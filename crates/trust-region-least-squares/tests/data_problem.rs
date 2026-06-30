@@ -6,7 +6,10 @@
 //! drop-`i` solve bit-for-bit. Bit-exactness vs SciPy lives in
 //! `data_problem_fixtures.rs` (host-LAPACK gated).
 
-use trust_region_least_squares::batch::{solve_drop_one, solve_perturbed};
+use trust_region_least_squares::batch::{
+    solve_data_problem_drop_one, solve_data_problem_drop_one_serial, solve_drop_one,
+    solve_perturbed,
+};
 use trust_region_least_squares::data::{solve_data_problem, BuiltinResidual, DataProblem};
 use trust_region_least_squares::loss::Loss;
 use trust_region_least_squares::model::{solve_model, ResidualModel};
@@ -192,6 +195,41 @@ fn perturbed_matches_serial_byte_for_byte() {
         for (i, start) in starts.iter().enumerate() {
             let serial = solve_model(&kind, start, &options).expect("serial start");
             assert_results_byte_equal(&format!("{name} start {i}"), &report.runs[i], &serial);
+        }
+    }
+}
+
+/// The serial leave-one-out twin must produce a `DropOneReport` that is
+/// byte-identical to the rayon-parallel one on the same `DataProblem`: base,
+/// every drop's `x`/`cost`, and every `cost_delta`. This is what lets the wasm /
+/// single-threaded binding delegate to the serial entry point instead of
+/// re-implementing the loop.
+#[test]
+fn data_problem_drop_one_serial_matches_parallel_byte_for_byte() {
+    for (name, kind, x0) in all_kinds() {
+        let problem = DataProblem::new(kind, x0);
+
+        let parallel = solve_data_problem_drop_one(&problem).expect("parallel drop-one");
+        let serial = solve_data_problem_drop_one_serial(&problem).expect("serial drop-one");
+
+        assert_results_byte_equal(&format!("{name} base"), &serial.base, &parallel.base);
+
+        assert_eq!(
+            serial.drops.len(),
+            parallel.drops.len(),
+            "{name} drop count"
+        );
+        for i in 0..parallel.drops.len() {
+            assert_results_byte_equal(
+                &format!("{name} drop {i}"),
+                &serial.drops[i],
+                &parallel.drops[i],
+            );
+            assert_eq!(
+                serial.cost_delta[i].to_bits(),
+                parallel.cost_delta[i].to_bits(),
+                "{name} cost_delta {i}"
+            );
         }
     }
 }

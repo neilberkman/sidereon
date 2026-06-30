@@ -38,6 +38,8 @@
 //! - [`batch`]: parallel leave-one-out ([`batch::solve_drop_one`]) and
 //!   multi-start ([`batch::solve_perturbed`]) re-solves over a `rayon` pool,
 //!   with per-index results bit-identical to the equivalent serial solve.
+//!   Serial leave-one-out twins ([`batch::solve_drop_one_serial`] and friends)
+//!   give single-threaded / `wasm32` consumers the same report without rayon.
 //! - [`loss`]: SciPy's robust loss functions (`construct_loss_function` +
 //!   `IMPLEMENTED_LOSSES`) and `scale_for_robust_loss_function`, reproduced
 //!   bit-for-bit.
@@ -99,6 +101,11 @@
 
 pub mod batch;
 pub mod data;
+// `hostlapack` loads a host LAPACK/BLAS at runtime through `libloading`, which
+// has no wasm32 backend (no `dlopen`), so it cannot compile for wasm targets.
+// Gate it off there; wasm consumers use the default in-crate `NalgebraThinSvd`
+// backend. Every non-wasm target keeps the bit-exact LAPACK seam.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod hostlapack;
 pub mod loss;
 pub mod model;

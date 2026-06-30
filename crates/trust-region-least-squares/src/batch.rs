@@ -10,6 +10,13 @@
 //! [`solve_drop_one`] re-solves with each residual row masked in turn (an
 //! influence / jackknife diagnostic); [`solve_perturbed`] re-solves from a set
 //! of alternative starting points (a multi-start / sensitivity sweep).
+//!
+//! Each leave-one-out entry point has a serial twin ([`solve_drop_one_serial`],
+//! [`solve_drop_one_serial_with`], [`solve_data_problem_drop_one_serial`],
+//! [`solve_data_problem_drop_one_serial_with`]) that runs the same re-solves on
+//! a plain iterator instead of a rayon pool. The serial twins exist for
+//! single-threaded and `wasm32` consumers, which cannot enter rayon; their
+//! [`DropOneReport`] is bit-identical to the parallel form index-for-index.
 
 use rayon::prelude::*;
 
@@ -112,6 +119,64 @@ where
     solve_drop_one_with(model, x0, &NalgebraThinSvd, options)
 }
 
+/// Serial leave-one-out over an injected [`ThinSvd`] backend. Identical
+/// semantics and return value to [`solve_drop_one_with`], but the re-solves run
+/// one after another on a plain iterator instead of fanning across a [`rayon`]
+/// pool. Each drop-`i` solve is the same self-contained call into the same
+/// engine with the same inputs, so the [`DropOneReport`] is bit-identical to the
+/// parallel version index-for-index (base, every drop, and every `cost_delta`).
+///
+/// This exists for single-threaded and `wasm32` consumers, which cannot enter a
+/// rayon pool: they delegate here instead of re-implementing the leave-one-out
+/// loop. The backend need not be [`Sync`] here, but the signature keeps the same
+/// bound as the parallel form so callers can swap between them freely.
+pub fn solve_drop_one_serial_with<M>(
+    model: &M,
+    x0: &[f64],
+    svd: &dyn ThinSvd,
+    options: &TrfOptions,
+) -> Result<DropOneReport, TrfError>
+where
+    M: ResidualModel + ?Sized,
+{
+    let base = solve_model_with(model, x0, svd, options)?;
+    let m = base.fun.len();
+
+    // Same per-index work as the parallel form, run in ascending index order on a
+    // plain iterator. Returning on the first `Err` selects the lowest-index
+    // failure, matching the parallel path's index-ordered error reduction.
+    let mut drops = Vec::with_capacity(m);
+    for drop in 0..m {
+        drops.push(solve_model_with(
+            &DropRow { inner: model, drop },
+            x0,
+            svd,
+            options,
+        )?);
+    }
+
+    let cost_delta = drops.iter().map(|r| r.cost - base.cost).collect();
+    Ok(DropOneReport {
+        base,
+        drops,
+        cost_delta,
+    })
+}
+
+/// Serial leave-one-out using the default in-crate [`NalgebraThinSvd`] backend.
+/// Bit-identical to [`solve_drop_one`]; see [`solve_drop_one_serial_with`] for
+/// why the serial variants exist.
+pub fn solve_drop_one_serial<M>(
+    model: &M,
+    x0: &[f64],
+    options: &TrfOptions,
+) -> Result<DropOneReport, TrfError>
+where
+    M: ResidualModel + ?Sized,
+{
+    solve_drop_one_serial_with(model, x0, &NalgebraThinSvd, options)
+}
+
 /// Multi-start over an injected [`ThinSvd`] backend. Solves from `x0_base` once,
 /// then re-solves from each entry of `starts`, fanned across a [`rayon`] pool
 /// with index-preserving collection.
@@ -185,4 +250,31 @@ pub fn solve_data_problem_drop_one_with(
 ) -> Result<DropOneReport, TrfError> {
     problem.kind.validate(&problem.x0)?;
     solve_drop_one_with(&problem.kind, &problem.x0, svd, &problem.options())
+}
+
+/// Serial leave-one-out for a data-driven [`DataProblem`], using the default
+/// in-crate SVD backend. Bit-identical to [`solve_data_problem_drop_one`]; for
+/// single-threaded / `wasm32` consumers that cannot enter a rayon pool.
+pub fn solve_data_problem_drop_one_serial(
+    problem: &DataProblem,
+) -> Result<DropOneReport, TrfError> {
+    problem.kind.validate(&problem.x0)?;
+    solve_drop_one_serial_with(
+        &problem.kind,
+        &problem.x0,
+        &NalgebraThinSvd,
+        &problem.options(),
+    )
+}
+
+/// Serial leave-one-out for a data-driven [`DataProblem`] through an injected
+/// [`ThinSvd`] backend (inject [`crate::hostlapack::LapackSvd`] for bit-for-bit
+/// parity on every drop). Bit-identical to [`solve_data_problem_drop_one_with`];
+/// for single-threaded / `wasm32` consumers that cannot enter a rayon pool.
+pub fn solve_data_problem_drop_one_serial_with(
+    problem: &DataProblem,
+    svd: &dyn ThinSvd,
+) -> Result<DropOneReport, TrfError> {
+    problem.kind.validate(&problem.x0)?;
+    solve_drop_one_serial_with(&problem.kind, &problem.x0, svd, &problem.options())
 }
