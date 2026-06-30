@@ -402,13 +402,39 @@ pub fn hessian_trace(jacobian: &DMatrix<f64>) -> f64 {
     trace
 }
 
-/// Fitted parameter covariance from a converged [`LeastSquaresReport`].
+/// Fitted parameter covariance directly from a design (Jacobian) matrix and the
+/// post-fit cost, with the redundancy taken from the Jacobian's own shape.
 ///
-/// Convenience over [`normal_covariance`] that scales `(J^T J)^-1` by the
-/// post-fit reduced chi-square `s_sq = 2 * cost / (m - n)` (the residual sum of
-/// squares over the redundancy), the same scale `scipy.optimize.curve_fit`
+/// This is the binding-facing primitive: it forms the covariance straight from
+/// the design matrix and the scalar cost, with no [`LeastSquaresReport`] and no
+/// fabricated residual / parameter vectors. The degrees of freedom come from the
+/// Jacobian's dimensions alone (`m = jacobian.nrows()`, `n = jacobian.ncols()`),
+/// so there are no redundant lengths to keep consistent. It scales `(J^T J)^-1`
+/// by the post-fit reduced chi-square `s_sq = 2 * cost / (m - n)` (the residual
+/// sum of squares over the redundancy), the same scale `scipy.optimize.curve_fit`
 /// applies to its `pcov`. Requires positive redundancy `m > n`; otherwise
 /// returns [`SolveError::InvalidInput`].
+pub fn covariance_from_jacobian(
+    jacobian: &DMatrix<f64>,
+    cost: f64,
+) -> Result<DMatrix<f64>, SolveError> {
+    let m = jacobian.nrows();
+    let n = jacobian.ncols();
+    if m <= n {
+        return Err(invalid_input("degrees_of_freedom", "not positive"));
+    }
+    let dof = (m - n) as f64;
+    let s_sq = validate_value(2.0 * cost / dof, "reduced_chi_square")?;
+    normal_covariance(jacobian, s_sq)
+}
+
+/// Fitted parameter covariance from a converged [`LeastSquaresReport`].
+///
+/// Convenience over [`covariance_from_jacobian`] for real-report callers: it
+/// validates that the report's Jacobian shape agrees with its residual / `x`
+/// lengths, then delegates to [`covariance_from_jacobian`] so the report path
+/// and the Jacobian path share a single reduced-chi-square scaling. Requires
+/// positive redundancy `m > n`; otherwise returns [`SolveError::InvalidInput`].
 pub fn covariance_from_report(report: &LeastSquaresReport) -> Result<DMatrix<f64>, SolveError> {
     let m = report.residual.len();
     let n = report.x.len();
@@ -426,12 +452,7 @@ pub fn covariance_from_report(report: &LeastSquaresReport) -> Result<DMatrix<f64
             "columns must match parameter length",
         ));
     }
-    if m <= n {
-        return Err(invalid_input("degrees_of_freedom", "not positive"));
-    }
-    let dof = (m - n) as f64;
-    let s_sq = validate_value(2.0 * report.cost / dof, "reduced_chi_square")?;
-    normal_covariance(&report.jacobian, s_sq)
+    covariance_from_jacobian(&report.jacobian, report.cost)
 }
 
 /// A nonlinear least-squares problem: a residual closure, optional diagonal
@@ -1059,6 +1080,57 @@ mod tests {
         assert_invalid_field(
             covariance_from_report(&mismatched_cols).unwrap_err(),
             "jacobian",
+        );
+    }
+
+    #[test]
+    fn covariance_from_jacobian_matches_report_path_bit_for_bit() {
+        // The Jacobian-only primitive must produce bit-identical covariance to
+        // the report path on a matching report (same jacobian/cost, with
+        // residual/x lengths chosen to match the Jacobian's m x n shape), and
+        // must equal normal_covariance at the explicit reduced-chi-square scale.
+        let jac = covariance_fixture_jacobian(); // 5 x 2
+        let residual = DVector::from_vec(vec![0.1, -0.2, 0.15, 0.05, -0.1]);
+        let cost = 0.5 * residual.dot(&residual);
+        let report = LeastSquaresReport {
+            x: DVector::from_vec(vec![0.0, 0.0]),
+            cost,
+            residual,
+            jacobian: jac.clone(),
+            optimality_inf: 0.0,
+            iterations: 0,
+            status: Status::GradientTolerance,
+        };
+
+        let from_jac = covariance_from_jacobian(&jac, cost).unwrap();
+        let from_report = covariance_from_report(&report).unwrap();
+
+        let m = jac.nrows();
+        let n = jac.ncols();
+        let explicit = normal_covariance(&jac, 2.0 * cost / ((m - n) as f64)).unwrap();
+
+        assert_eq!(from_jac.shape(), from_report.shape());
+        for (a, (b, c)) in from_jac.iter().zip(from_report.iter().zip(explicit.iter())) {
+            assert_eq!(a.to_bits(), b.to_bits());
+            assert_eq!(a.to_bits(), c.to_bits());
+        }
+    }
+
+    #[test]
+    fn covariance_from_jacobian_rejects_insufficient_dof() {
+        // m <= n: a square (m == n) and an underdetermined (m < n) design both
+        // have non-positive redundancy and must return the typed error, not a
+        // panic or a NaN-laden covariance.
+        let square = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 1.0, 1.0]);
+        assert_invalid_field(
+            covariance_from_jacobian(&square, 0.1).unwrap_err(),
+            "degrees_of_freedom",
+        );
+
+        let wide = DMatrix::from_row_slice(2, 3, &[1.0, 0.0, 1.0, 0.0, 1.0, 1.0]);
+        assert_invalid_field(
+            covariance_from_jacobian(&wide, 0.1).unwrap_err(),
+            "degrees_of_freedom",
         );
     }
 

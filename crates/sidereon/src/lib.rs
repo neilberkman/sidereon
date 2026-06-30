@@ -244,6 +244,19 @@ pub mod raw {
 // astrodynamics module tree is available as `sidereon::astro`.
 pub use sidereon_core::astro::{passes, propagator, sgp4, state, tca, tle};
 
+/// Parameter-covariance primitives from the core least-squares substrate.
+///
+/// [`covariance_from_jacobian`](sidereon_core::astro::math::least_squares::covariance_from_jacobian)
+/// is the binding-facing entry point: it forms the fitted covariance straight
+/// from a design (Jacobian) matrix and the post-fit cost, with no report and no
+/// fabricated residual / parameter vectors. [`covariance_from_report`] keeps the
+/// converged-report path and [`normal_covariance`] the explicit-scale path.
+pub mod least_squares {
+    pub use sidereon_core::astro::math::least_squares::{
+        covariance_from_jacobian, covariance_from_report, normal_covariance,
+    };
+}
+
 use sidereon_core::antex::{Antex, AntexError};
 use sidereon_core::ephemeris::{BroadcastEphemeris, Sp3};
 use sidereon_core::observables::ObservableEphemerisSource;
