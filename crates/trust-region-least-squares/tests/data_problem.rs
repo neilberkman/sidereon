@@ -244,17 +244,13 @@ fn polynomial_degree_overflow_is_a_typed_error_not_a_panic() {
     };
     assert_eq!(
         problem.validate(&[0.0, 0.0]),
-        Err(TrfError::DegreeOverflow {
-            degree: usize::MAX
-        })
+        Err(TrfError::DegreeOverflow { degree: usize::MAX })
     );
 
     let data_problem = DataProblem::new(problem, vec![0.0, 0.0]);
     assert_eq!(
         solve_data_problem(&data_problem),
-        Err(TrfError::DegreeOverflow {
-            degree: usize::MAX
-        })
+        Err(TrfError::DegreeOverflow { degree: usize::MAX })
     );
 
     // dims() itself stays infallible and panic-free (saturating), so a direct
