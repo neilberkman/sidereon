@@ -1,0 +1,19 @@
+# Virtual workspace root (no root [package]).
+#
+# The complete engine is folded into the single `sidereon-core` crate at
+# `crates/sidereon-core/`: it exposes the astrodynamics propagation core (always
+# present, under the `astro` module) plus the GNSS domain layer (behind a
+# default-on `gnss` feature). `trust-region-least-squares` is a standalone,
+# publishable general-purpose solver crate that lives here but does not depend on
+# the engine; `sidereon-core`'s own GNSS-tuned least-squares lives inside the
+# engine and is intentionally separate (see the module docs at
+# `sidereon-core/src/astro/math/least_squares.rs` for why).
+# All members share this workspace's single `Cargo.lock`.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# Shared dependency versions for all members. `nalgebra` is pinned here so the
+# engine crate resolves to a single linear-algebra version.
+[workspace.dependencies]
+nalgebra = "0.33"

@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "kind": "physical-truth gate",
+  "measurement": {
+    "generated_at": "2026-06-14T08:11:04.922316Z",
+    "min_epochs": 100,
+    "huber_k": 1.345,
+    "scale_floor_m": 5.0,
+    "max_outer": 5
+  },
+  "claims": {
+    "huber_off_byte_identical_to_bare": true,
+    "all_powered_median_non_regress": true,
+    "all_powered_median_and_p95_non_regress": true,
+    "no_availability_regression": true
+  },
+  "pooled": {
+    "powered_arc_count": 4,
+    "total_arc_count": 4,
+    "huber_off_byte_identical_to_bare": true,
+    "all_powered_median_non_regress": true,
+    "all_powered_median_and_p95_non_regress": true
+  },
+  "arcs": [
+    {
+      "label": "gsdc_2021_08_04_sjc1_pixel5_p222_grec_l1_demo5",
+      "oracle_fixture": "gsdc_2021_08_04_sjc1_pixel5_p222_demo5_rtklib_oracle.json",
+      "matched": 1453,
+      "both_ok": 1453,
+      "huber_only_fail": 0,
+      "bare_only_fail": 0,
+      "both_fail": 0,
+      "too_few_sats": 0,
+      "bare": {"median_3d_m": 10.213, "p95_3d_m": 37.535, "median_h_m": 4.894},
+      "huber": {"median_3d_m": 9.796, "p95_3d_m": 34.988, "median_h_m": 4.641},
+      "delta_median_3d_m": 0.417,
+      "demo5_median_3d_m": 4.522,
+      "classification": "improved: Huber non-regression on median and p95, no availability loss"
+    },
+    {
+      "label": "gsdc_svl1_pixel5_p222_grec_l1_demo5",
+      "oracle_fixture": "gsdc_2021_08_24_svl1_pixel5_p222_demo5_rtklib_oracle.json",
+      "matched": 3136,
+      "both_ok": 3136,
+      "huber_only_fail": 0,
+      "bare_only_fail": 0,
+      "both_fail": 0,
+      "too_few_sats": 0,
+      "bare": {"median_3d_m": 9.241, "p95_3d_m": 26.877, "median_h_m": 3.973},
+      "huber": {"median_3d_m": 8.624, "p95_3d_m": 23.296, "median_h_m": 3.711},
+      "delta_median_3d_m": 0.617,
+      "demo5_median_3d_m": 3.977,
+      "classification": "improved: Huber non-regression on median and p95, no availability loss"
+    },
+    {
+      "label": "gsdc_2021_12_15_mtv1_pixel5_p222_grec_l1_demo5",
+      "oracle_fixture": "gsdc_2021_12_15_mtv1_pixel5_p222_demo5_rtklib_oracle.json",
+      "matched": 1465,
+      "both_ok": 1465,
+      "huber_only_fail": 0,
+      "bare_only_fail": 0,
+      "both_fail": 0,
+      "too_few_sats": 0,
+      "bare": {"median_3d_m": 8.062, "p95_3d_m": 29.437, "median_h_m": 3.623},
+      "huber": {"median_3d_m": 7.378, "p95_3d_m": 26.734, "median_h_m": 3.297},
+      "delta_median_3d_m": 0.685,
+      "demo5_median_3d_m": 3.653,
+      "classification": "improved: Huber non-regression on median and p95, no availability loss"
+    },
+    {
+      "label": "gsdc_2021_12_28_mtv1_pixel5_p222_grec_l1_demo5",
+      "oracle_fixture": "gsdc_2021_12_28_mtv1_pixel5_p222_demo5_rtklib_oracle.json",
+      "matched": 1610,
+      "both_ok": 1610,
+      "huber_only_fail": 0,
+      "bare_only_fail": 0,
+      "both_fail": 0,
+      "too_few_sats": 0,
+      "bare": {"median_3d_m": 10.599, "p95_3d_m": 27.830, "median_h_m": 4.949},
+      "huber": {"median_3d_m": 10.190, "p95_3d_m": 24.998, "median_h_m": 4.661},
+      "delta_median_3d_m": 0.410,
+      "demo5_median_3d_m": 3.974,
+      "classification": "improved: Huber non-regression on median and p95, no availability loss"
+    }
+  ]
+}

@@ -1,0 +1,1686 @@
+{
+  "schema": "orbis-gnss-parity/orbis_gnss_application.v1",
+  "purpose": "Independent Python oracle fixture for Orbis-only GNSS application modules.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "Generated in the pinned parity virtualenv; floats are stored as Python float.hex()."
+  },
+  "generator": {
+    "python": "3.14.6",
+    "executable": "python",
+    "numpy": "2.4.6",
+    "scipy": "1.17.1"
+  },
+  "signal": {
+    "ca": {
+      "chips": {
+        "1": [
+          -1,
+          -1,
+          1,
+          1,
+          -1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          -1,
+          1,
+          1,
+          -1,
+          1,
+          -1,
+          1,
+          1,
+          -1,
+          1,
+          1,
+          -1,
+          -1,
+          -1,
+          -1,
+          1,
+          1,
+          -1,
+          1,
+          -1
+        ],
+        "5": [
+          -1,
+          1,
+          1,
+          -1,
+          1,
+          -1,
+          -1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          1,
+          -1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          1,
+          -1,
+          1,
+          -1,
+          1,
+          -1,
+          -1,
+          -1
+        ],
+        "24": [
+          -1,
+          -1,
+          -1,
+          -1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          -1,
+          1,
+          1,
+          1,
+          1,
+          -1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          -1,
+          1,
+          1,
+          1,
+          -1,
+          -1
+        ],
+        "32": [
+          -1,
+          -1,
+          -1,
+          -1,
+          1,
+          1,
+          -1,
+          1,
+          -1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          -1,
+          -1,
+          -1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          -1
+        ]
+      },
+      "correlations": [
+        {
+          "a": 1,
+          "b": 1,
+          "lag": 0,
+          "value": 1023
+        },
+        {
+          "a": 1,
+          "b": 1,
+          "lag": 7,
+          "value": -1
+        },
+        {
+          "a": 1,
+          "b": 5,
+          "lag": 13,
+          "value": -65
+        },
+        {
+          "a": 24,
+          "b": 32,
+          "lag": -19,
+          "value": -1
+        }
+      ]
+    },
+    "correlator": {
+      "replica_case": {
+        "prn": 5,
+        "num_samples": 64,
+        "sample_rate_hz": "0x1.f383000000000p+20",
+        "code_phase_chips": "0x1.ff00000000000p+8",
+        "samples": [
+          1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          -1,
+          -1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          -1,
+          -1,
+          1,
+          1,
+          -1,
+          -1,
+          -1,
+          -1,
+          1,
+          1,
+          -1,
+          -1,
+          -1,
+          -1,
+          1,
+          1,
+          -1,
+          -1
+        ]
+      },
+      "correlate_case": {
+        "prn": 5,
+        "sample_rate_hz": "0x1.f383000000000p+20",
+        "doppler_hz": "0x1.f400000000000p+9",
+        "code_phase_chips": "0x1.ff00000000000p+8",
+        "i": "0x1.0000000000000p+6",
+        "q": "0x0.0p+0",
+        "power": "0x1.0000000000000p+12"
+      },
+      "acquire_case": {
+        "prn": 5,
+        "sample_rate_hz": "0x1.f383000000000p+20",
+        "injected_code_phase_chips": "0x1.ff00000000000p+8",
+        "injected_doppler_hz": "0x1.f400000000000p+9",
+        "code_phase_chips": "0x1.ff00000000000p+8",
+        "doppler_hz": "0x1.f400000000000p+9",
+        "peak_power": "0x1.ff00200000000p+21",
+        "metric": "0x1.369e276358fecp+10",
+        "code_phase_bins": 2046,
+        "samples_per_chip": "0x1.0000000000000p+1"
+      },
+      "coherent_loss": [
+        {
+          "freq_error_hz": "0x0.0p+0",
+          "integration_time_s": "0x1.0624dd2f1a9fcp-10",
+          "loss": "0x1.0000000000000p+0",
+          "loss_db": "0x0.0p+0"
+        },
+        {
+          "freq_error_hz": "0x1.f400000000000p+7",
+          "integration_time_s": "0x1.0624dd2f1a9fcp-10",
+          "loss": "0x1.9f02f6222c71fp-1",
+          "loss_db": "-0x1.d2fe745bc3f62p-1"
+        },
+        {
+          "freq_error_hz": "0x1.f400000000000p+8",
+          "integration_time_s": "0x1.0624dd2f1a9fcp-9",
+          "loss": "0x1.f8f7171d21750p-110",
+          "loss_db": "-0x1.482ecab293e4ep+8"
+        },
+        {
+          "freq_error_hz": "0x1.ec00000000000p+6",
+          "integration_time_s": "0x1.0624dd2f1a9fcp-8",
+          "loss": "0x1.ac58d00563d6dp-2",
+          "loss_db": "-0x1.e47c4a524edbdp+1"
+        }
+      ]
+    }
+  },
+  "lnav": {
+    "options": {
+      "tow": 12345,
+      "alert": 1,
+      "anti_spoof": 0,
+      "integrity": 1,
+      "tlm_message": 5461
+    },
+    "parity_cases": [
+      {
+        "data24": [
+          1,
+          0,
+          1,
+          1,
+          0,
+          0,
+          1,
+          0,
+          1,
+          0,
+          1,
+          1,
+          0,
+          1,
+          0,
+          0,
+          1,
+          1,
+          1,
+          0,
+          0,
+          1,
+          0,
+          1
+        ],
+        "d29_prev": 1,
+        "d30_prev": 0,
+        "parity": [
+          0,
+          1,
+          1,
+          0,
+          1,
+          1
+        ]
+      },
+      {
+        "data24": [
+          1,
+          0,
+          1,
+          1,
+          0,
+          0,
+          1,
+          0,
+          1,
+          0,
+          1,
+          1,
+          0,
+          1,
+          0,
+          0,
+          1,
+          1,
+          1,
+          0,
+          0,
+          1,
+          0,
+          1
+        ],
+        "d29_prev": 0,
+        "d30_prev": 1,
+        "parity": [
+          1,
+          0,
+          0,
+          1,
+          0,
+          0
+        ]
+      }
+    ],
+    "subframes": {
+      "1": "100010110101010101010110001001111001111110001100111001100100010010001001000000000010000001111111111111111111111111010110000000000000000000000000101001111111111111111111111111010110000000000000000011110100000011010101001000010011110011001101111111110000000000011110110111000100000010110010011011111000",
+      "2": "100010110101010101010110001001111001111110001100110111011100101010111111100100001100101010001101011001101011010011100111110011001100110011001100010100111111010111110000000110101011110110110010001011010000010000000100010110100010100001010010000011010011001100110011100111100001001111001111111110000100",
+      "3": "100010110101010101010110001001111001111110001100110010000100000000000001101110011100000011110101110000101000111100010100111111111000111100100111000111111101011100001010001110011010000111110101010001111001011101011001100110011001100101110111000000010001011001001111110001010101001110101101100000011000"
+    },
+    "word_hex": {
+      "1": [
+        "0x22d55589",
+        "0x39f8ce64",
+        "0x12240081",
+        "0x3fffffd6",
+        "0x00000029",
+        "0x3fffffd6",
+        "0x00003d03",
+        "0x15213ccd",
+        "0x3fc007b7",
+        "0x040b26f8"
+      ],
+      "2": [
+        "0x22d55589",
+        "0x39f8cddc",
+        "0x2afe432a",
+        "0x0d66b4e7",
+        "0x33333314",
+        "0x3f5f01ab",
+        "0x36c8b410",
+        "0x045a2852",
+        "0x034ccce7",
+        "0x213cff84"
+      ],
+      "3": [
+        "0x22d55589",
+        "0x39f8cc84",
+        "0x0006e703",
+        "0x35c28f14",
+        "0x3fe3c9c7",
+        "0x3d70a39a",
+        "0x07d51e5d",
+        "0x19999977",
+        "0x004593f1",
+        "0x153ad818"
+      ]
+    }
+  },
+  "sp3_application": {
+    "source": "test/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3",
+    "epoch": "2020-06-24T12:00:00",
+    "receiver_ecef_m": [
+      "0x1.acd2200000000p+21",
+      "0x1.7d1a800000000p+19",
+      "0x1.405af00000000p+22"
+    ],
+    "visible_gps_mask10": [
+      {
+        "satellite_id": "G21",
+        "elevation_deg": "0x1.4591189670abep+6",
+        "azimuth_deg": "0x1.45fceda657bddp+7"
+      },
+      {
+        "satellite_id": "G16",
+        "elevation_deg": "0x1.02d09e736e382p+6",
+        "azimuth_deg": "0x1.e45bd72088dc0p+7"
+      },
+      {
+        "satellite_id": "G18",
+        "elevation_deg": "0x1.a84efe5e0530ep+5",
+        "azimuth_deg": "0x1.171c40258d5d7p+6"
+      },
+      {
+        "satellite_id": "G27",
+        "elevation_deg": "0x1.92b89e82268bfp+5",
+        "azimuth_deg": "0x1.1bcbc7105e465p+8"
+      },
+      {
+        "satellite_id": "G20",
+        "elevation_deg": "0x1.7bf8cd0867010p+5",
+        "azimuth_deg": "0x1.09b4d5d4ca89ep+7"
+      },
+      {
+        "satellite_id": "G26",
+        "elevation_deg": "0x1.50889c64001b0p+5",
+        "azimuth_deg": "0x1.7673e58ef8390p+7"
+      },
+      {
+        "satellite_id": "G10",
+        "elevation_deg": "0x1.8837b8e12a5f3p+4",
+        "azimuth_deg": "0x1.45dd7aa435731p+7"
+      },
+      {
+        "satellite_id": "G08",
+        "elevation_deg": "0x1.1c7949caef4f1p+4",
+        "azimuth_deg": "0x1.1d431e8cd0776p+8"
+      },
+      {
+        "satellite_id": "G07",
+        "elevation_deg": "0x1.b92ae7017af30p+3",
+        "azimuth_deg": "0x1.4a8c320af855ap+8"
+      },
+      {
+        "satellite_id": "G15",
+        "elevation_deg": "0x1.4eff63f977dbbp+3",
+        "azimuth_deg": "0x1.190562c4119dap+6"
+      }
+    ],
+    "dop_weighted": {
+      "satellites": [
+        "G21",
+        "G16",
+        "G18",
+        "G27",
+        "G20",
+        "G26",
+        "G10"
+      ],
+      "gdop": "0x1.7a3e59e5fd85dp+2",
+      "pdop": "0x1.2ae5c34b5a8bdp+2",
+      "hdop": "0x1.110f34998dcb8p+1",
+      "vdop": "0x1.09e4bdb1e3eb3p+2",
+      "tdop": "0x1.cf9689d82ea0fp+1"
+    },
+    "velocity": {
+      "receiver_ecef_m": [
+        "0x1.12a8800000000p+22",
+        "0x1.e848000000000p+18",
+        "0x1.12a8800000000p+22"
+      ],
+      "true_velocity_m_s": [
+        "0x1.8000000000000p+3",
+        "-0x1.c000000000000p+2",
+        "0x1.8000000000000p+1"
+      ],
+      "true_clock_drift_s_s": "0x1.12e0be826d695p-30",
+      "observations": [
+        {
+          "sat": "G21",
+          "rho_dot_m_s": "0x1.3a9470c18c1a7p+7"
+        },
+        {
+          "sat": "G16",
+          "rho_dot_m_s": "-0x1.5eb58a1b7b54ep+5"
+        },
+        {
+          "sat": "G26",
+          "rho_dot_m_s": "0x1.9ef7d9618f6b0p+8"
+        },
+        {
+          "sat": "G20",
+          "rho_dot_m_s": "-0x1.89f0e9e24fbc3p+7"
+        },
+        {
+          "sat": "G27",
+          "rho_dot_m_s": "-0x1.75231a845d789p+8"
+        },
+        {
+          "sat": "G18",
+          "rho_dot_m_s": "0x1.ec07dd774b2f8p+8"
+        },
+        {
+          "sat": "G10",
+          "rho_dot_m_s": "-0x1.1c9b51570e844p+9"
+        }
+      ],
+      "solution_velocity_m_s": [
+        "0x1.7ffffffffffa0p+3",
+        "-0x1.bffffffffffc0p+2",
+        "0x1.8000000000000p+1"
+      ],
+      "solution_clock_drift_s_s": "0x1.12e0be826d03ep-30"
+    },
+    "dgnss": {
+      "base_ecef_m": [
+        "0x1.acd2200000000p+21",
+        "0x1.7d1a800000000p+19",
+        "0x1.405af00000000p+22"
+      ],
+      "rover_ecef_m": [
+        "0x1.ad10a00000000p+21",
+        "0x1.7d97800000000p+19",
+        "0x1.4072600000000p+22"
+      ],
+      "base_observations": [
+        {
+          "sat": "G21",
+          "pseudorange_m": "0x1.3ce3195b756f1p+24"
+        },
+        {
+          "sat": "G16",
+          "pseudorange_m": "0x1.3bd5b9d4bdd3ep+24"
+        },
+        {
+          "sat": "G18",
+          "pseudorange_m": "0x1.424f54d69869ap+24"
+        },
+        {
+          "sat": "G27",
+          "pseudorange_m": "0x1.4491899155e41p+24"
+        },
+        {
+          "sat": "G20",
+          "pseudorange_m": "0x1.46c24809cbb4ap+24"
+        },
+        {
+          "sat": "G26",
+          "pseudorange_m": "0x1.4e19c5a73a18bp+24"
+        },
+        {
+          "sat": "G10",
+          "pseudorange_m": "0x1.66e37b91ab19ep+24"
+        }
+      ],
+      "rover_observations": [
+        {
+          "sat": "G21",
+          "pseudorange_m": "0x1.3cd5755317734p+24"
+        },
+        {
+          "sat": "G16",
+          "pseudorange_m": "0x1.3bc9956f1e864p+24"
+        },
+        {
+          "sat": "G18",
+          "pseudorange_m": "0x1.4243b651cf993p+24"
+        },
+        {
+          "sat": "G27",
+          "pseudorange_m": "0x1.4488806dff492p+24"
+        },
+        {
+          "sat": "G20",
+          "pseudorange_m": "0x1.46b4eddcc5211p+24"
+        },
+        {
+          "sat": "G26",
+          "pseudorange_m": "0x1.4e0d498c512d0p+24"
+        },
+        {
+          "sat": "G10",
+          "pseudorange_m": "0x1.66d83142c3088p+24"
+        }
+      ],
+      "corrections_m": {
+        "G21": "0x1.154ade8700000p+8",
+        "G16": "0x1.220ade8710000p+8",
+        "G18": "0x1.2ecade8710000p+8",
+        "G27": "0x1.3b8ade8700000p+8",
+        "G20": "0x1.1a8ade8700000p+8",
+        "G26": "0x1.274ade8700000p+8",
+        "G10": "0x1.340ade8700000p+8"
+      },
+      "corrected_rover": [
+        {
+          "sat": "G21",
+          "pseudorange_m": "0x1.3cd4600838ec4p+24"
+        },
+        {
+          "sat": "G16",
+          "pseudorange_m": "0x1.3bc873643fff3p+24"
+        },
+        {
+          "sat": "G18",
+          "pseudorange_m": "0x1.42428786f1122p+24"
+        },
+        {
+          "sat": "G27",
+          "pseudorange_m": "0x1.448744e320c22p+24"
+        },
+        {
+          "sat": "G20",
+          "pseudorange_m": "0x1.46b3d351e69a1p+24"
+        },
+        {
+          "sat": "G26",
+          "pseudorange_m": "0x1.4e0c224172a60p+24"
+        },
+        {
+          "sat": "G10",
+          "pseudorange_m": "0x1.66d6fd37e4818p+24"
+        }
+      ]
+    },
+    "solution_report": {
+      "solution": {
+        "used_sats": [
+          "G21",
+          "G16",
+          "G18",
+          "G27",
+          "G20"
+        ],
+        "residuals_m": [
+          0.35,
+          -0.12,
+          0.08,
+          -0.21,
+          0.04
+        ],
+        "rejected_sats": [
+          {
+            "sat": "G26",
+            "reason": "low_elevation"
+          },
+          {
+            "sat": "G10",
+            "reason": "no_ephemeris"
+          }
+        ]
+      },
+      "sky": [
+        {
+          "sat": "G21",
+          "elevation_deg": "0x1.4590eed870f52p+6",
+          "azimuth_deg": "0x1.45ff5a090a131p+7"
+        },
+        {
+          "sat": "G16",
+          "elevation_deg": "0x1.02d08fe4b2270p+6",
+          "azimuth_deg": "0x1.e45cb9c04fe5ap+7"
+        },
+        {
+          "sat": "G18",
+          "elevation_deg": "0x1.a850706fadb05p+5",
+          "azimuth_deg": "0x1.171c971a4e603p+6"
+        },
+        {
+          "sat": "G27",
+          "elevation_deg": "0x1.92b71c6cb3b55p+5",
+          "azimuth_deg": "0x1.1bcbca10560efp+8"
+        },
+        {
+          "sat": "G20",
+          "elevation_deg": "0x1.7bf84f6c8b470p+5",
+          "azimuth_deg": "0x1.09b55d24466dep+7"
+        },
+        {
+          "sat": "G26",
+          "elevation_deg": "0x1.5089b60c1cc89p+5",
+          "azimuth_deg": "0x1.76743d1276ed9p+7"
+        },
+        {
+          "sat": "G10",
+          "elevation_deg": "0x1.88359c7714d31p+4",
+          "azimuth_deg": "0x1.45ddc4b3ee4e9p+7"
+        }
+      ],
+      "residual_rms_m": "0x1.8e2d3cc4d824bp-3"
+    },
+    "precise_positioning": {
+      "receiver_ecef_m": [
+        "0x1.acd2200000000p+21",
+        "0x1.7d1a800000000p+19",
+        "0x1.405af00000000p+22"
+      ],
+      "clock_m": "0x1.9000000000000p+3",
+      "initial_guess": [
+        "0x1.ace1c00000000p+21",
+        "0x1.7ce8800000000p+19",
+        "0x1.405fa00000000p+22",
+        "-0x1.4000000000000p+4"
+      ],
+      "observations": [
+        {
+          "sat": "G21",
+          "code_m": "0x1.3ce2109096e81p+24",
+          "phase_m": "0x1.3d1ca89096e81p+24",
+          "ambiguity_m": "0x1.d4c0000000000p+13"
+        },
+        {
+          "sat": "G16",
+          "code_m": "0x1.3bd4a449df4cdp+24",
+          "phase_m": "0x1.3c0f4d89df4cdp+24",
+          "ambiguity_m": "0x1.d54a000000000p+13"
+        },
+        {
+          "sat": "G18",
+          "code_m": "0x1.424e328bb9e29p+24",
+          "phase_m": "0x1.4288ed0bb9e29p+24",
+          "ambiguity_m": "0x1.d5d4000000000p+13"
+        },
+        {
+          "sat": "G27",
+          "code_m": "0x1.44905a86775d1p+24",
+          "phase_m": "0x1.44cb2646775d1p+24",
+          "ambiguity_m": "0x1.d65e000000000p+13"
+        },
+        {
+          "sat": "G20",
+          "code_m": "0x1.46c139feed2dap+24",
+          "phase_m": "0x1.46fc16feed2dap+24",
+          "ambiguity_m": "0x1.d6e8000000000p+13"
+        },
+        {
+          "sat": "G26",
+          "code_m": "0x1.4e18aadc5b91bp+24",
+          "phase_m": "0x1.4e53991c5b91bp+24",
+          "ambiguity_m": "0x1.d772000000000p+13"
+        },
+        {
+          "sat": "G10",
+          "code_m": "0x1.66e25406cc92ep+24",
+          "phase_m": "0x1.671d5386cc92ep+24",
+          "ambiguity_m": "0x1.d7fc000000000p+13"
+        },
+        {
+          "sat": "G08",
+          "code_m": "0x1.6ba1cc4fd7f88p+24",
+          "phase_m": "0x1.6bdcdd0fd7f88p+24",
+          "ambiguity_m": "0x1.d886000000000p+13"
+        }
+      ],
+      "solution": {
+        "position_m": [
+          "0x1.acd21ffffffffp+21",
+          "0x1.7d1a800000006p+19",
+          "0x1.405af00000001p+22"
+        ],
+        "clock_m": "0x1.9000000142bf7p+3",
+        "clock_s": "0x1.6629667c7bb09p-25",
+        "ambiguities_m": {
+          "G08": "0x1.d885fffffffcdp+13",
+          "G10": "0x1.d7fbffffffe04p+13",
+          "G16": "0x1.d54a0000004d7p+13",
+          "G18": "0x1.d5d3fffffff79p+13",
+          "G20": "0x1.d6e800000039ep+13",
+          "G21": "0x1.d4c00000001b5p+13",
+          "G26": "0x1.d7720000000a0p+13",
+          "G27": "0x1.d65dffffff892p+13"
+        },
+        "residuals_m": {
+          "G08": {
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          "G10": {
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          "G16": {
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-27"
+          },
+          "G18": {
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          "G20": {
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          "G21": {
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          "G26": {
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          "G27": {
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "0x0.0p+0"
+          }
+        },
+        "used_sats": [
+          "G08",
+          "G10",
+          "G16",
+          "G18",
+          "G20",
+          "G21",
+          "G26",
+          "G27"
+        ],
+        "metadata": {
+          "iterations": 3,
+          "converged": true,
+          "status": "position_tolerance",
+          "code_rms_m": "0x1.deeea11683f49p-29",
+          "phase_rms_m": "0x1.0f876ccdf6cd9p-28",
+          "weighted_rms_m": "0x1.2c02fc926180dp-22"
+        }
+      }
+    },
+    "precise_positioning_multi_epoch": {
+      "receiver_ecef_m": [
+        "0x1.acd2200000000p+21",
+        "0x1.7d1a800000000p+19",
+        "0x1.405af00000000p+22"
+      ],
+      "epoch_clocks_m": [
+        "0x1.9000000000000p+3",
+        "-0x1.0800000000000p+3",
+        "0x1.0000000000000p+2"
+      ],
+      "initial_guess": [
+        "0x1.ace1c00000000p+21",
+        "0x1.7ce8800000000p+19",
+        "0x1.405fa00000000p+22",
+        "-0x1.4000000000000p+4"
+      ],
+      "epochs": [
+        {
+          "epoch": "2020-06-24T12:00:00",
+          "clock_m": "0x1.9000000000000p+3",
+          "observations": [
+            {
+              "sat": "G21",
+              "code_m": "0x1.3ce2109096e81p+24",
+              "phase_m": "0x1.3d1ca89096e81p+24",
+              "ambiguity_m": "0x1.d4c0000000000p+13"
+            },
+            {
+              "sat": "G16",
+              "code_m": "0x1.3bd4a449df4cdp+24",
+              "phase_m": "0x1.3c0f4d89df4cdp+24",
+              "ambiguity_m": "0x1.d54a000000000p+13"
+            },
+            {
+              "sat": "G18",
+              "code_m": "0x1.424e328bb9e29p+24",
+              "phase_m": "0x1.4288ed0bb9e29p+24",
+              "ambiguity_m": "0x1.d5d4000000000p+13"
+            },
+            {
+              "sat": "G27",
+              "code_m": "0x1.44905a86775d1p+24",
+              "phase_m": "0x1.44cb2646775d1p+24",
+              "ambiguity_m": "0x1.d65e000000000p+13"
+            },
+            {
+              "sat": "G20",
+              "code_m": "0x1.46c139feed2dap+24",
+              "phase_m": "0x1.46fc16feed2dap+24",
+              "ambiguity_m": "0x1.d6e8000000000p+13"
+            },
+            {
+              "sat": "G26",
+              "code_m": "0x1.4e18aadc5b91bp+24",
+              "phase_m": "0x1.4e53991c5b91bp+24",
+              "ambiguity_m": "0x1.d772000000000p+13"
+            },
+            {
+              "sat": "G10",
+              "code_m": "0x1.66e25406cc92ep+24",
+              "phase_m": "0x1.671d5386cc92ep+24",
+              "ambiguity_m": "0x1.d7fc000000000p+13"
+            },
+            {
+              "sat": "G08",
+              "code_m": "0x1.6ba1cc4fd7f88p+24",
+              "phase_m": "0x1.6bdcdd0fd7f88p+24",
+              "ambiguity_m": "0x1.d886000000000p+13"
+            }
+          ]
+        },
+        {
+          "epoch": "2020-06-24T12:15:00",
+          "clock_m": "-0x1.0800000000000p+3",
+          "observations": [
+            {
+              "sat": "G21",
+              "code_m": "0x1.3d992976ddaf8p+24",
+              "phase_m": "0x1.3dd3c176ddaf8p+24",
+              "ambiguity_m": "0x1.d4c0000000000p+13"
+            },
+            {
+              "sat": "G16",
+              "code_m": "0x1.3e268fcb872f8p+24",
+              "phase_m": "0x1.3e61390b872f8p+24",
+              "ambiguity_m": "0x1.d54a000000000p+13"
+            },
+            {
+              "sat": "G18",
+              "code_m": "0x1.4824eed220c9fp+24",
+              "phase_m": "0x1.485fa95220c9fp+24",
+              "ambiguity_m": "0x1.d5d4000000000p+13"
+            },
+            {
+              "sat": "G27",
+              "code_m": "0x1.3f4972b05cf3dp+24",
+              "phase_m": "0x1.3f843e705cf3dp+24",
+              "ambiguity_m": "0x1.d65e000000000p+13"
+            },
+            {
+              "sat": "G20",
+              "code_m": "0x1.42a0c1af9524ep+24",
+              "phase_m": "0x1.42db9eaf9524ep+24",
+              "ambiguity_m": "0x1.d6e8000000000p+13"
+            },
+            {
+              "sat": "G26",
+              "code_m": "0x1.55f96f39d16bcp+24",
+              "phase_m": "0x1.56345d79d16bcp+24",
+              "ambiguity_m": "0x1.d772000000000p+13"
+            },
+            {
+              "sat": "G10",
+              "code_m": "0x1.5e26426e8e370p+24",
+              "phase_m": "0x1.5e6141ee8e370p+24",
+              "ambiguity_m": "0x1.d7fc000000000p+13"
+            },
+            {
+              "sat": "G08",
+              "code_m": "0x1.6315416016b8bp+24",
+              "phase_m": "0x1.6350522016b8bp+24",
+              "ambiguity_m": "0x1.d886000000000p+13"
+            }
+          ]
+        },
+        {
+          "epoch": "2020-06-24T12:30:00",
+          "clock_m": "0x1.0000000000000p+2",
+          "observations": [
+            {
+              "sat": "G21",
+              "code_m": "0x1.3f4bc6a8b5523p+24",
+              "phase_m": "0x1.3f865ea8b5523p+24",
+              "ambiguity_m": "0x1.d4c0000000000p+13"
+            },
+            {
+              "sat": "G16",
+              "code_m": "0x1.4202d546d87fap+24",
+              "phase_m": "0x1.423d7e86d87fap+24",
+              "ambiguity_m": "0x1.d54a000000000p+13"
+            },
+            {
+              "sat": "G18",
+              "code_m": "0x1.4edd94cc5e847p+24",
+              "phase_m": "0x1.4f184f4c5e847p+24",
+              "ambiguity_m": "0x1.d5d4000000000p+13"
+            },
+            {
+              "sat": "G27",
+              "code_m": "0x1.3b099b0125405p+24",
+              "phase_m": "0x1.3b4466c125405p+24",
+              "ambiguity_m": "0x1.d65e000000000p+13"
+            },
+            {
+              "sat": "G20",
+              "code_m": "0x1.3ff6bc797031dp+24",
+              "phase_m": "0x1.403199797031dp+24",
+              "ambiguity_m": "0x1.d6e8000000000p+13"
+            },
+            {
+              "sat": "G26",
+              "code_m": "0x1.5ea9489bc8aefp+24",
+              "phase_m": "0x1.5ee436dbc8aefp+24",
+              "ambiguity_m": "0x1.d772000000000p+13"
+            },
+            {
+              "sat": "G10",
+              "code_m": "0x1.562c60461f7fap+24",
+              "phase_m": "0x1.56675fc61f7fap+24",
+              "ambiguity_m": "0x1.d7fc000000000p+13"
+            },
+            {
+              "sat": "G08",
+              "code_m": "0x1.5af35c7380465p+24",
+              "phase_m": "0x1.5b2e6d3380465p+24",
+              "ambiguity_m": "0x1.d886000000000p+13"
+            }
+          ]
+        }
+      ],
+      "solution": {
+        "position_m": [
+          "0x1.acd21ffffffe0p+21",
+          "0x1.7d1a7fffffff9p+19",
+          "0x1.405af00000008p+22"
+        ],
+        "epoch_clocks": [
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "clock_m": "0x1.8ffffffd68ae2p+3",
+            "clock_s": "0x1.6629667908c2bp-25"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "clock_m": "-0x1.080000035568dp+3",
+            "clock_s": "-0x1.d8c6022deae5ap-26"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "clock_m": "0x1.fffffff6c11cdp+1",
+            "clock_s": "0x1.ca726eaa184b8p-27"
+          }
+        ],
+        "ambiguities_m": {
+          "G08": "0x1.d886000000cc0p+13",
+          "G10": "0x1.d7fbfffffed8dp+13",
+          "G16": "0x1.d54a0000000e3p+13",
+          "G18": "0x1.d5d4000001567p+13",
+          "G20": "0x1.d6e7ffffff68fp+13",
+          "G21": "0x1.d4bfffffffe69p+13",
+          "G26": "0x1.d771fffffee85p+13",
+          "G27": "0x1.d65e0000006c1p+13"
+        },
+        "residuals_m": [
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G08",
+            "code_m": "0x1.0000000000000p-27",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G10",
+            "code_m": "-0x1.0000000000000p-27",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G16",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G18",
+            "code_m": "0x1.0000000000000p-27",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G20",
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G21",
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G26",
+            "code_m": "-0x1.0000000000000p-27",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G27",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G08",
+            "code_m": "0x1.0000000000000p-27",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G10",
+            "code_m": "-0x1.0000000000000p-27",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G16",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G18",
+            "code_m": "0x1.0000000000000p-26",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G20",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G21",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G26",
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G27",
+            "code_m": "0x1.0000000000000p-27",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G08",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G10",
+            "code_m": "-0x1.0000000000000p-27",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G16",
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G18",
+            "code_m": "0x1.8000000000000p-27",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G20",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G21",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G26",
+            "code_m": "-0x1.8000000000000p-27",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G27",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "0x0.0p+0"
+          }
+        ],
+        "used_sats": [
+          "G08",
+          "G10",
+          "G16",
+          "G18",
+          "G20",
+          "G21",
+          "G26",
+          "G27"
+        ],
+        "epochs": [
+          "2020-06-24T12:00:00",
+          "2020-06-24T12:15:00",
+          "2020-06-24T12:30:00"
+        ],
+        "metadata": {
+          "iterations": 3,
+          "converged": true,
+          "status": "state_tolerance",
+          "n_epochs": 3,
+          "n_observations": 24,
+          "code_rms_m": "0x1.c48c6001f0ac0p-28",
+          "phase_rms_m": "0x1.6a09e667f3bcdp-29",
+          "weighted_rms_m": "0x1.901ffeb86c1fdp-23"
+        }
+      }
+    },
+    "precise_positioning_fixed_epoch": {
+      "receiver_ecef_m": [
+        "0x1.acd2200000000p+21",
+        "0x1.7d1a800000000p+19",
+        "0x1.405af00000000p+22"
+      ],
+      "epoch_clocks_m": [
+        "0x1.9000000000000p+3",
+        "-0x1.0800000000000p+3",
+        "0x1.0000000000000p+2"
+      ],
+      "initial_guess": [
+        "0x1.ace1c00000000p+21",
+        "0x1.7ce8800000000p+19",
+        "0x1.405fa00000000p+22",
+        "-0x1.4000000000000p+4"
+      ],
+      "ambiguity_wavelength_m": "0x1.85b8b06a70079p-3",
+      "epochs": [
+        {
+          "epoch": "2020-06-24T12:00:00",
+          "clock_m": "0x1.9000000000000p+3",
+          "observations": [
+            {
+              "sat": "G21",
+              "code_m": "0x1.3ce2109096e81p+24",
+              "phase_m": "0x1.3d1d880f0225dp+24",
+              "ambiguity_cycles": 80000,
+              "ambiguity_m": "0x1.dbbbf359edc14p+13"
+            },
+            {
+              "sat": "G16",
+              "code_m": "0x1.3bd4a449df4cdp+24",
+              "phase_m": "0x1.3c1022d2c0ba7p+24",
+              "ambiguity_cycles": 80037,
+              "ambiguity_m": "0x1.dbf4470b6d237p+13"
+            },
+            {
+              "sat": "G18",
+              "code_m": "0x1.424e328bb9e29p+24",
+              "phase_m": "0x1.4289b81f11802p+24",
+              "ambiguity_cycles": 80074,
+              "ambiguity_m": "0x1.dc2c9abcec85ap+13"
+            },
+            {
+              "sat": "G27",
+              "code_m": "0x1.44905a86775d1p+24",
+              "phase_m": "0x1.44cbe724452a9p+24",
+              "ambiguity_cycles": 80111,
+              "ambiguity_m": "0x1.dc64ee6e6be7dp+13"
+            },
+            {
+              "sat": "G20",
+              "code_m": "0x1.46c139feed2dap+24",
+              "phase_m": "0x1.46fccda7312b1p+24",
+              "ambiguity_cycles": 80148,
+              "ambiguity_m": "0x1.dc9d421feb4a0p+13"
+            },
+            {
+              "sat": "G26",
+              "code_m": "0x1.4e18aadc5b91bp+24",
+              "phase_m": "0x1.4e54458f15bf0p+24",
+              "ambiguity_cycles": 80185,
+              "ambiguity_m": "0x1.dcd595d16aac3p+13"
+            },
+            {
+              "sat": "G10",
+              "code_m": "0x1.66e25406cc92ep+24",
+              "phase_m": "0x1.671df5c3fcf02p+24",
+              "ambiguity_cycles": 80222,
+              "ambiguity_m": "0x1.dd0de982ea0e6p+13"
+            },
+            {
+              "sat": "G08",
+              "code_m": "0x1.6ba1cc4fd7f88p+24",
+              "phase_m": "0x1.6bdd75177e85bp+24",
+              "ambiguity_cycles": 80259,
+              "ambiguity_m": "0x1.dd463d3469709p+13"
+            }
+          ]
+        },
+        {
+          "epoch": "2020-06-24T12:15:00",
+          "clock_m": "-0x1.0800000000000p+3",
+          "observations": [
+            {
+              "sat": "G21",
+              "code_m": "0x1.3d992976ddaf8p+24",
+              "phase_m": "0x1.3dd4a0f548ed4p+24",
+              "ambiguity_cycles": 80000,
+              "ambiguity_m": "0x1.dbbbf359edc14p+13"
+            },
+            {
+              "sat": "G16",
+              "code_m": "0x1.3e268fcb872f8p+24",
+              "phase_m": "0x1.3e620e54689d2p+24",
+              "ambiguity_cycles": 80037,
+              "ambiguity_m": "0x1.dbf4470b6d237p+13"
+            },
+            {
+              "sat": "G18",
+              "code_m": "0x1.4824eed220c9fp+24",
+              "phase_m": "0x1.4860746578678p+24",
+              "ambiguity_cycles": 80074,
+              "ambiguity_m": "0x1.dc2c9abcec85ap+13"
+            },
+            {
+              "sat": "G27",
+              "code_m": "0x1.3f4972b05cf3dp+24",
+              "phase_m": "0x1.3f84ff4e2ac15p+24",
+              "ambiguity_cycles": 80111,
+              "ambiguity_m": "0x1.dc64ee6e6be7dp+13"
+            },
+            {
+              "sat": "G20",
+              "code_m": "0x1.42a0c1af9524ep+24",
+              "phase_m": "0x1.42dc5557d9225p+24",
+              "ambiguity_cycles": 80148,
+              "ambiguity_m": "0x1.dc9d421feb4a0p+13"
+            },
+            {
+              "sat": "G26",
+              "code_m": "0x1.55f96f39d16bcp+24",
+              "phase_m": "0x1.563509ec8b991p+24",
+              "ambiguity_cycles": 80185,
+              "ambiguity_m": "0x1.dcd595d16aac3p+13"
+            },
+            {
+              "sat": "G10",
+              "code_m": "0x1.5e26426e8e370p+24",
+              "phase_m": "0x1.5e61e42bbe944p+24",
+              "ambiguity_cycles": 80222,
+              "ambiguity_m": "0x1.dd0de982ea0e6p+13"
+            },
+            {
+              "sat": "G08",
+              "code_m": "0x1.6315416016b8bp+24",
+              "phase_m": "0x1.6350ea27bd45ep+24",
+              "ambiguity_cycles": 80259,
+              "ambiguity_m": "0x1.dd463d3469709p+13"
+            }
+          ]
+        },
+        {
+          "epoch": "2020-06-24T12:30:00",
+          "clock_m": "0x1.0000000000000p+2",
+          "observations": [
+            {
+              "sat": "G21",
+              "code_m": "0x1.3f4bc6a8b5523p+24",
+              "phase_m": "0x1.3f873e27208ffp+24",
+              "ambiguity_cycles": 80000,
+              "ambiguity_m": "0x1.dbbbf359edc14p+13"
+            },
+            {
+              "sat": "G16",
+              "code_m": "0x1.4202d546d87fap+24",
+              "phase_m": "0x1.423e53cfb9ed4p+24",
+              "ambiguity_cycles": 80037,
+              "ambiguity_m": "0x1.dbf4470b6d237p+13"
+            },
+            {
+              "sat": "G18",
+              "code_m": "0x1.4edd94cc5e847p+24",
+              "phase_m": "0x1.4f191a5fb6220p+24",
+              "ambiguity_cycles": 80074,
+              "ambiguity_m": "0x1.dc2c9abcec85ap+13"
+            },
+            {
+              "sat": "G27",
+              "code_m": "0x1.3b099b0125405p+24",
+              "phase_m": "0x1.3b45279ef30ddp+24",
+              "ambiguity_cycles": 80111,
+              "ambiguity_m": "0x1.dc64ee6e6be7dp+13"
+            },
+            {
+              "sat": "G20",
+              "code_m": "0x1.3ff6bc797031dp+24",
+              "phase_m": "0x1.40325021b42f4p+24",
+              "ambiguity_cycles": 80148,
+              "ambiguity_m": "0x1.dc9d421feb4a0p+13"
+            },
+            {
+              "sat": "G26",
+              "code_m": "0x1.5ea9489bc8aefp+24",
+              "phase_m": "0x1.5ee4e34e82dc4p+24",
+              "ambiguity_cycles": 80185,
+              "ambiguity_m": "0x1.dcd595d16aac3p+13"
+            },
+            {
+              "sat": "G10",
+              "code_m": "0x1.562c60461f7fap+24",
+              "phase_m": "0x1.566802034fdcep+24",
+              "ambiguity_cycles": 80222,
+              "ambiguity_m": "0x1.dd0de982ea0e6p+13"
+            },
+            {
+              "sat": "G08",
+              "code_m": "0x1.5af35c7380465p+24",
+              "phase_m": "0x1.5b2f053b26d38p+24",
+              "ambiguity_cycles": 80259,
+              "ambiguity_m": "0x1.dd463d3469709p+13"
+            }
+          ]
+        }
+      ],
+      "solution": {
+        "position_m": [
+          "0x1.acd2200000001p+21",
+          "0x1.7d1a7fffffffdp+19",
+          "0x1.405af00000002p+22"
+        ],
+        "epoch_clocks": [
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "clock_m": "0x1.90000000973dep+3",
+            "clock_s": "0x1.6629667be21f6p-25"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "clock_m": "-0x1.07fffffe8f767p+3",
+            "clock_s": "-0x1.d8c602255e9fdp-26"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "clock_m": "0x1.000000019b369p+2",
+            "clock_s": "0x1.ca726eb540052p-27"
+          }
+        ],
+        "fixed_ambiguities_cycles": {
+          "G08": 80259,
+          "G10": 80222,
+          "G16": 80037,
+          "G18": 80074,
+          "G20": 80148,
+          "G21": 80000,
+          "G26": 80185,
+          "G27": 80111
+        },
+        "fixed_ambiguities_m": {
+          "G08": "0x1.dd463d3469709p+13",
+          "G10": "0x1.dd0de982ea0e6p+13",
+          "G16": "0x1.dbf4470b6d237p+13",
+          "G18": "0x1.dc2c9abcec85ap+13",
+          "G20": "0x1.dc9d421feb4a0p+13",
+          "G21": "0x1.dbbbf359edc14p+13",
+          "G26": "0x1.dcd595d16aac3p+13",
+          "G27": "0x1.dc64ee6e6be7dp+13"
+        },
+        "residuals_m": [
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G08",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G10",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G16",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G18",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G20",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G21",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G26",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:00:00",
+            "sat": "G27",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G08",
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G10",
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G16",
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G18",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G20",
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G21",
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G26",
+            "code_m": "-0x1.0000000000000p-28",
+            "phase_m": "-0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:15:00",
+            "sat": "G27",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G08",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G10",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G16",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G18",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G20",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G21",
+            "code_m": "0x1.0000000000000p-28",
+            "phase_m": "0x1.0000000000000p-28"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G26",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          },
+          {
+            "epoch": "2020-06-24T12:30:00",
+            "sat": "G27",
+            "code_m": "0x0.0p+0",
+            "phase_m": "0x0.0p+0"
+          }
+        ],
+        "used_sats": [
+          "G08",
+          "G10",
+          "G16",
+          "G18",
+          "G20",
+          "G21",
+          "G26",
+          "G27"
+        ],
+        "epochs": [
+          "2020-06-24T12:00:00",
+          "2020-06-24T12:15:00",
+          "2020-06-24T12:30:00"
+        ],
+        "metadata": {
+          "iterations": 1,
+          "converged": true,
+          "status": "state_tolerance",
+          "n_epochs": 3,
+          "n_observations": 24,
+          "code_rms_m": "0x1.6a09e667f3bcdp-29",
+          "phase_rms_m": "0x1.6a09e667f3bcdp-29",
+          "weighted_rms_m": "0x1.90051eafee8b3p-23",
+          "integer_status": "fixed",
+          "integer_method": "lambda",
+          "integer_ratio": "0x1.a1c08086d6127p+40",
+          "integer_best_score": "0x1.10a6cab16fbf2p-41",
+          "integer_second_best_score": "0x1.bcecb6260cc00p-1",
+          "integer_candidates": 6
+        }
+      }
+    }
+  }
+}

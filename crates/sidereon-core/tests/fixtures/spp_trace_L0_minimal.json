@@ -1,0 +1,2329 @@
+{
+  "schema": "orbis-gnss-parity/spp_trace.v1",
+  "purpose": "GPS L1 single-point-positioning trace fixture. Records the synthesized observations, the FIXED receiver truth, the frozen-branch choices, the effective scipy options, and the full iteration trace (per trace-state x: per-satellite intermediates t_tx/sat_ecef/dt_sat/theta/sat_rot/rho/az/el/iono/tropo/p_hat, residual vector, 2-point FD perturbations, FD Jacobian, accepted steps, full fun() evaluation log, stopping reason). The residual and the 2-point FD Jacobian at the recorded trace states are the 0-ULP substrate the Rust trace-replay asserts; the trf converged position/clock is a BLAS-bound sub-micron solver-agreement target, never 0 ULP.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "0 ULP certified only against env.json. The SPP residual + 2-point FD Jacobian are libm/arithmetic-bound; the trf SVD is BLAS-bound (Apple Accelerate) and out of scope for 0 ULP.",
+    "sp3_interp_reference": "position: RTKLIB preceph.c interppol/pephpos (sliding-window degree-10 Lagrange + OMGE per-node rotation), certified in sp3::interp::interp_tests; these trace fields recomputed through the corrected production substrate. clock: scipy.interpolate.CubicSpline (unchanged)."
+  },
+  "geodetic_crosscheck": {
+    "note": "meters/radians-native geodetic recipe vs the core itrs_to_geodetic_compute, both replicating Skyfield's 3-iteration AU-internal algorithm. The 0-ULP claim: the meters-native lat/lon equal the core's INTERNAL radians bit-for-bit, and meters-native height equals core alt_km*1000. The core's deg API output (lat_deg/lon_deg) is recorded for reference; its deg->rad round-trip is two roundings and is NOT bit-identical to the raw radians (the SPP loop never crosses the deg boundary).",
+    "cases": [
+      {
+        "ecef_km": [
+          "0x40b18420c41ae562",
+          "0x408134a74b49da59",
+          "0x40b1878f7f9bc2c1"
+        ],
+        "meters_native": {
+          "lat_rad": "0x3fe921fb5432aa64",
+          "lon_rad": "0x3fbf46bb9c109320",
+          "height_m": "0x4072c00000004857"
+        },
+        "core_internal": {
+          "lat_rad": "0x3fe921fb5432aa64",
+          "lon_rad": "0x3fbf46bb9c109320",
+          "alt_km": "0x3fd3333333337d47"
+        },
+        "core_api_deg": {
+          "lat_deg": "0x40467ffffff052e0",
+          "lon_deg": "0x401bfffffffffffc"
+        },
+        "height_m_from_core_alt_km": "0x4072c00000004857",
+        "lat_rad_zero_ulp": true,
+        "lon_rad_zero_ulp": true,
+        "height_m_zero_ulp": true
+      },
+      {
+        "ecef_km": [
+          "0x40af400000000000",
+          "0x40a7700000000000",
+          "0x40b1940000000000"
+        ],
+        "meters_native": {
+          "lat_rad": "0x3fe78d21e99f49b3",
+          "lon_rad": "0x3fe4978fa3269ee0",
+          "height_m": "0x4115ddf6dd21b053"
+        },
+        "core_internal": {
+          "lat_rad": "0x3fe78d21e99f49b3",
+          "lon_rad": "0x3fe4978fa3269ee0",
+          "alt_km": "0x40766450c1abb69b"
+        },
+        "core_api_deg": {
+          "lat_deg": "0x4045158f60fd3ae8",
+          "lon_deg": "0x40426f58ce59e23b"
+        },
+        "height_m_from_core_alt_km": "0x4115ddf6dd21b053",
+        "lat_rad_zero_ulp": true,
+        "lon_rad_zero_ulp": true,
+        "height_m_zero_ulp": true
+      },
+      {
+        "ecef_km": [
+          "0xc0a3880000000000",
+          "0x40b57c0000000000",
+          "0xc0a7700000000000"
+        ],
+        "meters_native": {
+          "lat_rad": "0xbfdda8cbc50bfca7",
+          "lon_rad": "0x3ffff572aded0be8",
+          "height_m": "0x4116ac56531547dc"
+        },
+        "core_internal": {
+          "lat_rad": "0xbfdda8cbc50bfca7",
+          "lon_rad": "0x3ffff572aded0be8",
+          "alt_km": "0x407737a42c1dfbc3"
+        },
+        "core_api_deg": {
+          "lat_deg": "0xc03a8d6ca8090921",
+          "lon_deg": "0x405c9c69c14fb2ae"
+        },
+        "height_m_from_core_alt_km": "0x4116ac56531547dc",
+        "lat_rad_zero_ulp": true,
+        "lon_rad_zero_ulp": true,
+        "height_m_zero_ulp": true
+      }
+    ]
+  },
+  "generator": {
+    "scipy": "1.17.1",
+    "numpy": "2.4.6",
+    "gnssanalysis": "0.0.59",
+    "python": "3.14.4",
+    "executable": "python"
+  },
+  "fixture": {
+    "level": "L0_minimal",
+    "level_note": "geometry + clock + Sagnac, no iono, no tropo: P_k - (rho + b - c*dt)",
+    "inputs": {
+      "sp3_file": "GRG0MGXFIN_20201760000_01D_15M_ORB.SP3",
+      "sp3_provenance": "parity/fixtures/sp3/PROVENANCE.md",
+      "epoch_index": 48,
+      "t_rx_j2000_s": "0x41c342aa00000000",
+      "t_rx_j2000_s_int": 646272000,
+      "t_rx_sod_s": "0x40e5180000000000",
+      "doy": "0x4066100000000000",
+      "rx_truth_geodetic": {
+        "lat_deg": "0x4046800000000000",
+        "lon_deg": "0x401c000000000000",
+        "height_m": "0x4072c00000000000"
+      },
+      "rx_truth_ecef_m": [
+        "0x41511b07ff824402",
+        "0x4120cd6b5f861f3b",
+        "0x41511e62229e1c30"
+      ],
+      "b_truth_m": "0x40dd4c0000000000",
+      "klobuchar_alpha": [
+        "0x3e45ffffffffff61",
+        "0x3e57fffffffffe3f",
+        "0xbe6fffffffffffa2",
+        "0xbe800000000002c4"
+      ],
+      "klobuchar_beta": [
+        "0x40f7800000000000",
+        "0x4100000000000000",
+        "0xc0f0000000000000",
+        "0xc122000000000000"
+      ],
+      "met": {
+        "pressure_hpa": "0x408faa0000000000",
+        "temperature_k": "0x4072026666666666",
+        "relative_humidity": "0x3fe0000000000000"
+      },
+      "observations": [
+        {
+          "sat_id": "G01",
+          "p_meas_m": "0x417b004ff10ef0a2"
+        },
+        {
+          "sat_id": "G02",
+          "p_meas_m": "0x417dc8eb4a61a3c6"
+        },
+        {
+          "sat_id": "G03",
+          "p_meas_m": "0x417d7794e8d4f542"
+        },
+        {
+          "sat_id": "G05",
+          "p_meas_m": "0x417a86abdf14b1ed"
+        },
+        {
+          "sat_id": "G06",
+          "p_meas_m": "0x417f5a58cab632f7"
+        },
+        {
+          "sat_id": "G07",
+          "p_meas_m": "0x417856f3fdaa90ab"
+        },
+        {
+          "sat_id": "G08",
+          "p_meas_m": "0x4176b8c6fd82e861"
+        },
+        {
+          "sat_id": "G09",
+          "p_meas_m": "0x417ac4d73d52338c"
+        },
+        {
+          "sat_id": "G10",
+          "p_meas_m": "0x4175aa4fa1a0c21f"
+        },
+        {
+          "sat_id": "G11",
+          "p_meas_m": "0x417912ee07a3e2f7"
+        },
+        {
+          "sat_id": "G12",
+          "p_meas_m": "0x417d71f24cff269c"
+        },
+        {
+          "sat_id": "G13",
+          "p_meas_m": "0x4178cd0483a92706"
+        },
+        {
+          "sat_id": "G14",
+          "p_meas_m": "0x417ac2f98647e0ea"
+        },
+        {
+          "sat_id": "G15",
+          "p_meas_m": "0x417816e92e0128ad"
+        },
+        {
+          "sat_id": "G16",
+          "p_meas_m": "0x417387abd6052c3b"
+        },
+        {
+          "sat_id": "G17",
+          "p_meas_m": "0x417e9e575c4eb87b"
+        },
+        {
+          "sat_id": "G18",
+          "p_meas_m": "0x4174c288f3bd1166"
+        },
+        {
+          "sat_id": "G19",
+          "p_meas_m": "0x417f9cc78862439f"
+        },
+        {
+          "sat_id": "G20",
+          "p_meas_m": "0x417443947bd00bd6"
+        },
+        {
+          "sat_id": "G21",
+          "p_meas_m": "0x4173d8405cd09f84"
+        },
+        {
+          "sat_id": "G22",
+          "p_meas_m": "0x417c1b70fd3eab2c"
+        },
+        {
+          "sat_id": "G24",
+          "p_meas_m": "0x417d0ddeba10a71c"
+        },
+        {
+          "sat_id": "G25",
+          "p_meas_m": "0x417b4abb86be2ed5"
+        },
+        {
+          "sat_id": "G26",
+          "p_meas_m": "0x417425d51967e798"
+        },
+        {
+          "sat_id": "G27",
+          "p_meas_m": "0x41745a4b78a81707"
+        },
+        {
+          "sat_id": "G28",
+          "p_meas_m": "0x417d5146915dd476"
+        },
+        {
+          "sat_id": "G29",
+          "p_meas_m": "0x41787ae825e18d44"
+        },
+        {
+          "sat_id": "G30",
+          "p_meas_m": "0x4179eaeb14a44f8f"
+        },
+        {
+          "sat_id": "G31",
+          "p_meas_m": "0x4179031a36a10fbc"
+        },
+        {
+          "sat_id": "G32",
+          "p_meas_m": "0x417a6e35835d6753"
+        }
+      ]
+    },
+    "options": {
+      "method": "trf",
+      "jac": "2-point",
+      "gtol": "0x3ddb7cdfd9d7bdbb",
+      "ftol": "0x3e45798ee2308c3a",
+      "xtol": "0x3e45798ee2308c3a",
+      "x_scale_signature_default": "None",
+      "x_scale_resolved": "1.0 (uniform; None -> ones, from_jac=False)",
+      "tr_solver_signature_default": "None",
+      "tr_solver_resolved": "exact (None -> 'exact' for dense Jacobian)",
+      "diff_step": "None",
+      "fd_rel_step_2point": "0x3e50000000000000",
+      "bounds_signature_default": "(-inf, inf)",
+      "bounds_lb": [
+        "-inf",
+        "-inf",
+        "-inf",
+        "-inf"
+      ],
+      "bounds_ub": [
+        "+inf",
+        "+inf",
+        "+inf",
+        "+inf"
+      ],
+      "bounds_note": "unbounded; sentinels '-inf'/'+inf' map to f64 infinities, not hex-float",
+      "loss": "linear",
+      "max_nfev_signature_default": "None",
+      "max_nfev_resolved": 400,
+      "scipy_version": "1.17.1",
+      "numpy_version": "2.4.6",
+      "eps_f64": "0x3cb0000000000000"
+    },
+    "frozen": {
+      "initial_guess_x0": [
+        "0x41512a8800000000",
+        "0x411e848000000000",
+        "0x41512a8800000000",
+        "0x0000000000000000"
+      ],
+      "satellite_ordering": "ascending GnssSatelliteId (SP3 BTreeMap / ascending PRN)",
+      "residual_ordering": "used_sats ascending-id order, index-aligned to used_sats",
+      "weighting": {
+        "model": "elevation sin^2: w_k = sin^2(el_k)/sigma0^2",
+        "sigma0_m": "0x3ff0000000000000",
+        "residual_seen_by_solver": "sqrt(w_k)*(P_meas - P_hat)",
+        "geometry": "el at the FROZEN initial-guess geometry, constant across iterates"
+      },
+      "elevation_mask": {
+        "mask_rad": "0x3fc657184ae74487",
+        "mask_deg": "0x4024000000000000",
+        "equality": "exclude iff el_rad < mask_rad (strict <; el == mask KEPT)",
+        "evaluated": "once at the frozen initial-guess geometry; used set fixed for the solve"
+      },
+      "rejection_order": [
+        "no_ephemeris",
+        "low_elevation",
+        "outlier_OFF_in_v1"
+      ],
+      "transmit_time_iterations": 2,
+      "sagnac": {
+        "omega_e_dot_rad_s": "0x3f131da7d7cb8d5b",
+        "form": "closed-form +theta Z-rotation; theta = OMEGA_E_DOT*tau; sat_rot.x= cos*sx+sin*sy, sat_rot.y=-sin*sx+cos*sy, sat_rot.z=sz"
+      },
+      "relativistic_convention": "none added; SP3 clock used as-is",
+      "max_nfev": 400,
+      "constants": {
+        "c": "0x41b1de784a000000",
+        "f_l1": "0x41d779c018000000",
+        "omega_e_dot": "0x3f131da7d7cb8d5b",
+        "no_fma": true
+      },
+      "clock_unit_boundary": "solve b in meters; report rx_clock_s = b/c at the API boundary only",
+      "fd_step": "2-point forward, rel_step = sqrt(eps) = 2^-26 (FD_REL_STEP_2POINT); sign=(x>=0)?+1:-1 (x==0->+1); h=relstep*sign*max(1,|x|); dx=(x+h)-x",
+      "az_el_geometry_in_residual": "recomputed per iterate from current receiver state (for iono/tropo terms); mask+weights frozen at initial guess"
+    },
+    "used_sats": [
+      "G08",
+      "G10",
+      "G16",
+      "G18",
+      "G20",
+      "G21",
+      "G26",
+      "G27"
+    ],
+    "rejected_sats": [
+      {
+        "id": "G01",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G02",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G03",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G05",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G06",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G07",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G09",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G11",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G12",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G13",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G14",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G15",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G17",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G19",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G22",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G24",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G25",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G28",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G29",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G30",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G31",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G32",
+        "reason": "low_elevation"
+      }
+    ],
+    "used_sat_geometry": {
+      "G08": {
+        "el_rad": "0x3fd4c20eea520bee",
+        "az_rad": "0x40141195c392b6ea",
+        "weight": "0x3fb9fff20ce80607",
+        "sqrt_weight": "0x3fd4655fe65eb8a1"
+      },
+      "G10": {
+        "el_rad": "0x3fe2f939eaf6cf7c",
+        "az_rad": "0x40051f082126ad00",
+        "weight": "0x3fd3fbcc70866e5d",
+        "sqrt_weight": "0x3fe1e19680fa0055"
+      },
+      "G16": {
+        "el_rad": "0x3ff47436c1f4ead8",
+        "az_rad": "0x4012e9c9c597d416",
+        "weight": "0x3fed573ab98f344f",
+        "sqrt_weight": "0x3feea43ba534a032"
+      },
+      "G18": {
+        "el_rad": "0x3fe7b9a7ca1e5bd7",
+        "az_rad": "0x3fedc72b15a7cf15",
+        "weight": "0x3fdd3046c77db7da",
+        "sqrt_weight": "0x3fe59c4f2414d437"
+      },
+      "G20": {
+        "el_rad": "0x3fec0d6823557b54",
+        "az_rad": "0x3ffebb6cb7328444",
+        "weight": "0x3fe2e748b453e1ed",
+        "sqrt_weight": "0x3fe8984d3950af75"
+      },
+      "G21": {
+        "el_rad": "0x3ff65c538eb51202",
+        "az_rad": "0x3fecc15ca7e4337f",
+        "weight": "0x3fef0c8c065f7df7",
+        "sqrt_weight": "0x3fef855afc689737"
+      },
+      "G26": {
+        "el_rad": "0x3feee48b7b9949c7",
+        "az_rad": "0x4008ade9d9071764",
+        "weight": "0x3fe5a2eb0c983da1",
+        "sqrt_weight": "0x3fea50154ffc6136"
+      },
+      "G27": {
+        "el_rad": "0x3febfd7330ff2bdf",
+        "az_rad": "0x4014d29565a60d8d",
+        "weight": "0x3fe2d79625374201",
+        "sqrt_weight": "0x3fe88e14dd53965a"
+      }
+    },
+    "trace_states": [
+      {
+        "trace_index": 0,
+        "x": [
+          "0x41512a8800000000",
+          "0x411e848000000000",
+          "0x41512a8800000000",
+          "0x0000000000000000"
+        ],
+        "per_sat": [
+          {
+            "prn": "G08",
+            "sqrt_w": "0x3fd4655fe65eb8a1",
+            "tau_s": "0x3fb443c61c26dfeb",
+            "t_tx_j2000_s": "0x41c342a9fff5de1d",
+            "sat_ecef_m": [
+              "0x415c5fadf5d19825",
+              "0xc173cd0e04dcc95f",
+              "0x416be3297903d302"
+            ],
+            "dt_sat_s": "0xbf04431cdfa5d47d",
+            "theta_rad": "0x3ed8360aad357b37",
+            "sat_rot_ecef_m": [
+              "0x415c5f8fff594346",
+              "0xc173cd10b3d10b55",
+              "0x416be3297903d302"
+            ],
+            "rho_m": "0x4176a1c8aed0279a",
+            "az_rad": "0x40141195c39226c2",
+            "el_rad": "0x3fd4c20eea512cbe",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4176a49cd0169162",
+            "residual_m": "0x40d9b47be2ec049e"
+          },
+          {
+            "prn": "G10",
+            "sqrt_w": "0x3fe1e19680fa0055",
+            "tau_s": "0x3fb349830148069d",
+            "t_tx_j2000_s": "0x41c342a9fff65b3e",
+            "sat_ecef_m": [
+              "0x4176cfbdf0f389be",
+              "0x416659469b20287e",
+              "0x413bb5192315422f"
+            ],
+            "dt_sat_s": "0xbf38f0dc8cf18e99",
+            "theta_rad": "0x3ed70b0b2260673b",
+            "sat_rot_ecef_m": [
+              "0x4176cfc1f6ea5cd8",
+              "0x416659362deed743",
+              "0x413bb5192315422f"
+            ],
+            "rho_m": "0x41758a478cf03e95",
+            "az_rad": "0x40051f0821259b12",
+            "el_rad": "0x3fe2f939eaf34edf",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4175a62240bbf2f1",
+            "residual_m": "0x40c2ac718319becf"
+          },
+          {
+            "prn": "G16",
+            "sqrt_w": "0x3feea43ba534a032",
+            "tau_s": "0x3fb16419422e4c5e",
+            "t_tx_j2000_s": "0x41c342a9fff74df3",
+            "sat_ecef_m": [
+              "0x4171e9ecf669e7a2",
+              "0xc14d2351a2b28e3f",
+              "0x4171824fcbe6d649"
+            ],
+            "dt_sat_s": "0xbf26db8a9a11a8be",
+            "theta_rad": "0x3ed4c719dbb4e46c",
+            "sat_rot_ecef_m": [
+              "0x4171e9ebc7b312a5",
+              "0xc14d238029563a9c",
+              "0x4171824fcbe6d649"
+            ],
+            "rho_m": "0x41736c2adb641d15",
+            "az_rad": "0x4012e9c9c599d03c",
+            "el_rad": "0x3ff47436c1f519fe",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417378ee6603a6c3",
+            "residual_m": "0x40ec3a7eb1a8ecfa"
+          },
+          {
+            "prn": "G18",
+            "sqrt_w": "0x3fe59c4f2414d437",
+            "tau_s": "0x3fb2a34d351aa3bf",
+            "t_tx_j2000_s": "0x41c342a9fff6ae59",
+            "sat_ecef_m": [
+              "0x4159720a1641804f",
+              "0x416a3003fe675063",
+              "0x4174b78c3caa0472"
+            ],
+            "dt_sat_s": "0x3f2e005afa87fe53",
+            "theta_rad": "0x3ed644772ed53708",
+            "sat_rot_ecef_m": [
+              "0x4159721c4f4a464e",
+              "0x416a2fff912fb818",
+              "0x4174b78c3caa0472"
+            ],
+            "rho_m": "0x4174d0a7132a6a9d",
+            "az_rad": "0x3fedc72b15a75ab0",
+            "el_rad": "0x3fe7b9a7ca230b22",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4174bfe64f977251",
+            "residual_m": "0x40bc79b1d65b9fa1"
+          },
+          {
+            "prn": "G20",
+            "sqrt_w": "0x3fe8984d3950af75",
+            "tau_s": "0x3fb24533c581de24",
+            "t_tx_j2000_s": "0x41c342a9fff6dd66",
+            "sat_ecef_m": [
+              "0x41711a1c581a5162",
+              "0x416c79eddb6395d9",
+              "0x416870c1dfd6cd00"
+            ],
+            "dt_sat_s": "0x3f41488c91635175",
+            "theta_rad": "0x3ed5d40a9116e7c1",
+            "sat_rot_ecef_m": [
+              "0x41711a213346a47c",
+              "0x416c79e230ecb28c",
+              "0x416870c1dfd6cd00"
+            ],
+            "rho_m": "0x4174678fa9206449",
+            "az_rad": "0x3ffebb6cb7337b3b",
+            "el_rad": "0x3fec0d682351f179",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417440f4dd4e931f",
+            "residual_m": "0x40c0219b364eefa9"
+          },
+          {
+            "prn": "G21",
+            "sqrt_w": "0x3fef855afc689737",
+            "tau_s": "0x3fb1bd605d4e56be",
+            "t_tx_j2000_s": "0x41c342a9fff72150",
+            "sat_ecef_m": [
+              "0x417036665c59b4df",
+              "0x4151f6172a2b8f54",
+              "0x4173992c0e9a57a4"
+            ],
+            "dt_sat_s": "0x3ef04d2d82791a9d",
+            "theta_rad": "0x3ed531c3c5566137",
+            "sat_rot_ecef_m": [
+              "0x41703667d9068e7a",
+              "0x4151f601b057418d",
+              "0x4173992c0e9a57a4"
+            ],
+            "rho_m": "0x4173cfdf292f8a32",
+            "az_rad": "0x3fecc15ca7e9f0a4",
+            "el_rad": "0x3ff65c538eb6ddf2",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4173cebbde93855e",
+            "residual_m": "0x40e2c0080f29a619"
+          },
+          {
+            "prn": "G26",
+            "sqrt_w": "0x3fea50154ffc6136",
+            "tau_s": "0x3fb2109d4a329ff2",
+            "t_tx_j2000_s": "0x41c342a9fff6f7b1",
+            "sat_ecef_m": [
+              "0x4177eef99c72dc62",
+              "0x414a8292515f8912",
+              "0x415fb0416aaab663"
+            ],
+            "dt_sat_s": "0x3f2e4f0b3c8bccf6",
+            "theta_rad": "0x3ed595366641641b",
+            "sat_rot_ecef_m": [
+              "0x4177eefaba8650f8",
+              "0x414a8251bfa9247d",
+              "0x415fb0416aaab663"
+            ],
+            "rho_m": "0x41742cd5695f48a3",
+            "az_rad": "0x4008ade9d9056f89",
+            "el_rad": "0x3feee48b7b9bac8e",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41741be8b51aa967",
+            "residual_m": "0x40e051ce2ae6a2aa"
+          },
+          {
+            "prn": "G27",
+            "sqrt_w": "0x3fe88e14dd53965a",
+            "tau_s": "0x3fb213fe330933b6",
+            "t_tx_j2000_s": "0x41c342a9fff6f601",
+            "sat_ecef_m": [
+              "0x416840ad0d22d70b",
+              "0xc164407a0f21a4bc",
+              "0x4173953e3b9201e1"
+            ],
+            "dt_sat_s": "0xbf358c235562a7f6",
+            "theta_rad": "0x3ed5993fbdd747f4",
+            "sat_rot_ecef_m": [
+              "0x416840a6377b192e",
+              "0xc16440823e6c0b1e",
+              "0x4173953e3b9201e1"
+            ],
+            "rho_m": "0x4174309c397ed1ba",
+            "az_rad": "0x4014d29565a56aba",
+            "el_rad": "0x3febfd7330fbd2d7",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417448acb9727c69",
+            "residual_m": "0x40eb0a96ab8f6a63"
+          }
+        ],
+        "residual": [
+          "0x40d9b47be2ec049e",
+          "0x40c2ac718319becf",
+          "0x40ec3a7eb1a8ecfa",
+          "0x40bc79b1d65b9fa1",
+          "0x40c0219b364eefa9",
+          "0x40e2c0080f29a619",
+          "0x40e051ce2ae6a2aa",
+          "0x40eb0a96ab8f6a63"
+        ],
+        "cost": "0x41f273c8c55b2356",
+        "fd_2point": {
+          "rel_step": "0x3e50000000000000",
+          "perturbations": [
+            {
+              "param_index": 0,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb12a8800000000",
+              "dx": "0x3fb12a8800000000",
+              "x_perturbed": [
+                "0x41512a88044aa200",
+                "0x411e848000000000",
+                "0x41512a8800000000",
+                "0x0000000000000000"
+              ],
+              "f_perturbed": [
+                "0x40d9b47c0e41ee28",
+                "0x40c2ac75a2ca97d2",
+                "0x40ec3a8022943248",
+                "0x40bc79b2fd6893c9",
+                "0x40c0219f5a9f15e1",
+                "0x40e2c00954bbaf6d",
+                "0x40e051cfe2a9c824",
+                "0x40eb0a974f1e2305"
+              ],
+              "jac_column": [
+                "0x3fa43329de4f9433",
+                "0x3fdebf8774599de9",
+                "0x3fe57da59dc5bfda",
+                "0x3fb1312c57f128e5",
+                "0x3fdee1fb339f51e1",
+                "0x3fe2f75fcad05b6e",
+                "0x3fe99e12f2e328a0",
+                "0x3fd30ea9502ba95b"
+              ]
+            },
+            {
+              "param_index": 1,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f7e848000000000",
+              "dx": "0x3f7e848000000000",
+              "x_perturbed": [
+                "0x41512a8800000000",
+                "0x411e848007a12000",
+                "0x41512a8800000000",
+                "0x0000000000000000"
+              ],
+              "f_perturbed": [
+                "0x40d9b47bc00eb94e",
+                "0x40c2ac71c6e3590d",
+                "0x40ec3a7ea5451021",
+                "0x40bc79b29e29d8b8",
+                "0x40c0219bb4e5cdfb",
+                "0x40e2c0081b5580a3",
+                "0x40e051ce31f786ca",
+                "0x40eb0a9692f3c2fd"
+              ],
+              "jac_column": [
+                "0xbfd246454de7ea60",
+                "0x3fd1c2b19a847b24",
+                "0xbfc9fe7b82c2bd7f",
+                "0x3fda32bf17bd8be7",
+                "0x3fe096587075b3e1",
+                "0x3fc98a95208e1501",
+                "0x3fbd99345cfede98",
+                "0xbfd9ca58cb07d0af"
+              ]
+            },
+            {
+              "param_index": 2,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb12a8800000000",
+              "dx": "0x3fb12a8800000000",
+              "x_perturbed": [
+                "0x41512a8800000000",
+                "0x411e848000000000",
+                "0x41512a88044aa200",
+                "0x0000000000000000"
+              ],
+              "f_perturbed": [
+                "0x40d9b47c783bd986",
+                "0x40c2ac70f139b10b",
+                "0x40ec3a80179e4443",
+                "0x40bc79bafc302a60",
+                "0x40c0219dc6926675",
+                "0x40e2c009b1343ff7",
+                "0x40e051ce7c317a79",
+                "0x40eb0a97eacba2fe"
+              ],
+              "jac_column": [
+                "0x3fc165a7d50d54c4",
+                "0xbfb0fffc6eb0b7c3",
+                "0x3fe4da308f0b11f4",
+                "0x3fe10d9ed597be3f",
+                "0x3fd31d2b5fecb7c5",
+                "0x3fe85a66a9bdebe8",
+                "0x3fc2f0bb44e50c5f",
+                "0x3fe298f71fcb47a9"
+              ]
+            },
+            {
+              "param_index": 3,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3e50000000000000",
+              "dx": "0x3e50000000000000",
+              "x_perturbed": [
+                "0x41512a8800000000",
+                "0x411e848000000000",
+                "0x41512a8800000000",
+                "0x3e50000000000000"
+              ],
+              "f_perturbed": [
+                "0x40d9b47be2e9cc15",
+                "0x40c2ac718323048a",
+                "0x40ec3a7eb1aa2339",
+                "0x40bc79b1d6494354",
+                "0x40c0219b3658a9e5",
+                "0x40e2c0080f27a1f1",
+                "0x40e051ce2ae8f459",
+                "0x40eb0a96ab8c39ef"
+              ],
+              "jac_column": [
+                "0xbfd4640000000000",
+                "0xbfe1e20000000000",
+                "0xbfeea40000000000",
+                "0xbfe59c0000000000",
+                "0xbfe8990000000000",
+                "0xbfef880000000000",
+                "0xbfea500000000000",
+                "0xbfe8900000000000"
+              ]
+            }
+          ],
+          "jac": [
+            [
+              "0x3fa43329dec6e231",
+              "0xbfd246454d61b2a2",
+              "0x3fc165a7af12009c",
+              "0xbfd4640000000000"
+            ],
+            [
+              "0x3fdebf8795b35b0c",
+              "0x3fd1c2b3f290abb4",
+              "0xbfb0fffb63e2ceaf",
+              "0xbfe1e10000000000"
+            ],
+            [
+              "0x3fe57da59dc5bfda",
+              "0xbfc9fe7f88765ba7",
+              "0x3fe4da308f0b11f4",
+              "0xbfeea40000000000"
+            ],
+            [
+              "0x3fb1312c57f128e5",
+              "0x3fda32bf17bd8be7",
+              "0x3fe10d9ee9bbf0dc",
+              "0xbfe59c8000000000"
+            ],
+            [
+              "0x3fdee1fb339f51e1",
+              "0x3fe096587075b3e1",
+              "0x3fd31d2b32141f8a",
+              "0xbfe8980000000000"
+            ],
+            [
+              "0x3fe2f75fe83b7687",
+              "0x3fc98a9522a6f3f5",
+              "0x3fe85a66a9ccd5a8",
+              "0xbfef840000000000"
+            ],
+            [
+              "0x3fe99e12da6baa2b",
+              "0x3fbd99345cfede98",
+              "0x3fc2f0bba73a5430",
+              "0xbfea500000000000"
+            ],
+            [
+              "0x3fd30ea9502ba95b",
+              "0xbfd9ca5a66128390",
+              "0x3fe298f708f55a2b",
+              "0xbfe88c0000000000"
+            ]
+          ],
+          "scipy_approx_derivative_bit_identical": true
+        },
+        "grad_JT_f": [
+          "0x40fc0fb50da39525",
+          "0xc0d3a80e6bdad1b8",
+          "0x40fbaa998f08ec2c",
+          "0xc106f8cc86a035a4"
+        ],
+        "grad_inf_norm": "0x4106f8cc86a035a4"
+      },
+      {
+        "trace_index": 1,
+        "x": [
+          "0x41511afe254ef335",
+          "0x4120cd2e0c5fe878",
+          "0x41511e5d8f3c7070",
+          "0x40dd4fc6edc3ad35"
+        ],
+        "per_sat": [
+          {
+            "prn": "G08",
+            "sqrt_w": "0x3fd4655fe65eb8a1",
+            "tau_s": "0x3fb44f44a27ea7eb",
+            "t_tx_j2000_s": "0x41c342a9fff5d85e",
+            "sat_ecef_m": [
+              "0x415c5fadf0d8936b",
+              "0xc173cd0e09f90fa3",
+              "0x416be3296b9da344"
+            ],
+            "dt_sat_s": "0xbf04431cdfa5471d",
+            "theta_rad": "0x3ed843c63aa4d86e",
+            "sat_rot_ecef_m": [
+              "0x415c5f8fe9617d7c",
+              "0xc173cd10ba72f4eb",
+              "0x416be3296b9da344"
+            ],
+            "rho_m": "0x4176ae9eefacfd26",
+            "az_rad": "0x401418884b27bf9c",
+            "el_rad": "0x3fd441176fff7624",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4176b8c702aed7c5",
+            "residual_m": "0xbfba5ebe4deb4325"
+          },
+          {
+            "prn": "G10",
+            "sqrt_w": "0x3fe1e19680fa0055",
+            "tau_s": "0x3fb346b441694835",
+            "t_tx_j2000_s": "0x41c342a9fff65ca6",
+            "sat_ecef_m": [
+              "0x4176cfbdf0bf5490",
+              "0x416659469b50430c",
+              "0x413bb51945ced9df"
+            ],
+            "dt_sat_s": "0xbf38f0dc8cf1b073",
+            "theta_rad": "0x3ed707b06a5850d7",
+            "sat_rot_ecef_m": [
+              "0x4176cfc1f6203990",
+              "0x41665936308317a7",
+              "0x413bb51945ced9df"
+            ],
+            "rho_m": "0x41758724dcc03796",
+            "az_rad": "0x40053e64c622175f",
+            "el_rad": "0x3fe324efde047d67",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4175aa5382475d03",
+            "residual_m": "0xc0415572934075c2"
+          },
+          {
+            "prn": "G16",
+            "sqrt_w": "0x3feea43ba534a032",
+            "tau_s": "0x3fb16abefda39477",
+            "t_tx_j2000_s": "0x41c342a9fff74aa1",
+            "sat_ecef_m": [
+              "0x4171e9ecf324e77c",
+              "0xc14d2351b28a8b19",
+              "0x4171824fcebb1a4a"
+            ],
+            "dt_sat_s": "0xbf26db8a9a116138",
+            "theta_rad": "0x3ed4cf0afc6f6acd",
+            "sat_rot_ecef_m": [
+              "0x4171e9ebc3fa5c87",
+              "0xc14d23804af6cd6b",
+              "0x4171824fcebb1a4a"
+            ],
+            "rho_m": "0x417373976388f050",
+            "az_rad": "0x4012f2a1f20785fa",
+            "el_rad": "0x3ff449ca9f3c7dee",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417387aedfe3eac1",
+            "residual_m": "0xc04746c890850e6c"
+          },
+          {
+            "prn": "G18",
+            "sqrt_w": "0x3fe59c4f2414d437",
+            "tau_s": "0x3fb29f1c760f5a5d",
+            "t_tx_j2000_s": "0x41c342a9fff6b072",
+            "sat_ecef_m": [
+              "0x4159720a0cefeb19",
+              "0x416a3004019b4cde",
+              "0x4174b78c3c5d687e"
+            ],
+            "dt_sat_s": "0x3f2e005afa885e04",
+            "theta_rad": "0x3ed63f7587a83d12",
+            "sat_rot_ecef_m": [
+              "0x4159721c41dfd913",
+              "0x416a2fff95627f6e",
+              "0x4174b78c3c5d687e"
+            ],
+            "rho_m": "0x4174cbf9067c5065",
+            "az_rad": "0x3fedd2d07e710cb0",
+            "el_rad": "0x3fe7fc83b364ccb4",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4174c28c34a4c8ce",
+            "residual_m": "0xc04193e42f0c54dc"
+          },
+          {
+            "prn": "G20",
+            "sqrt_w": "0x3fe8984d3950af75",
+            "tau_s": "0x3fb241012f2f368a",
+            "t_tx_j2000_s": "0x41c342a9fff6df7f",
+            "sat_ecef_m": [
+              "0x41711a1c56696d78",
+              "0x416c79eddb053b00",
+              "0x416870c1e4ec8d66"
+            ],
+            "dt_sat_s": "0x3f41488c91635112",
+            "theta_rad": "0x3ed5cf06b6dbacc1",
+            "sat_rot_ecef_m": [
+              "0x41711a2130782243",
+              "0x416c79e2333c7d1e",
+              "0x416870c1e4ec8d66"
+            ],
+            "rho_m": "0x417462df9067df0c",
+            "az_rad": "0x3ffeee88d74bc19c",
+            "el_rad": "0x3fec5f264e800928",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41744398b6517ece",
+            "residual_m": "0xc04a00098bb3b565"
+          },
+          {
+            "prn": "G21",
+            "sqrt_w": "0x3fef855afc689737",
+            "tau_s": "0x3fb1bf5994030286",
+            "t_tx_j2000_s": "0x41c342a9fff72053",
+            "sat_ecef_m": [
+              "0x417036665d37d1a7",
+              "0x4151f61726f234b8",
+              "0x4173992c0e091005"
+            ],
+            "dt_sat_s": "0x3ef04d2d8278741f",
+            "theta_rad": "0x3ed5341f5eb3dd94",
+            "sat_rot_ecef_m": [
+              "0x41703667da0f0437",
+              "0x4151f601aaba47fa",
+              "0x4173992c0e091005"
+            ],
+            "rho_m": "0x4173d213679f9c96",
+            "az_rad": "0x3febb0f46f11a33f",
+            "el_rad": "0x3ff67d739f4b8467",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4173d8440ebf08b9",
+            "residual_m": "0xc04d1e27f3236b33"
+          },
+          {
+            "prn": "G26",
+            "sqrt_w": "0x3fea50154ffc6136",
+            "tau_s": "0x3fb212f3a2d97960",
+            "t_tx_j2000_s": "0x41c342a9fff6f686",
+            "sat_ecef_m": [
+              "0x4177eef99bf2cd12",
+              "0x414a82924e65cf72",
+              "0x415fb041714171f8"
+            ],
+            "dt_sat_s": "0x3f2e4f0b3c8ba921",
+            "theta_rad": "0x3ed59801448cf809",
+            "sat_rot_ecef_m": [
+              "0x4177eefaba2b44c7",
+              "0x414a8251b454c244",
+              "0x415fb041714171f8"
+            ],
+            "rho_m": "0x41742f71ac580a9f",
+            "az_rad": "0x4008df79a9f869c0",
+            "el_rad": "0x3feeee9896f1cfe2",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417425d8e9cedc62",
+            "residual_m": "0xc04916f994a1e48f"
+          },
+          {
+            "prn": "G27",
+            "sqrt_w": "0x3fe88e14dd53965a",
+            "tau_s": "0x3fb21d36faacc193",
+            "t_tx_j2000_s": "0x41c342a9fff6f165",
+            "sat_ecef_m": [
+              "0x416840ad0b585daa",
+              "0xc164407a1ae841cc",
+              "0x4173953e39065839"
+            ],
+            "dt_sat_s": "0xbf358c2355624516",
+            "theta_rad": "0x3ed5a44442905ce3",
+            "sat_rot_ecef_m": [
+              "0x416840a632341767",
+              "0xc16440824e5f7a79",
+              "0x4173953e39065839"
+            ],
+            "rho_m": "0x41743ae8c89b2a21",
+            "az_rad": "0x4014d4cb2b52bf7a",
+            "el_rad": "0x3febb7d41954ec2d",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41745a4d3a4a454d",
+            "residual_m": "0xc035906078d12189"
+          }
+        ],
+        "residual": [
+          "0xbfba5ebe4deb4325",
+          "0xc0415572934075c2",
+          "0xc04746c890850e6c",
+          "0xc04193e42f0c54dc",
+          "0xc04a00098bb3b565",
+          "0xc04d1e27f3236b33",
+          "0xc04916f994a1e48f",
+          "0xc035906078d12189"
+        ],
+        "cost": "0x40bab9aaddcb788b",
+        "fd_2point": {
+          "rel_step": "0x3e50000000000000",
+          "perturbations": [
+            {
+              "param_index": 0,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11afe254ef335",
+              "dx": "0x3fb11afe24000000",
+              "x_perturbed": [
+                "0x41511afe2995b2be",
+                "0x4120cd2e0c5fe878",
+                "0x41511e5d8f3c7070",
+                "0x40dd4fc6edc3ad35"
+              ],
+              "f_perturbed": [
+                "0xbfb9b16d911e7dbf",
+                "0xc0415155314df472",
+                "0xc047410aaeadc0c5",
+                "0xc041934fefc8b014",
+                "0xc049fbe6d1898243",
+                "0xc04d19152765d837",
+                "0xc049102051e3fc83",
+                "0xc0358b489cdf48a2"
+              ],
+              "jac_column": [
+                "0x3fa443acf186126c",
+                "0x3fdeca75fd5d2697",
+                "0x3fe57b90538cd6a1",
+                "0x3fb15555263030d1",
+                "0x3fdef274d9da131f",
+                "0x3fe2fb718428232d",
+                "0x3fe99fd30cfd37f5",
+                "0x3fd30e637e820f81"
+              ]
+            },
+            {
+              "param_index": 1,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f80cd2e0c5fe878",
+              "dx": "0x3f80cd2e0c000000",
+              "x_perturbed": [
+                "0x41511afe254ef335",
+                "0x4120cd2e109333fb",
+                "0x41511e5d8f3c7070",
+                "0x40dd4fc6edc3ad35"
+              ],
+              "f_perturbed": [
+                "0xbfbaf84996add8dd",
+                "0xc041552844a7d1fa",
+                "0xc04746ffb6aaba20",
+                "0xc041937677332f46",
+                "0xc049ff7e9053f637",
+                "0xc04d1df2f9b1933b",
+                "0xc04916db0b067493",
+                "0xc0359139aedfe862"
+              ],
+              "jac_column": [
+                "0xbfd247067b5e2907",
+                "0x3fd1b0c911261f73",
+                "0xbfca42555db255af",
+                "0x3fda1efe0606b9f9",
+                "0x3fe08b457a69df75",
+                "0x3fc9393b2cff69c5",
+                "0x3fbd14aebfbd6ac8",
+                "0xbfd9db2f235a428d"
+              ]
+            },
+            {
+              "param_index": 2,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11e5d8f3c7070",
+              "dx": "0x3fb11e5d90000000",
+              "x_perturbed": [
+                "0x41511afe254ef335",
+                "0x4120cd2e0c5fe878",
+                "0x41511e5d938407d4",
+                "0x40dd4fc6edc3ad35"
+              ],
+              "f_perturbed": [
+                "0xbfb80bb3503a812b",
+                "0xc04156037d6bec18",
+                "0xc04741358fbd472f",
+                "0xc0418f529a5e2e35",
+                "0xc049fd7991723efb",
+                "0xc04d17a3d0170c5b",
+                "0xc04915b4737cc8b2",
+                "0xc0358670a6d46a27"
+              ],
+              "jac_column": [
+                "0x3fc161476eceaaaf",
+                "0xbfb0ee4040270eb5",
+                "0x3fe4d705bb48bbb8",
+                "0x3fe1149e49a4a0a5",
+                "0x3fd328e73e68b474",
+                "0x3fe85c8786d23705",
+                "0x3fc2fe2475df9d96",
+                "0x3fe293305a68ef96"
+              ]
+            },
+            {
+              "param_index": 3,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f3d4fc6edc3ad35",
+              "dx": "0x3f3d4fc6ec000000",
+              "x_perturbed": [
+                "0x41511afe254ef335",
+                "0x4120cd2e0c5fe878",
+                "0x41511e5d8f3c7070",
+                "0x40dd4fc6f5179ef0"
+              ],
+              "f_perturbed": [
+                "0xbfba6815accb7e1a",
+                "0xc041557ac3c0c2be",
+                "0xc04746d6992664aa",
+                "0xc04193ee14d35ee7",
+                "0xc04a0014cf6eedd1",
+                "0xc04d1e3662cff09c",
+                "0xc0491705a1bbeb61",
+                "0xc0359076f6d26927"
+              ],
+              "jac_column": [
+                "0xbfd46566377c4d34",
+                "0xbfe1e19c0ab52bc7",
+                "0xbfeea44522a6d3b7",
+                "0xbfe59c55d57ebef9",
+                "0xbfe89854d7583dcc",
+                "0xbfef8564bf93bc8d",
+                "0xbfea501d763846f4",
+                "0xbfe88e1c7831b48e"
+              ]
+            }
+          ],
+          "jac": [
+            [
+              "0x3fa443acf186126c",
+              "0xbfd24705dffbc591",
+              "0x3fc16147bb0f6736",
+              "0xbfd46566377c4d34"
+            ],
+            [
+              "0x3fdeca75fd5d2697",
+              "0x3fd1b0c800b2794c",
+              "0xbfb0ee4040270eb5",
+              "0xbfe1e19c0ab2fcd1"
+            ],
+            [
+              "0x3fe57b9070362377",
+              "0xbfca42555db255af",
+              "0x3fe4d705d7ec62f2",
+              "0xbfeea44522a6d3b7"
+            ],
+            [
+              "0x3fb15555c7e65d67",
+              "0x3fda1efe0606b9f9",
+              "0x3fe1149e49a4a0a5",
+              "0xbfe59c55d57ebef9"
+            ],
+            [
+              "0x3fdef274abd7473c",
+              "0x3fe08b44bf0a52ed",
+              "0x3fd328e7106ef940",
+              "0xbfe89854d7583dcc"
+            ],
+            [
+              "0x3fe2fb718428232d",
+              "0x3fc9393b2cffe3aa",
+              "0x3fe85c8786d23705",
+              "0xbfef8564bf93bc8d"
+            ],
+            [
+              "0x3fe99fd30cfd37f5",
+              "0x3fbd14a87c0cb9f0",
+              "0x3fc2fe2475df9d96",
+              "0xbfea501d763846f4"
+            ],
+            [
+              "0x3fd30e63ac71bd82",
+              "0xbfd9db2dad36dcd3",
+              "0x3fe293305a68ef96",
+              "0xbfe88e1c7831b48e"
+            ]
+          ],
+          "scipy_approx_derivative_bit_identical": true
+        },
+        "grad_JT_f": [
+          "0xc0639373e6d86824",
+          "0xc048d98e6ace7dee",
+          "0xc05faac55bf8806f",
+          "0x406e5b9e8fb7e000"
+        ],
+        "grad_inf_norm": "0x406e5b9e8fb7e000"
+      },
+      {
+        "trace_index": 2,
+        "x": [
+          "0x41511b07ff82de8c",
+          "0x4120cd6b5f8a6f4b",
+          "0x41511e62229da862",
+          "0x40dd4c0001f2dba5"
+        ],
+        "per_sat": [
+          {
+            "prn": "G08",
+            "sqrt_w": "0x3fd4655fe65eb8a1",
+            "tau_s": "0x3fb44f45764f195c",
+            "t_tx_j2000_s": "0x41c342a9fff5d85d",
+            "sat_ecef_m": [
+              "0x415c5fadf0d7b5e2",
+              "0xc173cd0e09f9f352",
+              "0x416be3296b9b4e50"
+            ],
+            "dt_sat_s": "0xbf04431cdfa54705",
+            "theta_rad": "0x3ed843c737b4f6ea",
+            "sat_rot_ecef_m": [
+              "0x415c5f8fe95f66c4",
+              "0xc173cd10ba73f4a6",
+              "0x416be3296b9b4e50"
+            ],
+            "rho_m": "0x4176ae9fdc3ca521",
+            "az_rad": "0x40141889901b2ef8",
+            "el_rad": "0x3fd440fb09a99773",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4176b8c6fd838b8c",
+            "residual_m": "0xbf09fff22d9402ef"
+          },
+          {
+            "prn": "G10",
+            "sqrt_w": "0x3fe1e19680fa0055",
+            "tau_s": "0x3fb346b1a108a8c4",
+            "t_tx_j2000_s": "0x41c342a9fff65ca7",
+            "sat_ecef_m": [
+              "0x4176cfbdf0bf2f6e",
+              "0x416659469b506542",
+              "0x413bb51945e78b5d"
+            ],
+            "dt_sat_s": "0xbf38f0dc8cf1b08c",
+            "theta_rad": "0x3ed707ad47075703",
+            "sat_rot_ecef_m": [
+              "0x4176cfc1f61f882d",
+              "0x4166593630857685",
+              "0x413bb51945e78b5d"
+            ],
+            "rho_m": "0x41758721edd4d7dc",
+            "az_rad": "0x40053e68193d6fab",
+            "el_rad": "0x3fe324f6f675b287",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4175aa4fa1a10915",
+            "residual_m": "0xbf03d377b791314e"
+          },
+          {
+            "prn": "G16",
+            "sqrt_w": "0x3feea43ba534a032",
+            "tau_s": "0x3fb16abd1d93865a",
+            "t_tx_j2000_s": "0x41c342a9fff74aa1",
+            "sat_ecef_m": [
+              "0x4171e9ecf324e77c",
+              "0xc14d2351b28a8b19",
+              "0x4171824fcebb1a4a"
+            ],
+            "dt_sat_s": "0xbf26db8a9a116138",
+            "theta_rad": "0x3ed4cf08bee290ff",
+            "sat_rot_ecef_m": [
+              "0x4171e9ebc3fa7d2b",
+              "0xc14d23804af1c91d",
+              "0x4171824fcebb1a4a"
+            ],
+            "rho_m": "0x417373954b65a2b4",
+            "az_rad": "0x4012f2a5ec18b08d",
+            "el_rad": "0x3ff449c467c34418",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417387abd605a8f1",
+            "residual_m": "0xbf1ddaab4cd9e204"
+          },
+          {
+            "prn": "G18",
+            "sqrt_w": "0x3fe59c4f2414d437",
+            "tau_s": "0x3fb29f1a64b8e9d9",
+            "t_tx_j2000_s": "0x41c342a9fff6b073",
+            "sat_ecef_m": [
+              "0x4159720a0ceb79d7",
+              "0x416a3004019cd3ca",
+              "0x4174b78c3c5d43f7"
+            ],
+            "dt_sat_s": "0x3f2e005afa885e32",
+            "theta_rad": "0x3ed63f730f3c79f0",
+            "sat_rot_ecef_m": [
+              "0x4159721c41d96246",
+              "0x416a2fff95648413",
+              "0x4174b78c3c5d43f7"
+            ],
+            "rho_m": "0x4174cbf6b7500810",
+            "az_rad": "0x3fedd2cc208081f9",
+            "el_rad": "0x3fe7fc84ac090a82",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4174c288f3bd8c45",
+            "residual_m": "0xbf14bea1c044b68e"
+          },
+          {
+            "prn": "G20",
+            "sqrt_w": "0x3fe8984d3950af75",
+            "tau_s": "0x3fb240fe3e5a152e",
+            "t_tx_j2000_s": "0x41c342a9fff6df81",
+            "sat_ecef_m": [
+              "0x41711a1c5667d0bd",
+              "0x416c79eddb04e109",
+              "0x416870c1e4f1668b"
+            ],
+            "dt_sat_s": "0x3f41488c91635111",
+            "theta_rad": "0x3ed5cf03336b397d",
+            "sat_rot_ecef_m": [
+              "0x41711a213075bd70",
+              "0x416c79e2333e03db",
+              "0x416870c1e4f1668b"
+            ],
+            "rho_m": "0x417462dc47a1b8c2",
+            "az_rad": "0x3ffeee8b0b68f098",
+            "el_rad": "0x3fec5f2fcf137f30",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417443947bd06450",
+            "residual_m": "0xbf11002641021988"
+          },
+          {
+            "prn": "G21",
+            "sqrt_w": "0x3fef855afc689737",
+            "tau_s": "0x3fb1bf571d77b32f",
+            "t_tx_j2000_s": "0x41c342a9fff72054",
+            "sat_ecef_m": [
+              "0x417036665d36f0e6",
+              "0x4151f61726f577da",
+              "0x4173992c0e09a304"
+            ],
+            "dt_sat_s": "0x3ef04d2d827874c8",
+            "theta_rad": "0x3ed5341c6d5dbc56",
+            "sat_rot_ecef_m": [
+              "0x41703667da0dee9b",
+              "0x4151f601aac08675",
+              "0x4173992c0e09a304"
+            ],
+            "rho_m": "0x4173d210a76c9c82",
+            "az_rad": "0x3febb0afb2f62f14",
+            "el_rad": "0x3ff67d7506051cc9",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4173d8405cd11470",
+            "residual_m": "0xbf1ccaf8548029e1"
+          },
+          {
+            "prn": "G26",
+            "sqrt_w": "0x3fea50154ffc6136",
+            "tau_s": "0x3fb212f1110527a4",
+            "t_tx_j2000_s": "0x41c342a9fff6f687",
+            "sat_ecef_m": [
+              "0x4177eef99bf33ab7",
+              "0x414a82924e685ba1",
+              "0x415fb041713bcdcf"
+            ],
+            "dt_sat_s": "0x3f2e4f0b3c8ba941",
+            "theta_rad": "0x3ed597fe329d9165",
+            "sat_rot_ecef_m": [
+              "0x4177eefaba2b89bb",
+              "0x414a8251b4607db7",
+              "0x415fb041713bcdcf"
+            ],
+            "rho_m": "0x41742f6ecdac6196",
+            "az_rad": "0x4008df7fd67f82a2",
+            "el_rad": "0x3feeee9da01dd278",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417425d519683f25",
+            "residual_m": "0xbf11ff6ab3d7a616"
+          },
+          {
+            "prn": "G27",
+            "sqrt_w": "0x3fe88e14dd53965a",
+            "tau_s": "0x3fb21d36408440b6",
+            "t_tx_j2000_s": "0x41c342a9fff6f165",
+            "sat_ecef_m": [
+              "0x416840ad0b585daa",
+              "0xc164407a1ae841cc",
+              "0x4173953e39065839"
+            ],
+            "dt_sat_s": "0xbf358c2355624516",
+            "theta_rad": "0x3ed5a4436427399e",
+            "sat_rot_ecef_m": [
+              "0x416840a632345dc8",
+              "0xc16440824e5f2632",
+              "0x4173953e39065839"
+            ],
+            "rho_m": "0x41743ae7f8b485d9",
+            "az_rad": "0x4014d4cc6e654648",
+            "el_rad": "0x3febb7c4e3e50ce3",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41745a4b78a8acd1",
+            "residual_m": "0xbf1cbc24829094ee"
+          }
+        ],
+        "residual": [
+          "0xbf09fff22d9402ef",
+          "0xbf03d377b791314e",
+          "0xbf1ddaab4cd9e204",
+          "0xbf14bea1c044b68e",
+          "0xbf11002641021988",
+          "0xbf1ccaf8548029e1",
+          "0xbf11ff6ab3d7a616",
+          "0xbf1cbc24829094ee"
+        ],
+        "cost": "0x3e5e21332bb1c89a",
+        "fd_2point": {
+          "rel_step": "0x3e50000000000000",
+          "perturbations": [
+            {
+              "param_index": 0,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11b07ff82de8c",
+              "dx": "0x3fb11b0800000000",
+              "x_perturbed": [
+                "0x41511b0803c9a08c",
+                "0x4120cd6b5f8a6f4b",
+                "0x41511e62229da862",
+                "0x40dd4c0001f2dba5"
+              ],
+              "f_perturbed": [
+                "0x3f6542102ade6658",
+                "0x3fa0709c6bef4f14",
+                "0x3fa6e8a5a3caca7c",
+                "0x3f7234e479353df1",
+                "0x3fa08271b630ad19",
+                "0x3fa43cd37353787f",
+                "0x3fab5c1bb4539396",
+                "0x3f9442b9f7826d46"
+              ],
+              "jac_column": [
+                "0x3fa4439a1bf8e603",
+                "0x3fdeca7603607d64",
+                "0x3fe57b8ecdd1689a",
+                "0x3fb15542f258ce04",
+                "0x3fdef273ba767030",
+                "0x3fe2fb70226547f8",
+                "0x3fe99fd3a9f583e2",
+                "0x3fd30e5e9c81a44b"
+              ]
+            },
+            {
+              "param_index": 1,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f80cd6b5f8a6f4b",
+              "dx": "0x3f80cd6b60000000",
+              "x_perturbed": [
+                "0x41511b07ff82de8c",
+                "0x4120cd6b63bdca23",
+                "0x41511e62229da862",
+                "0x40dd4c0001f2dba5"
+              ],
+              "f_perturbed": [
+                "0xbf6399afa0adae1d",
+                "0x3f62449a39ee90ad",
+                "0xbf5d713072876e9c",
+                "0x3f6ac8627ac776a7",
+                "0x3f711bacb36ebe54",
+                "0x3f58b05834179ec2",
+                "0x3f4c4a0a31cae399",
+                "0xbf6c0d09cfe7078c"
+              ],
+              "jac_column": [
+                "0xbfd2470723d27ae4",
+                "0x3fd1b0c74902982e",
+                "0xbfca4262f08bd685",
+                "0x3fda1efc928637a3",
+                "0x3fe08b45d6f9b697",
+                "0x3fc93931a75c1c14",
+                "0x3fbd149c4d560af0",
+                "0xbfd9db31375f7471"
+              ]
+            },
+            {
+              "param_index": 2,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11e62229da862",
+              "dx": "0x3fb11e6224000000",
+              "x_perturbed": [
+                "0x41511b07ff82de8c",
+                "0x4120cd6b5f8a6f4b",
+                "0x41511e6226e540eb",
+                "0x40dd4c0001f2dba5"
+              ],
+              "f_perturbed": [
+                "0x3f827e5a0da43930",
+                "0xbf7244fb7490edfd",
+                "0x3fa63d1c401b1af7",
+                "0x3fa23bf90fa33044",
+                "0x3f946ed83cb62fef",
+                "0x3faa022f3442a492",
+                "0x3f842e1521577238",
+                "0x3fa3d14a9a5f7b01"
+              ],
+              "jac_column": [
+                "0x3fc16144b88f0b3f",
+                "0xbfb0ee49d2f72b39",
+                "0x3fe4d7063307998e",
+                "0x3fe1149f15be2f1b",
+                "0x3fd328e7afe7c47a",
+                "0x3fe85c892eb1c824",
+                "0x3fc2fe20eb0ffa1b",
+                "0x3fe2932fde3a2b87"
+              ]
+            },
+            {
+              "param_index": 3,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f3d4c0001f2dba5",
+              "dx": "0x3f3d4c0000000000",
+              "x_perturbed": [
+                "0x41511b07ff82de8c",
+                "0x4120cd6b5f8a6f4b",
+                "0x41511e62229da862",
+                "0x40dd4c000945dba5"
+              ],
+              "f_perturbed": [
+                "0xbf292c4c37edf904",
+                "0xbf32d94e307bc7bb",
+                "0xbf41c223774b4355",
+                "0xbf38f8ae32e15178",
+                "0xbf3ac4794399c505",
+                "0xbf42073aa0fb25f5",
+                "0xbf3c96ec30109905",
+                "0xbf3daa29c1cffaac"
+              ],
+              "jac_column": [
+                "0xbfd4655fe65eb8a1",
+                "0xbfe1e19680fa0055",
+                "0xbfeea43ba534a031",
+                "0xbfe59c4f2414d437",
+                "0xbfe8984d3950af75",
+                "0xbfef855afc689738",
+                "0xbfea50154ffc6136",
+                "0xbfe88e14dd53965a"
+              ]
+            }
+          ],
+          "jac": [
+            [
+              "0x3fa4439ab4981910",
+              "0xbfd24707bf32a728",
+              "0x3fc16144deaf5f50",
+              "0xbfd4655fe65eb8a1"
+            ],
+            [
+              "0x3fdeca7624d3efb6",
+              "0x3fd1b0c74902982e",
+              "0xbfb0ee49d2f72b39",
+              "0xbfe1e19680fa0055"
+            ],
+            [
+              "0x3fe57b8eea7aa497",
+              "0xbfca4262f08bd685",
+              "0x3fe4d7064fab38ca",
+              "0xbfeea43ba534a031"
+            ],
+            [
+              "0x3fb15542f258ce04",
+              "0x3fda1efc928637a2",
+              "0x3fe1149f018b678b",
+              "0xbfe59c4f2414d437"
+            ],
+            [
+              "0x3fdef273ba767030",
+              "0x3fe08b451b9ccca4",
+              "0x3fd328e781ee1347",
+              "0xbfe8984d3950af75"
+            ],
+            [
+              "0x3fe2fb70226547f8",
+              "0x3fc93931a75c1c14",
+              "0x3fe85c892eb1c824",
+              "0xbfef855afc689738"
+            ],
+            [
+              "0x3fe99fd3a9f583e2",
+              "0x3fbd149c4d560af0",
+              "0x3fc2fe214d6f87ed",
+              "0xbfea50154ffc6136"
+            ],
+            [
+              "0x3fd30e5e9c81a44b",
+              "0xbfd9db32ad7d91c1",
+              "0x3fe2932fc746e04f",
+              "0xbfe88e14dd539659"
+            ]
+          ],
+          "scipy_approx_derivative_bit_identical": true
+        },
+        "grad_JT_f": [
+          "0xbf32bfe6c07b7743",
+          "0xbef9128c61432851",
+          "0xbf337f0db3d43af2",
+          "0x3f4051cc0d597fc0"
+        ],
+        "grad_inf_norm": "0x3f4051cc0d597fc0"
+      },
+      {
+        "trace_index": 3,
+        "x": [
+          "0x41511b07ff824400",
+          "0x4120cd6b5f861f31",
+          "0x41511e62229e1c30",
+          "0x40dd4bfffffffce2"
+        ],
+        "per_sat": [
+          {
+            "prn": "G08",
+            "sqrt_w": "0x3fd4655fe65eb8a1",
+            "tau_s": "0x3fb44f45764ef6ee",
+            "t_tx_j2000_s": "0x41c342a9fff5d85d",
+            "sat_ecef_m": [
+              "0x415c5fadf0d7b5e2",
+              "0xc173cd0e09f9f352",
+              "0x416be3296b9b4e50"
+            ],
+            "dt_sat_s": "0xbf04431cdfa54705",
+            "theta_rad": "0x3ed843c737b4cdc8",
+            "sat_rot_ecef_m": [
+              "0x415c5f8fe95f66c4",
+              "0xc173cd10ba73f4a6",
+              "0x416be3296b9b4e50"
+            ],
+            "rho_m": "0x4176ae9fdc3c7ead",
+            "az_rad": "0x40141889901b0be5",
+            "el_rad": "0x3fd440fb09aba232",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4176b8c6fd82e860",
+            "residual_m": "0x3e14655fe65eb8a1"
+          },
+          {
+            "prn": "G10",
+            "sqrt_w": "0x3fe1e19680fa0055",
+            "tau_s": "0x3fb346b1a108d8e8",
+            "t_tx_j2000_s": "0x41c342a9fff65ca7",
+            "sat_ecef_m": [
+              "0x4176cfbdf0bf2f6e",
+              "0x416659469b506542",
+              "0x413bb51945e78b5d"
+            ],
+            "dt_sat_s": "0xbf38f0dc8cf1b08c",
+            "theta_rad": "0x3ed707ad47079087",
+            "sat_rot_ecef_m": [
+              "0x4176cfc1f61f882d",
+              "0x4166593630857685",
+              "0x413bb51945e78b5d"
+            ],
+            "rho_m": "0x41758721edd50d9e",
+            "az_rad": "0x40053e68193d459b",
+            "el_rad": "0x3fe324f6f6745952",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4175aa4fa1a0c21f",
+            "residual_m": "0x0000000000000000"
+          },
+          {
+            "prn": "G16",
+            "sqrt_w": "0x3feea43ba534a032",
+            "tau_s": "0x3fb16abd1d93865c",
+            "t_tx_j2000_s": "0x41c342a9fff74aa1",
+            "sat_ecef_m": [
+              "0x4171e9ecf324e77c",
+              "0xc14d2351b28a8b19",
+              "0x4171824fcebb1a4a"
+            ],
+            "dt_sat_s": "0xbf26db8a9a116138",
+            "theta_rad": "0x3ed4cf08bee29101",
+            "sat_rot_ecef_m": [
+              "0x4171e9ebc3fa7d2b",
+              "0xc14d23804af1c91d",
+              "0x4171824fcebb1a4a"
+            ],
+            "rho_m": "0x417373954b65a2b5",
+            "az_rad": "0x4012f2a5ec1811bf",
+            "el_rad": "0x3ff449c467c3af6e",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417387abd6052c3a",
+            "residual_m": "0x3e2ea43ba534a032"
+          },
+          {
+            "prn": "G18",
+            "sqrt_w": "0x3fe59c4f2414d437",
+            "tau_s": "0x3fb29f1a64b8eb81",
+            "t_tx_j2000_s": "0x41c342a9fff6b073",
+            "sat_ecef_m": [
+              "0x4159720a0ceb79d7",
+              "0x416a3004019cd3ca",
+              "0x4174b78c3c5d43f7"
+            ],
+            "dt_sat_s": "0x3f2e005afa885e32",
+            "theta_rad": "0x3ed63f730f3c7bea",
+            "sat_rot_ecef_m": [
+              "0x4159721c41d96246",
+              "0x416a2fff95648413",
+              "0x4174b78c3c5d43f7"
+            ],
+            "rho_m": "0x4174cbf6b75009e8",
+            "az_rad": "0x3fedd2cc20817e62",
+            "el_rad": "0x3fe7fc84ac093e6b",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4174c288f3bd1165",
+            "residual_m": "0x3e259c4f2414d437"
+          },
+          {
+            "prn": "G20",
+            "sqrt_w": "0x3fe8984d3950af75",
+            "tau_s": "0x3fb240fe3e5a35a2",
+            "t_tx_j2000_s": "0x41c342a9fff6df81",
+            "sat_ecef_m": [
+              "0x41711a1c5667d0bd",
+              "0x416c79eddb04e109",
+              "0x416870c1e4f1668b"
+            ],
+            "dt_sat_s": "0x3f41488c91635111",
+            "theta_rad": "0x3ed5cf03336b6043",
+            "sat_rot_ecef_m": [
+              "0x41711a213075bd70",
+              "0x416c79e2333e03db",
+              "0x416870c1e4f1668b"
+            ],
+            "rho_m": "0x417462dc47a1dd00",
+            "az_rad": "0x3ffeee8b0b6947c0",
+            "el_rad": "0x3fec5f2fcf1261d1",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417443947bd00bd6",
+            "residual_m": "0x0000000000000000"
+          },
+          {
+            "prn": "G21",
+            "sqrt_w": "0x3fef855afc689737",
+            "tau_s": "0x3fb1bf571d77ba2a",
+            "t_tx_j2000_s": "0x41c342a9fff72054",
+            "sat_ecef_m": [
+              "0x417036665d36f0e6",
+              "0x4151f61726f577da",
+              "0x4173992c0e09a304"
+            ],
+            "dt_sat_s": "0x3ef04d2d827874c8",
+            "theta_rad": "0x3ed5341c6d5dc4ad",
+            "sat_rot_ecef_m": [
+              "0x41703667da0dee9b",
+              "0x4151f601aac08675",
+              "0x4173992c0e09a304"
+            ],
+            "rho_m": "0x4173d210a76ca44d",
+            "az_rad": "0x3febb0afb2fee653",
+            "el_rad": "0x3ff67d7506054199",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4173d8405cd09f83",
+            "residual_m": "0x3e2f855afc689737"
+          },
+          {
+            "prn": "G26",
+            "sqrt_w": "0x3fea50154ffc6136",
+            "tau_s": "0x3fb212f1110548ec",
+            "t_tx_j2000_s": "0x41c342a9fff6f687",
+            "sat_ecef_m": [
+              "0x4177eef99bf33ab7",
+              "0x414a82924e685ba1",
+              "0x415fb041713bcdcf"
+            ],
+            "dt_sat_s": "0x3f2e4f0b3c8ba941",
+            "theta_rad": "0x3ed597fe329db929",
+            "sat_rot_ecef_m": [
+              "0x4177eefaba2b89bb",
+              "0x414a8251b4607db7",
+              "0x415fb041713bcdcf"
+            ],
+            "rho_m": "0x41742f6ecdac86c0",
+            "az_rad": "0x4008df7fd67f1361",
+            "el_rad": "0x3feeee9da01c88a1",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417425d51967e797",
+            "residual_m": "0x3e2a50154ffc6136"
+          },
+          {
+            "prn": "G27",
+            "sqrt_w": "0x3fe88e14dd53965a",
+            "tau_s": "0x3fb21d3640842a43",
+            "t_tx_j2000_s": "0x41c342a9fff6f165",
+            "sat_ecef_m": [
+              "0x416840ad0b585daa",
+              "0xc164407a1ae841cc",
+              "0x4173953e39065839"
+            ],
+            "dt_sat_s": "0xbf358c2355624516",
+            "theta_rad": "0x3ed5a44364271ecb",
+            "sat_rot_ecef_m": [
+              "0x416840a632345dc8",
+              "0xc16440824e5f2632",
+              "0x4173953e39065839"
+            ],
+            "rho_m": "0x41743ae7f8b46cc6",
+            "az_rad": "0x4014d4cc6e6511fb",
+            "el_rad": "0x3febb7c4e3e65a2a",
+            "iono_m": "0x0000000000000000",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41745a4b78a81706",
+            "residual_m": "0x3e288e14dd53965a"
+          }
+        ],
+        "residual": [
+          "0x3e14655fe65eb8a1",
+          "0x0000000000000000",
+          "0x3e2ea43ba534a032",
+          "0x3e259c4f2414d437",
+          "0x0000000000000000",
+          "0x3e2f855afc689737",
+          "0x3e2a50154ffc6136",
+          "0x3e288e14dd53965a"
+        ],
+        "cost": "0x3c753b8ece1d8d3a",
+        "fd_2point": {
+          "rel_step": "0x3e50000000000000",
+          "perturbations": [
+            {
+              "param_index": 0,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11b07ff824400",
+              "dx": "0x3fb11b0800000000",
+              "x_perturbed": [
+                "0x41511b0803c90600",
+                "0x4120cd6b5f861f31",
+                "0x41511e62229e1c30",
+                "0x40dd4bfffffffce2"
+              ],
+              "f_perturbed": [
+                "0x3f65aa1096bfb596",
+                "0x3fa0759149dd3361",
+                "0x3fa6f79318157313",
+                "0x3f7287e059fb430c",
+                "0x3fa08af1c9512e26",
+                "0x3fa44b390f031390",
+                "0x3fab651b4f5d6a19",
+                "0x3f945f764d212795"
+              ],
+              "jac_column": [
+                "0x3fa4439a1bf8e602",
+                "0x3fdeca7624d3efb8",
+                "0x3fe57b8ecdd1689b",
+                "0x3fb15542f258ce03",
+                "0x3fdef2738c73bc89",
+                "0x3fe2fb703fe11663",
+                "0x3fe99fd39158cea6",
+                "0x3fd30e5e6e920f25"
+              ]
+            },
+            {
+              "param_index": 1,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f80cd6b5f861f31",
+              "dx": "0x3f80cd6b60000000",
+              "x_perturbed": [
+                "0x41511b07ff824400",
+                "0x4120cd6b63b97a09",
+                "0x41511e62229e1c30",
+                "0x40dd4bfffffffce2"
+              ],
+              "f_perturbed": [
+                "0xbf6331af34cc5edf",
+                "0x3f6293e6fab36d63",
+                "0xbf5b9385bdb9d07b",
+                "0x3f6b6e5a3c5380de",
+                "0x3f715fae11353085",
+                "0x3f5a7d07b95fa161",
+                "0x3f4e89f78845d85c",
+                "0xbf6b272722f13510"
+              ],
+              "jac_column": [
+                "0xbfd2470723d27ae5",
+                "0x3fd1b0c74902982e",
+                "0xbfca4266963fc006",
+                "0x3fda1efc928637a3",
+                "0x3fe08b45d6f9b697",
+                "0x3fc93931a75c1c15",
+                "0x3fbd149c4d560af0",
+                "0xbfd9db32ad7d91c1"
+              ]
+            },
+            {
+              "param_index": 2,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11e62229e1c30",
+              "dx": "0x3fb11e6224000000",
+              "x_perturbed": [
+                "0x41511b07ff824400",
+                "0x4120cd6b5f861f31",
+                "0x41511e6226e5b4b9",
+                "0x40dd4bfffffffce2"
+              ],
+              "f_perturbed": [
+                "0x3f82985a289c8cff",
+                "0xbf721d55142e7fa2",
+                "0x3fa64c0995c187e8",
+                "0x3fa24658761fa1c3",
+                "0x3f947fd862f73208",
+                "0x3faa1094b06ce4a7",
+                "0x3f8452145fff76c5",
+                "0x3fa3dfa8c52ed829"
+              ],
+              "jac_column": [
+                "0x3fc16144b88f0b3e",
+                "0xbfb0ee49d2f72b39",
+                "0x3fe4d7061663fa52",
+                "0x3fe1149f018b678b",
+                "0x3fd328e781ee1346",
+                "0x3fe85c892eb1c824",
+                "0x3fc2fe214d6f87ee",
+                "0x3fe2932fc746e050"
+              ]
+            },
+            {
+              "param_index": 3,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f3d4bfffffffce2",
+              "dx": "0x3f3d4c0000000000",
+              "x_perturbed": [
+                "0x41511b07ff824400",
+                "0x4120cd6b5f861f31",
+                "0x41511e62229e1c30",
+                "0x40dd4c000752fce2"
+              ],
+              "f_perturbed": [
+                "0xbf22ac4579d90519",
+                "0xbf305ee82a54e20e",
+                "0xbf3c0d8cc9423b8f",
+                "0xbf33c8f02680ffbf",
+                "0xbf3684636732a1fa",
+                "0xbf3cdbb72cd64171",
+                "0xbf381711831aaf80",
+                "0xbf367b081316f81d"
+              ],
+              "jac_column": [
+                "0xbfd4655fe65eb8a1",
+                "0xbfe1e19680fa0055",
+                "0xbfeea43ba534a031",
+                "0xbfe59c4f2414d436",
+                "0xbfe8984d3950af74",
+                "0xbfef855afc689737",
+                "0xbfea50154ffc6136",
+                "0xbfe88e14dd53965a"
+              ]
+            }
+          ],
+          "jac": [
+            [
+              "0x3fa4439ab498190f",
+              "0xbfd24707bf32a729",
+              "0x3fc16144deaf5f50",
+              "0xbfd4655fe65eb8a1"
+            ],
+            [
+              "0x3fdeca7603607d66",
+              "0x3fd1b0c74902982e",
+              "0xbfb0ee4a58aac112",
+              "0xbfe1e19680fa0055"
+            ],
+            [
+              "0x3fe57b8ecdd1689b",
+              "0xbfca4262f08bd685",
+              "0x3fe4d7063307998e",
+              "0xbfeea43ba534a031"
+            ],
+            [
+              "0x3fb15542f258ce03",
+              "0x3fda1efc928637a3",
+              "0x3fe1149f018b678b",
+              "0xbfe59c4f2414d436"
+            ],
+            [
+              "0x3fdef273e87923d7",
+              "0x3fe08b469256a08b",
+              "0x3fd328e7afe7c479",
+              "0xbfe8984d3950af75"
+            ],
+            [
+              "0x3fe2fb7004e9798d",
+              "0x3fc93931a75c1c15",
+              "0x3fe85c89113bbfb4",
+              "0xbfef855afc689737"
+            ],
+            [
+              "0x3fe99fd39158cea6",
+              "0x3fbd149609bcdb4a",
+              "0x3fc2fe20eb0ffa1c",
+              "0xbfea50154ffc6136"
+            ],
+            [
+              "0x3fd30e5e9c81a44a",
+              "0xbfd9db34239baf10",
+              "0x3fe2932fc746e050",
+              "0xbfe88e14dd53965a"
+            ]
+          ],
+          "scipy_approx_derivative_bit_identical": true
+        },
+        "grad_JT_f": [
+          "0x3e34d2204497d558",
+          "0x3df355d4881f0c8a",
+          "0x3e3b3ee48b591966",
+          "0xbe453b8ece1d8d3a"
+        ],
+        "grad_inf_norm": "0x3e453b8ece1d8d3a"
+      }
+    ],
+    "accepted_steps": [
+      {
+        "from_trace_index": 0,
+        "to_trace_index": 1,
+        "step": [
+          "0xc0cf13b562199600",
+          "0x40e8aee0c5fe8780",
+          "0xc0c854e1871f2000",
+          "0x40dd4fc6edc3ad35"
+        ],
+        "step_inf_norm": "0x40e8aee0c5fe8780",
+        "accepted": true
+      },
+      {
+        "from_trace_index": 1,
+        "to_trace_index": 2,
+        "step": [
+          "0x4043b467d6ae0000",
+          "0x403ea99543698000",
+          "0x40324d84dfc80000",
+          "0xc02e375e868c8000"
+        ],
+        "step_inf_norm": "0x4043b467d6ae0000",
+        "accepted": true
+      },
+      {
+        "from_trace_index": 2,
+        "to_trace_index": 3,
+        "step": [
+          "0xbf03518000000000",
+          "0xbf01406800000000",
+          "0x3efcf38000000000",
+          "0xbf1f2dec30000000"
+        ],
+        "step_inf_norm": "0x3f1f2dec30000000",
+        "accepted": true
+      }
+    ],
+    "objective_evaluation_log": [
+      {
+        "objective_eval_index": 0,
+        "x": [
+          "0x41512a8800000000",
+          "0x411e848000000000",
+          "0x41512a8800000000",
+          "0x0000000000000000"
+        ],
+        "residual": [
+          "0x40d9b47be2e9d12e",
+          "0x40c2ac718323166c",
+          "0x40ec3a7eb1aa2ae2",
+          "0x40bc79b1d6496e8c",
+          "0x40c0219b3658c27e",
+          "0x40e2c0080f27a9d3",
+          "0x40e051ce2ae8faed",
+          "0x40eb0a96ab8c4013"
+        ],
+        "cost": "0x41f273c8c55b2356",
+        "outcome": "accepted_iterate"
+      },
+      {
+        "objective_eval_index": 1,
+        "x": [
+          "0x41511afe254ef335",
+          "0x4120cd2e0c5fe878",
+          "0x41511e5d8f3c7070",
+          "0x40dd4fc6edc3ad35"
+        ],
+        "residual": [
+          "0xbfba5ebe4deb4325",
+          "0xc0415572933bfd5c",
+          "0xc04746c890850e6c",
+          "0xc04193e42f0c54dc",
+          "0xc04a00098bc0018b",
+          "0xc04d1e27f313a885",
+          "0xc04916f994a1e48f",
+          "0xc035906078d12189"
+        ],
+        "cost": "0x40bab9aaddcb788b",
+        "outcome": "accepted_iterate"
+      },
+      {
+        "objective_eval_index": 2,
+        "x": [
+          "0x41511b07ff82de8c",
+          "0x4120cd6b5f8a6f4b",
+          "0x41511e62229da862",
+          "0x40dd4c0001f2dba5"
+        ],
+        "residual": [
+          "0xbf09fff22d9402ef",
+          "0xbf03d33031372d66",
+          "0xbf1ddaab4cd9e204",
+          "0xbf14beccf8e2feb8",
+          "0xbf11002641021988",
+          "0xbf1ccaf8548029e1",
+          "0xbf11ff6ab3d7a616",
+          "0xbf1cbc559eba4f95"
+        ],
+        "cost": "0x3e5e21332bb1c89a",
+        "outcome": "accepted_iterate"
+      },
+      {
+        "objective_eval_index": 3,
+        "x": [
+          "0x41511b07ff824400",
+          "0x4120cd6b5f861f31",
+          "0x41511e62229e1c30",
+          "0x40dd4bfffffffce2"
+        ],
+        "residual": [
+          "0x3e14655fe65eb8a1",
+          "0x0000000000000000",
+          "0x3e2ea43ba534a032",
+          "0x3e259c4f2414d437",
+          "0x3e28984d3950af75",
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x3e288e14dd53965a"
+        ],
+        "cost": "0x3c753b8ece1d8d3a",
+        "outcome": "accepted_iterate"
+      }
+    ],
+    "evaluation_counts": {
+      "n_objective_evals": 4,
+      "n_fd_perturbation_evals": 16,
+      "n_accepted_iterates": 4,
+      "n_rejected_trials": 0,
+      "scipy_nfev": 4,
+      "scipy_njev": 4,
+      "nfev_matches_objective_evals": true,
+      "fd_probes_match_njev_times_n": true
+    },
+    "stopping": {
+      "status": 3,
+      "termination_reason": "xtol satisfied: relative step size below xtol",
+      "final_optimality_inf_norm": "0x3e453b8ece1d8d3a",
+      "gtol": "0x3ddb7cdfd9d7bdbb",
+      "success": true,
+      "nfev": 4,
+      "njev": 4,
+      "message": "`xtol` termination condition is satisfied."
+    },
+    "dop": {
+      "gdop": "0x40121a7d97dcbbc7",
+      "pdop": "0x400d386422890c5e",
+      "hdop": "0x3ffd0cf06c21d520",
+      "vdop": "0x40095ab42c2bda8a",
+      "tdop": "0x4005615e497b9321"
+    },
+    "final_solution": {
+      "note": "trf SVD step is BLAS-bound (Apple Accelerate); the converged x is an independent-solve AGREEMENT target (sub-micron / ~1e-12), never 0 ULP.",
+      "x": [
+        "0x41511b07ff824406",
+        "0x4120cd6b5f861f30",
+        "0x41511e62229e1c2e",
+        "0x40dd4c000000032b"
+      ],
+      "residual": [
+        "0x3e14655fe65eb8a1",
+        "0x0000000000000000",
+        "0x3e2ea43ba534a032",
+        "0x3e259c4f2414d437",
+        "0x3e28984d3950af75",
+        "0x0000000000000000",
+        "0x0000000000000000",
+        "0x3e288e14dd53965a"
+      ],
+      "cost": "0x3c753b8ece1d8d3a",
+      "recovered_geodetic": {
+        "lat_rad": "0x3fe921fb5432aa66",
+        "lon_rad": "0x3fbf46bb9c109320",
+        "height_m": "0x4072bfffffffbd04"
+      },
+      "rx_clock_s": "0x3f1a3b884188e776",
+      "truth_x": [
+        "0x41511b07ff824402",
+        "0x4120cd6b5f861f3b",
+        "0x41511e62229e1c30",
+        "0x40dd4c0000000000"
+      ],
+      "truth_rx_clock_s": "0x3f1a3b884188e4a0",
+      "abs_err_x_m": [
+        "0x3e30000000000000",
+        "0x3e16000000000000",
+        "0x3e20000000000000"
+      ],
+      "abs_err_clock_m": "0x3e29580000000000"
+    }
+  }
+}

@@ -1,0 +1,4111 @@
+{
+  "_source": {
+    "note": "Oracle-only ANTEX values copied from the trimmed igs20.atx fixture; no parser or correction model is implemented in this change.",
+    "source_url": "https://files.igs.org/pub/station/general/igs20.atx",
+    "full_file_sha256": "70e963f66ca46c801a9fc8b37b0a0023c8e5213a724d7f26972ae81a80ce9699",
+    "full_file_bytes": 56564581,
+    "trimmed_file": "igs20_wettzell_trim.atx",
+    "trimmed_file_sha256": "5c30f41a7cb75564eb379fcbc10e123ebafce86f8c305836413cdeaa129cfa02",
+    "trimmed_file_bytes": 364261,
+    "trim_epoch_utc": "2020-06-25T00:00:00",
+    "units": "ANTEX PCO and PCV values are millimeters in north/east/up and grid samples.",
+    "selection": "Header retained verbatim; GPS PRN blocks selected by validity at the WTZR/WTZZ 120-epoch RINEX date; receiver block selected from ANT # / TYPE headers."
+  },
+  "_counts": {
+    "antennas": 10,
+    "frequency_blocks": 44,
+    "pco_scalar_values": 132,
+    "pcv_sample_values": 432
+  },
+  "antennas": [
+    {
+      "id": "BLOCK IIR-M         G05                 G050      2009-043A",
+      "source_lines": [
+        1069,
+        1085
+      ],
+      "type_serial_line": "BLOCK IIR-M         G05                 G050      2009-043A",
+      "dazi_deg": 0.0,
+      "zenith_grid_deg": {
+        "start": 0.0,
+        "end": 17.0,
+        "step": 1.0
+      },
+      "sinex_code": "IGS20_2417",
+      "frequencies": [
+        {
+          "frequency": "G01",
+          "source_lines": [
+            1077,
+            1080
+          ],
+          "pco_neu_mm": {
+            "north": -3.3,
+            "east": -0.3,
+            "up": 742.63
+          },
+          "pco_neu_mm_text": {
+            "north": "-3.30",
+            "east": "-0.30",
+            "up": "742.63"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 10.7,
+              "value_text": "10.70"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -9.5,
+              "value_text": "-9.50"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 40.6,
+              "value_text": "40.60"
+            }
+          ]
+        },
+        {
+          "frequency": "G02",
+          "source_lines": [
+            1081,
+            1084
+          ],
+          "pco_neu_mm": {
+            "north": -3.3,
+            "east": -0.3,
+            "up": 742.63
+          },
+          "pco_neu_mm_text": {
+            "north": "-3.30",
+            "east": "-0.30",
+            "up": "742.63"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 10.7,
+              "value_text": "10.70"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -9.5,
+              "value_text": "-9.50"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 40.6,
+              "value_text": "40.60"
+            }
+          ]
+        }
+      ],
+      "kind": "satellite",
+      "antenna_type": "BLOCK IIR-M",
+      "prn": "G05",
+      "svn_cospar": "G050      2009-043A",
+      "valid_from_utc": "2009-08-17T00:00:00.0000000",
+      "valid_until_utc": null
+    },
+    {
+      "id": "BLOCK IIF           G08                 G072      2015-033A",
+      "source_lines": [
+        1267,
+        1283
+      ],
+      "type_serial_line": "BLOCK IIF           G08                 G072      2015-033A",
+      "dazi_deg": 0.0,
+      "zenith_grid_deg": {
+        "start": 0.0,
+        "end": 17.0,
+        "step": 1.0
+      },
+      "sinex_code": "IGS20_2417",
+      "frequencies": [
+        {
+          "frequency": "G01",
+          "source_lines": [
+            1275,
+            1278
+          ],
+          "pco_neu_mm": {
+            "north": 394.0,
+            "east": 0.0,
+            "up": 1427.68
+          },
+          "pco_neu_mm_text": {
+            "north": "394.00",
+            "east": "0.00",
+            "up": "1427.68"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 6.1,
+              "value_text": "6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -4.4,
+              "value_text": "-4.40"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 23.5,
+              "value_text": "23.50"
+            }
+          ]
+        },
+        {
+          "frequency": "G02",
+          "source_lines": [
+            1279,
+            1282
+          ],
+          "pco_neu_mm": {
+            "north": 394.0,
+            "east": 0.0,
+            "up": 1427.68
+          },
+          "pco_neu_mm_text": {
+            "north": "394.00",
+            "east": "0.00",
+            "up": "1427.68"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 6.1,
+              "value_text": "6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -4.4,
+              "value_text": "-4.40"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 23.5,
+              "value_text": "23.50"
+            }
+          ]
+        }
+      ],
+      "kind": "satellite",
+      "antenna_type": "BLOCK IIF",
+      "prn": "G08",
+      "svn_cospar": "G072      2015-033A",
+      "valid_from_utc": "2015-07-15T00:00:00.0000000",
+      "valid_until_utc": null
+    },
+    {
+      "id": "BLOCK IIF           G09                 G068      2014-045A",
+      "source_lines": [
+        1321,
+        1337
+      ],
+      "type_serial_line": "BLOCK IIF           G09                 G068      2014-045A",
+      "dazi_deg": 0.0,
+      "zenith_grid_deg": {
+        "start": 0.0,
+        "end": 17.0,
+        "step": 1.0
+      },
+      "sinex_code": "IGS20_2417",
+      "frequencies": [
+        {
+          "frequency": "G01",
+          "source_lines": [
+            1329,
+            1332
+          ],
+          "pco_neu_mm": {
+            "north": 394.0,
+            "east": 0.0,
+            "up": 1460.09
+          },
+          "pco_neu_mm_text": {
+            "north": "394.00",
+            "east": "0.00",
+            "up": "1460.09"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 6.1,
+              "value_text": "6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -4.4,
+              "value_text": "-4.40"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 23.5,
+              "value_text": "23.50"
+            }
+          ]
+        },
+        {
+          "frequency": "G02",
+          "source_lines": [
+            1333,
+            1336
+          ],
+          "pco_neu_mm": {
+            "north": 394.0,
+            "east": 0.0,
+            "up": 1460.09
+          },
+          "pco_neu_mm_text": {
+            "north": "394.00",
+            "east": "0.00",
+            "up": "1460.09"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 6.1,
+              "value_text": "6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -4.4,
+              "value_text": "-4.40"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 23.5,
+              "value_text": "23.50"
+            }
+          ]
+        }
+      ],
+      "kind": "satellite",
+      "antenna_type": "BLOCK IIF",
+      "prn": "G09",
+      "svn_cospar": "G068      2014-045A",
+      "valid_from_utc": "2014-08-02T00:00:00.0000000",
+      "valid_until_utc": null
+    },
+    {
+      "id": "BLOCK IIR-A         G13                 G043      1997-035A",
+      "source_lines": [
+        1504,
+        1521
+      ],
+      "type_serial_line": "BLOCK IIR-A         G13                 G043      1997-035A",
+      "dazi_deg": 0.0,
+      "zenith_grid_deg": {
+        "start": 0.0,
+        "end": 17.0,
+        "step": 1.0
+      },
+      "sinex_code": "IGS20_2417",
+      "frequencies": [
+        {
+          "frequency": "G01",
+          "source_lines": [
+            1513,
+            1516
+          ],
+          "pco_neu_mm": {
+            "north": -2.4,
+            "east": -1.6,
+            "up": 1287.12
+          },
+          "pco_neu_mm_text": {
+            "north": "-2.40",
+            "east": "-1.60",
+            "up": "1287.12"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": -6.1,
+              "value_text": "-6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": 2.8,
+              "value_text": "2.80"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 6.4,
+              "value_text": "6.40"
+            }
+          ]
+        },
+        {
+          "frequency": "G02",
+          "source_lines": [
+            1517,
+            1520
+          ],
+          "pco_neu_mm": {
+            "north": -2.4,
+            "east": -1.6,
+            "up": 1287.12
+          },
+          "pco_neu_mm_text": {
+            "north": "-2.40",
+            "east": "-1.60",
+            "up": "1287.12"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": -6.1,
+              "value_text": "-6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": 2.8,
+              "value_text": "2.80"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 6.4,
+              "value_text": "6.40"
+            }
+          ]
+        }
+      ],
+      "kind": "satellite",
+      "antenna_type": "BLOCK IIR-A",
+      "prn": "G13",
+      "svn_cospar": "G043      1997-035A",
+      "valid_from_utc": "1997-07-23T00:00:00.0000000",
+      "valid_until_utc": "2026-04-24T23:59:59.9999999"
+    },
+    {
+      "id": "BLOCK IIR-M         G15                 G055      2007-047A",
+      "source_lines": [
+        1622,
+        1638
+      ],
+      "type_serial_line": "BLOCK IIR-M         G15                 G055      2007-047A",
+      "dazi_deg": 0.0,
+      "zenith_grid_deg": {
+        "start": 0.0,
+        "end": 17.0,
+        "step": 1.0
+      },
+      "sinex_code": "IGS20_2417",
+      "frequencies": [
+        {
+          "frequency": "G01",
+          "source_lines": [
+            1630,
+            1633
+          ],
+          "pco_neu_mm": {
+            "north": 4.5,
+            "east": 1.9,
+            "up": 575.59
+          },
+          "pco_neu_mm_text": {
+            "north": "4.50",
+            "east": "1.90",
+            "up": "575.59"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 10.7,
+              "value_text": "10.70"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -9.5,
+              "value_text": "-9.50"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 40.6,
+              "value_text": "40.60"
+            }
+          ]
+        },
+        {
+          "frequency": "G02",
+          "source_lines": [
+            1634,
+            1637
+          ],
+          "pco_neu_mm": {
+            "north": 4.5,
+            "east": 1.9,
+            "up": 575.59
+          },
+          "pco_neu_mm_text": {
+            "north": "4.50",
+            "east": "1.90",
+            "up": "575.59"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 10.7,
+              "value_text": "10.70"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -9.5,
+              "value_text": "-9.50"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 40.6,
+              "value_text": "40.60"
+            }
+          ]
+        }
+      ],
+      "kind": "satellite",
+      "antenna_type": "BLOCK IIR-M",
+      "prn": "G15",
+      "svn_cospar": "G055      2007-047A",
+      "valid_from_utc": "2007-10-17T00:00:00.0000000",
+      "valid_until_utc": null
+    },
+    {
+      "id": "BLOCK IIIA          G18                 G075      2019-056A",
+      "source_lines": [
+        1763,
+        1785
+      ],
+      "type_serial_line": "BLOCK IIIA          G18                 G075      2019-056A",
+      "dazi_deg": 0.0,
+      "zenith_grid_deg": {
+        "start": 0.0,
+        "end": 17.0,
+        "step": 1.0
+      },
+      "sinex_code": "IGS20_2417",
+      "frequencies": [
+        {
+          "frequency": "G01",
+          "source_lines": [
+            1773,
+            1776
+          ],
+          "pco_neu_mm": {
+            "north": -64.42,
+            "east": 19.48,
+            "up": 1188.42
+          },
+          "pco_neu_mm_text": {
+            "north": "-64.42",
+            "east": "19.48",
+            "up": "1188.42"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 13.9,
+              "value_text": "13.90"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -11.8,
+              "value_text": "-11.80"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 42.4,
+              "value_text": "42.40"
+            }
+          ]
+        },
+        {
+          "frequency": "G02",
+          "source_lines": [
+            1777,
+            1780
+          ],
+          "pco_neu_mm": {
+            "north": -64.79,
+            "east": 22.06,
+            "up": 702.29
+          },
+          "pco_neu_mm_text": {
+            "north": "-64.79",
+            "east": "22.06",
+            "up": "702.29"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 13.9,
+              "value_text": "13.90"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -11.8,
+              "value_text": "-11.80"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 42.4,
+              "value_text": "42.40"
+            }
+          ]
+        },
+        {
+          "frequency": "G05",
+          "source_lines": [
+            1781,
+            1784
+          ],
+          "pco_neu_mm": {
+            "north": -64.92,
+            "east": 20.85,
+            "up": 705.85
+          },
+          "pco_neu_mm_text": {
+            "north": "-64.92",
+            "east": "20.85",
+            "up": "705.85"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 13.9,
+              "value_text": "13.90"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -11.8,
+              "value_text": "-11.80"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 42.4,
+              "value_text": "42.40"
+            }
+          ]
+        }
+      ],
+      "kind": "satellite",
+      "antenna_type": "BLOCK IIIA",
+      "prn": "G18",
+      "svn_cospar": "G075      2019-056A",
+      "valid_from_utc": "2020-03-13T00:00:00.0000000",
+      "valid_until_utc": null
+    },
+    {
+      "id": "BLOCK IIF           G27                 G066      2013-023A",
+      "source_lines": [
+        2335,
+        2351
+      ],
+      "type_serial_line": "BLOCK IIF           G27                 G066      2013-023A",
+      "dazi_deg": 0.0,
+      "zenith_grid_deg": {
+        "start": 0.0,
+        "end": 17.0,
+        "step": 1.0
+      },
+      "sinex_code": "IGS20_2417",
+      "frequencies": [
+        {
+          "frequency": "G01",
+          "source_lines": [
+            2343,
+            2346
+          ],
+          "pco_neu_mm": {
+            "north": 394.0,
+            "east": 0.0,
+            "up": 1436.32
+          },
+          "pco_neu_mm_text": {
+            "north": "394.00",
+            "east": "0.00",
+            "up": "1436.32"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 6.1,
+              "value_text": "6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -4.4,
+              "value_text": "-4.40"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 23.5,
+              "value_text": "23.50"
+            }
+          ]
+        },
+        {
+          "frequency": "G02",
+          "source_lines": [
+            2347,
+            2350
+          ],
+          "pco_neu_mm": {
+            "north": 394.0,
+            "east": 0.0,
+            "up": 1436.32
+          },
+          "pco_neu_mm_text": {
+            "north": "394.00",
+            "east": "0.00",
+            "up": "1436.32"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 6.1,
+              "value_text": "6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -4.4,
+              "value_text": "-4.40"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 23.5,
+              "value_text": "23.50"
+            }
+          ]
+        }
+      ],
+      "kind": "satellite",
+      "antenna_type": "BLOCK IIF",
+      "prn": "G27",
+      "svn_cospar": "G066      2013-023A",
+      "valid_from_utc": "2013-05-15T00:00:00.0000000",
+      "valid_until_utc": null
+    },
+    {
+      "id": "BLOCK IIR-A         G28                 G044      2000-040A",
+      "source_lines": [
+        2370,
+        2387
+      ],
+      "type_serial_line": "BLOCK IIR-A         G28                 G044      2000-040A",
+      "dazi_deg": 0.0,
+      "zenith_grid_deg": {
+        "start": 0.0,
+        "end": 17.0,
+        "step": 1.0
+      },
+      "sinex_code": "IGS20_2417",
+      "frequencies": [
+        {
+          "frequency": "G01",
+          "source_lines": [
+            2379,
+            2382
+          ],
+          "pco_neu_mm": {
+            "north": 1.4,
+            "east": 4.7,
+            "up": 936.22
+          },
+          "pco_neu_mm_text": {
+            "north": "1.40",
+            "east": "4.70",
+            "up": "936.22"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": -6.1,
+              "value_text": "-6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": 2.8,
+              "value_text": "2.80"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 6.4,
+              "value_text": "6.40"
+            }
+          ]
+        },
+        {
+          "frequency": "G02",
+          "source_lines": [
+            2383,
+            2386
+          ],
+          "pco_neu_mm": {
+            "north": 1.4,
+            "east": 4.7,
+            "up": 936.22
+          },
+          "pco_neu_mm_text": {
+            "north": "1.40",
+            "east": "4.70",
+            "up": "936.22"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": -6.1,
+              "value_text": "-6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": 2.8,
+              "value_text": "2.80"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 6.4,
+              "value_text": "6.40"
+            }
+          ]
+        }
+      ],
+      "kind": "satellite",
+      "antenna_type": "BLOCK IIR-A",
+      "prn": "G28",
+      "svn_cospar": "G044      2000-040A",
+      "valid_from_utc": "2000-07-16T00:00:00.0000000",
+      "valid_until_utc": "2022-10-25T23:59:59.9999999"
+    },
+    {
+      "id": "BLOCK IIF           G30                 G064      2014-008A",
+      "source_lines": [
+        2590,
+        2606
+      ],
+      "type_serial_line": "BLOCK IIF           G30                 G064      2014-008A",
+      "dazi_deg": 0.0,
+      "zenith_grid_deg": {
+        "start": 0.0,
+        "end": 17.0,
+        "step": 1.0
+      },
+      "sinex_code": "IGS20_2417",
+      "frequencies": [
+        {
+          "frequency": "G01",
+          "source_lines": [
+            2598,
+            2601
+          ],
+          "pco_neu_mm": {
+            "north": 394.0,
+            "east": 0.0,
+            "up": 1462.16
+          },
+          "pco_neu_mm_text": {
+            "north": "394.00",
+            "east": "0.00",
+            "up": "1462.16"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 6.1,
+              "value_text": "6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -4.4,
+              "value_text": "-4.40"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 23.5,
+              "value_text": "23.50"
+            }
+          ]
+        },
+        {
+          "frequency": "G02",
+          "source_lines": [
+            2602,
+            2605
+          ],
+          "pco_neu_mm": {
+            "north": 394.0,
+            "east": 0.0,
+            "up": 1462.16
+          },
+          "pco_neu_mm_text": {
+            "north": "394.00",
+            "east": "0.00",
+            "up": "1462.16"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 6.1,
+              "value_text": "6.10"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 9.0,
+              "value": -4.4,
+              "value_text": "-4.40"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 17.0,
+              "value": 23.5,
+              "value_text": "23.50"
+            }
+          ]
+        }
+      ],
+      "kind": "satellite",
+      "antenna_type": "BLOCK IIF",
+      "prn": "G30",
+      "svn_cospar": "G064      2014-008A",
+      "valid_from_utc": "2014-02-21T00:00:00.0000000",
+      "valid_until_utc": null
+    },
+    {
+      "id": "LEIAR25.R3      LEIT",
+      "source_lines": [
+        182321,
+        184264
+      ],
+      "type_serial_line": "LEIAR25.R3      LEIT",
+      "dazi_deg": 5.0,
+      "zenith_grid_deg": {
+        "start": 0.0,
+        "end": 90.0,
+        "step": 5.0
+      },
+      "sinex_code": "IGS20_2417",
+      "frequencies": [
+        {
+          "frequency": "G01",
+          "source_lines": [
+            182339,
+            182415
+          ],
+          "pco_neu_mm": {
+            "north": -0.05,
+            "east": 0.95,
+            "up": 160.96
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.05",
+            "east": "0.95",
+            "up": "160.96"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": 2.83,
+              "value_text": "2.83"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 3.11,
+              "value_text": "3.11"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 2.19,
+              "value_text": "2.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": 3.06,
+              "value_text": "3.06"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 3.19,
+              "value_text": "3.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 2.52,
+              "value_text": "2.52"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": 2.8,
+              "value_text": "2.80"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 3.1,
+              "value_text": "3.10"
+            }
+          ]
+        },
+        {
+          "frequency": "E01",
+          "source_lines": [
+            182416,
+            182492
+          ],
+          "pco_neu_mm": {
+            "north": -0.05,
+            "east": 0.95,
+            "up": 160.96
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.05",
+            "east": "0.95",
+            "up": "160.96"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": 2.83,
+              "value_text": "2.83"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 3.11,
+              "value_text": "3.11"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 2.19,
+              "value_text": "2.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": 3.06,
+              "value_text": "3.06"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 3.19,
+              "value_text": "3.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 2.52,
+              "value_text": "2.52"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": 2.8,
+              "value_text": "2.80"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 3.1,
+              "value_text": "3.10"
+            }
+          ]
+        },
+        {
+          "frequency": "J01",
+          "source_lines": [
+            182493,
+            182569
+          ],
+          "pco_neu_mm": {
+            "north": -0.05,
+            "east": 0.95,
+            "up": 160.96
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.05",
+            "east": "0.95",
+            "up": "160.96"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": 2.83,
+              "value_text": "2.83"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 3.11,
+              "value_text": "3.11"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 2.19,
+              "value_text": "2.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": 3.06,
+              "value_text": "3.06"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 3.19,
+              "value_text": "3.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 2.52,
+              "value_text": "2.52"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": 2.8,
+              "value_text": "2.80"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 3.1,
+              "value_text": "3.10"
+            }
+          ]
+        },
+        {
+          "frequency": "S01",
+          "source_lines": [
+            182570,
+            182646
+          ],
+          "pco_neu_mm": {
+            "north": -0.05,
+            "east": 0.95,
+            "up": 160.96
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.05",
+            "east": "0.95",
+            "up": "160.96"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": 2.83,
+              "value_text": "2.83"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 3.11,
+              "value_text": "3.11"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 2.19,
+              "value_text": "2.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": 3.06,
+              "value_text": "3.06"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 3.19,
+              "value_text": "3.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 2.52,
+              "value_text": "2.52"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": 2.8,
+              "value_text": "2.80"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 3.1,
+              "value_text": "3.10"
+            }
+          ]
+        },
+        {
+          "frequency": "C01",
+          "source_lines": [
+            182647,
+            182723
+          ],
+          "pco_neu_mm": {
+            "north": -0.05,
+            "east": 0.95,
+            "up": 160.96
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.05",
+            "east": "0.95",
+            "up": "160.96"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": 2.83,
+              "value_text": "2.83"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 3.11,
+              "value_text": "3.11"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 2.19,
+              "value_text": "2.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": 3.06,
+              "value_text": "3.06"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 3.19,
+              "value_text": "3.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 2.52,
+              "value_text": "2.52"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": 2.8,
+              "value_text": "2.80"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 3.1,
+              "value_text": "3.10"
+            }
+          ]
+        },
+        {
+          "frequency": "G02",
+          "source_lines": [
+            182724,
+            182800
+          ],
+          "pco_neu_mm": {
+            "north": -0.43,
+            "east": 0.05,
+            "up": 157.79
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.43",
+            "east": "0.05",
+            "up": "157.79"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -4.22,
+              "value_text": "-4.22"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.8,
+              "value_text": "8.80"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -4.37,
+              "value_text": "-4.37"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.08,
+              "value_text": "8.08"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -4.28,
+              "value_text": "-4.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 9.42,
+              "value_text": "9.42"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -4.32,
+              "value_text": "-4.32"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.46,
+              "value_text": "7.46"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -3.96,
+              "value_text": "-3.96"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 9.03,
+              "value_text": "9.03"
+            }
+          ]
+        },
+        {
+          "frequency": "J02",
+          "source_lines": [
+            182801,
+            182877
+          ],
+          "pco_neu_mm": {
+            "north": -0.43,
+            "east": 0.05,
+            "up": 157.79
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.43",
+            "east": "0.05",
+            "up": "157.79"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -4.22,
+              "value_text": "-4.22"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.8,
+              "value_text": "8.80"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -4.37,
+              "value_text": "-4.37"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.08,
+              "value_text": "8.08"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -4.28,
+              "value_text": "-4.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 9.42,
+              "value_text": "9.42"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -4.32,
+              "value_text": "-4.32"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.46,
+              "value_text": "7.46"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -3.96,
+              "value_text": "-3.96"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 9.03,
+              "value_text": "9.03"
+            }
+          ]
+        },
+        {
+          "frequency": "G05",
+          "source_lines": [
+            182878,
+            182954
+          ],
+          "pco_neu_mm": {
+            "north": -0.64,
+            "east": -0.08,
+            "up": 162.56
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.64",
+            "east": "-0.08",
+            "up": "162.56"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -3.46,
+              "value_text": "-3.46"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.28,
+              "value_text": "8.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.49,
+              "value_text": "8.49"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -3.57,
+              "value_text": "-3.57"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 8.53,
+              "value_text": "8.53"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -3.31,
+              "value_text": "-3.31"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.95,
+              "value_text": "7.95"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 8.61,
+              "value_text": "8.61"
+            }
+          ]
+        },
+        {
+          "frequency": "E05",
+          "source_lines": [
+            182955,
+            183031
+          ],
+          "pco_neu_mm": {
+            "north": -0.64,
+            "east": -0.08,
+            "up": 162.56
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.64",
+            "east": "-0.08",
+            "up": "162.56"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -3.46,
+              "value_text": "-3.46"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.28,
+              "value_text": "8.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.49,
+              "value_text": "8.49"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -3.57,
+              "value_text": "-3.57"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 8.53,
+              "value_text": "8.53"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -3.31,
+              "value_text": "-3.31"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.95,
+              "value_text": "7.95"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 8.61,
+              "value_text": "8.61"
+            }
+          ]
+        },
+        {
+          "frequency": "J05",
+          "source_lines": [
+            183032,
+            183108
+          ],
+          "pco_neu_mm": {
+            "north": -0.64,
+            "east": -0.08,
+            "up": 162.56
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.64",
+            "east": "-0.08",
+            "up": "162.56"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -3.46,
+              "value_text": "-3.46"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.28,
+              "value_text": "8.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.49,
+              "value_text": "8.49"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -3.57,
+              "value_text": "-3.57"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 8.53,
+              "value_text": "8.53"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -3.31,
+              "value_text": "-3.31"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.95,
+              "value_text": "7.95"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 8.61,
+              "value_text": "8.61"
+            }
+          ]
+        },
+        {
+          "frequency": "C05",
+          "source_lines": [
+            183109,
+            183185
+          ],
+          "pco_neu_mm": {
+            "north": -0.64,
+            "east": -0.08,
+            "up": 162.56
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.64",
+            "east": "-0.08",
+            "up": "162.56"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -3.46,
+              "value_text": "-3.46"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.28,
+              "value_text": "8.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.49,
+              "value_text": "8.49"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -3.57,
+              "value_text": "-3.57"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 8.53,
+              "value_text": "8.53"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -3.31,
+              "value_text": "-3.31"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.95,
+              "value_text": "7.95"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 8.61,
+              "value_text": "8.61"
+            }
+          ]
+        },
+        {
+          "frequency": "S05",
+          "source_lines": [
+            183186,
+            183262
+          ],
+          "pco_neu_mm": {
+            "north": -0.64,
+            "east": -0.08,
+            "up": 162.56
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.64",
+            "east": "-0.08",
+            "up": "162.56"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -3.46,
+              "value_text": "-3.46"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.28,
+              "value_text": "8.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.49,
+              "value_text": "8.49"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -3.57,
+              "value_text": "-3.57"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 8.53,
+              "value_text": "8.53"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -3.31,
+              "value_text": "-3.31"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.95,
+              "value_text": "7.95"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 8.61,
+              "value_text": "8.61"
+            }
+          ]
+        },
+        {
+          "frequency": "I05",
+          "source_lines": [
+            183263,
+            183339
+          ],
+          "pco_neu_mm": {
+            "north": -0.64,
+            "east": -0.08,
+            "up": 162.56
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.64",
+            "east": "-0.08",
+            "up": "162.56"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -3.46,
+              "value_text": "-3.46"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.28,
+              "value_text": "8.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.49,
+              "value_text": "8.49"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -3.57,
+              "value_text": "-3.57"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 8.53,
+              "value_text": "8.53"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -3.31,
+              "value_text": "-3.31"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.95,
+              "value_text": "7.95"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -3.45,
+              "value_text": "-3.45"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 8.61,
+              "value_text": "8.61"
+            }
+          ]
+        },
+        {
+          "frequency": "R01",
+          "source_lines": [
+            183340,
+            183416
+          ],
+          "pco_neu_mm": {
+            "north": 0.03,
+            "east": 0.93,
+            "up": 159.8
+          },
+          "pco_neu_mm_text": {
+            "north": "0.03",
+            "east": "0.93",
+            "up": "159.80"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": 2.4,
+              "value_text": "2.40"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 3.12,
+              "value_text": "3.12"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": 2.19,
+              "value_text": "2.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 2.31,
+              "value_text": "2.31"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 3.48,
+              "value_text": "3.48"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": 2.32,
+              "value_text": "2.32"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 2.32,
+              "value_text": "2.32"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": 2.37,
+              "value_text": "2.37"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 3.28,
+              "value_text": "3.28"
+            }
+          ]
+        },
+        {
+          "frequency": "R04",
+          "source_lines": [
+            183417,
+            183493
+          ],
+          "pco_neu_mm": {
+            "north": 0.03,
+            "east": 0.93,
+            "up": 159.8
+          },
+          "pco_neu_mm_text": {
+            "north": "0.03",
+            "east": "0.93",
+            "up": "159.80"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": 2.4,
+              "value_text": "2.40"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 3.12,
+              "value_text": "3.12"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": 2.19,
+              "value_text": "2.19"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 2.31,
+              "value_text": "2.31"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": 2.68,
+              "value_text": "2.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 3.48,
+              "value_text": "3.48"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": 2.32,
+              "value_text": "2.32"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 2.32,
+              "value_text": "2.32"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": 2.37,
+              "value_text": "2.37"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 3.28,
+              "value_text": "3.28"
+            }
+          ]
+        },
+        {
+          "frequency": "R02",
+          "source_lines": [
+            183494,
+            183570
+          ],
+          "pco_neu_mm": {
+            "north": -0.55,
+            "east": -0.16,
+            "up": 155.43
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.55",
+            "east": "-0.16",
+            "up": "155.43"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -4.85,
+              "value_text": "-4.85"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 9.02,
+              "value_text": "9.02"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -5.03,
+              "value_text": "-5.03"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.18,
+              "value_text": "8.18"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -5.03,
+              "value_text": "-5.03"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 9.68,
+              "value_text": "9.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -4.94,
+              "value_text": "-4.94"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.61,
+              "value_text": "7.61"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -4.41,
+              "value_text": "-4.41"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 8.81,
+              "value_text": "8.81"
+            }
+          ]
+        },
+        {
+          "frequency": "R06",
+          "source_lines": [
+            183571,
+            183647
+          ],
+          "pco_neu_mm": {
+            "north": -0.55,
+            "east": -0.16,
+            "up": 155.43
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.55",
+            "east": "-0.16",
+            "up": "155.43"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -4.85,
+              "value_text": "-4.85"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 9.02,
+              "value_text": "9.02"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -5.03,
+              "value_text": "-5.03"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.18,
+              "value_text": "8.18"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -5.03,
+              "value_text": "-5.03"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 9.68,
+              "value_text": "9.68"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -4.94,
+              "value_text": "-4.94"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.61,
+              "value_text": "7.61"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -4.41,
+              "value_text": "-4.41"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 8.81,
+              "value_text": "8.81"
+            }
+          ]
+        },
+        {
+          "frequency": "E06",
+          "source_lines": [
+            183648,
+            183724
+          ],
+          "pco_neu_mm": {
+            "north": -0.48,
+            "east": -0.02,
+            "up": 154.14
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.48",
+            "east": "-0.02",
+            "up": "154.14"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -4.68,
+              "value_text": "-4.68"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.65,
+              "value_text": "8.65"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -4.97,
+              "value_text": "-4.97"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 7.18,
+              "value_text": "7.18"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -4.54,
+              "value_text": "-4.54"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 9.4,
+              "value_text": "9.40"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -4.9,
+              "value_text": "-4.90"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.05,
+              "value_text": "7.05"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -4.29,
+              "value_text": "-4.29"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 9.28,
+              "value_text": "9.28"
+            }
+          ]
+        },
+        {
+          "frequency": "J06",
+          "source_lines": [
+            183725,
+            183801
+          ],
+          "pco_neu_mm": {
+            "north": -0.48,
+            "east": -0.02,
+            "up": 154.14
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.48",
+            "east": "-0.02",
+            "up": "154.14"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -4.68,
+              "value_text": "-4.68"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.65,
+              "value_text": "8.65"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -4.97,
+              "value_text": "-4.97"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 7.18,
+              "value_text": "7.18"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -4.54,
+              "value_text": "-4.54"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 9.4,
+              "value_text": "9.40"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -4.9,
+              "value_text": "-4.90"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.05,
+              "value_text": "7.05"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -4.29,
+              "value_text": "-4.29"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 9.28,
+              "value_text": "9.28"
+            }
+          ]
+        },
+        {
+          "frequency": "E07",
+          "source_lines": [
+            183802,
+            183878
+          ],
+          "pco_neu_mm": {
+            "north": -0.52,
+            "east": -0.09,
+            "up": 159.05
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.52",
+            "east": "-0.09",
+            "up": "159.05"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -4.23,
+              "value_text": "-4.23"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.43,
+              "value_text": "8.43"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -4.22,
+              "value_text": "-4.22"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 7.01,
+              "value_text": "7.01"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -4.43,
+              "value_text": "-4.43"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 9.5,
+              "value_text": "9.50"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -4.28,
+              "value_text": "-4.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 6.89,
+              "value_text": "6.89"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -4.12,
+              "value_text": "-4.12"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 7.48,
+              "value_text": "7.48"
+            }
+          ]
+        },
+        {
+          "frequency": "C07",
+          "source_lines": [
+            183879,
+            183955
+          ],
+          "pco_neu_mm": {
+            "north": -0.52,
+            "east": -0.09,
+            "up": 159.05
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.52",
+            "east": "-0.09",
+            "up": "159.05"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -4.23,
+              "value_text": "-4.23"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.43,
+              "value_text": "8.43"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -4.22,
+              "value_text": "-4.22"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 7.01,
+              "value_text": "7.01"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -4.43,
+              "value_text": "-4.43"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 9.5,
+              "value_text": "9.50"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -4.28,
+              "value_text": "-4.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 6.89,
+              "value_text": "6.89"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -4.12,
+              "value_text": "-4.12"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 7.48,
+              "value_text": "7.48"
+            }
+          ]
+        },
+        {
+          "frequency": "E08",
+          "source_lines": [
+            183956,
+            184032
+          ],
+          "pco_neu_mm": {
+            "north": -0.65,
+            "east": -0.09,
+            "up": 160.97
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.65",
+            "east": "-0.09",
+            "up": "160.97"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -3.9,
+              "value_text": "-3.90"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.37,
+              "value_text": "8.37"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -3.9,
+              "value_text": "-3.90"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.31,
+              "value_text": "8.31"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -4.04,
+              "value_text": "-4.04"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 8.48,
+              "value_text": "8.48"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -3.77,
+              "value_text": "-3.77"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.74,
+              "value_text": "7.74"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -3.89,
+              "value_text": "-3.89"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 8.47,
+              "value_text": "8.47"
+            }
+          ]
+        },
+        {
+          "frequency": "C08",
+          "source_lines": [
+            184033,
+            184109
+          ],
+          "pco_neu_mm": {
+            "north": -0.65,
+            "east": -0.09,
+            "up": 160.97
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.65",
+            "east": "-0.09",
+            "up": "160.97"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -3.9,
+              "value_text": "-3.90"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 8.37,
+              "value_text": "8.37"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -3.9,
+              "value_text": "-3.90"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 8.31,
+              "value_text": "8.31"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -4.04,
+              "value_text": "-4.04"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 8.48,
+              "value_text": "8.48"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -3.77,
+              "value_text": "-3.77"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 7.74,
+              "value_text": "7.74"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -3.89,
+              "value_text": "-3.89"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 8.47,
+              "value_text": "8.47"
+            }
+          ]
+        },
+        {
+          "frequency": "C02",
+          "source_lines": [
+            184110,
+            184186
+          ],
+          "pco_neu_mm": {
+            "north": -0.31,
+            "east": 0.89,
+            "up": 160.07
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.31",
+            "east": "0.89",
+            "up": "160.07"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": 2.39,
+              "value_text": "2.39"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 3.09,
+              "value_text": "3.09"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": 2.11,
+              "value_text": "2.11"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 1.69,
+              "value_text": "1.69"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": 2.74,
+              "value_text": "2.74"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 4.28,
+              "value_text": "4.28"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": 2.25,
+              "value_text": "2.25"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 1.41,
+              "value_text": "1.41"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": 2.38,
+              "value_text": "2.38"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 2.31,
+              "value_text": "2.31"
+            }
+          ]
+        },
+        {
+          "frequency": "C06",
+          "source_lines": [
+            184187,
+            184263
+          ],
+          "pco_neu_mm": {
+            "north": -0.41,
+            "east": 0.12,
+            "up": 153.52
+          },
+          "pco_neu_mm_text": {
+            "north": "-0.41",
+            "east": "0.12",
+            "up": "153.52"
+          },
+          "pcv_samples_mm": [
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 45.0,
+              "value": -4.56,
+              "value_text": "-4.56"
+            },
+            {
+              "grid": "NOAZI",
+              "azimuth_deg": null,
+              "zenith_deg": 90.0,
+              "value": 7.27,
+              "value_text": "7.27"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 45.0,
+              "value": -4.93,
+              "value_text": "-4.93"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 0.0,
+              "zenith_deg": 90.0,
+              "value": 4.3,
+              "value_text": "4.30"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 45.0,
+              "value": -4.51,
+              "value_text": "-4.51"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 90.0,
+              "zenith_deg": 90.0,
+              "value": 9.49,
+              "value_text": "9.49"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 45.0,
+              "value": -4.92,
+              "value_text": "-4.92"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 180.0,
+              "zenith_deg": 90.0,
+              "value": 4.32,
+              "value_text": "4.32"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 0.0,
+              "value": 0.0,
+              "value_text": "0.00"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 45.0,
+              "value": -4.05,
+              "value_text": "-4.05"
+            },
+            {
+              "grid": "AZI",
+              "azimuth_deg": 270.0,
+              "zenith_deg": 90.0,
+              "value": 6.87,
+              "value_text": "6.87"
+            }
+          ]
+        }
+      ],
+      "kind": "receiver",
+      "antenna_type": "LEIAR25.R3",
+      "radome": "LEIT",
+      "valid_from_utc": null,
+      "valid_until_utc": null
+    }
+  ]
+}

@@ -1,0 +1,780 @@
+{
+  "schema": "orbis-gnss-parity/ionex.v1",
+  "purpose": "IONEX TEC grid bilinear + temporal interpolation + single-layer slant geometry -> slant ionospheric group delay (meters). Parser substrate is gnssanalysis.read_ionex; the float pipeline reference recipe is generator/ionex.py. The Rust port asserts 0 ULP per intermediate and on the final meters against these hex-float goldens.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "0 ULP certified only against env.json. libm contract: CPython math (Apple libsystem_m) vs Rust std on aarch64-apple-darwin. Geometry uses asin/cos/sin/sqrt; interpolation is FMA-free."
+  },
+  "recipe": "s = Re/(Re+H)*cos(E) formed once; psi = pi/2 - E - asin(s); IPP lat/lon by spherical asin form; longitude normalized into [lon1,lon2]; per-map explicit four-term bilinear (1-p)(1-q)E00 + p(1-q)E01 + (1-p)q E10 + p q E11 with IPP lat clamped to grid edge and signed-step p,q; linear-in-time blend (1-w)*vtec0 + w*vtec1 (endpoint hold); m = 1/sqrt(1-s^2); STEC = m*VTEC; delay = (40.3e16/(f*f))*STEC. Positive group delay. No FMA.",
+  "math_pi": "0x1.921fb54442d18p+1",
+  "constants": {
+    "k_iono": "0x1.65ef97591ee00p+58",
+    "base_radius_km": "0x1.8e30000000000p+12",
+    "shell_height_km": "0x1.c200000000000p+8",
+    "dlat": "-0x1.4000000000000p+4",
+    "dlon": "0x1.e000000000000p+5",
+    "f_l1": "0x1.779c018000000p+30",
+    "f_l2": "0x1.24aec20000000p+30",
+    "f_l5": "0x1.187ccf4000000p+30"
+  },
+  "ionex_file": {
+    "name": "synthetic_2map_7x7.20i",
+    "exponent": -1.0,
+    "lat_arr": [
+      "0x1.e000000000000p+5",
+      "0x1.4000000000000p+5",
+      "0x1.4000000000000p+4",
+      "0x0.0p+0",
+      "-0x1.4000000000000p+4",
+      "-0x1.4000000000000p+5",
+      "-0x1.e000000000000p+5"
+    ],
+    "lon_arr": [
+      "-0x1.6800000000000p+7",
+      "-0x1.e000000000000p+6",
+      "-0x1.e000000000000p+5",
+      "0x0.0p+0",
+      "0x1.e000000000000p+5",
+      "0x1.e000000000000p+6",
+      "0x1.6800000000000p+7"
+    ],
+    "lat_arr_repr": [
+      "60.0",
+      "40.0",
+      "20.0",
+      "0.0",
+      "-20.0",
+      "-40.0",
+      "-60.0"
+    ],
+    "lon_arr_repr": [
+      "-180.0",
+      "-120.0",
+      "-60.0",
+      "0.0",
+      "60.0",
+      "120.0",
+      "180.0"
+    ],
+    "map_epochs_s": [
+      646228800,
+      646236000
+    ],
+    "maps_vtec": [
+      [
+        [
+          "0x1.4000000000000p+3",
+          "0x1.4333333333334p+3",
+          "0x1.4666666666667p+3",
+          "0x1.499999999999ap+3",
+          "0x1.4cccccccccccdp+3",
+          "0x1.5000000000000p+3",
+          "0x1.5333333333334p+3"
+        ],
+        [
+          "0x1.6000000000000p+3",
+          "0x1.6333333333334p+3",
+          "0x1.6666666666667p+3",
+          "0x1.699999999999ap+3",
+          "0x1.6cccccccccccdp+3",
+          "0x1.7000000000000p+3",
+          "0x1.7333333333334p+3"
+        ],
+        [
+          "0x1.8000000000000p+3",
+          "0x1.8333333333334p+3",
+          "0x1.8666666666667p+3",
+          "0x1.899999999999ap+3",
+          "0x1.8cccccccccccdp+3",
+          "0x1.9000000000000p+3",
+          "0x1.9333333333334p+3"
+        ],
+        [
+          "0x1.a000000000000p+3",
+          "0x1.a333333333334p+3",
+          "0x1.a666666666667p+3",
+          "0x1.a99999999999ap+3",
+          "0x1.acccccccccccdp+3",
+          "0x1.b000000000000p+3",
+          "0x1.b333333333334p+3"
+        ],
+        [
+          "0x1.c000000000000p+3",
+          "0x1.c333333333334p+3",
+          "0x1.c666666666667p+3",
+          "0x1.c99999999999ap+3",
+          "0x1.ccccccccccccdp+3",
+          "0x1.d000000000000p+3",
+          "0x1.d333333333334p+3"
+        ],
+        [
+          "0x1.e000000000000p+3",
+          "0x1.e333333333334p+3",
+          "0x1.e666666666667p+3",
+          "0x1.e99999999999ap+3",
+          "0x1.ecccccccccccdp+3",
+          "0x1.f000000000000p+3",
+          "0x1.f333333333334p+3"
+        ],
+        [
+          "0x1.0000000000000p+4",
+          "0x1.019999999999ap+4",
+          "0x1.0333333333333p+4",
+          "0x1.04ccccccccccdp+4",
+          "0x1.0666666666667p+4",
+          "0x1.0800000000000p+4",
+          "0x1.099999999999ap+4"
+        ]
+      ],
+      [
+        [
+          "0x1.4000000000000p+4",
+          "0x1.419999999999ap+4",
+          "0x1.4333333333334p+4",
+          "0x1.44ccccccccccdp+4",
+          "0x1.4666666666667p+4",
+          "0x1.4800000000000p+4",
+          "0x1.499999999999ap+4"
+        ],
+        [
+          "0x1.5000000000000p+4",
+          "0x1.519999999999ap+4",
+          "0x1.5333333333334p+4",
+          "0x1.54ccccccccccdp+4",
+          "0x1.5666666666667p+4",
+          "0x1.5800000000000p+4",
+          "0x1.599999999999ap+4"
+        ],
+        [
+          "0x1.6000000000000p+4",
+          "0x1.619999999999ap+4",
+          "0x1.6333333333334p+4",
+          "0x1.64ccccccccccdp+4",
+          "0x1.6666666666667p+4",
+          "0x1.6800000000000p+4",
+          "0x1.699999999999ap+4"
+        ],
+        [
+          "0x1.7000000000000p+4",
+          "0x1.719999999999ap+4",
+          "0x1.7333333333334p+4",
+          "0x1.74ccccccccccdp+4",
+          "0x1.7666666666667p+4",
+          "0x1.7800000000000p+4",
+          "0x1.799999999999ap+4"
+        ],
+        [
+          "0x1.8000000000000p+4",
+          "0x1.819999999999ap+4",
+          "0x1.8333333333334p+4",
+          "0x1.84ccccccccccdp+4",
+          "0x1.8666666666667p+4",
+          "0x1.8800000000000p+4",
+          "0x1.899999999999ap+4"
+        ],
+        [
+          "0x1.9000000000000p+4",
+          "0x1.919999999999ap+4",
+          "0x1.9333333333334p+4",
+          "0x1.94ccccccccccdp+4",
+          "0x1.9666666666667p+4",
+          "0x1.9800000000000p+4",
+          "0x1.999999999999ap+4"
+        ],
+        [
+          "0x1.a000000000000p+4",
+          "0x1.a19999999999ap+4",
+          "0x1.a333333333334p+4",
+          "0x1.a4ccccccccccdp+4",
+          "0x1.a666666666667p+4",
+          "0x1.a800000000000p+4",
+          "0x1.a99999999999ap+4"
+        ]
+      ]
+    ],
+    "maps_vtec_repr": [
+      [
+        [
+          "10.0",
+          "10.100000000000001",
+          "10.200000000000001",
+          "10.3",
+          "10.4",
+          "10.5",
+          "10.600000000000001"
+        ],
+        [
+          "11.0",
+          "11.100000000000001",
+          "11.200000000000001",
+          "11.3",
+          "11.4",
+          "11.5",
+          "11.600000000000001"
+        ],
+        [
+          "12.0",
+          "12.100000000000001",
+          "12.200000000000001",
+          "12.3",
+          "12.4",
+          "12.5",
+          "12.600000000000001"
+        ],
+        [
+          "13.0",
+          "13.100000000000001",
+          "13.200000000000001",
+          "13.3",
+          "13.4",
+          "13.5",
+          "13.600000000000001"
+        ],
+        [
+          "14.0",
+          "14.100000000000001",
+          "14.200000000000001",
+          "14.3",
+          "14.4",
+          "14.5",
+          "14.600000000000001"
+        ],
+        [
+          "15.0",
+          "15.100000000000001",
+          "15.200000000000001",
+          "15.3",
+          "15.4",
+          "15.5",
+          "15.600000000000001"
+        ],
+        [
+          "16.0",
+          "16.1",
+          "16.2",
+          "16.3",
+          "16.400000000000002",
+          "16.5",
+          "16.6"
+        ]
+      ],
+      [
+        [
+          "20.0",
+          "20.1",
+          "20.200000000000003",
+          "20.3",
+          "20.400000000000002",
+          "20.5",
+          "20.6"
+        ],
+        [
+          "21.0",
+          "21.1",
+          "21.200000000000003",
+          "21.3",
+          "21.400000000000002",
+          "21.5",
+          "21.6"
+        ],
+        [
+          "22.0",
+          "22.1",
+          "22.200000000000003",
+          "22.3",
+          "22.400000000000002",
+          "22.5",
+          "22.6"
+        ],
+        [
+          "23.0",
+          "23.1",
+          "23.200000000000003",
+          "23.3",
+          "23.400000000000002",
+          "23.5",
+          "23.6"
+        ],
+        [
+          "24.0",
+          "24.1",
+          "24.200000000000003",
+          "24.3",
+          "24.400000000000002",
+          "24.5",
+          "24.6"
+        ],
+        [
+          "25.0",
+          "25.1",
+          "25.200000000000003",
+          "25.3",
+          "25.400000000000002",
+          "25.5",
+          "25.6"
+        ],
+        [
+          "26.0",
+          "26.1",
+          "26.200000000000003",
+          "26.3",
+          "26.400000000000002",
+          "26.5",
+          "26.6"
+        ]
+      ]
+    ]
+  },
+  "generator": {
+    "python": "3.14.4",
+    "numpy": "2.4.6",
+    "gnssanalysis": "0.0.59",
+    "executable": "python"
+  },
+  "cases": [
+    {
+      "name": "interior_l1",
+      "note": "interior IPP, interior epoch, L1",
+      "inputs": {
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "az_deg": "0x1.e000000000000p+5",
+        "el_deg": "0x1.e000000000000p+5",
+        "frequency_hz": "0x1.779c018000000p+30",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "az_rad": "0x1.0c152382d7365p+0",
+        "el_rad": "0x1.0c152382d7365p+0",
+        "epoch_s": 646232400,
+        "lat_deg_repr": "45.0",
+        "lon_deg_repr": "10.0",
+        "el_deg_repr": "60.0",
+        "frequency_hz_repr": "1575420000.0"
+      },
+      "expect": {
+        "s": "0x1.de38d279869ffp-2",
+        "psi": "0x1.34be1c0e24198p-5",
+        "phi_ipp_deg": "0x1.70631e8249039p+5",
+        "lambda_ipp_deg_raw": "0x1.963bc81622309p+3",
+        "lambda_ipp_deg": "0x1.963bc81622309p+3",
+        "w": "0x1.0000000000000p-1",
+        "vtec0": "0x1.609980a1b6930p+3",
+        "vtec1": "0x1.504cc050db498p+4",
+        "p0": "0x1.b150d56cf144ep-3",
+        "q0": "0x1.652937f8aff4ap-1",
+        "vtec": "0x1.004cc050db498p+4",
+        "m": "0x1.2182c6e4e0b3fp+0",
+        "stec": "0x1.21d9933572ae7p+4",
+        "delay_m": "0x1.788254ae08283p+1"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "interior_l2",
+      "note": "same geometry on L2 (frequency scaling)",
+      "inputs": {
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "az_deg": "0x1.e000000000000p+5",
+        "el_deg": "0x1.e000000000000p+5",
+        "frequency_hz": "0x1.24aec20000000p+30",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "az_rad": "0x1.0c152382d7365p+0",
+        "el_rad": "0x1.0c152382d7365p+0",
+        "epoch_s": 646232400,
+        "lat_deg_repr": "45.0",
+        "lon_deg_repr": "10.0",
+        "el_deg_repr": "60.0",
+        "frequency_hz_repr": "1227600000.0"
+      },
+      "expect": {
+        "s": "0x1.de38d279869ffp-2",
+        "psi": "0x1.34be1c0e24198p-5",
+        "phi_ipp_deg": "0x1.70631e8249039p+5",
+        "lambda_ipp_deg_raw": "0x1.963bc81622309p+3",
+        "lambda_ipp_deg": "0x1.963bc81622309p+3",
+        "w": "0x1.0000000000000p-1",
+        "vtec0": "0x1.609980a1b6930p+3",
+        "vtec1": "0x1.504cc050db498p+4",
+        "p0": "0x1.b150d56cf144ep-3",
+        "q0": "0x1.652937f8aff4ap-1",
+        "vtec": "0x1.004cc050db498p+4",
+        "m": "0x1.2182c6e4e0b3fp+0",
+        "stec": "0x1.21d9933572ae7p+4",
+        "delay_m": "0x1.360b774bc13ddp+2"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "interior_l5",
+      "note": "same geometry on L5 (frequency scaling)",
+      "inputs": {
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "az_deg": "0x1.e000000000000p+5",
+        "el_deg": "0x1.e000000000000p+5",
+        "frequency_hz": "0x1.187ccf4000000p+30",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "az_rad": "0x1.0c152382d7365p+0",
+        "el_rad": "0x1.0c152382d7365p+0",
+        "epoch_s": 646232400,
+        "lat_deg_repr": "45.0",
+        "lon_deg_repr": "10.0",
+        "el_deg_repr": "60.0",
+        "frequency_hz_repr": "1176450000.0"
+      },
+      "expect": {
+        "s": "0x1.de38d279869ffp-2",
+        "psi": "0x1.34be1c0e24198p-5",
+        "phi_ipp_deg": "0x1.70631e8249039p+5",
+        "lambda_ipp_deg_raw": "0x1.963bc81622309p+3",
+        "lambda_ipp_deg": "0x1.963bc81622309p+3",
+        "w": "0x1.0000000000000p-1",
+        "vtec0": "0x1.609980a1b6930p+3",
+        "vtec1": "0x1.504cc050db498p+4",
+        "p0": "0x1.b150d56cf144ep-3",
+        "q0": "0x1.652937f8aff4ap-1",
+        "vtec": "0x1.004cc050db498p+4",
+        "m": "0x1.2182c6e4e0b3fp+0",
+        "stec": "0x1.21d9933572ae7p+4",
+        "delay_m": "0x1.51975f892b743p+2"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "epoch_coincident",
+      "note": "epoch coincident with first map: time weight w=0",
+      "inputs": {
+        "lat_deg": "0x1.e000000000000p+4",
+        "lon_deg": "-0x1.4000000000000p+4",
+        "az_deg": "0x1.e000000000000p+6",
+        "el_deg": "0x1.9000000000000p+5",
+        "frequency_hz": "0x1.779c018000000p+30",
+        "lat_rad": "0x1.0c152382d7365p-1",
+        "lon_rad": "-0x1.657184ae74487p-2",
+        "az_rad": "0x1.0c152382d7365p+1",
+        "el_rad": "0x1.becde5da115a9p-1",
+        "epoch_s": 646228800,
+        "lat_deg_repr": "30.0",
+        "lon_deg_repr": "-20.0",
+        "el_deg_repr": "50.0",
+        "frequency_hz_repr": "1575420000.0"
+      },
+      "expect": {
+        "s": "0x1.336528a792054p-1",
+        "psi": "0x1.bba14cef20ef0p-5",
+        "phi_ipp_deg": "0x1.c69d0f7c872e9p+4",
+        "lambda_ipp_deg_raw": "-0x1.0f1e5ef0540cbp+4",
+        "lambda_ipp_deg": "-0x1.0f1e5ef0540cbp+4",
+        "w": "0x0.0p+0",
+        "vtec0": "0x1.7b3c23ae7abc3p+3",
+        "vtec1": "0x1.5d9e11d73d5e2p+4",
+        "p0": "0x1.6f6744d52881cp-1",
+        "q0": "0x1.289e4d9f27b58p-1",
+        "vtec": "0x1.7b3c23ae7abc3p+3",
+        "m": "0x1.401d4c3912132p+0",
+        "stec": "0x1.da36935489f17p+3",
+        "delay_m": "0x1.33ff22a448b8ep+1"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "epoch_last_map",
+      "note": "epoch coincident with last map: w=1",
+      "inputs": {
+        "lat_deg": "0x1.e000000000000p+4",
+        "lon_deg": "-0x1.4000000000000p+4",
+        "az_deg": "0x1.e000000000000p+6",
+        "el_deg": "0x1.9000000000000p+5",
+        "frequency_hz": "0x1.779c018000000p+30",
+        "lat_rad": "0x1.0c152382d7365p-1",
+        "lon_rad": "-0x1.657184ae74487p-2",
+        "az_rad": "0x1.0c152382d7365p+1",
+        "el_rad": "0x1.becde5da115a9p-1",
+        "epoch_s": 646236000,
+        "lat_deg_repr": "30.0",
+        "lon_deg_repr": "-20.0",
+        "el_deg_repr": "50.0",
+        "frequency_hz_repr": "1575420000.0"
+      },
+      "expect": {
+        "s": "0x1.336528a792054p-1",
+        "psi": "0x1.bba14cef20ef0p-5",
+        "phi_ipp_deg": "0x1.c69d0f7c872e9p+4",
+        "lambda_ipp_deg_raw": "-0x1.0f1e5ef0540cbp+4",
+        "lambda_ipp_deg": "-0x1.0f1e5ef0540cbp+4",
+        "w": "0x1.0000000000000p+0",
+        "vtec0": "0x1.7b3c23ae7abc3p+3",
+        "vtec1": "0x1.5d9e11d73d5e2p+4",
+        "p0": "0x1.6f6744d52881cp-1",
+        "q0": "0x1.289e4d9f27b58p-1",
+        "vtec": "0x1.5d9e11d73d5e2p+4",
+        "m": "0x1.401d4c3912132p+0",
+        "stec": "0x1.b52d994df044bp+4",
+        "delay_m": "0x1.1bf156788af16p+2"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "epoch_before_hold",
+      "note": "epoch before first map: endpoint hold (w clamped 0)",
+      "inputs": {
+        "lat_deg": "0x1.e000000000000p+4",
+        "lon_deg": "-0x1.4000000000000p+4",
+        "az_deg": "0x1.e000000000000p+6",
+        "el_deg": "0x1.9000000000000p+5",
+        "frequency_hz": "0x1.779c018000000p+30",
+        "lat_rad": "0x1.0c152382d7365p-1",
+        "lon_rad": "-0x1.657184ae74487p-2",
+        "az_rad": "0x1.0c152382d7365p+1",
+        "el_rad": "0x1.becde5da115a9p-1",
+        "epoch_s": 646227000,
+        "lat_deg_repr": "30.0",
+        "lon_deg_repr": "-20.0",
+        "el_deg_repr": "50.0",
+        "frequency_hz_repr": "1575420000.0"
+      },
+      "expect": {
+        "s": "0x1.336528a792054p-1",
+        "psi": "0x1.bba14cef20ef0p-5",
+        "phi_ipp_deg": "0x1.c69d0f7c872e9p+4",
+        "lambda_ipp_deg_raw": "-0x1.0f1e5ef0540cbp+4",
+        "lambda_ipp_deg": "-0x1.0f1e5ef0540cbp+4",
+        "w": "0x0.0p+0",
+        "vtec0": "0x1.7b3c23ae7abc3p+3",
+        "vtec1": "0x1.5d9e11d73d5e2p+4",
+        "p0": "0x1.6f6744d52881cp-1",
+        "q0": "0x1.289e4d9f27b58p-1",
+        "vtec": "0x1.7b3c23ae7abc3p+3",
+        "m": "0x1.401d4c3912132p+0",
+        "stec": "0x1.da36935489f17p+3",
+        "delay_m": "0x1.33ff22a448b8ep+1"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "epoch_after_hold",
+      "note": "epoch after last map: endpoint hold (w clamped 1)",
+      "inputs": {
+        "lat_deg": "0x1.e000000000000p+4",
+        "lon_deg": "-0x1.4000000000000p+4",
+        "az_deg": "0x1.e000000000000p+6",
+        "el_deg": "0x1.9000000000000p+5",
+        "frequency_hz": "0x1.779c018000000p+30",
+        "lat_rad": "0x1.0c152382d7365p-1",
+        "lon_rad": "-0x1.657184ae74487p-2",
+        "az_rad": "0x1.0c152382d7365p+1",
+        "el_rad": "0x1.becde5da115a9p-1",
+        "epoch_s": 646237800,
+        "lat_deg_repr": "30.0",
+        "lon_deg_repr": "-20.0",
+        "el_deg_repr": "50.0",
+        "frequency_hz_repr": "1575420000.0"
+      },
+      "expect": {
+        "s": "0x1.336528a792054p-1",
+        "psi": "0x1.bba14cef20ef0p-5",
+        "phi_ipp_deg": "0x1.c69d0f7c872e9p+4",
+        "lambda_ipp_deg_raw": "-0x1.0f1e5ef0540cbp+4",
+        "lambda_ipp_deg": "-0x1.0f1e5ef0540cbp+4",
+        "w": "0x1.0000000000000p+0",
+        "vtec0": "0x1.7b3c23ae7abc3p+3",
+        "vtec1": "0x1.5d9e11d73d5e2p+4",
+        "p0": "0x1.6f6744d52881cp-1",
+        "q0": "0x1.289e4d9f27b58p-1",
+        "vtec": "0x1.5d9e11d73d5e2p+4",
+        "m": "0x1.401d4c3912132p+0",
+        "stec": "0x1.b52d994df044bp+4",
+        "delay_m": "0x1.1bf156788af16p+2"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "lon_wrap_seam",
+      "note": "IPP longitude near +180 seam; brackets against the +180 column",
+      "inputs": {
+        "lat_deg": "0x0.0p+0",
+        "lon_deg": "0x1.5400000000000p+7",
+        "az_deg": "0x1.4000000000000p+6",
+        "el_deg": "0x1.4000000000000p+5",
+        "frequency_hz": "0x1.779c018000000p+30",
+        "lat_rad": "0x0.0p+0",
+        "lon_rad": "0x1.7bc89cf95b8d0p+1",
+        "az_rad": "0x1.657184ae74487p+0",
+        "el_rad": "0x1.657184ae74487p-1",
+        "epoch_s": 646232400,
+        "lat_deg_repr": "0.0",
+        "lon_deg_repr": "170.0",
+        "el_deg_repr": "40.0",
+        "frequency_hz_repr": "1575420000.0"
+      },
+      "expect": {
+        "s": "0x1.6e56dacefa648p-1",
+        "psi": "0x1.347e76c452018p-4",
+        "phi_ipp_deg": "0x1.7f4f9e10cf21fp-1",
+        "lambda_ipp_deg_raw": "0x1.5c7ffbba8b7ccp+7",
+        "lambda_ipp_deg": "0x1.5c7ffbba8b7ccp+7",
+        "w": "0x1.0000000000000p-1",
+        "vtec0": "0x1.b1b20b4914fe2p+3",
+        "vtec1": "0x1.78d905a48a7f1p+4",
+        "p0": "0x1.ceeedcb586589p-1",
+        "q0": "0x1.ecd59e7f28d7ep-1",
+        "vtec": "0x1.28d905a48a7f1p+4",
+        "m": "0x1.6e71a5fd0a36fp+0",
+        "stec": "0x1.a8ea0e560698ap+4",
+        "delay_m": "0x1.13fa3c9bde53fp+2"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "lon_wrap_negative",
+      "note": "IPP longitude near -180; west-of-seam bracket",
+      "inputs": {
+        "lat_deg": "0x0.0p+0",
+        "lon_deg": "-0x1.6400000000000p+7",
+        "az_deg": "0x1.1800000000000p+8",
+        "el_deg": "0x1.4000000000000p+5",
+        "frequency_hz": "0x1.779c018000000p+30",
+        "lat_rad": "0x0.0p+0",
+        "lon_rad": "-0x1.8da7e39bae2a3p+1",
+        "az_rad": "0x1.38c35418a5bf6p+2",
+        "el_rad": "0x1.657184ae74487p-1",
+        "epoch_s": 646232400,
+        "lat_deg_repr": "0.0",
+        "lon_deg_repr": "-178.0",
+        "el_deg_repr": "40.0",
+        "frequency_hz_repr": "1575420000.0"
+      },
+      "expect": {
+        "s": "0x1.6e56dacefa648p-1",
+        "psi": "0x1.347e76c452018p-4",
+        "phi_ipp_deg": "0x1.7f4f9e10cf20ep-1",
+        "lambda_ipp_deg_raw": "-0x1.6c7ffbba8b7cbp+7",
+        "lambda_ipp_deg": "0x1.6380044574835p+7",
+        "w": "0x1.0000000000000p-1",
+        "vtec0": "0x1.b1e1d4e662e2fp+3",
+        "vtec1": "0x1.78f0ea7331717p+4",
+        "p0": "0x1.ecccdf0635637p-1",
+        "q0": "0x1.ecd59e7f28d80p-1",
+        "vtec": "0x1.28f0ea7331717p+4",
+        "m": "0x1.6e71a5fd0a36fp+0",
+        "stec": "0x1.a90c4210f6961p+4",
+        "delay_m": "0x1.1410735dc2530p+2"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "low_el_lat_clamp",
+      "note": "low elevation polar IPP exceeds grid lat; clamps to +60 edge",
+      "inputs": {
+        "lat_deg": "0x1.4000000000000p+6",
+        "lon_deg": "0x1.e000000000000p+4",
+        "az_deg": "0x0.0p+0",
+        "el_deg": "0x1.0000000000000p+3",
+        "frequency_hz": "0x1.779c018000000p+30",
+        "lat_rad": "0x1.657184ae74487p+0",
+        "lon_rad": "0x1.0c152382d7365p-1",
+        "az_rad": "0x0.0p+0",
+        "el_rad": "0x1.1df46a2529d39p-3",
+        "epoch_s": 646232400,
+        "lat_deg_repr": "80.0",
+        "lon_deg_repr": "30.0",
+        "el_deg_repr": "8.0",
+        "frequency_hz_repr": "1575420000.0"
+      },
+      "expect": {
+        "s": "0x1.d99164681550dp-1",
+        "psi": "0x1.004e6c96fb058p-2",
+        "phi_ipp_deg": "0x1.56a2ba6b5c24ap+6",
+        "lambda_ipp_deg_raw": "0x1.dffffffffffffp+4",
+        "lambda_ipp_deg": "0x1.dffffffffffffp+4",
+        "w": "0x1.0000000000000p-1",
+        "vtec0": "0x1.4b33333333333p+3",
+        "vtec1": "0x1.459999999999ap+4",
+        "p0": "0x1.fffffffffffffp-2",
+        "q0": "-0x0.0p+0",
+        "vtec": "0x1.eb33333333334p+3",
+        "m": "0x1.50bc778ff8884p+1",
+        "stec": "0x1.430e691aec092p+5",
+        "delay_m": "0x1.a3a4be17d7a9bp+2"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "south_mid",
+      "note": "southern mid-latitude IPP, ascending-longitude bracket",
+      "inputs": {
+        "lat_deg": "-0x1.1800000000000p+5",
+        "lon_deg": "0x1.9000000000000p+6",
+        "az_deg": "0x1.9000000000000p+7",
+        "el_deg": "0x1.b800000000000p+5",
+        "frequency_hz": "0x1.779c018000000p+30",
+        "lat_rad": "-0x1.38c35418a5bf6p-1",
+        "lon_rad": "0x1.becde5da115a9p+0",
+        "az_rad": "0x1.becde5da115a9p+1",
+        "el_rad": "0x1.eb7c166fdfe3ap-1",
+        "epoch_s": 646232400,
+        "lat_deg_repr": "-35.0",
+        "lon_deg_repr": "100.0",
+        "el_deg_repr": "55.0",
+        "frequency_hz_repr": "1575420000.0"
+      },
+      "expect": {
+        "s": "0x1.124bfe439fd3dp-1",
+        "psi": "0x1.749f2b3cdec10p-5",
+        "phi_ipp_deg": "-0x1.2b8d105abbb97p+5",
+        "lambda_ipp_deg_raw": "0x1.8b82b038545bcp+6",
+        "lambda_ipp_deg": "0x1.8b82b038545bcp+6",
+        "w": "0x1.0000000000000p-1",
+        "vtec0": "0x1.eac89f3871c36p+3",
+        "vtec1": "0x1.95644f9c38e1bp+4",
+        "p0": "0x1.4bc177efa2e5ep-1",
+        "q0": "0x1.be9034558beb0p-1",
+        "vtec": "0x1.45644f9c38e1bp+4",
+        "m": "0x1.2f2dd64629d53p+0",
+        "stec": "0x1.815bfd36eeef8p+4",
+        "delay_m": "0x1.f492eb5dee898p+1"
+      },
+      "map_index": 0
+    },
+    {
+      "name": "equator_node",
+      "note": "IPP near the lat=0 / lon=0 nodes",
+      "inputs": {
+        "lat_deg": "0x0.0p+0",
+        "lon_deg": "0x0.0p+0",
+        "az_deg": "0x1.6800000000000p+6",
+        "el_deg": "0x1.1800000000000p+6",
+        "frequency_hz": "0x1.779c018000000p+30",
+        "lat_rad": "0x0.0p+0",
+        "lon_rad": "0x0.0p+0",
+        "az_rad": "0x1.921fb54442d18p+0",
+        "el_rad": "0x1.38c35418a5bf6p+0",
+        "epoch_s": 646232400,
+        "lat_deg_repr": "0.0",
+        "lon_deg_repr": "0.0",
+        "el_deg_repr": "70.0",
+        "frequency_hz_repr": "1575420000.0"
+      },
+      "expect": {
+        "s": "0x1.471f82acbc6cbp-2",
+        "psi": "0x1.87bf48cb5a160p-6",
+        "phi_ipp_deg": "0x1.82d1aa5aaf966p-54",
+        "lambda_ipp_deg_raw": "0x1.5eb5d8876c7b5p+0",
+        "lambda_ipp_deg": "0x1.5eb5d8876c7b5p+0",
+        "w": "0x1.0000000000000p-1",
+        "vtec0": "0x1.a9ac4df711767p+3",
+        "vtec1": "0x1.74d626fb88bb4p+4",
+        "p0": "0x1.76174d5d40839p-6",
+        "q0": "-0x1.357488488c785p-58",
+        "vtec": "0x1.24d626fb88bb4p+4",
+        "m": "0x1.0e27e7d17ae56p+0",
+        "stec": "0x1.350782ea171e9p+4",
+        "delay_m": "0x1.916c3ce302c22p+1"
+      },
+      "map_index": 0
+    }
+  ]
+}

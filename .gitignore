@@ -1,0 +1,27 @@
+/target
+# Cargo build output of the out-of-workspace binding crates.
+bindings/**/target
+**/*.rs.bk
+
+# JPL ephemeris kernels (downloaded at runtime by fixture generators)
+*.bsp
+# Exception: the small (88 KB) 433 Eros type-21 SPK is a committed parity
+# fixture backing the bit-exact SPK type-21 test. Regenerate with
+# tests/fixtures/spk/gen_eros_type21.py.
+!crates/sidereon-core/tests/fixtures/spk/horizons_eros_type21.bsp
+
+# Local working journal for the iterative dev loop (not shipped).
+PROGRESS.md
+
+# Python binding build/dev artifacts
+/.venv-wrappers
+**/__pycache__
+**/.pytest_cache
+*.so
+bindings/python/dist
+bindings/python/*.egg-info
+**/.venv/
+**/__pycache__/
+**/node_modules/
+/pkg/
+/pkg-node/

@@ -1,0 +1,187 @@
+{
+  "bilinear_cases": [
+    {
+      "elevation_bits": "0xc032c00000000000",
+      "latitude_bits": "0x4042100000000000",
+      "longitude_bits": "0xc05ab80000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc032400000000000",
+      "latitude_bits": "0x4042500000000000",
+      "longitude_bits": "0xc05aa80000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc019000000000000",
+      "latitude_bits": "0x4042300000000000",
+      "longitude_bits": "0xc05a980000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xbfe8000000000000",
+      "latitude_bits": "0x4042700000000000",
+      "longitude_bits": "0xc05a880000000000",
+      "tile_id": "n36_w107"
+    }
+  ],
+  "nearest_cases": [
+    {
+      "elevation_bits": "0xc034000000000000",
+      "latitude_bits": "0x4042000000000000",
+      "longitude_bits": "0xc05ac00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc039000000000000",
+      "latitude_bits": "0x4042200000000000",
+      "longitude_bits": "0xc05ac00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc03e000000000000",
+      "latitude_bits": "0x4042400000000000",
+      "longitude_bits": "0xc05ac00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc041800000000000",
+      "latitude_bits": "0x4042600000000000",
+      "longitude_bits": "0xc05ac00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc044000000000000",
+      "latitude_bits": "0x4042800000000000",
+      "longitude_bits": "0xc05ac00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc02a000000000000",
+      "latitude_bits": "0x4042000000000000",
+      "longitude_bits": "0xc05ab00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc031000000000000",
+      "latitude_bits": "0x4042200000000000",
+      "longitude_bits": "0xc05ab00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc035000000000000",
+      "latitude_bits": "0x4042400000000000",
+      "longitude_bits": "0xc05ab00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc039000000000000",
+      "latitude_bits": "0x4042600000000000",
+      "longitude_bits": "0xc05ab00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc03d000000000000",
+      "latitude_bits": "0x4042800000000000",
+      "longitude_bits": "0xc05ab00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc018000000000000",
+      "latitude_bits": "0x4042000000000000",
+      "longitude_bits": "0xc05aa00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc022000000000000",
+      "latitude_bits": "0x4042200000000000",
+      "longitude_bits": "0xc05aa00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc028000000000000",
+      "latitude_bits": "0x4042400000000000",
+      "longitude_bits": "0xc05aa00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc02e000000000000",
+      "latitude_bits": "0x4042600000000000",
+      "longitude_bits": "0xc05aa00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc032000000000000",
+      "latitude_bits": "0x4042800000000000",
+      "longitude_bits": "0xc05aa00000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0x3ff0000000000000",
+      "latitude_bits": "0x4042000000000000",
+      "longitude_bits": "0xc05a900000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xbff0000000000000",
+      "latitude_bits": "0x4042200000000000",
+      "longitude_bits": "0xc05a900000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc008000000000000",
+      "latitude_bits": "0x4042400000000000",
+      "longitude_bits": "0xc05a900000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc014000000000000",
+      "latitude_bits": "0x4042600000000000",
+      "longitude_bits": "0xc05a900000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0xc01c000000000000",
+      "latitude_bits": "0x4042800000000000",
+      "longitude_bits": "0xc05a900000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0x4020000000000000",
+      "latitude_bits": "0x4042000000000000",
+      "longitude_bits": "0xc05a800000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0x401c000000000000",
+      "latitude_bits": "0x4042200000000000",
+      "longitude_bits": "0xc05a800000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0x4018000000000000",
+      "latitude_bits": "0x4042400000000000",
+      "longitude_bits": "0xc05a800000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0x4014000000000000",
+      "latitude_bits": "0x4042600000000000",
+      "longitude_bits": "0xc05a800000000000",
+      "tile_id": "n36_w107"
+    },
+    {
+      "elevation_bits": "0x4010000000000000",
+      "latitude_bits": "0x4042800000000000",
+      "longitude_bits": "0xc05a800000000000",
+      "tile_id": "n36_w107"
+    }
+  ],
+  "schema": "gnss-dted-points-v1",
+  "source": {
+    "elevation_formula": "z_m = -20 + 7 * lon_i - 5 * lat_i + lon_i * lat_i",
+    "format": "DTED UHL/DSI/ACC/data-record byte layout",
+    "tile_id": "n36_w107",
+    "tile_path": "tiles/n36_w107_1arc_v3.dt2"
+  }
+}

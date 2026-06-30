@@ -1,0 +1,541 @@
+{
+  "schema": "orbis-gnss-parity/glonass_ephemeris.v1",
+  "purpose": "GLONASS broadcast PZ-90.11 state-vector propagation (RK4 of the central + J2 + Coriolis + lunisolar equation of motion). Reference recipe is generator/glonass_eval.py; the Rust port asserts 0 ULP per component, including the state after every RK4 step, against these hex-float goldens. Physically validated against precise GLONASS orbits by generator/broadcast_vs_sp3_check.py.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "0 ULP certified only against env.json. libm contract: CPython math (Apple libsystem_m) vs Rust std on aarch64-apple-darwin."
+  },
+  "recipe": "deq: r2=x^2+y^2+z^2; r3=r2*sqrt(r2); a=3/2*J2*MU*Re^2/(r2*r3); b=5*z^2/r2; c=-MU/r3 - a*(1-b); accel = (c+w^2)*x + 2*w*vy + als_x (symmetric y; z uses (c-2a) and no Coriolis). RK4 fixed step 60 s with a final partial step, direction by sign(tk). Clock: refine t twice then -TauN-field + GammaN*t. No FMA; integer powers as explicit multiplies; math.sqrt.",
+  "constants": {
+    "mu": "0x1.6a8665a22e000p+48",
+    "j2": "0x1.1bcdc7e6b76e4p-10",
+    "omega_e": "0x1.31da7d157db65p-14",
+    "r_e": "0x1.854a600000000p+22",
+    "tstep_s": "0x1.e000000000000p+5"
+  },
+  "generator": {
+    "python": "3.14.4",
+    "executable": "python"
+  },
+  "cases": [
+    {
+      "name": "at_toe",
+      "note": "tk = 0: no integration step, state is the broadcast state",
+      "sat": "R01",
+      "inputs": {
+        "tk_s": "0x0.0p+0",
+        "tk_s_repr": "0.0",
+        "pos_m": [
+          "0x1.4cea1cc3ffac2p+23",
+          "-0x1.6042f09800219p+21",
+          "0x1.5d2cd38cffeb0p+24"
+        ],
+        "vel_m_s": [
+          "0x1.5ff39bffff98fp+10",
+          "0x1.5d7b60700020cp+11",
+          "-0x1.3cff9c80000cep+8"
+        ],
+        "acc_m_s2": [
+          "-0x1.f4000000000cbp-20",
+          "-0x0.0p+0",
+          "-0x1.76ffffffffbfcp-19"
+        ],
+        "clk_bias": "0x1.0a96000000098p-14",
+        "gamma_n": "0x0.0p+0"
+      },
+      "expect": {
+        "steps": [],
+        "final_state": [
+          "0x1.4cea1cc3ffac2p+23",
+          "-0x1.6042f09800219p+21",
+          "0x1.5d2cd38cffeb0p+24",
+          "0x1.5ff39bffff98fp+10",
+          "0x1.5d7b60700020cp+11",
+          "-0x1.3cff9c80000cep+8"
+        ],
+        "clock_offset_s": "0x1.0a96000000098p-14"
+      }
+    },
+    {
+      "name": "one_step",
+      "note": "exactly one full 60 s forward step",
+      "sat": "R01",
+      "inputs": {
+        "tk_s": "0x1.e000000000000p+5",
+        "tk_s_repr": "60.0",
+        "pos_m": [
+          "0x1.4cea1cc3ffac2p+23",
+          "-0x1.6042f09800219p+21",
+          "0x1.5d2cd38cffeb0p+24"
+        ],
+        "vel_m_s": [
+          "0x1.5ff39bffff98fp+10",
+          "0x1.5d7b60700020cp+11",
+          "-0x1.3cff9c80000cep+8"
+        ],
+        "acc_m_s2": [
+          "-0x1.f4000000000cbp-20",
+          "-0x0.0p+0",
+          "-0x1.76ffffffffbfcp-19"
+        ],
+        "clk_bias": "0x1.0a96000000098p-14",
+        "gamma_n": "0x0.0p+0"
+      },
+      "expect": {
+        "steps": [
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.4f80e09a69accp+23",
+              "-0x1.4bd1522085544p+21",
+              "0x1.5cdeab880130cp+24",
+              "0x1.62fd8b1373006p+10",
+              "0x1.5c53ead734a10p+11",
+              "-0x1.5dee3f27745e8p+8"
+            ]
+          }
+        ],
+        "final_state": [
+          "0x1.4f80e09a69accp+23",
+          "-0x1.4bd1522085544p+21",
+          "0x1.5cdeab880130cp+24",
+          "0x1.62fd8b1373006p+10",
+          "0x1.5c53ead734a10p+11",
+          "-0x1.5dee3f27745e8p+8"
+        ],
+        "clock_offset_s": "0x1.0a96000000098p-14"
+      }
+    },
+    {
+      "name": "part_step",
+      "note": "a single sub-60 s partial step",
+      "sat": "R01",
+      "inputs": {
+        "tk_s": "0x1.6800000000000p+5",
+        "tk_s_repr": "45.0",
+        "pos_m": [
+          "0x1.4cea1cc3ffac2p+23",
+          "-0x1.6042f09800219p+21",
+          "0x1.5d2cd38cffeb0p+24"
+        ],
+        "vel_m_s": [
+          "0x1.5ff39bffff98fp+10",
+          "0x1.5d7b60700020cp+11",
+          "-0x1.3cff9c80000cep+8"
+        ],
+        "acc_m_s2": [
+          "-0x1.f4000000000cbp-20",
+          "-0x0.0p+0",
+          "-0x1.76ffffffffbfcp-19"
+        ],
+        "clk_bias": "0x1.0a96000000098p-14",
+        "gamma_n": "0x0.0p+0"
+      },
+      "expect": {
+        "steps": [
+          {
+            "step_s": "0x1.6800000000000p+5",
+            "state": [
+              "0x1.4edaa70fcde21p+23",
+              "-0x1.50ec19264f7afp+21",
+              "0x1.5cf2eec425f18p+24",
+              "0x1.623c1d9d57e58p+10",
+              "0x1.5c9ea9eca6345p+11",
+              "-0x1.55b34ac4dc5c5p+8"
+            ]
+          }
+        ],
+        "final_state": [
+          "0x1.4edaa70fcde21p+23",
+          "-0x1.50ec19264f7afp+21",
+          "0x1.5cf2eec425f18p+24",
+          "0x1.623c1d9d57e58p+10",
+          "0x1.5c9ea9eca6345p+11",
+          "-0x1.55b34ac4dc5c5p+8"
+        ],
+        "clock_offset_s": "0x1.0a96000000098p-14"
+      }
+    },
+    {
+      "name": "multi_step",
+      "note": "five full steps plus a 5 s partial remainder",
+      "sat": "R01",
+      "inputs": {
+        "tk_s": "0x1.3100000000000p+8",
+        "tk_s_repr": "305.0",
+        "pos_m": [
+          "0x1.4cea1cc3ffac2p+23",
+          "-0x1.6042f09800219p+21",
+          "0x1.5d2cd38cffeb0p+24"
+        ],
+        "vel_m_s": [
+          "0x1.5ff39bffff98fp+10",
+          "0x1.5d7b60700020cp+11",
+          "-0x1.3cff9c80000cep+8"
+        ],
+        "acc_m_s2": [
+          "-0x1.f4000000000cbp-20",
+          "-0x0.0p+0",
+          "-0x1.76ffffffffbfcp-19"
+        ],
+        "clk_bias": "0x1.0a96000000098p-14",
+        "gamma_n": "0x0.0p+0"
+      },
+      "expect": {
+        "steps": [
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.4f80e09a69accp+23",
+              "-0x1.4bd1522085544p+21",
+              "0x1.5cdeab880130cp+24",
+              "0x1.62fd8b1373006p+10",
+              "0x1.5c53ead734a10p+11",
+              "-0x1.5dee3f27745e8p+8"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.521d4c750c5c6p+23",
+              "-0x1.377149f23c66cp+21",
+              "0x1.5c88cc7bafb42p+24",
+              "0x1.65fc1fd25b37cp+10",
+              "0x1.5b231565f9bd2p+11",
+              "-0x1.7ed51151a7287p+8"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.54bf4ad6dd4a2p+23",
+              "-0x1.232364236aac5p+21",
+              "0x1.5c2b3852b43cep+24",
+              "0x1.68ef2334dce28p+10",
+              "0x1.59e8f23b6d9fbp+11",
+              "-0x1.9fb3590b77189p+8"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.5766c5dc1f7a1p+23",
+              "-0x1.0ee82bb783d49p+21",
+              "0x1.5bc5f12346cecp+24",
+              "0x1.6bd65eb8088d4p+10",
+              "0x1.58a593dcc7fcdp+11",
+              "-0x1.c0885c938010fp+8"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.5a13a73b5f2b6p+23",
+              "-0x1.f58055326a6c0p+20",
+              "0x1.5b58f92f22876p+24",
+              "0x1.6eb19c6090ebdp+10",
+              "0x1.57590d34719b3p+11",
+              "-0x1.e153625e28f43p+8"
+            ]
+          },
+          {
+            "step_s": "0x1.4000000000000p+2",
+            "state": [
+              "0x1.5a4cf7b3ddba5p+23",
+              "-0x1.f22619b4ebdcdp+20",
+              "0x1.5b4f8bba6759ep+24",
+              "0x1.6eedffeee38afp+10",
+              "0x1.573cee19c0899p+11",
+              "-0x1.e40e7eeb63d3dp+8"
+            ]
+          }
+        ],
+        "final_state": [
+          "0x1.5a4cf7b3ddba5p+23",
+          "-0x1.f22619b4ebdcdp+20",
+          "0x1.5b4f8bba6759ep+24",
+          "0x1.6eedffeee38afp+10",
+          "0x1.573cee19c0899p+11",
+          "-0x1.e40e7eeb63d3dp+8"
+        ],
+        "clock_offset_s": "0x1.0a96000000098p-14"
+      }
+    },
+    {
+      "name": "backward",
+      "note": "backward arc: two full -60 s steps plus a -30 s partial",
+      "sat": "R01",
+      "inputs": {
+        "tk_s": "-0x1.2c00000000000p+7",
+        "tk_s_repr": "-150.0",
+        "pos_m": [
+          "0x1.4cea1cc3ffac2p+23",
+          "-0x1.6042f09800219p+21",
+          "0x1.5d2cd38cffeb0p+24"
+        ],
+        "vel_m_s": [
+          "0x1.5ff39bffff98fp+10",
+          "0x1.5d7b60700020cp+11",
+          "-0x1.3cff9c80000cep+8"
+        ],
+        "acc_m_s2": [
+          "-0x1.f4000000000cbp-20",
+          "-0x0.0p+0",
+          "-0x1.76ffffffffbfcp-19"
+        ],
+        "clk_bias": "0x1.0a96000000098p-14",
+        "gamma_n": "0x0.0p+0"
+      },
+      "expect": {
+        "steps": [
+          {
+            "step_s": "-0x1.e000000000000p+5",
+            "state": [
+              "0x1.4a5916072fa8fp+23",
+              "-0x1.74c5983598328p+21",
+              "0x1.5d7342cb9d7f3p+24",
+              "0x1.5cde8a220baadp+10",
+              "0x1.5e9964783b3bcp+11",
+              "-0x1.1c09e37c19adap+8"
+            ]
+          },
+          {
+            "step_s": "-0x1.e000000000000p+5",
+            "state": [
+              "0x1.47cde110c0127p+23",
+              "-0x1.8958bacf7886bp+21",
+              "0x1.5db1f7b0703bfp+24",
+              "0x1.59be8d830eaedp+10",
+              "0x1.5fade59fa1363p+11",
+              "-0x1.f61b9ccc5e02cp+7"
+            ]
+          },
+          {
+            "step_s": "-0x1.e000000000000p+4",
+            "state": [
+              "0x1.468a7b9914c7ep+23",
+              "-0x1.93a84d87a31a6p+21",
+              "0x1.5dce6bcf0de45p+24",
+              "0x1.582a88d045f69p+10",
+              "0x1.60348fd28beb6p+11",
+              "-0x1.d51b372c1ae78p+7"
+            ]
+          }
+        ],
+        "final_state": [
+          "0x1.468a7b9914c7ep+23",
+          "-0x1.93a84d87a31a6p+21",
+          "0x1.5dce6bcf0de45p+24",
+          "0x1.582a88d045f69p+10",
+          "0x1.60348fd28beb6p+11",
+          "-0x1.d51b372c1ae78p+7"
+        ],
+        "clock_offset_s": "0x1.0a96000000098p-14"
+      }
+    },
+    {
+      "name": "quarter_hour",
+      "note": "the +15 min validity edge (fifteen full steps)",
+      "sat": "R01",
+      "inputs": {
+        "tk_s": "0x1.c200000000000p+9",
+        "tk_s_repr": "900.0",
+        "pos_m": [
+          "0x1.4cea1cc3ffac2p+23",
+          "-0x1.6042f09800219p+21",
+          "0x1.5d2cd38cffeb0p+24"
+        ],
+        "vel_m_s": [
+          "0x1.5ff39bffff98fp+10",
+          "0x1.5d7b60700020cp+11",
+          "-0x1.3cff9c80000cep+8"
+        ],
+        "acc_m_s2": [
+          "-0x1.f4000000000cbp-20",
+          "-0x0.0p+0",
+          "-0x1.76ffffffffbfcp-19"
+        ],
+        "clk_bias": "0x1.0a96000000098p-14",
+        "gamma_n": "0x0.0p+0"
+      },
+      "expect": {
+        "steps": [
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.4f80e09a69accp+23",
+              "-0x1.4bd1522085544p+21",
+              "0x1.5cdeab880130cp+24",
+              "0x1.62fd8b1373006p+10",
+              "0x1.5c53ead734a10p+11",
+              "-0x1.5dee3f27745e8p+8"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.521d4c750c5c6p+23",
+              "-0x1.377149f23c66cp+21",
+              "0x1.5c88cc7bafb42p+24",
+              "0x1.65fc1fd25b37cp+10",
+              "0x1.5b231565f9bd2p+11",
+              "-0x1.7ed51151a7287p+8"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.54bf4ad6dd4a2p+23",
+              "-0x1.232364236aac5p+21",
+              "0x1.5c2b3852b43cep+24",
+              "0x1.68ef2334dce28p+10",
+              "0x1.59e8f23b6d9fbp+11",
+              "-0x1.9fb3590b77189p+8"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.5766c5dc1f7a1p+23",
+              "-0x1.0ee82bb783d49p+21",
+              "0x1.5bc5f12346cecp+24",
+              "0x1.6bd65eb8088d4p+10",
+              "0x1.58a593dcc7fcdp+11",
+              "-0x1.c0885c938010fp+8"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.5a13a73b5f2b6p+23",
+              "-0x1.f58055326a6c0p+20",
+              "0x1.5b58f92f22876p+24",
+              "0x1.6eb19c6090ebdp+10",
+              "0x1.57590d34719b3p+11",
+              "-0x1.e153625e28f43p+8"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.5cc5d84672ae2p+23",
+              "-0x1.cd57d328fdb5ep+20",
+              "0x1.5ae452e378894p+24",
+              "0x1.7180a6bd7aaadp+10",
+              "0x1.560371911723bp+11",
+              "-0x1.0109d88cd816fp+9"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.5f7d41eb803ccp+23",
+              "-0x1.a557e0a1b52eep+20",
+              "0x1.5a6800d8e1f3fp+24",
+              "0x1.744348eac5b3bp+10",
+              "0x1.54a4d4a4b742bp+11",
+              "-0x1.116447d91b70ep+9"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.6239ccb608ccap+23",
+              "-0x1.7d818a96e2dc6p+20",
+              "0x1.59e405d350e99p+24",
+              "0x1.76f94e940fc33p+10",
+              "0x1.533d4a83ac274p+11",
+              "-0x1.21b8a2aae556ep+9"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.64fb60cff7c92p+23",
+              "-0x1.55d5dba2bf126p+20",
+              "0x1.595864c200a2ap+24",
+              "0x1.79a283f730326p+10",
+              "0x1.51cce7a3b06b5p+11",
+              "-0x1.32068cbc36f47p+9"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.67c1e602b7ac3p+23",
+              "-0x1.2e55dbf40e169p+20",
+              "0x1.58c520bf648fcp+24",
+              "0x1.7c3eb5e6ccd22p+10",
+              "0x1.5053c0dadf717p+11",
+              "-0x1.424da9ec0f256p+9"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.6a8d43b84b67ap+23",
+              "-0x1.07029142e3fb5p+20",
+              "0x1.582a3d11168a1p+24",
+              "0x1.7ecdb1cce7ba8p+10",
+              "0x1.4ed1eb5eb1438p+11",
+              "-0x1.528d9e406cf39p+9"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.6d5d60fc6c917p+23",
+              "-0x1.bfb9fd8b0e738p+19",
+              "0x1.5787bd27c412cp+24",
+              "0x1.814f45ad65ee1p+10",
+              "0x1.4d477cc2f1ff7p+11",
+              "-0x1.62c60de851340p+9"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.7032247dae45dp+23",
+              "-0x1.71cc4a4ae51e0p+19",
+              "0x1.56dda49f1aa22p+24",
+              "0x1.83c340288eb34p+10",
+              "0x1.4bb48af8b4de6p+11",
+              "-0x1.72f69d3dbf393p+9"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.730b748ea4b0fp+23",
+              "-0x1.243e04e8ed401p+19",
+              "0x1.562bf73db3065p+24",
+              "0x1.8629707d83852p+10",
+              "0x1.4a192c4d42e2cp+11",
+              "-0x1.831ef0c7bc907p+9"
+            ]
+          },
+          {
+            "step_s": "0x1.e000000000000p+5",
+            "state": [
+              "0x1.75e937271132ep+23",
+              "-0x1.ae224887ef96bp+18",
+              "0x1.5572b8f4fbd2ap+24",
+              "0x1.8881a68cb07dap+10",
+              "0x1.48757769053a8p+11",
+              "-0x1.933ead3c4fbf2p+9"
+            ]
+          }
+        ],
+        "final_state": [
+          "0x1.75e937271132ep+23",
+          "-0x1.ae224887ef96bp+18",
+          "0x1.5572b8f4fbd2ap+24",
+          "0x1.8881a68cb07dap+10",
+          "0x1.48757769053a8p+11",
+          "-0x1.933ead3c4fbf2p+9"
+        ],
+        "clock_offset_s": "0x1.0a96000000098p-14"
+      }
+    }
+  ]
+}

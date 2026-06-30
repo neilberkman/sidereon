@@ -1,0 +1,52 @@
+[package]
+name = "sidereon-core"
+version = "0.9.0"
+authors = []
+edition = "2021"
+description = "The complete Sidereon engine: numerical astrodynamics propagation core plus the GNSS domain layer (SP3, broadcast ephemeris, multi-GNSS positioning, RTK/PPP, ionosphere/troposphere, DOP) behind a default-on gnss feature"
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/sidereon-core"
+homepage = "https://github.com/neilberkman/sidereon"
+repository = "https://github.com/neilberkman/sidereon"
+keywords = ["gnss", "astrodynamics", "sp3", "positioning", "propagation"]
+categories = ["science", "simulation"]
+
+# Committed parity/test fixtures (vendored SP3/RINEX/ANTEX products and hex-float
+# golden vectors) plus the dev-only Vallado C++ SGP4 oracle back the crate's own
+# 0-ULP tests; consumers do not need them, so they are kept out of any future
+# published tarball. Clone the git repo to run the parity suite.
+exclude = [
+    "tests/fixtures/**",
+    "tests/cpp/**",
+    "tests/sgp4_diagnostic.rs",
+    "tests/sgp4_oracle_diff.rs",
+    "tests/sgp4_json_origin.rs",
+    "tests/sgp4_regenerate_fixture.rs",
+]
+
+[dependencies]
+nalgebra = { workspace = true }
+thiserror = "1.0"
+libm = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+roxmltree = "0.21"
+# Data-parallel batch propagation: the multi-satellite walkers in `astro::passes`
+# fan independent per-satellite arcs across a rayon work-stealing pool. Each arc
+# is the same serial kernel, so results stay bit-identical to the serial path.
+rayon = "1"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+approx = "0.5"
+# Reads the hex-float golden vectors for the bit-exact parity tests.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[features]
+# Test-only oracle. Compiles the Vallado C++ reference via cc and exposes it to
+# the test suite for field-level diffing against the pure-Rust SGP4 port. Not
+# part of the public API. Off by default.
+sgp4-debug-oracle = []

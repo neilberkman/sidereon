@@ -1,0 +1,2329 @@
+{
+  "schema": "orbis-gnss-parity/spp_trace.v1",
+  "purpose": "GPS L1 single-point-positioning trace fixture. Records the synthesized observations, the FIXED receiver truth, the frozen-branch choices, the effective scipy options, and the full iteration trace (per trace-state x: per-satellite intermediates t_tx/sat_ecef/dt_sat/theta/sat_rot/rho/az/el/iono/tropo/p_hat, residual vector, 2-point FD perturbations, FD Jacobian, accepted steps, full fun() evaluation log, stopping reason). The residual and the 2-point FD Jacobian at the recorded trace states are the 0-ULP substrate the Rust trace-replay asserts; the trf converged position/clock is a BLAS-bound sub-micron solver-agreement target, never 0 ULP.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "0 ULP certified only against env.json. The SPP residual + 2-point FD Jacobian are libm/arithmetic-bound; the trf SVD is BLAS-bound (Apple Accelerate) and out of scope for 0 ULP.",
+    "sp3_interp_reference": "position: RTKLIB preceph.c interppol/pephpos (sliding-window degree-10 Lagrange + OMGE per-node rotation), certified in sp3::interp::interp_tests; these trace fields recomputed through the corrected production substrate. clock: scipy.interpolate.CubicSpline (unchanged)."
+  },
+  "geodetic_crosscheck": {
+    "note": "meters/radians-native geodetic recipe vs the core itrs_to_geodetic_compute, both replicating Skyfield's 3-iteration AU-internal algorithm. The 0-ULP claim: the meters-native lat/lon equal the core's INTERNAL radians bit-for-bit, and meters-native height equals core alt_km*1000. The core's deg API output (lat_deg/lon_deg) is recorded for reference; its deg->rad round-trip is two roundings and is NOT bit-identical to the raw radians (the SPP loop never crosses the deg boundary).",
+    "cases": [
+      {
+        "ecef_km": [
+          "0x40b18420c41ae562",
+          "0x408134a74b49da59",
+          "0x40b1878f7f9bc2c1"
+        ],
+        "meters_native": {
+          "lat_rad": "0x3fe921fb5432aa64",
+          "lon_rad": "0x3fbf46bb9c109320",
+          "height_m": "0x4072c00000004857"
+        },
+        "core_internal": {
+          "lat_rad": "0x3fe921fb5432aa64",
+          "lon_rad": "0x3fbf46bb9c109320",
+          "alt_km": "0x3fd3333333337d47"
+        },
+        "core_api_deg": {
+          "lat_deg": "0x40467ffffff052e0",
+          "lon_deg": "0x401bfffffffffffc"
+        },
+        "height_m_from_core_alt_km": "0x4072c00000004857",
+        "lat_rad_zero_ulp": true,
+        "lon_rad_zero_ulp": true,
+        "height_m_zero_ulp": true
+      },
+      {
+        "ecef_km": [
+          "0x40af400000000000",
+          "0x40a7700000000000",
+          "0x40b1940000000000"
+        ],
+        "meters_native": {
+          "lat_rad": "0x3fe78d21e99f49b3",
+          "lon_rad": "0x3fe4978fa3269ee0",
+          "height_m": "0x4115ddf6dd21b053"
+        },
+        "core_internal": {
+          "lat_rad": "0x3fe78d21e99f49b3",
+          "lon_rad": "0x3fe4978fa3269ee0",
+          "alt_km": "0x40766450c1abb69b"
+        },
+        "core_api_deg": {
+          "lat_deg": "0x4045158f60fd3ae8",
+          "lon_deg": "0x40426f58ce59e23b"
+        },
+        "height_m_from_core_alt_km": "0x4115ddf6dd21b053",
+        "lat_rad_zero_ulp": true,
+        "lon_rad_zero_ulp": true,
+        "height_m_zero_ulp": true
+      },
+      {
+        "ecef_km": [
+          "0xc0a3880000000000",
+          "0x40b57c0000000000",
+          "0xc0a7700000000000"
+        ],
+        "meters_native": {
+          "lat_rad": "0xbfdda8cbc50bfca7",
+          "lon_rad": "0x3ffff572aded0be8",
+          "height_m": "0x4116ac56531547dc"
+        },
+        "core_internal": {
+          "lat_rad": "0xbfdda8cbc50bfca7",
+          "lon_rad": "0x3ffff572aded0be8",
+          "alt_km": "0x407737a42c1dfbc3"
+        },
+        "core_api_deg": {
+          "lat_deg": "0xc03a8d6ca8090921",
+          "lon_deg": "0x405c9c69c14fb2ae"
+        },
+        "height_m_from_core_alt_km": "0x4116ac56531547dc",
+        "lat_rad_zero_ulp": true,
+        "lon_rad_zero_ulp": true,
+        "height_m_zero_ulp": true
+      }
+    ]
+  },
+  "generator": {
+    "scipy": "1.17.1",
+    "numpy": "2.4.6",
+    "gnssanalysis": "0.0.59",
+    "python": "3.14.4",
+    "executable": "python"
+  },
+  "fixture": {
+    "level": "L1_iono",
+    "level_note": "L0 + Klobuchar L1 ionosphere",
+    "inputs": {
+      "sp3_file": "GRG0MGXFIN_20201760000_01D_15M_ORB.SP3",
+      "sp3_provenance": "parity/fixtures/sp3/PROVENANCE.md",
+      "epoch_index": 48,
+      "t_rx_j2000_s": "0x41c342aa00000000",
+      "t_rx_j2000_s_int": 646272000,
+      "t_rx_sod_s": "0x40e5180000000000",
+      "doy": "0x4066100000000000",
+      "rx_truth_geodetic": {
+        "lat_deg": "0x4046800000000000",
+        "lon_deg": "0x401c000000000000",
+        "height_m": "0x4072c00000000000"
+      },
+      "rx_truth_ecef_m": [
+        "0x41511b07ff824402",
+        "0x4120cd6b5f861f3b",
+        "0x41511e62229e1c30"
+      ],
+      "b_truth_m": "0x40dd4c0000000000",
+      "klobuchar_alpha": [
+        "0x3e45ffffffffff61",
+        "0x3e57fffffffffe3f",
+        "0xbe6fffffffffffa2",
+        "0xbe800000000002c4"
+      ],
+      "klobuchar_beta": [
+        "0x40f7800000000000",
+        "0x4100000000000000",
+        "0xc0f0000000000000",
+        "0xc122000000000000"
+      ],
+      "met": {
+        "pressure_hpa": "0x408faa0000000000",
+        "temperature_k": "0x4072026666666666",
+        "relative_humidity": "0x3fe0000000000000"
+      },
+      "observations": [
+        {
+          "sat_id": "G01",
+          "p_meas_m": "0x417b0050747ae043"
+        },
+        {
+          "sat_id": "G02",
+          "p_meas_m": "0x417dc8eddae2db6f"
+        },
+        {
+          "sat_id": "G03",
+          "p_meas_m": "0x417d7796ff1aba97"
+        },
+        {
+          "sat_id": "G05",
+          "p_meas_m": "0x417a86ac55e37bee"
+        },
+        {
+          "sat_id": "G06",
+          "p_meas_m": "0x417f5a5cf48b3178"
+        },
+        {
+          "sat_id": "G07",
+          "p_meas_m": "0x417856f49231d155"
+        },
+        {
+          "sat_id": "G08",
+          "p_meas_m": "0x4176b8c78a1632c7"
+        },
+        {
+          "sat_id": "G09",
+          "p_meas_m": "0x417ac4d7b89f957c"
+        },
+        {
+          "sat_id": "G10",
+          "p_meas_m": "0x4175aa501787c657"
+        },
+        {
+          "sat_id": "G11",
+          "p_meas_m": "0x417912eee19ff352"
+        },
+        {
+          "sat_id": "G12",
+          "p_meas_m": "0x417d71f386158c98"
+        },
+        {
+          "sat_id": "G13",
+          "p_meas_m": "0x4178cd054bac2d14"
+        },
+        {
+          "sat_id": "G14",
+          "p_meas_m": "0x417ac2fa0a0ff79f"
+        },
+        {
+          "sat_id": "G15",
+          "p_meas_m": "0x417816ea06f90cc3"
+        },
+        {
+          "sat_id": "G16",
+          "p_meas_m": "0x417387ac1c68a3d4"
+        },
+        {
+          "sat_id": "G17",
+          "p_meas_m": "0x417e9e5b13e4ca5c"
+        },
+        {
+          "sat_id": "G18",
+          "p_meas_m": "0x4174c28952edd3a0"
+        },
+        {
+          "sat_id": "G19",
+          "p_meas_m": "0x417f9ccb42c75faa"
+        },
+        {
+          "sat_id": "G20",
+          "p_meas_m": "0x41744394d34eb518"
+        },
+        {
+          "sat_id": "G21",
+          "p_meas_m": "0x4173d840a1f8d23f"
+        },
+        {
+          "sat_id": "G22",
+          "p_meas_m": "0x417c1b7209e6822d"
+        },
+        {
+          "sat_id": "G24",
+          "p_meas_m": "0x417d0de063d42cd7"
+        },
+        {
+          "sat_id": "G25",
+          "p_meas_m": "0x417b4abc0b1d78fd"
+        },
+        {
+          "sat_id": "G26",
+          "p_meas_m": "0x417425d56c0ed5c8"
+        },
+        {
+          "sat_id": "G27",
+          "p_meas_m": "0x41745a4bcc90ab9b"
+        },
+        {
+          "sat_id": "G28",
+          "p_meas_m": "0x417d51496d38c952"
+        },
+        {
+          "sat_id": "G29",
+          "p_meas_m": "0x41787ae91d27d3ce"
+        },
+        {
+          "sat_id": "G30",
+          "p_meas_m": "0x4179eaeb7aaa0bd7"
+        },
+        {
+          "sat_id": "G31",
+          "p_meas_m": "0x4179031b43ec9c87"
+        },
+        {
+          "sat_id": "G32",
+          "p_meas_m": "0x417a6e35fb257530"
+        }
+      ]
+    },
+    "options": {
+      "method": "trf",
+      "jac": "2-point",
+      "gtol": "0x3ddb7cdfd9d7bdbb",
+      "ftol": "0x3e45798ee2308c3a",
+      "xtol": "0x3e45798ee2308c3a",
+      "x_scale_signature_default": "None",
+      "x_scale_resolved": "1.0 (uniform; None -> ones, from_jac=False)",
+      "tr_solver_signature_default": "None",
+      "tr_solver_resolved": "exact (None -> 'exact' for dense Jacobian)",
+      "diff_step": "None",
+      "fd_rel_step_2point": "0x3e50000000000000",
+      "bounds_signature_default": "(-inf, inf)",
+      "bounds_lb": [
+        "-inf",
+        "-inf",
+        "-inf",
+        "-inf"
+      ],
+      "bounds_ub": [
+        "+inf",
+        "+inf",
+        "+inf",
+        "+inf"
+      ],
+      "bounds_note": "unbounded; sentinels '-inf'/'+inf' map to f64 infinities, not hex-float",
+      "loss": "linear",
+      "max_nfev_signature_default": "None",
+      "max_nfev_resolved": 400,
+      "scipy_version": "1.17.1",
+      "numpy_version": "2.4.6",
+      "eps_f64": "0x3cb0000000000000"
+    },
+    "frozen": {
+      "initial_guess_x0": [
+        "0x41512a8800000000",
+        "0x411e848000000000",
+        "0x41512a8800000000",
+        "0x0000000000000000"
+      ],
+      "satellite_ordering": "ascending GnssSatelliteId (SP3 BTreeMap / ascending PRN)",
+      "residual_ordering": "used_sats ascending-id order, index-aligned to used_sats",
+      "weighting": {
+        "model": "elevation sin^2: w_k = sin^2(el_k)/sigma0^2",
+        "sigma0_m": "0x3ff0000000000000",
+        "residual_seen_by_solver": "sqrt(w_k)*(P_meas - P_hat)",
+        "geometry": "el at the FROZEN initial-guess geometry, constant across iterates"
+      },
+      "elevation_mask": {
+        "mask_rad": "0x3fc657184ae74487",
+        "mask_deg": "0x4024000000000000",
+        "equality": "exclude iff el_rad < mask_rad (strict <; el == mask KEPT)",
+        "evaluated": "once at the frozen initial-guess geometry; used set fixed for the solve"
+      },
+      "rejection_order": [
+        "no_ephemeris",
+        "low_elevation",
+        "outlier_OFF_in_v1"
+      ],
+      "transmit_time_iterations": 2,
+      "sagnac": {
+        "omega_e_dot_rad_s": "0x3f131da7d7cb8d5b",
+        "form": "closed-form +theta Z-rotation; theta = OMEGA_E_DOT*tau; sat_rot.x= cos*sx+sin*sy, sat_rot.y=-sin*sx+cos*sy, sat_rot.z=sz"
+      },
+      "relativistic_convention": "none added; SP3 clock used as-is",
+      "max_nfev": 400,
+      "constants": {
+        "c": "0x41b1de784a000000",
+        "f_l1": "0x41d779c018000000",
+        "omega_e_dot": "0x3f131da7d7cb8d5b",
+        "no_fma": true
+      },
+      "clock_unit_boundary": "solve b in meters; report rx_clock_s = b/c at the API boundary only",
+      "fd_step": "2-point forward, rel_step = sqrt(eps) = 2^-26 (FD_REL_STEP_2POINT); sign=(x>=0)?+1:-1 (x==0->+1); h=relstep*sign*max(1,|x|); dx=(x+h)-x",
+      "az_el_geometry_in_residual": "recomputed per iterate from current receiver state (for iono/tropo terms); mask+weights frozen at initial guess"
+    },
+    "used_sats": [
+      "G08",
+      "G10",
+      "G16",
+      "G18",
+      "G20",
+      "G21",
+      "G26",
+      "G27"
+    ],
+    "rejected_sats": [
+      {
+        "id": "G01",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G02",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G03",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G05",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G06",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G07",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G09",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G11",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G12",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G13",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G14",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G15",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G17",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G19",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G22",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G24",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G25",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G28",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G29",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G30",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G31",
+        "reason": "low_elevation"
+      },
+      {
+        "id": "G32",
+        "reason": "low_elevation"
+      }
+    ],
+    "used_sat_geometry": {
+      "G08": {
+        "el_rad": "0x3fd4c20eea520bee",
+        "az_rad": "0x40141195c392b6ea",
+        "weight": "0x3fb9fff20ce80607",
+        "sqrt_weight": "0x3fd4655fe65eb8a1"
+      },
+      "G10": {
+        "el_rad": "0x3fe2f939eaf6cf7c",
+        "az_rad": "0x40051f082126ad00",
+        "weight": "0x3fd3fbcc70866e5d",
+        "sqrt_weight": "0x3fe1e19680fa0055"
+      },
+      "G16": {
+        "el_rad": "0x3ff47436c1f4ead8",
+        "az_rad": "0x4012e9c9c597d416",
+        "weight": "0x3fed573ab98f344f",
+        "sqrt_weight": "0x3feea43ba534a032"
+      },
+      "G18": {
+        "el_rad": "0x3fe7b9a7ca1e5bd7",
+        "az_rad": "0x3fedc72b15a7cf15",
+        "weight": "0x3fdd3046c77db7da",
+        "sqrt_weight": "0x3fe59c4f2414d437"
+      },
+      "G20": {
+        "el_rad": "0x3fec0d6823557b54",
+        "az_rad": "0x3ffebb6cb7328444",
+        "weight": "0x3fe2e748b453e1ed",
+        "sqrt_weight": "0x3fe8984d3950af75"
+      },
+      "G21": {
+        "el_rad": "0x3ff65c538eb51202",
+        "az_rad": "0x3fecc15ca7e4337f",
+        "weight": "0x3fef0c8c065f7df7",
+        "sqrt_weight": "0x3fef855afc689737"
+      },
+      "G26": {
+        "el_rad": "0x3feee48b7b9949c7",
+        "az_rad": "0x4008ade9d9071764",
+        "weight": "0x3fe5a2eb0c983da1",
+        "sqrt_weight": "0x3fea50154ffc6136"
+      },
+      "G27": {
+        "el_rad": "0x3febfd7330ff2bdf",
+        "az_rad": "0x4014d29565a60d8d",
+        "weight": "0x3fe2d79625374201",
+        "sqrt_weight": "0x3fe88e14dd53965a"
+      }
+    },
+    "trace_states": [
+      {
+        "trace_index": 0,
+        "x": [
+          "0x41512a8800000000",
+          "0x411e848000000000",
+          "0x41512a8800000000",
+          "0x0000000000000000"
+        ],
+        "per_sat": [
+          {
+            "prn": "G08",
+            "sqrt_w": "0x3fd4655fe65eb8a1",
+            "tau_s": "0x3fb443c61c26dfeb",
+            "t_tx_j2000_s": "0x41c342a9fff5de1d",
+            "sat_ecef_m": [
+              "0x415c5fadf5d19825",
+              "0xc173cd0e04dcc95f",
+              "0x416be3297903d302"
+            ],
+            "dt_sat_s": "0xbf04431cdfa5d47d",
+            "theta_rad": "0x3ed8360aad357b37",
+            "sat_rot_ecef_m": [
+              "0x415c5f8fff594346",
+              "0xc173cd10b3d10b55",
+              "0x416be3297903d302"
+            ],
+            "rho_m": "0x4176a1c8aed0279a",
+            "az_rad": "0x40141195c39226c2",
+            "el_rad": "0x3fd4c20eea512cbe",
+            "iono_m": "0x40215d903b3121bd",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4176a49d5b03133c",
+            "residual_m": "0x40d9b47dfddd6ba0"
+          },
+          {
+            "prn": "G10",
+            "sqrt_w": "0x3fe1e19680fa0055",
+            "tau_s": "0x3fb349830148069d",
+            "t_tx_j2000_s": "0x41c342a9fff65b3e",
+            "sat_ecef_m": [
+              "0x4176cfbdf0f389be",
+              "0x416659469b20287e",
+              "0x413bb5192315422f"
+            ],
+            "dt_sat_s": "0xbf38f0dc8cf18e99",
+            "theta_rad": "0x3ed70b0b2260673b",
+            "sat_rot_ecef_m": [
+              "0x4176cfc1f6ea5cd8",
+              "0x416659362deed743",
+              "0x413bb5192315422f"
+            ],
+            "rho_m": "0x41758a478cf03e95",
+            "az_rad": "0x40051f0821259b12",
+            "el_rad": "0x3fe2f939eaf34edf",
+            "iono_m": "0x401d9308709a23ef",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4175a622b70814b3",
+            "residual_m": "0x40c2ac6fbf159a2d"
+          },
+          {
+            "prn": "G16",
+            "sqrt_w": "0x3feea43ba534a032",
+            "tau_s": "0x3fb16419422e4c5e",
+            "t_tx_j2000_s": "0x41c342a9fff74df3",
+            "sat_ecef_m": [
+              "0x4171e9ecf669e7a2",
+              "0xc14d2351a2b28e3f",
+              "0x4171824fcbe6d649"
+            ],
+            "dt_sat_s": "0xbf26db8a9a11a8be",
+            "theta_rad": "0x3ed4c719dbb4e46c",
+            "sat_rot_ecef_m": [
+              "0x4171e9ebc7b312a5",
+              "0xc14d238029563a9c",
+              "0x4171824fcbe6d649"
+            ],
+            "rho_m": "0x41736c2adb641d15",
+            "az_rad": "0x4012e9c9c599d03c",
+            "el_rad": "0x3ff47436c1f519fe",
+            "iono_m": "0x40117ecf5c64f48e",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417378eeabfee435",
+            "residual_m": "0x40ec3a7f7943ceb5"
+          },
+          {
+            "prn": "G18",
+            "sqrt_w": "0x3fe59c4f2414d437",
+            "tau_s": "0x3fb2a34d351aa3bf",
+            "t_tx_j2000_s": "0x41c342a9fff6ae59",
+            "sat_ecef_m": [
+              "0x4159720a1641804f",
+              "0x416a3003fe675063",
+              "0x4174b78c3caa0472"
+            ],
+            "dt_sat_s": "0x3f2e005afa87fe53",
+            "theta_rad": "0x3ed644772ed53708",
+            "sat_rot_ecef_m": [
+              "0x4159721c4f4a464e",
+              "0x416a2fff912fb818",
+              "0x4174b78c3caa0472"
+            ],
+            "rho_m": "0x4174d0a7132a6a9d",
+            "az_rad": "0x3fedc72b15a75ab0",
+            "el_rad": "0x3fe7b9a7ca230b22",
+            "iono_m": "0x4017e4283083dd9e",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4174bfe6af281313",
+            "residual_m": "0x40bc79adca766c99"
+          },
+          {
+            "prn": "G20",
+            "sqrt_w": "0x3fe8984d3950af75",
+            "tau_s": "0x3fb24533c581de24",
+            "t_tx_j2000_s": "0x41c342a9fff6dd66",
+            "sat_ecef_m": [
+              "0x41711a1c581a5162",
+              "0x416c79eddb6395d9",
+              "0x416870c1dfd6cd00"
+            ],
+            "dt_sat_s": "0x3f41488c91635175",
+            "theta_rad": "0x3ed5d40a9116e7c1",
+            "sat_rot_ecef_m": [
+              "0x41711a213346a47c",
+              "0x416c79e230ecb28c",
+              "0x416870c1dfd6cd00"
+            ],
+            "rho_m": "0x4174678fa9206449",
+            "az_rad": "0x3ffebb6cb7337b3b",
+            "el_rad": "0x3fec0d682351f179",
+            "iono_m": "0x4015f9825d8e9c85",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417440f535349c95",
+            "residual_m": "0x40c02198baada42c"
+          },
+          {
+            "prn": "G21",
+            "sqrt_w": "0x3fef855afc689737",
+            "tau_s": "0x3fb1bd605d4e56be",
+            "t_tx_j2000_s": "0x41c342a9fff72150",
+            "sat_ecef_m": [
+              "0x417036665c59b4df",
+              "0x4151f6172a2b8f54",
+              "0x4173992c0e9a57a4"
+            ],
+            "dt_sat_s": "0x3ef04d2d82791a9d",
+            "theta_rad": "0x3ed531c3c5566137",
+            "sat_rot_ecef_m": [
+              "0x41703667d9068e7a",
+              "0x4151f601b057418d",
+              "0x4173992c0e9a57a4"
+            ],
+            "rho_m": "0x4173cfdf292f8a32",
+            "az_rad": "0x3fecc15ca7e9f0a4",
+            "el_rad": "0x3ff65c538eb6ddf2",
+            "iono_m": "0x40113ea2ef365083",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4173cebc238e111b",
+            "residual_m": "0x40e2c0086919b1f4"
+          },
+          {
+            "prn": "G26",
+            "sqrt_w": "0x3fea50154ffc6136",
+            "tau_s": "0x3fb2109d4a329ff2",
+            "t_tx_j2000_s": "0x41c342a9fff6f7b1",
+            "sat_ecef_m": [
+              "0x4177eef99c72dc62",
+              "0x414a8292515f8912",
+              "0x415fb0416aaab663"
+            ],
+            "dt_sat_s": "0x3f2e4f0b3c8bccf6",
+            "theta_rad": "0x3ed595366641641b",
+            "sat_rot_ecef_m": [
+              "0x4177eefaba8650f8",
+              "0x414a8251bfa9247d",
+              "0x415fb0416aaab663"
+            ],
+            "rho_m": "0x41742cd5695f48a3",
+            "az_rad": "0x4008ade9d9056f89",
+            "el_rad": "0x3feee48b7b9bac8e",
+            "iono_m": "0x40149dbb7abb0e1e",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41741be907919752",
+            "residual_m": "0x40e051ce79d75414"
+          },
+          {
+            "prn": "G27",
+            "sqrt_w": "0x3fe88e14dd53965a",
+            "tau_s": "0x3fb213fe330933b6",
+            "t_tx_j2000_s": "0x41c342a9fff6f601",
+            "sat_ecef_m": [
+              "0x416840ad0d22d70b",
+              "0xc164407a0f21a4bc",
+              "0x4173953e3b9201e1"
+            ],
+            "dt_sat_s": "0xbf358c235562a7f6",
+            "theta_rad": "0x3ed5993fbdd747f4",
+            "sat_rot_ecef_m": [
+              "0x416840a6377b192e",
+              "0xc16440823e6c0b1e",
+              "0x4173953e3b9201e1"
+            ],
+            "rho_m": "0x4174309c397ed1ba",
+            "az_rad": "0x4014d29565a56aba",
+            "el_rad": "0x3febfd7330fbd2d7",
+            "iono_m": "0x4014c4e1d1dbd027",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417448ad0c8603b0",
+            "residual_m": "0x40eb0a97f28749c2"
+          }
+        ],
+        "residual": [
+          "0x40d9b47dfddd6ba0",
+          "0x40c2ac6fbf159a2d",
+          "0x40ec3a7f7943ceb5",
+          "0x40bc79adca766c99",
+          "0x40c02198baada42c",
+          "0x40e2c0086919b1f4",
+          "0x40e051ce79d75414",
+          "0x40eb0a97f28749c2"
+        ],
+        "cost": "0x41f273c9f2aed9d8",
+        "fd_2point": {
+          "rel_step": "0x3e50000000000000",
+          "perturbations": [
+            {
+              "param_index": 0,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb12a8800000000",
+              "dx": "0x3fb12a8800000000",
+              "x_perturbed": [
+                "0x41512a88044aa200",
+                "0x411e848000000000",
+                "0x41512a8800000000",
+                "0x0000000000000000"
+              ],
+              "f_perturbed": [
+                "0x40d9b47e2933391f",
+                "0x40c2ac73dec68511",
+                "0x40ec3a80ea2f0a6f",
+                "0x40bc79aef18288a6",
+                "0x40c0219cdefda57f",
+                "0x40e2c009aeabaf76",
+                "0x40e051d0319a7cd8",
+                "0x40eb0a989615eff9"
+              ],
+              "jac_column": [
+                "0x3fa4331ccca7846e",
+                "0x3fdebf87f9b1a8b4",
+                "0x3fe57da50eeee005",
+                "0x3fb1311fc115df65",
+                "0x3fdee1fa20844b9b",
+                "0x3fe2f75f1a895fd7",
+                "0x3fe99e1323eff90a",
+                "0x3fd30ea72ad54f0b"
+              ]
+            },
+            {
+              "param_index": 1,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f7e848000000000",
+              "dx": "0x3f7e848000000000",
+              "x_perturbed": [
+                "0x41512a8800000000",
+                "0x411e848007a12000",
+                "0x41512a8800000000",
+                "0x0000000000000000"
+              ],
+              "f_perturbed": [
+                "0x40d9b47ddb001b37",
+                "0x40c2ac7002df346a",
+                "0x40ec3a7f6cdfeff1",
+                "0x40bc79ae9244b07f",
+                "0x40c02199394488a4",
+                "0x40e2c00875458c7e",
+                "0x40e051ce80e83833",
+                "0x40eb0a97d9eb9dc2"
+              ],
+              "jac_column": [
+                "0xbfd24647fa1a0cf2",
+                "0x3fd1c2b19a847b24",
+                "0xbfc9fe7f88765ba7",
+                "0x3fda32c082491afc",
+                "0x3fe096593ec460ee",
+                "0x3fc98a95208e1501",
+                "0x3fbd993458cd20b0",
+                "0xbfd9ca5d9e40c847"
+              ]
+            },
+            {
+              "param_index": 2,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb12a8800000000",
+              "dx": "0x3fb12a8800000000",
+              "x_perturbed": [
+                "0x41512a8800000000",
+                "0x411e848000000000",
+                "0x41512a88044aa200",
+                "0x0000000000000000"
+              ],
+              "f_perturbed": [
+                "0x40d9b47e932d58c0",
+                "0x40c2ac6f2d354dd3",
+                "0x40ec3a80df393365",
+                "0x40bc79b6f04b8e9f",
+                "0x40c0219b4af1211e",
+                "0x40e2c00a0b24599d",
+                "0x40e051cecb2226f4",
+                "0x40eb0a9931c3933f"
+              ],
+              "jac_column": [
+                "0x3fc165aaa76788bd",
+                "0xbfb10003b945a7da",
+                "0x3fe4da3156e9d9c4",
+                "0x3fe10d9fef963d4d",
+                "0x3fd31d2b8dc55001",
+                "0x3fe85a6777700298",
+                "0x3fc2f0ba1e9829e6",
+                "0x3fe298f81b919d93"
+              ]
+            },
+            {
+              "param_index": 3,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3e50000000000000",
+              "dx": "0x3e50000000000000",
+              "x_perturbed": [
+                "0x41512a8800000000",
+                "0x411e848000000000",
+                "0x41512a8800000000",
+                "0x3e50000000000000"
+              ],
+              "f_perturbed": [
+                "0x40d9b47dfddb3316",
+                "0x40c2ac6fbf1edfe7",
+                "0x40ec3a7f794504f4",
+                "0x40bc79adca64104c",
+                "0x40c02198bab75e68",
+                "0x40e2c0086917adcc",
+                "0x40e051ce79d9a5c3",
+                "0x40eb0a97f284194e"
+              ],
+              "jac_column": [
+                "0xbfd4680000000000",
+                "0xbfe1e20000000000",
+                "0xbfeea40000000000",
+                "0xbfe59c8000000000",
+                "0xbfe8990000000000",
+                "0xbfef880000000000",
+                "0xbfea500000000000",
+                "0xbfe8900000000000"
+              ]
+            }
+          ],
+          "jac": [
+            [
+              "0x3fa4331ccca7846e",
+              "0xbfd24647fa1a0cf2",
+              "0x3fc165aa816c3495",
+              "0xbfd4640000000000"
+            ],
+            [
+              "0x3fdebf881b03f0f7",
+              "0x3fd1c2b3f290abb4",
+              "0xbfb10002aeb365c4",
+              "0xbfe1e20000000000"
+            ],
+            [
+              "0x3fe57da50eeee005",
+              "0xbfc9fe838c111ada",
+              "0x3fe4da3156e9d9c4",
+              "0xbfeea40000000000"
+            ],
+            [
+              "0x3fb1311fc124c925",
+              "0x3fda32c082491afc",
+              "0x3fe10da003ba6feb",
+              "0xbfe59c0000000000"
+            ],
+            [
+              "0x3fdee1fa20844b9b",
+              "0x3fe096593ec460ee",
+              "0x3fd31d2b5fecb7c5",
+              "0xbfe8990000000000"
+            ],
+            [
+              "0x3fe2f75f37f47af0",
+              "0x3fc98a9522a6f3f5",
+              "0x3fe85a6777700298",
+              "0xbfef840000000000"
+            ],
+            [
+              "0x3fe99e130b6990d5",
+              "0x3fbd993458cd20b0",
+              "0x3fc2f0ba80b1cab9",
+              "0xbfea500000000000"
+            ],
+            [
+              "0x3fd30ea72af3228a",
+              "0xbfd9ca5f394b7b29",
+              "0x3fe298f804bbb015",
+              "0xbfe88c0000000000"
+            ]
+          ],
+          "scipy_approx_derivative_bit_identical": true
+        },
+        "grad_JT_f": [
+          "0x40fc0fb45caf2cff",
+          "0xc0d3a81806a7c214",
+          "0x40fbaa9b43642276",
+          "0xc106f903e50176cf"
+        ],
+        "grad_inf_norm": "0x4106f903e50176cf"
+      },
+      {
+        "trace_index": 1,
+        "x": [
+          "0x41511afb1b7a6da1",
+          "0x4120cd26d04835d2",
+          "0x41511e5b5dc0b859",
+          "0x40dd4c6c60cf2cc2"
+        ],
+        "per_sat": [
+          {
+            "prn": "G08",
+            "sqrt_w": "0x3fd4655fe65eb8a1",
+            "tau_s": "0x3fb44f44bf3afa96",
+            "t_tx_j2000_s": "0x41c342a9fff5d85e",
+            "sat_ecef_m": [
+              "0x415c5fadf0d8936b",
+              "0xc173cd0e09f90fa3",
+              "0x416be3296b9da344"
+            ],
+            "dt_sat_s": "0xbf04431cdfa5471d",
+            "theta_rad": "0x3ed843c65cf9bd60",
+            "sat_rot_ecef_m": [
+              "0x415c5f8fe9615300",
+              "0xc173cd10ba72f8b9",
+              "0x416be3296b9da344"
+            ],
+            "rho_m": "0x4176ae9f0fc45ac6",
+            "az_rad": "0x4014188829059844",
+            "el_rad": "0x3fd4411bf6d972db",
+            "iono_m": "0x4021925a9cdd84c5",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4176b8c6d8b5cd2c",
+            "residual_m": "0x400c438ad52c3041"
+          },
+          {
+            "prn": "G10",
+            "sqrt_w": "0x3fe1e19680fa0055",
+            "tau_s": "0x3fb346b4e2157bf1",
+            "t_tx_j2000_s": "0x41c342a9fff65ca6",
+            "sat_ecef_m": [
+              "0x4176cfbdf0bf5490",
+              "0x416659469b50430c",
+              "0x413bb51945ced9df"
+            ],
+            "dt_sat_s": "0xbf38f0dc8cf1b073",
+            "theta_rad": "0x3ed707b12a4e9be1",
+            "sat_rot_ecef_m": [
+              "0x4176cfc1f6205b14",
+              "0x4166593630828ed0",
+              "0x413bb51945ced9df"
+            ],
+            "rho_m": "0x4175872590314a10",
+            "az_rad": "0x40053e648c465c57",
+            "el_rad": "0x3fe324efc1c985dc",
+            "iono_m": "0x401d79c2afc929f1",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4175aa53d4fc3d1c",
+            "residual_m": "0xc040b81c8905bf33"
+          },
+          {
+            "prn": "G16",
+            "sqrt_w": "0x3feea43ba534a032",
+            "tau_s": "0x3fb16abfc217eae4",
+            "t_tx_j2000_s": "0x41c342a9fff74aa0",
+            "sat_ecef_m": [
+              "0x4171e9ecf323eb64",
+              "0xc14d2351b28f50ac",
+              "0x4171824fcebbf46c"
+            ],
+            "dt_sat_s": "0xbf26db8a9a116122",
+            "theta_rad": "0x3ed4cf0be725b123",
+            "sat_rot_ecef_m": [
+              "0x4171e9ebc3f95313",
+              "0xc14d23804afda08e",
+              "0x4171824fcebbf46c"
+            ],
+            "rho_m": "0x417373983ef0021d",
+            "az_rad": "0x4012f2a1681dd8f6",
+            "el_rad": "0x3ff449cb50e7a7f1",
+            "iono_m": "0x401198d79b0fa455",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417387af2b0b1dda",
+            "residual_m": "0xc0476b482ed864b2"
+          },
+          {
+            "prn": "G18",
+            "sqrt_w": "0x3fe59c4f2414d437",
+            "tau_s": "0x3fb29f1d0a2d776d",
+            "t_tx_j2000_s": "0x41c342a9fff6b071",
+            "sat_ecef_m": [
+              "0x4159720a0cf45c5c",
+              "0x416a30040199c5fb",
+              "0x4174b78c3c5d8d04"
+            ],
+            "dt_sat_s": "0x3f2e005afa885dd5",
+            "theta_rad": "0x3ed63f76389e87f2",
+            "sat_rot_ecef_m": [
+              "0x4159721c41e4db27",
+              "0x416a2fff9560d55c",
+              "0x4174b78c3c5d8d04"
+            ],
+            "rho_m": "0x4174cbf9abe7ef10",
+            "az_rad": "0x3fedd2d1474bd0b8",
+            "el_rad": "0x3fe7fc84b6d3cbf9",
+            "iono_m": "0x4017cc2a32c5d1a8",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4174c28c629dd324",
+            "residual_m": "0xc04089fc5ed33344"
+          },
+          {
+            "prn": "G20",
+            "sqrt_w": "0x3fe8984d3950af75",
+            "tau_s": "0x3fb24101f08b666a",
+            "t_tx_j2000_s": "0x41c342a9fff6df7f",
+            "sat_ecef_m": [
+              "0x41711a1c56696d78",
+              "0x416c79eddb053b00",
+              "0x416870c1e4ec8d66"
+            ],
+            "dt_sat_s": "0x3f41488c91635112",
+            "theta_rad": "0x3ed5cf079ddf8914",
+            "sat_rot_ecef_m": [
+              "0x41711a21307855a8",
+              "0x416c79e2333c01a7",
+              "0x416870c1e4ec8d66"
+            ],
+            "rho_m": "0x417462e0685a7c71",
+            "az_rad": "0x3ffeee88f9ca6de9",
+            "el_rad": "0x3fec5f2610247037",
+            "iono_m": "0x4015dfaa5166d1fe",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417443990f1f8859",
+            "residual_m": "0xc04a0817aeff4e6b"
+          },
+          {
+            "prn": "G21",
+            "sqrt_w": "0x3fef855afc689737",
+            "tau_s": "0x3fb1bf5a68601e6c",
+            "t_tx_j2000_s": "0x41c342a9fff72053",
+            "sat_ecef_m": [
+              "0x417036665d37d1a7",
+              "0x4151f61726f234b8",
+              "0x4173992c0e091005"
+            ],
+            "dt_sat_s": "0x3ef04d2d8278741f",
+            "theta_rad": "0x3ed534205c6c0b33",
+            "sat_rot_ecef_m": [
+              "0x41703667da0f1604",
+              "0x4151f601aab946e3",
+              "0x4173992c0e091005"
+            ],
+            "rho_m": "0x4173d21454cb5197",
+            "az_rad": "0x3febb0fc79886052",
+            "el_rad": "0x3ff67d73c53623fb",
+            "iono_m": "0x40114a0865d4d93a",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4173d8446a6fa231",
+            "residual_m": "0xc04dcfb8473f1d86"
+          },
+          {
+            "prn": "G26",
+            "sqrt_w": "0x3fea50154ffc6136",
+            "tau_s": "0x3fb212f46a407e83",
+            "t_tx_j2000_s": "0x41c342a9fff6f686",
+            "sat_ecef_m": [
+              "0x4177eef99bf2cd12",
+              "0x414a82924e65cf72",
+              "0x415fb041714171f8"
+            ],
+            "dt_sat_s": "0x3f2e4f0b3c8ba921",
+            "theta_rad": "0x3ed5980232c8e4a1",
+            "sat_rot_ecef_m": [
+              "0x4177eefaba2b511c",
+              "0x414a8251b451f98a",
+              "0x415fb041714171f8"
+            ],
+            "rho_m": "0x41742f728b0a0438",
+            "az_rad": "0x4008df792989d683",
+            "el_rad": "0x3feeee985335d0a0",
+            "iono_m": "0x4014a9b90d8be22e",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417425d944847d11",
+            "residual_m": "0xc0494bfa6dbb9850"
+          },
+          {
+            "prn": "G27",
+            "sqrt_w": "0x3fe88e14dd53965a",
+            "tau_s": "0x3fb21d3782087683",
+            "t_tx_j2000_s": "0x41c342a9fff6f164",
+            "sat_ecef_m": [
+              "0x416840ad0b57fa32",
+              "0xc164407a1aeacfce",
+              "0x4173953e3905cad9"
+            ],
+            "dt_sat_s": "0xbf358c23556244ff",
+            "theta_rad": "0x3ed5a444e44825e7",
+            "sat_rot_ecef_m": [
+              "0x416840a6323380c2",
+              "0xc16440824e6245c3",
+              "0x4173953e3905cad9"
+            ],
+            "rho_m": "0x41743ae95fc67fcc",
+            "az_rad": "0x4014d4cafe591ee4",
+            "el_rad": "0x3febb7d6519980be",
+            "iono_m": "0x4014fa16d47d6cb1",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41745a4d4ebab92a",
+            "residual_m": "0xc0328522090962a8"
+          }
+        ],
+        "residual": [
+          "0x400c438ad52c3041",
+          "0xc040b81c8905bf33",
+          "0xc0476b482ed864b2",
+          "0xc04089fc5ed33344",
+          "0xc04a0817aeff4e6b",
+          "0xc04dcfb8473f1d86",
+          "0xc0494bfa6dbb9850",
+          "0xc0328522090962a8"
+        ],
+        "cost": "0x40ba895e00bfe43b",
+        "fd_2point": {
+          "rel_step": "0x3e50000000000000",
+          "perturbations": [
+            {
+              "param_index": 0,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11afb1b7a6da1",
+              "dx": "0x3fb11afb1c000000",
+              "x_perturbed": [
+                "0x41511afb1fc12c68",
+                "0x4120cd26d04835d2",
+                "0x41511e5b5dc0b859",
+                "0x40dd4c6c60cf2cc2"
+              ],
+              "f_perturbed": [
+                "0x400c48f557e2bf70",
+                "0xc040b3ff27a6c2fd",
+                "0xc047658a4e33815f",
+                "0xc04089681fd5ca7e",
+                "0xc04a03f4f599ddb3",
+                "0xc04dcaa57c8d7810",
+                "0xc04945212c32dd3f",
+                "0xc032800a2e25a4a6"
+              ],
+              "jac_column": [
+                "0x3fa443a49c5c2e58",
+                "0x3fdeca7700decb57",
+                "0x3fe57b8ffda83070",
+                "0x3fb1554ebed7ab31",
+                "0x3fdef274676d1357",
+                "0x3fe2fb70f6d858d1",
+                "0x3fe99fd32b490bf7",
+                "0x3fd30e62ec684fc0"
+              ]
+            },
+            {
+              "param_index": 1,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f80cd26d04835d2",
+              "dx": "0x3f80cd26d0000000",
+              "x_perturbed": [
+                "0x41511afb1b7a6da1",
+                "0x4120cd26d47b7f86",
+                "0x41511e5b5dc0b859",
+                "0x40dd4c6c60cf2cc2"
+              ],
+              "f_perturbed": [
+                "0x400c3ebe7c553c51",
+                "0xc040b7d23a87edcd",
+                "0xc0476b7f54fe1066",
+                "0xc040898ea71a7825",
+                "0xc04a078cb3d6e5eb",
+                "0xc04dcf834deccae9",
+                "0xc0494bdbe433e465",
+                "0xc03285fb3eb5f12d"
+              ],
+              "jac_column": [
+                "0xbfd24708e39afe0a",
+                "0x3fd1b0c93bfdb6c4",
+                "0xbfca4255baeef3f5",
+                "0x3fda1efefb1c207d",
+                "0x3fe08b45484cf593",
+                "0x3fc9393707221e8b",
+                "0x3fbd14aebde42265",
+                "0xbfd9db2e94542bbf"
+              ]
+            },
+            {
+              "param_index": 2,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11e5b5dc0b859",
+              "dx": "0x3fb11e5b5c000000",
+              "x_perturbed": [
+                "0x41511afb1b7a6da1",
+                "0x4120cd26d04835d2",
+                "0x41511e5b62084f30",
+                "0x40dd4c6c60cf2cc2"
+              ],
+              "f_perturbed": [
+                "0x400c56232eb1a1cf",
+                "0xc040b8ad73313589",
+                "0xc04765b52eb17bae",
+                "0xc040856aca607a77",
+                "0xc04a0587b4ef089c",
+                "0xc04dc93424e7fd7a",
+                "0xc0494ab54cb7608e",
+                "0xc0327b3237ac46cd"
+              ],
+              "jac_column": [
+                "0x3fc1614b28af671d",
+                "0xbfb0ee42f3a9f710",
+                "0x3fe4d7066661df6d",
+                "0x3fe1149f75cf3cb3",
+                "0x3fd328e817e0fc0e",
+                "0x3fe85c8803d7317d",
+                "0x3fc2fe255e202354",
+                "0x3fe2933194093a0b"
+              ]
+            },
+            {
+              "param_index": 3,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f3d4c6c60cf2cc2",
+              "dx": "0x3f3d4c6c60000000",
+              "x_perturbed": [
+                "0x41511afb1b7a6da1",
+                "0x4120cd26d04835d2",
+                "0x41511e5b5dc0b859",
+                "0x40dd4c6c682247da"
+              ],
+              "f_perturbed": [
+                "0x400c434022cff2de",
+                "0xc040b824b8902e59",
+                "0xc0476b5635f30cf7",
+                "0xc0408a06436bb0fb",
+                "0xc04a0822f16858b2",
+                "0xc04dcfc6b5421aa3",
+                "0xc0494c067978fa08",
+                "0xc03285388473ae12"
+              ],
+              "jac_column": [
+                "0xbfd465626c646606",
+                "0xbfe1e198b758a846",
+                "0xbfeea43f6fbfbaaf",
+                "0xbfe59c51d0912e2b",
+                "0xbfe898504455ea80",
+                "0xbfef855ee2cc247c",
+                "0xbfea501891695100",
+                "0xbfe88e17e7141f92"
+              ]
+            }
+          ],
+          "jac": [
+            [
+              "0x3fa443a534fbd528",
+              "0xbfd24708e39afe0a",
+              "0x3fc1614b4ecfc98a",
+              "0xbfd465626c646606"
+            ],
+            [
+              "0x3fdeca7700ded2d3",
+              "0x3fd1b0c93bfdf3b6",
+              "0xbfb0ee42f3a9d927",
+              "0xbfe1e198b7567910"
+            ],
+            [
+              "0x3fe57b8ffda8342e",
+              "0xbfca4255baee7a10",
+              "0x3fe4d7066661e32a",
+              "0xbfeea43f6fbd8b79"
+            ],
+            [
+              "0x3fb1554ebed7ab31",
+              "0x3fda1efefb1be38a",
+              "0x3fe1149f75cf3cb3",
+              "0xbfe59c51d0935d60"
+            ],
+            [
+              "0x3fdef274676d1357",
+              "0x3fe08b4603acd2c9",
+              "0x3fd328e817e0fc0e",
+              "0xbfe898504455ea80"
+            ],
+            [
+              "0x3fe2fb70f6d858d1",
+              "0x3fc9393ac7b0df69",
+              "0x3fe85c8803d7317d",
+              "0xbfef855ee2ce53b1"
+            ],
+            [
+              "0x3fe99fd32b49083a",
+              "0x3fbd14a87a30bf08",
+              "0x3fc2fe24fbc0647e",
+              "0xbfea5018916b8035"
+            ],
+            [
+              "0x3fd30e62ec684fc0",
+              "0xbfd9db2e94542bbf",
+              "0x3fe2933194093a0b",
+              "0xbfe88e17e7141f92"
+            ]
+          ],
+          "scipy_approx_derivative_bit_identical": true
+        },
+        "grad_JT_f": [
+          "0xc063867629d1e19a",
+          "0xc049898bd2f3f4d2",
+          "0xc05f2cf236e4f606",
+          "0x406de9cee379ebfe"
+        ],
+        "grad_inf_norm": "0x406de9cee379ebfe"
+      },
+      {
+        "trace_index": 2,
+        "x": [
+          "0x41511b07ff8463a4",
+          "0x4120cd6b5f8ae9a4",
+          "0x41511e62229e4ba0",
+          "0x40dd4c000260268a"
+        ],
+        "per_sat": [
+          {
+            "prn": "G08",
+            "sqrt_w": "0x3fd4655fe65eb8a1",
+            "tau_s": "0x3fb44f45764f020a",
+            "t_tx_j2000_s": "0x41c342a9fff5d85d",
+            "sat_ecef_m": [
+              "0x415c5fadf0d7b5e2",
+              "0xc173cd0e09f9f352",
+              "0x416be3296b9b4e50"
+            ],
+            "dt_sat_s": "0xbf04431cdfa54705",
+            "theta_rad": "0x3ed843c737b4db0d",
+            "sat_rot_ecef_m": [
+              "0x415c5f8fe95f66c4",
+              "0xc173cd10ba73f4a6",
+              "0x416be3296b9b4e50"
+            ],
+            "rho_m": "0x4176ae9fdc3c8b16",
+            "az_rad": "0x40141889901b39d9",
+            "el_rad": "0x3fd440fb09a85e56",
+            "iono_m": "0x402192694ccea999",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4176b8c78a16d73a",
+            "residual_m": "0xbf0a3435f35255a8"
+          },
+          {
+            "prn": "G10",
+            "sqrt_w": "0x3fe1e19680fa0055",
+            "tau_s": "0x3fb346b1a1086068",
+            "t_tx_j2000_s": "0x41c342a9fff65ca7",
+            "sat_ecef_m": [
+              "0x4176cfbdf0bf2f6e",
+              "0x416659469b506542",
+              "0x413bb51945e78b5d"
+            ],
+            "dt_sat_s": "0xbf38f0dc8cf1b08c",
+            "theta_rad": "0x3ed707ad47070090",
+            "sat_rot_ecef_m": [
+              "0x4176cfc1f61f882d",
+              "0x4166593630857685",
+              "0x413bb51945e78b5d"
+            ],
+            "rho_m": "0x41758721edd4870c",
+            "az_rad": "0x40053e68193d427c",
+            "el_rad": "0x3fe324f6f675fa77",
+            "iono_m": "0x401d79c10e1e51d0",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4175aa501787d7d0",
+            "residual_m": "0xbee386e9eb3902fd"
+          },
+          {
+            "prn": "G16",
+            "sqrt_w": "0x3feea43ba534a032",
+            "tau_s": "0x3fb16abd1d93312b",
+            "t_tx_j2000_s": "0x41c342a9fff74aa1",
+            "sat_ecef_m": [
+              "0x4171e9ecf324e77c",
+              "0xc14d2351b28a8b19",
+              "0x4171824fcebb1a4a"
+            ],
+            "dt_sat_s": "0xbf26db8a9a116138",
+            "theta_rad": "0x3ed4cf08bee22b39",
+            "sat_rot_ecef_m": [
+              "0x4171e9ebc3fa7d2b",
+              "0xc14d23804af1c91c",
+              "0x4171824fcebb1a4a"
+            ],
+            "rho_m": "0x417373954b654391",
+            "az_rad": "0x4012f2a5ec191afb",
+            "el_rad": "0x3ff449c467c34456",
+            "iono_m": "0x401198dde6547740",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417387ac1c68dcba",
+            "residual_m": "0xbf0b3dd266e7c14b"
+          },
+          {
+            "prn": "G18",
+            "sqrt_w": "0x3fe59c4f2414d437",
+            "tau_s": "0x3fb29f1a64b8c22b",
+            "t_tx_j2000_s": "0x41c342a9fff6b073",
+            "sat_ecef_m": [
+              "0x4159720a0ceb79d7",
+              "0x416a3004019cd3ca",
+              "0x4174b78c3c5d43f7"
+            ],
+            "dt_sat_s": "0x3f2e005afa885e32",
+            "theta_rad": "0x3ed63f730f3c4a88",
+            "sat_rot_ecef_m": [
+              "0x4159721c41d96246",
+              "0x416a2fff95648413",
+              "0x4174b78c3c5d43f7"
+            ],
+            "rho_m": "0x4174cbf6b74fdbbe",
+            "az_rad": "0x3fedd2cc207f99af",
+            "el_rad": "0x3fe7fc84ac07de46",
+            "iono_m": "0x4017cc308e94cf7a",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4174c28952ee3d80",
+            "residual_m": "0xbf11e00a76183a88"
+          },
+          {
+            "prn": "G20",
+            "sqrt_w": "0x3fe8984d3950af75",
+            "tau_s": "0x3fb240fe3e59cdd9",
+            "t_tx_j2000_s": "0x41c342a9fff6df81",
+            "sat_ecef_m": [
+              "0x41711a1c5667d0bd",
+              "0x416c79eddb04e109",
+              "0x416870c1e4f1668b"
+            ],
+            "dt_sat_s": "0x3f41488c91635111",
+            "theta_rad": "0x3ed5cf03336ae444",
+            "sat_rot_ecef_m": [
+              "0x41711a213075bd70",
+              "0x416c79e2333e03db",
+              "0x416870c1e4f1668b"
+            ],
+            "rho_m": "0x417462dc47a16918",
+            "az_rad": "0x3ffeee8b0b68287f",
+            "el_rad": "0x3fec5f2fcf134925",
+            "iono_m": "0x4015dfaa50783132",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41744394d34ed93b",
+            "residual_m": "0xbefbc63d74f175a4"
+          },
+          {
+            "prn": "G21",
+            "sqrt_w": "0x3fef855afc689737",
+            "tau_s": "0x3fb1bf571d7761ce",
+            "t_tx_j2000_s": "0x41c342a9fff72054",
+            "sat_ecef_m": [
+              "0x417036665d36f0e6",
+              "0x4151f61726f577da",
+              "0x4173992c0e09a304"
+            ],
+            "dt_sat_s": "0x3ef04d2d827874c8",
+            "theta_rad": "0x3ed5341c6d5d5b1c",
+            "sat_rot_ecef_m": [
+              "0x41703667da0dee9b",
+              "0x4151f601aac08675",
+              "0x4173992c0e09a304"
+            ],
+            "rho_m": "0x4173d210a76c41a0",
+            "az_rad": "0x3febb0afb2f1f72e",
+            "el_rad": "0x3ff67d750604a26e",
+            "iono_m": "0x40114a0caec82844",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4173d840a1f9079c",
+            "residual_m": "0xbf0a483d213d6535"
+          },
+          {
+            "prn": "G26",
+            "sqrt_w": "0x3fea50154ffc6136",
+            "tau_s": "0x3fb212f11104cbc1",
+            "t_tx_j2000_s": "0x41c342a9fff6f687",
+            "sat_ecef_m": [
+              "0x4177eef99bf33ab7",
+              "0x414a82924e685ba1",
+              "0x415fb041713bcdcf"
+            ],
+            "dt_sat_s": "0x3f2e4f0b3c8ba941",
+            "theta_rad": "0x3ed597fe329d239d",
+            "sat_rot_ecef_m": [
+              "0x4177eefaba2b89bb",
+              "0x414a8251b4607db8",
+              "0x415fb041713bcdcf"
+            ],
+            "rho_m": "0x41742f6ecdabfaf7",
+            "az_rad": "0x4008df7fd67f5fbf",
+            "el_rad": "0x3feeee9da01e7e21",
+            "iono_m": "0x4014a9bb8bffb4f5",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417425d56c0ee209",
+            "residual_m": "0xbee426f552923a33"
+          },
+          {
+            "prn": "G27",
+            "sqrt_w": "0x3fe88e14dd53965a",
+            "tau_s": "0x3fb21d3640840513",
+            "t_tx_j2000_s": "0x41c342a9fff6f165",
+            "sat_ecef_m": [
+              "0x416840ad0b585daa",
+              "0xc164407a1ae841cc",
+              "0x4173953e39065839"
+            ],
+            "dt_sat_s": "0xbf358c2355624516",
+            "theta_rad": "0x3ed5a4436426f25d",
+            "sat_rot_ecef_m": [
+              "0x416840a632345dc8",
+              "0xc16440824e5f2632",
+              "0x4173953e39065839"
+            ],
+            "rho_m": "0x41743ae7f8b4433f",
+            "az_rad": "0x4014d4cc6e656ae1",
+            "el_rad": "0x3febb7c4e3e45c7e",
+            "iono_m": "0x4014fa2525165381",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41745a4bcc911a1e",
+            "residual_m": "0xbf15333b578e58c1"
+          }
+        ],
+        "residual": [
+          "0xbf0a3435f35255a8",
+          "0xbee386e9eb3902fd",
+          "0xbf0b3dd266e7c14b",
+          "0xbf11e00a76183a88",
+          "0xbefbc63d74f175a4",
+          "0xbf0a483d213d6535",
+          "0xbee426f552923a33",
+          "0xbf15333b578e58c1"
+        ],
+        "cost": "0x3e453d79827cf3ae",
+        "fd_2point": {
+          "rel_step": "0x3e50000000000000",
+          "perturbations": [
+            {
+              "param_index": 0,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11b07ff8463a4",
+              "dx": "0x3fb11b0800000000",
+              "x_perturbed": [
+                "0x41511b0803cb25a4",
+                "0x4120cd6b5f8ae9a4",
+                "0x41511e62229e4ba0",
+                "0x40dd4c000260268a"
+              ],
+              "f_perturbed": [
+                "0x3f65412fcfbf8046",
+                "0x3fa0745922c4d9d4",
+                "0x3fa6f0c2ccfe179e",
+                "0x3f72405154ac7954",
+                "0x3fa087789f415b12",
+                "0x3fa444a623154750",
+                "0x3fab63d914a86b95",
+                "0x3f944a40c477a47d"
+              ],
+              "jac_column": [
+                "0x3fa4438bcd0c1cd9",
+                "0x3fdeca76892e46ad",
+                "0x3fe57b8e21da00b5",
+                "0x3fb155365022c45c",
+                "0x3fdef272d468ede9",
+                "0x3fe2fb6f717e7173",
+                "0x3fe99fd3c292391e",
+                "0x3fd30e5c7546a691"
+              ]
+            },
+            {
+              "param_index": 1,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f80cd6b5f8ae9a4",
+              "dx": "0x3f80cd6b60000000",
+              "x_perturbed": [
+                "0x41511b07ff8463a4",
+                "0x4120cd6b63be447c",
+                "0x41511e62229e4ba0",
+                "0x40dd4c000260268a"
+              ],
+              "f_perturbed": [
+                "0xbf639a8482c6a29a",
+                "0x3f6280612ee19c70",
+                "0xbf5c6d7bf9fff7d3",
+                "0x3f6adf573518da87",
+                "0x3f7143e7d3c03f0f",
+                "0x3f59aac1dfaa56aa",
+                "0x3f4e39551ef63b74",
+                "0xbf6bd0c72132df2a"
+              ],
+              "jac_column": [
+                "0xbfd2470ac813847e",
+                "0x3fd1b0c74902982e",
+                "0xbfca426a3bf3a988",
+                "0x3fda1efc928637a3",
+                "0x3fe08b45d6f9b697",
+                "0x3fc9392de6dc4fcb",
+                "0x3fbd149609bcdb4a",
+                "0xbfd9db370fd7e9af"
+              ]
+            },
+            {
+              "param_index": 2,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11e62229e4ba0",
+              "dx": "0x3fb11e6224000000",
+              "x_perturbed": [
+                "0x41511b07ff8463a4",
+                "0x4120cd6b5f8ae9a4",
+                "0x41511e6226e5e429",
+                "0x40dd4c000260268a"
+              ],
+              "f_perturbed": [
+                "0x3f827e28a81ff742",
+                "0xbf7227205bd5f491",
+                "0x3fa6453ad90133d7",
+                "0x3fa23d6974384b57",
+                "0x3f9478e735fb2a90",
+                "0x3faa0a037dca1235",
+                "0x3f844d0966e9d276",
+                "0x3fa3d5101d0fe1a2"
+              ],
+              "jac_column": [
+                "0x3fc1614766d4f485",
+                "0xbfb0ee51a87cf2e9",
+                "0x3fe4d706dedd54f7",
+                "0x3fe114a01c525170",
+                "0x3fd328e7dde175ab",
+                "0x3fe85c89fcec0336",
+                "0x3fc2fe202650de77",
+                "0x3fe29330c3bb1bad"
+              ]
+            },
+            {
+              "param_index": 3,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f3d4c000260268a",
+              "dx": "0x3f3d4c0004000000",
+              "x_perturbed": [
+                "0x41511b07ff8463a4",
+                "0x4120cd6b5f8ae9a4",
+                "0x41511e62229e4ba0",
+                "0x40dd4c0009b3268b"
+              ],
+              "f_perturbed": [
+                "0xbf29395d295d8db2",
+                "0xbf30fb1688e369a9",
+                "0xbf3f7556683d0653",
+                "0xbf38410860563276",
+                "0xbf3840c73e81b955",
+                "0xbf40125f687ef70c",
+                "0xbf38b8492daf4151",
+                "0xbf3bc7e33004fcf7"
+              ],
+              "jac_column": [
+                "0xbfd4655fe395d45c",
+                "0xbfe1e1967e89020a",
+                "0xbfeea43ba105a062",
+                "0xbfe59c4f21217bff",
+                "0xbfe8984d35f507c4",
+                "0xbfef855af81adace",
+                "0xbfea50154c64ae09",
+                "0xbfe88e14d9f953e2"
+              ]
+            }
+          ],
+          "jac": [
+            [
+              "0x3fa4438c65ab4fe5",
+              "0xbfd2470ac813847e",
+              "0x3fc1614766d4f485",
+              "0xbfd4655fe395d45c"
+            ],
+            [
+              "0x3fdeca76aaa1b8ff",
+              "0x3fd1b0c859724519",
+              "0xbfb0ee5122c95d11",
+              "0xbfe1e1967e89020a"
+            ],
+            [
+              "0x3fe57b8e21da00b5",
+              "0xbfca4266963fc006",
+              "0x3fe4d706dedd54f7",
+              "0xbfeea43ba105a062"
+            ],
+            [
+              "0x3fb155365022c45c",
+              "0x3fda1efb494480f5",
+              "0x3fe114a0081f89e0",
+              "0xbfe59c4f21217bff"
+            ],
+            [
+              "0x3fdef272a6663a42",
+              "0x3fe08b474db38a7f",
+              "0x3fd328e80bdb26dd",
+              "0xbfe8984d35f507c4"
+            ],
+            [
+              "0x3fe2fb6f717e7173",
+              "0x3fc93931a75c1c15",
+              "0x3fe85c89fcec0336",
+              "0xbfef855af81adace"
+            ],
+            [
+              "0x3fe99fd3db2eee5a",
+              "0x3fbd149609bcdb4a",
+              "0x3fc2fe202650de77",
+              "0xbfea50154c64ae09"
+            ],
+            [
+              "0x3fd30e5c7546a691",
+              "0xbfd9db370fd7e9af",
+              "0x3fe29330c3bb1bad",
+              "0xbfe88e14d9f953e2"
+            ]
+          ],
+          "scipy_approx_derivative_bit_identical": true
+        },
+        "grad_JT_f": [
+          "0xbf1f8763c43a369e",
+          "0x3ec54b6829f2d6a6",
+          "0xbf266564ff3df01b",
+          "0x3f30d17e88fc929e"
+        ],
+        "grad_inf_norm": "0x3f30d17e88fc929e"
+      },
+      {
+        "trace_index": 3,
+        "x": [
+          "0x41511b07ff824403",
+          "0x4120cd6b5f861f3b",
+          "0x41511e62229e1c33",
+          "0x40dd4c0000000076"
+        ],
+        "per_sat": [
+          {
+            "prn": "G08",
+            "sqrt_w": "0x3fd4655fe65eb8a1",
+            "tau_s": "0x3fb44f45764ef6ed",
+            "t_tx_j2000_s": "0x41c342a9fff5d85d",
+            "sat_ecef_m": [
+              "0x415c5fadf0d7b5e2",
+              "0xc173cd0e09f9f352",
+              "0x416be3296b9b4e50"
+            ],
+            "dt_sat_s": "0xbf04431cdfa54705",
+            "theta_rad": "0x3ed843c737b4cdc6",
+            "sat_rot_ecef_m": [
+              "0x415c5f8fe95f66c4",
+              "0xc173cd10ba73f4a6",
+              "0x416be3296b9b4e50"
+            ],
+            "rho_m": "0x4176ae9fdc3c7eac",
+            "az_rad": "0x40141889901b0be5",
+            "el_rad": "0x3fd440fb09aba22e",
+            "iono_m": "0x402192694cccad94",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4176b8c78a1632c6",
+            "residual_m": "0x3e14655fe65eb8a1"
+          },
+          {
+            "prn": "G10",
+            "sqrt_w": "0x3fe1e19680fa0055",
+            "tau_s": "0x3fb346b1a108d8e7",
+            "t_tx_j2000_s": "0x41c342a9fff65ca7",
+            "sat_ecef_m": [
+              "0x4176cfbdf0bf2f6e",
+              "0x416659469b506542",
+              "0x413bb51945e78b5d"
+            ],
+            "dt_sat_s": "0xbf38f0dc8cf1b08c",
+            "theta_rad": "0x3ed707ad47079086",
+            "sat_rot_ecef_m": [
+              "0x4176cfc1f61f882d",
+              "0x4166593630857685",
+              "0x413bb51945e78b5d"
+            ],
+            "rho_m": "0x41758721edd50d9e",
+            "az_rad": "0x40053e68193d459c",
+            "el_rad": "0x3fe324f6f6745952",
+            "iono_m": "0x401d79c10e1f032b",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4175aa501787c658",
+            "residual_m": "0xbe21e19680fa0055"
+          },
+          {
+            "prn": "G16",
+            "sqrt_w": "0x3feea43ba534a032",
+            "tau_s": "0x3fb16abd1d93865b",
+            "t_tx_j2000_s": "0x41c342a9fff74aa1",
+            "sat_ecef_m": [
+              "0x4171e9ecf324e77c",
+              "0xc14d2351b28a8b19",
+              "0x4171824fcebb1a4a"
+            ],
+            "dt_sat_s": "0xbf26db8a9a116138",
+            "theta_rad": "0x3ed4cf08bee29100",
+            "sat_rot_ecef_m": [
+              "0x4171e9ebc3fa7d2b",
+              "0xc14d23804af1c91d",
+              "0x4171824fcebb1a4a"
+            ],
+            "rho_m": "0x417373954b65a2b4",
+            "az_rad": "0x4012f2a5ec1811c0",
+            "el_rad": "0x3ff449c467c3af6b",
+            "iono_m": "0x401198dde6538a75",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417387ac1c68a3d3",
+            "residual_m": "0x3e2ea43ba534a032"
+          },
+          {
+            "prn": "G18",
+            "sqrt_w": "0x3fe59c4f2414d437",
+            "tau_s": "0x3fb29f1a64b8eb7f",
+            "t_tx_j2000_s": "0x41c342a9fff6b073",
+            "sat_ecef_m": [
+              "0x4159720a0ceb79d7",
+              "0x416a3004019cd3ca",
+              "0x4174b78c3c5d43f7"
+            ],
+            "dt_sat_s": "0x3f2e005afa885e32",
+            "theta_rad": "0x3ed63f730f3c7be8",
+            "sat_rot_ecef_m": [
+              "0x4159721c41d96246",
+              "0x416a2fff95648413",
+              "0x4174b78c3c5d43f7"
+            ],
+            "rho_m": "0x4174cbf6b75009e7",
+            "az_rad": "0x3fedd2cc20817e61",
+            "el_rad": "0x3fe7fc84ac093e68",
+            "iono_m": "0x4017cc308e92bcce",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4174c28952edd39f",
+            "residual_m": "0x3e259c4f2414d437"
+          },
+          {
+            "prn": "G20",
+            "sqrt_w": "0x3fe8984d3950af75",
+            "tau_s": "0x3fb240fe3e5a35a1",
+            "t_tx_j2000_s": "0x41c342a9fff6df81",
+            "sat_ecef_m": [
+              "0x41711a1c5667d0bd",
+              "0x416c79eddb04e109",
+              "0x416870c1e4f1668b"
+            ],
+            "dt_sat_s": "0x3f41488c91635111",
+            "theta_rad": "0x3ed5cf03336b6042",
+            "sat_rot_ecef_m": [
+              "0x41711a213075bd70",
+              "0x416c79e2333e03db",
+              "0x416870c1e4f1668b"
+            ],
+            "rho_m": "0x417462dc47a1dcfe",
+            "az_rad": "0x3ffeee8b0b6947bf",
+            "el_rad": "0x3fec5f2fcf1261d0",
+            "iono_m": "0x4015dfaa5077c43d",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41744394d34eb517",
+            "residual_m": "0x3e28984d3950af75"
+          },
+          {
+            "prn": "G21",
+            "sqrt_w": "0x3fef855afc689737",
+            "tau_s": "0x3fb1bf571d77ba28",
+            "t_tx_j2000_s": "0x41c342a9fff72054",
+            "sat_ecef_m": [
+              "0x417036665d36f0e6",
+              "0x4151f61726f577da",
+              "0x4173992c0e09a304"
+            ],
+            "dt_sat_s": "0x3ef04d2d827874c8",
+            "theta_rad": "0x3ed5341c6d5dc4ab",
+            "sat_rot_ecef_m": [
+              "0x41703667da0dee9b",
+              "0x4151f601aac08675",
+              "0x4173992c0e09a304"
+            ],
+            "rho_m": "0x4173d210a76ca44c",
+            "az_rad": "0x3febb0afb2fee64a",
+            "el_rad": "0x3ff67d7506054199",
+            "iono_m": "0x40114a0caec74ae8",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x4173d840a1f8d23e",
+            "residual_m": "0x3e2f855afc689737"
+          },
+          {
+            "prn": "G26",
+            "sqrt_w": "0x3fea50154ffc6136",
+            "tau_s": "0x3fb212f1110548eb",
+            "t_tx_j2000_s": "0x41c342a9fff6f687",
+            "sat_ecef_m": [
+              "0x4177eef99bf33ab7",
+              "0x414a82924e685ba1",
+              "0x415fb041713bcdcf"
+            ],
+            "dt_sat_s": "0x3f2e4f0b3c8ba941",
+            "theta_rad": "0x3ed597fe329db927",
+            "sat_rot_ecef_m": [
+              "0x4177eefaba2b89bb",
+              "0x414a8251b4607db7",
+              "0x415fb041713bcdcf"
+            ],
+            "rho_m": "0x41742f6ecdac86c0",
+            "az_rad": "0x4008df7fd67f1362",
+            "el_rad": "0x3feeee9da01c88a1",
+            "iono_m": "0x4014a9bb8bffb3bd",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x417425d56c0ed5c8",
+            "residual_m": "0x0000000000000000"
+          },
+          {
+            "prn": "G27",
+            "sqrt_w": "0x3fe88e14dd53965a",
+            "tau_s": "0x3fb21d3640842a42",
+            "t_tx_j2000_s": "0x41c342a9fff6f165",
+            "sat_ecef_m": [
+              "0x416840ad0b585daa",
+              "0xc164407a1ae841cc",
+              "0x4173953e39065839"
+            ],
+            "dt_sat_s": "0xbf358c2355624516",
+            "theta_rad": "0x3ed5a44364271eca",
+            "sat_rot_ecef_m": [
+              "0x416840a632345dc8",
+              "0xc16440824e5f2632",
+              "0x4173953e39065839"
+            ],
+            "rho_m": "0x41743ae7f8b46cc6",
+            "az_rad": "0x4014d4cc6e6511fb",
+            "el_rad": "0x3febb7c4e3e65a26",
+            "iono_m": "0x4014fa25251448fa",
+            "tropo_m": "0x0000000000000000",
+            "p_hat_m": "0x41745a4bcc90ab9b",
+            "residual_m": "0x0000000000000000"
+          }
+        ],
+        "residual": [
+          "0x3e14655fe65eb8a1",
+          "0xbe21e19680fa0055",
+          "0x3e2ea43ba534a032",
+          "0x3e259c4f2414d437",
+          "0x3e28984d3950af75",
+          "0x3e2f855afc689737",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ],
+        "cost": "0x3c72befa88eb638d",
+        "fd_2point": {
+          "rel_step": "0x3e50000000000000",
+          "perturbations": [
+            {
+              "param_index": 0,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11b07ff824403",
+              "dx": "0x3fb11b0800000000",
+              "x_perturbed": [
+                "0x41511b0803c90603",
+                "0x4120cd6b5f861f3b",
+                "0x41511e62229e1c33",
+                "0x40dd4c0000000076"
+              ],
+              "f_perturbed": [
+                "0x3f65aa01ede2c802",
+                "0x3fa0759191638d65",
+                "0x3fa6f792603c0d33",
+                "0x3f7287d2d849cc7f",
+                "0x3fa08af166eff941",
+                "0x3fa44b38325d96a9",
+                "0x3fab651b83fd94b9",
+                "0x3f945f73ffcf32d6"
+              ],
+              "jac_column": [
+                "0x3fa4438cfe4a82f1",
+                "0x3fdeca76aaa1b901",
+                "0x3fe57b8e21da00b5",
+                "0x3fb155365022c45c",
+                "0x3fdef273026ba192",
+                "0x3fe2fb6f5402a308",
+                "0x3fe99fd3c292391e",
+                "0x3fd30e5c7546a691"
+              ]
+            },
+            {
+              "param_index": 1,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f80cd6b5f861f3b",
+              "dx": "0x3f80cd6b60000000",
+              "x_perturbed": [
+                "0x41511b07ff824403",
+                "0x4120cd6b63b97a13",
+                "0x41511e62229e1c33",
+                "0x40dd4c0000000076"
+              ],
+              "f_perturbed": [
+                "0xbf6331b307ce5a10",
+                "0x3f6293e6fab36d63",
+                "0xbf5b9385bdb9d07b",
+                "0x3f6b6e58e28e8e9c",
+                "0x3f715faed5f79a4f",
+                "0x3f5a7d03c8b441d3",
+                "0x3f4e89f0f440845d",
+                "0xbf6b272d46766c64"
+              ],
+              "jac_column": [
+                "0xbfd2470a2cb3583a",
+                "0x3fd1b0c74902982e",
+                "0xbfca4266963fc006",
+                "0x3fda1efb494480f5",
+                "0x3fe08b474db38a7e",
+                "0x3fc9392a265c8380",
+                "0x3fbd149609bcdb4a",
+                "0xbfd9db370fd7e9af"
+              ]
+            },
+            {
+              "param_index": 2,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3fb11e62229e1c33",
+              "dx": "0x3fb11e6224000000",
+              "x_perturbed": [
+                "0x41511b07ff824403",
+                "0x4120cd6b5f861f3b",
+                "0x41511e6226e5b4bc",
+                "0x40dd4c0000000076"
+              ],
+              "f_perturbed": [
+                "0x3f82985d06de0965",
+                "0xbf721d5ce6e0580f",
+                "0x3fa64c0a6c3f296c",
+                "0x3fa24659a4abf5bc",
+                "0x3f947fd8c55866ed",
+                "0x3faa10958d12618e",
+                "0x3f845212bafe21c5",
+                "0x3fa3dfa9babba8ce"
+              ],
+              "jac_column": [
+                "0x3fc161478cf54898",
+                "0xbfb0ee5122c95d10",
+                "0x3fe4d706dedd54f7",
+                "0x3fe114a01c525170",
+                "0x3fd328e80bdb26dd",
+                "0x3fe85c89df75fac6",
+                "0x3fc2fe1fc3f150a5",
+                "0x3fe29330c3bb1bad"
+              ]
+            },
+            {
+              "param_index": 3,
+              "sign_x0": "0x3ff0000000000000",
+              "h": "0x3f3d4c0000000076",
+              "dx": "0x3f3d4c0000000000",
+              "x_perturbed": [
+                "0x41511b07ff824403",
+                "0x4120cd6b5f861f3b",
+                "0x41511e62229e1c33",
+                "0x40dd4c0007530076"
+              ],
+              "f_perturbed": [
+                "0xbf22ac4fac88f848",
+                "0xbf305ee82a54e20e",
+                "0xbf3c0d8cc9423b8f",
+                "0xbf33c8f02680ffbf",
+                "0xbf36846fb3593ea3",
+                "0xbf3cdba76a28c33d",
+                "0xbf381711831aaf80",
+                "0xbf367b145a2166c7"
+              ],
+              "jac_column": [
+                "0xbfd4655fe65eb8a1",
+                "0xbfe1e19680fa0055",
+                "0xbfeea43ba534a031",
+                "0xbfe59c4f2414d436",
+                "0xbfe8984d3950af75",
+                "0xbfef855afc689737",
+                "0xbfea50154ffc6136",
+                "0xbfe88e14dd53965a"
+              ]
+            }
+          ],
+          "jac": [
+            [
+              "0x3fa4438cfe4a82f1",
+              "0xbfd2470b6373b0c3",
+              "0x3fc1614766d4f485",
+              "0xbfd4655fe65eb8a1"
+            ],
+            [
+              "0x3fdeca76aaa1b901",
+              "0x3fd1b0c74902982e",
+              "0xbfb0ee5122c95d10",
+              "0xbfe1e19680fa0055"
+            ],
+            [
+              "0x3fe57b8e3e833cb1",
+              "0xbfca4266963fc006",
+              "0x3fe4d706dedd54f7",
+              "0xbfeea43ba534a031"
+            ],
+            [
+              "0x3fb155365022c45c",
+              "0x3fda1efc928637a3",
+              "0x3fe114a01c525170",
+              "0xbfe59c4f2414d436"
+            ],
+            [
+              "0x3fdef272a6663a42",
+              "0x3fe08b45d6f9b697",
+              "0x3fd328e7dde175ab",
+              "0xbfe8984d3950af74"
+            ],
+            [
+              "0x3fe2fb6f717e7174",
+              "0x3fc93931a75c1c15",
+              "0x3fe85c89fcec0336",
+              "0xbfef855afc689737"
+            ],
+            [
+              "0x3fe99fd3db2eee5a",
+              "0x3fbd149609bcdb4a",
+              "0x3fc2fe202650de77",
+              "0xbfea50154ffc6136"
+            ],
+            [
+              "0x3fd30e5c7546a691",
+              "0xbfd9db3599b9cc60",
+              "0x3fe29330daae66e5",
+              "0xbfe88e14dd53965a"
+            ]
+          ],
+          "scipy_approx_derivative_bit_identical": true
+        },
+        "grad_JT_f": [
+          "0x3e345dac0ca20c7c",
+          "0x3e117da8e6c6370e",
+          "0x3e3bbe574db71c34",
+          "0xbe42befa88eb638c"
+        ],
+        "grad_inf_norm": "0x3e42befa88eb638c"
+      }
+    ],
+    "accepted_steps": [
+      {
+        "from_trace_index": 0,
+        "to_trace_index": 1,
+        "step": [
+          "0xc0cf19c90b24be00",
+          "0x40e8ae6d04835d20",
+          "0xc0c859447e8f4e00",
+          "0x40dd4c6c60cf2cc2"
+        ],
+        "step_inf_norm": "0x40e8ae6d04835d20",
+        "accepted": true
+      },
+      {
+        "from_trace_index": 1,
+        "to_trace_index": 2,
+        "step": [
+          "0x4049c813ec060000",
+          "0x404123d0acf48000",
+          "0x403b13764d1c0000",
+          "0xbffb179bc18e0000"
+        ],
+        "step_inf_norm": "0x4049c813ec060000",
+        "accepted": true
+      },
+      {
+        "from_trace_index": 2,
+        "to_trace_index": 3,
+        "step": [
+          "0xbf20fd0800000000",
+          "0xbf0329a400000000",
+          "0xbee7b68000000000",
+          "0xbf230130a0000000"
+        ],
+        "step_inf_norm": "0x3f230130a0000000",
+        "accepted": true
+      }
+    ],
+    "objective_evaluation_log": [
+      {
+        "objective_eval_index": 0,
+        "x": [
+          "0x41512a8800000000",
+          "0x411e848000000000",
+          "0x41512a8800000000",
+          "0x0000000000000000"
+        ],
+        "residual": [
+          "0x40d9b47dfddb3830",
+          "0x40c2ac6fbf1ef1c9",
+          "0x40ec3a7f79450c9d",
+          "0x40bc79adca643b85",
+          "0x40c02198bab77701",
+          "0x40e2c0086917b5ae",
+          "0x40e051ce79d9ac57",
+          "0x40eb0a97f2841f72"
+        ],
+        "cost": "0x41f273c9f2aed9d8",
+        "outcome": "accepted_iterate"
+      },
+      {
+        "objective_eval_index": 1,
+        "x": [
+          "0x41511afb1b7a6da1",
+          "0x4120cd26d04835d2",
+          "0x41511e5b5dc0b859",
+          "0x40dd4c6c60cf2cc2"
+        ],
+        "residual": [
+          "0x400c438ad52c3041",
+          "0xc040b81c88fcce67",
+          "0xc0476b482eef5fde",
+          "0xc04089fc5ec8651d",
+          "0xc04a0817af05747e",
+          "0xc04dcfb8472f5ad9",
+          "0xc0494bfa6dc22c56",
+          "0xc0328522090962a8"
+        ],
+        "cost": "0x40ba895e00bfe43b",
+        "outcome": "accepted_iterate"
+      },
+      {
+        "objective_eval_index": 2,
+        "x": [
+          "0x41511b07ff8463a4",
+          "0x4120cd6b5f8ae9a4",
+          "0x41511e62229e4ba0",
+          "0x40dd4c000260268a"
+        ],
+        "residual": [
+          "0xbf0a3435f35255a8",
+          "0xbee385cbd1d0f35d",
+          "0xbf0b3dd266e7c14b",
+          "0xbf11e035aeb682b2",
+          "0xbefbc578b287ab1e",
+          "0xbf0a483d213d6535",
+          "0xbee426f552923a33",
+          "0xbf15333b578e58c1"
+        ],
+        "cost": "0x3e453d79827cf3ae",
+        "outcome": "accepted_iterate"
+      },
+      {
+        "objective_eval_index": 3,
+        "x": [
+          "0x41511b07ff824403",
+          "0x4120cd6b5f861f3b",
+          "0x41511e62229e1c33",
+          "0x40dd4c0000000076"
+        ],
+        "residual": [
+          "0x0000000000000000",
+          "0x0000000000000000",
+          "0x3e2ea43ba534a032",
+          "0x3e259c4f2414d437",
+          "0x0000000000000000",
+          "0x3e2f855afc689737",
+          "0x0000000000000000",
+          "0x0000000000000000"
+        ],
+        "cost": "0x3c72befa88eb638d",
+        "outcome": "accepted_iterate"
+      }
+    ],
+    "evaluation_counts": {
+      "n_objective_evals": 4,
+      "n_fd_perturbation_evals": 16,
+      "n_accepted_iterates": 4,
+      "n_rejected_trials": 0,
+      "scipy_nfev": 4,
+      "scipy_njev": 4,
+      "nfev_matches_objective_evals": true,
+      "fd_probes_match_njev_times_n": true
+    },
+    "stopping": {
+      "status": 3,
+      "termination_reason": "xtol satisfied: relative step size below xtol",
+      "final_optimality_inf_norm": "0x3e42befa88eb638c",
+      "gtol": "0x3ddb7cdfd9d7bdbb",
+      "success": true,
+      "nfev": 4,
+      "njev": 4,
+      "message": "`xtol` termination condition is satisfied."
+    },
+    "dop": {
+      "gdop": "0x40121a7d97dcbbc7",
+      "pdop": "0x400d386422890c5e",
+      "hdop": "0x3ffd0cf06c21d520",
+      "vdop": "0x40095ab42c2bda8a",
+      "tdop": "0x4005615e497b9321"
+    },
+    "final_solution": {
+      "note": "trf SVD step is BLAS-bound (Apple Accelerate); the converged x is an independent-solve AGREEMENT target (sub-micron / ~1e-12), never 0 ULP.",
+      "x": [
+        "0x41511b07ff8243fd",
+        "0x4120cd6b5f861f49",
+        "0x41511e62229e1c2c",
+        "0x40dd4bfffffffc60"
+      ],
+      "residual": [
+        "0x0000000000000000",
+        "0x0000000000000000",
+        "0x3e2ea43ba534a032",
+        "0x3e259c4f2414d437",
+        "0x0000000000000000",
+        "0x3e2f855afc689737",
+        "0x0000000000000000",
+        "0x0000000000000000"
+      ],
+      "cost": "0x3c72befa88eb638d",
+      "recovered_geodetic": {
+        "lat_rad": "0x3fe921fb5432aa65",
+        "lon_rad": "0x3fbf46bb9c109320",
+        "height_m": "0x4072c0000000d3aa"
+      },
+      "rx_clock_s": "0x3f1a3b884188e161",
+      "truth_x": [
+        "0x41511b07ff824402",
+        "0x4120cd6b5f861f3b",
+        "0x41511e62229e1c30",
+        "0x40dd4c0000000000"
+      ],
+      "truth_rx_clock_s": "0x3f1a3b884188e4a0",
+      "abs_err_x_m": [
+        "0x3e34000000000000",
+        "0x3e1c000000000000",
+        "0x3e30000000000000"
+      ],
+      "abs_err_clock_m": "0x3e2d000000000000"
+    }
+  }
+}

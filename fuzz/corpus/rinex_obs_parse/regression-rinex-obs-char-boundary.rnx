@@ -1,0 +1,6 @@
+     3.04           OBSERVATION DATA    G                   RINEX VERSION / TYPE
+G    6 C1C L1C D1C S1C C2W L2W                              SYS / # / OBS TYPES
+                                                            END OF HEADER
+> 2020 06 25 00 00 00.0000000  0  1
+G01      4001.00012      4002.00023      4003.00034      4004.0004é
+         4005.00056      4006.00067

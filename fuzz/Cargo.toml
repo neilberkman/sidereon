@@ -1,0 +1,269 @@
+[package]
+name = "sidereon-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = { version = "1.4", features = ["derive"] }
+libfuzzer-sys = "=0.4.13"
+nalgebra = "0.33"
+sidereon-core = { path = "../crates/sidereon-core" }
+
+[[bin]]
+name = "crinex_parse"
+path = "fuzz_targets/crinex_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "antex_parse"
+path = "fuzz_targets/antex_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ionex_parse"
+path = "fuzz_targets/ionex_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ionex_round_trip"
+path = "fuzz_targets/ionex_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rinex_obs_parse"
+path = "fuzz_targets/rinex_obs_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rinex_obs_round_trip"
+path = "fuzz_targets/rinex_obs_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rinex_nav_parse"
+path = "fuzz_targets/rinex_nav_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rinex_nav_round_trip"
+path = "fuzz_targets/rinex_nav_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rinex_clock_parse"
+path = "fuzz_targets/rinex_clock_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rinex_clock_round_trip"
+path = "fuzz_targets/rinex_clock_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "crinex_v3_parse"
+path = "fuzz_targets/crinex_v3_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cdm_parse"
+path = "fuzz_targets/cdm_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "omm_xml_parse"
+path = "fuzz_targets/omm_xml_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sp3_parse"
+path = "fuzz_targets/sp3_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sp3_round_trip"
+path = "fuzz_targets/sp3_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sgp4_tle_3line_parse"
+path = "fuzz_targets/sgp4_tle_3line_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_math"
+path = "fuzz_targets/fuzz_math.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_time"
+path = "fuzz_targets/fuzz_time.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_frames"
+path = "fuzz_targets/fuzz_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_propagation"
+path = "fuzz_targets/fuzz_propagation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bodies_events"
+path = "fuzz_targets/fuzz_bodies_events.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_positioning"
+path = "fuzz_targets/fuzz_positioning.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_rtk"
+path = "fuzz_targets/fuzz_rtk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_atmosphere"
+path = "fuzz_targets/fuzz_atmosphere.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_signal"
+path = "fuzz_targets/fuzz_signal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cdm_round_trip"
+path = "fuzz_targets/cdm_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "omm_round_trip"
+path = "fuzz_targets/omm_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "spk_parse"
+path = "fuzz_targets/spk_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "navcen_parse"
+path = "fuzz_targets/navcen_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_doppler"
+path = "fuzz_targets/fuzz_doppler.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_rf"
+path = "fuzz_targets/fuzz_rf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_coverage"
+path = "fuzz_targets/fuzz_coverage.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oem_parse"
+path = "fuzz_targets/oem_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "opm_parse"
+path = "fuzz_targets/opm_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oem_round_trip"
+path = "fuzz_targets/oem_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "opm_round_trip"
+path = "fuzz_targets/opm_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

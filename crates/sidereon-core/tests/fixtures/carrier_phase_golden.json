@@ -1,0 +1,934 @@
+{
+  "schema": "orbis-gnss-parity/carrier_phase.v1",
+  "purpose": "Independent Python/georinex oracle fixture for Orbis.GNSS.RINEX.Observations values/phases and Orbis.GNSS.CarrierPhase combinations, cycle-slip detection, Hatch smoothing, and ionosphere-free smoothing.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "Generated in the pinned parity virtualenv; floats are stored as Python float.hex()."
+  },
+  "generator": {
+    "python": "3.14.4",
+    "executable": "python",
+    "georinex": "1.16.2",
+    "numpy": "2.4.6"
+  },
+  "rinex_observations": {
+    "source": "test/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx",
+    "reference_parser": "georinex",
+    "georinex_version": "1.16.2",
+    "epochs": [
+      {
+        "index": 0,
+        "time": "2020-06-25T00:00:00.000"
+      },
+      {
+        "index": 1,
+        "time": "2020-06-25T00:00:30.000"
+      }
+    ],
+    "rows": [
+      {
+        "epoch_index": 0,
+        "sat": "G05",
+        "code": "C1C",
+        "kind": "pseudorange",
+        "units": "meters",
+        "value": "0x1.3fa164ee56042p+24",
+        "lli": null,
+        "ssi": 8
+      },
+      {
+        "epoch_index": 0,
+        "sat": "G05",
+        "code": "L1C",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.a3eadd18e5604p+26",
+        "lli": 0,
+        "ssi": 8
+      },
+      {
+        "epoch_index": 0,
+        "sat": "G05",
+        "code": "L2W",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.47355c6df3b64p+26",
+        "lli": 0,
+        "ssi": 9
+      },
+      {
+        "epoch_index": 0,
+        "sat": "G05",
+        "code": "D1C",
+        "kind": "doppler",
+        "units": "hz",
+        "value": "-0x1.034d1eb851eb8p+10",
+        "lli": null,
+        "ssi": 8
+      },
+      {
+        "epoch_index": 0,
+        "sat": "G05",
+        "code": "S1C",
+        "kind": "signal_strength",
+        "units": "db_hz",
+        "value": "0x1.9400000000000p+5",
+        "lli": null,
+        "ssi": null
+      },
+      {
+        "epoch_index": 0,
+        "sat": "E01",
+        "code": "C1C",
+        "kind": "pseudorange",
+        "units": "meters",
+        "value": "0x1.a563b9fdf3b64p+24",
+        "lli": null,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 0,
+        "sat": "E01",
+        "code": "L1C",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.14cd5a43645a2p+27",
+        "lli": 0,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 0,
+        "sat": "E01",
+        "code": "L5Q",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.9d67e830a3d71p+26",
+        "lli": 0,
+        "ssi": 5
+      },
+      {
+        "epoch_index": 0,
+        "sat": "E01",
+        "code": "D1C",
+        "kind": "doppler",
+        "units": "hz",
+        "value": "-0x1.479676c8b4396p+11",
+        "lli": null,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 0,
+        "sat": "E01",
+        "code": "S1C",
+        "kind": "signal_strength",
+        "units": "db_hz",
+        "value": "0x1.2c00000000000p+5",
+        "lli": null,
+        "ssi": null
+      },
+      {
+        "epoch_index": 0,
+        "sat": "C07",
+        "code": "C2I",
+        "kind": "pseudorange",
+        "units": "meters",
+        "value": "0x1.2d4cb06581062p+25",
+        "lli": null,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 0,
+        "sat": "C07",
+        "code": "L2I",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.883c8dd7a5e35p+27",
+        "lli": 0,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 0,
+        "sat": "C07",
+        "code": "L6I",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.3eb9688dfbe77p+27",
+        "lli": 0,
+        "ssi": 5
+      },
+      {
+        "epoch_index": 0,
+        "sat": "C07",
+        "code": "D2I",
+        "kind": "doppler",
+        "units": "hz",
+        "value": "-0x1.e4b1a9fbe76c9p+8",
+        "lli": null,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 0,
+        "sat": "C07",
+        "code": "S2I",
+        "kind": "signal_strength",
+        "units": "db_hz",
+        "value": "0x1.3400000000000p+5",
+        "lli": null,
+        "ssi": null
+      },
+      {
+        "epoch_index": 0,
+        "sat": "R01",
+        "code": "C1C",
+        "kind": "pseudorange",
+        "units": "meters",
+        "value": "0x1.269c2bb89374cp+24",
+        "lli": null,
+        "ssi": 7
+      },
+      {
+        "epoch_index": 0,
+        "sat": "R01",
+        "code": "L1C",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.89b70bef2b021p+26",
+        "lli": 0,
+        "ssi": 7
+      },
+      {
+        "epoch_index": 0,
+        "sat": "R01",
+        "code": "L2C",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.3239125d3f7cfp+26",
+        "lli": 0,
+        "ssi": 7
+      },
+      {
+        "epoch_index": 0,
+        "sat": "R01",
+        "code": "D1C",
+        "kind": "doppler",
+        "units": "hz",
+        "value": "-0x1.d10ac083126e9p+8",
+        "lli": null,
+        "ssi": 7
+      },
+      {
+        "epoch_index": 0,
+        "sat": "R01",
+        "code": "S1C",
+        "kind": "signal_strength",
+        "units": "db_hz",
+        "value": "0x1.7200000000000p+5",
+        "lli": null,
+        "ssi": null
+      },
+      {
+        "epoch_index": 1,
+        "sat": "G05",
+        "code": "C1C",
+        "kind": "pseudorange",
+        "units": "meters",
+        "value": "0x1.3fb8be8978d50p+24",
+        "lli": null,
+        "ssi": 8
+      },
+      {
+        "epoch_index": 1,
+        "sat": "G05",
+        "code": "L1C",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.a4098a6dd2f1bp+26",
+        "lli": 0,
+        "ssi": 8
+      },
+      {
+        "epoch_index": 1,
+        "sat": "G05",
+        "code": "L2W",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.474d43e8624ddp+26",
+        "lli": 0,
+        "ssi": 9
+      },
+      {
+        "epoch_index": 1,
+        "sat": "G05",
+        "code": "D1C",
+        "kind": "doppler",
+        "units": "hz",
+        "value": "-0x1.08154fdf3b646p+10",
+        "lli": null,
+        "ssi": 8
+      },
+      {
+        "epoch_index": 1,
+        "sat": "G05",
+        "code": "S1C",
+        "kind": "signal_strength",
+        "units": "db_hz",
+        "value": "0x1.9000000000000p+5",
+        "lli": null,
+        "ssi": null
+      },
+      {
+        "epoch_index": 1,
+        "sat": "E01",
+        "code": "C1C",
+        "kind": "pseudorange",
+        "units": "meters",
+        "value": "0x1.a59e409c28f5cp+24",
+        "lli": null,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 1,
+        "sat": "E01",
+        "code": "L1C",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.14f3cc13f7ceep+27",
+        "lli": 0,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 1,
+        "sat": "E01",
+        "code": "L5Q",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.9da1530041893p+26",
+        "lli": 0,
+        "ssi": 5
+      },
+      {
+        "epoch_index": 1,
+        "sat": "E01",
+        "code": "D1C",
+        "kind": "doppler",
+        "units": "hz",
+        "value": "-0x1.4875e353f7ceep+11",
+        "lli": null,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 1,
+        "sat": "E01",
+        "code": "S1C",
+        "kind": "signal_strength",
+        "units": "db_hz",
+        "value": "0x1.2e00000000000p+5",
+        "lli": null,
+        "ssi": null
+      },
+      {
+        "epoch_index": 1,
+        "sat": "C07",
+        "code": "C2I",
+        "kind": "pseudorange",
+        "units": "meters",
+        "value": "0x1.2d522b40e5604p+25",
+        "lli": null,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 1,
+        "sat": "C07",
+        "code": "L2I",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.8843afdb43958p+27",
+        "lli": 0,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 1,
+        "sat": "C07",
+        "code": "L6I",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.3ebf3456872b0p+27",
+        "lli": 0,
+        "ssi": 5
+      },
+      {
+        "epoch_index": 1,
+        "sat": "C07",
+        "code": "D2I",
+        "kind": "doppler",
+        "units": "hz",
+        "value": "-0x1.e87999999999ap+8",
+        "lli": null,
+        "ssi": 6
+      },
+      {
+        "epoch_index": 1,
+        "sat": "C07",
+        "code": "S2I",
+        "kind": "signal_strength",
+        "units": "db_hz",
+        "value": "0x1.3800000000000p+5",
+        "lli": null,
+        "ssi": null
+      },
+      {
+        "epoch_index": 1,
+        "sat": "R01",
+        "code": "C1C",
+        "kind": "pseudorange",
+        "units": "meters",
+        "value": "0x1.26a69a5581062p+24",
+        "lli": null,
+        "ssi": 7
+      },
+      {
+        "epoch_index": 1,
+        "sat": "R01",
+        "code": "L1C",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.89c4fda0f5c29p+26",
+        "lli": 0,
+        "ssi": 7
+      },
+      {
+        "epoch_index": 1,
+        "sat": "R01",
+        "code": "L2C",
+        "kind": "carrier_phase",
+        "units": "cycles",
+        "value": "0x1.3243eacbd70a4p+26",
+        "lli": 0,
+        "ssi": 7
+      },
+      {
+        "epoch_index": 1,
+        "sat": "R01",
+        "code": "D1C",
+        "kind": "doppler",
+        "units": "hz",
+        "value": "-0x1.e642d0e560419p+8",
+        "lli": null,
+        "ssi": 7
+      },
+      {
+        "epoch_index": 1,
+        "sat": "R01",
+        "code": "S1C",
+        "kind": "signal_strength",
+        "units": "db_hz",
+        "value": "0x1.7400000000000p+5",
+        "lli": null,
+        "ssi": null
+      }
+    ],
+    "phases": [
+      {
+        "epoch_index": 0,
+        "sat": "G05",
+        "code": "L1C",
+        "value_cycles": "0x1.a3eadd18e5604p+26",
+        "lli": 0,
+        "ssi": 8,
+        "frequency_hz": "0x1.779c018000000p+30",
+        "wavelength_m": "0x1.85b8b06a70079p-3",
+        "value_m": "0x1.3fa16a12e6ba0p+24"
+      },
+      {
+        "epoch_index": 0,
+        "sat": "G05",
+        "code": "L2W",
+        "value_cycles": "0x1.47355c6df3b64p+26",
+        "lli": 0,
+        "ssi": 9,
+        "frequency_hz": "0x1.24aec20000000p+30",
+        "wavelength_m": "0x1.f4247c000fc57p-3",
+        "value_m": "0x1.3fa16d42d6320p+24"
+      },
+      {
+        "epoch_index": 0,
+        "sat": "E01",
+        "code": "L1C",
+        "value_cycles": "0x1.14cd5a43645a2p+27",
+        "lli": 0,
+        "ssi": 6,
+        "frequency_hz": "0x1.779c018000000p+30",
+        "wavelength_m": "0x1.85b8b06a70079p-3",
+        "value_m": "0x1.a563bc818c24dp+24"
+      },
+      {
+        "epoch_index": 0,
+        "sat": "E01",
+        "code": "L5Q",
+        "value_cycles": "0x1.9d67e830a3d71p+26",
+        "lli": 0,
+        "ssi": 5,
+        "frequency_hz": "0x1.187ccf4000000p+30",
+        "wavelength_m": "0x1.04f1a4dea40e0p-2",
+        "value_m": "0x1.a563c0e115f86p+24"
+      },
+      {
+        "epoch_index": 0,
+        "sat": "C07",
+        "code": "L2I",
+        "value_cycles": "0x1.883c8dd7a5e35p+27",
+        "lli": 0,
+        "ssi": 6,
+        "frequency_hz": "0x1.7431dc4000000p+30",
+        "wavelength_m": "0x1.894bff89f23b5p-3",
+        "value_m": "0x1.2d4cb382a456bp+25"
+      },
+      {
+        "epoch_index": 0,
+        "sat": "C07",
+        "code": "L6I",
+        "value_cycles": "0x1.3eb9688dfbe77p+27",
+        "lli": 0,
+        "ssi": 5,
+        "frequency_hz": "0x1.2e70510000000p+30",
+        "wavelength_m": "0x1.e4024673ac2a7p-3",
+        "value_m": "0x1.2d4caf6afbcbep+25"
+      },
+      {
+        "epoch_index": 0,
+        "sat": "R01",
+        "code": "L1C",
+        "value_cycles": "0x1.89b70bef2b021p+26",
+        "lli": 0,
+        "ssi": 7,
+        "frequency_hz": "0x1.7e14a71000000p+30",
+        "wavelength_m": "0x1.7f1ee9c2c3ed4p-3",
+        "value_m": "0x1.269c32e8ada31p+24"
+      },
+      {
+        "epoch_index": 0,
+        "sat": "R01",
+        "code": "L2C",
+        "value_cycles": "0x1.3239125d3f7cfp+26",
+        "lli": 0,
+        "ssi": 7,
+        "frequency_hz": "0x1.292c81f000000p+30",
+        "wavelength_m": "0x1.ec9575b1450c8p-3",
+        "value_m": "0x1.269c3ba583de6p+24"
+      },
+      {
+        "epoch_index": 1,
+        "sat": "G05",
+        "code": "L1C",
+        "value_cycles": "0x1.a4098a6dd2f1bp+26",
+        "lli": 0,
+        "ssi": 8,
+        "frequency_hz": "0x1.779c018000000p+30",
+        "wavelength_m": "0x1.85b8b06a70079p-3",
+        "value_m": "0x1.3fb8c3d4c9b42p+24"
+      },
+      {
+        "epoch_index": 1,
+        "sat": "G05",
+        "code": "L2W",
+        "value_cycles": "0x1.474d43e8624ddp+26",
+        "lli": 0,
+        "ssi": 9,
+        "frequency_hz": "0x1.24aec20000000p+30",
+        "wavelength_m": "0x1.f4247c000fc57p-3",
+        "value_m": "0x1.3fb8c70476de3p+24"
+      },
+      {
+        "epoch_index": 1,
+        "sat": "E01",
+        "code": "L1C",
+        "value_cycles": "0x1.14f3cc13f7ceep+27",
+        "lli": 0,
+        "ssi": 6,
+        "frequency_hz": "0x1.779c018000000p+30",
+        "wavelength_m": "0x1.85b8b06a70079p-3",
+        "value_m": "0x1.a59e432fc85a9p+24"
+      },
+      {
+        "epoch_index": 1,
+        "sat": "E01",
+        "code": "L5Q",
+        "value_cycles": "0x1.9da1530041893p+26",
+        "lli": 0,
+        "ssi": 5,
+        "frequency_hz": "0x1.187ccf4000000p+30",
+        "wavelength_m": "0x1.04f1a4dea40e0p-2",
+        "value_m": "0x1.a59e478e79f12p+24"
+      },
+      {
+        "epoch_index": 1,
+        "sat": "C07",
+        "code": "L2I",
+        "value_cycles": "0x1.8843afdb43958p+27",
+        "lli": 0,
+        "ssi": 6,
+        "frequency_hz": "0x1.7431dc4000000p+30",
+        "wavelength_m": "0x1.894bff89f23b5p-3",
+        "value_m": "0x1.2d522e2d75c66p+25"
+      },
+      {
+        "epoch_index": 1,
+        "sat": "C07",
+        "code": "L6I",
+        "value_cycles": "0x1.3ebf3456872b0p+27",
+        "lli": 0,
+        "ssi": 5,
+        "frequency_hz": "0x1.2e70510000000p+30",
+        "wavelength_m": "0x1.e4024673ac2a7p-3",
+        "value_m": "0x1.2d522a152765fp+25"
+      },
+      {
+        "epoch_index": 1,
+        "sat": "R01",
+        "code": "L1C",
+        "value_cycles": "0x1.89c4fda0f5c29p+26",
+        "lli": 0,
+        "ssi": 7,
+        "frequency_hz": "0x1.7e14a71000000p+30",
+        "wavelength_m": "0x1.7f1ee9c2c3ed4p-3",
+        "value_m": "0x1.26a6a20cb4045p+24"
+      },
+      {
+        "epoch_index": 1,
+        "sat": "R01",
+        "code": "L2C",
+        "value_cycles": "0x1.3243eacbd70a4p+26",
+        "lli": 0,
+        "ssi": 7,
+        "frequency_hz": "0x1.292c81f000000p+30",
+        "wavelength_m": "0x1.ec9575b1450c8p-3",
+        "value_m": "0x1.26a6aaca43e5dp+24"
+      }
+    ]
+  },
+  "carrier_phase": {
+    "constants": {
+      "c_m_s": "0x1.1de784a000000p+28",
+      "f_l1_hz": "0x1.779c018000000p+30",
+      "f_l2_hz": "0x1.24aec20000000p+30"
+    },
+    "scalar_cases": {
+      "phase_meters_m": "0x1.6679b5dbb7fd0p+24",
+      "code_minus_carrier_m": "-0x1.e17ae6edff400p+18",
+      "geometry_free_m": "0x1.4000000000000p+5",
+      "wide_lane_wavelength_m": "0x1.b94d5e5a6844dp-1",
+      "narrow_lane_code_m": "0x1.5c077975b8fe2p+3",
+      "melbourne_wubbena_m": "-0x1.24ddcdaa6bf58p+3"
+    },
+    "arc": [
+      {
+        "epoch": 0,
+        "phi1": "0x1.ad7697cf35157p+26",
+        "phi2": "0x1.4f2cad78dd8cap+26",
+        "p1": "0x1.4689c023d70a4p+24",
+        "p2": "0x1.4689bfd06a506p+24",
+        "lli1": 0,
+        "lli2": 0,
+        "f1": "0x1.779c018000000p+30",
+        "f2": "0x1.24aec20000000p+30"
+      },
+      {
+        "epoch": 1,
+        "phi1": "0x1.ad771514355cdp+26",
+        "phi2": "0x1.4f2d0f16095a4p+26",
+        "p1": "0x1.468a1f420c49cp+24",
+        "p2": "0x1.468a1f5c5f3eep+24",
+        "lli1": 0,
+        "lli2": 0,
+        "f1": "0x1.779c018000000p+30",
+        "f2": "0x1.24aec20000000p+30"
+      },
+      {
+        "epoch": 2,
+        "phi1": "0x1.ad779344a2977p+26",
+        "phi2": "0x1.4f2d716aa7f95p+26",
+        "p1": "0x1.468a7f9374bc6p+24",
+        "p2": "0x1.468a7f499bdb8p+24",
+        "lli1": 0,
+        "lli2": 0,
+        "f1": "0x1.779c018000000p+30",
+        "f2": "0x1.24aec20000000p+30"
+      },
+      {
+        "epoch": 3,
+        "phi1": "0x1.ad7812607cc59p+26",
+        "phi2": "0x1.4f2dd476b96a2p+26",
+        "p1": "0x1.468adffe76c8bp+24",
+        "p2": "0x1.468ae036d8781p+24",
+        "lli1": 0,
+        "lli2": 0,
+        "f1": "0x1.779c018000000p+30",
+        "f2": "0x1.24aec20000000p+30"
+      },
+      {
+        "epoch": 4,
+        "phi1": "0x1.ad7893e7c3e72p+26",
+        "phi2": "0x1.4f2e383a3dac9p+26",
+        "p1": "0x1.468b41a45a1cbp+24",
+        "p2": "0x1.468b41574847ep+24",
+        "lli1": 0,
+        "lli2": 0,
+        "f1": "0x1.779c018000000p+30",
+        "f2": "0x1.24aec20000000p+30"
+      },
+      {
+        "epoch": 5,
+        "phi1": "0x1.ad7914da77fc0p+26",
+        "phi2": "0x1.4f2e9cb534c08p+26",
+        "p1": "0x1.468ba38a3d70ap+24",
+        "p2": "0x1.468ba3ba4773dp+24",
+        "lli1": 0,
+        "lli2": 0,
+        "f1": "0x1.779c018000000p+30",
+        "f2": "0x1.24aec20000000p+30"
+      },
+      {
+        "epoch": 6,
+        "phi1": "0x1.ad7996b899045p+26",
+        "phi2": "0x1.4f2f01e79ea62p+26",
+        "p1": "0x1.468c06ad91687p+24",
+        "p2": "0x1.468c066ca2c8cp+24",
+        "lli1": 0,
+        "lli2": 1,
+        "f1": "0x1.779c018000000p+30",
+        "f2": "0x1.24aec20000000p+30"
+      },
+      {
+        "epoch": 7,
+        "phi1": "0x1.ad7a198226fffp+26",
+        "phi2": "0x1.4f2f67d17b5d4p+26",
+        "p1": "0x1.468c6a06a7ef9p+24",
+        "p2": "0x1.468c6a2bcaea7p+24",
+        "lli1": 0,
+        "lli2": 0,
+        "f1": "0x1.779c018000000p+30",
+        "f2": "0x1.24aec20000000p+30"
+      },
+      {
+        "epoch": 8,
+        "phi1": "0x1.ad7a9d3721ef1p+26",
+        "phi2": "0x1.4f2fce72cae62p+26",
+        "p1": "0x1.468cce5d2f1a9p+24",
+        "p2": "0x1.468cce471c01ep+24",
+        "lli1": 0,
+        "lli2": 0,
+        "f1": null,
+        "f2": "0x1.24aec20000000p+30"
+      }
+    ],
+    "detect_cycle_slips": [
+      {
+        "epoch": 0,
+        "slip": false,
+        "reasons": [],
+        "gf": "-0x1.07fd931e60e00p+15",
+        "mw": "-0x1.7618a9fb55c00p+16",
+        "skipped": false
+      },
+      {
+        "epoch": 1,
+        "slip": false,
+        "reasons": [],
+        "gf": "-0x1.07fd93c7f8a00p+15",
+        "mw": "-0x1.76189f4fdf000p+16",
+        "skipped": false
+      },
+      {
+        "epoch": 2,
+        "slip": false,
+        "reasons": [],
+        "gf": "-0x1.07fd947190400p+15",
+        "mw": "-0x1.7618b8b4d9c00p+16",
+        "skipped": false
+      },
+      {
+        "epoch": 3,
+        "slip": false,
+        "reasons": [],
+        "gf": "-0x1.07fd951b28000p+15",
+        "mw": "-0x1.76189d67f0600p+16",
+        "skipped": false
+      },
+      {
+        "epoch": 4,
+        "slip": true,
+        "reasons": [
+          "geometry_free",
+          "melbourne_wubbena"
+        ],
+        "gf": "-0x1.07fb4d2fb7200p+15",
+        "mw": "-0x1.76136a660be00p+16",
+        "skipped": false
+      },
+      {
+        "epoch": 5,
+        "slip": false,
+        "reasons": [],
+        "gf": "-0x1.07fb4dd94ec00p+15",
+        "mw": "-0x1.76136155f9c00p+16",
+        "skipped": false
+      },
+      {
+        "epoch": 6,
+        "slip": true,
+        "reasons": [
+          "lli"
+        ],
+        "gf": "-0x1.07fb4e82e6800p+15",
+        "mw": "-0x1.76137a3e94c00p+16",
+        "skipped": false
+      },
+      {
+        "epoch": 7,
+        "slip": false,
+        "reasons": [],
+        "gf": "-0x1.07fb4f2c7e200p+15",
+        "mw": "-0x1.761373e423d00p+16",
+        "skipped": false
+      },
+      {
+        "epoch": 8,
+        "slip": false,
+        "reasons": [],
+        "gf": null,
+        "mw": null,
+        "skipped": true
+      }
+    ],
+    "smooth_code": [
+      {
+        "epoch": 0,
+        "p_smooth": "0x1.4689c023d70a4p+24",
+        "window": 1,
+        "reset": false
+      },
+      {
+        "epoch": 1,
+        "p_smooth": "0x1.468a1f6000000p+24",
+        "window": 2,
+        "reset": false
+      },
+      {
+        "epoch": 2,
+        "p_smooth": "0x1.468a7f7a06d39p+24",
+        "window": 3,
+        "reset": false
+      },
+      {
+        "epoch": 3,
+        "p_smooth": "0x1.468ae02b851ebp+24",
+        "window": 4,
+        "reset": false
+      },
+      {
+        "epoch": 4,
+        "p_smooth": "0x1.468b41a45a1cbp+24",
+        "window": 1,
+        "reset": true
+      },
+      {
+        "epoch": 5,
+        "p_smooth": "0x1.468ba3aac0831p+24",
+        "window": 2,
+        "reset": false
+      },
+      {
+        "epoch": 6,
+        "p_smooth": "0x1.468c06ad91687p+24",
+        "window": 1,
+        "reset": true
+      },
+      {
+        "epoch": 7,
+        "p_smooth": "0x1.468c6a20c49bap+24",
+        "window": 2,
+        "reset": false
+      },
+      {
+        "epoch": 8,
+        "p_smooth": null,
+        "window": 0,
+        "reset": false
+      }
+    ],
+    "smooth_iono_free_code": [
+      {
+        "epoch": 0,
+        "p_smooth": "0x1.4689c0a4cab98p+24",
+        "p_if": "0x1.4689c0a4cab98p+24",
+        "l_if": "0x1.46197d93b3cb8p+24",
+        "window": 1,
+        "reset": false
+      },
+      {
+        "epoch": 1,
+        "p_smooth": "0x1.468a1f8be0026p+24",
+        "p_if": "0x1.468a1f195bb1bp+24",
+        "l_if": "0x1.4619dced4d652p+24",
+        "window": 2,
+        "reset": false
+      },
+      {
+        "epoch": 2,
+        "p_smooth": "0x1.468a7fbcfc0ccp+24",
+        "p_if": "0x1.468a80059a882p+24",
+        "l_if": "0x1.461a3cfa1a31ep+24",
+        "window": 3,
+        "reset": false
+      },
+      {
+        "epoch": 3,
+        "p_smooth": "0x1.468ae0479118ap+24",
+        "p_if": "0x1.468adfa7503c6p+24",
+        "l_if": "0x1.461a9dba1a31ep+24",
+        "window": 4,
+        "reset": false
+      },
+      {
+        "epoch": 4,
+        "p_smooth": "0x1.468b421b7b0f7p+24",
+        "p_if": "0x1.468b421b7b0f7p+24",
+        "l_if": "0x1.461b021565566p+24",
+        "window": 1,
+        "reset": true
+      },
+      {
+        "epoch": 5,
+        "p_smooth": "0x1.468ba3c0eec2cp+24",
+        "p_if": "0x1.468ba33ffc0f9p+24",
+        "l_if": "0x1.461b643bcbbcep+24",
+        "window": 2,
+        "reset": false
+      },
+      {
+        "epoch": 6,
+        "p_smooth": "0x1.468c0711ef759p+24",
+        "p_if": "0x1.468c0711ef759p+24",
+        "l_if": "0x1.461bc71565568p+24",
+        "window": 1,
+        "reset": true
+      },
+      {
+        "epoch": 7,
+        "p_smooth": "0x1.468c6a35fe7efp+24",
+        "p_if": "0x1.468c69cd40bb8p+24",
+        "l_if": "0x1.461c2aa232235p+24",
+        "window": 2,
+        "reset": false
+      },
+      {
+        "epoch": 8,
+        "p_smooth": null,
+        "p_if": null,
+        "l_if": null,
+        "window": 0,
+        "reset": false
+      }
+    ]
+  }
+}

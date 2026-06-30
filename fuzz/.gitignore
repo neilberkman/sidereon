@@ -1,0 +1,5 @@
+/target
+/artifacts
+# libfuzzer writes generated coverage corpus here on every run; only the small
+# curated seed corpus is tracked (already committed). Ignore generated growth.
+/corpus

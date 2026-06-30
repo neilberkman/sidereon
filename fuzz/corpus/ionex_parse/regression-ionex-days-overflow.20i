@@ -1,0 +1,11 @@
+     1.1                                                    IONEX VERSION / TYPE
+     1                                                      # OF MAPS IN FILE
+   450.0 450.0   0.0                                        HGT1 / HGT2 / DHGT
+    60.0 -60.0 -20.0                                        LAT1 / LAT2 / DLAT
+  -180.0 180.0  60.0                                        LON1 / LON2 / DLON
+    -1                                                      EXPONENT
+  6371.0                                                    BASE RADIUS
+     2                                                      MAP DIMENSION
+                                                            END OF HEADER
+     1                                                      START OF TEC MAP
+  9223372036854775807     1     1     0     0     0         EPOCH OF CURRENT MAP

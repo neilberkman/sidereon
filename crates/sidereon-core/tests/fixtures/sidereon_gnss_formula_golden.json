@@ -1,0 +1,327 @@
+{
+  "schema": "orbis-gnss-parity/orbis_gnss_formula.v1",
+  "purpose": "Independent Python/scipy oracle fixture for Orbis-only GNSS formula helpers: ionosphere-free combinations and QC weighting / chi-square gates.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "Generated in the pinned parity virtualenv; floats are stored as Python float.hex()."
+  },
+  "generator": {
+    "python": "3.14.6",
+    "executable": "/Volumes/ExternalSSD/orbis-gnss-workspace/parity/.venv/bin/python",
+    "numpy": "2.4.6",
+    "scipy": "1.17.1"
+  },
+  "ionosphere_free": {
+    "cases": [
+      {
+        "system": "G",
+        "band1": "l1",
+        "band2": "l2",
+        "f1_hz": "0x1.779c018000000p+30",
+        "f2_hz": "0x1.24aec20000000p+30",
+        "true_range_m": "0x1.5ef3c00000000p+24",
+        "k_tec": "0x1.158e460913d00p+63",
+        "pr1_m": "0x1.5ef3c40772a36p+24",
+        "pr2_m": "0x1.5ef3c6a2bcbb5p+24",
+        "gamma": "0x1.45da686c28e3cp+1",
+        "noise_amplification": "0x1.7d3777c503ebcp+1",
+        "iono_free_m": "0x1.5ef3c00000000p+24",
+        "phi1_cycles": "0x1.cd8990a6a993bp+26",
+        "phi2_cycles": "0x1.682ad3bea73b9p+26",
+        "phase1_m": "0x1.5f4f80ddd7ecdp+24",
+        "phase2_m": "0x1.5fd37d057d184p+24",
+        "iono_free_phase_m": "0x1.5e837d93b3cbap+24",
+        "iono_free_phase_from_cycles_m": "0x1.5e837d93b3cbap+24"
+      },
+      {
+        "system": "E",
+        "band1": "e1",
+        "band2": "e5a",
+        "f1_hz": "0x1.779c018000000p+30",
+        "f2_hz": "0x1.187ccf4000000p+30",
+        "true_range_m": "0x1.75d7200000000p+24",
+        "k_tec": "0x1.158e460913d00p+64",
+        "pr1_m": "0x1.75d7280ee546cp+24",
+        "pr2_m": "0x1.75d72e7354588p+24",
+        "gamma": "0x1.215b7b8bf1d8dp+1",
+        "noise_amplification": "0x1.4b4e6a9e28198p+1",
+        "iono_free_m": "0x1.75d71ffffffffp+24",
+        "phi1_cycles": "0x1.eb9b5c28924ddp+26",
+        "phi2_cycles": "0x1.6fa6edb5f553ep+26",
+        "phase1_m": "0x1.7632debd8c260p+24",
+        "phase2_m": "0x1.76c09259441aep+24",
+        "iono_free_phase_m": "0x1.75803d8d388aep+24",
+        "iono_free_phase_from_cycles_m": "0x1.75803d8d388aep+24"
+      },
+      {
+        "system": "C",
+        "band1": "b1i",
+        "band2": "b3i",
+        "f1_hz": "0x1.7431dc4000000p+30",
+        "f2_hz": "0x1.2e70510000000p+30",
+        "true_range_m": "0x1.5382100000000p+24",
+        "k_tec": "0x1.a055690d9db80p+63",
+        "pr1_m": "0x1.53821627b0be3p+24",
+        "pr2_m": "0x1.538219525d0a5p+24",
+        "gamma": "0x1.78ca90724ddf1p+1",
+        "noise_amplification": "0x1.c384adb005afdp+1",
+        "iono_free_m": "0x1.5382100000000p+24",
+        "phi1_cycles": "0x1.ba72a23131776p+26",
+        "phi2_cycles": "0x1.680982c673023p+26",
+        "phase1_m": "0x1.53deaa1cd1743p+24",
+        "phase2_m": "0x1.545a9733bf939p+24",
+        "iono_free_phase_m": "0x1.52edcaa262834p+24",
+        "iono_free_phase_from_cycles_m": "0x1.52edcaa262834p+24"
+      }
+    ]
+  },
+  "qc": {
+    "variance_cases": [
+      {
+        "elevation_deg": "0x1.4000000000000p+2",
+        "a_m": "0x1.3333333333333p-2",
+        "b_m": "0x1.3333333333333p-2",
+        "variance_m2": "0x1.7e05503abd80cp+3",
+        "sigma_m": "0x1.ba42c4a5802dap+1",
+        "weight": "0x1.571a0e0ca32b8p-4"
+      },
+      {
+        "elevation_deg": "0x1.e000000000000p+3",
+        "a_m": "0x1.3333333333333p-2",
+        "b_m": "0x1.3333333333333p-2",
+        "variance_m2": "0x1.6efc5d8c3a0bap+0",
+        "sigma_m": "0x1.32828dca6be43p+0",
+        "weight": "0x1.652881d3d4100p-1"
+      },
+      {
+        "elevation_deg": "0x1.e000000000000p+4",
+        "a_m": "0x1.3333333333333p-2",
+        "b_m": "0x1.3333333333333p-2",
+        "variance_m2": "0x1.ccccccccccccep-2",
+        "sigma_m": "0x1.5775c544ff263p-1",
+        "weight": "0x1.1c71c71c71c71p+1"
+      },
+      {
+        "elevation_deg": "0x1.e000000000000p+5",
+        "a_m": "0x1.3333333333333p-2",
+        "b_m": "0x1.3333333333333p-2",
+        "variance_m2": "0x1.ae147ae147ae2p-3",
+        "sigma_m": "0x1.d54178e8830d6p-2",
+        "weight": "0x1.30c30c30c30c3p+2"
+      },
+      {
+        "elevation_deg": "0x1.6800000000000p+6",
+        "a_m": "0x1.3333333333333p-2",
+        "b_m": "0x1.3333333333333p-2",
+        "variance_m2": "0x1.70a3d70a3d70ap-3",
+        "sigma_m": "0x1.b27247aff148fp-2",
+        "weight": "0x1.638e38e38e38ep+2"
+      }
+    ],
+    "cn0_cases": [
+      {
+        "elevation_deg": "0x1.e000000000000p+4",
+        "cn0_dbhz": "0x1.e000000000000p+4",
+        "cn0_scale": "0x1.0000000000000p+0",
+        "variance_m2": "0x1.cdd2f1a9fbe78p-2"
+      },
+      {
+        "elevation_deg": "0x1.e000000000000p+4",
+        "cn0_dbhz": "0x1.6800000000000p+5",
+        "cn0_scale": "0x1.0000000000000p+0",
+        "variance_m2": "0x1.ccd516f7f71adp-2"
+      },
+      {
+        "elevation_deg": "0x1.e000000000000p+4",
+        "cn0_dbhz": "0x1.9000000000000p+5",
+        "cn0_scale": "0x1.0000000000000p+0",
+        "variance_m2": "0x1.cccf6be37de95p-2"
+      }
+    ],
+    "chi2_cases": [
+      {
+        "p": "0x1.e666666666666p-1",
+        "dof": 1,
+        "critical": "0x1.ebb4ec31e7eedp+1"
+      },
+      {
+        "p": "0x1.e666666666666p-1",
+        "dof": 2,
+        "critical": "0x1.7f7427b73e38fp+2"
+      },
+      {
+        "p": "0x1.e666666666666p-1",
+        "dof": 3,
+        "critical": "0x1.f4248080e68eap+2"
+      },
+      {
+        "p": "0x1.e666666666666p-1",
+        "dof": 4,
+        "critical": "0x1.2f9b79ecc91bcp+3"
+      },
+      {
+        "p": "0x1.e666666666666p-1",
+        "dof": 5,
+        "critical": "0x1.624184610313cp+3"
+      },
+      {
+        "p": "0x1.e666666666666p-1",
+        "dof": 8,
+        "critical": "0x1.f03be896f8d48p+3"
+      },
+      {
+        "p": "0x1.e666666666666p-1",
+        "dof": 12,
+        "critical": "0x1.506ac82f580a2p+4"
+      },
+      {
+        "p": "0x1.fae147ae147aep-1",
+        "dof": 1,
+        "critical": "0x1.a8a2255a6e925p+2"
+      },
+      {
+        "p": "0x1.fae147ae147aep-1",
+        "dof": 2,
+        "critical": "0x1.26bb1bbb55514p+3"
+      },
+      {
+        "p": "0x1.fae147ae147aep-1",
+        "dof": 3,
+        "critical": "0x1.6b0925f3ee5a5p+3"
+      },
+      {
+        "p": "0x1.fae147ae147aep-1",
+        "dof": 4,
+        "critical": "0x1.a8dac2a1d7834p+3"
+      },
+      {
+        "p": "0x1.fae147ae147aep-1",
+        "dof": 5,
+        "critical": "0x1.e2c2be7b52448p+3"
+      },
+      {
+        "p": "0x1.fae147ae147aep-1",
+        "dof": 8,
+        "critical": "0x1.41719a4955b70p+4"
+      },
+      {
+        "p": "0x1.fae147ae147aep-1",
+        "dof": 12,
+        "critical": "0x1.a378b2b5993e5p+4"
+      },
+      {
+        "p": "0x1.ff7ced916872bp-1",
+        "dof": 1,
+        "critical": "0x1.5a7b6c0cc8b77p+3"
+      },
+      {
+        "p": "0x1.ff7ced916872bp-1",
+        "dof": 2,
+        "critical": "0x1.ba18a998fffa0p+3"
+      },
+      {
+        "p": "0x1.ff7ced916872bp-1",
+        "dof": 3,
+        "critical": "0x1.044280e2bdaadp+4"
+      },
+      {
+        "p": "0x1.ff7ced916872bp-1",
+        "dof": 4,
+        "critical": "0x1.27781f89f9c46p+4"
+      },
+      {
+        "p": "0x1.ff7ced916872bp-1",
+        "dof": 5,
+        "critical": "0x1.483d769127450p+4"
+      },
+      {
+        "p": "0x1.ff7ced916872bp-1",
+        "dof": 8,
+        "critical": "0x1.a1fde05fe2e3ep+4"
+      },
+      {
+        "p": "0x1.ff7ced916872bp-1",
+        "dof": 12,
+        "critical": "0x1.0746a2e81d1a4p+5"
+      }
+    ]
+  },
+  "observables": {
+    "source": "test/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3",
+    "reference": "canonical sp3_interp CubicSpline recipe + Orbis/Skyfield WGS84 geodetic op-order",
+    "cases": [
+      {
+        "sat": "G21",
+        "light_time": true,
+        "sagnac": true,
+        "epoch": "2020-06-24T12:00:00",
+        "receiver_ecef_m": [
+          "0x1.acd2200000000p+21",
+          "0x1.7d1a800000000p+19",
+          "0x1.405af00000000p+22"
+        ],
+        "transmit_time": "2020-06-24T11:59:59.930712",
+        "tau_s": "0x1.1bcd4da635c8fp-4",
+        "geometric_range_m": "0x1.3cf438ba57358p+24",
+        "range_rate_m_s": "0x1.d7dd36f6b8980p+3",
+        "doppler_hz": "-0x1.35f534ba7c77dp+6",
+        "sat_clock_s": "0x1.04d2d8279460cp-16",
+        "elevation_deg": "0x1.4590eed870f52p+6",
+        "azimuth_deg": "0x1.45ff5a090a131p+7",
+        "los_unit": [
+          "0x1.4c70da9fa70ddp-1",
+          "0x1.834429adb2baep-3",
+          "0x1.792a4f57fdcb1p-1"
+        ]
+      },
+      {
+        "sat": "G21",
+        "light_time": false,
+        "sagnac": true,
+        "epoch": "2020-06-24T12:00:00",
+        "receiver_ecef_m": [
+          "0x1.acd2200000000p+21",
+          "0x1.7d1a800000000p+19",
+          "0x1.405af00000000p+22"
+        ],
+        "transmit_time": "2020-06-24T12:00:00.000000",
+        "tau_s": "0x0.0p+0",
+        "geometric_range_m": "0x1.3cf43a8bb3445p+24",
+        "range_rate_m_s": "0x1.d81bbae10bc40p+3",
+        "doppler_hz": "-0x1.361e455f0d7eep+6",
+        "sat_clock_s": "0x1.04d2d884f63ebp-16",
+        "elevation_deg": "0x1.4591189670abep+6",
+        "azimuth_deg": "0x1.45fceda657bddp+7",
+        "los_unit": [
+          "0x1.4c6fe90c5ea25p-1",
+          "0x1.83493e40de1b5p-3",
+          "0x1.792ad0ce6f941p-1"
+        ]
+      },
+      {
+        "sat": "G21",
+        "light_time": true,
+        "sagnac": false,
+        "epoch": "2020-06-24T12:00:00",
+        "receiver_ecef_m": [
+          "0x1.acd2200000000p+21",
+          "0x1.7d1a800000000p+19",
+          "0x1.405af00000000p+22"
+        ],
+        "transmit_time": "2020-06-24T11:59:59.930712",
+        "tau_s": "0x1.1bcd4e5c9f33ep-4",
+        "geometric_range_m": "0x1.3cf439860f892p+24",
+        "range_rate_m_s": "0x1.d7ebb2b522b00p+3",
+        "doppler_hz": "-0x1.35feb844e4985p+6",
+        "sat_clock_s": "0x1.04d2d8279460cp-16",
+        "elevation_deg": "0x1.4590de8dd7394p+6",
+        "azimuth_deg": "0x1.45fe89c2a6bd5p+7",
+        "los_unit": [
+          "0x1.4c70b35c38440p-1",
+          "0x1.834653b4bfacbp-3",
+          "0x1.792a4e65922b1p-1"
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,2167 @@
+{
+  "cases": [
+    {
+      "bias_bits": [
+        "0xbffac3d5c05bf1ec"
+      ],
+      "cross_bits": [
+        []
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x3e50000000000000"
+        ]
+      ],
+      "f0_bits": [
+        "0xbffac3d5c05bf1ec"
+      ],
+      "h_bits": [
+        "0x3e50000000000000"
+      ],
+      "id": 0,
+      "jacobian_bits": [
+        [
+          "0xbfc952cb40000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0xbfc952cb4d5d91d4"
+        ]
+      ],
+      "m": 1,
+      "n": 1,
+      "quadratic_bits": [
+        [
+          "0xbf7e4c8f8d52e9f8"
+        ]
+      ],
+      "use_one_sided": [
+        true
+      ],
+      "x0_bits": [
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0x4005d2e4a17636c4",
+        "0xbff61871589e007b",
+        "0xc0028e7f5e49228c",
+        "0xbff97cdec58a24e6"
+      ],
+      "cross_bits": [
+        [
+          "0x3f70452087a86983"
+        ],
+        [
+          "0x3f73c234777414eb"
+        ],
+        [
+          "0xbf6cd3c419fb7c8d"
+        ],
+        [
+          "0x3f5d8475671263f4"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x3e50000000000000",
+          "0x3ff0000000000000"
+        ],
+        [
+          "0x0000000000000000",
+          "0x3ff0000004000000"
+        ]
+      ],
+      "f0_bits": [
+        "0x4005454b77e23582",
+        "0xbffaded7f26de50b",
+        "0xbffdf0000454664a",
+        "0xbfed47f84c9c4c59"
+      ],
+      "h_bits": [
+        "0x3e50000000000000",
+        "0x3e50000000000000"
+      ],
+      "id": 1,
+      "jacobian_bits": [
+        [
+          "0x3fc94893c0000000",
+          "0xbfb201aa00000000"
+        ],
+        [
+          "0xbfce196fa0000000",
+          "0xbfd2de7110000000"
+        ],
+        [
+          "0xbfe4551a10000000",
+          "0x3fdd34c570000000"
+        ],
+        [
+          "0xbfbab86680000000",
+          "0x3fe5f34d14000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fc8855620782d40",
+          "0xbfb14415e3f47cb8"
+        ],
+        [
+          "0xbfcf068a270c9be8",
+          "0xbfd34ae2a6111799"
+        ],
+        [
+          "0xbfe429dc6d3a0fae",
+          "0x3fdc2bfb561222f4"
+        ],
+        [
+          "0xbfbb69814bfaede0",
+          "0x3fe57215b001428c"
+        ]
+      ],
+      "m": 4,
+      "n": 2,
+      "quadratic_bits": [
+        [
+          "0xbf80c7325cc74e03",
+          "0xbf2ae116bb71f500"
+        ],
+        [
+          "0x3f594e35770e82b0",
+          "0x3f73bae3612cdde2"
+        ],
+        [
+          "0x3f814a9d760be231",
+          "0x3f7c982df476e982"
+        ],
+        [
+          "0xbf5c2291410e8e48",
+          "0x3f814e191e839669"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x8000000000000000",
+        "0x3ff0000000000000"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0x3ff04785628ef56c"
+      ],
+      "cross_bits": [
+        [
+          "0x3f40cf9f2a32da00",
+          "0x3f7232e4c8852b17",
+          "0xbf6de0bff88f7797"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0xbff0000004000000",
+          "0x3fe0000000000000",
+          "0x4000000000000000"
+        ],
+        [
+          "0xbff0000000000000",
+          "0x3fe0000008000000",
+          "0x4000000000000000"
+        ],
+        [
+          "0xbff0000000000000",
+          "0x3fe0000000000000",
+          "0x4000000004000000"
+        ]
+      ],
+      "f0_bits": [
+        "0x3feec6907a6938be"
+      ],
+      "h_bits": [
+        "0xbe50000000000000",
+        "0x3e50000000000000",
+        "0x3e60000000000000"
+      ],
+      "id": 2,
+      "jacobian_bits": [
+        [
+          "0x3fcd27a260000000",
+          "0xbfd65cce00000000",
+          "0x3fc586f2e0000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fc9e40bb85dc80c",
+          "0xbfd536d886845e42",
+          "0x3fc4e221659fb498"
+        ]
+      ],
+      "m": 1,
+      "n": 3,
+      "quadratic_bits": [
+        [
+          "0xbf7c6cd3468a97ac",
+          "0xbf80a060d961d8a6",
+          "0x3f68f80c8f8e51a0"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0xbff0000000000000",
+        "0x3fe0000000000000",
+        "0x4000000000000000"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0xbffd5e7a4f782769",
+        "0x3fe2208f058572d8",
+        "0x3ff2d94e752c6c80",
+        "0xbfde7c0270e2ce00"
+      ],
+      "cross_bits": [
+        [
+          "0xbf657185c7f70b27",
+          "0x3f5fd9946755e958",
+          "0x3f32554a040f91b0",
+          "0xbf7163fee523aed2",
+          "0x3f64be770b46fc5a",
+          "0x3f6ddfef74934fa2"
+        ],
+        [
+          "0xbf713cd021b03637",
+          "0xbf6af9ab628340e9",
+          "0xbf64e0fd146620a9",
+          "0x3f64e4b22ae85950",
+          "0xbf70cba30d0e5ced",
+          "0x3f2a833778567c80"
+        ],
+        [
+          "0x3f738d28e30b8bf5",
+          "0x3f6ea985a59b2b82",
+          "0xbf0916ebbe168e00",
+          "0x3f5e46ac97f69d90",
+          "0x3f5659ee1bcf9b30",
+          "0xbf4afbe5cde6fd30"
+        ],
+        [
+          "0xbf574d11653275aa",
+          "0xbf5721b32c56a2be",
+          "0xbf3d0271b53fb9f0",
+          "0x3f654e063a85c6ac",
+          "0xbf4e4a7a57e931e8",
+          "0xbf56d3a8c21f4cf0"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x3e5000465e6604b8",
+          "0xbd719799812dea11",
+          "0x4024000000000000",
+          "0xc024000000000000"
+        ],
+        [
+          "0x3d719799812dea11",
+          "0xbe5000465e6604b8",
+          "0x4024000000000000",
+          "0xc024000000000000"
+        ],
+        [
+          "0x3d719799812dea11",
+          "0xbd719799812dea11",
+          "0x4024000005000000",
+          "0xc024000000000000"
+        ],
+        [
+          "0x3d719799812dea11",
+          "0xbd719799812dea11",
+          "0x4024000000000000",
+          "0xc024000005000000"
+        ]
+      ],
+      "f0_bits": [
+        "0xbfe1852532ce6426",
+        "0xc00b17174957affa",
+        "0x401d21079df39280",
+        "0x40081968e0e3039a"
+      ],
+      "h_bits": [
+        "0x3e50000000000000",
+        "0xbe50000000000000",
+        "0x3e84000000000000",
+        "0xbe84000000000000"
+      ],
+      "id": 3,
+      "jacobian_bits": [
+        [
+          "0x3fe67da7e0000000",
+          "0x3fbe6d15e0000000",
+          "0xbfe170d9d199999a",
+          "0xbfe1892a6d99999a"
+        ],
+        [
+          "0x3fcbae1880000000",
+          "0x3fd05744c0000000",
+          "0xbfdf30b26ccccccd",
+          "0xbfd0c337c6666666"
+        ],
+        [
+          "0xbfd9c4a600000000",
+          "0x3fe39cebe0000000",
+          "0x3fa7409533333333",
+          "0xbfe473b87ccccccd"
+        ],
+        [
+          "0xbfe10121a0000000",
+          "0xbfe2ff72f0000000",
+          "0x3fdcf51256666666",
+          "0x3f870d3c00000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fe5f6efb1e57d36",
+          "0x3fc7f4e7371b85e0",
+          "0xbfdf4553a295f1db",
+          "0xbfe7b0cd62e5988e"
+        ],
+        [
+          "0x3fcd469c2c0e5120",
+          "0x3fc83352b053bc38",
+          "0xbfe3622c785c112a",
+          "0xbfa51bdd96b894c0"
+        ],
+        [
+          "0xbfdc771b3b6a919b",
+          "0x3fe36d072f7c3dca",
+          "0xbfb2669364d2c398",
+          "0xbfe37ec87ea7c25a"
+        ],
+        [
+          "0xbfe0a4507c4b692a",
+          "0xbfe4288bdd7d38e2",
+          "0x3fd6f8f89469cbd8",
+          "0x3fb9e914c8e9b1e0"
+        ]
+      ],
+      "m": 4,
+      "n": 4,
+      "quadratic_bits": [
+        [
+          "0xbf801557526cdb0e",
+          "0xbf64869d396b27aa",
+          "0xbf5b80672112be20",
+          "0xbf7979491390b514"
+        ],
+        [
+          "0xbf607e2c332b5b14",
+          "0xbf6bce5ff5fbdd52",
+          "0x3f77dc24623bc9fa",
+          "0x3f8396525ead9bc1"
+        ],
+        [
+          "0xbf7498523015d543",
+          "0x3f5a8f9852900d88",
+          "0x3f7c4995e5ae5cde",
+          "0x3f53b751bb3940e0"
+        ],
+        [
+          "0xbf7061b8114bea78",
+          "0x3f7c66fee8c78396",
+          "0x3f71b039afa1e2a2",
+          "0x3f69a0c2282eea74"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x3d719799812dea11",
+        "0xbd719799812dea11",
+        "0x4024000000000000",
+        "0xc024000000000000"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0x4000dc790480853c"
+      ],
+      "cross_bits": [
+        [
+          "0x3f5675083e1943dc",
+          "0x3f2711b72c599940",
+          "0xbf421dab04a3df68",
+          "0xbf705a37adde9173",
+          "0x3f6a9d7c1a6ead9e",
+          "0xbf6c009b6c2f34b6",
+          "0x3f23087bc7321360",
+          "0x3f45ebf095107d40",
+          "0xbf48d19298359d50",
+          "0xbf5d61d7e74710d2"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x4197d78405f5e100",
+          "0xc197d78400000000",
+          "0x400a000000000000",
+          "0xc012000000000000",
+          "0x0000000000000000"
+        ],
+        [
+          "0x4197d78400000000",
+          "0xc197d78405f5e100",
+          "0x400a000000000000",
+          "0xc012000000000000",
+          "0x0000000000000000"
+        ],
+        [
+          "0x4197d78400000000",
+          "0xc197d78400000000",
+          "0x400a000006800000",
+          "0xc012000000000000",
+          "0x0000000000000000"
+        ],
+        [
+          "0x4197d78400000000",
+          "0xc197d78400000000",
+          "0x400a000000000000",
+          "0xc012000004800000",
+          "0x0000000000000000"
+        ],
+        [
+          "0x4197d78400000000",
+          "0xc197d78400000000",
+          "0x400a000000000000",
+          "0xc012000000000000",
+          "0x3e50000000000000"
+        ]
+      ],
+      "f0_bits": [
+        "0x42d758058a55c98f"
+      ],
+      "h_bits": [
+        "0x3ff7d78400000000",
+        "0xbff7d78400000000",
+        "0x3e6a000000000000",
+        "0xbe72000000000000",
+        "0x3e50000000000000"
+      ],
+      "id": 4,
+      "jacobian_bits": [
+        [
+          "0x412c76f0068db8bb",
+          "0xc1311969354dbfa6",
+          "0xc113b13b13b13b14",
+          "0x411c71c71c71c71c",
+          "0x0000000000000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0xbfd03473bb994553",
+          "0xbfde7c4fd228323a",
+          "0xbfe32c99f1608c21",
+          "0x3fd00bfd7d5fdf0c",
+          "0x3f7820304cd83780"
+        ]
+      ],
+      "m": 1,
+      "n": 5,
+      "quadratic_bits": [
+        [
+          "0x3f75e8cfb53e5b74",
+          "0x3f7b2933e109e532",
+          "0x3f752f95195145b4",
+          "0xbf813bab4a2da6b3",
+          "0xbf82c3329c0191aa"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x4197d78400000000",
+        "0xc197d78400000000",
+        "0x400a000000000000",
+        "0xc012000000000000",
+        "0x0000000000000000"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0x4005f9da778f73ee",
+        "0x4006ec375f7f6e60",
+        "0x40024986296ffe78",
+        "0x4000b3d456fea70c"
+      ],
+      "cross_bits": [
+        [],
+        [],
+        [],
+        []
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x3e5a7706b761a4c0"
+        ]
+      ],
+      "f0_bits": [
+        "0x4005f9da780d8a43",
+        "0x4006ec376072105b",
+        "0x4002498629bf1ab8",
+        "0x4000b3d45761d5a1"
+      ],
+      "h_bits": [
+        "0x3e50000000000000"
+      ],
+      "id": 5,
+      "jacobian_bits": [
+        [
+          "0x3fd818d920000000"
+        ],
+        [
+          "0x3fe72f6ea0000000"
+        ],
+        [
+          "0x3fce3cfc40000000"
+        ],
+        [
+          "0x3fd2f48060000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fd818d9224ce9d8"
+        ],
+        [
+          "0x3fe72f6ea668e90e"
+        ],
+        [
+          "0x3fce3cfc4c0ee048"
+        ],
+        [
+          "0x3fd2f4805ebbe4ac"
+        ]
+      ],
+      "m": 4,
+      "n": 1,
+      "quadratic_bits": [
+        [
+          "0x3f7a359c554572ba"
+        ],
+        [
+          "0xbf74110f4e641052"
+        ],
+        [
+          "0x3f7bf60919a7deba"
+        ],
+        [
+          "0xbf74ded809ab7621"
+        ]
+      ],
+      "use_one_sided": [
+        true
+      ],
+      "x0_bits": [
+        "0x3e44ee0d6ec34980"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0xc004cf34f26cf35e"
+      ],
+      "cross_bits": [
+        [
+          "0xbf6bb656e9e99629"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0xc0b1edb05781f1f9",
+          "0xbe82721657d88e94"
+        ],
+        [
+          "0xc0b1edb0530685e4",
+          "0xbe84721657d88e94"
+        ]
+      ],
+      "f0_bits": [
+        "0x4104caddb36c4519"
+      ],
+      "h_bits": [
+        "0xbf11edb0530685e4",
+        "0xbe50000000000000"
+      ],
+      "id": 6,
+      "jacobian_bits": [
+        [
+          "0xc05286462d6474ee",
+          "0x402f610000000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0xbfc001c31193ab14",
+          "0x3fc513af5c664ed8"
+        ]
+      ],
+      "m": 1,
+      "n": 2,
+      "quadratic_bits": [
+        [
+          "0x3f8080eeef61215f",
+          "0xbf767043f3fc1617"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0xc0b1edb0530685e4",
+        "0xbe82721657d88e94"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0x40046aae4bb7d582",
+        "0x3fff6cd4380bf210",
+        "0x3ff689e751aae928",
+        "0xbff528e8f0ba1a62"
+      ],
+      "cross_bits": [
+        [
+          "0xbf695fa0c5c007ac",
+          "0x3f661a37bcb75ac0",
+          "0xbf60af58c1e04261"
+        ],
+        [
+          "0xbf662b8424fc439a",
+          "0xbf65360637911df3",
+          "0x3f632a53a242b702"
+        ],
+        [
+          "0xbf4c2dd70828d560",
+          "0xbf5941a8b4ac5a76",
+          "0xbf6d8242f3b22269"
+        ],
+        [
+          "0x3f7367c22f63a3a5",
+          "0x3f73f63393ec2ef3",
+          "0xbf730474280a895a"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x3fb0000040000000",
+          "0xc0a9849031e010a2",
+          "0x3e74cb48f1d34d00"
+        ],
+        [
+          "0x3fb0000000000000",
+          "0xc0a98490384134ae",
+          "0x3e74cb48f1d34d00"
+        ],
+        [
+          "0x3fb0000000000000",
+          "0xc0a9849031e010a2",
+          "0x3e78cb48f1d34d00"
+        ]
+      ],
+      "f0_bits": [
+        "0x40f9238c4611ead4",
+        "0xc0f2aa8c16748d45",
+        "0x40f2fedc72ba0380",
+        "0xc0d54ec2b7625d49"
+      ],
+      "h_bits": [
+        "0x3e50000000000000",
+        "0xbf09849031e010a2",
+        "0x3e50000000000000"
+      ],
+      "id": 7,
+      "jacobian_bits": [
+        [
+          "0x4024e28000000000",
+          "0xc04f5b6bc3e3b02d",
+          "0x401a480000000000"
+        ],
+        [
+          "0x4022f38000000000",
+          "0x40470edeb5888c82",
+          "0xc01e940000000000"
+        ],
+        [
+          "0x4001d60000000000",
+          "0xc047b7c6c9834486",
+          "0x4026150000000000"
+        ],
+        [
+          "0xc02e45c000000000",
+          "0x402b4b061efb0a12",
+          "0x402d11e000000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fd4cf92f5283e50",
+          "0xbfd54e5df435df0e",
+          "0xbfb4db710408f8d0"
+        ],
+        [
+          "0x3fe477e63ff90168",
+          "0x3fe6623fc7bebc3e",
+          "0xbf639038cf130200"
+        ],
+        [
+          "0xbfe2811c35dda992",
+          "0xbfca0b21e89ce3bc",
+          "0xbfe73b93e91b5ab4"
+        ],
+        [
+          "0x3fd5522dcd4ecc7c",
+          "0xbfd235df00fd84ad",
+          "0xbfe42c324630846a"
+        ]
+      ],
+      "m": 4,
+      "n": 3,
+      "quadratic_bits": [
+        [
+          "0x3f7c6dd58b9b0fc6",
+          "0x3f81f8888875f65d",
+          "0xbf55a0719a02f0c0"
+        ],
+        [
+          "0xbf82889d374a5855",
+          "0xbf7f3f4b3aa59cee",
+          "0x3f1f796d7bc0eb00"
+        ],
+        [
+          "0xbf70c2c16ee38fe9",
+          "0x3f7cbbca1d4665ea",
+          "0xbf601f4306334dcc"
+        ],
+        [
+          "0x3f6f130669d8f374",
+          "0xbf4f15092f4ff840",
+          "0xbf63a063b7ba748a"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x3fb0000000000000",
+        "0xc0a9849031e010a2",
+        "0x3e74cb48f1d34d00"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0xc001328e62864960"
+      ],
+      "cross_bits": [
+        [
+          "0x3f5f7d0312c2ff84",
+          "0x3f71d5e3ef9f5d4f",
+          "0xbf52dfc2f839fd48",
+          "0xbf6544ba315b3e38",
+          "0xbf3f8d1c7e403610",
+          "0xbf63910c72b6c3b6"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x400d7a097c67a67d",
+          "0x3fc0000000000000",
+          "0xc0bdba00e073710e",
+          "0x3ea318af9319cda8"
+        ],
+        [
+          "0x400d7a0975092420",
+          "0x3fc0000020000000",
+          "0xc0bdba00e073710e",
+          "0x3ea318af9319cda8"
+        ],
+        [
+          "0x400d7a0975092420",
+          "0x3fc0000000000000",
+          "0xc0bdba00e7e1f146",
+          "0x3ea318af9319cda8"
+        ],
+        [
+          "0x400d7a0975092420",
+          "0x3fc0000000000000",
+          "0xc0bdba00e073710e",
+          "0x3ea398af9319cda8"
+        ]
+      ],
+      "f0_bits": [
+        "0xc11ceafe9160e907"
+      ],
+      "h_bits": [
+        "0x3e6d7a0975092420",
+        "0x3e50000000000000",
+        "0xbf1dba00e073710e",
+        "0x3e50000000000000"
+      ],
+      "id": 8,
+      "jacobian_bits": [
+        [
+          "0xc040a28c8b3583b3",
+          "0x40336a0000000000",
+          "0x405f3ebd00c6f7b4",
+          "0x4031ef0000000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0xbfc2d3a204bb32e0",
+          "0xbfd696eab00ba252",
+          "0xbfde8a39f96f37d7",
+          "0xbfce8b3d5a4e4710"
+        ]
+      ],
+      "m": 1,
+      "n": 4,
+      "quadratic_bits": [
+        [
+          "0x3f55a3e69939ad70",
+          "0x3f8378eb79b74ea5",
+          "0xbf7ff57904a33271",
+          "0x3f76fe4bdb4f6878"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x400d7a0975092420",
+        "0x3fc0000000000000",
+        "0xc0bdba00e073710e",
+        "0x3ea318af9319cda8"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0xc0033f23fa9fd61a",
+        "0xbff9435ddeed78c4",
+        "0xbffcd94c70438380",
+        "0xbfee341194270e08"
+      ],
+      "cross_bits": [
+        [
+          "0x3f6b8d38c1032cf2",
+          "0x3f55517a0f7e1620",
+          "0x3f45c5acdab64868",
+          "0x3f620befed82861e",
+          "0xbf7380195de105e9",
+          "0x3f2f341f1dcb3fa0",
+          "0x3f3254b8d2782b70",
+          "0x3f680b8850e3b95a",
+          "0xbf5c794f46c8744c",
+          "0xbf685a11ff3433bb"
+        ],
+        [
+          "0x3f6fc40ac1cc78d6",
+          "0xbf56f9c68361543e",
+          "0xbf57f0da0bd1bcae",
+          "0xbf6377267dda67df",
+          "0xbf2a14becbc8d740",
+          "0x3f7198e46b4bfe55",
+          "0x3f6d8c0a10959542",
+          "0x3f6c95b02a9af62a",
+          "0x3f7432b280515a8f",
+          "0x3f72a2ad7ca1c49d"
+        ],
+        [
+          "0x3f6a32dae60f2daa",
+          "0xbf705c939b124f42",
+          "0x3f6015bfa86d3fda",
+          "0x3f405e71e95acc98",
+          "0xbf6986888cfb8629",
+          "0x3f66c1fd071c11ae",
+          "0xbf63803f7a875d55",
+          "0x3f5352d5d03895e8",
+          "0x3f6492dafa50a1f4",
+          "0xbf6861481b70ece9"
+        ],
+        [
+          "0x3f40c2e2d096f568",
+          "0x3f61d23d8a77dc22",
+          "0x3f64a17f6f703a76",
+          "0xbf3adcc20563f310",
+          "0x3f7324d7446e1487",
+          "0xbf6698eb9c8c1ff1",
+          "0xbf3f4d191830d0f0",
+          "0xbf631eed8e39aab1",
+          "0x3f60e4d7b9d63354",
+          "0x3f3d56ddfd228d80"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x3eac8f2395c657b0",
+          "0x3ff68b44846b2360",
+          "0xbf70000000000000",
+          "0x40b4395fc37779a0",
+          "0xbe700126c5ec2860"
+        ],
+        [
+          "0x3eac0f2395c657b0",
+          "0x3ff68b448a0df481",
+          "0xbf70000000000000",
+          "0x40b4395fc37779a0",
+          "0xbe700126c5ec2860"
+        ],
+        [
+          "0x3eac0f2395c657b0",
+          "0x3ff68b44846b2360",
+          "0xbf70000400000000",
+          "0x40b4395fc37779a0",
+          "0xbe700126c5ec2860"
+        ],
+        [
+          "0x3eac0f2395c657b0",
+          "0x3ff68b44846b2360",
+          "0xbf70000000000000",
+          "0x40b4395fc885d191",
+          "0xbe700126c5ec2860"
+        ],
+        [
+          "0x3eac0f2395c657b0",
+          "0x3ff68b44846b2360",
+          "0xbf70000000000000",
+          "0x40b4395fc37779a0",
+          "0xbe740126c5ec2860"
+        ]
+      ],
+      "f0_bits": [
+        "0x40f0dc15a592cf35",
+        "0xc0e4ddd9e6370371",
+        "0x40ff4c9ef350c275",
+        "0x41113595cd241809"
+      ],
+      "h_bits": [
+        "0x3e50000000000000",
+        "0x3e568b44846b2360",
+        "0xbe50000000000000",
+        "0x3f14395fc37779a0",
+        "0xbe50000000000000"
+      ],
+      "id": 9,
+      "jacobian_bits": [
+        [
+          "0x400e140000000000",
+          "0x3ffbe3cf9bb84be3",
+          "0x402e148000000000",
+          "0x403b6623d500f720",
+          "0xc02dea0000000000"
+        ],
+        [
+          "0xc01e300000000000",
+          "0x4036a80825efa9cd",
+          "0x4031ee0000000000",
+          "0xc031035dd5d96b62",
+          "0x403820e000000000"
+        ],
+        [
+          "0x4023c10000000000",
+          "0x402bb221605cad14",
+          "0x40163f0000000000",
+          "0x40489f6e1479f2cd",
+          "0xc02ef98000000000"
+        ],
+        [
+          "0x402acc0000000000",
+          "0xc02da731d449309f",
+          "0xc028500000000000",
+          "0x405b49c16bc9a694",
+          "0x4003780000000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fd3ec32b076d7c0",
+          "0x3fdfc1d972a4a8fc",
+          "0xbfc341c14bbc7b84",
+          "0xbfe70aff28162a1e",
+          "0x3fdbbc9710ba2cf8"
+        ],
+        [
+          "0x3f8cc157c37fa180",
+          "0x3fdba3bbf9902d98",
+          "0xbfc1e913e4a9a08c",
+          "0x3fdfda7b85f0c718",
+          "0x3fe235dfc7c2bc18"
+        ],
+        [
+          "0xbfd2bf157195f684",
+          "0xbfe0dfb12f4cf750",
+          "0xbfe15ef5918204e0",
+          "0x3fd1c57e224860a8",
+          "0xbfb316320e29efe0"
+        ],
+        [
+          "0x3fd6d4e993ed9584",
+          "0xbfe22818c1db69fd",
+          "0xbfb39a026fac9800",
+          "0xbfcd5ae3319e1be0",
+          "0x3fbd43a3ffbae570"
+        ]
+      ],
+      "m": 4,
+      "n": 5,
+      "quadratic_bits": [
+        [
+          "0xbf8362756afd1749",
+          "0x3f7c09c0f7bd25e6",
+          "0xbf6c163055609a38",
+          "0x3f6e1b5ac3e69b04",
+          "0xbf666c2708be022a"
+        ],
+        [
+          "0x3f832335d3ed4a0f",
+          "0xbf7b628efe6e6d10",
+          "0x3f7f21907f850d5e",
+          "0xbf1d07d692db8d80",
+          "0x3f82e81af58f7a55"
+        ],
+        [
+          "0xbf63605652138290",
+          "0xbf59d2a9ab26d760",
+          "0x3f64588ed1331174",
+          "0x3f796eb777691c16",
+          "0x3f6681ae5a689468"
+        ],
+        [
+          "0x3f5850247eccf7f8",
+          "0x3f8103f7e5acfe3f",
+          "0x3f766ebe55a76922",
+          "0x3f84510e917f8f75",
+          "0x3f6a63e4cbad8374"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x3eac0f2395c657b0",
+        "0x3ff68b44846b2360",
+        "0xbf70000000000000",
+        "0x40b4395fc37779a0",
+        "0xbe700126c5ec2860"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0x3ffe2f03fb70cba0"
+      ],
+      "cross_bits": [
+        []
+      ],
+      "evaluation_points_bits": [
+        [
+          "0xc0bb388d7e2709a4"
+        ]
+      ],
+      "f0_bits": [
+        "0xc10b59d6dd9583cc"
+      ],
+      "h_bits": [
+        "0xbf1b388d7758e646"
+      ],
+      "id": 10,
+      "jacobian_bits": [
+        [
+          "0x404ff05d17f4c390"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fdb6b11e4b7cde4"
+        ]
+      ],
+      "m": 1,
+      "n": 1,
+      "quadratic_bits": [
+        [
+          "0xbf72a5b308493d95"
+        ]
+      ],
+      "use_one_sided": [
+        true
+      ],
+      "x0_bits": [
+        "0xc0bb388d7758e646"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0xbffaada499cc4581",
+        "0x3fead54b2edfba40",
+        "0x3fd34999d9f23448",
+        "0x3fe04298c69cdba0"
+      ],
+      "cross_bits": [
+        [
+          "0x3f4af2ff7bfb70d0"
+        ],
+        [
+          "0xbf61855b0ee365c8"
+        ],
+        [
+          "0xbf74122bee08a19a"
+        ],
+        [
+          "0x3f7150540c3f2c1f"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x3ec0200000000000",
+          "0x40b75309013c1a92"
+        ],
+        [
+          "0x3ec0000000000000",
+          "0x40b753090710dcd2"
+        ]
+      ],
+      "f0_bits": [
+        "0x40fcf7945d54d101",
+        "0xc0fe765d4d978388",
+        "0x4112546947fc0f01",
+        "0xc112c7723086725c"
+      ],
+      "h_bits": [
+        "0x3e50000000000000",
+        "0x3f175309013c1a92"
+      ],
+      "id": 11,
+      "jacobian_bits": [
+        [
+          "0x4013e20000000000",
+          "0x4043f4b9a515b3de"
+        ],
+        [
+          "0xc029a30000000000",
+          "0xc044cf96246e4d6f"
+        ],
+        [
+          "0xc03ddb0000000000",
+          "0x40591e9a082bce07"
+        ],
+        [
+          "0x4038f60000000000",
+          "0xc059a899f697c9aa"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fae7062475dc900",
+          "0xbfc5b6ecfc6cbb50"
+        ],
+        [
+          "0xbfa7e62ae6665a90",
+          "0xbfc5fde34b3d2d08"
+        ],
+        [
+          "0xbfe3156b9122da71",
+          "0x3fbc8bad3a2fd8f0"
+        ],
+        [
+          "0xbfd1c0d90778eedf",
+          "0xbfdafb72e4dc8635"
+        ]
+      ],
+      "m": 4,
+      "n": 2,
+      "quadratic_bits": [
+        [
+          "0x3f6e644f33b1f6b4",
+          "0x3f6d2df1f176e8fc"
+        ],
+        [
+          "0x3f43f09f80cc14f0",
+          "0xbf7068371df4d15f"
+        ],
+        [
+          "0x3f7ba25de73a6932",
+          "0x3f7d681e1ea7e242"
+        ],
+        [
+          "0xbf8335f2797effb7",
+          "0xbf7ebab011aca3bb"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x3ec0000000000000",
+        "0x40b75309013c1a92"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0xc000e3089ecf50fa"
+      ],
+      "cross_bits": [
+        [
+          "0xbf63300a31a75c27",
+          "0xbf66517e299eca57",
+          "0x3f7423d0de02f02f"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x402bfefe00c43f12",
+          "0x4070000000000000",
+          "0xc0c09e0d65471e7b"
+        ],
+        [
+          "0x402bfefdf9c47f94",
+          "0x4070000004000000",
+          "0xc0c09e0d65471e7b"
+        ],
+        [
+          "0x402bfefdf9c47f94",
+          "0x4070000000000000",
+          "0xc0c09e0d696ea1d4"
+        ]
+      ],
+      "f0_bits": [
+        "0xc11abc5a00aa46f0"
+      ],
+      "h_bits": [
+        "0x3e8bfefdf9c47f94",
+        "0x3ed0000000000000",
+        "0xbf209e0d65471e7b"
+      ],
+      "id": 12,
+      "jacobian_bits": [
+        [
+          "0x4035f6814111fc81",
+          "0xc042754a00000000",
+          "0x405977ddb22f241b"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0xbfda3320b819c2f7",
+          "0x3fe225e1d6542d82",
+          "0x3fa3a9c00e3d2950"
+        ]
+      ],
+      "m": 1,
+      "n": 3,
+      "quadratic_bits": [
+        [
+          "0xbf7e00946aceef5c",
+          "0x3f8052cdd51d8a03",
+          "0xbf75f94c27b9c152"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x402bfefdf9c47f94",
+        "0x4070000000000000",
+        "0xc0c09e0d65471e7b"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0xbfd322c02f587190",
+        "0x4004694b55d03e10",
+        "0xbffb60bb1d65a45c",
+        "0x4006d7683efcb8fc"
+      ],
+      "cross_bits": [
+        [
+          "0x3f61301071bc0942",
+          "0x3f68963afaaa973a",
+          "0x3f67caca5ea370b6",
+          "0xbf6c3c0f06cc3610",
+          "0xbf53bcaee1c71f76",
+          "0x3f1da6eb0247a4c0"
+        ],
+        [
+          "0xbf7048c0231c7332",
+          "0x3f6b156751246d56",
+          "0xbf6b10ac896ea59f",
+          "0xbf64d24b75310a36",
+          "0x3f5edcf5e6d28d74",
+          "0x3f6bb6536cd085a6"
+        ],
+        [
+          "0xbf73fb1c580fc43e",
+          "0xbf60ac20e6f33d21",
+          "0x3f742696a5e366c9",
+          "0xbf709af59b6b9f5b",
+          "0xbf5ec2cc505fc82a",
+          "0xbf60593c593c3852"
+        ],
+        [
+          "0x3f72b995ea5a7deb",
+          "0x3f54c2295ada9d74",
+          "0xbf39bd98d9039a40",
+          "0x3f70fd8c11a3f043",
+          "0xbf5f421b78689dcc",
+          "0xbf731e556833e3ec"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x3e7294431433bb50",
+          "0x4014de4e6f7cb850",
+          "0xbf10000000000000",
+          "0x407f8bfc5ac9d740"
+        ],
+        [
+          "0x3e6d2886286776a0",
+          "0x4014de4e74b44bec",
+          "0xbf10000000000000",
+          "0x407f8bfc5ac9d740"
+        ],
+        [
+          "0x3e6d2886286776a0",
+          "0x4014de4e6f7cb850",
+          "0xbf10010000000000",
+          "0x407f8bfc5ac9d740"
+        ],
+        [
+          "0x3e6d2886286776a0",
+          "0x4014de4e6f7cb850",
+          "0xbf10000000000000",
+          "0x407f8bfc62acd657"
+        ]
+      ],
+      "f0_bits": [
+        "0xc088cc1ac083c391",
+        "0x40765b1af0c77db3",
+        "0x408a46d345808426",
+        "0x40718a45244872b3"
+      ],
+      "h_bits": [
+        "0x3e50000000000000",
+        "0x3e74de4e6f7cb850",
+        "0xbe50000000000000",
+        "0x3edf8bfc5ac9d740"
+      ],
+      "id": 13,
+      "jacobian_bits": [
+        [
+          "0x3ff5ff9000000000",
+          "0xbfeb181d4552245b",
+          "0xbfc2cac000000000",
+          "0xc00613e2107ee41b"
+        ],
+        [
+          "0xbff6051000000000",
+          "0x3ff8ce0c61ab502d",
+          "0x3ff8599c00000000",
+          "0x3ff85a266e927232"
+        ],
+        [
+          "0x4002d62c00000000",
+          "0xbfd58be13b5609dd",
+          "0xbfe7d90000000000",
+          "0x400e22f4965b1de8"
+        ],
+        [
+          "0x3fc377e000000000",
+          "0xbfd0d344ecc3387f",
+          "0xc00725ac00000000",
+          "0x3ff8a442dc0dcd51"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0xbfbb222c8f2c48e0",
+          "0xbfd35816a2ffa93e",
+          "0xbfc7d011de4b91f0",
+          "0xbfd7c12f2aaf4ab5"
+        ],
+        [
+          "0x3fd41a4c83c343f0",
+          "0x3fe0cbae2c992514",
+          "0xbfc643df7562367c",
+          "0xbfc168c4926fb310"
+        ],
+        [
+          "0xbfba25da8476d6c0",
+          "0x3fe14bb8d073ec8a",
+          "0x3fd2243fa0a32bd4",
+          "0xbfdb8cde60e83ac2"
+        ],
+        [
+          "0x3fd4b8aaa56c05b8",
+          "0x3fe640651d04e24e",
+          "0xbfe1cb297210faa2",
+          "0xbfdc76e90f363788"
+        ]
+      ],
+      "m": 4,
+      "n": 4,
+      "quadratic_bits": [
+        [
+          "0xbf8303a5d4b9258c",
+          "0x3f7c224ccb817a06",
+          "0x3f83125d66dc82c1",
+          "0xbf5f3c205bae37b8"
+        ],
+        [
+          "0xbf7640bbd8dada8d",
+          "0x3f79285665cd4202",
+          "0x3f6ce751e5e0fab8",
+          "0x3f61658781144448"
+        ],
+        [
+          "0xbf5ea533c6456878",
+          "0x3f779c3da2adf51e",
+          "0x3f7beef3515c266a",
+          "0x3f7224a7ef5da25c"
+        ],
+        [
+          "0x3f8021f989878db9",
+          "0x3f594aa6c3350628",
+          "0xbf644feff5bd5ac2",
+          "0x3f2e8e6d1354fe80"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x3e6d2886286776a0",
+        "0x4014de4e6f7cb850",
+        "0xbf10000000000000",
+        "0x407f8bfc5ac9d740"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0x4005b45e4ab083a4"
+      ],
+      "cross_bits": [
+        [
+          "0x3f6bd27a66cf2b92",
+          "0xbf3168265d186660",
+          "0x3f65231d3a1d35b4",
+          "0xbf6433a0325934a4",
+          "0x3f625d93259f629e",
+          "0x3f68a17cee7b9caa",
+          "0xbf7471ddc2c373ee",
+          "0x3f640158fc21f094",
+          "0x3ebf1e118d7ee000",
+          "0xbf637323d083d1b6"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0xc07b1c47cb89a5f1",
+          "0xbe9d9d88d1d1c832",
+          "0xc033ea3768caeb84",
+          "0xbfe0000000000000",
+          "0x40986df00ad352b8"
+        ],
+        [
+          "0xc07b1c47c4c29400",
+          "0xbe9e9d88d1d1c832",
+          "0xc033ea3768caeb84",
+          "0xbfe0000000000000",
+          "0x40986df00ad352b8"
+        ],
+        [
+          "0xc07b1c47c4c29400",
+          "0xbe9d9d88d1d1c832",
+          "0xc033ea376dc5795e",
+          "0xbfe0000000000000",
+          "0x40986df00ad352b8"
+        ],
+        [
+          "0xc07b1c47c4c29400",
+          "0xbe9d9d88d1d1c832",
+          "0xc033ea3768caeb84",
+          "0xbfe0000008000000",
+          "0x40986df00ad352b8"
+        ],
+        [
+          "0xc07b1c47c4c29400",
+          "0xbe9d9d88d1d1c832",
+          "0xc033ea3768caeb84",
+          "0xbfe0000000000000",
+          "0x40986df010eecebb"
+        ]
+      ],
+      "f0_bits": [
+        "0x40c1cd2ddc32e844"
+      ],
+      "h_bits": [
+        "0xbedb1c47c4c29400",
+        "0xbe50000000000000",
+        "0xbe93ea3768caeb84",
+        "0xbe50000000000000",
+        "0x3ef86df00ad352b8"
+      ],
+      "id": 14,
+      "jacobian_bits": [
+        [
+          "0x40124ef119c5e95d",
+          "0xc021e66000000000",
+          "0x3fdf1baeabd98a6b",
+          "0xc0113a6000000000",
+          "0x40296df85274a434"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fdee56b9d8fa248",
+          "0x3fd7ebf8871678f0",
+          "0x3fd5de07cb6e61b4",
+          "0x3fe27655f46e395a",
+          "0x3fd699f31a5fa88c"
+        ]
+      ],
+      "m": 1,
+      "n": 5,
+      "quadratic_bits": [
+        [
+          "0xbf82c11441bf786d",
+          "0x3f60e9577d0c664c",
+          "0xbf268656260af940",
+          "0x3f6e4dcc81e63da8",
+          "0x3f52e3c584237630"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0xc07b1c47c4c29400",
+        "0xbe9d9d88d1d1c832",
+        "0xc033ea3768caeb84",
+        "0xbfe0000000000000",
+        "0x40986df00ad352b8"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0x3fe255ce2a243c9c",
+        "0xbff76793e330bff5",
+        "0xbff21b4020f09cf6",
+        "0xc005daf903c4bfdf"
+      ],
+      "cross_bits": [
+        [],
+        [],
+        [],
+        []
+      ],
+      "evaluation_points_bits": [
+        [
+          "0xc000000004000000"
+        ]
+      ],
+      "f0_bits": [
+        "0xbfacd5a5d5faa054",
+        "0xc0069ab2c939ece4",
+        "0x3f97391ab25e5de4",
+        "0xc01064c6ab99dd25"
+      ],
+      "h_bits": [
+        "0xbe60000000000000"
+      ],
+      "id": 15,
+      "jacobian_bits": [
+        [
+          "0x3fd406e3d3000000"
+        ],
+        [
+          "0x3fe5808480000000"
+        ],
+        [
+          "0xbfe2b24e06b00000"
+        ],
+        [
+          "0x3fe5f330f0000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fd43f6d3bf0cf2c"
+        ],
+        [
+          "0x3fe61b1eddf3fd32"
+        ],
+        [
+          "0xbfe23dfb1067ff12"
+        ],
+        [
+          "0x3fe5c7204eee3040"
+        ]
+      ],
+      "m": 4,
+      "n": 1,
+      "quadratic_bits": [
+        [
+          "0x3f4c44b46ce88ac0"
+        ],
+        [
+          "0x3f73534bac38d7e2"
+        ],
+        [
+          "0x3f6d14bda90badc8"
+        ],
+        [
+          "0xbf560857efc492f8"
+        ]
+      ],
+      "use_one_sided": [
+        true
+      ],
+      "x0_bits": [
+        "0xc000000000000000"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0xbffb03edd4c5ac61"
+      ],
+      "cross_bits": [
+        [
+          "0x3f67d83664d02c9e"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x40264d4b2c33343e",
+          "0xbfd0000000000000"
+        ],
+        [
+          "0x40264d4b269fe174",
+          "0xbfd0000010000000"
+        ]
+      ],
+      "f0_bits": [
+        "0x4011230d88ad6838"
+      ],
+      "h_bits": [
+        "0x3e864d4b269fe174",
+        "0xbe50000000000000"
+      ],
+      "id": 16,
+      "jacobian_bits": [
+        [
+          "0x3fe2fde4a188daa2",
+          "0x3fd6d77400000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fdf75ad8a135f88",
+          "0x3fd4c10495b92a28"
+        ]
+      ],
+      "m": 1,
+      "n": 2,
+      "quadratic_bits": [
+        [
+          "0x3f7296820f12958a",
+          "0xbf353dca230f61c0"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x40264d4b269fe174",
+        "0xbfd0000000000000"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0xbfdb1da34e246b30",
+        "0x3fff7874377ea55c",
+        "0xbff922cd91d1b9dc",
+        "0xc00735b76c2d1cac"
+      ],
+      "cross_bits": [
+        [
+          "0xbf64641e75660440",
+          "0xbf71f616d4955161",
+          "0x3f3374b0237047f0"
+        ],
+        [
+          "0x3f60e90911234b6a",
+          "0xbf61e814ae143f85",
+          "0xbf674316789350b8"
+        ],
+        [
+          "0xbf6e38f34018224d",
+          "0xbf53dea0868655e6",
+          "0x3f681b25f1c7ba12"
+        ],
+        [
+          "0xbf66b13311f98085",
+          "0xbf6696de50ab4b6e",
+          "0x3f6d56b320222b3e"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x3ea20d1e1a5a2706",
+          "0x401dd9d80f39a738",
+          "0xc130000000000000"
+        ],
+        [
+          "0x3ea18d1e1a5a2706",
+          "0x401dd9d816b01d3c",
+          "0xc130000000000000"
+        ],
+        [
+          "0x3ea18d1e1a5a2706",
+          "0x401dd9d80f39a738",
+          "0xc130000004000000"
+        ]
+      ],
+      "f0_bits": [
+        "0xc1dc25adb19fd888",
+        "0x41f6f1b8e35b56dd",
+        "0x41ff363f9956f5ce",
+        "0xc1eda04120e7adc6"
+      ],
+      "h_bits": [
+        "0x3e50000000000000",
+        "0x3e7dd9d80f39a738",
+        "0xbf90000000000000"
+      ],
+      "id": 17,
+      "jacobian_bits": [
+        [
+          "0x40b1f00000000000",
+          "0xc0736e0ba8326f43",
+          "0x40ac26d6c8000000"
+        ],
+        [
+          "0x40a1800000000000",
+          "0x40a73fb3e8272953",
+          "0xc0c6f1f766000000"
+        ],
+        [
+          "0x4094000000000000",
+          "0xc0a81ead5e09a49a",
+          "0xc0cf361ddc000000"
+        ],
+        [
+          "0x40a6800000000000",
+          "0xc0ad588621588844",
+          "0x40bd9fd8b8000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0xbfbdfd7d07c1ea10",
+          "0x3fdce8c027f6c620",
+          "0xbfe2a7582c37272c"
+        ],
+        [
+          "0x3fa8ae84c5a9ca50",
+          "0xbfdb04f095d71873",
+          "0x3fe0487f1272add8"
+        ],
+        [
+          "0x3fd38b7a19889778",
+          "0xbfd503cfdda8028f",
+          "0xbfd241338ff366b3"
+        ],
+        [
+          "0x3fd29b7c39880974",
+          "0x3fbd8ef3938458d0",
+          "0x3fd8674c96d8d374"
+        ]
+      ],
+      "m": 4,
+      "n": 3,
+      "quadratic_bits": [
+        [
+          "0xbf7bab072aa1f0b1",
+          "0x3f7cf9f7911ad356",
+          "0xbf667365d28fb9c2"
+        ],
+        [
+          "0x3f7c4eae844b149a",
+          "0xbf64dce369201480",
+          "0x3f71ccd07ef5e59a"
+        ],
+        [
+          "0xbf398f14f17de760",
+          "0x3f75c4ea5cdb4db8",
+          "0x3f807dbb6dcaa6a1"
+        ],
+        [
+          "0x3f7eb046bba959ce",
+          "0xbf80d0b974081fc1",
+          "0xbf6bef7b10b0a01a"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x3ea18d1e1a5a2706",
+        "0x401dd9d80f39a738",
+        "0xc130000000000000"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0xc0035062a447226a"
+      ],
+      "cross_bits": [
+        [
+          "0xbf11e62467d84a00",
+          "0xbf7157f7b3f0c77b",
+          "0xbf6fc646d67a4682",
+          "0x3f68f824e19b8146",
+          "0xbf60c49157b3462e",
+          "0xbf53b47048abb33e"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0x40aa6df173cab8d7",
+          "0xbe9120a78bd48f70",
+          "0x4032ecbd95dc82c8",
+          "0x3f90000000000000"
+        ],
+        [
+          "0x40aa6df16d2f3c7c",
+          "0xbe9220a78bd48f70",
+          "0x4032ecbd95dc82c8",
+          "0x3f90000000000000"
+        ],
+        [
+          "0x40aa6df16d2f3c7c",
+          "0xbe9120a78bd48f70",
+          "0x4032ecbd9a97b22d",
+          "0x3f90000000000000"
+        ],
+        [
+          "0x40aa6df16d2f3c7c",
+          "0xbe9120a78bd48f70",
+          "0x4032ecbd95dc82c8",
+          "0x3f90000100000000"
+        ]
+      ],
+      "f0_bits": [
+        "0x40d73de8c3efb612"
+      ],
+      "h_bits": [
+        "0x3f0a6df16d2f3c7c",
+        "0xbe50000000000000",
+        "0x3e92ecbd95dc82c8",
+        "0x3e50000000000000"
+      ],
+      "id": 18,
+      "jacobian_bits": [
+        [
+          "0x402dca7dd114bda3",
+          "0xbfe0620000000000",
+          "0xc02c6652060a4252",
+          "0xc02a81c000000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0xbfe7b0483829605c",
+          "0xbfd5b369d19e106e",
+          "0x3f82c1172bf5d580",
+          "0xbfbc366f52d98180"
+        ]
+      ],
+      "m": 1,
+      "n": 4,
+      "quadratic_bits": [
+        [
+          "0x3f630889fc000cdc",
+          "0x3f53c5d67c4faee0",
+          "0x3f66a959a91c82e0",
+          "0x3f745775f1d0b4b6"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0x40aa6df16d2f3c7c",
+        "0xbe9120a78bd48f70",
+        "0x4032ecbd95dc82c8",
+        "0x3f90000000000000"
+      ]
+    },
+    {
+      "bias_bits": [
+        "0x3ffb5190856d1cdc",
+        "0xc0033d980f1e168c",
+        "0xbfe359d85c139a70",
+        "0xc007d5281911eb3b"
+      ],
+      "cross_bits": [
+        [
+          "0x3f699cb33f8a143a",
+          "0xbf4db7ef81e09388",
+          "0x3f3059af2cb4a690",
+          "0x3f66a2811b372aa4",
+          "0x3f4de1bf5fef9108",
+          "0x3f721f8ad913ca8b",
+          "0xbf4364f58e3b6000",
+          "0xbf6e28b4a029aa6e",
+          "0xbf54b744a43bd706",
+          "0x3f6765a9c1563586"
+        ],
+        [
+          "0x3f2d43a69525dd40",
+          "0x3f440f7dad7e3900",
+          "0xbf61d3ae77d9ab17",
+          "0xbf678bc4b1396d1c",
+          "0x3f67956cded90cce",
+          "0x3f669d31c0506198",
+          "0xbf72953c34b5ff37",
+          "0xbf6aedade5ceaec6",
+          "0x3f708ee238d64725",
+          "0xbf69bf71a3cfdf46"
+        ],
+        [
+          "0xbf2f82b15ab90ee0",
+          "0xbf71d15600f47120",
+          "0x3f4030a615b41e40",
+          "0xbf71592f01bcdfa4",
+          "0x3f32b511920b6850",
+          "0x3f730bc036163147",
+          "0x3f2621ebd21de1a0",
+          "0x3f7325e770c38279",
+          "0xbf4293c59a9ab7b0",
+          "0xbf68312ece1078c5"
+        ],
+        [
+          "0x3f0ec978759fea00",
+          "0xbf6e2ecab99b04b8",
+          "0xbf658becec9f6a24",
+          "0xbf05b29aa4ff4d00",
+          "0x3f743aaeeb6e9f43",
+          "0x3ef4a6097c880500",
+          "0x3f57d55e561cafe0",
+          "0xbf661971ad7667b6",
+          "0x3f3efd0ba6cecdc0",
+          "0x3f625934891d4f52"
+        ]
+      ],
+      "evaluation_points_bits": [
+        [
+          "0xc130000004000000",
+          "0x404db418e0830b00",
+          "0x3e8642ad63f5d628",
+          "0x400a0509bbda20c8",
+          "0x40a0000000000000"
+        ],
+        [
+          "0xc130000000000000",
+          "0x404db418e7f01138",
+          "0x3e8642ad63f5d628",
+          "0x400a0509bbda20c8",
+          "0x40a0000000000000"
+        ],
+        [
+          "0xc130000000000000",
+          "0x404db418e0830b00",
+          "0x3e8842ad63f5d628",
+          "0x400a0509bbda20c8",
+          "0x40a0000000000000"
+        ],
+        [
+          "0xc130000000000000",
+          "0x404db418e0830b00",
+          "0x3e8642ad63f5d628",
+          "0x400a0509c25b6337",
+          "0x40a0000000000000"
+        ],
+        [
+          "0xc130000000000000",
+          "0x404db418e0830b00",
+          "0x3e8642ad63f5d628",
+          "0x400a0509bbda20c8",
+          "0x40a0000004000000"
+        ]
+      ],
+      "f0_bits": [
+        "0xc1fa4a5a0c6ef94f",
+        "0x41fd8d0c7a6507f9",
+        "0xc1d6dea0c85d69e4",
+        "0xc174d7ae43116fc3"
+      ],
+      "h_bits": [
+        "0xbf90000000000000",
+        "0x3eadb418e0830b00",
+        "0x3e50000000000000",
+        "0x3e6a0509bbda20c8",
+        "0x3f00000000000000"
+      ],
+      "id": 19,
+      "jacobian_bits": [
+        [
+          "0x40ca47300e000000",
+          "0xc0a99c88614df4cf",
+          "0x408e000000000000",
+          "0xc06ff9cdd5d02014",
+          "0xc0a6c8f000000000"
+        ],
+        [
+          "0xc0cd89c36e000000",
+          "0xc06e6f22706e2251",
+          "0xc084000000000000",
+          "0x40a1d528f2519bbc",
+          "0x40a760b000000000"
+        ],
+        [
+          "0x40a6f0d626000000",
+          "0x406fb6a3520a8d1b",
+          "0x40b1d00000000000",
+          "0xc08072f76cc272f7",
+          "0x40b14a5200000000"
+        ],
+        [
+          "0x4044d3f6da000000",
+          "0xc04cfa62473a6c25",
+          "0x40ae328000000000",
+          "0x40a594966c35f2f5",
+          "0x4044d9b000000000"
+        ]
+      ],
+      "linear_bits": [
+        [
+          "0x3fdc67278f10bd48",
+          "0x3fcbccf974a70a10",
+          "0x3fdf7aa4c9953468",
+          "0xbfe21c5e0505f1fa",
+          "0x3fe279dd3f4b93dc"
+        ],
+        [
+          "0xbfe76ea5db43996a",
+          "0x3fe324d27cc06140",
+          "0xbfe76d661a9c0050",
+          "0xbfe5c1c2420314d8",
+          "0xbfe60302947b8384"
+        ],
+        [
+          "0xbfdc3da0d5d7e6f2",
+          "0x3fd2db5a25c20e1c",
+          "0xbfe7ed07cfd185ea",
+          "0xbfe7bc4107d94f04",
+          "0x3fdaae5afcf60bc4"
+        ],
+        [
+          "0x3fbe159edf7eeb40",
+          "0xbfdce5356a8323ae",
+          "0x3fd4c299ebd16ef0",
+          "0xbfd7a0d657a7fdb0",
+          "0xbfe657b202bcf657"
+        ]
+      ],
+      "m": 4,
+      "n": 5,
+      "quadratic_bits": [
+        [
+          "0xbf7a440ab946dbb4",
+          "0xbf55f6af98194b48",
+          "0xbf615976f6798ad8",
+          "0xbf7e70efbbb05040",
+          "0xbf6fcd25db62f358"
+        ],
+        [
+          "0x3f7d8674bda4bcce",
+          "0xbf14c0788af53400",
+          "0xbf843431334caf8a",
+          "0xbf77e6d51310f1ae",
+          "0xbf7b3d004d547e64"
+        ],
+        [
+          "0xbf570319da321290",
+          "0x3f82a8bc64107de3",
+          "0x3f39d1e68b1460c0",
+          "0x3f7da18e29610a36",
+          "0xbf770bde3a4ceffe"
+        ],
+        [
+          "0xbef4d0d28623b800",
+          "0x3f82c00329a298b3",
+          "0x3f83559a3888b1ab",
+          "0x3f6ff9d11f274d04",
+          "0x3f49151d49710c30"
+        ]
+      ],
+      "use_one_sided": [
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "x0_bits": [
+        "0xc130000000000000",
+        "0x404db418e0830b00",
+        "0x3e8642ad63f5d628",
+        "0x400a0509bbda20c8",
+        "0x40a0000000000000"
+      ]
+    }
+  ],
+  "numpy_version": "1.26.0",
+  "schema": "trust-region-least-squares-numdiff-v1",
+  "scipy_version": "1.11.3"
+}

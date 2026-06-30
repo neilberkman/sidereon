@@ -1,0 +1,75 @@
+name: fuzz
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 8 * * *"
+
+env:
+  FUZZ_TARGETS: >-
+    cdm_parse
+    cdm_round_trip
+    crinex_parse
+    crinex_v3_parse
+    fuzz_atmosphere
+    fuzz_bodies_events
+    fuzz_frames
+    fuzz_math
+    fuzz_positioning
+    fuzz_propagation
+    fuzz_rtk
+    fuzz_signal
+    fuzz_time
+    ionex_parse
+    omm_xml_parse
+    omm_round_trip
+    rinex_obs_parse
+    sgp4_tle_3line_parse
+    sp3_parse
+    sp3_round_trip
+
+jobs:
+  regression-corpus:
+    name: regression corpus
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Run committed fuzz corpus
+        run: |
+          set -euo pipefail
+          for target in $FUZZ_TARGETS; do
+            cargo +nightly fuzz run "$target" -- -runs=0 -max_total_time=30
+          done
+
+  scheduled-fuzz:
+    name: scheduled bounded fuzz
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Run bounded fuzzing
+        run: |
+          set -euo pipefail
+          for target in $FUZZ_TARGETS; do
+            cargo +nightly fuzz run "$target" -- -max_total_time=120
+          done
+      - name: Upload crash artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore

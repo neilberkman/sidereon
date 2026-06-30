@@ -1,0 +1,488 @@
+{
+  "schema": "orbis-gnss-parity/klobuchar.v1",
+  "purpose": "IS-GPS-200 Klobuchar L1 broadcast ionospheric group delay (meters). Reference recipe is generator/klobuchar.py; the Rust port asserts 0 ULP per intermediate and on the final meters against these hex-float goldens.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "0 ULP certified only against env.json. libm contract: CPython math (Apple libsystem_m) vs Rust std on aarch64-apple-darwin."
+  },
+  "recipe": "Semicircle-domain IS-GPS-200 Sec. 20.3.3.5.2.5: psi, phi_i (clamp +-0.416), lambda_i, phi_m, local time t (wrap [0,86400)), obliquity F = 1 + 16*(0.53-E)^3, Horner AMP (>=0) and PER (>=72000), phase x = 2*pi*(t-50400)/PER, truncated cosine series 1 - x^2/2 + x^4/24 while |x|<1.57 else 5e-9 floor, times F, times c. Positive group delay. No FMA, integer powers as explicit multiplies, math.pi.",
+  "math_pi": "0x1.921fb54442d18p+1",
+  "constants": {
+    "c": "0x1.1de784a000000p+28",
+    "f_l1": "0x1.779c018000000p+30",
+    "f_b1i": "0x1.7431dc4000000p+30",
+    "geomag_pole_lon_sc": "0x1.9df3b645a1cacp+0",
+    "night_floor_s": "0x1.5798ee2308c3ap-28",
+    "period_floor_s": "0x1.1940000000000p+16",
+    "lat_clamp_sc": "0x1.a9fbe76c8b439p-2",
+    "phase_window_rad": "0x1.91eb851eb851fp+0"
+  },
+  "generator": {
+    "python": "3.14.4",
+    "executable": "python"
+  },
+  "cases": [
+    {
+      "name": "zenith_midlat_day",
+      "note": "high elevation near zenith, local noon-ish peak; cosine-series branch",
+      "inputs": {
+        "lat_deg": "0x1.4000000000000p+5",
+        "lon_deg": "-0x1.9000000000000p+6",
+        "az_deg": "0x1.e000000000000p+4",
+        "el_deg": "0x1.5400000000000p+6",
+        "t_gps_s": "0x1.89c0000000000p+15",
+        "alpha": [
+          "0x1.5ffffffffff61p-27",
+          "0x1.7fffffffffe3fp-26",
+          "-0x1.fffffffffffa2p-25",
+          "-0x1.00000000002c4p-23"
+        ],
+        "beta": [
+          "0x1.7800000000000p+16",
+          "0x1.0000000000000p+17",
+          "-0x1.0000000000000p+16",
+          "-0x1.2000000000000p+19"
+        ],
+        "lat_deg_repr": "40.0",
+        "lon_deg_repr": "-100.0",
+        "az_deg_repr": "30.0",
+        "el_deg_repr": "85.0",
+        "t_gps_s_repr": "50400.0"
+      },
+      "expect": {
+        "psi": "0x1.91386bef2da30p-10",
+        "phi_i": "0x1.c9d360e91c5ecp-3",
+        "lambda_i": "-0x1.1bee60e5e833ap-1",
+        "phi_m": "0x1.1d28b424fc1c8p-2",
+        "t": "0x1.9d2d3b40e65ffp+14",
+        "F": "0x1.00ca3f4563b1cp+0",
+        "AMP": "0x1.3e9846a8ae42cp-27",
+        "PER": "0x1.c0f8a279f59b0p+16",
+        "x": "-0x1.4f43d6958d05bp+0",
+        "t_iono": "0x1.0104ce79bcf9bp-27",
+        "delay_l1_m": "0x1.1f0aca5af4b35p+1",
+        "delay_b1i_m": "0x1.2455488ef75b9p+1"
+      }
+    },
+    {
+      "name": "low_el_midlat_day",
+      "note": "low elevation near the mask; large obliquity F",
+      "inputs": {
+        "lat_deg": "0x1.4000000000000p+5",
+        "lon_deg": "-0x1.9000000000000p+6",
+        "az_deg": "0x1.e000000000000p+6",
+        "el_deg": "0x1.c000000000000p+2",
+        "t_gps_s": "0x1.89c0000000000p+15",
+        "alpha": [
+          "0x1.5ffffffffff61p-27",
+          "0x1.7fffffffffe3fp-26",
+          "-0x1.fffffffffffa2p-25",
+          "-0x1.00000000002c4p-23"
+        ],
+        "beta": [
+          "0x1.7800000000000p+16",
+          "0x1.0000000000000p+17",
+          "-0x1.0000000000000p+16",
+          "-0x1.2000000000000p+19"
+        ],
+        "lat_deg_repr": "40.0",
+        "lon_deg_repr": "-100.0",
+        "az_deg_repr": "120.0",
+        "el_deg_repr": "7.0",
+        "t_gps_s_repr": "50400.0"
+      },
+      "expect": {
+        "psi": "0x1.1ec7f86b5a14ep-4",
+        "phi_i": "0x1.7f6a73ac45ec9p-3",
+        "lambda_i": "-0x1.ee42346cc570dp-2",
+        "phi_m": "0x1.fc1d33ad92282p-3",
+        "t": "0x1.cdb1dbf14cd9ep+14",
+        "F": "0x1.7296842ae46c6p+1",
+        "AMP": "0x1.61ecaff55c04fp-27",
+        "PER": "0x1.c4157db4ca108p+16",
+        "x": "-0x1.21ccdfcfde29ep+0",
+        "t_iono": "0x1.d3d0d30d15058p-26",
+        "delay_l1_m": "0x1.053b47600845ep+3",
+        "delay_b1i_m": "0x1.0a0bfa1658475p+3"
+      }
+    },
+    {
+      "name": "low_el_mask_5deg",
+      "note": "elevation 5 deg, near the typical elevation mask",
+      "inputs": {
+        "lat_deg": "0x1.1800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "az_deg": "0x1.9000000000000p+7",
+        "el_deg": "0x1.4000000000000p+2",
+        "t_gps_s": "0x1.5180000000000p+15",
+        "alpha": [
+          "0x1.5ffffffffff61p-27",
+          "0x1.7fffffffffe3fp-26",
+          "-0x1.fffffffffffa2p-25",
+          "-0x1.00000000002c4p-23"
+        ],
+        "beta": [
+          "0x1.7800000000000p+16",
+          "0x1.0000000000000p+17",
+          "-0x1.0000000000000p+16",
+          "-0x1.2000000000000p+19"
+        ],
+        "lat_deg_repr": "35.0",
+        "lon_deg_repr": "10.0",
+        "az_deg_repr": "200.0",
+        "el_deg_repr": "5.0",
+        "t_gps_s_repr": "43200.0"
+      },
+      "expect": {
+        "psi": "0x1.3d2cfd6c69706p-4",
+        "phi_i": "0x1.f26590c4f5d74p-4",
+        "lambda_i": "0x1.ba8b4d6872e98p-6",
+        "phi_m": "0x1.1dc3151eabc25p-3",
+        "t": "0x1.5a9dba9a34ce0p+15",
+        "F": "0x1.836db3e441646p+1",
+        "AMP": "0x1.98291d333e93ep-27",
+        "PER": "0x1.b43286779e903p+16",
+        "x": "-0x1.5b9db9e5a3f5ep-2",
+        "t_iono": "0x1.a53a5bf54da08p-25",
+        "delay_l1_m": "0x1.d66eea426da8bp+3",
+        "delay_b1i_m": "0x1.df1acb0665093p+3"
+      }
+    },
+    {
+      "name": "clamp_lat_pos",
+      "note": "high north latitude, azimuth toward pole; phi_i clamps to +0.416",
+      "inputs": {
+        "lat_deg": "0x1.4800000000000p+6",
+        "lon_deg": "0x1.4000000000000p+4",
+        "az_deg": "0x0.0p+0",
+        "el_deg": "0x1.4000000000000p+4",
+        "t_gps_s": "0x1.3880000000000p+15",
+        "alpha": [
+          "0x1.5ffffffffff61p-27",
+          "0x1.7fffffffffe3fp-26",
+          "-0x1.fffffffffffa2p-25",
+          "-0x1.00000000002c4p-23"
+        ],
+        "beta": [
+          "0x1.7800000000000p+16",
+          "0x1.0000000000000p+17",
+          "-0x1.0000000000000p+16",
+          "-0x1.2000000000000p+19"
+        ],
+        "lat_deg_repr": "82.0",
+        "lon_deg_repr": "20.0",
+        "az_deg_repr": "0.0",
+        "el_deg_repr": "20.0",
+        "t_gps_s_repr": "40000.0"
+      },
+      "expect": {
+        "psi": "0x1.4759c5bad221ap-5",
+        "phi_i": "0x1.a9fbe76c8b439p-2",
+        "lambda_i": "0x1.c71c71c71c71cp-4",
+        "phi_m": "0x1.ab3245e424516p-2",
+        "t": "0x1.5e00000000000p+15",
+        "F": "0x1.1687fb9b65af5p+1",
+        "AMP": "0x1.28e9d9ea677f0p-31",
+        "PER": "0x1.79c14fe87972fp+16",
+        "x": "-0x1.749409743c5c8p-2",
+        "t_iono": "0x1.9b9355ff11071p-27",
+        "delay_l1_m": "0x1.cba73de8c38a8p+1",
+        "delay_b1i_m": "0x1.d4204057dce2dp+1"
+      }
+    },
+    {
+      "name": "clamp_lat_neg",
+      "note": "high south latitude, azimuth toward south pole; phi_i clamps to -0.416",
+      "inputs": {
+        "lat_deg": "-0x1.4800000000000p+6",
+        "lon_deg": "0x1.4000000000000p+4",
+        "az_deg": "0x1.6800000000000p+7",
+        "el_deg": "0x1.4000000000000p+4",
+        "t_gps_s": "0x1.3880000000000p+15",
+        "alpha": [
+          "0x1.5ffffffffff61p-27",
+          "0x1.7fffffffffe3fp-26",
+          "-0x1.fffffffffffa2p-25",
+          "-0x1.00000000002c4p-23"
+        ],
+        "beta": [
+          "0x1.7800000000000p+16",
+          "0x1.0000000000000p+17",
+          "-0x1.0000000000000p+16",
+          "-0x1.2000000000000p+19"
+        ],
+        "lat_deg_repr": "-82.0",
+        "lon_deg_repr": "20.0",
+        "az_deg_repr": "180.0",
+        "el_deg_repr": "20.0",
+        "t_gps_s_repr": "40000.0"
+      },
+      "expect": {
+        "psi": "0x1.4759c5bad221ap-5",
+        "phi_i": "-0x1.a9fbe76c8b439p-2",
+        "lambda_i": "0x1.c71c71c71c71dp-4",
+        "phi_m": "-0x1.a8c588f4f235cp-2",
+        "t": "0x1.5e00000000000p+15",
+        "F": "0x1.1687fb9b65af5p+1",
+        "AMP": "0x0.0p+0",
+        "PER": "0x1.1c04f9432d10cp+16",
+        "x": "-0x1.ef8a9145a0defp-2",
+        "t_iono": "0x1.75d695f3238d4p-27",
+        "delay_l1_m": "0x1.a181fb3d48687p+1",
+        "delay_b1i_m": "0x1.a9341d5e47cdap+1"
+      }
+    },
+    {
+      "name": "night_floor",
+      "note": "off-peak local time: |x| >= 1.57, floor branch (F * 5e-9)",
+      "inputs": {
+        "lat_deg": "0x1.4000000000000p+5",
+        "lon_deg": "-0x1.9000000000000p+6",
+        "az_deg": "0x1.6800000000000p+5",
+        "el_deg": "0x1.e000000000000p+4",
+        "t_gps_s": "0x1.c200000000000p+12",
+        "alpha": [
+          "0x1.5798ee2308c3ap-26",
+          "0x0.0p+0",
+          "0x0.0p+0",
+          "0x0.0p+0"
+        ],
+        "beta": [
+          "0x1.d4c0000000000p+15",
+          "0x0.0p+0",
+          "0x0.0p+0",
+          "0x0.0p+0"
+        ],
+        "lat_deg_repr": "40.0",
+        "lon_deg_repr": "-100.0",
+        "az_deg_repr": "45.0",
+        "el_deg_repr": "30.0",
+        "t_gps_s_repr": "7200.0"
+      },
+      "expect": {
+        "psi": "0x1.c2db2921fa20ap-6",
+        "phi_i": "0x1.eef6274183f65p-3",
+        "lambda_i": "-0x1.0eb59e4b9d181p-1",
+        "phi_m": "0x1.324486d7d367ep-2",
+        "t": "0x1.1466e3f3d4193p+16",
+        "F": "0x1.c475f02754d0cp+0",
+        "AMP": "0x1.5798ee2308c3ap-26",
+        "PER": "0x1.1940000000000p+16",
+        "x": "0x1.c6d26d246d918p+0",
+        "t_iono": "0x1.2fa427d76d6ffp-27",
+        "delay_l1_m": "0x1.531c5ac9335d6p+1",
+        "delay_b1i_m": "0x1.595c8c77531a2p+1"
+      }
+    },
+    {
+      "name": "time_wrap_high",
+      "note": "large positive longitude + late time; local time wraps t >= 86400",
+      "inputs": {
+        "lat_deg": "0x1.e000000000000p+4",
+        "lon_deg": "0x1.5e00000000000p+7",
+        "az_deg": "0x1.6800000000000p+6",
+        "el_deg": "0x1.4000000000000p+5",
+        "t_gps_s": "0x1.3880000000000p+16",
+        "alpha": [
+          "0x1.5ffffffffff61p-27",
+          "0x1.7fffffffffe3fp-26",
+          "-0x1.fffffffffffa2p-25",
+          "-0x1.00000000002c4p-23"
+        ],
+        "beta": [
+          "0x1.7800000000000p+16",
+          "0x1.0000000000000p+17",
+          "-0x1.0000000000000p+16",
+          "-0x1.2000000000000p+19"
+        ],
+        "lat_deg_repr": "30.0",
+        "lon_deg_repr": "175.0",
+        "az_deg_repr": "90.0",
+        "el_deg_repr": "40.0",
+        "t_gps_s_repr": "80000.0"
+      },
+      "expect": {
+        "psi": "0x1.3b2fbf7348ae2p-6",
+        "phi_i": "0x1.5555555555555p-3",
+        "lambda_i": "0x1.fd26adee790f8p-1",
+        "phi_m": "0x1.241a328cffd8bp-3",
+        "t": "0x1.1d9f3f26f24d0p+15",
+        "F": "0x1.776b24e3c8845p+0",
+        "AMP": "0x1.97fdf5ea0d943p-27",
+        "PER": "0x1.b52205212924ap+16",
+        "x": "-0x1.8ddf721c841afp-1",
+        "t_iono": "0x1.53581cb22a9d4p-26",
+        "delay_l1_m": "0x1.7afbfc41c4135p+2",
+        "delay_b1i_m": "0x1.81f855a6ad19bp+2"
+      }
+    },
+    {
+      "name": "time_wrap_low",
+      "note": "near antimeridian west, early time; local time wraps t < 0",
+      "inputs": {
+        "lat_deg": "0x1.e000000000000p+4",
+        "lon_deg": "-0x1.5e00000000000p+7",
+        "az_deg": "0x1.0e00000000000p+8",
+        "el_deg": "0x1.4000000000000p+5",
+        "t_gps_s": "0x1.f400000000000p+8",
+        "alpha": [
+          "0x1.5ffffffffff61p-27",
+          "0x1.7fffffffffe3fp-26",
+          "-0x1.fffffffffffa2p-25",
+          "-0x1.00000000002c4p-23"
+        ],
+        "beta": [
+          "0x1.7800000000000p+16",
+          "0x1.0000000000000p+17",
+          "-0x1.0000000000000p+16",
+          "-0x1.2000000000000p+19"
+        ],
+        "lat_deg_repr": "30.0",
+        "lon_deg_repr": "-175.0",
+        "az_deg_repr": "270.0",
+        "el_deg_repr": "40.0",
+        "t_gps_s_repr": "500.0"
+      },
+      "expect": {
+        "psi": "0x1.3b2fbf7348ae2p-6",
+        "phi_i": "0x1.5555555555555p-3",
+        "lambda_i": "-0x1.fd26adee790f8p-1",
+        "phi_m": "0x1.2860e46ddcb5fp-3",
+        "t": "0x1.5748c0d90db31p+15",
+        "F": "0x1.776b24e3c8845p+0",
+        "AMP": "0x1.97d6563078c43p-27",
+        "PER": "0x1.b5c01c4c5d093p+16",
+        "x": "-0x1.72de73591c515p-2",
+        "t_iono": "0x1.959cff5547e63p-26",
+        "delay_l1_m": "0x1.c4fe9b0eccc6bp+2",
+        "delay_b1i_m": "0x1.cd5831a9ee59ap+2"
+      }
+    },
+    {
+      "name": "amp_clamp",
+      "note": "negative amplitude polynomial clamps AMP to 0; period floor active",
+      "inputs": {
+        "lat_deg": "0x1.4000000000000p+4",
+        "lon_deg": "0x0.0p+0",
+        "az_deg": "0x1.e000000000000p+5",
+        "el_deg": "0x1.9000000000000p+5",
+        "t_gps_s": "0x1.89c0000000000p+15",
+        "alpha": [
+          "-0x1.ad7f29abcaf48p-25",
+          "0x1.5798ee2308c3ap-27",
+          "0x0.0p+0",
+          "0x0.0p+0"
+        ],
+        "beta": [
+          "0x1.86a0000000000p+15",
+          "0x1.3880000000000p+13",
+          "0x0.0p+0",
+          "0x0.0p+0"
+        ],
+        "lat_deg_repr": "20.0",
+        "lon_deg_repr": "0.0",
+        "az_deg_repr": "60.0",
+        "el_deg_repr": "50.0",
+        "t_gps_s_repr": "50400.0"
+      },
+      "expect": {
+        "psi": "0x1.b4c80ef9c319cp-7",
+        "phi_i": "0x1.e268f2b6b8a36p-4",
+        "lambda_i": "0x1.95b879823306ep-7",
+        "phi_m": "0x1.1b8345dabbee2p-3",
+        "t": "0x1.8dedc568624c9p+15",
+        "F": "0x1.41b8cd4202a7cp+0",
+        "AMP": "0x0.0p+0",
+        "PER": "0x1.1940000000000p+16",
+        "x": "0x1.7e61f60e116dbp-5",
+        "t_iono": "0x1.afcecc0326db6p-28",
+        "delay_l1_m": "0x1.e23fbc6e1b8b7p+0",
+        "delay_b1i_m": "0x1.eb235eb470f28p+0"
+      }
+    },
+    {
+      "name": "equator_noon",
+      "note": "equator at local noon peak",
+      "inputs": {
+        "lat_deg": "0x0.0p+0",
+        "lon_deg": "0x0.0p+0",
+        "az_deg": "0x1.6800000000000p+6",
+        "el_deg": "0x1.e000000000000p+5",
+        "t_gps_s": "0x1.89c0000000000p+15",
+        "alpha": [
+          "0x1.5ffffffffff61p-27",
+          "0x1.7fffffffffe3fp-26",
+          "-0x1.fffffffffffa2p-25",
+          "-0x1.00000000002c4p-23"
+        ],
+        "beta": [
+          "0x1.7800000000000p+16",
+          "0x1.0000000000000p+17",
+          "-0x1.0000000000000p+16",
+          "-0x1.2000000000000p+19"
+        ],
+        "lat_deg_repr": "0.0",
+        "lon_deg_repr": "0.0",
+        "az_deg_repr": "90.0",
+        "el_deg_repr": "60.0",
+        "t_gps_s_repr": "50400.0"
+      },
+      "expect": {
+        "psi": "0x1.23b5886a4fac2p-7",
+        "phi_i": "0x1.41c614caad719p-61",
+        "lambda_i": "0x1.23b5886a4fac2p-7",
+        "phi_m": "0x1.5d4a4ac122002p-6",
+        "t": "0x1.8cc127a6b0501p+15",
+        "F": "0x1.1f282117df696p+0",
+        "AMP": "0x1.6f6708b00360ep-27",
+        "PER": "0x1.82c6d20ca0c13p+16",
+        "x": "0x1.8fd65fa4d53f4p-6",
+        "t_iono": "0x1.2e59ebdf847b2p-26",
+        "delay_l1_m": "0x1.51ab8b5f03005p+2",
+        "delay_b1i_m": "0x1.57e4f0b62ce69p+2"
+      }
+    },
+    {
+      "name": "antimeridian_lon",
+      "note": "longitude near +180 exercises lambda_i and the lambda_i-1.617 term",
+      "inputs": {
+        "lat_deg": "0x1.4000000000000p+3",
+        "lon_deg": "0x1.6700000000000p+7",
+        "az_deg": "0x1.0e00000000000p+7",
+        "el_deg": "0x1.9000000000000p+4",
+        "t_gps_s": "0x1.d4c0000000000p+15",
+        "alpha": [
+          "0x1.5ffffffffff61p-27",
+          "0x1.7fffffffffe3fp-26",
+          "-0x1.fffffffffffa2p-25",
+          "-0x1.00000000002c4p-23"
+        ],
+        "beta": [
+          "0x1.7800000000000p+16",
+          "0x1.0000000000000p+17",
+          "-0x1.0000000000000p+16",
+          "-0x1.2000000000000p+19"
+        ],
+        "lat_deg_repr": "10.0",
+        "lon_deg_repr": "179.5",
+        "az_deg_repr": "135.0",
+        "el_deg_repr": "25.0",
+        "t_gps_s_repr": "60000.0"
+      },
+      "expect": {
+        "psi": "0x1.0eb3a38c24477p-5",
+        "phi_i": "0x1.07b2332afe5b3p-5",
+        "lambda_i": "0x1.054d23a47c094p+0",
+        "phi_m": "0x1.ae02199890d9ep-7",
+        "t": "0x1.147a64fab30c8p+14",
+        "F": "0x1.f50d9fb2f0926p+0",
+        "AMP": "0x1.69b76497d412cp-27",
+        "PER": "0x1.7eab6a002ab83p+16",
+        "x": "-0x1.0c802d5b37ee7p+1",
+        "t_iono": "0x1.504049936787cp-27",
+        "delay_l1_m": "0x1.7787aa1ecc629p+1",
+        "delay_b1i_m": "0x1.7e73b69600ffdp+1"
+      }
+    }
+  ]
+}

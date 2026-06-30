@@ -1,0 +1,264 @@
+{
+  "schema": "orbis-gnss-parity/dop_multi.v1",
+  "purpose": "Multi-system DOP: per-constellation TDOP = sqrt(Q[3+i][3+i]) from Q = (H^T W H)^-1 with one receiver-clock column per GNSS. Reference uses numpy.linalg.inv (a dense LU inverse); the Rust dop_multi uses a dense symmetric (Cholesky) inverse, so this is a TIGHT-TOLERANCE agreement target (~1e-12 relative), NOT 0 ULP. The single-system scalar DOP stays 0-ULP in dop_golden.json.",
+  "recipe": "H row = [-ex,-ey,-ez, one-hot clock columns]; A = H^T W H; Q = A^-1; R(lat,lon)=[[-sl,cl,0],[-sp*cl,-sp*sl,cp],[cp*cl,cp*sl,sp]]; ENU = R Q[0:3,0:3] R^T; GDOP=sqrt(trace Q); PDOP=sqrt(qE+qN+qU); HDOP=sqrt(qE+qN); VDOP=sqrt(qU); TDOP=sqrt(Q[3][3]); per-system TDOP[i]=sqrt(Q[3+i][3+i]).",
+  "generator": {
+    "numpy": "2.4.6",
+    "script": "generate_dop_multi.py"
+  },
+  "cases": [
+    {
+      "name": "gps_galileo_seven",
+      "note": "GPS+Galileo, two clock columns, mixed weights",
+      "inputs": {
+        "lat_deg_repr": "45.0",
+        "lon_deg_repr": "10.0",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "n_clocks": 2,
+        "clock_index": [
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1
+        ],
+        "weights": [
+          "0x1.0000000000000p+0",
+          "0x1.ccccccccccccdp-1",
+          "0x1.199999999999ap+0",
+          "0x1.6666666666666p-1",
+          "0x1.4cccccccccccdp+0",
+          "0x1.999999999999ap-1",
+          "0x1.0000000000000p+0"
+        ],
+        "los_ecef": [
+          [
+            "0x1.1088f8a3453d4p-1",
+            "0x1.0b4d3cc0be468p-3",
+            "0x1.ac417ab964078p-1"
+          ],
+          [
+            "0x1.d4834e4ee0ca9p-4",
+            "0x1.a5b0e05a9c792p-1",
+            "0x1.1c69d7c26b63bp-1"
+          ],
+          [
+            "0x1.4dcf850d904d8p-1",
+            "0x1.70b5c7806d265p-1",
+            "-0x1.e6157abd9be77p-3"
+          ],
+          [
+            "0x1.fd7d760b63ab8p-1",
+            "-0x1.d2525664ed397p-5",
+            "0x1.4b3e8cc4c3176p-4"
+          ],
+          [
+            "0x1.643a71a8cc2e5p-1",
+            "-0x1.68478b8b28525p-1",
+            "0x1.2722fa2674fa7p-3"
+          ],
+          [
+            "0x1.e5dea8eeb72b3p-2",
+            "-0x1.5434336457940p-2",
+            "0x1.a15cf4f48b0fbp-1"
+          ],
+          [
+            "-0x1.6715a6451f671p-2",
+            "-0x1.918abb718eb17p-2",
+            "0x1.b36e2b62daadbp-1"
+          ]
+        ]
+      },
+      "expect": {
+        "gdop": "0x1.d7fdb10493faap+1",
+        "pdop": "0x1.715f7105f9a1ep+1",
+        "hdop": "0x1.e0870a635bdfep+0",
+        "vdop": "0x1.188d65609c549p+1",
+        "tdop": "0x1.00ee62eb5e640p+1",
+        "per_system_tdop": [
+          "0x1.00ee62eb5e640p+1",
+          "0x1.1d22b28359d61p+0"
+        ]
+      }
+    },
+    {
+      "name": "gps_beidou_eight",
+      "note": "GPS+BeiDou, two clock columns, mixed weights",
+      "inputs": {
+        "lat_deg_repr": "-22.5",
+        "lon_deg_repr": "133.0",
+        "lat_rad": "-0x1.921fb54442d18p-2",
+        "lon_rad": "0x1.291ff64a9d75dp+1",
+        "n_clocks": 2,
+        "clock_index": [
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1
+        ],
+        "weights": [
+          "0x1.0000000000000p+0",
+          "0x1.3333333333333p+0",
+          "0x1.999999999999ap-1",
+          "0x1.0000000000000p+0",
+          "0x1.ccccccccccccdp-1",
+          "0x1.199999999999ap+0",
+          "0x1.6666666666666p-1",
+          "0x1.0000000000000p+0"
+        ],
+        "los_ecef": [
+          [
+            "-0x1.67d6c77b1a4dbp-1",
+            "0x1.6b805b32db1f3p-1",
+            "-0x1.6f2e2489171c6p-5"
+          ],
+          [
+            "-0x1.f50cfdcef353fp-1",
+            "0x1.08e1157fb7d8fp-3",
+            "0x1.4796517e9dd15p-3"
+          ],
+          [
+            "-0x1.9dd1fd4168266p-1",
+            "-0x1.87312ebdaf13ep-2",
+            "-0x1.cadd18f14ea85p-2"
+          ],
+          [
+            "-0x1.eba1d6f43b024p-2",
+            "0x1.305062be6a653p-2",
+            "-0x1.a6924f898806ap-1"
+          ],
+          [
+            "0x1.397e6bfa5b1b8p-3",
+            "0x1.cd87602d191fdp-2",
+            "-0x1.c246ea70f8438p-1"
+          ],
+          [
+            "-0x1.fae630e1f9b82p-3",
+            "0x1.c0599296fb5cbp-1",
+            "-0x1.a894aadd438b2p-2"
+          ],
+          [
+            "0x1.073773fa0152ep-2",
+            "0x1.d5d05056ab701p-1",
+            "0x1.3678ff96392cep-2"
+          ],
+          [
+            "-0x1.13307d54470a5p-1",
+            "0x1.83491dbfa31aep-1",
+            "0x1.7db46f73034eap-2"
+          ]
+        ]
+      },
+      "expect": {
+        "gdop": "0x1.a994cad0835bdp+1",
+        "pdop": "0x1.3fb0192283436p+1",
+        "hdop": "0x1.8924776c216e6p+0",
+        "vdop": "0x1.f838f98a42fa2p+0",
+        "tdop": "0x1.bcecb0d163187p+0",
+        "per_system_tdop": [
+          "0x1.bcecb0d163187p+0",
+          "0x1.5719d6d39cb6fp+0"
+        ]
+      }
+    },
+    {
+      "name": "gps_galileo_beidou_nine",
+      "note": "GPS+Galileo+BeiDou, three clock columns, unit weights",
+      "inputs": {
+        "lat_deg_repr": "51.5",
+        "lon_deg_repr": "-0.13",
+        "lat_rad": "0x1.cc355ad3cf508p-1",
+        "lon_rad": "-0x1.29649759d9946p-9",
+        "n_clocks": 3,
+        "clock_index": [
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          2,
+          2,
+          2
+        ],
+        "weights": [
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0"
+        ],
+        "los_ecef": [
+          [
+            "0x1.75caab5ad4dd0p-2",
+            "0x1.ad83dbd61c261p-4",
+            "0x1.d9a2e8138b16bp-1"
+          ],
+          [
+            "0x1.8a494c0ea915bp-2",
+            "0x1.9303e6c41c6b1p-1",
+            "0x1.ed62aa6e4c69fp-2"
+          ],
+          [
+            "0x1.c889f685c6306p-1",
+            "0x1.c1ffa58af241cp-2",
+            "-0x1.bccfe03ce3fb1p-4"
+          ],
+          [
+            "0x1.e74e9f5e9c121p-1",
+            "-0x1.a0cf5f0306f77p-4",
+            "0x1.2862edd44890bp-2"
+          ],
+          [
+            "0x1.4f066a6e11a27p-1",
+            "-0x1.7cd559b5bac5ep-1",
+            "0x1.1716828ea6655p-3"
+          ],
+          [
+            "0x1.b1228c4b41dd3p-2",
+            "-0x1.c4bb0ed190046p-2",
+            "0x1.94f87ef6329a1p-1"
+          ],
+          [
+            "-0x1.77cea1442cc21p-2",
+            "-0x1.d2e2408c8aad2p-2",
+            "0x1.9f23cfb631923p-1"
+          ],
+          [
+            "0x1.1318c0c3f941dp-1",
+            "-0x1.3f93f3e36e2edp-10",
+            "0x1.afd100eafc28fp-1"
+          ],
+          [
+            "0x1.726cac2cd7cc2p-1",
+            "0x1.2d8fd1fbde8f3p-1",
+            "0x1.70ba7cb1ba365p-2"
+          ]
+        ]
+      },
+      "expect": {
+        "gdop": "0x1.cd47fc33080ecp+1",
+        "pdop": "0x1.3ba9be6bd79f4p+1",
+        "hdop": "0x1.b635ccd10b134p+0",
+        "vdop": "0x1.c678c1d7ca376p+0",
+        "tdop": "0x1.484346e4af1e5p+0",
+        "per_system_tdop": [
+          "0x1.484346e4af1e5p+0",
+          "0x1.de8fda1df99d3p+0",
+          "0x1.54403d429e7afp+0"
+        ]
+      }
+    }
+  ]
+}

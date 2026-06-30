@@ -1,0 +1,784 @@
+{
+  "schema": "orbis-gnss-parity/troposphere.v1",
+  "purpose": "Saastamoinen zenith (dry+wet) + Niell NMF mapping -> slant tropospheric delay (meters). Reference recipe is generator/troposphere.py (RTKLIB rtkcmn.c operation order and constants); the Rust port asserts 0 ULP per intermediate and on the final meters against these hex-float goldens.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "0 ULP certified only against env.json. libm contract: CPython math (Apple libsystem_m) vs Rust std on aarch64-apple-darwin. Transcendentals: sin, cos, exp, pow (pow only on the standard-atmosphere helper)."
+  },
+  "recipe": "zenith: e = 6.108*rh*exp((17.15*T-4684)/(T-38.45)); zhd = 0.0022768*P/(1 - 0.00266*cos(2*lat) - 0.00028*h_km); zwd = 0.002277*(1255/T + 0.05)*e. niell: seasonal y from doy and signed lat, cosy = cos(2*pi*y), interpc over {15,30,45,60,75}, ah = ave - amp*cosy, aw = ave; mapf continued fraction; height correction dm on hydrostatic only; slant = zhd*mh + zwd*mw. el<=0 or h not in [-100,1e4] -> 0. No FMA.",
+  "math_pi": "0x1.921fb54442d18p+1",
+  "constants": {
+    "aht": [
+      "0x1.a876ac2ec793ap-16",
+      "0x1.67caea747d806p-8",
+      "0x1.2ad81adea8976p-10"
+    ],
+    "deg_per_rad": "0x1.ca5dc1a63c1f8p+5",
+    "met_gate_low_m": "-0x1.9000000000000p+6",
+    "met_gate_hi_m": "0x1.3880000000000p+13"
+  },
+  "generator": {
+    "python": "3.14.4",
+    "executable": "python"
+  },
+  "slant_cases": [
+    {
+      "name": "zenith_midlat",
+      "note": "elevation at zenith, mid-latitude node interpolation, reference doy",
+      "inputs": {
+        "el_deg": "0x1.6800000000000p+6",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.921fb54442d18p+0",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "90.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.12617bc71ca4bp+3",
+        "zhd_m": "0x1.274ab6dd773efp+1",
+        "zwd_m": "0x1.604c12e54e8d6p-4",
+        "mh": "0x1.0000000000000p+0",
+        "mw": "0x1.0000000000000p+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.324d1774a1b36p+1"
+      }
+    },
+    {
+      "name": "el30_midlat",
+      "note": "moderate elevation 30 deg",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.12617bc71ca4bp+3",
+        "zhd_m": "0x1.274ab6dd773efp+1",
+        "zwd_m": "0x1.604c12e54e8d6p-4",
+        "mh": "0x1.fe289fc8be78ap+0",
+        "mw": "0x1.ff1d83226933bp+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.31385bff8e79dp+2"
+      }
+    },
+    {
+      "name": "el15_node",
+      "note": "elevation 15 deg",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+3",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-2",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "15.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.12617bc71ca4bp+3",
+        "zhd_m": "0x1.274ab6dd773efp+1",
+        "zwd_m": "0x1.604c12e54e8d6p-4",
+        "mh": "0x1.e69750497daf1p+1",
+        "mw": "0x1.eaa96c3895eb1p+1",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.23301b787b1a7p+3"
+      }
+    },
+    {
+      "name": "el10_low",
+      "note": "low elevation 10 deg",
+      "inputs": {
+        "el_deg": "0x1.4000000000000p+3",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.657184ae74487p-3",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "10.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.12617bc71ca4bp+3",
+        "zhd_m": "0x1.274ab6dd773efp+1",
+        "zwd_m": "0x1.604c12e54e8d6p-4",
+        "mh": "0x1.63919fc603599p+2",
+        "mw": "0x1.6a0e5fd9b7790p+2",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.a9b69008c813dp+3"
+      }
+    },
+    {
+      "name": "el5_low",
+      "note": "elevation 5 deg, near mask",
+      "inputs": {
+        "el_deg": "0x1.4000000000000p+2",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.657184ae74487p-4",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "5.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.12617bc71ca4bp+3",
+        "zhd_m": "0x1.274ab6dd773efp+1",
+        "zwd_m": "0x1.604c12e54e8d6p-4",
+        "mh": "0x1.44db3b7270360p+3",
+        "mw": "0x1.58073e52d7054p+3",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.8582f276dbcf8p+4"
+      }
+    },
+    {
+      "name": "el3_lowest",
+      "note": "elevation 3 deg, Niell stated lower range",
+      "inputs": {
+        "el_deg": "0x1.8000000000000p+1",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.acee9f37bebd6p-5",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "3.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.12617bc71ca4bp+3",
+        "zhd_m": "0x1.274ab6dd773efp+1",
+        "zwd_m": "0x1.604c12e54e8d6p-4",
+        "mh": "0x1.d65e879ee56aap+3",
+        "mw": "0x1.06aace4b4dd24p+4",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.1a93e21ab74ffp+5"
+      }
+    },
+    {
+      "name": "el_zero_gate",
+      "note": "elevation gate el<=0 -> slant 0",
+      "inputs": {
+        "el_deg": "0x0.0p+0",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x0.0p+0",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "0.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x0.0p+0",
+        "zhd_m": "0x0.0p+0",
+        "zwd_m": "0x0.0p+0",
+        "mh": "0x0.0p+0",
+        "mw": "0x0.0p+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x0.0p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x0.0p+0"
+      }
+    },
+    {
+      "name": "el_negative_gate",
+      "note": "below horizon el<0 -> slant 0",
+      "inputs": {
+        "el_deg": "-0x1.4000000000000p+2",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "-0x1.657184ae74487p-4",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "-5.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x0.0p+0",
+        "zhd_m": "0x0.0p+0",
+        "zwd_m": "0x0.0p+0",
+        "mh": "0x0.0p+0",
+        "mw": "0x0.0p+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x0.0p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x0.0p+0"
+      }
+    },
+    {
+      "name": "equator",
+      "note": "equator: interpc i<1 clamps to 15-deg column",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x0.0p+0",
+        "lon_deg": "0x0.0p+0",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2c00000000000p+8",
+        "relative_humidity": "0x1.6666666666666p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x0.0p+0",
+        "lon_rad": "0x0.0p+0",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "0.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.8ea6427ae5d44p+4",
+        "zhd_m": "0x1.28145522beaa4p+1",
+        "zwd_m": "0x1.ebdda5e6c0dafp-3",
+        "mh": "0x1.fe12c4d29e8cep+0",
+        "mw": "0x1.ff1ddb471ddcap+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.45a761b2c3f93p+2"
+      }
+    },
+    {
+      "name": "lat15_node",
+      "note": "latitude 15 deg node boundary",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.e000000000000p+3",
+        "lon_deg": "0x0.0p+0",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2700000000000p+8",
+        "relative_humidity": "0x1.3333333333333p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.0c152382d7365p-2",
+        "lon_rad": "0x0.0p+0",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "15.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.fa545598015b0p+3",
+        "zhd_m": "0x1.27f9422b14f81p+1",
+        "zwd_m": "0x1.3d9814d7f58f5p-3",
+        "mh": "0x1.fe12c4d29e8cep+0",
+        "mw": "0x1.ff1ddb471ddcap+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.3aacdf525fbc4p+2"
+      }
+    },
+    {
+      "name": "lat75_node",
+      "note": "latitude 75 deg node boundary",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.2c00000000000p+6",
+        "lon_deg": "0x0.0p+0",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.f400000000000p+9",
+        "temperature_k": "0x1.0e00000000000p+8",
+        "relative_humidity": "0x1.999999999999ap-2",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.4f1a6c638d03fp+0",
+        "lon_rad": "0x0.0p+0",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "75.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.f06d105bc1e34p+0",
+        "zhd_m": "0x1.22c2b66943d7ap+1",
+        "zwd_m": "0x1.53e102602c514p-6",
+        "mh": "0x1.fe3e302fd71b1p+0",
+        "mw": "0x1.ff101b1850e3cp+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.2469c82a2496fp+2"
+      }
+    },
+    {
+      "name": "lat_high_clamp",
+      "note": "latitude >75 clamps interpc to the 75-deg column",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.5400000000000p+6",
+        "lon_deg": "0x0.0p+0",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.f400000000000p+9",
+        "temperature_k": "0x1.0400000000000p+8",
+        "relative_humidity": "0x1.3333333333333p-2",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.7bc89cf95b8d0p+0",
+        "lon_rad": "0x0.0p+0",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "85.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.53ceb45923661p-1",
+        "zhd_m": "0x1.22ab4169dd44dp+1",
+        "zwd_m": "0x1.e301537bbfbe8p-8",
+        "mh": "0x1.fe3e302fd71b1p+0",
+        "mw": "0x1.ff101b1850e3cp+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.229cf3c2cc421p+2"
+      }
+    },
+    {
+      "name": "southern_site",
+      "note": "southern latitude exercises the +0.5-year seasonal phase",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "-0x1.6800000000000p+5",
+        "lon_deg": "0x0.0p+0",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2200000000000p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "-0x1.921fb54442d18p-1",
+        "lon_rad": "0x0.0p+0",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "-45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.34e92df82fe42p+3",
+        "zhd_m": "0x1.274ab6dd773efp+1",
+        "zwd_m": "0x1.8a219a3417111p-4",
+        "mh": "0x1.fe145c0572851p+0",
+        "mw": "0x1.ff1d83226933bp+0",
+        "dm": "0x0.0p+0",
+        "cosy": "-0x1.0000000000000p+0",
+        "y": "0x1.0000000000000p-1",
+        "slant_m": "0x1.327ac42e520a7p+2"
+      }
+    },
+    {
+      "name": "doy_half_year",
+      "note": "half-year doy: cosy ~ -1",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.a540000000000p+7",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "210.625"
+      },
+      "expect": {
+        "e": "0x1.12617bc71ca4bp+3",
+        "zhd_m": "0x1.274ab6dd773efp+1",
+        "zwd_m": "0x1.604c12e54e8d6p-4",
+        "mh": "0x1.fe145c0572851p+0",
+        "mw": "0x1.ff1d83226933bp+0",
+        "dm": "0x0.0p+0",
+        "cosy": "-0x1.0000000000000p+0",
+        "y": "0x1.0000000000000p-1",
+        "slant_m": "0x1.312cabff8022ap+2"
+      }
+    },
+    {
+      "name": "doy_fractional",
+      "note": "fractional day-of-year (fractional time-of-day)",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "doy": "0x1.88be38e3878a9p+7",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "196.371527777"
+      },
+      "expect": {
+        "e": "0x1.12617bc71ca4bp+3",
+        "zhd_m": "0x1.274ab6dd773efp+1",
+        "zwd_m": "0x1.604c12e54e8d6p-4",
+        "mh": "0x1.fe14a99163398p+0",
+        "mw": "0x1.ff1d83226933bp+0",
+        "dm": "0x0.0p+0",
+        "cosy": "-0x1.f0afa926e267fp-1",
+        "y": "0x1.d80a1fbc0e136p-2",
+        "slant_m": "0x1.312cd8b8f23ebp+2"
+      }
+    },
+    {
+      "name": "high_altitude",
+      "note": "high altitude: low pressure, cold, dry",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x1.f400000000000p+11",
+        "pressure_hpa": "0x1.3400000000000p+9",
+        "temperature_k": "0x1.0600000000000p+8",
+        "relative_humidity": "0x1.999999999999ap-3",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "4000.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.0a8403d50baecp-1",
+        "zhd_m": "0x1.6771e071f3573p+0",
+        "zwd_m": "0x1.77f72a537a60bp-8",
+        "mh": "0x1.fe4f593a4f0bap+0",
+        "mw": "0x1.ff1d83226933bp+0",
+        "dm": "0x1.35cb8c8498000p-11",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.67b974226719cp+1"
+      }
+    },
+    {
+      "name": "below_sea_level",
+      "note": "below sea level (-50 m valid); negative height flows through",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "-0x1.9000000000000p+5",
+        "pressure_hpa": "0x1.fd80000000000p+9",
+        "temperature_k": "0x1.2200000000000p+8",
+        "relative_humidity": "0x1.3333333333333p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "-50.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.72b16a5d0644fp+3",
+        "zhd_m": "0x1.28f6a2b351db7p+1",
+        "zwd_m": "0x1.d8f51f71b547ap-4",
+        "mh": "0x1.fe2823ddb976dp+0",
+        "mw": "0x1.ff1d83226933bp+0",
+        "dm": "-0x1.efac14075999ap-18",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.36a6136200dd7p+2"
+      }
+    },
+    {
+      "name": "met_gate_low",
+      "note": "height -150 m below the Met gate (-100) -> slant 0",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "-0x1.2c00000000000p+7",
+        "pressure_hpa": "0x1.0040000000000p+10",
+        "temperature_k": "0x1.2400000000000p+8",
+        "relative_humidity": "0x1.3333333333333p-1",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "-150.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x0.0p+0",
+        "zhd_m": "0x0.0p+0",
+        "zwd_m": "0x0.0p+0",
+        "mh": "0x0.0p+0",
+        "mw": "0x0.0p+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x0.0p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x0.0p+0"
+      }
+    },
+    {
+      "name": "met_gate_hi",
+      "note": "height at Met gate edge 1e4 m (inclusive) -> valid",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x1.3880000000000p+13",
+        "pressure_hpa": "0x1.0800000000000p+8",
+        "temperature_k": "0x1.be00000000000p+7",
+        "relative_humidity": "0x1.999999999999ap-4",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "10000.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.7bde34b7d2754p-8",
+        "zhd_m": "0x1.349d57f49fb5ap-1",
+        "zwd_m": "0x1.3a4ef3f7851a1p-14",
+        "mh": "0x1.fe896f64a7e82p+0",
+        "mw": "0x1.ff1d83226933bp+0",
+        "dm": "0x1.833e6fa5be000p-10",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.33c55ffad0421p+0"
+      }
+    },
+    {
+      "name": "humid_zero",
+      "note": "relative humidity 0: zwd from e=0",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2026666666666p+8",
+        "relative_humidity": "0x0.0p+0",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "45.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x0.0p+0",
+        "zhd_m": "0x1.274ab6dd773efp+1",
+        "zwd_m": "0x0.0p+0",
+        "mh": "0x1.fe289fc8be78ap+0",
+        "mw": "0x1.ff1d83226933bp+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.263ada245de88p+2"
+      }
+    },
+    {
+      "name": "humid_full",
+      "note": "relative humidity 1.0, hot equator: large wet term",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x0.0p+0",
+        "lon_deg": "0x0.0p+0",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2f00000000000p+8",
+        "relative_humidity": "0x1.0000000000000p+0",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x0.0p+0",
+        "lon_rad": "0x0.0p+0",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "0.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.5309014bdcb02p+5",
+        "zhd_m": "0x1.28145522beaa4p+1",
+        "zwd_m": "0x1.9e38186a536e8p-2",
+        "mh": "0x1.fe12c4d29e8cep+0",
+        "mw": "0x1.ff1ddb471ddcap+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.5aa73fd46fb7cp+2"
+      }
+    },
+    {
+      "name": "cold_dry",
+      "note": "very cold, high pressure, dry",
+      "inputs": {
+        "el_deg": "0x1.e000000000000p+4",
+        "lat_deg": "0x1.1800000000000p+6",
+        "lon_deg": "0x0.0p+0",
+        "height_m": "0x0.0p+0",
+        "pressure_hpa": "0x1.0180000000000p+10",
+        "temperature_k": "0x1.d200000000000p+7",
+        "relative_humidity": "0x1.999999999999ap-4",
+        "doy": "0x1.c000000000000p+4",
+        "el_rad": "0x1.0c152382d7365p-1",
+        "lat_rad": "0x1.38c35418a5bf6p+0",
+        "lon_rad": "0x0.0p+0",
+        "el_deg_repr": "30.0",
+        "lat_deg_repr": "70.0",
+        "height_m_repr": "0.0",
+        "doy_repr": "28.0"
+      },
+      "expect": {
+        "e": "0x1.23541f4065388p-6",
+        "zhd_m": "0x1.2b901a298d1b6p+1",
+        "zwd_m": "0x1.cd9728ddfa9d6p-13",
+        "mh": "0x1.fe3b5e082856fp+0",
+        "mw": "0x1.ff1280b0f0bcfp+0",
+        "dm": "0x0.0p+0",
+        "cosy": "0x1.0000000000000p+0",
+        "y": "0x0.0p+0",
+        "slant_m": "0x1.2a8e7932d07d6p+2"
+      }
+    }
+  ],
+  "standard_atmosphere_cases": [
+    {
+      "name": "std_sea_level",
+      "inputs": {
+        "height_m": "0x0.0p+0",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "height_m_repr": "0.0"
+      },
+      "expect": {
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2028f5c28f5c3p+8",
+        "relative_humidity": "0x1.0000000000000p-1"
+      }
+    },
+    {
+      "name": "std_2000m",
+      "inputs": {
+        "height_m": "0x1.f400000000000p+10",
+        "relative_humidity": "0x1.0000000000000p-1",
+        "height_m_repr": "2000.0"
+      },
+      "expect": {
+        "pressure_hpa": "0x1.8d7650bc15583p+9",
+        "temperature_k": "0x1.1328f5c28f5c3p+8",
+        "relative_humidity": "0x1.0000000000000p-1"
+      }
+    },
+    {
+      "name": "std_8000m",
+      "inputs": {
+        "height_m": "0x1.f400000000000p+12",
+        "relative_humidity": "0x1.3333333333333p-2",
+        "height_m_repr": "8000.0"
+      },
+      "expect": {
+        "pressure_hpa": "0x1.63f203c4d8cf9p+8",
+        "temperature_k": "0x1.d851eb851eb86p+7",
+        "relative_humidity": "0x1.3333333333333p-2"
+      }
+    },
+    {
+      "name": "std_below_sea_clamp",
+      "inputs": {
+        "height_m": "-0x1.9000000000000p+7",
+        "relative_humidity": "0x1.3333333333333p-1",
+        "height_m_repr": "-200.0"
+      },
+      "expect": {
+        "pressure_hpa": "0x1.faa0000000000p+9",
+        "temperature_k": "0x1.2028f5c28f5c3p+8",
+        "relative_humidity": "0x1.3333333333333p-1"
+      }
+    }
+  ]
+}

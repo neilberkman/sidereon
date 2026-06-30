@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- CCSDS 508.0-B-1 CDMExample2 (JSPOC), XML serialization of the KVN fixture. -->
+<cdm id="CCSDS_CDM_VERS" version="1.0">
+  <header>
+    <CCSDS_CDM_VERS>1.0</CCSDS_CDM_VERS>
+    <CREATION_DATE>2010-03-12T22:31:12.000</CREATION_DATE>
+    <ORIGINATOR>JSPOC</ORIGINATOR>
+    <MESSAGE_FOR>SATELLITE A</MESSAGE_FOR>
+    <MESSAGE_ID>201113719185</MESSAGE_ID>
+  </header>
+  <body>
+    <relativeMetadataData>
+      <COMMENT>Relative Metadata/Data</COMMENT>
+      <TCA>2010-03-13T22:37:52.618</TCA>
+      <MISS_DISTANCE units="m">715</MISS_DISTANCE>
+      <RELATIVE_SPEED units="m/s">14762</RELATIVE_SPEED>
+      <relativeStateVector>
+        <RELATIVE_POSITION_R units="m">27.4</RELATIVE_POSITION_R>
+        <RELATIVE_POSITION_T units="m">-70.2</RELATIVE_POSITION_T>
+        <RELATIVE_POSITION_N units="m">711.8</RELATIVE_POSITION_N>
+        <RELATIVE_VELOCITY_R units="m/s">-7.2</RELATIVE_VELOCITY_R>
+        <RELATIVE_VELOCITY_T units="m/s">-14692.0</RELATIVE_VELOCITY_T>
+        <RELATIVE_VELOCITY_N units="m/s">-1437.2</RELATIVE_VELOCITY_N>
+      </relativeStateVector>
+      <COLLISION_PROBABILITY>4.835E-05</COLLISION_PROBABILITY>
+      <COLLISION_PROBABILITY_METHOD>FOSTER-1992</COLLISION_PROBABILITY_METHOD>
+    </relativeMetadataData>
+    <segment>
+      <metadata>
+        <OBJECT>OBJECT1</OBJECT>
+        <OBJECT_DESIGNATOR>12345</OBJECT_DESIGNATOR>
+        <CATALOG_NAME>SATCAT</CATALOG_NAME>
+        <OBJECT_NAME>SATELLITE A</OBJECT_NAME>
+        <INTERNATIONAL_DESIGNATOR>1997-030E</INTERNATIONAL_DESIGNATOR>
+        <OBJECT_TYPE>PAYLOAD</OBJECT_TYPE>
+        <REF_FRAME>EME2000</REF_FRAME>
+      </metadata>
+      <data>
+        <stateVector>
+          <X units="km">2570.097065</X>
+          <Y units="km">2244.654904</Y>
+          <Z units="km">6281.497978</Z>
+          <X_DOT units="km/s">4.418769571</X_DOT>
+          <Y_DOT units="km/s">4.833547743</Y_DOT>
+          <Z_DOT units="km/s">-3.526774282</Z_DOT>
+        </stateVector>
+        <covarianceMatrix>
+          <CR_R units="m**2">4.142E+01</CR_R>
+          <CT_R units="m**2">-8.579E+00</CT_R>
+          <CT_T units="m**2">2.533E+03</CT_T>
+          <CN_R units="m**2">-2.313E+01</CN_R>
+          <CN_T units="m**2">1.336E+01</CN_T>
+          <CN_N units="m**2">7.098E+01</CN_N>
+          <CRDOT_R units="m**2/s">2.520E-03</CRDOT_R>
+        </covarianceMatrix>
+      </data>
+    </segment>
+    <segment>
+      <metadata>
+        <OBJECT>OBJECT2</OBJECT>
+        <OBJECT_DESIGNATOR>30337</OBJECT_DESIGNATOR>
+        <CATALOG_NAME>SATCAT</CATALOG_NAME>
+        <OBJECT_NAME>FENGYUN 1C DEB</OBJECT_NAME>
+        <INTERNATIONAL_DESIGNATOR>1999-025AA</INTERNATIONAL_DESIGNATOR>
+        <OBJECT_TYPE>DEBRIS</OBJECT_TYPE>
+        <REF_FRAME>EME2000</REF_FRAME>
+      </metadata>
+      <data>
+        <stateVector>
+          <X units="km">2569.540800</X>
+          <Y units="km">2245.093614</Y>
+          <Z units="km">6281.599946</Z>
+          <X_DOT units="km/s">-2.888612500</X_DOT>
+          <Y_DOT units="km/s">-6.007247516</Y_DOT>
+          <Z_DOT units="km/s">3.328770172</Z_DOT>
+        </stateVector>
+        <covarianceMatrix>
+          <CR_R units="m**2">1.337E+03</CR_R>
+          <CT_R units="m**2">-4.806E+04</CT_R>
+          <CT_T units="m**2">2.492E+06</CT_T>
+          <CN_R units="m**2">-3.298E+01</CN_R>
+          <CN_T units="m**2">-7.5888E+02</CN_T>
+          <CN_N units="m**2">7.105E+01</CN_N>
+        </covarianceMatrix>
+      </data>
+    </segment>
+  </body>
+</cdm>

@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "kind": "physical-truth gate",
+  "measurement": {
+    "generated_at": "2026-06-14T02:16:02.272261Z",
+    "min_epochs": 100,
+    "credibility_factor": 2.0,
+    "max_pdop": 1000.0,
+    "code_sigma_m": 5.0,
+    "epoch_stride": 1
+  },
+  "claims": {
+    "robust_weighted_median_non_regression": true,
+    "strict_median_and_p95_non_regression": false,
+    "default_robust_without_noise_model_refuses": true,
+    "unit_weight_fde_is_harmful_mode": true
+  },
+  "pooled": {
+    "powered_arc_count": 4,
+    "total_arc_count": 4,
+    "all_powered_median_non_regress": true,
+    "all_powered_median_and_p95_non_regress": false
+  },
+  "arcs": [
+    {
+      "label": "gsdc_2021_08_04_sjc1_pixel5_p222_grec_l1_demo5",
+      "oracle_fixture": "gsdc_2021_08_04_sjc1_pixel5_p222_demo5_rtklib_oracle.json",
+      "n": 1453,
+      "bare": {"median_3d_m": 10.213, "p95_3d_m": 37.535},
+      "robust_unit": {"median_3d_m": 13.054, "p95_3d_m": 64.905},
+      "robust_weighted": {"median_3d_m": 9.680, "p95_3d_m": 42.778},
+      "demo5_median_3d_m": 4.522,
+      "weighted_satellite_exclusions": 1204
+    },
+    {
+      "label": "gsdc_svl1_pixel5_p222_grec_l1_demo5",
+      "oracle_fixture": "gsdc_2021_08_24_svl1_pixel5_p222_demo5_rtklib_oracle.json",
+      "n": 3136,
+      "bare": {"median_3d_m": 9.241, "p95_3d_m": 26.877},
+      "robust_unit": {"median_3d_m": 10.596, "p95_3d_m": 39.410},
+      "robust_weighted": {"median_3d_m": 8.837, "p95_3d_m": 24.673},
+      "demo5_median_3d_m": 3.977,
+      "weighted_satellite_exclusions": 1171
+    },
+    {
+      "label": "gsdc_2021_12_15_mtv1_pixel5_p222_grec_l1_demo5",
+      "oracle_fixture": "gsdc_2021_12_15_mtv1_pixel5_p222_demo5_rtklib_oracle.json",
+      "n": 1465,
+      "bare": {"median_3d_m": 8.062, "p95_3d_m": 29.437},
+      "robust_unit": {"median_3d_m": 9.327, "p95_3d_m": 37.561},
+      "robust_weighted": {"median_3d_m": 7.729, "p95_3d_m": 28.366},
+      "demo5_median_3d_m": 3.653,
+      "weighted_satellite_exclusions": 367
+    },
+    {
+      "label": "gsdc_2021_12_28_mtv1_pixel5_p222_grec_l1_demo5",
+      "oracle_fixture": "gsdc_2021_12_28_mtv1_pixel5_p222_demo5_rtklib_oracle.json",
+      "n": 1610,
+      "bare": {"median_3d_m": 10.599, "p95_3d_m": 27.830},
+      "robust_unit": {"median_3d_m": 12.185, "p95_3d_m": 48.816},
+      "robust_weighted": {"median_3d_m": 10.145, "p95_3d_m": 26.768},
+      "demo5_median_3d_m": 3.974,
+      "weighted_satellite_exclusions": 553
+    }
+  ]
+}

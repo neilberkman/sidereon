@@ -1,0 +1,47 @@
+[package]
+name = "trust-region-least-squares"
+version = "0.9.0"
+authors = []
+edition = "2021"
+description = "A dense trust-region-reflective nonlinear least-squares solver that reproduces SciPy's least_squares (method='trf') bit-for-bit on its unbounded path for arbitrary dimension n, every loss (linear/soft_l1/huber/cauchy/arctan), and 2-point Jacobians, with an injectable SVD/BLAS seam so a pinned host LAPACK's numerical trajectory can be reproduced exactly. For anyone who needs scipy-identical least-squares results in Rust."
+license = "MIT"
+readme = "README.md"
+documentation = "https://docs.rs/trust-region-least-squares"
+homepage = "https://github.com/neilberkman/sidereon"
+repository = "https://github.com/neilberkman/sidereon"
+keywords = ["least-squares", "optimization", "trust-region", "scipy", "numerical"]
+categories = ["mathematics", "science", "algorithms"]
+
+# Keep the published package small and source-only: the Python fixture/bench
+# generators are shipped for provenance, but their virtualenv (hundreds of MB of
+# binaries) and any local criterion output must never be packaged.
+exclude = [
+    "fixtures-generators/.venv",
+    "target",
+]
+
+# Build docs.rs with all features so the feature-gated `hostlapack` and `trace`
+# modules appear in the published documentation.
+[package.metadata.docs.rs]
+all-features = true
+
+[features]
+default = []
+host-lapack = ["dep:libloading"]
+trace = []
+
+[dependencies]
+libloading = { version = "0.8", optional = true }
+
+[dev-dependencies]
+serde_json = { version = "1", features = ["preserve_order"] }
+# `nalgebra` is used only by tests, benches, and the crate-level doctest to
+# supply a pure-Rust `ThinSvd` (the SVD/BLAS seam). It is NOT a dependency of the
+# library itself: the crate stays dependency-free by default and callers inject
+# whatever SVD backend they like.
+nalgebra = { workspace = true }
+criterion = "0.5"
+
+[[bench]]
+name = "solve"
+harness = false

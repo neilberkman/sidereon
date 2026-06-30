@@ -1,0 +1,1132 @@
+{
+  "schema": "orbis-gnss-parity/dop.v1",
+  "purpose": "GDOP/PDOP/HDOP/VDOP/TDOP from a design (geometry) matrix of unit line-of-sight vectors plus a clock column and a diagonal weight matrix, via Q = (H^T W H)^-1 with the horizontal/vertical split taken in a local ENU frame. Reference recipe is generator/dop.py: the normal matrix is summed left-to-right and the 4x4 inverse is an explicit cofactor (adjugate/determinant) expansion -- NOT numpy.linalg.inv / LAPACK -- so it is independently 0-ULP. The Rust port asserts 0 ULP per intermediate and per DOP scalar against these hex-float goldens.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "0 ULP certified only against env.json. The inverse is an explicit small-matrix cofactor expansion with pinned operation order, so unlike a LAPACK-bound inverse it is NOT BLAS-bound and is a genuine 0-ULP target. libm contract: CPython math (Apple libsystem_m) vs Rust std on aarch64-apple-darwin. Transcendentals: sin, cos (ENU rotation), sqrt (DOP scalars)."
+  },
+  "recipe": "A = H^T W H accumulated left-to-right (term h[k][i]*w[k]*h[k][j]); det by first-row cofactor expansion; Q = adj(A)/det via 3x3 minors with fixed term order (inv[j][i] = (-1)^(i+j) minor(i,j)/det); ENU rotation R(phi,lam) [[-sl,cl,0],[-sp*cl,-sp*sl,cp],[cp*cl,cp*sl,sp]]; Q_enu = R Q_xyz R^T on the 3x3 position block; GDOP=sqrt(Qxx+Qyy+Qzz+Qtt), PDOP=sqrt(qE+qN+qU), HDOP=sqrt(qE+qN), VDOP=sqrt(qU), TDOP=sqrt(Qtt). det==0 -> no finite DOP. No FMA.",
+  "math_pi": "0x1.921fb54442d18p+1",
+  "generator": {
+    "python": "3.14.4",
+    "executable": "python"
+  },
+  "cases": [
+    {
+      "name": "four_sats_symmetric",
+      "note": "minimal four-satellite spread, unit weights",
+      "inputs": {
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "lat_deg_repr": "45.0",
+        "lon_deg_repr": "10.0",
+        "design_matrix": [
+          [
+            "-0x1.aa2fbd945ccc0p-2",
+            "-0x1.2c97bb8ccdf37p-4",
+            "-0x1.d0079302dd766p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.09f95aba18fafp-1",
+            "-0x1.b4d27ce94dbcep-1",
+            "-0x1.8408293b0d4f0p-5",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.8f55f9ae5db06p-1",
+            "0x1.3f829842cce52p-1",
+            "-0x1.8408293b0d4b8p-5",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "0x1.3493dd2a6d2aap-2",
+            "-0x1.97b2bf4a3bea0p-1",
+            "-0x1.0c8dc2e423980p-1",
+            "0x1.0000000000000p+0"
+          ]
+        ],
+        "weights": [
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0"
+        ],
+        "los_ecef": [
+          [
+            "0x1.aa2fbd945ccc0p-2",
+            "0x1.2c97bb8ccdf37p-4",
+            "0x1.d0079302dd766p-1"
+          ],
+          [
+            "0x1.09f95aba18fafp-1",
+            "0x1.b4d27ce94dbcep-1",
+            "0x1.8408293b0d4f0p-5"
+          ],
+          [
+            "0x1.8f55f9ae5db06p-1",
+            "-0x1.3f829842cce52p-1",
+            "0x1.8408293b0d4b8p-5"
+          ],
+          [
+            "-0x1.3493dd2a6d2aap-2",
+            "0x1.97b2bf4a3bea0p-1",
+            "0x1.0c8dc2e423980p-1"
+          ]
+        ]
+      },
+      "expect": {
+        "normal_matrix": [
+          [
+            "0x1.2468444ff7f28p+0",
+            "-0x1.0300f6abe9fcbp-2",
+            "0x1.1f6dd2fb81e16p-2",
+            "-0x1.6a0ea24eb73e0p+0"
+          ],
+          [
+            "-0x1.0300f6abe9fcbp-2",
+            "0x1.c1bc8264fd5a9p+0",
+            "0x1.fae96e6b5baffp-2",
+            "-0x1.194acdb12b402p+0"
+          ],
+          [
+            "0x1.1f6dd2fb81e16p-2",
+            "0x1.fae96e6b5baffp-2",
+            "0x1.19db394b0ab2bp+0",
+            "-0x1.868b2d87315c0p+0"
+          ],
+          [
+            "-0x1.6a0ea24eb73e0p+0",
+            "-0x1.194acdb12b402p+0",
+            "-0x1.868b2d87315c0p+0",
+            "0x1.0000000000000p+2"
+          ]
+        ],
+        "cofactor_matrix": [
+          [
+            "0x1.ea8f188642880p+1",
+            "0x1.9a26bc7866013p+0",
+            "0x1.ace249542c83bp+0",
+            "0x1.37916170dfd1ep+1"
+          ],
+          [
+            "0x1.9a26bc7866011p+0",
+            "0x1.5cc493bb0f5ecp+0",
+            "0x1.32b3908295bfep-1",
+            "0x1.2b4f837e7e0c4p+0"
+          ],
+          [
+            "0x1.ace249542c83ap+0",
+            "0x1.32b3908295c01p-1",
+            "0x1.562ff25d731c6p+1",
+            "0x1.c6c7c10cb88f0p+0"
+          ],
+          [
+            "0x1.37916170dfd1cp+1",
+            "0x1.2b4f837e7e0c4p+0",
+            "0x1.c6c7c10cb88f0p+0",
+            "0x1.0dff0259b4428p+1"
+          ]
+        ],
+        "enu_pos_block": [
+          [
+            "0x1.c71c71c71c728p-1",
+            "-0x1.1be0b3c49eb8dp-1",
+            "0x1.f461f7c069556p-1"
+          ],
+          [
+            "-0x1.1be0b3c49eb8ep-1",
+            "0x1.bc5ae9c076574p+0",
+            "-0x1.a1f4a7291ffcap-1"
+          ],
+          [
+            "0x1.f461f7c06955ap-1",
+            "-0x1.a1f4a7291ffc8p-1",
+            "0x1.4f9661b79d85cp+2"
+          ]
+        ],
+        "det": "0x1.90905de6ac3b8p-1",
+        "qe": "0x1.c71c71c71c728p-1",
+        "qn": "0x1.bc5ae9c076574p+0",
+        "qu": "0x1.4f9661b79d85cp+2",
+        "qt": "0x1.0dff0259b4428p+1",
+        "gdop": "0x1.94512188a0ee8p+1",
+        "pdop": "0x1.670b4a1e5da09p+1",
+        "hdop": "0x1.9ebd66303910ap+0",
+        "vdop": "0x1.251acf780e6a6p+1",
+        "tdop": "0x1.73cdc1aa52898p+0"
+      }
+    },
+    {
+      "name": "six_sats_good",
+      "note": "well-distributed six-satellite geometry, low DOP",
+      "inputs": {
+        "lat_deg": "0x1.6800000000000p+5",
+        "lon_deg": "0x1.4000000000000p+3",
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "lat_deg_repr": "45.0",
+        "lon_deg_repr": "10.0",
+        "design_matrix": [
+          [
+            "-0x1.2135a910d83fbp-1",
+            "-0x1.97f6b26ba6e6ap-4",
+            "-0x1.a367e59158747p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "0x1.ac1a70d2589e0p-4",
+            "-0x1.23b435392bda2p-1",
+            "-0x1.a15c1a309e33ep-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.423145c43b7ebp-1",
+            "-0x1.85fdcfa18d7e1p-1",
+            "0x1.3c0ae5041608ap-3",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.fc071b94563e4p-1",
+            "0x1.8b7ffeac1f982p-5",
+            "-0x1.d543cf378fbccp-4",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.9afa944095fedp-2",
+            "0x1.c44fb700cd0c8p-1",
+            "-0x1.ef4c4e9241676p-3",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.91913c5469dfap-2",
+            "0x1.07608a65d157bp-2",
+            "-0x1.c4341b6d53a9ep-1",
+            "0x1.0000000000000p+0"
+          ]
+        ],
+        "weights": [
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0"
+        ],
+        "los_ecef": [
+          [
+            "0x1.2135a910d83fbp-1",
+            "0x1.97f6b26ba6e6ap-4",
+            "0x1.a367e59158747p-1"
+          ],
+          [
+            "-0x1.ac1a70d2589e0p-4",
+            "0x1.23b435392bda2p-1",
+            "0x1.a15c1a309e33ep-1"
+          ],
+          [
+            "0x1.423145c43b7ebp-1",
+            "0x1.85fdcfa18d7e1p-1",
+            "-0x1.3c0ae5041608ap-3"
+          ],
+          [
+            "0x1.fc071b94563e4p-1",
+            "-0x1.8b7ffeac1f982p-5",
+            "0x1.d543cf378fbccp-4"
+          ],
+          [
+            "0x1.9afa944095fedp-2",
+            "-0x1.c44fb700cd0c8p-1",
+            "0x1.ef4c4e9241676p-3"
+          ],
+          [
+            "0x1.91913c5469dfap-2",
+            "-0x1.07608a65d157bp-2",
+            "0x1.c4341b6d53a9ep-1"
+          ]
+        ]
+      },
+      "expect": {
+        "normal_matrix": [
+          [
+            "0x1.03404035d66b7p+1",
+            "-0x1.bf129f1418bd8p-6",
+            "0x1.accc8bd8e4d7ep-1",
+            "-0x1.700c292667b61p+1"
+          ],
+          [
+            "-0x1.bf129f1418bd8p-6",
+            "0x1.c37ce257a6ec1p+0",
+            "-0x1.24f6ae3265458p-6",
+            "-0x1.efe37c26da0cap-3"
+          ],
+          [
+            "0x1.accc8bd8e4d7ep-1",
+            "-0x1.24f6ae3265458p-6",
+            "0x1.1b014e9e561e8p+1",
+            "-0x1.5c1c3bde71c86p+1"
+          ],
+          [
+            "-0x1.700c292667b61p+1",
+            "-0x1.efe37c26da0cap-3",
+            "-0x1.5c1c3bde71c86p+1",
+            "0x1.8000000000000p+2"
+          ]
+        ],
+        "cofactor_matrix": [
+          [
+            "0x1.3eaf076013d87p+1",
+            "0x1.2b87a1fc04754p-2",
+            "0x1.3943835842590p+0",
+            "0x1.c2758c518e9e0p+0"
+          ],
+          [
+            "0x1.2b87a1fc04755p-2",
+            "0x1.38528b32f8541p-1",
+            "0x1.c03ef0eeaf040p-3",
+            "0x1.0e56c7d0fe06cp-2"
+          ],
+          [
+            "0x1.3943835842592p+0",
+            "0x1.c03ef0eeaf040p-3",
+            "0x1.a22a2d0af0e26p+0",
+            "0x1.55ed50aaf1c30p+0"
+          ],
+          [
+            "0x1.c2758c518e9dfp+0",
+            "0x1.0e56c7d0fe06cp-2",
+            "0x1.55ed50aaf1c2fp+0",
+            "0x1.a040726f4cc86p+0"
+          ]
+        ],
+        "enu_pos_block": [
+          [
+            "0x1.221ebf401350ap-1",
+            "0x1.1f83932092ff2p-5",
+            "-0x1.f843e0cefddecp-6"
+          ],
+          [
+            "0x1.1f83932092fecp-5",
+            "0x1.ae2a3b9f9bf7dp-1",
+            "-0x1.cc9b8f5d529fcp-2"
+          ],
+          [
+            "-0x1.f843e0cefde10p-6",
+            "-0x1.cc9b8f5d52a04p-2",
+            "0x1.a9c681fa5e8c8p+1"
+          ]
+        ],
+        "det": "0x1.061cad37ae2e0p+2",
+        "qe": "0x1.221ebf401350ap-1",
+        "qn": "0x1.ae2a3b9f9bf7dp-1",
+        "qu": "0x1.a9c681fa5e8c8p+1",
+        "qt": "0x1.a040726f4cc86p+0",
+        "gdop": "0x1.42c84c6b1f151p+1",
+        "pdop": "0x1.16799f91eab89p+1",
+        "hdop": "0x1.2fa3851086f0ep+0",
+        "vdop": "0x1.d2e6c90994e09p+0",
+        "tdop": "0x1.466f9c2e85f34p+0"
+      }
+    },
+    {
+      "name": "weighted_elevation",
+      "note": "southern site, elevation-dependent weights (sin^2(el)-like)",
+      "inputs": {
+        "lat_deg": "-0x1.0800000000000p+5",
+        "lon_deg": "0x1.2e00000000000p+7",
+        "lat_rad": "-0x1.26e40d7653223p-1",
+        "lon_rad": "0x1.51565537d7579p+1",
+        "lat_deg_repr": "-33.0",
+        "lon_deg_repr": "151.0",
+        "design_matrix": [
+          [
+            "0x1.b415ca9570907p-1",
+            "-0x1.aed5121d39724p-2",
+            "0x1.3fcf6b960c20dp-2",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "0x1.8c394008a8c89p-1",
+            "0x1.bbfe8d6e35fc8p-2",
+            "0x1.d8ba8703b5070p-2",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.138345efc3f17p-2",
+            "-0x1.329c23317453cp-5",
+            "0x1.ecbf52566ed70p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.de66827fce05fp-3",
+            "-0x1.f19c41329f243p-1",
+            "-0x1.dea5dc9c45e90p-6",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "0x1.659a77635f40fp-1",
+            "-0x1.6e1b9b29b2a74p-1",
+            "0x1.e41cbd33c4470p-6",
+            "0x1.0000000000000p+0"
+          ]
+        ],
+        "weights": [
+          "0x1.0000000000000p+2",
+          "0x1.0000000000000p+1",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p-1",
+          "0x1.8000000000000p+1"
+        ],
+        "los_ecef": [
+          [
+            "-0x1.b415ca9570907p-1",
+            "0x1.aed5121d39724p-2",
+            "-0x1.3fcf6b960c20dp-2"
+          ],
+          [
+            "-0x1.8c394008a8c89p-1",
+            "-0x1.bbfe8d6e35fc8p-2",
+            "-0x1.d8ba8703b5070p-2"
+          ],
+          [
+            "0x1.138345efc3f17p-2",
+            "0x1.329c23317453cp-5",
+            "-0x1.ecbf52566ed70p-1"
+          ],
+          [
+            "0x1.de66827fce05fp-3",
+            "0x1.f19c41329f243p-1",
+            "0x1.dea5dc9c45e90p-6"
+          ],
+          [
+            "-0x1.659a77635f40fp-1",
+            "0x1.6e1b9b29b2a74p-1",
+            "-0x1.e41cbd33c4470p-6"
+          ]
+        ]
+      },
+      "expect": {
+        "normal_matrix": [
+          [
+            "0x1.6a694baa4d35cp+2",
+            "-0x1.1189a9a4159bcp+1",
+            "0x1.95be278388c74p+0",
+            "0x1.aa8153a92abbap+2"
+          ],
+          [
+            "-0x1.1189a9a4159bcp+1",
+            "0x1.8bbbc26a7ce06p+1",
+            "-0x1.af1257db2883cp-3",
+            "-0x1.bdfd92c56eed4p+1"
+          ],
+          [
+            "0x1.95be278388c74p+0",
+            "-0x1.af1257db2883cp-3",
+            "0x1.bee34c81d1683p+0",
+            "0x1.9ac032b4295bap+1"
+          ],
+          [
+            "0x1.aa8153a92abbap+2",
+            "-0x1.bdfd92c56eed4p+1",
+            "0x1.9ac032b4295bap+1",
+            "0x1.5000000000000p+3"
+          ]
+        ],
+        "cofactor_matrix": [
+          [
+            "0x1.3671f4cd7326cp+0",
+            "-0x1.6e63f99b8d66ap-1",
+            "0x1.83f5c3e1f8ffcp+0",
+            "-0x1.786468ffc79a8p+0"
+          ],
+          [
+            "-0x1.6e63f99b8d660p-1",
+            "0x1.7105ce6a477cdp+0",
+            "-0x1.042f03200bbbfp+1",
+            "0x1.8dc28a82fe536p+0"
+          ],
+          [
+            "0x1.83f5c3e1f8ff3p+0",
+            "-0x1.042f03200bbc0p+1",
+            "0x1.1e40aece375fbp+2",
+            "-0x1.806c13ced9e3fp+1"
+          ],
+          [
+            "-0x1.786468ffc79a5p+0",
+            "0x1.8dc28a82fe536p+0",
+            "-0x1.806c13ced9e40p+1",
+            "0x1.3b1e0101dc035p+1"
+          ]
+        ],
+        "enu_pos_block": [
+          [
+            "0x1.8fcadab632b98p-1",
+            "0x1.3b1c35be7989ap-1",
+            "-0x1.ef5fa615b4520p-1"
+          ],
+          [
+            "0x1.3b1c35be7989fp-1",
+            "0x1.972b873e6d689p+0",
+            "-0x1.104a09100b5d8p+1"
+          ],
+          [
+            "-0x1.ef5fa615b4530p-1",
+            "-0x1.104a09100b5dcp+1",
+            "0x1.305a6275c4574p+2"
+          ]
+        ],
+        "det": "0x1.9fe4a14e656a8p+2",
+        "qe": "0x1.8fcadab632b98p-1",
+        "qn": "0x1.972b873e6d689p+0",
+        "qu": "0x1.305a6275c4574p+2",
+        "qt": "0x1.3b1e0101dc035p+1",
+        "gdop": "0x1.8c5c48082767ep+1",
+        "pdop": "0x1.55b618ce07038p+1",
+        "hdop": "0x1.8a382c459076fp+0",
+        "vdop": "0x1.1721a8d8e98b5p+1",
+        "tdop": "0x1.91abe890067e9p+0"
+      }
+    },
+    {
+      "name": "poor_geometry_clustered",
+      "note": "equator, satellites clustered in one quadrant: large DOP",
+      "inputs": {
+        "lat_deg": "0x0.0p+0",
+        "lon_deg": "0x0.0p+0",
+        "lat_rad": "0x0.0p+0",
+        "lon_rad": "0x0.0p+0",
+        "lat_deg_repr": "0.0",
+        "lon_deg_repr": "0.0",
+        "design_matrix": [
+          [
+            "-0x1.bb67ae8584caap-1",
+            "-0x1.63a1a7e0b738ap-4",
+            "-0x1.f838b8c811c19p-2",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.c411b4f6d2707p-1",
+            "-0x1.48d84249d1144p-3",
+            "-0x1.c3bf2cdd7264ap-2",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.b2335c2cda945p-1",
+            "-0x1.0f5193eacdd29p-2",
+            "-0x1.d5f00dc0ca4cap-2",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.d0079302dd767p-1",
+            "-0x1.c006fa6c72f78p-4",
+            "-0x1.a203df1bef2ffp-2",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.a367e59158747p-1",
+            "-0x1.f07171902382ep-3",
+            "-0x1.0a280c3ed94c6p-1",
+            "0x1.0000000000000p+0"
+          ]
+        ],
+        "weights": [
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0"
+        ],
+        "los_ecef": [
+          [
+            "0x1.bb67ae8584caap-1",
+            "0x1.63a1a7e0b738ap-4",
+            "0x1.f838b8c811c19p-2"
+          ],
+          [
+            "0x1.c411b4f6d2707p-1",
+            "0x1.48d84249d1144p-3",
+            "0x1.c3bf2cdd7264ap-2"
+          ],
+          [
+            "0x1.b2335c2cda945p-1",
+            "0x1.0f5193eacdd29p-2",
+            "0x1.d5f00dc0ca4cap-2"
+          ],
+          [
+            "0x1.d0079302dd767p-1",
+            "0x1.c006fa6c72f78p-4",
+            "0x1.a203df1bef2ffp-2"
+          ],
+          [
+            "0x1.a367e59158747p-1",
+            "0x1.f07171902382ep-3",
+            "0x1.0a280c3ed94c6p-1"
+          ]
+        ]
+      },
+      "expect": {
+        "normal_matrix": [
+          [
+            "0x1.dedf2dfbe4381p+1",
+            "0x1.7a8dd134f5595p-1",
+            "0x1.001ecec1d5013p+1",
+            "-0x1.14a38707acf74p+2"
+          ],
+          [
+            "0x1.7a8dd134f5595p-1",
+            "0x1.64dc4f43fafaap-3",
+            "0x1.9f965fb989280p-2",
+            "-0x1.ba704b3589552p-1"
+          ],
+          [
+            "0x1.001ecec1d5013p+1",
+            "0x1.9f965fb989280p-2",
+            "0x1.15a61a1fb8308p+0",
+            "-0x1.29077d5ffe078p+1"
+          ],
+          [
+            "-0x1.14a38707acf74p+2",
+            "-0x1.ba704b3589552p-1",
+            "-0x1.29077d5ffe078p+1",
+            "0x1.4000000000000p+2"
+          ]
+        ],
+        "cofactor_matrix": [
+          [
+            "0x1.010b9fe58bc91p+16",
+            "0x1.9f91174179553p+13",
+            "0x1.1c0a464b39dd0p+15",
+            "0x1.291ae9d4f0a4dp+16"
+          ],
+          [
+            "0x1.9f9117417a255p+13",
+            "0x1.55a3c7bb4190ap+11",
+            "0x1.c9672c48e272dp+12",
+            "0x1.e028c96efd45fp+13"
+          ],
+          [
+            "0x1.1c0a464b3a2fcp+15",
+            "0x1.c9672c48da77bp+12",
+            "0x1.3c37337695818p+14",
+            "0x1.48cfee68aa061p+15"
+          ],
+          [
+            "0x1.291ae9d4f0b14p+16",
+            "0x1.e028c96eff7d8p+13",
+            "0x1.48cfee68aa061p+15",
+            "0x1.5785b95aa13f8p+16"
+          ]
+        ],
+        "enu_pos_block": [
+          [
+            "0x1.55a3c7bb4190ap+11",
+            "0x1.c9672c48e272dp+12",
+            "0x1.9f9117417a255p+13"
+          ],
+          [
+            "0x1.c9672c48da77bp+12",
+            "0x1.3c37337695818p+14",
+            "0x1.1c0a464b3a2fcp+15"
+          ],
+          [
+            "0x1.9f91174179553p+13",
+            "0x1.1c0a464b39dd0p+15",
+            "0x1.010b9fe58bc91p+16"
+          ]
+        ],
+        "det": "0x1.b109166880000p-27",
+        "qe": "0x1.55a3c7bb4190ap+11",
+        "qn": "0x1.3c37337695818p+14",
+        "qu": "0x1.010b9fe58bc91p+16",
+        "qt": "0x1.5785b95aa13f8p+16",
+        "gdop": "0x1.a46057cd51c8dp+8",
+        "pdop": "0x1.29f358a55677bp+8",
+        "hdop": "0x1.2f1f89f22ec55p+7",
+        "vdop": "0x1.0085ad0c24191p+8",
+        "tdop": "0x1.288cb9149dca7p+8"
+      }
+    },
+    {
+      "name": "polar_site",
+      "note": "high-latitude receiver exercises the ENU rotation extremes",
+      "inputs": {
+        "lat_deg": "0x1.5400000000000p+6",
+        "lon_deg": "-0x1.e000000000000p+6",
+        "lat_rad": "0x1.7bc89cf95b8d0p+0",
+        "lon_rad": "-0x1.0c152382d7365p+1",
+        "lat_deg_repr": "85.0",
+        "lon_deg_repr": "-120.0",
+        "design_matrix": [
+          [
+            "-0x1.491b7523c161bp-2",
+            "-0x1.1d03e70ea8500p-1",
+            "-0x1.8836fa2cf5038p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.74d814a39ebf9p-1",
+            "0x1.e20ce06c88b4ep-2",
+            "-0x1.fe0d3b41815a1p-2",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "0x1.bb67ae8584ca6p-2",
+            "0x1.8000000000000p-1",
+            "-0x1.0000000000000p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "0x1.9b4a72cc8a7aap-1",
+            "-0x1.af5d7c0cf3e47p-2",
+            "-0x1.af1d43a4505fbp-2",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.27e41e3fbcc7dp-2",
+            "-0x1.13348459579f0p-6",
+            "-0x1.ea15756ab91a3p-1",
+            "0x1.0000000000000p+0"
+          ]
+        ],
+        "weights": [
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0"
+        ],
+        "los_ecef": [
+          [
+            "0x1.491b7523c161bp-2",
+            "0x1.1d03e70ea8500p-1",
+            "0x1.8836fa2cf5038p-1"
+          ],
+          [
+            "0x1.74d814a39ebf9p-1",
+            "-0x1.e20ce06c88b4ep-2",
+            "0x1.fe0d3b41815a1p-2"
+          ],
+          [
+            "-0x1.bb67ae8584ca6p-2",
+            "-0x1.8000000000000p-1",
+            "0x1.0000000000000p-1"
+          ],
+          [
+            "-0x1.9b4a72cc8a7aap-1",
+            "0x1.af5d7c0cf3e47p-2",
+            "0x1.af1d43a4505fbp-2"
+          ],
+          [
+            "0x1.27e41e3fbcc7dp-2",
+            "0x1.13348459579f0p-6",
+            "0x1.ea15756ab91a3p-1"
+          ]
+        ]
+      },
+      "expect": {
+        "normal_matrix": [
+          [
+            "0x1.8cc4a718b626ep+0",
+            "-0x1.61a54eea9dcbcp-3",
+            "0x1.52be6e4c01939p-2",
+            "-0x1.a2cca23087a3cp-4"
+          ],
+          [
+            "-0x1.61a54eea9dcbcp-3",
+            "0x1.458ff038c1106p+0",
+            "0x1.54488cb739324p-7",
+            "0x1.cee89bf95d6d0p-3"
+          ],
+          [
+            "0x1.52be6e4c01939p-2",
+            "0x1.54488cb739324p-7",
+            "0x1.16d5b45744645p+1",
+            "-0x1.92386bc2a5beap+1"
+          ],
+          [
+            "-0x1.a2cca23087a3cp-4",
+            "0x1.cee89bf95d6d0p-3",
+            "-0x1.92386bc2a5beap+1",
+            "0x1.4000000000000p+2"
+          ]
+        ],
+        "cofactor_matrix": [
+          [
+            "0x1.d9b10730d6238p-1",
+            "0x1.2f9cba430e480p-2",
+            "-0x1.6f078955bd337p+0",
+            "-0x1.ca826b18b1c91p-1"
+          ],
+          [
+            "0x1.2f9cba430e47fp-2",
+            "0x1.eee67da7d3ad2p-1",
+            "-0x1.1cbd1b322501fp+0",
+            "-0x1.792ace50bd77cp-1"
+          ],
+          [
+            "-0x1.6f078955bd337p+0",
+            "-0x1.1cbd1b322501fp+0",
+            "0x1.e7efc439b4279p+2",
+            "0x1.33feab6ffb6e1p+2"
+          ],
+          [
+            "-0x1.ca826b18b1c8ep-1",
+            "-0x1.792ace50bd77cp-1",
+            "0x1.33feab6ffb6e2p+2",
+            "0x1.9ea62c046e993p+1"
+          ]
+        ],
+        "enu_pos_block": [
+          [
+            "0x1.5b8699779eb8cp-1",
+            "0x1.1f020660d6c98p-4",
+            "-0x1.63745049ca08fp-1"
+          ],
+          [
+            "0x1.1f020660d6c90p-4",
+            "0x1.f0a02c9019fd7p-1",
+            "-0x1.1913153acc0c0p+0"
+          ],
+          [
+            "-0x1.63745049ca08fp-1",
+            "-0x1.1913153acc0c0p+0",
+            "0x1.f77ddc13d24aep+2"
+          ]
+        ],
+        "det": "0x1.43128c3094f91p+0",
+        "qe": "0x1.5b8699779eb8cp-1",
+        "qn": "0x1.f0a02c9019fd7p-1",
+        "qu": "0x1.f77ddc13d24aep+2",
+        "qt": "0x1.9ea62c046e993p+1",
+        "gdop": "0x1.c925300481812p+1",
+        "pdop": "0x1.8ad9a8dbf741fp+1",
+        "hdop": "0x1.48b63279c6bbap+0",
+        "vdop": "0x1.670495bf64cd2p+1",
+        "tdop": "0x1.ccc2b7a1f4df4p+0"
+      }
+    },
+    {
+      "name": "equatorial_prime_meridian",
+      "note": "lat=lon=0 so the ENU rotation has zero sin(phi) and sin(lam) terms",
+      "inputs": {
+        "lat_deg": "0x0.0p+0",
+        "lon_deg": "0x0.0p+0",
+        "lat_rad": "0x0.0p+0",
+        "lon_rad": "0x0.0p+0",
+        "lat_deg_repr": "0.0",
+        "lon_deg_repr": "0.0",
+        "design_matrix": [
+          [
+            "-0x1.8836fa2cf5039p-1",
+            "-0x1.491b7523c161cp-2",
+            "-0x1.1d03e70ea8500p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.491b7523c161cp-1",
+            "-0x1.8836fa2cf5038p-2",
+            "0x1.53aafe3631109p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.6a09e667f3bccp-1",
+            "0x1.6a09e667f3bcdp-1",
+            "0x1.2b8388e82ab21p-53",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.f838b8c811c17p-1",
+            "-0x0.0p+0",
+            "-0x1.63a1a7e0b738cp-3",
+            "0x1.0000000000000p+0"
+          ]
+        ],
+        "weights": [
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0"
+        ],
+        "los_ecef": [
+          [
+            "0x1.8836fa2cf5039p-1",
+            "0x1.491b7523c161cp-2",
+            "0x1.1d03e70ea8500p-1"
+          ],
+          [
+            "0x1.491b7523c161cp-1",
+            "0x1.8836fa2cf5038p-2",
+            "-0x1.53aafe3631109p-1"
+          ],
+          [
+            "0x1.6a09e667f3bccp-1",
+            "-0x1.6a09e667f3bcdp-1",
+            "-0x1.2b8388e82ab21p-53"
+          ],
+          [
+            "0x1.f838b8c811c17p-1",
+            "0x0.0p+0",
+            "0x1.63a1a7e0b738cp-3"
+          ]
+        ]
+      },
+      "expect": {
+        "normal_matrix": [
+          [
+            "0x1.3c23ec84a45a3p+1",
+            "-0x1.f1d1cdfb8fa80p-8",
+            "0x1.5e3a8748a0bfap-3",
+            "-0x1.8ce543a02ef8ep+1"
+          ],
+          [
+            "-0x1.f1d1cdfb8fa80p-8",
+            "0x1.8000000000000p-1",
+            "-0x1.33fc62fee2039p-4",
+            "0x1.60aebf988a300p-9"
+          ],
+          [
+            "0x1.5e3a8748a0bfap-3",
+            "-0x1.33fc62fee2039p-4",
+            "0x1.8f704ded6e973p-1",
+            "-0x1.120a9685286c7p-4"
+          ],
+          [
+            "-0x1.8ce543a02ef8ep+1",
+            "0x1.60aebf988a300p-9",
+            "-0x1.120a9685286c7p-4",
+            "0x1.0000000000000p+2"
+          ]
+        ],
+        "cofactor_matrix": [
+          [
+            "0x1.4de6b72866623p+4",
+            "-0x1.5842c71d2ecd9p-3",
+            "-0x1.9a9d11ecafef6p+1",
+            "0x1.01faa579a6d72p+4"
+          ],
+          [
+            "-0x1.5842c71d2ecd8p-3",
+            "0x1.590311f3820ebp+0",
+            "0x1.3ee50b64d945ap-3",
+            "-0x1.0763a3b77c4cfp-3"
+          ],
+          [
+            "-0x1.9a9d11ecafef5p+1",
+            "0x1.3ee50b64d947ep-3",
+            "0x1.ca0e726cef988p+0",
+            "-0x1.3a7c1b321d7d3p+1"
+          ],
+          [
+            "0x1.01faa579a6d71p+4",
+            "-0x1.0763a3b77c4d1p-3",
+            "-0x1.3a7c1b321d7d0p+1",
+            "0x1.96a6d0ebc22e4p+3"
+          ]
+        ],
+        "enu_pos_block": [
+          [
+            "0x1.590311f3820ebp+0",
+            "0x1.3ee50b64d945ap-3",
+            "-0x1.5842c71d2ecd8p-3"
+          ],
+          [
+            "0x1.3ee50b64d947ep-3",
+            "0x1.ca0e726cef988p+0",
+            "-0x1.9a9d11ecafef5p+1"
+          ],
+          [
+            "-0x1.5842c71d2ecd9p-3",
+            "-0x1.9a9d11ecafef6p+1",
+            "0x1.4de6b72866623p+4"
+          ]
+        ],
+        "det": "0x1.c646f954a0c00p-4",
+        "qe": "0x1.590311f3820ebp+0",
+        "qn": "0x1.ca0e726cef988p+0",
+        "qu": "0x1.4de6b72866623p+4",
+        "qt": "0x1.96a6d0ebc22e4p+3",
+        "gdop": "0x1.83c99fc86fd39p+2",
+        "pdop": "0x1.3992998d0e1b4p+2",
+        "hdop": "0x1.c56a5716195a8p+0",
+        "vdop": "0x1.245e100aca480p+2",
+        "tdop": "0x1.c84ba965d84eap+1"
+      }
+    }
+  ],
+  "singular_cases": [
+    {
+      "name": "only_three_sats",
+      "note": "three satellites: the 4x4 normal matrix is rank-deficient (singular)",
+      "inputs": {
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "design_matrix": [
+          [
+            "-0x1.aa2fbd945ccc0p-2",
+            "-0x1.2c97bb8ccdf37p-4",
+            "-0x1.d0079302dd766p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.09f95aba18fafp-1",
+            "-0x1.b4d27ce94dbcep-1",
+            "-0x1.8408293b0d4f0p-5",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.8f55f9ae5db06p-1",
+            "0x1.3f829842cce52p-1",
+            "-0x1.8408293b0d4b8p-5",
+            "0x1.0000000000000p+0"
+          ]
+        ],
+        "weights": [
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0"
+        ],
+        "los_ecef": [
+          [
+            "0x1.aa2fbd945ccc0p-2",
+            "0x1.2c97bb8ccdf37p-4",
+            "0x1.d0079302dd766p-1"
+          ],
+          [
+            "0x1.09f95aba18fafp-1",
+            "0x1.b4d27ce94dbcep-1",
+            "0x1.8408293b0d4f0p-5"
+          ],
+          [
+            "0x1.8f55f9ae5db06p-1",
+            "-0x1.3f829842cce52p-1",
+            "0x1.8408293b0d4b8p-5"
+          ]
+        ]
+      },
+      "expect": {
+        "normal_matrix": [
+          [
+            "0x1.0d2902369aaaep+0",
+            "-0x1.a936355cbf200p-7",
+            "0x1.c148a8eda54e0p-2",
+            "-0x1.b73399995288ap+0"
+          ],
+          [
+            "-0x1.a936355cbf200p-7",
+            "0x1.1f6a0c21d62f4p+0",
+            "0x1.3ce2295600ef5p-4",
+            "-0x1.35c5b830352c6p-2"
+          ],
+          [
+            "0x1.c148a8eda54e0p-2",
+            "0x1.3ce2295600ef5p-4",
+            "0x1.a6d9e34f1e4b6p-1",
+            "-0x1.00444c151f900p+0"
+          ],
+          [
+            "-0x1.b73399995288ap+0",
+            "-0x1.35c5b830352c6p-2",
+            "-0x1.00444c151f900p+0",
+            "0x1.8000000000000p+1"
+          ]
+        ],
+        "det": "-0x1.0000000000000p-51",
+        "singular": true
+      }
+    },
+    {
+      "name": "duplicate_directions",
+      "note": "four identical line-of-sight rows: rank 2, determinant zero",
+      "inputs": {
+        "lat_rad": "0x1.921fb54442d18p-1",
+        "lon_rad": "0x1.657184ae74487p-3",
+        "design_matrix": [
+          [
+            "-0x1.aa2fbd945ccc0p-2",
+            "-0x1.2c97bb8ccdf37p-4",
+            "-0x1.d0079302dd766p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.aa2fbd945ccc0p-2",
+            "-0x1.2c97bb8ccdf37p-4",
+            "-0x1.d0079302dd766p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.aa2fbd945ccc0p-2",
+            "-0x1.2c97bb8ccdf37p-4",
+            "-0x1.d0079302dd766p-1",
+            "0x1.0000000000000p+0"
+          ],
+          [
+            "-0x1.aa2fbd945ccc0p-2",
+            "-0x1.2c97bb8ccdf37p-4",
+            "-0x1.d0079302dd766p-1",
+            "0x1.0000000000000p+0"
+          ]
+        ],
+        "weights": [
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0",
+          "0x1.0000000000000p+0"
+        ],
+        "los_ecef": [
+          [
+            "0x1.aa2fbd945ccc0p-2",
+            "0x1.2c97bb8ccdf37p-4",
+            "0x1.d0079302dd766p-1"
+          ],
+          [
+            "0x1.aa2fbd945ccc0p-2",
+            "0x1.2c97bb8ccdf37p-4",
+            "0x1.d0079302dd766p-1"
+          ],
+          [
+            "0x1.aa2fbd945ccc0p-2",
+            "0x1.2c97bb8ccdf37p-4",
+            "0x1.d0079302dd766p-1"
+          ],
+          [
+            "0x1.aa2fbd945ccc0p-2",
+            "0x1.2c97bb8ccdf37p-4",
+            "0x1.d0079302dd766p-1"
+          ]
+        ]
+      },
+      "expect": {
+        "normal_matrix": [
+          [
+            "0x1.62c175ec76dabp-1",
+            "0x1.f46c8c8df7b66p-4",
+            "0x1.824191d4a3162p+0",
+            "-0x1.aa2fbd945ccc0p+0"
+          ],
+          [
+            "0x1.f46c8c8df7b66p-4",
+            "0x1.60f3f980cc348p-6",
+            "0x1.106df459ea071p-2",
+            "-0x1.2c97bb8ccdf37p-2"
+          ],
+          [
+            "0x1.824191d4a3162p+0",
+            "0x1.106df459ea071p-2",
+            "0x1.a48dba91e0b0cp+1",
+            "-0x1.d0079302dd766p+1"
+          ],
+          [
+            "-0x1.aa2fbd945ccc0p+0",
+            "-0x1.2c97bb8ccdf37p-2",
+            "-0x1.d0079302dd766p+1",
+            "0x1.0000000000000p+2"
+          ]
+        ],
+        "det": "0x1.0000000000000p-108",
+        "singular": true
+      }
+    }
+  ]
+}

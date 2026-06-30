@@ -1,0 +1,182 @@
+{
+  "schema": "orbis-gnss-parity/libm_tiny.v1",
+  "purpose": "Tiny libm-bound 0-ULP fixture (parity build order step 2). Proves the parity harness + math contract before any GNSS numerics: numpy reference transcendentals emitted as hex-float; a Rust std test asserts 0 ULP (bit-identical) per component, or reports the ULP delta if Rust std libm diverges from numpy's on this pinned target.",
+  "env_ref": {
+    "fixture": "fixtures/env.json",
+    "note": "0 ULP is certified only against the pinned environment in env.json. The libm contract here is Apple libsystem_m vs Rust std on aarch64-apple-darwin (see env.libm / env.rust)."
+  },
+  "generator": {
+    "numpy": "2.4.6",
+    "python": "3.14.4",
+    "executable": "python"
+  },
+  "cases": {
+    "unary": [
+      {
+        "name": "zero",
+        "x": "0x0.0p+0",
+        "x_repr": "0.0",
+        "expect": {
+          "sin": "0x0.0p+0",
+          "cos": "0x1.0000000000000p+0",
+          "sqrt": "0x0.0p+0",
+          "exp": "0x1.0000000000000p+0",
+          "log": "0x0.0p+0"
+        }
+      },
+      {
+        "name": "small_pos",
+        "x": "0x1.0000000000000p-1",
+        "x_repr": "0.5",
+        "expect": {
+          "sin": "0x1.eaee8744b05f0p-2",
+          "cos": "0x1.c1528065b7d50p-1",
+          "sqrt": "0x1.6a09e667f3bcdp-1",
+          "exp": "0x1.0080200556001p+0",
+          "log": "0x1.9f323ecbf984cp-2"
+        }
+      },
+      {
+        "name": "one",
+        "x": "0x1.0000000000000p+0",
+        "x_repr": "1.0",
+        "expect": {
+          "sin": "0x1.aed548f090ceep-1",
+          "cos": "0x1.14a280fb5068cp-1",
+          "sqrt": "0x1.0000000000000p+0",
+          "exp": "0x1.0100802ab5577p+0",
+          "log": "0x1.62e42fefa39efp-1"
+        }
+      },
+      {
+        "name": "pi_quarter",
+        "x": "0x1.921fb54442d18p-1",
+        "x_repr": "0.7853981633974483",
+        "expect": {
+          "sin": "0x1.6a09e667f3bccp-1",
+          "cos": "0x1.6a09e667f3bcdp-1",
+          "sqrt": "0x1.c5bf891b4ef6ap-1",
+          "exp": "0x1.00c95ee44514fp+0",
+          "log": "0x1.28c6c3a79fe29p-1"
+        }
+      },
+      {
+        "name": "pi_half",
+        "x": "0x1.921fb54442d18p+0",
+        "x_repr": "1.5707963267948966",
+        "expect": {
+          "sin": "0x1.0000000000000p+0",
+          "cos": "0x1.1a62633145c07p-54",
+          "sqrt": "0x1.40d931ff62705p+0",
+          "exp": "0x1.01935c2eafcadp+0",
+          "log": "0x1.e3703db0ab11ap-1"
+        }
+      },
+      {
+        "name": "two",
+        "x": "0x1.0000000000000p+1",
+        "x_repr": "2.0",
+        "expect": {
+          "sin": "0x1.d18f6ead1b446p-1",
+          "cos": "-0x1.aa22657537205p-2",
+          "sqrt": "0x1.6a09e667f3bcdp+0",
+          "exp": "0x1.0202015600446p+0",
+          "log": "0x1.193ea7aad030bp+0"
+        }
+      },
+      {
+        "name": "large",
+        "x": "0x1.34a456d5cfaadp+10",
+        "x_repr": "1234.5678",
+        "expect": {
+          "sin": "0x1.3fa00084ee3ddp-4",
+          "cos": "-0x1.fe7053dc31387p-1",
+          "sqrt": "0x1.191761cc918f0p+5",
+          "exp": "0x1.f11de0c89fcf1p+6",
+          "log": "0x1.c7a261545ef30p+2"
+        }
+      },
+      {
+        "name": "neg",
+        "x": "-0x1.a000000000000p+1",
+        "x_repr": "-3.25",
+        "expect": {
+          "sin": "0x1.bb2ad2464a48cp-4",
+          "cos": "-0x1.fcfe909d7f7f8p-1",
+          "sqrt": "0x1.cd82b446159f3p+0",
+          "exp": "0x1.f98a8497f0b83p-1",
+          "log": "0x1.7269484fac504p+0"
+        }
+      },
+      {
+        "name": "tiny",
+        "x": "0x1.19799812dea11p-40",
+        "x_repr": "1e-12",
+        "expect": {
+          "sin": "0x1.19799812dea11p-40",
+          "cos": "0x1.0000000000000p+0",
+          "sqrt": "0x1.0c6f7a0b5ed8dp-20",
+          "exp": "0x1.0000000000012p+0",
+          "log": "0x1.197fffffff654p-40"
+        }
+      }
+    ],
+    "binary": [
+      {
+        "name": "atan2_q1",
+        "y": "0x1.0000000000000p+0",
+        "x": "0x1.0000000000000p+0",
+        "y_repr": "1.0",
+        "x_repr": "1.0",
+        "expect": {
+          "atan2": "0x1.921fb54442d18p-1",
+          "norm2": "0x1.6a09e667f3bcdp+0"
+        }
+      },
+      {
+        "name": "atan2_q2",
+        "y": "0x1.0000000000000p+0",
+        "x": "-0x1.0000000000000p+0",
+        "y_repr": "1.0",
+        "x_repr": "-1.0",
+        "expect": {
+          "atan2": "0x1.2d97c7f3321d2p+1",
+          "norm2": "0x1.6a09e667f3bcdp+0"
+        }
+      },
+      {
+        "name": "atan2_q3",
+        "y": "-0x1.0000000000000p+1",
+        "x": "-0x1.0000000000000p-1",
+        "y_repr": "-2.0",
+        "x_repr": "-0.5",
+        "expect": {
+          "atan2": "-0x1.d0d6a1369bd34p+0",
+          "norm2": "0x1.07e0f66afed07p+1"
+        }
+      },
+      {
+        "name": "atan2_q4",
+        "y": "-0x1.a000000000000p+1",
+        "x": "0x1.e000000000000p+2",
+        "y_repr": "-3.25",
+        "x_repr": "7.5",
+        "expect": {
+          "atan2": "-0x1.a2b8bbe1b0ba9p-2",
+          "norm2": "0x1.0590849e2dc7ap+3"
+        }
+      },
+      {
+        "name": "atan2_axis",
+        "y": "0x0.0p+0",
+        "x": "-0x1.0000000000000p+0",
+        "y_repr": "0.0",
+        "x_repr": "-1.0",
+        "expect": {
+          "atan2": "0x1.921fb54442d18p+1",
+          "norm2": "0x1.0000000000000p+0"
+        }
+      }
+    ]
+  }
+}

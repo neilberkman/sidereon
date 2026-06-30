@@ -1,0 +1,11 @@
+% program   : RTKLIB ver.EX 2.5.1
+% inp file  : tests/fixtures/obs/ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx
+% inp file  : tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx
+% inp file  : (nav file with RINEX 3.04 header for demo5 compatibility)
+% obs start : 2020/06/25 00:00:00.0 GPST (week2111 345600.0s)
+% obs end   : 2020/06/25 00:00:30.0 GPST (week2111 345630.0s)
+%
+% (x/y/z-ecef=WGS84,Q=1:fix,2:float,3:sbas,4:dgps,5:single,6:ppp,ns=# of satellites)
+%  GPST              x-ecef(m)      y-ecef(m)      z-ecef(m)   Q  ns   sdx(m)   sdy(m)   sdz(m)  sdxy(m)  sdyz(m)  sdzx(m) age(s)  ratio
+2111 345600.000   3582110.6334    532590.1127   5232764.8971   5  17   2.7586   2.1699   4.8240  -0.6771   1.5096   2.1190   0.00    0.0
+2111 345630.000   3582110.9536    532590.4164   5232765.7077   5  18   2.7543   2.1285   4.2582  -0.6210   1.1539   2.2038   0.00    0.0
