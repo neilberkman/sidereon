@@ -1,4 +1,4 @@
-//! Host LAPACK and BLAS bridge for pinned SciPy 1.11.3 parity runs.
+//! Host LAPACK and BLAS bridge for pinned SciPy 1.18.0 parity runs.
 //!
 //! This module resolves symbols from a configured dynamic library and exposes
 //! thin SVD plus the small BLAS operations used by the trust-region solver.
@@ -179,6 +179,11 @@ impl trf::ThinSvd for LapackSvd {
         transpose: bool,
     ) -> Result<Option<Vec<f64>>, trf::SvdError> {
         let path = self.resolve_blas_path().map_err(trf::SvdError::from)?;
+        // Column-major Fortran `dgemv`. scipy applies this product to operands it
+        // holds F-contiguous (the Jacobian: gradient J^T f and J @ step), where
+        // numpy's `J.T.dot`/`J.dot` resolve to the column-major BLAS path. The
+        // C-contiguous transpose product (uf = U^T f, U is C-contiguous) goes
+        // through `row_major_matvec` with transpose instead, matching numpy there.
         blas_fortran_matvec_with_path(path, m, n, a, x, transpose)
             .map(Some)
             .map_err(trf::SvdError::from)
@@ -190,9 +195,10 @@ impl trf::ThinSvd for LapackSvd {
         m: usize,
         n: usize,
         x: &[f64],
+        transpose: bool,
     ) -> Result<Option<Vec<f64>>, trf::SvdError> {
         let path = self.resolve_blas_path().map_err(trf::SvdError::from)?;
-        blas_row_major_matvec_with_path(path, m, n, a, x)
+        blas_row_major_matvec_with_path(path, m, n, a, x, transpose)
             .map(Some)
             .map_err(trf::SvdError::from)
     }
@@ -387,13 +393,20 @@ pub fn thin_svd_with_lapack_path(
     })?;
 
     // SAFETY: The symbol name and signature match the scipy bundled
-    // OpenBLAS/LAPACK LP64 dgesdd_ entry point used by scipy.linalg.svd here.
-    let dgesdd: Symbol<'_, Dgesdd> =
-        unsafe { library.get(b"dgesdd_\0") }.map_err(|err| LapackError::Symbol {
-            path: path.to_path_buf(),
-            symbol: "dgesdd_",
-            message: err.to_string(),
-        })?;
+    // OpenBLAS/LAPACK LP64 dgesdd entry point used by scipy.linalg.svd here.
+    // scipy/numpy >=2.x ship OpenBLAS built with the `scipy_` symbol prefix
+    // (SYMBOLPREFIX=scipy_), so the public entry point is `scipy_dgesdd_`; older
+    // wheels exported the bare `dgesdd_`. Try the bare name first, then prefixed.
+    let dgesdd: Symbol<'_, Dgesdd> = unsafe {
+        library
+            .get(b"dgesdd_\0")
+            .or_else(|_| library.get(b"scipy_dgesdd_\0"))
+    }
+    .map_err(|err| LapackError::Symbol {
+        path: path.to_path_buf(),
+        symbol: "dgesdd_ or scipy_dgesdd_",
+        message: err.to_string(),
+    })?;
 
     call_dgesdd(*dgesdd, m, n, a_row_major)
 }
@@ -418,19 +431,31 @@ fn blas_dot_with_path(
         message: err.to_string(),
     })?;
 
-    if let Ok(ddot) = unsafe { library.get::<DdotWide>(b"ddot_64_\0") } {
+    // numpy >=2.x bundles an ILP64 OpenBLAS with the `scipy_` symbol prefix, so
+    // the wide entry point is `scipy_ddot_64_`; older wheels exported the bare
+    // `ddot_64_`. Prefer the ILP64 path (numpy's BLAS) when present.
+    if let Ok(ddot) = unsafe {
+        library
+            .get::<DdotWide>(b"ddot_64_\0")
+            .or_else(|_| library.get::<DdotWide>(b"scipy_ddot_64_\0"))
+    } {
         let n = to_blas_wide("n", a.len())?;
         let inc = 1 as BlasWide;
-        // SAFETY: ddot_64_ reads n elements from both live slices with unit strides.
+        // SAFETY: ddot reads n elements from both live slices with unit strides.
         return Ok(unsafe { ddot(&n, a.as_ptr(), &inc, b.as_ptr(), &inc) });
     }
 
-    let ddot: Symbol<'_, Ddot> =
-        unsafe { library.get(b"ddot_\0") }.map_err(|err| LapackError::Symbol {
-            path: path.to_path_buf(),
-            symbol: "ddot_64_ or ddot_",
-            message: err.to_string(),
-        })?;
+    // LP64 fallback: bare `ddot_` (old wheels) or prefixed `scipy_ddot_` (>=2.x).
+    let ddot: Symbol<'_, Ddot> = unsafe {
+        library
+            .get(b"ddot_\0")
+            .or_else(|_| library.get(b"scipy_ddot_\0"))
+    }
+    .map_err(|err| LapackError::Symbol {
+        path: path.to_path_buf(),
+        symbol: "ddot_64_ / scipy_ddot_64_ / ddot_ / scipy_ddot_",
+        message: err.to_string(),
+    })?;
 
     let n = to_lapack_int("n", a.len())?;
     let inc = 1 as LapackInt;
@@ -469,7 +494,11 @@ fn blas_fortran_matvec_with_path(
     let a_col_major = row_major_to_col_major(m, n, a_row_major);
     let mut y = vec![0.0; out_len];
 
-    if let Ok(dgemv) = unsafe { library.get::<Dgemv64>(b"dgemv_64_\0") } {
+    if let Ok(dgemv) = unsafe {
+        library
+            .get::<Dgemv64>(b"dgemv_64_\0")
+            .or_else(|_| library.get::<Dgemv64>(b"scipy_dgemv_64_\0"))
+    } {
         let m_i = to_blas_wide("m", m)?;
         let n_i = to_blas_wide("n", n)?;
         let lda = m_i;
@@ -494,12 +523,16 @@ fn blas_fortran_matvec_with_path(
         return Ok(y);
     }
 
-    let dgemv: Symbol<'_, Dgemv> =
-        unsafe { library.get(b"dgemv_\0") }.map_err(|err| LapackError::Symbol {
-            path: path.to_path_buf(),
-            symbol: "dgemv_64_ or dgemv_",
-            message: err.to_string(),
-        })?;
+    let dgemv: Symbol<'_, Dgemv> = unsafe {
+        library
+            .get(b"dgemv_\0")
+            .or_else(|_| library.get(b"scipy_dgemv_\0"))
+    }
+    .map_err(|err| LapackError::Symbol {
+        path: path.to_path_buf(),
+        symbol: "dgemv_64_ / scipy_dgemv_64_ / dgemv_ / scipy_dgemv_",
+        message: err.to_string(),
+    })?;
 
     let m_i = to_lapack_int("m", m)?;
     let n_i = to_lapack_int("n", n)?;
@@ -531,11 +564,19 @@ fn blas_row_major_matvec_with_path(
     n: usize,
     a_row_major: &[f64],
     x: &[f64],
+    transpose: bool,
 ) -> Result<Vec<f64>, LapackError> {
     validate_inputs(m, n, a_row_major)?;
-    if x.len() != n {
+    // `cblas_dgemv(RowMajor, Trans/NoTrans, m, n, ...)` on the row-major m-by-n
+    // matrix reproduces numpy's `A.dot(x)` (NoTrans: x len n, y len m) and
+    // `A.T.dot(x)` (Trans: x len m, y len n) bit-for-bit, because it issues the
+    // exact same OpenBLAS call numpy does (same kernel, same summation order).
+    // The previous column-major Fortran-`dgemv` path used a different kernel and
+    // diverged by 1 ULP from numpy on some value patterns.
+    let (x_len, y_len) = if transpose { (m, n) } else { (n, m) };
+    if x.len() != x_len {
         return Err(LapackError::VectorLen {
-            expected: n,
+            expected: x_len,
             actual: x.len(),
         });
     }
@@ -548,20 +589,25 @@ fn blas_row_major_matvec_with_path(
         message: err.to_string(),
     })?;
     let row_major = 101 as LapackInt;
-    let no_trans = 111 as LapackInt;
-    let mut y = vec![0.0; m];
+    // CblasNoTrans = 111, CblasTrans = 112.
+    let trans = if transpose { 112 } else { 111 } as LapackInt;
+    let mut y = vec![0.0; y_len];
 
-    if let Ok(cblas_dgemv) = unsafe { library.get::<CblasDgemv64>(b"cblas_dgemv64_\0") } {
+    if let Ok(cblas_dgemv) = unsafe {
+        library
+            .get::<CblasDgemv64>(b"cblas_dgemv64_\0")
+            .or_else(|_| library.get::<CblasDgemv64>(b"scipy_cblas_dgemv64_\0"))
+    } {
         let m_i = to_blas_wide("m", m)?;
         let n_i = to_blas_wide("n", n)?;
         let lda = n_i;
         let inc = 1 as BlasWide;
         // SAFETY: cblas_dgemv64_ reads the row-major m-by-n matrix and x with
-        // unit stride, then writes m values into y with unit stride.
+        // unit stride, then writes y_len values into y with unit stride.
         unsafe {
             cblas_dgemv(
                 row_major,
-                no_trans,
+                trans,
                 m_i,
                 n_i,
                 1.0,
@@ -577,23 +623,27 @@ fn blas_row_major_matvec_with_path(
         return Ok(y);
     }
 
-    let cblas_dgemv: Symbol<'_, CblasDgemv> =
-        unsafe { library.get(b"cblas_dgemv\0") }.map_err(|err| LapackError::Symbol {
-            path: path.to_path_buf(),
-            symbol: "cblas_dgemv64_ or cblas_dgemv",
-            message: err.to_string(),
-        })?;
+    let cblas_dgemv: Symbol<'_, CblasDgemv> = unsafe {
+        library
+            .get(b"cblas_dgemv\0")
+            .or_else(|_| library.get(b"scipy_cblas_dgemv\0"))
+    }
+    .map_err(|err| LapackError::Symbol {
+        path: path.to_path_buf(),
+        symbol: "cblas_dgemv64_ / scipy_cblas_dgemv64_ / cblas_dgemv / scipy_cblas_dgemv",
+        message: err.to_string(),
+    })?;
 
     let m_i = to_lapack_int("m", m)?;
     let n_i = to_lapack_int("n", n)?;
     let lda = n_i;
     let inc = 1 as LapackInt;
     // SAFETY: cblas_dgemv reads the row-major m-by-n matrix and x with unit
-    // stride, then writes m values into y with unit stride.
+    // stride, then writes y_len values into y with unit stride.
     unsafe {
         cblas_dgemv(
             row_major,
-            no_trans,
+            trans,
             m_i,
             n_i,
             1.0,
@@ -773,7 +823,11 @@ fn find_multiarray_umath(dir: PathBuf) -> Option<PathBuf> {
     for entry in entries.flatten() {
         let path = entry.path();
         let name = path.file_name()?.to_string_lossy();
-        if name.starts_with("_multiarray_umath") {
+        // Only the compiled extension carries `__svml_pow8`. NumPy 2's legacy
+        // `numpy/core/` shim dir ships a pure-Python `_multiarray_umath.py`
+        // re-export alongside the real `_core/*.so`; matching it would dlopen a
+        // text file ("invalid ELF header"), so require a shared object.
+        if name.starts_with("_multiarray_umath") && name.ends_with(".so") {
             matches.push(path);
         }
     }

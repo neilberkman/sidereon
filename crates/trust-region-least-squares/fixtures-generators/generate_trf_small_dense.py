@@ -66,8 +66,13 @@ def build_case(rng: np.random.Generator, case_index: int):
 def main() -> None:
     lsq_mod = importlib.import_module("scipy.optimize._lsq.least_squares")
     trf_mod = importlib.import_module("scipy.optimize._lsq.trf")
+    # scipy >=1.x computes the finite-difference Jacobian inside VectorFunction,
+    # which calls approx_derivative imported into _differentiable_functions (now
+    # returning a (J, dct) tuple), so intercept it there rather than on
+    # least_squares, which no longer exposes the symbol.
+    df_mod = importlib.import_module("scipy.optimize._differentiable_functions")
 
-    original_approx_derivative = lsq_mod.approx_derivative
+    original_approx_derivative = df_mod.approx_derivative
     original_svd = trf_mod.svd
 
     rng = np.random.default_rng(SEED)
@@ -86,7 +91,9 @@ def main() -> None:
                 return f
 
             def approx_derivative_wrapped(fun_arg, x, *args, **kwargs):
-                jacobian = original_approx_derivative(fun_arg, x, *args, **kwargs)
+                result = original_approx_derivative(fun_arg, x, *args, **kwargs)
+                # scipy >=1.x returns (J, dct); older returned a bare J.
+                jacobian = result[0] if isinstance(result, tuple) else result
                 jac_calls.append(
                     {
                         "x": bits_flat(x),
@@ -94,7 +101,7 @@ def main() -> None:
                         "jac": bits_flat(jacobian),
                     }
                 )
-                return jacobian
+                return result
 
             def svd_wrapped(a, full_matrices=False):
                 u, s, vt = original_svd(a, full_matrices=full_matrices)
@@ -108,7 +115,7 @@ def main() -> None:
                 )
                 return u, s, vt
 
-            lsq_mod.approx_derivative = approx_derivative_wrapped
+            df_mod.approx_derivative = approx_derivative_wrapped
             trf_mod.svd = svd_wrapped
 
             result = lsq_mod.least_squares(fun, x0, gtol=1e-10)
@@ -137,7 +144,7 @@ def main() -> None:
                 }
             )
     finally:
-        lsq_mod.approx_derivative = original_approx_derivative
+        df_mod.approx_derivative = original_approx_derivative
         trf_mod.svd = original_svd
 
     payload = {

@@ -1,7 +1,7 @@
 //! Dense unbounded trust-region reflective least-squares matching
 //! `scipy.optimize._lsq.trf.trf_no_bounds` for arbitrary problem dimension `n`.
 //!
-//! The SVD and BLAS operations are injected so a pinned SciPy 1.11.3 runtime can
+//! The SVD and BLAS operations are injected so a pinned SciPy 1.18.0 runtime can
 //! provide the exact numerical trajectory when required.
 
 #[cfg(feature = "trace")]
@@ -72,12 +72,68 @@ pub trait ThinSvd {
         _m: usize,
         _n: usize,
         _x: &[f64],
+        _transpose: bool,
     ) -> Result<Option<Vec<f64>>, SvdError> {
         Ok(None)
     }
 
     fn power3(&self, _x: &[f64]) -> Result<Option<Vec<f64>>, SvdError> {
         Ok(None)
+    }
+}
+
+/// Pure-Rust thin-SVD backend built on `nalgebra`, the crate's default
+/// [`ThinSvd`] seam used when no host LAPACK is configured.
+///
+/// It is a legitimate independent singular value decomposition but is **not**
+/// bit-exact with `scipy.linalg.svd` / the host-LAPACK path, so it must never
+/// back the bit-exact parity fixtures; it powers the native solve. The optional
+/// BLAS hooks ([`ThinSvd::dot`], the matvecs, [`ThinSvd::power3`]) are left at
+/// their defaults so the trust-region loop falls back to its own deterministic
+/// scalar reductions.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NalgebraThinSvd;
+
+impl ThinSvd for NalgebraThinSvd {
+    fn svd(
+        &self,
+        a: &[f64],
+        m: usize,
+        n: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), SvdError> {
+        if a.len() != m.saturating_mul(n) {
+            return Err(SvdError::BadDimensions {
+                expected_m: m,
+                expected_n: n,
+                got: a.len(),
+            });
+        }
+        let k = m.min(n);
+        let matrix = nalgebra::DMatrix::<f64>::from_row_slice(m, n, a);
+        let svd = matrix.svd(true, true);
+        let u = svd
+            .u
+            .ok_or_else(|| SvdError::Failed("nalgebra SVD did not produce U".to_string()))?;
+        let vt = svd
+            .v_t
+            .ok_or_else(|| SvdError::Failed("nalgebra SVD did not produce V^T".to_string()))?;
+
+        // Row-major thin U (m x k), matching scipy.linalg.svd(full_matrices=False).
+        let mut u_out = vec![0.0; m * k];
+        for i in 0..m {
+            for j in 0..k {
+                u_out[i * k + j] = u[(i, j)];
+            }
+        }
+        let s_out = svd.singular_values.as_slice().to_vec();
+        // Row-major thin V^T (k x n).
+        let mut vt_out = vec![0.0; k * n];
+        for i in 0..k {
+            for j in 0..n {
+                vt_out[i * n + j] = vt[(i, j)];
+            }
+        }
+        Ok((u_out, s_out, vt_out))
     }
 }
 
@@ -98,6 +154,9 @@ pub enum TrfError {
     InsufficientRows { m: usize, n: usize },
     /// `m * n` overflowed `usize`; the problem is too large to allocate.
     SizeOverflow { m: usize, n: usize },
+    /// A polynomial `degree` was so large that the coefficient count
+    /// `degree + 1` overflows `usize`; the problem cannot be represented.
+    DegreeOverflow { degree: usize },
     /// `max_nfev` was `Some(0)`; SciPy requires a positive evaluation budget
     /// (`None` selects the default `100 * n`).
     InvalidMaxNfev,
@@ -143,6 +202,12 @@ impl std::fmt::Display for TrfError {
             ),
             TrfError::SizeOverflow { m, n } => {
                 write!(f, "problem size m*n overflows usize: m={m}, n={n}")
+            }
+            TrfError::DegreeOverflow { degree } => {
+                write!(
+                    f,
+                    "polynomial coefficient count degree+1 overflows usize: degree={degree}"
+                )
             }
             TrfError::InvalidMaxNfev => {
                 write!(
@@ -1193,7 +1258,10 @@ fn u_transpose_dot_f_with_svd(
     m: usize,
     n: usize,
 ) -> Result<Vec<f64>, TrfError> {
-    if let Some(out) = svd.fortran_matvec(u, m, n, f, true)? {
+    // uf = U^T f. scipy's U (from svd) is C-contiguous, so numpy's `U.T.dot(f)`
+    // takes the row-major cblas path (RowMajor, Trans) - distinct from the
+    // column-major Fortran path used for the F-contiguous Jacobian gradient.
+    if let Some(out) = svd.row_major_matvec(u, m, n, f, true)? {
         if out.len() != n {
             return Err(TrfError::InvalidSvdOutput(format!(
                 "BLAS U transpose matvec returned length {}, expected {}",
@@ -1225,14 +1293,14 @@ fn neg_v_dot_maybe(
     vt: &[f64],
     n: usize,
 ) -> Result<Vec<f64>, TrfError> {
+    // SciPy computes the step as `-V.dot(rhs)` where `V` (the SVD `Vh`) is an
+    // F-contiguous n-by-n array. Our `vt` is row-major V^T, which is byte-for-byte
+    // the same buffer as scipy's column-major `V`, so numpy's `V.dot(rhs)` is
+    // reproduced bit-exactly by `cblas_dgemv(RowMajor, Trans)` on `vt` (verified
+    // identical to numpy's F-contiguous V.dot for n>=4, where a sequential sum
+    // diverges - it only coincided at n=3).
     if let Some(svd) = svd {
-        let mut v = vec![0.0; n * n];
-        for i in 0..n {
-            for k in 0..n {
-                v[i * n + k] = vt[k * n + i];
-            }
-        }
-        if let Some(out) = svd.row_major_matvec(&v, n, n, rhs)? {
+        if let Some(out) = svd.row_major_matvec(vt, n, n, rhs, true)? {
             if out.len() != n {
                 return Err(TrfError::InvalidSvdOutput(format!(
                     "BLAS V matvec returned length {}, expected {}",

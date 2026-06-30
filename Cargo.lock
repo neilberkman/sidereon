@@ -713,6 +713,7 @@ dependencies = [
  "criterion",
  "libloading",
  "nalgebra",
+ "rayon",
  "serde_json",
 ]
 

@@ -70,7 +70,7 @@
           "0x3ff0000000000000"
         ],
         [
-          "0x0000000000000000",
+          "0x8000000000000000",
           "0x3ff0000004000000"
         ]
       ],
@@ -2161,7 +2161,7 @@
       ]
     }
   ],
-  "numpy_version": "1.26.0",
+  "numpy_version": "2.5.0",
   "schema": "trust-region-least-squares-numdiff-v1",
-  "scipy_version": "1.11.3"
+  "scipy_version": "1.18.0"
 }

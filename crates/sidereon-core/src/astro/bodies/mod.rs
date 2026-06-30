@@ -17,11 +17,17 @@
 //! Precision is at the few-centimetre / sub-degree level, sufficient for the
 //! tidal and antenna-geometry corrections that consume these positions.
 
+pub mod observe;
 pub mod rise_set;
 pub mod sun_moon;
 
+pub use observe::{
+    moon_az_el, moon_illumination, sun_az_el, BodyAzEl, BodyObservationError, MoonIllumination,
+};
 pub use rise_set::{
-    find_sun_elevation_crossings, sun_elevation_deg, SunElevationCrossing,
+    find_moon_elevation_crossings, find_moon_transits, find_sun_elevation_crossings,
+    moon_elevation_deg, sun_elevation_deg, MoonElevationCrossing, MoonElevationCrossingKind,
+    MoonElevationOptions, MoonTransit, MoonTransitKind, SunElevationCrossing,
     SunElevationCrossingKind, SunElevationOptions,
 };
 pub use sun_moon::{sun_moon_ecef, sun_moon_eci, sun_moon_eci_at, SunMoon, SunMoonError};

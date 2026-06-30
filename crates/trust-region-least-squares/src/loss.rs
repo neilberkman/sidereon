@@ -1,6 +1,6 @@
 //! SciPy robust loss functions, reproduced bit-for-bit.
 //!
-//! This module mirrors the exact float sequence SciPy 1.11.3 uses for robust
+//! This module mirrors the exact float sequence SciPy 1.18.0 uses for robust
 //! (non-`linear`) losses, so the trust-region iteration in [`crate::trf`] can
 //! reproduce `scipy.optimize.least_squares(..., loss=..., f_scale=...)` down to
 //! the last bit. Three SciPy source locations are mirrored verbatim:
@@ -17,8 +17,8 @@
 //! - `numpy.sum`'s pairwise summation, reproduced in [`pairwise_sum`] so the
 //!   robust cost `0.5 * sum(rho[0])` is bit-identical.
 //!
-//! The float primitives were verified bit-exact against the pinned NumPy 1.26.0
-//! / SciPy 1.11.3 runtime on this target: `**2` is `x*x`, `**0.5` is `sqrt`,
+//! The float primitives were verified bit-exact against the pinned NumPy 2.5.0
+//! / SciPy 1.18.0 runtime on this target: `**2` is `x*x`, `**0.5` is `sqrt`,
 //! `**-0.5` / `**-1.5` are libm `pow` (== Rust [`f64::powf`]), `log1p` ==
 //! [`f64::ln_1p`], `arctan` == [`f64::atan`].
 

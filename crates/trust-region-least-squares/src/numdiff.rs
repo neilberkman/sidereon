@@ -100,11 +100,13 @@ where
     let mut f_eval = Vec::new();
 
     for j in 0..n {
-        let mut x = Vec::with_capacity(n);
-        for (k, &x0k) in x0.iter().enumerate() {
-            let step = if k == j { h[j] } else { 0.0 };
-            x.push(x0k + step);
-        }
+        // Mirror scipy's `x = x0.copy(); x[j] += h[j]`: copy x0 verbatim so the
+        // unperturbed coordinates keep their exact bits, then bump only j. Adding
+        // 0.0 to the other coordinates (the old approach) would turn a stored
+        // -0.0 into +0.0 (IEEE `-0.0 + 0.0 == +0.0`) and diverge from numpy/scipy,
+        // which leave those entries untouched.
+        let mut x = x0.to_vec();
+        x[j] = x0[j] + h[j];
         let dx = x[j] - x0[j];
 
         f_eval.clear();

@@ -137,10 +137,12 @@ def make_cases():
 
 
 def main() -> None:
+    import scipy
+
     payload = {
         "schema": "trust-region-least-squares-numdiff-v1",
-        "scipy_version": "1.11.3",
-        "numpy_version": "1.26.0",
+        "scipy_version": scipy.__version__,
+        "numpy_version": np.__version__,
         "cases": make_cases(),
     }
     out = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "numdiff_2point.json"

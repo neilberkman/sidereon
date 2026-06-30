@@ -1299,6 +1299,54 @@ mod tests {
     }
 
     #[test]
+    fn ground_site_sun_moon_helpers_reachable_through_facade() {
+        use astro::bodies::{
+            find_moon_elevation_crossings, find_moon_transits, moon_az_el, moon_illumination,
+            sun_az_el, MoonElevationOptions,
+        };
+        use astro::frames::transforms::{itrs_to_topocentric, GeodeticStationKm};
+        use astro::passes::UtcInstant;
+
+        let station = GeodeticStationKm {
+            latitude_deg: 51.4769,
+            longitude_deg: 0.0,
+            altitude_km: 0.046,
+        };
+        // Solar upper transit at Greenwich on 2024-06-20 (Skyfield de421):
+        // az 180.0 deg, alt 61.96 deg.
+        let noon = UtcInstant::from_utc(2024, 6, 20, 12, 1, 42, 0).expect("valid UTC");
+        let sun = sun_az_el(&station, noon).expect("sun geometry");
+        assert!((sun.elevation_deg - 61.96).abs() < 0.5);
+
+        // Full moon of 2024-04-23 23:49 UTC: nearly fully lit.
+        let full = UtcInstant::from_utc(2024, 4, 23, 23, 49, 0, 0).expect("valid UTC");
+        let illum = moon_illumination(&station, full).expect("moon illumination");
+        assert!(illum.illuminated_fraction > 0.95);
+        let moon = moon_az_el(&station, full).expect("moon geometry");
+        assert!((350_000.0..410_000.0).contains(&moon.range_km));
+
+        let start = UtcInstant::from_utc(2024, 4, 23, 0, 0, 0, 0).expect("valid UTC");
+        let end = UtcInstant::from_utc(2024, 4, 24, 0, 0, 0, 0).expect("valid UTC");
+        assert_eq!(
+            find_moon_elevation_crossings(&station, start, end, MoonElevationOptions::default())
+                .expect("moon crossings")
+                .len(),
+            2
+        );
+        assert_eq!(
+            find_moon_transits(&station, start, end, 300.0, 1.0)
+                .expect("moon transits")
+                .len(),
+            2
+        );
+
+        // The shared Earth-fixed topocentric primitive is exposed too.
+        let (_az, el, _range) =
+            itrs_to_topocentric([0.0, 0.0, 7000.0], &station).expect("topocentric");
+        assert!(el.is_finite());
+    }
+
+    #[test]
     fn tca_shortcut_screens_two_real_tles_over_one_day() {
         let primary_tle = station_tle("ISS (ZARYA)");
         let secondary_tle = station_tle("CSS (TIANHE)");

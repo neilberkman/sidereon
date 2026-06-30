@@ -20,26 +20,36 @@ exclude = [
     "target",
 ]
 
-# Build docs.rs with all features so the feature-gated `hostlapack` and `trace`
-# modules appear in the published documentation.
+# Build docs.rs with all features so the `trace` module appears in the published
+# documentation.
 [package.metadata.docs.rs]
 all-features = true
 
 [features]
 default = []
-host-lapack = ["dep:libloading"]
+# `trace` is the one capability kept behind a flag: it threads zero-cost-when-off
+# diagnostic branches through the hot solver loop (first-divergence debugging for
+# parity work), so it must compile out when unused rather than tax every solve.
 trace = []
 
 [dependencies]
-libloading = { version = "0.8", optional = true }
+# Everything that makes the solver work ships in the single build: there are no
+# capability feature flags to remember.
+#
+# `nalgebra` supplies the default in-crate thin-SVD backend (`NalgebraThinSvd`),
+# so the solver works out of the box; callers can still inject a different
+# `ThinSvd` at the call site.
+nalgebra = { workspace = true }
+# `libloading` backs the `hostlapack` bit-exact SVD/BLAS backend. It is compiled
+# in by default (not gated): bit-for-bit SciPy parity is reachable in the default
+# build by pointing the backend at the host LAPACK/BLAS at runtime.
+libloading = "0.8"
+# `rayon` fans the independent leave-one-out / perturbed re-solves in the `batch`
+# module across a work-stealing pool.
+rayon = "1"
 
 [dev-dependencies]
 serde_json = { version = "1", features = ["preserve_order"] }
-# `nalgebra` is used only by tests, benches, and the crate-level doctest to
-# supply a pure-Rust `ThinSvd` (the SVD/BLAS seam). It is NOT a dependency of the
-# library itself: the crate stays dependency-free by default and callers inject
-# whatever SVD backend they like.
-nalgebra = { workspace = true }
 criterion = "0.5"
 
 [[bench]]

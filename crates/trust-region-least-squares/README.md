@@ -86,8 +86,10 @@ assert!(result.success());
 ```
 
 For bit-for-bit agreement with a pinned SciPy/NumPy runtime, inject the
-host-LAPACK backend (`hostlapack::LapackSvd`, optional `host-lapack` feature)
-instead; the iteration is identical, only the SVD/BLAS seam changes.
+host-LAPACK backend (`hostlapack::LapackSvd`) instead; it is compiled into the
+single build and selected at runtime by pointing
+`TRUST_REGION_LEAST_SQUARES_LAPACK_PATH` at the host LAPACK/BLAS. The iteration
+is identical, only the SVD/BLAS seam changes.
 
 Malformed input is rejected with a typed `TrfError` rather than a panic: empty
 or non-finite `x0`, non-finite initial residuals, `m < n`, a wrong-length
@@ -106,9 +108,10 @@ and bad `x_scale` are all surfaced as errors.
   `_numdiff.approx_derivative(..., method="2-point")` path.
 - `parity`: hex-bit fixture helpers, feature-gated trace output, and
   first-divergence reporting for diagnosing where two trajectories split.
-- `hostlapack` (feature `host-lapack`): a `ThinSvd` implementation backed by a
-  dynamically loaded host LAPACK/BLAS, used to reproduce a pinned SciPy
-  runtime's exact SVD/BLAS results.
+- `hostlapack`: a `ThinSvd` implementation backed by a dynamically loaded host
+  LAPACK/BLAS, used to reproduce a pinned SciPy runtime's exact SVD/BLAS results.
+  Compiled into the single build and activated at runtime via
+  `TRUST_REGION_LEAST_SQUARES_LAPACK_PATH`.
 
 ## Status
 
@@ -119,6 +122,31 @@ SciPy's `trf_no_bounds` trajectory bit-for-bit, for all five losses (`linear`,
 enforced by committed fixtures spanning `n ∈ {2, 3, 4, 5, 6, 8}` crossed with
 every loss, replayed end-to-end through the host-LAPACK backend, alongside the
 original `n = 3` regression fixtures.
+
+### Reproducibility scope
+
+Bit-for-bit floating-point agreement with a numerical library is intrinsically
+**platform- and version-specific** — there is no cross-platform bit-exactness for
+BLAS- and libm-heavy code. The committed parity is certified on:
+
+- **Architecture:** Linux **x86_64** (glibc `libm`).
+- **SciPy 1.18.0 / NumPy 2.5.0 / Python 3.12**, and the bundled **OpenBLAS**
+  (`scipy-openblas`) shipped in those wheels.
+- **OpenBLAS pinned deterministic:** `OPENBLAS_NUM_THREADS=1` (multi-threaded
+  reductions sum in nondeterministic order) and a fixed `OPENBLAS_CORETYPE`
+  (e.g. `HASWELL`) so the same SIMD kernel is selected regardless of host CPU.
+
+Change any of these and the low bits move: Apple **Accelerate** (the macOS arm64
+default), a different OpenBLAS build or CPU kernel (`AVX-512` vs `Haswell`), or a
+different `libm` each produce a *different* — internally still correct —
+trajectory. The contiguity-sensitive products are matched to the exact call NumPy
+makes on **this** stack: `Jᵀf` / `J·step` on the F-contiguous Jacobian via the
+column-major BLAS path, `Uᵀf` / `V·rhs` via the C-contiguous row-major path.
+
+The agreement is also "given the same SVD/BLAS substrate": the crate's injectable
+SVD seam (the runtime-selected host-LAPACK backend) is what lets it reproduce a
+pinned backend's trajectory. The default pure-Rust `nalgebra` SVD is self-consistent but is a
+*different* LAPACK, so it does not match SciPy bit-for-bit.
 
 ## Benchmarks
 
@@ -135,7 +163,7 @@ native row loop in Rust, vectorized `matrix @ x` in NumPy), so this is a timing
 comparison, not a bit-for-bit one.
 
 Measured on an Apple M5 Max (macOS 26.5.1, arm64), single-threaded BLAS, SciPy
-1.11.3 / NumPy 1.26.0. Native times are criterion medians; SciPy times are the
+1.18.0 / NumPy 2.5.0. Native times are criterion medians; SciPy times are the
 best of seven batches. Per-solve wall-clock, lower is better:
 
 | problem (`n`×`m`, loss)        | native Rust | SciPy      | speedup |
@@ -154,7 +182,7 @@ the Python-level trust-region loop). On a single large solve both sides are
 SVD-bound and the gap narrows toward parity (still ~1.5–1.7× here, with `nalgebra`
 competitive with OpenBLAS `gesdd` at these sizes).
 
-Caveat on fairness: the parity (`host-lapack`) backend injects SciPy's *own*
+Caveat on fairness: the parity (host-LAPACK) backend injects SciPy's *own*
 LAPACK/BLAS, so benchmarking it would be SciPy-vs-SciPy — these numbers
 deliberately use the native Rust SVD instead. Each side evaluates the residual
 idiomatically (not a deliberately slow callback), so the comparison reflects
@@ -168,13 +196,13 @@ python fixtures-generators/bench_scipy.py    # in the pinned venv
 ## Tests and fixtures
 
 Parity is enforced against committed reference fixtures generated from a pinned
-SciPy 1.11.3 / NumPy 1.26.0 runtime. All floating-point payloads are serialized
+SciPy 1.18.0 / NumPy 2.5.0 runtime. All floating-point payloads are serialized
 as f64 hex-bit strings and compared with `f64::to_bits`, never tolerances.
 Regenerate them with the scripts in `fixtures-generators/` inside the pinned
 Python environment (`fixtures-generators/requirements.txt`).
 
-The host-LAPACK parity test is gated on the `host-lapack` feature and skips
-unless `TRUST_REGION_LEAST_SQUARES_LAPACK_PATH` points at a LAPACK library.
+The host-LAPACK parity test skips unless `TRUST_REGION_LEAST_SQUARES_LAPACK_PATH`
+points at a LAPACK library; the backend itself is always compiled in.
 
 ## License
 

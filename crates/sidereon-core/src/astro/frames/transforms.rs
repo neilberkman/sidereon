@@ -978,18 +978,50 @@ fn gcrs_to_topocentric_compute_unchecked(
         );
     }
 
-    // Standard path: GCRS->ITRS->subtract->ENU
+    // Standard path: GCRS->ITRS->ENU topocentric reduction.
     let (sat_itrs_x, sat_itrs_y, sat_itrs_z) =
         gcrs_to_itrs_compute_unchecked(sat_x, sat_y, sat_z, ts, false);
+    itrs_to_topocentric_unchecked([sat_itrs_x, sat_itrs_y, sat_itrs_z], station)
+}
 
-    let (stn_x, stn_y, stn_z) =
-        geodetic_to_itrs_unchecked(station_lat_deg, station_lon_deg, station_alt_km);
+/// Topocentric az/el/range from a station to an Earth-fixed (ITRS/ECEF) target.
+///
+/// `target_itrs_km` is the target's geocentric position in the Earth-fixed
+/// (ITRS/ECEF) frame, km. Returns `(azimuth_deg, elevation_deg, range_km)`,
+/// azimuth measured clockwise from north on `[0, 360)` and elevation on
+/// `[-90, 90]`. This is the same station-to-target ENU reduction the satellite
+/// look-angle path uses, exposed for callers that already hold an Earth-fixed
+/// target vector (for example the analytic Sun/Moon ECEF positions from
+/// [`crate::astro::bodies::sun_moon::sun_moon_ecef`]).
+pub fn itrs_to_topocentric(
+    target_itrs_km: [f64; 3],
+    station: &GeodeticStationKm,
+) -> Result<(f64, f64, f64), FrameTransformError> {
+    validate_vec3("target_itrs_km", &target_itrs_km)?;
+    validate_geodetic_degrees_km(
+        station.latitude_deg,
+        station.longitude_deg,
+        station.altitude_km,
+    )?;
+    validate_tuple3(
+        "topocentric",
+        itrs_to_topocentric_unchecked(target_itrs_km, station),
+    )
+}
 
-    let dx = sat_itrs_x - stn_x;
-    let dy = sat_itrs_y - stn_y;
-    let dz = sat_itrs_z - stn_z;
+fn itrs_to_topocentric_unchecked(target_itrs_km: [f64; 3], station: &GeodeticStationKm) -> Vec3 {
+    let [target_x, target_y, target_z] = target_itrs_km;
+    let (stn_x, stn_y, stn_z) = geodetic_to_itrs_unchecked(
+        station.latitude_deg,
+        station.longitude_deg,
+        station.altitude_km,
+    );
 
-    let enu_mat = ecef_to_enu_matrix(station_lat_deg, station_lon_deg);
+    let dx = target_x - stn_x;
+    let dy = target_y - stn_y;
+    let dz = target_z - stn_z;
+
+    let enu_mat = ecef_to_enu_matrix(station.latitude_deg, station.longitude_deg);
     let enu = mat3_vec3_mul_unchecked(&enu_mat, &[dx, dy, dz]);
     let east = enu[0];
     let north = enu[1];
