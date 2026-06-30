@@ -16,6 +16,22 @@
 //! a local east-north-up (ENU) frame at the receiver's geodetic
 //! latitude/longitude.
 //!
+//! # ENU convention
+//!
+//! HDOP, VDOP, and PDOP are convention-dependent: they split the position
+//! cofactor along a local "up" axis, and two definitions of "up" appear in the
+//! literature. The default everywhere ([`dop`], [`geometry_cofactor`], and the
+//! covariance/ellipse helpers) is the **geodetic-ellipsoid-normal** ENU built
+//! from the receiver's geodetic latitude/longitude (the GNSS standard, matching
+//! RTKLIB's `xyz2enu`). The alternative is a **geocentric-radial** ENU whose up
+//! is the spherical radial direction `position / |position|`. The two "up"
+//! axes differ by up to ~0.19 degrees (the deflection of the ellipsoid normal
+//! from the radial), which moves the horizontal/vertical split by on the order
+//! of `1e-3` relative. [`EnuConvention`] and the `*_with_convention` entry
+//! points let a caller select the geocentric-radial variant; the default
+//! helpers keep the geodetic-normal convention and its 0-ULP goldens. See
+//! [`crate::frame::geocentric_up`] for the geocentric-vs-geodetic distinction.
+//!
 //! # Reproducibility
 //!
 //! The normal matrix `H^T W H` is accumulated by a plain left-to-right sum over
@@ -46,6 +62,10 @@ use crate::validate;
 
 const DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
 const LOS_UNIT_TOLERANCE: f64 = 1.0e-3;
+/// Minimum ECEF radius (metres) for which the geocentric-radial "up" direction
+/// is well defined. A receiver at or within this distance of the geocenter has
+/// no meaningful radial axis, so [`EnuConvention::GeocentricRadial`] rejects it.
+const GEOCENTRIC_MIN_RADIUS_M: f64 = 1.0;
 
 /// A line-of-sight unit vector from the receiver toward a satellite, in ECEF.
 ///
@@ -190,6 +210,28 @@ pub struct HorizontalErrorEllipse {
     pub azimuth_rad: f64,
 }
 
+/// A confidence ellipse from an arbitrary 2x2 covariance block.
+///
+/// Domain-neutral companion to [`HorizontalErrorEllipse`]: the axes carry
+/// whatever unit the covariance is in (square that unit), and `orientation_rad`
+/// is the semi-major-axis direction measured from the first axis toward the
+/// second.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ErrorEllipse2 {
+    /// Requested confidence probability in `(0, 1)`.
+    pub confidence: f64,
+    /// Two-degree-of-freedom chi-square scale `-2 ln(1 - confidence)` applied to
+    /// the covariance eigenvalues.
+    pub chi_square_scale: f64,
+    /// Semi-major axis length (same unit as the square root of the covariance).
+    pub semi_major: f64,
+    /// Semi-minor axis length.
+    pub semi_minor: f64,
+    /// Semi-major-axis orientation in radians, from the first (row/col 0) axis
+    /// toward the second (row/col 1) axis.
+    pub orientation_rad: f64,
+}
+
 /// Why a geometry has no finite DOP.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DopError {
@@ -230,6 +272,61 @@ impl core::fmt::Display for DopError {
 
 impl std::error::Error for DopError {}
 
+/// Which local east-north-up frame the position cofactor is rotated into before
+/// the horizontal/vertical DOP split.
+///
+/// The two conventions differ only in the definition of local "up" and so in
+/// the HDOP/VDOP partition; GDOP, PDOP, and TDOP are unaffected by the choice
+/// (PDOP is the trace of the position block, which is rotation-invariant). See
+/// the module-level "ENU convention" section for the ~0.19 degree difference
+/// between the axes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum EnuConvention {
+    /// Geodetic-ellipsoid-normal ENU built from the receiver's geodetic
+    /// latitude/longitude. The GNSS-standard default (RTKLIB `xyz2enu`).
+    #[default]
+    GeodeticNormal,
+    /// Geocentric-radial ENU whose up is the spherical radial direction
+    /// `position / |position|` (see [`crate::frame::geocentric_neu_basis`]).
+    GeocentricRadial,
+}
+
+/// ECEF -> ENU rotation rows `[east; north; up]` for the requested convention.
+///
+/// `GeodeticNormal` returns exactly [`ecef_to_enu_rotation`] (so the default
+/// DOP path is byte-for-byte unchanged); `GeocentricRadial` builds the rows from
+/// [`crate::frame::geocentric_neu_basis`] at the receiver's ECEF position.
+fn enu_rotation(
+    receiver: Wgs84Geodetic,
+    convention: EnuConvention,
+) -> Result<[[f64; 3]; 3], DopError> {
+    match convention {
+        EnuConvention::GeodeticNormal => {
+            Ok(ecef_to_enu_rotation(receiver.lat_rad, receiver.lon_rad))
+        }
+        EnuConvention::GeocentricRadial => {
+            let ecef = crate::frame::geodetic_to_itrf(receiver)
+                .map_err(|_| invalid_input("receiver", "geocentric basis unavailable"))?;
+            let p = ecef.as_array();
+            // Geocentric "up" is position / |position|, which is undefined at the
+            // geocenter. `geocentric_neu_basis` would silently fall back to +Z
+            // there and return an arbitrary frame; reject a zero/near-zero radius
+            // instead of accepting that fabricated orientation.
+            // `p` comes from a validated-finite ItrfPositionM, so `radius` is
+            // finite and non-negative; a plain threshold comparison suffices.
+            let radius = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            if radius <= GEOCENTRIC_MIN_RADIUS_M {
+                return Err(invalid_input(
+                    "receiver",
+                    "geocentric up undefined at zero radius",
+                ));
+            }
+            let (north, east, up) = crate::frame::geocentric_neu_basis(p);
+            Ok([east, north, up])
+        }
+    }
+}
+
 /// ECEF -> ENU rotation matrix at geodetic latitude/longitude (radians).
 fn ecef_to_enu_rotation(lat_rad: f64, lon_rad: f64) -> [[f64; 3]; 3] {
     let sphi = lat_rad.sin();
@@ -264,6 +361,22 @@ fn rotate_pos_block(q: &[[f64; 4]; 4], r: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
 /// [`DopError::Singular`] for a singular or
 /// ill-conditioned geometry (see the module docs for the exact predicate).
 pub fn dop(los: &[LineOfSight], weights: &[f64], receiver: Wgs84Geodetic) -> Result<Dop, DopError> {
+    dop_with_convention(los, weights, receiver, EnuConvention::GeodeticNormal)
+}
+
+/// [`dop`] with an explicit [`EnuConvention`] for the horizontal/vertical split.
+///
+/// [`EnuConvention::GeodeticNormal`] is the default [`dop`] path (0-ULP
+/// goldens); [`EnuConvention::GeocentricRadial`] rotates the position block into
+/// the geocentric-radial ENU instead, changing only HDOP/VDOP (by ~`1e-3`
+/// relative; see the module "ENU convention" section). GDOP/PDOP/TDOP are
+/// identical between conventions.
+pub fn dop_with_convention(
+    los: &[LineOfSight],
+    weights: &[f64],
+    receiver: Wgs84Geodetic,
+    convention: EnuConvention,
+) -> Result<Dop, DopError> {
     validate_dop_inputs(los, weights, receiver)?;
     if los.len() < 4 {
         return Err(DopError::TooFewSatellites);
@@ -273,7 +386,7 @@ pub fn dop(los: &[LineOfSight], weights: &[f64], receiver: Wgs84Geodetic) -> Res
     let a = normal_matrix_4_weighted_column_outer(&rows, weights).map_err(map_linear_error)?;
     let q = invert_4x4_cofactor(&a).ok_or(DopError::Singular)?;
 
-    let r = ecef_to_enu_rotation(receiver.lat_rad, receiver.lon_rad);
+    let r = enu_rotation(receiver, convention)?;
     let enu = rotate_pos_block(&q, &r);
 
     let qe = enu[0][0];
@@ -326,6 +439,21 @@ pub fn geometry_cofactor(
     weights: &[f64],
     receiver: Wgs84Geodetic,
 ) -> Result<GeometryCofactor, DopError> {
+    geometry_cofactor_with_convention(los, weights, receiver, EnuConvention::GeodeticNormal)
+}
+
+/// [`geometry_cofactor`] with an explicit [`EnuConvention`] for the `position_enu`
+/// block.
+///
+/// `position_ecef` and `state` are convention-independent; only `position_enu`
+/// changes. [`EnuConvention::GeodeticNormal`] is the default
+/// [`geometry_cofactor`] path.
+pub fn geometry_cofactor_with_convention(
+    los: &[LineOfSight],
+    weights: &[f64],
+    receiver: Wgs84Geodetic,
+    convention: EnuConvention,
+) -> Result<GeometryCofactor, DopError> {
     validate_dop_inputs(los, weights, receiver)?;
     if los.len() < 4 {
         return Err(DopError::TooFewSatellites);
@@ -336,7 +464,7 @@ pub fn geometry_cofactor(
     let q = invert_4x4_cofactor(&a).ok_or(DopError::Singular)?;
     validate_cofactor_variances(&q)?;
 
-    let r = ecef_to_enu_rotation(receiver.lat_rad, receiver.lon_rad);
+    let r = enu_rotation(receiver, convention)?;
     let enu = rotate_pos_block(&q, &r);
     validate_matrix3(&enu, "position_enu")?;
     Ok(GeometryCofactor {
@@ -375,37 +503,71 @@ pub fn horizontal_error_ellipse(
     confidence: f64,
 ) -> Result<HorizontalErrorEllipse, DopError> {
     validate_matrix3(&covariance_enu_m2, "covariance_enu_m2")?;
+    let en_block = [
+        [covariance_enu_m2[0][0], covariance_enu_m2[0][1]],
+        [covariance_enu_m2[1][0], covariance_enu_m2[1][1]],
+    ];
+    let ellipse = error_ellipse_2x2(en_block, confidence).map_err(|err| match err {
+        // Re-label only the covariance field so the GNSS wrapper reports its own
+        // argument name; a confidence error keeps its field.
+        DopError::InvalidInput {
+            field: "covariance",
+            reason,
+        } => invalid_input("covariance_enu_m2", reason),
+        other => other,
+    })?;
+    Ok(HorizontalErrorEllipse {
+        confidence: ellipse.confidence,
+        chi_square_scale: ellipse.chi_square_scale,
+        semi_major_m: ellipse.semi_major,
+        semi_minor_m: ellipse.semi_minor,
+        azimuth_rad: ellipse.orientation_rad,
+    })
+}
+
+/// Confidence ellipse from an arbitrary 2x2 covariance block.
+///
+/// Domain-neutral primitive: the semi-axes are scaled by the two-degree-of-
+/// freedom chi-square quantile `-2 ln(1 - confidence)` applied to the
+/// eigenvalues of the symmetrized block. [`horizontal_error_ellipse`] is the
+/// GNSS-facing wrapper that feeds it the local east/north block, so both share
+/// this eigensolve (and its goldens). The eigenvalues come from the closed-form
+/// 2x2 symmetric solution `lambda = center +/- sqrt(half_delta^2 + b^2)`.
+pub fn error_ellipse_2x2(
+    covariance: [[f64; 2]; 2],
+    confidence: f64,
+) -> Result<ErrorEllipse2, DopError> {
+    for row in &covariance {
+        validate::finite_slice(row, "covariance").map_err(map_validation_error)?;
+    }
     validate_confidence(confidence)?;
 
-    let a = covariance_enu_m2[0][0];
-    let b = 0.5 * (covariance_enu_m2[0][1] + covariance_enu_m2[1][0]);
-    let c = covariance_enu_m2[1][1];
+    let a = covariance[0][0];
+    let b = 0.5 * (covariance[0][1] + covariance[1][0]);
+    let c = covariance[1][1];
     let half_delta = 0.5 * (a - c);
     let center = 0.5 * (a + c);
     let root = (half_delta * half_delta + b * b).sqrt();
     let lambda_major = center + root;
     let lambda_minor = center - root;
     if !lambda_major.is_finite() || !lambda_minor.is_finite() || lambda_minor < -1.0e-12 {
-        return Err(invalid_input(
-            "covariance_enu_m2",
-            "not positive semidefinite",
-        ));
+        return Err(invalid_input("covariance", "not positive semidefinite"));
     }
 
     let chi_square_scale = -2.0 * (1.0 - confidence).ln();
-    let semi_major_m = (lambda_major.max(0.0) * chi_square_scale).sqrt();
-    let semi_minor_m = (lambda_minor.max(0.0) * chi_square_scale).sqrt();
-    let azimuth_rad = if root == 0.0 {
+    let semi_major = (lambda_major.max(0.0) * chi_square_scale).sqrt();
+    let semi_minor = (lambda_minor.max(0.0) * chi_square_scale).sqrt();
+    let orientation_rad = if root == 0.0 {
         0.0
     } else {
         0.5 * (2.0 * b).atan2(a - c)
     };
-    Ok(HorizontalErrorEllipse {
+    Ok(ErrorEllipse2 {
         confidence,
         chi_square_scale,
-        semi_major_m,
-        semi_minor_m,
-        azimuth_rad,
+        semi_major,
+        semi_minor,
+        orientation_rad,
     })
 }
 
@@ -817,6 +979,102 @@ mod public_api_tests {
         assert!(ellipse.semi_major_m >= ellipse.semi_minor_m);
         assert!(ellipse.semi_minor_m > 0.0);
         assert!(ellipse.azimuth_rad.is_finite());
+    }
+
+    #[test]
+    fn error_ellipse_2x2_matches_numpy_eigh() {
+        // numpy.linalg.eigh of [[9, 2], [2, 4]] with the chi2(2) 0.95 scale.
+        let ellipse = error_ellipse_2x2([[9.0, 2.0], [2.0, 4.0]], 0.95).expect("ellipse");
+        assert!((ellipse.chi_square_scale - 5.99146454710798).abs() < 1e-12);
+        assert!((ellipse.semi_major - 7.6240780089041085).abs() < 1e-12);
+        assert!((ellipse.semi_minor - 4.445500379771495).abs() < 1e-12);
+        assert!((ellipse.orientation_rad - 0.3373704711117763).abs() < 1e-12);
+    }
+
+    #[test]
+    fn horizontal_error_ellipse_delegates_to_2x2_primitive() {
+        // The GNSS wrapper must be byte-identical to the 2x2 primitive on the
+        // east/north block.
+        let cov3 = [[9.0, 2.0, 1.0], [2.0, 4.0, -3.0], [1.0, -3.0, 16.0]];
+        let wrapper = horizontal_error_ellipse(cov3, 0.95).expect("wrapper");
+        let primitive =
+            error_ellipse_2x2([[cov3[0][0], cov3[0][1]], [cov3[1][0], cov3[1][1]]], 0.95)
+                .expect("primitive");
+        assert_eq!(
+            wrapper.semi_major_m.to_bits(),
+            primitive.semi_major.to_bits()
+        );
+        assert_eq!(
+            wrapper.semi_minor_m.to_bits(),
+            primitive.semi_minor.to_bits()
+        );
+        assert_eq!(
+            wrapper.azimuth_rad.to_bits(),
+            primitive.orientation_rad.to_bits()
+        );
+    }
+
+    #[test]
+    fn geocentric_convention_changes_only_horizontal_vertical_split() {
+        let (los, weights, rx) = sample_geometry();
+        let geodetic = dop(&los, &weights, rx).expect("geodetic DOP");
+        let geocentric = dop_with_convention(&los, &weights, rx, EnuConvention::GeocentricRadial)
+            .expect("geocentric DOP");
+
+        // GDOP and TDOP read the unrotated state cofactor, so they are
+        // bit-identical across conventions.
+        assert_eq!(geodetic.gdop.to_bits(), geocentric.gdop.to_bits());
+        assert_eq!(geodetic.tdop.to_bits(), geocentric.tdop.to_bits());
+
+        // PDOP is the rotation-invariant position trace: equal to roundoff.
+        assert!((geodetic.pdop - geocentric.pdop).abs() < 1e-9 * geodetic.pdop);
+
+        // The H/V split moves with the ~0.19 deg up-axis deflection: different,
+        // but on the order of 1e-3 relative.
+        let hdop_rel = (geodetic.hdop - geocentric.hdop).abs() / geodetic.hdop;
+        assert!(hdop_rel > 0.0, "convention must change HDOP");
+        assert!(
+            hdop_rel < 1e-2,
+            "HDOP shift {hdop_rel} larger than expected"
+        );
+        assert_ne!(geodetic.vdop.to_bits(), geocentric.vdop.to_bits());
+    }
+
+    #[test]
+    fn geocentric_convention_rejects_zero_radius_receiver() {
+        // A receiver one equatorial radius below the equator/prime-meridian sits
+        // at the geocenter (ECEF ~ origin), where geocentric "up" is undefined.
+        // The geocentric-radial convention must reject it rather than silently
+        // fall back to a +Z frame.
+        let geocenter = Wgs84Geodetic::new(0.0, 0.0, -crate::astro::constants::earth::WGS84_A_M)
+            .expect("valid geodetic receiver");
+        let (los, weights, _) = sample_geometry();
+        let err = dop_with_convention(&los, &weights, geocenter, EnuConvention::GeocentricRadial)
+            .expect_err("zero-radius geocentric up must be rejected");
+        assert!(matches!(
+            err,
+            DopError::InvalidInput {
+                field: "receiver",
+                ..
+            }
+        ));
+
+        // The geodetic-normal convention does not use the radial axis, so the
+        // same receiver is accepted there.
+        assert!(
+            dop_with_convention(&los, &weights, geocenter, EnuConvention::GeodeticNormal).is_ok()
+        );
+    }
+
+    #[test]
+    fn default_dop_equals_explicit_geodetic_convention_bit_for_bit() {
+        let (los, weights, rx) = sample_geometry();
+        let default = dop(&los, &weights, rx).expect("default");
+        let explicit =
+            dop_with_convention(&los, &weights, rx, EnuConvention::GeodeticNormal).expect("geo");
+        assert_eq!(default.hdop.to_bits(), explicit.hdop.to_bits());
+        assert_eq!(default.vdop.to_bits(), explicit.vdop.to_bits());
+        assert_eq!(default.pdop.to_bits(), explicit.pdop.to_bits());
     }
 }
 

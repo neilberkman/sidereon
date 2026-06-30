@@ -20,7 +20,7 @@ pub mod troposphere {
     pub use crate::tropo::{
         tropo_mapping, tropo_slant, tropo_zenith, tropo_zwd_delay_xyz, zwd_zenith_wet_delay,
         AltitudeClamp, MappingFactors, MappingModel, Met, TropoModel, ZenithDelay, ZwdEpoch,
-        ZwdProfile, ZwdSlantOptions,
+        ZwdProfile, ZwdSlantOptions, TROPO_MIN_MAPPING_ELEVATION_RAD,
     };
 }
 
@@ -34,5 +34,5 @@ pub use ionosphere::{
 pub use troposphere::{
     tropo_mapping, tropo_slant, tropo_zenith, tropo_zwd_delay_xyz, zwd_zenith_wet_delay,
     AltitudeClamp, MappingFactors, MappingModel, Met, TropoModel, ZenithDelay, ZwdEpoch,
-    ZwdProfile, ZwdSlantOptions,
+    ZwdProfile, ZwdSlantOptions, TROPO_MIN_MAPPING_ELEVATION_RAD,
 };

@@ -306,6 +306,134 @@ pub fn cost(residual: &DVector<f64>) -> Result<f64, SolveError> {
     validate_value(0.5 * residual.dot(residual), "cost")
 }
 
+// --- Jacobian-derived geometry: covariance and Hessian-trace primitives -----
+
+/// Parameter covariance from a design (Jacobian) matrix via the Gauss-Newton
+/// normal equations: `sigma^2 (J^T J)^-1`.
+///
+/// `jacobian` is an `m x n` design matrix with `m >= n` (at least as many
+/// residuals as parameters). `variance_scale` (`sigma^2`) multiplies the raw
+/// inverse normal matrix: pass the post-fit reduced chi-square to get the fitted
+/// parameter covariance, or `1.0` for the bare `(J^T J)^-1` cofactor.
+///
+/// The covariance is formed from the thin SVD of `J` directly, not from a
+/// factorization of `J^T J`. With `J = U S V^T`, the normal-equation inverse is
+/// `(J^T J)^-1 = V S^-2 V^T`, so the covariance is
+/// `variance_scale * V diag(1/sigma_i^2) V^T`. Going through the SVD of `J`
+/// rather than inverting `J^T J` avoids squaring the condition number: a
+/// full-rank but near-collinear Jacobian (large `cond(J)`) would become
+/// numerically singular under `cond(J^T J) = cond(J)^2`, whereas the SVD path
+/// keeps the conditioning at `cond(J)`. A genuinely rank-deficient Jacobian
+/// (a singular value at or below the relative rank threshold) yields
+/// [`SolveError::SingularJacobian`].
+///
+/// This is the same quantity, and the same construction, that
+/// `scipy.optimize.curve_fit` reports as `pcov` (`pcov = (J^T J)^-1 * s_sq`,
+/// formed from the SVD of `J`); the two agree to a tight tolerance for a
+/// well-conditioned `J` and stay stable as `J` approaches collinearity.
+pub fn normal_covariance(
+    jacobian: &DMatrix<f64>,
+    variance_scale: f64,
+) -> Result<DMatrix<f64>, SolveError> {
+    validate_matrix(jacobian, "jacobian")?;
+    let m = jacobian.nrows();
+    let n = jacobian.ncols();
+    if n == 0 || m == 0 {
+        return Err(invalid_input("jacobian", "empty"));
+    }
+    if m < n {
+        return Err(invalid_input("jacobian", "fewer rows than columns"));
+    }
+    crate::validate::finite_nonneg(variance_scale, "variance_scale").map_err(map_field_error)?;
+
+    // Thin SVD of J (right singular vectors only). cov = variance_scale * V S^-2 V^T.
+    let svd = jacobian.clone().svd(false, true);
+    let v_t = svd.v_t.ok_or(SolveError::SingularJacobian)?;
+    let singular = svd.singular_values;
+
+    // Rank guard: a singular value at or below the relative threshold means the
+    // covariance is unbounded, i.e. the Jacobian is rank-deficient. This is the
+    // SVD analogue of the previous Cholesky-failure check, but it also catches
+    // the near-collinear case that squaring into J^T J would have masked.
+    let smax = singular.iter().cloned().fold(0.0_f64, f64::max);
+    if smax == 0.0 {
+        return Err(SolveError::SingularJacobian);
+    }
+    let threshold = smax * (m.max(n) as f64) * f64::EPSILON;
+    if singular.iter().any(|&s| s <= threshold) {
+        return Err(SolveError::SingularJacobian);
+    }
+
+    // cov[i][j] = variance_scale * sum_k V[i,k] (1/sigma_k^2) V[j,k].
+    // v_t is n x n with row k = the k-th right singular vector, so V[i,k] = v_t[(k, i)].
+    let mut cov = DMatrix::zeros(n, n);
+    for i in 0..n {
+        for j in 0..n {
+            let mut acc = 0.0;
+            for k in 0..n {
+                let inv_s2 = 1.0 / (singular[k] * singular[k]);
+                acc += v_t[(k, i)] * v_t[(k, j)] * inv_s2;
+            }
+            cov[(i, j)] = acc * variance_scale;
+        }
+    }
+    validate_matrix(&cov, "covariance")?;
+    Ok(cov)
+}
+
+/// Trace of the Gauss-Newton Hessian approximation `J^T J`, i.e. the sum of the
+/// squared column norms of `jacobian`.
+///
+/// No inverse is formed: this is `sum_i ||J[:, i]||^2 == trace(J^T J)`, summed
+/// column-by-column. It equals `numpy.trace(jac.T @ jac)` to a tight tolerance
+/// (the reductions differ only in summation order).
+pub fn hessian_trace(jacobian: &DMatrix<f64>) -> f64 {
+    let n = jacobian.ncols();
+    let m = jacobian.nrows();
+    let mut trace = 0.0;
+    for i in 0..n {
+        let mut col = 0.0;
+        for r in 0..m {
+            let v = jacobian[(r, i)];
+            col += v * v;
+        }
+        trace += col;
+    }
+    trace
+}
+
+/// Fitted parameter covariance from a converged [`LeastSquaresReport`].
+///
+/// Convenience over [`normal_covariance`] that scales `(J^T J)^-1` by the
+/// post-fit reduced chi-square `s_sq = 2 * cost / (m - n)` (the residual sum of
+/// squares over the redundancy), the same scale `scipy.optimize.curve_fit`
+/// applies to its `pcov`. Requires positive redundancy `m > n`; otherwise
+/// returns [`SolveError::InvalidInput`].
+pub fn covariance_from_report(report: &LeastSquaresReport) -> Result<DMatrix<f64>, SolveError> {
+    let m = report.residual.len();
+    let n = report.x.len();
+    // `LeastSquaresReport`'s fields are public, so the residual/x lengths that
+    // set the degrees of freedom and the Jacobian that sets the scale can be
+    // inconsistent. Reject a Jacobian whose shape does not match (m x n) rather
+    // than silently scaling a covariance of the Jacobian's dimensions by a
+    // reduced chi-square derived from unrelated vectors.
+    if report.jacobian.nrows() != m {
+        return Err(invalid_input("jacobian", "rows must match residual length"));
+    }
+    if report.jacobian.ncols() != n {
+        return Err(invalid_input(
+            "jacobian",
+            "columns must match parameter length",
+        ));
+    }
+    if m <= n {
+        return Err(invalid_input("degrees_of_freedom", "not positive"));
+    }
+    let dof = (m - n) as f64;
+    let s_sq = validate_value(2.0 * report.cost / dof, "reduced_chi_square")?;
+    normal_covariance(&report.jacobian, s_sq)
+}
+
 /// A nonlinear least-squares problem: a residual closure, optional diagonal
 /// weights, and a starting point. The weighted form scales both the residual
 /// and the Jacobian rows by `sqrt(weight)`; with all weights `1` it reduces to
@@ -791,6 +919,176 @@ mod tests {
         .unwrap();
         for i in 0..3 {
             assert_eq!(report.x[i].to_bits(), again.x[i].to_bits());
+        }
+    }
+
+    /// Reference Jacobian for the covariance/trace primitives.
+    fn covariance_fixture_jacobian() -> DMatrix<f64> {
+        // J (m=5, n=2): a linear-fit design matrix [1, t].
+        DMatrix::from_row_slice(5, 2, &[1.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0, 3.0, 1.0, 4.0])
+    }
+
+    #[test]
+    fn hessian_trace_matches_numpy() {
+        // numpy: trace((J.T @ J)) == 35.0 for the fixture Jacobian.
+        let trace = hessian_trace(&covariance_fixture_jacobian());
+        assert!((trace - 35.0).abs() < 1e-12, "trace {trace}");
+    }
+
+    #[test]
+    fn normal_covariance_matches_numpy_pcov() {
+        // numpy: inv(J.T @ J) for the fixture Jacobian.
+        let inv = normal_covariance(&covariance_fixture_jacobian(), 1.0).unwrap();
+        let expected = [[0.6000000000000001, -0.2], [-0.2, 0.1]];
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (inv[(i, j)] - expected[i][j]).abs() < 1e-12,
+                    "inv[{i}][{j}] = {}",
+                    inv[(i, j)]
+                );
+            }
+        }
+
+        // With the post-fit reduced chi-square scale s_sq = SSR/(m-n).
+        let s_sq = 0.085 / 3.0;
+        let cov = normal_covariance(&covariance_fixture_jacobian(), s_sq).unwrap();
+        let expected_cov = [
+            [0.017000000000000005, -0.005666666666666667],
+            [-0.005666666666666667, 0.0028333333333333335],
+        ];
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (cov[(i, j)] - expected_cov[i][j]).abs() < 1e-12,
+                    "cov[{i}][{j}] = {}",
+                    cov[(i, j)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normal_covariance_rejects_underdetermined_and_negative_scale() {
+        let wide = DMatrix::from_row_slice(2, 3, &[1.0, 0.0, 1.0, 0.0, 1.0, 1.0]);
+        assert!(matches!(
+            normal_covariance(&wide, 1.0),
+            Err(SolveError::InvalidInput {
+                field: "jacobian",
+                ..
+            })
+        ));
+        assert!(matches!(
+            normal_covariance(&covariance_fixture_jacobian(), -1.0),
+            Err(SolveError::InvalidInput {
+                field: "variance_scale",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn normal_covariance_matches_closed_form_inverse_for_collinear_jacobian() {
+        // A full-rank but collinear design: the second column is the first plus a
+        // small ramp, so the two columns are nearly parallel (raised condition
+        // number). The SVD path forms the covariance from the SVD of J directly,
+        // not from (J^T J)^-1, so it keeps the conditioning at cond(J) rather than
+        // squaring it. Compare against the closed-form 2x2 inverse of J^T J (the
+        // analytic answer the SVD covariance must reproduce).
+        let eps = 1e-2;
+        let col1: Vec<f64> = (0..5).map(|k| 1.0 + (k as f64) * eps).collect();
+        let mut data = Vec::with_capacity(10);
+        for &c1 in &col1 {
+            data.push(1.0);
+            data.push(c1);
+        }
+        let jac = DMatrix::from_row_slice(5, 2, &data);
+        let scale = 2.5;
+        let cov = normal_covariance(&jac, scale).unwrap();
+
+        // Closed-form (J^T J)^-1 * scale for this moderately conditioned design.
+        let s00 = 5.0_f64;
+        let s01: f64 = col1.iter().sum();
+        let s11: f64 = col1.iter().map(|c| c * c).sum();
+        let det = s00 * s11 - s01 * s01;
+        let inv = [[s11 / det, -s01 / det], [-s01 / det, s00 / det]];
+        for i in 0..2 {
+            for j in 0..2 {
+                let expected = inv[i][j] * scale;
+                let tol = 1e-9 * expected.abs().max(1.0);
+                assert!(
+                    (cov[(i, j)] - expected).abs() < tol,
+                    "cov[{i}][{j}] = {} (expected {expected})",
+                    cov[(i, j)]
+                );
+            }
+        }
+        // Symmetric to roundoff.
+        assert!((cov[(0, 1)] - cov[(1, 0)]).abs() <= 1e-12 * cov[(0, 0)].abs().max(1.0));
+    }
+
+    #[test]
+    fn covariance_from_report_rejects_jacobian_dimension_mismatch() {
+        // A report whose Jacobian shape disagrees with the residual/x lengths
+        // (public fields let a caller build one) must be rejected, not used to
+        // scale a covariance of the Jacobian's own dimensions.
+        let jac = covariance_fixture_jacobian(); // 5 x 2
+        let mismatched_rows = LeastSquaresReport {
+            x: DVector::from_vec(vec![0.0, 0.0]),
+            residual: DVector::from_vec(vec![0.1, -0.2, 0.15, 0.05]), // len 4 != 5 rows
+            cost: 0.1,
+            jacobian: jac.clone(),
+            optimality_inf: 0.0,
+            iterations: 0,
+            status: Status::GradientTolerance,
+        };
+        assert_invalid_field(
+            covariance_from_report(&mismatched_rows).unwrap_err(),
+            "jacobian",
+        );
+
+        let mismatched_cols = LeastSquaresReport {
+            x: DVector::from_vec(vec![0.0, 0.0, 0.0]), // len 3 != 2 cols
+            residual: DVector::from_vec(vec![0.1, -0.2, 0.15, 0.05, -0.1]),
+            cost: 0.1,
+            jacobian: jac,
+            optimality_inf: 0.0,
+            iterations: 0,
+            status: Status::GradientTolerance,
+        };
+        assert_invalid_field(
+            covariance_from_report(&mismatched_cols).unwrap_err(),
+            "jacobian",
+        );
+    }
+
+    #[test]
+    fn covariance_from_report_uses_reduced_chi_square() {
+        // Build a report by hand: residual r and Jacobian J fix the scale.
+        let jac = covariance_fixture_jacobian();
+        let residual = DVector::from_vec(vec![0.1, -0.2, 0.15, 0.05, -0.1]);
+        let report = LeastSquaresReport {
+            x: DVector::from_vec(vec![0.0, 0.0]),
+            cost: 0.5 * residual.dot(&residual),
+            residual,
+            jacobian: jac,
+            optimality_inf: 0.0,
+            iterations: 0,
+            status: Status::GradientTolerance,
+        };
+        let cov = covariance_from_report(&report).unwrap();
+        let expected_cov = [
+            [0.017000000000000005, -0.005666666666666667],
+            [-0.005666666666666667, 0.0028333333333333335],
+        ];
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!(
+                    (cov[(i, j)] - expected_cov[i][j]).abs() < 1e-12,
+                    "cov[{i}][{j}] = {}",
+                    cov[(i, j)]
+                );
+            }
         }
     }
 }

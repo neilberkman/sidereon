@@ -210,7 +210,10 @@ pub mod rtk_filter {
 /// Geoid undulation lookup and orthometric-height conversion: the
 /// [`sidereon_core::geoid`] surface re-exported on the ergonomic crate.
 pub mod geoid {
-    pub use sidereon_core::geoid::{geoid_undulation, orthometric_height_m, GeoidError, GeoidGrid};
+    pub use sidereon_core::geoid::{
+        egm96_ellipsoidal_height_m, egm96_grid, egm96_orthometric_height_m, egm96_undulation,
+        ellipsoidal_height_m, geoid_undulation, orthometric_height_m, GeoidError, GeoidGrid,
+    };
 }
 
 /// Stable PPP input, result, option, status, and error types used by the

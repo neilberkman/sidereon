@@ -381,13 +381,6 @@ fn tropo_public_helpers_reject_invalid_domains() {
     assert_invalid_input(super::Met::standard(100_000.0, 0.5));
 
     assert_invalid_input(super::tropo_slant(f64::NAN, receiver, met, epoch));
-    assert_invalid_input(super::tropo_slant(-1.0e-6, receiver, met, epoch));
-    assert_invalid_input(super::tropo_mapping(
-        super::MappingModel::Niell,
-        0.0,
-        receiver,
-        epoch,
-    ));
 
     let bad_receiver = crate::frame::Wgs84Geodetic {
         lat_rad: f64::NAN,
@@ -410,18 +403,6 @@ fn tropo_public_helpers_reject_invalid_domains() {
         height_m: receiver.height_m,
     };
     assert_invalid_input(super::tropo_slant(elevation, bad_lon_receiver, met, epoch));
-
-    let high_receiver = crate::frame::Wgs84Geodetic {
-        lat_rad: receiver.lat_rad,
-        lon_rad: receiver.lon_rad,
-        height_m: 20_000.0,
-    };
-    assert_invalid_input(super::tropo_mapping(
-        super::MappingModel::Niell,
-        elevation,
-        high_receiver,
-        epoch,
-    ));
 
     let bad_met = super::Met::new_unchecked(1013.25, f64::INFINITY, 0.5);
     assert_invalid_input(super::tropo_zenith(
@@ -471,6 +452,163 @@ fn tropo_public_helpers_reject_invalid_domains() {
         receiver,
         ancient_epoch,
     ));
+}
+
+/// A solver probing an infeasible mid-iteration state must get a finite,
+/// clamped/zeroed delay, not an `Err`. This covers the previously-rejected
+/// transient inputs: sub-horizon and over-zenith elevation, and out-of-range
+/// height, on each public entry.
+#[test]
+fn tropo_clamps_transient_solver_states() {
+    use core::f64::consts::FRAC_PI_2;
+
+    let receiver = valid_tropo_receiver();
+    let met = valid_tropo_met();
+    let epoch = valid_tropo_epoch();
+
+    // --- tropo_slant: sub-horizon elevation and out-of-range height -> 0.0 ---
+    for el in [(-5.0_f64).to_radians(), 0.0] {
+        let got = super::tropo_slant(el, receiver, met, epoch)
+            .expect("sub-horizon elevation must not error");
+        assert_eq!(got, 0.0, "tropo_slant below the horizon must be exactly 0");
+    }
+    for height_m in [-200.0, 12_000.0] {
+        let rx = crate::frame::Wgs84Geodetic {
+            height_m,
+            ..receiver
+        };
+        let got = super::tropo_slant(30.0_f64.to_radians(), rx, met, epoch)
+            .expect("out-of-range height must not error");
+        assert_eq!(
+            got, 0.0,
+            "tropo_slant outside the height range must be exactly 0"
+        );
+    }
+    // Over-zenith elevation clamps to the zenith (bit-identical to el == pi/2).
+    let over = super::tropo_slant(FRAC_PI_2 + 0.1, receiver, met, epoch).expect("over-zenith ok");
+    let at_zenith = super::tropo_slant(FRAC_PI_2, receiver, met, epoch).expect("zenith ok");
+    assert!(over.is_finite() && over > 0.0);
+    assert_eq!(over.to_bits(), at_zenith.to_bits());
+
+    // The mapping floor is asin(0.01), so its sine matches the ZWD slant path's
+    // sin(elevation) >= 0.01 floor exactly (bit-for-bit).
+    assert_eq!(super::TROPO_MIN_MAPPING_ELEVATION_RAD.sin(), 0.01);
+    assert_eq!(super::TROPO_MIN_MAPPING_ELEVATION_RAD, (0.01_f64).asin());
+
+    // --- tropo_mapping: elevation floored, over-zenith and height clamped ---
+    let floored = super::tropo_mapping(
+        super::MappingModel::Niell,
+        super::TROPO_MIN_MAPPING_ELEVATION_RAD,
+        receiver,
+        epoch,
+    )
+    .expect("floor elevation ok");
+    for el in [(-5.0_f64).to_radians(), 0.0] {
+        let got = super::tropo_mapping(super::MappingModel::Niell, el, receiver, epoch)
+            .expect("sub-horizon mapping must not error");
+        assert!(got.dry.is_finite() && got.wet.is_finite());
+        assert_eq!(got.dry.to_bits(), floored.dry.to_bits());
+        assert_eq!(got.wet.to_bits(), floored.wet.to_bits());
+    }
+    let over_map =
+        super::tropo_mapping(super::MappingModel::Niell, FRAC_PI_2 + 0.1, receiver, epoch)
+            .expect("over-zenith mapping ok");
+    let zenith_map = super::tropo_mapping(super::MappingModel::Niell, FRAC_PI_2, receiver, epoch)
+        .expect("zenith mapping ok");
+    assert_eq!(over_map.dry.to_bits(), zenith_map.dry.to_bits());
+    assert_eq!(over_map.wet.to_bits(), zenith_map.wet.to_bits());
+
+    let high_rx = crate::frame::Wgs84Geodetic {
+        height_m: 20_000.0,
+        ..receiver
+    };
+    let clamped_hi_rx = crate::frame::Wgs84Geodetic {
+        height_m: super::saastamoinen::MET_GATE_HI_M,
+        ..receiver
+    };
+    let map_high = super::tropo_mapping(
+        super::MappingModel::Niell,
+        30.0_f64.to_radians(),
+        high_rx,
+        epoch,
+    )
+    .expect("out-of-range height mapping must not error");
+    let map_clamped = super::tropo_mapping(
+        super::MappingModel::Niell,
+        30.0_f64.to_radians(),
+        clamped_hi_rx,
+        epoch,
+    )
+    .expect("clamped height mapping ok");
+    assert_eq!(map_high.dry.to_bits(), map_clamped.dry.to_bits());
+    assert_eq!(map_high.wet.to_bits(), map_clamped.wet.to_bits());
+
+    // --- tropo_zenith: out-of-range height clamps to the nearest boundary ---
+    for (height_m, boundary) in [
+        (20_000.0, super::saastamoinen::MET_GATE_HI_M),
+        (-200.0, super::saastamoinen::MET_GATE_LOW_M),
+    ] {
+        let rx = crate::frame::Wgs84Geodetic {
+            height_m,
+            ..receiver
+        };
+        let bnd = crate::frame::Wgs84Geodetic {
+            height_m: boundary,
+            ..receiver
+        };
+        let got = super::tropo_zenith(super::TropoModel::Saastamoinen, rx, met)
+            .expect("out-of-range height zenith must not error");
+        let want = super::tropo_zenith(super::TropoModel::Saastamoinen, bnd, met)
+            .expect("boundary zenith ok");
+        assert_eq!(got.dry_m.to_bits(), want.dry_m.to_bits());
+        assert_eq!(got.wet_m.to_bits(), want.wet_m.to_bits());
+    }
+}
+
+/// In-domain inputs (elevation in `(0, pi/2]`, height in `[-100, 1e4]`) take the
+/// identical pre-clamp code path: the relaxed public entries are bit-for-bit
+/// equal to the underlying kernel, so the clamping only ever changes
+/// previously-rejected inputs.
+#[test]
+fn tropo_in_range_values_are_bit_unchanged() {
+    let receiver = valid_tropo_receiver();
+    let met = valid_tropo_met();
+    let epoch = valid_tropo_epoch();
+    let el = 30.0_f64.to_radians();
+    let doy = super::fractional_day_of_year(epoch);
+
+    // Mapping: public entry == direct Niell kernel at the same in-range inputs.
+    let map = super::tropo_mapping(super::MappingModel::Niell, el, receiver, epoch)
+        .expect("in-range mapping ok");
+    let kernel_map =
+        super::saastamoinen::niell_mapping(el, receiver.lat_rad, receiver.height_m, doy);
+    assert_eq!(map.dry.to_bits(), kernel_map.mh.to_bits());
+    assert_eq!(map.wet.to_bits(), kernel_map.mw.to_bits());
+
+    // Zenith: public entry == direct Saastamoinen zenith kernel.
+    let zen = super::tropo_zenith(super::TropoModel::Saastamoinen, receiver, met)
+        .expect("in-range zenith ok");
+    let kernel_zen = super::saastamoinen::zenith_delays(
+        met.pressure_hpa,
+        met.temperature_k,
+        met.relative_humidity,
+        receiver.lat_rad,
+        receiver.height_m,
+    );
+    assert_eq!(zen.dry_m.to_bits(), kernel_zen.zhd_m.to_bits());
+    assert_eq!(zen.wet_m.to_bits(), kernel_zen.zwd_m.to_bits());
+
+    // Slant: public entry == direct composed slant kernel.
+    let slant = super::tropo_slant(el, receiver, met, epoch).expect("in-range slant ok");
+    let kernel_slant = slant_components(
+        el,
+        receiver,
+        met.pressure_hpa,
+        met.temperature_k,
+        met.relative_humidity,
+        doy,
+    );
+    assert_eq!(slant.to_bits(), kernel_slant.slant_m.to_bits());
 }
 
 fn fixture_path_named(parts: &[&str]) -> PathBuf {

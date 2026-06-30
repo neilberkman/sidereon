@@ -233,6 +233,13 @@ pub enum PassError {
 /// Topocentric look angle from a ground station to a TLE satellite.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LookAngle {
+    /// Topocentric azimuth in `[0, 360)`, degrees.
+    ///
+    /// At (and arbitrarily near) the station zenith the azimuth is geometrically
+    /// undefined; it is defined here to be exactly `0.0` once the horizontal
+    /// line-of-sight projection falls below
+    /// [`crate::constants::AZIMUTH_ZENITH_EPS`], rather than returning rounding
+    /// noise or erroring.
     pub azimuth_deg: f64,
     pub elevation_deg: f64,
     pub range_km: f64,

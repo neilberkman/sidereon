@@ -10,8 +10,8 @@ use std::f64::consts::PI;
 
 use crate::astro::time::civil;
 use crate::constants::{
-    C_M_S, DEGREES_PER_CIRCLE, DEGREES_PER_SEMICIRCLE, F_L1_HZ, KM_TO_M, MICROSECONDS_PER_SECOND,
-    OBSERVABLE_TRANSMIT_TIME_ITERATIONS, OMEGA_E_DOT_RAD_S,
+    AZIMUTH_ZENITH_EPS, C_M_S, DEGREES_PER_CIRCLE, DEGREES_PER_SEMICIRCLE, F_L1_HZ, KM_TO_M,
+    MICROSECONDS_PER_SECOND, OBSERVABLE_TRANSMIT_TIME_ITERATIONS, OMEGA_E_DOT_RAD_S,
 };
 use crate::ephemeris::BroadcastEphemeris;
 use crate::estimation::recipe::SagnacRecipe;
@@ -20,6 +20,7 @@ use crate::sp3::Sp3;
 use crate::spp::EphemerisSource;
 use crate::validate;
 use crate::Error;
+use rayon::prelude::*;
 
 const FD_HALF_S: f64 = 0.5;
 
@@ -245,6 +246,12 @@ pub struct PredictedObservables {
     /// Topocentric elevation, degrees.
     pub elevation_deg: f64,
     /// Topocentric azimuth in `[0, 360)`, degrees.
+    ///
+    /// At (and arbitrarily near) the receiver's zenith the azimuth is
+    /// geometrically undefined; it is defined here to be exactly `0.0` once the
+    /// horizontal line-of-sight projection falls below
+    /// [`crate::constants::AZIMUTH_ZENITH_EPS`], rather than returning rounding
+    /// noise or erroring.
     pub azimuth_deg: f64,
     /// Transmit-time offset from receive time, rounded to microseconds.
     pub transmit_offset_us: i64,
@@ -353,6 +360,56 @@ pub fn predict(
         sat_pos_ecef_m: solved.sat_rot_ecef_m,
         sat_velocity_m_s: velocity_rot,
     })
+}
+
+/// One batch prediction request: the satellite to observe, the static receiver
+/// ECEF position in meters, and the receive epoch in seconds since J2000.
+///
+/// Each entry is fully independent of the others; the receiver position and
+/// epoch are per-request, so a single batch can mix many satellites, many
+/// receivers, and many epochs in any combination.
+pub type PredictRequest = (GnssSatelliteId, [f64; 3], f64);
+
+/// Predict observables for many `(satellite, receiver, epoch)` requests, serially.
+///
+/// Element `i` of the result is exactly what [`predict`] returns for
+/// `requests[i]` (including its `Err`), evaluated with the shared `options`.
+/// This is the single-threaded reference that [`predict_batch_parallel`] is
+/// proven bit-identical against; it lets a caller predict a whole fleet/arc in
+/// one call instead of paying per-call dispatch overhead in a host-language loop.
+pub fn predict_batch(
+    source: &dyn ObservableEphemerisSource,
+    requests: &[PredictRequest],
+    options: PredictOptions,
+) -> Vec<Result<PredictedObservables, ObservablesError>> {
+    requests
+        .iter()
+        .map(|&(sat, receiver_ecef_m, t_rx_j2000_s)| {
+            predict(source, sat, receiver_ecef_m, t_rx_j2000_s, options)
+        })
+        .collect()
+}
+
+/// Predict observables for many `(satellite, receiver, epoch)` requests, fanning
+/// the independent requests across a rayon thread pool.
+///
+/// Each request is evaluated by the same scalar [`predict`] kernel and the
+/// indexed parallel collect preserves input order, so element `i` is
+/// byte-for-byte identical to element `i` of [`predict_batch`]: the requests
+/// share no mutable state and a single `predict` is internally sequential, so
+/// throughput scales with cores while every value stays bit-exact. The
+/// `source` must be `Sync` because it is read concurrently from every worker.
+pub fn predict_batch_parallel(
+    source: &(dyn ObservableEphemerisSource + Sync),
+    requests: &[PredictRequest],
+    options: PredictOptions,
+) -> Vec<Result<PredictedObservables, ObservablesError>> {
+    requests
+        .par_iter()
+        .map(|&(sat, receiver_ecef_m, t_rx_j2000_s)| {
+            predict(source, sat, receiver_ecef_m, t_rx_j2000_s, options)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -548,12 +605,25 @@ fn topocentric(
     let n = -sl * co * dx - sl * so * dy + cl * dz;
     let u = cl * co * dx + cl * so * dy + sl * dz;
 
-    // Sidereon' application oracle pins this multiply-then-divide order.
-    let mut azimuth_deg = e.atan2(n) * DEGREES_PER_SEMICIRCLE / PI;
+    // Near the zenith the horizontal projection (e, n) is pure rounding noise,
+    // so azimuth is degenerate and defined to be 0.0 (RTKLIB satazel semantics).
+    // Outside that threshold the multiply-then-divide order is pinned by the
+    // application oracle.
+    let horiz_sq = e * e + n * n;
+    let mut azimuth_deg = if horiz_sq < AZIMUTH_ZENITH_EPS * range_m * range_m {
+        0.0
+    } else {
+        e.atan2(n) * DEGREES_PER_SEMICIRCLE / PI
+    };
     if azimuth_deg < 0.0 {
         azimuth_deg += DEGREES_PER_CIRCLE;
     }
-    let elevation_deg = (u / range_m).asin() * DEGREES_PER_SEMICIRCLE / PI;
+    // range_m is an ECEF norm, so at an exact zenith u/range_m can round just
+    // past 1.0 and make asin return NaN. Clamp to the valid asin domain; this
+    // only touches the previously-NaN boundary and leaves in-range values bit
+    // identical.
+    let sin_elevation = (u / range_m).clamp(-1.0, 1.0);
+    let elevation_deg = sin_elevation.asin() * DEGREES_PER_SEMICIRCLE / PI;
 
     validate::finite(elevation_deg, "elevation_deg").map_err(map_input_error)?;
     validate::finite(azimuth_deg, "azimuth_deg").map_err(map_input_error)?;
@@ -578,6 +648,51 @@ mod public_api_tests {
         ) -> Result<ObservableState, ObservablesError> {
             Ok(self.state)
         }
+    }
+
+    #[test]
+    fn topocentric_elevation_is_ninety_at_non_equatorial_zenith() {
+        // A ~45 deg receiver (non-equatorial) with the satellite placed exactly
+        // along the receiver's recovered geodetic up, so the east/north
+        // projection is zero and the asin argument u/range lands on the domain
+        // boundary. For this receiver the rounding pushes u/range to just past
+        // 1.0 (1.0000000000000002): without the clamp asin returns NaN and the
+        // finite check turns it into an InvalidInput error. The clamp must yield
+        // a finite ~90 deg elevation instead. This exact receiver was found by
+        // scanning ECEF positions for the >1.0 rounding case.
+        let rx = [
+            4_509_179.095_483_66,
+            275_556.225_682_215_9,
+            4_487_348.408_865_919,
+        ];
+        let (lat_deg, lon_deg, _h) =
+            itrs_to_geodetic_compute(rx[0] / KM_TO_M, rx[1] / KM_TO_M, rx[2] / KM_TO_M)
+                .expect("receiver geodetic conversion");
+        assert!(lat_deg.abs() > 40.0, "receiver must be non-equatorial");
+
+        // Reconstruct the up unit vector exactly as `topocentric` does, then put
+        // the satellite straight overhead along it.
+        let lat = lat_deg * PI / DEGREES_PER_SEMICIRCLE;
+        let lon = lon_deg * PI / DEGREES_PER_SEMICIRCLE;
+        let (sl, cl) = lat.sin_cos();
+        let (so, co) = lon.sin_cos();
+        let up = [cl * co, cl * so, sl];
+
+        let d = 20_000_000.0_f64;
+        let delta = [up[0] * d, up[1] * d, up[2] * d];
+        let range = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        // Guard the regression premise: this geometry really does overshoot the
+        // asin domain (the bug this test pins).
+        let u = cl * co * delta[0] + cl * so * delta[1] + sl * delta[2];
+        assert!(
+            u / range > 1.0,
+            "test geometry must overshoot the asin domain"
+        );
+
+        let (elevation_deg, _azimuth_deg) =
+            topocentric(rx, delta, range).expect("non-equatorial zenith must not error");
+        assert!(elevation_deg.is_finite());
+        assert!((elevation_deg - 90.0).abs() < 1e-9);
     }
 
     #[test]
@@ -842,5 +957,157 @@ mod tests {
             "receiver_ecef_m",
             ObservablesInputErrorKind::OutOfRange,
         );
+    }
+
+    // WGS84 equatorial radius; a receiver here sits at lat=0, lon=0, height~=0,
+    // so the geodetic up direction is +X and a satellite displaced along +X is
+    // exactly overhead (degenerate azimuth geometry).
+    const EQUATORIAL_RX_X_M: f64 = 6_378_137.0;
+
+    #[test]
+    fn topocentric_azimuth_is_zero_at_exact_zenith() {
+        // Satellite displaced purely radially (+X) above an equatorial receiver:
+        // east == north == 0, so azimuth is degenerate.
+        let (elevation_deg, azimuth_deg) = topocentric(
+            [EQUATORIAL_RX_X_M, 0.0, 0.0],
+            [20_000_000.0, 0.0, 0.0],
+            20_000_000.0,
+        )
+        .expect("zenith topocentric must not error");
+        assert_eq!(azimuth_deg, 0.0);
+        assert!(azimuth_deg.is_finite());
+        assert!((elevation_deg - 90.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn topocentric_azimuth_is_zero_just_off_zenith() {
+        // A ~1e-9 m horizontal nudge is pure rounding-scale noise at a 20,000 km
+        // range, so azimuth stays pinned to 0.0 (RTKLIB satazel semantics).
+        let (_, azimuth_deg) = topocentric(
+            [EQUATORIAL_RX_X_M, 0.0, 0.0],
+            [20_000_000.0, 1.0e-9, 1.0e-9],
+            20_000_000.0,
+        )
+        .expect("near-zenith topocentric must not error");
+        assert_eq!(azimuth_deg, 0.0);
+        assert!(azimuth_deg.is_finite());
+    }
+
+    #[test]
+    fn predict_azimuth_is_zero_at_exact_zenith() {
+        let source = StaticSource {
+            state: ObservableState {
+                position_ecef_m: [EQUATORIAL_RX_X_M + 20_000_000.0, 0.0, 0.0],
+                clock_s: None,
+            },
+        };
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id");
+        let obs = predict(
+            &source,
+            sat,
+            [EQUATORIAL_RX_X_M, 0.0, 0.0],
+            0.0,
+            PredictOptions {
+                carrier_hz: F_L1_HZ,
+                light_time: false,
+                sagnac: false,
+            },
+        )
+        .expect("zenith predict must not error");
+        assert_eq!(obs.azimuth_deg, 0.0);
+        assert!(obs.azimuth_deg.is_finite());
+        assert!((obs.elevation_deg - 90.0).abs() < 1e-9);
+    }
+
+    fn batch_test_requests() -> Vec<PredictRequest> {
+        let sat1 = GnssSatelliteId::new(GnssSystem::Gps, 21).expect("valid satellite id");
+        let sat2 = GnssSatelliteId::new(GnssSystem::Gps, 7).expect("valid satellite id");
+        vec![
+            (sat1, [4_027_894.0, 307_046.0, 4_919_474.0], 646_272_000.0),
+            (sat2, [4_027_900.0, 307_050.0, 4_919_480.0], 646_272_030.0),
+            (
+                sat1,
+                [1_130_000.0, -4_830_000.0, 3_994_000.0],
+                646_272_060.0,
+            ),
+            (
+                sat2,
+                [-2_700_000.0, -4_290_000.0, 3_855_000.0],
+                646_272_090.0,
+            ),
+        ]
+    }
+
+    fn assert_observables_bits_eq(a: &PredictedObservables, b: &PredictedObservables) {
+        assert_eq!(a.geometric_range_m.to_bits(), b.geometric_range_m.to_bits());
+        assert_eq!(a.range_rate_m_s.to_bits(), b.range_rate_m_s.to_bits());
+        assert_eq!(a.doppler_hz.to_bits(), b.doppler_hz.to_bits());
+        assert_eq!(a.elevation_deg.to_bits(), b.elevation_deg.to_bits());
+        assert_eq!(a.azimuth_deg.to_bits(), b.azimuth_deg.to_bits());
+        assert_eq!(a.transmit_offset_us, b.transmit_offset_us);
+        assert_eq!(
+            a.transmit_time_j2000_s.to_bits(),
+            b.transmit_time_j2000_s.to_bits()
+        );
+        for k in 0..3 {
+            assert_eq!(a.los_unit[k].to_bits(), b.los_unit[k].to_bits());
+            assert_eq!(a.sat_pos_ecef_m[k].to_bits(), b.sat_pos_ecef_m[k].to_bits());
+            assert_eq!(
+                a.sat_velocity_m_s[k].to_bits(),
+                b.sat_velocity_m_s[k].to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn predict_batch_matches_scalar_loop_bitwise() {
+        let source = StaticSource {
+            state: ObservableState {
+                position_ecef_m: [20_200_000.0, 14_000_000.0, 21_700_000.0],
+                clock_s: Some(1.25e-6),
+            },
+        };
+        let options = PredictOptions {
+            carrier_hz: F_L1_HZ,
+            light_time: true,
+            sagnac: true,
+        };
+        let requests = batch_test_requests();
+        let batch = predict_batch(&source, &requests, options);
+        assert_eq!(batch.len(), requests.len());
+        for (entry, &(sat, rx, t)) in batch.iter().zip(requests.iter()) {
+            let scalar = predict(&source, sat, rx, t, options);
+            match (entry, &scalar) {
+                (Ok(b), Ok(s)) => assert_observables_bits_eq(b, s),
+                (Err(_), Err(_)) => {}
+                _ => panic!("batch and scalar predict disagree on Ok/Err"),
+            }
+        }
+    }
+
+    #[test]
+    fn predict_batch_parallel_matches_serial_bitwise() {
+        let source = StaticSource {
+            state: ObservableState {
+                position_ecef_m: [20_200_000.0, 14_000_000.0, 21_700_000.0],
+                clock_s: Some(1.25e-6),
+            },
+        };
+        let options = PredictOptions {
+            carrier_hz: F_L1_HZ,
+            light_time: true,
+            sagnac: true,
+        };
+        let requests = batch_test_requests();
+        let serial = predict_batch(&source, &requests, options);
+        let parallel = predict_batch_parallel(&source, &requests, options);
+        assert_eq!(serial.len(), parallel.len());
+        for (s, p) in serial.iter().zip(parallel.iter()) {
+            match (s, p) {
+                (Ok(a), Ok(b)) => assert_observables_bits_eq(a, b),
+                (Err(_), Err(_)) => {}
+                _ => panic!("serial and parallel batch disagree on Ok/Err"),
+            }
+        }
     }
 }

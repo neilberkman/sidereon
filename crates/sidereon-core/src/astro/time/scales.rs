@@ -686,6 +686,40 @@ pub fn find_leap_seconds(jd_utc: f64) -> f64 {
     rubber_tai_minus_utc(jd_utc)
 }
 
+/// TAI - UTC (the full accumulated leap-second count) at a UTC Julian date.
+///
+/// This is the IERS / Bulletin C quantity: the difference between International
+/// Atomic Time and Coordinated Universal Time. From 2017-01-01 onward it is
+/// **37 s**. It is the unambiguously-named alias of [`find_leap_seconds`] and
+/// returns the identical value.
+///
+/// This is **not** the GNSS "leap seconds since the GPS epoch" quantity. A GNSS
+/// caller who wants GPS - UTC (18 s in 2017) must call [`gps_utc_offset_s`];
+/// using this function there over-counts by `TAI - GPST = 19 s`.
+///
+/// See [`find_leap_seconds`] for the table, rubber-second, and boundary
+/// semantics, which this function inherits verbatim.
+pub fn tai_utc_offset_s(jd_utc: f64) -> f64 {
+    find_leap_seconds(jd_utc)
+}
+
+/// GPS - UTC (the GNSS leap-second offset since the GPS epoch) at a UTC Julian
+/// date.
+///
+/// This is the IS-GPS-200 quantity broadcast in the navigation message: the
+/// difference between GPS system time and UTC. From 2017-01-01 onward it is
+/// **18 s**. By definition `GPST - TAI = -19 s` (equivalently
+/// `TAI - GPST = +19 s`), so
+/// `GPS-UTC = (TAI-UTC) + (GPST-TAI) = (TAI-UTC) - 19 s`,
+/// i.e. `gps_utc_offset_s == tai_utc_offset_s - 19`.
+///
+/// Use this, not [`tai_utc_offset_s`], whenever you mean "the leap seconds a
+/// GPS receiver applies"; the two differ by a constant 19 s and silently
+/// returning TAI - UTC where GPS - UTC is expected is a 19 s blunder.
+pub fn gps_utc_offset_s(jd_utc: f64) -> f64 {
+    find_leap_seconds(jd_utc) - GPST_MINUS_TAI_S
+}
+
 /// Evaluate the pre-1972 piecewise-linear TAI-UTC model at a UTC Julian date.
 ///
 /// Selects the latest [`RUBBER_SECONDS`] segment whose `start_mjd` precedes the
@@ -993,6 +1027,35 @@ mod tests {
         // Post-1972 integer table is untouched (bit-identical goldens).
         assert_eq!(find_leap_seconds(utc_jd(1980, 1, 1, 0, 0, 0.0)), 19.0);
         assert_eq!(find_leap_seconds(utc_jd(2017, 1, 1, 0, 0, 0.0)), 37.0);
+    }
+
+    #[test]
+    fn tai_utc_and_gps_utc_offsets_match_iers_and_is_gps_200() {
+        // 2017-01-01 onward: IERS Bulletin C TAI-UTC = 37 s; IS-GPS-200
+        // GPS-UTC = 18 s; the two differ by the fixed GPST-TAI = 19 s.
+        let jd_2017 = utc_jd(2017, 1, 1, 0, 0, 0.0);
+        assert_eq!(tai_utc_offset_s(jd_2017), 37.0);
+        assert_eq!(gps_utc_offset_s(jd_2017), 18.0);
+        assert_eq!(tai_utc_offset_s(jd_2017) - gps_utc_offset_s(jd_2017), 19.0);
+
+        // The named alias must equal the historical accessor bit-for-bit, and the
+        // GPS offset must track it minus 19 s across the whole integer table.
+        for (y, m, d) in [(1980, 1, 1), (2000, 1, 1), (2009, 1, 1), (2017, 1, 1)] {
+            let jd = utc_jd(y, m, d, 0, 0, 0.0);
+            assert_eq!(
+                tai_utc_offset_s(jd).to_bits(),
+                find_leap_seconds(jd).to_bits()
+            );
+            assert_eq!(gps_utc_offset_s(jd), find_leap_seconds(jd) - 19.0);
+        }
+
+        // Cross-check GPS-UTC against the leap-aware UTC->GPST offset, which is
+        // independently validated against RTKLIB.
+        assert_eq!(
+            gps_utc_offset_s(jd_2017),
+            timescale_offset_at_s(TimeScale::Utc, TimeScale::Gpst, jd_2017)
+                .expect("leap-aware offset")
+        );
     }
 
     #[test]

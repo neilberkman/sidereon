@@ -8,6 +8,7 @@ pub use crate::astro::constants::astro::{AU_KM, AU_M};
 pub use crate::astro::constants::earth::{
     MEAN_EARTH_RADIUS_M, OMEGA_E_DOT_RAD_S, WGS84_A_KM, WGS84_A_M, WGS84_E2, WGS84_F,
 };
+pub use crate::astro::constants::geometry::AZIMUTH_ZENITH_EPS;
 pub use crate::astro::constants::time::{J2000_JD, SECONDS_PER_DAY, SECONDS_PER_WEEK};
 pub use crate::astro::constants::units::{
     DEGREES_PER_CIRCLE, DEGREES_PER_SEMICIRCLE, DEG_TO_RAD, KM_TO_M, MICROSECONDS_PER_SECOND,

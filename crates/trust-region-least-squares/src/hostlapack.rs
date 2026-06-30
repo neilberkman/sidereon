@@ -671,19 +671,21 @@ fn numpy_svml_power3(
         return Ok(None);
     };
 
-    // SAFETY: The NumPy extension is already loaded by the Python process in
-    // live parity runs. Loading it here is only to resolve the same SVML pow
-    // symbol used by NumPy's AVX-512 power ufunc.
-    let library = unsafe { Library::new(&umath_path) }.map_err(|err| LapackError::Dlopen {
-        path: umath_path.clone(),
-        message: err.to_string(),
-    })?;
-    let pow8: Symbol<'_, SvmlPow8> =
-        unsafe { library.get(b"__svml_pow8\0") }.map_err(|err| LapackError::Symbol {
-            path: umath_path.clone(),
-            symbol: "__svml_pow8",
-            message: err.to_string(),
-        })?;
+    // The NumPy ufunc extension resolves CPython symbols (e.g. PyObject_SelfIter)
+    // that are only present when an interpreter has imported it; side-loading it
+    // here can fail with those undefined symbols. When it cannot be loaded or the
+    // SVML symbol is absent, fall back to the scalar power path rather than
+    // failing the solve - that path matches a NumPy whose pow ufunc is scalar
+    // (SVML disabled / non-AVX-512), which is the certified reference config.
+    // SAFETY: loading the extension only to resolve the same SVML pow symbol
+    // NumPy's AVX-512 power ufunc uses.
+    let Ok(library) = (unsafe { Library::new(&umath_path) }) else {
+        return Ok(None);
+    };
+    // SAFETY: `__svml_pow8` has the SVML `(__m512d, __m512d) -> __m512d` ABI.
+    let Ok(pow8) = (unsafe { library.get::<SvmlPow8>(b"__svml_pow8\0") }) else {
+        return Ok(None);
+    };
 
     let mut out = vec![0.0; x.len()];
     for (chunk_index, chunk) in x.chunks(8).enumerate() {

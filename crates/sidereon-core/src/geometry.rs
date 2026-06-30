@@ -10,8 +10,9 @@ use crate::astro::angles::normalize_geodetic_lon_rad;
 
 use crate::constants::{C_M_S, F_L1_HZ, KM_TO_M, OMEGA_E_DOT_RAD_S};
 pub use crate::dop::{
-    dop, error_ellipse_from_geometry, geometry_cofactor, horizontal_error_ellipse,
-    line_of_sight_from_az_el_deg, position_covariance_from_geometry_m2, Dop, DopError,
+    dop, dop_with_convention, error_ellipse_2x2, error_ellipse_from_geometry, geometry_cofactor,
+    geometry_cofactor_with_convention, horizontal_error_ellipse, line_of_sight_from_az_el_deg,
+    position_covariance_from_geometry_m2, Dop, DopError, EnuConvention, ErrorEllipse2,
     GeometryCofactor, HorizontalErrorEllipse, LineOfSight, PositionCovariance,
 };
 pub use crate::frame::{ItrfPositionM, ItrfVelocityMS, Wgs84Geodetic};

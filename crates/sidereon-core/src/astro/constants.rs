@@ -34,6 +34,23 @@ pub mod units {
     pub const ARCSEC_TO_RAD: f64 = 4.848_136_811_095_359_935_899_141e-6;
 }
 
+/// Topocentric look-angle geometry tolerances.
+pub mod geometry {
+    /// Squared horizontal fraction of the unit line of sight below which the
+    /// topocentric azimuth is degenerate and is defined to be `0.0`.
+    ///
+    /// At (and arbitrarily near) the observer's zenith the east and north
+    /// components of the line of sight collapse to pure rounding residuals, so
+    /// `atan2(east, north)` carries no real bearing information. Following
+    /// RTKLIB's `satazel` (which sets `az = 0` when the squared horizontal
+    /// projection of the unit line-of-sight vector is `< 1e-12`), azimuth is
+    /// pinned to `0.0` inside this threshold rather than returning rounding
+    /// noise. The comparison is made in squared form
+    /// (`east^2 + north^2 < AZIMUTH_ZENITH_EPS * range^2`) so it is scale free
+    /// regardless of the units the line of sight is expressed in.
+    pub const AZIMUTH_ZENITH_EPS: f64 = 1e-12;
+}
+
 /// Time-scale and Julian-date constants.
 pub mod time {
     use super::units::MICROSECONDS_PER_SECOND_I64;

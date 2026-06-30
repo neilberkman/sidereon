@@ -39,6 +39,7 @@ pub use model::{
     SECONDS_PER_WEEK,
 };
 pub use scales::{
+    find_leap_seconds, gps_utc_offset_s, leap_second_table, tai_utc_offset_s,
     timescale_offset_at_s, timescale_offset_s, TimeOffsetError, TimeOffsetErrorCode, TimeScales,
     GLONASST_MINUS_UTC_S,
 };

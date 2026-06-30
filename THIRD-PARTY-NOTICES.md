@@ -68,3 +68,9 @@ no source code was copied:
   Correction Algorithm for Galileo Single Frequency Users"; MODIP and CCIR data
   tables transcribed as ITU-R / EU-JRC reference data (facts).
 - NRLMSISE-00: U.S. Naval Research Laboratory (public domain).
+- EGM96 geoid undulation grid (`crates/sidereon-core/src/egm96_geoid_1deg.bin`):
+  Earth Gravitational Model 1996, a joint NIMA (now NGA) / NASA GSFC / Ohio State
+  University model. As a work of the U.S. Government it is in the public domain
+  and is distributed by NGA without restriction. The embedded file is the
+  official 15-arcminute grid (`WW15MGH.DAC`) decimated to a 1-degree lattice;
+  each sample is a genuine EGM96 undulation value at the corresponding node.

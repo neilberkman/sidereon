@@ -17,20 +17,44 @@
 //!   interpolation ([`GeoidGrid::undulation_rad`] / [`GeoidGrid::undulation_deg`]);
 //! - [`GeoidGrid::from_text`], a data-loading hook that parses a simple,
 //!   documented grid text format so a caller can supply a full EGM grid;
+//! - [`GeoidGrid::from_egm96_dac`], a loader for the authoritative NGA EGM96
+//!   15-arcminute binary grid (`WW15MGH.DAC`) for decimetre-class datum work;
+//! - [`egm96_undulation`] / [`egm96_grid`], a zero-setup lookup against an
+//!   embedded genuine EGM96 1-degree global grid (a higher-accuracy alternative
+//!   to the coarse built-in);
 //! - [`geoid_undulation`], a zero-setup lookup against a small COARSE built-in
 //!   global grid, plus [`orthometric_height_m`] / [`ellipsoidal_height_m`] height
 //!   conversion helpers.
 //!
-//! ## Built-in grid vs. loading a real model
+//! ## Choosing a grid
 //!
-//! Embedding a full-resolution EGM grid (EGM2008 is a 1-minute, ~2.3 GB grid)
-//! is impractical to vendor into the crate, so the built-in grid is a COARSE
-//! 30-degree global field. It reproduces the large-scale character of the geoid
-//! (the Indian Ocean low, the North Atlantic / New Guinea highs, the polar
-//! offsets) and is suitable for tests, sanity checks, and metre-scale fallback,
-//! but it is NOT survey-grade. Production code should load a real model through
-//! [`GeoidGrid::from_text`] (or build a [`GeoidGrid`] from any parsed source)
-//! and call [`GeoidGrid::undulation_rad`] directly.
+//! Three accuracy tiers are available, in increasing fidelity:
+//!
+//! 1. [`geoid_undulation`] - the COARSE 30-degree built-in. It reproduces the
+//!    large-scale character of the geoid (the Indian Ocean low, the North
+//!    Atlantic / New Guinea highs, the polar offsets) and is fine for tests,
+//!    sanity checks, and metre-scale fallback, but it is NOT survey-grade
+//!    (decametre-level error).
+//! 2. [`egm96_undulation`] - an embedded GENUINE EGM96 1-degree global grid,
+//!    decimated from the official NGA 15-arcminute model. Its bilinear lookup
+//!    agrees with the full 15-arcminute EGM96 grid to ~0.4 m RMS (95th
+//!    percentile ~0.7 m; up to a few metres over the steepest geoid gradients).
+//!    This is the recommended zero-setup default for metre-class datum work.
+//! 3. [`GeoidGrid::from_egm96_dac`] with the official `WW15MGH.DAC` file (a
+//!    ~2 MB download, not vendored here) - the full 15-arcminute resolution. Its
+//!    bilinear lookup tracks the geoid to roughly decimetre RMS, but the
+//!    worst-case bilinear interpolation error can still exceed 1 m over the
+//!    steepest geoid gradients (see
+//!    <https://geographiclib.sourceforge.io/html/geoid.html> for the egm96-15
+//!    error envelope), so this path supports decimetre-class typical datum work
+//!    rather than guaranteed sub-metre accuracy everywhere. Embedding the full
+//!    grid is impractical (the 15-arcminute grid is ~1 M samples and EGM2008
+//!    1-minute is ~2.3 GB), so the high-resolution path loads the file at
+//!    runtime.
+//!
+//! A caller with any other vendor grid can lower it to [`GeoidGrid::from_text`]
+//! or build a [`GeoidGrid`] via [`GeoidGrid::new`] and call
+//! [`GeoidGrid::undulation_rad`] directly.
 
 use std::sync::OnceLock;
 
@@ -223,6 +247,62 @@ impl GeoidGrid {
         )
     }
 
+    /// Parse the authoritative NGA EGM96 15-arcminute binary geoid grid
+    /// (`WW15MGH.DAC`) for decimetre-class datum work.
+    ///
+    /// This is the highest-resolution path in the module. Its bilinear lookup
+    /// tracks the geoid to roughly decimetre RMS, but the worst-case bilinear
+    /// interpolation error can still exceed 1 m over the steepest geoid
+    /// gradients, so it does not guarantee sub-metre accuracy everywhere.
+    ///
+    /// The file is a headerless block of `721 * 1440` big-endian `INTEGER*2`
+    /// samples in centimetres, arranged north-to-south by record (record 1 at
+    /// latitude `+90`, last record at `-90`, in `0.25`-degree steps) and, within
+    /// each record, west-to-east by longitude from `0` to `359.75` degrees in
+    /// `0.25`-degree steps. Each sample is divided by 100 to get metres. The rows
+    /// are flipped to the latitude-ascending storage order of [`GeoidGrid`], so
+    /// the resulting grid is global in longitude and wraps across the
+    /// antimeridian like any other full-span grid.
+    ///
+    /// The file is not vendored in this crate (it is a ~2 MB public-domain NGA
+    /// download); fetch `WW15MGH.DAC` from the NGA EGM96 distribution and pass its
+    /// bytes here. For a zero-setup metre-class default without the download, use
+    /// [`egm96_undulation`] instead.
+    ///
+    /// Returns [`GeoidError::Parse`] if the byte length is not exactly
+    /// `721 * 1440 * 2` bytes.
+    pub fn from_egm96_dac(bytes: &[u8]) -> Result<Self, GeoidError> {
+        let expected = EGM96_DAC_N_LAT * EGM96_DAC_N_LON * 2;
+        if bytes.len() != expected {
+            return Err(GeoidError::Parse {
+                reason: format!(
+                    "EGM96 WW15MGH.DAC must be {expected} bytes ({EGM96_DAC_N_LAT} x {EGM96_DAC_N_LON} big-endian int16), got {}",
+                    bytes.len()
+                ),
+            });
+        }
+        let mut values_m = vec![0.0f64; EGM96_DAC_N_LAT * EGM96_DAC_N_LON];
+        for i in 0..EGM96_DAC_N_LAT {
+            // DAC record 0 is +90 (north); GeoidGrid stores latitude ascending,
+            // so internal row i (latitude -90 + i*0.25) reads DAC record N-1-i.
+            let src_row = EGM96_DAC_N_LAT - 1 - i;
+            for c in 0..EGM96_DAC_N_LON {
+                let off = (src_row * EGM96_DAC_N_LON + c) * 2;
+                let cm = i16::from_be_bytes([bytes[off], bytes[off + 1]]);
+                values_m[i * EGM96_DAC_N_LON + c] = f64::from(cm) / 100.0;
+            }
+        }
+        Self::new(
+            -90.0,
+            0.0,
+            0.25,
+            0.25,
+            EGM96_DAC_N_LAT,
+            EGM96_DAC_N_LON,
+            values_m,
+        )
+    }
+
     /// Whether the grid spans a full 360 degrees of longitude (and therefore
     /// wraps across the antimeridian during interpolation).
     fn is_global_longitude(&self) -> bool {
@@ -333,19 +413,121 @@ pub fn geoid_undulation(lat_rad: f64, lon_rad: f64) -> f64 {
 }
 
 /// Orthometric height `H = h - N` (metres above mean sea level) from an
-/// ellipsoidal height and a geodetic position in radians, using the built-in
-/// grid's undulation. For a real model, subtract
-/// [`GeoidGrid::undulation_rad`] directly.
+/// ellipsoidal height and a geodetic position in radians, using the COARSE
+/// 30-degree built-in model's undulation (decametre-level error, NOT
+/// survey-grade). For metre-class conversion use [`egm96_orthometric_height_m`];
+/// for a real model, subtract [`GeoidGrid::undulation_rad`] directly.
 pub fn orthometric_height_m(ellipsoidal_height_m: f64, lat_rad: f64, lon_rad: f64) -> f64 {
     ellipsoidal_height_m - geoid_undulation(lat_rad, lon_rad)
 }
 
 /// Ellipsoidal height `h = H + N` (metres above the WGS84 ellipsoid) from an
-/// orthometric height and a geodetic position in radians, using the built-in
-/// grid's undulation. For a real model, add [`GeoidGrid::undulation_rad`]
-/// directly.
+/// orthometric height and a geodetic position in radians, using the COARSE
+/// 30-degree built-in model's undulation (decametre-level error, NOT
+/// survey-grade). For metre-class conversion use [`egm96_ellipsoidal_height_m`];
+/// for a real model, add [`GeoidGrid::undulation_rad`] directly.
 pub fn ellipsoidal_height_m(orthometric_height_m: f64, lat_rad: f64, lon_rad: f64) -> f64 {
     orthometric_height_m + geoid_undulation(lat_rad, lon_rad)
+}
+
+/// Orthometric height `H = h - N` (metres above mean sea level) from an
+/// ellipsoidal height and a geodetic position in radians, using the embedded
+/// GENUINE EGM96 1-degree model via [`egm96_undulation`].
+///
+/// This is the recommended zero-setup height converter for metre-class datum
+/// work; the [`orthometric_height_m`] sibling uses the COARSE 30-degree built-in
+/// instead and is only suitable for sanity checks.
+pub fn egm96_orthometric_height_m(ellipsoidal_height_m: f64, lat_rad: f64, lon_rad: f64) -> f64 {
+    ellipsoidal_height_m - egm96_undulation(lat_rad, lon_rad)
+}
+
+/// Ellipsoidal height `h = H + N` (metres above the WGS84 ellipsoid) from an
+/// orthometric height and a geodetic position in radians, using the embedded
+/// GENUINE EGM96 1-degree model via [`egm96_undulation`].
+///
+/// This is the recommended zero-setup height converter for metre-class datum
+/// work; the [`ellipsoidal_height_m`] sibling uses the COARSE 30-degree built-in
+/// instead and is only suitable for sanity checks.
+pub fn egm96_ellipsoidal_height_m(orthometric_height_m: f64, lat_rad: f64, lon_rad: f64) -> f64 {
+    orthometric_height_m + egm96_undulation(lat_rad, lon_rad)
+}
+
+/// Latitude record count of the NGA EGM96 `WW15MGH.DAC` 15-arcminute grid.
+const EGM96_DAC_N_LAT: usize = 721;
+/// Longitude sample count per record of the NGA EGM96 `WW15MGH.DAC` grid.
+const EGM96_DAC_N_LON: usize = 1440;
+
+/// Latitude row count of the embedded genuine EGM96 1-degree grid.
+const EGM96_1DEG_N_LAT: usize = 181;
+/// Longitude column count of the embedded genuine EGM96 1-degree grid.
+const EGM96_1DEG_N_LON: usize = 360;
+
+// Provenance of the embedded EGM96 1-degree undulation grid
+// (`egm96_geoid_1deg.bin`):
+//
+// Source model: EGM96 (Earth Gravitational Model 1996), the joint NIMA (now
+// NGA) / NASA GSFC / Ohio State University global geopotential model. The geoid
+// undulation grid is a work of the U.S. Government and is in the public domain;
+// NGA distributes it without restriction. See THIRD-PARTY-NOTICES.md.
+//
+// Origin file: the official NGA 15-arcminute binary grid `WW15MGH.DAC`
+// (721 x 1440 big-endian INTEGER*2 centimetres, north-to-south records,
+// longitude 0..359.75 E), obtained from the public OpenSGeo PROJ vdatum mirror
+// (download.osgeo.org/proj/vdatum/egm96_15/). `egm96_geoid_1deg.bin` is that
+// grid decimated to a 1-degree lattice: each sample is the exact `WW15MGH.DAC`
+// value at the corresponding integer-degree node (no resampling or smoothing -
+// 1 degree is an integer multiple of the 0.25-degree source spacing), so every
+// value is a genuine EGM96 undulation, not a fabricated or fitted figure. The
+// packed format is 181 x 360 big-endian INTEGER*2 centimetres in
+// latitude-ascending (-90..+90), longitude-ascending (0..359 E) row-major order.
+// Decimating to 1 degree keeps the embedded data tractable (~127 KB) while its
+// bilinear lookup tracks the full 15-arcminute grid to ~0.4 m RMS.
+
+/// Bytes of the embedded genuine EGM96 1-degree undulation grid (big-endian
+/// int16 centimetres, latitude-ascending, longitude-ascending row-major).
+const EGM96_1DEG_BYTES: &[u8] = include_bytes!("egm96_geoid_1deg.bin");
+
+/// The embedded genuine EGM96 1-degree global geoid, decoded once on first use.
+///
+/// See [`egm96_undulation`] for the recommended scalar entry point and the
+/// module docs for the accuracy tiers.
+pub fn egm96_grid() -> &'static GeoidGrid {
+    static GRID: OnceLock<GeoidGrid> = OnceLock::new();
+    GRID.get_or_init(|| {
+        assert_eq!(
+            EGM96_1DEG_BYTES.len(),
+            EGM96_1DEG_N_LAT * EGM96_1DEG_N_LON * 2,
+            "embedded EGM96 1-degree grid has the wrong byte length"
+        );
+        let mut values_m = vec![0.0f64; EGM96_1DEG_N_LAT * EGM96_1DEG_N_LON];
+        for (k, value) in values_m.iter_mut().enumerate() {
+            let cm = i16::from_be_bytes([EGM96_1DEG_BYTES[k * 2], EGM96_1DEG_BYTES[k * 2 + 1]]);
+            *value = f64::from(cm) / 100.0;
+        }
+        GeoidGrid::new(
+            -90.0,
+            0.0,
+            1.0,
+            1.0,
+            EGM96_1DEG_N_LAT,
+            EGM96_1DEG_N_LON,
+            values_m,
+        )
+        .expect("embedded EGM96 1-degree grid is well-formed")
+    })
+}
+
+/// Geoid undulation `N` (metres above the WGS84 ellipsoid) at a geodetic
+/// position in radians, from the embedded GENUINE EGM96 1-degree global grid.
+///
+/// Latitude is positive north, longitude positive east, both in radians. This is
+/// the recommended zero-setup default for metre-class datum work: its bilinear
+/// lookup agrees with the full 15-arcminute EGM96 grid to ~0.4 m RMS. For the
+/// full-resolution model load the official `WW15MGH.DAC` via
+/// [`GeoidGrid::from_egm96_dac`]; for the lowest-fidelity legacy fallback use
+/// [`geoid_undulation`].
+pub fn egm96_undulation(lat_rad: f64, lon_rad: f64) -> f64 {
+    egm96_grid().undulation_rad(lat_rad, lon_rad)
 }
 
 /// The coarse 30-degree built-in global geoid, built once on first use.
@@ -464,6 +646,25 @@ mod tests {
     }
 
     #[test]
+    fn egm96_height_converters_use_the_egm96_undulation() {
+        // A known point well away from the coarse-grid agreement; the egm96
+        // converters must subtract/add the genuine EGM96 1-degree undulation, not
+        // the coarse 30-degree built-in.
+        let lat = 37.0_f64.to_radians();
+        let lon = (-122.0_f64).to_radians();
+        let n = egm96_undulation(lat, lon);
+        let h = 250.0;
+        let big_h = egm96_orthometric_height_m(h, lat, lon);
+        assert_eq!(big_h, h - n);
+        assert_eq!(egm96_ellipsoidal_height_m(big_h, lat, lon), big_h + n);
+        // The egm96 path differs from the coarse path here (different model).
+        assert_ne!(
+            egm96_orthometric_height_m(h, lat, lon),
+            orthometric_height_m(h, lat, lon)
+        );
+    }
+
+    #[test]
     fn from_text_round_trips_a_grid() {
         let text = "\
 # coarse 2x3 regional grid
@@ -519,5 +720,100 @@ mod tests {
         assert!((normalize_longitude_deg(-190.0) - 170.0).abs() <= 1.0e-12);
         assert!((normalize_longitude_deg(180.0) - (-180.0)).abs() <= 1.0e-12);
         assert!((normalize_longitude_deg(360.0)).abs() <= 1.0e-12);
+    }
+
+    /// The embedded EGM96 1-degree grid returns its genuine node values exactly
+    /// at integer-degree positions (a node query is an exact bilinear hit). The
+    /// expected figures are the corresponding `WW15MGH.DAC` samples (cm/100),
+    /// transcribed from the source grid; see the provenance note in this module.
+    #[test]
+    fn egm96_grid_reproduces_genuine_nodes() {
+        // (lat_deg, lon_deg, expected EGM96 undulation in metres).
+        let nodes: [(f64, f64, f64); 5] = [
+            (0.0, 0.0, 17.16),    // Gulf of Guinea
+            (0.0, 80.0, -102.69), // Indian Ocean low
+            (60.0, -30.0, 63.80), // North Atlantic high (lon -30 == 330 E)
+            (-90.0, 0.0, -29.53), // south pole
+            (90.0, 0.0, 13.61),   // north pole
+        ];
+        for (lat, lon, want) in nodes {
+            let got = egm96_undulation(lat.to_radians(), lon.to_radians());
+            assert!(
+                (got - want).abs() <= 1.0e-9,
+                "egm96 node ({lat},{lon}): got {got}, want {want}"
+            );
+        }
+    }
+
+    /// The embedded EGM96 grid matches the independently published EGM96 geoid
+    /// height at a known checkpoint within the tolerance set by its 1-degree
+    /// resolution, and is far closer to truth than the coarse built-in.
+    ///
+    /// Reference: GeographicLib `GeoidEval` (egm96-5) reports `28.7068` m at
+    /// `16:46:33N 3:00:34W` (Timbuktu); see
+    /// `https://geographiclib.sourceforge.io/C++/doc/GeoidEval.1.html`. The full
+    /// 15-arcminute EGM96 grid bilinearly interpolates to `28.6976` m there; the
+    /// embedded 1-degree grid lands at `28.6746` m, i.e. within ~0.03 m of the
+    /// published value, well inside a 1-degree-resolution tolerance.
+    #[test]
+    fn egm96_grid_matches_published_checkpoint() {
+        let lat = (16.0 + 46.0 / 60.0 + 33.0 / 3600.0_f64).to_radians();
+        let lon = (-(3.0 + 0.0 / 60.0 + 34.0 / 3600.0_f64)).to_radians();
+        let published = 28.7068;
+
+        let egm96 = egm96_undulation(lat, lon);
+        assert!(
+            (egm96 - published).abs() < 0.5,
+            "egm96 Timbuktu {egm96} not within 0.5 m of published {published}"
+        );
+
+        // The genuine 1-degree grid must be strictly closer to the published
+        // value than the decametre-scale 30-degree built-in.
+        let coarse = geoid_undulation(lat, lon);
+        assert!(
+            (egm96 - published).abs() < (coarse - published).abs(),
+            "egm96 ({egm96}) should beat the coarse built-in ({coarse}) vs {published}"
+        );
+    }
+
+    /// `from_egm96_dac` decodes the NGA `WW15MGH.DAC` layout: big-endian int16
+    /// centimetres, north-to-south records flipped to latitude-ascending storage,
+    /// longitude `0..359.75` E. Validated against an independently built grid of
+    /// the same samples, plus the byte-length guard.
+    #[test]
+    fn from_egm96_dac_decodes_the_nga_layout() {
+        let n_lat = super::EGM96_DAC_N_LAT;
+        let n_lon = super::EGM96_DAC_N_LON;
+        // A deterministic per-(record, column) pattern, well within int16 cm.
+        let cm = |record: usize, col: usize| -> i16 {
+            ((record as i32) - 360 + (col as i32 % 11) - 5) as i16
+        };
+
+        let mut bytes = Vec::with_capacity(n_lat * n_lon * 2);
+        for record in 0..n_lat {
+            for col in 0..n_lon {
+                bytes.extend_from_slice(&cm(record, col).to_be_bytes());
+            }
+        }
+        let parsed = GeoidGrid::from_egm96_dac(&bytes).expect("parse synthetic DAC");
+
+        // Independent reconstruction: internal row i (latitude -90 + i*0.25) is
+        // DAC record n_lat-1-i, columns unchanged, centimetres -> metres.
+        let mut values_m = vec![0.0f64; n_lat * n_lon];
+        for i in 0..n_lat {
+            let record = n_lat - 1 - i;
+            for col in 0..n_lon {
+                values_m[i * n_lon + col] = f64::from(cm(record, col)) / 100.0;
+            }
+        }
+        let expected =
+            GeoidGrid::new(-90.0, 0.0, 0.25, 0.25, n_lat, n_lon, values_m).expect("reference grid");
+        assert_eq!(parsed, expected);
+
+        // A wrong byte length is rejected, not silently misread.
+        assert!(matches!(
+            GeoidGrid::from_egm96_dac(&bytes[..bytes.len() - 2]),
+            Err(GeoidError::Parse { .. })
+        ));
     }
 }

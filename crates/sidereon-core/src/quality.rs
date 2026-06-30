@@ -5,6 +5,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod normality;
+
 use crate::astro::math::linear::{invert_symmetric_pd, normal_equations_weighted};
 use crate::constants::DEG_TO_RAD;
 use crate::spp::{solve, EphemerisSource, Observation, ReceiverSolution, SolveInputs, SppError};

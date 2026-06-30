@@ -26,6 +26,7 @@ use crate::astro::time::scales::TimeScales;
 use crate::astro::{
     constants::astro::AU_KM,
     constants::earth::{WGS84_A_KM, WGS84_E2, WGS84_F},
+    constants::geometry::AZIMUTH_ZENITH_EPS,
     constants::models::proj::{
         HALF_PI as PROJ_HALF_PI, RAD_TO_DEG as PROJ_RAD_TO_DEG, WGS84_A_M as PROJ_WGS84_A_M,
         WGS84_B_M as PROJ_WGS84_B_M, WGS84_E2S as PROJ_WGS84_E2S, WGS84_ES as PROJ_WGS84_ES,
@@ -1033,8 +1034,15 @@ fn itrs_to_topocentric_unchecked(target_itrs_km: [f64; 3], station: &GeodeticSta
     // Elevation
     let elevation = (up / range).asin().to_degrees();
 
-    // Azimuth (measured clockwise from north)
-    let mut azimuth = east.atan2(north).to_degrees();
+    // Azimuth (measured clockwise from north). At (and arbitrarily near) the
+    // station zenith the east and north components are pure rounding residuals,
+    // so azimuth is degenerate and defined to be 0.0 (RTKLIB satazel semantics).
+    let horiz_sq = east * east + north * north;
+    let mut azimuth = if horiz_sq < AZIMUTH_ZENITH_EPS * range * range {
+        0.0
+    } else {
+        east.atan2(north).to_degrees()
+    };
     if azimuth < 0.0 {
         azimuth += 360.0;
     }
@@ -1365,6 +1373,31 @@ mod tests {
         assert!(
             gcrs_to_topocentric_compute([7000.0, f64::NAN, 0.0], &station, &ts, false).is_err()
         );
+    }
+
+    #[test]
+    fn topocentric_azimuth_is_zero_at_station_zenith() {
+        let ts = TimeScales::from_utc(2020, 6, 24, 12, 34, 56.0).expect("valid UTC instant");
+        // Equatorial station: geodetic up coincides with the geocentric radial,
+        // so a satellite displaced radially outward is exactly overhead.
+        let station = GeodeticStationKm {
+            latitude_deg: 0.0,
+            longitude_deg: 0.0,
+            altitude_km: 0.0,
+        };
+        let (sx, sy, sz) = geodetic_to_itrs_unchecked(0.0, 0.0, 0.0);
+        // Satellite ITRS position 20,000 km straight up (+X at lat0/lon0).
+        let sat_itrs = [sx + 20_000.0, sy, sz];
+        // Express it in GCRS so the standard path rotates it back to `sat_itrs`.
+        let r_itrs = gcrs_to_itrs_matrix_unchecked(&ts);
+        let r_itrs_t = inline_tr(&r_itrs);
+        let sat_gcrs = mat3_vec3_mul_unchecked(&r_itrs_t, &sat_itrs);
+
+        let (azimuth_deg, elevation_deg, _range_km) =
+            gcrs_to_topocentric_compute_unchecked(sat_gcrs, &station, &ts, false);
+        assert_eq!(azimuth_deg, 0.0);
+        assert!(azimuth_deg.is_finite());
+        assert!((elevation_deg - 90.0).abs() < 1e-6);
     }
 
     #[test]

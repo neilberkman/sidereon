@@ -39,6 +39,24 @@ pub use zwd::{
 const MIN_CALENDAR_JULIAN_DATE: f64 = 1_721_425.0;
 const MAX_CALENDAR_JULIAN_DATE: f64 = 5_373_485.0;
 
+/// Elevation floor, in radians, applied by [`tropo_mapping`] to a transient
+/// at-or-below-horizon input.
+///
+/// The mapping functions contain a `1 / sin(elevation)` term that is singular at
+/// the horizon, so the checked [`tropo_mapping`] entry clamps any elevation at or
+/// below the horizon up to this floor before evaluating, rather than rejecting it
+/// (a least-squares solver routinely probes infeasible states mid-iteration and
+/// must not abort there). The value is `asin(0.01)` (about `0.573` degrees), so
+/// `sin(TROPO_MIN_MAPPING_ELEVATION_RAD) == 0.01` exactly, matching the
+/// `sin(elevation) >= 0.01` floor used on the ZWD slant path ([`zwd`]):
+/// elevation enters the mapping only through `1 / sin(elevation)`, so flooring
+/// the sine to `0.01` is the equivalent contract. Elevations strictly above the
+/// horizon are untouched, so in-domain output is unchanged to the last bit; only
+/// previously-rejected inputs differ.
+// Literal value of `(0.01f64).asin()` (not const-evaluable); a unit test pins
+// `TROPO_MIN_MAPPING_ELEVATION_RAD.sin() == 0.01` to guard this against drift.
+pub const TROPO_MIN_MAPPING_ELEVATION_RAD: f64 = 0.010_000_166_674_167_114;
+
 /// Surface meteorological conditions at the receiver.
 ///
 /// These are the inputs to the Saastamoinen zenith delays. Pressure is in
@@ -161,11 +179,17 @@ pub struct MappingFactors {
 /// the surface pressure, temperature, and humidity come from `met`. Both
 /// components are returned as positive meters. The possibly-negative ellipsoidal
 /// height is used with its sign.
+///
+/// A height outside the model's validity range `[-100, 1e4]` meters is clamped
+/// into that range before evaluation rather than rejected, so a transient solver
+/// state never aborts the solve; an in-range height takes the identical code path
+/// and is bit-for-bit unchanged.
 pub fn tropo_zenith(model: TropoModel, receiver: Wgs84Geodetic, met: Met) -> Result<ZenithDelay> {
     validate_receiver(receiver)?;
     validate_met(met)?;
     validate_tropo_model(model)?;
 
+    let receiver = clamp_receiver_height(receiver);
     let delay = tropo_zenith_unchecked(model, receiver, met);
     validate_finite(delay.dry_m, "zenith_dry_m")?;
     validate_finite(delay.wet_m, "zenith_wet_m")?;
@@ -213,6 +237,15 @@ pub(crate) fn tropo_zenith_unchecked(
 /// (via `receiver`) and on the fractional day-of-year (derived from `epoch`),
 /// hence both are arguments. The hydrostatic mapping carries the height
 /// correction; the wet mapping does not.
+///
+/// Transient out-of-domain inputs are clamped, not rejected, so a least-squares
+/// solver that probes an infeasible state mid-iteration keeps a finite mapping
+/// and steps back: an elevation at or below the horizon is raised to
+/// [`TROPO_MIN_MAPPING_ELEVATION_RAD`], an elevation past the zenith is lowered
+/// to the zenith, and a height outside `[-100, 1e4]` meters is clamped into
+/// range. An elevation strictly above the horizon (and at or below the zenith)
+/// with an in-range height takes the identical code path and is bit-for-bit
+/// unchanged; only previously-rejected inputs differ.
 pub fn tropo_mapping(
     model: MappingModel,
     elevation_rad: f64,
@@ -220,10 +253,12 @@ pub fn tropo_mapping(
     epoch: Instant,
 ) -> Result<MappingFactors> {
     validate_mapping_model(model)?;
-    validate_elevation(elevation_rad)?;
+    validate_finite(elevation_rad, "elevation_rad")?;
     validate_receiver(receiver)?;
     validate_instant(epoch)?;
 
+    let elevation_rad = clamp_mapping_elevation(elevation_rad);
+    let receiver = clamp_receiver_height(receiver);
     let mapping = tropo_mapping_unchecked(model, elevation_rad, receiver, epoch);
     validate_finite(mapping.dry, "mapping_dry")?;
     validate_finite(mapping.wet, "mapping_wet")?;
@@ -266,7 +301,16 @@ pub(crate) fn tropo_mapping_unchecked(
 /// Composes the Saastamoinen zenith delays and the Niell mapping into the total
 /// line-of-sight delay `dry_m * mapping.dry + wet_m * mapping.wet`. The delay is
 /// zero for an elevation at or below the horizon and for a height outside the
-/// model's validity range; inside that range the result is positive.
+/// model's validity range `[-100, 1e4]` meters; inside that range the result is
+/// positive.
+///
+/// Transient out-of-domain inputs are handled, not rejected, matching the RTKLIB
+/// `tropmodel()` oracle: an elevation at or below the horizon and a height
+/// outside the validity range both return `Ok(0.0)`, and an elevation past the
+/// zenith is clamped to the zenith. This lets a least-squares solver probe an
+/// infeasible state mid-iteration, see a zero delay, and step back instead of
+/// aborting. An elevation in `(0, pi/2]` with an in-range height is bit-for-bit
+/// unchanged.
 ///
 /// Note on bit-exactness: the fractional day-of-year is derived from `epoch` at
 /// this boundary. Its integer day is exact (from the calendar date); the
@@ -280,11 +324,16 @@ pub fn tropo_slant(
     met: Met,
     epoch: Instant,
 ) -> Result<f64> {
-    validate_elevation(elevation_rad)?;
+    validate_finite(elevation_rad, "elevation_rad")?;
     validate_receiver(receiver)?;
     validate_met(met)?;
     validate_instant(epoch)?;
 
+    // Clamp an over-zenith elevation down to the zenith; a sub-horizon elevation
+    // and an out-of-range height fall to the kernel's permissive zero gate
+    // (slant_components), matching RTKLIB tropmodel(). In-domain inputs pass
+    // through unchanged: el.min(FRAC_PI_2) == el for el in (0, pi/2].
+    let elevation_rad = elevation_rad.min(core::f64::consts::FRAC_PI_2);
     let delay_m = tropo_slant_unchecked(elevation_rad, receiver, met, epoch);
     validate_finite(delay_m, "tropo_slant_m")?;
     Ok(delay_m)
@@ -397,18 +446,39 @@ fn validate_receiver(receiver: Wgs84Geodetic) -> Result<()> {
     if !(-core::f64::consts::PI..=core::f64::consts::PI).contains(&receiver.lon_rad) {
         return Err(invalid_input("receiver.lon_rad", "out of range"));
     }
-    if !(saastamoinen::MET_GATE_LOW_M..=saastamoinen::MET_GATE_HI_M).contains(&receiver.height_m) {
-        return Err(invalid_input("receiver.height_m", "out of range"));
-    }
+    // The height range is not rejected here: an out-of-range height is a
+    // recoverable transient solver state, clamped or zeroed downstream rather
+    // than erroring. Only a non-finite height (caught above) is unusable.
     Ok(())
 }
 
-fn validate_elevation(elevation_rad: f64) -> Result<()> {
-    validate_finite(elevation_rad, "elevation_rad")?;
-    if !(0.0..=core::f64::consts::FRAC_PI_2).contains(&elevation_rad) {
-        return Err(invalid_input("elevation_rad", "out of range"));
+/// Clamp a receiver's ellipsoidal height into the model's validity range.
+///
+/// In-range heights are returned unchanged (the clamp is the identity on
+/// `[-100, 1e4]` meters), so in-domain output stays bit-for-bit identical; only a
+/// transient out-of-range height is pulled to the nearest boundary.
+fn clamp_receiver_height(receiver: Wgs84Geodetic) -> Wgs84Geodetic {
+    Wgs84Geodetic {
+        height_m: receiver
+            .height_m
+            .clamp(saastamoinen::MET_GATE_LOW_M, saastamoinen::MET_GATE_HI_M),
+        ..receiver
     }
-    Ok(())
+}
+
+/// Clamp an elevation into the range over which [`tropo_mapping`] evaluates.
+///
+/// An elevation at or below the horizon is raised to
+/// [`TROPO_MIN_MAPPING_ELEVATION_RAD`] (the mapping's `1 / sin(el)` term is
+/// singular at the horizon); an elevation past the zenith is lowered to the
+/// zenith. An elevation in `(0, pi/2]` is returned unchanged
+/// (`el.min(FRAC_PI_2) == el`), keeping in-domain mapping factors bit-identical.
+fn clamp_mapping_elevation(elevation_rad: f64) -> f64 {
+    if elevation_rad <= 0.0 {
+        TROPO_MIN_MAPPING_ELEVATION_RAD
+    } else {
+        elevation_rad.min(core::f64::consts::FRAC_PI_2)
+    }
 }
 
 fn validate_instant(epoch: Instant) -> Result<()> {
