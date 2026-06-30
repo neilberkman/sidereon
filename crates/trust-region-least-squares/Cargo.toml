@@ -1,6 +1,6 @@
 [package]
 name = "trust-region-least-squares"
-version = "0.9.0"
+version = "0.9.1"
 authors = []
 edition = "2021"
 description = "A dense trust-region-reflective nonlinear least-squares solver that reproduces SciPy's least_squares (method='trf') bit-for-bit on its unbounded path for arbitrary dimension n, every loss (linear/soft_l1/huber/cauchy/arctan), and 2-point Jacobians, with an injectable SVD/BLAS seam so a pinned host LAPACK's numerical trajectory can be reproduced exactly. For anyone who needs scipy-identical least-squares results in Rust."

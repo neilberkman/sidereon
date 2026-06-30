@@ -626,14 +626,14 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sidereon"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "sidereon-core",
 ]
 
 [[package]]
 name = "sidereon-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "approx",
  "cc",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "trust-region-least-squares"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "criterion",
  "libloading",

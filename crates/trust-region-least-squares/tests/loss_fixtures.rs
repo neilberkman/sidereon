@@ -22,6 +22,9 @@ use trust_region_least_squares::parity::{
     assert_f64_bits_eq, assert_f64_slice_bits_eq, f64_from_hex,
 };
 
+#[path = "support/bitexact.rs"]
+mod bitexact;
+
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -55,6 +58,10 @@ fn loss_from_str(name: &str) -> Loss {
 
 #[test]
 fn scipy_robust_loss_reweighting_is_bit_exact() {
+    if bitexact::skip_platform_pinned_replay() {
+        return;
+    }
+
     let raw =
         std::fs::read_to_string(fixture_path("trf_loss.json")).expect("read trf loss fixture");
     let doc: Value = serde_json::from_str(&raw).expect("parse trf loss fixture");

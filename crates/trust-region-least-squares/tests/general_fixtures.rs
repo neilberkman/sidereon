@@ -23,6 +23,9 @@ use trust_region_least_squares::trf::{
     jacobian_2point, trf_no_bounds, JacobianFn, ResidualFn, TrfOptions,
 };
 
+#[path = "support/bitexact.rs"]
+mod bitexact;
+
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -86,6 +89,9 @@ fn residual_values(matrix: &[f64], target: &[f64], x: &[f64]) -> Vec<f64> {
 
 #[test]
 fn scipy_trf_general_n_hostlapack_results_are_bit_exact() {
+    if bitexact::skip_platform_pinned_replay() {
+        return;
+    }
     if skip_if_host_lapack_path_missing() {
         return;
     }

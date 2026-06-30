@@ -12,6 +12,9 @@ use serde_json::Value;
 use trust_region_least_squares::parity::{assert_f64_slice_bits_eq, f64_from_hex};
 use trust_region_least_squares::trf::jacobian_2point;
 
+#[path = "support/bitexact.rs"]
+mod bitexact;
+
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -52,6 +55,10 @@ fn residual_values(matrix: &[f64], target: &[f64], x: &[f64]) -> Vec<f64> {
 
 #[test]
 fn scipy_trf_small_dense_substrate_fixtures_are_bit_exact() {
+    if bitexact::skip_platform_pinned_replay() {
+        return;
+    }
+
     let raw =
         std::fs::read_to_string(fixture_path("trf_small_dense.json")).expect("read trf fixture");
     let doc: Value = serde_json::from_str(&raw).expect("parse trf fixture");

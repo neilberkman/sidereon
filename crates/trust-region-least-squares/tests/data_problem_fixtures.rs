@@ -27,6 +27,9 @@ use trust_region_least_squares::parity::{
     assert_f64_bits_eq, assert_f64_slice_bits_eq, f64_from_hex,
 };
 
+#[path = "support/bitexact.rs"]
+mod bitexact;
+
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -90,6 +93,9 @@ fn skip_if_host_lapack_path_missing() -> bool {
 
 #[test]
 fn scipy_trf_data_problem_hostlapack_results_are_bit_exact() {
+    if bitexact::skip_platform_pinned_replay() {
+        return;
+    }
     if skip_if_host_lapack_path_missing() {
         return;
     }

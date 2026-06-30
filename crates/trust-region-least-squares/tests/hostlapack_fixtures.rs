@@ -20,6 +20,9 @@ use trust_region_least_squares::trf::{
     jacobian_2point, trf_no_bounds, JacobianFn, ResidualFn, ThinSvd, TrfOptions,
 };
 
+#[path = "support/bitexact.rs"]
+mod bitexact;
+
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
@@ -69,6 +72,9 @@ fn residual_values(matrix: &[f64], target: &[f64], x: &[f64]) -> Vec<f64> {
 
 #[test]
 fn scipy_hostlapack_svd_fixtures_are_bit_exact() {
+    if bitexact::skip_platform_pinned_replay() {
+        return;
+    }
     if skip_if_host_lapack_path_missing() {
         return;
     }
@@ -101,6 +107,9 @@ fn scipy_hostlapack_svd_fixtures_are_bit_exact() {
 
 #[test]
 fn scipy_trf_small_dense_hostlapack_results_are_bit_exact() {
+    if bitexact::skip_platform_pinned_replay() {
+        return;
+    }
     if skip_if_host_lapack_path_missing() {
         return;
     }
@@ -211,6 +220,9 @@ fn loss_from_str(name: &str) -> Loss {
 
 #[test]
 fn scipy_trf_loss_hostlapack_results_are_bit_exact() {
+    if bitexact::skip_platform_pinned_replay() {
+        return;
+    }
     if skip_if_host_lapack_path_missing() {
         return;
     }

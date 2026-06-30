@@ -56,6 +56,10 @@ export TRUST_REGION_LEAST_SQUARES_LAPACK_PATH="$lapack_so"
 export OPENBLAS_NUM_THREADS=1
 export OPENBLAS_CORETYPE=HASWELL
 
+# Opt in to the platform-pinned hex-bit replays. A default `cargo test` skips
+# them (green on every platform); this gate runs them on the canonical host.
+export SIDEREON_BITEXACT=1
+
 echo "bitexact_gate: scipy $(python -c 'import scipy;print(scipy.__version__)') / numpy $(python -c 'import numpy;print(numpy.__version__)')"
 echo "bitexact_gate: LAPACK -> $lapack_so"
 

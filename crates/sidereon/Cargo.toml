@@ -1,6 +1,6 @@
 [package]
 name = "sidereon"
-version = "0.9.0"
+version = "0.9.1"
 authors = []
 edition = "2021"
 description = "Thin ergonomic API over sidereon-core: SP3 loading and SPP/RTK/PPP positioning solves with rich result structs and one error enum"
@@ -16,4 +16,4 @@ categories = ["science", "simulation"]
 # The complete engine. The ergonomic surface here adds no modeling logic of its
 # own; every function delegates to a sidereon-core reference entry point. The
 # default features (gnss + serde) carry the SP3/SPP/RTK/PPP API this wraps.
-sidereon-core = { path = "../sidereon-core", version = "0.9.0" }
+sidereon-core = { path = "../sidereon-core", version = "0.9.1" }
