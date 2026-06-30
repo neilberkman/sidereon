@@ -1,0 +1,29 @@
+name: bit-exact (TRLS vs scipy 1.18.0)
+
+# The trust-region-least-squares parity fixtures reproduce scipy bit-for-bit
+# only on a NON-AVX-512 x86_64 host (numpy 2.5.0's AVX-512 SVML `pow` differs
+# from glibc `pow` by 1 ULP and cannot be disabled at runtime). Stock
+# GitHub-hosted runners are often AVX-512, so this job targets a self-hosted
+# runner labelled `no-avx512`. Until such a runner is registered the job is
+# inert (it never schedules on a hosted runner), and the gate can be run by hand
+# on any non-AVX-512 box with crates/trust-region-least-squares/scripts/bitexact_gate.sh.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * 1" # weekly, Monday 07:00 UTC
+  push:
+    branches: [main]
+    paths:
+      - "crates/trust-region-least-squares/**"
+
+jobs:
+  bitexact:
+    # Requires a self-hosted x86_64 Linux runner on a non-AVX-512 CPU,
+    # registered with these labels. See scripts/bitexact_gate.sh for the env.
+    runs-on: [self-hosted, linux, x64, no-avx512]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: bit-exact gate
+        run: bash crates/trust-region-least-squares/scripts/bitexact_gate.sh
