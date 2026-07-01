@@ -134,8 +134,6 @@ impl Sp3 {
     /// Errors:
     /// - [`Error::InvalidInput`] if `query` is NaN or infinite.
     pub fn position_at_j2000_seconds(&self, sat: GnssSatelliteId, query: f64) -> Result<Sp3State> {
-        let query = validate::finite(query, "query_j2000_s").map_err(map_query_input)?;
-
         // Gather this satellite's position nodes (x = J2000 seconds, y = km),
         // in ascending epoch order, skipping epochs where the satellite has no
         // record. Track clock nodes and clock-event epochs alongside.
@@ -172,61 +170,88 @@ impl Sp3 {
             }
         }
 
-        if pos_x.is_empty() {
-            return Err(Error::UnknownSatellite(sat));
-        }
-        if pos_x.len() < 2 {
-            // A cubic spline needs >= 2 points; a single node cannot define one.
-            return Err(Error::EpochOutOfRange);
-        }
-        validate_strictly_increasing_nodes(&pos_x)?;
-
-        // Refuse grossly out-of-coverage queries instead of silently returning a
-        // diverging extrapolation. The underlying cubic spline mirrors scipy
-        // CubicSpline(extrapolate=True): a query well past the node span runs off
-        // to nonsense (megametres and worse). We allow up to one node spacing of
-        // edge extrapolation (the end cubic is still physically reasonable that
-        // close to the data) and reject anything beyond. In-coverage interpolation
-        // is bit-for-bit unchanged, so 0-ULP parity is preserved. Nodes are in
-        // ascending epoch order.
-        // Reject a query that lands deep inside an interior coverage gap rather
-        // than interpolating across it. Nominal spacing is the smallest
-        // consecutive node gap; a bracketing interval far larger than that is a
-        // gap. One nominal spacing of interpolation past either edge node is
-        // allowed (the near-gap edge stays usable); beyond that the query is in
-        // the gap and is refused.
-        let nominal = nominal_positive_spacing(&pos_x).ok_or(Error::EpochOutOfRange)?;
-        let first = pos_x[0];
-        let last = pos_x[pos_x.len() - 1];
-        if query < first - nominal || query > last + nominal {
-            return Err(Error::EpochOutOfRange);
-        }
-
-        let gap_thresh = 1.5 * nominal;
-        let mut bi = 0usize;
-        while bi + 1 < pos_x.len() && pos_x[bi + 1] <= query {
-            bi += 1;
-        }
-        if bi + 1 < pos_x.len() {
-            let (lo, hi) = (pos_x[bi], pos_x[bi + 1]);
-            if hi - lo > gap_thresh && query > lo + nominal && query < hi - nominal {
-                return Err(Error::EpochOutOfRange);
-            }
-        }
-
-        let (x_m, y_m, z_m) =
-            interpolate_position_neville(&pos_x, &pos_kx, &pos_ky, &pos_kz, query);
-
-        let clock_s = interpolate_clock(&clk_nodes, query);
-
-        Ok(Sp3State {
-            position: ItrfPositionM::new(x_m, y_m, z_m).expect("valid ITRF position"),
-            clock_s,
-            velocity: None,
-            clock_rate_s_s: None,
-            flags: crate::sp3::Sp3Flags::default(),
-        })
+        interpolate_precise_state(sat, &pos_x, &pos_kx, &pos_ky, &pos_kz, &clk_nodes, query)
     }
+}
+
+/// Interpolate a satellite state from already-gathered native-unit nodes.
+///
+/// This is the shared interpolation substrate. Both the SP3-parsed source
+/// ([`Sp3::position_at_j2000_seconds`]) and the sample-backed source
+/// ([`crate::sp3::PreciseEphemerisSamples`]) gather the same node vectors
+/// (ascending floored J2000 seconds `x`; native km `kx/ky/kz`; native
+/// `(x, clock_us, clock_event)` clock nodes) and drive this one function, so a
+/// source built from samples produces byte-identical states to the SP3 source
+/// those samples serialize to.
+///
+/// Inputs are the file-native units the reference recipes consume (km for
+/// position, microseconds for clock); the single final unit multiply to meters /
+/// seconds happens inside the position/clock evaluators, exactly as the SP3 path
+/// requires for 0-ULP parity.
+pub(super) fn interpolate_precise_state(
+    sat: GnssSatelliteId,
+    pos_x: &[f64],
+    pos_kx: &[f64],
+    pos_ky: &[f64],
+    pos_kz: &[f64],
+    clk_nodes: &[(f64, f64, bool)],
+    query: f64,
+) -> Result<Sp3State> {
+    let query = validate::finite(query, "query_j2000_s").map_err(map_query_input)?;
+
+    if pos_x.is_empty() {
+        return Err(Error::UnknownSatellite(sat));
+    }
+    if pos_x.len() < 2 {
+        // A cubic spline needs >= 2 points; a single node cannot define one.
+        return Err(Error::EpochOutOfRange);
+    }
+    validate_strictly_increasing_nodes(pos_x)?;
+
+    // Refuse grossly out-of-coverage queries instead of silently returning a
+    // diverging extrapolation. The underlying cubic spline mirrors scipy
+    // CubicSpline(extrapolate=True): a query well past the node span runs off
+    // to nonsense (megametres and worse). We allow up to one node spacing of
+    // edge extrapolation (the end cubic is still physically reasonable that
+    // close to the data) and reject anything beyond. In-coverage interpolation
+    // is bit-for-bit unchanged, so 0-ULP parity is preserved. Nodes are in
+    // ascending epoch order.
+    // Reject a query that lands deep inside an interior coverage gap rather
+    // than interpolating across it. Nominal spacing is the smallest
+    // consecutive node gap; a bracketing interval far larger than that is a
+    // gap. One nominal spacing of interpolation past either edge node is
+    // allowed (the near-gap edge stays usable); beyond that the query is in
+    // the gap and is refused.
+    let nominal = nominal_positive_spacing(pos_x).ok_or(Error::EpochOutOfRange)?;
+    let first = pos_x[0];
+    let last = pos_x[pos_x.len() - 1];
+    if query < first - nominal || query > last + nominal {
+        return Err(Error::EpochOutOfRange);
+    }
+
+    let gap_thresh = 1.5 * nominal;
+    let mut bi = 0usize;
+    while bi + 1 < pos_x.len() && pos_x[bi + 1] <= query {
+        bi += 1;
+    }
+    if bi + 1 < pos_x.len() {
+        let (lo, hi) = (pos_x[bi], pos_x[bi + 1]);
+        if hi - lo > gap_thresh && query > lo + nominal && query < hi - nominal {
+            return Err(Error::EpochOutOfRange);
+        }
+    }
+
+    let (x_m, y_m, z_m) = interpolate_position_neville(pos_x, pos_kx, pos_ky, pos_kz, query);
+
+    let clock_s = interpolate_clock(clk_nodes, query);
+
+    Ok(Sp3State {
+        position: ItrfPositionM::new(x_m, y_m, z_m).expect("valid ITRF position"),
+        clock_s,
+        velocity: None,
+        clock_rate_s_s: None,
+        flags: crate::sp3::Sp3Flags::default(),
+    })
 }
 
 fn map_query_input(error: validate::FieldError) -> Error {

@@ -412,6 +412,83 @@ pub fn predict_batch_parallel(
         .collect()
 }
 
+/// One batch range-prediction request: the satellite, the static receiver ECEF
+/// position in meters, and the receive epoch in seconds since J2000.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RangePredictionRequest {
+    /// The satellite to range against.
+    pub sat: GnssSatelliteId,
+    /// Static receiver ECEF position, meters.
+    pub receiver_ecef_m: [f64; 3],
+    /// Receive epoch, seconds since J2000.
+    pub t_rx_j2000_s: f64,
+}
+
+/// The geometry-only result of one [`predict_ranges`] request.
+///
+/// A projection of [`transmit_time_satellite_state`]: the transmit-time geometry
+/// a range-only consumer needs, without the Doppler / topocentric fields.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RangePrediction {
+    /// Geometric range after optional Sagnac transport, meters.
+    pub geometric_range_m: f64,
+    /// Satellite clock offset at transmit time, seconds (`None` if absent).
+    pub sat_clock_s: Option<f64>,
+    /// Transmit time as seconds since J2000.
+    pub transmit_time_j2000_s: f64,
+    /// Sagnac-transported satellite ECEF position, meters.
+    pub sat_pos_ecef_m: [f64; 3],
+}
+
+/// Predict geometric ranges for many `(satellite, receiver, epoch)` requests in
+/// one call, writing into a caller-provided `out` slice.
+///
+/// `out[i]` is filled from `requests[i]` using the same per-request
+/// [`transmit_time_satellite_state`] machinery (light-time iteration + Sagnac
+/// transport), so the batch is bit-identical to calling that predictor in a loop
+/// and projecting the geometry fields; this is amortization of the call boundary
+/// only, not a different algorithm. `options.carrier_hz` is unused (ranges carry
+/// no Doppler); `options.light_time` / `options.sagnac` are honored.
+///
+/// Errors:
+/// - [`ObservablesError::InvalidInput`] with field `out` if `out.len()` differs
+///   from `requests.len()`.
+/// - The first request error (invalid input or missing ephemeris) aborts the
+///   batch and is returned; `out` is then partially written.
+pub fn predict_ranges(
+    source: &dyn ObservableEphemerisSource,
+    requests: &[RangePredictionRequest],
+    options: PredictOptions,
+    out: &mut [RangePrediction],
+) -> Result<(), ObservablesError> {
+    if out.len() != requests.len() {
+        return Err(ObservablesError::InvalidInput {
+            field: "out",
+            kind: ObservablesInputErrorKind::OutOfRange,
+        });
+    }
+    let tt_options = TransmitTimeOptions {
+        light_time: options.light_time,
+        sagnac: options.sagnac,
+    };
+    for (request, slot) in requests.iter().zip(out.iter_mut()) {
+        let state = transmit_time_satellite_state(
+            source,
+            request.sat,
+            request.receiver_ecef_m,
+            request.t_rx_j2000_s,
+            tt_options,
+        )?;
+        *slot = RangePrediction {
+            geometric_range_m: state.geometric_range_m,
+            sat_clock_s: state.clock_s,
+            transmit_time_j2000_s: state.transmit_time_j2000_s,
+            sat_pos_ecef_m: state.position_ecef_m,
+        };
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SolvedTransmitTime {
     tau_s: f64,
@@ -647,6 +724,99 @@ mod public_api_tests {
             _t_j2000_s: f64,
         ) -> Result<ObservableState, ObservablesError> {
             Ok(self.state)
+        }
+    }
+
+    #[test]
+    fn predict_ranges_matches_transmit_time_loop_bitwise() {
+        let source = StaticSource {
+            state: ObservableState {
+                position_ecef_m: [20_200_000.0, 14_000_000.0, 21_700_000.0],
+                clock_s: Some(1.25e-6),
+            },
+        };
+        let options = PredictOptions {
+            carrier_hz: F_L1_HZ,
+            light_time: true,
+            sagnac: true,
+        };
+        let sat1 = GnssSatelliteId::new(GnssSystem::Gps, 21).expect("valid satellite id");
+        let sat2 = GnssSatelliteId::new(GnssSystem::Gps, 7).expect("valid satellite id");
+        let requests = [
+            RangePredictionRequest {
+                sat: sat1,
+                receiver_ecef_m: [4_027_894.0, 307_046.0, 4_919_474.0],
+                t_rx_j2000_s: 646_272_000.0,
+            },
+            RangePredictionRequest {
+                sat: sat2,
+                receiver_ecef_m: [1_130_000.0, -4_830_000.0, 3_994_000.0],
+                t_rx_j2000_s: 646_272_060.0,
+            },
+        ];
+        let mut out = [RangePrediction {
+            geometric_range_m: 0.0,
+            sat_clock_s: None,
+            transmit_time_j2000_s: 0.0,
+            sat_pos_ecef_m: [0.0; 3],
+        }; 2];
+        predict_ranges(&source, &requests, options, &mut out).expect("batch range prediction");
+
+        let tt_options = TransmitTimeOptions {
+            light_time: options.light_time,
+            sagnac: options.sagnac,
+        };
+        for (request, got) in requests.iter().zip(out.iter()) {
+            let single = transmit_time_satellite_state(
+                &source,
+                request.sat,
+                request.receiver_ecef_m,
+                request.t_rx_j2000_s,
+                tt_options,
+            )
+            .expect("single transmit-time state");
+            assert_eq!(
+                got.geometric_range_m.to_bits(),
+                single.geometric_range_m.to_bits()
+            );
+            assert_eq!(
+                got.transmit_time_j2000_s.to_bits(),
+                single.transmit_time_j2000_s.to_bits()
+            );
+            assert_eq!(
+                got.sat_clock_s.map(f64::to_bits),
+                single.clock_s.map(f64::to_bits)
+            );
+            assert_eq!(
+                got.sat_pos_ecef_m.map(f64::to_bits),
+                single.position_ecef_m.map(f64::to_bits)
+            );
+        }
+    }
+
+    #[test]
+    fn predict_ranges_rejects_length_mismatch() {
+        let source = StaticSource {
+            state: ObservableState {
+                position_ecef_m: [20_200_000.0, 14_000_000.0, 21_700_000.0],
+                clock_s: None,
+            },
+        };
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 21).expect("valid satellite id");
+        let requests = [RangePredictionRequest {
+            sat,
+            receiver_ecef_m: [4_027_894.0, 307_046.0, 4_919_474.0],
+            t_rx_j2000_s: 646_272_000.0,
+        }];
+        let mut out: [RangePrediction; 0] = [];
+        let err = predict_ranges(&source, &requests, PredictOptions::default(), &mut out)
+            .expect_err("length mismatch must fail");
+        match err {
+            ObservablesError::InvalidInput { field, kind } => {
+                assert_eq!(field, "out");
+                assert_eq!(kind, ObservablesInputErrorKind::OutOfRange);
+            }
+            other => panic!("expected InvalidInput(out, OutOfRange), got {other:?}"),
         }
     }
 

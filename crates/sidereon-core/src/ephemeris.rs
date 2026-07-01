@@ -21,8 +21,9 @@ pub use crate::rinex_nav::{
 };
 pub use crate::sp3::{
     align_clock_reference, clock_reference_offset, merge, AgreementMetric, ClockReferenceOffset,
-    EpochAgreement, MergeCombine, MergeFlag, MergeOptions, MergeReport, Sp3, Sp3DataType, Sp3Flags,
-    Sp3Header, Sp3State, Sp3TimeSystem, Sp3Version,
+    EpochAgreement, MergeCombine, MergeFlag, MergeOptions, MergeReport, PreciseEphemerisSample,
+    PreciseEphemerisSamples, PreciseSamplesError, Sp3, Sp3DataType, Sp3Flags, Sp3Header, Sp3State,
+    Sp3TimeSystem, Sp3Version,
 };
 pub use crate::spp::EphemerisSource;
 use crate::GnssSystem;
