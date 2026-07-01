@@ -1,6 +1,6 @@
 [package]
 name = "sidereon-core"
-version = "0.9.1"
+version = "0.9.2"
 authors = []
 edition = "2021"
 description = "The complete Sidereon engine: numerical astrodynamics propagation core plus the GNSS domain layer (SP3, broadcast ephemeris, multi-GNSS positioning, RTK/PPP, ionosphere/troposphere, DOP) behind a default-on gnss feature"
