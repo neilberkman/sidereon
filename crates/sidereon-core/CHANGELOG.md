@@ -2,6 +2,23 @@
 
 All notable changes to `sidereon-core` are documented here.
 
+## [0.27.1] - 2026-07-13
+
+### Fixed
+
+- `lambda_ils_search` now rejects ambiguity values outside the `i64` lattice
+  domain before reduction and checks back-transformed candidates before integer
+  conversion. Previously, an extreme finite input could saturate to
+  `i64::MAX`, overflow canonical rescoring, and return `Ok` with non-finite
+  scores and ratio.
+
+### Evaluation-bit stability
+
+- Calls whose ambiguity inputs and back-transformed candidates remain within
+  the `i64` lattice domain retain the same LAMBDA arithmetic, candidate
+  ordering, scores, and fix decisions. Inputs or internally produced candidates
+  outside that domain now return the existing typed `InvalidInput` error.
+
 ## [0.27.0] - 2026-07-12
 
 ### Added

@@ -16,8 +16,8 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm_0
 tokio = { version = "1", features = ["rt", "io-std", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sidereon = { path = "../sidereon", version = "0.27.0" }
-sidereon-core = { path = "../sidereon-core", version = "0.27.0" }
+sidereon = { path = "../sidereon", version = "0.27.1" }
+sidereon-core = { path = "../sidereon-core", version = "0.27.1" }
 
 [dev-dependencies]
 portable-pty = "0.9.0"
