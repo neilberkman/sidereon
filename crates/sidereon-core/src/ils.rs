@@ -292,6 +292,17 @@ fn integers_near(center: f64, low: i64, high: i64) -> Vec<i64> {
     values
 }
 
+fn checked_integer_search_value(rounded: f64) -> core::result::Result<i64, IlsError> {
+    const I64_MAX_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
+    if !rounded.is_finite() || rounded < i64::MIN as f64 || rounded >= I64_MAX_EXCLUSIVE {
+        return Err(IlsError::InvalidInput {
+            field: "ils float_cycles",
+            reason: "outside integer search range",
+        });
+    }
+    Ok(rounded as i64)
+}
+
 fn bounded_integer_candidates(
     float_cycle: f64,
     radius: i64,
@@ -301,15 +312,7 @@ fn bounded_integer_candidates(
     }
 
     let rounded = float_cycle.round(); // Elixir round/1: half away from zero
-    const I64_MAX_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
-    if rounded < i64::MIN as f64 || rounded >= I64_MAX_EXCLUSIVE {
-        return Err(IlsError::InvalidInput {
-            field: "ils float_cycles",
-            reason: "outside integer search range",
-        });
-    }
-
-    let center_i64 = rounded as i64;
+    let center_i64 = checked_integer_search_value(rounded)?;
     let low = center_i64
         .checked_sub(radius)
         .ok_or(IlsError::InvalidInput {
@@ -631,6 +634,9 @@ pub fn lambda_ils_search(
     validate_inputs(float_cycles, covariance)?;
     validate_covariance_geometry(covariance)?;
     validate_ratio_threshold(ratio_threshold)?;
+    for &float_cycle in float_cycles {
+        checked_integer_search_value(lam_round(float_cycle))?;
+    }
     let n = float_cycles.len();
     let q = symmetrize(covariance);
     // Inverse is kept only for the diagnostic metadata (LAMBDA itself uses LtDL).
@@ -682,7 +688,11 @@ pub fn lambda_ils_search(
     for col in 0..m {
         let b: Vec<f64> = (0..n).map(|i| zn[i + col * n]).collect();
         let x = solve_linear_first_tie(&zt, &b).ok_or(IlsError::Singular)?;
-        fixed_candidates.push(x.iter().map(|&v| lam_round(v) as i64).collect());
+        let fixed = x
+            .into_iter()
+            .map(|value| checked_integer_search_value(lam_round(value)))
+            .collect::<core::result::Result<Vec<_>, _>>()?;
+        fixed_candidates.push(fixed);
     }
 
     // LAMBDA's mlambda distance `s` is computed in the decorrelated LtDL space; to
@@ -814,7 +824,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bounded_search_ranges_outside_i64_domain() {
+    fn rejects_search_values_outside_i64_domain() {
         let cov = vec![vec![1.0]];
         let expected = Err(IlsError::InvalidInput {
             field: "ils float_cycles",
@@ -829,6 +839,27 @@ mod tests {
         assert_eq!(
             bounded_ils_search(&[i64::MIN as f64], &cov, 1, 3, 3.0),
             expected
+        );
+
+        assert_eq!(lambda_ils_search(&[f64::MAX], &cov, 3.0), expected);
+        assert_eq!(lambda_ils_search(&[-f64::MAX], &cov, 3.0), expected);
+        assert_eq!(lambda_ils_search(&[i64::MAX as f64], &cov, 3.0), expected);
+    }
+
+    #[test]
+    fn rejects_ci_lambda_crash_outside_integer_domain() {
+        let float_cycles = [1.382_418_547_873_630_5e306, 1.382_417_208_487_871_5e306];
+        let covariance = vec![
+            vec![1.382_418_547_873_630_5e306, 1.382_417_208_487_871_5e306],
+            vec![1.382_417_208_487_871_5e306, 1.382_417_208_487_871_5e306],
+        ];
+
+        assert_eq!(
+            lambda_ils_search(&float_cycles, &covariance, 1.382_417_208_487_871_5e306),
+            Err(IlsError::InvalidInput {
+                field: "ils float_cycles",
+                reason: "outside integer search range",
+            })
         );
     }
 
