@@ -116,7 +116,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Exercise the experimental causal single-frequency PPC runner scaffold.
+    /// Build and solve one route with the private causal single-frequency PPC adapter.
     PpcSolve {
         /// Base-station RINEX observation file.
         #[arg(long)]
@@ -136,6 +136,12 @@ enum Command {
         /// Maximum age of the latest causal base observation, seconds.
         #[arg(long, default_value_t = 1.2)]
         max_base_age_s: f64,
+        /// Retire an unseen ambiguity fragment after this many seconds.
+        #[arg(long, default_value_t = ppc_runner::DEFAULT_AMBIGUITY_RETIREMENT_AGE_S)]
+        ambiguity_retirement_age_s: f64,
+        /// Maximum tracked ambiguity columns; current observations are never removed.
+        #[arg(long, default_value_t = ppc_runner::DEFAULT_MAX_AMBIGUITY_COLUMNS)]
+        max_ambiguity_columns: usize,
         /// Optional cap on successfully built causal arc epochs.
         #[arg(long)]
         max_epochs: Option<usize>,
@@ -270,6 +276,8 @@ fn run(cli: Cli) -> Result<()> {
             truth,
             solution_out,
             max_base_age_s,
+            ambiguity_retirement_age_s,
+            max_ambiguity_columns,
             max_epochs,
             elevation_mask_deg,
             hold_sigma_m,
@@ -284,6 +292,8 @@ fn run(cli: Cli) -> Result<()> {
             &solution_out,
             ppc_runner::PpcRunnerOptions {
                 max_base_age_s,
+                ambiguity_retirement_age_s,
+                max_ambiguity_columns,
                 max_epochs,
                 elevation_mask_deg,
                 hold_sigma_m,
@@ -938,6 +948,15 @@ fn ppc_solve_command(
     json: bool,
 ) -> Result<()> {
     ppc_runner::validate_options(options)?;
+    validate_ppc_solution_output(
+        solution_out,
+        [
+            ("--base-obs", base_obs_path),
+            ("--rover-obs", rover_obs_path),
+            ("--nav", nav_path),
+            ("--truth", truth_path),
+        ],
+    )?;
     let base_obs = load_rinex_obs(base_obs_path)
         .with_context(|| format!("load base RINEX {}", base_obs_path.display()))?;
     let rover_obs = load_rinex_obs(rover_obs_path)
@@ -983,7 +1002,7 @@ fn ppc_solve_command(
     } else {
         println!("wrote {}", solution_out.display());
         println!(
-            "experimental single-frequency causal PPC score: {:.3}%",
+            "single-frequency causal PPC adapter score: {:.3}%",
             report.average_score_percent
         );
         println!("arc epochs: {}", result.stats.arc_epochs);
@@ -1004,8 +1023,39 @@ fn ppc_solve_command(
             "peak ambiguity columns: {}",
             result.stats.peak_ambiguity_columns
         );
+        println!(
+            "retired ambiguity columns: {}",
+            result.stats.retired_ambiguity_columns
+        );
+        println!(
+            "float-fallback epochs: {}",
+            result.stats.float_fallback_epochs
+        );
     }
     Ok(())
+}
+
+fn validate_ppc_solution_output<const N: usize>(
+    solution_out: &Path,
+    inputs: [(&str, &Path); N],
+) -> Result<()> {
+    let canonical_output = std::fs::canonicalize(solution_out).ok();
+    for (label, input) in inputs {
+        let aliases = solution_out == input
+            || same_existing_file(solution_out, input)
+            || canonical_output
+                .as_ref()
+                .zip(std::fs::canonicalize(input).ok().as_ref())
+                .is_some_and(|(output, input)| output == input);
+        if aliases {
+            bail!("--solution-out must not alias {label}");
+        }
+    }
+    Ok(())
+}
+
+fn same_existing_file(left: &Path, right: &Path) -> bool {
+    same_file::is_same_file(left, right).unwrap_or(false)
 }
 
 fn inspect_command(path: &Path) -> Result<()> {

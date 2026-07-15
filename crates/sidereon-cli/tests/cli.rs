@@ -315,14 +315,16 @@ fn ppc_solve_help_describes_private_causal_adapter() {
     let output = run(&["ppc-solve", "--help"]);
     assert!(output.status.success(), "stderr:\n{}", stderr(&output));
     let stdout = stdout(&output);
-    assert!(stdout.contains("experimental causal single-frequency PPC runner scaffold"));
+    assert!(stdout.contains("private causal single-frequency PPC adapter"));
     assert!(stdout.contains("--max-base-age-s"));
+    assert!(stdout.contains("--ambiguity-retirement-age-s"));
+    assert!(stdout.contains("--max-ambiguity-columns"));
     assert!(stdout.contains("--solution-out"));
 }
 
 #[test]
 fn ppc_solve_validates_scientific_options_before_loading_inputs() {
-    let output = run(&[
+    let common = [
         "ppc-solve",
         "--base-obs",
         "missing-base.obs",
@@ -334,12 +336,102 @@ fn ppc_solve_validates_scientific_options_before_loading_inputs() {
         "missing-reference.csv",
         "--solution-out",
         "missing-solution.csv",
-        "--max-base-age-s=-1",
+    ];
+    for (option, expected) in [
+        (
+            "--max-base-age-s=-1",
+            "--max-base-age-s must be finite and non-negative",
+        ),
+        ("--max-epochs=0", "--max-epochs must be positive"),
+        (
+            "--elevation-mask-deg=90",
+            "--elevation-mask-deg must be finite and in [0, 90)",
+        ),
+        (
+            "--hold-sigma-m=0",
+            "--hold-sigma-m must be finite and positive",
+        ),
+        (
+            "--process-noise-sigma-m=-1",
+            "--process-noise-sigma-m must be finite and non-negative",
+        ),
+        (
+            "--ambiguity-retirement-age-s=-1",
+            "--ambiguity-retirement-age-s must be finite and non-negative",
+        ),
+        (
+            "--max-ambiguity-columns=0",
+            "--max-ambiguity-columns must be positive",
+        ),
+    ] {
+        let mut args = common.to_vec();
+        args.push(option);
+        let output = run(&args);
+        assert!(
+            !output.status.success(),
+            "option {option} unexpectedly passed"
+        );
+        assert!(
+            stderr(&output).contains(expected),
+            "option {option} stderr:\n{}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn ppc_solve_rejects_an_output_that_aliases_an_input() {
+    let output = run(&[
+        "ppc-solve",
+        "--base-obs",
+        "same.obs",
+        "--rover-obs",
+        "missing-rover.obs",
+        "--nav",
+        "missing.nav",
+        "--truth",
+        "missing-reference.csv",
+        "--solution-out",
+        "same.obs",
     ]);
     assert!(!output.status.success());
     assert!(
-        stderr(&output).contains("--max-base-age-s must be finite and non-negative"),
+        stderr(&output).contains("--solution-out must not alias --base-obs"),
         "stderr:\n{}",
         stderr(&output)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn ppc_solve_rejects_a_hard_link_to_an_input() {
+    let input = temp_text_file("ppc-hard-link-input.obs", "immutable input\n");
+    let output = temp_text_file("ppc-hard-link-output.obs", "placeholder\n");
+    fs::remove_file(&output).expect("remove placeholder");
+    fs::hard_link(&input, &output).expect("create input hard link");
+    let result = run(&[
+        "ppc-solve",
+        "--base-obs",
+        input.to_str().expect("input path utf8"),
+        "--rover-obs",
+        "missing-rover.obs",
+        "--nav",
+        "missing.nav",
+        "--truth",
+        "missing-reference.csv",
+        "--solution-out",
+        output.to_str().expect("output path utf8"),
+    ]);
+    assert!(!result.status.success());
+    assert!(
+        stderr(&result).contains("--solution-out must not alias --base-obs"),
+        "stderr:\n{}",
+        stderr(&result)
+    );
+    assert_eq!(
+        fs::read_to_string(&input).expect("read input"),
+        "immutable input\n"
+    );
+    let _ = fs::remove_file(output);
+    let _ = fs::remove_file(input);
 }

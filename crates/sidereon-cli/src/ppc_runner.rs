@@ -1,17 +1,19 @@
-//! Private, causal PPC RTK runner scaffold.
+//! Private, causal PPC RTK runner adapter.
 //!
 //! The current public arc driver chooses references from the complete arc. PPC
 //! must not let future satellite availability influence an earlier solution, so
 //! this module keeps the route policy in the unpublished CLI crate and feeds the
-//! existing streaming filter one epoch at a time. This Phase 2 scaffold is kept
-//! deliberately single-frequency until the historical dual-frequency control is
-//! reproducible on current main.
+//! existing streaming filter one epoch at a time. This Phase 2 adapter is kept
+//! deliberately single-frequency because restoring the historical dual-frequency
+//! control would require estimator interfaces that are not present on current main.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{anyhow, bail, Context, Result};
+use sidereon_core::astro::math::linear::invert_matrix_first_tie;
 use sidereon_core::astro::time::{j2000_seconds, TimeScale};
 use sidereon_core::constants::C_M_S;
+use sidereon_core::ils::IlsError;
 use sidereon_core::observables::{
     is_observable_state_gap, ObservableEphemerisSource, ObservablesError,
 };
@@ -23,8 +25,9 @@ use sidereon_core::rtk::{
     BaselineReferenceSelection, ElevationMaskEpoch,
 };
 use sidereon_core::rtk_filter::{
-    update_epoch, DynamicsModel, Epoch, FilterState, MeasModel, RtkArcEpoch, RtkArcObservation,
-    SatMeas, SearchOpts, StochasticModel, UpdateError, UpdateOpts,
+    update_epoch_with_scratch, AmbiguityScale, DynamicsModel, Epoch, EpochUpdate, FilterState,
+    MeasModel, RtkArcEpoch, RtkArcObservation, RtkFilterScratch, SatMeas, SearchOpts,
+    StochasticModel, UpdateError, UpdateOpts,
 };
 use sidereon_core::velocity::{
     self, VelocityObservable, VelocityObservation, VelocitySolveOptions,
@@ -32,6 +35,8 @@ use sidereon_core::velocity::{
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 
 const MINIMUM_SATELLITES: usize = 4;
+pub(crate) const DEFAULT_AMBIGUITY_RETIREMENT_AGE_S: f64 = 15.0;
+pub(crate) const DEFAULT_MAX_AMBIGUITY_COLUMNS: usize = 128;
 // Match the established private receiver-position contract in rinex_qc. PPC is
 // a terrestrial benchmark; accepting an algebraically finite position outside
 // this shell would serialize a corrupt filter state as a benchmark solution.
@@ -46,6 +51,8 @@ pub(crate) struct PpcRunnerOptions {
     pub hold_sigma_m: f64,
     pub process_noise_sigma_m: f64,
     pub velocity_dynamics: bool,
+    pub ambiguity_retirement_age_s: f64,
+    pub max_ambiguity_columns: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +73,8 @@ pub(crate) struct PpcRunnerStats {
     pub coasted_epochs: usize,
     pub fixed_epochs: usize,
     pub peak_ambiguity_columns: usize,
+    pub retired_ambiguity_columns: usize,
+    pub float_fallback_epochs: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,6 +145,7 @@ fn doppler_code(phase_code: &str) -> String {
 struct SelectedObservation {
     satellite_id: GnssSatelliteId,
     ambiguity_id: String,
+    phase_code: &'static str,
     code_m: f64,
     phase_m: f64,
     wavelength_m: f64,
@@ -151,28 +161,53 @@ struct TimedEpoch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CausalJoinStep {
-    advanced_base_indices: std::ops::Range<usize>,
+    advanced_base_indices: Vec<usize>,
     latest_base_index: Option<usize>,
     fresh_base_index: Option<usize>,
 }
 
 #[derive(Debug)]
+enum BaseEpochSource<'a> {
+    Rinex(&'a [ObsEpoch]),
+    #[cfg(test)]
+    Timed(&'a [TimedEpoch]),
+}
+
+#[derive(Debug)]
 struct CausalEpochJoin<'a> {
-    base_epochs: &'a [TimedEpoch],
+    base_epochs: BaseEpochSource<'a>,
     cursor: usize,
-    latest_base_index: Option<usize>,
+    pending_base: Option<TimedEpoch>,
+    latest_base: Option<TimedEpoch>,
+    previous_base_time_j2000_s: Option<f64>,
     previous_rover_time_j2000_s: Option<f64>,
+    saw_base_epoch: bool,
 }
 
 impl<'a> CausalEpochJoin<'a> {
-    fn new(base_epochs: &'a [TimedEpoch]) -> Result<Self> {
-        validate_timed_epochs(base_epochs, "base", true)?;
-        Ok(Self {
-            base_epochs,
+    fn new(base_epochs: &'a [ObsEpoch]) -> Self {
+        Self {
+            base_epochs: BaseEpochSource::Rinex(base_epochs),
             cursor: 0,
-            latest_base_index: None,
+            pending_base: None,
+            latest_base: None,
+            previous_base_time_j2000_s: None,
             previous_rover_time_j2000_s: None,
-        })
+            saw_base_epoch: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn from_timed(base_epochs: &'a [TimedEpoch]) -> Self {
+        Self {
+            base_epochs: BaseEpochSource::Timed(base_epochs),
+            cursor: 0,
+            pending_base: None,
+            latest_base: None,
+            previous_base_time_j2000_s: None,
+            previous_rover_time_j2000_s: None,
+            saw_base_epoch: false,
+        }
     }
 
     fn advance(&mut self, rover_time_j2000_s: f64, max_base_age_s: f64) -> Result<CausalJoinStep> {
@@ -189,22 +224,76 @@ impl<'a> CausalEpochJoin<'a> {
             bail!("maximum causal base age must be finite and non-negative");
         }
 
-        let advanced_start = self.cursor;
-        while self.cursor < self.base_epochs.len()
-            && self.base_epochs[self.cursor].time_j2000_s <= rover_time_j2000_s
-        {
-            self.latest_base_index = Some(self.cursor);
-            self.cursor += 1;
+        let mut advanced_base_indices = Vec::new();
+        loop {
+            let candidate = match self.pending_base.take() {
+                Some(candidate) => Some(candidate),
+                None => self.next_base_epoch()?,
+            };
+            let Some(candidate) = candidate else {
+                break;
+            };
+            if candidate.time_j2000_s > rover_time_j2000_s {
+                self.pending_base = Some(candidate);
+                break;
+            }
+            advanced_base_indices.push(candidate.index);
+            self.latest_base = Some(candidate);
         }
         self.previous_rover_time_j2000_s = Some(rover_time_j2000_s);
-        let fresh_base_index = self.latest_base_index.filter(|&index| {
-            rover_time_j2000_s - self.base_epochs[index].time_j2000_s <= max_base_age_s
+        let latest_base_index = self.latest_base.map(|epoch| epoch.index);
+        let fresh_base_index = self.latest_base.and_then(|epoch| {
+            (rover_time_j2000_s - epoch.time_j2000_s <= max_base_age_s).then_some(epoch.index)
         });
         Ok(CausalJoinStep {
-            advanced_base_indices: advanced_start..self.cursor,
-            latest_base_index: self.latest_base_index,
+            advanced_base_indices,
+            latest_base_index,
             fresh_base_index,
         })
+    }
+
+    fn next_base_epoch(&mut self) -> Result<Option<TimedEpoch>> {
+        loop {
+            let epoch = match self.base_epochs {
+                BaseEpochSource::Rinex(epochs) => {
+                    let Some(epoch) = epochs.get(self.cursor) else {
+                        return Ok(None);
+                    };
+                    let index = self.cursor;
+                    self.cursor += 1;
+                    if epoch.flag > 1 {
+                        continue;
+                    }
+                    TimedEpoch {
+                        index,
+                        time_j2000_s: epoch_j2000_s(epoch),
+                    }
+                }
+                #[cfg(test)]
+                BaseEpochSource::Timed(epochs) => {
+                    let Some(epoch) = epochs.get(self.cursor).copied() else {
+                        return Ok(None);
+                    };
+                    self.cursor += 1;
+                    epoch
+                }
+            };
+            if !epoch.time_j2000_s.is_finite() {
+                bail!(
+                    "base RINEX epoch {} has a non-finite timestamp",
+                    epoch.index
+                );
+            }
+            if self
+                .previous_base_time_j2000_s
+                .is_some_and(|previous| epoch.time_j2000_s < previous)
+            {
+                bail!("base RINEX observation timestamps must be non-decreasing");
+            }
+            self.previous_base_time_j2000_s = Some(epoch.time_j2000_s);
+            self.saw_base_epoch = true;
+            return Ok(Some(epoch));
+        }
     }
 }
 
@@ -219,17 +308,27 @@ struct ArcTracker {
     generations: BTreeMap<String, usize>,
     seen: BTreeSet<String>,
     previous_present: BTreeSet<String>,
+    previous_phase_codes: BTreeMap<String, &'static str>,
 }
 
 impl ArcTracker {
-    fn segment(&mut self, observations: &mut BTreeMap<String, SelectedObservation>) {
+    fn segment(
+        &mut self,
+        observations: &mut BTreeMap<String, SelectedObservation>,
+        receiver_power_failure: bool,
+    ) {
         let current = observations.keys().cloned().collect::<BTreeSet<_>>();
+        let mut current_phase_codes = BTreeMap::new();
         for (satellite_id, observation) in observations {
             let reacquired =
                 self.seen.contains(satellite_id) && !self.previous_present.contains(satellite_id);
             let lli_slip = observation.lli.is_some_and(|lli| lli & 1 != 0);
+            let signal_changed = self
+                .previous_phase_codes
+                .get(satellite_id)
+                .is_some_and(|previous| *previous != observation.phase_code);
             let generation = self.generations.entry(satellite_id.clone()).or_default();
-            if reacquired || lli_slip {
+            if reacquired || lli_slip || signal_changed || receiver_power_failure {
                 *generation += 1;
             }
             observation.ambiguity_id = if *generation == 0 {
@@ -238,8 +337,10 @@ impl ArcTracker {
                 format!("{satellite_id}#{}", *generation + 1)
             };
             self.seen.insert(satellite_id.clone());
+            current_phase_codes.insert(satellite_id.clone(), observation.phase_code);
         }
         self.previous_present = current;
+        self.previous_phase_codes = current_phase_codes;
     }
 }
 
@@ -287,6 +388,12 @@ pub(crate) fn validate_options(options: PpcRunnerOptions) -> Result<()> {
     if !options.process_noise_sigma_m.is_finite() || options.process_noise_sigma_m < 0.0 {
         bail!("--process-noise-sigma-m must be finite and non-negative");
     }
+    if !options.ambiguity_retirement_age_s.is_finite() || options.ambiguity_retirement_age_s < 0.0 {
+        bail!("--ambiguity-retirement-age-s must be finite and non-negative");
+    }
+    if options.max_ambiguity_columns == 0 {
+        bail!("--max-ambiguity-columns must be positive");
+    }
     Ok(())
 }
 
@@ -307,12 +414,10 @@ fn build_causal_arc(
     selector: &SignalSelector,
     options: PpcRunnerOptions,
 ) -> Result<CausalArc> {
-    let base_epochs = timed_epochs(base_obs, "base", true)?;
-    let rover_epochs = timed_epochs(rover_obs, "rover", false)?;
-    if base_epochs.is_empty() {
+    if base_obs.epochs().is_empty() {
         bail!("base RINEX has no observation epochs");
     }
-    if rover_epochs.is_empty() {
+    if rover_obs.epochs().is_empty() {
         bail!("rover RINEX has no observation epochs");
     }
 
@@ -320,37 +425,42 @@ fn build_causal_arc(
     let mut epochs = Vec::new();
     let mut wavelengths_m = BTreeMap::new();
     let mut offsets_m = BTreeMap::new();
-    let mut base_join = CausalEpochJoin::new(&base_epochs)?;
+    let mut base_join = CausalEpochJoin::new(base_obs.epochs());
     let mut latest_base = None::<LatestBase>;
     let mut base_tracker = ArcTracker::default();
     let mut rover_tracker = ArcTracker::default();
 
-    for rover in rover_epochs {
+    for (rover_index, rover_epoch) in rover_obs.epochs().iter().enumerate() {
         if options
             .max_epochs
             .is_some_and(|limit| epochs.len() >= limit)
         {
             break;
         }
+        if rover_epoch.flag > 1 {
+            continue;
+        }
+        let rover = TimedEpoch {
+            index: rover_index,
+            time_j2000_s: epoch_j2000_s(rover_epoch),
+        };
         stats.rover_epochs_scanned += 1;
 
         let joined = base_join.advance(rover.time_j2000_s, options.max_base_age_s)?;
         // Advance each native base epoch exactly once. Reusing a 1 Hz base row
         // for five rover rows must not apply its LLI five times.
-        for joined_index in joined.advanced_base_indices {
-            let base_epoch = base_epochs[joined_index];
-            let mut observations =
-                select_observations(base_obs, &base_obs.epochs()[base_epoch.index], selector)?;
-            base_tracker.segment(&mut observations);
+        for base_index in joined.advanced_base_indices {
+            let base_epoch = &base_obs.epochs()[base_index];
+            let mut observations = select_observations(base_obs, base_epoch, selector)?;
+            base_tracker.segment(&mut observations, base_epoch.flag == 1);
             latest_base = Some(LatestBase {
-                time_j2000_s: base_epoch.time_j2000_s,
+                time_j2000_s: epoch_j2000_s(base_epoch),
                 observations,
             });
         }
 
-        let rover_epoch = &rover_obs.epochs()[rover.index];
         let mut rover_observations = select_observations(rover_obs, rover_epoch, selector)?;
-        rover_tracker.segment(&mut rover_observations);
+        rover_tracker.segment(&mut rover_observations, rover_epoch.flag == 1);
         let velocity_mps = options.velocity_dynamics.then(|| {
             solve_rover_velocity(ephemeris, &rover_observations, base_m, rover.time_j2000_s)
         });
@@ -389,6 +499,12 @@ fn build_causal_arc(
         epochs.push(epoch);
     }
 
+    if stats.rover_epochs_scanned == 0 {
+        bail!("rover RINEX has no observation epochs");
+    }
+    if !base_join.saw_base_epoch {
+        bail!("base RINEX has no observation epochs");
+    }
     if epochs.is_empty() {
         bail!("causal PPC builder produced no usable epochs");
     }
@@ -399,47 +515,6 @@ fn build_causal_arc(
         offsets_m,
         stats,
     })
-}
-
-fn timed_epochs(obs: &RinexObs, receiver: &str, allow_equal: bool) -> Result<Vec<TimedEpoch>> {
-    let mut out = Vec::new();
-    for (index, epoch) in obs.epochs().iter().enumerate() {
-        if epoch.flag > 1 {
-            continue;
-        }
-        let time = epoch_j2000_s(epoch);
-        out.push(TimedEpoch {
-            index,
-            time_j2000_s: time,
-        });
-    }
-    validate_timed_epochs(&out, receiver, allow_equal)?;
-    Ok(out)
-}
-
-fn validate_timed_epochs(epochs: &[TimedEpoch], receiver: &str, allow_equal: bool) -> Result<()> {
-    for epoch in epochs {
-        if !epoch.time_j2000_s.is_finite() {
-            bail!(
-                "{receiver} RINEX epoch {} has a non-finite timestamp",
-                epoch.index
-            );
-        }
-    }
-    if epochs.windows(2).any(|pair| {
-        pair[1].time_j2000_s < pair[0].time_j2000_s
-            || (!allow_equal && pair[1].time_j2000_s == pair[0].time_j2000_s)
-    }) {
-        bail!(
-            "{receiver} RINEX observation timestamps must be {}increasing",
-            if allow_equal {
-                "non-decreasing"
-            } else {
-                "strictly "
-            }
-        );
-    }
-    Ok(())
 }
 
 fn epoch_j2000_s(epoch: &ObsEpoch) -> f64 {
@@ -503,6 +578,7 @@ fn select_observations(
                 SelectedObservation {
                     satellite_id,
                     ambiguity_id: satellite_token,
+                    phase_code: pair.phase,
                     code_m,
                     phase_m: phase_cycles * wavelength_m,
                     wavelength_m,
@@ -669,8 +745,16 @@ fn extend_scales(
             .get(&base_observation.satellite_id)
             .ok_or_else(|| anyhow!("missing selected base observation for scale"))?
             .wavelength_m;
-        wavelengths_m.insert(sd_id.clone(), wavelength_m);
-        offsets_m.insert(sd_id, 0.0);
+        if let Some(previous) = wavelengths_m.get(&sd_id) {
+            if (previous - wavelength_m).abs() > 1.0e-12 {
+                bail!(
+                    "causal PPC ambiguity {sd_id} changed carrier wavelength from {previous} to {wavelength_m} m"
+                );
+            }
+        } else {
+            wavelengths_m.insert(sd_id.clone(), wavelength_m);
+            offsets_m.insert(sd_id, 0.0);
+        }
     }
     Ok(())
 }
@@ -707,6 +791,9 @@ fn solve_causal_arc(
     };
     let mut state = FilterState::new(BTreeMap::new(), [0.0; 3], 100.0, 1000.0)
         .context("initialize causal PPC filter")?;
+    let mut scratch = RtkFilterScratch::new();
+    let mut float_fallback_scratch = RtkFilterScratch::new();
+    let mut ambiguity_last_seen_s = BTreeMap::<String, f64>::new();
     let mut previous_time = None::<f64>;
     let mut solutions = Vec::with_capacity(arc.epochs.len());
 
@@ -743,7 +830,7 @@ fn solve_causal_arc(
         // singular epoch therefore coasts the state but still bounds the next
         // Doppler propagation interval at this timestamp.
         previous_time = Some(time_j2000_s);
-        match update_epoch(
+        match update_causal_epoch(
             state.clone(),
             &prepared.epoch,
             base_m,
@@ -751,8 +838,10 @@ fn solve_causal_arc(
             &arc.wavelengths_m,
             &arc.offsets_m,
             &update_options,
+            &mut scratch,
+            &mut float_fallback_scratch,
         ) {
-            Ok(update) => {
+            Ok((update, used_float_fallback)) => {
                 let solution = checked_update_solution(
                     epoch_index,
                     time_j2000_s,
@@ -765,11 +854,23 @@ fn solve_causal_arc(
                 if update.integer_fixed {
                     arc.stats.fixed_epochs += 1;
                 }
+                if used_float_fallback {
+                    arc.stats.float_fallback_epochs += 1;
+                }
                 state = update.state;
                 arc.stats.peak_ambiguity_columns = arc
                     .stats
                     .peak_ambiguity_columns
                     .max(state.sd_ambiguity_ids.len());
+                let retired = retire_causal_ambiguities(
+                    &mut state,
+                    &prepared.epoch,
+                    time_j2000_s,
+                    options.ambiguity_retirement_age_s,
+                    options.max_ambiguity_columns,
+                    &mut ambiguity_last_seen_s,
+                )?;
+                arc.stats.retired_ambiguity_columns += retired;
                 solutions.push(solution);
             }
             Err(UpdateError::SingularGeometry) => {
@@ -799,6 +900,201 @@ fn solve_causal_arc(
         epochs: solutions,
         stats: arc.stats,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_causal_epoch(
+    state: FilterState,
+    epoch: &Epoch,
+    base_m: [f64; 3],
+    model: &MeasModel,
+    wavelengths_m: &BTreeMap<String, f64>,
+    offsets_m: &BTreeMap<String, f64>,
+    options: &UpdateOpts,
+    scratch: &mut RtkFilterScratch,
+    float_fallback_scratch: &mut RtkFilterScratch,
+) -> Result<(EpochUpdate, bool), UpdateError> {
+    let scale = AmbiguityScale {
+        wavelengths_m,
+        offsets_m,
+    };
+    match update_epoch_with_scratch(state.clone(), epoch, base_m, model, scale, options, scratch) {
+        Ok(update) => Ok((update, false)),
+        Err(UpdateError::Ils(error)) if recoverable_ils_error(&error) => {
+            // A bounded/search-conditioning failure is environmental for a
+            // sequential route, not malformed filter input. Preserve the float
+            // measurement update and all existing holds, but do not attempt a
+            // new fix for this epoch. The ordinary streaming kernel and its
+            // defaults remain unchanged.
+            let mut float_options = options.clone();
+            float_options.float_only_systems = epoch
+                .references
+                .iter()
+                .chain(&epoch.nonref)
+                .map(|measurement| constellation_letter(&measurement.sat).to_string())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            update_epoch_with_scratch(
+                state,
+                epoch,
+                base_m,
+                model,
+                AmbiguityScale {
+                    wavelengths_m,
+                    offsets_m,
+                },
+                &float_options,
+                float_fallback_scratch,
+            )
+            .map(|update| (update, true))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn recoverable_ils_error(error: &IlsError) -> bool {
+    matches!(
+        error,
+        IlsError::Singular
+            | IlsError::NoCandidates(_)
+            | IlsError::TooManyCandidates { .. }
+            | IlsError::SearchLimitExceeded
+    )
+}
+
+fn retire_causal_ambiguities(
+    state: &mut FilterState,
+    epoch: &Epoch,
+    now_s: f64,
+    retirement_age_s: f64,
+    max_columns: usize,
+    last_seen_s: &mut BTreeMap<String, f64>,
+) -> Result<usize> {
+    let observed = epoch
+        .references
+        .iter()
+        .chain(&epoch.nonref)
+        .map(|measurement| measurement.sd_ambiguity_id.clone())
+        .collect::<BTreeSet<_>>();
+    for id in &observed {
+        last_seen_s.insert(id.clone(), now_s);
+    }
+    let protected = state.references.values().collect::<BTreeSet<_>>();
+    let mut candidates = state
+        .sd_ambiguity_ids
+        .iter()
+        .filter(|id| !observed.contains(*id) && !protected.contains(id))
+        .map(|id| {
+            let last_seen = last_seen_s.get(id).copied().unwrap_or(now_s);
+            (id.clone(), last_seen, now_s - last_seen > retirement_age_s)
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    let aged_count = candidates.iter().filter(|candidate| candidate.2).count();
+    let excess = state.sd_ambiguity_ids.len().saturating_sub(max_columns);
+    let retire_count = aged_count.max(excess).min(candidates.len());
+    let retired = candidates
+        .into_iter()
+        .take(retire_count)
+        .map(|(id, _, _)| id)
+        .collect::<Vec<_>>();
+    if retired.is_empty() {
+        return Ok(0);
+    }
+    marginalize_ambiguities(state, &retired)?;
+    for id in &retired {
+        last_seen_s.remove(id);
+    }
+    Ok(retired.len())
+}
+
+fn marginalize_ambiguities(state: &mut FilterState, ids: &[String]) -> Result<()> {
+    let retired = ids.iter().collect::<BTreeSet<_>>();
+    if state
+        .references
+        .values()
+        .any(|reference| retired.contains(reference))
+    {
+        bail!("causal PPC ambiguity retirement attempted to remove an active reference");
+    }
+    let remove_positions = state
+        .sd_ambiguity_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(position, id)| retired.contains(id).then_some(position))
+        .collect::<BTreeSet<_>>();
+    if remove_positions.is_empty() {
+        return Ok(());
+    }
+
+    let old_n = 3 + state.sd_ambiguity_ids.len();
+    let expected_len = old_n
+        .checked_mul(old_n)
+        .ok_or_else(|| anyhow!("causal PPC filter dimension overflow during retirement"))?;
+    if state.information.len() != expected_len
+        || state.sd_ambiguities_m.len() != state.sd_ambiguity_ids.len()
+    {
+        bail!("causal PPC filter state has inconsistent ambiguity dimensions");
+    }
+    let remove = remove_positions
+        .iter()
+        .map(|position| position + 3)
+        .collect::<Vec<_>>();
+    let remove_indices = remove.iter().copied().collect::<BTreeSet<_>>();
+    let kept = (0..old_n)
+        .filter(|index| !remove_indices.contains(index))
+        .collect::<Vec<_>>();
+    let removed_information = remove
+        .iter()
+        .map(|&row| {
+            remove
+                .iter()
+                .map(|&column| state.information[row * old_n + column])
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let inverse = invert_matrix_first_tie(&removed_information)
+        .ok_or_else(|| anyhow!("causal PPC retired ambiguity information block is singular"))?;
+
+    let kept_n = kept.len();
+    let mut marginalized = vec![0.0; kept_n * kept_n];
+    for (a, &row) in kept.iter().enumerate() {
+        for (b, &column) in kept.iter().enumerate().skip(a) {
+            let mut value = state.information[row * old_n + column];
+            for (r, &removed_row) in remove.iter().enumerate() {
+                for (s, &removed_column) in remove.iter().enumerate() {
+                    value -= state.information[row * old_n + removed_row]
+                        * inverse[r][s]
+                        * state.information[removed_column * old_n + column];
+                }
+            }
+            if !value.is_finite() {
+                bail!("causal PPC ambiguity retirement produced non-finite information");
+            }
+            marginalized[a * kept_n + b] = value;
+            marginalized[b * kept_n + a] = value;
+        }
+    }
+
+    state.sd_ambiguity_ids = state
+        .sd_ambiguity_ids
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| !remove_positions.contains(position))
+        .map(|(_, id)| id.clone())
+        .collect();
+    state.sd_ambiguities_m = state
+        .sd_ambiguities_m
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| !remove_positions.contains(position))
+        .map(|(_, value)| *value)
+        .collect();
+    state.information = marginalized;
+    state.fixed_cycles.retain(|id, _| !retired.contains(id));
+    state.fixed_m.retain(|id, _| !retired.contains(id));
+    Ok(())
 }
 
 struct PreparedFilterEpoch {
@@ -1025,7 +1321,7 @@ fn sd_ambiguity_token(satellite_id: &str, base_id: &str, rover_id: &str) -> Stri
         satellite_id.to_string()
     } else if base_id == satellite_id {
         rover_id.to_string()
-    } else if rover_id == satellite_id || base_id == rover_id {
+    } else if rover_id == satellite_id {
         base_id.to_string()
     } else {
         format!("{satellite_id}:base={base_id},rover={rover_id}")
@@ -1057,6 +1353,7 @@ mod tests {
         SelectedObservation {
             satellite_id,
             ambiguity_id: satellite_id.to_string(),
+            phase_code: "L1C",
             code_m,
             phase_m: code_m + 1.0,
             wavelength_m: 0.190_293_672_798,
@@ -1086,12 +1383,12 @@ mod tests {
     fn tracker_applies_reused_native_lli_only_once() {
         let mut tracker = ArcTracker::default();
         let mut first = BTreeMap::from([("G01".to_string(), observation(1, 20_000_000.0))]);
-        tracker.segment(&mut first);
+        tracker.segment(&mut first, false);
         assert_eq!(first["G01"].ambiguity_id, "G01");
 
         let mut slipped = first.clone();
         slipped.get_mut("G01").expect("observation").lli = Some(1);
-        tracker.segment(&mut slipped);
+        tracker.segment(&mut slipped, false);
         assert_eq!(slipped["G01"].ambiguity_id, "G01#2");
 
         // A reused base row is cloned from the already-segmented native row;
@@ -1104,11 +1401,40 @@ mod tests {
     fn tracker_splits_reacquired_observation() {
         let mut tracker = ArcTracker::default();
         let mut present = BTreeMap::from([("G01".to_string(), observation(1, 20_000_000.0))]);
-        tracker.segment(&mut present);
-        tracker.segment(&mut BTreeMap::new());
+        tracker.segment(&mut present, false);
+        tracker.segment(&mut BTreeMap::new(), false);
         let mut reacquired = present;
-        tracker.segment(&mut reacquired);
+        tracker.segment(&mut reacquired, false);
         assert_eq!(reacquired["G01"].ambiguity_id, "G01#2");
+    }
+
+    #[test]
+    fn tracker_splits_a_receiver_power_failure_once_per_native_epoch() {
+        let mut tracker = ArcTracker::default();
+        let mut observation = BTreeMap::from([("G01".to_string(), observation(1, 20_000_000.0))]);
+        tracker.segment(&mut observation, false);
+        tracker.segment(&mut observation, true);
+        assert_eq!(observation["G01"].ambiguity_id, "G01#2");
+
+        // Reusing the already segmented native base row at rover rate does not
+        // invoke the tracker again. The next ordinary native epoch keeps the
+        // same generation unless another lifecycle event occurs.
+        let reused = observation.clone();
+        assert_eq!(reused["G01"].ambiguity_id, "G01#2");
+        tracker.segment(&mut observation, false);
+        assert_eq!(observation["G01"].ambiguity_id, "G01#2");
+    }
+
+    #[test]
+    fn tracker_splits_a_signal_fallback_transition() {
+        let mut tracker = ArcTracker::default();
+        let mut first = BTreeMap::from([("G01".to_string(), observation(1, 20_000_000.0))]);
+        tracker.segment(&mut first, false);
+
+        let mut changed = first;
+        changed.get_mut("G01").expect("observation").phase_code = "L1X";
+        tracker.segment(&mut changed, false);
+        assert_eq!(changed["G01"].ambiguity_id, "G01#2");
     }
 
     #[test]
@@ -1117,9 +1443,38 @@ mod tests {
         assert_eq!(sd_ambiguity_token("G01", "G01#2", "G01"), "G01#2");
         assert_eq!(sd_ambiguity_token("G01", "G01", "G01#3"), "G01#3");
         assert_eq!(
+            sd_ambiguity_token("G01", "G01#2", "G01#2"),
+            "G01:base=G01#2,rover=G01#2"
+        );
+        assert_eq!(
             sd_ambiguity_token("G01", "G01#2", "G01#3"),
             "G01:base=G01#2,rover=G01#3"
         );
+    }
+
+    #[test]
+    fn staggered_receiver_slips_cannot_reuse_an_sd_ambiguity_id() {
+        let mut base_tracker = ArcTracker::default();
+        let mut rover_tracker = ArcTracker::default();
+        let mut base = BTreeMap::from([("G01".to_string(), observation(1, 20_000_000.0))]);
+        let mut rover = base.clone();
+        base_tracker.segment(&mut base, false);
+        rover_tracker.segment(&mut rover, false);
+        let original =
+            sd_ambiguity_token("G01", &base["G01"].ambiguity_id, &rover["G01"].ambiguity_id);
+
+        base.get_mut("G01").expect("base observation").lli = Some(1);
+        base_tracker.segment(&mut base, false);
+        base.get_mut("G01").expect("base observation").lli = None;
+        let base_slipped =
+            sd_ambiguity_token("G01", &base["G01"].ambiguity_id, &rover["G01"].ambiguity_id);
+
+        rover.get_mut("G01").expect("rover observation").lli = Some(1);
+        rover_tracker.segment(&mut rover, false);
+        let both_slipped =
+            sd_ambiguity_token("G01", &base["G01"].ambiguity_id, &rover["G01"].ambiguity_id);
+        assert_ne!(original, base_slipped);
+        assert_ne!(base_slipped, both_slipped);
     }
 
     #[test]
@@ -1146,6 +1501,62 @@ mod tests {
     fn causal_join_rejects_out_of_order_inputs() {
         assert!(joined_base_indices(&[2.0, 1.0], &[2.0], 1.2).is_err());
         assert!(joined_base_indices(&[1.0], &[2.0, 1.0], 1.2).is_err());
+    }
+
+    #[test]
+    fn bounded_prefix_does_not_validate_an_unconsumed_base_suffix() {
+        let base_epochs = [10.0, 20.0, 5.0]
+            .into_iter()
+            .enumerate()
+            .map(|(index, time_j2000_s)| TimedEpoch {
+                index,
+                time_j2000_s,
+            })
+            .collect::<Vec<_>>();
+        let mut join = CausalEpochJoin::from_timed(&base_epochs);
+        let prefix = join.advance(10.0, 1.2).expect("bounded prefix join");
+        assert_eq!(prefix.fresh_base_index, Some(0));
+        assert!(join.advance(20.0, 1.2).is_err());
+    }
+
+    #[test]
+    fn paired_epoch_order_is_independent_of_insertion_order() {
+        let code_m = C_M_S * 0.072_345_6;
+        let ascending = (1..=6)
+            .map(|prn| (format!("G{prn:02}"), observation(prn, code_m)))
+            .collect::<BTreeMap<_, _>>();
+        let descending = (1..=6)
+            .rev()
+            .map(|prn| (format!("G{prn:02}"), observation(prn, code_m)))
+            .collect::<BTreeMap<_, _>>();
+        let a = build_paired_epoch(
+            &TimeCodedEphemeris,
+            100.0,
+            100.8,
+            &ascending,
+            &descending,
+            None,
+        )
+        .expect("ascending epoch")
+        .expect("usable ascending epoch");
+        let b = build_paired_epoch(
+            &TimeCodedEphemeris,
+            100.0,
+            100.8,
+            &descending,
+            &ascending,
+            None,
+        )
+        .expect("descending epoch")
+        .expect("usable descending epoch");
+        assert_eq!(a, b);
+        assert_eq!(
+            a.base
+                .iter()
+                .map(|observation| observation.satellite_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["G01", "G02", "G03", "G04", "G05", "G06"]
+        );
     }
 
     #[test]
@@ -1235,6 +1646,106 @@ mod tests {
     }
 
     #[test]
+    fn ambiguity_retirement_uses_a_symmetric_schur_marginal() {
+        let mut state = FilterState::new(
+            BTreeMap::from([("G".to_string(), "G01".to_string())]),
+            [0.0; 3],
+            1.0,
+            1.0,
+        )
+        .expect("filter state");
+        state.sd_ambiguity_ids = vec!["G01".to_string(), "G02".to_string()];
+        state.sd_ambiguities_m = vec![1.0, 2.0];
+        state.information = vec![0.0; 25];
+        for index in 0..5 {
+            state.information[index * 5 + index] = 1.0;
+        }
+        state.information[3 * 5 + 3] = 4.0;
+        state.information[4 * 5 + 4] = 9.0;
+        state.information[3 * 5 + 4] = 3.0;
+        state.information[4 * 5 + 3] = 3.0;
+        state.fixed_cycles.insert("G02".to_string(), 2);
+        state.fixed_m.insert("G02".to_string(), 2.0);
+
+        marginalize_ambiguities(&mut state, &["G02".to_string()]).expect("retire ambiguity");
+        assert_eq!(state.sd_ambiguity_ids, vec!["G01"]);
+        assert_eq!(state.sd_ambiguities_m, vec![1.0]);
+        assert_eq!(state.information.len(), 16);
+        assert!((state.information[3 * 4 + 3] - 3.0).abs() < 1.0e-12);
+        for row in 0..4 {
+            for column in 0..4 {
+                assert_eq!(
+                    state.information[row * 4 + column],
+                    state.information[column * 4 + row]
+                );
+            }
+        }
+        assert!(!state.fixed_m.contains_key("G02"));
+        assert!(!state.fixed_cycles.contains_key("G02"));
+    }
+
+    #[test]
+    fn lifecycle_retires_only_unseen_nonreference_fragments() {
+        let mut state = FilterState::new(
+            BTreeMap::from([("G".to_string(), "G01".to_string())]),
+            [0.0; 3],
+            1.0,
+            1.0,
+        )
+        .expect("filter state");
+        state.sd_ambiguity_ids = vec!["G01".into(), "G02".into(), "G03".into()];
+        state.sd_ambiguities_m = vec![1.0, 2.0, 3.0];
+        state.information = vec![0.0; 36];
+        for index in 0..6 {
+            state.information[index * 6 + index] = 1.0;
+        }
+        state.fixed_cycles.insert("G02".to_string(), 2);
+        state.fixed_m.insert("G02".to_string(), 2.0);
+        let epoch = Epoch {
+            references: vec![test_measurement("G01", "G01")],
+            nonref: vec![test_measurement("G03", "G03")],
+            velocity_mps: None,
+            dt_s: 0.2,
+        };
+        let mut last_seen = BTreeMap::from([("G02".to_string(), 0.0)]);
+        let count = retire_causal_ambiguities(&mut state, &epoch, 20.0, 15.0, 128, &mut last_seen)
+            .expect("retire stale fragment");
+        assert_eq!(count, 1);
+        assert_eq!(state.sd_ambiguity_ids, vec!["G01", "G03"]);
+        assert_eq!(state.references["G"], "G01");
+        assert_eq!(
+            last_seen,
+            BTreeMap::from([("G01".to_string(), 20.0), ("G03".to_string(), 20.0)])
+        );
+    }
+
+    #[test]
+    fn float_fallback_accepts_only_environmental_integer_search_failures() {
+        for error in [
+            IlsError::Singular,
+            IlsError::NoCandidates(0),
+            IlsError::TooManyCandidates {
+                evaluated: 101,
+                limit: 100,
+            },
+            IlsError::SearchLimitExceeded,
+        ] {
+            assert!(recoverable_ils_error(&error), "{error:?}");
+        }
+
+        for error in [
+            IlsError::InvalidDimensions { n: 2, rows: 1 },
+            IlsError::NonFinite,
+            IlsError::InvalidInput {
+                field: "ratio_threshold",
+                reason: "must be finite",
+            },
+        ] {
+            assert!(!recoverable_ils_error(&error), "{error:?}");
+        }
+    }
+
+    #[test]
     fn runner_options_validate_every_scientific_boundary() {
         let valid = PpcRunnerOptions {
             max_base_age_s: 1.2,
@@ -1243,6 +1754,8 @@ mod tests {
             hold_sigma_m: 0.15,
             process_noise_sigma_m: 0.0,
             velocity_dynamics: true,
+            ambiguity_retirement_age_s: DEFAULT_AMBIGUITY_RETIREMENT_AGE_S,
+            max_ambiguity_columns: DEFAULT_MAX_AMBIGUITY_COLUMNS,
         };
         validate_options(valid).expect("valid boundary options");
 
@@ -1277,12 +1790,35 @@ mod tests {
         options = valid;
         options.process_noise_sigma_m = f64::INFINITY;
         cases.push((options, "--process-noise-sigma-m"));
+        options = valid;
+        options.ambiguity_retirement_age_s = -f64::EPSILON;
+        cases.push((options, "--ambiguity-retirement-age-s"));
+        options = valid;
+        options.ambiguity_retirement_age_s = f64::NAN;
+        cases.push((options, "--ambiguity-retirement-age-s"));
+        options = valid;
+        options.max_ambiguity_columns = 0;
+        cases.push((options, "--max-ambiguity-columns"));
 
         for (options, expected) in cases {
             let error = validate_options(options)
                 .expect_err("invalid option must be rejected")
                 .to_string();
             assert!(error.contains(expected), "unexpected error: {error}");
+        }
+    }
+
+    fn test_measurement(satellite_id: &str, ambiguity_id: &str) -> SatMeas {
+        SatMeas {
+            sat: satellite_id.to_string(),
+            sd_ambiguity_id: ambiguity_id.to_string(),
+            base_code_m: 20_000_000.0,
+            base_phase_m: 20_000_000.0,
+            rover_code_m: 20_000_001.0,
+            rover_phase_m: 20_000_001.0,
+            base_tx_pos: [20_000_000.0, 0.0, 0.0],
+            rover_tx_pos: [20_000_000.0, 0.0, 0.0],
+            pos: [20_000_000.0, 0.0, 0.0],
         }
     }
 
@@ -1356,6 +1892,8 @@ mod tests {
                 hold_sigma_m: 0.15,
                 process_noise_sigma_m: 0.0,
                 velocity_dynamics: false,
+                ambiguity_retirement_age_s: DEFAULT_AMBIGUITY_RETIREMENT_AGE_S,
+                max_ambiguity_columns: DEFAULT_MAX_AMBIGUITY_COLUMNS,
             },
         )
     }
@@ -1380,7 +1918,7 @@ mod tests {
                 time_j2000_s,
             })
             .collect::<Vec<_>>();
-        let mut join = CausalEpochJoin::new(&base_epochs)?;
+        let mut join = CausalEpochJoin::from_timed(&base_epochs);
         let mut out = Vec::new();
         for &rover_time in rover_times {
             out.push(join.advance(rover_time, max_age_s)?.fresh_base_index);

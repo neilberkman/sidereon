@@ -1367,6 +1367,7 @@ dependencies = [
  "crossterm",
  "portable-pty",
  "ratatui",
+ "same-file",
  "serde",
  "serde_json",
  "sidereon",
