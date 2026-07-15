@@ -4,6 +4,19 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Sequential RTK solves with baseline process noise now enforce the exact
+  symmetry of the information-form time update. The rank-3 correction is
+  symmetric mathematically, but independently evaluated matrix triangles could
+  accumulate phase-precision roundoff and destabilize long held-ambiguity arcs.
+
+### Evaluation-bit stability
+
+- Process-noise-enabled sequential RTK updates can move in their last bits when
+  the two information-matrix triangles are averaged. The zero-process-noise
+  path and public interfaces are unchanged.
+
 ## [0.28.0] - 2026-07-13
 
 ### Added

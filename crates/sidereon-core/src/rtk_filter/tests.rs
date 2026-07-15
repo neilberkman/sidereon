@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use crate::astro::math::vec3::sub3;
 
 use super::antenna::ReceiverAntennaScratch;
+use super::update::time_update_information;
 use super::*;
 use crate::ambiguity::AmbiguityId;
 use crate::constants::{C_M_S, F_L1_HZ};
@@ -2968,6 +2969,30 @@ fn velocity_prediction_moves_prior_after_first_epoch_only_when_enabled() {
     default_path.epoch_count = 1;
     propagate_baseline_mean(&mut default_path, &epoch, &opts);
     assert_eq!(default_path.baseline_m, [1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn process_noise_time_update_preserves_exact_information_symmetry() {
+    let n = 6;
+    let information = vec![
+        1.1e12, 2.3e8, -4.7e8, 7.1e9, -9.2e9, 1.3e10, //
+        2.3e8, 9.7e11, 5.9e8, -6.4e9, 8.6e9, -1.1e10, //
+        -4.7e8, 5.9e8, 1.3e12, 4.2e9, -7.3e9, 9.4e9, //
+        7.1e9, -6.4e9, 4.2e9, 2.0e11, 3.1e8, -2.2e8, //
+        -9.2e9, 8.6e9, -7.3e9, 3.1e8, 2.5e11, 4.3e8, //
+        1.3e10, -1.1e10, 9.4e9, -2.2e8, 4.3e8, 3.0e11,
+    ];
+    let updated = time_update_information(&information, n, 8.0).expect("non-singular time update");
+
+    for row in 0..n {
+        for column in (row + 1)..n {
+            assert_eq!(
+                updated[row * n + column].to_bits(),
+                updated[column * n + row].to_bits(),
+                "information entries ({row}, {column}) and ({column}, {row}) differ"
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------

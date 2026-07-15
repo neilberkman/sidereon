@@ -2037,9 +2037,12 @@ fn wettzell_kinematic_rtk_filter_tracks_rtklib_truth_class() {
     assert_eq!(
         kinematic_baseline_m.map(f64::to_bits),
         [
-            0xbfef_8873_53a6_52a3,
-            0xbfe4_e3eb_2e47_f1d6,
-            0x3ff0_fd89_2e64_d93d,
+            // Re-frozen after enforcing the information time update's exact
+            // symmetry. The truth-class quality assertions above remain the
+            // primary gate for this process-noise-enabled solve.
+            0xbfef_7247_4db4_6e89,
+            0xbfe4_e9cf_5eaa_c5dd,
+            0x3ff1_1093_a8be_62c9,
         ]
     );
 

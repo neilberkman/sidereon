@@ -1440,7 +1440,11 @@ fn fixed_maps_from_holds(
 /// ambiguity block exactly. Returns `None` on a singular 3×3 system (caller keeps
 /// the un-inflated prior). Same operation order as the Elixir
 /// `inflate_baseline_information` for bit-for-bit trace parity.
-fn time_update_information(information: &[f64], n: usize, sigma: f64) -> Option<Vec<f64>> {
+pub(super) fn time_update_information(
+    information: &[f64],
+    n: usize,
+    sigma: f64,
+) -> Option<Vec<f64>> {
     let inv_q = 1.0 / (sigma * sigma);
     // M = Q⁻¹ + Λ₀₀ (3×3 top-left block of the information matrix).
     let mut m = [[0.0f64; 3]; 3];
@@ -1470,6 +1474,17 @@ fn time_update_information(information: &[f64], n: usize, sigma: f64) -> Option<
                 corr += wia * information[j * n + a];
             }
             out[i * n + j] -= corr;
+        }
+    }
+    // The correction is symmetric in exact arithmetic, but the two triangles
+    // are evaluated through different expression orders; with phase-precision
+    // information magnitudes the round-off difference can exceed the state
+    // validator's symmetry tolerance. Enforce the symmetry the math promises.
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let mean = 0.5 * (out[i * n + j] + out[j * n + i]);
+            out[i * n + j] = mean;
+            out[j * n + i] = mean;
         }
     }
     Some(out)
