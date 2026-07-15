@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::f64::consts::PI;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -25,6 +26,7 @@ use sidereon_scoreboard::ppc::{
 };
 
 mod mcp;
+mod ppc_runner;
 mod tui;
 
 #[derive(Parser)]
@@ -111,6 +113,45 @@ enum Command {
         #[arg(long)]
         git_commit: Option<String>,
         /// Emit JSON suitable for a CI artifact.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Exercise the experimental causal single-frequency PPC runner scaffold.
+    PpcSolve {
+        /// Base-station RINEX observation file.
+        #[arg(long)]
+        base_obs: PathBuf,
+        /// Rover RINEX observation file.
+        #[arg(long)]
+        rover_obs: PathBuf,
+        /// Broadcast navigation RINEX file.
+        #[arg(long)]
+        nav: PathBuf,
+        /// PPC reference.csv used to score the emitted solution.
+        #[arg(long)]
+        truth: PathBuf,
+        /// Output CSV with GPS TOW and ECEF coordinates.
+        #[arg(long)]
+        solution_out: PathBuf,
+        /// Maximum age of the latest causal base observation, seconds.
+        #[arg(long, default_value_t = 1.2)]
+        max_base_age_s: f64,
+        /// Optional cap on successfully built causal arc epochs.
+        #[arg(long)]
+        max_epochs: Option<usize>,
+        /// Elevation mask applied at the surveyed base position, degrees.
+        #[arg(long, default_value_t = 10.0)]
+        elevation_mask_deg: f64,
+        /// Fix-and-hold pseudo-measurement sigma, metres.
+        #[arg(long, default_value_t = 0.15)]
+        hold_sigma_m: f64,
+        /// Per-epoch baseline process-noise sigma, metres.
+        #[arg(long, default_value_t = 8.0)]
+        process_noise_sigma_m: f64,
+        /// Propagate the baseline mean with causal rover Doppler velocity.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        velocity_dynamics: bool,
+        /// Emit the score report as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -220,6 +261,35 @@ fn run(cli: Cli) -> Result<()> {
             dataset_revision,
             dataset_sha256,
             git_commit,
+            json,
+        ),
+        Command::PpcSolve {
+            base_obs,
+            rover_obs,
+            nav,
+            truth,
+            solution_out,
+            max_base_age_s,
+            max_epochs,
+            elevation_mask_deg,
+            hold_sigma_m,
+            process_noise_sigma_m,
+            velocity_dynamics,
+            json,
+        } => ppc_solve_command(
+            &base_obs,
+            &rover_obs,
+            &nav,
+            &truth,
+            &solution_out,
+            ppc_runner::PpcRunnerOptions {
+                max_base_age_s,
+                max_epochs,
+                elevation_mask_deg,
+                hold_sigma_m,
+                process_noise_sigma_m,
+                velocity_dynamics,
+            },
             json,
         ),
         Command::Inspect { file } => inspect_command(&file),
@@ -854,6 +924,86 @@ fn ppc_score_command(
         }
         println!("average score: {:.3}%", report.average_score_percent);
         println!("scorer: {}", report.metadata.scorer_version);
+    }
+    Ok(())
+}
+
+fn ppc_solve_command(
+    base_obs_path: &Path,
+    rover_obs_path: &Path,
+    nav_path: &Path,
+    truth_path: &Path,
+    solution_out: &Path,
+    options: ppc_runner::PpcRunnerOptions,
+    json: bool,
+) -> Result<()> {
+    ppc_runner::validate_options(options)?;
+    let base_obs = load_rinex_obs(base_obs_path)
+        .with_context(|| format!("load base RINEX {}", base_obs_path.display()))?;
+    let rover_obs = load_rinex_obs(rover_obs_path)
+        .with_context(|| format!("load rover RINEX {}", rover_obs_path.display()))?;
+    let nav = load_rinex_nav(nav_path)
+        .with_context(|| format!("load broadcast NAV {}", nav_path.display()))?;
+    let result = ppc_runner::solve_ppc_route(&nav, &base_obs, &rover_obs, options)?;
+
+    let mut output = std::fs::File::create(solution_out)
+        .with_context(|| format!("create solution {}", solution_out.display()))?;
+    writeln!(output, "GPS TOW (s),ECEF X (m),ECEF Y (m),ECEF Z (m)")?;
+    for epoch in &result.epochs {
+        let continuous_gps_s = epoch.time_j2000_s + sidereon_core::constants::GPS_EPOCH_TO_J2000_S;
+        let tow_s = continuous_gps_s.rem_euclid(sidereon_core::constants::SECONDS_PER_WEEK);
+        writeln!(
+            output,
+            "{tow_s:.3},{:.6},{:.6},{:.6}",
+            epoch.position_ecef_m[0], epoch.position_ecef_m[1], epoch.position_ecef_m[2]
+        )?;
+    }
+    output
+        .flush()
+        .with_context(|| format!("flush solution {}", solution_out.display()))?;
+
+    let report = score_routes(
+        &[PpcRouteInput {
+            name: "ppc-route".to_string(),
+            truth_path: truth_path.to_path_buf(),
+            solution_path: solution_out.to_path_buf(),
+        }],
+        PPC_DEFAULT_THRESHOLD_M,
+        PpcRunMetadata {
+            scorer_version: sidereon_scoreboard::ppc::PPC_SCORER_VERSION.to_string(),
+            sidereon_version: env!("CARGO_PKG_VERSION").to_string(),
+            git_commit: std::env::var("SIDEREON_GIT_COMMIT").ok(),
+            dataset_revision: None,
+            dataset_sha256: None,
+            threshold_m: PPC_DEFAULT_THRESHOLD_M,
+        },
+    )?;
+    if json {
+        print_json(&report)?;
+    } else {
+        println!("wrote {}", solution_out.display());
+        println!(
+            "experimental single-frequency causal PPC score: {:.3}%",
+            report.average_score_percent
+        );
+        println!("arc epochs: {}", result.stats.arc_epochs);
+        println!(
+            "fixed epochs: {}/{} ({:.3})",
+            result.stats.fixed_epochs,
+            result.epochs.len(),
+            result.stats.fixed_epochs as f64 / result.epochs.len().max(1) as f64
+        );
+        println!("coasted epochs: {}", result.stats.coasted_epochs);
+        println!(
+            "base misses: {}, stale: {}, unusable: {}",
+            result.stats.missing_base_epochs,
+            result.stats.stale_base_epochs,
+            result.stats.unusable_epochs
+        );
+        println!(
+            "peak ambiguity columns: {}",
+            result.stats.peak_ambiguity_columns
+        );
     }
     Ok(())
 }

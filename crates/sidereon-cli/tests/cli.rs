@@ -309,3 +309,37 @@ fn ppc_score_rejects_mismatched_route_inputs() {
     let _ = fs::remove_file(truth);
     let _ = fs::remove_file(solution);
 }
+
+#[test]
+fn ppc_solve_help_describes_private_causal_adapter() {
+    let output = run(&["ppc-solve", "--help"]);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("experimental causal single-frequency PPC runner scaffold"));
+    assert!(stdout.contains("--max-base-age-s"));
+    assert!(stdout.contains("--solution-out"));
+}
+
+#[test]
+fn ppc_solve_validates_scientific_options_before_loading_inputs() {
+    let output = run(&[
+        "ppc-solve",
+        "--base-obs",
+        "missing-base.obs",
+        "--rover-obs",
+        "missing-rover.obs",
+        "--nav",
+        "missing.nav",
+        "--truth",
+        "missing-reference.csv",
+        "--solution-out",
+        "missing-solution.csv",
+        "--max-base-age-s=-1",
+    ]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("--max-base-age-s must be finite and non-negative"),
+        "stderr:\n{}",
+        stderr(&output)
+    );
+}
