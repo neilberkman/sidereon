@@ -228,3 +228,84 @@ fn solve_json_reports_successful_epochs_and_metrics() {
     assert!((-100.0..500.0).contains(&height), "height {height}");
     assert!(cep.is_finite() && cep >= 0.0, "CEP {cep}");
 }
+
+#[test]
+fn ppc_score_json_reports_score_and_provenance() {
+    let truth = temp_text_file(
+        "ppc-reference.csv",
+        "GPS TOW (s),GPS Week,Latitude (deg),Longitude (deg),Ellipsoid Height (m)\n0,2325,0,0,0\n1,2325,0,0.00001,0\n",
+    );
+    let solution = temp_text_file(
+        "ppc-solution.csv",
+        "GPS TOW (s),Latitude (deg),Longitude (deg),Ellipsoid Height (m)\n1,0,0.00001,0\n",
+    );
+    let output = run(&[
+        "ppc-score",
+        "--truth",
+        truth.to_str().expect("truth path utf8"),
+        "--solution",
+        solution.to_str().expect("solution path utf8"),
+        "--route",
+        "contract-route",
+        "--dataset-revision",
+        "ppc-test-revision",
+        "--dataset-sha256",
+        "test-digest",
+        "--git-commit",
+        "deadbeef",
+        "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "status {:?}\nstdout:\n{}\nstderr:\n{}",
+        output.status.code(),
+        stdout(&output),
+        stderr(&output)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).expect("PPC score JSON");
+    assert_eq!(json["metadata"]["scorer_version"], "sidereon-ppc-v1");
+    assert_eq!(
+        json["metadata"]["sidereon_version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(json["metadata"]["git_commit"], "deadbeef");
+    assert_eq!(json["metadata"]["dataset_revision"], "ppc-test-revision");
+    assert_eq!(json["metadata"]["dataset_sha256"], "test-digest");
+    assert_eq!(json["metadata"]["threshold_m"].as_f64(), Some(0.5));
+    assert_eq!(json["routes"][0]["route"], "contract-route");
+    assert_eq!(json["routes"][0]["score_percent"].as_f64(), Some(100.0));
+    assert_eq!(json["average_score_percent"].as_f64(), Some(100.0));
+
+    let _ = fs::remove_file(truth);
+    let _ = fs::remove_file(solution);
+}
+
+#[test]
+fn ppc_score_rejects_mismatched_route_inputs() {
+    let truth = temp_text_file(
+        "ppc-reference-count.csv",
+        "GPS TOW (s),GPS Week,Latitude (deg),Longitude (deg),Ellipsoid Height (m)\n0,2325,0,0,0\n",
+    );
+    let solution = temp_text_file(
+        "ppc-solution-count.csv",
+        "GPS TOW (s),ECEF X (m),ECEF Y (m),ECEF Z (m)\n0,1,2,3\n",
+    );
+    let output = run(&[
+        "ppc-score",
+        "--truth",
+        truth.to_str().expect("truth path utf8"),
+        "--truth",
+        truth.to_str().expect("truth path utf8"),
+        "--solution",
+        solution.to_str().expect("solution path utf8"),
+    ]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("--truth and --solution must have the same number of paths"),
+        "stderr:\n{}",
+        stderr(&output)
+    );
+
+    let _ = fs::remove_file(truth);
+    let _ = fs::remove_file(solution);
+}

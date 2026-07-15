@@ -20,6 +20,9 @@ use sidereon::{
     spherical_radius_at, spp_inputs_from_rinex_obs, vertical_radius_at, PercentileRadius,
     PositionErrorMetrics, RinexSppEpochInputs, RinexSppOptions, RinexSppSource,
 };
+use sidereon_scoreboard::ppc::{
+    score_routes, PpcRouteInput, PpcRunMetadata, PPC_DEFAULT_THRESHOLD_M,
+};
 
 mod mcp;
 mod tui;
@@ -28,7 +31,7 @@ mod tui;
 #[command(name = "sidereon")]
 #[command(about = "GNSS file inspection, QC, SPP solving, and covariance metrics")]
 #[command(
-    after_long_help = "JSON output uses stable field names. solve: source, obs, nav, sp3, epochs, summary, errors. qc: obs, lint, qc, parse_error. inspect output is human text with path, type, span, counts, systems, satellites. metrics accepts JSON input through --json-file and emits JSON with --json. tui is an interactive replay monitor for RINEX OBS plus NAV."
+    after_long_help = "JSON output uses stable field names. solve: source, obs, nav, sp3, epochs, summary, errors. qc: obs, lint, qc, parse_error. ppc-score: metadata, routes, average_score_percent. inspect output is human text with path, type, span, counts, systems, satellites. metrics accepts JSON input through --json-file and emits JSON with --json. tui is an interactive replay monitor for RINEX OBS plus NAV."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -78,6 +81,36 @@ enum Command {
         #[arg(long, default_value_t = 0.95)]
         probability: f64,
         /// Emit JSON with stable fields for covariance and derived metrics.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Score one or more PPC routes with the causal distance-weighted metric.
+    PpcScore {
+        /// PPC reference CSV; repeat once for each route.
+        #[arg(long, required = true)]
+        truth: Vec<PathBuf>,
+        /// RTKLIB LLH/ECEF .pos or supported solution CSV; repeat once for each route.
+        #[arg(long, required = true)]
+        solution: Vec<PathBuf>,
+        /// Route names in the same order as --truth/--solution.
+        #[arg(long)]
+        route: Vec<String>,
+        /// Optional PPC IMU CSVs to parse and validate; repeat once per route.
+        #[arg(long)]
+        imu: Vec<PathBuf>,
+        /// Three-dimensional success threshold, metres.
+        #[arg(long, default_value_t = PPC_DEFAULT_THRESHOLD_M)]
+        threshold_m: f64,
+        /// Dataset revision or archive identifier to record in JSON output.
+        #[arg(long)]
+        dataset_revision: Option<String>,
+        /// SHA-256 digest of the dataset archive to record in JSON output.
+        #[arg(long)]
+        dataset_sha256: Option<String>,
+        /// Source-control commit to record; defaults to SIDEREON_GIT_COMMIT.
+        #[arg(long)]
+        git_commit: Option<String>,
+        /// Emit JSON suitable for a CI artifact.
         #[arg(long)]
         json: bool,
     },
@@ -168,6 +201,27 @@ fn run(cli: Cli) -> Result<()> {
             probability,
             json,
         } => metrics_command(enu_cov.as_deref(), json_file.as_deref(), probability, json),
+        Command::PpcScore {
+            truth,
+            solution,
+            route,
+            imu,
+            threshold_m,
+            dataset_revision,
+            dataset_sha256,
+            git_commit,
+            json,
+        } => ppc_score_command(
+            &truth,
+            &solution,
+            &route,
+            &imu,
+            threshold_m,
+            dataset_revision,
+            dataset_sha256,
+            git_commit,
+            json,
+        ),
         Command::Inspect { file } => inspect_command(&file),
         Command::Tui {
             obs,
@@ -717,6 +771,91 @@ fn print_metrics_human(
         format!("S({probability:.3})"),
         spherical.radius_m
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ppc_score_command(
+    truth: &[PathBuf],
+    solution: &[PathBuf],
+    route_names: &[String],
+    imu: &[PathBuf],
+    threshold_m: f64,
+    dataset_revision: Option<String>,
+    dataset_sha256: Option<String>,
+    git_commit: Option<String>,
+    json: bool,
+) -> Result<()> {
+    if truth.len() != solution.len() {
+        bail!(
+            "--truth and --solution must have the same number of paths ({} vs {})",
+            truth.len(),
+            solution.len()
+        );
+    }
+    if !imu.is_empty() && imu.len() != truth.len() {
+        bail!(
+            "when supplied, --imu must have one path per route ({} vs {})",
+            imu.len(),
+            truth.len()
+        );
+    }
+    if !route_names.is_empty() && route_names.len() != truth.len() {
+        bail!(
+            "--route must have one name per route ({} vs {})",
+            route_names.len(),
+            truth.len()
+        );
+    }
+    if !threshold_m.is_finite() || threshold_m <= 0.0 {
+        bail!("--threshold-m must be finite and positive");
+    }
+
+    for imu_path in imu {
+        sidereon_scoreboard::ppc::read_imu_csv(imu_path)
+            .with_context(|| format!("validate PPC IMU {}", imu_path.display()))?;
+    }
+
+    let routes = truth
+        .iter()
+        .zip(solution.iter())
+        .enumerate()
+        .map(|(index, (truth_path, solution_path))| PpcRouteInput {
+            name: route_names
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| format!("route-{}", index + 1)),
+            truth_path: truth_path.clone(),
+            solution_path: solution_path.clone(),
+        })
+        .collect::<Vec<_>>();
+    let metadata = PpcRunMetadata {
+        scorer_version: sidereon_scoreboard::ppc::PPC_SCORER_VERSION.to_string(),
+        sidereon_version: env!("CARGO_PKG_VERSION").to_string(),
+        git_commit: git_commit.or_else(|| std::env::var("SIDEREON_GIT_COMMIT").ok()),
+        dataset_revision,
+        dataset_sha256,
+        threshold_m,
+    };
+    let report = score_routes(&routes, threshold_m, metadata)?;
+    if json {
+        print_json(&report)?;
+    } else {
+        for route in &report.routes {
+            println!(
+                "{:<20} {:>8.3}%  ({:.1}/{:.1} m, missing={}, p95={:?} m, max={:?} m)",
+                route.route,
+                route.score_percent,
+                route.good_distance_m,
+                route.total_distance_m,
+                route.missing_solution_samples,
+                route.p95_error_m,
+                route.max_error_m
+            );
+        }
+        println!("average score: {:.3}%", report.average_score_percent);
+        println!("scorer: {}", report.metadata.scorer_version);
+    }
+    Ok(())
 }
 
 fn inspect_command(path: &Path) -> Result<()> {

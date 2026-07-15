@@ -30,6 +30,8 @@ use sidereon_core::{
     TdbEarthOrientationProvider,
 };
 
+pub mod ppc;
+
 const UNIX_TO_J2000_S: i64 = 946_728_000;
 const DEFAULT_LOOKBACK_DAYS: u32 = 4;
 
