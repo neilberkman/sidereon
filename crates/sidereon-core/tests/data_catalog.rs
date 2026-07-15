@@ -175,7 +175,7 @@ fn ultra_rapid_sp3_urls_match_binding_catalog_examples() {
     );
     assert_eq!(
         cod.archive_url().expect("url"),
-        "http://ftp.aiub.unibe.ch/CODE/COD0OPSULT_20261620000_01D_05M_ORB.SP3"
+        "https://www.aiub.unibe.ch/download/CODE/COD0OPSULT_20261620000_01D_05M_ORB.SP3"
     );
 }
 
@@ -189,10 +189,16 @@ fn ultra_rapid_sp3_locations_include_current_patterns_and_fallbacks() {
 
     let code = ultra_sp3_locations(AnalysisCenter::CodUlt, date(2026, 6, 3), "0000")
         .expect("CODE candidates");
+    assert!(code.iter().all(|location| location
+        .url
+        .starts_with("https://www.aiub.unibe.ch/download/CODE/")));
     let alias = code.last().expect("latest alias");
     assert_eq!(alias.pattern, "alias_latest");
     assert_eq!(alias.filename, "COD0OPSULT.SP3");
-    assert_eq!(alias.url, "http://ftp.aiub.unibe.ch/CODE/COD0OPSULT.SP3");
+    assert_eq!(
+        alias.url,
+        "https://www.aiub.unibe.ch/download/CODE/COD0OPSULT.SP3"
+    );
 
     let gfz_target = ProductDateTime::new(date(2026, 7, 12), 10, 0, 0).expect("target");
     let gfz_issues =

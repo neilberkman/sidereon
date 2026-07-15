@@ -612,9 +612,12 @@ const CATALOG: [CenterCatalogEntry; 11] = [
     CenterCatalogEntry {
         center: AnalysisCenter::CodUlt,
         code: "cod_ult",
-        protocol: ArchiveProtocol::Http,
-        host: "ftp.aiub.unibe.ch",
-        root_url: "http://ftp.aiub.unibe.ch",
+        protocol: ArchiveProtocol::Https,
+        host: "www.aiub.unibe.ch",
+        // AIUB retired the old ftp.aiub.unibe.ch HTTP tree. Its public file
+        // browser links products through this stable HTTPS download surface,
+        // which redirects to the current object store.
+        root_url: "https://www.aiub.unibe.ch/download",
         products: &COD_ULT_PRODUCTS,
         issues: &COD_ULT_ISSUES,
     },
@@ -652,8 +655,9 @@ const CELESTRAK_SPACE_WEATHER_SOURCE: SpaceWeatherSourceEntry = SpaceWeatherSour
     root_url: "https://celestrak.org/SpaceData",
 };
 
-const ALLOWED_HOSTS: [&str; 6] = [
+const ALLOWED_HOSTS: [&str; 7] = [
     "ftp.aiub.unibe.ch",
+    "www.aiub.unibe.ch",
     "navigation-office.esa.int",
     "isdc-data.gfz.de",
     "igs.bkg.bund.de",
