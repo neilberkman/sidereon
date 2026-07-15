@@ -1201,6 +1201,17 @@ mod tests {
     }
 
     #[test]
+    fn solution_csv_rejects_malformed_record_shape() {
+        let path = temp_file(
+            "malformed-solution.csv",
+            "GPS TOW (s),ECEF X (m),ECEF Y (m),ECEF Z (m)\n1,1,2\n",
+        );
+        let error = read_solution(&path).expect_err("malformed CSV records must be fatal");
+        assert!(matches!(error, PpcError::Csv { .. }));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn solution_csv_requires_complete_coordinate_triplets() {
         let path = temp_file(
             "partial-ecef.csv",
