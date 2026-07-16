@@ -43,8 +43,9 @@ impl RobustError {
 
 /// The median of `values`, computed on a `total_cmp` sort so the order (and
 /// thus the result for an even count, which averages the two central values)
-/// is deterministic. An empty slice yields `0.0`. The averaging of the two
-/// central elements is a single `(a + b) / 2.0`, no FMA.
+/// is deterministic. An empty slice yields `0.0`. The two central elements use
+/// `(a + b) / 2.0` when its addition is finite, with `a / 2.0 + b / 2.0` only
+/// as the overflow-safe fallback. Neither path uses FMA.
 pub fn median(values: &[f64]) -> Result<f64, RobustError> {
     validate_finite_slice(values, "values")?;
     if values.is_empty() {
@@ -55,9 +56,9 @@ pub fn median(values: &[f64]) -> Result<f64, RobustError> {
 }
 
 /// The shared median kernel: sorts `values` in place by `total_cmp` and
-/// returns the middle element (odd count) or the `(a + b) / 2.0` average of
-/// the two central elements (even count, no FMA). `None` for an empty slice.
-/// No finiteness validation; callers own their input contracts.
+/// returns the middle element (odd count) or an overflow-safe average of the
+/// two central elements (even count, no FMA). `None` for an empty slice. No
+/// finiteness validation; callers own their input contracts.
 pub(crate) fn median_sorting_in_place(values: &mut [f64]) -> Option<f64> {
     if values.is_empty() {
         return None;
@@ -67,7 +68,14 @@ pub(crate) fn median_sorting_in_place(values: &mut [f64]) -> Option<f64> {
     if n % 2 == 1 {
         Some(values[n / 2])
     } else {
-        Some((values[n / 2 - 1] + values[n / 2]) / 2.0)
+        let lower = values[n / 2 - 1];
+        let upper = values[n / 2];
+        let sum = lower + upper;
+        Some(if sum.is_finite() {
+            sum / 2.0
+        } else {
+            lower / 2.0 + upper / 2.0
+        })
     }
 }
 
@@ -137,6 +145,12 @@ mod tests {
         assert_eq!(median(&[3.0, 1.0, 2.0]).unwrap(), 2.0);
         assert_eq!(median(&[1.0, 2.0, 3.0, 4.0]).unwrap(), 2.5);
         assert_eq!(median(&[]).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn median_does_not_overflow_for_finite_central_values() {
+        assert_eq!(median(&[f64::MAX, f64::MAX]).unwrap(), f64::MAX);
+        assert_eq!(median(&[-f64::MAX, -f64::MAX]).unwrap(), -f64::MAX);
     }
 
     #[test]

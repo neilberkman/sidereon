@@ -4,6 +4,11 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Prevented finite even-count robust-median inputs near `f64` limits from
+  overflowing their central-pair addition to infinity.
+
 ## [0.29.2] - 2026-07-16
 
 ### Added
