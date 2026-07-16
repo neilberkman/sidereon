@@ -1,6 +1,6 @@
 [package]
 name = "sidereon-core"
-version = "0.29.2"
+version = "0.30.0"
 authors = []
 edition = "2021"
 description = "Numerical astrodynamics propagation core plus the GNSS domain layer (SP3, broadcast ephemeris, multi-GNSS positioning, RTK/PPP, ionosphere/troposphere, DOP) behind a default-on gnss feature"
@@ -35,11 +35,16 @@ libm = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 roxmltree = "0.21"
+sha2 = "0.10"
 # Data-parallel batch propagation: the multi-satellite walkers in `astro::passes`
 # fan independent per-satellite arcs across a rayon work-stealing pool. Each arc
 # is the same serial kernel, so results stay bit-identical to the serial path.
 rayon = "1"
 trust-region-least-squares = { path = "../trust-region-least-squares", version = "0.9" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fs2 = "0.4"
+getrandom = "0.2"
 
 [build-dependencies]
 cc = "1"
@@ -59,3 +64,7 @@ harness = false
 # the test suite for field-level diffing against the pure-Rust SGP4 port. Not
 # part of the public API. Off by default.
 sgp4-debug-oracle = []
+# Test-only exact-cache crash/barrier instrumentation. Off by default so an
+# installed library never reacts to the integration suite's environment
+# variables.
+exact-cache-test-failpoints = []

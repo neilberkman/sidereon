@@ -3,84 +3,119 @@
 ## Verdict for 0.29.2
 
 Sidereon 0.29.2 did not provide a cross-process or crash-consistent exact-cache
-commit. The Rust core derived the full distributor-independent identity and
-source-specific cache path but intentionally performed no cache IO. The Python
-and Elixir acquisition interfaces each wrote the archive, provenance, and
-decompressed product as three independently renamed files. Their locks covered
-only one Python process or one BEAM coordination domain.
+commit. The Rust core derived distributor-independent identity and
+source-specific paths but performed no cache IO. Python and Elixir separately
+wrote product, archive, and provenance files, and their coordination did not
+cover independent OS processes.
 
-The 0.29.2 readers did recheck the full requested and resolved identities,
-distribution source, both SHA-256 digests and lengths, caller checksum, and
-parsed product semantics. Those checks rejected ordinary corruption and most
-mixed triples. They did not establish one atomic acquisition record, prevent
-independent OS processes from interleaving publication, preserve the previous
-entry across every crash boundary, or prevent duplicate cross-process
-downloads. Therefore the required guarantee was absent.
+The 0.29.2 acquisition readers rechecked requested and resolved provenance,
+distribution source, byte lengths and SHA-256 digests, and parsed product
+semantics. Those checks rejected ordinary corruption and most mixed triples.
+They did not make the three files one atomic acquisition record, prevent two
+processes from interleaving publication, preserve the previous entry across
+every process-death boundary, or prevent a duplicate cross-process download.
+The required guarantee was therefore absent.
 
-## Unreleased correction
+The audit also found that the Rust `ProductIdentity` omitted the catalog
+analysis-center selector and parsed format version even though the acquisition
+interfaces retained them. Those fields can distinguish exact products, so the
+shared identity now includes both.
 
-The acquisition-capable interfaces now share one on-disk protocol:
+## 0.30.0 correction
 
-1. The source and complete `ProductIdentity` continue to select the existing
-   collision-resistant identity directory. No identity field is inferred from
-   a filename or modification time.
-2. A POSIX advisory lock file in that directory covers cache check, acquisition,
-   validation, and commit. Python uses `flock` directly; the Elixir NIF uses the
-   same `flock` operation on Unix. Waiting is bounded. Process exit closes the
-   descriptor and releases the lock without a stale-owner deletion decision.
-3. A writer creates a cryptographically unique entry directory and writes the
-   product, archive, and provenance there. Each file is synchronized before the
-   entry and entries directories are synchronized.
-4. The writer creates and synchronizes a small version-2 commit record. It
-   contains the immutable entry identifier and the SHA-256 digest of the exact
-   provenance bytes. A same-directory atomic rename replaces the prior commit
-   record, followed by synchronization of its parent directory.
-5. A reader follows only the commit record. The record binds provenance bytes;
-   provenance binds product/archive digests, lengths, full requested and
-   resolved identities, and source. The reader repeats those checks and fresh
-   SP3/IONEX semantic validation before returning a hit.
-6. A later lock owner removes unreferenced transaction directories. It cannot
-   run cleanup while a cooperating writer is alive. Valid 0.29.0-0.29.2 triples
-   are fully revalidated and republished as one transaction without a new
-   download.
+One Rust implementation now defines the native protocol used by the Rust,
+Python, C, and Elixir interfaces. The WASM/JavaScript interface uses the same
+identity and commit-record builder/verifier, with browser-native coordination
+and storage:
 
-The commit record is the only reader-visible transition. A failure before its
-rename leaves the prior record. A failure after its rename points to an entry
-whose files and directory names were already synchronized. With no prior
-record, the corresponding outcomes are a complete entry or no acceptable
-entry.
+1. The complete `ProductIdentity` includes family, analysis center, publisher,
+   solution class, campaign, filename version, coverage date, issue, span,
+   cadence, official filename, format, parsed format version, and prediction
+   horizon. Its canonical bytes and the explicit distribution source select
+   and bind a cache entry. No field is inferred from filename or modification
+   time.
+2. Native writers hold a bounded advisory `flock` on the entry directory across
+   cache check, acquisition, validation, commit, and cleanup. The kernel
+   releases the lock when a process exits; recovery never guesses an owner PID
+   or deletes a live writer's files.
+3. A native writer creates a cryptographically random immutable entry
+   directory, writes product, archive, and provenance bytes with exclusive file
+   creation, synchronizes each file, and synchronizes the entry directories.
+4. Schema-v3 commit bytes bind the SHA-256 digest and length of all three byte
+   objects, the SHA-256 digest of the complete canonical identity, the explicit
+   distribution source, and the immutable entry identifier.
+5. A synchronized temporary marker is renamed over `current.json` in the same
+   directory, then the directory is synchronized. That marker is the only
+   reader-visible transition. A process death leaves the previous complete
+   entry, the new complete entry, or no acceptable entry; it cannot authorize a
+   mixed entry.
+6. Readers follow only the marker and rehash all three objects. An unlocked
+   native reader retries if the marker changes while a later lock owner removes
+   the previous immutable directory, so refresh yields an old or new complete
+   entry rather than a spurious partial read.
+7. Cleanup runs only under the writer lock and removes only immutable entry
+   directories not named by the current marker. Valid legacy Python and Elixir
+   triples are fully revalidated before transaction migration and do not
+   require another download.
+8. Browser JavaScript uses a Web Lock for same-origin tab/worker coordination.
+   One strict-durability IndexedDB read-write transaction stores the immutable
+   entry and replaces its marker atomically. Reads invoke the shared WASM
+   verifier before returning any bytes.
+
+Transport and format parsing remain outside the low-level cache module. A
+caller must validate product semantics before publication and must parse the
+authenticated product and provenance bytes on a hit. Python and Elixir exact
+acquisition perform those checks themselves.
+
+## Interface parity
+
+- Rust exposes the pure schema-v3 builder/verifier and the native
+  `ExactProductCache` through both `sidereon-core` and `sidereon`.
+- Python exposes `sidereon.exact_cache` and uses that same native implementation
+  in exact acquisition.
+- C exposes lock, locked and unlocked read, publish, cleanup, authenticated-byte
+  and path accessors, and handle release functions in `sidereon.h`.
+- WASM exposes the pure builder/verifier and `BrowserExactProductCache` from the
+  `@neilberkman/sidereon/exact-cache` package export.
+- Elixir exposes `Sidereon.GNSS.ExactCache` and uses that same native
+  implementation in exact acquisition.
+
+Host languages retain their normal ownership and async conventions, but the
+identity fields, accepted sources, commit bindings, corruption behavior,
+bounded coordination, immutable publication, and cleanup rules are shared.
 
 ## Test coverage
 
-Deterministic tests use explicit barriers and named publication failpoints. The
-Python and Elixir suites cover independent OS processes racing one source,
-identical bytes acquired through different allowed sources, duplicate-request
-reuse, a prior entry during refresh, process death after every payload,
-archive, provenance, entry-sync, marker-write, marker-rename, and final-sync
-boundary, corruption, same-filename/different-identity isolation, and abandoned
-cleanup while another OS process owns the lock. Python additionally constructs
-a deliberate payload/provenance mismatch and verifies legacy migration.
+Core tests use child processes, explicit barriers, and named publication
+failpoints compiled only by the non-default `exact-cache-test-failpoints`
+feature. They cover two processes racing the same identity, one-download
+warm-cache reuse, a live owner that cannot be displaced or cleaned, an unlocked
+reader racing refresh cleanup, death after every payload/archive/provenance,
+entry-sync, marker-write, marker-rename, and final-sync boundary, byte
+corruption, source substitution, and same-path identity substitution.
 
-Manual bidirectional compatibility checks also prove that Python accepts an
-Elixir-published entry and Elixir accepts a Python-published entry. Holding the
-lock in either runtime makes the other runtime time out, confirming that both
-use the same OS lock rather than two unrelated coordination mechanisms.
+Python and Elixir acquisition tests cover distributor races, legacy migration,
+parsed-product validation, provenance mismatch, lock timeout, and duplicate
+request reuse through the shared native implementation. C tests exercise lock
+ownership, timeout, publication, locked and unlocked verified reads, and byte
+copying. WASM tests exercise full identity fields, commit substitution
+rejection, Web Lock serialization, one-acquisition reuse, IndexedDB atomic
+publication, and stored-byte corruption rejection.
 
 ## Compatibility and residual risk
 
-- The exact-acquisition function signatures remain compatible. Python adds
-  optional `cache_lock_timeout_s`; Elixir adds optional
-  `:cache_lock_timeout_ms`.
-- `result.path` still names the official product filename, now inside the
-  immutable transaction directory. Code that assumed the undocumented former
-  parent directory should instead use the returned path.
-- The legacy convenience fetch APIs and their separate cache layouts are not
-  changed.
-- The crash and cross-process guarantee applies to local Linux and macOS
-  filesystems that honor POSIX `flock`, atomic same-directory rename, regular
-  file synchronization, and directory synchronization. Network filesystems or
-  mounts that weaken those primitives are outside the guarantee.
-- The cache directory is assumed to be controlled by the caller. Protection
-  from a malicious local user who can replace paths or rewrite committed files
-  is not part of this contract; tampering is detected when it changes bound
-  bytes, but this is not an authenticated storage format.
+- Existing exact-acquisition calls remain compatible. Python adds optional
+  `cache_lock_timeout_s`; Elixir adds optional `:cache_lock_timeout_ms`.
+- `result.path` still names the official product, now inside its immutable
+  entry directory. Consumers should not depend on the undocumented former
+  parent directory.
+- The native guarantee covers local Linux and macOS filesystems that implement
+  advisory `flock`, atomic same-directory rename, file synchronization, and
+  directory synchronization. Network filesystems or mounts that weaken those
+  primitives are outside the guarantee.
+- Browser coordination covers contexts participating in the same origin's Web
+  Locks and IndexedDB databases. It is not an OS filesystem lock and does not
+  coordinate unrelated origins or native processes.
+- The cache directory is caller-controlled trusted storage. Digest verification
+  detects changed bound bytes but is not a signature and does not defend
+  against an attacker able to replace both data and commit records.

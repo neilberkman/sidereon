@@ -30,6 +30,21 @@ and never compile the SP3/RINEX/IONEX/solver code.
 - EGM96/EGM2008 geoid grids, including the public PROJ EGM96 GTX loader with
   explicit fused or separately rounded PROJ 9.3 interpolation.
 
+## Exact-product cache transactions
+
+`sidereon_core::exact_cache` provides one schema-v3 commit format for every
+interface. It binds the complete product identity, explicit distribution
+source, and SHA-256 digest and length of validated product, original archive,
+and provenance bytes.
+
+On Linux and macOS, `ExactProductCache` adds a bounded cross-process advisory
+lock, immutable synchronized entry directories, atomic marker replacement,
+verified locked or unlocked reads, and lock-scoped cleanup. Callers retain
+transport and parsing responsibility: validate product semantics before
+publication and parse the authenticated bytes again on a cache hit. The full
+audit and filesystem assumptions are documented in
+[`docs/exact-product-cache-atomicity.md`](../../docs/exact-product-cache-atomicity.md).
+
 ## Parity bar
 
 Every independently reproducible, libm-bound component (propagation, frames, time, SGP4,

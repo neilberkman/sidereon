@@ -2,7 +2,27 @@
 
 All notable changes to `sidereon-core` are documented here.
 
-## [Unreleased]
+## [0.30.0] - 2026-07-16
+
+### Added
+
+- Added the schema-v3 exact-product cache protocol. Commit records bind the
+  complete product identity, explicit distribution source, and SHA-256 digest
+  and length of validated product, distributor archive, and provenance bytes.
+- Added native Linux/macOS `ExactProductCache` transactions with bounded
+  cross-process locking, cryptorandom immutable entries, synchronized files and
+  directories, one atomic commit marker, unlocked-reader refresh retry, and
+  lock-scoped abandoned-entry cleanup. The ergonomic `sidereon` crate re-exports
+  the same API.
+- Added `analysis_center` and `format_version` to `ProductIdentity`. Canonical
+  identity bytes and portable keys now include every exact identity field.
+
+### Compatibility
+
+- This is a source-breaking identity-model correction: Rust struct literals
+  must provide the two new fields. The minor version advances because
+  `ProductIdentity` is externally constructible; `cargo-semver-checks` confirms
+  a patch release would be incorrect.
 
 ### Fixed
 

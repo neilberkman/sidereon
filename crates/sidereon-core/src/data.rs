@@ -1400,6 +1400,8 @@ const GFZ_ULT_SP3_PATTERNS: [UltraSp3Pattern; 3] = [
 pub struct ProductIdentity {
     /// Product family.
     pub family: ProductType,
+    /// Catalog analysis-center product line.
+    pub analysis_center: AnalysisCenter,
     /// Producing or combining organization.
     pub publisher: ProductPublisher,
     /// Solution class or tier.
@@ -1420,6 +1422,12 @@ pub struct ProductIdentity {
     pub official_filename: String,
     /// Public serialization format.
     pub format: ProductFormat,
+    /// Parsed serialization revision when the request constrains one.
+    ///
+    /// Catalog identities leave this unset because the revision is carried by
+    /// product content rather than the official filename. A resolved identity
+    /// may set it after parsing the product.
+    pub format_version: Option<String>,
     /// Prediction horizon when the product line encodes one.
     pub prediction_horizon_days: Option<u8>,
 }
@@ -1442,6 +1450,16 @@ impl ProductIdentity {
             return Err(DataCatalogError::InconsistentProductIdentity { field: "format" });
         }
 
+        if self
+            .format_version
+            .as_deref()
+            .is_some_and(|value| value.is_empty() || value.as_bytes().contains(&0))
+        {
+            return Err(DataCatalogError::InconsistentProductIdentity {
+                field: "format_version",
+            });
+        }
+
         let horizon_valid = match (self.publisher, self.solution, self.prediction_horizon_days) {
             (ProductPublisher::Code, SolutionClass::Predicted, Some(1 | 2)) => true,
             (_, SolutionClass::Predicted, _) => false,
@@ -1453,7 +1471,6 @@ impl ProductIdentity {
                 field: "prediction_horizon_days",
             });
         }
-
         let descriptor = product_type_convention(self.family);
         let expected = match descriptor.kind {
             ProductFilenameKind::Sampled => {
@@ -1501,25 +1518,72 @@ impl ProductIdentity {
                 field: "official_filename",
             });
         }
+        if self.publisher != self.analysis_center.publisher()
+            || self.solution != self.analysis_center.solution_class()
+            || self.prediction_horizon_days != self.analysis_center.prediction_horizon_days()
+        {
+            return Err(DataCatalogError::InconsistentProductIdentity {
+                field: "analysis_center",
+            });
+        }
         Ok(())
     }
 
     /// Deterministic identity key suitable for a portable cache layout.
     pub fn key(&self) -> Result<String, DataCatalogError> {
-        self.validate()?;
-        let prediction = self.prediction_horizon_days.map_or_else(
-            || "observed".to_string(),
-            |days| format!("prediction_{days}d"),
-        );
+        use sha2::{Digest, Sha256};
+
+        let canonical = self.canonical_bytes()?;
+        let digest = Sha256::digest(canonical);
         Ok(format!(
-            "{}/{}/{}/{}/{}/{}",
-            self.family.code(),
+            "{}-{}-{}",
             self.publisher.code().to_ascii_lowercase(),
             self.solution.code(),
-            self.campaign.code().to_ascii_lowercase(),
-            prediction,
-            self.official_filename
+            digest[..10]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
         ))
+    }
+
+    /// Canonical, unambiguous bytes containing every exact identity field.
+    ///
+    /// The encoding is ASCII/UTF-8 field text separated by NUL bytes. It is a
+    /// stable cross-interface input to cache identity hashing, not a display
+    /// or interchange document.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, DataCatalogError> {
+        self.validate()?;
+        let date = format!(
+            "{:04}-{:02}-{:02}",
+            self.date.year, self.date.month, self.date.day
+        );
+        let version = self.version.to_string();
+        let prediction = self
+            .prediction_horizon_days
+            .map(|days| days.to_string())
+            .unwrap_or_default();
+        let fields = [
+            self.family.code(),
+            self.analysis_center.code(),
+            self.publisher.code(),
+            self.solution.code(),
+            self.campaign.code(),
+            version.as_str(),
+            date.as_str(),
+            self.issue.as_deref().unwrap_or_default(),
+            self.span.as_str(),
+            self.sample.as_str(),
+            self.official_filename.as_str(),
+            self.format.code(),
+            self.format_version.as_deref().unwrap_or_default(),
+            prediction.as_str(),
+        ];
+        if fields.iter().any(|field| field.as_bytes().contains(&0)) {
+            return Err(DataCatalogError::InconsistentProductIdentity {
+                field: "canonical_encoding",
+            });
+        }
+        Ok(fields.join("\0").into_bytes())
     }
 
     /// Deterministic cache path for this identity and distributor.
@@ -1839,16 +1903,23 @@ impl ProductSpec {
         };
         let identity = ProductIdentity {
             family: self.product_type,
+            analysis_center: self.center,
             publisher: self.center.publisher(),
             solution: self.center.solution_class(),
             campaign,
             version: 0,
             date: self.date,
-            issue: self.issue.clone(),
+            issue: match descriptor.kind {
+                ProductFilenameKind::Sampled => {
+                    Some(self.issue.clone().unwrap_or_else(|| "0000".to_string()))
+                }
+                ProductFilenameKind::Nav => None,
+            },
             span: convention.span.to_string(),
             sample: self.sample.clone(),
             official_filename: self.canonical_filename()?,
             format: product_format(self.product_type),
+            format_version: None,
             prediction_horizon_days: self.center.prediction_horizon_days(),
         };
         identity.validate()?;

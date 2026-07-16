@@ -34,7 +34,8 @@
 //! - GNSS utility modules such as [`frequencies`], [`combinations`],
 //!   [`quality`], [`carrier_phase`], [`signal`], [`velocity`],
 //!   [`broadcast_comparison`], [`constants`], [`navigation`], [`geometry`],
-//!   [`data`], [`dgnss`], [`constellation`], [`ppp_corrections`], [`rtk`],
+//!   [`data`], [`exact_cache`], [`dgnss`], [`constellation`],
+//!   [`ppp_corrections`], [`rtk`],
 //!   [`staleness`], [`tides`], [`ils`], and [`terrain`] expose the core helper
 //!   surface,
 //! - [`astro`] exposes time/frame conversions, Sun/Moon positions, RF link
@@ -196,6 +197,7 @@ pub use sidereon_core::astro::frames::{
     EarthOrientation, EarthOrientationProvider, TdbEarthOrientationProvider,
 };
 pub use sidereon_core::astro::propagator::{ForceModelComponents, ForceModelKind};
+pub use sidereon_core::exact_cache;
 pub use sidereon_core::geometry_quality::{
     classify, GeometryQuality, GeometryQualityThresholds, ObservabilityTier,
 };

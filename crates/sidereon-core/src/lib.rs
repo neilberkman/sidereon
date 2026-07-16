@@ -89,6 +89,7 @@ mod crinex; // Hatanaka (CRINEX) observation-file decoder
 pub mod data; // sans-IO GNSS product filename and archive URL catalog
 pub mod dop; // dilution-of-precision geometry (GDOP/PDOP/HDOP/VDOP/TDOP)
 pub mod error_metrics; // covariance-derived CEP, radial, and ellipse metrics
+pub mod exact_cache; // exact-product cache identity binding and atomic publication
 pub mod frequencies; // canonical GNSS carrier-frequency table
 mod glonass; // GLONASS PZ-90.11 state-vector RK4 propagation
 pub mod has; // Galileo HAS MT1 correction payload decode/encode

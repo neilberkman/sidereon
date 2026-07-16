@@ -150,6 +150,20 @@ fn exact_request_and_cache_key_keep_source_selection_explicit() {
 }
 
 #[test]
+fn exact_identity_key_is_stable_across_interfaces() {
+    let identity = mgex_sp3(AnalysisCenter::Cod, date(2026, 7, 12), None)
+        .expect("CODE product")
+        .identity()
+        .expect("identity");
+    assert_eq!(identity.analysis_center, AnalysisCenter::Cod);
+    assert_eq!(identity.format_version, None);
+    assert_eq!(
+        identity.key().expect("cache key"),
+        "cod-final-a91258c21fa4860c34ce"
+    );
+}
+
+#[test]
 fn exact_product_set_requires_every_declared_identity_before_processing() {
     let first = mgex_sp3(AnalysisCenter::Cod, date(2026, 7, 12), None)
         .expect("first product")
