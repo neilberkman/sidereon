@@ -127,11 +127,32 @@ decompressed product, original downloaded archive, and JSON provenance sidecar
 are retained. A cache hit rechecks identities, byte counts, both hashes, caller
 checksum, and a fresh product parse with semantic checks.
 
-Writes use exclusive temporary files, flush them before atomic promotion, and
-make the decompressed data file visible last. Invalid or interrupted first
-downloads cannot become cache hits. Per-path in-process locks prevent duplicate
-first downloads. A verified existing entry is returned without contacting a
-remote service, including in offline mode.
+The acquisition-capable Python and Elixir interfaces publish the product,
+original archive, and JSON provenance as one immutable transaction. A single
+SHA-256-bound commit record names that transaction and is atomically replaced
+only after the entry files and directories have been synchronized. Readers
+follow only that record and then repeat the identity, source, digest, length,
+caller-checksum, and semantic checks.
+
+On Linux and macOS, both interfaces use the same per-entry POSIX advisory lock
+across cache validation, acquisition, and commit. The wait is bounded; a lock or
+cache-write failure is terminal rather than permission to try another source.
+OS process death releases the lock automatically, allowing a later owner to
+clean abandoned transactions without deleting a live writer's work. Valid
+0.29.0-0.29.2 three-file entries are revalidated and migrated into the committed
+layout without a new download.
+
+The crash guarantee relies on a local filesystem providing atomic
+same-directory rename, POSIX advisory locks, regular-file synchronization, and
+directory synchronization. Under those Linux/macOS guarantees, a process death
+or power loss during publication leaves the previous complete entry or no
+acceptable entry; it cannot expose a mixed payload/provenance pair. A verified
+existing entry is returned without contacting a remote service, including in
+offline mode.
+
+The [cache atomicity audit](exact-product-cache-atomicity.md) records the 0.29.2
+verdict, corrected protocol, process/failpoint coverage, compatibility, and
+residual risks.
 
 ## Compatibility and extension
 
