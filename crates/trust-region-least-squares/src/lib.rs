@@ -10,12 +10,18 @@
 //! trust-region Newton iteration SciPy does, down to the last bit. The
 //! linear-algebra
 //! operations that determine the last bits of the trajectory -- the thin SVD of
-//! the scaled Jacobian and the small BLAS reductions around it -- are *injected*
-//! through the [`trf::ThinSvd`] trait. Supplying an implementation backed by a
-//! host LAPACK/BLAS (see the optional `hostlapack` module) lets the solver
+//! the scaled Jacobian, the small BLAS reductions around it, and the elementwise
+//! and scalar powers SciPy writes as `**` -- are *injected* through the
+//! [`trf::ThinSvd`] trait. Supplying an implementation backed by a host
+//! LAPACK/BLAS/NumPy (see the optional `hostlapack` module) lets the solver
 //! reproduce that backend's numerical trajectory exactly, which is what makes
 //! bit-for-bit agreement with a pinned SciPy/NumPy runtime achievable rather
 //! than merely tolerance-close.
+//!
+//! Every hook on [`trf::ThinSvd`] except the SVD itself is a defaulted
+//! `Ok(None)`, so an implementation only overrides what it actually needs to
+//! pin, and a backend written against an earlier version keeps compiling and
+//! keeps its results.
 //!
 //! Use it when you need scipy-identical least-squares results in Rust: porting a
 //! Python pipeline, cross-checking a Rust solver against SciPy, or pinning a
@@ -42,15 +48,21 @@
 //!   give single-threaded / `wasm32` consumers the same report without rayon.
 //! - [`loss`]: SciPy's robust loss functions (`construct_loss_function` +
 //!   `IMPLEMENTED_LOSSES`) and `scale_for_robust_loss_function`, reproduced
-//!   bit-for-bit.
+//!   bit-for-bit. The `_with` variants
+//!   ([`loss::LossFunction::evaluate_with`], [`loss::rho_for_loss_with`])
+//!   route the `z ** -0.5` / `z ** -1.5` derivative powers through the same
+//!   host-numerics seam.
 //! - [`numdiff`]: the dense two-point finite-difference Jacobian matching
 //!   SciPy's `_numdiff.approx_derivative(..., method="2-point")` path.
 //! - [`parity`]: hex-bit fixture helpers, feature-gated trace output, and
 //!   first-divergence reporting for diagnosing where two trajectories split.
 //! - [`hostlapack`]: a [`trf::ThinSvd`] implementation backed by a dynamically
-//!   loaded host LAPACK/BLAS, used to reproduce a pinned SciPy runtime's exact
-//!   SVD/BLAS results bit-for-bit. Compiled into the default build; point it at
-//!   the host LAPACK/BLAS at runtime to get bit-exact parity.
+//!   loaded host LAPACK/BLAS/NumPy, used to reproduce a pinned SciPy runtime's
+//!   exact SVD/BLAS/power results bit-for-bit. Compiled into the default build;
+//!   point it at the host LAPACK/BLAS at runtime to get bit-exact parity, and
+//!   optionally record it process-wide with [`hostlapack::LapackSvd::install`]
+//!   so a second, conflicting configuration is rejected rather than silently
+//!   applied.
 //!
 //! The iteration is general in `n`: give it a residual `r: R^n -> R^m` for any
 //! `n >= 1` (with `m >= n` for the dense exact trust-region solve) and it runs
@@ -94,7 +106,7 @@
 //! [`trf::NalgebraThinSvd`] is a legitimate independent SVD but is *not*
 //! bit-identical to a pinned SciPy/NumPy runtime; for bit-for-bit parity inject
 //! the [`hostlapack::LapackSvd`] backend (the `*_with` entry points take a
-//! [`trf::ThinSvd`]). The iteration is identical, only the SVD/BLAS seam
+//! [`trf::ThinSvd`]). The iteration is identical, only the host-numerics seam
 //! changes.
 //!
 //! [`scipy.optimize.least_squares`]: https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.least_squares.html

@@ -11,6 +11,11 @@ bindings/**/target
 !crates/sidereon-core/tests/fixtures/spk/horizons_eros_type21.bsp
 !crates/sidereon-core/tests/fixtures/bodies/observe_de.bsp
 
+# The numpy `power` oracle is CPU-dispatch-sensitive, so unlike every other
+# trust-region-least-squares fixture it is regenerated in-place by
+# scripts/bitexact_gate.sh rather than committed.
+crates/trust-region-least-squares/tests/fixtures/numpy_power.json
+
 # Local working journal for the iterative dev loop (not shipped).
 PROGRESS.md
 

@@ -63,11 +63,18 @@ export SIDEREON_BITEXACT=1
 echo "bitexact_gate: scipy $(python -c 'import scipy;print(scipy.__version__)') / numpy $(python -c 'import numpy;print(numpy.__version__)')"
 echo "bitexact_gate: LAPACK -> $lapack_so"
 
-# 4. Run the bit-exact replays. These assert hex-bit equality vs scipy 1.18.0.
+# 4. Take the numpy `power` oracle from the interpreter this run just pinned, so
+# the host-numerics power hooks are compared against the in-process numpy rather
+# than against a payload captured on some other machine. Every other fixture is
+# committed; this one is CPU-dispatch-sensitive, so it is regenerated here.
+python fixtures-generators/generate_numpy_power.py
+
+# 5. Run the bit-exact replays. These assert hex-bit equality vs scipy 1.18.0.
 cargo test -p trust-region-least-squares \
   --test loss_fixtures \
   --test general_fixtures \
   --test hostlapack_fixtures \
+  --test host_backend_power \
   --test data_problem_fixtures \
   --test numdiff_fixtures \
   --test trf_fixtures

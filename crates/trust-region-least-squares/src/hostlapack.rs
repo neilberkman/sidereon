@@ -10,6 +10,7 @@ use std::error::Error;
 use std::ffi::{c_char, c_int, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::{__m512d, _mm512_loadu_pd, _mm512_storeu_pd};
@@ -115,6 +116,23 @@ type CblasDgemv64 = unsafe extern "C" fn(
 #[allow(improper_ctypes_definitions)]
 type SvmlPow8 = unsafe extern "C" fn(__m512d, __m512d) -> __m512d;
 
+extern "C" {
+    /// The platform C `pow`. NumPy's `power` ufunc inner loop and its scalar
+    /// `**` both reduce to `npy_pow`, which is this symbol; binding it directly
+    /// (rather than going through [`f64::powf`]) pins the dispatch to the same
+    /// operation the reference runtime performs.
+    fn pow(base: f64, exponent: f64) -> f64;
+}
+
+fn c_pow(base: f64, exponent: f64) -> f64 {
+    // SAFETY: `pow` is a pure libm function defined for every pair of doubles;
+    // it has no preconditions and touches no memory.
+    unsafe { pow(base, exponent) }
+}
+
+/// The process-wide exact host numerics configuration, once installed.
+static INSTALLED: OnceLock<LapackSvd> = OnceLock::new();
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThinSvdResult {
     pub m: usize,
@@ -126,7 +144,14 @@ pub struct ThinSvdResult {
     pub vt: Vec<f64>,
 }
 
-#[derive(Clone, Debug, Default)]
+/// A [`trf::ThinSvd`] backed by a host LAPACK/BLAS/NumPy runtime.
+///
+/// The pair of paths it carries *is* its configuration identity: which library
+/// the SVD comes from, and which library the BLAS reductions and the NumPy
+/// power dispatch come from. Two backends compare equal exactly when they name
+/// the same runtime, which is what [`LapackSvd::install`] uses to keep a whole
+/// process pinned to one runtime.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LapackSvd {
     path: Option<PathBuf>,
     blas_path: Option<PathBuf>,
@@ -145,6 +170,51 @@ impl LapackSvd {
             path: Some(path.into()),
             blas_path: None,
         }
+    }
+
+    /// Pin the NumPy BLAS/ufunc library explicitly, instead of letting it be
+    /// inferred from the LAPACK path or read from
+    /// `TRUST_REGION_LEAST_SQUARES_NUMPY_BLAS_PATH`.
+    pub fn with_numpy_blas_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.blas_path = Some(path.into());
+        self
+    }
+
+    /// Install this backend as the process-wide exact host numerics
+    /// configuration.
+    ///
+    /// Bit-for-bit parity is only meaningful when every result in a process
+    /// came from the same pinned runtime, so this is deliberately
+    /// write-once. Installing an identical configuration again succeeds and
+    /// changes nothing; installing a different one is rejected rather than
+    /// silently re-pointing part of the process at another runtime.
+    ///
+    /// This *records* the configuration, it does not route any solve through
+    /// it: callers still hand a backend to the `*_with` entry points, and
+    /// [`LapackSvd::installed`] reads the record back. What the record buys is
+    /// that a second component asking for a different runtime fails loudly
+    /// here rather than quietly contributing numbers from it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LapackError::ConflictingHostInstall`] if a different
+    /// configuration is already installed.
+    pub fn install(&self) -> Result<(), LapackError> {
+        let installed = INSTALLED.get_or_init(|| self.clone());
+        if installed == self {
+            Ok(())
+        } else {
+            Err(LapackError::ConflictingHostInstall {
+                installed: format!("{installed:?}"),
+                requested: format!("{self:?}"),
+            })
+        }
+    }
+
+    /// The installed process-wide configuration, if [`LapackSvd::install`] has
+    /// been called.
+    pub fn installed() -> Option<&'static LapackSvd> {
+        INSTALLED.get()
     }
 }
 
@@ -206,6 +276,24 @@ impl trf::ThinSvd for LapackSvd {
     fn power3(&self, x: &[f64]) -> Result<Option<Vec<f64>>, trf::SvdError> {
         let path = self.resolve_blas_path().map_err(trf::SvdError::from)?;
         numpy_svml_power3(path, x).map_err(trf::SvdError::from)
+    }
+
+    fn power(&self, values: &[f64], exponent: f64) -> Result<Option<Vec<f64>>, trf::SvdError> {
+        let path = self.resolve_blas_path().map_err(trf::SvdError::from)?;
+        numpy_power(&path, values, exponent)
+            .map(Some)
+            .map_err(trf::SvdError::from)
+    }
+
+    fn power_scalar(&self, base: f64, exponent: f64) -> Result<Option<f64>, trf::SvdError> {
+        let path = self.resolve_blas_path().map_err(trf::SvdError::from)?;
+        // Bind the runtime before answering, for the same reason the vector
+        // hook does: a backend that cannot reach the runtime it was configured
+        // against must not hand back a platform-libm number as if it had.
+        let _runtime = open_numpy_runtime(&path).map_err(trf::SvdError::from)?;
+        // numpy scalars and Python floats both take `npy_pow` for `**`; there
+        // is no `fast_scalar_power` shortcut off the ndarray path.
+        Ok(Some(c_pow(base, exponent)))
     }
 }
 
@@ -295,6 +383,18 @@ pub enum LapackError {
     InvalidWorkspace {
         value: f64,
     },
+    /// A different host numerics configuration is already installed in this
+    /// process, so this one cannot take its place.
+    ConflictingHostInstall {
+        installed: String,
+        requested: String,
+    },
+    /// The NumPy runtime associated with the configured host library could not
+    /// be located, so the exact dispatch it would perform cannot be resolved.
+    NumpyRuntimeNotFound {
+        path: PathBuf,
+        what: &'static str,
+    },
 }
 
 impl fmt::Display for LapackError {
@@ -345,6 +445,19 @@ impl fmt::Display for LapackError {
             LapackError::InvalidWorkspace { value } => {
                 write!(f, "dgesdd_ returned invalid lwork query value {value:?}")
             }
+            LapackError::ConflictingHostInstall {
+                installed,
+                requested,
+            } => write!(
+                f,
+                "host numerics is already installed as {installed}; \
+                 refusing to reconfigure it to {requested}"
+            ),
+            LapackError::NumpyRuntimeNotFound { path, what } => write!(
+                f,
+                "could not locate the {what} for the configured host library {}",
+                path.display()
+            ),
         }
     }
 }
@@ -659,6 +772,113 @@ fn blas_row_major_matvec_with_path(
     Ok(y)
 }
 
+/// Binds to the exact NumPy/BLAS runtime this backend is configured against.
+///
+/// Every power dispatch opens the runtime through here, so a backend that names
+/// a library it cannot actually reach fails closed with a typed error instead of
+/// quietly answering with the platform's own arithmetic while claiming to
+/// reproduce a runtime it never loaded.
+fn open_numpy_runtime(path: &Path) -> Result<Library, LapackError> {
+    // SAFETY: the configured scipy/numpy library is loaded only to bind the
+    // runtime whose numerical behavior this backend reproduces. No symbol is
+    // resolved or called through this handle.
+    unsafe { Library::new(path) }.map_err(|err| LapackError::Dlopen {
+        path: path.to_path_buf(),
+        message: err.to_string(),
+    })
+}
+
+/// Elementwise `values ** exponent` as the configured NumPy runtime computes
+/// it: the AVX-512 SVML kernel where NumPy's `power` ufunc dispatches one, and
+/// the scalar `npy_pow` (== platform C `pow`) inner loop everywhere else.
+///
+/// Unlike [`numpy_svml_power3`] this never degrades quietly: once the CPU gate
+/// selects the SVML kernel, failing to resolve it is an error, because the
+/// scalar loop would produce a different (if equally valid) trajectory than the
+/// runtime the caller asked to reproduce.
+fn numpy_power(numpy_path: &Path, values: &[f64], exponent: f64) -> Result<Vec<f64>, LapackError> {
+    let _runtime = open_numpy_runtime(numpy_path)?;
+    numpy_vector_power(numpy_path, values, exponent)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn numpy_vector_power(
+    numpy_path: &Path,
+    values: &[f64],
+    exponent: f64,
+) -> Result<Vec<f64>, LapackError> {
+    if std::is_x86_feature_detected!("avx512f") {
+        return numpy_svml_power(numpy_path, values, exponent);
+    }
+    Ok(scalar_power_loop(values, exponent))
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn numpy_vector_power(
+    _numpy_path: &Path,
+    values: &[f64],
+    exponent: f64,
+) -> Result<Vec<f64>, LapackError> {
+    Ok(scalar_power_loop(values, exponent))
+}
+
+/// NumPy's non-SVML `power` inner loop: `npy_pow` applied element by element.
+fn scalar_power_loop(values: &[f64], exponent: f64) -> Vec<f64> {
+    values.iter().map(|&base| c_pow(base, exponent)).collect()
+}
+
+/// Resolves and calls the same `__svml_pow8` kernel NumPy's AVX-512 `power`
+/// ufunc uses. The caller must have confirmed AVX-512 support.
+#[cfg(target_arch = "x86_64")]
+fn numpy_svml_power(
+    blas_path: &Path,
+    values: &[f64],
+    exponent: f64,
+) -> Result<Vec<f64>, LapackError> {
+    let umath_path =
+        infer_numpy_umath_path(blas_path).ok_or_else(|| LapackError::NumpyRuntimeNotFound {
+            path: blas_path.to_path_buf(),
+            what: "_multiarray_umath extension",
+        })?;
+
+    // SAFETY: loading the extension only to resolve the same SVML pow symbol
+    // NumPy's AVX-512 power ufunc uses.
+    let library = unsafe { Library::new(&umath_path) }.map_err(|err| LapackError::Dlopen {
+        path: umath_path.clone(),
+        message: err.to_string(),
+    })?;
+    // SAFETY: `__svml_pow8` has the SVML `(__m512d, __m512d) -> __m512d` ABI.
+    let pow8: Symbol<'_, SvmlPow8> =
+        unsafe { library.get(b"__svml_pow8\0") }.map_err(|err| LapackError::Symbol {
+            path: umath_path.clone(),
+            symbol: "__svml_pow8",
+            message: err.to_string(),
+        })?;
+
+    Ok(svml_power_lanes(*pow8, values, exponent))
+}
+
+/// Feeds `values` through the SVML kernel eight lanes at a time. The caller
+/// must have confirmed AVX-512 support.
+#[cfg(target_arch = "x86_64")]
+fn svml_power_lanes(pow8: SvmlPow8, values: &[f64], exponent: f64) -> Vec<f64> {
+    let mut out = vec![0.0; values.len()];
+    for (chunk_index, chunk) in values.chunks(8).enumerate() {
+        let mut bases = [1.0; 8];
+        let exponents = [exponent; 8];
+        bases[..chunk.len()].copy_from_slice(chunk);
+
+        // SAFETY: AVX-512 support was checked by the caller. The arrays have
+        // exactly eight f64 lanes, and only the initialized output lanes are
+        // copied.
+        let powered = unsafe { call_svml_pow8(pow8, &bases, &exponents) };
+
+        let start = chunk_index * 8;
+        out[start..start + chunk.len()].copy_from_slice(&powered[..chunk.len()]);
+    }
+    out
+}
+
 #[cfg(target_arch = "x86_64")]
 fn numpy_svml_power3(
     blas_path: impl AsRef<Path>,
@@ -667,9 +887,6 @@ fn numpy_svml_power3(
     if !std::is_x86_feature_detected!("avx512f") {
         return Ok(None);
     }
-    let Some(umath_path) = infer_numpy_umath_path(blas_path.as_ref()) else {
-        return Ok(None);
-    };
 
     // The NumPy ufunc extension resolves CPython symbols (e.g. PyObject_SelfIter)
     // that are only present when an interpreter has imported it; side-loading it
@@ -677,30 +894,11 @@ fn numpy_svml_power3(
     // SVML symbol is absent, fall back to the scalar power path rather than
     // failing the solve - that path matches a NumPy whose pow ufunc is scalar
     // (SVML disabled / non-AVX-512), which is the certified reference config.
-    // SAFETY: loading the extension only to resolve the same SVML pow symbol
-    // NumPy's AVX-512 power ufunc uses.
-    let Ok(library) = (unsafe { Library::new(&umath_path) }) else {
-        return Ok(None);
-    };
-    // SAFETY: `__svml_pow8` has the SVML `(__m512d, __m512d) -> __m512d` ABI.
-    let Ok(pow8) = (unsafe { library.get::<SvmlPow8>(b"__svml_pow8\0") }) else {
-        return Ok(None);
-    };
-
-    let mut out = vec![0.0; x.len()];
-    for (chunk_index, chunk) in x.chunks(8).enumerate() {
-        let mut bases = [1.0; 8];
-        let exponents = [3.0; 8];
-        bases[..chunk.len()].copy_from_slice(chunk);
-
-        // SAFETY: AVX-512 support was checked above. The arrays have exactly
-        // eight f64 lanes, and only the initialized output lanes are copied.
-        let powered = unsafe { call_svml_pow8(*pow8, &bases, &exponents) };
-
-        let start = chunk_index * 8;
-        out[start..start + chunk.len()].copy_from_slice(&powered[..chunk.len()]);
-    }
-    Ok(Some(out))
+    //
+    // This lenient behavior is specific to the long-standing `denom ** 3` hook
+    // and is kept so its results do not move; the general `power` hook fails
+    // closed instead.
+    Ok(numpy_svml_power(blas_path.as_ref(), x, 3.0).ok())
 }
 
 #[cfg(target_arch = "x86_64")]

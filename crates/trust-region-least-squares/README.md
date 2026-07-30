@@ -9,13 +9,18 @@ robust-reweighting parameter; see [Status](#status) for details.
 
 It is built to be a general-purpose solver, not a one-off port. Give it a
 residual `r: Rⁿ → Rᵐ` and a starting point and it runs the same trust-region
-Newton iteration SciPy does, down to the last bit. The linear-algebra operations that
-determine the last bits of the trajectory, the thin SVD of the scaled Jacobian
-and the small BLAS reductions around it, are *injected* through the `ThinSvd`
-trait. Backing that trait with a host LAPACK/BLAS lets the solver reproduce that
-backend's numerical trajectory exactly, which is what makes bit-for-bit
-agreement with a pinned SciPy/NumPy runtime achievable rather than merely
-tolerance-close.
+Newton iteration SciPy does, down to the last bit. The operations that
+determine the last bits of the trajectory, the thin SVD of the scaled Jacobian,
+the small BLAS reductions around it, and the elementwise and scalar powers SciPy
+writes as `**`, are *injected* through the `ThinSvd` trait. Backing that trait
+with a host LAPACK/BLAS/NumPy lets the solver reproduce that backend's numerical
+trajectory exactly, which is what makes bit-for-bit agreement with a pinned
+SciPy/NumPy runtime achievable rather than merely tolerance-close.
+
+Only `svd` is required. Every other hook (`dot`, the matvecs, `power3`,
+`power`, `power_scalar`) defaults to `Ok(None)`, meaning "no host result, use
+your own arithmetic", so an implementation overrides exactly what it needs to
+pin and a backend written against an earlier version keeps compiling.
 
 ## When to use it
 
@@ -89,7 +94,11 @@ For bit-for-bit agreement with a pinned SciPy/NumPy runtime, inject the
 host-LAPACK backend (`hostlapack::LapackSvd`) instead; it is compiled into the
 single build and selected at runtime by pointing
 `TRUST_REGION_LEAST_SQUARES_LAPACK_PATH` at the host LAPACK/BLAS. The iteration
-is identical, only the SVD/BLAS seam changes.
+is identical, only the host-numerics seam changes. Call
+`LapackSvd::install` once at startup to record which runtime the process is
+pinned to: installing the same configuration again is a no-op, and a conflicting
+reconfiguration is rejected rather than silently applied. It is a guard, not a
+router -- a solve still uses the backend you hand it.
 
 Malformed input is rejected with a typed `TrfError` rather than a panic: empty
 or non-finite `x0`, non-finite initial residuals, `m < n`, a wrong-length
@@ -103,15 +112,17 @@ and bad `x_scale` are all surfaced as errors.
   SVD/BLAS seam.
 - `loss`: SciPy's robust loss functions (`construct_loss_function` +
   `IMPLEMENTED_LOSSES`) and `scale_for_robust_loss_function`, reproduced
-  bit-for-bit, driven by `TrfOptions { loss, f_scale }`.
+  bit-for-bit, driven by `TrfOptions { loss, f_scale }`. The `_with` variants
+  route the `z ** -0.5` / `z ** -1.5` derivative powers (`huber`, `soft_l1`)
+  through the host-numerics seam.
 - `numdiff`: the dense two-point finite-difference Jacobian matching SciPy's
   `_numdiff.approx_derivative(..., method="2-point")` path.
 - `parity`: hex-bit fixture helpers, feature-gated trace output, and
   first-divergence reporting for diagnosing where two trajectories split.
 - `hostlapack`: a `ThinSvd` implementation backed by a dynamically loaded host
-  LAPACK/BLAS, used to reproduce a pinned SciPy runtime's exact SVD/BLAS results.
-  Compiled into the single build and activated at runtime via
-  `TRUST_REGION_LEAST_SQUARES_LAPACK_PATH`.
+  LAPACK/BLAS/NumPy, used to reproduce a pinned SciPy runtime's exact
+  SVD/BLAS/power results. Compiled into the single build and activated at
+  runtime via `TRUST_REGION_LEAST_SQUARES_LAPACK_PATH`.
 
 ## Status
 

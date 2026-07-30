@@ -80,6 +80,38 @@ pub trait ThinSvd {
     fn power3(&self, _x: &[f64]) -> Result<Option<Vec<f64>>, SvdError> {
         Ok(None)
     }
+
+    /// Elementwise `values ** exponent`, mirroring NumPy's `power` ufunc over a
+    /// contiguous f64 array.
+    ///
+    /// The solver reaches this for the robust-loss derivative powers, where
+    /// SciPy writes `z ** -0.5` and `z ** -1.5`. Those exponents miss NumPy's
+    /// `fast_scalar_power` shortcuts (which turn `** 0.5` into `sqrt` and
+    /// `** 2` into `x * x`), so they go through the real `power` ufunc and its
+    /// per-CPU kernel selection; a host backend implements this to reproduce
+    /// that kernel exactly.
+    ///
+    /// `Ok(None)` declines, and the solver keeps its own [`f64::powf`]. A
+    /// supplied `Some(values)` **must** have the same length as `values`; the
+    /// solver rejects any other length with a typed error rather than
+    /// iterating on a truncated array.
+    ///
+    /// [`ThinSvd::power3`] stays as the dedicated `denom ** 3` hook it has
+    /// always been, so backends written against it keep their behavior.
+    fn power(&self, _values: &[f64], _exponent: f64) -> Result<Option<Vec<f64>>, SvdError> {
+        Ok(None)
+    }
+
+    /// Scalar `base ** exponent`, mirroring the scalar power of the reference
+    /// runtime (NumPy scalars and Python floats both take the platform C `pow`;
+    /// there is no array `fast_scalar_power` shortcut on that path).
+    ///
+    /// The solver reaches this for the trust-region alpha seed, which SciPy
+    /// writes as `(alpha_lower * alpha_upper) ** 0.5`. `Ok(None)` declines, and
+    /// the solver keeps its own square root.
+    fn power_scalar(&self, _base: f64, _exponent: f64) -> Result<Option<f64>, SvdError> {
+        Ok(None)
+    }
 }
 
 /// Pure-Rust thin-SVD backend built on `nalgebra`, the crate's default
@@ -88,9 +120,9 @@ pub trait ThinSvd {
 /// It is a legitimate independent singular value decomposition but is **not**
 /// bit-exact with `scipy.linalg.svd` / the host-LAPACK path, so it must never
 /// back the bit-exact parity fixtures; it powers the native solve. The optional
-/// BLAS hooks ([`ThinSvd::dot`], the matvecs, [`ThinSvd::power3`]) are left at
-/// their defaults so the trust-region loop falls back to its own deterministic
-/// scalar reductions.
+/// BLAS hooks ([`ThinSvd::dot`], the matvecs, [`ThinSvd::power3`],
+/// [`ThinSvd::power`], [`ThinSvd::power_scalar`]) are left at their defaults so
+/// the trust-region loop falls back to its own deterministic scalar reductions.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NalgebraThinSvd;
 
@@ -270,6 +302,12 @@ impl From<LossError> for TrfError {
                 expected,
                 got,
             },
+            LossError::HostPowerLength { expected, got } => TrfError::InvalidSliceLength {
+                what: "host power result",
+                expected,
+                got,
+            },
+            LossError::Host(err) => TrfError::Svd(err),
         }
     }
 }
@@ -457,7 +495,7 @@ pub fn trf_no_bounds(
     // `0.5 * sum(rho[0])` and the Jacobian/residual are reweighted in place
     // before the gradient and SVD; otherwise the ordinary `0.5 * f.f` path runs.
     let mut cost = if robust {
-        let rho = loss_function.evaluate(&f);
+        let rho = loss_function.evaluate_with(&f, svd)?;
         let cost = 0.5 * pairwise_sum(&rho.rho0);
         scale_for_robust_loss(&mut j_mat, &mut f, &rho, n)?;
         cost
@@ -701,7 +739,7 @@ pub fn trf_no_bounds(
             // SciPy reweights the freshly evaluated (unscaled) Jacobian and
             // residual here, before the gradient and the jac-scale update.
             if robust {
-                let rho = loss_function.evaluate(&f);
+                let rho = loss_function.evaluate_with(&f, svd)?;
                 scale_for_robust_loss(&mut j_mat, &mut f, &rho, n)?;
             }
             g = compute_grad_with_svd(svd, &j_mat, &f, m, n)?;
@@ -946,15 +984,20 @@ fn solve_lsq_trust_region_impl(
         0.0
     };
 
+    // SciPy seeds (and re-seeds) alpha with `(alpha_lower * alpha_upper) ** 0.5`
+    // over NumPy scalars, which is the platform C `pow`, not the array
+    // `fast_scalar_power` shortcut. The expression is mathematically a square
+    // root, so the crate's own default stays `sqrt`; a host backend can supply
+    // the exact scalar-power result its runtime produces instead.
     let mut alpha = if !full_rank && initial_alpha == 0.0 {
-        (0.001 * alpha_upper).max((alpha_lower * alpha_upper).sqrt())
+        (0.001 * alpha_upper).max(alpha_seed(svd, alpha_lower, alpha_upper)?)
     } else {
         initial_alpha
     };
     let mut it = 0usize;
     while it < 10 {
         if alpha < alpha_lower || alpha > alpha_upper {
-            alpha = (0.001 * alpha_upper).max((alpha_lower * alpha_upper).sqrt());
+            alpha = (0.001 * alpha_upper).max(alpha_seed(svd, alpha_lower, alpha_upper)?);
         }
 
         let (phi, phi_prime) = phi_and_derivative(svd, alpha, &suf, s, delta, n)?;
@@ -1105,6 +1148,11 @@ pub fn check_termination(
 }
 
 fn finite_difference_step(xi: f64) -> f64 {
+    // SciPy's `_numdiff` writes the relative step as the scalar `EPS ** 0.5`,
+    // which is a `pow` rather than a `sqrt`. It is deliberately not routed
+    // through the host-numerics power seam: `EPS` is `2**-52`, so the result is
+    // the exactly representable `2**-26` under either operation, and no
+    // conforming runtime can disagree about it.
     let sign = if xi >= 0.0 { 1.0 } else { -1.0 };
     EPS.sqrt() * sign * xi.abs().max(1.0)
 }
@@ -1206,6 +1254,34 @@ fn norm_maybe(svd: Option<&dyn ThinSvd>, x: &[f64]) -> Result<f64, TrfError> {
         Some(svd) => norm_with_svd(svd, x),
         None => Ok(norm_slice(x)),
     }
+}
+
+/// `base ** exponent` through the host-numerics seam, falling back to
+/// `rust_default` (the value the crate's own arithmetic produces for the same
+/// expression) when no backend result is supplied.
+fn scalar_power_maybe(
+    svd: Option<&dyn ThinSvd>,
+    base: f64,
+    exponent: f64,
+    rust_default: f64,
+) -> Result<f64, TrfError> {
+    if let Some(svd) = svd {
+        if let Some(out) = svd.power_scalar(base, exponent)? {
+            return Ok(out);
+        }
+    }
+    Ok(rust_default)
+}
+
+/// SciPy's `(alpha_lower * alpha_upper) ** 0.5` alpha seed, shared by the
+/// initialization and the in-loop re-entry site.
+fn alpha_seed(
+    svd: Option<&dyn ThinSvd>,
+    alpha_lower: f64,
+    alpha_upper: f64,
+) -> Result<f64, TrfError> {
+    let product = alpha_lower * alpha_upper;
+    scalar_power_maybe(svd, product, 0.5, product.sqrt())
 }
 
 fn power3_maybe(svd: Option<&dyn ThinSvd>, x: &[f64]) -> Result<Vec<f64>, TrfError> {
@@ -1341,4 +1417,144 @@ fn phi_and_derivative(
     let phi = p_norm - delta;
     let phi_prime = -derivative_sum / p_norm;
     Ok((phi, phi_prime))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Site-level coverage for the two alpha seeds inside
+    //! `solve_lsq_trust_region_impl`. They live here rather than in an
+    //! integration test because each site needs its own hand-built rank
+    //! deficient SVD and `initial_alpha`, which the public entry points do not
+    //! expose.
+
+    use super::*;
+    use std::cell::RefCell;
+
+    /// Records every scalar-power dispatch and answers with `outcome`.
+    struct ScalarPowerBackend {
+        calls: RefCell<Vec<(f64, f64)>>,
+        outcome: Result<Option<f64>, SvdError>,
+    }
+
+    impl ScalarPowerBackend {
+        fn answering(value: Option<f64>) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                outcome: Ok(value),
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                outcome: Err(SvdError::Failed("no host scalar power".to_string())),
+            }
+        }
+
+        fn calls(&self) -> Vec<(f64, f64)> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl ThinSvd for ScalarPowerBackend {
+        fn svd(
+            &self,
+            _a: &[f64],
+            _m: usize,
+            _n: usize,
+        ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), SvdError> {
+            Err(SvdError::Failed(
+                "solve_lsq_trust_region never calls svd".to_string(),
+            ))
+        }
+
+        fn power_scalar(&self, base: f64, exponent: f64) -> Result<Option<f64>, SvdError> {
+            self.calls.borrow_mut().push((base, exponent));
+            self.outcome.clone()
+        }
+    }
+
+    /// A rank-deficient thin SVD: `s[n - 1] == 0` puts
+    /// `solve_lsq_trust_region` on its alpha-seeding branch instead of the
+    /// Gauss-Newton shortcut. `alpha_lower` is 0 and `alpha_upper` is
+    /// `norm(s * uf) / delta = 10`, and `phi` has its root at `alpha = 9`,
+    /// strictly inside that bracket.
+    fn rank_deficient_inputs() -> (usize, usize, Vec<f64>, Vec<f64>, Vec<f64>, f64) {
+        let n = 2;
+        let m = 3;
+        let uf = vec![10.0, 1.0];
+        let s = vec![1.0, 0.0];
+        let vt = vec![1.0, 0.0, 0.0, 1.0];
+        let delta = 1.0;
+        (n, m, uf, s, vt, delta)
+    }
+
+    #[test]
+    fn alpha_initialization_site_consults_the_scalar_power_hook() {
+        let (n, m, uf, s, vt, delta) = rank_deficient_inputs();
+        let backend = ScalarPowerBackend::failing();
+        // `initial_alpha == 0.0` selects the initialization site.
+        let err = solve_lsq_trust_region_impl(Some(&backend), n, m, &uf, &s, &vt, delta, 0.0)
+            .expect_err("the failing hook must abort the solve at the seed");
+
+        assert!(matches!(err, TrfError::Svd(SvdError::Failed(_))), "{err:?}");
+        // alpha_lower is 0 on the rank-deficient branch, so the seed base is
+        // `alpha_lower * alpha_upper == 0.0` and the exponent is 0.5.
+        assert_eq!(backend.calls(), vec![(0.0, 0.5)]);
+    }
+
+    #[test]
+    fn alpha_reentry_site_consults_the_scalar_power_hook() {
+        let (n, m, uf, s, vt, delta) = rank_deficient_inputs();
+        let backend = ScalarPowerBackend::failing();
+        // A non-zero `initial_alpha` skips the initialization site entirely, and
+        // one far above `alpha_upper = 10.0` trips the in-loop re-entry site on
+        // the first pass, so the single recorded call can only be that site.
+        let err = solve_lsq_trust_region_impl(Some(&backend), n, m, &uf, &s, &vt, delta, 1.0e6)
+            .expect_err("the failing hook must abort the solve at the re-entry");
+
+        assert!(matches!(err, TrfError::Svd(SvdError::Failed(_))), "{err:?}");
+        assert_eq!(backend.calls(), vec![(0.0, 0.5)]);
+    }
+
+    #[test]
+    fn declining_scalar_power_hook_keeps_the_rust_alpha() {
+        let (n, m, uf, s, vt, delta) = rank_deficient_inputs();
+        let backend = ScalarPowerBackend::answering(None);
+        let (declined_step, declined_alpha) =
+            solve_lsq_trust_region_impl(Some(&backend), n, m, &uf, &s, &vt, delta, 0.0)
+                .expect("declining backend");
+        let (rust_step, rust_alpha) =
+            solve_lsq_trust_region_impl(None, n, m, &uf, &s, &vt, delta, 0.0).expect("rust path");
+
+        assert!(!backend.calls().is_empty(), "the hook was never consulted");
+        assert_eq!(declined_alpha.to_bits(), rust_alpha.to_bits());
+        assert_eq!(declined_step, rust_step);
+    }
+
+    #[test]
+    fn alpha_seed_returns_the_supplied_scalar_power() {
+        // Both call sites route through `alpha_seed`, so this pins that the
+        // backend's value is what they use -- a wrong-but-recognizable answer
+        // comes straight back out instead of the crate's own square root.
+        let backend = ScalarPowerBackend::answering(Some(42.0));
+        assert_eq!(alpha_seed(Some(&backend), 3.0, 12.0).expect("seed"), 42.0);
+        assert_eq!(backend.calls(), vec![(36.0, 0.5)]);
+    }
+
+    #[test]
+    fn alpha_seed_falls_back_to_the_rust_square_root() {
+        let expected = 36.0_f64.sqrt().to_bits();
+        let declining = ScalarPowerBackend::answering(None);
+        assert_eq!(
+            alpha_seed(Some(&declining), 3.0, 12.0)
+                .expect("seed")
+                .to_bits(),
+            expected
+        );
+        assert_eq!(
+            alpha_seed(None, 3.0, 12.0).expect("seed").to_bits(),
+            expected
+        );
+    }
 }
