@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::astro::math::vec3::{add3, sub3};
+use crate::astro::math::vec3::{checked_add3, sub3};
 
 use super::antenna::{
     double_difference_receiver_antenna_correction, DoubleDifferenceAntennaGeometry,
@@ -232,6 +232,21 @@ fn validate_row_boundary(
         .map_err(row_input_error)?;
     validate::finite_positive(ctx.model.phase_sigma_m, "rtk.phase_sigma_m")
         .map_err(row_input_error)?;
+    // A receiver-antenna PCO is projected onto the local NEU basis and summed;
+    // a non-finite offset would reach the vector primitives as NaN, so it is
+    // rejected here by field alongside the other boundary inputs.
+    if let Some(corrections) = ctx.antenna {
+        validate::finite_vec3(
+            corrections.base.pco_neu_m,
+            "rtk.receiver_antenna.base.pco_neu_m",
+        )
+        .map_err(row_input_error)?;
+        validate::finite_vec3(
+            corrections.rover.pco_neu_m,
+            "rtk.receiver_antenna.rover.pco_neu_m",
+        )
+        .map_err(row_input_error)?;
+    }
     for meas in epoch.references.iter().chain(&epoch.nonref) {
         validate_sat_meas(meas)?;
     }
@@ -375,7 +390,15 @@ pub(super) fn dd_epoch_rows_into<'a>(
         model,
         antenna: receiver_antenna_corrections,
     } = ctx;
-    let rover = add3(base, baseline_m);
+    // `base` and `baseline_m` are each finite (`validate_row_boundary` above),
+    // but their sum need not be: two finite operands near `f64::MAX` overflow to
+    // an infinite rover position. The checked helper turns that into the same
+    // typed rejection the other boundary inputs get, rather than leaving it to
+    // the `debug_assert!` inside `add3`.
+    let rover = checked_add3(base, baseline_m).map_err(|_| DdRowError::InvalidInput {
+        field: "rtk.rover_pos",
+        kind: RtkInputErrorKind::NonFinite,
+    })?;
     let n = recipe.dim();
 
     // Per-system reference context, computed once per epoch (Elixir

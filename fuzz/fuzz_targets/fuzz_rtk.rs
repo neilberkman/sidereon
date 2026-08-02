@@ -26,7 +26,8 @@ use sidereon_core::{
     },
     rtk_filter::{
         self, AmbiguityScale, AmbiguitySet, DynamicsModel, Epoch, FilterState, FixedSolveOpts,
-        FloatPrior, FloatSolveOpts, MeasModel, SatMeas, SearchOpts, StochasticModel, UpdateOpts,
+        FloatPrior, FloatSolveOpts, MeasModel, ReceiverAntennaCalibration,
+        ReceiverAntennaCorrections, SatMeas, SearchOpts, StochasticModel, UpdateOpts,
     },
     GnssSatelliteId, GnssSystem,
 };
@@ -40,6 +41,13 @@ struct Input {
     values: Vec<f64>,
     scalars: [f64; 16],
     bits: [u8; 8],
+    /// Receiver-antenna phase-centre offsets (north/east/up metres) for the
+    /// base and rover stations.
+    pco_neu_m: [[f64; 3]; 2],
+    /// Azimuth-independent PCV samples as `(zenith_deg, value_m)`.
+    noazi_pcv_m: Vec<(f64, f64)>,
+    /// Azimuth-dependent PCV samples as `(azimuth_deg, zenith_deg, value_m)`.
+    azi_pcv_m: Vec<(f64, f64, f64)>,
 }
 
 struct FuzzSource {
@@ -195,6 +203,26 @@ fn model(input: &Input) -> MeasModel {
             StochasticModel::Rtklib
         },
     }
+}
+
+fn calibration(input: &Input, idx: usize) -> ReceiverAntennaCalibration {
+    ReceiverAntennaCalibration {
+        pco_neu_m: input.pco_neu_m[idx],
+        noazi_pcv_m: cap_vec(input.noazi_pcv_m.clone(), 16),
+        azi_pcv_m: cap_vec(input.azi_pcv_m.clone(), 16),
+    }
+}
+
+/// Receiver-antenna calibrations for the base and rover, present on roughly
+/// half of inputs so the `None` path stays covered too.
+fn antenna_corrections(input: &Input) -> Option<ReceiverAntennaCorrections> {
+    if input.bits[6] & 1 == 0 {
+        return None;
+    }
+    Some(ReceiverAntennaCorrections {
+        base: calibration(input, 0),
+        rover: calibration(input, 1),
+    })
 }
 
 fn scale_maps(input: &Input, epoch: &Epoch) -> (BTreeMap<String, f64>, BTreeMap<String, f64>) {
@@ -465,6 +493,7 @@ fuzz_target!(|data: &[u8]| {
 
     let epoch = rtk_epoch(&input);
     let model = model(&input);
+    let antenna = antenna_corrections(&input);
     let ambiguity_ids: Vec<String> = epoch
         .nonref
         .iter()
@@ -483,7 +512,7 @@ fuzz_target!(|data: &[u8]| {
                 ambiguity_tol_m: input.scalars[1],
                 max_iterations: bounded_usize(input.bits[0], 1, 5),
             },
-            None,
+            antenna.as_ref(),
         ),
     );
     let (wavelengths, offsets) = scale_maps(&input, &epoch);
@@ -505,7 +534,7 @@ fuzz_target!(|data: &[u8]| {
         dynamics_model: DynamicsModel::VelocityPropagated,
         float_only_systems: Vec::new(),
         report_residuals: input.bits[2] & 1 == 1,
-        receiver_antenna_corrections: None,
+        receiver_antenna_corrections: antenna.clone(),
         ar_arming_sigma_m: Some(input.scalars[8]),
         search: SearchOpts {
             ratio_threshold: input.scalars[9],
@@ -563,7 +592,7 @@ fuzz_target!(|data: &[u8]| {
                 partial_ambiguity_resolution: input.bits[4] & 1 == 1,
                 partial_min_ambiguities: bounded_usize(input.bits[5], 1, 4),
             },
-            None,
+            antenna.as_ref(),
         ),
     );
 });

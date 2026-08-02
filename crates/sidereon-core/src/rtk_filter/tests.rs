@@ -781,6 +781,132 @@ fn float_solve_rejects_nonpositive_measurement_sigma() {
     );
 }
 
+/// Regression: `fuzz_rtk` reached `add3(base, baseline_m)` in the row builder
+/// with two individually finite operands whose sum overflowed to infinity,
+/// tripping the `debug_assert!(finite3(&out))` inside `add3`. The per-operand
+/// finiteness checks in `validate_row_boundary` cannot see that, so the rover
+/// position is now formed with the checked helper and rejected by field.
+#[test]
+fn float_solve_rejects_a_rover_position_that_overflows_to_infinity() {
+    let (_, epoch, _, model, ambiguity_ids) = simple_single_dd_fixture();
+    let epochs = vec![epoch];
+
+    // Each operand is finite; base + baseline is not.
+    let base = [f64::MAX, f64::MAX, f64::MAX];
+    let baseline_m = [f64::MAX, f64::MAX, f64::MAX];
+    assert!(base.iter().all(|v| v.is_finite()));
+    assert!(baseline_m.iter().all(|v| v.is_finite()));
+    assert!(!(base[0] + baseline_m[0]).is_finite());
+
+    let err = solve_float_baseline(
+        &epochs,
+        base,
+        &ambiguity_ids,
+        baseline_m,
+        &model,
+        FloatSolveOpts {
+            position_tol_m: 1.0e-4,
+            ambiguity_tol_m: 1.0e-4,
+            max_iterations: 2,
+        },
+        None,
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        FloatSolveError::InvalidInput {
+            field: "rtk.rover_pos",
+            kind: RtkInputErrorKind::NonFinite,
+        }
+    );
+}
+
+/// Regression: with receiver-antenna corrections supplied, a non-finite PCO
+/// reached `los_projection` and tripped the input `debug_assert!` inside
+/// `add3`. `fuzz_rtk` passed `None` for the corrections, so the whole antenna
+/// path was unfuzzed; the calibration is now validated by field at the row
+/// boundary.
+#[test]
+fn float_solve_rejects_a_nonfinite_receiver_antenna_pco() {
+    let (base, epoch, _, model, ambiguity_ids) = simple_single_dd_fixture();
+    let epochs = vec![epoch];
+
+    let finite = ReceiverAntennaCalibration {
+        pco_neu_m: [0.001, 0.002, 0.003],
+        noazi_pcv_m: vec![(0.0, 0.0), (90.0, 0.0)],
+        azi_pcv_m: Vec::new(),
+    };
+    let mut corrections = ReceiverAntennaCorrections {
+        base: finite.clone(),
+        rover: finite,
+    };
+    corrections.rover.pco_neu_m = [f64::NAN, 0.0, 0.0];
+
+    let err = solve_float_baseline(
+        &epochs,
+        base,
+        &ambiguity_ids,
+        [0.0; 3],
+        &model,
+        FloatSolveOpts {
+            position_tol_m: 1.0e-4,
+            ambiguity_tol_m: 1.0e-4,
+            max_iterations: 2,
+        },
+        Some(&corrections),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        FloatSolveError::InvalidInput {
+            field: "rtk.receiver_antenna.rover.pco_neu_m",
+            kind: RtkInputErrorKind::NonFinite,
+        }
+    );
+}
+
+/// A PCO large enough to overflow when its three NEU components are summed is
+/// finite on every input, so the boundary check passes and `los_projection`
+/// itself must reject it rather than forming an infinite offset vector.
+#[test]
+fn float_solve_rejects_a_receiver_antenna_pco_that_overflows_when_summed() {
+    let (base, epoch, _, model, ambiguity_ids) = simple_single_dd_fixture();
+    let epochs = vec![epoch];
+
+    let huge = ReceiverAntennaCalibration {
+        pco_neu_m: [f64::MAX, f64::MAX, f64::MAX],
+        noazi_pcv_m: vec![(0.0, 0.0), (90.0, 0.0)],
+        azi_pcv_m: Vec::new(),
+    };
+    assert!(huge.pco_neu_m.iter().all(|v| v.is_finite()));
+    let corrections = ReceiverAntennaCorrections {
+        base: huge.clone(),
+        rover: huge,
+    };
+
+    let err = solve_float_baseline(
+        &epochs,
+        base,
+        &ambiguity_ids,
+        [0.0; 3],
+        &model,
+        FloatSolveOpts {
+            position_tol_m: 1.0e-4,
+            ambiguity_tol_m: 1.0e-4,
+            max_iterations: 2,
+        },
+        Some(&corrections),
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        FloatSolveError::ReceiverAntenna(ReceiverAntennaError::InvalidGeometry)
+    );
+}
+
 #[test]
 fn float_solve_rejects_nonfinite_measurement_sigma() {
     for (code_sigma_m, phase_sigma_m, field) in [

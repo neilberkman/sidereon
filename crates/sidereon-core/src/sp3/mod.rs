@@ -96,6 +96,9 @@ const LINE2_SECONDS_OF_WEEK_DECIMALS: usize = 8;
 const LINE2_INTERVAL_WIDTH: usize = 14;
 const LINE2_INTERVAL_DECIMALS: usize = 8;
 const LINE2_MJD_FRACTION_DECIMALS: usize = 13;
+/// Columns and decimals of the epoch-record (`*`) seconds field (`F11.8`).
+const EPOCH_SECONDS_WIDTH: usize = 11;
+const EPOCH_SECONDS_DECIMALS: usize = 8;
 
 /// SP3 format version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1065,6 +1068,17 @@ impl Parser {
         let hour: i64 = next_field(&mut it, "epoch hour")?;
         let minute: i64 = next_field(&mut it, "epoch minute")?;
         let seconds: f64 = next_field(&mut it, "epoch seconds")?;
+        // The epoch instant is written back through this same `F11.8` field, so
+        // seconds carrying more precision than it expresses would re-parse as a
+        // different instant and shift the epoch (`0.0000009999` re-emits as
+        // `0.00000100`). Same rule the record and header line-2 values apply.
+        let seconds = exact_in_field(
+            seconds,
+            Some(EPOCH_SECONDS_WIDTH),
+            EPOCH_SECONDS_DECIMALS,
+            "epoch seconds",
+            line,
+        )?;
 
         let civil = validate::civil_datetime_with_second_policy(
             year,

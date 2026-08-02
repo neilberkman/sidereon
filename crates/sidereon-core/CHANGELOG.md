@@ -6,6 +6,44 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- The RTK double-difference row builder now rejects a rover position that
+  overflows to infinity instead of panicking. The rover is formed as
+  `base + baseline_m`, and the boundary check validated each operand
+  separately, so two individually finite inputs near `f64::MAX` summed to an
+  infinite position and tripped a debug assertion inside the internal `add3`
+  primitive. The sum is now built with the checked helper and surfaces as a
+  typed `InvalidInput { field: "rtk.rover_pos", kind: NonFinite }` through all
+  three RTK paths. Physically realizable baselines are unaffected. Added the
+  scheduled-fuzz crash artifact (run 30695232523) as a committed corpus seed.
+- SP3 now rejects an epoch-record (`*`) seconds value its own field cannot
+  re-emit. The writer renders the epoch instant through an `F11.8` field, so
+  seconds carrying more precision silently shifted the epoch on re-encode
+  (`0.0000009999` came back as `0.00000100`, moving the instant by ~0.1 ns).
+  This completes the fixed-column re-emission rule already applied to record
+  values and the header line-2 fields. Conforming products are unaffected:
+  their epoch seconds already round-trip through the field exactly.
+- The RTK row builder now validates a supplied receiver-antenna calibration.
+  A non-finite `pco_neu_m` reached the PCO/NEU projection and tripped a debug
+  assertion inside the vector primitives; it is now rejected by field as
+  `InvalidInput { field: "rtk.receiver_antenna.{base,rover}.pco_neu_m" }`. An
+  offset that is finite but large enough to overflow when its three basis
+  components are summed is reported as `ReceiverAntenna(InvalidGeometry)` by
+  the projection itself. Published antenna calibrations are unaffected: real
+  PCOs are centimetre-scale.
+
+### Testing
+
+- `sp3_round_trip` now compares the product's public content - header, epoch
+  instants, comments, and every epoch's satellite states - instead of asserting
+  whole-struct equality against the pre-normalization product. `to_sp3_string`
+  is a normalizing writer, and `Sp3` retains raw acquisition-validation
+  provenance describing the *input* text, so `parse(write(x)) == x` was false by
+  construction for malformed or sparse inputs and reported those as crashes.
+  The content comparison still catches a writer that drops or mangles data.
+- `fuzz_rtk` now exercises the receiver-antenna path. It previously passed
+  `None` for the corrections at all three RTK entry points, so PCO/PCV
+  projection was never fuzzed; the harness now supplies arbitrary base/rover
+  calibrations on roughly half of inputs and keeps the `None` path covered.
 - RINEX observation headers now reject a code list the fixed-column format
   cannot carry, instead of parsing into a product that cannot be serialized.
   Observation descriptors are `A3` fields in `SYS / # / OBS TYPES`,

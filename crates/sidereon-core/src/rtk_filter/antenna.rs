@@ -3,7 +3,7 @@
 //! projection used by the double-difference row builders.
 
 use crate::astro::angles::rad_to_deg_ref;
-use crate::astro::math::vec3::{add3, dot3, norm3, scale3, sub3, unit3};
+use crate::astro::math::vec3::{checked_add3, dot3, norm3, scale3, sub3, unit3};
 
 use crate::antenna::{
     azimuth_bracket, blend_azimuth, interpolate_zenith_sorted, normalize_azimuth,
@@ -51,16 +51,26 @@ impl core::fmt::Display for ReceiverAntennaError {
 
 impl std::error::Error for ReceiverAntennaError {}
 
+/// Project a receiver-antenna PCO from the local NEU basis onto the line of
+/// sight.
+///
+/// The offset is finite at this point (the row boundary rejects a non-finite
+/// `pco_neu_m` by field), but a finite offset near `f64::MAX` can still overflow
+/// when the three basis components are summed, so the sum is checked and an
+/// unusable projection is reported as invalid geometry rather than reaching the
+/// `debug_assert!`s inside `add3`.
 fn los_projection(
     pco: [f64; 3],
     north_unit: [f64; 3],
     east_unit: [f64; 3],
     up_unit: [f64; 3],
     los: [f64; 3],
-) -> f64 {
-    let pco_ecef = add3(scale3(north_unit, pco[0]), scale3(east_unit, pco[1]));
-    let pco_ecef = add3(pco_ecef, scale3(up_unit, pco[2]));
-    dot3(pco_ecef, los)
+) -> Result<f64, ReceiverAntennaError> {
+    let pco_ecef = checked_add3(scale3(north_unit, pco[0]), scale3(east_unit, pco[1]))
+        .map_err(|_| ReceiverAntennaError::InvalidGeometry)?;
+    let pco_ecef = checked_add3(pco_ecef, scale3(up_unit, pco[2]))
+        .map_err(|_| ReceiverAntennaError::InvalidGeometry)?;
+    Ok(dot3(pco_ecef, los))
 }
 
 fn los_zenith_azimuth_deg(
@@ -193,7 +203,7 @@ pub(super) fn receiver_antenna_correction(
         crate::estimation::recipe::FrameRecipe::GeocentricUpRtkReference,
         receiver_pos,
     );
-    let pco_projection = los_projection(calibration.pco_neu_m, north, east, up, los);
+    let pco_projection = los_projection(calibration.pco_neu_m, north, east, up, los)?;
     let (zenith_deg, azimuth_deg) = los_zenith_azimuth_deg(los, up, north, east);
     let pcv = pcv_m(calibration, zenith_deg, azimuth_deg, scratch)?;
     Ok(pco_projection + pcv)

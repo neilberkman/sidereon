@@ -1504,3 +1504,54 @@ EOF
         "parse -> write -> parse changed product"
     );
 }
+
+/// The epoch (`*`) record's seconds field is `F11.8` and the writer re-emits the
+/// instant through it, so seconds carrying more precision than the field
+/// expresses shifted the epoch on re-encode (`0.0000009999` came back as
+/// `0.00000100`). Found by the scheduled `sp3_round_trip` fuzz gate.
+#[test]
+fn rejects_epoch_seconds_the_f11_8_field_cannot_re_emit() {
+    fn file_with_epoch(epoch: &str) -> String {
+        format!(
+            "\
+#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 432000.00000000   900.00000000 59024 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* TEST SP3-c FIXTURE
+{epoch}
+PG01      1.000000      2.000000      3.000000    123.456789
+EOF
+"
+        )
+    }
+
+    for epoch in [
+        "*  2020  6 24  0  0  0.0000009999",
+        "*  2020  6 24  0  0  1.234567891",
+    ] {
+        let err = Sp3::parse(file_with_epoch(epoch).as_bytes())
+            .expect_err("an over-precision epoch seconds must be rejected");
+        assert!(
+            matches!(err, Error::Parse(ref message)
+                if message.contains("epoch seconds") && message.contains("not representable")),
+            "{epoch}: {err}"
+        );
+    }
+
+    // A value the field expresses exactly stays accepted and round-trips.
+    let text = file_with_epoch("*  2020  6 24  0  0 12.34567891");
+    let original = Sp3::parse(text.as_bytes()).expect("conforming epoch seconds stay accepted");
+    let reparsed =
+        Sp3::parse(original.to_sp3_string().as_bytes()).expect("re-encoded product must reparse");
+    assert_eq!(
+        reparsed, original,
+        "parse -> write -> parse changed product"
+    );
+}
