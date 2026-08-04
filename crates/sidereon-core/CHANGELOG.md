@@ -4,6 +4,43 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in cross-line candidate walk for CODE's predicted ionosphere:
+  `predicted_ionex_line_candidates` enumerates the `P1` and `P2` artifacts for
+  one map date (both lines publish the same official filename for a map date,
+  but the two-day line is produced a day earlier, so `P2` is routinely
+  published while `P1` is still absent when CODE runs behind). Candidates
+  never substitute a neighboring date's map, each keeps its own exact
+  identity and cache path, and `resolve_first_published` preserves the line
+  actually served in provenance. Single-line requests keep their fail-closed
+  behavior.
+- Added a publication-status API: `parse_archive_listing` (Apache and XHTML
+  autoindexes, AIUB's whole-tree CSV, FTP `LIST` output - each verified live
+  on 2026-08-04 and recorded as fixtures), `newest_published_product`,
+  `published_issue_age_minutes`, and the bounded `publication_listing_urls`
+  (current week directory plus previous, or one whole-tree listing). The
+  scoreboard's one-call `publication_status` query reports the newest
+  published issue and its lag behind nominal without fetching product bytes,
+  and reports a transport failure as `Unreachable` rather than answering
+  from an older directory - "nothing published" and "archive did not answer"
+  are distinct outcomes.
+- Added Wuhan University's hourly MGEX near-real-time orbit line
+  (`wum_nrt`, `WUM0MGXNRT`, 02D span at 05M over anonymous FTP), verified
+  against the live archive: the series begins 2024-07-03 (GPS week 2321) and
+  the previously published `WUM0MGXULA` hourly line ended around GPS week
+  2230 with a publication gap between; pre-NRT dates are refused. The line
+  is not projected onto CDDIS (no exact mapping is cataloged). `ArchiveProtocol`
+  gains `Ftp`, `SolutionClass` gains `NearRealTime`, and `ProductPublisher`
+  gains `Whu`.
+- The IGS combined ultra (`IGS0OPSULT`) and the Wuhan NRT line participate
+  in the multi-center SP3 merge-consensus path behind their catalog entries,
+  with exact-validation agency pins (`IGS`, `WHU`) and a four-center
+  merge-input identity test alongside ESA/GFZ.
+- Documented the case for broadcast ephemerides as the acquisition
+  resilience floor (`docs/broadcast-ephemeris-resilience-floor.md`), as a
+  design issue without implementation.
+
 ## [0.35.1] - 2026-08-01
 
 ### Fixed

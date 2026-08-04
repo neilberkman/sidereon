@@ -992,3 +992,63 @@ fn rejects_span_not_divisible_by_sample() {
         }
     );
 }
+
+/// The Wuhan MGEX near-real-time line validates exactly like the other ultra
+/// lines: a catalog-derived request pins the `WHU` agency, the half-open
+/// two-day five-minute grid, and the filename-epoch content start (all
+/// verified against the live product on 2026-08-04).
+#[test]
+fn wum_nrt_identity_validates_an_archive_shaped_product() {
+    let identity = ops_ultra_sp3(
+        AnalysisCenter::WumNrt,
+        ProductDate::new(2026, 8, 3).expect("date"),
+        None,
+        Some("0000"),
+    )
+    .expect("WUM NRT product")
+    .identity()
+    .expect("identity");
+    let request = ExactSp3Request::from_identity(&identity).expect("exact request");
+    assert_eq!(request.expected_agency(), Some("WHU"));
+    assert_eq!(request.span(), "02D");
+    assert_eq!(request.sample(), "05M");
+
+    // 2026-08-03 00:00 GPST: GPS week 2430 day 1, MJD 61255.
+    let text = exact_sp3_at(
+        &regular_offsets(576, 300),
+        576,
+        "300.00000000",
+        2026,
+        8,
+        3,
+        2430,
+        86_400.0,
+        61_255,
+        "WHU",
+    );
+    assert_eq!(
+        parse_exact_sp3(text.as_bytes(), &request)
+            .expect("archive-shaped WUM NRT product validates")
+            .1,
+        ExactSp3Coverage::HalfOpen
+    );
+
+    // The agency pin is terminal: bytes claiming another producer are not
+    // this product.
+    let foreign = exact_sp3_at(
+        &regular_offsets(576, 300),
+        576,
+        "300.00000000",
+        2026,
+        8,
+        3,
+        2430,
+        86_400.0,
+        61_255,
+        "GFZ",
+    );
+    assert!(matches!(
+        parse_exact_sp3(foreign.as_bytes(), &request),
+        Err(ExactSp3ValidationError::AgencyMismatch { .. })
+    ));
+}

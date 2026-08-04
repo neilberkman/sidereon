@@ -19,7 +19,11 @@ use sidereon_core::astro::frames::transforms::FrameTransformError;
 use sidereon_core::astro::propagator::ForceModelKind;
 use sidereon_core::astro::time::civil::civil_from_j2000_seconds;
 use sidereon_core::constants::{J2000_JD, SECONDS_PER_DAY};
-use sidereon_core::data::{DataCatalogError, ProductDate};
+use sidereon_core::data::{
+    newest_published_product, parse_archive_listing, publication_listing_urls,
+    published_issue_age_minutes, AnalysisCenter, DataCatalogError, ProductDate, ProductDateTime,
+    ProductType, PublishedProduct,
+};
 use sidereon_core::ephemeris::{
     fit_precise_ephemeris_sample_orbit, fit_precise_ephemeris_state_sample_orbit, parse_exact_sp3,
     ExactSp3Request, ExactSp3ValidationError, OrbitFitOptions, OrbitResidualStats,
@@ -40,6 +44,9 @@ const UNIX_TO_J2000_S: i64 = 946_728_000;
 const DEFAULT_LOOKBACK_DAYS: u32 = 4;
 const IGS_LONG_FILENAME_START_GPS_WEEK: u32 = 2238;
 const MAX_SCOREBOARD_ARCHIVE_BYTES: usize = 64 * 1024 * 1024;
+/// AIUB's whole-tree CSV listing is ~41 MiB; directory autoindexes are far
+/// smaller. One bound covers both.
+const MAX_SCOREBOARD_LISTING_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SCOREBOARD_PRODUCT_BYTES: usize = 500 * 1024 * 1024;
 const MAX_COMMAND_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
 const CURL_CONNECT_TIMEOUT_SECONDS: &str = "30";
@@ -467,6 +474,187 @@ pub fn resolve_latest_available_rapid_sp3(
         attempted,
         attempted_http_statuses,
         attempted_errors,
+    })
+}
+
+/// Listing text or authoritative absence for one archive listing URL.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListingOutcome {
+    /// The listing answered with a body.
+    Available(String),
+    /// The listing URL returned an authoritative HTTP absence status
+    /// (404/410): the archive answered, and this directory does not exist.
+    NotPosted(u16),
+}
+
+/// Minimal listing-fetch interface used by [`publication_status`].
+pub trait ListingFetcher {
+    /// Fetch one archive listing URL.
+    fn fetch_listing(&self, url: &str) -> Result<ListingOutcome, ScoreboardError>;
+}
+
+/// HTTPS listing fetcher used by the binary.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HttpsListingFetcher;
+
+impl ListingFetcher for HttpsListingFetcher {
+    fn fetch_listing(&self, url: &str) -> Result<ListingOutcome, ScoreboardError> {
+        fetch_https_listing(url)
+    }
+}
+
+/// Answer of one bounded publication-status query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PublicationStatusOutcome {
+    /// The newest object this line has actually published.
+    Published {
+        /// Newest published issue, with the archive's verbatim
+        /// modification text where the listing exposes one.
+        product: PublishedProduct,
+        /// Listing URL that evidenced it.
+        listing_url: String,
+        /// Whole minutes from the published issue's nominal epoch to the
+        /// caller's query instant - the "N hours behind nominal" number.
+        behind_nominal_minutes: i64,
+    },
+    /// Every listing answered, and none of them holds an object of this
+    /// line: the archive is reachable but has published nothing in the
+    /// bounded window.
+    NothingPublished {
+        /// Listing URLs consulted, in order.
+        listing_urls: Vec<String>,
+    },
+    /// The archive itself did not answer, so publication state is unknown.
+    /// This is deliberately distinct from [`Self::NothingPublished`]: an
+    /// unreachable archive must never be reported as "nothing published".
+    Unreachable {
+        /// Listing URL whose fetch failed.
+        listing_url: String,
+        /// Transport diagnostic.
+        reason: String,
+    },
+}
+
+/// One bounded query answering "what is the newest published issue for this
+/// center and product line, and how far behind nominal is it?".
+///
+/// This is the single networked composition of the pure core pieces
+/// (`publication_listing_urls` -> `parse_archive_listing` ->
+/// `newest_published_product` -> `published_issue_age_minutes`); the split
+/// is doctrine, documented at the core's publication-status section. The
+/// query fetches at most the bounded listing URLs (current week directory
+/// plus the previous week, or one whole-tree listing), never any product
+/// bytes, and never loops or polls.
+///
+/// Two asymmetric rules are deliberate; do not "fix" them:
+///
+/// - An authoritative 404 on the newer directory WALKS BACK to the older
+///   one, because a 404 is the archive answering: "this directory does not
+///   exist", which is exactly what a late archive looks like (the recorded
+///   2026-08-04 BKG state, where the current week's directory had not been
+///   created yet). Walking back converts that answer into the newest issue
+///   that does exist.
+/// - A transport failure NEVER walks back and reports
+///   [`PublicationStatusOutcome::Unreachable`] immediately, because when the
+///   newer directory's state is unknown, an answer from the older directory
+///   is indistinguishable from real lag - a monitoring consumer would page
+///   on phantom staleness (or worse, trust a stale "current" issue).
+///
+/// The same asymmetry governs an unrecognizable listing body: the archive
+/// answered, but the answer cannot be read, so publication state is unknown
+/// and the outcome is `Unreachable`, never "nothing published".
+pub fn publication_status(
+    center: AnalysisCenter,
+    product_type: ProductType,
+    now: ProductDateTime,
+    fetcher: &impl ListingFetcher,
+) -> Result<PublicationStatusOutcome, ScoreboardError> {
+    let listing_urls = publication_listing_urls(center, product_type, now.date)?;
+    for listing_url in &listing_urls {
+        match fetcher.fetch_listing(listing_url) {
+            Ok(ListingOutcome::Available(body)) => {
+                // A reachable archive serving a body that fits no recognized
+                // listing dialect cannot answer the publication question:
+                // report it as unreachable-for-this-purpose rather than
+                // letting an archive format change or error page read as
+                // "nothing published".
+                let objects = match parse_archive_listing(&body) {
+                    Ok(objects) => objects,
+                    Err(error) => {
+                        return Ok(PublicationStatusOutcome::Unreachable {
+                            listing_url: listing_url.clone(),
+                            reason: error.to_string(),
+                        });
+                    }
+                };
+                if let Some(product) = newest_published_product(center, product_type, &objects)? {
+                    let behind_nominal_minutes = published_issue_age_minutes(&product, now)?;
+                    return Ok(PublicationStatusOutcome::Published {
+                        product,
+                        listing_url: listing_url.clone(),
+                        behind_nominal_minutes,
+                    });
+                }
+            }
+            Ok(ListingOutcome::NotPosted(_)) => {}
+            Err(error) => {
+                return Ok(PublicationStatusOutcome::Unreachable {
+                    listing_url: listing_url.clone(),
+                    reason: error.to_string(),
+                });
+            }
+        }
+    }
+    Ok(PublicationStatusOutcome::NothingPublished { listing_urls })
+}
+
+fn fetch_https_listing(url: &str) -> Result<ListingOutcome, ScoreboardError> {
+    if !url.starts_with("https://") {
+        return Err(ScoreboardError::NonHttpsUrl {
+            archive_source: "listing".to_string(),
+            name: url.rsplit('/').next().unwrap_or(url).to_string(),
+            url: url.to_string(),
+        });
+    }
+    let candidate = ProductCandidate {
+        date: ProductDate {
+            year: 2000,
+            month: 1,
+            day: 1,
+        },
+        cadence: ProductCadence::UltraRapid,
+        source: "listing",
+        name: url.rsplit('/').next().unwrap_or(url).to_string(),
+        url: url.to_string(),
+    };
+    let outcome = fetch_bounded_http_body(
+        &candidate,
+        MAX_SCOREBOARD_LISTING_BYTES,
+        CURL_BODY_ATTEMPTS,
+        || {
+            let mut command = Command::new("curl");
+            command.args([
+                "--http1.1",
+                "--fail",
+                "--location",
+                "--silent",
+                "--show-error",
+                "--connect-timeout",
+                CURL_CONNECT_TIMEOUT_SECONDS,
+                "--max-time",
+                CURL_TRANSFER_TIMEOUT_SECONDS,
+                "--write-out",
+                "\\nSIDEREON_HTTP_STATUS:%{http_code}",
+                url,
+            ]);
+            command
+        },
+    )?;
+    Ok(match outcome {
+        HttpBodyOutcome::Available(bytes) => {
+            ListingOutcome::Available(String::from_utf8_lossy(&bytes).into_owned())
+        }
+        HttpBodyOutcome::NotPosted(status) => ListingOutcome::NotPosted(status),
     })
 }
 

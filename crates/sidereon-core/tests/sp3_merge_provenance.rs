@@ -16,7 +16,8 @@ fn identity(center: AnalysisCenter) -> sidereon_core::data::ProductIdentity {
         AnalysisCenter::IgsUlt
         | AnalysisCenter::CodUlt
         | AnalysisCenter::EsaUlt
-        | AnalysisCenter::GfzUlt => Some("0000"),
+        | AnalysisCenter::GfzUlt
+        | AnalysisCenter::WumNrt => Some("0000"),
         _ => None,
     };
     product(
@@ -466,4 +467,39 @@ fn direct_location_retains_cataloged_overlap_cadence() {
     assert!(location
         .archive_filename
         .starts_with(&alternate.official_filename));
+}
+
+/// The multi-center ultra consensus path is not limited to the ESA/GFZ pair:
+/// the IGS combined ultra and the Wuhan MGEX near-real-time line participate
+/// behind their catalog entries, and the merge-input identity names every
+/// contributor's line distinctly.
+#[test]
+fn four_center_ultra_consensus_includes_igs_and_wum() {
+    let contributors = [
+        artifact(AnalysisCenter::EsaUlt, 0x31),
+        artifact(AnalysisCenter::GfzUlt, 0x32),
+        artifact(AnalysisCenter::IgsUlt, 0x33),
+        artifact(AnalysisCenter::WumNrt, 0x34),
+    ];
+    let policy = complete_policy(MergeCombine::Median);
+    let merge_input = Sp3MergeInputIdentity::new(&contributors, &policy).expect("merge input");
+
+    assert_eq!(merge_input.contributors.len(), 4);
+    let filenames: BTreeSet<&str> = merge_input
+        .contributors
+        .iter()
+        .map(|contributor| contributor.official_filename.as_str())
+        .collect();
+    assert!(filenames.contains("IGS0OPSULT_20261970000_02D_15M_ORB.SP3"));
+    assert!(filenames.contains("WUM0MGXNRT_20261970000_02D_05M_ORB.SP3"));
+    assert!(filenames.contains("ESA0OPSULT_20261970000_02D_05M_ORB.SP3"));
+    assert!(filenames.contains("GFZ0OPSULT_20261970000_02D_05M_ORB.SP3"));
+
+    assert_eq!(merge_input.verify(&policy), Ok(true));
+
+    // Contributor order never changes the stable consensus identity.
+    let mut reversed = contributors.clone();
+    reversed.reverse();
+    let reversed_input = Sp3MergeInputIdentity::new(&reversed, &policy).expect("merge input");
+    assert_eq!(merge_input, reversed_input);
 }

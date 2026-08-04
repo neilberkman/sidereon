@@ -19,15 +19,15 @@ use sidereon_core::astro::time::civil::{
 use sidereon_core::astro::time::gnss::{seconds_of_week_from_calendar, week_from_calendar};
 use sidereon_core::astro::time::model::{Instant, JulianDateSplit, TimeScale};
 use sidereon_core::constants::{J2000_JD, SECONDS_PER_DAY};
-use sidereon_core::data::ProductDate;
+use sidereon_core::data::{AnalysisCenter, ProductDate, ProductDateTime, ProductType};
 use sidereon_core::ephemeris::{ExactSp3ValidationError, Sp3};
 use sidereon_core::{
     EarthOrientationProvider, GnssSatelliteId, GnssSystem, TdbEarthOrientationProvider,
 };
 use sidereon_scoreboard::{
-    parse_product_date, resolve_latest_available_rapid_sp3, run_with_fetcher, score_sp3_bytes,
-    FetchOutcome, HttpsFetcher, ProductCandidate, ProductFetcher, ScoreOptions, ScoreboardError,
-    ScoreboardStatus,
+    parse_product_date, publication_status, resolve_latest_available_rapid_sp3, run_with_fetcher,
+    score_sp3_bytes, FetchOutcome, HttpsFetcher, ListingFetcher, ListingOutcome, ProductCandidate,
+    ProductFetcher, PublicationStatusOutcome, ScoreOptions, ScoreboardError, ScoreboardStatus,
 };
 
 const SP3_POSITION_3D_QUANTIZATION_BOUND_M: f64 = 8.660_254_037_844_386e-4;
@@ -977,4 +977,191 @@ fn format_calendar(
     seconds: f64,
 ) -> String {
     format!("{year:4} {month:>2} {day:>2} {hour:>2} {minute:>2} {seconds:11.8}")
+}
+
+fn core_listing_fixture(name: &str) -> String {
+    let path = format!(
+        "{}/../sidereon-core/tests/fixtures/listings/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"))
+}
+
+/// Recorded 2026-08-04 GFZ ultra scenario: one bounded query answers the
+/// newest published issue and its lag behind nominal without fetching any
+/// product bytes.
+#[test]
+fn publication_status_answers_the_recorded_gfz_lag_scenario() {
+    struct RecordedGfz {
+        fetched: std::cell::RefCell<Vec<String>>,
+    }
+    impl ListingFetcher for RecordedGfz {
+        fn fetch_listing(&self, url: &str) -> Result<ListingOutcome, ScoreboardError> {
+            self.fetched.borrow_mut().push(url.to_string());
+            assert_eq!(url, "https://isdc-data.gfz.de/gnss/products/ultra/w2430/");
+            Ok(ListingOutcome::Available(core_listing_fixture(
+                "gfz-ultra-w2430-20260804.html",
+            )))
+        }
+    }
+
+    let fetcher = RecordedGfz {
+        fetched: std::cell::RefCell::new(Vec::new()),
+    };
+    let now = ProductDateTime::new(date(2026, 8, 4), 7, 8, 0).expect("query instant");
+    let outcome = publication_status(AnalysisCenter::GfzUlt, ProductType::Sp3, now, &fetcher)
+        .expect("supported line");
+
+    match outcome {
+        PublicationStatusOutcome::Published {
+            product,
+            listing_url,
+            behind_nominal_minutes,
+        } => {
+            assert_eq!(product.date, date(2026, 8, 3));
+            assert_eq!(product.issue, "0300");
+            assert_eq!(product.filename, "GFZ0OPSULT_20262150300_02D_05M_ORB.SP3");
+            assert_eq!(product.observed_at.as_deref(), Some("2026-08-04 08:20"));
+            assert_eq!(
+                listing_url,
+                "https://isdc-data.gfz.de/gnss/products/ultra/w2430/"
+            );
+            assert_eq!(behind_nominal_minutes, 28 * 60 + 8);
+        }
+        other => panic!("expected Published, got {other:?}"),
+    }
+    assert_eq!(
+        fetcher.fetched.borrow().len(),
+        1,
+        "one listing GET answered the query"
+    );
+}
+
+/// Recorded 2026-08-04 BKG state: the current week's directory does not
+/// exist (authoritative 404), and the bounded walk-back answers from the
+/// previous week's directory.
+#[test]
+fn publication_status_walks_back_when_the_current_week_directory_is_absent() {
+    struct RecordedBkg;
+    impl ListingFetcher for RecordedBkg {
+        fn fetch_listing(&self, url: &str) -> Result<ListingOutcome, ScoreboardError> {
+            match url {
+                "https://igs.bkg.bund.de/root_ftp/IGS/products/2430/" => {
+                    Ok(ListingOutcome::NotPosted(404))
+                }
+                "https://igs.bkg.bund.de/root_ftp/IGS/products/2429/" => Ok(
+                    ListingOutcome::Available(core_listing_fixture("bkg-igs-2429-20260804.html")),
+                ),
+                other => panic!("unexpected listing URL {other}"),
+            }
+        }
+    }
+
+    let now = ProductDateTime::new(date(2026, 8, 4), 7, 8, 0).expect("query instant");
+    let outcome = publication_status(AnalysisCenter::IgsUlt, ProductType::Sp3, now, &RecordedBkg)
+        .expect("supported line");
+    match outcome {
+        PublicationStatusOutcome::Published {
+            product,
+            listing_url,
+            ..
+        } => {
+            assert_eq!(product.date, date(2026, 7, 28));
+            assert_eq!(product.issue, "1800");
+            assert_eq!(
+                listing_url,
+                "https://igs.bkg.bund.de/root_ftp/IGS/products/2429/"
+            );
+        }
+        other => panic!("expected Published, got {other:?}"),
+    }
+}
+
+/// A transport failure is `Unreachable`, never `NothingPublished`, and never
+/// falls back to an older directory whose answer would masquerade as lag.
+#[test]
+fn publication_status_reports_transport_failure_as_unreachable() {
+    struct Down {
+        calls: std::cell::RefCell<usize>,
+    }
+    impl ListingFetcher for Down {
+        fn fetch_listing(&self, url: &str) -> Result<ListingOutcome, ScoreboardError> {
+            *self.calls.borrow_mut() += 1;
+            Err(ScoreboardError::InvalidArgument(format!(
+                "connection refused fetching {url}"
+            )))
+        }
+    }
+
+    let fetcher = Down {
+        calls: std::cell::RefCell::new(0),
+    };
+    let now = ProductDateTime::new(date(2026, 8, 4), 7, 8, 0).expect("query instant");
+    let outcome = publication_status(AnalysisCenter::GfzUlt, ProductType::Sp3, now, &fetcher)
+        .expect("supported line");
+    match outcome {
+        PublicationStatusOutcome::Unreachable {
+            listing_url,
+            reason,
+        } => {
+            assert_eq!(
+                listing_url,
+                "https://isdc-data.gfz.de/gnss/products/ultra/w2430/"
+            );
+            assert!(reason.contains("connection refused"), "{reason}");
+        }
+        other => panic!("expected Unreachable, got {other:?}"),
+    }
+    assert_eq!(*fetcher.calls.borrow(), 1, "no walk-back past an unknown");
+}
+
+/// Every listing answering with no objects of the line is the reachable
+/// "nothing published" answer, carrying the URLs that were consulted.
+#[test]
+fn publication_status_distinguishes_nothing_published_from_unreachable() {
+    struct EmptyWeeks;
+    impl ListingFetcher for EmptyWeeks {
+        fn fetch_listing(&self, _url: &str) -> Result<ListingOutcome, ScoreboardError> {
+            Ok(ListingOutcome::NotPosted(404))
+        }
+    }
+
+    let now = ProductDateTime::new(date(2026, 8, 4), 7, 8, 0).expect("query instant");
+    let outcome = publication_status(AnalysisCenter::IgsUlt, ProductType::Sp3, now, &EmptyWeeks)
+        .expect("supported line");
+    assert_eq!(
+        outcome,
+        PublicationStatusOutcome::NothingPublished {
+            listing_urls: vec![
+                "https://igs.bkg.bund.de/root_ftp/IGS/products/2430/".to_string(),
+                "https://igs.bkg.bund.de/root_ftp/IGS/products/2429/".to_string(),
+            ],
+        }
+    );
+}
+
+/// A reachable archive serving an unrecognizable body (an error page, a
+/// format change) is `Unreachable`, never `NothingPublished`: the closed
+/// dialect detection refuses to convert "I cannot read this" into "nothing
+/// is published here".
+#[test]
+fn publication_status_treats_an_unrecognizable_listing_as_unreachable() {
+    struct ErrorPage;
+    impl ListingFetcher for ErrorPage {
+        fn fetch_listing(&self, _url: &str) -> Result<ListingOutcome, ScoreboardError> {
+            Ok(ListingOutcome::Available(
+                "<html><body><h1>503 Service Unavailable</h1></body></html>".to_string(),
+            ))
+        }
+    }
+
+    let now = ProductDateTime::new(date(2026, 8, 4), 7, 8, 0).expect("query instant");
+    let outcome = publication_status(AnalysisCenter::GfzUlt, ProductType::Sp3, now, &ErrorPage)
+        .expect("supported line");
+    match outcome {
+        PublicationStatusOutcome::Unreachable { reason, .. } => {
+            assert!(reason.contains("unrecognized archive listing"), "{reason}");
+        }
+        other => panic!("expected Unreachable, got {other:?}"),
+    }
 }

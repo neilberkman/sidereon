@@ -114,6 +114,7 @@ impl ExactSp3Request {
                 | AnalysisCenter::CodPrd2
                 | AnalysisCenter::CodUlt => "AIUB",
                 AnalysisCenter::IgsUlt => "IGS",
+                AnalysisCenter::WumNrt => "WHU",
             }
             .to_owned(),
         );

@@ -126,3 +126,44 @@ fn facade_reexports_terrain_data_derivation_and_conversion() {
     );
     assert!(hgt_to_dted(36, -107, &[]).is_err());
 }
+
+#[test]
+fn facade_reexports_publication_resilience_apis() {
+    use sidereon::data::{
+        newest_published_product, parse_archive_listing, predicted_ionex_line_candidates,
+        publication_listing_urls, resolve_first_published,
+    };
+
+    let map_date = ProductDate::new(2026, 8, 5).expect("valid date");
+    let candidates = predicted_ionex_line_candidates(map_date, None).expect("candidates");
+    assert_eq!(candidates.len(), 2);
+
+    let listing = "CODE/IONO/P2/2026/COD0OPSPRD_20262170000_01D_01H_GIM.INX.gz;1;\
+2026-08-04T06:51:15Z;00";
+    let objects = parse_archive_listing(listing).expect("recognized listing");
+    assert_eq!(
+        resolve_first_published(&candidates, &objects).expect("resolvable"),
+        Some(1)
+    );
+    let newest = newest_published_product(
+        sidereon::data::AnalysisCenter::CodPrd2,
+        ProductType::Ionex,
+        &objects,
+    )
+    .expect("supported line")
+    .expect("published");
+    assert_eq!(newest.date, map_date);
+
+    assert_eq!(
+        publication_listing_urls(
+            sidereon::data::AnalysisCenter::WumNrt,
+            ProductType::Sp3,
+            ProductDate::new(2026, 8, 4).expect("valid date"),
+        )
+        .expect("listing URLs"),
+        vec![
+            "ftp://igs.gnsswhu.cn/pub/gps/products/mgex/2430/".to_string(),
+            "ftp://igs.gnsswhu.cn/pub/gps/products/mgex/2429/".to_string(),
+        ]
+    );
+}

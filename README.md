@@ -33,6 +33,15 @@ sidereon is one engine: a Rust core for satellite orbit propagation, GNSS positi
   collision-resistant cache paths; the Python and Elixir interfaces add
   authenticated acquisition, validation, typed failures, and secret-free
   provenance. See the [design note](docs/public-gnss-distribution-sources.md).
+  Resilience under analysis-center publication lag: an opt-in cross-line walk
+  for CODE's predicted ionosphere (`P1` then `P2`, same map date, provenance
+  naming the line served), a bounded publication-status query (newest
+  published issue per center and line, its archive-reported publication text,
+  and its lag behind nominal - distinguishing "nothing published" from an
+  unreachable archive), and a wider ultra pool including the IGS combined
+  ultra and Wuhan's hourly MGEX NRT line. Broadcast ephemerides as the
+  resilience floor are a recorded
+  [design issue](docs/broadcast-ephemeris-resilience-floor.md).
 
 ## Install
 

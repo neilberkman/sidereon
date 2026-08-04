@@ -4,17 +4,18 @@ use sidereon_core::data::{
     allowed_hosts, archive_url, canonical_filename, catalog, cddis_archive_url, default_sample,
     default_sample_for_date, distribution_location_for_identity, dted_block_dir,
     dted_cache_relpath, dted_tile_filename, gim_date_candidates, latest_ops_ultra_sp3, mgex_clk,
-    mgex_ionex, mgex_nav, mgex_sp3, no_open_mirrors, open_mirror_code, ops_ultra_sp3,
-    parse_skadi_tile_id, predicted_ionex, product, product_convention, product_solution_class,
-    rapid_ionex, skadi_archive_url, skadi_band, skadi_source_entry, skadi_tile_id,
-    sp3_content_start_convention, space_weather_archive_url, space_weather_cache_relpath,
-    space_weather_filename, space_weather_source_entry, station_obs, station_obs_filename,
-    station_obs_protocol, station_obs_url, supported_samples, terrain_tile_index,
-    ultra_issue_candidates, ultra_sp3_locations, validate_exact_product_set, AnalysisCenter,
-    ArchiveCompression, ArchiveProtocol, DataCatalogError, DistributionSource,
-    ExactProductSetError, ProductCampaign, ProductDate, ProductDateTime, ProductFormat,
-    ProductPublisher, ProductRequest, ProductType, SolutionClass, Sp3ContentStartConvention,
-    SpaceWeatherProduct, UltraIssue,
+    mgex_ionex, mgex_nav, mgex_sp3, newest_published_product, no_open_mirrors, open_mirror_code,
+    ops_ultra_sp3, parse_archive_listing, parse_skadi_tile_id, predicted_ionex,
+    predicted_ionex_line_candidates, product, product_convention, product_solution_class,
+    publication_listing_urls, published_issue_age_minutes, rapid_ionex, resolve_first_published,
+    skadi_archive_url, skadi_band, skadi_source_entry, skadi_tile_id, sp3_content_start_convention,
+    space_weather_archive_url, space_weather_cache_relpath, space_weather_filename,
+    space_weather_source_entry, station_obs, station_obs_filename, station_obs_protocol,
+    station_obs_url, supported_samples, terrain_tile_index, ultra_issue_candidates,
+    ultra_sp3_locations, validate_exact_product_set, AnalysisCenter, ArchiveCompression,
+    ArchiveProtocol, DataCatalogError, DistributionSource, ExactProductSetError, ProductCampaign,
+    ProductDate, ProductDateTime, ProductFormat, ProductPublisher, ProductRequest, ProductType,
+    PublishedProduct, SolutionClass, Sp3ContentStartConvention, SpaceWeatherProduct, UltraIssue,
 };
 
 fn date(year: i32, month: u8, day: u8) -> ProductDate {
@@ -1098,6 +1099,428 @@ COD0OPSPRD_20261970000_01D_01H_GIM.INX.gz"
     assert_eq!(boundary.date, date(2027, 1, 1));
     assert_eq!(
         boundary.archive_url().expect("year-boundary P2 URL"),
+        "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2027/\
+COD0OPSPRD_20270010000_01D_01H_GIM.INX.gz"
+    );
+}
+
+/// Cross-line predicted-IONEX walk: both candidates cover the SAME map date
+/// (2026 day 217 - the archive state recorded on 2026-08-04, when the P1
+/// object for day 217 was unpublished while the P2 object already existed),
+/// share the official filename, and keep the distinct line identities that
+/// name which artifact was actually served.
+#[test]
+fn predicted_ionex_line_candidates_share_map_date_and_name_their_line() {
+    let map_date = date(2026, 8, 5); // 2026 day-of-year 217
+    let candidates =
+        predicted_ionex_line_candidates(map_date, None).expect("cross-line candidates");
+    assert_eq!(candidates.len(), 2);
+
+    let one_day = &candidates[0];
+    let two_day = &candidates[1];
+    assert_eq!(one_day.center, AnalysisCenter::CodPrd1);
+    assert_eq!(two_day.center, AnalysisCenter::CodPrd2);
+    assert_eq!(one_day.date, map_date);
+    assert_eq!(two_day.date, map_date);
+
+    // Same official filename, different archive line and different identity.
+    let filename = "COD0OPSPRD_20262170000_01D_01H_GIM.INX";
+    assert_eq!(one_day.canonical_filename().expect("P1 filename"), filename);
+    assert_eq!(two_day.canonical_filename().expect("P2 filename"), filename);
+    assert_eq!(
+        one_day.archive_url().expect("P1 URL"),
+        "https://www.aiub.unibe.ch/download/CODE/IONO/P1/2026/\
+COD0OPSPRD_20262170000_01D_01H_GIM.INX.gz"
+    );
+    assert_eq!(
+        two_day.archive_url().expect("P2 URL"),
+        "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2026/\
+COD0OPSPRD_20262170000_01D_01H_GIM.INX.gz"
+    );
+
+    let one_day_identity = one_day.identity().expect("P1 identity");
+    let two_day_identity = two_day.identity().expect("P2 identity");
+    // The same-map-date invariant holds at the identity level too - the
+    // level that provenance records and cache paths are keyed by.
+    assert_eq!(one_day_identity.date, map_date);
+    assert_eq!(two_day_identity.date, map_date);
+    assert_eq!(one_day_identity.prediction_horizon_days, Some(1));
+    assert_eq!(two_day_identity.prediction_horizon_days, Some(2));
+    assert_ne!(
+        one_day_identity.key().expect("P1 key"),
+        two_day_identity.key().expect("P2 key"),
+        "the resolved line must remain distinguishable in provenance"
+    );
+    assert_ne!(
+        one_day_identity
+            .cache_relpath(DistributionSource::Direct)
+            .expect("P1 cache path"),
+        two_day_identity
+            .cache_relpath(DistributionSource::Direct)
+            .expect("P2 cache path"),
+        "a cached P2 artifact must never resolve under the P1 identity"
+    );
+
+    // The walk agrees exactly with the single-line request API.
+    assert_eq!(
+        two_day,
+        &predicted_ionex(AnalysisCenter::CodPrd2, date(2026, 8, 4), None)
+            .expect("single-line P2 request")
+    );
+}
+
+/// Wuhan MGEX near-real-time orbit line: every derived value below was
+/// verified against the live archive on 2026-08-04
+/// (`ftp://igs.gnsswhu.cn/pub/gps/products/mgex/2430/`, recorded in
+/// `fixtures/listings/whu-mgex-2430-20260804.txt`).
+#[test]
+fn wum_nrt_catalog_derivation_matches_live_archive() {
+    let spec = ops_ultra_sp3(AnalysisCenter::WumNrt, date(2026, 8, 3), None, Some("0500"))
+        .expect("WUM NRT product");
+    assert_eq!(
+        spec.canonical_filename().expect("filename"),
+        "WUM0MGXNRT_20262150500_02D_05M_ORB.SP3"
+    );
+    assert_eq!(
+        spec.archive_url().expect("URL"),
+        "ftp://igs.gnsswhu.cn/pub/gps/products/mgex/2430/\
+WUM0MGXNRT_20262150500_02D_05M_ORB.SP3.gz"
+    );
+
+    let identity = spec.identity().expect("identity");
+    assert_eq!(identity.publisher, ProductPublisher::Whu);
+    assert_eq!(identity.solution, SolutionClass::NearRealTime);
+    assert_eq!(identity.solution.code(), "near_real_time");
+    assert_eq!(identity.campaign, ProductCampaign::MultiGnssExperiment);
+    assert_eq!(identity.span, "02D");
+    assert_eq!(identity.sample, "05M");
+
+    let entry = catalog()
+        .iter()
+        .find(|entry| entry.center == AnalysisCenter::WumNrt)
+        .expect("catalog entry");
+    assert_eq!(entry.protocol, ArchiveProtocol::Ftp);
+    assert_eq!(entry.issues.len(), 24, "hourly issue rhythm");
+
+    assert_eq!(
+        sp3_content_start_convention(AnalysisCenter::WumNrt, date(2026, 8, 3), Some("0500")),
+        Ok(Sp3ContentStartConvention::FilenameEpoch)
+    );
+}
+
+/// The WUM NRT era gate refuses dates before the archive-verified first NRT
+/// day (2024-07-03); the discontinued hourly `WUM0MGXULA` era and the
+/// publication gap that followed it must not be assigned NRT filenames.
+#[test]
+fn wum_nrt_refuses_pre_nrt_archive_eras() {
+    assert_eq!(
+        ops_ultra_sp3(AnalysisCenter::WumNrt, date(2024, 7, 2), None, Some("0000")),
+        Err(DataCatalogError::UnsupportedProductEra {
+            center: AnalysisCenter::WumNrt,
+            product_type: ProductType::Sp3,
+            date: date(2024, 7, 2),
+        })
+    );
+    assert!(ops_ultra_sp3(AnalysisCenter::WumNrt, date(2024, 7, 3), None, Some("0300")).is_ok());
+
+    // Sub-hourly issues are not published.
+    assert_eq!(
+        ops_ultra_sp3(AnalysisCenter::WumNrt, date(2026, 8, 3), None, Some("0530")),
+        Err(DataCatalogError::UnsupportedIssue {
+            center: AnalysisCenter::WumNrt,
+            issue: "0530".to_string(),
+        })
+    );
+}
+
+/// The hourly rhythm feeds the shared ultra-issue walk: at 05:30 the newest
+/// candidate is the 0500 issue and every hour of the previous day is still
+/// enumerated, newest first.
+#[test]
+fn wum_nrt_issue_candidates_walk_hourly_newest_first() {
+    let target = ProductDateTime::new(date(2026, 8, 3), 5, 30, 0).expect("target");
+    let candidates =
+        ultra_issue_candidates(AnalysisCenter::WumNrt, target).expect("issue candidates");
+    assert_eq!(
+        candidates[0],
+        UltraIssue::new(date(2026, 8, 3), "0500").expect("issue")
+    );
+    assert_eq!(
+        candidates[1],
+        UltraIssue::new(date(2026, 8, 3), "0400").expect("issue")
+    );
+    // Six issues today (0000-0500) plus all 24 of the previous day.
+    assert_eq!(candidates.len(), 30);
+    assert_eq!(
+        candidates.last(),
+        Some(&UltraIssue::new(date(2026, 8, 2), "0000").expect("issue"))
+    );
+}
+
+/// No exact CDDIS mapping is cataloged for the WHU near-real-time line, so it
+/// is not projected onto CDDIS (the ESA final-line rule).
+#[test]
+fn wum_nrt_is_not_projected_onto_cddis() {
+    let identity = ops_ultra_sp3(AnalysisCenter::WumNrt, date(2026, 8, 3), None, Some("0500"))
+        .expect("WUM NRT product")
+        .identity()
+        .expect("identity");
+    assert_eq!(
+        distribution_location_for_identity(&identity, DistributionSource::NasaCddis),
+        Err(DataCatalogError::UnsupportedDistributionEra {
+            source: DistributionSource::NasaCddis,
+            center: AnalysisCenter::WumNrt,
+            product_type: ProductType::Sp3,
+            date: date(2026, 8, 3),
+        })
+    );
+}
+
+fn listing_fixture(name: &str) -> String {
+    let path = format!(
+        "{}/tests/fixtures/listings/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"))
+}
+
+/// Acceptance scenario, recorded 2026-08-04: the GFZ ultra archive listing
+/// answers "what is the newest published issue" and "how far behind nominal"
+/// without fetching any product bytes. The newest orbit in the recorded
+/// listing is the day-215 03:00 issue, published (archive-local mtime text
+/// `2026-08-04 08:20`) roughly 28 hours after its nominal issue time.
+#[test]
+fn publication_status_reports_gfz_ultra_lag_from_recorded_listing() {
+    let objects = parse_archive_listing(&listing_fixture("gfz-ultra-w2430-20260804.html"))
+        .expect("recognized listing");
+    let newest = newest_published_product(AnalysisCenter::GfzUlt, ProductType::Sp3, &objects)
+        .expect("supported line")
+        .expect("published objects exist");
+    assert_eq!(
+        newest,
+        PublishedProduct {
+            date: date(2026, 8, 3),
+            issue: "0300".to_string(),
+            filename: "GFZ0OPSULT_20262150300_02D_05M_ORB.SP3".to_string(),
+            observed_at: Some("2026-08-04 08:20".to_string()),
+        }
+    );
+
+    let now = ProductDateTime::new(date(2026, 8, 4), 7, 8, 0).expect("query time");
+    assert_eq!(
+        published_issue_age_minutes(&newest, now).expect("age"),
+        28 * 60 + 8,
+        "the newest issue ran about 28 hours behind its nominal epoch"
+    );
+}
+
+/// The ESA XHTML-table autoindex flavor parses to the same shape: newest
+/// recorded ESA ultra is the day-215 00:00 issue.
+#[test]
+fn publication_status_parses_the_esa_table_autoindex() {
+    let objects = parse_archive_listing(&listing_fixture("esa-2430-20260804.html"))
+        .expect("recognized listing");
+    let newest = newest_published_product(AnalysisCenter::EsaUlt, ProductType::Sp3, &objects)
+        .expect("supported line")
+        .expect("published objects exist");
+    assert_eq!(
+        newest,
+        PublishedProduct {
+            date: date(2026, 8, 3),
+            issue: "0000".to_string(),
+            filename: "ESA0OPSULT_20262150000_02D_05M_ORB.SP3".to_string(),
+            observed_at: Some("2026-08-04 01:45".to_string()),
+        }
+    );
+}
+
+/// The IGS combined ultra at BKG, recorded 2026-08-04: the current week's
+/// directory did not exist yet (its 404 body is an error page, not a
+/// listing, and the closed dialect detection refuses it), and the bounded
+/// week walk-back finds the newest published issue in the previous week's
+/// directory - day 209 18:00, published `2026-07-29 21:00`.
+#[test]
+fn publication_status_walks_back_one_week_for_the_recorded_bkg_state() {
+    let urls = publication_listing_urls(AnalysisCenter::IgsUlt, ProductType::Sp3, date(2026, 8, 4))
+        .expect("listing URLs");
+    assert_eq!(
+        urls,
+        vec![
+            "https://igs.bkg.bund.de/root_ftp/IGS/products/2430/".to_string(),
+            "https://igs.bkg.bund.de/root_ftp/IGS/products/2429/".to_string(),
+        ]
+    );
+
+    // The recorded 404 body reaches the parser only if a transport layer
+    // mistakes an error page for a listing; the closed dialect detection
+    // refuses it rather than reporting an empty week.
+    assert!(matches!(
+        parse_archive_listing(&listing_fixture("bkg-igs-2430-404-20260804.html")),
+        Err(DataCatalogError::UnrecognizedArchiveListing { .. })
+    ));
+
+    let previous_week = parse_archive_listing(&listing_fixture("bkg-igs-2429-20260804.html"))
+        .expect("recognized listing");
+    let newest = newest_published_product(AnalysisCenter::IgsUlt, ProductType::Sp3, &previous_week)
+        .expect("supported line")
+        .expect("published objects exist");
+    assert_eq!(
+        newest,
+        PublishedProduct {
+            date: date(2026, 7, 28),
+            issue: "1800".to_string(),
+            filename: "IGS0OPSULT_20262091800_02D_15M_ORB.SP3".to_string(),
+            observed_at: Some("2026-07-29 21:00".to_string()),
+        }
+    );
+}
+
+/// Dialect detection is closed: a body that fits no recognized listing
+/// grammar is a typed error, never a best-effort empty result. A silent
+/// empty parse would read as "nothing published" - exactly the wrong answer
+/// for an error page, a login interstitial, or an archive format change.
+#[test]
+fn parse_archive_listing_refuses_unrecognized_bodies() {
+    for (body, what) in [
+        ("", "empty body"),
+        ("   \n\t\n", "whitespace-only body"),
+        (
+            "This mirror has moved.\nPlease update your bookmarks.",
+            "prose",
+        ),
+        (
+            "<html><body><h1>503 Service Unavailable</h1></body></html>",
+            "error page without an autoindex marker",
+        ),
+        (
+            "{\"objects\": [\"GFZ0OPSULT_20262150000_02D_05M_ORB.SP3.gz\"]}",
+            "a JSON body",
+        ),
+    ] {
+        assert!(
+            matches!(
+                parse_archive_listing(body),
+                Err(DataCatalogError::UnrecognizedArchiveListing { .. })
+            ),
+            "{what} must be refused"
+        );
+    }
+
+    // A row violating its recognized dialect's grammar is also refused:
+    // truncation or corruption must not shrink to a shorter listing.
+    let truncated_csv =
+        "CODE/IONO/P1/2026/COD0OPSPRD_20262160000_01D_01H_GIM.INX.gz;1;2026-08-04T06:51:14Z;00\n\
+CODE/IONO/P2/2026/COD0OPSPRD_2026";
+    assert!(matches!(
+        parse_archive_listing(truncated_csv),
+        Err(DataCatalogError::UnrecognizedArchiveListing { .. })
+    ));
+    let corrupted_ftp =
+        "-r--r--r--    1 0 0 100 Aug 04 06:30 WUM0MGXNRT_20262150500_02D_05M_ORB.SP3.gz\n\
+<<< transfer aborted >>>";
+    assert!(matches!(
+        parse_archive_listing(corrupted_ftp),
+        Err(DataCatalogError::UnrecognizedArchiveListing { .. })
+    ));
+}
+
+/// The WHU FTP listing flavor: newest recorded NRT orbit is the day-215
+/// 05:00 issue.
+#[test]
+fn publication_status_parses_the_whu_ftp_listing() {
+    let objects = parse_archive_listing(&listing_fixture("whu-mgex-2430-20260804.txt"))
+        .expect("recognized listing");
+    let newest = newest_published_product(AnalysisCenter::WumNrt, ProductType::Sp3, &objects)
+        .expect("supported line")
+        .expect("published objects exist");
+    assert_eq!(
+        newest,
+        PublishedProduct {
+            date: date(2026, 8, 3),
+            issue: "0500".to_string(),
+            filename: "WUM0MGXNRT_20262150500_02D_05M_ORB.SP3".to_string(),
+            observed_at: Some("Aug 04 06:30".to_string()),
+        }
+    );
+}
+
+/// The AIUB whole-tree CSV attributes objects to the correct predicted line
+/// even though `P1` and `P2` share every filename: in the recorded state the
+/// one-day line's newest map is day 216 while the two-day line's is day 217.
+#[test]
+fn publication_status_separates_the_aiub_predicted_lines() {
+    let objects = parse_archive_listing(&listing_fixture("aiub-iono-p1p2-20260804.csv"))
+        .expect("recognized listing");
+
+    let one_day = newest_published_product(AnalysisCenter::CodPrd1, ProductType::Ionex, &objects)
+        .expect("supported line")
+        .expect("published objects exist");
+    assert_eq!(one_day.date, date(2026, 8, 4));
+    assert_eq!(one_day.observed_at.as_deref(), Some("2026-08-04T06:51:14Z"));
+
+    let two_day = newest_published_product(AnalysisCenter::CodPrd2, ProductType::Ionex, &objects)
+        .expect("supported line")
+        .expect("published objects exist");
+    assert_eq!(two_day.date, date(2026, 8, 5));
+    assert_eq!(two_day.filename, "COD0OPSPRD_20262170000_01D_01H_GIM.INX");
+
+    assert_eq!(
+        publication_listing_urls(
+            AnalysisCenter::CodPrd1,
+            ProductType::Ionex,
+            date(2026, 8, 4)
+        )
+        .expect("listing URLs"),
+        vec!["https://www.aiub.unibe.ch/download/full_listing.csv".to_string()]
+    );
+}
+
+/// Acceptance scenario, recorded 2026-08-04: a predicted-IONEX request for
+/// map date 217, whose `P1` object was unpublished while the `P2` object
+/// existed, resolves through the cross-line walk to the two-day artifact,
+/// and the resolved identity names the `P2` line. For map date 216 both
+/// lines were published and the walk keeps its `P1` preference.
+#[test]
+fn cross_line_walk_resolves_the_recorded_p1_gap_to_p2() {
+    let objects = parse_archive_listing(&listing_fixture("aiub-iono-p1p2-20260804.csv"))
+        .expect("recognized listing");
+
+    let gap_candidates =
+        predicted_ionex_line_candidates(date(2026, 8, 5), None).expect("candidates");
+    let resolved = resolve_first_published(&gap_candidates, &objects)
+        .expect("resolvable")
+        .expect("one line is published");
+    assert_eq!(resolved, 1, "P1 unpublished, P2 published");
+    let identity = gap_candidates[resolved].identity().expect("identity");
+    assert_eq!(identity.analysis_center, AnalysisCenter::CodPrd2);
+    assert_eq!(identity.prediction_horizon_days, Some(2));
+    assert_eq!(
+        identity.date,
+        date(2026, 8, 5),
+        "the map date is never substituted"
+    );
+
+    let full_candidates =
+        predicted_ionex_line_candidates(date(2026, 8, 4), None).expect("candidates");
+    assert_eq!(
+        resolve_first_published(&full_candidates, &objects).expect("resolvable"),
+        Some(0),
+        "when P1 is published the walk prefers it"
+    );
+}
+
+/// The walk stays whole across a civil year boundary: the two-day line for a
+/// January 1 map date is produced on December 31 but keeps the map date's
+/// identity year.
+#[test]
+fn predicted_ionex_line_candidates_cross_the_year_boundary() {
+    let map_date = date(2027, 1, 1);
+    let candidates =
+        predicted_ionex_line_candidates(map_date, None).expect("year-boundary candidates");
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.iter().all(|spec| spec.date == map_date));
+    assert_eq!(
+        candidates[1].archive_url().expect("P2 URL"),
         "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2027/\
 COD0OPSPRD_20270010000_01D_01H_GIM.INX.gz"
     );

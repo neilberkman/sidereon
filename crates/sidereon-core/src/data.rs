@@ -40,6 +40,8 @@ pub enum AnalysisCenter {
     EsaUlt,
     /// `gfz_ult`.
     GfzUlt,
+    /// `wum_nrt`.
+    WumNrt,
 }
 
 impl AnalysisCenter {
@@ -58,6 +60,7 @@ impl AnalysisCenter {
             Self::CodUlt => "cod_ult",
             Self::EsaUlt => "esa_ult",
             Self::GfzUlt => "gfz_ult",
+            Self::WumNrt => "wum_nrt",
         }
     }
 
@@ -76,6 +79,7 @@ impl AnalysisCenter {
             "cod_ult" => Some(Self::CodUlt),
             "esa_ult" => Some(Self::EsaUlt),
             "gfz_ult" => Some(Self::GfzUlt),
+            "wum_nrt" => Some(Self::WumNrt),
             _ => None,
         }
     }
@@ -90,6 +94,7 @@ impl AnalysisCenter {
             }
             Self::Esa | Self::EsaUlt => ProductPublisher::Esa,
             Self::Gfz | Self::GfzUlt => ProductPublisher::Gfz,
+            Self::WumNrt => ProductPublisher::Whu,
         }
     }
 
@@ -106,6 +111,7 @@ impl AnalysisCenter {
             Self::CodPrd1 | Self::CodPrd2 => SolutionClass::Predicted,
             Self::Esa | Self::Cod => SolutionClass::Final,
             Self::IgsUlt | Self::CodUlt | Self::EsaUlt | Self::GfzUlt => SolutionClass::UltraRapid,
+            Self::WumNrt => SolutionClass::NearRealTime,
         }
     }
 
@@ -201,6 +207,8 @@ pub enum ProductPublisher {
     Esa,
     /// GFZ German Research Centre for Geosciences.
     Gfz,
+    /// Wuhan University IGS Analysis Center.
+    Whu,
 }
 
 impl ProductPublisher {
@@ -212,6 +220,7 @@ impl ProductPublisher {
             Self::Code => "COD",
             Self::Esa => "ESA",
             Self::Gfz => "GFZ",
+            Self::Whu => "WUM",
         }
     }
 }
@@ -233,6 +242,8 @@ pub enum SolutionClass {
     UltraRapid,
     /// Predicted product.
     Predicted,
+    /// Near-real-time product, published on a sub-ultra-rapid (hourly) rhythm.
+    NearRealTime,
     /// Broadcast navigation product.
     Broadcast,
 }
@@ -246,6 +257,7 @@ impl SolutionClass {
             Self::Rapid => "rapid",
             Self::UltraRapid => "ultra_rapid",
             Self::Predicted => "predicted",
+            Self::NearRealTime => "near_real_time",
             Self::Broadcast => "broadcast",
         }
     }
@@ -258,6 +270,7 @@ impl SolutionClass {
             Self::Rapid => Some("RAP"),
             Self::UltraRapid => Some("ULT"),
             Self::Predicted => Some("PRD"),
+            Self::NearRealTime => Some("NRT"),
             Self::Broadcast => None,
         }
     }
@@ -401,6 +414,9 @@ pub enum ArchiveProtocol {
     Http,
     /// HTTPS.
     Https,
+    /// Anonymous FTP. Wuhan University's IGS data center serves its open
+    /// archive over `ftp://` only; there is no HTTP surface for these paths.
+    Ftp,
 }
 
 impl ArchiveProtocol {
@@ -410,6 +426,7 @@ impl ArchiveProtocol {
         match self {
             Self::Http => "http",
             Self::Https => "https",
+            Self::Ftp => "ftp",
         }
     }
 }
@@ -606,6 +623,31 @@ const COD_PRD_PRODUCTS: [CenterProductConvention; 1] = [CenterProductConvention 
     compression: ArchiveCompression::Gzip,
 }];
 
+/// Wuhan University MGEX near-real-time orbit line.
+///
+/// Verified against the live archive on 2026-08-04
+/// (`ftp://igs.gnsswhu.cn/pub/gps/products/mgex/<gps-week>/`): hourly
+/// `WUM0MGXNRT_<YYYYDDDHHMM>_02D_05M_ORB.SP3.gz` objects, SP3-d, agency
+/// `WHU`, 576 epochs (a half-open two-day span at five minutes) starting at
+/// the filename epoch. The `WUM0MGXULA` name this line was once known by is
+/// no longer published: the archived hourly series switches from ULA (last
+/// observed in GPS week 2230) through a publication gap to NRT from
+/// 2024-07-03 (day 185, GPS week 2321) onward.
+const WUM_NRT_PRODUCTS: [CenterProductConvention; 1] = [CenterProductConvention {
+    product_type: ProductType::Sp3,
+    token: "WUM0MGXNRT",
+    layout: ArchiveLayout::GpsWeek,
+    span: "02D",
+    default_sample: "05M",
+    compression: ArchiveCompression::Gzip,
+}];
+
+/// Hourly issue times published by the WUM near-real-time line.
+const WUM_NRT_ISSUES: [&str; 24] = [
+    "0000", "0100", "0200", "0300", "0400", "0500", "0600", "0700", "0800", "0900", "1000", "1100",
+    "1200", "1300", "1400", "1500", "1600", "1700", "1800", "1900", "2000", "2100", "2200", "2300",
+];
+
 const ESA_PRODUCTS: [CenterProductConvention; 3] = [
     CenterProductConvention {
         product_type: ProductType::Sp3,
@@ -787,6 +829,19 @@ const ESA_ULTRA_SP3_START_DATE: ProductDate = ProductDate {
     day: 4,
 };
 
+/// First archived `WUM0MGXNRT` orbit date (2024 day 185, GPS week 2321),
+/// verified against the live Wuhan archive on 2026-08-04. The first issue on
+/// this date is `0300`; the catalog gates at the date level and leaves the
+/// two absent earlier issues to availability discovery. Earlier weeks carry
+/// either the discontinued `WUM0MGXULA` hourly line (last observed in GPS
+/// week 2230) or nothing, and are refused rather than assigned a filename
+/// that never existed.
+const WUM_NRT_SP3_START_DATE: ProductDate = ProductDate {
+    year: 2024,
+    month: 7,
+    day: 3,
+};
+
 /// Last ESA ultra-rapid issue that uses the 15-minute sampling token.
 const ESA_ULTRA_15M_LAST_DATE: ProductDate = ProductDate {
     year: 2025,
@@ -962,7 +1017,7 @@ const GFZ_ULTRA_START_TRANSITION: [(ProductDate, &str, Sp3ContentStartConvention
     ),
 ];
 
-const CENTER_ORDER: [AnalysisCenter; 11] = [
+const CENTER_ORDER: [AnalysisCenter; 12] = [
     AnalysisCenter::CodRap,
     AnalysisCenter::CodPrd1,
     AnalysisCenter::CodPrd2,
@@ -974,9 +1029,10 @@ const CENTER_ORDER: [AnalysisCenter; 11] = [
     AnalysisCenter::CodUlt,
     AnalysisCenter::EsaUlt,
     AnalysisCenter::GfzUlt,
+    AnalysisCenter::WumNrt,
 ];
 
-const CATALOG: [CenterCatalogEntry; 11] = [
+const CATALOG: [CenterCatalogEntry; 12] = [
     CenterCatalogEntry {
         center: AnalysisCenter::CodRap,
         code: "cod_rap",
@@ -1079,6 +1135,15 @@ const CATALOG: [CenterCatalogEntry; 11] = [
         products: &GFZ_ULT_PRODUCTS,
         issues: &GFZ_ULT_ISSUES,
     },
+    CenterCatalogEntry {
+        center: AnalysisCenter::WumNrt,
+        code: "wum_nrt",
+        protocol: ArchiveProtocol::Ftp,
+        host: "igs.gnsswhu.cn",
+        root_url: "ftp://igs.gnsswhu.cn/pub/gps/products/mgex",
+        products: &WUM_NRT_PRODUCTS,
+        issues: &WUM_NRT_ISSUES,
+    },
 ];
 
 const SKADI_SOURCE: TerrainSourceEntry = TerrainSourceEntry {
@@ -1095,13 +1160,14 @@ const CELESTRAK_SPACE_WEATHER_SOURCE: SpaceWeatherSourceEntry = SpaceWeatherSour
     root_url: "https://celestrak.org/SpaceData",
 };
 
-const ALLOWED_HOSTS: [&str; 10] = [
+const ALLOWED_HOSTS: [&str; 11] = [
     "www.aiub.unibe.ch",
     "download.aiub.unibe.ch",
     "zhw-b.s3.cloud.switch.ch",
     "navigation-office.esa.int",
     "isdc-data.gfz.de",
     "igs.bkg.bund.de",
+    "igs.gnsswhu.cn",
     "s3.amazonaws.com",
     "celestrak.org",
     "cddis.nasa.gov",
@@ -1256,6 +1322,13 @@ pub enum DataCatalogError {
     NoUltraIssue,
     /// No available ultra-rapid issue exists at or before the requested target.
     NoAvailableUltraIssue,
+    /// An archive listing body did not classify as any recognized listing
+    /// dialect. Deliberately not best-effort: a silent empty parse would be
+    /// indistinguishable from "nothing published".
+    UnrecognizedArchiveListing {
+        /// Why classification failed.
+        reason: String,
+    },
     /// Station identifier is not a 9-character upper-case alphanumeric token.
     InvalidStation(String),
     /// Terrain lookup coordinate is non-finite or outside the reader range.
@@ -1363,6 +1436,9 @@ impl fmt::Display for DataCatalogError {
             Self::NoUltraIssue => write!(f, "no ultra-rapid issue at or before target"),
             Self::NoAvailableUltraIssue => {
                 write!(f, "no available ultra-rapid issue at or before target")
+            }
+            Self::UnrecognizedArchiveListing { reason } => {
+                write!(f, "unrecognized archive listing: {reason}")
             }
             Self::InvalidStation(station) => write!(f, "invalid station code {station:?}"),
             Self::InvalidCoordinate {
@@ -2980,7 +3056,8 @@ pub fn ultra_sp3_locations(
         AnalysisCenter::IgsUlt
         | AnalysisCenter::CodUlt
         | AnalysisCenter::EsaUlt
-        | AnalysisCenter::GfzUlt => {}
+        | AnalysisCenter::GfzUlt
+        | AnalysisCenter::WumNrt => {}
         other => {
             return Err(DataCatalogError::UnsupportedProduct {
                 center: other,
@@ -3103,6 +3180,54 @@ pub fn latest_ultra_issue(
     }
 }
 
+/// Ordered cross-line candidates for one predicted IONEX map date.
+///
+/// CODE publishes two predicted global ionosphere lines for every map date:
+/// the one-day prediction under `CODE/IONO/P1/` and the two-day prediction
+/// under `CODE/IONO/P2/`. Both files carry the same official filename (the
+/// filename date is the map date in both lines) but are distinct artifacts
+/// with distinct exact identities and cache paths. Because the two-day line
+/// for map date `M` is produced a day earlier than the one-day line, `P2/M`
+/// is routinely published while `P1/M` is still absent whenever CODE runs
+/// behind schedule.
+///
+/// This walk mirrors [`ultra_issue_candidates`]: it enumerates genuine
+/// artifacts, ordered by preference (`P1` first, `P2` second), and the caller
+/// acquires the first available one, cache-first. Hard rules:
+///
+/// - Every candidate is for the SAME map date. The walk never substitutes a
+///   neighboring date's map; date fallback remains a separate, explicit
+///   decision via [`gim_date_candidates`].
+/// - Each candidate keeps its own exact identity ([`AnalysisCenter::CodPrd1`]
+///   or [`AnalysisCenter::CodPrd2`] with its prediction horizon), so resolved
+///   provenance names the line actually served and a cached `P2` artifact is
+///   never re-labelled as `P1`.
+/// - The walk is opt-in. A single-line request through [`predicted_ionex`]
+///   keeps its fail-closed behavior.
+///
+/// Note the argument is the map date itself, unlike [`predicted_ionex`],
+/// whose date argument is offset by [`predicted_day_offset`] for the two-day
+/// line. A map date whose two-day production day falls outside the supported
+/// calendar (its previous civil day is invalid) is rejected rather than
+/// silently narrowed to one candidate.
+pub fn predicted_ionex_line_candidates(
+    map_date: ProductDate,
+    sample: Option<&str>,
+) -> Result<Vec<ProductSpec>, DataCatalogError> {
+    let one_day = predicted_ionex(AnalysisCenter::CodPrd1, map_date, sample)?;
+    let two_day_production_date = map_date.add_days(-1)?;
+    let two_day = predicted_ionex(AnalysisCenter::CodPrd2, two_day_production_date, sample)?;
+    // The same-map-date rule is the walk's contract, so it is enforced at
+    // runtime in every build - not debug-asserted - even though only a
+    // catalog bug could violate it.
+    if one_day.date != map_date || two_day.date != map_date {
+        return Err(DataCatalogError::InconsistentProductIdentity {
+            field: "predicted_ionex_map_date",
+        });
+    }
+    Ok(vec![one_day, two_day])
+}
+
 /// Candidate IONEX dates at or before a target date, newest first.
 pub fn gim_date_candidates(
     center: AnalysisCenter,
@@ -3116,6 +3241,457 @@ pub fn gim_date_candidates(
         out.push(base.add_days(-i64::from(back))?);
     }
     Ok(out)
+}
+
+// --- Publication status -----------------------------------------------------
+//
+// Doctrine for this section, deliberate and load-bearing:
+//
+// - The purity split is the design, not an accident. Everything here -
+//   listing parsing, newest-issue selection, listing-URL derivation, age
+//   arithmetic - is pure and network-free, exactly like the rest of the
+//   catalog. The one networked call composing these pieces lives in the
+//   scoreboard (`sidereon-scoreboard::publication_status`), behind its
+//   existing fetcher trait so tests inject recorded bodies. Do not "fix"
+//   this by adding transport here: the purity boundary is what lets every
+//   interface reuse these semantics with its own acquisition stack, and
+//   what keeps CI free of live-network dependence.
+// - `observed_at` stays verbatim archive text forever. The archives disagree
+//   on format and time zone (Apache indexes report server-local wall time
+//   with no zone, AIUB's CSV reports ISO-8601 UTC, FTP LIST reports
+//   `Mon DD HH:MM` with a year only for old files); parsing these into
+//   instants would fabricate precision the archive never published. Lag
+//   arithmetic therefore uses the filename's nominal issue epoch
+//   ([`published_issue_age_minutes`]), which IS well-defined, and callers
+//   who want the archive's own text get it untouched.
+//
+/// One object observed in an archive listing.
+///
+/// `path` is the object path exactly as the listing reported it: a bare
+/// filename for an HTML autoindex or FTP directory listing, a slash-separated
+/// archive path for a whole-tree listing such as AIUB's `full_listing.csv`.
+/// `observed_at` is the archive-reported modification text, verbatim; archives
+/// disagree on format and time zone, so Sidereon never reinterprets it (see
+/// the section doctrine above).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedObject {
+    /// Object path as listed.
+    pub path: String,
+    /// Archive-reported modification text, verbatim, when the listing has one.
+    pub observed_at: Option<String>,
+}
+
+/// Newest published issue of one center + product line, as evidenced by an
+/// archive listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedProduct {
+    /// Product date encoded by the newest published official filename.
+    pub date: ProductDate,
+    /// `HHMM` issue time encoded by that filename.
+    pub issue: String,
+    /// Official filename without transport compression suffix.
+    pub filename: String,
+    /// Archive-reported publication text for that object, verbatim.
+    pub observed_at: Option<String>,
+}
+
+/// Parse the object entries out of an archive listing body.
+///
+/// Dialect detection is closed: the body must classify as exactly one of the
+/// listing surfaces the catalog's archives actually serve, each verified live
+/// on 2026-08-04 and recorded as a fixture, and a body that fits none of them
+/// is [`DataCatalogError::UnrecognizedArchiveListing`] - never a best-effort
+/// empty result. An error page, a login interstitial, or a format change at
+/// an archive must surface as "this is not a listing I understand", because a
+/// silent empty parse is indistinguishable from "nothing published" and would
+/// convert an archive change into a false publication-gap report.
+///
+/// - Apache `<pre>` autoindex and its older table flavor (GFZ
+///   `isdc-data.gfz.de`, BKG `igs.bkg.bund.de`) and the ESA XHTML table
+///   autoindex (`navigation-office.esa.int`): recognized by the autoindex
+///   `Index of` marker; objects are relative anchors, with the row's
+///   `YYYY-MM-DD HH:MM` text captured verbatim.
+/// - AIUB whole-tree CSV (`www.aiub.unibe.ch/download/full_listing.csv`):
+///   `path;bytes;ISO-8601;md5` rows; every non-empty row must fit that
+///   grammar.
+/// - Anonymous-FTP `LIST` output (WHU `igs.gnsswhu.cn`): Unix `ls -l` rows
+///   (an optional leading `total` line allowed); every other non-empty row
+///   must fit that grammar.
+///
+/// Within a recognized dialect, rows that by the dialect's own rules do not
+/// name an object (parent links, sort links, directories, symlinks) are
+/// skipped. The result preserves nothing but object paths and verbatim
+/// modification text; interpretation belongs to
+/// [`newest_published_product`].
+pub fn parse_archive_listing(body: &str) -> Result<Vec<PublishedObject>, DataCatalogError> {
+    let mut seen: Vec<PublishedObject> = Vec::new();
+    let mut push = |path: String, observed_at: Option<String>| {
+        if let Some(existing) = seen.iter_mut().find(|object| object.path == path) {
+            if existing.observed_at.is_none() {
+                existing.observed_at = observed_at;
+            }
+        } else {
+            seen.push(PublishedObject { path, observed_at });
+        }
+    };
+    let unrecognized = |reason: &str| DataCatalogError::UnrecognizedArchiveListing {
+        reason: reason.to_string(),
+    };
+
+    let non_empty: Vec<&str> = body
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if non_empty.is_empty() {
+        return Err(unrecognized("empty body"));
+    }
+    let has_markup = body.contains('<');
+
+    // AIUB whole-tree CSV.
+    if !has_markup && non_empty[0].matches(';').count() >= 3 {
+        for line in &non_empty {
+            if line.matches(';').count() < 3 {
+                return Err(unrecognized("CSV row without its four fields"));
+            }
+            let mut fields = line.split(';');
+            let (Some(path), Some(_bytes), Some(observed)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(unrecognized("CSV row without its four fields"));
+            };
+            if path.is_empty() || path.contains(' ') {
+                return Err(unrecognized("CSV row without an archive path"));
+            }
+            // Directory rows carry `-1` sentinels and a trailing slash.
+            if path.ends_with('/') {
+                continue;
+            }
+            let observed_at =
+                (!observed.is_empty() && observed != "-1").then(|| observed.to_string());
+            push(path.to_string(), observed_at);
+        }
+        return Ok(seen);
+    }
+
+    // Anonymous-FTP `LIST` (Unix `ls -l`) output.
+    if !has_markup && non_empty[0].starts_with(['-', 'd', 'l']) {
+        for (index, line) in non_empty.iter().enumerate() {
+            if index == 0 && line.starts_with("total ") {
+                continue;
+            }
+            let mode_shaped = line.len() > 10
+                && line.starts_with(['-', 'd', 'l'])
+                && line.as_bytes()[1..10]
+                    .iter()
+                    .all(|byte| matches!(byte, b'r' | b'w' | b'x' | b'-' | b's' | b't'));
+            if !mode_shaped {
+                return Err(unrecognized("FTP LIST row without a Unix mode field"));
+            }
+            // Directories and symlinks are not objects.
+            if !line.starts_with('-') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            if fields.len() < 9 {
+                return Err(unrecognized("FTP LIST file row without nine fields"));
+            }
+            push(fields[8..].join(" "), Some(fields[5..8].join(" ")));
+        }
+        return Ok(seen);
+    }
+
+    // HTML autoindex flavors, recognized by the shared `Index of` marker.
+    if has_markup && body.contains("Index of") {
+        for line in &non_empty {
+            // Anchors, one or more per physical row. Sort links (`?C=`),
+            // absolute parent links, and directories are not objects.
+            let mut rest = *line;
+            while let Some(start) = rest.find("<a href=\"") {
+                rest = &rest[start + 9..];
+                let Some(end) = rest.find('"') else { break };
+                let target = &rest[..end];
+                rest = &rest[end..];
+                if target.is_empty()
+                    || target.starts_with('?')
+                    || target.starts_with('/')
+                    || target.starts_with('#')
+                    || target.contains("://")
+                    || target.ends_with('/')
+                {
+                    continue;
+                }
+                let observed_at = find_listing_datetime(rest).map(str::to_string);
+                push(target.to_string(), observed_at);
+            }
+        }
+        return Ok(seen);
+    }
+
+    Err(unrecognized(if has_markup {
+        "markup without an autoindex marker"
+    } else {
+        "no known listing grammar"
+    }))
+}
+
+/// First `YYYY-MM-DD HH:MM` datetime text in the remainder of a listing row.
+fn find_listing_datetime(rest: &str) -> Option<&str> {
+    let bytes = rest.as_bytes();
+    let is_digit = |index: usize| bytes.get(index).is_some_and(u8::is_ascii_digit);
+    for start in 0..bytes.len().saturating_sub(15) {
+        let shape_matches = is_digit(start)
+            && is_digit(start + 1)
+            && is_digit(start + 2)
+            && is_digit(start + 3)
+            && bytes[start + 4] == b'-'
+            && is_digit(start + 5)
+            && is_digit(start + 6)
+            && bytes[start + 7] == b'-'
+            && is_digit(start + 8)
+            && is_digit(start + 9)
+            && bytes[start + 10] == b' '
+            && is_digit(start + 11)
+            && is_digit(start + 12)
+            && bytes[start + 13] == b':'
+            && is_digit(start + 14)
+            && is_digit(start + 15);
+        if shape_matches {
+            return Some(&rest[start..start + 16]);
+        }
+    }
+    None
+}
+
+/// Archive path marker that attributes a listed object to one catalog line
+/// when several lines share an official filename convention.
+const fn center_path_marker(center: AnalysisCenter) -> Option<&'static str> {
+    match center {
+        AnalysisCenter::CodPrd1 => Some("/IONO/P1/"),
+        AnalysisCenter::CodPrd2 => Some("/IONO/P2/"),
+        _ => None,
+    }
+}
+
+fn object_matches_center(center: AnalysisCenter, path: &str) -> bool {
+    match center_path_marker(center) {
+        // Whole-tree paths must carry the line's directory; a bare filename
+        // cannot be attributed to either line and is never accepted.
+        Some(marker) => {
+            let slashed = format!("/{path}");
+            slashed.contains(marker)
+        }
+        None => true,
+    }
+}
+
+/// Newest published issue for one center + product line among listed objects.
+///
+/// An object counts only when its name is exactly the line's official
+/// filename convention (token, span, catalog-supported sample, content code,
+/// extension, and the line's archive-compression suffix) and, for lines that
+/// share a filename convention (the CODE predicted `P1`/`P2` ionosphere
+/// lines), when its listed path carries the line's directory. The newest
+/// object is selected by filename date and issue time; the archive-reported
+/// modification text rides along verbatim.
+///
+/// `Ok(None)` means the listing was readable but contained no published
+/// object of this line - the "nothing published here" answer, distinct from
+/// an unreachable archive, which the transport layer reports instead.
+pub fn newest_published_product(
+    center: AnalysisCenter,
+    product_type: ProductType,
+    objects: &[PublishedObject],
+) -> Result<Option<PublishedProduct>, DataCatalogError> {
+    let convention = product_convention(center, product_type)?;
+    let descriptor = product_type_convention(product_type);
+    let suffix = format!(".{}", descriptor.extension);
+    let tail = format!("_{}{}", descriptor.content_code, suffix);
+
+    let mut newest: Option<(i64, PublishedProduct)> = None;
+    for object in objects {
+        if !object_matches_center(center, &object.path) {
+            continue;
+        }
+        let listed_name = object.path.rsplit('/').next().unwrap_or(&object.path);
+        let stripped = listed_name
+            .strip_suffix(".gz")
+            .or_else(|| listed_name.strip_suffix(".Z"))
+            .unwrap_or(listed_name);
+        let Some(after_token) = stripped
+            .strip_prefix(convention.token)
+            .and_then(|rest| rest.strip_prefix('_'))
+        else {
+            continue;
+        };
+        let Some(middle) = after_token.strip_suffix(&tail) else {
+            continue;
+        };
+        let mut parts = middle.split('_');
+        let (Some(block), Some(span), Some(sample), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if span != convention.span || block.len() != 11 {
+            continue;
+        }
+        let (Ok(year), Ok(day_of_year)) = (block[0..4].parse::<i32>(), block[4..7].parse::<u16>())
+        else {
+            continue;
+        };
+        let issue = &block[7..11];
+        let Ok(date) = product_date_from_year_day(year, day_of_year) else {
+            continue;
+        };
+        if validate_issue(issue).is_err() {
+            continue;
+        }
+        // The object must be one the catalog can re-derive for that date and
+        // issue; anything else is not this line's product.
+        let issue_argument = (!center_catalog(center)
+            .expect("catalog entry exists for enum variant")
+            .issues
+            .is_empty())
+        .then_some(issue);
+        match product(center, product_type, date, Some(sample), issue_argument) {
+            Ok(spec) => {
+                if spec.canonical_filename()? != stripped {
+                    continue;
+                }
+            }
+            Err(_) => continue,
+        }
+        let ordering = issue_ordering_minutes(date, issue)?;
+        let replace = newest
+            .as_ref()
+            .is_none_or(|(newest_ordering, _)| ordering > *newest_ordering);
+        if replace {
+            newest = Some((
+                ordering,
+                PublishedProduct {
+                    date,
+                    issue: issue.to_string(),
+                    filename: stripped.to_string(),
+                    observed_at: object.observed_at.clone(),
+                },
+            ));
+        }
+    }
+    Ok(newest.map(|(_, product)| product))
+}
+
+/// Whole minutes from a published issue's nominal epoch to `now`.
+///
+/// This is the "N hours behind nominal" number for lag alerting: the newest
+/// published issue's filename epoch compared with the caller's clock. It says
+/// nothing about when the archive actually wrote the object; the verbatim
+/// [`PublishedProduct::observed_at`] text carries that where the archive
+/// exposes one.
+pub fn published_issue_age_minutes(
+    published: &PublishedProduct,
+    now: ProductDateTime,
+) -> Result<i64, DataCatalogError> {
+    Ok(now.ordering_minutes() - issue_ordering_minutes(published.date, &published.issue)?)
+}
+
+/// Archive listing URLs that can answer "what is the newest published issue"
+/// for one center + product line, ordered newest-directory-first.
+///
+/// This is a bounded enumeration, not a poll: at most two URLs. Week-layout
+/// archives get the week directory containing `around` plus the previous week
+/// (a late archive may not have created the current week's directory yet -
+/// the recorded 2026-08-04 BKG state). Year-layout archives are served
+/// through AIUB's whole-tree CSV listing, one URL. The caller fetches in
+/// order and interprets each body with [`parse_archive_listing`] and
+/// [`newest_published_product`].
+pub fn publication_listing_urls(
+    center: AnalysisCenter,
+    product_type: ProductType,
+    around: ProductDate,
+) -> Result<Vec<String>, DataCatalogError> {
+    let convention = product_convention(center, product_type)?;
+    let entry = center_catalog(center).expect("catalog entry exists for enum variant");
+    match convention.layout {
+        ArchiveLayout::AiubCodeRoot
+        | ArchiveLayout::AiubCodeYear
+        | ArchiveLayout::AiubCodeMgexYear => {
+            Ok(vec![format!("{}/full_listing.csv", entry.root_url)])
+        }
+        _ => {
+            let current = format!(
+                "{}/{}/",
+                entry.root_url,
+                product_dir_path(center, convention.layout, around)?
+            );
+            let previous_week_date = around.add_days(-7)?;
+            let previous = format!(
+                "{}/{}/",
+                entry.root_url,
+                product_dir_path(center, convention.layout, previous_week_date)?
+            );
+            let mut urls = vec![current];
+            if !urls.contains(&previous) {
+                urls.push(previous);
+            }
+            Ok(urls)
+        }
+    }
+}
+
+/// Index of the first candidate whose exact archive object is present among
+/// listed objects.
+///
+/// This is the pure availability step of a candidate walk such as
+/// [`predicted_ionex_line_candidates`]: candidates stay in preference order,
+/// an object counts only when it is exactly the candidate's official archive
+/// filename (with the line's compression suffix) on the candidate's line, and
+/// the returned index preserves the candidate's own identity - resolved
+/// provenance therefore names the line actually served.
+pub fn resolve_first_published(
+    candidates: &[ProductSpec],
+    objects: &[PublishedObject],
+) -> Result<Option<usize>, DataCatalogError> {
+    for (index, candidate) in candidates.iter().enumerate() {
+        let filename = candidate.canonical_filename()?;
+        let convention = product_convention(candidate.center, candidate.product_type)?;
+        let compression = product_archive_compression(
+            candidate.center,
+            candidate.product_type,
+            candidate.date,
+            convention.compression,
+        )?;
+        let archive_name = format!("{filename}{}", compression.suffix());
+        let found = objects.iter().any(|object| {
+            if !object_matches_center(candidate.center, &object.path) {
+                return false;
+            }
+            let listed_name = object.path.rsplit('/').next().unwrap_or(&object.path);
+            listed_name == archive_name || listed_name == filename
+        });
+        if found {
+            return Ok(Some(index));
+        }
+    }
+    Ok(None)
+}
+
+fn product_date_from_year_day(
+    year: i32,
+    day_of_year: u16,
+) -> Result<ProductDate, DataCatalogError> {
+    if day_of_year == 0 {
+        return Err(DataCatalogError::DateOutOfRange);
+    }
+    ProductDate::new(year, 1, 1)?
+        .add_days(i64::from(day_of_year) - 1)
+        .and_then(|date| {
+            if date.year == year {
+                Ok(date)
+            } else {
+                Err(DataCatalogError::DateOutOfRange)
+            }
+        })
 }
 
 /// Build a daily station observation product.
@@ -3334,7 +3910,10 @@ fn supported_samples_inner(
 
     Ok(match center {
         AnalysisCenter::Igs | AnalysisCenter::IgsUlt => &["15M"],
-        AnalysisCenter::Esa | AnalysisCenter::Cod | AnalysisCenter::CodUlt => &["05M"],
+        AnalysisCenter::Esa
+        | AnalysisCenter::Cod
+        | AnalysisCenter::CodUlt
+        | AnalysisCenter::WumNrt => &["05M"],
         AnalysisCenter::Gfz => {
             if date < GFZ_RAPID_5M_START_DATE {
                 &["15M"]
@@ -3416,6 +3995,7 @@ fn validate_product_date(
         }
         (AnalysisCenter::EsaUlt, ProductType::Sp3) => Some(ESA_ULTRA_SP3_START_DATE),
         (AnalysisCenter::GfzUlt, ProductType::Sp3) => Some(GFZ_ULTRA_SP3_START_DATE),
+        (AnalysisCenter::WumNrt, ProductType::Sp3) => Some(WUM_NRT_SP3_START_DATE),
         _ => None,
     };
     let before_long_name_start = matches!(center, AnalysisCenter::IgsUlt | AnalysisCenter::CodUlt)
@@ -3470,6 +4050,17 @@ fn validate_cddis_distribution_era(identity: &ProductIdentity) -> Result<(), Dat
     let gps_week = identity.date.gps_week()?;
     let esa_mgex_final_sp3 =
         identity.analysis_center == AnalysisCenter::Esa && identity.family == ProductType::Sp3;
+    // The Wuhan near-real-time hourly line is served from the WHU archive
+    // only; no exact CDDIS mapping is cataloged for it, so it is not
+    // projected onto CDDIS (same rule as the ESA `ESA0MGNFIN` line).
+    if identity.analysis_center == AnalysisCenter::WumNrt {
+        return Err(DataCatalogError::UnsupportedDistributionEra {
+            source: DistributionSource::NasaCddis,
+            center: identity.analysis_center,
+            product_type: identity.family,
+            date: identity.date,
+        });
+    }
     let unmodeled_pretransition_sp3 = identity.family == ProductType::Sp3
         && gps_week < IGS_LONG_FILENAME_START_GPS_WEEK
         && !uses_legacy_igs_final_name(identity.analysis_center, identity.family, identity.date)?;
