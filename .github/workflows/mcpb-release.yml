@@ -1,0 +1,149 @@
+name: MCPB Release
+
+# Builds the sidereon MCPB bundle on tag push, attaches it to the GitHub
+# release (creating the release if the tag has none), and publishes
+# io.github.neilberkman/sidereon to the official MCP registry.
+#
+# workflow_dispatch runs the same pipeline against an existing tag, so a
+# past release can be backfilled or republished without re-tagging. The
+# build jobs check out the tag itself so binaries match the release;
+# bundling and publishing use the workflow's own ref for the scripts.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Existing tag version to build and publish, e.g. 0.36.3'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            artifact: sidereon-darwin
+          - os: ubuntu-latest
+            artifact: sidereon-linux
+          - os: windows-latest
+            artifact: sidereon-win32.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Resolve version
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          [ -z "$VERSION" ] && VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: v${{ env.VERSION }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mcpb-${{ matrix.os }}
+
+      - name: Build (macOS universal)
+        if: matrix.os == 'macos-14'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release -p sidereon-cli --target aarch64-apple-darwin
+          cargo build --release -p sidereon-cli --target x86_64-apple-darwin
+          lipo -create -output sidereon-darwin \
+            target/aarch64-apple-darwin/release/sidereon \
+            target/x86_64-apple-darwin/release/sidereon
+
+      - name: Build (linux x86_64)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo build --release -p sidereon-cli
+          cp target/release/sidereon sidereon-linux
+
+      - name: Build (windows x86_64)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          cargo build --release -p sidereon-cli
+          cp target/release/sidereon.exe sidereon-win32.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  bundle:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: ver
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          [ -z "$VERSION" ] && VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: mcpb-bin
+          merge-multiple: true
+
+      - name: Build MCPB bundle
+        run: ./scripts/build-mcpb.sh "$VERSION" mcpb-bin dist
+
+      - name: Attach to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$VERSION"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Sidereon $VERSION" --generate-notes --verify-tag
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "dist/sidereon_${VERSION}.mcpb"
+
+  publish-mcp-registry:
+    needs: bundle
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC auth for the io.github.neilberkman namespace
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Generate server.json
+        run: |
+          VERSION="${{ needs.bundle.outputs.version }}"
+          URL="https://github.com/neilberkman/sidereon/releases/download/v${VERSION}/sidereon_${VERSION}.mcpb"
+          curl -sSLf "$URL" -o sidereon.mcpb
+          SHA=$(openssl dgst -sha256 -r sidereon.mcpb | cut -d' ' -f1)
+          ./scripts/gen-server-json.sh "$VERSION" "$SHA" > server.json
+          cat server.json
+
+      - name: Login to MCP registry (OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish to MCP registry
+        run: ./mcp-publisher publish

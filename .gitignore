@@ -26,3 +26,4 @@ bindings/python/*.egg-info
 **/node_modules/
 /pkg/
 /pkg-node/
+dist/
