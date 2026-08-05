@@ -1,10 +1,17 @@
 # OTP 30 removes `:ftp`: replacement plan for the Elixir FTP transport
 
-Status: design note with a hard deadline - OTP 30's release (~May 2027 on
-the annual cadence). Not "when CI migrates": the Elixir package declares
+Status: IMPLEMENTED (2026-08-04). `Sidereon.GNSS.FtpClient` - a minimal
+passive-mode anonymous-FTP client over `:gen_tcp` - ships in the Elixir
+interface and is the default for the `:ftp_module` seam, removing the
+dependency on the deprecated application entirely. Verified against an
+in-process fake FTP server and live against the WHU archive (listing,
+exact acquisition, merge). CI carries an OTP 29 leg. Remaining from the
+plan below: add an OTP 30 leg when the first RC ships (~May 2027).
+
+Original problem statement: the Elixir package declares
 `elixir: "~> 1.18"` with no OTP ceiling, so the day OTP 30 ships, any user
-adopting it gets `:undef` at runtime on the FTP acquisition path (the WHU
-`wum_nrt` line and FTP publication-status listings).
+adopting it would have gotten `:undef` at runtime on the FTP acquisition
+path (the WHU `wum_nrt` line and FTP publication-status listings).
 
 ## Verified facts (2026-08-04)
 
