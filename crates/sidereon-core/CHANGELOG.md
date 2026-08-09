@@ -4,6 +4,50 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-08-09
+
+### Added
+
+- `check_continuity` attests that a precise-ephemeris sample series is
+  physically continuous, or reports each violation with the epochs, the
+  interval, and the magnitude that exceeded its bound. Two checks with
+  different jobs: a speed gate whose bound is a true physical upper bound
+  for the orbit class (`sqrt(mu/a_min) + omega_e*r_max`), so it cannot
+  false-positive and catches gross corruption; and a hold-out
+  interpolation residual evaluated through the product's own Lagrange
+  substrate, which supplies the sensitivity. On a real GFZ ultra product
+  earth-fixed chord speeds run 2757-3187 m/s against a ~6 km/s class
+  bound, leaving hundreds of kilometres of displacement undetectable per
+  epoch pair, so a speed gate alone cannot see a metre-scale splice; the
+  residual check resolves a 5 m splice against a 1 m tolerance. Ordering
+  is the library's responsibility - input is sorted internally, so a
+  shuffled sequence and a sorted one produce identical reports - and
+  after duplicate epochs are split out as their own defect class, a zero
+  or negative interval is unrepresentable in the comparison path.
+- `MergeOptions::provenance` records per-epoch merge provenance as the
+  merge decides: which contributor supplied each accepted cell, where
+  selection changed and why, and what each contributor covered.
+  `Summary` mode is bounded by the number of selection changes; `Full`
+  adds one entry per accepted cell. `MergeReport::provenance` is an
+  `Option` so "not requested" stays distinguishable from "one
+  contributor". `CellSelection` records a combined value as combined
+  rather than nominating a supplier: under `Mean` or `Median` the written
+  value is a combination of the members, so no single contributor
+  supplied it.
+- `MergeOptions::verify_continuity` runs the continuity check over the
+  merged product as a post-condition and attributes each violation to the
+  contributors on both sides, distinguishing a splice across a
+  contributor change from a discontinuity inside one contributor's arc.
+  It reports without refusing: the merge still returns the product.
+
+### Changed
+
+- `MergeOptions` gains the `provenance` and `verify_continuity` fields.
+  This is source-breaking for exhaustive struct literals; construction
+  sites using `..MergeOptions::default()` are unaffected. Neither option
+  changes the merged product - the SP3 output is byte-identical whether
+  or not they are enabled, pinned by test.
+
 ## [0.36.3] - 2026-08-04
 
 ### Fixed
