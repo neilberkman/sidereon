@@ -66,6 +66,7 @@ mod validate;
 #[cfg(all(test, sidereon_repo_tests))]
 mod test_parity;
 
+pub mod artifact_bytes;
 pub mod astro;
 pub(crate) mod format;
 

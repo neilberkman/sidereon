@@ -4,6 +4,36 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-08-09
+
+### Added
+
+- `mmap` feature (off by default). With it enabled, `MmapTerrain::from_path`
+  and `MmapPreciseEphemerisInterpolant::from_path` memory-map the file
+  read-only and the reader owns the mapping, instead of reading the whole
+  artifact into process memory. The entry point is unchanged, so every
+  existing caller benefits without migrating to a new constructor.
+
+  The copy avoided is the smaller half. A mapping is demand-paged, so a
+  reader that queries a geographically local region faults in the pages
+  covering those tiles and never touches the rest; construction parses only
+  the header, datum tag, and index. That is the difference between opening a
+  30+ GB terrain store and being unable to start. Measured on the committed
+  fixture: a mapped open allocates ~1 KB regardless of artifact size, where
+  the copying open allocates the artifact.
+
+  Neither reader becomes self-referential and no `unsafe` appears at any
+  interface boundary. Bytes live in a new `ArtifactBytes` enum
+  (`Borrowed` / `Owned` / `Mapped`) and every lookup derives its span on
+  demand. The interpolant's mapped parse uses offset-backed arrays rather
+  than the borrowed `&[f64]` arrays its borrowed path uses, so the promotion
+  to an owning reader is expressible in safe code.
+
+- `MmapTerrain::is_memory_mapped` and
+  `MmapPreciseEphemerisInterpolant::is_memory_mapped`, so a caller or a test
+  can assert that a path open actually mapped rather than read. A change that
+  quietly relocated the copy would otherwise be indistinguishable from a fix.
+
 ## [0.37.0] - 2026-08-09
 
 ### Added

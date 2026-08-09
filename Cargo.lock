@@ -839,6 +839,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
+name = "memmap2"
+version = "0.9.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "miniz_oxide"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1411,7 +1420,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sidereon"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -1438,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "sidereon-core"
-version = "0.37.0"
+version = "0.38.0"
 dependencies = [
  "approx",
  "cc",
@@ -1446,6 +1455,7 @@ dependencies = [
  "fs2",
  "getrandom",
  "libm",
+ "memmap2",
  "nalgebra",
  "rayon",
  "roxmltree",

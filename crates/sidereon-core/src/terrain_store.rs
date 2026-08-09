@@ -11,7 +11,7 @@
 //! level geoid. Ellipsoidal height conversion is an explicit `h = H + N` step
 //! using [`TerrainGeoidModel`].
 
-use std::borrow::Cow;
+use crate::artifact_bytes::ArtifactBytes;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -519,7 +519,7 @@ impl MmapTile {
 /// `h = H + N` conversion to WGS84 ellipsoidal height.
 #[derive(Clone, Debug)]
 pub struct MmapTerrain<'a> {
-    bytes: Cow<'a, [u8]>,
+    bytes: ArtifactBytes<'a>,
     tiles: Vec<MmapTile>,
     by_grid: HashMap<(i32, i32), usize>,
     tile_index: Vec<TerrainStoreTileIndex>,
@@ -530,21 +530,42 @@ pub struct MmapTerrain<'a> {
 impl MmapTerrain<'static> {
     /// Parse an owned terrain store byte vector.
     pub fn from_vec(bytes: Vec<u8>) -> core::result::Result<Self, TerrainStoreError> {
-        Self::from_cow(Cow::Owned(bytes))
+        Self::from_backing(ArtifactBytes::Owned(bytes))
     }
 
-    /// Read and parse a terrain store file.
+    /// Open and parse a terrain store file.
     ///
-    /// This reads the file into memory. Applications that already manage an mmap
-    /// should pass the mmap slice to [`MmapTerrain::from_bytes`] to avoid the
-    /// file read copy.
+    /// With the `mmap` feature the file is memory-mapped read-only and this
+    /// reader owns the mapping; without it the file is read into memory. The
+    /// entry point is the same either way, so enabling the feature speeds up
+    /// every existing caller rather than asking anyone to migrate.
+    ///
+    /// Mapping is what makes a very large store usable at all: construction
+    /// parses only the header, datum tag, and tile index, and lookups are
+    /// demand-paged, so a reader querying a geographically local region never
+    /// faults in the rest of the file.
     pub fn from_path(path: impl AsRef<Path>) -> core::result::Result<Self, TerrainStoreError> {
         let path = path.as_ref();
-        let bytes = fs::read(path).map_err(|err| TerrainStoreError::Io {
-            path: path.to_path_buf(),
-            message: err.to_string(),
-        })?;
-        Self::from_vec(bytes)
+
+        #[cfg(feature = "mmap")]
+        {
+            let bytes = crate::artifact_bytes::map_file_read_only(path).map_err(|err| {
+                TerrainStoreError::Io {
+                    path: path.to_path_buf(),
+                    message: err.to_string(),
+                }
+            })?;
+            Self::from_backing(bytes)
+        }
+
+        #[cfg(not(feature = "mmap"))]
+        {
+            let bytes = fs::read(path).map_err(|err| TerrainStoreError::Io {
+                path: path.to_path_buf(),
+                message: err.to_string(),
+            })?;
+            Self::from_vec(bytes)
+        }
     }
 }
 
@@ -554,11 +575,11 @@ impl<'a> MmapTerrain<'a> {
     /// The reader keeps the byte span in place and indexes posting payloads by
     /// offset. Passing an mmap-backed slice gives a zero-copy reader.
     pub fn from_bytes(bytes: &'a [u8]) -> core::result::Result<Self, TerrainStoreError> {
-        Self::from_cow(Cow::Borrowed(bytes))
+        Self::from_backing(ArtifactBytes::Borrowed(bytes))
     }
 
-    fn from_cow(bytes: Cow<'a, [u8]>) -> core::result::Result<Self, TerrainStoreError> {
-        let parsed = parse_store(bytes.as_ref())?;
+    fn from_backing(bytes: ArtifactBytes<'a>) -> core::result::Result<Self, TerrainStoreError> {
+        let parsed = parse_store(bytes.as_slice())?;
         Ok(Self {
             bytes,
             tiles: parsed.tiles,
@@ -572,7 +593,14 @@ impl<'a> MmapTerrain<'a> {
     /// Borrow the original terrain store bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        self.bytes.as_ref()
+        self.bytes.as_slice()
+    }
+
+    /// Whether this reader is backed by a memory map rather than a copy in
+    /// process memory.
+    #[must_use]
+    pub fn is_memory_mapped(&self) -> bool {
+        self.bytes.is_memory_mapped()
     }
 
     /// Return the store's file-level vertical datum.
@@ -839,7 +867,7 @@ impl<'a> MmapTerrain<'a> {
     fn tile_payload(&self, tile: &MmapTile) -> &[u8] {
         let start = tile.index.data_offset as usize;
         let end = start + tile.index.data_len as usize;
-        &self.bytes[start..end]
+        &self.bytes.as_slice()[start..end]
     }
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "sidereon-core"
-version = "0.37.0"
+version = "0.38.0"
 authors = []
 edition = "2021"
 description = "Numerical astrodynamics propagation core plus the GNSS domain layer (SP3, broadcast ephemeris, multi-GNSS positioning, RTK/PPP, ionosphere/troposphere, DOP) behind a default-on gnss feature"
@@ -29,6 +29,7 @@ exclude = [
 ]
 
 [dependencies]
+memmap2 = { version = "0.9", optional = true }
 nalgebra = { workspace = true }
 thiserror = "1.0"
 libm = "0.2"
@@ -60,6 +61,12 @@ name = "hotpath"
 harness = false
 
 [features]
+# Memory-map large binary artifacts (terrain store, precise-interpolant store)
+# instead of reading them into memory. Off by default so the dependency-light
+# build is unaffected and wasm, where mapping is meaningless, simply does not
+# enable it. With it on, the existing path constructors map - no new entry
+# point, so every caller benefits without changing a line.
+mmap = ["dep:memmap2"]
 # Test-only oracle. Compiles the Vallado C++ reference via cc and exposes it to
 # the test suite for field-level diffing against the pure-Rust SGP4 port. Not
 # part of the public API. Off by default.

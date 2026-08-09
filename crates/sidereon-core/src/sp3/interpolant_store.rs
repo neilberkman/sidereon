@@ -6,7 +6,7 @@
 //! so opening the store validates bytes and builds only lightweight indexes. It
 //! never refits clock splines at open or during evaluation.
 
-use std::borrow::Cow;
+use crate::artifact_bytes::ArtifactBytes;
 use std::collections::BTreeMap;
 use std::fs;
 use std::mem;
@@ -173,6 +173,19 @@ enum F64Array<'a> {
 }
 
 impl F64Array<'_> {
+    /// Promote an offset-backed array to `'static`.
+    ///
+    /// `Offset` carries no reference, so the value is independent of the byte
+    /// lifetime. `Borrowed` is not promotable and returns `None`. This is what
+    /// lets a memory-mapped reader own its bytes without becoming a
+    /// self-referential struct or reaching for `unsafe`.
+    fn into_static(self) -> Option<F64Array<'static>> {
+        match self {
+            Self::Borrowed(_) => None,
+            Self::Offset { offset, count } => Some(F64Array::Offset { offset, count }),
+        }
+    }
+
     const fn len(&self) -> usize {
         match self {
             Self::Borrowed(values) => values.len(),
@@ -198,6 +211,16 @@ struct MmapClockArc<'a> {
 }
 
 impl MmapClockArc<'_> {
+    fn into_static(self) -> Option<MmapClockArc<'static>> {
+        Some(MmapClockArc {
+            x: self.x.into_static()?,
+            c0: self.c0.into_static()?,
+            c1: self.c1.into_static()?,
+            c2: self.c2.into_static()?,
+            c3: self.c3.into_static()?,
+        })
+    }
+
     fn node_count(&self) -> usize {
         self.x.len()
     }
@@ -216,6 +239,24 @@ struct MmapSeries<'a> {
     pos_ky: F64Array<'a>,
     pos_kz: F64Array<'a>,
     clock_arcs: Vec<MmapClockArc<'a>>,
+}
+
+impl MmapSeries<'_> {
+    fn into_static(self) -> Option<MmapSeries<'static>> {
+        Some(MmapSeries {
+            pos_count: self.pos_count,
+            clock_node_count: self.clock_node_count,
+            pos_x: self.pos_x.into_static()?,
+            pos_kx: self.pos_kx.into_static()?,
+            pos_ky: self.pos_ky.into_static()?,
+            pos_kz: self.pos_kz.into_static()?,
+            clock_arcs: self
+                .clock_arcs
+                .into_iter()
+                .map(MmapClockArc::into_static)
+                .collect::<Option<Vec<_>>>()?,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -238,7 +279,7 @@ enum ArrayBacking<'a> {
 /// from an application-owned mapping. Both paths parse only fixed metadata;
 /// clock spline coefficients are consumed from the artifact as written.
 pub struct MmapPreciseEphemerisInterpolant<'a> {
-    bytes: Cow<'a, [u8]>,
+    bytes: ArtifactBytes<'a>,
     time_scale: TimeScale,
     satellites: Vec<GnssSatelliteId>,
     series: BTreeMap<GnssSatelliteId, MmapSeries<'a>>,
@@ -247,7 +288,7 @@ pub struct MmapPreciseEphemerisInterpolant<'a> {
 impl core::fmt::Debug for MmapPreciseEphemerisInterpolant<'_> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MmapPreciseEphemerisInterpolant")
-            .field("byte_len", &self.bytes.as_ref().len())
+            .field("byte_len", &self.bytes.as_slice().len())
             .field("time_scale", &self.time_scale)
             .field("satellites", &self.satellites)
             .finish_non_exhaustive()
@@ -259,27 +300,58 @@ impl MmapPreciseEphemerisInterpolant<'static> {
     pub fn from_vec(bytes: Vec<u8>) -> core::result::Result<Self, PreciseInterpolantStoreError> {
         let parsed = parse_store(&bytes, ArrayBacking::Offset)?;
         Ok(Self {
-            bytes: Cow::Owned(bytes),
+            bytes: ArtifactBytes::Owned(bytes),
             time_scale: parsed.time_scale,
             satellites: parsed.satellites,
             series: parsed.series,
         })
     }
 
-    /// Read and parse a precise-interpolant store file.
+    /// Open and parse a precise-interpolant store file.
     ///
-    /// This reads the file into memory. Applications that already manage an mmap
-    /// should pass the mmap slice to [`MmapPreciseEphemerisInterpolant::from_bytes`]
-    /// to avoid the file read copy.
+    /// With the `mmap` feature the file is memory-mapped read-only and this
+    /// reader owns the mapping; without it the file is read into memory. The
+    /// entry point is the same either way, so enabling the feature speeds up
+    /// every existing caller rather than asking anyone to migrate.
+    ///
+    /// The mapped parse uses offset-backed arrays rather than borrowed ones, so
+    /// the reader owns its bytes without becoming a self-referential struct.
     pub fn from_path(
         path: impl AsRef<Path>,
     ) -> core::result::Result<Self, PreciseInterpolantStoreError> {
         let path = path.as_ref();
-        let bytes = fs::read(path).map_err(|err| PreciseInterpolantStoreError::Io {
-            path: path.to_path_buf(),
-            message: err.to_string(),
-        })?;
-        Self::from_vec(bytes)
+
+        #[cfg(feature = "mmap")]
+        {
+            let bytes = crate::artifact_bytes::map_file_read_only(path).map_err(|err| {
+                PreciseInterpolantStoreError::Io {
+                    path: path.to_path_buf(),
+                    message: err.to_string(),
+                }
+            })?;
+            let parsed = parse_store(bytes.as_slice(), ArrayBacking::Offset)?;
+            let series = parsed
+                .series
+                .into_iter()
+                .map(|(sat, series)| series.into_static().map(|series| (sat, series)))
+                .collect::<Option<BTreeMap<_, _>>>()
+                .expect("offset-backed parse yields no borrows");
+            Ok(Self {
+                bytes,
+                time_scale: parsed.time_scale,
+                satellites: parsed.satellites,
+                series,
+            })
+        }
+
+        #[cfg(not(feature = "mmap"))]
+        {
+            let bytes = fs::read(path).map_err(|err| PreciseInterpolantStoreError::Io {
+                path: path.to_path_buf(),
+                message: err.to_string(),
+            })?;
+            Self::from_vec(bytes)
+        }
     }
 }
 
@@ -292,7 +364,7 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
     pub fn from_bytes(bytes: &'a [u8]) -> core::result::Result<Self, PreciseInterpolantStoreError> {
         let parsed = parse_store(bytes, ArrayBacking::Borrowed(bytes))?;
         Ok(Self {
-            bytes: Cow::Borrowed(bytes),
+            bytes: ArtifactBytes::Borrowed(bytes),
             time_scale: parsed.time_scale,
             satellites: parsed.satellites,
             series: parsed.series,
@@ -302,7 +374,14 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
     /// Borrow the artifact bytes backing this reader.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        self.bytes.as_ref()
+        self.bytes.as_slice()
+    }
+
+    /// Whether this reader is backed by a memory map rather than a copy in
+    /// process memory.
+    #[must_use]
+    pub fn is_memory_mapped(&self) -> bool {
+        self.bytes.is_memory_mapped()
     }
 
     /// Return the store's file-level checksum.
