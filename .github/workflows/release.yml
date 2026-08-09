@@ -1,0 +1,125 @@
+name: Release
+
+# Publishes the engine crates to crates.io on tag push.
+#
+# This existed as a pair of `cargo publish` commands typed by hand, which is
+# how 0.37.0 shipped to crates.io from a commit that was never tagged: the
+# publish succeeded, the tag did not exist, and the Python interface's CI -
+# which checks out the engine at `v${core_version}` for shared fixtures -
+# failed on a repository that had already been published. A tag-triggered
+# workflow makes the tag the trigger rather than an afterthought, and gates the
+# irreversible step on the same CI bar every other interface now uses.
+#
+# `workflow_dispatch` runs the same pipeline against an existing tag so a past
+# release can be republished without re-tagging.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish, e.g. v0.37.0'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # The full CI bar, run against the tagged commit. Publishing to crates.io is
+  # irreversible - a version can be yanked but never replaced - so it must not
+  # run ahead of the gates.
+  gate:
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish to crates.io
+    needs: gate
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write # crates.io trusted publishing (OIDC), no stored token
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The tag is the release's identity: if it disagrees with the manifests,
+      # the published crate would not match the tag anyone reads it from.
+      - name: Verify tag matches the manifest versions
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          core_version="$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "sidereon-core"))')"
+          facade_version="$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "sidereon"))')"
+
+          echo "tag=${RELEASE_TAG} core=${core_version} facade=${facade_version}"
+          test "${RELEASE_TAG}" = "v${core_version}"
+          test "${core_version}" = "${facade_version}"
+
+      - name: Authenticate to crates.io
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+
+      # Order matters and is not incidental: the facade depends on the engine
+      # at an exact version, so the engine has to be resolvable on the registry
+      # before the facade is verified. Each publish is skipped when that exact
+      # version is already on crates.io, so a re-run after a partial failure
+      # completes the release instead of failing on the half that succeeded.
+      - name: Publish sidereon-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          version="$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "sidereon-core"))')"
+          if curl -sSf -H 'User-Agent: sidereon-release' \
+              "https://crates.io/api/v1/crates/sidereon-core/${version}" >/dev/null 2>&1; then
+            echo "sidereon-core ${version} is already published; skipping"
+          else
+            cargo publish -p sidereon-core
+          fi
+
+      - name: Publish sidereon
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          version="$(cargo metadata --format-version 1 --no-deps \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "sidereon"))')"
+          if curl -sSf -H 'User-Agent: sidereon-release' \
+              "https://crates.io/api/v1/crates/sidereon/${version}" >/dev/null 2>&1; then
+            echo "sidereon ${version} is already published; skipping"
+          else
+            cargo publish -p sidereon
+          fi
+
+      - name: Confirm both crates resolve at the tagged version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          for crate in sidereon-core sidereon; do
+            for attempt in 1 2 3 4 5 6; do
+              published="$(curl -sS -H 'User-Agent: sidereon-release' \
+                "https://crates.io/api/v1/crates/${crate}" \
+                | python3 -c 'import json,sys; print(json.load(sys.stdin)["crate"]["max_version"])')"
+              if [ "${published}" = "${version}" ]; then
+                echo "${crate} ${published} live"
+                break
+              fi
+              if [ "${attempt}" = "6" ]; then
+                echo "${crate} still reports ${published}, expected ${version}" >&2
+                exit 1
+              fi
+              sleep 10
+            done
+          done

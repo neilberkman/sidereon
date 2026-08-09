@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Callable so the release workflow gates on this exact bar rather than a
+  # weaker copy of it. Two lists drift, and the weaker one ends up guarding
+  # the irreversible action.
+  workflow_call:
 
 jobs:
   # A workflow file can be valid YAML and still be a broken workflow - a
@@ -14,9 +18,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: raven-actions/actionlint@3a24062651993d40fed1019b58ac6fbdfbf276cc # v2.0.1
-        with:
-          flags: "-shellcheck= -pyflakes="
+      # The pinned upstream binary, not a wrapper action: a wrapper resolves
+      # its own Node dependencies out of this repository's root node_modules
+      # and dies before it lints anything. Running the same binary the same way
+      # locally and in CI is the point.
+      - name: Run actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+        run: |
+          curl -sSfL \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz" \
+            -o actionlint.tar.gz
+          tar -xzf actionlint.tar.gz actionlint
+          ./actionlint -shellcheck= -pyflakes=
 
   test:
     runs-on: macos-latest
