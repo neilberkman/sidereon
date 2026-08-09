@@ -1,0 +1,5 @@
+# Labels for the self-hosted bit-exactness runner. actionlint cannot know
+# custom labels, and without this it reports the legitimate runs-on as unknown.
+self-hosted-runner:
+  labels:
+    - no-avx512
