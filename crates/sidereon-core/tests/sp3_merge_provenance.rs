@@ -70,6 +70,7 @@ fn complete_policy(combine: MergeCombine) -> MergeOptions {
             ],
             helmert: true,
         },
+        provenance: None,
     }
 }
 

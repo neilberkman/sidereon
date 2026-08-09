@@ -1514,10 +1514,12 @@ mod verify;
 mod write;
 
 pub use combine::{
-    align_clock_reference, clock_reference_offset, merge, AgreementMetric, ClockReferenceOffset,
-    EpochAgreement, MergeCombine, MergeFlag, MergeOptions, MergePrecedenceScope, MergeReport,
-    OutlierRejectOptions, Sp3FrameLabelSet, Sp3FrameReconciliation, Sp3FrameReconciliationMethod,
-    Sp3FrameReconciliationOptions,
+    align_clock_reference, clock_reference_offset, merge, AgreementMetric, CellProvenance,
+    CellSelection, ClockReferenceOffset, ContributorCoverage, EpochAgreement, MergeCombine,
+    MergeFlag, MergeOptions, MergePrecedenceScope, MergeProvenance, MergeReport,
+    OutlierRejectOptions, PrecedenceTransition, ProvenanceMode, Sp3FrameLabelSet,
+    Sp3FrameReconciliation, Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions,
+    TransitionReason,
 };
 pub use continuity::{
     check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,

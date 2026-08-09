@@ -56,6 +56,10 @@ pub use crate::sp3::{
     check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
     OrbitClass, SpeedBound,
 };
+pub use crate::sp3::{
+    CellProvenance, CellSelection, ContributorCoverage, MergeProvenance, PrecedenceTransition,
+    ProvenanceMode, TransitionReason,
+};
 pub use crate::spp::EphemerisSource;
 use crate::{validate, GnssSatelliteId, GnssSystem};
 
