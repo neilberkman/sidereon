@@ -1503,6 +1503,7 @@ fn next_field<T: std::str::FromStr>(
 }
 
 mod combine;
+mod continuity;
 mod exact;
 mod interp;
 mod interpolant;
@@ -1513,10 +1514,16 @@ mod verify;
 mod write;
 
 pub use combine::{
-    align_clock_reference, clock_reference_offset, merge, AgreementMetric, ClockReferenceOffset,
-    EpochAgreement, MergeCombine, MergeFlag, MergeOptions, MergePrecedenceScope, MergeReport,
-    OutlierRejectOptions, Sp3FrameLabelSet, Sp3FrameReconciliation, Sp3FrameReconciliationMethod,
-    Sp3FrameReconciliationOptions,
+    align_clock_reference, clock_reference_offset, merge, AgreementMetric, CellProvenance,
+    CellSelection, ClockReferenceOffset, ContributorCoverage, EpochAgreement, MergeCombine,
+    MergeContinuityReport, MergeContinuityViolation, MergeFlag, MergeOptions, MergePrecedenceScope,
+    MergeProvenance, MergeReport, OutlierRejectOptions, PrecedenceTransition, ProvenanceMode,
+    Sp3FrameLabelSet, Sp3FrameReconciliation, Sp3FrameReconciliationMethod,
+    Sp3FrameReconciliationOptions, TransitionReason,
+};
+pub use continuity::{
+    check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
+    OrbitClass, SpeedBound,
 };
 pub use exact::{
     parse_exact_sp3, validate_exact_sp3, ExactSp3Coverage, ExactSp3Request, ExactSp3ValidationError,

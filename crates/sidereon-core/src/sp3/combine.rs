@@ -32,6 +32,9 @@ use crate::frame_catalog::{
     TerrestrialVelocityMPerYear,
 };
 use crate::id::{GnssSatelliteId, GnssSystem};
+use crate::sp3::continuity::{
+    check_continuity, ContinuityDefect, ContinuityOptions, ContinuityReport,
+};
 use crate::tolerances::WHOLE_SECOND_EPS_S;
 use crate::validate;
 use crate::{Error, Result};
@@ -222,6 +225,19 @@ pub struct MergeOptions {
     /// Explicit coordinate-label reconciliation rules. Default is disabled, so
     /// mismatched coordinate-system labels are rejected.
     pub frame_reconciliation: Sp3FrameReconciliationOptions,
+    /// Record per-epoch provenance as the merge decides. `None` (the default)
+    /// records nothing: a full record costs one entry per accepted cell.
+    ///
+    /// This never changes the merged product - the SP3 output is byte-identical
+    /// whether or not provenance is enabled, and a test pins that.
+    pub provenance: Option<ProvenanceMode>,
+    /// Verify the continuity of the merged product as a post-condition, and
+    /// attribute each violation to the contributors on both sides.
+    ///
+    /// `None` (the default) runs no check. Enabling it never changes the merged
+    /// product and never fails the merge: violations are reported on
+    /// [`MergeReport::continuity`] and refusing is the caller's decision.
+    pub verify_continuity: Option<ContinuityOptions>,
 }
 
 impl Default for MergeOptions {
@@ -239,6 +255,8 @@ impl Default for MergeOptions {
             target_epoch_interval_s: None,
             systems: None,
             frame_reconciliation: Sp3FrameReconciliationOptions::default(),
+            provenance: None,
+            verify_continuity: None,
         }
     }
 }
@@ -423,6 +441,212 @@ pub struct Sp3FrameReconciliation {
     pub identity: bool,
 }
 
+/// How much per-epoch provenance [`merge`] records.
+///
+/// Off entirely unless [`MergeOptions::provenance`] asks for it: a full record
+/// is one entry per accepted `(epoch, satellite)` cell, which for a day of
+/// 5-minute GNSS data is tens of thousands of entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProvenanceMode {
+    /// Transitions and per-contributor coverage only. Bounded by the number of
+    /// selection changes rather than by the number of cells.
+    Summary,
+    /// Everything in [`ProvenanceMode::Summary`], plus one
+    /// [`CellProvenance`] per accepted cell.
+    Full,
+}
+
+/// How the merge arrived at the value it wrote for one channel of one cell.
+///
+/// The distinction between [`CellSelection::Precedence`] and
+/// [`CellSelection::Combined`] is load-bearing rather than cosmetic: under
+/// [`MergeCombine::Mean`] or [`MergeCombine::Median`] - and `Mean` is the
+/// default - the emitted value is a combination of the agreeing members, so
+/// "which contributor supplied this cell" has no answer. The honest record there
+/// is the member set and the rule that combined them, and this type refuses to
+/// pretend otherwise.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CellSelection {
+    /// One source carried the cell; it was carried through as gap fill. Also
+    /// recorded in [`MergeReport::single_source`].
+    SingleSource {
+        /// Index into the input slice.
+        source: usize,
+    },
+    /// Precedence picked one source out of an agreeing set.
+    Precedence {
+        /// Index into the input slice of the source whose value was written.
+        source: usize,
+        /// Every source in the accepted consensus, ascending.
+        members: Vec<usize>,
+    },
+    /// The written value is a combination of the members; no single source
+    /// supplied it.
+    Combined {
+        /// The rule that produced the written value.
+        rule: MergeCombine,
+        /// Every source in the accepted consensus, ascending.
+        members: Vec<usize>,
+    },
+}
+
+impl CellSelection {
+    /// The single source whose value was written, when one exists.
+    ///
+    /// `None` for [`CellSelection::Combined`], where no single contributor
+    /// supplied the value.
+    pub fn selected_source(&self) -> Option<usize> {
+        match self {
+            Self::SingleSource { source } | Self::Precedence { source, .. } => Some(*source),
+            Self::Combined { .. } => None,
+        }
+    }
+
+    /// Every source in the accepted consensus.
+    pub fn members(&self) -> Vec<usize> {
+        match self {
+            Self::SingleSource { source } => vec![*source],
+            Self::Precedence { members, .. } | Self::Combined { members, .. } => members.clone(),
+        }
+    }
+}
+
+/// Provenance of one accepted `(epoch, satellite)` cell, recorded by the merge
+/// as it decided - never reconstructed afterwards.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellProvenance {
+    /// The epoch.
+    pub epoch: Instant,
+    /// The satellite.
+    pub satellite: GnssSatelliteId,
+    /// How the written position was arrived at.
+    pub position: CellSelection,
+    /// How the written clock was arrived at; `None` when the cell carries no
+    /// clock.
+    pub clock: Option<CellSelection>,
+}
+
+/// Why the source supplying a satellite's position changed at an epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransitionReason {
+    /// The previously selected source no longer carried the cell.
+    SoleAvailability,
+    /// Precedence order chose a different source that was already available.
+    Precedence,
+    /// The previously selected source was rejected from the consensus as an
+    /// outlier.
+    OutlierRejection,
+    /// The cell moved between a single-source carry and a multi-source
+    /// consensus, or between combined and single-source selection.
+    ConsensusChange,
+}
+
+/// One change in which source supplied a satellite's position.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrecedenceTransition {
+    /// The satellite.
+    pub satellite: GnssSatelliteId,
+    /// The epoch at which the new source took over.
+    pub epoch: Instant,
+    /// The source supplying the previous accepted cell; `None` at a satellite's
+    /// first accepted cell.
+    pub from_source: Option<usize>,
+    /// The source supplying this cell; `None` when the new cell is combined and
+    /// so has no single supplier.
+    pub to_source: Option<usize>,
+    /// Why selection changed.
+    pub reason: TransitionReason,
+}
+
+/// What one contributor supplied to the merged product.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContributorCoverage {
+    /// Index into the input slice.
+    pub source: usize,
+    /// Accepted cells where this source was in the position consensus.
+    pub cells_contributed: usize,
+    /// Accepted cells whose written position came from this source alone
+    /// (single-source carry or precedence pick). Always zero under a combining
+    /// rule, where no cell has a single supplier.
+    pub cells_selected: usize,
+    /// First accepted cell this source contributed to.
+    pub first_epoch: Option<Instant>,
+    /// Last accepted cell this source contributed to.
+    pub last_epoch: Option<Instant>,
+    /// Accepted cells this source contributed nothing to - the complement of
+    /// `cells_contributed` over the merged product.
+    pub cells_absent: usize,
+}
+
+/// Per-epoch merge provenance, recorded as the merge decided.
+///
+/// Present on [`MergeReport::provenance`] only when [`MergeOptions::provenance`]
+/// requested it. The `Option` is deliberate: a caller must be able to tell
+/// "provenance was not requested" from "provenance says one contributor".
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeProvenance {
+    /// The mode that produced this record.
+    pub mode: ProvenanceMode,
+    /// One entry per accepted cell, in output order. Empty under
+    /// [`ProvenanceMode::Summary`].
+    pub cells: Vec<CellProvenance>,
+    /// Every change of supplying source, in output order. Identical under both
+    /// modes.
+    pub transitions: Vec<PrecedenceTransition>,
+    /// What each input contributed, indexed by source order.
+    pub coverage: Vec<ContributorCoverage>,
+}
+
+/// One continuity violation in the merged product, attributed to the
+/// contributors on each side of it.
+///
+/// At a splice the actionable fact is not that the arc jumped but *between
+/// which two contributors* it jumped, which is why this exists rather than a
+/// bare [`ContinuityDefect`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeContinuityViolation {
+    /// The violation as the continuity check reported it.
+    pub defect: ContinuityDefect,
+    /// Sources supplying the earlier side of the offending epoch pair, as
+    /// recorded when the merge chose that cell. Empty when the merged product
+    /// carries no cell there (the check reached past the merge's own coverage).
+    pub from_sources: Vec<usize>,
+    /// Sources supplying the later side of the offending epoch pair.
+    pub to_sources: Vec<usize>,
+    /// Whether the two sides were supplied by different contributors. A
+    /// violation across a contributor change is a splice; one inside a single
+    /// contributor's arc is that contributor's own discontinuity, and the two
+    /// call for different follow-up.
+    pub crosses_contributors: bool,
+}
+
+/// Continuity verification of the merged product, run as a merge
+/// post-condition.
+///
+/// Reporting, never refusing: the merge still returns the product. Whether a
+/// product with continuity defects is acceptable is the caller's decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeContinuityReport {
+    /// The full continuity report over the merged product.
+    pub report: ContinuityReport,
+    /// Each violation, attributed to the contributors on both sides.
+    pub violations: Vec<MergeContinuityViolation>,
+}
+
+impl MergeContinuityReport {
+    /// Whether the merged product is attested continuous.
+    pub fn attested(&self) -> bool {
+        self.report.attested()
+    }
+
+    /// Violations that sit across a change of contributor - the splices.
+    pub fn splices(&self) -> impl Iterator<Item = &MergeContinuityViolation> {
+        self.violations
+            .iter()
+            .filter(|violation| violation.crosses_contributors)
+    }
+}
+
 /// Audit trail for a [`merge`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MergeReport {
@@ -444,6 +668,13 @@ pub struct MergeReport {
     /// merged product. Quantifies how tightly the consensus sources clustered
     /// about the combined value (Gap: per-epoch quality metrics).
     pub agreement: Vec<AgreementMetric>,
+    /// Per-epoch provenance, present only when [`MergeOptions::provenance`]
+    /// requested it. `None` means "not requested", which a caller must be able
+    /// to distinguish from a record naming one contributor.
+    pub provenance: Option<MergeProvenance>,
+    /// Continuity verification of the merged product, present only when
+    /// [`MergeOptions::verify_continuity`] requested it.
+    pub continuity: Option<MergeContinuityReport>,
 }
 
 impl MergeReport {
@@ -755,6 +986,18 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     };
 
     let mut out_epochs: Vec<Instant> = Vec::with_capacity(epoch_keys.len());
+    // Provenance accumulators. Every entry is written at the moment the merge
+    // decides the cell; nothing here is reconstructed from the merged product.
+    let mut prov_cells: Vec<CellProvenance> = Vec::new();
+    let mut prov_transitions: Vec<PrecedenceTransition> = Vec::new();
+    let mut prov_contributed: Vec<usize> = vec![0; sources.len()];
+    let mut prov_selected: Vec<usize> = vec![0; sources.len()];
+    let mut prov_first: Vec<Option<Instant>> = vec![None; sources.len()];
+    let mut prov_last: Vec<Option<Instant>> = vec![None; sources.len()];
+    let mut prov_accepted_cells: usize = 0;
+    let mut prov_previous: BTreeMap<GnssSatelliteId, CellSelection> = BTreeMap::new();
+    let mut continuity_selection: BTreeMap<(GnssSatelliteId, i64), CellSelection> = BTreeMap::new();
+
     let mut out_epoch_j2000_s: Vec<f64> = Vec::with_capacity(epoch_keys.len());
     let mut out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>> =
         Vec::with_capacity(epoch_keys.len());
@@ -835,7 +1078,9 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
             // `pos`) of the sources that contributed it. Cell precedence selects
             // the first source present here; satellite-arc precedence can leave
             // a deliberate hole when the arc owner is missing.
-            let (position_m, pos_members) = if opts.combine == MergeCombine::Precedence {
+            let (position_m, pos_members, pos_selection) = if opts.combine
+                == MergeCombine::Precedence
+            {
                 let Some(preferred_source) = position_preferred_source else {
                     continue;
                 };
@@ -847,7 +1092,13 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
 
                 if pos.len() == 1 {
                     report.single_source.push(flag(vec![pos[preferred_idx].0]));
-                    (pos[preferred_idx].1, vec![preferred_idx])
+                    (
+                        pos[preferred_idx].1,
+                        vec![preferred_idx],
+                        CellSelection::SingleSource {
+                            source: pos[preferred_idx].0,
+                        },
+                    )
                 } else if let Some(reject) = opts.outlier_reject {
                     let pts: Vec<[f64; 3]> = pos.iter().map(|(_, p, _)| *p).collect();
                     let cluster =
@@ -862,10 +1113,15 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                             .filter(|i| !cluster.contains(i))
                             .map(|i| pos[i].0)
                             .collect();
-                        if !rejected.is_empty() {
+                        let rejected_selection = !rejected.is_empty();
+                        if rejected_selection {
                             report.position_outliers.push(flag(rejected));
                         }
-                        (pos[selected_idx].1, cluster)
+                        let selection = CellSelection::Precedence {
+                            source: pos[selected_idx].0,
+                            members: cluster.iter().map(|&i| pos[i].0).collect(),
+                        };
+                        (pos[selected_idx].1, cluster, selection)
                     } else {
                         report
                             .quarantined
@@ -885,7 +1141,11 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                         if !rejected.is_empty() {
                             report.position_outliers.push(flag(rejected));
                         }
-                        (pos[preferred_idx].1, cluster)
+                        let selection = CellSelection::Precedence {
+                            source: pos[preferred_idx].0,
+                            members: cluster.iter().map(|&i| pos[i].0).collect(),
+                        };
+                        (pos[preferred_idx].1, cluster, selection)
                     } else {
                         report
                             .quarantined
@@ -895,7 +1155,11 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                 }
             } else if pos.len() == 1 {
                 report.single_source.push(flag(vec![pos[0].0]));
-                (pos[0].1, vec![0usize])
+                (
+                    pos[0].1,
+                    vec![0usize],
+                    CellSelection::SingleSource { source: pos[0].0 },
+                )
             } else {
                 let pts: Vec<[f64; 3]> = pos.iter().map(|(_, p, _)| *p).collect();
                 let cluster = largest_within(&pts, |a, b| dist3(a, b) <= opts.position_tolerance_m);
@@ -909,7 +1173,11 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                     }
                     let members: Vec<(usize, [f64; 3])> =
                         cluster.iter().map(|&i| (pos[i].0, pos[i].1)).collect();
-                    (combine3(&members, opts.combine), cluster)
+                    let selection = CellSelection::Combined {
+                        rule: opts.combine,
+                        members: members.iter().map(|(source, _)| *source).collect(),
+                    };
+                    (combine3(&members, opts.combine), cluster, selection)
                 } else {
                     report
                         .quarantined
@@ -920,6 +1188,7 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
 
             // Clock consensus, independent of position -> the merged clock and the
             // indices (into `clk`) of the sources that contributed it.
+            let mut clk_selection: Option<CellSelection> = None;
             let (clock_s, clk_members): (Option<f64>, Vec<usize>) = if clk.is_empty() {
                 (None, Vec::new())
             } else if opts.combine == MergeCombine::Precedence {
@@ -928,6 +1197,9 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                 {
                     None => (None, Vec::new()),
                     Some(preferred_idx) if clk.len() == 1 => {
+                        clk_selection = Some(CellSelection::SingleSource {
+                            source: clk[preferred_idx].0,
+                        });
                         (Some(clk[preferred_idx].1), vec![preferred_idx])
                     }
                     Some(preferred_idx) if opts.outlier_reject.is_some() => {
@@ -948,6 +1220,10 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                             if !rejected.is_empty() {
                                 report.clock_outliers.push(flag(rejected));
                             }
+                            clk_selection = Some(CellSelection::Precedence {
+                                source: clk[selected_idx].0,
+                                members: cluster.iter().map(|&i| clk[i].0).collect(),
+                            });
                             (Some(clk[selected_idx].1), cluster)
                         } else {
                             report
@@ -969,6 +1245,10 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                             if !rejected.is_empty() {
                                 report.clock_outliers.push(flag(rejected));
                             }
+                            clk_selection = Some(CellSelection::Precedence {
+                                source: clk[preferred_idx].0,
+                                members: cluster.iter().map(|&i| clk[i].0).collect(),
+                            });
                             (Some(clk[preferred_idx].1), cluster)
                         } else {
                             (None, Vec::new())
@@ -976,6 +1256,7 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                     }
                 }
             } else if clk.len() == 1 {
+                clk_selection = Some(CellSelection::SingleSource { source: clk[0].0 });
                 (Some(clk[0].1), vec![0usize])
             } else {
                 let vals: Vec<f64> = clk.iter().map(|(_, c, _)| *c).collect();
@@ -990,6 +1271,10 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                     }
                     let members: Vec<(usize, f64)> =
                         cluster.iter().map(|&i| (clk[i].0, clk[i].1)).collect();
+                    clk_selection = Some(CellSelection::Combined {
+                        rule: opts.combine,
+                        members: members.iter().map(|(source, _)| *source).collect(),
+                    });
                     (Some(combine_axis(&members, opts.combine)), cluster)
                 } else {
                     (None, Vec::new())
@@ -1031,6 +1316,33 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                 clock_rms_s,
                 clock_max_s,
             });
+
+            if opts.verify_continuity.is_some() {
+                continuity_selection.insert((sat, key), pos_selection.clone());
+            }
+
+            if opts.provenance.is_some() {
+                record_cell_provenance(
+                    RecordCellProvenance {
+                        epoch,
+                        sat,
+                        position: &pos_selection,
+                        clock: clk_selection.as_ref(),
+                        candidates: &pos.iter().map(|(src, _, _)| *src).collect::<Vec<_>>(),
+                        mode: opts.provenance.expect("checked above"),
+                    },
+                    &mut ProvenanceAccumulator {
+                        cells: &mut prov_cells,
+                        transitions: &mut prov_transitions,
+                        contributed: &mut prov_contributed,
+                        selected: &mut prov_selected,
+                        first: &mut prov_first,
+                        last: &mut prov_last,
+                        accepted_cells: &mut prov_accepted_cells,
+                        previous: &mut prov_previous,
+                    },
+                );
+            }
 
             all_sats.insert(sat);
             states.insert(
@@ -1144,6 +1456,22 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
+    report.provenance = opts.provenance.map(|mode| MergeProvenance {
+        mode,
+        cells: prov_cells,
+        transitions: prov_transitions,
+        coverage: (0..sources.len())
+            .map(|source| ContributorCoverage {
+                source,
+                cells_contributed: prov_contributed[source],
+                cells_selected: prov_selected[source],
+                first_epoch: prov_first[source],
+                last_epoch: prov_last[source],
+                cells_absent: prov_accepted_cells - prov_contributed[source],
+            })
+            .collect(),
+    });
+
     let merged = Sp3 {
         header,
         epochs: out_epochs,
@@ -1168,7 +1496,77 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
         skipped_records: sources.iter().map(|s| s.skipped_records).sum(),
     };
 
+    if let Some(continuity_options) = opts.verify_continuity.as_ref() {
+        report.continuity = Some(verify_merged_continuity(
+            &merged,
+            continuity_options,
+            &continuity_selection,
+        ));
+    }
+
     Ok((merged, report))
+}
+
+/// Run the continuity check over the merged product and attribute each
+/// violation to the contributors on both sides of it.
+///
+/// The check runs on the product the merge actually emitted, so it verifies the
+/// output rather than re-deriving it from the inputs. Attribution reads the
+/// selections recorded while the merge decided, so a splice names the real
+/// contributors rather than a guess reconstructed afterwards.
+fn verify_merged_continuity(
+    merged: &Sp3,
+    options: &ContinuityOptions,
+    selection: &BTreeMap<(GnssSatelliteId, i64), CellSelection>,
+) -> MergeContinuityReport {
+    let report = check_continuity(&merged.precise_ephemeris_samples(), options);
+
+    let violations = report
+        .defects
+        .iter()
+        .map(|defect| {
+            let sat = defect.satellite();
+            let (from_epoch, to_epoch) = defect_epoch_pair(defect);
+            let from_sources = from_epoch
+                .and_then(|epoch| selection.get(&(sat, epoch)))
+                .map(CellSelection::members)
+                .unwrap_or_default();
+            let to_sources = to_epoch
+                .and_then(|epoch| selection.get(&(sat, epoch)))
+                .map(CellSelection::members)
+                .unwrap_or_default();
+            let crosses_contributors =
+                !from_sources.is_empty() && !to_sources.is_empty() && from_sources != to_sources;
+            MergeContinuityViolation {
+                defect: defect.clone(),
+                from_sources,
+                to_sources,
+                crosses_contributors,
+            }
+        })
+        .collect();
+
+    MergeContinuityReport { report, violations }
+}
+
+/// The epoch pair a defect brackets, as integer epoch keys.
+fn defect_epoch_pair(defect: &ContinuityDefect) -> (Option<i64>, Option<i64>) {
+    match defect {
+        ContinuityDefect::SpeedBound {
+            from_j2000_s,
+            to_j2000_s,
+            ..
+        } => (Some(*from_j2000_s as i64), Some(*to_j2000_s as i64)),
+        ContinuityDefect::HoldOutResidual {
+            preceding_j2000_s,
+            epoch_j2000_s,
+            ..
+        } => (Some(*preceding_j2000_s as i64), Some(*epoch_j2000_s as i64)),
+        ContinuityDefect::DuplicateEpoch { epoch_j2000_s, .. } => {
+            (Some(*epoch_j2000_s as i64), Some(*epoch_j2000_s as i64))
+        }
+        ContinuityDefect::SingleSampleSeries { .. } => (None, None),
+    }
 }
 
 fn reconcile_sp3_coordinate_labels(
@@ -1850,6 +2248,131 @@ pub fn align_clock_reference(reference: &Sp3, other: &Sp3, min_common: usize) ->
         }
     }
     aligned
+}
+
+/// One cell's decision, as the merge made it.
+struct RecordCellProvenance<'a> {
+    epoch: Instant,
+    sat: GnssSatelliteId,
+    position: &'a CellSelection,
+    clock: Option<&'a CellSelection>,
+    /// Every source that offered a position for this cell, whether or not it
+    /// survived into the consensus. Distinguishing "did not offer" from
+    /// "offered and was rejected" is the whole difference between a transition
+    /// caused by availability and one caused by outlier rejection, and the
+    /// accepted member set alone cannot tell them apart.
+    candidates: &'a [usize],
+    mode: ProvenanceMode,
+}
+
+/// Running provenance state threaded through the epoch loop.
+struct ProvenanceAccumulator<'a> {
+    cells: &'a mut Vec<CellProvenance>,
+    transitions: &'a mut Vec<PrecedenceTransition>,
+    contributed: &'a mut [usize],
+    selected: &'a mut [usize],
+    first: &'a mut [Option<Instant>],
+    last: &'a mut [Option<Instant>],
+    accepted_cells: &'a mut usize,
+    previous: &'a mut BTreeMap<GnssSatelliteId, CellSelection>,
+}
+
+/// Record one accepted cell: its selection, any transition it represents, and
+/// its effect on per-contributor coverage.
+///
+/// Called only from the point in [`merge`] where a cell is known to have been
+/// accepted and written, so the record is an attestation of the decision rather
+/// than a later reconstruction of it.
+fn record_cell_provenance(cell: RecordCellProvenance<'_>, acc: &mut ProvenanceAccumulator<'_>) {
+    *acc.accepted_cells += 1;
+
+    for source in cell.position.members() {
+        acc.contributed[source] += 1;
+        if acc.first[source].is_none() {
+            acc.first[source] = Some(cell.epoch);
+        }
+        acc.last[source] = Some(cell.epoch);
+    }
+    if let Some(source) = cell.position.selected_source() {
+        acc.selected[source] += 1;
+    }
+
+    if let Some(transition) = transition_between(
+        cell.sat,
+        cell.epoch,
+        acc.previous.get(&cell.sat),
+        cell.position,
+        cell.candidates,
+    ) {
+        acc.transitions.push(transition);
+    }
+    acc.previous.insert(cell.sat, cell.position.clone());
+
+    if cell.mode == ProvenanceMode::Full {
+        acc.cells.push(CellProvenance {
+            epoch: cell.epoch,
+            satellite: cell.sat,
+            position: cell.position.clone(),
+            clock: cell.clock.cloned(),
+        });
+    }
+}
+
+/// The transition, if any, between a satellite's previous accepted cell and this
+/// one.
+///
+/// A satellite's first accepted cell is a transition from `None`: a consumer
+/// reading the transition list as a timeline needs the arc's opening entry, not
+/// an implicit one it has to infer.
+fn transition_between(
+    sat: GnssSatelliteId,
+    epoch: Instant,
+    previous: Option<&CellSelection>,
+    current: &CellSelection,
+    candidates: &[usize],
+) -> Option<PrecedenceTransition> {
+    let Some(previous) = previous else {
+        return Some(PrecedenceTransition {
+            satellite: sat,
+            epoch,
+            from_source: None,
+            to_source: current.selected_source(),
+            reason: TransitionReason::SoleAvailability,
+        });
+    };
+
+    let from = previous.selected_source();
+    let to = current.selected_source();
+    if from == to && std::mem::discriminant(previous) == std::mem::discriminant(current) {
+        return None;
+    }
+
+    // Why selection moved. The candidate set separates the two cases the
+    // accepted member set cannot: a previous supplier that did not offer this
+    // cell at all left the product (availability), while one that offered it and
+    // did not survive the consensus was rejected (outlier).
+    let current_members = current.members();
+    let reason = match from {
+        Some(from_source) if !candidates.contains(&from_source) => {
+            TransitionReason::SoleAvailability
+        }
+        Some(from_source) if !current_members.contains(&from_source) => {
+            TransitionReason::OutlierRejection
+        }
+        Some(_) if std::mem::discriminant(previous) != std::mem::discriminant(current) => {
+            TransitionReason::ConsensusChange
+        }
+        Some(_) => TransitionReason::Precedence,
+        None => TransitionReason::ConsensusChange,
+    };
+
+    Some(PrecedenceTransition {
+        satellite: sat,
+        epoch,
+        from_source: from,
+        to_source: to,
+        reason,
+    })
 }
 
 #[cfg(test)]
