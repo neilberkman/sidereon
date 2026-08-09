@@ -57,8 +57,9 @@ pub use crate::sp3::{
     OrbitClass, SpeedBound,
 };
 pub use crate::sp3::{
-    CellProvenance, CellSelection, ContributorCoverage, MergeProvenance, PrecedenceTransition,
-    ProvenanceMode, TransitionReason,
+    CellProvenance, CellSelection, ContributorCoverage, MergeContinuityReport,
+    MergeContinuityViolation, MergeProvenance, PrecedenceTransition, ProvenanceMode,
+    TransitionReason,
 };
 pub use crate::spp::EphemerisSource;
 use crate::{validate, GnssSatelliteId, GnssSystem};

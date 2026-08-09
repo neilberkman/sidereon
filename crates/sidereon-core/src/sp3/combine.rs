@@ -32,6 +32,9 @@ use crate::frame_catalog::{
     TerrestrialVelocityMPerYear,
 };
 use crate::id::{GnssSatelliteId, GnssSystem};
+use crate::sp3::continuity::{
+    check_continuity, ContinuityDefect, ContinuityOptions, ContinuityReport,
+};
 use crate::tolerances::WHOLE_SECOND_EPS_S;
 use crate::validate;
 use crate::{Error, Result};
@@ -228,6 +231,13 @@ pub struct MergeOptions {
     /// This never changes the merged product - the SP3 output is byte-identical
     /// whether or not provenance is enabled, and a test pins that.
     pub provenance: Option<ProvenanceMode>,
+    /// Verify the continuity of the merged product as a post-condition, and
+    /// attribute each violation to the contributors on both sides.
+    ///
+    /// `None` (the default) runs no check. Enabling it never changes the merged
+    /// product and never fails the merge: violations are reported on
+    /// [`MergeReport::continuity`] and refusing is the caller's decision.
+    pub verify_continuity: Option<ContinuityOptions>,
 }
 
 impl Default for MergeOptions {
@@ -246,6 +256,7 @@ impl Default for MergeOptions {
             systems: None,
             frame_reconciliation: Sp3FrameReconciliationOptions::default(),
             provenance: None,
+            verify_continuity: None,
         }
     }
 }
@@ -586,6 +597,56 @@ pub struct MergeProvenance {
     pub coverage: Vec<ContributorCoverage>,
 }
 
+/// One continuity violation in the merged product, attributed to the
+/// contributors on each side of it.
+///
+/// At a splice the actionable fact is not that the arc jumped but *between
+/// which two contributors* it jumped, which is why this exists rather than a
+/// bare [`ContinuityDefect`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeContinuityViolation {
+    /// The violation as the continuity check reported it.
+    pub defect: ContinuityDefect,
+    /// Sources supplying the earlier side of the offending epoch pair, as
+    /// recorded when the merge chose that cell. Empty when the merged product
+    /// carries no cell there (the check reached past the merge's own coverage).
+    pub from_sources: Vec<usize>,
+    /// Sources supplying the later side of the offending epoch pair.
+    pub to_sources: Vec<usize>,
+    /// Whether the two sides were supplied by different contributors. A
+    /// violation across a contributor change is a splice; one inside a single
+    /// contributor's arc is that contributor's own discontinuity, and the two
+    /// call for different follow-up.
+    pub crosses_contributors: bool,
+}
+
+/// Continuity verification of the merged product, run as a merge
+/// post-condition.
+///
+/// Reporting, never refusing: the merge still returns the product. Whether a
+/// product with continuity defects is acceptable is the caller's decision.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeContinuityReport {
+    /// The full continuity report over the merged product.
+    pub report: ContinuityReport,
+    /// Each violation, attributed to the contributors on both sides.
+    pub violations: Vec<MergeContinuityViolation>,
+}
+
+impl MergeContinuityReport {
+    /// Whether the merged product is attested continuous.
+    pub fn attested(&self) -> bool {
+        self.report.attested()
+    }
+
+    /// Violations that sit across a change of contributor - the splices.
+    pub fn splices(&self) -> impl Iterator<Item = &MergeContinuityViolation> {
+        self.violations
+            .iter()
+            .filter(|violation| violation.crosses_contributors)
+    }
+}
+
 /// Audit trail for a [`merge`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MergeReport {
@@ -611,6 +672,9 @@ pub struct MergeReport {
     /// requested it. `None` means "not requested", which a caller must be able
     /// to distinguish from a record naming one contributor.
     pub provenance: Option<MergeProvenance>,
+    /// Continuity verification of the merged product, present only when
+    /// [`MergeOptions::verify_continuity`] requested it.
+    pub continuity: Option<MergeContinuityReport>,
 }
 
 impl MergeReport {
@@ -932,6 +996,7 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     let mut prov_last: Vec<Option<Instant>> = vec![None; sources.len()];
     let mut prov_accepted_cells: usize = 0;
     let mut prov_previous: BTreeMap<GnssSatelliteId, CellSelection> = BTreeMap::new();
+    let mut continuity_selection: BTreeMap<(GnssSatelliteId, i64), CellSelection> = BTreeMap::new();
 
     let mut out_epoch_j2000_s: Vec<f64> = Vec::with_capacity(epoch_keys.len());
     let mut out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>> =
@@ -1252,6 +1317,10 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                 clock_max_s,
             });
 
+            if opts.verify_continuity.is_some() {
+                continuity_selection.insert((sat, key), pos_selection.clone());
+            }
+
             if opts.provenance.is_some() {
                 record_cell_provenance(
                     RecordCellProvenance {
@@ -1427,7 +1496,77 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
         skipped_records: sources.iter().map(|s| s.skipped_records).sum(),
     };
 
+    if let Some(continuity_options) = opts.verify_continuity.as_ref() {
+        report.continuity = Some(verify_merged_continuity(
+            &merged,
+            continuity_options,
+            &continuity_selection,
+        ));
+    }
+
     Ok((merged, report))
+}
+
+/// Run the continuity check over the merged product and attribute each
+/// violation to the contributors on both sides of it.
+///
+/// The check runs on the product the merge actually emitted, so it verifies the
+/// output rather than re-deriving it from the inputs. Attribution reads the
+/// selections recorded while the merge decided, so a splice names the real
+/// contributors rather than a guess reconstructed afterwards.
+fn verify_merged_continuity(
+    merged: &Sp3,
+    options: &ContinuityOptions,
+    selection: &BTreeMap<(GnssSatelliteId, i64), CellSelection>,
+) -> MergeContinuityReport {
+    let report = check_continuity(&merged.precise_ephemeris_samples(), options);
+
+    let violations = report
+        .defects
+        .iter()
+        .map(|defect| {
+            let sat = defect.satellite();
+            let (from_epoch, to_epoch) = defect_epoch_pair(defect);
+            let from_sources = from_epoch
+                .and_then(|epoch| selection.get(&(sat, epoch)))
+                .map(CellSelection::members)
+                .unwrap_or_default();
+            let to_sources = to_epoch
+                .and_then(|epoch| selection.get(&(sat, epoch)))
+                .map(CellSelection::members)
+                .unwrap_or_default();
+            let crosses_contributors =
+                !from_sources.is_empty() && !to_sources.is_empty() && from_sources != to_sources;
+            MergeContinuityViolation {
+                defect: defect.clone(),
+                from_sources,
+                to_sources,
+                crosses_contributors,
+            }
+        })
+        .collect();
+
+    MergeContinuityReport { report, violations }
+}
+
+/// The epoch pair a defect brackets, as integer epoch keys.
+fn defect_epoch_pair(defect: &ContinuityDefect) -> (Option<i64>, Option<i64>) {
+    match defect {
+        ContinuityDefect::SpeedBound {
+            from_j2000_s,
+            to_j2000_s,
+            ..
+        } => (Some(*from_j2000_s as i64), Some(*to_j2000_s as i64)),
+        ContinuityDefect::HoldOutResidual {
+            preceding_j2000_s,
+            epoch_j2000_s,
+            ..
+        } => (Some(*preceding_j2000_s as i64), Some(*epoch_j2000_s as i64)),
+        ContinuityDefect::DuplicateEpoch { epoch_j2000_s, .. } => {
+            (Some(*epoch_j2000_s as i64), Some(*epoch_j2000_s as i64))
+        }
+        ContinuityDefect::SingleSampleSeries { .. } => (None, None),
+    }
 }
 
 fn reconcile_sp3_coordinate_labels(

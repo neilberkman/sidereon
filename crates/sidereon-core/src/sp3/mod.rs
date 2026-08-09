@@ -1516,10 +1516,10 @@ mod write;
 pub use combine::{
     align_clock_reference, clock_reference_offset, merge, AgreementMetric, CellProvenance,
     CellSelection, ClockReferenceOffset, ContributorCoverage, EpochAgreement, MergeCombine,
-    MergeFlag, MergeOptions, MergePrecedenceScope, MergeProvenance, MergeReport,
-    OutlierRejectOptions, PrecedenceTransition, ProvenanceMode, Sp3FrameLabelSet,
-    Sp3FrameReconciliation, Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions,
-    TransitionReason,
+    MergeContinuityReport, MergeContinuityViolation, MergeFlag, MergeOptions, MergePrecedenceScope,
+    MergeProvenance, MergeReport, OutlierRejectOptions, PrecedenceTransition, ProvenanceMode,
+    Sp3FrameLabelSet, Sp3FrameReconciliation, Sp3FrameReconciliationMethod,
+    Sp3FrameReconciliationOptions, TransitionReason,
 };
 pub use continuity::{
     check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
