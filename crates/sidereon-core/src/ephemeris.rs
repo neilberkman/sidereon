@@ -52,6 +52,10 @@ pub use crate::sp3::{
     Sp3MergeInputIdentityError, Sp3PredictionSummary, Sp3State, Sp3TimeSystem, Sp3Version,
     SP3_MERGE_INPUT_ID_PREFIX, SP3_MERGE_INPUT_SCHEMA_VERSION,
 };
+pub use crate::sp3::{
+    check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
+    OrbitClass, SpeedBound,
+};
 pub use crate::spp::EphemerisSource;
 use crate::{validate, GnssSatelliteId, GnssSystem};
 

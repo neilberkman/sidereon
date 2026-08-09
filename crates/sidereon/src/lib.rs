@@ -409,10 +409,11 @@ pub use sidereon_core::astro::{
     omm, passes, propagator, sgp4, space_weather, state, tca, tdm, tle,
 };
 pub use sidereon_core::ephemeris::{
-    fit_precise_ephemeris_state_sample_orbit, fit_precise_ephemeris_state_sample_orbits,
+    check_continuity, fit_precise_ephemeris_state_sample_orbit, fit_precise_ephemeris_state_sample_orbits,
     precise_interpolant_store_checksum64, sp3_ecef_state_to_eci, MmapPreciseEphemerisInterpolant,
     OrientedPreciseEphemerisStateSample, PreciseEphemerisInterpolant, PreciseEphemerisStateSample,
-    PreciseInterpolantStoreError,
+    ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport, OrbitClass,
+    PreciseInterpolantStoreError, SpeedBound,
 };
 
 /// Root-level shortcut for satellite-relative frames and CW propagation.
