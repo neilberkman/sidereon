@@ -1321,7 +1321,7 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                 continuity_selection.insert((sat, key), pos_selection.clone());
             }
 
-            if opts.provenance.is_some() {
+            if let Some(provenance_mode) = opts.provenance {
                 record_cell_provenance(
                     RecordCellProvenance {
                         epoch,
@@ -1329,7 +1329,7 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                         position: &pos_selection,
                         clock: clk_selection.as_ref(),
                         candidates: &pos.iter().map(|(src, _, _)| *src).collect::<Vec<_>>(),
-                        mode: opts.provenance.expect("checked above"),
+                        mode: provenance_mode,
                     },
                     &mut ProvenanceAccumulator {
                         cells: &mut prov_cells,
