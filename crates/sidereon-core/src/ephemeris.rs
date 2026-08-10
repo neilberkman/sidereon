@@ -10,6 +10,7 @@
 //! precise-with-broadcast-fallback path is
 //! [`solve_with_fallback`](crate::positioning::solve_with_fallback).
 
+pub use crate::artifact_bytes::DigestProvenance;
 pub use crate::broadcast::{
     eccentric_anomaly, relativistic_clock_correction_s, satellite_clock_offset_s,
     satellite_position_ecef, satellite_position_ecef_cnav, satellite_state, satellite_state_cnav,

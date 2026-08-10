@@ -22,6 +22,18 @@
 
 use std::borrow::Cow;
 
+/// Who computed the content digest a handle carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DigestProvenance {
+    /// The library hashed the payload at open or during verification and the
+    /// digest is its own measurement.
+    Verified,
+    /// The caller asserted the digest at open; the library recorded it and
+    /// skipped the payload hash. An attested handle never reports this digest
+    /// without also reporting its provenance.
+    Attested,
+}
+
 /// Where a reader's bytes live.
 ///
 /// `Mapped` is only available with the `mmap` feature, so the default build

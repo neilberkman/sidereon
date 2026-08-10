@@ -6,7 +6,7 @@
 //! so opening the store validates bytes and builds only lightweight indexes. It
 //! never refits clock splines at open or during evaluation.
 
-use crate::artifact_bytes::ArtifactBytes;
+use crate::artifact_bytes::{ArtifactBytes, DigestProvenance};
 use std::collections::BTreeMap;
 use std::fs;
 use std::mem;
@@ -120,6 +120,13 @@ pub enum PreciseInterpolantStoreError {
         /// Checksum computed from the satellite payload.
         found: u64,
     },
+    /// An attested checksum did not match the checksum declared by the header.
+    AttestedChecksumMismatch {
+        /// Checksum asserted by the caller.
+        claimed: u64,
+        /// Checksum declared by the store header.
+        declared: u64,
+    },
 }
 
 impl core::fmt::Display for PreciseInterpolantStoreError {
@@ -159,6 +166,10 @@ impl core::fmt::Display for PreciseInterpolantStoreError {
             } => write!(
                 f,
                 "precise interpolant satellite {sat} checksum expected {expected:#x} but found {found:#x}"
+            ),
+            Self::AttestedChecksumMismatch { claimed, declared } => write!(
+                f,
+                "attested precise interpolant checksum {claimed:#x} does not match header checksum {declared:#x}"
             ),
         }
     }
@@ -275,6 +286,32 @@ enum ArrayBacking<'a> {
     Offset,
 }
 
+#[derive(Clone, Copy)]
+enum ChecksumValidation {
+    Verified,
+    Attested(u64),
+}
+
+impl ChecksumValidation {
+    const fn digest_provenance(self) -> DigestProvenance {
+        match self {
+            Self::Verified => DigestProvenance::Verified,
+            Self::Attested(_) => DigestProvenance::Attested,
+        }
+    }
+
+    const fn attested_checksum64(self) -> Option<u64> {
+        match self {
+            Self::Verified => None,
+            Self::Attested(checksum64) => Some(checksum64),
+        }
+    }
+
+    const fn verifies_payloads(self) -> bool {
+        matches!(self, Self::Verified)
+    }
+}
+
 /// Evaluation-only precise-ephemeris interpolant backed by store bytes.
 ///
 /// [`Self::from_path`] reads the artifact and validates its checksum on open.
@@ -286,6 +323,8 @@ pub struct MmapPreciseEphemerisInterpolant<'a> {
     time_scale: TimeScale,
     satellites: Vec<GnssSatelliteId>,
     series: BTreeMap<GnssSatelliteId, MmapSeries<'a>>,
+    digest_provenance: DigestProvenance,
+    attested_checksum64: Option<u64>,
 }
 
 impl core::fmt::Debug for MmapPreciseEphemerisInterpolant<'_> {
@@ -294,6 +333,8 @@ impl core::fmt::Debug for MmapPreciseEphemerisInterpolant<'_> {
             .field("byte_len", &self.bytes.as_slice().len())
             .field("time_scale", &self.time_scale)
             .field("satellites", &self.satellites)
+            .field("digest_provenance", &self.digest_provenance)
+            .field("attested_checksum64", &self.attested_checksum64)
             .finish_non_exhaustive()
     }
 }
@@ -301,13 +342,24 @@ impl core::fmt::Debug for MmapPreciseEphemerisInterpolant<'_> {
 impl MmapPreciseEphemerisInterpolant<'static> {
     /// Parse an owned precise-interpolant store byte vector.
     pub fn from_vec(bytes: Vec<u8>) -> core::result::Result<Self, PreciseInterpolantStoreError> {
-        let parsed = parse_store(&bytes, ArrayBacking::Offset)?;
-        Ok(Self {
-            bytes: ArtifactBytes::Owned(bytes),
-            time_scale: parsed.time_scale,
-            satellites: parsed.satellites,
-            series: parsed.series,
-        })
+        Self::from_backing(
+            ArtifactBytes::Owned(bytes),
+            ArrayBacking::Offset,
+            ChecksumValidation::Verified,
+        )
+    }
+
+    /// Parse owned precise-interpolant store bytes using a caller-attested checksum.
+    #[doc(hidden)]
+    pub fn from_vec_attested(
+        bytes: Vec<u8>,
+        claimed_checksum64: u64,
+    ) -> core::result::Result<Self, PreciseInterpolantStoreError> {
+        Self::from_backing(
+            ArtifactBytes::Owned(bytes),
+            ArrayBacking::Offset,
+            ChecksumValidation::Attested(claimed_checksum64),
+        )
     }
 
     /// Open and parse a precise-interpolant store file.
@@ -332,19 +384,7 @@ impl MmapPreciseEphemerisInterpolant<'static> {
                     message: err.to_string(),
                 }
             })?;
-            let parsed = parse_store(bytes.as_slice(), ArrayBacking::Offset)?;
-            let series = parsed
-                .series
-                .into_iter()
-                .map(|(sat, series)| series.into_static().map(|series| (sat, series)))
-                .collect::<Option<BTreeMap<_, _>>>()
-                .expect("offset-backed parse yields no borrows");
-            Ok(Self {
-                bytes,
-                time_scale: parsed.time_scale,
-                satellites: parsed.satellites,
-                series,
-            })
+            Self::from_mapped_backing(bytes, ChecksumValidation::Verified)
         }
 
         #[cfg(not(feature = "mmap"))]
@@ -356,6 +396,67 @@ impl MmapPreciseEphemerisInterpolant<'static> {
             Self::from_vec(bytes)
         }
     }
+
+    /// Open a precise-interpolant store using a caller-attested checksum.
+    ///
+    /// This performs the same header, index, dimension, length, and payload
+    /// layout validation as [`Self::from_path`] without recomputing file-level
+    /// or per-satellite checksums. The claim must match the checksum declared
+    /// by the header. A mismatch is an error and never falls back to hashing.
+    /// With the `mmap` feature the file is memory-mapped read-only; without it
+    /// the file is read into memory.
+    pub fn from_path_attested(
+        path: impl AsRef<Path>,
+        claimed_checksum64: u64,
+    ) -> core::result::Result<Self, PreciseInterpolantStoreError> {
+        let path = path.as_ref();
+
+        #[cfg(feature = "mmap")]
+        {
+            let bytes = crate::artifact_bytes::map_file_read_only(path).map_err(|err| {
+                PreciseInterpolantStoreError::Io {
+                    path: path.to_path_buf(),
+                    message: err.to_string(),
+                }
+            })?;
+            Self::from_mapped_backing(bytes, ChecksumValidation::Attested(claimed_checksum64))
+        }
+
+        #[cfg(not(feature = "mmap"))]
+        {
+            let bytes = fs::read(path).map_err(|err| PreciseInterpolantStoreError::Io {
+                path: path.to_path_buf(),
+                message: err.to_string(),
+            })?;
+            Self::from_backing(
+                ArtifactBytes::Owned(bytes),
+                ArrayBacking::Offset,
+                ChecksumValidation::Attested(claimed_checksum64),
+            )
+        }
+    }
+
+    #[cfg(feature = "mmap")]
+    fn from_mapped_backing(
+        bytes: ArtifactBytes<'static>,
+        checksum_validation: ChecksumValidation,
+    ) -> core::result::Result<Self, PreciseInterpolantStoreError> {
+        let parsed = parse_store(bytes.as_slice(), ArrayBacking::Offset, checksum_validation)?;
+        let series = parsed
+            .series
+            .into_iter()
+            .map(|(sat, series)| series.into_static().map(|series| (sat, series)))
+            .collect::<Option<BTreeMap<_, _>>>()
+            .expect("offset-backed parse yields no borrows");
+        Ok(Self {
+            bytes,
+            time_scale: parsed.time_scale,
+            satellites: parsed.satellites,
+            series,
+            digest_provenance: checksum_validation.digest_provenance(),
+            attested_checksum64: checksum_validation.attested_checksum64(),
+        })
+    }
 }
 
 impl<'a> MmapPreciseEphemerisInterpolant<'a> {
@@ -365,12 +466,26 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
     /// directly from the span, so callers that pass an mmap-backed slice get a
     /// zero-copy reader.
     pub fn from_bytes(bytes: &'a [u8]) -> core::result::Result<Self, PreciseInterpolantStoreError> {
-        let parsed = parse_store(bytes, ArrayBacking::Borrowed(bytes))?;
+        Self::from_backing(
+            ArtifactBytes::Borrowed(bytes),
+            ArrayBacking::Borrowed(bytes),
+            ChecksumValidation::Verified,
+        )
+    }
+
+    fn from_backing(
+        bytes: ArtifactBytes<'a>,
+        backing: ArrayBacking<'a>,
+        checksum_validation: ChecksumValidation,
+    ) -> core::result::Result<Self, PreciseInterpolantStoreError> {
+        let parsed = parse_store(bytes.as_slice(), backing, checksum_validation)?;
         Ok(Self {
-            bytes: ArtifactBytes::Borrowed(bytes),
+            bytes,
             time_scale: parsed.time_scale,
             satellites: parsed.satellites,
             series: parsed.series,
+            digest_provenance: checksum_validation.digest_provenance(),
+            attested_checksum64: checksum_validation.attested_checksum64(),
         })
     }
 
@@ -387,10 +502,39 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
         self.bytes.is_memory_mapped()
     }
 
-    /// Return the store's file-level checksum.
+    /// Return who computed the checksum carried by this reader.
+    #[must_use]
+    pub const fn digest_provenance(&self) -> DigestProvenance {
+        self.digest_provenance
+    }
+
+    /// Return the file-level checksum carried by this reader.
+    ///
+    /// Verified readers compute the checksum on demand. Attested readers return
+    /// the caller's claim without hashing the byte span.
     #[must_use]
     pub fn checksum64(&self) -> u64 {
-        precise_interpolant_store_checksum64(self.bytes.as_ref())
+        match self.digest_provenance {
+            DigestProvenance::Verified => precise_interpolant_store_checksum64(self.bytes.as_ref()),
+            DigestProvenance::Attested => self
+                .attested_checksum64
+                .expect("attested precise interpolant reader carries a checksum"),
+        }
+    }
+
+    /// Re-verify the file-level and per-satellite payload checksums.
+    ///
+    /// Successful verification changes the digest provenance to
+    /// [`DigestProvenance::Verified`].
+    pub fn verify(&mut self) -> core::result::Result<(), PreciseInterpolantStoreError> {
+        parse_store(
+            self.bytes.as_ref(),
+            ArrayBacking::Offset,
+            ChecksumValidation::Verified,
+        )?;
+        self.digest_provenance = DigestProvenance::Verified;
+        self.attested_checksum64 = None;
+        Ok(())
     }
 
     /// The time scale of the stored epoch axis.
@@ -779,6 +923,7 @@ struct PendingClockArcLayout {
 fn parse_store<'a>(
     bytes: &[u8],
     backing: ArrayBacking<'a>,
+    checksum_validation: ChecksumValidation,
 ) -> core::result::Result<ParsedStore<'a>, PreciseInterpolantStoreError> {
     if bytes.len() < STORE_HEADER_LEN {
         return Err(parse_error(format!(
@@ -795,12 +940,23 @@ fn parse_store<'a>(
     }
 
     let expected_checksum = read_u64(bytes, HEADER_CHECKSUM_OFFSET)?;
-    let found_checksum = artifact_checksum64(bytes);
-    if expected_checksum != found_checksum {
-        return Err(PreciseInterpolantStoreError::Checksum {
-            expected: expected_checksum,
-            found: found_checksum,
-        });
+    match checksum_validation {
+        ChecksumValidation::Verified => {
+            let found_checksum = artifact_checksum64(bytes);
+            if expected_checksum != found_checksum {
+                return Err(PreciseInterpolantStoreError::Checksum {
+                    expected: expected_checksum,
+                    found: found_checksum,
+                });
+            }
+        }
+        ChecksumValidation::Attested(claimed) if claimed != expected_checksum => {
+            return Err(PreciseInterpolantStoreError::AttestedChecksumMismatch {
+                claimed,
+                declared: expected_checksum,
+            });
+        }
+        ChecksumValidation::Attested(_) => {}
     }
 
     ensure_zero(bytes, 11, 12, "header reserved byte")?;
@@ -902,13 +1058,15 @@ fn parse_store<'a>(
         }
 
         let sat_checksum = read_u64(record, SAT_CHECKSUM_OFFSET)?;
-        let found_sat_checksum = fnv1a64(&bytes[sat_data_offset..sat_data_end]);
-        if sat_checksum != found_sat_checksum {
-            return Err(PreciseInterpolantStoreError::SatelliteChecksum {
-                sat,
-                expected: sat_checksum,
-                found: found_sat_checksum,
-            });
+        if checksum_validation.verifies_payloads() {
+            let found_sat_checksum = fnv1a64(&bytes[sat_data_offset..sat_data_end]);
+            if sat_checksum != found_sat_checksum {
+                return Err(PreciseInterpolantStoreError::SatelliteChecksum {
+                    sat,
+                    expected: sat_checksum,
+                    found: found_sat_checksum,
+                });
+            }
         }
 
         let mut cursor = sat_data_offset;

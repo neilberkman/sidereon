@@ -70,6 +70,8 @@ pub mod artifact_bytes;
 pub mod astro;
 pub(crate) mod format;
 
+pub use artifact_bytes::DigestProvenance;
+
 // ---------------------------------------------------------------------------
 // GNSS domain layer. Behind the default-on `gnss` feature so a propagation-only
 // consumer can opt out. Additional product modules are added as each lands.

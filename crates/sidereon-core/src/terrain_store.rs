@@ -12,6 +12,7 @@
 //! using [`TerrainGeoidModel`].
 
 use crate::artifact_bytes::ArtifactBytes;
+pub use crate::artifact_bytes::DigestProvenance;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -420,6 +421,13 @@ pub enum TerrainStoreError {
         /// Checksum computed from the posting payload.
         found: u64,
     },
+    /// An attested full-store checksum did not match the bytes opened.
+    AttestedChecksumMismatch {
+        /// Checksum asserted by the caller.
+        expected: u64,
+        /// Checksum computed from the full store byte span.
+        found: u64,
+    },
 }
 
 impl core::fmt::Display for TerrainStoreError {
@@ -458,6 +466,10 @@ impl core::fmt::Display for TerrainStoreError {
             } => write!(
                 f,
                 "terrain tile ({lat_index},{lon_index}) checksum expected {expected:#x} but found {found:#x}"
+            ),
+            Self::AttestedChecksumMismatch { expected, found } => write!(
+                f,
+                "attested terrain store checksum expected {expected:#x} but found {found:#x}"
             ),
         }
     }
@@ -525,12 +537,52 @@ pub struct MmapTerrain<'a> {
     tile_index: Vec<TerrainStoreTileIndex>,
     tile_ids: Vec<TerrainTileId>,
     vertical_datum: VerticalDatum,
+    digest_provenance: DigestProvenance,
+    attested_checksum64: Option<u64>,
+}
+
+#[derive(Clone, Copy)]
+enum ChecksumValidation {
+    Verified,
+    Attested(u64),
+}
+
+impl ChecksumValidation {
+    const fn digest_provenance(self) -> DigestProvenance {
+        match self {
+            Self::Verified => DigestProvenance::Verified,
+            Self::Attested(_) => DigestProvenance::Attested,
+        }
+    }
+
+    const fn attested_checksum64(self) -> Option<u64> {
+        match self {
+            Self::Verified => None,
+            Self::Attested(checksum64) => Some(checksum64),
+        }
+    }
+
+    const fn verifies_payloads(self) -> bool {
+        matches!(self, Self::Verified)
+    }
 }
 
 impl MmapTerrain<'static> {
     /// Parse an owned terrain store byte vector.
     pub fn from_vec(bytes: Vec<u8>) -> core::result::Result<Self, TerrainStoreError> {
-        Self::from_backing(ArtifactBytes::Owned(bytes))
+        Self::from_backing(ArtifactBytes::Owned(bytes), ChecksumValidation::Verified)
+    }
+
+    /// Parse owned terrain store bytes using a caller-attested checksum.
+    #[doc(hidden)]
+    pub fn from_vec_attested(
+        bytes: Vec<u8>,
+        claimed_checksum64: u64,
+    ) -> core::result::Result<Self, TerrainStoreError> {
+        Self::from_backing(
+            ArtifactBytes::Owned(bytes),
+            ChecksumValidation::Attested(claimed_checksum64),
+        )
     }
 
     /// Open and parse a terrain store file.
@@ -555,7 +607,7 @@ impl MmapTerrain<'static> {
                     message: err.to_string(),
                 }
             })?;
-            Self::from_backing(bytes)
+            Self::from_backing(bytes, ChecksumValidation::Verified)
         }
 
         #[cfg(not(feature = "mmap"))]
@@ -567,6 +619,44 @@ impl MmapTerrain<'static> {
             Self::from_vec(bytes)
         }
     }
+
+    /// Open a terrain store using a caller-attested full-store checksum.
+    ///
+    /// This performs the same header, index, dimension, length, and tile-bound
+    /// validation as [`Self::from_path`] without hashing tile payloads. Terrain
+    /// headers do not carry a full-store checksum, so the claim is recorded as
+    /// supplied and can be checked later with [`Self::verify`]. With the `mmap`
+    /// feature the file is memory-mapped read-only; without it the file is read
+    /// into memory.
+    pub fn from_path_attested(
+        path: impl AsRef<Path>,
+        claimed_checksum64: u64,
+    ) -> core::result::Result<Self, TerrainStoreError> {
+        let path = path.as_ref();
+
+        #[cfg(feature = "mmap")]
+        {
+            let bytes = crate::artifact_bytes::map_file_read_only(path).map_err(|err| {
+                TerrainStoreError::Io {
+                    path: path.to_path_buf(),
+                    message: err.to_string(),
+                }
+            })?;
+            Self::from_backing(bytes, ChecksumValidation::Attested(claimed_checksum64))
+        }
+
+        #[cfg(not(feature = "mmap"))]
+        {
+            let bytes = fs::read(path).map_err(|err| TerrainStoreError::Io {
+                path: path.to_path_buf(),
+                message: err.to_string(),
+            })?;
+            Self::from_backing(
+                ArtifactBytes::Owned(bytes),
+                ChecksumValidation::Attested(claimed_checksum64),
+            )
+        }
+    }
 }
 
 impl<'a> MmapTerrain<'a> {
@@ -575,11 +665,14 @@ impl<'a> MmapTerrain<'a> {
     /// The reader keeps the byte span in place and indexes posting payloads by
     /// offset. Passing an mmap-backed slice gives a zero-copy reader.
     pub fn from_bytes(bytes: &'a [u8]) -> core::result::Result<Self, TerrainStoreError> {
-        Self::from_backing(ArtifactBytes::Borrowed(bytes))
+        Self::from_backing(ArtifactBytes::Borrowed(bytes), ChecksumValidation::Verified)
     }
 
-    fn from_backing(bytes: ArtifactBytes<'a>) -> core::result::Result<Self, TerrainStoreError> {
-        let parsed = parse_store(bytes.as_slice())?;
+    fn from_backing(
+        bytes: ArtifactBytes<'a>,
+        checksum_validation: ChecksumValidation,
+    ) -> core::result::Result<Self, TerrainStoreError> {
+        let parsed = parse_store(bytes.as_slice(), checksum_validation)?;
         Ok(Self {
             bytes,
             tiles: parsed.tiles,
@@ -587,6 +680,8 @@ impl<'a> MmapTerrain<'a> {
             tile_index: parsed.tile_index,
             tile_ids: parsed.tile_ids,
             vertical_datum: parsed.vertical_datum,
+            digest_provenance: checksum_validation.digest_provenance(),
+            attested_checksum64: checksum_validation.attested_checksum64(),
         })
     }
 
@@ -627,10 +722,41 @@ impl<'a> MmapTerrain<'a> {
         &self.tile_ids
     }
 
-    /// Return an FNV-1a checksum of the full terrain store byte span.
+    /// Return who computed the checksum carried by this reader.
+    #[must_use]
+    pub const fn digest_provenance(&self) -> DigestProvenance {
+        self.digest_provenance
+    }
+
+    /// Return the full-store checksum carried by this reader.
+    ///
+    /// Verified readers compute the FNV-1a checksum on demand. Attested readers
+    /// return the caller's claim without hashing the byte span.
     #[must_use]
     pub fn checksum64(&self) -> u64 {
-        terrain_store_checksum64(self.bytes.as_ref())
+        match self.digest_provenance {
+            DigestProvenance::Verified => terrain_store_checksum64(self.bytes.as_ref()),
+            DigestProvenance::Attested => self
+                .attested_checksum64
+                .expect("attested terrain reader carries a checksum"),
+        }
+    }
+
+    /// Re-verify tile payloads and any caller-attested full-store checksum.
+    ///
+    /// Successful verification changes the digest provenance to
+    /// [`DigestProvenance::Verified`].
+    pub fn verify(&mut self) -> core::result::Result<(), TerrainStoreError> {
+        parse_store(self.bytes.as_ref(), ChecksumValidation::Verified)?;
+        if let Some(expected) = self.attested_checksum64 {
+            let found = terrain_store_checksum64(self.bytes.as_ref());
+            if expected != found {
+                return Err(TerrainStoreError::AttestedChecksumMismatch { expected, found });
+            }
+        }
+        self.digest_provenance = DigestProvenance::Verified;
+        self.attested_checksum64 = None;
+        Ok(())
     }
 
     /// Re-serialize this parsed terrain store into canonical bytes.
@@ -1132,7 +1258,10 @@ fn is_dted_tile_path(path: &Path) -> bool {
         .is_some_and(|name| name.ends_with(".dt2"))
 }
 
-fn parse_store(bytes: &[u8]) -> core::result::Result<ParsedStore, TerrainStoreError> {
+fn parse_store(
+    bytes: &[u8],
+    checksum_validation: ChecksumValidation,
+) -> core::result::Result<ParsedStore, TerrainStoreError> {
     if bytes.len() < STORE_HEADER_LEN {
         return Err(TerrainStoreError::Parse {
             reason: format!(
@@ -1262,14 +1391,16 @@ fn parse_store(bytes: &[u8]) -> core::result::Result<ParsedStore, TerrainStoreEr
         }
 
         let checksum64 = read_u64(record, INDEX_CHECKSUM_OFFSET)?;
-        let found = fnv1a64(&bytes[offset..end]);
-        if found != checksum64 {
-            return Err(TerrainStoreError::Checksum {
-                lat_index,
-                lon_index,
-                expected: checksum64,
-                found,
-            });
+        if checksum_validation.verifies_payloads() {
+            let found = fnv1a64(&bytes[offset..end]);
+            if found != checksum64 {
+                return Err(TerrainStoreError::Checksum {
+                    lat_index,
+                    lon_index,
+                    expected: checksum64,
+                    found,
+                });
+            }
         }
 
         let min_latitude_deg = read_f64(record, INDEX_MIN_LAT_OFFSET)?;
