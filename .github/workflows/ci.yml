@@ -32,7 +32,12 @@ jobs:
           tar -xzf actionlint.tar.gz actionlint
           ./actionlint -shellcheck= -pyflakes=
 
-  test:
+  # Lint and tests are separate jobs so clippy overlaps the test shards
+  # instead of serializing ahead of them. Both share one cache key with each
+  # other and with the release gate: rust-cache keys on the workflow name by
+  # default, so the tag-triggered release workflow_call previously recompiled
+  # cold even though push CI had just built the identical commit.
+  lint:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,12 +45,33 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-macos
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # Doctests do not run under nextest; they live here where the workspace
+      # is already compiled for clippy.
+      - name: Doctests
+        run: cargo test --workspace --doc
+
+  test:
+    name: test (shard ${{ matrix.shard }}/3)
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-macos
+      - uses: taiki-e/install-action@nextest
       - name: Test
-        run: cargo test --workspace
+        run: cargo nextest run --workspace --partition count:${{ matrix.shard }}/3
 
   geoid-proj-x86_64:
     name: PROJ geoid arithmetic (x86_64)
