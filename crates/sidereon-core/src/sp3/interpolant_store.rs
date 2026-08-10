@@ -173,6 +173,7 @@ enum F64Array<'a> {
 }
 
 impl F64Array<'_> {
+    #[cfg(feature = "mmap")]
     /// Promote an offset-backed array to `'static`.
     ///
     /// `Offset` carries no reference, so the value is independent of the byte
@@ -211,6 +212,7 @@ struct MmapClockArc<'a> {
 }
 
 impl MmapClockArc<'_> {
+    #[cfg(feature = "mmap")]
     fn into_static(self) -> Option<MmapClockArc<'static>> {
         Some(MmapClockArc {
             x: self.x.into_static()?,
@@ -242,6 +244,7 @@ struct MmapSeries<'a> {
 }
 
 impl MmapSeries<'_> {
+    #[cfg(feature = "mmap")]
     fn into_static(self) -> Option<MmapSeries<'static>> {
         Some(MmapSeries {
             pos_count: self.pos_count,
