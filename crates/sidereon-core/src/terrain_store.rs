@@ -574,7 +574,13 @@ impl MmapTerrain<'static> {
     }
 
     /// Parse owned terrain store bytes using a caller-attested checksum.
-    #[doc(hidden)]
+    ///
+    /// The byte-based counterpart of [`Self::from_path_attested`], for callers
+    /// that already hold the store bytes (an interface layer, an object-store
+    /// read) alongside a trustworthy content measurement. Same contract:
+    /// structural checks run unconditionally, the per-tile payload hashing is
+    /// replaced by the claim, and the handle reports
+    /// [`DigestProvenance::Attested`] until [`Self::verify`] succeeds.
     pub fn from_vec_attested(
         bytes: Vec<u8>,
         claimed_checksum64: u64,

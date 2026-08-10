@@ -244,3 +244,37 @@ fn interpolant_attested_identity_verifies_and_legacy_constructors_stay_verified(
     assert_eq!(attested.checksum64(), declared);
     attested.verify().expect("verified interpolant re-verifies");
 }
+
+/// The byte-based attested constructors carry the identical contract as the
+/// path-based ones. They exist for interface layers that hold bytes rather
+/// than a path, and were added for the wasm binding; this pins them in core so
+/// their behavior is owned here rather than implied by a downstream consumer.
+#[test]
+fn byte_based_attested_constructors_match_the_path_based_contract() {
+    // Terrain: corrupted payload opens attested, fails verify.
+    let mut corrupt = terrain_store().to_vec();
+    let data_offset = read_u64(&corrupt, HEADER_DATA_OFFSET_OFFSET) as usize;
+    corrupt[data_offset + 1] ^= 1;
+    assert!(matches!(
+        MmapTerrain::from_vec(corrupt.clone()),
+        Err(TerrainStoreError::Checksum { .. })
+    ));
+    let mut terrain = MmapTerrain::from_vec_attested(corrupt, 0xDEAD_BEEF)
+        .expect("attested byte open skips payload hashing");
+    assert_eq!(terrain.digest_provenance(), DigestProvenance::Attested);
+    assert_eq!(terrain.checksum64(), 0xDEAD_BEEF);
+    assert!(terrain.verify().is_err());
+
+    // Interpolant: claim must match the header declaration, byte path too.
+    let pristine = interpolant_store().to_vec();
+    let declared = read_u64(&pristine, INTERPOLANT_HEADER_CHECKSUM_OFFSET);
+    assert!(matches!(
+        MmapPreciseEphemerisInterpolant::from_vec_attested(pristine.clone(), declared ^ 1),
+        Err(PreciseInterpolantStoreError::AttestedChecksumMismatch { .. })
+    ));
+    let mut artifact = MmapPreciseEphemerisInterpolant::from_vec_attested(pristine, declared)
+        .expect("attested byte open with the declared checksum");
+    assert_eq!(artifact.digest_provenance(), DigestProvenance::Attested);
+    artifact.verify().expect("pristine artifact verifies");
+    assert_eq!(artifact.digest_provenance(), DigestProvenance::Verified);
+}

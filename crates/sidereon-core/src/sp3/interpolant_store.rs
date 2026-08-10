@@ -349,8 +349,13 @@ impl MmapPreciseEphemerisInterpolant<'static> {
         )
     }
 
-    /// Parse owned precise-interpolant store bytes using a caller-attested checksum.
-    #[doc(hidden)]
+    /// Parse owned precise-interpolant store bytes using a caller-attested
+    /// checksum.
+    ///
+    /// The byte-based counterpart of [`Self::from_path_attested`], with the
+    /// same contract, including the O(8) cross-check of the claim against the
+    /// header's declared checksum, which fails closed with
+    /// [`PreciseInterpolantStoreError::AttestedChecksumMismatch`].
     pub fn from_vec_attested(
         bytes: Vec<u8>,
         claimed_checksum64: u64,
