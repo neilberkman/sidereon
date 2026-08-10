@@ -4,6 +4,32 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [0.39.0] - 2026-08-10
+
+### Added
+
+- Attested opens for both mapped artifact readers:
+  `MmapTerrain::from_path_attested` / `from_vec_attested` and
+  `MmapPreciseEphemerisInterpolant::from_path_attested` /
+  `from_vec_attested`, taking a caller-attested content checksum in place
+  of the O(payload) hash pass the verified constructors perform. 0.38
+  mapped the file but still hashed every payload byte at open (~90 s cold
+  / ~47 s warm on a ~34 GB store, measured downstream); a caller who
+  already holds a trustworthy measurement - fs-verity, a signed manifest,
+  a content-addressed store - can now hand it over instead.
+
+  The handle carries its digest provenance (`DigestProvenance::Verified`
+  vs `Attested`) everywhere the digest appears, so an attested handle can
+  never masquerade as a verified one. `checksum64()` on an attested
+  handle returns the claim without hashing. `verify()` escalates to the
+  full hash pass on demand and flips provenance on success. Everything
+  O(header) and O(index) stays unconditional; the interpolant's attested
+  open cross-checks the claim against the header's declared checksum in
+  O(8) and fails closed with `AttestedChecksumMismatch` - a wrong digest
+  for the file is caught without hashing a byte. The terrain header
+  carries no file-level checksum, so its claim is recorded as-is and
+  checked only by `verify()`.
+
 ## [0.38.0] - 2026-08-09
 
 ### Added
