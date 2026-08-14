@@ -4,6 +4,25 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-08-11
+
+### Fixed
+
+- DTED terrain lookups now compute the grid cell and intra-cell fraction
+  in exact integer arithmetic. The 1-arc-second scaling is a roughly
+  65-bit product, so the binary64 multiply rounded away the low fraction
+  bits - up to 4096 ULP at representative CONUS coordinates - and, at a
+  posting boundary, could round a coordinate strictly below a posting
+  onto the exact integer, flipping the lookup into the next cell's
+  stencil with fraction 0.0. The offset's integer significand is now
+  multiplied by postings-per-degree before the power-of-two division,
+  with Euclidean flooring for negative offsets and correctly rounded
+  dyadic-to-binary64 conversion. All three lookup paths (bilinear DTED,
+  bilinear mmap store, nearest-posting) share the one helper; the
+  nearest-posting ties-to-even policy is unchanged, now computed on the
+  exact remainder. Dyadic-exact coordinates are byte-identical before
+  and after.
+
 ## [0.39.0] - 2026-08-10
 
 ### Added
