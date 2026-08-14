@@ -170,6 +170,77 @@ fn assert_height_results_match(
     }
 }
 
+fn naive_primary_fixture_height(
+    longitude_deg: f64,
+    latitude_deg: f64,
+    interpolation: DtedInterpolation,
+) -> f64 {
+    fn posting(lon_index: usize, lat_index: usize) -> f64 {
+        (-20 + 7 * lon_index as i32 - 5 * lat_index as i32 + (lon_index * lat_index) as i32) as f64
+    }
+
+    fn round_ties_even(value: f64) -> usize {
+        let lo = value.floor();
+        let fraction = value - lo;
+        if fraction < 0.5 || (fraction == 0.5 && (lo as usize).is_multiple_of(2)) {
+            lo as usize
+        } else {
+            lo as usize + 1
+        }
+    }
+
+    let lon_index = (longitude_deg - -107.0) * 4.0;
+    let lat_index = (latitude_deg - 36.0) * 4.0;
+    if interpolation == DtedInterpolation::NearestPosting {
+        return posting(round_ties_even(lon_index), round_ties_even(lat_index));
+    }
+
+    let lon_lo = lon_index.floor() as usize;
+    let lat_lo = lat_index.floor() as usize;
+    let fx = lon_index - lon_lo as f64;
+    let fy = lat_index - lat_lo as f64;
+    let mut height_m = 0.0;
+    for (di, wx) in [(0usize, 1.0 - fx), (1usize, fx)] {
+        for (dj, wy) in [(0usize, 1.0 - fy), (1usize, fy)] {
+            let weight = wx * wy;
+            if weight != 0.0 {
+                height_m += weight * posting(lon_lo + di, lat_lo + dj);
+            }
+        }
+    }
+    height_m
+}
+
+#[test]
+fn dyadic_fixture_lookups_are_bit_identical_to_naive_scaling() {
+    let root = fixture_path("tiles");
+    let bytes = dted_tree_to_mmap_store(&root).expect("convert DTED tree");
+    let mut mmap = MmapTerrain::from_bytes(&bytes).expect("parse terrain store");
+    let mut dted = DtedTerrain::new(&root);
+    let offsets = [(1_u32, 17_u32), (33, 64), (65, 129), (127, 191), (200, 255)];
+
+    for interpolation in [
+        DtedInterpolation::Bilinear,
+        DtedInterpolation::NearestPosting,
+    ] {
+        let options = DtedLookupOptions { interpolation };
+        for (lon_numerator, lat_numerator) in offsets {
+            let longitude_deg = -107.0 + f64::from(lon_numerator) / 256.0;
+            let latitude_deg = 36.0 + f64::from(lat_numerator) / 256.0;
+            let naive = naive_primary_fixture_height(longitude_deg, latitude_deg, interpolation);
+            let dted_height = dted
+                .height_m_with_options(longitude_deg, latitude_deg, options)
+                .expect("DTED dyadic fixture height");
+            let mmap_height = mmap
+                .height_m_with_options(longitude_deg, latitude_deg, options)
+                .expect("mmap dyadic fixture height");
+
+            assert_eq!(dted_height.to_bits(), naive.to_bits());
+            assert_eq!(mmap_height.to_bits(), naive.to_bits());
+        }
+    }
+}
+
 #[test]
 fn mmap_store_matches_dted_reader_over_multi_tile_fixture() {
     let root = fixture_path("tiles");

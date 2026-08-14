@@ -203,12 +203,12 @@ fn height_from_tile(
     let postings_per_deg_lon = tile.lon_count - 1;
     let postings_per_deg_lat = tile.lat_count - 1;
 
-    let lon_idx = (longitude_deg - tile.origin_longitude) * postings_per_deg_lon as f64;
-    let lat_idx = (latitude_deg - tile.origin_latitude) * postings_per_deg_lat as f64;
-    let lon_lo = lon_idx.floor() as i64;
-    let lat_lo = lat_idx.floor() as i64;
-    let fx = lon_idx - lon_lo as f64;
-    let fy = lat_idx - lat_lo as f64;
+    let lon = scaled_cell_fraction(longitude_deg - tile.origin_longitude, postings_per_deg_lon);
+    let lat = scaled_cell_fraction(latitude_deg - tile.origin_latitude, postings_per_deg_lat);
+    let lon_lo = lon.cell;
+    let lat_lo = lat.cell;
+    let fx = lon.fraction;
+    let fy = lat.fraction;
 
     let mut z = 0.0;
     for (di, wx) in [(0i64, 1.0 - fx), (1i64, fx)] {
@@ -333,9 +333,9 @@ impl DtedTile {
         }
 
         let latitude_index =
-            py_round_to_usize((latitude - self.origin_latitude) * (self.lat_count - 1) as f64)?;
+            nearest_posting_index(latitude - self.origin_latitude, self.lat_count - 1)?;
         let longitude_index =
-            py_round_to_usize((longitude - self.origin_longitude) * (self.lon_count - 1) as f64)?;
+            nearest_posting_index(longitude - self.origin_longitude, self.lon_count - 1)?;
         if latitude_index >= self.lat_count || longitude_index >= self.lon_count {
             return Err(format!(
                 "posting index out of bounds lon={longitude_index} lat={latitude_index}"
@@ -516,25 +516,161 @@ fn parse_dted_coord(input: &str) -> Result<f64, String> {
     Ok(sign * (degree as f64 + ((minute as f64 + second / 60.0) / 60.0)))
 }
 
-pub(crate) fn py_round_to_usize(value: f64) -> Result<usize, String> {
-    if value < 0.0 {
-        return Err(format!("cannot round negative posting index {value}"));
-    }
-    let lo = value.floor();
-    let frac = value - lo;
-    let rounded = if frac < 0.5 {
-        lo
-    } else if frac > 0.5 {
-        lo + 1.0
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScaledCellFraction {
+    pub(crate) cell: i64,
+    pub(crate) fraction: f64,
+    nearest: i64,
+}
+
+/// Scale an exact binary64 value by an integer without first rounding their
+/// product to binary64.
+pub(crate) fn scaled_cell_fraction(offset: f64, postings_per_degree: usize) -> ScaledCellFraction {
+    debug_assert!(offset.is_finite());
+    debug_assert!(postings_per_degree > 0);
+
+    let bits = offset.to_bits();
+    let negative = bits >> 63 != 0;
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let stored_significand = bits & ((1_u64 << 52) - 1);
+    let (significand, exponent) = if exponent_bits == 0 {
+        (stored_significand, -1074)
     } else {
-        let lo_i = lo as u64;
-        if lo_i.is_multiple_of(2) {
-            lo
-        } else {
-            lo + 1.0
-        }
+        (
+            stored_significand | (1_u64 << 52),
+            exponent_bits - 1023 - 52,
+        )
     };
-    Ok(rounded as usize)
+    if significand == 0 {
+        return ScaledCellFraction {
+            cell: 0,
+            fraction: 0.0,
+            nearest: 0,
+        };
+    }
+
+    let numerator = u128::from(significand) * postings_per_degree as u128;
+    if exponent >= 0 {
+        let magnitude = numerator
+            .checked_shl(exponent as u32)
+            .expect("in-tile scaled coordinate must fit u128");
+        let magnitude =
+            i64::try_from(magnitude).expect("in-tile scaled coordinate must fit a posting index");
+        let cell = if negative { -magnitude } else { magnitude };
+        return ScaledCellFraction {
+            cell,
+            fraction: 0.0,
+            nearest: cell,
+        };
+    }
+
+    let denominator_exponent = (-exponent) as u32;
+    if denominator_exponent >= 128 {
+        if negative {
+            return ScaledCellFraction {
+                cell: -1,
+                fraction: one_minus_dyadic(numerator, denominator_exponent),
+                nearest: 0,
+            };
+        }
+        return ScaledCellFraction {
+            cell: 0,
+            fraction: dyadic_to_f64(numerator, exponent),
+            nearest: 0,
+        };
+    }
+
+    let denominator = 1_u128 << denominator_exponent;
+    let integer = numerator >> denominator_exponent;
+    let remainder = numerator & (denominator - 1);
+    let (cell, euclidean_remainder) = if negative {
+        if remainder == 0 {
+            (-(integer as i64), 0)
+        } else {
+            (-(integer as i64) - 1, denominator - remainder)
+        }
+    } else {
+        (integer as i64, remainder)
+    };
+    let half = denominator >> 1;
+    let nearest = if euclidean_remainder < half || (euclidean_remainder == half && cell % 2 == 0) {
+        cell
+    } else {
+        cell + 1
+    };
+    ScaledCellFraction {
+        cell,
+        fraction: dyadic_to_f64(euclidean_remainder, exponent),
+        nearest,
+    }
+}
+
+pub(crate) fn nearest_posting_index(
+    offset: f64,
+    postings_per_degree: usize,
+) -> Result<usize, String> {
+    let scaled = scaled_cell_fraction(offset, postings_per_degree);
+    usize::try_from(scaled.nearest)
+        .map_err(|_| format!("cannot round negative posting index {}", scaled.nearest))
+}
+
+fn one_minus_dyadic(numerator: u128, denominator_exponent: u32) -> f64 {
+    let deficit_units = round_shift_right(numerator, denominator_exponent - 53);
+    1.0 - deficit_units as f64 * (f64::EPSILON / 2.0)
+}
+
+fn dyadic_to_f64(numerator: u128, exponent: i32) -> f64 {
+    if numerator == 0 {
+        return 0.0;
+    }
+
+    let bit_length = 128 - numerator.leading_zeros();
+    let mut binary_exponent = bit_length as i32 - 1 + exponent;
+    if binary_exponent >= -1022 {
+        let mut significand = if bit_length <= 53 {
+            numerator << (53 - bit_length)
+        } else {
+            round_shift_right(numerator, bit_length - 53)
+        };
+        if significand == 1_u128 << 53 {
+            significand >>= 1;
+            binary_exponent += 1;
+        }
+        let exponent_bits = u64::try_from(binary_exponent + 1023)
+            .expect("normal binary64 exponent must be nonnegative");
+        let fraction_bits = significand as u64 & ((1_u64 << 52) - 1);
+        return f64::from_bits((exponent_bits << 52) | fraction_bits);
+    }
+
+    let subnormal_shift = exponent + 1074;
+    let significand = if subnormal_shift >= 0 {
+        numerator << subnormal_shift as u32
+    } else {
+        round_shift_right(numerator, (-subnormal_shift) as u32)
+    };
+    f64::from_bits(significand as u64)
+}
+
+fn round_shift_right(value: u128, shift: u32) -> u128 {
+    if shift == 0 {
+        return value;
+    }
+    if shift > 128 {
+        return 0;
+    }
+
+    let quotient = if shift == 128 { 0 } else { value >> shift };
+    let remainder = if shift == 128 {
+        value
+    } else {
+        value & ((1_u128 << shift) - 1)
+    };
+    let half = 1_u128 << (shift - 1);
+    if remainder > half || (remainder == half && !quotient.is_multiple_of(2)) {
+        quotient + 1
+    } else {
+        quotient
+    }
 }
 
 fn convert_signed_magnitude(raw: i16) -> i16 {
@@ -564,9 +700,79 @@ mod tests {
     use crate::Error;
 
     use super::{
-        terrain_block_dir, DtedInterpolation, DtedLookupOptions, DtedTerrain, DtedTile,
-        DATA_OFFSET, DATA_SENTINEL,
+        nearest_posting_index, scaled_cell_fraction, terrain_block_dir, DtedInterpolation,
+        DtedLookupOptions, DtedTerrain, DtedTile, DATA_OFFSET, DATA_SENTINEL,
     };
+
+    #[test]
+    fn exact_scaling_preserves_the_split_point_fraction() {
+        let tile_origin = -107.0;
+        let coordinate = -106.265_141_029_846_36;
+        let offset = coordinate - tile_origin;
+        assert_eq!(offset, 0.734_858_970_153_638_3);
+
+        let scaled = scaled_cell_fraction(offset, 3600);
+        let naive = offset * 3600.0;
+        let naive_fraction = naive - naive.floor();
+        assert_eq!(scaled.cell, 2645);
+        assert_eq!(scaled.fraction.to_bits(), 0x3fdf_81b8_9fe7_b000);
+        assert_eq!(naive.floor() as i64, 2645);
+        assert_eq!(naive_fraction.to_bits(), 0x3fdf_81b8_9fe7_c000);
+        assert_eq!(naive_fraction.to_bits() - scaled.fraction.to_bits(), 4096);
+
+        let nondiscriminating_offset = -0.265_141_029_846_361_7;
+        let nondiscriminating = scaled_cell_fraction(nondiscriminating_offset, 3600);
+        let naive = nondiscriminating_offset * 3600.0;
+        assert_eq!(
+            nondiscriminating.fraction.to_bits(),
+            (naive - naive.floor()).to_bits()
+        );
+    }
+
+    #[test]
+    fn exact_scaling_keeps_a_coordinate_below_the_posting_in_the_lower_cell() {
+        let posting = 3.0_f64 / 3600.0;
+        let coordinate = f64::from_bits(posting.to_bits() - 1);
+        assert!(coordinate < posting);
+        assert_eq!(coordinate * 3600.0, 3.0);
+
+        let scaled = scaled_cell_fraction(coordinate, 3600);
+        assert_eq!(scaled.cell, 2);
+        assert_eq!(scaled.fraction.to_bits(), 0x3fef_ffff_ffff_fffe);
+        assert_eq!(scaled.nearest, 3);
+    }
+
+    #[test]
+    fn nearest_posting_rounds_the_exact_product_instead_of_the_binary64_product() {
+        let half_posting = 1.5_f64 / 3600.0;
+        let coordinate = f64::from_bits(half_posting.to_bits() - 1);
+        assert!(coordinate < half_posting);
+        assert_eq!(coordinate * 3600.0, 1.5);
+
+        assert_eq!(nearest_posting_index(coordinate, 3600), Ok(1));
+    }
+
+    #[test]
+    fn exact_scaled_value_tracks_the_binary64_product_over_deterministic_offsets() {
+        let mut state = 0x764e_279d_9f41_2c03_u64;
+        for _ in 0..10_000 {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut random = state;
+            random = (random ^ (random >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            random = (random ^ (random >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            random ^= random >> 31;
+            let offset = f64::from_bits(0x3ff0_0000_0000_0000 | (random >> 12)) - 1.0;
+
+            let exact = scaled_cell_fraction(offset, 3600);
+            let reconstructed = exact.cell as f64 + exact.fraction;
+            let naive = offset * 3600.0;
+            assert!(
+                reconstructed.to_bits().abs_diff(naive.to_bits()) <= 1,
+                "offset={offset} exact={reconstructed} naive={naive}"
+            );
+            assert!(exact.cell <= naive.floor() as i64, "offset={offset}");
+        }
+    }
 
     #[test]
     fn terrain_block_dir_matches_reference_bucket_names() {

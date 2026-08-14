@@ -500,12 +500,14 @@ impl MmapTile {
 
         let lat_count = self.index.lat_count as usize;
         let lon_count = self.index.lon_count as usize;
-        let latitude_index = terrain::py_round_to_usize(
-            (latitude_deg - self.index.min_latitude_deg) * (lat_count - 1) as f64,
+        let latitude_index = terrain::nearest_posting_index(
+            latitude_deg - self.index.min_latitude_deg,
+            lat_count - 1,
         )
         .map_err(Error::Parse)?;
-        let longitude_index = terrain::py_round_to_usize(
-            (longitude_deg - self.index.min_longitude_deg) * (lon_count - 1) as f64,
+        let longitude_index = terrain::nearest_posting_index(
+            longitude_deg - self.index.min_longitude_deg,
+            lon_count - 1,
         )
         .map_err(Error::Parse)?;
         if latitude_index >= lat_count || longitude_index >= lon_count {
@@ -1121,12 +1123,18 @@ fn height_from_tile(
     let postings_per_deg_lon = tile.index.lon_count as usize - 1;
     let postings_per_deg_lat = tile.index.lat_count as usize - 1;
 
-    let lon_idx = (longitude_deg - tile.index.min_longitude_deg) * postings_per_deg_lon as f64;
-    let lat_idx = (latitude_deg - tile.index.min_latitude_deg) * postings_per_deg_lat as f64;
-    let lon_lo = lon_idx.floor() as i64;
-    let lat_lo = lat_idx.floor() as i64;
-    let fx = lon_idx - lon_lo as f64;
-    let fy = lat_idx - lat_lo as f64;
+    let lon = terrain::scaled_cell_fraction(
+        longitude_deg - tile.index.min_longitude_deg,
+        postings_per_deg_lon,
+    );
+    let lat = terrain::scaled_cell_fraction(
+        latitude_deg - tile.index.min_latitude_deg,
+        postings_per_deg_lat,
+    );
+    let lon_lo = lon.cell;
+    let lat_lo = lat.cell;
+    let fx = lon.fraction;
+    let fy = lat.fraction;
 
     let mut z = 0.0;
     for (di, wx) in [(0i64, 1.0 - fx), (1i64, fx)] {
