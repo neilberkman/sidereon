@@ -10,6 +10,9 @@ use sidereon_core::ephemeris::{
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 
 const COD_5M_FIXTURE: &str = "tests/fixtures/sp3/COD0MGXFIN_20201770000_01D_05M_ORB.SP3";
+/// 15-minute product with the G01 records from 07:30 through 10:00 GPST
+/// removed, so its 07:15 and 10:15 nodes bracket a three-hour hole.
+const GAP_15M_FIXTURE: &str = "tests/fixtures/sp3/GAP_G01_20201760000_15M.sp3";
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
@@ -111,6 +114,91 @@ fn mapped_precise_interpolant_matches_in_memory_bits_at_records_and_midpoints() 
     }
 
     fs::remove_file(store_path).expect("remove temp artifact");
+}
+
+/// The mapped reader carries its own copy of the coverage-gap policy (query
+/// gate plus contiguous-run bracket) over the byte-indexed node axis. Pin it to
+/// the in-memory interpolant on the gapped fixture: bit-identical states where
+/// both evaluate, and the same rejection at the edges and inside the hole.
+#[test]
+fn mapped_precise_interpolant_matches_in_memory_across_a_coverage_gap() {
+    let bytes = fs::read(fixture_path(GAP_15M_FIXTURE)).expect("read gapped SP3 fixture");
+    let sp3 = Sp3::parse(&bytes).expect("parse gapped SP3 fixture");
+    let memory = PreciseEphemerisInterpolant::from_sp3(&sp3);
+    let mapped = MmapPreciseEphemerisInterpolant::from_vec(
+        memory
+            .to_mmap_store_bytes()
+            .expect("build precise interpolant artifact"),
+    )
+    .expect("read artifact");
+
+    let epochs = sp3.epochs_j2000_seconds();
+    let nominal_s = 900.0;
+    let first = epochs[0];
+    let last = epochs[epochs.len() - 1];
+    // The G01 hole is bracketed by its 07:15 and 10:15 nodes; every other
+    // satellite is contiguous across the whole day.
+    let hole_lo = 646_254_900.0;
+    let hole_hi = 646_265_700.0;
+
+    let mut queries: Vec<f64> = epochs.clone();
+    queries.extend(epochs.windows(2).map(|w| 0.5 * (w[0] + w[1])));
+    // One nominal spacing past either edge is admitted; beyond it is refused.
+    let edge_overreach = [first - nominal_s - 50.0, last + nominal_s + 50.0];
+    queries.extend([first - nominal_s, last + nominal_s]);
+    queries.extend(edge_overreach);
+    // The admitted margins on either side of the hole, and in-gap points that
+    // must be refused for G01 alone.
+    let hole_margins = [hole_lo + nominal_s, hole_hi - nominal_s];
+    let in_hole = [
+        hole_lo + nominal_s + 1.0,
+        646_260_300.0,
+        hole_hi - nominal_s - 1.0,
+    ];
+    queries.extend(hole_margins);
+    queries.extend(in_hole);
+
+    for sat in [gps(1), gps(2)] {
+        for &epoch_j2000_s in &queries {
+            let got = mapped.position_at_j2000_seconds(sat, epoch_j2000_s);
+            let want = memory.position_at_j2000_seconds(sat, epoch_j2000_s);
+            match (got, want) {
+                (Ok(got), Ok(want)) => assert_state_bits_eq(sat, epoch_j2000_s, got, want),
+                (Err(got), Err(want)) => {
+                    assert_eq!(got, want, "{sat} at {epoch_j2000_s}: rejection differs");
+                }
+                (got, want) => {
+                    panic!("{sat} at {epoch_j2000_s}: mapped {got:?} vs in-memory {want:?}")
+                }
+            }
+        }
+
+        // The rejection path was exercised, not vacuously matched.
+        for epoch_j2000_s in edge_overreach {
+            assert!(
+                mapped
+                    .position_at_j2000_seconds(sat, epoch_j2000_s)
+                    .is_err(),
+                "{sat} at {epoch_j2000_s}: edge over-reach must be refused"
+            );
+        }
+    }
+    for epoch_j2000_s in hole_margins {
+        mapped
+            .position_at_j2000_seconds(gps(1), epoch_j2000_s)
+            .unwrap_or_else(|e| panic!("G01 hole margin {epoch_j2000_s} must evaluate: {e:?}"));
+    }
+    for epoch_j2000_s in in_hole {
+        assert!(
+            mapped
+                .position_at_j2000_seconds(gps(1), epoch_j2000_s)
+                .is_err(),
+            "G01 in-hole query {epoch_j2000_s} must be refused"
+        );
+        mapped
+            .position_at_j2000_seconds(gps(2), epoch_j2000_s)
+            .unwrap_or_else(|e| panic!("G02 has no hole at {epoch_j2000_s}: {e:?}"));
+    }
 }
 
 #[test]
