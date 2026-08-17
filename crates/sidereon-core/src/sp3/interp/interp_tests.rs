@@ -690,3 +690,168 @@ fn instant_to_j2000_seconds_query_exactness_bound() {
         "sub-second round-trip error {worst:e} s exceeds proven bound {BOUND_S:e} s"
     );
 }
+
+// --- coverage-gap policy on synthetic node axes ---
+//
+// The gap policy is two pieces of index arithmetic: the query gate in
+// `interpolate_precise_position` (refuse a query deep inside a gap or beyond
+// one nominal spacing of either edge) and the contiguous-run bracket in
+// `interpolate_position_neville` (never let the Lagrange window cross a gap).
+// The public gapped-fixture tests above pin one interior gap on real data;
+// these pin the remaining shapes on integer axes: no gap at all, a single
+// node, a leading gap, a trailing gap, several gaps, and unsorted input.
+//
+// Node values are small integers on an integer axis, so Neville over any
+// subset of a constant arc reproduces the constant exactly and the assertions
+// are on bits. The contiguous case uses a quadratic instead: a falsely split
+// run (one or two nodes) cannot reproduce it, a real run of three or more can.
+
+fn gap_policy_state(x: &[f64], kz: &[f64], query: f64) -> crate::Result<f64> {
+    let zeros = vec![0.0; x.len()];
+    super::interpolate_precise_state(id_for("G01"), x, &zeros, &zeros, kz, &[], query)
+        .map(|state| state.position.z_m)
+}
+
+fn assert_gap_policy_constant(x: &[f64], kz: &[f64], query: f64, want_km: f64) {
+    let got_m = gap_policy_state(x, kz, query)
+        .unwrap_or_else(|e| panic!("query {query} on axis {x:?} must evaluate, got {e:?}"));
+    assert_eq!(
+        got_m.to_bits(),
+        (want_km * KM_TO_M).to_bits(),
+        "query {query} on axis {x:?}: got {got_m} m, want {} m",
+        want_km * KM_TO_M
+    );
+}
+
+fn assert_gap_policy_rejects(x: &[f64], kz: &[f64], query: f64) {
+    match gap_policy_state(x, kz, query) {
+        Err(Error::EpochOutOfRange) => {}
+        other => panic!("query {query} on axis {x:?} must be EpochOutOfRange, got {other:?}"),
+    }
+}
+
+#[test]
+fn contiguous_axis_has_no_false_gap() {
+    // 21 nodes at a 10 s cadence, z = (x/10)^2 km: exact integers 0..=400.
+    let x: Vec<f64> = (0..21).map(|i| f64::from(i) * 10.0).collect();
+    let kz: Vec<f64> = (0..21).map(|i| f64::from(i * i)).collect();
+    let nominal = 10.0;
+
+    // Every node and every midpoint evaluates, and reproduces the quadratic to
+    // round-off: the window is a real run of nodes, never a one-node "arc".
+    let mut queries: Vec<f64> = x.clone();
+    queries.extend(x.windows(2).map(|w| 0.5 * (w[0] + w[1])));
+    queries.push(x[0] - nominal);
+    queries.push(x[x.len() - 1] + nominal);
+    for &q in &queries {
+        let got_m = gap_policy_state(&x, &kz, q)
+            .unwrap_or_else(|e| panic!("contiguous query {q} must evaluate, got {e:?}"));
+        let want_m = (q / 10.0) * (q / 10.0) * KM_TO_M;
+        assert!(
+            (got_m - want_m).abs() <= 1e-6,
+            "contiguous query {q}: got {got_m} m, want {want_m} m"
+        );
+    }
+
+    // Beyond one nominal spacing of either edge is out of range.
+    assert_gap_policy_rejects(&x, &kz, x[0] - nominal - 0.5);
+    assert_gap_policy_rejects(&x, &kz, x[x.len() - 1] + nominal + 0.5);
+}
+
+#[test]
+fn single_node_axis_is_out_of_range_and_empty_axis_is_unknown() {
+    for q in [-5.0, 0.0, 5.0] {
+        assert_gap_policy_rejects(&[0.0], &[3.0], q);
+    }
+    match gap_policy_state(&[], &[], 0.0) {
+        Err(Error::UnknownSatellite(sat)) => assert_eq!(sat, id_for("G01")),
+        other => panic!("empty axis must be UnknownSatellite, got {other:?}"),
+    }
+}
+
+#[test]
+fn leading_gap_isolates_the_first_node_without_crossing() {
+    // One node, a 100 s hole, then a 10 s cadence run.
+    let x = [0.0, 100.0, 110.0, 120.0, 130.0, 140.0];
+    let kz = [-3.0, 7.0, 7.0, 7.0, 7.0, 7.0];
+
+    // The isolated first node is usable within one nominal spacing on both
+    // sides and never sees the run across the hole.
+    for q in [-10.0, -5.0, 0.0, 5.0, 10.0] {
+        assert_gap_policy_constant(&x, &kz, q, -3.0);
+    }
+    // Deep inside the hole is refused, up to one spacing short of the run.
+    for q in [10.5, 50.0, 89.5] {
+        assert_gap_policy_rejects(&x, &kz, q);
+    }
+    // From one spacing before the run onward, the run answers.
+    for q in [90.0, 95.0, 100.0, 125.0, 140.0, 150.0] {
+        assert_gap_policy_constant(&x, &kz, q, 7.0);
+    }
+    assert_gap_policy_rejects(&x, &kz, -10.5);
+    assert_gap_policy_rejects(&x, &kz, 150.5);
+}
+
+#[test]
+fn trailing_gap_isolates_the_last_node_without_crossing() {
+    // A 10 s cadence run, a 100 s hole, then one node.
+    let x = [0.0, 10.0, 20.0, 30.0, 40.0, 140.0];
+    let kz = [7.0, 7.0, 7.0, 7.0, 7.0, -3.0];
+
+    for q in [-10.0, 0.0, 15.0, 40.0, 45.0, 50.0] {
+        assert_gap_policy_constant(&x, &kz, q, 7.0);
+    }
+    for q in [50.5, 95.0, 129.5] {
+        assert_gap_policy_rejects(&x, &kz, q);
+    }
+    for q in [130.0, 135.0, 140.0, 145.0, 150.0] {
+        assert_gap_policy_constant(&x, &kz, q, -3.0);
+    }
+    assert_gap_policy_rejects(&x, &kz, -10.5);
+    assert_gap_policy_rejects(&x, &kz, 150.5);
+}
+
+#[test]
+fn multiple_gaps_bracket_each_arc_independently() {
+    // Three 3-node arcs at a 10 s cadence separated by 80 s holes.
+    let x = [0.0, 10.0, 20.0, 100.0, 110.0, 120.0, 200.0, 210.0, 220.0];
+    let kz = [-3.0, -3.0, -3.0, 7.0, 7.0, 7.0, 11.0, 11.0, 11.0];
+
+    for q in [-10.0, 0.0, 15.0, 20.0, 30.0] {
+        assert_gap_policy_constant(&x, &kz, q, -3.0);
+    }
+    for q in [30.5, 60.0, 89.5] {
+        assert_gap_policy_rejects(&x, &kz, q);
+    }
+    for q in [90.0, 100.0, 115.0, 120.0, 130.0] {
+        assert_gap_policy_constant(&x, &kz, q, 7.0);
+    }
+    for q in [130.5, 160.0, 189.5] {
+        assert_gap_policy_rejects(&x, &kz, q);
+    }
+    for q in [190.0, 200.0, 215.0, 220.0, 230.0] {
+        assert_gap_policy_constant(&x, &kz, q, 11.0);
+    }
+    assert_gap_policy_rejects(&x, &kz, -10.5);
+    assert_gap_policy_rejects(&x, &kz, 230.5);
+}
+
+#[test]
+fn unsorted_axis_is_rejected_before_any_gap_arithmetic() {
+    let descending = [40.0, 30.0, 20.0, 10.0, 0.0];
+    let one_swap = [0.0, 10.0, 30.0, 20.0, 40.0];
+    let kz = [7.0; 5];
+    for x in [descending, one_swap] {
+        for q in [-100.0, 5.0, 25.0, 100.0] {
+            match gap_policy_state(&x, &kz, q) {
+                Err(Error::InvalidInput(message)) => {
+                    assert!(
+                        message.contains("strictly increasing"),
+                        "axis {x:?} query {q}: {message}"
+                    );
+                }
+                other => panic!("axis {x:?} query {q} must be InvalidInput, got {other:?}"),
+            }
+        }
+    }
+}
