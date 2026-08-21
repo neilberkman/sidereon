@@ -4,6 +4,36 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [0.40.0] - 2026-08-21
+
+### Added
+
+- `ExactProductCache::open_single_flight`: concurrent requesters for one
+  product identity coalesce onto a single download. A waiter observes the
+  owner's in-flight marker and blocks, bounded, on the committed entry
+  instead of re-downloading - the answer to the alias-prone ultra-target
+  pairs that previously had to stay serial. Ownership is a random
+  128-bit token (PID and wall clocks are diagnostic only, so containers
+  sharing a cache directory cannot be confused); liveness is append-only
+  heartbeat growth judged on each waiter's own monotonic clock; takeover
+  re-verifies the marker snapshot under the existing transition lock and
+  claims by exclusive creation; a slow live owner yields a bounded
+  `SingleFlightTimeout`, never a second download. The sidecar is
+  schema-v3-compatible - commit encoding and `current.json` are
+  byte-unchanged - and the mixed-version matrix is documented in
+  `docs/exact-cache-single-flight.md`. Nine new failpoint boundaries
+  carry process-kill tests; real-process integration tests cover
+  waiter-observes-commit-without-downloading, SIGKILLed-owner takeover
+  with exactly one commit, and live-owner timeout.
+
+### Changed
+
+- **Breaking**: `MergeOptions` is `#[non_exhaustive]`. It gains a field
+  whenever the merge learns a new policy - 0.37.0 alone added two - and
+  each addition was source-breaking for every downstream exhaustive
+  literal. Construct by mutating `MergeOptions::default()`; future
+  options then arrive without breakage.
+
 ## [0.39.1] - 2026-08-11
 
 ### Fixed
