@@ -13,6 +13,7 @@ use crate::data::{DataCatalogError, DistributionSource, ProductIdentity};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
+use std::time::Duration;
 
 /// Commit-record version shared by all Sidereon interfaces.
 pub const EXACT_CACHE_SCHEMA_VERSION: u8 = 3;
@@ -49,6 +50,15 @@ pub enum ExactCacheError {
     #[cfg(not(target_arch = "wasm32"))]
     #[error("timed out waiting for the exact-cache lock")]
     LockTimeout,
+    /// A live single-flight owner did not commit within the configured wait.
+    #[error("timed out waiting for the exact-cache in-flight owner")]
+    SingleFlightTimeout,
+    /// The single-flight owner token is no longer current or its heartbeat failed.
+    #[error("exact-cache single-flight ownership was lost")]
+    SingleFlightOwnershipLost,
+    /// Single-flight duration options are zero or internally inconsistent.
+    #[error("invalid exact-cache single-flight options")]
+    InvalidSingleFlightOptions,
     /// Cross-process durable cache publication is unsupported on this platform.
     #[cfg(not(target_arch = "wasm32"))]
     #[error("durable exact-cache publication is unsupported on this platform")]
@@ -83,6 +93,108 @@ pub struct VerifiedExactCacheCommit {
     pub entry_id: String,
     /// Verified identity, source, and byte bindings.
     pub digests: ExactCacheDigests,
+}
+
+/// Bounded timing policy for exact-cache single-flight coordination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExactCacheSingleFlightOptions {
+    /// Interval between committed-entry and heartbeat observations.
+    pub poll_interval: Duration,
+    /// Interval between automatic owner heartbeat writes.
+    pub heartbeat_interval: Duration,
+    /// Required continuous no-progress interval before owner retirement.
+    pub liveness_timeout: Duration,
+    /// Maximum total time spent waiting for another owner.
+    pub wait_timeout: Duration,
+}
+
+impl Default for ExactCacheSingleFlightOptions {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_millis(50),
+            heartbeat_interval: Duration::from_secs(5),
+            liveness_timeout: Duration::from_secs(30),
+            wait_timeout: Duration::from_secs(30 * 60),
+        }
+    }
+}
+
+impl ExactCacheSingleFlightOptions {
+    fn validate(self) -> Result<Self, ExactCacheError> {
+        if self.poll_interval.is_zero()
+            || self.heartbeat_interval.is_zero()
+            || self.liveness_timeout.is_zero()
+            || self.wait_timeout.is_zero()
+            || self.heartbeat_interval >= self.liveness_timeout
+        {
+            return Err(ExactCacheError::InvalidSingleFlightOptions);
+        }
+        Ok(self)
+    }
+}
+
+/// Target-neutral next action for an exact-cache single-flight waiter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactCacheSingleFlightDecision {
+    /// Observe the committed entry and owner revision again after this delay.
+    Wait(Duration),
+    /// Recheck the exact owner revision atomically and take over if unchanged.
+    Takeover,
+    /// Stop without downloading because the bounded total wait expired.
+    Timeout,
+}
+
+/// Target-neutral liveness state shared by filesystem and browser substrates.
+#[derive(Debug, Clone)]
+pub struct ExactCacheSingleFlightWait {
+    started: Duration,
+    unchanged_since: Duration,
+    observation_sha256: Option<[u8; 32]>,
+}
+
+impl ExactCacheSingleFlightWait {
+    /// Begin observing an owner at one monotonic timestamp.
+    #[must_use]
+    pub fn new(now: Duration) -> Self {
+        Self {
+            started: now,
+            unchanged_since: now,
+            observation_sha256: None,
+        }
+    }
+
+    /// Observe an opaque owner/heartbeat revision and select the next action.
+    ///
+    /// `now` and the returned delay use a caller-local monotonic clock. The
+    /// revision must change whenever the owner token or heartbeat changes.
+    pub fn observe(
+        &mut self,
+        now: Duration,
+        revision: &[u8],
+        options: ExactCacheSingleFlightOptions,
+    ) -> Result<ExactCacheSingleFlightDecision, ExactCacheError> {
+        let options = options.validate()?;
+        let revision_sha256: [u8; 32] = Sha256::digest(revision).into();
+        if self.observation_sha256 != Some(revision_sha256) {
+            self.observation_sha256 = Some(revision_sha256);
+            self.unchanged_since = now;
+        }
+
+        let no_progress = now.saturating_sub(self.unchanged_since);
+        if no_progress >= options.liveness_timeout {
+            return Ok(ExactCacheSingleFlightDecision::Takeover);
+        }
+        let elapsed = now.saturating_sub(self.started);
+        if elapsed >= options.wait_timeout {
+            return Ok(ExactCacheSingleFlightDecision::Timeout);
+        }
+        Ok(ExactCacheSingleFlightDecision::Wait(
+            options
+                .poll_interval
+                .min(options.wait_timeout - elapsed)
+                .min(options.liveness_timeout - no_progress),
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -218,10 +330,15 @@ mod native {
     use std::fs::{self, File, OpenOptions};
     use std::io::{ErrorKind, Write};
     use std::path::{Path, PathBuf};
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     const LOCK_FILENAME: &str = ".sidereon-cache.lock";
+    const INFLIGHT_FILENAME: &str = "in-flight.json";
+    const INFLIGHT_HEARTBEAT_DIRECTORY: &str = "in-flight-heartbeats";
+    const INFLIGHT_PROTOCOL_VERSION: u8 = 1;
 
     /// Paths and exact bytes from one verified immutable cache entry.
     #[derive(Debug, Clone)]
@@ -242,6 +359,231 @@ mod native {
         pub provenance: Vec<u8>,
     }
 
+    /// Result of opening an exact cache with single-flight coordination.
+    #[derive(Debug)]
+    pub enum ExactCacheOpen {
+        /// A complete committed entry was already available or was published
+        /// by the owner observed while waiting.
+        Hit(CommittedExactCacheEntry),
+        /// This process owns acquisition and is the only caller that should fetch.
+        Owner(ExactCacheOwner),
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+    #[serde(deny_unknown_fields)]
+    struct InflightRecord {
+        protocol_version: u8,
+        owner_token: String,
+        process_id: u32,
+        process_nonce: String,
+        created_unix_ms: u64,
+        identity_sha256: String,
+        distribution_source: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct InflightSnapshot {
+        marker: Vec<u8>,
+        record: Option<InflightRecord>,
+        heartbeat: Option<HeartbeatFingerprint>,
+    }
+
+    impl InflightSnapshot {
+        fn revision(&self) -> [u8; 32] {
+            let mut digest = Sha256::new();
+            digest.update(self.marker.len().to_be_bytes());
+            digest.update(&self.marker);
+            match &self.heartbeat {
+                Some(heartbeat) => {
+                    digest.update([1]);
+                    digest.update(heartbeat.byte_length.to_be_bytes());
+                    match heartbeat.modified {
+                        Some(modified) => match modified.duration_since(UNIX_EPOCH) {
+                            Ok(duration) => {
+                                digest.update([1]);
+                                digest.update(duration.as_secs().to_be_bytes());
+                                digest.update(duration.subsec_nanos().to_be_bytes());
+                            }
+                            Err(error) => {
+                                digest.update([2]);
+                                digest.update(error.duration().as_secs().to_be_bytes());
+                                digest.update(error.duration().subsec_nanos().to_be_bytes());
+                            }
+                        },
+                        None => digest.update([0]),
+                    }
+                }
+                None => digest.update([0]),
+            }
+            digest.finalize().into()
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct HeartbeatFingerprint {
+        byte_length: u64,
+        modified: Option<SystemTime>,
+    }
+
+    #[derive(Debug)]
+    struct HeartbeatControl {
+        stopped: Mutex<bool>,
+        wake: Condvar,
+    }
+
+    impl HeartbeatControl {
+        fn wait(&self, interval: Duration) -> bool {
+            let stopped = self.stopped.lock().expect("heartbeat mutex poisoned");
+            let (stopped, _) = self
+                .wake
+                .wait_timeout_while(stopped, interval, |stopped| !*stopped)
+                .expect("heartbeat condition variable poisoned");
+            *stopped
+        }
+
+        fn stop(&self) {
+            *self.stopped.lock().expect("heartbeat mutex poisoned") = true;
+            self.wake.notify_all();
+        }
+    }
+
+    /// Exclusive right to fetch and publish one single-flight cache miss.
+    pub struct ExactCacheOwner {
+        cache: ExactProductCache,
+        token: String,
+        options: ExactCacheSingleFlightOptions,
+        heartbeat_control: Arc<HeartbeatControl>,
+        heartbeat_failed: Arc<AtomicBool>,
+        heartbeat_thread: Option<JoinHandle<()>>,
+        released: bool,
+    }
+
+    impl std::fmt::Debug for ExactCacheOwner {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("ExactCacheOwner")
+                .field("stable_path", &self.cache.stable_path)
+                .field("token", &self.token)
+                .field("options", &self.options)
+                .field("heartbeat_failed", &self.heartbeat_failed)
+                .field("released", &self.released)
+                .finish_non_exhaustive()
+        }
+    }
+
+    trait MonotonicClock {
+        fn now(&self) -> Duration;
+        fn sleep(&self, duration: Duration);
+    }
+
+    struct SystemMonotonicClock {
+        origin: Instant,
+    }
+
+    impl SystemMonotonicClock {
+        fn new() -> Self {
+            Self {
+                origin: Instant::now(),
+            }
+        }
+    }
+
+    impl MonotonicClock for SystemMonotonicClock {
+        fn now(&self) -> Duration {
+            self.origin.elapsed()
+        }
+
+        fn sleep(&self, duration: Duration) {
+            thread::sleep(duration);
+        }
+    }
+
+    #[cfg(feature = "exact-cache-test-failpoints")]
+    #[derive(Debug, Clone)]
+    #[doc(hidden)]
+    pub struct ExactCacheTestClock {
+        state: Arc<(Mutex<TestClockState>, Condvar)>,
+    }
+
+    #[cfg(feature = "exact-cache-test-failpoints")]
+    #[derive(Debug)]
+    struct TestClockState {
+        now: Duration,
+        sleepers: usize,
+    }
+
+    #[cfg(feature = "exact-cache-test-failpoints")]
+    impl ExactCacheTestClock {
+        /// Create a stopped monotonic clock for deterministic integration tests.
+        #[must_use]
+        pub fn new() -> Self {
+            Self {
+                state: Arc::new((
+                    Mutex::new(TestClockState {
+                        now: Duration::ZERO,
+                        sleepers: 0,
+                    }),
+                    Condvar::new(),
+                )),
+            }
+        }
+
+        /// Advance the clock and wake every cache waiter.
+        pub fn advance(&self, duration: Duration) {
+            let (state, wake) = &*self.state;
+            let mut state = state.lock().expect("test clock mutex poisoned");
+            state.now = state.now.saturating_add(duration);
+            wake.notify_all();
+        }
+
+        /// Block until at least `count` cache sleeps have begun.
+        pub fn wait_for_sleepers(&self, count: usize) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let (state, wake) = &*self.state;
+            let mut state = state.lock().expect("test clock mutex poisoned");
+            while state.sleepers < count {
+                let remaining = deadline
+                    .checked_duration_since(Instant::now())
+                    .expect("timed out waiting for test-clock sleeper");
+                let (next, timeout) = wake
+                    .wait_timeout(state, remaining)
+                    .expect("test clock condition variable poisoned");
+                state = next;
+                assert!(
+                    !timeout.timed_out() || state.sleepers >= count,
+                    "timed out waiting for test-clock sleeper"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "exact-cache-test-failpoints")]
+    impl Default for ExactCacheTestClock {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    #[cfg(feature = "exact-cache-test-failpoints")]
+    impl MonotonicClock for ExactCacheTestClock {
+        fn now(&self) -> Duration {
+            self.state.0.lock().expect("test clock mutex poisoned").now
+        }
+
+        fn sleep(&self, duration: Duration) {
+            let (state, wake) = &*self.state;
+            let mut state = state.lock().expect("test clock mutex poisoned");
+            let deadline = state.now.saturating_add(duration);
+            state.sleepers += 1;
+            wake.notify_all();
+            while state.now < deadline {
+                state = wake
+                    .wait(state)
+                    .expect("test clock condition variable poisoned");
+            }
+        }
+    }
+
     /// One exact identity/source cache rooted at the caller's stable product path.
     #[derive(Debug, Clone)]
     pub struct ExactProductCache {
@@ -259,6 +601,104 @@ mod native {
     impl Drop for ExactCacheGuard {
         fn drop(&mut self) {
             let _ = FileExt::unlock(&self.lock_file);
+        }
+    }
+
+    impl ExactCacheOwner {
+        fn new(
+            cache: ExactProductCache,
+            token: String,
+            options: ExactCacheSingleFlightOptions,
+        ) -> Self {
+            let heartbeat_control = Arc::new(HeartbeatControl {
+                stopped: Mutex::new(false),
+                wake: Condvar::new(),
+            });
+            let heartbeat_failed = Arc::new(AtomicBool::new(false));
+            let thread_cache = cache.clone();
+            let thread_token = token.clone();
+            let thread_control = Arc::clone(&heartbeat_control);
+            let thread_failed = Arc::clone(&heartbeat_failed);
+            let heartbeat_thread = thread::Builder::new()
+                .name("exact-cache-heartbeat".to_owned())
+                .spawn(move || {
+                    while !thread_control.wait(options.heartbeat_interval) {
+                        if thread_cache
+                            .refresh_inflight_heartbeat(&thread_token)
+                            .is_err()
+                        {
+                            thread_failed.store(true, Ordering::Release);
+                            break;
+                        }
+                    }
+                })
+                .ok();
+            if heartbeat_thread.is_none() {
+                heartbeat_failed.store(true, Ordering::Release);
+            }
+            Self {
+                cache,
+                token,
+                options,
+                heartbeat_control,
+                heartbeat_failed,
+                heartbeat_thread,
+                released: false,
+            }
+        }
+
+        /// Refresh this owner's liveness heartbeat immediately.
+        pub fn heartbeat(&self) -> Result<(), ExactCacheError> {
+            if self.heartbeat_failed.load(Ordering::Acquire) {
+                return Err(ExactCacheError::SingleFlightOwnershipLost);
+            }
+            let result = self.cache.refresh_inflight_heartbeat(&self.token);
+            if result.is_err() {
+                self.heartbeat_failed.store(true, Ordering::Release);
+            }
+            result
+        }
+
+        /// Publish validated bytes and release single-flight ownership.
+        pub fn publish(
+            mut self,
+            product: &[u8],
+            archive: &[u8],
+            provenance: &[u8],
+        ) -> Result<CommittedExactCacheEntry, ExactCacheError> {
+            self.stop_heartbeat();
+            if self.heartbeat_failed.load(Ordering::Acquire) {
+                return Err(ExactCacheError::SingleFlightOwnershipLost);
+            }
+            let guard = self.cache.lock(self.options.wait_timeout)?;
+            if !self.cache.inflight_token_is_current(&self.token)? {
+                return Err(ExactCacheError::SingleFlightOwnershipLost);
+            }
+            let entry = self.cache.publish(&guard, product, archive, provenance)?;
+            self.cache.release_inflight(&guard, &self.token)?;
+            self.released = true;
+            Ok(entry)
+        }
+
+        fn stop_heartbeat(&mut self) {
+            self.heartbeat_control.stop();
+            if let Some(heartbeat_thread) = self.heartbeat_thread.take() {
+                if heartbeat_thread.join().is_err() {
+                    self.heartbeat_failed.store(true, Ordering::Release);
+                }
+            }
+        }
+    }
+
+    impl Drop for ExactCacheOwner {
+        fn drop(&mut self) {
+            self.stop_heartbeat();
+            if self.released {
+                return;
+            }
+            if let Ok(guard) = self.cache.lock(Duration::ZERO) {
+                let _ = self.cache.release_inflight(&guard, &self.token);
+            }
         }
     }
 
@@ -285,6 +725,29 @@ mod native {
         #[must_use]
         pub fn stable_path(&self) -> &Path {
             &self.stable_path
+        }
+
+        /// Open this cache with bounded single-flight miss coalescing.
+        ///
+        /// A hit contains bytes verified by the unchanged schema-v3 commit
+        /// protocol. Only the returned owner should perform acquisition.
+        pub fn open_single_flight(
+            &self,
+            options: ExactCacheSingleFlightOptions,
+        ) -> Result<ExactCacheOpen, ExactCacheError> {
+            let clock = SystemMonotonicClock::new();
+            self.open_single_flight_with_clock(options, &clock)
+        }
+
+        /// Open using an injectable monotonic clock for deterministic tests.
+        #[cfg(feature = "exact-cache-test-failpoints")]
+        #[doc(hidden)]
+        pub fn open_single_flight_with_test_clock(
+            &self,
+            options: ExactCacheSingleFlightOptions,
+            clock: &ExactCacheTestClock,
+        ) -> Result<ExactCacheOpen, ExactCacheError> {
+            self.open_single_flight_with_clock(options, clock)
         }
 
         /// Acquire the per-entry cross-process lock with bounded waiting.
@@ -499,6 +962,304 @@ mod native {
             Ok(())
         }
 
+        fn open_single_flight_with_clock<C: MonotonicClock>(
+            &self,
+            options: ExactCacheSingleFlightOptions,
+            clock: &C,
+        ) -> Result<ExactCacheOpen, ExactCacheError> {
+            let options = options.validate()?;
+            ensure_supported_platform()?;
+            let started = clock.now();
+            let mut wait_state = ExactCacheSingleFlightWait::new(started);
+
+            loop {
+                if let Some(entry) = self.read()? {
+                    return Ok(ExactCacheOpen::Hit(entry));
+                }
+
+                let now = clock.now();
+                let snapshot = self.read_inflight_snapshot()?;
+                match snapshot {
+                    None => {
+                        if let Some(opened) = self.try_claim_transition(options)? {
+                            return Ok(opened);
+                        }
+                        let elapsed = now.saturating_sub(started);
+                        if elapsed >= options.wait_timeout {
+                            return Err(ExactCacheError::SingleFlightTimeout);
+                        }
+                        clock.sleep(options.poll_interval.min(options.wait_timeout - elapsed));
+                    }
+                    Some(snapshot) => {
+                        let decision = wait_state.observe(now, &snapshot.revision(), options)?;
+                        test_failpoint("after_inflight_wait_observation");
+                        match decision {
+                            ExactCacheSingleFlightDecision::Wait(duration) => {
+                                clock.sleep(duration);
+                            }
+                            ExactCacheSingleFlightDecision::Takeover => {
+                                if let Some(opened) =
+                                    self.try_takeover_transition(&snapshot, options)?
+                                {
+                                    return Ok(opened);
+                                }
+                                let elapsed = clock.now().saturating_sub(started);
+                                if elapsed >= options.wait_timeout {
+                                    return Err(ExactCacheError::SingleFlightTimeout);
+                                }
+                                clock.sleep(
+                                    options.poll_interval.min(options.wait_timeout - elapsed),
+                                );
+                            }
+                            ExactCacheSingleFlightDecision::Timeout => {
+                                return Err(ExactCacheError::SingleFlightTimeout);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        fn try_claim_transition(
+            &self,
+            options: ExactCacheSingleFlightOptions,
+        ) -> Result<Option<ExactCacheOpen>, ExactCacheError> {
+            let Some(guard) = self.try_transition_guard()? else {
+                return Ok(None);
+            };
+            if let Some(entry) = self.read()? {
+                return Ok(Some(ExactCacheOpen::Hit(entry)));
+            }
+            if self.read_inflight_snapshot()?.is_some() {
+                return Ok(None);
+            }
+            let Some(token) = self.claim_inflight(&guard)? else {
+                return Ok(None);
+            };
+            Ok(Some(ExactCacheOpen::Owner(ExactCacheOwner::new(
+                self.clone(),
+                token,
+                options,
+            ))))
+        }
+
+        fn try_takeover_transition(
+            &self,
+            observed: &InflightSnapshot,
+            options: ExactCacheSingleFlightOptions,
+        ) -> Result<Option<ExactCacheOpen>, ExactCacheError> {
+            let Some(guard) = self.try_transition_guard()? else {
+                return Ok(None);
+            };
+            if let Some(entry) = self.read()? {
+                return Ok(Some(ExactCacheOpen::Hit(entry)));
+            }
+            if self.read_inflight_snapshot()?.as_ref() != Some(observed) {
+                return Ok(None);
+            }
+            if !self.retire_inflight(&guard, observed)? {
+                return Ok(None);
+            }
+            let Some(token) = self.claim_inflight(&guard)? else {
+                return Ok(None);
+            };
+            Ok(Some(ExactCacheOpen::Owner(ExactCacheOwner::new(
+                self.clone(),
+                token,
+                options,
+            ))))
+        }
+
+        fn try_transition_guard(&self) -> Result<Option<ExactCacheGuard>, ExactCacheError> {
+            match self.lock(Duration::ZERO) {
+                Ok(guard) => Ok(Some(guard)),
+                Err(ExactCacheError::LockTimeout) => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+
+        fn claim_inflight(
+            &self,
+            guard: &ExactCacheGuard,
+        ) -> Result<Option<String>, ExactCacheError> {
+            self.require_guard(guard)?;
+            let control = self.control_directory();
+            let heartbeats = control.join(INFLIGHT_HEARTBEAT_DIRECTORY);
+            durable_create_dir_all(&heartbeats)?;
+            if self.inflight_path().exists() {
+                return Ok(None);
+            }
+
+            let token = random_identifier("random in-flight owner token")?;
+            let heartbeat_path = self.inflight_heartbeat_path(&token)?;
+            write_exclusive(&heartbeat_path, b"\0")?;
+            sync_directory(&heartbeats)?;
+            test_failpoint("after_inflight_heartbeat");
+
+            let record = InflightRecord {
+                protocol_version: INFLIGHT_PROTOCOL_VERSION,
+                owner_token: token.clone(),
+                process_id: std::process::id(),
+                process_nonce: process_nonce()?,
+                created_unix_ms: unix_milliseconds(),
+                identity_sha256: identity_sha256(&self.identity)?,
+                distribution_source: self.source.code().to_owned(),
+            };
+            let marker = serde_json::to_vec(&record)
+                .map_err(|_| ExactCacheError::InvalidCommit("in-flight serialization"))?;
+            if !write_exclusive_if_absent(&self.inflight_path(), &marker)? {
+                let _ = fs::remove_file(heartbeat_path);
+                return Ok(None);
+            }
+            test_failpoint("after_inflight_marker");
+            sync_directory(&control)?;
+            test_failpoint("after_inflight_sync");
+            Ok(Some(token))
+        }
+
+        fn read_inflight_snapshot(&self) -> Result<Option<InflightSnapshot>, ExactCacheError> {
+            let marker = match fs::read(self.inflight_path()) {
+                Ok(marker) => marker,
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+                Err(source) => return Err(io("read in-flight marker", source)),
+            };
+            let record = serde_json::from_slice::<InflightRecord>(&marker)
+                .ok()
+                .filter(|record| {
+                    record.protocol_version == INFLIGHT_PROTOCOL_VERSION
+                        && validate_entry_id(&record.owner_token).is_ok()
+                        && validate_entry_id(&record.process_nonce).is_ok()
+                });
+            if let Some(record) = &record {
+                if record.identity_sha256 != identity_sha256(&self.identity)?
+                    || record.distribution_source != self.source.code()
+                {
+                    return Err(ExactCacheError::InvalidCommit(
+                        "in-flight identity or source",
+                    ));
+                }
+            }
+            let heartbeat = match &record {
+                Some(record) => {
+                    match fs::metadata(self.inflight_heartbeat_path(&record.owner_token)?) {
+                        Ok(metadata) => Some(HeartbeatFingerprint {
+                            byte_length: metadata.len(),
+                            modified: metadata.modified().ok(),
+                        }),
+                        Err(error) if error.kind() == ErrorKind::NotFound => None,
+                        Err(source) => return Err(io("read in-flight heartbeat", source)),
+                    }
+                }
+                None => None,
+            };
+            Ok(Some(InflightSnapshot {
+                marker,
+                record,
+                heartbeat,
+            }))
+        }
+
+        fn refresh_inflight_heartbeat(&self, token: &str) -> Result<(), ExactCacheError> {
+            if !self.inflight_token_is_current(token)? {
+                return Err(ExactCacheError::SingleFlightOwnershipLost);
+            }
+            let heartbeat_path = self.inflight_heartbeat_path(token)?;
+            let mut heartbeat = OpenOptions::new()
+                .append(true)
+                .open(heartbeat_path)
+                .map_err(|source| io("open in-flight heartbeat", source))?;
+            heartbeat
+                .write_all(b"\0")
+                .map_err(|source| io("write in-flight heartbeat", source))?;
+            heartbeat
+                .sync_all()
+                .map_err(|source| io("sync in-flight heartbeat", source))?;
+            test_failpoint("after_inflight_heartbeat_refresh");
+            Ok(())
+        }
+
+        fn inflight_token_is_current(&self, token: &str) -> Result<bool, ExactCacheError> {
+            Ok(self
+                .read_inflight_snapshot()?
+                .and_then(|snapshot| snapshot.record)
+                .is_some_and(|record| record.owner_token == token))
+        }
+
+        fn release_inflight(
+            &self,
+            guard: &ExactCacheGuard,
+            token: &str,
+        ) -> Result<(), ExactCacheError> {
+            self.require_guard(guard)?;
+            let Some(snapshot) = self.read_inflight_snapshot()? else {
+                return Ok(());
+            };
+            if snapshot
+                .record
+                .as_ref()
+                .map(|record| record.owner_token.as_str())
+                != Some(token)
+            {
+                return Ok(());
+            }
+            let _ = self.retire_inflight(guard, &snapshot)?;
+            Ok(())
+        }
+
+        fn retire_inflight(
+            &self,
+            guard: &ExactCacheGuard,
+            expected: &InflightSnapshot,
+        ) -> Result<bool, ExactCacheError> {
+            self.require_guard(guard)?;
+            if self.read_inflight_snapshot()?.as_ref() != Some(expected) {
+                return Ok(false);
+            }
+            let nonce = random_identifier("random retired marker id")?;
+            let token = expected
+                .record
+                .as_ref()
+                .map_or("malformed", |record| record.owner_token.as_str());
+            let retired = self
+                .control_directory()
+                .join(format!(".in-flight.{token}.{nonce}.retired"));
+            match fs::rename(self.inflight_path(), &retired) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+                Err(source) => return Err(io("retire in-flight marker", source)),
+            }
+            test_failpoint("after_inflight_retire");
+
+            let retired_marker =
+                fs::read(&retired).map_err(|source| io("read retired in-flight marker", source))?;
+            if retired_marker != expected.marker {
+                let _ = write_exclusive_if_absent(&self.inflight_path(), &retired_marker)?;
+                let _ = fs::remove_file(&retired);
+                sync_directory(&self.control_directory())?;
+                return Ok(false);
+            }
+
+            sync_directory(&self.control_directory())?;
+            test_failpoint("after_inflight_retire_sync");
+            fs::remove_file(&retired)
+                .map_err(|source| io("remove retired in-flight marker", source))?;
+            if let Some(record) = &expected.record {
+                match fs::remove_file(self.inflight_heartbeat_path(&record.owner_token)?) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == ErrorKind::NotFound => {}
+                    Err(source) => return Err(io("remove in-flight heartbeat", source)),
+                }
+            }
+            test_failpoint("after_inflight_reap");
+            sync_directory(&self.control_directory())?;
+            let heartbeats = self.control_directory().join(INFLIGHT_HEARTBEAT_DIRECTORY);
+            if heartbeats.is_dir() {
+                sync_directory(&heartbeats)?;
+            }
+            test_failpoint("after_inflight_reap_sync");
+            Ok(true)
+        }
+
         fn require_guard(&self, guard: &ExactCacheGuard) -> Result<(), ExactCacheError> {
             if guard.stable_path == self.stable_path {
                 Ok(())
@@ -516,6 +1277,18 @@ mod native {
 
         fn marker_path(&self) -> PathBuf {
             self.control_directory().join(EXACT_CACHE_MARKER_FILENAME)
+        }
+
+        fn inflight_path(&self) -> PathBuf {
+            self.control_directory().join(INFLIGHT_FILENAME)
+        }
+
+        fn inflight_heartbeat_path(&self, token: &str) -> Result<PathBuf, ExactCacheError> {
+            validate_entry_id(token)?;
+            Ok(self
+                .control_directory()
+                .join(INFLIGHT_HEARTBEAT_DIRECTORY)
+                .join(format!("{token}.heartbeat")))
         }
 
         fn entry_paths(&self, entry_id: &str) -> Result<EntryPaths, ExactCacheError> {
@@ -537,14 +1310,7 @@ mod native {
 
         fn allocate_entry_id(&self, entries: &Path) -> Result<String, ExactCacheError> {
             for _ in 0..128 {
-                let mut random = [0_u8; 16];
-                getrandom::getrandom(&mut random).map_err(|error| {
-                    io("random entry id", std::io::Error::other(error.to_string()))
-                })?;
-                let mut entry_id = String::with_capacity(32);
-                for byte in random {
-                    write!(&mut entry_id, "{byte:02x}").expect("writing to String cannot fail");
-                }
+                let entry_id = random_identifier("random entry id")?;
                 match fs::create_dir(entries.join(&entry_id)) {
                     Ok(()) => return Ok(entry_id),
                     Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
@@ -618,6 +1384,57 @@ mod native {
             .map_err(|source| io("sync immutable file", source))
     }
 
+    fn write_exclusive_if_absent(path: &Path, bytes: &[u8]) -> Result<bool, ExactCacheError> {
+        let mut file = match OpenOptions::new().create_new(true).write(true).open(path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(false),
+            Err(source) => return Err(io("create in-flight marker", source)),
+        };
+        let result = file
+            .write_all(bytes)
+            .map_err(|source| io("write in-flight marker", source))
+            .and_then(|()| {
+                file.sync_all()
+                    .map_err(|source| io("sync in-flight marker", source))
+            });
+        if result.is_err() {
+            let _ = fs::remove_file(path);
+        }
+        result.map(|()| true)
+    }
+
+    fn random_identifier(operation: &'static str) -> Result<String, ExactCacheError> {
+        let mut random = [0_u8; 16];
+        getrandom::getrandom(&mut random)
+            .map_err(|error| io(operation, std::io::Error::other(error.to_string())))?;
+        let mut identifier = String::with_capacity(32);
+        for byte in random {
+            write!(&mut identifier, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        Ok(identifier)
+    }
+
+    fn process_nonce() -> Result<String, ExactCacheError> {
+        static PROCESS_NONCE: OnceLock<String> = OnceLock::new();
+        if let Some(nonce) = PROCESS_NONCE.get() {
+            return Ok(nonce.clone());
+        }
+        let nonce = random_identifier("random in-flight process nonce")?;
+        let _ = PROCESS_NONCE.set(nonce);
+        Ok(PROCESS_NONCE
+            .get()
+            .expect("process nonce initialized")
+            .clone())
+    }
+
+    fn unix_milliseconds() -> u64 {
+        let milliseconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        u64::try_from(milliseconds).unwrap_or(u64::MAX)
+    }
+
     fn sync_directory(path: &Path) -> Result<(), ExactCacheError> {
         File::open(path)
             .and_then(|directory| directory.sync_all())
@@ -626,6 +1443,25 @@ mod native {
 
     #[cfg(feature = "exact-cache-test-failpoints")]
     fn test_failpoint(name: &str) {
+        if std::env::var_os("SIDEREON_TEST_EXACT_CACHE_PAUSE_FAILPOINT").as_deref()
+            == Some(std::ffi::OsStr::new(name))
+        {
+            let barrier = PathBuf::from(
+                std::env::var_os("SIDEREON_TEST_EXACT_CACHE_FAILPOINT_BARRIER")
+                    .expect("exact-cache pause failpoint barrier"),
+            );
+            fs::write(barrier.with_extension("ready"), b"ready")
+                .expect("write exact-cache failpoint barrier");
+            let release = barrier.with_extension("release");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while !release.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for exact-cache failpoint release"
+                );
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
         if std::env::var_os("SIDEREON_TEST_EXACT_CACHE_FAILPOINT").as_deref()
             == Some(std::ffi::OsStr::new(name))
         {
@@ -663,7 +1499,13 @@ mod native {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{CommittedExactCacheEntry, ExactCacheGuard, ExactProductCache};
+pub use native::{
+    CommittedExactCacheEntry, ExactCacheGuard, ExactCacheOpen, ExactCacheOwner, ExactProductCache,
+};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-cache-test-failpoints"))]
+#[doc(hidden)]
+pub use native::ExactCacheTestClock;
 
 #[cfg(test)]
 mod tests {
@@ -750,5 +1592,69 @@ mod tests {
             )
             .is_err());
         }
+    }
+
+    #[test]
+    fn single_flight_wait_state_resets_on_progress_and_prefers_stale_takeover() {
+        let options = ExactCacheSingleFlightOptions {
+            poll_interval: Duration::from_secs(2),
+            heartbeat_interval: Duration::from_secs(1),
+            liveness_timeout: Duration::from_secs(5),
+            wait_timeout: Duration::from_secs(20),
+        };
+        let mut wait = ExactCacheSingleFlightWait::new(Duration::ZERO);
+        assert_eq!(
+            wait.observe(Duration::ZERO, b"owner-a:1", options)
+                .expect("first observation"),
+            ExactCacheSingleFlightDecision::Wait(Duration::from_secs(2))
+        );
+        assert_eq!(
+            wait.observe(Duration::from_secs(4), b"owner-a:1", options)
+                .expect("unchanged observation"),
+            ExactCacheSingleFlightDecision::Wait(Duration::from_secs(1))
+        );
+        assert_eq!(
+            wait.observe(Duration::from_secs(4), b"owner-a:2", options)
+                .expect("heartbeat progress"),
+            ExactCacheSingleFlightDecision::Wait(Duration::from_secs(2))
+        );
+        assert_eq!(
+            wait.observe(Duration::from_secs(9), b"owner-a:2", options)
+                .expect("stale observation"),
+            ExactCacheSingleFlightDecision::Takeover
+        );
+
+        let options = ExactCacheSingleFlightOptions {
+            wait_timeout: Duration::from_secs(5),
+            ..options
+        };
+        let mut equal_deadlines = ExactCacheSingleFlightWait::new(Duration::ZERO);
+        equal_deadlines
+            .observe(Duration::ZERO, b"owner", options)
+            .expect("initial observation");
+        assert_eq!(
+            equal_deadlines
+                .observe(Duration::from_secs(5), b"owner", options)
+                .expect("equal deadlines"),
+            ExactCacheSingleFlightDecision::Takeover
+        );
+    }
+
+    #[test]
+    fn single_flight_wait_state_times_out_while_owner_is_live() {
+        let options = ExactCacheSingleFlightOptions {
+            poll_interval: Duration::from_secs(1),
+            heartbeat_interval: Duration::from_secs(2),
+            liveness_timeout: Duration::from_secs(10),
+            wait_timeout: Duration::from_secs(3),
+        };
+        let mut wait = ExactCacheSingleFlightWait::new(Duration::ZERO);
+        wait.observe(Duration::ZERO, b"owner:1", options)
+            .expect("initial observation");
+        assert_eq!(
+            wait.observe(Duration::from_secs(3), b"owner:2", options)
+                .expect("live owner at wait bound"),
+            ExactCacheSingleFlightDecision::Timeout
+        );
     }
 }
