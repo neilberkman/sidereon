@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-08-21",
+  "retrieval": {
+    "tool": "curl 8.7.1",
+    "digest_tool": "shasum -a 256"
+  },
+  "sources": [
+    {
+      "name": "IGS products",
+      "url": "https://igs.org/products/",
+      "sha256": "6b9d6b0b84da060144277edcdcc83bd137c475eb53342c9044625e298fbf4732",
+      "supports": [
+        "IGS combined ultra releases at 03:00, 09:00, 15:00, and 21:00 UTC",
+        "ultra products contain 24 observed hours followed by 24 predicted hours",
+        "IGS rapid products release at about 17:00 UTC after the previous day",
+        "IGS final products are available weekly by Friday",
+        "rapid IONEX latency is less than 24 hours",
+        "final IONEX latency is approximately 11 days and updates weekly"
+      ]
+    },
+    {
+      "name": "IGS Analysis Center Coordinator schedule",
+      "url": "https://acc.igs.org/skeds.html",
+      "sha256": "c3240f0829a2e93d763d3c58a0baccea9884fa720c04c593c2fb482ea32e92bf",
+      "supports": [
+        "ultra analysis-center deadline is 02:50 UTC for each 00, 06, 12, or 18 session",
+        "rapid analysis-center deadline is 15:45 UTC daily",
+        "final analysis-center deadline is Wednesday 05:00 UTC, 11 days after GPS week end",
+        "IGS combined final delivery is Friday, 13 days after GPS week end"
+      ]
+    },
+    {
+      "name": "CODE analysis-center description",
+      "url": "https://files.igs.org/pub/center/analysis/code.acn",
+      "sha256": "9fd573cb746bc0ce7f37796139d58eb7be4b4805cdbe65fa3bb943b899b3b6a1",
+      "supports": [
+        "CODE publishes final daily SP3, CLK, and IONEX products",
+        "CODE publishes rapid and ultra-rapid product series"
+      ]
+    },
+    {
+      "name": "GFZ analysis-center description",
+      "url": "https://files.igs.org/pub/center/analysis/gfz.acn",
+      "sha256": "21e21fa35bf2149bf0fb14474713922694919ac2f4ebe71370eb2ef46ac600c1",
+      "supports": [
+        "GFZ publishes daily rapid SP3 and CLK products",
+        "GFZ ultra-rapid SP3 is generated every three hours"
+      ]
+    },
+    {
+      "name": "ESA analysis-center description",
+      "url": "https://files.igs.org/pub/center/analysis/esa.acn",
+      "sha256": "ba36e392a289fa0d33f38b790a9bf5bcf44545c9186de69e3a8cdf578a48c3d4",
+      "supports": [
+        "ESA publishes seven daily final SP3 and CLK files per GPS week",
+        "ESA ultra-rapid issues use 00, 06, 12, and 18 sessions"
+      ]
+    },
+    {
+      "name": "GFZ MGEX analysis-center description",
+      "url": "https://files.igs.org/pub/center/analysis/GFZ0MGXFIN.acn",
+      "sha256": "289adae81ca9062a7a9931dcbb0a391b7723ab09db4729a00d1525e6da258954",
+      "supports": [
+        "GFZ MGEX rapid products include daily SP3 and CLK files"
+      ]
+    }
+  ],
+  "deterministic_resolutions": [
+    "A weekly final batch is represented by its newest daily identity, the Saturday file.",
+    "IGS combined final date-only Friday delivery is represented as Friday 23:59:59 UTC.",
+    "Final IONEX approximately 11-day date-only latency is represented as the due date at 23:59:59 UTC.",
+    "Rapid IONEX less-than-24-hour latency is represented by the following 00:00 UTC boundary.",
+    "CODE predicted IONEX is due at 00:00 UTC one or two days before the map date, matching its catalog horizon.",
+    "WUM near-real-time and broadcast navigation have no schedule rule in this fixture."
+  ]
+}

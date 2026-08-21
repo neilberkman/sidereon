@@ -9,8 +9,8 @@ cadence, family, format, or official decompressed filename.
 
 The Rust core remains network-free. It owns catalog selection, exact identity,
 official filename and source-location derivation, safe cache-relative paths,
-and SP3/IONEX parsing. Bindings that already own acquisition—Python and
-Elixir—own authenticated HTTP, retries, cookies, cache IO, and credential
+and SP3/IONEX parsing. Bindings that already own acquisition, Python and
+Elixir, own authenticated HTTP, retries, cookies, cache IO, and credential
 configuration. C and WebAssembly expose the same pure identity and location
 derivation without adding hidden network behavior.
 
@@ -141,6 +141,49 @@ https://www.aiub.unibe.ch/download/CODE/IONO/P2/<identity-year>/<official-filena
 The HTTPS redirect chain is restricted to AIUB's download host and public
 object-store host. A missing exact URL remains a not-published result; direct
 location derivation performs no date lookback or tier substitution.
+
+## Nominal next-issue schedule
+
+`next_issue_due(center, product_type, now)` is a network-free query over the
+same catalog identities used by publication status. It returns the first due
+time at or after `now`, the exact `ProductIdentity`, and half-open observed and
+predicted coverage intervals. It does not fetch a listing and does not claim
+that an archive has posted the issue.
+
+The due-time rules distinguish a filename coverage epoch from publication.
+For IGS combined ultra-rapid SP3, a two-day filename names 24 observed hours
+followed by 24 predicted hours and is released 27 hours after its coverage
+start. The analysis-center ultra lines use the 26 h 50 min submission deadline.
+GFZ rapid SP3 and CLK use the next-day 15:45 UTC analysis-center deadline. CODE
+rapid IONEX uses the following 00:00 UTC boundary for its published less-than-24
+hour latency. CODE predicted IONEX uses its cataloged one-day or two-day horizon.
+
+Final products are weekly batches of daily identities. The query names the
+Saturday identity, which is the newest identity publication-status monitoring
+expects from that batch. Analysis-center final SP3 and CLK batches are due at
+Wednesday 05:00 UTC, 11 days after GPS week end. IGS combined final is due by
+Friday, 13 days after week end. Because that source gives a day but no hour, the
+catalog represents the deadline as Friday 23:59:59 UTC. Final IONEX uses its
+published approximately 11-day weekly latency and the same end-of-day rule for
+the otherwise date-only deadline.
+
+These resolutions are catalog policy, not inferred timestamps. Their source
+URLs, access date, `curl 8.7.1` retrieval record, `shasum -a 256` digests, and
+the date-only resolution rules are committed in
+`crates/sidereon-core/tests/fixtures/data/nominal_issue_schedule_provenance.json`.
+The sources are the IGS products page, the IGS Analysis Center Coordinator
+schedule, and the CODE, ESA, and GFZ analysis-center descriptions.
+
+The current source set does not establish a nominal due-time rule for WUM's
+near-real-time line or broadcast navigation. Those pairs return
+`UnsupportedNominalSchedule` rather than inheriting a nearby cadence.
+
+The scoreboard publication-status outcome carries `next_issue` beside
+`behind_nominal_minutes`. Its CLI renders both with:
+
+```text
+sidereon-scoreboard --publication-status CENTER PRODUCT --at YYYY-MM-DDTHH:MM:SSZ
+```
 
 ## GFZ rapid SP3 cadence eras
 

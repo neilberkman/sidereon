@@ -20,9 +20,9 @@ use sidereon_core::astro::propagator::ForceModelKind;
 use sidereon_core::astro::time::civil::civil_from_j2000_seconds;
 use sidereon_core::constants::{J2000_JD, SECONDS_PER_DAY};
 use sidereon_core::data::{
-    newest_published_product, parse_archive_listing, publication_listing_urls,
-    published_issue_age_minutes, AnalysisCenter, DataCatalogError, ProductDate, ProductDateTime,
-    ProductType, PublishedProduct,
+    newest_published_product, next_issue_due, parse_archive_listing, publication_listing_urls,
+    published_issue_age_minutes, AnalysisCenter, DataCatalogError, NominalIssue, ProductDate,
+    ProductDateTime, ProductType, PublishedProduct,
 };
 use sidereon_core::ephemeris::{
     fit_precise_ephemeris_sample_orbit, fit_precise_ephemeris_state_sample_orbit, parse_exact_sp3,
@@ -516,6 +516,10 @@ pub enum PublicationStatusOutcome {
         /// Whole minutes from the published issue's nominal epoch to the
         /// caller's query instant - the "N hours behind nominal" number.
         behind_nominal_minutes: i64,
+        /// Next issue nominally due for this line, computed without a network
+        /// query from the same catalog identity rules. `None` means the catalog
+        /// carries the line without a pinned nominal schedule.
+        next_issue: Option<Box<NominalIssue>>,
     },
     /// Every listing answered, and none of them holds an object of this
     /// line: the archive is reachable but has published nothing in the
@@ -589,10 +593,16 @@ pub fn publication_status(
                 };
                 if let Some(product) = newest_published_product(center, product_type, &objects)? {
                     let behind_nominal_minutes = published_issue_age_minutes(&product, now)?;
+                    let next_issue = match next_issue_due(center, product_type, now) {
+                        Ok(issue) => Some(Box::new(issue)),
+                        Err(DataCatalogError::UnsupportedNominalSchedule { .. }) => None,
+                        Err(error) => return Err(error.into()),
+                    };
                     return Ok(PublicationStatusOutcome::Published {
                         product,
                         listing_url: listing_url.clone(),
                         behind_nominal_minutes,
+                        next_issue,
                     });
                 }
             }
