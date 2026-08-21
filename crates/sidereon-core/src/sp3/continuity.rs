@@ -80,8 +80,160 @@ use crate::constants::KM_TO_M;
 use crate::id::GnssSatelliteId;
 use crate::sp3::interp::{
     instant_to_j2000_seconds, interpolate_precise_state, precise_node_j2000_seconds_from_instant,
+    NEVILLE_POINTS,
 };
 use crate::sp3::samples::PreciseEphemerisSample;
+use crate::sp3::Sp3;
+use crate::{Error, Result};
+
+/// Inclusive evaluation window on the SP3 seconds-since-J2000 axis.
+///
+/// This identifies epochs the caller intends to evaluate. Continuity findings
+/// outside the window can still influence it through the interpolation
+/// neighbourhood, which is why queries also require a [`StencilExtent`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EpochWindow {
+    from_j2000_s: f64,
+    through_j2000_s: f64,
+}
+
+impl EpochWindow {
+    /// Construct an inclusive evaluation window.
+    ///
+    /// Both endpoints must be finite and `from_j2000_s` must not be later than
+    /// `through_j2000_s`.
+    pub fn new(from_j2000_s: f64, through_j2000_s: f64) -> Result<Self> {
+        if !from_j2000_s.is_finite() || !through_j2000_s.is_finite() {
+            return Err(Error::InvalidInput(
+                "SP3 continuity window endpoints must be finite".to_string(),
+            ));
+        }
+        if from_j2000_s > through_j2000_s {
+            return Err(Error::InvalidInput(
+                "SP3 continuity window start must not follow its end".to_string(),
+            ));
+        }
+        Ok(Self {
+            from_j2000_s,
+            through_j2000_s,
+        })
+    }
+
+    /// Inclusive first evaluation epoch, seconds since J2000.
+    pub fn from_j2000_s(self) -> f64 {
+        self.from_j2000_s
+    }
+
+    /// Inclusive last evaluation epoch, seconds since J2000.
+    pub fn through_j2000_s(self) -> f64 {
+        self.through_j2000_s
+    }
+}
+
+/// Time reach of the SP3 position interpolator's sliding node stencil.
+///
+/// Construct this with [`StencilExtent::for_sp3`]. The extent is derived from
+/// the product interval and the same 11-node constant used by the position
+/// interpolator, rather than accepted as a caller-supplied duration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct StencilExtent {
+    grid_origin_j2000_s: f64,
+    interval_s: f64,
+    before_s: f64,
+    after_s: f64,
+}
+
+impl StencilExtent {
+    /// Derive the interpolation reach for an SP3 product.
+    ///
+    /// The degree-10 Lagrange substrate uses 11 nodes centered on the query, so
+    /// its nominal reach is five product intervals on either side. A non-finite
+    /// or non-positive declared interval is rejected.
+    pub fn for_sp3(sp3: &Sp3) -> Result<Self> {
+        let interval_s = sp3.header.epoch_interval_s;
+        if !interval_s.is_finite() || interval_s <= 0.0 {
+            return Err(Error::InvalidInput(
+                "SP3 stencil extent requires a positive finite epoch interval".to_string(),
+            ));
+        }
+        let grid_origin_j2000_s = sp3
+            .epochs_j2000_seconds()
+            .first()
+            .copied()
+            .filter(|epoch| epoch.is_finite())
+            .ok_or_else(|| {
+                Error::InvalidInput(
+                    "SP3 stencil extent requires at least one representable epoch".to_string(),
+                )
+            })?;
+        let half_nodes = (NEVILLE_POINTS / 2) as f64;
+        let half_width_s = half_nodes * interval_s;
+        Ok(Self {
+            grid_origin_j2000_s,
+            interval_s,
+            before_s: half_width_s,
+            after_s: half_width_s,
+        })
+    }
+
+    /// Nominal reach before an evaluated epoch, seconds.
+    pub fn before_s(self) -> f64 {
+        self.before_s
+    }
+
+    /// Nominal reach after an evaluated epoch, seconds.
+    pub fn after_s(self) -> f64 {
+        self.after_s
+    }
+
+    /// Union of nominal grid nodes the interpolator can select for any query in
+    /// `window`.
+    fn influence_bounds(self, window: EpochWindow) -> (f64, f64) {
+        let pivot_at_or_before = |query: f64| {
+            self.grid_origin_j2000_s
+                + ((query - self.grid_origin_j2000_s) / self.interval_s).floor() * self.interval_s
+        };
+        (
+            pivot_at_or_before(window.from_j2000_s) - self.before_s,
+            pivot_at_or_before(window.through_j2000_s) + self.after_s,
+        )
+    }
+}
+
+/// Window-scoped continuity decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowContinuityDecision {
+    /// No recorded finding can enter an interpolation stencil for the window.
+    Accept,
+    /// At least one recorded finding can enter an interpolation stencil.
+    Refuse,
+}
+
+/// A window-scoped decision that retains both influencing and global findings.
+///
+/// `all_defects` remains available for logging findings the caller accepted
+/// around. Merge reports additionally populate `influencing_splices` and
+/// `all_splices` through their own verdict helper.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowContinuityVerdict<'a> {
+    /// Accept or refuse the requested evaluation window.
+    pub decision: WindowContinuityDecision,
+    /// Defects whose time support intersects a stencil used by the window.
+    pub influencing_defects: Vec<&'a ContinuityDefect>,
+    /// Contributor-changing violations influencing the window.
+    pub influencing_splices: Vec<&'a super::combine::MergeContinuityViolation>,
+    /// Every defect in the underlying continuity report.
+    pub all_defects: &'a [ContinuityDefect],
+    /// Every contributor-changing violation in the merge report.
+    pub all_splices: Vec<&'a super::combine::MergeContinuityViolation>,
+}
+
+impl WindowContinuityVerdict<'_> {
+    /// Whether the requested window is accepted.
+    pub fn accepted(&self) -> bool {
+        self.decision == WindowContinuityDecision::Accept
+    }
+}
 
 /// Orbit class supplying a physical earth-fixed displacement bound.
 ///
@@ -243,6 +395,37 @@ impl ContinuityDefect {
             | Self::HoldOutResidual { sat, .. } => *sat,
         }
     }
+
+    /// Whether this finding can enter any interpolation stencil used by the
+    /// evaluation window.
+    pub(super) fn influences(&self, window: EpochWindow, stencil: StencilExtent) -> bool {
+        let (needed_from, needed_through) = stencil.influence_bounds(window);
+        let support = match self {
+            Self::DuplicateEpoch { epoch_j2000_s, .. } => Some((*epoch_j2000_s, *epoch_j2000_s)),
+            Self::SingleSampleSeries { .. } => None,
+            Self::SpeedBound {
+                from_j2000_s,
+                to_j2000_s,
+                ..
+            } => Some((from_j2000_s.min(*to_j2000_s), from_j2000_s.max(*to_j2000_s))),
+            Self::HoldOutResidual {
+                epoch_j2000_s,
+                preceding_j2000_s,
+                ..
+            } => Some((
+                epoch_j2000_s.min(*preceding_j2000_s),
+                epoch_j2000_s.max(*preceding_j2000_s),
+            )),
+        };
+
+        match support {
+            Some((from, through)) => from <= needed_through && through >= needed_from,
+            // The existing variant has no epoch. Querying the existing report
+            // must therefore treat it conservatively rather than invent a
+            // location or hide an unresolved input defect.
+            None => true,
+        }
+    }
 }
 
 /// Which check produced a defect, for callers filtering a report.
@@ -293,6 +476,46 @@ impl ContinuityReport {
             };
             source == check
         })
+    }
+
+    /// Findings that can influence evaluation in `window` through `stencil`.
+    ///
+    /// This filters the existing report. It does not rerun continuity checks or
+    /// alter their defaults. A [`ContinuityDefect::SingleSampleSeries`] has no
+    /// stored epoch, so it conservatively influences every window.
+    pub fn defects_influencing(
+        &self,
+        window: EpochWindow,
+        stencil: StencilExtent,
+    ) -> Vec<&ContinuityDefect> {
+        self.defects
+            .iter()
+            .filter(|defect| defect.influences(window, stencil))
+            .collect()
+    }
+
+    /// Decide whether recorded defects can influence an evaluation window.
+    ///
+    /// The full report remains available in [`WindowContinuityVerdict::all_defects`]
+    /// whether the result accepts or refuses the window.
+    pub fn verdict_for_window(
+        &self,
+        window: EpochWindow,
+        stencil: StencilExtent,
+    ) -> WindowContinuityVerdict<'_> {
+        let influencing_defects = self.defects_influencing(window, stencil);
+        let decision = if influencing_defects.is_empty() {
+            WindowContinuityDecision::Accept
+        } else {
+            WindowContinuityDecision::Refuse
+        };
+        WindowContinuityVerdict {
+            decision,
+            influencing_defects,
+            influencing_splices: Vec::new(),
+            all_defects: &self.defects,
+            all_splices: Vec::new(),
+        }
     }
 }
 

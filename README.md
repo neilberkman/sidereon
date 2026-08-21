@@ -15,7 +15,7 @@ sidereon is one engine: a Rust core for satellite orbit propagation, GNSS positi
 - **GNSS positioning:** single-point (SPP), RINEX observation to SPP assembly and solve helpers, public multi-epoch `static_positioning` / `solve_static` solves with covariance, leave-one-out redundancy diagnostics, and robust weighting (including one-call reference-station static: rover and reference RINEX in, station coordinate with covariance out), Doppler velocity with clock drift, RTK float and fixed (LAMBDA) with baselines built straight from raw RINEX (verified to millimeters against a published ITRF station pair), PPP float and fixed with SSR or Galileo HAS corrections driving the solve over broadcast ephemeris, static PPP with temporal-correlation covariance (calibrated day-length bounds), optional elevation cutoff, and optional tropospheric gradient estimation, DGNSS, across GPS/GLONASS/Galileo/BeiDou/QZSS, with DOP (G/P/H/V/T).
 - **Integrity and error bounds:** RAIM fault detection and exclusion, multi-constellation ARAIM (MHSS protection levels), SBAS protection levels (DO-229), classical reliability (per-observation minimal detectable bias, internal/external reliability), observability classification of every solve (rank, redundancy, conditioning), and covariance-derived error metrics (CEP, R95, drms, SEP, error ellipse) that report wide or flagged bounds for weak geometry rather than fabricated confidence, and uncertainty-aware geodesic geofencing (containment and crossing probabilities from a position covariance, with hysteresis).
 - **GNSS corrections:** SBAS message decode and correction application, RTCM SSR and Galileo HAS orbit/clock/bias correction stores with explicit provider reference-point handling, NTRIP client stream handling, and differential code biases (DCB/OSB) from Bias-SINEX and CODE products.
-- **Ephemeris and time:** broadcast and precise (SP3) ephemeris, RTCM 3 broadcast ephemeris decode for GPS (1019), GLONASS (1020), Galileo (1045/1046), BeiDou (1042), and QZSS (1044), each real-data validated, JPL SPK kernels, source-agnostic satellite state sampling across all three, batched multi-satellite interpolation, scale-aware time (UTC/TAI/TT/UT1/TDB/TCG/TCB and the GNSS system times) with leap-second handling and caller-updatable leap and UT1 tables, and Earth orientation (EOP).
+- **Ephemeris and time:** broadcast and precise (SP3) ephemeris, window-scoped continuity verdicts using the product interpolator's derived stencil reach, RTCM 3 broadcast ephemeris decode for GPS (1019), GLONASS (1020), Galileo (1045/1046), BeiDou (1042), and QZSS (1044), each real-data validated, JPL SPK kernels, source-agnostic satellite state sampling across all three, batched multi-satellite interpolation, scale-aware time (UTC/TAI/TT/UT1/TDB/TCG/TCB and the GNSS system times) with leap-second handling and caller-updatable leap and UT1 tables, and Earth orientation (EOP).
 - **Timing and clocks:** Allan-family stability analysis (ADEV/MDEV/HDEV/TDEV), power-law clock-noise identification with a five-coefficient fit (IEEE 1139), and clock comparison across products.
 - **Estimation and detection:** a covariance-weighted track filter for position fixes (no IMU required: weak-geometry fixes with wide covariances cannot spike the track) with a fixed-interval RTS smoother, scalar Kalman and alpha-beta trackers, innovation gating (NIS), MAD statistics, CFAR detection thresholds, and source localization (ToA/TDOA) from arrival times at known sensors.
 - **Geodesy and monitoring:** geodesic direct and inverse problems on the ellipsoid (Karney), an epoch-aware terrestrial reference frame catalog with published ITRF and ETRF Helmert parameter sets, station displacement corrections (solid Earth tide, pole tide, and ocean loading from caller-supplied BLQ coefficients), station velocity (MIDAS), trajectory fitting with seasonal terms and offsets, step detection, network motion fields with common-mode removal, and repeating-geometry (sidereal) filtering with coverage-aware templates.
@@ -38,8 +38,9 @@ sidereon is one engine: a Rust core for satellite orbit propagation, GNSS positi
   naming the line served), a bounded publication-status query (newest
   published issue per center and line, its archive-reported publication text,
   and its lag behind nominal - distinguishing "nothing published" from an
-  unreachable archive), and a wider ultra pool including the IGS combined
-  ultra and Wuhan's hourly MGEX NRT line. Broadcast ephemerides as the
+  unreachable archive), a network-free next-issue due-time query with exact
+  identity and observed/predicted coverage, and a wider ultra pool including
+  the IGS combined ultra and Wuhan's hourly MGEX NRT line. Broadcast ephemerides as the
   resilience floor are a recorded
   [design issue](docs/broadcast-ephemeris-resilience-floor.md).
 
@@ -72,7 +73,7 @@ The repo ships a single binary for working without writing code:
 ```text
 sidereon solve --obs rover.obs --nav brdc.nav     # SPP per epoch, bounds always shown
 sidereon qc --obs rover.obs                       # teqc-style observation quality report
-sidereon inspect FILE                             # detect and summarize RINEX/SP3/ANTEX/TLE
+sidereon inspect FILE [--window FROM THROUGH]     # summarize a file and optionally scope SP3 continuity
 sidereon metrics --enu-cov "..."                  # CEP / DRMS / R95 / ellipse from a covariance
 sidereon tui --obs rover.obs --nav brdc.nav       # replay a session in the terminal monitor
 sidereon tui --ntrip host:2101 --mount MP ...     # watch a live stream solve in real time
@@ -115,6 +116,9 @@ Every numerical routine is cross-checked against the reference implementation or
 | RTCM MSM lock-time to RINEX LLI | RTKLIB `convbin` decode of a real MSM stream | RTKLIB |
 
 The per-crate test suites document the exact references, fixtures, and tolerances.
+The [Python oracle version-pinning note](docs/oracle-version-pinning.md) records
+cross-version FITPACK and pseudo-inverse checks and the fixture-regeneration
+rules they establish.
 
 ## License
 

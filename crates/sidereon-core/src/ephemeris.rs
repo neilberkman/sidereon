@@ -55,7 +55,8 @@ pub use crate::sp3::{
 };
 pub use crate::sp3::{
     check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
-    OrbitClass, SpeedBound,
+    EpochWindow, OrbitClass, SpeedBound, StencilExtent, WindowContinuityDecision,
+    WindowContinuityVerdict,
 };
 pub use crate::sp3::{
     CellProvenance, CellSelection, ContributorCoverage, MergeContinuityReport,

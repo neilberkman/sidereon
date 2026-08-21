@@ -9,7 +9,10 @@ use clap::{ArgGroup, Parser, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 use sidereon::antex::AntennaKind;
-use sidereon::ephemeris::{BroadcastEphemeris, Sp3};
+use sidereon::ephemeris::{
+    check_continuity, BroadcastEphemeris, ContinuityOptions, EpochWindow, OrbitClass, Sp3,
+    StencilExtent,
+};
 use sidereon::positioning::{ReceiverSolution, SolvePolicy};
 use sidereon::qc_obs::{observation_qc, render_text as render_obs_qc_text};
 use sidereon::rinex::qc::{FindingRef, LintReport, Severity};
@@ -85,6 +88,9 @@ enum Command {
     Inspect {
         /// File to inspect.
         file: PathBuf,
+        /// Inclusive evaluation window as FROM THROUGH, in product-scale seconds since J2000.
+        #[arg(long, num_args = 2, value_names = ["FROM", "THROUGH"])]
+        window: Option<Vec<f64>>,
     },
     /// Replay a RINEX OBS/NAV solve or watch a live RTCM stream.
     Tui {
@@ -168,7 +174,7 @@ fn run(cli: Cli) -> Result<()> {
             probability,
             json,
         } => metrics_command(enu_cov.as_deref(), json_file.as_deref(), probability, json),
-        Command::Inspect { file } => inspect_command(&file),
+        Command::Inspect { file, window } => inspect_command(&file, window.as_deref()),
         Command::Tui {
             obs,
             nav,
@@ -719,9 +725,19 @@ fn print_metrics_human(
     );
 }
 
-fn inspect_command(path: &Path) -> Result<()> {
+fn inspect_command(path: &Path, window: Option<&[f64]>) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let text = std::str::from_utf8(&bytes).ok();
+
+    if let Some(endpoints) = window {
+        let [from_j2000_s, through_j2000_s] = endpoints else {
+            bail!("--window requires exactly FROM THROUGH");
+        };
+        let sp3 = load_sp3(&bytes).context("--window is available only for SP3 products")?;
+        print_inspect(InspectReport::sp3(path, &sp3));
+        print_window_continuity(&sp3, *from_j2000_s, *through_j2000_s)?;
+        return Ok(());
+    }
 
     if let Some(text) = text {
         if let Ok(obs) = parse_rinex_obs(text) {
@@ -751,6 +767,40 @@ fn inspect_command(path: &Path) -> Result<()> {
     }
 
     bail!("unrecognized file type: {}", path.display())
+}
+
+fn print_window_continuity(sp3: &Sp3, from_j2000_s: f64, through_j2000_s: f64) -> Result<()> {
+    let report = check_continuity(
+        &sp3.precise_ephemeris_samples(),
+        &ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss),
+    );
+    let window = EpochWindow::new(from_j2000_s, through_j2000_s)?;
+    let stencil = StencilExtent::for_sp3(sp3)?;
+    let verdict = report.verdict_for_window(window, stencil);
+    println!(
+        "continuity: {} (defects={}, pairs_checked={}, residuals_checked={}, residuals_skipped={})",
+        if report.attested() {
+            "attested"
+        } else {
+            "defects"
+        },
+        report.defects.len(),
+        report.pairs_checked,
+        report.residuals_checked,
+        report.residuals_skipped,
+    );
+    println!(
+        "window_continuity: {} (influencing_defects={}, stencil_before_s={}, stencil_after_s={})",
+        if verdict.accepted() {
+            "accept"
+        } else {
+            "refuse"
+        },
+        verdict.influencing_defects.len(),
+        stencil.before_s(),
+        stencil.after_s(),
+    );
+    Ok(())
 }
 
 fn print_inspect(report: InspectReport) {

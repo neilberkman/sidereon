@@ -1523,7 +1523,8 @@ pub use combine::{
 };
 pub use continuity::{
     check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,
-    OrbitClass, SpeedBound,
+    EpochWindow, OrbitClass, SpeedBound, StencilExtent, WindowContinuityDecision,
+    WindowContinuityVerdict,
 };
 pub use exact::{
     parse_exact_sp3, validate_exact_sp3, ExactSp3Coverage, ExactSp3Request, ExactSp3ValidationError,
