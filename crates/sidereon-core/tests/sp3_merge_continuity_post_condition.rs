@@ -51,14 +51,13 @@ fn arc_source(start_epoch_index: usize, count: usize, offset_m: f64) -> Sp3 {
 }
 
 fn options() -> MergeOptions {
-    MergeOptions {
-        combine: MergeCombine::Precedence,
-        precedence_scope: MergePrecedenceScope::Cell,
-        min_agree: 1,
-        position_tolerance_m: 10_000.0,
-        verify_continuity: Some(ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss)),
-        ..MergeOptions::default()
-    }
+    let mut options = MergeOptions::default();
+    options.combine = MergeCombine::Precedence;
+    options.precedence_scope = MergePrecedenceScope::Cell;
+    options.min_agree = 1;
+    options.position_tolerance_m = 10_000.0;
+    options.verify_continuity = Some(ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss));
+    options
 }
 
 #[test]

@@ -10,14 +10,12 @@ fn facade_reexports_sp3_merge_controls_and_prediction_metadata() {
     assert!(summary.epochs.iter().all(|epoch| epoch.is_observed()));
     assert_eq!(summary.observed_through, sp3.epochs.last().copied());
 
-    let options = MergeOptions {
-        precedence_scope: MergePrecedenceScope::SatelliteArc,
-        outlier_reject: Some(OutlierRejectOptions {
-            position_tolerance_m: 0.5,
-            clock_tolerance_s: 5.0e-9,
-        }),
-        ..MergeOptions::default()
-    };
+    let mut options = MergeOptions::default();
+    options.precedence_scope = MergePrecedenceScope::SatelliteArc;
+    options.outlier_reject = Some(OutlierRejectOptions {
+        position_tolerance_m: 0.5,
+        clock_tolerance_s: 5.0e-9,
+    });
     assert_eq!(options.precedence_scope, MergePrecedenceScope::SatelliteArc);
     assert!(options.outlier_reject.is_some());
 }

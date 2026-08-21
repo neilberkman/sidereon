@@ -189,6 +189,14 @@ pub struct OutlierRejectOptions {
 }
 
 /// Options for [`merge`].
+///
+/// Non-exhaustive: construct with struct-update syntax over
+/// [`MergeOptions::default`] (`MergeOptions { min_agree: 3, ..Default::default() }`).
+/// This struct gains a field whenever the merge learns a new policy - 0.37.0
+/// alone added two - and each addition used to be source-breaking for every
+/// consumer holding an exhaustive literal, including all four language
+/// bindings. Struct-update construction makes future options non-breaking.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergeOptions {
     /// Maximum 3D position difference (meters) for two sources to be in

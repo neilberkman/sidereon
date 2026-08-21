@@ -58,13 +58,12 @@ fn late_source(position_km: f64) -> Sp3 {
 }
 
 fn precedence_options(mode: Option<ProvenanceMode>) -> MergeOptions {
-    MergeOptions {
-        combine: MergeCombine::Precedence,
-        precedence_scope: MergePrecedenceScope::Cell,
-        min_agree: 1,
-        provenance: mode,
-        ..MergeOptions::default()
-    }
+    let mut options = MergeOptions::default();
+    options.combine = MergeCombine::Precedence;
+    options.precedence_scope = MergePrecedenceScope::Cell;
+    options.min_agree = 1;
+    options.provenance = mode;
+    options
 }
 
 #[test]
@@ -181,18 +180,16 @@ fn outlier_rejection_is_recorded_as_its_own_reason() {
     let steady_a = source([15_000.0, 15_100.0]);
     let steady_b = source([15_000.0, 15_100.0]);
 
-    let options = MergeOptions {
-        combine: MergeCombine::Precedence,
-        precedence_scope: MergePrecedenceScope::Cell,
-        min_agree: 2,
+    let mut options = MergeOptions::default();
+    options.combine = MergeCombine::Precedence;
+    options.precedence_scope = MergePrecedenceScope::Cell;
+    options.min_agree = 2;
+    options.position_tolerance_m = 1.0;
+    options.outlier_reject = Some(OutlierRejectOptions {
         position_tolerance_m: 1.0,
-        outlier_reject: Some(OutlierRejectOptions {
-            position_tolerance_m: 1.0,
-            clock_tolerance_s: 1.0e-6,
-        }),
-        provenance: Some(ProvenanceMode::Full),
-        ..MergeOptions::default()
-    };
+        clock_tolerance_s: 1.0e-6,
+    });
+    options.provenance = Some(ProvenanceMode::Full);
 
     let (_merged, report) = merge(&[wild, steady_a, steady_b], &options).expect("merge");
 
@@ -229,10 +226,8 @@ fn a_combined_cell_names_no_single_supplier() {
     let a = source([15_000.0, 15_100.0]);
     let b = source([15_000.0, 15_100.0]);
 
-    let options = MergeOptions {
-        provenance: Some(ProvenanceMode::Full),
-        ..MergeOptions::default()
-    };
+    let mut options = MergeOptions::default();
+    options.provenance = Some(ProvenanceMode::Full);
     let (_merged, report) = merge(&[a, b], &options).expect("merge");
 
     let provenance = report.provenance.expect("provenance requested");

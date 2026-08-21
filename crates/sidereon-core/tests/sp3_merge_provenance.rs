@@ -50,29 +50,29 @@ fn artifact(center: AnalysisCenter, byte: u8) -> Sp3ArtifactIdentity {
 }
 
 fn complete_policy(combine: MergeCombine) -> MergeOptions {
-    MergeOptions {
-        position_tolerance_m: 0.0,
-        clock_tolerance_s: 2.5e-9,
-        min_agree: 2,
-        clock_min_common: 3,
-        combine,
-        precedence_scope: MergePrecedenceScope::SatelliteArc,
-        outlier_reject: Some(OutlierRejectOptions {
-            position_tolerance_m: 1.25,
-            clock_tolerance_s: 7.5e-9,
-        }),
-        target_epoch_interval_s: Some(900.0),
-        systems: Some(BTreeSet::from([GnssSystem::Gps, GnssSystem::Galileo])),
-        frame_reconciliation: Sp3FrameReconciliationOptions {
-            asserted_equivalent_label_sets: vec![
-                Sp3FrameLabelSet::new(["IGS20", "ITRF2020"]),
-                Sp3FrameLabelSet::new(["IGS14", "ITRF2014"]),
-            ],
-            helmert: true,
-        },
-        provenance: None,
-        verify_continuity: None,
-    }
+    let mut options = MergeOptions::default();
+    options.position_tolerance_m = 0.0;
+    options.clock_tolerance_s = 2.5e-9;
+    options.min_agree = 2;
+    options.clock_min_common = 3;
+    options.combine = combine;
+    options.precedence_scope = MergePrecedenceScope::SatelliteArc;
+    options.outlier_reject = Some(OutlierRejectOptions {
+        position_tolerance_m: 1.25,
+        clock_tolerance_s: 7.5e-9,
+    });
+    options.target_epoch_interval_s = Some(900.0);
+    options.systems = Some(BTreeSet::from([GnssSystem::Gps, GnssSystem::Galileo]));
+    options.frame_reconciliation = Sp3FrameReconciliationOptions {
+        asserted_equivalent_label_sets: vec![
+            Sp3FrameLabelSet::new(["IGS20", "ITRF2020"]),
+            Sp3FrameLabelSet::new(["IGS14", "ITRF2014"]),
+        ],
+        helmert: true,
+    };
+    options.provenance = None;
+    options.verify_continuity = None;
+    options
 }
 
 #[test]
@@ -259,10 +259,8 @@ fn merge_input_identity_is_order_independent_and_verifiable() {
 fn precedence_order_is_bound_as_semantic_merge_policy() {
     let first = artifact(AnalysisCenter::Esa, 0x11);
     let second = artifact(AnalysisCenter::Cod, 0x22);
-    let policy = MergeOptions {
-        combine: MergeCombine::Precedence,
-        ..MergeOptions::default()
-    };
+    let mut policy = MergeOptions::default();
+    policy.combine = MergeCombine::Precedence;
 
     let forward = Sp3MergeInputIdentity::new(&[first.clone(), second.clone()], &policy).unwrap();
     let reverse = Sp3MergeInputIdentity::new(&[second, first], &policy).unwrap();
@@ -292,10 +290,8 @@ fn artifact_or_policy_changes_change_the_stable_identity() {
             .unwrap();
     assert_ne!(original.stable_id, changed_artifact.stable_id);
 
-    let changed_policy = MergeOptions {
-        combine: MergeCombine::Median,
-        ..MergeOptions::default()
-    };
+    let mut changed_policy = MergeOptions::default();
+    changed_policy.combine = MergeCombine::Median;
     let changed_policy = Sp3MergeInputIdentity::new(&[first, second], &changed_policy).unwrap();
     assert_ne!(original.stable_id, changed_policy.stable_id);
 }
@@ -303,28 +299,24 @@ fn artifact_or_policy_changes_change_the_stable_identity() {
 #[test]
 fn policy_set_order_does_not_change_the_stable_identity() {
     let contributor = artifact(AnalysisCenter::Esa, 0x11);
-    let first = MergeOptions {
-        systems: Some(BTreeSet::from([GnssSystem::Galileo, GnssSystem::Gps])),
-        frame_reconciliation: Sp3FrameReconciliationOptions {
-            asserted_equivalent_label_sets: vec![
-                Sp3FrameLabelSet::new(["IGS20", "ITRF2020"]),
-                Sp3FrameLabelSet::new(["IGS14", "ITRF2014"]),
-            ],
-            helmert: false,
-        },
-        ..MergeOptions::default()
+    let mut first = MergeOptions::default();
+    first.systems = Some(BTreeSet::from([GnssSystem::Galileo, GnssSystem::Gps]));
+    first.frame_reconciliation = Sp3FrameReconciliationOptions {
+        asserted_equivalent_label_sets: vec![
+            Sp3FrameLabelSet::new(["IGS20", "ITRF2020"]),
+            Sp3FrameLabelSet::new(["IGS14", "ITRF2014"]),
+        ],
+        helmert: false,
     };
 
-    let second = MergeOptions {
-        systems: Some(BTreeSet::from([GnssSystem::Gps, GnssSystem::Galileo])),
-        frame_reconciliation: Sp3FrameReconciliationOptions {
-            asserted_equivalent_label_sets: vec![
-                Sp3FrameLabelSet::new(["ITRF2014", "IGS14"]),
-                Sp3FrameLabelSet::new(["ITRF2020", "IGS20"]),
-            ],
-            helmert: false,
-        },
-        ..MergeOptions::default()
+    let mut second = MergeOptions::default();
+    second.systems = Some(BTreeSet::from([GnssSystem::Gps, GnssSystem::Galileo]));
+    second.frame_reconciliation = Sp3FrameReconciliationOptions {
+        asserted_equivalent_label_sets: vec![
+            Sp3FrameLabelSet::new(["ITRF2014", "IGS14"]),
+            Sp3FrameLabelSet::new(["ITRF2020", "IGS20"]),
+        ],
+        helmert: false,
     };
 
     let first = Sp3MergeInputIdentity::new(std::slice::from_ref(&contributor), &first).unwrap();
@@ -335,19 +327,15 @@ fn policy_set_order_does_not_change_the_stable_identity() {
 #[test]
 fn non_executable_merge_policies_fail_closed() {
     let contributor = artifact(AnalysisCenter::Esa, 0x11);
-    let empty_systems = MergeOptions {
-        systems: Some(BTreeSet::new()),
-        ..MergeOptions::default()
-    };
+    let mut empty_systems = MergeOptions::default();
+    empty_systems.systems = Some(BTreeSet::new());
     assert!(matches!(
         Sp3MergeInputIdentity::new(std::slice::from_ref(&contributor), &empty_systems),
         Err(Sp3MergeInputIdentityError::InvalidPolicy("systems filter"))
     ));
 
-    let fractional_interval = MergeOptions {
-        target_epoch_interval_s: Some(1.5),
-        ..MergeOptions::default()
-    };
+    let mut fractional_interval = MergeOptions::default();
+    fractional_interval.target_epoch_interval_s = Some(1.5);
     assert!(matches!(
         Sp3MergeInputIdentity::new(&[contributor], &fractional_interval),
         Err(Sp3MergeInputIdentityError::InvalidPolicy(
@@ -355,10 +343,8 @@ fn non_executable_merge_policies_fail_closed() {
         ))
     ));
 
-    let near_zero_interval = MergeOptions {
-        target_epoch_interval_s: Some(1.0e-12),
-        ..MergeOptions::default()
-    };
+    let mut near_zero_interval = MergeOptions::default();
+    near_zero_interval.target_epoch_interval_s = Some(1.0e-12);
     assert!(matches!(
         Sp3MergeInputIdentity::new(&[artifact(AnalysisCenter::Esa, 0x22)], &near_zero_interval),
         Err(Sp3MergeInputIdentityError::InvalidPolicy(
@@ -366,12 +352,10 @@ fn non_executable_merge_policies_fail_closed() {
         ))
     ));
 
-    let incomplete_frame_set = MergeOptions {
-        frame_reconciliation: Sp3FrameReconciliationOptions {
-            asserted_equivalent_label_sets: vec![Sp3FrameLabelSet::new(["IGS20"])],
-            helmert: false,
-        },
-        ..MergeOptions::default()
+    let mut incomplete_frame_set = MergeOptions::default();
+    incomplete_frame_set.frame_reconciliation = Sp3FrameReconciliationOptions {
+        asserted_equivalent_label_sets: vec![Sp3FrameLabelSet::new(["IGS20"])],
+        helmert: false,
     };
     assert!(matches!(
         Sp3MergeInputIdentity::new(
@@ -387,24 +371,20 @@ fn non_executable_merge_policies_fail_closed() {
 #[test]
 fn negative_zero_tolerances_have_the_same_identity_as_positive_zero() {
     let contributor = artifact(AnalysisCenter::Esa, 0x11);
-    let positive = MergeOptions {
+    let mut positive = MergeOptions::default();
+    positive.position_tolerance_m = 0.0;
+    positive.clock_tolerance_s = 0.0;
+    positive.outlier_reject = Some(OutlierRejectOptions {
         position_tolerance_m: 0.0,
         clock_tolerance_s: 0.0,
-        outlier_reject: Some(OutlierRejectOptions {
-            position_tolerance_m: 0.0,
-            clock_tolerance_s: 0.0,
-        }),
-        ..MergeOptions::default()
-    };
-    let negative = MergeOptions {
+    });
+    let mut negative = MergeOptions::default();
+    negative.position_tolerance_m = -0.0;
+    negative.clock_tolerance_s = -0.0;
+    negative.outlier_reject = Some(OutlierRejectOptions {
         position_tolerance_m: -0.0,
         clock_tolerance_s: -0.0,
-        outlier_reject: Some(OutlierRejectOptions {
-            position_tolerance_m: -0.0,
-            clock_tolerance_s: -0.0,
-        }),
-        ..MergeOptions::default()
-    };
+    });
 
     let positive =
         Sp3MergeInputIdentity::new(std::slice::from_ref(&contributor), &positive).unwrap();
