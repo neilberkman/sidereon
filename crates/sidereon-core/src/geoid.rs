@@ -554,8 +554,8 @@ impl GeoidGrid {
         }
 
         let mut values_m = Vec::with_capacity(PROJ_EGM96_GTX_N_LAT * PROJ_EGM96_GTX_N_LON);
-        for chunk in bytes[PROJ_EGM96_GTX_HEADER_BYTES..].chunks_exact(4) {
-            let value = f32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        for chunk in bytes[PROJ_EGM96_GTX_HEADER_BYTES..].as_chunks::<4>().0 {
+            let value = f32::from_be_bytes(*chunk);
             if !value.is_finite() {
                 return Err(GeoidError::NonFiniteValue {
                     index: values_m.len(),
@@ -1555,7 +1555,10 @@ mod tests {
         gtx[32..36].copy_from_slice(&(super::PROJ_EGM96_GTX_N_LAT as i32).to_be_bytes());
         gtx[36..40].copy_from_slice(&(super::PROJ_EGM96_GTX_N_LON as i32).to_be_bytes());
 
-        for record in PROJ_EGM96_930_DENSE_BYTES[16..point_offset].chunks_exact(8) {
+        for record in PROJ_EGM96_930_DENSE_BYTES[16..point_offset]
+            .as_chunks::<8>()
+            .0
+        {
             let index = u32::from_be_bytes(record[..4].try_into().expect("fixture node index"));
             let offset = super::PROJ_EGM96_GTX_HEADER_BYTES + index as usize * 4;
             gtx[offset..offset + 4].copy_from_slice(&record[4..8]);
@@ -1979,7 +1982,9 @@ mod tests {
         let grid = GeoidGrid::from_proj_egm96_gtx(&bytes).expect("parse sparse public PROJ GTX");
 
         for (index, record) in PROJ_EGM96_930_DENSE_BYTES[point_offset..]
-            .chunks_exact(24)
+            .as_chunks::<24>()
+            .0
+            .iter()
             .enumerate()
         {
             let lon_rad = f64::from_bits(u64::from_be_bytes(

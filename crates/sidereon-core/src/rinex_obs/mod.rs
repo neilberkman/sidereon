@@ -1349,7 +1349,7 @@ impl Parser {
                 "RINEX OBS GLONASS slot table has an odd token count in {line:?}"
             )));
         }
-        for pair in tokens.chunks_exact(2) {
+        for pair in tokens.as_chunks::<2>().0 {
             // Each pair is one declared slot entry; account for it against the
             // declared count first, so a skipped (unrepresentable) slot still
             // balances the count check in `finish`.

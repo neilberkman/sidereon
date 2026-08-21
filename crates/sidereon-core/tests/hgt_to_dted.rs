@@ -173,12 +173,11 @@ fn sha256_hex(data: &[u8]) -> String {
         0x5be0cd19,
     ];
 
-    let mut chunks = data.chunks_exact(64);
-    for chunk in &mut chunks {
+    let (blocks, remainder) = data.as_chunks::<64>();
+    for chunk in blocks {
         compress_sha256_block(chunk, &mut state);
     }
 
-    let remainder = chunks.remainder();
     let bit_len = (data.len() as u64).wrapping_mul(8);
     let mut final_blocks = [[0u8; 64]; 2];
     final_blocks[0][..remainder.len()].copy_from_slice(remainder);
@@ -220,8 +219,8 @@ fn compress_sha256_block(block: &[u8], state: &mut [u32; 8]) {
     ];
 
     let mut w = [0u32; 64];
-    for (word, bytes) in w.iter_mut().take(16).zip(block.chunks_exact(4)) {
-        *word = u32::from_be_bytes(bytes.try_into().expect("four-byte SHA-256 word"));
+    for (word, bytes) in w.iter_mut().take(16).zip(block.as_chunks::<4>().0) {
+        *word = u32::from_be_bytes(*bytes);
     }
 
     let mut i = 16usize;

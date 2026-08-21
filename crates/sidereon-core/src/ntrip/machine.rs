@@ -295,7 +295,7 @@ impl NtripClientMachine {
         if self.carry.is_empty() {
             return;
         }
-        let bytes: Vec<u8> = self.carry.drain(..).collect();
+        let bytes: Vec<u8> = std::mem::take(&mut self.carry);
         if self.chunked {
             match self.chunk_decoder.push(&bytes) {
                 Ok(payload) => {
@@ -322,7 +322,7 @@ impl NtripClientMachine {
     fn drain_sourcetable(&mut self, events: &mut Vec<NtripEvent>) -> bool {
         if self.sourcetable_chunked {
             if !self.carry.is_empty() {
-                let bytes: Vec<u8> = self.carry.drain(..).collect();
+                let bytes: Vec<u8> = std::mem::take(&mut self.carry);
                 match self.chunk_decoder.push(&bytes) {
                     Ok(decoded) => self.sourcetable_carry.extend_from_slice(&decoded),
                     Err(err) => {
@@ -339,7 +339,7 @@ impl NtripClientMachine {
             }
             if self.chunk_decoder.finished() {
                 if !self.sourcetable_carry.is_empty() {
-                    let line: Vec<u8> = self.sourcetable_carry.drain(..).collect();
+                    let line: Vec<u8> = std::mem::take(&mut self.sourcetable_carry);
                     if self.push_sourcetable_line(&line, events) {
                         return true;
                     }
@@ -358,11 +358,11 @@ impl NtripClientMachine {
         if self.state == NtripState::Sourcetable {
             if self.sourcetable_chunked {
                 if !self.sourcetable_carry.is_empty() {
-                    let line: Vec<u8> = self.sourcetable_carry.drain(..).collect();
+                    let line: Vec<u8> = std::mem::take(&mut self.sourcetable_carry);
                     self.push_sourcetable_line(&line, &mut events);
                 }
             } else if !self.carry.is_empty() {
-                let line: Vec<u8> = self.carry.drain(..).collect();
+                let line: Vec<u8> = std::mem::take(&mut self.carry);
                 self.push_sourcetable_line(&line, &mut events);
             }
             self.finish_sourcetable(&mut events);

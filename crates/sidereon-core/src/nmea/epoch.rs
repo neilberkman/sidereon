@@ -259,7 +259,7 @@ impl NmeaAccumulator {
 
     pub fn finish(&mut self) -> Option<EpochSnapshot> {
         if !self.retained.is_empty() {
-            let line = self.retained.drain(..).collect::<Vec<_>>();
+            let line = std::mem::take(&mut self.retained);
             let mut output = NmeaChunkOutput::default();
             push_line(self, &line, self.next_line, &mut output);
             self.next_line += 1;

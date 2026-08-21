@@ -1463,7 +1463,9 @@ mod tests {
         assert_eq!(compact.len() % 2, 0);
         compact
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|chunk| {
                 let hi = (chunk[0] as char).to_digit(16).unwrap();
                 let lo = (chunk[1] as char).to_digit(16).unwrap();
