@@ -201,6 +201,12 @@ as f64 hex-bit strings and compared with `f64::to_bits`, never tolerances.
 Regenerate them with the scripts in `fixtures-generators/` inside the pinned
 Python environment (`fixtures-generators/requirements.txt`).
 
+When an oracle package version changes, apply the repository's [Python oracle
+version-pinning rules](../../docs/oracle-version-pinning.md). In particular,
+hash only the meaningful FITPACK coefficient prefix, pin NumPy together with
+its BLAS/LAPACK substrate for pseudo-inverse fixtures, and treat regeneration
+under another package version as a new fixture.
+
 The host-LAPACK parity test skips unless `TRUST_REGION_LEAST_SQUARES_LAPACK_PATH`
 points at a LAPACK library; the backend itself is always compiled in.
 

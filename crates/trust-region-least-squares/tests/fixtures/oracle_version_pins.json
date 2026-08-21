@@ -1,0 +1,131 @@
+{
+  "schema": "trust-region-least-squares-oracle-version-pins-v1",
+  "recorded_at": "2026-08-21",
+  "host": {
+    "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+    "python": "3.14.7",
+    "blas_lapack": "Apple Accelerate as reported by numpy.show_config()"
+  },
+  "tools": {
+    "uv": "0.11.19",
+    "curl": "8.7.1",
+    "jq": "1.7.1",
+    "digest": "shasum -a 256"
+  },
+  "sources": [
+    {
+      "package": "numpy",
+      "version": "2.4.6",
+      "artifact": "numpy-2.4.6-cp314-cp314-macosx_14_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/60/61/23f27c172f022e04025b7dc2367f4d63c1a398120607ec896228649a6f48/numpy-2.4.6-cp314-cp314-macosx_14_0_arm64.whl",
+      "sha256": "d581b735e177fdcdce6fed8e7e8880a3fb6ee4e3653a3ac6af01c6f4c03effc5",
+      "measured_binary": "numpy/linalg/_umath_linalg.cpython-314-darwin.so",
+      "measured_binary_sha256": "5a8c1ceb8eeb0fecd6086baf0a7482c107273f6597cfdb8e41c9079f89089af3"
+    },
+    {
+      "package": "numpy",
+      "version": "2.5.0",
+      "artifact": "numpy-2.5.0-cp314-cp314-macosx_14_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/f7/a0/8400a9c0e3625182347593f5e1f57da9a617a534794805c8df5518154ddc/numpy-2.5.0-cp314-cp314-macosx_14_0_arm64.whl",
+      "sha256": "e1da54b53e75cd9fcfc23efcc7edab2c6aecf97b6037566d8a0fe804af8ec57c",
+      "measured_binary": "numpy/linalg/_umath_linalg.cpython-314-darwin.so",
+      "measured_binary_sha256": "b2ee60582c2d764477125b59838b732659a2b373a0d22f2f743890ce1032ad65"
+    },
+    {
+      "package": "scipy",
+      "version": "1.17.1",
+      "artifact": "scipy-1.17.1-cp314-cp314-macosx_14_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/db/7b/8624a203326675d7746a254083a187398090a179335b2e4a20e2ddc46e83/scipy-1.17.1-cp314-cp314-macosx_14_0_arm64.whl",
+      "sha256": "3fd1fcdab3ea951b610dc4cef356d416d5802991e7e32b5254828d342f7b7e0b",
+      "measured_binary": "scipy/interpolate/_fitpack.cpython-314-darwin.so",
+      "measured_binary_sha256": "0c1c63ef5bf1928dad2dcf731c8b225e882656da96e00a6ed540d7e76bf62d5a"
+    },
+    {
+      "package": "scipy",
+      "version": "1.18.0",
+      "artifact": "scipy-1.18.0-cp314-cp314-macosx_14_0_arm64.whl",
+      "url": "https://files.pythonhosted.org/packages/91/02/2e636a61a525632c373cf6a9c24442a3ffb79e364d38e98b32042964ac32/scipy-1.18.0-cp314-cp314-macosx_14_0_arm64.whl",
+      "sha256": "f2a6af57bd9e4a75d70e4117e78a1bbee84f79ae3fbb6d0111005d6ebcc4cb8d",
+      "measured_binary": "scipy/interpolate/_fitpack.cpython-314-darwin.so",
+      "measured_binary_sha256": "45086335552edb6f0d8a6fe22399f4567d543d882d233149b464706a1fa5b662"
+    }
+  ],
+  "references": [
+    {
+      "title": "SciPy 1.18.0 release notes",
+      "url": "https://docs.scipy.org/doc/scipy/release/1.18.0-notes.html",
+      "relevance": "records the FITPACK port from Fortran to C"
+    },
+    {
+      "title": "SciPy splrep documentation",
+      "url": "https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.splrep.html",
+      "relevance": "records that the trailing k+1 coefficients are ignored"
+    },
+    {
+      "title": "NumPy 2.5.0 release notes",
+      "url": "https://numpy.org/doc/2.5/release/2.5.0-notes.html",
+      "relevance": "official release record for the new NumPy version"
+    }
+  ],
+  "reproduction": {
+    "script": "crates/trust-region-least-squares/fixtures-generators/verify_oracle_version_pins.py",
+    "command": "UV_CACHE_DIR=/tmp/sidereon-oracle-uv uv venv --python 3.14 /tmp/sidereon-oracle-old && UV_CACHE_DIR=/tmp/sidereon-oracle-uv uv pip install --python /tmp/sidereon-oracle-old/bin/python numpy==2.4.6 scipy==1.17.1 && UV_CACHE_DIR=/tmp/sidereon-oracle-uv uv venv --python 3.14 /tmp/sidereon-oracle-new && UV_CACHE_DIR=/tmp/sidereon-oracle-uv uv pip install --python /tmp/sidereon-oracle-new/bin/python numpy==2.5.0 scipy==1.18.0 && SIDEREON_ORACLE_OLD_PYTHON=/tmp/sidereon-oracle-old/bin/python SIDEREON_ORACLE_NEW_PYTHON=/tmp/sidereon-oracle-new/bin/python /tmp/sidereon-oracle-new/bin/python crates/trust-region-least-squares/fixtures-generators/verify_oracle_version_pins.py"
+  },
+  "measurements": {
+    "scipy_splrep": {
+      "old_version": "1.17.1",
+      "new_version": "1.18.0",
+      "allocator_reuse_fits_per_version": 10000,
+      "allocator_addresses_reused_per_version": 2,
+      "nonzero_trailing_coefficients_seen": 0,
+      "interpolating_s_0": {
+        "used_coefficients": 9,
+        "trailing_coefficients_per_version": [
+          "0x0.0p+0",
+          "0x0.0p+0",
+          "0x0.0p+0",
+          "0x0.0p+0"
+        ],
+        "used_coefficient_max_ulp": 0,
+        "evaluation_max_ulp": 0
+      },
+      "smoothed_s_0_01": {
+        "used_coefficients": 7,
+        "trailing_coefficients_per_version": [
+          "0x0.0p+0",
+          "0x0.0p+0",
+          "0x0.0p+0",
+          "0x0.0p+0"
+        ],
+        "used_coefficient_max_ulp": 21,
+        "evaluation_max_ulp": 23
+      }
+    },
+    "numpy_pinv": {
+      "old_version": "2.4.6",
+      "new_version": "2.5.0",
+      "fixed_matrix": {
+        "generator": "numpy.random.default_rng(20260821).normal(size=(9, 6))",
+        "input_sha256": "0c67efbaf8a750cf94d9ba870279cc30aedd1da37b23736e5a94f43111e2ff14",
+        "old_output_sha256": "742760f0f41566d7b1070be2b56f29f5520934a634d0283a5782ddf5f1698b09",
+        "new_output_sha256": "742760f0f41566d7b1070be2b56f29f5520934a634d0283a5782ddf5f1698b09",
+        "max_ulp": 0
+      },
+      "deterministic_sweep": {
+        "matrix_families": [
+          "random",
+          "hilbert",
+          "near-dependent"
+        ],
+        "dimensions": "2 through 20",
+        "seeds_per_dimension": 5,
+        "cases": 285,
+        "differing_cases": 0
+      }
+    }
+  },
+  "policy": {
+    "spline_coefficients": "Hash only the first n_knots - k - 1 coefficients and pin SciPy for evaluated fixture values.",
+    "pseudo_inverse": "Pin NumPy and the BLAS/LAPACK substrate. Regeneration under another version creates a new fixture."
+  }
+}

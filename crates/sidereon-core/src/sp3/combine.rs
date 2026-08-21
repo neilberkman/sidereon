@@ -33,7 +33,8 @@ use crate::frame_catalog::{
 };
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::sp3::continuity::{
-    check_continuity, ContinuityDefect, ContinuityOptions, ContinuityReport,
+    check_continuity, ContinuityDefect, ContinuityOptions, ContinuityReport, EpochWindow,
+    StencilExtent, WindowContinuityDecision, WindowContinuityVerdict,
 };
 use crate::tolerances::WHOLE_SECOND_EPS_S;
 use crate::validate;
@@ -653,6 +654,45 @@ impl MergeContinuityReport {
             .iter()
             .filter(|violation| violation.crosses_contributors)
     }
+
+    /// Contributor-changing violations that can influence an evaluation
+    /// window through the product interpolator's stencil.
+    pub fn splices_influencing(
+        &self,
+        window: EpochWindow,
+        stencil: StencilExtent,
+    ) -> Vec<&MergeContinuityViolation> {
+        self.splices()
+            .filter(|violation| violation.defect.influences(window, stencil))
+            .collect()
+    }
+
+    /// Compose defect and splice findings into one window-scoped decision.
+    ///
+    /// The decision refuses when any recorded defect influences the requested
+    /// evaluation window. Both the influencing subset and complete finding lists
+    /// remain available on the returned verdict.
+    pub fn verdict_for_window(
+        &self,
+        window: EpochWindow,
+        stencil: StencilExtent,
+    ) -> WindowContinuityVerdict<'_> {
+        let influencing_defects = self.report.defects_influencing(window, stencil);
+        let influencing_splices = self.splices_influencing(window, stencil);
+        let all_splices = self.splices().collect();
+        let decision = if influencing_defects.is_empty() && influencing_splices.is_empty() {
+            WindowContinuityDecision::Accept
+        } else {
+            WindowContinuityDecision::Refuse
+        };
+        WindowContinuityVerdict {
+            decision,
+            influencing_defects,
+            influencing_splices,
+            all_defects: &self.report.defects,
+            all_splices,
+        }
+    }
 }
 
 /// Audit trail for a [`merge`].
@@ -686,6 +726,37 @@ pub struct MergeReport {
 }
 
 impl MergeReport {
+    /// Contributor-changing violations that can influence an evaluation
+    /// window, when merge continuity verification was requested.
+    ///
+    /// `None` means verification was not requested. `Some(Vec::new())` means it
+    /// ran and no recorded splice can enter the requested stencil.
+    pub fn splices_influencing(
+        &self,
+        window: EpochWindow,
+        stencil: StencilExtent,
+    ) -> Option<Vec<&MergeContinuityViolation>> {
+        self.continuity
+            .as_ref()
+            .map(|report| report.splices_influencing(window, stencil))
+    }
+
+    /// Decide whether the optional continuity post-condition influences an
+    /// evaluation window.
+    ///
+    /// `None` preserves the distinction that merge continuity verification was
+    /// not requested. When present, the verdict includes the complete defect and
+    /// splice lists even when it accepts the window.
+    pub fn continuity_verdict_for_window(
+        &self,
+        window: EpochWindow,
+        stencil: StencilExtent,
+    ) -> Option<WindowContinuityVerdict<'_>> {
+        self.continuity
+            .as_ref()
+            .map(|report| report.verdict_for_window(window, stencil))
+    }
+
     /// Fraction of accepted cells that were carried from a single source, in
     /// `0.0..=1.0`; `None` when no cells were accepted.
     ///

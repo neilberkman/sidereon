@@ -163,6 +163,29 @@ fn inspect_nav_reports_compatible_time_bases_separately() {
 }
 
 #[test]
+fn inspect_sp3_window_prints_scoped_continuity_verdict() {
+    let sp3 = fixture(&["sp3", "COD0MGXFIN_20201770000_01D_05M_ORB.SP3"]);
+    let output = run(&[
+        "inspect",
+        sp3.to_str().expect("fixture path utf8"),
+        "--window",
+        "646358400",
+        "646401600",
+    ]);
+    assert!(
+        output.status.success(),
+        "status {:?}\nstderr:\n{}",
+        output.status.code(),
+        stderr(&output)
+    );
+    let stdout = stdout(&output);
+    assert!(stdout.contains("continuity: attested"), "{stdout}");
+    assert!(stdout.contains("window_continuity: accept"), "{stdout}");
+    assert!(stdout.contains("stencil_before_s=1500"), "{stdout}");
+    assert!(stdout.contains("stencil_after_s=1500"), "{stdout}");
+}
+
+#[test]
 fn qc_json_includes_lint_counts_and_qc_report() {
     let obs = fixture(&["obs", "ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx"]);
     let output = run(&[

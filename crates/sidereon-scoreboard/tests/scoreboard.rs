@@ -1017,7 +1017,9 @@ fn publication_status_answers_the_recorded_gfz_lag_scenario() {
             product,
             listing_url,
             behind_nominal_minutes,
+            next_issue,
         } => {
+            let next_issue = next_issue.expect("cataloged GFZ ultra schedule");
             assert_eq!(product.date, date(2026, 8, 3));
             assert_eq!(product.issue, "0300");
             assert_eq!(product.filename, "GFZ0OPSULT_20262150300_02D_05M_ORB.SP3");
@@ -1027,6 +1029,12 @@ fn publication_status_answers_the_recorded_gfz_lag_scenario() {
                 "https://isdc-data.gfz.de/gnss/products/ultra/w2430/"
             );
             assert_eq!(behind_nominal_minutes, 28 * 60 + 8);
+            assert_eq!(next_issue.identity.date, date(2026, 8, 3));
+            assert_eq!(next_issue.identity.issue.as_deref(), Some("0600"));
+            assert_eq!(
+                next_issue.due_at,
+                ProductDateTime::new(date(2026, 8, 4), 8, 50, 0).unwrap()
+            );
         }
         other => panic!("expected Published, got {other:?}"),
     }
@@ -1035,6 +1043,36 @@ fn publication_status_answers_the_recorded_gfz_lag_scenario() {
         1,
         "one listing GET answered the query"
     );
+}
+
+#[test]
+fn publication_status_keeps_lines_without_a_nominal_schedule_queryable() {
+    struct RecordedWum;
+    impl ListingFetcher for RecordedWum {
+        fn fetch_listing(&self, _url: &str) -> Result<ListingOutcome, ScoreboardError> {
+            Ok(ListingOutcome::Available(
+                "-rw-r--r-- 1 ftp ftp 123 Aug 4 00:30 WUM0MGXNRT_20262160000_02D_05M_ORB.SP3.gz\n"
+                    .to_string(),
+            ))
+        }
+    }
+
+    let now = ProductDateTime::new(date(2026, 8, 4), 7, 8, 0).expect("query instant");
+    let outcome = publication_status(AnalysisCenter::WumNrt, ProductType::Sp3, now, &RecordedWum)
+        .expect("publication status remains available without a due schedule");
+    match outcome {
+        PublicationStatusOutcome::Published {
+            product,
+            behind_nominal_minutes,
+            next_issue,
+            ..
+        } => {
+            assert_eq!(product.issue, "0000");
+            assert_eq!(behind_nominal_minutes, 7 * 60 + 8);
+            assert!(next_issue.is_none());
+        }
+        other => panic!("expected Published, got {other:?}"),
+    }
 }
 
 /// Recorded 2026-08-04 BKG state: the current week's directory does not

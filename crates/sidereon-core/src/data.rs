@@ -1328,6 +1328,14 @@ pub enum DataCatalogError {
     NoUltraIssue,
     /// No available ultra-rapid issue exists at or before the requested target.
     NoAvailableUltraIssue,
+    /// The catalog carries the product line but has no pinned nominal due-time
+    /// rule for it.
+    UnsupportedNominalSchedule {
+        /// Analysis center.
+        center: AnalysisCenter,
+        /// Product type.
+        product_type: ProductType,
+    },
     /// An archive listing body did not classify as any recognized listing
     /// dialect. Deliberately not best-effort: a silent empty parse would be
     /// indistinguishable from "nothing published".
@@ -1443,6 +1451,13 @@ impl fmt::Display for DataCatalogError {
             Self::NoAvailableUltraIssue => {
                 write!(f, "no available ultra-rapid issue at or before target")
             }
+            Self::UnsupportedNominalSchedule {
+                center,
+                product_type,
+            } => write!(
+                f,
+                "{center}/{product_type} has no nominal due-time schedule"
+            ),
             Self::UnrecognizedArchiveListing { reason } => {
                 write!(f, "unrecognized archive listing: {reason}")
             }
@@ -1653,6 +1668,56 @@ impl ProductDateTime {
     fn ordering_minutes(self) -> i64 {
         self.date.julian_day_number() * 1_440 + i64::from(self.hour) * 60 + i64::from(self.minute)
     }
+
+    fn ordering_seconds(self) -> i64 {
+        self.date.julian_day_number() * 86_400
+            + i64::from(self.hour) * 3_600
+            + i64::from(self.minute) * 60
+            + i64::from(self.second)
+    }
+}
+
+impl fmt::Display for ProductDateTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}T{:02}:{:02}:{:02}Z",
+            self.date, self.hour, self.minute, self.second
+        )
+    }
+}
+
+/// Half-open nominal coverage interval, `[from, until)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NominalCoverageInterval {
+    /// First covered instant.
+    pub from: ProductDateTime,
+    /// First instant not covered.
+    pub until: ProductDateTime,
+}
+
+/// Nominal observed and predicted portions of one issue.
+///
+/// Ultra-rapid SP3 identities populate both fields. Ordinary final and rapid
+/// products populate only `observed`; predicted IONEX products populate only
+/// `predicted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NominalCoverage {
+    /// Observed-data interval, when the line carries one.
+    pub observed: Option<NominalCoverageInterval>,
+    /// Predicted-data interval, when the line carries one.
+    pub predicted: Option<NominalCoverageInterval>,
+}
+
+/// The next catalog issue nominally due at or after a query instant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NominalIssue {
+    /// Exact product identity expected at the due time.
+    pub identity: ProductIdentity,
+    /// Nominal publication deadline in UTC.
+    pub due_at: ProductDateTime,
+    /// Nominal observed and predicted coverage named by the identity.
+    pub covers: NominalCoverage,
 }
 
 /// Ultra-rapid issue date and `HHMM` issue time.
@@ -3605,6 +3670,237 @@ pub fn published_issue_age_minutes(
     now: ProductDateTime,
 ) -> Result<i64, DataCatalogError> {
     Ok(now.ordering_minutes() - issue_ordering_minutes(published.date, &published.issue)?)
+}
+
+/// Return the next catalog issue nominally due at or after `now`.
+///
+/// This is a pure catalog query. It performs no listing fetch and does not say
+/// whether an archive has published the issue. The schedule rules are pinned
+/// to the IGS product descriptions, the IGS Analysis Center Coordinator
+/// schedule, and the relevant center descriptions in the committed nominal
+/// schedule provenance fixture.
+///
+/// Rules represented here:
+///
+/// - IGS combined ultra-rapid SP3 is released 27 hours after the filename's
+///   coverage start: 24 observed hours followed by the 03:00, 09:00, 15:00,
+///   or 21:00 UTC release. Analysis-center ultra products use the 26 h 50 min
+///   submission deadline. A two-day ultra identity names a 24-hour observed
+///   interval followed by a 24-hour predicted interval.
+/// - GFZ rapid SP3 and CLK use the daily 15:45 UTC analysis-center deadline for
+///   the preceding UTC day. CODE rapid IONEX uses the published less-than-24 h
+///   latency boundary, represented as 00:00 UTC following the map date.
+/// - Final SP3 and CLK lines represent the newest daily identity in each weekly
+///   batch. Analysis-center batches are due Wednesday at 05:00 UTC, 11 days
+///   after the GPS week ends. The IGS combined final batch is due by Friday,
+///   represented as 23:59:59 UTC, 13 days after the week ends. Final IONEX uses
+///   the published approximately 11-day weekly latency, with a date-only
+///   deadline represented as 23:59:59 UTC.
+/// - CODE predicted IONEX is due at 00:00 UTC one or two days before its map
+///   date, matching the line's cataloged prediction horizon.
+///
+/// Near-real-time WUM and broadcast navigation lines are outside these pinned
+/// rules and return [`DataCatalogError::UnsupportedNominalSchedule`].
+pub fn next_issue_due(
+    center: AnalysisCenter,
+    product_type: ProductType,
+    now: ProductDateTime,
+) -> Result<NominalIssue, DataCatalogError> {
+    ProductDate::new(now.date.year, now.date.month, now.date.day)?;
+    ProductDateTime::new(now.date, now.hour, now.minute, now.second)?;
+    product_convention(center, product_type)?;
+    if center == AnalysisCenter::WumNrt || product_type == ProductType::Nav {
+        return Err(DataCatalogError::UnsupportedNominalSchedule {
+            center,
+            product_type,
+        });
+    }
+
+    let mut next: Option<NominalIssue> = None;
+    for offset_days in -28_i64..=42 {
+        let Ok(identity_date) = now.date.add_days(offset_days) else {
+            continue;
+        };
+        for candidate in nominal_issues_for_date(center, product_type, identity_date)? {
+            if candidate.due_at < now {
+                continue;
+            }
+            let replace = next.as_ref().is_none_or(|current| {
+                candidate.due_at < current.due_at
+                    || (candidate.due_at == current.due_at
+                        && candidate.identity.official_filename
+                            < current.identity.official_filename)
+            });
+            if replace {
+                next = Some(candidate);
+            }
+        }
+    }
+    next.ok_or(DataCatalogError::DateOutOfRange)
+}
+
+fn nominal_issues_for_date(
+    center: AnalysisCenter,
+    product_type: ProductType,
+    identity_date: ProductDate,
+) -> Result<Vec<NominalIssue>, DataCatalogError> {
+    let solution = product_solution_class(center, product_type)?;
+    if solution == SolutionClass::Final && identity_date.gps_day_of_week()? != 6 {
+        return Ok(Vec::new());
+    }
+
+    let entry = center_catalog(center).expect("catalog entry exists for enum variant");
+    let issues: Vec<&str> = if matches!(solution, SolutionClass::UltraRapid) {
+        entry.issues.to_vec()
+    } else {
+        vec!["0000"]
+    };
+    let mut out = Vec::with_capacity(issues.len());
+    for issue in issues {
+        let issue_argument = (!entry.issues.is_empty()).then_some(issue);
+        let identity =
+            match product_identity(center, product_type, identity_date, None, issue_argument) {
+                Ok(identity) => identity,
+                Err(DataCatalogError::UnsupportedProductEra { .. }) => continue,
+                Err(error) => return Err(error),
+            };
+        let filename_epoch = ProductDateTime::new(
+            identity_date,
+            (issue_minutes(issue)? / 60) as u8,
+            (issue_minutes(issue)? % 60) as u8,
+            0,
+        )?;
+        let covers = nominal_coverage(&identity, filename_epoch)?;
+        let due_at = nominal_due_at(center, product_type, solution, filename_epoch, covers)?;
+        out.push(NominalIssue {
+            identity,
+            due_at,
+            covers,
+        });
+    }
+    Ok(out)
+}
+
+fn nominal_due_at(
+    center: AnalysisCenter,
+    product_type: ProductType,
+    solution: SolutionClass,
+    filename_epoch: ProductDateTime,
+    covers: NominalCoverage,
+) -> Result<ProductDateTime, DataCatalogError> {
+    match solution {
+        SolutionClass::UltraRapid => {
+            let observed_until = covers
+                .observed
+                .ok_or(DataCatalogError::InconsistentProductIdentity {
+                    field: "nominal_ultra_observed_coverage",
+                })?
+                .until;
+            add_product_seconds(
+                observed_until,
+                if center == AnalysisCenter::IgsUlt {
+                    3 * 3_600
+                } else {
+                    2 * 3_600 + 50 * 60
+                },
+            )
+        }
+        SolutionClass::Rapid if product_type == ProductType::Ionex => {
+            add_product_seconds(filename_epoch, 24 * 3_600)
+        }
+        SolutionClass::Rapid => {
+            add_product_seconds(filename_epoch, 24 * 3_600 + 15 * 3_600 + 45 * 60)
+        }
+        SolutionClass::Final if center == AnalysisCenter::Igs => {
+            add_product_seconds(filename_epoch, 13 * 86_400 + 23 * 3_600 + 59 * 60 + 59)
+        }
+        SolutionClass::Final if product_type == ProductType::Ionex => {
+            add_product_seconds(filename_epoch, 11 * 86_400 + 23 * 3_600 + 59 * 60 + 59)
+        }
+        SolutionClass::Final => add_product_seconds(filename_epoch, 11 * 86_400 + 5 * 3_600),
+        SolutionClass::Predicted => {
+            let horizon = center.prediction_horizon_days().ok_or(
+                DataCatalogError::UnsupportedNominalSchedule {
+                    center,
+                    product_type,
+                },
+            )?;
+            add_product_seconds(filename_epoch, -i64::from(horizon) * 86_400)
+        }
+        SolutionClass::NearRealTime | SolutionClass::Broadcast => {
+            Err(DataCatalogError::UnsupportedNominalSchedule {
+                center,
+                product_type,
+            })
+        }
+    }
+}
+
+fn nominal_coverage(
+    identity: &ProductIdentity,
+    filename_epoch: ProductDateTime,
+) -> Result<NominalCoverage, DataCatalogError> {
+    let content_offset_s = if identity.family == ProductType::Sp3 {
+        let entry = center_catalog(identity.analysis_center)
+            .expect("validated identity has a catalog entry");
+        let issue = if entry.issues.is_empty() {
+            None
+        } else {
+            identity.issue.as_deref()
+        };
+        sp3_content_start_convention(identity.analysis_center, identity.date, issue)?
+            .content_start_offset_s()
+    } else {
+        0
+    };
+    let from = add_product_seconds(filename_epoch, content_offset_s)?;
+    let duration_s = match identity.span.as_str() {
+        "01D" => 86_400,
+        "02D" => 172_800,
+        _ => {
+            return Err(DataCatalogError::InconsistentProductIdentity {
+                field: "nominal_coverage_span",
+            })
+        }
+    };
+    let until = add_product_seconds(from, duration_s)?;
+
+    if identity.solution == SolutionClass::UltraRapid && duration_s == 172_800 {
+        let split = add_product_seconds(from, 86_400)?;
+        Ok(NominalCoverage {
+            observed: Some(NominalCoverageInterval { from, until: split }),
+            predicted: Some(NominalCoverageInterval { from: split, until }),
+        })
+    } else if identity.solution == SolutionClass::Predicted {
+        Ok(NominalCoverage {
+            observed: None,
+            predicted: Some(NominalCoverageInterval { from, until }),
+        })
+    } else {
+        Ok(NominalCoverage {
+            observed: Some(NominalCoverageInterval { from, until }),
+            predicted: None,
+        })
+    }
+}
+
+fn add_product_seconds(
+    datetime: ProductDateTime,
+    seconds: i64,
+) -> Result<ProductDateTime, DataCatalogError> {
+    let total = datetime
+        .ordering_seconds()
+        .checked_add(seconds)
+        .ok_or(DataCatalogError::DateOutOfRange)?;
+    let jdn = total.div_euclid(86_400);
+    let seconds_of_day = total.rem_euclid(86_400);
+    ProductDateTime::new(
+        product_date_from_jdn(jdn)?,
+        u8::try_from(seconds_of_day / 3_600).map_err(|_| DataCatalogError::DateOutOfRange)?,
+        u8::try_from((seconds_of_day % 3_600) / 60)
+            .map_err(|_| DataCatalogError::DateOutOfRange)?,
+        u8::try_from(seconds_of_day % 60).map_err(|_| DataCatalogError::DateOutOfRange)?,
+    )
 }
 
 /// Archive listing URLs that can answer "what is the newest published issue"
