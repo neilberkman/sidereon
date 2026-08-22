@@ -16,7 +16,7 @@
 
 use crate::loss::Loss;
 use crate::model::{solve_model, solve_model_with, ResidualModel};
-use crate::trf::{ThinSvd, TrfError, TrfOptions, TrfResult, XScale};
+use crate::trf::{HostNumerics, TrfError, TrfOptions, TrfResult, XScale};
 
 /// A built-in residual `r: R^n -> R^m` evaluated entirely in Rust.
 ///
@@ -254,14 +254,14 @@ pub fn solve_data_problem(problem: &DataProblem) -> Result<TrfResult, TrfError> 
     solve_model(&problem.kind, &problem.x0, &problem.options())
 }
 
-/// Solve a [`DataProblem`] through an injected [`ThinSvd`] backend (inject
+/// Solve a [`DataProblem`] through an injected [`HostNumerics`] backend (inject
 /// [`crate::hostlapack::LapackSvd`] for bit-for-bit SciPy parity).
 pub fn solve_data_problem_with(
     problem: &DataProblem,
-    svd: &dyn ThinSvd,
+    host: &dyn HostNumerics,
 ) -> Result<TrfResult, TrfError> {
     problem.kind.validate(&problem.x0)?;
-    solve_model_with(&problem.kind, &problem.x0, svd, &problem.options())
+    solve_model_with(&problem.kind, &problem.x0, host, &problem.options())
 }
 
 fn check_len(what: &'static str, got: usize, expected: usize) -> Result<(), TrfError> {

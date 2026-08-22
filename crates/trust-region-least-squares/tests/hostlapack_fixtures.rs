@@ -17,7 +17,7 @@ use trust_region_least_squares::parity::{
     assert_f64_bits_eq, assert_f64_slice_bits_eq, f64_from_hex,
 };
 use trust_region_least_squares::trf::{
-    jacobian_2point, trf_no_bounds, JacobianFn, ResidualFn, ThinSvd, TrfOptions,
+    jacobian_2point, trf_no_bounds, HostNumerics, JacobianFn, ResidualFn, TrfOptions,
 };
 
 #[path = "support/bitexact.rs"]
@@ -89,14 +89,14 @@ fn scipy_hostlapack_svd_fixtures_are_bit_exact() {
     assert_eq!(doc["scipy_version"], "1.18.0");
     assert_eq!(doc["numpy_version"], "2.5.0");
 
-    let svd = LapackSvd::from_env();
+    let host = LapackSvd::from_env();
     let mut checked = 0usize;
     for case in doc["cases"].as_array().expect("cases") {
         let name = case["name"].as_str().expect("name");
         let m = case["m"].as_u64().expect("m") as usize;
         let n = case["n"].as_u64().expect("n") as usize;
         let a = bits_vec(&case["a_bits"]);
-        let (u, s, vt) = svd.svd(&a, m, n).expect("host LAPACK SVD");
+        let (u, s, vt) = host.svd(&a, m, n).expect("host LAPACK SVD");
         assert_f64_slice_bits_eq(&format!("{name} u"), &u, &bits_vec(&case["u_bits"]));
         assert_f64_slice_bits_eq(&format!("{name} s"), &s, &bits_vec(&case["s_bits"]));
         assert_f64_slice_bits_eq(&format!("{name} vt"), &vt, &bits_vec(&case["vt_bits"]));
@@ -124,7 +124,7 @@ fn scipy_trf_small_dense_hostlapack_results_are_bit_exact() {
     assert_eq!(doc["reference"]["scipy"], "1.18.0");
     assert_eq!(doc["reference"]["numpy"], "2.5.0");
 
-    let svd = LapackSvd::from_env();
+    let host = LapackSvd::from_env();
     let mut checked = 0usize;
     for case in doc["cases"].as_array().expect("cases") {
         let name = case["name"].as_str().expect("case name");
@@ -151,7 +151,7 @@ fn scipy_trf_small_dense_hostlapack_results_are_bit_exact() {
             &mut fun as &mut ResidualFn<'_>,
             &mut jac as &mut JacobianFn<'_>,
             &bits3(&case["x0"]),
-            &svd,
+            &host,
             &TrfOptions::default(),
         )
         .expect("host LAPACK trf");
@@ -234,7 +234,7 @@ fn scipy_trf_loss_hostlapack_results_are_bit_exact() {
     assert_eq!(doc["reference"]["scipy"], "1.18.0");
     assert_eq!(doc["reference"]["numpy"], "2.5.0");
 
-    let svd = LapackSvd::from_env();
+    let host = LapackSvd::from_env();
     let mut checked = 0usize;
     let mut losses_seen = std::collections::BTreeSet::new();
     for case in doc["cases"].as_array().expect("cases") {
@@ -270,7 +270,7 @@ fn scipy_trf_loss_hostlapack_results_are_bit_exact() {
             &mut fun as &mut ResidualFn<'_>,
             &mut jac as &mut JacobianFn<'_>,
             &bits3(&case["x0"]),
-            &svd,
+            &host,
             &options,
         )
         .expect("host LAPACK trf");

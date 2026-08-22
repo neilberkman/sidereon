@@ -110,7 +110,7 @@ fn scipy_trf_data_problem_hostlapack_results_are_bit_exact() {
     assert_eq!(doc["reference"]["scipy"], "1.18.0");
     assert_eq!(doc["reference"]["numpy"], "2.5.0");
 
-    let svd = LapackSvd::from_env();
+    let host = LapackSvd::from_env();
     let mut checked = 0usize;
     let mut kinds_seen = BTreeSet::new();
     let mut losses_seen = BTreeSet::new();
@@ -131,7 +131,7 @@ fn scipy_trf_data_problem_hostlapack_results_are_bit_exact() {
         };
 
         let result =
-            solve_data_problem_with(&problem, &svd).expect("host LAPACK data-problem solve");
+            solve_data_problem_with(&problem, &host).expect("host LAPACK data-problem solve");
 
         assert_eq!(
             result.nfev,

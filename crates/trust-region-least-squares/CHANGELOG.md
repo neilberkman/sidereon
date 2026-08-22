@@ -2,6 +2,43 @@
 
 All notable changes to `trust-region-least-squares` are documented here.
 
+## [0.10.0] - 2026-08-22
+
+### Added
+
+- A host-runtime numerics backend seam for bit-exact reproduction of a pinned
+  SciPy/NumPy runtime. `HostNumerics::power` routes elementwise
+  `values ** exponent`, and `HostNumerics::power_scalar` routes scalar power;
+  both default to `Ok(None)` to retain the pure-Rust calculation. Supplied
+  vector results are length-checked and failures remain typed.
+- `LossFunction::evaluate_with` and `rho_for_loss_with`, routing the robust-loss
+  derivative powers (`z ** -0.5` and `z ** -1.5`) through the host backend.
+  Huber dispatches the compressed `z[z > 1]` subset and soft-L1 dispatches the
+  full `1 + z` vector. Losses and cost-only paths without a NumPy `power` call
+  do not dispatch.
+- Scalar-power routing for both trust-region alpha seeds written by SciPy as
+  `(alpha_lower * alpha_upper) ** 0.5`. Direct square roots, including the
+  exactly representable finite-difference step, remain direct operations.
+- `LapackSvd::install`, `LapackSvd::installed`, and
+  `LapackSvd::with_numpy_blas_path` for a write-once process record of the
+  pinned runtime. Conflicting configuration returns
+  `LapackError::ConflictingHostInstall`.
+- Host NumPy power dispatch using the runtime's `__svml_pow8` kernel when the
+  AVX-512 gate selects it and the scalar `npy_pow`/platform-`pow` path otherwise.
+  A configured backend that cannot bind the selected runtime fails closed.
+
+### Changed
+
+- **Breaking:** renamed the `ThinSvd` trait to `HostNumerics`, `SvdError` to
+  `BackendError`, `TrfError::Svd` to `TrfError::Backend`, and
+  `LossError::Host` to `LossError::Backend`. No compatibility aliases are
+  provided.
+- **Breaking:** removed the dedicated `power3` hook. The
+  `phi_and_derivative` `denom ** 3` expression now calls the unified
+  `HostNumerics::power(values, 3.0)` hook. A configured but unresolvable host
+  therefore returns a typed error instead of quietly using Rust arithmetic;
+  `Ok(None)` still explicitly declines to the Rust fallback.
+
 ## [0.9.2] - 2026-07-20
 
 - Included the repository MIT license and SciPy's full BSD 3-Clause terms in

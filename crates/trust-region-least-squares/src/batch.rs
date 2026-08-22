@@ -22,7 +22,7 @@ use rayon::prelude::*;
 
 use crate::data::DataProblem;
 use crate::model::{solve_model_with, ResidualModel};
-use crate::trf::{NalgebraThinSvd, ThinSvd, TrfError, TrfOptions, TrfResult};
+use crate::trf::{HostNumerics, NalgebraThinSvd, TrfError, TrfOptions, TrfResult};
 
 /// The result of a leave-one-out sweep: the base solve over all rows, plus one
 /// re-solve per masked row.
@@ -71,7 +71,7 @@ impl<M: ResidualModel + ?Sized> ResidualModel for DropRow<'_, M> {
     }
 }
 
-/// Leave-one-out over an injected [`ThinSvd`] backend. Solves the base problem
+/// Leave-one-out over an injected [`HostNumerics`] backend. Solves the base problem
 /// once, then re-solves with each residual row masked, fanning the independent
 /// re-solves across a [`rayon`] pool with index-preserving collection.
 ///
@@ -80,13 +80,13 @@ impl<M: ResidualModel + ?Sized> ResidualModel for DropRow<'_, M> {
 pub fn solve_drop_one_with<M>(
     model: &M,
     x0: &[f64],
-    svd: &(dyn ThinSvd + Sync),
+    host: &(dyn HostNumerics + Sync),
     options: &TrfOptions,
 ) -> Result<DropOneReport, TrfError>
 where
     M: ResidualModel + Sync + ?Sized,
 {
-    let base = solve_model_with(model, x0, svd, options)?;
+    let base = solve_model_with(model, x0, host, options)?;
     let m = base.fun.len();
 
     // Collect every re-solve in index order, then surface the lowest-index error
@@ -95,7 +95,7 @@ where
     // would return whichever error finished the race first).
     let results: Vec<Result<TrfResult, TrfError>> = (0..m)
         .into_par_iter()
-        .map(|drop| solve_model_with(&DropRow { inner: model, drop }, x0, svd, options))
+        .map(|drop| solve_model_with(&DropRow { inner: model, drop }, x0, host, options))
         .collect();
     let drops = first_error_in_index_order(results)?;
 
@@ -119,7 +119,7 @@ where
     solve_drop_one_with(model, x0, &NalgebraThinSvd, options)
 }
 
-/// Serial leave-one-out over an injected [`ThinSvd`] backend. Identical
+/// Serial leave-one-out over an injected [`HostNumerics`] backend. Identical
 /// semantics and return value to [`solve_drop_one_with`], but the re-solves run
 /// one after another on a plain iterator instead of fanning across a [`rayon`]
 /// pool. Each drop-`i` solve is the same self-contained call into the same
@@ -133,13 +133,13 @@ where
 pub fn solve_drop_one_serial_with<M>(
     model: &M,
     x0: &[f64],
-    svd: &dyn ThinSvd,
+    host: &dyn HostNumerics,
     options: &TrfOptions,
 ) -> Result<DropOneReport, TrfError>
 where
     M: ResidualModel + ?Sized,
 {
-    let base = solve_model_with(model, x0, svd, options)?;
+    let base = solve_model_with(model, x0, host, options)?;
     let m = base.fun.len();
 
     // Same per-index work as the parallel form, run in ascending index order on a
@@ -150,7 +150,7 @@ where
         drops.push(solve_model_with(
             &DropRow { inner: model, drop },
             x0,
-            svd,
+            host,
             options,
         )?);
     }
@@ -177,25 +177,25 @@ where
     solve_drop_one_serial_with(model, x0, &NalgebraThinSvd, options)
 }
 
-/// Multi-start over an injected [`ThinSvd`] backend. Solves from `x0_base` once,
+/// Multi-start over an injected [`HostNumerics`] backend. Solves from `x0_base` once,
 /// then re-solves from each entry of `starts`, fanned across a [`rayon`] pool
 /// with index-preserving collection.
 pub fn solve_perturbed_with<M>(
     model: &M,
     x0_base: &[f64],
     starts: &[Vec<f64>],
-    svd: &(dyn ThinSvd + Sync),
+    host: &(dyn HostNumerics + Sync),
     options: &TrfOptions,
 ) -> Result<PerturbedReport, TrfError>
 where
     M: ResidualModel + Sync + ?Sized,
 {
-    let base = solve_model_with(model, x0_base, svd, options)?;
+    let base = solve_model_with(model, x0_base, host, options)?;
     // Index-ordered collection then lowest-index error: deterministic regardless
     // of which parallel re-solve fails first (see `solve_drop_one_with`).
     let results: Vec<Result<TrfResult, TrfError>> = starts
         .par_iter()
-        .map(|start| solve_model_with(model, start, svd, options))
+        .map(|start| solve_model_with(model, start, host, options))
         .collect();
     let runs = first_error_in_index_order(results)?;
     Ok(PerturbedReport { base, runs })
@@ -242,14 +242,14 @@ pub fn solve_data_problem_drop_one(problem: &DataProblem) -> Result<DropOneRepor
 }
 
 /// Leave-one-out for a data-driven [`DataProblem`] through an injected
-/// [`ThinSvd`] backend (inject [`crate::hostlapack::LapackSvd`] for bit-for-bit
+/// [`HostNumerics`] backend (inject [`crate::hostlapack::LapackSvd`] for bit-for-bit
 /// parity on every drop).
 pub fn solve_data_problem_drop_one_with(
     problem: &DataProblem,
-    svd: &(dyn ThinSvd + Sync),
+    host: &(dyn HostNumerics + Sync),
 ) -> Result<DropOneReport, TrfError> {
     problem.kind.validate(&problem.x0)?;
-    solve_drop_one_with(&problem.kind, &problem.x0, svd, &problem.options())
+    solve_drop_one_with(&problem.kind, &problem.x0, host, &problem.options())
 }
 
 /// Serial leave-one-out for a data-driven [`DataProblem`], using the default
@@ -268,13 +268,13 @@ pub fn solve_data_problem_drop_one_serial(
 }
 
 /// Serial leave-one-out for a data-driven [`DataProblem`] through an injected
-/// [`ThinSvd`] backend (inject [`crate::hostlapack::LapackSvd`] for bit-for-bit
+/// [`HostNumerics`] backend (inject [`crate::hostlapack::LapackSvd`] for bit-for-bit
 /// parity on every drop). Bit-identical to [`solve_data_problem_drop_one_with`];
 /// for single-threaded / `wasm32` consumers that cannot enter a rayon pool.
 pub fn solve_data_problem_drop_one_serial_with(
     problem: &DataProblem,
-    svd: &dyn ThinSvd,
+    host: &dyn HostNumerics,
 ) -> Result<DropOneReport, TrfError> {
     problem.kind.validate(&problem.x0)?;
-    solve_drop_one_serial_with(&problem.kind, &problem.x0, svd, &problem.options())
+    solve_drop_one_serial_with(&problem.kind, &problem.x0, host, &problem.options())
 }

@@ -103,7 +103,7 @@ fn scipy_trf_general_n_hostlapack_results_are_bit_exact() {
     assert_eq!(doc["reference"]["scipy"], "1.18.0");
     assert_eq!(doc["reference"]["numpy"], "2.5.0");
 
-    let svd = LapackSvd::from_env();
+    let host = LapackSvd::from_env();
     let mut checked = 0usize;
     let mut dims_seen = BTreeSet::new();
     let mut losses_seen = BTreeSet::new();
@@ -145,7 +145,7 @@ fn scipy_trf_general_n_hostlapack_results_are_bit_exact() {
             &mut fun as &mut ResidualFn<'_>,
             &mut jac as &mut JacobianFn<'_>,
             &x0,
-            &svd,
+            &host,
             &options,
         )
         .expect("host LAPACK trf");
