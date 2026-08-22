@@ -8,7 +8,7 @@ every SciPy loss (``linear``, ``soft_l1``, ``huber``, ``cauchy``, ``arctan``)
 and a couple of conditioning settings, and records the problem
 (``matrix``/``target``/``x0``) together with the converged ``result``. The Rust
 test replays each problem through ``trf_no_bounds`` with the host-LAPACK
-``ThinSvd`` backend and asserts the full result is bit-identical.
+``HostNumerics`` backend and asserts the full result is bit-identical.
 
 The residual model is defined to be reproducible scalar-for-scalar in both
 Python and Rust: the linear part is a sequential left-to-right accumulation and

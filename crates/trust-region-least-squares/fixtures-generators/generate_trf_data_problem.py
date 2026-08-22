@@ -8,7 +8,7 @@ it spans each built-in residual kind (``linear``, ``polynomial``,
 ``huber``, ``cauchy``, ``arctan``) and records the problem (the kind's data
 arrays plus ``x0``) together with the converged ``result``. The Rust test
 rebuilds each ``DataProblem`` and replays it through ``solve_data_problem_with``
-with the host-LAPACK ``ThinSvd`` backend, asserting the full result is
+with the host-LAPACK ``HostNumerics`` backend, asserting the full result is
 bit-identical.
 
 Each residual is defined to be reproducible scalar-for-scalar in both Python and

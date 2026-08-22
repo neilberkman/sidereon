@@ -6,7 +6,7 @@
 //! optionally an analytic Jacobian (the default delegates to the same bit-exact
 //! 2-point finite difference [`crate::trf`] uses). [`solve_model`] drives the
 //! trust-region iteration through the default in-crate SVD; [`solve_model_with`]
-//! takes an explicit [`ThinSvd`] backend (inject [`crate::hostlapack::LapackSvd`]
+//! takes an explicit [`HostNumerics`] backend (inject [`crate::hostlapack::LapackSvd`]
 //! for bit-for-bit SciPy parity).
 //!
 //! The model is consulted on every iteration without re-entering any host
@@ -15,8 +15,8 @@
 //! [`crate::data`]) and the loop stays in Rust.
 
 use crate::trf::{
-    jacobian_2point, trf_no_bounds, JacobianFn, NalgebraThinSvd, ResidualFn, ThinSvd, TrfError,
-    TrfOptions, TrfResult,
+    jacobian_2point, trf_no_bounds, HostNumerics, JacobianFn, NalgebraThinSvd, ResidualFn,
+    TrfError, TrfOptions, TrfResult,
 };
 
 /// A residual `r: R^n -> R^m` whose evaluation (and any per-evaluation
@@ -49,16 +49,16 @@ pub trait ResidualModel {
     }
 }
 
-/// Solve `model` from `x0` through an injected [`ThinSvd`] backend. Inject
+/// Solve `model` from `x0` through an injected [`HostNumerics`] backend. Inject
 /// [`crate::hostlapack::LapackSvd`] for bit-for-bit SciPy parity, or any other
-/// [`ThinSvd`] implementation.
+/// [`HostNumerics`] implementation.
 ///
 /// This is the seam-explicit form of [`solve_model`]; it adapts the model to the
 /// closure shims [`trf_no_bounds`] expects, leaving that engine untouched.
 pub fn solve_model_with<M: ResidualModel + ?Sized>(
     model: &M,
     x0: &[f64],
-    svd: &dyn ThinSvd,
+    host: &dyn HostNumerics,
     options: &TrfOptions,
 ) -> Result<TrfResult, TrfError> {
     let mut fun = |x: &[f64], out: &mut Vec<f64>| model.residual(x, out);
@@ -67,7 +67,7 @@ pub fn solve_model_with<M: ResidualModel + ?Sized>(
         &mut fun as &mut ResidualFn<'_>,
         &mut jac as &mut JacobianFn<'_>,
         x0,
-        svd,
+        host,
         options,
     )
 }

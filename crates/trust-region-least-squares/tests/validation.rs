@@ -11,7 +11,8 @@ use nalgebra_svd::NalgebraSvd;
 use trust_region_least_squares::loss::{scale_for_robust_loss, Loss, LossError, Rho};
 use trust_region_least_squares::trf::{
     compute_grad, compute_jac_scale, evaluate_quadratic, jacobian_2point, solve_lsq_trust_region,
-    trf_no_bounds, JacobianFn, ResidualFn, SvdError, ThinSvd, TrfError, TrfOptions, XScale,
+    trf_no_bounds, BackendError, HostNumerics, JacobianFn, ResidualFn, TrfError, TrfOptions,
+    XScale,
 };
 
 /// A small well-posed `m=3`, `n=2` linear residual, used as the happy-path
@@ -358,38 +359,44 @@ fn zero_max_nfev_is_rejected() {
 }
 
 /// A backend that delegates the SVD to `nalgebra` but returns a wrong-length
-/// `power3`, to prove the solver validates that injected output rather than
-/// indexing out of bounds.
-struct BadPower3;
-impl ThinSvd for BadPower3 {
+/// exponent-3 power result, proving the unified hook is validated before use.
+struct BadPower;
+impl HostNumerics for BadPower {
     fn svd(
         &self,
         a: &[f64],
         m: usize,
         n: usize,
-    ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), SvdError> {
+    ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), BackendError> {
         NalgebraSvd.svd(a, m, n)
     }
-    fn power3(&self, x: &[f64]) -> Result<Option<Vec<f64>>, SvdError> {
-        Ok(Some(vec![0.0; x.len() + 1]))
+    fn power(&self, values: &[f64], exponent: f64) -> Result<Option<Vec<f64>>, BackendError> {
+        assert_eq!(exponent, 3.0);
+        Ok(Some(vec![0.0; values.len() + 1]))
     }
 }
 
 #[test]
-fn bad_power3_output_length_is_rejected() {
+fn bad_exponent_three_power_output_length_is_rejected() {
     // x0 far from the solution [1, 2] forces a step past the trust radius, so the
-    // alpha search runs and `power3` is consulted.
+    // alpha search runs and the unified power hook is consulted with 3.0.
     let mut fun = linear_residual;
     let mut jac = linear_jac;
     let err = trf_no_bounds(
         &mut fun as &mut ResidualFn<'_>,
         &mut jac as &mut JacobianFn<'_>,
         &[0.0, 0.0],
-        &BadPower3,
+        &BadPower,
         &TrfOptions::default(),
     )
     .unwrap_err();
-    assert!(matches!(err, TrfError::InvalidSvdOutput(_)), "{err:?}");
+    assert!(matches!(
+        err,
+        TrfError::InvalidSliceLength {
+            what: "host power result",
+            ..
+        }
+    ));
 }
 
 #[test]

@@ -1,9 +1,9 @@
 [package]
 name = "trust-region-least-squares"
-version = "0.9.2"
+version = "0.10.0"
 authors = []
 edition = "2021"
-description = "A dense trust-region-reflective nonlinear least-squares solver that reproduces SciPy's least_squares (method='trf') bit-for-bit on its unbounded path for arbitrary dimension n, every loss (linear/soft_l1/huber/cauchy/arctan), and 2-point Jacobians, with an injectable SVD/BLAS seam so a pinned host LAPACK's numerical trajectory can be reproduced exactly. For anyone who needs scipy-identical least-squares results in Rust."
+description = "A dense trust-region-reflective nonlinear least-squares solver that reproduces SciPy's least_squares (method='trf') bit-for-bit on its unbounded path for arbitrary dimension n, every loss (linear/soft_l1/huber/cauchy/arctan), and 2-point Jacobians, with an injectable host-runtime numerics backend for exact SVD, BLAS, and power dispatch."
 license = "MIT"
 readme = "README.md"
 documentation = "https://docs.rs/trust-region-least-squares"
@@ -38,9 +38,9 @@ trace = []
 #
 # `nalgebra` supplies the default in-crate thin-SVD backend (`NalgebraThinSvd`),
 # so the solver works out of the box; callers can still inject a different
-# `ThinSvd` at the call site.
+# `HostNumerics` at the call site.
 nalgebra = { workspace = true }
-# `libloading` backs the `hostlapack` bit-exact SVD/BLAS backend. It is compiled
+# `libloading` backs the `hostlapack` bit-exact SVD/BLAS/power backend. It is compiled
 # in by default (not gated): bit-for-bit SciPy parity is reachable in the default
 # build by pointing the backend at the host LAPACK/BLAS at runtime.
 libloading = "0.8"

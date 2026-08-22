@@ -21,13 +21,25 @@
 //! / SciPy 1.18.0 runtime on this target: `**2` is `x*x`, `**0.5` is `sqrt`,
 //! `**-0.5` / `**-1.5` are libm `pow` (== Rust [`f64::powf`]), `log1p` ==
 //! [`f64::ln_1p`], `arctan` == [`f64::atan`].
+//!
+//! Only `**-0.5` and `**-1.5` miss NumPy's `fast_scalar_power` shortcuts, so
+//! only those two reach the real `power` ufunc and its per-CPU kernel
+//! selection. They are therefore the only expressions routed through the
+//! host-numerics seam ([`crate::trf::HostNumerics::power`]), via the `_with`
+//! variants below; every other primitive stays a direct Rust operation because
+//! that is what NumPy itself does. In practice that means `huber` (over the
+//! compressed `z[z > 1]` subset SciPy passes) and `soft_l1` (over the whole
+//! `1 + z` vector); `linear`, `cauchy`, and `arctan` never raise to a power at
+//! all, and neither does the `cost_only` path of any loss.
+
+use crate::trf::{BackendError, HostNumerics};
 
 /// `numpy.finfo(float).eps`, used as the `scale_for_robust_loss_function` floor.
 const EPS: f64 = f64::EPSILON;
 
-/// Errors from the robust-loss reweighting helper when its slice arguments are
-/// inconsistent, so the public API returns a typed error rather than panicking
-/// on an out-of-bounds index.
+/// Errors from the robust-loss helpers when their slice arguments are
+/// inconsistent or an injected host backend breaks its contract, so the public
+/// API returns a typed error rather than panicking on an out-of-bounds index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LossError {
     /// A slice argument had a length inconsistent with `m = f.len()` / `n`.
@@ -36,6 +48,11 @@ pub enum LossError {
         expected: usize,
         got: usize,
     },
+    /// An injected [`HostNumerics::power`] returned a vector whose length is not the
+    /// length of the input it was handed.
+    HostPowerLength { expected: usize, got: usize },
+    /// An injected host-numerics backend failed while evaluating a power.
+    Backend(BackendError),
 }
 
 impl std::fmt::Display for LossError {
@@ -46,11 +63,22 @@ impl std::fmt::Display for LossError {
                 expected,
                 got,
             } => write!(f, "{what} has length {got}, expected {expected}"),
+            LossError::HostPowerLength { expected, got } => {
+                write!(f, "host power returned {got} values, expected {expected}")
+            }
+            LossError::Backend(err) => write!(f, "host numerics backend error: {err}"),
         }
     }
 }
 
-impl std::error::Error for LossError {}
+impl std::error::Error for LossError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            LossError::Backend(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 /// SciPy's `loss` selector for `least_squares`.
 ///
@@ -92,8 +120,33 @@ impl LossFunction {
     /// Mirrors `construct_loss_function`'s full path (`cost_only=False`):
     /// `z = (f / f_scale)**2`, fill `rho`, then `rho[0] *= f_scale**2` and
     /// `rho[2] /= f_scale**2`.
+    ///
+    /// This is the pure-Rust path; [`LossFunction::evaluate_with`] is the same
+    /// computation with the derivative powers routed through a host backend.
     pub fn evaluate(&self, f: &[f64]) -> Rho {
-        let mut rho = self.eval_z_rho(f, false);
+        self.evaluate_maybe_with(f, None)
+            .expect("pure-Rust rho evaluation cannot fail")
+    }
+
+    /// [`LossFunction::evaluate`] with the `z ** -0.5` / `z ** -1.5` derivative
+    /// powers dispatched through `host`'s [`HostNumerics::power`] hook, so a host
+    /// backend can supply its runtime's exact elementwise results.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LossError::Backend`] if the backend fails, or
+    /// [`LossError::HostPowerLength`] if it returns a vector whose length is
+    /// not the length of the input it was handed.
+    pub fn evaluate_with(&self, f: &[f64], host: &dyn HostNumerics) -> Result<Rho, LossError> {
+        self.evaluate_maybe_with(f, Some(host))
+    }
+
+    fn evaluate_maybe_with(
+        &self,
+        f: &[f64],
+        host: Option<&dyn HostNumerics>,
+    ) -> Result<Rho, LossError> {
+        let mut rho = self.eval_z_rho(f, false, host)?;
         let fs2 = self.f_scale * self.f_scale;
         for value in &mut rho.rho0 {
             *value *= fs2;
@@ -101,13 +154,19 @@ impl LossFunction {
         for value in &mut rho.rho2 {
             *value /= fs2;
         }
-        rho
+        Ok(rho)
     }
 
     /// Mirrors `construct_loss_function`'s `cost_only=True` path:
     /// `0.5 * f_scale**2 * sum(rho[0])` over the unscaled `rho[0]`.
+    ///
+    /// No host seam is needed here: SciPy's `cost_only` shortcut only fills
+    /// `rho[0]`, which every loss expresses with `sqrt` / `log1p` / `arctan`
+    /// and never with a `power` ufunc call.
     pub fn cost_only(&self, f: &[f64]) -> f64 {
-        let rho = self.eval_z_rho(f, true);
+        let rho = self
+            .eval_z_rho(f, true, None)
+            .expect("cost_only never dispatches a power");
         let fs2 = self.f_scale * self.f_scale;
         0.5 * fs2 * pairwise_sum(&rho.rho0)
     }
@@ -115,7 +174,12 @@ impl LossFunction {
     /// Computes `z = (f / f_scale)**2` then dispatches to the rho function. With
     /// `cost_only`, only `rho0` is meaningful (matching SciPy's early return);
     /// `rho1`/`rho2` are left zero-filled.
-    fn eval_z_rho(&self, f: &[f64], cost_only: bool) -> Rho {
+    fn eval_z_rho(
+        &self,
+        f: &[f64],
+        cost_only: bool,
+        host: Option<&dyn HostNumerics>,
+    ) -> Result<Rho, LossError> {
         let fs = self.f_scale;
         let z: Vec<f64> = f
             .iter()
@@ -124,7 +188,7 @@ impl LossFunction {
                 d * d
             })
             .collect();
-        rho_for_loss(self.loss, &z, cost_only)
+        rho_maybe_with(self.loss, &z, cost_only, host)
     }
 }
 
@@ -132,7 +196,66 @@ impl LossFunction {
 /// `IMPLEMENTED_LOSSES` entry. `Linear` has no rho entry in SciPy; it is
 /// included here as the identity (`rho0=z, rho1=1, rho2=0`) for completeness and
 /// is never used by the robust path.
+///
+/// This is the pure-Rust path; [`rho_for_loss_with`] is the same computation
+/// with the derivative powers routed through a host backend.
 pub fn rho_for_loss(loss: Loss, z: &[f64], cost_only: bool) -> Rho {
+    rho_maybe_with(loss, z, cost_only, None).expect("pure-Rust rho evaluation cannot fail")
+}
+
+/// [`rho_for_loss`] with the `z ** -0.5` / `z ** -1.5` derivative powers
+/// dispatched through `host`'s [`HostNumerics::power`] hook.
+///
+/// # Errors
+///
+/// Returns [`LossError::Backend`] if the backend fails, or
+/// [`LossError::HostPowerLength`] if it returns a vector whose length is not the
+/// length of the input it was handed.
+pub fn rho_for_loss_with(
+    loss: Loss,
+    z: &[f64],
+    cost_only: bool,
+    host: &dyn HostNumerics,
+) -> Result<Rho, LossError> {
+    rho_maybe_with(loss, z, cost_only, Some(host))
+}
+
+/// Elementwise `values ** exponent` through the host-numerics seam.
+///
+/// Returns the backend's result when it supplies one, after checking that it
+/// has exactly the length of `values`; otherwise the crate's own [`f64::powf`].
+fn host_power(
+    host: Option<&dyn HostNumerics>,
+    values: &[f64],
+    exponent: f64,
+) -> Result<Vec<f64>, LossError> {
+    // An empty input has no values to produce, so there is nothing for a
+    // backend to disagree about. Skipping the dispatch spares the host a
+    // round-trip (for the LAPACK backend, a whole library load) on the common
+    // huber case where every residual sits inside the `z <= 1` mask.
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    if let Some(host) = host {
+        if let Some(out) = host.power(values, exponent).map_err(LossError::Backend)? {
+            if out.len() != values.len() {
+                return Err(LossError::HostPowerLength {
+                    expected: values.len(),
+                    got: out.len(),
+                });
+            }
+            return Ok(out);
+        }
+    }
+    Ok(values.iter().map(|&value| value.powf(exponent)).collect())
+}
+
+fn rho_maybe_with(
+    loss: Loss,
+    z: &[f64],
+    cost_only: bool,
+    host: Option<&dyn HostNumerics>,
+) -> Result<Rho, LossError> {
     let m = z.len();
     let mut rho0 = vec![0.0; m];
     let mut rho1 = vec![0.0; m];
@@ -153,7 +276,7 @@ pub fn rho_for_loss(loss: Loss, z: &[f64], cost_only: bool) -> Rho {
         Loss::Huber => {
             for i in 0..m {
                 let zi = z[i];
-                if zi <= 1.0 {
+                if huber_inside_mask(zi) {
                     rho0[i] = zi;
                     if cost_only {
                         continue;
@@ -163,27 +286,47 @@ pub fn rho_for_loss(loss: Loss, z: &[f64], cost_only: bool) -> Rho {
                 } else {
                     // rho[0] = 2 * z**0.5 - 1
                     rho0[i] = 2.0 * zi.sqrt() - 1.0;
-                    if cost_only {
+                }
+            }
+            if !cost_only {
+                // SciPy indexes with the boolean mask, so `z[~mask]` reaches
+                // numpy's `power` as a *compressed* contiguous array. Gather it
+                // the same way, so the host backend sees exactly the values and
+                // the length numpy's ufunc does, then scatter the results back.
+                let outliers: Vec<f64> = z
+                    .iter()
+                    .copied()
+                    .filter(|&zi| !huber_inside_mask(zi))
+                    .collect();
+                // rho[1][~mask] = z**-0.5 ; rho[2][~mask] = -0.5 * z**-1.5
+                let inverse_root = host_power(host, &outliers, -0.5)?;
+                let inverse_cube_root = host_power(host, &outliers, -1.5)?;
+                let mut k = 0usize;
+                for i in 0..m {
+                    if huber_inside_mask(z[i]) {
                         continue;
                     }
-                    // rho[1] = z**-0.5 ; rho[2] = -0.5 * z**-1.5
-                    rho1[i] = zi.powf(-0.5);
-                    rho2[i] = -0.5 * zi.powf(-1.5);
+                    rho1[i] = inverse_root[k];
+                    rho2[i] = -0.5 * inverse_cube_root[k];
+                    k += 1;
                 }
             }
         }
         // soft_l1(z, rho, cost_only): t = 1 + z.
         Loss::SoftL1 => {
+            let t: Vec<f64> = z.iter().map(|&zi| 1.0 + zi).collect();
             for i in 0..m {
-                let t = 1.0 + z[i];
                 // rho[0] = 2 * (t**0.5 - 1)
-                rho0[i] = 2.0 * (t.sqrt() - 1.0);
-                if cost_only {
-                    continue;
-                }
+                rho0[i] = 2.0 * (t[i].sqrt() - 1.0);
+            }
+            if !cost_only {
                 // rho[1] = t**-0.5 ; rho[2] = -0.5 * t**-1.5
-                rho1[i] = t.powf(-0.5);
-                rho2[i] = -0.5 * t.powf(-1.5);
+                let inverse_root = host_power(host, &t, -0.5)?;
+                let inverse_cube_root = host_power(host, &t, -1.5)?;
+                for i in 0..m {
+                    rho1[i] = inverse_root[i];
+                    rho2[i] = -0.5 * inverse_cube_root[i];
+                }
             }
         }
         // cauchy(z, rho, cost_only): rho[0] = log1p(z).
@@ -215,7 +358,13 @@ pub fn rho_for_loss(loss: Loss, z: &[f64], cost_only: bool) -> Rho {
         }
     }
 
-    Rho { rho0, rho1, rho2 }
+    Ok(Rho { rho0, rho1, rho2 })
+}
+
+/// SciPy's `mask = z <= 1` for the huber loss. A NaN `z` compares false and so
+/// lands on the outlier branch, exactly as numpy's boolean mask puts it there.
+fn huber_inside_mask(z: f64) -> bool {
+    z <= 1.0
 }
 
 /// Mirrors `common.scale_for_robust_loss_function`, modifying the residual `f`
