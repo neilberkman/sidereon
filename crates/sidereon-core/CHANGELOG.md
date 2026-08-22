@@ -4,6 +4,17 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-22
+
+### Changed
+
+- `trust-region-least-squares` updated to 0.10.0: the injected backend contract
+  is now the `HostNumerics` seam (SVD, BLAS reductions, and NumPy power
+  dispatch in one fail-closed contract), and the host backend reproduces
+  NumPy's stride-0 scalar-exponent power fast paths bit-for-bit. sidereon-core
+  drives the solver through its data/model entry points and is unaffected at
+  its own API surface.
+
 ## [1.0.0] - 2026-08-21
 
 Sidereon 1.0.0. The public API carries a stability commitment from here:
