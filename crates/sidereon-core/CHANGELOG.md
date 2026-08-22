@@ -4,6 +4,38 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-21
+
+Sidereon 1.0.0. The public API carries a stability commitment from here:
+additions arrive without breaking existing callers (MergeOptions and its
+non-exhaustive construction pattern are the template), and anything that
+must break waits for 2.0.0.
+
+### Added
+
+- Window-scoped continuity verdicts: `EpochWindow`, `StencilExtent`
+  (derived from the interpolator's sliding-window order and the product's
+  epoch interval, never caller-supplied), `defects_influencing` on
+  `ContinuityReport` and `MergeReport`, and accept/refuse verdict helpers
+  that name the influencing defects either way. A consumer evaluating a
+  bounded span no longer refuses a product for a seam its stencil cannot
+  reach, and cannot silently accept one whose stencil reaches it. The
+  `inspect` CLI gains `--window FROM THROUGH`.
+- `next_issue_due`: a network-free answer, over the same catalog the
+  publication-status query uses, for when the next issue of a cataloged
+  product line is nominally due, naming the ultra lines' observed and
+  predicted halves. Schedules cited to the published IGS product
+  descriptions in committed provenance; boundary behavior pinned across
+  UTC midnight and a GPS week rollover. The scoreboard prints the next
+  due issue beside the current lag.
+- Oracle version pinning documented in `docs/oracle-version-pinning.md`
+  with measured (not transcribed) cross-version deltas for the SciPy and
+  NumPy reference stack, and a one-command reproduction from pinned
+  environments.
+
+(0.40.0's exact-cache single-flight coalescing and non-exhaustive
+`MergeOptions` ship to every interface with this release.)
+
 ## [0.40.0] - 2026-08-21
 
 ### Added
