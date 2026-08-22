@@ -3,12 +3,13 @@
 
 Two oracles are recorded per case, because NumPy dispatches them differently:
 
-* ``vector_bits`` -- ``np.power(values, exponent)`` over a contiguous f64
-  array. This is the real ``power`` ufunc, whose inner loop is the AVX-512 SVML
-  kernel on a capable CPU and the scalar ``npy_pow`` everywhere else. It is what
-  ``HostNumerics::power`` must reproduce.
-* ``scalar_bits`` -- ``np.float64(base) ** exponent`` element by element. NumPy
-  scalars never take the ndarray ``fast_scalar_power`` shortcuts, so this is
+* ``vector_bits`` -- ``np.power(values, np.float64(exponent))`` over a
+  contiguous f64 array. Its inner loop applies the stride-0 scalar-exponent
+  table before selecting the AVX-512 SVML kernel on a capable CPU or scalar
+  ``npy_pow`` everywhere else. It is what ``HostNumerics::power`` must
+  reproduce.
+* ``scalar_bits`` -- ``np.float64(base) ** np.float64(exponent)`` element by
+  element. NumPy scalars do not enter the ufunc's stride-0 table, so this is
   always ``npy_pow`` (the platform C ``pow``). It is what
   ``HostNumerics::power_scalar`` must reproduce.
 
@@ -16,8 +17,7 @@ The value set is deliberately adversarial: subnormals, the smallest normal,
 values straddling 1, the extremes of the finite range, both signed zeros, both
 infinities, and NaN. Exponents cover the two the robust losses dispatch
 (``-0.5``, ``-1.5``), the unified hook's ``denom ** 3`` call (exponent ``3.0``),
-and neighbours that exercise the odd-integer / non-integer branches of the C
-``pow`` special cases.
+and every stride-0 table row (``-1.0``, ``0.0``, ``0.5``, ``1.0``, ``2.0``).
 
 Run this in the pinned virtualenv on the canonical reference host (see the
 crate README's "Reproducibility scope"): the payload is platform-, CPU-, and
@@ -64,7 +64,7 @@ BASES: list[float] = [
     float("nan"),
 ]
 
-EXPONENTS: list[float] = [-1.5, -0.5, 0.0, 0.5, 2.0, 3.0]
+EXPONENTS: list[float] = [-1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 3.0]
 
 
 def f64_bits(value: float) -> str:
@@ -83,6 +83,8 @@ def case(exponent: float) -> dict[str, object]:
     return {
         "name": f"exponent_{exponent!r}",
         "exponent": f64_bits(exponent),
+        "vector_call": "np.power(values, np.float64(e))",
+        "scalar_call": "np.float64(b) ** np.float64(e)",
         "values": bits_array(values),
         "vector_bits": bits_array(vector),
         "scalar_bits": bits_array(scalars),

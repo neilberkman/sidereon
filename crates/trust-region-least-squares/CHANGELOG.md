@@ -23,9 +23,13 @@ All notable changes to `trust-region-least-squares` are documented here.
   `LapackSvd::with_numpy_blas_path` for a write-once process record of the
   pinned runtime. Conflicting configuration returns
   `LapackError::ConflictingHostInstall`.
-- Host NumPy power dispatch using the runtime's `__svml_pow8` kernel when the
-  AVX-512 gate selects it and the scalar `npy_pow`/platform-`pow` path otherwise.
-  A configured backend that cannot bind the selected runtime fails closed.
+- Host NumPy vector-power dispatch reproducing the stride-0 scalar-exponent
+  table (`-1.0` division, `0.0` literal one, `0.5` square root, `1.0` identity,
+  and `2.0` multiplication) before using the runtime's `__svml_pow8` or scalar
+  `npy_pow`/platform-`pow` fall-through kernel. Vector and scalar power
+  deliberately disagree for `(-0.0) ** 0.5`, because NumPy's vector square-root
+  row preserves negative zero while its scalar `pow` returns positive zero. A
+  configured backend that cannot bind the selected runtime still fails closed.
 
 ### Changed
 

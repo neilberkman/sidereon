@@ -3,11 +3,11 @@
 //! The golden-replay tests assert `f64::to_bits` equality against committed
 //! SciPy 1.18.0 fixtures. Those bits only reproduce on the canonical reference
 //! host (a non-AVX-512 x86_64 Linux box loading the wheel-bundled OpenBLAS),
-//! because numpy's array `pow` dispatches a wider SVML kernel on AVX-512 that
-//! differs by 1 ULP and cannot be disabled at runtime. On any other platform a
-//! downstream `cargo test` would fail through no fault of the crate, so the
-//! replays stay off by default and only run when the canonical environment is
-//! signalled via `SIDEREON_BITEXACT`.
+//! because numpy's array `pow` fall-through dispatches a wider SVML kernel on
+//! AVX-512 that differs by 1 ULP and cannot be disabled at runtime. On any
+//! other platform an ordinary `cargo test` would fail through no fault of the
+//! crate, so the replays stay off by default and only run when the canonical
+//! environment is signalled via `SIDEREON_BITEXACT`.
 //!
 //! This file is pulled in via `#[path = "support/bitexact.rs"] mod bitexact;`
 //! rather than being its own test binary (it lives under `tests/support/`,

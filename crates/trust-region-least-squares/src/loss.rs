@@ -18,19 +18,21 @@
 //!   robust cost `0.5 * sum(rho[0])` is bit-identical.
 //!
 //! The float primitives were verified bit-exact against the pinned NumPy 2.5.0
-//! / SciPy 1.18.0 runtime on this target: `**2` is `x*x`, `**0.5` is `sqrt`,
-//! `**-0.5` / `**-1.5` are libm `pow` (== Rust [`f64::powf`]), `log1p` ==
-//! [`f64::ln_1p`], `arctan` == [`f64::atan`].
+//! / SciPy 1.18.0 runtime on this target: the scalar-exponent `power` ufunc
+//! table makes `**2` use `x*x` and `**0.5` use `sqrt`, while `**-0.5` and
+//! `**-1.5` fall through to libm `pow` (== Rust [`f64::powf`]); `log1p` ==
+//! [`f64::ln_1p`] and `arctan` == [`f64::atan`].
 //!
-//! Only `**-0.5` and `**-1.5` miss NumPy's `fast_scalar_power` shortcuts, so
-//! only those two reach the real `power` ufunc and its per-CPU kernel
-//! selection. They are therefore the only expressions routed through the
-//! host-numerics seam ([`crate::trf::HostNumerics::power`]), via the `_with`
-//! variants below; every other primitive stays a direct Rust operation because
-//! that is what NumPy itself does. In practice that means `huber` (over the
-//! compressed `z[z > 1]` subset SciPy passes) and `soft_l1` (over the whole
-//! `1 + z` vector); `linear`, `cauchy`, and `arctan` never raise to a power at
-//! all, and neither does the `cost_only` path of any loss.
+//! SciPy's ndarray `z ** -0.5` and `z ** -1.5` expressions pass through both
+//! the outer ndarray operation and the `power` ufunc without a shortcut. Their
+//! exponents miss the inner loop's stride-0 table, so they reach its per-CPU
+//! fall-through kernel. They are therefore the only loss expressions routed
+//! through the host-numerics seam ([`crate::trf::HostNumerics::power`]), via
+//! the `_with` variants below; every other primitive stays a direct Rust
+//! operation because that is what NumPy itself does. In practice that means
+//! `huber` (over the compressed `z[z > 1]` subset SciPy passes) and `soft_l1`
+//! (over the whole `1 + z` vector); `linear`, `cauchy`, and `arctan` never raise
+//! to a power at all, and neither does the `cost_only` path of any loss.
 
 use crate::trf::{BackendError, HostNumerics};
 

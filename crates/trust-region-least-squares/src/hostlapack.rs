@@ -118,10 +118,10 @@ type CblasDgemv64 = unsafe extern "C" fn(
 type SvmlPow8 = unsafe extern "C" fn(__m512d, __m512d) -> __m512d;
 
 extern "C" {
-    /// The platform C `pow`. NumPy's `power` ufunc inner loop and its scalar
-    /// `**` both reduce to `npy_pow`, which is this symbol; binding it directly
-    /// (rather than going through [`f64::powf`]) pins the dispatch to the same
-    /// operation the reference runtime performs.
+    /// The platform C `pow`. NumPy's `power` ufunc fall-through loop and its
+    /// scalar `**` both reduce to `npy_pow`, which is this symbol; binding it
+    /// directly (rather than going through [`f64::powf`]) pins the dispatch to
+    /// the same operation the reference runtime performs.
     fn pow(base: f64, exponent: f64) -> f64;
 }
 
@@ -287,8 +287,8 @@ impl trf::HostNumerics for LapackSvd {
         // hook does: a backend that cannot reach the runtime it was configured
         // against must not hand back a platform-libm number as if it had.
         let _runtime = open_numpy_runtime(&path).map_err(trf::BackendError::from)?;
-        // numpy scalars and Python floats both take `npy_pow` for `**`; there
-        // is no `fast_scalar_power` shortcut off the ndarray path.
+        // NumPy scalars and Python floats both take `npy_pow` for `**`; they do
+        // not enter the ufunc's stride-0 table.
         Ok(Some(c_pow(base, exponent)))
     }
 }
@@ -785,15 +785,42 @@ fn open_numpy_runtime(path: &Path) -> Result<Library, LapackError> {
 }
 
 /// Elementwise `values ** exponent` as the configured NumPy runtime computes
-/// it: the AVX-512 SVML kernel where NumPy's `power` ufunc dispatches one, and
-/// the scalar `npy_pow` (== platform C `pow`) inner loop everywhere else.
+/// it: first the `power` ufunc's stride-0 scalar-exponent table, then the
+/// AVX-512 SVML kernel where NumPy dispatches one, and otherwise the scalar
+/// `npy_pow` (== platform C `pow`) inner loop.
 ///
 /// Once the CPU gate selects the SVML kernel, failing to resolve it is an error,
 /// because the scalar loop would produce a different (if equally valid)
 /// trajectory than the runtime the caller asked to reproduce.
 fn numpy_power(numpy_path: &Path, values: &[f64], exponent: f64) -> Result<Vec<f64>, LapackError> {
     let _runtime = open_numpy_runtime(numpy_path)?;
+    if let Some(powered) = numpy_stride_zero_power(values, exponent) {
+        return Ok(powered);
+    }
     numpy_vector_power(numpy_path, values, exponent)
+}
+
+/// NumPy's stride-0 (scalar-exponent) `power` ufunc table.
+///
+/// Returning `None` means the exponent misses the table and must use the
+/// runtime-selected SVML or `npy_pow` kernel. The caller binds the configured
+/// runtime before calling this helper so even a table hit retains the backend's
+/// fail-closed contract.
+fn numpy_stride_zero_power(values: &[f64], exponent: f64) -> Option<Vec<f64>> {
+    let powered = if exponent == -1.0 {
+        values.iter().map(|&base| 1.0 / base).collect()
+    } else if exponent == 0.0 {
+        vec![1.0; values.len()]
+    } else if exponent == 0.5 {
+        values.iter().map(|&base| base.sqrt()).collect()
+    } else if exponent == 1.0 {
+        values.to_vec()
+    } else if exponent == 2.0 {
+        values.iter().map(|&base| base * base).collect()
+    } else {
+        return None;
+    };
+    Some(powered)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1144,4 +1171,75 @@ fn col_major_to_row_major(rows: usize, cols: usize, col_major: &[f64]) -> Vec<f6
         }
     }
     row_major
+}
+
+#[cfg(test)]
+mod power_tests {
+    use super::numpy_stride_zero_power;
+
+    const BASES: [f64; 9] = [
+        -0.0,
+        0.0,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::from_bits(0x7ff8_0000_0000_0042),
+        -4.0,
+        f64::from_bits(1),
+        f64::from_bits(0x8000_0000_0000_0001),
+        f64::MIN_POSITIVE,
+    ];
+
+    fn expected_bits(exponent: f64) -> Vec<u64> {
+        let expected: Vec<f64> = if exponent == -1.0 {
+            BASES.iter().map(|&base| 1.0 / base).collect()
+        } else if exponent == 0.0 {
+            vec![1.0; BASES.len()]
+        } else if exponent == 0.5 {
+            BASES.iter().map(|&base| base.sqrt()).collect()
+        } else if exponent == 1.0 {
+            BASES.to_vec()
+        } else if exponent == 2.0 {
+            BASES.iter().map(|&base| base * base).collect()
+        } else {
+            unreachable!("not a stride-0 fast-path exponent")
+        };
+        expected.into_iter().map(f64::to_bits).collect()
+    }
+
+    #[test]
+    fn numpy_stride_zero_power_table_is_bit_exact_for_ieee_edges() {
+        for exponent in [-1.0, 0.0, 0.5, 1.0, 2.0] {
+            let actual = numpy_stride_zero_power(&BASES, exponent)
+                .expect("fast-path exponent must select a table row");
+            let actual_bits: Vec<u64> = actual.into_iter().map(f64::to_bits).collect();
+            assert_eq!(actual_bits, expected_bits(exponent), "exponent {exponent}");
+        }
+    }
+
+    /// Literal bit patterns, independent of any Rust arithmetic, for the two
+    /// cases where the stride-0 sqrt row observably diverges from C `pow`:
+    /// `sqrt(-0.0)` keeps the sign of zero and `sqrt(-inf)` is NaN, where
+    /// `pow` answers `+0.0` and `+inf`. These literals pin the exact defect a
+    /// `pow`-only dispatch reintroduces.
+    #[test]
+    fn stride_zero_sqrt_row_pins_the_sign_of_zero_and_negative_infinity() {
+        let out = numpy_stride_zero_power(&[-0.0, f64::NEG_INFINITY], 0.5)
+            .expect("0.5 must select the sqrt row");
+        assert_eq!(
+            out[0].to_bits(),
+            0x8000_0000_0000_0000,
+            "sqrt(-0.0) is -0.0"
+        );
+        assert!(out[1].is_nan(), "sqrt(-inf) is NaN, not +inf");
+    }
+
+    #[test]
+    fn numpy_stride_zero_power_declines_fall_through_exponents() {
+        for exponent in [-1.5, -0.5, 3.0, f64::NAN] {
+            assert!(
+                numpy_stride_zero_power(&BASES, exponent).is_none(),
+                "exponent {exponent:?} unexpectedly selected a table row"
+            );
+        }
+    }
 }
