@@ -3,11 +3,12 @@
 #
 # The committed parity fixtures reproduce scipy's trust-region-reflective
 # least_squares bit-for-bit ONLY in a specific environment. The binding numbers
-# come from the LAPACK/BLAS scipy itself loads, and numpy's array `pow` matches
-# glibc `pow` (which Rust's powf calls) ONLY on a CPU without AVX-512: numpy
-# 2.5.0 dispatches a wider SVML `pow` on AVX-512 that differs by 1 ULP, and that
-# path cannot be disabled at runtime (NPY_DISABLE_CPU_FEATURES does not affect
-# it). So this gate must run on a NON-AVX-512 x86_64 Linux host.
+# come from the LAPACK/BLAS scipy itself loads, and numpy's array `pow`
+# fall-through matches glibc `pow` (which Rust's powf calls) ONLY on a CPU
+# without AVX-512: numpy 2.5.0 dispatches a wider SVML `pow` on AVX-512 that
+# differs by 1 ULP, and that path cannot be disabled at runtime
+# (NPY_DISABLE_CPU_FEATURES does not affect it). So this gate must run on a
+# NON-AVX-512 x86_64 Linux host.
 #
 # Canonical env: Linux x86_64 (no AVX-512), glibc 2.39, Python 3.12,
 # scipy 1.18.0 / numpy 2.5.0 (wheel-bundled OpenBLAS), OPENBLAS_NUM_THREADS=1,

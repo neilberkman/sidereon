@@ -87,15 +87,23 @@ pub trait HostNumerics {
         Ok(None)
     }
 
-    /// Elementwise `values ** exponent`, mirroring NumPy's `power` ufunc over a
-    /// contiguous f64 array.
+    /// Elementwise power mirroring `np.power(values, scalar_exponent)` over a
+    /// contiguous f64 array: NumPy's stride-0 ufunc dispatch.
     ///
-    /// The solver reaches this for the robust-loss derivative powers, where
-    /// SciPy writes `z ** -0.5` and `z ** -1.5`. Those exponents miss NumPy's
-    /// `fast_scalar_power` shortcuts (which turn `** 0.5` into `sqrt` and
-    /// `** 2` into `x * x`), so they go through the real `power` ufunc and its
-    /// per-CPU kernel selection; a host backend implements this to reproduce
-    /// that kernel exactly.
+    /// Before selecting an SVML or `npy_pow` kernel, that dispatch applies this
+    /// table to the scalar exponent:
+    ///
+    /// - `-1.0`: `1.0 / value`
+    /// - `0.0`: literal `1.0`
+    /// - `0.5`: `sqrt(value)`
+    /// - `1.0`: `value`
+    /// - `2.0`: `value * value`
+    ///
+    /// Every other exponent falls through to the per-CPU kernel. The three
+    /// exponents routed by the solver (`-0.5`, `-1.5`, and `3.0`) all take that
+    /// fall-through path. At the robust-loss sites, SciPy's ndarray `**`
+    /// operation reaches the ufunc without an outer shortcut, then the scalar
+    /// exponent misses this inner-loop table.
     ///
     /// `Ok(None)` declines, and the solver keeps its own [`f64::powf`]. A
     /// supplied `Some(values)` **must** have the same length as `values`; the
@@ -109,8 +117,8 @@ pub trait HostNumerics {
     }
 
     /// Scalar `base ** exponent`, mirroring the scalar power of the reference
-    /// runtime (NumPy scalars and Python floats both take the platform C `pow`;
-    /// there is no array `fast_scalar_power` shortcut on that path).
+    /// runtime. NumPy scalars and Python floats both take the platform C `pow`;
+    /// they do not enter the array ufunc's stride-0 table.
     ///
     /// The solver reaches this for the trust-region alpha seed, which SciPy
     /// writes as `(alpha_lower * alpha_upper) ** 0.5`. `Ok(None)` declines, and
@@ -993,8 +1001,8 @@ fn solve_lsq_trust_region_impl(
     };
 
     // SciPy seeds (and re-seeds) alpha with `(alpha_lower * alpha_upper) ** 0.5`
-    // over NumPy scalars, which is the platform C `pow`, not the array
-    // `fast_scalar_power` shortcut. The expression is mathematically a square
+    // over NumPy scalars, which is the platform C `pow` and does not enter the
+    // array ufunc's stride-0 table. The expression is mathematically a square
     // root, so the crate's own default stays `sqrt`; a host backend can supply
     // the exact scalar-power result its runtime produces instead.
     let mut alpha = if !full_rank && initial_alpha == 0.0 {
