@@ -110,7 +110,7 @@ impl std::error::Error for ConjunctionError {}
 ///
 /// Returns an error when any state component is non-finite or the relative
 /// velocity is below
-/// [`ZERO_REL_SPEED_EPS_KM_S`], which leaves the frame undefined.
+/// `ZERO_REL_SPEED_EPS_KM_S`, which leaves the frame undefined.
 pub fn encounter_frame(
     r1: [f64; 3],
     v1: [f64; 3],

@@ -1719,10 +1719,10 @@ fn spp_position_covariance(
 ///
 /// Thin compatibility wrapper over the runtime strategy selector
 /// ([`crate::estimation::strategies::estimate`]): it drives the shared
-/// per-technique implementation [`run`] under the SPP reference strategy, which
+/// per-technique implementation `run` under the SPP reference strategy, which
 /// resolves to the SPP reference recipe. The reference strategy always yields an
 /// SPP solution or an SPP error, so the result is bit-identical to the recipe
-/// driving [`run`] directly.
+/// driving `run` directly.
 pub fn solve_with_policy(
     eph: &dyn EphemerisSource,
     inputs: &SolveInputs,

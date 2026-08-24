@@ -233,10 +233,10 @@ impl std::error::Error for FallbackError {
 /// the type system rather than relying on the caller to pass the right source.
 ///
 /// The store can come from a parsed RINEX navigation file
-/// ([`BroadcastEphemeris::from_nav`](crate::ephemeris::BroadcastEphemeris::from_nav))
+/// (`BroadcastEphemeris::from_nav`)
 /// or from records decoded straight off the air via
 /// [`BroadcastRecord::from_lnav`](crate::ephemeris::BroadcastRecord::from_lnav)
-/// and [`BroadcastEphemeris::new`](crate::ephemeris::BroadcastEphemeris::new),
+/// and `BroadcastEphemeris::new`,
 /// which closes the `lnav::decode -> broadcast source` half of the real-time
 /// pipeline.
 pub fn solve_broadcast(
@@ -253,7 +253,8 @@ pub fn solve_broadcast(
 /// The precise path is tried first through the product-staleness selection layer
 /// ([`select_sp3`]) at the receive epoch (`inputs.t_rx_j2000_s`):
 ///
-/// - If a precise product covers the epoch ([`DegradationKind::Exact`]) it is
+/// - If a precise product covers the epoch
+///   ([`crate::staleness::DegradationKind::Exact`]) it is
 ///   used. The solve is bit-for-bit identical to
 ///   [`solve`](crate::positioning::solve) on that SP3 (the selection layer borrows
 ///   the caller's product untouched), and the result is
@@ -261,7 +262,7 @@ pub fn solve_broadcast(
 ///   error (the data covers the epoch), returned as [`FallbackError::Precise`],
 ///   never masked by a silent broadcast re-solve.
 /// - If a stale-but-within-cap precise product is selected
-///   ([`DegradationKind::NearestPrior`]) and it actually produces a fix, the
+///   ([`crate::staleness::DegradationKind::NearestPrior`]) and it actually produces a fix, the
 ///   result is [`FixSource::Precise`] carrying the nonzero
 ///   [`StalenessMetadata`]. If instead it cannot serve the requested epoch (its
 ///   coverage ends before it, so the solve fails on missing ephemeris), broadcast

@@ -74,7 +74,7 @@ const MAX_ORDER: usize = 6;
 /// leaving the plain RINEX header verbatim and each epoch's recovered
 /// observations as scaled integers plus reconstructed flag strings.
 ///
-/// Two serializers consume it. [`Decoder`]'s RINEX path renders it back to plain
+/// Two serializers consume it. `Decoder`'s RINEX path renders it back to plain
 /// RINEX observation text (the [`decode`] output). [`encode_stream`] renders it
 /// back to CRINEX. Because CRINEX compression is not unique, `encode_stream`
 /// emits the canonical all-reset form rather than reproducing the original

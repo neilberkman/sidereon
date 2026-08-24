@@ -116,7 +116,7 @@ pub struct CdmObject {
     /// RTN position covariance lower triangle: CR_R, CT_R, CT_T, CN_R, CN_T, CN_N.
     pub covariance_rtn: [f64; 6],
     /// RTN velocity covariance lower-triangle rows completing the 6x6 matrix, in
-    /// [`VELOCITY_COVARIANCE_FIELDS`] order, or `None` when the producer carried
+    /// `VELOCITY_COVARIANCE_FIELDS` order, or `None` when the producer carried
     /// only the position block. Present only when the full 15-element block is.
     pub velocity_covariance_rtn: Option<[f64; 15]>,
 }
@@ -403,7 +403,7 @@ pub fn parse_xml(text: &str) -> Result<CdmKvn, CdmError> {
 /// rather than a generic streaming-writer dependency: the output is a fixed,
 /// documented CCSDS layout (`cdm > header/body > segment > metadata/data`) whose
 /// element nesting and `units` attributes are the inter-system exchange contract,
-/// and every interpolated value is escaped via [`xml::escape`]. The matching
+/// and every interpolated value is escaped via `xml::escape`. The matching
 /// reader is the vetted `roxmltree` DOM parser in [`parse_xml`].
 pub fn encode_xml(cdm: &CdmKvn) -> Result<String, CdmError> {
     validate_cdm(cdm)?;

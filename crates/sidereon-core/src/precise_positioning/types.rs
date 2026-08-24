@@ -146,7 +146,7 @@ pub const VMF_SITE_MAX_SAMPLES: usize = 8;
 /// Clamp window (days) on each side of a single-sample VMF series.
 ///
 /// With one sample there is no interval to size the allowed clamp from, so this
-/// fixed window is used by [`VmfSiteSeries::interpolate_checked`]. One VMF
+/// fixed window is used by `VmfSiteSeries::interpolate_checked`. One VMF
 /// sampling step (6 h = 0.25 day) past the lone node is treated as covered;
 /// beyond it, the epoch is out of VMF coverage.
 pub const VMF_SITE_SINGLE_SAMPLE_CLAMP_DAYS: f64 = 0.25;

@@ -136,7 +136,7 @@ pub enum MappingModel {
     /// continued fraction with the supplied hydrostatic/wet `a` coefficients
     /// from the VMF1 numerical-weather-model data product at the station and
     /// epoch, and VMF1's own `b`, `c` coefficients. No height correction (the
-    /// site-wise `a` are already valid at the station). See [`vmf`].
+    /// site-wise `a` are already valid at the station). See `vmf`.
     Vmf1 {
         /// Hydrostatic `a` coefficient from the VMF1 data product.
         ah: f64,

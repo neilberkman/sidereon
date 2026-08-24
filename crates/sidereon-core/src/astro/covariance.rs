@@ -198,7 +198,7 @@ pub fn covariance6_m_to_km(covariance: &Covariance6) -> Result<Covariance6, Cova
 /// Cholesky entries are linearly blended, diagonal entries are blended in log
 /// space, and the covariance is reconstructed as `L * L^T`. Endpoints are
 /// returned bit-for-bit. Singular but non-zero validated endpoints are nudged
-/// through [`eigen_floor6`] before factorization; an all-zero endpoint is
+/// through `eigen_floor6` before factorization; an all-zero endpoint is
 /// rejected because the logarithmic diagonal is undefined.
 #[allow(clippy::needless_range_loop)]
 pub fn interpolate_covariance_psd(
@@ -347,7 +347,7 @@ pub fn rtn_to_eci(cov_rtn: &Mat3, r: [f64; 3], v: [f64; 3]) -> Result<Mat3, RtnF
     Ok(cov_eci)
 }
 
-/// Whether a 3x3 matrix is symmetric within [`SYMMETRY_EPS`].
+/// Whether a 3x3 matrix is symmetric within `SYMMETRY_EPS`.
 pub fn symmetric(m: &Mat3) -> bool {
     (m[0][1] - m[1][0]).abs() < SYMMETRY_EPS
         && (m[0][2] - m[2][0]).abs() < SYMMETRY_EPS

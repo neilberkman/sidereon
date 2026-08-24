@@ -546,14 +546,14 @@ impl BroadcastRecord {
     ///
     /// This closes the `lnav::decode -> broadcast source` half of the real-time
     /// pipeline: feed [`crate::navigation::lnav::decode`]'s output here, collect
-    /// the records into a [`BroadcastStore`], and solve with
+    /// the records into a `BroadcastStore`, and solve with
     /// [`solve_broadcast`](crate::positioning::solve_broadcast). The conversion
     /// matches the RINEX navigation parser's record exactly except for the inputs
     /// only the air interface carries:
     ///
     /// - The decoded angular elements are in semicircles (and semicircles/second)
     ///   as transmitted by GPS LNAV; they are scaled to the radians the
-    ///   [`crate::broadcast`] evaluator expects (the harmonic `cuc..cis` terms are
+    ///   `crate::broadcast` evaluator expects (the harmonic `cuc..cis` terms are
     ///   already radians and `crc`/`crs` meters, so they pass through unchanged).
     /// - The 10-bit transmitted week number is ambiguous across the GPS
     ///   1024-week rollover, so the full (unrolled) week is taken from
@@ -1474,7 +1474,7 @@ fn parse_glonass_block(block: &[&str]) -> Result<GlonassRecord, NavParseError> {
 /// the engine cannot represent (an extended GLONASS slot beyond the PRN cap, e.g.
 /// `R28` in real BKG/IGS products) is skipped rather than rejecting the whole
 /// file - the same treatment unsupported constellations get in
-/// [`parse_nav_v3`]. (Version-4 GLONASS frames are not yet parsed.)
+/// `parse_nav_v3`. (Version-4 GLONASS frames are not yet parsed.)
 pub fn parse_glonass(text: &str) -> Result<Vec<GlonassRecord>, NavParseError> {
     Ok(parse_glonass_lenient(text)?.records)
 }

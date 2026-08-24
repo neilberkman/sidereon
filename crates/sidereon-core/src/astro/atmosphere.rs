@@ -14,7 +14,7 @@
 //!
 //! Provenance and license: the model was developed by Mike Picone, Alan Hedin,
 //! and Doug Drob at the US Naval Research Laboratory and is in the public
-//! domain. The model logic and the full coefficient tables in [`tables`] were
+//! domain. The model logic and the full coefficient tables in `tables` were
 //! transcribed verbatim from Dominik Brodowski's public-domain C port
 //! (`nrlmsise-00.c` / `nrlmsise-00_data.c`, release 20041227,
 //! <https://www.brodo.de/space/nrlmsise/>). The coefficient tables are

@@ -19,7 +19,10 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::{dop, dop_multi, line_of_sight_from_az_el_deg, test_support, DopError, LineOfSight};
+use super::{
+    dop, dop_from_design_rows, dop_multi, ecef_to_enu_rotation, line_of_sight_from_az_el_deg,
+    test_support, DopError, LineOfSight,
+};
 use crate::frame::Wgs84Geodetic;
 use crate::id::GnssSystem;
 
@@ -38,6 +41,36 @@ fn systems_for(n_clocks: usize) -> Vec<GnssSystem> {
         GnssSystem::Sbas,
     ];
     ORDER[..n_clocks].to_vec()
+}
+
+#[test]
+fn generalized_dop_matches_gnss_rows() {
+    let receiver =
+        Wgs84Geodetic::new(45.0_f64.to_radians(), -75.0_f64.to_radians(), 100.0).expect("receiver");
+    let los = vec![
+        LineOfSight::new(0.6509445549041194, -0.3229151081253906, 0.6870132099084238),
+        LineOfSight::new(-0.1936430033175727, 0.7473746634879952, 0.6356771337896102),
+        LineOfSight::new(
+            -0.730_360_483_841_695,
+            -0.506583142388898,
+            0.4579016226872558,
+        ),
+        LineOfSight::new(0.189511839684945, -0.9347210311772362, 0.300573550871319),
+    ];
+    let weights = vec![1.0, 0.9, 1.2, 0.8];
+    let gnss = dop(&los, &weights, receiver).expect("gnss dop");
+    let rows = los
+        .iter()
+        .map(|line| vec![-line.e_x, -line.e_y, -line.e_z, 1.0])
+        .collect::<Vec<_>>();
+    let rotation = ecef_to_enu_rotation(receiver.lat_rad, receiver.lon_rad);
+    let general = dop_from_design_rows(&rows, &weights, 3, rotation).expect("general dop");
+
+    assert_eq!(gnss.gdop.to_bits(), general.gdop.to_bits());
+    assert_eq!(gnss.pdop.to_bits(), general.pdop.to_bits());
+    assert_eq!(gnss.hdop.to_bits(), general.hdop.to_bits());
+    assert_eq!(gnss.vdop.to_bits(), general.vdop.to_bits());
+    assert_eq!(gnss.tdop.to_bits(), general.tdop.to_bits());
 }
 
 /// Parse a C99 / Python `float.hex()` hex-float string into the exact `f64`.

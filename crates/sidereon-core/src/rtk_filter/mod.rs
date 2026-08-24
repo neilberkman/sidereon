@@ -16,7 +16,7 @@
 //!   sequential filter: iterated information update, search-and-hold, predict
 //!   step, and the public option/result/error types.
 //!
-//! [`rms`] is shared by the static float and fixed solvers and stays here.
+//! `rms` is shared by the static float and fixed solvers and stays here.
 
 mod antenna;
 mod arc;

@@ -414,8 +414,8 @@ pub fn look_angle_batch_parallel(
 ///
 /// For each instant this composes the existing core transforms - propagate to
 /// TEME ([`Satellite::propagate_jd`]), TEME->GCRS ([`teme_to_gcrs_compute`]),
-/// GCRS->ITRS/ECEF ([`gcrs_to_itrs_compute`]), then ECEF->geodetic
-/// ([`itrs_to_geodetic_compute`]) - and returns the WGS84 sub-point (geodetic
+/// GCRS->ITRS/ECEF (`gcrs_to_itrs_compute`), then ECEF->geodetic
+/// (`itrs_to_geodetic_compute`) - and returns the WGS84 sub-point (geodetic
 /// latitude/longitude and ellipsoidal height). No geometry is reinvented; the
 /// same TEME->GCRS path [`look_angle`] uses feeds an ECEF step and the shared
 /// geodetic reduction. Like [`look_angle_arc`], the first propagation or frame

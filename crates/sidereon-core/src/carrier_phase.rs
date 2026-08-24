@@ -33,7 +33,7 @@ pub(crate) const MIN_HATCH_WINDOW_CAP: usize = 1;
 /// smoothing goldens run with (the `smooth_code` / `smooth_iono_free_code`
 /// tests pass `100`). Feeds the `hatch_window_cap` argument of
 /// [`smooth_code`] and [`smooth_iono_free_code`]; the floor enforced internally
-/// is [`MIN_HATCH_WINDOW_CAP`].
+/// is `MIN_HATCH_WINDOW_CAP`.
 pub const DEFAULT_HATCH_WINDOW_CAP: usize = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

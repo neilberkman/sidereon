@@ -32,7 +32,7 @@
 //! GPS-only; the OMM identity round-trip and the GLONASS FDMA check are the
 //! gates for the rest.
 //!
-//! The OMM input is the canonical [`Omm`](crate::astro::omm::Omm) produced by
+//! The OMM input is the canonical [`Omm`] produced by
 //! the core OMM parser (`crate::astro::omm::{parse_json, parse_json_array}`):
 //! this module does not re-parse OMM from scratch, it reads `OBJECT_NAME` and
 //! `NORAD_CAT_ID` off already-parsed records.

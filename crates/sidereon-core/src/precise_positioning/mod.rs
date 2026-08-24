@@ -4,7 +4,7 @@
 //! carrier ambiguities, integer ambiguity resolution, and the fixed-ambiguity
 //! re-solve from SP3-backed ionosphere-free code and phase observations. The
 //! observation-only wide-lane/narrow-lane and cycle-slip preparation that runs
-//! ahead of the solve lives in the [`prep`] leaf submodule.
+//! ahead of the solve lives in the `prep` leaf submodule.
 //!
 //! ```
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {

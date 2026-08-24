@@ -667,7 +667,7 @@ pub fn propagate_batch(
 /// Propagate many already-initialized satellites across a shared set of times,
 /// fanning the independent per-satellite arcs across a rayon thread pool.
 ///
-/// Each satellite's arc is computed by the same serial [`propagate_arc`] kernel
+/// Each satellite's arc is computed by the same serial `propagate_arc` kernel
 /// (i.e. the same [`Satellite::propagate`] calls as [`propagate_batch`]), and the
 /// indexed parallel collect preserves input order. Satellites are independent
 /// (no cross-satellite state, no reduction), so element `i` of the result is

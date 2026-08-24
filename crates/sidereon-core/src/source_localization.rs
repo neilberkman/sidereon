@@ -1,9 +1,89 @@
 //! Source localization from arrival times.
 //!
-//! This module solves for an event position from sensors at known Cartesian
-//! coordinates. Inputs are sans-I/O: callers supply sensor positions, arrival
-//! times, and a propagation speed. Coordinates are metres in a caller-chosen 2D
-//! or 3D Cartesian frame, times are seconds, and speeds are metres per second.
+//! This sans-I/O module solves for an event position from sensors at known
+//! Cartesian coordinates. Coordinates are metres in a caller-chosen 2D or 3D
+//! frame, times are seconds, and propagation speeds are metres per second.
+//!
+//! # Measurement models
+//!
+//! Absolute time of arrival (ToA) uses
+//!
+//! ```text
+//! t_i = t0 + ||x - s_i|| / c_i,
+//! ```
+//!
+//! with state `[x, t0]`: two or three position coordinates followed by the
+//! origin time. Time difference of arrival (TDOA) uses
+//!
+//! ```text
+//! t_i - t_ref = ||x - s_i|| / c_i - ||x - s_ref|| / c_ref,
+//! ```
+//!
+//! with position-only state `[x]`. After a TDOA position solve, the origin time
+//! is recovered from the absolute arrivals. Linear loss uses their arithmetic
+//! mean exactly; a non-linear loss applies one iteratively reweighted refinement
+//! so an arrival downweighted by the position solve is also downweighted in the
+//! reported time.
+//!
+//! Both modes require at least `dimension + 1` sensors: three in 2D or four in
+//! 3D. The closed-form seed is the spherical-intersection linearization of
+//! H. C. Schau and A. Z. Robinson, *IEEE Transactions on Acoustics, Speech, and
+//! Signal Processing* 35(8), 1987, followed by a quadratic in the reference
+//! range (TDOA) or emission-distance unknown `c * t0` (ToA). See
+//! [`closed_form_initial_guess`].
+//!
+//! The solution covariance is `(J^T J)^-1 * timing_sigma_s^2`, formed from the
+//! retained singular vectors and values of the final Jacobian. At the fitted
+//! state this is the local estimate covariance. [`source_crlb`] evaluates the
+//! same timing-information interpretation at a proposed source point through
+//! the shared DOP machinery, where it is a Cramer-Rao lower bound (CRLB).
+//!
+//! By default [`locate_source`] also measures each sensor's influence by running
+//! one complete nonlinear leave-one-out solve per sensor. Each record reports
+//! the full-solution ToA residual, held-out ToA residual, state displacement,
+//! robust-loss weight, and normalized residual magnitude. Set
+//! [`SourceLocateOptions::include_influence`] to `false` to skip those re-solves.
+//!
+//! # Example
+//!
+//! ```
+//! use sidereon_core::source_localization::{
+//!     locate_source, Sensor, SourceLocateOptions, SourceSolveMode,
+//! };
+//!
+//! let sensors = vec![
+//!     Sensor::new(vec![0.0, 0.0]),
+//!     Sensor::new(vec![100.0, 0.0]),
+//!     Sensor::new(vec![0.0, 100.0]),
+//!     Sensor::new(vec![100.0, 100.0]),
+//! ];
+//! let source_m = [30.0, 40.0];
+//! let origin_time_s = 2.0;
+//! let propagation_speed_m_s = 50.0;
+//! let arrival_times_s = sensors
+//!     .iter()
+//!     .map(|sensor| {
+//!         let dx = source_m[0] - sensor.position_m[0];
+//!         let dy = source_m[1] - sensor.position_m[1];
+//!         origin_time_s + (dx * dx + dy * dy).sqrt() / propagation_speed_m_s
+//!     })
+//!     .collect::<Vec<_>>();
+//!
+//! let mut options = SourceLocateOptions::default();
+//! options.mode = SourceSolveMode::Toa;
+//! options.include_influence = false;
+//! let solution = locate_source(
+//!     &sensors,
+//!     &arrival_times_s,
+//!     propagation_speed_m_s,
+//!     &options,
+//! )?;
+//!
+//! assert!((solution.position_m[0] - source_m[0]).abs() < 1.0e-8);
+//! assert!((solution.position_m[1] - source_m[1]).abs() < 1.0e-8);
+//! assert!((solution.origin_time_s.unwrap() - origin_time_s).abs() < 1.0e-10);
+//! # Ok::<(), sidereon_core::source_localization::SourceLocalizationError>(())
+//! ```
 
 use core::fmt;
 
@@ -18,7 +98,11 @@ use crate::geometry_quality::{
 };
 use nalgebra::DMatrix;
 
-const ROOT_TOL: f64 = 1.0e-12;
+/// Relative tolerance for classifying a quadratic coefficient or discriminant
+/// as numerically zero. The closed-form coefficients contain several dot
+/// products, so 32 machine epsilons covers their rounding accumulation while
+/// remaining far below a meaningful root separation.
+const QUADRATIC_REL_EPS: f64 = 32.0 * f64::EPSILON;
 
 /// A sensor with a known Cartesian position.
 ///
@@ -69,6 +153,20 @@ pub enum SourceSolveMode {
 }
 
 /// Options for [`locate_source`].
+///
+/// This type is non-exhaustive. Construct it by mutating
+/// [`SourceLocateOptions::default`], then set the fields needed for a call:
+///
+/// ```
+/// use sidereon_core::source_localization::{SourceLocateOptions, SourceSolveMode};
+///
+/// let mut options = SourceLocateOptions::default();
+/// options.mode = SourceSolveMode::Tdoa {
+///     reference_sensor: 0,
+/// };
+/// options.include_influence = false;
+/// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceLocateOptions {
     /// ToA or TDOA residual form.
@@ -88,6 +186,12 @@ pub struct SourceLocateOptions {
     pub gtol: Option<f64>,
     /// Optional maximum residual evaluations.
     pub max_nfev: Option<usize>,
+    /// Whether to compute per-sensor leave-one-out influence diagnostics.
+    ///
+    /// Influence runs one full nonlinear re-solve per sensor. The default is
+    /// `true`; set this to `false` to skip all leave-one-out solves and return
+    /// an empty [`SourceSolution::per_sensor_influence`] vector.
+    pub include_influence: bool,
 }
 
 impl Default for SourceLocateOptions {
@@ -101,6 +205,7 @@ impl Default for SourceLocateOptions {
             xtol: None,
             gtol: None,
             max_nfev: None,
+            include_influence: true,
         }
     }
 }
@@ -132,21 +237,37 @@ pub struct SourceResidual {
 pub struct SourceSensorInfluence {
     /// Sensor index in the caller's input slice.
     pub sensor_index: usize,
-    /// ToA residual at the full solution in seconds.
+    /// ToA residual at the full solution and estimated origin time, in seconds.
+    ///
+    /// This is a ToA residual in both solve modes, including TDOA mode.
     pub residual_s: f64,
     /// Held-out ToA residual after solving without this sensor, in seconds.
+    ///
+    /// This is evaluated at the leave-one-out estimated origin time in both
+    /// solve modes, including TDOA mode.
     pub leave_one_out_residual_s: Option<f64>,
     /// Position change between the full and leave-one-out solutions, in metres.
     pub position_delta_m: Option<f64>,
     /// Origin-time change between the full and leave-one-out solutions, in seconds.
     pub origin_time_delta_s: Option<f64>,
     /// First-derivative loss weight for the full-solution residual.
+    ///
+    /// This field carries robust-loss downweighting separately from [`score`](Self::score).
     pub loss_weight: f64,
-    /// Normalized diagnostic score. Larger values indicate a poorer fit.
+    /// Normalized residual magnitude in timing-sigma units.
+    ///
+    /// This is `max(|residual_s|, |leave_one_out_residual_s|) /
+    /// timing_sigma_s`, or `|residual_s| / timing_sigma_s` when the
+    /// leave-one-out solve is unavailable. Robust-loss downweighting is
+    /// reported separately by [`loss_weight`](Self::loss_weight).
     pub score: f64,
 }
 
-/// State covariance or Cramer-Rao lower bound for a source solve.
+/// Timing-information covariance for a source state.
+///
+/// This is `(J^T J)^-1 * timing_sigma_s^2` at the evaluation point. At a fitted
+/// solution it is the local estimate covariance; at a proposed point it is the
+/// Cramer-Rao lower bound (CRLB).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceCovariance {
     /// Full state covariance in solver state order.
@@ -180,7 +301,9 @@ pub struct SourceSolution {
     pub geometry_quality: GeometryQuality,
     /// Closed-form seed used to start the iterative solve.
     pub initial_guess: SourceInitialGuess,
-    /// Trust-region termination status.
+    /// Trust-region termination code: `0` maximum evaluations, `1` gradient
+    /// tolerance, `2` function tolerance, `3` step tolerance, or `4` both
+    /// function and step tolerances.
     pub status: i32,
     /// Residual evaluations used by the solver.
     pub nfev: usize,
@@ -287,6 +410,17 @@ impl From<TrfError> for SourceLocalizationError {
 /// `sensors` and `arrival_times_s` must have matching length. Positions must
 /// all be 2D or all be 3D. The call-level propagation speed is used for every
 /// sensor without a per-sensor override.
+///
+/// # Errors
+///
+/// Returns [`SourceLocalizationError::InvalidInput`] for malformed, non-finite,
+/// or inconsistent inputs; [`SourceLocalizationError::TooFewSensors`] when the
+/// selected dimension has fewer than `dimension + 1` sensors;
+/// [`SourceLocalizationError::InitializerSingular`] when the closed-form seed
+/// geometry is degenerate; [`SourceLocalizationError::Solver`] when the
+/// trust-region solver rejects the problem; [`SourceLocalizationError::DidNotConverge`]
+/// when its evaluation budget is exhausted; or
+/// [`SourceLocalizationError::Geometry`] when the final Jacobian is singular.
 pub fn locate_source(
     sensors: &[Sensor],
     arrival_times_s: &[f64],
@@ -298,27 +432,63 @@ pub fn locate_source(
         arrival_times_s,
         propagation_speed_m_s,
         options,
-        true,
+        options.include_influence,
     )
 }
 
-/// Compute the closed-form Chan-Ho style seed used by [`locate_source`].
+/// Compute the closed-form spherical-intersection seed used by [`locate_source`].
 ///
 /// The seed uses the call-level propagation speed in the closed-form equations.
-/// Per-sensor speed overrides are applied by the iterative residual model.
+/// Per-sensor speed overrides are applied by the iterative residual model. The
+/// TDOA branch is the spherical-intersection method of H. C. Schau and A. Z.
+/// Robinson, *IEEE Transactions on Acoustics, Speech, and Signal Processing*
+/// 35(8), 1987: position is affine in the unknown reference range, followed by
+/// a quadratic in that range. The ToA branch uses the same linearization in the
+/// emission-distance unknown `propagation_speed_m_s * origin_time_s` and always
+/// uses sensor `0` as its algebraic reference; any sensor is mathematically
+/// valid for that linearization.
+///
+/// # Errors
+///
+/// Returns [`SourceLocalizationError::InvalidInput`] for malformed, non-finite,
+/// or inconsistent inputs; [`SourceLocalizationError::TooFewSensors`] when the
+/// selected dimension has fewer than `dimension + 1` sensors; or
+/// [`SourceLocalizationError::InitializerSingular`] when the linear system or
+/// quadratic is degenerate or has no admissible root.
+#[allow(clippy::field_reassign_with_default)] // Public non-exhaustive construction pattern.
+pub fn closed_form_initial_guess(
+    sensors: &[Sensor],
+    arrival_times_s: &[f64],
+    propagation_speed_m_s: f64,
+    mode: SourceSolveMode,
+) -> Result<SourceInitialGuess, SourceLocalizationError> {
+    let mut options = SourceLocateOptions::default();
+    options.mode = mode;
+    let resolved =
+        resolve_locate_inputs(sensors, arrival_times_s, propagation_speed_m_s, &options)?;
+    closed_form_initial_guess_resolved(sensors, arrival_times_s, propagation_speed_m_s, &resolved)
+}
+
+/// Deprecated name for [`closed_form_initial_guess`].
+///
+/// The implemented initializer is the Schau-Robinson spherical-intersection
+/// linearization, not the two-stage Chan-Ho weighted least-squares method.
+///
+/// # Errors
+///
+/// Returns the same [`SourceLocalizationError`] variants as
+/// [`closed_form_initial_guess`].
+#[deprecated(
+    since = "1.1.0",
+    note = "use closed_form_initial_guess; this is Schau-Robinson spherical intersection, not Chan-Ho"
+)]
 pub fn chan_ho_initial_guess(
     sensors: &[Sensor],
     arrival_times_s: &[f64],
     propagation_speed_m_s: f64,
     mode: SourceSolveMode,
 ) -> Result<SourceInitialGuess, SourceLocalizationError> {
-    let options = SourceLocateOptions {
-        mode,
-        ..SourceLocateOptions::default()
-    };
-    let resolved =
-        resolve_locate_inputs(sensors, arrival_times_s, propagation_speed_m_s, &options)?;
-    chan_ho_initial_guess_resolved(sensors, arrival_times_s, propagation_speed_m_s, &resolved)
+    closed_form_initial_guess(sensors, arrival_times_s, propagation_speed_m_s, mode)
 }
 
 /// Compute timing DOP for a proposed source location.
@@ -326,6 +496,13 @@ pub fn chan_ho_initial_guess(
 /// The returned position DOP values multiply timing sigma in seconds to produce
 /// metres. The local Cartesian axes are used for the horizontal and vertical
 /// split.
+///
+/// # Errors
+///
+/// Returns [`SourceLocalizationError::InvalidInput`] for malformed, non-finite,
+/// inconsistent inputs, including a source coincident with a sensor. Returns
+/// [`SourceLocalizationError::Geometry`] when the shared DOP machinery finds
+/// too few sensors or a singular timing design.
 pub fn source_dop(
     sensors: &[Sensor],
     source_position_m: &[f64],
@@ -342,6 +519,14 @@ pub fn source_dop(
 ///
 /// The covariance is `(H^T H)^-1 * timing_sigma_s^2`, where each row is the ToA
 /// timing derivative at `source_position_m`.
+///
+/// # Errors
+///
+/// Returns [`SourceLocalizationError::InvalidInput`] for malformed, non-finite,
+/// non-positive, or inconsistent inputs. Returns
+/// [`SourceLocalizationError::Geometry`] when the shared DOP machinery finds
+/// too few sensors or a singular timing design. A source coincident with a
+/// sensor is [`SourceLocalizationError::InvalidInput`].
 pub fn source_crlb(
     sensors: &[Sensor],
     source_position_m: &[f64],
@@ -504,11 +689,18 @@ fn locate_source_inner(
     include_influence: bool,
 ) -> Result<SourceSolution, SourceLocalizationError> {
     let resolved = resolve_locate_inputs(sensors, arrival_times_s, propagation_speed_m_s, options)?;
-    let initial_guess =
-        chan_ho_initial_guess_resolved(sensors, arrival_times_s, propagation_speed_m_s, &resolved)?;
+    let initial_guess = closed_form_initial_guess_resolved(
+        sensors,
+        arrival_times_s,
+        propagation_speed_m_s,
+        &resolved,
+    )?;
     let mut x0 = initial_guess.position_m.clone();
     if matches!(resolved.mode, SourceSolveMode::Toa) {
-        x0.push(initial_guess.origin_time_s.expect("ToA seed has time"));
+        let origin_time_s = initial_guess
+            .origin_time_s
+            .ok_or(SourceLocalizationError::InitializerSingular)?;
+        x0.push(origin_time_s);
     }
 
     let problem = SourceProblem {
@@ -531,6 +723,8 @@ fn locate_source_inner(
         &initial_guess,
         result,
         options.timing_sigma_s,
+        options.loss,
+        options.f_scale_s,
     )?;
     if include_influence {
         solution.per_sensor_influence = compute_influence(
@@ -550,33 +744,37 @@ fn build_solution(
     initial_guess: &SourceInitialGuess,
     result: TrfResult,
     timing_sigma_s: f64,
+    loss: Loss,
+    f_scale_s: f64,
 ) -> Result<SourceSolution, SourceLocalizationError> {
     let position_m = result.x[..resolved.dimension].to_vec();
     let origin_time_s = match resolved.mode {
         SourceSolveMode::Toa => Some(result.x[resolved.dimension]),
-        SourceSolveMode::Tdoa { .. } => Some(estimate_origin_time_s(
+        SourceSolveMode::Tdoa { .. } => Some(estimate_origin_time_for_loss_s(
             problem.sensors,
             problem.arrival_times_s,
             problem.speeds_m_s,
             &position_m,
+            loss,
+            f_scale_s,
         )),
     };
     let residuals = problem.residual_records(&result.fun);
     let parameter_count = result.x.len();
     let residual_count = result.fun.len();
+    let jacobian = jacobian_svd_diagnostics(&result.jac, residual_count, parameter_count)
+        .ok_or(SourceLocalizationError::Geometry(DopError::Singular))?;
     let geometry_quality =
-        source_geometry_quality_from_jacobian(&result.jac, residual_count, parameter_count)?;
+        source_geometry_quality_from_svd(&jacobian, residual_count, parameter_count);
     if geometry_quality.tier == ObservabilityTier::RankDeficient {
         return Err(SourceLocalizationError::Geometry(DopError::Singular));
     }
-    let covariance = covariance_from_jacobian(
-        &result.jac,
-        residual_count,
-        parameter_count,
+    let covariance = covariance_from_state_cofactor(
+        &jacobian.cofactor,
         resolved.dimension,
         timing_sigma_s,
-    )
-    .ok_or(SourceLocalizationError::Geometry(DopError::Singular))?;
+        parameter_count == resolved.dimension + 1,
+    );
     Ok(SourceSolution {
         position_m,
         origin_time_s,
@@ -593,26 +791,33 @@ fn build_solution(
     })
 }
 
+#[cfg(test)]
 fn source_geometry_quality_from_jacobian(
     jac: &[f64],
     m: usize,
     n: usize,
 ) -> Result<GeometryQuality, SourceLocalizationError> {
-    if n == 0 || m == 0 || jac.len() != m.saturating_mul(n) {
-        return Err(SourceLocalizationError::Geometry(DopError::Singular));
-    }
-    let matrix = DMatrix::from_row_slice(m, n, jac);
-    let singular_values = matrix.svd(false, false).singular_values;
-    let diagnostics = singular_value_diagnostics(singular_values.as_slice(), m, n);
+    let diagnostics = jacobian_svd_diagnostics(jac, m, n)
+        .ok_or(SourceLocalizationError::Geometry(DopError::Singular))?;
+    Ok(source_geometry_quality_from_svd(&diagnostics, m, n))
+}
+
+fn source_geometry_quality_from_svd(
+    diagnostics: &JacobianSvdDiagnostics,
+    m: usize,
+    n: usize,
+) -> GeometryQuality {
     let gdop = if diagnostics.rank < n {
         f64::INFINITY
     } else {
-        cofactor_trace_from_jacobian(jac, m, n)
-            .filter(|trace| *trace >= 0.0 && trace.is_finite())
-            .map(f64::sqrt)
-            .unwrap_or(f64::INFINITY)
+        let trace = cofactor_trace(&diagnostics.cofactor);
+        if trace >= 0.0 && trace.is_finite() {
+            trace.sqrt()
+        } else {
+            f64::INFINITY
+        }
     };
-    Ok(classify(
+    classify(
         diagnostics.rank,
         n,
         m as i32 - n as i32,
@@ -620,10 +825,10 @@ fn source_geometry_quality_from_jacobian(
         gdop,
         false,
         GeometryQualityThresholds::default(),
-    ))
+    )
 }
 
-fn chan_ho_initial_guess_resolved(
+fn closed_form_initial_guess_resolved(
     sensors: &[Sensor],
     arrival_times_s: &[f64],
     propagation_speed_m_s: f64,
@@ -631,9 +836,9 @@ fn chan_ho_initial_guess_resolved(
 ) -> Result<SourceInitialGuess, SourceLocalizationError> {
     match resolved.mode {
         SourceSolveMode::Toa => {
-            chan_ho_toa_initial_guess(sensors, arrival_times_s, propagation_speed_m_s, resolved)
+            closed_form_toa_initial_guess(sensors, arrival_times_s, propagation_speed_m_s, resolved)
         }
-        SourceSolveMode::Tdoa { reference_sensor } => chan_ho_tdoa_initial_guess(
+        SourceSolveMode::Tdoa { reference_sensor } => closed_form_tdoa_initial_guess(
             sensors,
             arrival_times_s,
             propagation_speed_m_s,
@@ -643,7 +848,7 @@ fn chan_ho_initial_guess_resolved(
     }
 }
 
-fn chan_ho_toa_initial_guess(
+fn closed_form_toa_initial_guess(
     sensors: &[Sensor],
     arrival_times_s: &[f64],
     propagation_speed_m_s: f64,
@@ -683,9 +888,13 @@ fn chan_ho_toa_initial_guess(
     let mut best_sse = f64::INFINITY;
     for tau_m in roots {
         let position_m: Vec<f64> = (0..d).map(|axis| p0[axis] + p1[axis] * tau_m).collect();
-        if sensors.iter().any(|sensor| {
-            distance(&position_m, &sensor.position_m) > propagation_speed_m_s * 1.0e12
-        }) {
+        // `tau_m = c * t0` is the emission-distance unknown introduced by the
+        // linearization. It carries the sign of `t0` in the caller's time base,
+        // so a negative value is legitimate (an origin before the epoch the
+        // arrivals are measured against), and its scale is problem-defined, so
+        // no absolute cutoff is defensible either. Reject only a non-finite
+        // candidate and let the ToA SSE select the physically consistent root.
+        if !tau_m.is_finite() || position_m.iter().any(|value| !value.is_finite()) {
             continue;
         }
         let origin_time_s = tau_m / propagation_speed_m_s;
@@ -708,7 +917,7 @@ fn chan_ho_toa_initial_guess(
     best.ok_or(SourceLocalizationError::InitializerSingular)
 }
 
-fn chan_ho_tdoa_initial_guess(
+fn closed_form_tdoa_initial_guess(
     sensors: &[Sensor],
     arrival_times_s: &[f64],
     propagation_speed_m_s: f64,
@@ -783,7 +992,14 @@ fn compute_influence(
         Err(_) => return Vec::new(),
     };
     let origin_time_s = solution.origin_time_s.unwrap_or_else(|| {
-        estimate_origin_time_s(sensors, arrival_times_s, &speeds, &solution.position_m)
+        estimate_origin_time_for_loss_s(
+            sensors,
+            arrival_times_s,
+            &speeds,
+            &solution.position_m,
+            options.loss,
+            options.f_scale_s,
+        )
     });
     let full_residuals = toa_residuals(
         sensors,
@@ -804,15 +1020,9 @@ fn compute_influence(
                 sensor_index,
             );
             let (leave_one_out_residual_s, position_delta_m, origin_time_delta_s) =
-                if let Some(loo_solution) = loo {
-                    let loo_origin = loo_solution.origin_time_s.unwrap_or_else(|| {
-                        estimate_origin_time_s(
-                            sensors,
-                            arrival_times_s,
-                            &speeds,
-                            &loo_solution.position_m,
-                        )
-                    });
+                if let Some((loo_solution, loo_origin)) =
+                    loo.and_then(|solution| solution.origin_time_s.map(|time| (solution, time)))
+                {
                     let held_out_residual = single_toa_residual(
                         &sensors[sensor_index],
                         arrival_times_s[sensor_index],
@@ -833,10 +1043,6 @@ fn compute_influence(
                 options.f_scale_s,
                 full_residuals[sensor_index],
             );
-            let score_basis = leave_one_out_residual_s
-                .unwrap_or(full_residuals[sensor_index])
-                .abs()
-                .max(full_residuals[sensor_index].abs());
             SourceSensorInfluence {
                 sensor_index,
                 residual_s: full_residuals[sensor_index],
@@ -844,7 +1050,11 @@ fn compute_influence(
                 position_delta_m,
                 origin_time_delta_s,
                 loss_weight,
-                score: score_basis / sigma + (1.0 - loss_weight) * 1.0e6,
+                score: influence_score(
+                    full_residuals[sensor_index],
+                    leave_one_out_residual_s,
+                    sigma,
+                ),
             }
         })
         .collect()
@@ -951,10 +1161,7 @@ fn resolve_geometry_inputs(
     propagation_speed_m_s: f64,
 ) -> Result<ResolvedGeometry, SourceLocalizationError> {
     if sensors.is_empty() {
-        return Err(SourceLocalizationError::TooFewSensors {
-            sensors: 0,
-            needed: 3,
-        });
+        return Err(invalid_input("sensors", "must not be empty"));
     }
     validate_positive("propagation_speed_m_s", propagation_speed_m_s)?;
     let dimension = sensors[0].position_m.len();
@@ -1030,40 +1237,59 @@ fn source_toa_design_rows(
         .collect()
 }
 
-fn covariance_from_jacobian(
-    jac: &[f64],
-    m: usize,
-    n: usize,
-    dimension: usize,
-    timing_sigma_s: f64,
-) -> Option<SourceCovariance> {
-    let cofactor = cofactor_from_jacobian(jac, m, n)?;
-    Some(covariance_from_state_cofactor(
-        &cofactor,
-        dimension,
-        timing_sigma_s,
-        n == dimension + 1,
-    ))
+struct JacobianSvdDiagnostics {
+    rank: usize,
+    condition_number: f64,
+    cofactor: Vec<Vec<f64>>,
 }
 
+#[cfg(test)]
 fn cofactor_trace_from_jacobian(jac: &[f64], m: usize, n: usize) -> Option<f64> {
     let cofactor = cofactor_from_jacobian(jac, m, n)?;
-    Some((0..n).map(|idx| cofactor[idx][idx]).sum())
+    Some(cofactor_trace(&cofactor))
 }
 
+#[cfg(test)]
 fn cofactor_from_jacobian(jac: &[f64], m: usize, n: usize) -> Option<Vec<Vec<f64>>> {
-    if jac.len() != m.checked_mul(n)? {
+    Some(jacobian_svd_diagnostics(jac, m, n)?.cofactor)
+}
+
+fn jacobian_svd_diagnostics(jac: &[f64], m: usize, n: usize) -> Option<JacobianSvdDiagnostics> {
+    if m == 0 || n == 0 || jac.len() != m.checked_mul(n)? {
         return None;
     }
-    let mut normal = vec![vec![0.0_f64; n]; n];
-    for row in 0..m {
-        for i in 0..n {
-            for j in 0..n {
-                normal[i][j] += jac[row * n + i] * jac[row * n + j];
+    let matrix = DMatrix::from_row_slice(m, n, jac);
+    let svd = matrix.svd(false, true);
+    let diagnostics = singular_value_diagnostics(svd.singular_values.as_slice(), m, n);
+    let v_t = svd.v_t?;
+    let largest = svd.singular_values.iter().copied().fold(0.0_f64, f64::max);
+    let threshold = largest * (m.max(n) as f64) * f64::EPSILON;
+    let mut cofactor = vec![vec![0.0_f64; n]; n];
+    for i in 0..n {
+        for j in i..n {
+            let mut value = 0.0;
+            for (component, &singular_value) in svd.singular_values.iter().enumerate() {
+                if singular_value > threshold {
+                    let inverse_square = (singular_value * singular_value).recip();
+                    value += v_t[(component, i)] * inverse_square * v_t[(component, j)];
+                }
             }
+            cofactor[i][j] = value;
+            cofactor[j][i] = value;
         }
     }
-    crate::astro::math::linear::invert_symmetric_pd(&normal)
+    if cofactor.iter().flatten().any(|value| !value.is_finite()) {
+        return None;
+    }
+    Some(JacobianSvdDiagnostics {
+        rank: diagnostics.rank,
+        condition_number: diagnostics.condition_number,
+        cofactor,
+    })
+}
+
+fn cofactor_trace(cofactor: &[Vec<f64>]) -> f64 {
+    (0..cofactor.len()).map(|idx| cofactor[idx][idx]).sum()
 }
 
 fn covariance_from_state_cofactor(
@@ -1139,14 +1365,19 @@ fn quadratic_roots(a: f64, b: f64, c: f64) -> Result<Vec<f64>, SourceLocalizatio
     if !a.is_finite() || !b.is_finite() || !c.is_finite() {
         return Err(SourceLocalizationError::InitializerSingular);
     }
-    if a.abs() <= ROOT_TOL {
-        if b.abs() <= ROOT_TOL {
+    let coefficient_scale = a.abs().max(b.abs()).max(c.abs()).max(1.0);
+    let coefficient_tolerance = QUADRATIC_REL_EPS * coefficient_scale;
+    if a.abs() <= coefficient_tolerance {
+        if b.abs() <= coefficient_tolerance {
             return Err(SourceLocalizationError::InitializerSingular);
         }
         return Ok(vec![-c / b]);
     }
-    let disc = b * b - 4.0 * a * c;
-    if disc < -ROOT_TOL || !disc.is_finite() {
+    let b_squared = b * b;
+    let four_ac = 4.0 * a * c;
+    let disc = b_squared - four_ac;
+    let discriminant_scale = b_squared.abs().max(four_ac.abs()).max(1.0);
+    if disc < -QUADRATIC_REL_EPS * discriminant_scale || !disc.is_finite() {
         return Err(SourceLocalizationError::InitializerSingular);
     }
     let root = disc.max(0.0).sqrt();
@@ -1242,6 +1473,38 @@ fn estimate_origin_time_s(
     sum / sensors.len() as f64
 }
 
+fn estimate_origin_time_for_loss_s(
+    sensors: &[Sensor],
+    arrival_times_s: &[f64],
+    speeds_m_s: &[f64],
+    position_m: &[f64],
+    loss: Loss,
+    f_scale_s: f64,
+) -> f64 {
+    let unweighted = estimate_origin_time_s(sensors, arrival_times_s, speeds_m_s, position_m);
+    if loss == Loss::Linear {
+        // Preserve the historical expression path, including its rounding, for
+        // the default loss.
+        return unweighted;
+    }
+
+    let mut weighted_sum = 0.0;
+    let mut weight_sum = 0.0;
+    for (i, sensor) in sensors.iter().enumerate() {
+        let candidate_s =
+            arrival_times_s[i] - distance(position_m, &sensor.position_m) / speeds_m_s[i];
+        let residual_s = unweighted - candidate_s;
+        let weight = loss_weight(loss, f_scale_s, residual_s);
+        weighted_sum += weight * candidate_s;
+        weight_sum += weight;
+    }
+    if weight_sum > 0.0 && weight_sum.is_finite() && weighted_sum.is_finite() {
+        weighted_sum / weight_sum
+    } else {
+        unweighted
+    }
+}
+
 fn fill_range_derivative(position_m: &[f64], sensor_m: &[f64], speed_m_s: f64, out: &mut [f64]) {
     let range_m = distance(position_m, sensor_m);
     if range_m <= 0.0 || !range_m.is_finite() {
@@ -1254,23 +1517,37 @@ fn fill_range_derivative(position_m: &[f64], sensor_m: &[f64], speed_m_s: f64, o
 }
 
 fn loss_weight(loss: Loss, f_scale_s: f64, residual_s: f64) -> f64 {
-    if loss == Loss::Linear {
-        return 1.0;
-    }
-    let z = (residual_s / f_scale_s) * (residual_s / f_scale_s);
     match loss {
         Loss::Linear => 1.0,
         Loss::Huber => {
+            let z = (residual_s / f_scale_s) * (residual_s / f_scale_s);
             if z <= 1.0 {
                 1.0
             } else {
                 z.sqrt().recip()
             }
         }
-        Loss::SoftL1 => (1.0 + z).sqrt().recip(),
-        Loss::Cauchy => (1.0 + z).recip(),
-        Loss::Arctan => (1.0 + z * z).recip(),
+        Loss::SoftL1 => {
+            let z = (residual_s / f_scale_s) * (residual_s / f_scale_s);
+            (1.0 + z).sqrt().recip()
+        }
+        Loss::Cauchy => {
+            let z = (residual_s / f_scale_s) * (residual_s / f_scale_s);
+            (1.0 + z).recip()
+        }
+        Loss::Arctan => {
+            let z = (residual_s / f_scale_s) * (residual_s / f_scale_s);
+            (1.0 + z * z).recip()
+        }
     }
+}
+
+fn influence_score(residual_s: f64, leave_one_out_residual_s: Option<f64>, sigma_s: f64) -> f64 {
+    leave_one_out_residual_s
+        .unwrap_or(residual_s)
+        .abs()
+        .max(residual_s.abs())
+        / sigma_s
 }
 
 fn distance(a: &[f64], b: &[f64]) -> f64 {
@@ -1288,7 +1565,7 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
-fn identity_rotation() -> [[f64; 3]; 3] {
+const fn identity_rotation() -> [[f64; 3]; 3] {
     [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 }
 
@@ -1330,9 +1607,11 @@ mod tests {
     //! synthetic corrupted arrivals. They do not compare against another
     //! implementation.
 
+    // Exercise the construction pattern available to callers of the
+    // non-exhaustive options type.
+    #![allow(clippy::field_reassign_with_default)]
+
     use super::*;
-    use crate::dop::{dop, dop_from_design_rows, ecef_to_enu_rotation, LineOfSight};
-    use crate::frame::Wgs84Geodetic;
 
     fn arrivals(sensors: &[Sensor], source: &[f64], origin: f64, speed: f64) -> Vec<f64> {
         sensors
@@ -1353,8 +1632,209 @@ mod tests {
         }
     }
 
+    fn assert_f64_bits(actual: f64, expected: f64, field: &str) {
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "{field}: actual {actual:?}, expected {expected:?}"
+        );
+    }
+
+    fn assert_covariance_bits(actual: &SourceCovariance, expected: &SourceCovariance, field: &str) {
+        assert_eq!(actual.state.len(), expected.state.len());
+        for (row_index, (actual_row, expected_row)) in
+            actual.state.iter().zip(&expected.state).enumerate()
+        {
+            assert_eq!(actual_row.len(), expected_row.len());
+            for (column_index, (&actual_value, &expected_value)) in
+                actual_row.iter().zip(expected_row).enumerate()
+            {
+                assert_f64_bits(
+                    actual_value,
+                    expected_value,
+                    &format!("{field}.state[{row_index}][{column_index}]"),
+                );
+            }
+        }
+        assert_eq!(actual.position_m2.len(), expected.position_m2.len());
+        for (row_index, (actual_row, expected_row)) in actual
+            .position_m2
+            .iter()
+            .zip(&expected.position_m2)
+            .enumerate()
+        {
+            assert_eq!(actual_row.len(), expected_row.len());
+            for (column_index, (&actual_value, &expected_value)) in
+                actual_row.iter().zip(expected_row).enumerate()
+            {
+                assert_f64_bits(
+                    actual_value,
+                    expected_value,
+                    &format!("{field}.position_m2[{row_index}][{column_index}]"),
+                );
+            }
+        }
+        match (actual.origin_time_s2, expected.origin_time_s2) {
+            (Some(actual), Some(expected)) => {
+                assert_f64_bits(actual, expected, &format!("{field}.origin_time_s2"));
+            }
+            (None, None) => {}
+            pair => panic!("{field}.origin_time_s2 differs: {pair:?}"),
+        }
+        assert_f64_bits(
+            actual.timing_sigma_s,
+            expected.timing_sigma_s,
+            &format!("{field}.timing_sigma_s"),
+        );
+    }
+
+    fn assert_solution_bits_except_influence(actual: &SourceSolution, expected: &SourceSolution) {
+        assert_eq!(actual.position_m.len(), expected.position_m.len());
+        for (axis, (&actual, &expected)) in actual
+            .position_m
+            .iter()
+            .zip(&expected.position_m)
+            .enumerate()
+        {
+            assert_f64_bits(actual, expected, &format!("position_m[{axis}]"));
+        }
+        match (actual.origin_time_s, expected.origin_time_s) {
+            (Some(actual), Some(expected)) => {
+                assert_f64_bits(actual, expected, "origin_time_s");
+            }
+            (None, None) => {}
+            pair => panic!("origin_time_s differs: {pair:?}"),
+        }
+        match (&actual.covariance, &expected.covariance) {
+            (Some(actual), Some(expected)) => {
+                assert_covariance_bits(actual, expected, "covariance");
+            }
+            (None, None) => {}
+            pair => panic!("covariance presence differs: {pair:?}"),
+        }
+        assert_eq!(actual.residuals.len(), expected.residuals.len());
+        for (index, (actual, expected)) in
+            actual.residuals.iter().zip(&expected.residuals).enumerate()
+        {
+            assert_eq!(actual.sensor_index, expected.sensor_index);
+            assert_eq!(
+                actual.reference_sensor_index,
+                expected.reference_sensor_index
+            );
+            assert_f64_bits(
+                actual.residual_s,
+                expected.residual_s,
+                &format!("residuals[{index}].residual_s"),
+            );
+        }
+        assert_eq!(actual.geometry_quality.tier, expected.geometry_quality.tier);
+        assert_eq!(
+            actual.geometry_quality.redundancy,
+            expected.geometry_quality.redundancy
+        );
+        assert_eq!(actual.geometry_quality.rank, expected.geometry_quality.rank);
+        assert_f64_bits(
+            actual.geometry_quality.condition_number,
+            expected.geometry_quality.condition_number,
+            "geometry_quality.condition_number",
+        );
+        assert_f64_bits(
+            actual.geometry_quality.gdop,
+            expected.geometry_quality.gdop,
+            "geometry_quality.gdop",
+        );
+        assert_eq!(
+            actual.geometry_quality.raim_checkable,
+            expected.geometry_quality.raim_checkable
+        );
+        assert_eq!(
+            actual.geometry_quality.covariance_validated,
+            expected.geometry_quality.covariance_validated
+        );
+        assert_eq!(
+            actual.initial_guess.position_m.len(),
+            expected.initial_guess.position_m.len()
+        );
+        for (axis, (&actual, &expected)) in actual
+            .initial_guess
+            .position_m
+            .iter()
+            .zip(&expected.initial_guess.position_m)
+            .enumerate()
+        {
+            assert_f64_bits(
+                actual,
+                expected,
+                &format!("initial_guess.position_m[{axis}]"),
+            );
+        }
+        match (
+            actual.initial_guess.origin_time_s,
+            expected.initial_guess.origin_time_s,
+        ) {
+            (Some(actual), Some(expected)) => {
+                assert_f64_bits(actual, expected, "initial_guess.origin_time_s");
+            }
+            (None, None) => {}
+            pair => panic!("initial_guess.origin_time_s differs: {pair:?}"),
+        }
+        assert_f64_bits(
+            actual.initial_guess.residual_rms_s,
+            expected.initial_guess.residual_rms_s,
+            "initial_guess.residual_rms_s",
+        );
+        assert_eq!(actual.status, expected.status);
+        assert_eq!(actual.nfev, expected.nfev);
+        assert_eq!(actual.njev, expected.njev);
+        assert_f64_bits(actual.cost, expected.cost, "cost");
+        assert_f64_bits(actual.optimality, expected.optimality, "optimality");
+    }
+
+    struct SplitMix64 {
+        state: u64,
+        spare_normal: Option<f64>,
+    }
+
+    impl SplitMix64 {
+        fn new(seed: u64) -> Self {
+            Self {
+                state: seed,
+                spare_normal: None,
+            }
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut value = self.state;
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^ (value >> 31)
+        }
+
+        fn unit_f64(&mut self) -> f64 {
+            let bits = 0x3ff0_0000_0000_0000 | (self.next_u64() >> 12);
+            f64::from_bits(bits) - 1.0
+        }
+
+        fn standard_normal(&mut self) -> f64 {
+            if let Some(value) = self.spare_normal.take() {
+                return value;
+            }
+            loop {
+                let u = 2.0 * self.unit_f64() - 1.0;
+                let v = 2.0 * self.unit_f64() - 1.0;
+                let radius_squared = u * u + v * v;
+                if radius_squared > 0.0 && radius_squared < 1.0 {
+                    let scale = (-2.0 * radius_squared.ln() / radius_squared).sqrt();
+                    self.spare_normal = Some(v * scale);
+                    return u * scale;
+                }
+            }
+        }
+    }
+
     #[test]
-    fn chan_ho_toa_initializer_recovers_clean_3d() {
+    fn closed_form_toa_initializer_recovers_clean_3d() {
         let sensors = vec![
             Sensor::new(vec![0.0, 0.0, 0.0]),
             Sensor::new(vec![1200.0, 0.0, 0.0]),
@@ -1368,7 +1848,7 @@ mod tests {
         let times = arrivals(&sensors, &source, origin, speed);
 
         let seed =
-            chan_ho_initial_guess(&sensors, &times, speed, SourceSolveMode::Toa).expect("seed");
+            closed_form_initial_guess(&sensors, &times, speed, SourceSolveMode::Toa).expect("seed");
         assert_vec_close(&seed.position_m, &source, 1.0e-8);
         assert!((seed.origin_time_s.unwrap() - origin).abs() < 1.0e-10);
         assert!(seed.residual_rms_s < 1.0e-11);
@@ -1387,10 +1867,8 @@ mod tests {
         let origin = 12.5;
         let speed = 343.0;
         let times = arrivals(&sensors, &source, origin, speed);
-        let options = SourceLocateOptions {
-            timing_sigma_s: 0.001,
-            ..SourceLocateOptions::default()
-        };
+        let mut options = SourceLocateOptions::default();
+        options.timing_sigma_s = 0.001;
 
         let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
         assert_vec_close(&solution.position_m, &source, 1.0e-7);
@@ -1400,6 +1878,90 @@ mod tests {
             .residuals
             .iter()
             .all(|row| row.residual_s.abs() < 1.0e-10));
+    }
+
+    #[test]
+    fn locate_source_toa_recovers_clean_2d() {
+        let sensors = vec![
+            Sensor::new(vec![0.0, 0.0]),
+            Sensor::new(vec![700.0, 0.0]),
+            Sensor::new(vec![0.0, 600.0]),
+            Sensor::new(vec![650.0, 550.0]),
+        ];
+        let source = [210.0, 170.0];
+        let origin = 2.75;
+        let speed = 343.0;
+        let times = arrivals(&sensors, &source, origin, speed);
+        let mut options = SourceLocateOptions::default();
+        options.include_influence = false;
+
+        let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
+
+        assert_vec_close(&solution.position_m, &source, 1.0e-8);
+        assert!((solution.origin_time_s.unwrap() - origin).abs() < 1.0e-10);
+        assert!(solution.per_sensor_influence.is_empty());
+    }
+
+    #[test]
+    fn locate_source_toa_recovers_negative_origin_time() {
+        // Arrival times measured against an epoch later than the emission:
+        // the origin time is negative and the seed's emission-distance unknown
+        // `c * t0` is negative with it. That is a valid problem, not a
+        // rejected root.
+        let sensors = vec![
+            Sensor::new(vec![0.0, 0.0, 0.0]),
+            Sensor::new(vec![1200.0, 0.0, 0.0]),
+            Sensor::new(vec![0.0, 900.0, 0.0]),
+            Sensor::new(vec![0.0, 0.0, 700.0]),
+            Sensor::new(vec![1100.0, 800.0, 600.0]),
+        ];
+        let source = [320.0, 260.0, 180.0];
+        let origin = -4.5;
+        let speed = 343.0;
+        let times = arrivals(&sensors, &source, origin, speed);
+        let mut options = SourceLocateOptions::default();
+        options.include_influence = false;
+
+        let seed =
+            closed_form_initial_guess(&sensors, &times, speed, SourceSolveMode::Toa).expect("seed");
+        assert!((seed.origin_time_s.unwrap() - origin).abs() < 1.0e-9);
+
+        let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
+        assert_vec_close(&solution.position_m, &source, 1.0e-7);
+        assert!((solution.origin_time_s.unwrap() - origin).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn influence_opt_out_preserves_every_other_output_bit() {
+        let sensors = vec![
+            Sensor::new(vec![0.0, 0.0, 0.0]),
+            Sensor::new(vec![1200.0, 0.0, 0.0]),
+            Sensor::new(vec![0.0, 900.0, 0.0]),
+            Sensor::new(vec![0.0, 0.0, 700.0]),
+            Sensor::new(vec![1100.0, 800.0, 600.0]),
+        ];
+        let source = [320.0, 260.0, 180.0];
+        let speed = 343.0;
+        let mut times = arrivals(&sensors, &source, 12.5, speed);
+        for (time, noise) in times
+            .iter_mut()
+            .zip([0.00031, -0.00022, 0.00017, -0.00008, 0.00041])
+        {
+            *time += noise;
+        }
+        let mut with_influence_options = SourceLocateOptions::default();
+        with_influence_options.timing_sigma_s = 0.001;
+        let with_influence = locate_source(&sensors, &times, speed, &with_influence_options)
+            .expect("solution with influence");
+        assert_eq!(with_influence.per_sensor_influence.len(), sensors.len());
+
+        let mut without_influence_options = with_influence_options.clone();
+        without_influence_options.include_influence = false;
+        let without_influence = locate_source(&sensors, &times, speed, &without_influence_options)
+            .expect("solution without influence");
+
+        assert!(without_influence.per_sensor_influence.is_empty());
+        assert_solution_bits_except_influence(&without_influence, &with_influence);
     }
 
     #[test]
@@ -1441,18 +2003,78 @@ mod tests {
         let origin = 4.0;
         let speed = 340.0;
         let times = arrivals(&sensors, &source, origin, speed);
-        let options = SourceLocateOptions {
-            mode: SourceSolveMode::Tdoa {
-                reference_sensor: 0,
-            },
-            timing_sigma_s: 0.001,
-            ..SourceLocateOptions::default()
+        let mut options = SourceLocateOptions::default();
+        options.mode = SourceSolveMode::Tdoa {
+            reference_sensor: 0,
         };
+        options.timing_sigma_s = 0.001;
 
         let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
         assert_vec_close(&solution.position_m, &source, 1.0e-7);
         assert!((solution.origin_time_s.unwrap() - origin).abs() < 1.0e-9);
         assert_eq!(solution.residuals.len(), sensors.len() - 1);
+    }
+
+    #[test]
+    fn locate_source_tdoa_recovers_clean_3d() {
+        let sensors = vec![
+            Sensor::new(vec![0.0, 0.0, 0.0]),
+            Sensor::new(vec![1000.0, 0.0, 0.0]),
+            Sensor::new(vec![0.0, 900.0, 0.0]),
+            Sensor::new(vec![0.0, 0.0, 800.0]),
+            Sensor::new(vec![900.0, 850.0, 750.0]),
+        ];
+        let source = [280.0, 310.0, 190.0];
+        let origin = 6.25;
+        let speed = 343.0;
+        let times = arrivals(&sensors, &source, origin, speed);
+        let mut options = SourceLocateOptions::default();
+        options.mode = SourceSolveMode::Tdoa {
+            reference_sensor: 3,
+        };
+        options.include_influence = false;
+
+        let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
+
+        assert_vec_close(&solution.position_m, &source, 1.0e-7);
+        assert!((solution.origin_time_s.unwrap() - origin).abs() < 1.0e-9);
+        assert_eq!(solution.residuals.len(), sensors.len() - 1);
+    }
+
+    #[test]
+    fn tdoa_influence_populates_excluded_reference_sensor() {
+        let sensors = vec![
+            Sensor::new(vec![0.0, 0.0]),
+            Sensor::new(vec![1000.0, 0.0]),
+            Sensor::new(vec![0.0, 800.0]),
+            Sensor::new(vec![900.0, 900.0]),
+            Sensor::new(vec![-350.0, 500.0]),
+        ];
+        let source = [300.0, 260.0];
+        let speed = 340.0;
+        let times = arrivals(&sensors, &source, 4.0, speed);
+        let reference_sensor = 2;
+        let mut options = SourceLocateOptions::default();
+        options.mode = SourceSolveMode::Tdoa { reference_sensor };
+        options.timing_sigma_s = 0.001;
+
+        let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
+        let reference = solution
+            .per_sensor_influence
+            .iter()
+            .find(|record| record.sensor_index == reference_sensor)
+            .expect("reference influence record");
+
+        assert!(reference
+            .leave_one_out_residual_s
+            .is_some_and(f64::is_finite));
+        assert!(reference
+            .position_delta_m
+            .is_some_and(|value| value.is_finite() && value >= 0.0));
+        assert!(reference
+            .origin_time_delta_s
+            .is_some_and(|value| value.is_finite() && value >= 0.0));
+        assert!(reference.score.is_finite());
     }
 
     #[test]
@@ -1500,36 +2122,6 @@ mod tests {
     }
 
     #[test]
-    fn generalized_dop_matches_gnss_rows() {
-        let receiver = Wgs84Geodetic::new(45.0_f64.to_radians(), -75.0_f64.to_radians(), 100.0)
-            .expect("receiver");
-        let los = vec![
-            LineOfSight::new(0.6509445549041194, -0.3229151081253906, 0.6870132099084238),
-            LineOfSight::new(-0.1936430033175727, 0.7473746634879952, 0.6356771337896102),
-            LineOfSight::new(
-                -0.730_360_483_841_695,
-                -0.506583142388898,
-                0.4579016226872558,
-            ),
-            LineOfSight::new(0.189511839684945, -0.9347210311772362, 0.300573550871319),
-        ];
-        let weights = vec![1.0, 0.9, 1.2, 0.8];
-        let gnss = dop(&los, &weights, receiver).expect("gnss dop");
-        let rows = los
-            .iter()
-            .map(|line| vec![-line.e_x, -line.e_y, -line.e_z, 1.0])
-            .collect::<Vec<_>>();
-        let rotation = ecef_to_enu_rotation(receiver.lat_rad, receiver.lon_rad);
-        let general = dop_from_design_rows(&rows, &weights, 3, rotation).expect("general dop");
-
-        assert_eq!(gnss.gdop.to_bits(), general.gdop.to_bits());
-        assert_eq!(gnss.pdop.to_bits(), general.pdop.to_bits());
-        assert_eq!(gnss.hdop.to_bits(), general.hdop.to_bits());
-        assert_eq!(gnss.vdop.to_bits(), general.vdop.to_bits());
-        assert_eq!(gnss.tdop.to_bits(), general.tdop.to_bits());
-    }
-
-    #[test]
     fn corrupted_arrival_is_downweighted_and_flagged() {
         let sensors = vec![
             Sensor::new(vec![100.0, 0.0]),
@@ -1538,18 +2130,18 @@ mod tests {
             Sensor::new(vec![0.0, -100.0]),
             Sensor::new(vec![120.0, 120.0]),
             Sensor::new(vec![-120.0, 80.0]),
+            Sensor::new(vec![80.0, -140.0]),
+            Sensor::new(vec![-160.0, -100.0]),
         ];
         let source = vec![15.0, -20.0];
         let origin = 1.25;
         let speed = 50.0;
         let mut times = arrivals(&sensors, &source, origin, speed);
         times[4] += 0.5;
-        let options = SourceLocateOptions {
-            loss: Loss::Huber,
-            f_scale_s: 0.01,
-            timing_sigma_s: 0.01,
-            ..SourceLocateOptions::default()
-        };
+        let mut options = SourceLocateOptions::default();
+        options.loss = Loss::Huber;
+        options.f_scale_s = 0.01;
+        options.timing_sigma_s = 0.01;
 
         let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
         let worst = solution
@@ -1557,8 +2149,183 @@ mod tests {
             .iter()
             .max_by(|a, b| a.score.total_cmp(&b.score))
             .expect("influence");
+        let runner_up = solution
+            .per_sensor_influence
+            .iter()
+            .filter(|record| record.sensor_index != worst.sensor_index)
+            .map(|record| record.score)
+            .max_by(f64::total_cmp)
+            .expect("runner-up influence");
         assert_eq!(worst.sensor_index, 4);
         assert!(worst.loss_weight < 0.05);
+        assert!(
+            worst.score > 20.0 * runner_up,
+            "corrupted score {} was not twenty times runner-up {}",
+            worst.score,
+            runner_up
+        );
+        let expected = worst
+            .leave_one_out_residual_s
+            .unwrap_or(worst.residual_s)
+            .abs()
+            .max(worst.residual_s.abs())
+            / options.timing_sigma_s;
+        assert_f64_bits(worst.score, expected, "corrupted influence score");
+    }
+
+    #[test]
+    fn influence_score_matches_hand_computation() {
+        assert_f64_bits(
+            influence_score(-0.03, Some(0.08), 0.01),
+            8.0,
+            "leave-one-out score",
+        );
+        assert_f64_bits(influence_score(-0.03, None, 0.01), 3.0, "fallback score");
+    }
+
+    #[test]
+    fn tdoa_huber_origin_time_improves_on_unweighted_mean() {
+        let sensors = vec![
+            Sensor::new(vec![100.0, 0.0]),
+            Sensor::new(vec![-100.0, 0.0]),
+            Sensor::new(vec![0.0, 100.0]),
+            Sensor::new(vec![0.0, -100.0]),
+            Sensor::new(vec![120.0, 120.0]),
+            Sensor::new(vec![-120.0, 80.0]),
+        ];
+        let source = [15.0, -20.0];
+        let origin = 1.25;
+        let speed = 50.0;
+        let mut times = arrivals(&sensors, &source, origin, speed);
+        times[4] += 0.5;
+        let mut options = SourceLocateOptions::default();
+        options.mode = SourceSolveMode::Tdoa {
+            reference_sensor: 0,
+        };
+        options.loss = Loss::Huber;
+        options.f_scale_s = 0.01;
+        options.include_influence = false;
+
+        let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
+        let speeds = sensor_speeds(&sensors, speed).expect("speeds");
+        let unweighted = estimate_origin_time_s(&sensors, &times, &speeds, &solution.position_m);
+        let weighted = solution.origin_time_s.expect("TDOA origin time");
+
+        assert!(
+            (weighted - origin).abs() < (unweighted - origin).abs(),
+            "weighted error {}, unweighted error {}",
+            (weighted - origin).abs(),
+            (unweighted - origin).abs()
+        );
+    }
+
+    #[test]
+    fn seeded_toa_noise_rms_tracks_crlb() {
+        const TRIALS: usize = 256;
+        const TIMING_SIGMA_S: f64 = 2.0e-4;
+
+        let sensors = vec![
+            Sensor::new(vec![-200.0, -100.0]),
+            Sensor::new(vec![250.0, -80.0]),
+            Sensor::new(vec![-150.0, 260.0]),
+            Sensor::new(vec![220.0, 240.0]),
+            Sensor::new(vec![20.0, -300.0]),
+            Sensor::new(vec![350.0, 100.0]),
+        ];
+        let source = [40.0, 30.0];
+        let origin = 3.0;
+        let speed = 343.0;
+        let clean_times = arrivals(&sensors, &source, origin, speed);
+        let predicted = source_crlb(&sensors, &source, speed, TIMING_SIGMA_S)
+            .expect("CRLB")
+            .covariance
+            .position_m2;
+        let predicted_rms = (predicted[0][0] + predicted[1][1]).sqrt();
+        let mut options = SourceLocateOptions::default();
+        options.timing_sigma_s = TIMING_SIGMA_S;
+        options.include_influence = false;
+        let mut rng = SplitMix64::new(0x534f_5552_4345_4d43);
+        let mut squared_position_error_sum = 0.0;
+
+        for _ in 0..TRIALS {
+            let mut noisy_times = clean_times.clone();
+            for time in &mut noisy_times {
+                *time += TIMING_SIGMA_S * rng.standard_normal();
+            }
+            let solution =
+                locate_source(&sensors, &noisy_times, speed, &options).expect("noisy solution");
+            squared_position_error_sum += solution
+                .position_m
+                .iter()
+                .zip(source)
+                .map(|(estimated, truth)| (estimated - truth) * (estimated - truth))
+                .sum::<f64>();
+        }
+
+        let sample_rms = (squared_position_error_sum / TRIALS as f64).sqrt();
+        let ratio = sample_rms / predicted_rms;
+        assert!(
+            (0.8..=1.2).contains(&ratio),
+            "sample RMS {sample_rms} m, predicted RMS {predicted_rms} m, ratio {ratio}"
+        );
+    }
+
+    #[test]
+    fn degenerate_seed_geometry_reports_initializer_singular() {
+        let sensors = vec![
+            Sensor::new(vec![0.0, 0.0]),
+            Sensor::new(vec![100.0, 0.0]),
+            Sensor::new(vec![200.0, 0.0]),
+            Sensor::new(vec![300.0, 0.0]),
+        ];
+        let times = arrivals(&sensors, &[50.0, 20.0], 1.0, 300.0);
+
+        let error = closed_form_initial_guess(&sensors, &times, 300.0, SourceSolveMode::Toa)
+            .expect_err("collinear seed must be singular");
+
+        assert_eq!(error, SourceLocalizationError::InitializerSingular);
+    }
+
+    #[test]
+    fn exhausted_solver_budget_reports_did_not_converge() {
+        let sensors = vec![
+            Sensor::new(vec![0.0, 0.0, 0.0]),
+            Sensor::new(vec![1200.0, 0.0, 0.0]),
+            Sensor::new(vec![0.0, 900.0, 0.0]),
+            Sensor::new(vec![0.0, 0.0, 700.0]),
+            Sensor::new(vec![1100.0, 800.0, 600.0]),
+        ];
+        let source = [320.0, 260.0, 180.0];
+        let speed = 343.0;
+        let mut times = arrivals(&sensors, &source, 12.5, speed);
+        for (time, noise) in times
+            .iter_mut()
+            .zip([0.00031, -0.00022, 0.00017, -0.00008, 0.00041])
+        {
+            *time += noise;
+        }
+        let mut options = SourceLocateOptions::default();
+        options.max_nfev = Some(1);
+        options.include_influence = false;
+
+        let error = locate_source(&sensors, &times, speed, &options)
+            .expect_err("one evaluation cannot converge");
+
+        assert_eq!(error, SourceLocalizationError::DidNotConverge { status: 0 });
+    }
+
+    #[test]
+    fn empty_sensor_input_names_the_invalid_field() {
+        let error = locate_source(&[], &[], 343.0, &SourceLocateOptions::default())
+            .expect_err("empty sensors");
+
+        assert_eq!(
+            error,
+            SourceLocalizationError::InvalidInput {
+                field: "sensors",
+                reason: "must not be empty",
+            }
+        );
     }
 
     #[test]
@@ -1593,6 +2360,8 @@ mod tests {
             1.0,
         ];
         let quality = source_geometry_quality_from_jacobian(&jac, 4, 3).expect("quality");
+        let pseudocofactor_trace =
+            cofactor_trace_from_jacobian(&jac, 4, 3).expect("SVD pseudocofactor trace");
 
         assert_eq!(
             quality.tier,
@@ -1600,5 +2369,6 @@ mod tests {
         );
         assert!(!quality.raim_checkable);
         assert!(!quality.covariance_validated);
+        assert!(pseudocofactor_trace.is_finite() && pseudocofactor_trace >= 0.0);
     }
 }

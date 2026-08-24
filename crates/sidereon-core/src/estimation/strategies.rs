@@ -2,7 +2,7 @@
 //!
 //! P0-P3 named the operation-order recipes ([`super::recipe`]) and routed the
 //! frame/range/normal/ambiguity/qc kernels of the three reference stacks through
-//! the shared [`super::substrate`]. This module is the runtime selector that ties
+//! the shared `super::substrate`. This module is the runtime selector that ties
 //! those names together: [`estimate`] takes an [`EstimateInput`] plus an
 //! [`EstimateOptions`] carrying a [`StrategyId`], resolves the strategy into its
 //! [`EstimationRecipe`] and screen/ambiguity policy DATA, and DRIVES the shared
@@ -12,9 +12,10 @@
 //! into the technique's shared runner (`spp::run`, `rtk_filter::run_float` /
 //! `run_fixed_validated`, `precise_positioning::run_float_epochs` /
 //! `run_fixed_from_float`), which consumes the recipe to select its operation
-//! order (the SPP trust-region [`SolverRecipe`] via `spp::solve_with_solver`, the
-//! RTK/PPP normal-equation [`NormalRecipe`] via the shared
-//! [`super::substrate::normal::NormalAssembler`]). The old public entry points
+//! order (the SPP trust-region [`crate::estimation::recipe::SolverRecipe`] via
+//! `spp::solve_with_solver`, the RTK/PPP normal-equation
+//! [`crate::estimation::recipe::NormalRecipe`] via the shared
+//! `super::substrate::normal::NormalAssembler`). The old public entry points
 //! (`spp::solve_with_policy`, `rtk_filter::solve_float_baseline` /
 //! `solve_fixed_baseline_validated`, `precise_positioning::solve_float_epochs` /
 //! `solve_fixed_from_float`) are now thin compatibility wrappers that call

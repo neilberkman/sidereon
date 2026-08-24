@@ -450,7 +450,7 @@ impl EstimationRecipe {
 /// How a strategy forms its integer-ambiguity identifiers, and against what they
 /// are referenced. Naming this lets the RTK and PPP fixed solvers share one
 /// LAMBDA resolution kernel
-/// ([`crate::estimation::substrate::ambiguity::resolve_integer_lattice`]) and
+/// (`crate::estimation::substrate::ambiguity::resolve_integer_lattice`) and
 /// differ only in DATA rather than in separate algorithm trees.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DifferencingMode {
@@ -532,7 +532,7 @@ impl AmbiguityIdPolicy {
 /// The operation order used to normalize one residual against its weight before
 /// the sigma comparison in a per-residual screen. Naming the order keeps each
 /// screen bit-identical while the formula lives in exactly one place
-/// ([`crate::estimation::substrate::qc::normalized_residual`]).
+/// (`crate::estimation::substrate::qc::normalized_residual`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResidualNormRecipe {
     /// `value · weight` where `weight` is an inverse *sigma*
@@ -550,7 +550,7 @@ pub enum ResidualNormRecipe {
 /// The residual-screen family a strategy applies after a solve. Strategy DATA
 /// for the P4 selector; the chi-square variant is
 /// the SPP RAIM aggregate test, the rest are per-residual sigma screens that
-/// share [`crate::estimation::substrate::qc::normalized_residual`].
+/// share `crate::estimation::substrate::qc::normalized_residual`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScreenKind {
     /// SPP RAIM: aggregate chi-square on the weighted residual sum, then FDE
