@@ -41,14 +41,15 @@
 //! By default [`locate_source`] also measures each sensor's influence by running
 //! one complete nonlinear leave-one-out solve per sensor. Each record reports
 //! the full-solution ToA residual, held-out ToA residual, state displacement,
-//! robust-loss weight, and normalized residual magnitude. Set
-//! [`SourceLocateOptions::include_influence`] to `false` to skip those re-solves.
+//! robust-loss weight, and normalized residual magnitude. Call
+//! [`locate_source_with`] with a [`SourceLocateConfig`] whose
+//! `include_influence` is `false` to skip those re-solves.
 //!
 //! # Example
 //!
 //! ```
 //! use sidereon_core::source_localization::{
-//!     locate_source, Sensor, SourceLocateOptions, SourceSolveMode,
+//!     locate_source_with, Sensor, SourceLocateConfig, SourceLocateOptions, SourceSolveMode,
 //! };
 //!
 //! let sensors = vec![
@@ -69,14 +70,17 @@
 //!     })
 //!     .collect::<Vec<_>>();
 //!
-//! let mut options = SourceLocateOptions::default();
-//! options.mode = SourceSolveMode::Toa;
-//! options.include_influence = false;
-//! let solution = locate_source(
+//! let options = SourceLocateOptions {
+//!     mode: SourceSolveMode::Toa,
+//!     ..SourceLocateOptions::default()
+//! };
+//! let mut config = SourceLocateConfig::from(options);
+//! config.include_influence = false;
+//! let solution = locate_source_with(
 //!     &sensors,
 //!     &arrival_times_s,
 //!     propagation_speed_m_s,
-//!     &options,
+//!     &config,
 //! )?;
 //!
 //! assert!((solution.position_m[0] - source_m[0]).abs() < 1.0e-8);
@@ -154,19 +158,9 @@ pub enum SourceSolveMode {
 
 /// Options for [`locate_source`].
 ///
-/// This type is non-exhaustive. Construct it by mutating
-/// [`SourceLocateOptions::default`], then set the fields needed for a call:
-///
-/// ```
-/// use sidereon_core::source_localization::{SourceLocateOptions, SourceSolveMode};
-///
-/// let mut options = SourceLocateOptions::default();
-/// options.mode = SourceSolveMode::Tdoa {
-///     reference_sensor: 0,
-/// };
-/// options.include_influence = false;
-/// ```
-#[non_exhaustive]
+/// This type keeps its 1.0 shape so struct literals stay valid. Settings added
+/// after 1.0 live on [`SourceLocateConfig`] and are passed through
+/// [`locate_source_with`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceLocateOptions {
     /// ToA or TDOA residual form.
@@ -186,12 +180,6 @@ pub struct SourceLocateOptions {
     pub gtol: Option<f64>,
     /// Optional maximum residual evaluations.
     pub max_nfev: Option<usize>,
-    /// Whether to compute per-sensor leave-one-out influence diagnostics.
-    ///
-    /// Influence runs one full nonlinear re-solve per sensor. The default is
-    /// `true`; set this to `false` to skip all leave-one-out solves and return
-    /// an empty [`SourceSolution::per_sensor_influence`] vector.
-    pub include_influence: bool,
 }
 
 impl Default for SourceLocateOptions {
@@ -205,6 +193,50 @@ impl Default for SourceLocateOptions {
             xtol: None,
             gtol: None,
             max_nfev: None,
+        }
+    }
+}
+
+/// Full configuration for [`locate_source_with`].
+///
+/// This type is `#[non_exhaustive]` so later settings can be added without
+/// breaking callers. Construct it from a [`SourceLocateOptions`] with
+/// [`SourceLocateConfig::from`] or start from [`SourceLocateConfig::default`],
+/// then set fields:
+///
+/// ```
+/// use sidereon_core::source_localization::{SourceLocateConfig, SourceLocateOptions};
+///
+/// let mut config = SourceLocateConfig::from(SourceLocateOptions::default());
+/// config.include_influence = false;
+/// ```
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceLocateConfig {
+    /// Solver and measurement-model options, unchanged from [`locate_source`].
+    pub options: SourceLocateOptions,
+    /// Whether to compute per-sensor leave-one-out influence diagnostics.
+    ///
+    /// Influence runs one full nonlinear re-solve per sensor. The default is
+    /// `true`; set this to `false` to skip all leave-one-out solves and return
+    /// an empty [`SourceSolution::per_sensor_influence`] vector. Every other
+    /// output is bit-identical either way.
+    pub include_influence: bool,
+}
+
+impl Default for SourceLocateConfig {
+    fn default() -> Self {
+        Self {
+            options: SourceLocateOptions::default(),
+            include_influence: true,
+        }
+    }
+}
+
+impl From<SourceLocateOptions> for SourceLocateConfig {
+    fn from(options: SourceLocateOptions) -> Self {
+        Self {
+            options,
             include_influence: true,
         }
     }
@@ -432,7 +464,31 @@ pub fn locate_source(
         arrival_times_s,
         propagation_speed_m_s,
         options,
-        options.include_influence,
+        true,
+    )
+}
+
+/// Locate a source from sensor arrival times with a full [`SourceLocateConfig`].
+///
+/// This is [`locate_source`] plus the settings that live on the config, such
+/// as [`SourceLocateConfig::include_influence`]. With a default config the two
+/// entry points are equivalent.
+///
+/// # Errors
+///
+/// The same [`SourceLocalizationError`] variants as [`locate_source`].
+pub fn locate_source_with(
+    sensors: &[Sensor],
+    arrival_times_s: &[f64],
+    propagation_speed_m_s: f64,
+    config: &SourceLocateConfig,
+) -> Result<SourceSolution, SourceLocalizationError> {
+    locate_source_inner(
+        sensors,
+        arrival_times_s,
+        propagation_speed_m_s,
+        &config.options,
+        config.include_influence,
     )
 }
 
@@ -455,15 +511,16 @@ pub fn locate_source(
 /// selected dimension has fewer than `dimension + 1` sensors; or
 /// [`SourceLocalizationError::InitializerSingular`] when the linear system or
 /// quadratic is degenerate or has no admissible root.
-#[allow(clippy::field_reassign_with_default)] // Public non-exhaustive construction pattern.
 pub fn closed_form_initial_guess(
     sensors: &[Sensor],
     arrival_times_s: &[f64],
     propagation_speed_m_s: f64,
     mode: SourceSolveMode,
 ) -> Result<SourceInitialGuess, SourceLocalizationError> {
-    let mut options = SourceLocateOptions::default();
-    options.mode = mode;
+    let options = SourceLocateOptions {
+        mode,
+        ..SourceLocateOptions::default()
+    };
     let resolved =
         resolve_locate_inputs(sensors, arrival_times_s, propagation_speed_m_s, &options)?;
     closed_form_initial_guess_resolved(sensors, arrival_times_s, propagation_speed_m_s, &resolved)
@@ -1623,6 +1680,13 @@ mod tests {
             .collect()
     }
 
+    fn no_influence(options: SourceLocateOptions) -> SourceLocateConfig {
+        SourceLocateConfig {
+            options,
+            include_influence: false,
+        }
+    }
+
     fn assert_vec_close(actual: &[f64], expected: &[f64], tol: f64) {
         for (axis, (a, e)) in actual.iter().zip(expected).enumerate() {
             assert!(
@@ -1892,10 +1956,10 @@ mod tests {
         let origin = 2.75;
         let speed = 343.0;
         let times = arrivals(&sensors, &source, origin, speed);
-        let mut options = SourceLocateOptions::default();
-        options.include_influence = false;
+        let options = SourceLocateOptions::default();
+        let config = no_influence(options);
 
-        let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
+        let solution = locate_source_with(&sensors, &times, speed, &config).expect("solution");
 
         assert_vec_close(&solution.position_m, &source, 1.0e-8);
         assert!((solution.origin_time_s.unwrap() - origin).abs() < 1.0e-10);
@@ -1919,14 +1983,14 @@ mod tests {
         let origin = -4.5;
         let speed = 343.0;
         let times = arrivals(&sensors, &source, origin, speed);
-        let mut options = SourceLocateOptions::default();
-        options.include_influence = false;
+        let options = SourceLocateOptions::default();
+        let config = no_influence(options);
 
         let seed =
             closed_form_initial_guess(&sensors, &times, speed, SourceSolveMode::Toa).expect("seed");
         assert!((seed.origin_time_s.unwrap() - origin).abs() < 1.0e-9);
 
-        let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
+        let solution = locate_source_with(&sensors, &times, speed, &config).expect("solution");
         assert_vec_close(&solution.position_m, &source, 1.0e-7);
         assert!((solution.origin_time_s.unwrap() - origin).abs() < 1.0e-10);
     }
@@ -1955,10 +2019,11 @@ mod tests {
             .expect("solution with influence");
         assert_eq!(with_influence.per_sensor_influence.len(), sensors.len());
 
-        let mut without_influence_options = with_influence_options.clone();
-        without_influence_options.include_influence = false;
-        let without_influence = locate_source(&sensors, &times, speed, &without_influence_options)
-            .expect("solution without influence");
+        let without_influence_options = with_influence_options.clone();
+        let without_influence_config = no_influence(without_influence_options);
+        let without_influence =
+            locate_source_with(&sensors, &times, speed, &without_influence_config)
+                .expect("solution without influence");
 
         assert!(without_influence.per_sensor_influence.is_empty());
         assert_solution_bits_except_influence(&without_influence, &with_influence);
@@ -2032,9 +2097,9 @@ mod tests {
         options.mode = SourceSolveMode::Tdoa {
             reference_sensor: 3,
         };
-        options.include_influence = false;
+        let config = no_influence(options);
 
-        let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
+        let solution = locate_source_with(&sensors, &times, speed, &config).expect("solution");
 
         assert_vec_close(&solution.position_m, &source, 1.0e-7);
         assert!((solution.origin_time_s.unwrap() - origin).abs() < 1.0e-9);
@@ -2204,9 +2269,9 @@ mod tests {
         };
         options.loss = Loss::Huber;
         options.f_scale_s = 0.01;
-        options.include_influence = false;
+        let config = no_influence(options);
 
-        let solution = locate_source(&sensors, &times, speed, &options).expect("solution");
+        let solution = locate_source_with(&sensors, &times, speed, &config).expect("solution");
         let speeds = sensor_speeds(&sensors, speed).expect("speeds");
         let unweighted = estimate_origin_time_s(&sensors, &times, &speeds, &solution.position_m);
         let weighted = solution.origin_time_s.expect("TDOA origin time");
@@ -2243,7 +2308,7 @@ mod tests {
         let predicted_rms = (predicted[0][0] + predicted[1][1]).sqrt();
         let mut options = SourceLocateOptions::default();
         options.timing_sigma_s = TIMING_SIGMA_S;
-        options.include_influence = false;
+        let config = no_influence(options);
         let mut rng = SplitMix64::new(0x534f_5552_4345_4d43);
         let mut squared_position_error_sum = 0.0;
 
@@ -2253,7 +2318,7 @@ mod tests {
                 *time += TIMING_SIGMA_S * rng.standard_normal();
             }
             let solution =
-                locate_source(&sensors, &noisy_times, speed, &options).expect("noisy solution");
+                locate_source_with(&sensors, &noisy_times, speed, &config).expect("noisy solution");
             squared_position_error_sum += solution
                 .position_m
                 .iter()
@@ -2306,9 +2371,9 @@ mod tests {
         }
         let mut options = SourceLocateOptions::default();
         options.max_nfev = Some(1);
-        options.include_influence = false;
+        let config = no_influence(options);
 
-        let error = locate_source(&sensors, &times, speed, &options)
+        let error = locate_source_with(&sensors, &times, speed, &config)
             .expect_err("one evaluation cannot converge");
 
         assert_eq!(error, SourceLocalizationError::DidNotConverge { status: 0 });

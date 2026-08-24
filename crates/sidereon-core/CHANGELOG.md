@@ -6,17 +6,19 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Added
 
-- `SourceLocateOptions::include_influence` can skip the one-full-re-solve-per-
-  sensor leave-one-out diagnostics and return an empty influence vector.
+- `locate_source_with` and `SourceLocateConfig`, a `#[non_exhaustive]`
+  configuration wrapping `SourceLocateOptions`, whose `include_influence`
+  can skip the one-full-re-solve-per-sensor leave-one-out diagnostics and
+  return an empty influence vector. `locate_source` is unchanged and
+  equivalent to `include_influence = true`.
 - `closed_form_initial_guess` names the source-localization seed for its actual
   Schau-Robinson spherical-intersection method. `chan_ho_initial_guess` remains
   as a deprecated compatibility wrapper.
 
 ### Changed
 
-- **Source compatibility**: `SourceLocateOptions` is now `#[non_exhaustive]`.
-  Construct it by mutating `SourceLocateOptions::default()` so future option
-  fields remain additive.
+- `SourceLocateOptions` keeps its 1.0 shape; settings added from here on live
+  on `SourceLocateConfig` so they stay additive.
 - Source-solution rank, condition number, covariance, and GDOP now come from one
   thin SVD of the final Jacobian. The covariance is assembled as
   `V * diag(1 / sigma_i^2) * V^T` over retained singular values instead of a
