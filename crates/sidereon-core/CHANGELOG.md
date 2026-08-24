@@ -4,6 +4,41 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `SourceLocateOptions::include_influence` can skip the one-full-re-solve-per-
+  sensor leave-one-out diagnostics and return an empty influence vector.
+- `closed_form_initial_guess` names the source-localization seed for its actual
+  Schau-Robinson spherical-intersection method. `chan_ho_initial_guess` remains
+  as a deprecated compatibility wrapper.
+
+### Changed
+
+- **Source compatibility**: `SourceLocateOptions` is now `#[non_exhaustive]`.
+  Construct it by mutating `SourceLocateOptions::default()` so future option
+  fields remain additive.
+- Source-solution rank, condition number, covariance, and GDOP now come from one
+  thin SVD of the final Jacobian. The covariance is assembled as
+  `V * diag(1 / sigma_i^2) * V^T` over retained singular values instead of a
+  separate Cholesky inverse of the normal matrix.
+- Sensor influence `score` is exactly the larger absolute full/leave-one-out
+  ToA residual divided by `timing_sigma_s`. Robust downweighting remains
+  available separately in `loss_weight`.
+- TDOA origin time uses one robust-loss reweighting refinement after the
+  position solve when a non-linear loss is selected. Linear loss retains the
+  original arithmetic-mean path exactly.
+- Source-localization documentation now specifies the ToA/TDOA models, state,
+  sensor minima, seed method, covariance/CRLB interpretation, influence cost,
+  solver termination codes, and fallible API errors.
+
+### Fixed
+
+- Closed-form quadratic degeneracy and discriminant checks are relative to the
+  coefficient magnitudes. The ToA seed no longer rejects an otherwise finite
+  candidate with an arbitrary absolute-distance cutoff.
+- Empty source-localization sensor input now reports `InvalidInput` for
+  `sensors` instead of a dimension-assuming `TooFewSensors { needed: 3 }`.
+
 ## [1.0.1] - 2026-08-22
 
 ### Changed
