@@ -9,7 +9,7 @@
 //!
 //! P0 landed [`recipe`] - the taxonomy of operation-order variants, each
 //! documented against the current code path it names and defaulting to current
-//! behavior. P1 adds [`substrate`] with the frame and range kernels; P2 adds the
+//! behavior. P1 adds `substrate` with the frame and range kernels; P2 adds the
 //! parameter layout, the weighted measurement row, the measurement covariance
 //! block, and the normal-equation assembler; P3 adds the shared ambiguity and qc
 //! kernels, all routed through by the existing strategies via their current

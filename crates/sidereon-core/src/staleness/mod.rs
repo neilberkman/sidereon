@@ -5,8 +5,8 @@
 //! not always on hand. A direct lookup against a missing epoch is a hard failure,
 //! which is brittle for real-time and operational use.
 //!
-//! This module sits on top of the [`Ionex`](crate::atmosphere::Ionex) and
-//! [`Sp3`](crate::ephemeris::Sp3) parsers and adds a selection layer that
+//! This module sits on top of the [`Ionex`] and [`Sp3`] parsers and adds a
+//! selection layer that
 //! degrades gracefully instead of erroring: given a SET of available parsed
 //! products and a requested epoch (or epoch range), it returns a usable handle,
 //! falling back to the most-recent available product within a configurable
@@ -290,7 +290,7 @@ impl IonexSelection<'_> {
 
     /// Slant ionospheric group delay (positive meters) from the selected product.
     ///
-    /// Delegates to [`ionex_slant_delay`](crate::atmosphere::ionex_slant_delay)
+    /// Delegates to [`ionex_slant_delay`]
     /// on the inner product. For an exact selection this is the inner product
     /// untouched, so the result is bit-for-bit identical to calling
     /// `ionex_slant_delay` on the caller's product directly.

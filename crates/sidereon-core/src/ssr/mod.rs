@@ -69,8 +69,8 @@ pub enum OrbitBasis {
 /// CoM/APC as the satellite reference point choices and IGS RTS product
 /// documentation identifies CoM streams separately from antenna-reference
 /// streams:
-/// https://files.igs.org/pub/data/format/igs_ssr_v1.pdf
-/// https://igs.org/rts/products/
+/// <https://files.igs.org/pub/data/format/igs_ssr_v1.pdf>
+/// <https://igs.org/rts/products/>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum SsrReferencePoint {
     /// Satellite antenna phase center.

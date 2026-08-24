@@ -1354,7 +1354,7 @@ pub struct MediaRangePrediction {
 /// one call, writing into a caller-provided `out` slice.
 ///
 /// `out[i]` is filled from `requests[i]` by the range-only transmit-time kernel
-/// [`range_prediction_at_rx`]: the same light-time iteration and Sagnac transport
+/// `range_prediction_at_rx`: the same light-time iteration and Sagnac transport
 /// as [`transmit_time_satellite_state`], projected to the range geometry. It is
 /// therefore bit-identical to calling that predictor in a loop and reading its
 /// geometry fields, and the whole batch is one native call over the array (no

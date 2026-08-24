@@ -2,8 +2,8 @@
 //!
 //! This crate-internal module holds header, epoch, and covariance-block helpers
 //! shared across the CCSDS NDM family. OEM and OPM readers/writers use
-//! [`NdmHeader`] for message headers and [`read_covariance6`]/
-//! [`write_covariance6`] for 6x6 state covariance blocks.
+//! `NdmHeader` for message headers and `read_covariance6`/
+//! `write_covariance6` for 6x6 state covariance blocks.
 
 #![allow(dead_code, unused_imports)]
 

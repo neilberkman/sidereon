@@ -7,7 +7,7 @@
 //! framed binary messages. This module is a sans-I/O codec for that stream,
 //! built to the same shape as the crate's RINEX / SP3 / IONEX parsers:
 //!
-//! 1. a forgiving byte-level frame layer ([`framing`]) that syncs on the `0xD3`
+//! 1. a forgiving byte-level frame layer (`framing`) that syncs on the `0xD3`
 //!    preamble, reads the 10-bit length, and verifies the 24-bit CRC-24Q;
 //! 2. a format-agnostic canonical IR ([`Message`] and its typed variants) that
 //!    stores each field as its raw transmitted integer; and
@@ -227,7 +227,7 @@ pub enum Message {
 
 /// Read the 12-bit RTCM message number from the start of a message body.
 ///
-/// Returns [`Error::Parse`] if the body is shorter than 12 bits.
+/// Returns [`crate::Error::Parse`] if the body is shorter than 12 bits.
 pub fn message_number(body: &[u8]) -> Result<u16> {
     message_number_classified(body).map_err(Into::into)
 }
@@ -319,7 +319,7 @@ impl Message {
 
     /// Decode this message and wrap it in a fresh RTCM transport frame.
     ///
-    /// Returns [`Error::InvalidInput`] if the encoded body exceeds the frame
+    /// Returns [`crate::Error::InvalidInput`] if the encoded body exceeds the frame
     /// length limit.
     pub fn to_frame(&self) -> Result<Vec<u8>> {
         encode_frame(&self.encode())

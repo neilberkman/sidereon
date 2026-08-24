@@ -5,7 +5,7 @@
 //! sec. 3.3.2 / 3.3.3) as carried by common open GNSS code. They take the time
 //! argument `t` in Julian centuries of Terrestrial Time since the J2000.0 epoch
 //! (2000-01-01T12:00:00 TT). The five fundamental (Delaunay) arguments
-//! `{l, l', F, D, Omega}` are evaluated by [`ast_args`] from the IAU 1980
+//! `{l, l', F, D, Omega}` are evaluated by `ast_args` from the IAU 1980
 //! nutation series coefficients.
 //!
 //! The series are referred to the mean equator and equinox of date (their mean

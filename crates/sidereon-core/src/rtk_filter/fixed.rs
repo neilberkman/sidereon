@@ -330,7 +330,7 @@ pub struct ValidatedFixedSolveOpts {
 /// covariance; this function owns the LAMBDA decision, optional partial AR, and
 /// the ambiguity-conditioned re-solve.
 ///
-/// Thin wrapper over [`solve_fixed_baseline_with_normal`] pinned to the RTK
+/// Thin wrapper over `solve_fixed_baseline_with_normal` pinned to the RTK
 /// reference normal-equation recipe
 /// ([`NormalRecipe::RtkDoubleDifferenceBlockFirstTie`]), so this public entry
 /// point is bit-identical to the legacy fixed re-solve. The runtime selector
@@ -498,10 +498,10 @@ fn solve_fixed_baseline_with_normal(
 ///
 /// Thin compatibility wrapper over the runtime strategy selector
 /// ([`crate::estimation::strategies::estimate`]): it drives the shared
-/// per-technique implementation [`run_fixed_validated`] under the RTK reference
+/// per-technique implementation `run_fixed_validated` under the RTK reference
 /// strategy. The reference strategy always yields an RTK validated-fixed solution
 /// or an RTK validated-fixed error, so the result is bit-identical to the recipe
-/// driving [`run_fixed_validated`] directly.
+/// driving `run_fixed_validated` directly.
 pub fn solve_fixed_baseline_validated(
     epochs: &[Epoch],
     base: [f64; 3],

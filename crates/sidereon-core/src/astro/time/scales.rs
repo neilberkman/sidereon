@@ -574,7 +574,7 @@ impl TimeScales {
     /// Build [`TimeScales`] for a calendar instant labelled in `scale`.
     ///
     /// Non-UTC scales (GPST/GST/BDT/QZSST/TAI/TT/TDB and GLONASST) are converted
-    /// to the UTC calendar label first via [`scale_calendar_to_utc`], so the
+    /// to the UTC calendar label first via `scale_calendar_to_utc`, so the
     /// Earth-orientation inputs used downstream are correct rather than offset by
     /// the scale's leap-second gap, then routed through [`Self::from_utc`]. This
     /// is the single home for the system-time-to-UTC inverse that the
@@ -1352,7 +1352,7 @@ pub fn julian_day_number(year: i32, month: i32, day: i32) -> i64 {
 ///
 /// For instants in the 1961-01-01 .. 1972-01-01 rubber-second era it evaluates
 /// the published piecewise-linear IERS/USNO model
-/// `TAI-UTC = base + (MJD - ref_mjd) * rate` (see [`RUBBER_SECONDS`]) using the
+/// `TAI-UTC = base + (MJD - ref_mjd) * rate` (see `RUBBER_SECONDS`) using the
 /// fractional UTC MJD, so the offset is continuous within each segment as the
 /// historical definition requires. Before 1961 it clamps to the first
 /// rubber-second segment's value rather than extrapolating into undefined
@@ -1602,7 +1602,7 @@ fn scale_minus_tai_s(scale: TimeScale, utc_jd: f64) -> Result<f64, TimeOffsetErr
 /// Returns the value that, added to a `from`-scale reading, yields the
 /// `to`-scale reading of the same physical instant. This covers the atomic
 /// scales TAI/TT/GPST/GST/QZSST/BDT, whose offsets are fixed by their defining
-/// ICDs (see [`scale_minus_tai_s`] for the per-scale citations).
+/// ICDs (see `scale_minus_tai_s` for the per-scale citations).
 ///
 /// Returns [`TimeOffsetError::EpochRequired`] if either scale is UTC-based
 /// (UTC/GLONASST), which need [`timescale_offset_at_s`], and
