@@ -4,6 +4,14 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-26
+
+### Changed
+
+- Coordination release restoring the shared release number across the language
+  interfaces after the Elixir 1.1.1 patch. No numerical, algorithmic, or API
+  changes.
+
 ## [1.1.0] - 2026-08-24
 
 ### Added
