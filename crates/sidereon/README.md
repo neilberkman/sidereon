@@ -122,8 +122,10 @@ of epochs across a rayon pool, bit-identical to the serial path.
 - **Bodies & almanac:** Sun/Moon/planet apparent places (geocentric or topocentric RA/Dec and az/el), Sun and Moon rise/set, Moon illumination, seasons, moon phases, eclipses, planetary transits, plus JPL SPK (DAF/.bsp) kernels
 - **Observation geometry:** angular separation and position angle, phase/beta/parallactic angles, sub-solar and sub-observer points, terminator, satellite visual magnitude
 - **Positioning:** SPP, RINEX observation to SPP assembly and solve helpers, RTK (float/fixed), PPP (float/fixed), DOP, velocity, robust fault detection and exclusion
+- **Estimation and detection:** scalar alpha-beta and Kalman trackers, NIS innovation gates, EWMA/MAD/CFAR detectors, covariance-weighted `TrackFilter`, and fixed-interval RTS smoothing
 - **GNSS/INS fusion:** loose and tight updates, inertial checkpoint serialization, RTS smoothing, outage velocity matching, stationary and non-holonomic pseudo-updates
 - **GNSS data:** SP3, RINEX (obs/nav/clock), CRINEX encode/decode, ANTEX, broadcast ephemeris, Bias-SINEX / CODE DCB biases, source-agnostic ephemeris sampling
+- **Protocol and simulation:** sans-I/O NTRIP requests, handshakes, sourcetables, chunked streams, and GGA formatting (live transport remains caller-owned); deterministic synthetic GNSS scenarios with media/source variants and a typed truth ledger
 - **Corrections:** SBAS, RTCM SSR and Galileo HAS orbit/clock/bias correction stores
 - **Space situational awareness:** conjunction/TCA screening, collision probability, CDM, covariance, relative motion (RIC/RTN/LVLH, Clohessy-Wiltshire)
 - **RF:** link budget (FSPL, EIRP, C/N0, antenna gain)
