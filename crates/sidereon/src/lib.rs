@@ -38,6 +38,11 @@
 //!   [`ppp_corrections`], [`rtk`],
 //!   [`staleness`], [`tides`], [`ils`], and [`terrain`] expose the core helper
 //!   surface,
+//! - [`estimation`] exposes deterministic scalar estimation and detection
+//!   primitives, covariance-weighted track filtering, and RTS smoothing,
+//! - [`ntrip`] exposes the sans-I/O NTRIP request, handshake, stream, and GGA
+//!   helpers, while [`scenario`] exposes deterministic synthetic-observable
+//!   simulation and its typed truth ledger,
 //! - [`astro`] exposes time/frame conversions, Sun/Moon positions, RF link
 //!   budgets, solar beta angles, equinoctial element transforms, eclipse
 //!   events, conjunction/covariance utilities, CDM/OMM/TDM parsing, TCA
@@ -201,6 +206,13 @@ pub use sidereon_core::astro::frames::{
     EarthOrientation, EarthOrientationProvider, TdbEarthOrientationProvider,
 };
 pub use sidereon_core::astro::propagator::{ForceModelComponents, ForceModelKind};
+/// Deterministic scalar estimation and detection primitives, covariance-weighted
+/// track filtering, and fixed-interval RTS smoothing.
+///
+/// This is the public [`sidereon_core::estimation`] module re-exported without
+/// an additional facade layer, so its public submodules and native result and
+/// error types remain available unchanged.
+pub use sidereon_core::estimation;
 pub use sidereon_core::exact_cache;
 pub use sidereon_core::geometry_quality::{
     classify, GeometryQuality, GeometryQualityThresholds, ObservabilityTier,
@@ -228,6 +240,20 @@ pub use sidereon_core::{
     rinex, rtcm, rtk, sbas, sbas_pl, sidereal, signal, source_localization, ssr, staleness,
     static_positioning, terrain, terrain_store, tides, velocity,
 };
+
+/// Sans-I/O NTRIP request, handshake, stream, sourcetable, and GGA APIs.
+///
+/// The facade exposes [`ntrip::NtripClientMachine`], request/configuration
+/// types, sourcetable and chunk decoders, and [`ntrip::format_gga`] without
+/// taking ownership of HTTP, sockets, DNS, TLS, clocks, retries, or storage.
+pub use sidereon_core::ntrip;
+
+/// Deterministic synthetic GNSS scenario generation and its typed truth ledger.
+///
+/// The facade exposes [`scenario::simulate_scenario`] and its source/media
+/// variants, synthetic observables, declared external sources, optional media,
+/// and per-observation ground-truth terms.
+pub use sidereon_core::scenario;
 pub use sidereon_core::{
     catalog, catalog_entry, propagate_position, transform, transform_from_epoch, FrameCatalogError,
     HelmertParameters, HelmertRates, HelmertTransform, TerrestrialFrame, TerrestrialPositionM,
