@@ -9,6 +9,11 @@ use serde_json::{json, Value};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error>>;
 
+/// Generous because the server is a debug-profile child process and the suite
+/// runs many tests in parallel; a tight bound turns scheduling delay into a
+/// spurious failure. It still bounds a genuinely hung server.
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[test]
 fn serve_mcp_stdio_conforms_to_json_rpc_flow() -> TestResult {
     let mut server = McpServer::spawn()?;
@@ -23,7 +28,7 @@ fn serve_mcp_stdio_conforms_to_json_rpc_flow() -> TestResult {
             "clientInfo": {"name": "sidereon-e2e", "version": "0"}
         }
     }))?;
-    let initialize = server.recv(Duration::from_secs(5))?;
+    let initialize = server.recv(RESPONSE_TIMEOUT)?;
     assert_eq!(initialize["jsonrpc"], "2.0");
     assert_eq!(initialize["id"], 1);
     let result = &initialize["result"];
@@ -49,7 +54,7 @@ fn serve_mcp_stdio_conforms_to_json_rpc_flow() -> TestResult {
         "method": "tools/list",
         "params": {}
     }))?;
-    let tools_response = server.recv(Duration::from_secs(5))?;
+    let tools_response = server.recv(RESPONSE_TIMEOUT)?;
     let tools = tools_response["result"]["tools"]
         .as_array()
         .expect("tools array");
@@ -84,7 +89,7 @@ fn serve_mcp_stdio_conforms_to_json_rpc_flow() -> TestResult {
             }
         }
     }))?;
-    let metrics = server.recv(Duration::from_secs(5))?;
+    let metrics = server.recv(RESPONSE_TIMEOUT)?;
     let metrics_result = &metrics["result"];
     assert_eq!(metrics_result["isError"], false);
     assert!(metrics_result["content"].as_array().is_some_and(|items| {
@@ -100,7 +105,7 @@ fn serve_mcp_stdio_conforms_to_json_rpc_flow() -> TestResult {
         "method": "tools/call",
         "params": {"name": "no_such_tool", "arguments": {}}
     }))?;
-    let bad_tool = server.recv(Duration::from_secs(5))?;
+    let bad_tool = server.recv(RESPONSE_TIMEOUT)?;
     assert_eq!(bad_tool["id"], 4);
     assert!(bad_tool["result"].is_null());
     assert_eq!(bad_tool["error"]["code"], -32601);
@@ -175,7 +180,7 @@ impl McpServer {
 
     fn shutdown(&mut self) -> TestResult {
         drop(self.stdin.take());
-        wait_for_child(&mut self.child, Duration::from_secs(5))
+        wait_for_child(&mut self.child, RESPONSE_TIMEOUT)
     }
 }
 
