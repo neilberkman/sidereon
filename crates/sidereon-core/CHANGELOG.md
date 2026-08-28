@@ -4,6 +4,8 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-28
+
 ### Added
 
 - `rinex_band_frequency_hz_classified` reports
