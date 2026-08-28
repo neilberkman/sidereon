@@ -322,6 +322,24 @@ pub fn rinex_band_frequency_hz(
     rinex_signal_frequency_hz(system, band, None, None, glonass_channel)
 }
 
+/// Carrier frequency in hertz for a system and RINEX band digit.
+///
+/// Unlike [`rinex_band_frequency_hz`], this classified lookup distinguishes a
+/// missing GLONASS FDMA channel.
+pub fn rinex_band_frequency_hz_classified(
+    system: GnssSystem,
+    band: char,
+    glonass_channel: Option<i8>,
+) -> crate::Result<Option<f64>> {
+    if matches!(
+        (system, band, glonass_channel),
+        (GnssSystem::Glonass, '1' | '2', None)
+    ) {
+        return Err(crate::Error::MissingGlonassChannel);
+    }
+    Ok(rinex_band_frequency_hz(system, band, glonass_channel))
+}
+
 /// RINEX observation-code frequency in hertz for a system and full code.
 ///
 /// BeiDou's band labels changed across RINEX 3 minor versions: in RINEX 3.02
@@ -546,6 +564,40 @@ mod tests {
             rinex_band_frequency_hz(GnssSystem::Glonass, '1', None),
             None
         );
+    }
+
+    #[test]
+    fn classified_rinex_band_lookup_distinguishes_missing_channels() {
+        for band in ['1', '2'] {
+            assert_eq!(
+                rinex_band_frequency_hz_classified(GnssSystem::Glonass, band, None),
+                Err(crate::Error::MissingGlonassChannel)
+            );
+            assert_eq!(
+                rinex_band_frequency_hz(GnssSystem::Glonass, band, None),
+                None
+            );
+        }
+        assert_eq!(
+            rinex_band_frequency_hz_classified(GnssSystem::Glonass, '3', None),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn classified_rinex_band_lookup_preserves_frequency_bits() {
+        let cases: [(GnssSystem, char, Option<i8>, f64); 3] = [
+            (GnssSystem::Gps, '1', None, 1_575_420_000.0),
+            (GnssSystem::Glonass, '1', Some(-7), 1_598_062_500.0),
+            (GnssSystem::Glonass, '2', Some(6), 1_248_625_000.0),
+        ];
+        for (system, band, channel, expected) in cases {
+            assert_eq!(
+                rinex_band_frequency_hz_classified(system, band, channel)
+                    .map(|frequency| frequency.map(f64::to_bits)),
+                Ok(Some(expected.to_bits()))
+            );
+        }
     }
 
     #[test]

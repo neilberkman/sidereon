@@ -4,6 +4,19 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `rinex_band_frequency_hz_classified` reports
+  `Error::MissingGlonassChannel` when GLONASS G1/G2 needs an FDMA channel,
+  while existing lookup behavior and frequency values remain unchanged.
+
+### Fixed
+
+- Lenient RINEX 4 NAV parsing now decodes GPS/QZSS CNAV-family EPH frames
+  instead of skipping them.
+- RTKLIB SBAS parsing now preserves the `Framed250` wire form for valid
+  32-byte blocks without changing the parsed bytes.
+
 ## [1.1.1] - 2026-08-26
 
 ### Changed

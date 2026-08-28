@@ -1045,8 +1045,13 @@ where
             continue;
         }
         if let Some(message) = nav_message_from_v4_token(msg_token, system) {
-            let parsed = validate_v4_ephemeris_marker(sv, message, body)
-                .and_then(|()| parse_keplerian_block(body, Some(message), version));
+            let parsed = validate_v4_ephemeris_marker(sv, message, body).and_then(|()| {
+                if message.is_cnav_family() {
+                    parse_cnav_block(body, message)
+                } else {
+                    parse_keplerian_block(body, Some(message), version)
+                }
+            });
             match parsed {
                 Ok(record) => records.push(record),
                 Err(error) => skipped.push(SkippedNavBlock {

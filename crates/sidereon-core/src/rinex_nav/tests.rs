@@ -2510,6 +2510,57 @@ fn real_brdc4_cnav_fixture_counts_and_skips_unsupported_frames() {
 }
 
 #[test]
+fn real_brdc4_lenient_matches_strict_and_keeps_cnav_records() {
+    let text = cnav_fixture_text();
+    let strict = parse_nav(&text).expect("strictly parse real CNAV fixture");
+    let lenient = parse_nav_lenient(&text).expect("leniently parse real CNAV fixture");
+
+    assert_eq!(lenient.records, strict);
+    assert!(lenient.skipped.is_empty(), "fixture blocks were skipped");
+    assert_eq!(
+        lenient
+            .records
+            .iter()
+            .filter(|record| record.message.is_cnav_family())
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn real_brdc4_truncated_cnav_reports_strict_and_lenient_diagnostic() {
+    let fixture = cnav_fixture_text();
+    let header = fixture
+        .split_once("END OF HEADER")
+        .map(|(before, _)| format!("{before}END OF HEADER\n"))
+        .expect("CNAV fixture header");
+    let marker = "> EPH G01 CNAV\n";
+    let body = fixture
+        .split_once(marker)
+        .map(|(_, after)| after.lines().take(8).collect::<Vec<_>>().join("\n"))
+        .expect("G01 CNAV frame in fixture");
+    // The real G01 body line keeps marker validation valid; its missing ninth
+    // line must therefore take the CNAV-specific parser path.
+    let malformed = format!("{header}{marker}{body}\n");
+    let expected = NavParseError::TruncatedRecord("G01".to_string());
+
+    assert_eq!(parse_nav(&malformed), Err(expected.clone()));
+
+    let lenient = parse_nav_lenient(&malformed).expect("leniently parse truncated CNAV");
+    assert!(
+        lenient.records.is_empty(),
+        "truncated CNAV must not be accepted"
+    );
+    assert_eq!(
+        lenient.skipped,
+        vec![SkippedNavBlock {
+            satellite: "G01".to_string(),
+            message: expected.to_string(),
+        }]
+    );
+}
+
+#[test]
 fn real_brdc4_cnav_field_decode_assertions() {
     let recs = cnav_fixture_records();
 
