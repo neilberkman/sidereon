@@ -16,6 +16,8 @@ pub enum Error {
     Parse(String),
     /// A requested satellite is not present in the product.
     UnknownSatellite(crate::GnssSatelliteId),
+    /// A GLONASS G1/G2 frequency lookup did not receive an FDMA channel.
+    MissingGlonassChannel,
     /// A requested terrain tile is not present in the terrain store.
     MissingTerrainTile {
         /// Integer latitude tile id.
@@ -38,6 +40,7 @@ impl fmt::Display for Error {
         match self {
             Error::Parse(msg) => write!(f, "parse error: {msg}"),
             Error::UnknownSatellite(id) => write!(f, "unknown satellite: {id}"),
+            Error::MissingGlonassChannel => write!(f, "missing GLONASS FDMA channel"),
             Error::MissingTerrainTile {
                 lat_index,
                 lon_index,

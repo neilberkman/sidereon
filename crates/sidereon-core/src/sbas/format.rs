@@ -111,11 +111,11 @@ fn parse_rtklib_line(line: &str) -> Result<Option<SbasLogBlock>> {
     };
     let epoch = GnssWeekTow::new(TimeScale::Gpst, week, tow_s)
         .map_err(|e| Error::Parse(format!("invalid SBAS RTKLIB epoch: {e}")))?;
-    let (_, bytes) = decode_hex_block(hex.trim())?;
+    let (form, bytes) = decode_hex_block(hex.trim())?;
     Ok(Some(SbasLogBlock {
         satellite_id,
         epoch,
-        form: SbasWireForm::Body226,
+        form,
         bytes,
     }))
 }
@@ -166,38 +166,68 @@ fn parse_f64(value: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sbas::message::{SbasBlock, SbasMessage, SbasPrnMask, SpareBits};
+    use crate::astro::time::model::{GnssWeekTow, TimeScale};
+    use crate::sbas::message::{SbasBlock, SbasFastCorrections, SbasMessage, SpareBits};
 
-    fn sample_body_hex() -> String {
-        let mut mask = [false; 210];
-        mask[0] = true;
-        let bytes = SbasBlock {
-            form: SbasWireForm::Body226,
-            message: SbasMessage::PrnMask(SbasPrnMask {
-                preamble: 0x53,
-                iodp: 1,
-                mask,
-                reserved: SpareBits::new(),
-            }),
-        }
-        .encode();
-        bytes.iter().map(|b| format!("{b:02X}")).collect()
+    // The body bytes are the MT2 capture in tests/sbas_real_vectors.rs. The
+    // Framed250 counterpart is derived once from those 226 body bits with the
+    // public framing convention: CRC-24Q followed by six zero pad bits.
+    const RTKLIB_MT2_BODY: [u8; 29] = [
+        0x53, 0x08, 0xDF, 0xFC, 0x01, 0x00, 0x05, 0xFF, 0xC0, 0x0D, 0xFF, 0xC0, 0x09, 0xFF, 0xDF,
+        0xFC, 0x00, 0x1F, 0xFD, 0xFF, 0xDF, 0xFF, 0xBA, 0xBB, 0xBB, 0xBB, 0x9B, 0xBB, 0x80,
+    ];
+    const RTKLIB_MT2_FRAMED: [u8; 32] = [
+        0x53, 0x08, 0xDF, 0xFC, 0x01, 0x00, 0x05, 0xFF, 0xC0, 0x0D, 0xFF, 0xC0, 0x09, 0xFF, 0xDF,
+        0xFC, 0x00, 0x1F, 0xFD, 0xFF, 0xDF, 0xFF, 0xBA, 0xBB, 0xBB, 0xBB, 0x9B, 0xBB, 0x83, 0xA9,
+        0xCE, 0x00,
+    ];
+
+    fn block_hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02X}")).collect()
     }
 
     #[test]
-    fn rtklib_lines_parse_body_blocks_and_skip_malformed_lines() {
-        let hex = sample_body_hex();
-        let text = format!("bad line\n2360 259200 120 1 : {hex}\n");
-        let parsed = parse_rtklib_lines(&text).expect("parse RTKLIB lines");
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].satellite_id.to_string(), "S20");
-        assert_eq!(parsed[0].form, SbasWireForm::Body226);
-        assert_eq!(parsed[0].bytes.len(), 29);
+    fn rtklib_lines_parse_public_body_and_framed_blocks() {
+        let expected_message = SbasMessage::FastCorrections(SbasFastCorrections {
+            preamble: 0x53,
+            message_type: 2,
+            iodf: 0,
+            iodp: 3,
+            prc: [
+                2047, 4, 1, 2047, 3, 2047, 2, 2047, 2047, 0, 2047, 2047, 2047,
+            ],
+            udrei: [14, 14, 10, 14, 14, 14, 14, 14, 14, 6, 14, 14, 14],
+            reserved: SpareBits::new(),
+        });
+        let expected_epoch =
+            GnssWeekTow::new(TimeScale::Gpst, 2360, 259_200.0).expect("valid RTKLIB epoch");
+
+        for (form, expected_bytes) in [
+            (SbasWireForm::Body226, RTKLIB_MT2_BODY.as_slice()),
+            (SbasWireForm::Framed250, RTKLIB_MT2_FRAMED.as_slice()),
+        ] {
+            let text = format!(
+                "bad line\n2360 259200 120 1 : {}\n",
+                block_hex(expected_bytes)
+            );
+            let parsed = parse_rtklib_lines(&text).expect("parse RTKLIB lines");
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0].satellite_id.to_string(), "S20");
+            assert_eq!(parsed[0].epoch, expected_epoch);
+            assert_eq!(parsed[0].form, form);
+            assert_eq!(parsed[0].bytes.len(), expected_bytes.len());
+            assert_eq!(parsed[0].bytes, expected_bytes);
+
+            let decoded = SbasBlock::decode(&parsed[0].bytes, parsed[0].form)
+                .expect("public SBAS block decoder accepts parsed form");
+            assert_eq!(decoded.form, form);
+            assert_eq!(decoded.message, expected_message);
+        }
     }
 
     #[test]
     fn ems_lines_parse_calendar_epochs() {
-        let hex = sample_body_hex();
+        let hex = block_hex(&RTKLIB_MT2_BODY);
         let text = format!("120,26,7,1,0,0,1,1,{hex}\nnot,enough\n");
         let parsed = parse_ems_lines(&text).expect("parse EMS lines");
         assert_eq!(parsed.len(), 1);
