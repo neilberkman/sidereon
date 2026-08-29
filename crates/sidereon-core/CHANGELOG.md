@@ -4,6 +4,14 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-29
+
+### Changed
+
+- Coordination release keeping the shared release number across the language
+  interfaces, which now include a Go interface. No numerical, algorithmic, or
+  API changes in the engine.
+
 ## [1.2.0] - 2026-08-28
 
 ### Added
