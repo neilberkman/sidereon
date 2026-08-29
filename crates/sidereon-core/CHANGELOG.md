@@ -4,6 +4,15 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-08-29
+
+### Changed
+
+- Coordination release keeping the shared release number across the language
+  interfaces. Ships the Go interface relicense from Apache-2.0 to MIT
+  (matching the engine and every other language interface). No numerical,
+  algorithmic, or API changes in the engine.
+
 ## [1.3.0] - 2026-08-29
 
 ### Changed
