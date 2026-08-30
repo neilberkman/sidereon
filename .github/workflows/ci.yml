@@ -83,7 +83,7 @@ jobs:
           want='${{ matrix.os == 'macos-latest' && 'arm64' || 'x86_64' }}'
           test "$got" = "$want" || { echo "expected $want runner, got $got" >&2; exit 1; }
       - name: Test
-        run: cargo nextest run --workspace --partition count:${{ matrix.shard }}/3
+        run: cargo nextest run --no-fail-fast --workspace --partition count:${{ matrix.shard }}/3
 
   geoid-proj-x86_64:
     name: PROJ geoid arithmetic (x86_64)
