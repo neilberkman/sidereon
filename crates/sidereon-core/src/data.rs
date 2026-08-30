@@ -8,6 +8,7 @@
 use core::fmt;
 use core::str::FromStr;
 use std::collections::{HashMap, HashSet};
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::astro::time::civil::{civil_from_julian_day_number, day_of_year_int, days_in_month};
 use crate::astro::time::gnss::{week_epoch_julian_day_number, week_from_calendar};
@@ -3394,24 +3395,69 @@ pub struct PublishedProduct {
 /// skipped. The result preserves nothing but object paths and verbatim
 /// modification text; interpretation belongs to
 /// [`newest_published_product`].
-pub fn parse_archive_listing(body: &str) -> Result<Vec<PublishedObject>, DataCatalogError> {
-    let mut seen: Vec<PublishedObject> = Vec::new();
-    // Listings are large (AIUB's whole-tree CSV is ~426k rows), and a row may
-    // repeat a path already listed. Deduplicating by scanning `seen` is
-    // quadratic and takes minutes on that listing, so the position of each
-    // path is indexed instead. `seen` still carries listing order; the index
-    // only answers "have I already pushed this path, and where".
-    let mut positions: HashMap<String, usize> = HashMap::new();
-    let mut push = |path: String, observed_at: Option<String>| {
-        if let Some(&at) = positions.get(&path) {
-            let existing: &mut PublishedObject = &mut seen[at];
+/// Position index backing archive-listing deduplication.
+///
+/// Keyed by the hash of the path rather than by an owned copy of it, so a
+/// 426k-row listing does not pay for a second copy of every archive path. A
+/// hash is not an identity: every candidate is confirmed against the actual
+/// stored path, so two distinct paths that hash alike remain distinct objects
+/// and only a genuine repeat is merged.
+#[derive(Default)]
+struct ListingIndex {
+    buckets: HashMap<u64, Vec<u32>>,
+}
+
+impl ListingIndex {
+    /// Record `path`, or merge it into the first occurrence already recorded.
+    ///
+    /// The first occurrence keeps its output position. A later duplicate only
+    /// supplies `observed_at` when the first occurrence lacks one; it never
+    /// overwrites an `observed_at` already present.
+    fn push(
+        &mut self,
+        seen: &mut Vec<PublishedObject>,
+        hash_of: fn(&str) -> u64,
+        path: String,
+        observed_at: Option<String>,
+    ) {
+        let candidates = self.buckets.entry(hash_of(&path)).or_default();
+        if let Some(&at) = candidates
+            .iter()
+            .find(|&&at| seen[at as usize].path == path)
+        {
+            let existing = &mut seen[at as usize];
             if existing.observed_at.is_none() {
                 existing.observed_at = observed_at;
             }
         } else {
-            positions.insert(path.clone(), seen.len());
+            candidates.push(seen.len() as u32);
             seen.push(PublishedObject { path, observed_at });
         }
+    }
+}
+
+fn default_path_hash(path: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn parse_archive_listing(body: &str) -> Result<Vec<PublishedObject>, DataCatalogError> {
+    let mut seen: Vec<PublishedObject> = Vec::new();
+    // Listings are large (AIUB's whole-tree CSV is ~426k rows) and a row may
+    // repeat a path already listed. Deduplicating by scanning `seen` is
+    // quadratic and takes minutes on that listing, so each path's position is
+    // indexed instead. `seen` still carries listing order; the index only
+    // answers "have I already pushed this path, and where".
+    //
+    // The index is keyed by the path's hash rather than by an owned copy of
+    // the path, so a 426k-row listing does not pay for a second copy of every
+    // archive path. A hash is not an identity: each candidate is confirmed by
+    // comparing the actual path, so two distinct paths that hash alike stay
+    // distinct objects.
+    let mut positions: ListingIndex = ListingIndex::default();
+    let mut push = |path: String, observed_at: Option<String>| {
+        positions.push(&mut seen, default_path_hash, path, observed_at);
     };
     let unrecognized = |reason: &str| DataCatalogError::UnrecognizedArchiveListing {
         reason: reason.to_string(),
@@ -4703,5 +4749,48 @@ mod content_start_tests {
                 center: AnalysisCenter::GfzUlt,
             })
         );
+    }
+
+    /// Every path hashes to the same bucket here, which is the worst case a
+    /// hash-keyed index can face. Distinct paths must still be distinct
+    /// objects: the index confirms each candidate against the stored path, so
+    /// a collision costs a comparison and never merges two archive objects.
+    #[test]
+    fn listing_index_keeps_distinct_paths_apart_under_total_hash_collision() {
+        fn collide_everything(_path: &str) -> u64 {
+            0
+        }
+
+        let mut seen: Vec<PublishedObject> = Vec::new();
+        let mut index = ListingIndex::default();
+        for (path, observed_at) in [
+            ("CODE/a.SP3", None),
+            ("CODE/b.SP3", Some("2026-01-02 03:04:05".to_string())),
+            ("CODE/c.SP3", None),
+        ] {
+            index.push(&mut seen, collide_everything, path.to_string(), observed_at);
+        }
+        assert_eq!(seen.len(), 3, "distinct paths merged under collision");
+
+        // A genuine repeat still merges, and still fills only an absent mtime.
+        index.push(
+            &mut seen,
+            collide_everything,
+            "CODE/a.SP3".to_string(),
+            Some("2026-05-05 05:05:05".to_string()),
+        );
+        index.push(
+            &mut seen,
+            collide_everything,
+            "CODE/b.SP3".to_string(),
+            Some("2026-09-09 09:09:09".to_string()),
+        );
+        assert_eq!(seen.len(), 3, "repeat was not merged");
+
+        let paths: Vec<&str> = seen.iter().map(|object| object.path.as_str()).collect();
+        assert_eq!(paths, ["CODE/a.SP3", "CODE/b.SP3", "CODE/c.SP3"]);
+        assert_eq!(seen[0].observed_at.as_deref(), Some("2026-05-05 05:05:05"));
+        assert_eq!(seen[1].observed_at.as_deref(), Some("2026-01-02 03:04:05"));
+        assert_eq!(seen[2].observed_at, None);
     }
 }
