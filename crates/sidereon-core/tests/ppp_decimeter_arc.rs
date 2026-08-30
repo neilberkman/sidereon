@@ -828,8 +828,8 @@ fn zim2_ppp_static_with_code_bias_matches_no_bias_on_matched_datum() {
 
     assert_eq!(residual.satellite_id, "G05");
     assert_eq!(residual.epoch_index, 0);
-    assert_eq!(residual.code_m.to_bits(), 0x40040fcd9c000000);
-    assert_eq!(residual.phase_m.to_bits(), 0xbfa1ac7f80000000);
+    assert_eq!(residual.code_m.to_bits(), 0x40040fce03800000);
+    assert_eq!(residual.phase_m.to_bits(), 0xbfa1ac9000000000);
     assert!(truth_err < DECIMETER_TRUTH_BOUND_M);
 }
 

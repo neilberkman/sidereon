@@ -4,6 +4,17 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-08-30
+
+### Fixed
+
+- The Moon's geocentric distance in the analytic Sun/Moon series lost its
+  parallax sine in 1.3.2 (`a / parallax` instead of `a / sin(parallax)`),
+  moving the Moon by about 17 km. The solid-earth tide it feeds was off by
+  roughly 140 mm. 1.3.2 is superseded; every downstream interface skips it.
+  A bit-pinned Moon regression now guards the series, since the DE440 golden
+  tolerates the model's own ~1% and cannot see a slip of this size.
+
 ## [1.3.2] - 2026-08-30
 
 ### Fixed

@@ -1127,7 +1127,7 @@ mod tests {
         assert_eq!(got.tide.len(), 1);
         assert_eq!(
             got.tide[0].vector_m.map(f64::to_bits),
-            [0x3FB8BD276E8C52BE, 0x3FAA55C70D7974BC, 0x3FB034FB457EFEF5]
+            [0x3FB8BC98E788ED00, 0x3FAA54D8C1097507, 0x3FB03498C46B3B50]
         );
         assert_eq!(got.windup_m.len(), 1);
         assert_eq!(got.windup_m[0].value_m.to_bits(), 0xBF808DE79DBD2C16);

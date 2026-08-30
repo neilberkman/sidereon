@@ -136,13 +136,19 @@ fn sun_moon_eci_unchecked(t: f64) -> SunMoon {
     let pm = 5.13 * libm::sin(f[2]) + 0.28 * libm::sin(f[0] + f[2])
         - 0.28 * libm::sin(f[2] - f[0])
         - 0.17 * libm::sin(f[2] - 2.0 * f[3]);
+    // Geocentric distance is the equatorial radius over the sine of the
+    // horizontal parallax. The parallax is under a degree, so sin(x) is
+    // within 4e-5 of x and dropping the sine would move the Moon ~17 km
+    // while still passing any coarse range check.
     let rm = WGS84_A_M
-        / ((0.9508
-            + 0.0518 * libm::cos(f[0])
-            + 0.0095 * libm::cos(f[0] - 2.0 * f[3])
-            + 0.0078 * libm::cos(2.0 * f[3])
-            + 0.0028 * libm::cos(2.0 * f[0]))
-            * DEG_TO_RAD);
+        / libm::sin(
+            (0.9508
+                + 0.0518 * libm::cos(f[0])
+                + 0.0095 * libm::cos(f[0] - 2.0 * f[3])
+                + 0.0078 * libm::cos(2.0 * f[3])
+                + 0.0028 * libm::cos(2.0 * f[0]))
+                * DEG_TO_RAD,
+        );
     let sinlm = libm::sin(lm * DEG_TO_RAD);
     let coslm = libm::cos(lm * DEG_TO_RAD);
     let sinp = libm::sin(pm * DEG_TO_RAD);

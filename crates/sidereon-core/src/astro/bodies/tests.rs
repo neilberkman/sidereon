@@ -123,3 +123,43 @@ fn sun_moon_ecef_matches_skyfield_de440_golden() {
         failures.join("\n")
     );
 }
+
+/// Bit-pinned Moon regression. The DE440 golden above tolerates ~1% because
+/// that is the analytic series' own accuracy, so it cannot see a subtle
+/// coefficient or transcendental slip: dropping the sine in the Moon's
+/// parallax-to-distance step moved the Moon ~17 km (4e-5 relative) and
+/// passed it. These bits are the pre-portable-math baseline, reproduced
+/// exactly by the portable kernels, so any drift here is a regression in
+/// the series itself, not a math-library difference.
+#[test]
+fn moon_eci_bits_are_pinned() {
+    // (unix_micros, moon_eci_m bits x/y/z) at three instants two decades apart.
+    const PINS: &[(i64, [u64; 3])] = &[
+        (
+            946_728_000_000_000,
+            [0xc1b163925b933186, 0xc1afcaa4fa57acad, 0xc192153ea903eeb9],
+        ),
+        (
+            1_593_002_096_000_000,
+            [0xc1af0771c7967d25, 0x41ac9e3ecd3524e1, 0x419f1a69c6be1c5c],
+        ),
+        (
+            1_777_542_300_000_000,
+            [0xc1b579e03c35f99e, 0xc1a133a2497d15b7, 0xc195ca05d0dac380],
+        ),
+    ];
+    for &(unix_micros, want) in PINS {
+        let ts =
+            crate::astro::passes::UtcInstant::from_unix_microseconds(unix_micros).time_scales();
+        let sm = sun_moon_eci_at(&ts).expect("valid time scales");
+        for (axis, (got, pinned)) in sm.moon.iter().zip(want.iter()).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                *pinned,
+                "moon_eci[{axis}] at unix_micros={unix_micros}: got {:#018x}, pinned {pinned:#018x} \
+                 (value {got} m); the Moon series changed",
+                got.to_bits()
+            );
+        }
+    }
+}
