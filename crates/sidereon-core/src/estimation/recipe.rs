@@ -65,10 +65,8 @@ pub enum ReferenceTarget {
     /// subproblem factorization with no nalgebra LU and no black-box BLAS in that
     /// solve. It is pinned to its own frozen-bits golden rather than to an
     /// external library, and is selectable only for [`Technique::Spp`]. The owned
-    /// kernel owns only the subproblem factorization (the surrounding
-    /// normal-matrix / gradient / norm reductions stay on nalgebra), so its
-    /// cross-platform bit guarantee is scoped to the factorization; see
-    /// [`SolverRecipe::OwnedDeterministicTrf`] for the precise scope.
+    /// kernel uses fixed-order scalar arithmetic for the complete trust-region
+    /// assembly and factorization.
     OwnedDeterministic,
 }
 
@@ -122,9 +120,9 @@ impl StrategyId {
     }
 
     /// SPP via the owned deterministic trust-region solver
-    /// ([`SolverRecipe::OwnedDeterministicTrf`]): the owned dense subproblem
-    /// factorization, pinned to its own frozen-bits golden (its cross-platform
-    /// bit guarantee is scoped to the factorization). Selecting this through
+    /// ([`SolverRecipe::OwnedDeterministicTrf`]): the owned trust-region
+    /// assembly and dense subproblem factorization, pinned to its own
+    /// frozen-bits golden. Selecting this through
     /// [`crate::estimation::strategies::estimate`] drives the owned solver
     /// rather than the legacy nalgebra LU path.
     pub const fn spp_owned_deterministic() -> Self {
@@ -229,10 +227,9 @@ pub enum NormalRecipe {
 
 /// Linear-solve / factorization operation order. Determinism note: the legacy
 /// SPP path is nalgebra LU (not bit-portable end-to-end), preserved as a named
-/// variant; the owned deterministic kernel (P5) owns the dense subproblem
-/// factorization with its own goldens. Its determinism scope is the
-/// factorization, not the surrounding nalgebra reductions that build the
-/// subproblem -- see [`Self::OwnedDeterministicTrf`].
+/// variant; the owned deterministic kernel (P5) owns the complete dense
+/// trust-region assembly and factorization with its own goldens -- see
+/// [`Self::OwnedDeterministicTrf`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SolverRecipe {
     /// nalgebra trust-region least squares, the current SPP solver
@@ -256,18 +253,15 @@ pub enum SolverRecipe {
     /// with no nalgebra LU and no black-box BLAS. Paired with
     /// [`NormalRecipe::CanonicalSquareRoot`]. Both the RTK and PPP canonical paths
     /// are owned scalar arithmetic and f64 sqrt is IEEE-754 correctly rounded, so
-    /// unlike [`Self::OwnedDeterministicTrf`] (whose surrounding reductions ride
-    /// nalgebra) its bit guarantee covers the full solve and is portable across
-    /// platforms.
+    /// like [`Self::OwnedDeterministicTrf`], its bit guarantee covers the full
+    /// solve and is portable across platforms.
     OwnedDeterministicCholesky,
     /// Owned deterministic trust-region subproblem solve added in P5: a
     /// fixed-reduction-order dense Gaussian elimination (the
-    /// `OwnedGaussianFirstTie` kernel) with no nalgebra LU and no black-box BLAS
-    /// in the factorization, pinned to its OWN frozen-bits goldens. Scope: it
-    /// owns ONLY the subproblem factorization; the normal-matrix / gradient /
-    /// norm reductions that build the subproblem still flow through nalgebra's
-    /// CPU-dispatched dense algebra, so the cross-platform bit guarantee is
-    /// scoped to the factorization, not the full solve.
+    /// `OwnedGaussianFirstTie` kernel) with no nalgebra LU or black-box BLAS.
+    /// Its normal-matrix, gradient, cost, norm, and optimality reductions are
+    /// fixed-order scalar operations too, and its frozen bits are portable
+    /// across CPU targets.
     OwnedDeterministicTrf,
 }
 
@@ -322,7 +316,8 @@ impl EstimationRecipe {
     /// The SPP recipe driving the owned deterministic trust-region solver: the
     /// SPP reference model with [`SolverRecipe::OwnedDeterministicTrf`] swapped
     /// in for the legacy nalgebra LU linear-solve stage. Every other stage is the
-    /// SPP reference op-order, so only the factorization changes.
+    /// SPP reference op-order; the owned solver's assembly and factorization
+    /// use fixed-order scalar arithmetic.
     pub const fn spp_owned_deterministic() -> Self {
         let mut recipe = Self::spp();
         recipe.solver = SolverRecipe::OwnedDeterministicTrf;
@@ -340,9 +335,8 @@ impl EstimationRecipe {
     ///   meters on the WGS84 ellipsoid (vs the reference's Skyfield AU-scaled
     ///   three-iteration latitude loop).
     /// - solver: [`SolverRecipe::OwnedDeterministicTrf`] owns the trust-region
-    ///   subproblem factorization so canonical is deterministic run-to-run on a
-    ///   pinned build (its cross-platform bit guarantee is scoped to the
-    ///   factorization; the surrounding reductions ride nalgebra).
+    ///   assembly and subproblem factorization so canonical is deterministic
+    ///   run-to-run across CPU targets.
     ///
     /// The Sagnac stage is the closed-form Z-rotation the SPP reference already
     /// uses (the rigorous form), and the normal stage is the SPP

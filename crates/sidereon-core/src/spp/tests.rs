@@ -2003,12 +2003,10 @@ fn estimate_spp_reference_matches_solve_with_policy_bit_for_bit() {
 /// deterministic trust-region kernel produces its OWN frozen-bits solution on
 /// the ESBC first-epoch fixture. The owned factorization is a different
 /// reduction order than the legacy nalgebra LU, so it carries its own pinned
-/// bits rather than reusing the legacy goldens. Determinism scope: the owned
-/// kernel owns the dense subproblem factorization (no nalgebra LU, no black-box
-/// BLAS in that solve); the surrounding normal-matrix / gradient / norm
-/// reductions still go through nalgebra, so these pinned bits are this build's
-/// reproducible output (asserted run-to-run below), with the cross-platform bit
-/// guarantee scoped to the factorization.
+/// bits rather than reusing the legacy goldens. The owned kernel uses fixed
+/// reduction order and scalar arithmetic for the complete trust-region
+/// assembly and factorization (no nalgebra LU or black-box BLAS), so these
+/// pinned bits are portable across CPU targets.
 #[test]
 fn owned_deterministic_solver_frozen_bits() {
     use super::solve_with_solver;
@@ -2445,11 +2443,8 @@ const CANONICAL_SPP_TRUTH_BOUND_M: f64 = 6.0;
 ///
 ///   1. DETERMINISM: canonical is bit-reproducible run-to-run on this build (the
 ///      frozen-bits golden below, re-asserted on a second solve). Scope caveat,
-///      exactly as the owned-solver claim: the owned kernel owns only the dense
-///      subproblem factorization; the surrounding normal-matrix / gradient / norm
-///      reductions still ride nalgebra's CPU-dispatched dense algebra, so these
-///      pinned bits are THIS build's reproducible output, with the cross-platform
-///      bit guarantee scoped to the factorization, not a portable constant.
+///      the owned kernel uses fixed-order scalar assembly and factorization, so
+///      these pinned bits are portable across CPU targets.
 ///   2. BOUNDED-TOLERANCE + TRUTH: canonical lands within
 ///      [`CANONICAL_VS_REFERENCE_SPP_TOL_M`] of the Skyfield-faithful reference
 ///      SPP on the shared case (same used satellites), and within

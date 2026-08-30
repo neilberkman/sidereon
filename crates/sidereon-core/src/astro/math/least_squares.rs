@@ -13,15 +13,11 @@
 //!   operation order is fixed and reproducible, so they reproduce a reference
 //!   implementation (e.g. scipy `approx_derivative`) bit-for-bit when the same
 //!   recipe and the same libm are used.
-//! - The solver's trust-region step solves a linear subproblem via a matrix
-//!   factorization. That factorization goes through dense linear algebra whose
-//!   last bits depend on the BLAS/LAPACK backend, so the converged solution is
-//!   reproducible only to a tight tolerance, not bit-for-bit. The owned
-//!   [`TrustRegionSolve::OwnedGaussianFirstTie`] variant replaces only the
-//!   factorization with a fixed-order scalar kernel; the normal-matrix /
-//!   gradient / norm reductions that build the subproblem stay on nalgebra, so
-//!   its cross-platform bit guarantee is scoped to the factorization (see that
-//!   variant's docs).
+//! - The legacy solver's trust-region step uses dense nalgebra operations whose
+//!   last bits depend on the selected backend. The owned
+//!   [`TrustRegionSolve::OwnedGaussianFirstTie`] variant uses fixed-order scalar
+//!   reductions for the complete trust-region assembly and a fixed-order scalar
+//!   factorization, so its arithmetic path is portable across CPU targets.
 //!
 //! Keeping the finite-difference primitive separate from the linear-algebra
 //! step lets callers assert the former to the bit while treating the latter as
@@ -289,12 +285,9 @@ pub struct LeastSquaresReport {
 }
 
 /// How the trust-region subproblem `(J^T J + mu I) dx = -J^T r` is solved at
-/// each iterate. Both are dense small-system solves; they differ only in the
-/// factorization, which is the one place the converged bits move *between the
-/// two variants*. The surrounding Gauss-Newton reductions that build the
-/// subproblem (the normal matrix `J^T J`, the gradient `J^T r`, the cost dot
-/// product, the step/state norms, the optimality `amax`) are shared, identical
-/// for both variants, and computed with nalgebra's dense algebra.
+/// each iterate. The legacy path retains nalgebra's dense operations. The
+/// owned path uses fixed-order scalar arithmetic for both the subproblem
+/// assembly and factorization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TrustRegionSolve {
     /// nalgebra LU factorization. This is the legacy SPP path: its last bit is
@@ -304,23 +297,10 @@ pub enum TrustRegionSolve {
     NalgebraLu,
     /// Owned deterministic Gaussian elimination with partial pivoting and a
     /// fixed reduction order ([`crate::astro::math::linear::solve_linear_first_tie`])
-    /// for the dense trust-region subproblem `(J^T J + mu I) dx = -J^T r`: no
-    /// nalgebra LU and no black-box BLAS in that factorization, so the
-    /// factorization step is reproducible to the bit on any platform.
-    ///
-    /// Determinism scope: this variant owns ONLY the subproblem factorization.
-    /// The reductions that FORM the subproblem each iterate -- the normal
-    /// matrix `J^T J` and gradient `J^T r` (nalgebra GEMM/GEMV), the cost dot
-    /// product, and the step/state norms -- still go through nalgebra's dense
-    /// `DMatrix`/`DVector` algebra, which (nalgebra 0.33 without the BLAS
-    /// feature) dispatches to `matrixmultiply`'s CPU-tuned FMA kernels. Those
-    /// reductions are therefore NOT bit-portable across CPU targets. The
-    /// converged solution is bit-reproducible run-to-run for a fixed build, so
-    /// its frozen-bits golden pins THAT build's output; the cross-platform bit
-    /// guarantee is scoped to the factorization, not the whole solve. Owning the
-    /// assembly reductions too (fixed-order scalar `J^T J`/`J^T r`/dot/norm)
-    /// would make the entire solve portable, but is a separate,
-    /// behavior-changing step that would re-pin the owned bits.
+    /// for the dense trust-region subproblem `(J^T J + mu I) dx = -J^T r`.
+    /// The normal matrix, gradient, cost, norm, and optimality reductions are
+    /// also fixed-order scalar operations, with no nalgebra LU or black-box
+    /// BLAS in the solve path.
     OwnedGaussianFirstTie,
 }
 
@@ -662,9 +642,67 @@ fn solve_subproblem(
     }
 }
 
+fn normal_matrix_scalar(jacobian: &DMatrix<f64>) -> DMatrix<f64> {
+    let rows = jacobian.nrows();
+    let cols = jacobian.ncols();
+    let mut result = DMatrix::zeros(cols, cols);
+    for column in 0..cols {
+        for other_column in 0..cols {
+            let mut sum = 0.0_f64;
+            for row in 0..rows {
+                sum += jacobian[(row, column)] * jacobian[(row, other_column)];
+            }
+            result[(column, other_column)] = sum;
+        }
+    }
+    result
+}
+
+fn gradient_scalar(jacobian: &DMatrix<f64>, residual: &DVector<f64>) -> DVector<f64> {
+    let rows = jacobian.nrows();
+    let cols = jacobian.ncols();
+    DVector::from_iterator(
+        cols,
+        (0..cols).map(|column| {
+            let mut sum = 0.0_f64;
+            for row in 0..rows {
+                sum += jacobian[(row, column)] * residual[row];
+            }
+            sum
+        }),
+    )
+}
+
+fn dot_scalar(lhs: &DVector<f64>, rhs: &DVector<f64>) -> f64 {
+    let mut sum = 0.0_f64;
+    for index in 0..lhs.len() {
+        sum += lhs[index] * rhs[index];
+    }
+    sum
+}
+
+fn norm_scalar(vector: &DVector<f64>) -> f64 {
+    dot_scalar(vector, vector).sqrt()
+}
+
+fn amax_scalar(vector: &DVector<f64>) -> f64 {
+    vector
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max)
+}
+
+fn add_scalar(lhs: &DVector<f64>, rhs: &DVector<f64>) -> DVector<f64> {
+    DVector::from_iterator(
+        lhs.len(),
+        (0..lhs.len()).map(|index| lhs[index] + rhs[index]),
+    )
+}
+
 /// [`solve_trf`] with an explicit choice of the trust-region subproblem solver.
 /// `NalgebraLu` reproduces the legacy SPP path; `OwnedGaussianFirstTie` is the
-/// owned deterministic kernel pinned to its own frozen-bits goldens.
+/// owned deterministic kernel with fixed-order scalar assembly and
+/// factorization, pinned to its own frozen-bits goldens.
 pub fn solve_trf_with<F>(
     problem: &LeastSquaresProblem<F>,
     opts: &SolveOptions,
@@ -683,10 +721,19 @@ where
     let mut f0 = r.clone();
     let mut jac = problem.jacobian(&x, &f0)?;
     let mut nfev = 1usize; // the f0 above
-    let mut cur_cost = cost(&r)?;
+    let scalar_reductions = linear_solve == TrustRegionSolve::OwnedGaussianFirstTie;
+    let mut cur_cost = if scalar_reductions {
+        validate_value(0.5 * dot_scalar(&r, &r), "cost")?
+    } else {
+        cost(&r)?
+    };
 
     // Initial Levenberg damping scaled to the Gauss-Newton normal matrix.
-    let jtj0 = jac.transpose() * &jac;
+    let jtj0 = if scalar_reductions {
+        normal_matrix_scalar(&jac)
+    } else {
+        jac.transpose() * &jac
+    };
     validate_matrix(&jtj0, "normal matrix")?;
     let mut mu = TRF_INITIAL_DAMPING_SCALE
         * (0..n)
@@ -697,19 +744,51 @@ where
     let mut iterations = 0usize;
 
     loop {
-        let jt = jac.transpose();
-        let grad = &jt * &r;
+        let grad = if scalar_reductions {
+            gradient_scalar(&jac, &r)
+        } else {
+            let jt = jac.transpose();
+            &jt * &r
+        };
         validate_vector(&grad, "gradient")?;
-        let optimality_inf = validate_value(grad.amax(), "optimality")?;
+        let optimality_inf = validate_value(
+            if scalar_reductions {
+                amax_scalar(&grad)
+            } else {
+                grad.amax()
+            },
+            "optimality",
+        )?;
 
         if optimality_inf < opts.gtol {
-            return finish(x, r, cur_cost, jac, iterations, Status::GradientTolerance);
+            return finish(
+                x,
+                r,
+                cur_cost,
+                jac,
+                iterations,
+                Status::GradientTolerance,
+                scalar_reductions,
+            );
         }
         if nfev >= opts.max_nfev {
-            return finish(x, r, cur_cost, jac, iterations, Status::MaxEvaluations);
+            return finish(
+                x,
+                r,
+                cur_cost,
+                jac,
+                iterations,
+                Status::MaxEvaluations,
+                scalar_reductions,
+            );
         }
 
-        let jtj = &jt * &jac;
+        let jtj = if scalar_reductions {
+            normal_matrix_scalar(&jac)
+        } else {
+            let jt = jac.transpose();
+            &jt * &jac
+        };
         validate_matrix(&jtj, "normal matrix")?;
 
         // Levenberg-damped Gauss-Newton subproblem.
@@ -728,16 +807,32 @@ where
             };
             validate_vector(&step, "step")?;
 
-            let x_trial = &x + &step;
+            let x_trial = if scalar_reductions {
+                add_scalar(&x, &step)
+            } else {
+                &x + &step
+            };
             let r_trial = problem.weighted_residual(&x_trial)?;
             nfev += 1;
-            let cost_trial = cost(&r_trial)?;
+            let cost_trial = if scalar_reductions {
+                validate_value(0.5 * dot_scalar(&r_trial, &r_trial), "cost")?
+            } else {
+                cost(&r_trial)?
+            };
 
             if cost_trial < cur_cost {
                 // Accept; relative-cost and relative-step stopping checks.
                 let cost_reduction = (cur_cost - cost_trial) / cur_cost.max(f64::MIN_POSITIVE);
-                let step_norm = step.norm();
-                let x_norm = x.norm();
+                let step_norm = if scalar_reductions {
+                    norm_scalar(&step)
+                } else {
+                    step.norm()
+                };
+                let x_norm = if scalar_reductions {
+                    norm_scalar(&x)
+                } else {
+                    x.norm()
+                };
                 let rel_step = step_norm / x_norm.max(f64::MIN_POSITIVE);
 
                 x = x_trial;
@@ -751,10 +846,26 @@ where
                 accepted = true;
 
                 if cost_reduction < opts.ftol {
-                    return finish(x, r, cur_cost, jac, iterations, Status::CostTolerance);
+                    return finish(
+                        x,
+                        r,
+                        cur_cost,
+                        jac,
+                        iterations,
+                        Status::CostTolerance,
+                        scalar_reductions,
+                    );
                 }
                 if rel_step < opts.xtol {
-                    return finish(x, r, cur_cost, jac, iterations, Status::StepTolerance);
+                    return finish(
+                        x,
+                        r,
+                        cur_cost,
+                        jac,
+                        iterations,
+                        Status::StepTolerance,
+                        scalar_reductions,
+                    );
                 }
                 break;
             } else {
@@ -765,7 +876,15 @@ where
 
         if !accepted {
             // Could not find an improving step within the damping sweep.
-            return finish(x, r, cur_cost, jac, iterations, Status::StepTolerance);
+            return finish(
+                x,
+                r,
+                cur_cost,
+                jac,
+                iterations,
+                Status::StepTolerance,
+                scalar_reductions,
+            );
         }
     }
 }
@@ -777,6 +896,7 @@ fn finish(
     jacobian: DMatrix<f64>,
     iterations: usize,
     status: Status,
+    scalar_reductions: bool,
 ) -> Result<LeastSquaresReport, SolveError> {
     validate_nonempty_vector(&x, "solution")?;
     validate_vector(&x, "solution")?;
@@ -784,7 +904,14 @@ fn finish(
     validate_vector(&residual, "residual")?;
     validate_value(cost_value, "cost")?;
     validate_matrix(&jacobian, "jacobian")?;
-    let optimality_inf = validate_value((jacobian.transpose() * &residual).amax(), "optimality")?;
+    let optimality_inf = validate_value(
+        if scalar_reductions {
+            amax_scalar(&gradient_scalar(&jacobian, &residual))
+        } else {
+            (jacobian.transpose() * &residual).amax()
+        },
+        "optimality",
+    )?;
     Ok(LeastSquaresReport {
         x,
         residual,
@@ -896,7 +1023,7 @@ mod tests {
                 tt.len(),
                 tt.iter()
                     .zip(&yy)
-                    .map(|(&tk, &yk)| a * (b * tk).exp() + c - yk),
+                    .map(|(&tk, &yk)| a * libm::exp(b * tk) + c - yk),
             )
         };
         let problem = LeastSquaresProblem::new(residual, DVector::from_vec(vec![5.0, -2.0, 2.0]));
@@ -1013,10 +1140,10 @@ mod tests {
     /// problem and reproduces its solution bit-for-bit run to run. The pinned
     /// bits are the owned kernel's own frozen-bits golden (a different
     /// factorization than the legacy nalgebra path, so its own value). The
-    /// owned kernel owns only the subproblem factorization; the surrounding
-    /// `J^T J`/`J^T r`/norm reductions are shared nalgebra dense algebra, so
-    /// these bits are this build's reproducible output (the run-to-run check
-    /// below), not a cross-platform constant.
+    /// owned kernel uses fixed-order scalar arithmetic for the complete
+    /// trust-region assembly and factorization, so the frozen bits are a
+    /// cross-platform constant; the run-to-run check below guards that
+    /// contract.
     #[test]
     fn owned_trf_converges_to_frozen_bits() {
         let problem = exp_fit_problem();
