@@ -262,7 +262,7 @@ where
     let vtec = grid.vtec_at_pierce_point(options.epoch, pp_lonlatalt[0], pp_lonlatalt[1])?;
     validate::finite(vtec, "vtec").map_err(field_error_string)?;
     let obliquity_arg =
-        options.shell_geometry.earth_radius_m * elevation_rad.cos() / shell_radius_m;
+        options.shell_geometry.earth_radius_m * libm::cos(elevation_rad) / shell_radius_m;
     validate::finite(obliquity_arg, "obliquity_arg").map_err(field_error_string)?;
     let mapping_denominator = 1.0 - obliquity_arg * obliquity_arg;
     validate::finite_positive(mapping_denominator, "TEC mapping denominator")
@@ -289,7 +289,7 @@ where
 
     let receiver_up = unit_vector(receiver_xyz);
     let sat_unit = unit_vector(&receiver_sat_vector);
-    let elevation_rad = dot_three_fused(&sat_unit, &receiver_up).asin();
+    let elevation_rad = libm::asin(dot_three_fused(&sat_unit, &receiver_up));
 
     let a = 1.0;
     let b = 2.0 * dot_three_fused(receiver_xyz, &sat_unit);

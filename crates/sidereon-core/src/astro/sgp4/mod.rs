@@ -1367,7 +1367,10 @@ mod tests {
         // proves those normalizations run through the public entry point.
         let sat = Satellite::from_tle(ISS_L1, ISS_L2).unwrap();
         let p = sat.propagate(MinutesSinceEpoch(0.0)).unwrap();
-        let r = (p.position[0].powi(2) + p.position[1].powi(2) + p.position[2].powi(2)).sqrt();
+        let r = (p.position[0] * p.position[0]
+            + p.position[1] * p.position[1]
+            + p.position[2] * p.position[2])
+            .sqrt();
         assert!(
             (6500.0..=7200.0).contains(&r),
             "ISS radius {r} km outside LEO"

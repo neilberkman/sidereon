@@ -3,7 +3,7 @@
   "purpose": "IS-GPS-200 Klobuchar L1 broadcast ionospheric group delay (meters). Reference recipe is generator/klobuchar.py; the Rust port asserts 0 ULP per intermediate and on the final meters against these hex-float goldens.",
   "env_ref": {
     "fixture": "fixtures/env.json",
-    "note": "0 ULP certified only against env.json. libm contract: CPython math (Apple libsystem_m) vs Rust std on aarch64-apple-darwin."
+    "note": "0 ULP certified against the portable Rust libm contract. The committed fixture retains the original Klobuchar cases; its transcendental calls now use the same portable Rust kernels as the engine."
   },
   "recipe": "Semicircle-domain IS-GPS-200 Sec. 20.3.3.5.2.5: psi, phi_i (clamp +-0.416), lambda_i, phi_m, local time t (wrap [0,86400)), obliquity F = 1 + 16*(0.53-E)^3, Horner AMP (>=0) and PER (>=72000), phase x = 2*pi*(t-50400)/PER, truncated cosine series 1 - x^2/2 + x^4/24 while |x|<1.57 else 5e-9 floor, times F, times c. Positive group delay. No FMA, integer powers as explicit multiplies, math.pi.",
   "math_pi": "0x1.921fb54442d18p+1",

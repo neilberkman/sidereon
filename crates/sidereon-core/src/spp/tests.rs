@@ -1908,10 +1908,10 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     };
 
     let sol = solve_with_policy(&store, &inputs, true, policy).expect("coarse search solves");
-    assert_eq!(sol.position.x_m.to_bits(), 0x414b544d32219a0d);
-    assert_eq!(sol.position.y_m.to_bits(), 0x412040dc182a9b20);
-    assert_eq!(sol.position.z_m.to_bits(), 0x4153f61dfc670caa);
-    assert_eq!(sol.rx_clock_s.to_bits(), 0x3f3f84f505aa3883);
+    assert_eq!(sol.position.x_m.to_bits(), 0x414b544d32219a58);
+    assert_eq!(sol.position.y_m.to_bits(), 0x412040dc182a9933);
+    assert_eq!(sol.position.z_m.to_bits(), 0x4153f61dfc670fde);
+    assert_eq!(sol.rx_clock_s.to_bits(), 0x3f3f84f505aab32e);
     assert!(sol.metadata.converged);
     assert!(sol.metadata.redundancy >= 1);
     assert!(sol.metadata.raim_checkable);
@@ -2003,12 +2003,10 @@ fn estimate_spp_reference_matches_solve_with_policy_bit_for_bit() {
 /// deterministic trust-region kernel produces its OWN frozen-bits solution on
 /// the ESBC first-epoch fixture. The owned factorization is a different
 /// reduction order than the legacy nalgebra LU, so it carries its own pinned
-/// bits rather than reusing the legacy goldens. Determinism scope: the owned
-/// kernel owns the dense subproblem factorization (no nalgebra LU, no black-box
-/// BLAS in that solve); the surrounding normal-matrix / gradient / norm
-/// reductions still go through nalgebra, so these pinned bits are this build's
-/// reproducible output (asserted run-to-run below), with the cross-platform bit
-/// guarantee scoped to the factorization.
+/// bits rather than reusing the legacy goldens. The owned kernel uses fixed
+/// reduction order and scalar arithmetic for the complete trust-region
+/// assembly and factorization (no nalgebra LU or black-box BLAS), so these
+/// pinned bits are portable across CPU targets.
 #[test]
 fn owned_deterministic_solver_frozen_bits() {
     use super::solve_with_solver;
@@ -2038,10 +2036,10 @@ fn owned_deterministic_solver_frozen_bits() {
     // Owned deterministic kernel: its own frozen-bits golden.
     let owned = solve_with_solver(&store, &inputs, true, SolverRecipe::OwnedDeterministicTrf)
         .expect("owned deterministic solve");
-    assert_eq!(owned.position.x_m.to_bits(), 0x414b544cd339d204);
-    assert_eq!(owned.position.y_m.to_bits(), 0x412040dc030556d9);
-    assert_eq!(owned.position.z_m.to_bits(), 0x4153f61de1d76fa6);
-    assert_eq!(owned.rx_clock_s.to_bits(), 0x3f3f84ebef5aa1b8);
+    assert_eq!(owned.position.x_m.to_bits(), 0x414b544cd339d1cd);
+    assert_eq!(owned.position.y_m.to_bits(), 0x412040dc03055a9c);
+    assert_eq!(owned.position.z_m.to_bits(), 0x4153f61de1d76f2e);
+    assert_eq!(owned.rx_clock_s.to_bits(), 0x3f3f84ebef5a8fa8);
     assert_eq!(owned.used_sats, reference.used_sats);
     assert_eq!(owned.residuals_m.len(), reference.residuals_m.len());
 
@@ -2445,11 +2443,8 @@ const CANONICAL_SPP_TRUTH_BOUND_M: f64 = 6.0;
 ///
 ///   1. DETERMINISM: canonical is bit-reproducible run-to-run on this build (the
 ///      frozen-bits golden below, re-asserted on a second solve). Scope caveat,
-///      exactly as the owned-solver claim: the owned kernel owns only the dense
-///      subproblem factorization; the surrounding normal-matrix / gradient / norm
-///      reductions still ride nalgebra's CPU-dispatched dense algebra, so these
-///      pinned bits are THIS build's reproducible output, with the cross-platform
-///      bit guarantee scoped to the factorization, not a portable constant.
+///      the owned kernel uses fixed-order scalar assembly and factorization, so
+///      these pinned bits are portable across CPU targets.
 ///   2. BOUNDED-TOLERANCE + TRUTH: canonical lands within
 ///      [`CANONICAL_VS_REFERENCE_SPP_TOL_M`] of the Skyfield-faithful reference
 ///      SPP on the shared case (same used satellites), and within
@@ -2483,7 +2478,6 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     };
 
     let canonical = run_canonical();
-
     // Reference SPP (Skyfield-faithful) for the bounded-tolerance comparison;
     // this is the unchanged reference path, proving canonical is additive.
     let reference = solve_with_policy(&store, &inputs, true, policy).expect("reference SPP");
@@ -2516,10 +2510,10 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     );
 
     // BAR 1: frozen-bits determinism golden (this build's reproducible output).
-    assert_eq!(canonical.position.x_m.to_bits(), 0x414b544cd339bab6);
-    assert_eq!(canonical.position.y_m.to_bits(), 0x412040dc03055a75);
-    assert_eq!(canonical.position.z_m.to_bits(), 0x4153f61de1d7513a);
-    assert_eq!(canonical.rx_clock_s.to_bits(), 0x3f3f84ebef550522);
+    assert_eq!(canonical.position.x_m.to_bits(), 0x414b544cd339d1f2);
+    assert_eq!(canonical.position.y_m.to_bits(), 0x412040dc0305586a);
+    assert_eq!(canonical.position.z_m.to_bits(), 0x4153f61de1d76f5e);
+    assert_eq!(canonical.rx_clock_s.to_bits(), 0x3f3f84ebef5a9708);
 
     // Determinism: a second canonical solve is bit-identical.
     let again = run_canonical();

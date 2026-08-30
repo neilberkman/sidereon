@@ -683,7 +683,9 @@ fn interpolate_position_neville(
     for j in 0..win {
         let k = start + j;
         let tj = x[k] - query;
-        let (s, c) = (OMEGA_E_DOT_RAD_S * tj).sin_cos();
+        let theta = OMEGA_E_DOT_RAD_S * tj;
+        let s = libm::sin(theta);
+        let c = libm::cos(theta);
         t[j] = tj;
         px[j] = c * kx[k] - s * ky[k];
         py[j] = s * kx[k] + c * ky[k];

@@ -422,13 +422,13 @@ impl TimeScales {
         let jd_ut1 = jd_whole + ut1_fraction;
 
         let t = (jd_whole - J2000_JD + tt_fraction) / DAYS_PER_JULIAN_CENTURY;
-        let tdb_minus_tt_seconds = 0.001657 * (628.3076 * t + 6.2401).sin()
-            + 0.000022 * (575.3385 * t + 4.2970).sin()
-            + 0.000014 * (1256.6152 * t + 6.1969).sin()
-            + 0.000005 * (606.9777 * t + 4.0212).sin()
-            + 0.000005 * (52.9691 * t + 0.4444).sin()
-            + 0.000002 * (21.3299 * t + 5.5431).sin()
-            + 0.000010 * t * (628.3076 * t + 4.2490).sin();
+        let tdb_minus_tt_seconds = 0.001657 * libm::sin(628.3076 * t + 6.2401)
+            + 0.000022 * libm::sin(575.3385 * t + 4.2970)
+            + 0.000014 * libm::sin(1256.6152 * t + 6.1969)
+            + 0.000005 * libm::sin(606.9777 * t + 4.0212)
+            + 0.000005 * libm::sin(52.9691 * t + 0.4444)
+            + 0.000002 * libm::sin(21.3299 * t + 5.5431)
+            + 0.000010 * t * libm::sin(628.3076 * t + 4.2490);
 
         let tdb_fraction = tt_fraction + tdb_minus_tt_seconds / SECONDS_PER_DAY;
         let jd_tdb = jd_whole + tdb_fraction;
@@ -485,13 +485,13 @@ impl TimeScales {
         let jd_ut1 = jd_whole + ut1_fraction;
 
         let t = (jd_whole - J2000_JD + tt_fraction) / DAYS_PER_JULIAN_CENTURY;
-        let tdb_minus_tt_seconds = 0.001657 * (628.3076 * t + 6.2401).sin()
-            + 0.000022 * (575.3385 * t + 4.2970).sin()
-            + 0.000014 * (1256.6152 * t + 6.1969).sin()
-            + 0.000005 * (606.9777 * t + 4.0212).sin()
-            + 0.000005 * (52.9691 * t + 0.4444).sin()
-            + 0.000002 * (21.3299 * t + 5.5431).sin()
-            + 0.000010 * t * (628.3076 * t + 4.2490).sin();
+        let tdb_minus_tt_seconds = 0.001657 * libm::sin(628.3076 * t + 6.2401)
+            + 0.000022 * libm::sin(575.3385 * t + 4.2970)
+            + 0.000014 * libm::sin(1256.6152 * t + 6.1969)
+            + 0.000005 * libm::sin(606.9777 * t + 4.0212)
+            + 0.000005 * libm::sin(52.9691 * t + 0.4444)
+            + 0.000002 * libm::sin(21.3299 * t + 5.5431)
+            + 0.000010 * t * libm::sin(628.3076 * t + 4.2490);
 
         let tdb_fraction = tt_fraction + tdb_minus_tt_seconds / SECONDS_PER_DAY;
         let jd_tdb = jd_whole + tdb_fraction;
@@ -934,13 +934,13 @@ fn tdb_to_tt_jd_for_tdb_input(jd_tdb: f64) -> f64 {
 
 fn tdb_minus_tt_seconds_at_tt_jd(jd_tt: f64) -> f64 {
     let t = (jd_tt - J2000_JD) / DAYS_PER_JULIAN_CENTURY;
-    0.001657 * (628.3076 * t + 6.2401).sin()
-        + 0.000022 * (575.3385 * t + 4.2970).sin()
-        + 0.000014 * (1256.6152 * t + 6.1969).sin()
-        + 0.000005 * (606.9777 * t + 4.0212).sin()
-        + 0.000005 * (52.9691 * t + 0.4444).sin()
-        + 0.000002 * (21.3299 * t + 5.5431).sin()
-        + 0.000010 * t * (628.3076 * t + 4.2490).sin()
+    0.001657 * libm::sin(628.3076 * t + 6.2401)
+        + 0.000022 * libm::sin(575.3385 * t + 4.2970)
+        + 0.000014 * libm::sin(1256.6152 * t + 6.1969)
+        + 0.000005 * libm::sin(606.9777 * t + 4.0212)
+        + 0.000005 * libm::sin(52.9691 * t + 0.4444)
+        + 0.000002 * libm::sin(21.3299 * t + 5.5431)
+        + 0.000010 * t * libm::sin(628.3076 * t + 4.2490)
 }
 
 fn normalize_calendar_seconds(mut cal: ScaleCal, second: f64) -> ScaleCal {

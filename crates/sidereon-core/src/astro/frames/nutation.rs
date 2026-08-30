@@ -185,8 +185,8 @@ pub(crate) fn skyfield_iau2000a_radians_unchecked(jd_tt: f64) -> (f64, f64) {
             arg += (NALS_T[row][i] as f64) * fundamental_args[i];
         }
 
-        let sarg = arg.sin();
-        let carg = arg.cos();
+        let sarg = libm::sin(arg);
+        let carg = libm::cos(arg);
 
         dpsi += sarg * LUNISOLAR_LONGITUDE_COEFFICIENTS[row][0];
         dpsi += sarg * LUNISOLAR_LONGITUDE_COEFFICIENTS[row][1] * t;
@@ -211,8 +211,8 @@ pub(crate) fn skyfield_iau2000a_radians_unchecked(jd_tt: f64) -> (f64, f64) {
             arg += (NAPL_T[row][i] as f64) * planetary_args[i];
         }
 
-        let sarg = arg.sin();
-        let carg = arg.cos();
+        let sarg = libm::sin(arg);
+        let carg = libm::cos(arg);
 
         dpsi += sarg * NUTATION_COEFFICIENTS_LONGITUDE[row][0];
         dpsi += carg * NUTATION_COEFFICIENTS_LONGITUDE[row][1];
@@ -274,12 +274,12 @@ pub(crate) fn build_skyfield_nutation_matrix_unchecked(
     true_obliquity_radians: f64,
     psi_radians: f64,
 ) -> Mat3 {
-    let cobm = mean_obliquity_radians.cos();
-    let sobm = mean_obliquity_radians.sin();
-    let cobt = true_obliquity_radians.cos();
-    let sobt = true_obliquity_radians.sin();
-    let cpsi = psi_radians.cos();
-    let spsi = psi_radians.sin();
+    let cobm = libm::cos(mean_obliquity_radians);
+    let sobm = libm::sin(mean_obliquity_radians);
+    let cobt = libm::cos(true_obliquity_radians);
+    let sobt = libm::sin(true_obliquity_radians);
+    let cpsi = libm::cos(psi_radians);
+    let spsi = libm::sin(psi_radians);
 
     [
         [cpsi, -spsi * cobm, -spsi * sobm],
@@ -432,7 +432,7 @@ pub(crate) fn skyfield_equation_of_the_equinoxes_complimentary_terms_unchecked(j
     for i in 0..14 {
         a += (KE1[i] as f64) * fa[i];
     }
-    let mut c_terms = SE1_0 * a.sin();
+    let mut c_terms = SE1_0 * libm::sin(a);
     c_terms *= t;
 
     // Constant terms (33 rows)
@@ -441,8 +441,8 @@ pub(crate) fn skyfield_equation_of_the_equinoxes_complimentary_terms_unchecked(j
         for i in 0..14 {
             arg += (KE0_T[row][i] as f64) * fa[i];
         }
-        c_terms += SE0_T_0[row] * arg.sin();
-        c_terms += SE0_T_1[row] * arg.cos();
+        c_terms += SE0_T_0[row] * libm::sin(arg);
+        c_terms += SE0_T_1[row] * libm::cos(arg);
     }
 
     c_terms * ARCSEC_TO_RAD

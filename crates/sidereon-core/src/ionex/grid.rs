@@ -290,7 +290,7 @@ impl Ionex {
         let nlon = lon_nodes_deg.len();
 
         // TEC scale `10^EXPONENT`, formed as a single multiply per field.
-        let scale = 10f64.powi(exponent);
+        let scale = libm::pow(10.0, exponent as f64);
 
         // ---- Body ----
         let mut map_epochs = Vec::new();

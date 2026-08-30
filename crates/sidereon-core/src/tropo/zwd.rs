@@ -106,14 +106,14 @@ pub(crate) fn niell_mapping_function_unchecked(
     day_of_year: u16,
     height_m: f64,
 ) -> Mapping {
-    let mut sin_e = elevation_rad.sin();
+    let mut sin_e = libm::sin(elevation_rad);
     if sin_e < 0.01 {
         sin_e = 0.01;
     }
 
     // The ZWD 0-ULP fixture pins this multiply-then-divide order.
     let lat_rad = latitude_deg * PI / DEGREES_PER_SEMICIRCLE;
-    let sin_lat = lat_rad.sin();
+    let sin_lat = libm::sin(lat_rad);
     let phi = 2.0 * PI * (day_of_year as f64 - 1.0) / DAYS_PER_JULIAN_YEAR;
 
     let a_h_base = 2.65e-3;
@@ -124,9 +124,9 @@ pub(crate) fn niell_mapping_function_unchecked(
     let mut b_h = b_h_base * (1.0 - 0.0025 * sin_lat * sin_lat);
     let mut c_h = c_h_base * (1.0 - 0.0025 * sin_lat * sin_lat);
 
-    a_h += 0.0005 * phi.cos() * (1.0 - 0.5 * sin_lat * sin_lat);
-    b_h += 0.0001 * phi.cos() * (1.0 - 0.5 * sin_lat * sin_lat);
-    c_h += 0.00005 * phi.cos() * (1.0 - 0.5 * sin_lat * sin_lat);
+    a_h += 0.0005 * libm::cos(phi) * (1.0 - 0.5 * sin_lat * sin_lat);
+    b_h += 0.0001 * libm::cos(phi) * (1.0 - 0.5 * sin_lat * sin_lat);
+    c_h += 0.00005 * libm::cos(phi) * (1.0 - 0.5 * sin_lat * sin_lat);
 
     let a_w_base = 1.5e-2;
     let b_w_base = 8.3e-3;
@@ -136,12 +136,12 @@ pub(crate) fn niell_mapping_function_unchecked(
     let mut b_w = b_w_base * (1.0 - 0.01 * sin_lat.abs());
     let mut c_w = c_w_base * (1.0 - 0.01 * sin_lat.abs());
 
-    a_w += 0.005 * phi.cos() * (1.0 - sin_lat.abs());
-    b_w += 0.003 * phi.cos() * (1.0 - sin_lat.abs());
-    c_w += 0.0005 * phi.cos() * (1.0 - sin_lat.abs());
+    a_w += 0.005 * libm::cos(phi) * (1.0 - sin_lat.abs());
+    b_w += 0.003 * libm::cos(phi) * (1.0 - sin_lat.abs());
+    c_w += 0.0005 * libm::cos(phi) * (1.0 - sin_lat.abs());
 
     if height_m > 0.0 {
-        let height_factor = (-height_m / 8000.0).exp();
+        let height_factor = libm::exp(-height_m / 8000.0);
         a_h *= height_factor;
         b_h *= height_factor;
         c_h *= height_factor;
@@ -177,7 +177,7 @@ where
 
     let receiver_up = unit_vector(receiver_xyz);
     let sat_unit = unit_vector(&receiver_sat_vector);
-    let elevation_rad = dot_three_reference(&sat_unit, &receiver_up).asin();
+    let elevation_rad = libm::asin(dot_three_reference(&sat_unit, &receiver_up));
 
     let lonlatalt = ecef_to_lla(receiver_xyz);
     validate_lonlatalt(lonlatalt)?;
@@ -199,13 +199,13 @@ where
 }
 
 fn standard_pressure_hpa(altitude_m: f64) -> f64 {
-    1013.25 * (1.0 - 2.25577e-5 * altitude_m).powf(5.2559)
+    1013.25 * libm::pow(1.0 - 2.25577e-5 * altitude_m, 5.2559)
 }
 
 fn saastamoinen_zhd(pressure_hpa: f64, latitude_deg: f64, altitude_m: f64) -> f64 {
     // The ZWD 0-ULP fixture pins this multiply-then-divide order.
     let lat_rad = latitude_deg * PI / DEGREES_PER_SEMICIRCLE;
-    0.0022768 * pressure_hpa / (1.0 - 0.00266 * (2.0 * lat_rad).cos() - 2.8e-7 * altitude_m)
+    0.0022768 * pressure_hpa / (1.0 - 0.00266 * libm::cos(2.0 * lat_rad) - 2.8e-7 * altitude_m)
 }
 
 pub fn zenith_wet_delay(profile: ZwdProfile, height_m: f64) -> Result<f64> {
@@ -225,7 +225,7 @@ pub(crate) fn zenith_wet_delay_unchecked(profile: ZwdProfile, height_m: f64) -> 
 }
 
 fn zwd_altitude_scaled(profile: ZwdProfile, altitude_m: f64) -> f64 {
-    profile.sea_level_zenith_wet_delay_m * (-altitude_m / profile.wet_scale_height_m).exp()
+    profile.sea_level_zenith_wet_delay_m * libm::exp(-altitude_m / profile.wet_scale_height_m)
 }
 
 pub(crate) fn validate_profile(profile: ZwdProfile) -> Result<()> {

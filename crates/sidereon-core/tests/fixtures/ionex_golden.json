@@ -3,7 +3,7 @@
   "purpose": "IONEX TEC grid bilinear + temporal interpolation + single-layer slant geometry -> slant ionospheric group delay (meters). Parser substrate is gnssanalysis.read_ionex; the float pipeline reference recipe is generator/ionex.py. The Rust port asserts 0 ULP per intermediate and on the final meters against these hex-float goldens.",
   "env_ref": {
     "fixture": "fixtures/env.json",
-    "note": "0 ULP certified only against env.json. libm contract: CPython math (Apple libsystem_m) vs Rust std on aarch64-apple-darwin. Geometry uses asin/cos/sin/sqrt; interpolation is FMA-free."
+    "note": "0 ULP certified against the portable Rust libm contract. Geometry uses libm asin/cos/sin plus IEEE-754 sqrt; interpolation is FMA-free."
   },
   "recipe": "s = Re/(Re+H)*cos(E) formed once; psi = pi/2 - E - asin(s); IPP lat/lon by spherical asin form; longitude normalized into [lon1,lon2]; per-map explicit four-term bilinear (1-p)(1-q)E00 + p(1-q)E01 + (1-p)q E10 + p q E11 with IPP lat clamped to grid edge and signed-step p,q; linear-in-time blend (1-w)*vtec0 + w*vtec1 (endpoint hold); m = 1/sqrt(1-s^2); STEC = m*VTEC; delay = (40.3e16/(f*f))*STEC. Positive group delay. No FMA.",
   "math_pi": "0x1.921fb54442d18p+1",
@@ -686,7 +686,7 @@
       },
       "expect": {
         "s": "0x1.d99164681550dp-1",
-        "psi": "0x1.004e6c96fb058p-2",
+        "psi": "0x1.004e6c96fb05cp-2",
         "phi_ipp_deg": "0x1.56a2ba6b5c24ap+6",
         "lambda_ipp_deg_raw": "0x1.dffffffffffffp+4",
         "lambda_ipp_deg": "0x1.dffffffffffffp+4",

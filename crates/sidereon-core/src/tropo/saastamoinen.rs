@@ -196,7 +196,7 @@ fn interpc(coef: &[f64; 5], lat_deg: f64) -> f64 {
 /// Vienna (VMF) mapping functions: the families differ only in where `a, b, c`
 /// come from, not in this evaluation, so the VMF module reuses it verbatim.
 pub(crate) fn mapf(el_rad: f64, a: f64, b: f64, c: f64) -> f64 {
-    let sinel = el_rad.sin();
+    let sinel = libm::sin(el_rad);
     (1.0 + a / (1.0 + b / (1.0 + c))) / (sinel + (a / (sinel + b / (sinel + c))))
 }
 
@@ -217,10 +217,10 @@ pub(crate) fn zenith_delays(
 ) -> ZenithComponents {
     let t = temperature_k;
     // Water-vapour partial pressure (hPa): saturation pressure times humidity.
-    let e = 6.108 * relative_humidity * ((17.15 * t - 4684.0) / (t - 38.45)).exp();
+    let e = 6.108 * relative_humidity * libm::exp((17.15 * t - 4684.0) / (t - 38.45));
 
     let h_km = height_m / KM_TO_M;
-    let denom = 1.0 - 0.00266 * (2.0 * lat_rad).cos() - 0.00028 * h_km;
+    let denom = 1.0 - 0.00266 * libm::cos(2.0 * lat_rad) - 0.00028 * h_km;
     let zhd_m = 0.0022768 * pressure_hpa / denom;
 
     let zwd_m = 0.002277 * (1255.0 / t + 0.05) * e;
@@ -236,7 +236,7 @@ pub(crate) fn zenith_delays(
 /// lapse uses `pow`, the one transcendental specific to this helper.
 pub(crate) fn standard_atmosphere(height_m: f64, relative_humidity: f64) -> StandardAtmosphere {
     let hgt = if height_m > 0.0 { height_m } else { 0.0 };
-    let pressure_hpa = 1013.25 * (1.0 - 2.2557e-5 * hgt).powf(5.2568);
+    let pressure_hpa = 1013.25 * libm::pow(1.0 - 2.2557e-5 * hgt, 5.2568);
     let temperature_k = 15.0 - 6.5e-3 * hgt + 273.16;
     StandardAtmosphere {
         pressure_hpa,
@@ -261,7 +261,7 @@ pub(crate) fn niell_mapping(
     let lat_deg = lat_rad * RAD_TO_DEG;
     // Seasonal phase: day-28 reference, plus half a year for southern latitudes.
     let y = (doy - 28.0) / DAYS_PER_JULIAN_YEAR + if lat_deg < 0.0 { 0.5 } else { 0.0 };
-    let cosy = (2.0 * PI * y).cos();
+    let cosy = libm::cos(2.0 * PI * y);
     let alat = lat_deg.abs();
 
     let mut ah = [0.0f64; 3];
@@ -272,7 +272,8 @@ pub(crate) fn niell_mapping(
     }
 
     // Height correction (km), ellipsoidal height, applied to hydrostatic only.
-    let dm = (1.0 / el_rad.sin() - mapf(el_rad, AHT[0], AHT[1], AHT[2])) * (height_m / KM_TO_M);
+    let dm =
+        (1.0 / libm::sin(el_rad) - mapf(el_rad, AHT[0], AHT[1], AHT[2])) * (height_m / KM_TO_M);
     let mh = mapf(el_rad, ah[0], ah[1], ah[2]) + dm;
     let mw = mapf(el_rad, aw[0], aw[1], aw[2]);
 

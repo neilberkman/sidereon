@@ -18,8 +18,8 @@ use crate::astro::math::vec3::{norm3, sub3};
 #[inline]
 pub(crate) fn sagnac_rotate_exact(pos: [f64; 3], tau_s: f64, omega_rad_s: f64) -> [f64; 3] {
     let theta = omega_rad_s * tau_s;
-    let c = theta.cos();
-    let s = theta.sin();
+    let c = libm::cos(theta);
+    let s = libm::sin(theta);
     [c * pos[0] + s * pos[1], -s * pos[0] + c * pos[1], pos[2]]
 }
 
@@ -51,8 +51,8 @@ mod tests {
     #[test]
     fn sagnac_rotate_exact_matches_explicit_recipe_bits() {
         let theta = OMEGA * TAU_S;
-        let c = theta.cos();
-        let s = theta.sin();
+        let c = libm::cos(theta);
+        let s = libm::sin(theta);
         let want = [c * SAT[0] + s * SAT[1], -s * SAT[0] + c * SAT[1], SAT[2]];
         let got = sagnac_rotate_exact(SAT, TAU_S, OMEGA);
         for (g, w) in got.iter().zip(want.iter()) {

@@ -115,8 +115,11 @@ pub(super) fn model_troposphere(
 /// clockwise from north, so the north/east partials are
 /// `m_grad * cos(az)` and `m_grad * sin(az)`.
 pub(super) fn tropo_gradient_mapping(elevation_rad: f64, azimuth_rad: f64) -> [f64; 2] {
-    let mapping = 1.0 / (elevation_rad.sin() * elevation_rad.tan() + 0.0032);
-    [mapping * azimuth_rad.cos(), mapping * azimuth_rad.sin()]
+    let mapping = 1.0 / (libm::sin(elevation_rad) * libm::tan(elevation_rad) + 0.0032);
+    [
+        mapping * libm::cos(azimuth_rad),
+        mapping * libm::sin(azimuth_rad),
+    ]
 }
 
 fn ppp_tropo_invalid_julian_split(error: TimeModelError) -> FloatSolveError {
@@ -521,7 +524,7 @@ pub(super) fn measurement_weight(
 }
 
 fn elevation_weight_scale(elevation_deg: f64) -> f64 {
-    let sin_el = (elevation_deg * DEG_TO_RAD).sin();
+    let sin_el = libm::sin(elevation_deg * DEG_TO_RAD);
     if !sin_el.is_finite() || sin_el < MIN_ELEVATION_WEIGHT_SCALE {
         MIN_ELEVATION_WEIGHT_SCALE
     } else {
@@ -550,8 +553,8 @@ fn los_zenith_azimuth_deg(
     east: [f64; 3],
 ) -> (f64, f64) {
     let elevation_sin = dot3(los, up).clamp(-1.0, 1.0);
-    let zenith_deg = rad_to_deg_ref(elevation_sin.acos());
-    let mut azimuth_deg = rad_to_deg_ref(dot3(los, east).atan2(dot3(los, north)));
+    let zenith_deg = rad_to_deg_ref(libm::acos(elevation_sin));
+    let mut azimuth_deg = rad_to_deg_ref(libm::atan2(dot3(los, east), dot3(los, north)));
     if azimuth_deg < 0.0 {
         azimuth_deg += 360.0;
     }

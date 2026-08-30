@@ -3,7 +3,7 @@
   "purpose": "GPS L1 single-point-positioning trace fixture. Records the synthesized observations, the FIXED receiver truth, the frozen-branch choices, the effective scipy options, and the full iteration trace (per trace-state x: per-satellite intermediates t_tx/sat_ecef/dt_sat/theta/sat_rot/rho/az/el/iono/tropo/p_hat, residual vector, 2-point FD perturbations, FD Jacobian, accepted steps, full fun() evaluation log, stopping reason). The residual and the 2-point FD Jacobian at the recorded trace states are the 0-ULP substrate the Rust trace-replay asserts; the trf converged position/clock is a BLAS-bound sub-micron solver-agreement target, never 0 ULP.",
   "env_ref": {
     "fixture": "fixtures/env.json",
-    "note": "0 ULP certified only against env.json. The SPP residual + 2-point FD Jacobian are libm/arithmetic-bound; the trf SVD is BLAS-bound (Apple Accelerate) and out of scope for 0 ULP.",
+    "note": "The SPP residual + 2-point FD Jacobian are certified against the portable Rust libm 0.2.16 contract. The recorded external scipy final-solution fields remain audit data; the canonical solver owns its fixed reduction order.",
     "sp3_interp_reference": "position: RTKLIB preceph.c interppol/pephpos (sliding-window degree-10 Lagrange + OMGE per-node rotation), certified in sp3::interp::interp_tests; these trace fields recomputed through the corrected production substrate. clock: scipy.interpolate.CubicSpline (unchanged)."
   },
   "geodetic_crosscheck": {
@@ -16,7 +16,7 @@
           "0x40b1878f7f9bc2c1"
         ],
         "meters_native": {
-          "lat_rad": "0x3fe921fb5432aa64",
+          "lat_rad": "0x3fe921fb5432aa63",
           "lon_rad": "0x3fbf46bb9c109320",
           "height_m": "0x4072c00000004857"
         },
@@ -535,7 +535,7 @@
             ],
             "rho_m": "0x41758a478cf03e95",
             "az_rad": "0x40051f0821259b12",
-            "el_rad": "0x3fe2f939eaf34edf",
+            "el_rad": "0x3fe2f939eaf34ee0",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x4175a62240bbf2f1",
@@ -584,7 +584,7 @@
               "0x4174b78c3caa0472"
             ],
             "rho_m": "0x4174d0a7132a6a9d",
-            "az_rad": "0x3fedc72b15a75ab0",
+            "az_rad": "0x3fedc72b15a75aae",
             "el_rad": "0x3fe7b9a7ca230b22",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
@@ -634,7 +634,7 @@
               "0x4173992c0e9a57a4"
             ],
             "rho_m": "0x4173cfdf292f8a32",
-            "az_rad": "0x3fecc15ca7e9f0a4",
+            "az_rad": "0x3fecc15ca7e9f0a1",
             "el_rad": "0x3ff65c538eb6ddf2",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
@@ -660,7 +660,7 @@
             ],
             "rho_m": "0x41742cd5695f48a3",
             "az_rad": "0x4008ade9d9056f89",
-            "el_rad": "0x3feee48b7b9bac8e",
+            "el_rad": "0x3feee48b7b9bac91",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x41741be8b51aa967",
@@ -685,7 +685,7 @@
             ],
             "rho_m": "0x4174309c397ed1ba",
             "az_rad": "0x4014d29565a56aba",
-            "el_rad": "0x3febfd7330fbd2d7",
+            "el_rad": "0x3febfd7330fbd2d6",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x417448acb9727c69",
@@ -1022,7 +1022,7 @@
               "0x416870c1e4ec8d66"
             ],
             "rho_m": "0x417462df9067df0c",
-            "az_rad": "0x3ffeee88d74bc19c",
+            "az_rad": "0x3ffeee88d74bc19d",
             "el_rad": "0x3fec5f264e800928",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
@@ -1435,7 +1435,7 @@
               "0x416870c1e4f1668b"
             ],
             "rho_m": "0x417462dc47a1b8c2",
-            "az_rad": "0x3ffeee8b0b68f098",
+            "az_rad": "0x3ffeee8b0b68f099",
             "el_rad": "0x3fec5f2fcf137f30",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
@@ -1461,7 +1461,7 @@
             ],
             "rho_m": "0x4173d210a76c9c82",
             "az_rad": "0x3febb0afb2f62f14",
-            "el_rad": "0x3ff67d7506051cc9",
+            "el_rad": "0x3ff67d7506051cc8",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x4173d8405cd11470",
@@ -1749,7 +1749,7 @@
             ],
             "rho_m": "0x4176ae9fdc3c7ead",
             "az_rad": "0x40141889901b0be5",
-            "el_rad": "0x3fd440fb09aba232",
+            "el_rad": "0x3fd440fb09aba231",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x4176b8c6fd82e860",
@@ -1798,7 +1798,7 @@
               "0x4171824fcebb1a4a"
             ],
             "rho_m": "0x417373954b65a2b5",
-            "az_rad": "0x4012f2a5ec1811bf",
+            "az_rad": "0x4012f2a5ec1811c0",
             "el_rad": "0x3ff449c467c3af6e",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
@@ -1848,8 +1848,8 @@
               "0x416870c1e4f1668b"
             ],
             "rho_m": "0x417462dc47a1dd00",
-            "az_rad": "0x3ffeee8b0b6947c0",
-            "el_rad": "0x3fec5f2fcf1261d1",
+            "az_rad": "0x3ffeee8b0b6947bf",
+            "el_rad": "0x3fec5f2fcf1261d2",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x417443947bd00bd6",
@@ -1873,7 +1873,7 @@
               "0x4173992c0e09a304"
             ],
             "rho_m": "0x4173d210a76ca44d",
-            "az_rad": "0x3febb0afb2fee653",
+            "az_rad": "0x3febb0afb2fee64f",
             "el_rad": "0x3ff67d7506054199",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
@@ -1924,7 +1924,7 @@
             ],
             "rho_m": "0x41743ae7f8b46cc6",
             "az_rad": "0x4014d4cc6e6511fb",
-            "el_rad": "0x3febb7c4e3e65a2a",
+            "el_rad": "0x3febb7c4e3e65a29",
             "iono_m": "0x0000000000000000",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x41745a4b78a81706",
@@ -2289,10 +2289,10 @@
     "final_solution": {
       "note": "trf SVD step is BLAS-bound (Apple Accelerate); the converged x is an independent-solve AGREEMENT target (sub-micron / ~1e-12), never 0 ULP.",
       "x": [
-        "0x41511b07ff824406",
-        "0x4120cd6b5f861f30",
-        "0x41511e62229e1c2e",
-        "0x40dd4c000000032b"
+        "0x41511b07ff824403",
+        "0x4120cd6b5f861f41",
+        "0x41511e62229e1c30",
+        "0x40dd4c00000000f7"
       ],
       "residual": [
         "0x3e14655fe65eb8a1",
@@ -2310,7 +2310,7 @@
         "lon_rad": "0x3fbf46bb9c109320",
         "height_m": "0x4072bfffffffbd04"
       },
-      "rx_clock_s": "0x3f1a3b884188e776",
+      "rx_clock_s": "0x3f1a3b884188e57d",
       "truth_x": [
         "0x41511b07ff824402",
         "0x4120cd6b5f861f3b",
@@ -2319,11 +2319,11 @@
       ],
       "truth_rx_clock_s": "0x3f1a3b884188e4a0",
       "abs_err_x_m": [
-        "0x3e30000000000000",
-        "0x3e16000000000000",
-        "0x3e20000000000000"
+        "0x3e10000000000000",
+        "0x3e08000000000000",
+        "0x0000000000000000"
       ],
-      "abs_err_clock_m": "0x3e29580000000000"
+      "abs_err_clock_m": "0x3e0ee00000000000"
     }
   }
 }

@@ -34,7 +34,7 @@ pub fn rad_to_deg_ref(rad: f64) -> f64 {
 
 #[inline]
 pub(crate) fn beta_angle_from_cos_rad(cos: f64) -> f64 {
-    std::f64::consts::FRAC_PI_2 - cos.clamp(-1.0, 1.0).acos()
+    std::f64::consts::FRAC_PI_2 - libm::acos(cos.clamp(-1.0, 1.0))
 }
 
 /// Snap a geodetic longitude (radians) off the `-pi` branch cut onto `+pi`.
@@ -84,7 +84,7 @@ pub fn angular_separation(a: [f64; 3], b: [f64; 3]) -> Result<f64, AngleError> {
     let v = vec3::unit3(b).ok_or_else(|| invalid_angle_input("b", "zero vector"))?;
     let sin_theta = vec3::norm3(vec3::cross3(u, v));
     let cos_theta = vec3::dot3(u, v);
-    Ok(rad_to_deg_ref(sin_theta.atan2(cos_theta)))
+    Ok(rad_to_deg_ref(libm::atan2(sin_theta, cos_theta)))
 }
 
 /// On-sky angle (degrees) between two `(lon, lat)` / `(RA, Dec)` pairs in
@@ -117,9 +117,10 @@ pub fn position_angle(
     let lat2 = to_lon_lat_deg.1.to_radians();
     let dlon = (lon2 - lon1).to_radians();
 
-    let numerator = lat2.cos() * dlon.sin();
-    let denominator = lat1.cos() * lat2.sin() - lat1.sin() * lat2.cos() * dlon.cos();
-    let pa = rad_to_deg_ref(numerator.atan2(denominator)).rem_euclid(DEGREES_PER_CIRCLE);
+    let numerator = libm::cos(lat2) * libm::sin(dlon);
+    let denominator =
+        libm::cos(lat1) * libm::sin(lat2) - libm::sin(lat1) * libm::cos(lat2) * libm::cos(dlon);
+    let pa = rad_to_deg_ref(libm::atan2(numerator, denominator)).rem_euclid(DEGREES_PER_CIRCLE);
     Ok(if pa == DEGREES_PER_CIRCLE || pa == 0.0 {
         0.0
     } else {
@@ -215,14 +216,18 @@ pub fn earth_angular_radius(sat_pos: [f64; 3]) -> Result<f64, AngleError> {
     validate_nonzero_vec3(sat_pos, "sat_pos")?;
     let distance = vec3::norm3(sat_pos);
     let ratio = (WGS84_A_KM / distance).min(1.0);
-    Ok(rad_to_deg_ref(ratio.asin()))
+    Ok(rad_to_deg_ref(libm::asin(ratio)))
 }
 
 fn unit_from_lon_lat_deg(lon_lat_deg: (f64, f64)) -> [f64; 3] {
     let lon = reduce_lon_deg(lon_lat_deg.0).to_radians();
     let lat = lon_lat_deg.1.to_radians();
-    let cos_lat = lat.cos();
-    [cos_lat * lon.cos(), cos_lat * lon.sin(), lat.sin()]
+    let cos_lat = libm::cos(lat);
+    [
+        cos_lat * libm::cos(lon),
+        cos_lat * libm::sin(lon),
+        libm::sin(lat),
+    ]
 }
 
 fn validate_lon_lat_deg(lon_lat_deg: (f64, f64), field: &'static str) -> Result<(), AngleError> {
@@ -375,7 +380,7 @@ mod tests {
         let theta = 1.0e-8_f64;
         let expected_deg = rad_to_deg_ref(theta);
         let axis_a = [1.0, 0.0, 0.0];
-        let axis_b = [theta.cos(), theta.sin(), 0.0];
+        let axis_b = [libm::cos(theta), libm::sin(theta), 0.0];
 
         let axis_atan2 = angular_separation(axis_a, axis_b).unwrap();
         let axis_acos = acos_separation_deg(axis_a, axis_b);
@@ -419,7 +424,7 @@ mod tests {
         let eps_deg = 1.0e-7_f64;
         let eps = eps_deg.to_radians();
         let a = [1.0, 0.0, 0.0];
-        let b = [-eps.cos(), eps.sin(), 0.0];
+        let b = [-libm::cos(eps), libm::sin(eps), 0.0];
         let sep = angular_separation(a, b).unwrap();
         let complement = 180.0 - sep;
         assert!(
@@ -761,7 +766,7 @@ mod tests {
     fn sat_yaw_beta_parity() {
         let eps = f64::EPSILON;
         for cos in [-1.0 - eps, -1.0, -0.5, 0.0, 0.5, 1.0, 1.0 + eps] {
-            let old = std::f64::consts::PI / 2.0 - cos.clamp(-1.0, 1.0).acos();
+            let old = std::f64::consts::PI / 2.0 - libm::acos(cos.clamp(-1.0, 1.0));
             assert_eq!(beta_angle_from_cos_rad(cos).to_bits(), old.to_bits());
         }
     }
@@ -865,12 +870,12 @@ mod tests {
     fn acos_separation_deg(a: [f64; 3], b: [f64; 3]) -> f64 {
         let u = vec3::unit3(a).expect("nonzero vector");
         let v = vec3::unit3(b).expect("nonzero vector");
-        rad_to_deg_ref(vec3::dot3(u, v).clamp(-1.0, 1.0).acos())
+        rad_to_deg_ref(libm::acos(vec3::dot3(u, v).clamp(-1.0, 1.0)))
     }
 
     fn rotate_about_axis(v: [f64; 3], axis: [f64; 3], theta: f64) -> [f64; 3] {
-        let cos_theta = theta.cos();
-        let sin_theta = theta.sin();
+        let cos_theta = libm::cos(theta);
+        let sin_theta = libm::sin(theta);
         let cross = vec3::cross3(axis, v);
         let dot = vec3::dot3(axis, v);
         [
@@ -882,24 +887,24 @@ mod tests {
 
     fn normal_from_elements(inclination: f64, raan: f64) -> [f64; 3] {
         [
-            inclination.sin() * raan.sin(),
-            -inclination.sin() * raan.cos(),
-            inclination.cos(),
+            libm::sin(inclination) * libm::sin(raan),
+            -libm::sin(inclination) * libm::cos(raan),
+            libm::cos(inclination),
         ]
     }
 
     fn sun_from_ra_dec(alpha: f64, delta: f64) -> [f64; 3] {
         [
-            delta.cos() * alpha.cos(),
-            delta.cos() * alpha.sin(),
-            delta.sin(),
+            libm::cos(delta) * libm::cos(alpha),
+            libm::cos(delta) * libm::sin(alpha),
+            libm::sin(delta),
         ]
     }
 
     fn closed_form_beta_deg(inclination: f64, raan: f64, alpha: f64, delta: f64) -> f64 {
-        let sin_beta = delta.cos() * inclination.sin() * (raan - alpha).sin()
-            + delta.sin() * inclination.cos();
-        rad_to_deg_ref(sin_beta.asin())
+        let sin_beta = libm::cos(delta) * libm::sin(inclination) * libm::sin(raan - alpha)
+            + libm::sin(delta) * libm::cos(inclination);
+        rad_to_deg_ref(libm::asin(sin_beta))
     }
 
     fn perpendicular_via_least_parallel_axis(v: [f64; 3]) -> [f64; 3] {

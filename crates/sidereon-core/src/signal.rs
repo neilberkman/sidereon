@@ -323,8 +323,8 @@ pub fn correlate_against(
     let mut acc_q = 0.0;
     for (n, (sample, &c)) in iq.iter().zip(code.iter()).enumerate() {
         let theta = w * n as f64;
-        let cos = theta.cos();
-        let sin = theta.sin();
+        let cos = libm::cos(theta);
+        let sin = libm::sin(theta);
         let cc = c as f64;
         let di = (sample.i * cos + sample.q * sin) * cc;
         let dq = (sample.q * cos - sample.i * sin) * cc;
@@ -386,7 +386,7 @@ pub fn coherent_loss(freq_error_hz: f64, integration_time_s: f64) -> Result<f64,
     if x == 0.0 {
         Ok(1.0)
     } else {
-        let s = x.sin() / x;
+        let s = libm::sin(x) / x;
         signal_finite(s * s, "coherent_loss")
     }
 }
@@ -397,7 +397,7 @@ pub fn coherent_loss_db(freq_error_hz: f64, integration_time_s: f64) -> Result<f
     if loss <= 0.0 {
         return Err(invalid_signal_input("coherent_loss_db", "out of range"));
     }
-    let loss_db = 10.0 * loss.log10();
+    let loss_db = 10.0 * libm::log10(loss);
     if loss_db.is_finite() {
         Ok(loss_db)
     } else {
@@ -409,7 +409,10 @@ pub fn coherent_loss_db(freq_error_hz: f64, integration_time_s: f64) -> Result<f
 pub fn snr_post_db(cn0_dbhz: f64, integration_time_s: f64) -> Result<f64, SignalError> {
     let cn0_dbhz = signal_finite(cn0_dbhz, "cn0_dbhz")?;
     let integration_time_s = signal_positive_step(integration_time_s, "integration_time_s")?;
-    signal_finite(cn0_dbhz + 10.0 * integration_time_s.log10(), "snr_post_db")
+    signal_finite(
+        cn0_dbhz + 10.0 * libm::log10(integration_time_s),
+        "snr_post_db",
+    )
 }
 
 fn do_acquire(
@@ -559,8 +562,8 @@ fn carrier_wipeoff(iq: &[IqSample], fs: f64, doppler_hz: f64) -> Vec<IqSample> {
         .enumerate()
         .map(|(k, sample)| {
             let theta = w * k as f64;
-            let cos = theta.cos();
-            let sin = theta.sin();
+            let cos = libm::cos(theta);
+            let sin = libm::sin(theta);
             IqSample {
                 i: sample.i * cos + sample.q * sin,
                 q: sample.q * cos - sample.i * sin,

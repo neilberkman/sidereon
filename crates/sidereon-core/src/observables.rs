@@ -1848,10 +1848,10 @@ fn topocentric_receiver(
     Ok(TopocentricReceiver {
         ecef_m: receiver_ecef_m,
         geodetic: receiver,
-        sin_lat: lat.sin(),
-        cos_lat: lat.cos(),
-        sin_lon: lon.sin(),
-        cos_lon: lon.cos(),
+        sin_lat: libm::sin(lat),
+        cos_lat: libm::cos(lat),
+        sin_lon: libm::sin(lon),
+        cos_lon: libm::cos(lon),
     })
 }
 
@@ -1879,7 +1879,7 @@ fn topocentric_with_receiver(
     let (azimuth_rad, mut azimuth_deg) = if horiz_sq < AZIMUTH_ZENITH_EPS * range_m * range_m {
         (0.0, 0.0)
     } else {
-        let raw_azimuth_rad = e.atan2(n);
+        let raw_azimuth_rad = libm::atan2(e, n);
         (
             if raw_azimuth_rad < 0.0 {
                 raw_azimuth_rad + 2.0 * PI
@@ -1897,7 +1897,7 @@ fn topocentric_with_receiver(
     // only touches the previously-NaN boundary and leaves in-range values bit
     // identical.
     let sin_elevation = (u / range_m).clamp(-1.0, 1.0);
-    let elevation_rad = sin_elevation.asin();
+    let elevation_rad = libm::asin(sin_elevation);
     let elevation_deg = elevation_rad * DEGREES_PER_SEMICIRCLE / PI;
 
     validate::finite(elevation_rad, "elevation_rad").map_err(map_input_error)?;
@@ -2113,8 +2113,8 @@ mod public_api_tests {
         // the satellite straight overhead along it.
         let lat = lat_deg * PI / DEGREES_PER_SEMICIRCLE;
         let lon = lon_deg * PI / DEGREES_PER_SEMICIRCLE;
-        let (sl, cl) = lat.sin_cos();
-        let (so, co) = lon.sin_cos();
+        let (sl, cl) = (libm::sin(lat), libm::cos(lat));
+        let (so, co) = (libm::sin(lon), libm::cos(lon));
         let up = [cl * co, cl * so, sl];
 
         let d = 20_000_000.0_f64;

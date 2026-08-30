@@ -57,21 +57,33 @@ jobs:
         run: cargo test --workspace --doc
 
   test:
-    name: test (shard ${{ matrix.shard }}/3)
-    runs-on: macos-latest
+    name: test (${{ matrix.os == 'macos-latest' && 'arm64' || 'x86_64' }} shard ${{ matrix.shard }}/3)
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        # The frozen-bit fixtures are architecture-sensitive: transcendental
+        # results can differ in the last bits between arm64 and x86_64. Running
+        # the suite on both is what proves the portable-math kernels actually
+        # deliver cross-architecture determinism rather than only matching the
+        # architecture the fixtures were captured on.
+        os: [macos-latest, ubuntu-latest]
         shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ci-macos
+          shared-key: ci-${{ matrix.os }}
       - uses: taiki-e/install-action@nextest
+      - name: Confirm runner architecture
+        shell: bash
+        run: |
+          got=$(uname -m)
+          want='${{ matrix.os == 'macos-latest' && 'arm64' || 'x86_64' }}'
+          test "$got" = "$want" || { echo "expected $want runner, got $got" >&2; exit 1; }
       - name: Test
-        run: cargo nextest run --workspace --partition count:${{ matrix.shard }}/3
+        run: cargo nextest run --no-fail-fast --workspace --partition count:${{ matrix.shard }}/3
 
   geoid-proj-x86_64:
     name: PROJ geoid arithmetic (x86_64)

@@ -280,6 +280,12 @@ fn host_vector_sqrt_deliberately_differs_from_scalar_pow() {
 
 #[test]
 fn host_vector_power_spans_more_than_one_simd_lane_group() {
+    if !vector_and_scalar_share_a_kernel() {
+        eprintln!(
+            "skipping: AVX-512 lane-span probe requires a configured NumPy extension for SVML"
+        );
+        return;
+    }
     let Some(backend) = loadable_backend() else {
         return;
     };

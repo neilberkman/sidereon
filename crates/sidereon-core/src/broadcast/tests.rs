@@ -1,12 +1,15 @@
 //! 0-ULP parity for broadcast-ephemeris orbit/clock evaluation.
 //!
-//! The reference recipe is `parity/generator/broadcast_eval.py`; the committed
-//! fixture (`tests/fixtures/broadcast_golden.json`, emitted by
-//! `broadcast_golden_fixture.py` from the vendored RINEX NAV file) records, per
+//! The committed fixture (`tests/fixtures/broadcast_golden.json`) records, per
 //! case, the broadcast elements and clock terms plus every load-bearing
 //! intermediate, all as raw IEEE-754 bit patterns. Each `f64` is rebuilt from
 //! its bits and the Rust evaluation is asserted bit-for-bit (ULP distance 0), so
 //! a miss localizes to a single operation rather than the final coordinate.
+//!
+//! The fixture's canonical evaluator is the portable Rust `libm` crate. The
+//! mpmath implementation in `fixtures-generators/broadcast_eval_portable.py`
+//! is retained as an independent high-precision audit, not as the engine
+//! oracle; its one-ULP disagreements with `libm` are intentional audit data.
 
 use super::*;
 use serde_json::Value;
@@ -127,16 +130,16 @@ fn legacy_satellite_position_ecef_reference(
     let mk = elements.m0 + n * tk;
     let kepler = eccentric_anomaly_unchecked(mk, e);
     let ecc_anom = kepler.value;
-    let sin_e = ecc_anom.sin();
-    let cos_e = ecc_anom.cos();
+    let sin_e = libm::sin(ecc_anom);
+    let cos_e = libm::cos(ecc_anom);
 
     let e2 = e * e;
-    let nu = ((1.0 - e2).sqrt() * sin_e).atan2(cos_e - e);
+    let nu = libm::atan2((1.0 - e2).sqrt() * sin_e, cos_e - e);
     let phi = nu + elements.omega;
 
     let two_phi = 2.0 * phi;
-    let s2 = two_phi.sin();
-    let c2 = two_phi.cos();
+    let s2 = libm::sin(two_phi);
+    let c2 = libm::cos(two_phi);
     let du = elements.cus * s2 + elements.cuc * c2;
     let dr = elements.crs * s2 + elements.crc * c2;
     let di = elements.cis * s2 + elements.cic * c2;
@@ -145,8 +148,8 @@ fn legacy_satellite_position_ecef_reference(
     let r = a * (1.0 - e * cos_e) + dr;
     let i = elements.i0 + di + elements.idot * tk;
 
-    let xp = r * u.cos();
-    let yp = r * u.sin();
+    let xp = r * libm::cos(u);
+    let yp = r * libm::sin(u);
 
     let omega_k = if is_geo {
         elements.omega0 + elements.omega_dot * tk - omega_e * elements.toe_sow
@@ -154,21 +157,21 @@ fn legacy_satellite_position_ecef_reference(
         elements.omega0 + (elements.omega_dot - omega_e) * tk - omega_e * elements.toe_sow
     };
 
-    let sin_o = omega_k.sin();
-    let cos_o = omega_k.cos();
-    let sin_i = i.sin();
-    let cos_i = i.cos();
+    let sin_o = libm::sin(omega_k);
+    let cos_o = libm::cos(omega_k);
+    let sin_i = libm::sin(i);
+    let cos_i = libm::cos(i);
     let xg = xp * cos_o - yp * cos_i * sin_o;
     let yg = xp * sin_o + yp * cos_i * cos_o;
     let zg = yp * sin_i;
 
     let (x, y, z) = if is_geo {
         let deg5 = 5.0_f64.to_radians();
-        let cos_phi = deg5.cos();
-        let sin_phi = -deg5.sin();
+        let cos_phi = libm::cos(deg5);
+        let sin_phi = -libm::sin(deg5);
         let z_ang = omega_e * tk;
-        let cos_z = z_ang.cos();
-        let sin_z = z_ang.sin();
+        let cos_z = libm::cos(z_ang);
+        let sin_z = libm::sin(z_ang);
         let yr = yg * cos_phi + zg * sin_phi;
         let zr = -yg * sin_phi + zg * cos_phi;
         (xg * cos_z + yr * sin_z, -xg * sin_z + yr * cos_z, zr)

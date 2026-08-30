@@ -1110,7 +1110,7 @@ pub(crate) fn select_sats(
             });
             continue;
         }
-        let sin_el = model.el_rad.sin();
+        let sin_el = libm::sin(model.el_rad);
         let weight = (sin_el * sin_el) / (SIGMA0_M * SIGMA0_M);
         used.push(ob.satellite_id);
         weights.push(weight);
@@ -1304,8 +1304,9 @@ where
 }
 
 /// SPP's trust-region stage recognizes the owned deterministic solver
-/// ([`SolverRecipe::OwnedDeterministicTrf`]), which owns the dense subproblem
-/// factorization with a fixed reduction order and its own frozen-bits golden;
+/// ([`SolverRecipe::OwnedDeterministicTrf`]), which owns the trust-region
+/// assembly and dense subproblem factorization with a fixed reduction order and
+/// its own frozen-bits golden;
 /// every other recipe selects the legacy nalgebra LU path that [`solve`] uses.
 /// The other [`SolverRecipe`] variants name other strategies' linear-solve
 /// stages (RTK first-tie, PPP last-tie, host LAPACK) and are not SPP
@@ -1323,12 +1324,10 @@ const fn trust_region_solve(solver: SolverRecipe) -> TrustRegionSolve {
 /// [`SolverRecipe::OwnedDeterministicTrf`] swaps in the owned deterministic
 /// Gaussian-elimination factorization for the dense trust-region subproblem (no
 /// nalgebra LU, no black-box BLAS in that solve), pinned to its own frozen-bits
-/// golden; all other model stages are unchanged. The owned kernel owns ONLY the
-/// subproblem factorization: the normal-matrix / gradient / norm reductions that
-/// build the subproblem still go through nalgebra's CPU-dispatched dense
-/// algebra, so the cross-platform bit guarantee is scoped to the factorization
-/// (the converged bits are this build's reproducible output, not a portable
-/// constant).
+/// golden; all other model stages are unchanged. The owned kernel uses
+/// fixed-order scalar arithmetic for the complete trust-region assembly and
+/// factorization (no nalgebra LU or black-box BLAS), so its converged bits are
+/// portable across CPU targets.
 pub fn solve_with_solver(
     eph: &dyn EphemerisSource,
     inputs: &SolveInputs,
@@ -1512,10 +1511,10 @@ fn solve_inner(
             outer_iterations += 1;
             final_robust_scale_m = Some(scale);
             // Position L2 step between successive outer solves.
-            let dpos = ((report.x[0] - x_prev[0]).powi(2)
-                + (report.x[1] - x_prev[1]).powi(2)
-                + (report.x[2] - x_prev[2]).powi(2))
-            .sqrt();
+            let dx = report.x[0] - x_prev[0];
+            let dy = report.x[1] - x_prev[1];
+            let dz = report.x[2] - x_prev[2];
+            let dpos = (dx * dx + dy * dy + dz * dz).sqrt();
             if dpos < rc.outer_tol_m {
                 break;
             }
@@ -1893,8 +1892,8 @@ fn coarse_seeds(n: usize) -> Vec<[f64; 4]> {
             let r = (1.0 - z * z).max(0.0).sqrt();
             let theta = golden * i as f64;
             [
-                MEAN_EARTH_RADIUS_M * r * theta.cos(),
-                MEAN_EARTH_RADIUS_M * r * theta.sin(),
+                MEAN_EARTH_RADIUS_M * r * libm::cos(theta),
+                MEAN_EARTH_RADIUS_M * r * libm::sin(theta),
                 MEAN_EARTH_RADIUS_M * z,
                 0.0,
             ]

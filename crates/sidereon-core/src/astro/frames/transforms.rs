@@ -204,8 +204,8 @@ fn mat3_vec3_mul_fma(r: &Mat3, p: &[f64; 3]) -> [f64; 3] {
 }
 
 fn build_rot_z(angle: f64) -> Mat3 {
-    let c = angle.cos();
-    let s = angle.sin();
+    let c = libm::cos(angle);
+    let s = libm::sin(angle);
     [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
 }
 
@@ -224,10 +224,10 @@ fn polar_motion_matrix_unchecked(pole: PolarMotion) -> Mat3 {
         return [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     }
 
-    let cx = pole.xp_rad.cos();
-    let sx = pole.xp_rad.sin();
-    let cy = pole.yp_rad.cos();
-    let sy = pole.yp_rad.sin();
+    let cx = libm::cos(pole.xp_rad);
+    let sx = libm::sin(pole.xp_rad);
+    let cy = libm::cos(pole.yp_rad);
+    let sy = libm::sin(pole.yp_rad);
 
     [
         [cx, sx * sy, sx * cy],
@@ -289,7 +289,7 @@ fn gast_radians(ts: &TimeScales, dpsi: f64) -> f64 {
     let gmst_hours = sidereal_time_hours(ts.jd_whole, ts.ut1_fraction, ts.tdb_fraction);
     let mean_ob = skyfield_mean_obliquity_radians_unchecked(ts.jd_tdb);
     let c_terms = skyfield_equation_of_the_equinoxes_complimentary_terms_unchecked(ts.jd_tt);
-    let eq_eq = dpsi * mean_ob.cos() + c_terms;
+    let eq_eq = dpsi * libm::cos(mean_ob) + c_terms;
     let mut gast_hours = (gmst_hours + eq_eq / TAU * 24.0) % 24.0;
     if gast_hours < 0.0 {
         gast_hours += 24.0;
@@ -840,7 +840,7 @@ fn itrs_to_geodetic_compute_unchecked(x: f64, y: f64, z: f64) -> (f64, f64, f64)
     // Longitude: match Skyfield's exact normalization:
     // (arctan2(y, x) - pi) % tau - pi
     // Python's % always returns positive; Rust's can be negative.
-    let lon_raw = y_au.atan2(x_au);
+    let lon_raw = libm::atan2(y_au, x_au);
     let pi = std::f64::consts::PI;
     let mut lon_shifted = (lon_raw - pi) % TAU;
     if lon_shifted < 0.0 {
@@ -849,16 +849,16 @@ fn itrs_to_geodetic_compute_unchecked(x: f64, y: f64, z: f64) -> (f64, f64, f64)
     let lon = lon_shifted - pi;
 
     // Latitude: 3 iterations matching Skyfield exactly
-    let mut lat = z_au.atan2(r_xy);
+    let mut lat = libm::atan2(z_au, r_xy);
     let mut a_c = 0.0_f64;
     let mut hyp = 0.0_f64;
 
     for _ in 0..3 {
-        let sin_lat = lat.sin();
+        let sin_lat = libm::sin(lat);
         let e2_sin_lat = WGS84_E2 * sin_lat;
         a_c = a_au / (1.0 - e2_sin_lat * sin_lat).sqrt();
         hyp = z_au + a_c * e2_sin_lat;
-        lat = hyp.atan2(r_xy);
+        lat = libm::atan2(hyp, r_xy);
     }
 
     // Elevation in AU, then convert to km
@@ -878,8 +878,10 @@ fn proj_normal_radius_of_curvature(sinphi: f64) -> f64 {
 }
 
 fn proj_geocentric_radius(cosphi: f64, sinphi: f64) -> f64 {
-    ((PROJ_WGS84_A_M * PROJ_WGS84_A_M) * cosphi).hypot((PROJ_WGS84_B_M * PROJ_WGS84_B_M) * sinphi)
-        / (PROJ_WGS84_A_M * cosphi).hypot(PROJ_WGS84_B_M * sinphi)
+    libm::hypot(
+        (PROJ_WGS84_A_M * PROJ_WGS84_A_M) * cosphi,
+        (PROJ_WGS84_B_M * PROJ_WGS84_B_M) * sinphi,
+    ) / libm::hypot(PROJ_WGS84_A_M * cosphi, PROJ_WGS84_B_M * sinphi)
 }
 
 /// Convert ECEF meters to `(longitude_degrees, latitude_degrees, altitude_m)`.
@@ -895,17 +897,17 @@ pub fn geodetic_from_ecef_proj(x: f64, y: f64, z: f64) -> Result<[f64; 3], Frame
 }
 
 fn geodetic_from_ecef_proj_unchecked(x: f64, y: f64, z: f64) -> [f64; 3] {
-    let p = x.hypot(y);
+    let p = libm::hypot(x, y);
 
     let y_theta = z * PROJ_WGS84_A_M;
     let x_theta = p * PROJ_WGS84_B_M;
-    let norm = y_theta.hypot(x_theta);
+    let norm = libm::hypot(y_theta, x_theta);
     let c = if norm == 0.0 { 1.0 } else { x_theta / norm };
     let s = if norm == 0.0 { 0.0 } else { y_theta / norm };
 
     let y_phi = z + ((((PROJ_WGS84_E2S * PROJ_WGS84_B_M) * s) * s) * s);
     let x_phi = p - ((((PROJ_WGS84_ES * PROJ_WGS84_A_M) * c) * c) * c);
-    let norm_phi = y_phi.hypot(x_phi);
+    let norm_phi = libm::hypot(y_phi, x_phi);
     let mut cosphi = if norm_phi == 0.0 {
         1.0
     } else {
@@ -927,10 +929,10 @@ fn geodetic_from_ecef_proj_unchecked(x: f64, y: f64, z: f64) -> [f64; 3] {
             -PROJ_HALF_PI
         }
     } else {
-        (y_phi / x_phi).atan()
+        libm::atan(y_phi / x_phi)
     };
 
-    let lam = y.atan2(x);
+    let lam = libm::atan2(y, x);
     let alt = if cosphi < 1e-6 {
         z.abs() - proj_geocentric_radius(cosphi, sinphi)
     } else {
@@ -961,10 +963,10 @@ fn geodetic_to_itrs_unchecked(lat_deg: f64, lon_deg: f64, alt_km: f64) -> (f64, 
     let lat = lat_deg.to_radians();
     let lon = lon_deg.to_radians();
 
-    let sin_lat = lat.sin();
-    let cos_lat = lat.cos();
-    let sin_lon = lon.sin();
-    let cos_lon = lon.cos();
+    let sin_lat = libm::sin(lat);
+    let cos_lat = libm::cos(lat);
+    let sin_lon = libm::sin(lon);
+    let cos_lon = libm::cos(lon);
 
     let n = WGS84_A_KM / (1.0 - WGS84_E2 * sin_lat * sin_lat).sqrt();
 
@@ -982,8 +984,8 @@ fn geodetic_to_itrs_au(lat_deg: f64, lon_deg: f64, alt_km: f64) -> [f64; 3] {
     let lat = lat_deg * TAU / 360.0;
     let lon = lon_deg * TAU / 360.0;
 
-    let sinphi = lat.sin();
-    let cosphi = lat.cos();
+    let sinphi = libm::sin(lat);
+    let cosphi = libm::cos(lat);
 
     let radius_au = WGS84_A_KM / AU_KM;
     let elevation_au = alt_km / AU_KM;
@@ -994,8 +996,8 @@ fn geodetic_to_itrs_au(lat_deg: f64, lon_deg: f64, alt_km: f64) -> [f64; 3] {
 
     let radius_xy = radius_au * c;
     let xy = (radius_xy + elevation_au) * cosphi;
-    let x = xy * lon.cos();
-    let y = xy * lon.sin();
+    let x = xy * libm::cos(lon);
+    let y = xy * libm::sin(lon);
 
     let radius_z = radius_au * s;
     let z = (radius_z + elevation_au) * sinphi;
@@ -1008,10 +1010,10 @@ fn ecef_to_enu_matrix(lat_deg: f64, lon_deg: f64) -> Mat3 {
     let lat = lat_deg.to_radians();
     let lon = lon_deg.to_radians();
 
-    let sin_lat = lat.sin();
-    let cos_lat = lat.cos();
-    let sin_lon = lon.sin();
-    let cos_lon = lon.cos();
+    let sin_lat = libm::sin(lat);
+    let cos_lat = libm::cos(lat);
+    let sin_lon = libm::sin(lon);
+    let cos_lon = libm::cos(lon);
 
     // ENU rotation matrix:
     // E = [-sin(lon),           cos(lon),          0       ]
@@ -1121,7 +1123,7 @@ fn itrs_to_topocentric_unchecked(target_itrs_km: [f64; 3], station: &GeodeticSta
     let range = (east * east + north * north + up * up).sqrt();
 
     // Elevation
-    let elevation = (up / range).asin().to_degrees();
+    let elevation = libm::asin(up / range).to_degrees();
 
     // Azimuth (measured clockwise from north). At (and arbitrarily near) the
     // station zenith the east and north components are pure rounding residuals,
@@ -1130,7 +1132,7 @@ fn itrs_to_topocentric_unchecked(target_itrs_km: [f64; 3], station: &GeodeticSta
     let mut azimuth = if horiz_sq < AZIMUTH_ZENITH_EPS * range * range {
         0.0
     } else {
-        east.atan2(north).to_degrees()
+        libm::atan2(east, north).to_degrees()
     };
     if azimuth < 0.0 {
         azimuth += 360.0;
@@ -1162,8 +1164,8 @@ fn gcrs_to_topocentric_skyfield(
     let lon_rad = station_lon_deg * TAU / 360.0;
 
     // Build R_lat = rot_y(lat)[::-1]  (rows reversed)
-    let cy = lat_rad.cos();
-    let sy = lat_rad.sin();
+    let cy = libm::cos(lat_rad);
+    let sy = libm::sin(lat_rad);
     // rot_y(lat) = [[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]]
     // [::-1] reverses rows: [[-sy, 0, cy], [0, 1, 0], [cy, 0, sy]]
     let r_lat: Mat3 = [[-sy, 0.0, cy], [0.0, 1.0, 0.0], [cy, 0.0, sy]];
@@ -1203,8 +1205,8 @@ fn gcrs_to_topocentric_skyfield(
     let ez = enu_au[2];
 
     let r_au = (ex * ex + ey * ey + ez * ez).sqrt();
-    let elevation_rad = ez.atan2((ex * ex + ey * ey).sqrt());
-    let mut azimuth_rad = ey.atan2(ex) % TAU;
+    let elevation_rad = libm::atan2(ez, (ex * ex + ey * ey).sqrt());
+    let mut azimuth_rad = libm::atan2(ey, ex) % TAU;
     if azimuth_rad < 0.0 {
         azimuth_rad += TAU;
     }
@@ -1274,10 +1276,10 @@ mod tests {
     #[test]
     fn polar_motion_matrix_matches_documented_convention() {
         let pole = PolarMotion::from_arcseconds(0.25, -0.35).expect("valid polar motion");
-        let cx = pole.xp_rad.cos();
-        let sx = pole.xp_rad.sin();
-        let cy = pole.yp_rad.cos();
-        let sy = pole.yp_rad.sin();
+        let cx = libm::cos(pole.xp_rad);
+        let sx = libm::sin(pole.xp_rad);
+        let cy = libm::cos(pole.yp_rad);
+        let sy = libm::sin(pole.yp_rad);
 
         let expected = [
             [cx, sx * sy, sx * cy],

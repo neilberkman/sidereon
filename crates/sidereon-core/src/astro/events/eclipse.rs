@@ -81,13 +81,13 @@ pub fn shadow_fraction(sat_pos: [f64; 3], sun_pos: [f64; 3]) -> Result<f64, Ecli
     let dist_behind = -proj;
 
     // Umbra cone (converging): sin(alpha) = (R_sun - R_earth) / d_sun.
-    let alpha_umbra = ((SOLAR_RADIUS_KM - MEAN_EARTH_RADIUS_KM) / d_sun).asin();
+    let alpha_umbra = libm::asin((SOLAR_RADIUS_KM - MEAN_EARTH_RADIUS_KM) / d_sun);
     // Penumbra cone (diverging): sin(alpha) = (R_sun + R_earth) / d_sun.
-    let alpha_penumbra = ((SOLAR_RADIUS_KM + MEAN_EARTH_RADIUS_KM) / d_sun).asin();
+    let alpha_penumbra = libm::asin((SOLAR_RADIUS_KM + MEAN_EARTH_RADIUS_KM) / d_sun);
 
     // Cone radii at the satellite's distance behind Earth.
-    let r_umbra = MEAN_EARTH_RADIUS_KM - dist_behind * alpha_umbra.tan();
-    let r_penumbra = MEAN_EARTH_RADIUS_KM + dist_behind * alpha_penumbra.tan();
+    let r_umbra = MEAN_EARTH_RADIUS_KM - dist_behind * libm::tan(alpha_umbra);
+    let r_penumbra = MEAN_EARTH_RADIUS_KM + dist_behind * libm::tan(alpha_penumbra);
 
     if rho >= r_penumbra {
         // Beyond the penumbra cone: full sunlight.
@@ -345,10 +345,10 @@ mod tests {
     }
 
     fn shadow_radius_for_fraction(fraction: f64, dist_behind_km: f64) -> f64 {
-        let alpha_umbra = ((SOLAR_RADIUS_KM - MEAN_EARTH_RADIUS_KM) / AU_KM).asin();
-        let alpha_penumbra = ((SOLAR_RADIUS_KM + MEAN_EARTH_RADIUS_KM) / AU_KM).asin();
-        let r_umbra = MEAN_EARTH_RADIUS_KM - dist_behind_km * alpha_umbra.tan();
-        let r_penumbra = MEAN_EARTH_RADIUS_KM + dist_behind_km * alpha_penumbra.tan();
+        let alpha_umbra = libm::asin((SOLAR_RADIUS_KM - MEAN_EARTH_RADIUS_KM) / AU_KM);
+        let alpha_penumbra = libm::asin((SOLAR_RADIUS_KM + MEAN_EARTH_RADIUS_KM) / AU_KM);
+        let r_umbra = MEAN_EARTH_RADIUS_KM - dist_behind_km * libm::tan(alpha_umbra);
+        let r_penumbra = MEAN_EARTH_RADIUS_KM + dist_behind_km * libm::tan(alpha_penumbra);
         r_penumbra - fraction * (r_penumbra - r_umbra)
     }
 

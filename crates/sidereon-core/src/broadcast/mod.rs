@@ -12,13 +12,16 @@
 //! MEO/IGSO satellites use the direct rotation.
 //!
 //! This is a 0-ULP parity target for the legacy evaluator: the operation order
-//! reproduces the canonical reference recipe (`parity/generator/broadcast_eval.py`)
-//! bit-for-bit. The CNAV evaluator is pinned separately by
-//! `fixtures-generators/broadcast_eval_cnav.py`, using the same scalar libm,
-//! no-FMA, explicit-multiply discipline. Separate `.sin()` and `.cos()` calls
-//! are used deliberately (never `.sin_cos()`, whose fused evaluation can differ
-//! in the last bit). Integer powers are explicit repeated multiplies and there
-//! is no fused multiply-add (Rust does not auto-contract `a * b + c`).
+//! reproduces the canonical portable Rust `libm` reference bit-for-bit. The
+//! CNAV evaluator is pinned separately by
+//! `fixtures-generators/broadcast_eval_cnav.py`, with the same operation order
+//! and Rust `libm` contract. The Python generators use high-precision mpmath as
+//! an independent audit; they are not substituted for the engine's `libm`
+//! evaluator because the two can differ by one ULP. Separate `libm::sin` and
+//! `libm::cos` calls are used deliberately (never
+//! `sin_cos`, whose fused evaluation can differ in the last bit). Integer
+//! powers are explicit repeated multiplies and there is no fused multiply-add
+//! (Rust does not auto-contract `a * b + c`).
 
 use crate::astro::constants::models::broadcast::{
     BEIDOU_OMEGA_E_RAD_S, GALILEO_BEIDOU_DTR_F, GALILEO_GM_M3_S2, GPS_DTR_F,
@@ -289,7 +292,7 @@ pub(crate) fn eccentric_anomaly_unchecked(
     let mut iterations = 0usize;
     while iterations < KEPLER_MAX_ITER {
         let e_prev = e_k;
-        e_k = mean_anomaly_rad + eccentricity * e_prev.sin();
+        e_k = mean_anomaly_rad + eccentricity * libm::sin(e_prev);
         iterations += 1;
         let delta = (e_k - e_prev).abs();
         if delta <= KEPLER_TOL {
@@ -367,18 +370,18 @@ fn satellite_position_ecef_impl(
     let mk = elements.m0 + n * tk;
     let kepler = eccentric_anomaly_unchecked(mk, e);
     let ecc_anom = kepler.value;
-    let sin_e = ecc_anom.sin();
-    let cos_e = ecc_anom.cos();
+    let sin_e = libm::sin(ecc_anom);
+    let cos_e = libm::cos(ecc_anom);
 
     // 4. True anomaly (atan2 form) and argument of latitude.
     let e2 = e * e;
-    let nu = ((1.0 - e2).sqrt() * sin_e).atan2(cos_e - e);
+    let nu = libm::atan2((1.0 - e2).sqrt() * sin_e, cos_e - e);
     let phi = nu + elements.omega;
 
     // 5. Second-harmonic corrections (sine term first).
     let two_phi = 2.0 * phi;
-    let s2 = two_phi.sin();
-    let c2 = two_phi.cos();
+    let s2 = libm::sin(two_phi);
+    let c2 = libm::cos(two_phi);
     let du = elements.cus * s2 + elements.cuc * c2;
     let dr = elements.crs * s2 + elements.crc * c2;
     let di = elements.cis * s2 + elements.cic * c2;
@@ -389,8 +392,8 @@ fn satellite_position_ecef_impl(
     let i = elements.i0 + di + elements.idot * tk;
 
     // 7. Position in the orbital plane.
-    let xp = r * u.cos();
-    let yp = r * u.sin();
+    let xp = r * libm::cos(u);
+    let yp = r * libm::sin(u);
 
     // 8. Corrected longitude of ascending node. The BeiDou GEO node omits the
     // Earth-rotation-during-tk term (applied by the final rotation instead).
@@ -401,10 +404,10 @@ fn satellite_position_ecef_impl(
     };
 
     // 9. Coordinates in the (custom) frame from the node rotation.
-    let sin_o = omega_k.sin();
-    let cos_o = omega_k.cos();
-    let sin_i = i.sin();
-    let cos_i = i.cos();
+    let sin_o = libm::sin(omega_k);
+    let cos_o = libm::cos(omega_k);
+    let sin_i = libm::sin(i);
+    let cos_i = libm::cos(i);
     let xg = xp * cos_o - yp * cos_i * sin_o;
     let yg = xp * sin_o + yp * cos_i * cos_o;
     let zg = yp * sin_i;
@@ -413,11 +416,11 @@ fn satellite_position_ecef_impl(
     // GEO path applies Rz(omega_e*tk) . Rx(-5deg) (BDS-SIS-ICD).
     let (x, y, z) = if is_geo {
         let deg5 = 5.0_f64.to_radians();
-        let cos_phi = deg5.cos();
-        let sin_phi = -deg5.sin();
+        let cos_phi = libm::cos(deg5);
+        let sin_phi = -libm::sin(deg5);
         let z_ang = omega_e * tk;
-        let cos_z = z_ang.cos();
-        let sin_z = z_ang.sin();
+        let cos_z = libm::cos(z_ang);
+        let sin_z = libm::sin(z_ang);
         let yr = yg * cos_phi + zg * sin_phi;
         let zr = -yg * sin_phi + zg * cos_phi;
         (xg * cos_z + yr * sin_z, -xg * sin_z + yr * cos_z, zr)

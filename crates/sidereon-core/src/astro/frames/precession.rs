@@ -80,14 +80,14 @@ pub(crate) fn compute_skyfield_precession_matrix_unchecked(jd_tdb: f64) -> Mat3 
     let omegaa_rad = omegaa * ARCSEC_TO_RAD;
     let chia_rad = chia * ARCSEC_TO_RAD;
 
-    let sa = eps0.sin();
-    let ca = eps0.cos();
-    let sb = (-psia_rad).sin();
-    let cb = (-psia_rad).cos();
-    let sc = (-omegaa_rad).sin();
-    let cc = (-omegaa_rad).cos();
-    let sd = chia_rad.sin();
-    let cd = chia_rad.cos();
+    let sa = libm::sin(eps0);
+    let ca = libm::cos(eps0);
+    let sb = libm::sin(-psia_rad);
+    let cb = libm::cos(-psia_rad);
+    let sc = libm::sin(-omegaa_rad);
+    let cc = libm::cos(-omegaa_rad);
+    let sd = libm::sin(chia_rad);
+    let cd = libm::cos(chia_rad);
 
     [
         [

@@ -1068,7 +1068,7 @@ fn inflate_covariance(
         } => spectral_density_m2_s * dt_s,
         KinematicPositionProcessNoise::WhiteNoiseAcceleration {
             spectral_density_m2_s3,
-        } => spectral_density_m2_s3 * dt_s.powi(3) / 3.0,
+        } => spectral_density_m2_s3 * dt_s * dt_s * dt_s / 3.0,
     };
 
     for (idx, row) in covariance_m2.iter_mut().enumerate().take(3) {

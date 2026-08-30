@@ -542,10 +542,10 @@ fn dpper(
     if init == 'y' {
         zm = zmos;
     }
-    zf = zm + 2.0 * zes * zm.sin();
-    sinzf = zf.sin();
+    zf = zm + 2.0 * zes * libm::sin(zm);
+    sinzf = libm::sin(zf);
     f2 = 0.5 * sinzf * sinzf - 0.25;
-    f3 = -0.5 * sinzf * zf.cos();
+    f3 = -0.5 * sinzf * libm::cos(zf);
     ses = se2 * f2 + se3 * f3;
     sis = si2 * f2 + si3 * f3;
     sls = sl2 * f2 + sl3 * f3 + sl4 * sinzf;
@@ -555,10 +555,10 @@ fn dpper(
     if init == 'y' {
         zm = zmol;
     }
-    zf = zm + 2.0 * zel * zm.sin();
-    sinzf = zf.sin();
+    zf = zm + 2.0 * zel * libm::sin(zm);
+    sinzf = libm::sin(zf);
     f2 = 0.5 * sinzf * sinzf - 0.25;
-    f3 = -0.5 * sinzf * zf.cos();
+    f3 = -0.5 * sinzf * libm::cos(zf);
     sel = ee2 * f2 + e3 * f3;
     sil = xi2 * f2 + xi3 * f3;
     sll = xl2 * f2 + xl3 * f3 + xl4 * sinzf;
@@ -578,8 +578,8 @@ fn dpper(
         ph = ph - pho;
         *inclp = *inclp + pinc;
         *ep = *ep + pe;
-        sinip = (*inclp).sin();
-        cosip = (*inclp).cos();
+        sinip = libm::sin(*inclp);
+        cosip = libm::cos(*inclp);
 
         /* ----------------- apply periodics directly ------------ */
         //  sgp4fix for lyddane choice
@@ -598,8 +598,8 @@ fn dpper(
             *mp = *mp + pl;
         } else {
             /* ---- apply periodics with lyddane modification ---- */
-            sinop = (*nodep).sin();
-            cosop = (*nodep).cos();
+            sinop = libm::sin(*nodep);
+            cosop = libm::cos(*nodep);
             alfdp = sinip * sinop;
             betdp = sinip * cosop;
             dalf = ph * cosop + pinc * cosip * sinop;
@@ -616,7 +616,7 @@ fn dpper(
             dls = pl + pgh - pinc * *nodep * sinip;
             let xls = xls + dls;
             xnoh = *nodep;
-            *nodep = alfdp.atan2(betdp);
+            *nodep = libm::atan2(alfdp, betdp);
             //  sgp4fix for afspc written intrinsic functions
             // nodep used without a trigonometric function ahead
             if (*nodep < 0.0) && (opsmode == 'a') {
@@ -775,12 +775,12 @@ fn dscom(epoch: f64, ep: f64, argpp: f64, tc: f64, inclp: f64, nodep: f64, np: f
 
     let mut nm = np;
     let mut em = ep;
-    let snodm = nodep.sin();
-    let cnodm = nodep.cos();
-    let sinomm = argpp.sin();
-    let cosomm = argpp.cos();
-    let sinim = inclp.sin();
-    let cosim = inclp.cos();
+    let snodm = libm::sin(nodep);
+    let cnodm = libm::cos(nodep);
+    let sinomm = libm::sin(argpp);
+    let cosomm = libm::cos(argpp);
+    let sinim = libm::sin(inclp);
+    let cosim = libm::cos(inclp);
     let emsq = em * em;
     betasq = 1.0 - emsq;
     let rtemsq = betasq.sqrt();
@@ -793,8 +793,8 @@ fn dscom(epoch: f64, ep: f64, argpp: f64, tc: f64, inclp: f64, nodep: f64, np: f
     let pho: f64 = 0.0;
     let day = epoch + 18261.5 + tc / 1440.0;
     xnodce = (4.5236020 - 9.2422029e-4 * day) % twopi;
-    stem = xnodce.sin();
-    ctem = xnodce.cos();
+    stem = libm::sin(xnodce);
+    ctem = libm::cos(xnodce);
     zcosil = 0.91375164 - 0.03568096 * ctem;
     zsinil = (1.0 - zcosil * zcosil).sqrt();
     zsinhl = 0.089683511 * stem / zsinil;
@@ -802,10 +802,10 @@ fn dscom(epoch: f64, ep: f64, argpp: f64, tc: f64, inclp: f64, nodep: f64, np: f
     let gam = 5.8351514 + 0.0019443680 * day;
     let zx = 0.39785416 * stem / zsinil;
     let zy = zcoshl * ctem + 0.91744867 * zsinhl * stem;
-    let zx = zx.atan2(zy);
+    let zx = libm::atan2(zx, zy);
     let zx = gam + zx - xnodce;
-    zcosgl = zx.cos();
-    zsingl = zx.sin();
+    zcosgl = libm::cos(zx);
+    zsingl = libm::sin(zx);
 
     /* ------------------------- do solar terms --------------------- */
     zcosg = zcosgs;
@@ -1273,7 +1273,7 @@ fn dsinit(
 
     /* -------------- initialize the resonance terms ------------- */
     if irez != 0 {
-        aonv = (nm / xke).powf(x2o3);
+        aonv = libm::pow(nm / xke, x2o3);
 
         /* ---------- geopotential resonance for 12 hour orbits ------ */
         if irez == 2 {
@@ -1538,41 +1538,41 @@ fn dspace(
             /* ------------------- dot terms calculated ------------- */
             /* ----------- near - synchronous resonance terms ------- */
             if irez != 2 {
-                xndt = del1 * (xli - fasx2).sin()
-                    + del2 * (2.0 * (xli - fasx4)).sin()
-                    + del3 * (3.0 * (xli - fasx6)).sin();
+                xndt = del1 * libm::sin(xli - fasx2)
+                    + del2 * libm::sin(2.0 * (xli - fasx4))
+                    + del3 * libm::sin(3.0 * (xli - fasx6));
                 xldot = xni + xfact;
-                xnddt = del1 * (xli - fasx2).cos()
-                    + 2.0 * del2 * (2.0 * (xli - fasx4)).cos()
-                    + 3.0 * del3 * (3.0 * (xli - fasx6)).cos();
+                xnddt = del1 * libm::cos(xli - fasx2)
+                    + 2.0 * del2 * libm::cos(2.0 * (xli - fasx4))
+                    + 3.0 * del3 * libm::cos(3.0 * (xli - fasx6));
                 xnddt = xnddt * xldot;
             } else {
                 /* --------- near - half-day resonance terms -------- */
                 xomi = argpo + argpdot * atime;
                 x2omi = xomi + xomi;
                 x2li = xli + xli;
-                xndt = d2201 * (x2omi + xli - g22).sin()
-                    + d2211 * (xli - g22).sin()
-                    + d3210 * (xomi + xli - g32).sin()
-                    + d3222 * (-xomi + xli - g32).sin()
-                    + d4410 * (x2omi + x2li - g44).sin()
-                    + d4422 * (x2li - g44).sin()
-                    + d5220 * (xomi + xli - g52).sin()
-                    + d5232 * (-xomi + xli - g52).sin()
-                    + d5421 * (xomi + x2li - g54).sin()
-                    + d5433 * (-xomi + x2li - g54).sin();
+                xndt = d2201 * libm::sin(x2omi + xli - g22)
+                    + d2211 * libm::sin(xli - g22)
+                    + d3210 * libm::sin(xomi + xli - g32)
+                    + d3222 * libm::sin(-xomi + xli - g32)
+                    + d4410 * libm::sin(x2omi + x2li - g44)
+                    + d4422 * libm::sin(x2li - g44)
+                    + d5220 * libm::sin(xomi + xli - g52)
+                    + d5232 * libm::sin(-xomi + xli - g52)
+                    + d5421 * libm::sin(xomi + x2li - g54)
+                    + d5433 * libm::sin(-xomi + x2li - g54);
                 xldot = xni + xfact;
-                xnddt = d2201 * (x2omi + xli - g22).cos()
-                    + d2211 * (xli - g22).cos()
-                    + d3210 * (xomi + xli - g32).cos()
-                    + d3222 * (-xomi + xli - g32).cos()
-                    + d5220 * (xomi + xli - g52).cos()
-                    + d5232 * (-xomi + xli - g52).cos()
+                xnddt = d2201 * libm::cos(x2omi + xli - g22)
+                    + d2211 * libm::cos(xli - g22)
+                    + d3210 * libm::cos(xomi + xli - g32)
+                    + d3222 * libm::cos(-xomi + xli - g32)
+                    + d5220 * libm::cos(xomi + xli - g52)
+                    + d5232 * libm::cos(-xomi + xli - g52)
                     + 2.0
-                        * (d4410 * (x2omi + x2li - g44).cos()
-                            + d4422 * (x2li - g44).cos()
-                            + d5421 * (xomi + x2li - g54).cos()
-                            + d5433 * (-xomi + x2li - g54).cos());
+                        * (d4410 * libm::cos(x2omi + x2li - g44)
+                            + d4422 * libm::cos(x2li - g44)
+                            + d5421 * libm::cos(xomi + x2li - g54)
+                            + d5433 * libm::cos(-xomi + x2li - g54));
                 xnddt = xnddt * xldot;
             }
 
@@ -1655,18 +1655,18 @@ fn initl(
     let eccsq = ecco * ecco;
     let omeosq = 1.0 - eccsq;
     let rteosq = omeosq.sqrt();
-    let cosio = inclo.cos();
+    let cosio = libm::cos(inclo);
     let cosio2 = cosio * cosio;
 
     /* ------------------ un-kozai the mean motion ----------------- */
-    let ak = (xke / no_kozai).powf(x2o3);
+    let ak = libm::pow(xke / no_kozai, x2o3);
     let d1 = 0.75 * j2 * (3.0 * cosio2 - 1.0) / (rteosq * omeosq);
     let mut del = d1 / (ak * ak);
     let adel = ak * (1.0 - del * del - del * (1.0 / 3.0 + 134.0 * del * del / 81.0));
     del = d1 / (adel * adel);
     let no_unkozai = no_kozai / (1.0 + del);
-    let ao = (xke / (no_unkozai)).powf(x2o3);
-    let sinio = inclo.sin();
+    let ao = libm::pow(xke / (no_unkozai), x2o3);
+    let sinio = libm::sin(inclo);
     let po = ao * omeosq;
     let con42 = 1.0 - 5.0 * cosio2;
     let con41 = -con42 - cosio2 - cosio2;
@@ -1991,7 +1991,7 @@ pub fn sgp4init(
     ao = il.ao;
     ainv = il.ainv;
 
-    satrec.a = (satrec.no_unkozai * satrec.tumin).powf(-2.0 / 3.0);
+    satrec.a = libm::pow(satrec.no_unkozai * satrec.tumin, -2.0 / 3.0);
     satrec.alta = satrec.a * (1.0 + satrec.ecco) - 1.0;
     satrec.altp = satrec.a * (1.0 - satrec.ecco) - 1.0;
     satrec.error = 0;
@@ -2023,8 +2023,8 @@ pub fn sgp4init(
         etasq = satrec.eta * satrec.eta;
         eeta = satrec.ecco * satrec.eta;
         psisq = (1.0 - etasq).abs();
-        coef = qzms24 * tsi.powf(4.0);
-        coef1 = coef / psisq.powf(3.5);
+        coef = qzms24 * tsi * tsi * tsi * tsi;
+        coef1 = coef / libm::pow(psisq, 3.5);
         cc2 = coef1
             * satrec.no_unkozai
             * (ao * (1.0 + 1.5 * etasq + eeta * (4.0 + etasq))
@@ -2049,7 +2049,7 @@ pub fn sgp4init(
                         + 0.75
                             * satrec.x1mth2
                             * (2.0 * etasq - eeta * (1.0 + etasq))
-                            * (2.0 * satrec.argpo).cos()));
+                            * libm::cos(2.0 * satrec.argpo)));
         satrec.cc5 = 2.0 * coef1 * ao * omeosq * (1.0 + 2.75 * (etasq + eeta) + eeta * etasq);
         cosio4 = cosio2 * cosio2;
         temp1 = 1.5 * satrec.j2 * pinvsq * satrec.no_unkozai;
@@ -2065,7 +2065,7 @@ pub fn sgp4init(
         satrec.nodedot = xhdot1
             + (0.5 * temp2 * (4.0 - 19.0 * cosio2) + 2.0 * temp3 * (3.0 - 7.0 * cosio2)) * cosio;
         xpidot = satrec.argpdot + satrec.nodedot;
-        satrec.omgcof = satrec.bstar * cc3 * satrec.argpo.cos();
+        satrec.omgcof = satrec.bstar * cc3 * libm::cos(satrec.argpo);
         satrec.xmcof = 0.0;
         if satrec.ecco > 1.0e-4 {
             satrec.xmcof = -x2o3 * coef * satrec.bstar / eeta;
@@ -2080,9 +2080,9 @@ pub fn sgp4init(
         }
         satrec.aycof = -0.5 * satrec.j3oj2 * sinio;
         // sgp4fix use multiply for speed instead of pow
-        delmotemp = 1.0 + satrec.eta * satrec.mo.cos();
+        delmotemp = 1.0 + satrec.eta * libm::cos(satrec.mo);
         satrec.delmo = delmotemp * delmotemp * delmotemp;
-        satrec.sinmao = satrec.mo.sin();
+        satrec.sinmao = libm::sin(satrec.mo);
         satrec.x7thm1 = 7.0 * cosio2 - 1.0;
 
         /* --------------- deep space initialization ------------- */
@@ -2445,7 +2445,7 @@ pub fn sgp4(satrec: &mut ElsetRec, tsince: f64, r: &mut [f64; 3], v: &mut [f64; 
     if satrec.isimp != 1 {
         delomg = satrec.omgcof * satrec.t;
         // sgp4fix use mutliply for speed instead of pow
-        delmtemp = 1.0 + satrec.eta * xmdf.cos();
+        delmtemp = 1.0 + satrec.eta * libm::cos(xmdf);
         delm = satrec.xmcof * (delmtemp * delmtemp * delmtemp - satrec.delmo);
         temp = delomg + delm;
         mm = xmdf + temp;
@@ -2453,7 +2453,7 @@ pub fn sgp4(satrec: &mut ElsetRec, tsince: f64, r: &mut [f64; 3], v: &mut [f64; 
         t3 = t2 * satrec.t;
         t4 = t3 * satrec.t;
         tempa = tempa - satrec.d2 * t2 - satrec.d3 * t3 - satrec.d4 * t4;
-        tempe = tempe + satrec.bstar * satrec.cc5 * (mm.sin() - satrec.sinmao);
+        tempe = tempe + satrec.bstar * satrec.cc5 * (libm::sin(mm) - satrec.sinmao);
         templ = templ + satrec.t3cof * t3 + t4 * (satrec.t4cof + satrec.t * satrec.t5cof);
     }
 
@@ -2516,8 +2516,8 @@ pub fn sgp4(satrec: &mut ElsetRec, tsince: f64, r: &mut [f64; 3], v: &mut [f64; 
         satrec.error = 2;
         return false;
     }
-    am = (satrec.xke / nm).powf(x2o3) * tempa * tempa;
-    nm = satrec.xke / am.powf(1.5);
+    am = libm::pow(satrec.xke / nm, x2o3) * tempa * tempa;
+    nm = satrec.xke / libm::pow(am, 1.5);
     em = em - tempe;
 
     // fix tolerance for error recognition
@@ -2549,8 +2549,8 @@ pub fn sgp4(satrec: &mut ElsetRec, tsince: f64, r: &mut [f64; 3], v: &mut [f64; 
     satrec.nm = nm;
 
     /* ----------------- compute extra mean quantities ------------- */
-    sinim = inclm.sin();
-    cosim = inclm.cos();
+    sinim = libm::sin(inclm);
+    cosim = libm::cos(inclm);
 
     /* -------------------- add lunar-solar periodics -------------- */
     ep = em;
@@ -2616,8 +2616,8 @@ pub fn sgp4(satrec: &mut ElsetRec, tsince: f64, r: &mut [f64; 3], v: &mut [f64; 
 
     /* -------------------- long period periodics ------------------ */
     if satrec.method == 'd' {
-        sinip = xincp.sin();
-        cosip = xincp.cos();
+        sinip = libm::sin(xincp);
+        cosip = libm::cos(xincp);
         satrec.aycof = -0.5 * satrec.j3oj2 * sinip;
         // sgp4fix for divide by zero for xincp = 180 deg
         if (cosip + 1.0).abs() > 1.5e-12 {
@@ -2626,9 +2626,9 @@ pub fn sgp4(satrec: &mut ElsetRec, tsince: f64, r: &mut [f64; 3], v: &mut [f64; 
             satrec.xlcof = -0.25 * satrec.j3oj2 * sinip * (3.0 + 5.0 * cosip) / temp4;
         }
     }
-    axnl = ep * argpp.cos();
+    axnl = ep * libm::cos(argpp);
     temp = 1.0 / (am * (1.0 - ep * ep));
-    aynl = ep * argpp.sin() + temp * satrec.aycof;
+    aynl = ep * libm::sin(argpp) + temp * satrec.aycof;
     xl = mp + argpp + nodep + temp * satrec.xlcof * axnl;
 
     /* --------------------- solve kepler's equation --------------- */
@@ -2639,8 +2639,8 @@ pub fn sgp4(satrec: &mut ElsetRec, tsince: f64, r: &mut [f64; 3], v: &mut [f64; 
     //   sgp4fix for kepler iteration
     //   the following iteration needs better limits on corrections
     while (tem5.abs() >= 1.0e-12) && (ktr <= 10) {
-        sineo1 = eo1.sin();
-        coseo1 = eo1.cos();
+        sineo1 = libm::sin(eo1);
+        coseo1 = libm::cos(eo1);
         tem5 = 1.0 - coseo1 * axnl - sineo1 * aynl;
         tem5 = (u - aynl * coseo1 + axnl * sineo1 - eo1) / tem5;
         if tem5.abs() >= 0.95 {
@@ -2666,7 +2666,7 @@ pub fn sgp4(satrec: &mut ElsetRec, tsince: f64, r: &mut [f64; 3], v: &mut [f64; 
         temp = esine / (1.0 + betal);
         sinu = am / rl * (sineo1 - aynl - axnl * temp);
         cosu = am / rl * (coseo1 - axnl + aynl * temp);
-        su = sinu.atan2(cosu);
+        su = libm::atan2(sinu, cosu);
         sin2u = (cosu + cosu) * sinu;
         cos2u = 1.0 - 2.0 * sinu * sinu;
         temp = 1.0 / pl;
@@ -2688,12 +2688,12 @@ pub fn sgp4(satrec: &mut ElsetRec, tsince: f64, r: &mut [f64; 3], v: &mut [f64; 
         rvdot = rvdotl + nm * temp1 * (satrec.x1mth2 * cos2u + 1.5 * satrec.con41) / satrec.xke;
 
         /* --------------------- orientation vectors ------------------- */
-        sinsu = su.sin();
-        cossu = su.cos();
-        snod = xnode.sin();
-        cnod = xnode.cos();
-        sini = xinc.sin();
-        cosi = xinc.cos();
+        sinsu = libm::sin(su);
+        cossu = libm::cos(su);
+        snod = libm::sin(xnode);
+        cnod = libm::cos(xnode);
+        sini = libm::sin(xinc);
+        cosi = libm::cos(xinc);
         xmx = -snod * cosi;
         xmy = cnod * cosi;
         ux = xmx * sinsu + cnod * cossu;
@@ -2877,8 +2877,8 @@ pub fn twoline2rv_propagate(
 
     // Convert to SGP4 units (EXACTLY matching Python's twoline2rv)
     let no_kozai = no_kozai_revday / xpdotp; // rad/min
-    let nddot = nddot_mantissa * 10.0_f64.powi(nexp);
-    let bstar = bstar_mantissa * 10.0_f64.powi(ibexp);
+    let nddot = nddot_mantissa * libm::pow(10.0, nexp as f64);
+    let bstar = bstar_mantissa * libm::pow(10.0, ibexp as f64);
 
     // Convert ndot: Python does ndot / (xpdotp * 1440.0)
     let ndot = ndot_raw / (xpdotp * 1440.0);

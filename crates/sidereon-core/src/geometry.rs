@@ -426,7 +426,7 @@ fn weight_for(weighting: DopWeighting, elevation_deg: f64) -> f64 {
     match weighting {
         DopWeighting::Unit => 1.0,
         DopWeighting::Elevation => {
-            let s = (elevation_deg * DEG_TO_RAD).sin();
+            let s = libm::sin(elevation_deg * DEG_TO_RAD);
             s * s
         }
     }
@@ -534,8 +534,8 @@ mod sampling_tests {
         let recv = [4_027_894.0, 307_046.0, 4_919_474.0];
         let tau = 0.072_345;
         let theta = OMEGA_E_DOT_RAD_S * tau;
-        let c = theta.cos();
-        let s = theta.sin();
+        let c = libm::cos(theta);
+        let s = libm::sin(theta);
         let rotated = sagnac_rotate_ecef_m(sat, tau);
         assert_eq!(
             rotated.map(f64::to_bits),
@@ -1064,9 +1064,9 @@ mod tests {
             ["G21", "G16", "G26", "G20", "G27", "G18", "G10", "G08", "G07"]
         );
         assert_eq!(first.geometry.dop.gdop.to_bits(), 0x4000c042642e3cbc);
-        assert_eq!(first.geometry.dop.pdop.to_bits(), 0x3ffd34cde2c7e400);
-        assert_eq!(first.geometry.dop.hdop.to_bits(), 0x3ff257e7df379517);
-        assert_eq!(first.geometry.dop.vdop.to_bits(), 0x3ff6ba2ad4e284af);
+        assert_eq!(first.geometry.dop.pdop.to_bits(), 0x3ffd34cde2c7e3ff);
+        assert_eq!(first.geometry.dop.hdop.to_bits(), 0x3ff257e7df379516);
+        assert_eq!(first.geometry.dop.vdop.to_bits(), 0x3ff6ba2ad4e284ae);
         assert_eq!(first.geometry.dop.tdop.to_bits(), 0x3ff069acbf06750f);
     }
 
@@ -1083,14 +1083,14 @@ mod tests {
             .expect("valid pass step");
         assert_eq!(got.len(), 51);
         let expected = [
-            ("G02", 0, 0, 0, 0x4024d260407442fe),
+            ("G02", 0, 0, 0, 0x4024d26040744300),
             ("G05", 0, 10, 0, 0x40513cd3dd1f7866),
-            ("G07", 0, 6, 0, 0x4046e04ff1c2a900),
+            ("G07", 0, 6, 0, 0x4046e04ff1c2a8fe),
             ("G09", 0, 1, 0, 0x402fdced3853f1fb),
-            ("G13", 0, 19, 8, 0x4054b61de01a5608),
+            ("G13", 0, 19, 8, 0x4054b61de01a5602),
             ("G15", 0, 22, 11, 0x4053483acdeec548),
             ("G28", 0, 16, 7, 0x404d9cd49009957c),
-            ("G30", 0, 11, 0, 0x4053eb9157f4b766),
+            ("G30", 0, 11, 0, 0x4053eb9157f4b765),
         ];
         for (got, (satellite, rise, set, peak, elevation_bits)) in got.iter().zip(expected) {
             assert_eq!(got.satellite.to_string(), satellite);

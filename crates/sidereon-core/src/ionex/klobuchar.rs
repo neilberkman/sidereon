@@ -88,7 +88,7 @@ pub(crate) fn klobuchar_l1_components(
     let psi = 0.0137 / (e + 0.11) - 0.022;
 
     // 2. Subionospheric latitude (semicircles), clamped to +-0.416.
-    let mut phi_i = phi_u + psi * a.cos();
+    let mut phi_i = phi_u + psi * libm::cos(a);
     if phi_i > 0.416 {
         phi_i = 0.416;
     }
@@ -97,10 +97,10 @@ pub(crate) fn klobuchar_l1_components(
     }
 
     // 3. Subionospheric longitude (semicircles). cos takes phi_i in radians.
-    let lambda_i = lambda_u + psi * a.sin() / (phi_i * PI).cos();
+    let lambda_i = lambda_u + psi * libm::sin(a) / libm::cos(phi_i * PI);
 
     // 4. Geomagnetic latitude (semicircles).
-    let phi_m = phi_i + 0.064 * ((lambda_i - 1.617) * PI).cos();
+    let phi_m = phi_i + 0.064 * libm::cos((lambda_i - 1.617) * PI);
 
     // 5. Local time at the pierce point (seconds), wrapped to [0, 86400).
     let mut t = 43200.0 * lambda_i + t_gps_s;

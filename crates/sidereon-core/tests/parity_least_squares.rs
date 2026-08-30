@@ -150,7 +150,7 @@ fn make_residual(t_data: Vec<f64>, y_data: Vec<f64>) -> impl Fn(&DVector<f64>) -
             t_data
                 .iter()
                 .zip(&y_data)
-                .map(|(&tk, &yk)| a * (b * tk).exp() + c - yk),
+                .map(|(&tk, &yk)| a * libm::exp(b * tk) + c - yk),
         )
     }
 }

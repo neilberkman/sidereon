@@ -3,7 +3,7 @@
   "purpose": "Saastamoinen zenith (dry+wet) + Niell NMF mapping -> slant tropospheric delay (meters). Reference recipe is generator/troposphere.py (RTKLIB rtkcmn.c operation order and constants); the Rust port asserts 0 ULP per intermediate and on the final meters against these hex-float goldens.",
   "env_ref": {
     "fixture": "fixtures/env.json",
-    "note": "0 ULP certified only against env.json. libm contract: CPython math (Apple libsystem_m) vs Rust std on aarch64-apple-darwin. Transcendentals: sin, cos, exp, pow (pow only on the standard-atmosphere helper)."
+    "note": "0 ULP certified against the portable Rust libm 0.2.16 contract. Transcendentals: libm sin, cos, exp, and pow (pow only on the standard-atmosphere helper)."
   },
   "recipe": "zenith: e = 6.108*rh*exp((17.15*T-4684)/(T-38.45)); zhd = 0.0022768*P/(1 - 0.00266*cos(2*lat) - 0.00028*h_km); zwd = 0.002277*(1255/T + 0.05)*e. niell: seasonal y from doy and signed lat, cosy = cos(2*pi*y), interpc over {15,30,45,60,75}, ah = ave - amp*cosy, aw = ave; mapf continued fraction; height correction dm on hydrostatic only; slant = zhd*mh + zwd*mw. el<=0 or h not in [-100,1e4] -> 0. No FMA.",
   "math_pi": "0x1.921fb54442d18p+1",
@@ -363,7 +363,7 @@
         "doy_repr": "28.0"
       },
       "expect": {
-        "e": "0x1.f06d105bc1e34p+0",
+        "e": "0x1.f06d105bc1e33p+0",
         "zhd_m": "0x1.22c2b66943d7ap+1",
         "zwd_m": "0x1.53e102602c514p-6",
         "mh": "0x1.fe3e302fd71b1p+0",
@@ -715,9 +715,9 @@
         "doy_repr": "28.0"
       },
       "expect": {
-        "e": "0x1.23541f4065388p-6",
+        "e": "0x1.23541f4065389p-6",
         "zhd_m": "0x1.2b901a298d1b6p+1",
-        "zwd_m": "0x1.cd9728ddfa9d6p-13",
+        "zwd_m": "0x1.cd9728ddfa9d7p-13",
         "mh": "0x1.fe3b5e082856fp+0",
         "mw": "0x1.ff1280b0f0bcfp+0",
         "dm": "0x0.0p+0",
@@ -749,7 +749,7 @@
         "height_m_repr": "2000.0"
       },
       "expect": {
-        "pressure_hpa": "0x1.8d7650bc15583p+9",
+        "pressure_hpa": "0x1.8d7650bc15584p+9",
         "temperature_k": "0x1.1328f5c28f5c3p+8",
         "relative_humidity": "0x1.0000000000000p-1"
       }

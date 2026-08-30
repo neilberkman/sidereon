@@ -800,7 +800,7 @@ fn windup_cycles(
     }
 
     let cosp = clamp(dot3(ds, dr) / nds / ndr);
-    let mut ph = cosp.acos() / std::f64::consts::TAU;
+    let mut ph = libm::acos(cosp) / std::f64::consts::TAU;
     let drs = cross3(ds, dr);
     if dot3(ek, drs) < 0.0 {
         ph = -ph;
@@ -827,7 +827,7 @@ fn sat_yaw(rs: [f64; 3], vs: [f64; 3], sun_ecef_m: [f64; 3]) -> Option<([f64; 3]
     let ep = unit3(p)?;
 
     let beta = beta_angle_from_cos_rad(dot3(esun, en));
-    let ee = clamp(dot3(es, ep)).acos();
+    let ee = libm::acos(clamp(dot3(es, ep)));
     let mut mu = PI / 2.0 + if dot3(es, esun) <= 0.0 { -ee } else { ee };
 
     if mu < -PI / 2.0 {
@@ -838,8 +838,8 @@ fn sat_yaw(rs: [f64; 3], vs: [f64; 3], sun_ecef_m: [f64; 3]) -> Option<([f64; 3]
 
     let yaw = yaw_nominal(beta, mu);
     let ex = cross3(en, es);
-    let cosy = yaw.cos();
-    let siny = yaw.sin();
+    let cosy = libm::cos(yaw);
+    let siny = libm::sin(yaw);
     let exs = add3(scale3(en, -siny), scale3(ex, cosy));
     let eys = add3(scale3(en, -cosy), scale3(ex, -siny));
     Some((exs, eys))
@@ -849,7 +849,7 @@ fn yaw_nominal(beta: f64, mu: f64) -> f64 {
     if beta.abs() < YAW_SINGULARITY_EPS_RAD && mu.abs() < YAW_SINGULARITY_EPS_RAD {
         PI
     } else {
-        (-beta.tan()).atan2(mu.sin()) + PI
+        libm::atan2(-libm::tan(beta), libm::sin(mu)) + PI
     }
 }
 
@@ -935,7 +935,7 @@ fn nadir_pcv_if(
 ) -> Option<f64> {
     let eu = unit3(neg3(pred.los_unit))?;
     let ez = unit3(neg3(pred.sat_pos_ecef_m))?;
-    let nadir_deg = clamp(dot3(eu, ez)).acos() * RAD_TO_DEG;
+    let nadir_deg = libm::acos(clamp(dot3(eu, ez))) * RAD_TO_DEG;
     let p1 = ant.pcv_noazi(&options.freq1_label, nadir_deg)?;
     let p2 = ant.pcv_noazi(&options.freq2_label, nadir_deg)?;
     Some(gamma * p1 - (gamma - 1.0) * p2)
@@ -1127,7 +1127,7 @@ mod tests {
         assert_eq!(got.tide.len(), 1);
         assert_eq!(
             got.tide[0].vector_m.map(f64::to_bits),
-            [0x3FB8BC98E788ED00, 0x3FAA54D8C1097508, 0x3FB03498C46B3B50]
+            [0x3FB8BD276E8C52BE, 0x3FAA55C70D7974BC, 0x3FB034FB457EFEF5]
         );
         assert_eq!(got.windup_m.len(), 1);
         assert_eq!(got.windup_m[0].value_m.to_bits(), 0xBF808DE79DBD2C16);

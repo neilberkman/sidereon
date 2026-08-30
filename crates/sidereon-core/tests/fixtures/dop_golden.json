@@ -3,7 +3,7 @@
   "purpose": "GDOP/PDOP/HDOP/VDOP/TDOP from a design (geometry) matrix of unit line-of-sight vectors plus a clock column and a diagonal weight matrix, via Q = (H^T W H)^-1 with the horizontal/vertical split taken in a local ENU frame. Reference recipe is generator/dop.py: the normal matrix is summed left-to-right and the 4x4 inverse is an explicit cofactor (adjugate/determinant) expansion -- NOT numpy.linalg.inv / LAPACK -- so it is independently 0-ULP. The Rust port asserts 0 ULP per intermediate and per DOP scalar against these hex-float goldens.",
   "env_ref": {
     "fixture": "fixtures/env.json",
-    "note": "0 ULP certified only against env.json. The inverse is an explicit small-matrix cofactor expansion with pinned operation order, so unlike a LAPACK-bound inverse it is NOT BLAS-bound and is a genuine 0-ULP target. libm contract: CPython math (Apple libsystem_m) vs Rust std on aarch64-apple-darwin. Transcendentals: sin, cos (ENU rotation), sqrt (DOP scalars)."
+    "note": "0 ULP certified against the portable Rust libm 0.2.16 contract. The inverse is an explicit small-matrix cofactor expansion with pinned operation order, so unlike a LAPACK-bound inverse it is NOT BLAS-bound and is a genuine 0-ULP target. Transcendentals: libm sin/cos (ENU rotation) and IEEE-754 sqrt (DOP scalars)."
   },
   "recipe": "A = H^T W H accumulated left-to-right (term h[k][i]*w[k]*h[k][j]); det by first-row cofactor expansion; Q = adj(A)/det via 3x3 minors with fixed term order (inv[j][i] = (-1)^(i+j) minor(i,j)/det); ENU rotation R(phi,lam) [[-sl,cl,0],[-sp*cl,-sp*sl,cp],[cp*cl,cp*sl,sp]]; Q_enu = R Q_xyz R^T on the 3x3 position block; GDOP=sqrt(Qxx+Qyy+Qzz+Qtt), PDOP=sqrt(qE+qN+qU), HDOP=sqrt(qE+qN), VDOP=sqrt(qU), TDOP=sqrt(Qtt). det==0 -> no finite DOP. No FMA.",
   "math_pi": "0x1.921fb54442d18p+1",
@@ -780,12 +780,12 @@
         ],
         "enu_pos_block": [
           [
-            "0x1.5b8699779eb8cp-1",
-            "0x1.1f020660d6c98p-4",
+            "0x1.5b8699779eb8bp-1",
+            "0x1.1f020660d6c96p-4",
             "-0x1.63745049ca08fp-1"
           ],
           [
-            "0x1.1f020660d6c90p-4",
+            "0x1.1f020660d6c94p-4",
             "0x1.f0a02c9019fd7p-1",
             "-0x1.1913153acc0c0p+0"
           ],
@@ -796,13 +796,13 @@
           ]
         ],
         "det": "0x1.43128c3094f91p+0",
-        "qe": "0x1.5b8699779eb8cp-1",
+        "qe": "0x1.5b8699779eb8bp-1",
         "qn": "0x1.f0a02c9019fd7p-1",
         "qu": "0x1.f77ddc13d24aep+2",
         "qt": "0x1.9ea62c046e993p+1",
         "gdop": "0x1.c925300481812p+1",
         "pdop": "0x1.8ad9a8dbf741fp+1",
-        "hdop": "0x1.48b63279c6bbap+0",
+        "hdop": "0x1.48b63279c6bb9p+0",
         "vdop": "0x1.670495bf64cd2p+1",
         "tdop": "0x1.ccc2b7a1f4df4p+0"
       }

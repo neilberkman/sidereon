@@ -114,22 +114,22 @@ fn skyfield_au_geodetic(ecef_m: [f64; 3]) -> Wgs84Geodetic {
     let a_au = WGS84_A_KM / AU_KM;
     let r_xy = (x_au * x_au + y_au * y_au).sqrt();
 
-    let lon_raw = y_au.atan2(x_au);
+    let lon_raw = libm::atan2(y_au, x_au);
     let mut lon_shifted = (lon_raw - PI) % TAU;
     if lon_shifted < 0.0 {
         lon_shifted += TAU;
     }
     let lon = lon_shifted - PI;
 
-    let mut lat = z_au.atan2(r_xy);
+    let mut lat = libm::atan2(z_au, r_xy);
     let mut a_c = 0.0;
     let mut hyp = 0.0;
     for _ in 0..3 {
-        let sin_lat = lat.sin();
+        let sin_lat = libm::sin(lat);
         let e2_sin_lat = WGS84_E2 * sin_lat;
         a_c = a_au / (1.0 - e2_sin_lat * sin_lat).sqrt();
         hyp = z_au + a_c * e2_sin_lat;
-        lat = hyp.atan2(r_xy);
+        lat = libm::atan2(hyp, r_xy);
     }
 
     let height_au = (hyp * hyp + r_xy * r_xy).sqrt() - a_c;
@@ -204,18 +204,18 @@ fn geodetic_enu_az_el(geo: Wgs84Geodetic, rx_ecef_m: [f64; 3], sat_ecef_m: [f64;
     let dy = sat_ecef_m[1] - rx_ecef_m[1];
     let dz = sat_ecef_m[2] - rx_ecef_m[2];
 
-    let sin_lat = geo.lat_rad.sin();
-    let cos_lat = geo.lat_rad.cos();
-    let sin_lon = geo.lon_rad.sin();
-    let cos_lon = geo.lon_rad.cos();
+    let sin_lat = libm::sin(geo.lat_rad);
+    let cos_lat = libm::cos(geo.lat_rad);
+    let sin_lon = libm::sin(geo.lon_rad);
+    let cos_lon = libm::cos(geo.lon_rad);
 
     let e = -sin_lon * dx + cos_lon * dy;
     let n = -sin_lat * cos_lon * dx - sin_lat * sin_lon * dy + cos_lat * dz;
     let u = cos_lat * cos_lon * dx + cos_lat * sin_lon * dy + sin_lat * dz;
 
     let rng = (e * e + n * n + u * u).sqrt();
-    let el = (u / rng).asin();
-    let mut az = e.atan2(n);
+    let el = libm::asin(u / rng);
+    let mut az = libm::atan2(e, n);
     if az < 0.0 {
         az += TAU;
     }

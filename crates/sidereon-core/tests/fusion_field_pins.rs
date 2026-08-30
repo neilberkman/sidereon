@@ -674,7 +674,7 @@ fn fix_status_weighting_inflates_float_covariance_by_configured_sigma() {
 
 #[test]
 fn field_mode_defaults_keep_existing_loose_fixture_bits() {
-    const EXPECTED_DEFAULT_HASH: u64 = 0x174a_b3c7_0087_c76c;
+    const EXPECTED_DEFAULT_HASH: u64 = 0x7efe_5153_ffe0_9868;
     let scenario = field_scenario();
     let simulated = simulate_scenario(&scenario).expect("simulate scenario");
     let source = source_from_scenario(&scenario);

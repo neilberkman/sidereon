@@ -2,9 +2,9 @@
 //! Tiny libm-bound 0-ULP parity test (parity build order step 2).
 //!
 //! Proves the parity HARNESS + MATH CONTRACT end-to-end before any GNSS
-//! numerics: read the hex-float golden vector emitted by the pinned numpy
-//! reference stack (`parity/fixtures/libm_tiny.json`), recompute each value
-//! with Rust `std` (`f64::sin` etc.), and assert 0 ULP (bit-identical) per
+//! numerics: read the hex-float golden vector emitted by the portable Rust
+//! `libm` reference, recompute each value with the same portable math kernels,
+//! and assert 0 ULP (bit-identical) per
 //! component.
 //!
 //! This mirrors the discipline of `repos/sidereon/test/skyfield_parity_test.exs`:
@@ -12,9 +12,10 @@
 //! decimal-parse ambiguity, and parity is measured as ULP distance via the
 //! integer reinterpretation of the IEEE-754 bit pattern.
 //!
-//! If Rust `std` libm diverges from numpy's (Apple libsystem_m on this pinned
-//! target) by even one ULP, this test FAILS and prints the exact delta rather
-//! than hiding it.
+//! If the Rust portable `libm` kernel diverges from its committed reference by
+//! even one ULP, this test FAILS and prints the exact delta rather than hiding
+//! it. The fixture records an independent mpmath audit separately because
+//! mpmath and `libm` do not produce the same bits for every transcendental.
 
 use std::path::PathBuf;
 
@@ -168,13 +169,16 @@ fn libm_tiny_zero_ulp() {
         let expect = &case["expect"];
 
         let got = [
-            ("sin", x.sin()),
-            ("cos", x.cos()),
-            ("sqrt", x.abs().sqrt()),
+            ("sin", libm::sin(x)),
+            ("cos", libm::cos(x)),
+            ("sqrt", libm::sqrt(x.abs())),
             // Mirror the generator exactly: exp(x / 256.0). 256 is a power of
             // two so the divide is exact and injects no extra rounding.
-            ("exp", (x / 256.0).exp()),
-            ("log", (x.abs() + 1.0).ln()),
+            ("exp", libm::exp(x / 256.0)),
+            (
+                "log",
+                sidereon_core::astro::math::special::portable_log(x.abs() + 1.0),
+            ),
         ];
 
         for (fname, actual) in got {
@@ -184,7 +188,7 @@ fn libm_tiny_zero_ulp() {
             checks += 1;
             if ulp != 0 {
                 failures.push(format!(
-                    "unary {name}.{fname}: {ulp} ULP (rust={} numpy={})",
+                    "unary {name}.{fname}: {ulp} ULP (rust={} reference={})",
                     float_hex(actual),
                     exp_hex
                 ));
@@ -200,7 +204,7 @@ fn libm_tiny_zero_ulp() {
         let expect = &case["expect"];
 
         let got = [
-            ("atan2", y.atan2(x)),
+            ("atan2", libm::atan2(y, x)),
             // composite: sqrt(x*x + y*y), plain ops (no FMA), matching the
             // generator and the sidereon "no FMA except mat3_vec3_mul" rule.
             ("norm2", (x * x + y * y).sqrt()),
@@ -213,7 +217,7 @@ fn libm_tiny_zero_ulp() {
             checks += 1;
             if ulp != 0 {
                 failures.push(format!(
-                    "binary {name}.{fname}: {ulp} ULP (rust={} numpy={})",
+                    "binary {name}.{fname}: {ulp} ULP (rust={} reference={})",
                     float_hex(actual),
                     exp_hex
                 ));
@@ -225,7 +229,7 @@ fn libm_tiny_zero_ulp() {
 
     assert!(
         failures.is_empty(),
-        "Rust std libm diverged from the numpy reference on {} of {checks} components:\n  {}",
+        "Rust portable math diverged from the portable reference on {} of {checks} components:\n  {}",
         failures.len(),
         failures.join("\n  ")
     );

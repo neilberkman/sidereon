@@ -609,7 +609,10 @@ mod tests {
         let rows = ppp_schur_rows(n_epochs, n_ambiguities);
         let weighted_ssr = rows
             .iter()
-            .map(|row| (row.y * row.weight).powi(2))
+            .map(|row| {
+                let weighted = row.y * row.weight;
+                weighted * weighted
+            })
             .sum::<f64>();
         let dof = rows.len() - layout.full_dim();
         let factor = posterior_variance_factor(&rows, layout).expect("posterior variance factor");
