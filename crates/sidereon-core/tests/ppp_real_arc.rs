@@ -493,7 +493,7 @@ fn canonical_ppp_is_deterministic_bounded_and_truthful() {
     // elimination: X and Y moved a few ULP, Z is unchanged, and the reduced
     // path is pinned equivalent to the dense one in normal.rs.
     assert_eq!(canonical.position_m[0].to_bits(), 0x414b544c30f74f98);
-    assert_eq!(canonical.position_m[1].to_bits(), 0x412040d68a0054fe);
+    assert_eq!(canonical.position_m[1].to_bits(), 0x412040d68a005500);
     assert_eq!(canonical.position_m[2].to_bits(), 0x4153f61c555f9818);
 
     // BAR 1b: a second canonical solve is bit-identical on the same build.

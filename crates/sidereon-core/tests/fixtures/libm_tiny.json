@@ -1,14 +1,14 @@
 {
   "schema": "orbis-gnss-parity/libm_tiny.v1",
-  "purpose": "Tiny libm-bound 0-ULP fixture (parity build order step 2). Proves the parity harness + math contract before any GNSS numerics: numpy reference transcendentals emitted as hex-float; a Rust std test asserts 0 ULP (bit-identical) per component, or reports the ULP delta if Rust std libm diverges from numpy's on this pinned target.",
+  "purpose": "Tiny libm-bound 0-ULP fixture (parity build order step 2). Proves the parity harness + math contract before any GNSS numerics: portable Rust libm reference transcendentals emitted as hex-float; Rust portable math tests assert 0 ULP (bit-identical) per component. mpmath is retained as an independent audit.",
   "env_ref": {
     "fixture": "fixtures/env.json",
-    "note": "0 ULP is certified only against the pinned environment in env.json. The libm contract here is Apple libsystem_m vs Rust std on aarch64-apple-darwin (see env.libm / env.rust)."
+    "note": "The prior fixture was generated on aarch64 Apple system libm and was not portable. The committed engine reference is portable Rust libm 0.2.16; mpmath 1.4.1 at 200 digits is an independent high-precision audit and is not expected to match libm on every input."
   },
   "generator": {
-    "numpy": "2.4.6",
-    "python": "3.14.4",
-    "executable": "python"
+    "engine_reference": "portable Rust libm 0.2.16 plus correctly rounded portable_log",
+    "mpmath_audit": "mpmath 1.4.1 at 200 decimal digits, rounded to binary64",
+    "portable": true
   },
   "cases": {
     "unary": [

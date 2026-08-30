@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
-"""Generate CNAV broadcast-evaluation bit goldens from the trimmed RINEX 4 file."""
+"""Audit CNAV broadcast goldens with a portable high-precision reference.
+
+The production fixture is canonicalized to the Rust ``libm`` crate.  This
+script reconstructs the CNAV recipe with mpmath so its result can be compared
+independently; mpmath is not assumed to produce the same bits as Rust ``libm``.
+"""
 
 from __future__ import annotations
 
 import datetime as dt
 import json
-import math
 import platform
 import struct
+import tempfile
+from argparse import ArgumentParser
 from pathlib import Path
+
+from portable_math import MPMATH_PRECISION_DIGITS
+from portable_math import add, atan2, cos, div, mul, sin, sqrt, sub
 
 
 SECONDS_PER_WEEK = 604800.0
@@ -24,7 +33,7 @@ GPS_DTR_F = -0.000000000444280763339306
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_NAV = ROOT / "tests/fixtures/nav/BRD400DLR_S_20261800000_01H_MN_trim.rnx"
-OUTPUT = ROOT / "tests/fixtures/cnav_broadcast_golden.json"
+DEFAULT_OUTPUT = Path(tempfile.gettempdir()) / "sidereon-cnav-broadcast-mpmath-audit.json"
 
 
 def bits(value: float) -> str:
@@ -56,11 +65,11 @@ def gps_week_sow(year: int, month: int, day: int, hour: int, minute: int, second
 
 
 def time_from_reference_s(t_sow_s: float, reference_sow_s: float) -> float:
-    value = t_sow_s - reference_sow_s
+    value = sub(t_sow_s, reference_sow_s)
     if value > HALF_WEEK_S:
-        value -= SECONDS_PER_WEEK
+        value = sub(value, SECONDS_PER_WEEK)
     if value < -HALF_WEEK_S:
-        value += SECONDS_PER_WEEK
+        value = add(value, SECONDS_PER_WEEK)
     return value
 
 
@@ -69,9 +78,9 @@ def eccentric_anomaly(mean_anomaly: float, eccentricity: float) -> tuple[float, 
     iterations = 0
     while iterations < KEPLER_MAX_ITER:
         previous = value
-        value = mean_anomaly + eccentricity * math.sin(previous)
+        value = add(mean_anomaly, mul(eccentricity, sin(previous)))
         iterations += 1
-        if abs(value - previous) <= KEPLER_TOL:
+        if abs(sub(value, previous)) <= KEPLER_TOL:
             break
     return value, iterations
 
@@ -83,52 +92,55 @@ def clock_offset(clock: dict[str, float], elements: dict[str, float], sin_e: flo
     dt0 = time_from_reference_s(t_sow_s, clock["toc_sow"])
     arg = dt0
     for _ in range(CLOCK_MAX_ITER):
-        arg = dt0 - (af0 + af1 * arg + af2 * arg * arg)
-    dt_poly = af0 + af1 * arg + af2 * arg * arg
-    dt_rel = GPS_DTR_F * elements["e"] * elements["sqrt_a"] * sin_e
+        arg = sub(dt0, add(add(af0, mul(af1, arg)), mul(af2, mul(arg, arg))))
+    dt_poly = add(add(af0, mul(af1, arg)), mul(af2, mul(arg, arg)))
+    dt_rel = mul(mul(mul(GPS_DTR_F, elements["e"]), elements["sqrt_a"]), sin_e)
     return {
         "dt_clock_poly_s": dt_poly,
         "dt_rel_s": dt_rel,
         "tgd_s": tgd_s,
-        "dt_clock_total_s": dt_poly + dt_rel - tgd_s,
+        "dt_clock_total_s": sub(add(dt_poly, dt_rel), tgd_s),
     }
 
 
 def orbit_state(elements: dict[str, float], rates: dict[str, float], t_sow_s: float) -> tuple[dict[str, float], int]:
     sqrt_a = elements["sqrt_a"]
     e = elements["e"]
-    a0 = sqrt_a * sqrt_a
-    n0 = math.sqrt(GPS_GM_M3_S2 / (a0 * a0 * a0))
+    a0 = mul(sqrt_a, sqrt_a)
+    n0 = sqrt(div(GPS_GM_M3_S2, mul(mul(a0, a0), a0)))
     tk = time_from_reference_s(t_sow_s, elements["toe_sow"])
-    a = a0 + rates["adot_m_s"] * tk
-    delta_n_a = elements["delta_n"] + 0.5 * rates["delta_n0_dot_rad_s2"] * tk
-    n = n0 + delta_n_a
-    mk = elements["m0"] + n * tk
+    a = add(a0, mul(rates["adot_m_s"], tk))
+    delta_n_a = add(elements["delta_n"], mul(mul(0.5, rates["delta_n0_dot_rad_s2"]), tk))
+    n = add(n0, delta_n_a)
+    mk = add(elements["m0"], mul(n, tk))
     ecc, iterations = eccentric_anomaly(mk, e)
-    sin_e = math.sin(ecc)
-    cos_e = math.cos(ecc)
-    e2 = e * e
-    nu = math.atan2(math.sqrt(1.0 - e2) * sin_e, cos_e - e)
-    phi = nu + elements["omega"]
-    two_phi = 2.0 * phi
-    s2 = math.sin(two_phi)
-    c2 = math.cos(two_phi)
-    du = elements["cus"] * s2 + elements["cuc"] * c2
-    dr = elements["crs"] * s2 + elements["crc"] * c2
-    di = elements["cis"] * s2 + elements["cic"] * c2
-    u = phi + du
-    r = a * (1.0 - e * cos_e) + dr
-    i = elements["i0"] + di + elements["idot"] * tk
-    xp = r * math.cos(u)
-    yp = r * math.sin(u)
-    omega_k = elements["omega0"] + (elements["omega_dot"] - GPS_OMEGA_E_RAD_S) * tk - GPS_OMEGA_E_RAD_S * elements["toe_sow"]
-    sin_o = math.sin(omega_k)
-    cos_o = math.cos(omega_k)
-    sin_i = math.sin(i)
-    cos_i = math.cos(i)
-    x = xp * cos_o - yp * cos_i * sin_o
-    y = xp * sin_o + yp * cos_i * cos_o
-    z = yp * sin_i
+    sin_e = sin(ecc)
+    cos_e = cos(ecc)
+    e2 = mul(e, e)
+    nu = atan2(mul(sqrt(sub(1.0, e2)), sin_e), sub(cos_e, e))
+    phi = add(nu, elements["omega"])
+    two_phi = mul(2.0, phi)
+    s2 = sin(two_phi)
+    c2 = cos(two_phi)
+    du = add(mul(elements["cus"], s2), mul(elements["cuc"], c2))
+    dr = add(mul(elements["crs"], s2), mul(elements["crc"], c2))
+    di = add(mul(elements["cis"], s2), mul(elements["cic"], c2))
+    u = add(phi, du)
+    r = add(mul(a, sub(1.0, mul(e, cos_e))), dr)
+    i = add(add(elements["i0"], di), mul(elements["idot"], tk))
+    xp = mul(r, cos(u))
+    yp = mul(r, sin(u))
+    omega_k = sub(
+        add(elements["omega0"], mul(sub(elements["omega_dot"], GPS_OMEGA_E_RAD_S), tk)),
+        mul(GPS_OMEGA_E_RAD_S, elements["toe_sow"]),
+    )
+    sin_o = sin(omega_k)
+    cos_o = cos(omega_k)
+    sin_i = sin(i)
+    cos_i = cos(i)
+    x = sub(mul(xp, cos_o), mul(mul(yp, cos_i), sin_o))
+    y = add(mul(xp, sin_o), mul(mul(yp, cos_i), cos_o))
+    z = mul(yp, sin_i)
     return (
         {
             "a": a,
@@ -252,7 +264,7 @@ def make_case(record: dict[str, object], suffix: str, offset_s: float) -> dict[s
     elements = record["elements"]
     rates = record["rates"]
     clock = record["clock"]
-    t_sow = elements["toe_sow"] + offset_s
+    t_sow = add(elements["toe_sow"], offset_s)
     orbit, iterations = orbit_state(elements, rates, t_sow)
     clk = clock_offset(clock, elements, orbit["sin_e"], t_sow, record["tgd_s"])
     expect = dict(orbit)
@@ -273,6 +285,15 @@ def make_case(record: dict[str, object], suffix: str, offset_s: float) -> dict[s
 
 
 def main() -> None:
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT,
+        help=f"audit JSON path (default: {DEFAULT_OUTPUT})",
+    )
+    args = parser.parse_args()
+
     records = [
         parse_cnav_frame(sv, message, body)
         for _, sv, message, body in read_frames(SOURCE_NAV)
@@ -291,7 +312,18 @@ def main() -> None:
         "source_nav": "BRD400DLR_S_20261800000_01H_MN_trim.rnx",
         "source_url": "https://igs.bkg.bund.de/root_ftp/IGS/BRDC/2026/180/BRD400DLR_S_20261800000_01D_MN.rnx.gz",
         "trim": "Header plus selected G01/G03 LNAV+CNAV, J02 LNAV+CNAV+CNV2, and C19 CNV2 frames.",
-        "recipe": "IS-GPS-200/705/800 CNAV orbit and clock; scalar Python math, no FMA, explicit-multiply powers; fixed-point Kepler E=M+e*sin(E), tol 1e-12 cap 30; two clock time-argument refinements; relativistic term uses sqrt(A0).",
+        "recipe": "IS-GPS-200/705/800 CNAV audit: mpmath high-precision reference rounded to binary64 after every operation; no FMA; explicit-multiply powers; fixed-point Kepler E=M+e*sin(E), tol 1e-12 cap 30; two clock time-argument refinements; relativistic term uses sqrt(A0).",
+        "mpmath_audit": {
+            "library": "mpmath",
+            "version": str(__import__("mpmath").__version__),
+            "precision_digits": MPMATH_PRECISION_DIGITS,
+            "round_after_every_operation": True,
+        },
+        "engine_reference": {
+            "library": "Rust libm crate",
+            "version": "0.2.16",
+            "portable": True,
+        },
         "python_version": platform.python_version(),
         "kepler_tol_hex": bits(KEPLER_TOL),
         "kepler_max_iter": KEPLER_MAX_ITER,
@@ -312,7 +344,8 @@ def main() -> None:
         },
         "cases": cases,
     }
-    OUTPUT.write_text(json.dumps(doc, indent=2) + "\n")
+    args.output.write_text(json.dumps(doc, indent=2) + "\n")
+    print(args.output)
 
 
 if __name__ == "__main__":

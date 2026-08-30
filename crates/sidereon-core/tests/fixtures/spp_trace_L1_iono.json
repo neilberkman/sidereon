@@ -3,7 +3,7 @@
   "purpose": "GPS L1 single-point-positioning trace fixture. Records the synthesized observations, the FIXED receiver truth, the frozen-branch choices, the effective scipy options, and the full iteration trace (per trace-state x: per-satellite intermediates t_tx/sat_ecef/dt_sat/theta/sat_rot/rho/az/el/iono/tropo/p_hat, residual vector, 2-point FD perturbations, FD Jacobian, accepted steps, full fun() evaluation log, stopping reason). The residual and the 2-point FD Jacobian at the recorded trace states are the 0-ULP substrate the Rust trace-replay asserts; the trf converged position/clock is a BLAS-bound sub-micron solver-agreement target, never 0 ULP.",
   "env_ref": {
     "fixture": "fixtures/env.json",
-    "note": "0 ULP certified only against env.json. The SPP residual + 2-point FD Jacobian are libm/arithmetic-bound; the trf SVD is BLAS-bound (Apple Accelerate) and out of scope for 0 ULP.",
+    "note": "The SPP residual + 2-point FD Jacobian are certified against the portable Rust libm 0.2.16 contract. The recorded external scipy final-solution fields remain audit data; the canonical solver owns its fixed reduction order.",
     "sp3_interp_reference": "position: RTKLIB preceph.c interppol/pephpos (sliding-window degree-10 Lagrange + OMGE per-node rotation), certified in sp3::interp::interp_tests; these trace fields recomputed through the corrected production substrate. clock: scipy.interpolate.CubicSpline (unchanged)."
   },
   "geodetic_crosscheck": {
@@ -535,7 +535,7 @@
             ],
             "rho_m": "0x41758a478cf03e95",
             "az_rad": "0x40051f0821259b12",
-            "el_rad": "0x3fe2f939eaf34edf",
+            "el_rad": "0x3fe2f939eaf34ee0",
             "iono_m": "0x401d9308709a23ef",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x4175a622b70814b3",
@@ -584,7 +584,7 @@
               "0x4174b78c3caa0472"
             ],
             "rho_m": "0x4174d0a7132a6a9d",
-            "az_rad": "0x3fedc72b15a75ab0",
+            "az_rad": "0x3fedc72b15a75aae",
             "el_rad": "0x3fe7b9a7ca230b22",
             "iono_m": "0x4017e4283083dd9e",
             "tropo_m": "0x0000000000000000",
@@ -634,7 +634,7 @@
               "0x4173992c0e9a57a4"
             ],
             "rho_m": "0x4173cfdf292f8a32",
-            "az_rad": "0x3fecc15ca7e9f0a4",
+            "az_rad": "0x3fecc15ca7e9f0a1",
             "el_rad": "0x3ff65c538eb6ddf2",
             "iono_m": "0x40113ea2ef365083",
             "tropo_m": "0x0000000000000000",
@@ -660,8 +660,8 @@
             ],
             "rho_m": "0x41742cd5695f48a3",
             "az_rad": "0x4008ade9d9056f89",
-            "el_rad": "0x3feee48b7b9bac8e",
-            "iono_m": "0x40149dbb7abb0e1e",
+            "el_rad": "0x3feee48b7b9bac91",
+            "iono_m": "0x40149dbb7abb0e1b",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x41741be907919752",
             "residual_m": "0x40e051ce79d75414"
@@ -685,8 +685,8 @@
             ],
             "rho_m": "0x4174309c397ed1ba",
             "az_rad": "0x4014d29565a56aba",
-            "el_rad": "0x3febfd7330fbd2d7",
-            "iono_m": "0x4014c4e1d1dbd027",
+            "el_rad": "0x3febfd7330fbd2d6",
+            "iono_m": "0x4014c4e1d1dbd028",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x417448ad0c8603b0",
             "residual_m": "0x40eb0a97f28749c2"
@@ -923,7 +923,7 @@
             ],
             "rho_m": "0x4176ae9f0fc45ac6",
             "az_rad": "0x4014188829059844",
-            "el_rad": "0x3fd4411bf6d972db",
+            "el_rad": "0x3fd4411bf6d972da",
             "iono_m": "0x4021925a9cdd84c5",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x4176b8c6d8b5cd2c",
@@ -948,8 +948,8 @@
             ],
             "rho_m": "0x4175872590314a10",
             "az_rad": "0x40053e648c465c57",
-            "el_rad": "0x3fe324efc1c985dc",
-            "iono_m": "0x401d79c2afc929f1",
+            "el_rad": "0x3fe324efc1c985dd",
+            "iono_m": "0x401d79c2afc929ee",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x4175aa53d4fc3d1c",
             "residual_m": "0xc040b81c8905bf33"
@@ -973,8 +973,8 @@
             ],
             "rho_m": "0x417373983ef0021d",
             "az_rad": "0x4012f2a1681dd8f6",
-            "el_rad": "0x3ff449cb50e7a7f1",
-            "iono_m": "0x401198d79b0fa455",
+            "el_rad": "0x3ff449cb50e7a7ee",
+            "iono_m": "0x401198d79b0fa456",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x417387af2b0b1dda",
             "residual_m": "0xc0476b482ed864b2"
@@ -1098,8 +1098,8 @@
             ],
             "rho_m": "0x41743ae95fc67fcc",
             "az_rad": "0x4014d4cafe591ee4",
-            "el_rad": "0x3febb7d6519980be",
-            "iono_m": "0x4014fa16d47d6cb1",
+            "el_rad": "0x3febb7d6519980bc",
+            "iono_m": "0x4014fa16d47d6cb4",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x41745a4d4ebab92a",
             "residual_m": "0xc0328522090962a8"
@@ -1337,7 +1337,7 @@
             "rho_m": "0x4176ae9fdc3c8b16",
             "az_rad": "0x40141889901b39d9",
             "el_rad": "0x3fd440fb09a85e56",
-            "iono_m": "0x402192694ccea999",
+            "iono_m": "0x402192694ccea99a",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x4176b8c78a16d73a",
             "residual_m": "0xbf0a3435f35255a8"
@@ -1361,8 +1361,8 @@
             ],
             "rho_m": "0x41758721edd4870c",
             "az_rad": "0x40053e68193d427c",
-            "el_rad": "0x3fe324f6f675fa77",
-            "iono_m": "0x401d79c10e1e51d0",
+            "el_rad": "0x3fe324f6f675fa78",
+            "iono_m": "0x401d79c10e1e51ce",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x4175aa501787d7d0",
             "residual_m": "0xbee386e9eb3902fd"
@@ -1385,9 +1385,9 @@
               "0x4171824fcebb1a4a"
             ],
             "rho_m": "0x417373954b654391",
-            "az_rad": "0x4012f2a5ec191afb",
+            "az_rad": "0x4012f2a5ec191afc",
             "el_rad": "0x3ff449c467c34456",
-            "iono_m": "0x401198dde6547740",
+            "iono_m": "0x401198dde6547741",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x417387ac1c68dcba",
             "residual_m": "0xbf0b3dd266e7c14b"
@@ -1410,9 +1410,9 @@
               "0x4174b78c3c5d43f7"
             ],
             "rho_m": "0x4174cbf6b74fdbbe",
-            "az_rad": "0x3fedd2cc207f99af",
-            "el_rad": "0x3fe7fc84ac07de46",
-            "iono_m": "0x4017cc308e94cf7a",
+            "az_rad": "0x3fedd2cc207f99ae",
+            "el_rad": "0x3fe7fc84ac07de45",
+            "iono_m": "0x4017cc308e94cf7b",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x4174c28952ee3d80",
             "residual_m": "0xbf11e00a76183a88"
@@ -1436,7 +1436,7 @@
             ],
             "rho_m": "0x417462dc47a16918",
             "az_rad": "0x3ffeee8b0b68287f",
-            "el_rad": "0x3fec5f2fcf134925",
+            "el_rad": "0x3fec5f2fcf134927",
             "iono_m": "0x4015dfaa50783132",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x41744394d34ed93b",
@@ -1460,9 +1460,9 @@
               "0x4173992c0e09a304"
             ],
             "rho_m": "0x4173d210a76c41a0",
-            "az_rad": "0x3febb0afb2f1f72e",
+            "az_rad": "0x3febb0afb2f1f727",
             "el_rad": "0x3ff67d750604a26e",
-            "iono_m": "0x40114a0caec82844",
+            "iono_m": "0x40114a0caec82845",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x4173d840a1f9079c",
             "residual_m": "0xbf0a483d213d6535"
@@ -1486,8 +1486,8 @@
             ],
             "rho_m": "0x41742f6ecdabfaf7",
             "az_rad": "0x4008df7fd67f5fbf",
-            "el_rad": "0x3feeee9da01e7e21",
-            "iono_m": "0x4014a9bb8bffb4f5",
+            "el_rad": "0x3feeee9da01e7e20",
+            "iono_m": "0x4014a9bb8bffb4f7",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x417425d56c0ee209",
             "residual_m": "0xbee426f552923a33"
@@ -1511,8 +1511,8 @@
             ],
             "rho_m": "0x41743ae7f8b4433f",
             "az_rad": "0x4014d4cc6e656ae1",
-            "el_rad": "0x3febb7c4e3e45c7e",
-            "iono_m": "0x4014fa2525165381",
+            "el_rad": "0x3febb7c4e3e45c7c",
+            "iono_m": "0x4014fa2525165385",
             "tropo_m": "0x0000000000000000",
             "p_hat_m": "0x41745a4bcc911a1e",
             "residual_m": "0xbf15333b578e58c1"
@@ -1873,7 +1873,7 @@
               "0x4173992c0e09a304"
             ],
             "rho_m": "0x4173d210a76ca44c",
-            "az_rad": "0x3febb0afb2fee64a",
+            "az_rad": "0x3febb0afb2fee649",
             "el_rad": "0x3ff67d7506054199",
             "iono_m": "0x40114a0caec74ae8",
             "tropo_m": "0x0000000000000000",
@@ -2289,10 +2289,10 @@
     "final_solution": {
       "note": "trf SVD step is BLAS-bound (Apple Accelerate); the converged x is an independent-solve AGREEMENT target (sub-micron / ~1e-12), never 0 ULP.",
       "x": [
-        "0x41511b07ff8243fd",
-        "0x4120cd6b5f861f49",
-        "0x41511e62229e1c2c",
-        "0x40dd4bfffffffc60"
+        "0x41511b07ff824402",
+        "0x4120cd6b5f861f37",
+        "0x41511e62229e1c2f",
+        "0x40dd4bffffffff75"
       ],
       "residual": [
         "0x0000000000000000",
@@ -2310,7 +2310,7 @@
         "lon_rad": "0x3fbf46bb9c109320",
         "height_m": "0x4072c0000000d3aa"
       },
-      "rx_clock_s": "0x3f1a3b884188e161",
+      "rx_clock_s": "0x3f1a3b884188e424",
       "truth_x": [
         "0x41511b07ff824402",
         "0x4120cd6b5f861f3b",
@@ -2319,11 +2319,11 @@
       ],
       "truth_rx_clock_s": "0x3f1a3b884188e4a0",
       "abs_err_x_m": [
-        "0x3e34000000000000",
-        "0x3e1c000000000000",
-        "0x3e30000000000000"
+        "0x0000000000000000",
+        "0x3e00000000000000",
+        "0x3e10000000000000"
       ],
-      "abs_err_clock_m": "0x3e2d000000000000"
+      "abs_err_clock_m": "0x3e01600000000000"
     }
   }
 }

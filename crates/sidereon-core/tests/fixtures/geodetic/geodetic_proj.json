@@ -9,8 +9,8 @@
       "id": 0,
       "lonlatalt_bits": [
         "0x4059c9b2d342ed10",
-        "0xc0240a6b00fcfda6",
-        "0x415ca5c14c40359a"
+        "0xc0240a6b00fcfda7",
+        "0x415ca5c14c403598"
       ]
     },
     {
@@ -21,9 +21,9 @@
       ],
       "id": 1,
       "lonlatalt_bits": [
-        "0xc03e0f782bfabd37",
+        "0xc03e0f782bfabd38",
         "0xc001f87fb5a5b85c",
-        "0x415e00ba86779b23"
+        "0x415e00ba86779b21"
       ]
     },
     {
@@ -35,8 +35,8 @@
       "id": 2,
       "lonlatalt_bits": [
         "0x4058968711d2886d",
-        "0x402d5e6f111cb77c",
-        "0x4173c490a6ad3ced"
+        "0x402d5e6f111cb77a",
+        "0x4173c490a6ad3cee"
       ]
     },
     {
@@ -138,7 +138,7 @@
       ],
       "id": 10,
       "lonlatalt_bits": [
-        "0x40398ff84a542267",
+        "0x40398ff84a542268",
         "0x4031f847f73653fc",
         "0x4131cec4727862ac"
       ]
@@ -191,8 +191,8 @@
       "id": 14,
       "lonlatalt_bits": [
         "0xc05548aa1bcf6092",
-        "0xc03819d6dacc158b",
-        "0x4122ae69ed207fc0"
+        "0xc03819d6dacc158a",
+        "0x4122ae69ed207fc8"
       ]
     },
     {
@@ -309,7 +309,7 @@
       "lonlatalt_bits": [
         "0xc06433277f35938a",
         "0x40288ab4986887a6",
-        "0xc12c49c6c549fb28"
+        "0xc12c49c6c549fb20"
       ]
     },
     {
@@ -424,7 +424,7 @@
       ],
       "id": 32,
       "lonlatalt_bits": [
-        "0xc059f78474c873c9",
+        "0xc059f78474c873ca",
         "0xc0454cdf7b5b23c9",
         "0x417928f97b140345"
       ]
@@ -569,7 +569,7 @@
       "lonlatalt_bits": [
         "0xc02aad701063fe10",
         "0xc024a86cba440acc",
-        "0x40bf31bc34457c00"
+        "0x40bf31bc34458000"
       ]
     },
     {
@@ -645,7 +645,7 @@
       ],
       "id": 49,
       "lonlatalt_bits": [
-        "0x40236354470a9091",
+        "0x40236354470a9090",
         "0x402ba19e87c68516",
         "0xc12dc75c4ac89a48"
       ]
@@ -658,7 +658,7 @@
       ],
       "id": 50,
       "lonlatalt_bits": [
-        "0xc05cb1fa89cec7c1",
+        "0xc05cb1fa89cec7c3",
         "0x40498273d29905a8",
         "0xc10668d5e26a96a0"
       ]
@@ -724,7 +724,7 @@
       "id": 55,
       "lonlatalt_bits": [
         "0x4040435af22a5e18",
-        "0x404a303aa81923d2",
+        "0x404a303aa81923d1",
         "0x40bff22cde625400"
       ]
     },
@@ -736,7 +736,7 @@
       ],
       "id": 56,
       "lonlatalt_bits": [
-        "0xc03dec42fe5efc31",
+        "0xc03dec42fe5efc33",
         "0x405071da2287aa4e",
         "0x40b5ea040eadbc00"
       ]
@@ -749,7 +749,7 @@
       ],
       "id": 57,
       "lonlatalt_bits": [
-        "0xc035fea10c539af9",
+        "0xc035fea10c539af8",
         "0x4047d2c6df1393ab",
         "0x4099a2f866728000"
       ]
@@ -803,7 +803,7 @@
       "lonlatalt_bits": [
         "0x404f48d66cb50dec",
         "0x403bc301e51f57cd",
-        "0x41240a25c9c57b40"
+        "0x41240a25c9c57b38"
       ]
     },
     {

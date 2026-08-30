@@ -40,9 +40,12 @@ use sidereon_core::{GnssSatelliteId, GnssSystem, TdbEarthOrientationProvider};
 
 const IGS_FINAL_SP3: &[u8] = include_bytes!("fixtures/sp3/IGS0OPSFIN_20261330000_03H_15M_ORB.SP3");
 const PINNED_ARC_START_TDB_J2000_S: f64 = 831_902_451.185_288_4;
-const ACHIEVED_PHASE_A_RMS_3D_M: f64 = 2.547_747_482_861_259_6;
+// Re-pinned after replacing host libm calls in the SP3 frame/force path with
+// portable Rust libm kernels; the independent agency SP3 regression remains
+// within the same fixed headroom.
+const ACHIEVED_PHASE_A_RMS_3D_M: f64 = 2.547_885_426_393_437;
 const ACHIEVED_PHASE_A_FINALS2000A_RMS_3D_M: f64 = 1.194_618_055_240_168_2;
-const ACHIEVED_PHASE_A_WITH_TIDES_FINALS2000A_RMS_3D_M: f64 = 1.193_244_842_446_745;
+const ACHIEVED_PHASE_A_WITH_TIDES_FINALS2000A_RMS_3D_M: f64 = 1.193_361_555_626_073_7;
 // 0.051 mm headroom keeps the regression bound boundary-sensitive while
 // allowing ordinary floating-point and solver-path variation.
 const REAL_SP3_RMS_HEADROOM_M: f64 = 5.1e-5;

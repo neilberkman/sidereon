@@ -82,7 +82,7 @@
     },
     {
       "day_of_year": 69,
-      "delay_bits": "0x3ffe80141802a9c5",
+      "delay_bits": "0x3ffe80141802a9c4",
       "name": "zwd_04",
       "receiver_lonlatalt_bits": [
         "0xc0582bea0cac2975",
@@ -122,7 +122,7 @@
     },
     {
       "day_of_year": 103,
-      "delay_bits": "0x3ff9ae15f19fbea7",
+      "delay_bits": "0x3ff9ae15f19fbea6",
       "name": "zwd_06",
       "receiver_lonlatalt_bits": [
         "0xc0410f9d8cc971e0",
@@ -662,7 +662,7 @@
     },
     {
       "day_of_year": 197,
-      "delay_bits": "0x40033fa57bf7c656",
+      "delay_bits": "0x40033fa57bf7c655",
       "name": "zwd_33",
       "receiver_lonlatalt_bits": [
         "0x401c50bcf0ab91a0",
@@ -882,7 +882,7 @@
     },
     {
       "day_of_year": 19,
-      "delay_bits": "0x402a16c4dec5d7d8",
+      "delay_bits": "0x402a16c4dec5d7d7",
       "name": "zwd_44",
       "receiver_lonlatalt_bits": [
         "0x4060096cdd9eee62",
@@ -1162,7 +1162,7 @@
     },
     {
       "day_of_year": 257,
-      "delay_bits": "0x3ff98f5ae9fa1500",
+      "delay_bits": "0x3ff98f5ae9fa1502",
       "name": "zwd_58",
       "receiver_lonlatalt_bits": [
         "0x404614cc447a8a30",
@@ -1322,7 +1322,7 @@
     },
     {
       "day_of_year": 28,
-      "delay_bits": "0x401ac34904680ec9",
+      "delay_bits": "0x401ac34904680ec7",
       "name": "zwd_66",
       "receiver_lonlatalt_bits": [
         "0x4038f0127cebaf40",

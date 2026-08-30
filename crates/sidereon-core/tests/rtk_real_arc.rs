@@ -1829,9 +1829,9 @@ fn canonical_rtk_is_deterministic_bounded_and_truthful() {
     );
 
     // BAR 1: frozen-bits determinism golden (portable: owned scalar + IEEE sqrt).
-    assert_eq!(canonical.baseline_m[0].to_bits(), 0xbfef8e410f517d27);
-    assert_eq!(canonical.baseline_m[1].to_bits(), 0xbfe5295e574d4787);
-    assert_eq!(canonical.baseline_m[2].to_bits(), 0x3ff117cc1610b9af);
+    assert_eq!(canonical.baseline_m[0].to_bits(), 0xbfef8e410f560ebf);
+    assert_eq!(canonical.baseline_m[1].to_bits(), 0xbfe5295e5773b5a6);
+    assert_eq!(canonical.baseline_m[2].to_bits(), 0x3ff117cc1607e2d1);
 
     // Determinism: a second canonical solve is bit-identical.
     let again = run_canonical();
@@ -2040,9 +2040,9 @@ fn wettzell_kinematic_rtk_filter_tracks_rtklib_truth_class() {
             // Re-frozen after enforcing the information time update's exact
             // symmetry. The truth-class quality assertions above remain the
             // primary gate for this process-noise-enabled solve.
-            0xbfef_7247_4db4_6e89,
-            0xbfe4_e9cf_5eaa_c5dd,
-            0x3ff1_1093_a8be_62c9,
+            0xbfef_7247_4ebe_0a94,
+            0xbfe4_e9cf_5f7f_631e,
+            0x3ff1_1093_a805_debb,
         ]
     );
 
@@ -2126,9 +2126,9 @@ fn pasa_scoa_receiver_antenna_corrections_are_core_validated() {
     assert_eq!(
         final_baseline_m.map(f64::to_bits),
         [
-            0x40b3_681d_8ac5_fa51,
-            0xc0d3_f0dd_6cff_76ca,
-            0xc0b7_2944_95dc_3a83,
+            0x40b3_681d_8ac5_f81c,
+            0xc0d3_f0dd_6cff_7696,
+            0xc0b7_2944_95dc_3b51,
         ]
     );
     assert!(distance(final_baseline_m, truth_baseline_m) < 1.0);
@@ -2184,9 +2184,9 @@ fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
             .reported_baseline_m
             .map(f64::to_bits),
         [
-            0x40b3_6899_e001_df89,
-            0xc0d3_f108_03a6_31df,
-            0xc0b7_294b_cad3_6552,
+            0x40b3_6899_e001_df77,
+            0xc0d3_f108_03a6_31e6,
+            0xc0b7_294b_cad3_6563,
         ]
     );
 
@@ -2211,9 +2211,9 @@ fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
             .reported_baseline_m
             .map(f64::to_bits),
         [
-            0x40b3_6899_e002_14c1,
-            0xc0d3_f108_03a6_8c8d,
-            0xc0b7_294b_cad2_f507,
+            0x40b3_6899_e002_143a,
+            0xc0d3_f108_03a6_8ca7,
+            0xc0b7_294b_cad2_f536,
         ]
     );
 
@@ -2292,9 +2292,9 @@ fn multignss_static_rtk_filter_reproduces_track_b_truth_gate() {
     assert_eq!(
         final_baseline_m.map(f64::to_bits),
         [
-            0xbfef_90a0_d505_a577,
-            0xbfe4_e420_4fc3_7928,
-            0x3ff1_1582_e7fc_143c,
+            0xbfef_90a0_d506_c17f,
+            0xbfe4_e420_4fc6_6ae5,
+            0x3ff1_1582_e7f6_a88f,
         ]
     );
     assert!(distance(final_baseline_m, antenna_baseline_m) < 0.01);
