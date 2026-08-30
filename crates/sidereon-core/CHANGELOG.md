@@ -4,6 +4,24 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-08-30
+
+### Fixed
+
+- `parse_archive_listing` deduplicated by scanning every object parsed so far
+  for each incoming row, which is quadratic. On AIUB's whole-tree CSV
+  (~426k rows) the parse took 154 s; it now indexes each path's position and
+  takes 0.23 s. Listing order and the `observed_at` backfill are unchanged.
+
+### Changed
+
+- Transcendental math (sin, cos, tan, atan2, asin, acos, exp, log, pow) now
+  goes through portable Rust kernels rather than the platform C math library,
+  so results are bit-identical across x86_64 and arm64. The full test suite
+  now runs on both architectures in CI and passes bit-for-bit on each. The
+  owned trust-region solver's complete subproblem assembly, not only its
+  factorization, uses fixed-order scalar arithmetic.
+
 ## [1.3.1] - 2026-08-29
 
 ### Changed
