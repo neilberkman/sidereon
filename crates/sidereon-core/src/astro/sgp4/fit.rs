@@ -383,13 +383,13 @@ impl MeanChart {
         let mean = deg_to_rad(elements.mean_anomaly_deg);
         let incl = deg_to_rad(elements.inclination_deg);
         let varpi = argp + raan;
-        let half_tan = (incl * 0.5).tan();
+        let half_tan = libm::tan(incl * 0.5);
         Self {
             n_rev_day: elements.mean_motion_rev_per_day,
-            af: ecc * varpi.cos(),
-            ag: ecc * varpi.sin(),
-            chi: half_tan * raan.sin(),
-            psi: half_tan * raan.cos(),
+            af: ecc * libm::cos(varpi),
+            ag: ecc * libm::sin(varpi),
+            chi: half_tan * libm::sin(raan),
+            psi: half_tan * libm::cos(raan),
             lam: normalize_angle(mean + varpi),
         }
     }
@@ -539,9 +539,9 @@ fn initial_guess(
     let dt = seconds_between(resolved.epoch, sample.epoch);
     target.lam = normalize_angle(target.lam + target.n_rev_day * TAU / SECONDS_PER_DAY * dt);
 
-    if rad_to_deg(2.0 * (target.chi.hypot(target.psi)).atan()) >= 179.5 {
+    if rad_to_deg(2.0 * libm::atan(libm::hypot(target.chi, target.psi))) >= 179.5 {
         return Err(TleFitError::InclinationNearRetrograde {
-            inclination_deg: rad_to_deg(2.0 * (target.chi.hypot(target.psi)).atan()),
+            inclination_deg: rad_to_deg(2.0 * libm::atan(libm::hypot(target.chi, target.psi))),
         });
     }
 
@@ -810,15 +810,16 @@ fn chart_from_coe(coe: &ClassicalElements) -> Result<MeanChart, TleFitError> {
     }
 
     let mean = true_to_mean(nu, coe.ecc).map_err(|_| TleFitError::NotElliptical)?;
-    let n_rad_s = (MU_WGS72_KM3_S2 / coe.a.powi(3)).sqrt();
+    let a3 = coe.a * coe.a * coe.a;
+    let n_rad_s = (MU_WGS72_KM3_S2 / a3).sqrt();
     let varpi = argp + raan;
-    let half_tan = (coe.incl * 0.5).tan();
+    let half_tan = libm::tan(coe.incl * 0.5);
     Ok(MeanChart {
         n_rev_day: n_rad_s * SECONDS_PER_DAY / TAU,
-        af: coe.ecc * varpi.cos(),
-        ag: coe.ecc * varpi.sin(),
-        chi: half_tan * raan.sin(),
-        psi: half_tan * raan.cos(),
+        af: coe.ecc * libm::cos(varpi),
+        ag: coe.ecc * libm::sin(varpi),
+        chi: half_tan * libm::sin(raan),
+        psi: half_tan * libm::cos(raan),
         lam: normalize_angle(mean + varpi),
     })
 }
@@ -840,7 +841,7 @@ fn chart_to_elements(
     let chi = x[3];
     let psi = x[4];
     let lam = x[5];
-    let ecc = af.hypot(ag);
+    let ecc = libm::hypot(af, ag);
     if n_rev_day <= 0.0 || ecc >= ECC_MAX {
         return None;
     }
@@ -853,9 +854,9 @@ fn chart_to_elements(
         return None;
     }
 
-    let varpi = ag.atan2(af);
-    let incl = 2.0 * chi.hypot(psi).atan();
-    let raan = chi.atan2(psi);
+    let varpi = libm::atan2(ag, af);
+    let incl = 2.0 * libm::atan(libm::hypot(chi, psi));
+    let raan = libm::atan2(chi, psi);
     let argp = varpi - raan;
     let mean = lam - varpi;
 

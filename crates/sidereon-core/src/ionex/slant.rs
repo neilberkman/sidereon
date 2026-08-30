@@ -63,13 +63,16 @@ pub(crate) fn pierce_point(
     use crate::constants::RAD_TO_DEG;
     use core::f64::consts::PI;
 
-    let s = re_km / (re_km + h_km) * el_rad.cos();
+    let s = re_km / (re_km + h_km) * libm::cos(el_rad);
 
     // Earth-central angle from receiver to pierce point.
-    let psi = PI / 2.0 - el_rad - s.asin();
+    let psi = PI / 2.0 - el_rad - libm::asin(s);
 
-    let phi_ipp = (lat_rad.sin() * psi.cos() + lat_rad.cos() * psi.sin() * az_rad.cos()).asin();
-    let lambda_ipp = lon_rad + (psi.sin() * az_rad.sin() / phi_ipp.cos()).asin();
+    let phi_ipp = libm::asin(
+        libm::sin(lat_rad) * libm::cos(psi)
+            + libm::cos(lat_rad) * libm::sin(psi) * libm::cos(az_rad),
+    );
+    let lambda_ipp = lon_rad + libm::asin(libm::sin(psi) * libm::sin(az_rad) / libm::cos(phi_ipp));
 
     PiercePoint {
         s,

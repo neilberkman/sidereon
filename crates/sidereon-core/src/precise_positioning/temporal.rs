@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::astro::math::special::portable_log;
 use crate::dop::PositionCovariance;
 
 use super::{FloatEpoch, FloatResidual, TemporalCorrelationSummary};
@@ -202,7 +203,7 @@ fn finite_ar1_variance_inflation(rho: f64, n: usize) -> f64 {
 
 fn decorrelation_time_epochs(rho: f64) -> f64 {
     if rho > 0.0 {
-        -1.0 / rho.ln()
+        -1.0 / portable_log(rho)
     } else {
         0.0
     }
@@ -227,7 +228,7 @@ mod tests {
     #[test]
     fn ar1_temporal_estimator_recovers_injected_decorrelation_time() {
         let injected_tau_s = 180.0;
-        let rho = (-EPOCH_INTERVAL_S / injected_tau_s).exp();
+        let rho = libm::exp(-EPOCH_INTERVAL_S / injected_tau_s);
         let residuals = synthetic_ar1_residuals(180, 8, rho, 0);
         let epochs = synthetic_epochs(180);
 
@@ -269,7 +270,7 @@ mod tests {
     #[test]
     fn ar1_coverage_is_calibrated_where_independent_covariance_undercovers() {
         let injected_tau_s = 180.0;
-        let rho = (-EPOCH_INTERVAL_S / injected_tau_s).exp();
+        let rho = libm::exp(-EPOCH_INTERVAL_S / injected_tau_s);
         let n = 240;
         let trials = 320;
         let mut independent_covered = 0_usize;
@@ -356,9 +357,9 @@ mod tests {
     fn gaussian_pair(rng: &mut Lcg) -> (f64, f64) {
         let u1 = rng.next_open01();
         let u2 = rng.next_open01();
-        let radius = (-2.0 * u1.ln()).sqrt();
+        let radius = (-2.0 * portable_log(u1)).sqrt();
         let angle = 2.0 * std::f64::consts::PI * u2;
-        (radius * angle.cos(), radius * angle.sin())
+        (radius * libm::cos(angle), radius * libm::sin(angle))
     }
 
     struct Lcg {

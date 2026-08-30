@@ -545,8 +545,8 @@ fn solve_kepler(m: f64, e: f64) -> f64 {
     let m = m.rem_euclid(two_pi);
     let mut ee = if e < 0.8 { m } else { std::f64::consts::PI };
     for _ in 0..30 {
-        let f = ee - e * ee.sin() - m;
-        let fp = 1.0 - e * ee.cos();
+        let f = ee - e * libm::sin(ee) - m;
+        let fp = 1.0 - e * libm::cos(ee);
         let d = f / fp;
         ee -= d;
         if d.abs() < REDUCED_ORBIT_KEPLER_STEP_EPS_RAD {
@@ -571,22 +571,22 @@ fn eval_gcrs_km_ecc(p: &[f64], dt: f64) -> [f64; 3] {
         // Circular fast path: u -> lambda, exactly the circular model.
         return eval_gcrs_km(&[a, i, p[2], p[3], p[6], p[7]], dt);
     }
-    let omega = h.atan2(k);
+    let omega = libm::atan2(h, k);
     let mm = lambda - omega;
     let big_e = solve_kepler(mm, e);
-    let (se, ce) = big_e.sin_cos();
+    let (se, ce) = (libm::sin(big_e), libm::cos(big_e));
     let r = a * (1.0 - e * ce);
-    let nu = (((1.0 - e * e).sqrt()) * se).atan2(ce - e);
+    let nu = libm::atan2(((1.0 - e * e).sqrt()) * se, ce - e);
     let u = omega + nu;
 
-    rotate_in_plane_km([r * u.cos(), r * u.sin()], i, raan)
+    rotate_in_plane_km([r * libm::cos(u), r * libm::sin(u)], i, raan)
 }
 
 /// Rotate an in-plane (node-aligned) 2-vector `[x, y]` km by `Rx(i)` then
 /// `Rz(raan)` into GCRS, matching the circular model's outer rotation.
 fn rotate_in_plane_km(xy: [f64; 2], i: f64, raan: f64) -> [f64; 3] {
-    let (si, ci) = i.sin_cos();
-    let (sr, cr) = raan.sin_cos();
+    let (si, ci) = (libm::sin(i), libm::cos(i));
+    let (sr, cr) = (libm::sin(raan), libm::cos(raan));
     let x1 = xy[0];
     let y1 = xy[1] * ci;
     let z1 = xy[1] * si;
@@ -610,10 +610,10 @@ fn eval_gcrs_velocity_km_s_ecc(p: &[f64], dt: f64) -> [f64; 3] {
     if e < ECCENTRICITY_ZERO_EPS {
         return eval_gcrs_velocity_km_s(&[a, i, p[2], p[3], p[6], p[7]], dt);
     }
-    let omega = h.atan2(k);
+    let omega = libm::atan2(h, k);
     let mm = lambda - omega;
     let big_e = solve_kepler(mm, e);
-    let (se, ce) = big_e.sin_cos();
+    let (se, ce) = (libm::sin(big_e), libm::cos(big_e));
     // dE/dt from differentiating Kepler: (1 - e cos E) Edot = dM/dt = n.
     let edot = n / (1.0 - e * ce);
     let beta = (1.0 - e * e).sqrt();
@@ -625,7 +625,7 @@ fn eval_gcrs_velocity_km_s_ecc(p: &[f64], dt: f64) -> [f64; 3] {
     let ydot_pf = a * beta * ce * edot;
 
     // Rotate the perifocal frame into the node-aligned in-plane frame by ω.
-    let (so, co) = omega.sin_cos();
+    let (so, co) = (libm::sin(omega), libm::cos(omega));
     let x1 = co * x_pf - so * y_pf;
     let y1 = so * x_pf + co * y_pf;
     let dx1 = co * xdot_pf - so * ydot_pf;
@@ -633,8 +633,8 @@ fn eval_gcrs_velocity_km_s_ecc(p: &[f64], dt: f64) -> [f64; 3] {
 
     // Apply Rx(i) then Rz(raan) with the raan_rate coupling, exactly as the
     // circular velocity does (only the in-plane inputs differ).
-    let (si, ci) = i.sin_cos();
-    let (sr, cr) = raan.sin_cos();
+    let (si, ci) = (libm::sin(i), libm::cos(i));
+    let (sr, cr) = (libm::sin(raan), libm::cos(raan));
     let y1i = y1 * ci;
     let dy1i = dy1 * ci;
 
@@ -653,13 +653,13 @@ fn eval_gcrs_km(p: &[f64], dt: f64) -> [f64; 3] {
     let u = p[4] + p[5] * dt;
 
     // In-plane circle.
-    let (su, cu) = u.sin_cos();
+    let (su, cu) = (libm::sin(u), libm::cos(u));
     let xp = a * cu;
     let yp = a * su;
 
     // Rotate by inclination about x, then by raan about z.
-    let (si, ci) = i.sin_cos();
-    let (sr, cr) = raan.sin_cos();
+    let (si, ci) = (libm::sin(i), libm::cos(i));
+    let (sr, cr) = (libm::sin(raan), libm::cos(raan));
 
     // Rx(i) * [xp, yp, 0] = [xp, yp*ci, yp*si]
     let x1 = xp;
@@ -680,9 +680,9 @@ fn eval_gcrs_velocity_km_s(p: &[f64], dt: f64) -> [f64; 3] {
     let raan = p[2] + raan_rate * dt;
     let u = p[4] + n * dt;
 
-    let (su, cu) = u.sin_cos();
-    let (si, ci) = i.sin_cos();
-    let (sr, cr) = raan.sin_cos();
+    let (su, cu) = (libm::sin(u), libm::cos(u));
+    let (si, ci) = (libm::sin(i), libm::cos(i));
+    let (sr, cr) = (libm::sin(raan), libm::cos(raan));
 
     let xp = a * cu;
     let yp = a * su;
@@ -738,7 +738,7 @@ fn seed_params(samples: &[GcrsSample]) -> Result<[f64; N_PARAMS], ReducedOrbitEr
     let hhat = [h[0] / hn, h[1] / hn, h[2] / hn];
 
     // Inclination from the normal's z component.
-    let i = hhat[2].clamp(-1.0, 1.0).acos();
+    let i = libm::acos(hhat[2].clamp(-1.0, 1.0));
     if i < MIN_INCLINATION_RAD || (std::f64::consts::PI - i) < MIN_INCLINATION_RAD {
         return Err(ReducedOrbitError::RaanAmbiguous);
     }
@@ -749,7 +749,7 @@ fn seed_params(samples: &[GcrsSample]) -> Result<[f64; N_PARAMS], ReducedOrbitEr
     if node_n <= VECTOR_NORM_ZERO_EPS {
         return Err(ReducedOrbitError::RaanAmbiguous);
     }
-    let raan0 = node[1].atan2(node[0]);
+    let raan0 = libm::atan2(node[1], node[0]);
     let nhat = [node[0] / node_n, node[1] / node_n, 0.0];
 
     // Argument of latitude of the first sample: angle from the node, measured in
@@ -759,7 +759,7 @@ fn seed_params(samples: &[GcrsSample]) -> Result<[f64; N_PARAMS], ReducedOrbitEr
     // In-plane "perpendicular to node" axis: h_hat x n_hat.
     let p_axis = cross(&hhat, &nhat);
     let sin_u = (r0[0] * p_axis[0] + r0[1] * p_axis[1] + r0[2] * p_axis[2]) / norm(r0);
-    let arg_lat0 = sin_u.atan2(cos_u);
+    let arg_lat0 = libm::atan2(sin_u, cos_u);
 
     // Mean motion from the Keplerian relation at the fitted a (km, MU in km^3/s^2).
     let n = (MU_EARTH / (a_km * a_km * a_km)).sqrt();
@@ -774,7 +774,7 @@ fn seed_params(samples: &[GcrsSample]) -> Result<[f64; N_PARAMS], ReducedOrbitEr
 /// `a` in kilometers (matching `RE_EARTH`).
 fn raan_rate_j2(n: f64, i: f64, a_km: f64) -> f64 {
     let re_over_a = RE_EARTH / a_km;
-    -1.5 * n * J2_EARTH * re_over_a * re_over_a * i.cos()
+    -1.5 * n * J2_EARTH * re_over_a * re_over_a * libm::cos(i)
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,7 +1088,7 @@ fn fit_eccentric(
     let arg_perigee_rad = if e < ECCENTRICITY_ZERO_EPS {
         0.0
     } else {
-        h.atan2(k)
+        libm::atan2(h, k)
     };
 
     let elements = Elements {

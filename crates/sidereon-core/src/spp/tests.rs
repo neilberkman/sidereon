@@ -1908,10 +1908,10 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     };
 
     let sol = solve_with_policy(&store, &inputs, true, policy).expect("coarse search solves");
-    assert_eq!(sol.position.x_m.to_bits(), 0x414b544d32219a0d);
-    assert_eq!(sol.position.y_m.to_bits(), 0x412040dc182a9b20);
-    assert_eq!(sol.position.z_m.to_bits(), 0x4153f61dfc670caa);
-    assert_eq!(sol.rx_clock_s.to_bits(), 0x3f3f84f505aa3883);
+    assert_eq!(sol.position.x_m.to_bits(), 0x414b544d32219a58);
+    assert_eq!(sol.position.y_m.to_bits(), 0x412040dc182a9933);
+    assert_eq!(sol.position.z_m.to_bits(), 0x4153f61dfc670fde);
+    assert_eq!(sol.rx_clock_s.to_bits(), 0x3f3f84f505aab32e);
     assert!(sol.metadata.converged);
     assert!(sol.metadata.redundancy >= 1);
     assert!(sol.metadata.raim_checkable);
@@ -2038,10 +2038,10 @@ fn owned_deterministic_solver_frozen_bits() {
     // Owned deterministic kernel: its own frozen-bits golden.
     let owned = solve_with_solver(&store, &inputs, true, SolverRecipe::OwnedDeterministicTrf)
         .expect("owned deterministic solve");
-    assert_eq!(owned.position.x_m.to_bits(), 0x414b544cd339d204);
-    assert_eq!(owned.position.y_m.to_bits(), 0x412040dc030556d9);
-    assert_eq!(owned.position.z_m.to_bits(), 0x4153f61de1d76fa6);
-    assert_eq!(owned.rx_clock_s.to_bits(), 0x3f3f84ebef5aa1b8);
+    assert_eq!(owned.position.x_m.to_bits(), 0x414b544cd339d1cd);
+    assert_eq!(owned.position.y_m.to_bits(), 0x412040dc03055a9c);
+    assert_eq!(owned.position.z_m.to_bits(), 0x4153f61de1d76f2e);
+    assert_eq!(owned.rx_clock_s.to_bits(), 0x3f3f84ebef5a8fa8);
     assert_eq!(owned.used_sats, reference.used_sats);
     assert_eq!(owned.residuals_m.len(), reference.residuals_m.len());
 
@@ -2483,7 +2483,6 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     };
 
     let canonical = run_canonical();
-
     // Reference SPP (Skyfield-faithful) for the bounded-tolerance comparison;
     // this is the unchanged reference path, proving canonical is additive.
     let reference = solve_with_policy(&store, &inputs, true, policy).expect("reference SPP");
@@ -2516,10 +2515,10 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     );
 
     // BAR 1: frozen-bits determinism golden (this build's reproducible output).
-    assert_eq!(canonical.position.x_m.to_bits(), 0x414b544cd339bab6);
-    assert_eq!(canonical.position.y_m.to_bits(), 0x412040dc03055a75);
-    assert_eq!(canonical.position.z_m.to_bits(), 0x4153f61de1d7513a);
-    assert_eq!(canonical.rx_clock_s.to_bits(), 0x3f3f84ebef550522);
+    assert_eq!(canonical.position.x_m.to_bits(), 0x414b544cd339d1f2);
+    assert_eq!(canonical.position.y_m.to_bits(), 0x412040dc0305586a);
+    assert_eq!(canonical.position.z_m.to_bits(), 0x4153f61de1d76f5e);
+    assert_eq!(canonical.rx_clock_s.to_bits(), 0x3f3f84ebef5a9708);
 
     // Determinism: a second canonical solve is bit-identical.
     let again = run_canonical();

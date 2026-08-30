@@ -17,6 +17,7 @@
 //! relation. It is the reference-grade companion to the compact broadcast-driven
 //! [`super::galileo_nequick_g_native`] helper.
 
+use crate::astro::math::special::portable_log;
 use crate::error::{Error, Result};
 
 use super::nequick_g_data::{
@@ -163,7 +164,7 @@ fn nq_exp(power: f64) -> f64 {
     } else if power < -80.0 {
         1.8049e-35
     } else {
-        power.exp()
+        libm::exp(power)
     }
 }
 
@@ -203,8 +204,8 @@ impl Angle {
         Self {
             deg,
             rad,
-            sin: rad.sin(),
-            cos: rad.cos(),
+            sin: libm::sin(rad),
+            cos: libm::cos(rad),
         }
     }
 
@@ -212,14 +213,14 @@ impl Angle {
         Self {
             deg: rad * RAD_TO_DEG,
             rad,
-            sin: rad.sin(),
-            cos: rad.cos(),
+            sin: libm::sin(rad),
+            cos: libm::cos(rad),
         }
     }
 
     fn from_sin(sin: f64) -> Self {
         let cos = cos_from_sin(sin);
-        let rad = sin.atan2(cos);
+        let rad = libm::atan2(sin, cos);
         Self {
             deg: rad * RAD_TO_DEG,
             rad,
@@ -230,7 +231,7 @@ impl Angle {
 
     fn from_cos(cos: f64) -> Self {
         let sin = sin_from_cos(cos);
-        let rad = sin.atan2(cos);
+        let rad = libm::atan2(sin, cos);
         Self {
             deg: rad * RAD_TO_DEG,
             rad,
@@ -382,9 +383,9 @@ fn solar_declination(month: u8, utc_hours: f64) -> (f64, f64) {
     let mean_anomaly = (0.9856 * doy - 3.289) * DEG_TO_RAD;
     let ecliptic_longitude = mean_anomaly
         + (282.634 * DEG_TO_RAD)
-        + (1.916 * DEG_TO_RAD) * mean_anomaly.sin()
-        + (0.02 * DEG_TO_RAD) * (2.0 * mean_anomaly).sin();
-    let sin = 0.39782 * ecliptic_longitude.sin();
+        + (1.916 * DEG_TO_RAD) * libm::sin(mean_anomaly)
+        + (0.02 * DEG_TO_RAD) * libm::sin(2.0 * mean_anomaly);
+    let sin = 0.39782 * libm::sin(ecliptic_longitude);
     (sin, cos_from_sin(sin))
 }
 
@@ -408,8 +409,8 @@ fn f2_fourier_coefficients(
     let mut sin_h = [0.0_f64; MAX_HARMONICS];
     let mut cos_h = [0.0_f64; MAX_HARMONICS];
     let solar_long = solar_longitude_rad(utc_hours);
-    sin_h[0] = solar_long.sin();
-    cos_h[0] = solar_long.cos();
+    sin_h[0] = libm::sin(solar_long);
+    cos_h[0] = libm::cos(solar_long);
     for i in 1..MAX_HARMONICS {
         sin_h[i] = sin_h[i - 1] * cos_h[0] + cos_h[i - 1] * sin_h[0];
         cos_h[i] = cos_h[i - 1] * cos_h[0] - sin_h[i - 1] * sin_h[0];
@@ -487,7 +488,7 @@ fn legendre_expansion(
 fn modip_legendre_coeff(modip_deg: f64) -> [f64; 12] {
     let mut c = [0.0_f64; 12];
     c[0] = 1.0;
-    let s = (modip_deg * DEG_TO_RAD).sin();
+    let s = libm::sin(modip_deg * DEG_TO_RAD);
     c[1] = s;
     for i in 2..12 {
         let mut term = c[i - 1] * c[1];
@@ -506,8 +507,8 @@ fn longitude_legendre_coeff(lon: &Angle) -> ([f64; 8], [f64; 8]) {
     cos[0] = lon.cos;
     let mut n_long = 2.0 * lon.rad;
     for i in 1..8 {
-        sin[i] = n_long.sin();
-        cos[i] = n_long.cos();
+        sin[i] = libm::sin(n_long);
+        cos[i] = libm::cos(n_long);
         n_long += lon.rad;
     }
     (sin, cos)
@@ -584,8 +585,11 @@ impl NequickModel {
         f2.thickness_top_km = f64::INFINITY;
         f2.thickness_bottom_km = {
             let grad = 0.01
-                * (-3.467 + 0.857 * (f2_crit_freq * f2_crit_freq).ln() + 2.02 * trans_factor.ln())
-                    .exp();
+                * libm::exp(
+                    -3.467
+                        + 0.857 * portable_log(f2_crit_freq * f2_crit_freq)
+                        + 2.02 * portable_log(trans_factor),
+                );
             (0.385 * f2.electron_density) / grad
         };
         f1.thickness_top_km = 0.3 * (f2.height_km - f1.height_km);
@@ -613,7 +617,7 @@ impl NequickModel {
         let lat_param = (season * (ee - 1.0)) / (ee + 1.0);
 
         let mut crit = (1.112 - 0.019 * lat_param) * self.az_sfu.sqrt().sqrt();
-        crit *= nq_exp((effective_zenith * DEG_TO_RAD).cos().ln() * 0.3);
+        crit *= nq_exp(portable_log(libm::cos(effective_zenith * DEG_TO_RAD)) * 0.3);
         (crit * crit + 0.49).sqrt()
     }
 
@@ -624,7 +628,7 @@ impl NequickModel {
         } else if local_time >= 24.0 {
             local_time -= 24.0;
         }
-        let cos_hour = (PI * (12.0 - local_time) / 12.0).cos();
+        let cos_hour = libm::cos(PI * (12.0 - local_time) / 12.0);
         let zenith_cos = position.lat.sin * self.solar_decl_sin
             + position.lat.cos * self.solar_decl_cos * cos_hour;
         let zenith = Angle::from_cos(zenith_cos);
@@ -775,7 +779,7 @@ fn bottom_side(profile: &Profile, height_km: f64) -> f64 {
     let mut f1_arg = (h - profile.f1.height_km) / f1_b;
     let mut e_arg = (h - profile.e.height_km) / e_b;
 
-    let temp = (10.0 / (h_above_f2.abs() + 1.0)).exp();
+    let temp = libm::exp(10.0 / (h_above_f2.abs() + 1.0));
     f1_arg *= temp;
     e_arg *= temp;
 
@@ -783,9 +787,9 @@ fn bottom_side(profile: &Profile, height_km: f64) -> f64 {
     let f1_above = f1_arg.abs() > 25.0;
     let e_above = e_arg.abs() > 25.0;
 
-    f2_arg = f2_arg.exp();
-    f1_arg = f1_arg.exp();
-    e_arg = e_arg.exp();
+    f2_arg = libm::exp(f2_arg);
+    f1_arg = libm::exp(f1_arg);
+    e_arg = libm::exp(e_arg);
 
     let s = |amp: f64, exp_value: f64, above: bool| {
         if above {
@@ -884,16 +888,19 @@ impl RayGeometry {
         }
 
         let lon_delta = satellite.lon.rad - station.lon.rad;
-        let lon_delta_sin = lon_delta.sin();
-        let lon_delta_cos = lon_delta.cos();
+        let lon_delta_sin = libm::sin(lon_delta);
+        let lon_delta_cos = libm::cos(lon_delta);
 
         let delta_cos = (station.lat.sin * satellite.lat.sin)
             + (station.lat.cos * satellite.lat.cos * lon_delta_cos);
         let delta_sin = sin_from_cos(delta_cos);
 
         // zenith angle of the satellite seen from the receiver
-        let zenith_rad = delta_sin.atan2(delta_cos - (station.radius_km / satellite.radius_km));
-        let zenith_sin = zenith_rad.sin();
+        let zenith_rad = libm::atan2(
+            delta_sin,
+            delta_cos - (station.radius_km / satellite.radius_km),
+        );
+        let zenith_sin = libm::sin(zenith_rad);
 
         let perigee_radius_km = station.radius_km * zenith_sin;
         if zenith_rad.abs() > (90.0 * DEG_TO_RAD) && perigee_radius_km < EARTH_RADIUS_KM {
@@ -907,8 +914,8 @@ impl RayGeometry {
             ((satellite.lat.sin - (delta_cos * station.lat.sin)) / delta_sin) / station.lat.cos;
 
         let delta_p_rad = (90.0 * DEG_TO_RAD) - zenith_rad;
-        let delta_p_sin = delta_p_rad.sin();
-        let delta_p_cos = delta_p_rad.cos();
+        let delta_p_sin = libm::sin(delta_p_rad);
+        let delta_p_cos = libm::cos(delta_p_rad);
 
         let perigee_lat_sin =
             (station.lat.sin * delta_p_cos) - (station.lat.cos * delta_p_sin * sigma_cos);
@@ -917,7 +924,7 @@ impl RayGeometry {
         let sin_lamp = (-sigma_sin * delta_p_sin) / perigee_lat.cos;
         let cos_lamp = ((delta_p_cos - (station.lat.sin * perigee_lat.sin)) / station.lat.cos)
             / perigee_lat.cos;
-        let perigee_lon = Angle::from_rad(sin_lamp.atan2(cos_lamp) + station.lon.rad);
+        let perigee_lon = Angle::from_rad(libm::atan2(sin_lamp, cos_lamp) + station.lon.rad);
 
         let mut geometry = Self {
             is_vertical,
@@ -958,10 +965,10 @@ impl RayGeometry {
         }
         let delta_rad = satellite.lon.rad - self.perigee_lon.rad;
         let psi_cos = (self.perigee_lat.sin * satellite.lat.sin)
-            + self.perigee_lat.cos * satellite.lat.cos * delta_rad.cos();
+            + self.perigee_lat.cos * satellite.lat.cos * libm::cos(delta_rad);
         let psi_sin = sin_from_cos(psi_cos);
 
-        self.azimuth_sin = (satellite.lat.cos * delta_rad.sin()) / psi_sin;
+        self.azimuth_sin = (satellite.lat.cos * libm::sin(delta_rad)) / psi_sin;
         self.azimuth_cos = (satellite.lat.sin - (self.perigee_lat.sin * psi_cos))
             / (psi_sin * self.perigee_lat.cos);
     }
@@ -985,7 +992,7 @@ impl RayGeometry {
 
         let dlam_sin = delta_sin * self.azimuth_sin * self.receiver_lat_cos;
         let dlam_cos = delta_cos - (self.receiver_lat_sin * lat.sin);
-        let dlam = dlam_sin.atan2(dlam_cos);
+        let dlam = libm::atan2(dlam_sin, dlam_cos);
         let lon = Angle::from_rad(dlam + self.perigee_lon.rad);
 
         Position {

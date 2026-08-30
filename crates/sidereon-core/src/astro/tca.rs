@@ -2641,7 +2641,7 @@ mod tests {
         assert_eq!(with_noise.collision_probability, direct);
         assert_eq!(
             with_noise.collision_probability.pc.to_bits(),
-            4_506_509_322_197_832_265
+            4_506_509_326_956_086_449
         );
     }
 

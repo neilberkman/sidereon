@@ -457,11 +457,11 @@ fn robust_reweighted_rows(
 }
 
 fn solution_step_norm(previous: [f64; 4], next: [f64; 4]) -> f64 {
-    ((next[0] - previous[0]).powi(2)
-        + (next[1] - previous[1]).powi(2)
-        + (next[2] - previous[2]).powi(2)
-        + (next[3] - previous[3]).powi(2))
-    .sqrt()
+    let d0 = next[0] - previous[0];
+    let d1 = next[1] - previous[1];
+    let d2 = next[2] - previous[2];
+    let d3 = next[3] - previous[3];
+    (d0 * d0 + d1 * d1 + d2 * d2 + d3 * d3).sqrt()
 }
 
 fn assemble_solution(

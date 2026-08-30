@@ -103,9 +103,25 @@ pub fn fd_steps(x0: &DVector<f64>, rel_step: f64) -> Result<Vec<FdStep>, SolveEr
 }
 
 fn fd_steps_checked(x0: &DVector<f64>, rel_step: f64) -> Result<Vec<FdStep>, SolveError> {
+    fd_steps_checked_with_min_steps(x0, rel_step, None)
+}
+
+fn fd_steps_checked_with_min_steps(
+    x0: &DVector<f64>,
+    rel_step: f64,
+    min_steps: Option<&DVector<f64>>,
+) -> Result<Vec<FdStep>, SolveError> {
     validate_nonempty_vector(x0, "parameters")?;
     validate_vector(x0, "parameters")?;
-    let steps = fd_steps_unchecked(x0, rel_step);
+    if let Some(min_steps) = min_steps {
+        if min_steps.len() != x0.len() {
+            return Err(invalid_input("fd_min_steps", "length mismatch"));
+        }
+        for &min_step in min_steps.iter() {
+            crate::validate::finite_nonneg(min_step, "fd_min_steps").map_err(map_field_error)?;
+        }
+    }
+    let steps = fd_steps_unchecked(x0, rel_step, min_steps);
     for step in &steps {
         validate_value(step.h, "fd_step")?;
         validate_value(step.dx, "fd_step")?;
@@ -117,12 +133,18 @@ fn fd_steps_checked(x0: &DVector<f64>, rel_step: f64) -> Result<Vec<FdStep>, Sol
     Ok(steps)
 }
 
-fn fd_steps_unchecked(x0: &DVector<f64>, rel_step: f64) -> Vec<FdStep> {
+fn fd_steps_unchecked(
+    x0: &DVector<f64>,
+    rel_step: f64,
+    min_steps: Option<&DVector<f64>>,
+) -> Vec<FdStep> {
     (0..x0.len())
         .map(|i| {
             let xi = x0[i];
             let sign_x0 = if xi >= 0.0 { 1.0 } else { -1.0 };
-            let h = rel_step * sign_x0 * xi.abs().max(1.0);
+            let relative_h = rel_step * xi.abs().max(1.0);
+            let min_h = min_steps.map_or(0.0, |steps| steps[i]);
+            let h = sign_x0 * relative_h.max(min_h);
             let mut x_perturbed = x0.clone();
             x_perturbed[i] = xi + h;
             let dx = x_perturbed[i] - xi;
@@ -155,13 +177,31 @@ pub fn jacobian_2point<F>(
 where
     F: Fn(&DVector<f64>) -> DVector<f64>,
 {
-    jacobian_2point_checked(|x| Ok(residual(x)), x0, f0)
+    jacobian_2point_checked_with_min_steps(|x| Ok(residual(x)), x0, f0, None)
 }
 
-fn jacobian_2point_checked<F>(
+/// Forward finite-difference Jacobian with per-parameter absolute step floors.
+///
+/// This crate-private variant lets callers that use the same cancellation
+/// protection as the solver derive an exactly matching covariance matrix.
+#[cfg(test)]
+pub(crate) fn jacobian_2point_with_min_steps<F>(
     residual: F,
     x0: &DVector<f64>,
     f0: &DVector<f64>,
+    min_steps: &DVector<f64>,
+) -> Result<DMatrix<f64>, SolveError>
+where
+    F: Fn(&DVector<f64>) -> DVector<f64>,
+{
+    jacobian_2point_checked_with_min_steps(|x| Ok(residual(x)), x0, f0, Some(min_steps))
+}
+
+fn jacobian_2point_checked_with_min_steps<F>(
+    residual: F,
+    x0: &DVector<f64>,
+    f0: &DVector<f64>,
+    min_steps: Option<&DVector<f64>>,
 ) -> Result<DMatrix<f64>, SolveError>
 where
     F: Fn(&DVector<f64>) -> Result<DVector<f64>, SolveError>,
@@ -172,7 +212,7 @@ where
     validate_vector(f0, "residual")?;
     let m = f0.len();
     let n = x0.len();
-    let steps = fd_steps_checked(x0, FD_REL_STEP_2POINT)?;
+    let steps = fd_steps_checked_with_min_steps(x0, FD_REL_STEP_2POINT, min_steps)?;
     let mut jac = DMatrix::zeros(m, n);
     for step in &steps {
         let f1 = residual(&step.x_perturbed)?;
@@ -497,6 +537,8 @@ pub struct LeastSquaresProblem<F> {
     residual: F,
     /// `sqrt` of the diagonal weights, or `None` for the identity weighting.
     sqrt_weights: Option<DVector<f64>>,
+    /// Optional per-parameter absolute floors for forward-difference steps.
+    fd_min_steps: Option<DVector<f64>>,
     x0: DVector<f64>,
 }
 
@@ -509,6 +551,7 @@ where
         Self {
             residual,
             sqrt_weights: None,
+            fd_min_steps: None,
             x0,
         }
     }
@@ -520,6 +563,24 @@ where
         Self {
             residual,
             sqrt_weights: Some(sqrt_weights),
+            fd_min_steps: None,
+            x0,
+        }
+    }
+
+    /// A weighted problem with per-parameter absolute floors for the
+    /// forward-difference step. A zero floor keeps the relative step.
+    pub fn with_weights_and_fd_min_steps(
+        residual: F,
+        x0: DVector<f64>,
+        weights: DVector<f64>,
+        fd_min_steps: DVector<f64>,
+    ) -> Self {
+        let sqrt_weights = weights.map(f64::sqrt);
+        Self {
+            residual,
+            sqrt_weights: Some(sqrt_weights),
+            fd_min_steps: Some(fd_min_steps),
             x0,
         }
     }
@@ -544,6 +605,15 @@ where
             }
             None => Ok(r),
         }
+    }
+
+    fn jacobian(&self, x: &DVector<f64>, f0: &DVector<f64>) -> Result<DMatrix<f64>, SolveError> {
+        jacobian_2point_checked_with_min_steps(
+            |p| self.weighted_residual(p),
+            x,
+            f0,
+            self.fd_min_steps.as_ref(),
+        )
     }
 }
 
@@ -611,7 +681,7 @@ where
     validate_vector(&x, "initial parameters")?;
     let mut r = problem.weighted_residual(&x)?;
     let mut f0 = r.clone();
-    let mut jac = jacobian_2point_checked(|p| problem.weighted_residual(p), &x, &f0)?;
+    let mut jac = problem.jacobian(&x, &f0)?;
     let mut nfev = 1usize; // the f0 above
     let mut cur_cost = cost(&r)?;
 
@@ -674,7 +744,7 @@ where
                 r = r_trial;
                 cur_cost = cost_trial;
                 f0 = r.clone();
-                jac = jacobian_2point_checked(|p| problem.weighted_residual(p), &x, &f0)?;
+                jac = problem.jacobian(&x, &f0)?;
                 nfev += n; // FD probes for the new Jacobian
                 iterations += 1;
                 mu *= 0.5;

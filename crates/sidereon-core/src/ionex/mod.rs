@@ -377,12 +377,15 @@ pub(crate) fn galileo_nequick_g_native_unchecked(
     let az = galileo_effective_ionisation_level(coeffs, mu_deg);
 
     let local_time_h = (t_gal_s / SECONDS_PER_HOUR + lon_deg / 15.0).rem_euclid(24.0);
-    let solar = 0.5 + 0.5 * ((local_time_h - 14.0) * (2.0 * std::f64::consts::PI / 24.0)).cos();
+    let solar = 0.5 + 0.5 * libm::cos((local_time_h - 14.0) * (2.0 * std::f64::consts::PI / 24.0));
     let diurnal = 0.35 + 0.65 * solar.max(0.0);
     let seasonal = 1.0
         + 0.08
-            * ((day_of_year - 172.0) * (2.0 * std::f64::consts::PI / DAYS_PER_JULIAN_YEAR)).cos();
-    let equatorial = 1.0 + 0.35 * (-(mu_deg / 22.0).powi(2)).exp();
+            * libm::cos(
+                (day_of_year - 172.0) * (2.0 * std::f64::consts::PI / DAYS_PER_JULIAN_YEAR),
+            );
+    let mu_ratio = mu_deg / 22.0;
+    let equatorial = 1.0 + 0.35 * libm::exp(-(mu_ratio * mu_ratio));
 
     let vertical_tecu = (2.5 + 0.135 * az) * diurnal * seasonal * equatorial;
     let mapping = single_layer_mapping(el_deg);
@@ -417,18 +420,20 @@ fn galileo_modified_dip_latitude_deg(lat_deg: f64, lon_deg: f64) -> f64 {
     // polynomial without shipping the full MODIP grid alongside this crate.
     let pole_lat = 80.37 * DEG_TO_RAD;
     let pole_lon = -72.62 * DEG_TO_RAD;
-    let dip_lat =
-        (lat.sin() * pole_lat.sin() + lat.cos() * pole_lat.cos() * (lon - pole_lon).cos()).asin();
-    let magnetic_dip = (2.0 * dip_lat.tan()).atan();
-    let denom = lat.cos().max(1.0e-12).sqrt();
-    (magnetic_dip.tan() / denom).atan() * RAD_TO_DEG
+    let dip_lat = libm::asin(
+        libm::sin(lat) * libm::sin(pole_lat)
+            + libm::cos(lat) * libm::cos(pole_lat) * libm::cos(lon - pole_lon),
+    );
+    let magnetic_dip = libm::atan(2.0 * libm::tan(dip_lat));
+    let denom = libm::cos(lat).max(1.0e-12).sqrt();
+    libm::atan(libm::tan(magnetic_dip) / denom) * RAD_TO_DEG
 }
 
 fn single_layer_mapping(el_deg: f64) -> f64 {
     let el_rad = el_deg.max(0.1) * DEG_TO_RAD;
     let earth_radius_m = MEAN_EARTH_RADIUS_M;
     let shell_radius_m = earth_radius_m + 450_000.0;
-    let arg = earth_radius_m / shell_radius_m * el_rad.cos();
+    let arg = earth_radius_m / shell_radius_m * libm::cos(el_rad);
     1.0 / (1.0 - arg * arg).max(1.0e-12).sqrt()
 }
 

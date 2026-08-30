@@ -1302,7 +1302,9 @@ fn interpolate_mapped_position_neville(
         let kx = series.pos_kx.get(bytes, k);
         let ky = series.pos_ky.get(bytes, k);
         let kz = series.pos_kz.get(bytes, k);
-        let (s, c) = (OMEGA_E_DOT_RAD_S * tj).sin_cos();
+        let theta = OMEGA_E_DOT_RAD_S * tj;
+        let s = libm::sin(theta);
+        let c = libm::cos(theta);
         t[j] = tj;
         px[j] = c * kx - s * ky;
         py[j] = s * kx + c * ky;

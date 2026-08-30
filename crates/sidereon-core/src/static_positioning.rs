@@ -56,6 +56,13 @@ const STATIC_SOLVER_GTOL: f64 = 1e-14;
 const STATIC_SOLVER_FTOL: f64 = 1e-15;
 const STATIC_SOLVER_XTOL: f64 = 1e-14;
 const STATIC_SOLVER_MAX_NFEV: usize = 400;
+// ECEF coordinates can be close to zero even though the receiver is on Earth.
+// The generic sqrt-eps relative step would then perturb a coordinate by a few
+// nanometres, and subtracting two ~20,000 km ranges turns that into a noisy
+// finite-difference column. A decimetre floor keeps the static range Jacobian
+// in its linear regime while avoiding cancellation; clock columns retain the
+// generic relative step because their residual dependence is affine.
+const STATIC_POSITION_FD_MIN_STEP_M: f64 = 0.1;
 
 /// One receive epoch for [`solve_static`].
 ///
@@ -571,7 +578,20 @@ fn solve_static_core(
         max_nfev: STATIC_SOLVER_MAX_NFEV,
     };
     let base_weights = DVector::from_row_slice(&prepared.base_weights);
-    let problem = LeastSquaresProblem::with_weights(&residual, prepared.x0.clone(), base_weights);
+    // Preserve the existing one-epoch SPP-equivalent path. The absolute
+    // position floor is needed for the shared-position columns introduced by
+    // stacked epochs; one epoch remains the established SPP compatibility path.
+    let fd_min_steps = if epochs.len() > 1 {
+        static_fd_min_steps(prepared.n_params)
+    } else {
+        DVector::zeros(prepared.n_params)
+    };
+    let problem = LeastSquaresProblem::with_weights_and_fd_min_steps(
+        &residual,
+        prepared.x0.clone(),
+        base_weights,
+        fd_min_steps.clone(),
+    );
     let report_result = solve_trf_with(&problem, &opts, TrustRegionSolve::NalgebraLu);
     if let Some((epoch_index, satellite)) = lost.get() {
         return Err(StaticSolveError::EphemerisLost {
@@ -600,7 +620,12 @@ fn solve_static_core(
                 .collect();
             let weights = DVector::from_row_slice(&effective);
             let x_prev = report.x.clone();
-            let problem = LeastSquaresProblem::with_weights(&residual, x_prev.clone(), weights);
+            let problem = LeastSquaresProblem::with_weights_and_fd_min_steps(
+                &residual,
+                x_prev.clone(),
+                weights,
+                fd_min_steps.clone(),
+            );
             let next = solve_trf_with(&problem, &opts, TrustRegionSolve::NalgebraLu);
             if let Some((epoch_index, satellite)) = lost.get() {
                 return Err(StaticSolveError::EphemerisLost {
@@ -612,10 +637,10 @@ fn solve_static_core(
             final_weights = effective;
             outer_iterations += 1;
             final_robust_scale_m = Some(scale);
-            let dpos = ((report.x[0] - x_prev[0]).powi(2)
-                + (report.x[1] - x_prev[1]).powi(2)
-                + (report.x[2] - x_prev[2]).powi(2))
-            .sqrt();
+            let dx = report.x[0] - x_prev[0];
+            let dy = report.x[1] - x_prev[1];
+            let dz = report.x[2] - x_prev[2];
+            let dpos = (dx * dx + dy * dy + dz * dz).sqrt();
             if dpos < robust.outer_tol_m {
                 break;
             }
@@ -635,6 +660,19 @@ fn solve_static_core(
         final_robust_scale_m,
         final_weights: &final_weights,
     })
+}
+
+fn static_fd_min_steps(n_params: usize) -> DVector<f64> {
+    DVector::from_iterator(
+        n_params,
+        (0..n_params).map(|index| {
+            if index < 3 {
+                STATIC_POSITION_FD_MIN_STEP_M
+            } else {
+                0.0
+            }
+        }),
+    )
 }
 
 fn prepare_static(

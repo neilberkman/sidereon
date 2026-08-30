@@ -426,7 +426,7 @@ pub fn thin_shell_mapping_function(elevation_rad: f64, config: TecConfig) -> Res
     let shell_radius_m = config.earth_radius_m + config.shell_height_m;
     validate::finite_positive(shell_radius_m, "shell_radius_m")
         .map_err(|_| TecError::InvalidShellHeight)?;
-    let obliquity_arg = config.earth_radius_m * elevation_rad.cos() / shell_radius_m;
+    let obliquity_arg = config.earth_radius_m * libm::cos(elevation_rad) / shell_radius_m;
     validate::finite(obliquity_arg, "obliquity_arg").map_err(|_| TecError::InvalidShellHeight)?;
     let mapping_denominator = 1.0 - obliquity_arg * obliquity_arg;
     validate::finite_positive(mapping_denominator, "mapping_denominator")
@@ -599,21 +599,23 @@ pub fn ionospheric_pierce_point(
     validate_azimuth(azimuth_rad)?;
 
     let shell_radius_m = config.earth_radius_m + config.shell_height_m;
-    let shell_scaled_cosine = config.earth_radius_m / shell_radius_m * elevation_rad.cos();
-    let earth_central_angle_rad = FRAC_PI_2 - elevation_rad - shell_scaled_cosine.asin();
+    let shell_scaled_cosine = config.earth_radius_m / shell_radius_m * libm::cos(elevation_rad);
+    let earth_central_angle_rad = FRAC_PI_2 - elevation_rad - libm::asin(shell_scaled_cosine);
 
-    let receiver_sin = receiver_latitude_rad.sin();
-    let receiver_cos = receiver_latitude_rad.cos();
-    let psi_sin = earth_central_angle_rad.sin();
-    let psi_cos = earth_central_angle_rad.cos();
-    let azimuth_sin = azimuth_rad.sin();
-    let azimuth_cos = azimuth_rad.cos();
+    let receiver_sin = libm::sin(receiver_latitude_rad);
+    let receiver_cos = libm::cos(receiver_latitude_rad);
+    let psi_sin = libm::sin(earth_central_angle_rad);
+    let psi_cos = libm::cos(earth_central_angle_rad);
+    let azimuth_sin = libm::sin(azimuth_rad);
+    let azimuth_cos = libm::cos(azimuth_rad);
 
     let latitude_sine =
         (receiver_sin * psi_cos + receiver_cos * psi_sin * azimuth_cos).clamp(-1.0, 1.0);
-    let latitude_rad = latitude_sine.asin();
-    let longitude_step_rad =
-        (azimuth_sin * psi_sin * receiver_cos).atan2(psi_cos - receiver_sin * latitude_rad.sin());
+    let latitude_rad = libm::asin(latitude_sine);
+    let longitude_step_rad = libm::atan2(
+        azimuth_sin * psi_sin * receiver_cos,
+        psi_cos - receiver_sin * libm::sin(latitude_rad),
+    );
     let longitude_rad = normalize_longitude_rad(receiver_longitude_rad + longitude_step_rad);
 
     Ok(IonosphericPiercePoint {

@@ -6,6 +6,138 @@
 //! cross-platform 0-ULP determinism. `libm::erf` is a deterministic port that
 //! produces the same bits on every platform.
 
+/// Binary64 natural logarithm with a portable, correctly-rounded result for
+/// the finite positive inputs used by the core math paths.
+///
+/// `libm::log` is deterministic, but its fdlibm implementation documents an
+/// error bound below one ULP rather than correct rounding; in particular it
+/// returns the lower neighbor for `log(3.0)`. The small expansion kernel below
+/// keeps the logarithm series and the `ln(2)` constant in four error-free
+/// limbs, so the final conversion to binary64 selects the nearest result
+/// without consulting the host math library. Non-positive and non-finite
+/// values retain `libm`'s documented special-value behavior.
+#[inline]
+pub fn portable_log(x: f64) -> f64 {
+    if !x.is_finite() || x <= 0.0 {
+        return libm::log(x);
+    }
+    if x == 1.0 {
+        return 0.0;
+    }
+
+    let mut scaled = x;
+    let mut exponent = ((scaled.to_bits() >> 52) & 0x7ff) as i32 - 1023;
+    if exponent == -1023 {
+        scaled *= 18_014_398_509_481_984.0; // 2^54
+        exponent = ((scaled.to_bits() >> 52) & 0x7ff) as i32 - 1023 - 54;
+    }
+    let mantissa =
+        f64::from_bits((scaled.to_bits() & 0x000f_ffff_ffff_ffff) | 0x3ff0_0000_0000_0000);
+    let z = (mantissa - 1.0) / (mantissa + 1.0);
+    let z2 = Quad::from(z * z);
+    let mut term = Quad::from(z);
+    let mut sum = Quad::from(z);
+    for odd in (3..=601).step_by(2) {
+        term = term.mul(z2);
+        let addend = term.scale(1.0 / odd as f64);
+        sum = sum.add(addend);
+        if addend.values[0].abs() < f64::from_bits(0x38f0_0000_0000_0000) {
+            break;
+        }
+    }
+
+    let ln_mantissa = sum.scale(2.0);
+    let ln_two = Quad {
+        values: [
+            f64::from_bits(0x3fe6_2e42_fee0_0000),
+            f64::from_bits(0x3dea_39ef_3579_3c76),
+            f64::from_bits(0x3a8c_c01f_97b5_7a08),
+            f64::from_bits(0xb729_79b3_1ace_93a5),
+        ],
+    };
+    ln_mantissa.add(ln_two.scale(exponent as f64)).to_f64()
+}
+
+#[derive(Clone, Copy)]
+struct Quad {
+    values: [f64; 4],
+}
+
+impl Quad {
+    const fn from(value: f64) -> Self {
+        Self {
+            values: [value, 0.0, 0.0, 0.0],
+        }
+    }
+
+    fn add(self, other: Self) -> Self {
+        let mut result = self;
+        for &value in &other.values {
+            result.add_scalar(value);
+        }
+        result
+    }
+
+    fn add_scalar(&mut self, value: f64) {
+        let mut carry = value;
+        for index in 0..self.values.len() {
+            let (sum, error) = two_sum(self.values[index], carry);
+            self.values[index] = sum;
+            carry = error;
+        }
+    }
+
+    fn scale(self, factor: f64) -> Self {
+        let mut result = Self::from(0.0);
+        for &value in &self.values {
+            let (product, error) = two_prod(value, factor);
+            result.add_scalar(product);
+            result.add_scalar(error);
+        }
+        result
+    }
+
+    fn mul(self, other: Self) -> Self {
+        let mut result = Self::from(0.0);
+        for &left in &self.values {
+            for &right in &other.values {
+                let (product, error) = two_prod(left, right);
+                result.add_scalar(product);
+                result.add_scalar(error);
+            }
+        }
+        result
+    }
+
+    fn to_f64(self) -> f64 {
+        self.values.iter().copied().sum()
+    }
+}
+
+#[inline]
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let sum = a + b;
+    let b_virtual = sum - a;
+    let a_virtual = sum - b_virtual;
+    let b_roundoff = b - b_virtual;
+    let a_roundoff = a - a_virtual;
+    (sum, a_roundoff + b_roundoff)
+}
+
+#[inline]
+fn two_prod(a: f64, b: f64) -> (f64, f64) {
+    const SPLITTER: f64 = 134_217_729.0; // 2^27 + 1
+    let product = a * b;
+    let a_split = SPLITTER * a;
+    let a_high = a_split - (a_split - a);
+    let a_low = a - a_high;
+    let b_split = SPLITTER * b;
+    let b_high = b_split - (b_split - b);
+    let b_low = b - b_high;
+    let error = ((a_high * b_high - product) + a_high * b_low + a_low * b_high) + a_low * b_low;
+    (product, error)
+}
+
 /// Gauss error function, deterministic across platforms via the `libm` crate.
 #[inline]
 pub fn erf(x: f64) -> f64 {
@@ -69,7 +201,7 @@ fn erfc_inv_raw(y: f64) -> Option<f64> {
 
 fn normal_pdf(x: f64) -> f64 {
     const INV_SQRT_2PI: f64 = 0.398_942_280_401_432_7;
-    INV_SQRT_2PI * (-0.5 * x * x).exp()
+    INV_SQRT_2PI * libm::exp(-0.5 * x * x)
 }
 
 fn inverse_normal_cdf_approx(p: f64) -> Option<f64> {
@@ -110,14 +242,14 @@ fn inverse_normal_cdf_approx(p: f64) -> Option<f64> {
     const P_HIGH: f64 = 1.0 - P_LOW;
 
     if p < P_LOW {
-        let q = (-2.0 * p.ln()).sqrt();
+        let q = (-2.0 * portable_log(p)).sqrt();
         Some(poly6(&C, q) / poly4p1(&D, q))
     } else if p <= P_HIGH {
         let q = p - 0.5;
         let r = q * q;
         Some(q * poly6(&A, r) / poly5p1(&B, r))
     } else {
-        let q = (-2.0 * (1.0 - p).ln()).sqrt();
+        let q = (-2.0 * portable_log(1.0 - p)).sqrt();
         Some(-poly6(&C, q) / poly4p1(&D, q))
     }
 }
@@ -176,5 +308,14 @@ mod tests {
             normal_q_inv(5.0e-8).unwrap().to_bits(),
             0x4015_4e90_b4db_5fad
         );
+    }
+
+    #[test]
+    fn portable_log_resolves_libm_rounding_counterexample() {
+        assert_eq!(portable_log(3.0).to_bits(), 0x3ff1_93ea_7aad_030b);
+        assert_eq!(portable_log(1.0).to_bits(), 0x0000_0000_0000_0000);
+        assert_eq!(portable_log(0.5).to_bits(), 0xbfe6_2e42_fefa_39ef);
+        assert_eq!(portable_log(f64::INFINITY), f64::INFINITY);
+        assert!(portable_log(-1.0).is_nan());
     }
 }

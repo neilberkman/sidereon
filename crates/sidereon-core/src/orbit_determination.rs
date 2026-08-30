@@ -39,6 +39,13 @@ use crate::{GnssSatelliteId, GnssSystem};
 const STATE_PARAM_COUNT: usize = 6;
 const MIN_SEED_SAMPLES: usize = 2;
 const DEFAULT_MIN_LEDGER_SAMPLES: usize = 3;
+// The propagated position is obtained by subtracting nearly equal kilometre
+// coordinates. A sqrt-eps perturbation in the scaled state can therefore be
+// below the useful resolution of the propagation/frame chain. Keep the
+// physical perturbation at 1 m and 1 mm/s before converting it to scaled
+// parameter coordinates.
+const ORBIT_FD_MIN_POSITION_STEP_KM: f64 = 1.0e-3;
+const ORBIT_FD_MIN_VELOCITY_STEP_KM_S: f64 = 1.0e-6;
 
 /// Options controlling a precise-orbit fit.
 #[derive(Debug, Clone)]
@@ -609,9 +616,23 @@ fn fit_one_observation_arc(
         }
     };
 
-    let problem = LeastSquaresProblem::new(
+    let scaled_seed = DVector::from_vec(scale_params(&seed_vector, &param_scales).to_vec());
+    let fd_min_steps = DVector::from_iterator(
+        STATE_PARAM_COUNT,
+        (0..STATE_PARAM_COUNT).map(|index| {
+            let physical_step = if index < 3 {
+                ORBIT_FD_MIN_POSITION_STEP_KM
+            } else {
+                ORBIT_FD_MIN_VELOCITY_STEP_KM_S
+            };
+            physical_step / param_scales[index]
+        }),
+    );
+    let problem = LeastSquaresProblem::with_weights_and_fd_min_steps(
         residual,
-        DVector::from_vec(scale_params(&seed_vector, &param_scales).to_vec()),
+        scaled_seed,
+        DVector::from_element(observations.len() * 3, 1.0),
+        fd_min_steps,
     );
     let report = match solve_trf_with(&problem, &options.solver_options, options.linear_solve) {
         Ok(report) => report,

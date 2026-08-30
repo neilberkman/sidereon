@@ -34,7 +34,7 @@ impl Ionex {
         let mut out = String::new();
         self.write_header(&mut out);
 
-        let scale = 10f64.powi(self.exponent());
+        let scale = libm::pow(10.0, self.exponent() as f64);
         for (index, epoch) in self.map_epochs().iter().enumerate() {
             let map_number = index + 1;
             write_labeled(&mut out, &format!("{map_number:6}"), "START OF TEC MAP");

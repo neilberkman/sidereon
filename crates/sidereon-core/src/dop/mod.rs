@@ -112,10 +112,10 @@ pub fn line_of_sight_from_az_el_deg(
     validate_az_el_receiver(azimuth_deg, elevation_deg, receiver)?;
     let az = azimuth_deg * DEG_TO_RAD;
     let el = elevation_deg * DEG_TO_RAD;
-    let cos_el = el.cos();
-    let east = cos_el * az.sin();
-    let north = cos_el * az.cos();
-    let up = el.sin();
+    let cos_el = libm::cos(el);
+    let east = cos_el * libm::sin(az);
+    let north = cos_el * libm::cos(az);
+    let up = libm::sin(el);
 
     let r = ecef_to_enu_rotation(receiver.lat_rad, receiver.lon_rad);
     let e_x = r[0][0] * east + r[1][0] * north + r[2][0] * up;
@@ -332,10 +332,10 @@ fn enu_rotation(
 /// Rows are `[east; north; up]` and match RTKLIB's geodetic-normal ENU
 /// convention used by the DOP and covariance helpers.
 pub fn ecef_to_enu_rotation(lat_rad: f64, lon_rad: f64) -> [[f64; 3]; 3] {
-    let sphi = lat_rad.sin();
-    let cphi = lat_rad.cos();
-    let slam = lon_rad.sin();
-    let clam = lon_rad.cos();
+    let sphi = libm::sin(lat_rad);
+    let cphi = libm::cos(lat_rad);
+    let slam = libm::sin(lon_rad);
+    let clam = libm::cos(lon_rad);
     [
         [-slam, clam, 0.0],
         [-sphi * clam, -sphi * slam, cphi],
@@ -1050,6 +1050,7 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod public_api_tests {
     use super::*;
+    use crate::astro::math::special::portable_log;
 
     fn receiver() -> Wgs84Geodetic {
         Wgs84Geodetic::new(45.0_f64.to_radians(), -75.0_f64.to_radians(), 100.0)
@@ -1112,7 +1113,7 @@ mod public_api_tests {
     fn horizontal_error_ellipse_uses_chi_square_two_dof_scale() {
         let covariance = [[9.0, 2.0, 0.0], [2.0, 4.0, 0.0], [0.0, 0.0, 16.0]];
         let ellipse = horizontal_error_ellipse(covariance, 0.95).expect("ellipse");
-        let expected_scale = -2.0 * (1.0_f64 - 0.95).ln();
+        let expected_scale = -2.0 * portable_log(1.0_f64 - 0.95);
         assert_eq!(ellipse.chi_square_scale.to_bits(), expected_scale.to_bits());
         assert!(ellipse.semi_major_m >= ellipse.semi_minor_m);
         assert!(ellipse.semi_minor_m > 0.0);

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use nalgebra::{DMatrix, DVector};
 
 use super::*;
-use crate::astro::math::least_squares::jacobian_2point;
+use crate::astro::math::least_squares::jacobian_2point_with_min_steps;
 use crate::dop::line_of_sight_from_az_el_deg;
 use crate::spp::{
     ionosphere_for, sat_model, solve, KlobucharCoeffs, SatModelEnv, SppModelRecipe,
@@ -515,7 +515,9 @@ fn independent_jacobian_covariance(
         )
     };
     let f0 = residual(&x);
-    let jacobian = jacobian_2point(residual, &x, &f0).expect("independent jacobian");
+    let min_steps = super::static_fd_min_steps(x.len());
+    let jacobian = jacobian_2point_with_min_steps(residual, &x, &f0, &min_steps)
+        .expect("independent jacobian");
     normal_covariance(&jacobian, 1.0).expect("independent covariance")
 }
 

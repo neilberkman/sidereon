@@ -83,8 +83,8 @@ pub(crate) fn vmf1_mapping(
         (0.0, 0.005, 0.001)
     };
     let ch = c0h
-        + (((doy / DAYS_PER_JULIAN_YEAR * 2.0 * PI + phh).cos() + 1.0) * c11h / 2.0 + c10h)
-            * (1.0 - lat_rad.cos());
+        + ((libm::cos(doy / DAYS_PER_JULIAN_YEAR * 2.0 * PI + phh) + 1.0) * c11h / 2.0 + c10h)
+            * (1.0 - libm::cos(lat_rad));
     let mh = mapf(el_rad, ah, bh, ch);
 
     let bw = 0.00146;
