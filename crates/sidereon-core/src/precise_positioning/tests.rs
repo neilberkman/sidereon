@@ -256,7 +256,11 @@ fn ppp_cutoff_sat_position(receiver_m: [f64; 3], az_deg: f64, el_deg: f64) -> [f
     let az = az_deg.to_radians();
     let el = el_deg.to_radians();
     let range_m = 26_000_000.0;
-    let los = [el.sin(), el.cos() * az.sin(), el.cos() * az.cos()];
+    let los = [
+        libm::sin(el),
+        libm::cos(el) * libm::sin(az),
+        libm::cos(el) * libm::cos(az),
+    ];
     [
         receiver_m[0] + range_m * los[0],
         receiver_m[1] + range_m * los[1],

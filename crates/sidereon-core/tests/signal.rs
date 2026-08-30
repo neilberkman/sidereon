@@ -69,7 +69,7 @@ fn clean_signal(
         .enumerate()
         .map(|(idx, c)| {
             let theta = w * idx as f64;
-            IqSample::new(c as f64 * theta.cos(), c as f64 * theta.sin())
+            IqSample::new(c as f64 * libm::cos(theta), c as f64 * libm::sin(theta))
         })
         .collect()
 }
@@ -275,12 +275,11 @@ fn replica_correlate_acquire_and_loss_match_application_oracle_bits() {
         "acquisition peak"
     );
     // The copied application fixture stores the numpy generator's metric. The
-    // Sidereon public implementation has always returned this deterministic bit
-    // pattern, four ULP above that numpy value, so the core pins the preserved
-    // public behavior exactly.
+    // canonical Sidereon path uses portable libm for the carrier wipeoff and
+    // pins the resulting public value exactly.
     assert_eq!(
         got.metric.to_bits(),
-        0x409369e276358ff0,
+        0x409369e276358fef,
         "acquisition metric"
     );
     assert_eq!(got.peak_metric.to_bits(), got.metric.to_bits());
