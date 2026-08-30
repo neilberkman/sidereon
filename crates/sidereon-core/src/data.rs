@@ -3396,12 +3396,20 @@ pub struct PublishedProduct {
 /// [`newest_published_product`].
 pub fn parse_archive_listing(body: &str) -> Result<Vec<PublishedObject>, DataCatalogError> {
     let mut seen: Vec<PublishedObject> = Vec::new();
+    // Listings are large (AIUB's whole-tree CSV is ~426k rows), and a row may
+    // repeat a path already listed. Deduplicating by scanning `seen` is
+    // quadratic and takes minutes on that listing, so the position of each
+    // path is indexed instead. `seen` still carries listing order; the index
+    // only answers "have I already pushed this path, and where".
+    let mut positions: HashMap<String, usize> = HashMap::new();
     let mut push = |path: String, observed_at: Option<String>| {
-        if let Some(existing) = seen.iter_mut().find(|object| object.path == path) {
+        if let Some(&at) = positions.get(&path) {
+            let existing: &mut PublishedObject = &mut seen[at];
             if existing.observed_at.is_none() {
                 existing.observed_at = observed_at;
             }
         } else {
+            positions.insert(path.clone(), seen.len());
             seen.push(PublishedObject { path, observed_at });
         }
     };

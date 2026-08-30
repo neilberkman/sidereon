@@ -2401,3 +2401,38 @@ fn terrain_tile_index_matches_reader_grid_and_clamps_upper_edges() {
         })
     );
 }
+
+/// The whole-tree CSV can repeat a path, and the archive only reports an
+/// mtime on some of those rows. Deduplication must therefore keep one object
+/// per path, in listing order, and let a later row supply an `observed_at`
+/// the first row left empty. This pins that contract independently of how the
+/// duplicate lookup is implemented: the lookup is indexed rather than a scan
+/// over everything already parsed, because the live AIUB listing is ~426k
+/// rows and scanning is quadratic.
+#[test]
+fn parse_archive_listing_dedupes_by_path_in_listing_order() {
+    let body = concat!(
+        "CODE/a.SP3;10;;x\n",
+        "CODE/b.SP3;20;2026-01-02 03:04:05;x\n",
+        "CODE/a.SP3;10;2026-01-01 00:00:00;x\n",
+        "CODE/c.SP3;30;-1;x\n",
+        "CODE/b.SP3;20;2026-09-09 09:09:09;x\n",
+    );
+    let objects = parse_archive_listing(body).expect("recognized listing");
+
+    let paths: Vec<&str> = objects.iter().map(|object| object.path.as_str()).collect();
+    assert_eq!(paths, ["CODE/a.SP3", "CODE/b.SP3", "CODE/c.SP3"]);
+
+    // First row had no mtime, so the later duplicate fills it.
+    assert_eq!(
+        objects[0].observed_at.as_deref(),
+        Some("2026-01-01 00:00:00")
+    );
+    // First row already had one, so the later duplicate does not overwrite it.
+    assert_eq!(
+        objects[1].observed_at.as_deref(),
+        Some("2026-01-02 03:04:05")
+    );
+    // `-1` is the archive's "no mtime" sentinel, not a timestamp.
+    assert_eq!(objects[2].observed_at, None);
+}
