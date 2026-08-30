@@ -110,44 +110,43 @@ fn sun_moon_eci_unchecked(t: f64) -> SunMoon {
 
     // Obliquity of the ecliptic (deg -> rad).
     let eps = 23.439291 - 0.0130042 * t;
-    let sine = (eps * DEG_TO_RAD).sin();
-    let cose = (eps * DEG_TO_RAD).cos();
+    let sine = libm::sin(eps * DEG_TO_RAD);
+    let cose = libm::cos(eps * DEG_TO_RAD);
 
     // Sun position in ECI.
     let ms = 357.5277233 + 35999.05034 * t;
     let ls = 280.460
         + 36000.770 * t
-        + 1.914666471 * (ms * DEG_TO_RAD).sin()
-        + 0.019994643 * (2.0 * ms * DEG_TO_RAD).sin();
+        + 1.914666471 * libm::sin(ms * DEG_TO_RAD)
+        + 0.019994643 * libm::sin(2.0 * ms * DEG_TO_RAD);
     let rs = MONTENBRUCK_AU_M
         * (1.000140612
-            - 0.016708617 * (ms * DEG_TO_RAD).cos()
-            - 0.000139589 * (2.0 * ms * DEG_TO_RAD).cos());
-    let sinl = (ls * DEG_TO_RAD).sin();
-    let cosl = (ls * DEG_TO_RAD).cos();
+            - 0.016708617 * libm::cos(ms * DEG_TO_RAD)
+            - 0.000139589 * libm::cos(2.0 * ms * DEG_TO_RAD));
+    let sinl = libm::sin(ls * DEG_TO_RAD);
+    let cosl = libm::cos(ls * DEG_TO_RAD);
     let sun = [rs * cosl, rs * cose * sinl, rs * sine * sinl];
 
     // Moon position in ECI.
-    let lm = 218.32 + 481267.883 * t + 6.29 * f[0].sin() - 1.27 * (f[0] - 2.0 * f[3]).sin()
-        + 0.66 * (2.0 * f[3]).sin()
-        + 0.21 * (2.0 * f[0]).sin()
-        - 0.19 * f[1].sin()
-        - 0.11 * (2.0 * f[2]).sin();
-    let pm = 5.13 * f[2].sin() + 0.28 * (f[0] + f[2]).sin()
-        - 0.28 * (f[2] - f[0]).sin()
-        - 0.17 * (f[2] - 2.0 * f[3]).sin();
+    let lm = 218.32 + 481267.883 * t + 6.29 * libm::sin(f[0]) - 1.27 * libm::sin(f[0] - 2.0 * f[3])
+        + 0.66 * libm::sin(2.0 * f[3])
+        + 0.21 * libm::sin(2.0 * f[0])
+        - 0.19 * libm::sin(f[1])
+        - 0.11 * libm::sin(2.0 * f[2]);
+    let pm = 5.13 * libm::sin(f[2]) + 0.28 * libm::sin(f[0] + f[2])
+        - 0.28 * libm::sin(f[2] - f[0])
+        - 0.17 * libm::sin(f[2] - 2.0 * f[3]);
     let rm = WGS84_A_M
         / ((0.9508
-            + 0.0518 * f[0].cos()
-            + 0.0095 * (f[0] - 2.0 * f[3]).cos()
-            + 0.0078 * (2.0 * f[3]).cos()
-            + 0.0028 * (2.0 * f[0]).cos())
-            * DEG_TO_RAD)
-            .sin();
-    let sinlm = (lm * DEG_TO_RAD).sin();
-    let coslm = (lm * DEG_TO_RAD).cos();
-    let sinp = (pm * DEG_TO_RAD).sin();
-    let cosp = (pm * DEG_TO_RAD).cos();
+            + 0.0518 * libm::cos(f[0])
+            + 0.0095 * libm::cos(f[0] - 2.0 * f[3])
+            + 0.0078 * libm::cos(2.0 * f[3])
+            + 0.0028 * libm::cos(2.0 * f[0]))
+            * DEG_TO_RAD);
+    let sinlm = libm::sin(lm * DEG_TO_RAD);
+    let coslm = libm::cos(lm * DEG_TO_RAD);
+    let sinp = libm::sin(pm * DEG_TO_RAD);
+    let cosp = libm::cos(pm * DEG_TO_RAD);
     let moon = [
         rm * cosp * coslm,
         rm * (cose * cosp * sinlm - sine * sinp),

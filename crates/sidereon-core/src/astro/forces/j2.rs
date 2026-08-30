@@ -35,7 +35,8 @@ impl ForceModel for J2Gravity {
         }
         let r_mag = r_mag2.sqrt();
 
-        let f = 1.5 * self.j2 * (self.mu / r_mag2) * (self.re / r_mag).powi(2);
+        let re_over_r = self.re / r_mag;
+        let f = 1.5 * self.j2 * (self.mu / r_mag2) * (re_over_r * re_over_r);
         let z_r2 = (state.position_km.z * state.position_km.z) / r_mag2;
 
         Ok(Vector3::new(
