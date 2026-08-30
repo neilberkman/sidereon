@@ -2,9 +2,9 @@
 
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.21174996-1682D4.svg)](https://doi.org/10.5281/zenodo.21174996)
 
-GNSS positioning and astrodynamics in Rust, with first-class interfaces in [Python](https://github.com/neilberkman/sidereon-python), [C](https://github.com/neilberkman/sidereon-c), [WebAssembly](https://github.com/neilberkman/sidereon-wasm), and [Elixir](https://github.com/neilberkman/sidereon-ex). Reference-validated, and bit-exact to public oracles where it counts.
+GNSS positioning and astrodynamics in Rust, with first-class interfaces in [Python](https://github.com/neilberkman/sidereon-python), [C](https://github.com/neilberkman/sidereon-c), [Go](https://github.com/neilberkman/sidereon-go), [WebAssembly](https://github.com/neilberkman/sidereon-wasm), and [Elixir](https://github.com/neilberkman/sidereon-ex). Reference-validated, and bit-exact to public oracles where it counts.
 
-sidereon is one engine: a Rust core for satellite orbit propagation, GNSS positioning, time and frame transforms, atmosphere models, and the standard exchange formats, exposed through idiomatic interfaces in five languages so the same validated math is reachable wherever you work.
+sidereon is one engine: a Rust core for satellite orbit propagation, GNSS positioning, time and frame transforms, atmosphere models, and the standard exchange formats, exposed through idiomatic interfaces in six languages so the same validated math is reachable wherever you work.
 
 **Live demo: [sidereon.dev](https://sidereon.dev)**: a real-time satellite tracker (globe, ground tracks, coverage, conjunction screening, orbit determination) computed in the browser via the WebAssembly build.
 
@@ -64,7 +64,7 @@ let look = look_angle(&elements, station, when)?;
 println!("az {:.2} el {:.2} range {:.1} km", look.azimuth_deg, look.elevation_deg, look.range_km);
 ```
 
-More runnable examples, in all five languages, are on the [live demo](https://sidereon.dev).
+More runnable examples, in all six languages, are on the [live demo](https://sidereon.dev).
 
 ## The command line
 
@@ -93,6 +93,7 @@ The Rust interface is the `sidereon` crate above. The other language interfaces 
 
 - Python: [`sidereon-python`](https://github.com/neilberkman/sidereon-python) (PyPI: `sidereon`)
 - C: [`sidereon-c`](https://github.com/neilberkman/sidereon-c)
+- Go: [`sidereon-go`](https://github.com/neilberkman/sidereon-go)
 - Elixir: [`sidereon-ex`](https://github.com/neilberkman/sidereon-ex) (Hex: `sidereon`)
 - JavaScript / WebAssembly: [`sidereon-wasm`](https://github.com/neilberkman/sidereon-wasm) (npm: `@neilberkman/sidereon`)
 
