@@ -1352,7 +1352,7 @@ mod tests {
         let desired = SignalModulation::bpsk1();
         let interference = SignalModulation::boc_sine(1.0, 1.0).unwrap();
         let cn0_db_hz = 45.0;
-        let ratio = 10.0_f64.powf(-20.0 / 10.0);
+        let ratio = libm::pow(10.0_f64, -20.0 / 10.0);
         let result = effective_cn0_degradation(
             &desired,
             cn0_db_hz,

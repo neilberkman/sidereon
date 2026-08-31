@@ -1992,8 +1992,8 @@ fn regular_tec_grid_shell_geometry_is_configurable() {
         let p = (xyz[0] * xyz[0] + xyz[1] * xyz[1]).sqrt();
         let r = (p * p + xyz[2] * xyz[2]).sqrt();
         [
-            xyz[1].atan2(xyz[0]) * crate::constants::RAD_TO_DEG,
-            xyz[2].atan2(p) * crate::constants::RAD_TO_DEG,
+            libm::atan2(xyz[1], xyz[0]) * crate::constants::RAD_TO_DEG,
+            libm::atan2(xyz[2], p) * crate::constants::RAD_TO_DEG,
             r - super::tec_grid::EARTH_RADIUS_M,
         ]
     }
@@ -2026,7 +2026,7 @@ fn regular_tec_grid_shell_geometry_is_configurable() {
     if elevation_rad < options.min_elevation_rad {
         elevation_rad = options.min_elevation_rad;
     }
-    let default_arg = EARTH_RADIUS_M * elevation_rad.cos() / default_shell_radius_m;
+    let default_arg = EARTH_RADIUS_M * libm::cos(elevation_rad) / default_shell_radius_m;
     let expected_default_stec = vtec_default / (1.0 - default_arg * default_arg).sqrt();
     assert_eq!(
         stec_default.to_bits(),
@@ -2058,7 +2058,7 @@ fn regular_tec_grid_shell_geometry_is_configurable() {
         "constant grid VTEC should not depend on shell geometry"
     );
     let custom_arg =
-        custom_shell.earth_radius_m * elevation_rad.cos() / custom_shell.shell_radius_m();
+        custom_shell.earth_radius_m * libm::cos(elevation_rad) / custom_shell.shell_radius_m();
     let expected_custom_stec = vtec_custom / (1.0 - custom_arg * custom_arg).sqrt();
     assert_eq!(
         stec_custom.to_bits(),

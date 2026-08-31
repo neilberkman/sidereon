@@ -390,11 +390,11 @@ fn hour_angle_reconstructs_altaz_without_polar_motion() {
     let lat = station.latitude_deg.to_radians();
     let dec = got.apparent.declination_deg.to_radians();
     let h = got.hour_angle_deg.to_radians();
-    let sin_alt = lat.sin() * dec.sin() + lat.cos() * dec.cos() * h.cos();
-    let alt = sin_alt.clamp(-1.0, 1.0).asin();
-    let east = -dec.cos() * h.sin();
-    let north = dec.sin() * lat.cos() - dec.cos() * lat.sin() * h.cos();
-    let az = wrap_360(east.atan2(north).to_degrees());
+    let sin_alt = libm::sin(lat) * libm::sin(dec) + libm::cos(lat) * libm::cos(dec) * libm::cos(h);
+    let alt = libm::asin(sin_alt.clamp(-1.0, 1.0));
+    let east = -libm::cos(dec) * libm::sin(h);
+    let north = libm::sin(dec) * libm::cos(lat) - libm::cos(dec) * libm::sin(lat) * libm::cos(h);
+    let az = wrap_360(libm::atan2(east, north).to_degrees());
 
     assert!(
         (alt.to_degrees() - got.horizontal.elevation_deg).abs() < 1.0e-6,
@@ -642,7 +642,7 @@ fn equatorial_sep_arcsec(
 ) -> f64 {
     let a = unit_from_radec(actual.right_ascension_deg, actual.declination_deg);
     let b = unit_from_radec(expected.ra_deg, expected.dec_deg);
-    dot3(a, b).clamp(-1.0, 1.0).acos() * ARCSEC_PER_RADIAN
+    libm::acos(dot3(a, b).clamp(-1.0, 1.0)) * ARCSEC_PER_RADIAN
 }
 
 fn equatorial_sep_arcsec_between(
@@ -651,7 +651,7 @@ fn equatorial_sep_arcsec_between(
 ) -> f64 {
     let a = unit_from_radec(a.right_ascension_deg, a.declination_deg);
     let b = unit_from_radec(b.right_ascension_deg, b.declination_deg);
-    dot3(a, b).clamp(-1.0, 1.0).acos() * ARCSEC_PER_RADIAN
+    libm::acos(dot3(a, b).clamp(-1.0, 1.0)) * ARCSEC_PER_RADIAN
 }
 
 fn assert_angle_arcsec(case: &str, field: &str, actual: f64, expected: f64, max_arcsec: f64) {
@@ -672,7 +672,11 @@ fn assert_relative(case: &str, field: &str, actual: f64, expected: f64, max_rel:
 fn unit_from_radec(ra_deg: f64, dec_deg: f64) -> [f64; 3] {
     let ra = ra_deg.to_radians();
     let dec = dec_deg.to_radians();
-    [dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()]
+    [
+        libm::cos(dec) * libm::cos(ra),
+        libm::cos(dec) * libm::sin(ra),
+        libm::sin(dec),
+    ]
 }
 
 fn angle_diff_deg(actual: f64, expected: f64) -> f64 {
@@ -689,8 +693,8 @@ fn wrap_360(deg: f64) -> f64 {
 }
 
 fn rot_z(angle: f64) -> Mat3 {
-    let c = angle.cos();
-    let s = angle.sin();
+    let c = libm::cos(angle);
+    let s = libm::sin(angle);
     [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
 }
 

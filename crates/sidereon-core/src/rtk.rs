@@ -743,7 +743,7 @@ pub fn apply_elevation_mask(
     validate_rtk_receiver_position(base_m)?;
     let mask_deg = validate::finite_in_range(mask_deg, -90.0, 90.0, "rtk elevation mask_deg")
         .map_err(double_difference_invalid_input)?;
-    let min_sin = (mask_deg * DEG_TO_RAD).sin();
+    let min_sin = libm::sin(mask_deg * DEG_TO_RAD);
     let up = local_up(base_m);
     let mut masked = BTreeSet::new();
     let mut results = Vec::with_capacity(epochs.len());
@@ -1869,8 +1869,10 @@ fn geodetic_elevation_rad(
     } else {
         let lat = geodetic.lat_rad;
         let lon = geodetic.lon_rad;
-        let u = lat.cos() * lon.cos() * dx + lat.cos() * lon.sin() * dy + lat.sin() * dz;
-        let elevation_deg = (u / range).clamp(-1.0, 1.0).asin() * RAD_TO_DEG;
+        let u = libm::cos(lat) * libm::cos(lon) * dx
+            + libm::cos(lat) * libm::sin(lon) * dy
+            + libm::sin(lat) * dz;
+        let elevation_deg = libm::asin((u / range).clamp(-1.0, 1.0)) * RAD_TO_DEG;
         elevation_deg * DEG_TO_RAD
     }
 }

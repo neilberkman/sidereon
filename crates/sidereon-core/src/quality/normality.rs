@@ -127,7 +127,7 @@ pub fn skewness(x: &[f64], bias: bool) -> Result<f64, NormalityError> {
     if !(m2 > 0.0) {
         return Err(NormalityError::ZeroVariance);
     }
-    let g1 = m3 / m2.powf(1.5);
+    let g1 = m3 / libm::pow(m2, 1.5);
     if bias {
         return Ok(g1);
     }
@@ -201,10 +201,10 @@ pub fn jarque_bera(x: &[f64]) -> Result<JarqueBera, NormalityError> {
     if !(m2 > 0.0) {
         return Err(NormalityError::ZeroVariance);
     }
-    let s = m3 / m2.powf(1.5);
+    let s = m3 / libm::pow(m2, 1.5);
     let k = m4 / (m2 * m2) - 3.0;
     let statistic = n as f64 / 6.0 * (s * s + k * k / 4.0);
-    let p_value = (-statistic / 2.0).exp();
+    let p_value = libm::exp(-statistic / 2.0);
     Ok(JarqueBera { statistic, p_value })
 }
 
@@ -299,7 +299,7 @@ fn sw_ppnd(p: f64) -> f64 {
     }
     let mut r = if q > 0.0 { 1.0 - p } else { p };
     if r > 0.0 {
-        r = (-r.ln()).sqrt();
+        r = (-libm::log(r)).sqrt();
     } else {
         return 0.0;
     }
@@ -424,16 +424,16 @@ pub fn shapiro_wilk(x: &[f64]) -> Result<ShapiroWilk, NormalityError> {
 
     let p_value = if n == 3 {
         let pi6 = 6.0 / std::f64::consts::PI;
-        let stqr = (0.75_f64).sqrt().asin();
-        (pi6 * (w.sqrt().asin() - stqr)).clamp(0.0, 1.0)
+        let stqr = libm::asin((0.75_f64).sqrt());
+        (pi6 * (libm::asin(w.sqrt()) - stqr)).clamp(0.0, 1.0)
     } else if w1 <= 0.0 {
         // Degenerate: W >= 1 (the residuals are essentially perfectly
         // Gaussian-ordered), so the null is not rejected.
         1.0
     } else {
         let an = n as f64;
-        let mut y_t = w1.ln();
-        let xx = an.ln();
+        let mut y_t = libm::log(w1);
+        let xx = libm::log(an);
         let (m, s);
         if n <= 11 {
             let gamma = sw_poly(&SW_G, an);
@@ -443,12 +443,12 @@ pub fn shapiro_wilk(x: &[f64]) -> Result<ShapiroWilk, NormalityError> {
                     p_value: SW_SMALL,
                 });
             }
-            y_t = -(gamma - y_t).ln();
+            y_t = -libm::log(gamma - y_t);
             m = sw_poly(&SW_C3, an);
-            s = sw_poly(&SW_C4, an).exp();
+            s = libm::exp(sw_poly(&SW_C4, an));
         } else {
             m = sw_poly(&SW_C5, xx);
-            s = sw_poly(&SW_C6, xx).exp();
+            s = libm::exp(sw_poly(&SW_C6, xx));
         }
         sw_alnorm((y_t - m) / s, true)
     };

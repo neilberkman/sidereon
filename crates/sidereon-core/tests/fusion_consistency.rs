@@ -649,9 +649,9 @@ fn turntable_body_rate_wrt_ecef_rps() -> [f64; 3] {
 
 fn aggressive_velocity(t_s: f64) -> [f64; 3] {
     [
-        14.0 * (1.7 * t_s).sin() + 3.25,
-        -11.0 * (1.3 * t_s + 0.4).cos(),
-        5.5 * (2.1 * t_s + 0.2).sin() - 0.75,
+        14.0 * libm::sin(1.7 * t_s) + 3.25,
+        -11.0 * libm::cos(1.3 * t_s + 0.4),
+        5.5 * libm::sin(2.1 * t_s + 0.2) - 0.75,
     ]
 }
 
@@ -844,7 +844,7 @@ fn identity_dcm() -> [[f64; 3]; 3] {
 }
 
 fn yaw_body_to_ecef(yaw_rad: f64) -> [[f64; 3]; 3] {
-    let (sin_yaw, cos_yaw) = yaw_rad.sin_cos();
+    let (sin_yaw, cos_yaw) = libm::sincos(yaw_rad);
     [
         [cos_yaw, -sin_yaw, 0.0],
         [sin_yaw, cos_yaw, 0.0],
@@ -1027,7 +1027,7 @@ impl SplitMix64 {
             let v = 2.0 * self.unit_f64() - 1.0;
             let s = u * u + v * v;
             if s > 0.0 && s < 1.0 {
-                let scale = (-2.0 * s.ln() / s).sqrt();
+                let scale = libm::sqrt(-2.0 * libm::log(s) / s);
                 self.spare_normal = Some(v * scale);
                 return u * scale;
             }

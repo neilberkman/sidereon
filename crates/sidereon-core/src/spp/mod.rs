@@ -56,6 +56,7 @@ use crate::astro::math::least_squares::{
     TrustRegionSolve,
 };
 use crate::astro::math::linear::invert_symmetric_pd;
+use crate::astro::math::portable;
 use crate::geometry_quality::{classify, GeometryQuality, GeometryQualityThresholds};
 use nalgebra::DVector;
 use std::collections::BTreeMap;
@@ -1600,9 +1601,14 @@ fn solve_inner(
         dop_multi(&los, &clock_index, &systems, n_clocks, &final_weights, geo).ok()
     };
     let n_params = xs.len();
-    let jacobian_svd = report.jacobian.clone().svd(false, false);
+    let jacobian_svd = portable::svd(&report.jacobian, false, false);
+    let singular_values: Vec<f64> = jacobian_svd
+        .singular_values
+        .iter()
+        .map(|value| value.0)
+        .collect();
     let diagnostics = singular_value_diagnostics(
-        jacobian_svd.singular_values.as_slice(),
+        &singular_values,
         report.jacobian.nrows(),
         report.jacobian.ncols(),
     );

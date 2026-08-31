@@ -2351,13 +2351,13 @@ fn synthetic_satellite_position(receiver_m: [f64; 3], az_deg: f64, el_deg: f64) 
     let north = cross3(up, east);
     let az = az_deg.to_radians();
     let el = el_deg.to_radians();
-    let horizontal = el.cos();
+    let horizontal = libm::cos(el);
     let los = add3(
         add3(
-            scale3(north, horizontal * az.cos()),
-            scale3(east, horizontal * az.sin()),
+            scale3(north, horizontal * libm::cos(az)),
+            scale3(east, horizontal * libm::sin(az)),
         ),
-        scale3(up, el.sin()),
+        scale3(up, libm::sin(el)),
     );
     add3(receiver_m, scale3(los, 26_000_000.0))
 }

@@ -18,9 +18,9 @@ fn arc_source(start_epoch_index: usize, count: usize, offset_m: f64) -> Sp3 {
         let epoch_index = start_epoch_index + index;
         let seconds = epoch_index as f64 * STEP_S;
         let theta = 3.0 / A_KM * seconds;
-        let x = A_KM * theta.cos() + offset_m / 1000.0;
-        let y = A_KM * theta.sin() * 0.573_576;
-        let z = A_KM * theta.sin() * 0.819_152;
+        let x = A_KM * libm::cos(theta) + offset_m / 1000.0;
+        let y = A_KM * libm::sin(theta) * 0.573_576;
+        let z = A_KM * libm::sin(theta) * 0.819_152;
         let minutes = (epoch_index * 15) % 60;
         let hours = (epoch_index * 15) / 60;
         records.push_str(&format!(

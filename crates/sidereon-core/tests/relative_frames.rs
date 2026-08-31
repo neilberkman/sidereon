@@ -146,9 +146,9 @@ fn circular_state(
     argument_latitude_rad: f64,
 ) -> CartesianState {
     let speed = (MU_EARTH / radius_km).sqrt();
-    let (sin_u, cos_u) = argument_latitude_rad.sin_cos();
-    let (sin_i, cos_i) = inclination_rad.sin_cos();
-    let (sin_raan, cos_raan) = raan_rad.sin_cos();
+    let (sin_u, cos_u) = libm::sincos(argument_latitude_rad);
+    let (sin_i, cos_i) = libm::sincos(inclination_rad);
+    let (sin_raan, cos_raan) = libm::sincos(raan_rad);
 
     let x_orb = radius_km * cos_u;
     let y_orb = radius_km * sin_u;

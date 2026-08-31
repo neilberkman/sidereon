@@ -514,8 +514,8 @@ fn geodetic_from_validated_state(state: &CartesianState) -> Result<DragGeodetic,
 }
 
 fn eci_to_ecef_gmst(position_km: Vector3<f64>, theta: f64) -> Vector3<f64> {
-    let c = theta.cos();
-    let s = theta.sin();
+    let c = libm::cos(theta);
+    let s = libm::sin(theta);
     Vector3::new(
         c * position_km.x + s * position_km.y,
         -s * position_km.x + c * position_km.y,
@@ -573,7 +573,11 @@ mod tests {
         CartesianState::new(
             epoch,
             [r, 0.0, 0.0],
-            [0.0, v * inclination_rad.cos(), v * inclination_rad.sin()],
+            [
+                0.0,
+                v * libm::cos(inclination_rad),
+                v * libm::sin(inclination_rad),
+            ],
         )
     }
 
@@ -585,10 +589,10 @@ mod tests {
     ) -> CartesianState {
         let r = RE_EARTH + altitude_km;
         let v = (MU_EARTH / r).sqrt();
-        let cu = argument_rad.cos();
-        let su = argument_rad.sin();
-        let ci = inclination_rad.cos();
-        let si = inclination_rad.sin();
+        let cu = libm::cos(argument_rad);
+        let su = libm::sin(argument_rad);
+        let ci = libm::cos(inclination_rad);
+        let si = libm::sin(inclination_rad);
         CartesianState::new(
             epoch,
             [r * cu, r * su * ci, r * su * si],
@@ -601,8 +605,8 @@ mod tests {
             geodetic_to_itrs(0.0, 0.0, altitude_km).expect("valid geodetic");
         let theta =
             greenwich_mean_sidereal_time_radians_from_j2000_seconds(epoch).expect("valid gmst");
-        let c = theta.cos();
-        let s = theta.sin();
+        let c = libm::cos(theta);
+        let s = libm::sin(theta);
         let x_eci = c * x_ecef - s * y_ecef;
         let y_eci = s * x_ecef + c * y_ecef;
         let r = RE_EARTH + altitude_km;
@@ -959,8 +963,8 @@ mod tests {
             [accel.x.to_bits(), accel.y.to_bits(), accel.z.to_bits()],
             [
                 9_223_372_036_854_775_808,
-                13_692_397_580_950_677_423,
-                13_694_827_167_186_369_315,
+                13_692_397_580_950_677_421,
+                13_694_827_167_186_369_312,
             ]
         );
     }

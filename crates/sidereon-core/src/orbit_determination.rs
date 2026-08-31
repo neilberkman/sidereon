@@ -24,6 +24,7 @@ use crate::astro::math::least_squares::{
     self, singular_value_diagnostics, solve_trf_with, LeastSquaresProblem, SolveError,
     SolveOptions, Status, TrustRegionSolve,
 };
+use crate::astro::math::portable;
 use crate::astro::propagator::{
     ForceModelKind, IntegratorKind, IntegratorOptions, PropagationContext, StatePropagator,
 };
@@ -1176,9 +1177,10 @@ fn singular_geometry_quality(
 }
 
 fn classify_fit_geometry(jacobian: &DMatrix<f64>, options: &OrbitFitOptions) -> GeometryQuality {
-    let singular = jacobian.clone().svd(false, false).singular_values;
+    let singular = portable::svd(jacobian, false, false).singular_values;
+    let singular_values: Vec<f64> = singular.iter().map(|value| value.0).collect();
     let diagnostics =
-        singular_value_diagnostics(singular.as_slice(), jacobian.nrows(), jacobian.ncols());
+        singular_value_diagnostics(&singular_values, jacobian.nrows(), jacobian.ncols());
     let gdop = least_squares::normal_covariance(jacobian, 1.0)
         .map(|cofactor| {
             (0..cofactor.nrows())

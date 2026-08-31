@@ -427,7 +427,7 @@ fn log_log_slope(x: &[f64], y: &[f64]) -> f64 {
         .iter()
         .zip(y.iter())
         .fold((0.0, 0.0), |(sum_x, sum_y), (&x, &y)| {
-            (sum_x + x.ln(), sum_y + y.ln())
+            (sum_x + libm::log(x), sum_y + libm::log(y))
         });
     let mean_x = sum_x / n;
     let mean_y = sum_y / n;
@@ -436,8 +436,8 @@ fn log_log_slope(x: &[f64], y: &[f64]) -> f64 {
         .iter()
         .zip(y.iter())
         .fold((0.0, 0.0), |(num, den), (&x, &y)| {
-            let dx = x.ln() - mean_x;
-            let dy = y.ln() - mean_y;
+            let dx = libm::log(x) - mean_x;
+            let dy = libm::log(y) - mean_y;
             (num + dx * dy, den + dx * dx)
         });
     num / den
@@ -497,7 +497,7 @@ fn synthetic_mdev_variance(
         PowerLawNoiseType::FlickerFM => (27.0 / 20.0) * core::f64::consts::LN_2 * h,
         PowerLawNoiseType::WhiteFM => 0.25 * h / tau_s,
         PowerLawNoiseType::FlickerPM => {
-            let numerator = 3.0 * (256.0_f64 / 27.0).ln();
+            let numerator = 3.0 * libm::log(256.0_f64 / 27.0);
             numerator * h / (8.0 * pi * pi * tau_s * tau_s)
         }
         PowerLawNoiseType::WhitePM => {
@@ -511,9 +511,9 @@ fn mixed_slope_curve() -> AllanResult {
     let tau_s = vec![1.0, 1.25, 1.5, 2.0];
     let mut deviation = Vec::with_capacity(tau_s.len());
     deviation.push(1.0);
-    deviation.push(deviation[0] * f64::powf(tau_s[1] / tau_s[0], -0.5));
-    deviation.push(deviation[1] * f64::powf(tau_s[2] / tau_s[1], -1.0));
-    deviation.push(deviation[2] * f64::powf(tau_s[3] / tau_s[2], -1.0));
+    deviation.push(deviation[0] * libm::pow(tau_s[1] / tau_s[0], -0.5));
+    deviation.push(deviation[1] * libm::pow(tau_s[2] / tau_s[1], -1.0));
+    deviation.push(deviation[2] * libm::pow(tau_s[3] / tau_s[2], -1.0));
     AllanResult {
         n: vec![64; tau_s.len()],
         tau_s,

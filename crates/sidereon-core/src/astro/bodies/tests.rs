@@ -39,7 +39,7 @@ fn norm(v: &[f64; 3]) -> f64 {
 fn angle_deg(a: &[f64; 3], b: &[f64; 3]) -> f64 {
     let dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
     let c = (dot / (norm(a) * norm(b))).clamp(-1.0, 1.0);
-    c.acos().to_degrees()
+    libm::acos(c).to_degrees()
 }
 
 #[test]

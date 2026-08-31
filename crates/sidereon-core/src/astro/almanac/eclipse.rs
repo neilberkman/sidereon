@@ -155,10 +155,10 @@ fn classify_lunar(
     let sun_distance = norm_checked(sun, "sun")?;
     let sigma = angular_separation_rad(moon, scale3(sun, -1.0))?;
 
-    let pi_m = (MEAN_EARTH_RADIUS_KM / moon_distance).asin();
-    let pi_s = (MEAN_EARTH_RADIUS_KM / sun_distance).asin();
-    let s_sun = (SOLAR_RADIUS_KM / sun_distance).asin();
-    let s_moon = (MOON_RADIUS_KM / moon_distance).asin();
+    let pi_m = libm::asin(MEAN_EARTH_RADIUS_KM / moon_distance);
+    let pi_s = libm::asin(MEAN_EARTH_RADIUS_KM / sun_distance);
+    let s_sun = libm::asin(SOLAR_RADIUS_KM / sun_distance);
+    let s_moon = libm::asin(MOON_RADIUS_KM / moon_distance);
     let rho_u = LUNAR_SHADOW_ENLARGEMENT * (pi_m + pi_s - s_sun);
     let rho_p = LUNAR_SHADOW_ENLARGEMENT * (pi_m + pi_s + s_sun);
 
@@ -356,8 +356,8 @@ fn solar_disk_geometry(
     let moon_topo = sub3(moon, surface);
     let sun_distance = norm_checked(sun_topo, "sun_topocentric")?;
     let moon_distance = norm_checked(moon_topo, "moon_topocentric")?;
-    let s_sun = (SOLAR_RADIUS_KM / sun_distance).asin();
-    let s_moon = (MOON_RADIUS_KM / moon_distance).asin();
+    let s_sun = libm::asin(SOLAR_RADIUS_KM / sun_distance);
+    let s_moon = libm::asin(MOON_RADIUS_KM / moon_distance);
     let sep = angular_separation_rad(sun_topo, moon_topo)?;
     Ok(SolarDiskGeometry { s_sun, s_moon, sep })
 }

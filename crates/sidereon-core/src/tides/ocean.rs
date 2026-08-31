@@ -611,7 +611,7 @@ fn ocean_tide_loading_unchecked(
     {
         let mut sum = 0.0;
         for ((&amplitude, &phase_deg), &a) in amplitudes.iter().zip(phases).zip(&arg) {
-            sum += amplitude * (a - phase_deg * DEG_TO_RAD).cos();
+            sum += amplitude * libm::cos(a - phase_deg * DEG_TO_RAD);
         }
         *slot = sum;
     }
@@ -625,8 +625,8 @@ fn ocean_tide_loading_unchecked(
     let (lat_deg, lon_deg, _height_km) =
         itrs_to_geodetic_compute(xsta[0] / KM_TO_M, xsta[1] / KM_TO_M, xsta[2] / KM_TO_M)
             .expect("validated station position yields geodetic coordinates");
-    let (sinlat, coslat) = (lat_deg * DEG_TO_RAD).sin_cos();
-    let (sinlon, coslon) = (lon_deg * DEG_TO_RAD).sin_cos();
+    let (sinlat, coslat) = libm::sincos(lat_deg * DEG_TO_RAD);
+    let (sinlon, coslon) = libm::sincos(lon_deg * DEG_TO_RAD);
 
     // ENU basis vectors expressed in ECEF (geodetic topocentric frame):
     //   e = [-sinlon, coslon, 0]

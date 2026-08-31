@@ -190,7 +190,7 @@ pub fn gauss_markov_bias_decay(dt_s: f64, tau_s: f64) -> Result<f64, InertialErr
     if tau_s.is_infinite() {
         Ok(1.0)
     } else {
-        Ok((-dt_s / tau_s).exp())
+        Ok(libm::exp(-dt_s / tau_s))
     }
 }
 
@@ -211,7 +211,7 @@ pub fn gauss_markov_bias_variance_increment(
     if tau_s.is_infinite() {
         Ok(variance * dt_s)
     } else {
-        Ok(variance * (1.0 - (-2.0 * dt_s / tau_s).exp()))
+        Ok(variance * (1.0 - libm::exp(-2.0 * dt_s / tau_s)))
     }
 }
 
@@ -237,7 +237,7 @@ mod tests {
     #[test]
     fn gauss_markov_decay_matches_closed_form() {
         let decay = gauss_markov_bias_decay(12.5, 100.0).expect("decay");
-        assert_eq!(decay.to_bits(), (-0.125_f64).exp().to_bits());
+        assert_eq!(decay.to_bits(), libm::exp(-0.125_f64).to_bits());
         assert_eq!(
             gauss_markov_bias_decay(12.5, RANDOM_WALK_BIAS_TAU_S)
                 .expect("random walk")
@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn gauss_markov_variance_matches_closed_form() {
         let increment = gauss_markov_bias_variance_increment(0.02, 10.0, 200.0).expect("variance");
-        let expected = 0.02_f64 * 0.02 * (1.0 - (-0.1_f64).exp());
+        let expected = 0.02_f64 * 0.02 * (1.0 - libm::exp(-0.1_f64));
         assert_eq!(increment.to_bits(), expected.to_bits());
 
         let random_walk = gauss_markov_bias_variance_increment(0.02, 10.0, RANDOM_WALK_BIAS_TAU_S)

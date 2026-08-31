@@ -1628,7 +1628,7 @@ fn perigee_angular_rate_rad_s(satellite: &Satellite) -> Option<f64> {
 
     let one_minus_e = 1.0 - eccentricity;
     let perigee_rate_rad_s =
-        mean_motion_rad_s * (1.0 + eccentricity).sqrt() / one_minus_e.powf(1.5);
+        mean_motion_rad_s * (1.0 + eccentricity).sqrt() / libm::pow(one_minus_e, 1.5);
     if !(perigee_rate_rad_s.is_finite() && perigee_rate_rad_s > 0.0) {
         return None;
     }
@@ -1658,7 +1658,7 @@ fn mask_geometry_step_us(
     if !station_lat_rad.is_finite() {
         return None;
     }
-    let station_spin_rad_s = OMEGA_E_DOT_RAD_S * station_lat_rad.cos().abs();
+    let station_spin_rad_s = OMEGA_E_DOT_RAD_S * libm::cos(station_lat_rad).abs();
     let relative_rate_rad_s = perigee_rate_rad_s + station_spin_rad_s;
     if !(relative_rate_rad_s.is_finite() && relative_rate_rad_s > 0.0) {
         return None;
@@ -1684,7 +1684,7 @@ fn orbit_perigee_radius_km(satellite: &Satellite) -> Option<f64> {
         return None;
     }
 
-    let semi_major_axis_km = (GM_EARTH_KM3_S2 / (mean_motion_rad_s * mean_motion_rad_s)).cbrt();
+    let semi_major_axis_km = libm::cbrt(GM_EARTH_KM3_S2 / (mean_motion_rad_s * mean_motion_rad_s));
     let perigee_radius_km = semi_major_axis_km * (1.0 - eccentricity);
     if !(perigee_radius_km.is_finite() && perigee_radius_km > 0.0) {
         return None;
@@ -1725,8 +1725,8 @@ fn elevation_mask_central_angle_rad(
         return None;
     }
 
-    let sin_mask = elevation_mask_rad.sin();
-    let cos_mask = elevation_mask_rad.cos();
+    let sin_mask = libm::sin(elevation_mask_rad);
+    let cos_mask = libm::cos(elevation_mask_rad);
     let cos_mask_squared = cos_mask * cos_mask;
     let horizon_term = 1.0 - radius_ratio * radius_ratio * cos_mask_squared;
     if horizon_term < 0.0 {
@@ -1734,7 +1734,7 @@ fn elevation_mask_central_angle_rad(
     }
 
     let cos_central_angle = radius_ratio * cos_mask_squared + sin_mask * horizon_term.sqrt();
-    let central_angle = cos_central_angle.clamp(-1.0, 1.0).acos();
+    let central_angle = libm::acos(cos_central_angle.clamp(-1.0, 1.0));
     if !(central_angle.is_finite() && central_angle > 0.0) {
         return None;
     }
@@ -2277,7 +2277,7 @@ mod tests {
     }
 
     fn synthetic_pass_wave(time_seconds: f64) -> f64 {
-        (time_seconds * std::f64::consts::TAU / 5_400.0).sin()
+        libm::sin(time_seconds * std::f64::consts::TAU / 5_400.0)
     }
 
     fn crossing_offset_us(crossing: CrossingEvent) -> i64 {

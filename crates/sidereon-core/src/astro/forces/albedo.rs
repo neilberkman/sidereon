@@ -143,8 +143,8 @@ fn earth_radiation_acceleration_with_sun(
     let (east_hat, north_hat) = tangent_basis(radial_hat)?;
     let sun_hat = sun_pos_km / sun_r2.sqrt();
     let solar_pressure = model.pressure_n_m2() * model.au_km() * model.au_km() / sun_r2;
-    let disk_half_angle = (model.earth_radius_km() / sat_radius_km).asin();
-    let one_minus_cos_disk = 1.0 - disk_half_angle.cos();
+    let disk_half_angle = libm::asin(model.earth_radius_km() / sat_radius_km);
+    let one_minus_cos_disk = 1.0 - libm::cos(disk_half_angle);
     let apparent_weight = 2.0 * one_minus_cos_disk / KNOCKE_ELEMENT_COUNT as f64;
 
     let mut accel_m_s2 = Vector3::zeros();
@@ -169,11 +169,11 @@ fn earth_radiation_acceleration_with_sun(
                 1.0 - previous_elements as f64 / KNOCKE_ELEMENT_COUNT as f64 * one_minus_cos_disk;
             let outer_mu =
                 1.0 - current_elements as f64 / KNOCKE_ELEMENT_COUNT as f64 * one_minus_cos_disk;
-            let psi = (0.5 * (inner_mu + outer_mu)).acos();
-            let (sin_psi, cos_psi) = psi.sin_cos();
+            let psi = libm::acos(0.5 * (inner_mu + outer_mu));
+            let (sin_psi, cos_psi) = libm::sincos(psi);
             for segment in 0..segments {
                 let azimuth = (segment as f64 + 0.5) * std::f64::consts::TAU / segments as f64;
-                let (sin_azimuth, cos_azimuth) = azimuth.sin_cos();
+                let (sin_azimuth, cos_azimuth) = libm::sincos(azimuth);
                 let sat_to_element_hat = -cos_psi * radial_hat
                     + sin_psi * (cos_azimuth * east_hat + sin_azimuth * north_hat);
                 let sample = surface_sample_from_ray(
@@ -238,7 +238,7 @@ fn element_acceleration(
     apparent_weight: f64,
     model: EarthRadiationPressure,
 ) -> Vector3<f64> {
-    let latitude_rad = sample.normal.z.asin();
+    let latitude_rad = libm::asin(sample.normal.z);
     let (albedo, emissivity) = knocke_albedo_emissivity(epoch_tdb_seconds, latitude_rad);
     let cos_solar_zenith = sample.normal.dot(&sun_hat);
     let reflected = if cos_solar_zenith > 0.0 {
@@ -254,8 +254,8 @@ fn element_acceleration(
 fn knocke_albedo_emissivity(epoch_tdb_seconds: f64, latitude_rad: f64) -> (f64, f64) {
     let jd = J2000_JD + epoch_tdb_seconds / SECONDS_PER_DAY;
     let seasonal_phase = std::f64::consts::TAU * (jd - KNOCKE_REFERENCE_JD) / DAYS_PER_JULIAN_YEAR;
-    let (phase_sin, phase_cos) = seasonal_phase.sin_cos();
-    let p1 = latitude_rad.sin();
+    let (phase_sin, phase_cos) = libm::sincos(seasonal_phase);
+    let p1 = libm::sin(latitude_rad);
     let p2 = 0.5 * (3.0 * p1 * p1 - 1.0);
 
     let a1 = ALBEDO_C0 + ALBEDO_C1 * phase_cos + ALBEDO_C2 * phase_sin;

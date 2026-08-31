@@ -62,8 +62,8 @@ fn sub_point(vec_ecef: [f64; 3], field: &'static str) -> Result<SurfacePoint, Ob
     if horizontal == 0.0 && z == 0.0 {
         return Err(invalid(field, "zero vector"));
     }
-    let latitude_deg = z.atan2(horizontal) * RAD_TO_DEG;
-    let longitude_deg = y.atan2(x) * RAD_TO_DEG;
+    let latitude_deg = libm::atan2(z, horizontal) * RAD_TO_DEG;
+    let longitude_deg = libm::atan2(y, x) * RAD_TO_DEG;
     Ok(SurfacePoint {
         latitude_deg,
         longitude_deg,
@@ -115,8 +115,8 @@ pub fn terminator_latitude_deg(
         .map_err(map_field)?
         .to_radians();
 
-    let tan_delta = delta.tan();
-    let cos_dlon = (lon - lambda_s).cos();
+    let tan_delta = libm::tan(delta);
+    let cos_dlon = libm::cos(lon - lambda_s);
     // Quadrature meridians (lon = lambda_s +/- 90) are where the terminator
     // crosses the equator: the numerator cos(lon - lambda_s) is zero there, so
     // the latitude is 0 regardless of declination. `cos(pi/2)` is not exactly
@@ -131,7 +131,7 @@ pub fn terminator_latitude_deg(
     // cleanly: the ratio diverges and atan saturates to the +/-90 degree poleward
     // meridian, with the sign following that of -cos(lon - lambda_s), without a
     // divide-by-zero blowing up to NaN.
-    let lat = (-cos_dlon / tan_delta).atan();
+    let lat = libm::atan(-cos_dlon / tan_delta);
     Ok(lat * RAD_TO_DEG)
 }
 
@@ -165,9 +165,9 @@ pub fn parallactic_angle_deg(
         .map_err(map_field)?
         .to_radians();
 
-    let numerator = h.sin();
-    let denominator = phi.tan() * dec.cos() - dec.sin() * h.cos();
-    Ok(numerator.atan2(denominator) * RAD_TO_DEG)
+    let numerator = libm::sin(h);
+    let denominator = libm::tan(phi) * libm::cos(dec) - libm::sin(dec) * libm::cos(h);
+    Ok(libm::atan2(numerator, denominator) * RAD_TO_DEG)
 }
 
 /// Apparent visual magnitude of a sunlit body from a diffuse-sphere phase law.
@@ -213,10 +213,10 @@ pub fn satellite_visual_magnitude(
 
     let phi = phase_angle_deg.clamp(0.0, 180.0) * DEG_TO_RAD;
     let pi = std::f64::consts::PI;
-    let phase = ((pi - phi) * phi.cos() + phi.sin()) / pi;
+    let phase = ((pi - phi) * libm::cos(phi) + libm::sin(phi)) / pi;
 
-    let distance_term = 5.0 * (range_km / reference_range_km).log10();
-    let phase_term = -2.5 * phase.log10();
+    let distance_term = 5.0 * libm::log10(range_km / reference_range_km);
+    let phase_term = -2.5 * libm::log10(phase);
     Ok(standard_magnitude + distance_term + phase_term)
 }
 
@@ -277,14 +277,14 @@ pub fn sub_observer_point(
 /// Passive rotation of a vector about the z-axis by `theta` (radians).
 #[inline]
 fn rot_z(v: [f64; 3], theta: f64) -> [f64; 3] {
-    let (s, c) = theta.sin_cos();
+    let (s, c) = libm::sincos(theta);
     [c * v[0] + s * v[1], -s * v[0] + c * v[1], v[2]]
 }
 
 /// Passive rotation of a vector about the x-axis by `theta` (radians).
 #[inline]
 fn rot_x(v: [f64; 3], theta: f64) -> [f64; 3] {
-    let (s, c) = theta.sin_cos();
+    let (s, c) = libm::sincos(theta);
     [v[0], c * v[1] + s * v[2], -s * v[1] + c * v[2]]
 }
 
@@ -303,13 +303,13 @@ mod tests {
         // Sun in the Earth-fixed frame, 23.44 deg above the equatorial plane at
         // longitude 0: sub-solar point is at that declination and longitude.
         let delta = 23.44_f64.to_radians();
-        let sun = [AU_KM * delta.cos(), 0.0, AU_KM * delta.sin()];
+        let sun = [AU_KM * libm::cos(delta), 0.0, AU_KM * libm::sin(delta)];
         let point = sub_solar_point(sun).expect("valid sun vector");
         assert!(close(point.latitude_deg, 23.44, 1e-9));
         assert!(close(point.longitude_deg, 0.0, 1e-9));
 
         // A longitude offset shows up directly.
-        let sun_east = [0.0, AU_KM * delta.cos(), AU_KM * delta.sin()];
+        let sun_east = [0.0, AU_KM * libm::cos(delta), AU_KM * libm::sin(delta)];
         let east = sub_solar_point(sun_east).expect("valid sun vector");
         assert!(close(east.longitude_deg, 90.0, 1e-9));
     }

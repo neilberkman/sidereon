@@ -381,7 +381,7 @@ pub fn cnav_ura_nominal_m(index: i8) -> Option<f64> {
         1 => Some(2.8),
         3 => Some(5.7),
         5 => Some(11.3),
-        -15..=6 => Some(2.0_f64.powf(1.0 + f64::from(index) / 2.0)),
+        -15..=6 => Some(libm::pow(2.0_f64, 1.0 + f64::from(index) / 2.0)),
         7..=14 => Some(2.0_f64.powi(i32::from(index) - 2)),
         _ => None,
     }

@@ -46,10 +46,10 @@ impl std::error::Error for BackendError {}
 /// Host-runtime numerical operations that can affect bit-exact SciPy parity.
 ///
 /// The required [`HostNumerics::svd`] operation supplies the thin SVD. The
-/// defaulted hooks supply BLAS reductions and the NumPy power dispatch used at
-/// the specific solver sites where the pinned runtime's last bits can differ
-/// from Rust arithmetic. `Ok(None)` declines a defaulted hook and keeps the
-/// crate's pure-Rust computation.
+/// defaulted hooks supply BLAS reductions, the NumPy power dispatch, and the
+/// loss transcendental operations used at the specific solver sites where the
+/// pinned runtime's last bits can differ from Rust arithmetic. `Ok(None)`
+/// declines a defaulted hook and keeps the crate's pure-Rust computation.
 pub trait HostNumerics {
     /// Return row-major U, singular values, and row-major VT for a row-major
     /// m-by-n input matrix, equivalent to scipy.linalg.svd(..., full_matrices=False).
@@ -126,6 +126,22 @@ pub trait HostNumerics {
     fn power_scalar(&self, _base: f64, _exponent: f64) -> Result<Option<f64>, BackendError> {
         Ok(None)
     }
+
+    /// Scalar natural logarithm of one plus `x` for the Cauchy loss.
+    ///
+    /// `Ok(None)` declines and leaves the crate's published `f64::ln_1p`
+    /// calculation in place.
+    fn log1p(&self, _x: f64) -> Result<Option<f64>, BackendError> {
+        Ok(None)
+    }
+
+    /// Scalar arctangent for the Arctan loss.
+    ///
+    /// `Ok(None)` declines and leaves the crate's published `f64::atan`
+    /// calculation in place.
+    fn atan(&self, _x: f64) -> Result<Option<f64>, BackendError> {
+        Ok(None)
+    }
 }
 
 /// Pure-Rust thin-SVD backend built on `nalgebra`, the crate's default
@@ -135,9 +151,9 @@ pub trait HostNumerics {
 /// bit-exact with `scipy.linalg.svd` / the host-LAPACK path, so it must never
 /// back the bit-exact parity fixtures; it powers the native solve. The optional
 /// BLAS and power hooks ([`HostNumerics::dot`], the matvecs,
-/// [`HostNumerics::power`], [`HostNumerics::power_scalar`]) are left at their
-/// defaults so the trust-region loop falls back to its own deterministic
-/// arithmetic.
+/// [`HostNumerics::power`], [`HostNumerics::power_scalar`],
+/// [`HostNumerics::log1p`], [`HostNumerics::atan`]) are left at their defaults
+/// so the trust-region loop falls back to its own deterministic arithmetic.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NalgebraThinSvd;
 

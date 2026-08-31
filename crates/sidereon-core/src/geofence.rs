@@ -644,15 +644,15 @@ fn interior_winding_sign(
 ) -> Result<f64, GeofenceError> {
     let mut xyz = [0.0_f64; 3];
     for &vertex in vertices {
-        let cos_lat = vertex.lat_rad.cos();
-        xyz[0] += cos_lat * vertex.lon_rad.cos();
-        xyz[1] += cos_lat * vertex.lon_rad.sin();
-        xyz[2] += vertex.lat_rad.sin();
+        let cos_lat = libm::cos(vertex.lat_rad);
+        xyz[0] += cos_lat * libm::cos(vertex.lon_rad);
+        xyz[1] += cos_lat * libm::sin(vertex.lon_rad);
+        xyz[2] += libm::sin(vertex.lat_rad);
     }
     let norm = (xyz[0] * xyz[0] + xyz[1] * xyz[1] + xyz[2] * xyz[2]).sqrt();
     if norm > ORIENTATION_CENTROID_NORM_TOL {
-        let lat = (xyz[2] / norm).asin();
-        let lon = xyz[1].atan2(xyz[0]);
+        let lat = libm::asin(xyz[2] / norm);
+        let lon = libm::atan2(xyz[1], xyz[0]);
         let probe = Wgs84Geodetic::new(lat, lon, 0.0)
             .map_err(|_| invalid_input("vertices", "centroid is outside geodetic range"))?;
         let sum = winding_sum(probe, vertices)?;
@@ -751,8 +751,8 @@ fn project_from(origin: Wgs84Geodetic, point: Wgs84Geodetic) -> Result<[f64; 2],
     }
     let azimuth_rad = azimuth_deg * DEG_TO_RAD;
     Ok([
-        distance_m * azimuth_rad.sin(),
-        distance_m * azimuth_rad.cos(),
+        distance_m * libm::sin(azimuth_rad),
+        distance_m * libm::cos(azimuth_rad),
     ])
 }
 
@@ -877,12 +877,12 @@ fn normal_from_position_to_boundary(
     }
     let (_, azimuth_deg, _) = inverse_points(position, boundary)?;
     let azimuth_rad = azimuth_deg * DEG_TO_RAD;
-    Ok([azimuth_rad.sin(), azimuth_rad.cos()])
+    Ok([libm::sin(azimuth_rad), libm::cos(azimuth_rad)])
 }
 
 fn tangent_normal(azimuth_deg: f64) -> [f64; 2] {
     let azimuth_rad = azimuth_deg * DEG_TO_RAD;
-    let tangent = [azimuth_rad.sin(), azimuth_rad.cos()];
+    let tangent = [libm::sin(azimuth_rad), libm::cos(azimuth_rad)];
     [-tangent[1], tangent[0]]
 }
 
@@ -973,7 +973,7 @@ fn covariance_from_horizontal_radius(
     let sigma2 = if radius.radius_m == 0.0 {
         0.0
     } else {
-        let scale = -2.0 * (1.0 - radius.probability).ln();
+        let scale = -2.0 * libm::log(1.0 - radius.probability);
         radius.radius_m * radius.radius_m / scale
     };
     Ok([[sigma2, 0.0, 0.0], [0.0, sigma2, 0.0], [0.0, 0.0, 0.0]])
@@ -1036,7 +1036,7 @@ fn probability_planar_quadrature(
     let major_sigma = eigen.major_m2.sqrt();
     let minor_sigma = eigen.minor_m2.sqrt();
     let integral = integrate_gl64(0.0, TWO_PI, |theta| {
-        let unit = [theta.cos(), theta.sin()];
+        let unit = [libm::cos(theta), libm::sin(theta)];
         let direction = add2(
             scale2(eigen.major_axis, major_sigma * unit[0]),
             scale2(eigen.minor_axis, minor_sigma * unit[1]),
@@ -1078,10 +1078,10 @@ fn horizontal_eigen(covariance: [[f64; 3]; 3]) -> Result<HorizontalEigen, Geofen
     let angle = if root == 0.0 {
         0.0
     } else {
-        0.5 * (2.0 * b).atan2(a - c)
+        0.5 * libm::atan2(2.0 * b, a - c)
     };
-    let major_axis = [angle.cos(), angle.sin()];
-    let minor_axis = [-angle.sin(), angle.cos()];
+    let major_axis = [libm::cos(angle), libm::sin(angle)];
+    let minor_axis = [-libm::sin(angle), libm::cos(angle)];
     Ok(HorizontalEigen {
         major_m2: major.max(0.0),
         minor_m2: minor.max(0.0),
@@ -1114,13 +1114,13 @@ fn radial_mass_along_direction(
     let mut mass = 0.0_f64;
     for hit in hits {
         if inside {
-            mass += (-0.5 * previous * previous).exp() - (-0.5 * hit * hit).exp();
+            mass += libm::exp(-0.5 * previous * previous) - libm::exp(-0.5 * hit * hit);
         }
         inside = !inside;
         previous = hit;
     }
     if inside {
-        mass += (-0.5 * previous * previous).exp();
+        mass += libm::exp(-0.5 * previous * previous);
     }
     mass.clamp(0.0, 1.0)
 }

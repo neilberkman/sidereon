@@ -20,19 +20,21 @@
 //! The float primitives were verified bit-exact against the pinned NumPy 2.5.0
 //! / SciPy 1.18.0 runtime on this target: the scalar-exponent `power` ufunc
 //! table makes `**2` use `x*x` and `**0.5` use `sqrt`, while `**-0.5` and
-//! `**-1.5` fall through to libm `pow` (== Rust [`f64::powf`]); `log1p` ==
-//! [`f64::ln_1p`] and `arctan` == [`f64::atan`].
+//! `**-1.5` fall through to libm `pow` (== Rust [`f64::powf`]); `log1p` and
+//! `arctan` remain the crate's host-parity defaults unless a `_with` caller
+//! supplies the corresponding backend hooks.
 //!
 //! SciPy's ndarray `z ** -0.5` and `z ** -1.5` expressions pass through both
 //! the outer ndarray operation and the `power` ufunc without a shortcut. Their
 //! exponents miss the inner loop's stride-0 table, so they reach its per-CPU
 //! fall-through kernel. They are therefore the only loss expressions routed
 //! through the host-numerics seam ([`crate::trf::HostNumerics::power`]), via
-//! the `_with` variants below; every other primitive stays a direct Rust
-//! operation because that is what NumPy itself does. In practice that means
-//! `huber` (over the compressed `z[z > 1]` subset SciPy passes) and `soft_l1`
-//! (over the whole `1 + z` vector); `linear`, `cauchy`, and `arctan` never raise
-//! to a power at all, and neither does the `cost_only` path of any loss.
+//! the `_with` variants below; Cauchy `log1p` and Arctan `atan` are also routed
+//! through their corresponding hooks on those variants. Every other primitive
+//! stays a direct Rust operation because that is what NumPy itself does. In
+//! practice that means `huber` (over the compressed `z[z > 1]` subset SciPy
+//! passes) and `soft_l1` (over the whole `1 + z` vector); neither the
+//! `cost_only` path of any loss nor the hook-less paths dispatches.
 
 use crate::trf::{BackendError, HostNumerics};
 
@@ -131,8 +133,9 @@ impl LossFunction {
     }
 
     /// [`LossFunction::evaluate`] with the `z ** -0.5` / `z ** -1.5` derivative
-    /// powers dispatched through `host`'s [`HostNumerics::power`] hook, so a host
-    /// backend can supply its runtime's exact elementwise results.
+    /// powers dispatched through `host`'s [`HostNumerics::power`] hook, and the
+    /// Cauchy/Arctan loss transcendental operations dispatched through
+    /// [`HostNumerics::log1p`] / [`HostNumerics::atan`].
     ///
     /// # Errors
     ///
@@ -206,7 +209,9 @@ pub fn rho_for_loss(loss: Loss, z: &[f64], cost_only: bool) -> Rho {
 }
 
 /// [`rho_for_loss`] with the `z ** -0.5` / `z ** -1.5` derivative powers
-/// dispatched through `host`'s [`HostNumerics::power`] hook.
+/// dispatched through `host`'s [`HostNumerics::power`] hook, and the
+/// Cauchy/Arctan loss transcendental operations dispatched through
+/// [`HostNumerics::log1p`] / [`HostNumerics::atan`].
 ///
 /// # Errors
 ///
@@ -250,6 +255,24 @@ fn host_power(
         }
     }
     Ok(values.iter().map(|&value| value.powf(exponent)).collect())
+}
+
+fn log1p_maybe(host: Option<&dyn HostNumerics>, value: f64) -> Result<f64, LossError> {
+    if let Some(host) = host {
+        if let Some(result) = host.log1p(value).map_err(LossError::Backend)? {
+            return Ok(result);
+        }
+    }
+    Ok(value.ln_1p())
+}
+
+fn atan_maybe(host: Option<&dyn HostNumerics>, value: f64) -> Result<f64, LossError> {
+    if let Some(host) = host {
+        if let Some(result) = host.atan(value).map_err(LossError::Backend)? {
+            return Ok(result);
+        }
+    }
+    Ok(value.atan())
 }
 
 fn rho_maybe_with(
@@ -334,7 +357,7 @@ fn rho_maybe_with(
         // cauchy(z, rho, cost_only): rho[0] = log1p(z).
         Loss::Cauchy => {
             for i in 0..m {
-                rho0[i] = z[i].ln_1p();
+                rho0[i] = log1p_maybe(host, z[i])?;
                 if cost_only {
                     continue;
                 }
@@ -348,7 +371,7 @@ fn rho_maybe_with(
         Loss::Arctan => {
             for i in 0..m {
                 let zi = z[i];
-                rho0[i] = zi.atan();
+                rho0[i] = atan_maybe(host, zi)?;
                 if cost_only {
                     continue;
                 }

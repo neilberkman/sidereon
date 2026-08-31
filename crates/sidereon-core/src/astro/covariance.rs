@@ -11,6 +11,7 @@
 //! squared units of whatever position vectors it was formed from.
 
 use crate::astro::math::mat3::{self, Mat3};
+use crate::astro::math::portable;
 use crate::astro::math::vec3;
 use crate::astro::state::CartesianState;
 use crate::validate;
@@ -225,7 +226,7 @@ pub fn interpolate_covariance_psd(
     for i in 0..6 {
         for j in 0..=i {
             l[i][j] = if i == j {
-                (la[i][j].ln() * (1.0 - u) + lb[i][j].ln() * u).exp()
+                libm::exp(libm::log(la[i][j]) * (1.0 - u) + libm::log(lb[i][j]) * u)
             } else {
                 la[i][j] * (1.0 - u) + lb[i][j] * u
             };
@@ -419,7 +420,7 @@ fn positive_semidefinite6(m: &Mat6) -> bool {
     }
 
     let matrix = SMatrix::<f64, 6, 6>::from_fn(|i, j| m[i][j]);
-    let eigenvalues = matrix.symmetric_eigen().eigenvalues;
+    let (_, eigenvalues) = portable::symmetric_eigen6(&matrix);
     let scale = covariance_scale6(m);
     let floor = -PSD6_EIGEN_REL_EPS * scale;
     eigenvalues.iter().all(|&lambda| lambda >= floor)
@@ -431,14 +432,17 @@ fn positive_semidefinite6(m: &Mat6) -> bool {
 /// factorizable. It is not a propagation repair path.
 pub(crate) fn eigen_floor6(matrix: &Mat6, rel_floor: f64) -> Mat6 {
     let m = SMatrix::<f64, 6, 6>::from_fn(|i, j| matrix[i][j]);
-    let eig = m.symmetric_eigen();
+    let (eigenvectors, eigenvalues) = portable::symmetric_eigen6(&m);
     let scale = covariance_scale6(matrix);
     let floor = rel_floor.max(0.0) * scale;
     let mut diagonal = SMatrix::<f64, 6, 6>::zeros();
     for i in 0..6 {
-        diagonal[(i, i)] = eig.eigenvalues[i].max(floor);
+        diagonal[(i, i)] = eigenvalues[i].max(floor);
     }
-    let floored = eig.eigenvectors * diagonal * eig.eigenvectors.transpose();
+    let floored = portable::product_fixed(
+        &portable::product_fixed(&eigenvectors, &diagonal),
+        &eigenvectors.transpose(),
+    );
     let mut out = mat6_from_smatrix(&floored);
     symmetrize6(&mut out);
     out
@@ -471,7 +475,7 @@ fn mat6_from_smatrix(matrix: &SMatrix<f64, 6, 6>) -> Mat6 {
 
 fn cholesky_lower(matrix: &Mat6) -> Option<Mat6> {
     let m = SMatrix::<f64, 6, 6>::from_fn(|i, j| matrix[i][j]);
-    m.cholesky().map(|factor| mat6_from_smatrix(&factor.l()))
+    portable::cholesky_lower(&m).map(|lower| mat6_from_smatrix(&lower))
 }
 
 fn cholesky_lower_with_floor(matrix: &Mat6) -> Result<Mat6, Covariance6Error> {

@@ -68,7 +68,7 @@ pub fn error_ellipse_2x2(
     confidence: f64,
 ) -> Result<ErrorEllipse2, IntegrityError> {
     validate_probability(confidence)?;
-    let scale = -2.0 * (1.0 - confidence).ln();
+    let scale = -2.0 * libm::log(1.0 - confidence);
     error_ellipse_2x2_scaled(covariance, scale, confidence)
 }
 
@@ -78,7 +78,7 @@ pub fn error_ellipse_2x2(
 /// The stored confidence is the two-degree-of-freedom probability associated
 /// with a unit chi-square contour.
 pub fn error_ellipse_2x2_unit(covariance: [[f64; 2]; 2]) -> Result<ErrorEllipse2, IntegrityError> {
-    error_ellipse_2x2_scaled(covariance, 1.0, 1.0 - (-0.5_f64).exp())
+    error_ellipse_2x2_scaled(covariance, 1.0, 1.0 - libm::exp(-0.5_f64))
 }
 
 /// Standard deviation for one gain row and per-measurement sigmas.
@@ -196,7 +196,7 @@ fn error_ellipse_2x2_scaled(
     let orientation_rad = if root == 0.0 {
         0.0
     } else {
-        0.5 * (2.0 * b).atan2(a - c)
+        0.5 * libm::atan2(2.0 * b, a - c)
     };
     Ok(ErrorEllipse2 {
         confidence,

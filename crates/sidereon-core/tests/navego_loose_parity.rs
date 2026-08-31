@@ -332,7 +332,7 @@ fn navego_land_vehicle_trajectory() -> TruthTrajectory {
 
         let position_ecef = add3(origin, mat3_mul_vec(&ecef_from_ned, local_position));
         let velocity_ecef = mat3_mul_vec(&ecef_from_ned, velocity);
-        let yaw = velocity[1].atan2(velocity[0]);
+        let yaw = libm::atan2(velocity[1], velocity[0]);
         let ypr = [0.0, 0.0, yaw];
         let attitude = mat3_mul(&ecef_from_ned, &body_to_ned(ypr));
         states.push(NavState::new(t, position_ecef, velocity_ecef, attitude).expect("truth state"));
@@ -348,15 +348,15 @@ fn navego_land_vehicle_trajectory() -> TruthTrajectory {
 }
 
 fn local_velocity_ned(t: f64) -> [f64; 3] {
-    let speed = 15.0 + 0.4 * (2.0 * core::f64::consts::PI * t / 180.0).sin();
-    let yaw = -15.0 * DEG_TO_RAD + 0.01 * (2.0 * core::f64::consts::PI * t / 240.0).sin();
-    let down = 0.01 * (2.0 * core::f64::consts::PI * t / 220.0).sin();
-    [speed * yaw.cos(), speed * yaw.sin(), down]
+    let speed = 15.0 + 0.4 * libm::sin(2.0 * core::f64::consts::PI * t / 180.0);
+    let yaw = -15.0 * DEG_TO_RAD + 0.01 * libm::sin(2.0 * core::f64::consts::PI * t / 240.0);
+    let down = 0.01 * libm::sin(2.0 * core::f64::consts::PI * t / 220.0);
+    [speed * libm::cos(yaw), speed * libm::sin(yaw), down]
 }
 
 fn ecef_from_ned(lat_rad: f64, lon_rad: f64) -> Mat3 {
-    let (sin_lat, cos_lat) = lat_rad.sin_cos();
-    let (sin_lon, cos_lon) = lon_rad.sin_cos();
+    let (sin_lat, cos_lat) = libm::sincos(lat_rad);
+    let (sin_lon, cos_lon) = libm::sincos(lon_rad);
     let north = [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat];
     let east = [-sin_lon, cos_lon, 0.0];
     let down = [-cos_lat * cos_lon, -cos_lat * sin_lon, -sin_lat];
@@ -374,9 +374,9 @@ fn body_to_ned(ypr_rad: [f64; 3]) -> Mat3 {
 
 fn body_to_ned_ypr(attitude_body_to_ecef: &Mat3, ned_from_ecef: &Mat3) -> [f64; 3] {
     let dcm = mat3_mul(ned_from_ecef, attitude_body_to_ecef);
-    let pitch = (-dcm[2][0]).asin();
-    let roll = dcm[2][1].atan2(dcm[2][2]);
-    let yaw = dcm[1][0].atan2(dcm[0][0]);
+    let pitch = libm::asin(-dcm[2][0]);
+    let roll = libm::atan2(dcm[2][1], dcm[2][2]);
+    let yaw = libm::atan2(dcm[1][0], dcm[0][0]);
     [roll, pitch, yaw]
 }
 
@@ -435,17 +435,17 @@ fn mat3_transpose(matrix: &Mat3) -> Mat3 {
 }
 
 fn rot_x(angle: f64) -> Mat3 {
-    let (sin, cos) = angle.sin_cos();
+    let (sin, cos) = libm::sincos(angle);
     [[1.0, 0.0, 0.0], [0.0, cos, -sin], [0.0, sin, cos]]
 }
 
 fn rot_y(angle: f64) -> Mat3 {
-    let (sin, cos) = angle.sin_cos();
+    let (sin, cos) = libm::sincos(angle);
     [[cos, 0.0, sin], [0.0, 1.0, 0.0], [-sin, 0.0, cos]]
 }
 
 fn rot_z(angle: f64) -> Mat3 {
-    let (sin, cos) = angle.sin_cos();
+    let (sin, cos) = libm::sincos(angle);
     [[cos, -sin, 0.0], [sin, cos, 0.0], [0.0, 0.0, 1.0]]
 }
 
@@ -494,9 +494,9 @@ impl SplitMix64 {
         }
         let u1 = self.unit_open();
         let u2 = self.unit_open();
-        let radius = (-2.0 * u1.ln()).sqrt();
+        let radius = libm::sqrt(-2.0 * libm::log(u1));
         let theta = 2.0 * core::f64::consts::PI * u2;
-        let (sin, cos) = theta.sin_cos();
+        let (sin, cos) = libm::sincos(theta);
         self.cached_normal = Some(radius * sin);
         radius * cos
     }

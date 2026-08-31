@@ -43,7 +43,7 @@ pub fn meridian_transits(
                         crate::astro::almanac::instant_at_offset_seconds(start, offset_seconds);
                     let apparent =
                         topocentric_apparent(target_naif, station, &time.time_scales(), source)?;
-                    Ok(apparent.hour_angle_deg.to_radians().sin())
+                    Ok(libm::sin(apparent.hour_angle_deg.to_radians()))
                 })
             },
             0.0,
@@ -54,7 +54,7 @@ pub fn meridian_transits(
     for crossing in crossings {
         let time = crossing_time(start, crossing);
         let apparent = topocentric_apparent(target_naif, station, &time.time_scales(), source)?;
-        let cos_h = apparent.hour_angle_deg.to_radians().cos();
+        let cos_h = libm::cos(apparent.hour_angle_deg.to_radians());
         let kind = if cos_h > 0.0 {
             CulminationKind::Upper
         } else if cos_h < 0.0 {

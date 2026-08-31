@@ -20,6 +20,7 @@ use crate::astro::math::linear::{
     invert_flat_first_tie_into, solve_matrix_flat_first_tie_into, FlatCholeskySolveScratch,
     FlatLinearScratch as InvertFlatScratch, FlatNormalSolveScratch as SolveNormalScratch,
 };
+use crate::astro::math::portable;
 use crate::astro::math::vec3;
 use crate::estimation::recipe::{EstimationRecipe, NormalRecipe, ResidualNormRecipe, SolverRecipe};
 use crate::estimation::substrate::normal::NormalAssembler;
@@ -518,8 +519,9 @@ fn float_geometry_quality(
         design.extend_from_slice(&row.h);
     }
     let matrix = DMatrix::from_row_slice(rows.len(), n_params, &design);
-    let singular_values = matrix.svd(false, false).singular_values;
-    let diagnostics = singular_value_diagnostics(singular_values.as_slice(), rows.len(), n_params);
+    let singular_values = portable::svd(&matrix, false, false).singular_values;
+    let singular_values_f64: Vec<f64> = singular_values.iter().map(|value| value.0).collect();
+    let diagnostics = singular_value_diagnostics(&singular_values_f64, rows.len(), n_params);
     let gdop = if diagnostics.rank < n_params {
         f64::INFINITY
     } else {

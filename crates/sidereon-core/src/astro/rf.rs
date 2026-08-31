@@ -59,8 +59,8 @@ pub fn fspl(distance_km: f64, frequency_mhz: f64) -> Result<f64, RfError> {
     let frequency_mhz = rf_positive(frequency_mhz, "frequency_mhz")?;
     rf_finite_output(
         FSPL_KM_MHZ_CONSTANT_DB
-            + DB_FIELD_DECADE * frequency_mhz.log10()
-            + DB_FIELD_DECADE * distance_km.log10(),
+            + DB_FIELD_DECADE * libm::log10(frequency_mhz)
+            + DB_FIELD_DECADE * libm::log10(distance_km),
         "fspl_db",
     )
 }
@@ -121,7 +121,7 @@ pub fn dish_gain(diameter_m: f64, frequency_hz: f64, efficiency: f64) -> Result<
     let lambda = wavelength(frequency_hz)?;
     let efficiency = rf_unit_efficiency(efficiency)?;
     rf_finite_output(
-        DB_POWER_DECADE * (efficiency * (PI * diameter_m / lambda).powf(2.0)).log10(),
+        DB_POWER_DECADE * libm::log10(efficiency * libm::pow(PI * diameter_m / lambda, 2.0)),
         "dish_gain_dbi",
     )
 }

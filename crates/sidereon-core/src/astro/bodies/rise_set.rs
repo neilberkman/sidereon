@@ -118,9 +118,13 @@ pub fn sun_elevation_deg(station: &GeodeticStationKm, time: UtcInstant) -> f64 {
 
     let lat = station.latitude_deg.to_radians();
     let lon = station.longitude_deg.to_radians();
-    let up = [lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin()];
+    let up = [
+        libm::cos(lat) * libm::cos(lon),
+        libm::cos(lat) * libm::sin(lon),
+        libm::sin(lat),
+    ];
     let sin_elevation = ((up[0] * dx + up[1] * dy + up[2] * dz) / range).clamp(-1.0, 1.0);
-    sin_elevation.asin().to_degrees()
+    libm::asin(sin_elevation).to_degrees()
 }
 
 /// Options for Moon elevation threshold crossings (moonrise / moonset).

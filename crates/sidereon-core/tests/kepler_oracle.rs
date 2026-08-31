@@ -145,7 +145,7 @@ fn test_j2_secular_drift_oracle() {
     let initial_state = CartesianState {
         epoch_tdb_seconds: 0.0,
         position_km: Vector3::new(r_mag, 0.0, 0.0),
-        velocity_km_s: Vector3::new(0.0, v_mag * inc_rad.cos(), v_mag * inc_rad.sin()),
+        velocity_km_s: Vector3::new(0.0, v_mag * libm::cos(inc_rad), v_mag * libm::sin(inc_rad)),
     };
 
     let mut forces = sidereon_core::astro::forces::CompositeForceModel::new();
@@ -175,7 +175,7 @@ fn test_j2_secular_drift_oracle() {
     // Analytical J2 drift for circular orbit (e=0, p=a=r)
     let n = (mu / r_mag.powi(3)).sqrt();
     let p = r_mag;
-    let raan_drift_rate = -1.5 * j2 * (re / p).powi(2) * n * inc_rad.cos();
+    let raan_drift_rate = -1.5 * j2 * (re / p).powi(2) * n * libm::cos(inc_rad);
 
     let expected_raan_drift = raan_drift_rate * t_end;
 
@@ -189,11 +189,11 @@ fn test_j2_secular_drift_oracle() {
         .position_km
         .cross(&initial_state.velocity_km_s);
     let n_vec = Vector3::new(0.0, 0.0, 1.0).cross(&h_vec);
-    let initial_raan = n_vec.y.atan2(n_vec.x);
+    let initial_raan = libm::atan2(n_vec.y, n_vec.x);
 
     let h_final = final_pos.cross(&final_vel);
     let n_final = Vector3::new(0.0, 0.0, 1.0).cross(&h_final);
-    let final_raan = n_final.y.atan2(n_final.x);
+    let final_raan = libm::atan2(n_final.y, n_final.x);
 
     let mut actual_raan_drift = final_raan - initial_raan;
     while actual_raan_drift > std::f64::consts::PI {

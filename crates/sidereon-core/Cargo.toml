@@ -31,6 +31,9 @@ exclude = [
 [dependencies]
 memmap2 = { version = "0.9", optional = true }
 nalgebra = { workspace = true }
+approx = "0.5"
+num-traits = "0.2"
+simba = "0.9"
 thiserror = "1.0"
 libm = "0.2"
 serde = { version = "1", features = ["derive"] }
@@ -41,7 +44,7 @@ sha2 = "0.10"
 # fan independent per-satellite arcs across a rayon work-stealing pool. Each arc
 # is the same serial kernel, so results stay bit-identical to the serial path.
 rayon = "1"
-trust-region-least-squares = { path = "../trust-region-least-squares", version = "0.10.0" }
+trust-region-least-squares = { path = "../trust-region-least-squares", version = "0.11" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 fs2 = "0.4"

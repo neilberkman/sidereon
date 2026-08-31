@@ -23,7 +23,7 @@ impl PIController {
         }
 
         // Classic Hairer/Wanner controller
-        let factor = self.safety_factor * (1.0 / error).powf(1.0 / (self.order + 1.0));
+        let factor = self.safety_factor * libm::pow(1.0 / error, 1.0 / (self.order + 1.0));
         current_h * factor.clamp(self.min_scale, self.max_scale)
     }
 }

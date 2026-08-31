@@ -121,7 +121,7 @@ pub fn rodrigues_delta_dcm(delta_theta_rad: [f64; 3]) -> Result<Mat3, InertialEr
             0.5 - phi2 / 24.0 + phi4 / 720.0,
         )
     } else {
-        (phi.sin() / phi, (1.0 - phi.cos()) / phi2)
+        (libm::sin(phi) / phi, (1.0 - libm::cos(phi)) / phi2)
     };
     let k = skew(delta_theta_rad);
     let k2 = mat3_mul(&k, &k);

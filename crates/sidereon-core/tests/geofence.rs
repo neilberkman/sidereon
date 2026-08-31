@@ -114,7 +114,7 @@ fn containment_probability_matches_circular_gaussian_half_space() {
         geodesic_inverse(0.0, point.lon_rad.to_degrees(), 0.0, 0.0).expect("oracle");
     assert_close(probability, normal_cdf(oracle_distance_m / sigma_m), 2.0e-9);
 
-    let cep_m = sigma_m * (2.0_f64 * 2.0_f64.ln()).sqrt();
+    let cep_m = sigma_m * libm::sqrt(2.0_f64 * libm::log(2.0));
     let from_cep = containment_probability(point, PositionUncertainty::CepRadiusM(cep_m), &fence)
         .expect("cep probability");
     assert_close(from_cep, probability, 1.0e-12);

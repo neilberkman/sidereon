@@ -194,8 +194,8 @@ fn assert_state_bits(left: CartesianState, right: CartesianState) {
 }
 
 fn rotate_z(position: [f64; 3], angle: f64) -> [f64; 3] {
-    let c = angle.cos();
-    let s = angle.sin();
+    let c = libm::cos(angle);
+    let s = libm::sin(angle);
     [
         c * position[0] - s * position[1],
         s * position[0] + c * position[1],

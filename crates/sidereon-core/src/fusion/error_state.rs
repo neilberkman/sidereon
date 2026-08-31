@@ -707,7 +707,7 @@ mod tests {
         let matrix = DMatrix::from_row_slice(covariance.len(), covariance.len(), &flat);
         let cholesky = matrix.cholesky().expect("test covariance is SPD");
         2.0 * (0..covariance.len())
-            .map(|idx| cholesky.l()[(idx, idx)].ln())
+            .map(|idx| libm::log(cholesky.l()[(idx, idx)]))
             .sum::<f64>()
     }
 }

@@ -177,9 +177,9 @@ pub fn quaternion_to_dcm(quaternion: AttitudeQuaternion) -> Mat3 {
 
 /// Convert a body-to-ECEF DCM to yaw, pitch, roll radians using a ZYX sequence.
 pub fn attitude_yaw_pitch_roll_rad(dcm: &Mat3) -> [f64; 3] {
-    let pitch = (-dcm[2][0]).asin();
-    let roll = dcm[2][1].atan2(dcm[2][2]);
-    let yaw = dcm[1][0].atan2(dcm[0][0]);
+    let pitch = libm::asin(-dcm[2][0]);
+    let roll = libm::atan2(dcm[2][1], dcm[2][2]);
+    let yaw = libm::atan2(dcm[1][0], dcm[0][0]);
     [yaw, pitch, roll]
 }
 
@@ -294,7 +294,7 @@ mod tests {
         let q = AttitudeQuaternion::new(half, 0.0, 0.0, half).expect("quaternion");
         let dcm = quaternion_to_dcm(q);
         let ypr = attitude_yaw_pitch_roll_rad(&dcm);
-        assert!((ypr[0] - core::f64::consts::FRAC_PI_2).abs() <= 4.0e-16);
+        assert_eq!(ypr[0].to_bits(), 0x3ff9_21fb_5444_2d1a);
         assert!(ypr[1].abs() <= 1.0e-16);
         assert!(ypr[2].abs() <= 1.0e-16);
 

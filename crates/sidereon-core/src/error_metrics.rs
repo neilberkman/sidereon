@@ -313,7 +313,7 @@ fn horizontal_radius_from_eigenvalues(
     } else {
         bisect_radius(
             probability,
-            sigma_major * (-2.0 * (1.0 - probability).ln()).sqrt() + 6.0 * sigma_major,
+            sigma_major * (-2.0 * libm::log(1.0 - probability)).sqrt() + 6.0 * sigma_major,
             |radius| horizontal_probability_radius(lambda_major, lambda_minor, radius),
         )
     };
@@ -360,7 +360,7 @@ fn spherical_radius_from_eigenvalues(
             let sigma_major = values[0].sqrt();
             bisect_radius(
                 probability,
-                sigma_major * (-2.0 * (1.0 - probability).ln()).sqrt() + 6.0 * sigma_major,
+                sigma_major * (-2.0 * libm::log(1.0 - probability)).sqrt() + 6.0 * sigma_major,
                 |radius| spherical_probability_radius(values, radius),
             )
         }
@@ -399,11 +399,11 @@ fn horizontal_probability_radius(lambda_major: f64, lambda_minor: f64, radius: f
         return erf(radius / (core::f64::consts::SQRT_2 * sigma_major));
     }
     let quarter = integrate_gl64(0.0, core::f64::consts::FRAC_PI_2, |phi| {
-        let cos_phi = phi.cos();
-        let sin_phi = phi.sin();
+        let cos_phi = libm::cos(phi);
+        let sin_phi = libm::sin(phi);
         let guarded_minor = lambda_minor.max(lambda_major * DEGENERATE_REL_EPS);
         let g = cos_phi * cos_phi / lambda_major + sin_phi * sin_phi / guarded_minor;
-        (-0.5 * radius * radius * g).exp() / g
+        libm::exp(-0.5 * radius * radius * g) / g
     });
     let integral = 4.0 * quarter;
     let outside = integral / (2.0 * core::f64::consts::PI * sigma_major * sigma_minor);
@@ -420,11 +420,11 @@ fn spherical_probability_radius(eigenvalues: [f64; 3], radius: f64) -> f64 {
         eigenvalues[2].sqrt(),
     ];
     let theta_integral = integrate_gl64(0.0, core::f64::consts::FRAC_PI_2, |theta| {
-        let sin_theta = theta.sin();
-        let cos_theta = theta.cos();
+        let sin_theta = libm::sin(theta);
+        let cos_theta = libm::cos(theta);
         integrate_gl64(0.0, core::f64::consts::FRAC_PI_2, |phi| {
-            let cos_phi = phi.cos();
-            let sin_phi = phi.sin();
+            let cos_phi = libm::cos(phi);
+            let sin_phi = libm::sin(phi);
             let u0 = sin_theta * cos_phi;
             let u1 = sin_theta * sin_phi;
             let u2 = cos_theta;
@@ -433,7 +433,7 @@ fn spherical_probability_radius(eigenvalues: [f64; 3], radius: f64) -> f64 {
         })
     });
     let shell_integral = 8.0 * theta_integral;
-    let norm = (2.0 * core::f64::consts::PI).powf(-1.5) / (sigmas[0] * sigmas[1] * sigmas[2]);
+    let norm = libm::pow(2.0 * core::f64::consts::PI, -1.5) / (sigmas[0] * sigmas[1] * sigmas[2]);
     (norm * shell_integral).clamp(0.0, 1.0)
 }
 
@@ -442,7 +442,7 @@ fn radial_integral(radius: f64, h: f64) -> f64 {
     let sqrt_a = a.sqrt();
     let ar2 = a * radius * radius;
     core::f64::consts::PI.sqrt() * erf(radius * sqrt_a) / (4.0 * a * sqrt_a)
-        - radius * (-ar2).exp() / (2.0 * a)
+        - radius * libm::exp(-ar2) / (2.0 * a)
 }
 
 fn one_dimensional_radius(sigma: f64, probability: f64) -> Result<f64, ErrorMetricsError> {
@@ -460,7 +460,7 @@ fn maxwell_radius(sigma: f64, probability: f64) -> f64 {
     bisect_radius(probability, 8.0 * sigma, |radius| {
         let x = radius / sigma;
         erf(x * core::f64::consts::FRAC_1_SQRT_2)
-            - (2.0 / core::f64::consts::PI).sqrt() * x * (-0.5 * x * x).exp()
+            - (2.0 / core::f64::consts::PI).sqrt() * x * libm::exp(-0.5 * x * x)
     })
 }
 
@@ -536,9 +536,9 @@ fn eigenvalues_symmetric_3x3(covariance: [[f64; 3]; 3]) -> Result<[f64; 3], Erro
             [a02 * inv_p, a12 * inv_p, b22 * inv_p],
         ];
         let r = (det3(b) / 2.0).clamp(-1.0, 1.0);
-        let phi = r.acos() / 3.0;
-        let lambda1 = q + 2.0 * p * phi.cos();
-        let lambda3 = q + 2.0 * p * (phi + 2.0 * core::f64::consts::PI / 3.0).cos();
+        let phi = libm::acos(r) / 3.0;
+        let lambda1 = q + 2.0 * p * libm::cos(phi);
+        let lambda3 = q + 2.0 * p * libm::cos(phi + 2.0 * core::f64::consts::PI / 3.0);
         let lambda2 = a00 + a11 + a22 - lambda1 - lambda3;
         [lambda1, lambda2, lambda3]
     };
@@ -714,7 +714,7 @@ mod tests {
     fn two_drms_coverage_spans_isotropic_to_elongated_cases() {
         let isotropic_r = 2.0 * (2.0_f64).sqrt();
         let isotropic = horizontal_probability_radius(1.0, 1.0, isotropic_r);
-        assert_close(isotropic, 1.0 - (-4.0_f64).exp(), 1.0e-12);
+        assert_close(isotropic, 1.0 - libm::exp(-4.0_f64), 1.0e-12);
 
         let elongated_r = 2.0 * (100.0_f64 + 1.0e-4).sqrt();
         let elongated = horizontal_probability_radius(100.0, 1.0e-4, elongated_r);
@@ -752,7 +752,7 @@ mod tests {
     fn quadrature_recovers_isotropic_rayleigh_closed_form() {
         let sigma = 4.0;
         let probability = 0.95_f64;
-        let radius = sigma * (-2.0_f64 * (1.0 - probability).ln()).sqrt();
+        let radius = sigma * (-2.0_f64 * libm::log(1.0 - probability)).sqrt();
         let got = horizontal_probability_radius(sigma * sigma, sigma * sigma, radius);
         assert_close(got, probability, 1.0e-12);
     }

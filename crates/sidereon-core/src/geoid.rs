@@ -743,9 +743,9 @@ impl GeoidGrid {
                 value += value_d * weight_d;
             }
             ProjVgridshiftArithmetic::FusedMultiplyAdd => {
-                value = value_b.mul_add(weight_b, value);
-                value = value_c.mul_add(weight_c, value);
-                value = value_d.mul_add(weight_d, value);
+                value = libm::fma(value_b, weight_b, value);
+                value = libm::fma(value_c, weight_c, value);
+                value = libm::fma(value_d, weight_d, value);
             }
         }
         Ok(value)

@@ -190,14 +190,13 @@ impl Default for PolarMotion {
 }
 
 /// Final matrix-vector multiply using explicit FMA.
-/// This matches numpy's vectorized behavior and is the ONLY place
-/// where f64::mul_add() should be used.
+/// This matches numpy's vectorized behavior.
 fn mat3_vec3_mul_fma(r: &Mat3, p: &[f64; 3]) -> [f64; 3] {
     let mut result = [0.0_f64; 3];
     for i in 0..3 {
         let sum = r[i][0] * p[0];
-        let sum = f64::mul_add(r[i][1], p[1], sum);
-        let sum = f64::mul_add(r[i][2], p[2], sum);
+        let sum = libm::fma(r[i][1], p[1], sum);
+        let sum = libm::fma(r[i][2], p[2], sum);
         result[i] = sum;
     }
     result

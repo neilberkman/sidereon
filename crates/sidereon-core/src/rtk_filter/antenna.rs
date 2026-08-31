@@ -81,9 +81,9 @@ fn los_zenith_azimuth_deg(
 ) -> (f64, f64) {
     let elevation_sin = dot3(los, up);
     let elevation_sin = (-1.0_f64).max(1.0_f64.min(elevation_sin));
-    let zenith_deg = rad_to_deg_ref(elevation_sin.acos());
+    let zenith_deg = rad_to_deg_ref(libm::acos(elevation_sin));
 
-    let azimuth_rad = dot3(los, east).atan2(dot3(los, north));
+    let azimuth_rad = libm::atan2(dot3(los, east), dot3(los, north));
     let azimuth_deg = rad_to_deg_ref(azimuth_rad);
     let azimuth_deg = if azimuth_deg < 0.0 {
         azimuth_deg + 360.0

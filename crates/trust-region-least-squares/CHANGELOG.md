@@ -2,6 +2,15 @@
 
 All notable changes to `trust-region-least-squares` are documented here.
 
+## [0.11.0] - 2026-08-30
+
+### Added
+
+- Defaulted `HostNumerics::log1p` and `HostNumerics::atan` hooks for callers
+  that need portable robust-loss results. `LossFunction::evaluate_with` and
+  `rho_for_loss_with` consult these hooks for the Cauchy and Arctan losses;
+  `Ok(None)` preserves the crate's existing host-`f64` behavior.
+
 ## [0.10.0] - 2026-08-22
 
 ### Added

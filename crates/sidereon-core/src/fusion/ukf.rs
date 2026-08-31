@@ -2,6 +2,8 @@
 
 use nalgebra::DMatrix;
 
+use crate::astro::math::portable;
+
 use super::ekf::{
     apply_closed_loop_navigation_error, apply_closed_loop_scale_error,
     normalized_innovation_squared, EkfCorrection, EkfCorrectionReport, InnovationGate,
@@ -276,16 +278,16 @@ fn covariance_square_root(covariance: &[Vec<f64>]) -> Result<DMatrix<f64>, Fusio
     let dimension = covariance.len();
     validate_covariance_matrix(covariance, dimension, "covariance")?;
     let matrix = dmatrix_from_rows(covariance);
-    if let Some(cholesky) = matrix.clone().cholesky() {
-        return Ok(cholesky.l());
+    if let Some(cholesky) = portable::cholesky_lower_dynamic(&matrix) {
+        return Ok(cholesky);
     }
 
-    let eigen = matrix.symmetric_eigen();
+    let (eigenvectors, eigenvalues) = portable::symmetric_eigen_dynamic(&matrix);
     let mut diagonal = DMatrix::<f64>::zeros(dimension, dimension);
     for idx in 0..dimension {
-        let eigenvalue = eigen.eigenvalues[idx];
+        let eigenvalue = eigenvalues[idx];
         if eigenvalue < 0.0 {
-            let tolerance = covariance_eigenvalue_tolerance(covariance, &eigen.eigenvectors, idx);
+            let tolerance = covariance_eigenvalue_tolerance(covariance, &eigenvectors, idx);
             if eigenvalue < -tolerance {
                 return Err(FusionError::NonPositiveSemidefinite {
                     field: "covariance",
@@ -296,7 +298,7 @@ fn covariance_square_root(covariance: &[Vec<f64>]) -> Result<DMatrix<f64>, Fusio
             diagonal[(idx, idx)] = eigenvalue.sqrt();
         }
     }
-    Ok(eigen.eigenvectors * diagonal)
+    Ok(portable::product(&eigenvectors, &diagonal))
 }
 
 fn measurement_statistics<F>(

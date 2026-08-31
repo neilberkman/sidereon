@@ -347,8 +347,8 @@ mod tests {
             geodetic_to_itrs(0.0, 0.0, altitude_km).expect("valid geodetic");
         let theta =
             greenwich_mean_sidereal_time_radians_from_j2000_seconds(epoch).expect("valid gmst");
-        let c = theta.cos();
-        let s = theta.sin();
+        let c = libm::cos(theta);
+        let s = libm::sin(theta);
         let x_eci = c * x_ecef - s * y_ecef;
         let y_eci = s * x_ecef + c * y_ecef;
         let r = RE_EARTH + altitude_km;

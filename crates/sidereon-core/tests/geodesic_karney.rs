@@ -90,8 +90,8 @@ fn local_position_error_m(actual_lat_deg: f64, actual_lon_deg: f64, case: GeodTe
     let east_m = angle_diff_deg(actual_lon_deg, case.lon2_deg)
         * DEG_TO_RAD
         * WGS84_A_M
-        * (case.lat2_deg * DEG_TO_RAD).cos().abs();
-    north_m.hypot(east_m)
+        * libm::cos(case.lat2_deg * DEG_TO_RAD).abs();
+    libm::hypot(north_m, east_m)
 }
 
 fn inverse_azimuth_tolerance_deg(index: usize) -> f64 {

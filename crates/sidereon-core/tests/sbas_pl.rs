@@ -216,7 +216,7 @@ fn k_multipliers_are_pinned_to_mops_constants() {
         0x4015_4e90_b4db_5fad
     );
     assert_abs_diff(normal_q_inv(5.0e-8).unwrap(), 5.33, 0.003_28);
-    let rayleigh = (-2.0 * (5.0e-9_f64).ln()).sqrt();
+    let rayleigh = libm::sqrt(-2.0 * libm::log(5.0e-9_f64));
     assert_abs_diff(rayleigh, 6.182_851_756_998_919, 1.0e-12);
     assert_abs_diff(rayleigh, SbasKMultipliers::EN_ROUTE_NPA.k_h, 0.003);
 }

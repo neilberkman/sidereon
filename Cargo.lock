@@ -1435,6 +1435,7 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "libm",
  "portable-pty",
  "ratatui",
  "serde",
@@ -1457,11 +1458,13 @@ dependencies = [
  "libm",
  "memmap2",
  "nalgebra",
+ "num-traits",
  "rayon",
  "roxmltree",
  "serde",
  "serde_json",
  "sha2",
+ "simba",
  "thiserror 1.0.69",
  "trust-region-least-squares",
 ]
@@ -1679,7 +1682,7 @@ dependencies = [
 
 [[package]]
 name = "trust-region-least-squares"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "criterion",
  "libloading",

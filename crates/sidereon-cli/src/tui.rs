@@ -1158,7 +1158,7 @@ impl TuiState {
         let enu = sidereon::dop::ecef_to_enu_rotation(origin.geo.lat_rad, origin.geo.lon_rad);
         let east_m = dot(delta, enu[0]);
         let north_m = dot(delta, enu[1]);
-        let horizontal_m = east_m.hypot(north_m);
+        let horizontal_m = libm::hypot(east_m, north_m);
         self.latest_horizontal_m = Some(horizontal_m);
         if self.convergence_m.len() == CONVERGENCE_SAMPLES {
             self.convergence_m.pop_front();

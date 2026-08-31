@@ -1,6 +1,6 @@
 [package]
 name = "trust-region-least-squares"
-version = "0.10.0"
+version = "0.11.0"
 authors = []
 edition = "2021"
 description = "A dense trust-region-reflective nonlinear least-squares solver that reproduces SciPy's least_squares (method='trf') bit-for-bit on its unbounded path for arbitrary dimension n, every loss (linear/soft_l1/huber/cauchy/arctan), and 2-point Jacobians, with an injectable host-runtime numerics backend for exact SVD, BLAS, and power dispatch."
@@ -31,6 +31,11 @@ default = []
 # diagnostic branches through the hot solver loop (first-divergence debugging for
 # parity work), so it must compile out when unused rather than tax every solve.
 trace = []
+
+# TRLS deliberately retains direct host `f64` transcendental operations on its
+# published parity paths; sidereon-core supplies the portable `_with` backend.
+[lints.clippy]
+disallowed-methods = "allow"
 
 [dependencies]
 # Everything that makes the solver work ships in the single build: there are no

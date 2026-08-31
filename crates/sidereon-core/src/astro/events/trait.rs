@@ -848,7 +848,7 @@ mod tests {
 
     impl ScalarEventPredicate for ShiftedSine {
         fn value_at(&self, time_seconds: f64) -> f64 {
-            (time_seconds + self.phase_seconds).sin()
+            libm::sin(time_seconds + self.phase_seconds)
         }
     }
 
@@ -974,7 +974,7 @@ mod tests {
     #[test]
     fn crossings_find_sine_zeroes_with_direction() {
         let events = finder(-0.4, TAU + 0.4)
-            .find_crossings(f64::sin, 0.0)
+            .find_crossings(libm::sin, 0.0)
             .expect("finite sine samples");
 
         assert_eq!(events.len(), 3);
@@ -1143,7 +1143,7 @@ mod tests {
     fn extrema_find_sine_maximum_and_minimum() {
         let events = EventFinder::new(0.0, TAU, 0.2, 1.0e-8)
             .expect("valid finder")
-            .find_extrema(f64::sin)
+            .find_extrema(libm::sin)
             .expect("finite sine samples");
 
         assert_eq!(events.len(), 2);
