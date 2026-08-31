@@ -35,7 +35,7 @@ approx = "0.5"
 num-traits = "0.2"
 simba = "0.9"
 thiserror = "1.0"
-libm = "0.2"
+libm = "=0.2.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 roxmltree = "0.21"

@@ -4,6 +4,14 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- `libm` is pinned to exactly 0.2.16. The crate's cross-platform bit-exactness
+  is a property of that implementation's rounding, so a semver-compatible
+  update of it could change results without any change here. The pin makes
+  such a move a deliberate edit with a re-pinning pass, not a side effect of
+  `cargo update`.
+
 ## [1.4.1] - 2026-08-31
 
 Supersedes 1.4.0. Solutions are unchanged; a diagnostic is restored.
