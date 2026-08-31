@@ -393,7 +393,7 @@ pub fn moon_illumination(
     let observer_km = [stn_x, stn_y, stn_z];
 
     let phase_angle_deg = phase_angle(moon_km, sun_km, observer_km)?;
-    let illuminated_fraction = (1.0 + phase_angle_deg.to_radians().cos()) / 2.0;
+    let illuminated_fraction = (1.0 + libm::cos(phase_angle_deg.to_radians())) / 2.0;
     Ok(MoonIllumination {
         illuminated_fraction,
         phase_angle_deg,
@@ -842,14 +842,14 @@ fn ecliptic_from_true_equatorial(
     distance_km: f64,
 ) -> Result<Ecliptic, ObserveError> {
     let eps_true = true_obliquity_radians(ts)?;
-    let cos_eps = eps_true.cos();
-    let sin_eps = eps_true.sin();
+    let cos_eps = libm::cos(eps_true);
+    let sin_eps = libm::sin(eps_true);
     let x = u_tod[0];
     let y = cos_eps * u_tod[1] + sin_eps * u_tod[2];
     let z = -sin_eps * u_tod[1] + cos_eps * u_tod[2];
     Ok(Ecliptic {
-        longitude_deg: wrap_360(y.atan2(x).to_degrees()),
-        latitude_deg: clamp_unit(z).asin().to_degrees(),
+        longitude_deg: wrap_360(libm::atan2(y, x).to_degrees()),
+        latitude_deg: libm::asin(clamp_unit(z)).to_degrees(),
         distance_km,
     })
 }
@@ -877,11 +877,11 @@ fn equatorial_from_vector(vector_km: [f64; 3]) -> Result<Equatorial, ObserveErro
 }
 
 fn equatorial_from_unit(unit: [f64; 3], distance_km: f64) -> Equatorial {
-    let right_ascension_deg = wrap_360(unit[1].atan2(unit[0]).to_degrees());
+    let right_ascension_deg = wrap_360(libm::atan2(unit[1], unit[0]).to_degrees());
     Equatorial {
         right_ascension_deg,
         right_ascension_hours: right_ascension_deg / 15.0,
-        declination_deg: clamp_unit(unit[2]).asin().to_degrees(),
+        declination_deg: libm::asin(clamp_unit(unit[2])).to_degrees(),
         distance_km,
     }
 }
@@ -902,7 +902,7 @@ fn apply_refraction(
     let argument_deg = elevation_deg + 10.3 / (elevation_deg + 5.11);
     let r_arcmin = refraction.pressure_mbar / 1010.0 * 283.0 / (273.0 + refraction.temperature_c)
         * 1.02
-        / argument_deg.to_radians().tan();
+        / libm::tan(argument_deg.to_radians());
     let corrected = elevation_deg + r_arcmin / 60.0;
     ensure_finite(corrected)?;
     Ok(corrected)

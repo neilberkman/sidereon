@@ -371,7 +371,7 @@ pub fn cfar_ca_multiplier_from_pfa(
     }
     validate_probability(false_alarm_probability, "false_alarm_probability")?;
     let n = searched_cells as f64;
-    let inv = 1.0 / false_alarm_probability.powf(1.0 / n);
+    let inv = 1.0 / libm::pow(false_alarm_probability, 1.0 / n);
     Ok(n * (inv - 1.0))
 }
 
@@ -389,7 +389,7 @@ pub fn cfar_ca_pfa_from_multiplier(
     if !one_plus.is_finite() {
         return Err(invalid_input("multiplier", "not finite"));
     }
-    Ok(one_plus.powf(-n))
+    Ok(libm::pow(one_plus, -n))
 }
 
 /// CA-CFAR absolute threshold from noise level, search window, and false-alarm target.

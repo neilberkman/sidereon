@@ -1468,7 +1468,7 @@ mod tests {
             .l()
             .diagonal()
             .iter()
-            .map(|value| value.ln())
+            .map(|value| libm::log(*value))
             .sum::<f64>()
     }
 

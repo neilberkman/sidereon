@@ -25,15 +25,15 @@ pub fn geocentric_ecliptic(
         return Err(AlmanacError::Frame("obliquity"));
     }
 
-    let cos_eps = eps.cos();
-    let sin_eps = eps.sin();
+    let cos_eps = libm::cos(eps);
+    let sin_eps = libm::sin(eps);
     let x = pos_true_of_date_m[0] / distance_m;
     let y_eq = pos_true_of_date_m[1] / distance_m;
     let z_eq = pos_true_of_date_m[2] / distance_m;
     let y = cos_eps * y_eq + sin_eps * z_eq;
     let z = -sin_eps * y_eq + cos_eps * z_eq;
     Ok(EclipticLonLat {
-        longitude_deg: wrap360(y.atan2(x).to_degrees()),
-        latitude_deg: z.clamp(-1.0, 1.0).asin().to_degrees(),
+        longitude_deg: wrap360(libm::atan2(y, x).to_degrees()),
+        latitude_deg: libm::asin(z.clamp(-1.0, 1.0)).to_degrees(),
     })
 }

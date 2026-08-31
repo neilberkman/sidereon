@@ -249,7 +249,10 @@ fn host_power(
             return Ok(out);
         }
     }
-    Ok(values.iter().map(|&value| value.powf(exponent)).collect())
+    Ok(values
+        .iter()
+        .map(|&value| libm::pow(value, exponent))
+        .collect())
 }
 
 fn rho_maybe_with(
@@ -334,7 +337,7 @@ fn rho_maybe_with(
         // cauchy(z, rho, cost_only): rho[0] = log1p(z).
         Loss::Cauchy => {
             for i in 0..m {
-                rho0[i] = z[i].ln_1p();
+                rho0[i] = libm::log1p(z[i]);
                 if cost_only {
                     continue;
                 }
@@ -348,7 +351,7 @@ fn rho_maybe_with(
         Loss::Arctan => {
             for i in 0..m {
                 let zi = z[i];
-                rho0[i] = zi.atan();
+                rho0[i] = libm::atan(zi);
                 if cost_only {
                     continue;
                 }

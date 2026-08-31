@@ -145,7 +145,7 @@ pub fn pseudorange_variance(
 
     let mut elevation_var = options.a_m * options.a_m;
     if options.b_m != 0.0 {
-        let sin_el = (elevation_deg * DEG_TO_RAD).sin();
+        let sin_el = libm::sin(elevation_deg * DEG_TO_RAD);
         let scaled = options.b_m * options.b_m / (sin_el * sin_el);
         if !scaled.is_finite() {
             return Err(QualityError::InvalidElevation);
@@ -160,7 +160,7 @@ pub fn pseudorange_variance(
                 return Err(QualityError::MissingCn0);
             };
             validate_nonneg_parameter(cn0, "cn0_dbhz")?;
-            elevation_var + options.cn0_scale_m2 * 10.0_f64.powf(-cn0 / 10.0)
+            elevation_var + options.cn0_scale_m2 * libm::pow(10.0_f64, -cn0 / 10.0)
         }
     };
 
@@ -1260,10 +1260,10 @@ fn regularized_gamma_p(a: f64, x: f64) -> f64 {
     if x < a + 1.0 {
         let gln = log_gamma(a);
         let sum = gamma_series(x, 1.0 / a, 1.0 / a, a, 1);
-        sum * (-x + a * x.ln() - gln).exp()
+        sum * libm::exp(-x + a * libm::log(x) - gln)
     } else {
         let gln = log_gamma(a);
-        let q = gamma_continued_fraction(a, x) * (-x + a * x.ln() - gln).exp();
+        let q = gamma_continued_fraction(a, x) * libm::exp(-x + a * libm::log(x) - gln);
         1.0 - q
     }
 }
@@ -1331,7 +1331,9 @@ const SQRT_2PI: f64 = 2.5066282746310002;
 
 fn log_gamma(z: f64) -> f64 {
     if z < 0.5 {
-        std::f64::consts::PI.ln() - (std::f64::consts::PI * z).sin().ln() - log_gamma(1.0 - z)
+        libm::log(std::f64::consts::PI)
+            - libm::log(libm::sin(std::f64::consts::PI * z))
+            - log_gamma(1.0 - z)
     } else {
         let z = z - 1.0;
         let mut x = LANCZOS[0];
@@ -1339,7 +1341,7 @@ fn log_gamma(z: f64) -> f64 {
             x += coef / (z + i as f64);
         }
         let t = z + 7.5;
-        SQRT_2PI.ln() + (z + 0.5) * t.ln() - t + x.ln()
+        libm::log(SQRT_2PI) + (z + 0.5) * libm::log(t) - t + libm::log(x)
     }
 }
 

@@ -373,7 +373,7 @@ pub fn coe2rv(coe: &ClassicalElements, mu: f64) -> Result<([f64; 3], [f64; 3]), 
     let p = coe.p;
     let incl = coe.incl;
 
-    let (sin_nu, cos_nu) = nu.sin_cos();
+    let (sin_nu, cos_nu) = libm::sincos(nu);
 
     // Perifocal (PQW) position and velocity.
     let temp = p / (1.0 + ecc * cos_nu);
@@ -382,9 +382,9 @@ pub fn coe2rv(coe: &ClassicalElements, mu: f64) -> Result<([f64; 3], [f64; 3]), 
     let v_pqw = [-sin_nu * sqrt_mu_p, (ecc + cos_nu) * sqrt_mu_p, 0.0];
 
     // Perifocal-to-ECI rotation R = ROT3(-raan) ROT1(-incl) ROT3(-argp).
-    let (sin_raan, cos_raan) = raan.sin_cos();
-    let (sin_argp, cos_argp) = argp.sin_cos();
-    let (sin_incl, cos_incl) = incl.sin_cos();
+    let (sin_raan, cos_raan) = libm::sincos(raan);
+    let (sin_argp, cos_argp) = libm::sincos(argp);
+    let (sin_incl, cos_incl) = libm::sincos(incl);
 
     let m11 = cos_raan * cos_argp - sin_raan * sin_argp * cos_incl;
     let m12 = -cos_raan * sin_argp - sin_raan * cos_argp * cos_incl;
@@ -424,7 +424,7 @@ pub(crate) fn classify(ecc: f64, incl: f64) -> OrbitType {
 /// otherwise produce a NaN at the poles of the conversion.
 #[inline]
 pub(crate) fn clamp_acos(x: f64) -> f64 {
-    x.clamp(-1.0, 1.0).acos()
+    libm::acos(x.clamp(-1.0, 1.0))
 }
 
 /// Unsigned angle between two vectors in `[0, pi]`, clamped against round-off.
@@ -574,8 +574,16 @@ mod tests {
         let radius = 7000.0_f64;
         let speed = (MU / radius).sqrt();
         let truelon0 = 35.0 * DEG;
-        let r = [radius * truelon0.cos(), radius * truelon0.sin(), 0.0];
-        let v = [-speed * truelon0.sin(), speed * truelon0.cos(), 0.0];
+        let r = [
+            radius * libm::cos(truelon0),
+            radius * libm::sin(truelon0),
+            0.0,
+        ];
+        let v = [
+            -speed * libm::sin(truelon0),
+            speed * libm::cos(truelon0),
+            0.0,
+        ];
 
         let coe = rv2coe(r, v, MU).unwrap();
         assert_eq!(coe.orbit_type, OrbitType::CircularEquatorial);

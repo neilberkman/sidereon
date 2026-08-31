@@ -1118,7 +1118,9 @@ mod tests {
     fn logdet(covariance: Covariance6) -> f64 {
         let matrix = SMatrix::<f64, 6, 6>::from_fn(|i, j| covariance.as_matrix()[i][j]);
         let cholesky = matrix.cholesky().expect("test covariance is SPD");
-        2.0 * (0..6).map(|idx| cholesky.l()[(idx, idx)].ln()).sum::<f64>()
+        2.0 * (0..6)
+            .map(|idx| libm::log(cholesky.l()[(idx, idx)]))
+            .sum::<f64>()
     }
 
     struct SplitMix64 {
@@ -1153,11 +1155,15 @@ mod tests {
         let theta = rng.range_f64(0.0, 2.0 * PI);
         let z = rng.range_f64(-50.0, 50.0);
         let xy_radius = (radius * radius - z * z).sqrt();
-        let position = [xy_radius * theta.cos(), xy_radius * theta.sin(), z];
+        let position = [
+            xy_radius * libm::cos(theta),
+            xy_radius * libm::sin(theta),
+            z,
+        ];
         let speed = (MU_EARTH / radius).sqrt();
         let velocity = [
-            -speed * theta.sin(),
-            speed * theta.cos(),
+            -speed * libm::sin(theta),
+            speed * libm::cos(theta),
             rng.range_f64(-0.02, 0.02),
         ];
         CartesianState::new(rng.range_f64(-100.0, 100.0), position, velocity)

@@ -2284,7 +2284,7 @@ mod tests {
         fn standard_normal(&mut self) -> f64 {
             let u1 = self.unit_f64().max(f64::MIN_POSITIVE);
             let u2 = self.unit_f64();
-            (-2.0 * u1.ln()).sqrt() * (2.0 * core::f64::consts::PI * u2).cos()
+            (-2.0 * libm::log(u1)).sqrt() * libm::cos(2.0 * core::f64::consts::PI * u2)
         }
     }
 

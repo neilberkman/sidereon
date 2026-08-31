@@ -2728,8 +2728,8 @@ mod tests {
         let factors = [1, 2, 4, 8, 16, 32, 64, 128];
         let adev = overlapping_adev(AllanSeries::FractionalFrequency(&frequency), 1.0, &factors)
             .expect("overlapping ADEV");
-        let slope = (adev.deviation[5].ln() - adev.deviation[1].ln())
-            / (adev.tau_s[5].ln() - adev.tau_s[1].ln());
+        let slope = (libm::log(adev.deviation[5]) - libm::log(adev.deviation[1]))
+            / (libm::log(adev.tau_s[5]) - libm::log(adev.tau_s[1]));
         assert!(
             (slope - allan_deviation_power_law_slope(PowerLawNoiseType::WhiteFM)).abs() < 0.25,
             "white-FM Allan deviation slope {slope:e}"

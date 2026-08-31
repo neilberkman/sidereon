@@ -405,9 +405,9 @@ fn principal_components(frame: &EncounterFrame, c_enc: &[[f64; 2]; 2]) -> (f64, 
         (1.0, 0.0)
     };
 
-    let theta = vy.atan2(vx);
-    let xm = frame.miss_km * theta.cos();
-    let zm = -frame.miss_km * theta.sin();
+    let theta = libm::atan2(vy, vx);
+    let xm = frame.miss_km * libm::cos(theta);
+    let zm = -frame.miss_km * libm::sin(theta);
 
     (sigma_x, sigma_z, xm, zm)
 }
@@ -451,7 +451,7 @@ fn alfano_2005(sigma_x: f64, sigma_z: f64, xm: f64, zm: f64, hbr: f64) -> f64 {
             } else {
                 let y_top = y_top_sq.sqrt();
                 let arg = (x - xm) * (x - xm) / (2.0 * sigma_x * sigma_x);
-                let exp_term = (-arg).exp();
+                let exp_term = libm::exp(-arg);
                 let erf_top = erf((y_top - zm) / (sigma_z * sqrt2));
                 let erf_bot = erf((-y_top - zm) / (sigma_z * sqrt2));
                 exp_term * (erf_top - erf_bot)
@@ -490,14 +490,14 @@ fn foster_numerical(sigma_x: f64, sigma_z: f64, xm: f64, zm: f64, hbr: f64) -> f
             for j in 0..steps_theta {
                 let r = (i as f64 + 0.5) * dr;
                 let theta = (j as f64 + 0.5) * dtheta;
-                let x = r * theta.cos();
-                let z = r * theta.sin();
+                let x = r * libm::cos(theta);
+                let z = r * libm::sin(theta);
 
                 // `powf(2.0)` (not `x * x`) matches the reference `:math.pow(_, 2)`
                 // for bit-exact parity.
-                let arg = (x - xm).powf(2.0) / (2.0 * sigma_x * sigma_x)
-                    + (z - zm).powf(2.0) / (2.0 * sigma_z * sigma_z);
-                let f = (-arg).exp() / (2.0 * PI * sigma_x * sigma_z);
+                let arg = libm::pow(x - xm, 2.0) / (2.0 * sigma_x * sigma_x)
+                    + libm::pow(z - zm, 2.0) / (2.0 * sigma_z * sigma_z);
+                let f = libm::exp(-arg) / (2.0 * PI * sigma_x * sigma_z);
                 acc += f * r * dr * dtheta;
             }
         }

@@ -33,7 +33,7 @@ pub fn normal_gravity_mps2(lat_rad: f64, height_m: f64) -> Result<f64, InertialE
         return Err(invalid_input("lat_rad", "must be in [-pi/2, pi/2]"));
     }
 
-    let sin_lat = lat_rad.sin();
+    let sin_lat = libm::sin(lat_rad);
     let sin2 = sin_lat * sin_lat;
     let surface = WGS84_NORMAL_GRAVITY_EQUATOR_MPS2 * (1.0 + WGS84_SOMIGLIANA_K * sin2)
         / (1.0 - WGS84_E2 * sin2).sqrt();
@@ -73,8 +73,8 @@ pub fn gravity_ecef_mps2(position_ecef_m: [f64; 3]) -> Result<[f64; 3], Inertial
 }
 
 fn geodetic_surface_normal_ecef(lat_rad: f64, lon_rad: f64) -> [f64; 3] {
-    let (sin_lat, cos_lat) = lat_rad.sin_cos();
-    let (sin_lon, cos_lon) = lon_rad.sin_cos();
+    let (sin_lat, cos_lat) = libm::sincos(lat_rad);
+    let (sin_lon, cos_lon) = libm::sincos(lon_rad);
     [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat]
 }
 

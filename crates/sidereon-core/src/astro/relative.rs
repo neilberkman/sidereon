@@ -148,8 +148,8 @@ pub fn cw_stm(n: f64, dt: f64) -> Result<Mat6, RtnFrameError> {
     }
 
     let nt = n * dt;
-    let s = nt.sin();
-    let c = nt.cos();
+    let s = libm::sin(nt);
+    let c = libm::cos(nt);
     let one_minus_c = 1.0 - c;
 
     Ok([
@@ -342,8 +342,8 @@ mod tests {
         let propagated = cw_propagate(&initial, N, dt).expect("valid CW state");
         let nt = N * dt;
 
-        assert!((propagated.position_km.z - z0 * nt.cos()).abs() < 1.0e-6);
-        assert!((propagated.velocity_km_s.z - (-N * z0 * nt.sin())).abs() < 1.0e-9);
+        assert!((propagated.position_km.z - z0 * libm::cos(nt)).abs() < 1.0e-6);
+        assert!((propagated.velocity_km_s.z - (-N * z0 * libm::sin(nt))).abs() < 1.0e-9);
     }
 
     #[test]
@@ -359,7 +359,7 @@ mod tests {
         let radial = CartesianState::new(0.0, [x0, 0.0, 0.0], [0.0, 0.0, 0.0]);
         let propagated = cw_propagate(&radial, N, dt).expect("valid CW state");
         let nt = N * dt;
-        assert!((propagated.position_km.y - 6.0 * (nt.sin() - nt) * x0).abs() < 1.0e-6);
+        assert!((propagated.position_km.y - 6.0 * (libm::sin(nt) - nt) * x0).abs() < 1.0e-6);
     }
 
     #[test]

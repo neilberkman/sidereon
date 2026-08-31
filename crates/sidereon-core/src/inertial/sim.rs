@@ -508,7 +508,7 @@ fn earth_rotation_first_order_inverse(dt_s: f64) -> Result<[[f64; 3]; 3], Inerti
 fn rotation_vector_from_dcm(dcm: &[[f64; 3]; 3]) -> Result<[f64; 3], InertialError> {
     let trace = dcm[0][0] + dcm[1][1] + dcm[2][2];
     let cos_angle = bounded_rotation_cosine(0.5 * (trace - 1.0))?;
-    let angle = cos_angle.acos();
+    let angle = libm::acos(cos_angle);
     let skew_part = [
         dcm[2][1] - dcm[1][2],
         dcm[0][2] - dcm[2][0],
@@ -519,7 +519,7 @@ fn rotation_vector_from_dcm(dcm: &[[f64; 3]; 3]) -> Result<[f64; 3], InertialErr
     } else if core::f64::consts::PI - angle < 1.0e-6 {
         rotation_vector_near_pi(dcm, angle)
     } else {
-        Ok(scale3(skew_part, angle / (2.0 * angle.sin())))
+        Ok(scale3(skew_part, angle / (2.0 * libm::sin(angle))))
     }
 }
 
@@ -629,7 +629,7 @@ impl SplitMix64 {
             let v = 2.0 * self.unit_f64() - 1.0;
             let s = u * u + v * v;
             if s > 0.0 && s < 1.0 {
-                let scale = (-2.0 * s.ln() / s).sqrt();
+                let scale = (-2.0 * libm::log(s) / s).sqrt();
                 self.spare_normal = Some(v * scale);
                 return u * scale;
             }
@@ -757,7 +757,7 @@ mod tests {
         for dt_s in [0.25_f64, 0.5_f64] {
             let values = collect_bias_axis(dt_s, count);
             let rho = autocorrelation_lag1(&values, burn_in);
-            let expected = (-dt_s / 0.75_f64).exp();
+            let expected = libm::exp(-dt_s / 0.75_f64);
             assert!(
                 (rho - expected).abs() <= 1.2e-3,
                 "dt {dt_s}, rho {rho:.17e}, expected {expected:.17e}"
@@ -1101,6 +1101,6 @@ mod tests {
         let second =
             simulate_imu_samples_from_increments(&truth, spec, options).expect("second sequence");
         assert_eq!(first.samples, second.samples);
-        assert_eq!(bit_hash_samples(&first.samples), 0xb4bb_aa05_b75e_5097);
+        assert_eq!(bit_hash_samples(&first.samples), 0x1595_8f34_f021_b56d);
     }
 }

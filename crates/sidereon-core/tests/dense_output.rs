@@ -113,8 +113,8 @@ fn test_dense_output_circular_orbit_parity() {
 
         // Analytical circular orbit
         let theta = n * t;
-        let expected_pos = Vector3::new(r_mag * theta.cos(), r_mag * theta.sin(), 0.0);
-        let expected_vel = Vector3::new(-v_mag * theta.sin(), v_mag * theta.cos(), 0.0);
+        let expected_pos = Vector3::new(r_mag * libm::cos(theta), r_mag * libm::sin(theta), 0.0);
+        let expected_vel = Vector3::new(-v_mag * libm::sin(theta), v_mag * libm::cos(theta), 0.0);
 
         let pos_err = (interpolated.position_km - expected_pos).norm();
         let vel_err = (interpolated.velocity_km_s - expected_vel).norm();

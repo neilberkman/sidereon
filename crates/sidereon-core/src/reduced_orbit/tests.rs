@@ -538,8 +538,8 @@ fn synth_ecc(
     let base = base_epoch();
     let t0 = base.time_scales(TimeScale::Utc);
     let n = (MU_EARTH / (a_km * a_km * a_km)).sqrt();
-    let h = e * omega.sin();
-    let k = e * omega.cos();
+    let h = e * libm::sin(omega);
+    let k = e * libm::cos(omega);
     let l0 = omega + big_m0;
     let params = [a_km, i, raan0, raan_rate, h, k, l0, n];
 

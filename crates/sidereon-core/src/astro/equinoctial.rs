@@ -149,10 +149,10 @@ pub fn coe2eq(
 
     Ok(EquinoctialElements {
         a: coe.a,
-        h: coe.ecc * varpi.sin(),
-        k: coe.ecc * varpi.cos(),
-        p: scale * resolved.raan.sin(),
-        q: scale * resolved.raan.cos(),
+        h: coe.ecc * libm::sin(varpi),
+        k: coe.ecc * libm::cos(varpi),
+        p: scale * libm::sin(resolved.raan),
+        q: scale * libm::cos(resolved.raan),
         lambda,
         retrograde: factor,
     })
@@ -180,10 +180,10 @@ pub fn coe2mee(
 
     Ok(ModifiedEquinoctialElements {
         p: coe.p,
-        f: coe.ecc * varpi.cos(),
-        g: coe.ecc * varpi.sin(),
-        h: scale * resolved.raan.cos(),
-        k: scale * resolved.raan.sin(),
+        f: coe.ecc * libm::cos(varpi),
+        g: coe.ecc * libm::sin(varpi),
+        h: scale * libm::cos(resolved.raan),
+        k: scale * libm::sin(resolved.raan),
         l,
         retrograde: factor,
     })
@@ -239,10 +239,10 @@ pub fn eq2mee(eq: &EquinoctialElements) -> Result<ModifiedEquinoctialElements, E
 
     Ok(ModifiedEquinoctialElements {
         p: recovered.p,
-        f: recovered.ecc * recovered.varpi.cos(),
-        g: recovered.ecc * recovered.varpi.sin(),
-        h: scale * recovered.raan.cos(),
-        k: scale * recovered.raan.sin(),
+        f: recovered.ecc * libm::cos(recovered.varpi),
+        g: recovered.ecc * libm::sin(recovered.varpi),
+        h: scale * libm::cos(recovered.raan),
+        k: scale * libm::sin(recovered.raan),
         l: recovered.l,
         retrograde: recovered.retrograde,
     })
@@ -260,10 +260,10 @@ pub fn mee2eq(mee: &ModifiedEquinoctialElements) -> Result<EquinoctialElements, 
 
     Ok(EquinoctialElements {
         a: recovered.a,
-        h: recovered.ecc * recovered.varpi.sin(),
-        k: recovered.ecc * recovered.varpi.cos(),
-        p: scale * recovered.raan.sin(),
-        q: scale * recovered.raan.cos(),
+        h: recovered.ecc * libm::sin(recovered.varpi),
+        k: recovered.ecc * libm::cos(recovered.varpi),
+        p: scale * libm::sin(recovered.raan),
+        q: scale * libm::cos(recovered.raan),
         lambda,
         retrograde: recovered.retrograde,
     })
@@ -292,13 +292,13 @@ struct RecoveredConic {
 fn recover_equinoctial(eq: &EquinoctialElements) -> Result<RecoveredConic, EquinoctialError> {
     validate_equinoctial(eq)?;
 
-    let ecc = eq.h.hypot(eq.k);
+    let ecc = libm::hypot(eq.h, eq.k);
     if is_parabolic(ecc) {
         return Err(EquinoctialError::ParabolicEquinoctial);
     }
-    let varpi = eq.h.atan2(eq.k);
+    let varpi = libm::atan2(eq.h, eq.k);
     let incl = recover_inclination(eq.p, eq.q, eq.retrograde)?;
-    let raan = eq.p.atan2(eq.q);
+    let raan = libm::atan2(eq.p, eq.q);
     let mean = eq.lambda - varpi;
     let nu = mean_to_true(mean, ecc)?;
     let l = normalize_angle(varpi + nu);
@@ -328,10 +328,10 @@ fn recover_modified_equinoctial(
 ) -> Result<RecoveredConic, EquinoctialError> {
     validate_modified_equinoctial(mee)?;
 
-    let ecc = mee.f.hypot(mee.g);
-    let varpi = mee.g.atan2(mee.f);
+    let ecc = libm::hypot(mee.f, mee.g);
+    let varpi = libm::atan2(mee.g, mee.f);
     let incl = recover_inclination(mee.h, mee.k, mee.retrograde)?;
-    let raan = mee.k.atan2(mee.h);
+    let raan = libm::atan2(mee.k, mee.h);
     let nu = mee.l - varpi;
     let a = if is_parabolic(ecc) {
         f64::INFINITY
@@ -536,7 +536,7 @@ fn check_finite(value: f64, field: &'static str) -> Result<(), EquinoctialError>
 
 fn inclination_scale(incl: f64, factor: RetrogradeFactor) -> Result<f64, EquinoctialError> {
     check_retrograde_pole(incl, factor)?;
-    let tan_half = (0.5 * incl).tan();
+    let tan_half = libm::tan(0.5 * incl);
     let scale = match factor {
         RetrogradeFactor::Prograde => tan_half,
         RetrogradeFactor::Retrograde => 1.0 / tan_half,
@@ -549,14 +549,14 @@ fn inclination_scale(incl: f64, factor: RetrogradeFactor) -> Result<f64, Equinoc
 }
 
 fn recover_inclination(x: f64, y: f64, factor: RetrogradeFactor) -> Result<f64, EquinoctialError> {
-    let scale = x.hypot(y);
+    let scale = libm::hypot(x, y);
     if !scale.is_finite() {
         return Err(EquinoctialError::RetrogradePole);
     }
 
     let atan_incl = match factor {
-        RetrogradeFactor::Prograde => 2.0 * scale.atan(),
-        RetrogradeFactor::Retrograde => PI - 2.0 * scale.atan(),
+        RetrogradeFactor::Prograde => 2.0 * libm::atan(scale),
+        RetrogradeFactor::Retrograde => PI - 2.0 * libm::atan(scale),
     };
     let incl = if (STABLE_HALF_ANGLE_MIN..=STABLE_HALF_ANGLE_MAX).contains(&scale) {
         let scale_sq = scale * scale;
@@ -897,19 +897,19 @@ mod tests {
         // printed Example 2-5 elements only as a loose external anchor.
         let varpi = wrap_to_pi(coe.argp + coe.raan);
         let mean = true_to_mean(coe.nu, coe.ecc).unwrap();
-        let scale = (0.5 * coe.incl).tan();
+        let scale = libm::tan(0.5 * coe.incl);
         assert_close(eq.a, coe.a, 1.0e-12, "eq a full");
-        assert_close(eq.h, coe.ecc * varpi.sin(), 1.0e-12, "eq h full");
-        assert_close(eq.k, coe.ecc * varpi.cos(), 1.0e-12, "eq k full");
-        assert_close(eq.p, scale * coe.raan.sin(), 1.0e-12, "eq p full");
-        assert_close(eq.q, scale * coe.raan.cos(), 1.0e-12, "eq q full");
+        assert_close(eq.h, coe.ecc * libm::sin(varpi), 1.0e-12, "eq h full");
+        assert_close(eq.k, coe.ecc * libm::cos(varpi), 1.0e-12, "eq k full");
+        assert_close(eq.p, scale * libm::sin(coe.raan), 1.0e-12, "eq p full");
+        assert_close(eq.q, scale * libm::cos(coe.raan), 1.0e-12, "eq q full");
         assert_angle_close(eq.lambda, mean + varpi, 1.0e-12, "eq lambda full");
 
         assert_close(mee.p, coe.p, 1.0e-12, "mee p full");
-        assert_close(mee.f, coe.ecc * varpi.cos(), 1.0e-12, "mee f full");
-        assert_close(mee.g, coe.ecc * varpi.sin(), 1.0e-12, "mee g full");
-        assert_close(mee.h, scale * coe.raan.cos(), 1.0e-12, "mee h full");
-        assert_close(mee.k, scale * coe.raan.sin(), 1.0e-12, "mee k full");
+        assert_close(mee.f, coe.ecc * libm::cos(varpi), 1.0e-12, "mee f full");
+        assert_close(mee.g, coe.ecc * libm::sin(varpi), 1.0e-12, "mee g full");
+        assert_close(mee.h, scale * libm::cos(coe.raan), 1.0e-12, "mee h full");
+        assert_close(mee.k, scale * libm::sin(coe.raan), 1.0e-12, "mee k full");
         assert_angle_close(mee.l, varpi + coe.nu, 1.0e-12, "mee l full");
 
         let e = 0.832853_f64;
@@ -919,20 +919,20 @@ mod tests {
         let nu = 92.335 * DEG;
         let varpi = wrap_to_pi(argp + raan);
         let mean = true_to_mean(nu, e).unwrap();
-        let scale = (0.5 * incl).tan();
+        let scale = libm::tan(0.5 * incl);
 
         assert_close(eq.a, 36127.343, 1.0e-2, "eq a rounded");
-        assert_close(eq.h, e * varpi.sin(), 1.0e-4, "eq h rounded");
-        assert_close(eq.k, e * varpi.cos(), 1.0e-4, "eq k rounded");
-        assert_close(eq.p, scale * raan.sin(), 1.0e-4, "eq p rounded");
-        assert_close(eq.q, scale * raan.cos(), 1.0e-4, "eq q rounded");
+        assert_close(eq.h, e * libm::sin(varpi), 1.0e-4, "eq h rounded");
+        assert_close(eq.k, e * libm::cos(varpi), 1.0e-4, "eq k rounded");
+        assert_close(eq.p, scale * libm::sin(raan), 1.0e-4, "eq p rounded");
+        assert_close(eq.q, scale * libm::cos(raan), 1.0e-4, "eq q rounded");
         assert_angle_close(eq.lambda, mean + varpi, 1.0e-4, "eq lambda rounded");
 
         assert_close(mee.p, 11067.790, 1.0e-2, "mee p rounded");
-        assert_close(mee.f, e * varpi.cos(), 1.0e-4, "mee f rounded");
-        assert_close(mee.g, e * varpi.sin(), 1.0e-4, "mee g rounded");
-        assert_close(mee.h, scale * raan.cos(), 1.0e-4, "mee h rounded");
-        assert_close(mee.k, scale * raan.sin(), 1.0e-4, "mee k rounded");
+        assert_close(mee.f, e * libm::cos(varpi), 1.0e-4, "mee f rounded");
+        assert_close(mee.g, e * libm::sin(varpi), 1.0e-4, "mee g rounded");
+        assert_close(mee.h, scale * libm::cos(raan), 1.0e-4, "mee h rounded");
+        assert_close(mee.k, scale * libm::sin(raan), 1.0e-4, "mee k rounded");
         assert_angle_close(mee.l, varpi + nu, 1.0e-4, "mee l rounded");
     }
 

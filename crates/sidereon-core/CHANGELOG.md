@@ -4,6 +4,22 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Proposed 1.4.0
+
+### Changed
+
+- All core transcendental evaluation now delegates to the portable `libm`
+  kernels, including the trust-region solve paths and numerical weighting,
+  so solved results do not depend on the platform C math library.
+- Core nalgebra decompositions and dynamic matrix products now run through a
+  transparent portable binary64 scalar. This bypasses architecture-selected
+  SIMD matrix-product kernels while retaining binary64 arithmetic and making
+  SVD-derived covariance and geometry diagnostics bit-identical across targets.
+- Core trust-region solves now inject their own portable numerical backend for
+  SVD, powers, dot products, and matrix-vector products; the general-purpose
+  trust-region crate's default backend and published parity behavior are
+  unchanged.
+
 ## [1.3.3] - 2026-08-30
 
 ### Fixed

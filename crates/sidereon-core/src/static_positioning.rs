@@ -38,6 +38,7 @@ use crate::astro::math::least_squares::{
     self, normal_covariance, singular_value_diagnostics, solve_trf_with, LeastSquaresProblem,
     SolveOptions, Status, TrustRegionSolve,
 };
+use crate::astro::math::portable;
 use crate::astro::math::robust::{huber_weight, mad_scale, RobustError};
 use crate::dop::rotate_covariance_ecef_to_enu_m2;
 use crate::estimation::substrate::frames::geodetic_from_ecef;
@@ -857,12 +858,10 @@ fn finish_static(input: FinishStaticInput<'_>) -> Result<CoreStaticSolution, Sta
 
     let covariance_matrix = normal_covariance(jacobian, 1.0).map_err(StaticSolveError::Singular)?;
     let covariance = static_covariance(&covariance_matrix, receiver_geodetic)?;
-    let svd = jacobian.clone().svd(false, false);
-    let diagnostics = singular_value_diagnostics(
-        svd.singular_values.as_slice(),
-        jacobian.nrows(),
-        jacobian.ncols(),
-    );
+    let svd = portable::svd(jacobian, false, false);
+    let singular_values: Vec<f64> = svd.singular_values.iter().map(|value| value.0).collect();
+    let diagnostics =
+        singular_value_diagnostics(&singular_values, jacobian.nrows(), jacobian.ncols());
     if diagnostics.rank < prepared.n_params {
         return Err(StaticSolveError::Singular(
             least_squares::SolveError::SingularJacobian,

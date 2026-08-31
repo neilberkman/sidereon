@@ -927,7 +927,7 @@ fn log_log_slope_for_curve(curve: &AllanResult, start: usize, end: usize) -> Opt
         .iter()
         .zip(deviation.iter())
         .fold((0.0, 0.0), |(sum_x, sum_y), (&tau_s, &sigma)| {
-            (sum_x + tau_s.ln(), sum_y + sigma.ln())
+            (sum_x + libm::log(tau_s), sum_y + libm::log(sigma))
         });
     let mean_x = sum_x / n;
     let mean_y = sum_y / n;
@@ -936,8 +936,8 @@ fn log_log_slope_for_curve(curve: &AllanResult, start: usize, end: usize) -> Opt
         tau.iter()
             .zip(deviation.iter())
             .fold((0.0, 0.0), |(num, den), (&tau_s, &sigma)| {
-                let dx = tau_s.ln() - mean_x;
-                let dy = sigma.ln() - mean_y;
+                let dx = libm::log(tau_s) - mean_x;
+                let dy = libm::log(sigma) - mean_y;
                 (num + dx * dy, den + dx * dx)
             });
 
@@ -958,9 +958,9 @@ fn adjacent_log_log_slopes(curve: &AllanResult, start: usize, end: usize) -> Vec
         if sigma0 <= 0.0 || sigma1 <= 0.0 {
             continue;
         }
-        let denominator = tau1.ln() - tau0.ln();
+        let denominator = libm::log(tau1) - libm::log(tau0);
         if denominator > 0.0 {
-            slopes.push((sigma1.ln() - sigma0.ln()) / denominator);
+            slopes.push((libm::log(sigma1) - libm::log(sigma0)) / denominator);
         }
     }
     slopes
@@ -1241,7 +1241,7 @@ fn power_law_variance_factor(
         PowerLawNoiseType::FlickerFM => 2.0 * core::f64::consts::LN_2,
         PowerLawNoiseType::WhiteFM => 0.5 / tau_s,
         PowerLawNoiseType::FlickerPM => {
-            let numerator = 3.0 * (256.0_f64 / 27.0).ln();
+            let numerator = 3.0 * libm::log(256.0_f64 / 27.0);
             numerator / (8.0 * pi * pi * tau_s * tau_s)
         }
         PowerLawNoiseType::WhitePM => {

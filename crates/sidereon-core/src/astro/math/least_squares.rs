@@ -51,6 +51,8 @@
 
 use nalgebra::{DMatrix, DVector};
 
+use super::portable;
+
 /// Relative finite-difference step for a 2-point (forward) scheme: `sqrt(eps)`
 /// for `f64`, i.e. `2^-26`. This matches scipy's `_eps_for_method` choice for
 /// the `"2-point"` method.
@@ -323,7 +325,7 @@ pub enum SolveError {
 pub fn cost(residual: &DVector<f64>) -> Result<f64, SolveError> {
     validate_nonempty_vector(residual, "residual")?;
     validate_vector(residual, "residual")?;
-    validate_value(0.5 * residual.dot(residual), "cost")
+    validate_value(0.5 * dot_scalar(residual, residual), "cost")
 }
 
 // --- Jacobian-derived geometry: covariance and Hessian-trace primitives -----
@@ -367,7 +369,7 @@ pub fn normal_covariance(
     crate::validate::finite_nonneg(variance_scale, "variance_scale").map_err(map_field_error)?;
 
     // Thin SVD of J (right singular vectors only). cov = variance_scale * V S^-2 V^T.
-    let svd = jacobian.clone().svd(false, true);
+    let svd = portable::svd(jacobian, false, true);
     let v_t = svd.v_t.ok_or(SolveError::SingularJacobian)?;
     let singular = svd.singular_values;
 
@@ -375,7 +377,8 @@ pub fn normal_covariance(
     // covariance is unbounded, i.e. the Jacobian is rank-deficient. This is the
     // SVD analogue of the previous Cholesky-failure check, but it also catches
     // the near-collinear case that squaring into J^T J would have masked.
-    let diagnostics = singular_value_diagnostics(singular.as_slice(), m, n);
+    let singular_values: Vec<f64> = singular.iter().map(|value| value.0).collect();
+    let diagnostics = singular_value_diagnostics(&singular_values, m, n);
     if diagnostics.rank < n {
         return Err(SolveError::SingularJacobian);
     }
@@ -388,8 +391,8 @@ pub fn normal_covariance(
         for j in 0..n {
             let mut acc = 0.0;
             for k in 0..n {
-                let inv_s2 = 1.0 / (singular[k] * singular[k]);
-                acc += v_t[(k, i)] * v_t[(k, j)] * inv_s2;
+                let inv_s2 = 1.0 / (singular[k].0 * singular[k].0);
+                acc += v_t[(k, i)].0 * v_t[(k, j)].0 * inv_s2;
             }
             cov[(i, j)] = acc * variance_scale;
         }
@@ -630,7 +633,7 @@ fn solve_subproblem(
     linear_solve: TrustRegionSolve,
 ) -> Option<DVector<f64>> {
     match linear_solve {
-        TrustRegionSolve::NalgebraLu => lhs.clone().lu().solve(rhs),
+        TrustRegionSolve::NalgebraLu => portable::solve_lu(lhs, rhs),
         TrustRegionSolve::OwnedGaussianFirstTie => {
             let n = rhs.len();
             let a: Vec<Vec<f64>> = (0..n)
@@ -732,7 +735,7 @@ where
     let jtj0 = if scalar_reductions {
         normal_matrix_scalar(&jac)
     } else {
-        jac.transpose() * &jac
+        portable::product(&jac.transpose(), &jac)
     };
     validate_matrix(&jtj0, "normal matrix")?;
     let mut mu = TRF_INITIAL_DAMPING_SCALE
@@ -748,7 +751,7 @@ where
             gradient_scalar(&jac, &r)
         } else {
             let jt = jac.transpose();
-            &jt * &r
+            portable::product_vector(&jt, &r)
         };
         validate_vector(&grad, "gradient")?;
         let optimality_inf = validate_value(
@@ -787,7 +790,7 @@ where
             normal_matrix_scalar(&jac)
         } else {
             let jt = jac.transpose();
-            &jt * &jac
+            portable::product(&jt, &jac)
         };
         validate_matrix(&jtj, "normal matrix")?;
 
@@ -908,7 +911,7 @@ fn finish(
         if scalar_reductions {
             amax_scalar(&gradient_scalar(&jacobian, &residual))
         } else {
-            (jacobian.transpose() * &residual).amax()
+            portable::product_vector(&jacobian.transpose(), &residual).amax()
         },
         "optimality",
     )?;
@@ -1130,7 +1133,7 @@ mod tests {
                 t.len(),
                 t.iter()
                     .zip(&y)
-                    .map(|(&tk, &yk)| a * (b * tk).exp() + c - yk),
+                    .map(|(&tk, &yk)| a * libm::exp(b * tk) + c - yk),
             )
         };
         LeastSquaresProblem::new(residual, DVector::from_vec(vec![5.0, -2.0, 2.0]))
@@ -1158,9 +1161,9 @@ mod tests {
             "owned cost did not reduce: {}",
             report.cost
         );
-        assert_eq!(report.x[0].to_bits(), 0x4003c3674cdfadef);
-        assert_eq!(report.x[1].to_bits(), 0xbfe799e0d1929220);
-        assert_eq!(report.x[2].to_bits(), 0x3fe0d5c96d9d3b35);
+        assert_eq!(report.x[0].to_bits(), 0x4003c3674cd4b235);
+        assert_eq!(report.x[1].to_bits(), 0xbfe799e0d1f674dc);
+        assert_eq!(report.x[2].to_bits(), 0x3fe0d5c96e019945);
 
         // Determinism: a second run is bit-identical.
         let again = solve_trf_with(

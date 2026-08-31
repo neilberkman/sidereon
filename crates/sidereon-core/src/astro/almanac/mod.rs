@@ -303,7 +303,7 @@ where
                 latch_scalar(&latch, || {
                     let time = instant_at_offset_seconds(start, offset_seconds);
                     let angle = angle_fn(time)?;
-                    Ok((angle - target_deg).to_radians().sin())
+                    Ok(libm::sin((angle - target_deg).to_radians()))
                 })
             },
             0.0,
@@ -314,7 +314,7 @@ where
     for crossing in crossings {
         let time = instant_at_offset_seconds(start, crossing.time_seconds);
         let angle = angle_fn(time)?;
-        if (angle - target_deg).to_radians().cos() > 0.0 {
+        if libm::cos((angle - target_deg).to_radians()) > 0.0 {
             times.push(time);
         }
     }
@@ -396,7 +396,7 @@ pub(crate) fn angular_separation_rad(a: [f64; 3], b: [f64; 3]) -> Result<f64, Al
     let na = norm_checked(a, "a")?;
     let nb = norm_checked(b, "b")?;
     let cos_sep = (dot3(a, b) / (na * nb)).clamp(-1.0, 1.0);
-    Ok(cos_sep.acos())
+    Ok(libm::acos(cos_sep))
 }
 
 pub(crate) fn norm_checked(vector: [f64; 3], field: &'static str) -> Result<f64, AlmanacError> {

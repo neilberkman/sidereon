@@ -162,7 +162,7 @@ fn hodograph(
     let mut x1 = -x1_abs;
 
     let nvec;
-    if dnu.sin().abs() < SMALL {
+    if libm::sin(dnu).abs() < SMALL {
         // 180-degree transfer
         let cp = cross(r1, v1);
         let ncp = mag(&cp);
@@ -176,8 +176,8 @@ fn hodograph(
         }
     } else {
         // Common path
-        let y2a = VALLADO_MU / p - x1 * dnu.sin() + a * dnu.cos();
-        let y2b = VALLADO_MU / p + x1 * dnu.sin() + a * dnu.cos();
+        let y2a = VALLADO_MU / p - x1 * libm::sin(dnu) + a * libm::cos(dnu);
+        let y2b = VALLADO_MU / p + x1 * libm::sin(dnu) + a * libm::cos(dnu);
         if (VALLADO_MU / magr2 - y2b).abs() < (VALLADO_MU / magr2 - y2a).abs() {
             x1 = x1_abs;
         }
@@ -198,7 +198,7 @@ fn hodograph(
         &vadd(&smul(x1 / VALLADO_MU, r1), &smul(1.0 / magr1, &nr1)),
     );
 
-    let x2 = x1 * dnu.cos() + a * dnu.sin();
+    let x2 = x1 * libm::cos(dnu) + a * libm::sin(dnu);
     let nr2 = cross(&nvec, r2);
     let v2t = smul(
         sqrtmup / magr2,
@@ -308,7 +308,7 @@ pub fn battin(
         -1.0
     };
     let sindeltanu = sign * magrcrossr / (magr1 * magr2);
-    let mut dnu = sindeltanu.atan2(cosdeltanu);
+    let mut dnu = libm::atan2(sindeltanu, cosdeltanu);
     if dnu < 0.0 {
         dnu += TWOPI;
     }
@@ -318,7 +318,7 @@ pub fn battin(
     // degenerate. That is recoverable only for a near-180-degree transfer
     // (cosdeltanu < 0) whose plane can instead be fixed from `v1`. The `v1`
     // normal must be finite and nonzero, since the hodograph normalizes it.
-    if dnu.sin().abs() < SMALL {
+    if libm::sin(dnu).abs() < SMALL {
         let n_v1 = mag(&cross(r1, v1));
         let plane_from_v1 = cosdeltanu < 0.0 && n_v1.is_finite() && n_v1 >= SMALL;
         if !plane_from_v1 {
@@ -332,7 +332,7 @@ pub fn battin(
     let eps = magr2 / magr1 - 1.0;
 
     // Lambda, L, m
-    let lam = (magr1 * magr2).sqrt() / s * (dnu * 0.5).cos();
+    let lam = (magr1 * magr2).sqrt() / s * libm::cos(dnu * 0.5);
     let l_ = ((1.0 - lam) / (1.0 + lam)).powi(2);
     let m = 8.0 * VALLADO_MU * dtsec * dtsec / (s.powi(3) * (1.0 + lam).powi(6));
 
@@ -350,15 +350,15 @@ pub fn battin(
             x = xn;
             let temp = 1.0 / (2.0 * (l_ - x * x));
             let temp1 = x.sqrt();
-            let temp2 = (nrev as f64 * PI * 0.5 + temp1.atan()) / temp1;
+            let temp2 = (nrev as f64 * PI * 0.5 + libm::atan(temp1)) / temp1;
             let h1 = temp * (l_ + x) * (1.0 + 2.0 * x + l_);
             let h2 = temp * m * temp1 * ((l_ - x * x) * temp2 - (l_ + x));
 
             let b = 0.25 * 27.0 * h2 / (temp1 * (1.0 + h1)).powi(3);
             let f = if b < 0.0 {
-                2.0 * ((b + 1.0).sqrt().acos() / 3.0).cos()
+                2.0 * libm::cos(libm::acos((b + 1.0).sqrt()) / 3.0)
             } else {
-                let a_ = (b.sqrt() + (b + 1.0).sqrt()).powf(1.0 / 3.0);
+                let a_ = libm::pow(b.sqrt() + (b + 1.0).sqrt(), 1.0 / 3.0);
                 a_ + 1.0 / a_
             };
 
@@ -378,7 +378,7 @@ pub fn battin(
         }
 
         let a_orbit = s * (1.0 + lam).powi(2) * (1.0 + xn) * (l_ + xn) / (8.0 * xn);
-        let p = 2.0 * magr1 * magr2 * (1.0 + xn) * (dnu * 0.5).sin().powi(2)
+        let p = 2.0 * magr1 * magr2 * (1.0 + xn) * libm::sin(dnu * 0.5).powi(2)
             / (s * (1.0 + lam).powi(2) * (l_ + xn));
         let ecc = (1.0 - p / a_orbit).abs().sqrt();
         finite_or_err(hodograph(r1, r2, v1, p, ecc, dnu, dtsec))
@@ -395,7 +395,7 @@ pub fn battin(
 
             let (h1, h2) = if nrev > 0 {
                 let temp = 1.0 / ((1.0 + 2.0 * x + l_) * (4.0 * x * x));
-                let temp1 = (nrev as f64 * PI * 0.5 + x.sqrt().atan()) / x.sqrt();
+                let temp1 = (nrev as f64 * PI * 0.5 + libm::atan(x.sqrt())) / x.sqrt();
                 let h1 =
                     temp * (l_ + x).powi(2) * (3.0 * (1.0 + x).powi(2) * temp1 - (3.0 + 5.0 * x));
                 let h2 = temp * m * ((x * x - x * (1.0 + l_) - 3.0 * l_) * temp1 + (3.0 * l_ + x));
@@ -423,11 +423,11 @@ pub fn battin(
             return Err(LambertError::NoConvergence);
         }
 
-        let p = 2.0 * magr1 * magr2 * y * y * (1.0 + x).powi(2) * (dnu * 0.5).sin().powi(2)
+        let p = 2.0 * magr1 * magr2 * y * y * (1.0 + x).powi(2) * libm::sin(dnu * 0.5).powi(2)
             / (m * s * (1.0 + lam).powi(2));
         let ecc = (eps * eps
-            + 4.0 * magr2 / magr1 * (dnu * 0.5).sin().powi(2) * ((l_ - x) / (l_ + x)).powi(2))
-            / (eps * eps + 4.0 * magr2 / magr1 * (dnu * 0.5).sin().powi(2));
+            + 4.0 * magr2 / magr1 * libm::sin(dnu * 0.5).powi(2) * ((l_ - x) / (l_ + x)).powi(2))
+            / (eps * eps + 4.0 * magr2 / magr1 * libm::sin(dnu * 0.5).powi(2));
         let ecc = ecc.sqrt();
 
         finite_or_err(hodograph(r1, r2, v1, p, ecc, dnu, dtsec))

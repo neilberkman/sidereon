@@ -2,6 +2,7 @@
 
 use nalgebra::DMatrix;
 
+use crate::astro::math::portable;
 use crate::inertial::{validate_finite, NavState};
 
 /// Number of states in the position, velocity, attitude, and bias layout.
@@ -292,12 +293,12 @@ pub fn covariance_is_positive_semidefinite(covariance: &[Vec<f64>]) -> Result<bo
         }
     }
     let matrix = dmatrix_from_rows(covariance);
-    let eigen = matrix.symmetric_eigen();
-    for (idx, value) in eigen.eigenvalues.iter().enumerate() {
+    let (eigenvectors, eigenvalues) = portable::symmetric_eigen_dynamic(&matrix);
+    for (idx, value) in eigenvalues.iter().enumerate() {
         if !value.is_finite() {
             return Ok(false);
         }
-        let tolerance = covariance_eigenvalue_tolerance(covariance, &eigen.eigenvectors, idx);
+        let tolerance = covariance_eigenvalue_tolerance(covariance, &eigenvectors, idx);
         if *value < -tolerance {
             return Ok(false);
         }
@@ -314,13 +315,13 @@ pub fn reproject_covariance_psd(
     validate_square_matrix(covariance, dimension, field)?;
     symmetrize_in_place(covariance);
     let matrix = dmatrix_from_rows(covariance);
-    let eigen = matrix.symmetric_eigen();
+    let (eigenvectors, eigenvalues) = portable::symmetric_eigen_dynamic(&matrix);
     let mut needs_repair = false;
-    for (idx, value) in eigen.eigenvalues.iter().enumerate() {
+    for (idx, value) in eigenvalues.iter().enumerate() {
         if !value.is_finite() {
             return Err(FusionError::NonPositiveSemidefinite { field });
         }
-        let tolerance = covariance_eigenvalue_tolerance(covariance, &eigen.eigenvectors, idx);
+        let tolerance = covariance_eigenvalue_tolerance(covariance, &eigenvectors, idx);
         if *value < -tolerance {
             return Err(FusionError::NonPositiveSemidefinite { field });
         }
@@ -330,9 +331,12 @@ pub fn reproject_covariance_psd(
     if needs_repair {
         let mut diagonal = DMatrix::<f64>::zeros(dimension, dimension);
         for idx in 0..dimension {
-            diagonal[(idx, idx)] = eigen.eigenvalues[idx].max(0.0);
+            diagonal[(idx, idx)] = eigenvalues[idx].max(0.0);
         }
-        let repaired = &eigen.eigenvectors * diagonal * eigen.eigenvectors.transpose();
+        let repaired = portable::product(
+            &portable::product(&eigenvectors, &diagonal),
+            &eigenvectors.transpose(),
+        );
         for row in 0..dimension {
             for col in 0..dimension {
                 covariance[row][col] = repaired[(row, col)];

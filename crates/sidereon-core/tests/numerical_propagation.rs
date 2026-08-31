@@ -37,13 +37,13 @@ use sidereon_core::constants::SECONDS_PER_HOUR;
 fn stumpff(psi: f64) -> (f64, f64) {
     if psi > 1.0e-6 {
         let s = psi.sqrt();
-        let c2 = (1.0 - s.cos()) / psi;
-        let c3 = (s - s.sin()) / (psi * s);
+        let c2 = (1.0 - libm::cos(s)) / psi;
+        let c3 = (s - libm::sin(s)) / (psi * s);
         (c2, c3)
     } else if psi < -1.0e-6 {
         let s = (-psi).sqrt();
-        let c2 = (s.cosh() - 1.0) / (-psi);
-        let c3 = (s.sinh() - s) / ((-psi) * s);
+        let c2 = (libm::cosh(s) - 1.0) / (-psi);
+        let c3 = (libm::sinh(s) - s) / ((-psi) * s);
         (c2, c3)
     } else {
         // Series expansion near psi = 0.
@@ -76,9 +76,10 @@ fn kepler_universal(
         let a = 1.0 / alpha;
         dt.signum()
             * (-a).sqrt()
-            * ((-2.0 * mu * alpha * dt)
-                / (rdotv + dt.signum() * (-mu * a).sqrt() * (1.0 - r0n * alpha)))
-                .ln()
+            * libm::log(
+                (-2.0 * mu * alpha * dt)
+                    / (rdotv + dt.signum() * (-mu * a).sqrt() * (1.0 - r0n * alpha)),
+            )
     };
 
     let mut psi;
@@ -419,12 +420,12 @@ fn reference_arc_is_deterministic_and_frozen() {
     // Frozen-bits regression lock on the last sample (full arc cross-checked
     // Python-side against the dumped fixture).
     let last = states.last().unwrap();
-    assert_eq!(last.position_km.x.to_bits(), 0xc0c0_c53c_4169_956d);
-    assert_eq!(last.position_km.y.to_bits(), 0xc0b2_3e93_900c_70b7);
-    assert_eq!(last.position_km.z.to_bits(), 0xc083_abd6_a837_88d8);
-    assert_eq!(last.velocity_km_s.x.to_bits(), 0x400e_7a9b_324f_c2f4);
-    assert_eq!(last.velocity_km_s.y.to_bits(), 0xc012_7346_7da9_1578);
-    assert_eq!(last.velocity_km_s.z.to_bits(), 0xbfe3_beff_5750_5a62);
+    assert_eq!(last.position_km.x.to_bits(), 0xc0c0_c53c_4169_9530);
+    assert_eq!(last.position_km.y.to_bits(), 0xc0b2_3e93_900c_70f8);
+    assert_eq!(last.position_km.z.to_bits(), 0xc083_abd6_a837_8930);
+    assert_eq!(last.velocity_km_s.x.to_bits(), 0x400e_7a9b_324f_c3b7);
+    assert_eq!(last.velocity_km_s.y.to_bits(), 0xc012_7346_7da9_155b);
+    assert_eq!(last.velocity_km_s.z.to_bits(), 0xbfe3_beff_5750_5a48);
 
     if std::env::var("SIDEREON_DUMP_FIXTURES").is_ok() {
         dump_fixture(&times, &states);

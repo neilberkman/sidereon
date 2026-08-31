@@ -1317,7 +1317,10 @@ fn power_maybe(
             return Ok(out);
         }
     }
-    Ok(values.iter().map(|value| value.powf(exponent)).collect())
+    Ok(values
+        .iter()
+        .map(|value| libm::pow(*value, exponent))
+        .collect())
 }
 
 fn inf_norm(x: &[f64]) -> f64 {

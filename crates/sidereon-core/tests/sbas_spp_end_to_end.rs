@@ -104,7 +104,7 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
 
 fn rotate_for_sagnac(pos: [f64; 3], tau_s: f64) -> [f64; 3] {
     let theta = OMEGA_E_DOT_RAD_S * tau_s;
-    let (sin_theta, cos_theta) = theta.sin_cos();
+    let (sin_theta, cos_theta) = libm::sincos(theta);
     [
         cos_theta * pos[0] - sin_theta * pos[1],
         sin_theta * pos[0] + cos_theta * pos[1],
@@ -145,8 +145,8 @@ fn pseudorange_from_model(
     }
     let sat_rot = rotate_for_sagnac(sat_position, tau);
     let los = unit(sub(sat_rot, receiver_ecef_m));
-    let elevation = dot(los, iono.up).asin();
-    let azimuth = dot(los, iono.east).atan2(dot(los, iono.north));
+    let elevation = libm::asin(dot(los, iono.up));
+    let azimuth = libm::atan2(dot(los, iono.east), dot(los, iono.north));
     let iono_m = iono
         .grid
         .slant_delay_m(iono.receiver_geo, elevation, azimuth, F_L1_HZ)
@@ -220,7 +220,7 @@ fn sbas_corrected_spp_with_geo_ranging_beats_uncorrected() {
     let geo_state = store.geo_nav(geo).expect("GEO navigation state").clone();
     let (geo_position, _) = geo_state.state_at(t_rx_j2000_s);
 
-    let lon_rad = geo_position[1].atan2(geo_position[0]);
+    let lon_rad = libm::atan2(geo_position[1], geo_position[0]);
     let receiver_geo = Wgs84Geodetic::new(0.0, lon_rad, 0.0).expect("valid receiver geodetic");
     let receiver_ecef = geodetic_to_itrf(receiver_geo)
         .expect("valid receiver ECEF")

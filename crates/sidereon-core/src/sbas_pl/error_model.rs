@@ -251,7 +251,7 @@ pub fn sigma_tropo_m(elevation_rad: f64) -> Option<f64> {
     if !elevation_rad.is_finite() {
         return None;
     }
-    let sin_el = elevation_rad.sin();
+    let sin_el = libm::sin(elevation_rad);
     let sigma_m = 0.12 * 1.001 / (0.002001 + sin_el * sin_el).sqrt();
     sigma_m.is_finite().then_some(sigma_m)
 }
@@ -261,7 +261,7 @@ pub fn sbas_obliquity_factor(elevation_rad: f64) -> Option<f64> {
     if !elevation_rad.is_finite() {
         return None;
     }
-    let s = MEAN_EARTH_RADIUS_KM * elevation_rad.cos()
+    let s = MEAN_EARTH_RADIUS_KM * libm::cos(elevation_rad)
         / (MEAN_EARTH_RADIUS_KM + SBAS_IONOSPHERE_SHELL_HEIGHT_KM);
     let denominator = 1.0 - s * s;
     (denominator.is_finite() && denominator > 0.0).then_some(1.0 / denominator.sqrt())
@@ -273,7 +273,7 @@ pub fn sigma_air_multipath_m(elevation_rad: f64) -> Option<f64> {
         return None;
     }
     let elevation_deg = elevation_rad.to_degrees();
-    let sigma_m = 0.13 + 0.53 * (-elevation_deg / 10.0).exp();
+    let sigma_m = 0.13 + 0.53 * libm::exp(-elevation_deg / 10.0);
     sigma_m.is_finite().then_some(sigma_m)
 }
 
@@ -303,14 +303,14 @@ fn azimuth_for_row(geometry: &ProtectionGeometry, row: &AraimRow) -> Option<f64>
     let r = ecef_to_enu_rotation(geometry.receiver.lat_rad, geometry.receiver.lon_rad);
     let east = r[0][0] * los.e_x + r[0][1] * los.e_y + r[0][2] * los.e_z;
     let north = r[1][0] * los.e_x + r[1][1] * los.e_y + r[1][2] * los.e_z;
-    let horizontal = east.hypot(north);
+    let horizontal = libm::hypot(east, north);
     if !horizontal.is_finite() {
         return None;
     }
     if horizontal <= f64::EPSILON {
         Some(0.0)
     } else {
-        Some(east.atan2(north))
+        Some(libm::atan2(east, north))
     }
 }
 

@@ -8,12 +8,13 @@ use core::fmt;
 
 use nalgebra::DMatrix;
 pub use trust_region_least_squares::loss::Loss;
-use trust_region_least_squares::model::{solve_model, ResidualModel};
+use trust_region_least_squares::model::{solve_model_with, ResidualModel};
 use trust_region_least_squares::trf::{TrfError, TrfOptions};
 
 use crate::astro::math::least_squares::{
     covariance_from_jacobian, normal_covariance, singular_value_diagnostics,
 };
+use crate::astro::math::portable::{self, PortableNumerics};
 use crate::astro::math::robust::{median, RobustError};
 use crate::dop;
 use crate::estimation::{mad_spread, PrimitiveError};
@@ -548,7 +549,7 @@ pub fn fit_trajectory(
     if solver_options.max_nfev.is_none() {
         solver_options.max_nfev = Some(100 * n_params.max(1));
     }
-    let solved = solve_model(&problem, &x0, &solver_options)?;
+    let solved = solve_model_with(&problem, &x0, &PortableNumerics, &solver_options)?;
     if !solved.success() {
         return Err(GeodeticTimeSeriesError::DidNotConverge {
             status: solved.status,
@@ -986,10 +987,10 @@ fn basis_value(term: TrajectoryTerm, epoch_year: f64, reference_epoch_year: f64)
     match term {
         TrajectoryTerm::Position => 1.0,
         TrajectoryTerm::Velocity => dt,
-        TrajectoryTerm::AnnualSin => (TAU * dt).sin(),
-        TrajectoryTerm::AnnualCos => (TAU * dt).cos(),
-        TrajectoryTerm::SemiannualSin => (2.0 * TAU * dt).sin(),
-        TrajectoryTerm::SemiannualCos => (2.0 * TAU * dt).cos(),
+        TrajectoryTerm::AnnualSin => libm::sin(TAU * dt),
+        TrajectoryTerm::AnnualCos => libm::cos(TAU * dt),
+        TrajectoryTerm::SemiannualSin => libm::sin(2.0 * TAU * dt),
+        TrajectoryTerm::SemiannualCos => libm::cos(2.0 * TAU * dt),
         TrajectoryTerm::Offset { epoch_year, .. } => {
             let step_dt = epoch_year - reference_epoch_year;
             if dt > step_dt {
@@ -1112,12 +1113,10 @@ fn trajectory_component(x: &[f64], axis: usize, terms: &[TrajectoryTerm]) -> Tra
 }
 
 fn trajectory_geometry_quality(jacobian: &DMatrix<f64>) -> GeometryQuality {
-    let svd = jacobian.clone().svd(false, false);
-    let diagnostics = singular_value_diagnostics(
-        svd.singular_values.as_slice(),
-        jacobian.nrows(),
-        jacobian.ncols(),
-    );
+    let svd = portable::svd(jacobian, false, false);
+    let singular_values: Vec<f64> = svd.singular_values.iter().map(|value| value.0).collect();
+    let diagnostics =
+        singular_value_diagnostics(&singular_values, jacobian.nrows(), jacobian.ncols());
     let gdop = normal_covariance(jacobian, 1.0)
         .map(|covariance| {
             let trace = (0..covariance.nrows())
@@ -1458,7 +1457,7 @@ mod tests {
         let raw = (0..=24)
             .map(|quarter| {
                 let t = quarter as f64 * 0.25;
-                let seasonal = 0.012 * (TAU * t).sin() + 0.004 * (TAU * t).cos();
+                let seasonal = 0.012 * libm::sin(TAU * t) + 0.004 * libm::cos(TAU * t);
                 let step = if t >= 2.25 { 0.09 } else { 0.0 };
                 let outlier = if (t - 4.25).abs() < f64::EPSILON {
                     0.25
@@ -1504,10 +1503,10 @@ mod tests {
                 let dt = t - reference;
                 let value = east.position_m
                     + east.velocity_m_per_yr * dt
-                    + east.annual_sin_m.unwrap() * (TAU * dt).sin()
-                    + east.annual_cos_m.unwrap() * (TAU * dt).cos()
-                    + east.semiannual_sin_m.unwrap() * (2.0 * TAU * dt).sin()
-                    + east.semiannual_cos_m.unwrap() * (2.0 * TAU * dt).cos()
+                    + east.annual_sin_m.unwrap() * libm::sin(TAU * dt)
+                    + east.annual_cos_m.unwrap() * libm::cos(TAU * dt)
+                    + east.semiannual_sin_m.unwrap() * libm::sin(2.0 * TAU * dt)
+                    + east.semiannual_cos_m.unwrap() * libm::cos(2.0 * TAU * dt)
                     + if t > offset_epoch {
                         east.offsets_m[0]
                     } else {

@@ -105,7 +105,7 @@ fn sq(value: f64) -> f64 {
 }
 
 fn hypot(value1: f64, value2: f64) -> f64 {
-    value1.hypot(value2)
+    libm::hypot(value1, value2)
 }
 
 fn sin_cos_deg(value: f64) -> (f64, f64) {
@@ -114,7 +114,7 @@ fn sin_cos_deg(value: f64) -> (f64, f64) {
     let quadrant = (reduced_deg / 90.0).round();
     reduced_deg -= 90.0 * quadrant;
     let reduced = reduced_deg * DEG_TO_RAD;
-    let (sin_reduced, cos_reduced) = reduced.sin_cos();
+    let (sin_reduced, cos_reduced) = libm::sincos(reduced);
     let (sin_reduced, cos_reduced) = if reduced_deg.abs() == 45.0 {
         let value = 0.5_f64.sqrt();
         (value.copysign(reduced), value)
@@ -165,7 +165,7 @@ fn atan2_deg(y: f64, x: f64) -> f64 {
         x = -x;
         quadrant += 1;
     }
-    let mut angle = y.atan2(x) * RAD_TO_DEG;
+    let mut angle = libm::atan2(y, x) * RAD_TO_DEG;
     match quadrant {
         1 => angle = HALF_TURN_DEG.copysign(y) - angle,
         2 => angle = 90.0 - angle,
@@ -339,7 +339,7 @@ fn c3_coefficients(
 }
 
 fn sine_series(coeffs: &[f64], sigma: f64) -> f64 {
-    let (sin_sigma, cos_sigma) = sigma.sin_cos();
+    let (sin_sigma, cos_sigma) = libm::sincos(sigma);
     sine_series_sin_cos(coeffs, sin_sigma, cos_sigma)
 }
 
@@ -376,7 +376,7 @@ fn i1(series: Series, sigma: f64) -> f64 {
 
 fn sigma1_sin_cos(sbet1: f64, cbet1: f64, salp1: f64, calp1: f64) -> (f64, f64, f64) {
     let (salp0, calp0) = normalize_pair(salp1 * cbet1, hypot(calp1, salp1 * sbet1));
-    let sigma1 = sbet1.atan2(calp1 * cbet1);
+    let sigma1 = libm::atan2(sbet1, calp1 * cbet1);
     (sigma1, salp0, calp0)
 }
 
@@ -392,28 +392,28 @@ fn direct_raw(sbet1: f64, cbet1: f64, salp1: f64, calp1: f64, s12_m: f64) -> (f6
         },
     );
     let b11 = sine_series_sin_cos(&series.c1, ssig1, csig1);
-    let (sin_b11, cos_b11) = b11.sin_cos();
+    let (sin_b11, cos_b11) = libm::sincos(b11);
     let stau1 = ssig1 * cos_b11 + csig1 * sin_b11;
     let ctau1 = csig1 * cos_b11 - ssig1 * sin_b11;
     let tau12 = s12_m / (WGS84_B_M * series.a1);
-    let (stau12, ctau12) = tau12.sin_cos();
+    let (stau12, ctau12) = libm::sincos(tau12);
     let stau2 = stau1 * ctau12 + ctau1 * stau12;
     let ctau2 = ctau1 * ctau12 - stau1 * stau12;
     let b12 = -sine_series_sin_cos(&series.c1p, stau2, ctau2);
     let sig12 = tau12 - (b12 - b11);
-    let (ssig12, csig12) = sig12.sin_cos();
+    let (ssig12, csig12) = libm::sincos(sig12);
     let ssig2 = ssig1 * csig12 + csig1 * ssig12;
     let csig2 = csig1 * csig12 - ssig1 * ssig12;
 
     let sbet2 = calp0 * ssig2;
     let cbet2 = hypot(salp0, calp0 * csig2);
-    let lat2_rad = sbet2.atan2((1.0 - WGS84_F) * cbet2);
-    let azi2_rad = salp0.atan2(calp0 * csig2);
+    let lat2_rad = libm::atan2(sbet2, (1.0 - WGS84_F) * cbet2);
+    let azi2_rad = libm::atan2(salp0, calp0 * csig2);
     let somg1 = salp0 * ssig1;
     let comg1 = csig1;
     let somg2 = salp0 * ssig2;
     let comg2 = csig2;
-    let omg12 = (somg2 * comg1 - comg2 * somg1).atan2(comg2 * comg1 + somg2 * somg1);
+    let omg12 = libm::atan2(somg2 * comg1 - comg2 * somg1, comg2 * comg1 + somg2 * somg1);
     let b31 = sine_series_sin_cos(&series.c3, ssig1, csig1);
     let b32 = sine_series_sin_cos(&series.c3, ssig2, csig2);
     let lambda12 = omg12 - WGS84_F * salp0 * series.a3 * (sig12 + b32 - b31);
@@ -483,9 +483,10 @@ fn hybrid_solution_from_pair(
     let comg2 = csig2;
     (ssig2, csig2) = normalize_pair(ssig2, csig2);
 
-    let sig12 = (csig1 * ssig2 - ssig1 * csig2)
-        .max(0.0)
-        .atan2(csig1 * csig2 + ssig1 * ssig2);
+    let sig12 = libm::atan2(
+        (csig1 * ssig2 - ssig1 * csig2).max(0.0),
+        csig1 * csig2 + ssig1 * ssig2,
+    );
     let somg12 = (comg1 * somg2 - somg1 * comg2).max(0.0);
     let comg12 = comg1 * comg2 + somg1 * somg2;
     let k2 = WGS84_EP2 * sq(calp0);
@@ -494,8 +495,10 @@ fn hybrid_solution_from_pair(
     let series = series_from_salp0(salp0);
     let b3 = sine_series_sin_cos(&series.c3, ssig2, csig2)
         - sine_series_sin_cos(&series.c3, ssig1, csig1);
-    let eta = (somg12 * target.clam - comg12 * target.slam)
-        .atan2(comg12 * target.clam + somg12 * target.slam);
+    let eta = libm::atan2(
+        somg12 * target.clam - comg12 * target.slam,
+        comg12 * target.clam + somg12 * target.slam,
+    );
     let residual_rad = eta - WGS84_F * salp0 * series.a3 * (sig12 + b3);
     let sigma1 = SigmaPoint {
         ssig: ssig1,
@@ -531,8 +534,8 @@ fn hybrid_solution(
     alpha1_rad: f64,
     lambda12_rad: f64,
 ) -> HybridSolution {
-    let (salp1, calp1) = alpha1_rad.sin_cos();
-    let (slam12, clam12) = lambda12_rad.sin_cos();
+    let (salp1, calp1) = libm::sincos(alpha1_rad);
+    let (slam12, clam12) = libm::sincos(lambda12_rad);
     hybrid_solution_from_pair(
         point1,
         point2,
@@ -580,7 +583,7 @@ fn spherical_starting_azimuth(
     let cbetm = 0.5 * (point1.cbet + point2.cbet);
     let wbar = (1.0 - WGS84_E2 * sq(cbetm)).sqrt();
     let omega12 = lambda12_rad / wbar;
-    let (somg12, comg12) = omega12.sin_cos();
+    let (somg12, comg12) = libm::sincos(omega12);
     let salp1 = point2.cbet * somg12;
     let calp1 = point1.cbet * point2.sbet - point1.sbet * point2.cbet * comg12;
     let (salp1, calp1) = normalize_pair(salp1, calp1);
@@ -631,7 +634,7 @@ fn astroid_starting_azimuth(
     let x = (lambda12_rad - HALF_TURN_RAD) / lam_scale;
     let sbet_sum = point2.sbet * point1.cbet + point2.cbet * point1.sbet;
     let cbet_sum = point1.cbet * point2.cbet - point1.sbet * point2.sbet;
-    let y = sbet_sum.atan2(cbet_sum) / bet_scale;
+    let y = libm::atan2(sbet_sum, cbet_sum) / bet_scale;
 
     if !(x <= 0.0 && y <= 0.0 && x >= -5.0 && y >= -5.0) {
         return None;
@@ -684,7 +687,7 @@ fn canonical_inverse(phi1_deg: f64, phi2_deg: f64, lambda12_rad: f64) -> HybridS
         return solution;
     }
 
-    let (slam12, clam12) = lambda12_rad.sin_cos();
+    let (slam12, clam12) = libm::sincos(lambda12_rad);
     let target = LongitudeTarget {
         slam: slam12,
         clam: clam12,
@@ -726,7 +729,7 @@ fn canonical_inverse(phi1_deg: f64, phi2_deg: f64, lambda12_rad: f64) -> HybridS
         if numit < NEWTON_FAST_MAX && solution.derivative_rad > 0.0 {
             let dalp1 = -residual / solution.derivative_rad;
             if dalp1.abs() < HALF_TURN_RAD {
-                let (sdalp1, cdalp1) = dalp1.sin_cos();
+                let (sdalp1, cdalp1) = libm::sincos(dalp1);
                 let next_salp1 = salp1 * cdalp1 + calp1 * sdalp1;
                 if next_salp1 > 0.0 {
                     calp1 = calp1 * cdalp1 - salp1 * sdalp1;
@@ -771,7 +774,7 @@ fn short_inverse(
     let sbetm2 = sq(sbetm_sum) / (sq(sbetm_sum) + sq(cbetm_sum));
     let dnm = (1.0 + WGS84_EP2 * sbetm2).sqrt();
     let omega12 = lambda12_rad / (WGS84_ONE_MINUS_F * dnm);
-    let (somg12, comg12) = omega12.sin_cos();
+    let (somg12, comg12) = libm::sincos(omega12);
     let sbet12a = point2.sbet * point1.cbet + point2.cbet * point1.sbet;
     let mut salp1 = point2.cbet * somg12;
     let mut calp1 = if comg12 >= 0.0 {
@@ -795,7 +798,7 @@ fn short_inverse(
                 1.0 - comg12
             };
     (salp2, calp2) = normalize_pair(salp2, calp2);
-    let sig12 = ssig12.atan2(csig12);
+    let sig12 = libm::atan2(ssig12, csig12);
     Some(HybridSolution {
         residual_rad: 0.0,
         distance_m: sig12 * WGS84_B_M * dnm,

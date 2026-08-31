@@ -53,10 +53,10 @@ fn approx_eq(a: f64, b: f64, tol: f64) -> bool {
 /// station, used to read the displacement back in the IERS local triad.
 fn ecef_to_runeu(xsta: &[f64; 3], d: &[f64; 3]) -> (f64, f64, f64) {
     let r = (xsta[0] * xsta[0] + xsta[1] * xsta[1] + xsta[2] * xsta[2]).sqrt();
-    let lon = xsta[1].atan2(xsta[0]);
-    let lat_gc = (xsta[2] / r).asin();
-    let (sinlat, coslat) = lat_gc.sin_cos();
-    let (sinlon, coslon) = lon.sin_cos();
+    let lon = libm::atan2(xsta[1], xsta[0]);
+    let lat_gc = libm::asin(xsta[2] / r);
+    let (sinlat, coslat) = libm::sincos(lat_gc);
+    let (sinlon, coslon) = libm::sincos(lon);
 
     let up_hat = [coslat * coslon, coslat * sinlon, sinlat];
     let east_hat = [-sinlon, coslon, 0.0];
@@ -80,19 +80,19 @@ fn eq724_latitude_form(
     yp_arcsec: f64,
 ) -> (f64, f64, f64) {
     let r = (xsta[0] * xsta[0] + xsta[1] * xsta[1] + xsta[2] * xsta[2]).sqrt();
-    let lon = xsta[1].atan2(xsta[0]);
-    let lat = (xsta[2] / r).asin();
+    let lon = libm::atan2(xsta[1], xsta[0]);
+    let lat = libm::asin(xsta[2] / r);
 
     let m1 = xp_arcsec - x_bar_arcsec;
     let m2 = -(yp_arcsec - y_bar_arcsec);
 
-    let (sinlon, coslon) = lon.sin_cos();
+    let (sinlon, coslon) = libm::sincos(lon);
     let radial = m1 * coslon + m2 * sinlon;
     let lambda = m1 * sinlon - m2 * coslon;
 
-    let up = -33.0e-3 * (2.0 * lat).sin() * radial;
-    let north = -9.0e-3 * (2.0 * lat).cos() * radial;
-    let east = 9.0e-3 * lat.sin() * lambda;
+    let up = -33.0e-3 * libm::sin(2.0 * lat) * radial;
+    let north = -9.0e-3 * libm::cos(2.0 * lat) * radial;
+    let east = 9.0e-3 * libm::sin(lat) * lambda;
     (up, north, east)
 }
 

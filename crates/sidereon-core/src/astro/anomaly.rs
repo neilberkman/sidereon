@@ -63,7 +63,7 @@ pub fn solve_kepler(mean_anom: f64, ecc: f64) -> Result<KeplerSolution, AnomalyE
             mean_anom,
             ecc,
             Regime::Hyperbolic,
-            (mean_anom / ecc).asinh(),
+            libm::asinh(mean_anom / ecc),
         ),
     }
 }
@@ -79,10 +79,10 @@ pub fn eccentric_to_mean(ecc_anom: f64, ecc: f64) -> Result<f64, AnomalyError> {
     match regime(ecc) {
         Regime::Elliptic => {
             let anomaly = normalize_angle(ecc_anom);
-            Ok(normalize_angle(anomaly - ecc * anomaly.sin()))
+            Ok(normalize_angle(anomaly - ecc * libm::sin(anomaly)))
         }
         Regime::Parabolic => Ok(ecc_anom + ecc_anom.powi(3) / 3.0),
-        Regime::Hyperbolic => Ok(ecc * ecc_anom.sinh() - ecc_anom),
+        Regime::Hyperbolic => Ok(ecc * libm::sinh(ecc_anom) - ecc_anom),
     }
 }
 
@@ -93,15 +93,15 @@ pub fn eccentric_to_true(ecc_anom: f64, ecc: f64) -> Result<f64, AnomalyError> {
     match regime(ecc) {
         Regime::Elliptic => {
             let anomaly = normalize_angle(ecc_anom);
-            let sin_nu = ((1.0 - ecc) * (1.0 + ecc)).sqrt() * anomaly.sin();
-            let cos_nu = anomaly.cos() - ecc;
-            Ok(normalize_angle(sin_nu.atan2(cos_nu)))
+            let sin_nu = ((1.0 - ecc) * (1.0 + ecc)).sqrt() * libm::sin(anomaly);
+            let cos_nu = libm::cos(anomaly) - ecc;
+            Ok(normalize_angle(libm::atan2(sin_nu, cos_nu)))
         }
-        Regime::Parabolic => Ok(normalize_angle(2.0 * ecc_anom.atan())),
+        Regime::Parabolic => Ok(normalize_angle(2.0 * libm::atan(ecc_anom))),
         Regime::Hyperbolic => {
-            let sin_nu = ((ecc - 1.0) * (ecc + 1.0)).sqrt() * ecc_anom.sinh();
-            let cos_nu = ecc - ecc_anom.cosh();
-            Ok(normalize_angle(sin_nu.atan2(cos_nu)))
+            let sin_nu = ((ecc - 1.0) * (ecc + 1.0)).sqrt() * libm::sinh(ecc_anom);
+            let cos_nu = ecc - libm::cosh(ecc_anom);
+            Ok(normalize_angle(libm::atan2(sin_nu, cos_nu)))
         }
     }
 }
@@ -114,21 +114,23 @@ pub fn true_to_eccentric(true_anom: f64, ecc: f64) -> Result<f64, AnomalyError> 
         Regime::Elliptic => {
             let nu = normalize_angle(true_anom);
             let half_nu = 0.5 * nu;
-            let s = (1.0 - ecc).sqrt() * half_nu.sin();
-            let c = (1.0 + ecc).sqrt() * half_nu.cos();
+            let s = (1.0 - ecc).sqrt() * libm::sin(half_nu);
+            let c = (1.0 + ecc).sqrt() * libm::cos(half_nu);
             let sin_e = 2.0 * s * c;
             let cos_e = c * c - s * s;
-            Ok(normalize_angle(sin_e.atan2(cos_e)))
+            Ok(normalize_angle(libm::atan2(sin_e, cos_e)))
         }
         Regime::Parabolic => {
             check_open_true_anomaly(true_anom, PI)?;
-            Ok((0.5 * wrap_to_pi(true_anom)).tan())
+            Ok(libm::tan(0.5 * wrap_to_pi(true_anom)))
         }
         Regime::Hyperbolic => {
-            let limit = (-1.0 / ecc).acos();
+            let limit = libm::acos(-1.0 / ecc);
             check_open_true_anomaly(true_anom, limit)?;
             let nu = wrap_to_pi(true_anom);
-            Ok((nu.sin() * ((ecc - 1.0) * (ecc + 1.0)).sqrt() / (1.0 + ecc * nu.cos())).asinh())
+            Ok(libm::asinh(
+                libm::sin(nu) * ((ecc - 1.0) * (ecc + 1.0)).sqrt() / (1.0 + ecc * libm::cos(nu)),
+            ))
         }
     }
 }
@@ -188,7 +190,7 @@ pub fn propagate_kepler(
 fn elliptic_seed(mean_anom: f64, ecc: f64) -> f64 {
     let mean = normalize_angle(mean_anom);
     if ecc < 0.8 {
-        mean + ecc * mean.sin()
+        mean + ecc * libm::sin(mean)
     } else {
         PI
     }
@@ -236,21 +238,21 @@ fn solve_iterative(
 fn residuals(anomaly: f64, mean_anom: f64, ecc: f64, conic: Regime) -> (f64, f64, f64) {
     match conic {
         Regime::Elliptic => (
-            anomaly - ecc * anomaly.sin() - mean_anom,
-            1.0 - ecc * anomaly.cos(),
-            ecc * anomaly.sin(),
+            anomaly - ecc * libm::sin(anomaly) - mean_anom,
+            1.0 - ecc * libm::cos(anomaly),
+            ecc * libm::sin(anomaly),
         ),
         Regime::Hyperbolic => (
-            ecc * anomaly.sinh() - anomaly - mean_anom,
-            ecc * anomaly.cosh() - 1.0,
-            ecc * anomaly.sinh(),
+            ecc * libm::sinh(anomaly) - anomaly - mean_anom,
+            ecc * libm::cosh(anomaly) - 1.0,
+            ecc * libm::sinh(anomaly),
         ),
         Regime::Parabolic => unreachable!(),
     }
 }
 
 fn barker_d_from_mean(mean_anom: f64) -> f64 {
-    2.0 * ((1.5 * mean_anom).asinh() / 3.0).sinh()
+    2.0 * libm::sinh(libm::asinh(1.5 * mean_anom) / 3.0)
 }
 
 fn validate_propagation_inputs(
@@ -488,7 +490,7 @@ mod tests {
                 assert!((mean_from_true - mean).abs() <= 1.0e-9 * scale);
 
                 let solution = solve_kepler(mean, ecc).unwrap();
-                let residual = ecc * solution.anomaly.sinh() - solution.anomaly - mean;
+                let residual = ecc * libm::sinh(solution.anomaly) - solution.anomaly - mean;
                 assert!(solution.iterations <= MAX_ITER);
                 assert!(residual.abs() <= TOL_ABS + TOL_REL * mean.abs());
             }
@@ -548,7 +550,7 @@ mod tests {
         ));
 
         let ecc = 1.5;
-        let limit = (-1.0_f64 / ecc).acos();
+        let limit = libm::acos(-1.0_f64 / ecc);
         assert!(matches!(
             true_to_eccentric(limit, ecc),
             Err(AnomalyError::BeyondAsymptote { .. })

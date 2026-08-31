@@ -187,6 +187,6 @@ fn huber_mask_exercises_both_branches() {
     assert_f64_bits_eq("huber lo rho2", rho.rho2[0], 0.0);
     // z>1: rho0=2*sqrt(z)-1, rho1=z**-0.5, rho2=-0.5*z**-1.5.
     assert_f64_bits_eq("huber hi rho0", rho.rho0[1], 2.0 * 4.0_f64.sqrt() - 1.0);
-    assert_f64_bits_eq("huber hi rho1", rho.rho1[1], 4.0_f64.powf(-0.5));
-    assert_f64_bits_eq("huber hi rho2", rho.rho2[1], -0.5 * 4.0_f64.powf(-1.5));
+    assert_f64_bits_eq("huber hi rho1", rho.rho1[1], libm::pow(4.0, -0.5));
+    assert_f64_bits_eq("huber hi rho2", rho.rho2[1], -0.5 * libm::pow(4.0, -1.5));
 }

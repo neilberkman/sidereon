@@ -97,7 +97,7 @@ impl AraimGeometry {
             let up = enu[2][0] * line_of_sight.e_x
                 + enu[2][1] * line_of_sight.e_y
                 + enu[2][2] * line_of_sight.e_z;
-            let elevation_rad = up.clamp(-1.0, 1.0).asin();
+            let elevation_rad = libm::asin(up.clamp(-1.0, 1.0));
             if !elevation_rad.is_finite() {
                 return Err(AraimError::InsufficientGeometry);
             }

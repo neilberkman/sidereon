@@ -141,7 +141,7 @@ fn outage_coast_stays_inside_imu_grade_bound_and_recovers() {
         .fold(0.0_f64, f64::max);
     let outage_span_s = truth[outage_end_epoch].t_j2000_s - truth[outage_entry_epoch].t_j2000_s;
     let tactical = ImuSpec::preset(ImuGrade::Tactical);
-    let accel_vrw_bound_m = 3.0 * tactical.accel_vrw_mps_sqrt_s * outage_span_s.powf(1.5);
+    let accel_vrw_bound_m = 3.0 * tactical.accel_vrw_mps_sqrt_s * libm::pow(outage_span_s, 1.5);
     let accel_bias_bound_m = 1.5 * tactical.accel_bias_instab_mps2 * outage_span_s.powi(2);
     let imu_coast_growth_bound_m = accel_vrw_bound_m + accel_bias_bound_m + 0.30;
 
@@ -674,7 +674,7 @@ fn fix_status_weighting_inflates_float_covariance_by_configured_sigma() {
 
 #[test]
 fn field_mode_defaults_keep_existing_loose_fixture_bits() {
-    const EXPECTED_DEFAULT_HASH: u64 = 0x7efe_5153_ffe0_9868;
+    const EXPECTED_DEFAULT_HASH: u64 = 0x06cb_d2e4_b7b1_729c;
     let scenario = field_scenario();
     let simulated = simulate_scenario(&scenario).expect("simulate scenario");
     let source = source_from_scenario(&scenario);
@@ -798,7 +798,7 @@ impl SplitMix64 {
             let v = 2.0 * self.unit_f64() - 1.0;
             let s = u * u + v * v;
             if s > 0.0 && s < 1.0 {
-                let scale = (-2.0 * s.ln() / s).sqrt();
+                let scale = libm::sqrt(-2.0 * libm::log(s) / s);
                 self.spare_normal = Some(v * scale);
                 return u * scale;
             }

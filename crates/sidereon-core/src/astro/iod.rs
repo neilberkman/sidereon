@@ -140,7 +140,11 @@ fn mat3_mat3(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
 
 /// Line-of-sight unit vector from right ascension and declination (radians).
 fn los(ra: f64, dec: f64) -> [f64; 3] {
-    [dec.cos() * ra.cos(), dec.cos() * ra.sin(), dec.sin()]
+    [
+        libm::cos(dec) * libm::cos(ra),
+        libm::cos(dec) * libm::sin(ra),
+        libm::sin(dec),
+    ]
 }
 
 /// Gibbs method: determine the velocity at `r2` from three coplanar position
@@ -197,7 +201,7 @@ pub fn gibbs(
     // Coplanarity angle (now safe: `p` and `r1` are nonzero). Clamp the dot
     // product into asin's domain so floating-point spill past +-1 cannot yield
     // a NaN that slips through the `> tol` test below.
-    let copa = dot(&unit(&p), &unit(r1)).clamp(-1.0, 1.0).asin();
+    let copa = libm::asin(dot(&unit(&p), &unit(r1)).clamp(-1.0, 1.0));
     if copa.abs() > COPLANAR_TOL_RAD {
         return Err(IodError::NotCoplanar);
     }
@@ -218,8 +222,8 @@ pub fn gibbs(
     }
 
     // Angles between position vectors
-    let theta12 = (dot(r1, r2) / (magr1 * magr2)).clamp(-1.0, 1.0).acos();
-    let theta23 = (dot(r2, r3) / (magr2 * magr3)).clamp(-1.0, 1.0).acos();
+    let theta12 = libm::acos((dot(r1, r2) / (magr1 * magr2)).clamp(-1.0, 1.0));
+    let theta23 = libm::acos((dot(r2, r3) / (magr2 * magr3)).clamp(-1.0, 1.0));
 
     // S vector
     let r1mr2 = magr1 - magr2;
@@ -314,14 +318,14 @@ pub fn hgibbs(
     // Coplanarity angle (now safe: `p` and `r1` are nonzero). Clamp the dot
     // product into asin's domain so floating-point spill past +-1 cannot yield
     // a NaN that slips through the `> tol` test below.
-    let copa = dot(&unit(&p), &unit(r1)).clamp(-1.0, 1.0).asin();
+    let copa = libm::asin(dot(&unit(&p), &unit(r1)).clamp(-1.0, 1.0));
     if copa.abs() > COPLANAR_TOL_RAD {
         return Err(IodError::NotCoplanar);
     }
 
     // Angles between position vectors
-    let theta12 = (dot(r1, r2) / (magr1 * magr2)).clamp(-1.0, 1.0).acos();
-    let theta23 = (dot(r2, r3) / (magr2 * magr3)).clamp(-1.0, 1.0).acos();
+    let theta12 = libm::acos((dot(r1, r2) / (magr1 * magr2)).clamp(-1.0, 1.0));
+    let theta23 = libm::acos((dot(r2, r3) / (magr2 * magr3)).clamp(-1.0, 1.0));
 
     // Herrick-Gibbs velocity approximation
     let term1 = smul(

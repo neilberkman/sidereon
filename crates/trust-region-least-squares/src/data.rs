@@ -136,7 +136,7 @@ impl BuiltinResidual {
             }
             BuiltinResidual::Exponential { t, y } => {
                 for (i, &ti) in t.iter().enumerate() {
-                    out.push((x[0] * (x[1] * ti).exp() + x[2]) - y[i]);
+                    out.push((x[0] * libm::exp(x[1] * ti) + x[2]) - y[i]);
                 }
             }
         }
@@ -166,7 +166,7 @@ impl BuiltinResidual {
             BuiltinResidual::Exponential { t, .. } => {
                 for (i, &ti) in t.iter().enumerate() {
                     let row = i * 3;
-                    let e = (x[1] * ti).exp();
+                    let e = libm::exp(x[1] * ti);
                     out[row] = e;
                     out[row + 1] = x[0] * ti * e;
                     out[row + 2] = 1.0;

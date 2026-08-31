@@ -40,6 +40,7 @@ trace = []
 # so the solver works out of the box; callers can still inject a different
 # `HostNumerics` at the call site.
 nalgebra = { workspace = true }
+libm = "0.2"
 # `libloading` backs the `hostlapack` bit-exact SVD/BLAS/power backend. It is compiled
 # in by default (not gated): bit-for-bit SciPy parity is reachable in the default
 # build by pointing the backend at the host LAPACK/BLAS at runtime.

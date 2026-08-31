@@ -1,6 +1,7 @@
 //! Generic EKF correction and closed-loop reset for the indirect INS state.
 
 use crate::astro::math::mat3::inline_rxr;
+use crate::astro::math::portable;
 use crate::inertial::state::{mat3_identity, reorthonormalize_dcm, skew};
 
 use super::state::{
@@ -401,7 +402,7 @@ fn validate_measurement_covariance(
     }
     validate_covariance_matrix(measurement_covariance, dimension, "measurement_covariance")?;
     let matrix = dmatrix_from_rows(measurement_covariance);
-    if matrix.cholesky().is_some() {
+    if portable::cholesky_lower_dynamic(&matrix).is_some() {
         Ok(())
     } else {
         Err(FusionError::NonPositiveDefinite {

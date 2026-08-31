@@ -41,9 +41,9 @@ fn arc_position_m(j2000_seconds: f64) -> [f64; 3] {
     let theta = rate_rad_s * j2000_seconds;
     let inclination = 55.0_f64.to_radians();
     [
-        GPS_A_M * theta.cos(),
-        GPS_A_M * theta.sin() * inclination.cos(),
-        GPS_A_M * theta.sin() * inclination.sin(),
+        GPS_A_M * libm::cos(theta),
+        GPS_A_M * libm::sin(theta) * libm::cos(inclination),
+        GPS_A_M * libm::sin(theta) * libm::sin(inclination),
     ]
 }
 

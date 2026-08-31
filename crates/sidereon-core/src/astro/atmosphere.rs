@@ -276,14 +276,14 @@ const RGAS: f64 = 831.4;
 fn ccor(alt: f64, r: f64, h1: f64, zh: f64) -> f64 {
     let e = (alt - zh) / h1;
     if e > 70.0 {
-        return (0.0_f64).exp();
+        return libm::exp(0.0_f64);
     }
     if e < -70.0 {
-        return r.exp();
+        return libm::exp(r);
     }
-    let ex = e.exp();
+    let ex = libm::exp(e);
     let e = r / (1.0 + ex);
-    e.exp()
+    libm::exp(e)
 }
 
 /// Chemistry/dissociation correction with two scale lengths (reference
@@ -292,15 +292,15 @@ fn ccor2(alt: f64, r: f64, h1: f64, zh: f64, h2: f64) -> f64 {
     let e1 = (alt - zh) / h1;
     let e2 = (alt - zh) / h2;
     if (e1 > 70.0) || (e2 > 70.0) {
-        return (0.0_f64).exp();
+        return libm::exp(0.0_f64);
     }
     if (e1 < -70.0) && (e2 < -70.0) {
-        return r.exp();
+        return libm::exp(r);
     }
-    let ex1 = e1.exp();
-    let ex2 = e2.exp();
+    let ex1 = libm::exp(e1);
+    let ex2 = libm::exp(e2);
     let ccor2v = r / (1.0 + 0.5 * (ex1 + ex2));
-    ccor2v.exp()
+    libm::exp(ccor2v)
 }
 
 /// Turbopause density blend (reference `dnet`).
@@ -318,14 +318,14 @@ fn dnet(dd: f64, dm: f64, zhm: f64, xmm: f64, xm: f64) -> f64 {
             return dm;
         }
     }
-    let ylog = a * (dm / dd).ln();
+    let ylog = a * libm::log(dm / dd);
     if ylog < -10.0 {
         return dd;
     }
     if ylog > 10.0 {
         return dm;
     }
-    dd * (1.0 + ylog.exp()).powf(1.0 / a)
+    dd * libm::pow(1.0 + libm::exp(ylog), 1.0 / a)
 }
 
 /// Integrate a cubic spline from `xa[0]` to `x` (reference `splini`).
@@ -420,12 +420,12 @@ fn g0(a: f64, p: &[f64]) -> f64 {
     a - 4.0
         + (p[25] - 1.0)
             * (a - 4.0
-                + ((-(p[24] * p[24]).sqrt() * (a - 4.0)).exp() - 1.0) / (p[24] * p[24]).sqrt())
+                + (libm::exp(-(p[24] * p[24]).sqrt() * (a - 4.0)) - 1.0) / (p[24] * p[24]).sqrt())
 }
 
 /// 3 hr magnetic-activity sum normalizer (reference `sumex`).
 fn sumex(ex: f64) -> f64 {
-    1.0 + (1.0 - ex.powf(19.0)) / (1.0 - ex) * ex.powf(0.5)
+    1.0 + (1.0 - libm::pow(ex, 19.0)) / (1.0 - ex) * libm::pow(ex, 0.5)
 }
 
 /// 3 hr magnetic-activity weighted sum (reference `sg0`).
@@ -433,8 +433,9 @@ fn sg0(ex: f64, p: &[f64], ap: &[f64]) -> f64 {
     (g0(ap[1], p)
         + (g0(ap[2], p) * ex
             + g0(ap[3], p) * ex * ex
-            + g0(ap[4], p) * ex.powf(3.0)
-            + (g0(ap[5], p) * ex.powf(4.0) + g0(ap[6], p) * ex.powf(12.0)) * (1.0 - ex.powf(8.0))
+            + g0(ap[4], p) * libm::pow(ex, 3.0)
+            + (g0(ap[5], p) * libm::pow(ex, 4.0) + g0(ap[6], p) * libm::pow(ex, 12.0))
+                * (1.0 - libm::pow(ex, 8.0))
                 / (1.0 - ex)))
         / sumex(ex)
 }
@@ -506,7 +507,7 @@ impl State {
     /// Latitude variation of gravity; sets `gsurf` and `re` (reference
     /// `glatf`).
     fn glatf(&mut self, lat: f64) {
-        let c2 = (2.0 * DGTR * lat).cos();
+        let c2 = libm::cos(2.0 * DGTR * lat);
         self.gsurf = 980.616 * (1.0 - 0.0026373 * c2);
         self.re = 2.0 * self.gsurf / (3.085462E-6 + 2.27E-9 * c2) * 1.0E-5;
     }
@@ -518,7 +519,7 @@ impl State {
 
     /// Scale height (reference `scalh`).
     fn scalh(&self, alt: f64, xm: f64, temp: f64) -> f64 {
-        let g = self.gsurf / (1.0 + alt / self.re).powf(2.0);
+        let g = self.gsurf / libm::pow(1.0 + alt / self.re, 2.0);
         RGAS * temp / (g * xm)
     }
 
@@ -573,7 +574,7 @@ impl State {
             ys[k] = 1.0 / tn2[k];
         }
         let yd1 = -tgn2[0] / (t1 * t1) * zgdif;
-        let yd2 = -tgn2[1] / (t2 * t2) * zgdif * ((self.re + z2) / (self.re + z1)).powf(2.0);
+        let yd2 = -tgn2[1] / (t2 * t2) * zgdif * libm::pow((self.re + z2) / (self.re + z1), 2.0);
 
         spline(&xs, &ys, mn, yd1, yd2, &mut y2out);
         let x = zg / zgdif;
@@ -581,14 +582,14 @@ impl State {
 
         *tz = 1.0 / y;
         if xm != 0.0 {
-            let glb = self.gsurf / (1.0 + z1 / self.re).powf(2.0);
+            let glb = self.gsurf / libm::pow(1.0 + z1 / self.re, 2.0);
             let gamm = xm * glb * zgdif / RGAS;
             let yi = splini(&xs, &ys, &y2out, mn, x);
             let mut expl = gamm * yi;
             if expl > 50.0 {
                 expl = 50.0;
             }
-            densm_tmp = densm_tmp * (t1 / *tz) * (-expl).exp();
+            densm_tmp = densm_tmp * (t1 / *tz) * libm::exp(-expl);
         }
 
         if alt > zn3[0] {
@@ -614,7 +615,7 @@ impl State {
             ys[k] = 1.0 / tn3[k];
         }
         let yd1 = -tgn3[0] / (t1 * t1) * zgdif;
-        let yd2 = -tgn3[1] / (t2 * t2) * zgdif * ((self.re + z2) / (self.re + z1)).powf(2.0);
+        let yd2 = -tgn3[1] / (t2 * t2) * zgdif * libm::pow((self.re + z2) / (self.re + z1), 2.0);
 
         spline(&xs, &ys, mn, yd1, yd2, &mut y2out);
         let x = zg / zgdif;
@@ -622,14 +623,14 @@ impl State {
 
         *tz = 1.0 / y;
         if xm != 0.0 {
-            let glb = self.gsurf / (1.0 + z1 / self.re).powf(2.0);
+            let glb = self.gsurf / libm::pow(1.0 + z1 / self.re, 2.0);
             let gamm = xm * glb * zgdif / RGAS;
             let yi = splini(&xs, &ys, &y2out, mn, x);
             let mut expl = gamm * yi;
             if expl > 50.0 {
                 expl = 50.0;
             }
-            densm_tmp = densm_tmp * (t1 / *tz) * (-expl).exp();
+            densm_tmp = densm_tmp * (t1 / *tz) * libm::exp(-expl);
         }
         if xm == 0.0 {
             *tz
@@ -669,7 +670,7 @@ impl State {
 
         let zg2 = self.zeta(z, zlb);
 
-        let tt = tinf - (tinf - tlb) * (-s2 * zg2).exp();
+        let tt = tinf - (tinf - tlb) * libm::exp(-s2 * zg2);
         let ta = tt;
         *tz = tt;
         densu_temp = *tz;
@@ -682,7 +683,7 @@ impl State {
         let mut t1 = 0.0;
 
         if alt < za {
-            let dta = (tinf - ta) * s2 * ((self.re + zlb) / (self.re + za)).powf(2.0);
+            let dta = (tinf - ta) * s2 * libm::pow((self.re + zlb) / (self.re + za), 2.0);
             tgn1[0] = dta;
             tn1[0] = ta;
             let z = if alt > zn1[mn1 - 1] {
@@ -702,7 +703,8 @@ impl State {
                 ys[k] = 1.0 / tn1[k];
             }
             let yd1 = -tgn1[0] / (t1 * t1) * zgdif;
-            let yd2 = -tgn1[1] / (t2 * t2) * zgdif * ((self.re + z2) / (self.re + z1)).powf(2.0);
+            let yd2 =
+                -tgn1[1] / (t2 * t2) * zgdif * libm::pow((self.re + z2) / (self.re + z1), 2.0);
             spline(&xs, &ys, mn, yd1, yd2, &mut y2out);
             x = zg / zgdif;
             let y = splint(&xs, &ys, &y2out, mn, x);
@@ -713,9 +715,9 @@ impl State {
             return densu_temp;
         }
 
-        let glb = self.gsurf / (1.0 + zlb / self.re).powf(2.0);
+        let glb = self.gsurf / libm::pow(1.0 + zlb / self.re, 2.0);
         let gamma = xm * glb / (s2 * RGAS * tinf);
-        let mut expl = (-s2 * gamma * zg2).exp();
+        let mut expl = libm::exp(-s2 * gamma * zg2);
         if expl > 50.0 {
             expl = 50.0;
         }
@@ -723,13 +725,13 @@ impl State {
             expl = 50.0;
         }
 
-        let densa = dlb * (tlb / tt).powf(1.0 + alpha + gamma) * expl;
+        let densa = dlb * libm::pow(tlb / tt, 1.0 + alpha + gamma) * expl;
         densu_temp = densa;
         if alt >= za {
             return densu_temp;
         }
 
-        let glb = self.gsurf / (1.0 + z1 / self.re).powf(2.0);
+        let glb = self.gsurf / libm::pow(1.0 + z1 / self.re, 2.0);
         let gamm = xm * glb * zgdif / RGAS;
 
         let yi = splini(&xs, &ys, &y2out, mn, x);
@@ -741,7 +743,7 @@ impl State {
             expl = 50.0;
         }
 
-        densu_temp * (t1 / *tz).powf(1.0 + alpha) * (-expl).exp()
+        densu_temp * libm::pow(t1 / *tz, 1.0 + alpha) * libm::exp(-expl)
     }
 
     /// Upper-thermosphere G(L) expansion (reference `globe7`). Sets the shared
@@ -750,8 +752,8 @@ impl State {
         let mut t = [0.0_f64; 15];
         let tloc = input.lst;
 
-        let c = (input.g_lat * DGTR).sin();
-        let s = (input.g_lat * DGTR).cos();
+        let c = libm::sin(input.g_lat * DGTR);
+        let s = libm::cos(input.g_lat * DGTR);
         let c2 = c * c;
         let c4 = c2 * c2;
         let s2 = s * s;
@@ -780,19 +782,19 @@ impl State {
         self.plg[3][6] = (11.0 * c * self.plg[3][5] - 8.0 * self.plg[3][4]) / 3.0;
 
         if !(((flags.sw[7] == 0.0) && (flags.sw[8] == 0.0)) && (flags.sw[14] == 0.0)) {
-            self.stloc = (HR * tloc).sin();
-            self.ctloc = (HR * tloc).cos();
-            self.s2tloc = (2.0 * HR * tloc).sin();
-            self.c2tloc = (2.0 * HR * tloc).cos();
-            self.s3tloc = (3.0 * HR * tloc).sin();
-            self.c3tloc = (3.0 * HR * tloc).cos();
+            self.stloc = libm::sin(HR * tloc);
+            self.ctloc = libm::cos(HR * tloc);
+            self.s2tloc = libm::sin(2.0 * HR * tloc);
+            self.c2tloc = libm::cos(2.0 * HR * tloc);
+            self.s3tloc = libm::sin(3.0 * HR * tloc);
+            self.c3tloc = libm::cos(3.0 * HR * tloc);
         }
 
         let doy = input.doy as f64;
-        let cd32 = (DR * (doy - p[31])).cos();
-        let cd18 = (2.0 * DR * (doy - p[17])).cos();
-        let cd14 = (DR * (doy - p[13])).cos();
-        let cd39 = (2.0 * DR * (doy - p[38])).cos();
+        let cd32 = libm::cos(DR * (doy - p[31]));
+        let cd18 = libm::cos(2.0 * DR * (doy - p[17]));
+        let cd14 = libm::cos(DR * (doy - p[13]));
+        let cd39 = libm::cos(2.0 * DR * (doy - p[38]));
 
         // F10.7 effect.
         let df = input.f107 - input.f107a;
@@ -801,7 +803,7 @@ impl State {
         t[0] = p[19] * df * (1.0 + p[59] * dfa)
             + p[20] * df * df
             + p[21] * dfa
-            + p[29] * dfa.powf(2.0);
+            + p[29] * libm::pow(dfa, 2.0);
         let f1 = 1.0 + (p[47] * dfa + p[19] * df + p[20] * df * df) * flags.swc[1];
         let f2 = 1.0 + (p[49] * dfa + p[19] * df + p[20] * df * df) * flags.swc[1];
 
@@ -869,9 +871,10 @@ impl State {
                 // (the clamp never fires for the standard tables).
                 let mut pc = [0.0_f64; 150];
                 pc.copy_from_slice(p);
-                let mut exp1 = (-10800.0 * (pc[51] * pc[51]).sqrt()
-                    / (1.0 + pc[138] * (45.0 - (input.g_lat * input.g_lat).sqrt())))
-                .exp();
+                let mut exp1 = libm::exp(
+                    -10800.0 * (pc[51] * pc[51]).sqrt()
+                        / (1.0 + pc[138] * (45.0 - (input.g_lat * input.g_lat).sqrt())),
+                );
                 if exp1 > 0.99999 {
                     exp1 = 0.99999;
                 }
@@ -893,7 +896,7 @@ impl State {
                                 + p[129] * self.plg[1][3]
                                 + p[130] * self.plg[1][5])
                                 * flags.swc[7]
-                                * (HR * (tloc - p[131])).cos());
+                                * libm::cos(HR * (tloc - p[131])));
                 }
             }
         } else {
@@ -903,7 +906,7 @@ impl State {
             if p44 < 0.0 {
                 p44 = 1.0E-5;
             }
-            self.apdf = apd + (p45 - 1.0) * (apd + ((-p44 * apd).exp() - 1.0) / p44);
+            self.apdf = apd + (p45 - 1.0) * (apd + (libm::exp(-p44 * apd) - 1.0) / p44);
             if flags.sw[9] != 0.0 {
                 t[8] = self.apdf
                     * (p[32]
@@ -918,7 +921,7 @@ impl State {
                             + p[122] * self.plg[1][3]
                             + p[123] * self.plg[1][5])
                             * flags.swc[7]
-                            * (HR * (tloc - p[124])).cos());
+                            * libm::cos(HR * (tloc - p[124])));
             }
         }
 
@@ -937,7 +940,7 @@ impl State {
                                 + p[110] * self.plg[1][3]
                                 + p[111] * self.plg[1][5])
                             * cd14)
-                        * (DGTR * input.g_long).cos()
+                        * libm::cos(DGTR * input.g_long)
                         + (p[90] * self.plg[1][2]
                             + p[91] * self.plg[1][4]
                             + p[92] * self.plg[1][6]
@@ -949,7 +952,7 @@ impl State {
                                     + p[113] * self.plg[1][3]
                                     + p[114] * self.plg[1][5])
                                 * cd14)
-                            * (DGTR * input.g_long).sin());
+                            * libm::sin(DGTR * input.g_long));
             }
 
             // UT and mixed UT/longitude.
@@ -958,10 +961,10 @@ impl State {
                     * (1.0 + p[81] * dfa * flags.swc[1])
                     * (1.0 + p[119] * self.plg[0][1] * flags.swc[5] * cd14)
                     * ((p[68] * self.plg[0][1] + p[69] * self.plg[0][3] + p[70] * self.plg[0][5])
-                        * (SR * (input.sec - p[71])).cos());
+                        * libm::cos(SR * (input.sec - p[71])));
                 t[11] += flags.swc[11]
                     * (p[76] * self.plg[2][3] + p[77] * self.plg[2][5] + p[78] * self.plg[2][7])
-                    * (SR * (input.sec - p[79]) + 2.0 * DGTR * input.g_long).cos()
+                    * libm::cos(SR * (input.sec - p[79]) + 2.0 * DGTR * input.g_long)
                     * (1.0 + p[137] * dfa * flags.swc[1]);
             }
 
@@ -975,7 +978,7 @@ impl State {
                             * ((p[52] * self.plg[1][2]
                                 + p[98] * self.plg[1][4]
                                 + p[67] * self.plg[1][6])
-                                * (DGTR * (input.g_long - p[97])).cos())
+                                * libm::cos(DGTR * (input.g_long - p[97])))
                             + self.apt[0]
                                 * flags.swc[11]
                                 * flags.swc[5]
@@ -983,13 +986,13 @@ impl State {
                                     + p[134] * self.plg[1][3]
                                     + p[135] * self.plg[1][5])
                                 * cd14
-                                * (DGTR * (input.g_long - p[136])).cos()
+                                * libm::cos(DGTR * (input.g_long - p[136]))
                             + self.apt[0]
                                 * flags.swc[12]
                                 * (p[55] * self.plg[0][1]
                                     + p[56] * self.plg[0][3]
                                     + p[57] * self.plg[0][5])
-                                * (SR * (input.sec - p[58])).cos();
+                                * libm::cos(SR * (input.sec - p[58]));
                     }
                 } else {
                     t[12] = self.apdf
@@ -998,7 +1001,7 @@ impl State {
                         * ((p[60] * self.plg[1][2]
                             + p[61] * self.plg[1][4]
                             + p[62] * self.plg[1][6])
-                            * (DGTR * (input.g_long - p[63])).cos())
+                            * libm::cos(DGTR * (input.g_long - p[63])))
                         + self.apdf
                             * flags.swc[11]
                             * flags.swc[5]
@@ -1006,13 +1009,13 @@ impl State {
                                 + p[116] * self.plg[1][3]
                                 + p[117] * self.plg[1][5])
                             * cd14
-                            * (DGTR * (input.g_long - p[118])).cos()
+                            * libm::cos(DGTR * (input.g_long - p[118]))
                         + self.apdf
                             * flags.swc[12]
                             * (p[83] * self.plg[0][1]
                                 + p[84] * self.plg[0][3]
                                 + p[85] * self.plg[0][5])
-                            * (SR * (input.sec - p[75])).cos();
+                            * libm::cos(SR * (input.sec - p[75]));
                 }
             }
         }
@@ -1034,10 +1037,10 @@ impl State {
             return -1.0;
         }
         let doy = input.doy as f64;
-        let cd32 = (DR * (doy - p[31])).cos();
-        let cd18 = (2.0 * DR * (doy - p[17])).cos();
-        let cd14 = (DR * (doy - p[13])).cos();
-        let cd39 = (2.0 * DR * (doy - p[38])).cos();
+        let cd32 = libm::cos(DR * (doy - p[31]));
+        let cd18 = libm::cos(2.0 * DR * (doy - p[17]));
+        let cd14 = libm::cos(DR * (doy - p[13]));
+        let cd39 = libm::cos(2.0 * DR * (doy - p[38]));
 
         // F10.7.
         t[0] = p[21] * self.dfa;
@@ -1097,24 +1100,24 @@ impl State {
         if !((flags.sw[10] == 0.0) || (flags.sw[11] == 0.0) || (input.g_long <= -1000.0)) {
             t[10] = (1.0
                 + self.plg[0][1]
-                    * (p[80] * flags.swc[5] * (DR * (doy - p[81])).cos()
-                        + p[85] * flags.swc[6] * (2.0 * DR * (doy - p[86])).cos())
-                + p[83] * flags.swc[3] * (DR * (doy - p[84])).cos()
-                + p[87] * flags.swc[4] * (2.0 * DR * (doy - p[88])).cos())
+                    * (p[80] * flags.swc[5] * libm::cos(DR * (doy - p[81]))
+                        + p[85] * flags.swc[6] * libm::cos(2.0 * DR * (doy - p[86])))
+                + p[83] * flags.swc[3] * libm::cos(DR * (doy - p[84]))
+                + p[87] * flags.swc[4] * libm::cos(2.0 * DR * (doy - p[88])))
                 * ((p[64] * self.plg[1][2]
                     + p[65] * self.plg[1][4]
                     + p[66] * self.plg[1][6]
                     + p[74] * self.plg[1][1]
                     + p[75] * self.plg[1][3]
                     + p[76] * self.plg[1][5])
-                    * (DGTR * input.g_long).cos()
+                    * libm::cos(DGTR * input.g_long)
                     + (p[90] * self.plg[1][2]
                         + p[91] * self.plg[1][4]
                         + p[92] * self.plg[1][6]
                         + p[77] * self.plg[1][1]
                         + p[78] * self.plg[1][3]
                         + p[79] * self.plg[1][5])
-                        * (DGTR * input.g_long).sin());
+                        * libm::sin(DGTR * input.g_long));
         }
         let mut tt = 0.0;
         for i in 0..14 {
@@ -1174,14 +1177,14 @@ impl State {
                 * (1.0 + flags.sw[18] * flags.sw[20] * self.glob7s(&PMA[8], input, flags))
                 * self.meso_tn1[4]
                 * self.meso_tn1[4]
-                / (PTM[4] * PTL[3][0]).powf(2.0);
+                / libm::pow(PTM[4] * PTL[3][0], 2.0);
         } else {
             self.meso_tn1[1] = PTM[6] * PTL[0][0];
             self.meso_tn1[2] = PTM[2] * PTL[1][0];
             self.meso_tn1[3] = PTM[7] * PTL[2][0];
             self.meso_tn1[4] = PTM[4] * PTL[3][0];
             self.meso_tgn1[1] = PTM[8] * PMA[8][0] * self.meso_tn1[4] * self.meso_tn1[4]
-                / (PTM[4] * PTL[3][0]).powf(2.0);
+                / libm::pow(PTM[4] * PTL[3][0], 2.0);
         }
 
         // N2 variation factor at Zlb.
@@ -1192,8 +1195,8 @@ impl State {
             * (1.0
                 + flags.sw[5]
                     * PDL[0][24]
-                    * (DGTR * input.g_lat).sin()
-                    * (DR * (input.doy as f64 - PT[13])).cos());
+                    * libm::sin(DGTR * input.g_lat)
+                    * libm::cos(DR * (input.doy as f64 - PT[13])));
         output.t[0] = tinf;
         let xmm = PDM[2][4];
         let z = input.alt;
@@ -1204,7 +1207,7 @@ impl State {
         let mut tgn1 = self.meso_tgn1;
 
         // N2 density.
-        let db28 = PDM[2][0] * g28.exp() * PD[2][0];
+        let db28 = PDM[2][0] * libm::exp(g28) * PD[2][0];
         output.d[2] = self.densu(
             z,
             db28,
@@ -1249,7 +1252,7 @@ impl State {
 
         // He density.
         let g4 = flags.sw[21] * self.globe7(&PD[0], input, flags);
-        let db04 = PDM[0][0] * g4.exp() * PD[0][0];
+        let db04 = PDM[0][0] * libm::exp(g4) * PD[0][0];
         output.d[0] = self.densu(
             z,
             db04,
@@ -1299,7 +1302,7 @@ impl State {
             );
             let zhm04 = zhm28;
             output.d[0] = dnet(output.d[0], self.dm04, zhm04, xmm, 4.0);
-            let rl = (b28 * PDM[0][1] / b04).ln();
+            let rl = libm::log(b28 * PDM[0][1] / b04);
             let zc04 = PDM[0][4] * PDL[1][0];
             let hc04 = PDM[0][5] * PDL[1][1];
             output.d[0] *= ccor(z, rl, hc04, zc04);
@@ -1307,7 +1310,7 @@ impl State {
 
         // O density.
         let g16 = flags.sw[21] * self.globe7(&PD[1], input, flags);
-        let db16 = PDM[1][0] * g16.exp() * PD[1][0];
+        let db16 = PDM[1][0] * libm::exp(g16) * PD[1][0];
         output.d[1] = self.densu(
             z,
             db16,
@@ -1371,7 +1374,7 @@ impl State {
 
         // O2 density.
         let g32 = flags.sw[21] * self.globe7(&PD[4], input, flags);
-        let db32 = PDM[3][0] * g32.exp() * PD[4][0];
+        let db32 = PDM[3][0] * libm::exp(g32) * PD[4][0];
         output.d[3] = self.densu(
             z,
             db32,
@@ -1422,7 +1425,7 @@ impl State {
                 );
                 let zhm32 = zhm28;
                 output.d[3] = dnet(output.d[3], self.dm32, zhm32, xmm, 32.0);
-                let rl = (b28 * PDM[3][1] / b32).ln();
+                let rl = libm::log(b28 * PDM[3][1] / b32);
                 let hc32 = PDM[3][5] * PDL[1][7];
                 let zc32 = PDM[3][4] * PDL[1][6];
                 output.d[3] *= ccor(z, rl, hc32, zc32);
@@ -1437,7 +1440,7 @@ impl State {
 
         // Ar density.
         let g40 = flags.sw[21] * self.globe7(&PD[5], input, flags);
-        let db40 = PDM[4][0] * g40.exp() * PD[5][0];
+        let db40 = PDM[4][0] * libm::exp(g40) * PD[5][0];
         output.d[4] = self.densu(
             z,
             db40,
@@ -1487,7 +1490,7 @@ impl State {
             );
             let zhm40 = zhm28;
             output.d[4] = dnet(output.d[4], self.dm40, zhm40, xmm, 40.0);
-            let rl = (b28 * PDM[4][1] / b40).ln();
+            let rl = libm::log(b28 * PDM[4][1] / b40);
             let hc40 = PDM[4][5] * PDL[1][9];
             let zc40 = PDM[4][4] * PDL[1][8];
             output.d[4] *= ccor(z, rl, hc40, zc40);
@@ -1495,7 +1498,7 @@ impl State {
 
         // Hydrogen density.
         let g1 = flags.sw[21] * self.globe7(&PD[6], input, flags);
-        let db01 = PDM[5][0] * g1.exp() * PD[6][0];
+        let db01 = PDM[5][0] * libm::exp(g1) * PD[6][0];
         output.d[6] = self.densu(
             z,
             db01,
@@ -1545,7 +1548,7 @@ impl State {
             );
             let zhm01 = zhm28;
             output.d[6] = dnet(output.d[6], self.dm01, zhm01, xmm, 1.0);
-            let rl = (b28 * PDM[5][1] * (PDL[1][17] * PDL[1][17]).sqrt() / b01).ln();
+            let rl = libm::log(b28 * PDM[5][1] * (PDL[1][17] * PDL[1][17]).sqrt() / b01);
             let hc01 = PDM[5][5] * PDL[1][11];
             let zc01 = PDM[5][4] * PDL[1][10];
             output.d[6] *= ccor(z, rl, hc01, zc01);
@@ -1557,7 +1560,7 @@ impl State {
 
         // Atomic nitrogen density.
         let g14 = flags.sw[21] * self.globe7(&PD[7], input, flags);
-        let db14 = PDM[6][0] * g14.exp() * PD[7][0];
+        let db14 = PDM[6][0] * libm::exp(g14) * PD[7][0];
         output.d[7] = self.densu(
             z,
             db14,
@@ -1607,7 +1610,7 @@ impl State {
             );
             let zhm14 = zhm28;
             output.d[7] = dnet(output.d[7], self.dm14, zhm14, xmm, 14.0);
-            let rl = (b28 * PDM[6][1] * (PDL[0][2] * PDL[0][2]).sqrt() / b14).ln();
+            let rl = libm::log(b28 * PDM[6][1] * (PDL[0][2] * PDL[0][2]).sqrt() / b14);
             let hc14 = PDM[6][5] * PDL[0][1];
             let zc14 = PDM[6][4] * PDL[0][0];
             output.d[7] *= ccor(z, rl, hc14, zc14);
@@ -1619,7 +1622,7 @@ impl State {
 
         // Anomalous oxygen density.
         let g16h = flags.sw[21] * self.globe7(&PD[8], input, flags);
-        let db16h = PDM[7][0] * g16h.exp() * PD[8][0];
+        let db16h = PDM[7][0] * libm::exp(g16h) * PD[8][0];
         let tho = PDM[7][9] * PDL[0][6];
         let dd = self.densu(
             z,
@@ -1639,7 +1642,7 @@ impl State {
         let zsht = PDM[7][5];
         let zmho = PDM[7][4];
         let zsho = self.scalh(zmho, 16.0, tho);
-        output.d[8] = dd * (-zsht / zsho * ((-(z - zmho) / zsht).exp() - 1.0)).exp();
+        output.d[8] = dd * libm::exp(-zsht / zsho * (libm::exp(-(z - zmho) / zsht) - 1.0));
 
         // Total mass density.
         output.d[5] = 1.66E-24
@@ -1739,7 +1742,7 @@ impl State {
             * (1.0 + flags.sw[20] * flags.sw[22] * self.glob7s(&PMA[9], input, flags))
             * self.meso_tn2[3]
             * self.meso_tn2[3]
-            / (PMA[2][0] * PAVGM[2]).powf(2.0);
+            / libm::pow(PMA[2][0] * PAVGM[2], 2.0);
         self.meso_tn3[0] = self.meso_tn2[3];
 
         if input.alt < zn3[0] {
@@ -1758,7 +1761,7 @@ impl State {
                 * (1.0 + flags.sw[22] * self.glob7s(&PMA[7], input, flags))
                 * self.meso_tn3[4]
                 * self.meso_tn3[4]
-                / (PMA[6][0] * PAVGM[6]).powf(2.0);
+                / libm::pow(PMA[6][0] * PAVGM[6], 2.0);
         }
 
         // Linear transition to full mixing below zn2[0].

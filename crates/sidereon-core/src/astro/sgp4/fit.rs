@@ -26,12 +26,13 @@ use std::cell::Cell;
 
 use thiserror::Error;
 pub use trust_region_least_squares::loss::Loss;
-use trust_region_least_squares::model::{solve_model, ResidualModel};
+use trust_region_least_squares::model::{solve_model_with, ResidualModel};
 pub use trust_region_least_squares::trf::XScale;
 use trust_region_least_squares::trf::{TrfError, TrfOptions, TrfResult};
 
 use crate::astro::anomaly::true_to_mean;
 use crate::astro::elements::{rv2coe, ClassicalElements, OrbitType};
+use crate::astro::math::portable::PortableNumerics;
 use crate::astro::math::vec3;
 use crate::astro::omm::Omm;
 use crate::astro::sgp4::{ElementSet, Error as Sgp4Error, JulianDate, OpsMode, Satellite};
@@ -258,7 +259,8 @@ pub fn fit_tle(samples: &[FitSample], config: &FitConfig) -> Result<TleFit, TleF
     };
 
     let options = solver_options(config);
-    let result = solve_model(&problem, &x0, &options).map_err(TleFitError::Solver)?;
+    let result = solve_model_with(&problem, &x0, &PortableNumerics, &options)
+        .map_err(TleFitError::Solver)?;
 
     let mut final_rows = Vec::new();
     problem.penalty_hit_at_solution.set(false);

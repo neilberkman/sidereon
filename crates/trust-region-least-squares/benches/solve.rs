@@ -60,7 +60,7 @@ fn residual_values(matrix: &[f64], target: &[f64], x: &[f64]) -> Vec<f64> {
         for j in 0..n {
             acc += matrix[row + j] * x[j];
         }
-        out.push((acc - target[i]) + (0.25 * x[i % n]).sin());
+        out.push((acc - target[i]) + libm::sin(0.25 * x[i % n]));
     }
     out
 }

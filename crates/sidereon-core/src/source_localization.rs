@@ -92,10 +92,11 @@
 use core::fmt;
 
 pub use trust_region_least_squares::loss::Loss;
-use trust_region_least_squares::model::{solve_model, ResidualModel};
+use trust_region_least_squares::model::{solve_model_with, ResidualModel};
 use trust_region_least_squares::trf::{TrfError, TrfOptions, TrfResult, XScale};
 
 use crate::astro::math::least_squares::singular_value_diagnostics;
+use crate::astro::math::portable::{self, PortableNumerics};
 use crate::dop::{self, Dop, DopError};
 use crate::geometry_quality::{
     classify, GeometryQuality, GeometryQualityThresholds, ObservabilityTier,
@@ -767,7 +768,7 @@ fn locate_source_inner(
         dimension: resolved.dimension,
         mode: resolved.mode,
     };
-    let result = solve_model(&problem, &x0, &solver_options(options))?;
+    let result = solve_model_with(&problem, &x0, &PortableNumerics, &solver_options(options))?;
     if !result.success() {
         return Err(SourceLocalizationError::DidNotConverge {
             status: result.status,
@@ -1316,19 +1317,20 @@ fn jacobian_svd_diagnostics(jac: &[f64], m: usize, n: usize) -> Option<JacobianS
         return None;
     }
     let matrix = DMatrix::from_row_slice(m, n, jac);
-    let svd = matrix.svd(false, true);
-    let diagnostics = singular_value_diagnostics(svd.singular_values.as_slice(), m, n);
+    let svd = portable::svd(&matrix, false, true);
+    let singular_values: Vec<f64> = svd.singular_values.iter().map(|value| value.0).collect();
+    let diagnostics = singular_value_diagnostics(&singular_values, m, n);
     let v_t = svd.v_t?;
-    let largest = svd.singular_values.iter().copied().fold(0.0_f64, f64::max);
+    let largest = singular_values.iter().copied().fold(0.0_f64, f64::max);
     let threshold = largest * (m.max(n) as f64) * f64::EPSILON;
     let mut cofactor = vec![vec![0.0_f64; n]; n];
     for i in 0..n {
         for j in i..n {
             let mut value = 0.0;
-            for (component, &singular_value) in svd.singular_values.iter().enumerate() {
+            for (component, &singular_value) in singular_values.iter().enumerate() {
                 if singular_value > threshold {
                     let inverse_square = (singular_value * singular_value).recip();
-                    value += v_t[(component, i)] * inverse_square * v_t[(component, j)];
+                    value += v_t[(component, i)].0 * inverse_square * v_t[(component, j)].0;
                 }
             }
             cofactor[i][j] = value;
@@ -1889,7 +1891,7 @@ mod tests {
                 let v = 2.0 * self.unit_f64() - 1.0;
                 let radius_squared = u * u + v * v;
                 if radius_squared > 0.0 && radius_squared < 1.0 {
-                    let scale = (-2.0 * radius_squared.ln() / radius_squared).sqrt();
+                    let scale = (-2.0 * libm::log(radius_squared) / radius_squared).sqrt();
                     self.spare_normal = Some(v * scale);
                     return u * scale;
                 }
@@ -2197,6 +2199,18 @@ mod tests {
             Sensor::new(vec![-120.0, 80.0]),
             Sensor::new(vec![80.0, -140.0]),
             Sensor::new(vec![-160.0, -100.0]),
+            Sensor::new(vec![200.0, 0.0]),
+            Sensor::new(vec![-200.0, 0.0]),
+            Sensor::new(vec![0.0, 200.0]),
+            Sensor::new(vec![0.0, -200.0]),
+            Sensor::new(vec![300.0, 0.0]),
+            Sensor::new(vec![-300.0, 0.0]),
+            Sensor::new(vec![0.0, 300.0]),
+            Sensor::new(vec![0.0, -300.0]),
+            Sensor::new(vec![500.0, 0.0]),
+            Sensor::new(vec![-500.0, 0.0]),
+            Sensor::new(vec![0.0, 500.0]),
+            Sensor::new(vec![0.0, -500.0]),
         ];
         let source = vec![15.0, -20.0];
         let origin = 1.25;
