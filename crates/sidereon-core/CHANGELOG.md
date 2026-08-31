@@ -4,6 +4,21 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-08-31
+
+Supersedes 1.4.0. Solutions are unchanged; a diagnostic is restored.
+
+### Fixed
+
+- The core trust-region backend no longer overrides the solver's dot-product
+  and matrix-vector reductions. Those fallbacks were already portable
+  fixed-order arithmetic; overriding them in 1.4.0 summed the terminal
+  gradient in a different order, which left every converged solution
+  bit-identical but moved the reported first-order optimality (a
+  cancellation-dominated number) by an order of magnitude on some fits, and
+  could change the evaluation counts of a fit. 1.4.1 reports the same
+  optimality and counts as 1.3.3 for fits whose path is otherwise unchanged.
+
 ## [1.4.0] - 2026-08-31
 
 Results are bit-identical across x86_64 and arm64 targets. Relative to 1.3.3

@@ -26,9 +26,15 @@ pub struct Portable(pub f64);
 
 /// Core-owned numerical backend for the public trust-region solver.
 ///
-/// The backend deliberately uses the same portable scalar SVD as the core
-/// covariance paths and fixed-order scalar loops for the BLAS-like hooks.  It
-/// is zero-sized, so sharing one value across independent solves is free.
+/// The backend overrides only the operations that depend on the platform C
+/// library: the thin SVD (routed through the same portable scalar as the
+/// core covariance paths), `power`, `log1p`, and `atan`. The dot-product and
+/// matrix-vector hooks are left declined on purpose: the solver's own
+/// fallbacks are fixed-order scalar arithmetic that mirror the reference
+/// implementation's summation shapes, so they are already portable, and
+/// overriding them with a different order changed the reported terminal
+/// gradient norm of converged fits without changing the solution. It is
+/// zero-sized, so sharing one value across independent solves is free.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct PortableNumerics;
 
@@ -40,43 +46,6 @@ impl HostNumerics for PortableNumerics {
         cols: usize,
     ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), BackendError> {
         thin_svd(values, rows, cols).map_err(BackendError::Failed)
-    }
-
-    fn dot(&self, lhs: &[f64], rhs: &[f64]) -> Result<Option<f64>, BackendError> {
-        if lhs.len() != rhs.len() {
-            return Err(BackendError::Failed(format!(
-                "dot length mismatch: {} and {}",
-                lhs.len(),
-                rhs.len()
-            )));
-        }
-        let mut result = 0.0;
-        for index in 0..lhs.len() {
-            result += lhs[index] * rhs[index];
-        }
-        Ok(Some(result))
-    }
-
-    fn fortran_matvec(
-        &self,
-        matrix: &[f64],
-        rows: usize,
-        cols: usize,
-        vector: &[f64],
-        transpose: bool,
-    ) -> Result<Option<Vec<f64>>, BackendError> {
-        matvec(matrix, rows, cols, vector, transpose, true)
-    }
-
-    fn row_major_matvec(
-        &self,
-        matrix: &[f64],
-        rows: usize,
-        cols: usize,
-        vector: &[f64],
-        transpose: bool,
-    ) -> Result<Option<Vec<f64>>, BackendError> {
-        matvec(matrix, rows, cols, vector, transpose, false)
     }
 
     fn power(&self, values: &[f64], exponent: f64) -> Result<Option<Vec<f64>>, BackendError> {
@@ -101,50 +70,6 @@ impl HostNumerics for PortableNumerics {
         Ok(Some(libm::atan(value)))
     }
 }
-
-fn matvec(
-    matrix: &[f64],
-    rows: usize,
-    cols: usize,
-    vector: &[f64],
-    transpose: bool,
-    column_major: bool,
-) -> Result<Option<Vec<f64>>, BackendError> {
-    let (input_len, output_len) = if transpose {
-        (rows, cols)
-    } else {
-        (cols, rows)
-    };
-    if matrix.len() != rows.saturating_mul(cols) || vector.len() != input_len {
-        return Err(BackendError::Failed(format!(
-            "matvec dimensions {}x{} with vector length {}",
-            rows,
-            cols,
-            vector.len()
-        )));
-    }
-    let mut result = vec![0.0; output_len];
-    for (output, slot) in result.iter_mut().enumerate() {
-        let mut sum = 0.0;
-        for (input, value) in vector.iter().enumerate() {
-            let index = if column_major {
-                if transpose {
-                    output * rows + input
-                } else {
-                    input * rows + output
-                }
-            } else if transpose {
-                input * cols + output
-            } else {
-                output * cols + input
-            };
-            sum += matrix[index] * value;
-        }
-        *slot = sum;
-    }
-    Ok(Some(result))
-}
-
 /// Convert a row-major binary64 slice to a dynamic portable matrix.
 #[inline]
 pub fn matrix_from_row_slice(rows: usize, cols: usize, values: &[f64]) -> DMatrix<Portable> {
