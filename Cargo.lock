@@ -1682,11 +1682,10 @@ dependencies = [
 
 [[package]]
 name = "trust-region-least-squares"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "criterion",
  "libloading",
- "libm",
  "nalgebra",
  "rayon",
  "serde_json",

@@ -82,7 +82,7 @@ fn residual_values(matrix: &[f64], target: &[f64], x: &[f64]) -> Vec<f64> {
         }
         let a = x[i % n];
         let b = x[(i + 1) % n];
-        out.push((acc - target[i]) + libm::sin(0.25 * a) + 0.01 * b * b - 0.02 * a * b);
+        out.push((acc - target[i]) + (0.25 * a).sin() + 0.01 * b * b - 0.02 * a * b);
     }
     out
 }

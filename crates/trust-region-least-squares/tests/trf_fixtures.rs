@@ -47,9 +47,9 @@ fn residual_values(matrix: &[f64], target: &[f64], x: &[f64]) -> Vec<f64> {
         let row = i * 3;
         out.push(matrix[row] * x[0] + matrix[row + 1] * x[1] + matrix[row + 2] * x[2] - target_i);
     }
-    out[0] += libm::sin(0.25 * x[0]) + 0.01 * x[1] * x[1];
-    out[1] += libm::cos(0.20 * x[1]) - 0.02 * x[0] * x[2];
-    out[2] += libm::sin(0.15 * x[2]) + 0.03 * x[0];
+    out[0] += (0.25 * x[0]).sin() + 0.01 * x[1] * x[1];
+    out[1] += (0.20 * x[1]).cos() - 0.02 * x[0] * x[2];
+    out[2] += (0.15 * x[2]).sin() + 0.03 * x[0];
     out
 }
 

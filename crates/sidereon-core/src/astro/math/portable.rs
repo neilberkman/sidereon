@@ -92,6 +92,14 @@ impl HostNumerics for PortableNumerics {
     fn power_scalar(&self, base: f64, exponent: f64) -> Result<Option<f64>, BackendError> {
         Ok(Some(libm::pow(base, exponent)))
     }
+
+    fn log1p(&self, value: f64) -> Result<Option<f64>, BackendError> {
+        Ok(Some(libm::log1p(value)))
+    }
+
+    fn atan(&self, value: f64) -> Result<Option<f64>, BackendError> {
+        Ok(Some(libm::atan(value)))
+    }
 }
 
 fn matvec(
@@ -1151,6 +1159,34 @@ impl FromStr for Portable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct LossHookProbe {
+        log1p_inputs: RefCell<Vec<f64>>,
+        atan_inputs: RefCell<Vec<f64>>,
+    }
+
+    impl HostNumerics for LossHookProbe {
+        fn svd(
+            &self,
+            values: &[f64],
+            rows: usize,
+            cols: usize,
+        ) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), BackendError> {
+            PortableNumerics.svd(values, rows, cols)
+        }
+
+        fn log1p(&self, value: f64) -> Result<Option<f64>, BackendError> {
+            self.log1p_inputs.borrow_mut().push(value);
+            Ok(Some(17.0 + value))
+        }
+
+        fn atan(&self, value: f64) -> Result<Option<f64>, BackendError> {
+            self.atan_inputs.borrow_mut().push(value);
+            Ok(Some(23.0 + value))
+        }
+    }
 
     fn samples(count: usize) -> Vec<f64> {
         let mut state = 0x9e3779b97f4a7c15_u64;
@@ -1293,6 +1329,57 @@ mod tests {
             assert_eq!(
                 Portable(positive).log(Portable(positive + 0.5)).0.to_bits(),
                 (libm::log(positive) / libm::log(positive + 0.5)).to_bits()
+            );
+        }
+    }
+
+    #[test]
+    fn portable_loss_backend_hooks_are_consulted() {
+        use trust_region_least_squares::loss::{Loss, LossFunction};
+
+        let probe = LossHookProbe::default();
+        let cauchy = LossFunction::new(Loss::Cauchy, 1.0)
+            .evaluate_with(&[0.5], &probe)
+            .expect("Cauchy hook");
+        assert_eq!(probe.log1p_inputs.borrow().as_slice(), &[0.25]);
+        assert_eq!(cauchy.rho0, vec![17.25]);
+
+        let arctan = LossFunction::new(Loss::Arctan, 1.0)
+            .evaluate_with(&[0.5], &probe)
+            .expect("Arctan hook");
+        assert_eq!(probe.atan_inputs.borrow().as_slice(), &[0.25]);
+        assert_eq!(arctan.rho0, vec![23.25]);
+
+        assert_eq!(
+            PortableNumerics
+                .log1p(0.25)
+                .expect("portable log1p")
+                .expect("supplied log1p")
+                .to_bits(),
+            libm::log1p(0.25).to_bits()
+        );
+        assert_eq!(
+            PortableNumerics
+                .atan(0.25)
+                .expect("portable atan")
+                .expect("supplied atan")
+                .to_bits(),
+            libm::atan(0.25).to_bits()
+        );
+    }
+
+    #[test]
+    fn portable_fma_matches_libm() {
+        let values = samples(128);
+        for (index, &left) in values.iter().enumerate() {
+            let right = values[(index * 37) % values.len()];
+            let addend = values[(index * 71 + 11) % values.len()];
+            assert_eq!(
+                Portable(left)
+                    .mul_add(Portable(right), Portable(addend))
+                    .0
+                    .to_bits(),
+                libm::fma(left, right, addend).to_bits()
             );
         }
     }

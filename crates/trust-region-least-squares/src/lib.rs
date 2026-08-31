@@ -12,7 +12,8 @@
 //! of the scaled Jacobian, the small BLAS reductions around it, and the
 //! elementwise and scalar powers SciPy writes as `**` -- are *injected* through
 //! the [`trf::HostNumerics`] trait. This is the host-runtime numerics backend
-//! seam, spanning SVD, BLAS reductions, and power dispatch. Supplying an
+//! seam, spanning SVD, BLAS reductions, power dispatch, and robust-loss
+//! transcendental dispatch. Supplying an
 //! implementation backed by a pinned LAPACK/BLAS/NumPy runtime (see
 //! [`hostlapack`]) lets the solver reproduce that runtime's numerical trajectory
 //! exactly, which is what makes
@@ -31,8 +32,9 @@
 //!
 //! - [`trf`]: the dense unbounded trust-region-reflective iteration matching
 //!   `scipy.optimize._lsq.trf.trf_no_bounds`, with the injectable
-//!   [`trf::HostNumerics`] SVD/BLAS/power seam and the `loss`/`f_scale` robust
-//!   path. Ships the default in-crate [`trf::NalgebraThinSvd`] backend and the
+//!   [`trf::HostNumerics`] SVD/BLAS/power/loss-transcendental seam and the
+//!   `loss`/`f_scale` robust path. Ships the default in-crate
+//!   [`trf::NalgebraThinSvd`] backend and the
 //!   convenience
 //!   [`trf::trf_solve`] entry point so the solver runs out of the box.
 //! - [`model`]: the [`model::ResidualModel`] trait and
@@ -51,8 +53,8 @@
 //!   `IMPLEMENTED_LOSSES`) and `scale_for_robust_loss_function`, reproduced
 //!   bit-for-bit. The `_with` variants
 //!   ([`loss::LossFunction::evaluate_with`], [`loss::rho_for_loss_with`])
-//!   route the `z ** -0.5` / `z ** -1.5` derivative powers through the same
-//!   host-numerics seam.
+//!   route the `z ** -0.5` / `z ** -1.5` derivative powers and the Cauchy
+//!   `log1p` / Arctan `atan` operations through the same host-numerics seam.
 //! - [`numdiff`]: the dense two-point finite-difference Jacobian matching
 //!   SciPy's `_numdiff.approx_derivative(..., method="2-point")` path.
 //! - [`parity`]: hex-bit fixture helpers, feature-gated trace output, and

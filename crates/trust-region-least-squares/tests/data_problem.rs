@@ -41,10 +41,7 @@ fn polynomial_problem() -> BuiltinResidual {
 
 fn exponential_problem() -> BuiltinResidual {
     let t: Vec<f64> = (0..10).map(|i| 0.2 * i as f64).collect();
-    let y: Vec<f64> = t
-        .iter()
-        .map(|&ti| 2.0 * libm::exp(-0.5 * ti) + 0.3)
-        .collect();
+    let y: Vec<f64> = t.iter().map(|&ti| 2.0 * (-0.5 * ti).exp() + 0.3).collect();
     BuiltinResidual::Exponential { t, y }
 }
 
