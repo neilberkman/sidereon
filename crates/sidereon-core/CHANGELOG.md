@@ -4,7 +4,13 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
-### Proposed 1.4.0
+## [1.4.0] - 2026-08-31
+
+Results are bit-identical across x86_64 and arm64 targets. Relative to 1.3.3
+the frozen outputs of iterative fits move in their last bits, and SVD-derived
+covariance and geometry diagnostics now agree with the values 1.3.3 produced
+on x86_64/glibc; position and clock results of the bundled static and SPP
+fixtures are unchanged.
 
 ### Changed
 
@@ -19,6 +25,15 @@ All notable changes to `sidereon-core` are documented here.
   SVD, powers, dot products, and matrix-vector products; the general-purpose
   trust-region crate's default backend and published parity behavior are
   unchanged.
+- Robust-loss evaluation in core-driven trust-region solves (Cauchy, Arctan)
+  uses portable `log1p` and `atan` through the new defaulted hooks in
+  `trust-region-least-squares` 0.11.0.
+- Fused multiply-add in the SP3 interpolant, geoid, frame, and vector helpers
+  goes through `libm::fma` instead of the platform C library's `fma`; no
+  result changed on any tested platform, the dependency did.
+- A workspace lint (`clippy.toml` `disallowed-methods`) rejects any new
+  platform-libm transcendental or `mul_add` call, and a guard test keeps
+  production decompositions on the portable scalar.
 
 ## [1.3.3] - 2026-08-30
 
