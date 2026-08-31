@@ -840,8 +840,8 @@ fn solve_n3_parabola(dx: &[f64], slope: &[f64], _y: &[f64]) -> Vec<f64> {
 /// certified parity target's LAPACK is **Apple Accelerate** (macOS arm64; scipy
 /// 1.17.1, `detection method: extraframeworks`), whose `dgtsv` contracts each
 /// `acc - fact*x` update into a **fused multiply-add**. So every `y - a*x`
-/// elimination/back-substitution update here uses [`f64::mul_add`]
-/// (`(-a).mul_add(x, y)`), NOT a separate multiply then subtract - the
+/// elimination/back-substitution update here uses [`libm::fma`]
+/// (`libm::fma(-a, x, y)`), NOT a separate multiply then subtract - the
 /// per-function FMA-contraction discipline the parity contract requires.
 /// Verified 0-ULP against `scipy.linalg.lapack.dgtsv` on this target; on a
 /// non-FMA LAPACK build the last bits differ (the portable-mode reality, where
@@ -862,8 +862,8 @@ fn dgtsv(mut dl: Vec<f64>, mut d: Vec<f64>, mut du: Vec<f64>, mut b: Vec<f64>) -
         if d[i].abs() >= dl[i].abs() {
             // No pivot.
             let fact = dl[i] / d[i];
-            d[i + 1] = (-fact).mul_add(du[i], d[i + 1]);
-            b[i + 1] = (-fact).mul_add(b[i], b[i + 1]);
+            d[i + 1] = libm::fma(-fact, du[i], d[i + 1]);
+            b[i + 1] = libm::fma(-fact, b[i], b[i + 1]);
             dl[i] = 0.0;
         } else {
             // Pivot (swap rows i and i+1). Note `dl[i] = du[i+1]` happens
@@ -872,13 +872,13 @@ fn dgtsv(mut dl: Vec<f64>, mut d: Vec<f64>, mut du: Vec<f64>, mut b: Vec<f64>) -
             let fact = d[i] / dl[i];
             d[i] = dl[i];
             let temp = d[i + 1];
-            d[i + 1] = (-fact).mul_add(temp, du[i]);
+            d[i + 1] = libm::fma(-fact, temp, du[i]);
             dl[i] = du[i + 1];
             du[i + 1] = -fact * dl[i];
             du[i] = temp;
             let tb = b[i];
             b[i] = b[i + 1];
-            b[i + 1] = (-fact).mul_add(b[i + 1], tb);
+            b[i + 1] = libm::fma(-fact, b[i + 1], tb);
         }
     }
 
@@ -887,29 +887,29 @@ fn dgtsv(mut dl: Vec<f64>, mut d: Vec<f64>, mut du: Vec<f64>, mut b: Vec<f64>) -
         let i = n - 2;
         if d[i].abs() >= dl[i].abs() {
             let fact = dl[i] / d[i];
-            d[i + 1] = (-fact).mul_add(du[i], d[i + 1]);
-            b[i + 1] = (-fact).mul_add(b[i], b[i + 1]);
+            d[i + 1] = libm::fma(-fact, du[i], d[i + 1]);
+            b[i + 1] = libm::fma(-fact, b[i], b[i + 1]);
         } else {
             let fact = d[i] / dl[i];
             d[i] = dl[i];
             let temp = d[i + 1];
-            d[i + 1] = (-fact).mul_add(temp, du[i]);
+            d[i + 1] = libm::fma(-fact, temp, du[i]);
             du[i] = temp;
             let tb = b[i];
             b[i] = b[i + 1];
-            b[i + 1] = (-fact).mul_add(b[i + 1], tb);
+            b[i + 1] = libm::fma(-fact, b[i + 1], tb);
         }
     }
 
     // Back substitution (dgtsv), FMA-contracted as above.
     b[n - 1] /= d[n - 1];
     if n > 1 {
-        b[n - 2] = (-du[n - 2]).mul_add(b[n - 1], b[n - 2]) / d[n - 2];
+        b[n - 2] = libm::fma(-du[n - 2], b[n - 1], b[n - 2]) / d[n - 2];
     }
     for i in (0..n.saturating_sub(2)).rev() {
         // (b[i] - du[i]*b[i+1] - dl[i]*b[i+2]) / d[i], each subtraction fused.
-        let t = (-du[i]).mul_add(b[i + 1], b[i]);
-        b[i] = (-dl[i]).mul_add(b[i + 2], t) / d[i];
+        let t = libm::fma(-du[i], b[i + 1], b[i]);
+        b[i] = libm::fma(-dl[i], b[i + 2], t) / d[i];
     }
 
     b
@@ -919,7 +919,7 @@ fn dgtsv(mut dl: Vec<f64>, mut d: Vec<f64>, mut du: Vec<f64>, mut b: Vec<f64>) -
 /// the n==3 not-a-knot parabola case. As with [`dgtsv`], the certified parity
 /// target is Apple Accelerate, whose `dgesv` contracts the `acc - factor*x`
 /// elimination and substitution updates into fused multiply-adds; this routine
-/// uses [`f64::mul_add`] to match it bit-for-bit.
+/// uses [`libm::fma`] to match it bit-for-bit.
 #[allow(clippy::needless_range_loop)]
 fn gesv3(a: &mut [[f64; 3]; 3], b: &mut [f64; 3]) {
     let mut perm = [0usize, 1, 2];
@@ -944,7 +944,7 @@ fn gesv3(a: &mut [[f64; 3]; 3], b: &mut [f64; 3]) {
             let factor = a[r][k] / a[k][k];
             a[r][k] = factor;
             for c in (k + 1)..3 {
-                a[r][c] = (-factor).mul_add(a[k][c], a[r][c]);
+                a[r][c] = libm::fma(-factor, a[k][c], a[r][c]);
             }
         }
     }
@@ -955,7 +955,7 @@ fn gesv3(a: &mut [[f64; 3]; 3], b: &mut [f64; 3]) {
     for r in 0..3 {
         let mut s = pb[r];
         for c in 0..r {
-            s = (-a[r][c]).mul_add(yv[c], s);
+            s = libm::fma(-a[r][c], yv[c], s);
         }
         yv[r] = s;
     }
@@ -963,7 +963,7 @@ fn gesv3(a: &mut [[f64; 3]; 3], b: &mut [f64; 3]) {
     for r in (0..3).rev() {
         let mut s = yv[r];
         for c in (r + 1)..3 {
-            s = (-a[r][c]).mul_add(b[c], s);
+            s = libm::fma(-a[r][c], b[c], s);
         }
         b[r] = s / a[r][r];
     }

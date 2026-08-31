@@ -71,7 +71,7 @@ pub fn dot3_z_yx_ref(a: &[f64; 3], b: &[f64; 3]) -> f64 {
 
 #[inline]
 pub fn dot3_fused_z_yx_ref(a: &[f64; 3], b: &[f64; 3]) -> f64 {
-    a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
+    libm::fma(a[2], b[2], libm::fma(a[1], b[1], a[0] * b[0]))
 }
 
 #[inline]
@@ -152,8 +152,7 @@ mod tests {
         );
         assert_eq!(
             dot3_fused_z_yx_ref(&a, &b).to_bits(),
-            a[2].mul_add(b[2], a[1].mul_add(b[1], a[0] * b[0]))
-                .to_bits()
+            libm::fma(a[2], b[2], libm::fma(a[1], b[1], a[0] * b[0])).to_bits()
         );
     }
 
