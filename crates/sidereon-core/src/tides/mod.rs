@@ -61,47 +61,85 @@ use crate::frame::{geodetic_to_itrf, ItrfPositionM, Wgs84Geodetic};
 use crate::validate::{self, FieldError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Validation categories carried by [`TideError::InvalidInput`].
+///
+/// The categories are converted from shared field and time-scale validation
+/// errors before they are exposed by the tide APIs.
 pub enum TideInputErrorKind {
+    /// A required input was not supplied.
     Missing,
+    /// An input value or component was not finite.
     NonFinite,
+    /// A value required to be positive was zero or negative.
     NotPositive,
+    /// A value failed a negative-value check.
     Negative,
+    /// A finite input was outside its permitted domain.
     OutOfRange,
+    /// Text could not be parsed as a floating-point value.
     FloatParse,
+    /// Text could not be parsed as an integer value.
     IntParse,
+    /// A calendar date failed civil-date validation.
     InvalidCivilDate,
+    /// A clock value failed civil-time validation.
     InvalidCivilTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Failure details produced while parsing a BLQ station block.
+///
+/// Numeric rows and constituent headers use these variants to retain the
+/// offending count, token, station, or constituent label.
 pub enum BlqParseErrorKind {
+    /// The input contained no non-whitespace content.
     Empty,
+    /// A numeric coefficient row appeared before a station identifier.
     MissingStation,
+    /// A station ended before its six coefficient rows were complete.
     MissingCoefficientRows {
+        /// Trimmed station identifier for the incomplete block.
         station: String,
+        /// Required number of coefficient rows, which is six.
         expected: usize,
+        /// Number of coefficient rows collected before end of input.
         found: usize,
     },
+    /// The active station accumulated more than six coefficient rows.
     TooManyCoefficientRows {
+        /// Active station identifier when the extra row was read.
         station: String,
     },
+    /// A numeric row or recognized header did not contain eleven columns.
     WrongColumnCount {
+        /// Required ARG2 column count, equal to `NUM_OCEAN_CONSTITUENTS`.
         expected: usize,
+        /// Number of tokens or constituent labels found on the line.
         found: usize,
     },
+    /// A coefficient token could not be parsed as an `f64`.
     InvalidNumber {
+        /// Original token, or the trimmed line reported as a numeric candidate.
         token: String,
     },
+    /// A token parsed as an `f64` but produced a non-finite value.
     NonFiniteNumber {
+        /// Original token that produced the non-finite value.
         token: String,
     },
+    /// A constituent-like header label is absent from the supported table.
     UnsupportedConstituent {
+        /// Normalized uppercase label rejected by the constituent lookup.
         constituent: String,
     },
+    /// A supported constituent occurred more than once in a header.
     DuplicateConstituent {
+        /// Canonical label of the repeated constituent.
         constituent: String,
     },
+    /// The single-block parser found more than one complete station block.
     MultipleBlocks {
+        /// Number of complete station blocks found.
         found: usize,
     },
 }
@@ -176,23 +214,40 @@ impl From<&FieldError> for TideInputErrorKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// Errors returned by station displacement evaluators and BLQ parsers.
+///
+/// Validation failures carry normalized field and reason data; other variants
+/// preserve the underlying time-scale, frame, ephemeris, or parser failure.
 pub enum TideError {
+    /// A tide input failed validation.
     #[error("invalid solid-earth tide input {field}: {kind}")]
     InvalidInput {
+        /// Field label supplied by the originating validator or constructor.
         field: &'static str,
+        /// Normalized validation category for the field.
         kind: TideInputErrorKind,
     },
+    /// Time-scale conversion failed for a non-input coverage or conversion reason.
     #[error("station displacement time-scale conversion failed: {0}")]
     TimeScale(#[from] CoverageError),
+    /// Geodetic, ECEF, or polar-motion frame conversion failed.
     #[error("station displacement frame transform failed: {0}")]
     FrameTransform(#[from] FrameTransformError),
+    /// Polar-motion-aware Sun/Moon evaluation failed.
     #[error("station displacement Sun/Moon evaluation failed: {0}")]
     SunMoon(#[from] SunMoonError),
+    /// A required high-level station-displacement input was not supplied.
     #[error("missing station displacement input {field}")]
-    MissingInput { field: &'static str },
+    MissingInput {
+        /// Missing-input label; the dispatcher uses `"polar motion"` here.
+        field: &'static str,
+    },
+    /// A BLQ parser rejected an input line or whole-input condition.
     #[error("invalid BLQ block at line {line}: {kind}")]
     BlqParse {
+        /// One-based offending line number, or zero for whole-input failures.
         line: usize,
+        /// Detailed BLQ parsing failure and its source payload.
         kind: BlqParseErrorKind,
     },
 }
@@ -278,11 +333,17 @@ impl StationDisplacementPosition {
 /// IERS polar-motion coordinates of the epoch, in arcseconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StationPolarMotion {
+    /// IERS x-pole coordinate supplied in arcseconds.
     pub xp_arcsec: f64,
+    /// IERS y-pole coordinate supplied in arcseconds.
     pub yp_arcsec: f64,
 }
 
 impl StationPolarMotion {
+    /// Construct from the IERS x- and y-pole coordinates in arcseconds.
+    ///
+    /// The coordinates are stored as supplied; tide evaluation performs the
+    /// conversion and validation required by its downstream model.
     pub const fn from_arcseconds(xp_arcsec: f64, yp_arcsec: f64) -> Self {
         Self {
             xp_arcsec,
@@ -301,11 +362,17 @@ impl StationPolarMotion {
 /// UTC epoch for station displacement evaluation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StationDisplacementEpoch {
+    /// UTC calendar year passed to validation and tide models.
     pub year: i32,
+    /// UTC calendar month passed to validation and tide models.
     pub month: u8,
+    /// UTC calendar day passed to validation and tide models.
     pub day: u8,
+    /// UTC hour used by the `fractional_hour` calculation.
     pub hour: u8,
+    /// UTC minute used by the `fractional_hour` calculation.
     pub minute: u8,
+    /// UTC seconds, including a fractional part, used in time conversion and fractional-hour calculation.
     pub second: f64,
     /// Optional IERS polar motion for pole tide and polar-motion-aware Sun/Moon
     /// rotation.
@@ -313,6 +380,10 @@ pub struct StationDisplacementEpoch {
 }
 
 impl StationDisplacementEpoch {
+    /// Construct an epoch from UTC calendar and clock components.
+    ///
+    /// The returned epoch has no polar motion until a caller adds it with
+    /// [`StationDisplacementEpoch::with_polar_motion_arcsec`].
     pub const fn from_utc(
         year: i32,
         month: u8,
@@ -332,6 +403,7 @@ impl StationDisplacementEpoch {
         }
     }
 
+    /// Return this epoch with the supplied IERS polar motion in arcseconds.
     pub const fn with_polar_motion_arcsec(mut self, xp_arcsec: f64, yp_arcsec: f64) -> Self {
         self.polar_motion = Some(StationPolarMotion::from_arcseconds(xp_arcsec, yp_arcsec));
         self
@@ -395,8 +467,11 @@ impl Default for StationDisplacementOptions<'_> {
 pub struct StationDisplacement {
     /// Sum of all enabled component displacements, in ITRF/ECEF metres.
     pub ecef_m: [f64; 3],
+    /// Solid-Earth tide component, or `None` when that correction is disabled.
     pub solid_earth_tide_ecef_m: Option<[f64; 3]>,
+    /// Pole-tide component, or `None` when that correction is disabled.
     pub pole_tide_ecef_m: Option<[f64; 3]>,
+    /// Ocean-loading component, or `None` when no BLQ coefficients are supplied.
     pub ocean_loading_ecef_m: Option<[f64; 3]>,
 }
 
