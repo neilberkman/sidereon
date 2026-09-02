@@ -19,7 +19,11 @@ pub enum PrecessionError {
     /// A precession input was non-finite or otherwise invalid.
     #[error("invalid precession {field}: {reason}")]
     InvalidInput {
+        /// Static label identifying the failed validation target: `jd_tdb` for a non-finite
+        /// input or `precession_matrix` for a non-finite computed component.
         field: &'static str,
+        /// Static validation detail: `must be finite` for a non-finite TDB Julian date or
+        /// `components must be finite` for a non-finite matrix component.
         reason: &'static str,
     },
 }
