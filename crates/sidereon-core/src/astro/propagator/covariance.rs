@@ -24,7 +24,14 @@ pub enum CovarianceFrame {
 /// A covariance plus the frame label it is expressed in.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LabeledCovariance6 {
+    /// Initial 6x6 state covariance passed to
+    /// [`StatePropagator::propagate_covariance`]. If `frame` is
+    /// [`CovarianceFrame::Rtn`], the propagator rotates it to inertial axes at
+    /// the initial state before transport.
     pub covariance: Covariance6,
+    /// Frame in which `covariance` is supplied. [`CovarianceFrame::Inertial`]
+    /// selects direct transport, while [`CovarianceFrame::Rtn`] selects the
+    /// initial RTN-to-ECI covariance transform.
     pub frame: CovarianceFrame,
 }
 
@@ -36,8 +43,20 @@ pub enum ProcessNoise {
     None,
     /// Per-axis white acceleration PSD in RTN, km^2/s^3.
     RtnAccelerationPsd {
+        /// Radial component of the RTN white-acceleration PSD, in km^2/s^3.
+        /// Validation rejects non-finite or negative values; transport uses
+        /// this component in the radial position/velocity covariance terms
+        /// with `|dt|^3 / 3`, `|dt|^2 / 2`, and `|dt|` factors.
         q_radial_km2_s3: f64,
+        /// Transverse component of the RTN white-acceleration PSD, in
+        /// km^2/s^3. Validation rejects non-finite or negative values;
+        /// transport uses this component in the transverse position/velocity
+        /// covariance terms with `|dt|^3 / 3`, `|dt|^2 / 2`, and `|dt|` factors.
         q_transverse_km2_s3: f64,
+        /// Normal component of the RTN white-acceleration PSD, in km^2/s^3.
+        /// Validation rejects non-finite or negative values; transport uses
+        /// this component in the normal position/velocity covariance terms
+        /// with `|dt|^3 / 3`, `|dt|^2 / 2`, and `|dt|` factors.
         q_normal_km2_s3: f64,
     },
 }
@@ -45,7 +64,16 @@ pub enum ProcessNoise {
 /// Options for a covariance propagation run.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CovariancePropagationOptions {
+    /// Process-noise model validated and applied by
+    /// [`StatePropagator::propagate_covariance`] and
+    /// [`transport_covariance`]. The default is [`ProcessNoise::None`]; RTN
+    /// PSD noise is evaluated using each segment's midpoint state, rotated
+    /// into inertial axes, and added after `Phi * P * Phi^T` transport.
     pub process_noise: ProcessNoise,
+    /// Frame used for each returned [`CovarianceNode`] covariance. The default
+    /// is [`CovarianceFrame::Inertial`]; [`CovarianceFrame::Rtn`] applies the
+    /// ECI-to-RTN transform at each node, so
+    /// [`CovarianceEphemeris::covariance_at`] rejects that ephemeris.
     pub output_frame: CovarianceFrame,
 }
 
