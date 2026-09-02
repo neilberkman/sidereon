@@ -1,7 +1,40 @@
+/// Coefficients for the Dormand-Prince embedded fifth- and fourth-order step
+/// used by [`DP54`](crate::astro::integrators::DP54).
+///
+/// [`Default::default`] fills the seven stage-time fractions, lower-triangular
+/// stage coefficients, and paired solution weights used by the adaptive step
+/// calculation.
 pub struct DP54Tableau {
+    /// Dimensionless fractions of the signed step duration used for
+    /// intermediate stage epochs by [`DP54`](crate::astro::integrators::DP54).
+    ///
+    /// [`Default::default`] sets the seven values to
+    /// `[0, 1/5, 3/10, 4/5, 8/9, 1, 1]`; the step calculation multiplies an
+    /// entry by `h` and adds it to the current epoch.
     pub c: [f64; 7],
+    /// Lower-triangular stage-coupling coefficients used by
+    /// [`DP54`](crate::astro::integrators::DP54).
+    ///
+    /// For stage `i` from 1 through 5, the step calculation uses the first `i`
+    /// values of row `i` to combine previously computed position and velocity
+    /// derivatives before multiplying by `h`. [`Default::default`] supplies
+    /// rows of lengths 1 through 6 after the empty first row.
     pub a: Vec<Vec<f64>>,
+    /// Weights for the fifth-order position and velocity increments computed
+    /// by [`DP54`](crate::astro::integrators::DP54).
+    ///
+    /// The step calculation applies the first six values to the stage
+    /// derivatives, multiplies the sums by `h`, and adds them to the input
+    /// state. The default seventh value is zero because the FSAL derivative is
+    /// reserved for the embedded error calculation.
     pub b5: [f64; 7],
+    /// Weights for the embedded fourth-order position and velocity increments
+    /// used by [`DP54`](crate::astro::integrators::DP54).
+    ///
+    /// The step calculation applies all seven values, including the derivative
+    /// evaluated at the proposed endpoint, and subtracts the resulting
+    /// increments from the fifth-order increments to form adaptive error
+    /// estimates. [`Default::default`] sets the seventh value to `1/40`.
     pub b4: [f64; 7],
 }
 
