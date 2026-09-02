@@ -45,64 +45,116 @@ use crate::{GnssSatelliteId, GnssSystem};
 /// Civil date/time fields used by PPP correction tables.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CivilDateTime {
+    /// Gregorian calendar year passed to civil-time validation, tide evaluation,
+    /// and Julian-date conversion.
     pub year: i32,
+    /// One-based Gregorian calendar month passed to civil-time validation, tide
+    /// evaluation, and Julian-date conversion.
     pub month: u8,
+    /// Gregorian calendar day passed to civil-time validation, tide evaluation,
+    /// and Julian-date conversion.
     pub day: u8,
+    /// Civil-time hour used directly and in the fractional hour sent to tide
+    /// routines.
     pub hour: u8,
+    /// Civil-time minute used directly and in the fractional hour sent to tide
+    /// routines.
     pub minute: u8,
+    /// Fractional civil seconds validated with the selected time-scale policy,
+    /// converted to Julian-date time, and included in the tide fractional hour.
     pub second: f64,
 }
 
 /// One satellite observation row needed by the static correction precompute.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PppCorrectionObservation {
+    /// Physical satellite used for orbit prediction and per-satellite correction
+    /// lookup.
     pub sat: GnssSatelliteId,
+    /// First carrier frequency in hertz, used for wind-up and code-bias
+    /// ionosphere-free calculations.
     pub freq1_hz: f64,
+    /// Second carrier frequency in hertz, used for wind-up and code-bias
+    /// ionosphere-free calculations.
     pub freq2_hz: f64,
+    /// Optional GLONASS FDMA channel passed to RINEX-frequency lookup; when it is
+    /// absent, the channel is inferred from the two carrier frequencies when possible.
     pub glonass_channel: Option<i8>,
 }
 
 /// One receiver epoch and its visible satellite rows.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PppCorrectionEpoch {
+    /// Civil epoch used for Sun/Moon, station-displacement, and antenna-validity
+    /// evaluation.
     pub epoch: CivilDateTime,
+    /// Receiver time in seconds from J2000, used for precise-orbit prediction and
+    /// converted with the bias set's time scale for code-bias evaluation.
     pub t_rx_j2000_s: f64,
+    /// Visible observations traversed in input order for per-satellite correction
+    /// generation.
     pub observations: Vec<PppCorrectionObservation>,
 }
 
 /// Frequency-dependent satellite antenna calibration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SatelliteAntennaFrequency {
+    /// Frequency label used to select this record from a satellite antenna block.
     pub label: String,
+    /// Satellite body-frame phase-center offset in meters, projected to ECEF
+    /// before the ionosphere-free combination.
     pub pco_m: [f64; 3],
+    /// No-azimuth PCV samples as `(nadir angle in degrees, correction in meters)`;
+    /// samples are sorted before interpolation and non-finite values are rejected.
     pub noazi_pcv_m: Vec<(f64, f64)>,
 }
 
 /// Satellite antenna block selected by PRN and validity window.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SatelliteAntenna {
+    /// Satellite identifier used to select this antenna block.
     pub sat: GnssSatelliteId,
+    /// Inclusive lower civil-epoch bound for this block; `None` leaves it open.
     pub valid_from: Option<CivilDateTime>,
+    /// Inclusive upper civil-epoch bound for this block; `None` leaves it open.
     pub valid_until: Option<CivilDateTime>,
+    /// Frequency-specific PCO and no-azimuth PCV records searched by trimmed
+    /// frequency label.
     pub frequencies: Vec<SatelliteAntennaFrequency>,
 }
 
 /// Satellite antenna correction options.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SatelliteAntennaOptions {
+    /// Trimmed label selecting the first signal's PCO and PCV records.
     pub freq1_label: String,
+    /// First configured carrier frequency in hertz; it must be finite, positive,
+    /// and distinct from [`Self::freq2_hz`]. When phase wind-up is enabled, this
+    /// value overrides the observation's first frequency.
     pub freq1_hz: f64,
+    /// Trimmed label selecting the second signal's PCO and PCV records.
     pub freq2_label: String,
+    /// Second configured carrier frequency in hertz; it must be finite, positive,
+    /// and distinct from [`Self::freq1_hz`]. When phase wind-up is enabled, this
+    /// value overrides the observation's second frequency.
     pub freq2_hz: f64,
+    /// Antenna blocks searched in vector order by satellite and civil validity.
     pub antennas: Vec<SatelliteAntenna>,
 }
 
 /// Offline code-bias correction options.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodeBiasOptions {
+    /// Bias-SINEX or DCB model queried for the selected satellite and epoch.
     pub bias_set: BiasSet,
+    /// Per-satellite used code-observable pairs, taking precedence over system
+    /// defaults.
     pub used_observables_per_sat: BTreeMap<GnssSatelliteId, (String, String)>,
+    /// Per-system used code-observable pairs used when no satellite-specific pair
+    /// is present.
     pub used_observables_default: BTreeMap<GnssSystem, (String, String)>,
+    /// Optional per-system clock-reference pairs overriding the pairs in
+    /// [`BiasSet::clock_reference`].
     pub clock_reference: Option<ClockReferenceObservables>,
 }
 
@@ -124,109 +176,181 @@ pub struct PoleTideOptions {
 /// PPP correction precompute switches.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PppCorrectionsOptions {
+    /// Enables one Sun/Moon-driven solid-earth displacement per input epoch.
     pub solid_earth_tide: bool,
+    /// Enables one polar-motion-driven displacement per input epoch when present.
     pub pole_tide: Option<PoleTideOptions>,
     /// Ocean tide loading: the station's BLQ coefficients. The engine does not
     /// embed ocean-loading models, so the caller supplies the per-station BLQ
     /// block (Bos-Scherneck / OSO Chalmers or equivalent), exactly like the
     /// polar-motion data dependency of the pole tide.
     pub ocean_loading: Option<OceanLoadingBlq>,
+    /// Enables continuous per-satellite ionosphere-free phase wind-up corrections
+    /// in meters.
     pub phase_windup: bool,
+    /// Enables satellite PCO/PCV corrections after validating the configured
+    /// carrier pair and PCV samples.
     pub satellite_antenna: Option<SatelliteAntennaOptions>,
+    /// Enables clock-datum code-bias corrections for observations with a used
+    /// observable mapping.
     pub code_bias: Option<CodeBiasOptions>,
 }
 
 /// Indexed vector result. The epoch index refers to the input epoch slice.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EpochVectorCorrection {
+    /// Zero-based index written while `build` enumerates the input epochs and used
+    /// as the station-correction lookup key.
     pub epoch_index: usize,
+    /// ECEF station-displacement vector in meters, later projected against the
+    /// predicted line of sight.
     pub vector_m: [f64; 3],
 }
 
 /// Indexed satellite scalar result. The epoch index refers to the input epoch slice.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SatScalarCorrection {
+    /// Satellite copied from the observation and combined with [`Self::epoch_index`]
+    /// into the precise-positioning lookup key.
     pub sat: GnssSatelliteId,
+    /// Zero-based source-epoch index combined with [`Self::sat`] into the precise-
+    /// positioning lookup key.
     pub epoch_index: usize,
+    /// Ionosphere-free correction in meters: phase wind-up, satellite PCV, or
+    /// clock-datum code bias according to its containing table.
     pub value_m: f64,
 }
 
 /// Indexed satellite vector result. The epoch index refers to the input epoch slice.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SatVectorCorrection {
+    /// Satellite copied from the observation and combined with [`Self::epoch_index`]
+    /// into the satellite PCO lookup key.
     pub sat: GnssSatelliteId,
+    /// Zero-based source-epoch index combined with [`Self::sat`] into the satellite
+    /// PCO lookup key.
     pub epoch_index: usize,
+    /// Ionosphere-free satellite PCO vector in ECEF meters, projected onto the
+    /// predicted line of sight by the PPP measurement model.
     pub vector_m: [f64; 3],
 }
 
 /// Precomputed PPP correction tables.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PppCorrections {
+    /// Solid-earth tide displacements indexed by input epoch.
     pub tide: Vec<EpochVectorCorrection>,
+    /// Solid-earth pole-tide displacements indexed by input epoch.
     pub pole_tide: Vec<EpochVectorCorrection>,
+    /// Ocean-loading displacements indexed by input epoch.
     pub ocean_loading: Vec<EpochVectorCorrection>,
+    /// Continuous ionosphere-free phase wind-up corrections indexed by satellite
+    /// and input epoch.
     pub windup_m: Vec<SatScalarCorrection>,
+    /// Ionosphere-free satellite PCO vectors in ECEF meters indexed by satellite
+    /// and input epoch.
     pub sat_pco_ecef: Vec<SatVectorCorrection>,
+    /// Ionosphere-free no-azimuth satellite PCV values in meters indexed by
+    /// satellite and input epoch.
     pub sat_pcv_m: Vec<SatScalarCorrection>,
+    /// Clock-datum code-bias corrections in meters indexed by satellite and input
+    /// epoch.
     pub code_bias_m: Vec<SatScalarCorrection>,
+    /// Diagnostics containing missing-metadata warnings for observations without a
+    /// code-bias used-observable mapping.
     pub diagnostics: crate::format::Diagnostics,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
+/// Errors encountered while constructing static PPP correction tables.
 pub enum PppCorrectionsError {
     #[error("invalid PPP correction input {field}: {reason}")]
+    /// A receiver, antenna, prediction, or media input failed validation.
     InvalidInput {
+        /// Static label identifying the input that failed validation.
         field: &'static str,
+        /// Validator or prediction reason, such as `not finite` or `out of range`.
         reason: &'static str,
     },
     #[error("invalid PPP correction epoch at epoch {epoch_index}: {source}")]
+    /// Sun/Moon time-scale construction failed for an input epoch.
     Epoch {
+        /// Zero-based index of the invalid or out-of-coverage input epoch.
         epoch_index: usize,
         #[source]
+        /// Civil-time validation or embedded time-model coverage failure.
         source: CoverageError,
     },
     #[error("solid Earth tide correction failed at epoch {epoch_index}: {source}")]
+    /// Solid-earth tide evaluation failed after Sun/Moon data were obtained.
     Tide {
+        /// Zero-based index of the input epoch where evaluation failed.
         epoch_index: usize,
         #[source]
+        /// Underlying solid-earth tide failure.
         source: TideError,
     },
     #[error("solid Earth pole tide correction failed at epoch {epoch_index}: {source}")]
+    /// Solid-earth pole-tide evaluation failed.
     PoleTide {
+        /// Zero-based index of the input epoch where evaluation failed.
         epoch_index: usize,
         #[source]
+        /// Underlying polar-motion tide failure.
         source: TideError,
     },
     #[error("ocean tide loading correction failed at epoch {epoch_index}: {source}")]
+    /// BLQ ocean-loading evaluation failed.
     OceanLoading {
+        /// Zero-based index of the input epoch where evaluation failed.
         epoch_index: usize,
         #[source]
+        /// Underlying ocean-loading failure.
         source: TideError,
     },
     #[error(
         "invalid phase wind-up carrier frequencies at epoch {epoch_index} for {sat}: {field} {reason}"
     )]
+    /// A carrier pair selected for phase wind-up failed finite, positivity, or
+    /// separation validation.
     WindupFrequency {
+        /// Zero-based index of the observation epoch where validation failed.
         epoch_index: usize,
+        /// Satellite whose selected carrier pair failed validation.
         sat: GnssSatelliteId,
+        /// Static label identifying the failing frequency or frequency pair.
         field: &'static str,
+        /// Validation reason, such as `not finite`, `not positive`, or `must differ`.
         reason: &'static str,
     },
     #[error("invalid satellite antenna carrier frequencies: {field} {reason}")]
+    /// The configured satellite-antenna carrier pair failed validation before
+    /// per-observation processing.
     SatelliteAntennaFrequency {
+        /// Static label identifying the failing configured frequency or pair.
         field: &'static str,
+        /// Validation reason, such as `not finite`, `not positive`, or `must differ`.
         reason: &'static str,
     },
     #[error("code-bias correction failed: {source}")]
+    /// Code-bias setup failed because the required clock reference or bias epoch
+    /// conversion was unavailable.
     Bias {
         #[source]
+        /// Underlying bias-model failure, such as a missing clock reference.
         source: BiasError,
     },
     #[error("invalid code-bias observable at epoch {epoch_index} for {sat}: {field} {reason}")]
+    /// A code-bias used observable has an invalid or mismatched carrier frequency.
     CodeBiasObservable {
+        /// Zero-based index of the input epoch containing the invalid observation.
         epoch_index: usize,
+        /// Satellite containing the invalid or mismatched observation frequency.
         sat: GnssSatelliteId,
+        /// Static label identifying the used observable frequency field.
         field: &'static str,
+        /// Validation reason, including `not finite`, `not positive`, or
+        /// `frequency mismatch`.
         reason: &'static str,
     },
 }
