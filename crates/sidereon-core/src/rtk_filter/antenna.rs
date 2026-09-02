@@ -15,15 +15,37 @@ use crate::antenna::{
 /// `(azimuth_deg, zenith_deg, value_m)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReceiverAntennaCalibration {
+    /// Local north/east/up phase-center offset, in meters. When mapped from
+    /// ANTEX, this is copied from [`crate::antex::Frequency::pco_m`], whose
+    /// parser converts the `NORTH / EAST / UP` millimeter record to meters;
+    /// RTK projects the components onto the local NEU basis and line of sight.
+    /// The row boundary rejects non-finite components before projection.
     pub pco_neu_m: [f64; 3],
+    /// Phase-center variation samples for a grid without azimuth dependence,
+    /// stored as `(zenith_deg, value_m)` pairs. RTK sorts this grid by zenith
+    /// and uses clamped linear interpolation when [`Self::azi_pcv_m`] is empty;
+    /// an empty grid returns [`ReceiverAntennaError::MissingPcv`].
     pub noazi_pcv_m: Vec<(f64, f64)>,
+    /// Azimuth-dependent phase-center variation samples, stored as
+    /// `(azimuth_deg, zenith_deg, value_m)` triples. A nonempty grid takes
+    /// precedence over [`Self::noazi_pcv_m`]; RTK interpolates each azimuth
+    /// node in zenith and blends the bracketing nodes, returning
+    /// [`ReceiverAntennaError::MissingPcv`] when the grid cannot supply them.
     pub azi_pcv_m: Vec<(f64, f64, f64)>,
 }
 
 /// Base and rover receiver-antenna calibrations used by the DD row builder.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReceiverAntennaCorrections {
+    /// Calibration applied to the base-station line of sight. The
+    /// double-difference correction evaluates it for both target and reference
+    /// satellites, and row validation labels its PCO components
+    /// `rtk.receiver_antenna.base.pco_neu_m`.
     pub base: ReceiverAntennaCalibration,
+    /// Calibration applied to the rover-station line of sight. The
+    /// double-difference correction evaluates it for both target and reference
+    /// satellites, and row validation labels its PCO components
+    /// `rtk.receiver_antenna.rover.pco_neu_m`.
     pub rover: ReceiverAntennaCalibration,
 }
 
