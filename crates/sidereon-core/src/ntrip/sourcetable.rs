@@ -1,13 +1,19 @@
 use crate::{Error, Result};
 
 #[derive(Clone, Debug, PartialEq)]
+/// A sourcetable token that may be typed, blank, or preserved as source text.
+/// The parsers use [`Parsed`](Field::Parsed) for accepted values, [`Empty`](Field::Empty) for blank tokens, and [`Raw`](Field::Raw) when conversion fails; retaining `Raw` lets the serializer reproduce an otherwise unknown token.
 pub enum Field<T> {
+    /// A source token converted by the parser into `T`.
     Parsed(T),
+    /// A source token that was empty.
     Empty,
+    /// A non-empty source token that the parser could not convert into `T`.
     Raw(String),
 }
 
 impl<T> Field<T> {
+    /// Returns the parsed value, or `None` for [`Empty`](Field::Empty) and [`Raw`](Field::Raw).
     pub fn value(&self) -> Option<&T> {
         match self {
             Field::Parsed(value) => Some(value),
@@ -17,81 +23,144 @@ impl<T> Field<T> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Authentication markers used by [`StrRecord`] and [`NetRecord`] records.
+/// Parsing recognizes only the exact one-letter tokens `N`, `B`, and `D`; other tokens are retained in [`Other`](StrAuth::Other).
 pub enum StrAuth {
+    /// No authentication, serialized as `N`.
     None,
+    /// Basic authentication, serialized as `B`.
     Basic,
+    /// Digest authentication, serialized as `D`.
     Digest,
+    /// An authentication token other than `N`, `B`, or `D`.
     Other(String),
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// A parsed NTRIP sourcetable, retaining records in their input order.
+/// [`Sourcetable::to_text`] writes those records in the same order and appends the protocol terminator.
 pub struct Sourcetable {
+    /// Records encountered before the sourcetable terminator, in input order.
     pub records: Vec<SourcetableRecord>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// One typed or unrecognized record from a sourcetable.
 pub enum SourcetableRecord {
+    /// A stream record with the STR field layout.
     Str(StrRecord),
+    /// A caster record with the CAS field layout.
     Cas(CasRecord),
+    /// A network record with the NET field layout.
     Net(NetRecord),
+    /// An unrecognized record retained without typed-field conversion.
     Other(OtherRecord),
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// An NTRIP STR stream record.
+/// `parse_sourcetable` maps the 18 semicolon-delimited fields after `STR` to these members, and serialization emits them in that same order.
 pub struct StrRecord {
+    /// The stream mountpoint from STR position 1; semicolons and line breaks are rejected when the record is serialized.
     pub mountpoint: String,
+    /// The stream identifier from STR position 2; semicolons and line breaks are rejected when the record is serialized.
     pub identifier: String,
+    /// The advertised data-format label from STR position 3; semicolons and line breaks are rejected when serialized.
     pub format: String,
+    /// Format-specific details from STR position 4; semicolons and line breaks are rejected when serialized.
     pub format_details: String,
+    /// The carrier indicator from STR position 5, parsed as `u8` when possible and otherwise retained as a [`Field`] variant.
     pub carrier: Field<u8>,
+    /// The supported navigation-system token from STR position 6; semicolons and line breaks are rejected when serialized.
     pub nav_system: String,
+    /// The network name from STR position 7; semicolons and line breaks are rejected when serialized.
     pub network: String,
+    /// The country token from STR position 8; semicolons and line breaks are rejected when serialized.
     pub country: String,
+    /// The latitude in decimal degrees from STR position 9; blank, invalid, and non-finite tokens remain [`Field::Raw`].
     pub lat_deg: Field<f64>,
+    /// The longitude in decimal degrees from STR position 10; blank, invalid, and non-finite tokens remain [`Field::Raw`].
     pub lon_deg: Field<f64>,
+    /// Whether NMEA is required, parsed from exact `0`/`1` tokens in STR position 11 and serialized with the same codes.
     pub nmea_required: Field<bool>,
+    /// Whether a network solution is available, parsed from exact `0`/`1` tokens in STR position 12 and serialized with the same codes.
     pub network_solution: Field<bool>,
+    /// The generator name from STR position 13; semicolons and line breaks are rejected when serialized.
     pub generator: String,
+    /// The compression description from STR position 14; semicolons and line breaks are rejected when serialized.
     pub compression: String,
+    /// The STR authentication marker from position 15, parsed into [`StrAuth`] using the exact `N`, `B`, and `D` codes.
     pub authentication: StrAuth,
+    /// Whether the stream has a fee, parsed from exact `N`/`Y` tokens in STR position 16 and serialized with the same codes.
     pub fee: Field<bool>,
+    /// The advertised bit rate from STR position 17, parsed as `u32` when possible and otherwise retained as a [`Field`] variant.
     pub bitrate: Field<u32>,
+    /// All STR tokens from position 18 onward, joined with semicolons so trailing fields survive a parse/render round trip.
     pub misc: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// An NTRIP CAS caster record.
+/// `parse_sourcetable` maps the 11 semicolon-delimited fields after `CAS` to these members, and serialization emits them in that same order.
 pub struct CasRecord {
+    /// The caster host from CAS position 1; semicolons and line breaks are rejected when serialized.
     pub host: String,
+    /// The caster port from CAS position 2, parsed as `u16` when possible and otherwise retained as a [`Field`] variant.
     pub port: Field<u16>,
+    /// The caster identifier from CAS position 3; semicolons and line breaks are rejected when serialized.
     pub identifier: String,
+    /// The operator name from CAS position 4; semicolons and line breaks are rejected when serialized.
     pub operator: String,
+    /// Whether NMEA is required, parsed from exact `0`/`1` tokens in CAS position 5 and serialized with the same codes.
     pub nmea_required: Field<bool>,
+    /// The country token from CAS position 6; semicolons and line breaks are rejected when serialized.
     pub country: String,
+    /// The latitude in decimal degrees from CAS position 7; blank, invalid, and non-finite tokens remain [`Field::Raw`].
     pub lat_deg: Field<f64>,
+    /// The longitude in decimal degrees from CAS position 8; blank, invalid, and non-finite tokens remain [`Field::Raw`].
     pub lon_deg: Field<f64>,
+    /// The fallback caster host from CAS position 9; semicolons and line breaks are rejected when serialized.
     pub fallback_host: String,
+    /// The fallback caster port from CAS position 10, parsed as `u16` when possible and otherwise retained as a [`Field`] variant.
     pub fallback_port: Field<u16>,
+    /// All CAS tokens from position 11 onward, joined with semicolons so trailing fields survive a parse/render round trip.
     pub misc: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// An NTRIP NET network record.
+/// `parse_sourcetable` maps the 8 semicolon-delimited fields after `NET` to these members, and serialization emits them in that same order.
 pub struct NetRecord {
+    /// The network identifier from NET position 1; semicolons and line breaks are rejected when serialized.
     pub identifier: String,
+    /// The network operator from NET position 2; semicolons and line breaks are rejected when serialized.
     pub operator: String,
+    /// The NET authentication marker from position 3, parsed into [`StrAuth`] using the exact `N`, `B`, and `D` codes.
     pub authentication: StrAuth,
+    /// Whether the network has a fee, parsed from exact `N`/`Y` tokens in NET position 4 and serialized with the same codes.
     pub fee: Field<bool>,
+    /// The network information URL from NET position 5; semicolons and line breaks are rejected when serialized.
     pub web_net: String,
+    /// The stream information URL from NET position 6; semicolons and line breaks are rejected when serialized.
     pub web_str: String,
+    /// The registration URL from NET position 7; semicolons and line breaks are rejected when serialized.
     pub web_reg: String,
+    /// All NET tokens from position 8 onward, joined with semicolons so trailing fields survive a parse/render round trip.
     pub misc: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// A record whose type tag is not one of the recognized STR, CAS, or NET tags.
+/// Its tokens remain text so unknown extensions can be parsed and rendered without typed conversion.
 pub struct OtherRecord {
+    /// The original first token of the unrecognized line, including any surrounding whitespace.
     pub type_tag: String,
+    /// The remaining semicolon-delimited tokens, in their original order.
     pub fields: Vec<String>,
 }
 
+/// Parses an NTRIP sourcetable into typed and unrecognized records.
+/// Empty lines are skipped, the `STR`, `CAS`, and `NET` tags are matched case-insensitively after trimming, and parsing stops at a case-insensitive `ENDSOURCETABLE` tag. Invalid typed tokens are retained as [`Field::Raw`] instead of rejecting the table.
 pub fn parse_sourcetable(text: &str) -> Result<Sourcetable> {
     let mut records = Vec::new();
     for raw_line in text.lines() {
@@ -122,6 +191,8 @@ pub fn parse_sourcetable(text: &str) -> Result<Sourcetable> {
 }
 
 impl Sourcetable {
+    /// Serializes the records with CRLF line endings and appends `ENDSOURCETABLE\r\n`.
+    /// Ordinary fields reject semicolons and every field rejects line breaks, returning [`Error::InvalidInput`] when the value cannot be represented by the line format.
     pub fn to_text(&self) -> Result<String> {
         let mut out = String::new();
         for record in &self.records {
@@ -132,6 +203,7 @@ impl Sourcetable {
         Ok(out)
     }
 
+    /// Iterates over STR records in their original order, skipping CAS, NET, and Other records.
     pub fn streams(&self) -> impl Iterator<Item = &StrRecord> {
         self.records.iter().filter_map(|record| match record {
             SourcetableRecord::Str(record) => Some(record),
