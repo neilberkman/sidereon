@@ -11,6 +11,8 @@ All notable changes to `sidereon-core` are documented here.
   update of it could change results without any change here. The pin makes
   such a move a deliberate edit with a re-pinning pass, not a side effect of
   `cargo update`.
+- OMM parsing and SP3 merging are organized into documented private stages;
+  frozen serializer outputs, diagnostics, and numerical results are unchanged.
 
 ## [1.4.1] - 2026-08-31
 
