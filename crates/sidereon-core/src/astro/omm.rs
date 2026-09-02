@@ -843,11 +843,12 @@ impl Omm {
             get("EPOCH").ok_or(OmmError::MissingField("EPOCH"))?,
             omm_civil_second_policy(time_system.as_deref()),
         )?;
+        let header = parse_header(map)?;
 
         Ok(Omm {
-            ccsds_omm_vers: xml_text_or_default(get("CCSDS_OMM_VERS"), "CCSDS_OMM_VERS", "2.0")?,
-            creation_date: xml_text(get("CREATION_DATE"), "CREATION_DATE")?,
-            originator: xml_text(get("ORIGINATOR"), "ORIGINATOR")?,
+            ccsds_omm_vers: header.ccsds_omm_vers,
+            creation_date: header.creation_date,
+            originator: header.originator,
             object_name: xml_text(get("OBJECT_NAME"), "OBJECT_NAME")?,
             object_id: xml_text(get("OBJECT_ID"), "OBJECT_ID")?,
             center_name: xml_text(get("CENTER_NAME"), "CENTER_NAME")?,
@@ -877,6 +878,22 @@ impl Omm {
             quantize_tle_derived_fields: true,
         })
     }
+}
+
+struct OmmHeader {
+    ccsds_omm_vers: String,
+    creation_date: Option<String>,
+    originator: Option<String>,
+}
+
+/// Consume the OMM header fields and produce their validated canonical values.
+fn parse_header(map: &crate::format::kvn::FieldMap) -> Result<OmmHeader, OmmError> {
+    let get = |key: &str| map.get(key);
+    Ok(OmmHeader {
+        ccsds_omm_vers: xml_text_or_default(get("CCSDS_OMM_VERS"), "CCSDS_OMM_VERS", "2.0")?,
+        creation_date: xml_text(get("CREATION_DATE"), "CREATION_DATE")?,
+        originator: xml_text(get("ORIGINATOR"), "ORIGINATOR")?,
+    })
 }
 
 fn xml_text(value: Option<&str>, field: &'static str) -> Result<Option<String>, OmmError> {
