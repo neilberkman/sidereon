@@ -148,6 +148,13 @@ pub mod astro {
 
 /// Model-specific constants that intentionally differ from WGS84.
 pub mod models {
+    /// PZ-90.11 constants consumed by the GLONASS equation of motion and the
+    /// Doppler ECEF transport term.
+    ///
+    /// The GLONASS module re-exports the gravitational constant, J2, Earth
+    /// radius, and rotation rate for its central-gravity, oblateness, and
+    /// rotating-frame terms; [`crate::astro::doppler::range_rate_and_ratio`]
+    /// uses the rotation rate for the same frame transport convention.
     pub mod pz90 {
         /// Geocentric gravitational constant (m^3/s^2), PZ-90.11.
         pub const GM_M3_S2: f64 = 3.986_004_4e14;
@@ -159,11 +166,21 @@ pub mod models {
         pub const A_M: f64 = 6_378_136.0;
     }
 
+    /// IERS-specific constant used by the Dehant solid-Earth tide calculation.
+    ///
+    /// [`crate::tides::solid_earth_tide`] uses the radius in the IERS
+    /// `DEHANTTIDEINEL.F` degree-2 and degree-3 scale factors whose ECEF
+    /// displacement is checked against the routine's reference rows.
     pub mod iers {
         /// Earth radius used by the Dehant solid Earth tide formulation (m).
         pub const SOLID_TIDE_EARTH_RADIUS_M: f64 = 6_378_136.6;
     }
 
+    /// PROJ-pinned WGS84 constants used by the ECEF-to-geodetic parity path.
+    ///
+    /// [`crate::astro::frames::transforms::geodetic_from_ecef_proj`] uses the
+    /// pinned axes, eccentricities, half-pi, and radian-to-degree multiplier;
+    /// its outputs are checked against pyproj 3.6.1 / PROJ 9.3.0 bit fixtures.
     pub mod proj {
         /// PROJ-pinned WGS84 semi-major axis (m).
         pub const WGS84_A_M: f64 = f64::from_bits(0x4158_54a6_4000_0000);
@@ -179,6 +196,12 @@ pub mod models {
         pub const HALF_PI: f64 = f64::from_bits(0x3ff9_21fb_5444_2d18);
     }
 
+    /// Per-constellation constants used by broadcast orbit and clock presets.
+    ///
+    /// [`crate::broadcast::ConstellationConstants`] takes its GPS/QZSS,
+    /// Galileo, and BeiDou gravitational, Earth-rotation, and relativistic
+    /// clock values from this module; the broadcast recipe tests require those
+    /// preset values to match at 0 ULP.
     pub mod broadcast {
         /// GPS broadcast gravitational constant (m^3/s^2), IS-GPS-200.
         pub const GPS_GM_M3_S2: f64 = 3.986_005_0e14;
