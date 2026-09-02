@@ -48,6 +48,8 @@ mod vallado;
 
 use crate::astro::tle;
 use crate::validate::{self, FieldError};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use thiserror::Error;
 
 pub use fit::{
@@ -142,7 +144,10 @@ pub enum Error {
     /// 4 = semi-latus rectum, 5 = epoch elements sub-orbital,
     /// 6 = satellite decayed.
     #[error("SGP4 error code {code}")]
-    Sgp4 { code: i32 },
+    Sgp4 {
+        /// `code` in `Error::Sgp4` carries the code value used by the enclosing API; its type defines the encoding.
+        code: i32,
+    },
 }
 
 /// Error from opt-in decay-latched SGP4 propagation.
@@ -187,10 +192,47 @@ pub struct Prediction {
 
 /// Julian date split as `(whole, fraction)` for high-precision time input.
 ///
-/// Skyfield convention: `whole = floor(JD)`, `fraction = remainder`.
-/// For example, 2018-07-04 00:00:00 UTC = `JulianDate(2458303.0, 0.5)`.
+/// `whole` is the Julian-date day boundary used by the Vallado SGP4 path
+/// (the integer Julian Day Number minus `0.5`), and `fraction` is the
+/// non-negative within-day fraction in `[0, 1)`. Their sum is the Julian Date;
+/// keeping the two terms separate avoids losing sub-day precision when a large
+/// day number is converted to binary64. For example, the civil midnight
+/// 2018-07-04 is represented as `JulianDate(2458303.5, 0.0)` by the SGP4
+/// calendar path.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JulianDate(pub f64, pub f64);
+
+impl JulianDate {
+    /// Constructs a split Julian date from its day boundary and within-day
+    /// fraction.
+    ///
+    /// This constructor does not validate the values. SGP4 entry points reject
+    /// non-finite dates and fractions outside `[0, 1)` with [`Error::InvalidInput`].
+    pub const fn new(whole: f64, fraction: f64) -> Self {
+        Self(whole, fraction)
+    }
+
+    /// Returns the day-boundary component of this split Julian date.
+    pub const fn whole(self) -> f64 {
+        self.0
+    }
+
+    /// Returns the non-negative within-day fraction of this split Julian date.
+    pub const fn fraction(self) -> f64 {
+        self.1
+    }
+
+    /// Converts a POSIX-like Unix timestamp in microseconds to a split Julian
+    /// date using the same floor-and-remainder arithmetic as pass prediction.
+    ///
+    /// Negative timestamps are split into a preceding civil day plus a
+    /// non-negative remainder, so values immediately before the Unix epoch and
+    /// exact day boundaries retain the same bits as [`crate::astro::passes::UtcInstant`].
+    pub fn from_unix_microseconds(unix_microseconds: i64) -> Self {
+        crate::astro::passes::UtcInstant::from_unix_microseconds(unix_microseconds)
+            .sgp4_julian_date()
+    }
+}
 
 /// Per-satellite latch for decay-like SGP4 propagation failures.
 ///
@@ -678,9 +720,11 @@ pub fn propagate_batch_parallel(
     satellites: &[Satellite],
     times: &[MinutesSinceEpoch],
 ) -> Vec<Result<Vec<Prediction>, Error>> {
-    use rayon::prelude::*;
+    #[cfg(feature = "parallel")]
+    let satellites = satellites.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let satellites = satellites.iter();
     satellites
-        .par_iter()
         .map(|satellite| propagate_arc(satellite, times))
         .collect()
 }
@@ -1344,6 +1388,23 @@ mod tests {
     }
 
     #[test]
+    fn unix_microsecond_julian_split_matches_utc_instant() {
+        let day = 86_400_000_000_i64;
+        let offsets = [-1_i64, 0, 1, 1_000_000, day / 2, day - 1];
+        for whole_days in -8_i64..=8 {
+            for offset in offsets {
+                let unix_microseconds = whole_days * day + offset;
+                let actual = JulianDate::from_unix_microseconds(unix_microseconds);
+                let expected =
+                    crate::astro::passes::UtcInstant::from_unix_microseconds(unix_microseconds)
+                        .sgp4_julian_date();
+                assert_eq!(actual.whole().to_bits(), expected.whole().to_bits());
+                assert_eq!(actual.fraction().to_bits(), expected.fraction().to_bits());
+            }
+        }
+    }
+
+    #[test]
     fn lenient_trailing_whitespace_and_content_past_col_69() {
         let clean = Satellite::from_tle(ISS_L1, ISS_L2).unwrap();
 
@@ -1502,6 +1563,9 @@ mod tests {
             let p = parallel[sat_idx].as_ref().expect("parallel arc ok");
             assert_eq!(s.len(), p.len());
             for epoch_idx in 0..times.len() {
+                let single = satellites[sat_idx]
+                    .propagate(times[epoch_idx])
+                    .expect("single-satellite propagation ok");
                 for axis in 0..3 {
                     assert_eq!(
                         s[epoch_idx].position[axis].to_bits(),
@@ -1509,9 +1573,19 @@ mod tests {
                         "position bits sat {sat_idx} epoch {epoch_idx} axis {axis}"
                     );
                     assert_eq!(
+                        p[epoch_idx].position[axis].to_bits(),
+                        single.position[axis].to_bits(),
+                        "parallel position vs per-item sat {sat_idx} epoch {epoch_idx} axis {axis}"
+                    );
+                    assert_eq!(
                         s[epoch_idx].velocity[axis].to_bits(),
                         p[epoch_idx].velocity[axis].to_bits(),
                         "velocity bits sat {sat_idx} epoch {epoch_idx} axis {axis}"
+                    );
+                    assert_eq!(
+                        p[epoch_idx].velocity[axis].to_bits(),
+                        single.velocity[axis].to_bits(),
+                        "parallel velocity vs per-item sat {sat_idx} epoch {epoch_idx} axis {axis}"
                     );
                 }
             }

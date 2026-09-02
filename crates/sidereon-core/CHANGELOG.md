@@ -11,11 +11,44 @@ All notable changes to `sidereon-core` are documented here.
   equation orders through 500 and a 2000x200 Jacobian; CI compares all
   application hotpaths and portable linear-algebra cases against their
   same-job merge base and uploads both Criterion reports.
+- `nalgebra` 0.33.3 and `simba` 0.9.1 are now exact dependency pins. The
+  decomposition algorithms and scalar-dispatch companion participate in the
+  crate's bit-exact identity claim, so a semver-compatible update could change
+  operation order, convergence thresholds, or covariance bits; any upgrade is
+  now a deliberate re-pinning release rather than a side effect of `cargo
+  update`.
+- Native exact-cache locking now uses the stable standard-library file-locking
+  API, removing the unmaintained fs2 dependency while preserving bounded,
+  non-blocking retry behavior and error handling.
 - `libm` is pinned to exactly 0.2.16. The crate's cross-platform bit-exactness
   is a property of that implementation's rounding, so a semver-compatible
   update of it could change results without any change here. The pin makes
   such a move a deliberate edit with a re-pinning pass, not a side effect of
   `cargo update`.
+
+### Added
+
+- A supply-chain gate (`cargo deny`: advisories, licenses, bans, sources)
+  runs in CI, together with an MSRV check at Rust 1.89. One advisory is an
+  explicit, documented exception: RUSTSEC-2024-0436 (`paste`, an unmaintained
+  compile-time proc-macro reached only through the exact `simba` pin); it is
+  revisited when `nalgebra`/`simba` are upgraded.
+- Batch APIs now use an optional default-on `parallel` feature. Disabling it
+  removes rayon and compiles the same order-preserving batch entry points with
+  plain iterators, keeping results bit-identical and retaining the public
+  serial variants.
+- `JulianDate::new`, `whole`, `fraction`, and `from_unix_microseconds`: named
+  construction and accessors for the split Julian date, and a Unix-microsecond
+  conversion that shares its floor-and-remainder arithmetic with pass
+  prediction (bit-identical, proven by a test over negative and day-boundary
+  inputs). The tuple representation is unchanged.
+
+### Fixed
+
+- Documentation now states the actual single-crate layout: the GNSS layer is
+  always present alongside propagation, and the units policy permits bare
+  solver-space positions while keeping frame and datum names on georeferenced
+  quantities.
 
 ## [1.4.1] - 2026-08-31
 

@@ -682,6 +682,8 @@ pub fn find_tca_conjunctions_with_propagated_covariance(
 ///
 /// Returns one hit per local TCA whose miss distance is at or below
 /// `miss_distance_threshold_km`, preserving the caller's secondary indices.
+/// When `parallel` is disabled, the parallel entry point is equivalent to this
+/// serial implementation.
 pub fn screen_tca_candidates_serial(
     primary: &Satellite,
     secondaries: &[Satellite],
@@ -726,6 +728,8 @@ pub fn screen_tca_candidates_parallel(
 }
 
 /// Serially screen a primary TLE against a borrowed secondary TLE catalog.
+/// When `parallel` is disabled, the parallel entry point is equivalent to this
+/// serial implementation.
 pub fn screen_tca_candidates_from_tle_catalog_serial(
     primary_tle: TcaTle<'_>,
     secondary_tles: &[TcaTle<'_>],
@@ -766,6 +770,8 @@ pub fn screen_tca_candidates_from_tle_catalog_parallel(
 }
 
 /// Serially screen a catalog and compute Pc for each threshold TCA.
+/// When `parallel` is disabled, the parallel entry point is equivalent to this
+/// serial implementation.
 pub fn screen_tca_conjunctions_serial(
     primary: &Satellite,
     secondaries: &[Satellite],
@@ -787,6 +793,8 @@ pub fn screen_tca_conjunctions_serial(
 }
 
 /// Serially screen a borrowed TLE catalog and compute Pc for each threshold TCA.
+/// When `parallel` is disabled, the parallel entry point is equivalent to this
+/// serial implementation.
 pub fn screen_tca_conjunctions_from_tle_catalog_serial(
     primary_tle: TcaTle<'_>,
     secondary_tles: &[TcaTle<'_>],
@@ -847,6 +855,8 @@ pub fn screen_tca_conjunctions_from_tle_catalog_parallel(
 
 /// Serially screen a borrowed TLE catalog and compute Pc for each threshold TCA
 /// after propagating each object's initial covariance to the TCA.
+/// When `parallel` is disabled, the parallel entry point is equivalent to this
+/// serial implementation.
 pub fn screen_tca_conjunctions_with_propagated_covariance_from_tle_catalog_serial(
     primary: TcaTleWithCovariance<'_>,
     secondaries: &[TcaTleWithCovariance<'_>],
@@ -2848,7 +2858,6 @@ mod tests {
         }
     }
 
-    #[allow(clippy::needless_range_loop)]
     fn manual_full_jacobian_covariance(
         covariance: &Mat6,
         jacobian: &Mat6,
@@ -2878,7 +2887,6 @@ mod tests {
         jacobian
     }
 
-    #[allow(clippy::needless_range_loop)]
     fn symmetrize6_for_test(matrix: &mut Mat6) {
         for i in 0..6 {
             for j in (i + 1)..6 {

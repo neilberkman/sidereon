@@ -920,7 +920,6 @@ fn dgtsv(mut dl: Vec<f64>, mut d: Vec<f64>, mut du: Vec<f64>, mut b: Vec<f64>) -
 /// target is Apple Accelerate, whose `dgesv` contracts the `acc - factor*x`
 /// elimination and substitution updates into fused multiply-adds; this routine
 /// uses [`libm::fma`] to match it bit-for-bit.
-#[allow(clippy::needless_range_loop)]
 fn gesv3(a: &mut [[f64; 3]; 3], b: &mut [f64; 3]) {
     let mut perm = [0usize, 1, 2];
     // LU with partial pivoting (column-major in LAPACK; we keep row-major but

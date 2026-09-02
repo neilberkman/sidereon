@@ -933,7 +933,6 @@ pub(crate) fn dop_multi(
         row[2] = -los[k].e_z;
         row[3 + clock_index[k]] = 1.0;
         let w = weights[k];
-        #[allow(clippy::needless_range_loop)]
         for i in 0..p {
             for j in 0..p {
                 a[i][j] += row[i] * w * row[j];

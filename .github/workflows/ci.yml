@@ -56,6 +56,25 @@ jobs:
       - name: Doctests
         run: cargo test --workspace --doc
 
+  msrv:
+    name: MSRV (Rust 1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check workspace on the declared MSRV
+        run: cargo +1.89.0 check --workspace --all-targets
+
+  supply-chain:
+    name: Supply-chain policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   test:
     name: test (${{ matrix.os == 'macos-latest' && 'arm64' || 'x86_64' }} shard ${{ matrix.shard }}/3)
     runs-on: ${{ matrix.os }}

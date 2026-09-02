@@ -2,9 +2,10 @@
 
 The complete engine behind [`sidereon`](https://crates.io/crates/sidereon): satellite
 propagation and observation plus GNSS positioning, in one pure-Rust crate. It is the fold
-of the propagation and GNSS layers. The GNSS layer sits behind a
-default `gnss` feature, so a propagation-only consumer can build with `--no-default-features`
-and never compile the SP3/RINEX/IONEX/solver code.
+of the propagation and GNSS layers. The GNSS layer is always present in this
+single complete crate. The published crate excludes `tests/fixtures`, so `cargo test` on a
+crates.io tarball runs a subset; 42 tests are gated on `cfg(sidereon_repo_tests)`, and the full
+suite requires the repository.
 
 ## Propagation and observation
 
@@ -21,7 +22,7 @@ and never compile the SP3/RINEX/IONEX/solver code.
   default-on `json` feature), and CCSDS Conjunction Data Message / CDM (KVN and XML). An OMM
   drives SGP4 bit-identically (0 ULP) to the equivalent TLE.
 
-## GNSS positioning (default `gnss` feature)
+## GNSS positioning
 
 - SP3 precise ephemeris and RINEX 3.x/4.x navigation (GPS, Galileo, BeiDou, GLONASS).
 - Single-point positioning, double-differenced RTK with LAMBDA ambiguity resolution, and

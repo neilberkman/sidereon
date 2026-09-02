@@ -28,13 +28,18 @@ pub mod data;
 pub mod doppler;
 pub mod elements;
 pub mod equinoctial;
+/// Propagation error types distinguishing invalid inputs from model or integration failures.
 pub mod error;
+/// Event detectors for geometry crossings and close approaches along propagated trajectories.
 pub mod events;
+/// Force models computing spacecraft acceleration from state and environment.
 pub mod forces;
 pub mod frames;
+/// ODE integrators and step-control types for propagating dynamic states.
 pub mod integrators;
 pub mod iod;
 pub mod lambert;
+/// Numerical matrix, vector, polynomial, and robust-estimation helpers used by solvers.
 pub mod math;
 pub mod ndm;
 pub mod observation;
@@ -42,12 +47,14 @@ pub mod oem;
 pub mod omm;
 pub mod opm;
 pub mod passes;
+/// Orbit propagation APIs; start with dynamics, integration options, and propagation result types.
 pub mod propagator;
 pub mod relative;
 pub mod rf;
 pub mod sgp4;
 pub mod space_weather;
 pub mod spk;
+/// Cartesian state and derivative types exchanged by the propagator.
 pub mod state;
 pub mod tca;
 pub mod tdm;

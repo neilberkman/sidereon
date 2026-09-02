@@ -125,7 +125,6 @@ impl Covariance6 {
 
     /// Propagate this covariance through a state-transition matrix:
     /// `P_f = Phi * P_0 * Phi^T`.
-    #[allow(clippy::needless_range_loop)]
     pub fn propagate_with_stm(&self, stm: &Mat6) -> Result<Self, Covariance6Error> {
         if !finite6(stm) {
             return Err(Covariance6Error::NonFinite);
@@ -201,7 +200,6 @@ pub fn covariance6_m_to_km(covariance: &Covariance6) -> Result<Covariance6, Cova
 /// returned bit-for-bit. Singular but non-zero validated endpoints are nudged
 /// through `eigen_floor6` before factorization; an all-zero endpoint is
 /// rejected because the logarithmic diagonal is undefined.
-#[allow(clippy::needless_range_loop)]
 pub fn interpolate_covariance_psd(
     a: &Covariance6,
     b: &Covariance6,
@@ -401,7 +399,6 @@ fn covariance_scale6(m: &Mat6) -> f64 {
     (0..6).fold(0.0_f64, |scale, idx| scale.max(m[idx][idx].abs()))
 }
 
-#[allow(clippy::needless_range_loop)]
 fn symmetric6(m: &Mat6) -> bool {
     let tolerance = SYMMETRY_REL_EPS6 * covariance_scale6(m);
     for i in 0..6 {
@@ -448,7 +445,6 @@ pub(crate) fn eigen_floor6(matrix: &Mat6, rel_floor: f64) -> Mat6 {
     out
 }
 
-#[allow(clippy::needless_range_loop)]
 pub(crate) fn symmetrize6(m: &mut Mat6) {
     for i in 0..6 {
         for j in (i + 1)..6 {
@@ -486,7 +482,6 @@ fn cholesky_lower_with_floor(matrix: &Mat6) -> Result<Mat6, Covariance6Error> {
     cholesky_lower(&floored).ok_or(Covariance6Error::NotFactorizable)
 }
 
-#[allow(clippy::needless_range_loop)]
 pub(crate) fn covariance_congruence6_checked(
     covariance: &Covariance6,
     rotation: &Mat3,
@@ -867,7 +862,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::needless_range_loop)]
     fn eigen_floor6_clamps_only_values_below_floor() {
         let mut marginal = [[0.0_f64; 6]; 6];
         for (idx, row) in marginal.iter_mut().enumerate() {
@@ -889,7 +883,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::needless_range_loop)]
     fn covariance6_cdm_lower_triangle_unit_bridge_is_pinned() {
         let mut matrix = [[0.0_f64; 6]; 6];
         let mut value = 1.0_f64;

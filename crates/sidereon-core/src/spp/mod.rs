@@ -1764,6 +1764,8 @@ pub fn solve_with_policy(
 /// for an epoch becomes that element's `Err`. This is the single-threaded
 /// reference the parallel [`solve_spp_batch_parallel`] is proven bit-identical
 /// against.
+/// When `parallel` is disabled, the parallel entry point is equivalent to this
+/// serial iterator.
 pub fn solve_spp_batch_serial(
     eph: &dyn EphemerisSource,
     epochs: &[SolveInputs],
@@ -1793,9 +1795,13 @@ pub fn solve_spp_batch_parallel(
     with_geodetic: bool,
     policy: SolvePolicy,
 ) -> Vec<Result<ReceiverSolution, SolvePolicyError>> {
+    #[cfg(feature = "parallel")]
     use rayon::prelude::*;
+    #[cfg(feature = "parallel")]
+    let epochs = epochs.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let epochs = epochs.iter();
     epochs
-        .par_iter()
         .map(|inputs| solve_with_policy(eph, inputs, with_geodetic, policy))
         .collect()
 }

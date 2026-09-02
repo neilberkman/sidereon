@@ -29,7 +29,6 @@ pub enum LinearError {
     },
 }
 
-#[allow(clippy::needless_range_loop)]
 pub fn solve_linear_first_tie(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     let n = validate_dense_system(a, b)?;
     let mut rows: Vec<Vec<f64>> = a
@@ -79,7 +78,6 @@ pub fn solve_linear_first_tie(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     Some(x)
 }
 
-#[allow(clippy::needless_range_loop)]
 pub fn solve_linear_last_tie(mut a: Vec<Vec<f64>>, b: Vec<f64>) -> Option<Vec<f64>> {
     let n = validate_dense_system(&a, &b)?;
     for (row, bi) in a.iter_mut().zip(b) {
@@ -302,7 +300,6 @@ pub fn solve_matrix_flat_first_tie_into(
     Some(())
 }
 
-#[allow(clippy::needless_range_loop)]
 pub fn solve_augmented_flat_first_tie_in_place(
     rows: &mut [f64],
     n: usize,
@@ -359,7 +356,6 @@ pub fn solve_flat_normal_first_tie(lambda: &[f64], eta: &[f64]) -> Option<Vec<f6
     solve_flat_normal_first_tie_into(lambda, eta, &mut scratch).map(<[f64]>::to_vec)
 }
 
-#[allow(clippy::needless_range_loop)]
 pub fn solve_flat_normal_first_tie_into<'a>(
     lambda: &[f64],
     eta: &[f64],
@@ -444,7 +440,6 @@ pub struct FlatCholeskySolveScratch {
 /// bit-reproducible with no pivot-dependent branching. Returns `None` if `Λ` is
 /// not positive definite (a non-positive or non-finite pivot), which for a
 /// weighted least-squares normal matrix means rank-deficient geometry.
-#[allow(clippy::needless_range_loop)]
 pub fn solve_flat_normal_square_root_into<'a>(
     lambda: &[f64],
     eta: &[f64],
@@ -520,7 +515,6 @@ fn validate_flat_symmetric(matrix: &[f64], n: usize) -> Option<()> {
     Some(())
 }
 
-#[allow(clippy::needless_range_loop)]
 fn validate_rows_symmetric(matrix: &[Vec<f64>]) -> Option<()> {
     let n = matrix.len();
     let mut scale = 1.0_f64;
@@ -598,7 +592,6 @@ fn linear_invalid_input(field: &'static str, reason: &'static str) -> LinearErro
     LinearError::InvalidInput { field, reason }
 }
 
-#[allow(clippy::needless_range_loop)]
 pub fn normal_matrix_4_weighted_column_outer(
     rows: &[[f64; 4]],
     weights: &[f64],
@@ -627,7 +620,6 @@ pub fn normal_matrix_4_weighted_column_outer(
     Ok(a)
 }
 
-#[allow(clippy::needless_range_loop)]
 pub fn normal_matrix_4_unweighted_row_outer(rows: &[[f64; 4]]) -> [[f64; 4]; 4] {
     let mut a = [[0.0_f64; 4]; 4];
     for row in rows {
@@ -700,7 +692,6 @@ pub fn minor3_of_4(a: &[[f64; 4]; 4], skip_r: usize, skip_c: usize) -> f64 {
     b00 * (b11 * b22 - b12 * b21) - b01 * (b10 * b22 - b12 * b20) + b02 * (b10 * b21 - b11 * b20)
 }
 
-#[allow(clippy::needless_range_loop)]
 pub fn invert_4x4_cofactor(a: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
     let det = det4_cofactor(a);
     if det == 0.0 || !det.is_finite() {
@@ -750,7 +741,6 @@ pub fn invert_3x3_adjugate(m: &[[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
     Some(inverse)
 }
 
-#[allow(clippy::needless_range_loop)]
 pub fn invert_symmetric_pd(n: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     let p = n.len();
     if p == 0 {

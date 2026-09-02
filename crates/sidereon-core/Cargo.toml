@@ -3,7 +3,8 @@ name = "sidereon-core"
 version = "1.4.1"
 authors = []
 edition = "2021"
-description = "Numerical astrodynamics propagation core plus the GNSS domain layer (SP3, broadcast ephemeris, multi-GNSS positioning, RTK/PPP, ionosphere/troposphere, DOP) behind a default-on gnss feature"
+rust-version = "1.89"
+description = "Numerical astrodynamics propagation core plus the always-present GNSS domain layer (SP3, broadcast ephemeris, multi-GNSS positioning, RTK/PPP, ionosphere/troposphere, DOP)"
 license = "MIT"
 readme = "README.md"
 documentation = "https://docs.rs/sidereon-core"
@@ -31,24 +32,27 @@ exclude = [
 [dependencies]
 memmap2 = { version = "0.9", optional = true }
 nalgebra = { workspace = true }
+# Keep this scalar-operation companion aligned with the exact nalgebra pin;
+# changing it is a numerical re-pinning release.
+simba = { workspace = true }
 approx = "0.5"
 num-traits = "0.2"
-simba = "0.9"
 thiserror = "1.0"
 libm = "=0.2.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 roxmltree = "0.21"
 sha2 = "0.10"
-# Data-parallel batch propagation: the multi-satellite walkers in `astro::passes`
-# fan independent per-satellite arcs across a rayon work-stealing pool. Each arc
-# is the same serial kernel, so results stay bit-identical to the serial path.
-rayon = "1"
+# Data-parallel batch propagation is enabled by the default `parallel` feature.
+# Each arc is the same serial kernel, so results stay bit-identical to fallback.
+rayon = { version = "1", optional = true }
 trust-region-least-squares = { path = "../trust-region-least-squares", version = "0.11" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-fs2 = "0.4"
 getrandom = "0.2"
+
+[lints]
+workspace = true
 
 [build-dependencies]
 cc = "1"
@@ -64,6 +68,10 @@ name = "hotpath"
 harness = false
 
 [features]
+default = ["parallel"]
+# Data-parallel batch entry points use rayon when enabled; when disabled they
+# compile to order-preserving plain iterators without changing their API.
+parallel = ["dep:rayon"]
 # Memory-map large binary artifacts (terrain store, precise-interpolant store)
 # instead of reading them into memory. Off by default so the dependency-light
 # build is unaffected and wasm, where mapping is meaningless, simply does not
