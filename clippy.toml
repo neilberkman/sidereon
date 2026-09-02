@@ -1,5 +1,7 @@
 # `f64::powi` is intentionally omitted: the compiler lowers it to repeated
-# squaring, and the portable scalar property test covers the non-power cases.
+# squaring. `crates/sidereon-core/tests/powi_portability.rs` checks all literal
+# exponents found in production and the runtime exponent interval over 10,000
+# random bases, including the signed and non-power-of-two cases.
 disallowed-methods = [
     { path = "f32::sin", reason = "portable numerics require libm delegates" },
     { path = "f32::cos", reason = "portable numerics require libm delegates" },

@@ -178,6 +178,10 @@ pub(crate) struct StandardAtmosphere {
 /// to the 75-degree column (flat, no extrapolation); between nodes it is a
 /// linear blend of the two bracketing columns.
 fn interpc(coef: &[f64; 5], lat_deg: f64) -> f64 {
+    // The Niell table is indexed by absolute latitude: its five columns are
+    // the positive 15/30/45/60/75-degree nodes. `niell_mapping` takes the
+    // absolute value before calling this helper, so truncation toward zero is
+    // intentional here and cannot put a southern latitude in a different bin.
     let i = (lat_deg / 15.0) as i32;
     if i < 1 {
         return coef[0];
