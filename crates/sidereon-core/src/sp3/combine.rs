@@ -970,6 +970,88 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     let all_sats = cells.all_sats;
     let mut report = cells.report;
     let continuity_selection = cells.continuity_selection;
+
+    let synthesized = synthesize_merge_header(
+        sources,
+        &out_epochs,
+        &out_epoch_j2000_s,
+        all_sats,
+        epoch_interval_s,
+    )?;
+    let MergeHeaderOutput {
+        header,
+        mandatory_header_lines,
+        declared_satellite_tokens,
+        epoch_position_tokens,
+        epoch_state_record_sequence,
+    } = synthesized;
+    let merged = Sp3 {
+        header,
+        epochs: out_epochs,
+        declared_num_epochs: out_epoch_j2000_s.len() as u64,
+        declared_start_j2000_s: out_epoch_j2000_s.first().copied(),
+        terminal_record: TerminalRecordState::valid(),
+        satellite_header_lines: mandatory_header_lines,
+        accuracy_header_lines: mandatory_header_lines,
+        time_system_header_lines: 2,
+        float_header_lines: 2,
+        integer_header_lines: 2,
+        header_comment_lines: 4,
+        declared_satellite_count: Some(declared_satellite_tokens.len()),
+        declared_satellite_tokens,
+        epoch_velocity_tokens: vec![Vec::new(); epoch_position_tokens.len()],
+        epoch_position_tokens,
+        epoch_state_record_sequence,
+        epoch_j2000_s: out_epoch_j2000_s,
+        states: out_states,
+        interp_raw: out_raw,
+        comments: vec![format!("MERGED from {} SP3 products", sources.len())],
+        skipped_records: sources.iter().map(|s| s.skipped_records).sum(),
+    };
+
+    if let Some(continuity_options) = opts.verify_continuity.as_ref() {
+        report.continuity = Some(verify_merged_continuity(
+            &merged,
+            continuity_options,
+            &continuity_selection,
+        ));
+    }
+
+    Ok((merged, report))
+}
+
+struct PreparedMergeInputs {
+    sources: Vec<Sp3>,
+    frame_reconciliations: Vec<Sp3FrameReconciliation>,
+}
+
+struct MergeCellOutput {
+    out_epochs: Vec<Instant>,
+    out_epoch_j2000_s: Vec<f64>,
+    out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
+    out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
+    all_sats: BTreeSet<GnssSatelliteId>,
+    report: MergeReport,
+    continuity_selection: BTreeMap<(GnssSatelliteId, i64), CellSelection>,
+}
+
+struct MergeHeaderOutput {
+    header: Sp3Header,
+    mandatory_header_lines: usize,
+    declared_satellite_tokens: Vec<String>,
+    epoch_position_tokens: Vec<Vec<String>>,
+    epoch_state_record_sequence: Vec<Vec<(char, String)>>,
+}
+
+/// Consume ordered merged cells and source metadata, and produce the synthetic
+/// SP3 header plus the canonical output record-token sequences.
+fn synthesize_merge_header(
+    sources: &[Sp3],
+    out_epochs: &[Instant],
+    out_epoch_j2000_s: &[f64],
+    all_sats: BTreeSet<GnssSatelliteId>,
+    epoch_interval_s: f64,
+) -> Result<MergeHeaderOutput> {
     // Base the non-epoch metadata on a source product, but derive the first-epoch
     // header fields from the merged grid itself. Mixed cadence / coverage can make
     // the merged first epoch later than every input's first epoch, so cloning
@@ -1052,54 +1134,14 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    let merged = Sp3 {
+
+    Ok(MergeHeaderOutput {
         header,
-        epochs: out_epochs,
-        declared_num_epochs: out_epoch_j2000_s.len() as u64,
-        declared_start_j2000_s: out_epoch_j2000_s.first().copied(),
-        terminal_record: TerminalRecordState::valid(),
-        satellite_header_lines: mandatory_header_lines,
-        accuracy_header_lines: mandatory_header_lines,
-        time_system_header_lines: 2,
-        float_header_lines: 2,
-        integer_header_lines: 2,
-        header_comment_lines: 4,
-        declared_satellite_count: Some(declared_satellite_tokens.len()),
+        mandatory_header_lines,
         declared_satellite_tokens,
-        epoch_velocity_tokens: vec![Vec::new(); epoch_position_tokens.len()],
         epoch_position_tokens,
         epoch_state_record_sequence,
-        epoch_j2000_s: out_epoch_j2000_s,
-        states: out_states,
-        interp_raw: out_raw,
-        comments: vec![format!("MERGED from {} SP3 products", sources.len())],
-        skipped_records: sources.iter().map(|s| s.skipped_records).sum(),
-    };
-
-    if let Some(continuity_options) = opts.verify_continuity.as_ref() {
-        report.continuity = Some(verify_merged_continuity(
-            &merged,
-            continuity_options,
-            &continuity_selection,
-        ));
-    }
-
-    Ok((merged, report))
-}
-
-struct PreparedMergeInputs {
-    sources: Vec<Sp3>,
-    frame_reconciliations: Vec<Sp3FrameReconciliation>,
-}
-
-struct MergeCellOutput {
-    out_epochs: Vec<Instant>,
-    out_epoch_j2000_s: Vec<f64>,
-    out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
-    out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
-    all_sats: BTreeSet<GnssSatelliteId>,
-    report: MergeReport,
-    continuity_selection: BTreeMap<(GnssSatelliteId, i64), CellSelection>,
+    })
 }
 
 /// Consume ordered merge timing data and emit every accepted epoch/satellite cell,
