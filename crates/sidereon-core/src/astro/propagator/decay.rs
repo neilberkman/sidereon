@@ -149,10 +149,18 @@ pub enum DecayError {
     InvalidConfig(&'static str),
     /// The orbit did not decay within the requested horizon.
     #[error("no decay within horizon {horizon_s} s")]
-    NoDecayWithinHorizon { horizon_s: f64 },
+    NoDecayWithinHorizon {
+        /// Configured maximum elapsed scan time, in seconds, reached before a crossing was found.
+        horizon_s: f64,
+    },
     /// The coarse scan hit its sample budget before the horizon.
     #[error("scan budget exhausted after {samples} samples and {scanned_s} s")]
-    ScanBudgetExhausted { scanned_s: f64, samples: u32 },
+    ScanBudgetExhausted {
+        /// Elapsed time covered by completed coarse samples, in seconds, when the budget check failed.
+        scanned_s: f64,
+        /// Number of completed coarse propagation samples reported at the budget check.
+        samples: u32,
+    },
 }
 
 /// Estimate time to reentry using drag-perturbed numerical propagation.
