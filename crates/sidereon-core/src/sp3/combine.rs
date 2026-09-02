@@ -955,29 +955,9 @@ fn fold_max(acc: Option<f64>, value: f64) -> f64 {
 /// normal source counts and uses a deterministic greedy fallback above the exact
 /// search cap, so hostile disagreement graphs remain bounded.
 pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)> {
-    if sources.is_empty() {
-        return Err(Error::InvalidInput(
-            "merge requires at least one SP3 product".into(),
-        ));
-    }
-
-    validate_merge_options(opts)?;
-
-    // Inputs must be combinable: epochs are matched in one exact product time
-    // system, and positions are only comparable in an exactly common coordinate
-    // system / frame unless the caller explicitly opted into one of the audited
-    // reconciliation mechanisms below.
-    let base = &sources[0].header;
-    for s in &sources[1..] {
-        if s.header.time_system != base.time_system {
-            return Err(Error::InvalidInput(format!(
-                "merge inputs have mismatched SP3 time systems ({:?} vs {:?})",
-                base.time_system, s.header.time_system
-            )));
-        }
-    }
-
-    let (prepared_sources, frame_reconciliations) = reconcile_sp3_coordinate_labels(sources, opts)?;
+    let prepared = prepare_merge_inputs(sources, opts)?;
+    let prepared_sources = prepared.sources;
+    let frame_reconciliations = prepared.frame_reconciliations;
     let sources = prepared_sources.as_slice();
 
     // floored-J2000-second -> epoch index, per source.
@@ -1584,6 +1564,43 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     }
 
     Ok((merged, report))
+}
+
+struct PreparedMergeInputs {
+    sources: Vec<Sp3>,
+    frame_reconciliations: Vec<Sp3FrameReconciliation>,
+}
+
+/// Consume raw SP3 sources and merge options, validate their combinability, and
+/// produce frame-reconciled sources plus the reconciliation audit trail.
+fn prepare_merge_inputs(sources: &[Sp3], opts: &MergeOptions) -> Result<PreparedMergeInputs> {
+    if sources.is_empty() {
+        return Err(Error::InvalidInput(
+            "merge requires at least one SP3 product".into(),
+        ));
+    }
+
+    validate_merge_options(opts)?;
+
+    // Inputs must be combinable: epochs are matched in one exact product time
+    // system, and positions are only comparable in an exactly common coordinate
+    // system / frame unless the caller explicitly opted into one of the audited
+    // reconciliation mechanisms below.
+    let base = &sources[0].header;
+    for s in &sources[1..] {
+        if s.header.time_system != base.time_system {
+            return Err(Error::InvalidInput(format!(
+                "merge inputs have mismatched SP3 time systems ({:?} vs {:?})",
+                base.time_system, s.header.time_system
+            )));
+        }
+    }
+
+    let (sources, frame_reconciliations) = reconcile_sp3_coordinate_labels(sources, opts)?;
+    Ok(PreparedMergeInputs {
+        sources,
+        frame_reconciliations,
+    })
 }
 
 /// Run the continuity check over the merged product and attribute each
