@@ -18,8 +18,16 @@ const RIGHT_ANGLE_DEG: f64 = 90.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum AngleError {
     #[error("invalid angle input {field}: {reason}")]
+    /// An angle helper rejected a non-finite, out-of-range, or degenerate input.
     InvalidInput {
+        /// Static label identifying the rejected angle-helper argument.
+        /// Vector and coordinate helpers use `a`/`b`; position-angle helpers use `from`/`to`;
+        /// satellite geometry uses `sat_pos`, `sun_pos`, `moon_pos`, and `observer_pos`; beta
+        /// helpers use `orbit_normal`/`sun`, or `r`/`v` for state inputs.
         field: &'static str,
+        /// Validation reason included in the formatted error.
+        /// The validators emit `not finite`, `zero vector`, `out of range`, or
+        /// `latitude out of range`.
         reason: &'static str,
     },
 }
