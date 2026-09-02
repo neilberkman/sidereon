@@ -92,20 +92,40 @@ pub enum VelocityError {
     /// No observation entries were supplied.
     NoObservations,
     /// Fewer than four usable satellites remained after geometry lookup.
-    TooFewSatellites { used: usize, required: usize },
+    TooFewSatellites {
+        /// Number of rows retained by [`solve`] after unusable geometry was dropped.
+        used: usize,
+        /// Fixed at four for the three ECEF velocity components and one receiver
+        /// clock-drift state.
+        required: usize,
+    },
     /// The 4x4 normal matrix is singular.
     SingularGeometry,
     /// A satellite appears more than once in the input observations.
-    DuplicateObservation { satellite_id: GnssSatelliteId },
+    DuplicateObservation {
+        /// Satellite ID of the repeated entry found while scanning input order.
+        satellite_id: GnssSatelliteId,
+    },
     /// Doppler conversion needs a positive finite carrier frequency.
-    InvalidCarrier { satellite_id: GnssSatelliteId },
+    InvalidCarrier {
+        /// Satellite ID whose Doppler observation supplied the invalid carrier.
+        satellite_id: GnssSatelliteId,
+    },
     /// A scalar conversion helper received a malformed input.
     InvalidInput {
+        /// Label supplied by the failing helper: `doppler_hz`, `range_rate_m_s`,
+        /// `carrier_hz`, `velocity row`, or `velocity solution`.
         field: &'static str,
+        /// Stable validation reason: `not finite`, `not positive`, or
+        /// `out of range`.
         reason: &'static str,
     },
     /// An observation carries a non-finite measurement or satellite-clock drift.
-    InvalidObservation { satellite_id: GnssSatelliteId },
+    InvalidObservation {
+        /// Satellite ID associated with a non-finite measurement or clock drift,
+        /// or with a Doppler conversion failure other than carrier validation.
+        satellite_id: GnssSatelliteId,
+    },
     /// The receiver state or receive epoch is non-finite.
     InvalidReceiverState,
 }
