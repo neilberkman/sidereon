@@ -102,13 +102,60 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci-ubuntu
       - name: Require x86_64 runner
         run: test "$(uname -m)" = x86_64
-      - name: Run hotpath benchmark
-        run: cargo bench -p sidereon-core --bench hotpath -- --noplot --sample-size 10 --measurement-time 1
-      - name: Compare against committed baseline
-        run: python3 crates/sidereon-core/benches/check_hotpath.py target/criterion crates/sidereon-core/benches/hotpath_baseline.json
+      - name: Run merge-base hotpath benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_commit="$(git merge-base HEAD origin/main)"
+          base_worktree="$(mktemp -d "$RUNNER_TEMP/sidereon-base.XXXXXX")"
+          base_target="$RUNNER_TEMP/sidereon-base-target"
+          base_criterion="$RUNNER_TEMP/sidereon-base-criterion"
+          artifact_dir="$RUNNER_TEMP/hotpath-criterion/base"
+          git worktree add --detach "$base_worktree" "$base_commit"
+          trap 'git worktree remove --force "$base_worktree"' EXIT
+          # The merge base predates the expanded benchmark. Use the branch's
+          # harness for both trees so every application and linear-algebra case
+          # has the same inputs and benchmark code.
+          cp crates/sidereon-core/benches/hotpath.rs \
+            "$base_worktree/crates/sidereon-core/benches/hotpath.rs"
+          cd "$base_worktree"
+          CRITERION_HOME="$base_criterion" cargo bench \
+            --manifest-path "$base_worktree/Cargo.toml" \
+            --target-dir "$base_target" \
+            -p sidereon-core --bench hotpath -- \
+            --noplot --sample-size 10 --measurement-time 1
+          mkdir -p "$artifact_dir"
+          cp -R "$base_criterion/." "$artifact_dir/"
+      - name: Run branch hotpath benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch_target="$RUNNER_TEMP/sidereon-branch-target"
+          branch_criterion="$RUNNER_TEMP/sidereon-branch-criterion"
+          CRITERION_HOME="$branch_criterion" cargo bench \
+            --target-dir "$branch_target" \
+            -p sidereon-core --bench hotpath -- \
+            --noplot --sample-size 10 --measurement-time 1
+          mkdir -p "$RUNNER_TEMP/hotpath-criterion/branch"
+          cp -R "$branch_criterion/." \
+            "$RUNNER_TEMP/hotpath-criterion/branch/"
+      - name: Compare merge base and branch
+        run: |
+          python3 crates/sidereon-core/benches/check_hotpath.py \
+            "$RUNNER_TEMP/hotpath-criterion/base" \
+            "$RUNNER_TEMP/hotpath-criterion/branch"
+      - name: Upload Criterion reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hotpath-criterion
+          path: ${{ runner.temp }}/hotpath-criterion
+          if-no-files-found: warn
