@@ -17,6 +17,9 @@ use std::fmt;
 /// Parsed ANTEX antenna calibration product.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Antex {
+    /// Latest completed antenna block for each trimmed `TYPE / SERIAL NO` id.
+    /// A later block with the same id replaces this entry; all blocks remain
+    /// available through [`Antex::antenna_intervals`].
     pub antennas: BTreeMap<String, Antenna>,
     antenna_intervals: BTreeMap<String, Vec<Antenna>>,
     /// Count of malformed records skipped during a forgiving parse (a corrupt PCV
@@ -32,80 +35,147 @@ pub struct Antex {
 /// Receiver or satellite antenna block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Antenna {
+    /// Trimmed body of the `TYPE / SERIAL NO` record, also used as the key in
+    /// the parsed antenna views and as the identifier in lookup errors.
     pub id: String,
+    /// Classification assigned from the trimmed serial by the
+    /// `is_satellite_serial` helper.
     pub kind: AntennaKind,
+    /// Trimmed first 20-byte field of the `TYPE / SERIAL NO` record.
     pub antenna_type: String,
+    /// Trimmed 20..40-byte field of the `TYPE / SERIAL NO` record. It drives
+    /// receiver/satellite classification and satellite PRN lookup.
     pub serial: String,
+    /// First parseable value from `DAZI`, in degrees; parsing initializes this
+    /// field to `0.0` when no such value is present.
     pub dazi_deg: f64,
+    /// First value from `ZEN1 / ZEN2 / DZEN`, in degrees; it anchors recovered
+    /// PCV sample zeniths and is the lower bound checked by [`Antenna::pcv`].
     pub zenith_start_deg: f64,
+    /// Second value from `ZEN1 / ZEN2 / DZEN`, in degrees; it is the inclusive
+    /// upper bound checked by [`Antenna::pcv`].
     pub zenith_end_deg: f64,
+    /// Third value from `ZEN1 / ZEN2 / DZEN`, in degrees, used to place
+    /// successive PCV values; a zero value assigns every sample the start.
     pub zenith_step_deg: f64,
+    /// Nonblank trimmed `SINEX CODE` content, or `None` when that record is
+    /// absent or blank.
     pub sinex_code: Option<String>,
+    /// Timestamp from `VALID FROM`, used as an inclusive lower bound by
+    /// [`Antenna::valid_at`].
     pub valid_from: Option<AntexDateTime>,
+    /// Timestamp from `VALID UNTIL`, used as an inclusive upper bound by
+    /// [`Antenna::valid_at`].
     pub valid_until: Option<AntexDateTime>,
+    /// Completed frequency blocks indexed by their trimmed labels; a repeated
+    /// label replaces the earlier block in this antenna.
     pub frequencies: BTreeMap<String, Frequency>,
 }
 
 /// ANTEX antenna block role.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AntennaKind {
+    /// Assigned when the trimmed serial does not match the three-byte satellite
+    /// PRN pattern accepted by the `is_satellite_serial` helper.
     Receiver,
+    /// Assigned for a serial consisting of one uppercase ASCII letter and two
+    /// ASCII digits; satellite lookup requires this classification.
     Satellite,
 }
 
 /// Frequency-specific PCO/PCV calibration block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frequency {
+    /// Trimmed label from the `START OF FREQUENCY` record and the key used by
+    /// antenna frequency lookup.
     pub frequency: String,
+    /// Finite `NORTH / EAST / UP` PCO values converted from ANTEX millimeters
+    /// to meters and kept in north/east/up order.
     pub pco_m: [f64; 3],
+    /// PCV samples recovered in row/token order, with values expressed in
+    /// meters; lookup partitions them by [`PcvGrid`] for interpolation.
     pub pcv_samples: Vec<PcvSample>,
 }
 
 /// One phase-center-variation grid value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PcvSample {
+    /// Whether the source row was headed by `NOAZI` or by a numeric azimuth.
     pub grid: PcvGrid,
+    /// `None` for `NOAZI` samples; otherwise the unnormalized parsed angle
+    /// from the source row head, in degrees.
     pub azimuth_deg: Option<f64>,
+    /// Zenith coordinate computed from the antenna grid start, step, and this
+    /// value's row position.
     pub zenith_deg: f64,
+    /// PCV token converted from ANTEX millimeters to meters; malformed tokens
+    /// are skipped instead of producing a sample.
     pub value_m: f64,
 }
 
 /// PCV grid type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PcvGrid {
+    /// A `NOAZI` row used for zenith-only interpolation or fallback.
     NoAzimuth,
+    /// A numeric-azimuth row whose samples are grouped by azimuth for lookup.
     Azimuth,
 }
 
 /// Civil UTC-like timestamp fields from `VALID FROM` / `VALID UNTIL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AntexDateTime {
+    /// Validated civil calendar year, restricted by the shared validator to
+    /// `0..=9999`.
     pub year: i32,
+    /// Validated one-based civil month in `1..=12`.
     pub month: u8,
+    /// Day accepted for the stored civil year and month.
     pub day: u8,
+    /// UTC-like civil clock hour in `0..=23`.
     pub hour: u8,
+    /// UTC-like civil minute in `0..=59`.
     pub minute: u8,
+    /// Stored whole-second component; UTC-like validation permits ordinary
+    /// values through `59` and a valid leap-second label `60`.
     pub second: u8,
 }
 
 /// ANTEX parse or lookup error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AntexError {
+    /// A date/time component failed integer-range, calendar, clock, or
+    /// UTC-like leap-second validation.
     InvalidDateTime,
+    /// A public PCV input was rejected by shared validation.
     InvalidInput {
+        /// Static label of the rejected PCV argument; the current path uses
+        /// `"zenith_deg"`.
         field: &'static str,
+        /// Validator reason, such as `"not finite"` or `"out of range"`.
         reason: &'static str,
     },
+    /// The trimmed requested frequency label was absent from an antenna's
+    /// frequency map.
     UnknownFrequency {
+        /// Id of the antenna whose frequency map was queried.
         antenna_id: String,
+        /// Original caller-supplied frequency argument, before lookup trims it.
         frequency: String,
     },
+    /// A frequency block ended without a finite three-value `NORTH / EAST / UP`
+    /// record having been parsed.
     MissingPco {
+        /// Id of the antenna containing the incomplete frequency block.
         antenna_id: String,
+        /// Trimmed label from that block's `START OF FREQUENCY` record.
         frequency: String,
     },
+    /// The selected PCV interpolation input contained no samples.
     EmptyPcvGrid {
+        /// Id of the antenna requested by the PCV lookup.
         antenna_id: String,
+        /// Stored frequency label used by the PCV lookup.
         frequency: String,
     },
 }
@@ -340,6 +410,10 @@ fn invalid_input(field: &'static str, reason: &'static str) -> AntexError {
 }
 
 impl AntexDateTime {
+    /// Construct a timestamp after UTC-like civil-time validation.
+    ///
+    /// Invalid calendar or clock values, including an unsupported leap-second
+    /// label, return [`AntexError::InvalidDateTime`].
     pub fn new(
         year: i32,
         month: u8,
