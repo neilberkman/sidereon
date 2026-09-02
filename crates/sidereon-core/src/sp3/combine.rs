@@ -967,7 +967,7 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
 
     let timing = prepare_merge_timing(sources, opts)?;
     let epoch_interval_s = timing.epoch_interval_s;
-    let cells = emit_merge_cells(sources, opts, &timing, frame_reconciliations);
+    let cells = emit_merge_cells(sources, opts, &timing, frame_reconciliations)?;
 
     let synthesized = synthesize_merge_header(
         sources,
@@ -1174,7 +1174,7 @@ fn emit_merge_cells(
     opts: &MergeOptions,
     timing: &MergeTiming,
     frame_reconciliations: Vec<Sp3FrameReconciliation>,
-) -> MergeCellOutput {
+) -> Result<MergeCellOutput> {
     let epoch_index = timing.epoch_index.as_slice();
     let epoch_keys = &timing.epoch_keys;
     let clock_offset = timing.clock_offset.as_slice();
@@ -1564,13 +1564,8 @@ fn emit_merge_cells(
             states.insert(
                 sat,
                 Sp3State {
-                    position: {
-                        // invariant: parsed SP3 coordinates and finite consensus
-                        // arithmetic produce a valid finite ITRF position.
-                        #[allow(clippy::expect_used)]
-                        ItrfPositionM::new(position_m[0], position_m[1], position_m[2])
-                            .expect("valid ITRF position")
-                    },
+                    position: ItrfPositionM::new(position_m[0], position_m[1], position_m[2])
+                        .map_err(|error| Error::InvalidInput(error.to_string()))?,
                     clock_s,
                     velocity: None,
                     clock_rate_s_s: None,
@@ -1611,7 +1606,7 @@ fn emit_merge_cells(
             .collect(),
     });
 
-    MergeCellOutput {
+    Ok(MergeCellOutput {
         out_epochs,
         out_epoch_j2000_s,
         out_states,
@@ -1619,7 +1614,7 @@ fn emit_merge_cells(
         all_sats,
         report,
         continuity_selection,
-    }
+    })
 }
 
 struct MergeTiming {
@@ -2620,6 +2615,7 @@ mod tests {
         Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions,
     };
     use crate::constants::SECONDS_PER_DAY;
+    use crate::frame::ItrfPositionM;
     use crate::id::{GnssSatelliteId, GnssSystem};
     use sha2::{Digest, Sha256};
     use std::collections::BTreeSet;
@@ -3263,6 +3259,21 @@ mod tests {
     #[test]
     fn merge_rejects_an_empty_input() {
         assert!(merge(&[], &MergeOptions::default()).is_err());
+    }
+
+    #[test]
+    fn merge_rejects_nonfinite_consensus_position_without_panicking() {
+        let mut a = sp3_records(&[("G01", [15_000.0, -20_000.0, 5_000.0], None)]);
+        let mut b = sp3_records(&[("G01", [15_000.0, -20_000.0, 5_000.0], None)]);
+        let extreme = ItrfPositionM::new(f64::MAX, 0.0, 0.0).unwrap();
+        a.states[0].get_mut(&gps(1)).unwrap().position = extreme;
+        b.states[0].get_mut(&gps(1)).unwrap().position = extreme;
+
+        let error = match merge(&[a, b], &MergeOptions::default()) {
+            Ok(_) => panic!("non-finite consensus position must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("must be finite"));
     }
 
     #[test]
