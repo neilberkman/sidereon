@@ -152,16 +152,34 @@ pub fn thin_svd(
     Ok((u_out, s_out, vt_out))
 }
 
-/// A dynamic matrix product evaluated by nalgebra with the portable scalar.
+/// A dynamic matrix product evaluated by the fixed-order portable scalar.
 #[inline]
 pub fn product(lhs: &DMatrix<f64>, rhs: &DMatrix<f64>) -> DMatrix<f64> {
-    matrix_to_f64(&(matrix_from_f64(lhs) * matrix_from_f64(rhs)))
+    let lhs = matrix_from_f64(lhs);
+    let rhs = matrix_from_f64(rhs);
+    matrix_to_f64(&product_portable(&lhs, &rhs))
 }
 
-/// A dynamic matrix/vector product evaluated by nalgebra with the portable scalar.
+/// A dynamic matrix/vector product evaluated by the fixed-order portable scalar.
 #[inline]
 pub fn product_vector(lhs: &DMatrix<f64>, rhs: &DVector<f64>) -> DVector<f64> {
-    vector_to_f64(&(matrix_from_f64(lhs) * vector_from_f64(rhs)))
+    let lhs = matrix_from_f64(lhs);
+    let rhs = vector_from_f64(rhs);
+    vector_to_f64(&product_vector_portable(&lhs, &rhs))
+}
+
+/// Dynamic product on the portable scalar. nalgebra's generic (non-`f64`)
+/// path is a fixed-order scalar loop that accumulates each output cell over
+/// ascending `k`; measured against a cache-blocked variant on the CI runner it
+/// was as fast or faster at every size the solvers reach, so the plain path is
+/// the kernel. Do not reorder the reduction: that changes binary64 rounding
+/// and therefore the cross-platform contract.
+fn product_portable(lhs: &DMatrix<Portable>, rhs: &DMatrix<Portable>) -> DMatrix<Portable> {
+    lhs * rhs
+}
+
+fn product_vector_portable(lhs: &DMatrix<Portable>, rhs: &DVector<Portable>) -> DVector<Portable> {
+    lhs * rhs
 }
 
 /// Fixed-size matrix product evaluated through the portable scalar.
@@ -1306,6 +1324,81 @@ mod tests {
                     .to_bits(),
                 libm::fma(left, right, addend).to_bits()
             );
+        }
+    }
+
+    fn naive_product(lhs: &DMatrix<Portable>, rhs: &DMatrix<Portable>) -> DMatrix<Portable> {
+        let mut result = DMatrix::zeros(lhs.nrows(), rhs.ncols());
+        for row in 0..lhs.nrows() {
+            for col in 0..rhs.ncols() {
+                let mut sum = Portable::zero();
+                for k in 0..lhs.ncols() {
+                    sum += lhs[(row, k)] * rhs[(k, col)];
+                }
+                result[(row, col)] = sum;
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn products_are_bit_identical_to_naive_reduction() {
+        let mut state = 0x243f6a8885a308d3_u64;
+        for _ in 0..1_000 {
+            state = state
+                .wrapping_mul(0x9e3779b97f4a7c15)
+                .wrapping_add(0xbf58476d1ce4e5b9);
+            let rows = (state as usize % 71) + 1;
+            state = state
+                .wrapping_mul(0x9e3779b97f4a7c15)
+                .wrapping_add(0xbf58476d1ce4e5b9);
+            let inner = (state as usize % 71) + 1;
+            state = state
+                .wrapping_mul(0x9e3779b97f4a7c15)
+                .wrapping_add(0xbf58476d1ce4e5b9);
+            let cols = (state as usize % 71) + 1;
+
+            let mut next_value = || {
+                state = state
+                    .wrapping_mul(0xd1342543de82ef95)
+                    .wrapping_add(0xa4093822299f31d0);
+                let fraction = f64::from_bits(0x3ff0000000000000 | (state >> 12)) - 1.0;
+                if state & 1 == 0 {
+                    fraction
+                } else {
+                    -fraction
+                }
+            };
+            let lhs = DMatrix::from_fn(rows, inner, |_, _| Portable(next_value()));
+            let rhs = DMatrix::from_fn(inner, cols, |_, _| Portable(next_value()));
+            let expected = naive_product(&lhs, &rhs);
+            let got = product_portable(&lhs, &rhs);
+            assert_eq!(got.nrows(), expected.nrows());
+            assert_eq!(got.ncols(), expected.ncols());
+            for (actual, wanted) in got.iter().zip(expected.iter()) {
+                assert_eq!(
+                    actual.0.to_bits(),
+                    wanted.0.to_bits(),
+                    "blocked product changed a reduction at {rows}x{inner} by {inner}x{cols}"
+                );
+            }
+
+            let rhs_vector =
+                DVector::from_iterator(inner, (0..inner).map(|_| Portable(next_value())));
+            let expected_vector = DVector::from_iterator(
+                rows,
+                (0..rows).map(|row| {
+                    let mut sum = Portable::zero();
+                    for k in 0..inner {
+                        sum += lhs[(row, k)] * rhs_vector[k];
+                    }
+                    sum
+                }),
+            );
+            let got_vector = product_vector_portable(&lhs, &rhs_vector);
+            for (actual, wanted) in got_vector.iter().zip(expected_vector.iter()) {
+                assert_eq!(actual.0.to_bits(), wanted.0.to_bits());
+            }
         }
     }
 }
