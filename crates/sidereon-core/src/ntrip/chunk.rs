@@ -5,6 +5,9 @@ const MAX_LINE: usize = 8 * 1024;
 const MAX_HEX_DIGITS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Incremental decoder for an HTTP chunked response body.
+///
+/// It returns data bytes as complete chunks become available, including when size lines or data span multiple [`Self::push`] calls. It accepts optional chunk extensions, LF or CRLF data terminators, and trailer lines after the zero-size chunk; lines longer than 8 KiB, size fields with more than 8 hexadecimal digits, chunks larger than 16 MiB, and oversized trailer sections produce a parse error.
 pub struct ChunkedDecoder {
     buf: Vec<u8>,
     state: ChunkState,
@@ -28,6 +31,9 @@ impl Default for ChunkedDecoder {
 }
 
 impl ChunkedDecoder {
+    /// Creates an empty decoder ready to read a chunk-size line.
+    ///
+    /// The input buffer, completion flag, stored parse error, and trailer length start empty, false, absent, and zero, respectively.
     pub fn new() -> Self {
         Self {
             buf: Vec::new(),
@@ -38,6 +44,9 @@ impl ChunkedDecoder {
         }
     }
 
+    /// Feeds one fragment of a chunked response body and returns decoded data bytes.
+    ///
+    /// The fragment may end in the middle of a size line, chunk body, data terminator, or trailer; those bytes remain buffered. After the zero-size chunk and its terminating empty trailer line are consumed, later calls return an empty vector; malformed input returns [`Error::Parse`], and later calls return the same stored parse error.
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<u8>> {
         if let Some(message) = &self.poison {
             return Err(Error::Parse(message.clone()));
@@ -117,10 +126,16 @@ impl ChunkedDecoder {
         Ok(out)
     }
 
+    /// Reports whether the zero-size chunk and terminating empty trailer line have been consumed.
+    ///
+    /// [`crate::ntrip::NtripClientMachine`] uses this result to emit `StreamEnded` for a data response or finish a chunked sourcetable.
     pub fn finished(&self) -> bool {
         self.finished
     }
 
+    /// Discards buffered response bytes and returns the decoder to the initial state.
+    ///
+    /// This clears completion, trailer length, and any stored parse error, matching [`Self::new`].
     pub fn reset(&mut self) {
         *self = Self::new();
     }
