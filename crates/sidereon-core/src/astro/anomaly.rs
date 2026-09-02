@@ -13,27 +13,56 @@ const TOL_ABS: f64 = 1.0e-12;
 const TOL_REL: f64 = 1.0e-14;
 const MAX_ITER: usize = 50;
 
+/// Errors returned by the anomaly conversions, [`solve_kepler`], and
+/// [`propagate_kepler`].
 #[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
 pub enum AnomalyError {
+    /// A checked floating-point input was not finite.
     #[error("non-finite input {field}")]
-    NonFinite { field: &'static str },
+    NonFinite {
+        /// Names the input that was NaN or infinite.
+        field: &'static str,
+    },
+    /// The supplied eccentricity was negative.
     #[error("eccentricity must be non-negative")]
     NegativeEccentricity,
+    /// Propagation received a non-positive gravitational parameter.
     #[error("mu must be positive")]
     NonPositiveMu,
+    /// Propagation received a non-positive semi-latus rectum.
     #[error("semi-latus rectum must be positive")]
     NonPositiveSemiLatus,
+    /// A true anomaly was at or beyond the admissible open-orbit limit.
     #[error("true anomaly {nu} is beyond the open-orbit asymptote {limit}")]
-    BeyondAsymptote { nu: f64, limit: f64 },
+    BeyondAsymptote {
+        /// The original, unwrapped true anomaly that failed the domain check.
+        nu: f64,
+        /// The parabolic or hyperbolic open-orbit limit used by the check.
+        limit: f64,
+    },
+    /// The supplied classical elements are inconsistent with their conic or orbit type.
     #[error("inconsistent element {field}")]
-    InconsistentElements { field: &'static str },
+    InconsistentElements {
+        /// Names the invalid semi-major-axis, eccentricity, or inclination field.
+        field: &'static str,
+    },
+    /// The iterative elliptic or hyperbolic solve exhausted its iteration limit.
     #[error("Kepler solve did not converge in {iterations} iters (residual {residual})")]
-    NonConvergent { iterations: usize, residual: f64 },
+    NonConvergent {
+        /// The number of iterations attempted, which is `MAX_ITER` on this error.
+        iterations: usize,
+        /// The residual from the final iteration.
+        residual: f64,
+    },
 }
 
+/// Middle-anomaly result and iteration count returned by [`solve_kepler`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KeplerSolution {
+    /// Eccentric anomaly `E`, hyperbolic anomaly `H`, or Barker anomaly `D`.
+    /// Elliptic results are normalized to `[0, 2*pi)`.
     pub anomaly: f64,
+    /// The converged 1-based iteration count, or zero for the direct parabolic inversion.
     pub iterations: usize,
 }
 
@@ -44,6 +73,18 @@ enum Regime {
     Hyperbolic,
 }
 
+/// Solve Kepler's equation for the conic regime selected by `ecc`.
+///
+/// Mean, eccentric, hyperbolic, and Barker anomalies are in radians; `ecc` is
+/// dimensionless. Elliptic mean anomaly is reduced to `[0, 2*pi)` before the
+/// iterative solve, while the parabolic branch uses Barker's direct inversion.
+///
+/// # Errors
+///
+/// Returns [`AnomalyError::NonFinite`] for a non-finite input,
+/// [`AnomalyError::NegativeEccentricity`] for negative `ecc`, or
+/// [`AnomalyError::NonConvergent`] when an elliptic or hyperbolic iteration
+/// does not reach its residual tolerance.
 pub fn solve_kepler(mean_anom: f64, ecc: f64) -> Result<KeplerSolution, AnomalyError> {
     check_finite(mean_anom, "mean_anom")?;
     validate_ecc(ecc)?;
@@ -68,10 +109,29 @@ pub fn solve_kepler(mean_anom: f64, ecc: f64) -> Result<KeplerSolution, AnomalyE
     }
 }
 
+/// Convert mean anomaly to the middle anomaly for the selected conic regime.
+///
+/// The returned value is the `anomaly` field from [`solve_kepler`]: `E` for an
+/// elliptic orbit, `H` for a hyperbolic orbit, or Barker's `D` at the
+/// parabolic boundary. Angles are in radians and eccentricity is dimensionless.
+///
+/// # Errors
+///
+/// Propagates validation and convergence errors from [`solve_kepler`].
 pub fn mean_to_eccentric(mean_anom: f64, ecc: f64) -> Result<f64, AnomalyError> {
     Ok(solve_kepler(mean_anom, ecc)?.anomaly)
 }
 
+/// Convert eccentric, hyperbolic, or Barker anomaly to mean anomaly.
+///
+/// The elliptic branch computes `E - ecc*sin(E)` and normalizes the result to
+/// `[0, 2*pi)`. The parabolic branch computes `D + D^3/3`, and the hyperbolic
+/// branch computes `ecc*sinh(H) - H`.
+///
+/// # Errors
+///
+/// Returns [`AnomalyError::NonFinite`] if `ecc_anom` or `ecc` is not finite,
+/// or [`AnomalyError::NegativeEccentricity`] if `ecc` is negative.
 pub fn eccentric_to_mean(ecc_anom: f64, ecc: f64) -> Result<f64, AnomalyError> {
     check_finite(ecc_anom, "ecc_anom")?;
     validate_ecc(ecc)?;
@@ -86,6 +146,16 @@ pub fn eccentric_to_mean(ecc_anom: f64, ecc: f64) -> Result<f64, AnomalyError> {
     }
 }
 
+/// Convert eccentric, Barker, or hyperbolic anomaly to true anomaly.
+///
+/// The elliptic and hyperbolic branches use the corresponding sine and cosine
+/// relations, while the parabolic branch uses `nu = 2*atan(D)`. The returned
+/// true anomaly is normalized to `[0, 2*pi)`.
+///
+/// # Errors
+///
+/// Returns [`AnomalyError::NonFinite`] if `ecc_anom` or `ecc` is not finite,
+/// or [`AnomalyError::NegativeEccentricity`] if `ecc` is negative.
 pub fn eccentric_to_true(ecc_anom: f64, ecc: f64) -> Result<f64, AnomalyError> {
     check_finite(ecc_anom, "ecc_anom")?;
     validate_ecc(ecc)?;
@@ -106,6 +176,18 @@ pub fn eccentric_to_true(ecc_anom: f64, ecc: f64) -> Result<f64, AnomalyError> {
     }
 }
 
+/// Convert true anomaly to eccentric, Barker, or hyperbolic anomaly.
+///
+/// Elliptic input is converted with the half-angle relation and normalized to
+/// `[0, 2*pi)`. The parabolic result is `D = tan(nu/2)`, and the hyperbolic
+/// result is obtained with `asinh` after wrapping `nu` to `(-pi, pi]`.
+///
+/// # Errors
+///
+/// Returns [`AnomalyError::NonFinite`] if `true_anom` or `ecc` is not finite,
+/// [`AnomalyError::NegativeEccentricity`] if `ecc` is negative, or
+/// [`AnomalyError::BeyondAsymptote`] when an open-orbit input is at or beyond
+/// its parabolic or hyperbolic limit.
 pub fn true_to_eccentric(true_anom: f64, ecc: f64) -> Result<f64, AnomalyError> {
     check_finite(true_anom, "true_anom")?;
     validate_ecc(ecc)?;
@@ -135,16 +217,48 @@ pub fn true_to_eccentric(true_anom: f64, ecc: f64) -> Result<f64, AnomalyError> 
     }
 }
 
+/// Convert mean anomaly directly to normalized true anomaly.
+///
+/// This composes [`mean_to_eccentric`] with [`eccentric_to_true`], selecting
+/// `E`, `H`, or `D` from `ecc` before returning the true anomaly in
+/// `[0, 2*pi)`.
+///
+/// # Errors
+///
+/// Returns the first validation, convergence, or open-orbit-domain error from
+/// the two conversions.
 pub fn mean_to_true(mean_anom: f64, ecc: f64) -> Result<f64, AnomalyError> {
     let ecc_anom = mean_to_eccentric(mean_anom, ecc)?;
     eccentric_to_true(ecc_anom, ecc)
 }
 
+/// Convert true anomaly directly to mean anomaly.
+///
+/// This composes [`true_to_eccentric`] with [`eccentric_to_mean`]. Open-orbit
+/// domain checks therefore occur before the mean anomaly is evaluated.
+///
+/// # Errors
+///
+/// Returns the first validation or open-orbit-domain error from the two
+/// conversions.
 pub fn true_to_mean(true_anom: f64, ecc: f64) -> Result<f64, AnomalyError> {
     let ecc_anom = true_to_eccentric(true_anom, ecc)?;
     eccentric_to_mean(ecc_anom, ecc)
 }
 
+/// Propagate classical elements for a two-body Keplerian orbit by `dt`.
+///
+/// The input is copied before propagation. Circular inclined and circular
+/// equatorial elements advance `arglat` and `truelon`, respectively; eccentric
+/// orbit types advance `nu` through mean anomaly using `mu` and the relevant
+/// `a` or `p`. All other fields are preserved.
+///
+/// # Errors
+///
+/// Returns [`AnomalyError::NonFinite`], [`AnomalyError::NonPositiveMu`],
+/// [`AnomalyError::NonPositiveSemiLatus`], or
+/// [`AnomalyError::InconsistentElements`] when the inputs fail validation, or
+/// an anomaly-conversion error when the propagated anomaly cannot be computed.
 pub fn propagate_kepler(
     elements: &ClassicalElements,
     mu: f64,
