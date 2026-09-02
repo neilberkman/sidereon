@@ -57,6 +57,12 @@ Supersedes 1.4.0. Solutions are unchanged; a diagnostic is restored.
 
 ### Fixed
 
+- A RINEX NAV record probe sliced a line at a fixed byte offset and panicked
+  when the header bytes were not a UTF-8 character boundary (found by fuzzing);
+  it now inspects bytes and never panics on malformed input.
+- A DTED coordinate field ending in a multi-byte character was sliced at an
+  invalid boundary and panicked (found by fuzzing); it now returns a typed
+  error.
 - The core trust-region backend no longer overrides the solver's dot-product
   and matrix-vector reductions. Those fallbacks were already portable
   fixed-order arithmetic; overriding them in 1.4.0 summed the terminal
