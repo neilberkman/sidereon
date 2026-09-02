@@ -23,12 +23,23 @@ pub(crate) enum RowKind {
 /// transmit-time ECEF positions at an epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SatMeas {
+    /// Physical satellite id copied from the paired base and rover observations.
+    /// Row construction uses it for same-constellation reference selection and
+    /// double-difference row labels.
     pub sat: String,
     /// Single-difference ambiguity id (gap-segmentation already applied upstream).
     pub sd_ambiguity_id: String,
+    /// Base receiver's selected code measurement in meters. Row construction
+    /// subtracts it from [`Self::rover_code_m`] to form the code single difference.
     pub base_code_m: f64,
+    /// Base receiver's carrier-phase measurement in meters. Row construction
+    /// subtracts it from [`Self::rover_phase_m`] to form the phase single difference.
     pub base_phase_m: f64,
+    /// Rover receiver's selected code measurement in meters. Row construction
+    /// subtracts [`Self::base_code_m`] to form the code single difference.
     pub rover_code_m: f64,
+    /// Rover receiver's carrier-phase measurement in meters. Row construction
+    /// subtracts [`Self::base_phase_m`] to form the phase single difference.
     pub rover_phase_m: f64,
     /// Transmit-time satellite ECEF position (metres) for the base receiver.
     pub base_tx_pos: [f64; 3],
@@ -48,7 +59,13 @@ pub struct SatMeas {
 /// the historical single-system epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Epoch {
+    /// Reference measurements present in this epoch, with one selected
+    /// satellite per constellation when that satellite is observed. Row
+    /// construction uses each entry as its constellation's single-difference reference.
     pub references: Vec<SatMeas>,
+    /// Available non-reference measurements in sorted satellite-id order. Row
+    /// construction emits one code row and one phase row for each entry, and
+    /// the sequential update considers each entry for ambiguity resolution.
     pub nonref: Vec<SatMeas>,
     /// Optional rover ECEF velocity in metres/second for the velocity-propagated
     /// predict branch. The value is an epoch input, not carried filter state.
@@ -120,7 +137,11 @@ pub(super) fn is_float_only_system(sat: &str, float_only: &[GnssSystem]) -> bool
 pub enum StochasticModel {
     /// `SD variance = 2σ²`; with `elevation_weighting`, σ is first scaled by
     /// `1/max(sin el, MIN_ELEVATION_SIN)`.
-    Simple { elevation_weighting: bool },
+    Simple {
+        /// When true, scales sigma by the floor-clamped elevation sine before
+        /// computing the variance; when false, uses the elevation-independent `2σ²`.
+        elevation_weighting: bool,
+    },
     /// RTKLIB floor-plus-elevation: `SD variance = 2(σ² + σ²/sin²el)` with the
     /// same clamped `sin el`.
     Rtklib,
@@ -132,9 +153,16 @@ pub(crate) const MIN_ELEVATION_SIN: f64 = 0.05;
 /// Measurement-model configuration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeasModel {
+    /// Finite positive code-measurement standard deviation in meters, used to
+    /// compute the code single-difference variance for each satellite and reference.
     pub code_sigma_m: f64,
+    /// Finite positive carrier-phase standard deviation in meters, used to
+    /// compute the phase single-difference variance for each satellite and reference.
     pub phase_sigma_m: f64,
+    /// Selects the first-order RTKLIB Sagnac correction for geometric ranges;
+    /// false selects the uncorrected Euclidean range recipe.
     pub sagnac: bool,
+    /// Variance model applied to both code and carrier-phase single differences.
     pub stochastic: StochasticModel,
 }
 
