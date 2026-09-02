@@ -23,6 +23,7 @@ jobs:
         run: |
           set -euo pipefail
           for target_path in fuzz/fuzz_targets/*.rs; do
+            grep -q '^#!\[no_main\]' "$target_path" || continue
             target=${target_path##*/}
             target=${target%.rs}
             cargo +nightly fuzz run "$target" -- -runs=0 -max_total_time=30
@@ -32,10 +33,11 @@ jobs:
     name: scheduled bounded fuzz
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    # The 54 targets have 108 minutes of fuzz budget before checkout, toolchain,
-    # cargo-fuzz installation, and compilation. Leave enough headroom for cold
-    # runners while preserving the full two-minute gate per target.
-    timeout-minutes: 90
+    # The directory contains 54 .rs files: 53 executable targets and one shared
+    # helper. The executable targets have 106 minutes of fuzz budget before
+    # checkout, toolchain, cargo-fuzz installation, and compilation. Leave enough
+    # headroom for cold runners while preserving the full two-minute gate per target.
+    timeout-minutes: 130
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -46,6 +48,7 @@ jobs:
         run: |
           set -euo pipefail
           for target_path in fuzz/fuzz_targets/*.rs; do
+            grep -q '^#!\[no_main\]' "$target_path" || continue
             target=${target_path##*/}
             target=${target%.rs}
             cargo +nightly fuzz run "$target" -- -max_total_time=120
