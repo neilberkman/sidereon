@@ -1,3 +1,5 @@
+#![warn(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 //! Multi-source SP3 combination: clock-datum alignment across analysis centers.
 //!
 //! Precise clock products from different analysis centers are referenced to
@@ -839,6 +841,9 @@ impl MergeReport {
                 });
                 current_key = key;
             }
+            // invariant: the branch above pushes the first aggregate before this
+            // lookup, and every later aggregate remains in `out`.
+            #[allow(clippy::expect_used)]
             let agg = out.last_mut().expect("just pushed");
             agg.position_max_m = agg.position_max_m.max(m.position_max_m);
             if m.position_members >= 2 {
@@ -955,103 +960,232 @@ fn fold_max(acc: Option<f64>, value: f64) -> f64 {
 /// normal source counts and uses a deterministic greedy fallback above the exact
 /// search cap, so hostile disagreement graphs remain bounded.
 pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)> {
-    if sources.is_empty() {
-        return Err(Error::InvalidInput(
-            "merge requires at least one SP3 product".into(),
-        ));
-    }
-
-    validate_merge_options(opts)?;
-
-    // Inputs must be combinable: epochs are matched in one exact product time
-    // system, and positions are only comparable in an exactly common coordinate
-    // system / frame unless the caller explicitly opted into one of the audited
-    // reconciliation mechanisms below.
-    let base = &sources[0].header;
-    for s in &sources[1..] {
-        if s.header.time_system != base.time_system {
-            return Err(Error::InvalidInput(format!(
-                "merge inputs have mismatched SP3 time systems ({:?} vs {:?})",
-                base.time_system, s.header.time_system
-            )));
-        }
-    }
-
-    let (prepared_sources, frame_reconciliations) = reconcile_sp3_coordinate_labels(sources, opts)?;
+    let prepared = prepare_merge_inputs(sources, opts)?;
+    let prepared_sources = prepared.sources;
+    let frame_reconciliations = prepared.frame_reconciliations;
     let sources = prepared_sources.as_slice();
 
-    // floored-J2000-second -> epoch index, per source.
-    let epoch_index: Vec<BTreeMap<i64, usize>> = sources
-        .iter()
-        .map(|s| {
-            s.epochs
-                .iter()
-                .enumerate()
-                .filter_map(|(i, ep)| {
-                    sp3_epoch_j2000_seconds(s, i, ep).map(|sec| (sec.floor() as i64, i))
-                })
-                .collect()
-        })
-        .collect();
+    let timing = prepare_merge_timing(sources, opts)?;
+    let epoch_interval_s = timing.epoch_interval_s;
+    let cells = emit_merge_cells(sources, opts, &timing, frame_reconciliations)?;
 
-    let epoch_interval_s = resolve_common_epoch_interval(sources, opts.target_epoch_interval_s)?;
+    let synthesized = synthesize_merge_header(
+        sources,
+        &cells.out_epochs,
+        &cells.out_epoch_j2000_s,
+        &cells.all_sats,
+        epoch_interval_s,
+    )?;
+    let (merged, mut report, continuity_selection) =
+        emit_merged_product(sources, synthesized, cells);
 
-    // Per-source per-epoch clock-datum offset relative to source 0. Source 0 is
-    // the datum, so its offset is identically zero.
-    let clock_offset: Vec<BTreeMap<i64, f64>> = sources
-        .iter()
-        .enumerate()
-        .map(|(idx, s)| {
-            if idx == 0 {
-                BTreeMap::new()
-            } else {
-                clock_reference_offset(&sources[0], s, opts.clock_min_common)
-                    .into_iter()
-                    .filter_map(|o| {
-                        instant_to_j2000_seconds(&o.epoch)
-                            .map(|sec| (sec.floor() as i64, o.offset_s))
-                    })
-                    .collect()
-            }
-        })
-        .collect();
-
-    // Union of epochs (by floored second), retaining the representative Instant
-    // from the earliest-listed source on duplicate keys. This is what lets a
-    // dense source fill cells absent from a sparse preferred source.
-    let mut epoch_keys: BTreeMap<i64, Instant> = BTreeMap::new();
-    for source in sources {
-        for (idx, ep) in source.epochs.iter().enumerate() {
-            if let Some(sec) = sp3_epoch_j2000_seconds(source, idx, ep) {
-                epoch_keys.entry(sec.floor() as i64).or_insert(*ep);
-            }
-        }
-    }
-
-    // Restrict the union to the resolved output grid (anchored at the earliest
-    // union epoch), dropping off-grid epochs by exact subset selection. This is
-    // a no-op at the default finest cadence and performs deterministic
-    // decimation for an explicit coarser target.
-    if let Some((&anchor, _)) = epoch_keys.iter().next() {
-        let step = epoch_interval_s.round() as i64;
-        if step > 0 {
-            epoch_keys.retain(|&key, _| (key - anchor).rem_euclid(step) == 0);
-        }
-    }
-
-    if epoch_keys.is_empty() {
-        return Err(Error::InvalidInput(
-            "merge inputs have no epochs on the requested time grid".into(),
+    if let Some(continuity_options) = opts.verify_continuity.as_ref() {
+        report.continuity = Some(verify_merged_continuity(
+            &merged,
+            continuity_options,
+            &continuity_selection,
         ));
     }
+
+    Ok((merged, report))
+}
+
+struct PreparedMergeInputs {
+    sources: Vec<Sp3>,
+    frame_reconciliations: Vec<Sp3FrameReconciliation>,
+}
+
+struct MergeCellOutput {
+    out_epochs: Vec<Instant>,
+    out_epoch_j2000_s: Vec<f64>,
+    out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
+    out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
+    all_sats: BTreeSet<GnssSatelliteId>,
+    report: MergeReport,
+    continuity_selection: BTreeMap<(GnssSatelliteId, i64), CellSelection>,
+}
+
+struct MergeHeaderOutput {
+    header: Sp3Header,
+    mandatory_header_lines: usize,
+    declared_satellite_tokens: Vec<String>,
+    epoch_position_tokens: Vec<Vec<String>>,
+    epoch_state_record_sequence: Vec<Vec<(char, String)>>,
+}
+
+/// Assemble the canonical `Sp3` product from the ordered merge stages without
+/// changing the serializer-facing header counts, records, or source comment.
+fn emit_merged_product(
+    sources: &[Sp3],
+    synthesized: MergeHeaderOutput,
+    cells: MergeCellOutput,
+) -> (
+    Sp3,
+    MergeReport,
+    BTreeMap<(GnssSatelliteId, i64), CellSelection>,
+) {
+    let MergeHeaderOutput {
+        header,
+        mandatory_header_lines,
+        declared_satellite_tokens,
+        epoch_position_tokens,
+        epoch_state_record_sequence,
+    } = synthesized;
+    let MergeCellOutput {
+        out_epochs,
+        out_epoch_j2000_s,
+        out_states,
+        out_raw,
+        report,
+        continuity_selection,
+        ..
+    } = cells;
+    let merged = Sp3 {
+        header,
+        epochs: out_epochs,
+        declared_num_epochs: out_epoch_j2000_s.len() as u64,
+        declared_start_j2000_s: out_epoch_j2000_s.first().copied(),
+        terminal_record: TerminalRecordState::valid(),
+        satellite_header_lines: mandatory_header_lines,
+        accuracy_header_lines: mandatory_header_lines,
+        time_system_header_lines: 2,
+        float_header_lines: 2,
+        integer_header_lines: 2,
+        header_comment_lines: 4,
+        declared_satellite_count: Some(declared_satellite_tokens.len()),
+        declared_satellite_tokens,
+        epoch_velocity_tokens: vec![Vec::new(); epoch_position_tokens.len()],
+        epoch_position_tokens,
+        epoch_state_record_sequence,
+        epoch_j2000_s: out_epoch_j2000_s,
+        states: out_states,
+        interp_raw: out_raw,
+        comments: vec![format!("MERGED from {} SP3 products", sources.len())],
+        skipped_records: sources.iter().map(|s| s.skipped_records).sum(),
+    };
+    (merged, report, continuity_selection)
+}
+
+/// Consume ordered merged cells and source metadata, and produce the synthetic
+/// SP3 header plus the canonical output record-token sequences.
+fn synthesize_merge_header(
+    sources: &[Sp3],
+    out_epochs: &[Instant],
+    out_epoch_j2000_s: &[f64],
+    all_sats: &BTreeSet<GnssSatelliteId>,
+    epoch_interval_s: f64,
+) -> Result<MergeHeaderOutput> {
+    // Base the non-epoch metadata on a source product, but derive the first-epoch
+    // header fields from the merged grid itself. Mixed cadence / coverage can make
+    // the merged first epoch later than every input's first epoch, so cloning
+    // those fields from any input would make the `##` line stale.
+    let first_key = Some(out_epoch_j2000_s[0].floor() as i64);
+    let base_idx = sources
+        .iter()
+        .position(|s| {
+            s.epochs
+                .first()
+                .and_then(|ep| sp3_epoch_j2000_seconds(s, 0, ep))
+                .map(|sec| sec.floor() as i64)
+                == first_key
+        })
+        .or_else(|| {
+            sources
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    s.epochs
+                        .first()
+                        .and_then(|ep| sp3_epoch_j2000_seconds(s, 0, ep))
+                        .map(|sec| (sec, i))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+                .map(|(_, i)| i)
+        })
+        .unwrap_or(0);
+    let first_epoch_header = first_epoch_header_fields(&out_epochs[0]).ok_or_else(|| {
+        Error::InvalidInput("merged SP3 first epoch cannot be represented in header fields".into())
+    })?;
+
+    let satellites: Vec<_> = all_sats.iter().copied().collect();
+    let satellite_accuracy_codes = satellites
+        .iter()
+        .map(|sat| {
+            sources[base_idx]
+                .header
+                .satellites
+                .iter()
+                .position(|base_sat| base_sat == sat)
+                .and_then(|idx| {
+                    sources[base_idx]
+                        .header
+                        .satellite_accuracy_codes
+                        .get(idx)
+                        .copied()
+                })
+                .unwrap_or(0)
+        })
+        .collect();
+
+    let header = Sp3Header {
+        num_epochs: out_epochs.len() as u64,
+        satellites,
+        satellite_accuracy_codes,
+        data_type: Sp3DataType::Position,
+        gnss_week: first_epoch_header.gnss_week,
+        seconds_of_week: first_epoch_header.seconds_of_week,
+        epoch_interval_s,
+        mjd: first_epoch_header.mjd,
+        mjd_fraction: first_epoch_header.mjd_fraction,
+        ..sources[base_idx].header.clone()
+    };
+
+    let mandatory_header_lines = 5.max(header.satellites.len().div_ceil(17));
+    let declared_satellite_tokens = header
+        .satellites
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let epoch_position_tokens = vec![declared_satellite_tokens.clone(); out_epochs.len()];
+    let epoch_state_record_sequence = epoch_position_tokens
+        .iter()
+        .map(|tokens| {
+            tokens
+                .iter()
+                .cloned()
+                .map(|token| ('P', token))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    Ok(MergeHeaderOutput {
+        header,
+        mandatory_header_lines,
+        declared_satellite_tokens,
+        epoch_position_tokens,
+        epoch_state_record_sequence,
+    })
+}
+
+/// Consume ordered merge timing data and emit every accepted epoch/satellite cell,
+/// preserving consensus, provenance, report, and native interpolation values.
+fn emit_merge_cells(
+    sources: &[Sp3],
+    opts: &MergeOptions,
+    timing: &MergeTiming,
+    frame_reconciliations: Vec<Sp3FrameReconciliation>,
+) -> Result<MergeCellOutput> {
+    let epoch_index = timing.epoch_index.as_slice();
+    let epoch_keys = &timing.epoch_keys;
+    let clock_offset = timing.clock_offset.as_slice();
 
     let precedence_source_for_sat = if opts.combine == MergeCombine::Precedence
         && opts.precedence_scope == MergePrecedenceScope::SatelliteArc
     {
         Some(precedence_sources_for_satellites(
             sources,
-            &epoch_index,
-            &epoch_keys,
+            epoch_index,
+            epoch_keys,
             opts.systems.as_ref(),
         ))
     } else {
@@ -1087,7 +1221,7 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     };
     let mut all_sats: BTreeSet<GnssSatelliteId> = BTreeSet::new();
 
-    for (&key, &epoch) in &epoch_keys {
+    for (&key, &epoch) in epoch_keys {
         out_epochs.push(epoch);
         out_epoch_j2000_s.push(key as f64);
         let mut states: BTreeMap<GnssSatelliteId, Sp3State> = BTreeMap::new();
@@ -1282,6 +1416,9 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                         (Some(clk[preferred_idx].1), vec![preferred_idx])
                     }
                     Some(preferred_idx) if opts.outlier_reject.is_some() => {
+                        // invariant: this match arm is guarded by
+                        // `outlier_reject.is_some()` immediately above.
+                        #[allow(clippy::expect_used)]
                         let reject = opts.outlier_reject.expect("checked above");
                         let vals: Vec<f64> = clk.iter().map(|(_, c, _)| *c).collect();
                         let cluster =
@@ -1428,7 +1565,7 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
                 sat,
                 Sp3State {
                     position: ItrfPositionM::new(position_m[0], position_m[1], position_m[2])
-                        .expect("valid ITRF position"),
+                        .map_err(|error| Error::InvalidInput(error.to_string()))?,
                     clock_s,
                     velocity: None,
                     clock_rate_s_s: None,
@@ -1453,88 +1590,6 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
         out_raw.push(raws);
     }
 
-    // Base the non-epoch metadata on a source product, but derive the first-epoch
-    // header fields from the merged grid itself. Mixed cadence / coverage can make
-    // the merged first epoch later than every input's first epoch, so cloning
-    // those fields from any input would make the `##` line stale.
-    let first_key = Some(out_epoch_j2000_s[0].floor() as i64);
-    let base_idx = sources
-        .iter()
-        .position(|s| {
-            s.epochs
-                .first()
-                .and_then(|ep| sp3_epoch_j2000_seconds(s, 0, ep))
-                .map(|sec| sec.floor() as i64)
-                == first_key
-        })
-        .or_else(|| {
-            sources
-                .iter()
-                .enumerate()
-                .filter_map(|(i, s)| {
-                    s.epochs
-                        .first()
-                        .and_then(|ep| sp3_epoch_j2000_seconds(s, 0, ep))
-                        .map(|sec| (sec, i))
-                })
-                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
-                .map(|(_, i)| i)
-        })
-        .unwrap_or(0);
-    let first_epoch_header = first_epoch_header_fields(&out_epochs[0]).ok_or_else(|| {
-        Error::InvalidInput("merged SP3 first epoch cannot be represented in header fields".into())
-    })?;
-
-    let satellites: Vec<_> = all_sats.into_iter().collect();
-    let satellite_accuracy_codes = satellites
-        .iter()
-        .map(|sat| {
-            sources[base_idx]
-                .header
-                .satellites
-                .iter()
-                .position(|base_sat| base_sat == sat)
-                .and_then(|idx| {
-                    sources[base_idx]
-                        .header
-                        .satellite_accuracy_codes
-                        .get(idx)
-                        .copied()
-                })
-                .unwrap_or(0)
-        })
-        .collect();
-
-    let header = Sp3Header {
-        num_epochs: out_epochs.len() as u64,
-        satellites,
-        satellite_accuracy_codes,
-        data_type: Sp3DataType::Position,
-        gnss_week: first_epoch_header.gnss_week,
-        seconds_of_week: first_epoch_header.seconds_of_week,
-        epoch_interval_s,
-        mjd: first_epoch_header.mjd,
-        mjd_fraction: first_epoch_header.mjd_fraction,
-        ..sources[base_idx].header.clone()
-    };
-
-    let mandatory_header_lines = 5.max(header.satellites.len().div_ceil(17));
-    let declared_satellite_tokens = header
-        .satellites
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    let epoch_position_tokens = vec![declared_satellite_tokens.clone(); out_epochs.len()];
-    let epoch_state_record_sequence = epoch_position_tokens
-        .iter()
-        .map(|tokens| {
-            tokens
-                .iter()
-                .cloned()
-                .map(|token| ('P', token))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
     report.provenance = opts.provenance.map(|mode| MergeProvenance {
         mode,
         cells: prov_cells,
@@ -1551,39 +1606,130 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
             .collect(),
     });
 
-    let merged = Sp3 {
-        header,
-        epochs: out_epochs,
-        declared_num_epochs: out_epoch_j2000_s.len() as u64,
-        declared_start_j2000_s: out_epoch_j2000_s.first().copied(),
-        terminal_record: TerminalRecordState::valid(),
-        satellite_header_lines: mandatory_header_lines,
-        accuracy_header_lines: mandatory_header_lines,
-        time_system_header_lines: 2,
-        float_header_lines: 2,
-        integer_header_lines: 2,
-        header_comment_lines: 4,
-        declared_satellite_count: Some(declared_satellite_tokens.len()),
-        declared_satellite_tokens,
-        epoch_velocity_tokens: vec![Vec::new(); epoch_position_tokens.len()],
-        epoch_position_tokens,
-        epoch_state_record_sequence,
-        epoch_j2000_s: out_epoch_j2000_s,
-        states: out_states,
-        interp_raw: out_raw,
-        comments: vec![format!("MERGED from {} SP3 products", sources.len())],
-        skipped_records: sources.iter().map(|s| s.skipped_records).sum(),
-    };
+    Ok(MergeCellOutput {
+        out_epochs,
+        out_epoch_j2000_s,
+        out_states,
+        out_raw,
+        all_sats,
+        report,
+        continuity_selection,
+    })
+}
 
-    if let Some(continuity_options) = opts.verify_continuity.as_ref() {
-        report.continuity = Some(verify_merged_continuity(
-            &merged,
-            continuity_options,
-            &continuity_selection,
+struct MergeTiming {
+    epoch_index: Vec<BTreeMap<i64, usize>>,
+    epoch_interval_s: f64,
+    clock_offset: Vec<BTreeMap<i64, f64>>,
+    epoch_keys: BTreeMap<i64, Instant>,
+}
+
+/// Consume raw SP3 sources and merge options, validate their combinability, and
+/// produce frame-reconciled sources plus the reconciliation audit trail.
+fn prepare_merge_inputs(sources: &[Sp3], opts: &MergeOptions) -> Result<PreparedMergeInputs> {
+    if sources.is_empty() {
+        return Err(Error::InvalidInput(
+            "merge requires at least one SP3 product".into(),
         ));
     }
 
-    Ok((merged, report))
+    validate_merge_options(opts)?;
+
+    // Inputs must be combinable: epochs are matched in one exact product time
+    // system, and positions are only comparable in an exactly common coordinate
+    // system / frame unless the caller explicitly opted into one of the audited
+    // reconciliation mechanisms below.
+    let base = &sources[0].header;
+    for s in &sources[1..] {
+        if s.header.time_system != base.time_system {
+            return Err(Error::InvalidInput(format!(
+                "merge inputs have mismatched SP3 time systems ({:?} vs {:?})",
+                base.time_system, s.header.time_system
+            )));
+        }
+    }
+
+    let (sources, frame_reconciliations) = reconcile_sp3_coordinate_labels(sources, opts)?;
+    Ok(PreparedMergeInputs {
+        sources,
+        frame_reconciliations,
+    })
+}
+
+/// Consume frame-reconciled sources and merge timing options, and produce the
+/// ordered epoch indexes, clock-datum offsets, cadence, and union output grid.
+fn prepare_merge_timing(sources: &[Sp3], opts: &MergeOptions) -> Result<MergeTiming> {
+    // floored-J2000-second -> epoch index, per source.
+    let epoch_index: Vec<BTreeMap<i64, usize>> = sources
+        .iter()
+        .map(|s| {
+            s.epochs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, ep)| {
+                    sp3_epoch_j2000_seconds(s, i, ep).map(|sec| (sec.floor() as i64, i))
+                })
+                .collect()
+        })
+        .collect();
+
+    let epoch_interval_s = resolve_common_epoch_interval(sources, opts.target_epoch_interval_s)?;
+
+    // Per-source per-epoch clock-datum offset relative to source 0. Source 0 is
+    // the datum, so its offset is identically zero.
+    let clock_offset: Vec<BTreeMap<i64, f64>> = sources
+        .iter()
+        .enumerate()
+        .map(|(idx, s)| {
+            if idx == 0 {
+                BTreeMap::new()
+            } else {
+                clock_reference_offset(&sources[0], s, opts.clock_min_common)
+                    .into_iter()
+                    .filter_map(|o| {
+                        instant_to_j2000_seconds(&o.epoch)
+                            .map(|sec| (sec.floor() as i64, o.offset_s))
+                    })
+                    .collect()
+            }
+        })
+        .collect();
+
+    // Union of epochs (by floored second), retaining the representative Instant
+    // from the earliest-listed source on duplicate keys. This is what lets a
+    // dense source fill cells absent from a sparse preferred source.
+    let mut epoch_keys: BTreeMap<i64, Instant> = BTreeMap::new();
+    for source in sources {
+        for (idx, ep) in source.epochs.iter().enumerate() {
+            if let Some(sec) = sp3_epoch_j2000_seconds(source, idx, ep) {
+                epoch_keys.entry(sec.floor() as i64).or_insert(*ep);
+            }
+        }
+    }
+
+    // Restrict the union to the resolved output grid (anchored at the earliest
+    // union epoch), dropping off-grid epochs by exact subset selection. This is
+    // a no-op at the default finest cadence and performs deterministic
+    // decimation for an explicit coarser target.
+    if let Some((&anchor, _)) = epoch_keys.iter().next() {
+        let step = epoch_interval_s.round() as i64;
+        if step > 0 {
+            epoch_keys.retain(|&key, _| (key - anchor).rem_euclid(step) == 0);
+        }
+    }
+
+    if epoch_keys.is_empty() {
+        return Err(Error::InvalidInput(
+            "merge inputs have no epochs on the requested time grid".into(),
+        ));
+    }
+
+    Ok(MergeTiming {
+        epoch_index,
+        epoch_interval_s,
+        clock_offset,
+        epoch_keys,
+    })
 }
 
 /// Run the continuity check over the merged product and attribute each
@@ -2276,13 +2422,18 @@ fn combine_axis(members: &[(usize, f64)], how: MergeCombine) -> f64 {
         MergeCombine::Mean => members.iter().map(|(_, v)| *v).sum::<f64>() / members.len() as f64,
         MergeCombine::Median => {
             let mut vals: Vec<f64> = members.iter().map(|(_, v)| *v).collect();
+            // invariant: combine_axis is called only with a non-empty consensus
+            // cluster selected by the preceding merge stage.
+            #[allow(clippy::expect_used)]
             median(&mut vals).expect("consensus cluster is non-empty")
         }
-        MergeCombine::Precedence => members
-            .iter()
-            .min_by_key(|(s, _)| *s)
-            .map(|(_, v)| *v)
-            .expect("consensus cluster is non-empty"),
+        MergeCombine::Precedence => {
+            let preferred = members.iter().min_by_key(|(s, _)| *s).map(|(_, v)| *v);
+            // invariant: combine_axis is called only with a non-empty consensus
+            // cluster selected by the preceding merge stage.
+            #[allow(clippy::expect_used)]
+            preferred.expect("consensus cluster is non-empty")
+        }
     }
 }
 
@@ -2455,6 +2606,7 @@ fn transition_between(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::super::Sp3;
     use super::{
@@ -2463,7 +2615,9 @@ mod tests {
         Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions,
     };
     use crate::constants::SECONDS_PER_DAY;
+    use crate::frame::ItrfPositionM;
     use crate::id::{GnssSatelliteId, GnssSystem};
+    use sha2::{Digest, Sha256};
     use std::collections::BTreeSet;
 
     /// One satellite sample in a synthetic SP3 epoch: token, ECEF position
@@ -2643,6 +2797,126 @@ mod tests {
         }
         body.push_str("EOF\n");
         Sp3::parse(body.as_bytes()).expect("parse test sp3")
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn frozen_merge_output_hashes() {
+        let union_a = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(200.0)),
+            ("G03", [17000.0, -22000.0, 7000.0], Some(300.0)),
+        ]);
+        let union_b = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(200.0)),
+        ]);
+
+        let mean_a = sp3_records(&[("G01", [15000.000, -20000.0, 5000.0], Some(100.0))]);
+        let mean_b = sp3_records(&[("G01", [15000.003, -20000.0, 5000.0], Some(100.0))]);
+        let mean_c = sp3_records(&[("G01", [15000.006, -20000.0, 5000.0], Some(100.0))]);
+        let mean_options = MergeOptions {
+            position_tolerance_m: 10.0,
+            min_agree: 3,
+            combine: MergeCombine::Mean,
+            ..MergeOptions::default()
+        };
+
+        let preferred = sp3_records(&[("G01", [15000.0, -20000.0, 5000.0], Some(100.0))]);
+        let agreeing = sp3_records(&[("G01", [15000.001, -20000.0, 5000.0], Some(100.0))]);
+        let outlier = sp3_records(&[("G01", [15002.0, -20000.0, 5000.0], Some(100.0))]);
+        let guarded_precedence_options = MergeOptions {
+            combine: MergeCombine::Precedence,
+            min_agree: 2,
+            outlier_reject: Some(OutlierRejectOptions {
+                position_tolerance_m: 2.0,
+                clock_tolerance_s: 1.0e-6,
+            }),
+            ..MergeOptions::default()
+        };
+
+        let mixed_a = sp3_epochs(
+            0.0,
+            &[
+                &[("G01", [15000.0, -20000.0, 5000.0], Some(100.0))],
+                &[("G01", [15001.0, -20001.0, 5001.0], Some(101.0))],
+                &[("G01", [15002.0, -20002.0, 5002.0], Some(102.0))],
+            ],
+            900.0,
+            "IGS14",
+        );
+        let mixed_b = sp3_epochs(
+            450.0,
+            &[
+                &[("G01", [15010.0, -20010.0, 5010.0], Some(110.0))],
+                &[("G01", [15001.0, -20001.0, 5001.0], Some(101.0))],
+                &[("G01", [15011.0, -20011.0, 5011.0], Some(111.0))],
+                &[("G01", [15002.0, -20002.0, 5002.0], Some(102.0))],
+            ],
+            450.0,
+            "IGS14",
+        );
+        let mixed_options = MergeOptions {
+            min_agree: 1,
+            ..MergeOptions::default()
+        };
+
+        let cases = [
+            (
+                "union coverage",
+                vec![union_a, union_b],
+                MergeOptions::default(),
+                "f4ae5c18581e9d5805085f62525d1c912590cd41297bfdc0eb6322b8e48ad598",
+            ),
+            (
+                "mean consensus",
+                vec![mean_a, mean_b, mean_c],
+                mean_options,
+                "c4080215254a49dd4800348bc1d064e36e2da7a79dd499671588ae54566152a8",
+            ),
+            (
+                "guarded precedence",
+                vec![preferred, agreeing, outlier],
+                guarded_precedence_options,
+                "5fc60fe118f462faae9f3d25b579ae4917ee97796a79cf3737aaf8d21a6a7507",
+            ),
+            (
+                "mixed cadence union",
+                vec![mixed_a, mixed_b],
+                mixed_options,
+                "b18983adea82b57990a1bdfe88b4816e593472775b395ec611654894a9f54cdd",
+            ),
+        ];
+
+        for (name, sources, options, expected) in cases {
+            let (merged, _) = merge(&sources, &options).expect("frozen merge case");
+            let actual = sha256_hex(merged.to_sp3_string().as_bytes());
+            assert_eq!(actual, expected, "{name}");
+        }
+
+        #[cfg(sidereon_repo_tests)]
+        {
+            fn load(name: &str) -> Sp3 {
+                let path = format!("{}/tests/fixtures/sp3/{name}", env!("CARGO_MANIFEST_DIR"));
+                let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+                Sp3::parse(&bytes).unwrap_or_else(|error| panic!("{name}: {error}"))
+            }
+
+            let sources = [
+                load("COD0OPSFIN_20261200945_02H30M_15M_ORB_trim.SP3"),
+                load("GFZ0OPSFIN_20261200945_02H30M_15M_ORB_trim.SP3"),
+                load("JPL0OPSFIN_20261200945_02H30M_15M_ORB_trim.SP3"),
+            ];
+            let (merged, _) = merge(&sources, &MergeOptions::default()).expect("real frozen merge");
+            assert_eq!(
+                sha256_hex(merged.to_sp3_string().as_bytes()),
+                "850c10dfc9b3394bc72d6c3bcd96634310b8d654a9908ed068b7fe165d224442",
+                "real three-center merge"
+            );
+        }
     }
 
     #[test]
@@ -2985,6 +3259,21 @@ mod tests {
     #[test]
     fn merge_rejects_an_empty_input() {
         assert!(merge(&[], &MergeOptions::default()).is_err());
+    }
+
+    #[test]
+    fn merge_rejects_nonfinite_consensus_position_without_panicking() {
+        let mut a = sp3_records(&[("G01", [15_000.0, -20_000.0, 5_000.0], None)]);
+        let mut b = sp3_records(&[("G01", [15_000.0, -20_000.0, 5_000.0], None)]);
+        let extreme = ItrfPositionM::new(f64::MAX, 0.0, 0.0).unwrap();
+        a.states[0].get_mut(&gps(1)).unwrap().position = extreme;
+        b.states[0].get_mut(&gps(1)).unwrap().position = extreme;
+
+        let error = match merge(&[a, b], &MergeOptions::default()) {
+            Ok(_) => panic!("non-finite consensus position must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("must be finite"));
     }
 
     #[test]

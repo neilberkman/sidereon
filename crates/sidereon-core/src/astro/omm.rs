@@ -1,3 +1,5 @@
+#![warn(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 //! CCSDS Orbit Mean-Elements Message (OMM) parser, encoder, and SGP4 bridge.
 //!
 //! OMM (CCSDS 502.0-B) is the modern replacement for the TLE: it carries the
@@ -576,12 +578,17 @@ pub fn encode_json(omm: &Omm) -> String {
 ///
 /// Each array member is the same object produced by [`encode_json`], preserving
 /// all scalar fields and optional metadata carried by [`Omm`].
+#[allow(clippy::expect_used)]
 pub fn encode_json_array(omms: &[Omm]) -> String {
     use serde_json::Value;
 
     let values: Vec<Value> = omms
         .iter()
-        .map(|omm| serde_json::from_str(&encode_json(omm)).expect("encoded OMM JSON object"))
+        .map(|omm| {
+            // invariant: encode_json constructs a serde_json object directly, so
+            // its serialized output is always a valid JSON object.
+            serde_json::from_str(&encode_json(omm)).expect("encoded OMM JSON object")
+        })
         .collect();
     Value::Array(values).to_string()
 }
@@ -843,40 +850,138 @@ impl Omm {
             get("EPOCH").ok_or(OmmError::MissingField("EPOCH"))?,
             omm_civil_second_policy(time_system.as_deref()),
         )?;
+        let header = parse_header(map)?;
+        let metadata = parse_metadata(map, time_system)?;
+        let mean_elements = parse_mean_elements(map, epoch)?;
+        let tle_parameters = parse_tle_parameters(map)?;
 
         Ok(Omm {
-            ccsds_omm_vers: xml_text_or_default(get("CCSDS_OMM_VERS"), "CCSDS_OMM_VERS", "2.0")?,
-            creation_date: xml_text(get("CREATION_DATE"), "CREATION_DATE")?,
-            originator: xml_text(get("ORIGINATOR"), "ORIGINATOR")?,
-            object_name: xml_text(get("OBJECT_NAME"), "OBJECT_NAME")?,
-            object_id: xml_text(get("OBJECT_ID"), "OBJECT_ID")?,
-            center_name: xml_text(get("CENTER_NAME"), "CENTER_NAME")?,
-            ref_frame: xml_text(get("REF_FRAME"), "REF_FRAME")?,
-            time_system,
-            mean_element_theory: xml_text(get("MEAN_ELEMENT_THEORY"), "MEAN_ELEMENT_THEORY")?,
-            epoch,
-            mean_motion: req_num(get("MEAN_MOTION"), "MEAN_MOTION")?,
-            eccentricity: req_num(get("ECCENTRICITY"), "ECCENTRICITY")?,
-            inclination_deg: req_num(get("INCLINATION"), "INCLINATION")?,
-            ra_of_asc_node_deg: req_num(get("RA_OF_ASC_NODE"), "RA_OF_ASC_NODE")?,
-            arg_of_pericenter_deg: req_num(get("ARG_OF_PERICENTER"), "ARG_OF_PERICENTER")?,
-            mean_anomaly_deg: req_num(get("MEAN_ANOMALY"), "MEAN_ANOMALY")?,
-            ephemeris_type: opt_int(get("EPHEMERIS_TYPE"), "EPHEMERIS_TYPE")?.unwrap_or(0),
-            classification_type: xml_text_or_default(
-                get("CLASSIFICATION_TYPE"),
-                "CLASSIFICATION_TYPE",
-                "U",
-            )?,
-            norad_cat_id: req_int(get("NORAD_CAT_ID"), "NORAD_CAT_ID")?,
-            element_set_no: opt_int(get("ELEMENT_SET_NO"), "ELEMENT_SET_NO")?.unwrap_or(999),
-            rev_at_epoch: opt_int(get("REV_AT_EPOCH"), "REV_AT_EPOCH")?.unwrap_or(0),
-            bstar: req_num(get("BSTAR"), "BSTAR")?,
-            mean_motion_dot: req_num(get("MEAN_MOTION_DOT"), "MEAN_MOTION_DOT")?,
-            mean_motion_ddot: req_num(get("MEAN_MOTION_DDOT"), "MEAN_MOTION_DDOT")?,
+            ccsds_omm_vers: header.ccsds_omm_vers,
+            creation_date: header.creation_date,
+            originator: header.originator,
+            object_name: metadata.object_name,
+            object_id: metadata.object_id,
+            center_name: metadata.center_name,
+            ref_frame: metadata.ref_frame,
+            time_system: metadata.time_system,
+            mean_element_theory: metadata.mean_element_theory,
+            epoch: mean_elements.epoch,
+            mean_motion: mean_elements.mean_motion,
+            eccentricity: mean_elements.eccentricity,
+            inclination_deg: mean_elements.inclination_deg,
+            ra_of_asc_node_deg: mean_elements.ra_of_asc_node_deg,
+            arg_of_pericenter_deg: mean_elements.arg_of_pericenter_deg,
+            mean_anomaly_deg: mean_elements.mean_anomaly_deg,
+            ephemeris_type: tle_parameters.ephemeris_type,
+            classification_type: tle_parameters.classification_type,
+            norad_cat_id: tle_parameters.norad_cat_id,
+            element_set_no: tle_parameters.element_set_no,
+            rev_at_epoch: tle_parameters.rev_at_epoch,
+            bstar: tle_parameters.bstar,
+            mean_motion_dot: tle_parameters.mean_motion_dot,
+            mean_motion_ddot: tle_parameters.mean_motion_ddot,
             exact_sgp4_epoch: None,
             quantize_tle_derived_fields: true,
         })
     }
+}
+
+struct OmmHeader {
+    ccsds_omm_vers: String,
+    creation_date: Option<String>,
+    originator: Option<String>,
+}
+
+/// Consume the OMM header fields and produce their validated canonical values.
+fn parse_header(map: &crate::format::kvn::FieldMap) -> Result<OmmHeader, OmmError> {
+    let get = |key: &str| map.get(key);
+    Ok(OmmHeader {
+        ccsds_omm_vers: xml_text_or_default(get("CCSDS_OMM_VERS"), "CCSDS_OMM_VERS", "2.0")?,
+        creation_date: xml_text(get("CREATION_DATE"), "CREATION_DATE")?,
+        originator: xml_text(get("ORIGINATOR"), "ORIGINATOR")?,
+    })
+}
+
+struct OmmMetadata {
+    object_name: Option<String>,
+    object_id: Option<String>,
+    center_name: Option<String>,
+    ref_frame: Option<String>,
+    time_system: Option<String>,
+    mean_element_theory: Option<String>,
+}
+
+/// Consume OMM metadata fields and produce their validated canonical values.
+fn parse_metadata(
+    map: &crate::format::kvn::FieldMap,
+    time_system: Option<String>,
+) -> Result<OmmMetadata, OmmError> {
+    let get = |key: &str| map.get(key);
+    Ok(OmmMetadata {
+        object_name: xml_text(get("OBJECT_NAME"), "OBJECT_NAME")?,
+        object_id: xml_text(get("OBJECT_ID"), "OBJECT_ID")?,
+        center_name: xml_text(get("CENTER_NAME"), "CENTER_NAME")?,
+        ref_frame: xml_text(get("REF_FRAME"), "REF_FRAME")?,
+        time_system,
+        mean_element_theory: xml_text(get("MEAN_ELEMENT_THEORY"), "MEAN_ELEMENT_THEORY")?,
+    })
+}
+
+struct OmmMeanElements {
+    epoch: OmmEpoch,
+    mean_motion: f64,
+    eccentricity: f64,
+    inclination_deg: f64,
+    ra_of_asc_node_deg: f64,
+    arg_of_pericenter_deg: f64,
+    mean_anomaly_deg: f64,
+}
+
+/// Consume the OMM epoch and mean-element fields and produce canonical values.
+fn parse_mean_elements(
+    map: &crate::format::kvn::FieldMap,
+    epoch: OmmEpoch,
+) -> Result<OmmMeanElements, OmmError> {
+    let get = |key: &str| map.get(key);
+    Ok(OmmMeanElements {
+        epoch,
+        mean_motion: req_num(get("MEAN_MOTION"), "MEAN_MOTION")?,
+        eccentricity: req_num(get("ECCENTRICITY"), "ECCENTRICITY")?,
+        inclination_deg: req_num(get("INCLINATION"), "INCLINATION")?,
+        ra_of_asc_node_deg: req_num(get("RA_OF_ASC_NODE"), "RA_OF_ASC_NODE")?,
+        arg_of_pericenter_deg: req_num(get("ARG_OF_PERICENTER"), "ARG_OF_PERICENTER")?,
+        mean_anomaly_deg: req_num(get("MEAN_ANOMALY"), "MEAN_ANOMALY")?,
+    })
+}
+
+struct OmmTleParameters {
+    ephemeris_type: i32,
+    classification_type: String,
+    norad_cat_id: u32,
+    element_set_no: i32,
+    rev_at_epoch: i64,
+    bstar: f64,
+    mean_motion_dot: f64,
+    mean_motion_ddot: f64,
+}
+
+/// Consume the OMM TLE-parameter fields and produce canonical values.
+fn parse_tle_parameters(map: &crate::format::kvn::FieldMap) -> Result<OmmTleParameters, OmmError> {
+    let get = |key: &str| map.get(key);
+    Ok(OmmTleParameters {
+        ephemeris_type: opt_int(get("EPHEMERIS_TYPE"), "EPHEMERIS_TYPE")?.unwrap_or(0),
+        classification_type: xml_text_or_default(
+            get("CLASSIFICATION_TYPE"),
+            "CLASSIFICATION_TYPE",
+            "U",
+        )?,
+        norad_cat_id: req_int(get("NORAD_CAT_ID"), "NORAD_CAT_ID")?,
+        element_set_no: opt_int(get("ELEMENT_SET_NO"), "ELEMENT_SET_NO")?.unwrap_or(999),
+        rev_at_epoch: opt_int(get("REV_AT_EPOCH"), "REV_AT_EPOCH")?.unwrap_or(0),
+        bstar: req_num(get("BSTAR"), "BSTAR")?,
+        mean_motion_dot: req_num(get("MEAN_MOTION_DOT"), "MEAN_MOTION_DOT")?,
+        mean_motion_ddot: req_num(get("MEAN_MOTION_DDOT"), "MEAN_MOTION_DDOT")?,
+    })
 }
 
 fn xml_text(value: Option<&str>, field: &'static str) -> Result<Option<String>, OmmError> {
@@ -1170,6 +1275,7 @@ fn fmt_num(value: f64) -> String {
 }
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
