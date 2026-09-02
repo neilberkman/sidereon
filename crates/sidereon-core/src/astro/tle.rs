@@ -95,21 +95,76 @@ pub struct TleElements {
     /// representation (for example, `"A0000"`). Use
     /// [`decode_catalog_number`] to obtain the numeric catalog id.
     pub catalog_number: String,
+    /// Classification character from line 1 byte index 7 (column 8).
+    /// [`parse`] defaults a missing position to `"U"`, while [`encode`] emits it
+    /// immediately after the catalog field.
     pub classification: String,
+    /// Launch international designator from line 1 byte indices 9..=16
+    /// (columns 10-17). [`parse`] removes right padding, and [`encode`] restores
+    /// the eight-character field width.
     pub international_designator: String,
+    /// Full calendar year after applying the TLE two-digit pivot: parsed values
+    /// below 57 become 2000+, and all others become 1900+. [`encode`] emits the
+    /// year modulo 100, while [`TleElements::to_element_set`] uses the full year.
     pub epoch_year: i32,
+    /// One-based fractional day of year from line 1 byte indices 20..=31.
+    /// [`TleElements::to_element_set`] converts it through Vallado `days2mdhms`
+    /// and split-Julian-date math; [`encode`] emits eight decimal places.
     pub epoch_day_of_year: f64,
+    /// First mean-motion derivative (`ndot`) in rev/day², read from line 1 byte
+    /// indices 33..=42. [`encode`] removes its leading zero, and
+    /// [`TleElements::to_element_set`] passes it to SGP4 for conversion to
+    /// radians per minute squared.
     pub mean_motion_dot: f64,
+    /// Second mean-motion derivative (`nddot`) in rev/day³, read from line 1
+    /// byte indices 44..=51 as a signed assumed-decimal value. The parser and
+    /// encoder use the five-digit mantissa codec, and the element bridge passes
+    /// it to SGP4 for conversion to radians per minute cubed.
     pub mean_motion_double_dot: f64,
+    /// Vallado B* drag term in the dimensionless 1/earth-radii TLE convention,
+    /// decoded from line 1 byte indices 53..=60 with the assumed-decimal codec.
+    /// [`TleElements::to_element_set`] passes it unchanged to SGP4.
     pub bstar: f64,
+    /// Integer ephemeris-type field at line 1 byte index 62 (column 63).
+    /// [`parse`] maps a blank field to zero, fitted TLE records emit zero, and
+    /// [`TleElements::to_element_set`] omits this bookkeeping value from
+    /// [`ElementSet`].
     pub ephemeris_type: i32,
+    /// Element-set number from line 1 byte indices 64..=67 (columns 65-68).
+    /// A blank field parses as zero, and [`encode`] writes the value in a
+    /// four-character field.
     pub elset_number: i32,
+    /// Inclination in degrees from line 2 byte indices 8..=15, formatted with
+    /// four decimal places. [`TleElements::to_element_set`] preserves the degree
+    /// value in [`ElementSet`], whose SGP4 initializer converts it to radians.
     pub inclination_deg: f64,
+    /// Right ascension of the ascending node in degrees from line 2 byte
+    /// indices 17..=24, formatted with four decimal places. The element bridge
+    /// maps it to [`ElementSet::right_ascension_deg`] before SGP4 converts it to
+    /// radians.
     pub raan_deg: f64,
+    /// Dimensionless eccentricity from line 2 byte indices 26..=32, interpreted
+    /// as an implicit-leading-decimal fraction with spaces replaced by zeroes.
+    /// The element bridge requires a finite value in `[0, 1)`, while [`encode`]
+    /// emits seven fractional digits without the leading `0.`.
     pub eccentricity: f64,
+    /// Argument of perigee in degrees from line 2 byte indices 34..=41,
+    /// formatted with four decimal places. The element bridge maps it to
+    /// [`ElementSet::argument_of_perigee_deg`] before SGP4 converts it to
+    /// radians.
     pub arg_perigee_deg: f64,
+    /// Mean anomaly in degrees from line 2 byte indices 43..=50, formatted with
+    /// four decimal places. The element bridge maps it to
+    /// [`ElementSet::mean_anomaly_deg`] before SGP4 converts it to radians.
     pub mean_anomaly_deg: f64,
+    /// Mean motion in revolutions per day from line 2 byte indices 52..=62,
+    /// formatted with eight decimal places. The element bridge requires a
+    /// finite positive value, copies it to [`ElementSet::mean_motion_rev_per_day`],
+    /// and SGP4 converts it to radians per minute.
     pub mean_motion: f64,
+    /// Revolution number at the TLE epoch from line 2 byte indices 63..=67.
+    /// A blank field parses as zero, and [`encode`] writes the value in a
+    /// five-character field for the fit metadata's `rev_at_epoch` value.
     pub rev_number: i32,
 }
 
@@ -166,7 +221,13 @@ pub struct ChecksumWarning {
 /// The result of [`parse`]: the elements plus any advisory checksum warnings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedTle {
+    /// Orbital and bookkeeping fields extracted from the validated line pair.
+    /// This is the value passed to [`encode`] for round trips or to
+    /// [`TleElements::to_element_set`] for SGP4 initialization.
     pub elements: TleElements,
+    /// Advisory checksum discrepancies, ordered by line 1 then line 2. A
+    /// warning is added only when a full-width line has a numeric column-69
+    /// digit that differs from the modulo-10 checksum of columns 1-68.
     pub checksum_warnings: Vec<ChecksumWarning>,
 }
 
