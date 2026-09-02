@@ -3377,34 +3377,6 @@ pub struct PublishedProduct {
     pub observed_at: Option<String>,
 }
 
-/// Parse the object entries out of an archive listing body.
-///
-/// Dialect detection is closed: the body must classify as exactly one of the
-/// listing surfaces the catalog's archives actually serve, each verified live
-/// on 2026-08-04 and recorded as a fixture, and a body that fits none of them
-/// is [`DataCatalogError::UnrecognizedArchiveListing`] - never a best-effort
-/// empty result. An error page, a login interstitial, or a format change at
-/// an archive must surface as "this is not a listing I understand", because a
-/// silent empty parse is indistinguishable from "nothing published" and would
-/// convert an archive change into a false publication-gap report.
-///
-/// - Apache `<pre>` autoindex and its older table flavor (GFZ
-///   `isdc-data.gfz.de`, BKG `igs.bkg.bund.de`) and the ESA XHTML table
-///   autoindex (`navigation-office.esa.int`): recognized by the autoindex
-///   `Index of` marker; objects are relative anchors, with the row's
-///   `YYYY-MM-DD HH:MM` text captured verbatim.
-/// - AIUB whole-tree CSV (`www.aiub.unibe.ch/download/full_listing.csv`):
-///   `path;bytes;ISO-8601;md5` rows; every non-empty row must fit that
-///   grammar.
-/// - Anonymous-FTP `LIST` output (WHU `igs.gnsswhu.cn`): Unix `ls -l` rows
-///   (an optional leading `total` line allowed); every other non-empty row
-///   must fit that grammar.
-///
-/// Within a recognized dialect, rows that by the dialect's own rules do not
-/// name an object (parent links, sort links, directories, symlinks) are
-/// skipped. The result preserves nothing but object paths and verbatim
-/// modification text; interpretation belongs to
-/// [`newest_published_product`].
 /// Position index backing archive-listing deduplication.
 ///
 /// Keyed by the hash of the path rather than by an owned copy of it, so a
@@ -3452,6 +3424,34 @@ fn default_path_hash(path: &str) -> u64 {
     hasher.finish()
 }
 
+/// Parse the object entries out of an archive listing body.
+///
+/// Dialect detection is closed: the body must classify as exactly one of the
+/// listing surfaces the catalog's archives actually serve, each verified live
+/// on 2026-08-04 and recorded as a fixture, and a body that fits none of them
+/// is [`DataCatalogError::UnrecognizedArchiveListing`] - never a best-effort
+/// empty result. An error page, a login interstitial, or a format change at
+/// an archive must surface as "this is not a listing I understand", because a
+/// silent empty parse is indistinguishable from "nothing published" and would
+/// convert an archive change into a false publication-gap report.
+///
+/// - Apache `<pre>` autoindex and its older table flavor (GFZ
+///   `isdc-data.gfz.de`, BKG `igs.bkg.bund.de`) and the ESA XHTML table
+///   autoindex (`navigation-office.esa.int`): recognized by the autoindex
+///   `Index of` marker; objects are relative anchors, with the row's
+///   `YYYY-MM-DD HH:MM` text captured verbatim.
+/// - AIUB whole-tree CSV (`www.aiub.unibe.ch/download/full_listing.csv`):
+///   `path;bytes;ISO-8601;md5` rows; every non-empty row must fit that
+///   grammar.
+/// - Anonymous-FTP `LIST` output (WHU `igs.gnsswhu.cn`): Unix `ls -l` rows
+///   (an optional leading `total` line allowed); every other non-empty row
+///   must fit that grammar.
+///
+/// Within a recognized dialect, rows that by the dialect's own rules do not
+/// name an object (parent links, sort links, directories, symlinks) are
+/// skipped. The result preserves nothing but object paths and verbatim
+/// modification text; interpretation belongs to
+/// [`newest_published_product`].
 pub fn parse_archive_listing(body: &str) -> Result<Vec<PublishedObject>, DataCatalogError> {
     let mut seen: Vec<PublishedObject> = Vec::new();
     // Listings are large (AIUB's whole-tree CSV is ~426k rows) and a row may
