@@ -48,14 +48,42 @@ impl PropagationContext {
     }
 }
 
+/// Options forwarded to the selected [`crate::astro::integrators::Integrator`]
+/// by [`crate::astro::propagator::StatePropagator`].
+///
+/// [`crate::astro::integrators::RK4`] uses the initial step, step limit, and
+/// point-output flag; [`crate::astro::integrators::DP54`] also uses the
+/// tolerance and adaptive step fields.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IntegratorOptions {
+    /// Additive error scale used by DP54 for the position and velocity error
+    /// estimates. The adaptive validator requires a finite positive value;
+    /// RK4 does not read this field.
     pub abs_tol: f64,
+    /// Relative error factor used by DP54 with the larger current/proposed
+    /// position and velocity norms. The adaptive validator requires a finite
+    /// positive value; RK4 does not read this field.
     pub rel_tol: f64,
+    /// Minimum step magnitude in seconds accepted after a rejected DP54 step.
+    /// If the controller proposes a smaller magnitude, DP54 returns a
+    /// [`PropagationError::NumericalFailure`].
     pub min_step: f64,
+    /// Maximum step magnitude in seconds used by DP54 when clamping its
+    /// initial and controller-selected steps. RK4 validates this field but
+    /// does not use it to select steps.
     pub max_step: f64,
+    /// Initial step magnitude in seconds. Both integrators limit it to the
+    /// absolute target span and apply the direction toward the target; DP54
+    /// also clamps it to `max_step`.
     pub initial_step: f64,
+    /// Maximum number of step outcomes allowed for one propagation. RK4 counts
+    /// completed steps, while DP54 counts accepted and rejected steps; either
+    /// integrator returns [`PropagationError::MaxStepsExceeded`] at the limit.
     pub max_steps: u32,
+    /// Whether to retain every completed step in the `points` field of
+    /// [`crate::astro::propagator::PropagationResult`].
+    /// DP54 additionally captures its stages and returns dense output when this
+    /// is enabled; with it disabled, DP54 returns no dense output.
     pub dense_output: bool,
 }
 
