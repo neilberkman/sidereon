@@ -846,6 +846,7 @@ impl Omm {
         let header = parse_header(map)?;
         let metadata = parse_metadata(map, time_system)?;
         let mean_elements = parse_mean_elements(map, epoch)?;
+        let tle_parameters = parse_tle_parameters(map)?;
 
         Ok(Omm {
             ccsds_omm_vers: header.ccsds_omm_vers,
@@ -864,18 +865,14 @@ impl Omm {
             ra_of_asc_node_deg: mean_elements.ra_of_asc_node_deg,
             arg_of_pericenter_deg: mean_elements.arg_of_pericenter_deg,
             mean_anomaly_deg: mean_elements.mean_anomaly_deg,
-            ephemeris_type: opt_int(get("EPHEMERIS_TYPE"), "EPHEMERIS_TYPE")?.unwrap_or(0),
-            classification_type: xml_text_or_default(
-                get("CLASSIFICATION_TYPE"),
-                "CLASSIFICATION_TYPE",
-                "U",
-            )?,
-            norad_cat_id: req_int(get("NORAD_CAT_ID"), "NORAD_CAT_ID")?,
-            element_set_no: opt_int(get("ELEMENT_SET_NO"), "ELEMENT_SET_NO")?.unwrap_or(999),
-            rev_at_epoch: opt_int(get("REV_AT_EPOCH"), "REV_AT_EPOCH")?.unwrap_or(0),
-            bstar: req_num(get("BSTAR"), "BSTAR")?,
-            mean_motion_dot: req_num(get("MEAN_MOTION_DOT"), "MEAN_MOTION_DOT")?,
-            mean_motion_ddot: req_num(get("MEAN_MOTION_DDOT"), "MEAN_MOTION_DDOT")?,
+            ephemeris_type: tle_parameters.ephemeris_type,
+            classification_type: tle_parameters.classification_type,
+            norad_cat_id: tle_parameters.norad_cat_id,
+            element_set_no: tle_parameters.element_set_no,
+            rev_at_epoch: tle_parameters.rev_at_epoch,
+            bstar: tle_parameters.bstar,
+            mean_motion_dot: tle_parameters.mean_motion_dot,
+            mean_motion_ddot: tle_parameters.mean_motion_ddot,
             exact_sgp4_epoch: None,
             quantize_tle_derived_fields: true,
         })
@@ -947,6 +944,36 @@ fn parse_mean_elements(
         ra_of_asc_node_deg: req_num(get("RA_OF_ASC_NODE"), "RA_OF_ASC_NODE")?,
         arg_of_pericenter_deg: req_num(get("ARG_OF_PERICENTER"), "ARG_OF_PERICENTER")?,
         mean_anomaly_deg: req_num(get("MEAN_ANOMALY"), "MEAN_ANOMALY")?,
+    })
+}
+
+struct OmmTleParameters {
+    ephemeris_type: i32,
+    classification_type: String,
+    norad_cat_id: u32,
+    element_set_no: i32,
+    rev_at_epoch: i64,
+    bstar: f64,
+    mean_motion_dot: f64,
+    mean_motion_ddot: f64,
+}
+
+/// Consume the OMM TLE-parameter fields and produce canonical values.
+fn parse_tle_parameters(map: &crate::format::kvn::FieldMap) -> Result<OmmTleParameters, OmmError> {
+    let get = |key: &str| map.get(key);
+    Ok(OmmTleParameters {
+        ephemeris_type: opt_int(get("EPHEMERIS_TYPE"), "EPHEMERIS_TYPE")?.unwrap_or(0),
+        classification_type: xml_text_or_default(
+            get("CLASSIFICATION_TYPE"),
+            "CLASSIFICATION_TYPE",
+            "U",
+        )?,
+        norad_cat_id: req_int(get("NORAD_CAT_ID"), "NORAD_CAT_ID")?,
+        element_set_no: opt_int(get("ELEMENT_SET_NO"), "ELEMENT_SET_NO")?.unwrap_or(999),
+        rev_at_epoch: opt_int(get("REV_AT_EPOCH"), "REV_AT_EPOCH")?.unwrap_or(0),
+        bstar: req_num(get("BSTAR"), "BSTAR")?,
+        mean_motion_dot: req_num(get("MEAN_MOTION_DOT"), "MEAN_MOTION_DOT")?,
+        mean_motion_ddot: req_num(get("MEAN_MOTION_DDOT"), "MEAN_MOTION_DDOT")?,
     })
 }
 
