@@ -15,6 +15,10 @@ All notable changes to `sidereon-core` are documented here.
 - Native exact-cache locking now uses the stable standard-library file-locking
   API, removing the unmaintained fs2 dependency while preserving bounded,
   non-blocking retry behavior and error handling.
+- **Breaking:** `terrain`, `ionex::tec_grid`, and
+  `astro::propagator::dense_output` now return typed error enums from their
+  public parsing, interpolation, and dense-output evaluation APIs; the error
+  messages remain unchanged.
 - `libm` is pinned to exactly 0.2.16. The crate's cross-platform bit-exactness
   is a property of that implementation's rounding, so a semver-compatible
   update of it could change results without any change here. The pin makes
