@@ -7,13 +7,38 @@ use super::message::SbasWireForm;
 use super::store::sbas_prn_to_sat;
 
 #[derive(Clone, Debug, PartialEq)]
+/// One SBAS block recovered from an EMS or RTKLIB log line.
+///
+/// The line parsers retain recognized records in input order and store the
+/// converted satellite, GPST epoch, wire-form classification, and decoded
+/// bytes.
 pub struct SbasLogBlock {
+    /// SBAS satellite returned by [`sbas_prn_to_sat`] for a supported broadcast
+    /// PRN (120 through 158, inclusive).
     pub satellite_id: GnssSatelliteId,
+    /// GPST week and seconds-of-week associated with the logged block.
+    ///
+    /// EMS calendar fields are converted using the Sunday-origin GPST week;
+    /// RTKLIB lines provide the week and time-of-week directly.
     pub epoch: GnssWeekTow,
+    /// Wire representation inferred from the decoded byte count: 29 bytes use
+    /// [`SbasWireForm::Body226`] and 32 bytes use [`SbasWireForm::Framed250`].
     pub form: SbasWireForm,
+    /// Hex-decoded bytes from the source line, with whitespace removed before
+    /// decoding. An odd number of hexadecimal digits is completed with a zero
+    /// digit before byte pairs are formed.
     pub bytes: Vec<u8>,
 }
 
+/// Parse newline-separated EMS records into [`SbasLogBlock`] values.
+///
+/// For each line, the first seven non-empty comma-separated fields provide the
+/// broadcast PRN and calendar components, and the last non-empty field
+/// provides the hexadecimal block. Years numerically below 100 are increased
+/// by 2000 before the calendar time is converted to GPST. Lines that fail the
+/// field, PRN, calendar-week, or hexadecimal-character checks are ignored; the
+/// result preserves input order, while block-length and epoch-construction
+/// errors are returned.
 pub fn parse_ems_lines(text: &str) -> Result<Vec<SbasLogBlock>> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -24,6 +49,14 @@ pub fn parse_ems_lines(text: &str) -> Result<Vec<SbasLogBlock>> {
     Ok(out)
 }
 
+/// Parse newline-separated RTKLIB records into [`SbasLogBlock`] values.
+///
+/// Each recognized record has at least four whitespace-separated header fields
+/// before a colon: week, seconds-of-week, broadcast PRN, and an additional
+/// header field. The text after the first colon is decoded as the block's
+/// hexadecimal bytes. Lines without the required delimiter or parseable,
+/// supported fields are ignored, recognized records retain input order, and
+/// block-length or epoch-construction errors are returned.
 pub fn parse_rtklib_lines(text: &str) -> Result<Vec<SbasLogBlock>> {
     let mut out = Vec::new();
     for line in text.lines() {
