@@ -31,16 +31,36 @@ pub enum IlsError {
     /// The lattice yielded no candidate (an empty search box).
     NoCandidates(usize),
     /// The lattice exceeded `candidate_limit`.
-    TooManyCandidates { evaluated: usize, limit: usize },
+    TooManyCandidates {
+        /// Number of lattice leaves evaluated when enumeration crossed the
+        /// cap, or the computed count that was rejected during preflight.
+        evaluated: usize,
+        /// Candidate cap supplied to [`bounded_ils_search`] and carried into
+        /// the rejection details.
+        limit: usize,
+    },
     /// `float_cycles` was empty, or `covariance` was not exactly `n x n` for
     /// `n = float_cycles.len()` (`rows` is the offending row count, or the length
     /// of the first row that was not `n` wide).
-    InvalidDimensions { n: usize, rows: usize },
+    InvalidDimensions {
+        /// Number of values in the supplied `float_cycles` slice, which is the
+        /// required covariance row and column count.
+        n: usize,
+        /// Supplied covariance row count, or the width of the first row that
+        /// differs from `n`; this is zero for empty input.
+        rows: usize,
+    },
     /// A `float_cycles` or `covariance` entry was NaN or infinite.
     NonFinite,
     /// A public ILS option was malformed.
     InvalidInput {
+        /// Identifies `"ils ratio_threshold"` or `"ils covariance"` for a
+        /// validator failure, or `"ils float_cycles"` for an integer-domain
+        /// failure.
         field: &'static str,
+        /// Identifies `"negative"`, `"not finite"`, or `"not positive"` for a
+        /// validator failure, or `"outside integer search range"` for an
+        /// integer-domain failure.
         reason: &'static str,
     },
     /// The MLAMBDA search did not converge within `LAMBDA_LOOP_MAX` iterations
