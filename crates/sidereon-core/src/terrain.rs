@@ -1,5 +1,7 @@
 //! DTED tile reader and bilinear terrain lookup.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,179 @@ const MIN_LOOKUP_LATITUDE_DEG: f64 = -90.0;
 const MAX_LOOKUP_LATITUDE_DEG: f64 = 90.0;
 const MIN_LOOKUP_LONGITUDE_DEG: f64 = -180.0;
 const MAX_LOOKUP_LONGITUDE_DEG: f64 = 180.0;
+
+/// Error returned when a DTED tile cannot be read, validated, or queried.
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum DtedTileError {
+    /// The tile could not be read from disk.
+    #[error("{path}: {message}")]
+    Io { path: String, message: String },
+    /// The tile does not contain the fixed DTED header area.
+    #[error("{path} is too short for DTED headers")]
+    TooShort { path: String },
+    /// The tile does not start with the DTED UHL1 marker.
+    #[error("{path} missing UHL1 header")]
+    MissingUhl1 { path: String },
+    /// A fixed-width field was not valid UTF-8.
+    #[error("{0}")]
+    InvalidEncoding(String),
+    /// A numeric field could not be parsed.
+    #[error("{0}")]
+    InvalidField(String),
+    /// The tile dimensions are too small to define a grid cell.
+    #[error(
+        "{path} has invalid DTED dimensions lon_count={lon_count} lat_count={lat_count}; both must be at least 2"
+    )]
+    InvalidDimensions {
+        path: String,
+        lon_count: usize,
+        lat_count: usize,
+    },
+    /// The tile ends before its declared data blocks end.
+    #[error("{path} has {actual} bytes but expected at least {expected}")]
+    Truncated {
+        path: String,
+        actual: usize,
+        expected: usize,
+    },
+    /// A query is outside this tile's one-degree extent.
+    #[error("point ({longitude},{latitude}) is outside DTED tile ({origin_longitude},{origin_latitude})")]
+    Outside {
+        longitude: f64,
+        latitude: f64,
+        origin_longitude: f64,
+        origin_latitude: f64,
+    },
+    /// A rounded query did not map to a declared posting.
+    #[error("posting index out of bounds lon={longitude_index} lat={latitude_index}")]
+    PostingIndexOutOfBounds {
+        longitude_index: usize,
+        latitude_index: usize,
+    },
+    /// A DTED data block is missing its sentinel byte.
+    #[error("DTED block {longitude_index} missing data sentinel")]
+    MissingDataSentinel { longitude_index: usize },
+    /// A DTED data block checksum does not match its contents.
+    #[error("DTED checksum failed for block {longitude_index}: expected {checksum}, found {sum}")]
+    Checksum {
+        longitude_index: usize,
+        checksum: i32,
+        sum: i32,
+    },
+    /// A coordinate field is empty.
+    #[error("empty DTED coordinate")]
+    EmptyCoordinate,
+    /// A coordinate field has an unsupported hemisphere suffix.
+    #[error("invalid DTED hemisphere {hemisphere}")]
+    InvalidHemisphere { hemisphere: char },
+    /// The rounded coordinate is negative and cannot be a posting index.
+    #[error("cannot round negative posting index {index}")]
+    NegativePostingIndex { index: i64 },
+}
+
+#[cfg(test)]
+mod error_display_tests {
+    use super::{parse_dted_coord, DtedTileError};
+
+    #[test]
+    fn dted_error_display_preserves_parser_messages() {
+        let cases = [
+            (
+                DtedTileError::Io {
+                    path: "tile.dt2".to_string(),
+                    message: "permission denied".to_string(),
+                },
+                "tile.dt2: permission denied",
+            ),
+            (
+                DtedTileError::TooShort {
+                    path: "tile.dt2".to_string(),
+                },
+                "tile.dt2 is too short for DTED headers",
+            ),
+            (
+                DtedTileError::MissingUhl1 {
+                    path: "tile.dt2".to_string(),
+                },
+                "tile.dt2 missing UHL1 header",
+            ),
+            (
+                DtedTileError::InvalidEncoding("invalid utf-8".to_string()),
+                "invalid utf-8",
+            ),
+            (
+                DtedTileError::InvalidField("invalid digit".to_string()),
+                "invalid digit",
+            ),
+            (
+                DtedTileError::InvalidDimensions {
+                    path: "tile.dt2".to_string(),
+                    lon_count: 1,
+                    lat_count: 0,
+                },
+                "tile.dt2 has invalid DTED dimensions lon_count=1 lat_count=0; both must be at least 2",
+            ),
+            (
+                DtedTileError::Truncated {
+                    path: "tile.dt2".to_string(),
+                    actual: 10,
+                    expected: 20,
+                },
+                "tile.dt2 has 10 bytes but expected at least 20",
+            ),
+            (
+                DtedTileError::Outside {
+                    longitude: 2.0,
+                    latitude: 3.0,
+                    origin_longitude: 0.0,
+                    origin_latitude: 1.0,
+                },
+                "point (2,3) is outside DTED tile (0,1)",
+            ),
+            (
+                DtedTileError::PostingIndexOutOfBounds {
+                    longitude_index: 4,
+                    latitude_index: 5,
+                },
+                "posting index out of bounds lon=4 lat=5",
+            ),
+            (
+                DtedTileError::MissingDataSentinel { longitude_index: 6 },
+                "DTED block 6 missing data sentinel",
+            ),
+            (
+                DtedTileError::Checksum {
+                    longitude_index: 7,
+                    checksum: 8,
+                    sum: 9,
+                },
+                "DTED checksum failed for block 7: expected 8, found 9",
+            ),
+            (DtedTileError::EmptyCoordinate, "empty DTED coordinate"),
+            (
+                DtedTileError::InvalidHemisphere { hemisphere: 'X' },
+                "invalid DTED hemisphere X",
+            ),
+            (
+                DtedTileError::NegativePostingIndex { index: -1 },
+                "cannot round negative posting index -1",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn malformed_coordinate_returns_typed_error() {
+        assert!(matches!(
+            parse_dted_coord("N"),
+            Err(DtedTileError::InvalidField(_))
+        ));
+    }
+}
 
 /// Interpolation mode for DTED terrain lookups.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,10 +293,12 @@ impl DtedTerrain {
             match self.resolve_grid(longitude_deg, latitude_deg) {
                 Ok(Some(grid_idx)) => {
                     current = Some(grid_idx);
-                    let tile = self
-                        .tiles
-                        .get(&grid_idx)
-                        .expect("resolved DTED grid must be present in tile cache");
+                    let Some(tile) = self.tiles.get(&grid_idx) else {
+                        out.push(Err(Error::Parse(
+                            "resolved DTED grid is missing from the tile cache".to_string(),
+                        )));
+                        continue;
+                    };
                     out.push(height_from_tile(tile, longitude_deg, latitude_deg, options));
                 }
                 Ok(None) => {
@@ -151,7 +328,8 @@ impl DtedTerrain {
                 if !path.is_file() {
                     continue;
                 }
-                let tile = DtedTile::from_path(path).map_err(Error::Parse)?;
+                let tile =
+                    DtedTile::from_path(path).map_err(|error| Error::Parse(error.to_string()))?;
                 self.tiles.insert(grid_idx, tile);
             }
             if let Some(tile) = self.tiles.get(&grid_idx) {
@@ -197,7 +375,7 @@ fn height_from_tile(
         return tile
             .get_elevation(longitude_deg, latitude_deg)
             .map(|v| v as f64)
-            .map_err(Error::Parse);
+            .map_err(|error| Error::Parse(error.to_string()));
     }
 
     let postings_per_deg_lon = tile.lon_count - 1;
@@ -223,7 +401,7 @@ fn height_from_tile(
                 tile.origin_latitude + (lat_lo + dj) as f64 / postings_per_deg_lat as f64;
             z += w * f64::from(
                 tile.get_elevation(posting_lon, posting_lat)
-                    .map_err(Error::Parse)?,
+                    .map_err(|error| Error::Parse(error.to_string()))?,
             );
         }
     }
@@ -274,42 +452,45 @@ pub struct DtedTile {
 
 impl DtedTile {
     /// Read and parse a DTED `.dt2` tile from disk.
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, String> {
-        let bytes =
-            fs::read(path.as_ref()).map_err(|e| format!("{}: {e}", path.as_ref().display()))?;
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, DtedTileError> {
+        let path = path.as_ref();
+        let path_display = path.display().to_string();
+        let bytes = fs::read(path).map_err(|error| DtedTileError::Io {
+            path: path_display.clone(),
+            message: error.to_string(),
+        })?;
         if bytes.len() < DATA_OFFSET {
-            return Err(format!(
-                "{} is too short for DTED headers",
-                path.as_ref().display()
-            ));
+            return Err(DtedTileError::TooShort { path: path_display });
         }
         if &bytes[0..4] != b"UHL1" {
-            return Err(format!("{} missing UHL1 header", path.as_ref().display()));
+            return Err(DtedTileError::MissingUhl1 { path: path_display });
         }
 
-        let origin_longitude =
-            parse_dted_coord(std::str::from_utf8(&bytes[4..12]).map_err(|e| e.to_string())?)?;
-        let origin_latitude =
-            parse_dted_coord(std::str::from_utf8(&bytes[12..20]).map_err(|e| e.to_string())?)?;
+        let origin_longitude = parse_dted_coord(
+            std::str::from_utf8(&bytes[4..12])
+                .map_err(|error| DtedTileError::InvalidEncoding(error.to_string()))?,
+        )?;
+        let origin_latitude = parse_dted_coord(
+            std::str::from_utf8(&bytes[12..20])
+                .map_err(|error| DtedTileError::InvalidEncoding(error.to_string()))?,
+        )?;
         let lon_count = parse_ascii_usize(&bytes[47..51])?;
         let lat_count = parse_ascii_usize(&bytes[51..55])?;
         if lon_count < 2 || lat_count < 2 {
-            return Err(format!(
-                "{} has invalid DTED dimensions lon_count={} lat_count={}; both must be at least 2",
-                path.as_ref().display(),
+            return Err(DtedTileError::InvalidDimensions {
+                path: path_display,
                 lon_count,
-                lat_count
-            ));
+                lat_count,
+            });
         }
         let data_block_length = 12 + 2 * lat_count;
         let expected_len = DATA_OFFSET + lon_count * data_block_length;
         if bytes.len() < expected_len {
-            return Err(format!(
-                "{} has {} bytes but expected at least {}",
-                path.as_ref().display(),
-                bytes.len(),
-                expected_len
-            ));
+            return Err(DtedTileError::Truncated {
+                path: path_display,
+                actual: bytes.len(),
+                expected: expected_len,
+            });
         }
 
         Ok(Self {
@@ -324,12 +505,14 @@ impl DtedTile {
 
     /// Return the nearest orthometric posting value in metres for a
     /// longitude-first geodetic position in degrees.
-    pub fn get_elevation(&self, longitude: f64, latitude: f64) -> Result<i16, String> {
+    pub fn get_elevation(&self, longitude: f64, latitude: f64) -> Result<i16, DtedTileError> {
         if !self.contains(longitude, latitude) {
-            return Err(format!(
-                "point ({longitude},{latitude}) is outside DTED tile ({},{})",
-                self.origin_longitude, self.origin_latitude
-            ));
+            return Err(DtedTileError::Outside {
+                longitude,
+                latitude,
+                origin_longitude: self.origin_longitude,
+                origin_latitude: self.origin_latitude,
+            });
         }
 
         let latitude_index =
@@ -337,9 +520,10 @@ impl DtedTile {
         let longitude_index =
             nearest_posting_index(longitude - self.origin_longitude, self.lon_count - 1)?;
         if latitude_index >= self.lat_count || longitude_index >= self.lon_count {
-            return Err(format!(
-                "posting index out of bounds lon={longitude_index} lat={latitude_index}"
-            ));
+            return Err(DtedTileError::PostingIndexOutOfBounds {
+                longitude_index,
+                latitude_index,
+            });
         }
 
         let block = self.validated_block(longitude_index)?;
@@ -365,7 +549,7 @@ impl DtedTile {
         self.lat_count
     }
 
-    pub(crate) fn decoded_postings_lon_major(&self) -> Result<Vec<i16>, String> {
+    pub(crate) fn decoded_postings_lon_major(&self) -> Result<Vec<i16>, DtedTileError> {
         let mut out = Vec::with_capacity(self.lon_count * self.lat_count);
         for longitude_index in 0..self.lon_count {
             let block = self.validated_block(longitude_index)?;
@@ -385,14 +569,12 @@ impl DtedTile {
             && longitude <= self.origin_longitude + 1.0
     }
 
-    fn validated_block(&self, longitude_index: usize) -> Result<&[u8], String> {
+    fn validated_block(&self, longitude_index: usize) -> Result<&[u8], DtedTileError> {
         let block_start = DATA_OFFSET + longitude_index * self.data_block_length;
         let block_end = block_start + self.data_block_length;
         let block = &self.bytes[block_start..block_end];
         if block[0] != DATA_SENTINEL {
-            return Err(format!(
-                "DTED block {longitude_index} missing data sentinel"
-            ));
+            return Err(DtedTileError::MissingDataSentinel { longitude_index });
         }
         let checksum = i32::from_be_bytes([
             block[block.len() - 4],
@@ -404,9 +586,11 @@ impl DtedTile {
             .iter()
             .fold(0i32, |acc, b| acc + i32::from(*b));
         if sum != checksum {
-            return Err(format!(
-                "DTED checksum failed for block {longitude_index}: expected {checksum}, found {sum}"
-            ));
+            return Err(DtedTileError::Checksum {
+                longitude_index,
+                checksum,
+                sum,
+            });
         }
         Ok(block)
     }
@@ -479,40 +663,49 @@ pub(crate) fn block_origin(index: i32) -> u32 {
     (index.unsigned_abs() / 10) * 10
 }
 
-fn parse_ascii_usize(bytes: &[u8]) -> Result<usize, String> {
+fn parse_ascii_usize(bytes: &[u8]) -> Result<usize, DtedTileError> {
     std::str::from_utf8(bytes)
-        .map_err(|e| e.to_string())?
+        .map_err(|error| DtedTileError::InvalidEncoding(error.to_string()))?
         .trim()
         .parse::<usize>()
-        .map_err(|e| e.to_string())
+        .map_err(|error| DtedTileError::InvalidField(error.to_string()))
 }
 
-fn parse_dted_coord(input: &str) -> Result<f64, String> {
-    let hemi = input
-        .chars()
+fn parse_dted_coord(input: &str) -> Result<f64, DtedTileError> {
+    let (hemi_start, hemi) = input
+        .char_indices()
         .last()
-        .ok_or_else(|| "empty DTED coordinate".to_string())?;
+        .ok_or(DtedTileError::EmptyCoordinate)?;
     let sign = match hemi {
         'S' | 'W' => -1.0,
         'N' | 'E' => 1.0,
-        _ => return Err(format!("invalid DTED hemisphere {hemi}")),
+        _ => return Err(DtedTileError::InvalidHemisphere { hemisphere: hemi }),
     };
-    let coord = &input[..input.len() - 1];
+    let coord = &input[..hemi_start];
+    if !coord.is_ascii() {
+        return Err(DtedTileError::InvalidField(
+            "invalid DTED coordinate".to_string(),
+        ));
+    }
     let seconds_index = if coord.as_bytes().get(coord.len().saturating_sub(2)) == Some(&b'.') {
-        coord.len() - 4
+        coord.len().checked_sub(4)
     } else {
-        coord.len() - 2
-    };
-    let minutes_index = seconds_index - 2;
+        coord.len().checked_sub(2)
+    }
+    .ok_or_else(|| DtedTileError::InvalidField("invalid DTED coordinate".to_string()))?;
+    let minutes_index = seconds_index
+        .checked_sub(2)
+        .filter(|&index| index > 0)
+        .ok_or_else(|| DtedTileError::InvalidField("invalid DTED coordinate".to_string()))?;
     let degree = coord[..minutes_index]
         .parse::<i32>()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| DtedTileError::InvalidField(error.to_string()))?;
     let minute = coord[minutes_index..seconds_index]
         .parse::<i32>()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| DtedTileError::InvalidField(error.to_string()))?;
     let second = coord[seconds_index..]
         .parse::<f64>()
-        .map_err(|e| e.to_string())?;
+        .map_err(|error| DtedTileError::InvalidField(error.to_string()))?;
     Ok(sign * (degree as f64 + ((minute as f64 + second / 60.0) / 60.0)))
 }
 
@@ -525,6 +718,8 @@ pub(crate) struct ScaledCellFraction {
 
 /// Scale an exact binary64 value by an integer without first rounding their
 /// product to binary64.
+// invariant: callers pass an in-tile offset and a positive posting count.
+#[allow(clippy::expect_used)]
 pub(crate) fn scaled_cell_fraction(offset: f64, postings_per_degree: usize) -> ScaledCellFraction {
     debug_assert!(offset.is_finite());
     debug_assert!(postings_per_degree > 0);
@@ -605,13 +800,22 @@ pub(crate) fn scaled_cell_fraction(offset: f64, postings_per_degree: usize) -> S
     }
 }
 
-pub(crate) fn nearest_posting_index(
-    offset: f64,
-    postings_per_degree: usize,
-) -> Result<usize, String> {
+pub(crate) fn nearest_posting_index<E>(offset: f64, postings_per_degree: usize) -> Result<usize, E>
+where
+    E: From<DtedTileError>,
+{
     let scaled = scaled_cell_fraction(offset, postings_per_degree);
     usize::try_from(scaled.nearest)
-        .map_err(|_| format!("cannot round negative posting index {}", scaled.nearest))
+        .map_err(|_| DtedTileError::NegativePostingIndex {
+            index: scaled.nearest,
+        })
+        .map_err(E::from)
+}
+
+impl From<DtedTileError> for String {
+    fn from(error: DtedTileError) -> Self {
+        error.to_string()
+    }
 }
 
 fn one_minus_dyadic(numerator: u128, denominator_exponent: u32) -> f64 {
@@ -619,6 +823,8 @@ fn one_minus_dyadic(numerator: u128, denominator_exponent: u32) -> f64 {
     1.0 - deficit_units as f64 * (f64::EPSILON / 2.0)
 }
 
+// invariant: binary64 decomposition bounds the normal exponent before encoding.
+#[allow(clippy::expect_used)]
 fn dyadic_to_f64(numerator: u128, exponent: i32) -> f64 {
     if numerator == 0 {
         return 0.0;
@@ -682,6 +888,7 @@ fn convert_signed_magnitude(raw: i16) -> i16 {
 }
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     //! DTED batch fixture provenance: adjacent synthetic tiles under
     //! `tests/fixtures/dted/tiles` are written by
@@ -701,7 +908,7 @@ mod tests {
 
     use super::{
         nearest_posting_index, scaled_cell_fraction, terrain_block_dir, DtedInterpolation,
-        DtedLookupOptions, DtedTerrain, DtedTile, DATA_OFFSET, DATA_SENTINEL,
+        DtedLookupOptions, DtedTerrain, DtedTile, DtedTileError, DATA_OFFSET, DATA_SENTINEL,
     };
 
     #[test]
@@ -749,7 +956,10 @@ mod tests {
         assert!(coordinate < half_posting);
         assert_eq!(coordinate * 3600.0, 1.5);
 
-        assert_eq!(nearest_posting_index(coordinate, 3600), Ok(1));
+        assert_eq!(
+            nearest_posting_index::<DtedTileError>(coordinate, 3600),
+            Ok(1)
+        );
     }
 
     #[test]
@@ -926,7 +1136,7 @@ mod tests {
 
             let err = DtedTile::from_path(&tile_path).expect_err("degenerate counts must error");
             assert!(
-                err.contains("invalid DTED dimensions"),
+                err.to_string().contains("invalid DTED dimensions"),
                 "unexpected error for lon_count={lon_count} lat_count={lat_count}: {err}"
             );
         }
