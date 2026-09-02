@@ -72,16 +72,27 @@ const SEGMENT_TAG: &str = "segment";
 /// type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CdmKvn {
+    /// Raw CREATION_DATE text from the message. The readers do not validate it as a calendar value, and the host is responsible for interpreting and formatting the instant.
     pub creation_date: Option<String>,
+    /// ORIGINATOR text copied from the message and emitted when present.
     pub originator: Option<String>,
+    /// MESSAGE_ID text copied without format validation and emitted in the corresponding header field when present.
     pub message_id: Option<String>,
+    /// Raw TCA text; this module leaves date/time resolution and formatting to the host.
     pub tca: Option<String>,
+    /// Finite MISS_DISTANCE value in meters. KVN units are stripped and XML units are ignored on input; encoders label the value in meters.
     pub miss_distance_m: Option<f64>,
+    /// Finite RELATIVE_SPEED value in meters per second. KVN units are stripped and XML units are ignored on input; encoders label the value in meters per second.
     pub relative_speed_m_s: Option<f64>,
+    /// Optional finite COLLISION_PROBABILITY value, emitted without a units attribute.
     pub collision_probability: Option<f64>,
+    /// COLLISION_PROBABILITY_METHOD text, emitted when present and XML-escaped in XML output.
     pub collision_probability_method: Option<String>,
+    /// Optional hard-body radius in meters. KVN reads and writes it through the NASA CARA `COMMENT HBR` convention; XML reads an `HBR` element, but the XML encoder omits it.
     pub hard_body_radius_m: Option<f64>,
+    /// The object parsed from the first KVN OBJECT block or first XML segment.
     pub object1: CdmObject,
+    /// The object parsed from the second KVN OBJECT block or second XML segment.
     pub object2: CdmObject,
 }
 
@@ -91,25 +102,45 @@ pub struct CdmKvn {
 /// `None` and are not emitted on encode.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CdmObject {
+    /// Optional OBJECT_DESIGNATOR text copied from either serialization and emitted under the same key when present.
     pub object_designator: Option<String>,
+    /// Optional CATALOG_NAME text copied from either serialization and emitted under the same key when present.
     pub catalog_name: Option<String>,
+    /// Optional OBJECT_NAME text copied from either serialization; XML output escapes it.
     pub object_name: Option<String>,
+    /// Optional INTERNATIONAL_DESIGNATOR text copied from either serialization and emitted under the same key when present.
     pub international_designator: Option<String>,
+    /// OBJECT_TYPE is carried as text rather than parsed into an enum, then emitted when present.
     pub object_type: Option<String>,
+    /// Optional OPERATOR_CONTACT_POSITION text emitted in the canonical metadata order when present.
     pub operator_contact_position: Option<String>,
+    /// Optional OPERATOR_ORGANIZATION text copied by both readers and emitted when present.
     pub operator_organization: Option<String>,
+    /// Optional OPERATOR_PHONE text emitted in the canonical metadata order when present.
     pub operator_phone: Option<String>,
+    /// Optional OPERATOR_EMAIL text emitted in the canonical metadata order when present.
     pub operator_email: Option<String>,
+    /// Optional EPHEMERIS_NAME text copied by both readers and emitted when present.
     pub ephemeris_name: Option<String>,
+    /// Optional COVARIANCE_METHOD text copied by both readers and emitted when present.
     pub covariance_method: Option<String>,
+    /// MANEUVERABLE is carried as text, preserving values such as YES or NO, and emitted when present.
     pub maneuverable: Option<String>,
+    /// Optional ORBIT_CENTER text emitted in the canonical metadata order when present.
     pub orbit_center: Option<String>,
+    /// Optional REF_FRAME text copied without frame conversion and emitted when present.
     pub ref_frame: Option<String>,
+    /// Optional GRAVITY_MODEL text, including any model detail supplied by the message, emitted under the same key.
     pub gravity_model: Option<String>,
+    /// Optional ATMOSPHERIC_MODEL text emitted in the canonical metadata order when present.
     pub atmospheric_model: Option<String>,
+    /// Optional N_BODY_PERTURBATIONS text preserving the listed perturbing bodies and emitted when present.
     pub n_body_perturbations: Option<String>,
+    /// SOLAR_RAD_PRESSURE is carried as text rather than interpreted as a boolean, then emitted when present.
     pub solar_rad_pressure: Option<String>,
+    /// EARTH_TIDES is carried as text rather than interpreted as a boolean, then emitted when present.
     pub earth_tides: Option<String>,
+    /// INTRACK_THRUST is carried as text, preserving values such as NO, and emitted when present.
     pub intrack_thrust: Option<String>,
     /// Position `(x, y, z)` then velocity `(x_dot, y_dot, z_dot)`.
     pub state: ((f64, f64, f64), (f64, f64, f64)),
