@@ -82,14 +82,33 @@ pub enum DegradeReason {
 /// Invalid civil-time input kind for time-scale conversion boundaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeScaleInputErrorKind {
+    /// A required input was absent; table validation uses this for empty leap-second tables,
+    /// UT1 tables with fewer than two rows, or too few effective UT1 rows.
     Missing,
+    /// A numeric input was NaN or infinite; time-scale validation uses this for date seconds,
+    /// table offsets, checked UTC lookups, and coverage queries.
     NonFinite,
+    /// A mapped validation failure required the value to be strictly greater than zero; the
+    /// generic field-error mapper preserves this classification for downstream tide errors.
     NotPositive,
+    /// A mapped validation failure rejected a negative value where a non-negative value was
+    /// required; the generic field-error mapper preserves this classification for downstream
+    /// tide errors.
     Negative,
+    /// An input fell outside an accepted range or table ordering; table validation uses this for
+    /// non-increasing MJD entries, and checked leap lookup uses it before the first table entry.
     OutOfRange,
+    /// A textual floating-point field could not be parsed; the generic field-error mapper
+    /// preserves this classification for downstream tide errors.
     FloatParse,
+    /// A textual integer field could not be parsed; the generic field-error mapper preserves
+    /// this classification for downstream tide errors.
     IntParse,
+    /// Calendar fields did not form a valid civil date; UTC conversion reports this before
+    /// time-scale arithmetic, including for an invalid date such as 2001-02-29.
     InvalidCivilDate,
+    /// Clock fields did not form a valid civil time; UTC validation reports this for an
+    /// out-of-range clock or a second value that is not an allowed leap-second label.
     InvalidCivilTime,
 }
 
@@ -130,7 +149,12 @@ impl<T> Validated<T> {
 pub enum CoverageError {
     /// Time-scale conversion input is malformed or outside its accepted domain.
     InvalidInput {
+        /// Stable label for the rejected input. Civil validation copies it from the field
+        /// validator, while table and coverage checks use labels such as `leap_seconds`,
+        /// `ut1_utc`, and `jd_tt`; formatting this error includes the label.
         field: &'static str,
+        /// Classification selected by civil or table validation, or by a non-finite coverage
+        /// query; downstream tide errors translate this classification one-for-one.
         kind: TimeScaleInputErrorKind,
     },
     /// Instant is outside the table's covered interval.
