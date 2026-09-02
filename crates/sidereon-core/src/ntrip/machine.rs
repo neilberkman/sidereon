@@ -11,33 +11,59 @@ const MAX_SOURCETABLE: usize = 4 * 1024 * 1024;
 const PREFIX_LIMIT: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Lifecycle states used by [`NtripClientMachine`] while it parses a caster response.
+/// An instance starts in [`NtripState::Idle`], may wait for a status and HTTP headers, and ends in [`NtripState::Closed`] after rejection or completion.
 pub enum NtripState {
+    /// The initial state from [`NtripClientMachine::new`]; the first [`NtripClientMachine::push`] call changes it to [`NtripState::AwaitingStatus`] before parsing input.
     Idle,
+    /// The machine is collecting a line for an `ERROR`, `ICY`, `SOURCETABLE`, or `HTTP/1.0`/`HTTP/1.1` status.
+    /// A malformed or oversized line emits [`NtripEvent::Rejected`] and closes the machine.
     AwaitingStatus,
+    /// An HTTP status has been parsed, so subsequent CRLF-terminated lines are collected until a blank line selects a response class.
+    /// A header block larger than 64 KiB emits [`NtripEvent::Rejected`].
     AwaitingHeaders,
+    /// A data response has been accepted; [`NtripClientMachine::push`] emits payload bytes and dechunks them when required.
+    /// A chunked body closes the machine after decoder completion or failure.
     Streaming,
+    /// A sourcetable response has been accepted and its body is being collected for [`Sourcetable`](crate::ntrip::Sourcetable) parsing.
+    /// The machine closes after the terminator, chunked-body completion, or [`NtripClientMachine::finish`].
     Sourcetable,
+    /// A rejection or terminal response condition has occurred; subsequent [`NtripClientMachine::push`] calls return no events.
     Closed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Connection metadata emitted by [`NtripEvent::Connected`] after a data response is accepted.
+/// It records the response revision, transfer encoding, and HTTP headers used by the parser.
 pub struct NtripHandshake {
+    /// The revision inferred from the response status: ICY and HTTP/1.0 produce [`NtripVersion::Rev1`], while HTTP/1.1 produces [`NtripVersion::Rev2`].
     pub version: NtripVersion,
+    /// Whether the HTTP response uses a case-insensitive `chunked` token in `Transfer-Encoding`; ICY responses always set this to `false`.
     pub chunked: bool,
+    /// HTTP header pairs in input order, with names trimmed and exactly one leading ASCII space removed from values; ICY responses provide an empty vector.
     pub headers: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// Notifications produced while [`NtripClientMachine`] consumes a response or finishes a sourcetable at EOF.
 pub enum NtripEvent {
+    /// Emitted for ICY 200 and for HTTP 200 responses classified as GNSS data, before payload from the same input.
     Connected(NtripHandshake),
+    /// Bytes available to downstream consumers; chunked HTTP bodies are dechunked, and empty decoder output is omitted.
     Payload(Vec<u8>),
+    /// The accumulated sourcetable after [`parse_sourcetable`] succeeds at its terminator or through the finish-at-EOF path.
     Sourcetable(Sourcetable),
+    /// A status, response classification, or malformed/oversized handshake input was rejected; emitting this event closes the machine.
     Rejected(NtripRejection),
+    /// A chunked-body decoder or sourcetable parser failed; emitting this event closes the machine.
     StreamCorrupted { detail: String },
+    /// A chunked data body reached its zero-size chunk and trailer terminator; the machine becomes closed after this event.
     StreamEnded,
 }
 
 #[derive(Clone, Debug)]
+/// Stateful parser for one NTRIP response.
+/// It buffers incomplete status, header, sourcetable, and chunk records across [`Self::push`] calls and emits [`NtripEvent`] values as complete input becomes available.
 pub struct NtripClientMachine {
     config: NtripConfig,
     state: NtripState,
@@ -58,6 +84,8 @@ pub struct NtripClientMachine {
 }
 
 impl NtripClientMachine {
+    /// Creates an idle machine retaining `config` for request generation and optional GGA pacing.
+    /// Response buffers, the chunk decoder, and the prior-GGA timestamp all start empty.
     pub fn new(config: NtripConfig) -> Self {
         Self {
             config,
@@ -79,12 +107,16 @@ impl NtripClientMachine {
         }
     }
 
+    /// Serializes the retained [`NtripConfig`] and moves the machine to [`NtripState::AwaitingStatus`] after serialization succeeds.
+    /// Configuration errors are returned without changing the current state.
     pub fn connection_request(&mut self) -> Result<Vec<u8>> {
         let bytes = self.config.request_bytes()?;
         self.state = NtripState::AwaitingStatus;
         Ok(bytes)
     }
 
+    /// Feeds a response fragment to the parser and returns events in processing order.
+    /// Incomplete records remain buffered for later calls, while calls made after [`NtripState::Closed`] return no events and consume no input.
     pub fn push(&mut self, bytes: &[u8]) -> Vec<NtripEvent> {
         let mut events = Vec::new();
         if matches!(self.state, NtripState::Closed) {
@@ -123,6 +155,8 @@ impl NtripClientMachine {
         events
     }
 
+    /// Returns a due GGA sentence while streaming, converting errors from [`Self::try_gga_message`] into `None`.
+    /// Use [`Self::try_gga_message`] when the caller must distinguish an invalid position or time from a message that is not yet due.
     pub fn gga_message(
         &mut self,
         now_s: f64,
@@ -134,6 +168,8 @@ impl NtripClientMachine {
             .flatten()
     }
 
+    /// Attempts to produce a paced GGA sentence for the active stream.
+    /// It returns `Ok(None)` unless the machine is streaming, an interval is configured, `now_s` is finite, and the first or sufficiently delayed non-backwards call is due; formatter errors propagate, and a successful message records `now_s`.
     pub fn try_gga_message(
         &mut self,
         now_s: f64,
@@ -162,10 +198,12 @@ impl NtripClientMachine {
         Ok(Some(bytes))
     }
 
+    /// Returns the current parser state without changing buffered input or other machine state.
     pub fn state(&self) -> NtripState {
         self.state
     }
 
+    /// Restarts parsing with the same [`NtripConfig`] by replacing all parser and GGA pacing state with fresh state.
     pub fn reset(&mut self) {
         let config = self.config.clone();
         *self = Self::new(config);
@@ -353,6 +391,8 @@ impl NtripClientMachine {
         }
     }
 
+    /// Completes a sourcetable response at EOF.
+    /// In [`NtripState::Sourcetable`], a final unterminated buffered line is submitted, the accumulated text is parsed, [`NtripEvent::Sourcetable`] or [`NtripEvent::StreamCorrupted`] is emitted, and the machine closes; other states produce no events.
     pub fn finish(&mut self) -> Vec<NtripEvent> {
         let mut events = Vec::new();
         if self.state == NtripState::Sourcetable {
