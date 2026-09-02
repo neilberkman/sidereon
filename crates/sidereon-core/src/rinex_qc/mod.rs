@@ -77,182 +77,335 @@ impl FindingRef {
 #[non_exhaustive]
 pub enum Finding {
     /// OBS parse failed before a parsed product existed.
-    ObsFatalParse { at: FindingRef, message: String },
+    ObsFatalParse {
+        /// Defaults to an empty [`FindingRef`] because no parsed location exists for the failure.
+        at: FindingRef,
+        /// Stringified CRINEX decoder or OBS parser error that prevented a parsed product.
+        message: String,
+    },
     /// OBS version is not one of the published versions covered here.
-    ObsUnpublishedVersion { at: FindingRef, version: f64 },
+    ObsUnpublishedVersion {
+        /// Points to `RINEX VERSION / TYPE` in the OBS header.
+        at: FindingRef,
+        /// Header version rejected by the published-version check.
+        version: f64,
+    },
     /// A mandatory OBS header retained by the current product is absent.
-    ObsMissingHeader { at: FindingRef, label: &'static str },
+    ObsMissingHeader {
+        /// Points to the absent header record.
+        at: FindingRef,
+        /// RINEX label of the absent header record.
+        label: &'static str,
+    },
     /// OBS header has no observation-code table.
-    ObsMissingObsTypes { at: FindingRef },
+    ObsMissingObsTypes {
+        /// Points to `SYS / # / OBS TYPES`.
+        at: FindingRef,
+    },
     /// OBS code syntax is not valid for this first slice.
     ObsInvalidObsCode {
+        /// Points to `SYS / # / OBS TYPES`.
         at: FindingRef,
+        /// GNSS system owning the rejected code table.
         system: GnssSystem,
+        /// Complete observation code rejected by the system-, band-, and attribute-specific check.
         code: String,
     },
     /// OBS code is duplicated in one system table.
     ObsDuplicateObsCode {
+        /// Points to `SYS / # / OBS TYPES`.
         at: FindingRef,
+        /// GNSS system whose header list repeats the code.
         system: GnssSystem,
+        /// Observation code repeated in that system's header list.
         code: String,
     },
     /// TIME OF FIRST OBS disagrees with the body.
     ObsTimeOfFirstMismatch {
+        /// Points to `TIME OF FIRST OBS`.
         at: FindingRef,
+        /// Epoch copied from the `TIME OF FIRST OBS` header.
         declared: ObsEpochTime,
+        /// Time scale copied from the `TIME OF FIRST OBS` header.
         declared_scale: TimeScale,
+        /// First body epoch with a normal observation flag.
         observed: ObsEpochTime,
+        /// Body time scale used for comparison with `declared_scale`.
         observed_scale: TimeScale,
     },
     /// TIME OF LAST OBS disagrees with the body epoch or with the file time
     /// system declared by TIME OF FIRST OBS (RINEX 3.05: TIME OF FIRST OBS
     /// defines the time system; TIME OF LAST OBS must agree with it).
     ObsTimeOfLastMismatch {
+        /// Points to `TIME OF LAST OBS`.
         at: FindingRef,
+        /// Epoch copied from the `TIME OF LAST OBS` header.
         declared: ObsEpochTime,
+        /// Time scale copied from the `TIME OF LAST OBS` header.
         declared_scale: TimeScale,
+        /// Last body epoch with a normal observation flag.
         observed: ObsEpochTime,
+        /// Body time scale used for comparison with `declared_scale`.
         observed_scale: TimeScale,
     },
     /// INTERVAL disagrees with the dominant epoch spacing.
     ObsIntervalMismatch {
+        /// Points to `INTERVAL`.
         at: FindingRef,
+        /// Usable interval declared by the OBS header, in seconds.
         declared_s: f64,
+        /// Dominant spacing inferred from normal epochs, in seconds.
         observed_s: f64,
     },
     /// # OF SATELLITES disagrees with the body.
     ObsSatelliteCountMismatch {
+        /// Points to `# OF SATELLITES`.
         at: FindingRef,
+        /// Nonzero satellite count declared by the OBS header.
         declared: usize,
+        /// Number of distinct satellites in normal body records.
         observed: usize,
     },
     /// PRN / # OF OBS disagrees with body tallies.
     ObsPrnObsCountMismatch {
+        /// Carries the affected satellite and points to `PRN / # OF OBS`.
         at: FindingRef,
+        /// Satellite key of the header count entry.
         satellite: GnssSatelliteId,
+        /// Observation code at the mismatching count index, or empty when absent.
         code: String,
+        /// Optional count declared by the header at that index.
         declared: Option<usize>,
+        /// Number of present values observed in the body at that index.
         observed: usize,
     },
     /// GLONASS observations need a valid slot/frequency table.
     ObsGlonassSlotIssue {
+        /// Carries the affected satellite and points to `GLONASS SLOT / FRQ #`.
         at: FindingRef,
+        /// GLONASS satellite with an invalid or missing slot entry.
         satellite: GnssSatelliteId,
+        /// `invalid channel` for an out-of-range header channel, or `missing slot` for a body satellite without an entry.
         issue: &'static str,
     },
     /// SYS / PHASE SHIFT names a code absent from SYS / # / OBS TYPES.
     ObsPhaseShiftUndeclaredCode {
+        /// Points to `SYS / PHASE SHIFT`.
         at: FindingRef,
+        /// GNSS system named by the phase-shift entry.
         system: GnssSystem,
+        /// Phase-shift code absent from that system's declared code list.
         code: String,
     },
     /// SYS / SCALE FACTOR is invalid or names an undeclared code.
     ObsScaleFactorIssue {
+        /// Points to `SYS / SCALE FACTOR`.
         at: FindingRef,
+        /// GNSS system named by the scale-factor entry.
         system: GnssSystem,
+        /// `None` for an unsupported factor; otherwise the undeclared code.
         code: Option<String>,
     },
     /// MARKER TYPE is not a RINEX Table 8 keyword.
-    ObsMarkerTypeIssue { at: FindingRef, marker_type: String },
+    ObsMarkerTypeIssue {
+        /// Points to `MARKER TYPE`.
+        at: FindingRef,
+        /// Original marker-type text copied from the header before trimming for validation.
+        marker_type: String,
+    },
     /// Identity/header field exceeds width or has non-printable ASCII.
     ObsIdentityFieldIssue {
+        /// Points to the identity field passed to the header checker.
         at: FindingRef,
+        /// Static RINEX label of the invalid identity field.
         label: &'static str,
+        /// Original identity value that exceeded its width or contained a non-printable byte.
         value: String,
     },
     /// Approximate position is implausible for a fixed marker.
-    ObsImplausibleApproxPosition { at: FindingRef, radius_m: f64 },
+    ObsImplausibleApproxPosition {
+        /// Points to `APPROX POSITION XYZ`.
+        at: FindingRef,
+        /// Nonzero ECEF radius computed from the header position, in meters.
+        radius_m: f64,
+    },
     /// Antenna height/east/north offset is implausible.
     ObsImplausibleAntennaDelta {
+        /// Points to `ANTENNA: DELTA H/E/N`.
         at: FindingRef,
+        /// Zero-based H, E, or N component index that exceeded the limit.
         component: usize,
+        /// Offending antenna offset component, in meters.
         value_m: f64,
     },
     /// Epoch times are not strictly increasing.
     ObsEpochOrder {
+        /// Carries the zero-based index of the current out-of-order epoch.
         at: FindingRef,
+        /// Previous normal epoch retained by the order scan.
         previous: ObsEpochTime,
+        /// Current normal epoch whose rounded key is earlier than `previous`.
         current: ObsEpochTime,
     },
     /// Two normal epochs carry the same timestamp.
-    ObsDuplicateEpoch { at: FindingRef, epoch: ObsEpochTime },
+    ObsDuplicateEpoch {
+        /// Carries the zero-based index of the later duplicate epoch.
+        at: FindingRef,
+        /// Later normal epoch whose rounded key was already seen.
+        epoch: ObsEpochTime,
+    },
     /// The parser skipped satellite records it could not represent.
-    ObsSkippedRecords { at: FindingRef, count: usize },
+    ObsSkippedRecords {
+        /// Defaults to an empty reference because the parser exposes no more specific location.
+        at: FindingRef,
+        /// Positive parser counter for records that could not be represented.
+        count: usize,
+    },
     /// Epoch record count disagreed with retained satellite records.
     ObsEpochSatCountMismatch {
+        /// Carries the zero-based epoch index.
         at: FindingRef,
+        /// `NUM SAT` count declared in the epoch record.
         declared: usize,
+        /// Number of satellite entries retained in the epoch map.
         retained: usize,
     },
     /// A retained event epoch had special records that are not retained.
-    ObsEventSpecialRecords { at: FindingRef, count: usize },
+    ObsEventSpecialRecords {
+        /// Carries the zero-based event epoch index.
+        at: FindingRef,
+        /// Number of special records recorded for the event epoch.
+        count: usize,
+    },
     /// Header record is outside the retained OBS product.
-    ObsUnretainedHeader { at: FindingRef, label: String },
+    ObsUnretainedHeader {
+        /// Uses the literal `header` location because only the unsupported label is retained.
+        at: FindingRef,
+        /// Header label recorded as unretained by the parser.
+        label: String,
+    },
     /// A pseudorange value is outside the configured plausibility window.
     ObsPseudorangeOutOfRange {
+        /// Carries the normal epoch and satellite containing the value.
         at: FindingRef,
+        /// Observation code selected at the value's index, or empty when unavailable.
         code: String,
+        /// Pseudorange value outside the 15,000,000 to 50,000,000 meter window.
         value_m: f64,
     },
     /// LLI digit is outside the three defined bits.
     ObsLossOfLockOutOfRange {
+        /// Carries the normal epoch and satellite containing the LLI.
         at: FindingRef,
+        /// Observation code selected at the LLI field's index, or empty when unavailable.
         code: String,
+        /// Raw loss-of-lock indicator greater than 7.
         lli: u8,
     },
     /// Event epoch retained with no special records.
-    ObsEventEpoch { at: FindingRef, flag: u8 },
+    ObsEventEpoch {
+        /// Carries the zero-based event epoch index.
+        at: FindingRef,
+        /// Parsed event flag greater than 1.
+        flag: u8,
+    },
     /// Satellite record has all observation fields blank.
-    ObsEmptySatelliteRecord { at: FindingRef },
+    ObsEmptySatelliteRecord {
+        /// Carries the normal epoch and satellite whose observation values are all absent.
+        at: FindingRef,
+    },
     /// Epoch gap is larger than 1.5 times the dominant interval.
     ObsEpochGap {
+        /// Carries the zero-based current normal epoch index.
         at: FindingRef,
+        /// Current-minus-previous normal epoch difference, in seconds.
         gap_s: f64,
+        /// Dominant normal-epoch interval used for the threshold, in seconds.
         interval_s: f64,
     },
     /// NAV parse failed before a parsed product existed.
-    NavFatalParse { at: FindingRef, message: String },
+    NavFatalParse {
+        /// Defaults to an empty reference because no reliable NAV record location exists.
+        at: FindingRef,
+        /// Stringified error returned by lenient NAV parsing.
+        message: String,
+    },
     /// NAV header has no LEAP SECONDS record.
-    NavLeapSecondsAbsent { at: FindingRef },
+    NavLeapSecondsAbsent {
+        /// Points to `LEAP SECONDS`.
+        at: FindingRef,
+    },
     /// NAV ionospheric correction records are malformed.
-    NavIonoMalformed { at: FindingRef, message: String },
+    NavIonoMalformed {
+        /// Points to `IONOSPHERIC CORR`.
+        at: FindingRef,
+        /// Stringified ionospheric-correction parse error.
+        message: String,
+    },
     /// NAV record block was dropped by lenient parsing.
     NavDroppedBlock {
+        /// Carries the skipped block's satellite token.
         at: FindingRef,
+        /// Satellite token stored by the lenient parser for the dropped block.
         satellite: String,
+        /// Lenient parser explanation for skipping the block.
         message: String,
     },
     /// Duplicate NAV records share an identity.
     NavDuplicateRecord {
+        /// Carries the zero-based index of the later duplicate record.
         at: FindingRef,
+        /// Satellite ID of the later duplicate broadcast record.
         satellite: GnssSatelliteId,
+        /// Whether the later record equals the first record with this NAV identity.
         same_payload: bool,
     },
     /// NAV records are not in canonical order.
-    NavUnsortedRecords { at: FindingRef },
+    NavUnsortedRecords {
+        /// Defaults to an empty reference because the check compares adjacent records.
+        at: FindingRef,
+    },
     /// NAV broadcast fields are outside this slice's plausibility limits.
     NavImplausibleRecord {
+        /// Carries the zero-based NAV record index.
         at: FindingRef,
+        /// Satellite ID of the record containing the out-of-range element.
         satellite: GnssSatelliteId,
+        /// Static label identifying the checked element: `eccentricity` or `sqrt_a`.
         field: &'static str,
+        /// Raw broadcast value that failed its range check.
         value: f64,
     },
     /// NAV records include unhealthy satellite records.
     NavUnhealthyRecords {
+        /// Defaults to an empty reference because this finding summarizes a system.
         at: FindingRef,
+        /// GNSS system in the unhealthy-record tally.
         system: GnssSystem,
+        /// Number of that system's records with nonzero `sv_health`.
         count: usize,
     },
     /// NAV records outside the retained/writable scope are present.
     NavOutOfScopeRecords {
+        /// Defaults to an empty reference because the text scan retains no record index.
         at: FindingRef,
+        /// Deterministic class of unsupported frame, message, or constellation.
         class: String,
+        /// Number of text records in the reported scope class.
         count: usize,
     },
     /// INTERVAL is zero, a standards-defined representation of unavailable metadata.
-    ObsIntervalUnavailable { at: FindingRef },
+    ObsIntervalUnavailable {
+        /// Points to `INTERVAL`.
+        at: FindingRef,
+    },
     /// INTERVAL is negative, or non-finite in a caller-constructed product.
-    ObsInvalidInterval { at: FindingRef, declared_s: f64 },
+    ObsInvalidInterval {
+        /// Points to `INTERVAL`.
+        at: FindingRef,
+        /// Raw interval value rejected as negative or non-finite, in seconds.
+        declared_s: f64,
+    },
 }
 
 impl Finding {
