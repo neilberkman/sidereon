@@ -91,12 +91,21 @@ mod error_display_tests {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// [`TecGrid::vtec_at_pierce_point`] converts `unix_nanos` to the temporal
+/// interpolation coordinate. `day_of_year` is retained for callers but is not
+/// read by this regular-grid implementation.
 pub struct TecGridEpoch {
+    /// Unix-epoch timestamp in nanoseconds, matching the grid's epoch axis.
     pub unix_nanos: i64,
+    /// Day-of-year companion carried with the timestamp but unused by grid interpolation.
     pub day_of_year: u16,
 }
 
 impl TecGridEpoch {
+    /// Builds an epoch by copying the supplied timestamp and day-of-year value.
+    ///
+    /// Neither value is validated here; validation of the timestamp occurs
+    /// when a grid query converts it to its floating-point axis coordinate.
     pub fn new(unix_nanos: i64, day_of_year: u16) -> Self {
         Self {
             unix_nanos,
@@ -106,12 +115,23 @@ impl TecGridEpoch {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+/// [`Self::shell_radius_m`] adds the shell height to the Earth radius, and
+/// [`tec_xyz`] uses the resulting radius for the pierce-point intersection and
+/// the slant-to-vertical mapping.
 pub struct TecGridShellGeometry {
+    /// Radius in meters used by the shell intersection and obliquity numerator;
+    /// evaluation requires it to be finite and positive.
     pub earth_radius_m: f64,
+    /// Height in meters added to the Earth radius for the shell intersection;
+    /// evaluation requires it to be finite and nonnegative.
     pub shell_height_m: f64,
 }
 
 impl TecGridShellGeometry {
+    /// Constructs shell geometry without validating its two distances.
+    ///
+    /// The distances are validated when the geometry is passed to [`tec_xyz`]
+    /// or [`iono_delay_xyz`].
     pub const fn new(earth_radius_m: f64, shell_height_m: f64) -> Self {
         Self {
             earth_radius_m,
@@ -119,6 +139,9 @@ impl TecGridShellGeometry {
         }
     }
 
+    /// Returns the default Earth radius and ionospheric shell height.
+    ///
+    /// [`Default::default`] delegates to this constructor.
     pub const fn default_shell() -> Self {
         Self {
             earth_radius_m: EARTH_RADIUS_M,
@@ -126,6 +149,7 @@ impl TecGridShellGeometry {
         }
     }
 
+    /// Returns the spherical shell radius as `earth_radius_m + shell_height_m`.
     pub fn shell_radius_m(self) -> f64 {
         self.earth_radius_m + self.shell_height_m
     }
@@ -138,15 +162,26 @@ impl Default for TecGridShellGeometry {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+/// [`tec_xyz`] consumes the epoch, elevation floor, fallback altitude, and
+/// shell geometry; [`iono_delay_xyz`] additionally uses the carrier frequency.
 pub struct TecGridEvalOptions {
+    /// Epoch passed to [`TecGrid::vtec_at_pierce_point`].
     pub epoch: TecGridEpoch,
+    /// Minimum elevation used by the thin-shell obliquity mapping, in radians.
     pub min_elevation_rad: f64,
+    /// Fallback pierce-point altitude in meters when the coordinate callback returns any NaN.
     pub nan_pierce_point_height_m: f64,
+    /// Carrier frequency used to convert slant TEC to group delay, in hertz.
     pub frequency_hz: f64,
+    /// Earth radius and shell height used by the pierce-point and obliquity calculations.
     pub shell_geometry: TecGridShellGeometry,
 }
 
 impl TecGridEvalOptions {
+    /// Creates options for the canonical GPS L1 frequency.
+    ///
+    /// The result uses a 5-degree minimum elevation, the default 450,000-meter
+    /// fallback height, and [`TecGridShellGeometry::default`].
     pub fn l1(epoch: TecGridEpoch) -> Self {
         // invariant: the built-in GNSS frequency table always defines GPS L1.
         #[allow(clippy::expect_used)]
@@ -161,6 +196,7 @@ impl TecGridEvalOptions {
         }
     }
 
+    /// Returns a copy using `shell_geometry` and its height as the NaN fallback altitude.
     pub fn with_shell_geometry(mut self, shell_geometry: TecGridShellGeometry) -> Self {
         self.nan_pierce_point_height_m = shell_geometry.shell_height_m;
         self.shell_geometry = shell_geometry;
@@ -169,6 +205,9 @@ impl TecGridEvalOptions {
 }
 
 #[derive(Clone, Debug)]
+/// [`TecGrid::new`] stores finite TECU values on strictly increasing epoch,
+/// latitude, and longitude axes in epoch-latitude-longitude order. Queries
+/// interpolate the eight corners of the surrounding cell.
 pub struct TecGrid {
     epochs_ns: Vec<f64>,
     latitudes_deg: Vec<f64>,
@@ -177,6 +216,12 @@ pub struct TecGrid {
 }
 
 impl TecGrid {
+    /// Builds a grid from epoch, latitude, and longitude axes and flat cell values.
+    ///
+    /// Each axis must contain at least two strictly increasing entries. The
+    /// value count must equal the checked product of the axis lengths, and all
+    /// values must be finite; otherwise the returned error describes the failed
+    /// invariant.
     pub fn new(
         epochs_ns: Vec<f64>,
         latitudes_deg: Vec<f64>,
@@ -212,6 +257,12 @@ impl TecGrid {
         })
     }
 
+    /// Returns VTEC interpolated at a pierce-point longitude and latitude.
+    ///
+    /// Latitude values outside `[-87.5, 87.5]` are clamped to that interval.
+    /// The epoch's Unix-nanosecond timestamp is converted to the grid's
+    /// floating-point epoch coordinate, and the effective epoch, latitude, and
+    /// longitude query values must be finite and within their respective axes.
     pub fn vtec_at_pierce_point(
         &self,
         epoch: TecGridEpoch,
@@ -290,6 +341,13 @@ impl TecGrid {
     }
 }
 
+/// Computes the ionospheric group delay for an ECEF satellite and receiver pair.
+///
+/// The callback receives the ECEF pierce point in meters and returns
+/// `[longitude_deg, latitude_deg, altitude]`. This function validates the
+/// carrier frequency, obtains slant TEC from [`tec_xyz`], and applies
+/// `IONOSPHERE_CONSTANT * stec / frequency_hz^2`, returning the finite result in
+/// meters. The altitude component is used only for the NaN check.
 pub fn iono_delay_xyz<F>(
     grid: &TecGrid,
     options: TecGridEvalOptions,
@@ -309,6 +367,14 @@ where
         .map(|_| delay_m)
 }
 
+/// Computes vertical and slant TEC for an ECEF satellite and receiver pair.
+///
+/// The callback receives the ECEF pierce point in meters and returns
+/// `[longitude_deg, latitude_deg, altitude]`; if any returned component is
+/// NaN, the receiver longitude/latitude and
+/// `nan_pierce_point_height_m` are used instead. The result is
+/// `(vtec_tecu, stec_tecu)`, with slant TEC obtained from the configured shell
+/// geometry and the elevation after applying `min_elevation_rad`.
 pub fn tec_xyz<F>(
     grid: &TecGrid,
     options: TecGridEvalOptions,
