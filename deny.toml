@@ -67,6 +67,12 @@ feature-depth = 1
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
 ignore = [
+    # paste is a compile-time proc-macro with no runtime code, reached only
+    # through simba 0.9.1, which is pinned exactly because this crate's
+    # bit-exactness depends on the nalgebra 0.33 / simba 0.9 algorithms.
+    # Revisit when nalgebra/simba are upgraded; that is itself a re-pinning
+    # release.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained compile-time proc-macro behind the exact simba 0.9.1 pin" },
     #"RUSTSEC-0000-0000",
     #{ id = "RUSTSEC-0000-0000", reason = "you can specify a reason the advisory is ignored" },
     #"a-crate-that-is-yanked@0.1.1", # you can also ignore yanked crate versions if you wish

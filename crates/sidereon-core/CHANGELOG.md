@@ -23,6 +23,11 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Added
 
+- A supply-chain gate (`cargo deny`: advisories, licenses, bans, sources)
+  runs in CI, together with an MSRV check at Rust 1.89. One advisory is an
+  explicit, documented exception: RUSTSEC-2024-0436 (`paste`, an unmaintained
+  compile-time proc-macro reached only through the exact `simba` pin); it is
+  revisited when `nalgebra`/`simba` are upgraded.
 - Batch APIs now use an optional default-on `parallel` feature. Disabling it
   removes rayon and compiles the same order-preserving batch entry points with
   plain iterators, keeping results bit-identical and retaining the public
