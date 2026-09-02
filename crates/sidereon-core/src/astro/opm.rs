@@ -54,68 +54,141 @@ const MANEUVER_KEYS: [&str; 7] = [
 /// Canonical, format-agnostic OPM container.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Opm {
+    /// Version copied from `CCSDS_OPM_VERS` in KVN or the `<opm version>`/
+    /// `CCSDS_OPM_VERS` value in XML. [`parse_kvn`] rejects an empty KVN
+    /// version, and both encoders write this value back.
     pub ccsds_opm_vers: String,
+    /// Optional `CREATION_DATE` header text copied by both readers and emitted
+    /// as text by both encoders; `None` becomes an empty header value.
     pub creation_date: Option<String>,
+    /// Optional `ORIGINATOR` header text copied by both readers and emitted as
+    /// text by both encoders; `None` becomes an empty header value.
     pub originator: Option<String>,
+    /// Required metadata assembled by `parse_metadata` from the five metadata
+    /// fields and emitted before state data by both encoders.
     pub metadata: OpmMetadata,
+    /// Required Cartesian state assembled by `parse_state` and emitted by both
+    /// encoders after [`Opm::metadata`].
     pub state: OpmState,
+    /// Optional Keplerian block. KVN sets it when any Keplerian key is present,
+    /// XML sets it for `keplerianElements`, and a present block must contain
+    /// one, and only one, anomaly field.
     pub keplerian: Option<OpmKeplerian>,
+    /// Optional spacecraft-parameters block. KVN sets it when any spacecraft
+    /// key is present, XML sets it for `spacecraftParameters`, and each of its
+    /// numeric fields may still be absent.
     pub spacecraft: Option<OpmSpacecraft>,
+    /// Optional covariance block. KVN sets it for `COV_REF_FRAME` or any
+    /// covariance entry, XML sets it for `covarianceMatrix`, and a present
+    /// block must provide all 21 matrix entries.
     pub covariance: Option<OpmCovariance>,
+    /// Maneuver blocks in source order. Both readers append them in encounter
+    /// order, and both encoders iterate this vector in that same order.
     pub maneuvers: Vec<OpmManeuver>,
 }
 
 /// OPM metadata block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpmMetadata {
+    /// Required `OBJECT_NAME` text copied by `parse_metadata` and emitted under
+    /// the same key by both encoders.
     pub object_name: String,
+    /// Required `OBJECT_ID` text copied by `parse_metadata` and emitted under
+    /// the same key by both encoders.
     pub object_id: String,
+    /// Required `CENTER_NAME` text copied by `parse_metadata` and emitted under
+    /// the same key by both encoders.
     pub center_name: String,
+    /// Required `REF_FRAME` label copied by `parse_metadata` and emitted under
+    /// the same key by both encoders.
     pub ref_frame: String,
+    /// Required `TIME_SYSTEM` label copied by `parse_metadata` and emitted under
+    /// the same key by both encoders.
     pub time_system: String,
 }
 
 /// OPM Cartesian state vector.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpmState {
+    /// Required `EPOCH` text. The readers do not convert or normalize it, and
+    /// both encoders write the stored text back.
     pub epoch: String,
+    /// Strict numeric values from `X`, `Y`, and `Z`, in that order; encoders map
+    /// the entries back to those keys without conversion.
     pub position_km: [f64; 3],
+    /// Strict numeric values from `X_DOT`, `Y_DOT`, and `Z_DOT`, in that order;
+    /// encoders map the entries back to those keys without conversion.
     pub velocity_km_s: [f64; 3],
 }
 
 /// Optional OPM Keplerian elements.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpmKeplerian {
+    /// Strict numeric `SEMI_MAJOR_AXIS` value stored directly and emitted under
+    /// the same field name.
     pub semi_major_axis_km: f64,
+    /// Strict numeric `ECCENTRICITY` value stored directly and emitted under
+    /// the same field name; no orbital-range check is applied here.
     pub eccentricity: f64,
+    /// Strict numeric `INCLINATION` value stored directly and emitted under the
+    /// same field name.
     pub inclination_deg: f64,
+    /// Strict numeric `RA_OF_ASC_NODE` value stored directly and emitted under
+    /// the same field name.
     pub ra_of_asc_node_deg: f64,
+    /// Strict numeric `ARG_OF_PERICENTER` value stored directly and emitted
+    /// under the same field name.
     pub arg_of_pericenter_deg: f64,
+    /// Selected by exactly one of `TRUE_ANOMALY` and `MEAN_ANOMALY`; missing or
+    /// simultaneous fields produce [`OpmError::Field`], and the selected key is
+    /// emitted on encoding.
     pub anomaly: OpmAnomaly,
+    /// Strict numeric `GM` value stored directly and emitted under the same
+    /// field name.
     pub gm_km3_s2: f64,
 }
 
 /// OPM true or mean anomaly.
 #[derive(Debug, Clone, PartialEq)]
 pub enum OpmAnomaly {
+    /// Value from `TRUE_ANOMALY`, accepted only when `MEAN_ANOMALY` is absent;
+    /// encoders write it as `TRUE_ANOMALY`.
     True(f64),
+    /// Value from `MEAN_ANOMALY`, accepted only when `TRUE_ANOMALY` is absent;
+    /// encoders write it as `MEAN_ANOMALY`.
     Mean(f64),
 }
 
 /// Optional OPM spacecraft parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpmSpacecraft {
+    /// Optional strict numeric `MASS` value; `None` causes the encoders to omit
+    /// the `MASS` field.
     pub mass_kg: Option<f64>,
+    /// Optional strict numeric `SOLAR_RAD_AREA` value; `None` causes the
+    /// encoders to omit the field.
     pub solar_rad_area_m2: Option<f64>,
+    /// Optional strict numeric `SOLAR_RAD_COEFF` value; `None` causes the
+    /// encoders to omit the field.
     pub solar_rad_coeff: Option<f64>,
+    /// Optional strict numeric `DRAG_AREA` value; `None` causes the encoders to
+    /// omit the field.
     pub drag_area_m2: Option<f64>,
+    /// Optional strict numeric `DRAG_COEFF` value; `None` causes the encoders to
+    /// omit the field.
     pub drag_coeff: Option<f64>,
 }
 
 /// Optional OPM 6x6 covariance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpmCovariance {
+    /// Optional `COV_REF_FRAME` label retained on the covariance block and
+    /// emitted only when present. In KVN, its presence also makes the block
+    /// present, so all matrix fields are then required.
     pub cov_ref_frame: Option<String>,
+    /// Symmetric, positive-semidefinite [`Covariance6`] built by mirroring the
+    /// 21 lower-triangle fields on read; encoding emits that lower triangle in
+    /// the shared CCSDS key order.
     pub matrix: Covariance6,
 }
 
@@ -123,10 +196,20 @@ pub struct OpmCovariance {
 /// maneuver is present, including `MAN_REF_FRAME`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpmManeuver {
+    /// Required `MAN_EPOCH_IGNITION` text retained without date conversion and
+    /// emitted under the same key.
     pub epoch_ignition: String,
+    /// Strict numeric `MAN_DURATION` value stored directly and emitted under
+    /// the same key.
     pub duration_s: f64,
+    /// Strict numeric `MAN_DELTA_MASS` value, including its sign, stored
+    /// directly and emitted under the same key.
     pub delta_mass_kg: f64,
+    /// Required `MAN_REF_FRAME` text stored for this maneuver and emitted under
+    /// the same key.
     pub ref_frame: String,
+    /// Strict numeric values from `MAN_DV_1`, `MAN_DV_2`, and `MAN_DV_3`, in that
+    /// order; encoders map the entries back to those keys.
     pub dv_km_s: [f64; 3],
 }
 
@@ -137,7 +220,10 @@ pub enum OpmError {
     MissingField(&'static str),
     /// A decoded scalar field failed validation.
     InvalidField {
+        /// Static source-field label retained from validation and included in
+        /// the error's display text.
         field: &'static str,
+        /// Validation category mapped from the shared [`validate::FieldError`].
         kind: OpmInputErrorKind,
     },
     /// A structural or XML-level error.
