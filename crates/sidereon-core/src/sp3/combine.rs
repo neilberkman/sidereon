@@ -960,70 +960,11 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     let frame_reconciliations = prepared.frame_reconciliations;
     let sources = prepared_sources.as_slice();
 
-    // floored-J2000-second -> epoch index, per source.
-    let epoch_index: Vec<BTreeMap<i64, usize>> = sources
-        .iter()
-        .map(|s| {
-            s.epochs
-                .iter()
-                .enumerate()
-                .filter_map(|(i, ep)| {
-                    sp3_epoch_j2000_seconds(s, i, ep).map(|sec| (sec.floor() as i64, i))
-                })
-                .collect()
-        })
-        .collect();
-
-    let epoch_interval_s = resolve_common_epoch_interval(sources, opts.target_epoch_interval_s)?;
-
-    // Per-source per-epoch clock-datum offset relative to source 0. Source 0 is
-    // the datum, so its offset is identically zero.
-    let clock_offset: Vec<BTreeMap<i64, f64>> = sources
-        .iter()
-        .enumerate()
-        .map(|(idx, s)| {
-            if idx == 0 {
-                BTreeMap::new()
-            } else {
-                clock_reference_offset(&sources[0], s, opts.clock_min_common)
-                    .into_iter()
-                    .filter_map(|o| {
-                        instant_to_j2000_seconds(&o.epoch)
-                            .map(|sec| (sec.floor() as i64, o.offset_s))
-                    })
-                    .collect()
-            }
-        })
-        .collect();
-
-    // Union of epochs (by floored second), retaining the representative Instant
-    // from the earliest-listed source on duplicate keys. This is what lets a
-    // dense source fill cells absent from a sparse preferred source.
-    let mut epoch_keys: BTreeMap<i64, Instant> = BTreeMap::new();
-    for source in sources {
-        for (idx, ep) in source.epochs.iter().enumerate() {
-            if let Some(sec) = sp3_epoch_j2000_seconds(source, idx, ep) {
-                epoch_keys.entry(sec.floor() as i64).or_insert(*ep);
-            }
-        }
-    }
-
-    // Restrict the union to the resolved output grid (anchored at the earliest
-    // union epoch), dropping off-grid epochs by exact subset selection. This is
-    // a no-op at the default finest cadence and performs deterministic
-    // decimation for an explicit coarser target.
-    if let Some((&anchor, _)) = epoch_keys.iter().next() {
-        let step = epoch_interval_s.round() as i64;
-        if step > 0 {
-            epoch_keys.retain(|&key, _| (key - anchor).rem_euclid(step) == 0);
-        }
-    }
-
-    if epoch_keys.is_empty() {
-        return Err(Error::InvalidInput(
-            "merge inputs have no epochs on the requested time grid".into(),
-        ));
-    }
+    let timing = prepare_merge_timing(sources, opts)?;
+    let epoch_index = timing.epoch_index;
+    let epoch_interval_s = timing.epoch_interval_s;
+    let clock_offset = timing.clock_offset;
+    let epoch_keys = timing.epoch_keys;
 
     let precedence_source_for_sat = if opts.combine == MergeCombine::Precedence
         && opts.precedence_scope == MergePrecedenceScope::SatelliteArc
@@ -1571,6 +1512,13 @@ struct PreparedMergeInputs {
     frame_reconciliations: Vec<Sp3FrameReconciliation>,
 }
 
+struct MergeTiming {
+    epoch_index: Vec<BTreeMap<i64, usize>>,
+    epoch_interval_s: f64,
+    clock_offset: Vec<BTreeMap<i64, f64>>,
+    epoch_keys: BTreeMap<i64, Instant>,
+}
+
 /// Consume raw SP3 sources and merge options, validate their combinability, and
 /// produce frame-reconciled sources plus the reconciliation audit trail.
 fn prepare_merge_inputs(sources: &[Sp3], opts: &MergeOptions) -> Result<PreparedMergeInputs> {
@@ -1600,6 +1548,82 @@ fn prepare_merge_inputs(sources: &[Sp3], opts: &MergeOptions) -> Result<Prepared
     Ok(PreparedMergeInputs {
         sources,
         frame_reconciliations,
+    })
+}
+
+/// Consume frame-reconciled sources and merge timing options, and produce the
+/// ordered epoch indexes, clock-datum offsets, cadence, and union output grid.
+fn prepare_merge_timing(sources: &[Sp3], opts: &MergeOptions) -> Result<MergeTiming> {
+    // floored-J2000-second -> epoch index, per source.
+    let epoch_index: Vec<BTreeMap<i64, usize>> = sources
+        .iter()
+        .map(|s| {
+            s.epochs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, ep)| {
+                    sp3_epoch_j2000_seconds(s, i, ep).map(|sec| (sec.floor() as i64, i))
+                })
+                .collect()
+        })
+        .collect();
+
+    let epoch_interval_s = resolve_common_epoch_interval(sources, opts.target_epoch_interval_s)?;
+
+    // Per-source per-epoch clock-datum offset relative to source 0. Source 0 is
+    // the datum, so its offset is identically zero.
+    let clock_offset: Vec<BTreeMap<i64, f64>> = sources
+        .iter()
+        .enumerate()
+        .map(|(idx, s)| {
+            if idx == 0 {
+                BTreeMap::new()
+            } else {
+                clock_reference_offset(&sources[0], s, opts.clock_min_common)
+                    .into_iter()
+                    .filter_map(|o| {
+                        instant_to_j2000_seconds(&o.epoch)
+                            .map(|sec| (sec.floor() as i64, o.offset_s))
+                    })
+                    .collect()
+            }
+        })
+        .collect();
+
+    // Union of epochs (by floored second), retaining the representative Instant
+    // from the earliest-listed source on duplicate keys. This is what lets a
+    // dense source fill cells absent from a sparse preferred source.
+    let mut epoch_keys: BTreeMap<i64, Instant> = BTreeMap::new();
+    for source in sources {
+        for (idx, ep) in source.epochs.iter().enumerate() {
+            if let Some(sec) = sp3_epoch_j2000_seconds(source, idx, ep) {
+                epoch_keys.entry(sec.floor() as i64).or_insert(*ep);
+            }
+        }
+    }
+
+    // Restrict the union to the resolved output grid (anchored at the earliest
+    // union epoch), dropping off-grid epochs by exact subset selection. This is
+    // a no-op at the default finest cadence and performs deterministic
+    // decimation for an explicit coarser target.
+    if let Some((&anchor, _)) = epoch_keys.iter().next() {
+        let step = epoch_interval_s.round() as i64;
+        if step > 0 {
+            epoch_keys.retain(|&key, _| (key - anchor).rem_euclid(step) == 0);
+        }
+    }
+
+    if epoch_keys.is_empty() {
+        return Err(Error::InvalidInput(
+            "merge inputs have no epochs on the requested time grid".into(),
+        ));
+    }
+
+    Ok(MergeTiming {
+        epoch_index,
+        epoch_interval_s,
+        clock_offset,
+        epoch_keys,
     })
 }
 
