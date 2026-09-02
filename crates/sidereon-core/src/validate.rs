@@ -25,44 +25,106 @@ pub(crate) struct ArithmeticError {
     pub(crate) field: &'static str,
 }
 
+/// Describes why a named parser or solver input was rejected.
+///
+/// The variants preserve the offending field name and, where useful, the
+/// bounds or source text that caused the failure. Public parsers expose their
+/// own error enums and use this type internally to keep validation behavior
+/// consistent across formats.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum FieldError {
     #[error("{field} is missing")]
-    Missing { field: &'static str },
-    #[error("{field} is not a finite number")]
-    NonFinite { field: &'static str },
-    #[error("{field} must be positive")]
-    NotPositive { field: &'static str },
-    #[error("{field} must be non-negative")]
-    Negative { field: &'static str },
-    #[error("{field} is out of range")]
-    OutOfRange {
+    /// A required field was absent or contained only whitespace.
+    ///
+    /// `field` is the stable field label used by the caller-facing error.
+    Missing {
+        /// Stable name of the required field that was absent.
         field: &'static str,
+    },
+    #[error("{field} is not a finite number")]
+    /// A floating-point field was NaN or infinite.
+    ///
+    /// `field` identifies the value that failed the finite-number check.
+    NonFinite {
+        /// Stable name of the field containing NaN or infinity.
+        field: &'static str,
+    },
+    #[error("{field} must be positive")]
+    /// A value that must be strictly greater than zero was not positive.
+    ///
+    /// `field` identifies the physical parameter whose domain was violated.
+    NotPositive {
+        /// Stable name of the parameter that was not strictly positive.
+        field: &'static str,
+    },
+    #[error("{field} must be non-negative")]
+    /// A value that must be at least zero was negative.
+    ///
+    /// `field` identifies the parameter whose sign check failed.
+    Negative {
+        /// Stable name of the parameter that was negative.
+        field: &'static str,
+    },
+    #[error("{field} is out of range")]
+    /// A finite value fell outside the supplied inclusive or half-open bounds.
+    OutOfRange {
+        /// Stable name of the rejected input field.
+        field: &'static str,
+        /// Lower bound that the input had to meet.
         min: f64,
+        /// Upper bound that the input had to meet.
         max: f64,
+        /// Whether `max` itself is accepted; `min` is always inclusive.
         upper_inclusive: bool,
     },
     #[error("{field} is not a valid float: {value:?}")]
-    FloatParse { field: &'static str, value: String },
-    #[error("{field} is not a valid integer: {value:?}")]
-    IntParse { field: &'static str, value: String },
-    #[error("{field} is not a valid civil date: {year:04}-{month:02}-{day:02}")]
-    InvalidCivilDate {
+    /// Text could not be parsed as a finite floating-point value.
+    ///
+    /// The original trimmed token is retained in `value` for diagnostics.
+    FloatParse {
+        /// Stable name of the field whose text could not be parsed.
         field: &'static str,
+        /// Original trimmed token supplied by the caller.
+        value: String,
+    },
+    #[error("{field} is not a valid integer: {value:?}")]
+    /// Text could not be parsed as the requested integer type.
+    ///
+    /// The original trimmed token is retained in `value` for diagnostics.
+    IntParse {
+        /// Stable name of the field whose text could not be parsed.
+        field: &'static str,
+        /// Original trimmed token supplied by the caller.
+        value: String,
+    },
+    #[error("{field} is not a valid civil date: {year:04}-{month:02}-{day:02}")]
+    /// Calendar fields do not identify a date in the supported civil range.
+    InvalidCivilDate {
+        /// Stable name of the rejected civil-date field or group.
+        field: &'static str,
+        /// Calendar year supplied by the caller.
         year: i64,
+        /// Calendar month supplied by the caller.
         month: i64,
+        /// Calendar day supplied by the caller.
         day: i64,
     },
     #[error("{field} is not a valid civil time: {hour:02}:{minute:02}:{second}")]
+    /// Clock fields do not identify a valid time of day.
     InvalidCivilTime {
+        /// Stable name of the rejected civil-time field or group.
         field: &'static str,
+        /// Hour in the supplied civil time.
         hour: i64,
+        /// Minute in the supplied civil time.
         minute: i64,
+        /// Seconds, including any fractional part, in the supplied civil time.
         second: f64,
     },
 }
 
 impl FieldError {
+    /// Returns the stable field label associated with this validation failure.
     pub const fn field(&self) -> &'static str {
         match self {
             Self::Missing { field }
@@ -77,6 +139,7 @@ impl FieldError {
         }
     }
 
+    /// Returns a short machine-readable reason for this validation failure.
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::Missing { .. } => "missing",

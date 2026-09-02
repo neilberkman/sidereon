@@ -165,7 +165,7 @@ impl UtcInstant {
         .expect("UtcInstant components produce a finite UTC second")
     }
 
-    fn sgp4_julian_date(self) -> JulianDate {
+    pub(crate) fn sgp4_julian_date(self) -> JulianDate {
         let c = self.components();
         let jdn = julian_day_number(c.year, c.month, c.day);
         let jd_midnight = jdn as f64 - 0.5;

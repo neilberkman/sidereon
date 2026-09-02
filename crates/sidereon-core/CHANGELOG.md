@@ -32,6 +32,11 @@ All notable changes to `sidereon-core` are documented here.
   removes rayon and compiles the same order-preserving batch entry points with
   plain iterators, keeping results bit-identical and retaining the public
   serial variants.
+- `JulianDate::new`, `whole`, `fraction`, and `from_unix_microseconds`: named
+  construction and accessors for the split Julian date, and a Unix-microsecond
+  conversion that shares its floor-and-remainder arithmetic with pass
+  prediction (bit-identical, proven by a test over negative and day-boundary
+  inputs). The tuple representation is unchanged.
 
 ### Fixed
 
