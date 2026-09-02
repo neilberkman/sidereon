@@ -129,6 +129,8 @@ fn write_labeled(out: &mut String, data: &str, label: &str) {
 
 /// Emit an `EPOCH OF CURRENT MAP` record from a map epoch, the inverse of the
 /// parser's `parse_epoch_j2000_s`.
+// invariant: serializable IONEX epochs are whole, representable J2000 seconds.
+#[allow(clippy::expect_used)]
 fn write_epoch(out: &mut String, epoch: Instant) {
     let seconds =
         j2000_seconds_from_instant(epoch).expect("IONEX map epoch is convertible to J2000 seconds");
@@ -141,6 +143,7 @@ fn write_epoch(out: &mut String, epoch: Instant) {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::ionex::ionex_epoch_from_j2000_seconds;

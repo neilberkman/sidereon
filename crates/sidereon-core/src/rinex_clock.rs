@@ -4,6 +4,8 @@
 //! The strict parser reports malformed `AS` rows. Use
 //! [`RinexClock::parse_lossy`] only when best-effort input recovery is intended.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::{self, Write as _};
@@ -478,6 +480,8 @@ fn parse_time_scale(text: &str) -> Result<TimeScale, RinexClockError> {
     Ok(time_scale)
 }
 
+// invariant: the parser validates GPS seconds before constructing its split JD.
+#[allow(clippy::expect_used)]
 fn gps_seconds_to_instant(gps_seconds: f64) -> Instant {
     let gps_epoch_jd = J2000_JD - GPS_EPOCH_TO_J2000_S / SECONDS_PER_DAY;
     let days = (gps_seconds / SECONDS_PER_DAY).floor();
@@ -715,6 +719,8 @@ fn civil_microsecond_to_instant(
     Ok(Instant::from_julian_date(scale, split))
 }
 
+// invariant: the civil fields have passed range validation before split-JD construction.
+#[allow(clippy::expect_used)]
 fn civil_microsecond_to_julian_split(
     scale: TimeScale,
     civil: validate::ValidCivilMicrosecond,
@@ -950,6 +956,7 @@ fn days_since_gps_epoch(year: i32, month: u8, day: u8) -> i64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

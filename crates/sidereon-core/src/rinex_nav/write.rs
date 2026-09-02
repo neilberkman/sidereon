@@ -117,6 +117,8 @@ fn write_record(out: &mut String, record: &BroadcastRecord) {
     write_orbit(out, [0.0, fit_interval_hours(record), 0.0, 0.0]);
 }
 
+// invariant: write_record dispatches here only for a record carrying CNAV data.
+#[allow(clippy::expect_used)]
 fn write_cnav_record(out: &mut String, record: &BroadcastRecord) {
     let cnav = record.cnav.expect("CNAV-family record carries cnav data");
 
@@ -284,6 +286,8 @@ fn message_token(message: NavMessage) -> &'static str {
 /// Append a value in RINEX `D19.12` fixed-width form: a leading sign or space,
 /// one mantissa digit, twelve fraction digits, and a signed two-digit exponent
 /// (e.g. ` 1.000000000000e+00`, `-2.907656250000e+02`), always 19 columns.
+// invariant: Rust's fixed scientific formatter always emits an `e` separator.
+#[allow(clippy::expect_used)]
 pub(super) fn push_d19_12(out: &mut String, value: f64) {
     let negative = value.is_sign_negative() && value != 0.0;
     let magnitude = value.abs();
@@ -296,6 +300,8 @@ pub(super) fn push_d19_12(out: &mut String, value: f64) {
 
 /// The base-10 exponent [`push_d19_12`] emits for `value` (the rounded
 /// `{:.12e}` exponent). Factored out so the parser shares the exact predicate.
+// invariant: Rust's fixed scientific formatter always emits a parseable exponent.
+#[allow(clippy::expect_used)]
 fn d19_12_exponent(value: f64) -> i32 {
     let base = format!("{:.12e}", value.abs());
     let (_, exponent) = base.split_once('e').expect("scientific form has 'e'");

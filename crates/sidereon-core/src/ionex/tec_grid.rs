@@ -1,5 +1,7 @@
 //! Regular-grid TEC ionosphere delay variant.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use crate::astro::math::vec3::{
     dot3_fused_z_yx_ref as dot_three_fused, unit3_ref_unchecked as unit_vector,
 };
@@ -12,6 +14,81 @@ use crate::GnssSystem;
 
 pub const IONOSPHERE_HEIGHT_M: f64 = 450_000.0;
 pub const IONOSPHERE_CONSTANT: f64 = 40.308193 * 1e16;
+
+/// Error returned when a regular TEC grid or one of its queries is invalid.
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum TecGridError {
+    /// One or more grid axes have fewer than two nodes.
+    #[error("TEC grid axes must each contain at least two entries")]
+    AxesTooShort,
+    /// A grid axis is not strictly increasing.
+    #[error("TEC grid axes must be strictly increasing")]
+    AxesNotIncreasing,
+    /// The product of the axis lengths overflowed `usize`.
+    #[error("TEC grid dimensions overflow")]
+    DimensionsOverflow,
+    /// The number of values does not match the grid dimensions.
+    #[error("TEC grid has {actual} values but expected {expected}")]
+    ValueCountMismatch { actual: usize, expected: usize },
+    /// A named input failed a shared validation rule.
+    #[error("{field} {reason}")]
+    InvalidField {
+        field: &'static str,
+        reason: &'static str,
+    },
+    /// A query lies outside the grid's interpolation bounds.
+    #[error("{name} {value} is out of TEC grid bounds")]
+    OutOfBounds { name: &'static str, value: f64 },
+}
+
+#[cfg(test)]
+mod error_display_tests {
+    use super::TecGridError;
+
+    #[test]
+    fn tec_grid_error_display_preserves_parser_messages() {
+        let cases = [
+            (
+                TecGridError::AxesTooShort,
+                "TEC grid axes must each contain at least two entries",
+            ),
+            (
+                TecGridError::AxesNotIncreasing,
+                "TEC grid axes must be strictly increasing",
+            ),
+            (
+                TecGridError::DimensionsOverflow,
+                "TEC grid dimensions overflow",
+            ),
+            (
+                TecGridError::ValueCountMismatch {
+                    actual: 3,
+                    expected: 8,
+                },
+                "TEC grid has 3 values but expected 8",
+            ),
+            (
+                TecGridError::InvalidField {
+                    field: "frequency_hz",
+                    reason: "must be positive",
+                },
+                "frequency_hz must be positive",
+            ),
+            (
+                TecGridError::OutOfBounds {
+                    name: "latitude",
+                    value: 95.0,
+                },
+                "latitude 95 is out of TEC grid bounds",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TecGridEpoch {
@@ -71,12 +148,15 @@ pub struct TecGridEvalOptions {
 
 impl TecGridEvalOptions {
     pub fn l1(epoch: TecGridEpoch) -> Self {
+        // invariant: the built-in GNSS frequency table always defines GPS L1.
+        #[allow(clippy::expect_used)]
+        let frequency_hz = frequencies::frequency_hz(GnssSystem::Gps, CarrierBand::L1)
+            .expect("canonical GPS L1 carrier exists");
         Self {
             epoch,
             min_elevation_rad: 5.0 * DEG_TO_RAD,
             nan_pierce_point_height_m: IONOSPHERE_HEIGHT_M,
-            frequency_hz: frequencies::frequency_hz(GnssSystem::Gps, CarrierBand::L1)
-                .expect("canonical GPS L1 carrier exists"),
+            frequency_hz,
             shell_geometry: TecGridShellGeometry::default(),
         }
     }
@@ -102,27 +182,26 @@ impl TecGrid {
         latitudes_deg: Vec<f64>,
         longitudes_deg: Vec<f64>,
         values: Vec<f64>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, TecGridError> {
         if epochs_ns.len() < 2 || latitudes_deg.len() < 2 || longitudes_deg.len() < 2 {
-            return Err("TEC grid axes must each contain at least two entries".to_string());
+            return Err(TecGridError::AxesTooShort);
         }
         if !strictly_increasing(&epochs_ns)
             || !strictly_increasing(&latitudes_deg)
             || !strictly_increasing(&longitudes_deg)
         {
-            return Err("TEC grid axes must be strictly increasing".to_string());
+            return Err(TecGridError::AxesNotIncreasing);
         }
         let expected = epochs_ns
             .len()
             .checked_mul(latitudes_deg.len())
             .and_then(|v| v.checked_mul(longitudes_deg.len()))
-            .ok_or_else(|| "TEC grid dimensions overflow".to_string())?;
+            .ok_or(TecGridError::DimensionsOverflow)?;
         if values.len() != expected {
-            return Err(format!(
-                "TEC grid has {} values but expected {}",
-                values.len(),
-                expected
-            ));
+            return Err(TecGridError::ValueCountMismatch {
+                actual: values.len(),
+                expected,
+            });
         }
         validate::finite_slice(&values, "TEC grid values").map_err(field_error_string)?;
         Ok(Self {
@@ -138,7 +217,7 @@ impl TecGrid {
         epoch: TecGridEpoch,
         longitude_deg: f64,
         latitude_deg: f64,
-    ) -> Result<f64, String> {
+    ) -> Result<f64, TecGridError> {
         let latitude_deg = if latitude_deg.abs() > 87.5 {
             clamp(latitude_deg, -87.5, 87.5)
         } else {
@@ -152,7 +231,7 @@ impl TecGrid {
         epoch_ns: f64,
         latitude_deg: f64,
         longitude_deg: f64,
-    ) -> Result<f64, String> {
+    ) -> Result<f64, TecGridError> {
         let epoch_ns = finite_query_value(epoch_ns, "timestamp")?;
         let latitude_deg = finite_query_value(latitude_deg, "latitude")?;
         let longitude_deg = finite_query_value(longitude_deg, "longitude")?;
@@ -217,7 +296,7 @@ pub fn iono_delay_xyz<F>(
     sat_xyz: &[f64; 3],
     receiver_xyz: &[f64; 3],
     ecef_to_lla: F,
-) -> Result<f64, String>
+) -> Result<f64, TecGridError>
 where
     F: Fn(&[f64; 3]) -> [f64; 3],
 {
@@ -236,7 +315,7 @@ pub fn tec_xyz<F>(
     sat_xyz: &[f64; 3],
     receiver_xyz: &[f64; 3],
     ecef_to_lla: F,
-) -> Result<(f64, f64), String>
+) -> Result<(f64, f64), TecGridError>
 where
     F: Fn(&[f64; 3]) -> [f64; 3],
 {
@@ -319,15 +398,18 @@ fn strictly_increasing(values: &[f64]) -> bool {
     values.windows(2).all(|w| w[1] > w[0])
 }
 
-fn finite_query_value(value: f64, name: &'static str) -> Result<f64, String> {
+fn finite_query_value(value: f64, name: &'static str) -> Result<f64, TecGridError> {
     validate::finite(value, name).map_err(field_error_string)
 }
 
-fn field_error_string(error: validate::FieldError) -> String {
-    format!("{} {}", error.field(), error.reason())
+fn field_error_string(error: validate::FieldError) -> TecGridError {
+    TecGridError::InvalidField {
+        field: error.field(),
+        reason: error.reason(),
+    }
 }
 
-fn validate_frequency(frequency_hz: f64) -> Result<(), String> {
+fn validate_frequency(frequency_hz: f64) -> Result<(), TecGridError> {
     validate::finite_positive(frequency_hz, "frequency_hz")
         .map(|_| ())
         .map_err(field_error_string)
@@ -337,7 +419,7 @@ fn validate_tec_geometry_inputs(
     options: TecGridEvalOptions,
     sat_xyz: &[f64; 3],
     receiver_xyz: &[f64; 3],
-) -> Result<f64, String> {
+) -> Result<f64, TecGridError> {
     validate::finite_vec3(*sat_xyz, "satellite_xyz").map_err(field_error_string)?;
     validate::finite_vec3(*receiver_xyz, "receiver_xyz").map_err(field_error_string)?;
     validate::finite(options.min_elevation_rad, "min_elevation_rad").map_err(field_error_string)?;
@@ -371,9 +453,9 @@ fn validate_tec_geometry_inputs(
     Ok(shell_radius_m)
 }
 
-fn interval(axis: &[f64], x: f64, name: &str) -> Result<(usize, f64), String> {
+fn interval(axis: &[f64], x: f64, name: &'static str) -> Result<(usize, f64), TecGridError> {
     if x < axis[0] || x > axis[axis.len() - 1] {
-        return Err(format!("{name} {x} is out of TEC grid bounds"));
+        return Err(TecGridError::OutOfBounds { name, value: x });
     }
     let upper = axis.partition_point(|v| *v <= x);
     let mut lower = upper.saturating_sub(1);
@@ -385,6 +467,7 @@ fn interval(axis: &[f64], x: f64, name: &str) -> Result<(usize, f64), String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -412,8 +495,8 @@ mod tests {
             let error = grid
                 .interpolate_vtec(epoch_ns, latitude_deg, longitude_deg)
                 .expect_err("non-finite TEC coordinate must be rejected");
-            assert!(error.contains(field), "{error}");
-            assert!(error.contains("not finite"), "{error}");
+            assert!(error.to_string().contains(field), "{error}");
+            assert!(error.to_string().contains("not finite"), "{error}");
         }
     }
 
@@ -445,8 +528,8 @@ mod tests {
         )
         .expect_err("nonfinite TEC grid cells must be rejected");
 
-        assert!(error.contains("TEC grid values"), "{error}");
-        assert!(error.contains("not finite"), "{error}");
+        assert!(error.to_string().contains("TEC grid values"), "{error}");
+        assert!(error.to_string().contains("not finite"), "{error}");
     }
 
     #[test]
@@ -475,8 +558,8 @@ mod tests {
         )
         .expect_err("zero receiver and satellite vectors must be rejected");
 
-        assert!(error.contains("receiver radius_m"), "{error}");
-        assert!(error.contains("not positive"), "{error}");
+        assert!(error.to_string().contains("receiver radius_m"), "{error}");
+        assert!(error.to_string().contains("not positive"), "{error}");
     }
 
     #[test]
@@ -494,8 +577,8 @@ mod tests {
 
             let error = iono_delay_xyz(&grid, options, &sat_xyz, &receiver_xyz, passthrough_lla)
                 .expect_err("invalid TEC-grid frequency must be rejected");
-            assert!(error.contains("frequency_hz"), "{error}");
-            assert!(error.contains(reason), "{error}");
+            assert!(error.to_string().contains("frequency_hz"), "{error}");
+            assert!(error.to_string().contains(reason), "{error}");
         }
     }
 }

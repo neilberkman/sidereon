@@ -1,9 +1,12 @@
 //! Sans-I/O NMEA 0183 sentence parsing and GGA writing.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 mod epoch;
 mod fields;
 mod sentence;
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;
 mod write;
 

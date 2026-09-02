@@ -4,6 +4,8 @@
 //! correction values keyed by satellite, with enough provider and issue metadata
 //! to apply orbit and clock corrections on top of broadcast ephemerides.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -1125,6 +1127,7 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::astro::math::vec3::dot3;

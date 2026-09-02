@@ -9,8 +9,8 @@ pub mod ionosphere {
         regular_tec_grid_delay_xyz, regular_tec_xyz, GalileoNequickCoeffs, GalileoNequickEval,
         Ionex, IonexCoverageError, IonexCoveragePolicy, IonexSlantDelayEvaluation,
         IonexSlantDelayStatus, IonexSlantRequest, IonoModel, KlobucharParams, NequickGRayEval,
-        TecGrid, TecGridEpoch, TecGridEvalOptions, TecGridSamples, TecGridShellGeometry, TecSample,
-        TecSamplesError,
+        TecGrid, TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridSamples,
+        TecGridShellGeometry, TecSample, TecSamplesError,
     };
     pub use crate::rinex_nav::{IonoCorrections, KlobucharAlphaBeta};
 
@@ -35,8 +35,8 @@ pub use ionosphere::{
     regular_tec_grid_delay_xyz, regular_tec_xyz, GalileoNequickCoeffs, GalileoNequickEval, Ionex,
     IonexCoverageError, IonexCoveragePolicy, IonexGrid, IonexSlantDelayEvaluation,
     IonexSlantDelayStatus, IonexSlantRequest, IonoModel, KlobucharParams, NequickGRayEval, TecGrid,
-    TecGridEpoch, TecGridEvalOptions, TecGridSamples, TecGridShellGeometry, TecSample,
-    TecSamplesError,
+    TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridSamples, TecGridShellGeometry,
+    TecSample, TecSamplesError,
 };
 pub use troposphere::{
     tropo_mapping, tropo_slant, tropo_zenith, tropo_zwd_delay_xyz, zwd_zenith_wet_delay,

@@ -255,6 +255,8 @@ impl PreciseEphemerisSamples {
     /// The real-product decimation hold-out oracle pins the sample-backed versus
     /// parsed-text 3D difference at no more than `4.020965667248365e-8` m over
     /// interior held-out 5-minute records bracketed by 15-minute nodes.
+    // invariant: empty and invalid sample groups return before choosing a time scale.
+    #[allow(clippy::expect_used)]
     pub fn from_samples(
         samples: impl IntoIterator<Item = PreciseEphemerisSample>,
     ) -> core::result::Result<Self, PreciseSamplesError> {
@@ -495,6 +497,7 @@ fn frame_error(field: &'static str, reason: &'static str) -> FrameTransformError
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::astro::time::model::{InstantRepr, JulianDateSplit};
@@ -689,6 +692,7 @@ mod tests {
 }
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod parity_tests {
     use super::*;
     use crate::observables::{

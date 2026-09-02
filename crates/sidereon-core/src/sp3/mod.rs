@@ -45,6 +45,8 @@
 //! Positions/velocities are returned as frame-tagged [`ItrfPositionM`] /
 //! [`ItrfVelocityMS`], never a bare `position_m`.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use std::collections::BTreeMap;
 
 use crate::astro::time::civil::{j2000_seconds, split_julian_date};
@@ -1115,6 +1117,8 @@ impl Parser {
     }
 
     /// Position+clock record: `PG01  x  y  z  clk  ...flags`.
+    // invariant: current_epoch is checked immediately before the synchronized raw lists.
+    #[allow(clippy::expect_used)]
     fn parse_position_line(&mut self, line: &str, line_number: usize) -> Result<()> {
         if self.current_epoch.is_none() {
             return Err(Error::Parse(
@@ -1196,6 +1200,8 @@ impl Parser {
 
     /// Velocity record: `VG01  vx  vy  vz  clkrate ...`. Augments the matching
     /// position record at the current epoch (must follow it).
+    // invariant: current_epoch is checked immediately before the synchronized raw lists.
+    #[allow(clippy::expect_used)]
     fn parse_velocity_line(&mut self, line: &str, line_number: usize) -> Result<()> {
         if self.current_epoch.is_none() {
             return Err(Error::Parse(
@@ -1547,4 +1553,5 @@ pub use verify::{
 };
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;

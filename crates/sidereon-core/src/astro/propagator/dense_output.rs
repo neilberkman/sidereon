@@ -2,6 +2,59 @@ use crate::astro::state::CartesianState;
 use crate::astro::state::StateDerivative;
 use nalgebra::Vector3;
 
+/// Error returned when dense propagation output cannot be evaluated.
+#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum DenseOutputError {
+    /// A segment query lies outside the segment's allowed time interval.
+    #[error("Time {t} out of range [{t_start}, {t_end}] (theta={theta})")]
+    SegmentOutOfRange {
+        t: f64,
+        t_start: f64,
+        t_end: f64,
+        theta: f64,
+    },
+    /// No dense segments are available for evaluation.
+    #[error("Dense output is empty")]
+    Empty,
+    /// A collection query lies outside the covered time interval.
+    #[error("Time {t} out of range [{t_min}, {t_max}]")]
+    OutputOutOfRange { t: f64, t_min: f64, t_max: f64 },
+}
+
+#[cfg(test)]
+mod error_display_tests {
+    use super::DenseOutputError;
+
+    #[test]
+    fn dense_output_error_display_preserves_evaluation_messages() {
+        let cases = [
+            (
+                DenseOutputError::SegmentOutOfRange {
+                    t: 3.0,
+                    t_start: 0.0,
+                    t_end: 1.0,
+                    theta: 3.0,
+                },
+                "Time 3 out of range [0, 1] (theta=3)",
+            ),
+            (DenseOutputError::Empty, "Dense output is empty"),
+            (
+                DenseOutputError::OutputOutOfRange {
+                    t: 3.0,
+                    t_min: 0.0,
+                    t_max: 1.0,
+                },
+                "Time 3 out of range [0, 1]",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+}
+
 /// Dense output segment for continuous interpolation.
 /// Currently implements Shampine's 4th-order continuous extension for DP5(4).
 #[derive(Debug, Clone)]
@@ -16,7 +69,7 @@ pub struct DenseSegment {
 impl DenseSegment {
     /// Evaluate the interpolant at time t.
     /// Returns Err if t is out of range [t_start, t_start + h] (with a small epsilon).
-    pub fn eval(&self, t: f64) -> Result<CartesianState, String> {
+    pub fn eval(&self, t: f64) -> Result<CartesianState, DenseOutputError> {
         // Bit-exact endpoint checks based on time
         if t == self.t_start {
             return Ok(self.y_start);
@@ -34,10 +87,12 @@ impl DenseSegment {
         // Allow for very small numerical overshoot at boundaries
         if !(-1e-12..=1.0 + 1e-12).contains(&theta) {
             let t_end = self.t_start + self.h;
-            return Err(format!(
-                "Time {} out of range [{}, {}] (theta={})",
-                t, self.t_start, t_end, theta
-            ));
+            return Err(DenseOutputError::SegmentOutOfRange {
+                t,
+                t_start: self.t_start,
+                t_end,
+                theta,
+            });
         }
 
         let theta = theta.clamp(0.0, 1.0);
@@ -128,9 +183,9 @@ pub struct DenseOutput {
 
 impl DenseOutput {
     /// Evaluate the interpolated state at any time t within the covered range.
-    pub fn eval(&self, t: f64) -> Result<CartesianState, String> {
+    pub fn eval(&self, t: f64) -> Result<CartesianState, DenseOutputError> {
         if self.segments.is_empty() {
-            return Err("Dense output is empty".to_string());
+            return Err(DenseOutputError::Empty);
         }
 
         let first = &self.segments[0];
@@ -146,7 +201,7 @@ impl DenseOutput {
         };
 
         if t < t_min - 1e-7 || t > t_max + 1e-7 {
-            return Err(format!("Time {t} out of range [{t_min}, {t_max}]"));
+            return Err(DenseOutputError::OutputOutOfRange { t, t_min, t_max });
         }
 
         // Binary search for the correct segment

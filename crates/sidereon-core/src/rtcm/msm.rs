@@ -393,15 +393,13 @@ impl MsmMessage {
         }
 
         // Signal block, column-major over the ordered cells.
-        let cell_signal = |sat: u8, sig: u8| {
-            self.signals
-                .iter()
-                .find(|s| s.satellite_id == sat && s.signal_id == sig)
-                .expect("ordered cell must reference an existing signal")
-        };
         let ordered: Vec<&MsmSignal> = ordered_cells
             .iter()
-            .map(|&(sat, sig)| cell_signal(sat, sig))
+            .filter_map(|&(sat, sig)| {
+                self.signals
+                    .iter()
+                    .find(|s| s.satellite_id == sat && s.signal_id == sig)
+            })
             .collect();
 
         match self.kind {

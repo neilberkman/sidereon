@@ -901,6 +901,7 @@ fn parse_error(message: &str) -> Error {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::rtcm::crc::crc24q;

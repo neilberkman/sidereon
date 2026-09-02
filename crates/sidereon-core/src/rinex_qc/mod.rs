@@ -4,6 +4,8 @@
 //! It does not implement a parser. Text entry points decode through the owning
 //! modules, then report typed findings derived from the parsed products.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::astro::time::model::TimeScale;
@@ -2152,4 +2154,5 @@ const fn nav_message_rank(message: NavMessage) -> u8 {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;

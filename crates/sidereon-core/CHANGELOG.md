@@ -15,6 +15,10 @@ All notable changes to `sidereon-core` are documented here.
 - Native exact-cache locking now uses the stable standard-library file-locking
   API, removing the unmaintained fs2 dependency while preserving bounded,
   non-blocking retry behavior and error handling.
+- **Breaking:** `terrain`, `ionex::tec_grid`, and
+  `astro::propagator::dense_output` now return typed error enums from their
+  public parsing, interpolation, and dense-output evaluation APIs; the error
+  messages remain unchanged.
 - `libm` is pinned to exactly 0.2.16. The crate's cross-platform bit-exactness
   is a property of that implementation's rounding, so a semver-compatible
   update of it could change results without any change here. The pin makes
@@ -53,6 +57,12 @@ Supersedes 1.4.0. Solutions are unchanged; a diagnostic is restored.
 
 ### Fixed
 
+- A RINEX NAV record probe sliced a line at a fixed byte offset and panicked
+  when the header bytes were not a UTF-8 character boundary (found by fuzzing);
+  it now inspects bytes and never panics on malformed input.
+- A DTED coordinate field ending in a multi-byte character was sliced at an
+  invalid boundary and panicked (found by fuzzing); it now returns a typed
+  error.
 - The core trust-region backend no longer overrides the solver's dot-product
   and matrix-vector reductions. Those fallbacks were already portable
   fixed-order arithmetic; overriding them in 1.4.0 summed the terminal
