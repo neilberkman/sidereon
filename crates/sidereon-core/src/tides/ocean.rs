@@ -86,16 +86,39 @@ const TWO_PI: f64 = 2.0 * std::f64::consts::PI;
 /// BLQ tidal constituents supported by the ARG2 evaluator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OceanTideConstituent {
+    /// First BLQ/ARG2 slot (index 0), labeled `M2`; its ARG2 speed is
+    /// `1.40519e-4` rad/s with multipliers `(h0, s0, p0, 2pi) = (2, -2, 0, 0)`.
     M2,
+    /// Second BLQ/ARG2 slot (index 1), labeled `S2`; its ARG2 speed is
+    /// `1.45444e-4` rad/s and its multiplier row is all zero, so its argument
+    /// advances with the fractional hour alone.
     S2,
+    /// Third BLQ/ARG2 slot (index 2), labeled `N2`; its ARG2 speed is
+    /// `1.37880e-4` rad/s with multipliers `(h0, s0, p0, 2pi) = (2, -3, 1, 0)`.
     N2,
+    /// Fourth BLQ/ARG2 slot (index 3), labeled `K2`; its ARG2 speed is
+    /// `1.45842e-4` rad/s with multipliers `(h0, s0, p0, 2pi) = (2, 0, 0, 0)`.
     K2,
+    /// Fifth BLQ/ARG2 slot (index 4), labeled `K1`; its ARG2 speed is
+    /// `0.72921e-4` rad/s with multipliers `(h0, s0, p0, 2pi) = (1, 0, 0, 0.25)`.
     K1,
+    /// Sixth BLQ/ARG2 slot (index 5), labeled `O1`; its ARG2 speed is
+    /// `0.67598e-4` rad/s with multipliers `(h0, s0, p0, 2pi) = (1, -2, 0, -0.25)`.
     O1,
+    /// Seventh BLQ/ARG2 slot (index 6), labeled `P1`; its ARG2 speed is
+    /// `0.72523e-4` rad/s with multipliers `(h0, s0, p0, 2pi) = (-1, 0, 0, -0.25)`.
     P1,
+    /// Eighth BLQ/ARG2 slot (index 7), labeled `Q1`; its ARG2 speed is
+    /// `0.64959e-4` rad/s with multipliers `(h0, s0, p0, 2pi) = (1, -3, 1, -0.25)`.
     Q1,
+    /// Ninth BLQ/ARG2 slot (index 8), labeled `Mf`; its ARG2 speed is
+    /// `0.053234e-4` rad/s with multipliers `(h0, s0, p0, 2pi) = (0, 2, 0, 0)`.
     Mf,
+    /// Tenth BLQ/ARG2 slot (index 9), labeled `Mm`; its ARG2 speed is
+    /// `0.026392e-4` rad/s with multipliers `(h0, s0, p0, 2pi) = (0, 1, -1, 0)`.
     Mm,
+    /// Eleventh BLQ/ARG2 slot (index 10), labeled `Ssa`; its ARG2 speed is
+    /// `0.003982e-4` rad/s with multipliers `(h0, s0, p0, 2pi) = (2, 0, 0, 0)`.
     Ssa,
 }
 
