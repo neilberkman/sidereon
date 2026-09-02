@@ -218,6 +218,9 @@ pub struct RtkFilterScratch {
 }
 
 impl RtkFilterScratch {
+    /// Creates an empty scratch workspace for reuse across filter epochs.
+    /// Pass the workspace to [`update_epoch_with_scratch`] so its row, geometry,
+    /// hold, and solver buffers can be retained between updates.
     pub fn new() -> Self {
         Self::default()
     }
@@ -531,6 +534,10 @@ pub(crate) fn dd_covariance_cycles(
 /// Ratio-test options for the ambiguity search.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SearchOpts {
+    /// Ratio at which the LAMBDA search accepts its integer candidate, measured
+    /// as the runner-up score divided by the best score. The update boundary
+    /// requires this value to be finite and positive; the canonical default is
+    /// [`super::defaults::RATIO_THRESHOLD`].
     pub ratio_threshold: f64,
 }
 
@@ -547,9 +554,21 @@ pub enum DynamicsModel {
 /// Options for one streaming filter epoch update.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UpdateOpts {
+    /// Held-ambiguity pseudo-measurement sigma in meters. The update uses
+    /// `1 / sigma²` for both fix-and-hold constraints and per-system reference
+    /// gauge pins, and rejects values whose inverse variance is not finite.
     pub hold_sigma_m: f64,
+    /// Positive meter threshold for the Euclidean norm of a baseline step in
+    /// the iterated update. Convergence also requires the ambiguity step to be
+    /// within [`Self::ambiguity_tol_m`].
     pub position_tol_m: f64,
+    /// Positive meter threshold for the largest absolute single-difference
+    /// ambiguity step in the iterated update. Convergence also requires the
+    /// baseline step to be within [`Self::position_tol_m`].
     pub ambiguity_tol_m: f64,
+    /// Nonzero maximum number of Gauss-Newton information-update iterations.
+    /// If the two step tests have not passed by this cap, the last iterate is
+    /// returned.
     pub max_iterations: usize,
     /// Kinematic process-noise sigma (metres) for the baseline. `0.0` (default)
     /// is the static filter: the carried information is propagated forward
@@ -579,6 +598,9 @@ pub struct UpdateOpts {
     /// below the gate the epoch carries its existing held set and stays float.
     /// `None` (default) keeps the always-armed behaviour.
     pub ar_arming_sigma_m: Option<f64>,
+    /// LAMBDA ratio-test settings applied after the float update to unheld,
+    /// non-float-only ambiguities. If no ambiguity is eligible for search, this
+    /// field does not produce search metadata for that epoch.
     pub search: SearchOpts,
 }
 
@@ -628,7 +650,14 @@ pub struct EpochUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InvalidStateKind {
     /// A state vector or matrix length did not match the state dimension.
-    Length { expected: usize, actual: usize },
+    Length {
+        /// Required length calculated from the carried filter dimension: the
+        /// ambiguity vector matches the id count and the information vector is
+        /// `n * n` entries.
+        expected: usize,
+        /// Length observed in the state vector or matrix that failed validation.
+        actual: usize,
+    },
     /// A state dimension was too large to form the row-major information shape.
     DimensionOverflow,
     /// A floating-point state field was NaN or infinite.
@@ -661,15 +690,24 @@ impl core::fmt::Display for InvalidStateKind {
 pub enum UpdateError {
     /// The carried serialized filter state is malformed and cannot be indexed safely.
     InvalidState {
+        /// Stable validator label naming the rejected state member, such as
+        /// `state.information` or `state.sd_ambiguities_m`.
         field: &'static str,
+        /// Validation category mapped from the filter-state validator, such as
+        /// a length, finiteness, positivity, symmetry, or matrix definiteness failure.
         kind: InvalidStateKind,
     },
     /// The carried filter state is tied to one reference ambiguity arc per
     /// system; applying held DDs to a different reference would reinterpret
     /// fixed integers.
     ReferenceChanged {
+        /// Constellation identifier derived from the epoch reference satellite.
         system: String,
+        /// Reference single-difference ambiguity id stored in the carried state
+        /// for this constellation.
         expected: String,
+        /// Reference single-difference ambiguity id supplied by the current
+        /// epoch for this constellation.
         actual: String,
     },
     /// The epoch carries a reference for a constellation the state does not
@@ -687,7 +725,10 @@ pub enum UpdateError {
     /// A row-builder boundary input was malformed, non-finite, or outside its
     /// physical domain.
     InvalidInput {
+        /// Stable field label for the option or row-boundary input rejected
+        /// before the numerical update proceeds.
         field: &'static str,
+        /// Public RTK validation category for the rejected input.
         kind: super::RtkInputErrorKind,
     },
     /// The measurement/update normal equations or posterior covariance were singular.
