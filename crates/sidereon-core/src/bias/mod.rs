@@ -23,14 +23,27 @@ use crate::validate::{self, CivilSecondPolicy};
 use crate::{frequencies, GnssSatelliteId, GnssSystem};
 
 const BIAS_SINEX_MAJOR_VERSION: &str = "1";
+/// Denominator used when converting Bias-SINEX slope values and slope
+/// uncertainties to the internal per-second representation and back.
 pub const SINEX_BIAS_SLOPE_DENOMINATOR_S: f64 = 1.0;
 const DSB_INCONSISTENCY_TOL_S: f64 = 1.0e-15;
 const RINEX_VERSION_FOR_BIAS_CODES: f64 = 3.04;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Bias-SINEX solution records are classified by the token parsed into this
+/// enum and by whether the record carries one observable or a pair.
+///
+/// The parser accepts the `OSB`, `DSB`, and `ISB` labels. OSB records address
+/// one observable; DSB and ISB records carry a pair.
 pub enum BiasKind {
+    /// The `OSB` token, which is indexed by one observable and has no second
+    /// observable in a solution record.
     Osb,
+    /// The `DSB` token, which is resolved as a signed difference between two
+    /// observables.
     Dsb,
+    /// The `ISB` token, which requires two observables when a solution line is
+    /// parsed.
     Isb,
 }
 
@@ -58,27 +71,53 @@ impl FromStr for BiasKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// PRN and station columns are decoded into one of four target forms in this
+/// enum, which controls the lookup key used for a bias record.
+///
+/// [`BiasSet::parse_bias_sinex`] selects a variant from the PRN and station columns;
+/// station values are normalized before they are stored.
 pub enum BiasTarget {
+    /// A one-character PRN with no station, written back as the system letter.
     System(GnssSystem),
+    /// A multi-character PRN parsed as [`GnssSatelliteId`] with no station.
     Satellite(GnssSatelliteId),
+    /// A one-character PRN paired with a station, with the station normalized
+    /// before storage.
     Receiver {
+        /// GNSS system identified by the one-character PRN column.
         system: GnssSystem,
+        /// Receiver station identifier after station normalization.
         station: String,
     },
+    /// A multi-character PRN paired with a station, with the station
+    /// normalized before storage.
     SatelliteReceiver {
+        /// Satellite identified by the PRN column.
         sat: GnssSatelliteId,
+        /// Receiver station identifier after station normalization.
         station: String,
     },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+/// Canonical index key corresponding to a [`BiasTarget`].
+///
+/// Receiver station strings are normalized by the constructors so that
+/// lookups and parsed receiver records use the same key.
 pub struct BiasTargetKey {
+    /// System component copied from a target or from its satellite identifier.
     pub system: GnssSystem,
+    /// Satellite component used to distinguish satellite-specific lookup from
+    /// the system fallback, when present.
     pub sat: Option<GnssSatelliteId>,
+    /// Normalized station component used to distinguish receiver lookup, when
+    /// present.
     pub station: Option<String>,
 }
 
 impl BiasTargetKey {
+    /// Creates the key used for a system-wide target, with no satellite or
+    /// station component.
     pub fn system(system: GnssSystem) -> Self {
         Self {
             system,
@@ -87,6 +126,8 @@ impl BiasTargetKey {
         }
     }
 
+    /// Creates a key for one satellite by copying its system and identifier;
+    /// the station component is absent.
     pub fn satellite(sat: GnssSatelliteId) -> Self {
         Self {
             system: sat.system,
@@ -95,6 +136,10 @@ impl BiasTargetKey {
         }
     }
 
+    /// Creates a key for one receiver in `system` and stores no satellite
+    /// component.
+    ///
+    /// The station is trimmed, uppercased, and normalized before it is stored.
     pub fn receiver(system: GnssSystem, station: &str) -> Self {
         Self {
             system,
@@ -103,6 +148,10 @@ impl BiasTargetKey {
         }
     }
 
+    /// Creates a key containing the satellite's system and identifier plus a
+    /// normalized receiver station.
+    ///
+    /// The station is trimmed, uppercased, and normalized before it is stored.
     pub fn satellite_receiver(sat: GnssSatelliteId, station: &str) -> Self {
         Self {
             system: sat.system,
@@ -126,13 +175,29 @@ impl From<&BiasTarget> for BiasTargetKey {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Bias-SINEX validity fields store this calendar epoch as year, day of year,
+/// and second of day before lookup converts it to a split Julian date.
+///
+/// The three components are converted to a split Julian date by
+/// [`bias_epoch_instant`].
 pub struct BiasEpoch {
+    /// Calendar year used by [`BiasEpoch::new`] to determine the leap-year day
+    /// bound and by [`BiasEpoch::format_sinex`] as the four-digit prefix.
     pub year: i32,
+    /// One-based day checked against the length of `year` and formatted as a
+    /// three-digit SINEX component.
     pub day_of_year: u16,
+    /// Second checked against `SECONDS_PER_DAY_I64` and formatted as a
+    /// five-digit SINEX component.
     pub second_of_day: u32,
 }
 
 impl BiasEpoch {
+    /// Constructs an epoch after validating its calendar day and second.
+    ///
+    /// `day_of_year` must be within the number of days in `year`, and
+    /// `second_of_day` must not exceed `SECONDS_PER_DAY_I64`; violations return
+    /// [`BiasError::InvalidEpoch`].
     pub fn new(year: i32, day_of_year: u16, second_of_day: u32) -> Result<Self, BiasError> {
         if !(1..=days_in_year(year)).contains(&i32::from(day_of_year)) {
             return Err(BiasError::InvalidEpoch);
@@ -147,6 +212,11 @@ impl BiasEpoch {
         })
     }
 
+    /// Parses a Bias-SINEX epoch token.
+    ///
+    /// An empty token and `0000:000:00000` represent an absent epoch. Every
+    /// other token must contain exactly three colon-separated integer fields
+    /// accepted by [`BiasEpoch::new`].
     pub fn parse_sinex(token: &str) -> Result<Option<Self>, BiasError> {
         let token = token.trim();
         if token.is_empty() || token == "0000:000:00000" {
@@ -162,6 +232,8 @@ impl BiasEpoch {
         Self::new(year, doy, sod).map(Some)
     }
 
+    /// Formats the epoch as the fixed-width `YYYY:DDD:SSSSS` form used by
+    /// Bias-SINEX solution records.
     pub fn format_sinex(self) -> String {
         format!(
             "{:04}:{:03}:{:05}",
@@ -202,94 +274,208 @@ impl BiasEpoch {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// A parsed solution line stores code values in seconds or phase values in
+/// cycles, with validity and optional slope data carried alongside the
+/// target and observables.
+///
+/// Code values and uncertainties are stored in seconds, phase values and
+/// uncertainties in cycles, and optional slopes are evaluated against the
+/// record's validity start by [`BiasSet::code_osb_seconds`] or the related
+/// query methods.
 pub struct BiasRecord {
+    /// Parsed classification that selects one-observable OSB or two-observable
+    /// DSB/ISB indexing and query behavior.
     pub kind: BiasKind,
+    /// Parsed PRN/station target used to build the set's [`BiasTargetKey`].
     pub target: BiasTarget,
+    /// Optional SVN text copied from the solution line.
     pub svn: Option<String>,
+    /// First observable code used alone for OSB indexing or with `obs2` for
+    /// DSB/ISB indexing.
     pub obs1: String,
+    /// Second observable for DSB and ISB records; absent for OSB records.
     pub obs2: Option<String>,
+    /// Inclusive validity start, when the solution line supplies one.
     pub valid_from: Option<BiasEpoch>,
+    /// Exclusive validity end, when the solution line supplies one.
     pub valid_until: Option<BiasEpoch>,
+    /// Trimmed source start and end tokens retained for serialization.
     pub raw_epochs: (String, String),
+    /// Bias value in seconds for code records or cycles for phase records.
     pub value: f64,
+    /// Optional uncertainty in the same units as [`BiasRecord::value`].
     pub sigma: Option<f64>,
+    /// Optional slope converted from the SINEX slope columns and applied over
+    /// elapsed seconds from `valid_from`.
     pub slope: Option<f64>,
+    /// Optional uncertainty converted with the same unit rule as `slope`.
     pub slope_sigma: Option<f64>,
+    /// Records parsed from `cyc` set this true; `ns` records set it false and
+    /// are eligible for code queries.
     pub is_phase: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Interpretation declared by the Bias-SINEX `BIAS_MODE` description.
 pub enum BiasMode {
+    /// Selected by `BIAS_MODE ABSOLUTE`; non-OSB solution records then produce
+    /// mismatch warnings.
     Absolute,
+    /// Selected by `BIAS_MODE RELATIVE` and assigned to every parsed DCB set;
+    /// OSB solution records then produce mismatch warnings.
     Relative,
+    /// Default and fallback for an unrecognized `BIAS_MODE`; the SINEX writer
+    /// rejects it as missing mode metadata.
     #[default]
     Unspecified,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
+/// Bias-SINEX clock-reference description lines populate this per-system map,
+/// which PPP code-bias correction later uses to select a reference pair.
 pub struct ClockReferenceObservables {
+    /// Map populated by `SATELLITE_CLOCK_REFERENCE_OBSERVABLES` lines and read
+    /// by PPP code-bias correction as the pair for each satellite system.
     pub per_system: BTreeMap<GnssSystem, (String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
+/// Bias-SINEX header blocks and legacy DCB metadata are retained in these
+/// fields for diagnostics, inspection, and serialization.
 pub struct BiasSetHeader {
+    /// Third whitespace token from the `%=BIA` header, required by the SINEX
+    /// writer when present as the agency value.
     pub agency: Option<String>,
+    /// Ordered key/value pairs accumulated from nonempty `FILE/REFERENCE`
+    /// lines.
     pub file_reference: Vec<(String, String)>,
+    /// Description map accumulated from `BIAS/DESCRIPTION` lines, including
+    /// system-suffixed clock-reference keys.
     pub description: BTreeMap<String, String>,
+    /// Parsed integer following `+BIAS/SOLUTION`, used for the record-count
+    /// mismatch warning.
     pub declared_bias_count: Option<usize>,
+    /// DCB options retained by `parse_code_dcb` for `write_code_dcb`, when
+    /// available.
     pub dcb_meta: Option<CodeDcbOptions>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// A parsed product retains its records, lookup metadata, and diagnostics so
+/// code and phase bias queries can apply the product's validity rules.
+///
+/// The parsers build an index by target and observable, retain typed
+/// diagnostics for skipped input, and expose the source metadata for writing.
 pub struct BiasSet {
     records: Vec<BiasRecord>,
     index: BTreeMap<(BiasTargetKey, String), Vec<usize>>,
+    /// Mode parsed from `BIAS_MODE`, or `Relative` for a DCB-created set.
     pub mode: BiasMode,
+    /// Scale parsed from `TIME_SYSTEM` or DCB metadata; query epochs on another
+    /// scale are rejected by coverage checks.
     pub time_scale: TimeScale,
+    /// Pairs parsed from `SATELLITE_CLOCK_REFERENCE_OBSERVABLES` and consumed by
+    /// `code_bias_model_m`.
     pub clock_reference: ClockReferenceObservables,
+    /// Source file/description metadata and optional DCB options retained for
+    /// serialization.
     pub header: BiasSetHeader,
     diagnostics: Diagnostics,
     skipped_records: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Legacy DCB parsing and writing use these fields to identify the observable
+/// pair, product interval, time scale, and optional receiver constellation.
+///
+/// The pair and month control observable mapping and the generated validity
+/// interval, while `receiver_system` supplies missing system columns.
 pub struct CodeDcbOptions {
+    /// Legacy observable labels, such as `P1` and `C1`, to map per system.
     pub pair: (String, String),
+    /// Calendar year used to construct the first day of the product interval.
     pub year: i32,
+    /// Calendar month checked as 1 through 12 and used to find the next-month
+    /// exclusive interval end.
     pub month: u8,
+    /// Scale copied to the parsed [`BiasSet`] and emitted in the DCB title.
     pub time_scale: TimeScale,
+    /// Optional system used to recognize and target receiver rows whose first
+    /// column does not contain a system letter.
     pub receiver_system: Option<GnssSystem>,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
+/// These variants identify the parser, time conversion, query metadata, or
+/// writer condition that stopped a bias operation.
 pub enum BiasError {
     #[error("invalid bias input {field}: {reason}")]
+    /// A parser found a missing or invalid field, or a writer received an
+    /// unsupported set component.
     InvalidInput {
+        /// Name of the input or output component that failed, such as `month`
+        /// or `bias target`.
         field: &'static str,
+        /// Fixed explanation selected by the validation branch, such as
+        /// `missing` or `out of range`.
         reason: &'static str,
     },
     #[error("invalid bias epoch")]
+    /// A calendar epoch or split Julian date could not be validated.
     InvalidEpoch,
     #[error("unknown RINEX observable code {code}")]
-    UnknownObservable { code: String },
+    /// Represents an unknown RINEX observable code; the current frequency
+    /// lookup returns `None` instead of constructing this variant.
+    UnknownObservable {
+        /// Unrecognized RINEX observable code.
+        code: String,
+    },
     #[error("unsupported Bias-SINEX version {version}")]
-    UnsupportedVersion { version: String },
+    /// The Bias-SINEX version token does not start with supported major version
+    /// `1`.
+    UnsupportedVersion {
+        /// Complete version token that failed the major-version check.
+        version: String,
+    },
     #[error("missing DCB pair or product month")]
+    /// Neither caller options nor the first twelve title lines supplied DCB
+    /// pair, year, and month metadata.
     MissingDcbMetadata,
     #[error("missing satellite clock reference observables")]
+    /// PPP lookup found no clock-reference pair for the requested satellite's
+    /// system.
     MissingClockReference,
     #[error("bias writer missing required metadata {field}")]
-    MissingWriterMetadata { field: &'static str },
+    /// A writer was called without agency, mode, clock-reference, or DCB
+    /// metadata required by its output format.
+    MissingWriterMetadata {
+        /// Name of the required set component that was absent.
+        field: &'static str,
+    },
     #[error("input is not UTF-8")]
+    /// Indicates a UTF-8 decoding failure; the current byte parsers use
+    /// `String::from_utf8_lossy` instead.
     Utf8,
 }
 
 impl BiasSet {
+    /// Parses a Bias-SINEX byte stream.
+    ///
+    /// The byte stream is decoded lossily as UTF-8. Valid solution records are
+    /// retained in the returned [`Parsed`] value, while malformed records,
+    /// unknown blocks, metadata mismatches, overlaps, and missing file-reference
+    /// metadata are reported through [`BiasSet::diagnostics`].
     pub fn parse_bias_sinex(input: &[u8]) -> Result<Parsed<BiasSet>, BiasError> {
         let text = String::from_utf8_lossy(input);
         parse_bias_sinex_text(text.as_ref())
     }
 
+    /// Parses a legacy code DCB byte stream.
+    ///
+    /// Metadata is taken from `options` or the product title, validated, and
+    /// used to convert accepted nanosecond rows into code DSB records in
+    /// seconds. Rows that cannot be represented are retained as typed skips in
+    /// the returned [`Parsed`] value.
     pub fn parse_code_dcb(
         input: &[u8],
         options: Option<CodeDcbOptions>,
@@ -298,22 +484,41 @@ impl BiasSet {
         parse_code_dcb_text(text.as_ref(), options)
     }
 
+    /// Returns parser and indexing diagnostics retained by this set, including
+    /// skips and overlap warnings added while building its lookup index.
     pub fn diagnostics(&self) -> &Diagnostics {
         &self.diagnostics
     }
 
+    /// Returns the number of entries in [`BiasSet::diagnostics`] that were
+    /// skipped during parsing.
     pub fn skipped_records(&self) -> usize {
         self.skipped_records
     }
 
+    /// Returns a covering code OSB in seconds for `sat` and `obs`.
+    ///
+    /// Lookup checks the satellite target before the system target. Phase
+    /// records, scale-mismatched epochs, and epochs outside the validity
+    /// interval produce `None`; an optional record slope is evaluated at
+    /// `epoch`.
     pub fn code_osb_seconds(&self, sat: GnssSatelliteId, obs: &str, epoch: Instant) -> Option<f64> {
         self.osb_for_target_chain(sat, obs, epoch, false)
     }
 
+    /// Returns a covering phase OSB in cycles for `sat` and `obs`.
+    ///
+    /// Lookup checks the satellite target before the system target and requires
+    /// the record unit to be `cyc`; an optional slope is evaluated at `epoch`.
     pub fn phase_osb_cycles(&self, sat: GnssSatelliteId, obs: &str, epoch: Instant) -> Option<f64> {
         self.osb_for_target_chain(sat, obs, epoch, true)
     }
 
+    /// Resolves a covering code DSB in seconds for a satellite or its system.
+    ///
+    /// The satellite key is tried before the system key. Reversing the
+    /// observable arguments reverses the resolved sign, and multi-hop paths
+    /// are allowed when the active DSB records connect the observables.
     pub fn code_dsb_seconds(
         &self,
         sat: GnssSatelliteId,
@@ -332,6 +537,10 @@ impl BiasSet {
         )
     }
 
+    /// Returns a covering receiver code OSB in seconds.
+    ///
+    /// The lookup uses the normalized station and requested system as an exact
+    /// receiver key and excludes phase records.
     pub fn receiver_code_osb_seconds(
         &self,
         system: GnssSystem,
@@ -348,6 +557,10 @@ impl BiasSet {
         .and_then(|record| self.record_value_at(record, epoch))
     }
 
+    /// Resolves a covering receiver code DSB in seconds.
+    ///
+    /// The lookup uses the normalized station and requested system as an exact
+    /// receiver key.
     pub fn receiver_code_dsb_seconds(
         &self,
         system: GnssSystem,
@@ -359,6 +572,10 @@ impl BiasSet {
         self.dsb_for_key(&BiasTargetKey::receiver(system, station), obs1, obs2, epoch)
     }
 
+    /// Returns a covering satellite-receiver code OSB in seconds.
+    ///
+    /// The lookup uses the satellite and normalized station as an exact key
+    /// and excludes phase records.
     pub fn sat_receiver_code_osb_seconds(
         &self,
         sat: GnssSatelliteId,
@@ -375,6 +592,10 @@ impl BiasSet {
         .and_then(|record| self.record_value_at(record, epoch))
     }
 
+    /// Resolves a covering satellite-receiver code DSB in seconds.
+    ///
+    /// The lookup uses the requested satellite and normalized station as an
+    /// exact key.
     pub fn sat_receiver_code_dsb_seconds(
         &self,
         sat: GnssSatelliteId,
@@ -391,10 +612,18 @@ impl BiasSet {
         )
     }
 
+    /// Returns the parsed records in their stored vector order, which is the
+    /// input order for records accepted by either public parser.
     pub fn records(&self) -> &[BiasRecord] {
         &self.records
     }
 
+    /// Computes the code-bias model relative to a satellite-clock reference in meters.
+    ///
+    /// Matching observable pairs return exact zero. When both ionosphere-free
+    /// OSB combinations are available, the model is their difference times
+    /// [`C_M_S`]; otherwise the corresponding code DSBs are combined with the
+    /// ionosphere-free coefficients and converted to meters.
     pub fn code_bias_model_m(
         &self,
         sat: GnssSatelliteId,
@@ -664,6 +893,13 @@ impl BiasSet {
     }
 }
 
+/// Emits a `%=BIA 1.00` header and Bias-SINEX reference, description, and
+/// solution blocks for a [`BiasSet`].
+///
+/// The output contains file-reference, description, and solution blocks. The
+/// set must provide agency, a specified [`BiasMode`], and at least one
+/// [`ClockReferenceObservables`] entry; otherwise the corresponding
+/// [`BiasError::MissingWriterMetadata`] is returned.
 // invariant: formatting into a String uses infallible fmt::Write operations.
 #[allow(clippy::expect_used)]
 pub fn write_bias_sinex(set: &BiasSet) -> Result<String, BiasError> {
@@ -740,6 +976,12 @@ pub fn write_bias_sinex(set: &BiasSet) -> Result<String, BiasError> {
     Ok(out)
 }
 
+/// Emits a legacy code DCB title and satellite or receiver rows for a
+/// [`BiasSet`].
+///
+/// The set must contain [`CodeDcbOptions`] in its header. Every record must be
+/// a non-phase DSB targeting a satellite or receiver; stored code seconds and
+/// uncertainties are written in nanoseconds.
 // invariant: formatting into a String uses infallible fmt::Write operations.
 #[allow(clippy::expect_used)]
 pub fn write_code_dcb(set: &BiasSet) -> Result<String, BiasError> {
@@ -800,6 +1042,11 @@ pub fn write_code_dcb(set: &BiasSet) -> Result<String, BiasError> {
     Ok(out)
 }
 
+/// Returns the ionosphere-free coefficients for two carrier frequencies.
+///
+/// For finite positive unequal frequencies, the result is
+/// `(f1² / (f1² - f2²), -f2² / (f1² - f2²))`. Invalid frequencies and an equal
+/// frequency pair return `None`.
 pub fn ionosphere_free_coefficients(f1_hz: f64, f2_hz: f64) -> Option<(f64, f64)> {
     validate::finite_positive(f1_hz, "f1_hz").ok()?;
     validate::finite_positive(f2_hz, "f2_hz").ok()?;
@@ -1657,10 +1904,19 @@ fn instant_split(epoch: Instant) -> Option<JulianDateSplit> {
     }
 }
 
+/// Converts a [`BiasEpoch`] to an [`Instant`] on `scale`.
+///
+/// The calendar components are converted through a validated split Julian
+/// date; an invalid conversion returns [`BiasError::InvalidEpoch`].
 pub fn bias_epoch_instant(epoch: BiasEpoch, scale: TimeScale) -> Result<Instant, BiasError> {
     Ok(Instant::from_julian_date(scale, epoch.to_split()?))
 }
 
+/// Converts a civil date-time to an [`Instant`] on `scale`.
+///
+/// UTC and GLONASST use UTC-like second validation; all other scales use
+/// continuous-second validation. Invalid calendar or second values return
+/// [`BiasError::InvalidEpoch`].
 pub fn civil_datetime_instant(
     epoch: crate::ppp_corrections::CivilDateTime,
     scale: TimeScale,
