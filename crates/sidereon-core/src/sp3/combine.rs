@@ -2464,6 +2464,7 @@ mod tests {
     };
     use crate::constants::SECONDS_PER_DAY;
     use crate::id::{GnssSatelliteId, GnssSystem};
+    use sha2::{Digest, Sha256};
     use std::collections::BTreeSet;
 
     /// One satellite sample in a synthetic SP3 epoch: token, ECEF position
@@ -2643,6 +2644,126 @@ mod tests {
         }
         body.push_str("EOF\n");
         Sp3::parse(body.as_bytes()).expect("parse test sp3")
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn frozen_merge_output_hashes() {
+        let union_a = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(200.0)),
+            ("G03", [17000.0, -22000.0, 7000.0], Some(300.0)),
+        ]);
+        let union_b = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(200.0)),
+        ]);
+
+        let mean_a = sp3_records(&[("G01", [15000.000, -20000.0, 5000.0], Some(100.0))]);
+        let mean_b = sp3_records(&[("G01", [15000.003, -20000.0, 5000.0], Some(100.0))]);
+        let mean_c = sp3_records(&[("G01", [15000.006, -20000.0, 5000.0], Some(100.0))]);
+        let mean_options = MergeOptions {
+            position_tolerance_m: 10.0,
+            min_agree: 3,
+            combine: MergeCombine::Mean,
+            ..MergeOptions::default()
+        };
+
+        let preferred = sp3_records(&[("G01", [15000.0, -20000.0, 5000.0], Some(100.0))]);
+        let agreeing = sp3_records(&[("G01", [15000.001, -20000.0, 5000.0], Some(100.0))]);
+        let outlier = sp3_records(&[("G01", [15002.0, -20000.0, 5000.0], Some(100.0))]);
+        let guarded_precedence_options = MergeOptions {
+            combine: MergeCombine::Precedence,
+            min_agree: 2,
+            outlier_reject: Some(OutlierRejectOptions {
+                position_tolerance_m: 2.0,
+                clock_tolerance_s: 1.0e-6,
+            }),
+            ..MergeOptions::default()
+        };
+
+        let mixed_a = sp3_epochs(
+            0.0,
+            &[
+                &[("G01", [15000.0, -20000.0, 5000.0], Some(100.0))],
+                &[("G01", [15001.0, -20001.0, 5001.0], Some(101.0))],
+                &[("G01", [15002.0, -20002.0, 5002.0], Some(102.0))],
+            ],
+            900.0,
+            "IGS14",
+        );
+        let mixed_b = sp3_epochs(
+            450.0,
+            &[
+                &[("G01", [15010.0, -20010.0, 5010.0], Some(110.0))],
+                &[("G01", [15001.0, -20001.0, 5001.0], Some(101.0))],
+                &[("G01", [15011.0, -20011.0, 5011.0], Some(111.0))],
+                &[("G01", [15002.0, -20002.0, 5002.0], Some(102.0))],
+            ],
+            450.0,
+            "IGS14",
+        );
+        let mixed_options = MergeOptions {
+            min_agree: 1,
+            ..MergeOptions::default()
+        };
+
+        let cases = [
+            (
+                "union coverage",
+                vec![union_a, union_b],
+                MergeOptions::default(),
+                "f4ae5c18581e9d5805085f62525d1c912590cd41297bfdc0eb6322b8e48ad598",
+            ),
+            (
+                "mean consensus",
+                vec![mean_a, mean_b, mean_c],
+                mean_options,
+                "c4080215254a49dd4800348bc1d064e36e2da7a79dd499671588ae54566152a8",
+            ),
+            (
+                "guarded precedence",
+                vec![preferred, agreeing, outlier],
+                guarded_precedence_options,
+                "5fc60fe118f462faae9f3d25b579ae4917ee97796a79cf3737aaf8d21a6a7507",
+            ),
+            (
+                "mixed cadence union",
+                vec![mixed_a, mixed_b],
+                mixed_options,
+                "b18983adea82b57990a1bdfe88b4816e593472775b395ec611654894a9f54cdd",
+            ),
+        ];
+
+        for (name, sources, options, expected) in cases {
+            let (merged, _) = merge(&sources, &options).expect("frozen merge case");
+            let actual = sha256_hex(merged.to_sp3_string().as_bytes());
+            assert_eq!(actual, expected, "{name}");
+        }
+
+        #[cfg(sidereon_repo_tests)]
+        {
+            fn load(name: &str) -> Sp3 {
+                let path = format!("{}/tests/fixtures/sp3/{name}", env!("CARGO_MANIFEST_DIR"));
+                let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
+                Sp3::parse(&bytes).unwrap_or_else(|error| panic!("{name}: {error}"))
+            }
+
+            let sources = [
+                load("COD0OPSFIN_20261200945_02H30M_15M_ORB_trim.SP3"),
+                load("GFZ0OPSFIN_20261200945_02H30M_15M_ORB_trim.SP3"),
+                load("JPL0OPSFIN_20261200945_02H30M_15M_ORB_trim.SP3"),
+            ];
+            let (merged, _) = merge(&sources, &MergeOptions::default()).expect("real frozen merge");
+            assert_eq!(
+                sha256_hex(merged.to_sp3_string().as_bytes()),
+                "850c10dfc9b3394bc72d6c3bcd96634310b8d654a9908ed068b7fe165d224442",
+                "real three-center merge"
+            );
+        }
     }
 
     #[test]
