@@ -173,7 +173,7 @@ pub fn product_vector(lhs: &DMatrix<f64>, rhs: &DVector<f64>) -> DVector<f64> {
 /// keeps the active output and the corresponding input panels in cache. The
 /// `k` loop deliberately stays in ascending order for every cell: changing
 /// that order would change binary64 rounding and therefore the contract.
-const PRODUCT_BLOCK: usize = 32;
+const PRODUCT_BLOCK: usize = 128;
 
 fn product_portable(lhs: &DMatrix<Portable>, rhs: &DMatrix<Portable>) -> DMatrix<Portable> {
     assert_eq!(
@@ -185,26 +185,31 @@ fn product_portable(lhs: &DMatrix<Portable>, rhs: &DMatrix<Portable>) -> DMatrix
         rhs.nrows(),
         rhs.ncols()
     );
-    let mut result = DMatrix::zeros(lhs.nrows(), rhs.ncols());
-    for row0 in (0..lhs.nrows()).step_by(PRODUCT_BLOCK) {
-        let row_end = (row0 + PRODUCT_BLOCK).min(lhs.nrows());
-        for col0 in (0..rhs.ncols()).step_by(PRODUCT_BLOCK) {
-            let col_end = (col0 + PRODUCT_BLOCK).min(rhs.ncols());
-            let tile_rows = row_end - row0;
-            let tile_cols = col_end - col0;
-            let mut tile = [Portable::zero(); PRODUCT_BLOCK * PRODUCT_BLOCK];
-            for k in 0..lhs.ncols() {
-                for row in row0..row_end {
-                    let lhs_value = lhs[(row, k)];
-                    for col in col0..col_end {
-                        let tile_index = (row - row0) * PRODUCT_BLOCK + (col - col0);
-                        tile[tile_index] += lhs_value * rhs[(k, col)];
+    let lhs_rows = lhs.nrows();
+    let inner = lhs.ncols();
+    let rhs_cols = rhs.ncols();
+    let lhs_values = lhs.as_slice();
+    let rhs_values = rhs.as_slice();
+    let mut result = DMatrix::zeros(lhs_rows, rhs_cols);
+    let result_values = result.as_mut_slice();
+    for col0 in (0..rhs_cols).step_by(PRODUCT_BLOCK) {
+        let col_end = (col0 + PRODUCT_BLOCK).min(rhs_cols);
+        for row0 in (0..lhs_rows).step_by(PRODUCT_BLOCK) {
+            let row_end = (row0 + PRODUCT_BLOCK).min(lhs_rows);
+            for col in col0..col_end {
+                let rhs_offset = col * inner;
+                let result_offset = col * lhs_rows + row0;
+                for k in 0..inner {
+                    let lhs_offset = k * lhs_rows + row0;
+                    let rhs_value = unsafe { *rhs_values.get_unchecked(rhs_offset + k) };
+                    for row in 0..row_end - row0 {
+                        // SAFETY: all offsets are within the column-major
+                        // buffers after the dimension check above.
+                        unsafe {
+                            *result_values.get_unchecked_mut(result_offset + row) +=
+                                *lhs_values.get_unchecked(lhs_offset + row) * rhs_value;
+                        }
                     }
-                }
-            }
-            for row in 0..tile_rows {
-                for col in 0..tile_cols {
-                    result[(row0 + row, col0 + col)] = tile[row * PRODUCT_BLOCK + col];
                 }
             }
         }
