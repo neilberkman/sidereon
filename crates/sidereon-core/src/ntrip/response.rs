@@ -1,21 +1,69 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Rejection outcomes produced while interpreting an NTRIP response.
 pub enum NtripRejection {
+    /// `NtripClientMachine` emits this for a password-related `ERROR -` reason or an HTTP 401
+    /// whose challenges are absent or include a non-Digest scheme.
     Unauthorized,
+    /// [`classify_http_response`] returns this for HTTP status 404.
     MountpointNotFound,
+    /// [`classify_http_response`] returns this for HTTP 401 when at least one challenge is
+    /// present and every detected scheme is Digest.
     DigestRequired,
-    CasterError { reason: String },
-    UnexpectedContentType { content_type: String },
-    HttpError { status: u16, reason: String },
-    MalformedHandshake { prefix: Vec<u8> },
+    /// The caster returned an `ERROR -` line that did not identify a password failure.
+    CasterError {
+        /// Text returned after the `ERROR - ` prefix.
+        reason: String,
+    },
+    /// A successful response used a media type this client does not accept.
+    UnexpectedContentType {
+        /// The normalized media type from the first `Content-Type` header.
+        content_type: String,
+    },
+    /// The machine received a non-200 ICY or SOURCETABLE status, or an HTTP status other than
+    /// 200, 401, and 404.
+    HttpError {
+        /// Numeric status parsed from the response status line.
+        status: u16,
+        /// Trimmed reason phrase parsed from the response status line.
+        reason: String,
+    },
+    /// The status line was unrecognized, or a handshake, header block, or sourcetable input
+    /// exceeded its byte limit.
+    MalformedHandshake {
+        /// Up to 256 bytes retained from the malformed or overlong handshake input.
+        prefix: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Result returned after the response status and headers are classified by
+/// [`classify_http_response`].
 pub enum HttpClassification {
-    Stream { chunked: bool },
-    Sourcetable { chunked: bool },
+    /// A `gnss/data` response, or a response without `Content-Type`, carries stream payloads.
+    Stream {
+        /// Whether the body uses a comma-separated `Transfer-Encoding: chunked` token.
+        chunked: bool,
+    },
+    /// HTTP 200 with normalized media type `gnss/sourcetable` carries sourcetable text.
+    Sourcetable {
+        /// Whether the body uses a comma-separated `Transfer-Encoding: chunked` token.
+        chunked: bool,
+    },
+    /// The response must be closed with the given [`NtripRejection`].
     Rejection(NtripRejection),
 }
 
+/// Classifies an HTTP NTRIP response from its status, reason phrase, and headers.
+///
+/// HTTP 401 becomes [`NtripRejection::DigestRequired`] when at least one
+/// `WWW-Authenticate` scheme is present and every scheme is Digest; otherwise it
+/// becomes [`NtripRejection::Unauthorized`]. HTTP 404 becomes
+/// [`NtripRejection::MountpointNotFound`], and other non-200 statuses become
+/// [`NtripRejection::HttpError`]. A 200 response is a [`HttpClassification::Stream`]
+/// for no media type or `gnss/data`, a [`HttpClassification::Sourcetable`] for
+/// `gnss/sourcetable`, and an [`NtripRejection::UnexpectedContentType`] otherwise.
+/// The stream and sourcetable variants report whether a comma-separated
+/// `Transfer-Encoding` token is `chunked`, without regard to ASCII case.
 pub fn classify_http_response(
     status: u16,
     reason: &str,
