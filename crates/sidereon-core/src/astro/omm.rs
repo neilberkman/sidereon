@@ -845,6 +845,7 @@ impl Omm {
         )?;
         let header = parse_header(map)?;
         let metadata = parse_metadata(map, time_system)?;
+        let mean_elements = parse_mean_elements(map, epoch)?;
 
         Ok(Omm {
             ccsds_omm_vers: header.ccsds_omm_vers,
@@ -856,13 +857,13 @@ impl Omm {
             ref_frame: metadata.ref_frame,
             time_system: metadata.time_system,
             mean_element_theory: metadata.mean_element_theory,
-            epoch,
-            mean_motion: req_num(get("MEAN_MOTION"), "MEAN_MOTION")?,
-            eccentricity: req_num(get("ECCENTRICITY"), "ECCENTRICITY")?,
-            inclination_deg: req_num(get("INCLINATION"), "INCLINATION")?,
-            ra_of_asc_node_deg: req_num(get("RA_OF_ASC_NODE"), "RA_OF_ASC_NODE")?,
-            arg_of_pericenter_deg: req_num(get("ARG_OF_PERICENTER"), "ARG_OF_PERICENTER")?,
-            mean_anomaly_deg: req_num(get("MEAN_ANOMALY"), "MEAN_ANOMALY")?,
+            epoch: mean_elements.epoch,
+            mean_motion: mean_elements.mean_motion,
+            eccentricity: mean_elements.eccentricity,
+            inclination_deg: mean_elements.inclination_deg,
+            ra_of_asc_node_deg: mean_elements.ra_of_asc_node_deg,
+            arg_of_pericenter_deg: mean_elements.arg_of_pericenter_deg,
+            mean_anomaly_deg: mean_elements.mean_anomaly_deg,
             ephemeris_type: opt_int(get("EPHEMERIS_TYPE"), "EPHEMERIS_TYPE")?.unwrap_or(0),
             classification_type: xml_text_or_default(
                 get("CLASSIFICATION_TYPE"),
@@ -919,6 +920,33 @@ fn parse_metadata(
         ref_frame: xml_text(get("REF_FRAME"), "REF_FRAME")?,
         time_system,
         mean_element_theory: xml_text(get("MEAN_ELEMENT_THEORY"), "MEAN_ELEMENT_THEORY")?,
+    })
+}
+
+struct OmmMeanElements {
+    epoch: OmmEpoch,
+    mean_motion: f64,
+    eccentricity: f64,
+    inclination_deg: f64,
+    ra_of_asc_node_deg: f64,
+    arg_of_pericenter_deg: f64,
+    mean_anomaly_deg: f64,
+}
+
+/// Consume the OMM epoch and mean-element fields and produce canonical values.
+fn parse_mean_elements(
+    map: &crate::format::kvn::FieldMap,
+    epoch: OmmEpoch,
+) -> Result<OmmMeanElements, OmmError> {
+    let get = |key: &str| map.get(key);
+    Ok(OmmMeanElements {
+        epoch,
+        mean_motion: req_num(get("MEAN_MOTION"), "MEAN_MOTION")?,
+        eccentricity: req_num(get("ECCENTRICITY"), "ECCENTRICITY")?,
+        inclination_deg: req_num(get("INCLINATION"), "INCLINATION")?,
+        ra_of_asc_node_deg: req_num(get("RA_OF_ASC_NODE"), "RA_OF_ASC_NODE")?,
+        arg_of_pericenter_deg: req_num(get("ARG_OF_PERICENTER"), "ARG_OF_PERICENTER")?,
+        mean_anomaly_deg: req_num(get("MEAN_ANOMALY"), "MEAN_ANOMALY")?,
     })
 }
 
