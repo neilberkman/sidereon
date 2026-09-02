@@ -428,6 +428,8 @@ fn slant_delay_components_with_coverage(
     (components, coverage)
 }
 
+// invariant: map epochs come from the validated IONEX product axis.
+#[allow(clippy::expect_used)]
 fn map_epoch_j2000_s(map_epochs: &[Instant], index: usize) -> i64 {
     j2000_seconds_from_instant(map_epochs[index])
         .expect("IONEX map epoch is convertible to J2000 seconds")

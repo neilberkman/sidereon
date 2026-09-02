@@ -351,6 +351,8 @@ fn next_down(value: f64) -> f64 {
 /// position, microseconds for clock); the single final unit multiply to meters /
 /// seconds happens inside the position/clock evaluators, exactly as the SP3 path
 /// requires for 0-ULP parity.
+// invariant: the interpolation path validates finite, in-range coordinates.
+#[allow(clippy::expect_used)]
 pub(super) fn interpolate_precise_state(
     sat: GnssSatelliteId,
     pos_x: &[f64],
@@ -372,6 +374,8 @@ pub(super) fn interpolate_precise_state(
     })
 }
 
+// invariant: the interpolation path validates finite, in-range coordinates.
+#[allow(clippy::expect_used)]
 pub(super) fn interpolate_precise_state_with_clock_arcs(
     sat: GnssSatelliteId,
     pos_x: &[f64],
@@ -1070,4 +1074,5 @@ pub(super) fn eval_cubic_spline_for_test(x: &[f64], y: &[f64], query: f64) -> f6
 }
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod interp_tests;

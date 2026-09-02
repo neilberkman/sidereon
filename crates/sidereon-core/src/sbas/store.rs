@@ -1445,6 +1445,7 @@ fn f64_total_cmp(a: &f64, b: &f64) -> std::cmp::Ordering {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::astro::time::model::TimeScale;

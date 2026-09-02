@@ -7,6 +7,7 @@
 //! GPS/QZSS CNAV and CNAV-2 use a separate RINEX 4 roster and are parsed into a
 //! CNAV extension. BeiDou CNV1/CNV2/CNV3, QZSS LNAV, NavIC, SBAS, and RINEX 4
 //! GLONASS FDMA frames are recognized as frame boundaries and skipped.
+
 //!
 //! Reads broadcast ephemeris records out of a RINEX navigation file into the
 //! typed [`BroadcastRecord`]s the [`crate::broadcast`] evaluator consumes. This
@@ -21,6 +22,8 @@
 //! evaluated by the [`crate::glonass`] RK4 propagator, not the Keplerian path).
 //! Unsupported constellations and message rosters are skipped so a mixed file
 //! parses without error while yielding only the supported systems.
+
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod store;
 pub use store::{BroadcastStore, NavMessagePreference};
@@ -1572,14 +1575,23 @@ fn parse_rinex_version(version: &str) -> Option<RinexVersion> {
 }
 
 fn is_record_start(line: &str) -> bool {
-    let Some(token) = line.get(0..3) else {
+    let Some(token) = line.as_bytes().get(..3) else {
         return false;
     };
-    let b = token.as_bytes();
-    let prn = token[1..].trim();
-    b[0].is_ascii_alphabetic()
+    let prn = &token[1..];
+    token[0].is_ascii_alphabetic()
         && (1..=2).contains(&prn.len())
-        && prn.bytes().all(|byte| byte.is_ascii_digit())
+        && prn.iter().all(u8::is_ascii_digit)
+}
+
+#[cfg(test)]
+mod panic_regression_tests {
+    use super::is_record_start;
+
+    #[test]
+    fn malformed_utf8_replacement_does_not_panic_record_probe() {
+        assert!(!is_record_start("G\u{FFFD}"));
+    }
 }
 
 /// The four broadcast-orbit values of a continuation line (columns 4/23/42/61).
@@ -1778,6 +1790,7 @@ fn parse_cnav_block(block: &[&str], message: NavMessage) -> Result<BroadcastReco
     } else {
         None
     };
+    let cnav2_fields = o9.unwrap_or([None; 4]);
 
     let g = |v: Option<f64>, what: &'static str| v.ok_or_else(|| bad(what));
     let elements = KeplerianElements {
@@ -1813,7 +1826,7 @@ fn parse_cnav_block(block: &[&str], message: NavMessage) -> Result<BroadcastReco
         .and_then(GnssWeekTow::normalized)
         .map_err(|_| bad("toc"))?;
     let wn_op = finite_integral_u32(
-        g(if is_cnav2 { o9.unwrap()[1] } else { o8[1] }, "wn_op")?,
+        g(if is_cnav2 { cnav2_fields[1] } else { o8[1] }, "wn_op")?,
         "wn_op",
         &sat,
     )?;
@@ -1833,7 +1846,7 @@ fn parse_cnav_block(block: &[&str], message: NavMessage) -> Result<BroadcastReco
         health_max,
         &sat,
     )?);
-    let transmission_time_sow = g(if is_cnav2 { o9.unwrap()[0] } else { o8[0] }, "t_tm")?;
+    let transmission_time_sow = g(if is_cnav2 { cnav2_fields[0] } else { o8[0] }, "t_tm")?;
     let flags = optional_integral_u32(
         if is_cnav2 {
             raw_orbit_field(block[9], 2)
@@ -2124,4 +2137,5 @@ fn parse_toc(
 }
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;

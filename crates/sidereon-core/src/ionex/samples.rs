@@ -130,6 +130,8 @@ impl std::error::Error for TecSamplesError {}
 
 impl Ionex {
     /// Build an IONEX product directly from whole-grid samples.
+    // invariant: epoch and axis membership are validated before these lookups.
+    #[allow(clippy::expect_used)]
     pub fn from_samples(samples: TecGridSamples) -> core::result::Result<Self, TecSamplesError> {
         validate_grid_samples(&samples)?;
         Self::from_parts(IonexParts {
@@ -154,6 +156,8 @@ impl Ionex {
     }
 
     /// Build an IONEX product from a flat stream of node samples.
+    // invariant: epoch and axis membership are validated before these lookups.
+    #[allow(clippy::expect_used)]
     pub fn from_node_samples(
         samples: impl IntoIterator<Item = TecSample>,
         shell_height_km: f64,

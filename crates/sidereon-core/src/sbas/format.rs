@@ -164,6 +164,7 @@ fn parse_f64(value: &str) -> Option<f64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::astro::time::model::{GnssWeekTow, TimeScale};

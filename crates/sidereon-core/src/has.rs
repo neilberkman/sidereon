@@ -5,6 +5,8 @@
 //! Reed-Solomon reconstruction, and outer transport framing are intentionally
 //! outside this module.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use crate::constants::{C_M_S, F_E1_HZ, F_E5A_HZ, F_L1_HZ, F_L2_HZ};
 use crate::error::{Error, Result};
 use crate::id::{GnssSatelliteId, GnssSystem};
@@ -252,17 +254,17 @@ impl HasMt1Message {
         if let Some(orbit) = &self.orbit {
             write_orbit_block(&mut w, orbit);
         }
-        if let Some(clock) = &self.clock_full_set {
-            write_clock_full_set_block(&mut w, self.mask.as_ref().expect("HAS mask"), clock);
+        if let (Some(mask), Some(clock)) = (self.mask.as_ref(), self.clock_full_set.as_ref()) {
+            write_clock_full_set_block(&mut w, mask, clock);
         }
-        if let Some(clock) = &self.clock_subset {
-            write_clock_subset_block(&mut w, self.mask.as_ref().expect("HAS mask"), clock);
+        if let (Some(mask), Some(clock)) = (self.mask.as_ref(), self.clock_subset.as_ref()) {
+            write_clock_subset_block(&mut w, mask, clock);
         }
-        if let Some(code_bias) = &self.code_bias {
-            write_code_bias_block(&mut w, self.mask.as_ref().expect("HAS mask"), code_bias);
+        if let (Some(mask), Some(code_bias)) = (self.mask.as_ref(), self.code_bias.as_ref()) {
+            write_code_bias_block(&mut w, mask, code_bias);
         }
-        if let Some(phase_bias) = &self.phase_bias {
-            write_phase_bias_block(&mut w, self.mask.as_ref().expect("HAS mask"), phase_bias);
+        if let (Some(mask), Some(phase_bias)) = (self.mask.as_ref(), self.phase_bias.as_ref()) {
+            write_phase_bias_block(&mut w, mask, phase_bias);
         }
         for &bit in &self.padding_bits {
             w.push_flag(bit);
@@ -386,7 +388,7 @@ fn read_mask_block(r: &mut BitReader<'_>) -> Result<HasMaskBlock> {
 fn write_mask_block(w: &mut BitWriter, mask: &HasMaskBlock) {
     w.push_u(mask.systems.len() as u64, 4);
     for system in &mask.systems {
-        w.push_u(u64::from(has_gnss_id(system.system).expect("HAS GNSS")), 4);
+        w.push_u(u64::from(has_gnss_id(system.system).unwrap_or(0)), 4);
         let sat_mask = mask_from_indices(system.satellites.iter().map(|prn| prn - 1), 40);
         let signal_mask = mask_from_indices(system.signals.iter().copied(), 16);
         w.push_u(sat_mask, 40);
@@ -477,7 +479,9 @@ fn write_clock_full_set_block(w: &mut BitWriter, mask: &HasMaskBlock, clock: &Ha
     }
     for system_mask in &mask.systems {
         for &prn in &system_mask.satellites {
-            let sat = has_satellite(system_mask.system, prn).expect("HAS sat");
+            let Ok(sat) = has_satellite(system_mask.system, prn) else {
+                continue;
+            };
             let raw = clock
                 .records
                 .iter()
@@ -546,14 +550,13 @@ fn write_clock_subset_block(w: &mut BitWriter, mask: &HasMaskBlock, clock: &HasC
         .collect::<Vec<_>>();
     w.push_u(systems.len() as u64, 4);
     for system_mask in systems {
-        w.push_u(
-            u64::from(has_gnss_id(system_mask.system).expect("HAS GNSS")),
-            4,
-        );
+        w.push_u(u64::from(has_gnss_id(system_mask.system).unwrap_or(0)), 4);
         w.push_u(0, 2);
         let mut selected = Vec::with_capacity(system_mask.satellites.len());
         for &prn in &system_mask.satellites {
-            let sat = has_satellite(system_mask.system, prn).expect("HAS sat");
+            let Ok(sat) = has_satellite(system_mask.system, prn) else {
+                continue;
+            };
             let present = clock.records.iter().any(|record| record.sat == sat);
             selected.push((sat, present));
             w.push_flag(present);
@@ -565,7 +568,7 @@ fn write_clock_subset_block(w: &mut BitWriter, mask: &HasMaskBlock, clock: &HasC
                     .iter()
                     .find(|record| record.sat == sat)
                     .map(|record| (record.correction_m / HAS_CLOCK_SCALE_M).round() as i64)
-                    .expect("selected clock");
+                    .unwrap_or(0);
                 w.push_i(raw, 13);
             }
         }
@@ -597,7 +600,7 @@ fn read_code_bias_block(r: &mut BitReader<'_>, mask: &HasMaskBlock) -> Result<Ha
 
 fn write_code_bias_block(w: &mut BitWriter, mask: &HasMaskBlock, code_bias: &HasCodeBiasBlock) {
     w.push_u(u64::from(code_bias.validity_interval), 4);
-    for cell in mask_cells(mask).expect("HAS cells") {
+    for cell in mask_cells(mask).unwrap_or_default() {
         let raw = code_bias
             .records
             .iter()
@@ -638,7 +641,7 @@ fn read_phase_bias_block(r: &mut BitReader<'_>, mask: &HasMaskBlock) -> Result<H
 
 fn write_phase_bias_block(w: &mut BitWriter, mask: &HasMaskBlock, phase_bias: &HasPhaseBiasBlock) {
     w.push_u(u64::from(phase_bias.validity_interval), 4);
-    for cell in mask_cells(mask).expect("HAS cells") {
+    for cell in mask_cells(mask).unwrap_or_default() {
         if let Some(record) = phase_bias
             .records
             .iter()
@@ -788,6 +791,7 @@ fn has_signal_frequency_hz(system: GnssSystem, signal_id: u8) -> Result<f64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

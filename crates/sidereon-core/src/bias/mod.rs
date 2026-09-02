@@ -4,6 +4,8 @@
 //! carries typed diagnostics for records that were skipped during forgiving
 //! parsing.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
@@ -662,6 +664,8 @@ impl BiasSet {
     }
 }
 
+// invariant: formatting into a String uses infallible fmt::Write operations.
+#[allow(clippy::expect_used)]
 pub fn write_bias_sinex(set: &BiasSet) -> Result<String, BiasError> {
     let agency = set
         .header
@@ -736,6 +740,8 @@ pub fn write_bias_sinex(set: &BiasSet) -> Result<String, BiasError> {
     Ok(out)
 }
 
+// invariant: formatting into a String uses infallible fmt::Write operations.
+#[allow(clippy::expect_used)]
 pub fn write_code_dcb(set: &BiasSet) -> Result<String, BiasError> {
     let meta = set
         .header
@@ -1465,6 +1471,8 @@ fn is_legacy_dcb_label(label: &str) -> bool {
     matches!(label, "P1" | "P2" | "C1" | "C2")
 }
 
+// invariant: formatting into a String uses infallible fmt::Write operations.
+#[allow(clippy::expect_used)]
 fn format_sinex_solution_record(record: &BiasRecord) -> String {
     let (svn, prn, station) = target_fields(record);
     let obs2 = record.obs2.as_deref().unwrap_or("");
@@ -1574,7 +1582,9 @@ fn resolve_dsb_path(
         if best_depth.is_some_and(|best| depth > best) {
             continue;
         }
-        let node = path.last().expect("path contains start");
+        let Some(node) = path.last() else {
+            continue;
+        };
         if node == end {
             best_depth = Some(depth);
             candidates.push((path, value));
@@ -1761,6 +1771,7 @@ fn rinex_frequency(sat: GnssSatelliteId, obs: &str, glonass_channel: Option<i8>)
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::constants::{F_L1_HZ, F_L2_HZ};

@@ -84,6 +84,8 @@ pub enum Sp3MergeInputIdentityError {
 
 impl Sp3MergeInputIdentity {
     /// Validate, canonically order, and bind all contributors and merge controls.
+    // invariant: formatting a digest into a String cannot fail.
+    #[allow(clippy::expect_used)]
     pub fn new(
         contributors: &[Sp3ArtifactIdentity],
         policy: &MergeOptions,

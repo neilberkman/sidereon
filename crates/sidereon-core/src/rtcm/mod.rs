@@ -73,6 +73,8 @@
 //! }
 //! ```
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 mod antenna;
 pub(crate) mod bits;
 pub(crate) mod crc;
@@ -84,6 +86,7 @@ mod ssr;
 mod station;
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;
 
 use crate::error::Result;

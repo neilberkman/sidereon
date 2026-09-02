@@ -447,6 +447,9 @@ impl MmapPreciseEphemerisInterpolant<'static> {
         checksum_validation: ChecksumValidation,
     ) -> core::result::Result<Self, PreciseInterpolantStoreError> {
         let parsed = parse_store(bytes.as_slice(), ArrayBacking::Offset, checksum_validation)?;
+        // invariant: offset-backed parsing owns its backing bytes, so every
+        // parsed series can be promoted to the store's static lifetime.
+        #[allow(clippy::expect_used)]
         let series = parsed
             .series
             .into_iter()
@@ -518,6 +521,8 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
     /// Verified readers compute the checksum on demand. Attested readers return
     /// the caller's claim without hashing the byte span.
     #[must_use]
+    // invariant: Attested readers are constructed only with a claimed checksum.
+    #[allow(clippy::expect_used)]
     pub fn checksum64(&self) -> u64 {
         match self.digest_provenance {
             DigestProvenance::Verified => precise_interpolant_store_checksum64(self.bytes.as_ref()),
@@ -674,6 +679,8 @@ pub fn precise_interpolant_store_checksum64(bytes: &[u8]) -> u64 {
     artifact_checksum64(bytes)
 }
 
+// invariant: layouts are derived from the same validated source used to build the store.
+#[allow(clippy::expect_used)]
 fn build_store(
     source: &PreciseEphemerisInterpolant,
 ) -> core::result::Result<Vec<u8>, PreciseInterpolantStoreError> {
@@ -1210,6 +1217,8 @@ fn parse_store<'a>(
     })
 }
 
+// invariant: validated mapped payloads contain finite ITRF coordinates.
+#[allow(clippy::expect_used)]
 fn interpolate_mapped_state(bytes: &[u8], series: &MmapSeries, query: f64) -> Result<Sp3State> {
     if series.pos_count < 2 {
         return Err(Error::EpochOutOfRange);
@@ -1652,6 +1661,8 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     })
 }
 
+// invariant: callers pass ranges validated by the mapped-store parser.
+#[allow(clippy::expect_used)]
 fn mapped_f64(bytes: &[u8], offset: usize, idx: usize) -> f64 {
     let start = offset + idx * 8;
     f64::from_le_bytes(
