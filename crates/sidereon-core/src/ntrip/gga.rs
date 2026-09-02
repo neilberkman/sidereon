@@ -2,12 +2,21 @@ use crate::nmea::{self, Gga, GgaQuality, NmeaTalker, NmeaTime};
 use crate::{Error, Result, Wgs84Geodetic};
 
 #[derive(Clone, Debug, PartialEq)]
+/// Position and receiver metadata consumed by [`format_gga`].
+///
+/// `Default::default` supplies a zero-degree, zero-height position with fix quality 1, 10 satellites, and HDOP 1.0.
 pub struct GgaPosition {
+    /// WGS84 geodetic latitude in degrees. [`format_gga`] accepts only finite values in `[-90, 90]` and converts it to radians before GGA coordinate formatting.
     pub lat_deg: f64,
+    /// WGS84 geodetic longitude in degrees, positive east. [`format_gga`] accepts only finite values in `[-180, 180]` and converts it to radians before GGA coordinate formatting.
     pub lon_deg: f64,
+    /// Height passed to [`crate::Wgs84Geodetic::new`] and then to the GGA altitude field. [`format_gga`] requires it finite; the writer emits it in meters with one decimal place and an `M` unit marker.
     pub height_m: f64,
+    /// Numeric NMEA GGA fix-quality code. [`format_gga`] maps 0 through 8 to the corresponding [`crate::nmea::GgaQuality`] variant and preserves any other `u8` as `Other(value)` before writing it.
     pub fix_quality: u8,
+    /// Number passed to GGA's satellites-used field. [`format_gga`] does not otherwise constrain it, and the NMEA writer emits it zero-padded to two digits.
     pub num_satellites: u8,
+    /// Horizontal dilution of precision passed into GGA. [`format_gga`] requires a finite, non-negative value, and the NMEA writer emits it with two fractional digits.
     pub hdop: f64,
 }
 
@@ -24,6 +33,11 @@ impl Default for GgaPosition {
     }
 }
 
+/// Formats `position` and `utc_seconds_of_day` as a GPS NMEA GGA sentence and returns its UTF-8 bytes.
+///
+/// The formatter converts the degree coordinates to a WGS84 geodetic position, floors the time to centiseconds, maps the numeric fix-quality code, uses seven coordinate decimals, and omits geoid separation before writing the sentence.
+///
+/// It returns [`crate::Error::InvalidInput`] when the coordinates, height, HDOP, or time are non-finite, when latitude or longitude is outside its accepted interval, when HDOP is negative, or when the time is outside `[0, 86400)`; errors from geodetic construction, GGA construction, and sentence writing are mapped to the same variant.
 pub fn format_gga(position: &GgaPosition, utc_seconds_of_day: f64) -> Result<Vec<u8>> {
     validate(position, utc_seconds_of_day)?;
     let geodetic = Wgs84Geodetic::new(
