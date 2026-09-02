@@ -7,40 +7,6 @@ on:
   schedule:
     - cron: "17 8 * * *"
 
-env:
-  FUZZ_TARGETS: >-
-    cdm_parse
-    cdm_round_trip
-    crinex_parse
-    crinex_v3_parse
-    fuzz_atmosphere
-    fuzz_bodies_events
-    fuzz_frames
-    fuzz_math
-    fuzz_positioning
-    fuzz_propagation
-    fuzz_rtk
-    fuzz_signal
-    fuzz_time
-    geoid_dac_parse
-    ionex_parse
-    ionex_samples_round_trip
-    nmea_accumulate
-    nmea_parse
-    ntrip_chunk_decode
-    ntrip_response_parse
-    ntrip_sourcetable_parse
-    ntrip_sourcetable_round_trip
-    omm_xml_parse
-    omm_round_trip
-    rinex_obs_parse
-    rinex_qc_repair_roundtrip
-    rinex_obs_v2_parse
-    sgp4_tle_3line_parse
-    space_weather_parse
-    sp3_parse
-    sp3_round_trip
-
 jobs:
   regression-corpus:
     name: regression corpus
@@ -56,7 +22,10 @@ jobs:
       - name: Run committed fuzz corpus
         run: |
           set -euo pipefail
-          for target in $FUZZ_TARGETS; do
+          for target_path in fuzz/fuzz_targets/*.rs; do
+            grep -q '^#!\[no_main\]' "$target_path" || continue
+            target=${target_path##*/}
+            target=${target%.rs}
             cargo +nightly fuzz run "$target" -- -runs=0 -max_total_time=30
           done
 
@@ -64,10 +33,11 @@ jobs:
     name: scheduled bounded fuzz
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    # The 31 targets have 62 minutes of fuzz budget before checkout, toolchain,
-    # cargo-fuzz installation, and compilation. Leave enough headroom for cold
-    # runners while preserving the full two-minute gate per target.
-    timeout-minutes: 90
+    # The directory contains 54 .rs files: 53 executable targets and one shared
+    # helper. The executable targets have 106 minutes of fuzz budget before
+    # checkout, toolchain, cargo-fuzz installation, and compilation. Leave enough
+    # headroom for cold runners while preserving the full two-minute gate per target.
+    timeout-minutes: 130
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -77,7 +47,10 @@ jobs:
       - name: Run bounded fuzzing
         run: |
           set -euo pipefail
-          for target in $FUZZ_TARGETS; do
+          for target_path in fuzz/fuzz_targets/*.rs; do
+            grep -q '^#!\[no_main\]' "$target_path" || continue
+            target=${target_path##*/}
+            target=${target%.rs}
             cargo +nightly fuzz run "$target" -- -max_total_time=120
           done
       - name: Upload crash artifacts

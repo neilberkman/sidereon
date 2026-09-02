@@ -276,7 +276,6 @@ pub fn validate_covariance_matrix(
 }
 
 /// Test whether a covariance is positive semidefinite under numerical bounds.
-#[allow(clippy::needless_range_loop)]
 pub fn covariance_is_positive_semidefinite(covariance: &[Vec<f64>]) -> Result<bool, FusionError> {
     let dimension = covariance.len();
     validate_square_matrix(covariance, dimension, "covariance")?;
@@ -537,7 +536,6 @@ pub(crate) fn matrix_sub(a: &[Vec<f64>], b: &[Vec<f64>]) -> Result<Vec<Vec<f64>>
     Ok(out)
 }
 
-#[allow(clippy::needless_range_loop)]
 pub(crate) fn symmetrize_in_place(matrix: &mut [Vec<f64>]) {
     let dimension = matrix.len();
     for row in 0..dimension {

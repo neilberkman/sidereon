@@ -319,7 +319,6 @@ fn sw_ppnd(p: f64) -> f64 {
 /// matches `scipy.stats.shapiro` to a tight tolerance; for `n > 5000` the
 /// statistic is reliable but the p-value approximation degrades (as documented
 /// for the reference implementation).
-#[allow(clippy::needless_range_loop)]
 pub fn shapiro_wilk(x: &[f64]) -> Result<ShapiroWilk, NormalityError> {
     let n = x.len();
     if n < 3 {

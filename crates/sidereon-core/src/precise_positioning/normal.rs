@@ -275,7 +275,6 @@ fn tropo_gradient_covariance_m2(
     Ok(Some(out))
 }
 
-#[allow(clippy::needless_range_loop)]
 fn symmetrize_square(matrix: &mut [Vec<f64>]) {
     for i in 0..matrix.len() {
         for j in (i + 1)..matrix.len() {
@@ -286,7 +285,6 @@ fn symmetrize_square(matrix: &mut [Vec<f64>]) {
     }
 }
 
-#[allow(clippy::needless_range_loop)]
 fn symmetrize_3x3(matrix: &mut [[f64; 3]; 3]) {
     for i in 0..3 {
         for j in (i + 1)..3 {
@@ -550,7 +548,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::needless_range_loop)]
     fn ppp_position_covariance_matches_unreduced_dense_inverse() {
         let n_epochs = 10;
         let n_ambiguities = 6;

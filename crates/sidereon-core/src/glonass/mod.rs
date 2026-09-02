@@ -73,7 +73,7 @@ pub(crate) fn deq(s: &[f64; 6], acc: &[f64; 3]) -> [f64; 6] {
 }
 
 /// One classical RK4 step of length `step` seconds.
-#[allow(clippy::needless_range_loop)] // explicit indices keep the RK4 stage updates legible and pinned
+// explicit indices keep the RK4 stage updates legible and pinned
 pub(crate) fn glorbit(step: f64, s: &[f64; 6], acc: &[f64; 3]) -> [f64; 6] {
     let k1 = deq(s, acc);
     let mut w = [0.0_f64; 6];

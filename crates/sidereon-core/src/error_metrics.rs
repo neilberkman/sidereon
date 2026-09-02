@@ -549,7 +549,6 @@ fn eigenvalues_symmetric_3x3(covariance: [[f64; 3]; 3]) -> Result<[f64; 3], Erro
     Ok(values)
 }
 
-#[allow(clippy::needless_range_loop)]
 fn validate_enu_covariance(covariance: [[f64; 3]; 3]) -> Result<[[f64; 3]; 3], ErrorMetricsError> {
     validate_finite_matrix(covariance)?;
     let scale = covariance_scale(&covariance);

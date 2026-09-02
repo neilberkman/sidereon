@@ -303,7 +303,6 @@ where
     Ok(())
 }
 
-#[allow(clippy::needless_range_loop)]
 pub(crate) fn validate_covariance_psd<const N: usize>(
     m: &[[f64; N]; N],
     field: &'static str,
@@ -339,7 +338,6 @@ pub(crate) fn validate_covariance_psd<const N: usize>(
     Ok(())
 }
 
-#[allow(clippy::needless_range_loop)]
 pub(crate) fn validate_covariance_psd_rows(
     rows: &[&[f64]],
     field: &'static str,
@@ -402,7 +400,6 @@ fn covariance_matrix_tolerance(n: usize, scale: f64) -> f64 {
     (128.0 * f64::EPSILON * (n.max(1) as f64) * scale).max(1.0e-9 * scale)
 }
 
-#[allow(clippy::needless_range_loop)]
 fn symmetric_min_eigenvalue<const N: usize>(a: &mut [[f64; N]; N], tol: f64) -> f64 {
     let max_sweeps = (16 * N * N).max(32);
     for _ in 0..max_sweeps {
@@ -466,7 +463,6 @@ fn symmetric_min_eigenvalue<const N: usize>(a: &mut [[f64; N]; N], tol: f64) -> 
     min
 }
 
-#[allow(clippy::needless_range_loop)]
 fn symmetric_rows_min_eigenvalue(a: &mut [Vec<f64>], tol: f64) -> f64 {
     let n = a.len();
     let max_sweeps = (16 * n * n).max(32);

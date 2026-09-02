@@ -7,6 +7,7 @@
 
 use crate::astro::events::root::{sign_change_bracketed, try_bisect_crossing_until, RootError};
 use crate::validate;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 const GOLDEN_RESPHI: f64 = 0.381_966_011_250_105_1;
@@ -180,6 +181,8 @@ impl EventFinder {
     /// Find threshold crossings for a batch of scalar predicates, serially.
     ///
     /// Result element `i` belongs to `predicates[i]`.
+    /// When `parallel` is disabled, the parallel entry point is equivalent to
+    /// this serial iterator.
     pub fn find_crossings_batch_serial<P>(
         self,
         predicates: &[P],
@@ -207,8 +210,11 @@ impl EventFinder {
     where
         P: ScalarEventPredicate + Sync,
     {
+        #[cfg(feature = "parallel")]
+        let predicates = predicates.par_iter();
+        #[cfg(not(feature = "parallel"))]
+        let predicates = predicates.iter();
         predicates
-            .par_iter()
             .map(|predicate| self.find_crossings_ref(predicate, threshold))
             .collect()
     }
@@ -279,6 +285,8 @@ impl EventFinder {
     /// Find local extrema for a batch of scalar predicates, serially.
     ///
     /// Result element `i` belongs to `predicates[i]`.
+    /// When `parallel` is disabled, the parallel entry point is equivalent to
+    /// this serial iterator.
     pub fn find_extrema_batch_serial<P>(
         self,
         predicates: &[P],
@@ -304,8 +312,11 @@ impl EventFinder {
     where
         P: ScalarEventPredicate + Sync,
     {
+        #[cfg(feature = "parallel")]
+        let predicates = predicates.par_iter();
+        #[cfg(not(feature = "parallel"))]
+        let predicates = predicates.iter();
         predicates
-            .par_iter()
             .map(|predicate| self.find_extrema_ref(predicate))
             .collect()
     }
@@ -369,6 +380,8 @@ impl EventFinder {
     /// Find state changes for a batch of discrete predicates, serially.
     ///
     /// Result element `i` belongs to `predicates[i]`.
+    /// When `parallel` is disabled, the parallel entry point is equivalent to
+    /// this serial iterator.
     pub fn find_state_changes_batch_serial<P>(
         self,
         predicates: &[P],
@@ -394,8 +407,11 @@ impl EventFinder {
     where
         P: DiscreteEventPredicate + Sync,
     {
+        #[cfg(feature = "parallel")]
+        let predicates = predicates.par_iter();
+        #[cfg(not(feature = "parallel"))]
+        let predicates = predicates.iter();
         predicates
-            .par_iter()
             .map(|predicate| self.find_state_changes_ref(predicate))
             .collect()
     }
@@ -1293,6 +1309,13 @@ mod tests {
         assert!(crossing_serial
             .iter()
             .all(|events| events.as_ref().is_ok_and(|events| !events.is_empty())));
+        for (index, (predicate, result)) in waves.iter().zip(crossing_parallel.iter()).enumerate() {
+            assert_eq!(
+                result,
+                &wave_finder.find_crossings(*predicate, 0.0),
+                "crossing batch item {index}"
+            );
+        }
 
         let extrema_serial = wave_finder.find_extrema_batch_serial(&waves);
         let extrema_parallel = wave_finder.find_extrema_batch_parallel(&waves);
@@ -1301,6 +1324,13 @@ mod tests {
         assert!(extrema_serial
             .iter()
             .all(|events| events.as_ref().is_ok_and(|events| events.len() >= 2)));
+        for (index, (predicate, result)) in waves.iter().zip(extrema_parallel.iter()).enumerate() {
+            assert_eq!(
+                result,
+                &wave_finder.find_extrema(*predicate),
+                "extrema batch item {index}"
+            );
+        }
 
         let state_finder = EventFinder::new(0.0, 5.0, 0.25, 1.0e-10).expect("valid state finder");
         let states = [
@@ -1321,13 +1351,18 @@ mod tests {
         let state_parallel = state_finder.find_state_changes_batch_parallel(&states);
         assert_eq!(state_serial, state_parallel);
         assert_eq!(state_serial.len(), states.len());
-        for (result, predicate) in state_serial.iter().zip(states.iter()) {
+        for (index, (result, predicate)) in state_serial.iter().zip(states.iter()).enumerate() {
             let events = result.as_ref().expect("state changes");
             assert_eq!(events.len(), 1);
             assert_close(
                 events[0].time_seconds,
                 predicate.transition_seconds,
                 1.0e-10,
+            );
+            assert_eq!(
+                &state_parallel[index],
+                &state_finder.find_state_changes(*predicate),
+                "state-change batch item {index}"
             );
         }
     }

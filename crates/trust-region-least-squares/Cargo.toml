@@ -3,6 +3,7 @@ name = "trust-region-least-squares"
 version = "0.11.0"
 authors = []
 edition = "2021"
+rust-version = "1.89"
 description = "A dense trust-region-reflective nonlinear least-squares solver that reproduces SciPy's least_squares (method='trf') bit-for-bit on its unbounded path for arbitrary dimension n, every loss (linear/soft_l1/huber/cauchy/arctan), and 2-point Jacobians, with an injectable host-runtime numerics backend for exact SVD, BLAS, and power dispatch."
 license = "MIT"
 readme = "README.md"

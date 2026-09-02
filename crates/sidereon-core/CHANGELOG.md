@@ -6,11 +6,39 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- `nalgebra` 0.33.3 and `simba` 0.9.1 are now exact dependency pins. The
+  decomposition algorithms and scalar-dispatch companion participate in the
+  crate's bit-exact identity claim, so a semver-compatible update could change
+  operation order, convergence thresholds, or covariance bits; any upgrade is
+  now a deliberate re-pinning release rather than a side effect of `cargo
+  update`.
+- Native exact-cache locking now uses the stable standard-library file-locking
+  API, removing the unmaintained fs2 dependency while preserving bounded,
+  non-blocking retry behavior and error handling.
 - `libm` is pinned to exactly 0.2.16. The crate's cross-platform bit-exactness
   is a property of that implementation's rounding, so a semver-compatible
   update of it could change results without any change here. The pin makes
   such a move a deliberate edit with a re-pinning pass, not a side effect of
   `cargo update`.
+
+### Added
+
+- A supply-chain gate (`cargo deny`: advisories, licenses, bans, sources)
+  runs in CI, together with an MSRV check at Rust 1.89. One advisory is an
+  explicit, documented exception: RUSTSEC-2024-0436 (`paste`, an unmaintained
+  compile-time proc-macro reached only through the exact `simba` pin); it is
+  revisited when `nalgebra`/`simba` are upgraded.
+- Batch APIs now use an optional default-on `parallel` feature. Disabling it
+  removes rayon and compiles the same order-preserving batch entry points with
+  plain iterators, keeping results bit-identical and retaining the public
+  serial variants.
+
+### Fixed
+
+- Documentation now states the actual single-crate layout: the GNSS layer is
+  always present alongside propagation, and the units policy permits bare
+  solver-space positions while keeping frame and datum names on georeferenced
+  quantities.
 
 ## [1.4.1] - 2026-08-31
 

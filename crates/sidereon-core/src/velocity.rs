@@ -321,7 +321,7 @@ fn build_rows(
     Ok(rows)
 }
 
-#[allow(clippy::needless_range_loop)] // Index loops pin the normal-equation accumulation order.
+// Index loops pin the normal-equation accumulation order.
 fn solve_normal_equations(rows: &[Row]) -> Result<([f64; 4], [[f64; 4]; 4]), VelocityError> {
     let mut aty = [0.0_f64; 4];
 

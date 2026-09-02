@@ -263,7 +263,6 @@ pub(super) fn iterate_epoch(
     })
 }
 
-#[allow(clippy::needless_range_loop)]
 fn iterate_epoch_into<'a>(
     ctx: MeasContext,
     state: &FilterState,
@@ -494,7 +493,6 @@ fn iterate_epoch_into<'a>(
 /// covariance block `sd_cov` (row-major, metres²). `dd[i] = (sat_pos, ref_pos)`
 /// are SD-block indices; `wavelengths[i]` is the carrier wavelength (metres) of
 /// DD target `i`.
-#[allow(clippy::needless_range_loop)]
 pub(crate) fn dd_covariance_cycles(
     sd_cov: &[f64],
     k: usize,
@@ -1202,7 +1200,6 @@ fn reported_epoch_residuals(
 /// `float_only_ambiguity_ids` rejection in `sequential_search_and_hold`).
 /// Returns the updated held set and the ratio (`0.0` when there was nothing to
 /// search).
-#[allow(clippy::needless_range_loop)]
 pub(crate) fn search_and_hold(
     state: &FilterState,
     posterior_information: &[f64],
