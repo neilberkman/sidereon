@@ -6,11 +6,11 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
-- Portable dynamic matrix and matrix-vector products now use a cache-blocked,
-  fixed-order binary64 reduction. Randomized bit comparisons cover normal-
-  equation orders through 500 and a 2000x200 Jacobian; CI compares all
-  application hotpaths and portable linear-algebra cases against their
-  same-job merge base and uploads both Criterion reports.
+- Portable dynamic matrix and matrix-vector products are pinned to nalgebra's
+  fixed-order scalar path by a randomized bit-identity test (normal-equation
+  orders through 500 and a 2000x200 Jacobian). CI benchmarks every
+  application hotpath and portable linear-algebra case against the same-job
+  merge base and fails on a regression above 25 percent.
 - `nalgebra` 0.33.3 and `simba` 0.9.1 are now exact dependency pins. The
   decomposition algorithms and scalar-dispatch companion participate in the
   crate's bit-exact identity claim, so a semver-compatible update could change

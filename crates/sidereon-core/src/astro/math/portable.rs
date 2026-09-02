@@ -168,76 +168,18 @@ pub fn product_vector(lhs: &DMatrix<f64>, rhs: &DVector<f64>) -> DVector<f64> {
     vector_to_f64(&product_vector_portable(&lhs, &rhs))
 }
 
-/// Cache-block the independent output cells while preserving the naive inner
-/// reduction order. `DMatrix` is column-major, so a fixed row/column tile
-/// keeps the active output and the corresponding input panels in cache. The
-/// `k` loop deliberately stays in ascending order for every cell: changing
-/// that order would change binary64 rounding and therefore the contract.
-const PRODUCT_BLOCK: usize = 128;
-
+/// Dynamic product on the portable scalar. nalgebra's generic (non-`f64`)
+/// path is a fixed-order scalar loop that accumulates each output cell over
+/// ascending `k`; measured against a cache-blocked variant on the CI runner it
+/// was as fast or faster at every size the solvers reach, so the plain path is
+/// the kernel. Do not reorder the reduction: that changes binary64 rounding
+/// and therefore the cross-platform contract.
 fn product_portable(lhs: &DMatrix<Portable>, rhs: &DMatrix<Portable>) -> DMatrix<Portable> {
-    assert_eq!(
-        lhs.ncols(),
-        rhs.nrows(),
-        "matrix product dimension mismatch: {}x{} by {}x{}",
-        lhs.nrows(),
-        lhs.ncols(),
-        rhs.nrows(),
-        rhs.ncols()
-    );
-    let lhs_rows = lhs.nrows();
-    let inner = lhs.ncols();
-    let rhs_cols = rhs.ncols();
-    let lhs_values = lhs.as_slice();
-    let rhs_values = rhs.as_slice();
-    let mut result = DMatrix::zeros(lhs_rows, rhs_cols);
-    let result_values = result.as_mut_slice();
-    for col0 in (0..rhs_cols).step_by(PRODUCT_BLOCK) {
-        let col_end = (col0 + PRODUCT_BLOCK).min(rhs_cols);
-        for row0 in (0..lhs_rows).step_by(PRODUCT_BLOCK) {
-            let row_end = (row0 + PRODUCT_BLOCK).min(lhs_rows);
-            for col in col0..col_end {
-                let rhs_offset = col * inner;
-                let result_offset = col * lhs_rows + row0;
-                for k in 0..inner {
-                    let lhs_offset = k * lhs_rows + row0;
-                    let rhs_value = unsafe { *rhs_values.get_unchecked(rhs_offset + k) };
-                    for row in 0..row_end - row0 {
-                        // SAFETY: all offsets are within the column-major
-                        // buffers after the dimension check above.
-                        unsafe {
-                            *result_values.get_unchecked_mut(result_offset + row) +=
-                                *lhs_values.get_unchecked(lhs_offset + row) * rhs_value;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    result
+    lhs * rhs
 }
 
 fn product_vector_portable(lhs: &DMatrix<Portable>, rhs: &DVector<Portable>) -> DVector<Portable> {
-    assert_eq!(
-        lhs.ncols(),
-        rhs.len(),
-        "matrix/vector product dimension mismatch: {}x{} by {}",
-        lhs.nrows(),
-        lhs.ncols(),
-        rhs.len()
-    );
-    let mut result = DVector::zeros(lhs.nrows());
-    for row0 in (0..lhs.nrows()).step_by(PRODUCT_BLOCK) {
-        let row_end = (row0 + PRODUCT_BLOCK).min(lhs.nrows());
-        for row in row0..row_end {
-            let mut sum = Portable::zero();
-            for k in 0..lhs.ncols() {
-                sum += lhs[(row, k)] * rhs[k];
-            }
-            result[row] = sum;
-        }
-    }
-    result
+    lhs * rhs
 }
 
 /// Fixed-size matrix product evaluated through the portable scalar.
@@ -1400,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_products_are_bit_identical_to_naive_reduction() {
+    fn products_are_bit_identical_to_naive_reduction() {
         let mut state = 0x243f6a8885a308d3_u64;
         for _ in 0..1_000 {
             state = state
