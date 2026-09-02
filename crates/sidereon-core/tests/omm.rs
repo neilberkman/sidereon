@@ -47,6 +47,8 @@ const FIXTURES: &[Fixture] = &[
     },
 ];
 
+type FrozenOmmCase = (&'static str, &'static str, fn(&Omm) -> String);
+
 const ISS_CSV: &str = "OBJECT_NAME,OBJECT_ID,EPOCH,MEAN_MOTION,ECCENTRICITY,INCLINATION,RA_OF_ASC_NODE,ARG_OF_PERICENTER,MEAN_ANOMALY,EPHEMERIS_TYPE,CLASSIFICATION_TYPE,NORAD_CAT_ID,ELEMENT_SET_NO,REV_AT_EPOCH,BSTAR,MEAN_MOTION_DOT,MEAN_MOTION_DDOT\n\
 ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,300.0813,195.1146,164.9702,0,U,25544,999,57175,0.00017172,9.113e-5,0";
 
@@ -181,7 +183,7 @@ fn omm_json_matches_other_encodings_and_drives_sgp4_to_0_ulp() {
 
 #[test]
 fn frozen_auto_parse_encode_output_hashes() {
-    let cases: [(&str, &str, fn(&Omm) -> String); 9] = [
+    let cases: [FrozenOmmCase; 9] = [
         ("25544.kvn", FIXTURES[0].kvn, omm::encode_kvn),
         ("25544.xml", FIXTURES[0].xml, omm::encode_xml),
         ("25544.json", FIXTURES[0].json, omm::encode_json),
