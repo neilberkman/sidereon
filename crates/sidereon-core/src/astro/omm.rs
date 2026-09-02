@@ -1,3 +1,5 @@
+#![warn(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 //! CCSDS Orbit Mean-Elements Message (OMM) parser, encoder, and SGP4 bridge.
 //!
 //! OMM (CCSDS 502.0-B) is the modern replacement for the TLE: it carries the
@@ -576,12 +578,17 @@ pub fn encode_json(omm: &Omm) -> String {
 ///
 /// Each array member is the same object produced by [`encode_json`], preserving
 /// all scalar fields and optional metadata carried by [`Omm`].
+#[allow(clippy::expect_used)]
 pub fn encode_json_array(omms: &[Omm]) -> String {
     use serde_json::Value;
 
     let values: Vec<Value> = omms
         .iter()
-        .map(|omm| serde_json::from_str(&encode_json(omm)).expect("encoded OMM JSON object"))
+        .map(|omm| {
+            // invariant: encode_json constructs a serde_json object directly, so
+            // its serialized output is always a valid JSON object.
+            serde_json::from_str(&encode_json(omm)).expect("encoded OMM JSON object")
+        })
         .collect();
     Value::Array(values).to_string()
 }
@@ -1268,6 +1275,7 @@ fn fmt_num(value: f64) -> String {
 }
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
 

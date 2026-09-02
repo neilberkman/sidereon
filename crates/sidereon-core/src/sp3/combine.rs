@@ -1,3 +1,5 @@
+#![warn(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 //! Multi-source SP3 combination: clock-datum alignment across analysis centers.
 //!
 //! Precise clock products from different analysis centers are referenced to
@@ -839,6 +841,9 @@ impl MergeReport {
                 });
                 current_key = key;
             }
+            // invariant: the branch above pushes the first aggregate before this
+            // lookup, and every later aggregate remains in `out`.
+            #[allow(clippy::expect_used)]
             let agg = out.last_mut().expect("just pushed");
             agg.position_max_m = agg.position_max_m.max(m.position_max_m);
             if m.position_members >= 2 {
@@ -963,40 +968,16 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     let timing = prepare_merge_timing(sources, opts)?;
     let epoch_interval_s = timing.epoch_interval_s;
     let cells = emit_merge_cells(sources, opts, &timing, frame_reconciliations);
-    let out_epochs = cells.out_epochs;
-    let out_epoch_j2000_s = cells.out_epoch_j2000_s;
-    let out_states = cells.out_states;
-    let out_raw = cells.out_raw;
-    let all_sats = cells.all_sats;
-    let mut report = cells.report;
-    let continuity_selection = cells.continuity_selection;
 
     let synthesized = synthesize_merge_header(
         sources,
-        &out_epochs,
-        &out_epoch_j2000_s,
-        all_sats,
+        &cells.out_epochs,
+        &cells.out_epoch_j2000_s,
+        &cells.all_sats,
         epoch_interval_s,
     )?;
-    let MergeHeaderOutput {
-        header,
-        mandatory_header_lines,
-        declared_satellite_tokens,
-        epoch_position_tokens,
-        epoch_state_record_sequence,
-    } = synthesized;
-    let merged = emit_merged_product(
-        sources,
-        header,
-        mandatory_header_lines,
-        declared_satellite_tokens,
-        epoch_position_tokens,
-        epoch_state_record_sequence,
-        out_epochs,
-        out_epoch_j2000_s,
-        out_states,
-        out_raw,
-    );
+    let (merged, mut report, continuity_selection) =
+        emit_merged_product(sources, synthesized, cells);
 
     if let Some(continuity_options) = opts.verify_continuity.as_ref() {
         report.continuity = Some(verify_merged_continuity(
@@ -1036,17 +1017,30 @@ struct MergeHeaderOutput {
 /// changing the serializer-facing header counts, records, or source comment.
 fn emit_merged_product(
     sources: &[Sp3],
-    header: Sp3Header,
-    mandatory_header_lines: usize,
-    declared_satellite_tokens: Vec<String>,
-    epoch_position_tokens: Vec<Vec<String>>,
-    epoch_state_record_sequence: Vec<Vec<(char, String)>>,
-    out_epochs: Vec<Instant>,
-    out_epoch_j2000_s: Vec<f64>,
-    out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
-    out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
-) -> Sp3 {
-    Sp3 {
+    synthesized: MergeHeaderOutput,
+    cells: MergeCellOutput,
+) -> (
+    Sp3,
+    MergeReport,
+    BTreeMap<(GnssSatelliteId, i64), CellSelection>,
+) {
+    let MergeHeaderOutput {
+        header,
+        mandatory_header_lines,
+        declared_satellite_tokens,
+        epoch_position_tokens,
+        epoch_state_record_sequence,
+    } = synthesized;
+    let MergeCellOutput {
+        out_epochs,
+        out_epoch_j2000_s,
+        out_states,
+        out_raw,
+        report,
+        continuity_selection,
+        ..
+    } = cells;
+    let merged = Sp3 {
         header,
         epochs: out_epochs,
         declared_num_epochs: out_epoch_j2000_s.len() as u64,
@@ -1068,7 +1062,8 @@ fn emit_merged_product(
         interp_raw: out_raw,
         comments: vec![format!("MERGED from {} SP3 products", sources.len())],
         skipped_records: sources.iter().map(|s| s.skipped_records).sum(),
-    }
+    };
+    (merged, report, continuity_selection)
 }
 
 /// Consume ordered merged cells and source metadata, and produce the synthetic
@@ -1077,7 +1072,7 @@ fn synthesize_merge_header(
     sources: &[Sp3],
     out_epochs: &[Instant],
     out_epoch_j2000_s: &[f64],
-    all_sats: BTreeSet<GnssSatelliteId>,
+    all_sats: &BTreeSet<GnssSatelliteId>,
     epoch_interval_s: f64,
 ) -> Result<MergeHeaderOutput> {
     // Base the non-epoch metadata on a source product, but derive the first-epoch
@@ -1112,7 +1107,7 @@ fn synthesize_merge_header(
         Error::InvalidInput("merged SP3 first epoch cannot be represented in header fields".into())
     })?;
 
-    let satellites: Vec<_> = all_sats.into_iter().collect();
+    let satellites: Vec<_> = all_sats.iter().copied().collect();
     let satellite_accuracy_codes = satellites
         .iter()
         .map(|sat| {
@@ -1189,8 +1184,8 @@ fn emit_merge_cells(
     {
         Some(precedence_sources_for_satellites(
             sources,
-            &epoch_index,
-            &epoch_keys,
+            epoch_index,
+            epoch_keys,
             opts.systems.as_ref(),
         ))
     } else {
@@ -1421,6 +1416,9 @@ fn emit_merge_cells(
                         (Some(clk[preferred_idx].1), vec![preferred_idx])
                     }
                     Some(preferred_idx) if opts.outlier_reject.is_some() => {
+                        // invariant: this match arm is guarded by
+                        // `outlier_reject.is_some()` immediately above.
+                        #[allow(clippy::expect_used)]
                         let reject = opts.outlier_reject.expect("checked above");
                         let vals: Vec<f64> = clk.iter().map(|(_, c, _)| *c).collect();
                         let cluster =
@@ -1566,8 +1564,13 @@ fn emit_merge_cells(
             states.insert(
                 sat,
                 Sp3State {
-                    position: ItrfPositionM::new(position_m[0], position_m[1], position_m[2])
-                        .expect("valid ITRF position"),
+                    position: {
+                        // invariant: parsed SP3 coordinates and finite consensus
+                        // arithmetic produce a valid finite ITRF position.
+                        #[allow(clippy::expect_used)]
+                        ItrfPositionM::new(position_m[0], position_m[1], position_m[2])
+                            .expect("valid ITRF position")
+                    },
                     clock_s,
                     velocity: None,
                     clock_rate_s_s: None,
@@ -2424,13 +2427,18 @@ fn combine_axis(members: &[(usize, f64)], how: MergeCombine) -> f64 {
         MergeCombine::Mean => members.iter().map(|(_, v)| *v).sum::<f64>() / members.len() as f64,
         MergeCombine::Median => {
             let mut vals: Vec<f64> = members.iter().map(|(_, v)| *v).collect();
+            // invariant: combine_axis is called only with a non-empty consensus
+            // cluster selected by the preceding merge stage.
+            #[allow(clippy::expect_used)]
             median(&mut vals).expect("consensus cluster is non-empty")
         }
-        MergeCombine::Precedence => members
-            .iter()
-            .min_by_key(|(s, _)| *s)
-            .map(|(_, v)| *v)
-            .expect("consensus cluster is non-empty"),
+        MergeCombine::Precedence => {
+            let preferred = members.iter().min_by_key(|(s, _)| *s).map(|(_, v)| *v);
+            // invariant: combine_axis is called only with a non-empty consensus
+            // cluster selected by the preceding merge stage.
+            #[allow(clippy::expect_used)]
+            preferred.expect("consensus cluster is non-empty")
+        }
     }
 }
 
@@ -2603,6 +2611,7 @@ fn transition_between(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::super::Sp3;
     use super::{
