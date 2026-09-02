@@ -96,3 +96,19 @@ jobs:
         run: test "$(uname -m)" = x86_64
       - name: Verify fused and separately rounded PROJ arithmetic
         run: cargo test -p sidereon-core geoid::tests::proj_
+
+  hotpath-perf:
+    name: hotpath performance (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-ubuntu
+      - name: Require x86_64 runner
+        run: test "$(uname -m)" = x86_64
+      - name: Run hotpath benchmark
+        run: cargo bench -p sidereon-core --bench hotpath -- --noplot --sample-size 10 --measurement-time 1
+      - name: Compare against committed baseline
+        run: python3 crates/sidereon-core/benches/check_hotpath.py target/criterion crates/sidereon-core/benches/hotpath_baseline.json

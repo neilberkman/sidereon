@@ -6,6 +6,10 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- Portable dynamic matrix and matrix-vector products now use a cache-blocked,
+  fixed-order binary64 reduction. Randomized bit comparisons and a committed
+  hotpath baseline cover normal-equation orders through 500 and a 2000x200
+  Jacobian.
 - `libm` is pinned to exactly 0.2.16. The crate's cross-platform bit-exactness
   is a property of that implementation's rounding, so a semver-compatible
   update of it could change results without any change here. The pin makes

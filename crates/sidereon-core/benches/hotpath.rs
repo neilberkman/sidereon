@@ -2,6 +2,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use nalgebra::DMatrix;
+use sidereon_core::astro::math::portable;
 use sidereon_core::constants::F_L1_HZ;
 use sidereon_core::ephemeris::{ObservableEphemerisSource, PreciseEphemerisInterpolant, Sp3};
 use sidereon_core::observables::{
@@ -428,5 +430,86 @@ fn bench_hotpath(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_hotpath);
+fn next_linalg_value(state: &mut u64) -> f64 {
+    *state = state
+        .wrapping_mul(0xd1342543de82ef95)
+        .wrapping_add(0xa4093822299f31d0);
+    let fraction = f64::from_bits(0x3fe0000000000000 | (*state >> 12)) - 0.5;
+    if *state & 1 == 0 {
+        fraction
+    } else {
+        -fraction
+    }
+}
+
+fn linalg_matrix(rows: usize, cols: usize, seed: u64) -> DMatrix<f64> {
+    let mut state = seed;
+    DMatrix::from_fn(rows, cols, |_, _| next_linalg_value(&mut state))
+}
+
+fn normal_matrix(order: usize) -> DMatrix<f64> {
+    let factor = linalg_matrix(order, order, order as u64);
+    let mut normal = &factor.transpose() * &factor;
+    for diagonal in 0..order {
+        normal[(diagonal, diagonal)] += order as f64 + 1.0;
+    }
+    normal
+}
+
+fn bench_linalg(c: &mut Criterion) {
+    let mut products = c.benchmark_group("hotpath_linalg_product");
+    for order in [50, 200, 500] {
+        let normal = normal_matrix(order);
+        products.throughput(Throughput::Elements(1));
+        products.bench_with_input(
+            BenchmarkId::new("plain_normal", order),
+            &normal,
+            |b, matrix| b.iter(|| black_box(black_box(matrix) * black_box(matrix))),
+        );
+        products.bench_with_input(
+            BenchmarkId::new("portable_normal", order),
+            &normal,
+            |b, matrix| {
+                b.iter(|| black_box(portable::product(black_box(matrix), black_box(matrix))))
+            },
+        );
+    }
+
+    let jacobian = linalg_matrix(2_000, 200, 0x517cc1b727220a95);
+    let transposed = jacobian.transpose();
+    products.throughput(Throughput::Elements(1));
+    products.bench_function("plain_jacobian_2000x200", |b| {
+        b.iter(|| black_box(black_box(&transposed) * black_box(&jacobian)))
+    });
+    products.bench_function("portable_jacobian_2000x200", |b| {
+        b.iter(|| {
+            black_box(portable::product(
+                black_box(&transposed),
+                black_box(&jacobian),
+            ))
+        })
+    });
+    products.finish();
+
+    let mut cholesky = c.benchmark_group("hotpath_linalg_cholesky");
+    for order in [50, 200, 500] {
+        let normal = normal_matrix(order);
+        cholesky.throughput(Throughput::Elements(1));
+        cholesky.bench_with_input(
+            BenchmarkId::new("plain_normal", order),
+            &normal,
+            |b, matrix| {
+                b.iter(|| black_box(black_box(matrix).clone().cholesky().expect("SPD matrix")))
+            },
+        );
+        cholesky.bench_with_input(
+            BenchmarkId::new("portable_normal", order),
+            &normal,
+            |b, matrix| b.iter(|| black_box(portable::cholesky_lower_dynamic(black_box(matrix)))),
+        );
+    }
+    cholesky.finish();
+}
+
+criterion_group!(benches, bench_hotpath, bench_linalg);
 criterion_main!(benches);
