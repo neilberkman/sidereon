@@ -123,6 +123,8 @@ impl Ionex {
     /// This is a compatibility view for parity tests and callers that need the
     /// integer IONEX epoch axis; the canonical stored representation is
     /// [`Instant`].
+    // invariant: parsed and sample-built IONEX epochs are whole, representable J2000 seconds.
+    #[allow(clippy::expect_used)]
     pub fn map_epochs_s(&self) -> Vec<i64> {
         self.map_epochs
             .iter()
@@ -232,12 +234,8 @@ impl Ionex {
         let mut line_number = 0usize;
 
         // ---- Header ----
-        let mut lat1 = None;
-        let mut lat2 = None;
-        let mut dlat = None;
-        let mut lon1 = None;
-        let mut lon2 = None;
-        let mut dlon = None;
+        let mut latitude_axis = None;
+        let mut longitude_axis = None;
         let mut shell_height_km = None;
         let mut base_radius_km = None;
         let mut exponent: i32 = -1; // IONEX default when no EXPONENT record.
@@ -247,16 +245,10 @@ impl Ionex {
             let label = label_of(line);
             match label {
                 "LAT1 / LAT2 / DLAT" => {
-                    let (a, b, c) = three_fields(line, "LAT1 / LAT2 / DLAT")?;
-                    lat1 = Some(a);
-                    lat2 = Some(b);
-                    dlat = Some(c);
+                    latitude_axis = Some(three_fields(line, "LAT1 / LAT2 / DLAT")?);
                 }
                 "LON1 / LON2 / DLON" => {
-                    let (a, b, c) = three_fields(line, "LON1 / LON2 / DLON")?;
-                    lon1 = Some(a);
-                    lon2 = Some(b);
-                    dlon = Some(c);
+                    longitude_axis = Some(three_fields(line, "LON1 / LON2 / DLON")?);
                 }
                 "HGT1 / HGT2 / DHGT" => {
                     let (a, _b, _c) = three_fields(line, "HGT1 / HGT2 / DHGT")?;
@@ -273,12 +265,10 @@ impl Ionex {
             }
         }
 
-        let lat1 = lat1.ok_or_else(|| Error::Parse("IONEX missing LAT1 / LAT2 / DLAT".into()))?;
-        let lat2 = lat2.unwrap();
-        let dlat = dlat.unwrap();
-        let lon1 = lon1.ok_or_else(|| Error::Parse("IONEX missing LON1 / LON2 / DLON".into()))?;
-        let lon2 = lon2.unwrap();
-        let dlon = dlon.unwrap();
+        let (lat1, lat2, dlat) =
+            latitude_axis.ok_or_else(|| Error::Parse("IONEX missing LAT1 / LAT2 / DLAT".into()))?;
+        let (lon1, lon2, dlon) = longitude_axis
+            .ok_or_else(|| Error::Parse("IONEX missing LON1 / LON2 / DLON".into()))?;
         let shell_height_km = shell_height_km
             .ok_or_else(|| Error::Parse("IONEX missing HGT1 / HGT2 / DHGT".into()))?;
         let base_radius_km =
@@ -751,8 +741,18 @@ fn parse_epoch_j2000_s(line: &str) -> Result<i64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_rejects_missing_latitude_axis_without_panicking() {
+        let error = Ionex::parse_str("END OF HEADER\n").expect_err("missing axis must fail");
+        assert!(matches!(
+            error,
+            Error::Parse(message) if message == "IONEX missing LAT1 / LAT2 / DLAT"
+        ));
+    }
 
     #[test]
     fn parse_epoch_rejects_invalid_civil_datetime() {

@@ -5,6 +5,8 @@
 //! canonical archive filenames, URLs, cache relative paths, and deterministic
 //! converted bytes for pure terrain ingestion.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use core::fmt;
 use core::str::FromStr;
 use std::collections::{HashMap, HashSet};
@@ -15,6 +17,12 @@ use crate::astro::time::gnss::{week_epoch_julian_day_number, week_from_calendar}
 use crate::astro::time::model::TimeScale;
 use crate::astro::time::scales::julian_day_number;
 use crate::terrain;
+
+// invariant: GPST is one of the built-in time scales and always has a week epoch.
+#[allow(clippy::expect_used)]
+fn gpst_week_epoch_julian_day_number() -> i64 {
+    week_epoch_julian_day_number(TimeScale::Gpst).expect("GPST has a week-numbering epoch")
+}
 
 /// Analysis-center code supported by the data-product catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1567,8 +1575,7 @@ impl ProductDate {
         if day_of_week > 6 {
             return Err(DataCatalogError::InvalidGpsDayOfWeek(day_of_week));
         }
-        let epoch_jdn =
-            week_epoch_julian_day_number(TimeScale::Gpst).expect("GPST has a week-numbering epoch");
+        let epoch_jdn = gpst_week_epoch_julian_day_number();
         let offset_days = i64::from(week)
             .checked_mul(7)
             .and_then(|days| days.checked_add(i64::from(day_of_week)))
@@ -1593,8 +1600,7 @@ impl ProductDate {
 
     /// GPS day of week (`0` = Sunday, `6` = Saturday) for this date.
     pub fn gps_day_of_week(self) -> Result<u8, DataCatalogError> {
-        let epoch_jdn =
-            week_epoch_julian_day_number(TimeScale::Gpst).expect("GPST has a week-numbering epoch");
+        let epoch_jdn = gpst_week_epoch_julian_day_number();
         let days = self
             .julian_day_number()
             .checked_sub(epoch_jdn)
@@ -1863,8 +1869,7 @@ impl ProductIdentity {
         let legacy_igs_final =
             uses_legacy_igs_final_name(self.analysis_center, self.family, self.date)?;
         if !legacy_igs_final && descriptor.kind == ProductFilenameKind::Sampled {
-            let entry = center_catalog(self.analysis_center)
-                .expect("validated analysis center has a catalog entry");
+            let entry = required_center_catalog(self.analysis_center);
             let issue_valid = if entry.issues.is_empty() {
                 self.issue.as_deref() == Some("0000")
             } else {
@@ -2045,8 +2050,7 @@ pub(crate) fn exact_sp3_content_start_offset_s(
         return Err(DataCatalogError::InconsistentProductIdentity { field: "family" });
     }
 
-    let entry =
-        center_catalog(identity.analysis_center).expect("a validated identity has a catalog entry");
+    let entry = required_center_catalog(identity.analysis_center);
     // Sampled non-issue identities encode midnight as `Some("0000")`, while
     // the public catalog query follows ProductSpec construction and accepts no
     // issue for those centers.
@@ -2408,7 +2412,7 @@ impl ProductSpec {
                 date: self.date,
             });
         }
-        let entry = center_catalog(self.center).expect("catalog entry exists for enum variant");
+        let entry = required_center_catalog(self.center);
         let filename = self.canonical_filename()?;
         let compression = product_archive_compression(
             self.center,
@@ -2779,13 +2783,20 @@ pub fn center_catalog(center: AnalysisCenter) -> Option<&'static CenterCatalogEn
     CATALOG.iter().find(|entry| entry.center == center)
 }
 
+// invariant: every AnalysisCenter enum variant represented by this catalog has
+// exactly one static catalog entry.
+#[allow(clippy::expect_used)]
+fn required_center_catalog(center: AnalysisCenter) -> &'static CenterCatalogEntry {
+    center_catalog(center).expect("catalog entry exists for enum variant")
+}
+
 /// Look up the convention for one center and product type.
 pub fn product_convention(
     center: AnalysisCenter,
     product_type: ProductType,
 ) -> Result<&'static CenterProductConvention, DataCatalogError> {
     open_mirror(center, product_type)?;
-    let entry = center_catalog(center).expect("catalog entry exists for enum variant");
+    let entry = required_center_catalog(center);
     entry
         .products
         .iter()
@@ -2935,8 +2946,7 @@ pub fn distribution_location_for_identity(
                     date: identity.date,
                 });
             }
-            let entry = center_catalog(identity.analysis_center)
-                .expect("validated analysis center has a catalog entry");
+            let entry = required_center_catalog(identity.analysis_center);
             let compression = product_archive_compression(
                 identity.analysis_center,
                 identity.family,
@@ -3202,7 +3212,7 @@ pub fn ultra_issue_candidates(
     center: AnalysisCenter,
     target: ProductDateTime,
 ) -> Result<Vec<UltraIssue>, DataCatalogError> {
-    let entry = center_catalog(center).expect("catalog entry exists for enum variant");
+    let entry = required_center_catalog(center);
     let _ = product_convention(center, ProductType::Sp3)?;
     if entry.issues.is_empty() {
         return Err(DataCatalogError::UnsupportedProduct {
@@ -3680,11 +3690,7 @@ pub fn newest_published_product(
         }
         // The object must be one the catalog can re-derive for that date and
         // issue; anything else is not this line's product.
-        let issue_argument = (!center_catalog(center)
-            .expect("catalog entry exists for enum variant")
-            .issues
-            .is_empty())
-        .then_some(issue);
+        let issue_argument = (!required_center_catalog(center).issues.is_empty()).then_some(issue);
         match product(center, product_type, date, Some(sample), issue_argument) {
             Ok(spec) => {
                 if spec.canonical_filename()? != stripped {
@@ -3803,7 +3809,7 @@ fn nominal_issues_for_date(
         return Ok(Vec::new());
     }
 
-    let entry = center_catalog(center).expect("catalog entry exists for enum variant");
+    let entry = required_center_catalog(center);
     let issues: Vec<&str> = if matches!(solution, SolutionClass::UltraRapid) {
         entry.issues.to_vec()
     } else {
@@ -3895,8 +3901,7 @@ fn nominal_coverage(
     filename_epoch: ProductDateTime,
 ) -> Result<NominalCoverage, DataCatalogError> {
     let content_offset_s = if identity.family == ProductType::Sp3 {
-        let entry = center_catalog(identity.analysis_center)
-            .expect("validated identity has a catalog entry");
+        let entry = required_center_catalog(identity.analysis_center);
         let issue = if entry.issues.is_empty() {
             None
         } else {
@@ -3980,7 +3985,7 @@ pub fn publication_listing_urls(
     around: ProductDate,
 ) -> Result<Vec<String>, DataCatalogError> {
     let convention = product_convention(center, product_type)?;
-    let entry = center_catalog(center).expect("catalog entry exists for enum variant");
+    let entry = required_center_catalog(center);
     match convention.layout {
         ArchiveLayout::AiubCodeRoot
         | ArchiveLayout::AiubCodeYear
@@ -4165,6 +4170,8 @@ fn encode_dted_signed_magnitude(sample: i16) -> u16 {
     }
 }
 
+// invariant: every ProductType enum variant has a cataloged filename convention.
+#[allow(clippy::expect_used)]
 fn product_type_convention(product_type: ProductType) -> &'static ProductTypeConvention {
     PRODUCT_TYPE_CONVENTIONS
         .iter()
@@ -4251,7 +4258,7 @@ pub fn supported_samples(
     product_convention(center, product_type)?;
     validate_product_date(center, product_type, date)?;
 
-    let entry = center_catalog(center).expect("catalog entry exists for enum variant");
+    let entry = required_center_catalog(center);
     if entry.issues.is_empty() {
         validate_issue_for_center(center, issue)?;
     } else {
@@ -4451,7 +4458,7 @@ fn validate_issue_for_center(
     center: AnalysisCenter,
     issue: Option<&str>,
 ) -> Result<(), DataCatalogError> {
-    let entry = center_catalog(center).expect("catalog entry exists for enum variant");
+    let entry = required_center_catalog(center);
     match (entry.issues.is_empty(), issue) {
         (true, None) => Ok(()),
         (true, Some(_)) => Err(DataCatalogError::UnexpectedIssue { center }),
@@ -4623,6 +4630,7 @@ fn product_date_from_jdn(jdn: i64) -> Result<ProductDate, DataCatalogError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod content_start_tests {
     use super::*;
 

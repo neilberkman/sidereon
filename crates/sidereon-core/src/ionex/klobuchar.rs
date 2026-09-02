@@ -161,4 +161,5 @@ pub(crate) fn klobuchar_l1_components(
 }
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;

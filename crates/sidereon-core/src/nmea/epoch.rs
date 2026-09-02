@@ -277,7 +277,9 @@ impl NmeaAccumulator {
         if let Some(date) = date {
             self.carried_date = Some(date);
         }
-        let epoch = self.current.as_mut().expect("epoch is open");
+        let Some(epoch) = self.current.as_mut() else {
+            return;
+        };
         if epoch.snapshot.time_of_day.is_none() {
             epoch.snapshot.time_of_day = time;
         }

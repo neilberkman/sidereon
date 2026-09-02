@@ -47,6 +47,8 @@
 //!   line, with no leading satellite token. Blank value fields are retained as
 //!   `None`.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 
@@ -541,9 +543,9 @@ pub fn observation_values(
         .iter()
         .filter(|(sat, _)| filter.allowed_codes(sat.system).is_some())
     {
-        let allowed_codes = filter
-            .allowed_codes(sat.system)
-            .expect("filter presence checked");
+        let Some(allowed_codes) = filter.allowed_codes(sat.system) else {
+            continue;
+        };
         let Some(code_list) = obs.header.obs_codes.get(&sat.system) else {
             continue;
         };
@@ -989,7 +991,10 @@ impl Parser {
                 Err(_) => return self.parse_obs_types_whitespace(line),
             };
             self.ensure_obs_type_count_complete(line)?;
-            let letter = sys_field.chars().next().unwrap();
+            let letter = sys_field
+                .chars()
+                .next()
+                .ok_or_else(|| Error::Parse("RINEX OBS missing system letter".to_string()))?;
             let system = GnssSystem::from_letter(letter).ok_or_else(|| {
                 Error::Parse(format!("RINEX OBS unknown system letter {letter:?}"))
             })?;
@@ -1004,7 +1009,11 @@ impl Parser {
         // Codes occupy 4-wide fields (" CCC") from column 7; collect up to the
         // remaining count.
         let codes_section = field(line, 7, 60);
-        let list = self.obs_codes.get_mut(&system).expect("system inserted");
+        let Some(list) = self.obs_codes.get_mut(&system) else {
+            return Err(Error::Parse(format!(
+                "RINEX OBS observation-code system {system} was not inserted"
+            )));
+        };
         for tok in codes_section.split_whitespace() {
             if self.obs_codes_remaining == 0 {
                 return Err(Error::Parse(format!(
@@ -1221,7 +1230,10 @@ impl Parser {
         let sys_field = field(line, 0, 1).trim();
         if !sys_field.is_empty() {
             self.ensure_scale_factor_count_complete(line)?;
-            let letter = sys_field.chars().next().unwrap();
+            let letter = sys_field
+                .chars()
+                .next()
+                .ok_or_else(|| Error::Parse("RINEX OBS missing scale-factor system".to_string()))?;
             let system = GnssSystem::from_letter(letter).ok_or_else(|| {
                 Error::Parse(format!("RINEX OBS unknown scale-factor system {letter:?}"))
             })?;
@@ -1251,10 +1263,11 @@ impl Parser {
         let Some(mut continuation) = self.scale_factor_continuation else {
             return Ok(());
         };
-        let record = self
-            .scale_factors
-            .last_mut()
-            .expect("scale factor continuation has a record");
+        let Some(record) = self.scale_factors.last_mut() else {
+            return Err(Error::Parse(
+                "RINEX OBS scale-factor continuation has no record".to_string(),
+            ));
+        };
         for code in field(line, 10, 60).split_whitespace() {
             if continuation.remaining == 0 {
                 return Err(Error::Parse(format!(
@@ -1686,7 +1699,9 @@ impl Parser {
             if next.starts_with('>') || starts_with_sat_designator(&next) {
                 break;
             }
-            let continuation = lines.next().expect("peeked continuation line");
+            let Some(continuation) = lines.next() else {
+                break;
+            };
             let continuation = ascii_fixed_columns(continuation.trim_end_matches(['\r', '\n']));
             append_sat_continuation(&mut record, &continuation, n_obs);
         }
@@ -2417,4 +2432,5 @@ fn digit_at(line: &str, col: usize) -> Option<u8> {
 mod write;
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;

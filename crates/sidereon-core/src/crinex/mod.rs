@@ -48,6 +48,8 @@
 //! sink (e.g. feeding a record consumer) so the expansion is processed
 //! incrementally.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -707,8 +709,16 @@ impl Decoder {
     /// Apply one observation token (reset `order&value`, or a plain delta) and
     /// return the recovered scaled integer.
     fn apply_obs_token(&mut self, sv: &str, obs_index: usize, token: &str) -> Result<i64> {
-        let engines = self.obs_diff.get_mut(sv).expect("engines inserted above");
-        let slot = &mut engines[obs_index];
+        let Some(engines) = self.obs_diff.get_mut(sv) else {
+            return Err(Error::Parse(format!(
+                "CRINEX observation {sv:?} has no difference state"
+            )));
+        };
+        let Some(slot) = engines.get_mut(obs_index) else {
+            return Err(Error::Parse(format!(
+                "CRINEX observation {sv}[{obs_index}] exceeds the declared observation count"
+            )));
+        };
         if let Some((order, value)) = parse_reset(token)? {
             match slot {
                 Some(e) => e.force_init(value, order),
@@ -1668,4 +1678,5 @@ fn trim_end(line: &str) -> &str {
 }
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;

@@ -911,6 +911,8 @@ fn parse_issue(issue: Option<&str>) -> Result<(u8, u8), ExactSp3ValidationError>
     Ok((hour, minute))
 }
 
+// invariant: ExactSp3Request construction validates its issue token.
+#[allow(clippy::expect_used)]
 fn requested_start_j2000_s(request: &ExactSp3Request) -> f64 {
     let (hour, minute) = parse_issue(request.issue.as_deref())
         .expect("ExactSp3Request construction validates its issue token");

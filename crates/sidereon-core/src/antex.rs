@@ -4,6 +4,8 @@
 //! used by PPP and RTK correction paths. Values are stored in SI units:
 //! PCO/PCV are meters, azimuth and zenith grids are degrees.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use crate::antenna;
 use crate::constants::MM_PER_M;
 use crate::format::columns::{fortran_f64, raw_field};
@@ -303,11 +305,14 @@ impl Frequency {
         if azimuth_samples.is_empty() {
             interpolate(antenna_id, &self.frequency, &noazi, zenith_deg)
         } else {
+            let Some(azimuth_deg) = azimuth_deg else {
+                return interpolate(antenna_id, &self.frequency, &noazi, zenith_deg);
+            };
             interpolate_azimuth(
                 antenna_id,
                 &self.frequency,
                 &azimuth_samples,
-                azimuth_deg.expect("checked Some"),
+                azimuth_deg,
                 zenith_deg,
             )
         }
@@ -870,8 +875,12 @@ fn interpolate(
     let mut sorted = samples.to_vec();
     sorted.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-    Ok(antenna::interpolate_zenith_sorted(&sorted, zenith_deg)
-        .expect("non-empty grid yields a value"))
+    antenna::interpolate_zenith_sorted(&sorted, zenith_deg).ok_or_else(|| {
+        AntexError::EmptyPcvGrid {
+            antenna_id: antenna_id.to_string(),
+            frequency: frequency.to_string(),
+        }
+    })
 }
 
 fn tag(line: &str) -> &str {
@@ -898,6 +907,7 @@ fn parse_float(token: &str) -> Option<f64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 

@@ -1,3 +1,5 @@
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 pub mod format;
 pub mod message;
 pub mod source;

@@ -96,7 +96,7 @@ pub fn write_gga(talker: NmeaTalker, gga: &Gga) -> Result<String, NmeaError> {
 
     let checksum = checksum_body(&body);
     let mut sentence = String::with_capacity(body.len() + 6);
-    write!(&mut sentence, "${body}*{checksum:02X}\r\n").expect("write to string");
+    let _ = write!(&mut sentence, "${body}*{checksum:02X}\r\n");
     Ok(sentence)
 }
 
