@@ -147,7 +147,12 @@ pub enum SpaceWeatherError {
     UnrecognizedFormat,
     /// Structural failure that prevents a table from being built.
     #[error("malformed space-weather input at line {line}: {reason}")]
-    Malformed { line: usize, reason: String },
+    Malformed {
+        /// Source line associated with the structural failure. CSV header failures and an empty table use `1`; fixed-width section errors use the current one-based line, while an unterminated section uses `text.lines().count()`.
+        line: usize,
+        /// Owned description of the structural cause, including missing or unexpected CSV headers, nested or mismatched fixed-width sections, an unterminated section, or no parseable rows. The error message places it after the line number and a colon.
+        reason: String,
+    },
     /// Input bytes are not UTF-8 text.
     #[error("space-weather input is not valid UTF-8")]
     NotText,
