@@ -10,6 +10,8 @@
 //! value). The ionosphere is dispersive, so a delay reported on a carrier other
 //! than the model's native L1 is the L1 delay scaled by `(f_l1 / f)^2`.
 
+#![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 mod grid;
 mod klobuchar;
 mod nequick_g;
@@ -20,6 +22,7 @@ mod tec_grid;
 mod write;
 
 #[cfg(all(test, sidereon_repo_tests))]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests;
 
 use crate::astro::constants::time::{DAYS_PER_JULIAN_YEAR, SECONDS_PER_DAY, SECONDS_PER_HOUR};
@@ -40,7 +43,7 @@ pub use nequick_g::{nequick_g_delay_m, nequick_g_stec_tecu, NequickGRayEval};
 pub use samples::{TecGridSamples, TecSample, TecSamplesError};
 pub use tec_grid::{
     iono_delay_xyz as regular_tec_grid_delay_xyz, tec_xyz as regular_tec_xyz, TecGrid,
-    TecGridEpoch, TecGridEvalOptions, TecGridShellGeometry,
+    TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridShellGeometry,
 };
 
 /// Policy applied when an IONEX query lands outside the product's coverage.
@@ -103,6 +106,8 @@ pub(crate) fn ionex_epoch_from_j2000_seconds(seconds: i64) -> Instant {
     instant_from_j2000_seconds(TimeScale::Utc, seconds)
 }
 
+// invariant: split_julian_date_from_j2000_seconds returns a valid normalized split.
+#[allow(clippy::expect_used)]
 pub(crate) fn instant_from_j2000_seconds(scale: TimeScale, seconds: i64) -> Instant {
     let (jd_whole, fraction) = split_julian_date_from_j2000_seconds(seconds);
     Instant::from_julian_date(
@@ -311,6 +316,8 @@ pub fn klobuchar_native(
     Ok(delay_m)
 }
 
+// invariant: the built-in GNSS frequency table always defines GPS L1.
+#[allow(clippy::expect_used)]
 pub(crate) fn klobuchar_native_unchecked(
     params: &KlobucharParams,
     lat_deg: f64,
