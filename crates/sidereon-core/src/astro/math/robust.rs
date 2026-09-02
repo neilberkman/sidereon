@@ -19,21 +19,40 @@ pub const HUBER_K: f64 = 1.345;
 pub const MAD_NORMAL_CONST: f64 = 1.4826;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+/// An input validation error from [`median`] or [`mad_scale`].
+///
+/// The solver callers map the contained field and reason into their public
+/// input-error types.
 pub enum RobustError {
     #[error("invalid robust statistic {field}: {reason}")]
+    /// A robust-statistic input failed a finiteness or positivity check.
+    ///
+    /// [`median`] and [`mad_scale`] use this variant for invalid samples or an
+    /// invalid scale floor.
     InvalidInput {
+        /// The rejected argument: `"values"` for non-finite samples or
+        /// `"scale_floor"` for an invalid scale floor.
         field: &'static str,
+        /// The validation failure: `"not finite"` or `"not positive"`.
         reason: &'static str,
     },
 }
 
 impl RobustError {
+    /// Returns the rejected input name from [`RobustError::InvalidInput`].
+    ///
+    /// The static and single-point positioning adapters use this value to
+    /// distinguish the scale floor from the robust sample values.
     pub const fn field(&self) -> &'static str {
         match self {
             Self::InvalidInput { field, .. } => field,
         }
     }
 
+    /// Returns the validation failure from [`RobustError::InvalidInput`].
+    ///
+    /// The static and single-point positioning adapters use this value to map
+    /// non-finite and non-positive inputs to their public error kinds.
     pub const fn reason(&self) -> &'static str {
         match self {
             Self::InvalidInput { reason, .. } => reason,
