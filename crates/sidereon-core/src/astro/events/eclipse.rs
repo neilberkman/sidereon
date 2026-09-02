@@ -45,8 +45,14 @@ pub enum EclipseStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum EclipseError {
     #[error("invalid eclipse input {field}: {reason}")]
+    /// A satellite or Sun position failed validation before eclipse geometry
+    /// was evaluated.
     InvalidInput {
+        /// Name of the position argument that failed validation: `"sat_pos"`
+        /// or `"sun_pos"`.
         field: &'static str,
+        /// Validation failure: `"not finite"`, `"zero vector"`, or
+        /// `"out of range"`.
         reason: &'static str,
     },
 }
