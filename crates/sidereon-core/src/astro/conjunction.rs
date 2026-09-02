@@ -44,12 +44,25 @@ const FOSTER_NUMERICAL_ANGULAR_STEPS: usize = 40;
 /// relative velocity, and `z_hat` is the encounter-plane normal.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EncounterFrame {
+    /// Unit ECI vector for the in-plane cross-track axis. It is derived from
+    /// the relative-position component orthogonal to relative velocity, or
+    /// from a selected world-axis trial vector when the objects are on a
+    /// collision course.
     pub x_hat: [f64; 3],
+    /// Unit ECI vector in the direction of the relative velocity `v2 - v1`.
     pub y_hat: [f64; 3],
+    /// ECI normal to the encounter plane, computed as `y_hat` crossed with
+    /// `x_hat`.
     pub z_hat: [f64; 3],
+    /// Relative ECI position `r2 - r1`, in kilometers.
     pub relative_position_km: [f64; 3],
+    /// Relative ECI velocity `v2 - v1`, in kilometers per second.
     pub relative_velocity_km_s: [f64; 3],
+    /// Norm in kilometers of the relative-position component orthogonal to
+    /// `y_hat`; this is the miss distance used by [`CollisionPc`].
     pub miss_km: f64,
+    /// Norm in kilometers per second of `v2 - v1`. Values below
+    /// `ZERO_REL_SPEED_EPS_KM_S` make the encounter frame unavailable.
     pub relative_speed_km_s: f64,
 }
 
@@ -68,18 +81,39 @@ pub enum PcMethod {
 /// and 3x3 position covariance (km^2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ConjunctionState {
+    /// Object position in kilometers in the common inertial frame supplied to
+    /// the solver. The TCA wrapper supplies the converted primary relative
+    /// position and `[0.0; 3]` for the secondary.
     pub position_km: [f64; 3],
+    /// Object velocity in kilometers per second in the common inertial frame
+    /// supplied to the solver. The TCA wrapper supplies the converted primary
+    /// relative velocity and `[0.0; 3]` for the secondary.
     pub velocity_km_s: [f64; 3],
+    /// Object position covariance in square kilometers in the same frame as
+    /// `position_km`; the solver adds both object matrices element-wise before
+    /// projecting them into the encounter plane.
     pub covariance_km2: [[f64; 3]; 3],
 }
 
 /// Collision-probability result and the encounter-plane summary it came from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CollisionPc {
+    /// Collision probability from the selected integration method. A negative
+    /// computed value is returned as zero after finite-value validation.
     pub pc: f64,
+    /// Encounter-frame miss distance in kilometers, copied from
+    /// [`EncounterFrame::miss_km`].
     pub miss_km: f64,
+    /// Relative-state speed in kilometers per second, copied from
+    /// [`EncounterFrame::relative_speed_km_s`].
     pub relative_speed_km_s: f64,
+    /// Standard deviation in kilometers along the first principal axis of the
+    /// projected encounter-plane Gaussian; it is the square root of the larger
+    /// covariance eigenvalue.
     pub sigma_x_km: f64,
+    /// Standard deviation in kilometers along the second principal axis of the
+    /// projected encounter-plane Gaussian; it is the square root of the smaller
+    /// covariance eigenvalue.
     pub sigma_z_km: f64,
 }
 
@@ -87,9 +121,17 @@ pub struct CollisionPc {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConjunctionError {
     /// A numeric input or derived probability was non-finite.
-    NonFinite { field: &'static str },
+    NonFinite {
+        /// Static label of the input or derived output that failed finite
+        /// validation.
+        field: &'static str,
+    },
     /// A strictly positive input was zero or negative.
-    NotPositive { field: &'static str },
+    NotPositive {
+        /// Static label of the value that failed a positivity or covariance
+        /// validity check.
+        field: &'static str,
+    },
     /// The encounter frame is undefined because relative velocity is zero.
     UndefinedFrame,
 }
