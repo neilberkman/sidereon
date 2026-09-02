@@ -961,10 +961,158 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     let sources = prepared_sources.as_slice();
 
     let timing = prepare_merge_timing(sources, opts)?;
-    let epoch_index = timing.epoch_index;
     let epoch_interval_s = timing.epoch_interval_s;
-    let clock_offset = timing.clock_offset;
-    let epoch_keys = timing.epoch_keys;
+    let cells = emit_merge_cells(sources, opts, &timing, frame_reconciliations);
+    let out_epochs = cells.out_epochs;
+    let out_epoch_j2000_s = cells.out_epoch_j2000_s;
+    let out_states = cells.out_states;
+    let out_raw = cells.out_raw;
+    let all_sats = cells.all_sats;
+    let mut report = cells.report;
+    let continuity_selection = cells.continuity_selection;
+    // Base the non-epoch metadata on a source product, but derive the first-epoch
+    // header fields from the merged grid itself. Mixed cadence / coverage can make
+    // the merged first epoch later than every input's first epoch, so cloning
+    // those fields from any input would make the `##` line stale.
+    let first_key = Some(out_epoch_j2000_s[0].floor() as i64);
+    let base_idx = sources
+        .iter()
+        .position(|s| {
+            s.epochs
+                .first()
+                .and_then(|ep| sp3_epoch_j2000_seconds(s, 0, ep))
+                .map(|sec| sec.floor() as i64)
+                == first_key
+        })
+        .or_else(|| {
+            sources
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    s.epochs
+                        .first()
+                        .and_then(|ep| sp3_epoch_j2000_seconds(s, 0, ep))
+                        .map(|sec| (sec, i))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
+                .map(|(_, i)| i)
+        })
+        .unwrap_or(0);
+    let first_epoch_header = first_epoch_header_fields(&out_epochs[0]).ok_or_else(|| {
+        Error::InvalidInput("merged SP3 first epoch cannot be represented in header fields".into())
+    })?;
+
+    let satellites: Vec<_> = all_sats.into_iter().collect();
+    let satellite_accuracy_codes = satellites
+        .iter()
+        .map(|sat| {
+            sources[base_idx]
+                .header
+                .satellites
+                .iter()
+                .position(|base_sat| base_sat == sat)
+                .and_then(|idx| {
+                    sources[base_idx]
+                        .header
+                        .satellite_accuracy_codes
+                        .get(idx)
+                        .copied()
+                })
+                .unwrap_or(0)
+        })
+        .collect();
+
+    let header = Sp3Header {
+        num_epochs: out_epochs.len() as u64,
+        satellites,
+        satellite_accuracy_codes,
+        data_type: Sp3DataType::Position,
+        gnss_week: first_epoch_header.gnss_week,
+        seconds_of_week: first_epoch_header.seconds_of_week,
+        epoch_interval_s,
+        mjd: first_epoch_header.mjd,
+        mjd_fraction: first_epoch_header.mjd_fraction,
+        ..sources[base_idx].header.clone()
+    };
+
+    let mandatory_header_lines = 5.max(header.satellites.len().div_ceil(17));
+    let declared_satellite_tokens = header
+        .satellites
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let epoch_position_tokens = vec![declared_satellite_tokens.clone(); out_epochs.len()];
+    let epoch_state_record_sequence = epoch_position_tokens
+        .iter()
+        .map(|tokens| {
+            tokens
+                .iter()
+                .cloned()
+                .map(|token| ('P', token))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let merged = Sp3 {
+        header,
+        epochs: out_epochs,
+        declared_num_epochs: out_epoch_j2000_s.len() as u64,
+        declared_start_j2000_s: out_epoch_j2000_s.first().copied(),
+        terminal_record: TerminalRecordState::valid(),
+        satellite_header_lines: mandatory_header_lines,
+        accuracy_header_lines: mandatory_header_lines,
+        time_system_header_lines: 2,
+        float_header_lines: 2,
+        integer_header_lines: 2,
+        header_comment_lines: 4,
+        declared_satellite_count: Some(declared_satellite_tokens.len()),
+        declared_satellite_tokens,
+        epoch_velocity_tokens: vec![Vec::new(); epoch_position_tokens.len()],
+        epoch_position_tokens,
+        epoch_state_record_sequence,
+        epoch_j2000_s: out_epoch_j2000_s,
+        states: out_states,
+        interp_raw: out_raw,
+        comments: vec![format!("MERGED from {} SP3 products", sources.len())],
+        skipped_records: sources.iter().map(|s| s.skipped_records).sum(),
+    };
+
+    if let Some(continuity_options) = opts.verify_continuity.as_ref() {
+        report.continuity = Some(verify_merged_continuity(
+            &merged,
+            continuity_options,
+            &continuity_selection,
+        ));
+    }
+
+    Ok((merged, report))
+}
+
+struct PreparedMergeInputs {
+    sources: Vec<Sp3>,
+    frame_reconciliations: Vec<Sp3FrameReconciliation>,
+}
+
+struct MergeCellOutput {
+    out_epochs: Vec<Instant>,
+    out_epoch_j2000_s: Vec<f64>,
+    out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
+    out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
+    all_sats: BTreeSet<GnssSatelliteId>,
+    report: MergeReport,
+    continuity_selection: BTreeMap<(GnssSatelliteId, i64), CellSelection>,
+}
+
+/// Consume ordered merge timing data and emit every accepted epoch/satellite cell,
+/// preserving consensus, provenance, report, and native interpolation values.
+fn emit_merge_cells(
+    sources: &[Sp3],
+    opts: &MergeOptions,
+    timing: &MergeTiming,
+    frame_reconciliations: Vec<Sp3FrameReconciliation>,
+) -> MergeCellOutput {
+    let epoch_index = timing.epoch_index.as_slice();
+    let epoch_keys = &timing.epoch_keys;
+    let clock_offset = timing.clock_offset.as_slice();
 
     let precedence_source_for_sat = if opts.combine == MergeCombine::Precedence
         && opts.precedence_scope == MergePrecedenceScope::SatelliteArc
@@ -1008,7 +1156,7 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
     };
     let mut all_sats: BTreeSet<GnssSatelliteId> = BTreeSet::new();
 
-    for (&key, &epoch) in &epoch_keys {
+    for (&key, &epoch) in epoch_keys {
         out_epochs.push(epoch);
         out_epoch_j2000_s.push(key as f64);
         let mut states: BTreeMap<GnssSatelliteId, Sp3State> = BTreeMap::new();
@@ -1374,88 +1522,6 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
         out_raw.push(raws);
     }
 
-    // Base the non-epoch metadata on a source product, but derive the first-epoch
-    // header fields from the merged grid itself. Mixed cadence / coverage can make
-    // the merged first epoch later than every input's first epoch, so cloning
-    // those fields from any input would make the `##` line stale.
-    let first_key = Some(out_epoch_j2000_s[0].floor() as i64);
-    let base_idx = sources
-        .iter()
-        .position(|s| {
-            s.epochs
-                .first()
-                .and_then(|ep| sp3_epoch_j2000_seconds(s, 0, ep))
-                .map(|sec| sec.floor() as i64)
-                == first_key
-        })
-        .or_else(|| {
-            sources
-                .iter()
-                .enumerate()
-                .filter_map(|(i, s)| {
-                    s.epochs
-                        .first()
-                        .and_then(|ep| sp3_epoch_j2000_seconds(s, 0, ep))
-                        .map(|sec| (sec, i))
-                })
-                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)))
-                .map(|(_, i)| i)
-        })
-        .unwrap_or(0);
-    let first_epoch_header = first_epoch_header_fields(&out_epochs[0]).ok_or_else(|| {
-        Error::InvalidInput("merged SP3 first epoch cannot be represented in header fields".into())
-    })?;
-
-    let satellites: Vec<_> = all_sats.into_iter().collect();
-    let satellite_accuracy_codes = satellites
-        .iter()
-        .map(|sat| {
-            sources[base_idx]
-                .header
-                .satellites
-                .iter()
-                .position(|base_sat| base_sat == sat)
-                .and_then(|idx| {
-                    sources[base_idx]
-                        .header
-                        .satellite_accuracy_codes
-                        .get(idx)
-                        .copied()
-                })
-                .unwrap_or(0)
-        })
-        .collect();
-
-    let header = Sp3Header {
-        num_epochs: out_epochs.len() as u64,
-        satellites,
-        satellite_accuracy_codes,
-        data_type: Sp3DataType::Position,
-        gnss_week: first_epoch_header.gnss_week,
-        seconds_of_week: first_epoch_header.seconds_of_week,
-        epoch_interval_s,
-        mjd: first_epoch_header.mjd,
-        mjd_fraction: first_epoch_header.mjd_fraction,
-        ..sources[base_idx].header.clone()
-    };
-
-    let mandatory_header_lines = 5.max(header.satellites.len().div_ceil(17));
-    let declared_satellite_tokens = header
-        .satellites
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    let epoch_position_tokens = vec![declared_satellite_tokens.clone(); out_epochs.len()];
-    let epoch_state_record_sequence = epoch_position_tokens
-        .iter()
-        .map(|tokens| {
-            tokens
-                .iter()
-                .cloned()
-                .map(|token| ('P', token))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
     report.provenance = opts.provenance.map(|mode| MergeProvenance {
         mode,
         cells: prov_cells,
@@ -1472,44 +1538,15 @@ pub fn merge(sources: &[Sp3], opts: &MergeOptions) -> Result<(Sp3, MergeReport)>
             .collect(),
     });
 
-    let merged = Sp3 {
-        header,
-        epochs: out_epochs,
-        declared_num_epochs: out_epoch_j2000_s.len() as u64,
-        declared_start_j2000_s: out_epoch_j2000_s.first().copied(),
-        terminal_record: TerminalRecordState::valid(),
-        satellite_header_lines: mandatory_header_lines,
-        accuracy_header_lines: mandatory_header_lines,
-        time_system_header_lines: 2,
-        float_header_lines: 2,
-        integer_header_lines: 2,
-        header_comment_lines: 4,
-        declared_satellite_count: Some(declared_satellite_tokens.len()),
-        declared_satellite_tokens,
-        epoch_velocity_tokens: vec![Vec::new(); epoch_position_tokens.len()],
-        epoch_position_tokens,
-        epoch_state_record_sequence,
-        epoch_j2000_s: out_epoch_j2000_s,
-        states: out_states,
-        interp_raw: out_raw,
-        comments: vec![format!("MERGED from {} SP3 products", sources.len())],
-        skipped_records: sources.iter().map(|s| s.skipped_records).sum(),
-    };
-
-    if let Some(continuity_options) = opts.verify_continuity.as_ref() {
-        report.continuity = Some(verify_merged_continuity(
-            &merged,
-            continuity_options,
-            &continuity_selection,
-        ));
+    MergeCellOutput {
+        out_epochs,
+        out_epoch_j2000_s,
+        out_states,
+        out_raw,
+        all_sats,
+        report,
+        continuity_selection,
     }
-
-    Ok((merged, report))
-}
-
-struct PreparedMergeInputs {
-    sources: Vec<Sp3>,
-    frame_reconciliations: Vec<Sp3FrameReconciliation>,
 }
 
 struct MergeTiming {
