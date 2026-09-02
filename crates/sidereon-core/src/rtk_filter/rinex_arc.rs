@@ -27,8 +27,15 @@ const DEFAULT_MIN_COMMON_SATELLITES: usize = 4;
 /// One single-frequency code/carrier pair to extract from RINEX observations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtkRinexSignalPair {
+    /// Constellation whose RINEX observations this pair can select. The builder
+    /// groups pairs by this [`GnssSystem`] value and skips satellites from other
+    /// constellations.
     pub system: GnssSystem,
+    /// Full RINEX code observable whose present value supplies the pseudorange in
+    /// meters and the satellite transmit-time correction.
     pub code_observable: String,
+    /// Full RINEX carrier-phase observable whose present value is read in cycles
+    /// and converted to meters using its carrier frequency; its LLI is retained.
     pub phase_observable: String,
 }
 
@@ -46,6 +53,9 @@ impl RtkRinexSignalPair {
 /// Options for building single-frequency RTK arc records from RINEX.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtkRinexArcOptions {
+    /// Signal choices grouped by constellation and tried in vector order. For
+    /// each satellite, the first pair with both values present is used; an empty
+    /// vector returns [`RtkRinexArcError::NoSignalPairs`].
     pub signal_pairs: Vec<RtkRinexSignalPair>,
     /// Optional cap on base epochs considered, in file order.
     pub max_epochs: Option<usize>,
@@ -71,21 +81,37 @@ impl RtkRinexArcOptions {
 /// sequential and static RTK arc solvers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkRinexArc {
+    /// Output [`RtkArcEpoch`] records in considered base-RINEX order. Each retains
+    /// paired base/rover records only for satellites with receive-time,
+    /// base-transmit-time, and rover-transmit-time positions.
     pub epochs: Vec<RtkArcEpoch>,
     /// Carrier wavelength per single-difference ambiguity id, metres.
     pub wavelengths_m: BTreeMap<String, f64>,
     /// Code-to-phase metre offsets per single-difference ambiguity id.
     pub offsets_m: BTreeMap<String, f64>,
+    /// Number of considered base epochs omitted because the rover civil-time key
+    /// was absent or too few usable satellites remained.
     pub skipped_epoch_count: usize,
 }
 
 /// One dual-frequency code/carrier selection for one constellation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtkRinexDualSignalPair {
+    /// Constellation whose RINEX observations this pair can select. The builder
+    /// groups pairs by this [`GnssSystem`] value and skips satellites from other
+    /// constellations.
     pub system: GnssSystem,
+    /// Full RINEX code observable supplying the first-frequency pseudorange in
+    /// meters when its row has a value.
     pub code1_observable: String,
+    /// Full RINEX carrier-phase observable supplying the first-frequency phase in
+    /// cycles and its carrier frequency when both are available.
     pub phase1_observable: String,
+    /// Full RINEX code observable supplying the second-frequency pseudorange in
+    /// meters when its row has a value.
     pub code2_observable: String,
+    /// Full RINEX carrier-phase observable supplying the second-frequency phase
+    /// in cycles and its carrier frequency when both are available.
     pub phase2_observable: String,
 }
 
@@ -105,6 +131,9 @@ impl RtkRinexDualSignalPair {
 /// Options for building dual-frequency RTK arc records from RINEX.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RtkRinexDualArcOptions {
+    /// Four-observable choices grouped by constellation and tried in vector order.
+    /// For each satellite, the first pair with all four values present is used;
+    /// an empty vector returns [`RtkRinexArcError::NoSignalPairs`].
     pub signal_pairs: Vec<RtkRinexDualSignalPair>,
     /// Optional cap on base epochs considered, in file order.
     pub max_epochs: Option<usize>,
@@ -129,27 +158,46 @@ impl RtkRinexDualArcOptions {
 /// Dual-frequency arc records for wide-lane and ionosphere-free RTK paths.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkRinexDualFrequencyArc {
+    /// Output [`RtkDualFrequencyArcEpoch`] records in considered base-RINEX order,
+    /// including their paired observations and receive/transmit-time satellite
+    /// positions.
     pub epochs: Vec<RtkDualFrequencyArcEpoch>,
+    /// Number of considered base epochs omitted because the rover civil-time key
+    /// was absent or too few usable dual-frequency satellites remained.
     pub skipped_epoch_count: usize,
 }
 
 /// Failure while building RTK arc records from RINEX.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtkRinexArcError {
+    /// An option or satellite identifier failed the builder's input checks.
     InvalidInput {
+        /// Name of the rejected input: `min_common_satellites` or `satellite_id`.
         field: &'static str,
+        /// Static reason for rejection: `must be positive` or `invalid satellite token`.
         reason: &'static str,
     },
+    /// RINEX observation extraction or carrier-frequency lookup failed.
     Observation(crate::Error),
+    /// An ephemeris lookup failed for a reason other than an unavailable state
+    /// gap; gap results instead make the satellite unavailable for that epoch.
     Ephemeris {
+        /// Satellite token used in the failed state lookup.
         satellite_id: String,
+        /// Seconds since J2000 passed to the failed state lookup.
         epoch_j2000_s: f64,
+        /// Display text from the ephemeris source error.
         reason: String,
     },
+    /// No signal pair was supplied in the single- or dual-frequency options.
     NoSignalPairs,
+    /// No considered base epoch met the configured usable-satellite threshold.
     NoUsableEpochs,
+    /// A selected phase observable has no carrier frequency in its RINEX context.
     MissingFrequency {
+        /// Satellite token for the missing carrier frequency.
         satellite_id: String,
+        /// Full RINEX phase observable code whose frequency is missing.
         observable_code: String,
     },
 }
