@@ -91,7 +91,6 @@ impl CovarianceBlock {
     /// `cov` and `invert` are reused scratch buffers, so steady-state folds do not
     /// allocate. NOT a Sherman-Morrison structured inverse: the kernel reproduces
     /// the reference's exact floating-point order for the 0-ULP trace gate.
-    #[allow(clippy::needless_range_loop)]
     pub(crate) fn inverse_into(
         &self,
         m: usize,
@@ -158,7 +157,6 @@ impl CovarianceBlock {
     ///   η[i]      += Σ_a h_a[i]·r_inv_y[a]
     /// The grouping (inner b-sum, then ·h_a[i], then accumulate over a) must match
     /// exactly - a per-(a,b) form rounds differently and breaks the 0-ULP trace gate.
-    #[allow(clippy::needless_range_loop)]
     pub(crate) fn fold_block_into(
         &self,
         block: &impl CorrelatedBlock,

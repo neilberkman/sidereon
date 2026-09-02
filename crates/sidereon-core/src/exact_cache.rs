@@ -326,7 +326,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::*;
-    use fs2::FileExt;
     use std::fs::{self, File, OpenOptions};
     use std::io::{ErrorKind, Write};
     use std::path::{Path, PathBuf};
@@ -600,7 +599,7 @@ mod native {
 
     impl Drop for ExactCacheGuard {
         fn drop(&mut self) {
-            let _ = FileExt::unlock(&self.lock_file);
+            let _ = self.lock_file.unlock();
         }
     }
 
@@ -774,21 +773,25 @@ mod native {
                 .checked_add(timeout)
                 .ok_or(ExactCacheError::LockTimeout)?;
             loop {
-                match lock_file.try_lock_exclusive() {
+                match lock_file.try_lock() {
                     Ok(()) => {
                         return Ok(ExactCacheGuard {
                             lock_file,
                             stable_path: self.stable_path.clone(),
                         });
                     }
-                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
-                        let now = Instant::now();
-                        if now >= deadline {
-                            return Err(ExactCacheError::LockTimeout);
+                    Err(error) => {
+                        let source: std::io::Error = error.into();
+                        if source.kind() == ErrorKind::WouldBlock {
+                            let now = Instant::now();
+                            if now >= deadline {
+                                return Err(ExactCacheError::LockTimeout);
+                            }
+                            thread::sleep((deadline - now).min(Duration::from_millis(10)));
+                        } else {
+                            return Err(io("lock", source));
                         }
-                        thread::sleep((deadline - now).min(Duration::from_millis(10)));
                     }
-                    Err(source) => return Err(io("lock", source)),
                 }
             }
         }

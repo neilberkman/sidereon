@@ -1011,7 +1011,6 @@ fn protection_position_covariance_with_ztd(
     ])
 }
 
-#[allow(clippy::needless_range_loop)]
 fn rotate_position_covariance_to_enu(q: &[[f64; 3]; 3], receiver: Wgs84Geodetic) -> [[f64; 3]; 3] {
     let sphi = libm::sin(receiver.lat_rad);
     let cphi = libm::cos(receiver.lat_rad);

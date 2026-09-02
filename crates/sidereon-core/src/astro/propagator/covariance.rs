@@ -907,7 +907,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::needless_range_loop)]
     fn long_arc_j2_drag_covariance_stays_symmetric_psd_and_bounded() {
         let radius = 6878.137_f64;
         let velocity = (MU_EARTH / radius).sqrt();
@@ -1022,7 +1021,6 @@ mod tests {
         matrix
     }
 
-    #[allow(clippy::needless_range_loop)]
     fn covariance_from_lower(lower: Mat6) -> Covariance6 {
         let mut matrix = [[0.0_f64; 6]; 6];
         for i in 0..6 {
@@ -1081,7 +1079,6 @@ mod tests {
         jacobian
     }
 
-    #[allow(clippy::needless_range_loop)]
     fn covariance_through_jacobian(covariance: Covariance6, jacobian: &Mat6) -> Covariance6 {
         let mut temp = [[0.0_f64; 6]; 6];
         for i in 0..6 {
@@ -1169,7 +1166,6 @@ mod tests {
         CartesianState::new(rng.range_f64(-100.0, 100.0), position, velocity)
     }
 
-    #[allow(clippy::needless_range_loop)]
     fn random_spd_covariance(rng: &mut SplitMix64) -> Covariance6 {
         let mut lower = [[0.0_f64; 6]; 6];
         for i in 0..6 {
@@ -1192,7 +1188,6 @@ mod tests {
         (a, b)
     }
 
-    #[allow(clippy::needless_range_loop)]
     fn linear_covariance_midpoint(a: &Covariance6, b: &Covariance6) -> Covariance6 {
         let mut matrix = [[0.0_f64; 6]; 6];
         for i in 0..6 {

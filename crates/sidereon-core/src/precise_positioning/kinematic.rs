@@ -550,7 +550,6 @@ fn validate_covariance_positive_semidefinite(
     }
 }
 
-#[allow(clippy::needless_range_loop)]
 fn covariance_is_positive_semidefinite(covariance_m2: &[Vec<f64>]) -> bool {
     let dimension = covariance_m2.len();
     let tolerance = covariance_psd_tolerance(covariance_m2);
@@ -1085,7 +1084,6 @@ fn inflate_covariance(
     }
 }
 
-#[allow(clippy::needless_range_loop)]
 fn symmetrize(covariance_m2: &mut [Vec<f64>]) {
     for row in 0..covariance_m2.len() {
         for col in 0..row {
@@ -1460,7 +1458,6 @@ mod tests {
         covariance_m2
     }
 
-    #[allow(clippy::needless_range_loop)]
     fn is_psd(covariance_m2: &[Vec<f64>]) -> bool {
         let n = covariance_m2.len();
         let mut lower = vec![vec![0.0; n]; n];

@@ -30,6 +30,7 @@ use crate::astro::sgp4::{
 use crate::astro::time::civil::civil_from_julian_day_number;
 use crate::astro::time::scales::{julian_day_number, TimeScales};
 use crate::validate;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 const UNIX_EPOCH_JDN: i64 = 2_440_588;
@@ -345,6 +346,8 @@ pub fn look_angle_arc(
 /// (the first propagation error in a satellite's arc becomes that element's
 /// `Err`). This is the single-threaded reference the parallel
 /// [`propagate_teme_batch_parallel`] is proven bit-identical against.
+/// When `parallel` is disabled, the parallel entry point is equivalent to this
+/// serial iterator.
 pub fn propagate_teme_batch_serial(
     satellites: &[Satellite],
     datetimes: &[UtcInstant],
@@ -369,8 +372,11 @@ pub fn propagate_teme_batch_parallel(
     satellites: &[Satellite],
     datetimes: &[UtcInstant],
 ) -> Vec<Result<Vec<Prediction>, Sgp4Error>> {
+    #[cfg(feature = "parallel")]
+    let satellites = satellites.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let satellites = satellites.iter();
     satellites
-        .par_iter()
         .map(|satellite| propagate_teme_arc(satellite, datetimes))
         .collect()
 }
@@ -381,6 +387,8 @@ pub fn propagate_teme_batch_parallel(
 /// Element `i` is the look-angle arc for `satellites[i]` from `ground_station`,
 /// exactly as [`look_angle_arc`] would produce it. The serial reference for
 /// [`look_angle_batch_parallel`].
+/// When `parallel` is disabled, the parallel entry point is equivalent to this
+/// serial iterator.
 pub fn look_angle_batch_serial(
     satellites: &[Satellite],
     ground_station: GroundStation,
@@ -403,8 +411,11 @@ pub fn look_angle_batch_parallel(
     ground_station: GroundStation,
     datetimes: &[UtcInstant],
 ) -> Vec<Result<Vec<LookAngle>, LookAngleError>> {
+    #[cfg(feature = "parallel")]
+    let satellites = satellites.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let satellites = satellites.iter();
     satellites
-        .par_iter()
         .map(|satellite| look_angle_arc(satellite, ground_station, datetimes))
         .collect()
 }
@@ -942,6 +953,8 @@ pub fn find_passes_with_opsmode(
 /// independently with the same per-satellite robust step used by
 /// [`find_passes`]. Invalid element sets produce `Ok(Vec::new())`, matching
 /// [`find_passes`].
+/// When `parallel` is disabled, the parallel entry point is equivalent to this
+/// serial iterator.
 pub fn find_passes_batch_serial(
     elements: &[ElementSet],
     ground_station: GroundStation,
@@ -962,6 +975,8 @@ pub fn find_passes_batch_serial(
 /// [`find_passes_batch_serial`] with an explicit SGP4 [`OpsMode`] (see
 /// [`find_passes_with_opsmode`] for why the bare function uses
 /// [`OpsMode::Afspc`]).
+/// When `parallel` is disabled, the parallel entry point is equivalent to this
+/// serial implementation.
 pub fn find_passes_batch_serial_with_opsmode(
     elements: &[ElementSet],
     ground_station: GroundStation,
@@ -1492,18 +1507,23 @@ fn find_passes_batch_for_satellites_validated(
                 )
             })
             .collect(),
-        PassBatchMode::Parallel => satellites
-            .par_iter()
-            .map(|satellite| {
-                find_passes_for_satellite_validated(
-                    satellite,
-                    ground_station,
-                    start_time,
-                    end_time,
-                    options,
-                )
-            })
-            .collect(),
+        PassBatchMode::Parallel => {
+            #[cfg(feature = "parallel")]
+            let satellites = satellites.par_iter();
+            #[cfg(not(feature = "parallel"))]
+            let satellites = satellites.iter();
+            satellites
+                .map(|satellite| {
+                    find_passes_for_satellite_validated(
+                        satellite,
+                        ground_station,
+                        start_time,
+                        end_time,
+                        options,
+                    )
+                })
+                .collect()
+        }
     }
 }
 
@@ -3137,12 +3157,16 @@ mod tests {
             .iter()
             .any(|result| result.as_ref().is_ok_and(|passes| !passes.is_empty())));
 
-        let single = find_passes(&element_sets[0], station, start, end, options)
-            .expect("single pass finder succeeds");
-        let batch_first = serial[0].as_ref().expect("serial batch element succeeds");
-        assert_eq!(batch_first.len(), single.len());
-        for (batch_pass, single_pass) in batch_first.iter().zip(&single) {
-            assert_pass_close(batch_pass, single_pass, 1_000, 1.0e-6);
+        for (index, (batch_result, elements)) in serial.iter().zip(&element_sets).enumerate() {
+            let single = find_passes(elements, station, start, end, options)
+                .expect("single pass finder succeeds");
+            let batch = batch_result
+                .as_ref()
+                .expect("serial batch element succeeds");
+            assert_eq!(
+                batch, &single,
+                "serial batch element {index} differs from the public per-item function"
+            );
         }
     }
 

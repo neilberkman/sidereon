@@ -48,6 +48,8 @@ mod vallado;
 
 use crate::astro::tle;
 use crate::validate::{self, FieldError};
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 use thiserror::Error;
 
 pub use fit::{
@@ -678,9 +680,11 @@ pub fn propagate_batch_parallel(
     satellites: &[Satellite],
     times: &[MinutesSinceEpoch],
 ) -> Vec<Result<Vec<Prediction>, Error>> {
-    use rayon::prelude::*;
+    #[cfg(feature = "parallel")]
+    let satellites = satellites.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let satellites = satellites.iter();
     satellites
-        .par_iter()
         .map(|satellite| propagate_arc(satellite, times))
         .collect()
 }
@@ -1502,6 +1506,9 @@ mod tests {
             let p = parallel[sat_idx].as_ref().expect("parallel arc ok");
             assert_eq!(s.len(), p.len());
             for epoch_idx in 0..times.len() {
+                let single = satellites[sat_idx]
+                    .propagate(times[epoch_idx])
+                    .expect("single-satellite propagation ok");
                 for axis in 0..3 {
                     assert_eq!(
                         s[epoch_idx].position[axis].to_bits(),
@@ -1509,9 +1516,19 @@ mod tests {
                         "position bits sat {sat_idx} epoch {epoch_idx} axis {axis}"
                     );
                     assert_eq!(
+                        p[epoch_idx].position[axis].to_bits(),
+                        single.position[axis].to_bits(),
+                        "parallel position vs per-item sat {sat_idx} epoch {epoch_idx} axis {axis}"
+                    );
+                    assert_eq!(
                         s[epoch_idx].velocity[axis].to_bits(),
                         p[epoch_idx].velocity[axis].to_bits(),
                         "velocity bits sat {sat_idx} epoch {epoch_idx} axis {axis}"
+                    );
+                    assert_eq!(
+                        p[epoch_idx].velocity[axis].to_bits(),
+                        single.velocity[axis].to_bits(),
+                        "parallel velocity vs per-item sat {sat_idx} epoch {epoch_idx} axis {axis}"
                     );
                 }
             }

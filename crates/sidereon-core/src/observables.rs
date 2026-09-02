@@ -28,6 +28,7 @@ use crate::spp::EphemerisSource;
 use crate::tropo::{tropo_mapping, tropo_zenith, MappingModel, Met, TropoModel};
 use crate::validate;
 use crate::Error;
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 const FD_HALF_S: f64 = 0.5;
@@ -1286,8 +1287,11 @@ pub fn predict_batch_parallel(
     requests: &[PredictRequest],
     options: PredictOptions,
 ) -> Vec<Result<PredictedObservables, ObservablesError>> {
+    #[cfg(feature = "parallel")]
+    let requests = requests.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let requests = requests.iter();
     requests
-        .par_iter()
         .map(|&(sat, receiver_ecef_m, t_rx_j2000_s)| {
             predict(source, sat, receiver_ecef_m, t_rx_j2000_s, options)
         })
@@ -1303,8 +1307,11 @@ pub fn predict_batch_with_media_parallel(
     requests: &[PredictRequest],
     options: MediaPredictOptions<'_>,
 ) -> Vec<Result<MediaPredictedObservables, ObservablesError>> {
+    #[cfg(feature = "parallel")]
+    let requests = requests.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let requests = requests.iter();
     requests
-        .par_iter()
         .map(|&(sat, receiver_ecef_m, t_rx_j2000_s)| {
             predict_with_media(source, sat, receiver_ecef_m, t_rx_j2000_s, options)
         })
@@ -2952,11 +2959,14 @@ mod tests {
         let serial = predict_batch(&source, &requests, options);
         let parallel = predict_batch_parallel(&source, &requests, options);
         assert_eq!(serial.len(), parallel.len());
-        for (s, p) in serial.iter().zip(parallel.iter()) {
-            match (s, p) {
-                (Ok(a), Ok(b)) => assert_observables_bits_eq(a, b),
+        for (i, (&(sat, receiver_ecef_m, t_rx_j2000_s), p)) in
+            requests.iter().zip(parallel.iter()).enumerate()
+        {
+            let scalar = predict(&source, sat, receiver_ecef_m, t_rx_j2000_s, options);
+            match (p, &scalar) {
+                (Ok(batch), Ok(single)) => assert_observables_bits_eq(batch, single),
                 (Err(_), Err(_)) => {}
-                _ => panic!("serial and parallel batch disagree on Ok/Err"),
+                _ => panic!("parallel batch and scalar prediction {i} disagree on Ok/Err"),
             }
         }
     }

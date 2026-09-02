@@ -3,6 +3,7 @@ name = "sidereon"
 version = "1.4.1"
 authors = []
 edition = "2021"
+rust-version = "1.89"
 description = "Thin ergonomic API over sidereon-core: SP3 loading and SPP/RTK/PPP positioning solves with rich result structs and one error enum"
 license = "MIT"
 readme = "README.md"

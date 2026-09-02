@@ -6,9 +6,8 @@
 //! positioning, RTK/PPP, ionosphere/troposphere, DOP).
 //!
 //! - The propagation/astro layer is always present under the [`astro`] module.
-//! - The GNSS layer lives behind the default-on `gnss` cargo feature, so a
-//!   propagation-only consumer can build with `--no-default-features` (plus
-//!   any astro features it wants) and never compile the IONEX/SP3 parsers.
+//! - The GNSS layer is always present alongside the propagation layer; this is
+//!   one complete crate rather than a propagation-only feature split.
 //!
 //! The GNSS façade is organized by user-facing tasks:
 //!
@@ -34,9 +33,9 @@
 //!
 //! ## Units policy (internal representation)
 //!
-//! All quantities are stored and computed in **SI base units**, with the frame
-//! and datum encoded in the type name (per the spec's frames-in-the-type-system
-//! rule), never hidden behind a bare `position_m`:
+//! All quantities are stored and computed in **SI base units**. Georeferenced
+//! quantities carry their frame and datum in the type name; frameless
+//! solver-space quantities may use a bare `position_m`:
 //!
 //! - **Length / position:** meters (`_m`). SP3 positions are ITRF/IGS-frame
 //!   ECEF meters; SPP receiver positions are WGS84/ITRF-compatible ECEF meters.
@@ -53,6 +52,8 @@
 //! Field and parameter names carry the unit suffix so the unit is visible at
 //! every call site. Matrix/vector linear algebra uses `nalgebra`
 //! (`DMatrix`/`DVector`) per the spec.
+
+#![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate self as sidereon_core;
 
@@ -73,8 +74,8 @@ pub(crate) mod format;
 pub use artifact_bytes::DigestProvenance;
 
 // ---------------------------------------------------------------------------
-// GNSS domain layer. Behind the default-on `gnss` feature so a propagation-only
-// consumer can opt out. Additional product modules are added as each lands.
+// GNSS domain layer. Always present in this complete engine crate. Additional
+// product modules are added as each lands.
 // ---------------------------------------------------------------------------
 
 mod ambiguity; // shared RTK/PPP cycle-slip policy + wide-lane/narrow-lane prep
@@ -99,7 +100,7 @@ pub mod has; // Galileo HAS MT1 correction payload decode/encode
 mod ionex; // Klobuchar broadcast model + IONEX ionospheric maps
 pub mod navigation; // navigation-message bit-level codecs (GPS LNAV)
 pub mod nmea; // NMEA 0183 sentence parsing, stream grouping, and GGA writing
-pub mod ntrip; // NTRIP client sans-I/O request, response, and stream handling
+pub mod ntrip; // NTRIP network-protocol request, response, and stream handling
 pub mod observables; // forward GNSS observable prediction
 pub mod ppp_corrections; // static-arc PPP correction tables
 pub mod precise_positioning; // static multi-epoch PPP float solve

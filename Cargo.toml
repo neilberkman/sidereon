@@ -2,8 +2,8 @@
 #
 # The complete engine is folded into the single `sidereon-core` crate at
 # `crates/sidereon-core/`: it exposes the astrodynamics propagation core (always
-# present, under the `astro` module) plus the GNSS domain layer (behind a
-# default-on `gnss` feature). `trust-region-least-squares` is a standalone,
+# present, under the `astro` module) plus the always-present GNSS domain layer.
+# `trust-region-least-squares` is a standalone,
 # publishable general-purpose solver crate that lives here but does not depend on
 # the engine; `sidereon-core`'s own GNSS-tuned least-squares lives inside the
 # engine and is intentionally separate (see the module docs at
@@ -13,7 +13,17 @@
 resolver = "2"
 members = ["crates/*"]
 
-# Shared dependency versions for all members. `nalgebra` is pinned here so the
-# engine crate resolves to a single linear-algebra version.
+# Shared dependency versions for all members. The exact `nalgebra` pin is part
+# of the engine's bit-exact algorithm contract: update it only with a deliberate
+# re-pinning release.
 [workspace.dependencies]
-nalgebra = "0.33"
+# The decomposition and dynamic-product operation order is part of the numerical
+# identity claim, so this dependency is intentionally pinned exactly.
+nalgebra = "=0.33.3"
+# `nalgebra`'s scalar-operation dispatch depends on `simba`; pin the companion
+# version so an upgrade cannot change the algorithm through a transitive seam.
+simba = "=0.9.1"
+
+[workspace.lints.clippy]
+# Indexed loops state operation order explicitly in bit-exact numeric code.
+needless_range_loop = "allow"
