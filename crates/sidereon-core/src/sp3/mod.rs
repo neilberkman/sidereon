@@ -1508,8 +1508,6 @@ fn next_field<T: std::str::FromStr>(
         .map_err(|_| Error::Parse(format!("SP3 {what} {tok:?} unparsable")))
 }
 
-// invariant: merge is maintained by another lane and has its own internal checks.
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod combine;
 mod continuity;
 mod exact;
