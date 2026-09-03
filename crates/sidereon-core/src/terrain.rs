@@ -25,13 +25,24 @@ const MAX_LOOKUP_LONGITUDE_DEG: f64 = 180.0;
 pub enum DtedTileError {
     /// The tile could not be read from disk.
     #[error("{path}: {message}")]
-    Io { path: String, message: String },
+    Io {
+        /// Display string of the path passed to [`DtedTile::from_path`].
+        path: String,
+        /// Text returned by the underlying filesystem read error.
+        message: String,
+    },
     /// The tile does not contain the fixed DTED header area.
     #[error("{path} is too short for DTED headers")]
-    TooShort { path: String },
+    TooShort {
+        /// Display string of the path passed to [`DtedTile::from_path`].
+        path: String,
+    },
     /// The tile does not start with the DTED UHL1 marker.
     #[error("{path} missing UHL1 header")]
-    MissingUhl1 { path: String },
+    MissingUhl1 {
+        /// Display string of the path passed to [`DtedTile::from_path`].
+        path: String,
+    },
     /// A fixed-width field was not valid UTF-8.
     #[error("{0}")]
     InvalidEncoding(String),
@@ -43,39 +54,57 @@ pub enum DtedTileError {
         "{path} has invalid DTED dimensions lon_count={lon_count} lat_count={lat_count}; both must be at least 2"
     )]
     InvalidDimensions {
+        /// Display string of the path passed to [`DtedTile::from_path`].
         path: String,
+        /// Longitude block count parsed from header bytes `47..51`.
         lon_count: usize,
+        /// Latitude posting count parsed from header bytes `51..55`.
         lat_count: usize,
     },
     /// The tile ends before its declared data blocks end.
     #[error("{path} has {actual} bytes but expected at least {expected}")]
     Truncated {
+        /// Display string of the path passed to [`DtedTile::from_path`].
         path: String,
+        /// Total number of bytes returned by `fs::read`.
         actual: usize,
+        /// Minimum length computed from the fixed data offset and declared blocks.
         expected: usize,
     },
     /// A query is outside this tile's one-degree extent.
     #[error("point ({longitude},{latitude}) is outside DTED tile ({origin_longitude},{origin_latitude})")]
     Outside {
+        /// Longitude supplied to [`DtedTile::get_elevation`].
         longitude: f64,
+        /// Latitude supplied to [`DtedTile::get_elevation`].
         latitude: f64,
+        /// Parsed tile origin longitude used by the containment check.
         origin_longitude: f64,
+        /// Parsed tile origin latitude used by the containment check.
         origin_latitude: f64,
     },
     /// A rounded query did not map to a declared posting.
     #[error("posting index out of bounds lon={longitude_index} lat={latitude_index}")]
     PostingIndexOutOfBounds {
+        /// Nearest longitude posting index computed from the query offset.
         longitude_index: usize,
+        /// Nearest latitude posting index computed from the query offset.
         latitude_index: usize,
     },
     /// A DTED data block is missing its sentinel byte.
     #[error("DTED block {longitude_index} missing data sentinel")]
-    MissingDataSentinel { longitude_index: usize },
+    MissingDataSentinel {
+        /// Zero-based longitude data-block index whose first byte was not `0xAA`.
+        longitude_index: usize,
+    },
     /// A DTED data block checksum does not match its contents.
     #[error("DTED checksum failed for block {longitude_index}: expected {checksum}, found {sum}")]
     Checksum {
+        /// Zero-based longitude data-block index whose checksum comparison failed.
         longitude_index: usize,
+        /// Signed big-endian `i32` decoded from the block's final four bytes.
         checksum: i32,
+        /// Signed `i32` sum of the bytes before the final four checksum bytes.
         sum: i32,
     },
     /// A coordinate field is empty.
@@ -83,10 +112,16 @@ pub enum DtedTileError {
     EmptyCoordinate,
     /// A coordinate field has an unsupported hemisphere suffix.
     #[error("invalid DTED hemisphere {hemisphere}")]
-    InvalidHemisphere { hemisphere: char },
+    InvalidHemisphere {
+        /// Final coordinate-field character that was not `N`, `E`, `S`, or `W`.
+        hemisphere: char,
+    },
     /// The rounded coordinate is negative and cannot be a posting index.
     #[error("cannot round negative posting index {index}")]
-    NegativePostingIndex { index: i64 },
+    NegativePostingIndex {
+        /// Signed nearest posting index that could not convert to `usize`.
+        index: i64,
+    },
 }
 
 #[cfg(test)]
