@@ -132,24 +132,22 @@ fn instant_at(scale: TimeScale, epoch_j2000_s: i64) -> Instant {
 }
 
 fn fit_options(force_model: ForceModelKind) -> OrbitFitOptions {
-    OrbitFitOptions {
-        force_model,
-        integrator: IntegratorKind::Dp54,
-        integrator_options: IntegratorOptions {
-            abs_tol: 1.0e-12,
-            rel_tol: 1.0e-13,
-            initial_step: 10.0,
-            max_step: 60.0,
-            ..IntegratorOptions::default()
-        },
-        solver_options: SolveOptions {
-            gtol: 1.0e-15,
-            ftol: 1.0e-15,
-            xtol: 1.0e-15,
-            max_nfev: 1200,
-        },
-        ..OrbitFitOptions::default()
-    }
+    let mut integrator_options = IntegratorOptions::default();
+    integrator_options.abs_tol = 1.0e-12;
+    integrator_options.rel_tol = 1.0e-13;
+    integrator_options.initial_step = 10.0;
+    integrator_options.max_step = 60.0;
+    let mut solver_options = SolveOptions::default();
+    solver_options.gtol = 1.0e-15;
+    solver_options.ftol = 1.0e-15;
+    solver_options.xtol = 1.0e-15;
+    solver_options.max_nfev = 1200;
+    let mut options = OrbitFitOptions::default();
+    options.force_model = force_model;
+    options.integrator = IntegratorKind::Dp54;
+    options.integrator_options = integrator_options;
+    options.solver_options = solver_options;
+    options
 }
 
 fn assert_matrix_near(label: &str, actual: &Mat3, expected: &Mat3, tolerance: f64) {
@@ -363,9 +361,10 @@ fn propagation_default_bits_are_unchanged_with_unused_frame_provider() {
         initial: state,
         force_model: ForceModelKind::two_body(),
         integrator: IntegratorKind::Rk4,
-        options: IntegratorOptions {
-            initial_step: 10.0,
-            ..IntegratorOptions::default()
+        options: {
+            let mut options = IntegratorOptions::default();
+            options.initial_step = 10.0;
+            options
         },
         drag: None,
         space_weather: None,

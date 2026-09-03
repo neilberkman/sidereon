@@ -220,12 +220,11 @@ fuzz_target!(|data: &[u8]| {
     );
     assert_ok_finite_or_err("least_squares::cost", cost(&f0));
     let problem = LeastSquaresProblem::new(residual, x0.clone());
-    let opts = SolveOptions {
-        gtol: input.scalars[6],
-        ftol: input.scalars[7],
-        xtol: input.scalars[8],
-        max_nfev: bounded_usize(input.dims[3], 1, 8),
-    };
+    let mut opts = SolveOptions::default();
+    opts.gtol = input.scalars[6];
+    opts.ftol = input.scalars[7];
+    opts.xtol = input.scalars[8];
+    opts.max_nfev = bounded_usize(input.dims[3], 1, 8);
     assert_ok_finite_or_err("least_squares::solve_trf", solve_trf(&problem, &opts));
     assert_ok_finite_or_err(
         "least_squares::solve_trf_with",

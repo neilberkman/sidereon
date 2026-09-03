@@ -184,11 +184,23 @@ pub enum MergePrecedenceScope {
 /// deterministic largest cluster replaces it and the rejected source is
 /// recorded in the merge report.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct OutlierRejectOptions {
     /// Maximum 3D position separation inside the accepted cluster, meters.
     pub position_tolerance_m: f64,
     /// Maximum aligned-clock separation inside the accepted cluster, seconds.
     pub clock_tolerance_s: f64,
+}
+
+impl OutlierRejectOptions {
+    /// Build outlier-rejection settings from both required tolerances.
+    #[must_use]
+    pub const fn new(position_tolerance_m: f64, clock_tolerance_s: f64) -> Self {
+        Self {
+            position_tolerance_m,
+            clock_tolerance_s,
+        }
+    }
 }
 
 /// Options for [`merge`].
@@ -274,6 +286,7 @@ impl Default for MergeOptions {
 
 /// Explicit opt-in rules for reconciling mismatched SP3 coordinate labels.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Sp3FrameReconciliationOptions {
     /// Caller-asserted label sets that may be treated as physically equivalent
     /// without applying any coordinate transform.

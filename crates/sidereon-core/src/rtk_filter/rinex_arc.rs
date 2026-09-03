@@ -52,6 +52,7 @@ impl RtkRinexSignalPair {
 
 /// Options for building single-frequency RTK arc records from RINEX.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RtkRinexArcOptions {
     /// Signal choices grouped by constellation and tried in vector order. For
     /// each satellite, the first pair with both values present is used; an empty
@@ -66,6 +67,22 @@ pub struct RtkRinexArcOptions {
 }
 
 impl RtkRinexArcOptions {
+    /// Build single-frequency RINEX arc options from every selection and limit.
+    #[must_use]
+    pub fn new(
+        signal_pairs: Vec<RtkRinexSignalPair>,
+        max_epochs: Option<usize>,
+        min_common_satellites: usize,
+        include_prediction_time: bool,
+    ) -> Self {
+        Self {
+            signal_pairs,
+            max_epochs,
+            min_common_satellites,
+            include_prediction_time,
+        }
+    }
+
     /// Defaults for the GPS L1 C/A code and carrier path.
     pub fn gps_l1_c() -> Self {
         Self {
@@ -130,6 +147,7 @@ impl RtkRinexDualSignalPair {
 
 /// Options for building dual-frequency RTK arc records from RINEX.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RtkRinexDualArcOptions {
     /// Four-observable choices grouped by constellation and tried in vector order.
     /// For each satellite, the first pair with all four values present is used;
@@ -144,6 +162,22 @@ pub struct RtkRinexDualArcOptions {
 }
 
 impl RtkRinexDualArcOptions {
+    /// Build dual-frequency RINEX arc options from every selection and limit.
+    #[must_use]
+    pub fn new(
+        signal_pairs: Vec<RtkRinexDualSignalPair>,
+        max_epochs: Option<usize>,
+        min_common_satellites: usize,
+        include_prediction_time: bool,
+    ) -> Self {
+        Self {
+            signal_pairs,
+            max_epochs,
+            min_common_satellites,
+            include_prediction_time,
+        }
+    }
+
     /// Defaults for the GPS L1/L2 path used by the real arc fixtures.
     pub fn gps_l1_l2_cw() -> Self {
         Self {

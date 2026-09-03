@@ -302,6 +302,7 @@ pub struct ElevationMaskResult {
 
 /// Wide-lane integer estimation controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct WideLaneOptions {
     /// Positive minimum number of wide-lane samples required to fix an
     /// ambiguity.
@@ -312,6 +313,21 @@ pub struct WideLaneOptions {
     /// When true, short ambiguity fragments are omitted instead of failing. This
     /// is the `:split_arc` policy used by Sidereon after cycle-slip segmentation.
     pub skip_short_fragments: bool,
+}
+
+impl WideLaneOptions {
+    /// Build wide-lane controls from the required sample count and tolerance.
+    ///
+    /// Short fragments are retained by default; assign `skip_short_fragments`
+    /// when the split-arc policy is desired.
+    #[must_use]
+    pub const fn new(min_epochs: usize, tolerance_cycles: f64) -> Self {
+        Self {
+            min_epochs,
+            tolerance_cycles,
+            skip_short_fragments: false,
+        }
+    }
 }
 
 /// Error from dual-frequency wide-lane integer estimation.

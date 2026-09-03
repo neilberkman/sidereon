@@ -92,6 +92,7 @@ pub enum EmissionMediaStatus {
 
 /// Options for [`emission_media_batch_at_j2000_s`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct EmissionMediaBatchOptions<'a> {
     /// Carrier frequency used for ionospheric group delay, hertz.
     pub carrier_hz: f64,
@@ -515,6 +516,7 @@ pub fn is_observable_state_gap(error: &ObservablesError) -> bool {
 
 /// Options controlling observable prediction.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PredictOptions {
     /// Carrier frequency used to scale Doppler, hertz.
     pub carrier_hz: f64,
@@ -526,6 +528,7 @@ pub struct PredictOptions {
 
 /// Options controlling transmit-time satellite-state evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TransmitTimeOptions {
     /// Apply fixed-point light-time / transmit-time correction.
     pub light_time: bool,
@@ -583,6 +586,7 @@ pub enum ObservableIonosphereCorrection<'a> {
 
 /// Optional media corrections for one predicted tracking observable.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct ObservableMediaOptions<'a> {
     /// Neutral-atmosphere slant delay to add to the range, if present.
     pub troposphere: Option<ObservableTroposphereCorrection>,
@@ -620,6 +624,7 @@ impl ObservableMediaOptions<'_> {
 
 /// Prediction options plus optional media corrections.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct MediaPredictOptions<'a> {
     /// Geometry, light-time, Sagnac, and carrier options.
     pub prediction: PredictOptions,
@@ -1321,6 +1326,7 @@ pub fn predict_batch_with_media_parallel(
 /// One batch range-prediction request: the satellite, the static receiver ECEF
 /// position in meters, and the receive epoch in seconds since J2000.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct RangePredictionRequest {
     /// The satellite to range against.
     pub sat: GnssSatelliteId,
@@ -1328,6 +1334,18 @@ pub struct RangePredictionRequest {
     pub receiver_ecef_m: [f64; 3],
     /// Receive epoch, seconds since J2000.
     pub t_rx_j2000_s: f64,
+}
+
+impl RangePredictionRequest {
+    /// Build a range request from its satellite, receiver position, and epoch.
+    #[must_use]
+    pub const fn new(sat: GnssSatelliteId, receiver_ecef_m: [f64; 3], t_rx_j2000_s: f64) -> Self {
+        Self {
+            sat,
+            receiver_ecef_m,
+            t_rx_j2000_s,
+        }
+    }
 }
 
 /// The geometry-only result of one [`predict_ranges`] request.

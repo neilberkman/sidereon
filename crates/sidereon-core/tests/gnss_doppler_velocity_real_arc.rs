@@ -147,11 +147,10 @@ fn pixel5_gsdc_l1_doppler_velocity_arc_stays_within_bars() {
         epochs.len()
     );
 
-    let options = VelocitySolveOptions {
-        observable: VelocityObservable::Doppler,
-        light_time: true,
-        sagnac: true,
-    };
+    let mut options = VelocitySolveOptions::default();
+    options.observable = VelocityObservable::Doppler;
+    options.light_time = true;
+    options.sagnac = true;
     let mut errors = Vec::with_capacity(epochs.len());
     let mut truth_speeds = Vec::with_capacity(epochs.len());
     let mut solved = 0_usize;

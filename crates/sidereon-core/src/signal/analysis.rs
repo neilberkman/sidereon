@@ -176,6 +176,7 @@ pub enum DllProcessing {
 
 /// Inputs for code-tracking thermal-noise figures.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct DllTrackingOptions {
     /// Carrier-to-noise-density ratio, in decibel-hertz.
     pub cn0_db_hz: f64,
@@ -187,6 +188,26 @@ pub struct DllTrackingOptions {
     pub correlator_spacing_chips: f64,
     /// Two-sided receiver bandwidth, in hertz.
     pub receiver_bandwidth_hz: f64,
+}
+
+impl DllTrackingOptions {
+    /// Build DLL thermal-noise inputs from all required signal parameters.
+    #[must_use]
+    pub const fn new(
+        cn0_db_hz: f64,
+        loop_bandwidth_hz: f64,
+        integration_time_s: f64,
+        correlator_spacing_chips: f64,
+        receiver_bandwidth_hz: f64,
+    ) -> Self {
+        Self {
+            cn0_db_hz,
+            loop_bandwidth_hz,
+            integration_time_s,
+            correlator_spacing_chips,
+            receiver_bandwidth_hz,
+        }
+    }
 }
 
 /// Code-tracking thermal-noise result.
@@ -204,6 +225,7 @@ pub struct DllJitter {
 
 /// Inputs for one-path specular multipath envelope metrics.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct MultipathOptions {
     /// Reflected-path amplitude divided by direct-path amplitude, in `[0, 1)`.
     pub multipath_to_direct_ratio: f64,
@@ -211,6 +233,22 @@ pub struct MultipathOptions {
     pub correlator_spacing_chips: f64,
     /// Two-sided receiver bandwidth, in hertz.
     pub receiver_bandwidth_hz: f64,
+}
+
+impl MultipathOptions {
+    /// Build multipath inputs from the path ratio and receiver parameters.
+    #[must_use]
+    pub const fn new(
+        multipath_to_direct_ratio: f64,
+        correlator_spacing_chips: f64,
+        receiver_bandwidth_hz: f64,
+    ) -> Self {
+        Self {
+            multipath_to_direct_ratio,
+            correlator_spacing_chips,
+            receiver_bandwidth_hz,
+        }
+    }
 }
 
 /// Multipath envelope value at one reflected-path delay.

@@ -57,9 +57,21 @@ pub struct PreparedFloatEpoch {
 
 /// Wide-lane and narrow-lane prep controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct WideLanePrepOptions {
     pub min_epochs: usize,
     pub tolerance_cycles: f64,
+}
+
+impl WideLanePrepOptions {
+    /// Build wide-lane preparation controls from both required thresholds.
+    #[must_use]
+    pub const fn new(min_epochs: usize, tolerance_cycles: f64) -> Self {
+        Self {
+            min_epochs,
+            tolerance_cycles,
+        }
+    }
 }
 
 /// Public split-arc metadata for PPP ambiguity segmentation.

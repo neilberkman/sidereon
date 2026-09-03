@@ -298,6 +298,7 @@ pub struct LnavParams {
 
 /// TLM/HOW options accompanying an [`encode`] (defaults applied by the caller).
 #[derive(Clone, Copy, Debug)]
+#[non_exhaustive]
 pub struct LnavOptions {
     /// Integer time-of-week count placed in the 17-bit HOW field of each subframe.
     pub tow: LnavNumber,
@@ -309,6 +310,26 @@ pub struct LnavOptions {
     pub integrity: LnavNumber,
     /// Integer 14-bit TLM message placed after the preamble in each subframe.
     pub tlm_message: LnavNumber,
+}
+
+impl LnavOptions {
+    /// Build TLM/HOW options from every encoded-word input.
+    #[must_use]
+    pub const fn new(
+        tow: LnavNumber,
+        alert: LnavNumber,
+        anti_spoof: LnavNumber,
+        integrity: LnavNumber,
+        tlm_message: LnavNumber,
+    ) -> Self {
+        Self {
+            tow,
+            alert,
+            anti_spoof,
+            integrity,
+            tlm_message,
+        }
+    }
 }
 
 /// Decoded clock and ephemeris parameters (the typed output of [`decode`]). The

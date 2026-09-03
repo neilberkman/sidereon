@@ -1170,10 +1170,9 @@ fn predict_passes_invocation(raw: Value) -> Result<Value> {
         longitude_deg: params.lon_deg,
         altitude_m: params.height_m,
     };
-    let options = PassPredictionOptions {
-        min_elevation_deg: 0.0,
-        step_seconds: 20,
-    };
+    let mut options = PassPredictionOptions::default();
+    options.min_elevation_deg = 0.0;
+    options.step_seconds = 20;
 
     let mut satellites = Vec::new();
     for (index, (line1, line2)) in tle_pairs_from_text(&text).into_iter().enumerate() {

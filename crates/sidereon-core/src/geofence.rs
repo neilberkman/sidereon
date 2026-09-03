@@ -319,6 +319,7 @@ pub enum ProbabilityMethod {
 
 /// Options for [`containment_probability_with_options`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProbabilityOptions {
     /// Probability integration method.
     pub method: ProbabilityMethod,

@@ -287,6 +287,7 @@ impl OrbitClass {
 
 /// Which checks to run, and with what bounds.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ContinuityOptions {
     /// Earth-fixed speed bound for the adjacent-pair gate. `None` disables the
     /// gate.
@@ -320,6 +321,18 @@ impl SpeedBound {
 }
 
 impl ContinuityOptions {
+    /// Build continuity settings from the optional speed and residual checks.
+    ///
+    /// `None` disables the corresponding check; assign `Some` bounds when the
+    /// check is required.
+    #[must_use]
+    pub const fn new(speed_bound: Option<SpeedBound>, residual_tolerance_m: Option<f64>) -> Self {
+        Self {
+            speed_bound,
+            residual_tolerance_m,
+        }
+    }
+
     /// Both checks, with the class bound and a 1 m residual tolerance.
     pub fn for_orbit_class(class: OrbitClass) -> Self {
         Self {

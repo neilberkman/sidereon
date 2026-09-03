@@ -591,15 +591,15 @@ impl LiveDriver {
                 password: pass,
             })
         };
-        let mut machine = NtripClientMachine::new(NtripConfig {
-            host,
-            port,
-            mountpoint: mount,
-            version: NtripVersion::Rev2,
-            credentials,
-            user_agent_product: format!("sidereon/{}", env!("CARGO_PKG_VERSION")),
-            gga_interval_s: Some(NTRIP_GGA_INTERVAL_S),
-        });
+        let mut ntrip_config = NtripConfig::default();
+        ntrip_config.host = host;
+        ntrip_config.port = port;
+        ntrip_config.mountpoint = mount;
+        ntrip_config.version = NtripVersion::Rev2;
+        ntrip_config.credentials = credentials;
+        ntrip_config.user_agent_product = format!("sidereon/{}", env!("CARGO_PKG_VERSION"));
+        ntrip_config.gga_interval_s = Some(NTRIP_GGA_INTERVAL_S);
+        let mut machine = NtripClientMachine::new(ntrip_config);
         machine.reset();
         Ok(Self {
             nav,
@@ -1247,10 +1247,12 @@ fn satellite_snapshots(
                 observation.satellite_id,
                 receiver_ecef,
                 inputs.t_rx_j2000_s,
-                PredictOptions {
-                    carrier_hz: F_L1_HZ,
-                    light_time: true,
-                    sagnac: true,
+                {
+                    let mut options = PredictOptions::default();
+                    options.carrier_hz = F_L1_HZ;
+                    options.light_time = true;
+                    options.sagnac = true;
+                    options
                 },
             )
             .map_or((None, None), |prediction| {

@@ -189,6 +189,7 @@ impl TightGnssEpoch {
 
 /// Configuration for tightly coupled raw GNSS updates.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct TightCouplingConfig {
     /// Body-frame vector from IMU origin to GNSS antenna phase center, in meters.
     pub lever_arm_body_m: [f64; 3],

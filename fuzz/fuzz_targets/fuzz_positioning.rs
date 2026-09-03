@@ -171,25 +171,36 @@ fn ppp_state(input: &Input, epoch: &FloatEpoch) -> FloatState {
 }
 
 fn float_config(input: &Input) -> FloatSolveConfig {
-    FloatSolveConfig {
-        weights: MeasurementWeights {
-            code: input.scalars[0],
-            phase: input.scalars[1],
-            elevation_weighting: input.bits[2] & 1 == 1,
-        },
-        tropo: TroposphereOptions::disabled(),
-        corrections: RangeCorrections::disabled(),
-        opts: FloatSolveOptions {
-            max_iterations: bounded_usize(input.bits[3], 1, 5),
-            position_tolerance_m: input.scalars[2],
-            clock_tolerance_m: input.scalars[3],
-            ambiguity_tolerance_m: input.scalars[4],
-            ztd_tolerance_m: input.scalars[5],
-        },
-        elevation_cutoff_deg: None,
-        residual_screen: input.bits[4] & 1 == 1,
-        estimate_residual_ionosphere: false,
-    }
+    let weights = MeasurementWeights {
+        code: input.scalars[0],
+        phase: input.scalars[1],
+        elevation_weighting: input.bits[2] & 1 == 1,
+    };
+    let tropo = TroposphereOptions::disabled();
+    let corrections = RangeCorrections::disabled();
+    let mut opts = FloatSolveOptions::default();
+    opts.max_iterations = bounded_usize(input.bits[3], 1, 5);
+    opts.position_tolerance_m = input.scalars[2];
+    opts.clock_tolerance_m = input.scalars[3];
+    opts.ambiguity_tolerance_m = input.scalars[4];
+    opts.ztd_tolerance_m = input.scalars[5];
+    let mut config = FloatSolveConfig::new(
+        weights,
+        tropo,
+        corrections.clone(),
+        opts,
+        None,
+        input.bits[4] & 1 == 1,
+        false,
+    );
+    config.weights = weights;
+    config.tropo = tropo;
+    config.corrections = corrections;
+    config.opts = opts;
+    config.elevation_cutoff_deg = None;
+    config.residual_screen = input.bits[4] & 1 == 1;
+    config.estimate_residual_ionosphere = false;
+    config
 }
 
 fn raim_residuals(epoch: &FloatEpoch, input: &Input) -> Vec<FloatResidual> {
@@ -231,6 +242,12 @@ fuzz_target!(|data: &[u8]| {
     assert_ok_finite_or_err("Wgs84Geodetic::new", geodetic.as_ref());
     let geodetic = geodetic.ok();
 
+    let mut robust_cfg = RobustConfig::default();
+    robust_cfg.huber_k = input.scalars[5];
+    robust_cfg.scale_floor_m = input.scalars[6];
+    robust_cfg.max_outer = bounded_usize(input.bits[5], 1, 4);
+    robust_cfg.outer_tol_m = input.scalars[7];
+
     let solve_inputs = SolveInputs {
         observations: observations(&input),
         t_rx_j2000_s: input.scalars[11],
@@ -251,12 +268,7 @@ fuzz_target!(|data: &[u8]| {
             temperature_k: input.scalars[3],
             relative_humidity: input.scalars[4],
         },
-        robust: Some(RobustConfig {
-            huber_k: input.scalars[5],
-            scale_floor_m: input.scalars[6],
-            max_outer: bounded_usize(input.bits[5], 1, 4),
-            outer_tol_m: input.scalars[7],
-        }),
+        robust: Some(robust_cfg),
     };
     assert_ok_finite_or_err(
         "positioning::solve",
@@ -327,12 +339,11 @@ fuzz_target!(|data: &[u8]| {
                 .unwrap_or_else(|| LineOfSight::new(1.0, 0.0, 0.0)),
         })
         .collect();
-    let raim_config = RaimConfig {
-        false_alarm_probability: input.scalars[0],
-        missed_detection_probability: input.scalars[1],
-        measurement_sigma_m: input.scalars[2],
-        chi_square_threshold: Some(input.scalars[3]),
-    };
+    let mut raim_config = RaimConfig::default();
+    raim_config.false_alarm_probability = input.scalars[0];
+    raim_config.missed_detection_probability = input.scalars[1];
+    raim_config.measurement_sigma_m = input.scalars[2];
+    raim_config.chi_square_threshold = Some(input.scalars[3]);
     assert_ok_finite_or_err(
         "precise_positioning::global_test",
         global_test(&residuals, bounded_usize(input.bits[7], 1, 16), raim_config),
@@ -399,23 +410,33 @@ fuzz_target!(|data: &[u8]| {
             arcs_used: 0,
         },
     };
-    let fixed_config = FixedSolveConfig {
-        weights: config.weights,
-        tropo: config.tropo,
-        corrections: config.corrections.clone(),
-        opts: config.opts,
-        elevation_cutoff_deg: None,
-        ambiguity: FixedAmbiguityOptions {
-            wavelengths_m: epoch
-                .observations
-                .iter()
-                .map(|obs| (obs.ambiguity_id.clone(), input.scalars[7]))
-                .collect(),
-            offsets_m: BTreeMap::new(),
-            ratio_threshold: input.scalars[8],
-        },
-            estimate_residual_ionosphere: false,
-    };
+    let ratio_threshold = input.scalars[8];
+    let wavelengths_m = epoch
+        .observations
+        .iter()
+        .map(|obs| (obs.ambiguity_id.clone(), input.scalars[7]))
+        .collect();
+    let offsets_m = BTreeMap::new();
+    let mut ambiguity = FixedAmbiguityOptions::new(ratio_threshold);
+    ambiguity.wavelengths_m = wavelengths_m;
+    ambiguity.offsets_m = offsets_m;
+    ambiguity.ratio_threshold = ratio_threshold;
+    let mut fixed_config = FixedSolveConfig::new(
+        config.weights,
+        config.tropo,
+        config.corrections.clone(),
+        config.opts,
+        None,
+        ambiguity.clone(),
+        false,
+    );
+    fixed_config.weights = config.weights;
+    fixed_config.tropo = config.tropo;
+    fixed_config.corrections = config.corrections.clone();
+    fixed_config.opts = config.opts;
+    fixed_config.elevation_cutoff_deg = None;
+    fixed_config.ambiguity = ambiguity;
+    fixed_config.estimate_residual_ionosphere = false;
     assert_ok_finite_or_err(
         "precise_positioning::solve_fixed_from_float",
         precise_positioning::solve_fixed_from_float(
@@ -443,14 +464,18 @@ fuzz_target!(|data: &[u8]| {
         ambiguities_m: state.ambiguities_m.clone(),
     };
     let mut kin_cov = finite_square(kin_state.dimension(), input.scalars[10]);
-    let kin_config = KinematicConfig {
-        initial_state: kin_state.clone(),
-        initial_covariance_m2: kin_cov.clone(),
-        motion: KinematicMotionModel::ConstantVelocity {
-            velocity_m_s: input.velocities[0],
-        },
-        ..KinematicConfig::default()
+    let default = KinematicConfig::default();
+    let mut kin_config = KinematicConfig::default();
+    kin_config.initial_state = kin_state.clone();
+    kin_config.initial_covariance_m2 = kin_cov.clone();
+    kin_config.motion = KinematicMotionModel::ConstantVelocity {
+        velocity_m_s: input.velocities[0],
     };
+    kin_config.process_noise = default.process_noise;
+    kin_config.new_ambiguity_variance_m2 = default.new_ambiguity_variance_m2;
+    kin_config.weights = default.weights;
+    kin_config.tropo = default.tropo;
+    kin_config.corrections = default.corrections;
     let active: Vec<String> = epoch
         .observations
         .iter()
@@ -503,20 +528,20 @@ fuzz_target!(|data: &[u8]| {
             ),
         );
     }
+    let mut velocity_robust = VelocityRobustConfig::default();
+    velocity_robust.huber_k = input.scalars[0];
+    velocity_robust.scale_floor_m_s = input.scalars[1];
+    velocity_robust.max_outer = bounded_usize(input.bits[2], 1, 4);
+    velocity_robust.outer_tol_m_s = input.scalars[2];
+    let mut velocity_config = VelocityConfig::default();
+    velocity_config.minimum_observations = bounded_usize(input.bits[0], 1, 8);
+    velocity_config.robust = Some(velocity_robust);
     assert_ok_finite_or_err(
         "precise_positioning::solve_velocity",
         precise_positioning::solve_velocity(
             &ppp_velocity_obs,
             receiver,
-            VelocityConfig {
-                minimum_observations: bounded_usize(input.bits[0], 1, 8),
-                robust: Some(VelocityRobustConfig {
-                    huber_k: input.scalars[0],
-                    scale_floor_m_s: input.scalars[1],
-                    max_outer: bounded_usize(input.bits[2], 1, 4),
-                    outer_tol_m_s: input.scalars[2],
-                }),
-            },
+            velocity_config,
         ),
     );
 
@@ -538,6 +563,14 @@ fuzz_target!(|data: &[u8]| {
         "velocity::range_rate_to_doppler",
         velocity::range_rate_to_doppler(input.scalars[2], input.scalars[3]),
     );
+    let mut velocity_solve_opts = VelocitySolveOptions::default();
+    velocity_solve_opts.observable = if input.bits[0] & 1 == 0 {
+        VelocityObservable::RangeRate
+    } else {
+        VelocityObservable::Doppler
+    };
+    velocity_solve_opts.light_time = input.bits[1] & 1 == 1;
+    velocity_solve_opts.sagnac = input.bits[2] & 1 == 1;
     assert_ok_finite_or_err(
         "velocity::solve",
         velocity::solve(
@@ -545,15 +578,7 @@ fuzz_target!(|data: &[u8]| {
             &velocity_obs,
             receiver,
             input.scalars[11],
-            VelocitySolveOptions {
-                observable: if input.bits[0] & 1 == 0 {
-                    VelocityObservable::RangeRate
-                } else {
-                    VelocityObservable::Doppler
-                },
-                light_time: input.bits[1] & 1 == 1,
-                sagnac: input.bits[2] & 1 == 1,
-            },
+            velocity_solve_opts,
         ),
     );
 });

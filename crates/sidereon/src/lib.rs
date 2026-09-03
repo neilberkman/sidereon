@@ -1536,42 +1536,61 @@ mod tests {
     }
 
     fn ppp_float_solve_config() -> FloatSolveConfig {
-        FloatSolveConfig {
-            weights: precise_positioning::MeasurementWeights {
-                code: 1.0,
-                phase: 100.0,
-                elevation_weighting: false,
-            },
-            tropo: precise_positioning::TroposphereOptions::disabled(),
-            corrections: precise_positioning::RangeCorrections::disabled(),
-            opts: precise_positioning::FloatSolveOptions {
-                max_iterations: 1,
-                position_tolerance_m: 1.0e-4,
-                clock_tolerance_m: 1.0e-4,
-                ambiguity_tolerance_m: 1.0e-4,
-                ztd_tolerance_m: 1.0e-4,
-            },
-            elevation_cutoff_deg: None,
-            residual_screen: false,
-            estimate_residual_ionosphere: false,
-        }
+        let weights = precise_positioning::MeasurementWeights {
+            code: 1.0,
+            phase: 100.0,
+            elevation_weighting: false,
+        };
+        let tropo = precise_positioning::TroposphereOptions::disabled();
+        let corrections = precise_positioning::RangeCorrections::disabled();
+        let mut opts = precise_positioning::FloatSolveOptions::default();
+        opts.max_iterations = 1;
+        opts.position_tolerance_m = 1.0e-4;
+        opts.clock_tolerance_m = 1.0e-4;
+        opts.ambiguity_tolerance_m = 1.0e-4;
+        opts.ztd_tolerance_m = 1.0e-4;
+        let mut config = FloatSolveConfig::new(
+            weights,
+            tropo,
+            corrections.clone(),
+            opts,
+            None,
+            false,
+            false,
+        );
+        config.weights = weights;
+        config.tropo = tropo;
+        config.corrections = corrections;
+        config.opts = opts;
+        config.elevation_cutoff_deg = None;
+        config.residual_screen = false;
+        config.estimate_residual_ionosphere = false;
+        config
     }
 
     fn ppp_fixed_solve_config() -> FixedSolveConfig {
         let float = ppp_float_solve_config();
-        FixedSolveConfig {
-            weights: float.weights,
-            tropo: float.tropo,
-            corrections: float.corrections,
-            opts: float.opts,
-            elevation_cutoff_deg: None,
-            ambiguity: precise_positioning::FixedAmbiguityOptions {
-                wavelengths_m: BTreeMap::new(),
-                offsets_m: BTreeMap::new(),
-                ratio_threshold: 3.0,
-            },
-            estimate_residual_ionosphere: false,
-        }
+        let mut ambiguity = precise_positioning::FixedAmbiguityOptions::new(3.0);
+        ambiguity.wavelengths_m = BTreeMap::new();
+        ambiguity.offsets_m = BTreeMap::new();
+        ambiguity.ratio_threshold = 3.0;
+        let mut config = FixedSolveConfig::new(
+            float.weights,
+            float.tropo,
+            float.corrections.clone(),
+            float.opts,
+            None,
+            ambiguity.clone(),
+            false,
+        );
+        config.weights = float.weights;
+        config.tropo = float.tropo;
+        config.corrections = float.corrections;
+        config.opts = float.opts;
+        config.elevation_cutoff_deg = None;
+        config.ambiguity = ambiguity;
+        config.estimate_residual_ionosphere = false;
+        config
     }
 
     fn empty_ppp_state() -> FloatState {
@@ -2036,10 +2055,9 @@ mod tests {
             sidereon_core::constants::SECONDS_PER_DAY,
         )
         .expect("valid one-day window");
-        let options = tca::TcaFinderOptions {
-            coarse_step_seconds: 120.0,
-            time_tolerance_seconds: 1.0e-2,
-        };
+        let mut options = tca::TcaFinderOptions::default();
+        options.coarse_step_seconds = 120.0;
+        options.time_tolerance_seconds = 1.0e-2;
 
         let candidates =
             tca::find_tca_candidates_between_tles(primary_tle, secondary_tle, window, options)
@@ -2230,13 +2248,13 @@ mod tests {
             },
             robust: None,
         };
-        let options = quality::FdeSppOptions {
-            fde: quality::FdeOptions {
-                raim: quality::RaimOptions::default(),
-                max_iterations: 0,
-            },
-            validation: quality::SolutionValidationOptions::default(),
-        };
+        let mut fde = quality::FdeOptions::new(quality::RaimOptions::default(), 0);
+        fde.raim = quality::RaimOptions::default();
+        fde.max_iterations = 0;
+        let mut options =
+            quality::FdeSppOptions::new(fde.clone(), quality::SolutionValidationOptions::default());
+        options.fde = fde;
+        options.validation = quality::SolutionValidationOptions::default();
 
         let result = spp_robust_fde_driver(
             &sp3,

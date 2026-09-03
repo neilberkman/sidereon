@@ -495,9 +495,10 @@ fn correction_toggles_have_expected_scales() {
             kernel: &kernel,
             naif_id: 4,
         },
-        ObserveOptions {
-            aberration: false,
-            ..ObserveOptions::default()
+        {
+            let mut options = ObserveOptions::default();
+            options.aberration = false;
+            options
         },
     )
     .expect("observation without aberration");
@@ -519,9 +520,10 @@ fn correction_toggles_have_expected_scales() {
             kernel: &kernel,
             naif_id: 4,
         },
-        ObserveOptions {
-            deflection: false,
-            ..ObserveOptions::default()
+        {
+            let mut options = ObserveOptions::default();
+            options.deflection = false;
+            options
         },
     )
     .expect("conjunction without deflection");
@@ -556,12 +558,13 @@ fn refraction_matches_skyfield_bennett_reference() {
             kernel: &kernel,
             naif_id: 4,
         },
-        ObserveOptions {
-            refraction: Some(Refraction {
+        {
+            let mut options = ObserveOptions::default();
+            options.refraction = Some(Refraction {
                 pressure_mbar: 1013.25,
                 temperature_c: 10.0,
-            }),
-            ..ObserveOptions::default()
+            });
+            options
         },
     )
     .expect("refracted observation");

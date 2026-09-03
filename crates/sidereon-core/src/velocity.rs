@@ -43,6 +43,7 @@ pub struct VelocityObservation {
 
 /// Options controlling the velocity solve.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct VelocitySolveOptions {
     /// Observation value convention.
     pub observable: VelocityObservable,

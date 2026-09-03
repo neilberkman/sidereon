@@ -59,6 +59,7 @@ pub struct PppInitialGuess {
 
 /// Auto-initialization policy for the raw-epochs PPP driver.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PppAutoInitOptions {
     /// Explicit seed. `Some` skips the SPP/mean stages entirely (the Elixir
     /// `:initial_guess`); `None` runs the per-epoch SPP auto-init.

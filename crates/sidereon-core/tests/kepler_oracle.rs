@@ -27,11 +27,9 @@ fn test_kepler_circular_orbit_full_period() {
     };
     let integrator = DP54;
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        abs_tol: 1e-12,
-        rel_tol: 1e-12,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.abs_tol = 1e-12;
+    opts.rel_tol = 1e-12;
 
     let result = integrator
         .propagate(initial_state, period, &dynamics, &ctx, &opts)
@@ -98,11 +96,9 @@ fn test_kepler_elliptic_orbit_invariants() {
     };
     let integrator = DP54;
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        abs_tol: 1e-13,
-        rel_tol: 1e-13,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.abs_tol = 1e-13;
+    opts.rel_tol = 1e-13;
 
     // Propagate half an orbit (approx)
     let t_end = SECONDS_PER_HOUR;
@@ -157,11 +153,9 @@ fn test_j2_secular_drift_oracle() {
     };
     let integrator = DP54;
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        abs_tol: 1e-12,
-        rel_tol: 1e-12,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.abs_tol = 1e-12;
+    opts.rel_tol = 1e-12;
 
     // Propagate for one day
     let t_end = SECONDS_PER_DAY;

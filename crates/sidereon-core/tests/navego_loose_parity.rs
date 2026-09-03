@@ -130,15 +130,12 @@ fn navego_synthetic_adis16488_loose_reduced_gate_matches_stated_subset() {
 
     for trial in 0..TRIALS {
         let mut rng = SplitMix64::new(0x4e41_5645_474f_0000 + trial as u64);
-        let imu = simulate_imu_samples_from_increments(
-            &truth_increments,
-            imu_spec,
-            ImuSimulationOptions {
-                seed: 0x5141_4452_4154_0000 + trial as u64,
-                initial_bias: ImuBias::default(),
-                ..ImuSimulationOptions::default()
-            },
-        )
+        let imu = simulate_imu_samples_from_increments(&truth_increments, imu_spec, {
+            let mut options = ImuSimulationOptions::default();
+            options.seed = 0x5141_4452_4154_0000 + trial as u64;
+            options.initial_bias = ImuBias::default();
+            options
+        })
         .expect("simulated imu");
 
         let initial = initial_filter(&trajectory, imu_spec);

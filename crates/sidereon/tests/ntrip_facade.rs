@@ -4,15 +4,15 @@ use sidereon::ntrip::{
 };
 
 fn config(version: NtripVersion) -> NtripConfig {
-    NtripConfig {
-        host: "caster.example.test".into(),
-        port: 2101,
-        mountpoint: "MOUNT".into(),
-        version,
-        credentials: None,
-        user_agent_product: "sidereon-test/0".into(),
-        gga_interval_s: None,
-    }
+    let mut config = NtripConfig::default();
+    config.host = "caster.example.test".into();
+    config.port = 2101;
+    config.mountpoint = "MOUNT".into();
+    config.version = version;
+    config.credentials = None;
+    config.user_agent_product = "sidereon-test/0".into();
+    config.gga_interval_s = None;
+    config
 }
 
 #[test]

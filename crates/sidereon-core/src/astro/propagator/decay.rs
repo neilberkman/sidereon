@@ -31,6 +31,7 @@ pub struct DecayEstimate {
 
 /// Configuration for a decay run.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct DecayConfig {
     /// Gravity choice layered under drag.
     pub force_model: PropagationForceModel,

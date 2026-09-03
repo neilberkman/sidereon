@@ -54,16 +54,7 @@ fn clean_signal(
     n: usize,
     fs: f64,
 ) -> Vec<IqSample> {
-    let code = replica(
-        prn,
-        ReplicaOptions {
-            sample_rate_hz: fs,
-            num_samples: n,
-            code_phase_chips,
-            code_doppler_hz: 0.0,
-        },
-    )
-    .expect("replica");
+    let code = replica(prn, ReplicaOptions::new(fs, n, code_phase_chips, 0.0)).expect("replica");
     let w = 2.0 * std::f64::consts::PI * doppler_hz / fs;
     code.into_iter()
         .enumerate()
@@ -198,12 +189,12 @@ fn replica_correlate_acquire_and_loss_match_application_oracle_bits() {
 
     let samples = replica(
         rep["prn"].as_i64().unwrap(),
-        ReplicaOptions {
-            sample_rate_hz: hexf(&rep["sample_rate_hz"]),
-            num_samples: rep["num_samples"].as_u64().unwrap() as usize,
-            code_phase_chips: hexf(&rep["code_phase_chips"]),
-            code_doppler_hz: 0.0,
-        },
+        ReplicaOptions::new(
+            hexf(&rep["sample_rate_hz"]),
+            rep["num_samples"].as_u64().unwrap() as usize,
+            hexf(&rep["code_phase_chips"]),
+            0.0,
+        ),
     )
     .expect("replica");
     let expected_samples: Vec<i8> = rep["samples"]
@@ -222,16 +213,14 @@ fn replica_correlate_acquire_and_loss_match_application_oracle_bits() {
         64,
         hexf(&case["sample_rate_hz"]),
     );
-    let got = sidereon_core::signal::correlate(
-        &iq,
-        case["prn"].as_i64().unwrap(),
-        CorrelateOptions {
-            sample_rate_hz: hexf(&case["sample_rate_hz"]),
-            doppler_hz: hexf(&case["doppler_hz"]),
-            code_phase_chips: hexf(&case["code_phase_chips"]),
-            code_doppler_hz: 0.0,
-        },
-    )
+    let got = sidereon_core::signal::correlate(&iq, case["prn"].as_i64().unwrap(), {
+        let mut options = CorrelateOptions::default();
+        options.sample_rate_hz = hexf(&case["sample_rate_hz"]);
+        options.doppler_hz = hexf(&case["doppler_hz"]);
+        options.code_phase_chips = hexf(&case["code_phase_chips"]);
+        options.code_doppler_hz = 0.0;
+        options
+    })
     .expect("correlate");
     assert_eq!(got.i.to_bits(), hexf(&case["i"]).to_bits(), "correlator I");
     assert_eq!(got.q.to_bits(), hexf(&case["q"]).to_bits(), "correlator Q");
@@ -250,14 +239,11 @@ fn replica_correlate_acquire_and_loss_match_application_oracle_bits() {
         n,
         hexf(&acq["sample_rate_hz"]),
     );
-    let got = acquire(
-        &full,
-        acq["prn"].as_i64().unwrap(),
-        AcquisitionOptions {
-            sample_rate_hz: hexf(&acq["sample_rate_hz"]),
-            ..AcquisitionOptions::default()
-        },
-    )
+    let got = acquire(&full, acq["prn"].as_i64().unwrap(), {
+        let mut options = AcquisitionOptions::default();
+        options.sample_rate_hz = hexf(&acq["sample_rate_hz"]);
+        options
+    })
     .expect("acquire");
     assert_eq!(
         got.code_phase_chips.to_bits(),
@@ -318,12 +304,7 @@ fn replica_correlate_acquire_and_loss_match_application_oracle_bits() {
 
 #[test]
 fn signal_replica_and_correlate_reject_non_finite_options() {
-    let finite_replica_options = ReplicaOptions {
-        sample_rate_hz: 2.046e6,
-        num_samples: 8,
-        code_phase_chips: 0.0,
-        code_doppler_hz: 0.0,
-    };
+    let finite_replica_options = ReplicaOptions::new(2.046e6, 8, 0.0, 0.0);
     let finite_replica = replica(1, finite_replica_options).expect("finite replica options");
     assert_eq!(finite_replica, vec![-1, -1, -1, -1, 1, 1, 1, 1]);
 
@@ -331,16 +312,14 @@ fn signal_replica_and_correlate_reject_non_finite_options() {
         .iter()
         .map(|&chip| IqSample::real(f64::from(chip)))
         .collect();
-    let finite_correlation = sidereon_core::signal::correlate(
-        &iq,
-        1,
-        CorrelateOptions {
-            sample_rate_hz: finite_replica_options.sample_rate_hz,
-            doppler_hz: 0.0,
-            code_phase_chips: finite_replica_options.code_phase_chips,
-            code_doppler_hz: finite_replica_options.code_doppler_hz,
-        },
-    )
+    let finite_correlation = sidereon_core::signal::correlate(&iq, 1, {
+        let mut options = CorrelateOptions::default();
+        options.sample_rate_hz = finite_replica_options.sample_rate_hz;
+        options.doppler_hz = 0.0;
+        options.code_phase_chips = finite_replica_options.code_phase_chips;
+        options.code_doppler_hz = finite_replica_options.code_doppler_hz;
+        options
+    })
     .expect("finite correlate options");
     assert_eq!(finite_correlation.i.to_bits(), 8.0_f64.to_bits());
     assert_eq!(finite_correlation.q.to_bits(), 0.0_f64.to_bits());
@@ -348,64 +327,51 @@ fn signal_replica_and_correlate_reject_non_finite_options() {
 
     for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert_invalid_signal(
-            replica(
-                1,
-                ReplicaOptions {
-                    code_phase_chips: bad,
-                    ..finite_replica_options
-                },
-            )
+            replica(1, {
+                let mut options = finite_replica_options;
+                options.code_phase_chips = bad;
+                options
+            })
             .unwrap_err(),
             "code_phase_chips",
             "not finite",
         );
         assert_invalid_signal(
-            replica(
-                1,
-                ReplicaOptions {
-                    code_doppler_hz: bad,
-                    ..finite_replica_options
-                },
-            )
+            replica(1, {
+                let mut options = finite_replica_options;
+                options.code_doppler_hz = bad;
+                options
+            })
             .unwrap_err(),
             "code_doppler_hz",
             "not finite",
         );
         assert_invalid_signal(
-            sidereon_core::signal::correlate(
-                &[IqSample::real(1.0)],
-                1,
-                CorrelateOptions {
-                    code_phase_chips: bad,
-                    ..CorrelateOptions::default()
-                },
-            )
+            sidereon_core::signal::correlate(&[IqSample::real(1.0)], 1, {
+                let mut options = CorrelateOptions::default();
+                options.code_phase_chips = bad;
+                options
+            })
             .unwrap_err(),
             "code_phase_chips",
             "not finite",
         );
         assert_invalid_signal(
-            sidereon_core::signal::correlate(
-                &[IqSample::real(1.0)],
-                1,
-                CorrelateOptions {
-                    code_doppler_hz: bad,
-                    ..CorrelateOptions::default()
-                },
-            )
+            sidereon_core::signal::correlate(&[IqSample::real(1.0)], 1, {
+                let mut options = CorrelateOptions::default();
+                options.code_doppler_hz = bad;
+                options
+            })
             .unwrap_err(),
             "code_doppler_hz",
             "not finite",
         );
         assert_invalid_signal(
-            sidereon_core::signal::correlate(
-                &[IqSample::real(1.0)],
-                1,
-                CorrelateOptions {
-                    doppler_hz: bad,
-                    ..CorrelateOptions::default()
-                },
-            )
+            sidereon_core::signal::correlate(&[IqSample::real(1.0)], 1, {
+                let mut options = CorrelateOptions::default();
+                options.doppler_hz = bad;
+                options
+            })
             .unwrap_err(),
             "doppler_hz",
             "not finite",
@@ -439,14 +405,11 @@ fn signal_correlation_rejects_non_finite_samples_and_empty_explicit_code() {
             "not finite",
         );
         assert_invalid_signal(
-            acquire(
-                &[bad_sample],
-                1,
-                AcquisitionOptions {
-                    sample_rate_hz: 2.046e6,
-                    ..AcquisitionOptions::default()
-                },
-            )
+            acquire(&[bad_sample], 1, {
+                let mut options = AcquisitionOptions::default();
+                options.sample_rate_hz = 2.046e6;
+                options
+            })
             .unwrap_err(),
             "samples",
             "not finite",
@@ -526,115 +489,82 @@ fn acquisition_error_modes_are_explicit() {
     );
     let short = vec![IqSample::real(1.0); 100];
     assert_eq!(
-        acquire(
-            &short,
-            5,
-            AcquisitionOptions {
-                sample_rate_hz: 2.046e6,
-                ..AcquisitionOptions::default()
-            }
-        ),
+        acquire(&short, 5, {
+            let mut options = AcquisitionOptions::default();
+            options.sample_rate_hz = 2.046e6;
+            options
+        }),
         Err(SignalError::TooShort)
     );
 
     assert_invalid_signal_field(
-        replica(
-            5,
-            ReplicaOptions {
-                sample_rate_hz: 0.0,
-                num_samples: 1,
-                code_phase_chips: 0.0,
-                code_doppler_hz: 0.0,
-            },
-        )
+        replica(5, ReplicaOptions::new(0.0, 1, 0.0, 0.0)).unwrap_err(),
+        "sample_rate_hz",
+    );
+    assert_invalid_signal_field(
+        sidereon_core::signal::correlate(&[IqSample::real(1.0)], 5, {
+            let mut options = CorrelateOptions::default();
+            options.sample_rate_hz = 0.0;
+            options
+        })
         .unwrap_err(),
         "sample_rate_hz",
     );
     assert_invalid_signal_field(
-        sidereon_core::signal::correlate(
-            &[IqSample::real(1.0)],
-            5,
-            CorrelateOptions {
-                sample_rate_hz: 0.0,
-                ..CorrelateOptions::default()
-            },
-        )
-        .unwrap_err(),
-        "sample_rate_hz",
-    );
-    assert_invalid_signal_field(
-        acquire(
-            &short,
-            5,
-            AcquisitionOptions {
-                sample_rate_hz: 0.0,
-                ..AcquisitionOptions::default()
-            },
-        )
+        acquire(&short, 5, {
+            let mut options = AcquisitionOptions::default();
+            options.sample_rate_hz = 0.0;
+            options
+        })
         .unwrap_err(),
         "sample_rate_hz",
     );
     assert_invalid_signal(
-        acquire(
-            &[IqSample::real(1.0)],
-            5,
-            AcquisitionOptions {
-                sample_rate_hz: 1.0,
-                ..AcquisitionOptions::default()
-            },
-        )
+        acquire(&[IqSample::real(1.0)], 5, {
+            let mut options = AcquisitionOptions::default();
+            options.sample_rate_hz = 1.0;
+            options
+        })
         .unwrap_err(),
         "sample_rate_hz",
         "out of range",
     );
     assert_invalid_signal_field(
-        acquire(
-            &short,
-            5,
-            AcquisitionOptions {
-                doppler_step_hz: 0.0,
-                ..AcquisitionOptions::default()
-            },
-        )
+        acquire(&short, 5, {
+            let mut options = AcquisitionOptions::default();
+            options.doppler_step_hz = 0.0;
+            options
+        })
         .unwrap_err(),
         "doppler_step_hz",
     );
     assert_invalid_signal(
-        acquire(
-            &short,
-            5,
-            AcquisitionOptions {
-                doppler_min_hz: 500.0,
-                doppler_max_hz: -500.0,
-                ..AcquisitionOptions::default()
-            },
-        )
+        acquire(&short, 5, {
+            let mut options = AcquisitionOptions::default();
+            options.doppler_min_hz = 500.0;
+            options.doppler_max_hz = -500.0;
+            options
+        })
         .unwrap_err(),
         "doppler_max_hz",
         "out of range",
     );
     assert_invalid_signal(
-        acquire(
-            &short,
-            5,
-            AcquisitionOptions {
-                doppler_min_hz: f64::NAN,
-                ..AcquisitionOptions::default()
-            },
-        )
+        acquire(&short, 5, {
+            let mut options = AcquisitionOptions::default();
+            options.doppler_min_hz = f64::NAN;
+            options
+        })
         .unwrap_err(),
         "doppler_min_hz",
         "not finite",
     );
     assert_invalid_signal(
-        acquire(
-            &short,
-            5,
-            AcquisitionOptions {
-                doppler_max_hz: f64::INFINITY,
-                ..AcquisitionOptions::default()
-            },
-        )
+        acquire(&short, 5, {
+            let mut options = AcquisitionOptions::default();
+            options.doppler_max_hz = f64::INFINITY;
+            options
+        })
         .unwrap_err(),
         "doppler_max_hz",
         "not finite",
@@ -645,16 +575,14 @@ fn acquisition_error_modes_are_explicit() {
 fn acquisition_accepts_valid_doppler_grid_options() {
     let fs = CA_CHIP_RATE_HZ;
     let samples = clean_signal(5, 0.0, 0.0, CA_CODE_LENGTH, fs);
-    let got = acquire(
-        &samples,
-        5,
-        AcquisitionOptions {
-            sample_rate_hz: fs,
-            doppler_min_hz: 0.0,
-            doppler_max_hz: 0.0,
-            doppler_step_hz: 500.0,
-        },
-    )
+    let got = acquire(&samples, 5, {
+        let mut options = AcquisitionOptions::default();
+        options.sample_rate_hz = fs;
+        options.doppler_min_hz = 0.0;
+        options.doppler_max_hz = 0.0;
+        options.doppler_step_hz = 500.0;
+        options
+    })
     .expect("valid acquisition grid");
 
     assert_eq!(got.grid.doppler_hz, vec![0.0]);
@@ -667,16 +595,14 @@ fn acquisition_accepts_valid_doppler_grid_options() {
 fn acquisition_rejects_oversized_doppler_grid() {
     let fs = CA_CHIP_RATE_HZ;
     let samples = vec![IqSample::real(1.0); CA_CODE_LENGTH];
-    let err = acquire(
-        &samples,
-        5,
-        AcquisitionOptions {
-            sample_rate_hz: fs,
-            doppler_min_hz: -5.0e9,
-            doppler_max_hz: 5.0e9,
-            doppler_step_hz: 1.0,
-        },
-    )
+    let err = acquire(&samples, 5, {
+        let mut options = AcquisitionOptions::default();
+        options.sample_rate_hz = fs;
+        options.doppler_min_hz = -5.0e9;
+        options.doppler_max_hz = 5.0e9;
+        options.doppler_step_hz = 1.0;
+        options
+    })
     .expect_err("oversized Doppler grid must be rejected");
 
     assert_invalid_signal(err, "doppler_grid", "out of range");

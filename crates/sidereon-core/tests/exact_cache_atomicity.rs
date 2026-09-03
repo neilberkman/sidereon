@@ -41,12 +41,12 @@ fn cache(path: impl Into<PathBuf>) -> ExactProductCache {
 }
 
 fn single_flight_options() -> ExactCacheSingleFlightOptions {
-    ExactCacheSingleFlightOptions {
-        poll_interval: Duration::from_millis(10),
-        heartbeat_interval: Duration::from_millis(25),
-        liveness_timeout: Duration::from_secs(2),
-        wait_timeout: Duration::from_secs(10),
-    }
+    let mut options = ExactCacheSingleFlightOptions::default();
+    options.poll_interval = Duration::from_millis(10);
+    options.heartbeat_interval = Duration::from_millis(25);
+    options.liveness_timeout = Duration::from_secs(2);
+    options.wait_timeout = Duration::from_secs(10);
+    options
 }
 
 fn temp_directory(label: &str) -> PathBuf {
@@ -291,12 +291,11 @@ fn sigkill_dead_owner_is_taken_over_after_injected_liveness_timeout() {
     let waiter_root = root.clone();
     let waiter_stable = stable.clone();
     let takeover = thread::spawn(move || {
-        let options = ExactCacheSingleFlightOptions {
-            poll_interval: Duration::from_secs(1),
-            heartbeat_interval: Duration::from_secs(1),
-            liveness_timeout: Duration::from_secs(5),
-            wait_timeout: Duration::from_secs(10),
-        };
+        let mut options = ExactCacheSingleFlightOptions::default();
+        options.poll_interval = Duration::from_secs(1);
+        options.heartbeat_interval = Duration::from_secs(1);
+        options.liveness_timeout = Duration::from_secs(5);
+        options.wait_timeout = Duration::from_secs(10);
         let owner = match cache(waiter_stable)
             .open_single_flight_with_test_clock(options, &waiter_clock)
             .expect("dead-owner takeover")
@@ -350,11 +349,13 @@ fn live_owner_total_wait_timeout_does_not_create_a_second_owner() {
     let waiter_stable = stable.clone();
     let waiter = thread::spawn(move || {
         cache(waiter_stable).open_single_flight_with_test_clock(
-            ExactCacheSingleFlightOptions {
-                poll_interval: Duration::from_secs(1),
-                heartbeat_interval: Duration::from_secs(5),
-                liveness_timeout: Duration::from_secs(10),
-                wait_timeout: Duration::from_secs(3),
+            {
+                let mut options = ExactCacheSingleFlightOptions::default();
+                options.poll_interval = Duration::from_secs(1);
+                options.heartbeat_interval = Duration::from_secs(5);
+                options.liveness_timeout = Duration::from_secs(10);
+                options.wait_timeout = Duration::from_secs(3);
+                options
             },
             &waiter_clock,
         )

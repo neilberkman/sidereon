@@ -266,6 +266,7 @@ pub struct StaticReferenceStationSolution {
 
 /// Carrier RTK options for the RINEX station wrapper.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct StaticReferenceCarrierRinexOptions {
     /// RINEX-to-RTK arc extraction options.
     pub arc_options: RtkRinexArcOptions,
@@ -274,8 +275,21 @@ pub struct StaticReferenceCarrierRinexOptions {
     pub static_config: RtkStaticArcConfig,
 }
 
+impl StaticReferenceCarrierRinexOptions {
+    /// Build carrier RINEX options from the arc extraction and static solve
+    /// configurations.
+    #[must_use]
+    pub const fn new(arc_options: RtkRinexArcOptions, static_config: RtkStaticArcConfig) -> Self {
+        Self {
+            arc_options,
+            static_config,
+        }
+    }
+}
+
 /// RINEX wrapper options. `None` disables that mode.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct StaticReferenceStationRinexOptions {
     /// Code-DGNSS RINEX/SPP assembly options.
     pub code_options: Option<RinexSppOptions>,
@@ -286,6 +300,22 @@ pub struct StaticReferenceStationRinexOptions {
 }
 
 impl StaticReferenceStationRinexOptions {
+    /// Build RINEX wrapper options from the optionally enabled modes.
+    ///
+    /// `None` disables the corresponding code or carrier mode.
+    #[must_use]
+    pub const fn new(
+        code_options: Option<RinexSppOptions>,
+        carrier_options: Option<StaticReferenceCarrierRinexOptions>,
+        with_geodetic: bool,
+    ) -> Self {
+        Self {
+            code_options,
+            carrier_options,
+            with_geodetic,
+        }
+    }
+
     /// Build options with both code-DGNSS and carrier RTK enabled.
     #[must_use]
     pub const fn code_and_carrier(

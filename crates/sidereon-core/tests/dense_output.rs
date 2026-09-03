@@ -25,12 +25,10 @@ fn test_dense_output_endpoint_exactness() {
     };
     let integrator = DP54;
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        abs_tol: 1e-12,
-        rel_tol: 1e-12,
-        dense_output: true,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.abs_tol = 1e-12;
+    opts.rel_tol = 1e-12;
+    opts.dense_output = true;
 
     let result = integrator
         .propagate(initial_state, SECONDS_PER_HOUR, &dynamics, &ctx, &opts)
@@ -93,12 +91,10 @@ fn test_dense_output_circular_orbit_parity() {
     };
     let integrator = DP54;
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        abs_tol: 1e-12,
-        rel_tol: 1e-12,
-        dense_output: true,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.abs_tol = 1e-12;
+    opts.rel_tol = 1e-12;
+    opts.dense_output = true;
 
     let t_end = SECONDS_PER_HOUR;
     let result = integrator
@@ -154,12 +150,10 @@ fn test_dense_output_elliptic_orbit_invariants() {
     };
     let integrator = DP54;
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        abs_tol: 1e-12,
-        rel_tol: 1e-12,
-        dense_output: true,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.abs_tol = 1e-12;
+    opts.rel_tol = 1e-12;
+    opts.dense_output = true;
 
     let t_end = 5000.0;
     let result = integrator
@@ -203,12 +197,10 @@ fn test_dense_output_monotonic_continuity() {
     };
     let integrator = DP54;
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        abs_tol: 1e-10,
-        rel_tol: 1e-10,
-        dense_output: true,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.abs_tol = 1e-10;
+    opts.rel_tol = 1e-10;
+    opts.dense_output = true;
 
     let t_end = 10000.0;
     let result = integrator
@@ -259,10 +251,8 @@ fn test_dense_output_range_rejection() {
     };
     let integrator = DP54;
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        dense_output: true,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.dense_output = true;
 
     let result = integrator
         .propagate(initial_state, 200.0, &dynamics, &ctx, &opts)

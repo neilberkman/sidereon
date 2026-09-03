@@ -63,6 +63,7 @@ pub enum ProcessNoise {
 
 /// Options for a covariance propagation run.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct CovariancePropagationOptions {
     /// Process-noise model validated and applied by
     /// [`StatePropagator::propagate_covariance`] and

@@ -26,15 +26,15 @@ fn ntrip_machine_payload_feeds_rtcm_assembler() {
     wire.extend_from_slice(&frame);
     wire.extend_from_slice(b"\r\n0\r\n\r\n");
 
-    let mut machine = NtripClientMachine::new(NtripConfig {
-        host: "caster.example.test".into(),
-        port: 2101,
-        mountpoint: "MOUNT".into(),
-        version: NtripVersion::Rev2,
-        credentials: None,
-        user_agent_product: "test-client/0".into(),
-        gga_interval_s: None,
-    });
+    let mut ntrip_config = NtripConfig::default();
+    ntrip_config.host = "caster.example.test".into();
+    ntrip_config.port = 2101;
+    ntrip_config.mountpoint = "MOUNT".into();
+    ntrip_config.version = NtripVersion::Rev2;
+    ntrip_config.credentials = None;
+    ntrip_config.user_agent_product = "test-client/0".into();
+    ntrip_config.gga_interval_s = None;
+    let mut machine = NtripClientMachine::new(ntrip_config);
     machine.connection_request().unwrap();
     let events = machine.push(&wire);
     assert!(matches!(
@@ -74,15 +74,15 @@ fn ntrip_machine_payload_feeds_ssr_correction_store() {
     let mut second = frame[split..].to_vec();
     second.extend_from_slice(b"\r\n0\r\n\r\n");
 
-    let mut machine = NtripClientMachine::new(NtripConfig {
-        host: "caster.example.test".into(),
-        port: 2101,
-        mountpoint: "MOUNT".into(),
-        version: NtripVersion::Rev2,
-        credentials: None,
-        user_agent_product: "test-client/0".into(),
-        gga_interval_s: None,
-    });
+    let mut ntrip_config = NtripConfig::default();
+    ntrip_config.host = "caster.example.test".into();
+    ntrip_config.port = 2101;
+    ntrip_config.mountpoint = "MOUNT".into();
+    ntrip_config.version = NtripVersion::Rev2;
+    ntrip_config.credentials = None;
+    ntrip_config.user_agent_product = "test-client/0".into();
+    ntrip_config.gga_interval_s = None;
+    let mut machine = NtripClientMachine::new(ntrip_config);
     machine.connection_request().unwrap();
 
     let mut assembler = SsrStreamAssembler::new();

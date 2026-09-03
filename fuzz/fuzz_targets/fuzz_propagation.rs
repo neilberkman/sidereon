@@ -39,15 +39,15 @@ struct Input {
 }
 
 fn integrator_options(input: &Input) -> IntegratorOptions {
-    IntegratorOptions {
-        abs_tol: input.opts[0],
-        rel_tol: input.opts[1],
-        min_step: input.opts[2],
-        max_step: bounded_positive_or_raw(input.opts[3], 1.0, 600.0),
-        initial_step: bounded_positive_or_raw(input.opts[4], 1.0, 120.0),
-        max_steps: bounded_usize(input.opt_bits[0], 1, 32) as u32,
-        dense_output: input.opt_bits[1] & 1 == 1,
-    }
+    let mut opts = IntegratorOptions::default();
+    opts.abs_tol = input.opts[0];
+    opts.rel_tol = input.opts[1];
+    opts.min_step = input.opts[2];
+    opts.max_step = bounded_positive_or_raw(input.opts[3], 1.0, 600.0);
+    opts.initial_step = bounded_positive_or_raw(input.opts[4], 1.0, 120.0);
+    opts.max_steps = bounded_usize(input.opt_bits[0], 1, 32) as u32;
+    opts.dense_output = input.opt_bits[1] & 1 == 1;
+    opts
 }
 
 fn elements(input: &Input) -> ElementSet {

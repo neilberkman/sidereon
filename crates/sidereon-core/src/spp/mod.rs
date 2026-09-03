@@ -441,6 +441,7 @@ impl Default for SurfaceMet {
 /// `robust = None` the solve is byte-identical to the static elevation-weighted
 /// solve. `Default` matches the `DEFAULT_*` config constants.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct RobustConfig {
     /// Huber tuning constant `k`; residuals scaled below this keep full weight.
     pub huber_k: f64,

@@ -95,6 +95,7 @@ pub enum TrackError {
 /// `[position_m, velocity_m_s]`. Its blocks have units `m^2`, `m^2/s`, and
 /// `m^2/s^2`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct TrackFilterConfig {
     /// Cartesian frame of the state, observations, and covariances.
     pub frame: TrackCoordinateFrame,
@@ -111,6 +112,25 @@ pub struct TrackFilterConfig {
 }
 
 impl TrackFilterConfig {
+    /// Build and validate a configuration from every state field.
+    pub fn new(
+        frame: TrackCoordinateFrame,
+        initial_t_s: f64,
+        initial_position_m: Vec<f64>,
+        initial_velocity_m_s: Vec<f64>,
+        initial_covariance: Vec<Vec<f64>>,
+        acceleration_variance_spectral_density_m2_s3: f64,
+    ) -> Result<Self, TrackError> {
+        Self::from_position_velocity(
+            frame,
+            initial_t_s,
+            initial_position_m,
+            initial_velocity_m_s,
+            initial_covariance,
+            acceleration_variance_spectral_density_m2_s3,
+        )
+    }
+
     /// Build a configuration from a position fix and uncertain initial velocity.
     ///
     /// This is the position-only entry point. The velocity starts at zero and

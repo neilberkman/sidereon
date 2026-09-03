@@ -177,10 +177,8 @@ fn a_metre_scale_splice_is_caught_while_the_speed_gate_stays_silent() {
         sample.position_ecef_m[2] += splice_m;
     }
 
-    let options = ContinuityOptions {
-        speed_bound: Some(SpeedBound::OrbitClass(OrbitClass::MeoGnss)),
-        residual_tolerance_m: Some(1.0),
-    };
+    let options =
+        ContinuityOptions::new(Some(SpeedBound::OrbitClass(OrbitClass::MeoGnss)), Some(1.0));
     let report = check_continuity(&samples, &options);
 
     assert_eq!(
@@ -359,10 +357,7 @@ fn each_satellite_is_checked_independently() {
 fn an_explicit_bound_overrides_the_class_bound() {
     let samples = arc(1, 800_000_000.0, 10);
 
-    let strict = ContinuityOptions {
-        speed_bound: Some(SpeedBound::ExplicitMaxSpeed(100.0)),
-        residual_tolerance_m: None,
-    };
+    let strict = ContinuityOptions::new(Some(SpeedBound::ExplicitMaxSpeed(100.0)), None);
     let report = check_continuity(&samples, &strict);
 
     assert_eq!(

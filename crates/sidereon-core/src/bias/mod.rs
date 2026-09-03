@@ -390,6 +390,7 @@ pub struct BiasSet {
 ///
 /// The pair and month control observable mapping and the generated validity
 /// interval, while `receiver_system` supplies missing system columns.
+#[non_exhaustive]
 pub struct CodeDcbOptions {
     /// Legacy observable labels, such as `P1` and `C1`, to map per system.
     pub pair: (String, String),
@@ -403,6 +404,30 @@ pub struct CodeDcbOptions {
     /// Optional system used to recognize and target receiver rows whose first
     /// column does not contain a system letter.
     pub receiver_system: Option<GnssSystem>,
+}
+
+impl CodeDcbOptions {
+    /// Build DCB options from the required product identity fields.
+    ///
+    /// `receiver_system` defaults to `None`; assign it when the receiver rows
+    /// use a system-less legacy format.
+    #[must_use]
+    pub fn new(pair: (String, String), year: i32, month: u8, time_scale: TimeScale) -> Self {
+        Self {
+            pair,
+            year,
+            month,
+            time_scale,
+            receiver_system: None,
+        }
+    }
+
+    /// Set the optional receiver constellation.
+    #[must_use]
+    pub const fn with_receiver_system(mut self, receiver_system: GnssSystem) -> Self {
+        self.receiver_system = Some(receiver_system);
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

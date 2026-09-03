@@ -207,25 +207,25 @@ fn initial_ambiguities(epochs: &[FloatEpoch]) -> BTreeMap<String, f64> {
 }
 
 fn float_config() -> FloatSolveConfig {
-    FloatSolveConfig {
-        weights: MeasurementWeights {
+    let mut opts = FloatSolveOptions::default();
+    opts.max_iterations = 8;
+    opts.position_tolerance_m = 1.0e-4;
+    opts.clock_tolerance_m = 1.0e-4;
+    opts.ambiguity_tolerance_m = 1.0e-4;
+    opts.ztd_tolerance_m = 1.0e-4;
+    FloatSolveConfig::new(
+        MeasurementWeights {
             code: 1.0,
             phase: 100.0,
             elevation_weighting: false,
         },
-        tropo: TroposphereOptions::disabled(),
-        corrections: RangeCorrections::disabled(),
-        opts: FloatSolveOptions {
-            max_iterations: 8,
-            position_tolerance_m: 1.0e-4,
-            clock_tolerance_m: 1.0e-4,
-            ambiguity_tolerance_m: 1.0e-4,
-            ztd_tolerance_m: 1.0e-4,
-        },
-        elevation_cutoff_deg: None,
-        residual_screen: false,
-        estimate_residual_ionosphere: false,
-    }
+        TroposphereOptions::disabled(),
+        RangeCorrections::disabled(),
+        opts,
+        None,
+        false,
+        false,
+    )
 }
 
 fn position_error_m(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -254,17 +254,13 @@ fn synthetic_ssr_store(
         if !used.insert(obs.sat) {
             continue;
         }
-        let prediction = predict(
-            sp3,
-            obs.sat,
-            receiver_m,
-            epoch.t_rx_j2000_s,
-            PredictOptions {
-                carrier_hz: F_L1_HZ,
-                light_time: true,
-                sagnac: true,
-            },
-        )
+        let prediction = predict(sp3, obs.sat, receiver_m, epoch.t_rx_j2000_s, {
+            let mut options = PredictOptions::default();
+            options.carrier_hz = F_L1_HZ;
+            options.light_time = true;
+            options.sagnac = true;
+            options
+        })
         .expect("SP3 prediction");
         let t_tx = prediction.transmit_time_j2000_s;
         let record = broadcast

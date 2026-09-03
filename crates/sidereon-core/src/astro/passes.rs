@@ -207,6 +207,7 @@ pub struct GroundStation {
 
 /// Pass-prediction options.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PassPredictionOptions {
     /// Elevation threshold in degrees applied after each horizon-bounded pass's
     /// maximum elevation is found. The value must be finite and in `[-90, 90]`.
@@ -902,6 +903,7 @@ const CULMINATION_RATE_HALF_STEP_US: i64 = 1_000_000;
 
 /// Options for the event-finder-backed pass finder [`find_passes`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PassFinderOptions {
     /// Elevation mask (degrees). AOS/LOS are the times the satellite crosses
     /// this elevation, not merely the geometric horizon.

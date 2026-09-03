@@ -97,6 +97,7 @@ pub struct VerifiedExactCacheCommit {
 
 /// Bounded timing policy for exact-cache single-flight coordination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ExactCacheSingleFlightOptions {
     /// Interval between committed-entry and heartbeat observations.
     pub poll_interval: Duration,

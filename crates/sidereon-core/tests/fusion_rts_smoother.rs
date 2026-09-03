@@ -214,15 +214,8 @@ fn recorded_stationary_update_and_loose_update_can_share_epoch() {
     let state =
         InsFilterState::from_diagonal(start, ErrorStateLayout::Fifteen, &diagonal).expect("state");
     let mut config = InertialFilterConfig::new(spec).expect("filter config");
-    config.loose.stationary_updates = Some(StationaryUpdateConfig {
-        detector: StationaryDetectorConfig {
-            window_len: 1,
-            max_specific_force_norm_error_mps2: 1.0e-6,
-            max_body_rate_wrt_ecef_norm_rps: 1.0e-6,
-        },
-        zero_velocity_sigma_mps: 0.01,
-        zero_angular_rate_sigma_rps: 1.0e-4,
-    });
+    let detector = StationaryDetectorConfig::new(1, 1.0e-6, 1.0e-6);
+    config.loose.stationary_updates = Some(StationaryUpdateConfig::new(detector, 0.01, 1.0e-4));
     let mut filter = InertialFilter::with_config(state, config).expect("filter");
     let mut history = FusionRtsHistoryBuilder::from_filter(&filter).expect("history");
 
@@ -266,14 +259,11 @@ fn recorded_scenario_arc_smoothing_reduces_3d_rms() {
         .map(|pair| true_imu_increment_between(&pair[0], &pair[1]).expect("truth increment"))
         .collect::<Vec<_>>();
     let spec = ImuSpec::datasheet(0.015, 0.001, 0.001, 1.0e-4, 300.0, 300.0, None, None);
-    let sequence = simulate_imu_samples_from_increments(
-        &increments,
-        spec,
-        ImuSimulationOptions {
-            seed: 0x51d3_7e0f_29a4_d61b,
-            ..ImuSimulationOptions::default()
-        },
-    )
+    let sequence = simulate_imu_samples_from_increments(&increments, spec, {
+        let mut options = ImuSimulationOptions::default();
+        options.seed = 0x51d3_7e0f_29a4_d61b;
+        options
+    })
     .expect("simulated IMU");
 
     let mut filter = scenario_filter(truth[0], spec);

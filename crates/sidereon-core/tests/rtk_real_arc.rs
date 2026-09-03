@@ -1409,11 +1409,9 @@ fn wettzell_rinex_arc_builders_match_real_arc_scaffolding() {
     let base_obs = load_obs(&["obs", "WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"]);
     let rover_obs = load_obs(&["obs", "WTZZ00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"]);
 
-    let single_options = RtkRinexArcOptions {
-        max_epochs: Some(120),
-        include_prediction_time: false,
-        ..RtkRinexArcOptions::gps_l1_c()
-    };
+    let mut single_options = RtkRinexArcOptions::gps_l1_c();
+    single_options.max_epochs = Some(120);
+    single_options.include_prediction_time = false;
     let single = build_rinex_rtk_arc(&sp3, &base_obs, &rover_obs, &single_options)
         .expect("single-frequency RINEX RTK arc");
     let raw_single = real_gps_l1_epochs(&sp3, &base_obs, &rover_obs, 120);
@@ -1426,11 +1424,9 @@ fn wettzell_rinex_arc_builders_match_real_arc_scaffolding() {
     assert!(single.offsets_m.values().all(|value| *value == 0.0));
     assert_eq!(single.skipped_epoch_count, 0);
 
-    let dual_options = RtkRinexDualArcOptions {
-        max_epochs: Some(120),
-        include_prediction_time: false,
-        ..RtkRinexDualArcOptions::gps_l1_l2_cw()
-    };
+    let mut dual_options = RtkRinexDualArcOptions::gps_l1_l2_cw();
+    dual_options.max_epochs = Some(120);
+    dual_options.include_prediction_time = false;
     let dual = build_dual_frequency_rinex_rtk_arc(&sp3, &base_obs, &rover_obs, &dual_options)
         .expect("dual-frequency RINEX RTK arc");
     let raw_dual = real_gps_l1_l2_epochs(&sp3, &base_obs, &rover_obs, 120);
@@ -1635,14 +1631,12 @@ fn wettzell_static_gps_rtk_real_arc_self_validates_batch_paths() {
         .expect("single GPS reference")
         .clone();
     assert_eq!(reference_sat, "G30");
+    let mut wide_lane_options = WideLaneOptions::new(2, 0.5);
+    wide_lane_options.skip_short_fragments = false;
     let wide_lane_cycles = estimate_wide_lane_ambiguities(
         &dual_epochs(&prepared_dual.epochs),
         &reference_sat,
-        WideLaneOptions {
-            min_epochs: 2,
-            tolerance_cycles: 0.5,
-            skip_short_fragments: false,
-        },
+        wide_lane_options,
     )
     .expect("wide-lane integer estimates");
     assert!(!wide_lane_cycles.is_empty());

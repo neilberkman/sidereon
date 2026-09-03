@@ -62,6 +62,7 @@ impl ZwdEpoch {
 
 /// Inputs controlling the XYZ ZWD slant-delay helper.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct ZwdSlantOptions {
     pub epoch: ZwdEpoch,
     pub profile: ZwdProfile,

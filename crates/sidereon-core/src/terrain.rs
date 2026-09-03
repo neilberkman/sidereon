@@ -204,6 +204,7 @@ pub enum DtedInterpolation {
 
 /// Lookup options for DTED terrain queries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DtedLookupOptions {
     /// Interpolation mode used for each orthometric height query.
     pub interpolation: DtedInterpolation,

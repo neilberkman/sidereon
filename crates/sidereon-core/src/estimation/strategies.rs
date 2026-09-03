@@ -58,6 +58,7 @@ use crate::spp::{EphemerisSource, ReceiverSolution, SolveInputs, SolvePolicy, So
 /// Runtime selection options for [`estimate`]. Defaults to the SPP reference
 /// strategy ([`StrategyId::default`]), matching the per-stage recipe defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub struct EstimateOptions {
     /// Strategy identity resolved by [`estimate`] before it checks the input
     /// technique. The default is the SPP/Skyfield reference strategy.

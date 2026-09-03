@@ -74,6 +74,7 @@ pub const TEC_GROUP_DELAY_COEFFICIENT: f64 = 40.308 * ELECTRONS_PER_TECU_M2;
 
 /// Configuration for thin-shell TEC estimation.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct TecConfig {
     /// Ionospheric shell height above the spherical Earth, in meters.
     pub shell_height_m: f64,
