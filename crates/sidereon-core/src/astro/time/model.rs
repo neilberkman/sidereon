@@ -23,7 +23,16 @@ pub enum TimeModelError {
     /// A public constructor received a non-finite or out-of-domain input.
     #[error("invalid time model {field}: {reason}")]
     InvalidInput {
+        /// Stable label naming the rejected input. `JulianDateSplit::new` reports `jd_whole` or
+        /// `fraction`, `Duration::from_seconds` reports `seconds`, [`GnssWeekTow`] methods report
+        /// `tow_s` or `rollovers`, and [`crate::astro::time::Time::new`] reports
+        /// `seconds_since_j2000`; translating adapters may prefix split-date labels for their own
+        /// errors.
         field: &'static str,
+        /// Stable message describing why the labeled input was rejected. It distinguishes
+        /// finiteness, residual range, nanosecond representability, week-carry range,
+        /// normalized-week range, and unrolled-week overflow checks, and error adapters preserve
+        /// it when converting the error.
         reason: &'static str,
     },
 }
