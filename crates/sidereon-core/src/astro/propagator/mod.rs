@@ -1,11 +1,32 @@
+/// Propagation context and integrator configuration options.
+///
+/// Provides [`PropagationContext`] for passing optional body-fixed frame
+/// providers and [`IntegratorOptions`] for configuring tolerances and step sizes.
 pub mod api;
+/// Adaptive step-size controller for Runge-Kutta integration.
+///
+/// Implements [`PIController`](controller::PIController) using a Hairer/Wanner
+/// power-law factor to adjust signed integration steps based on normalized
+/// error estimates.
 pub mod controller;
 pub mod covariance;
 pub mod decay;
+/// Continuous polynomial interpolation along accepted integration steps.
+///
+/// Implements Shampine's fourth-order continuous extension for DP5(4),
+/// evaluated through [`DenseOutput`](dense_output::DenseOutput).
 pub mod dense_output;
 pub mod driver;
+/// Right-hand-side equations of motion for orbital states.
+///
+/// Provides [`OrbitalDynamics`], evaluating Cartesian position derivatives
+/// in km/s and force model accelerations in km/s².
 pub mod dynamics;
 pub mod numerical;
+/// Output structures returned by numerical integrators.
+///
+/// Defines [`PropagationResult`], discrete [`PropagationPoint`] trajectory
+/// samples at TDB epochs, and work counters in [`PropagationStats`].
 pub mod result;
 
 pub use crate::astro::forces::DragParameters;

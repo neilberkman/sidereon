@@ -53,10 +53,16 @@ pub use scales::{
 /// model lives in [`model`].
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub struct Time {
+    /// Elapsed duration in seconds from 2000-01-01 12:00:00 TDB.
+    ///
+    /// Must be finite; validated on construction by [`Time::new`].
     pub seconds_since_j2000: f64,
 }
 
 impl Time {
+    /// Creates a new [`Time`] after validating that `seconds_since_j2000` is finite.
+    ///
+    /// Returns [`TimeModelError::InvalidInput`] if the value is NaN or infinite.
     pub fn new(seconds_since_j2000: f64) -> Result<Self, TimeModelError> {
         if !seconds_since_j2000.is_finite() {
             return Err(TimeModelError::InvalidInput {
@@ -69,6 +75,7 @@ impl Time {
         })
     }
 
+    /// Returns elapsed seconds since J2000 in Barycentric Dynamical Time (TDB).
     pub fn tdb(&self) -> f64 {
         self.seconds_since_j2000
     }

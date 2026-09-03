@@ -3,6 +3,9 @@ pub mod interp;
 pub mod least_squares;
 pub mod linear;
 pub mod mat3;
+/// Polynomial operations module within the mathematical subsystem.
+///
+/// Currently serves as a namespace placeholder with no exported items.
 pub mod polynomial;
 pub mod portable;
 pub mod robust;

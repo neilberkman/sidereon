@@ -11,6 +11,8 @@ use super::{
 
 const SNR_COL_WIDTH: usize = 96;
 
+/// Renders an [`ObservationQcReport`] as a plain-text `RINEX OBSERVATION QC +QC SUMMARY` report.
+/// The result contains a header, a fixed-width per-constellation table, and a findings section separated by blank lines; absent or empty header fields are omitted, SNR and multipath values use fixed-decimal formatting, and an empty findings list is printed as `NONE`.
 pub fn render_text(report: &ObservationQcReport) -> String {
     let mut out = String::new();
     writeln!(&mut out, "RINEX OBSERVATION QC +QC SUMMARY").expect("write to string");

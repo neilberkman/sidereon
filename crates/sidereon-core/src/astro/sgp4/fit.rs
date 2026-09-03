@@ -62,8 +62,12 @@ const TAU: f64 = std::f64::consts::TAU;
 /// velocity.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FitSample {
+    /// UTC sample time as a split Julian date; the fraction must be in `[0, 1)`.
     pub epoch: JulianDate,
+    /// Target TEME position in kilometers, in the three-component order used by SGP4.
     pub position_teme_km: [f64; 3],
+    /// Optional target TEME velocity in kilometers per second; velocity fitting requires this
+    /// value on every sample or on none of them.
     pub velocity_teme_km_s: Option<[f64; 3]>,
 }
 
@@ -73,7 +77,9 @@ pub enum FitEpoch {
     /// The sample nearest the arc midpoint.
     #[default]
     Midpoint,
+    /// The first sample's epoch.
     First,
+    /// The last sample's epoch.
     Last,
     /// A specific sample index.
     Sample(usize),
@@ -84,11 +90,17 @@ pub enum FitEpoch {
 /// Pass-through TLE/OMM bookkeeping.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TleMetadata {
+    /// Catalog number copied to the generated TLE, OMM, and [`crate::astro::sgp4::ElementSet`].
     pub catalog_number: u32,
+    /// TLE and OMM classification; validation accepts only `U`, `C`, or `S`.
     pub classification: String,
+    /// TLE international designator; the OMM object identifier is derived from its trimmed text.
     pub international_designator: String,
+    /// Element-set number copied to the generated TLE and OMM.
     pub element_set_number: i32,
+    /// Revolution number at the fit epoch; it must fit the TLE `i32` field.
     pub rev_at_epoch: i64,
+    /// Object name copied to the generated OMM, including when it is empty.
     pub object_name: String,
 }
 
@@ -109,20 +121,35 @@ impl Default for TleMetadata {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct FitConfig {
+    /// Selects the fit epoch from the sample arc.
     pub epoch: FitEpoch,
+    /// Whether B\* is an optimized variable instead of the fixed [`bstar_seed`](Self::bstar_seed).
     pub fit_bstar: bool,
+    /// Initial B\* value, and the fixed value when [`fit_bstar`](Self::fit_bstar) is false.
     pub bstar_seed: f64,
+    /// Whether velocity residual rows are included when the samples provide velocities.
     pub use_velocity: bool,
+    /// Positive multiplier for velocity residuals; `None` derives it from the seed mean motion.
     pub velocity_weight_s: Option<f64>,
+    /// Optional positive per-sample multipliers for both position and velocity residuals.
     pub weights: Option<Vec<f64>>,
+    /// SGP4 operation mode used for seed, trial, final-element, and TLE-satellite propagation.
     pub opsmode: OpsMode,
+    /// Optional positive solver cost tolerance; `None` keeps the trust-region default.
     pub ftol: Option<f64>,
+    /// Optional positive solver step tolerance; `None` keeps the trust-region default.
     pub xtol: Option<f64>,
+    /// Optional positive solver gradient tolerance; `None` keeps the trust-region default.
     pub gtol: Option<f64>,
+    /// Optional maximum solver function-evaluation count; zero is rejected.
     pub max_nfev: Option<usize>,
+    /// Optional positive solver parameter scaling; `None` selects [`XScale::Jac`].
     pub x_scale: Option<XScale>,
+    /// Residual-loss model passed to the trust-region solver.
     pub loss: Loss,
+    /// Positive scale passed to the selected residual-loss model.
     pub f_scale: f64,
+    /// Catalog and object metadata copied into the generated TLE and OMM.
     pub metadata: TleMetadata,
 }
 
@@ -151,17 +178,29 @@ impl Default for FitConfig {
 /// Fit diagnostics computed from the returned elements and encoded TLE.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FitStatistics {
+    /// RMS of full-precision fitted-element TEME position residuals, in kilometers.
     pub rms_position_km: f64,
+    /// Largest full-precision fitted-element TEME position residual, in kilometers.
     pub max_position_km: f64,
+    /// Per-axis RMS fitted-element TEME position residuals, in kilometers, ordered by component.
     pub rms_position_axes_km: [f64; 3],
+    /// RMS fitted-element TEME velocity residual, in kilometers per second, or `None` when unused.
     pub rms_velocity_km_s: Option<f64>,
+    /// Position RMS after the fitted elements are encoded and reparsed as a TLE.
     pub tle_rms_position_km: f64,
+    /// Trust-region result status; status 0 is returned through [`TleFitError::DidNotConverge`].
     pub status: i32,
+    /// Trust-region function-evaluation count.
     pub nfev: usize,
+    /// Trust-region Jacobian-evaluation count.
     pub njev: usize,
+    /// Trust-region objective cost.
     pub cost: f64,
+    /// Trust-region optimality measure.
     pub optimality: f64,
+    /// Whether the final Jacobian provides the configured relative B\* observability signal.
     pub bstar_observable: bool,
+    /// Number of accepted fixed-point corrections used to refine the initial seed.
     pub seed_refine_passes: usize,
 }
 
@@ -182,10 +221,15 @@ pub struct FitStatistics {
 /// `stats.tle_rms_position_km`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TleFit {
+    /// Full-precision fitted SGP4 elements at the resolved fit epoch.
     pub elements: ElementSet,
+    /// Fixed-width encoded TLE line 1 produced from [`elements`](Self::elements) and metadata.
     pub line1: String,
+    /// Fixed-width encoded TLE line 2 produced from [`elements`](Self::elements).
     pub line2: String,
+    /// OMM carrying the fitted SGP4 elements and the exact in-memory split epoch.
     pub omm: Omm,
+    /// Arc, encoded-TLE, solver, B\*, and seed-refinement diagnostics.
     pub stats: FitStatistics,
 }
 
@@ -193,34 +237,64 @@ pub struct TleFit {
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum TleFitError {
     #[error("fit arc has {samples} samples; need at least {needed}")]
-    ArcTooShort { samples: usize, needed: usize },
+    /// The input has fewer than three samples or too few residual rows for the active parameters.
+    ArcTooShort {
+        /// Number of samples supplied by the caller.
+        samples: usize,
+        /// Minimum sample count required by the failing validation branch.
+        needed: usize,
+    },
     #[error("fit input invalid: {field}: {reason}")]
+    /// A finite, positive, length, metadata, epoch, or domain validation failed.
     InvalidInput {
+        /// Static dotted path identifying the rejected input.
         field: &'static str,
+        /// Static text identifying the rejected condition.
         reason: &'static str,
     },
     #[error("sample epochs must be strictly increasing (violation at index {index})")]
-    EpochsNotIncreasing { index: usize },
+    /// A sample epoch is not strictly later than its predecessor.
+    EpochsNotIncreasing {
+        /// Zero-based index of the current sample that violates the ordering check.
+        index: usize,
+    },
     #[error("requested epoch lies outside the sample arc")]
+    /// An explicit [`FitEpoch::Jd`] lies before the first or after the last sample.
     EpochOutsideArc,
     #[error("velocities must be present on every sample or on none")]
+    /// Velocity fitting was requested for an arc with only some velocity values present.
     MixedVelocityPresence,
     #[error("target arc is not elliptical (ecc >= 1 at the seed epoch)")]
+    /// The seed state cannot be converted to finite positive semimajor-axis elliptical data.
     NotElliptical,
     #[error("seed inclination {inclination_deg} deg is too close to retrograde-equatorial")]
-    InclinationNearRetrograde { inclination_deg: f64 },
+    /// The seed inclination reaches the 179.5-degree retrograde-equatorial guard.
+    InclinationNearRetrograde {
+        /// Seed inclination in degrees at the guard threshold.
+        inclination_deg: f64,
+    },
     #[error("seed elements cannot propagate the arc at sample {epoch_index}: {source}")]
+    /// Seed satellite initialization or propagation failed before optimization.
     SeedPropagation {
+        /// Zero for seed initialization failure; otherwise the failed sample index.
         epoch_index: usize,
+        /// Underlying SGP4 initialization or propagation error.
         source: Sgp4Error,
     },
     #[error("solver error: {0}")]
+    /// The trust-region solver returned a [`TrfError`] instead of a result.
     Solver(TrfError),
     #[error("solver stopped at an infeasible point")]
+    /// The final solver vector or residual evaluation is infeasible.
     SolutionInfeasible,
     #[error("evaluation budget exhausted before convergence (best-effort result attached)")]
-    DidNotConverge { result: Box<TleFit> },
+    /// A buildable fit has solver status 0 and is returned for inspection as a best effort.
+    DidNotConverge {
+        /// Best-effort fit built before reporting non-convergence.
+        result: Box<TleFit>,
+    },
     #[error("fitted elements failed final validation: {0}")]
+    /// SGP4 rejected fitted elements, the reparsed TLE, or a final statistics propagation.
     FinalElements(Sgp4Error),
     /// The final fitted TLE elements could not be encoded as TLE text.
     #[error("fitted TLE failed encoding: {0}")]

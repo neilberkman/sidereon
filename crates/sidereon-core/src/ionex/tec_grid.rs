@@ -30,16 +30,28 @@ pub enum TecGridError {
     DimensionsOverflow,
     /// The number of values does not match the grid dimensions.
     #[error("TEC grid has {actual} values but expected {expected}")]
-    ValueCountMismatch { actual: usize, expected: usize },
+    ValueCountMismatch {
+        /// Number of values supplied to [`TecGrid::new`] when it did not match the checked product of the three axis lengths.
+        actual: usize,
+        /// Checked epoch-by-latitude-by-longitude axis-length product required for the flat value vector.
+        expected: usize,
+    },
     /// A named input failed a shared validation rule.
     #[error("{field} {reason}")]
     InvalidField {
+        /// Stable label returned by `validate::FieldError::field()` for the rejected input.
         field: &'static str,
+        /// Short reason returned by `validate::FieldError::reason()` for the rejected input.
         reason: &'static str,
     },
     /// A query lies outside the grid's interpolation bounds.
     #[error("{name} {value} is out of TEC grid bounds")]
-    OutOfBounds { name: &'static str, value: f64 },
+    OutOfBounds {
+        /// Axis label passed by `TecGrid::interpolate_vtec` for the query that exceeded an axis endpoint.
+        name: &'static str,
+        /// Query coordinate passed by `TecGrid::interpolate_vtec` that exceeded the named axis endpoint.
+        value: f64,
+    },
 }
 
 #[cfg(test)]

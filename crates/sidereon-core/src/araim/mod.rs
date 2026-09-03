@@ -7,9 +7,23 @@
 //! per-satellite effective sigmas for reference cases that publish `Cint` and
 //! `Cacc` diagonals.
 
+/// Enumerates the fault hypotheses used by the ARAIM multi-hypothesis solve.
+/// [`crate::araim::enumerate_fault_modes`] returns a fault-free hypothesis
+/// first, followed by allowed satellite and constellation events and then
+/// higher-order satellite candidates ordered by prior mass.
 pub mod fault_modes;
+/// Holds the integrity support models consumed by ARAIM.
+/// [`crate::araim::Ism`] combines constellation defaults with optional
+/// satellite overrides; its effective-model path either uses supplied
+/// effective sigmas or adds local pseudorange variance to the URA/URE
+/// variances before taking their square roots.
 pub mod ism;
 mod mhss;
+/// Supplies the range-error interface and gain-matrix primitives used by ARAIM
+/// and single-hypothesis protection calculations.
+/// [`crate::araim::ProtectionModel`] implementations provide external
+/// per-row sigmas; the module projects weighted line-of-sight designs into ENU
+/// and applies the WG-C protection equations to derive protection levels.
 pub mod protection;
 pub mod reliability;
 

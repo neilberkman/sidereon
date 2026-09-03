@@ -12,7 +12,11 @@ pub const TROPOSPHERE_ALTITUDE_CLAMP_M: (f64, f64) = (-500.0, 9000.0);
 /// Closed altitude interval used before evaluating the ZWD profile.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AltitudeClamp {
+    /// Lower endpoint, in meters, used when clamping a height for the wet profile.
+    /// The checked ZWD helpers require this value to be finite and no greater than `max_m`.
     pub min_m: f64,
+    /// Upper endpoint, in meters, used when clamping a height for the wet profile.
+    /// The checked ZWD helpers require this value to be finite and no less than `min_m`.
     pub max_m: f64,
 }
 
@@ -28,8 +32,13 @@ impl Default for AltitudeClamp {
 /// Exponential wet-delay profile.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZwdProfile {
+    /// Closed altitude interval in meters applied before evaluating the wet profile.
     pub altitude_clamp: AltitudeClamp,
+    /// Zenith wet delay at zero altitude, in meters, before exponential scaling.
+    /// The checked helpers require this value to be finite and nonnegative.
     pub sea_level_zenith_wet_delay_m: f64,
+    /// Scale height in meters used as the denominator of the negative wet-delay exponent.
+    /// The checked helpers require this value to be finite and positive.
     pub wet_scale_height_m: f64,
 }
 
@@ -46,11 +55,15 @@ impl Default for ZwdProfile {
 /// Time input needed by the ZWD mapping variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ZwdEpoch {
+    /// Unix timestamp in nanoseconds retained with the epoch; the XYZ ZWD helper does not read it.
     pub unix_nanos: i64,
+    /// Day number used by the Niell seasonal term, accepted in the inclusive range `1..=366`.
     pub day_of_year: u16,
 }
 
 impl ZwdEpoch {
+    /// Construct an epoch, rejecting a `day_of_year` outside `1..=366`.
+    /// The Unix timestamp and accepted day number are stored unchanged.
     pub fn new(unix_nanos: i64, day_of_year: u16) -> Result<Self> {
         validate_day_of_year(day_of_year)?;
         Ok(Self {
@@ -64,11 +77,15 @@ impl ZwdEpoch {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub struct ZwdSlantOptions {
+    /// Epoch metadata for the XYZ calculation; its `day_of_year` drives the Niell seasonal term.
     pub epoch: ZwdEpoch,
+    /// Validated altitude and exponential wet-delay settings for the XYZ calculation.
     pub profile: ZwdProfile,
 }
 
 impl ZwdSlantOptions {
+    /// Construct XYZ ZWD options after validating the epoch day and wet-delay profile.
+    /// Returns [`crate::Error::InvalidInput`] when either validation fails.
     pub fn new(epoch: ZwdEpoch, profile: ZwdProfile) -> Result<Self> {
         validate_day_of_year(epoch.day_of_year)?;
         validate_profile(profile)?;
@@ -154,6 +171,13 @@ pub(crate) fn niell_mapping_function_unchecked(
     }
 }
 
+/// Compute the total ZWD-variant slant delay from satellite and receiver ECEF positions.
+///
+/// The two XYZ arrays are in meters. `ecef_to_lla` is called for the receiver and must return
+/// `[longitude_deg, latitude_deg, ellipsoidal_height_m]`; the height is clamped by the profile
+/// before standard-atmosphere Saastamoinen hydrostatic and exponential wet delays are mapped by
+/// the Niell factors. Invalid options, non-finite or degenerate vectors, or an invalid callback
+/// result return [`crate::Error::InvalidInput`].
 pub fn tropo_delay_xyz<F>(
     options: ZwdSlantOptions,
     sat_xyz: &[f64; 3],
@@ -209,6 +233,11 @@ fn saastamoinen_zhd(pressure_hpa: f64, latitude_deg: f64, altitude_m: f64) -> f6
     0.0022768 * pressure_hpa / (1.0 - 0.00266 * libm::cos(2.0 * lat_rad) - 2.8e-7 * altitude_m)
 }
 
+/// Evaluate the exponential zenith wet delay at a height in meters.
+///
+/// The height is clamped to the interval in `profile.altitude_clamp` before applying
+/// `sea_level_zenith_wet_delay_m * exp(-height_m / wet_scale_height_m)`. Invalid profile values
+/// or a non-finite height return [`crate::Error::InvalidInput`].
 pub fn zenith_wet_delay(profile: ZwdProfile, height_m: f64) -> Result<f64> {
     validate_profile(profile)?;
     validate_finite(height_m, "height_m")?;

@@ -430,31 +430,50 @@ pub enum AllanError {
     /// The input series has no samples.
     EmptySeries,
     /// The basic sampling interval is not finite and positive.
-    InvalidTau0 { tau0_s: f64 },
+    InvalidTau0 {
+        /// The non-finite or non-positive basic sampling interval supplied to the estimator, in seconds.
+        tau0_s: f64,
+    },
     /// No estimator was requested.
     NoEstimators,
     /// An explicit tau grid was empty.
     EmptyTauGrid,
     /// Averaging factors must be positive.
-    InvalidAveragingFactor { averaging_factor: usize },
+    InvalidAveragingFactor {
+        /// The zero averaging factor encountered during estimator evaluation.
+        averaging_factor: usize,
+    },
     /// A requested estimator has no valid term for this sample count.
     TooFewSamples {
+        /// The estimator being evaluated when candidate counting or term accumulation produced no usable terms.
         estimator: AllanEstimator,
+        /// The factor being evaluated when no usable term was available; the final empty-curve error uses `1` as its fallback.
         averaging_factor: usize,
+        /// Number of prepared phase samples used for candidate counting; fractional-frequency input includes its initial phase point.
         available_phase_samples: usize,
     },
     /// A sample was not finite.
-    NonFiniteSample { index: usize },
+    NonFiniteSample {
+        /// Source-series index of the non-finite value or the frequency sample whose integrated phase became non-finite.
+        index: usize,
+    },
     /// A missing sample was present under [`GapPolicy::Reject`].
-    Gap { index: usize },
+    Gap {
+        /// Source-series index of the missing entry rejected under [`GapPolicy::Reject`].
+        index: usize,
+    },
     /// The computed tau was not finite.
     NonFiniteTau {
+        /// Estimator for which `tau0_s * averaging_factor` was non-finite.
         estimator: AllanEstimator,
+        /// Averaging factor in the non-finite `tau0_s * averaging_factor` product.
         averaging_factor: usize,
     },
     /// The computed deviation was not finite.
     NonFiniteDeviation {
+        /// Estimator being evaluated when its deviation formula returned a non-finite result.
         estimator: AllanEstimator,
+        /// Averaging factor used by the non-finite deviation calculation.
         averaging_factor: usize,
     },
 }

@@ -849,15 +849,30 @@ impl core::fmt::Display for NavParseError {
 
 impl std::error::Error for NavParseError {}
 
+/// Diagnostic for a supported navigation block that lenient parsing could not decode or validate.
+/// The lenient parsers retain the block's satellite token and the [`NavParseError`] display text
+/// in [`Self::satellite`] and [`Self::message`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedNavBlock {
+    /// Satellite token associated with the failed supported block: v3 trims columns 0..3
+    /// of its first line, while v4 copies the SV token from the frame marker.
     pub satellite: String,
+    /// Display text of the [`NavParseError`] returned while parsing or validating the block.
     pub message: String,
 }
 
+/// Result of lenient RINEX navigation parsing.
+/// It keeps successfully parsed supported records and diagnostics for supported blocks that
+/// failed; header failures remain errors and unsupported systems or message rosters follow the
+/// parsers' skip policy.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NavParse {
+    /// Successfully parsed supported records, in input order. A malformed supported block is
+    /// omitted here and reported in [`Self::skipped`].
     pub records: Vec<BroadcastRecord>,
+    /// Diagnostics for supported blocks whose parsing or marker validation returned a
+    /// [`NavParseError`]. Unsupported systems and explicitly skipped version-4 rosters do not add
+    /// entries.
     pub skipped: Vec<SkippedNavBlock>,
 }
 

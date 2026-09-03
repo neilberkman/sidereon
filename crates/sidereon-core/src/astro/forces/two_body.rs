@@ -5,7 +5,19 @@ use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
 use nalgebra::Vector3;
 
+/// Central point-mass gravity model for Cartesian propagation.
+///
+/// [`ForceModel::acceleration`] returns `-mu * position_km / |position_km|³`
+/// in the propagator's inertial frame. [`Default::default`] uses
+/// [`MU_EARTH`], and an exact zero position norm is reported as
+/// [`PropagationError::NumericalFailure`].
 pub struct TwoBodyGravity {
+    /// Gravitational parameter in km³/s² used to scale the central point-mass
+    /// acceleration.
+    ///
+    /// [`Default::default`] sets this to [`MU_EARTH`], while
+    /// `ForceModelKind::build` copies the configured central-gravity parameter
+    /// into it for legacy and composite force-model variants.
     pub mu: f64,
 }
 

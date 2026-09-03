@@ -56,7 +56,11 @@ pub enum NtripEvent {
     /// A status, response classification, or malformed/oversized handshake input was rejected; emitting this event closes the machine.
     Rejected(NtripRejection),
     /// A chunked-body decoder or sourcetable parser failed; emitting this event closes the machine.
-    StreamCorrupted { detail: String },
+    StreamCorrupted {
+        /// Diagnostic message formatted from the underlying decoder or parser
+        /// error via [`core::fmt::Display`].
+        detail: String,
+    },
     /// A chunked data body reached its zero-size chunk and trailer terminator; the machine becomes closed after this event.
     StreamEnded,
 }

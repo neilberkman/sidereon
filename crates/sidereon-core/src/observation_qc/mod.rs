@@ -85,7 +85,11 @@ pub enum IntervalSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ObservationQcNote {
     /// Adjacent observation epochs were duplicate or out of order.
-    NonMonotonicEpoch { epoch_index: usize },
+    NonMonotonicEpoch {
+        /// Zero-based index of the later epoch in the observation sequence
+        /// that failed strict monotonicity (`delta_t <= 0.0`).
+        epoch_index: usize,
+    },
     /// No interval could be resolved.
     IntervalUnresolved,
 }

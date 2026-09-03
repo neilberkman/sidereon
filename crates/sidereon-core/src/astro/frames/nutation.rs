@@ -26,7 +26,11 @@ pub enum NutationError {
     /// A nutation input was non-finite or otherwise invalid.
     #[error("invalid nutation {field}: {reason}")]
     InvalidInput {
+        /// Static label identifying the value that failed validation: a public time input, a
+        /// computed scalar, a computed component collection, or a nutation-matrix angle input.
         field: &'static str,
+        /// Static validation detail: `must be finite` for a scalar and `components must be
+        /// finite` for a computed array or matrix.
         reason: &'static str,
     },
 }

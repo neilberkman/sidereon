@@ -317,7 +317,15 @@ pub enum SolveError {
     /// A boundary input or derived least-squares quantity was malformed.
     #[error("invalid least-squares {field}: {reason}")]
     InvalidInput {
+        /// Static label identifying the rejected input or derived quantity.
+        /// Direct checks pass labels such as `fd_step`, `residual`,
+        /// `jacobian`, `weights`, and `max_nfev`; mapped
+        /// [`crate::validate::FieldError`] values preserve their `field()`.
         field: &'static str,
+        /// Static condition paired with `field` in the formatted error.
+        /// Direct checks use conditions such as `empty`, `zero`, and
+        /// `length mismatch`; mapped [`crate::validate::FieldError`] values
+        /// preserve their `reason()` string.
         reason: &'static str,
     },
 }

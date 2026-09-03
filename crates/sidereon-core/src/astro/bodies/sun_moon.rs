@@ -43,7 +43,12 @@ pub enum SunMoonError {
     /// A public ephemeris input was non-finite or outside its valid domain.
     #[error("invalid Sun/Moon input {field}: {reason}")]
     InvalidInput {
+        /// Label from validation: `"t"` or `"jd_tt"` for a non-finite time
+        /// input, or `"sun[0]"` through `"sun[2]"` / `"moon[0]"` through
+        /// `"moon[2]"` for a non-finite computed vector component.
         field: &'static str,
+        /// Static reason copied from validation; this module's finite checks
+        /// report `"not finite"` for a non-finite input or computed component.
         reason: &'static str,
     },
     /// The ECI-to-ECEF frame rotation rejected the supplied time scales.

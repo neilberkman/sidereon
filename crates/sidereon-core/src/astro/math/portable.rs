@@ -259,11 +259,13 @@ pub fn svd(matrix: &DMatrix<f64>, compute_u: bool, compute_v: bool) -> SVD<Porta
 }
 
 impl Portable {
+    /// Wraps a binary64 value without changing its bit pattern.
     #[inline]
     pub const fn new(value: f64) -> Self {
         Self(value)
     }
 
+    /// Returns the wrapped binary64 value without changing its bit pattern.
     #[inline]
     pub const fn get(self) -> f64 {
         self.0

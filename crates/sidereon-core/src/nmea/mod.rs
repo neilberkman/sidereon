@@ -22,33 +22,63 @@ pub use sentence::{NmeaBody, NmeaSentence};
 pub use write::write_gga;
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
+/// Errors raised while framing, decoding, or writing an NMEA sentence.
+/// Forgiving stream entry points convert these errors into typed skips in their [`Diagnostics`].
 pub enum NmeaError {
     #[error("not an NMEA sentence: {reason}")]
-    NotFramed { reason: &'static str },
+    /// The input has no usable NMEA framing, contains a non-ASCII byte, exceeds the sentence length cap, or has a malformed checksum token.
+    NotFramed {
+        /// A parser reason such as `no NMEA start delimiter`, `sentence over length cap`, `non-ASCII byte`, or `malformed checksum`.
+        reason: &'static str,
+    },
     #[error("checksum mismatch: computed {computed:02X}, stated {stated:02X}")]
-    ChecksumMismatch { computed: u8, stated: u8 },
+    /// The XOR checksum calculated from the sentence body differs from the stated checksum.
+    ChecksumMismatch {
+        /// The checksum calculated by XORing the sentence body bytes.
+        computed: u8,
+        /// The hexadecimal checksum supplied after the sentence body.
+        stated: u8,
+    },
     #[error("unsupported sentence type {address}")]
-    UnsupportedType { address: String },
+    /// The delimiter is `!`, the address is not five bytes long, or its three-letter suffix is outside the supported sentence set.
+    UnsupportedType {
+        /// The rejected address, or `"encapsulated sentence"` for an `!` delimiter.
+        address: String,
+    },
     #[error("proprietary sentence {address}")]
-    Proprietary { address: String },
+    /// The address token begins with `P` and is proprietary rather than one of the supported standard sentence addresses.
+    Proprietary {
+        /// The proprietary address token beginning with `P`.
+        address: String,
+    },
     #[error("malformed field: {0}")]
+    /// A typed payload-field parser returned a [`FieldError`].
     MalformedField(#[from] FieldError),
     #[error("invalid input {field}: {reason}")]
+    /// A programmatic conversion or GGA-writing input failed validation.
     InvalidInput {
+        /// The input area rejected by the conversion or writer, such as `time`, `coordinate`, or `position`.
         field: &'static str,
+        /// The static validation or writer-contract message for the rejected input.
         reason: &'static str,
     },
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// A decoded NMEA log containing only sentences accepted by [`parse_nmea`].
 pub struct NmeaLog {
+    /// Accepted sentences in input line order; rejected and blank lines are represented only in parser diagnostics.
     pub sentences: Vec<NmeaSentence>,
 }
 
+/// Parses one NMEA line into a typed sentence and its non-fatal framing diagnostics.
+/// Terminal CR/LF characters are trimmed, the optional checksum is validated before payload decoding, and framing or decoding failures are returned as [`NmeaError`].
 pub fn parse_sentence(line: &str) -> Result<Parsed<NmeaSentence>, NmeaError> {
     sentence::parse_framed(sentence::frame_sentence(line)?)
 }
 
+/// Parses an LF-delimited byte stream into accepted sentences and line-numbered diagnostics.
+/// A trailing CR is removed from each line, blank lines are ignored, invalid UTF-8 and sentence errors become skips, and accepted sentences remain in input order.
 pub fn parse_nmea(input: &[u8]) -> Parsed<NmeaLog> {
     let mut diagnostics = Diagnostics::new();
     let mut sentences = Vec::new();
@@ -79,10 +109,13 @@ pub fn parse_nmea(input: &[u8]) -> Parsed<NmeaLog> {
     Parsed::new(NmeaLog { sentences }, diagnostics)
 }
 
+/// Parses UTF-8 NMEA text with the same line handling and diagnostics as [`parse_nmea`].
 pub fn parse_nmea_str(text: &str) -> Parsed<NmeaLog> {
     parse_nmea(text.as_bytes())
 }
 
+/// Groups the accepted sentences in `log` into completed NMEA epochs.
+/// Snapshots closed while pushing sentences are returned in order, followed by the final open snapshot when one remains.
 pub fn group_epochs(log: &NmeaLog) -> Vec<EpochSnapshot> {
     let mut accumulator = NmeaAccumulator::new();
     let mut snapshots = Vec::new();

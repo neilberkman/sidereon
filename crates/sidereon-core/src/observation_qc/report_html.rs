@@ -5,6 +5,13 @@ use crate::format::fmtnum::fixed_decimals;
 use super::report_text::{format_epoch_time, format_vec3_m, severity_label, system_rows};
 use super::{IntervalSource, ObservationQcHeader, ObservationQcReport};
 
+/// Render an [`ObservationQcReport`] as a self-contained HTML document.
+///
+/// The result contains inline CSS and `Header`, `Per-Constellation`, and
+/// `Findings` sections: header metadata, shared formatted constellation rows,
+/// and finding code, severity, and specification-reference cells. Report
+/// text is HTML-escaped, optional header fields are omitted when absent or
+/// empty, and empty constellation or finding collections produce a `None` row.
 pub fn render_html(report: &ObservationQcReport) -> String {
     let mut out = String::new();
     out.push_str(

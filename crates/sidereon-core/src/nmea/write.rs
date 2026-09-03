@@ -5,6 +5,9 @@ use crate::format::fmtnum::fixed_decimals;
 use super::sentence::checksum_body;
 use super::{Gga, NmeaCoordinate, NmeaError, NmeaTalker, NmeaTime};
 
+/// Serializes the GGA fields in `gga` into a checksummed `$<talker>GGA,...*HH\r\n` sentence.
+/// An optional [`NmeaTime`] must have `decimals == 2` and nanoseconds on the centisecond grid, latitude and longitude must be supplied together, and [`NmeaTalker::code`] must accept `talker`; violations return [`NmeaError::InvalidInput`].
+/// The output uses the parser's GGA field order, preserves stored coordinate minute precision and derives hemisphere letters from `negative`, formats HDOP with two decimals and altitude, geoid separation, and differential age with one, pads satellite and station identifiers to widths 2 and 4, emits `M` for present height fields, XORs the address and fields for the checksum, and ends with `\r\n`.
 pub fn write_gga(talker: NmeaTalker, gga: &Gga) -> Result<String, NmeaError> {
     if let Some(time) = gga.time {
         if time.decimals != 2 {
