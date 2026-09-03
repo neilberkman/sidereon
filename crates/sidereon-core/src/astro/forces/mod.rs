@@ -1,13 +1,23 @@
 pub mod albedo;
+/// Combines the accelerations returned by multiple [`ForceModel`]
+/// components in insertion order and returns the first component error.
 pub mod composite;
 pub mod drag;
 pub mod geopotential;
+/// Provides [`J2Gravity`], a degree-2 zonal-harmonic perturbation model built
+/// after [`TwoBodyGravity`] by [`crate::astro::propagator::ForceModelKind::TwoBodyJ2`].
 pub mod j2;
 pub mod relativity;
 pub mod srp;
 pub mod third_body;
 pub mod tides;
+/// Defines the thread-safe [`ForceModel`] acceleration interface used by
+/// numerical propagation. Its [`ForceModel::acceleration`] method returns an
+/// acceleration in km/s² or [`crate::astro::error::PropagationError`].
 pub mod r#trait;
+/// Provides [`TwoBodyGravity`], which returns central point-mass acceleration
+/// and reports an exact zero position norm as
+/// [`crate::astro::error::PropagationError::NumericalFailure`].
 pub mod two_body;
 pub mod zonal;
 
