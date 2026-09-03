@@ -29,7 +29,13 @@ pub enum RfError {
     /// A public RF input was non-finite or outside its physical domain.
     #[error("invalid RF input {field}: {reason}")]
     InvalidInput {
+        /// Static label for the rejected input or non-finite computed output.
+        /// Input validators preserve names such as `distance_km` and
+        /// `frequency_hz`; output checks use labels such as `fspl_db` and
+        /// `link_margin_db`.
         field: &'static str,
+        /// Machine-readable validation result: `not finite`, `not positive`,
+        /// or `out of range`.
         reason: &'static str,
     },
 }
