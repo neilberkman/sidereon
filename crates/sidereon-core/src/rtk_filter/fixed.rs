@@ -38,11 +38,24 @@ use crate::validate;
 /// Controls for the static fixed RTK solve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FixedSolveOpts {
+    /// Positive meters threshold for the norm of the three baseline update
+    /// components; the fixed loop requires this and the ambiguity threshold to
+    /// terminate by state tolerance.
     pub position_tol_m: f64,
+    /// Positive meters threshold for the largest absolute free-ambiguity update;
+    /// the fixed loop requires this and the baseline threshold to terminate by
+    /// state tolerance.
     pub ambiguity_tol_m: f64,
+    /// Positive upper bound for fixed re-solve iterations; reaching it without
+    /// satisfying both step thresholds returns a non-converged solution.
     pub max_iterations: usize,
+    /// Positive LAMBDA ratio threshold passed to the integer lattice resolver.
     pub ratio_threshold: f64,
+    /// Enables the partial-search fallback when the full integer search is not
+    /// fixed; the default is `false`.
     pub partial_ambiguity_resolution: bool,
+    /// Minimum subset size for partial ambiguity resolution when enabled; zero is
+    /// rejected in that mode.
     pub partial_min_ambiguities: usize,
 }
 
@@ -66,84 +79,162 @@ impl Default for FixedSolveOpts {
 /// Static batch integer-fixed RTK solution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FixedBaselineSolution {
+    /// Final three-component fixed baseline state in meters, after updates from
+    /// the fixed normal-equation re-solve have been applied.
     pub baseline_m: [f64; 3],
+    /// The 3x3 baseline covariance in square meters from the final fixed normal
+    /// matrix's first three parameter rows and columns.
     pub baseline_covariance_m2: [[f64; 3]; 3],
+    /// Free double-difference ambiguity ids paired with their final estimated
+    /// values in meters.
     pub free_ambiguities_m: Vec<(String, f64)>,
+    /// Integer cycles returned by the ambiguity search for each fixed ambiguity
+    /// id, in id-sorted order.
     pub fixed_ambiguities_cycles: Vec<(String, i64)>,
+    /// Held ambiguity values in meters, calculated from each fixed cycle count,
+    /// wavelength, and meter offset, in id-sorted order.
     pub fixed_ambiguities_m: Vec<(String, f64)>,
+    /// Paired code and carrier-phase residual records reconstructed from the
+    /// final fixed double-difference rows.
     pub residuals: Vec<FloatResidual>,
+    /// Integer-search diagnostics, including the LAMBDA result or empty
+    /// non-fixed metadata when there are no integer-search targets.
     pub search: IntegerSearchMeta,
+    /// Number of fixed re-solve iterations, including the terminating iteration.
     pub iterations: usize,
+    /// Whether both the baseline and free-ambiguity step thresholds were met.
     pub converged: bool,
+    /// `StateTolerance` for tolerance termination or `MaxIterations` for limit
+    /// termination.
     pub status: FloatSolveStatus,
+    /// Root-mean-square of the reconstructed code residuals in meters.
     pub code_rms_m: f64,
+    /// Root-mean-square of the reconstructed carrier-phase residuals in meters.
     pub phase_rms_m: f64,
+    /// Root-mean-square of each final row's prefit residual multiplied by its row
+    /// weight.
     pub weighted_rms_m: f64,
+    /// Number of final double-difference rows retained in the solve scratch
+    /// buffer.
     pub n_observations: usize,
 }
 
 /// Code or phase component selected by the RTK residual-validation gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidualComponentKind {
+    /// Selects `code_m`, `code_sigma_m`, and `code_normalized` in
+    /// `residual_validation_outlier_core`.
     Code,
+    /// Selects `phase_m`, `phase_sigma_m`, and `phase_normalized` in
+    /// `residual_validation_outlier_core`.
     Phase,
 }
 
 /// Worst normalized residual selected by the RTK validation gate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResidualValidationOutlier {
+    /// Epoch index copied from the selected [`FloatResidual`].
     pub epoch_index: usize,
+    /// Rover non-reference satellite id copied from the selected residual and
+    /// used for satellite exclusion.
     pub satellite_id: String,
+    /// Reference satellite id copied from the selected double-difference
+    /// residual.
     pub reference_satellite_id: String,
+    /// Composed double-difference ambiguity id copied from the selected residual.
     pub ambiguity_id: String,
+    /// Whether the selected component is code or carrier phase.
     pub kind: ResidualComponentKind,
+    /// Selected code or carrier-phase residual in meters.
     pub residual_m: f64,
+    /// Measurement sigma for the selected component in meters.
     pub sigma_m: f64,
+    /// Signed normalized residual; outlier selection compares its absolute value
+    /// with every other code and phase component.
     pub normalized_residual: f64,
+    /// Configured positive threshold that the selected absolute normalized
+    /// residual exceeded.
     pub threshold_sigma: f64,
 }
 
 /// Optional residual-validation controls for fixed RTK baseline solving.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResidualValidationOpts {
+    /// Optional positive finite normalized-residual threshold; `None` disables
+    /// outlier selection and validation metadata.
     pub threshold_sigma: Option<f64>,
+    /// Maximum number of satellite exclusions attempted before a remaining
+    /// outlier is returned as a validation failure.
     pub max_exclusions: usize,
 }
 
 /// Residual-validation metadata for the accepted fixed RTK solution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResidualValidationMeta {
+    /// Enabled normalized-residual threshold copied by
+    /// `residual_validation_meta_core` from the validation options.
     pub threshold_sigma: f64,
+    /// Exclusion limit copied by `residual_validation_meta_core` from the
+    /// validation options.
     pub max_exclusions: usize,
+    /// Unique satellite ids from the attempted exclusions, collected by
+    /// `residual_validation_meta_core` through a `BTreeSet` in sorted order.
     pub excluded_sats: Vec<String>,
+    /// Outliers found and removed during successive float-solve attempts, in
+    /// removal order.
     pub exclusions: Vec<ResidualValidationOutlier>,
 }
 
 /// Fixed RTK solution plus the final float solve used by integer fixing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedFixedBaselineSolution {
+    /// Last `run_float` result produced for the accepted working epochs, before
+    /// `solve_fixed_baseline_with_normal` performs integer fixing.
     pub float_solution: FloatBaselineSolution,
+    /// `solve_fixed_baseline_with_normal` result using the accepted float
+    /// baseline, ambiguities, and covariance.
     pub fixed_solution: FixedBaselineSolution,
+    /// Result of `residual_validation_meta_core`; it is `None` when the
+    /// residual options contain no threshold.
     pub residual_validation: Option<ResidualValidationMeta>,
+    /// Ambiguity columns used by the accepted solve; after an exclusion these
+    /// are rebuilt from the remaining epochs.
     pub ambiguity_ids: Vec<String>,
+    /// Map from each accepted double-difference ambiguity id to its rover
+    /// non-reference satellite.
     pub ambiguity_satellites: BTreeMap<String, String>,
 }
 
 /// Why the residual-validated fixed RTK solve could not complete.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidatedFixedSolveError {
+    /// `run_fixed_validated` converts a float, row-building, integer-search, or
+    /// fixed linear-algebra failure into this variant.
     Fixed(FixedSolveError),
+    /// The worst normalized residual remained above threshold after the allowed
+    /// satellite exclusions were attempted.
     ResidualValidationFailed {
+        /// Remaining worst residual that could not be accepted or excluded.
         outlier: Box<ResidualValidationOutlier>,
+        /// Earlier outliers whose satellites were excluded before this failure.
         exclusions: Vec<ResidualValidationOutlier>,
     },
+    /// One composed ambiguity id was associated with two different rover
+    /// satellites across the epochs.
     DuplicateAmbiguityId {
+        /// Composed ambiguity id found for both conflicting satellites.
         ambiguity_id: String,
+        /// Rover satellite stored when the ambiguity id was first inserted.
         first_satellite_id: String,
+        /// Later rover satellite that reused the ambiguity id.
         second_satellite_id: String,
     },
+    /// The available code/phase rows are fewer than the baseline and ambiguity
+    /// parameters required by the accepted solve.
     Underdetermined {
+        /// Number of double-difference rows available after exclusions.
         row_count: usize,
+        /// Three baseline components plus the accepted ambiguity-column count.
         unknown_count: usize,
     },
 }
@@ -209,18 +300,38 @@ impl From<FixedSolveError> for ValidatedFixedSolveError {
 /// Why a static fixed RTK solve could not complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FixedSolveError {
+    /// `From<FloatSolveError>` wraps a float error not mapped to a more specific
+    /// fixed error.
     Float(FloatSolveError),
+    /// `search_ambiguity_ids` maps the integer lattice resolver's error here.
     Ils(crate::ils::IlsError),
+    /// A float ambiguity lookup, row builder, or search helper found no supplied
+    /// value for the required id.
     MissingAmbiguity(String),
+    /// Covariance conversion, float-cycle conversion, or fixed-meter conversion
+    /// found no wavelength for the id in the supplied scale map.
     MissingWavelength(String),
+    /// Float-cycle conversion or fixed-meter conversion found no meter offset for
+    /// the id in the supplied scale map.
     MissingOffset(String),
+    /// The flat float covariance length was not the square of the ambiguity-id
+    /// count.
     InvalidCovarianceDimensions,
+    /// `validate_fixed_solve_opts`, covariance validation, or `fixed_row_error`
+    /// rejected a fixed-solve boundary input.
     InvalidInput {
+        /// Static field name identifying the rejected input.
         field: &'static str,
+        /// Validation category explaining why the input was rejected.
         kind: super::RtkInputErrorKind,
     },
+    /// Normal-equation assembly, selected solution, or final covariance inversion
+    /// returned no result.
     SingularGeometry,
+    /// Final rows were not complete adjacent code/phase pairs for one residual.
     IncompleteResidualPair,
+    /// `fixed_row_error` mapped a receiver-antenna correction failure from row
+    /// construction.
     ReceiverAntenna(ReceiverAntennaError),
 }
 
@@ -299,9 +410,16 @@ struct FixedAmbiguities<'a> {
 /// separately.
 #[derive(Clone, Copy)]
 pub struct AmbiguitySet<'a> {
+    /// Ambiguity ids in the caller's state and covariance column order.
     pub ids: &'a [String],
+    /// Map from ambiguity ids to rover satellite ids, used for float-only
+    /// constellation filtering and rebuilding after exclusions.
     pub satellites: &'a BTreeMap<String, String>,
+    /// Per-id wavelengths and meter offsets used for cycle conversion and fixed
+    /// meter values.
     pub scale: AmbiguityScale<'a>,
+    /// Constellation tokens whose matching ambiguity ids remain free instead of
+    /// entering integer resolution.
     pub float_only_systems: &'a [String],
 }
 
@@ -311,8 +429,12 @@ pub struct AmbiguitySet<'a> {
 /// stays within a small argument list.
 #[derive(Clone, Copy)]
 pub struct FloatPrior<'a> {
+    /// Initial fixed-state baseline in meters before normal-equation updates.
     pub baseline_m: [f64; 3],
+    /// Float double-difference ambiguity estimates in meters, indexed by id.
     pub ambiguities_m: &'a [(String, f64)],
+    /// Flat row-major ambiguity covariance in square meters; its dimensions and
+    /// positive-semidefinite rows are checked before integer search.
     pub covariance_m: &'a [f64],
 }
 
@@ -320,8 +442,14 @@ pub struct FloatPrior<'a> {
 /// inner float solve, the integer-fixed solve, and the residual-validation gate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ValidatedFixedSolveOpts {
+    /// `run_fixed_validated` passes these options to the prerequisite `run_float`
+    /// call after validation.
     pub float: FloatSolveOpts,
+    /// `run_fixed_validated` passes these options to integer search and the fixed
+    /// re-solve after validation.
     pub fixed: FixedSolveOpts,
+    /// `run_fixed_validated` passes these options to residual outlier selection
+    /// and satellite-exclusion control after validation.
     pub residual: ResidualValidationOpts,
 }
 

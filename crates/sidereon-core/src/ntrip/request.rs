@@ -1,25 +1,50 @@
 use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Selects the request and response revision used by the NTRIP client.
+/// Request construction maps the variants to HTTP/1.0 and HTTP/1.1, while response parsing maps ICY and HTTP/1.0 to [`NtripVersion::Rev1`] and HTTP/1.1 to [`NtripVersion::Rev2`].
 pub enum NtripVersion {
+    /// Produces an HTTP/1.0 request and is reported for ICY or HTTP/1.0 responses.
     Rev1,
+    /// Produces an HTTP/1.1 request with the Rev2-only request headers and is reported for HTTP/1.1 responses.
     Rev2,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Credentials encoded into the `Basic` authorization header of an NTRIP request.
+/// The request builder joins the two values with `:`, Base64-encodes the result, and rejects a username containing `:` or either value containing CR/LF.
 pub struct NtripCredentials {
+    /// Text placed before `:` when the request builder constructs the encoded authorization value.
+    /// This value must not contain `:` or CR/LF.
     pub username: String,
+    /// Text placed after `:` when the request builder constructs the encoded authorization value.
+    /// CR/LF in this value is rejected.
     pub password: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// Inputs retained by the NTRIP client machine for request construction and optional GGA pacing.
+/// The default uses port 2101 and [`NtripVersion::Rev2`], leaves the host and mountpoint empty, uses `sidereon/<package version>` as the product, and disables credentials and GGA pacing.
 pub struct NtripConfig {
+    /// Caster host text, paired with [`NtripConfig::port`] in the Rev2 `Host` header.
+    /// CR/LF in this value causes request validation to fail.
     pub host: String,
+    /// Caster port rendered in decimal after [`NtripConfig::host`] in the Rev2 `Host` header.
+    /// Rev1 request headers do not use this value.
     pub port: u16,
+    /// Mountpoint appended to the request path; an empty value produces `/`.
+    /// ASCII controls, ASCII whitespace, `/`, and `?` in this value cause request validation to fail.
     pub mountpoint: String,
+    /// Request revision selected by the request builder and retained by the client machine.
     pub version: NtripVersion,
+    /// Optional credentials that add a Base64 `Basic` authorization header when present.
+    /// Invalid username punctuation or CR/LF in either credential causes request construction to fail.
     pub credentials: Option<NtripCredentials>,
+    /// Product text placed after `NTRIP ` in the `User-Agent` header.
+    /// It must be nonempty, contain exactly one `/`, and contain no ASCII control or whitespace byte.
     pub user_agent_product: String,
+    /// Optional positive, finite interval in seconds used to pace GGA messages while streaming.
+    /// `None` disables GGA output; with `Some`, the first message is immediately due and later messages require at least this interval since the last one.
     pub gga_interval_s: Option<f64>,
 }
 
@@ -38,6 +63,8 @@ impl Default for NtripConfig {
 }
 
 impl NtripConfig {
+    /// Validates this configuration and returns the complete CRLF-terminated GET request.
+    /// The request uses HTTP/1.0 and Rev1 headers for [`NtripVersion::Rev1`] or HTTP/1.1 and Rev2 headers for [`NtripVersion::Rev2`], followed by a final blank line; invalid configuration returns an error.
     pub fn request_bytes(&self) -> Result<Vec<u8>> {
         let path = self.validated_path()?;
         let headers = self.common_headers()?;
@@ -60,6 +87,8 @@ impl NtripConfig {
         Ok(out)
     }
 
+    /// Returns the validated request path and header pairs for an NTRIP Rev2 request.
+    /// Rev1 returns an invalid-input error because this helper is only defined for [`NtripVersion::Rev2`].
     pub fn request_headers(&self) -> Result<(String, Vec<(String, String)>)> {
         if self.version != NtripVersion::Rev2 {
             return Err(Error::InvalidInput(

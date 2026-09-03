@@ -41,15 +41,32 @@ use super::{
 /// Terminal status of the static batch float RTK solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatSolveStatus {
+    /// The Euclidean baseline step and the largest absolute ambiguity step both
+    /// met their configured tolerances.
+    ///
+    /// This is the terminal status returned when the float or fixed iteration
+    /// loop stops by state tolerance.
     StateTolerance,
+    /// The iteration cap was reached before both state-step tolerances were met.
+    ///
+    /// A solution finalized with this status has `converged` set to `false`.
     MaxIterations,
 }
 
 /// Controls for the static batch float RTK solve.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FloatSolveOpts {
+    /// Finite positive threshold in meters for the Euclidean norm of the three
+    /// baseline-update components. Convergence requires the baseline step to be
+    /// no greater than this value.
     pub position_tol_m: f64,
+    /// Finite positive threshold in meters for the largest absolute update among
+    /// the float ambiguity columns. Convergence requires that maximum to be no
+    /// greater than this value.
     pub ambiguity_tol_m: f64,
+    /// Nonzero upper bound on solve iterations. Reaching it without satisfying
+    /// both step tests produces a non-converged result with
+    /// [`FloatSolveStatus::MaxIterations`].
     pub max_iterations: usize,
 }
 
@@ -70,33 +87,83 @@ impl Default for FloatSolveOpts {
 /// One public residual row from the static batch float solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FloatResidual {
+    /// Zero-based input-epoch index copied from the double-difference row. A
+    /// sequential one-epoch report uses index zero.
     pub epoch_index: usize,
+    /// Non-reference rover satellite token for this double-difference residual.
     pub satellite_id: String,
+    /// Reference satellite token selected for the non-reference satellite's
+    /// constellation.
     pub reference_satellite_id: String,
+    /// Composed double-difference ambiguity id. It combines the satellite and
+    /// reference single-difference ids with `|ref=`, except for the trivial case
+    /// where both ids equal their satellite tokens, which uses the bare satellite
+    /// token.
     pub ambiguity_id: String,
+    /// Code double-difference prefit residual in meters: observed double-
+    /// difference code minus modeled geometric double difference, including any
+    /// receiver-antenna correction.
     pub code_m: f64,
+    /// Carrier-phase double-difference prefit residual in meters: observed
+    /// double-difference phase minus modeled geometry and the current ambiguity
+    /// term.
     pub phase_m: f64,
+    /// Double-difference code measurement sigma in meters, reconstructed from
+    /// the static row weight or the sequential row's single-difference variances.
     pub code_sigma_m: f64,
+    /// Double-difference carrier-phase measurement sigma in meters, reconstructed
+    /// from the static row weight or the sequential row's single-difference
+    /// variances.
     pub phase_sigma_m: f64,
+    /// Signed code residual divided by its double-difference sigma. Static rows
+    /// use the code residual times the inverse-sigma row weight.
     pub code_normalized: f64,
+    /// Signed carrier-phase residual divided by its double-difference sigma.
+    /// Static rows use the phase residual times the inverse-sigma row weight.
     pub phase_normalized: f64,
 }
 
 /// Static batch float RTK solution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FloatBaselineSolution {
+    /// Final rover-minus-base ECEF baseline vector in meters after the last
+    /// normal-equation update.
     pub baseline_m: [f64; 3],
+    /// Top-left 3-by-3 baseline block of the inverse final normal matrix, in
+    /// square meters.
     pub baseline_covariance_m2: [[f64; 3]; 3],
+    /// Final float double-difference ambiguity estimates in meters paired with
+    /// the supplied ambiguity ids in their input order.
     pub ambiguities_m: Vec<(String, f64)>,
+    /// Row-major ambiguity covariance in square meters from the inverse Schur
+    /// complement after the three baseline parameters are eliminated.
     pub ambiguity_covariance_m: Vec<f64>,
+    /// Row-major inverse of [`Self::ambiguity_covariance_m`], computed by the
+    /// first-tie flat inversion.
     pub ambiguity_covariance_inverse_m: Vec<f64>,
+    /// One record per non-reference satellite and input epoch, formed from the
+    /// adjacent code-then-phase rows in input order.
     pub residuals: Vec<FloatResidual>,
+    /// One-based count of normal-equation iterations, including the terminating
+    /// iteration.
     pub iterations: usize,
+    /// Whether both the baseline and ambiguity step tests were satisfied before
+    /// the iteration cap was reached.
     pub converged: bool,
+    /// [`FloatSolveStatus::StateTolerance`] for threshold termination or
+    /// [`FloatSolveStatus::MaxIterations`] for cap termination.
     pub status: FloatSolveStatus,
+    /// Root-mean-square of the final residual records' code values in meters. The
+    /// shared RMS helper returns zero for an empty input.
     pub code_rms_m: f64,
+    /// Root-mean-square of the final residual records' carrier-phase values in
+    /// meters. The shared RMS helper returns zero for an empty input.
     pub phase_rms_m: f64,
+    /// Root-mean-square of every final code and phase row's prefit residual
+    /// multiplied by its static inverse-sigma row weight.
     pub weighted_rms_m: f64,
+    /// Number of final code and phase double-difference rows retained by the
+    /// solve; each non-reference satellite contributes two rows.
     pub n_observations: usize,
     /// Geometry observability and covariance-validation diagnostics for the
     /// final double-difference design. Snapshot RTK float solves pass no
@@ -111,14 +178,27 @@ pub struct FloatBaselineSolution {
 /// Why the static batch float RTK solve could not complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FloatSolveError {
+    /// A non-reference satellite has no reference satellite in its constellation;
+    /// the payload is the constellation token.
     MissingSystemReference(String),
+    /// The composed double-difference ambiguity id is absent from the supplied
+    /// float ambiguity columns.
     MissingAmbiguityColumn(String),
+    /// A float option or RTK row-builder boundary input failed validation.
     InvalidInput {
+        /// Static field-path string naming the rejected option or RTK input.
         field: &'static str,
+        /// Validation category explaining why the input was rejected.
         kind: super::RtkInputErrorKind,
     },
+    /// Normal-equation assembly or solution, rank-deficient geometry, or final
+    /// covariance inversion produced no result.
     SingularGeometry,
+    /// Final rows were not adjacent matching code/phase pairs with equal epoch,
+    /// satellite, reference, and ambiguity identifiers.
     IncompleteResidualPair,
+    /// Receiver-antenna correction application failed; the underlying error is
+    /// retained.
     ReceiverAntenna(ReceiverAntennaError),
 }
 

@@ -42,9 +42,22 @@ const STATE_NUMBER_KEYS: [&str; 9] = [
 /// Canonical, format-agnostic OEM container.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Oem {
+    /// KVN readers copy `CCSDS_OEM_VERS`, while XML readers prefer the trimmed
+    /// `<oem version>` attribute and otherwise use the `CCSDS_OEM_VERS`
+    /// element. An empty KVN value is rejected, and both encoders write the
+    /// stored version.
     pub ccsds_oem_vers: String,
+    /// Optional `CREATION_DATE` header text copied by both readers and emitted
+    /// by both encoders; a missing value becomes an empty KVN header value or
+    /// XML element.
     pub creation_date: Option<String>,
+    /// Optional `ORIGINATOR` header text copied by both readers and emitted by
+    /// both encoders; a missing value becomes an empty KVN header value or XML
+    /// element.
     pub originator: Option<String>,
+    /// Segments occur in KVN `META_START` order or XML document order. Both
+    /// encoders iterate this vector in order; a message with no segment returns
+    /// [`OemError::Field`].
     pub segments: Vec<OemSegment>,
     /// Forgiving-parse count of ephemeris data lines skipped as malformed.
     pub skipped_states: usize,
@@ -53,41 +66,89 @@ pub struct Oem {
 /// One OEM metadata/data segment.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OemSegment {
+    /// Metadata read between KVN markers or from the XML `<metadata>` child.
+    /// Encoders write it before the segment data.
     pub metadata: OemMetadata,
+    /// State vectors are collected in input order; malformed KVN lines are
+    /// skipped, while XML state-vector errors fail parsing. Both encoders write
+    /// states before covariances.
     pub states: Vec<OemState>,
+    /// Covariance blocks are collected in input order from KVN
+    /// `COVARIANCE_START` blocks or XML `<covarianceMatrix>` elements. Both
+    /// encoders write them after the states.
     pub covariances: Vec<OemCovariance>,
 }
 
 /// OEM segment metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OemMetadata {
+    /// Required `OBJECT_NAME` text copied by `parse_metadata` and emitted under
+    /// the same key or element by both encoders.
     pub object_name: String,
+    /// Required `OBJECT_ID` text copied by `parse_metadata` and emitted under
+    /// the same key or element by both encoders.
     pub object_id: String,
+    /// Required `CENTER_NAME` text copied by `parse_metadata` and emitted under
+    /// the same key or element by both encoders.
     pub center_name: String,
+    /// Required `REF_FRAME` text copied by `parse_metadata` and emitted under
+    /// the same key or element by both encoders.
     pub ref_frame: String,
+    /// Required `TIME_SYSTEM` text copied by `parse_metadata` and emitted under
+    /// the same key or element by both encoders.
     pub time_system: String,
+    /// Required `START_TIME` text retained without date conversion and emitted
+    /// under the same key or element by both encoders.
     pub start_time: String,
+    /// Required `STOP_TIME` text retained without date conversion and emitted
+    /// under the same key or element by both encoders.
     pub stop_time: String,
+    /// Optional `USEABLE_START_TIME` text; absent input yields `None`, and both
+    /// encoders omit the field when it is `None`.
     pub useable_start_time: Option<String>,
+    /// Optional `USEABLE_STOP_TIME` text; absent input yields `None`, and both
+    /// encoders omit the field when it is `None`.
     pub useable_stop_time: Option<String>,
+    /// Optional `INTERPOLATION` text; absent input yields `None`, and both
+    /// encoders omit the field when it is `None`.
     pub interpolation: Option<String>,
+    /// Optional `INTERPOLATION_DEGREE` parsed as a strict `u32`; an invalid
+    /// integer becomes an [`OemError::InvalidField`], and encoders write it in
+    /// decimal form only when present.
     pub interpolation_degree: Option<u32>,
 }
 
 /// One OEM Cartesian state sample.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OemState {
+    /// The first KVN token or required XML `EPOCH` text, retained without time-
+    /// system resolution or normalization and written back by both encoders.
     pub epoch: String,
+    /// Strict numeric `X`, `Y`, and `Z` values stored in that array order and
+    /// encoded back under those fields through `fmt_num`.
     pub position_km: [f64; 3],
+    /// Strict numeric `X_DOT`, `Y_DOT`, and `Z_DOT` values stored in that array
+    /// order and encoded back under those fields through `fmt_num`.
     pub velocity_km_s: [f64; 3],
+    /// KVN supplies acceleration only for a ten-token state line, while XML
+    /// supplies it only when all three acceleration elements are present. A
+    /// partial XML triple is an error, and encoders omit these fields for
+    /// `None`.
     pub acceleration_km_s2: Option<[f64; 3]>,
 }
 
 /// One OEM covariance block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OemCovariance {
+    /// Required `EPOCH` text retained in the covariance block and emitted under
+    /// the same field or element without date conversion.
     pub epoch: String,
+    /// Optional `COV_REF_FRAME` text retained when present and omitted by both
+    /// encoders when absent.
     pub cov_ref_frame: Option<String>,
+    /// Symmetric, positive-semidefinite [`Covariance6`] built by mirroring the
+    /// 21 lower-triangle covariance fields on read; encoding emits that lower
+    /// triangle in the shared CCSDS key order.
     pub matrix: Covariance6,
 }
 
@@ -98,7 +159,10 @@ pub enum OemError {
     MissingField(&'static str),
     /// A decoded scalar field failed validation.
     InvalidField {
+        /// Static source-field label retained from validation and included in
+        /// the error's display text.
         field: &'static str,
+        /// Validation category mapped from the shared [`validate::FieldError`].
         kind: OemInputErrorKind,
     },
     /// A structural or XML-level error.

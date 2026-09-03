@@ -20,7 +20,12 @@ pub enum IonosphereFreeError {
     /// The constellation has no standard ionosphere-free carrier pair.
     UnknownSystem(char),
     /// The requested band is not known for the constellation.
-    UnknownBand { system: char, band: String },
+    UnknownBand {
+        /// The constellation letter associated with the failed carrier-band lookup; the error formatter includes it when identifying the affected constellation.
+        system: char,
+        /// The exact band string supplied to the lookup or override. The error retains this text for the formatter, whether parsing the token failed or the recognized band is unavailable for that constellation.
+        band: String,
+    },
     /// Equal carrier frequencies make the denominator vanish.
     EqualFrequencies,
     /// Cycle-to-meter conversion requires positive carrier frequencies.

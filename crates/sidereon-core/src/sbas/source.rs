@@ -7,7 +7,17 @@ use crate::spp::EphemerisSource;
 
 use super::store::{SbasCorrectionStore, SbasIonoGrid};
 
+/// An [`EphemerisSource`] that can select a broadcast state by issue of data.
+///
+/// [`SbasCorrectedEphemeris`] calls the issue-specific lookup when a fresh GPS
+/// long-term correction supplies the broadcast IODE. A failed lookup prevents
+/// that correction branch from producing a state.
 pub trait IssueAwareBroadcast: EphemerisSource {
+    /// Return the ECEF position in meters and satellite clock offset in seconds
+    /// for the requested broadcast IODE at seconds since J2000.
+    ///
+    /// Return `None` when no usable record for `sat` has the requested IODE at
+    /// the query epoch.
     fn state_by_iode_at(
         &self,
         sat: GnssSatelliteId,
@@ -16,13 +26,25 @@ pub trait IssueAwareBroadcast: EphemerisSource {
     ) -> Option<([f64; 3], f64)>;
 }
 
+/// Selects the branch used when no complete or permitted partial SBAS
+/// correction is available.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SbasSolveMode {
+    /// Use the underlying broadcast state when correction data cannot be applied.
     #[default]
     MixedAugmentation,
+    /// Return no state when correction data cannot be applied.
     SbasOnly,
 }
 
+/// Borrowed SBAS correction inputs and the resulting fallback behavior for one
+/// source GEO.
+///
+/// `corrected_state` rejects a disabled source GEO or withdrawn satellite. GPS
+/// states use fast and long-term corrections when both are fresh, or one
+/// correction when the store permits partial use. The selected GEO uses fresh
+/// GEO navigation plus its fast clock delta; other unresolved queries follow
+/// [`SbasSolveMode`].
 pub struct SbasCorrectedEphemeris<'a> {
     broadcast: &'a dyn IssueAwareBroadcast,
     store: &'a SbasCorrectionStore,
@@ -31,6 +53,8 @@ pub struct SbasCorrectedEphemeris<'a> {
 }
 
 impl<'a> SbasCorrectedEphemeris<'a> {
+    /// Retain `broadcast`, `store`, and `geo` by reference and initialize the
+    /// fallback mode to [`SbasSolveMode::MixedAugmentation`].
     pub fn new(
         broadcast: &'a dyn IssueAwareBroadcast,
         store: &'a SbasCorrectionStore,
@@ -44,6 +68,11 @@ impl<'a> SbasCorrectedEphemeris<'a> {
         }
     }
 
+    /// Call [`SbasCorrectionStore::ready_geos`] at `t_j2000_s` and select its
+    /// first GEO.
+    ///
+    /// The store orders ready GEOs by newest partition update, so this returns
+    /// the newest eligible source or `None` when no GEO is ready.
     pub fn with_preferred_geo(
         broadcast: &'a dyn IssueAwareBroadcast,
         store: &'a SbasCorrectionStore,
@@ -53,11 +82,17 @@ impl<'a> SbasCorrectedEphemeris<'a> {
         Some(Self::new(broadcast, store, geo))
     }
 
+    /// Replace the fallback mode used when a complete or permitted partial
+    /// correction is unavailable.
     pub fn with_mode(mut self, mode: SbasSolveMode) -> Self {
         self.mode = mode;
         self
     }
 
+    /// Delegate to [`SbasCorrectionStore::iono_grid`] for the selected GEO.
+    ///
+    /// `None` indicates that the GEO partition is absent or that its latest
+    /// update has disabled the grid.
     pub fn iono_grid(&self) -> Option<&SbasIonoGrid> {
         self.store.iono_grid(self.geo)
     }
@@ -148,6 +183,11 @@ impl ObservableEphemerisSource for SbasCorrectedEphemeris<'_> {
     }
 }
 
+/// Owns thread-safe SBAS correction inputs for one source GEO.
+///
+/// The [`EphemerisSource`] and [`ObservableEphemerisSource`] implementations
+/// delegate to a borrowed [`SbasCorrectedEphemeris`] with the same GEO and
+/// fallback mode.
 pub struct SbasCorrectedEphemerisOwned {
     broadcast: Arc<dyn IssueAwareBroadcast + Send + Sync>,
     store: Arc<SbasCorrectionStore>,
@@ -156,6 +196,8 @@ pub struct SbasCorrectedEphemerisOwned {
 }
 
 impl SbasCorrectedEphemerisOwned {
+    /// Store the supplied reference-counted inputs and `geo`, initializing the
+    /// fallback mode to [`SbasSolveMode::MixedAugmentation`].
     pub fn new(
         broadcast: Arc<dyn IssueAwareBroadcast + Send + Sync>,
         store: Arc<SbasCorrectionStore>,
@@ -169,11 +211,15 @@ impl SbasCorrectedEphemerisOwned {
         }
     }
 
+    /// Replace the fallback mode used when a complete or permitted partial
+    /// correction is unavailable.
     pub fn with_mode(mut self, mode: SbasSolveMode) -> Self {
         self.mode = mode;
         self
     }
 
+    /// Delegate to the owned correction store's [`SbasCorrectionStore::iono_grid`]
+    /// lookup for the selected GEO.
     pub fn iono_grid(&self) -> Option<&SbasIonoGrid> {
         self.store.iono_grid(self.geo)
     }

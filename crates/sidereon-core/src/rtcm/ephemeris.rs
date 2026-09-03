@@ -302,42 +302,102 @@ impl GpsEphemeris {
 /// A decoded Galileo F/NAV broadcast ephemeris (message 1045).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GalileoFnavEphemeris {
+    /// Galileo SVID, decoded from the six-bit satellite field. [`Self::satellite`]
+    /// validates it against the Galileo PRN range before creating a
+    /// [`GnssSatelliteId`].
     pub satellite_id: u8,
+    /// Galileo GST week number, as transmitted in the twelve-bit field.
+    /// [`Self::to_broadcast_record`] adds the 1024-week Galileo-to-GPS epoch
+    /// offset when it builds the GST-tagged reference times.
     pub week_number: u16,
+    /// Ten-bit Galileo navigation-data issue copied to `BroadcastIssue.issue`.
     pub iod_nav: u16,
+    /// Eight-bit Galileo SISA index; [`Self::to_broadcast_record`] converts it
+    /// with the Galileo SISA table into meters.
     pub sisa: u8,
+    /// Signed fourteen-bit inclination rate, scaled as 2^-43 semicircles/s in
+    /// the wire message and converted to radians/s for broadcast evaluation.
     pub idot: i32,
+    /// Clock reference count from the fourteen-bit field; each count is 60 s
+    /// when [`Self::to_broadcast_record`] computes `toc_sow`.
     pub t_oc: u16,
+    /// Signed six-bit clock drift rate, with a 2^-59 scale to s/s^2.
     pub a_f2: i16,
+    /// Signed twenty-one-bit clock drift, with a 2^-46 scale to s/s.
     pub a_f1: i32,
+    /// Signed thirty-one-bit clock bias, with a 2^-34 scale to seconds.
     pub a_f0: i64,
+    /// Signed sixteen-bit orbit-radius sine correction, with a 2^-5 scale to
+    /// meters.
     pub c_rs: i32,
+    /// Signed sixteen-bit mean-motion difference, scaled as 2^-43
+    /// semicircles/s before conversion to radians/s.
     pub delta_n: i32,
+    /// Signed thirty-two-bit mean anomaly, scaled as 2^-31 semicircles before
+    /// conversion to radians.
     pub m0: i64,
+    /// Signed sixteen-bit latitude-argument cosine correction, with a 2^-29
+    /// scale to radians.
     pub c_uc: i32,
+    /// Unsigned thirty-two-bit eccentricity, scaled by 2^-33 for the
+    /// dimensionless broadcast element.
     pub eccentricity: u64,
+    /// Signed sixteen-bit latitude-argument sine correction, with a 2^-29
+    /// scale to radians.
     pub c_us: i32,
+    /// Unsigned thirty-two-bit square-root semi-major axis, scaled by 2^-19
+    /// to the square-root-meter value used by the broadcast evaluator.
     pub sqrt_a: u64,
+    /// Ephemeris reference count from the fourteen-bit field; each count is 60 s
+    /// when [`Self::to_broadcast_record`] computes `toe_sow`.
     pub t_oe: u16,
+    /// Signed sixteen-bit inclination cosine correction, with a 2^-29 scale to
+    /// radians.
     pub c_ic: i32,
+    /// Signed thirty-two-bit ascending-node longitude, scaled as 2^-31
+    /// semicircles before conversion to radians.
     pub omega0: i64,
+    /// Signed sixteen-bit inclination sine correction, with a 2^-29 scale to
+    /// radians.
     pub c_is: i32,
+    /// Signed thirty-two-bit reference inclination, scaled as 2^-31
+    /// semicircles before conversion to radians.
     pub i0: i64,
+    /// Signed sixteen-bit orbit-radius cosine correction, with a 2^-5 scale to
+    /// meters.
     pub c_rc: i32,
+    /// Signed thirty-two-bit argument of perigee, scaled as 2^-31 semicircles
+    /// before conversion to radians.
     pub omega: i64,
+    /// Signed twenty-four-bit right-ascension rate, scaled as 2^-43
+    /// semicircles/s before conversion to radians/s.
     pub omega_dot: i32,
+    /// Signed ten-bit E5a/E1 group-delay term, scaled by 2^-32 to seconds in
+    /// the broadcast record.
     pub bgd_e5a_e1: i16,
+    /// Two-bit E5a signal-health value. The broadcast conversion treats zero as
+    /// healthy only when [`Self::e5a_data_validity`] is false.
     pub e5a_signal_health: u8,
+    /// E5a data-validity flag; false is the value used by the broadcast health
+    /// predicate for valid data.
     pub e5a_data_validity: bool,
+    /// Seven-bit reserved tail retained by [`Self::encode`] for exact body
+    /// round trips; it is not used in broadcast conversion.
     pub reserved: u8,
 }
 
 impl GalileoFnavEphemeris {
+    /// Validate the decoded SVID and return its Galileo [`GnssSatelliteId`].
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
         GnssSatelliteId::new(GnssSystem::Galileo, self.satellite_id)
             .map_err(|e| Error::Parse(format!("invalid Galileo SVID in 1045: {e}")))
     }
 
+    /// Decode an unframed RTCM 1045 body.
+    ///
+    /// The leading twelve-bit message number must be 1045; a different number
+    /// is a parse error, and a body that ends before the fields are complete is
+    /// reported as an input error.
     pub fn decode(body: &[u8]) -> Result<Self> {
         Self::decode_inner(body).map_err(Into::into)
     }
@@ -383,6 +443,10 @@ impl GalileoFnavEphemeris {
         })
     }
 
+    /// Encode the raw fields as an unframed RTCM 1045 body in decoder order.
+    /// The result preserves every field, including the reserved tail, so a
+    /// decode followed by an encode retains the 62-byte body used by the
+    /// round-trip test.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = BitWriter::new();
         w.push_u(1045, 12);
@@ -417,6 +481,11 @@ impl GalileoFnavEphemeris {
         w.into_bytes()
     }
 
+    /// Convert this raw F/NAV message into the Galileo broadcast record used by
+    /// the orbital evaluator. Reference counts become seconds of GST week,
+    /// orbital and clock integers receive their broadcast scale factors, and
+    /// `iod_nav`, SISA, group delay, and health are copied into their canonical
+    /// record fields; an invalid SVID or overflowing aligned week is rejected.
     pub fn to_broadcast_record(&self) -> Result<BroadcastRecord> {
         galileo_to_record(
             self.satellite()?,
@@ -454,45 +523,111 @@ impl GalileoFnavEphemeris {
 /// A decoded Galileo I/NAV broadcast ephemeris (message 1046).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GalileoInavEphemeris {
+    /// Galileo SVID, decoded from the six-bit satellite field. [`Self::satellite`]
+    /// validates it against the Galileo PRN range before creating a
+    /// [`GnssSatelliteId`].
     pub satellite_id: u8,
+    /// Galileo GST week number, as transmitted in the twelve-bit field.
+    /// [`Self::to_broadcast_record`] adds the 1024-week Galileo-to-GPS epoch
+    /// offset when it builds the GST-tagged reference times.
     pub week_number: u16,
+    /// Ten-bit Galileo navigation-data issue copied to `BroadcastIssue.issue`.
     pub iod_nav: u16,
+    /// Eight-bit Galileo SISA index; [`Self::to_broadcast_record`] converts it
+    /// with the Galileo SISA table into meters.
     pub sisa_index: u8,
+    /// Signed fourteen-bit inclination rate, scaled as 2^-43 semicircles/s in
+    /// the wire message and converted to radians/s for broadcast evaluation.
     pub idot: i32,
+    /// Clock reference count from the fourteen-bit field; each count is 60 s
+    /// when [`Self::to_broadcast_record`] computes `toc_sow`.
     pub t_oc: u16,
+    /// Signed six-bit clock drift rate, with a 2^-59 scale to s/s^2.
     pub a_f2: i16,
+    /// Signed twenty-one-bit clock drift, with a 2^-46 scale to s/s.
     pub a_f1: i32,
+    /// Signed thirty-one-bit clock bias, with a 2^-34 scale to seconds.
     pub a_f0: i64,
+    /// Signed sixteen-bit orbit-radius sine correction, with a 2^-5 scale to
+    /// meters.
     pub c_rs: i32,
+    /// Signed sixteen-bit mean-motion difference, scaled as 2^-43
+    /// semicircles/s before conversion to radians/s.
     pub delta_n: i32,
+    /// Signed thirty-two-bit mean anomaly, scaled as 2^-31 semicircles before
+    /// conversion to radians.
     pub m0: i64,
+    /// Signed sixteen-bit latitude-argument cosine correction, with a 2^-29
+    /// scale to radians.
     pub c_uc: i32,
+    /// Unsigned thirty-two-bit eccentricity, scaled by 2^-33 for the
+    /// dimensionless broadcast element.
     pub eccentricity: u64,
+    /// Signed sixteen-bit latitude-argument sine correction, with a 2^-29
+    /// scale to radians.
     pub c_us: i32,
+    /// Unsigned thirty-two-bit square-root semi-major axis, scaled by 2^-19
+    /// to the square-root-meter value used by the broadcast evaluator.
     pub sqrt_a: u64,
+    /// Ephemeris reference count from the fourteen-bit field; each count is 60 s
+    /// when [`Self::to_broadcast_record`] computes `toe_sow`.
     pub t_oe: u16,
+    /// Signed sixteen-bit inclination cosine correction, with a 2^-29 scale to
+    /// radians.
     pub c_ic: i32,
+    /// Signed thirty-two-bit ascending-node longitude, scaled as 2^-31
+    /// semicircles before conversion to radians.
     pub omega0: i64,
+    /// Signed sixteen-bit inclination sine correction, with a 2^-29 scale to
+    /// radians.
     pub c_is: i32,
+    /// Signed thirty-two-bit reference inclination, scaled as 2^-31
+    /// semicircles before conversion to radians.
     pub i0: i64,
+    /// Signed sixteen-bit orbit-radius cosine correction, with a 2^-5 scale to
+    /// meters.
     pub c_rc: i32,
+    /// Signed thirty-two-bit argument of perigee, scaled as 2^-31 semicircles
+    /// before conversion to radians.
     pub omega: i64,
+    /// Signed twenty-four-bit right-ascension rate, scaled as 2^-43
+    /// semicircles/s before conversion to radians/s.
     pub omega_dot: i32,
+    /// Signed ten-bit E5a/E1 group-delay term, scaled by 2^-32 to seconds in
+    /// the broadcast record.
     pub bgd_e5a_e1: i16,
+    /// Signed ten-bit E5b/E1 group-delay term, scaled by 2^-32 to seconds in
+    /// the broadcast record.
     pub bgd_e5b_e1: i16,
+    /// Two-bit E5b signal-health value; it must be zero, with both validity
+    /// flags false and E1b health zero, for the broadcast record to be healthy.
     pub e5b_signal_health: u8,
+    /// E5b data-validity flag; false is required by the combined healthy-data
+    /// predicate in broadcast conversion.
     pub e5b_data_validity: bool,
+    /// Two-bit E1b signal-health value; it must be zero, with both validity
+    /// flags false and E5b health zero, for the broadcast record to be healthy.
     pub e1b_signal_health: u8,
+    /// E1b data-validity flag; false is required by the combined healthy-data
+    /// predicate in broadcast conversion.
     pub e1b_data_validity: bool,
+    /// Two-bit reserved tail retained by [`Self::encode`] for exact body round
+    /// trips; it is not used in broadcast conversion.
     pub reserved: u8,
 }
 
 impl GalileoInavEphemeris {
+    /// Validate the decoded SVID and return its Galileo [`GnssSatelliteId`].
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
         GnssSatelliteId::new(GnssSystem::Galileo, self.satellite_id)
             .map_err(|e| Error::Parse(format!("invalid Galileo SVID in 1046: {e}")))
     }
 
+    /// Decode an unframed RTCM 1046 body.
+    ///
+    /// The leading twelve-bit message number must be 1046; a different number
+    /// is a parse error, and a body that ends before the fields are complete is
+    /// reported as an input error.
     pub fn decode(body: &[u8]) -> Result<Self> {
         Self::decode_inner(body).map_err(Into::into)
     }
@@ -541,6 +676,10 @@ impl GalileoInavEphemeris {
         })
     }
 
+    /// Encode the raw fields as an unframed RTCM 1046 body in decoder order.
+    /// The result preserves every field, including the reserved tail, so a
+    /// decode followed by an encode retains the 63-byte body used by the
+    /// round-trip test.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = BitWriter::new();
         w.push_u(1046, 12);
@@ -578,6 +717,11 @@ impl GalileoInavEphemeris {
         w.into_bytes()
     }
 
+    /// Convert this raw I/NAV message into the Galileo broadcast record used by
+    /// the orbital evaluator. Reference counts become seconds of GST week,
+    /// orbital and clock integers receive their broadcast scale factors, and
+    /// both group delays plus the combined signal-health state are retained;
+    /// an invalid SVID or overflowing aligned week is rejected.
     pub fn to_broadcast_record(&self) -> Result<BroadcastRecord> {
         galileo_to_record(
             self.satellite()?,
@@ -703,42 +847,103 @@ fn galileo_to_record(
 /// A decoded BeiDou broadcast ephemeris (message 1042).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BeidouEphemeris {
+    /// BeiDou satellite number, decoded from the six-bit satellite field.
+    /// [`Self::satellite`] validates it against the BeiDou PRN range before
+    /// creating a [`GnssSatelliteId`].
     pub satellite_id: u8,
+    /// Native BeiDou BDT week from the thirteen-bit field; the conversion uses
+    /// it unchanged for the record week and both BDT reference times.
     pub week_number: u16,
+    /// Four-bit BeiDou signal-in-space accuracy index, mapped to meters by the
+    /// GPS URA table used in [`Self::to_broadcast_record`].
     pub sv_urai: u8,
+    /// Signed fourteen-bit inclination rate, scaled as 2^-43 semicircles/s and
+    /// converted to radians/s for broadcast evaluation.
     pub idot: i32,
+    /// Five-bit ephemeris-data issue copied to `BroadcastIssue.issue`; the
+    /// message is D1 or D2 according to the satellite's GEO classification.
     pub aode: u8,
+    /// Clock reference count from the seventeen-bit field; each count is 8 s
+    /// when [`Self::to_broadcast_record`] computes `toc_sow`.
     pub t_oc: u32,
+    /// Signed eleven-bit clock drift rate, with a 2^-66 scale to s/s^2.
     pub a_f2: i16,
+    /// Signed twenty-two-bit clock drift, with a 2^-50 scale to s/s.
     pub a_f1: i32,
+    /// Signed twenty-four-bit clock bias, with a 2^-33 scale to seconds.
     pub a_f0: i32,
+    /// Five-bit clock-data issue retained for raw round trips; broadcast issue
+    /// metadata comes from [`Self::aode`] instead.
     pub aodc: u8,
+    /// Signed eighteen-bit orbit-radius sine correction, with a 2^-6 scale to
+    /// meters.
     pub c_rs: i32,
+    /// Signed sixteen-bit mean-motion difference, scaled as 2^-43
+    /// semicircles/s before conversion to radians/s.
     pub delta_n: i32,
+    /// Signed thirty-two-bit mean anomaly, scaled as 2^-31 semicircles before
+    /// conversion to radians.
     pub m0: i64,
+    /// Signed eighteen-bit latitude-argument cosine correction, with a 2^-31
+    /// scale to radians.
     pub c_uc: i32,
+    /// Unsigned thirty-two-bit eccentricity, scaled by 2^-33 for the
+    /// dimensionless broadcast element.
     pub eccentricity: u64,
+    /// Signed eighteen-bit latitude-argument sine correction, with a 2^-31
+    /// scale to radians.
     pub c_us: i32,
+    /// Unsigned thirty-two-bit square-root semi-major axis, scaled by 2^-19
+    /// to the square-root-meter value used by the broadcast evaluator.
     pub sqrt_a: u64,
+    /// Ephemeris reference count from the seventeen-bit field; each count is 8 s
+    /// when [`Self::to_broadcast_record`] computes `toe_sow`.
     pub t_oe: u32,
+    /// Signed eighteen-bit inclination cosine correction, with a 2^-31 scale to
+    /// radians.
     pub c_ic: i32,
+    /// Signed thirty-two-bit ascending-node longitude, scaled as 2^-31
+    /// semicircles before conversion to radians.
     pub omega0: i64,
+    /// Signed eighteen-bit inclination sine correction, with a 2^-31 scale to
+    /// radians.
     pub c_is: i32,
+    /// Signed thirty-two-bit reference inclination, scaled as 2^-31
+    /// semicircles before conversion to radians.
     pub i0: i64,
+    /// Signed eighteen-bit orbit-radius cosine correction, with a 2^-6 scale to
+    /// meters.
     pub c_rc: i32,
+    /// Signed thirty-two-bit argument of perigee, scaled as 2^-31 semicircles
+    /// before conversion to radians.
     pub omega: i64,
+    /// Signed twenty-four-bit right-ascension rate, scaled as 2^-43
+    /// semicircles/s before conversion to radians/s.
     pub omega_dot: i32,
+    /// Signed ten-bit TGD1 value, multiplied by 1e-10 to produce seconds in the
+    /// BeiDou group-delay record.
     pub t_gd1: i16,
+    /// Signed ten-bit TGD2 value, multiplied by 1e-10 to produce seconds in the
+    /// BeiDou group-delay record.
     pub t_gd2: i16,
+    /// BeiDou health flag; false becomes `0.0` and true becomes `1.0` in the
+    /// broadcast record.
     pub sv_health: bool,
 }
 
 impl BeidouEphemeris {
+    /// Validate the decoded satellite number and return its BeiDou
+    /// [`GnssSatelliteId`].
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
         GnssSatelliteId::new(GnssSystem::BeiDou, self.satellite_id)
             .map_err(|e| Error::Parse(format!("invalid BeiDou satellite ID in 1042: {e}")))
     }
 
+    /// Decode an unframed RTCM 1042 body.
+    ///
+    /// The leading twelve-bit message number must be 1042; a different number
+    /// is a parse error, and a body that ends before the fields are complete is
+    /// reported as an input error.
     pub fn decode(body: &[u8]) -> Result<Self> {
         Self::decode_inner(body).map_err(Into::into)
     }
@@ -784,6 +989,10 @@ impl BeidouEphemeris {
         })
     }
 
+    /// Encode the raw fields as an unframed RTCM 1042 body in decoder order.
+    /// The result preserves every field, including both delay terms, so a
+    /// decode followed by an encode retains the 64-byte body used by the
+    /// round-trip test.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = BitWriter::new();
         w.push_u(1042, 12);
@@ -818,6 +1027,11 @@ impl BeidouEphemeris {
         w.into_bytes()
     }
 
+    /// Convert this raw message into the BDT-tagged BeiDou broadcast record
+    /// used by the orbital evaluator. The satellite selects the D1 or D2
+    /// message tag, integer fields receive their broadcast scales, and both
+    /// TGD terms are retained; an invalid satellite or unrepresentable time is
+    /// rejected.
     pub fn to_broadcast_record(&self) -> Result<BroadcastRecord> {
         let satellite_id = self.satellite()?;
         let week = u32::from(self.week_number);
@@ -879,43 +1093,104 @@ impl BeidouEphemeris {
 /// A decoded QZSS broadcast ephemeris (message 1044).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QzssEphemeris {
+    /// QZSS satellite number, decoded from the four-bit satellite field.
+    /// [`Self::satellite`] validates it against the QZSS PRN range before
+    /// creating a [`GnssSatelliteId`].
     pub satellite_id: u8,
+    /// Clock reference count from the sixteen-bit field; each count is 16 s
+    /// when [`Self::to_broadcast_record`] computes `toc_sow`.
     pub t_oc: u16,
+    /// Signed eight-bit clock drift rate, with a 2^-55 scale to s/s^2.
     pub a_f2: i16,
+    /// Signed sixteen-bit clock drift, with a 2^-43 scale to s/s.
     pub a_f1: i32,
+    /// Signed twenty-two-bit clock bias, with a 2^-31 scale to seconds.
     pub a_f0: i32,
+    /// Eight-bit ephemeris-data issue copied to `BroadcastIssue.issue`.
     pub iode: u8,
+    /// Signed sixteen-bit orbit-radius sine correction, with a 2^-5 scale to
+    /// meters.
     pub c_rs: i32,
+    /// Signed sixteen-bit mean-motion difference, scaled as 2^-43
+    /// semicircles/s before conversion to radians/s.
     pub delta_n: i32,
+    /// Signed thirty-two-bit mean anomaly, scaled as 2^-31 semicircles before
+    /// conversion to radians.
     pub m0: i64,
+    /// Signed sixteen-bit latitude-argument cosine correction, with a 2^-29
+    /// scale to radians.
     pub c_uc: i32,
+    /// Unsigned thirty-two-bit eccentricity, scaled by 2^-33 for the
+    /// dimensionless broadcast element.
     pub eccentricity: u64,
+    /// Signed sixteen-bit latitude-argument sine correction, with a 2^-29
+    /// scale to radians.
     pub c_us: i32,
+    /// Unsigned thirty-two-bit square-root semi-major axis, scaled by 2^-19
+    /// to the square-root-meter value used by the broadcast evaluator.
     pub sqrt_a: u64,
+    /// Ephemeris reference count from the sixteen-bit field; each count is 16 s
+    /// when [`Self::to_broadcast_record`] computes `toe_sow`.
     pub t_oe: u16,
+    /// Signed sixteen-bit inclination cosine correction, with a 2^-29 scale to
+    /// radians.
     pub c_ic: i32,
+    /// Signed thirty-two-bit ascending-node longitude, scaled as 2^-31
+    /// semicircles before conversion to radians.
     pub omega0: i64,
+    /// Signed sixteen-bit inclination sine correction, with a 2^-29 scale to
+    /// radians.
     pub c_is: i32,
+    /// Signed thirty-two-bit reference inclination, scaled as 2^-31
+    /// semicircles before conversion to radians.
     pub i0: i64,
+    /// Signed sixteen-bit orbit-radius cosine correction, with a 2^-5 scale to
+    /// meters.
     pub c_rc: i32,
+    /// Signed thirty-two-bit argument of perigee, scaled as 2^-31 semicircles
+    /// before conversion to radians.
     pub omega: i64,
+    /// Signed twenty-four-bit right-ascension rate, scaled as 2^-43
+    /// semicircles/s before conversion to radians/s.
     pub omega_dot: i32,
+    /// Signed fourteen-bit inclination rate, scaled as 2^-43 semicircles/s and
+    /// converted to radians/s for broadcast evaluation.
     pub idot: i32,
+    /// Two-bit L2 code value retained by [`Self::encode`]; the broadcast record
+    /// does not consume this raw signal indicator.
     pub codes_on_l2: u8,
+    /// Ten-bit GPS week residue checked against the caller-supplied `full_week`
+    /// by [`Self::to_broadcast_record`].
     pub week_number: u16,
+    /// Four-bit GPS URA index, mapped to meters by the GPS URA table.
     pub ura: u8,
+    /// Six-bit satellite-health word copied numerically to the broadcast
+    /// record, where zero is the healthy convention.
     pub sv_health: u8,
+    /// Signed eight-bit GPS-style group-delay value, scaled by 2^-31 to
+    /// seconds.
     pub t_gd: i16,
+    /// Ten-bit clock-data issue retained for exact encoding; broadcast issue
+    /// metadata comes from [`Self::iode`] instead.
     pub iodc: u16,
+    /// Fit-interval flag: false becomes two hours and true becomes six hours in
+    /// `BroadcastRecord.fit_interval_s`.
     pub fit_interval: bool,
 }
 
 impl QzssEphemeris {
+    /// Validate the decoded satellite number and return its QZSS
+    /// [`GnssSatelliteId`].
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
         GnssSatelliteId::new(GnssSystem::Qzss, self.satellite_id)
             .map_err(|e| Error::Parse(format!("invalid QZSS satellite ID in 1044: {e}")))
     }
 
+    /// Decode an unframed RTCM 1044 body.
+    ///
+    /// The leading twelve-bit message number must be 1044; a different number
+    /// is a parse error, and a body that ends before the fields are complete is
+    /// reported as an input error.
     pub fn decode(body: &[u8]) -> Result<Self> {
         Self::decode_inner(body).map_err(Into::into)
     }
@@ -962,6 +1237,10 @@ impl QzssEphemeris {
         })
     }
 
+    /// Encode the raw fields as an unframed RTCM 1044 body in decoder order.
+    /// The result preserves every field, including the clock-data issue, so a
+    /// decode followed by an encode retains the 61-byte body used by the
+    /// round-trip test.
     pub fn encode(&self) -> Vec<u8> {
         let mut w = BitWriter::new();
         w.push_u(1044, 12);
@@ -997,6 +1276,11 @@ impl QzssEphemeris {
         w.into_bytes()
     }
 
+    /// Convert this raw message into the GPST-tagged QZSS L/NAV broadcast record
+    /// used by the orbital evaluator. `full_week` must have the same ten-bit
+    /// residue as [`Self::week_number`]; reference counts and scale factors are
+    /// applied before the record is returned, and mismatched weeks, invalid
+    /// satellite IDs, or unrepresentable times are rejected.
     pub fn to_broadcast_record(&self, full_week: u32) -> Result<BroadcastRecord> {
         if full_week % 1024 != u32::from(self.week_number) {
             return Err(Error::InvalidInput(format!(

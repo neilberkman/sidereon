@@ -68,7 +68,12 @@ pub struct RtkArcObservation {
     /// Ambiguity-arc id. A clean arc uses the satellite id; a cycle-slip split
     /// carries a distinct id (e.g. `"G05#2"`) so the single-difference key resets.
     pub ambiguity_id: String,
+    /// Pseudorange from the selected code observable, in meters. The arc solve
+    /// uses it in the code measurement and in the first-sighting ambiguity seed.
     pub code_m: f64,
+    /// Carrier phase from the selected phase observable, converted to meters.
+    /// The arc solve uses it in the phase measurement and in the first-sighting
+    /// ambiguity seed.
     pub phase_m: f64,
     /// Optional loss-of-lock indicator. Only consumed by the optional cycle-slip
     /// preprocessing ([`RtkArcPreprocessing::cycle_slip`]): bit 0 set marks a slip
@@ -81,7 +86,11 @@ pub struct RtkArcObservation {
 /// positions needed to form double differences.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkArcEpoch {
+    /// Base observations retained for satellites that also have a rover record
+    /// and all required shared and transmit-time position entries.
     pub base: Vec<RtkArcObservation>,
+    /// Rover observations retained for satellites that also have a base record
+    /// and all required shared and transmit-time position entries.
     pub rover: Vec<RtkArcObservation>,
     /// Shared receive-time satellite ECEF positions (metres), used for the
     /// elevation-dependent variance model and as the reference geometry.
@@ -161,12 +170,19 @@ pub struct RtkArcConfig {
     pub preprocessing: RtkArcPreprocessing,
 }
 
+/// Configuration consumed by [`solve_static_rtk_arc`] for a static batch RTK
+/// arc solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkStaticArcConfig {
+    /// Sequential-arc settings reused for input preprocessing, geometry, and
+    /// measurement and ambiguity modeling.
     pub arc: RtkArcConfig,
+    /// Validated options for the float solve, fixed solve, and residual checks.
     pub opts: ValidatedFixedSolveOpts,
 }
 
+/// Results assembled by [`solve_static_rtk_arc`], including both batch solver
+/// outputs and metadata produced while preparing the input epochs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkStaticArcSolution {
     /// Geometry observability and covariance-validation diagnostics for the
@@ -177,20 +193,43 @@ pub struct RtkStaticArcSolution {
     /// design diagnostics, but a full-rank propagated prior can validate
     /// zero-redundancy covariance.
     pub geometry_quality: GeometryQuality,
+    /// Per-constellation reference single-difference ambiguity ids returned by
+    /// `build_static_batch_epochs` for the batch epochs.
     pub references: BTreeMap<String, String>,
+    /// Globally ordered ambiguity-column ids returned by
+    /// `baseline_ambiguity_index_core` for the batch epochs.
     pub ambiguity_ids: Vec<String>,
+    /// Physical satellite associated with each ambiguity-column id, as returned
+    /// by `baseline_ambiguity_index_core` for scale lookup and reporting.
     pub ambiguity_satellites: BTreeMap<String, String>,
+    /// Float baseline solution returned by `solve_float_baseline` over all batch
+    /// epochs.
     pub float_solution: FloatBaselineSolution,
+    /// Validated fixed baseline solution returned by
+    /// `solve_fixed_baseline_validated` over the same batch and ambiguity set.
     pub fixed_solution: ValidatedFixedBaselineSolution,
+    /// Satellites copied from `preprocess_arc` after cycle-slip preprocessing
+    /// applies its drop policy.
     pub dropped_sats: Vec<String>,
+    /// Arc records copied from `preprocess_arc` after cycle-slip preprocessing
+    /// applies its split policy.
     pub split_cycle_slip_arcs: Vec<CycleSlipSplitArc>,
+    /// Satellites copied from `preprocess_arc` after the configured elevation
+    /// mask removes them.
     pub elevation_masked_sats: Vec<String>,
 }
 
+/// Errors that [`solve_static_rtk_arc`] can return while preparing or solving a
+/// static RTK arc.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtkStaticArcError {
+    /// `solve_static_rtk_arc` failed during arc construction, reference or
+    /// filter-state setup, or enabled preprocessing before the batch solvers
+    /// completed.
     Arc(RtkArcError),
+    /// `solve_float_baseline` failed after the batch was constructed.
     Float(FloatSolveError),
+    /// `solve_fixed_baseline_validated` failed after the float solve.
     Fixed(ValidatedFixedSolveError),
 }
 
@@ -220,54 +259,121 @@ impl From<RtkArcError> for RtkStaticArcError {
     }
 }
 
+/// Dual-frequency values extracted by `dual_frequency_observations` for one
+/// receiver and one RTK satellite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkDualFrequencyObservation {
+    /// Ambiguity-arc identifier, initialized from the satellite token by the
+    /// RINEX builder and possibly renamed by cycle-slip splitting.
     pub ambiguity_id: String,
+    /// First-frequency pseudorange in meters, copied by
+    /// `dual_frequency_observations` and passed unchanged to dual-frequency
+    /// preparation.
     pub p1_m: f64,
+    /// Second-frequency pseudorange in meters, copied by
+    /// `dual_frequency_observations` and passed unchanged to dual-frequency
+    /// preparation.
     pub p2_m: f64,
+    /// First-frequency carrier phase in cycles, copied by
+    /// `dual_frequency_observations` and retained in cycles for dual-frequency
+    /// preparation.
     pub phi1_cycles: f64,
+    /// Second-frequency carrier phase in cycles, copied by
+    /// `dual_frequency_observations` and retained in cycles for dual-frequency
+    /// preparation.
     pub phi2_cycles: f64,
+    /// First selected carrier frequency in hertz, looked up from the RINEX
+    /// phase observable by `dual_frequency_observations`.
     pub f1_hz: f64,
+    /// Second selected carrier frequency in hertz, looked up from the RINEX
+    /// phase observable by `dual_frequency_observations`.
     pub f2_hz: f64,
+    /// Optional loss-of-lock value from the first phase observable, consumed by
+    /// dual-frequency cycle-slip preprocessing.
     pub lli1: Option<i64>,
+    /// Optional loss-of-lock value from the second phase observable, consumed by
+    /// dual-frequency cycle-slip preprocessing.
     pub lli2: Option<i64>,
 }
 
+/// A base/rover dual-frequency pair emitted by
+/// `build_dual_frequency_rinex_rtk_arc` for one satellite and epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkDualFrequencySatelliteObservation {
+    /// Satellite token used to pair observations and position-map entries.
     pub satellite_id: String,
+    /// Complete selected dual-frequency observation extracted from the base
+    /// RINEX epoch.
     pub base: RtkDualFrequencyObservation,
+    /// Complete selected dual-frequency observation extracted from the rover
+    /// RINEX epoch matched to the base epoch.
     pub rover: RtkDualFrequencyObservation,
 }
 
+/// A dual-frequency RTK epoch emitted by
+/// `build_dual_frequency_rinex_rtk_arc` for wide-lane and ionosphere-free
+/// preparation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkDualFrequencyArcEpoch {
+    /// Whole part returned by `civil_to_julian_split` for the civil epoch and
+    /// passed to ionosphere-free setup.
     pub jd_whole: f64,
+    /// Fractional part returned by `civil_to_julian_split` for the civil epoch
+    /// and passed to ionosphere-free setup.
     pub jd_fraction: f64,
+    /// Fixed-width civil timestamp used to order dual cycle-slip records; absent
+    /// values fall back to the input index during preprocessing.
     pub epoch_sort_key: Option<String>,
+    /// Seconds since J2000 used by dual cycle-slip preprocessing to detect gaps.
     pub gap_time_s: Option<f64>,
+    /// Base/rover pairs retained after complete signal, ephemeris, and position
+    /// checks.
     pub observations: Vec<RtkDualFrequencySatelliteObservation>,
+    /// Shared receive-time satellite ECEF positions, in meters, used for
+    /// reference geometry.
     pub satellite_positions_m: BTreeMap<String, [f64; 3]>,
+    /// Base transmit-time satellite ECEF positions, in meters; an empty map
+    /// makes the driver use [`Self::satellite_positions_m`].
     pub base_satellite_positions_m: BTreeMap<String, [f64; 3]>,
+    /// Rover transmit-time satellite ECEF positions, in meters; an empty map
+    /// makes the driver use [`Self::satellite_positions_m`].
     pub rover_satellite_positions_m: BTreeMap<String, [f64; 3]>,
+    /// Optional rover ECEF velocity, in meters per second, preserved for a later
+    /// velocity-propagated sequential solve.
     pub velocity_mps: Option<[f64; 3]>,
+    /// Optional seconds-since-J2000 coordinate preserved for prediction deltas
+    /// in a later sequential solve.
     pub prediction_time_s: Option<f64>,
 }
 
+/// Settings forwarded by `prepare_dual_frequency_arc` to dual-frequency
+/// cycle-slip preprocessing for a wide-lane arc.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RtkDualCycleSlipConfig {
+    /// Action selected by dual-frequency preprocessing when it detects a slip.
     pub policy: CycleSlipPolicy,
+    /// Detector thresholds and gap-handling options forwarded unchanged to
+    /// `prepare_dual_cycle_slip_baseline_epochs`.
     pub options: CycleSlipOptions,
 }
 
+/// Inputs consumed by [`fix_wide_lane_rtk_arc`] for dual-frequency wide-lane
+/// ambiguity estimation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkWideLaneArcConfig {
+    /// Base-station ECEF position, in meters, used for reference geometry.
     pub base_m: [f64; 3],
+    /// Policy used to select one reference satellite per constellation.
     pub reference: BaselineReferenceSelection,
+    /// Wide-lane estimator options passed to each selected constellation.
     pub options: WideLaneOptions,
+    /// Optional dual-frequency cycle-slip preparation before reference selection
+    /// and wide-lane estimation.
     pub cycle_slip: Option<RtkDualCycleSlipConfig>,
 }
 
+/// Output assembled by [`fix_wide_lane_rtk_arc`] from wide-lane estimates and
+/// the dual-frequency epochs used to obtain them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkWideLaneArcSolution {
     /// Geometry observability and covariance-validation diagnostics for the
@@ -278,18 +384,29 @@ pub struct RtkWideLaneArcSolution {
     /// Sequential filter epochs use the same instantaneous design diagnostics,
     /// but a full-rank propagated prior can validate zero-redundancy covariance.
     pub geometry_quality: GeometryQuality,
+    /// Per-constellation physical reference satellite tokens.
     pub references: BTreeMap<String, String>,
+    /// Integer wide-lane cycle estimates accumulated across the selected systems.
     pub wide_lane_cycles: BTreeMap<String, i64>,
+    /// Input epochs after optional dual cycle-slip preparation.
     pub epochs: Vec<RtkDualFrequencyArcEpoch>,
+    /// Satellites removed by dual cycle-slip preprocessing under its drop policy.
     pub dropped_sats: Vec<String>,
+    /// Split-arc records produced by dual cycle-slip preprocessing.
     pub split_cycle_slip_arcs: Vec<CycleSlipSplitArc>,
 }
 
+/// Errors that [`fix_wide_lane_rtk_arc`] can return while preparing or estimating
+/// a dual-frequency wide-lane arc.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtkWideLaneArcError {
+    /// `fix_wide_lane_rtk_arc` found an empty epoch slice before preprocessing.
     EmptyEpochs,
+    /// `dual_arc_references` failed to select reference satellites.
     Reference(DoubleDifferenceError),
+    /// `prepare_dual_frequency_arc` failed during dual cycle-slip preprocessing.
     CycleSlipPrep(CycleSlipPrepError),
+    /// `estimate_wide_lane_ambiguities` failed for a selected constellation.
     WideLane(WideLaneError),
 }
 
@@ -308,81 +425,154 @@ impl core::fmt::Display for RtkWideLaneArcError {
 
 impl std::error::Error for RtkWideLaneArcError {}
 
+/// Settings consumed by [`prepare_ionosphere_free_rtk_arc`] when converting
+/// dual-frequency epochs to ionosphere-free observations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkIonosphereFreeArcConfig {
+    /// Base-station ECEF position in meters, passed to reference selection and
+    /// ionosphere-free preparation.
     pub base_m: [f64; 3],
+    /// Initial rover-minus-base ECEF baseline guess in meters, passed to each
+    /// system's ionosphere-free setup.
     pub initial_baseline_m: [f64; 3],
+    /// Policy passed to dual reference selection for each constellation.
     pub reference: BaselineReferenceSelection,
+    /// Flag passed to the standalone preparation to select its troposphere
+    /// correction branch.
     pub apply_troposphere: bool,
 }
 
+/// Output assembled by [`prepare_ionosphere_free_rtk_arc`], including the
+/// ionosphere-free epochs and ambiguity scales needed by the final RTK solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkIonosphereFreeArcSolution {
+    /// Per-constellation physical reference satellite tokens returned by dual
+    /// reference selection.
     pub references: BTreeMap<String, String>,
+    /// Single-frequency ionosphere-free epochs merged by original input index
+    /// from each system's setup result.
     pub epochs: Vec<RtkArcEpoch>,
+    /// Wavelength scale per resulting single-difference ambiguity id, in meters,
+    /// returned for the final fixed solve.
     pub wavelengths_m: BTreeMap<String, f64>,
+    /// Code-to-phase offset scale per resulting single-difference ambiguity id,
+    /// in meters, returned for the final fixed solve.
     pub offsets_m: BTreeMap<String, f64>,
 }
 
+/// Selects the final static or sequential solve matched by
+/// [`solve_wide_lane_fixed_rtk_arc`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtkWideLaneFixedArcSolveConfig {
+    /// When selected, the combined driver calls `solve_static_rtk_arc` after
+    /// injecting the ionosphere-free reference and scale maps.
     Static(RtkStaticArcConfig),
+    /// When selected, the combined driver calls `solve_rtk_arc` after injecting
+    /// the ionosphere-free reference and scale maps.
     Sequential(RtkArcConfig),
 }
 
+/// Configuration consumed by [`solve_wide_lane_fixed_rtk_arc`] for its
+/// wide-lane, ionosphere-free, and final RTK stages.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkWideLaneFixedArcConfig {
+    /// Settings consumed by the initial wide-lane preparation and estimation.
     pub wide_lane: RtkWideLaneArcConfig,
+    /// Settings consumed by ionosphere-free conversion of the prepared epochs.
     pub ionosphere_free: RtkIonosphereFreeArcConfig,
+    /// Settings and branch selection for the final static or sequential solve.
     pub solve: RtkWideLaneFixedArcSolveConfig,
 }
 
+/// Identifies the branch recorded by `wide_lane_fixed_metadata` after a combined
+/// RTK arc solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RtkWideLaneFixedArcIntegerMethod {
+    /// `solve_wide_lane_fixed_rtk_arc` selected the static branch, whose
+    /// validated LAMBDA solve consumes the wide-lane scales.
     WideLaneNarrowLaneLambda,
+    /// `solve_wide_lane_fixed_rtk_arc` selected the sequential branch, whose
+    /// per-epoch ambiguity search consumes the wide-lane scales.
     WideLaneNarrowLaneSequential,
 }
 
+/// Metadata assembled by `wide_lane_fixed_metadata` to connect wide-lane fixing
+/// with the final RTK arc result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkWideLaneFixedArcMetadata {
+    /// Final path marker set by `wide_lane_fixed_metadata` from the selected
+    /// static or sequential branch.
     pub integer_method: RtkWideLaneFixedArcIntegerMethod,
+    /// Set to `true` by `wide_lane_fixed_metadata` after wide-lane fixing has
+    /// succeeded.
     pub wide_lane_fixed: bool,
+    /// Wide-lane integer estimates filtered to satellites used by the final
+    /// static ambiguity index or sequential epoch solutions.
     pub wide_lane_ambiguities_cycles: BTreeMap<String, i64>,
+    /// Dropped-satellite list copied from the wide-lane stage's cycle-slip
+    /// preparation.
     pub dropped_cycle_slip_sats: Vec<String>,
+    /// Split-arc list copied from the wide-lane stage's cycle-slip preparation.
     pub split_cycle_slip_arcs: Vec<CycleSlipSplitArc>,
 }
 
+/// Static branch assembled by [`solve_wide_lane_fixed_rtk_arc`] from its wide-
+/// lane, ionosphere-free, and final static results.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkWideLaneFixedStaticArcSolution {
+    /// Wide-lane stage result used to derive the combined metadata.
     pub wide_lane: RtkWideLaneArcSolution,
+    /// Ionosphere-free stage result whose epochs and scales feed the static solve.
     pub ionosphere_free: RtkIonosphereFreeArcSolution,
+    /// Final static batch result after reference and scale injection.
     pub solution: RtkStaticArcSolution,
+    /// Metadata identifying the static combined path and its wide-lane outcomes.
     pub metadata: RtkWideLaneFixedArcMetadata,
 }
 
+/// Sequential branch assembled by [`solve_wide_lane_fixed_rtk_arc`] from its
+/// wide-lane, ionosphere-free, and final sequential results.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtkWideLaneFixedSequentialArcSolution {
+    /// Wide-lane stage result used to derive the combined metadata.
     pub wide_lane: RtkWideLaneArcSolution,
+    /// Ionosphere-free stage result whose epochs and scales feed the sequential
+    /// solve.
     pub ionosphere_free: RtkIonosphereFreeArcSolution,
+    /// Final sequential arc result after reference and scale injection.
     pub solution: RtkArcSolution,
+    /// Metadata identifying the sequential combined path and its wide-lane
+    /// outcomes.
     pub metadata: RtkWideLaneFixedArcMetadata,
 }
 
 // Returned by value once per solve, never held in bulk, so the static-vs-sequential
 // size difference is immaterial; boxing a variant would churn the public + binding API.
 #[allow(clippy::large_enum_variant)]
+/// Result returned by [`solve_wide_lane_fixed_rtk_arc`] after its wide-lane and
+/// ionosphere-free stages and selected final solve.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtkWideLaneFixedArcSolution {
+    /// The selected final solver was the static batch path.
     Static(RtkWideLaneFixedStaticArcSolution),
+    /// The selected final solver was the sequential arc path.
     Sequential(RtkWideLaneFixedSequentialArcSolution),
 }
 
+/// Errors returned by [`solve_wide_lane_fixed_rtk_arc`] from its combined
+/// wide-lane, ionosphere-free, or final RTK stages.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtkWideLaneFixedArcError {
+    /// `ensure_single_wide_lane_system` found multiple constellations, or
+    /// `single_reference_satellite` did not find exactly one reference.
     UnsupportedMultiGnss,
+    /// The initial wide-lane stage returned an error.
     WideLane(RtkWideLaneArcError),
+    /// Ionosphere-free preparation over the wide-lane epochs returned an error.
     IonosphereFree(RtkIonosphereFreeArcError),
+    /// The final static branch returned an `RtkStaticArcError`.
     Static(RtkStaticArcError),
+    /// The final sequential branch returned an `RtkArcError`.
     Sequential(RtkArcError),
 }
 
@@ -412,10 +602,17 @@ impl std::error::Error for RtkWideLaneFixedArcError {
     }
 }
 
+/// Errors that [`prepare_ionosphere_free_rtk_arc`] can return while preparing
+/// dual-frequency ionosphere-free epochs.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RtkIonosphereFreeArcError {
+    /// `prepare_ionosphere_free_rtk_arc` found an empty epoch slice before
+    /// reference selection.
     EmptyEpochs,
+    /// `dual_arc_references` failed to select reference satellites.
     Reference(DoubleDifferenceError),
+    /// The standalone ionosphere-free preparation failed, including its
+    /// `NoEpochs` result when no system produced a usable epoch.
     IonosphereFree(IonosphereFreeBaselineError),
 }
 
@@ -499,21 +696,33 @@ pub enum RtkArcError {
     /// The arc has no epochs.
     EmptyEpochs,
     /// Fewer than four satellites appear across the whole arc.
-    TooFewSatellites { count: usize, minimum: usize },
+    TooFewSatellites {
+        /// Number of distinct satellites in the normalized arc availability union.
+        count: usize,
+        /// Required number of distinct arc satellites; currently four.
+        minimum: usize,
+    },
     /// Reference-satellite selection failed.
     Reference(DoubleDifferenceError),
     /// The constructed initial filter state was invalid.
     FilterState(FilterStateValidationError),
     /// A per-epoch sequential update failed.
     Update {
+        /// Zero-based index of the epoch whose update failed.
         epoch_index: usize,
+        /// Error returned by the sequential filter for that epoch.
         source: UpdateError,
     },
     /// A strict (velocity-propagated) run hit a missing/incomparable epoch time.
-    InvalidEpochTime { epoch_index: usize },
+    InvalidEpochTime {
+        /// Zero-based index of the non-first epoch without comparable time data.
+        epoch_index: usize,
+    },
     /// A satellite in the availability set is missing a required position.
     MissingPosition {
+        /// Zero-based index of the epoch being assembled.
         epoch_index: usize,
+        /// Satellite token whose shared or receiver-specific position is missing.
         satellite_id: String,
     },
     /// Cycle-slip preprocessing rejected the input or detected a slip under
@@ -650,6 +859,16 @@ pub fn solve_rtk_arc(
     })
 }
 
+/// Solve a static RTK baseline over a raw arc as one batch.
+///
+/// Enabled preprocessing runs before batch construction. The function then
+/// derives the ambiguity columns and scale maps, calls the float and validated
+/// fixed baseline solvers, and returns their results with preprocessing metadata.
+/// The static-station wrapper uses this path after filling the arc scale maps
+/// from RINEX.
+///
+/// An empty epoch slice is returned as [`RtkStaticArcError::Arc`]. Other
+/// preparation, float, and fixed failures retain their corresponding variants.
 pub fn solve_static_rtk_arc(
     epochs: &[RtkArcEpoch],
     config: &RtkStaticArcConfig,
@@ -714,6 +933,17 @@ pub fn solve_static_rtk_arc(
     })
 }
 
+/// Estimate wide-lane integer ambiguities across a dual-frequency RTK arc.
+///
+/// The function optionally applies dual-frequency cycle-slip preparation, selects
+/// one reference satellite per constellation, runs the standalone wide-lane
+/// estimator for each selected system, and returns the prepared epochs together
+/// with geometry and cycle-slip metadata. The estimate map is accumulated across
+/// the systems in deterministic map order.
+///
+/// An empty epoch slice returns [`RtkWideLaneArcError::EmptyEpochs`]. Failures in
+/// reference selection, cycle-slip preparation, or wide-lane estimation are
+/// wrapped in the matching error variant.
 pub fn fix_wide_lane_rtk_arc(
     epochs: &[RtkDualFrequencyArcEpoch],
     config: &RtkWideLaneArcConfig,
@@ -748,6 +978,16 @@ pub fn fix_wide_lane_rtk_arc(
     })
 }
 
+/// Convert a dual-frequency RTK arc to ionosphere-free single-frequency epochs.
+///
+/// References are selected per constellation, the standalone ionosphere-free
+/// preparation runs for each system with the supplied wide-lane integers, and
+/// the resulting records are merged by their original epoch index. The returned
+/// wavelength and offset maps are intended for the subsequent fixed RTK solve.
+///
+/// Empty input returns [`RtkIonosphereFreeArcError::EmptyEpochs`]; if no system
+/// produces an epoch, the function returns its `IonosphereFree` variant with
+/// [`IonosphereFreeBaselineError::NoEpochs`].
 pub fn prepare_ionosphere_free_rtk_arc(
     epochs: &[RtkDualFrequencyArcEpoch],
     wide_lane_cycles: &BTreeMap<String, i64>,
@@ -806,6 +1046,16 @@ pub fn prepare_ionosphere_free_rtk_arc(
     })
 }
 
+/// Run the complete wide-lane, ionosphere-free, and final RTK arc pipeline.
+///
+/// The input must contain one constellation. After wide-lane fixing and
+/// ionosphere-free conversion, the function injects the sole selected reference
+/// and the derived wavelength/offset maps into either the configured static or
+/// sequential solve, then returns the corresponding composite result.
+///
+/// [`RtkWideLaneFixedArcError::UnsupportedMultiGnss`] is returned for multiple
+/// constellations or for a reference map that is not singular; failures from
+/// each pipeline stage retain their matching error variant.
 pub fn solve_wide_lane_fixed_rtk_arc(
     epochs: &[RtkDualFrequencyArcEpoch],
     config: &RtkWideLaneFixedArcConfig,

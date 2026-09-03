@@ -34,6 +34,13 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Added
 
+- Reference documentation for 2,106 public items across 74 modules, written
+  from the code that produces and consumes each item: units, frames, bit
+  widths and scale factors for raw protocol fields, the header record or
+  function each value comes from, when an `Option` is `None`, and the
+  condition under which each error variant is returned. 522 items in 41
+  modules remain undocumented; `#![warn(missing_docs)]` stays off until they
+  are covered.
 - A supply-chain gate (`cargo deny`: advisories, licenses, bans, sources)
   runs in CI, together with an MSRV check at Rust 1.89. One advisory is an
   explicit, documented exception: RUSTSEC-2024-0436 (`paste`, an unmaintained

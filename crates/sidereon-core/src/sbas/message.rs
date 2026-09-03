@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use crate::rtcm::bits::{BitReader, BitWriter};
 use crate::rtcm::crc::crc24q_bits;
 
+/// The six-bit SBAS message-type field carried as an unsigned byte.
 pub type SbasMessageType = u8;
 
 const FRAMED_LEN: usize = 32;
@@ -14,195 +15,327 @@ const FRAMED_BITS: usize = BODY_BITS + CRC_BITS;
 const PREAMBLES: [u8; 3] = [0x53, 0x9A, 0xC6];
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
+/// Raw reserved segments retained from an SBAS message payload.
+///
+/// Each tuple stores a segment's value and width in bits, in wire order, so
+/// the encoder can replay reserved fields whose layout is known.
 pub struct SpareBits(pub Vec<(u64, u8)>);
 
 impl SpareBits {
+    /// Create an empty collection of reserved wire segments.
     pub fn new() -> Self {
         Self(Vec::new())
     }
 
+    /// Append one reserved segment with its raw value and bit width.
     pub fn push(&mut self, value: u64, width: u8) {
         self.0.push((value, width));
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// A decoded SBAS payload selected by its six-bit message type.
+///
+/// The decoder maps recognized phase-A IDs to typed records and retains
+/// unsupported IDs with their raw payload bits.
 pub enum SbasMessage {
+    /// Message type 0; ingesting it disables the selected GEO for 60 seconds.
     DoNotUse(SbasDoNotUse),
+    /// Message type 1; supplies the active 210-position satellite mask.
     PrnMask(SbasPrnMask),
+    /// Message types 2 through 5; supplies fast pseudorange corrections.
     FastCorrections(SbasFastCorrections),
+    /// Message type 6; supplies integrity indices for fast corrections.
     Integrity(SbasIntegrity),
+    /// Message type 7; supplies fast-correction degradation information.
     FastDegradation(SbasFastDegradation),
+    /// Message type 9; supplies raw GEO navigation state coefficients.
     GeoNav(SbasGeoNav),
+    /// Message type 12, retained as an uninterpreted 212-bit payload.
     NetworkTime(SbasNetworkTime),
+    /// Message type 17, retained as an uninterpreted 212-bit payload.
     GeoAlmanac(SbasGeoAlmanac),
+    /// Message type 18; supplies a band- and IODI-qualified IGP mask.
     IgpMask(SbasIgpMask),
+    /// Message type 24; combines six fast slots with one long-term half.
     MixedCorrections(SbasMixedCorrections),
+    /// Message type 25; supplies two long-term correction halves.
     LongTermCorrections(SbasLongTermCorrections),
+    /// Message type 26; supplies fifteen ionospheric delay entries.
     IonoDelays(SbasIonoDelays),
+    /// A message ID outside the phase-A classification, retained as raw data.
     Unsupported(SbasUnsupported),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The raw payload carried by SBAS message type 0.
 pub struct SbasDoNotUse {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// Raw payload bits; encoding uses at most 212 bits and pads short input.
     pub data: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The 210-position satellite mask and issue fields from message type 1.
 pub struct SbasPrnMask {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// The two-bit issue used by the correction store to select this mask.
     pub iodp: u8,
+    /// Mask flags in wire order; true positions are resolved to monitored satellites.
     pub mask: [bool; 210],
+    /// Empty for decoded message type 1 values because its fields fill the payload.
     pub reserved: SpareBits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The thirteen fast-correction slots in message types 2 through 5.
 pub struct SbasFastCorrections {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// The original message ID, in the inclusive range 2 through 5.
     pub message_type: SbasMessageType,
+    /// The two-bit issue matched against integrity blocks.
     pub iodf: u8,
+    /// The two-bit issue matched against the active PRN mask.
     pub iodp: u8,
+    /// Signed 12-bit pseudorange correction counts, scaled by the store at 0.125 meters.
     pub prc: [i16; 13],
+    /// Four-bit integrity indices for the thirteen correction slots.
     pub udrei: [u8; 13],
+    /// Empty because the typed fields fill all 212 data bits.
     pub reserved: SpareBits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The integrity blocks and UDREI values from message type 6.
 pub struct SbasIntegrity {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// Four two-bit issue values, one for each group of thirteen UDREIs.
     pub iodf: [u8; 4],
+    /// Fifty-one four-bit integrity indices applied to matching fast slots.
     pub udrei: [u8; 51],
+    /// Empty because the typed fields fill all 212 data bits.
     pub reserved: SpareBits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The latency and degradation indicators from message type 7.
 pub struct SbasFastDegradation {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// Four-bit latency, interpreted directly as seconds by the correction store.
     pub system_latency_s: u8,
+    /// The two-bit issue that gates acceptance of the latency value.
     pub iodp: u8,
+    /// Fifty-one four-bit degradation indicators preserved by the codec.
     pub ai: [u8; 51],
+    /// The two trailing reserved bits from the payload.
     pub reserved: SpareBits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The raw GEO navigation coefficients from message type 9.
 pub struct SbasGeoNav {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// A 13-bit time-of-day count in 16-second units.
     pub time_of_day_s: u16,
+    /// The four-bit URA index retained with the navigation coefficients.
     pub ura: u8,
+    /// Signed 30-bit raw X ECEF coordinate, scaled by the store at 0.08 meters.
     pub x_m: i32,
+    /// Signed 30-bit raw Y ECEF coordinate, scaled by the store at 0.08 meters.
     pub y_m: i32,
+    /// Signed 25-bit raw Z ECEF coordinate, scaled by the store at 0.4 meters.
     pub z_m: i32,
+    /// Signed 17-bit raw X ECEF velocity, scaled by the store at 0.000625 meters per second.
     pub x_rate_m_s: i32,
+    /// Signed 17-bit raw Y ECEF velocity, scaled by the store at 0.000625 meters per second.
     pub y_rate_m_s: i32,
+    /// Signed 18-bit raw Z ECEF velocity, scaled by the store at 0.004 meters per second.
     pub z_rate_m_s: i32,
+    /// Signed 10-bit raw X ECEF acceleration, scaled by the store at 0.0000125 meters per second squared.
     pub x_accel_m_s2: i16,
+    /// Signed 10-bit raw Y ECEF acceleration, scaled by the store at 0.0000125 meters per second squared.
     pub y_accel_m_s2: i16,
+    /// Signed 10-bit raw Z ECEF acceleration, scaled by the store at 0.0000625 meters per second squared.
     pub z_accel_m_s2: i16,
+    /// Signed 12-bit raw GEO clock offset coefficient, scaled by the store at 1/2^31 seconds.
     pub a_gf0_s: i16,
+    /// Signed 8-bit raw GEO clock drift coefficient, scaled by the store at 1/2^40 seconds per second.
     pub a_gf1_s_s: i16,
+    /// The eight reserved bits before the time-of-day field.
     pub reserved: SpareBits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The uninterpreted raw payload carried by message type 12.
 pub struct SbasNetworkTime {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// Raw payload bits normalized to 212 bits when encoded.
     pub data: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The uninterpreted raw payload carried by message type 17.
 pub struct SbasGeoAlmanac {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// Raw payload bits normalized to 212 bits when encoded.
     pub data: Vec<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The combined fast and long-term payload from message type 24.
 pub struct SbasMixedCorrections {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// The first 106 data bits, containing six fast slots and their issues.
     pub fast: SbasMixedFastCorrections,
+    /// The second 106 data bits, containing one long-term half.
     pub long_term: SbasLongTermHalf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The six-slot fast portion of message type 24.
 pub struct SbasMixedFastCorrections {
+    /// The two-bit issue passed to the fast-correction ingest path.
     pub iodf: u8,
+    /// The two-bit issue matched against the active PRN mask.
     pub iodp: u8,
+    /// The two-bit block selector mapped to message types 2 through 5.
     pub block_id: u8,
+    /// Signed 12-bit pseudorange correction counts, scaled at 0.125 meters by the store.
     pub prc: [i16; 6],
+    /// Four-bit integrity indices for the six correction slots.
     pub udrei: [u8; 6],
+    /// The four reserved bits between the fast and long-term portions.
     pub reserved: SpareBits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The two long-term halves carried by message type 25.
 pub struct SbasLongTermCorrections {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// The two 106-bit halves, visited in order by correction-store ingest.
     pub halves: [SbasLongTermHalf; 2],
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// One 106-bit long-term correction half.
 pub struct SbasLongTermHalf {
+    /// Selects one velocity record when true, or two non-velocity records when false.
     pub velocity_code: bool,
+    /// The two-bit issue matched against the active PRN mask.
     pub iodp: u8,
+    /// One record in velocity mode, or two records in non-velocity mode.
     pub records: Vec<SbasLongTermRecord>,
+    /// The trailing reserved bit available in non-velocity mode.
     pub reserved: SpareBits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Raw orbit and clock deltas for one monitored satellite.
 pub struct SbasLongTermRecord {
+    /// A six-bit one-based index into the active monitored-satellite mask.
     pub monitored_index: u8,
+    /// The eight-bit issue used to select the broadcast ephemeris.
     pub iode: u8,
+    /// Signed raw X ECEF delta, scaled at 0.125 meters by the store.
     pub delta_x: i32,
+    /// Signed raw Y ECEF delta, scaled at 0.125 meters by the store.
     pub delta_y: i32,
+    /// Signed raw Z ECEF delta, scaled at 0.125 meters by the store.
     pub delta_z: i32,
+    /// Signed raw X ECEF rate, scaled at 0.000625 meters per second in velocity mode.
     pub delta_x_rate: i32,
+    /// Signed raw Y ECEF rate, scaled at 0.000625 meters per second in velocity mode.
     pub delta_y_rate: i32,
+    /// Signed raw Z ECEF rate, scaled at 0.000625 meters per second in velocity mode.
     pub delta_z_rate: i32,
+    /// Signed raw clock-offset delta, scaled at 1/2^31 seconds.
     pub delta_a_f0: i32,
+    /// Signed raw clock-drift delta, scaled at 1/2^39 seconds per second in velocity mode.
     pub delta_a_f1: i32,
+    /// A velocity-mode time-of-day count in 16-second units, or `None` in non-velocity mode.
     pub time_of_day_s: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The band- and IODI-qualified 201-position mask from message type 18.
 pub struct SbasIgpMask {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// The four-bit ionospheric band selector.
     pub band_number: u8,
+    /// The two-bit ionospheric issue used to match delay blocks.
     pub iodi: u8,
+    /// Mask flags in wire order; active positions receive delay entries.
     pub mask: [bool; 201],
+    /// The four-bit prefix and optional one-bit trailing reserved segments.
     pub reserved: SpareBits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// Fifteen ionospheric delay/GIVE entries from message type 26.
 pub struct SbasIonoDelays {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// The four-bit ionospheric band selector.
     pub band_number: u8,
+    /// The four-bit block selector, with fifteen entries per block.
     pub block_id: u8,
+    /// The two-bit ionospheric issue matched against the IGP mask.
     pub iodi: u8,
+    /// Fifteen entries assigned to consecutive active IGP positions.
     pub entries: [SbasIgpDelay; 15],
+    /// The seven trailing reserved bits, when present.
     pub reserved: SpareBits,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
+/// One raw vertical-delay and GIVE pair from an ionospheric delay block.
 pub struct SbasIgpDelay {
+    /// A nine-bit delay count scaled at 0.125 meters by the store.
     pub vertical_delay: u16,
+    /// A four-bit GIVE index; 15 marks an unusable entry.
     pub givei: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// A non-phase-A SBAS message retained without a typed payload decoder.
 pub struct SbasUnsupported {
+    /// An SBAS preamble accepted by [`SbasBlock::decode`].
     pub preamble: u8,
+    /// The original six-bit message ID.
     pub message_type: SbasMessageType,
+    /// Raw payload bits normalized to 212 bits when encoded.
     pub data: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The wire representation that controls block length and CRC handling.
 pub enum SbasWireForm {
+    /// A 32-byte block carrying 226 body bits, 24 CRC bits, and six pad bits.
     Framed250,
+    /// A 29-byte body carrying 226 bits and six unused trailing bits.
     Body226,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+/// The decoded message and wire representation needed for re-encoding.
+///
+/// [`SbasBlock::decode`] fills both fields, and [`SbasBlock::encode`] uses
+/// them to select body-only or CRC-framed output.
 pub struct SbasBlock {
+    /// The body-only or CRC-framed representation selected for this block.
     pub form: SbasWireForm,
+    /// The typed or raw message decoded from the block body.
     pub message: SbasMessage,
 }
 
@@ -252,6 +385,12 @@ impl CountedBitWriter {
 }
 
 impl SbasBlock {
+    /// Decode a body or CRC-framed SBAS block.
+    ///
+    /// Body input must be 29 bytes. Framed input must be 32 bytes and must
+    /// contain a CRC-24Q matching the first 226 bits. Both forms require one
+    /// of the three recognized SBAS preambles; invalid lengths, CRCs,
+    /// preambles, and bit reads are returned as parse errors.
     pub fn decode(bytes: &[u8], form: SbasWireForm) -> Result<Self> {
         match form {
             SbasWireForm::Framed250 => {
@@ -282,6 +421,11 @@ impl SbasBlock {
         Ok(Self { form, message })
     }
 
+    /// Encode the message as the block's selected body or framed wire form.
+    ///
+    /// The body contains the preamble, six-bit message ID, and a normalized
+    /// 212-bit data payload. Framed output appends CRC-24Q over those 226 body
+    /// bits and six zero pad bits.
     pub fn encode(&self) -> Vec<u8> {
         let mut body = CountedBitWriter::new();
         body.push_u(u64::from(self.message.preamble()), 8);
@@ -306,6 +450,10 @@ impl SbasBlock {
 }
 
 impl SbasMessage {
+    /// Return the six-bit SBAS message ID represented by this value.
+    ///
+    /// Typed variants use their protocol IDs; fast corrections and unsupported
+    /// messages return the ID stored in their records.
     pub fn message_type(&self) -> SbasMessageType {
         match self {
             Self::DoNotUse(_) => 0,

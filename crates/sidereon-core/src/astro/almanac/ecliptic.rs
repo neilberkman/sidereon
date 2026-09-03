@@ -5,7 +5,9 @@ use crate::astro::time::scales::TimeScales;
 /// Geocentric apparent ecliptic longitude and latitude of a body, degrees, of date.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EclipticLonLat {
+    /// Ecliptic longitude in degrees on `[0, 360)`. [`geocentric_ecliptic`] obtains it by wrapping the `atan2` angle after rotating the normalized true-of-date equatorial position by true obliquity; phase, season, and planetary-event calculations consume it as their ecliptic angle.
     pub longitude_deg: f64,
+    /// Ecliptic latitude in degrees on `[-90, 90]`, obtained from the obliquity-rotated normalized position with a clamped `asin` in [`geocentric_ecliptic`]. The eclipse finder reads the Moon's value at new and full phases and skips candidates outside the corresponding node limit before classification.
     pub latitude_deg: f64,
 }
 

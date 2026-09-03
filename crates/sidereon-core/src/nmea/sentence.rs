@@ -9,20 +9,32 @@ use super::{
 };
 
 #[derive(Debug, Clone, PartialEq)]
+/// A decoded sentence returned by [`crate::nmea::parse_sentence`], combining the parsed address prefix with the payload parser selected by the address suffix.
 pub struct NmeaSentence {
+    /// The address prefix parsed by [`NmeaTalker::parse`]. [`crate::nmea::NmeaAccumulator`] uses it to distinguish GSV groups.
     pub talker: NmeaTalker,
+    /// The typed payload selected by the sentence's three-letter address suffix. [`crate::nmea::NmeaAccumulator`] dispatches it to the corresponding epoch record.
     pub body: NmeaBody,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Parsed payloads for the sentence types handled by [`crate::nmea::parse_sentence`]: GGA, RMC, GSA, GSV, GST, VTG, GLL, and ZDA.
 pub enum NmeaBody {
+    /// The GGA payload produced by `parse_gga`; [`crate::nmea::NmeaAccumulator`] retains the first value in [`crate::nmea::EpochSnapshot::gga`], and [`crate::nmea::write_gga`] serializes a [`Gga`] value as GGA.
     Gga(Gga),
+    /// The RMC payload produced by `parse_rmc`; [`crate::nmea::NmeaAccumulator`] retains the first value, and the accumulator uses its time and date for epoch metadata.
     Rmc(Rmc),
+    /// The GSA payload produced by `parse_gsa`; [`crate::nmea::NmeaAccumulator`] stores one [`crate::nmea::GsaEntry`] per system and warns on duplicate or differing DOP data.
     Gsa(Gsa),
+    /// The GSV payload produced by `parse_gsv`; [`crate::nmea::NmeaAccumulator`] groups messages by talker and signal, then extends satellites in message order.
     Gsv(Gsv),
+    /// The GST payload produced by `parse_gst`; [`crate::nmea::NmeaAccumulator`] retains the first value and uses its time as an epoch anchor.
     Gst(Gst),
+    /// The VTG payload produced by `parse_vtg`; [`crate::nmea::NmeaAccumulator`] retains the first value, but the accumulator does not use VTG as a timestamp source.
     Vtg(Vtg),
+    /// The GLL payload produced by `parse_gll`; [`crate::nmea::NmeaAccumulator`] retains the first value and uses its time as an epoch anchor.
     Gll(Gll),
+    /// The ZDA payload produced by `parse_zda`; [`crate::nmea::NmeaAccumulator`] retains the first value and uses its time and date for epoch metadata.
     Zda(Zda),
 }
 

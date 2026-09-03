@@ -405,25 +405,35 @@ impl Default for CatalogScreeningOptions {
 /// A prefiltered catalog pair.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogScreeningCandidate {
+    /// Lower catalog index emitted by [`screen_catalog_pairs`].
     pub i: usize,
+    /// Higher catalog index emitted by [`screen_catalog_pairs`].
     pub j: usize,
+    /// Optional identifier cloned from [`CatalogStateVector::id`] for the object at index `i`.
     pub id1: Option<String>,
+    /// Optional identifier cloned from [`CatalogStateVector::id`] for the object at index `j`.
     pub id2: Option<String>,
+    /// Euclidean separation of the paired catalog positions, in kilometers, computed by [`screen_catalog_pairs`].
     pub miss_km: f64,
 }
 
 /// Successful collision-probability evaluation for a catalog candidate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CatalogCollision {
+    /// [`CollisionPc`] returned by [`crate::astro::conjunction::collision_probability`] for the pair using its combined hard-body radius.
     pub probability: CollisionPc,
+    /// [`PcMethod`] passed through [`CatalogScreeningOptions::method`] to the conjunction solver.
     pub method: PcMethod,
 }
 
 /// One catalog screening result row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogScreeningResult {
+    /// [`CatalogScreeningCandidate`] produced by the position prefilter; it remains present when Pc evaluation fails.
     pub candidate: CatalogScreeningCandidate,
+    /// `Some` for a successful [`CatalogCollision`] evaluation, or `None` when the conjunction solver returns an error.
     pub collision: Option<CatalogCollision>,
+    /// [`ConjunctionError`] returned by the solver; `None` for a successful collision-probability evaluation.
     pub error: Option<ConjunctionError>,
 }
 

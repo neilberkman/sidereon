@@ -59,10 +59,15 @@ mod error_display_tests {
 /// Currently implements Shampine's 4th-order continuous extension for DP5(4).
 #[derive(Debug, Clone)]
 pub struct DenseSegment {
+    /// Absolute TDB epoch in seconds at the beginning of the accepted DP54 step.
     pub t_start: f64,
+    /// Signed duration in seconds of the accepted step, following the requested propagation direction.
     pub h: f64,
+    /// [`CartesianState`] at the beginning of the accepted step, used as the interpolation base.
     pub y_start: CartesianState,
+    /// [`CartesianState`] produced at the accepted step endpoint and returned for exact endpoint evaluation.
     pub y_end: CartesianState,
+    /// Seven Dormand-Prince derivative stages captured for the accepted step; position derivatives are in kilometers per second and velocity derivatives in kilometers per second squared.
     pub ks: [StateDerivative; 7],
 }
 
@@ -154,6 +159,8 @@ impl DenseSegment {
         })
     }
 
+    /// Builds a segment from the seven stages captured for one accepted DP54 step.
+    /// The stage array and the supplied start/end states are copied into the segment for interpolation and endpoint evaluation.
     pub fn from_dp54_stages(
         t_start: f64,
         h: f64,
@@ -170,6 +177,8 @@ impl DenseSegment {
         }
     }
 
+    /// Returns the segment endpoint epoch as `t_start + h`.
+    /// For reverse-time propagation, this endpoint is earlier than `t_start`.
     pub fn t_end(&self) -> f64 {
         self.t_start + self.h
     }
@@ -178,6 +187,8 @@ impl DenseSegment {
 /// Collection of dense segments covering a full propagation range.
 #[derive(Debug, Clone, Default)]
 pub struct DenseOutput {
+    /// Accepted-step interpolants in propagation order.
+    /// DP54 appends one [`DenseSegment`] for each accepted step when dense output is enabled; a zero-duration request leaves this vector empty, and [`DenseOutput::eval`] relies on the ordering when locating a segment.
     pub segments: Vec<DenseSegment>,
 }
 

@@ -59,6 +59,8 @@ use crate::spp::{EphemerisSource, ReceiverSolution, SolveInputs, SolvePolicy, So
 /// strategy ([`StrategyId::default`]), matching the per-stage recipe defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct EstimateOptions {
+    /// Strategy identity resolved by [`estimate`] before it checks the input
+    /// technique. The default is the SPP/Skyfield reference strategy.
     pub strategy: StrategyId,
 }
 
@@ -78,46 +80,95 @@ pub enum EstimateInput<'a> {
     /// SPP under the public validation/orchestration policy
     /// (`spp::solve_with_policy`).
     Spp {
+        /// Ephemeris source queried for selected satellites' transmit-time
+        /// positions and clocks.
         eph: &'a dyn EphemerisSource,
+        /// SPP epoch bundle whose observations, receive-time arguments, initial
+        /// state, and corrections are validated before the solve.
         inputs: &'a SolveInputs,
+        /// Whether the returned receiver solution includes its geodetic field;
+        /// `false` leaves that field as `None`.
         with_geodetic: bool,
+        /// SPP orchestration policy: coarse seeded candidates when configured,
+        /// or one solve followed by validation otherwise.
         policy: SolvePolicy,
     },
     /// Static multi-epoch float RTK baseline (`rtk_filter::solve_float_baseline`).
     RtkFloat {
+        /// Normalized static epochs whose double-difference code/phase rows are
+        /// accumulated into the batch normal system and residuals.
         epochs: &'a [Epoch],
+        /// Base-station ECEF position used by RTK geometry and weighting rows.
         base: [f64; 3],
+        /// Ordered ambiguity column keys paired with the float estimates and
+        /// covariance in the returned solution.
         ambiguity_ids: &'a [String],
+        /// Initial ECEF baseline estimate in meters for the iterated float state.
         initial_baseline_m: [f64; 3],
+        /// Code/phase sigmas, Sagnac choice, and stochastic model read while
+        /// constructing RTK rows.
         model: &'a MeasModel,
+        /// Position/ambiguity tolerances and maximum iteration count for the
+        /// float loop.
         opts: FloatSolveOpts,
+        /// Optional receiver antenna calibration applied while building RTK
+        /// rows; `None` supplies no antenna correction.
         receiver_antenna_corrections: Option<&'a ReceiverAntennaCorrections>,
     },
     /// Static fixed RTK baseline with residual validation/FDE
     /// (`rtk_filter::solve_fixed_baseline_validated`).
     RtkFixed {
+        /// Working static epoch set used by the float prerequisite, residual
+        /// validation exclusions, and integer-conditioned fixed re-solve.
         epochs: &'a [Epoch],
+        /// Base-station ECEF position shared by the validated float and fixed
+        /// RTK stages.
         base: [f64; 3],
+        /// Initial ambiguity ids, satellite map, cycle/meter scale, and
+        /// float-only systems for the fixed solve.
         initial_ambiguities: AmbiguitySet<'a>,
+        /// Initial ECEF baseline estimate used to seed the float prerequisite.
         initial_baseline_m: [f64; 3],
+        /// RTK measurement sigmas, Sagnac choice, and stochastic model shared by
+        /// both validated stages.
         model: &'a MeasModel,
+        /// Float, fixed, and residual-validation controls for the full fixed
+        /// workflow.
         opts: ValidatedFixedSolveOpts,
+        /// Optional receiver antenna calibration forwarded to both RTK stages;
+        /// `None` supplies no antenna correction.
         receiver_antenna_corrections: Option<&'a ReceiverAntennaCorrections>,
     },
     /// Static multi-epoch float PPP arc
     /// (`precise_positioning::solve_float_epochs`).
     PppFloat {
+        /// Observable ephemeris source used to predict satellite state while
+        /// PPP rows are built.
         source: &'a dyn ObservableEphemerisSource,
+        /// Static PPP arc; configured elevation filtering occurs before active
+        /// ambiguity ids and normal rows are built.
         epochs: &'a [FloatEpoch],
+        /// Initial receiver position, clocks, ambiguities, and enabled
+        /// atmospheric or residual-ionosphere states.
         initial_state: FloatState,
+        /// PPP weights, corrections, atmospheric settings, iteration controls,
+        /// and optional screening/state-estimation flags.
         config: FloatSolveConfig,
     },
     /// Integer-fixed PPP from an existing float solution
     /// (`precise_positioning::solve_fixed_from_float`).
     PppFixed {
+        /// Observable ephemeris source used for cutoff prediction, ambiguity
+        /// search rows, and the fixed re-solve.
         source: &'a dyn ObservableEphemerisSource,
+        /// Static arc used for integer search and the fixed re-solve, after any
+        /// configured elevation filtering.
         epochs: &'a [FloatEpoch],
+        /// Validated float result converted into the initial fixed state and
+        /// used with its ambiguity covariance for integer search.
         float_solution: FloatSolution,
+        /// PPP measurement/correction settings, integer-search controls,
+        /// convergence controls, and optional filtering/state estimation.
         config: FixedSolveConfig,
     },
 }
@@ -139,10 +190,19 @@ impl EstimateInput<'_> {
 /// pointer-sized regardless of which technique ran.
 #[derive(Debug, Clone)]
 pub enum EstimateOutput {
+    /// Successful SPP result produced by `spp::run` and boxed for the unified
+    /// output enum; the SPP compatibility wrapper unwraps this variant.
     Spp(Box<ReceiverSolution>),
+    /// Successful static RTK float result produced by `rtk_filter::run_float`.
     RtkFloat(Box<FloatBaselineSolution>),
+    /// Successful validated fixed RTK result produced by
+    /// `rtk_filter::run_fixed_validated`.
     RtkFixed(Box<ValidatedFixedBaselineSolution>),
+    /// Successful static PPP float result produced by
+    /// `precise_positioning::run_float_epochs`.
     PppFloat(Box<FloatSolution>),
+    /// Successful integer-fixed PPP result produced by
+    /// `precise_positioning::run_fixed_from_float`.
     PppFixed(Box<FixedSolution>),
 }
 
@@ -153,7 +213,9 @@ pub enum EstimateError {
     /// The selected strategy's technique does not match the input's technique
     /// (e.g. an RTK strategy with an SPP input).
     TechniqueMismatch {
+        /// Technique selected by the resolved strategy.
         strategy: Technique,
+        /// Technique returned by [`EstimateInput::technique`] for the input.
         input: Technique,
     },
     /// A `Reference` strategy named a `target` that is not a supported reference
@@ -161,7 +223,9 @@ pub enum EstimateError {
     /// oracle, or the owned deterministic solver for a non-SPP technique). The
     /// supported pairs are enumerated by [`EstimationRecipe::for_reference`].
     IncompatibleTarget {
+        /// Technique passed to [`EstimationRecipe::for_reference`].
         technique: Technique,
+        /// Reference target passed to [`EstimationRecipe::for_reference`].
         target: ReferenceTarget,
     },
     /// A `Canonical` strategy was selected for a technique whose canonical model
@@ -169,12 +233,24 @@ pub enum EstimateError {
     /// technique currently produces this; it is retained as the resolver's stable
     /// not-yet-implemented surface for any future technique.
     CanonicalUnavailable {
+        /// Technique for which [`EstimationRecipe::for_canonical`] returned no
+        /// recipe.
         technique: Technique,
     },
+    /// Error returned by the SPP runner and preserved for the compatibility
+    /// wrapper.
     Spp(SolvePolicyError),
+    /// Error returned by the static RTK float runner and preserved for the
+    /// compatibility wrapper.
     RtkFloat(RtkFloatSolveError),
+    /// Error returned by the validated RTK fixed runner and preserved for the
+    /// compatibility wrapper.
     RtkFixed(ValidatedFixedSolveError),
+    /// Error returned by the static PPP float runner and preserved for the
+    /// compatibility wrapper.
     PppFloat(PppFloatSolveError),
+    /// Error returned by the integer-fixed PPP runner and preserved for the
+    /// compatibility wrapper.
     PppFixed(FixedSolveError),
 }
 
@@ -184,8 +260,12 @@ pub enum EstimateError {
 /// resolved reference strategy dispatches bit-identically to the existing path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedStrategy {
+    /// Requested strategy identity copied into the resolved record.
     pub id: StrategyId,
+    /// Technique selected by `id`, checked against the input before dispatch.
     pub technique: Technique,
+    /// Operation-order recipe selected by `id` and passed to the technique
+    /// runner.
     pub recipe: EstimationRecipe,
     /// The residual-screen families this technique applies (P3 `ScreenKind`).
     pub screens: &'static [ScreenKind],

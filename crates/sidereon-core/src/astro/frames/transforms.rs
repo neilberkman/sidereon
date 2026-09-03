@@ -43,7 +43,9 @@ pub enum FrameTransformError {
     /// A transform input was non-finite or otherwise invalid.
     #[error("invalid frame transform {field}: {reason}")]
     InvalidInput {
+        /// Static input label selected by the validation or time-conversion failure.
         field: &'static str,
+        /// Static explanation paired with `field` for the failure.
         reason: &'static str,
     },
 }
@@ -131,14 +133,24 @@ pub type Vec3 = (f64, f64, f64);
 /// TEME-frame position and velocity (km, km/s): the input to
 /// [`teme_to_gcrs_compute`].
 pub struct TemeStateKm {
+    /// TEME position `(x, y, z)` in kilometers, rotated by the shared
+    /// TEME/GCRS matrix; the Skyfield-compatible path converts through AU.
     pub position_km: [f64; 3],
+    /// TEME velocity `(vx, vy, vz)` in kilometers per second, rotated by the
+    /// shared TEME/GCRS matrix; the Skyfield-compatible path uses AU/day.
     pub velocity_km_s: [f64; 3],
 }
 
 /// Geodetic ground-station position (WGS84) for topocentric look angles.
 pub struct GeodeticStationKm {
+    /// WGS84 geodetic latitude in degrees, constrained to `[-90, 90]` and
+    /// used for the ellipsoidal station position and ENU north/up axes.
     pub latitude_deg: f64,
+    /// WGS84 geodetic longitude in degrees, constrained to `[-180, 180]` and
+    /// used for the station ECEF longitude and ENU east/north axes.
     pub longitude_deg: f64,
+    /// Signed WGS84 ellipsoidal height in kilometers; it must be finite but
+    /// is otherwise added directly to the ellipsoid radii.
     pub altitude_km: f64,
 }
 
@@ -150,7 +162,11 @@ pub struct GeodeticStationKm {
 /// `*_with_polar_motion` entry points below.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PolarMotion {
+    /// IERS x-pole coordinate in radians, used as the `R_y(xp)` angle in the
+    /// polar-motion matrix.
     pub xp_rad: f64,
+    /// IERS y-pole coordinate in radians, used as the `R_x(yp)` angle in the
+    /// polar-motion matrix.
     pub yp_rad: f64,
 }
 

@@ -13,6 +13,14 @@ use crate::astro::propagator::result::{
 use crate::astro::state::{CartesianState, StateDerivative};
 use nalgebra::Vector3;
 
+/// Adaptive Dormand-Prince 5(4) integrator for Cartesian-state propagation.
+///
+/// [`Integrator::propagate`] uses the embedded [`DP54Tableau`] pair to compute
+/// fifth-order position and velocity updates with a fourth-order error
+/// estimate, reuses the endpoint derivative through FSAL, and adjusts signed
+/// steps with a PI controller configured for order 5. It validates adaptive
+/// tolerances and finite TDB epochs, supports forward and backward spans, and
+/// can return [`DenseOutput`] segments for accepted steps when requested.
 pub struct DP54;
 
 impl Integrator for DP54 {

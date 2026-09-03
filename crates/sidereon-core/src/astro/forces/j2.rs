@@ -5,9 +5,31 @@ use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
 use nalgebra::Vector3;
 
+/// Degree-2 zonal-harmonic perturbation model for Cartesian propagation.
+///
+/// The [`crate::astro::forces::ForceModel`] implementation uses `state.position_km`
+/// to return the perturbation acceleration in km/s². Its scale is
+/// `1.5 * j2 * (mu / r²) * (re / r)²`; the x and y components use
+/// `(coordinate / r) * (5 * z² / r² - 1)`, while the z component uses
+/// `(z / r) * (5 * z² / r² - 3)`. [`crate::astro::propagator::numerical::ForceModelKind::TwoBodyJ2`]
+/// builds this model alongside [`crate::astro::forces::TwoBodyGravity`], and a
+/// position whose norm squared is exactly zero returns
+/// [`crate::astro::error::PropagationError::NumericalFailure`].
 pub struct J2Gravity {
+    /// Gravitational parameter in km³/s². `Default::default` sets this to
+    /// [`crate::astro::constants::MU_EARTH`], `ForceModelKind::build` copies
+    /// `TwoBodyJ2::mu_km3_s2` here, and `acceleration` uses it in the `mu / r²`
+    /// factor.
     pub mu: f64,
+    /// Gravity-model reference equatorial radius in km. `Default::default` sets
+    /// this to [`crate::astro::constants::RE_EARTH`], `ForceModelKind::build`
+    /// copies `TwoBodyJ2::re_km` here, and `acceleration` uses its squared
+    /// ratio to the position magnitude.
     pub re: f64,
+    /// Dimensionless degree-2 zonal harmonic coefficient. `Default::default`
+    /// sets this to [`crate::astro::constants::J2_EARTH`], `ForceModelKind::build`
+    /// copies `TwoBodyJ2::j2` here, and `acceleration` uses it to scale the
+    /// perturbation.
     pub j2: f64,
 }
 

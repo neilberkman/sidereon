@@ -9,33 +9,60 @@ use crate::format::{Diagnostics, Parsed, RecordRef, Warning, WarningKind};
 const RETAINED_CAP: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq)]
+/// One accumulated NMEA epoch, closed by an anchor-time, GSV-cycle, or sentence-budget boundary.
+/// Singleton sentence kinds retain their first body, while GSA and GSV data are accumulated in their respective entry and group vectors.
 pub struct EpochSnapshot {
+    /// Time from the first GGA, RMC, GLL, GST, or ZDA sentence in the epoch that carries one.
     pub time_of_day: Option<NmeaTime>,
+    /// The explicit RMC/ZDA date, or the date carried from [`NmeaAccumulator::with_date`] or an earlier dated sentence.
+    /// A differing explicit date replaces the prior value and records a mismatch warning; a backward transition over 12 hours advances the carried date for the next epoch.
     pub date: Option<NmeaDate>,
+    /// The first GGA body attached to the epoch; later GGA bodies are omitted and record a mismatch warning.
     pub gga: Option<Gga>,
+    /// The first RMC body attached to the epoch; later RMC bodies are omitted and record a mismatch warning.
     pub rmc: Option<Rmc>,
+    /// The first GLL body attached to the epoch; later GLL bodies are omitted and record a mismatch warning.
     pub gll: Option<Gll>,
+    /// The first GST body attached to the epoch; later GST bodies are omitted and record a mismatch warning.
     pub gst: Option<Gst>,
+    /// The first VTG body attached to the epoch; later VTG bodies are omitted and record a mismatch warning.
     pub vtg: Option<Vtg>,
+    /// The first ZDA body attached to the epoch; later ZDA bodies are omitted and record a mismatch warning.
     pub zda: Option<Zda>,
+    /// GSA bodies accumulated as [`GsaEntry`] values, with known systems deduplicated and unknown-system entries retained.
     pub gsa: Vec<GsaEntry>,
+    /// GSV pages accumulated as [`GsvGroup`] values, grouped by talker and optional signal.
     pub gsv: Vec<GsvGroup>,
+    /// Number of accepted sentences attached to the epoch, including duplicate bodies and sentences without a time.
     pub sentence_count: usize,
+    /// Assembly warnings for duplicate or inconsistent epoch data, GSV sequence/count errors, near-midnight backward time, and the sentence budget.
+    /// Parser skips and warnings are kept in [`NmeaChunkOutput::diagnostics`] instead.
     pub diagnostics: Diagnostics,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// One decoded GSA body together with the optional GNSS system context used to distinguish it within an [`EpochSnapshot`].
 pub struct GsaEntry {
+    /// The system copied from [`Gsa::system`], or None when parsing could not resolve a system context.
     pub system: Option<crate::GnssSystem>,
+    /// The cloned GSA body, including its sentence-order satellite list and optional DOP values.
     pub gsa: Gsa,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// The accumulated GSV pages for one talker and optional signal within an [`EpochSnapshot`].
 pub struct GsvGroup {
+    /// The talker copied from the NMEA sentence carrying the GSV page.
     pub talker: NmeaTalker,
+    /// The optional signal copied from [`Gsv::signal`], used with `talker` to select the page group.
     pub signal: Option<NmeaSignalId>,
+    /// The first page’s optional claimed satellite count, replaced by the current page’s count after a sequence mismatch.
+    /// When the group completes, this value is compared with the number of listed satellite numbers.
     pub claimed_in_view: Option<u16>,
+    /// Satellite groups from the first page, extended in page order for an expected sequence or replaced after a sequence mismatch.
     pub satellites: Vec<GsvSatellite>,
+    /// Whether the latest attached page number equals its total page count.
+    /// A new page 1 for the same complete talker/signal group closes the current epoch before attachment.
     pub complete: bool,
 }
 
@@ -57,6 +84,8 @@ impl EpochSnapshot {
         }
     }
 
+    /// Returns a WGS-84 position using GGA first, then RMC, then GLL.
+    /// GGA requires both coordinates, MSL altitude, and geoid separation and converts their height sum to ellipsoidal height; RMC and GLL use zero height, and any missing required field or invalid WGS-84 construction returns `None`.
     pub fn position(&self) -> Option<crate::Wgs84Geodetic> {
         if let Some(gga) = &self.gga {
             let latitude = gga.latitude?;
@@ -82,6 +111,8 @@ impl EpochSnapshot {
         crate::Wgs84Geodetic::new(gll.latitude?.radians(), gll.longitude?.radians(), 0.0).ok()
     }
 
+    /// Converts the stored date and time to a UTC [`crate::astro::time::Instant`].
+    /// Nanoseconds are added to the whole seconds, and `None` is returned when either field is absent or the civil-time conversion rejects the values.
     pub fn instant_utc(&self) -> Option<crate::astro::time::Instant> {
         let date = self.date?;
         let time = self.time_of_day?;
@@ -97,24 +128,34 @@ impl EpochSnapshot {
         .ok()
     }
 
+    /// Returns the first position dilution of precision supplied by a GSA entry, in entry order.
+    /// Returns `None` when no GSA entry has a PDOP value.
     pub fn pdop(&self) -> Option<f64> {
         self.gsa.iter().find_map(|entry| entry.gsa.pdop)
     }
 
+    /// Returns the first horizontal dilution of precision supplied by a GSA entry, in entry order.
+    /// Returns `None` when no GSA entry has an HDOP value.
     pub fn hdop(&self) -> Option<f64> {
         self.gsa.iter().find_map(|entry| entry.gsa.hdop)
     }
 
+    /// Returns the first vertical dilution of precision supplied by a GSA entry, in entry order.
+    /// Returns `None` when no GSA entry has a VDOP value.
     pub fn vdop(&self) -> Option<f64> {
         self.gsa.iter().find_map(|entry| entry.gsa.vdop)
     }
 
+    /// Iterates over GSA satellite numbers in entry order and within each entry’s sentence order.
+    /// The iterator borrows the stored values and does not remove duplicates across entries.
     pub fn used_satellites(&self) -> impl Iterator<Item = &NmeaSatNumber> {
         self.gsa
             .iter()
             .flat_map(|entry| entry.gsa.satellites.iter())
     }
 
+    /// Counts unique `(resolved identity, raw number)` pairs listed by the GSV satellite groups.
+    /// Entries without a satellite number and the pages’ claimed counts are ignored.
     pub fn satellites_in_view(&self) -> usize {
         let mut seen = BTreeSet::new();
         for group in &self.gsv {
@@ -143,6 +184,8 @@ struct GsvProgress {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Streaming accumulator for one open NMEA epoch and the bytes waiting for a line terminator.
+/// It also carries dates across undated sentences, enforces a sentence budget, and numbers input lines for parser diagnostics.
 pub struct NmeaAccumulator {
     current: Option<OpenEpoch>,
     carried_date: Option<NmeaDate>,
@@ -159,6 +202,7 @@ impl Default for NmeaAccumulator {
 }
 
 impl NmeaAccumulator {
+    /// Creates an accumulator with no open epoch or carried date, a 256-sentence epoch limit, an empty byte remainder, and next line number 1.
     pub fn new() -> Self {
         Self {
             current: None,
@@ -170,6 +214,7 @@ impl NmeaAccumulator {
         }
     }
 
+    /// Creates the default accumulator with `date` available to epochs whose sentences do not carry a date.
     pub fn with_date(date: NmeaDate) -> Self {
         Self {
             carried_date: Some(date),
@@ -177,11 +222,14 @@ impl NmeaAccumulator {
         }
     }
 
+    /// Sets the per-epoch sentence budget, clamping values below 16 to 16.
     pub fn with_max_sentences_per_epoch(mut self, max: usize) -> Self {
         self.max_sentences_per_epoch = max.max(16);
         self
     }
 
+    /// Attaches one already parsed sentence and returns a snapshot when the prior epoch closes.
+    /// A close occurs when both time anchors differ, a completed GSV cycle restarts, or the sentence budget is reached; the incoming sentence is then attached to a newly opened epoch, and a budget close records a mismatch warning.
     pub fn push(&mut self, sentence: &NmeaSentence) -> Option<EpochSnapshot> {
         let incoming_time = sentence_time(sentence);
         let mut new_epoch_warning = false;
@@ -230,6 +278,8 @@ impl NmeaAccumulator {
         completed
     }
 
+    /// Buffers input until LF, CR, or CRLF, parses each complete line, and returns that chunk’s parsed sentences, completed snapshots, and line-numbered parser diagnostics.
+    /// If an unterminated buffer exceeds 1024 bytes, it is discarded and reported as a “sentence over length cap” skip.
     pub fn push_bytes(&mut self, chunk: &[u8]) -> NmeaChunkOutput {
         self.retained.extend_from_slice(chunk);
         let mut output = NmeaChunkOutput::default();
@@ -257,6 +307,8 @@ impl NmeaAccumulator {
         output
     }
 
+    /// Processes a nonempty unterminated remainder as one final line, then returns the final open snapshot, if any.
+    /// The temporary output produced while parsing that remainder is discarded, including any snapshot completed during that processing.
     pub fn finish(&mut self) -> Option<EpochSnapshot> {
         if !self.retained.is_empty() {
             let line = std::mem::take(&mut self.retained);
@@ -267,6 +319,7 @@ impl NmeaAccumulator {
         self.current.take().map(|epoch| epoch.snapshot)
     }
 
+    /// Returns the number of bytes currently buffered without a line terminator.
     pub fn retained_len(&self) -> usize {
         self.retained.len()
     }
@@ -594,8 +647,13 @@ fn push_line(
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
+/// Per-chunk results returned by [`NmeaAccumulator::push_bytes`].
+/// Completed snapshots and parsed sentences are kept separate from parser diagnostics, while epoch-assembly warnings remain on each snapshot.
 pub struct NmeaChunkOutput {
+    /// Snapshots completed while complete lines in the chunk were processed, in processing order; the still-open epoch is omitted.
     pub snapshots: Vec<EpochSnapshot>,
+    /// Successfully parsed sentences from complete lines in input order; skipped or still-buffered lines are omitted.
     pub sentences: Vec<NmeaSentence>,
+    /// Parser skips and warnings with one-based line references, including the retained-line length-cap skip.
     pub diagnostics: Diagnostics,
 }

@@ -15,6 +15,9 @@
 // Units: 0.1 microarcsecond (and 0.1 microarcsecond per Julian century
 //        for time-dependent terms).
 
+/// Five integer multipliers for the 678 lunisolar nutation arguments.
+/// Row `r` is dotted with the five fundamental arguments and is paired with
+/// row `r` of [`LUNISOLAR_LONGITUDE_COEFFICIENTS`] and [`LUNISOLAR_OBLIQUITY_COEFFICIENTS`].
 pub static NALS_T: [[i32; 5]; 678] = [
     [0, 0, 0, 0, 1],
     [0, 0, 2, -2, 2],
@@ -696,6 +699,9 @@ pub static NALS_T: [[i32; 5]; 678] = [
     [2, 0, 2, 4, 1],
 ];
 
+/// Fourteen integer multipliers for the 687 planetary nutation arguments.
+/// Row `r` is dotted with the fourteen planetary arguments and is paired with
+/// row `r` of [`NUTATION_COEFFICIENTS_LONGITUDE`] and [`NUTATION_COEFFICIENTS_OBLIQUITY`].
 pub static NAPL_T: [[i32; 14]; 687] = [
     [0, 0, 0, 0, 0, 0, 0, 8, -16, 4, 5, 0, 0, 0],
     [0, 0, 0, 0, 0, 0, 0, -8, 16, -4, -5, 0, 0, 2],
@@ -1386,6 +1392,10 @@ pub static NAPL_T: [[i32; 14]; 687] = [
     [0, 0, 2, 2, 2, 0, 0, 2, 0, -2, 0, 0, 0, 0],
 ];
 
+/// Lunisolar longitude coefficients in 0.1 microarcseconds.
+/// For each row, the three columns multiply `sin(argument)`, `sin(argument) * t`, and
+/// `cos(argument)` respectively in the IAU 2000A longitude sum; the completed sum is
+/// converted to radians by the nutation evaluator.
 pub static LUNISOLAR_LONGITUDE_COEFFICIENTS: [[f64; 3]; 678] = [
     [-172064161.0, -174666.0, 33386.0],
     [-13170906.0, -1675.0, -13696.0],
@@ -2067,6 +2077,10 @@ pub static LUNISOLAR_LONGITUDE_COEFFICIENTS: [[f64; 3]; 678] = [
     [-3.0, 0.0, 0.0],
 ];
 
+/// Lunisolar obliquity coefficients in 0.1 microarcseconds.
+/// For each row, the three columns multiply `cos(argument)`, `cos(argument) * t`, and
+/// `sin(argument)` respectively in the IAU 2000A obliquity sum; the completed sum is
+/// converted to radians by the nutation evaluator.
 pub static LUNISOLAR_OBLIQUITY_COEFFICIENTS: [[f64; 3]; 678] = [
     [92052331.0, 9086.0, 15377.0],
     [5730336.0, -3015.0, -4587.0],
@@ -2748,6 +2762,9 @@ pub static LUNISOLAR_OBLIQUITY_COEFFICIENTS: [[f64; 3]; 678] = [
     [2.0, 0.0, 0.0],
 ];
 
+/// Planetary longitude coefficients in 0.1 microarcseconds.
+/// For each row, the two columns multiply `sin(argument)` and `cos(argument)` respectively
+/// in the IAU 2000A longitude sum, which is then converted to radians.
 pub static NUTATION_COEFFICIENTS_LONGITUDE: [[f64; 2]; 687] = [
     [1440.0, 0.0],
     [56.0, -117.0],
@@ -3438,6 +3455,9 @@ pub static NUTATION_COEFFICIENTS_LONGITUDE: [[f64; 2]; 687] = [
     [3.0, 0.0],
 ];
 
+/// Planetary obliquity coefficients in 0.1 microarcseconds.
+/// For each row, the two columns multiply `sin(argument)` and `cos(argument)` respectively
+/// in the IAU 2000A obliquity sum, which is then converted to radians.
 pub static NUTATION_COEFFICIENTS_OBLIQUITY: [[f64; 2]; 687] = [
     [0.0, 0.0],
     [-42.0, -40.0],

@@ -54,11 +54,22 @@ pub fn give_variance_m2_for_givei(givei: u8) -> Option<f64> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// Fast SBAS range correction retained for one monitored satellite.
+///
+/// [`SbasCorrectionStore::ingest`] derives the rate term from consecutive
+/// corrections, and the corrected ephemeris uses both terms to extrapolate the
+/// range correction into the satellite clock.
 pub struct SbasFastCorrection {
+    /// Current fast range correction in meters, after the signed message value
+    /// is multiplied by the 0.125-meter scale factor.
     pub prc_m: f64,
+    /// Rate derived from consecutive same-issue range corrections, in meters per second.
     pub rrc_m_s: f64,
+    /// Current four-bit fast-correction integrity index; values at or above 14 withdraw the satellite.
     pub udrei: u8,
+    /// Correction application epoch, including system latency, in seconds since J2000.
     pub t_of_j2000_s: f64,
+    /// Fast-correction issue used for rate derivation and integrity matching.
     pub iodf: u8,
 }
 
@@ -70,26 +81,55 @@ impl SbasFastCorrection {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// Long-term SBAS correction retained for a GPS satellite.
+///
+/// The store uses `iode` to select the broadcast state and advances the
+/// position and clock deltas from [`SbasLongTermCorrection::t0_j2000_s`].
 pub struct SbasLongTermCorrection {
+    /// Broadcast ephemeris issue selected before applying this correction.
     pub iode: u8,
+    /// ECEF position delta in meters at [`SbasLongTermCorrection::t0_j2000_s`],
+    /// from the signed record coordinates multiplied by 0.125.
     pub delta_ecef_m: [f64; 3],
+    /// ECEF position-delta rate in meters per second, from signed record rates
+    /// multiplied by 0.000625.
     pub delta_ecef_rate_m_s: [f64; 3],
+    /// Clock offset delta at the reference epoch, in seconds, from the signed
+    /// record value multiplied by 1/2^31.
     pub delta_af0_s: f64,
+    /// Clock-drift delta, in seconds per second, from the signed record value
+    /// multiplied by 1/2^39.
     pub delta_af1_s_s: f64,
+    /// Reference epoch for the position and clock deltas, in seconds since J2000.
     pub t0_j2000_s: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// One accepted SBAS ionospheric grid point.
+///
+/// [`SbasCorrectionStore::ingest`] obtains the coordinates from the DO-229
+/// band table and omits entries whose GIVEI is 15.
 pub struct SbasIgp {
+    /// Grid latitude in degrees from the DO-229 band table, matched with the
+    /// IGP coordinate tolerance during interpolation.
     pub lat_deg: f64,
+    /// Grid longitude in degrees; lookup normalizes it to the [-180, 180] interval.
     pub lon_deg: f64,
+    /// Vertical ionospheric delay in meters, from the message value multiplied
+    /// by the 0.125-meter scale factor; interpolation uses this value.
     pub vertical_delay_m: f64,
+    /// DO-229 GIVE variance in square meters, or None when no usable variance was supplied.
     pub give_variance_m2: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
+/// IGP records associated with one SBAS ionospheric delay issue.
+///
+/// Ingestion replaces an existing coordinate match or appends a new point, so
+/// the returned slice preserves the grid's update order.
 pub struct SbasIonoGrid {
     igps: Vec<SbasIgp>,
+    /// IODI associated with the stored IGP records.
     pub iodi: u8,
 }
 
@@ -207,16 +247,35 @@ impl SbasIonoGrid {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// Propagated-state parameters decoded from an SBAS GEO navigation message.
+///
+/// The state is expressed in ECEF meters and seconds relative to its J2000
+/// reference epoch; [`SbasGeoState::state_at`] applies the stored rates.
 pub struct SbasGeoState {
+    /// GEO ECEF position at [`SbasGeoState::t0_j2000_s`], in meters, after X/Y
+    /// message values are scaled by 0.08 and Z by 0.4.
     pub position_ecef_m: [f64; 3],
+    /// GEO ECEF velocity at the reference epoch, in meters per second, after
+    /// X/Y message rates are scaled by 0.000625 and Z by 0.004.
     pub velocity_ecef_m_s: [f64; 3],
+    /// GEO ECEF acceleration, in meters per second squared, after X/Y message
+    /// accelerations are scaled by 0.0000125 and Z by 0.0000625.
     pub acceleration_ecef_m_s2: [f64; 3],
+    /// GEO clock offset at the reference epoch, in seconds, after the message
+    /// value is scaled by 1/2^31.
     pub clock_offset_s: f64,
+    /// GEO clock drift, in seconds per second, after the message value is
+    /// scaled by 1/2^40.
     pub clock_drift_s_s: f64,
+    /// Reference epoch for position and clock propagation, in seconds since J2000.
     pub t0_j2000_s: f64,
 }
 
 impl SbasGeoState {
+    /// Propagate the ECEF position and clock to a J2000-seconds epoch.
+    ///
+    /// Position uses the stored velocity and half the stored acceleration times
+    /// elapsed time squared; clock uses offset plus drift times elapsed time.
     pub fn state_at(&self, t_j2000_s: f64) -> ([f64; 3], f64) {
         let dt = t_j2000_s - self.t0_j2000_s;
         let dt2 = dt * dt;
@@ -237,6 +296,10 @@ impl SbasGeoState {
 }
 
 #[derive(Debug)]
+/// In-memory SBAS correction state partitioned by source GEO.
+///
+/// The store retains the latest masks, corrections, navigation, ionospheric
+/// data, withdrawal state, and policies used by the corrected-source lookups.
 pub struct SbasCorrectionStore {
     partitions: BTreeMap<GnssSatelliteId, GeoPartition>,
     policy: StalenessPolicy,
@@ -250,6 +313,10 @@ impl Default for SbasCorrectionStore {
 }
 
 impl SbasCorrectionStore {
+    /// Create an empty correction store.
+    ///
+    /// The initial freshness cap is 360 seconds and partial corrections are
+    /// disabled until [`SbasCorrectionStore::allow_partial`] is enabled.
     pub fn new() -> Self {
         Self {
             partitions: BTreeMap::new(),
@@ -258,6 +325,11 @@ impl SbasCorrectionStore {
         }
     }
 
+    /// Ingest one decoded [`SbasMessage`] for a source GEO at a GNSS epoch.
+    ///
+    /// A non-SBAS `geo` returns [`Error::InvalidInput`]. Supported messages
+    /// update their corresponding masks, corrections, navigation, ionosphere,
+    /// disable interval, or withdrawal state; unsupported variants are ignored.
     pub fn ingest(
         &mut self,
         message: &SbasMessage,
@@ -330,6 +402,11 @@ impl SbasCorrectionStore {
         Ok(())
     }
 
+    /// List source GEOs eligible for corrected-ephemeris selection at an epoch.
+    ///
+    /// A GEO must be enabled, have an active PRN mask, and contain fast
+    /// corrections, an ionospheric grid, or GEO navigation. Results are ordered
+    /// by newest partition update first.
     pub fn ready_geos(&self, t_j2000_s: f64) -> Vec<GnssSatelliteId> {
         let mut geos: Vec<(GnssSatelliteId, f64)> = self
             .partitions
@@ -343,10 +420,18 @@ impl SbasCorrectionStore {
         geos.into_iter().map(|(geo, _)| geo).collect()
     }
 
+    /// Return the latest stored fast correction for a source GEO and satellite.
+    ///
+    /// `None` means that the partition or satellite has no fast correction; this
+    /// public getter does not apply the internal freshness check.
     pub fn fast(&self, geo: GnssSatelliteId, sat: GnssSatelliteId) -> Option<&SbasFastCorrection> {
         self.partitions.get(&geo)?.fast.get(&sat).map(|t| &t.value)
     }
 
+    /// Return the latest stored long-term correction for a source GEO and satellite.
+    ///
+    /// `None` means that no correction is stored for the pair; this public
+    /// getter does not apply the internal freshness check.
     pub fn long_term(
         &self,
         geo: GnssSatelliteId,
@@ -359,6 +444,10 @@ impl SbasCorrectionStore {
             .map(|t| &t.value)
     }
 
+    /// Return the stored ionospheric grid unless the GEO is currently disabled.
+    ///
+    /// The disable check evaluates the partition's latest ingested epoch, so a
+    /// grid is hidden immediately after a `DoNotUse` message.
     pub fn iono_grid(&self, geo: GnssSatelliteId) -> Option<&SbasIonoGrid> {
         let partition = self.partitions.get(&geo)?;
         if partition.is_disabled(partition.last_update_j2000_s) {
@@ -367,6 +456,10 @@ impl SbasCorrectionStore {
         partition.iono_grid.as_ref().map(|t| &t.value)
     }
 
+    /// Return the latest stored GEO navigation state for a source GEO.
+    ///
+    /// `None` means that no GEO navigation message has been ingested; this
+    /// public getter does not apply freshness filtering.
     pub fn geo_nav(&self, geo: GnssSatelliteId) -> Option<&SbasGeoState> {
         self.partitions
             .get(&geo)?
@@ -375,11 +468,19 @@ impl SbasCorrectionStore {
             .map(|t| &t.value)
     }
 
+    /// Replace the freshness policy used by internal correction lookups.
+    ///
+    /// A source is accepted when the absolute query/source epoch difference is
+    /// no greater than the policy's `max_staleness_s` value.
     pub fn with_policy(mut self, policy: StalenessPolicy) -> Self {
         self.policy = policy;
         self
     }
 
+    /// Set whether corrected ephemeris may use only one available correction.
+    ///
+    /// When enabled, the corrected source may use a fast-only or long-term-only
+    /// correction; the default is disabled.
     pub fn allow_partial(mut self, yes: bool) -> Self {
         self.allow_partial = yes;
         self
@@ -744,6 +845,10 @@ fn mask_position_to_sat(position: usize) -> Option<GnssSatelliteId> {
     }
 }
 
+/// Convert an SBAS broadcast PRN to the library's slot-form satellite id.
+///
+/// Broadcast PRNs 120 through 158 map to SBAS slots 20 through 58; values
+/// outside that interval return `None`.
 pub fn sbas_prn_to_sat(broadcast_prn: u16) -> Option<GnssSatelliteId> {
     let slot = broadcast_prn.checked_sub(100)?;
     if (20..=58).contains(&slot) {
@@ -753,6 +858,10 @@ pub fn sbas_prn_to_sat(broadcast_prn: u16) -> Option<GnssSatelliteId> {
     }
 }
 
+/// Convert an SBAS slot-form satellite id to its broadcast PRN.
+///
+/// An SBAS id maps to its stored PRN plus 100; ids from other GNSS systems
+/// return `None`.
 pub fn sat_to_sbas_prn(sat: GnssSatelliteId) -> Option<u16> {
     (sat.system == GnssSystem::Sbas).then_some(u16::from(sat.prn) + 100)
 }

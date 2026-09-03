@@ -83,40 +83,75 @@ impl LnavNumber {
 /// An LNAV parameter field, used to tag a range-validation failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LnavField {
+    /// The 17-bit time-of-week field in the HOW word.
     Tow,
+    /// The one-bit alert flag in the HOW word.
     Alert,
+    /// The one-bit anti-spoof flag in the HOW word.
     AntiSpoof,
+    /// The one-bit integrity flag in the TLM word.
     Integrity,
+    /// The 14-bit message field in the TLM word.
     TlmMessage,
+    /// The 10-bit GPS week transmitted in subframe 1 word 3.
     WeekNumber,
+    /// The two-bit L2 code in subframe 1 word 3.
     L2Code,
+    /// The one-bit L2-P data flag in subframe 1 word 4.
     L2PDataFlag,
+    /// The four-bit GPS user-range-accuracy index in subframe 1 word 3.
     UraIndex,
+    /// The six-bit satellite health value in subframe 1 word 3.
     SvHealth,
+    /// The ten-bit clock-data issue split across subframe 1 words 3 and 8.
     Iodc,
+    /// The signed eight-bit GPS group delay in subframe 1 word 7.
     Tgd,
+    /// The unsigned 16-bit clock reference time in subframe 1 word 8.
     Toc,
+    /// The signed eight-bit clock drift rate in subframe 1 word 9.
     Af2,
+    /// The signed 16-bit clock drift in subframe 1 word 9.
     Af1,
+    /// The signed 22-bit clock bias in subframe 1 word 10.
     Af0,
+    /// The eight-bit ephemeris-data issue in subframe 2 word 3 and word 10 of subframe 3.
     Iode,
+    /// The signed 16-bit radial sine correction in subframe 2 word 3.
     Crs,
+    /// The signed 16-bit mean-motion difference in subframe 2 word 4.
     DeltaN,
+    /// The signed 32-bit mean anomaly split across subframe 2 words 4 and 5.
     M0,
+    /// The signed 16-bit cosine correction in subframe 2 word 6.
     Cuc,
+    /// The unsigned 32-bit eccentricity split across subframe 2 words 6 and 7.
     Eccentricity,
+    /// The signed 16-bit sine correction in subframe 2 word 8.
     Cus,
+    /// The unsigned 32-bit square root of the semi-major axis split across subframe 2 words 8 and 9.
     SqrtA,
+    /// The unsigned 16-bit ephemeris reference time in subframe 2 word 10.
     Toe,
+    /// The one-bit curve-fit selector in subframe 2 word 10.
     FitIntervalFlag,
+    /// The five-bit age-of-data offset in subframe 2 word 10.
     Aodo,
+    /// The signed 16-bit cosine correction in subframe 3 word 3.
     Cic,
+    /// The signed 32-bit longitude of the ascending node split across subframe 3 words 3 and 4.
     Omega0,
+    /// The signed 16-bit sine correction in subframe 3 word 5.
     Cis,
+    /// The signed 32-bit inclination split across subframe 3 words 5 and 6.
     I0,
+    /// The signed 16-bit radial cosine correction in subframe 3 word 7.
     Crc,
+    /// The signed 32-bit argument of perigee split across subframe 3 words 7 and 8.
     Omega,
+    /// The signed 24-bit rate of right ascension in subframe 3 word 9.
     OmegaDot,
+    /// The signed 14-bit inclination rate in subframe 3 word 10.
     Idot,
 }
 
@@ -168,58 +203,111 @@ impl LnavField {
 pub enum LnavError {
     /// A parameter does not fit its transmitted field; echoes the offending
     /// value in its original numeric type.
-    OutOfRange { field: LnavField, value: LnavNumber },
+    OutOfRange {
+        /// The first parameter that does not fit its transmitted field.
+        field: LnavField,
+        /// The rejected input, preserving its original numeric variant.
+        value: LnavNumber,
+    },
     /// A word's recomputed parity did not match (1-based subframe and word).
-    ParityFailed { subframe: u8, word: u8 },
+    ParityFailed {
+        /// One-based subframe number whose parity check failed.
+        subframe: u8,
+        /// One-based word number of the first failed parity check.
+        word: u8,
+    },
     /// A parity source word was not exactly 24 data bits.
-    BadWordLength { expected: usize, actual: usize },
+    BadWordLength {
+        /// Required source-word length, fixed at 24 data bits.
+        expected: usize,
+        /// Supplied source-word length.
+        actual: usize,
+    },
     /// A subframe was not exactly [`SUBFRAME_LENGTH`] bits.
-    BadSubframeLength { subframe: u8 },
+    BadSubframeLength {
+        /// One-based subframe number associated with the invalid input length.
+        subframe: u8,
+    },
 }
 
 /// Clock and ephemeris parameters in engineering units (the per-field input to
 /// [`encode`]). Values preserve their numeric type for faithful error echoing.
 #[derive(Clone, Copy, Debug)]
 pub struct LnavParams {
+    /// Ten-bit GPS week placed in subframe 1 word 3; [`encode`] accepts integer values 0 through 1023.
     pub week_number: LnavNumber,
+    /// Two-bit L2 code placed in subframe 1 word 3 bits 11..12.
     pub l2_code: LnavNumber,
+    /// One-bit L2-P data flag placed in subframe 1 word 4 bit 1; [`decode`] does not recover it.
     pub l2_p_data_flag: LnavNumber,
+    /// Four-bit GPS URA index placed in subframe 1 word 3 bits 13..16.
     pub ura_index: LnavNumber,
+    /// Six-bit satellite health value placed in subframe 1 word 3 bits 17..22.
     pub sv_health: LnavNumber,
+    /// Ten-bit clock-data issue split between subframe 1 word 3 and word 8.
     pub iodc: LnavNumber,
+    /// GPS TGD in seconds, quantized with a 2^-31 LSB in subframe 1 word 7.
     pub tgd: LnavNumber,
+    /// Clock reference time in seconds of week, quantized to 16-second steps in subframe 1 word 8.
     pub toc: LnavNumber,
+    /// Clock bias in seconds, quantized with a 2^-31 LSB in subframe 1 word 10.
     pub af0: LnavNumber,
+    /// Clock drift in seconds per second, quantized with a 2^-43 LSB in subframe 1 word 9.
     pub af1: LnavNumber,
+    /// Clock drift rate in seconds per second squared, quantized with a 2^-55 LSB in subframe 1 word 9.
     pub af2: LnavNumber,
+    /// Eight-bit ephemeris-data issue placed in subframe 2 word 3 and duplicated in subframe 3 word 10.
     pub iode: LnavNumber,
+    /// Radial sine correction in meters, quantized with a 2^-5 LSB in subframe 2 word 3.
     pub crs: LnavNumber,
+    /// Mean-motion difference in semicircles per second, quantized with a 2^-43 LSB in subframe 2 word 4.
     pub delta_n: LnavNumber,
+    /// Mean anomaly in semicircles, quantized with a 2^-31 LSB and split across subframe 2 words 4 and 5.
     pub m0: LnavNumber,
+    /// Cosine correction in radians, quantized with a 2^-29 LSB in subframe 2 word 6.
     pub cuc: LnavNumber,
+    /// Dimensionless eccentricity, quantized with a 2^-33 LSB and split across subframe 2 words 6 and 7.
     pub eccentricity: LnavNumber,
+    /// Sine correction in radians, quantized with a 2^-29 LSB in subframe 2 word 8.
     pub cus: LnavNumber,
+    /// Square root of the semi-major axis in sqrt(m), quantized with a 2^-19 LSB and split across subframe 2 words 8 and 9.
     pub sqrt_a: LnavNumber,
+    /// Ephemeris reference time in seconds of week, quantized to 16-second steps in subframe 2 word 10.
     pub toe: LnavNumber,
+    /// One-bit curve-fit selector in subframe 2 word 10, interpreted with IODE and IODC downstream.
     pub fit_interval_flag: LnavNumber,
+    /// Five-bit raw age-of-data offset placed in subframe 2 word 10 and recovered without conversion.
     pub aodo: LnavNumber,
+    /// Cosine correction in radians, quantized with a 2^-29 LSB in subframe 3 word 3.
     pub cic: LnavNumber,
+    /// Longitude of the ascending node in semicircles, quantized with a 2^-31 LSB and split across subframe 3 words 3 and 4.
     pub omega0: LnavNumber,
+    /// Sine correction in radians, quantized with a 2^-29 LSB in subframe 3 word 5.
     pub cis: LnavNumber,
+    /// Inclination in semicircles, quantized with a 2^-31 LSB and split across subframe 3 words 5 and 6.
     pub i0: LnavNumber,
+    /// Radial cosine correction in meters, quantized with a 2^-5 LSB in subframe 3 word 7.
     pub crc: LnavNumber,
+    /// Argument of perigee in semicircles, quantized with a 2^-31 LSB and split across subframe 3 words 7 and 8.
     pub omega: LnavNumber,
+    /// Rate of right ascension in semicircles per second, quantized with a 2^-43 LSB in subframe 3 word 9.
     pub omega_dot: LnavNumber,
+    /// Inclination rate in semicircles per second, quantized with a 2^-43 LSB in subframe 3 word 10.
     pub idot: LnavNumber,
 }
 
 /// TLM/HOW options accompanying an [`encode`] (defaults applied by the caller).
 #[derive(Clone, Copy, Debug)]
 pub struct LnavOptions {
+    /// Integer time-of-week count placed in the 17-bit HOW field of each subframe.
     pub tow: LnavNumber,
+    /// Integer alert flag placed in HOW bit 18 of each subframe.
     pub alert: LnavNumber,
+    /// Integer anti-spoof flag placed in HOW bit 19 of each subframe.
     pub anti_spoof: LnavNumber,
+    /// Integer integrity flag placed in the TLM word of each subframe.
     pub integrity: LnavNumber,
+    /// Integer 14-bit TLM message placed after the preamble in each subframe.
     pub tlm_message: LnavNumber,
 }
 
@@ -229,34 +317,63 @@ pub struct LnavOptions {
 /// encode-only flag in word 4 and is not recovered.)
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LnavDecoded {
+    /// Ten-bit GPS week used as the residue checked against the caller's full week.
     pub week_number: i64,
+    /// Two-bit L2 code read from subframe 1 word 3 bits 11..12.
     pub l2_code: i64,
+    /// Four-bit URA index used to obtain the broadcast record's meter accuracy bound.
     pub ura_index: i64,
+    /// Six-bit health value copied to the broadcast record.
     pub sv_health: i64,
+    /// Recombined ten-bit clock-data issue from the two subframe 1 locations.
     pub iodc: i64,
+    /// GPS TGD in seconds recovered with the 2^-31 LSB and copied into the group delay.
     pub tgd: f64,
+    /// Clock reference time in integer seconds of week from the 16-second field.
     pub toc: i64,
+    /// Clock bias in seconds recovered from the signed 22-bit field.
     pub af0: f64,
+    /// Clock drift in seconds per second recovered with the 2^-43 LSB.
     pub af1: f64,
+    /// Clock drift rate in seconds per second squared recovered with the 2^-55 LSB.
     pub af2: f64,
+    /// Eight-bit ephemeris-data issue recovered from subframe 2 and used as the broadcast issue.
     pub iode: i64,
+    /// Radial sine correction in meters recovered with the 2^-5 LSB.
     pub crs: f64,
+    /// Mean-motion difference in semicircles per second recovered with the 2^-43 LSB.
     pub delta_n: f64,
+    /// Mean anomaly in semicircles recovered from the two-word field with the 2^-31 LSB.
     pub m0: f64,
+    /// Cosine correction in radians recovered with the 2^-29 LSB.
     pub cuc: f64,
+    /// Dimensionless eccentricity recovered from the two-word field with the 2^-33 LSB.
     pub eccentricity: f64,
+    /// Sine correction in radians recovered with the 2^-29 LSB.
     pub cus: f64,
+    /// Square root of the semi-major axis in sqrt(m) recovered with the 2^-19 LSB.
     pub sqrt_a: f64,
+    /// Ephemeris reference time in integer seconds of week from the 16-second field.
     pub toe: i64,
+    /// One-bit fit selector combined with IODE and IODC to derive the GPS fit interval.
     pub fit_interval_flag: i64,
+    /// Five-bit raw age-of-data offset recovered without conversion.
     pub aodo: i64,
+    /// Cosine correction in radians recovered with the 2^-29 LSB.
     pub cic: f64,
+    /// Longitude of the ascending node in semicircles recovered with the 2^-31 LSB.
     pub omega0: f64,
+    /// Sine correction in radians recovered with the 2^-29 LSB.
     pub cis: f64,
+    /// Inclination in semicircles recovered with the 2^-31 LSB.
     pub i0: f64,
+    /// Radial cosine correction in meters recovered with the 2^-5 LSB.
     pub crc: f64,
+    /// Argument of perigee in semicircles recovered with the 2^-31 LSB.
     pub omega: f64,
+    /// Rate of right ascension in semicircles per second recovered with the 2^-43 LSB.
     pub omega_dot: f64,
+    /// Inclination rate in semicircles per second recovered with the 2^-43 LSB.
     pub idot: f64,
 }
 

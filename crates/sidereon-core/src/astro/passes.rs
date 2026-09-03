@@ -191,15 +191,29 @@ struct UtcComponents {
 /// Ground-station geodetic coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroundStation {
+    /// Geodetic latitude in degrees, passed to the WGS84 geodetic and
+    /// topocentric transforms. Pass and look-angle entry points require a
+    /// finite value in `[-90, 90]`.
     pub latitude_deg: f64,
+    /// Geodetic longitude in degrees, passed to the WGS84 geodetic and
+    /// topocentric transforms. Pass and look-angle entry points require a
+    /// finite value in `[-180, 180]`.
     pub longitude_deg: f64,
+    /// Station height above the reference ellipsoid in meters. The geometry
+    /// code requires it to be finite and converts it to kilometers before
+    /// constructing the geodetic station.
     pub altitude_m: f64,
 }
 
 /// Pass-prediction options.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PassPredictionOptions {
+    /// Elevation threshold in degrees applied after each horizon-bounded pass's
+    /// maximum elevation is found. The value must be finite and in `[-90, 90]`.
     pub min_elevation_deg: f64,
+    /// Positive integer interval in seconds between samples in the coarse
+    /// elevation scan. If the interval does not land on `end_time`, the scan
+    /// adds an explicit sample at that endpoint.
     pub step_seconds: i64,
 }
 
@@ -215,9 +229,17 @@ impl Default for PassPredictionOptions {
 /// Predicted visible pass.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PredictedPass {
+    /// UTC instant used as the pass rise: the refined rising horizon crossing,
+    /// or `start_time` when the first sample is already above the horizon.
     pub rise: UtcInstant,
+    /// UTC instant of the refined falling horizon crossing that closes the
+    /// emitted pass within the requested window.
     pub set: UtcInstant,
+    /// Elevation in degrees evaluated at the best time found by the
+    /// golden-section search between [`Self::rise`] and [`Self::set`].
     pub max_elevation_deg: f64,
+    /// UTC instant selected by the golden-section search for the highest
+    /// elevation between [`Self::rise`] and [`Self::set`].
     pub max_elevation_time: UtcInstant,
 }
 
@@ -225,8 +247,15 @@ pub struct PredictedPass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PassError {
     #[error("invalid pass input {field}: {reason}")]
+    /// A pass or visibility entry point rejected an input before producing its
+    /// result; [`Self::InvalidInput::field`] and [`Self::InvalidInput::reason`]
+    /// identify the rejected value and validation outcome.
     InvalidInput {
+        /// Stable label for the rejected value, such as `step_seconds` or
+        /// `ground_station.latitude_deg`.
         field: &'static str,
+        /// Short validation diagnostic, such as `not finite`, `not positive`,
+        /// or `out of range`.
         reason: &'static str,
     },
 }
@@ -242,24 +271,42 @@ pub struct LookAngle {
     /// [`crate::constants::AZIMUTH_ZENITH_EPS`], rather than returning rounding
     /// noise or erroring.
     pub azimuth_deg: f64,
+    /// Topocentric elevation in degrees produced by the GCRS-to-topocentric
+    /// transform and checked for finiteness before it is returned.
     pub elevation_deg: f64,
+    /// Topocentric line-of-sight distance in kilometers produced by the
+    /// GCRS-to-topocentric transform and checked for finiteness before return.
     pub range_km: f64,
 }
 
 /// One member of a TLE-backed constellation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConstellationMember {
+    /// Identifier copied into [`VisibleSatellite::catalog_number`] when this
+    /// member is emitted by [`visible_from_constellation`].
     pub catalog_number: String,
+    /// Element set passed to SGP4 initialization with [`OpsMode::Afspc`]; a
+    /// member whose initialization fails is skipped by the visibility search.
     pub elements: ElementSet,
 }
 
 /// One satellite visible from a ground station at an instant.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisibleSatellite {
+    /// Identifier copied from the constellation member or the parallel `ids`
+    /// entry that supplied this result.
     pub catalog_number: String,
+    /// Topocentric azimuth in degrees copied from the successful look-angle
+    /// calculation.
     pub azimuth_deg: f64,
+    /// Topocentric elevation in degrees copied from the successful look-angle
+    /// calculation; only values at or above the requested threshold are kept.
     pub elevation_deg: f64,
+    /// Topocentric line-of-sight distance in kilometers copied from the
+    /// successful look-angle calculation.
     pub range_km: f64,
+    /// Propagated satellite position in the TEME frame, in kilometers, copied
+    /// from [`Prediction::position`].
     pub position_km: [f64; 3],
 }
 
@@ -267,15 +314,26 @@ pub struct VisibleSatellite {
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum LookAngleError {
     #[error("invalid look-angle input {field}: {reason}")]
+    /// A look-angle or ground-track entry point rejected a station, datetime,
+    /// or computed look value; the fields carry its stable diagnostic.
     InvalidInput {
+        /// Stable label for the rejected input or computed output, such as
+        /// `datetime` or `ground_station.latitude_deg`.
         field: &'static str,
+        /// Short validation diagnostic, such as `not finite` or
+        /// `invalid UTC instant`.
         reason: &'static str,
     },
     #[error("SGP4 initialization failed: {0}")]
+    /// SGP4 could not initialize the element set supplied to [`look_angle`].
     Init(crate::astro::sgp4::Error),
     #[error("SGP4 propagation failed: {0}")]
+    /// SGP4 could not propagate the requested epoch; arc operations stop at
+    /// the first propagation failure.
     Propagate(crate::astro::sgp4::Error),
     #[error("look-angle frame transform failed: {0}")]
+    /// A frame conversion failed while deriving a look angle or ground-track
+    /// point from the propagated state.
     FrameTransform(#[from] FrameTransformError),
 }
 

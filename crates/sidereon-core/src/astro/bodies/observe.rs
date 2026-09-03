@@ -179,15 +179,27 @@ impl Default for ObserveOptions {
 #[derive(Debug, Clone, Copy)]
 pub enum Target<'a> {
     /// SPK-covered body by NAIF id.
-    Spk { kernel: &'a Spk, naif_id: i32 },
+    Spk {
+        /// Kernel used for the target, Earth, and Sun state queries.
+        kernel: &'a Spk,
+        /// NAIF identifier of the target body queried relative to the SSB.
+        naif_id: i32,
+    },
     /// Analytic low-precision Sun, no kernel required.
     Sun,
     /// Analytic low-precision Moon, no kernel required.
     Moon,
     /// Caller-supplied SSB-centered ICRS/J2000 state plus a kernel for Earth/Sun.
     BarycentricState {
+        /// Kernel used for the Earth barycentric state and solar-deflection Sun state.
         kernel: &'a Spk,
+        /// Target position at the observation epoch, in SSB-centered ICRS/J2000 kilometers.
+        ///
+        /// The light-time reducer advances this position with `velocity_km_s`.
         position_km: [f64; 3],
+        /// Target velocity in SSB-centered ICRS/J2000 kilometers per second.
+        ///
+        /// The light-time reducer treats this velocity as constant during its iteration.
         velocity_km_s: [f64; 3],
     },
 }
@@ -209,7 +221,10 @@ pub enum ObserveError {
     Angle(#[from] AngleError),
     /// SPK state used a reference frame this reduction does not support.
     #[error("unsupported SPK reference frame {frame}")]
-    UnsupportedSpkFrame { frame: i32 },
+    UnsupportedSpkFrame {
+        /// NAIF reference-frame identifier returned by the SPK state.
+        frame: i32,
+    },
     /// A public input or computed intermediate was not finite.
     #[error("non-finite observation input or intermediate")]
     NonFinite,

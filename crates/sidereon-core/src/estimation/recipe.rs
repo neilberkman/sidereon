@@ -78,11 +78,19 @@ pub enum ReferenceTarget {
 pub enum StrategyId {
     /// A reference-faithful strategy: 0-ULP to `target` for `technique`.
     Reference {
+        /// Technique passed to [`EstimationRecipe::for_reference`] and checked
+        /// against the input technique before runner dispatch.
         technique: Technique,
+        /// Reference target paired with `technique` when resolving the recipe;
+        /// unsupported pairs are rejected as incompatible targets.
         target: ReferenceTarget,
     },
     /// The canonical strategy for `technique` (bounded-tolerance, truth-gated).
-    Canonical { technique: Technique },
+    Canonical {
+        /// Technique passed to [`EstimationRecipe::for_canonical`] and used to
+        /// select the corresponding canonical runner and screen family.
+        technique: Technique,
+    },
 }
 
 impl Default for StrategyId {
@@ -272,10 +280,23 @@ pub enum SolverRecipe {
 /// reduced normals; see `estimation::strategies`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct EstimationRecipe {
+    /// SPP transmit-time branch copied into `SppModelRecipe` and consumed by
+    /// `sat_model`: the reference uses a measured-pseudorange seed with a fixed
+    /// iteration count, while the canonical branch iterates to convergence.
     pub range: RangeRecipe,
+    /// Earth-rotation operation passed by SPP to both satellite rotation and
+    /// geometric-range calculation in the shared range substrate.
     pub sagnac: SagnacRecipe,
+    /// Receiver-frame selection passed by SPP to the shared azimuth/elevation
+    /// substrate; SPP accepts the Skyfield and canonical WGS84 frame variants.
     pub frame: FrameRecipe,
+    /// Normal-equation reduction forwarded to the RTK and PPP solve seams; the
+    /// reference arms retain their tie orders and the canonical arm selects the
+    /// square-root reduction.
     pub normal: NormalRecipe,
+    /// Factorization selection forwarded to the SPP trust-region and RTK solve
+    /// seams; SPP recognizes its owned trust-region variant, while RTK uses the
+    /// owned Cholesky variant only with [`NormalRecipe::CanonicalSquareRoot`].
     pub solver: SolverRecipe,
 }
 
@@ -468,7 +489,11 @@ pub enum PartialResolution {
     /// Confidence-ranked then exhaustive subset fallback down to
     /// `min_ambiguities` retained (the RTK static fixed solver,
     /// `rtk_filter::search::search_partial_fixed_ambiguities`).
-    Exhaustive { min_ambiguities: usize },
+    Exhaustive {
+        /// Retained-subset floor copied from `partial_min_ambiguities` by
+        /// [`AmbiguityIdPolicy::rtk_static`].
+        min_ambiguities: usize,
+    },
 }
 
 /// The integer-ambiguity identity/eligibility policy a strategy resolves under:
@@ -477,9 +502,14 @@ pub enum PartialResolution {
 /// reference strategies. Named in P3; consumed by the runtime selector in P4.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AmbiguityIdPolicy {
+    /// Ambiguity identity convention: the RTK constructors store per-system
+    /// double differences, while [`AmbiguityIdPolicy::ppp`] stores undifferenced
+    /// per-satellite ambiguities.
     pub differencing: DifferencingMode,
     /// Exclude float-only constellations from the integer search set.
     pub float_only_gating: bool,
+    /// Resolution mode returned by the policy constructors: static RTK stores
+    /// an exhaustive fallback, while sequential RTK and PPP store `Disabled`.
     pub partial: PartialResolution,
     /// Ratio-test acceptance threshold passed to the LAMBDA kernel.
     pub ratio_threshold: f64,

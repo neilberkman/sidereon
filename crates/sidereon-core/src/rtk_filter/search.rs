@@ -18,52 +18,104 @@ use crate::id::GnssSystem;
 /// Integer ambiguity-fix verdict for a static fixed RTK solve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegerStatus {
+    /// The LAMBDA ratio test passed the requested [`FixedSolveOpts`] threshold,
+    /// so callers may use the returned integer vector as fixed.
     Fixed,
+    /// The search did not produce an accepted integer fix. This is also used
+    /// for metadata created when no ambiguity entered the search.
     NotFixed,
 }
 
 /// Diagnostic payload for one integer ambiguity search.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AmbiguitySearch {
+    /// Ambiguity ids in the order used by the float values and covariance rows
+    /// and columns.
     pub order: Vec<String>,
+    /// Float ambiguities in cycles, paired with the ids in [`Self::order`].
+    /// Each value is the meter ambiguity after its offset is removed and then
+    /// divided by its wavelength.
     pub float_cycles: Vec<(String, f64)>,
+    /// Symmetrized cycle covariance used by LAMBDA, flattened in row-major
+    /// order. Rows and columns follow [`Self::order`].
     pub covariance_cycles: Vec<f64>,
+    /// Inverse of the symmetrized cycle covariance used for the reported
+    /// quadratic scores, flattened in row-major order. Rows and columns follow
+    /// [`Self::order`].
     pub covariance_inverse_cycles: Vec<f64>,
 }
 
 /// Summary of a rejected full-set search when partial AR is enabled.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FullSetIntegerSummary {
+    /// Ratio-test verdict from the full ambiguity-set search before subset
+    /// attempts begin.
     pub integer_status: IntegerStatus,
+    /// Score ratio reported by the full ambiguity-set search.
     pub integer_ratio: Option<f64>,
+    /// Lowest quadratic score reported by the full ambiguity-set search.
     pub integer_best_score: Option<f64>,
+    /// Runner-up quadratic score from the full ambiguity-set search, when one
+    /// was returned.
     pub integer_second_best_score: Option<f64>,
+    /// Number of candidate vectors reported by the full LAMBDA search.
     pub integer_candidates: usize,
+    /// Ambiguity order used by the full ambiguity-set search.
     pub order: Vec<String>,
 }
 
 /// Partial ambiguity-resolution diagnostics for a static fixed RTK solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartialSearchMeta {
+    /// Whether partial resolution was entered after the full ambiguity-set
+    /// search was rejected.
     pub enabled: bool,
+    /// Whether the selected ambiguity subset passed the LAMBDA ratio test.
     pub fixed: bool,
+    /// Ids included in the fixed-cycle map for this result, in sorted order.
+    /// After a failed full-set search, these can identify the best candidate
+    /// even though [`Self::fixed`] is `false`.
     pub fixed_ambiguities: Vec<String>,
+    /// Full-search ids not selected for the subset, in sorted order.
     pub free_ambiguities: Vec<String>,
+    /// Diagnostics copied from the rejected full-set search, when partial
+    /// resolution was entered.
     pub full_set: Option<FullSetIntegerSummary>,
+    /// Number of subset combinations evaluated by the exhaustive fallback.
+    /// `None` means that fallback did not run; `Some(0)` records that a limit
+    /// prevented any combination from being evaluated.
     pub exhaustive_subsets_evaluated: Option<usize>,
 }
 
 /// Integer-search metadata for a static fixed RTK solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IntegerSearchMeta {
+    /// Ratio-test verdict from the LAMBDA search, or [`IntegerStatus::NotFixed`]
+    /// when no ambiguity entered the search.
     pub integer_status: IntegerStatus,
+    /// Integer-search method identifier; the RTK search currently stores
+    /// `"lambda"`.
     pub integer_method: &'static str,
+    /// Best-to-runner-up score ratio reported by LAMBDA. `None` means no
+    /// ambiguity search ran.
     pub integer_ratio: Option<f64>,
+    /// Lowest quadratic score `Δᵀ Q⁻¹ Δ` reported by LAMBDA, or `None` when no
+    /// ambiguity search ran.
     pub integer_best_score: Option<f64>,
+    /// Runner-up quadratic score reported by LAMBDA, when a second candidate
+    /// exists; it is also `None` when no search ran.
     pub integer_second_best_score: Option<f64>,
+    /// Number of candidate vectors reported by LAMBDA; an empty search stores
+    /// `0`.
     pub integer_candidates: usize,
+    /// Float values and covariance diagnostics retained for the search, with
+    /// the matrix data aligned to [`AmbiguitySearch::order`].
     pub ambiguity_search: AmbiguitySearch,
+    /// `(ambiguity id, meter offset)` pairs applied before converting the
+    /// float ambiguities to cycles. The static and sequential callers populate
+    /// this for the full or selected search ids.
     pub ambiguity_offsets_m: Vec<(String, f64)>,
+    /// Diagnostics for the optional partial ambiguity-resolution path.
     pub partial: PartialSearchMeta,
 }
 

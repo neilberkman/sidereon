@@ -93,11 +93,23 @@ const GP_CSV_FIELDS: &[&str] = &[
 /// re-encodes losslessly and converts directly to the SGP4 epoch.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OmmEpoch {
+    /// Civil year copied from the parsed `EPOCH`, or derived from an SGP4 split
+    /// Julian date without applying the TLE two-digit-year pivot.
     pub year: i32,
+    /// Civil month copied from the parsed `EPOCH`, or derived from an SGP4 split
+    /// Julian date when a fit produces an [`OmmEpoch`].
     pub month: u32,
+    /// Civil day copied from the parsed `EPOCH`, or derived from an SGP4 split
+    /// Julian date when a fit produces an [`OmmEpoch`].
     pub day: u32,
+    /// Civil hour passed to the calendar-to-Julian-date conversion; parsed
+    /// year-end OMMs retain hour 23 when bridged to SGP4.
     pub hour: u32,
+    /// Civil minute passed to the calendar-to-Julian-date conversion; the ISS
+    /// fixture's `04:32` epoch decodes this field as 32.
     pub minute: u32,
+    /// Civil second copied from the parsed `EPOCH`; UTC-like input may retain
+    /// leap-second value 60, while continuous-time input rejects it.
     pub second: u32,
     /// Fractional second expressed in whole microseconds (0..=999_999).
     pub microsecond: u32,
@@ -118,18 +130,36 @@ pub struct OmmEpoch {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Omm {
     // -- Header / metadata --
+    /// OMM format version from `CCSDS_OMM_VERS`; field mapping defaults it to
+    /// `"2.0"`, and encoders place it in the format-specific version field.
     pub ccsds_omm_vers: String,
+    /// Optional validated `CREATION_DATE` header text, emitted as empty/`null`
+    /// when absent according to the selected encoding.
     pub creation_date: Option<String>,
+    /// Optional validated `ORIGINATOR` header text, emitted as empty/`null`
+    /// when absent according to the selected encoding.
     pub originator: Option<String>,
+    /// Optional `OBJECT_NAME` text used by constellation conversion to resolve
+    /// a PRN and retained in CelesTrak source or skipped-entry identity.
     pub object_name: Option<String>,
     /// International designator, CCSDS form (e.g. `"1998-067A"`).
     pub object_id: Option<String>,
+    /// Optional `CENTER_NAME` metadata; CelesTrak JSON may omit it, yielding
+    /// `None` in cross-encoding comparisons.
     pub center_name: Option<String>,
+    /// Optional `REF_FRAME` metadata; CelesTrak JSON may omit it, yielding
+    /// `None` in cross-encoding comparisons.
     pub ref_frame: Option<String>,
+    /// Optional `TIME_SYSTEM` metadata that selects UTC-like parsing for absent,
+    /// `UTC`, `GLO`, and `GLONASS` labels and continuous parsing otherwise.
     pub time_system: Option<String>,
+    /// Optional validated `MEAN_ELEMENT_THEORY` text; XML encoding preserves
+    /// legal carriage returns through character-reference escaping.
     pub mean_element_theory: Option<String>,
 
     // -- Mean elements --
+    /// Parsed `EPOCH` calendar value emitted as ISO-8601 and used by
+    /// [`Omm::to_element_set`] when no exact in-memory split Julian date exists.
     pub epoch: OmmEpoch,
     /// Mean motion, revolutions per day.
     pub mean_motion: f64,
@@ -145,10 +175,20 @@ pub struct Omm {
     pub mean_anomaly_deg: f64,
 
     // -- TLE-derived parameters --
+    /// Optional `EPHEMERIS_TYPE`, defaulting to integer 0 when absent; fit-
+    /// generated OMMs also set it to 0.
     pub ephemeris_type: i32,
+    /// `CLASSIFICATION_TYPE`, defaulting to `"U"` when absent; fit-generated
+    /// OMMs copy the classification from their TLE metadata.
     pub classification_type: String,
+    /// Required `NORAD_CAT_ID` parsed as `u32`; it feeds the SGP4 catalog number
+    /// and constellation record identity.
     pub norad_cat_id: u32,
+    /// Optional `ELEMENT_SET_NO`, defaulting to integer 999 when absent; fit-
+    /// generated OMMs copy `TleMetadata::element_set_number`.
     pub element_set_no: i32,
+    /// Optional `REV_AT_EPOCH`, defaulting to integer 0 when absent; TLE
+    /// conversion requires a fit-generated value to fit in `i32`.
     pub rev_at_epoch: i64,
     /// SGP4 drag term B\*, inverse earth-radii.
     pub bstar: f64,
@@ -188,7 +228,9 @@ pub enum OmmError {
     MissingField(&'static str),
     /// A decoded scalar field failed boundary validation.
     InvalidField {
+        /// Static field label returned by the shared validator.
         field: &'static str,
+        /// OMM validation category derived from the shared validator.
         kind: OmmInputErrorKind,
     },
     /// A numeric/integer field could not be parsed.

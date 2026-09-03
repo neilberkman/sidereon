@@ -65,18 +65,42 @@ pub struct FilterState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Classification of failures returned when [`FilterState`] construction or
+/// carried-state validation rejects input. The update layer maps these
+/// classifications to its public invalid-state error.
 pub enum FilterStateValidationKind {
-    Length { expected: usize, actual: usize },
+    /// A parallel state vector or the row-major information matrix has an
+    /// unexpected length.
+    Length {
+        /// Required length computed from the state dimension or ambiguity ids.
+        expected: usize,
+        /// Observed length of the state vector or information matrix.
+        actual: usize,
+    },
+    /// A checked floating-point value or prior-derived information value is
+    /// NaN or infinite.
     NonFinite,
+    /// A prior sigma, or its derived information value, is not positive.
     NotPositive,
+    /// An information-matrix off-diagonal pair differs beyond the matrix
+    /// tolerance.
     NotSymmetric,
+    /// The symmetrized information matrix has an eigenvalue below the allowed
+    /// negative tolerance.
     NotPositiveSemidefinite,
+    /// The state dimension cannot be squared in `usize` for the information
+    /// matrix length.
     DimensionOverflow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Validation error returned while constructing or checking a [`FilterState`].
+/// The field label identifies the failed state member and the kind records the
+/// validation rule that rejected it.
 pub struct FilterStateValidationError {
+    /// Stable state-member label supplied to the validation routine.
     pub field: &'static str,
+    /// Validation classification for [`Self::field`].
     pub kind: FilterStateValidationKind,
 }
 

@@ -8,12 +8,21 @@ use crate::astro::tolerances::PIVOT_EPSILON;
 use crate::validate;
 
 #[derive(Debug, Default, Clone)]
+/// Reusable buffers for the flat first-tie linear kernels.
+///
+/// [`invert_flat_first_tie_into`] and [`solve_matrix_flat_first_tie_into`]
+/// refill `rows` with an augmented row-major system and reuse `x` for its
+/// length-`n` solution, so callers can retain this value between solves.
 pub struct FlatLinearScratch {
     rows: Vec<f64>,
     x: Vec<f64>,
 }
 
 #[derive(Debug, Default, Clone)]
+/// Reusable buffers for [`solve_flat_normal_first_tie_into`].
+///
+/// The into variant copies the row-major normal matrix and right-hand side into
+/// `a` and `b`, then returns the finite solution held in `x`.
 pub struct FlatNormalSolveScratch {
     a: Vec<f64>,
     b: Vec<f64>,
@@ -21,14 +30,28 @@ pub struct FlatNormalSolveScratch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+/// Validation failure reported while building a fixed-size weighted normal matrix.
+///
+/// [`normal_matrix_4_weighted_column_outer`] uses this error for weight-length
+/// mismatches, failed finite-input checks, and a non-finite accumulated result.
 pub enum LinearError {
     #[error("invalid linear algebra {field}: {reason}")]
+    /// The named input or output failed validation, with the static reason
+    /// supplied by the check that detected it.
     InvalidInput {
+        /// Validation label such as `weights`, `rows`, or `normal matrix`.
         field: &'static str,
+        /// Static diagnostic paired with [`field`](Self::InvalidInput::field).
         reason: &'static str,
     },
 }
 
+/// Solve a finite dense row-major system `A x = b` with partial pivoting.
+///
+/// At each column, the largest absolute pivot is selected by scanning downward
+/// with strict `>` comparison, so an equal-magnitude pivot keeps the first row.
+/// The function returns `None` for an empty, ragged, or non-finite system, a
+/// non-finite or `<= PIVOT_EPSILON` pivot, or a non-finite back-substituted result.
 pub fn solve_linear_first_tie(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     let n = validate_dense_system(a, b)?;
     let mut rows: Vec<Vec<f64>> = a
@@ -78,6 +101,12 @@ pub fn solve_linear_first_tie(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     Some(x)
 }
 
+/// Solve an owned finite dense row-major system `A x = b` with partial pivoting.
+///
+/// The largest absolute pivot is selected with `total_cmp`; equal magnitudes
+/// therefore select the last row encountered. The function returns `None` for
+/// an empty, ragged, or non-finite system, a non-finite or `<= PIVOT_EPSILON`
+/// pivot, or a non-finite back-substituted result.
 pub fn solve_linear_last_tie(mut a: Vec<Vec<f64>>, b: Vec<f64>) -> Option<Vec<f64>> {
     let n = validate_dense_system(&a, &b)?;
     for (row, bi) in a.iter_mut().zip(b) {
@@ -110,6 +139,11 @@ pub fn solve_linear_last_tie(mut a: Vec<Vec<f64>>, b: Vec<f64>) -> Option<Vec<f6
     Some(x)
 }
 
+/// Invert a finite dense matrix by solving once per unit-vector column with
+/// [`solve_linear_first_tie`].
+///
+/// The solved columns are transposed into the returned row-major inverse. An
+/// empty matrix or any failed column solve returns `None`.
 pub fn invert_matrix_first_tie(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     let n = a.len();
     if n == 0 {
@@ -128,6 +162,11 @@ pub fn invert_matrix_first_tie(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     )
 }
 
+/// Invert a finite dense matrix by solving once per unit-vector column with
+/// [`solve_linear_last_tie`].
+///
+/// The solved columns are transposed into the returned row-major inverse. An
+/// empty, malformed, or singular input returns `None`.
 pub fn invert_matrix_last_tie(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     let n = a.len();
     let mut columns = Vec::with_capacity(n);
@@ -140,6 +179,11 @@ pub fn invert_matrix_last_tie(a: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     transpose(&columns)
 }
 
+/// Solve `A X = B` column by column with [`solve_linear_last_tie`].
+///
+/// `B` and the returned `X` are row-major matrices; the function transposes
+/// `B` to obtain right-hand-side columns and transposes the solved columns back.
+/// Invalid dimensions, non-finite entries, or a failed column solve return `None`.
 pub fn solve_matrix_last_tie(a: &[Vec<f64>], b: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     let columns = transpose(b)?;
     let mut solved_columns = Vec::with_capacity(columns.len());
@@ -149,6 +193,14 @@ pub fn solve_matrix_last_tie(a: &[Vec<f64>], b: &[Vec<f64>]) -> Option<Vec<Vec<f
     transpose(&solved_columns)
 }
 
+/// Accumulate weighted normal equations from `(row_h, row_y, row_weight)` items.
+///
+/// Each item is scaled as `h = row_h * row_weight` and `y = row_y * row_weight`,
+/// then accumulated as `AᵀA` and `Aᵀy` in fixed row-major index order. Callers
+/// pass an inverse sigma or a square root of an inverse-variance weight, so the
+/// resulting matrix and right-hand side represent the corresponding weighted
+/// equations. `None` denotes zero dimension, a wrong row length, non-finite input,
+/// or a non-finite accumulated result.
 pub fn normal_equations_weighted<'a, I>(rows: I, n: usize) -> Option<(Vec<Vec<f64>>, Vec<f64>)>
 where
     I: IntoIterator<Item = (&'a [f64], f64, f64)>,
@@ -181,6 +233,10 @@ where
     Some((ata, aty))
 }
 
+/// Subtract two finite nonempty matrices entry by entry.
+///
+/// Both operands must have the same row and column counts. A dimension,
+/// finiteness, or result check failure returns `None`.
 pub fn matrix_sub(a: &[Vec<f64>], b: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     let (rows, cols) = validate_same_shape(a, b)?;
     let out: Vec<Vec<f64>> = a
@@ -196,6 +252,11 @@ pub fn matrix_sub(a: &[Vec<f64>], b: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     Some(out)
 }
 
+/// Multiply two finite rectangular matrices.
+///
+/// The second operand is transposed first; each output entry is then accumulated
+/// by a left-to-right `acc + x * y` fold. Empty, ragged, incompatible,
+/// non-finite, or non-finite-result inputs return `None`.
 pub fn matmul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     let b_t = transpose(b)?;
     let rows = a.len();
@@ -223,6 +284,11 @@ pub fn matmul(a: &[Vec<f64>], b: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     Some(out)
 }
 
+/// Transpose a finite rectangular matrix.
+///
+/// The first row establishes the column count, and output entries are emitted
+/// by iterating columns before rows. Empty, zero-column, ragged, or non-finite
+/// input returns `None`.
 pub fn transpose(matrix: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     let cols = matrix.first()?.len();
     if cols == 0 {
@@ -241,6 +307,13 @@ pub fn transpose(matrix: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     )
 }
 
+/// Write the inverse of a finite row-major flat `n × n` matrix into `out`.
+///
+/// Each unit-vector right-hand side is solved with
+/// [`solve_augmented_flat_first_tie_in_place`], and the resulting columns are
+/// stored in row-major order. `scratch` retains the augmented rows and solution
+/// buffers between calls; invalid dimensions, non-finite data, or a failed solve
+/// return `None`.
 pub fn invert_flat_first_tie_into(
     a: &[f64],
     n: usize,
@@ -268,6 +341,12 @@ pub fn invert_flat_first_tie_into(
     Some(())
 }
 
+/// Solve a row-major flat system `A X = B` into `out` with first-tie pivoting.
+///
+/// `A` is `n × n`, while `B` and `out` are `n × cols`; each right-hand-side
+/// column is solved through [`solve_augmented_flat_first_tie_in_place`]. The
+/// buffers in `scratch` are reused, and invalid dimensions, non-finite data, or
+/// a failed solve return `None`.
 pub fn solve_matrix_flat_first_tie_into(
     a: &[f64],
     n: usize,
@@ -300,6 +379,12 @@ pub fn solve_matrix_flat_first_tie_into(
     Some(())
 }
 
+/// Solve an augmented row-major `n × (n + 1)` system in place.
+///
+/// The coefficient columns use first-tie partial pivoting, then back-substitution
+/// writes the length-`n` solution into `x`. `rows` is modified during elimination;
+/// invalid lengths, non-finite data, a non-finite or `<= PIVOT_EPSILON` pivot, or a
+/// non-finite solution return `None`.
 pub fn solve_augmented_flat_first_tie_in_place(
     rows: &mut [f64],
     n: usize,
@@ -351,11 +436,21 @@ pub fn solve_augmented_flat_first_tie_in_place(
     Some(())
 }
 
+/// Solve a flat row-major normal system and return an owned solution.
+///
+/// This convenience wrapper allocates [`FlatNormalSolveScratch`], delegates to
+/// [`solve_flat_normal_first_tie_into`], and copies the returned solution.
 pub fn solve_flat_normal_first_tie(lambda: &[f64], eta: &[f64]) -> Option<Vec<f64>> {
     let mut scratch = FlatNormalSolveScratch::default();
     solve_flat_normal_first_tie_into(lambda, eta, &mut scratch).map(<[f64]>::to_vec)
 }
 
+/// Solve a flat row-major normal system with reusable first-tie scratch storage.
+///
+/// `lambda` must contain finite `n × n` data and `eta` finite length-`n` data.
+/// The inputs are copied into `scratch`, strict `>` pivot scanning keeps the
+/// first equal-magnitude pivot, and the returned slice is `scratch.x`. Zero or
+/// mismatched dimensions, non-finite data, or a singular pivot return `None`.
 pub fn solve_flat_normal_first_tie_into<'a>(
     lambda: &[f64],
     eta: &[f64],
@@ -592,6 +687,12 @@ fn linear_invalid_input(field: &'static str, reason: &'static str) -> LinearErro
     LinearError::InvalidInput { field, reason }
 }
 
+/// Accumulate the weighted normal matrix of four-component rows.
+///
+/// The result uses the fixed-order sum `Σ rows[k][i] * weights[k] * rows[k][j]`
+/// for every `i, j`. There must be one finite weight per finite row; a mismatch,
+/// failed validation, or non-finite accumulated entry returns
+/// [`LinearError::InvalidInput`].
 pub fn normal_matrix_4_weighted_column_outer(
     rows: &[[f64; 4]],
     weights: &[f64],
@@ -620,6 +721,10 @@ pub fn normal_matrix_4_weighted_column_outer(
     Ok(a)
 }
 
+/// Accumulate the unweighted normal matrix from four-component rows.
+///
+/// For every row, the function adds its outer product `row * rowᵀ` to the
+/// returned 4 × 4 matrix in the explicit `i`/`j` loop order.
 pub fn normal_matrix_4_unweighted_row_outer(rows: &[[f64; 4]]) -> [[f64; 4]; 4] {
     let mut a = [[0.0_f64; 4]; 4];
     for row in rows {
@@ -632,6 +737,10 @@ pub fn normal_matrix_4_unweighted_row_outer(rows: &[[f64; 4]]) -> [[f64; 4]; 4] 
     a
 }
 
+/// Apply a 4 × 4 matrix to a four-element vector.
+///
+/// Each result entry is the [`dot4`] product of one matrix row with `v`, in
+/// matrix-row order.
 pub fn mat4_vec4(m: &[[f64; 4]; 4], v: &[f64; 4]) -> [f64; 4] {
     [
         dot4(&m[0], v),
@@ -641,10 +750,18 @@ pub fn mat4_vec4(m: &[[f64; 4]; 4], v: &[f64; 4]) -> [f64; 4] {
     ]
 }
 
+/// Compute the fixed-order four-term dot product used by the velocity fit.
+///
+/// The terms are accumulated as `row[0] * v[0] + row[1] * v[1] +
+/// row[2] * v[2] + row[3] * v[3]`.
 pub fn dot4(row: &[f64; 4], v: &[f64; 4]) -> f64 {
     row[0] * v[0] + row[1] * v[1] + row[2] * v[2] + row[3] * v[3]
 }
 
+/// Compute a 4 × 4 determinant by cofactor expansion.
+///
+/// The implementation forms six 2 × 2 minors, four cofactors, and the
+/// alternating sum across the first row. It does not validate the input.
 pub fn det4_cofactor(a: &[[f64; 4]; 4]) -> f64 {
     let m01 = a[2][0] * a[3][1] - a[2][1] * a[3][0];
     let m02 = a[2][0] * a[3][2] - a[2][2] * a[3][0];
@@ -661,6 +778,11 @@ pub fn det4_cofactor(a: &[[f64; 4]; 4]) -> f64 {
     a[0][0] * c0 - a[0][1] * c1 + a[0][2] * c2 - a[0][3] * c3
 }
 
+/// Compute the determinant of the 3 × 3 matrix left after removing one row and
+/// one column from a 4 × 4 matrix.
+///
+/// The remaining entries are evaluated with the explicit three-term cofactor
+/// expansion used by [`invert_4x4_cofactor`].
 pub fn minor3_of_4(a: &[[f64; 4]; 4], skip_r: usize, skip_c: usize) -> f64 {
     let mut rows = [0_usize; 3];
     let mut cols = [0_usize; 3];
@@ -692,6 +814,10 @@ pub fn minor3_of_4(a: &[[f64; 4]; 4], skip_r: usize, skip_c: usize) -> f64 {
     b00 * (b11 * b22 - b12 * b21) - b01 * (b10 * b22 - b12 * b20) + b02 * (b10 * b21 - b11 * b20)
 }
 
+/// Invert a 4 × 4 matrix with its determinant and cofactor expansion.
+///
+/// A zero or non-finite determinant, or any non-finite entry in the resulting
+/// adjugate inverse, returns `None`.
 pub fn invert_4x4_cofactor(a: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
     let det = det4_cofactor(a);
     if det == 0.0 || !det.is_finite() {
@@ -711,6 +837,10 @@ pub fn invert_4x4_cofactor(a: &[[f64; 4]; 4]) -> Option<[[f64; 4]; 4]> {
     Some(inv)
 }
 
+/// Invert a 3 × 3 matrix with its explicit adjugate formula.
+///
+/// The function returns `None` when the determinant is non-finite or has
+/// absolute value `<= PIVOT_EPSILON`, or when an inverse entry is non-finite.
 pub fn invert_3x3_adjugate(m: &[[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
     let [[a, b, c], [d, e, f], [g, h, i]] = *m;
     let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
@@ -741,6 +871,14 @@ pub fn invert_3x3_adjugate(m: &[[f64; 3]; 3]) -> Option<[[f64; 3]; 3]> {
     Some(inverse)
 }
 
+/// Invert a finite symmetric positive-definite matrix by fixed-order Cholesky
+/// factorization.
+///
+/// The input must be nonempty, square, and symmetric within
+/// `128 * f64::EPSILON * max(n, 1) * max(scale, 1)`. The function factors
+/// `N = L Lᵀ`, inverts `L`, and forms `L⁻ᵀ L⁻¹`; malformed or non-finite input,
+/// a symmetry failure, a non-positive or non-finite pivot, or a non-finite
+/// inverse returns `None`.
 pub fn invert_symmetric_pd(n: &[Vec<f64>]) -> Option<Vec<Vec<f64>>> {
     let p = n.len();
     if p == 0 {

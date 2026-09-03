@@ -17,7 +17,9 @@ pub enum FrameValueError {
     /// A frame value component was non-finite or outside its documented domain.
     #[error("invalid frame value {field}: {reason}")]
     InvalidInput {
+        /// Static label of the rejected component, as assigned by the frame-value constructors (for example, `"x_m"` or `"lat_rad"`).
         field: &'static str,
+        /// Validation message for the rejected component. Constructors use `"must be finite"` for non-finite coordinates and velocities, and range-specific messages for latitude and longitude violations; conversion adapters preserve the message.
         reason: &'static str,
     },
 }

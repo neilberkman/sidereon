@@ -24,26 +24,45 @@ use std::collections::{BTreeMap, BTreeSet};
 /// One single-frequency code/carrier observation at a receiver.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Observation {
+    /// Satellite token used to join base and rover records. A token present on
+    /// only one side is placed in [`DoubleDifferenceResult::dropped_sats`].
     pub satellite_id: String,
+    /// Per-receiver ambiguity-arc token used to derive the single- and
+    /// double-difference ambiguity ids.
     pub ambiguity_id: String,
+    /// Code/pseudorange observable in meters. Double-difference construction
+    /// subtracts the receiver difference and then the reference difference.
     pub code_m: f64,
+    /// Carrier-phase observable in meters. Double-difference construction
+    /// subtracts the receiver difference and then the reference difference.
     pub phase_m: f64,
 }
 
 /// One single-frequency RTK observation for code-smoothing preprocessing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodeSmoothingObservation {
+    /// Satellite token used for per-epoch ordering and receiver-map rebuilds.
     pub satellite_id: String,
+    /// Key for the Hatch running state; a different token uses a separate
+    /// state.
     pub ambiguity_id: String,
+    /// Input code/pseudorange in meters. Hatch smoothing replaces this value,
+    /// except on a new or LLI-reset state where it is returned unchanged.
     pub code_m: f64,
+    /// Carrier phase in meters used for the increment added to the previous
+    /// smoothed code.
     pub phase_m: f64,
+    /// Optional loss-of-lock indicator. Bit 0 resets Hatch state and emits the
+    /// single-frequency [`SlipReason::Lli`] reason when set.
     pub lli: Option<i64>,
 }
 
 /// One RTK epoch for base/rover code-smoothing preprocessing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodeSmoothingEpoch {
+    /// Base observations smoothed with state independent of the rover vector.
     pub base_observations: Vec<CodeSmoothingObservation>,
+    /// Rover observations smoothed with state independent of the base vector.
     pub rover_observations: Vec<CodeSmoothingObservation>,
 }
 
@@ -57,20 +76,36 @@ pub type CycleSlipEpoch = CodeSmoothingEpoch;
 /// wide-lane RTK pre-step.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DualObservation {
+    /// Per-receiver ambiguity-arc token carried into dual-frequency
+    /// single- and double-difference ids.
     pub ambiguity_id: String,
+    /// Band-1 code/pseudorange observable in meters used by the wide-lane and
+    /// ionosphere-free combinations.
     pub p1_m: f64,
+    /// Band-2 code/pseudorange observable in meters used by the wide-lane and
+    /// ionosphere-free combinations.
     pub p2_m: f64,
+    /// Band-1 carrier phase in cycles used for wide-lane estimation and the
+    /// ionosphere-free phase combination.
     pub phi1_cycles: f64,
+    /// Band-2 carrier phase in cycles used for wide-lane estimation and the
+    /// ionosphere-free phase combination.
     pub phi2_cycles: f64,
+    /// Positive band-1 carrier frequency in hertz used by both combinations.
     pub f1_hz: f64,
+    /// Positive band-2 carrier frequency in hertz used by both combinations.
     pub f2_hz: f64,
 }
 
 /// Paired base/rover dual-frequency observation for one satellite.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DualSatelliteObservation {
+    /// Satellite token used to find the per-epoch reference and group
+    /// non-reference wide-lane samples.
     pub satellite_id: String,
+    /// Base receiver's dual-frequency observation for this satellite.
     pub base: DualObservation,
+    /// Rover receiver's dual-frequency observation for this satellite.
     pub rover: DualObservation,
 }
 
@@ -78,21 +113,39 @@ pub struct DualSatelliteObservation {
 /// caller's baseline epoch contract.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DualEpoch {
+    /// Normalized satellite pairs scanned for the reference and for
+    /// non-reference double-difference wide-lane samples.
     pub observations: Vec<DualSatelliteObservation>,
 }
 
 /// One receiver's dual-frequency observation for cycle-slip preprocessing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DualCycleSlipObservation {
+    /// Satellite token used to collect one receiver's observations into a
+    /// time-ordered carrier arc.
     pub satellite_id: String,
+    /// Ambiguity token carried through preparation and replaced when a split
+    /// or reacquisition starts a new receiver arc.
     pub ambiguity_id: String,
+    /// Band-1 code/pseudorange in meters passed to cycle-slip classification.
     pub p1_m: f64,
+    /// Band-2 code/pseudorange in meters passed to cycle-slip classification.
     pub p2_m: f64,
+    /// Band-1 carrier phase in cycles passed to geometry-free and
+    /// Melbourne-Wubbena classification.
     pub phi1_cycles: f64,
+    /// Band-2 carrier phase in cycles passed to geometry-free and
+    /// Melbourne-Wubbena classification.
     pub phi2_cycles: f64,
+    /// Positive band-1 carrier frequency in hertz used by the detector.
     pub f1_hz: f64,
+    /// Positive band-2 carrier frequency in hertz used by the detector.
     pub f2_hz: f64,
+    /// Band-1 loss-of-lock indicator copied to the detector; bit 0 contributes
+    /// [`SlipReason::Lli`].
     pub lli1: Option<i64>,
+    /// Band-2 loss-of-lock indicator copied to the detector; bit 0 contributes
+    /// [`SlipReason::Lli`].
     pub lli2: Option<i64>,
 }
 
@@ -103,7 +156,11 @@ pub struct DualCycleSlipEpoch {
     pub epoch_sort_key: String,
     /// Comparable epoch coordinate in seconds, when the caller can supply one.
     pub gap_time_s: Option<f64>,
+    /// Base observations grouped by satellite by the cycle-slip detector before
+    /// base-side events are emitted.
     pub base_observations: Vec<DualCycleSlipObservation>,
+    /// Rover observations grouped by satellite by the cycle-slip detector
+    /// before rover-side events are emitted.
     pub rover_observations: Vec<DualCycleSlipObservation>,
 }
 
@@ -111,58 +168,103 @@ pub struct DualCycleSlipEpoch {
 /// range correction removed from the ionosphere-free observable.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DualIonosphereFreeObservation {
+    /// Ambiguity token preserved in the converted single-frequency
+    /// [`Observation`].
     pub ambiguity_id: String,
+    /// Band-1 code/pseudorange in meters passed to the ionosphere-free code
+    /// combination.
     pub p1_m: f64,
+    /// Band-2 code/pseudorange in meters passed to the ionosphere-free code
+    /// combination.
     pub p2_m: f64,
+    /// Band-1 carrier phase in cycles passed to the ionosphere-free phase
+    /// combination.
     pub phi1_cycles: f64,
+    /// Band-2 carrier phase in cycles passed to the ionosphere-free phase
+    /// combination.
     pub phi2_cycles: f64,
+    /// Positive band-1 carrier frequency in hertz used by both combinations.
     pub f1_hz: f64,
+    /// Positive band-2 carrier frequency in hertz used by both combinations.
     pub f2_hz: f64,
+    /// Receiver-specific slant troposphere delay in meters subtracted from
+    /// both ionosphere-free code and phase; the disabled setup path supplies
+    /// zero.
     pub tropo_m: f64,
 }
 
 /// Paired base/rover dual-frequency observation for IF/narrow-lane conversion.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DualIonosphereFreeSatelliteObservation {
+    /// Satellite token used to pair the corrected base and rover records and
+    /// to locate a satellite during narrow-lane preparation.
     pub satellite_id: String,
+    /// Base receiver observation corrected by its troposphere delay before IF
+    /// conversion.
     pub base: DualIonosphereFreeObservation,
+    /// Rover receiver observation corrected by its troposphere delay before IF
+    /// conversion.
     pub rover: DualIonosphereFreeObservation,
 }
 
 /// One dual-frequency RTK epoch for IF/narrow-lane conversion.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DualIonosphereFreeEpoch {
+    /// Per-satellite corrected base/rover inputs used for narrow-lane
+    /// parameters and retained IF observations.
     pub observations: Vec<DualIonosphereFreeSatelliteObservation>,
 }
 
 /// One normalized dual-frequency RTK epoch before IF/narrow-lane conversion.
 ///
-/// The core owns the optional troposphere setup, so this shape carries the
+/// The core owns the optional troposphere setup, so these fields carry the
 /// satellite positions and split Julian epoch needed to form per-receiver
 /// slant delays before the IF conversion is applied.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DualIonosphereFreeSetupEpoch {
+    /// Whole part of the split Julian date passed to `JulianDateSplit::new`.
     pub jd_whole: f64,
+    /// Fractional part of the split Julian date, accepted in `-1.0..=1.0` and
+    /// passed to `JulianDateSplit::new`.
     pub jd_fraction: f64,
+    /// Normalized dual-frequency satellite pairs copied into corrected IF
+    /// inputs.
     pub observations: Vec<DualSatelliteObservation>,
+    /// Base-receiver satellite ECEF positions in meters, keyed by satellite
+    /// id, required for base slant troposphere when enabled.
     pub base_satellite_positions_m: BTreeMap<String, [f64; 3]>,
+    /// Rover-receiver satellite ECEF positions in meters, keyed by satellite
+    /// id, required for rover slant troposphere when enabled.
     pub rover_satellite_positions_m: BTreeMap<String, [f64; 3]>,
 }
 
 /// One converted single-observable epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IonosphereFreeBaselineEpoch {
+    /// Zero-based index of the input epoch retained in this converted result.
     pub epoch_index: usize,
+    /// Reference satellite followed by non-reference satellites with supplied
+    /// wide-lane integers.
     pub satellite_ids: Vec<String>,
+    /// Converted base observations for `satellite_ids`, with IF code and phase
+    /// after the troposphere subtraction.
     pub base_observations: Vec<Observation>,
+    /// Converted rover observations for `satellite_ids`, with IF code and phase
+    /// after the troposphere subtraction.
     pub rover_observations: Vec<Observation>,
 }
 
 /// Converted IF epochs plus per-DD narrow-lane ambiguity parameters.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IonosphereFreeBaselineResult {
+    /// Converted epochs in input order; epochs with fewer than two retained
+    /// satellites are skipped.
     pub epochs: Vec<IonosphereFreeBaselineEpoch>,
+    /// Narrow-lane wavelengths in meters keyed by double-difference ambiguity
+    /// id.
     pub wavelengths_m: BTreeMap<String, f64>,
+    /// Narrow-lane code-to-phase offsets in meters keyed by double-difference
+    /// ambiguity id and computed from the fixed wide-lane integer.
     pub offsets_m: BTreeMap<String, f64>,
 }
 
@@ -192,6 +294,7 @@ pub struct ElevationMaskEpochResult {
 /// Elevation-mask result for a baseline arc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElevationMaskResult {
+    /// One kept-id list per input epoch, emitted in input order.
     pub epochs: Vec<ElevationMaskEpochResult>,
     /// Satellites below the mask in any epoch, sorted by id.
     pub masked_satellite_ids: Vec<String>,
@@ -200,7 +303,11 @@ pub struct ElevationMaskResult {
 /// Wide-lane integer estimation controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WideLaneOptions {
+    /// Positive minimum number of wide-lane samples required to fix an
+    /// ambiguity.
     pub min_epochs: usize,
+    /// Positive cycle tolerance for accepting the rounded wide-lane sample
+    /// mean as an integer.
     pub tolerance_cycles: f64,
     /// When true, short ambiguity fragments are omitted instead of failing. This
     /// is the `:split_arc` policy used by Sidereon after cycle-slip segmentation.
@@ -210,23 +317,39 @@ pub struct WideLaneOptions {
 /// Error from dual-frequency wide-lane integer estimation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WideLaneError {
+    /// A wide-lane option or observation failed validation.
     InvalidInput {
+        /// Static validation field label for the rejected input.
         field: &'static str,
+        /// Static validation reason paired with `field`.
         reason: &'static str,
     },
+    /// The requested reference satellite was absent from an epoch.
     ReferenceSatelliteMissing(String),
+    /// A base or rover wide-lane calculation failed for one satellite.
     WideLaneFailed {
+        /// Satellite whose wide-lane calculation failed.
         satellite_id: String,
+        /// Underlying carrier-phase failure.
         reason: CarrierPhaseError,
     },
+    /// One ambiguity has fewer samples than `WideLaneOptions::min_epochs`.
     TooFewWideLaneEpochs {
+        /// Ambiguity whose collected sample count was too small.
         ambiguity_id: String,
+        /// Number of collected wide-lane samples.
         count: usize,
+        /// Configured minimum sample count.
         minimum: usize,
     },
+    /// A sample mean did not lie within tolerance of its rounded integer.
     WideLaneNotInteger {
+        /// Ambiguity whose wide-lane mean could not be fixed.
         ambiguity_id: String,
+        /// Mean of the collected wide-lane double-difference samples, in
+        /// cycles.
         mean_cycles: f64,
+        /// Rounded integer candidate compared with the mean and tolerance.
         fixed_cycles: i64,
     },
 }
@@ -234,15 +357,27 @@ pub enum WideLaneError {
 /// Error from dual-frequency IF/narrow-lane conversion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IonosphereFreeBaselineError {
+    /// An IF observation, setup epoch, receiver geometry, or Julian split
+    /// failed validation.
     InvalidInput {
+        /// Static validation field label for the rejected input.
         field: &'static str,
+        /// Static validation reason paired with `field`.
         reason: &'static str,
     },
+    /// No epoch retained the reference and a non-reference satellite with a
+    /// supplied wide-lane integer.
     NoEpochs,
+    /// The four observations used for one narrow-lane DD did not share carrier
+    /// frequencies.
     InconsistentFrequencies(String),
+    /// Narrow-lane parameter derivation returned an ionosphere-free error.
     NarrowLaneFailed(IonosphereFreeError),
+    /// A code or phase ionosphere-free combination failed for one satellite.
     IonosphereFreeFailed {
+        /// Satellite whose code or phase combination failed.
         satellite_id: String,
+        /// Underlying ionosphere-free combination failure.
         reason: IonosphereFreeError,
     },
 }
@@ -250,13 +385,16 @@ pub enum IonosphereFreeBaselineError {
 /// Error from RTK code-smoothing preprocessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CodeSmoothingError {
+    /// The Hatch window cap is below the minimum accepted cap of one epoch.
     InvalidWindowCap,
 }
 
 /// Base/rover receiver side for RTK preprocessing diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CycleSlipReceiver {
+    /// The base receiver's observation vector.
     Base,
+    /// The rover receiver's observation vector.
     Rover,
 }
 
@@ -265,41 +403,66 @@ pub use crate::ambiguity::CycleSlipPolicy;
 /// Public split-arc metadata, with epoch indices for callers to remap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CycleSlipSplitArc {
+    /// Receiver side whose satellite arc received this split ambiguity id.
     pub receiver: CycleSlipReceiver,
+    /// Satellite grouped with this receiver and ambiguity id.
     pub satellite_id: String,
+    /// Generated segment id, with `@base` or `@rover` before `#segment`.
     pub ambiguity_id: String,
+    /// First input epoch index recorded for the segment, inclusive.
     pub start_epoch_index: usize,
+    /// Last input epoch index recorded for the segment, inclusive.
     pub end_epoch_index: usize,
+    /// Number of input epoch indices recorded for the segment.
     pub n_epochs: usize,
 }
 
 /// Prepared single-frequency RTK epochs and policy metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CycleSlipPrepResult {
+    /// Single-frequency epochs after the selected policy and reacquisition
+    /// segmentation have been applied.
     pub epochs: Vec<CycleSlipEpoch>,
+    /// Unique satellite ids dropped by the drop policy, sorted by id.
     pub dropped_sats: Vec<String>,
+    /// Split metadata sorted by receiver, satellite, and ambiguity map order;
+    /// empty unless the split policy is used.
     pub split_arcs: Vec<CycleSlipSplitArc>,
 }
 
 /// Prepared dual-frequency RTK epochs and policy metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DualCycleSlipPrepResult {
+    /// Dual-frequency epochs after the selected policy and reacquisition
+    /// segmentation have been applied.
     pub epochs: Vec<DualCycleSlipEpoch>,
+    /// Unique satellite ids dropped by the drop policy, sorted by id.
     pub dropped_sats: Vec<String>,
+    /// Split metadata sorted by receiver, satellite, and ambiguity map order;
+    /// empty unless the split policy is used.
     pub split_arcs: Vec<CycleSlipSplitArc>,
 }
 
 /// Error from RTK cycle-slip preprocessing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CycleSlipPrepError {
+    /// Single- or dual-frequency cycle-slip input or options failed validation.
     InvalidInput {
+        /// Static validation field label for the rejected input.
         field: &'static str,
+        /// Static validation reason paired with `field`.
         reason: &'static str,
     },
+    /// The error policy reported the first event in deterministic detector
+    /// order.
     CycleSlipDetected {
+        /// Receiver side on which the event was detected.
         receiver: CycleSlipReceiver,
+        /// Satellite whose carrier arc produced the event.
         satellite_id: String,
+        /// Zero-based input epoch index associated with the event.
         epoch_index: usize,
+        /// Detector reasons in carrier-phase classification order.
         reasons: Vec<SlipReason>,
     },
 }
@@ -316,10 +479,12 @@ pub enum ReferenceSelection {
     PerSystem(BTreeMap<String, String>),
 }
 
-/// Reference report shape matching the Sidereon public API.
+/// Reference report produced by `reference_report` for one or more systems.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReferenceReport {
+    /// One reference token was selected for the input.
     Satellite(String),
+    /// One reference token was selected for each constellation letter.
     PerSystem(BTreeMap<String, String>),
 }
 
@@ -338,37 +503,65 @@ pub enum BaselineReferenceSelection {
 /// One non-reference satellite's double-difference measurement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DoubleDifference {
+    /// Non-reference common satellite id for this row.
     pub satellite_id: String,
+    /// Physical reference satellite used for this row's constellation.
     pub reference_satellite_id: String,
+    /// Double-difference ambiguity token derived from the satellite and
+    /// reference single-difference ids.
     pub ambiguity_id: String,
+    /// Code double difference in meters: satellite receiver difference minus
+    /// reference receiver difference.
     pub code_m: f64,
+    /// Carrier-phase double difference in meters: satellite receiver difference
+    /// minus reference receiver difference.
     pub phase_m: f64,
 }
 
 /// Result of double-difference construction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DoubleDifferenceResult {
+    /// Selected reference report, using `Satellite` for one system and
+    /// `PerSystem` for multiple systems.
     pub reference_satellite_id: ReferenceReport,
+    /// One row for each non-reference common satellite, in satellite-id order.
     pub double_differences: Vec<DoubleDifference>,
+    /// Sorted union of base-only and rover-only satellite ids excluded before
+    /// reference and double-difference construction.
     pub dropped_sats: Vec<String>,
 }
 
 /// Error from double-difference construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DoubleDifferenceError {
+    /// An observation, receiver position, satellite position, line-of-sight
+    /// vector, or elevation score failed validation.
     InvalidInput {
+        /// Static validation field label for the rejected input.
         field: &'static str,
+        /// Static validation reason paired with `field`.
         reason: &'static str,
     },
+    /// A receiver input repeated one satellite key.
     DuplicateObservation(String),
+    /// Fewer than two common satellites were available, or a system had no
+    /// non-reference common satellite.
     TooFewCommonSatellites {
+        /// Common satellite count at the failure point.
         count: usize,
+        /// Required common count, fixed at two.
         minimum: usize,
     },
+    /// A constellation occurred in the arc but had no satellite common to all
+    /// reference-selection epochs.
     NoCommonReferenceSatellite(String),
+    /// An available satellite had no position-map entry.
     MissingSatellitePosition(String),
+    /// A requested reference id was absent from the relevant common set.
     ReferenceSatelliteMissing(String),
+    /// Fixed-satellite selection was used with more than one constellation.
     ReferenceSatelliteSingleSystem(String),
+    /// A per-system reference map omitted a constellation letter.
     ReferenceSatelliteMissingSystem(String),
     InvalidReferenceOption,
 }
