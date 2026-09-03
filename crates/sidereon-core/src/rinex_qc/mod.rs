@@ -642,6 +642,7 @@ impl LintReport {
 
 /// Repair options for the first core slice.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RepairOptions {
     /// Caller-supplied PGM/RUN BY/DATE stamp for A8.
     pub file_stamp: Option<PgmRunByDate>,

@@ -22,6 +22,7 @@ use crate::validate;
 
 /// Options for Sun elevation threshold crossings.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct SunElevationOptions {
     /// Topocentric Sun elevation threshold, degrees. Use `0.0` for geometric
     /// sunrise/sunset, or e.g. `-6.0` for civil twilight.
@@ -129,6 +130,7 @@ pub fn sun_elevation_deg(station: &GeodeticStationKm, time: UtcInstant) -> f64 {
 
 /// Options for Moon elevation threshold crossings (moonrise / moonset).
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct MoonElevationOptions {
     /// Topocentric Moon (disk-center) elevation threshold, degrees. The default
     /// `-0.833` is the standard upper-limb-on-the-horizon convention (about

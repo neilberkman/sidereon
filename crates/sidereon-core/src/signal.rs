@@ -81,6 +81,7 @@ impl IqSample {
 
 /// Options for [`replica`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ReplicaOptions {
     /// Sampling rate in hertz.
     pub sample_rate_hz: f64,
@@ -93,6 +94,22 @@ pub struct ReplicaOptions {
 }
 
 impl ReplicaOptions {
+    /// Build replica options from every sampling and code-state input.
+    #[must_use]
+    pub const fn new(
+        sample_rate_hz: f64,
+        num_samples: usize,
+        code_phase_chips: f64,
+        code_doppler_hz: f64,
+    ) -> Self {
+        Self {
+            sample_rate_hz,
+            num_samples,
+            code_phase_chips,
+            code_doppler_hz,
+        }
+    }
+
     /// One C/A-code period at 2.046 MHz (two samples per chip).
     pub fn one_code_period() -> Self {
         let sample_rate_hz = DEFAULT_SAMPLE_RATE_HZ;
@@ -108,6 +125,7 @@ impl ReplicaOptions {
 
 /// Options for [`correlate`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct CorrelateOptions {
     /// Sampling rate in hertz.
     pub sample_rate_hz: f64,
@@ -143,6 +161,7 @@ pub struct CorrelationResult {
 
 /// Options for [`acquire`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct AcquisitionOptions {
     /// Sampling rate in hertz.
     pub sample_rate_hz: f64,

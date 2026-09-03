@@ -88,10 +88,8 @@ fn ulp_distance(left: f64, right: f64) -> u64 {
 
 #[test]
 fn compare_engines_on_shared_consumer_fixture_adapter() {
-    let core_options = SolveOptions {
-        max_nfev: 300,
-        ..SolveOptions::default()
-    };
+    let mut core_options = SolveOptions::default();
+    core_options.max_nfev = 300;
     let trls_options = TrfOptions {
         max_nfev: Some(300),
         ..TrfOptions::default()

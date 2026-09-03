@@ -63,16 +63,16 @@
 //! #     .iter()
 //! #     .map(|id| {
 //! #         let satellite_id = id.to_string();
+//! #         let mut predict_options = PredictOptions::default();
+//! #         predict_options.carrier_hz = F_L1_HZ;
+//! #         predict_options.light_time = true;
+//! #         predict_options.sagnac = true;
 //! #         let prediction = predict(
 //! #             &source,
 //! #             *id,
 //! #             truth,
 //! #             0.0,
-//! #             PredictOptions {
-//! #                 carrier_hz: F_L1_HZ,
-//! #                 light_time: true,
-//! #                 sagnac: true,
-//! #             },
+//! #             predict_options,
 //! #         )?;
 //! #         let code_bias_m = if satellite_id == "G05" { 50.0 } else { 0.0 };
 //! #         let code_m = prediction.geometric_range_m + clock_m + code_bias_m;
@@ -116,33 +116,35 @@
 //! #     tropo_gradient_east_m: 0.0,
 //! #     residual_ionosphere_m: BTreeMap::new(),
 //! # };
-//! # let solve_config = FloatSolveConfig {
-//! #     weights: MeasurementWeights {
-//! #         code: 1.0,
-//! #         phase: 1.0,
-//! #         elevation_weighting: false,
-//! #     },
-//! #     tropo: TroposphereOptions::disabled(),
-//! #     corrections: RangeCorrections::disabled(),
-//! #     opts: FloatSolveOptions {
-//! #         max_iterations: 50,
-//! #         position_tolerance_m: 1.0e-7,
-//! #         clock_tolerance_m: 1.0e-7,
-//! #         ambiguity_tolerance_m: 1.0e-7,
-//! #         ztd_tolerance_m: 1.0e-7,
-//! #     },
-//! #     residual_screen: false,
-//! #     elevation_cutoff_deg: None,
-//! #     estimate_residual_ionosphere: false,
+//! # let weights = MeasurementWeights {
+//! #     code: 1.0,
+//! #     phase: 1.0,
+//! #     elevation_weighting: false,
 //! # };
+//! # let mut solve_options = FloatSolveOptions::default();
+//! # solve_options.max_iterations = 50;
+//! # solve_options.position_tolerance_m = 1.0e-7;
+//! # solve_options.clock_tolerance_m = 1.0e-7;
+//! # solve_options.ambiguity_tolerance_m = 1.0e-7;
+//! # solve_options.ztd_tolerance_m = 1.0e-7;
+//! # let solve_config = FloatSolveConfig::new(
+//! #     weights,
+//! #     TroposphereOptions::disabled(),
+//! #     RangeCorrections::disabled(),
+//! #     solve_options,
+//! #     None,
+//! #     false,
+//! #     false,
+//! # );
 //! let result = solve_float_epoch_with_raim(
 //! #   &source,
 //! #   epoch,
 //! #   initial_state,
 //! #   solve_config,
-//!     RaimConfig {
-//!         chi_square_threshold: Some(10.0),
-//!         ..RaimConfig::default()
+//!     {
+//!         let mut config = RaimConfig::default();
+//!         config.chi_square_threshold = Some(10.0);
+//!         config
 //!     },
 //! )?;
 //! assert_eq!(result.excluded_sats, vec!["G05".to_string()]);
@@ -177,6 +179,7 @@ const DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
 
 /// Configuration for PPP snapshot RAIM.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct RaimConfig {
     /// False-alarm probability used to derive the chi-square threshold.
     pub false_alarm_probability: f64,

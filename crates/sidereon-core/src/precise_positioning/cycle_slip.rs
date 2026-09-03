@@ -34,12 +34,10 @@
 //!         observations: vec![observation(epoch, if epoch >= 2 { 9.0 } else { 5.0 })],
 //!     })
 //!     .collect::<Vec<_>>();
-//! let config = CycleSlipConfig {
-//!     melbourne_wubbena_threshold_cycles: 2.0,
-//!     geometry_free_threshold_m: 0.05,
-//!     maximum_gap_s: 120.0,
-//!     ..CycleSlipConfig::default()
-//! };
+//! let mut config = CycleSlipConfig::default();
+//! config.melbourne_wubbena_threshold_cycles = 2.0;
+//! config.geometry_free_threshold_m = 0.05;
+//! config.maximum_gap_s = 120.0;
 //!
 //! let flags = detect_cycle_slips(&epochs, config)?;
 //! assert!(!flags[1].observations[0].slip);
@@ -69,6 +67,7 @@ pub const DEFAULT_RUNNING_STATISTIC_K_FACTOR: f64 = 4.0;
 
 /// Configuration for dual-frequency PPP cycle-slip detection.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct CycleSlipConfig {
     /// Melbourne-Wubbena absolute slip threshold, in wide-lane cycles.
     pub melbourne_wubbena_threshold_cycles: f64,

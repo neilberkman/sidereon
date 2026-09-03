@@ -276,18 +276,15 @@ fn stationary_zupt_zaru_bounds_static_drift_and_estimates_biases() {
     let accel_bias = [0.020, 0.0, 0.0];
     let gyro_bias = [0.0010, -0.0008, 0.0006];
     let spec = ImuSpec::datasheet(0.0015, 2.0e-5, 0.0002, 2.0e-6, 600.0, 600.0, None, None);
-    let sequence = simulate_imu_samples_from_increments(
-        &truth_increments(&truth),
-        spec,
-        ImuSimulationOptions {
-            seed: SEED ^ 0x5a75_7100_0000_0001,
-            initial_bias: ImuBias {
-                accel_mps2: accel_bias,
-                gyro_rps: gyro_bias,
-            },
-            ..ImuSimulationOptions::default()
-        },
-    )
+    let sequence = simulate_imu_samples_from_increments(&truth_increments(&truth), spec, {
+        let mut options = ImuSimulationOptions::default();
+        options.seed = SEED ^ 0x5a75_7100_0000_0001;
+        options.initial_bias = ImuBias {
+            accel_mps2: accel_bias,
+            gyro_rps: gyro_bias,
+        };
+        options
+    })
     .expect("stationary IMU");
 
     let no_updates = run_stationary_constraint_case(&truth, sequence.samples.clone(), spec, false);
@@ -329,14 +326,11 @@ fn non_holonomic_constraint_removes_lateral_velocity_error() {
     let dt_s = 1.0;
     let truth = straight_vehicle_truth(steps, dt_s);
     let spec = ImuSpec::datasheet(0.0, 0.0, 0.0, 0.0, 600.0, 600.0, None, None);
-    let sequence = simulate_imu_samples_from_increments(
-        &truth_increments(&truth),
-        spec,
-        ImuSimulationOptions {
-            seed: SEED ^ 0x5a75_7100_0000_0002,
-            ..ImuSimulationOptions::default()
-        },
-    )
+    let sequence = simulate_imu_samples_from_increments(&truth_increments(&truth), spec, {
+        let mut options = ImuSimulationOptions::default();
+        options.seed = SEED ^ 0x5a75_7100_0000_0002;
+        options
+    })
     .expect("vehicle IMU");
 
     let coast = run_nhc_case(&truth, sequence.samples.clone(), spec, false);
@@ -364,15 +358,11 @@ fn stationary_update_rejects_short_windows_and_nonstationary_samples() {
     let truth = static_truth(3, 1.0);
     let spec = ImuSpec::datasheet(0.0, 0.0, 0.0, 0.0, 600.0, 600.0, None, None);
     let mut config = LooseCouplingConfig::default();
-    config.stationary_updates = Some(StationaryUpdateConfig {
-        detector: StationaryDetectorConfig {
-            window_len: 3,
-            max_specific_force_norm_error_mps2: 0.08,
-            max_body_rate_wrt_ecef_norm_rps: 0.003,
-        },
-        zero_velocity_sigma_mps: 0.015,
-        zero_angular_rate_sigma_rps: 0.00008,
-    });
+    config.stationary_updates = Some(StationaryUpdateConfig::new(
+        StationaryDetectorConfig::new(3, 0.08, 0.003),
+        0.015,
+        0.00008,
+    ));
     let mut filter = direct_filter(truth[0], spec, initial_covariance_diagonal(), config);
     let stationary_force_mps2 = [9.80665, 0.0, 0.0];
     for step in 1..=2 {
@@ -413,15 +403,11 @@ fn stationary_update_rejects_duplicate_epoch_application() {
     let truth = static_truth(3, 1.0);
     let spec = ImuSpec::datasheet(0.0, 0.0, 0.0, 0.0, 600.0, 600.0, None, None);
     let mut config = LooseCouplingConfig::default();
-    config.stationary_updates = Some(StationaryUpdateConfig {
-        detector: StationaryDetectorConfig {
-            window_len: 3,
-            max_specific_force_norm_error_mps2: 0.08,
-            max_body_rate_wrt_ecef_norm_rps: 0.003,
-        },
-        zero_velocity_sigma_mps: 0.015,
-        zero_angular_rate_sigma_rps: 0.00008,
-    });
+    config.stationary_updates = Some(StationaryUpdateConfig::new(
+        StationaryDetectorConfig::new(3, 0.08, 0.003),
+        0.015,
+        0.00008,
+    ));
     let mut filter = direct_filter(truth[0], spec, initial_covariance_diagonal(), config);
     for state in truth.iter().take(4).skip(1) {
         filter
@@ -447,15 +433,8 @@ fn stationary_update_rejects_duplicate_epoch_application() {
 fn non_holonomic_constraint_rejects_sub_min_speed_and_high_rate() {
     let truth = straight_vehicle_truth(1, 1.0);
     let spec = ImuSpec::datasheet(0.0, 0.0, 0.0, 0.0, 600.0, 600.0, None, None);
-    let config = LooseCouplingConfig {
-        non_holonomic: Some(NonHolonomicConstraintConfig {
-            lateral_velocity_sigma_mps: 0.03,
-            vertical_velocity_sigma_mps: 0.03,
-            min_speed_mps: 2.0,
-            max_body_rate_wrt_ecef_norm_rps: 0.01,
-        }),
-        ..LooseCouplingConfig::default()
-    };
+    let mut config = LooseCouplingConfig::default();
+    config.non_holonomic = Some(NonHolonomicConstraintConfig::new(0.03, 0.03, 2.0, 0.01));
     let mut slow_nominal = truth[0];
     slow_nominal.velocity_ecef_mps = [0.5, 0.0, 0.0];
     let mut slow_filter = direct_filter(slow_nominal, spec, initial_covariance_diagonal(), config);
@@ -495,15 +474,8 @@ fn non_holonomic_constraint_rejects_sub_min_speed_and_high_rate() {
 fn non_holonomic_constraint_rejects_duplicate_epoch_application() {
     let truth = straight_vehicle_truth(1, 1.0);
     let spec = ImuSpec::datasheet(0.0, 0.0, 0.0, 0.0, 600.0, 600.0, None, None);
-    let config = LooseCouplingConfig {
-        non_holonomic: Some(NonHolonomicConstraintConfig {
-            lateral_velocity_sigma_mps: 0.03,
-            vertical_velocity_sigma_mps: 0.03,
-            min_speed_mps: 2.0,
-            max_body_rate_wrt_ecef_norm_rps: 0.01,
-        }),
-        ..LooseCouplingConfig::default()
-    };
+    let mut config = LooseCouplingConfig::default();
+    config.non_holonomic = Some(NonHolonomicConstraintConfig::new(0.03, 0.03, 2.0, 0.01));
     let mut filter = direct_filter(truth[0], spec, initial_covariance_diagonal(), config);
     filter
         .propagate(ImuSample::rate(
@@ -560,9 +532,7 @@ fn velocity_matching_reduces_outage_peak_error_and_keeps_span_continuous() {
     let matched = sidereon_core::fusion::velocity_match_outage(
         &span,
         &return_fix,
-        VelocityMatchingConfig {
-            max_outage_duration_s: 20.0,
-        },
+        VelocityMatchingConfig::new(20.0),
     )
     .expect("velocity match");
 
@@ -608,9 +578,7 @@ fn velocity_matching_can_land_on_posterior_endpoint_state() {
     let matched = sidereon_core::fusion::velocity_match_outage_to_state(
         &states,
         endpoint,
-        VelocityMatchingConfig {
-            max_outage_duration_s: 5.0,
-        },
+        VelocityMatchingConfig::new(5.0),
     )
     .expect("velocity match to state");
 
@@ -641,18 +609,15 @@ fn fix_status_weighting_inflates_float_covariance_by_configured_sigma() {
         .expect("measurement")
         .with_fix_status(GnssFixStatus::Float);
     let mut unweighted = direct_filter(nominal, spec, diagonal, LooseCouplingConfig::default());
-    let mut weighted = direct_filter(
-        nominal,
-        spec,
-        diagonal,
-        LooseCouplingConfig {
-            fix_status_weighting: GnssFixStatusWeighting {
-                float_sigma_multiplier: 3.0,
-                ..GnssFixStatusWeighting::default()
-            },
-            ..LooseCouplingConfig::default()
-        },
-    );
+    let mut weighted = direct_filter(nominal, spec, diagonal, {
+        let mut config = LooseCouplingConfig::default();
+        let weighting = GnssFixStatusWeighting {
+            float_sigma_multiplier: 3.0,
+            ..Default::default()
+        };
+        config.fix_status_weighting = weighting;
+        config
+    });
 
     unweighted
         .update_loose(&measurement)
@@ -690,14 +655,13 @@ fn field_mode_defaults_keep_existing_loose_fixture_bits() {
             )
             .expect("filter state");
             let mut config = InertialFilterConfig::new(spec).expect("filter config");
-            config.loose = LooseCouplingConfig {
-                fix_status_weighting: GnssFixStatusWeighting::default(),
-                stationary_updates: None,
-                non_holonomic: None,
-                measurement_reweighting: Some(IggIiiMeasurementReweighting::standard()),
-                prediction_adaptation: Some(YangPredictionAdaptiveFactor::standard()),
-                ..LooseCouplingConfig::default()
-            };
+            let mut loose = LooseCouplingConfig::default();
+            loose.fix_status_weighting = GnssFixStatusWeighting::default();
+            loose.stationary_updates = None;
+            loose.non_holonomic = None;
+            loose.measurement_reweighting = Some(IggIiiMeasurementReweighting::standard());
+            loose.prediction_adaptation = Some(YangPredictionAdaptiveFactor::standard());
+            config.loose = loose;
             InertialFilter::with_config(state, config).expect("filter")
         });
 
@@ -1095,14 +1059,11 @@ where
     let mut velocities = vec![filter.state().nominal.velocity_ecef_mps];
     let mut covariances = vec![filter.state().covariance.clone()];
     let increments = truth_increments(truth);
-    let sequence = simulate_imu_samples_from_increments(
-        &increments,
-        spec,
-        ImuSimulationOptions {
-            seed: SEED ^ 0xa11c_e5e1_5e1d_0f11,
-            ..ImuSimulationOptions::default()
-        },
-    )
+    let sequence = simulate_imu_samples_from_increments(&increments, spec, {
+        let mut options = ImuSimulationOptions::default();
+        options.seed = SEED ^ 0xa11c_e5e1_5e1d_0f11;
+        options
+    })
     .expect("simulated IMU");
 
     for (step, sample) in sequence.samples.into_iter().enumerate() {
@@ -1185,15 +1146,11 @@ fn run_stationary_constraint_case(
     }
     let mut config = LooseCouplingConfig::default();
     if enable_updates {
-        config.stationary_updates = Some(StationaryUpdateConfig {
-            detector: StationaryDetectorConfig {
-                window_len: 3,
-                max_specific_force_norm_error_mps2: 0.08,
-                max_body_rate_wrt_ecef_norm_rps: 0.003,
-            },
-            zero_velocity_sigma_mps: 0.015,
-            zero_angular_rate_sigma_rps: 0.00008,
-        });
+        config.stationary_updates = Some(StationaryUpdateConfig::new(
+            StationaryDetectorConfig::new(3, 0.08, 0.003),
+            0.015,
+            0.00008,
+        ));
     }
     let mut filter = direct_filter(truth[0], spec, diagonal, config);
     let mut applied_updates = 0usize;
@@ -1229,12 +1186,7 @@ fn run_nhc_case(
     }
     let mut config = LooseCouplingConfig::default();
     if enable_updates {
-        config.non_holonomic = Some(NonHolonomicConstraintConfig {
-            lateral_velocity_sigma_mps: 0.03,
-            vertical_velocity_sigma_mps: 0.03,
-            min_speed_mps: 2.0,
-            max_body_rate_wrt_ecef_norm_rps: 0.01,
-        });
+        config.non_holonomic = Some(NonHolonomicConstraintConfig::new(0.03, 0.03, 2.0, 0.01));
     }
     let mut filter = direct_filter(nominal, spec, diagonal, config);
     let mut applied_updates = 0usize;
@@ -1283,14 +1235,11 @@ fn run_tight_fusion(
     let mut velocities = vec![filter.state().nominal.velocity_ecef_mps];
     let mut covariances = vec![filter.state().covariance.clone()];
     let increments = truth_increments(truth);
-    let sequence = simulate_imu_samples_from_increments(
-        &increments,
-        spec,
-        ImuSimulationOptions {
-            seed: imu_seed ^ 0x1a5e_d1f1_f7c0_5eed,
-            ..ImuSimulationOptions::default()
-        },
-    )
+    let sequence = simulate_imu_samples_from_increments(&increments, spec, {
+        let mut options = ImuSimulationOptions::default();
+        options.seed = imu_seed ^ 0x1a5e_d1f1_f7c0_5eed;
+        options
+    })
     .expect("simulated IMU");
 
     for (step, sample) in sequence.samples.into_iter().enumerate() {
@@ -1326,11 +1275,10 @@ fn loose_filter(initial_truth: NavState, spec: ImuSpec) -> InertialFilter {
     )
     .expect("filter state");
     let mut config = InertialFilterConfig::new(spec).expect("filter config");
-    config.loose = LooseCouplingConfig {
-        measurement_reweighting: Some(IggIiiMeasurementReweighting::standard()),
-        prediction_adaptation: Some(YangPredictionAdaptiveFactor::standard()),
-        ..LooseCouplingConfig::default()
-    };
+    let mut loose = LooseCouplingConfig::default();
+    loose.measurement_reweighting = Some(IggIiiMeasurementReweighting::standard());
+    loose.prediction_adaptation = Some(YangPredictionAdaptiveFactor::standard());
+    config.loose = loose;
     InertialFilter::with_config(state, config).expect("filter")
 }
 
@@ -1342,13 +1290,12 @@ fn tight_filter(initial_nominal: NavState, spec: ImuSpec) -> InertialFilter {
     )
     .expect("filter state");
     let mut config = InertialFilterConfig::new(spec).expect("filter config");
-    config.tight = TightCouplingConfig {
-        initial_clock_bias_variance_m2: 2.5e3,
-        initial_clock_drift_variance_m2_s2: 0.25,
-        clock_bias_random_walk_m2_s: 0.02,
-        clock_drift_random_walk_m2_s3: 1.0e-4,
-        ..TightCouplingConfig::default()
-    };
+    let mut tight = TightCouplingConfig::default();
+    tight.initial_clock_bias_variance_m2 = 2.5e3;
+    tight.initial_clock_drift_variance_m2_s2 = 0.25;
+    tight.clock_bias_random_walk_m2_s = 0.02;
+    tight.clock_drift_random_walk_m2_s3 = 1.0e-4;
+    config.tight = tight;
     InertialFilter::with_config(state, config).expect("filter")
 }
 

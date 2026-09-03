@@ -321,11 +321,10 @@ fn observable_formula_cases_match_golden_bits() {
         let sat = sat_id(case["sat"].as_str().expect("satellite token"));
         let receiver_ecef_m = hex3(&case["receiver_ecef_m"]);
         let t_rx_j2000_s = j2000_seconds_from_iso(case["epoch"].as_str().expect("epoch"));
-        let options = PredictOptions {
-            light_time: case["light_time"].as_bool().expect("light_time"),
-            sagnac: case["sagnac"].as_bool().expect("sagnac"),
-            carrier_hz: F_L1_HZ,
-        };
+        let mut options = PredictOptions::default();
+        options.light_time = case["light_time"].as_bool().expect("light_time");
+        options.sagnac = case["sagnac"].as_bool().expect("sagnac");
+        options.carrier_hz = F_L1_HZ;
 
         let predicted = predict(&sp3, sat, receiver_ecef_m, t_rx_j2000_s, options)
             .unwrap_or_else(|err| panic!("observable case {index} {sat}: {err}"));

@@ -442,6 +442,7 @@ impl StationDisplacementEpoch {
 
 /// Switches for the high-level station displacement entry.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct StationDisplacementOptions<'a> {
     /// Apply the IERS solid Earth tide station displacement.
     pub solid_earth_tide: bool,

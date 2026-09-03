@@ -64,6 +64,7 @@ pub enum SiderealTemplateMethod {
 
 /// Options controlling residual template stacking.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct SiderealFilterOptions {
     /// Sampling interval of the residual array.
     pub sample_interval: Duration,

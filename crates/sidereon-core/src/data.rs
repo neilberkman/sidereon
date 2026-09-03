@@ -2127,6 +2127,7 @@ pub struct DistributionLocation {
 
 /// Exact product request with an ordered, caller-controlled distributor list.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProductRequest {
     /// Exact requested identity.
     pub identity: ProductIdentity,

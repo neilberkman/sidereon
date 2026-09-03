@@ -101,13 +101,13 @@ fn encoded_subframes_match_reference_generator_bit_for_bit() {
     let lnav = &golden["lnav"];
     let opts_json = &lnav["options"];
 
-    let opts = LnavOptions {
-        tow: i(opts_json["tow"].as_i64().unwrap()),
-        alert: i(opts_json["alert"].as_i64().unwrap()),
-        anti_spoof: i(opts_json["anti_spoof"].as_i64().unwrap()),
-        integrity: i(opts_json["integrity"].as_i64().unwrap()),
-        tlm_message: i(opts_json["tlm_message"].as_i64().unwrap()),
-    };
+    let opts = LnavOptions::new(
+        i(opts_json["tow"].as_i64().unwrap()),
+        i(opts_json["alert"].as_i64().unwrap()),
+        i(opts_json["anti_spoof"].as_i64().unwrap()),
+        i(opts_json["integrity"].as_i64().unwrap()),
+        i(opts_json["tlm_message"].as_i64().unwrap()),
+    );
 
     let subframes = lnav::encode(&example(), &opts).expect("encode");
 

@@ -54,6 +54,7 @@ pub struct SphericalHarmonicCoefficient {
 
 /// Copyable embedded-table selector for propagation force composition.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct SphericalHarmonicGravityConfig {
     /// Gravitational parameter, km^3/s^2.
     pub mu_km3_s2: f64,
@@ -66,6 +67,32 @@ pub struct SphericalHarmonicGravityConfig {
 }
 
 impl SphericalHarmonicGravityConfig {
+    /// Build a selector from explicit gravity constants and degree/order limits.
+    ///
+    /// All four fields are required because the constants and active harmonic
+    /// limits directly determine the resulting perturbation.
+    pub fn new(
+        mu_km3_s2: f64,
+        reference_radius_km: f64,
+        max_degree: u16,
+        max_order: u16,
+    ) -> Result<Self, PropagationError> {
+        validate_finite_positive(mu_km3_s2, "mu_km3_s2")?;
+        validate_finite_positive(reference_radius_km, "reference_radius_km")?;
+        validate_degree_order(max_degree, max_order)?;
+        if max_degree > EGM96_EMBEDDED_MAX_DEGREE || max_order > EGM96_EMBEDDED_MAX_ORDER {
+            return Err(PropagationError::InvalidInput(
+                "EGM96 embedded degree/order must not exceed 36".to_string(),
+            ));
+        }
+        Ok(Self {
+            mu_km3_s2,
+            reference_radius_km,
+            max_degree,
+            max_order,
+        })
+    }
+
     /// Build an EGM96 embedded-table selector.
     pub fn egm96(max_degree: u16, max_order: u16) -> Result<Self, PropagationError> {
         validate_degree_order(max_degree, max_order)?;

@@ -21,6 +21,7 @@ pub const DEFAULT_TIME_SYNC_CHECKPOINT_CAPACITY: usize = 64;
 
 /// Retained history limits for bounded-latency time synchronization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TimeSyncHistoryConfig {
     /// Number of recent IMU samples retained for fractional replay.
     pub imu_capacity: usize,

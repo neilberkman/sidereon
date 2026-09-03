@@ -123,6 +123,7 @@ impl Default for KinematicProcessNoise {
 
 /// Configuration for a sequential kinematic PPP EKF solve.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct KinematicConfig {
     /// Initial receiver state estimate.
     pub initial_state: KinematicState,

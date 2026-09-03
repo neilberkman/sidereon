@@ -223,7 +223,8 @@ fn dyadic_fixture_lookups_are_bit_identical_to_naive_scaling() {
         DtedInterpolation::Bilinear,
         DtedInterpolation::NearestPosting,
     ] {
-        let options = DtedLookupOptions { interpolation };
+        let mut options = DtedLookupOptions::default();
+        options.interpolation = interpolation;
         for (lon_numerator, lat_numerator) in offsets {
             let longitude_deg = -107.0 + f64::from(lon_numerator) / 256.0;
             let latitude_deg = 36.0 + f64::from(lat_numerator) / 256.0;
@@ -265,7 +266,8 @@ fn mmap_store_matches_dted_reader_over_multi_tile_fixture() {
         DtedInterpolation::Bilinear,
         DtedInterpolation::NearestPosting,
     ] {
-        let options = DtedLookupOptions { interpolation };
+        let mut options = DtedLookupOptions::default();
+        options.interpolation = interpolation;
         let got = mmap.height_batch(&points, options);
         let want = dted.height_batch(&points, options);
         assert_height_results_match(&got, &want, &format!("{interpolation:?} batch"));
@@ -314,7 +316,8 @@ fn mmap_store_matches_committed_multi_tile_fixture_bits() {
         DtedInterpolation::Bilinear,
         DtedInterpolation::NearestPosting,
     ] {
-        let options = DtedLookupOptions { interpolation };
+        let mut options = DtedLookupOptions::default();
+        options.interpolation = interpolation;
         let got = mmap.height_batch(&points, options);
         assert_eq!(got.len(), cases.len(), "{interpolation:?} batch length");
 
@@ -369,9 +372,8 @@ fn mmap_store_nearest_posting_matches_real_skadi_source_posts() {
 
     let bytes = dted_tree_to_mmap_store(&root).expect("convert DTED tree");
     let mut mmap = MmapTerrain::from_bytes(&bytes).expect("parse terrain store");
-    let options = DtedLookupOptions {
-        interpolation: DtedInterpolation::NearestPosting,
-    };
+    let mut options = DtedLookupOptions::default();
+    options.interpolation = DtedInterpolation::NearestPosting;
 
     for (lon_index, lat_index) in [(0usize, 0usize), (0, 4), (3, 0), (3, 4), (2, 3), (4, 4)] {
         let longitude_deg = -107.0 + lon_index as f64 / 4.0;
@@ -402,9 +404,8 @@ fn mmap_store_returns_typed_zero_for_hgt_void_posting() {
     let bytes = dted_tree_to_mmap_store(&root).expect("convert DTED tree");
     let mut mmap = MmapTerrain::from_bytes(&bytes).expect("parse terrain store");
     let mut dted = DtedTerrain::new(&root);
-    let options = DtedLookupOptions {
-        interpolation: DtedInterpolation::NearestPosting,
-    };
+    let mut options = DtedLookupOptions::default();
+    options.interpolation = DtedInterpolation::NearestPosting;
     let latitude_deg = 36.0 + 1234.0 / 3600.0;
     let longitude_deg = -107.0 + 2345.0 / 3600.0;
 

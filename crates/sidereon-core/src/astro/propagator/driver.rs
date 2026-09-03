@@ -44,6 +44,7 @@ pub enum PropagationForceModel {
 /// integrator, the canonical [`MU_EARTH`] gravitational parameter, and the
 /// engine-default [`IntegratorOptions`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PropagationConfig {
     /// Initial ECI Cartesian state; its epoch is the propagation start epoch.
     pub initial: CartesianState,

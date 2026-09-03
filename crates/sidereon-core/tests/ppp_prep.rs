@@ -136,18 +136,15 @@ fn dual_observation_with_code_noise(
 }
 
 fn wide_lane_options() -> WideLanePrepOptions {
-    WideLanePrepOptions {
-        min_epochs: 2,
-        tolerance_cycles: 0.01,
-    }
+    WideLanePrepOptions::new(2, 0.01)
 }
 
 fn slip_options() -> CycleSlipOptions {
-    CycleSlipOptions {
-        gf_threshold_m: 0.05,
-        mw_threshold_cycles: 4.0,
-        min_arc_gap_s: 1_000.0,
-    }
+    let mut options = CycleSlipOptions::default();
+    options.gf_threshold_m = 0.05;
+    options.mw_threshold_cycles = 4.0;
+    options.min_arc_gap_s = 1_000.0;
+    options
 }
 
 fn float_epochs_from_dual(epochs: Vec<DualFrequencyEpoch>) -> Vec<FloatCycleSlipEpoch> {

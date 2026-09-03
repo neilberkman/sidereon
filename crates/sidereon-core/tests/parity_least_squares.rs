@@ -459,12 +459,11 @@ fn lsq_converged_solution_agreement() {
     let x0 = DVector::from_vec(hex_vec(&problem_j["x0"]));
     // Drive this solver to the first-order-optimal minimum so the comparison is
     // against a well-defined point, not its own path-dependent ftol stop.
-    let opts = SolveOptions {
-        gtol: 1e-14,
-        ftol: 1e-15,
-        xtol: 1e-15,
-        max_nfev: 1000,
-    };
+    let mut opts = SolveOptions::default();
+    opts.gtol = 1e-14;
+    opts.ftol = 1e-15;
+    opts.xtol = 1e-15;
+    opts.max_nfev = 1000;
 
     let lsq = LeastSquaresProblem::new(&residual, x0);
     let report = solve_trf(&lsq, &opts).expect("solver converged");

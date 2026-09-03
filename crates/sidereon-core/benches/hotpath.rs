@@ -87,21 +87,21 @@ fn receiver_ecef_m() -> [f64; 3] {
 }
 
 fn media_options(ionex: &Ionex) -> ObservableMediaOptions<'_> {
-    ObservableMediaOptions {
-        troposphere: Some(Default::default()),
-        ionosphere: Some(ObservableIonosphereCorrection::IonexWithPolicy(
-            ionex,
-            IonexCoveragePolicy::Hold,
-        )),
-    }
+    let mut options = ObservableMediaOptions::default();
+    options.troposphere = Some(Default::default());
+    options.ionosphere = Some(ObservableIonosphereCorrection::IonexWithPolicy(
+        ionex,
+        IonexCoveragePolicy::Hold,
+    ));
+    options
 }
 
 fn bundle_options(ionex: &Ionex) -> EmissionMediaBatchOptions<'_> {
-    EmissionMediaBatchOptions {
-        carrier_hz: F_L1_HZ,
-        media: media_options(ionex),
-        min_elevation_rad: None,
-    }
+    let mut options = EmissionMediaBatchOptions::default();
+    options.carrier_hz = F_L1_HZ;
+    options.media = media_options(ionex);
+    options.min_elevation_rad = None;
+    options
 }
 
 fn next_index(index: &mut usize, len: usize) -> usize {

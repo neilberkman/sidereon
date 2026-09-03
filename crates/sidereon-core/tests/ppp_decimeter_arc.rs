@@ -290,17 +290,13 @@ fn gps_float_epochs(sp3: &Sp3, obs: &RinexObs, approx: [f64; 3]) -> Vec<FloatEpo
 }
 
 fn elevation_deg(sp3: &Sp3, sat: GnssSatelliteId, approx: [f64; 3], t_rx_j2000_s: f64) -> f64 {
-    predict(
-        sp3,
-        sat,
-        approx,
-        t_rx_j2000_s,
-        PredictOptions {
-            carrier_hz: F_L1_HZ,
-            light_time: true,
-            sagnac: true,
-        },
-    )
+    predict(sp3, sat, approx, t_rx_j2000_s, {
+        let mut options = PredictOptions::default();
+        options.carrier_hz = F_L1_HZ;
+        options.light_time = true;
+        options.sagnac = true;
+        options
+    })
     .map(|p| p.elevation_deg)
     .unwrap_or(f64::NEG_INFINITY)
 }
@@ -458,13 +454,13 @@ fn receiver_antenna_options(antex: &Antex) -> ReceiverAntennaOptions {
             }
         })
         .collect();
-    ReceiverAntennaOptions {
-        freq1_label: "G01".to_string(),
-        freq1_hz: F_L1_HZ,
-        freq2_label: "G02".to_string(),
-        freq2_hz: F_L2_HZ,
+    ReceiverAntennaOptions::new(
+        "G01".to_string(),
+        F_L1_HZ,
+        "G02".to_string(),
+        F_L2_HZ,
         frequencies,
-    }
+    )
 }
 
 /// Satellite antenna correction options from the ANTEX satellite blocks for the
@@ -502,13 +498,13 @@ fn satellite_antenna_options(antex: &Antex, prns: &[String]) -> SatelliteAntenna
                 }
             })
             .collect();
-    SatelliteAntennaOptions {
-        freq1_label: "G01".to_string(),
-        freq1_hz: F_L1_HZ,
-        freq2_label: "G02".to_string(),
-        freq2_hz: F_L2_HZ,
+    SatelliteAntennaOptions::new(
+        "G01".to_string(),
+        F_L1_HZ,
+        "G02".to_string(),
+        F_L2_HZ,
         antennas,
-    }
+    )
 }
 
 fn gps_id(token: &str) -> GnssSatelliteId {
@@ -602,19 +598,18 @@ fn full_corrections_with_code_bias(
     code_bias: Option<CodeBiasOptions>,
 ) -> RangeCorrections {
     let prns = observed_prns(epochs);
-    let options = PppCorrectionsOptions {
-        solid_earth_tide: true,
-        // Pole tide intentionally off: this arc validates the cm/dm-dominant
-        // stack; pole tide is a sub-cm refinement out of scope here.
-        pole_tide: None,
-        // Ocean tide loading ON with the real ZIM2 BLQ. ZIM2 is deep inland, so
-        // OTL is only a few mm here; the bar is no decimeter regression (a slight
-        // change vs OTL-off is expected and benign).
-        ocean_loading: Some(ZIM2_OCEAN_LOADING_BLQ),
-        phase_windup: true,
-        satellite_antenna: Some(satellite_antenna_options(antex, &prns)),
-        code_bias,
-    };
+    // Pole tide intentionally off: this arc validates the cm/dm-dominant
+    // stack; pole tide is a sub-cm refinement out of scope here.
+    // Ocean tide loading ON with the real ZIM2 BLQ. ZIM2 is deep inland, so
+    // OTL is only a few mm here; the bar is no decimeter regression (a slight
+    // change vs OTL-off is expected and benign).
+    let mut options = PppCorrectionsOptions::new();
+    options.solid_earth_tide = true;
+    options.pole_tide = None;
+    options.ocean_loading = Some(ZIM2_OCEAN_LOADING_BLQ);
+    options.phase_windup = true;
+    options.satellite_antenna = Some(satellite_antenna_options(antex, &prns));
+    options.code_bias = code_bias;
     let precomputed = ppp_corrections::build(
         sp3,
         &ppp_correction_epochs(epochs),
@@ -651,12 +646,11 @@ fn full_stack_config(corrections: RangeCorrections, met: Met) -> FloatSolveConfi
 fn code_bias_options(used: (&str, &str)) -> CodeBiasOptions {
     let mut used_observables_default = BTreeMap::new();
     used_observables_default.insert(GnssSystem::Gps, (used.0.to_string(), used.1.to_string()));
-    CodeBiasOptions {
-        bias_set: load_bias(),
-        used_observables_per_sat: BTreeMap::new(),
-        used_observables_default,
-        clock_reference: None,
-    }
+    let mut options = CodeBiasOptions::new(load_bias());
+    options.used_observables_per_sat = BTreeMap::new();
+    options.used_observables_default = used_observables_default;
+    options.clock_reference = None;
+    options
 }
 
 fn full_stack_config_mapping(
@@ -664,31 +658,30 @@ fn full_stack_config_mapping(
     met: Met,
     mapping: TropoMapping,
 ) -> FloatSolveConfig {
-    FloatSolveConfig {
-        weights: MeasurementWeights {
+    let mut tropo = TroposphereOptions::new(met);
+    tropo.enabled = true;
+    tropo.estimate_ztd = true;
+    tropo.estimate_tropo_gradients = false;
+    tropo.mapping = mapping;
+    let mut opts = FloatSolveOptions::default();
+    opts.max_iterations = 12;
+    opts.position_tolerance_m = 1.0e-4;
+    opts.clock_tolerance_m = 1.0e-4;
+    opts.ambiguity_tolerance_m = 1.0e-4;
+    opts.ztd_tolerance_m = 1.0e-4;
+    FloatSolveConfig::new(
+        MeasurementWeights {
             code: 1.0,
             phase: 100.0,
             elevation_weighting: true,
         },
-        tropo: TroposphereOptions {
-            enabled: true,
-            estimate_ztd: true,
-            estimate_tropo_gradients: false,
-            met,
-            mapping,
-        },
+        tropo,
         corrections,
-        opts: FloatSolveOptions {
-            max_iterations: 12,
-            position_tolerance_m: 1.0e-4,
-            clock_tolerance_m: 1.0e-4,
-            ambiguity_tolerance_m: 1.0e-4,
-            ztd_tolerance_m: 1.0e-4,
-        },
-        elevation_cutoff_deg: None,
-        residual_screen: false,
-        estimate_residual_ionosphere: false,
-    }
+        opts,
+        None,
+        false,
+        false,
+    )
 }
 
 /// ZIM2 VMF1 site-wise mapping `a` coefficients for 2026-05-13 (MJD 61173),

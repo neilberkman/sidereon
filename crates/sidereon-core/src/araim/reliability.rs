@@ -31,6 +31,7 @@ pub struct RangeReliabilityRow {
 
 /// Options for Baarda/Teunissen reliability design.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct ReliabilityOptions {
     /// Two-sided false-alarm probability for the one-dimensional data-snooping w-test.
     pub alpha: f64,

@@ -153,6 +153,7 @@ pub struct Refraction {
 
 /// Options for general ground-site observation.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ObserveOptions {
     /// Optional polar-motion coordinates. `None` uses zero pole coordinates.
     pub polar_motion: Option<PolarMotion>,

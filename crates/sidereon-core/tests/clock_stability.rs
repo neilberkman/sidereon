@@ -200,13 +200,15 @@ fn gapped_phase_series_omits_only_cross_gap_terms() {
     let rejected = compute_allan_deviations(&AllanInput {
         series: AllanSeries::PhaseSecondsWithGaps(&phase),
         tau0_s: 1.0,
-        options: AllanOptions {
-            estimators: AllanEstimatorSet {
+        options: {
+            let mut options = AllanOptions::default();
+            options.estimators = AllanEstimatorSet {
                 overlapping_adev: true,
                 ..AllanEstimatorSet::none()
-            },
-            tau_grid: TauGrid::Explicit(vec![1]),
-            gap_policy: GapPolicy::Reject,
+            };
+            options.tau_grid = TauGrid::Explicit(vec![1]);
+            options.gap_policy = GapPolicy::Reject;
+            options
         },
     });
     assert!(rejected.is_err());
@@ -214,13 +216,15 @@ fn gapped_phase_series_omits_only_cross_gap_terms() {
     let omitted = compute_allan_deviations(&AllanInput {
         series: AllanSeries::PhaseSecondsWithGaps(&phase),
         tau0_s: 1.0,
-        options: AllanOptions {
-            estimators: AllanEstimatorSet {
+        options: {
+            let mut options = AllanOptions::default();
+            options.estimators = AllanEstimatorSet {
                 overlapping_adev: true,
                 ..AllanEstimatorSet::none()
-            },
-            tau_grid: TauGrid::Explicit(vec![1]),
-            gap_policy: GapPolicy::OmitTerms,
+            };
+            options.tau_grid = TauGrid::Explicit(vec![1]);
+            options.gap_policy = GapPolicy::OmitTerms;
+            options
         },
     })
     .expect("gap omission");

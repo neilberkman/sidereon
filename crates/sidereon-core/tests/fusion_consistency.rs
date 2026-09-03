@@ -266,14 +266,11 @@ fn run_ensemble(
         let truth = *trajectory.last().expect("final truth");
         let nominal = initial_nominal(initial, &mut rng);
         let mut filter = make_filter(nominal, profile.spec);
-        let sequence = simulate_imu_samples_from_increments(
-            &increments,
-            profile.spec,
-            ImuSimulationOptions {
-                seed: seed ^ 0x6d5f_c2a4_1c37_9e21,
-                ..ImuSimulationOptions::default()
-            },
-        )
+        let sequence = simulate_imu_samples_from_increments(&increments, profile.spec, {
+            let mut options = ImuSimulationOptions::default();
+            options.seed = seed ^ 0x6d5f_c2a4_1c37_9e21;
+            options
+        })
         .expect("IMU sequence");
 
         for sample in sequence.samples {
@@ -344,18 +341,15 @@ fn run_turntable_lever_arm_ensemble() -> EnsembleResult {
             TURNTABLE_LEVER_ARM_BODY_M,
             &covariance_diagonal,
         );
-        let sequence = simulate_imu_samples_from_increments(
-            &increments,
-            spec,
-            ImuSimulationOptions {
-                seed: seed ^ 0xa95c_7d63_0f5a_19b3,
-                initial_bias: ImuBias {
-                    accel_mps2: [0.0; 3],
-                    gyro_rps: true_initial_gyro_bias,
-                },
-                ..ImuSimulationOptions::default()
-            },
-        )
+        let sequence = simulate_imu_samples_from_increments(&increments, spec, {
+            let mut options = ImuSimulationOptions::default();
+            options.seed = seed ^ 0xa95c_7d63_0f5a_19b3;
+            options.initial_bias = ImuBias {
+                accel_mps2: [0.0; 3],
+                gyro_rps: true_initial_gyro_bias,
+            };
+            options
+        })
         .expect("IMU sequence");
 
         for (idx, (sample, truth_step)) in sequence
@@ -409,10 +403,9 @@ fn run_loose_outlier_budget_ensemble(robust: bool) -> EnsembleResult {
     let increments = truth_increments(&trajectory);
     let truth = *trajectory.last().expect("final truth");
     let loose = if robust {
-        LooseCouplingConfig {
-            measurement_reweighting: Some(IggIiiMeasurementReweighting::standard()),
-            ..LooseCouplingConfig::default()
-        }
+        let mut config = LooseCouplingConfig::default();
+        config.measurement_reweighting = Some(IggIiiMeasurementReweighting::standard());
+        config
     } else {
         LooseCouplingConfig::default()
     };
@@ -426,14 +419,11 @@ fn run_loose_outlier_budget_ensemble(robust: bool) -> EnsembleResult {
         let initial = trajectory[0];
         let nominal = initial_nominal(initial, &mut rng);
         let mut filter = make_filter_with_loose_config(nominal, profile.spec, loose);
-        let sequence = simulate_imu_samples_from_increments(
-            &increments,
-            profile.spec,
-            ImuSimulationOptions {
-                seed: seed ^ 0x6d5f_c2a4_1c37_9e21,
-                ..ImuSimulationOptions::default()
-            },
-        )
+        let sequence = simulate_imu_samples_from_increments(&increments, profile.spec, {
+            let mut options = ImuSimulationOptions::default();
+            options.seed = seed ^ 0x6d5f_c2a4_1c37_9e21;
+            options
+        })
         .expect("IMU sequence");
 
         for sample in sequence.samples {
@@ -498,16 +488,16 @@ fn make_filter_with_tight_config(
         InsFilterState::from_diagonal(nominal, ErrorStateLayout::Fifteen, covariance_diagonal)
             .expect("filter state");
     let mut config = InertialFilterConfig::new(spec).expect("filter config");
-    config.tight = TightCouplingConfig {
-        lever_arm_body_m,
-        light_time: false,
-        sagnac: false,
-        initial_clock_bias_variance_m2: 1.0e-6,
-        initial_clock_drift_variance_m2_s2: 1.0e-6,
-        clock_bias_random_walk_m2_s: 0.0,
-        clock_drift_random_walk_m2_s3: 0.0,
-        update_options: Default::default(),
-    };
+    let mut tight = TightCouplingConfig::default();
+    tight.lever_arm_body_m = lever_arm_body_m;
+    tight.light_time = false;
+    tight.sagnac = false;
+    tight.initial_clock_bias_variance_m2 = 1.0e-6;
+    tight.initial_clock_drift_variance_m2_s2 = 1.0e-6;
+    tight.clock_bias_random_walk_m2_s = 0.0;
+    tight.clock_drift_random_walk_m2_s3 = 0.0;
+    tight.update_options = Default::default();
+    config.tight = tight;
     InertialFilter::with_config(state, config).expect("filter")
 }
 
@@ -722,10 +712,9 @@ fn tight_epoch_with_kinematics(
     rng: &mut SplitMix64,
     actual_noise_scale: f64,
 ) -> TightGnssEpoch {
-    let options = TransmitTimeOptions {
-        light_time: false,
-        sagnac: false,
-    };
+    let mut options = TransmitTimeOptions::default();
+    options.light_time = false;
+    options.sagnac = false;
     let antenna = antenna_truth_kinematics(truth, lever_arm_body_m, body_rate_wrt_ecef_rps);
     let code_noise_sigma = code_sigma_m * actual_noise_scale;
     let range_rate_noise_sigma = range_rate_sigma_mps * actual_noise_scale;

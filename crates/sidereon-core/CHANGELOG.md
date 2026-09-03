@@ -6,6 +6,9 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking:** Public input structs are now `#[non_exhaustive]`; external
+  construction goes through `Default`/`new` plus field assignment, so adding
+  an option to these structs is no longer a breaking change.
 - Portable dynamic matrix and matrix-vector products are pinned to nalgebra's
   fixed-order scalar path by a randomized bit-identity test (normal-equation
   orders through 500 and a 2000x200 Jacobian). CI benchmarks every

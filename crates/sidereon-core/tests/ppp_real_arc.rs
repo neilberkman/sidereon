@@ -256,25 +256,25 @@ fn float_config(
     tropo: TroposphereOptions,
     max_iterations: usize,
 ) -> FloatSolveConfig {
-    FloatSolveConfig {
-        weights: MeasurementWeights {
+    let mut opts = FloatSolveOptions::default();
+    opts.max_iterations = max_iterations;
+    opts.position_tolerance_m = 1.0e-4;
+    opts.clock_tolerance_m = 1.0e-4;
+    opts.ambiguity_tolerance_m = 1.0e-4;
+    opts.ztd_tolerance_m = 1.0e-4;
+    FloatSolveConfig::new(
+        MeasurementWeights {
             code: 1.0,
             phase: 100.0,
             elevation_weighting,
         },
         tropo,
-        corrections: RangeCorrections::disabled(),
-        opts: FloatSolveOptions {
-            max_iterations,
-            position_tolerance_m: 1.0e-4,
-            clock_tolerance_m: 1.0e-4,
-            ambiguity_tolerance_m: 1.0e-4,
-            ztd_tolerance_m: 1.0e-4,
-        },
-        elevation_cutoff_deg: None,
-        residual_screen: false,
-        estimate_residual_ionosphere: false,
-    }
+        RangeCorrections::disabled(),
+        opts,
+        None,
+        false,
+        false,
+    )
 }
 
 fn fixed_config(
@@ -284,40 +284,39 @@ fn fixed_config(
     wavelengths_m: BTreeMap<String, f64>,
     offsets_m: BTreeMap<String, f64>,
 ) -> FixedSolveConfig {
-    FixedSolveConfig {
-        weights: MeasurementWeights {
+    let mut opts = FloatSolveOptions::default();
+    opts.max_iterations = max_iterations;
+    opts.position_tolerance_m = 1.0e-4;
+    opts.clock_tolerance_m = 1.0e-4;
+    opts.ambiguity_tolerance_m = 1.0e-4;
+    opts.ztd_tolerance_m = 1.0e-4;
+    let mut ambiguity = FixedAmbiguityOptions::new(3.0);
+    ambiguity.wavelengths_m = wavelengths_m;
+    ambiguity.offsets_m = offsets_m;
+    FixedSolveConfig::new(
+        MeasurementWeights {
             code: 1.0,
             phase: 100.0,
             elevation_weighting,
         },
         tropo,
-        corrections: RangeCorrections::disabled(),
-        opts: FloatSolveOptions {
-            max_iterations,
-            position_tolerance_m: 1.0e-4,
-            clock_tolerance_m: 1.0e-4,
-            ambiguity_tolerance_m: 1.0e-4,
-            ztd_tolerance_m: 1.0e-4,
-        },
-        elevation_cutoff_deg: None,
-        ambiguity: FixedAmbiguityOptions {
-            wavelengths_m,
-            offsets_m,
-            ratio_threshold: 3.0,
-        },
-        estimate_residual_ionosphere: false,
-    }
+        RangeCorrections::disabled(),
+        opts,
+        None,
+        ambiguity,
+        false,
+    )
 }
 
 fn tropo(enabled: bool, estimate_ztd: bool) -> TroposphereOptions {
     if enabled {
-        TroposphereOptions {
-            enabled: true,
-            estimate_ztd,
-            estimate_tropo_gradients: false,
-            met: Met::new(1013.25, 288.15, 0.5).expect("valid PPP troposphere met"),
-            ..TroposphereOptions::disabled()
-        }
+        let mut options = TroposphereOptions::new(
+            Met::new(1013.25, 288.15, 0.5).expect("valid PPP troposphere met"),
+        );
+        options.enabled = true;
+        options.estimate_ztd = estimate_ztd;
+        options.estimate_tropo_gradients = false;
+        options
     } else {
         TroposphereOptions::disabled()
     }
@@ -368,18 +367,15 @@ fn position_error_m(position_m: [f64; 3], truth_m: [f64; 3]) -> f64 {
 }
 
 fn wide_lane_options(tolerance_cycles: f64) -> WideLanePrepOptions {
-    WideLanePrepOptions {
-        min_epochs: 2,
-        tolerance_cycles,
-    }
+    WideLanePrepOptions::new(2, tolerance_cycles)
 }
 
 fn cycle_slip_options() -> sidereon_core::carrier_phase::CycleSlipOptions {
-    sidereon_core::carrier_phase::CycleSlipOptions {
-        gf_threshold_m: 0.05,
-        mw_threshold_cycles: 4.0,
-        min_arc_gap_s: 300.0,
-    }
+    let mut options = sidereon_core::carrier_phase::CycleSlipOptions::default();
+    options.gf_threshold_m = 0.05;
+    options.mw_threshold_cycles = 4.0;
+    options.min_arc_gap_s = 300.0;
+    options
 }
 
 /// Bounded-tolerance band (m) for canonical PPP vs the PPP-oracle-faithful

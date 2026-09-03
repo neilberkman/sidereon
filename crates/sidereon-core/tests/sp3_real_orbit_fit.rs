@@ -61,24 +61,22 @@ fn gps(prn: u8) -> GnssSatelliteId {
 }
 
 fn fit_options(force_model: ForceModelKind) -> OrbitFitOptions {
-    OrbitFitOptions {
-        force_model,
-        integrator: IntegratorKind::Dp54,
-        integrator_options: IntegratorOptions {
-            abs_tol: 1.0e-11,
-            rel_tol: 1.0e-13,
-            initial_step: 30.0,
-            max_step: 180.0,
-            ..IntegratorOptions::default()
-        },
-        solver_options: SolveOptions {
-            gtol: 1.0e-13,
-            ftol: 1.0e-13,
-            xtol: 1.0e-13,
-            max_nfev: 900,
-        },
-        ..OrbitFitOptions::default()
-    }
+    let mut integrator_options = IntegratorOptions::default();
+    integrator_options.abs_tol = 1.0e-11;
+    integrator_options.rel_tol = 1.0e-13;
+    integrator_options.initial_step = 30.0;
+    integrator_options.max_step = 180.0;
+    let mut solver_options = SolveOptions::default();
+    solver_options.gtol = 1.0e-13;
+    solver_options.ftol = 1.0e-13;
+    solver_options.xtol = 1.0e-13;
+    solver_options.max_nfev = 900;
+    let mut options = OrbitFitOptions::default();
+    options.force_model = force_model;
+    options.integrator = IntegratorKind::Dp54;
+    options.integrator_options = integrator_options;
+    options.solver_options = solver_options;
+    options
 }
 
 fn fit_options_with_provider(

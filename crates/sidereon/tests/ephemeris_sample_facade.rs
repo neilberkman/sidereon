@@ -12,10 +12,7 @@ fn facade_reexports_sp3_merge_controls_and_prediction_metadata() {
 
     let mut options = MergeOptions::default();
     options.precedence_scope = MergePrecedenceScope::SatelliteArc;
-    options.outlier_reject = Some(OutlierRejectOptions {
-        position_tolerance_m: 0.5,
-        clock_tolerance_s: 5.0e-9,
-    });
+    options.outlier_reject = Some(OutlierRejectOptions::new(0.5, 5.0e-9));
     assert_eq!(options.precedence_scope, MergePrecedenceScope::SatelliteArc);
     assert!(options.outlier_reject.is_some());
 }

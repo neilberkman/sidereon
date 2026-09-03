@@ -70,6 +70,7 @@ pub struct PositionSeries<'a> {
 
 /// Options for [`velocity_midas`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct MidasOptions {
     /// Dominant period used for pair selection, in years.
     pub dominant_period_years: f64,
@@ -183,6 +184,7 @@ impl Default for TrajectoryModel {
 
 /// Least-squares controls for [`fit_trajectory`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct TrajectoryFitOptions {
     /// Robust loss passed to the trust-region least-squares solver.
     pub loss: Loss,
@@ -253,6 +255,7 @@ pub struct Trajectory {
 
 /// Controls for [`detect_steps`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct StepDetectionOptions {
     /// Half-window around a candidate epoch, in years.
     pub window_years: f64,

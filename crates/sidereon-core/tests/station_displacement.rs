@@ -149,11 +149,10 @@ fn station_displacement_entry_sums_components_and_batch_matches_scalar() {
         .as_array();
     let epoch = StationDisplacementEpoch::from_utc(2026, 5, 13, 12, 30, 0.0)
         .with_polar_motion_arcsec(ZIM2_XP_ARCSEC, ZIM2_YP_ARCSEC);
-    let options = StationDisplacementOptions {
-        solid_earth_tide: true,
-        pole_tide: true,
-        ocean_loading: Some(&block.coefficients),
-    };
+    let mut options = StationDisplacementOptions::default();
+    options.solid_earth_tide = true;
+    options.pole_tide = true;
+    options.ocean_loading = Some(&block.coefficients);
 
     let got =
         station_displacement_ecef_m(StationDisplacementPosition::from(geodetic), epoch, options)
@@ -193,11 +192,10 @@ fn station_displacement_entry_sums_components_and_batch_matches_scalar() {
 #[test]
 fn station_displacement_requires_polar_motion_when_pole_tide_enabled() {
     let geodetic = zim2_geodetic();
-    let options = StationDisplacementOptions {
-        solid_earth_tide: false,
-        pole_tide: true,
-        ocean_loading: None,
-    };
+    let mut options = StationDisplacementOptions::default();
+    options.solid_earth_tide = false;
+    options.pole_tide = true;
+    options.ocean_loading = None;
     let err = station_displacement_ecef_m(
         StationDisplacementPosition::from(geodetic),
         StationDisplacementEpoch::from_utc(2026, 5, 13, 12, 0, 0.0),
@@ -216,11 +214,10 @@ fn station_displacement_requires_polar_motion_when_pole_tide_enabled() {
 fn station_displacement_validates_epoch_without_solid_tide() {
     let block = parse_ocean_loading_blq_block(ZIM2_BLQ_BLOCK).expect("parse BLQ");
     let geodetic = zim2_geodetic();
-    let options = StationDisplacementOptions {
-        solid_earth_tide: false,
-        pole_tide: false,
-        ocean_loading: Some(&block.coefficients),
-    };
+    let mut options = StationDisplacementOptions::default();
+    options.solid_earth_tide = false;
+    options.pole_tide = false;
+    options.ocean_loading = Some(&block.coefficients);
 
     let err = station_displacement_ecef_m(
         StationDisplacementPosition::from(geodetic),
@@ -259,16 +256,15 @@ fn station_displacement_magnitude_bounds_hold_on_daily_grid() {
     let geodetic = zim2_geodetic();
     for hour in (0..24).step_by(3) {
         let epoch = StationDisplacementEpoch::from_utc(2026, 5, 13, hour, 0, 0.0);
-        let displacement = station_displacement_ecef_m(
-            StationDisplacementPosition::from(geodetic),
-            epoch,
-            StationDisplacementOptions {
-                solid_earth_tide: true,
-                pole_tide: false,
-                ocean_loading: None,
-            },
-        )
-        .expect("solid tide displacement");
+        let displacement =
+            station_displacement_ecef_m(StationDisplacementPosition::from(geodetic), epoch, {
+                let mut options = StationDisplacementOptions::default();
+                options.solid_earth_tide = true;
+                options.pole_tide = false;
+                options.ocean_loading = None;
+                options
+            })
+            .expect("solid tide displacement");
         assert!(
             norm(displacement.ecef_m) < 0.5,
             "solid Earth tide magnitude is outside the expected decimetre band"

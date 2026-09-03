@@ -36,13 +36,14 @@ fn epoch(year: i32, doy: u16, sod: u32) -> sidereon_core::astro::time::model::In
 }
 
 fn dcb_options() -> CodeDcbOptions {
-    CodeDcbOptions {
-        pair: ("P1".to_string(), "C1".to_string()),
-        year: 2026,
-        month: 6,
-        time_scale: TimeScale::Gpst,
-        receiver_system: None,
-    }
+    let mut options = CodeDcbOptions::new(
+        ("P1".to_string(), "C1".to_string()),
+        2026,
+        6,
+        TimeScale::Gpst,
+    );
+    options.receiver_system = None;
+    options
 }
 
 fn ns(value: f64) -> f64 {

@@ -38,6 +38,7 @@ pub enum PseudorangeVarianceModel {
 
 /// Options for [`pseudorange_variance`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PseudorangeVarianceOptions {
     /// Zenith-floor term, meters.
     pub a_m: f64,
@@ -270,6 +271,7 @@ impl RaimWeights {
 
 /// Options for [`raim`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RaimOptions {
     /// False-alarm probability.
     pub p_fa: f64,
@@ -564,11 +566,23 @@ pub enum FdeError<E> {
 
 /// Options for [`fde`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct FdeOptions {
     /// RAIM options used after each solve.
     pub raim: RaimOptions,
     /// Maximum number of exclusions to attempt.
     pub max_iterations: usize,
+}
+
+impl FdeOptions {
+    /// Build FDE options from the RAIM policy and exclusion budget.
+    #[must_use]
+    pub const fn new(raim: RaimOptions, max_iterations: usize) -> Self {
+        Self {
+            raim,
+            max_iterations,
+        }
+    }
 }
 
 /// Fault detection and exclusion over a caller-supplied SPP solver.
@@ -638,12 +652,21 @@ impl std::error::Error for FdeSppError {}
 /// Options for [`fde_spp`]: the RAIM-gated exclusion loop plus the per-iteration
 /// solution-validation gates applied to each candidate solve.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct FdeSppOptions {
     /// FDE loop options: the RAIM configuration and the exclusion budget.
     pub fde: FdeOptions,
     /// Per-iteration solution-validation gates (PDOP ceiling and plausibility
     /// band) applied to each candidate solution.
     pub validation: SolutionValidationOptions,
+}
+
+impl FdeSppOptions {
+    /// Build SPP FDE options from the exclusion and validation policies.
+    #[must_use]
+    pub const fn new(fde: FdeOptions, validation: SolutionValidationOptions) -> Self {
+        Self { fde, validation }
+    }
 }
 
 /// Run single-point positioning with RAIM fault detection and exclusion.
@@ -723,6 +746,7 @@ pub struct RangeFdeRow {
 
 /// Options for [`raim_fde_design`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct RangeFdeOptions {
     /// False-alarm probability for the global chi-square test. The detection
     /// threshold is the `1 - p_fa` chi-square quantile at the redundancy
@@ -1057,6 +1081,7 @@ fn validate_range_rows(rows: &[RangeFdeRow]) -> Result<usize, QualityError> {
 
 /// Validation policy for receiver solutions returned by SPP.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct SolutionValidationOptions {
     /// Optional PDOP ceiling.
     pub max_pdop: Option<f64>,

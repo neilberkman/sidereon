@@ -131,6 +131,7 @@ impl StaticEpoch {
 
 /// Options for [`solve_static`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct StaticSolveOptions {
     /// Initial shared receiver ECEF position in meters.
     pub initial_position_m: [f64; 3],

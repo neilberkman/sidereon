@@ -72,16 +72,16 @@
 //! # let observations = ids
 //! #     .iter()
 //! #     .map(|id| {
+//! #         let mut predict_options = PredictOptions::default();
+//! #         predict_options.carrier_hz = F_L1_HZ;
+//! #         predict_options.light_time = true;
+//! #         predict_options.sagnac = true;
 //! #         let prediction = predict(
 //! #             &source,
 //! #             *id,
 //! #             truth,
 //! #             0.0,
-//! #             PredictOptions {
-//! #                 carrier_hz: F_L1_HZ,
-//! #                 light_time: true,
-//! #                 sagnac: true,
-//! #             },
+//! #             predict_options,
 //! #         )?;
 //! #         let code_m = prediction.geometric_range_m + clock_m;
 //! #         let ambiguity_m = ambiguities_m.get(&id.to_string()).copied().unwrap();
@@ -117,11 +117,9 @@
 //! #     ztd_residual_m: 0.0,
 //! #     ambiguities_m,
 //! # };
-//! # let config = KinematicConfig {
-//! #     initial_covariance_m2: diagonal_covariance(initial_state.dimension(), 1.0e8),
-//! #     initial_state,
-//! #     ..KinematicConfig::default()
-//! # };
+//! # let mut config = KinematicConfig::default();
+//! # config.initial_covariance_m2 = diagonal_covariance(initial_state.dimension(), 1.0e8);
+//! # config.initial_state = initial_state;
 //! let solutions = solve_kinematic_ppp(&source, &[epoch], config)?;
 //! assert_eq!(solutions.len(), 1);
 //! assert!(solutions[0].innovation_rms_m.is_finite());

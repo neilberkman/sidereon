@@ -83,14 +83,14 @@ fn core_domain_modules_are_reachable_through_facade() {
         sidereon::frequencies::CarrierBand::L1,
     )
     .expect("facade GPS L1 frequency");
-    let request = sidereon::atmosphere::IonexSlantRequest {
-        receiver: sidereon::Wgs84Geodetic::new(30.0_f64.to_radians(), 0.0_f64.to_radians(), 0.0)
+    let request = sidereon::atmosphere::IonexSlantRequest::new(
+        sidereon::Wgs84Geodetic::new(30.0_f64.to_radians(), 0.0_f64.to_radians(), 0.0)
             .expect("facade receiver"),
-        elevation_rad: 45.0_f64.to_radians(),
-        azimuth_rad: 90.0_f64.to_radians(),
-        epoch_j2000_s: ionex.map_epochs_s()[0],
+        45.0_f64.to_radians(),
+        90.0_f64.to_radians(),
+        ionex.map_epochs_s()[0],
         frequency_hz,
-    };
+    );
     let mut batch = [f64::NAN];
     ionex
         .slant_delays_batch(&[request], &mut batch)

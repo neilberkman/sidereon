@@ -47,11 +47,7 @@ fn requests(sp3: &Sp3) -> Vec<RangePredictionRequest> {
     }
     assert!(!times.is_empty(), "fixture has no covered epochs");
     (0..2_000)
-        .map(|i| RangePredictionRequest {
-            sat,
-            receiver_ecef_m: rx,
-            t_rx_j2000_s: times[i % times.len()],
-        })
+        .map(|i| RangePredictionRequest::new(sat, rx, times[i % times.len()]))
         .collect()
 }
 
@@ -61,10 +57,9 @@ fn predict_ranges_throughput() {
     let sp3 = sp3_fixture();
     let requests = requests(&sp3);
     let options = PredictOptions::default();
-    let tt_options = TransmitTimeOptions {
-        light_time: options.light_time,
-        sagnac: options.sagnac,
-    };
+    let mut tt_options = TransmitTimeOptions::default();
+    tt_options.light_time = options.light_time;
+    tt_options.sagnac = options.sagnac;
     let zero = RangePrediction {
         geometric_range_m: 0.0,
         sat_clock_s: None,

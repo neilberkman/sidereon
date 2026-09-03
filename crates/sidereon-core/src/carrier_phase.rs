@@ -90,6 +90,7 @@ pub struct ArcEpoch {
 
 /// Options controlling cycle-slip classification.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct CycleSlipOptions {
     /// Geometry-free step threshold, meters.
     pub gf_threshold_m: f64,

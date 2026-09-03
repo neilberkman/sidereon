@@ -157,12 +157,10 @@ fn dense_step_seconds(
 #[test]
 fn dp54_max_step_limits_controller_growth_and_initial_step() {
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        initial_step: 5.0,
-        max_step: 2.0,
-        dense_output: true,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.initial_step = 5.0;
+    opts.max_step = 2.0;
+    opts.dense_output = true;
 
     let result = DP54
         .propagate(
@@ -187,12 +185,10 @@ fn dp54_max_step_limits_controller_growth_and_initial_step() {
 #[test]
 fn dp54_max_step_preserves_backward_step_sign() {
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        initial_step: 5.0,
-        max_step: 2.0,
-        dense_output: true,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.initial_step = 5.0;
+    opts.max_step = 2.0;
+    opts.dense_output = true;
 
     let result = DP54
         .propagate(
@@ -217,12 +213,10 @@ fn dp54_max_step_preserves_backward_step_sign() {
 #[test]
 fn dp54_unbound_max_step_keeps_controller_growth() {
     let ctx = PropagationContext::default();
-    let opts = IntegratorOptions {
-        initial_step: 1.0,
-        max_step: 60.0,
-        dense_output: true,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.initial_step = 1.0;
+    opts.max_step = 60.0;
+    opts.dense_output = true;
 
     let result = DP54
         .propagate(
@@ -252,10 +246,11 @@ fn two_body_matches_analytic_kepler_to_tight_bound() {
         ForceModelKind::two_body(),
         IntegratorKind::Dp54,
     )
-    .with_options(IntegratorOptions {
-        abs_tol: 1.0e-13,
-        rel_tol: 1.0e-13,
-        ..IntegratorOptions::default()
+    .with_options({
+        let mut options = IntegratorOptions::default();
+        options.abs_tol = 1.0e-13;
+        options.rel_tol = 1.0e-13;
+        options
     });
 
     // Sample across roughly one orbital period.
@@ -301,10 +296,11 @@ fn two_body_conserves_energy_and_angular_momentum() {
         ForceModelKind::two_body(),
         IntegratorKind::Dp54,
     )
-    .with_options(IntegratorOptions {
-        abs_tol: 1.0e-13,
-        rel_tol: 1.0e-13,
-        ..IntegratorOptions::default()
+    .with_options({
+        let mut options = IntegratorOptions::default();
+        options.abs_tol = 1.0e-13;
+        options.rel_tol = 1.0e-13;
+        options
     });
 
     let final_state = propagator
@@ -335,10 +331,11 @@ fn forward_then_back_round_trips_to_start() {
         ForceModelKind::two_body_j2(),
         IntegratorKind::Dp54,
     )
-    .with_options(IntegratorOptions {
-        abs_tol: 1.0e-13,
-        rel_tol: 1.0e-13,
-        ..IntegratorOptions::default()
+    .with_options({
+        let mut options = IntegratorOptions::default();
+        options.abs_tol = 1.0e-13;
+        options.rel_tol = 1.0e-13;
+        options
     });
 
     let mid = forward.propagate_to(5400.0).expect("forward").final_state;
@@ -347,10 +344,11 @@ fn forward_then_back_round_trips_to_start() {
         initial: mid,
         force_model: ForceModelKind::two_body_j2(),
         integrator: IntegratorKind::Dp54,
-        options: IntegratorOptions {
-            abs_tol: 1.0e-13,
-            rel_tol: 1.0e-13,
-            ..IntegratorOptions::default()
+        options: {
+            let mut options = IntegratorOptions::default();
+            options.abs_tol = 1.0e-13;
+            options.rel_tol = 1.0e-13;
+            options
         },
         drag: None,
         space_weather: None,
@@ -380,14 +378,16 @@ fn dump_propagator() -> StatePropagator {
         initial: CartesianState::new(DUMP_EPOCH_S, DUMP_POS_KM, DUMP_VEL_KM_S),
         force_model: ForceModelKind::two_body_j2(),
         integrator: IntegratorKind::Dp54,
-        options: IntegratorOptions {
-            abs_tol: DUMP_ABS_TOL,
-            rel_tol: DUMP_REL_TOL,
-            initial_step: DUMP_INITIAL_STEP_S,
-            min_step: DUMP_MIN_STEP_S,
-            max_step: DUMP_MAX_STEP_S,
-            max_steps: DUMP_MAX_STEPS,
-            dense_output: false,
+        options: {
+            let mut options = IntegratorOptions::default();
+            options.abs_tol = DUMP_ABS_TOL;
+            options.rel_tol = DUMP_REL_TOL;
+            options.initial_step = DUMP_INITIAL_STEP_S;
+            options.min_step = DUMP_MIN_STEP_S;
+            options.max_step = DUMP_MAX_STEP_S;
+            options.max_steps = DUMP_MAX_STEPS;
+            options.dense_output = false;
+            options
         },
         drag: None,
         space_weather: None,
@@ -483,10 +483,11 @@ fn dump_fixture(times: &[f64], states: &[CartesianState]) {
 #[test]
 fn entry_point_is_bit_identical_to_direct_integration() {
     let (pos, vel) = elliptic_start();
-    let opts = || IntegratorOptions {
-        abs_tol: 1.0e-12,
-        rel_tol: 1.0e-12,
-        ..IntegratorOptions::default()
+    let opts = || {
+        let mut options = IntegratorOptions::default();
+        options.abs_tol = 1.0e-12;
+        options.rel_tol = 1.0e-12;
+        options
     };
 
     let via_entry = StatePropagator::new(
