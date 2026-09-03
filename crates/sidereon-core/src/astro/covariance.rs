@@ -250,7 +250,20 @@ pub fn interpolate_covariance_psd(
 pub enum RtnFrameError {
     /// A numeric input was non-finite.
     InvalidInput {
+        /// Input name reported by the frame, covariance, relative-state, or
+        /// Clohessy-Wiltshire validation path.
+        ///
+        /// Covariance APIs use names such as `"position"`, `"velocity"`,
+        /// `"cov_rtn"`, and `"covariance"`; relative-motion APIs use the
+        /// parameter or state path being checked.
         field: &'static str,
+        /// Stable validation text paired with `field`, including
+        /// finite-component, symmetry, positivity, range, parameter, epoch,
+        /// and orbit-geometry failures.
+        ///
+        /// [`RtnFrameError::message`] intentionally reduces this variant to
+        /// `"invalid input"`, while `OrbitFitError::RtnFrame` exposes the
+        /// nested error through debug formatting.
         reason: &'static str,
     },
     /// The position vector is effectively zero.
