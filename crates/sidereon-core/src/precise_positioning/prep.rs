@@ -19,15 +19,25 @@ use crate::combinations::{self, IonosphereFreeError};
 /// Raw dual-frequency PPP observation used by wide-lane/narrow-lane prep.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DualFrequencyObservation {
+    /// Satellite token produced by RINEX/QC and used to group samples into an arc.
     pub satellite_id: String,
+    /// Ambiguity-arc key retained by cycle-slip detection and replaced with a `sat#N` key for split PPP arcs.
     pub ambiguity_id: String,
+    /// First selected code pseudorange, in meters, used by the Melbourne-Wubbena, ionosphere-free, and `P1 - P2` TEC combinations.
     pub p1_m: f64,
+    /// Second selected code pseudorange, in meters, used by the Melbourne-Wubbena, ionosphere-free, and `P1 - P2` TEC combinations.
     pub p2_m: f64,
+    /// First selected carrier phase, in cycles; carrier helpers convert it with the first frequency for wide-lane, geometry-free, and ionosphere-free combinations.
     pub phi1_cyc: f64,
+    /// Second selected carrier phase, in cycles; carrier helpers convert it with the second frequency for wide-lane, geometry-free, and ionosphere-free combinations.
     pub phi2_cyc: f64,
+    /// First selected carrier frequency, in hertz, used to scale the first phase and derive frequency-dependent combinations.
     pub f1_hz: f64,
+    /// Second selected carrier frequency, in hertz, used to scale the second phase and derive frequency-dependent combinations.
     pub f2_hz: f64,
+    /// Optional first-band loss-of-lock value; detector bit 0 marks the observation as a cycle-slip candidate.
     pub lli1: Option<i64>,
+    /// Optional second-band loss-of-lock value; detector bit 0 marks the observation as a cycle-slip candidate.
     pub lli2: Option<i64>,
 }
 
@@ -36,79 +46,119 @@ pub struct DualFrequencyObservation {
 pub struct DualFrequencyEpoch {
     /// Comparable epoch coordinate in seconds for data-gap cycle-slip checks.
     pub gap_time_s: Option<f64>,
+    /// Complete dual-frequency records for this accepted input epoch; prep later sorts retained records by satellite and ambiguity id.
     pub observations: Vec<DualFrequencyObservation>,
 }
 
 /// One ionosphere-free PPP observation emitted by dual-frequency prep.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedFloatObservation {
+    /// Satellite token copied from the retained raw observation.
     pub satellite_id: String,
+    /// Bare or split (`sat#N`) ambiguity key copied from the wide-lane arc preparation.
     pub ambiguity_id: String,
+    /// Ionosphere-free code combination of the two pseudoranges, in meters.
     pub code_m: f64,
+    /// Ionosphere-free carrier-phase combination evaluated from cycle-valued inputs, in meters.
     pub phase_m: f64,
 }
 
 /// One prepared ionosphere-free epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedFloatEpoch {
+    /// Original index of the input dual-frequency epoch.
     pub epoch_index: usize,
+    /// Ionosphere-free observations for the retained ambiguities in this epoch, in deterministic satellite/id order.
     pub observations: Vec<PreparedFloatObservation>,
 }
 
 /// Wide-lane and narrow-lane prep controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WideLanePrepOptions {
+    /// Minimum wide-lane sample count; short split segments are skipped and a short unsplit arc returns [`WideLanePrepError::TooFewWideLaneEpochs`].
     pub min_epochs: usize,
+    /// Maximum distance in wide-lane cycles between the sample mean and its rounded integer.
     pub tolerance_cycles: f64,
 }
 
 /// Public split-arc metadata for PPP ambiguity segmentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PppSplitArc {
+    /// Satellite token of the segmented arc.
     pub satellite_id: String,
+    /// One-based split ambiguity key in the form `sat#N`.
     pub ambiguity_id: String,
+    /// Original input index of the segment's first sample.
     pub start_epoch_index: usize,
+    /// Original input index of the segment's last sample.
     pub end_epoch_index: usize,
+    /// Number of samples in the retained segment.
     pub n_epochs: usize,
 }
 
 /// Prepared dual-frequency PPP arc for the fixed wide-lane/narrow-lane path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WideLanePrepResult {
+    /// Filtered epochs after wide-lane retention and ionosphere-free conversion.
     pub epochs: Vec<PreparedFloatEpoch>,
+    /// Narrow-lane wavelengths in meters, keyed by prepared ambiguity id.
     pub wavelengths_m: BTreeMap<String, f64>,
+    /// Narrow-lane offsets in meters, keyed by prepared ambiguity id.
     pub offsets_m: BTreeMap<String, f64>,
+    /// Rounded Melbourne-Wubbena wide-lane integer for each retained ambiguity id.
     pub wide_lane_cycles: BTreeMap<String, i64>,
+    /// Sorted, deduplicated satellite tokens removed by policy or by loss of every usable split segment.
     pub dropped_sats: Vec<String>,
+    /// Metadata for split segments that met the minimum length and produced a wide-lane integer.
     pub split_arcs: Vec<PppSplitArc>,
 }
 
 /// Error from PPP wide-lane/narrow-lane prep.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WideLanePrepError {
+    /// A detected slip was rejected instead of being dropped or split into a new ambiguity arc.
     CycleSlipDetected {
+        /// Satellite token of the arc containing the detected slip.
         satellite_id: String,
+        /// Original input epoch index at which the selected slip event occurred.
         epoch_index: usize,
+        /// Detector reasons retained for the selected event.
         reasons: Vec<SlipReason>,
     },
+    /// A raw sample could not be converted into a finite wide-lane cycle value.
     WideLaneFailed {
+        /// Bare or split ambiguity id whose sample failed.
         ambiguity_id: String,
+        /// Carrier-phase error returned while forming the sample's wide-lane value.
         reason: CarrierPhaseError,
     },
+    /// An arc had fewer usable wide-lane samples than the configured minimum.
     TooFewWideLaneEpochs {
+        /// Ambiguity id of the short arc.
         ambiguity_id: String,
+        /// Number of cycle samples supplied to the estimator.
         count: usize,
+        /// Minimum sample count requested by the prep options.
         minimum: usize,
     },
+    /// The wide-lane sample mean was outside the configured distance from an integer.
     WideLaneNotInteger {
+        /// Ambiguity id whose wide-lane mean failed the integer check.
         ambiguity_id: String,
+        /// Left-fold mean of the arc's Melbourne-Wubbena wide-lane samples.
         mean_cycles: f64,
+        /// Rounded integer candidate rejected by the tolerance check.
         fixed_cycles: i64,
     },
+    /// A prepared observation had no matching entry in the wide-lane integer map.
     MissingWideLaneAmbiguity(String),
+    /// Repeated observations for one ambiguity id disagreed on a selected carrier frequency.
     InconsistentFrequencies(String),
+    /// Narrow-lane parameter construction or an ionosphere-free code/phase combination failed.
     IonosphereFreeFailed {
+        /// Source satellite token for a code or phase failure; narrow-lane parameter failures leave this empty.
         satellite_id: String,
+        /// Underlying frequency or observation error from the ionosphere-free helper.
         reason: IonosphereFreeError,
     },
 }
@@ -117,28 +167,36 @@ pub enum WideLanePrepError {
 /// cycle-slip ambiguity-tagging.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FloatCycleSlipObservation {
+    /// Satellite token used to collect the observation into a detector arc.
     pub satellite_id: String,
+    /// Input ambiguity key retained when no slip tag is produced for this epoch and satellite.
     pub ambiguity_id: String,
+    /// Raw dual-frequency sample used by the detector when present; absent samples are omitted from detector input.
     pub raw: Option<DualFrequencyObservation>,
 }
 
 /// One float PPP epoch for cycle-slip ambiguity-tagging.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FloatCycleSlipEpoch {
+    /// Optional comparable time copied into detector samples for data-gap checks.
     pub gap_time_s: Option<f64>,
+    /// Float observations grouped by satellite for cycle-slip tagging.
     pub observations: Vec<FloatCycleSlipObservation>,
 }
 
 /// One tagged float PPP observation returned by cycle-slip prep.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloatCycleSlipTaggedObservation {
+    /// Satellite token copied from the input observation.
     pub satellite_id: String,
+    /// Detected `sat#N` segment id, or the input ambiguity id when no tag exists.
     pub ambiguity_id: String,
 }
 
 /// One tagged float PPP epoch returned by cycle-slip prep.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FloatCycleSlipTaggedEpoch {
+    /// Tagged rows sorted lexicographically by satellite token and ambiguity id.
     pub observations: Vec<FloatCycleSlipTaggedObservation>,
 }
 /// Prepare raw dual-frequency PPP observations for the wide-lane then
