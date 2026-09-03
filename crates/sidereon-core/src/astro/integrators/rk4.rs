@@ -8,6 +8,14 @@ use crate::astro::propagator::result::{
 };
 use crate::astro::state::{CartesianState, StateDerivative};
 
+/// Fixed-step classical fourth-order Runge-Kutta integrator for Cartesian-state propagation.
+///
+/// [`Integrator::propagate`] limits [`IntegratorOptions::initial_step`] to the remaining absolute
+/// TDB span, applies its sign toward the target, and uses a final partial step when needed. Each
+/// completed step evaluates the dynamics four times; the result contains the initial point and
+/// either every completed-step endpoint or only the final point according to
+/// [`IntegratorOptions::dense_output`], leaves [`PropagationResult::dense`] as `None`, and
+/// validates finite epochs plus the final state and emitted points.
 pub struct RK4;
 
 impl Integrator for RK4 {
