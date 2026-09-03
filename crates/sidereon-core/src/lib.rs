@@ -54,6 +54,7 @@
 //! (`DMatrix`/`DVector`) per the spec.
 
 #![deny(unsafe_op_in_unsafe_fn)]
+#![warn(missing_docs)]
 
 extern crate self as sidereon_core;
 
@@ -112,6 +113,7 @@ mod rinex_obs; // RINEX 3 observation parsing + single-frequency pseudoranges
 mod rinex_qc; // RINEX observation/navigation lint and mechanical repair
 pub mod rtcm; // RTCM 3 differential-GNSS stream decode/encode (MSM, station, ephemeris)
 pub mod rtk; // RTK double-difference construction
+/// SBAS message decoding, corrections, and protection levels.
 pub mod sbas;
 /// Provides the sans-I/O [`sbas_protection_levels`] API for calculating SBAS
 /// protection levels from caller-supplied [`ProtectionGeometry`] and

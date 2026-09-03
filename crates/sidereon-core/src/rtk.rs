@@ -579,6 +579,9 @@ pub enum DoubleDifferenceError {
     ReferenceSatelliteSingleSystem(String),
     /// A per-system reference map omitted a constellation letter.
     ReferenceSatelliteMissingSystem(String),
+    /// No reference-selection path in this crate returns this variant. It is
+    /// retained because bindings match the enum exhaustively; a later release
+    /// may remove it.
     InvalidReferenceOption,
 }
 
