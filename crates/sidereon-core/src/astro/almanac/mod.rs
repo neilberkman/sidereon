@@ -54,9 +54,13 @@ pub enum EphemerisSource<'a> {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeasonKind {
+    /// The Sun's ecliptic longitude crossing at `0` degrees.
     MarchEquinox,
+    /// The Sun's ecliptic longitude crossing at `90` degrees.
     JuneSolstice,
+    /// The Sun's ecliptic longitude crossing at `180` degrees.
     SeptemberEquinox,
+    /// The Sun's ecliptic longitude crossing at `270` degrees.
     DecemberSolstice,
 }
 
@@ -64,9 +68,13 @@ pub enum SeasonKind {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MoonPhaseKind {
+    /// The wrapped Moon-minus-Sun ecliptic longitude is `0` degrees.
     New,
+    /// The wrapped Moon-minus-Sun ecliptic longitude is `90` degrees.
     FirstQuarter,
+    /// The wrapped Moon-minus-Sun ecliptic longitude is `180` degrees.
     Full,
+    /// The wrapped Moon-minus-Sun ecliptic longitude is `270` degrees.
     LastQuarter,
 }
 
@@ -74,7 +82,9 @@ pub enum MoonPhaseKind {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanetaryEventKind {
+    /// The planet-minus-Sun ecliptic longitude is `0` degrees.
     Conjunction,
+    /// The planet-minus-Sun ecliptic longitude is `180` degrees; `planetary_events` rejects this request for Mercury and Venus.
     Opposition,
 }
 
@@ -82,7 +92,9 @@ pub enum PlanetaryEventKind {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CulminationKind {
+    /// The cosine of the topocentric apparent hour angle is positive.
     Upper,
+    /// The cosine of the topocentric apparent hour angle is negative; a zero-cosine crossing is skipped.
     Lower,
 }
 
@@ -90,12 +102,19 @@ pub enum CulminationKind {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EclipseKind {
+    /// The Moon's apparent disk overlaps the penumbral shadow after the umbral tests fail.
     LunarPenumbral,
+    /// The Moon's apparent disk overlaps the umbra without fitting fully inside it.
     LunarPartial,
+    /// The Moon's apparent disk fits fully within the umbral shadow.
     LunarTotal,
+    /// The apparent disks do not meet the total or annular containment tests, including the non-overlap case.
     SolarPartial,
+    /// The Moon's apparent disk is smaller than the Sun's and is fully inside it.
     SolarAnnular,
+    /// The Moon's apparent disk is at least as large as the Sun's and fully covers it.
     SolarTotal,
+    /// The solar eclipse switches between total and annular across Earth's near and far intersections.
     SolarHybrid,
 }
 
@@ -103,12 +122,19 @@ pub enum EclipseKind {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Planet {
+    /// NAIF body ID `1`.
     Mercury,
+    /// NAIF body ID `2`.
     Venus,
+    /// NAIF body ID `4`.
     Mars,
+    /// NAIF body ID `5`.
     Jupiter,
+    /// NAIF body ID `6`.
     Saturn,
+    /// NAIF body ID `7`.
     Uranus,
+    /// NAIF body ID `8`.
     Neptune,
 }
 
@@ -116,8 +142,11 @@ pub enum Planet {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransitBody {
+    /// The Sun, with NAIF body ID `10`.
     Sun,
+    /// The Moon, with NAIF body ID `301`.
     Moon,
+    /// A planet resolved through `planet_naif`.
     Planet(Planet),
 }
 
@@ -125,7 +154,9 @@ pub enum TransitBody {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeasonEvent {
+    /// UTC instant of the crossing; returned events are sorted by this field.
     pub time: UtcInstant,
+    /// The seasonal marker whose Sun-longitude target produced the crossing.
     pub kind: SeasonKind,
 }
 
@@ -133,7 +164,9 @@ pub struct SeasonEvent {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoonPhaseEvent {
+    /// UTC instant of the phase crossing; returned events are sorted by this field.
     pub time: UtcInstant,
+    /// The phase whose Moon-minus-Sun angle target produced the crossing.
     pub kind: MoonPhaseKind,
 }
 
@@ -141,9 +174,13 @@ pub struct MoonPhaseEvent {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlanetaryEvent {
+    /// UTC instant of the planet-minus-Sun longitude crossing.
     pub time: UtcInstant,
+    /// The planet supplied to [`planetary_events`].
     pub planet: Planet,
+    /// The conjunction or opposition supplied to [`planetary_events`].
     pub kind: PlanetaryEventKind,
+    /// Wrapped planet-minus-Sun ecliptic longitude at `time`, in degrees on `[0, 360)`.
     pub elongation_deg: f64,
 }
 
@@ -151,8 +188,11 @@ pub struct PlanetaryEvent {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CulminationEvent {
+    /// UTC instant of the hour-angle crossing.
     pub time: UtcInstant,
+    /// Whether the crossing is upper or lower, based on the sign of the hour-angle cosine.
     pub kind: CulminationKind,
+    /// Topocentric apparent geometric altitude at `time`, in degrees without refraction.
     pub altitude_deg: f64,
 }
 
@@ -160,11 +200,17 @@ pub struct CulminationEvent {
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EclipseEvent {
+    /// UTC instant of the selected eclipse maximum within the requested window.
     pub time_maximum: UtcInstant,
+    /// The lunar shadow or solar disk-overlap classification.
     pub kind: EclipseKind,
+    /// For lunar events, `(rho_u + s_moon - sigma) / (2.0 * s_moon)` is used for total or partial events and `(rho_p + s_moon - sigma) / (2.0 * s_moon)` for penumbral events; solar events use `max(0.0, (s_sun + s_moon - sep) / (2.0 * s_sun))`.
     pub magnitude: f64,
+    /// Apparent geocentric ecliptic latitude of the Moon at `time_maximum`, in degrees.
     pub moon_latitude_deg: f64,
+    /// `0.0` for lunar events; for solar events, the norm of the shadow axis's perpendicular offset from Earth's center divided by the mean Earth radius.
     pub gamma: f64,
+    /// True when a lunar shadow boundary, solar shadow-reach boundary, or solar limb boundary is within `0.01`, or when near/far intersections switch the solar class.
     pub uncertain: bool,
 }
 
@@ -172,13 +218,21 @@ pub struct EclipseEvent {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum AlmanacError {
+    /// An event-finder window or search returned an error.
     Finder(EventFinderError),
+    /// An SPK-backed apparent-place reduction returned an error.
     Spk(SpkError),
+    /// A frame reduction failed; the payload identifies the reduction stage.
     Frame(&'static str),
+    /// An analytic source was asked for a body other than the Sun or Moon, or for a planetary event or transit that requires SPK data.
     EphemerisRequired,
+    /// Opposition was requested for Mercury or Venus.
     InferiorPlanetOpposition,
+    /// A scan control, station coordinate, predicate, vector, geometry, or other intermediate quantity failed a finiteness, positivity, range, or degeneracy check.
     InvalidInput {
+        /// Static label identifying the rejected input or intermediate quantity, such as `step_seconds`, `predicate`, `geometry`, or a vector label.
         field: &'static str,
+        /// Static explanation supplied by validation, such as `not finite`, `exceeds maximum`, `degenerate`, or `components must be finite`.
         reason: &'static str,
     },
 }
