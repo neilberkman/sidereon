@@ -269,22 +269,38 @@ pub struct DriftReport {
 pub enum ReducedOrbitSource<'a> {
     /// Precise SP3 product plus the satellite to sample.
     Sp3 {
+        /// Product queried at each generated epoch; its header time scale
+        /// determines the scale used for sampling, and unavailable positions
+        /// are omitted.
         product: &'a Sp3,
+        /// GNSS ID passed to the product position lookup for every generated
+        /// epoch.
         satellite: GnssSatelliteId,
     },
     /// Initialized SGP4 satellite sampled in UTC.
-    Sgp4 { satellite: &'a Satellite },
+    Sgp4 {
+        /// Satellite propagated at each generated UTC epoch; failed
+        /// propagation or frame conversion omits that epoch.
+        satellite: &'a Satellite,
+    },
 }
 
 /// Sampling window and cadence for source-backed reduced-orbit drivers.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReducedOrbitSourceSampling {
+    /// Start epoch validated in the source time scale and used as the first
+    /// generated step and the lower bound for piecewise fitting.
     pub t0: CalendarEpoch,
+    /// End epoch validated in the source time scale and used to bound generated
+    /// steps and piecewise fitting coverage.
     pub t1: CalendarEpoch,
+    /// Finite positive cadence in seconds. Generated offsets are rounded to
+    /// whole seconds before conversion back to calendar epochs.
     pub cadence_s: f64,
 }
 
 impl ReducedOrbitSourceSampling {
+    /// Store the sampling endpoints and cadence for a source driver.
     pub const fn new(t0: CalendarEpoch, t1: CalendarEpoch, cadence_s: f64) -> Self {
         Self { t0, t1, cadence_s }
     }
@@ -293,54 +309,92 @@ impl ReducedOrbitSourceSampling {
 /// Options for [`fit_reduced_orbit_source`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReducedOrbitSourceFitOptions {
+    /// Sampling configuration used to produce source samples before fitting.
     pub sampling: ReducedOrbitSourceSampling,
+    /// Model passed to [`fit_with_model`] after source sampling.
     pub model: Model,
 }
 
 /// Options for [`drift_reduced_orbit_source`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ReducedOrbitSourceDriftOptions {
+    /// Sampling configuration used to produce truth samples for drift
+    /// evaluation.
     pub sampling: ReducedOrbitSourceSampling,
+    /// Meter threshold passed to [`drift`] or [`piecewise_drift`]; the first
+    /// error strictly greater than it is recorded as the crossing.
     pub threshold_m: f64,
 }
 
 /// Options for [`fit_piecewise_reduced_orbit_source`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PiecewiseOrbitSourceFitOptions {
+    /// Sampling configuration used to produce source samples; its endpoints
+    /// become the requested piecewise coverage bounds.
     pub sampling: ReducedOrbitSourceSampling,
+    /// Model passed to [`fit_piecewise`] for every segment.
     pub model: Model,
+    /// Requested segment length in seconds; it is validated, rounded to an
+    /// integer, and used to tile the piecewise coverage.
     pub segment_s: f64,
 }
 
 /// A source-backed single-model fit and its sampling metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReducedOrbitSourceFit {
+    /// [`ReducedOrbit`] returned by [`fit_with_model`] from the successfully
+    /// sampled source positions.
     pub orbit: ReducedOrbit,
+    /// Number of generated cadence steps, including steps whose source lookup
+    /// returned no position.
     pub requested_samples: usize,
 }
 
 /// A source-backed single-model drift report and its sampling metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReducedOrbitSourceDrift {
+    /// Report produced by [`drift`] or [`piecewise_drift`] over successfully
+    /// sampled source positions.
     pub report: DriftReport,
+    /// Number of generated cadence steps, rather than the number of retained
+    /// truth samples.
     pub requested_samples: usize,
 }
 
 /// A source-backed piecewise fit and its sampling metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PiecewiseOrbitSourceFit {
+    /// [`PiecewiseOrbit`] returned by [`fit_piecewise`] from the successfully
+    /// sampled source positions.
     pub orbit: PiecewiseOrbit,
+    /// Number of generated cadence steps, including steps omitted because the
+    /// source had no position at that epoch.
     pub requested_samples: usize,
 }
 
 /// Error returned by source-backed reduced-orbit drivers.
 #[derive(Debug, Clone)]
 pub enum ReducedOrbitSourceError {
+    /// The source span is non-finite or non-positive, or the truncated cadence
+    /// count is non-finite or negative.
     InvalidWindow,
+    /// The requested source cadence is non-finite or not positive.
     InvalidCadence,
+    /// The requested segment length is non-finite, non-positive, rounds below
+    /// one second, or exceeds the `i64` range.
     InvalidSegment,
-    TooFewSamples { got: usize, required: usize },
+    /// No usable source positions remained for a source-driver drift path.
+    TooFewSamples {
+        /// Number of usable sampled positions; the empty-source paths set this
+        /// to zero.
+        got: usize,
+        /// Minimum usable positions required by the source-driver drift path;
+        /// the empty-source paths set this to one.
+        required: usize,
+    },
+    /// A single-model fit, evaluation, or source-epoch validation failed.
     Reduced(ReducedOrbitError),
+    /// A piecewise fit or piecewise drift evaluation failed.
     Piecewise(PiecewiseOrbitError),
 }
 
