@@ -288,7 +288,17 @@ impl<'a> MeasContext<'a> {
 /// two maps separately.
 #[derive(Clone, Copy)]
 pub struct AmbiguityScale<'a> {
+    /// Carrier wavelengths in meters indexed by ambiguity identifier.
+    ///
+    /// Used to convert float ambiguities and covariance to cycles before
+    /// integer search, and to reconstruct fixed metric ambiguities. Missing
+    /// entries return [`FixedSolveError::MissingWavelength`].
     pub wavelengths_m: &'a BTreeMap<String, f64>,
+    /// Code-to-phase offsets in meters indexed by ambiguity identifier.
+    ///
+    /// Subtracted before cycle scaling and added back when reconstructing
+    /// fixed metric ambiguities. Missing entries return
+    /// [`FixedSolveError::MissingOffset`].
     pub offsets_m: &'a BTreeMap<String, f64>,
 }
 
