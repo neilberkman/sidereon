@@ -58,6 +58,19 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- Bilinear DTED height lookups lost the query coordinate's low bits in the two
+  one-degree bands whose tile origin index is -1: the band south of the equator
+  and the band west of the prime meridian. The cell offset was formed by
+  subtracting the tile origin, which for those tiles is `coordinate + 1`, and
+  adding 1 discards everything below one ulp of 1. The interpolation weights
+  were then slightly wrong, and a query near a cell boundary could land in the
+  neighboring cell. The offset is now measured from whichever tile edge is
+  nearer, so the subtraction is exact, and the complement is taken on the exact
+  integer ratio. Measured on a synthetic tile at 3600 postings per degree with
+  8849 m between adjacent postings, 1,368 of 3,500 probes moved, by up to
+  1.1e-9 m; on real SRTM1 tiles the differences are a few times 1e-12 m. Tiles
+  with any other origin are bit-identical, and `NEAREST_POSTING` is unchanged
+  everywhere.
 - Documentation now states the actual single-crate layout: the GNSS layer is
   always present alongside propagation, and the units policy permits bare
   solver-space positions while keeping frame and datum names on georeferenced

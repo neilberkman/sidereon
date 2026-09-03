@@ -381,8 +381,8 @@ fn height_from_tile(
     let postings_per_deg_lon = tile.lon_count - 1;
     let postings_per_deg_lat = tile.lat_count - 1;
 
-    let lon = scaled_cell_fraction(longitude_deg - tile.origin_longitude, postings_per_deg_lon);
-    let lat = scaled_cell_fraction(latitude_deg - tile.origin_latitude, postings_per_deg_lat);
+    let lon = in_tile_cell_fraction(longitude_deg, tile.origin_longitude, postings_per_deg_lon);
+    let lat = in_tile_cell_fraction(latitude_deg, tile.origin_latitude, postings_per_deg_lat);
     let lon_lo = lon.cell;
     let lat_lo = lat.cell;
     let fx = lon.fraction;
@@ -800,6 +800,115 @@ pub(crate) fn scaled_cell_fraction(offset: f64, postings_per_degree: usize) -> S
     }
 }
 
+/// Locate a coordinate within a one-degree tile, in postings.
+///
+/// The cell offset is measured from whichever tile edge is nearer, so the
+/// subtraction that produces it is exact, and the complement is then taken on
+/// the exact integer ratio rather than on a rounded binary64 fraction.
+/// Measuring from the tile origin alone is exact for most tiles but not for a
+/// tile whose origin index is -1: there the upper edge is zero, so the offset
+/// is `coordinate + 1`, which discards every bit of the coordinate below one
+/// ulp of 1. That loss moves the interpolation weights and the interpolated
+/// height in its last bits across the one-degree band south of the equator and
+/// the one west of the prime meridian.
+pub(crate) fn in_tile_cell_fraction(
+    coordinate: f64,
+    origin: f64,
+    postings_per_degree: usize,
+) -> ScaledCellFraction {
+    let from_lower = coordinate - origin;
+    let from_upper = (origin + 1.0) - coordinate;
+    if from_lower <= from_upper {
+        scaled_cell_fraction(from_lower, postings_per_degree)
+    } else {
+        complement_cell_fraction(from_upper, postings_per_degree)
+    }
+}
+
+/// `postings_per_degree * (1 - offset)` as a cell index and fraction, for a
+/// non-negative `offset` no greater than half a degree.
+///
+/// The fractional part is complemented on the exact dyadic remainder of
+/// `postings_per_degree * offset`, because complementing a binary64 fraction
+/// instead would reintroduce the rounding this path exists to avoid.
+fn complement_cell_fraction(offset: f64, postings_per_degree: usize) -> ScaledCellFraction {
+    let postings = postings_per_degree as i64;
+    let (integer, remainder, denominator_exponent) =
+        exact_scaled_parts(offset, postings_per_degree);
+    if remainder == 0 {
+        let cell = postings - integer;
+        return ScaledCellFraction {
+            cell,
+            fraction: 0.0,
+            nearest: cell,
+        };
+    }
+
+    let cell = postings - integer - 1;
+    let (fraction, rounds_up) = if denominator_exponent >= 128 {
+        (one_minus_dyadic(remainder, denominator_exponent), true)
+    } else {
+        let denominator = 1_u128 << denominator_exponent;
+        let complement = denominator - remainder;
+        let half = denominator >> 1;
+        let rounds_up = complement > half || (complement == half && cell.rem_euclid(2) != 0);
+        (
+            dyadic_to_f64(complement, -(denominator_exponent as i32)),
+            rounds_up,
+        )
+    };
+    ScaledCellFraction {
+        cell,
+        fraction,
+        nearest: if rounds_up { cell + 1 } else { cell },
+    }
+}
+
+/// Exact `postings_per_degree * offset` for a non-negative `offset`, as an
+/// integer part and a remainder over a power of two.
+// invariant: callers pass a non-negative in-tile offset and a positive posting
+// count, so the scaled significand fits u128.
+#[allow(clippy::expect_used)]
+fn exact_scaled_parts(offset: f64, postings_per_degree: usize) -> (i64, u128, u32) {
+    debug_assert!(offset.is_finite());
+    debug_assert!(offset >= 0.0);
+    debug_assert!(postings_per_degree > 0);
+
+    let bits = offset.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let stored_significand = bits & ((1_u64 << 52) - 1);
+    let (significand, exponent) = if exponent_bits == 0 {
+        (stored_significand, -1074)
+    } else {
+        (
+            stored_significand | (1_u64 << 52),
+            exponent_bits - 1023 - 52,
+        )
+    };
+    if significand == 0 {
+        return (0, 0, 0);
+    }
+
+    let numerator = u128::from(significand) * postings_per_degree as u128;
+    if exponent >= 0 {
+        let magnitude = numerator
+            .checked_shl(exponent as u32)
+            .expect("in-tile scaled coordinate must fit u128");
+        let magnitude =
+            i64::try_from(magnitude).expect("in-tile scaled coordinate must fit a posting index");
+        return (magnitude, 0, 0);
+    }
+
+    let denominator_exponent = (-exponent) as u32;
+    if denominator_exponent >= 128 {
+        return (0, numerator, denominator_exponent);
+    }
+    let integer = i64::try_from(numerator >> denominator_exponent)
+        .expect("in-tile scaled coordinate must fit a posting index");
+    let remainder = numerator & ((1_u128 << denominator_exponent) - 1);
+    (integer, remainder, denominator_exponent)
+}
+
 pub(crate) fn nearest_posting_index<E>(offset: f64, postings_per_degree: usize) -> Result<usize, E>
 where
     E: From<DtedTileError>,
@@ -907,8 +1016,9 @@ mod tests {
     use crate::Error;
 
     use super::{
-        nearest_posting_index, scaled_cell_fraction, terrain_block_dir, DtedInterpolation,
-        DtedLookupOptions, DtedTerrain, DtedTile, DtedTileError, DATA_OFFSET, DATA_SENTINEL,
+        in_tile_cell_fraction, nearest_posting_index, scaled_cell_fraction, terrain_block_dir,
+        DtedInterpolation, DtedLookupOptions, DtedTerrain, DtedTile, DtedTileError, DATA_OFFSET,
+        DATA_SENTINEL, DTED_SUFFIX,
     };
 
     #[test]
@@ -1098,11 +1208,22 @@ mod tests {
         lat_count: usize,
         sample: impl Fn(usize, usize) -> i16,
     ) {
+        write_synthetic_dted_tile_at(path, b"1070000W", b"0360000N", lon_count, lat_count, sample);
+    }
+
+    fn write_synthetic_dted_tile_at(
+        path: &Path,
+        longitude_origin: &[u8; 8],
+        latitude_origin: &[u8; 8],
+        lon_count: usize,
+        lat_count: usize,
+        sample: impl Fn(usize, usize) -> i16,
+    ) {
         let data_block_length = 12 + 2 * lat_count;
         let mut bytes = vec![b' '; DATA_OFFSET];
         bytes[0..4].copy_from_slice(b"UHL1");
-        bytes[4..12].copy_from_slice(b"1070000W");
-        bytes[12..20].copy_from_slice(b"0360000N");
+        bytes[4..12].copy_from_slice(longitude_origin);
+        bytes[12..20].copy_from_slice(latitude_origin);
         bytes[47..51].copy_from_slice(format!("{lon_count:04}").as_bytes());
         bytes[51..55].copy_from_slice(format!("{lat_count:04}").as_bytes());
 
@@ -1123,6 +1244,121 @@ mod tests {
         }
 
         fs::write(path, bytes).expect("write synthetic DTED tile");
+    }
+
+    /// Cell index and fraction for coordinates carrying bits below one ulp of
+    /// 1, pinned to the exact rational value of `postings * (coordinate -
+    /// origin)` computed outside this crate.
+    ///
+    /// The probes are arbitrary binary64 values inside each tile, not
+    /// `origin + random()`. A coordinate written that way carries no bits
+    /// below ulp(1), which is the only place a float offset differs from the
+    /// exact one, so a sweep built that way passes whether or not the offset
+    /// is computed correctly.
+    #[test]
+    fn bilinear_cell_offset_is_exact_in_every_tile() {
+        // (coordinate bits, tile origin, expected cell, expected fraction bits)
+        const CASES: &[(u64, f64, i64, u64)] = &[
+            (0xbf1a36e2eb1c432d, -1.0, 3599, 0x3fe47ae147ae147b),
+            (0xbf1a36e2eb1c432c, -1.0, 3599, 0x3fe47ae147ae147b),
+            (0xbfd73a99165fe501, -1.0, 2293, 0x3fd7f7355b7ba1f0),
+            (0xbfdfedcba9876543, -1.0, 1804, 0x3d1d000000000000),
+            (0xbfeffffffff24190, -1.0, 0, 0x3e9828c0e0000000),
+            (0xbfe0000000000000, -1.0, 1800, 0x0000000000000000),
+            (0xbd719799812dea11, -1.0, 3599, 0x3feffffffe113843),
+            (0xbfe8000000000001, -1.0, 899, 0x3feffffffffff1f0),
+            (0xbfd0000000000002, -1.0, 2699, 0x3feffffffffff1f0),
+            (0xbfeccccccccccccd, -1.0, 359, 0x3feffffffffffd30),
+            (0x3f1a36e2eb1c432d, 0.0, 0, 0x3fd70a3d70a3d70b),
+            (0x3fd73a99165fe501, 0.0, 1306, 0x3fe4046552422f08),
+            (0x3fdfedcba9876543, 0.0, 1795, 0x3fefffffffffff18),
+            (0x3feffffffff24190, 0.0, 3599, 0x3fefffff3eb9f900),
+            (0x3fe0000000000000, 0.0, 1800, 0x0000000000000000),
+            (0x3d719799812dea11, 0.0, 0, 0x3e2eec7bd512b572),
+            (0x3fe8000000000000, 0.0, 2700, 0x0000000000000000),
+            (0x3fd0000000000002, 0.0, 900, 0x3d5c200000000000),
+            (0x4049800346dc5d64, 51.0, 0, 0x3fd70a3d70a72000),
+            (0x4049ae75322cbfca, 51.0, 1306, 0x3fe4046552422800),
+            (0x4049bfdb97530ecb, 51.0, 1796, 0x3daac00000000000),
+            (0x4049ffffffffc906, 51.0, 3599, 0x3fefffff3eb91800),
+            (0x4049c00000000000, 51.0, 1800, 0x0000000000000000),
+            (0xc05a8001a36e2eb2, -107.0, 3599, 0x3fe47ae147ac7000),
+            (0xc05a973a99165fe5, -107.0, 2293, 0x3fd7f7355b7bb000),
+            (0xc05abfedcba98765, -107.0, 4, 0x3dad800000000000),
+            (0xc05aa00000000000, -107.0, 1800, 0x0000000000000000),
+        ];
+
+        for (coordinate_bits, origin, expected_cell, expected_fraction_bits) in CASES {
+            let coordinate = f64::from_bits(*coordinate_bits);
+            let scaled = in_tile_cell_fraction(coordinate, *origin, 3600);
+            assert_eq!(
+                scaled.cell, *expected_cell,
+                "cell for {coordinate:e} in tile at {origin}"
+            );
+            assert_eq!(
+                scaled.fraction.to_bits(),
+                *expected_fraction_bits,
+                "fraction for {coordinate:e} in tile at {origin}: got {:e}, want {:e}",
+                scaled.fraction,
+                f64::from_bits(*expected_fraction_bits)
+            );
+        }
+    }
+
+    /// Interpolated heights in the one-degree tile south of the equator and
+    /// west of the prime meridian, pinned to the values that exact cell
+    /// offsets produce. Measuring the offset from the tile origin there means
+    /// adding 1 to the coordinate, which discards its low bits and moves both
+    /// the weights and, near a cell boundary, the cell itself.
+    #[test]
+    fn bilinear_height_is_exact_south_of_equator_and_west_of_meridian() {
+        let root = temp_path("dted-zero-edge-precision");
+        fs::create_dir_all(&root).expect("create temp DTED dir");
+        let postings = 1200;
+        write_synthetic_dted_tile_at(
+            &root.join(format!("s01_w001{DTED_SUFFIX}")),
+            b"0010000W",
+            b"0010000S",
+            postings + 1,
+            postings + 1,
+            |lon_index, lat_index| {
+                if (lon_index + lat_index) % 2 == 0 {
+                    0
+                } else {
+                    8849
+                }
+            },
+        );
+
+        // (longitude bits, latitude bits, expected height bits)
+        const CASES: &[(u64, u64, u64)] = &[
+            (0xbf1a36e2eb1c432d, 0xbf1a36e2eb1c432c, 0x409d33a29c779a6b),
+            (0xbfd73a99165fe501, 0xbfd73a99165fe500, 0x40b129828ba475c4),
+            (0xbfdfedcba9876543, 0xbfdfedcba9876542, 0x40aeb9c71c71c93c),
+            (0xbfeffffffff24190, 0xbfeffffffff920c8, 0x3f5a18c574f03816),
+            (0xbd3c25c268497682, 0xbd4c25c268497682, 0x3ecab91c416da2d4),
+            (0xbfe0000000000000, 0xbfe0000000000000, 0x0000000000000000),
+        ];
+
+        let mut terrain = DtedTerrain::new(&root);
+        let options = DtedLookupOptions {
+            interpolation: DtedInterpolation::Bilinear,
+        };
+        for (longitude_bits, latitude_bits, expected_bits) in CASES {
+            let longitude = f64::from_bits(*longitude_bits);
+            let latitude = f64::from_bits(*latitude_bits);
+            let height = terrain
+                .height_m_with_options(longitude, latitude, options)
+                .expect("bilinear height");
+            assert_eq!(
+                height.to_bits(),
+                *expected_bits,
+                "height at ({longitude:e}, {latitude:e}): got {height:?}, want {:?}",
+                f64::from_bits(*expected_bits)
+            );
+        }
+
+        fs::remove_dir_all(root).expect("remove temp DTED dir");
     }
 
     #[test]
