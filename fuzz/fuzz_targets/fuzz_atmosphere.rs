@@ -132,13 +132,14 @@ fuzz_target!(|data: &[u8]| {
         input.grid_values.to_vec(),
     );
     if let Ok(grid) = grid {
-        let opts = TecGridEvalOptions {
-            epoch: TecGridEpoch::new(input.nanos, input.doy),
-            min_elevation_rad: input.params[12],
-            nan_pierce_point_height_m: input.params[13],
-            frequency_hz: input.params[10],
-            ..TecGridEvalOptions::l1(TecGridEpoch::new(input.nanos, input.doy))
-        };
+        let epoch = TecGridEpoch::new(input.nanos, input.doy);
+        let base = TecGridEvalOptions::l1(epoch);
+        let mut opts = TecGridEvalOptions::new(epoch, input.params[10]);
+        opts.epoch = epoch;
+        opts.min_elevation_rad = input.params[12];
+        opts.nan_pierce_point_height_m = input.params[13];
+        opts.frequency_hz = input.params[10];
+        opts.shell_geometry = base.shell_geometry;
         assert_ok_finite_or_err(
             "TecGrid::vtec_at_pierce_point",
             grid.vtec_at_pierce_point(opts.epoch, input.params[0], input.params[1]),
@@ -255,10 +256,9 @@ fuzz_target!(|data: &[u8]| {
             [phase.phase_geometry_free_m, phase.slant_tec_tecu],
         );
     }
-    let tec_config = TecConfig {
-        shell_height_m: input.params[6],
-        earth_radius_m: input.params[7],
-    };
+    let mut tec_config = TecConfig::default();
+    tec_config.shell_height_m = input.params[6];
+    tec_config.earth_radius_m = input.params[7];
     assert_ok_finite_or_err(
         "precise_positioning::thin_shell_mapping_function",
         precise_positioning::thin_shell_mapping_function(input.params[8], tec_config),
