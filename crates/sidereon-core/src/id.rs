@@ -116,7 +116,11 @@ pub enum SatelliteIdError {
     /// The PRN is outside the documented range for its constellation.
     #[error("invalid GNSS satellite {field}: {reason}")]
     InvalidInput {
+        /// The rejected input name; [`GnssSatelliteId::new`] sets this to
+        /// `"prn"` for its constellation-specific range check.
         field: &'static str,
+        /// The diagnostic from [`GnssSatelliteId::new`] when the PRN fails the
+        /// [`GnssSystem`] range check: `"out of range for constellation"`.
         reason: &'static str,
     },
 }
