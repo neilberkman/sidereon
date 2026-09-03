@@ -113,6 +113,10 @@ mod rinex_qc; // RINEX observation/navigation lint and mechanical repair
 pub mod rtcm; // RTCM 3 differential-GNSS stream decode/encode (MSM, station, ephemeris)
 pub mod rtk; // RTK double-difference construction
 pub mod sbas;
+/// Provides the sans-I/O [`sbas_protection_levels`] API for calculating SBAS
+/// protection levels from caller-supplied [`ProtectionGeometry`] and
+/// [`SbasErrorModel`] inputs. Decoded SBAS messages and correction storage
+/// remain in [`crate::sbas`].
 pub mod sbas_pl; // SBAS single-hypothesis protection levels
 pub mod scenario; // scenario-driven synthetic GNSS observable generation
 pub mod sidereal; // repeating-geometry residual filtering and period diagnostics
