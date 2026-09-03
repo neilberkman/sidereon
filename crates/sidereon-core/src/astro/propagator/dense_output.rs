@@ -9,9 +9,15 @@ pub enum DenseOutputError {
     /// A segment query lies outside the segment's allowed time interval.
     #[error("Time {t} out of range [{t_start}, {t_end}] (theta={theta})")]
     SegmentOutOfRange {
+        /// Epoch supplied to [`DenseSegment::eval`] for the failed segment query.
+        /// This is the query value retained for the range-error message.
         t: f64,
+        /// Start epoch copied from the segment for the failed range query.
         t_start: f64,
+        /// Endpoint epoch computed as `t_start + h` for the failed range query.
         t_end: f64,
+        /// Normalized query coordinate computed by [`DenseSegment::eval`] as `(t - t_start) / h`.
+        /// For `|h| < 1e-18`, the evaluator uses `0.0` instead.
         theta: f64,
     },
     /// No dense segments are available for evaluation.
@@ -19,7 +25,16 @@ pub enum DenseOutputError {
     Empty,
     /// A collection query lies outside the covered time interval.
     #[error("Time {t} out of range [{t_min}, {t_max}]")]
-    OutputOutOfRange { t: f64, t_min: f64, t_max: f64 },
+    OutputOutOfRange {
+        /// Epoch supplied to [`DenseOutput::eval`] for the failed collection query.
+        t: f64,
+        /// Lower covered epoch, computed from the first segment start and last segment endpoint.
+        /// The evaluator reports this error only when the query is less than `t_min - 1e-7`.
+        t_min: f64,
+        /// Upper covered epoch, computed from the first segment start and last segment endpoint.
+        /// The evaluator reports this error only when the query is greater than `t_max + 1e-7`.
+        t_max: f64,
+    },
 }
 
 #[cfg(test)]
