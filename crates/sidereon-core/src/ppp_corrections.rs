@@ -125,6 +125,7 @@ pub struct SatelliteAntenna {
 
 /// Satellite antenna correction options.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct SatelliteAntennaOptions {
     /// Trimmed label selecting the first signal's PCO and PCV records.
     pub freq1_label: String,
@@ -142,8 +143,30 @@ pub struct SatelliteAntennaOptions {
     pub antennas: Vec<SatelliteAntenna>,
 }
 
+impl SatelliteAntennaOptions {
+    /// Build satellite-antenna options from both carrier definitions and the
+    /// supplied antenna records.
+    #[must_use]
+    pub fn new(
+        freq1_label: String,
+        freq1_hz: f64,
+        freq2_label: String,
+        freq2_hz: f64,
+        antennas: Vec<SatelliteAntenna>,
+    ) -> Self {
+        Self {
+            freq1_label,
+            freq1_hz,
+            freq2_label,
+            freq2_hz,
+            antennas,
+        }
+    }
+}
+
 /// Offline code-bias correction options.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct CodeBiasOptions {
     /// Bias-SINEX or DCB model queried for the selected satellite and epoch.
     pub bias_set: BiasSet,
@@ -158,6 +181,22 @@ pub struct CodeBiasOptions {
     pub clock_reference: Option<ClockReferenceObservables>,
 }
 
+impl CodeBiasOptions {
+    /// Build code-bias options for a bias set with no observable overrides.
+    ///
+    /// Both override maps are empty and `clock_reference` is `None`; assign
+    /// those fields when the observation mapping needs to be configured.
+    #[must_use]
+    pub fn new(bias_set: BiasSet) -> Self {
+        Self {
+            bias_set,
+            used_observables_per_sat: BTreeMap::new(),
+            used_observables_default: BTreeMap::new(),
+            clock_reference: None,
+        }
+    }
+}
+
 /// Solid-Earth pole tide correction options.
 ///
 /// The pole tide needs the epoch's IERS polar motion, which the engine's
@@ -166,6 +205,7 @@ pub struct CodeBiasOptions {
 /// Earth-orientation inputs. Polar motion drifts only a few mas/day, so a single
 /// daily value is representative across a static arc.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PoleTideOptions {
     /// IERS polar motion x of the date (arcsec).
     pub xp_arcsec: f64,
@@ -173,8 +213,20 @@ pub struct PoleTideOptions {
     pub yp_arcsec: f64,
 }
 
+impl PoleTideOptions {
+    /// Build pole-tide options from the date's required IERS polar motion.
+    #[must_use]
+    pub const fn new(xp_arcsec: f64, yp_arcsec: f64) -> Self {
+        Self {
+            xp_arcsec,
+            yp_arcsec,
+        }
+    }
+}
+
 /// PPP correction precompute switches.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct PppCorrectionsOptions {
     /// Enables one Sun/Moon-driven solid-earth displacement per input epoch.
     pub solid_earth_tide: bool,
@@ -194,6 +246,25 @@ pub struct PppCorrectionsOptions {
     /// Enables clock-datum code-bias corrections for observations with a used
     /// observable mapping.
     pub code_bias: Option<CodeBiasOptions>,
+}
+
+impl PppCorrectionsOptions {
+    /// Build options with every optional PPP correction disabled.
+    ///
+    /// The two boolean switches are `false` and each optional correction is
+    /// `None`; assign a field to enable that correction explicitly.
+    #[allow(clippy::new_without_default)]
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            solid_earth_tide: false,
+            pole_tide: None,
+            ocean_loading: None,
+            phase_windup: false,
+            satellite_antenna: None,
+            code_bias: None,
+        }
+    }
 }
 
 /// Indexed vector result. The epoch index refers to the input epoch slice.

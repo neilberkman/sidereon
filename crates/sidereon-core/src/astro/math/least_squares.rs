@@ -244,6 +244,7 @@ pub enum Status {
 
 /// Stopping tolerances and evaluation budget for [`solve_trf`].
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct SolveOptions {
     /// First-order optimality tolerance on `||J^T r||_inf`.
     pub gtol: f64,

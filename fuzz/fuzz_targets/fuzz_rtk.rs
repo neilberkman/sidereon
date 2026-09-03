@@ -344,16 +344,18 @@ fuzz_target!(|data: &[u8]| {
             })
             .collect(),
     };
+    let min_epochs = bounded_usize(input.bits[2], 1, 4);
+    let tolerance_cycles = input.scalars[10];
+    let mut wide_lane_options = WideLaneOptions::new(min_epochs, tolerance_cycles);
+    wide_lane_options.min_epochs = min_epochs;
+    wide_lane_options.tolerance_cycles = tolerance_cycles;
+    wide_lane_options.skip_short_fragments = input.bits[3] & 1 == 1;
     assert_ok_or_err(
         "rtk::estimate_wide_lane_ambiguities",
         rtk::estimate_wide_lane_ambiguities(
             std::slice::from_ref(&dual_epoch),
             "G01",
-            WideLaneOptions {
-                min_epochs: bounded_usize(input.bits[2], 1, 4),
-                tolerance_cycles: input.scalars[10],
-                skip_short_fragments: input.bits[3] & 1 == 1,
-            },
+            wide_lane_options,
         ),
     );
     let if_epoch = DualIonosphereFreeEpoch {

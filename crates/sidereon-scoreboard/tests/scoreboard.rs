@@ -605,19 +605,18 @@ fn synthetic_state_arc_runs_full_path_to_near_zero_rms() {
     let mut options = ScoreOptions::default();
     options.fit_options.force_model = ForceModelKind::two_body();
     options.fit_options.integrator = IntegratorKind::Dp54;
-    options.fit_options.integrator_options = IntegratorOptions {
-        abs_tol: 1.0e-12,
-        rel_tol: 1.0e-13,
-        initial_step: 10.0,
-        max_step: 60.0,
-        ..IntegratorOptions::default()
-    };
-    options.fit_options.solver_options = SolveOptions {
-        gtol: 1.0e-15,
-        ftol: 1.0e-15,
-        xtol: 1.0e-15,
-        max_nfev: 1200,
-    };
+    let mut integrator_options = IntegratorOptions::default();
+    integrator_options.abs_tol = 1.0e-12;
+    integrator_options.rel_tol = 1.0e-13;
+    integrator_options.initial_step = 10.0;
+    integrator_options.max_step = 60.0;
+    options.fit_options.integrator_options = integrator_options;
+    let mut solver_options = SolveOptions::default();
+    solver_options.gtol = 1.0e-15;
+    solver_options.ftol = 1.0e-15;
+    solver_options.xtol = 1.0e-15;
+    solver_options.max_nfev = 1200;
+    options.fit_options.solver_options = solver_options;
 
     let report = score_sp3_bytes(sp3.as_bytes(), "synthetic.sp3", date(2026, 6, 1), &options)
         .expect("synthetic arc scores");
@@ -878,17 +877,16 @@ fn duration_token_seconds(token: &str) -> i64 {
 
 fn synthetic_sp3(initial: CartesianState, epochs_j2000_s: &[i64]) -> String {
     let sat = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite");
+    let mut options = IntegratorOptions::default();
+    options.abs_tol = 1.0e-12;
+    options.rel_tol = 1.0e-13;
+    options.initial_step = 10.0;
+    options.max_step = 60.0;
     let propagator = StatePropagator {
         initial,
         force_model: ForceModelKind::two_body(),
         integrator: IntegratorKind::Dp54,
-        options: IntegratorOptions {
-            abs_tol: 1.0e-12,
-            rel_tol: 1.0e-13,
-            initial_step: 10.0,
-            max_step: 60.0,
-            ..IntegratorOptions::default()
-        },
+        options,
         drag: None,
         space_weather: None,
     };

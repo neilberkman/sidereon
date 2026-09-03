@@ -34,6 +34,7 @@ pub const DEFAULT_CLOCK_JUMP_THRESHOLD_S: f64 = 0.0005;
 
 /// Options controlling RINEX observation QC aggregation.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ObservationQcOptions {
     /// Override the header `INTERVAL` value when detecting missing epochs.
     pub interval_override_s: Option<f64>,

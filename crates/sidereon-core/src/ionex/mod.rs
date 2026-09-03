@@ -510,6 +510,7 @@ pub fn ionex_slant_delay_with_policy(
 
 /// One IONEX slant-delay query for [`ionex_slant_delays`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct IonexSlantRequest {
     /// Receiver geodetic position.
     pub receiver: Wgs84Geodetic,
@@ -521,6 +522,27 @@ pub struct IonexSlantRequest {
     pub epoch_j2000_s: i64,
     /// Carrier frequency on which to report the delay, hertz.
     pub frequency_hz: f64,
+}
+
+impl IonexSlantRequest {
+    /// Build a slant-delay query from its receiver, geometry, epoch, and
+    /// carrier-frequency inputs.
+    #[must_use]
+    pub const fn new(
+        receiver: Wgs84Geodetic,
+        elevation_rad: f64,
+        azimuth_rad: f64,
+        epoch_j2000_s: i64,
+        frequency_hz: f64,
+    ) -> Self {
+        Self {
+            receiver,
+            elevation_rad,
+            azimuth_rad,
+            epoch_j2000_s,
+            frequency_hz,
+        }
+    }
 }
 
 /// Batch IONEX vertical-TEC-grid slant ionospheric group delays.

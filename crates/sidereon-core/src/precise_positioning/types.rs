@@ -101,6 +101,7 @@ pub struct MeasurementWeights {
 
 /// Iteration and convergence controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct FloatSolveOptions {
     /// Inclusive iteration cap; zero and values above the 10,000 PPP cap are
     /// rejected before the solve loop starts.
@@ -137,6 +138,7 @@ impl Default for FloatSolveOptions {
 
 /// Troposphere controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct TroposphereOptions {
     /// Enables troposphere modeling; when false, the model returns zero slant,
     /// ZTD-mapping, and gradient-mapping terms and skips meteorological checks.
@@ -157,6 +159,21 @@ pub struct TroposphereOptions {
 }
 
 impl TroposphereOptions {
+    /// Build disabled troposphere controls using the supplied meteorology.
+    ///
+    /// Estimation is disabled and the Niell mapping is selected; assign the
+    /// boolean fields or mapping when a different model is required.
+    #[must_use]
+    pub const fn new(met: Met) -> Self {
+        Self {
+            enabled: false,
+            estimate_ztd: false,
+            estimate_tropo_gradients: false,
+            met,
+            mapping: TropoMapping::Niell,
+        }
+    }
+
     /// Return the explicit all-off troposphere configuration.
     ///
     /// The returned meteorological values are standard-atmosphere placeholders;
@@ -356,6 +373,7 @@ pub struct ReceiverAntennaFrequency {
 
 /// Receiver antenna correction options.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ReceiverAntennaOptions {
     /// Label selecting the first receiver-frequency calibration record.
     pub freq1_label: String,
@@ -370,6 +388,27 @@ pub struct ReceiverAntennaOptions {
     /// Frequency calibration records searched by label for local PCO and PCV
     /// data for each configured signal.
     pub frequencies: Vec<ReceiverAntennaFrequency>,
+}
+
+impl ReceiverAntennaOptions {
+    /// Build receiver-antenna options from both carrier definitions and the
+    /// supplied frequency calibrations.
+    #[must_use]
+    pub fn new(
+        freq1_label: String,
+        freq1_hz: f64,
+        freq2_label: String,
+        freq2_hz: f64,
+        frequencies: Vec<ReceiverAntennaFrequency>,
+    ) -> Self {
+        Self {
+            freq1_label,
+            freq1_hz,
+            freq2_label,
+            freq2_hz,
+            frequencies,
+        }
+    }
 }
 
 /// Fine satellite clock series, keyed by GPS seconds.
@@ -420,6 +459,7 @@ impl RangeCorrections {
 
 /// Static float solve controls.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct FloatSolveConfig {
     /// Code/phase inverse-sigma weights copied into the solve model context.
     pub weights: MeasurementWeights,
@@ -448,6 +488,30 @@ pub struct FloatSolveConfig {
     /// for diagnosing residual dispersive error after ionosphere-free
     /// combination.
     pub estimate_residual_ionosphere: bool,
+}
+
+impl FloatSolveConfig {
+    /// Build static float controls from all required model and solve settings.
+    #[must_use]
+    pub const fn new(
+        weights: MeasurementWeights,
+        tropo: TroposphereOptions,
+        corrections: RangeCorrections,
+        opts: FloatSolveOptions,
+        elevation_cutoff_deg: Option<f64>,
+        residual_screen: bool,
+        estimate_residual_ionosphere: bool,
+    ) -> Self {
+        Self {
+            weights,
+            tropo,
+            corrections,
+            opts,
+            elevation_cutoff_deg,
+            residual_screen,
+            estimate_residual_ionosphere,
+        }
+    }
 }
 
 /// Indexed static PPP correction lookup tables.
@@ -517,6 +581,7 @@ pub struct SsrPppBiasSignalPair {
 
 /// Per-satellite and per-system default signal mapping for SSR/HAS PPP biases.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct SsrPppBiasOptions {
     /// Satellite-specific signal pairs checked first for each observation.
     pub per_satellite: BTreeMap<GnssSatelliteId, SsrPppBiasSignalPair>,
@@ -1011,6 +1076,7 @@ impl core::fmt::Display for NoEphemerisReason {
 
 /// Integer ambiguity resolution controls for fixed PPP.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct FixedAmbiguityOptions {
     /// Per-ambiguity carrier wavelengths in meters used for meter/cycle
     /// conversion and ambiguity covariance scaling; each value must be finite
@@ -1023,8 +1089,24 @@ pub struct FixedAmbiguityOptions {
     pub ratio_threshold: f64,
 }
 
+impl FixedAmbiguityOptions {
+    /// Build ambiguity controls with an explicit ratio threshold.
+    ///
+    /// The wavelength and offset maps start empty because their values are
+    /// signal-specific; assign them before a fixed solve.
+    #[must_use]
+    pub fn new(ratio_threshold: f64) -> Self {
+        Self {
+            wavelengths_m: BTreeMap::new(),
+            offsets_m: BTreeMap::new(),
+            ratio_threshold,
+        }
+    }
+}
+
 /// Static fixed-ambiguity PPP solve controls.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct FixedSolveConfig {
     /// Code/phase inverse-sigma weights copied into the fixed solve context.
     pub weights: MeasurementWeights,
@@ -1047,6 +1129,30 @@ pub struct FixedSolveConfig {
     /// Estimate one post-combination residual ionosphere state per ambiguity
     /// arc during the fixed re-solve.
     pub estimate_residual_ionosphere: bool,
+}
+
+impl FixedSolveConfig {
+    /// Build static fixed-solve controls from all model and ambiguity settings.
+    #[must_use]
+    pub const fn new(
+        weights: MeasurementWeights,
+        tropo: TroposphereOptions,
+        corrections: RangeCorrections,
+        opts: FloatSolveOptions,
+        elevation_cutoff_deg: Option<f64>,
+        ambiguity: FixedAmbiguityOptions,
+        estimate_residual_ionosphere: bool,
+    ) -> Self {
+        Self {
+            weights,
+            tropo,
+            corrections,
+            opts,
+            elevation_cutoff_deg,
+            ambiguity,
+            estimate_residual_ionosphere,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -88,9 +88,8 @@ fn hgt_to_dted_round_trips_selected_postings_through_reader() {
     fs::write(&tile_path, &dt2).expect("write converted DTED tile");
 
     let mut terrain = DtedTerrain::new(&root);
-    let nearest = DtedLookupOptions {
-        interpolation: DtedInterpolation::NearestPosting,
-    };
+    let mut nearest = DtedLookupOptions::default();
+    nearest.interpolation = DtedInterpolation::NearestPosting;
 
     for (lat_posting, lon_posting) in [(0, 0), (100, 200), (1234, 2345), (2000, 3000), (3600, 3600)]
     {

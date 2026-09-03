@@ -56,6 +56,7 @@ impl ImuRateRandomWalk {
 
 /// Options for synthetic IMU generation.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ImuSimulationOptions {
     /// Sample representation returned by the simulator.
     pub output: ImuSimulationOutput,

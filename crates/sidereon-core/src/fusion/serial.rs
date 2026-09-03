@@ -214,6 +214,7 @@ impl SerializableTightFilterState {
 
 /// Serializable retained-history capacity settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub struct SerializableTimeSyncHistoryConfig {
     /// Number of retained IMU samples.
     pub imu_capacity: u32,
@@ -222,6 +223,15 @@ pub struct SerializableTimeSyncHistoryConfig {
 }
 
 impl SerializableTimeSyncHistoryConfig {
+    /// Build serialized history capacities from both required limits.
+    #[must_use]
+    pub const fn new(imu_capacity: u32, checkpoint_capacity: u32) -> Self {
+        Self {
+            imu_capacity,
+            checkpoint_capacity,
+        }
+    }
+
     /// Convert native time-sync capacity settings into the serialized form.
     pub fn from_native(config: TimeSyncHistoryConfig) -> Result<Self, FusionStateCodecError> {
         Ok(Self {

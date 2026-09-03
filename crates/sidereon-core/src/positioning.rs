@@ -203,6 +203,7 @@ impl<E: EphemerisSource + ?Sized> RinexSppAssemblySource for RinexSppSource<'_, 
 
 /// Options for assembling RINEX observation epochs into SPP [`SolveInputs`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RinexSppOptions {
     /// Per-constellation pseudorange-code selection policy.
     pub signal_policy: SignalPolicy,

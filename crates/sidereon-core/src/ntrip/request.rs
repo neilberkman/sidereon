@@ -25,6 +25,7 @@ pub struct NtripCredentials {
 #[derive(Clone, Debug, PartialEq)]
 /// Inputs retained by the NTRIP client machine for request construction and optional GGA pacing.
 /// The default uses port 2101 and [`NtripVersion::Rev2`], leaves the host and mountpoint empty, uses `sidereon/<package version>` as the product, and disables credentials and GGA pacing.
+#[non_exhaustive]
 pub struct NtripConfig {
     /// Caster host text, paired with [`NtripConfig::port`] in the Rev2 `Host` header.
     /// CR/LF in this value causes request validation to fail.

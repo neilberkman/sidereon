@@ -185,10 +185,7 @@ fn outlier_rejection_is_recorded_as_its_own_reason() {
     options.precedence_scope = MergePrecedenceScope::Cell;
     options.min_agree = 2;
     options.position_tolerance_m = 1.0;
-    options.outlier_reject = Some(OutlierRejectOptions {
-        position_tolerance_m: 1.0,
-        clock_tolerance_s: 1.0e-6,
-    });
+    options.outlier_reject = Some(OutlierRejectOptions::new(1.0, 1.0e-6));
     options.provenance = Some(ProvenanceMode::Full);
 
     let (_merged, report) = merge(&[wild, steady_a, steady_b], &options).expect("merge");

@@ -79,6 +79,7 @@ const VELOCITY_NORMAL_ASSEMBLER: NormalAssembler =
 
 /// Configuration for a single-epoch Doppler/range-rate velocity solve.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct VelocityConfig {
     /// Minimum number of observations required for the four velocity unknowns.
     pub minimum_observations: usize,
@@ -103,6 +104,7 @@ impl Default for VelocityConfig {
 /// `sqrt(huber(residual / scale))`, where `scale` is a floored MAD estimate.
 /// The default velocity solve leaves this disabled.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct VelocityRobustConfig {
     /// Huber tuning constant `k`; scaled residuals below this keep full weight.
     pub huber_k: f64,

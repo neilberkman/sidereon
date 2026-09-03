@@ -89,6 +89,7 @@ pub fn sagnac_range_first_order_m_with_rate(
 
 /// Visibility planning options for SP3-derived GNSS geometry.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct VisibilityOptions {
     /// Minimum topocentric elevation, degrees.
     pub elevation_mask_deg: f64,
@@ -117,6 +118,7 @@ pub enum DopWeighting {
 
 /// DOP planning options.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct DopOptions {
     /// Visibility scan options used when no explicit satellite list is supplied.
     pub visibility: VisibilityOptions,

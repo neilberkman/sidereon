@@ -54,41 +54,29 @@ fn find_passes_agrees_with_reference_and_keeps_what_coarse_drops() {
     let (start, end) = window();
 
     // Authoritative reference: the existing pass-prediction path at a fine step.
-    let reference = predict_passes(
-        &elements,
-        STATION,
-        start,
-        end,
-        PassPredictionOptions {
-            min_elevation_deg: 0.0,
-            step_seconds: 10,
-        },
-    )
+    let reference = predict_passes(&elements, STATION, start, end, {
+        let mut options = PassPredictionOptions::default();
+        options.min_elevation_deg = 0.0;
+        options.step_seconds = 10;
+        options
+    })
     .expect("valid pass-prediction step");
     // The dense-sample finder at mask 0 must reproduce the reference passes.
-    let mine = find_passes(
-        &elements,
-        STATION,
-        start,
-        end,
-        PassFinderOptions {
-            elevation_mask_deg: 0.0,
-            coarse_step_seconds: 10.0,
-            time_tolerance_seconds: 1.0e-3,
-        },
-    )
+    let mine = find_passes(&elements, STATION, start, end, {
+        let mut options = PassFinderOptions::default();
+        options.elevation_mask_deg = 0.0;
+        options.coarse_step_seconds = 10.0;
+        options.time_tolerance_seconds = 1.0e-3;
+        options
+    })
     .expect("valid pass-finder step");
     // A deliberately coarse step of the same reference method drops passes.
-    let coarse = predict_passes(
-        &elements,
-        STATION,
-        start,
-        end,
-        PassPredictionOptions {
-            min_elevation_deg: 0.0,
-            step_seconds: 900,
-        },
-    )
+    let coarse = predict_passes(&elements, STATION, start, end, {
+        let mut options = PassPredictionOptions::default();
+        options.min_elevation_deg = 0.0;
+        options.step_seconds = 900;
+        options
+    })
     .expect("valid pass-prediction step");
 
     assert!(

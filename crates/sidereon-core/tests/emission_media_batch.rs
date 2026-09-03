@@ -32,32 +32,32 @@ fn receiver_ecef_m() -> [f64; 3] {
 }
 
 fn media_options<'a>(ionex: &'a Ionex) -> ObservableMediaOptions<'a> {
-    ObservableMediaOptions {
-        troposphere: Some(Default::default()),
-        ionosphere: Some(ObservableIonosphereCorrection::IonexWithPolicy(
-            ionex,
-            IonexCoveragePolicy::Hold,
-        )),
-    }
+    let mut options = ObservableMediaOptions::default();
+    options.troposphere = Some(Default::default());
+    options.ionosphere = Some(ObservableIonosphereCorrection::IonexWithPolicy(
+        ionex,
+        IonexCoveragePolicy::Hold,
+    ));
+    options
 }
 
 fn scalar_options<'a>(ionex: &'a Ionex) -> MediaPredictOptions<'a> {
-    MediaPredictOptions {
-        prediction: PredictOptions {
-            carrier_hz: F_L1_HZ,
-            light_time: false,
-            sagnac: false,
-        },
-        media: media_options(ionex),
-    }
+    let mut prediction = PredictOptions::default();
+    prediction.carrier_hz = F_L1_HZ;
+    prediction.light_time = false;
+    prediction.sagnac = false;
+    let mut options = MediaPredictOptions::default();
+    options.prediction = prediction;
+    options.media = media_options(ionex);
+    options
 }
 
 fn batch_options<'a>(ionex: &'a Ionex) -> EmissionMediaBatchOptions<'a> {
-    EmissionMediaBatchOptions {
-        carrier_hz: F_L1_HZ,
-        media: media_options(ionex),
-        min_elevation_rad: None,
-    }
+    let mut options = EmissionMediaBatchOptions::default();
+    options.carrier_hz = F_L1_HZ;
+    options.media = media_options(ionex);
+    options.min_elevation_rad = None;
+    options
 }
 
 fn assert_vec3_bits_eq(label: &str, left: [f64; 3], right: [f64; 3]) {
@@ -343,16 +343,11 @@ fn emission_media_batch_cutoff_keeps_state_without_delay_placeholders() {
         .observable_state_at_j2000_s(sat, epoch_j2000_s)
         .expect("scalar state");
 
-    let batch = emission_media_batch_at_j2000_s(
-        &sp3,
-        &[sat],
-        &[epoch_j2000_s],
-        receiver,
-        EmissionMediaBatchOptions {
-            min_elevation_rad: Some(core::f64::consts::FRAC_PI_2),
-            ..batch_options(&ionex)
-        },
-    )
+    let batch = emission_media_batch_at_j2000_s(&sp3, &[sat], &[epoch_j2000_s], receiver, {
+        let mut options = batch_options(&ionex);
+        options.min_elevation_rad = Some(core::f64::consts::FRAC_PI_2);
+        options
+    })
     .expect("cutoff batch");
 
     assert_eq!(

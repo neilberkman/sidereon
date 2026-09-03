@@ -72,16 +72,16 @@ fn decay_config(space_weather: SpaceWeather) -> DecayConfig {
         DragForce::DEFAULT_REENTRY_ALTITUDE_KM,
     )
     .expect("valid drag");
+    let mut integrator_options = IntegratorOptions::default();
+    integrator_options.abs_tol = 1.0e-8;
+    integrator_options.rel_tol = 1.0e-10;
+    integrator_options.initial_step = 5.0;
+    integrator_options.min_step = 1.0e-6;
+    integrator_options.max_step = 30.0;
+    integrator_options.max_steps = 200_000;
+    integrator_options.dense_output = false;
     DecayConfig::new(drag)
-        .with_options(IntegratorOptions {
-            abs_tol: 1.0e-8,
-            rel_tol: 1.0e-10,
-            initial_step: 5.0,
-            min_step: 1.0e-6,
-            max_step: 30.0,
-            max_steps: 200_000,
-            dense_output: false,
-        })
+        .with_options(integrator_options)
         .with_scan_step_s(60.0)
         .with_crossing_tolerance_s(2.0)
         .with_max_duration_s(50_000.0)

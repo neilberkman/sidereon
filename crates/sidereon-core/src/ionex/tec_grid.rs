@@ -176,6 +176,7 @@ impl Default for TecGridShellGeometry {
 #[derive(Clone, Copy, Debug, PartialEq)]
 /// [`tec_xyz`] consumes the epoch, elevation floor, fallback altitude, and
 /// shell geometry; [`iono_delay_xyz`] additionally uses the carrier frequency.
+#[non_exhaustive]
 pub struct TecGridEvalOptions {
     /// Epoch passed to [`TecGrid::vtec_at_pierce_point`].
     pub epoch: TecGridEpoch,
@@ -190,6 +191,21 @@ pub struct TecGridEvalOptions {
 }
 
 impl TecGridEvalOptions {
+    /// Build evaluation options for an explicit carrier frequency.
+    ///
+    /// The minimum elevation, NaN fallback height, and shell geometry use the
+    /// engine defaults; assign those fields when a different shell is needed.
+    #[must_use]
+    pub fn new(epoch: TecGridEpoch, frequency_hz: f64) -> Self {
+        Self {
+            epoch,
+            min_elevation_rad: 5.0 * DEG_TO_RAD,
+            nan_pierce_point_height_m: IONOSPHERE_HEIGHT_M,
+            frequency_hz,
+            shell_geometry: TecGridShellGeometry::default(),
+        }
+    }
+
     /// Creates options for the canonical GPS L1 frequency.
     ///
     /// The result uses a 5-degree minimum elevation, the default 450,000-meter
@@ -199,13 +215,7 @@ impl TecGridEvalOptions {
         #[allow(clippy::expect_used)]
         let frequency_hz = frequencies::frequency_hz(GnssSystem::Gps, CarrierBand::L1)
             .expect("canonical GPS L1 carrier exists");
-        Self {
-            epoch,
-            min_elevation_rad: 5.0 * DEG_TO_RAD,
-            nan_pierce_point_height_m: IONOSPHERE_HEIGHT_M,
-            frequency_hz,
-            shell_geometry: TecGridShellGeometry::default(),
-        }
+        Self::new(epoch, frequency_hz)
     }
 
     /// Returns a copy using `shell_geometry` and its height as the NaN fallback altitude.

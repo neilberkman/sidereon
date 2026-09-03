@@ -308,6 +308,7 @@ impl ReducedOrbitSourceSampling {
 
 /// Options for [`fit_reduced_orbit_source`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ReducedOrbitSourceFitOptions {
     /// Sampling configuration used to produce source samples before fitting.
     pub sampling: ReducedOrbitSourceSampling,
@@ -315,8 +316,17 @@ pub struct ReducedOrbitSourceFitOptions {
     pub model: Model,
 }
 
+impl ReducedOrbitSourceFitOptions {
+    /// Build reduced-orbit fit options from the sampling and model choices.
+    #[must_use]
+    pub const fn new(sampling: ReducedOrbitSourceSampling, model: Model) -> Self {
+        Self { sampling, model }
+    }
+}
+
 /// Options for [`drift_reduced_orbit_source`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct ReducedOrbitSourceDriftOptions {
     /// Sampling configuration used to produce truth samples for drift
     /// evaluation.
@@ -326,8 +336,21 @@ pub struct ReducedOrbitSourceDriftOptions {
     pub threshold_m: f64,
 }
 
+impl ReducedOrbitSourceDriftOptions {
+    /// Build reduced-orbit drift options from the sampling and required error
+    /// threshold.
+    #[must_use]
+    pub const fn new(sampling: ReducedOrbitSourceSampling, threshold_m: f64) -> Self {
+        Self {
+            sampling,
+            threshold_m,
+        }
+    }
+}
+
 /// Options for [`fit_piecewise_reduced_orbit_source`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PiecewiseOrbitSourceFitOptions {
     /// Sampling configuration used to produce source samples; its endpoints
     /// become the requested piecewise coverage bounds.
@@ -337,6 +360,18 @@ pub struct PiecewiseOrbitSourceFitOptions {
     /// Requested segment length in seconds; it is validated, rounded to an
     /// integer, and used to tile the piecewise coverage.
     pub segment_s: f64,
+}
+
+impl PiecewiseOrbitSourceFitOptions {
+    /// Build piecewise-fit options from the sampling, model, and segment length.
+    #[must_use]
+    pub const fn new(sampling: ReducedOrbitSourceSampling, model: Model, segment_s: f64) -> Self {
+        Self {
+            sampling,
+            model,
+            segment_s,
+        }
+    }
 }
 
 /// A source-backed single-model fit and its sampling metadata.

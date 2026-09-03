@@ -57,14 +57,12 @@ fn propagate_kepler_matches_dp54_two_body() {
     let dynamics = OrbitalDynamics {
         force_model: &force,
     };
-    let opts = IntegratorOptions {
-        abs_tol: 1.0e-12,
-        rel_tol: 1.0e-12,
-        initial_step: 10.0,
-        max_step: 60.0,
-        min_step: 1.0e-12,
-        ..IntegratorOptions::default()
-    };
+    let mut opts = IntegratorOptions::default();
+    opts.abs_tol = 1.0e-12;
+    opts.rel_tol = 1.0e-12;
+    opts.initial_step = 10.0;
+    opts.max_step = 60.0;
+    opts.min_step = 1.0e-12;
     let numerical = DP54
         .propagate(
             initial,

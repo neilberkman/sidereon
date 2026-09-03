@@ -74,11 +74,23 @@ pub struct PreparedFloatEpoch {
 
 /// Wide-lane and narrow-lane prep controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct WideLanePrepOptions {
     /// Minimum wide-lane sample count; short split segments are skipped and a short unsplit arc returns [`WideLanePrepError::TooFewWideLaneEpochs`].
     pub min_epochs: usize,
     /// Maximum distance in wide-lane cycles between the sample mean and its rounded integer.
     pub tolerance_cycles: f64,
+}
+
+impl WideLanePrepOptions {
+    /// Build wide-lane preparation controls from both required thresholds.
+    #[must_use]
+    pub const fn new(min_epochs: usize, tolerance_cycles: f64) -> Self {
+        Self {
+            min_epochs,
+            tolerance_cycles,
+        }
+    }
 }
 
 /// Public split-arc metadata for PPP ambiguity segmentation.

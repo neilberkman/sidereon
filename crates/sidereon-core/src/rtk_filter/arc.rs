@@ -142,6 +142,7 @@ impl RtkArcPreprocessing {
 
 /// Sequential RTK arc driver configuration.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RtkArcConfig {
     /// Base-station ECEF position (metres).
     pub base_m: [f64; 3],
@@ -170,15 +171,56 @@ pub struct RtkArcConfig {
     pub preprocessing: RtkArcPreprocessing,
 }
 
+impl RtkArcConfig {
+    /// Build sequential RTK settings from every required arc configuration.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        base_m: [f64; 3],
+        reference: BaselineReferenceSelection,
+        model: MeasModel,
+        baseline_prior_sigma_m: f64,
+        ambiguity_prior_sigma_m: f64,
+        initial_baseline_m: [f64; 3],
+        wavelengths_m: BTreeMap<String, f64>,
+        offsets_m: BTreeMap<String, f64>,
+        update_opts: UpdateOpts,
+        preprocessing: RtkArcPreprocessing,
+    ) -> Self {
+        Self {
+            base_m,
+            reference,
+            model,
+            baseline_prior_sigma_m,
+            ambiguity_prior_sigma_m,
+            initial_baseline_m,
+            wavelengths_m,
+            offsets_m,
+            update_opts,
+            preprocessing,
+        }
+    }
+}
+
 /// Configuration consumed by [`solve_static_rtk_arc`] for a static batch RTK
 /// arc solve.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RtkStaticArcConfig {
     /// Sequential-arc settings reused for input preprocessing, geometry, and
     /// measurement and ambiguity modeling.
     pub arc: RtkArcConfig,
     /// Validated options for the float solve, fixed solve, and residual checks.
     pub opts: ValidatedFixedSolveOpts,
+}
+
+impl RtkStaticArcConfig {
+    /// Build static RTK settings from the sequential arc and validated solve
+    /// options.
+    #[must_use]
+    pub const fn new(arc: RtkArcConfig, opts: ValidatedFixedSolveOpts) -> Self {
+        Self { arc, opts }
+    }
 }
 
 /// Results assembled by [`solve_static_rtk_arc`], including both batch solver
@@ -349,6 +391,7 @@ pub struct RtkDualFrequencyArcEpoch {
 /// Settings forwarded by `prepare_dual_frequency_arc` to dual-frequency
 /// cycle-slip preprocessing for a wide-lane arc.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct RtkDualCycleSlipConfig {
     /// Action selected by dual-frequency preprocessing when it detects a slip.
     pub policy: CycleSlipPolicy,
@@ -357,9 +400,18 @@ pub struct RtkDualCycleSlipConfig {
     pub options: CycleSlipOptions,
 }
 
+impl RtkDualCycleSlipConfig {
+    /// Build dual-frequency cycle-slip settings from both required policies.
+    #[must_use]
+    pub const fn new(policy: CycleSlipPolicy, options: CycleSlipOptions) -> Self {
+        Self { policy, options }
+    }
+}
+
 /// Inputs consumed by [`fix_wide_lane_rtk_arc`] for dual-frequency wide-lane
 /// ambiguity estimation.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RtkWideLaneArcConfig {
     /// Base-station ECEF position, in meters, used for reference geometry.
     pub base_m: [f64; 3],
@@ -370,6 +422,25 @@ pub struct RtkWideLaneArcConfig {
     /// Optional dual-frequency cycle-slip preparation before reference selection
     /// and wide-lane estimation.
     pub cycle_slip: Option<RtkDualCycleSlipConfig>,
+}
+
+impl RtkWideLaneArcConfig {
+    /// Build wide-lane arc settings from the base position, reference policy,
+    /// estimator options, and optional cycle-slip policy.
+    #[must_use]
+    pub const fn new(
+        base_m: [f64; 3],
+        reference: BaselineReferenceSelection,
+        options: WideLaneOptions,
+        cycle_slip: Option<RtkDualCycleSlipConfig>,
+    ) -> Self {
+        Self {
+            base_m,
+            reference,
+            options,
+            cycle_slip,
+        }
+    }
 }
 
 /// Output assembled by [`fix_wide_lane_rtk_arc`] from wide-lane estimates and
@@ -428,6 +499,7 @@ impl std::error::Error for RtkWideLaneArcError {}
 /// Settings consumed by [`prepare_ionosphere_free_rtk_arc`] when converting
 /// dual-frequency epochs to ionosphere-free observations.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RtkIonosphereFreeArcConfig {
     /// Base-station ECEF position in meters, passed to reference selection and
     /// ionosphere-free preparation.
@@ -440,6 +512,25 @@ pub struct RtkIonosphereFreeArcConfig {
     /// Flag passed to the standalone preparation to select its troposphere
     /// correction branch.
     pub apply_troposphere: bool,
+}
+
+impl RtkIonosphereFreeArcConfig {
+    /// Build ionosphere-free settings from both baseline states and the
+    /// reference/troposphere policies.
+    #[must_use]
+    pub const fn new(
+        base_m: [f64; 3],
+        initial_baseline_m: [f64; 3],
+        reference: BaselineReferenceSelection,
+        apply_troposphere: bool,
+    ) -> Self {
+        Self {
+            base_m,
+            initial_baseline_m,
+            reference,
+            apply_troposphere,
+        }
+    }
 }
 
 /// Output assembled by [`prepare_ionosphere_free_rtk_arc`], including the
@@ -475,6 +566,7 @@ pub enum RtkWideLaneFixedArcSolveConfig {
 /// Configuration consumed by [`solve_wide_lane_fixed_rtk_arc`] for its
 /// wide-lane, ionosphere-free, and final RTK stages.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RtkWideLaneFixedArcConfig {
     /// Settings consumed by the initial wide-lane preparation and estimation.
     pub wide_lane: RtkWideLaneArcConfig,
@@ -482,6 +574,22 @@ pub struct RtkWideLaneFixedArcConfig {
     pub ionosphere_free: RtkIonosphereFreeArcConfig,
     /// Settings and branch selection for the final static or sequential solve.
     pub solve: RtkWideLaneFixedArcSolveConfig,
+}
+
+impl RtkWideLaneFixedArcConfig {
+    /// Build the combined wide-lane, ionosphere-free, and final-solve settings.
+    #[must_use]
+    pub const fn new(
+        wide_lane: RtkWideLaneArcConfig,
+        ionosphere_free: RtkIonosphereFreeArcConfig,
+        solve: RtkWideLaneFixedArcSolveConfig,
+    ) -> Self {
+        Self {
+            wide_lane,
+            ionosphere_free,
+            solve,
+        }
+    }
 }
 
 /// Identifies the branch recorded by `wide_lane_fixed_metadata` after a combined

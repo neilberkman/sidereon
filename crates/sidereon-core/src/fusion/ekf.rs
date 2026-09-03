@@ -91,6 +91,7 @@ impl InnovationGate {
 
 /// EKF correction options.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct EkfUpdateOptions {
     /// Optional normalized-innovation screen applied before correction.
     pub innovation_gate: Option<InnovationGate>,

@@ -135,8 +135,10 @@ fn quadrature_agrees_with_half_space_approximation_inside_bound() {
         point,
         PositionUncertainty::EnuCovarianceM2(covariance),
         &fence,
-        ProbabilityOptions {
-            method: ProbabilityMethod::BoundaryNormal,
+        {
+            let mut options = ProbabilityOptions::default();
+            options.method = ProbabilityMethod::BoundaryNormal;
+            options
         },
     )
     .expect("approximation");
@@ -144,8 +146,10 @@ fn quadrature_agrees_with_half_space_approximation_inside_bound() {
         point,
         PositionUncertainty::EnuCovarianceM2(covariance),
         &fence,
-        ProbabilityOptions {
-            method: ProbabilityMethod::PlanarQuadrature,
+        {
+            let mut options = ProbabilityOptions::default();
+            options.method = ProbabilityMethod::PlanarQuadrature;
+            options
         },
     )
     .expect("quadrature");
@@ -220,9 +224,8 @@ fn planar_quadrature_boundary_edge_and_corner_probabilities() {
         [0.0, sigma_m * sigma_m, 0.0],
         [0.0, 0.0, 0.0],
     ];
-    let options = ProbabilityOptions {
-        method: ProbabilityMethod::PlanarQuadrature,
-    };
+    let mut options = ProbabilityOptions::default();
+    options.method = ProbabilityMethod::PlanarQuadrature;
     let edge_probability = containment_probability_with_options(
         geo(0.01, 0.0),
         PositionUncertainty::EnuCovarianceM2(covariance),
@@ -263,8 +266,10 @@ fn zero_uncertainty_boundary_probability_matches_containment() {
         point,
         PositionUncertainty::CepRadiusM(0.0),
         &fence,
-        ProbabilityOptions {
-            method: ProbabilityMethod::PlanarQuadrature,
+        {
+            let mut options = ProbabilityOptions::default();
+            options.method = ProbabilityMethod::PlanarQuadrature;
+            options
         },
     )
     .expect("quadrature probability");

@@ -119,6 +119,7 @@ impl Default for TleMetadata {
 
 /// Configuration for [`fit_tle`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct FitConfig {
     /// Selects the fit epoch from the sample arc.
     pub epoch: FitEpoch,

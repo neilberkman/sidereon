@@ -50,6 +50,7 @@ const ORBIT_FD_MIN_VELOCITY_STEP_KM_S: f64 = 1.0e-6;
 
 /// Options controlling a precise-orbit fit.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OrbitFitOptions {
     /// Force model used by the numerical propagator.
     pub force_model: ForceModelKind,

@@ -21,6 +21,7 @@ use super::state::{
 /// `alpha`, `beta`, and `kappa` produce Wan/van der Merwe sigma-point weights
 /// with `lambda = alpha^2 * (n + kappa) - n`.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct UnscentedTransformOptions {
     /// Sigma-point spread around the mean.
     pub alpha: f64,
@@ -68,6 +69,7 @@ impl UnscentedTransformOptions {
 
 /// UKF measurement-correction options.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub struct UkfUpdateOptions {
     /// Scaled unscented-transform parameters.
     pub transform: UnscentedTransformOptions,

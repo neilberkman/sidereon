@@ -124,48 +124,46 @@ fuzz_target!(|data: &[u8]| {
             signal::correlation_at(&chips, &other, input.ints[2]).map(f64::from),
         );
     }
+    let sample_rate_hz = input.params[0];
+    let num_samples = bounded_usize(input.bits[1], 0, 256);
+    let code_phase_chips = input.params[1];
+    let code_doppler_hz = input.params[2];
+    let mut replica_opts = ReplicaOptions::new(
+        sample_rate_hz,
+        num_samples,
+        code_phase_chips,
+        code_doppler_hz,
+    );
+    replica_opts.sample_rate_hz = sample_rate_hz;
+    replica_opts.num_samples = num_samples;
+    replica_opts.code_phase_chips = code_phase_chips;
+    replica_opts.code_doppler_hz = code_doppler_hz;
     assert_ok_or_err(
         "signal::replica",
-        signal::replica(
-            prn,
-            ReplicaOptions {
-                sample_rate_hz: input.params[0],
-                num_samples: bounded_usize(input.bits[1], 0, 256),
-                code_phase_chips: input.params[1],
-                code_doppler_hz: input.params[2],
-            },
-        ),
+        signal::replica(prn, replica_opts),
     );
     let iq = iq(&input);
+    let mut correlate_opts = CorrelateOptions::default();
+    correlate_opts.sample_rate_hz = input.params[0];
+    correlate_opts.doppler_hz = input.params[3];
+    correlate_opts.code_phase_chips = input.params[1];
+    correlate_opts.code_doppler_hz = input.params[2];
     assert_ok_finite_or_err(
         "signal::correlate",
-        signal::correlate(
-            &iq,
-            prn,
-            CorrelateOptions {
-                sample_rate_hz: input.params[0],
-                doppler_hz: input.params[3],
-                code_phase_chips: input.params[1],
-                code_doppler_hz: input.params[2],
-            },
-        ),
+        signal::correlate(&iq, prn, correlate_opts),
     );
     assert_ok_finite_or_err(
         "signal::correlate_against",
         signal::correlate_against(&iq, &chips, input.params[0], input.params[3]),
     );
+    let mut acq_opts = AcquisitionOptions::default();
+    acq_opts.sample_rate_hz = input.params[0];
+    acq_opts.doppler_min_hz = bounded_abs_or_raw(input.params[4], 5_000.0);
+    acq_opts.doppler_max_hz = bounded_abs_or_raw(input.params[5], 5_000.0);
+    acq_opts.doppler_step_hz = bounded_positive_or_raw(input.params[6], 1.0, 1_000.0);
     assert_ok_finite_or_err(
         "signal::acquire",
-        signal::acquire(
-            &iq,
-            prn,
-            AcquisitionOptions {
-                sample_rate_hz: input.params[0],
-                doppler_min_hz: bounded_abs_or_raw(input.params[4], 5_000.0),
-                doppler_max_hz: bounded_abs_or_raw(input.params[5], 5_000.0),
-                doppler_step_hz: bounded_positive_or_raw(input.params[6], 1.0, 1_000.0),
-            },
-        ),
+        signal::acquire(&iq, prn, acq_opts),
     );
     assert_ok_finite_or_err(
         "signal::coherent_loss",
@@ -316,6 +314,10 @@ fuzz_target!(|data: &[u8]| {
         observables::j2000_seconds_from_split(input.params[10], input.params[11]),
     );
     if let Ok(sat) = GnssSatelliteId::new(GnssSystem::Gps, 1) {
+        let mut predict_opts = PredictOptions::default();
+        predict_opts.carrier_hz = input.params[4];
+        predict_opts.light_time = input.bits[0] & 1 == 1;
+        predict_opts.sagnac = input.bits[1] & 1 == 1;
         assert_ok_finite_or_err(
             "observables::predict",
             observables::predict(
@@ -323,11 +325,7 @@ fuzz_target!(|data: &[u8]| {
                 sat,
                 input.receiver,
                 input.params[12],
-                PredictOptions {
-                    carrier_hz: input.params[4],
-                    light_time: input.bits[0] & 1 == 1,
-                    sagnac: input.bits[1] & 1 == 1,
-                },
+                predict_opts,
             ),
         );
     }

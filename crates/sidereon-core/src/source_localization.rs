@@ -70,10 +70,8 @@
 //!     })
 //!     .collect::<Vec<_>>();
 //!
-//! let options = SourceLocateOptions {
-//!     mode: SourceSolveMode::Toa,
-//!     ..SourceLocateOptions::default()
-//! };
+//! let mut options = SourceLocateOptions::default();
+//! options.mode = SourceSolveMode::Toa;
 //! let mut config = SourceLocateConfig::from(options);
 //! config.include_influence = false;
 //! let solution = locate_source_with(
@@ -163,6 +161,7 @@ pub enum SourceSolveMode {
 /// after 1.0 live on [`SourceLocateConfig`] and are passed through
 /// [`locate_source_with`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct SourceLocateOptions {
     /// ToA or TDOA residual form.
     pub mode: SourceSolveMode,

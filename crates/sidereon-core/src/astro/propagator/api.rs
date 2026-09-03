@@ -55,6 +55,7 @@ impl PropagationContext {
 /// point-output flag; [`crate::astro::integrators::DP54`] also uses the
 /// tolerance and adaptive step fields.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct IntegratorOptions {
     /// Additive error scale used by DP54 for the position and velocity error
     /// estimates. The adaptive validator requires a finite positive value;

@@ -41,6 +41,7 @@ pub const DEFAULT_TCA_POSITION_COVARIANCE_KM2: [[f64; 3]; 3] =
 
 /// Options for [`find_tca_candidates`] and [`find_tca_candidates_from_tles`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct TcaFinderOptions {
     /// Coarse sampling step used to bracket local range minima.
     pub coarse_step_seconds: f64,
@@ -172,6 +173,7 @@ impl Default for TcaPcCovariances {
 
 /// Collision-probability options for evaluating a TCA candidate.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct TcaPcOptions {
     /// Hard-body radius passed to the conjunction Pc module, km.
     pub hard_body_radius_km: f64,
@@ -182,6 +184,14 @@ pub struct TcaPcOptions {
 }
 
 impl TcaPcOptions {
+    /// Build Pc options with the documented fallback position covariance.
+    ///
+    /// The hard-body radius and probability method are required; covariances
+    /// default to [`DEFAULT_TCA_POSITION_COVARIANCE_KM2`].
+    pub fn new(hard_body_radius_km: f64, method: PcMethod) -> Self {
+        Self::with_default_covariance(hard_body_radius_km, method)
+    }
+
     /// Build Pc options using the fallback TCA position covariance.
     pub fn with_default_covariance(hard_body_radius_km: f64, method: PcMethod) -> Self {
         Self {
@@ -212,6 +222,7 @@ impl TcaPcOptions {
 /// Collision-probability and covariance-transport settings for screening
 /// helpers whose primary/secondary covariances vary by catalog object.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct TcaPropagatedCovarianceOptions {
     /// Hard-body radius passed to the conjunction Pc module, km.
     pub hard_body_radius_km: f64,
@@ -280,6 +291,7 @@ impl TcaPropagatedCovarianceOptions {
 
 /// Collision-probability options for propagating state covariances to a TCA.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct TcaPropagatedCovariancePcOptions {
     /// Hard-body radius passed to the conjunction Pc module, km.
     pub hard_body_radius_km: f64,
@@ -383,6 +395,7 @@ pub struct CatalogStateVector {
 
 /// Options for [`screen_state_vector_catalog`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct CatalogScreeningOptions {
     /// Coarse position-pair filter threshold, km.
     pub miss_threshold_km: f64,

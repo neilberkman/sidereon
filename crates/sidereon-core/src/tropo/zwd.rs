@@ -75,6 +75,7 @@ impl ZwdEpoch {
 
 /// Inputs controlling the XYZ ZWD slant-delay helper.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct ZwdSlantOptions {
     /// Epoch metadata for the XYZ calculation; its `day_of_year` drives the Niell seasonal term.
     pub epoch: ZwdEpoch,

@@ -8,14 +8,16 @@ use sidereon_core::rinex::qc::{lint_obs, repair_obs, RepairOptions};
 const MAX_INPUT_LEN: usize = 1 << 20;
 
 fn repair_options() -> RepairOptions {
-    RepairOptions {
-        set_interval: true,
-        set_time_of_last_obs: true,
-        set_obs_counts: true,
-        drop_empty_records: true,
-        drop_unsupported: true,
-        ..RepairOptions::default()
-    }
+    let base = RepairOptions::default();
+    let mut options = RepairOptions::default();
+    options.set_interval = true;
+    options.set_time_of_last_obs = true;
+    options.set_obs_counts = true;
+    options.drop_empty_records = true;
+    options.drop_unsupported = true;
+    options.file_stamp = base.file_stamp;
+    options.sort_records = base.sort_records;
+    options
 }
 
 fuzz_target!(|data: &[u8]| {

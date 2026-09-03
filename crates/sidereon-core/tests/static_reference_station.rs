@@ -93,64 +93,61 @@ fn carrier_options(
     reference_position_m: [f64; 3],
     max_epochs: usize,
 ) -> StaticReferenceCarrierRinexOptions {
-    StaticReferenceCarrierRinexOptions {
-        arc_options: RtkRinexArcOptions {
-            max_epochs: Some(max_epochs),
-            include_prediction_time: false,
-            ..RtkRinexArcOptions::gps_l1_c()
+    let mut arc_options = RtkRinexArcOptions::gps_l1_c();
+    arc_options.max_epochs = Some(max_epochs);
+    arc_options.include_prediction_time = false;
+    let update_opts = UpdateOpts {
+        hold_sigma_m: 1.0e-4,
+        position_tol_m: 1.0e-4,
+        ambiguity_tol_m: 1.0e-4,
+        max_iterations: 10,
+        process_noise_baseline_sigma_m: 0.0,
+        dynamics_model: DynamicsModel::ConstantPosition,
+        float_only_systems: Vec::new(),
+        report_residuals: true,
+        receiver_antenna_corrections: None,
+        ar_arming_sigma_m: None,
+        search: SearchOpts {
+            ratio_threshold: 3.0,
         },
-        static_config: RtkStaticArcConfig {
-            arc: RtkArcConfig {
-                base_m: reference_position_m,
-                reference: BaselineReferenceSelection::Auto,
-                model: simple_model(),
-                baseline_prior_sigma_m: 30.0,
-                ambiguity_prior_sigma_m: 30.0,
-                initial_baseline_m: [0.0, 0.0, 0.0],
-                wavelengths_m: BTreeMap::new(),
-                offsets_m: BTreeMap::new(),
-                update_opts: UpdateOpts {
-                    hold_sigma_m: 1.0e-4,
-                    position_tol_m: 1.0e-4,
-                    ambiguity_tol_m: 1.0e-4,
-                    max_iterations: 10,
-                    process_noise_baseline_sigma_m: 0.0,
-                    dynamics_model: DynamicsModel::ConstantPosition,
-                    float_only_systems: Vec::new(),
-                    report_residuals: true,
-                    receiver_antenna_corrections: None,
-                    ar_arming_sigma_m: None,
-                    search: SearchOpts {
-                        ratio_threshold: 3.0,
-                    },
-                },
-                preprocessing: RtkArcPreprocessing {
-                    cycle_slip: Some(CycleSlipPolicy::SplitArc),
-                    hatch_window_cap: None,
-                    elevation_mask_deg: None,
-                },
-            },
-            opts: ValidatedFixedSolveOpts {
-                float: FloatSolveOpts {
-                    position_tol_m: 1.0e-4,
-                    ambiguity_tol_m: 1.0e-4,
-                    max_iterations: 10,
-                },
-                fixed: FixedSolveOpts {
-                    position_tol_m: 1.0e-4,
-                    ambiguity_tol_m: 1.0e-4,
-                    max_iterations: 10,
-                    ratio_threshold: 3.0,
-                    partial_ambiguity_resolution: true,
-                    partial_min_ambiguities: 4,
-                },
-                residual: ResidualValidationOpts {
-                    threshold_sigma: None,
-                    max_exclusions: 0,
-                },
-            },
+    };
+    let preprocessing = RtkArcPreprocessing {
+        cycle_slip: Some(CycleSlipPolicy::SplitArc),
+        hatch_window_cap: None,
+        elevation_mask_deg: None,
+    };
+    let arc = RtkArcConfig::new(
+        reference_position_m,
+        BaselineReferenceSelection::Auto,
+        simple_model(),
+        30.0,
+        30.0,
+        [0.0, 0.0, 0.0],
+        BTreeMap::new(),
+        BTreeMap::new(),
+        update_opts,
+        preprocessing,
+    );
+    let opts = ValidatedFixedSolveOpts {
+        float: FloatSolveOpts {
+            position_tol_m: 1.0e-4,
+            ambiguity_tol_m: 1.0e-4,
+            max_iterations: 10,
         },
-    }
+        fixed: FixedSolveOpts {
+            position_tol_m: 1.0e-4,
+            ambiguity_tol_m: 1.0e-4,
+            max_iterations: 10,
+            ratio_threshold: 3.0,
+            partial_ambiguity_resolution: true,
+            partial_min_ambiguities: 4,
+        },
+        residual: ResidualValidationOpts {
+            threshold_sigma: None,
+            max_exclusions: 0,
+        },
+    };
+    StaticReferenceCarrierRinexOptions::new(arc_options, RtkStaticArcConfig::new(arc, opts))
 }
 
 fn assert_covariance_psd(covariance: [[f64; 3]; 3]) {

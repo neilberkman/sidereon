@@ -168,6 +168,7 @@ pub enum ConingCorrection {
 
 /// Configuration for ECEF strapdown mechanization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MechanizationConfig {
     /// Coning correction mode. The default is off.
     pub coning_correction: ConingCorrection,

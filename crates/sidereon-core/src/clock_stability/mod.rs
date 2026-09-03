@@ -113,6 +113,7 @@ impl Default for AllanEstimatorSet {
 
 /// Options for the combined Allan-family driver.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct AllanOptions {
     /// Which estimators to compute.
     pub estimators: AllanEstimatorSet,
@@ -257,6 +258,7 @@ pub fn allan_variance_power_law_tau_exponent(noise_type: PowerLawNoiseType) -> i
 
 /// Options for per-octave power-law identification and coefficient fitting.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct PowerLawNoiseOptions {
     /// Minimum tau points required before an octave can be classified.
     pub min_points_per_octave: usize,

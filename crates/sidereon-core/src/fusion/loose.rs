@@ -159,6 +159,7 @@ pub enum GnssFixStatus {
 
 /// Configuration for loose-coupled GNSS updates.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct LooseCouplingConfig {
     /// Body-frame vector from IMU origin to GNSS antenna phase center, in meters.
     pub lever_arm_body_m: [f64; 3],
@@ -255,6 +256,7 @@ impl GnssFixStatusWeighting {
 
 /// Stationarity detector and pseudo-measurement sigmas for ZUPT/ZARU.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct StationaryUpdateConfig {
     /// Detector thresholds over a trailing IMU epoch window.
     pub detector: StationaryDetectorConfig,
@@ -265,6 +267,21 @@ pub struct StationaryUpdateConfig {
 }
 
 impl StationaryUpdateConfig {
+    /// Build stationary-update settings from the detector and both required
+    /// pseudo-measurement sigmas.
+    #[must_use]
+    pub const fn new(
+        detector: StationaryDetectorConfig,
+        zero_velocity_sigma_mps: f64,
+        zero_angular_rate_sigma_rps: f64,
+    ) -> Self {
+        Self {
+            detector,
+            zero_velocity_sigma_mps,
+            zero_angular_rate_sigma_rps,
+        }
+    }
+
     /// Validate detector settings and pseudo-measurement sigmas.
     pub fn validate(&self) -> Result<(), FusionError> {
         self.detector.validate()?;
@@ -278,6 +295,7 @@ impl StationaryUpdateConfig {
 
 /// Windowed accel and gyro magnitude detector for stationary updates.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct StationaryDetectorConfig {
     /// Number of propagated IMU epochs required before the detector can fire.
     pub window_len: usize,
@@ -288,6 +306,20 @@ pub struct StationaryDetectorConfig {
 }
 
 impl StationaryDetectorConfig {
+    /// Build detector settings from all required window and threshold values.
+    #[must_use]
+    pub const fn new(
+        window_len: usize,
+        max_specific_force_norm_error_mps2: f64,
+        max_body_rate_wrt_ecef_norm_rps: f64,
+    ) -> Self {
+        Self {
+            window_len,
+            max_specific_force_norm_error_mps2,
+            max_body_rate_wrt_ecef_norm_rps,
+        }
+    }
+
     /// Validate finite, non-negative thresholds and non-empty window length.
     pub fn validate(&self) -> Result<(), FusionError> {
         if self.window_len == 0 {
@@ -306,6 +338,7 @@ impl StationaryDetectorConfig {
 
 /// Non-holonomic wheeled-vehicle velocity constraint settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct NonHolonomicConstraintConfig {
     /// One-sigma lateral body velocity pseudo-measurement noise in m/s.
     pub lateral_velocity_sigma_mps: f64,
@@ -318,6 +351,22 @@ pub struct NonHolonomicConstraintConfig {
 }
 
 impl NonHolonomicConstraintConfig {
+    /// Build non-holonomic settings from all required sigmas and motion gates.
+    #[must_use]
+    pub const fn new(
+        lateral_velocity_sigma_mps: f64,
+        vertical_velocity_sigma_mps: f64,
+        min_speed_mps: f64,
+        max_body_rate_wrt_ecef_norm_rps: f64,
+    ) -> Self {
+        Self {
+            lateral_velocity_sigma_mps,
+            vertical_velocity_sigma_mps,
+            min_speed_mps,
+            max_body_rate_wrt_ecef_norm_rps,
+        }
+    }
+
     /// Validate sigmas and motion gates.
     pub fn validate(&self) -> Result<(), FusionError> {
         validate_positive(
@@ -343,12 +392,21 @@ impl NonHolonomicConstraintConfig {
 /// outage entry. It is not an RTS smoother because it does not recurse through
 /// covariance, dynamics transitions, or later measurements.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct VelocityMatchingConfig {
     /// Maximum outage interval accepted by the matcher.
     pub max_outage_duration_s: f64,
 }
 
 impl VelocityMatchingConfig {
+    /// Build endpoint-matching settings from the required outage limit.
+    #[must_use]
+    pub const fn new(max_outage_duration_s: f64) -> Self {
+        Self {
+            max_outage_duration_s,
+        }
+    }
+
     /// Validate finite, positive duration bound.
     pub fn validate(&self) -> Result<(), FusionError> {
         validate_positive(self.max_outage_duration_s, "max_outage_duration_s")
@@ -456,6 +514,7 @@ impl YangPredictionAdaptiveFactor {
 
 /// Configuration for an [`InertialFilter`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct InertialFilterConfig {
     /// IMU stochastic model used for covariance prediction.
     pub imu_spec: ImuSpec,
