@@ -2,6 +2,26 @@
 
 All notable changes to `sidereon-core` are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- `GnssWeekTow::normalized` could return a time of week equal to a whole week
+  instead of a value inside `[0, 604800)`. A TOW a fraction of a nanosecond
+  before the week start borrows a week, and the borrow subtraction
+  `tow - (-1 * 604800)` rounds back up to exactly 604800, because binary64
+  spacing there is about 1.16e-10. The rounded result now carries into the
+  following week. RINEX 4 CNAV records reached this through the `top` field:
+  the pair serialized as week `w` with TOW 604800, which reparsed as week
+  `w + 1` with TOW 0, so a second encode differed from the first. Found by the
+  `rinex_nav_round_trip` fuzz target; the reproducer is kept in the committed
+  corpus.
+- The RINEX navigation writer now normalizes the `top` pair it is about to
+  write rather than the one it holds. The `D19.12` column rounds to twelve
+  mantissa digits, so a TOW just under the week length is written as a full
+  week regardless of how it was stored, and `GnssWeekTow` has public fields
+  that a caller can set outside the normalized range.
+
 ## [2.0.0] - 2026-09-03
 
 ### Changed

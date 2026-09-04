@@ -35,3 +35,10 @@
 !/corpus/fuzz_rtk/valid-zero-bytes
 !/corpus/fuzz_rtk/regression-rover-position-overflow
 !/corpus/fuzz_rtk/regression-antenna-pco-nonfinite
+
+# Keep the scheduled-fuzz reproducer for the CNAV week-borrow round trip while
+# continuing to ignore libFuzzer's generated corpus growth.
+!/corpus/rinex_nav_round_trip/
+/corpus/rinex_nav_round_trip/*
+!/corpus/rinex_nav_round_trip/valid-v4-cnav.rnx
+!/corpus/rinex_nav_round_trip/cnav-top-week-borrow-rounds-to-week-length
