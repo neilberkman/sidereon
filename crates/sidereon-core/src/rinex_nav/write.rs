@@ -17,10 +17,10 @@
 
 use core::fmt::Write as _;
 
-use crate::astro::constants::time::{SECONDS_PER_DAY_I64, SECONDS_PER_HOUR};
+use crate::astro::constants::time::{SECONDS_PER_DAY_I64, SECONDS_PER_HOUR, SECONDS_PER_WEEK};
 use crate::astro::time::civil::civil_from_julian_day_number;
 use crate::astro::time::gnss::week_epoch_julian_day_number;
-use crate::astro::time::model::TimeScale;
+use crate::astro::time::model::{GnssWeekTow, TimeScale};
 use crate::astro::time::scales::julian_day_number;
 use crate::id::GnssSystem;
 
@@ -121,6 +121,7 @@ fn write_record(out: &mut String, record: &BroadcastRecord) {
 #[allow(clippy::expect_used)]
 fn write_cnav_record(out: &mut String, record: &BroadcastRecord) {
     let cnav = record.cnav.expect("CNAV-family record carries cnav data");
+    let top = serialized_week_tow(cnav.top);
 
     let (year, month, day, hour, minute, second) = clock_epoch_civil(record);
     let sat_token = record.satellite_id.to_string();
@@ -137,7 +138,7 @@ fn write_cnav_record(out: &mut String, record: &BroadcastRecord) {
     let gd = &record.group_delays;
     write_orbit(out, [cnav.adot_m_s, e.crs, e.delta_n, e.m0]);
     write_orbit(out, [e.cuc, e.e, e.cus, e.sqrt_a]);
-    write_orbit(out, [cnav.top.tow_s, e.cic, e.omega0, e.cis]);
+    write_orbit(out, [top.tow_s, e.cic, e.omega0, e.cis]);
     write_orbit(out, [e.i0, e.crc, e.omega, e.omega_dot]);
     write_orbit(
         out,
@@ -173,7 +174,7 @@ fn write_cnav_record(out: &mut String, record: &BroadcastRecord) {
             out,
             [
                 Some(cnav.transmission_time_sow),
-                Some(f64::from(cnav.top.week)),
+                Some(f64::from(top.week)),
                 cnav.flags.map(f64::from),
                 None,
             ],
@@ -183,7 +184,7 @@ fn write_cnav_record(out: &mut String, record: &BroadcastRecord) {
             out,
             [
                 Some(cnav.transmission_time_sow),
-                Some(f64::from(cnav.top.week)),
+                Some(f64::from(top.week)),
                 cnav.flags.map(f64::from),
                 None,
             ],
@@ -296,6 +297,32 @@ pub(super) fn push_d19_12(out: &mut String, value: f64) {
     let exponent = d19_12_exponent(value);
     let sign = if negative { '-' } else { ' ' };
     let _ = write!(out, "{sign}{mantissa}e{exponent:+03}");
+}
+
+/// The `(week, TOW)` pair as it will read back after serialization.
+///
+/// [`push_d19_12`] rounds to twelve mantissa digits, so a TOW a fraction of a
+/// microsecond below the end of the week is written as exactly
+/// `604800.000000000000`. The parser normalizes that into the next week, which
+/// makes the raw pair a non-fixed point: encoding it once yields week `w` and
+/// TOW 604800, and encoding what that parses to yields week `w + 1` and TOW 0.
+/// Normalizing the rounded pair here, rather than the stored one, keeps
+/// `encode(parse(encode(x))) == encode(x)`.
+///
+/// Nothing is lost: the format cannot represent the sub-rounding difference
+/// between the stored TOW and the week boundary it rounds to.
+fn serialized_week_tow(week_tow: GnssWeekTow) -> GnssWeekTow {
+    let mut written = String::new();
+    push_d19_12(&mut written, week_tow.tow_s);
+    let Ok(rounded) = written.trim().parse::<f64>() else {
+        return week_tow;
+    };
+    if (0.0..SECONDS_PER_WEEK).contains(&rounded) {
+        return week_tow;
+    }
+    GnssWeekTow::new(week_tow.system, week_tow.week, rounded)
+        .and_then(GnssWeekTow::normalized)
+        .unwrap_or(week_tow)
 }
 
 /// The base-10 exponent [`push_d19_12`] emits for `value` (the rounded

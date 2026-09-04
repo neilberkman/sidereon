@@ -262,6 +262,19 @@ impl GnssWeekTow {
             .checked_add(weeks_carry as i64)
             .ok_or_else(|| invalid_input("tow_s", "week carry is out of range"))?;
         tow -= weeks_carry * SECONDS_PER_WEEK;
+        // The subtraction is not exact near the boundary. A TOW a fraction of
+        // a nanosecond below zero borrows a week, and `tow - (-1 * 604800)`
+        // rounds up to exactly 604800: binary64 spacing there is about
+        // 1.16e-10, so anything smaller than half of that vanishes. Carrying
+        // the rounded result keeps the postcondition this function documents,
+        // TOW in [0, SECONDS_PER_WEEK), which callers and the RINEX writer
+        // both rely on.
+        if tow >= SECONDS_PER_WEEK {
+            week = week
+                .checked_add(1)
+                .ok_or_else(|| invalid_input("tow_s", "week carry is out of range"))?;
+            tow = 0.0;
+        }
         if week < 0 {
             week = 0;
             tow = 0.0;
@@ -295,6 +308,44 @@ impl GnssWeekTow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A TOW a fraction of a nanosecond before the week start borrows a week,
+    /// and the borrow subtraction rounds back up to a full week: binary64
+    /// spacing near 604800 is about 1.16e-10, so `-5.7e-11 + 604800` is
+    /// exactly 604800. The result must still hold a seconds-of-week value.
+    #[test]
+    fn week_tow_borrow_that_rounds_to_a_full_week_carries_instead() {
+        for tow in [
+            -5.714_523_747_137e-11,
+            -1.0e-12,
+            -1.0e-11,
+            -f64::MIN_POSITIVE,
+        ] {
+            let normalized = GnssWeekTow::new(TimeScale::Gpst, 9, tow)
+                .expect("valid week/TOW")
+                .normalized()
+                .expect("normalizes");
+            assert!(
+                (0.0..SECONDS_PER_WEEK).contains(&normalized.tow_s),
+                "tow {tow:?} normalized to week {} tow {:?}, outside [0, {SECONDS_PER_WEEK})",
+                normalized.week,
+                normalized.tow_s
+            );
+            assert_eq!(
+                normalized.week, 9,
+                "tow {tow:?} rounds back to its own week"
+            );
+            assert_eq!(normalized.tow_s, 0.0, "tow {tow:?} lands at the week start");
+        }
+
+        // A borrow large enough to survive the rounding still borrows.
+        let borrowed = GnssWeekTow::new(TimeScale::Gpst, 9, -1.0e-6)
+            .expect("valid week/TOW")
+            .normalized()
+            .expect("normalizes");
+        assert_eq!(borrowed.week, 8);
+        assert!((0.0..SECONDS_PER_WEEK).contains(&borrowed.tow_s));
+    }
 
     #[test]
     fn split_julian_date_rejects_nonfinite_parts() {

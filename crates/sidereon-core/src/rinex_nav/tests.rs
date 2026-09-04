@@ -2443,6 +2443,52 @@ fn broadcast_store_prefers_legacy_by_default_and_can_select_cnav() {
     );
 }
 
+/// A CNAV `top` a hair before the start of its week must reach a stable
+/// encoding.
+///
+/// `top` is stored as a week plus seconds of week, and a tiny negative TOW
+/// borrows a week: `tow - (-1 * 604800)`. That subtraction is not exact.
+/// Binary64 spacing near 604800 is about 1.16e-10, so a TOW smaller than half
+/// of that vanishes and the result rounds to exactly one full week, which is
+/// outside the `[0, 604800)` range the pair is supposed to hold. Encoding then
+/// writes week `w` with TOW 604800, the parser reads that back as week `w + 1`
+/// with TOW 0, and a second encoding differs from the first.
+///
+/// Found by the `rinex_nav_round_trip` fuzz target; the input is kept as
+/// `fuzz/corpus/rinex_nav_round_trip/cnav-top-week-borrow-rounds-to-week-length`.
+#[test]
+fn cnav_top_borrowing_a_week_reaches_a_stable_encoding() {
+    let mut lines = cnav_lines("G03");
+    // Orbit line 3 column 1 is `top`, seconds of the WNop week.
+    lines[3] = cnav_orbit_line([
+        Some(-5.714_523_747_137e-11),
+        Some(-1.508_742_570_877e-7),
+        Some(2.572_838_528_869),
+        Some(1.359_730_958_939e-7),
+    ]);
+
+    let mut text = String::from(V4_NAV_HEADER);
+    text.push_str("> EPH G03 CNAV\n");
+    push_owned_lines(&mut text, &lines);
+
+    let records = parse_nav(&text).expect("parse CNAV record with a borrowed week");
+    let cnav = records[0].cnav.expect("CNAV record carries cnav data");
+    assert!(
+        (0.0..SECONDS_PER_WEEK).contains(&cnav.top.tow_s),
+        "parsed top must hold a seconds-of-week value, got week {} tow {:?}",
+        cnav.top.week,
+        cnav.top.tow_s
+    );
+
+    let encoded = encode_nav(&records);
+    let reparsed = parse_nav(&encoded).expect("reparse encoded CNAV record");
+    assert_eq!(
+        encode_nav(&reparsed),
+        encoded,
+        "encoding must be a fixed point across the week boundary"
+    );
+}
+
 #[test]
 fn cnav_records_round_trip_through_rinex4_writer() {
     let mut text = String::from(V4_NAV_HEADER);
