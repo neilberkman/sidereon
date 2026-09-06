@@ -79,7 +79,8 @@ use crate::astro::constants::MU_EARTH;
 use crate::constants::KM_TO_M;
 use crate::id::GnssSatelliteId;
 use crate::sp3::interp::{
-    instant_to_j2000_seconds, interpolate_precise_state, precise_node_j2000_seconds_from_instant,
+    instant_to_j2000_seconds, interpolate_precise_state, nominal_positive_spacing,
+    precise_node_j2000_seconds, precise_node_j2000_seconds_from_instant, sp3_epoch_j2000_seconds,
     NEVILLE_POINTS,
 };
 use crate::sp3::samples::PreciseEphemerisSample;
@@ -137,8 +138,6 @@ impl EpochWindow {
 /// interpolator, rather than accepted as a caller-supplied duration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StencilExtent {
-    grid_origin_j2000_s: f64,
-    interval_s: f64,
     before_s: f64,
     after_s: f64,
 }
@@ -146,17 +145,26 @@ pub struct StencilExtent {
 impl StencilExtent {
     /// Derive the interpolation reach for an SP3 product.
     ///
-    /// The degree-10 Lagrange substrate uses 11 nodes. They are centered on the
-    /// query only in the interior of a contiguous run: near either end the
-    /// interpolator keeps the node count and slides the window inward, so the
-    /// stencil becomes one-sided. A query in the last interval of a run selects
-    /// the final 11 nodes, which reach back up to ten intervals rather than
-    /// five, and a query in the first interval reaches ten intervals forward.
+    /// The position interpolator selects up to 11 nodes per satellite, and it
+    /// selects them from that satellite's own node series, not from the
+    /// product's header grid. Three things make the selected span wider than
+    /// the centered five intervals a header-grid view suggests:
     ///
-    /// The reach reported here is therefore ten intervals on each side, the
-    /// widest window the interpolator can select anywhere in the product.
-    /// Reporting the centered five would understate it, and it understates it
-    /// in the unsafe direction: a window-scoped verdict such as
+    /// - At either end of a contiguous run the window keeps its node count and
+    ///   slides inward, so a query in the last interval reaches ten spacings
+    ///   back rather than five.
+    /// - A query up to one spacing outside a run is still served (across a
+    ///   coverage gap it is anchored to the nearer run), so the farthest node
+    ///   can sit eleven spacings away.
+    /// - The spacing is the satellite's own nominal spacing, estimated exactly
+    ///   as the interpolator does from its actual nodes. A satellite sampled
+    ///   every 600 s in a 300 s product has an 11-node span of 6,000 s.
+    ///
+    /// The reach reported here is therefore eleven times the largest
+    /// per-satellite nominal spacing in the product, the widest window the
+    /// interpolator can select for any satellite anywhere in it. A satellite
+    /// with fewer than two nodes falls back to the header interval. Understating
+    /// the reach errs in the unsafe direction: a window-scoped verdict such as
     /// [`ContinuityReport::verdict_for_window`] would accept a window whose
     /// interpolation selects a node the defect sits on.
     ///
@@ -168,53 +176,67 @@ impl StencilExtent {
                 "SP3 stencil extent requires a positive finite epoch interval".to_string(),
             ));
         }
-        let grid_origin_j2000_s = sp3
+        if !sp3
             .epochs_j2000_seconds()
             .first()
-            .copied()
-            .filter(|epoch| epoch.is_finite())
-            .ok_or_else(|| {
-                Error::InvalidInput(
-                    "SP3 stencil extent requires at least one representable epoch".to_string(),
-                )
-            })?;
-        // The window slides but never shrinks, so the furthest a selected node
-        // can sit from the pivot is the full span of the stencil.
-        let widest_span_s = (NEVILLE_POINTS - 1) as f64 * interval_s;
+            .is_some_and(|epoch| epoch.is_finite())
+        {
+            return Err(Error::InvalidInput(
+                "SP3 stencil extent requires at least one representable epoch".to_string(),
+            ));
+        }
+
+        // Largest nominal spacing over the satellites' actual node series,
+        // using the interpolator's own estimator so the two cannot disagree.
+        let mut widest_spacing_s = interval_s;
+        for sat in sp3.satellites() {
+            let mut nodes = Vec::new();
+            for (idx, epoch) in sp3.epochs.iter().enumerate() {
+                if sp3.interp_raw[idx].contains_key(sat) {
+                    if let Some(seconds) = sp3_epoch_j2000_seconds(sp3, idx, epoch) {
+                        nodes.push(precise_node_j2000_seconds(seconds));
+                    }
+                }
+            }
+            if let Some(spacing) = nominal_positive_spacing(&nodes) {
+                widest_spacing_s = widest_spacing_s.max(spacing);
+            }
+        }
+
+        let reach_s = NEVILLE_POINTS as f64 * widest_spacing_s;
         Ok(Self {
-            grid_origin_j2000_s,
-            interval_s,
-            before_s: widest_span_s,
-            after_s: widest_span_s,
+            before_s: reach_s,
+            after_s: reach_s,
         })
     }
 
     /// Reach before an evaluated epoch, seconds.
     ///
-    /// The widest stencil the interpolator can select, which is the one it uses
-    /// at the end of a contiguous run, not the centered interior stencil.
+    /// Eleven times the widest per-satellite nominal spacing: the farthest a
+    /// selected node can sit behind a query, at a run end or when a query one
+    /// spacing past a run is still served.
     pub fn before_s(self) -> f64 {
         self.before_s
     }
 
     /// Reach after an evaluated epoch, seconds.
     ///
-    /// The widest stencil the interpolator can select, which is the one it uses
-    /// at the start of a contiguous run, not the centered interior stencil.
+    /// Eleven times the widest per-satellite nominal spacing: the farthest a
+    /// selected node can sit ahead of a query, at a run start or when a query
+    /// one spacing before a run is anchored to it across a gap.
     pub fn after_s(self) -> f64 {
         self.after_s
     }
 
-    /// Union of grid nodes the interpolator can select for any query in
-    /// `window`, covering the inward slide at a run edge.
+    /// Time span that can contain a node selected for any query in `window`.
+    ///
+    /// Measured from the window bounds themselves. An earlier version snapped
+    /// each bound to the header grid first; on the upper side that snap moved
+    /// the bound earlier and let a selected node fall outside it.
     fn influence_bounds(self, window: EpochWindow) -> (f64, f64) {
-        let pivot_at_or_before = |query: f64| {
-            self.grid_origin_j2000_s
-                + ((query - self.grid_origin_j2000_s) / self.interval_s).floor() * self.interval_s
-        };
         (
-            pivot_at_or_before(window.from_j2000_s) - self.before_s,
-            pivot_at_or_before(window.through_j2000_s) + self.after_s,
+            window.from_j2000_s - self.before_s,
+            window.through_j2000_s + self.after_s,
         )
     }
 }

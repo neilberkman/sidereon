@@ -301,28 +301,46 @@ pub(super) fn push_d19_12(out: &mut String, value: f64) {
 
 /// The `(week, TOW)` pair as it will read back after serialization.
 ///
-/// [`push_d19_12`] rounds to twelve mantissa digits, so a TOW a fraction of a
-/// microsecond below the end of the week is written as exactly
+/// [`push_d19_12`] keeps twelve fractional mantissa digits, so a TOW within a
+/// tenth of a microsecond of the week boundary is written as exactly
 /// `604800.000000000000`. The parser normalizes that into the next week, which
-/// makes the raw pair a non-fixed point: encoding it once yields week `w` and
-/// TOW 604800, and encoding what that parses to yields week `w + 1` and TOW 0.
-/// Normalizing the rounded pair here, rather than the stored one, keeps
-/// `encode(parse(encode(x))) == encode(x)`.
+/// makes the stored pair a non-fixed point: encoding it once yields week `w`
+/// and TOW 604800, and encoding what that parses to yields week `w + 1` and
+/// TOW 0. Normalizing the pair as it will be written, rather than as stored,
+/// keeps `encode(parse(encode(x))) == encode(x)`.
+///
+/// Normalizing can itself land back on the boundary: a stored `(9, -1e-8)`
+/// normalizes to `(8, 604799.99999999)`, which the column again writes as a
+/// full week. So the check repeats on the normalized value until the written
+/// TOW is inside the week; two rounds are always enough because each round
+/// moves the pair by a whole week.
 ///
 /// Nothing is lost: the format cannot represent the sub-rounding difference
 /// between the stored TOW and the week boundary it rounds to.
 fn serialized_week_tow(week_tow: GnssWeekTow) -> GnssWeekTow {
-    let mut written = String::new();
-    push_d19_12(&mut written, week_tow.tow_s);
-    let Ok(rounded) = written.trim().parse::<f64>() else {
-        return week_tow;
+    let written_tow = |tow_s: f64| {
+        let mut written = String::new();
+        push_d19_12(&mut written, tow_s);
+        written.trim().parse::<f64>().ok()
     };
-    if (0.0..SECONDS_PER_WEEK).contains(&rounded) {
-        return week_tow;
+    let mut current = week_tow;
+    for _ in 0..3 {
+        let Some(rounded) = written_tow(current.tow_s) else {
+            return current;
+        };
+        if (0.0..SECONDS_PER_WEEK).contains(&rounded) {
+            return current;
+        }
+        match GnssWeekTow::new(current.system, current.week, rounded)
+            .and_then(GnssWeekTow::normalized)
+        {
+            Ok(normalized) => current = normalized,
+            // The week cannot carry any further (u32 range); the stored pair is
+            // the best representable answer and is written as it is.
+            Err(_) => return current,
+        }
     }
-    GnssWeekTow::new(week_tow.system, week_tow.week, rounded)
-        .and_then(GnssWeekTow::normalized)
-        .unwrap_or(week_tow)
+    current
 }
 
 /// The base-10 exponent [`push_d19_12`] emits for `value` (the rounded

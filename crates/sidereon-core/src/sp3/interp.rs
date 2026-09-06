@@ -458,7 +458,7 @@ fn map_query_input(error: validate::FieldError) -> Error {
     Error::InvalidInput(format!("{} {}", error.field(), error.reason()))
 }
 
-fn nominal_positive_spacing(x: &[f64]) -> Option<f64> {
+pub(super) fn nominal_positive_spacing(x: &[f64]) -> Option<f64> {
     let nominal = x
         .windows(2)
         .map(|w| w[1] - w[0])

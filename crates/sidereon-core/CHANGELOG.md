@@ -7,30 +7,39 @@ All notable changes to `sidereon-core` are documented here.
 ### Fixed
 
 - `StencilExtent::for_sp3` reported the SP3 interpolator's reach as five
-  product intervals on each side, the centered interior stencil. At either end
-  of a contiguous run the interpolator keeps its 11 nodes and slides the window
-  inward, so a query in the final interval selects nodes up to ten intervals
-  back. The reach is now ten intervals, the widest stencil the interpolator can
-  select. The old value erred in the unsafe direction: a window-scoped
-  continuity verdict could report Accept for a defect sitting on a node the
-  interpolation actually used. Measured on the committed CODE final product,
-  perturbing a node 1,650 s before a query in the last interval moves the
-  interpolated position by 3.36 m while the reported reach was 1,500 s.
-- `GnssWeekTow::normalized` could return a time of week equal to a whole week
-  instead of a value inside `[0, 604800)`. A TOW a fraction of a nanosecond
-  before the week start borrows a week, and the borrow subtraction
-  `tow - (-1 * 604800)` rounds back up to exactly 604800, because binary64
-  spacing there is about 1.16e-10. The rounded result now carries into the
-  following week. RINEX 4 CNAV records reached this through the `top` field:
-  the pair serialized as week `w` with TOW 604800, which reparsed as week
-  `w + 1` with TOW 0, so a second encode differed from the first. Found by the
-  `rinex_nav_round_trip` fuzz target; the reproducer is kept in the committed
-  corpus.
-- The RINEX navigation writer now normalizes the `top` pair it is about to
-  write rather than the one it holds. The `D19.12` column rounds to twelve
-  mantissa digits, so a TOW just under the week length is written as a full
-  week regardless of how it was stored, and `GnssWeekTow` has public fields
-  that a caller can set outside the normalized range.
+  product intervals on each side, the centered interior stencil. The
+  interpolator selects up to 11 nodes from each satellite's own node series:
+  at a run edge it keeps the count and slides the window inward (ten spacings
+  back for a query in the last interval), it still serves a query one spacing
+  outside a run (eleven spacings to the farthest node), and the spacing is the
+  satellite's, so a satellite sampled every 600 s in a 300 s product spans
+  6,000 s. The reach is now eleven times the widest per-satellite nominal
+  spacing, estimated with the interpolator's own estimator, and the influence
+  bounds are measured from the window bounds instead of a header-grid snap
+  that could move the upper bound earlier than a selected node. The old value
+  erred in the unsafe direction: a window-scoped verdict could report Accept
+  for a defect on a node the interpolation used. Measured on the committed
+  CODE final product, perturbing a node 1,650 s before a query in the last
+  interval moves the interpolated position by 3.36 m.
+- `GnssWeekTow::normalized` could return a time of week outside `[0, 604800)`.
+  A TOW a fraction of a nanosecond before the week start borrows a week, and
+  the borrow subtraction `tow - (-1 * 604800)` rounds back up to exactly
+  604800, because binary64 spacing there is about 1.16e-10; the rounded result
+  now carries into the following week. A negative subnormal TOW never borrowed
+  at all, because dividing it by the week length underflows to -0.0; it now
+  lands on the week start. RINEX 4 CNAV records reached the first case through
+  the `top` field: the pair serialized as week `w` with TOW 604800, which
+  reparsed as week `w + 1` with TOW 0, so a second encode differed from the
+  first. Found by the `rinex_nav_round_trip` fuzz target; the reproducer is in
+  the committed corpus. Correcting the pair also corrects the CNAV `dt_op`
+  term that subtracts weeks and TOW separately, which for the affected records
+  shifts the URA by a few ulp.
+- The RINEX navigation writer now normalizes the `top` pair as it will be
+  written rather than as stored, and repeats that on the normalized value,
+  because normalizing `(9, -1e-8)` yields `(8, 604799.99999999)`, which the
+  `D19.12` column writes as a full week again. `GnssWeekTow` has public fields
+  that a caller can set outside the normalized range, so the writer cannot rely
+  on its input being normalized.
 
 ## [2.0.0] - 2026-09-03
 

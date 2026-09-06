@@ -9,13 +9,18 @@ inclusive epoch window.
 ## Decision
 
 `EpochWindow` is expressed in seconds since J2000 on the SP3 product's own time
-scale. `StencilExtent::for_sp3` derives five intervals of reach before and after
-an evaluation epoch. Five is not a policy value supplied by the caller. It comes
-from the same `NEVILLE_POINTS = 11` constant used by the degree-10 sliding-window
-Lagrange position interpolator. The interval comes from the product header and
-must be positive and finite. The product's first epoch anchors the nominal grid.
-For non-node query times, filtering follows the interpolator by selecting the
-last grid node at or before each window bound before applying the five-interval
+scale. `StencilExtent::for_sp3` derives eleven spacings of reach before and
+after an evaluation epoch, where the spacing is the widest per-satellite nominal
+node spacing in the product, estimated exactly as the position interpolator
+estimates it. Eleven is not a policy value supplied by the caller. It comes from
+the same `NEVILLE_POINTS = 11` constant the degree-10 sliding-window Lagrange
+interpolator uses, plus how that window behaves at run edges: it keeps its node
+count and slides inward, so a query in a run's last interval reaches ten
+spacings back, and a query up to one spacing outside a run is still served, so
+the farthest selected node can sit eleven spacings away. The header interval
+must be positive and finite and is the fallback for a satellite with fewer than
+two nodes. The bounds are measured from the window bounds directly; snapping
+them to the header grid first let a selected node fall outside the upper bound.
 reach.
 
 A defect influences the window when its recorded epoch or epoch pair intersects

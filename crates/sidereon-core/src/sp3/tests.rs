@@ -1555,3 +1555,118 @@ EOF
         "parse -> write -> parse changed product"
     );
 }
+
+fn grg_final_product() -> Sp3 {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3"
+    );
+    let bytes = std::fs::read(path).expect("read committed SP3 fixture");
+    Sp3::parse(&bytes).expect("parse committed SP3 fixture")
+}
+
+/// An `Instant` `offset_s` after the product's epoch `idx`, on its time scale.
+fn instant_after_epoch(
+    product: &Sp3,
+    idx: usize,
+    offset_s: f64,
+) -> crate::astro::time::model::Instant {
+    use crate::astro::time::civil::split_julian_date_add_seconds;
+    use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit};
+    let epoch = product.epochs[idx];
+    match epoch.repr {
+        InstantRepr::JulianDate(split) => {
+            let (jd_whole, fraction) =
+                split_julian_date_add_seconds(split.jd_whole, split.fraction, offset_s);
+            Instant::from_julian_date(
+                epoch.scale,
+                JulianDateSplit::new(jd_whole, fraction).expect("shifted split epoch"),
+            )
+        }
+        InstantRepr::Nanos(nanos) => {
+            Instant::from_nanos(epoch.scale, nanos + (offset_s * 1.0e9).round() as i128)
+        }
+    }
+}
+
+/// The reported reach follows the sparsest satellite's own node spacing, not
+/// the header interval: the interpolator selects nodes per satellite.
+#[test]
+fn stencil_reach_follows_the_widest_per_satellite_spacing() {
+    use super::continuity::StencilExtent;
+    use super::interp::NEVILLE_POINTS;
+
+    let dense = grg_final_product();
+    assert_eq!(dense.header.epoch_interval_s, 900.0);
+    let dense_reach = StencilExtent::for_sp3(&dense).expect("dense product stencil");
+    assert_eq!(dense_reach.before_s(), NEVILLE_POINTS as f64 * 900.0);
+    assert_eq!(dense_reach.after_s(), NEVILLE_POINTS as f64 * 900.0);
+
+    // Thin one satellite to every other epoch. Its nominal spacing is now
+    // 1,800 s, so its 11-node span is 18,000 s and a defect up to 19,800 s
+    // from a query can sit on a node that evaluates it.
+    let mut sparse = dense.clone();
+    let sat = sparse.satellites()[0];
+    for idx in (1..sparse.interp_raw.len()).step_by(2) {
+        sparse.interp_raw[idx].remove(&sat);
+    }
+    let sparse_reach = StencilExtent::for_sp3(&sparse).expect("sparse product stencil");
+    assert_eq!(sparse_reach.before_s(), NEVILLE_POINTS as f64 * 1_800.0);
+    assert_eq!(sparse_reach.after_s(), NEVILLE_POINTS as f64 * 1_800.0);
+}
+
+/// Every node that moves a run-end query lies inside the reported reach.
+///
+/// This drives the real interpolator rather than an injected report. A node
+/// counts as selected if perturbing it by one meter moves the interpolated
+/// position at all. At the product's final interval the stencil slides inward,
+/// so the selected nodes reach far behind the query; each of them must be
+/// within `before_s` of it, or a window verdict could accept a defect on a node
+/// the interpolation used.
+#[test]
+fn every_node_that_moves_a_run_end_query_is_inside_the_reported_reach() {
+    use super::continuity::StencilExtent;
+    use super::interp::NEVILLE_POINTS;
+
+    let product = grg_final_product();
+    let stencil = StencilExtent::for_sp3(&product).expect("product stencil");
+    let sat = product.satellites()[0];
+    let nodes = product.epochs_j2000_seconds();
+    let n = nodes.len();
+    let half_interval_s = 0.5 * (nodes[n - 1] - nodes[n - 2]);
+    let query = instant_after_epoch(&product, n - 2, half_interval_s);
+    let query_s = nodes[n - 2] + half_interval_s;
+
+    let baseline = product
+        .position(sat, query)
+        .expect("baseline interpolation")
+        .position;
+
+    let mut moved = Vec::new();
+    for idx in 0..n {
+        let mut perturbed = product.clone();
+        let Some(raw) = perturbed.interp_raw[idx].get_mut(&sat) else {
+            continue;
+        };
+        raw.km[0] += 1.0e-3;
+        let shifted = perturbed
+            .position(sat, query)
+            .expect("perturbed interpolation")
+            .position;
+        if shifted != baseline {
+            moved.push(idx);
+        }
+    }
+    assert!(
+        moved.len() >= NEVILLE_POINTS - 1,
+        "the run-end stencil should select most of the last {NEVILLE_POINTS} nodes, got {moved:?}"
+    );
+    for idx in moved {
+        let distance_s = query_s - nodes[idx];
+        assert!(
+            distance_s <= stencil.before_s(),
+            "node {idx}, {distance_s:.0} s before the query, moves it but sits outside the reported reach of {:.0} s",
+            stencil.before_s()
+        );
+    }
+}
