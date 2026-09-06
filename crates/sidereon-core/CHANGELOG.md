@@ -2,7 +2,7 @@
 
 All notable changes to `sidereon-core` are documented here.
 
-## [Unreleased]
+## [2.1.0] - 2026-09-05
 
 ### Added
 
