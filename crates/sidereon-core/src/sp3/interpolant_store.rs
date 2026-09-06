@@ -1297,7 +1297,8 @@ fn interpolate_mapped_state(
         // Same failure as the in-memory path: admitted nodes far from the
         // query can coincide at its precision and zero a Neville denominator.
         return Err(Error::InvalidInput(format!(
-            "selected nodes are not distinct at the precision of query {query}"
+            "non-finite interpolated position at query {query}: the selected nodes are not \
+             distinct at its precision, or the coordinates overflow"
         )));
     }
     let clock_s = interpolate_mapped_clock(bytes, series, query);

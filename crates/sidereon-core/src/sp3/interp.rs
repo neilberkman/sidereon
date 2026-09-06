@@ -481,7 +481,8 @@ fn interpolate_precise_position(
         // Neville divides by node-minus-node offsets measured from the query;
         // nodes admitted far from the query can coincide at its precision.
         return Err(Error::InvalidInput(format!(
-            "{sat}: selected nodes are not distinct at the precision of query {query}"
+            "{sat}: non-finite interpolated position at query {query}: the selected nodes \
+             are not distinct at its precision, or the coordinates overflow"
         )));
     }
     Ok((x_m, y_m, z_m))
