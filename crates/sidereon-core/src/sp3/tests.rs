@@ -1565,66 +1565,68 @@ fn grg_final_product() -> Sp3 {
     Sp3::parse(&bytes).expect("parse committed SP3 fixture")
 }
 
-/// An `Instant` `offset_s` after the product's epoch `idx`, on its time scale.
-fn instant_after_epoch(
-    product: &Sp3,
-    idx: usize,
-    offset_s: f64,
-) -> crate::astro::time::model::Instant {
-    use crate::astro::time::civil::split_julian_date_add_seconds;
-    use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit};
-    let epoch = product.epochs[idx];
-    match epoch.repr {
-        InstantRepr::JulianDate(split) => {
-            let (jd_whole, fraction) =
-                split_julian_date_add_seconds(split.jd_whole, split.fraction, offset_s);
-            Instant::from_julian_date(
-                epoch.scale,
-                JulianDateSplit::new(jd_whole, fraction).expect("shifted split epoch"),
-            )
-        }
-        InstantRepr::Nanos(nanos) => {
-            Instant::from_nanos(epoch.scale, nanos + (offset_s * 1.0e9).round() as i128)
-        }
-    }
+/// `epochs` is public; a product whose epoch list has been extended past its
+/// node table must still produce a reach rather than index past the table.
+#[test]
+fn stencil_reach_tolerates_epochs_beyond_the_node_table() {
+    use super::continuity::StencilExtent;
+
+    let mut product = grg_final_product();
+    let reach_before = StencilExtent::for_sp3(&product).expect("product stencil");
+    let last = *product.epochs.last().expect("fixture has epochs");
+    product.epochs.push(last);
+    let reach_after =
+        StencilExtent::for_sp3(&product).expect("an extended epoch list must not panic");
+    assert_eq!(reach_after, reach_before);
 }
 
-/// The reported reach follows the sparsest satellite's own node spacing, not
-/// the header interval: the interpolator selects nodes per satellite.
+/// A uniformly sampled product's reach is eleven header intervals: ten for the
+/// window span plus one for the served extrapolation past a run.
 #[test]
-fn stencil_reach_follows_the_widest_per_satellite_spacing() {
+fn stencil_reach_of_a_uniform_product_is_eleven_intervals() {
     use super::continuity::StencilExtent;
     use super::interp::NEVILLE_POINTS;
 
     let dense = grg_final_product();
     assert_eq!(dense.header.epoch_interval_s, 900.0);
-    let dense_reach = StencilExtent::for_sp3(&dense).expect("dense product stencil");
-    assert_eq!(dense_reach.before_s(), NEVILLE_POINTS as f64 * 900.0);
-    assert_eq!(dense_reach.after_s(), NEVILLE_POINTS as f64 * 900.0);
+    let reach = StencilExtent::for_sp3(&dense).expect("dense product stencil");
+    assert_eq!(reach.before_s(), NEVILLE_POINTS as f64 * 900.0);
+    assert_eq!(reach.after_s(), NEVILLE_POINTS as f64 * 900.0);
+}
 
-    // Thin one satellite to every other epoch. Its nominal spacing is now
-    // 1,800 s, so its 11-node span is 18,000 s and a defect up to 19,800 s
-    // from a query can sit on a node that evaluates it.
+/// The reach follows the sparsest satellite's own node series, not the header
+/// interval, because the interpolator selects nodes per satellite.
+#[test]
+fn stencil_reach_follows_the_sparsest_satellite() {
+    use super::continuity::StencilExtent;
+
+    let dense = grg_final_product();
+    let dense_reach = StencilExtent::for_sp3(&dense).expect("dense product stencil");
+
+    // Thin one satellite to every other epoch: its nodes are 1,800 s apart, so
+    // its widest 11-node window spans 18,000 s and a query served one spacing
+    // past it reaches a node 19,800 s away.
     let mut sparse = dense.clone();
     let sat = sparse.satellites()[0];
     for idx in (1..sparse.interp_raw.len()).step_by(2) {
         sparse.interp_raw[idx].remove(&sat);
     }
     let sparse_reach = StencilExtent::for_sp3(&sparse).expect("sparse product stencil");
-    assert_eq!(sparse_reach.before_s(), NEVILLE_POINTS as f64 * 1_800.0);
-    assert_eq!(sparse_reach.after_s(), NEVILLE_POINTS as f64 * 1_800.0);
+    assert!(sparse_reach.before_s() > dense_reach.before_s());
+    assert_eq!(sparse_reach.before_s(), 10.0 * 1_800.0 + 1_800.0);
+    assert_eq!(sparse_reach.after_s(), sparse_reach.before_s());
 }
 
-/// Every node that moves a run-end query lies inside the reported reach.
+/// Every node that moves a query served one spacing past the run lies inside
+/// the reported reach.
 ///
 /// This drives the real interpolator rather than an injected report. A node
 /// counts as selected if perturbing it by one meter moves the interpolated
-/// position at all. At the product's final interval the stencil slides inward,
-/// so the selected nodes reach far behind the query; each of them must be
-/// within `before_s` of it, or a window verdict could accept a defect on a node
-/// the interpolation used.
+/// position at all. The query sits half a spacing past the last node, which
+/// the interpolator serves by extrapolation, so the window is the run's final
+/// eleven nodes and the farthest of them is ten and a half spacings back.
 #[test]
-fn every_node_that_moves_a_run_end_query_is_inside_the_reported_reach() {
+fn every_node_that_moves_an_extrapolated_run_end_query_is_inside_the_reported_reach() {
     use super::continuity::StencilExtent;
     use super::interp::NEVILLE_POINTS;
 
@@ -1633,13 +1635,12 @@ fn every_node_that_moves_a_run_end_query_is_inside_the_reported_reach() {
     let sat = product.satellites()[0];
     let nodes = product.epochs_j2000_seconds();
     let n = nodes.len();
-    let half_interval_s = 0.5 * (nodes[n - 1] - nodes[n - 2]);
-    let query = instant_after_epoch(&product, n - 2, half_interval_s);
-    let query_s = nodes[n - 2] + half_interval_s;
+    let spacing_s = nodes[n - 1] - nodes[n - 2];
+    let query_s = nodes[n - 1] + 0.5 * spacing_s;
 
     let baseline = product
-        .position(sat, query)
-        .expect("baseline interpolation")
+        .position_at_j2000_seconds(sat, query_s)
+        .expect("a query half a spacing past the last node is served")
         .position;
 
     let mut moved = Vec::new();
@@ -1650,16 +1651,17 @@ fn every_node_that_moves_a_run_end_query_is_inside_the_reported_reach() {
         };
         raw.km[0] += 1.0e-3;
         let shifted = perturbed
-            .position(sat, query)
+            .position_at_j2000_seconds(sat, query_s)
             .expect("perturbed interpolation")
             .position;
         if shifted != baseline {
             moved.push(idx);
         }
     }
-    assert!(
-        moved.len() >= NEVILLE_POINTS - 1,
-        "the run-end stencil should select most of the last {NEVILLE_POINTS} nodes, got {moved:?}"
+    assert_eq!(
+        moved.len(),
+        NEVILLE_POINTS,
+        "the run-end stencil should select the last {NEVILLE_POINTS} nodes, got {moved:?}"
     );
     for idx in moved {
         let distance_s = query_s - nodes[idx];
@@ -1669,4 +1671,61 @@ fn every_node_that_moves_a_run_end_query_is_inside_the_reported_reach() {
             stencil.before_s()
         );
     }
+}
+
+/// A run with irregular gaps spans more than eleven nominal spacings.
+///
+/// The nominal spacing is the smallest gap, and a run tolerates gaps up to 1.5
+/// times that. Eleven nodes at 0, 600, 1500, 2400, ..., 8700 s have a nominal
+/// spacing of 600 s but span 8,700 s, and a query 300 s past the last node is
+/// served with all eleven selected, so the first node sits 9,000 s from the
+/// query. A reach of eleven nominal spacings (6,600 s) would let a window
+/// verdict accept a defect on that node.
+#[test]
+fn stencil_reach_covers_an_irregular_run_wider_than_eleven_nominal_spacings() {
+    use super::continuity::StencilExtent;
+
+    let mut product = {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/sp3/COD0MGXFIN_20201770000_01D_05M_ORB.SP3"
+        );
+        let bytes = std::fs::read(path).expect("read committed CODE product");
+        Sp3::parse(&bytes).expect("parse committed CODE product")
+    };
+    assert_eq!(product.header.epoch_interval_s, 300.0);
+    let sat = product.satellites()[0];
+    let keep: [usize; 11] = [0, 2, 5, 8, 11, 14, 17, 20, 23, 26, 29];
+    for idx in 0..product.interp_raw.len() {
+        if !keep.contains(&idx) {
+            product.interp_raw[idx].remove(&sat);
+        }
+    }
+    let nodes = product.epochs_j2000_seconds();
+    let query_s = nodes[0] + 9_000.0;
+
+    let stencil = StencilExtent::for_sp3(&product).expect("product stencil");
+    assert!(
+        stencil.before_s() >= 9_000.0,
+        "reach {:.0} s does not cover a selected node 9,000 s from a served query",
+        stencil.before_s()
+    );
+
+    let baseline = product
+        .position_at_j2000_seconds(sat, query_s)
+        .expect("a query 300 s past the last node is served")
+        .position;
+    let mut perturbed = product.clone();
+    perturbed.interp_raw[0]
+        .get_mut(&sat)
+        .expect("first node kept")
+        .km[2] += 1.0e-3;
+    let shifted = perturbed
+        .position_at_j2000_seconds(sat, query_s)
+        .expect("perturbed interpolation")
+        .position;
+    assert_ne!(
+        shifted, baseline,
+        "the first node is selected for this query"
+    );
 }

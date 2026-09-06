@@ -437,7 +437,7 @@ fn interpolate_precise_position(
         return Err(Error::EpochOutOfRange);
     }
 
-    let gap_thresh = 1.5 * nominal;
+    let gap_thresh = GAP_THRESHOLD_FACTOR * nominal;
     let mut bi = 0usize;
     while bi + 1 < pos_x.len() && pos_x[bi + 1] <= query {
         bi += 1;
@@ -456,6 +456,42 @@ fn interpolate_precise_position(
 
 fn map_query_input(error: validate::FieldError) -> Error {
     Error::InvalidInput(format!("{} {}", error.field(), error.reason()))
+}
+
+/// Farthest a selected node can sit from any query this series serves.
+///
+/// Derived from the same rules the position interpolator applies to `x`, so
+/// the two cannot disagree: nodes split into contiguous runs at gaps wider than
+/// [`GAP_THRESHOLD_FACTOR`] times the nominal spacing; within a run the window
+/// holds `min(NEVILLE_POINTS, run_len)` consecutive nodes and slides inward at
+/// the run edges; and a query is served up to one nominal spacing outside the
+/// node span or across a gap, anchored to the nearer run. The farthest node is
+/// therefore at most one window span plus one nominal spacing from the query.
+///
+/// The span is measured from the actual nodes, not from the nominal spacing
+/// times the node count, because a run admits gaps up to 1.5 times nominal:
+/// eleven nodes at 0, 600, 1500, 2400, ..., 8700 s have nominal spacing 600 s
+/// and a window span of 8,700 s, not 6,000 s. Returns `None` for fewer than two
+/// nodes, which the interpolator refuses to serve.
+pub(super) fn selectable_reach_s(x: &[f64]) -> Option<f64> {
+    let nominal = nominal_positive_spacing(x)?;
+    let gap_thresh = GAP_THRESHOLD_FACTOR * nominal;
+    let mut widest_span = 0.0_f64;
+    let mut run_lo = 0usize;
+    for i in 1..=x.len() {
+        let run_ends = i == x.len() || (x[i] - x[i - 1]) > gap_thresh;
+        if run_ends {
+            let run = &x[run_lo..i];
+            let win = NEVILLE_POINTS.min(run.len());
+            if win >= 2 {
+                for start in 0..=run.len() - win {
+                    widest_span = widest_span.max(run[start + win - 1] - run[start]);
+                }
+            }
+            run_lo = i;
+        }
+    }
+    Some(widest_span + nominal)
 }
 
 pub(super) fn nominal_positive_spacing(x: &[f64]) -> Option<f64> {
@@ -611,6 +647,11 @@ pub(super) fn instant_to_j2000_seconds(instant: &Instant) -> Option<f64> {
 /// degree-10 polynomial, 11 nodes).
 pub(super) const NEVILLE_POINTS: usize = 11;
 
+/// A consecutive node gap larger than this multiple of the nominal spacing is
+/// a coverage gap: the window never spans it, and a query inside it is served
+/// only within one nominal spacing of either edge.
+pub(super) const GAP_THRESHOLD_FACTOR: f64 = 1.5;
+
 /// Sliding-window Lagrange (Neville) satellite-POSITION interpolation, matching
 /// RTKLIB `preceph.c` pephpos/interppol. Replaces the global not-a-knot cubic
 /// spline, which is degree-3 over the whole day and errs ~200 m at the day
@@ -639,7 +680,7 @@ fn interpolate_position_neville(
     // Nominal node spacing = smallest positive consecutive gap (robust to one
     // large coverage gap); the gap threshold marks a non-contiguous jump.
     let nominal = nominal_positive_spacing(x).unwrap_or(1.0);
-    let gap_thresh = 1.5 * nominal;
+    let gap_thresh = GAP_THRESHOLD_FACTOR * nominal;
 
     // Last node at or before the query (clamped into range).
     let mut pivot = 0usize;

@@ -8,19 +8,19 @@ All notable changes to `sidereon-core` are documented here.
 
 - `StencilExtent::for_sp3` reported the SP3 interpolator's reach as five
   product intervals on each side, the centered interior stencil. The
-  interpolator selects up to 11 nodes from each satellite's own node series:
-  at a run edge it keeps the count and slides the window inward (ten spacings
-  back for a query in the last interval), it still serves a query one spacing
-  outside a run (eleven spacings to the farthest node), and the spacing is the
-  satellite's, so a satellite sampled every 600 s in a 300 s product spans
-  6,000 s. The reach is now eleven times the widest per-satellite nominal
-  spacing, estimated with the interpolator's own estimator, and the influence
-  bounds are measured from the window bounds instead of a header-grid snap
-  that could move the upper bound earlier than a selected node. The old value
-  erred in the unsafe direction: a window-scoped verdict could report Accept
-  for a defect on a node the interpolation used. Measured on the committed
-  CODE final product, perturbing a node 1,650 s before a query in the last
-  interval moves the interpolated position by 3.36 m.
+  interpolator selects up to 11 nodes from each satellite's own node series,
+  slides that window inward at run edges, serves a query up to one nominal
+  spacing outside a run or across a coverage gap, and tolerates gaps up to 1.5
+  times the nominal spacing inside a run, so eleven nodes at 0, 600, 1500, ...,
+  8700 s span 8,700 s although their nominal spacing is 600 s. The reach is now
+  the widest selectable window span over the product's satellites plus one
+  nominal spacing, computed with the interpolator's own run and window rules,
+  and the influence bounds are measured from the window bounds instead of a
+  header-grid snap that could move the upper bound earlier than a selected
+  node. The old value erred in the unsafe direction: a window-scoped verdict
+  could report Accept for a defect on a node the interpolation used. A wider
+  reach means more Refuse decisions near recorded defects; `StencilExtent`
+  compares equal for products with equal reach.
 - `GnssWeekTow::normalized` could return a time of week outside `[0, 604800)`.
   A TOW a fraction of a nanosecond before the week start borrows a week, and
   the borrow subtraction `tow - (-1 * 604800)` rounds back up to exactly

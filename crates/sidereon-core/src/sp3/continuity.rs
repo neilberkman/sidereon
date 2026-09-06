@@ -79,8 +79,8 @@ use crate::astro::constants::MU_EARTH;
 use crate::constants::KM_TO_M;
 use crate::id::GnssSatelliteId;
 use crate::sp3::interp::{
-    instant_to_j2000_seconds, interpolate_precise_state, nominal_positive_spacing,
-    precise_node_j2000_seconds, precise_node_j2000_seconds_from_instant, sp3_epoch_j2000_seconds,
+    instant_to_j2000_seconds, interpolate_precise_state, precise_node_j2000_seconds,
+    precise_node_j2000_seconds_from_instant, selectable_reach_s, sp3_epoch_j2000_seconds,
     NEVILLE_POINTS,
 };
 use crate::sp3::samples::PreciseEphemerisSample;
@@ -145,26 +145,20 @@ pub struct StencilExtent {
 impl StencilExtent {
     /// Derive the interpolation reach for an SP3 product.
     ///
-    /// The position interpolator selects up to 11 nodes per satellite, and it
-    /// selects them from that satellite's own node series, not from the
-    /// product's header grid. Three things make the selected span wider than
-    /// the centered five intervals a header-grid view suggests:
+    /// The position interpolator selects up to 11 nodes from each satellite's
+    /// own node series, not from the product's header grid, and it serves a
+    /// query up to one nominal spacing outside that series or across a coverage
+    /// gap. The farthest selected node can therefore sit a full window span
+    /// plus one nominal spacing from the query, and the window span is measured
+    /// from the satellite's actual nodes: a run tolerates gaps up to 1.5 times
+    /// its nominal spacing, so eleven nodes at 0, 600, 1500, 2400, ..., 8700 s
+    /// span 8,700 s although their nominal spacing is 600 s.
     ///
-    /// - At either end of a contiguous run the window keeps its node count and
-    ///   slides inward, so a query in the last interval reaches ten spacings
-    ///   back rather than five.
-    /// - A query up to one spacing outside a run is still served (across a
-    ///   coverage gap it is anchored to the nearer run), so the farthest node
-    ///   can sit eleven spacings away.
-    /// - The spacing is the satellite's own nominal spacing, estimated exactly
-    ///   as the interpolator does from its actual nodes. A satellite sampled
-    ///   every 600 s in a 300 s product has an 11-node span of 6,000 s.
-    ///
-    /// The reach reported here is therefore eleven times the largest
-    /// per-satellite nominal spacing in the product, the widest window the
-    /// interpolator can select for any satellite anywhere in it. A satellite
-    /// with fewer than two nodes falls back to the header interval. Understating
-    /// the reach errs in the unsafe direction: a window-scoped verdict such as
+    /// The reach reported here is the largest such value over the satellites
+    /// in the product, computed with the interpolator's own run and window
+    /// rules, with a floor of eleven header intervals for products whose
+    /// satellites carry fewer than two nodes. Understating the reach errs in
+    /// the unsafe direction: a window-scoped verdict such as
     /// [`ContinuityReport::verdict_for_window`] would accept a window whose
     /// interpolation selects a node the defect sits on.
     ///
@@ -186,24 +180,29 @@ impl StencilExtent {
             ));
         }
 
-        // Largest nominal spacing over the satellites' actual node series,
-        // using the interpolator's own estimator so the two cannot disagree.
-        let mut widest_spacing_s = interval_s;
-        for sat in sp3.satellites() {
-            let mut nodes = Vec::new();
-            for (idx, epoch) in sp3.epochs.iter().enumerate() {
-                if sp3.interp_raw[idx].contains_key(sat) {
-                    if let Some(seconds) = sp3_epoch_j2000_seconds(sp3, idx, epoch) {
-                        nodes.push(precise_node_j2000_seconds(seconds));
-                    }
-                }
-            }
-            if let Some(spacing) = nominal_positive_spacing(&nodes) {
-                widest_spacing_s = widest_spacing_s.max(spacing);
+        // One pass over the epochs, collecting each satellite's node series.
+        // `epochs` is public and may be longer than the private node table, so
+        // the table is consulted by lookup rather than by index.
+        let mut series: BTreeMap<GnssSatelliteId, Vec<f64>> = BTreeMap::new();
+        for (idx, epoch) in sp3.epochs.iter().enumerate() {
+            let Some(nodes_at_epoch) = sp3.interp_raw.get(idx) else {
+                break;
+            };
+            let Some(seconds) = sp3_epoch_j2000_seconds(sp3, idx, epoch) else {
+                continue;
+            };
+            let seconds = precise_node_j2000_seconds(seconds);
+            for sat in nodes_at_epoch.keys() {
+                series.entry(*sat).or_default().push(seconds);
             }
         }
 
-        let reach_s = NEVILLE_POINTS as f64 * widest_spacing_s;
+        let mut reach_s = NEVILLE_POINTS as f64 * interval_s;
+        for nodes in series.values() {
+            if let Some(reach) = selectable_reach_s(nodes) {
+                reach_s = reach_s.max(reach);
+            }
+        }
         Ok(Self {
             before_s: reach_s,
             after_s: reach_s,
@@ -212,18 +211,18 @@ impl StencilExtent {
 
     /// Reach before an evaluated epoch, seconds.
     ///
-    /// Eleven times the widest per-satellite nominal spacing: the farthest a
-    /// selected node can sit behind a query, at a run end or when a query one
-    /// spacing past a run is still served.
+    /// The widest selectable window span in the product plus one nominal
+    /// spacing: the farthest a selected node can sit behind a query, at a run
+    /// end or when a query one spacing past a run is still served.
     pub fn before_s(self) -> f64 {
         self.before_s
     }
 
     /// Reach after an evaluated epoch, seconds.
     ///
-    /// Eleven times the widest per-satellite nominal spacing: the farthest a
-    /// selected node can sit ahead of a query, at a run start or when a query
-    /// one spacing before a run is anchored to it across a gap.
+    /// The widest selectable window span in the product plus one nominal
+    /// spacing: the farthest a selected node can sit ahead of a query, at a run
+    /// start or when a query one spacing before a run is anchored to it.
     pub fn after_s(self) -> f64 {
         self.after_s
     }

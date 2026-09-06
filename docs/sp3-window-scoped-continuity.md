@@ -9,19 +9,19 @@ inclusive epoch window.
 ## Decision
 
 `EpochWindow` is expressed in seconds since J2000 on the SP3 product's own time
-scale. `StencilExtent::for_sp3` derives eleven spacings of reach before and
-after an evaluation epoch, where the spacing is the widest per-satellite nominal
-node spacing in the product, estimated exactly as the position interpolator
-estimates it. Eleven is not a policy value supplied by the caller. It comes from
-the same `NEVILLE_POINTS = 11` constant the degree-10 sliding-window Lagrange
-interpolator uses, plus how that window behaves at run edges: it keeps its node
-count and slides inward, so a query in a run's last interval reaches ten
-spacings back, and a query up to one spacing outside a run is still served, so
-the farthest selected node can sit eleven spacings away. The header interval
-must be positive and finite and is the fallback for a satellite with fewer than
-two nodes. The bounds are measured from the window bounds directly; snapping
-them to the header grid first let a selected node fall outside the upper bound.
-reach.
+scale. `StencilExtent::for_sp3` derives the reach from the position
+interpolator's own selection rules applied to each satellite's actual nodes: the
+farthest a selected node can sit from a served query is one window span plus one
+nominal spacing. The window holds `NEVILLE_POINTS = 11` consecutive nodes and
+slides inward at the edges of a contiguous run, a run tolerates consecutive gaps
+up to 1.5 times the nominal spacing, and a query is served up to one nominal
+spacing outside a run or across a coverage gap. The span is measured from the
+nodes themselves rather than from the node count, because an irregular run can
+span far more than eleven nominal spacings. The reported reach is the largest
+value over the product's satellites, with a floor of eleven header intervals;
+the header interval must be positive and finite. The bounds are measured from
+the window bounds directly; snapping them to the header grid first let a
+selected node fall outside the upper bound.
 
 A defect influences the window when its recorded epoch or epoch pair intersects
 the evaluation window expanded by that derived reach. The bounds are inclusive,
