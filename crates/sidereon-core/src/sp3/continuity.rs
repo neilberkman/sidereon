@@ -81,7 +81,7 @@ use crate::id::GnssSatelliteId;
 use crate::sp3::interp::{
     instant_to_j2000_seconds, interpolate_precise_state, precise_node_j2000_seconds,
     precise_node_j2000_seconds_from_instant, selectable_reach_s, sp3_epoch_j2000_seconds,
-    NEVILLE_POINTS,
+    Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR, NEVILLE_POINTS,
 };
 use crate::sp3::samples::PreciseEphemerisSample;
 use crate::sp3::Sp3;
@@ -197,9 +197,10 @@ impl StencilExtent {
             }
         }
 
+        let gap_threshold_factor = sp3.interpolation.gap_threshold_factor;
         let mut reach_s = NEVILLE_POINTS as f64 * interval_s;
         for nodes in series.values() {
-            if let Some(reach) = selectable_reach_s(nodes) {
+            if let Some(reach) = selectable_reach_s(nodes, gap_threshold_factor) {
                 reach_s = reach_s.max(reach);
             }
         }
@@ -340,6 +341,10 @@ pub struct ContinuityOptions {
     /// and well below the smallest splice worth reporting is the useful range;
     /// 1.0 m is a defensible default for a merged GNSS orbit product.
     pub residual_tolerance_m: Option<f64>,
+    /// How the hold-out replay reads the retained node series: the same
+    /// [`Sp3InterpolationOptions`] the interpolator under test uses, so a
+    /// product read with a non-default gap threshold is checked with it too.
+    pub interpolation: Sp3InterpolationOptions,
 }
 
 /// Source of the adjacent-pair speed bound.
@@ -370,6 +375,9 @@ impl ContinuityOptions {
         Self {
             speed_bound,
             residual_tolerance_m,
+            interpolation: Sp3InterpolationOptions {
+                gap_threshold_factor: DEFAULT_GAP_THRESHOLD_FACTOR,
+            },
         }
     }
 
@@ -378,7 +386,16 @@ impl ContinuityOptions {
         Self {
             speed_bound: Some(SpeedBound::OrbitClass(class)),
             residual_tolerance_m: Some(1.0),
+            interpolation: Sp3InterpolationOptions::default(),
         }
+    }
+
+    /// The same settings, with the hold-out replay reading node series under
+    /// `interpolation`.
+    #[must_use]
+    pub fn with_interpolation_options(mut self, interpolation: Sp3InterpolationOptions) -> Self {
+        self.interpolation = interpolation;
+        self
     }
 }
 
@@ -710,7 +727,14 @@ pub fn check_continuity(
             check_speed_bound(sat, &series, bound, &mut sat_defects, &mut report);
         }
         if let Some(tolerance_m) = options.residual_tolerance_m {
-            check_hold_out_residual(sat, &series, tolerance_m, &mut sat_defects, &mut report);
+            check_hold_out_residual(
+                sat,
+                &series,
+                tolerance_m,
+                options.interpolation.gap_threshold_factor,
+                &mut sat_defects,
+                &mut report,
+            );
         }
 
         sat_defects.sort_by(|a, b| defect_sort_key(a).total_cmp(&defect_sort_key(b)));
@@ -777,6 +801,7 @@ fn check_hold_out_residual(
     sat: GnssSatelliteId,
     series: &OrderedSeries,
     tolerance_m: f64,
+    gap_threshold_factor: f64,
     defects: &mut Vec<ContinuityDefect>,
     report: &mut ContinuityReport,
 ) {
@@ -813,7 +838,16 @@ fn check_hold_out_residual(
 
         for index in held {
             let query = series.x[index];
-            match interpolate_precise_state(sat, &x, &kx, &ky, &kz, &[], query) {
+            match interpolate_precise_state(
+                sat,
+                &x,
+                &kx,
+                &ky,
+                &kz,
+                &[],
+                query,
+                gap_threshold_factor,
+            ) {
                 Ok(state) => {
                     report.residuals_checked += 1;
                     let predicted = [state.position.x_m, state.position.y_m, state.position.z_m];

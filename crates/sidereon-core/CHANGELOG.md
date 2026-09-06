@@ -4,6 +4,24 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `Sp3InterpolationOptions`, the policy an SP3 product's node series are read
+  with. Its one field, `gap_threshold_factor`, is the multiple of a satellite's
+  nominal spacing above which a consecutive node gap is a coverage gap; it was a
+  fixed 1.5 and that remains the default (`DEFAULT_GAP_THRESHOLD_FACTOR`), so
+  nothing moves for existing callers. `Sp3::with_interpolation_options` sets it
+  on a product; `PreciseEphemerisInterpolant::from_sp3`, `StencilExtent::for_sp3`
+  and a store written from the product carry it, `PreciseEphemerisSamples` and
+  `PreciseEphemerisInterpolant` take it directly, and
+  `ContinuityOptions::with_interpolation_options` applies it to the hold-out
+  replay. The policy is not SP3 text: it does not survive `to_sp3_string`, it is
+  excluded from product equality, and `merge` output carries the default. The
+  precise-interpolant store records a non-default factor in previously reserved
+  header bytes 48..56; a default-policy artifact is byte-identical to one
+  written before, an artifact written before reads back as the default, and a
+  factor that is not finite and greater than 1.0 is rejected at open.
+
 ### Fixed
 
 - `StencilExtent::for_sp3` reported the SP3 interpolator's reach as five

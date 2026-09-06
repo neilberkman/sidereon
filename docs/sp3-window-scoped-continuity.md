@@ -14,7 +14,9 @@ interpolator's own selection rules applied to each satellite's actual nodes: the
 farthest a selected node can sit from a served query is one window span plus one
 nominal spacing. The window holds `NEVILLE_POINTS = 11` consecutive nodes and
 slides inward at the edges of a contiguous run, a run tolerates consecutive gaps
-up to 1.5 times the nominal spacing, and a query is served up to one nominal
+up to the product's gap threshold factor times the nominal spacing
+(`Sp3InterpolationOptions`, 1.5 by default; `Sp3::with_interpolation_options`
+changes it, and the reach follows), and a query is served up to one nominal
 spacing outside a run or across a coverage gap. The span is measured from the
 nodes themselves rather than from the node count, because an irregular run can
 span far more than eleven nominal spacings. The reported reach is the largest

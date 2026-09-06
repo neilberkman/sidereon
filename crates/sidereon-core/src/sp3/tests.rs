@@ -1729,3 +1729,172 @@ fn stencil_reach_covers_an_irregular_run_wider_than_eleven_nominal_spacings() {
         "the first node is selected for this query"
     );
 }
+
+fn gapped_g01_product() -> Sp3 {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sp3/GAP_G01_20201760000_15M.sp3"
+    );
+    let bytes = std::fs::read(path).expect("read committed gapped SP3 fixture");
+    Sp3::parse(&bytes).expect("parse gapped SP3 fixture")
+}
+
+/// Midpoint of the G01 hole in `GAP_G01_20201760000_15M.sp3`, seconds since
+/// J2000: the 07:15 and 10:15 nodes bracket it at 646_254_900 and 646_265_700.
+const GAP_G01_MID_HOLE_J2000_S: f64 = 646_260_300.0;
+
+#[test]
+fn interpolation_options_reject_a_factor_that_would_split_every_run() {
+    assert!(Sp3InterpolationOptions::new(1.0).is_err());
+    assert!(Sp3InterpolationOptions::new(0.5).is_err());
+    assert!(Sp3InterpolationOptions::new(f64::NAN).is_err());
+    assert!(Sp3InterpolationOptions::new(f64::INFINITY).is_err());
+    assert_eq!(
+        Sp3InterpolationOptions::new(DEFAULT_GAP_THRESHOLD_FACTOR).unwrap(),
+        Sp3InterpolationOptions::default()
+    );
+    assert_eq!(DEFAULT_GAP_THRESHOLD_FACTOR, 1.5);
+}
+
+#[test]
+fn a_product_parses_with_the_default_gap_threshold_and_keeps_it_out_of_equality() {
+    let default = gapped_g01_product();
+    assert_eq!(
+        default.interpolation_options(),
+        Sp3InterpolationOptions::default()
+    );
+
+    let wide = gapped_g01_product()
+        .with_interpolation_options(Sp3InterpolationOptions::new(13.0).unwrap());
+    assert_eq!(wide.interpolation_options().gap_threshold_factor, 13.0);
+    // The policy is not product content: same records, equal products.
+    assert_eq!(wide, default);
+    // And it is not SP3 text either: a text round trip yields the default.
+    let reparsed = Sp3::parse(wide.to_sp3_string().as_bytes()).expect("reparse");
+    assert_eq!(
+        reparsed.interpolation_options(),
+        Sp3InterpolationOptions::default()
+    );
+}
+
+#[test]
+fn a_wider_gap_threshold_bridges_a_hole_the_default_refuses() {
+    let g01 = id(GnssSystem::Gps, 1);
+    let g02 = id(GnssSystem::Gps, 2);
+    let default = gapped_g01_product();
+    // The hole is twelve nominal spacings wide; 13 bridges it, 1.5 does not.
+    let wide = gapped_g01_product()
+        .with_interpolation_options(Sp3InterpolationOptions::new(13.0).unwrap());
+
+    assert_eq!(
+        default.position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S),
+        Err(Error::EpochOutOfRange)
+    );
+    let bridged = wide
+        .position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S)
+        .expect("a run that tolerates the hole serves its midpoint");
+    assert!(bridged.position.x_m.is_finite());
+
+    // A satellite without a hole selects the same nodes under either policy.
+    let contiguous_query = GAP_G01_MID_HOLE_J2000_S + 450.0;
+    let want = default
+        .position_at_j2000_seconds(g02, contiguous_query)
+        .unwrap();
+    let got = wide
+        .position_at_j2000_seconds(g02, contiguous_query)
+        .unwrap();
+    assert_eq!(got.position.x_m.to_bits(), want.position.x_m.to_bits());
+    assert_eq!(got.position.y_m.to_bits(), want.position.y_m.to_bits());
+    assert_eq!(got.position.z_m.to_bits(), want.position.z_m.to_bits());
+
+    // The cached interpolant and the sample-backed source carry the policy too.
+    let cached = PreciseEphemerisInterpolant::from_sp3(&wide);
+    assert_eq!(cached.interpolation_options().gap_threshold_factor, 13.0);
+    let via_cache = cached
+        .position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S)
+        .expect("cached interpolant honours the product policy");
+    assert_eq!(
+        via_cache.position.x_m.to_bits(),
+        bridged.position.x_m.to_bits()
+    );
+    assert!(PreciseEphemerisInterpolant::from_sp3(&default)
+        .position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S)
+        .is_err());
+}
+
+#[test]
+fn stencil_reach_follows_the_gap_threshold() {
+    use super::continuity::StencilExtent;
+
+    let default = gapped_g01_product();
+    let reach = StencilExtent::for_sp3(&default).expect("gapped product stencil");
+    // Every run is uniform at 900 s: ten steps plus one nominal spacing.
+    assert_eq!(reach.before_s(), 11.0 * 900.0);
+
+    let wide = gapped_g01_product()
+        .with_interpolation_options(Sp3InterpolationOptions::new(13.0).unwrap());
+    let reach = StencilExtent::for_sp3(&wide).expect("bridged product stencil");
+    // G01's run now spans the hole: nine 900 s steps, one 10,800 s step, plus
+    // one nominal spacing.
+    assert_eq!(reach.before_s(), 9.0 * 900.0 + 10_800.0 + 900.0);
+    assert_eq!(reach.after_s(), reach.before_s());
+}
+
+#[test]
+fn continuity_options_carry_the_default_interpretation_policy() {
+    use super::continuity::{ContinuityOptions, OrbitClass};
+
+    assert_eq!(
+        ContinuityOptions::new(None, Some(1.0)).interpolation,
+        Sp3InterpolationOptions::default()
+    );
+    assert_eq!(
+        ContinuityOptions::for_orbit_class(OrbitClass::MeoGnss).interpolation,
+        Sp3InterpolationOptions::default()
+    );
+    let wide = Sp3InterpolationOptions::new(13.0).unwrap();
+    assert_eq!(
+        ContinuityOptions::new(None, Some(1.0))
+            .with_interpolation_options(wide)
+            .interpolation,
+        wide
+    );
+}
+
+#[test]
+fn the_hold_out_replay_reads_nodes_under_the_continuity_options_policy() {
+    use super::continuity::{check_continuity, ContinuityDefect, ContinuityOptions};
+
+    let g01 = id(GnssSystem::Gps, 1);
+    let samples = gapped_g01_product().precise_ephemeris_samples();
+    // The 07:15 node is the last one before the hole. Held out, it is predicted
+    // from retained nodes on one side only under the default policy, and from
+    // nodes on both sides of the hole once the retained series bridges it.
+    let hole_edge_j2000_s = 646_254_900.0;
+    let residual_at_edge = |factor: f64| -> (usize, f64) {
+        let options = ContinuityOptions::new(None, Some(1.0))
+            .with_interpolation_options(Sp3InterpolationOptions::new(factor).unwrap());
+        let report = check_continuity(&samples, &options);
+        let residual_m = report
+            .defects
+            .iter()
+            .find_map(|defect| match defect {
+                ContinuityDefect::HoldOutResidual {
+                    sat,
+                    epoch_j2000_s,
+                    residual_m,
+                    ..
+                } if *sat == g01 && *epoch_j2000_s == hole_edge_j2000_s => Some(*residual_m),
+                _ => None,
+            })
+            .expect("the hole-edge node exceeds 1 m under either policy");
+        (report.residuals_checked, residual_m)
+    };
+
+    let (checked_default, residual_default) = residual_at_edge(DEFAULT_GAP_THRESHOLD_FACTOR);
+    let (checked_wide, residual_wide) = residual_at_edge(13.0);
+    // Same held-out set, different retained windows.
+    assert_eq!(checked_default, checked_wide);
+    assert!(residual_default > 20.0, "{residual_default}");
+    assert!(residual_wide < 5.0, "{residual_wide}");
+}

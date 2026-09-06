@@ -215,6 +215,7 @@ impl Sp3 {
             &series.kz,
             &series.clk,
             query,
+            self.interpolation.gap_threshold_factor,
         )
     }
 }
@@ -353,6 +354,9 @@ fn next_down(value: f64) -> f64 {
 /// requires for 0-ULP parity.
 // invariant: the interpolation path validates finite, in-range coordinates.
 #[allow(clippy::expect_used)]
+// Four parallel node slices, the clock series, the query and the policy: the
+// slices are the SP3 gather's native shape and are not repacked on the hot path.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn interpolate_precise_state(
     sat: GnssSatelliteId,
     pos_x: &[f64],
@@ -361,8 +365,17 @@ pub(super) fn interpolate_precise_state(
     pos_kz: &[f64],
     clk_nodes: &[(f64, f64, bool)],
     query: f64,
+    gap_threshold_factor: f64,
 ) -> Result<Sp3State> {
-    let (x_m, y_m, z_m) = interpolate_precise_position(sat, pos_x, pos_kx, pos_ky, pos_kz, query)?;
+    let (x_m, y_m, z_m) = interpolate_precise_position(
+        sat,
+        pos_x,
+        pos_kx,
+        pos_ky,
+        pos_kz,
+        query,
+        gap_threshold_factor,
+    )?;
     let clock_s = interpolate_clock(clk_nodes, query);
 
     Ok(Sp3State {
@@ -376,6 +389,9 @@ pub(super) fn interpolate_precise_state(
 
 // invariant: the interpolation path validates finite, in-range coordinates.
 #[allow(clippy::expect_used)]
+// Four parallel node slices, the clock series, the query and the policy: the
+// slices are the SP3 gather's native shape and are not repacked on the hot path.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn interpolate_precise_state_with_clock_arcs(
     sat: GnssSatelliteId,
     pos_x: &[f64],
@@ -384,8 +400,17 @@ pub(super) fn interpolate_precise_state_with_clock_arcs(
     pos_kz: &[f64],
     clock_arcs: &[ClockSplineArc],
     query: f64,
+    gap_threshold_factor: f64,
 ) -> Result<Sp3State> {
-    let (x_m, y_m, z_m) = interpolate_precise_position(sat, pos_x, pos_kx, pos_ky, pos_kz, query)?;
+    let (x_m, y_m, z_m) = interpolate_precise_position(
+        sat,
+        pos_x,
+        pos_kx,
+        pos_ky,
+        pos_kz,
+        query,
+        gap_threshold_factor,
+    )?;
     let clock_s = interpolate_fitted_clock(clock_arcs, query);
 
     Ok(Sp3State {
@@ -404,6 +429,7 @@ fn interpolate_precise_position(
     pos_ky: &[f64],
     pos_kz: &[f64],
     query: f64,
+    gap_threshold_factor: f64,
 ) -> Result<(f64, f64, f64)> {
     let query = validate::finite(query, "query_j2000_s").map_err(map_query_input)?;
 
@@ -437,7 +463,7 @@ fn interpolate_precise_position(
         return Err(Error::EpochOutOfRange);
     }
 
-    let gap_thresh = GAP_THRESHOLD_FACTOR * nominal;
+    let gap_thresh = gap_threshold_factor * nominal;
     let mut bi = 0usize;
     while bi + 1 < pos_x.len() && pos_x[bi + 1] <= query {
         bi += 1;
@@ -450,7 +476,12 @@ fn interpolate_precise_position(
     }
 
     Ok(interpolate_position_neville(
-        pos_x, pos_kx, pos_ky, pos_kz, query,
+        pos_x,
+        pos_kx,
+        pos_ky,
+        pos_kz,
+        query,
+        gap_threshold_factor,
     ))
 }
 
@@ -462,7 +493,7 @@ fn map_query_input(error: validate::FieldError) -> Error {
 ///
 /// Derived from the same rules the position interpolator applies to `x`, so
 /// the two cannot disagree: nodes split into contiguous runs at gaps wider than
-/// [`GAP_THRESHOLD_FACTOR`] times the nominal spacing; within a run the window
+/// `gap_threshold_factor` times the nominal spacing; within a run the window
 /// holds `min(NEVILLE_POINTS, run_len)` consecutive nodes and slides inward at
 /// the run edges; and a query is served up to one nominal spacing outside the
 /// node span or across a gap, anchored to the nearer run. The farthest node is
@@ -473,9 +504,9 @@ fn map_query_input(error: validate::FieldError) -> Error {
 /// eleven nodes at 0, 600, 1500, 2400, ..., 8700 s have nominal spacing 600 s
 /// and a window span of 8,700 s, not 6,000 s. Returns `None` for fewer than two
 /// nodes, which the interpolator refuses to serve.
-pub(super) fn selectable_reach_s(x: &[f64]) -> Option<f64> {
+pub(super) fn selectable_reach_s(x: &[f64], gap_threshold_factor: f64) -> Option<f64> {
     let nominal = nominal_positive_spacing(x)?;
-    let gap_thresh = GAP_THRESHOLD_FACTOR * nominal;
+    let gap_thresh = gap_threshold_factor * nominal;
     let mut widest_span = 0.0_f64;
     let mut run_lo = 0usize;
     for i in 1..=x.len() {
@@ -647,10 +678,54 @@ pub(super) fn instant_to_j2000_seconds(instant: &Instant) -> Option<f64> {
 /// degree-10 polynomial, 11 nodes).
 pub(super) const NEVILLE_POINTS: usize = 11;
 
-/// A consecutive node gap larger than this multiple of the nominal spacing is
-/// a coverage gap: the window never spans it, and a query inside it is served
-/// only within one nominal spacing of either edge.
-pub(super) const GAP_THRESHOLD_FACTOR: f64 = 1.5;
+/// Default multiple of the nominal spacing above which a consecutive node gap
+/// is a coverage gap. See [`Sp3InterpolationOptions::gap_threshold_factor`].
+pub const DEFAULT_GAP_THRESHOLD_FACTOR: f64 = 1.5;
+
+/// Interpretation policy for a product's node series.
+///
+/// Carried by [`Sp3`] and read by everything that selects nodes from it: the
+/// position interpolator, the continuity hold-out replay, the window-scoped
+/// reach, and a mapped store written from the product. It is not part of the
+/// SP3 text, so it does not survive `to_sp3_string` and does not take part in
+/// product equality.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub struct Sp3InterpolationOptions {
+    /// A consecutive node gap larger than this multiple of the satellite's
+    /// nominal (smallest) spacing is a coverage gap: the interpolation window
+    /// never spans it, and a query inside it is served only within one nominal
+    /// spacing of either edge.
+    ///
+    /// The default of 1.5 is the midpoint between one nominal step and one
+    /// missing node. It is a policy choice, not a published rule; a product
+    /// with deliberately irregular sampling can raise it so that its runs are
+    /// not split. Must be finite and greater than 1.0, since a factor at or
+    /// below 1.0 would split every run at every step.
+    pub gap_threshold_factor: f64,
+}
+
+impl Default for Sp3InterpolationOptions {
+    fn default() -> Self {
+        Self {
+            gap_threshold_factor: DEFAULT_GAP_THRESHOLD_FACTOR,
+        }
+    }
+}
+
+impl Sp3InterpolationOptions {
+    /// Build a policy with an explicit gap threshold factor.
+    pub fn new(gap_threshold_factor: f64) -> Result<Self> {
+        if !gap_threshold_factor.is_finite() || gap_threshold_factor <= 1.0 {
+            return Err(Error::InvalidInput(
+                "gap_threshold_factor must be finite and greater than 1.0".to_string(),
+            ));
+        }
+        Ok(Self {
+            gap_threshold_factor,
+        })
+    }
+}
 
 /// Sliding-window Lagrange (Neville) satellite-POSITION interpolation, matching
 /// RTKLIB `preceph.c` pephpos/interppol. Replaces the global not-a-knot cubic
@@ -674,13 +749,14 @@ fn interpolate_position_neville(
     ky: &[f64],
     kz: &[f64],
     query: f64,
+    gap_threshold_factor: f64,
 ) -> (f64, f64, f64) {
     let n = x.len();
 
     // Nominal node spacing = smallest positive consecutive gap (robust to one
     // large coverage gap); the gap threshold marks a non-contiguous jump.
     let nominal = nominal_positive_spacing(x).unwrap_or(1.0);
-    let gap_thresh = GAP_THRESHOLD_FACTOR * nominal;
+    let gap_thresh = gap_threshold_factor * nominal;
 
     // Last node at or before the query (clamped into range).
     let mut pivot = 0usize;
