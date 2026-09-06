@@ -2489,6 +2489,43 @@ fn cnav_top_borrowing_a_week_reaches_a_stable_encoding() {
     );
 }
 
+/// The writer must reach a fixed point for `top` pairs a caller sets directly,
+/// outside the normalized range, because `GnssWeekTow` has public fields and a
+/// constructor that does not normalize. This protects the writer's own
+/// normalization independently of `GnssWeekTow::normalized`: with the model
+/// fixed and the writer reverted, this still fails.
+#[test]
+fn cnav_top_set_outside_the_week_still_reaches_a_stable_encoding() {
+    let mut text = String::from(V4_NAV_HEADER);
+    text.push_str("> EPH G03 CNAV\n");
+    push_owned_lines(&mut text, &cnav_lines("G03"));
+    let mut records = parse_nav(&text).expect("parse CNAV record");
+
+    // (a) a tiny negative TOW that normalizes to a value the column rounds
+    //     back up to a full week; (b) a TOW of exactly one week.
+    for (week, tow_s) in [(9_u32, -1.0e-8_f64), (8, 604_800.0)] {
+        let cnav = records[0]
+            .cnav
+            .as_mut()
+            .expect("CNAV record carries cnav data");
+        cnav.top = GnssWeekTow::new(TimeScale::Gpst, week, tow_s).expect("finite TOW");
+        let encoded = encode_nav(&records);
+        let reparsed = parse_nav(&encoded).expect("reparse encoded CNAV record");
+        assert_eq!(
+            encode_nav(&reparsed),
+            encoded,
+            "top ({week}, {tow_s:?}) must encode to a fixed point"
+        );
+        let top = reparsed[0].cnav.expect("cnav").top;
+        assert!(
+            (0.0..SECONDS_PER_WEEK).contains(&top.tow_s),
+            "reparsed top must hold a seconds-of-week value, got ({}, {:?})",
+            top.week,
+            top.tow_s
+        );
+    }
+}
+
 #[test]
 fn cnav_records_round_trip_through_rinex4_writer() {
     let mut text = String::from(V4_NAV_HEADER);

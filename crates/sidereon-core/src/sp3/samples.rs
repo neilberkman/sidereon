@@ -51,7 +51,7 @@ use crate::id::GnssSatelliteId;
 use crate::observables::{ObservableEphemerisSource, ObservableState, ObservablesError};
 use crate::sp3::interp::{
     instant_to_j2000_seconds, interpolate_precise_state, precise_node_j2000_seconds_from_instant,
-    PreciseSatSeries,
+    PreciseSatSeries, Sp3InterpolationOptions,
 };
 use crate::sp3::{Sp3, Sp3State};
 use crate::{Error, Result};
@@ -237,6 +237,7 @@ impl std::error::Error for PreciseSamplesError {}
 pub struct PreciseEphemerisSamples {
     time_scale: TimeScale,
     nodes: BTreeMap<GnssSatelliteId, PreciseSatSeries>,
+    interpolation: Sp3InterpolationOptions,
 }
 
 impl PreciseEphemerisSamples {
@@ -330,6 +331,7 @@ impl PreciseEphemerisSamples {
 
         Ok(Self {
             time_scale: time_scale.expect("non-empty group has a time scale"),
+            interpolation: Sp3InterpolationOptions::default(),
             nodes: grouped,
         })
     }
@@ -337,6 +339,18 @@ impl PreciseEphemerisSamples {
     /// The time scale every sample epoch is expressed in.
     pub fn time_scale(&self) -> TimeScale {
         self.time_scale
+    }
+
+    /// The interpretation policy this source reads its node series with.
+    pub fn interpolation_options(&self) -> Sp3InterpolationOptions {
+        self.interpolation
+    }
+
+    /// Return the source with a different interpretation policy.
+    #[must_use]
+    pub fn with_interpolation_options(mut self, options: Sp3InterpolationOptions) -> Self {
+        self.interpolation = options;
+        self
     }
 
     /// The satellites this source can interpolate, in ascending order.
@@ -371,9 +385,17 @@ impl PreciseEphemerisSamples {
                 &series.kz,
                 &series.clk,
                 query,
+                self.interpolation.gap_threshold_factor(),
             ),
             None => interpolate_precise_state(
-                sat, &EMPTY_F64, &EMPTY_F64, &EMPTY_F64, &EMPTY_F64, &EMPTY_CLK, query,
+                sat,
+                &EMPTY_F64,
+                &EMPTY_F64,
+                &EMPTY_F64,
+                &EMPTY_F64,
+                &EMPTY_CLK,
+                query,
+                self.interpolation.gap_threshold_factor(),
             ),
         }
     }

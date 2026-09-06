@@ -275,6 +275,13 @@ impl GnssWeekTow {
                 .ok_or_else(|| invalid_input("tow_s", "week carry is out of range"))?;
             tow = 0.0;
         }
+        // A negative subnormal TOW never borrows: dividing it by the week
+        // length underflows to -0.0, whose floor is -0.0, so it survives the
+        // carry above still negative. It is closer to the week start than any
+        // representable offset from it, and that is where it belongs.
+        if tow < 0.0 {
+            tow = 0.0;
+        }
         if week < 0 {
             week = 0;
             tow = 0.0;
@@ -320,6 +327,7 @@ mod tests {
             -1.0e-12,
             -1.0e-11,
             -f64::MIN_POSITIVE,
+            -f64::from_bits(1),
         ] {
             let normalized = GnssWeekTow::new(TimeScale::Gpst, 9, tow)
                 .expect("valid week/TOW")

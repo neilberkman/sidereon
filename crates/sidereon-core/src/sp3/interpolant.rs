@@ -10,7 +10,7 @@ use crate::observables::{
 use crate::sp3::interp::{
     fit_clock_spline_arcs, gather_sp3_precise_series, instant_to_j2000_seconds,
     interpolate_precise_state, interpolate_precise_state_with_clock_arcs, ClockSplineArc,
-    PreciseSatSeries,
+    PreciseSatSeries, Sp3InterpolationOptions,
 };
 use crate::sp3::{
     PreciseEphemerisSample, PreciseEphemerisSamples, PreciseSamplesError, Sp3, Sp3State,
@@ -50,6 +50,7 @@ impl From<PreciseSamplesError> for PreciseInterpolantError {
 pub struct PreciseEphemerisInterpolant {
     time_scale: TimeScale,
     pub(super) nodes: BTreeMap<GnssSatelliteId, FittedPreciseSatSeries>,
+    pub(super) interpolation: Sp3InterpolationOptions,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,6 +85,7 @@ impl PreciseEphemerisInterpolant {
         Self {
             time_scale: source.header.time_scale,
             nodes,
+            interpolation: source.interpolation_options(),
         }
     }
 
@@ -110,12 +112,28 @@ impl PreciseEphemerisInterpolant {
                 .iter()
                 .map(|(&sat, series)| (sat, FittedPreciseSatSeries::new(series.clone())))
                 .collect(),
+            interpolation: source.interpolation_options(),
         }
     }
 
     /// The time scale of the source epochs used to build this handle.
     pub fn time_scale(&self) -> TimeScale {
         self.time_scale
+    }
+
+    /// The interpretation policy this handle reads its node series with.
+    ///
+    /// Copied from the source product or samples at build time, and written
+    /// into a store built from this handle.
+    pub fn interpolation_options(&self) -> Sp3InterpolationOptions {
+        self.interpolation
+    }
+
+    /// Return the handle with a different interpretation policy.
+    #[must_use]
+    pub fn with_interpolation_options(mut self, options: Sp3InterpolationOptions) -> Self {
+        self.interpolation = options;
+        self
     }
 
     pub(super) fn node_series(&self) -> &BTreeMap<GnssSatelliteId, FittedPreciseSatSeries> {
@@ -145,9 +163,17 @@ impl PreciseEphemerisInterpolant {
                 &fitted.series.kz,
                 &fitted.clock_arcs,
                 query,
+                self.interpolation.gap_threshold_factor(),
             ),
             None => interpolate_precise_state(
-                sat, &EMPTY_F64, &EMPTY_F64, &EMPTY_F64, &EMPTY_F64, &EMPTY_CLK, query,
+                sat,
+                &EMPTY_F64,
+                &EMPTY_F64,
+                &EMPTY_F64,
+                &EMPTY_F64,
+                &EMPTY_CLK,
+                query,
+                self.interpolation.gap_threshold_factor(),
             ),
         }
     }

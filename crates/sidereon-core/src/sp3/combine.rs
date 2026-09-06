@@ -25,7 +25,7 @@ use crate::astro::time::civil::{
 use crate::astro::time::gnss;
 use crate::astro::time::model::Instant;
 
-use super::interp::{instant_to_j2000_seconds, sp3_epoch_j2000_seconds};
+use super::interp::{instant_to_j2000_seconds, sp3_epoch_j2000_seconds, Sp3InterpolationOptions};
 use super::{RawNode, Sp3, Sp3DataType, Sp3Flags, Sp3Header, Sp3State, TerminalRecordState};
 use crate::constants::{DAYS_PER_JULIAN_YEAR, GPS_EPOCH_TO_J2000_S, KM_TO_M, SECONDS_PER_DAY};
 use crate::frame::{ItrfPositionM, ItrfVelocityMS};
@@ -1073,6 +1073,7 @@ fn emit_merged_product(
         epoch_j2000_s: out_epoch_j2000_s,
         states: out_states,
         interp_raw: out_raw,
+        interpolation: Sp3InterpolationOptions::default(),
         comments: vec![format!("MERGED from {} SP3 products", sources.len())],
         skipped_records: sources.iter().map(|s| s.skipped_records).sum(),
     };

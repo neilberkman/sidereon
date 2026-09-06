@@ -79,8 +79,9 @@ use crate::astro::constants::MU_EARTH;
 use crate::constants::KM_TO_M;
 use crate::id::GnssSatelliteId;
 use crate::sp3::interp::{
-    instant_to_j2000_seconds, interpolate_precise_state, precise_node_j2000_seconds_from_instant,
-    NEVILLE_POINTS,
+    instant_to_j2000_seconds, interpolate_precise_state, precise_node_j2000_seconds,
+    precise_node_j2000_seconds_from_instant, selectable_reach_s, sp3_epoch_j2000_seconds,
+    Sp3InterpolationOptions, NEVILLE_POINTS,
 };
 use crate::sp3::samples::PreciseEphemerisSample;
 use crate::sp3::Sp3;
@@ -137,8 +138,6 @@ impl EpochWindow {
 /// interpolator, rather than accepted as a caller-supplied duration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StencilExtent {
-    grid_origin_j2000_s: f64,
-    interval_s: f64,
     before_s: f64,
     after_s: f64,
 }
@@ -146,17 +145,20 @@ pub struct StencilExtent {
 impl StencilExtent {
     /// Derive the interpolation reach for an SP3 product.
     ///
-    /// The degree-10 Lagrange substrate uses 11 nodes. They are centered on the
-    /// query only in the interior of a contiguous run: near either end the
-    /// interpolator keeps the node count and slides the window inward, so the
-    /// stencil becomes one-sided. A query in the last interval of a run selects
-    /// the final 11 nodes, which reach back up to ten intervals rather than
-    /// five, and a query in the first interval reaches ten intervals forward.
+    /// The position interpolator selects up to 11 nodes from each satellite's
+    /// own node series, not from the product's header grid, and it serves a
+    /// query up to one nominal spacing outside that series or across a coverage
+    /// gap. The farthest selected node can therefore sit a full window span
+    /// plus one nominal spacing from the query, and the window span is measured
+    /// from the satellite's actual nodes: a run tolerates gaps up to 1.5 times
+    /// its nominal spacing, so eleven nodes at 0, 600, 1500, 2400, ..., 8700 s
+    /// span 8,700 s although their nominal spacing is 600 s.
     ///
-    /// The reach reported here is therefore ten intervals on each side, the
-    /// widest window the interpolator can select anywhere in the product.
-    /// Reporting the centered five would understate it, and it understates it
-    /// in the unsafe direction: a window-scoped verdict such as
+    /// The reach reported here is the largest such value over the satellites
+    /// in the product, computed with the interpolator's own run and window
+    /// rules, with a floor of eleven header intervals for products whose
+    /// satellites carry fewer than two nodes. Understating the reach errs in
+    /// the unsafe direction: a window-scoped verdict such as
     /// [`ContinuityReport::verdict_for_window`] would accept a window whose
     /// interpolation selects a node the defect sits on.
     ///
@@ -168,53 +170,73 @@ impl StencilExtent {
                 "SP3 stencil extent requires a positive finite epoch interval".to_string(),
             ));
         }
-        let grid_origin_j2000_s = sp3
+        if !sp3
             .epochs_j2000_seconds()
             .first()
-            .copied()
-            .filter(|epoch| epoch.is_finite())
-            .ok_or_else(|| {
-                Error::InvalidInput(
-                    "SP3 stencil extent requires at least one representable epoch".to_string(),
-                )
-            })?;
-        // The window slides but never shrinks, so the furthest a selected node
-        // can sit from the pivot is the full span of the stencil.
-        let widest_span_s = (NEVILLE_POINTS - 1) as f64 * interval_s;
+            .is_some_and(|epoch| epoch.is_finite())
+        {
+            return Err(Error::InvalidInput(
+                "SP3 stencil extent requires at least one representable epoch".to_string(),
+            ));
+        }
+
+        // One pass over the epochs, collecting each satellite's node series.
+        // `epochs` is public and may be longer than the private node table, so
+        // the table is consulted by lookup rather than by index.
+        let mut series: BTreeMap<GnssSatelliteId, Vec<f64>> = BTreeMap::new();
+        for (idx, epoch) in sp3.epochs.iter().enumerate() {
+            let Some(nodes_at_epoch) = sp3.interp_raw.get(idx) else {
+                break;
+            };
+            let Some(seconds) = sp3_epoch_j2000_seconds(sp3, idx, epoch) else {
+                continue;
+            };
+            let seconds = precise_node_j2000_seconds(seconds);
+            for sat in nodes_at_epoch.keys() {
+                series.entry(*sat).or_default().push(seconds);
+            }
+        }
+
+        let gap_threshold_factor = sp3.interpolation.gap_threshold_factor();
+        let mut reach_s = NEVILLE_POINTS as f64 * interval_s;
+        for nodes in series.values() {
+            if let Some(reach) = selectable_reach_s(nodes, gap_threshold_factor) {
+                reach_s = reach_s.max(reach);
+            }
+        }
         Ok(Self {
-            grid_origin_j2000_s,
-            interval_s,
-            before_s: widest_span_s,
-            after_s: widest_span_s,
+            before_s: reach_s,
+            after_s: reach_s,
         })
     }
 
     /// Reach before an evaluated epoch, seconds.
     ///
-    /// The widest stencil the interpolator can select, which is the one it uses
-    /// at the end of a contiguous run, not the centered interior stencil.
+    /// The widest selectable window span in the product plus one nominal
+    /// spacing: the farthest a selected node can sit behind a query, at a run
+    /// end or when a query one spacing past a run is still served.
     pub fn before_s(self) -> f64 {
         self.before_s
     }
 
     /// Reach after an evaluated epoch, seconds.
     ///
-    /// The widest stencil the interpolator can select, which is the one it uses
-    /// at the start of a contiguous run, not the centered interior stencil.
+    /// The widest selectable window span in the product plus one nominal
+    /// spacing: the farthest a selected node can sit ahead of a query, at a run
+    /// start or when a query one spacing before a run is anchored to it.
     pub fn after_s(self) -> f64 {
         self.after_s
     }
 
-    /// Union of grid nodes the interpolator can select for any query in
-    /// `window`, covering the inward slide at a run edge.
+    /// Time span that can contain a node selected for any query in `window`.
+    ///
+    /// Measured from the window bounds themselves. An earlier version snapped
+    /// each bound to the header grid first; on the upper side that snap moved
+    /// the bound earlier and let a selected node fall outside it.
     fn influence_bounds(self, window: EpochWindow) -> (f64, f64) {
-        let pivot_at_or_before = |query: f64| {
-            self.grid_origin_j2000_s
-                + ((query - self.grid_origin_j2000_s) / self.interval_s).floor() * self.interval_s
-        };
         (
-            pivot_at_or_before(window.from_j2000_s) - self.before_s,
-            pivot_at_or_before(window.through_j2000_s) + self.after_s,
+            window.from_j2000_s - self.before_s,
+            window.through_j2000_s + self.after_s,
         )
     }
 }
@@ -319,6 +341,16 @@ pub struct ContinuityOptions {
     /// and well below the smallest splice worth reporting is the useful range;
     /// 1.0 m is a defensible default for a merged GNSS orbit product.
     pub residual_tolerance_m: Option<f64>,
+    /// How the hold-out replay reads the retained node series.
+    ///
+    /// Nothing sets this from a product: [`check_continuity`] sees samples,
+    /// not the product they came from, so it defaults to the default policy
+    /// however the product was configured. A product read with a non-default
+    /// gap threshold is checked under that threshold only if the caller
+    /// copies `product.interpolation_options()` here; otherwise the replay
+    /// splits runs at 1.5 nominal spacings while the interpolator in use
+    /// does not, and the two disagree about which nodes a prediction uses.
+    pub interpolation: Sp3InterpolationOptions,
 }
 
 /// Source of the adjacent-pair speed bound.
@@ -349,6 +381,7 @@ impl ContinuityOptions {
         Self {
             speed_bound,
             residual_tolerance_m,
+            interpolation: Sp3InterpolationOptions::DEFAULT,
         }
     }
 
@@ -357,7 +390,16 @@ impl ContinuityOptions {
         Self {
             speed_bound: Some(SpeedBound::OrbitClass(class)),
             residual_tolerance_m: Some(1.0),
+            interpolation: Sp3InterpolationOptions::default(),
         }
+    }
+
+    /// The same settings, with the hold-out replay reading node series under
+    /// `interpolation`.
+    #[must_use]
+    pub fn with_interpolation_options(mut self, interpolation: Sp3InterpolationOptions) -> Self {
+        self.interpolation = interpolation;
+        self
     }
 }
 
@@ -689,7 +731,14 @@ pub fn check_continuity(
             check_speed_bound(sat, &series, bound, &mut sat_defects, &mut report);
         }
         if let Some(tolerance_m) = options.residual_tolerance_m {
-            check_hold_out_residual(sat, &series, tolerance_m, &mut sat_defects, &mut report);
+            check_hold_out_residual(
+                sat,
+                &series,
+                tolerance_m,
+                options.interpolation.gap_threshold_factor(),
+                &mut sat_defects,
+                &mut report,
+            );
         }
 
         sat_defects.sort_by(|a, b| defect_sort_key(a).total_cmp(&defect_sort_key(b)));
@@ -756,6 +805,7 @@ fn check_hold_out_residual(
     sat: GnssSatelliteId,
     series: &OrderedSeries,
     tolerance_m: f64,
+    gap_threshold_factor: f64,
     defects: &mut Vec<ContinuityDefect>,
     report: &mut ContinuityReport,
 ) {
@@ -792,7 +842,16 @@ fn check_hold_out_residual(
 
         for index in held {
             let query = series.x[index];
-            match interpolate_precise_state(sat, &x, &kx, &ky, &kz, &[], query) {
+            match interpolate_precise_state(
+                sat,
+                &x,
+                &kx,
+                &ky,
+                &kz,
+                &[],
+                query,
+                gap_threshold_factor,
+            ) {
                 Ok(state) => {
                     report.residuals_checked += 1;
                     let predicted = [state.position.x_m, state.position.y_m, state.position.z_m];

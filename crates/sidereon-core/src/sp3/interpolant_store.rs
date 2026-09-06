@@ -5,6 +5,11 @@
 //! Payloads carry SP3-native position nodes and fitted clock spline coefficients
 //! so opening the store validates bytes and builds only lightweight indexes. It
 //! never refits clock splines at open or during evaluation.
+//!
+//! The header records the source's [`Sp3InterpolationOptions`] gap threshold
+//! factor at bytes 48..56 as a little-endian f64, with all-zero bytes meaning
+//! the default. A default-policy artifact is byte-identical to one written
+//! before the field existed, and such an artifact reads back as the default.
 
 use crate::artifact_bytes::{ArtifactBytes, DigestProvenance};
 use std::collections::BTreeMap;
@@ -19,7 +24,10 @@ use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::observables::{
     ObservableEphemerisSource, ObservableState, ObservableStateBatch, ObservablesError,
 };
-use crate::sp3::interp::{instant_to_j2000_seconds, neville, NEVILLE_POINTS};
+use crate::sp3::interp::{
+    instant_to_j2000_seconds, neville, Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR,
+    NEVILLE_POINTS,
+};
 use crate::sp3::{PreciseEphemerisInterpolant, Sp3, Sp3State};
 use crate::{validate, Error, Result};
 
@@ -38,6 +46,11 @@ const HEADER_INDEX_OFFSET_OFFSET: usize = 16;
 const HEADER_DATA_OFFSET_OFFSET: usize = 24;
 const HEADER_TOTAL_LEN_OFFSET: usize = 32;
 const HEADER_CHECKSUM_OFFSET: usize = 40;
+/// Gap threshold factor as an f64, or all-zero bytes for the default policy.
+/// A default-policy artifact is therefore byte-identical to one written
+/// before the field existed, and such an artifact reads back as the default.
+const HEADER_GAP_THRESHOLD_FACTOR_OFFSET: usize = 48;
+const HEADER_RESERVED_OFFSET: usize = 56;
 
 const SAT_SYSTEM_OFFSET: usize = 0;
 const SAT_PRN_OFFSET: usize = 1;
@@ -278,6 +291,7 @@ struct ParsedStore<'a> {
     time_scale: TimeScale,
     satellites: Vec<GnssSatelliteId>,
     series: BTreeMap<GnssSatelliteId, MmapSeries<'a>>,
+    interpolation: Sp3InterpolationOptions,
 }
 
 #[derive(Clone, Copy)]
@@ -325,6 +339,7 @@ pub struct MmapPreciseEphemerisInterpolant<'a> {
     series: BTreeMap<GnssSatelliteId, MmapSeries<'a>>,
     digest_provenance: DigestProvenance,
     attested_checksum64: Option<u64>,
+    interpolation: Sp3InterpolationOptions,
 }
 
 impl core::fmt::Debug for MmapPreciseEphemerisInterpolant<'_> {
@@ -461,6 +476,7 @@ impl MmapPreciseEphemerisInterpolant<'static> {
             time_scale: parsed.time_scale,
             satellites: parsed.satellites,
             series,
+            interpolation: parsed.interpolation,
             digest_provenance: checksum_validation.digest_provenance(),
             attested_checksum64: checksum_validation.attested_checksum64(),
         })
@@ -492,9 +508,15 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
             time_scale: parsed.time_scale,
             satellites: parsed.satellites,
             series: parsed.series,
+            interpolation: parsed.interpolation,
             digest_provenance: checksum_validation.digest_provenance(),
             attested_checksum64: checksum_validation.attested_checksum64(),
         })
+    }
+
+    /// The interpretation policy recorded in the artifact header.
+    pub fn interpolation_options(&self) -> Sp3InterpolationOptions {
+        self.interpolation
     }
 
     /// Borrow the artifact bytes backing this reader.
@@ -565,7 +587,12 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
         let Some(series) = self.series.get(&sat) else {
             return Err(Error::UnknownSatellite(sat));
         };
-        interpolate_mapped_state(self.bytes.as_ref(), series, query)
+        interpolate_mapped_state(
+            self.bytes.as_ref(),
+            series,
+            query,
+            self.interpolation.gap_threshold_factor(),
+        )
     }
 
     /// Interpolate the state of `sat` at an arbitrary [`Instant`].
@@ -780,6 +807,14 @@ fn build_store(
     );
     write_u64(&mut out, HEADER_DATA_OFFSET_OFFSET, data_offset as u64);
     write_u64(&mut out, HEADER_TOTAL_LEN_OFFSET, cursor as u64);
+    let gap_threshold_factor = source.interpolation_options().gap_threshold_factor();
+    if gap_threshold_factor != DEFAULT_GAP_THRESHOLD_FACTOR {
+        write_f64(
+            &mut out,
+            HEADER_GAP_THRESHOLD_FACTOR_OFFSET,
+            gap_threshold_factor,
+        );
+    }
 
     for (idx, layout) in layouts.iter().enumerate() {
         let fitted = source
@@ -972,7 +1007,13 @@ fn parse_store<'a>(
     }
 
     ensure_zero(bytes, 11, 12, "header reserved byte")?;
-    ensure_zero(bytes, 48, STORE_HEADER_LEN, "header reserved bytes")?;
+    let interpolation = read_header_interpolation(bytes)?;
+    ensure_zero(
+        bytes,
+        HEADER_RESERVED_OFFSET,
+        STORE_HEADER_LEN,
+        "header reserved bytes",
+    )?;
     let time_scale = time_scale_from_tag(bytes[HEADER_TIME_SCALE_OFFSET])?;
     let sat_count = read_u32(bytes, HEADER_SAT_COUNT_OFFSET)? as usize;
     let index_offset = read_u64(bytes, HEADER_INDEX_OFFSET_OFFSET)? as usize;
@@ -1214,12 +1255,18 @@ fn parse_store<'a>(
         time_scale,
         satellites,
         series,
+        interpolation,
     })
 }
 
 // invariant: validated mapped payloads contain finite ITRF coordinates.
 #[allow(clippy::expect_used)]
-fn interpolate_mapped_state(bytes: &[u8], series: &MmapSeries, query: f64) -> Result<Sp3State> {
+fn interpolate_mapped_state(
+    bytes: &[u8],
+    series: &MmapSeries,
+    query: f64,
+    gap_threshold_factor: f64,
+) -> Result<Sp3State> {
     if series.pos_count < 2 {
         return Err(Error::EpochOutOfRange);
     }
@@ -1231,7 +1278,7 @@ fn interpolate_mapped_state(bytes: &[u8], series: &MmapSeries, query: f64) -> Re
         return Err(Error::EpochOutOfRange);
     }
 
-    let gap_thresh = 1.5 * nominal;
+    let gap_thresh = gap_threshold_factor * nominal;
     let mut bi = 0usize;
     while bi + 1 < series.pos_count && series.pos_x.get(bytes, bi + 1) <= query {
         bi += 1;
@@ -1244,7 +1291,16 @@ fn interpolate_mapped_state(bytes: &[u8], series: &MmapSeries, query: f64) -> Re
         }
     }
 
-    let (x_m, y_m, z_m) = interpolate_mapped_position_neville(bytes, series, query);
+    let (x_m, y_m, z_m) =
+        interpolate_mapped_position_neville(bytes, series, query, gap_threshold_factor);
+    if !(x_m.is_finite() && y_m.is_finite() && z_m.is_finite()) {
+        // Same failure as the in-memory path: admitted nodes far from the
+        // query can coincide at its precision and zero a Neville denominator.
+        return Err(Error::InvalidInput(format!(
+            "non-finite interpolated position at query {query}: the selected nodes are not \
+             distinct at its precision, or the coordinates overflow"
+        )));
+    }
     let clock_s = interpolate_mapped_clock(bytes, series, query);
     Ok(Sp3State {
         position: ItrfPositionM::new(x_m, y_m, z_m).expect("valid ITRF position"),
@@ -1259,10 +1315,11 @@ fn interpolate_mapped_position_neville(
     bytes: &[u8],
     series: &MmapSeries,
     query: f64,
+    gap_threshold_factor: f64,
 ) -> (f64, f64, f64) {
     let n = series.pos_count;
     let nominal = nominal_positive_spacing(bytes, series).unwrap_or(1.0);
-    let gap_thresh = 1.5 * nominal;
+    let gap_thresh = gap_threshold_factor * nominal;
 
     let mut pivot = 0usize;
     while pivot + 1 < n && series.pos_x.get(bytes, pivot + 1) <= query {
@@ -1463,6 +1520,21 @@ fn time_scale_tag(scale: TimeScale) -> u8 {
         TimeScale::Glonasst => 10,
         TimeScale::Qzsst => 11,
     }
+}
+
+fn read_header_interpolation(
+    bytes: &[u8],
+) -> core::result::Result<Sp3InterpolationOptions, PreciseInterpolantStoreError> {
+    let raw = read_array::<8>(bytes, HEADER_GAP_THRESHOLD_FACTOR_OFFSET)?;
+    if raw == [0u8; 8] {
+        return Ok(Sp3InterpolationOptions::default());
+    }
+    let factor = f64::from_le_bytes(raw);
+    Sp3InterpolationOptions::new(factor).map_err(|_| {
+        parse_error(format!(
+            "header gap threshold factor {factor} must be finite and greater than 1.0"
+        ))
+    })
 }
 
 fn time_scale_from_tag(tag: u8) -> core::result::Result<TimeScale, PreciseInterpolantStoreError> {

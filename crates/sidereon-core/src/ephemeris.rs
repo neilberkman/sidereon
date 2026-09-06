@@ -63,6 +63,7 @@ pub use crate::sp3::{
     MergeContinuityViolation, MergeProvenance, PrecedenceTransition, ProvenanceMode,
     TransitionReason,
 };
+pub use crate::sp3::{Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR};
 pub use crate::spp::EphemerisSource;
 use crate::{validate, GnssSatelliteId, GnssSystem};
 

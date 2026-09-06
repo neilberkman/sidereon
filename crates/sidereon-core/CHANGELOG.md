@@ -4,33 +4,65 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `Sp3InterpolationOptions`, the policy an SP3 product's node series are read
+  with. Its one setting, the gap threshold factor, is the multiple of a
+  satellite's nominal spacing above which a consecutive node gap is a coverage
+  gap; it was a fixed 1.5 and that remains the default
+  (`DEFAULT_GAP_THRESHOLD_FACTOR`, `Sp3InterpolationOptions::DEFAULT`), so
+  nothing moves for existing callers. The value is private and set only through
+  `new`, which requires finite and greater than 1.0. A factor large enough to
+  admit nodes so far from the query that they are no longer distinct at its
+  precision makes interpolation return `Error::InvalidInput` instead of a
+  position; previously unreachable, since 1.5 never admitted such nodes. `Sp3::with_interpolation_options` sets it
+  on a product; `PreciseEphemerisInterpolant::from_sp3`, `StencilExtent::for_sp3`
+  and a store written from the product carry it, `PreciseEphemerisSamples` and
+  `PreciseEphemerisInterpolant` take it directly, and
+  `ContinuityOptions::with_interpolation_options` applies it to the hold-out
+  replay. The policy is not SP3 text: it does not survive `to_sp3_string`, it is
+  excluded from product equality, and `merge` output carries the default. The
+  precise-interpolant store records a non-default factor in previously reserved
+  header bytes 48..56; a default-policy artifact is byte-identical to one
+  written before, an artifact written before reads back as the default, and a
+  factor that is not finite and greater than 1.0 is rejected at open.
+
 ### Fixed
 
 - `StencilExtent::for_sp3` reported the SP3 interpolator's reach as five
-  product intervals on each side, the centered interior stencil. At either end
-  of a contiguous run the interpolator keeps its 11 nodes and slides the window
-  inward, so a query in the final interval selects nodes up to ten intervals
-  back. The reach is now ten intervals, the widest stencil the interpolator can
-  select. The old value erred in the unsafe direction: a window-scoped
-  continuity verdict could report Accept for a defect sitting on a node the
-  interpolation actually used. Measured on the committed CODE final product,
-  perturbing a node 1,650 s before a query in the last interval moves the
-  interpolated position by 3.36 m while the reported reach was 1,500 s.
-- `GnssWeekTow::normalized` could return a time of week equal to a whole week
-  instead of a value inside `[0, 604800)`. A TOW a fraction of a nanosecond
-  before the week start borrows a week, and the borrow subtraction
-  `tow - (-1 * 604800)` rounds back up to exactly 604800, because binary64
-  spacing there is about 1.16e-10. The rounded result now carries into the
-  following week. RINEX 4 CNAV records reached this through the `top` field:
-  the pair serialized as week `w` with TOW 604800, which reparsed as week
-  `w + 1` with TOW 0, so a second encode differed from the first. Found by the
-  `rinex_nav_round_trip` fuzz target; the reproducer is kept in the committed
-  corpus.
-- The RINEX navigation writer now normalizes the `top` pair it is about to
-  write rather than the one it holds. The `D19.12` column rounds to twelve
-  mantissa digits, so a TOW just under the week length is written as a full
-  week regardless of how it was stored, and `GnssWeekTow` has public fields
-  that a caller can set outside the normalized range.
+  product intervals on each side, the centered interior stencil. The
+  interpolator selects up to 11 nodes from each satellite's own node series,
+  slides that window inward at run edges, serves a query up to one nominal
+  spacing outside a run or across a coverage gap, and tolerates gaps up to 1.5
+  times the nominal spacing inside a run, so eleven nodes at 0, 600, 1500, ...,
+  8700 s span 8,700 s although their nominal spacing is 600 s. The reach is now
+  the widest selectable window span over the product's satellites plus one
+  nominal spacing, computed with the interpolator's own run and window rules,
+  and the influence bounds are measured from the window bounds instead of a
+  header-grid snap that could move the upper bound earlier than a selected
+  node. The old value erred in the unsafe direction: a window-scoped verdict
+  could report Accept for a defect on a node the interpolation used. A wider
+  reach means more Refuse decisions near recorded defects; `StencilExtent`
+  compares equal for products with equal reach.
+- `GnssWeekTow::normalized` could return a time of week outside `[0, 604800)`.
+  A TOW a fraction of a nanosecond before the week start borrows a week, and
+  the borrow subtraction `tow - (-1 * 604800)` rounds back up to exactly
+  604800, because binary64 spacing there is about 1.16e-10; the rounded result
+  now carries into the following week. A negative subnormal TOW never borrowed
+  at all, because dividing it by the week length underflows to -0.0; it now
+  lands on the week start. RINEX 4 CNAV records reached the first case through
+  the `top` field: the pair serialized as week `w` with TOW 604800, which
+  reparsed as week `w + 1` with TOW 0, so a second encode differed from the
+  first. Found by the `rinex_nav_round_trip` fuzz target; the reproducer is in
+  the committed corpus. Correcting the pair also corrects the CNAV `dt_op`
+  term that subtracts weeks and TOW separately, which for the affected records
+  shifts the URA by a few ulp.
+- The RINEX navigation writer now normalizes the `top` pair as it will be
+  written rather than as stored, and repeats that on the normalized value,
+  because normalizing `(9, -1e-8)` yields `(8, 604799.99999999)`, which the
+  `D19.12` column writes as a full week again. `GnssWeekTow` has public fields
+  that a caller can set outside the normalized range, so the writer cannot rely
+  on its input being normalized.
 
 ## [2.0.0] - 2026-09-03
 

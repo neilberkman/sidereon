@@ -383,6 +383,9 @@ pub struct Sp3 {
     /// from the public meters (`km->m->km`) drifts up to 1 ULP and breaks the
     /// 0-ULP parity. See `sp3/interp.rs`.
     interp_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
+    /// How node series are interpreted for interpolation. Not part of the
+    /// SP3 text and excluded from equality; see [`Sp3InterpolationOptions`].
+    interpolation: Sp3InterpolationOptions,
     /// Free-form `/*` comment lines (notice retained for provenance).
     pub comments: Vec<String>,
     /// Count of entries skipped because their satellite token did not parse to a
@@ -447,6 +450,23 @@ impl Sp3 {
             parser.feed(raw, index + 1)?;
         }
         parser.finish()
+    }
+
+    /// The interpretation policy this product's node series are read with.
+    pub fn interpolation_options(&self) -> Sp3InterpolationOptions {
+        self.interpolation
+    }
+
+    /// Return the product with a different interpretation policy.
+    ///
+    /// Everything that selects nodes from the product reads it: position
+    /// interpolation, the window-scoped reach through
+    /// [`StencilExtent::for_sp3`], and a mapped store written from it. The
+    /// policy is not SP3 text, so `to_sp3_string` followed by `parse` yields
+    /// the default again, and `merge` output carries the default.
+    pub fn with_interpolation_options(mut self, options: Sp3InterpolationOptions) -> Self {
+        self.interpolation = options;
+        self
     }
 
     /// The satellites present in this product (from the header satellite list).
@@ -1343,6 +1363,7 @@ impl Parser {
             epoch_j2000_s: self.epoch_j2000_s,
             states: self.states,
             interp_raw: self.interp_raw,
+            interpolation: Sp3InterpolationOptions::default(),
             comments: self.comments,
             skipped_records,
         })
@@ -1535,6 +1556,7 @@ pub use continuity::{
 pub use exact::{
     parse_exact_sp3, validate_exact_sp3, ExactSp3Coverage, ExactSp3Request, ExactSp3ValidationError,
 };
+pub use interp::{Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR};
 pub use interpolant::{PreciseEphemerisInterpolant, PreciseInterpolantError};
 pub use interpolant_store::{
     precise_interpolant_store_checksum64, MmapPreciseEphemerisInterpolant,
