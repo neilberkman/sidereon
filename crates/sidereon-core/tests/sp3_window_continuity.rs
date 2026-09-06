@@ -120,8 +120,10 @@ fn merged_daily_window_verdict_flips_when_the_stencil_reaches_the_seam() {
 
     let stencil = StencilExtent::for_sp3(&merged).expect("merged-product stencil");
     assert_eq!(merged.header.epoch_interval_s, 300.0);
-    assert_eq!(stencil.before_s(), 1_500.0);
-    assert_eq!(stencil.after_s(), 1_500.0);
+    // Ten intervals, not five: the reach is the one-sided stencil the
+    // interpolator selects at a run edge, which is the widest it ever uses.
+    assert_eq!(stencil.before_s(), 3_000.0);
+    assert_eq!(stencil.after_s(), 3_000.0);
 
     let inside_one_day =
         EpochWindow::new(seam - 18.0 * 3_600.0, seam - 6.0 * 3_600.0).expect("inside-day window");
@@ -175,4 +177,70 @@ fn window_and_stencil_constructors_reject_invalid_axes() {
     let mut product = real_daily_product();
     product.header.epoch_interval_s = 0.0;
     assert!(StencilExtent::for_sp3(&product).is_err());
+}
+
+/// A defect that only the run-edge stencil can reach must still refuse.
+///
+/// The interpolator centers its 11 nodes on the query only in the interior of
+/// a run. For a query in the last interval it keeps the node count and slides
+/// the window inward, so the earliest selected node sits up to ten intervals
+/// back rather than five. A reach derived from the centered stencil reported
+/// 1,500 s here, and a defect 1,800 s before the window fell outside it while
+/// sitting inside the nodes the interpolator actually selects. That is the
+/// unsafe direction: the verdict said Accept for a window the defect moves.
+///
+/// Demonstrated on this product by perturbing a node 1,650 s before a query in
+/// the final interval and watching the interpolated position move by 3.36 m.
+#[test]
+fn a_defect_only_the_edge_stencil_reaches_still_refuses() {
+    let product = real_daily_product();
+    let epochs = product.epochs_j2000_seconds();
+    let interval_s = product.header.epoch_interval_s;
+    assert_eq!(interval_s, 300.0);
+    let n = epochs.len();
+    let sat = product.satellites()[0];
+
+    // Queries anywhere in the product's final interval.
+    let final_interval = EpochWindow::new(epochs[n - 2], epochs[n - 1]).expect("final interval");
+    let stencil = StencilExtent::for_sp3(&product).expect("product stencil");
+
+    // Six intervals before the window start: outside the centered five, inside
+    // the eleven nodes the interpolator selects at the run end (indices
+    // n-11 .. n-1 for any query past epochs[n-2]).
+    let reached_by_edge_stencil = epochs[n - 2] - 6.0 * interval_s;
+    let report = ContinuityReport {
+        defects: vec![ContinuityDefect::DuplicateEpoch {
+            sat,
+            epoch_j2000_s: reached_by_edge_stencil,
+            occurrences: 2,
+        }],
+        ..ContinuityReport::default()
+    };
+    let verdict = report.verdict_for_window(final_interval, stencil);
+    assert_eq!(
+        verdict.decision,
+        WindowContinuityDecision::Refuse,
+        "a node the edge stencil selects must count as influencing"
+    );
+    assert_eq!(verdict.influencing_defects.len(), 1);
+
+    // Eleven intervals before the window start is beyond even the edge
+    // stencil, so the corrected reach does not simply refuse everything.
+    let beyond_any_stencil = epochs[n - 2] - 11.0 * interval_s;
+    let report = ContinuityReport {
+        defects: vec![ContinuityDefect::DuplicateEpoch {
+            sat,
+            epoch_j2000_s: beyond_any_stencil,
+            occurrences: 2,
+        }],
+        ..ContinuityReport::default()
+    };
+    let verdict = report.verdict_for_window(final_interval, stencil);
+    assert_eq!(verdict.decision, WindowContinuityDecision::Accept);
+    assert!(verdict.influencing_defects.is_empty());
+    assert_eq!(
+        verdict.all_defects.len(),
+        1,
+        "the finding is still reported"
+    );
 }

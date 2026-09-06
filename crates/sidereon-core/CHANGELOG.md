@@ -6,6 +6,16 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- `StencilExtent::for_sp3` reported the SP3 interpolator's reach as five
+  product intervals on each side, the centered interior stencil. At either end
+  of a contiguous run the interpolator keeps its 11 nodes and slides the window
+  inward, so a query in the final interval selects nodes up to ten intervals
+  back. The reach is now ten intervals, the widest stencil the interpolator can
+  select. The old value erred in the unsafe direction: a window-scoped
+  continuity verdict could report Accept for a defect sitting on a node the
+  interpolation actually used. Measured on the committed CODE final product,
+  perturbing a node 1,650 s before a query in the last interval moves the
+  interpolated position by 3.36 m while the reported reach was 1,500 s.
 - `GnssWeekTow::normalized` could return a time of week equal to a whole week
   instead of a value inside `[0, 604800)`. A TOW a fraction of a nanosecond
   before the week start borrows a week, and the borrow subtraction
