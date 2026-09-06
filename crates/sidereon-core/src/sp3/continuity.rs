@@ -146,9 +146,21 @@ pub struct StencilExtent {
 impl StencilExtent {
     /// Derive the interpolation reach for an SP3 product.
     ///
-    /// The degree-10 Lagrange substrate uses 11 nodes centered on the query, so
-    /// its nominal reach is five product intervals on either side. A non-finite
-    /// or non-positive declared interval is rejected.
+    /// The degree-10 Lagrange substrate uses 11 nodes. They are centered on the
+    /// query only in the interior of a contiguous run: near either end the
+    /// interpolator keeps the node count and slides the window inward, so the
+    /// stencil becomes one-sided. A query in the last interval of a run selects
+    /// the final 11 nodes, which reach back up to ten intervals rather than
+    /// five, and a query in the first interval reaches ten intervals forward.
+    ///
+    /// The reach reported here is therefore ten intervals on each side, the
+    /// widest window the interpolator can select anywhere in the product.
+    /// Reporting the centered five would understate it, and it understates it
+    /// in the unsafe direction: a window-scoped verdict such as
+    /// [`ContinuityReport::verdict_for_window`] would accept a window whose
+    /// interpolation selects a node the defect sits on.
+    ///
+    /// A non-finite or non-positive declared interval is rejected.
     pub fn for_sp3(sp3: &Sp3) -> Result<Self> {
         let interval_s = sp3.header.epoch_interval_s;
         if !interval_s.is_finite() || interval_s <= 0.0 {
@@ -166,28 +178,35 @@ impl StencilExtent {
                     "SP3 stencil extent requires at least one representable epoch".to_string(),
                 )
             })?;
-        let half_nodes = (NEVILLE_POINTS / 2) as f64;
-        let half_width_s = half_nodes * interval_s;
+        // The window slides but never shrinks, so the furthest a selected node
+        // can sit from the pivot is the full span of the stencil.
+        let widest_span_s = (NEVILLE_POINTS - 1) as f64 * interval_s;
         Ok(Self {
             grid_origin_j2000_s,
             interval_s,
-            before_s: half_width_s,
-            after_s: half_width_s,
+            before_s: widest_span_s,
+            after_s: widest_span_s,
         })
     }
 
-    /// Nominal reach before an evaluated epoch, seconds.
+    /// Reach before an evaluated epoch, seconds.
+    ///
+    /// The widest stencil the interpolator can select, which is the one it uses
+    /// at the end of a contiguous run, not the centered interior stencil.
     pub fn before_s(self) -> f64 {
         self.before_s
     }
 
-    /// Nominal reach after an evaluated epoch, seconds.
+    /// Reach after an evaluated epoch, seconds.
+    ///
+    /// The widest stencil the interpolator can select, which is the one it uses
+    /// at the start of a contiguous run, not the centered interior stencil.
     pub fn after_s(self) -> f64 {
         self.after_s
     }
 
-    /// Union of nominal grid nodes the interpolator can select for any query in
-    /// `window`.
+    /// Union of grid nodes the interpolator can select for any query in
+    /// `window`, covering the inward slide at a run edge.
     fn influence_bounds(self, window: EpochWindow) -> (f64, f64) {
         let pivot_at_or_before = |query: f64| {
             self.grid_origin_j2000_s

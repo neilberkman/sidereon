@@ -181,8 +181,8 @@ fn inspect_sp3_window_prints_scoped_continuity_verdict() {
     let stdout = stdout(&output);
     assert!(stdout.contains("continuity: attested"), "{stdout}");
     assert!(stdout.contains("window_continuity: accept"), "{stdout}");
-    assert!(stdout.contains("stencil_before_s=1500"), "{stdout}");
-    assert!(stdout.contains("stencil_after_s=1500"), "{stdout}");
+    assert!(stdout.contains("stencil_before_s=3000"), "{stdout}");
+    assert!(stdout.contains("stencil_after_s=3000"), "{stdout}");
 }
 
 #[test]
