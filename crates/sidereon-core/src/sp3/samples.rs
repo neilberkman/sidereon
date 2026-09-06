@@ -385,7 +385,7 @@ impl PreciseEphemerisSamples {
                 &series.kz,
                 &series.clk,
                 query,
-                self.interpolation.gap_threshold_factor,
+                self.interpolation.gap_threshold_factor(),
             ),
             None => interpolate_precise_state(
                 sat,
@@ -395,7 +395,7 @@ impl PreciseEphemerisSamples {
                 &EMPTY_F64,
                 &EMPTY_CLK,
                 query,
-                self.interpolation.gap_threshold_factor,
+                self.interpolation.gap_threshold_factor(),
             ),
         }
     }

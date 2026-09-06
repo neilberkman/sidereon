@@ -81,7 +81,7 @@ use crate::id::GnssSatelliteId;
 use crate::sp3::interp::{
     instant_to_j2000_seconds, interpolate_precise_state, precise_node_j2000_seconds,
     precise_node_j2000_seconds_from_instant, selectable_reach_s, sp3_epoch_j2000_seconds,
-    Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR, NEVILLE_POINTS,
+    Sp3InterpolationOptions, NEVILLE_POINTS,
 };
 use crate::sp3::samples::PreciseEphemerisSample;
 use crate::sp3::Sp3;
@@ -197,7 +197,7 @@ impl StencilExtent {
             }
         }
 
-        let gap_threshold_factor = sp3.interpolation.gap_threshold_factor;
+        let gap_threshold_factor = sp3.interpolation.gap_threshold_factor();
         let mut reach_s = NEVILLE_POINTS as f64 * interval_s;
         for nodes in series.values() {
             if let Some(reach) = selectable_reach_s(nodes, gap_threshold_factor) {
@@ -341,9 +341,15 @@ pub struct ContinuityOptions {
     /// and well below the smallest splice worth reporting is the useful range;
     /// 1.0 m is a defensible default for a merged GNSS orbit product.
     pub residual_tolerance_m: Option<f64>,
-    /// How the hold-out replay reads the retained node series: the same
-    /// [`Sp3InterpolationOptions`] the interpolator under test uses, so a
-    /// product read with a non-default gap threshold is checked with it too.
+    /// How the hold-out replay reads the retained node series.
+    ///
+    /// Nothing sets this from a product: [`check_continuity`] sees samples,
+    /// not the product they came from, so it defaults to the default policy
+    /// however the product was configured. A product read with a non-default
+    /// gap threshold is checked under that threshold only if the caller
+    /// copies `product.interpolation_options()` here; otherwise the replay
+    /// splits runs at 1.5 nominal spacings while the interpolator in use
+    /// does not, and the two disagree about which nodes a prediction uses.
     pub interpolation: Sp3InterpolationOptions,
 }
 
@@ -375,9 +381,7 @@ impl ContinuityOptions {
         Self {
             speed_bound,
             residual_tolerance_m,
-            interpolation: Sp3InterpolationOptions {
-                gap_threshold_factor: DEFAULT_GAP_THRESHOLD_FACTOR,
-            },
+            interpolation: Sp3InterpolationOptions::DEFAULT,
         }
     }
 
@@ -731,7 +735,7 @@ pub fn check_continuity(
                 sat,
                 &series,
                 tolerance_m,
-                options.interpolation.gap_threshold_factor,
+                options.interpolation.gap_threshold_factor(),
                 &mut sat_defects,
                 &mut report,
             );

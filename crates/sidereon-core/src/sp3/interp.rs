@@ -215,7 +215,7 @@ impl Sp3 {
             &series.kz,
             &series.clk,
             query,
-            self.interpolation.gap_threshold_factor,
+            self.interpolation.gap_threshold_factor(),
         )
     }
 }
@@ -475,14 +475,16 @@ fn interpolate_precise_position(
         }
     }
 
-    Ok(interpolate_position_neville(
-        pos_x,
-        pos_kx,
-        pos_ky,
-        pos_kz,
-        query,
-        gap_threshold_factor,
-    ))
+    let (x_m, y_m, z_m) =
+        interpolate_position_neville(pos_x, pos_kx, pos_ky, pos_kz, query, gap_threshold_factor);
+    if !(x_m.is_finite() && y_m.is_finite() && z_m.is_finite()) {
+        // Neville divides by node-minus-node offsets measured from the query;
+        // nodes admitted far from the query can coincide at its precision.
+        return Err(Error::InvalidInput(format!(
+            "{sat}: selected nodes are not distinct at the precision of query {query}"
+        )));
+    }
+    Ok((x_m, y_m, z_m))
 }
 
 fn map_query_input(error: validate::FieldError) -> Error {
@@ -689,32 +691,48 @@ pub const DEFAULT_GAP_THRESHOLD_FACTOR: f64 = 1.5;
 /// reach, and a mapped store written from the product. It is not part of the
 /// SP3 text, so it does not survive `to_sp3_string` and does not take part in
 /// product equality.
+///
+/// The field is private so that every value in circulation passed [`new`]:
+/// the mapped store encodes the default as all-zero header bytes, and a
+/// factor of zero or NaN reaching the writer would come back as a different
+/// policy or an unreadable artifact.
+///
+/// [`new`]: Sp3InterpolationOptions::new
 #[derive(Debug, Clone, Copy, PartialEq)]
-#[non_exhaustive]
 pub struct Sp3InterpolationOptions {
-    /// A consecutive node gap larger than this multiple of the satellite's
-    /// nominal (smallest) spacing is a coverage gap: the interpolation window
-    /// never spans it, and a query inside it is served only within one nominal
-    /// spacing of either edge.
-    ///
-    /// The default of 1.5 is the midpoint between one nominal step and one
-    /// missing node. It is a policy choice, not a published rule; a product
-    /// with deliberately irregular sampling can raise it so that its runs are
-    /// not split. Must be finite and greater than 1.0, since a factor at or
-    /// below 1.0 would split every run at every step.
-    pub gap_threshold_factor: f64,
+    gap_threshold_factor: f64,
 }
 
 impl Default for Sp3InterpolationOptions {
     fn default() -> Self {
-        Self {
-            gap_threshold_factor: DEFAULT_GAP_THRESHOLD_FACTOR,
-        }
+        Self::DEFAULT
     }
 }
 
 impl Sp3InterpolationOptions {
+    /// The default policy: a gap threshold factor of
+    /// [`DEFAULT_GAP_THRESHOLD_FACTOR`].
+    pub const DEFAULT: Self = Self {
+        gap_threshold_factor: DEFAULT_GAP_THRESHOLD_FACTOR,
+    };
+
     /// Build a policy with an explicit gap threshold factor.
+    ///
+    /// A consecutive node gap larger than `gap_threshold_factor` times the
+    /// satellite's nominal (smallest) spacing is a coverage gap: the
+    /// interpolation window never spans it, and a query inside it is served
+    /// only within one nominal spacing of either edge.
+    ///
+    /// The default of 1.5 is the midpoint between one nominal step and one
+    /// missing node. It is a policy choice, not a published rule; a product
+    /// with deliberately irregular sampling can raise it so that its runs are
+    /// not split. The factor must be finite and greater than 1.0: at or below
+    /// 1.0 every step would be a gap, and the comparison is strict so exactly
+    /// 1.0 would still admit nominal steps, which is not a policy anyone
+    /// intends. A very large factor admits any finite gap; if the admitted
+    /// nodes are then so far from the query that they are no longer distinct
+    /// at the query's precision, interpolation reports
+    /// [`Error::InvalidInput`] rather than a position.
     pub fn new(gap_threshold_factor: f64) -> Result<Self> {
         if !gap_threshold_factor.is_finite() || gap_threshold_factor <= 1.0 {
             return Err(Error::InvalidInput(
@@ -724,6 +742,11 @@ impl Sp3InterpolationOptions {
         Ok(Self {
             gap_threshold_factor,
         })
+    }
+
+    /// The multiple of the nominal spacing above which a gap splits a run.
+    pub fn gap_threshold_factor(&self) -> f64 {
+        self.gap_threshold_factor
     }
 }
 

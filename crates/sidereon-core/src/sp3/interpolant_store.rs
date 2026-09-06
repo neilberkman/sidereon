@@ -591,7 +591,7 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
             self.bytes.as_ref(),
             series,
             query,
-            self.interpolation.gap_threshold_factor,
+            self.interpolation.gap_threshold_factor(),
         )
     }
 
@@ -807,7 +807,7 @@ fn build_store(
     );
     write_u64(&mut out, HEADER_DATA_OFFSET_OFFSET, data_offset as u64);
     write_u64(&mut out, HEADER_TOTAL_LEN_OFFSET, cursor as u64);
-    let gap_threshold_factor = source.interpolation_options().gap_threshold_factor;
+    let gap_threshold_factor = source.interpolation_options().gap_threshold_factor();
     if gap_threshold_factor != DEFAULT_GAP_THRESHOLD_FACTOR {
         write_f64(
             &mut out,
@@ -1293,6 +1293,13 @@ fn interpolate_mapped_state(
 
     let (x_m, y_m, z_m) =
         interpolate_mapped_position_neville(bytes, series, query, gap_threshold_factor);
+    if !(x_m.is_finite() && y_m.is_finite() && z_m.is_finite()) {
+        // Same failure as the in-memory path: admitted nodes far from the
+        // query can coincide at its precision and zero a Neville denominator.
+        return Err(Error::InvalidInput(format!(
+            "selected nodes are not distinct at the precision of query {query}"
+        )));
+    }
     let clock_s = interpolate_mapped_clock(bytes, series, query);
     Ok(Sp3State {
         position: ItrfPositionM::new(x_m, y_m, z_m).expect("valid ITRF position"),

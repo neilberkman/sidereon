@@ -1766,7 +1766,7 @@ fn a_product_parses_with_the_default_gap_threshold_and_keeps_it_out_of_equality(
 
     let wide = gapped_g01_product()
         .with_interpolation_options(Sp3InterpolationOptions::new(13.0).unwrap());
-    assert_eq!(wide.interpolation_options().gap_threshold_factor, 13.0);
+    assert_eq!(wide.interpolation_options().gap_threshold_factor(), 13.0);
     // The policy is not product content: same records, equal products.
     assert_eq!(wide, default);
     // And it is not SP3 text either: a text round trip yields the default.
@@ -1807,9 +1807,9 @@ fn a_wider_gap_threshold_bridges_a_hole_the_default_refuses() {
     assert_eq!(got.position.y_m.to_bits(), want.position.y_m.to_bits());
     assert_eq!(got.position.z_m.to_bits(), want.position.z_m.to_bits());
 
-    // The cached interpolant and the sample-backed source carry the policy too.
+    // The cached interpolant built from the product carries the policy too.
     let cached = PreciseEphemerisInterpolant::from_sp3(&wide);
-    assert_eq!(cached.interpolation_options().gap_threshold_factor, 13.0);
+    assert_eq!(cached.interpolation_options().gap_threshold_factor(), 13.0);
     let via_cache = cached
         .position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S)
         .expect("cached interpolant honours the product policy");
@@ -1897,4 +1897,139 @@ fn the_hold_out_replay_reads_nodes_under_the_continuity_options_policy() {
     assert_eq!(checked_default, checked_wide);
     assert!(residual_default > 20.0, "{residual_default}");
     assert!(residual_wide < 5.0, "{residual_wide}");
+}
+
+#[test]
+fn a_samples_source_takes_the_policy_directly_and_hands_it_to_a_cached_interpolant() {
+    let g01 = id(GnssSystem::Gps, 1);
+    let samples = gapped_g01_product().precise_ephemeris_samples();
+    let wide = Sp3InterpolationOptions::new(13.0).unwrap();
+
+    let source = PreciseEphemerisSamples::from_samples(samples.iter().cloned()).unwrap();
+    assert_eq!(
+        source.interpolation_options(),
+        Sp3InterpolationOptions::default()
+    );
+    assert_eq!(
+        source.position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S),
+        Err(Error::EpochOutOfRange)
+    );
+    let source = source.with_interpolation_options(wide);
+    assert_eq!(source.interpolation_options(), wide);
+    let from_source = source
+        .position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S)
+        .expect("a samples source honours its own policy");
+
+    // A cached interpolant built from the source inherits it.
+    let cached = PreciseEphemerisInterpolant::from_precise_ephemeris_samples(&source);
+    assert_eq!(cached.interpolation_options(), wide);
+    let from_cached = cached
+        .position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S)
+        .expect("the cached interpolant inherits the source policy");
+    assert_eq!(
+        from_cached.position.x_m.to_bits(),
+        from_source.position.x_m.to_bits()
+    );
+    assert_eq!(
+        from_cached.position.y_m.to_bits(),
+        from_source.position.y_m.to_bits()
+    );
+    assert_eq!(
+        from_cached.position.z_m.to_bits(),
+        from_source.position.z_m.to_bits()
+    );
+
+    // Built from raw samples, it starts at the default like any other source.
+    let from_raw = PreciseEphemerisInterpolant::from_samples(samples).unwrap();
+    assert_eq!(
+        from_raw.interpolation_options(),
+        Sp3InterpolationOptions::default()
+    );
+    assert_eq!(
+        from_raw.position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S),
+        Err(Error::EpochOutOfRange)
+    );
+}
+
+#[test]
+fn a_cached_interpolant_can_override_the_product_policy() {
+    let g01 = id(GnssSystem::Gps, 1);
+    let wide = Sp3InterpolationOptions::new(13.0).unwrap();
+    let default = gapped_g01_product();
+
+    let overridden =
+        PreciseEphemerisInterpolant::from_sp3(&default).with_interpolation_options(wide);
+    assert_eq!(overridden.interpolation_options(), wide);
+    let got = overridden
+        .position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S)
+        .expect("the override bridges the hole");
+    let want = PreciseEphemerisInterpolant::from_sp3(&default.with_interpolation_options(wide))
+        .position_at_j2000_seconds(g01, GAP_G01_MID_HOLE_J2000_S)
+        .unwrap();
+    assert_eq!(got.position.x_m.to_bits(), want.position.x_m.to_bits());
+    assert_eq!(got.position.y_m.to_bits(), want.position.y_m.to_bits());
+    assert_eq!(got.position.z_m.to_bits(), want.position.z_m.to_bits());
+}
+
+#[test]
+fn merge_output_carries_the_default_policy() {
+    use super::combine::{merge, MergeCombine, MergeOptions, MergePrecedenceScope};
+
+    let wide = gapped_g01_product()
+        .with_interpolation_options(Sp3InterpolationOptions::new(13.0).unwrap());
+    let options = MergeOptions {
+        combine: MergeCombine::Precedence,
+        precedence_scope: MergePrecedenceScope::Cell,
+        min_agree: 1,
+        ..MergeOptions::default()
+    };
+    let (merged, _report) = merge(&[wide], &options).expect("merge one configured source");
+    assert_eq!(
+        merged.interpolation_options(),
+        Sp3InterpolationOptions::default()
+    );
+    assert_eq!(
+        merged.position_at_j2000_seconds(id(GnssSystem::Gps, 1), GAP_G01_MID_HOLE_J2000_S),
+        Err(Error::EpochOutOfRange)
+    );
+}
+
+#[test]
+fn nodes_admitted_too_far_from_the_query_to_stay_distinct_are_an_error_not_a_panic() {
+    use super::interp::interpolate_precise_state;
+
+    let g01 = id(GnssSystem::Gps, 1);
+    // Six nodes a second apart and one 1e100 s away. A factor of f64::MAX
+    // admits the far node into the run; measured from a query of 5e99 the six
+    // near nodes coincide, and Neville divides by zero.
+    let x = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 1e100];
+    let k = [26_000.0; 7];
+    let query = 5e99;
+    assert_eq!(
+        interpolate_precise_state(
+            g01,
+            &x,
+            &k,
+            &k,
+            &k,
+            &[],
+            query,
+            DEFAULT_GAP_THRESHOLD_FACTOR
+        ),
+        Err(Error::EpochOutOfRange)
+    );
+    let widest = Sp3InterpolationOptions::new(f64::MAX).unwrap();
+    match interpolate_precise_state(
+        g01,
+        &x,
+        &k,
+        &k,
+        &k,
+        &[],
+        query,
+        widest.gap_threshold_factor(),
+    ) {
+        Err(Error::InvalidInput(message)) => assert!(message.contains("not distinct"), "{message}"),
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
 }

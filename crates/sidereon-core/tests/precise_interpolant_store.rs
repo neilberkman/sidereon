@@ -307,20 +307,68 @@ fn precise_interpolant_store_carries_a_non_default_gap_threshold() {
 
 #[test]
 fn precise_interpolant_store_rejects_an_unusable_gap_threshold() {
-    let mut bytes = PreciseEphemerisInterpolant::from_sp3(&gapped_sp3())
+    let pristine = PreciseEphemerisInterpolant::from_sp3(&gapped_sp3())
         .to_mmap_store_bytes()
         .expect("default artifact");
-    bytes[HEADER_GAP_THRESHOLD_FACTOR_OFFSET..HEADER_GAP_THRESHOLD_FACTOR_OFFSET + 8]
-        .copy_from_slice(&1.0f64.to_le_bytes());
-    let checksum = precise_interpolant_store_checksum64(&bytes);
-    bytes[HEADER_CHECKSUM_OFFSET..HEADER_CHECKSUM_OFFSET + 8]
-        .copy_from_slice(&checksum.to_le_bytes());
+    for factor in [1.0, 0.5, -1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut bytes = pristine.clone();
+        bytes[HEADER_GAP_THRESHOLD_FACTOR_OFFSET..HEADER_GAP_THRESHOLD_FACTOR_OFFSET + 8]
+            .copy_from_slice(&factor.to_le_bytes());
+        let checksum = precise_interpolant_store_checksum64(&bytes);
+        bytes[HEADER_CHECKSUM_OFFSET..HEADER_CHECKSUM_OFFSET + 8]
+            .copy_from_slice(&checksum.to_le_bytes());
 
-    let err = MmapPreciseEphemerisInterpolant::from_bytes(&bytes)
-        .expect_err("a factor of 1.0 would split every run");
-    assert!(
-        matches!(err, PreciseInterpolantStoreError::Parse { .. }),
-        "expected a parse rejection, got {err:?}"
-    );
-    assert!(err.to_string().contains("gap threshold factor"), "{err}");
+        let err = MmapPreciseEphemerisInterpolant::from_bytes(&bytes)
+            .expect_err("a factor the constructor rejects must not open");
+        assert!(
+            matches!(err, PreciseInterpolantStoreError::Parse { .. }),
+            "factor {factor}: expected a parse rejection, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("gap threshold factor"),
+            "factor {factor}: {err}"
+        );
+    }
+}
+
+/// Default-policy artifacts are byte-identical to those written before the
+/// header carried a gap threshold factor. Lengths and checksums computed at
+/// 2ddaf0b, the last commit without the field, on the same fixtures.
+#[test]
+fn default_policy_artifacts_are_byte_identical_to_those_written_before_the_header_field() {
+    let pins = [
+        (
+            "tests/fixtures/sp3/GAP_G01_20201760000_15M.sp3",
+            922_656usize,
+            0xf42f31591bdb97bd_u64,
+        ),
+        (COD_5M_FIXTURE, 2_591_808, 0xa2a11c9de566fda3),
+        (
+            "tests/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3",
+            926_752,
+            0x48ded418f39ddc05,
+        ),
+    ];
+    for (fixture, len, checksum) in pins {
+        let sp3 = Sp3::parse(&fs::read(fixture_path(fixture)).expect("read fixture"))
+            .expect("parse fixture");
+        assert_eq!(
+            sp3.interpolation_options(),
+            Sp3InterpolationOptions::default()
+        );
+        let bytes = sp3.precise_interpolant_store_bytes().expect("artifact");
+        assert_eq!(bytes.len(), len, "{fixture}: length");
+        assert_eq!(
+            precise_interpolant_store_checksum64(&bytes),
+            checksum,
+            "{fixture}: checksum"
+        );
+        // And such an artifact opens as the default policy, which is also how
+        // one written before the field existed opens.
+        let mapped = MmapPreciseEphemerisInterpolant::from_vec(bytes).expect("open");
+        assert_eq!(
+            mapped.interpolation_options(),
+            Sp3InterpolationOptions::default()
+        );
+    }
 }

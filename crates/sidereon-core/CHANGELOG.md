@@ -7,10 +7,15 @@ All notable changes to `sidereon-core` are documented here.
 ### Added
 
 - `Sp3InterpolationOptions`, the policy an SP3 product's node series are read
-  with. Its one field, `gap_threshold_factor`, is the multiple of a satellite's
-  nominal spacing above which a consecutive node gap is a coverage gap; it was a
-  fixed 1.5 and that remains the default (`DEFAULT_GAP_THRESHOLD_FACTOR`), so
-  nothing moves for existing callers. `Sp3::with_interpolation_options` sets it
+  with. Its one setting, the gap threshold factor, is the multiple of a
+  satellite's nominal spacing above which a consecutive node gap is a coverage
+  gap; it was a fixed 1.5 and that remains the default
+  (`DEFAULT_GAP_THRESHOLD_FACTOR`, `Sp3InterpolationOptions::DEFAULT`), so
+  nothing moves for existing callers. The value is private and set only through
+  `new`, which requires finite and greater than 1.0. A factor large enough to
+  admit nodes so far from the query that they are no longer distinct at its
+  precision makes interpolation return `Error::InvalidInput` instead of a
+  position; previously unreachable, since 1.5 never admitted such nodes. `Sp3::with_interpolation_options` sets it
   on a product; `PreciseEphemerisInterpolant::from_sp3`, `StencilExtent::for_sp3`
   and a store written from the product carry it, `PreciseEphemerisSamples` and
   `PreciseEphemerisInterpolant` take it directly, and
