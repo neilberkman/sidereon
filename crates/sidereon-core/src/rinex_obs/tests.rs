@@ -1335,6 +1335,140 @@ fn loosely_spaced_vector_headers_are_still_accepted() {
     }
 }
 
+/// Satellite ids across four constellations, and the `SYS / # / OBS TYPES`
+/// headers that declare them.
+fn multi_constellation_fixture(count: usize) -> (Vec<String>, Vec<String>) {
+    let satellites: Vec<String> = (1..=32)
+        .map(|prn| format!("G{prn:02}"))
+        .chain((1..=24).map(|prn| format!("R{prn:02}")))
+        .chain((1..=36).map(|prn| format!("E{prn:02}")))
+        .chain((1..=63).map(|prn| format!("C{prn:02}")))
+        .take(count)
+        .collect();
+    assert_eq!(satellites.len(), count);
+    let systems = ["G", "R", "E", "C"]
+        .iter()
+        .map(|system| header_line(&format!("{system}    1 C1C"), "SYS / # / OBS TYPES"))
+        .collect();
+    (satellites, systems)
+}
+
+fn epoch_of(count: usize, flag: u8, picoseconds: &str, clock: &str) -> String {
+    let (satellites, systems) = multi_constellation_fixture(count);
+    let mut body = format!("> 2020 06 24 00 00  0.0000000{picoseconds}  {flag}{count:3}{clock}");
+    for satellite in &satellites {
+        body.push_str(&format!("\n{satellite}   23000000.000"));
+    }
+    obs_with_code_headers(&systems, &body)
+}
+
+#[test]
+fn an_epoch_of_a_hundred_satellites_separates_its_flag_from_its_count() {
+    // The epoch flag is `I1` and the satellite count `I3`, in adjacent columns,
+    // so a count of 100 or more leaves no separator: a conforming line reads
+    // `0100`, which whitespace splitting sees as one token. Multi-constellation
+    // files reach this count routinely. The picosecond and clock-offset fields
+    // shift the flag away from its usual column, so each combination is covered.
+    for (picoseconds, clock, expected_picoseconds, expected_clock) in [
+        ("", "", None, None),
+        (" 12345", "", Some(12_345), None),
+        ("", "      -0.000000000001", None, Some(-0.000_000_000_001)),
+        (
+            " 12345",
+            "      -0.000000000001",
+            Some(12_345),
+            Some(-0.000_000_000_001),
+        ),
+    ] {
+        let text = epoch_of(100, 0, picoseconds, clock);
+        let obs = RinexObs::parse(&text).expect("an epoch of a hundred satellites must parse");
+        let epoch = &obs.epochs()[0];
+        assert_eq!(epoch.flag, 0);
+        assert_eq!(epoch.sats.len(), 100);
+        assert_eq!(
+            epoch.epoch_picoseconds, expected_picoseconds,
+            "{picoseconds:?}"
+        );
+        assert_eq!(epoch.rcv_clock_offset_s, expected_clock, "{clock:?}");
+
+        let reparsed =
+            RinexObs::parse(&obs.to_rinex_string()).expect("re-encoded RINEX OBS must reparse");
+        assert_eq!(reparsed, obs);
+    }
+}
+
+#[test]
+fn epoch_satellite_counts_read_the_same_either_side_of_the_merge() {
+    // 99 is written with a leading space and never merges; 100 and above fill
+    // the field. A non-zero flag merges the same way.
+    for (count, flag) in [(9_usize, 0_u8), (99, 0), (100, 1), (155, 0)] {
+        let obs = RinexObs::parse(&epoch_of(count, flag, "", ""))
+            .unwrap_or_else(|error| panic!("{count} satellites, flag {flag}: {error}"));
+        let epoch = &obs.epochs()[0];
+        assert_eq!(epoch.flag, flag, "{count} satellites");
+        assert_eq!(epoch.sats.len(), count, "{count} satellites");
+    }
+}
+
+#[test]
+fn nonconforming_epoch_field_shapes_keep_their_existing_reading() {
+    // Splitting is bounded to counts that actually merge, so these two keep the
+    // readings they have always had. A zero-padded flag followed by a separate
+    // count is not a merge, and must not be read as a count of zero with the
+    // real count taken for a clock offset.
+    let (_, systems) = multi_constellation_fixture(1);
+    let padded_flag = obs_with_code_headers(
+        &systems,
+        "> 2020 06 24 00 00  0.0000000  0000 1\nG01   23000000.000",
+    );
+    let obs = RinexObs::parse(&padded_flag).expect("a zero-padded flag still parses");
+    assert_eq!(obs.epochs()[0].flag, 0);
+    assert_eq!(obs.epochs()[0].sats.len(), 1);
+    assert_eq!(obs.epochs()[0].rcv_clock_offset_s, None);
+
+    // A count past the I3 field stays rejected rather than becoming a
+    // picosecond field with an invented flag and count.
+    let overflowing = obs_with_code_headers(
+        &systems,
+        "> 2020 06 24 00 00  0.0000000  01000 0000\nG01   23000000.000",
+    );
+    assert!(
+        RinexObs::parse(&overflowing).is_err(),
+        "a count past the I3 field must not parse"
+    );
+
+    // A RINEX 4 record carries its picoseconds after the clock offset, where
+    // this reader does not look for them. Such a line keeps its rejection
+    // rather than parsing with the field silently dropped, whether the clock is
+    // written or left blank so the picoseconds land in its token.
+    for trailing in ["      -0.000000000001 12345", " 00001"] {
+        let (satellites, systems) = multi_constellation_fixture(100);
+        let mut body = format!("> 2020 06 24 00 00  0.0000000  0100{trailing}");
+        for satellite in &satellites {
+            body.push_str(&format!("\n{satellite}   23000000.000"));
+        }
+        assert!(
+            RinexObs::parse(&obs_with_code_headers(&systems, &body)).is_err(),
+            "a record whose trailing field this reader cannot place must not parse: {trailing:?}"
+        );
+    }
+
+    // `0100` followed by a separate count reads as an out-of-range flag with no
+    // satellites, which is what this reader has always made of it. Separating
+    // the token here would invent a hundred-satellite epoch and take the count
+    // for a clock offset. The picosecond variant reads the same way.
+    for picoseconds in ["", " 12345"] {
+        let flag_shaped = obs_with_code_headers(
+            &systems,
+            &format!("> 2020 06 24 00 00  0.0000000{picoseconds}  0100 0"),
+        );
+        let obs = RinexObs::parse(&flag_shaped).expect("an out-of-range flag still parses");
+        assert_eq!(obs.epochs()[0].flag, 100, "{picoseconds:?}");
+        assert_eq!(obs.epochs()[0].sats.len(), 0, "{picoseconds:?}");
+        assert_eq!(obs.epochs()[0].rcv_clock_offset_s, None, "{picoseconds:?}");
+    }
+}
+
 #[test]
 fn rejects_malformed_glonass_slot_records() {
     for header in [

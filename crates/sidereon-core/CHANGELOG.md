@@ -6,6 +6,14 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- An epoch of 100 or more satellites now parses. The epoch flag is an `I1`
+  field and the satellite count an `I3` field in the next columns, so a
+  conforming line reads `0100` with no separator between them, and splitting
+  the line on whitespace saw a single token and reported too few fields.
+  Multi-constellation files reach that satellite count routinely, so this
+  affected ordinary data rather than only generated input. The flag and count
+  are separated again, including on the lines whose picosecond or clock-offset
+  fields shift the flag away from its usual column.
 - The same fixed-column rule now covers the rest of the RINEX observation
   format: the version (`F20.2`), a `GLONASS COD/PHS/BIS` bias (`F8.3`), and an
   epoch record's seconds (`F11.7`), receiver clock offset (`F15.12`) and

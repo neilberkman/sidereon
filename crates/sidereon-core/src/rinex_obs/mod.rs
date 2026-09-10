@@ -86,6 +86,9 @@ const EPOCH_SECOND_DECIMALS: usize = 7;
 const CLOCK_OFFSET_WIDTH: usize = 15;
 const CLOCK_OFFSET_DECIMALS: usize = 12;
 const OBS_VALUE_DECIMALS: usize = 3;
+/// Year, month, day, hour, minute and seconds: the tokens every epoch line
+/// opens with, before the optional picoseconds and the flag.
+const EPOCH_TIME_TOKENS: usize = 6;
 const HEADER_VEC3_WIDTH: usize = 14;
 const HEADER_VEC3_DECIMALS: usize = 4;
 const HEADER_SECOND_WIDTH: usize = 13;
@@ -1961,13 +1964,94 @@ fn parse_epoch_line(
         .strip_prefix('>')
         .ok_or_else(|| Error::Parse(format!("RINEX OBS epoch line lacks '>': {line:?}")))?;
     let tokens: Vec<&str> = body.split_whitespace().collect();
+    match interpret_epoch_tokens(&tokens, line, second_policy) {
+        Ok((parsed, _)) => Ok(parsed),
+        // The epoch flag (`I1`) and satellite count (`I3`) sit in adjacent
+        // columns, so a count of 100 or more - ordinary for a
+        // multi-constellation file - leaves no separator and whitespace
+        // splitting returns one token. Separating them is tried only after the
+        // plain reading fails, so no line this reader already accepted can be
+        // reinterpreted, whatever nonconforming shape it is in.
+        Err(error) => {
+            let Some(split) = split_merged_epoch_flag_and_count(&tokens) else {
+                return Err(error);
+            };
+            // Only a reading that accounts for the whole line is worth
+            // preferring to the rejection this line used to get. A record that
+            // trails an unread token is some other shape - a RINEX 4 epoch
+            // carries its picoseconds after the clock offset, where this reader
+            // does not look for them - and accepting it would silently drop
+            // that field. The plain reading's error is kept either way, so the
+            // message a caller sees is the one it has always seen.
+            match interpret_epoch_tokens(&split, line, second_policy) {
+                Ok((parsed, consumed))
+                    if consumed == split.len()
+                        && clock_token_is_written_as_one(&split, &parsed) =>
+                {
+                    Ok(parsed)
+                }
+                _ => Err(error),
+            }
+        }
+    }
+}
+
+/// Separate an epoch flag and satellite count that share one token.
+///
+/// Returns `None` unless the token is four digits whose last three are 100 or
+/// more: the count is right aligned in its field, so anything below that is
+/// written with a leading space and never merges.
+fn split_merged_epoch_flag_and_count<'a>(tokens: &[&'a str]) -> Option<Vec<&'a str>> {
+    let all_digits = |token: &&str| token.bytes().all(|byte| byte.is_ascii_digit());
+    let flag_index = usize::from(
+        tokens
+            .get(EPOCH_TIME_TOKENS)
+            .is_some_and(|token| token.len() == 5 && all_digits(token)),
+    ) + EPOCH_TIME_TOKENS;
+    let merged = tokens.get(flag_index)?;
+    if merged.len() != 4 || !all_digits(merged) || merged[1..].starts_with('0') {
+        return None;
+    }
+    let (flag, count) = merged.split_at(1);
+    let mut split = tokens.to_vec();
+    split[flag_index] = flag;
+    split.insert(flag_index + 1, count);
+    Some(split)
+}
+
+/// Whether a clock offset the fallback read is written the way one is written.
+///
+/// The field is `F15.12`, so a real offset carries a decimal point or a Fortran
+/// exponent. A bare integer in that position is some other field - a RINEX 4
+/// record puts its picoseconds after the clock, and with the clock left blank
+/// they land in the same token - and reading it as an offset would invent a
+/// value. Such a line keeps the rejection it has always had.
+fn clock_token_is_written_as_one(tokens: &[&str], parsed: &ParsedEpochLine) -> bool {
+    let (_, _, _, rcv_clock_offset_s, _) = parsed;
+    if rcv_clock_offset_s.is_none() {
+        return true;
+    }
+    tokens
+        .last()
+        .is_some_and(|token| token.contains(['.', 'e', 'E', 'd', 'D']))
+}
+
+/// Read an epoch line's fields from its tokens, reporting how many it used.
+///
+/// The token count matters only to the caller's fallback: the ordinary reading
+/// ignores anything trailing, as it always has.
+fn interpret_epoch_tokens(
+    tokens: &[&str],
+    line: &str,
+    second_policy: validate::CivilSecondPolicy,
+) -> Result<(ParsedEpochLine, usize)> {
     if tokens.len() < 8 {
         return Err(Error::Parse(format!(
             "RINEX OBS epoch line has too few fields in {line:?}"
         )));
     }
     let epoch = parse_epoch_time_tokens(
-        &tokens[..6].join(" "),
+        &tokens[..EPOCH_TIME_TOKENS].join(" "),
         line,
         [
             "epoch.year",
@@ -1987,7 +2071,7 @@ fn parse_epoch_line(
         line,
     )?;
 
-    let mut index = 6;
+    let mut index = EPOCH_TIME_TOKENS;
     let epoch_picoseconds = if tokens
         .get(index)
         .is_some_and(|token| token.len() == 5 && token.bytes().all(|b| b.is_ascii_digit()))
@@ -2016,7 +2100,11 @@ fn parse_epoch_line(
             )
         })
         .transpose()?;
-    Ok((epoch, flag, numsat, rcv_clock_offset_s, epoch_picoseconds))
+    let consumed = index + usize::from(rcv_clock_offset_s.is_some());
+    Ok((
+        (epoch, flag, numsat, rcv_clock_offset_s, epoch_picoseconds),
+        consumed,
+    ))
 }
 
 type ParsedEpochLineV2 = (ObsEpochTime, u8, usize, Option<f64>);
