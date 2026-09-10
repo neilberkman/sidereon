@@ -6,6 +6,26 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- The same fixed-column rule now covers the rest of the RINEX observation
+  format: the version (`F20.2`), a `GLONASS COD/PHS/BIS` bias (`F8.3`), and an
+  epoch record's seconds (`F11.7`), receiver clock offset (`F15.12`) and
+  observation values (`F14.3`). Each accepted values the writer could not
+  reproduce: a version of `3.999` came back as `4.00`, an epoch second of
+  `59.99999999` was written as `60.0000000` and then failed to reparse as a
+  civil time at all, a clock offset of `-123.456789012345` overran its columns
+  and merged with the satellite count, and an observation value below the
+  field's resolution came back as zero. The observation value is now checked for
+  precision as well as width, comparing after the scale factor is divided back
+  out, because that is the value the next read recovers.
+- The six columns RINEX reserves between an epoch's satellite count and its
+  receiver clock offset are written again. Without them a full-width negative
+  offset abutted the count, and the epoch line no longer read back.
+- `APPROX POSITION XYZ` and `ANTENNA: DELTA H/E/N` are read from the columns the
+  writer uses, falling back to whitespace for loosely formatted files. The three
+  `F14.4` components leave no separator when one fills its field, so a receiver
+  position with a -10,000,000 m component was written as
+  `0.0000-10000000.0000` and read back as a single token, failing to parse. This
+  affected conforming files, not just generated ones.
 - RINEX observation header numbers that a fixed-column field cannot re-emit are
   now rejected at parse instead of being written back as a different number.
   `INTERVAL` is an `F10.3` field, the `APPROX POSITION XYZ` and

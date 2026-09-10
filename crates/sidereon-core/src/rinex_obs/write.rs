@@ -176,9 +176,12 @@ impl RinexObs {
             .epoch_picoseconds
             .map(|value| format!(" {value:05}"))
             .unwrap_or_default();
+        // RINEX reserves six columns between the satellite count and the clock
+        // offset. Without them a full-width negative offset abuts the count and
+        // the line no longer reads back.
         let clock = epoch
             .rcv_clock_offset_s
-            .map(|value| format!("{value:15.12}"))
+            .map(|value| format!("      {value:15.12}"))
             .unwrap_or_default();
         let _ = writeln!(
             out,
