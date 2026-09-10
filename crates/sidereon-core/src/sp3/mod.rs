@@ -1439,9 +1439,7 @@ fn exact_in_field(
     if !value.is_finite() {
         return Ok(value);
     }
-    let text = format!("{value:.decimals$}");
-    let overflows = width.is_some_and(|width| text.len() > width);
-    if overflows || text.parse::<f64>() != Ok(value) {
+    if !validate::representable_in_fixed_field(value, width, decimals) {
         let field = match width {
             Some(width) => format!("F{width}.{decimals}"),
             None => format!("F.{decimals}"),

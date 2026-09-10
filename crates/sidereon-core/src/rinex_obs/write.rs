@@ -118,7 +118,13 @@ impl RinexObs {
         if let Some(unit) = &h.signal_strength_unit {
             push_header_line(out, unit, "SIGNAL STRENGTH UNIT");
         }
-        if let Some(interval) = h.interval_s {
+        // A cadence the F10.3 field cannot carry is omitted rather than written
+        // into a line that overruns its columns and reads back as a different
+        // number. Parsed products never hold one; a caller-built product can.
+        if let Some(interval) = h
+            .interval_s
+            .filter(|interval| crate::rinex_common::writable_obs_interval_s(*interval))
+        {
             push_header_line(out, &format!("{interval:10.3}"), "INTERVAL");
         }
         if let Some((epoch, scale)) = h.time_of_first_obs {

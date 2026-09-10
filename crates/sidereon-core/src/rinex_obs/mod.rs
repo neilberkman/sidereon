@@ -67,6 +67,15 @@ use crate::{Error, Result};
 
 /// Width of one RINEX-3 observation field (`F14.3` value + LLI + SSI).
 const OBS_FIELD_WIDTH: usize = 16;
+/// Columns and decimals of the fixed-column numeric header fields the writer
+/// re-emits: `INTERVAL` (`F10.3`), the `APPROX POSITION XYZ` and
+/// `ANTENNA: DELTA H/E/N` components (`F14.4`), and the `TIME OF FIRST OBS` /
+/// `TIME OF LAST OBS` seconds (`F13.7`). A header value outside what its field
+/// expresses is rejected rather than written back as a different number.
+const HEADER_VEC3_WIDTH: usize = 14;
+const HEADER_VEC3_DECIMALS: usize = 4;
+const HEADER_SECOND_WIDTH: usize = 13;
+const HEADER_SECOND_DECIMALS: usize = 7;
 /// Width of the numeric part of one observation field (`F14.3`).
 const OBS_VALUE_WIDTH: usize = 14;
 /// Largest record count representable by a RINEX epoch `I3` field.
@@ -841,7 +850,17 @@ impl Parser {
                 "TIME OF FIRST OBS" => self.parse_time_of_first_obs(line)?,
                 "TIME OF LAST OBS" => self.parse_time_of_last_obs(line)?,
                 "INTERVAL" => {
-                    self.interval_s = optional_f64_field(line, 0, 10, "interval_s")?;
+                    self.interval_s = optional_f64_field(line, 0, 10, "interval_s")?
+                        .map(|interval_s| {
+                            exact_in_field(
+                                interval_s,
+                                crate::rinex_common::OBS_INTERVAL_WIDTH,
+                                crate::rinex_common::OBS_INTERVAL_DECIMALS,
+                                "interval_s",
+                                line,
+                            )
+                        })
+                        .transpose()?;
                 }
                 "GLONASS SLOT / FRQ #" => self.parse_glonass_slots(line)?,
                 "GLONASS COD/PHS/BIS" => self.parse_glonass_cod_phs_bis(line)?,
@@ -1344,6 +1363,13 @@ impl Parser {
             line,
             [year, month, day, hour, minute, second],
             civil_second_policy_for_time_scale(scale),
+        )?;
+        exact_in_field(
+            epoch.second,
+            HEADER_SECOND_WIDTH,
+            HEADER_SECOND_DECIMALS,
+            second,
+            line,
         )?;
         Ok((epoch, scale))
     }
@@ -2255,11 +2281,18 @@ fn strict_vec3_tokens(body: &str, line: &str, fields: [&'static str; 3]) -> Resu
         let field = fields[tokens.len()];
         return Err(map_field_error(FieldError::Missing { field }, line));
     }
-    Ok([
-        strict_f64_token(tokens[0], fields[0], line)?,
-        strict_f64_token(tokens[1], fields[1], line)?,
-        strict_f64_token(tokens[2], fields[2], line)?,
-    ])
+    let mut values = [0.0_f64; 3];
+    for (index, value) in values.iter_mut().enumerate() {
+        let parsed = strict_f64_token(tokens[index], fields[index], line)?;
+        *value = exact_in_field(
+            parsed,
+            HEADER_VEC3_WIDTH,
+            HEADER_VEC3_DECIMALS,
+            fields[index],
+            line,
+        )?;
+    }
+    Ok(values)
 }
 
 fn optional_f64_field(
@@ -2330,6 +2363,29 @@ fn scale_factor_value(value: u32) -> Result<f64> {
             "RINEX OBS invalid scale_factor.factor: expected 1, 10, 100, or 1000, got {value}"
         ))),
     }
+}
+
+/// Reject a header value the fixed-column field cannot re-emit unchanged.
+///
+/// The writer sends every parsed header number back through the same `Fw.d`
+/// format, so a value the field cannot express re-parses as a different number
+/// (or, when it overruns its columns, as a line the parser cannot read at all).
+/// This is the same rule the SP3 record fields apply: never accept a record the
+/// writer cannot reproduce.
+fn exact_in_field(
+    value: f64,
+    width: usize,
+    decimals: usize,
+    field_name: &'static str,
+    line: &str,
+) -> Result<f64> {
+    if validate::representable_in_fixed_field(value, Some(width), decimals) {
+        return Ok(value);
+    }
+    Err(Error::Parse(format!(
+        "RINEX OBS invalid {field_name}: {value} is not representable in its \
+         F{width}.{decimals} field in {line:?}"
+    )))
 }
 
 fn map_field_error(error: FieldError, line: &str) -> Error {

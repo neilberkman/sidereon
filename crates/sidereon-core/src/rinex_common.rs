@@ -63,6 +63,31 @@ pub(crate) fn obs_epoch_seconds(epoch: ObsEpochTime) -> f64 {
     )
 }
 
+/// Columns and decimals of the observation `INTERVAL` header field (`F10.3`).
+pub(crate) const OBS_INTERVAL_WIDTH: usize = 10;
+pub(crate) const OBS_INTERVAL_DECIMALS: usize = 3;
+
+/// Whether the `INTERVAL` header field can record this cadence exactly.
+///
+/// A cadence the field cannot carry must never be written: the line would
+/// overrun its ten columns and the file would no longer read back as the same
+/// product. Repair therefore declines to adopt such a cadence, the writer omits
+/// it, and the parser rejects one it finds in a file. An inferred cadence is a
+/// multiple of a millisecond, so only a very long one - epochs a year apart, say
+/// - runs out of columns.
+pub(crate) fn writable_obs_interval_s(interval_s: f64) -> bool {
+    // A non-finite interval formats as `NaN` or `inf`, which the parser refuses
+    // outright, so it is unwritable rather than merely imprecise. The shared
+    // representability rule carries non-finite values through for the callers
+    // that model them separately, so exclude them here.
+    interval_s.is_finite()
+        && crate::validate::representable_in_fixed_field(
+            interval_s,
+            Some(OBS_INTERVAL_WIDTH),
+            OBS_INTERVAL_DECIMALS,
+        )
+}
+
 /// Whether a declared RINEX observation interval can be used as a cadence.
 ///
 /// `INTERVAL` is optional product metadata. RINEX permits zero to represent an
@@ -134,6 +159,27 @@ mod tests {
         assert!(usable_obs_interval_s(30.0));
         for unusable in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert!(!usable_obs_interval_s(unusable), "{unusable:?}");
+        }
+    }
+
+    #[test]
+    fn writable_observation_interval_is_bounded_by_the_header_field() {
+        // F10.3: ten columns, three decimals.
+        assert!(writable_obs_interval_s(30.0));
+        assert!(writable_obs_interval_s(0.001));
+        assert!(writable_obs_interval_s(999_999.999));
+        for unwritable in [
+            // Needs an eleventh column.
+            1_000_000.0,
+            // Epochs a year apart; the cadence repair would otherwise infer.
+            31_536_000.0,
+            // Carries precision the three decimals drop.
+            0.000_4,
+            1e-300,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            assert!(!writable_obs_interval_s(unwritable), "{unwritable:?}");
         }
     }
 
