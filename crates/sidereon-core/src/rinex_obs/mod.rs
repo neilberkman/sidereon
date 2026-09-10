@@ -72,6 +72,20 @@ const OBS_FIELD_WIDTH: usize = 16;
 /// `ANTENNA: DELTA H/E/N` components (`F14.4`), and the `TIME OF FIRST OBS` /
 /// `TIME OF LAST OBS` seconds (`F13.7`). A header value outside what its field
 /// expresses is rejected rather than written back as a different number.
+/// Columns and decimals of the remaining fixed-format numbers the writer
+/// re-emits: the version (two decimals in the twenty columns this writer leaves
+/// ahead of the file-type field; the specification calls the field `F9.2,11X`),
+/// a `GLONASS COD/PHS/BIS` bias (`F8.3`), an epoch record's seconds (`F11.7`)
+/// and receiver clock offset (`F15.12`).
+const VERSION_WIDTH: usize = 20;
+const VERSION_DECIMALS: usize = 2;
+const GLONASS_BIAS_WIDTH: usize = 8;
+const GLONASS_BIAS_DECIMALS: usize = 3;
+const EPOCH_SECOND_WIDTH: usize = 11;
+const EPOCH_SECOND_DECIMALS: usize = 7;
+const CLOCK_OFFSET_WIDTH: usize = 15;
+const CLOCK_OFFSET_DECIMALS: usize = 12;
+const OBS_VALUE_DECIMALS: usize = 3;
 const HEADER_VEC3_WIDTH: usize = 14;
 const HEADER_VEC3_DECIMALS: usize = 4;
 const HEADER_SECOND_WIDTH: usize = 13;
@@ -936,6 +950,7 @@ impl Parser {
                 .ok_or_else(|| Error::Parse(format!("RINEX OBS bad version field in {line:?}")))?;
             strict_f64_token(token, "version", line)
         })?;
+        let version = exact_in_field(version, VERSION_WIDTH, VERSION_DECIMALS, "version", line)?;
         // The file type letter is at column 20; observation files carry 'O'.
         let type_field = field(line, 20, 40);
         let body = field(line, 0, 60);
@@ -1435,9 +1450,16 @@ impl Parser {
                     "RINEX OBS GLONASS COD/PHS/BIS has an odd token count in {line:?}"
                 )));
             }
+            let bias = strict_f64_token(pair[1], "glonass_code_phase_bias", line)?;
             entries.push((
                 pair[0].to_string(),
-                strict_f64_token(pair[1], "glonass_code_phase_bias", line)?,
+                exact_in_field(
+                    bias,
+                    GLONASS_BIAS_WIDTH,
+                    GLONASS_BIAS_DECIMALS,
+                    "glonass_code_phase_bias",
+                    line,
+                )?,
             ));
         }
         self.glonass_cod_phs_bis = Some(entries);
@@ -1768,13 +1790,24 @@ impl Parser {
                 // The serializer writes this value back as `F14.3` (value * scale).
                 // A value whose three-decimal form needs more than the 14-column
                 // field would expand it and shift the LLI/SSI and later fields on
-                // reparse, so it is not representable in this format - reject it
-                // rather than emit ambiguous text. Real F14.3 data is always in
-                // range.
-                if format!("{:.3}", parsed * scale).len() > OBS_VALUE_WIDTH {
-                    return Err(Error::Parse(
-                        "RINEX OBS observation value exceeds the F14.3 field width".into(),
-                    ));
+                // reparse; one that needs more than three decimals comes back as
+                // a different number. Neither is representable in this format, so
+                // reject it rather than emit text that does not read back. Real
+                // F14.3 data is always in range.
+                // The comparison happens after the scale is divided back out,
+                // because that is the value the next read recovers. Scaling is
+                // not exactly invertible in binary floating point - a file value
+                // of 123456.001 at scale 10 is stored as 12345.6001 and
+                // multiplies back to 123456.00099999999 - so demanding that the
+                // formatted text reparse to the scaled product would reject a
+                // value that round trips perfectly well.
+                let formatted = format!("{:.*}", OBS_VALUE_DECIMALS, parsed * scale);
+                let recovered = formatted.parse::<f64>().map(|value| value / scale);
+                if formatted.len() > OBS_VALUE_WIDTH || recovered != Ok(parsed) {
+                    return Err(Error::Parse(format!(
+                        "RINEX OBS observation value {parsed} is not representable in its \
+                         F{OBS_VALUE_WIDTH}.{OBS_VALUE_DECIMALS} field in {line:?}"
+                    )));
                 }
                 Some(parsed)
             };
@@ -1946,6 +1979,13 @@ fn parse_epoch_line(
         ],
         second_policy,
     )?;
+    exact_in_field(
+        epoch.second,
+        EPOCH_SECOND_WIDTH,
+        EPOCH_SECOND_DECIMALS,
+        "epoch.second",
+        line,
+    )?;
 
     let mut index = 6;
     let epoch_picoseconds = if tokens
@@ -1965,7 +2005,16 @@ fn parse_epoch_line(
     index += 1;
     let rcv_clock_offset_s = tokens
         .get(index)
-        .map(|token| strict_f64_token(token, "epoch.rcv_clock_offset_s", line))
+        .map(|token| {
+            let offset = strict_f64_token(token, "epoch.rcv_clock_offset_s", line)?;
+            exact_in_field(
+                offset,
+                CLOCK_OFFSET_WIDTH,
+                CLOCK_OFFSET_DECIMALS,
+                "epoch.rcv_clock_offset_s",
+                line,
+            )
+        })
         .transpose()?;
     Ok((epoch, flag, numsat, rcv_clock_offset_s, epoch_picoseconds))
 }
@@ -2000,13 +2049,29 @@ fn parse_epoch_line_v2(
         second_policy,
     )
     .map_err(|error| map_field_error(error, line))?;
+    // RINEX 2 epochs are re-emitted through the RINEX 3 epoch writer, so they
+    // are held to that line's field geometry.
+    exact_in_field(
+        civil.second,
+        EPOCH_SECOND_WIDTH,
+        EPOCH_SECOND_DECIMALS,
+        "epoch.second",
+        line,
+    )?;
     let flag = strict_int_token::<u8>(tokens[6], "epoch.flag", line)?;
     let numsat = parse_epoch_record_count(tokens[7], line)?;
     let clock = field(line, 68, line.len()).trim();
     let rcv_clock_offset_s = if clock.is_empty() {
         None
     } else {
-        Some(strict_f64_token(clock, "epoch.rcv_clock_offset_s", line)?)
+        let offset = strict_f64_token(clock, "epoch.rcv_clock_offset_s", line)?;
+        Some(exact_in_field(
+            offset,
+            CLOCK_OFFSET_WIDTH,
+            CLOCK_OFFSET_DECIMALS,
+            "epoch.rcv_clock_offset_s",
+            line,
+        )?)
     };
     Ok((
         ObsEpochTime {
@@ -2276,7 +2341,43 @@ fn parse_epoch_time_tokens(
 }
 
 fn strict_vec3_tokens(body: &str, line: &str, fields: [&'static str; 3]) -> Result<[f64; 3]> {
-    let tokens: Vec<&str> = body.split_whitespace().collect();
+    // Whitespace splitting keeps priority, so every layout this reader has
+    // accepted still yields the same three numbers. It cannot read one case:
+    // the writer lays these out as three adjacent F14.4 columns, which leaves no
+    // separator when a component fills its field, so a -10,000,000 m coordinate
+    // writes as `0.0000-10000000.0000` and merges with its neighbour. Merging
+    // only ever loses tokens, so falling back to the writer's columns exactly
+    // when whitespace cannot produce three numbers rescues that case without
+    // reinterpreting any line that already worked.
+    let parses = |token: &str, index: usize| strict_f64_token(token, fields[index], line).is_ok();
+    let whitespace: Vec<&str> = body.split_whitespace().collect();
+    let tokens: Vec<&str> = if whitespace.len() >= fields.len()
+        && whitespace
+            .iter()
+            .take(fields.len())
+            .enumerate()
+            .all(|(index, token)| parses(token, index))
+    {
+        whitespace
+    } else {
+        let columns: Vec<&str> = (0..fields.len())
+            .map(|index| {
+                let start = index * HEADER_VEC3_WIDTH;
+                body.get(start..start + HEADER_VEC3_WIDTH)
+                    .map(str::trim)
+                    .unwrap_or_default()
+            })
+            .collect();
+        let columns_are_numbers = columns
+            .iter()
+            .enumerate()
+            .all(|(index, column)| !column.is_empty() && parses(column, index));
+        if columns_are_numbers {
+            columns
+        } else {
+            whitespace
+        }
+    };
     if tokens.len() < fields.len() {
         let field = fields[tokens.len()];
         return Err(map_field_error(FieldError::Missing { field }, line));

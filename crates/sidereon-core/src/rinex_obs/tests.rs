@@ -1154,6 +1154,188 @@ fn header_numbers_on_their_field_grid_round_trip_exactly() {
 }
 
 #[test]
+fn rejects_record_numbers_a_fixed_column_field_cannot_re_emit() {
+    // The remaining fixed-format numbers the writer re-emits: the version
+    // (F20.2), a GLONASS bias (F8.3), and an epoch record's seconds (F11.7),
+    // receiver clock offset (F15.12) and observation values (F14.3). Each of
+    // these parses as a finite f64 but cannot survive its own field.
+    let version = minimal_obs(&[], "").replace("     3.05  ", "     3.999 ");
+    let cases = [
+        ("version", version),
+        (
+            "glonass_code_phase_bias",
+            minimal_obs(&[header_line(" C1C   1e-300", "GLONASS COD/PHS/BIS")], ""),
+        ),
+        (
+            "epoch.second",
+            minimal_obs(
+                &[],
+                "> 2020 06 24 00 00 59.99999999  0  1\nG01        23000000.000",
+            ),
+        ),
+        (
+            "epoch.rcv_clock_offset_s",
+            minimal_obs(
+                &[],
+                "> 2020 06 24 00 00  0.0000000  0  1 1e-13\nG01        23000000.000",
+            ),
+        ),
+        (
+            // Wider than its fifteen columns: the offset would run into the
+            // satellite count on the next read.
+            "epoch.rcv_clock_offset_s",
+            minimal_obs(
+                &[],
+                "> 2020 06 24 00 00  0.0000000  0  1 -123.456789012345\nG01        23000000.000",
+            ),
+        ),
+        (
+            "observation value",
+            minimal_obs(
+                &[],
+                "> 2020 06 24 00 00  0.0000000  0  1\nG01        1e-300",
+            ),
+        ),
+    ];
+    for (field, text) in cases {
+        let err =
+            RinexObs::parse(&text).expect_err("a value its field cannot re-emit must not parse");
+        let message = err.to_string();
+        assert!(
+            message.contains("is not representable in its F") && message.contains(field),
+            "{field} was rejected for an unrelated reason: {message}"
+        );
+    }
+}
+
+#[test]
+fn adjacent_vector_header_columns_are_read_as_the_writer_wrote_them() {
+    // Three F14.4 columns leave no separator when a component fills its field,
+    // so a -10,000,000 m coordinate writes as `0.0000-10000000.0000`. Reading
+    // the writer's columns recovers it; whitespace splitting saw one token.
+    let text = minimal_obs(
+        &[header_line(
+            "           0.0  -10000000.0           0.0",
+            "APPROX POSITION XYZ",
+        )],
+        "",
+    );
+    let obs = RinexObs::parse(&text).expect("parse an adjacent-column position");
+    assert_eq!(
+        obs.header().approx_position_m,
+        Some([0.0, -10_000_000.0, 0.0])
+    );
+
+    let encoded = obs.to_rinex_string();
+    let line = encoded
+        .lines()
+        .find(|line| line.contains("APPROX POSITION XYZ"))
+        .expect("the position is written");
+    assert!(
+        line.contains("0.0000-10000000.0000"),
+        "the columns really do abut: {line:?}"
+    );
+    let reparsed = RinexObs::parse(&encoded).expect("re-encoded RINEX OBS must reparse");
+    assert_eq!(reparsed, obs);
+}
+
+#[test]
+fn scaled_observations_round_trip_at_their_own_scale() {
+    // Scaling is not exactly invertible in binary floating point: a file value
+    // of 123456.001 at scale 10 stores 12345.6001 and multiplies back to
+    // 123456.00099999999. What has to round trip is the value the next read
+    // recovers, not that intermediate product.
+    //
+    // `SYS / SCALE FACTOR` puts the system at column 0, the factor in columns
+    // 2..6 and the code count in columns 8..10, and an observation record puts
+    // its F14.3 value in the fourteen columns after the satellite id, so these
+    // fixtures are laid out by column rather than by eye.
+    for (scale_header, scale, file_value, stored) in [
+        (
+            "G 1000  1 C1C",
+            1000.0_f64,
+            "133379507.327",
+            133_379.507_327_f64,
+        ),
+        ("G   10  1 C1C", 10.0_f64, "123456.001", 12_345.600_1_f64),
+    ] {
+        let text = minimal_obs(
+            &[header_line(scale_header, "SYS / SCALE FACTOR")],
+            &format!("> 2020 06 24 00 00  0.0000000  0  1\nG01{file_value:>14}"),
+        );
+        let obs = RinexObs::parse(&text)
+            .unwrap_or_else(|error| panic!("scale {scale} value {file_value} must parse: {error}"));
+
+        // Prove the fixture is read as intended before trusting the round trip.
+        let factor = &obs.header().scale_factors[0];
+        assert_eq!(factor.system, GnssSystem::Gps);
+        assert_eq!(factor.factor.to_bits(), scale.to_bits());
+        assert_eq!(factor.codes, vec![String::from("C1C")]);
+        let values = &obs.epochs()[0].sats
+            [&GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id")];
+        assert_eq!(values[0].value, Some(stored), "scale {scale}");
+        assert_eq!(
+            values[0].lli, None,
+            "scale {scale}: the value must not spill into LLI"
+        );
+        assert_eq!(
+            values[0].ssi, None,
+            "scale {scale}: the value must not spill into SSI"
+        );
+
+        let reparsed =
+            RinexObs::parse(&obs.to_rinex_string()).expect("re-encoded RINEX OBS must reparse");
+        assert_eq!(
+            reparsed, obs,
+            "scale {scale} value {file_value} did not round trip"
+        );
+    }
+}
+
+#[test]
+fn a_full_width_clock_offset_keeps_its_reserved_columns() {
+    // RINEX reserves six columns between the satellite count and the clock
+    // offset. Without them a full-width negative offset abuts the count and the
+    // epoch line no longer reads back.
+    let text = minimal_obs(
+        &[],
+        "> 2020 06 24 00 00  0.0000000  0  1 -0.000000000001\nG01        23000000.000",
+    );
+    let obs = RinexObs::parse(&text).expect("parse a full-width clock offset");
+    let encoded = obs.to_rinex_string();
+    let epoch_line = encoded
+        .lines()
+        .find(|line| line.starts_with('>'))
+        .expect("the epoch line is written");
+    assert!(
+        epoch_line.contains("  1      -0.000000000001"),
+        "the reserved columns are missing: {epoch_line:?}"
+    );
+    let reparsed = RinexObs::parse(&encoded).expect("re-encoded RINEX OBS must reparse");
+    assert_eq!(reparsed, obs);
+}
+
+#[test]
+fn loosely_spaced_vector_headers_are_still_accepted() {
+    // Files that do not lay the components on the writer's columns have always
+    // parsed, and still do.
+    for (body, expected) in [
+        ("1.0 2.0 3.0", [1.0, 2.0, 3.0]),
+        // Fifteen-wide columns: every fourteen-column slice would also parse as
+        // a number, so reading the writer's columns first would silently return
+        // [1, 2, 34].
+        (
+            "             12             34             56",
+            [12.0, 34.0, 56.0],
+        ),
+    ] {
+        let text = minimal_obs(&[header_line(body, "APPROX POSITION XYZ")], "");
+        let obs = RinexObs::parse(&text).expect("parse a loosely spaced position");
+        assert_eq!(obs.header().approx_position_m, Some(expected), "{body:?}");
+    }
+}
+
+#[test]
 fn rejects_malformed_glonass_slot_records() {
     for header in [
         header_line("  1 R01 bad", "GLONASS SLOT / FRQ #"),
