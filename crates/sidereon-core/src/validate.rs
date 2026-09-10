@@ -634,6 +634,30 @@ pub(crate) fn checked_i64_mul(
     lhs.checked_mul(rhs).ok_or(ArithmeticError { field })
 }
 
+/// Whether a fixed-column `F<width>.<decimals>` field can carry `value` exactly.
+///
+/// Parsed values are written back through the same fixed-column format, so a
+/// value carrying more precision than the field expresses - or one too wide for
+/// its columns - re-parses as a different number and the parse -> write -> parse
+/// identity breaks. Callers reject such a value rather than emit a record they
+/// cannot reproduce. `width` is `None` for a field the format does not
+/// column-bound. Non-finite values are not this predicate's concern; each
+/// caller already models them.
+pub(crate) fn representable_in_fixed_field(
+    value: f64,
+    width: Option<usize>,
+    decimals: usize,
+) -> bool {
+    if !value.is_finite() {
+        return true;
+    }
+    let text = format!("{value:.decimals$}");
+    if width.is_some_and(|width| text.len() > width) {
+        return false;
+    }
+    text.parse::<f64>() == Ok(value)
+}
+
 pub(crate) fn strict_f64(s: &str, field: &'static str) -> Result<f64, FieldError> {
     let value = s.trim();
     if value.is_empty() {

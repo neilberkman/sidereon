@@ -344,6 +344,76 @@ fn negative_and_nonfinite_intervals_are_errors_and_never_used_as_cadence() {
 }
 
 #[test]
+fn repair_replaces_a_declared_interval_the_header_cannot_record() {
+    // 30.0000001 s is a usable cadence arithmetically and sits within the
+    // tolerance of the inferred 30 s, but the F10.3 field cannot express it, so
+    // the writer omits it. Retaining it would leave the repaired product and the
+    // repaired text disagreeing, and repairing the text again would re-derive
+    // the cadence and produce different bytes. Only a caller can build such a
+    // product: the parser now rejects the value.
+    let text = obs_text(
+        &[],
+        &format!(
+            "{}\n{}",
+            gps_epoch(0, 0.0, "        23000000.000"),
+            gps_epoch(0, 30.0, "        23000001.000")
+        ),
+    );
+    let mut obs = RinexObs::parse(&text).expect("parse two-epoch observations");
+    obs.header.interval_s = Some(30.000_000_1);
+    let options = RepairOptions {
+        set_interval: true,
+        ..RepairOptions::default()
+    };
+
+    let first = repair_obs(&obs, &options);
+    assert_eq!(first.repaired.header().interval_s, Some(30.0));
+    let first_text = first.repaired.to_rinex_string();
+    assert!(
+        first_text.contains("    30.000"),
+        "the recordable cadence must be written: {first_text}"
+    );
+
+    let reparsed = RinexObs::parse(&first_text).expect("repaired OBS must reparse");
+    let second_text = repair_obs(&reparsed, &options).repaired.to_rinex_string();
+    assert_eq!(second_text, first_text);
+}
+
+#[test]
+fn repair_declines_a_cadence_the_interval_field_cannot_record() {
+    // Epochs a year apart: the inferred cadence is 31,536,000 s, which needs
+    // more than the ten columns of the F10.3 INTERVAL field. Writing it would
+    // overrun the field and the repaired file would no longer read back, so
+    // repair leaves the header without an interval instead.
+    let mut body = String::new();
+    for year in [2018, 2019, 2020] {
+        body.push_str(&format!(
+            "> {year} 06 24 00 00  0.0000000  0  1\nG01        23000000.000\n"
+        ));
+    }
+    let text = obs_text(&[], &body);
+    let obs = RinexObs::parse(&text).expect("parse yearly-cadence observations");
+    let options = RepairOptions {
+        set_interval: true,
+        ..RepairOptions::default()
+    };
+
+    let first = repair_obs(&obs, &options);
+    assert_eq!(first.repaired.header().interval_s, None);
+    let first_text = first.repaired.to_rinex_string();
+    assert!(
+        !first_text.contains("INTERVAL"),
+        "an unrecordable cadence must not be written: {first_text}"
+    );
+
+    // The fuzz invariant: the repaired text reparses, and repairing it again
+    // reproduces it byte for byte.
+    let reparsed = RinexObs::parse(&first_text).expect("repaired OBS must reparse");
+    let second_text = repair_obs(&reparsed, &options).repaired.to_rinex_string();
+    assert_eq!(second_text, first_text);
+}
+
+#[test]
 fn obs_lint_reports_time_scale_mismatch_and_repair_fixes_it() {
     // RINEX 3.05: TIME OF FIRST OBS defines the file time system, so it is
     // authoritative. A TIME OF LAST OBS declaring a different system is the

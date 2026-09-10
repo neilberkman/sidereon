@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::astro::time::model::TimeScale;
 use crate::crinex;
 use crate::id::{GnssSatelliteId, GnssSystem};
-use crate::rinex_common::{dominant_obs_interval_s, obs_epoch_seconds, usable_obs_interval_s};
+use crate::rinex_common::{
+    dominant_obs_interval_s, obs_epoch_seconds, usable_obs_interval_s, writable_obs_interval_s,
+};
 use crate::rinex_nav::{
     parse_iono_corrections, parse_leap_seconds, parse_nav, parse_nav_lenient, BroadcastRecord,
     IonoCorrections, NavMessage, NavParseError,
@@ -2071,24 +2073,48 @@ fn repair_obs_unsupported_records(
     }
 }
 
+/// Whether an interval can serve as a cadence the header actually records.
+///
+/// Both halves matter and neither implies the other: zero is writable but is
+/// the "unknown" marker rather than a cadence, and a cadence a hair off a
+/// whole millisecond is usable arithmetic but cannot be written into the
+/// `F10.3` field. Repair leaves such an interval nowhere: the writer omits what
+/// it cannot express, so retaining one would make the repaired product and the
+/// repaired text disagree, and repairing the text again would then re-derive
+/// the cadence and produce different bytes.
+fn recordable_obs_interval_s(interval_s: f64) -> bool {
+    usable_obs_interval_s(interval_s) && writable_obs_interval_s(interval_s)
+}
+
 fn repair_obs_interval(obs: &mut RinexObs, actions: &mut Vec<RepairAction>) {
-    let Some(interval) = dominant_interval_for_epochs(&obs.epochs) else {
-        if obs
+    // A cadence the `INTERVAL` field cannot record is no better than none: the
+    // header would be written as a line that no longer reads back.
+    let Some(interval) = dominant_interval_for_epochs(&obs.epochs)
+        .filter(|interval| writable_obs_interval_s(*interval))
+    else {
+        if let Some(declared) = obs
             .header
             .interval_s
-            .is_some_and(|declared| !usable_obs_interval_s(declared))
+            .filter(|declared| !recordable_obs_interval_s(*declared))
         {
+            // Name which half of the rule the declared value failed, because
+            // the two are different problems for whoever wrote the file.
+            let message = if usable_obs_interval_s(declared) {
+                "removed INTERVAL because its F10.3 field cannot record it and no recordable \
+                 cadence could be inferred"
+            } else {
+                "removed unusable INTERVAL because no recordable cadence could be inferred"
+            };
             obs.header.interval_s = None;
             actions.push(RepairAction {
                 id: "A6",
-                message: "removed unusable INTERVAL because no cadence could be inferred"
-                    .to_string(),
+                message: message.to_string(),
             });
         }
         return;
     };
     if obs.header.interval_s.is_none_or(|declared| {
-        !usable_obs_interval_s(declared) || (declared - interval).abs() > 1.0e-6
+        !recordable_obs_interval_s(declared) || (declared - interval).abs() > 1.0e-6
     }) {
         obs.header.interval_s = Some(interval);
         actions.push(RepairAction {

@@ -2,6 +2,37 @@
 
 All notable changes to `sidereon-core` are documented here.
 
+## [Unreleased]
+
+### Fixed
+
+- RINEX observation header numbers that a fixed-column field cannot re-emit are
+  now rejected at parse instead of being written back as a different number.
+  `INTERVAL` is an `F10.3` field, the `APPROX POSITION XYZ` and
+  `ANTENNA: DELTA H/E/N` components are `F14.4`, and the `TIME OF FIRST OBS` /
+  `TIME OF LAST OBS` seconds are `F13.7`, but the parser accepted any finite
+  float in those columns. A value below the field's resolution was written as
+  zero, which RINEX reads back as the "unknown" zero rather than the original
+  value; a value too wide for its columns overran them, so the position and
+  antenna-delta lines re-encoded into text that no longer parsed at all, and an
+  `INTERVAL` of `1e300` came back as `1000000000`. Scheduled fuzzing found the
+  first case through repair idempotence: a header declaring `INTERVAL` at
+  `1e-300` on a product with no epochs was kept by the first repair (a positive
+  interval is usable), written as `0.000`, and then deleted by the second
+  repair because zero is not a usable cadence, so repairing twice did not match
+  repairing once. This is the rule the SP3 record fields already applied; it now
+  covers the observation header, and both parsers share it.
+- Observation repair no longer adopts a cadence the `INTERVAL` header cannot
+  record. The inferred cadence is the dominant epoch spacing, so a file whose
+  epochs sit a year apart inferred 31,536,000 seconds, which overruns the
+  field's ten columns; the repaired file was written with a malformed header
+  line. Repair now leaves the header without an interval in that case, and the
+  writer omits an interval it cannot express rather than emitting a line that
+  reads back as a different number. Repair also replaces a declared interval the
+  header cannot record even when it agrees with the inferred cadence to within
+  the comparison tolerance, so the repaired product and the repaired text no
+  longer disagree about what the file says.
+
 ## [2.1.0] - 2026-09-05
 
 ### Added

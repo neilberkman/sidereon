@@ -1079,6 +1079,81 @@ fn zero_optional_interval_is_retained_as_unavailable_metadata() {
 }
 
 #[test]
+fn rejects_header_numbers_a_fixed_column_field_cannot_re_emit() {
+    // Every one of these parses as a finite f64 but cannot survive the writer's
+    // own fixed-column format, so accepting it would mean emitting a file that
+    // reads back as a different product. INTERVAL is F10.3, the position and
+    // antenna-delta components are F14.4, and the header seconds are F13.7.
+    for header in [
+        // Below the field's resolution: the writer would emit 0.000, which
+        // RINEX reads back as the "unknown" zero rather than the tiny value.
+        header_line("    1e-300", "INTERVAL"),
+        header_line("    0.0004", "INTERVAL"),
+        // Too wide for the field: the writer would overrun the ten columns.
+        header_line("     1e300", "INTERVAL"),
+        header_line(
+            "        1e-300         0.0         0.0",
+            "APPROX POSITION XYZ",
+        ),
+        header_line(
+            "       0.00004         0.0         0.0",
+            "APPROX POSITION XYZ",
+        ),
+        header_line(
+            "         1e300         0.0         0.0",
+            "APPROX POSITION XYZ",
+        ),
+        header_line(
+            "        1e-300      0.0000      0.0000",
+            "ANTENNA: DELTA H/E/N",
+        ),
+        header_line(
+            "         1e300      0.0000      0.0000",
+            "ANTENNA: DELTA H/E/N",
+        ),
+        header_line(
+            "  2020     6    24     0     0   0.00000001     GPS",
+            "TIME OF FIRST OBS",
+        ),
+    ] {
+        let err = RinexObs::parse(&minimal_obs(std::slice::from_ref(&header), ""))
+            .expect_err("a value its field cannot re-emit must not parse");
+        let message = err.to_string();
+        assert!(
+            message.contains("is not representable in its F"),
+            "{header:?} was rejected for an unrelated reason: {message}"
+        );
+    }
+}
+
+#[test]
+fn header_numbers_on_their_field_grid_round_trip_exactly() {
+    for header in [
+        header_line("     0.000", "INTERVAL"),
+        header_line("     0.001", "INTERVAL"),
+        header_line("    30.000", "INTERVAL"),
+        header_line(
+            "  3582105.2910   532589.7313  5232754.8054",
+            "APPROX POSITION XYZ",
+        ),
+        header_line(
+            "        0.0000      0.0000      0.0000",
+            "ANTENNA: DELTA H/E/N",
+        ),
+        header_line(
+            "  2020     6    24     0     0    0.0000000     GPS",
+            "TIME OF FIRST OBS",
+        ),
+    ] {
+        let text = minimal_obs(std::slice::from_ref(&header), "");
+        let obs = RinexObs::parse(&text).expect("a value on the field grid parses");
+        let reparsed =
+            RinexObs::parse(&obs.to_rinex_string()).expect("re-encoded RINEX OBS must reparse");
+        assert_eq!(reparsed, obs, "{header:?} did not survive a round trip");
+    }
+}
+
+#[test]
 fn rejects_malformed_glonass_slot_records() {
     for header in [
         header_line("  1 R01 bad", "GLONASS SLOT / FRQ #"),
