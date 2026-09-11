@@ -17,6 +17,13 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
     let encoded = original.to_rinex_string();
-    let reparsed = RinexObs::parse(&encoded).expect("encoded RINEX OBS must reparse");
+    let mut reparsed = RinexObs::parse(&encoded).expect("encoded RINEX OBS must reparse");
+    // The labels of header records that were read and not retained describe the
+    // source text rather than the product, and the writer does not re-emit them,
+    // so a clean re-parse reports none. Normalise that one diagnostic rather
+    // than skipping the whole product, which would stop checking its records.
+    let mut original = original;
+    original.header.unretained_header_labels.clear();
+    reparsed.header.unretained_header_labels.clear();
     assert_eq!(reparsed, original);
 });

@@ -26,6 +26,58 @@ pub(crate) fn field(line: &str, start: usize, end: usize) -> Option<&str> {
     }
 }
 
+/// Read a record laid out in fixed columns, when the line really is laid out
+/// that way.
+///
+/// `fields` gives each field's half-open byte range, in order. The read succeeds
+/// only when every non-space byte of `line` falls inside one of those ranges, so
+/// a line whose content strays into the gaps a format reserves between its
+/// fields, or past the last one, is reported as not being in this layout.
+///
+/// That test is what lets a column reader stand in front of a looser one without
+/// changing how any loosely formatted line is read. A fixed-column record whose
+/// fields abut - a satellite count filling its `I3` columns against the epoch
+/// flag before it, say - is unreadable by splitting on whitespace, but a line
+/// that is not in the layout at all is still left to whatever looser reading the
+/// caller supports.
+///
+/// Ranges must be ordered and must not overlap. A field starting past the end of
+/// the line reads as blank, which is how an omitted trailing field appears.
+/// Fields are returned trimmed.
+pub(crate) fn fixed_record<const N: usize>(
+    line: &str,
+    fields: [(usize, usize); N],
+) -> Option<[&str; N]> {
+    debug_assert!(
+        fields.iter().all(|(start, end)| start <= end)
+            && fields.windows(2).all(|pair| pair[0].1 <= pair[1].0),
+        "fixed-column fields must be ordered and must not overlap"
+    );
+    // Columns are byte offsets, which only line up with characters while the
+    // line is ASCII. A line carrying anything else is not read as a layout at
+    // all, so a field boundary can never fall inside a character.
+    if !line.is_ascii() {
+        return None;
+    }
+    let outside_every_field = |index: usize| {
+        !fields
+            .iter()
+            .any(|(start, end)| index >= *start && index < *end)
+    };
+    if line
+        .bytes()
+        .enumerate()
+        .any(|(index, byte)| byte != b' ' && outside_every_field(index))
+    {
+        return None;
+    }
+    let mut read = [""; N];
+    for (slot, (start, end)) in read.iter_mut().zip(fields) {
+        *slot = field(line, start, end).unwrap_or_default();
+    }
+    Some(read)
+}
+
 /// Return an untrimmed fixed-column field, or `""` for an empty range.
 pub(crate) fn raw_field(line: &str, start: usize, end: usize) -> &str {
     let s = floor_char_boundary(line, start);
@@ -108,6 +160,76 @@ fn float_parse_error<T>(text: &str, field: &'static str) -> Result<T, FieldError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A RINEX 3 epoch line, laid out as the format specifies: the `>` marker,
+    /// the six date and time fields, then the flag and satellite count with the
+    /// two reserved columns before them.
+    const EPOCH: [(usize, usize); 9] = [
+        (0, 1),
+        (2, 6),
+        (7, 9),
+        (10, 12),
+        (13, 15),
+        (16, 18),
+        (18, 29),
+        (31, 32),
+        (32, 35),
+    ];
+
+    #[test]
+    fn fixed_record_reads_fields_that_abut() {
+        // A count of 100 fills its columns, so it touches the flag before it and
+        // no whitespace reading can separate the two.
+        assert_eq!(
+            fixed_record("> 2020 06 24 00 00  0.0000000  0100", EPOCH),
+            Some([">", "2020", "06", "24", "00", "00", "0.0000000", "0", "100"])
+        );
+        // The same line with the count clear of its first column reads the same
+        // way, so the layout is not doing anything special for the merged case.
+        assert_eq!(
+            fixed_record("> 2020 06 24 00 00  0.0000000  0 99", EPOCH),
+            Some([">", "2020", "06", "24", "00", "00", "0.0000000", "0", "99"])
+        );
+    }
+
+    #[test]
+    fn fixed_record_refuses_a_line_that_strays_outside_the_layout() {
+        // Content in the columns the format reserves after the count means the
+        // line is not in this layout, whatever else it may be. Both of these
+        // have a reading of their own that a looser reader still gives them.
+        for line in [
+            "> 2020 06 24 00 00  0.0000000  0000 1",
+            "> 2020 06 24 00 00  0.0000000  0100 0",
+        ] {
+            assert_eq!(fixed_record(line, EPOCH), None, "{line:?}");
+        }
+    }
+
+    #[test]
+    fn fixed_record_reads_a_blank_or_absent_trailing_field() {
+        // Three F14.4 columns, the last left off the end of the line.
+        let fields = [(0, 14), (14, 28), (28, 42)];
+        assert_eq!(
+            fixed_record("        0.0000-10000000.0000", fields),
+            Some(["0.0000", "-10000000.0000", ""])
+        );
+    }
+
+    #[test]
+    fn fixed_record_refuses_a_line_whose_columns_are_not_characters() {
+        // Byte offsets only line up with characters while the line is ASCII, so
+        // a field boundary must never be allowed to fall inside one.
+        assert_eq!(fixed_record("é", [(0, 1), (1, 2)]), None);
+        assert_eq!(fixed_record("ab", [(0, 1), (1, 2)]), Some(["a", "b"]));
+    }
+
+    #[test]
+    fn fixed_record_refuses_a_wider_layout_than_it_was_given() {
+        // Fifteen-column fields: every fourteen-column slice still parses as a
+        // number, so only the stray content reveals that the layout is wrong.
+        let body = format!("{:15}{:15}{:15}", 12, 34, 56);
+        assert_eq!(fixed_record(&body, [(0, 14), (14, 28), (28, 42)]), None);
+    }
 
     #[test]
     fn out_of_bounds_ranges_are_empty() {
