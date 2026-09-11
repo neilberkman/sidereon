@@ -6,6 +6,37 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- The RINEX observation reader takes the records the format lays out in fixed
+  columns from those columns, rather than by splitting the line on whitespace.
+  Whitespace cannot read a record whose field fills its width, because it then
+  touches the field beside it: an epoch of 100 or more satellites writes its
+  `I1` flag and `I3` count as `0100`, and a receiver position with a
+  -10,000,000 m component writes as `0.0000-10000000.0000`. Both are ordinary
+  conforming data and neither parsed. The columns are read only when the line is
+  laid out in them, which is decided by whether any content strays into the gaps
+  the format reserves; every looser reading still applies beneath that, in turn,
+  so a line that is not in the layout keeps the reading it has always had.
+  A line that *is* in the layout is now read as the layout describes it, which
+  is the intended change and can disagree with what splitting on whitespace made
+  of it. `0100` in an epoch's flag and count columns followed by a clock offset
+  read as an out-of-range flag of 100 with no satellites, and is now the hundred
+  satellites the columns describe; a minute and seconds field run together read
+  as one number and are now the two the columns separate. Such a line was
+  already being read as something its own layout contradicts. This covers both
+  epoch readers, the `APPROX POSITION XYZ` and `ANTENNA: DELTA H/E/N`
+  components, and the `TIME OF FIRST OBS` / `TIME OF LAST OBS` fields.
+- A RINEX 2 observation product can read the output it writes. Such a product is
+  re-emitted through the version 3 record writer, so its own file declared
+  version 2 while carrying `>` epoch records, which the version 2 reader could
+  not read. The body now follows the records themselves, which is unambiguous:
+  a version 2 epoch line begins with its two-digit year, never with `>`.
+- A `GLONASS COD/PHS/BIS` record carrying more entries than one line holds is
+  continued on another line instead of being cut off at the sixtieth column, and
+  the reader adds each line's entries to the record. A fifth entry was silently
+  lost. RINEX gives this record four biases and no continuation, so carrying
+  more is an extension of this crate's own; a blank record still means the
+  biases are unknown and clears what came before it.
+
 - An epoch of 100 or more satellites now parses. The epoch flag is an `I1`
   field and the satellite count an `I3` field in the next columns, so a
   conforming line reads `0100` with no separator between them, and splitting

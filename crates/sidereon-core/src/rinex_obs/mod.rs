@@ -54,7 +54,7 @@ use std::collections::BTreeMap;
 
 use crate::astro::time::model::TimeScale;
 
-use crate::format::columns::{raw_field as field, raw_field_from};
+use crate::format::columns::{fixed_record, raw_field as field, raw_field_from};
 use crate::format::{Diagnostics, RecordRef, Skip, SkipReason};
 use crate::frequencies::{
     rinex_band_frequency_hz, rinex_observation_frequency_hz, rinex_observation_wavelength_m,
@@ -86,6 +86,56 @@ const EPOCH_SECOND_DECIMALS: usize = 7;
 const CLOCK_OFFSET_WIDTH: usize = 15;
 const CLOCK_OFFSET_DECIMALS: usize = 12;
 const OBS_VALUE_DECIMALS: usize = 3;
+/// Columns of a RINEX 3 epoch line: the `>` marker, the six date and time
+/// fields, the epoch flag, the satellite count, and the receiver clock offset.
+/// The `2X` before the flag and the `6X` before the clock are the format's own
+/// gaps, and are left out so that content straying into them marks the line as
+/// not being in this layout.
+const V3_EPOCH_COLUMNS: [(usize, usize); 10] = [
+    (0, 1),
+    (2, 6),
+    (7, 9),
+    (10, 12),
+    (13, 15),
+    (16, 18),
+    (18, 29),
+    (31, 32),
+    (32, 35),
+    (41, 56),
+];
+/// The same line carrying this writer's picosecond field, which it places after
+/// the seconds and which shifts every later field six columns right.
+const V3_EPOCH_PICOSECOND_COLUMNS: [(usize, usize); 11] = [
+    (0, 1),
+    (2, 6),
+    (7, 9),
+    (10, 12),
+    (13, 15),
+    (16, 18),
+    (18, 29),
+    (30, 35),
+    (37, 38),
+    (38, 41),
+    (47, 62),
+];
+/// Columns of a `TIME OF FIRST OBS` / `TIME OF LAST OBS` body, `5I6,F13.7`.
+/// The time scale that follows is read from its own columns already.
+const TIME_OF_OBS_COLUMNS: [(usize, usize); EPOCH_TIME_TOKENS] =
+    [(0, 6), (6, 12), (12, 18), (18, 24), (24, 30), (30, 43)];
+
+/// Columns of a RINEX 2 epoch line's leading window, up to the satellite list.
+/// The clock offset sits past that list and is read separately.
+const V2_EPOCH_HEAD_COLUMNS: [(usize, usize); 8] = [
+    (1, 3),
+    (4, 6),
+    (7, 9),
+    (10, 12),
+    (13, 15),
+    (15, 26),
+    (28, 29),
+    (29, 32),
+];
+
 /// Year, month, day, hour, minute and seconds: the tokens every epoch line
 /// opens with, before the optional picoseconds and the flag.
 const EPOCH_TIME_TOKENS: usize = 6;
@@ -349,8 +399,19 @@ impl RinexObs {
         let mut parser = Parser::new();
         let mut lines = text.lines();
         parser.parse_header(&mut lines)?;
+        // A version 2 product is re-emitted through the version 3 record writer,
+        // so its own output declares version 2 while carrying `>` epoch records.
+        // Dispatch on the first record, which is unambiguous: a version 2 epoch
+        // line begins with its two-digit year, never with `>`. Without this the
+        // writer produces a file it cannot read back. Only the first record is
+        // consulted, never anything past it: a version 2 event record carries
+        // free text of its own, which may itself begin with `>`.
         let mut body = lines.peekable();
-        if parser.is_rinex2() {
+        while body.peek().is_some_and(|line| line.trim().is_empty()) {
+            body.next();
+        }
+        let carries_version_three_records = body.peek().is_some_and(|line| line.starts_with('>'));
+        if parser.is_rinex2() && !carries_version_three_records {
             parser.parse_body_v2(&mut body)?;
         } else {
             parser.parse_body(&mut body)?;
@@ -1376,12 +1437,24 @@ impl Parser {
             "time_of_last_obs" => "time_of_last_obs.second",
             _ => "time_of_first_obs.second",
         };
-        let epoch = parse_epoch_time_tokens(
-            body,
-            line,
-            [year, month, day, hour, minute, second],
-            civil_second_policy_for_time_scale(scale),
-        )?;
+        // `5I6,F13.7` with nothing between the fields, so they abut whenever one
+        // fills its width. Read the columns when the line is in them, and keep
+        // the looser reading for the files that are not.
+        // This layout leaves no gaps between its fields, so the check that
+        // content stays inside them cannot vouch for it on its own: the columns
+        // are preferred only when all six read as the numbers they are meant to
+        // be. Anything else keeps the looser reading.
+        let columns = fixed_record(body, TIME_OF_OBS_COLUMNS).filter(|columns| {
+            columns[..5]
+                .iter()
+                .all(|column| column.parse::<i64>().is_ok())
+                && columns[5].parse::<f64>().is_ok()
+        });
+        let names = [year, month, day, hour, minute, second];
+        let policy = civil_second_policy_for_time_scale(scale);
+        let epoch = columns
+            .and_then(|columns| parse_epoch_time_fields(columns, line, names, policy).ok())
+            .map_or_else(|| parse_epoch_time_tokens(body, line, names, policy), Ok)?;
         exact_in_field(
             epoch.second,
             HEADER_SECOND_WIDTH,
@@ -1465,7 +1538,15 @@ impl Parser {
                 )?,
             ));
         }
-        self.glonass_cod_phs_bis = Some(entries);
+        // RINEX gives this record four biases, which fit one line. More than
+        // that is an extension of this crate's own: the writer continues them
+        // onto another line rather than cutting them off at the sixtieth
+        // column, and a further line adds to the record. A blank record still
+        // means "unknown" and so clears what came before it.
+        match &mut self.glonass_cod_phs_bis {
+            Some(existing) if !entries.is_empty() => existing.extend(entries),
+            slot => *slot = Some(entries),
+        }
         Ok(())
     }
 
@@ -1960,29 +2041,34 @@ fn parse_epoch_line(
     line: &str,
     second_policy: validate::CivilSecondPolicy,
 ) -> Result<ParsedEpochLine> {
+    // Read the columns the format lays the record out in. That is the only way
+    // to read an epoch whose satellite count fills its `I3` field: it then abuts
+    // the flag before it, leaving no space for a tokenizer to split on. A line
+    // that is not in the layout, or whose columns do not parse, falls through to
+    // the looser reading that has always handled files which are not
+    // column-exact, so nothing this reader already accepted changes.
+    if let Some(tokens) = v3_epoch_column_tokens(line) {
+        if let Ok((parsed, _)) = interpret_epoch_tokens(&tokens, line, second_policy) {
+            return Ok(parsed);
+        }
+    }
     let body = line
         .strip_prefix('>')
         .ok_or_else(|| Error::Parse(format!("RINEX OBS epoch line lacks '>': {line:?}")))?;
     let tokens: Vec<&str> = body.split_whitespace().collect();
     match interpret_epoch_tokens(&tokens, line, second_policy) {
         Ok((parsed, _)) => Ok(parsed),
-        // The epoch flag (`I1`) and satellite count (`I3`) sit in adjacent
-        // columns, so a count of 100 or more - ordinary for a
-        // multi-constellation file - leaves no separator and whitespace
-        // splitting returns one token. Separating them is tried only after the
-        // plain reading fails, so no line this reader already accepted can be
-        // reinterpreted, whatever nonconforming shape it is in.
+        // A line that is in neither the layout nor a shape the tokenizer can
+        // read may still be one whose flag and count ran together. Separating
+        // them is the last thing tried, so it cannot change any other reading.
         Err(error) => {
             let Some(split) = split_merged_epoch_flag_and_count(&tokens) else {
                 return Err(error);
             };
-            // Only a reading that accounts for the whole line is worth
-            // preferring to the rejection this line used to get. A record that
-            // trails an unread token is some other shape - a RINEX 4 epoch
-            // carries its picoseconds after the clock offset, where this reader
-            // does not look for them - and accepting it would silently drop
-            // that field. The plain reading's error is kept either way, so the
-            // message a caller sees is the one it has always seen.
+            // The separated reading is preferred only when it accounts for the
+            // whole line and any clock offset it read is written the way one is
+            // written. Without both, a record whose trailing field this reader
+            // cannot place is accepted with that field silently dropped.
             match interpret_epoch_tokens(&split, line, second_policy) {
                 Ok((parsed, consumed))
                     if consumed == split.len()
@@ -1994,6 +2080,23 @@ fn parse_epoch_line(
             }
         }
     }
+}
+
+/// Whether a clock offset the repair read is written the way one is written.
+///
+/// The field is `F15.12`, so a real offset carries a decimal point or a Fortran
+/// exponent. A bare integer in that position is some other field - a RINEX 4
+/// record puts its picoseconds after the clock, and with the clock left blank
+/// they land in the same token - and reading it as an offset would invent a
+/// value.
+fn clock_token_is_written_as_one(tokens: &[&str], parsed: &ParsedEpochLine) -> bool {
+    let (_, _, _, rcv_clock_offset_s, _) = parsed;
+    if rcv_clock_offset_s.is_none() {
+        return true;
+    }
+    tokens
+        .last()
+        .is_some_and(|token| token.contains(['.', 'e', 'E', 'd', 'D']))
 }
 
 /// Separate an epoch flag and satellite count that share one token.
@@ -2019,21 +2122,57 @@ fn split_merged_epoch_flag_and_count<'a>(tokens: &[&'a str]) -> Option<Vec<&'a s
     Some(split)
 }
 
-/// Whether a clock offset the fallback read is written the way one is written.
+/// Read a RINEX 3 epoch line's fields from their columns, in the order the
+/// token reader expects them.
 ///
-/// The field is `F15.12`, so a real offset carries a decimal point or a Fortran
-/// exponent. A bare integer in that position is some other field - a RINEX 4
-/// record puts its picoseconds after the clock, and with the clock left blank
-/// they land in the same token - and reading it as an offset would invent a
-/// value. Such a line keeps the rejection it has always had.
-fn clock_token_is_written_as_one(tokens: &[&str], parsed: &ParsedEpochLine) -> bool {
-    let (_, _, _, rcv_clock_offset_s, _) = parsed;
-    if rcv_clock_offset_s.is_none() {
-        return true;
+/// Returns `None` when the line is not laid out that way, including when this
+/// writer's picosecond field is absent from where it puts it.
+fn v3_epoch_column_tokens(line: &str) -> Option<Vec<&str>> {
+    if let Some([marker, year, month, day, hour, minute, second, flag, count, clock]) =
+        fixed_record(line, V3_EPOCH_COLUMNS)
+    {
+        if marker == ">" {
+            return Some(epoch_tokens(
+                [year, month, day, hour, minute, second],
+                "",
+                flag,
+                count,
+                clock,
+            ));
+        }
+    }
+    let [marker, year, month, day, hour, minute, second, picoseconds, flag, count, clock] =
+        fixed_record(line, V3_EPOCH_PICOSECOND_COLUMNS)?;
+    (marker == ">").then(|| {
+        epoch_tokens(
+            [year, month, day, hour, minute, second],
+            picoseconds,
+            flag,
+            count,
+            clock,
+        )
+    })
+}
+
+/// Assemble the token list the epoch reader expects, leaving out the two
+/// optional fields when their columns are blank.
+fn epoch_tokens<'a>(
+    time: [&'a str; EPOCH_TIME_TOKENS],
+    picoseconds: &'a str,
+    flag: &'a str,
+    count: &'a str,
+    clock: &'a str,
+) -> Vec<&'a str> {
+    let mut tokens = time.to_vec();
+    if !picoseconds.is_empty() {
+        tokens.push(picoseconds);
+    }
+    tokens.push(flag);
+    tokens.push(count);
+    if !clock.is_empty() {
+        tokens.push(clock);
     }
     tokens
-        .last()
-        .is_some_and(|token| token.contains(['.', 'e', 'E', 'd', 'D']))
 }
 
 /// Read an epoch line's fields from its tokens, reporting how many it used.
@@ -2050,8 +2189,12 @@ fn interpret_epoch_tokens(
             "RINEX OBS epoch line has too few fields in {line:?}"
         )));
     }
-    let epoch = parse_epoch_time_tokens(
-        &tokens[..EPOCH_TIME_TOKENS].join(" "),
+    // Take the six fields as they were read. Re-joining them and splitting again
+    // would silently drop anything inside a field that contains a space, which a
+    // column read can legitimately hand over.
+    let time: [&str; EPOCH_TIME_TOKENS] = core::array::from_fn(|index| tokens[index]);
+    let epoch = parse_epoch_time_fields(
+        time,
         line,
         [
             "epoch.year",
@@ -2114,7 +2257,39 @@ fn parse_epoch_line_v2(
     second_policy: validate::CivilSecondPolicy,
 ) -> Result<ParsedEpochLineV2> {
     let head = field(line, 0, 32);
-    let tokens: Vec<&str> = head.split_whitespace().collect();
+    // The satellite count fills its `I3` field from a hundred satellites up and
+    // then abuts the flag before it, so the columns are read first. Each looser
+    // reading below it is tried in turn, so every line this reader accepted
+    // before is still read the same way.
+    if let Some(columns) = fixed_record(head, V2_EPOCH_HEAD_COLUMNS)
+        .filter(|columns| columns.iter().all(|column| !column.is_empty()))
+    {
+        if let Ok(parsed) = interpret_epoch_tokens_v2(&columns, line, second_policy) {
+            return Ok(parsed);
+        }
+    }
+    let whitespace: Vec<&str> = head.split_whitespace().collect();
+    match interpret_epoch_tokens_v2(&whitespace, line, second_policy) {
+        Ok(parsed) => Ok(parsed),
+        // The repaired head has to be exactly the eight fields the record is,
+        // or the line is some other shape and keeps its rejection.
+        Err(error) => match split_merged_epoch_flag_and_count(&whitespace)
+            .filter(|split| split.len() == V2_EPOCH_HEAD_COLUMNS.len())
+        {
+            Some(split) => {
+                interpret_epoch_tokens_v2(&split, line, second_policy).map_err(|_| error)
+            }
+            None => Err(error),
+        },
+    }
+}
+
+/// Read a RINEX 2 epoch line from its fields, however they were separated.
+fn interpret_epoch_tokens_v2(
+    tokens: &[&str],
+    line: &str,
+    second_policy: validate::CivilSecondPolicy,
+) -> Result<ParsedEpochLineV2> {
     if tokens.len() < 8 {
         return Err(Error::Parse(format!(
             "RINEX OBS v2 epoch line has too few fields in {line:?}"
@@ -2402,6 +2577,17 @@ fn parse_epoch_time_tokens(
         let field = fields[tokens.len()];
         return Err(map_field_error(FieldError::Missing { field }, line));
     }
+    let read: [&str; 6] = core::array::from_fn(|index| tokens[index]);
+    parse_epoch_time_fields(read, line, fields, second_policy)
+}
+
+/// Validate the six date and time fields of an epoch, however they were read.
+fn parse_epoch_time_fields(
+    tokens: [&str; 6],
+    line: &str,
+    fields: [&'static str; 6],
+    second_policy: validate::CivilSecondPolicy,
+) -> Result<ObsEpochTime> {
     let year = strict_int_token::<i32>(tokens[0], fields[0], line)?;
     let month = strict_int_token::<i64>(tokens[1], fields[1], line)?;
     let day = strict_int_token::<i64>(tokens[2], fields[2], line)?;
@@ -2429,41 +2615,56 @@ fn parse_epoch_time_tokens(
 }
 
 fn strict_vec3_tokens(body: &str, line: &str, fields: [&'static str; 3]) -> Result<[f64; 3]> {
-    // Whitespace splitting keeps priority, so every layout this reader has
-    // accepted still yields the same three numbers. It cannot read one case:
-    // the writer lays these out as three adjacent F14.4 columns, which leaves no
-    // separator when a component fills its field, so a -10,000,000 m coordinate
-    // writes as `0.0000-10000000.0000` and merges with its neighbour. Merging
-    // only ever loses tokens, so falling back to the writer's columns exactly
-    // when whitespace cannot produce three numbers rescues that case without
-    // reinterpreting any line that already worked.
+    // The three components are adjacent `F14.4` columns with nothing between
+    // them, so one that fills its field touches its neighbour: a -10,000,000 m
+    // coordinate writes as `0.0000-10000000.0000`, which no tokenizer can split.
+    // Read the columns when the line is laid out in them, and keep the looser
+    // reading for the files that are not.
+    let columns = fixed_record(
+        body,
+        [
+            (0, HEADER_VEC3_WIDTH),
+            (HEADER_VEC3_WIDTH, 2 * HEADER_VEC3_WIDTH),
+            (2 * HEADER_VEC3_WIDTH, 3 * HEADER_VEC3_WIDTH),
+        ],
+    )
+    .filter(|columns| {
+        columns.iter().enumerate().all(|(index, column)| {
+            !column.is_empty() && strict_f64_token(column, fields[index], line).is_ok()
+        })
+    });
     let parses = |token: &str, index: usize| strict_f64_token(token, fields[index], line).is_ok();
     let whitespace: Vec<&str> = body.split_whitespace().collect();
-    let tokens: Vec<&str> = if whitespace.len() >= fields.len()
+    let whitespace_reads = whitespace.len() >= fields.len()
         && whitespace
             .iter()
             .take(fields.len())
             .enumerate()
-            .all(|(index, token)| parses(token, index))
-    {
-        whitespace
-    } else {
-        let columns: Vec<&str> = (0..fields.len())
-            .map(|index| {
-                let start = index * HEADER_VEC3_WIDTH;
-                body.get(start..start + HEADER_VEC3_WIDTH)
-                    .map(str::trim)
-                    .unwrap_or_default()
-            })
-            .collect();
-        let columns_are_numbers = columns
-            .iter()
-            .enumerate()
-            .all(|(index, column)| !column.is_empty() && parses(column, index));
-        if columns_are_numbers {
-            columns
-        } else {
-            whitespace
+            .all(|(index, token)| parses(token, index));
+    let tokens: Vec<&str> = match columns {
+        Some(columns) => columns.to_vec(),
+        None if whitespace_reads => whitespace,
+        // Neither the layout nor the tokenizer read this line. The components
+        // may still sit on their columns with something trailing them, which is
+        // what this reader accepted before the layout test existed.
+        None => {
+            let lenient: Vec<&str> = (0..fields.len())
+                .map(|index| {
+                    let start = index * HEADER_VEC3_WIDTH;
+                    body.get(start..start + HEADER_VEC3_WIDTH)
+                        .map(str::trim)
+                        .unwrap_or_default()
+                })
+                .collect();
+            if lenient
+                .iter()
+                .enumerate()
+                .all(|(index, column)| !column.is_empty() && parses(column, index))
+            {
+                lenient
+            } else {
+                whitespace
+            }
         }
     };
     if tokens.len() < fields.len() {

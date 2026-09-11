@@ -24,6 +24,9 @@ use super::{ObsEpoch, ObsEpochTime, ObsValue, RinexObs, OBS_FIELD_WIDTH, OBS_VAL
 
 /// Columns a header record's content occupies before its 20-column label.
 pub(super) const HEADER_CONTENT_WIDTH: usize = 60;
+/// `GLONASS COD/PHS/BIS` entries that fit the sixty-column body: each takes
+/// thirteen columns, `1X,A3,1X,F8.3`.
+pub(super) const GLONASS_BIAS_ENTRIES_PER_LINE: usize = 4;
 /// Width of the `SYS / PHASE SHIFT` correction field (`F8.5`).
 const PHASE_SHIFT_CORRECTION_WIDTH: usize = 8;
 /// RINEX-3 observation codes per `SYS / # / OBS TYPES` line before continuation.
@@ -370,11 +373,20 @@ fn write_glonass_slots(out: &mut String, slots: &std::collections::BTreeMap<u8, 
 }
 
 fn write_glonass_cod_phs_bis(out: &mut String, entries: &[(String, f64)]) {
-    let mut content = String::new();
-    for (code, value) in entries {
-        let _ = write!(content, " {code:>3} {value:8.3}");
+    if entries.is_empty() {
+        push_header_line(out, "", "GLONASS COD/PHS/BIS");
+        return;
     }
-    push_header_line(out, content.trim_start(), "GLONASS COD/PHS/BIS");
+    // Each entry takes thirteen of the sixty columns, so a fifth one would be
+    // cut off the end of the line and lost. The record continues on another line
+    // instead, which is how the reader takes it back.
+    for chunk in entries.chunks(GLONASS_BIAS_ENTRIES_PER_LINE) {
+        let mut content = String::new();
+        for (code, value) in chunk {
+            let _ = write!(content, " {code:>3} {value:8.3}");
+        }
+        push_header_line(out, content.trim_start(), "GLONASS COD/PHS/BIS");
+    }
 }
 
 fn write_leap_seconds(out: &mut String, leap: super::ObsLeapSeconds) {

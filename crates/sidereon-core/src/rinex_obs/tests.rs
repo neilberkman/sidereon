@@ -1470,6 +1470,208 @@ fn nonconforming_epoch_field_shapes_keep_their_existing_reading() {
 }
 
 #[test]
+fn reading_by_column_leaves_every_looser_shape_as_it_was() {
+    // The layout is read first, but each looser reading below it still applies
+    // in turn, so a line that is not laid out in columns keeps the reading it
+    // has always had.
+    let (satellites, systems) = multi_constellation_fixture(100);
+
+    // Loosely spaced, with the flag and count run together: no layout, but the
+    // merged-token reading still recovers the hundred satellites.
+    let mut loose = String::from("> 2020 6 24 0 0 0 0100");
+    for satellite in &satellites {
+        loose.push_str(&format!("\n{satellite}   23000000.000"));
+    }
+    let obs = RinexObs::parse(&obs_with_code_headers(&systems, &loose))
+        .expect("a loosely spaced merged count still parses");
+    assert_eq!(obs.epochs()[0].sats.len(), 100);
+
+    // A seconds field holding a space is handed over as one field, not re-split:
+    // `0 1` is one second, as the looser reading has always made it.
+    let spaced = obs_with_code_headers(&systems, &format!("> 2020 06 24 00 00{:11}  0  0", "0 1"));
+    let obs = RinexObs::parse(&spaced).expect("a seconds field with a space still parses");
+    assert_eq!(obs.epochs()[0].epoch.second, 1.0);
+
+    // Column-shaped but not column-valued: the layout read parses badly, so the
+    // looser reading takes over rather than the line being rejected.
+    let odd_time = minimal_obs(
+        &[header_line(
+            &format!(
+                "{:7}{:7}{:7}{:7}{:7} 0.0000                GPS",
+                2020, 6, 24, 0, 0
+            ),
+            "TIME OF FIRST OBS",
+        )],
+        "",
+    );
+    let obs = RinexObs::parse(&odd_time).expect("a time header off its columns still parses");
+    assert_eq!(
+        obs.header().time_of_first_obs.expect("present").0.second,
+        0.0
+    );
+
+    // Components on their columns with something trailing them: no layout, and
+    // whitespace cannot separate the first two, but the columns still read.
+    let trailing = minimal_obs(
+        &[header_line(
+            &format!("{:14.4}{:14.4}{:14.4} extra", 0.0, -10_000_000.0, 0.0),
+            "APPROX POSITION XYZ",
+        )],
+        "",
+    );
+    let obs = RinexObs::parse(&trailing).expect("trailing content still parses");
+    assert_eq!(
+        obs.header().approx_position_m,
+        Some([0.0, -10_000_000.0, 0.0])
+    );
+}
+
+#[test]
+fn a_version_two_epoch_reads_a_satellite_count_that_fills_its_field() {
+    // The RINEX 2 epoch line abuts its flag and count exactly as the RINEX 3 one
+    // does, and had no repair at all before the columns were read. Its satellite
+    // list carries twelve to a line and continues from column 32 on the next.
+    let satellites: Vec<String> = (1..=32)
+        .map(|prn| format!("G{prn:02}"))
+        .chain((1..=24).map(|prn| format!("R{prn:02}")))
+        .chain((1..=36).map(|prn| format!("E{prn:02}")))
+        .chain((1..=8).map(|prn| format!("C{prn:02}")))
+        .collect();
+    assert_eq!(satellites.len(), 100);
+
+    let mut chunks = satellites.chunks(12);
+    let mut body = format!(
+        " 20  6 24  0  0  0.0000000  0{:3}{}",
+        satellites.len(),
+        chunks.next().expect("the first twelve").concat()
+    );
+    for chunk in chunks {
+        body.push_str(&format!("\n{}{}", " ".repeat(32), chunk.concat()));
+    }
+    for satellite in &satellites {
+        let _ = satellite;
+        body.push_str("\n   23000000.000");
+    }
+    let text = obs_with_version_and_code_headers(
+        2.11,
+        &[header_line("     1    C1", "# / TYPES OF OBSERV")],
+        &body,
+    );
+
+    let obs = RinexObs::parse(&text).expect("a version 2 epoch of a full count must parse");
+    assert_eq!(obs.epochs()[0].flag, 0);
+    assert_eq!(obs.epochs()[0].sats.len(), 100);
+}
+
+#[test]
+fn an_antenna_delta_whose_components_abut_is_read() {
+    // The same three adjacent F14.4 columns as the position, and the same merge.
+    // This one guards the reading rather than reproducing a break: the delta's
+    // components were already recovered by the reader's lenient last tier.
+    let text = minimal_obs(
+        &[header_line(
+            "           0.0  -10000000.0           0.0",
+            "ANTENNA: DELTA H/E/N",
+        )],
+        "",
+    );
+    let obs = RinexObs::parse(&text).expect("parse an adjacent-column antenna delta");
+    assert_eq!(
+        obs.header().antenna_delta_hen_m,
+        Some([0.0, -10_000_000.0, 0.0])
+    );
+    let reparsed =
+        RinexObs::parse(&obs.to_rinex_string()).expect("re-encoded RINEX OBS must reparse");
+    assert_eq!(reparsed, obs);
+}
+
+#[test]
+fn a_blank_glonass_bias_record_clears_the_one_before_it() {
+    // A blank record means the biases are unknown, so it replaces what came
+    // before rather than leaving it standing.
+    let text = minimal_obs(
+        &[
+            header_line(" C1C  -71.940", "GLONASS COD/PHS/BIS"),
+            header_line("", "GLONASS COD/PHS/BIS"),
+        ],
+        "",
+    );
+    let obs = RinexObs::parse(&text).expect("parse a cleared GLONASS bias record");
+    assert_eq!(obs.header().glonass_cod_phs_bis, Some(Vec::new()));
+}
+
+#[test]
+fn a_version_two_product_reads_back_the_output_it_writes() {
+    // A version 2 file is re-emitted through the version 3 record writer, so its
+    // own output declares version 2 while carrying `>` epoch records. Reading
+    // the body by its record shape rather than the declared version is what lets
+    // that file be read back at all.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/algo0010_2015001_v1_trim.rnx"
+    );
+    let text = std::fs::read_to_string(path).expect("read the committed RINEX 2 fixture");
+    let obs = RinexObs::parse(&text).expect("parse the RINEX 2 fixture");
+    assert!((obs.header().version - 2.11).abs() < 1e-9);
+    assert_eq!(obs.epochs().len(), 2);
+
+    let encoded = obs.to_rinex_string();
+    assert!(
+        encoded.lines().any(|line| line.starts_with('>')),
+        "the writer emits version 3 epoch records"
+    );
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs(), obs.epochs());
+    assert!((reparsed.header().version - 2.11).abs() < 1e-9);
+}
+
+#[test]
+fn a_glonass_bias_record_longer_than_one_line_survives_a_round_trip() {
+    // Each entry takes thirteen of the sixty columns, so a fifth would be cut
+    // off the end of the line. The record continues on another line instead, and
+    // the reader adds to what it already has rather than replacing it.
+    let entries = [
+        ("C1C", -71.940),
+        ("C1P", -71.940),
+        ("C2C", -71.940),
+        ("C2P", -71.940),
+        ("C3C", -12.500),
+    ];
+    let mut first = String::new();
+    for (code, value) in &entries[..4] {
+        first.push_str(&format!(" {code:>3} {value:8.3}"));
+    }
+    let text = minimal_obs(
+        &[
+            header_line(first.trim_start(), "GLONASS COD/PHS/BIS"),
+            header_line(" C3C  -12.500", "GLONASS COD/PHS/BIS"),
+        ],
+        "",
+    );
+
+    let obs = RinexObs::parse(&text).expect("parse a continued GLONASS bias record");
+    let read = obs
+        .header()
+        .glonass_cod_phs_bis
+        .as_ref()
+        .expect("the record is present");
+    assert_eq!(read.len(), 5, "every entry is kept: {read:?}");
+    assert_eq!(read[4].0, "C3C");
+
+    let encoded = obs.to_rinex_string();
+    assert_eq!(
+        encoded
+            .lines()
+            .filter(|line| line.contains("GLONASS COD/PHS/BIS"))
+            .count(),
+        2,
+        "the record is written across two lines rather than truncated"
+    );
+    let reparsed = RinexObs::parse(&encoded).expect("re-encoded RINEX OBS must reparse");
+    assert_eq!(reparsed, obs);
+}
+
+#[test]
 fn rejects_malformed_glonass_slot_records() {
     for header in [
         header_line("  1 R01 bad", "GLONASS SLOT / FRQ #"),
