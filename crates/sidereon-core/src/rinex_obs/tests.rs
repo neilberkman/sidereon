@@ -3095,6 +3095,88 @@ fn to_rinex_string_round_trips_through_parse() {
 }
 
 #[test]
+fn a_real_mixed_version_three_file_survives_being_written_as_version_two() {
+    // Every other version 2 test starts from the one version 2 fixture or from a
+    // product assembled by hand. This one takes a real mixed version 3 file,
+    // several constellations across 120 epochs, and asks for it as version 2.
+    // That is the path where each constellation's own code list has to become
+    // the one list version 2 carries, and where the column layout does its work
+    // rather than being the identity. Version 2 cannot carry a tracking
+    // attribute, so a value is matched on the band it was measured on, not on
+    // the full code.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"
+    );
+    let text = std::fs::read_to_string(path).expect("read the committed fixture");
+    let original = RinexObs::parse(&text).expect("parse the version 3 fixture");
+    assert!(
+        original.header().obs_codes.len() >= 3,
+        "the fixture is mixed"
+    );
+
+    let mut downgraded = original.clone();
+    downgraded.header.version = 2.11;
+    let encoded = downgraded.to_rinex_string();
+    assert!(
+        !encoded.lines().any(|line| line.starts_with('>')),
+        "written as version 2 throughout"
+    );
+    let reparsed = RinexObs::parse(&encoded).expect("the version 2 output reads back");
+    assert!((reparsed.header().version - 2.11).abs() < 1e-9);
+    assert_eq!(reparsed.epochs().len(), original.epochs().len());
+
+    // A measurement is its kind, band, value and indicators. The tracking
+    // attribute is the one thing version 2 is allowed to lose, so it is the one
+    // thing not compared. Blank fields carry nothing to lose.
+    let mut compared = 0_usize;
+
+    for (index, (before, after)) in original.epochs().iter().zip(reparsed.epochs()).enumerate() {
+        assert_eq!(before.epoch, after.epoch, "epoch {index} time");
+        assert_eq!(before.flag, after.flag, "epoch {index} flag");
+        assert_eq!(
+            before.sats.keys().collect::<Vec<_>>(),
+            after.sats.keys().collect::<Vec<_>>(),
+            "epoch {index} names the same satellites"
+        );
+        for (sat, values_before) in &before.sats {
+            let codes_before = &original.header().obs_codes[&sat.system];
+            let codes_after = &reparsed.header().obs_codes[&sat.system];
+            let values_after = &after.sats[sat];
+            let mut expected: Vec<(char, char, f64, Option<u8>, Option<u8>)> = codes_before
+                .iter()
+                .zip(values_before)
+                .filter_map(|(code, value)| {
+                    let v = value.value?;
+                    let mut c = code.chars();
+                    Some((c.next()?, c.next()?, v, value.lli, value.ssi))
+                })
+                .collect();
+            let mut found: Vec<(char, char, f64, Option<u8>, Option<u8>)> = codes_after
+                .iter()
+                .zip(values_after)
+                .filter_map(|(code, value)| {
+                    let v = value.value?;
+                    let mut c = code.chars();
+                    Some((c.next()?, c.next()?, v, value.lli, value.ssi))
+                })
+                .collect();
+            expected.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+            found.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+            assert_eq!(
+                found, expected,
+                "epoch {index} {sat:?}: every measurement keeps its kind, band, value and indicators"
+            );
+            compared += expected.len();
+        }
+    }
+    assert!(
+        compared > 10_000,
+        "the fixture carries real data to compare, not {compared} values"
+    );
+}
+
+#[test]
 fn a_version_two_file_keeps_its_columns_through_repeated_rewrites() {
     // Version 2 names its codes once for every constellation at once, so a name
     // one of them has no observable for lands on a code it already holds:
