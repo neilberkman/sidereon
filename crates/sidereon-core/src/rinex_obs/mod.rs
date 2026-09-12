@@ -2502,7 +2502,13 @@ fn canonical_rinex2_obs_code(system: GnssSystem, code: &str, version: f64) -> St
     }
 
     if let Some(mapped) = canonical_rinex2_code_exact(system, kind, band, version) {
-        return mapped.to_string();
+        // A leading `_` in the table means "this kind, on that band and
+        // tracking", so one row covers the pseudorange, phase, Doppler and
+        // signal strength that share a name's letter.
+        return match mapped.strip_prefix('_') {
+            Some(rest) => format!("{}{rest}", if kind == 'P' { 'C' } else { kind }),
+            None => mapped.to_string(),
+        };
     }
 
     let band = rinex2_band(system, band);
@@ -2510,6 +2516,10 @@ fn canonical_rinex2_obs_code(system: GnssSystem, code: &str, version: f64) -> St
     let attr = rinex2_default_tracking_attr(system, kind, band);
     format!("{canonical_kind}{band}{attr}")
 }
+
+/// The version that gave the L1 and L2 civil signals their own letters, leaving
+/// the digits to the P code.
+const RINEX2_LETTERED_NAMES_VERSION: f64 = 2.12;
 
 /// The version from which `C2` names the L2P(Y) pseudorange rather than L2C.
 /// 2.12 gave L2C its own names and left `C2` to the P code.
@@ -2523,7 +2533,34 @@ const RINEX2_L2C_RENAMED_VERSION: f64 = 2.12;
 /// and a shared column has to satisfy this for every constellation in it, not
 /// only the one whose candidates it came from.
 fn rinex2_name_allowed(system: GnssSystem, name: &str) -> bool {
-    !name.starts_with('P') || matches!(system, GnssSystem::Gps | GnssSystem::Glonass)
+    let mut chars = name.chars();
+    let (Some(kind), Some(band)) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    if kind == 'P' && !matches!(system, GnssSystem::Gps | GnssSystem::Glonass) {
+        return false;
+    }
+    // The bands each constellation has an observable on. Version 2 shares one
+    // digit space across all of them, so a name is only this constellation's
+    // where it names a band this one measures. BeiDou is not in version 2 at
+    // all; its digits are the frequency slots receivers wrote it into.
+    let bands: &[char] = match system {
+        GnssSystem::Gps => {
+            if kind == 'P' {
+                &['1', '2']
+            } else {
+                &['1', '2', '5']
+            }
+        }
+        GnssSystem::Glonass => &['1', '2', '3'],
+        GnssSystem::Galileo => &['1', '5', '6', '7', '8'],
+        GnssSystem::BeiDou => &['1', '2', '6', '7'],
+        GnssSystem::Qzss => &['1', '2', '5', '6'],
+        GnssSystem::Sbas => &['1', '5'],
+        // Version 2 has no NavIC, so no digit names one of its bands.
+        GnssSystem::Navic => &[],
+    };
+    bands.contains(&band)
 }
 
 /// Every RINEX 2 observation code a system's canonical code was mapped from,
@@ -2569,7 +2606,8 @@ fn rinex2_obs_code_candidates(system: GnssSystem, canonical: &str, version: f64)
         };
         for spelling in spellings {
             let name = format!("{spelling}{digit}");
-            if canonical_rinex2_obs_code(system, &name, version) == canonical
+            if rinex2_name_allowed(system, &name)
+                && canonical_rinex2_obs_code(system, &name, version) == canonical
                 && !names.contains(&name)
             {
                 names.push(name);
@@ -2579,7 +2617,8 @@ fn rinex2_obs_code_candidates(system: GnssSystem, canonical: &str, version: f64)
     for kind in kinds {
         for band in BANDS {
             let name = format!("{kind}{band}");
-            if canonical_rinex2_obs_code(system, &name, version) == canonical
+            if rinex2_name_allowed(system, &name)
+                && canonical_rinex2_obs_code(system, &name, version) == canonical
                 && !names.contains(&name)
             {
                 names.push(name);
@@ -2641,6 +2680,23 @@ fn canonical_rinex2_code_exact(
     version: f64,
 ) -> Option<&'static str> {
     match (system, kind, band) {
+        // 2.12 gave the L1 and L2 civil signals their own letters and left the
+        // digits to the P code, so `L1` there is the P(Y) phase, not C/A.
+        (GnssSystem::Gps, _, 'A') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1C"),
+        (GnssSystem::Glonass, _, 'A') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1C"),
+        (GnssSystem::Qzss, _, 'A') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1C"),
+        (GnssSystem::Sbas, _, 'A') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1C"),
+        (GnssSystem::Gps, _, 'B') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1X"),
+        (GnssSystem::Qzss, _, 'B') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1X"),
+        (GnssSystem::Gps, _, 'C') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_2X"),
+        (GnssSystem::Qzss, _, 'C') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_2X"),
+        (GnssSystem::Glonass, _, 'D') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_2C"),
+        (GnssSystem::Gps, 'L' | 'D' | 'S', '1') if version >= RINEX2_LETTERED_NAMES_VERSION => {
+            Some("_1W")
+        }
+        (GnssSystem::Glonass, 'L' | 'D' | 'S', '1') if version >= RINEX2_LETTERED_NAMES_VERSION => {
+            Some("_1P")
+        }
         (GnssSystem::Gps, 'C', '1') => Some("C1C"),
         // 2.11 section 10.1.1 added "Observation code for L2C pseudorange (C2)",
         // and RINEX 3 spells L2C `C2S`, `C2L` or `C2X` by channel; `X` is both,

@@ -60,7 +60,17 @@ All notable changes to `sidereon-core` are documented here.
 - A version 2 `# / TYPES OF OBSERV` code wider than the two characters its field
   holds is rejected. The record is `9(4X,A2)`, so a longer token means the line
   is not in that layout. Such a code was kept whole, written back into a
-  two-character field, and read again as a different code.
+  two-character field, and read again as a different code. This is stricter than
+  readers that take the two columns and ignore what sits beside them, which read
+  `C1CX` as `C1` and lose the rest without saying so.
+- Version 2.12's lettered names are read as the signals they name. It gave the
+  L1 and L2 civil signals their own letters and left the digits to the P code,
+  so at 2.12 a GPS `LA` is the C/A phase and `L1` the P(Y) one. Every letter was
+  read as though it were a band, producing codes like `CAX` that name no signal.
+- A version 2 name is only a constellation's where it names a band that
+  constellation measures. Version 2 shares one digit space across all of them,
+  and the writer would offer GPS a `P5` and Galileo a `C2`, neither of which
+  exists.
 
 - `PRN / # OF OBS` is read from the columns the format writes it in. The record
   is `3X,A1,I2,9I6`, so the satellite sits at columns 4 to 6 and the counts
@@ -112,7 +122,12 @@ All notable changes to `sidereon-core` are documented here.
   letting the other read back as a different signal was silent and wrong; the
   file grows by the columns the conflict needs instead. A file read at version 2
   gave every constellation its list from the same record, so nothing there
-  conflicts and the header keeps the width it had. A `PRN / # OF OBS` count
+  conflicts and the header keeps the width it had. A constellation that already
+  has a column for a code does not get a second one when the file names that
+  code again, which happens whenever a name is one it has no observable for:
+  Galileo has no `P1`, and both `C1` and `P1` read as its `C1X`. Giving that its
+  own column added one to the header on every rewrite, and the next read named
+  it again, so a valid mixed file grew without bound. A `PRN / # OF OBS` count
   moves to the column its measurement went to, rather than staying at the
   position it held in its own constellation's list. Two columns naming the same
   code are folded into one wherever no constellation needs both, so two lists

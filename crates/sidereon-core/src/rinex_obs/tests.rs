@@ -1962,7 +1962,27 @@ fn a_shared_column_is_a_name_every_constellation_in_it_may_carry() {
     obs.header
         .obs_codes
         .insert(GnssSystem::Galileo, vec!["C1X".to_string()]);
-    obs.epochs.clear();
+    let epoch = obs.epochs.first_mut().expect("the fixture has an epoch");
+    epoch.sats.clear();
+    let gps = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    let galileo = GnssSatelliteId {
+        system: GnssSystem::Galileo,
+        prn: 11,
+    };
+    for (sat, value) in [(gps, 123.0), (galileo, 456.0)] {
+        epoch.sats.insert(
+            sat,
+            vec![ObsValue {
+                value: Some(value),
+                lli: None,
+                ssi: None,
+            }],
+        );
+    }
+    obs.epochs.truncate(1);
 
     let encoded = obs.to_rinex_string();
     let declared = encoded
@@ -1970,10 +1990,18 @@ fn a_shared_column_is_a_name_every_constellation_in_it_may_carry() {
         .find(|line| line.contains("# / TYPES OF OBSERV"))
         .expect("the header names its types");
     assert_eq!(&declared[..18], "     2    P1    C1", "{declared:?}");
-    RinexObs::parse(&encoded).expect("its own output must read back");
-    assert!(
-        !encoded.contains("    P1    P1"),
-        "Galileo takes the C1 column, never a P1 one: {declared:?}"
+
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    let read = &reparsed.epochs()[0];
+    // GPS holds its value under P1 and Galileo holds its own under C1, so
+    // neither reads the other's column.
+    assert_eq!(
+        (read.sats[&gps][0].value, read.sats[&gps][1].value),
+        (Some(123.0), None)
+    );
+    assert_eq!(
+        (read.sats[&galileo][0].value, read.sats[&galileo][1].value),
+        (None, Some(456.0))
     );
 }
 
@@ -2280,6 +2308,68 @@ fn a_galileo_band_five_code_keeps_its_band() {
         canonical_rinex2_obs_code(GnssSystem::Galileo, "C5", 2.11),
         "C5X"
     );
+}
+
+#[test]
+fn version_two_point_twelve_names_the_civil_signals_by_letter() {
+    // 2.12 gave the L1 and L2 civil signals their own letters and left the
+    // digits to the P code, so `L1` there is the P(Y) phase and `LA` the C/A
+    // one. Reading a letter as a band produced codes like `CAX`, which name no
+    // signal at all.
+    for (system, declared, canonical) in [
+        (GnssSystem::Gps, "CA", "C1C"),
+        (GnssSystem::Gps, "LA", "L1C"),
+        (GnssSystem::Gps, "CB", "C1X"),
+        (GnssSystem::Gps, "CC", "C2X"),
+        (GnssSystem::Gps, "L1", "L1W"),
+        (GnssSystem::Gps, "S1", "S1W"),
+        (GnssSystem::Glonass, "CD", "C2C"),
+        (GnssSystem::Glonass, "L1", "L1P"),
+        (GnssSystem::Qzss, "CC", "C2X"),
+    ] {
+        assert_eq!(
+            canonical_rinex2_obs_code(system, declared, 2.12),
+            canonical,
+            "{system:?} {declared} at 2.12"
+        );
+    }
+    // At 2.11 the digits still name the civil signals.
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::Gps, "L1", 2.11),
+        "L1C"
+    );
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::Glonass, "L1", 2.11),
+        "L1C"
+    );
+}
+
+#[test]
+fn a_version_two_name_has_to_name_a_band_the_constellation_measures() {
+    // Version 2 shares one digit space across every constellation, so a digit
+    // is only this one's name where it names a band this one measures. GPS has
+    // no L5 P code and Galileo no band 2, and both were offered as names.
+    assert!(!rinex2_obs_code_candidates(GnssSystem::Gps, "C5X", 2.11)
+        .iter()
+        .any(|name| name == "P5"));
+    for (system, name) in [
+        (GnssSystem::Gps, "P5"),
+        (GnssSystem::Galileo, "C2"),
+        (GnssSystem::Sbas, "C2"),
+        (GnssSystem::Navic, "C5"),
+    ] {
+        assert!(
+            !rinex2_name_allowed(system, name),
+            "{system:?} has no {name}"
+        );
+    }
+    for (system, name) in [
+        (GnssSystem::Gps, "P2"),
+        (GnssSystem::Galileo, "C7"),
+        (GnssSystem::BeiDou, "C6"),
+    ] {
+        assert!(rinex2_name_allowed(system, name), "{system:?} has {name}");
+    }
 }
 
 #[test]
@@ -3002,4 +3092,50 @@ fn to_rinex_string_round_trips_through_parse() {
     );
     // Deterministic output.
     assert_eq!(reparsed.to_rinex_string(), serialized);
+}
+
+#[test]
+fn a_version_two_file_keeps_its_columns_through_repeated_rewrites() {
+    // Version 2 names its codes once for every constellation at once, so a name
+    // one of them has no observable for lands on a code it already holds:
+    // Galileo has no `P1`, and both `C1` and `P1` read as its `C1X`. Giving that
+    // a column of its own added one to the header on every rewrite, and the next
+    // read named it again, so the file grew without bound.
+    let mut text = String::new();
+    text.push_str(
+        "     2.11           OBSERVATION DATA    M (MIXED)           RINEX VERSION / TYPE\n",
+    );
+    text.push_str(&format!(
+        "{:<60}{:<20}\n",
+        "     2    C1    P1", "# / TYPES OF OBSERV"
+    ));
+    text.push_str(&format!(
+        "{:<60}{:<20}\n",
+        "  2015     1     1     0     0    0.0000000     GPS", "TIME OF FIRST OBS"
+    ));
+    text.push_str(&format!("{:<60}{:<20}\n", "", "END OF HEADER"));
+    text.push_str(" 15  1  1  0  0  0.0000000  0  2G 1E11\n");
+    text.push_str("  20000000.000  20000001.000\n");
+    text.push_str("  21000000.000\n");
+
+    let first = RinexObs::parse(&text).expect("parse the mixed version 2 file");
+    let mut obs = first.clone();
+    for round in 0..4 {
+        let encoded = obs.to_rinex_string();
+        let declared = encoded
+            .lines()
+            .find(|line| line.contains("# / TYPES OF OBSERV"))
+            .expect("the header names its types");
+        assert_eq!(
+            &declared[..18],
+            "     2    C1    P1",
+            "rewrite {round} changed the header: {declared:?}"
+        );
+        obs = RinexObs::parse(&encoded).expect("its own output must read back");
+        assert_eq!(
+            obs.epochs(),
+            first.epochs(),
+            "rewrite {round} moved a value"
+        );
+    }
 }

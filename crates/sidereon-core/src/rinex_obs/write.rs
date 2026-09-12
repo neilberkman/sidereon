@@ -372,12 +372,24 @@ impl RinexObs {
             .keys()
             .map(|system| (*system, Vec::new()))
             .collect();
+        // A constellation that already has a column for a code does not get a
+        // second one when the file names that code again. Version 2 names its
+        // codes once for every constellation at once, so a name one of them has
+        // no observable for - Galileo has no `P1` - lands on a code it already
+        // holds. Giving that a column of its own added one to the header on
+        // every rewrite, and the next read named it again.
+        let mut placed: BTreeMap<GnssSystem, Vec<&String>> = BTreeMap::new();
         for index in 0..longest {
             let mut remaining: Vec<(GnssSystem, &String)> = self
                 .header
                 .obs_codes
                 .iter()
                 .filter_map(|(system, codes)| Some((*system, codes.get(index)?)))
+                .filter(|(system, canonical)| {
+                    !placed
+                        .get(system)
+                        .is_some_and(|held| held.contains(canonical))
+                })
                 .collect();
             while let Some(&(first_system, first_code)) = remaining.first() {
                 let candidates =
@@ -413,6 +425,11 @@ impl RinexObs {
                     row.resize(position + 1, None);
                     if served.contains(system) {
                         row[position] = Some(index);
+                        if let Some((_, canonical)) =
+                            remaining.iter().find(|(holder, _)| holder == system)
+                        {
+                            placed.entry(*system).or_default().push(canonical);
+                        }
                     }
                 }
                 remaining.retain(|(system, _)| !served.contains(system));
