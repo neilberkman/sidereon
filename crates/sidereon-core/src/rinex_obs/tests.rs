@@ -2025,6 +2025,69 @@ fn a_version_two_file_writes_values_a_scale_factor_would_have_declared() {
 }
 
 #[test]
+fn an_event_epoch_keeps_the_records_that_followed_it() {
+    // A flag 3 epoch is followed by the header records for a new site
+    // occupation. They used to be counted and thrown away, and the epoch then
+    // written back declaring zero, so a file that changed site lost the marker,
+    // antenna and position it changed to.
+    let mut text = String::new();
+    for line in version_two_fixture_text().lines() {
+        text.push_str(line);
+        text.push('\n');
+        if line.contains("END OF HEADER") {
+            text.push_str(" 15  1  1  0  0  0.0000000  3  2\n");
+            text.push_str(&format!("{:<60}{:<20}\n", "NEWSITE", "MARKER NAME"));
+            text.push_str(&format!(
+                "{:<60}{:<20}\n",
+                "  1234567.0000  -4567890.0000   4321098.0000", "APPROX POSITION XYZ"
+            ));
+        }
+    }
+
+    let obs = RinexObs::parse(&text).expect("parse a file with a site occupation");
+    let event = obs
+        .epochs()
+        .iter()
+        .find(|epoch| epoch.flag == 3)
+        .expect("the event epoch is kept");
+    assert_eq!(event.special_records.len(), 2);
+    assert!(event.special_records[0].contains("MARKER NAME"));
+    assert!(event.special_records[1].contains("APPROX POSITION XYZ"));
+
+    // Written back, the epoch declares them and carries them.
+    let encoded = obs.to_rinex_string();
+    let line = encoded
+        .lines()
+        .find(|line| line.contains("  3  2"))
+        .expect("the event declares its two records");
+    assert_eq!(line.trim_end(), " 15  1  1  0  0  0.0000000  3  2");
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs(), obs.epochs());
+}
+
+#[test]
+fn a_version_three_event_epoch_keeps_its_records_too() {
+    let text = concat!(
+        "     3.05           OBSERVATION DATA    M                   RINEX VERSION / TYPE\n",
+        "G    1 C1C                                                  SYS / # / OBS TYPES\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 01 01 00 00  0.0000000  4  1\n",
+        "a comment carried by the event                              COMMENT\n",
+        "> 2020 01 01 00 00 30.0000000  0  1\n",
+        "G01      20000000.000\n",
+    );
+    let obs = RinexObs::parse(text).expect("parse a version 3 file with an event");
+    assert_eq!(
+        obs.epochs()[0].special_records,
+        vec!["a comment carried by the event                              COMMENT".to_string()]
+    );
+    let encoded = obs.to_rinex_string();
+    assert!(encoded.contains("a comment carried by the event"));
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs(), obs.epochs());
+}
+
+#[test]
 fn a_version_two_event_epoch_names_no_satellites() {
     // An event record keeps only its flag and epoch here. Writing a satellite
     // list beside a declared count of zero left text in the columns the clock
@@ -2041,7 +2104,7 @@ fn a_version_two_event_epoch_names_no_satellites() {
     assert_eq!(
         line.trim_end(),
         " 15  1  1  0  0  0.0000000  4  0",
-        "an event names no satellites"
+        "an event names no satellites, and this one carries no records either"
     );
 }
 

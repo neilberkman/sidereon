@@ -1177,7 +1177,7 @@ impl SyntheticObservationSet {
                 rcv_clock_offset_s: None,
                 epoch_picoseconds: None,
                 declared_record_count: sats.len(),
-                special_record_count: 0,
+                special_records: Vec::new(),
                 sats,
             });
         }

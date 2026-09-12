@@ -543,14 +543,21 @@ fn glonass_slot_findings_are_per_satellite_and_check_channel_range() {
 }
 
 #[test]
-fn obs_text_repair_guards_event_special_records() {
+fn obs_text_repair_keeps_event_special_records_unless_told_to_drop_them() {
     let headers = [header_line(
         "  2020    01    01    00    00    0.0000000     GPS",
         "TIME OF FIRST OBS",
     )];
     let body = "> 2020 01 01 00 00  0.0000000  2  1\nCOMMENT";
     let text = obs_text(&headers, body);
-    assert!(repair_obs_text(&text, &RepairOptions::default()).is_err());
+    // The repair used to refuse outright, because writing the product back
+    // dropped the records. It carries them now, so there is nothing to guard.
+    let kept = repair_obs_text(&text, &RepairOptions::default()).expect("repair keeps them");
+    assert_eq!(
+        kept.repaired.epochs()[0].special_records,
+        vec!["COMMENT".to_string()]
+    );
+    assert!(kept.repaired.to_rinex_string().contains("COMMENT"));
 
     let repair = repair_obs_text(
         &text,
