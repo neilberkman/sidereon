@@ -36,6 +36,12 @@ const RINEX2_OBS_TYPES_PER_LINE: usize = 9;
 /// `GLONASS COD/PHS/BIS` entries that fit the sixty-column body: each takes
 /// thirteen columns, `1X,A3,1X,F8.3`.
 pub(super) const GLONASS_BIAS_ENTRIES_PER_LINE: usize = 4;
+/// Column a `PRN / # OF OBS` record's satellite id begins at, after its `3X`.
+pub(super) const PRN_OBS_SATELLITE_COLUMN: usize = 3;
+/// Column a `PRN / # OF OBS` record's counts begin at, `A1,I2` past the blanks.
+pub(super) const PRN_OBS_COUNTS_COLUMN: usize = 6;
+/// Width of one `PRN / # OF OBS` count field (`I6`).
+pub(super) const PRN_OBS_COUNT_WIDTH: usize = 6;
 /// Width of the `SYS / PHASE SHIFT` correction field (`F8.5`).
 const PHASE_SHIFT_CORRECTION_WIDTH: usize = 8;
 /// RINEX-3 observation codes per `SYS / # / OBS TYPES` line before continuation.
@@ -707,15 +713,18 @@ fn write_prn_obs_counts(
     sat: crate::id::GnssSatelliteId,
     counts: &[Option<usize>],
 ) {
+    // `3X,A1,I2,9I6`, continued as `6X,9I6`: the satellite id sits at columns 4
+    // to 6, not at the start of the line, and the counts follow from column 7.
+    let heading = format!("{:blanks$}{sat:<3}", "", blanks = PRN_OBS_SATELLITE_COLUMN);
     if counts.is_empty() {
-        push_header_line(out, &format!("{sat:<3}"), "PRN / # OF OBS");
+        push_header_line(out, &heading, "PRN / # OF OBS");
         return;
     }
     for (chunk_index, chunk) in counts.chunks(PRN_OBS_COUNTS_PER_LINE).enumerate() {
         let mut content = if chunk_index == 0 {
-            format!("{sat:<3}")
+            heading.clone()
         } else {
-            " ".repeat(3)
+            " ".repeat(PRN_OBS_COUNTS_COLUMN)
         };
         for count in chunk {
             match count {

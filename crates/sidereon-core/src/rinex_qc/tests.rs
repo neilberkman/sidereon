@@ -109,9 +109,11 @@ fn committed_obs_fixtures_have_pinned_lint_findings() {
         ),
         (
             // The 120-epoch trim keeps full-file satellite totals and an
-            // unretained receiver-clock-offset header.
+            // unretained receiver-clock-offset header. It also keeps the
+            // full-day `PRN / # OF OBS` counts, one per satellite and code,
+            // and the trimmed body has far fewer, so OBS-H11 fires for each.
             "WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx",
-            &[("OBS-H10", 1), ("OBS-H90", 1)][..],
+            &[("OBS-H10", 1), ("OBS-H11", 1272), ("OBS-H90", 1)][..],
         ),
         (
             // RCV CLOCK OFFS APPL is parsed as an unretained disclosure only.

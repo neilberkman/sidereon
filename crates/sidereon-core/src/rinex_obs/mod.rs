@@ -64,6 +64,7 @@ use crate::rinex_common::time_scale_label;
 use crate::rinex_nav::valid_glonass_frequency_channel;
 use crate::validate::{self, FieldError};
 use crate::{Error, Result};
+use write::{PRN_OBS_COUNTS_COLUMN, PRN_OBS_COUNT_WIDTH, PRN_OBS_SATELLITE_COLUMN};
 
 /// Width of one RINEX-3 observation field (`F14.3` value + LLI + SSI).
 const OBS_FIELD_WIDTH: usize = 16;
@@ -1562,14 +1563,22 @@ impl Parser {
     }
 
     fn parse_prn_obs_counts(&mut self, line: &str) -> Result<()> {
-        let token = field(line, 0, 3).trim();
+        // `3X,A1,I2,9I6`: three blanks, then the satellite, then the counts.
+        let token = field(line, PRN_OBS_SATELLITE_COLUMN, PRN_OBS_COUNTS_COLUMN).trim();
         let sat = if token.is_empty() {
             let Some(sat) = self.prn_obs_counts_current else {
                 return Ok(());
             };
             sat
         } else {
-            let Some(sat) = parse_sv_token(token) else {
+            // A version 2 file may leave the constellation letter blank, which
+            // means the one its header names.
+            let parsed = if self.is_rinex2() {
+                self.parse_sv_token_v2(token)
+            } else {
+                parse_sv_token(token)
+            };
+            let Some(sat) = parsed else {
                 self.prn_obs_counts_current = None;
                 self.push_unrepresentable_satellite_skip(token);
                 return Ok(());
@@ -1577,16 +1586,23 @@ impl Parser {
             self.prn_obs_counts_current = Some(sat);
             sat
         };
-        let count = self.obs_codes.get(&sat.system).map_or(0, Vec::len);
+        // A version 2 header names its codes once for the whole file, and the
+        // per-constellation lists are not built until the body is read, so the
+        // count comes from that one list while the header is still being read.
+        let count = if self.is_rinex2() {
+            self.rinex2_obs_codes.len() + self.rinex2_obs_codes_remaining
+        } else {
+            self.obs_codes.get(&sat.system).map_or(0, Vec::len)
+        };
         let already = self.prn_obs_counts.get(&sat).map_or(0, Vec::len);
         let remaining = count.saturating_sub(already);
         let mut values = Vec::with_capacity(remaining.min(9));
         for idx in 0..remaining {
-            let start = 3 + idx * 6;
-            if start + 6 > 60 {
+            let start = PRN_OBS_COUNTS_COLUMN + idx * PRN_OBS_COUNT_WIDTH;
+            if start + PRN_OBS_COUNT_WIDTH > write::HEADER_CONTENT_WIDTH {
                 break;
             }
-            let raw = field(line, start, start + 6).trim();
+            let raw = field(line, start, start + PRN_OBS_COUNT_WIDTH).trim();
             if raw.is_empty() {
                 values.push(None);
             } else {

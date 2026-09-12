@@ -1719,6 +1719,47 @@ fn a_version_two_file_names_a_code_version_two_cannot_spell() {
     );
 }
 
+#[test]
+fn prn_observation_counts_are_read_from_the_columns_they_are_written_in() {
+    // `PRN / # OF OBS` is `3X,A1,I2,9I6`: three blanks, then the satellite, then
+    // the counts. Reading the satellite from the first three columns found them
+    // blank on every real file, so the record was dropped and every count with
+    // it. The committed WTZR fixture carries the record as the format writes it.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"
+    );
+    let text = std::fs::read_to_string(path).expect("read the committed fixture");
+    let obs = RinexObs::parse(&text).expect("parse the fixture");
+
+    let counts = obs
+        .header()
+        .prn_obs_counts
+        .get(&GnssSatelliteId {
+            system: GnssSystem::BeiDou,
+            prn: 2,
+        })
+        .expect("C02 declares its counts");
+    assert_eq!(
+        counts.iter().take(3).copied().collect::<Vec<_>>(),
+        vec![Some(1628), Some(1266), Some(2215)],
+        "the counts are read from column 7 onward"
+    );
+
+    // Written back, the record lands where it was read from.
+    let encoded = obs.to_rinex_string();
+    let line = encoded
+        .lines()
+        .find(|line| line.contains("PRN / # OF OBS"))
+        .expect("the record is written");
+    assert_eq!(&line[..3], "   ", "the satellite sits at columns 4 to 6");
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(
+        reparsed.header().prn_obs_counts,
+        obs.header().prn_obs_counts
+    );
+}
+
 fn version_two_fixture_text() -> String {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1841,6 +1882,39 @@ fn a_version_two_header_shares_one_column_where_the_constellations_agree() {
         &declared[..18],
         "     2    P1    C1",
         "both constellations read P1 and C1 back as what they hold: {declared:?}"
+    );
+}
+
+#[test]
+fn version_two_prn_observation_counts_are_read() {
+    // A version 2 header names its codes once, and the per-constellation lists
+    // are not built until the body is read. Taking the count from those lists
+    // found none while the header was still being read, so every count was
+    // dropped. A version 2 file may also leave the constellation letter blank.
+    let mut text = String::new();
+    for line in version_two_fixture_text().lines() {
+        if line.contains("END OF HEADER") {
+            text.push_str(&format!(
+                "{:<60}{:<20}\n",
+                format!("     1{:6}{:6}{:6}{:6}", 11, 22, 33, 44),
+                "PRN / # OF OBS"
+            ));
+        }
+        text.push_str(line);
+        text.push('\n');
+    }
+    let obs = RinexObs::parse(&text).expect("parse the fixture with a count record");
+    let counts = obs
+        .header()
+        .prn_obs_counts
+        .get(&GnssSatelliteId {
+            system: GnssSystem::Gps,
+            prn: 1,
+        })
+        .expect("the blank constellation letter means the one the header names");
+    assert_eq!(
+        counts.iter().take(4).copied().collect::<Vec<_>>(),
+        vec![Some(11), Some(22), Some(33), Some(44)]
     );
 }
 

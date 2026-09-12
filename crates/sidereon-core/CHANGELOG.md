@@ -6,6 +6,20 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- `PRN / # OF OBS` is read from the columns the format writes it in. The record
+  is `3X,A1,I2,9I6`, so the satellite sits at columns 4 to 6 and the counts
+  follow from column 7. Reading the satellite from the first three columns found
+  them blank on every conforming file, so the record was dropped and every count
+  with it, and the writer put the satellite where the reader had looked for it.
+  Files this crate wrote round-tripped; nobody else's did. Reading them now
+  fires the `PRN / # OF OBS` quality-control lint on trimmed files, whose
+  headers keep counts for a whole day of observations their body no longer has.
+  A version 2 file's counts are read too. Version 2 names its observation codes
+  once for the whole file and the per-constellation lists are not built until
+  the body is read, so taking the count from those lists found none while the
+  header was still being read, and every count went. A version 2 record may also
+  leave the constellation letter blank, meaning the one the header names, which
+  the version 3 satellite reader rejected.
 - A RINEX 2 observation product is written as a RINEX 2 file. It used to be
   re-emitted through the version 3 record writer, so its own output declared
   version 2 in the header while carrying version 3 `>` epoch records: a file
