@@ -1601,11 +1601,486 @@ fn a_blank_glonass_bias_record_clears_the_one_before_it() {
 }
 
 #[test]
-fn a_version_two_product_reads_back_the_output_it_writes() {
-    // A version 2 file is re-emitted through the version 3 record writer, so its
-    // own output declares version 2 while carrying `>` epoch records. Reading
-    // the body by its record shape rather than the declared version is what lets
-    // that file be read back at all.
+fn rinex2_code_round_trips_through_its_canonical_form() {
+    // A version 2 file's codes are kept canonically, and the writer maps them
+    // back to version 2 names. The two do not have to agree on the text - the
+    // mapping into canonical form is not injective, so `C1` and `P1` can share
+    // a canonical code and only one of them comes back. They do have to agree
+    // on the signal, or a product would name a different one every time it was
+    // written and read, and the fuzz round trip would find it.
+    const KINDS: [char; 5] = ['C', 'P', 'L', 'D', 'S'];
+    const BANDS: [char; 9] = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
+    for system in [
+        GnssSystem::Gps,
+        GnssSystem::Glonass,
+        GnssSystem::Galileo,
+        GnssSystem::BeiDou,
+        GnssSystem::Qzss,
+        GnssSystem::Navic,
+        GnssSystem::Sbas,
+    ] {
+        for kind in KINDS {
+            for band in BANDS {
+                let declared = format!("{kind}{band}");
+                let canonical = canonical_rinex2_obs_code(system, &declared);
+                let candidates = rinex2_obs_code_candidates(system, &canonical);
+                let written = candidates
+                    .first()
+                    .unwrap_or_else(|| panic!("{system:?} {declared} has no version 2 name"));
+                for alternative in &candidates {
+                    assert_eq!(
+                        canonical_rinex2_obs_code(system, alternative),
+                        canonical,
+                        "{system:?} {declared} lists {alternative} as an inverse"
+                    );
+                }
+                assert_eq!(
+                    canonical_rinex2_obs_code(system, written),
+                    canonical,
+                    "{system:?} {declared} became {canonical}, written back as {written}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_version_two_header_names_every_position_any_constellation_uses() {
+    // Version 2 names its codes once for the whole file. A product a caller
+    // assembled can give two constellations lists of different lengths, and the
+    // one record has to name the longer, or the values past its end are written
+    // where no reader looks for them.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/algo0010_2015001_v1_trim.rnx"
+    );
+    let text = std::fs::read_to_string(path).expect("read the committed RINEX 2 fixture");
+    let mut obs = RinexObs::parse(&text).expect("parse the RINEX 2 fixture");
+    obs.header.obs_codes.clear();
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Gps, vec!["C1C".to_string(), "L1C".to_string()]);
+    obs.header.obs_codes.insert(
+        GnssSystem::Galileo,
+        vec!["C1C".to_string(), "L1C".to_string(), "C5Q".to_string()],
+    );
+
+    let encoded = obs.to_rinex_string();
+    let declared = encoded
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the version 2 header names its types");
+    // Galileo's third position comes back as the version 2 name that maps to
+    // `C5Q`, which for Galileo is `C2`, not `C5`.
+    assert_eq!(
+        &declared[..24],
+        "     3    C1    L1    C2",
+        "every position is named: {declared:?}"
+    );
+}
+
+#[test]
+fn a_version_two_file_names_a_code_version_two_cannot_spell() {
+    // A caller can put a version 3 code on a product and ask for version 2
+    // output. Version 2 names a kind and a band and has nowhere to put the
+    // tracking attribute, so `C1X` is written `C1` and reads back as this
+    // system's default tracking on band 1. A digit in that field, which is what
+    // holding the column with the code's position would write, is not a code
+    // any reader takes.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/algo0010_2015001_v1_trim.rnx"
+    );
+    let text = std::fs::read_to_string(path).expect("read the committed RINEX 2 fixture");
+    let mut obs = RinexObs::parse(&text).expect("parse the RINEX 2 fixture");
+    let codes = obs
+        .header
+        .obs_codes
+        .get_mut(&GnssSystem::Gps)
+        .expect("the fixture carries GPS codes");
+    codes[0] = "C1X".to_string();
+
+    let encoded = obs.to_rinex_string();
+    let declared = encoded
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the version 2 header names its types");
+    assert_eq!(
+        &declared[6..12],
+        "    C1",
+        "the code keeps its kind and band: {declared:?}"
+    );
+
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(
+        reparsed.header().obs_codes[&GnssSystem::Gps][0],
+        "C1C",
+        "reading it back gives band 1 at this system's default tracking"
+    );
+}
+
+fn version_two_fixture_text() -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/algo0010_2015001_v1_trim.rnx"
+    );
+    std::fs::read_to_string(path).expect("read the committed RINEX 2 fixture")
+}
+
+fn version_two_fixture() -> RinexObs {
+    RinexObs::parse(&version_two_fixture_text()).expect("parse the RINEX 2 fixture")
+}
+
+#[test]
+fn a_version_two_header_gives_a_conflicting_signal_its_own_column() {
+    // GPS `C1W` and GLONASS `C1C` are `P1` and `C1`. Version 2 names its codes
+    // once, so one column cannot carry both: writing `P1` makes GLONASS read
+    // back as `C1P`, a different signal. The position is split instead, and
+    // each constellation leaves the other's column blank.
+    let mut obs = version_two_fixture();
+    obs.header.obs_codes.clear();
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Gps, vec!["C1W".to_string()]);
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Glonass, vec!["C1C".to_string()]);
+    let epoch = obs.epochs.first_mut().expect("the fixture has an epoch");
+    epoch.sats.clear();
+    epoch.sats.insert(
+        GnssSatelliteId {
+            system: GnssSystem::Gps,
+            prn: 1,
+        },
+        vec![ObsValue {
+            value: Some(123.0),
+            lli: None,
+            ssi: None,
+        }],
+    );
+    epoch.sats.insert(
+        GnssSatelliteId {
+            system: GnssSystem::Glonass,
+            prn: 2,
+        },
+        vec![ObsValue {
+            value: Some(456.0),
+            lli: None,
+            ssi: None,
+        }],
+    );
+    obs.epochs.truncate(1);
+
+    let encoded = obs.to_rinex_string();
+    let declared = encoded
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the version 2 header names its types");
+    assert_eq!(
+        &declared[..18],
+        "     2    P1    C1",
+        "the conflict gets two columns: {declared:?}"
+    );
+
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    let read = &reparsed.epochs()[0];
+    assert_eq!(
+        reparsed.header().obs_codes[&GnssSystem::Gps],
+        vec!["C1W".to_string(), "C1C".to_string()],
+        "no signal is renamed"
+    );
+    assert_eq!(
+        reparsed.header().obs_codes[&GnssSystem::Glonass],
+        vec!["C1P".to_string(), "C1C".to_string()],
+        "no signal is renamed"
+    );
+    let gps = &read.sats[&GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    }];
+    let glonass = &read.sats[&GnssSatelliteId {
+        system: GnssSystem::Glonass,
+        prn: 2,
+    }];
+    // Each value keeps the signal it was measured on: GPS holds `C1W` in the
+    // `P1` column, GLONASS holds `C1C` in the `C1` column, and neither reads
+    // the other's.
+    assert_eq!(
+        (gps[0].value, gps[1].value),
+        (Some(123.0), None),
+        "GPS keeps its value under P1"
+    );
+    assert_eq!(
+        (glonass[0].value, glonass[1].value),
+        (None, Some(456.0)),
+        "GLONASS keeps its value under C1"
+    );
+}
+
+#[test]
+fn a_version_two_header_shares_one_column_where_the_constellations_agree() {
+    // The split is only for a conflict. A file read at version 2 gave every
+    // constellation its list from the same record, so one name serves them all
+    // and the header keeps the width it had.
+    let mut obs = version_two_fixture();
+    obs.header.obs_codes.clear();
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Gps, vec!["C1W".to_string(), "C1C".to_string()]);
+    obs.header.obs_codes.insert(
+        GnssSystem::Glonass,
+        vec!["C1P".to_string(), "C1C".to_string()],
+    );
+
+    let encoded = obs.to_rinex_string();
+    let declared = encoded
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the version 2 header names its types");
+    assert_eq!(
+        &declared[..18],
+        "     2    P1    C1",
+        "both constellations read P1 and C1 back as what they hold: {declared:?}"
+    );
+}
+
+#[test]
+fn a_version_two_clock_offset_is_written_in_its_own_columns() {
+    // The clock offset is an `F12.9` field at columns 69 to 80. Letting it
+    // follow the last satellite put it wherever the count happened to end, so
+    // an epoch of fewer than twelve satellites wrote it into the satellite
+    // list, where this crate and every other reader lose it.
+    let mut obs = version_two_fixture();
+    let epoch = obs.epochs.first_mut().expect("the fixture has an epoch");
+    let kept: Vec<_> = epoch.sats.keys().copied().take(3).collect();
+    epoch.sats.retain(|sat, _| kept.contains(sat));
+    epoch.rcv_clock_offset_s = Some(0.123_456_789);
+
+    let encoded = obs.to_rinex_string();
+    let line = encoded
+        .lines()
+        .find(|line| line.starts_with(" 15  1  1  0  0  0.0000000"))
+        .expect("the epoch record is written");
+    assert_eq!(
+        &line[68..80],
+        " 0.123456789",
+        "the clock sits in columns 69 to 80: {line:?}"
+    );
+
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs()[0].rcv_clock_offset_s, Some(0.123_456_789));
+}
+
+#[test]
+fn a_version_two_record_runs_to_the_count_the_header_declares() {
+    // A version 2 reader takes a fixed number of observation lines for every
+    // satellite. Writing only as many as a satellite happened to hold put the
+    // next satellite's values under this one, and the epoch then ran out of
+    // lines before its last satellite.
+    let mut obs = version_two_fixture();
+    let epoch = obs.epochs.first_mut().expect("the fixture has an epoch");
+    let kept: Vec<_> = epoch.sats.keys().copied().take(3).collect();
+    epoch.sats.retain(|sat, _| kept.contains(sat));
+    let short = kept[1];
+    epoch
+        .sats
+        .get_mut(&short)
+        .expect("the second satellite")
+        .truncate(2);
+    let expected: Vec<_> = epoch.sats.values().map(Vec::len).collect();
+    assert_eq!(expected, vec![8, 2, 8], "one satellite holds fewer values");
+
+    let encoded = obs.to_rinex_string();
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    let read = &reparsed.epochs()[0];
+    assert_eq!(read.sats.len(), 3, "every satellite is found");
+    for (sat, values) in &read.sats {
+        assert_eq!(values.len(), 8, "{sat:?} gets the declared count back");
+    }
+    // The short satellite keeps the two values it held; the rest read as blank.
+    let short_values = &read.sats[&short];
+    assert!(short_values[0].value.is_some() && short_values[1].value.is_some());
+    assert!(short_values[2..].iter().all(|value| value.value.is_none()));
+    // Its neighbours are untouched, which is what a misplaced record broke.
+    for sat in [kept[0], kept[2]] {
+        assert_eq!(read.sats[&sat], obs.epochs[0].sats[&sat]);
+    }
+}
+
+#[test]
+fn a_version_two_file_writes_values_a_scale_factor_would_have_declared() {
+    // `SYS / SCALE FACTOR` arrived with version 3, so a version 2 file has no
+    // way to say a value was scaled. Applying the factor anyway wrote a number
+    // the reader had no reason to divide back.
+    let mut obs = version_two_fixture();
+    let system = *obs
+        .header
+        .obs_codes
+        .keys()
+        .next()
+        .expect("the fixture names a constellation");
+    obs.header.scale_factors.push(super::ObsScaleFactor {
+        system,
+        factor: 10.0,
+        codes: Vec::new(),
+    });
+    let (first_sat, first_values) = obs.epochs[0]
+        .sats
+        .iter()
+        .next()
+        .expect("the fixture's first epoch has a satellite");
+    let (first_sat, first_value) = (
+        *first_sat,
+        first_values[0].value.expect("its first value is present"),
+    );
+
+    let encoded = obs.to_rinex_string();
+    assert!(!encoded.contains("SYS / SCALE FACTOR"));
+    // Scaling it would have written ten times this, well inside `F14.3`, so the
+    // written field is what tells the two apart.
+    let written = encoded
+        .lines()
+        .find(|line| line.starts_with(&format!("{first_value:14.3}")))
+        .unwrap_or_else(|| panic!("{first_sat:?} is written unscaled as {first_value:14.3}"));
+    assert!(!written.starts_with(&format!("{:14.3}", first_value * 10.0)));
+
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(
+        reparsed.epochs()[0].sats,
+        obs.epochs[0].sats,
+        "the values come back as they went in, unscaled"
+    );
+}
+
+#[test]
+fn a_version_two_event_epoch_names_no_satellites() {
+    // An event record keeps only its flag and epoch here. Writing a satellite
+    // list beside a declared count of zero left text in the columns the clock
+    // offset occupies, which the reader then took for a clock.
+    let mut obs = version_two_fixture();
+    let epoch = obs.epochs.first_mut().expect("the fixture has an epoch");
+    epoch.flag = 4;
+
+    let encoded = obs.to_rinex_string();
+    let line = encoded
+        .lines()
+        .find(|line| line.starts_with(" 15  1  1  0  0  0.0000000"))
+        .expect("the event record is written");
+    assert_eq!(
+        line.trim_end(),
+        " 15  1  1  0  0  0.0000000  4  0",
+        "an event names no satellites"
+    );
+}
+
+#[test]
+fn a_galileo_band_five_code_keeps_its_band() {
+    // Galileo's `C5` and `P2` both canonicalise to `C5X`, so an inverse that
+    // takes whichever it meets first can write `P2` for a band 5 pseudorange.
+    // No reader outside this crate defines `P2` for Galileo.
+    let candidates = rinex2_obs_code_candidates(GnssSystem::Galileo, "C5X");
+    assert_eq!(
+        candidates.first().map(String::as_str),
+        Some("C5"),
+        "the code keeps the band it was measured on: {candidates:?}"
+    );
+    assert!(
+        candidates.iter().any(|name| name == "P2"),
+        "the alias stays available for a shared list: {candidates:?}"
+    );
+
+    // `C5Q` is a different matter. This crate's table reads Galileo `C2` as
+    // `C5Q` and nothing else maps to it, so `C2` is the only name that survives
+    // a write and a read. `C5` reads back as `C5X`, which would change the
+    // tracking a file already stated. Writing what the file said wins over
+    // spelling the band, and the choice is only reachable from a product a
+    // caller assembled: a version 2 file carrying `C2` gets `C2` back.
+    assert_eq!(
+        rinex2_obs_code_candidates(GnssSystem::Galileo, "C5Q"),
+        vec!["C2".to_string()]
+    );
+    assert_eq!(canonical_rinex2_obs_code(GnssSystem::Galileo, "C5"), "C5X");
+}
+
+#[test]
+fn a_version_two_file_carries_only_the_current_leap_second_count() {
+    // Version 2 defines one field in `LEAP SECONDS`. The future count, week and
+    // day arrived with version 3 and occupy columns version 2 leaves blank.
+    let mut obs = version_two_fixture();
+    obs.header.leap_seconds = Some(super::ObsLeapSeconds {
+        current: 17,
+        delta_future: Some(18),
+        week: Some(2000),
+        day: Some(3),
+    });
+
+    let encoded = obs.to_rinex_string();
+    let line = encoded
+        .lines()
+        .find(|line| line.contains("LEAP SECONDS"))
+        .expect("the record is written");
+    assert_eq!(&line[..60], format!("{:6}{:54}", 17, ""), "{line:?}");
+}
+
+#[test]
+fn a_version_two_file_carries_no_version_three_records() {
+    // A caller can put version 3 records on a product and ask for version 2
+    // output. Writing them would produce a file neither version accepts, so
+    // they are left out, and the product loses them.
+    let mut obs = version_two_fixture();
+    let system = *obs
+        .header
+        .obs_codes
+        .keys()
+        .next()
+        .expect("the fixture names a constellation");
+    obs.header.marker_type = Some("GEODETIC".to_string());
+    obs.header.signal_strength_unit = Some("DBHZ".to_string());
+    obs.header.glonass_cod_phs_bis = Some(vec![("C1C".to_string(), -71.940)]);
+    obs.header.phase_shifts.push(super::ObsPhaseShift {
+        system,
+        code: "L1C".to_string(),
+        correction_cycles: 0.25,
+        satellites: Vec::new(),
+    });
+    obs.header.scale_factors.push(super::ObsScaleFactor {
+        system,
+        factor: 1000.0,
+        codes: Vec::new(),
+    });
+
+    let encoded = obs.to_rinex_string();
+    for label in [
+        "MARKER TYPE",
+        "SIGNAL STRENGTH UNIT",
+        "GLONASS COD/PHS/BIS",
+        "SYS / PHASE SHIFT",
+        "SYS / SCALE FACTOR",
+    ] {
+        assert!(
+            !encoded.contains(label),
+            "{label} is not a version 2 record"
+        );
+    }
+    RinexObs::parse(&encoded).expect("the version 2 file still reads back");
+
+    // The same product at version 3 keeps them.
+    obs.header.version = 3.05;
+    let encoded = obs.to_rinex_string();
+    for label in ["MARKER TYPE", "SIGNAL STRENGTH UNIT", "GLONASS COD/PHS/BIS"] {
+        assert!(
+            encoded.contains(label),
+            "{label} belongs in a version 3 file"
+        );
+    }
+}
+
+#[test]
+fn a_version_two_product_is_written_as_version_two() {
+    // A version 2 file used to be re-emitted through the version 3 record
+    // writer, so its own output declared version 2 while carrying `>` epoch
+    // records: a file that was neither version. It is now written in the
+    // records its version names, which is a file other readers accept too.
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/obs/algo0010_2015001_v1_trim.rnx"
@@ -1617,12 +2092,29 @@ fn a_version_two_product_reads_back_the_output_it_writes() {
 
     let encoded = obs.to_rinex_string();
     assert!(
-        encoded.lines().any(|line| line.starts_with('>')),
-        "the writer emits version 3 epoch records"
+        !encoded.lines().any(|line| line.starts_with('>')),
+        "no version 3 epoch record is written"
     );
+    assert!(
+        encoded.contains("# / TYPES OF OBSERV") && !encoded.contains("SYS / # / OBS TYPES"),
+        "the observation types are named the way version 2 names them"
+    );
+    // The codes come back exactly as the file declared them, which is what the
+    // mapping back from canonical codes has to achieve for the values to stay
+    // aligned to the header that names them.
+    let declared = text
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the fixture declares its types");
+    assert!(
+        encoded.lines().any(|line| line == declared),
+        "the observation types are written back as they were read"
+    );
+
     let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
     assert_eq!(reparsed.epochs(), obs.epochs());
     assert!((reparsed.header().version - 2.11).abs() < 1e-9);
+    assert_eq!(reparsed.header().obs_codes, obs.header().obs_codes);
 }
 
 #[test]

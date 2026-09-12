@@ -2462,6 +2462,61 @@ fn canonical_rinex2_obs_code(system: GnssSystem, code: &str) -> String {
     format!("{canonical_kind}{band}{attr}")
 }
 
+/// Every RINEX 2 observation code a system's canonical code was mapped from,
+/// in the order a writer should prefer them.
+///
+/// The mapping into canonical codes is not injective - BeiDou's `C1` and `P1`
+/// both become `C2I`, and Galileo's `C5` and `P2` both become `C5X` - so this
+/// does not recover the text a file carried. Each name it returns maps forward
+/// to the same canonical code, which is what a version 2 file has to carry for
+/// the product to survive being written and read again;
+/// `rinex2_code_round_trips_through_its_canonical_form` holds the two together.
+///
+/// A name spelling the canonical code's own kind and band comes first, so a
+/// Galileo `C5X` is written `C5` rather than the alias `P2`, which no reader
+/// outside this crate defines for Galileo. The rest follow as alternatives, for
+/// a caller that needs one name several constellations can read.
+///
+/// A canonical code no version 2 name maps to - one a version 3 file named, on
+/// a product whose version was then set below 3 - yields its kind and band
+/// alone, losing the tracking attribute, which is the most a version 2 code can
+/// say. `C1X` becomes `C1`, and reads back as this system's default tracking on
+/// band 1. The list is empty only for a code that is not three characters, so
+/// it did not come from RINEX at all.
+fn rinex2_obs_code_candidates(system: GnssSystem, canonical: &str) -> Vec<String> {
+    const KINDS: [char; 5] = ['C', 'P', 'L', 'D', 'S'];
+    const BANDS: [char; 9] = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
+    let mut chars = canonical.chars();
+    let own = match (chars.next(), chars.next(), chars.next(), chars.next()) {
+        (Some(kind), Some(band), Some(_), None) => Some((kind, band)),
+        _ => None,
+    };
+    let mut names: Vec<String> = Vec::new();
+    if let Some((kind, band)) = own {
+        // A canonical `C` may have been written `C` or `P` in version 2.
+        for spelling in [kind, if kind == 'C' { 'P' } else { kind }] {
+            let name = format!("{spelling}{band}");
+            if canonical_rinex2_obs_code(system, &name) == canonical && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    for kind in KINDS {
+        for band in BANDS {
+            let name = format!("{kind}{band}");
+            if canonical_rinex2_obs_code(system, &name) == canonical && !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    if names.is_empty() {
+        if let Some((kind, band)) = own {
+            names.push(format!("{kind}{band}"));
+        }
+    }
+    names
+}
+
 fn canonical_rinex2_code_exact(system: GnssSystem, kind: char, band: char) -> Option<&'static str> {
     match (system, kind, band) {
         (GnssSystem::Gps, 'C', '1') => Some("C1C"),

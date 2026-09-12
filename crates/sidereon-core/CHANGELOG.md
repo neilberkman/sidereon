@@ -6,6 +6,43 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- A RINEX 2 observation product is written as a RINEX 2 file. It used to be
+  re-emitted through the version 3 record writer, so its own output declared
+  version 2 in the header while carrying version 3 `>` epoch records: a file
+  that was valid as neither version, and that no other reader would take. The
+  writer now emits the records the product's version names - the
+  `# / TYPES OF OBSERV` header, epoch lines carrying their satellite list
+  twelve to a line, and observation records five values to a line - so the
+  committed version 2 fixture is written back with its observation types
+  byte-identical and its epochs unchanged. Records that arrived with version 3 -
+  `MARKER TYPE`, `SIGNAL STRENGTH UNIT`, `SYS / PHASE SHIFT`,
+  `SYS / SCALE FACTOR` and `GLONASS COD/PHS/BIS` - are left out of a version 2
+  file for the same reason, so a product a caller put them on loses them there.
+  Version 2 names its observation codes once for the whole file, so the one
+  record it carries names every position any constellation uses, and a code
+  version 2 has no spelling for keeps its kind and band and loses its tracking
+  attribute: `C1X` is written `C1`. Every version 2 code, on every
+  constellation, maps back to a name that means the same signal, so writing a
+  product and reading it again does not rename one, and the name written keeps
+  the band the signal was measured on rather than an alias that shares a
+  canonical form - a Galileo band 5 pseudorange is written `C5`, not `P2`.
+  The receiver clock offset is written in the columns version 2 gives it rather
+  than after the last satellite, where an epoch of fewer than twelve satellites
+  put it out of reach of every reader including this one. Each satellite's
+  record runs to the count the header declares, blank past what that satellite
+  holds, because a reader takes that many lines for every satellite and a short
+  record put the next satellite's values under this one. Values are written
+  unscaled, since a version 2 file has no `SYS / SCALE FACTOR` record to say
+  they were scaled. An event epoch names no satellites, matching the count of
+  zero it declares. `LEAP SECONDS` carries only the current count.
+  Where two constellations hold codes at one position that no single version 2
+  name spells for both - GPS `C1W` beside GLONASS `C1C`, which are `P1` and
+  `C1` - the position is split and each name gets its own column, with the
+  constellation it does not serve left blank there. Writing one of the two and
+  letting the other read back as a different signal was silent and wrong; the
+  file grows by the columns the conflict needs instead. A file read at version 2
+  gave every constellation its list from the same record, so nothing there
+  conflicts and the header keeps the width it had.
 - The RINEX observation reader takes the records the format lays out in fixed
   columns from those columns, rather than by splitting the line on whitespace.
   Whitespace cannot read a record whose field fills its width, because it then
@@ -25,11 +62,11 @@ All notable changes to `sidereon-core` are documented here.
   already being read as something its own layout contradicts. This covers both
   epoch readers, the `APPROX POSITION XYZ` and `ANTENNA: DELTA H/E/N`
   components, and the `TIME OF FIRST OBS` / `TIME OF LAST OBS` fields.
-- A RINEX 2 observation product can read the output it writes. Such a product is
-  re-emitted through the version 3 record writer, so its own file declared
-  version 2 while carrying `>` epoch records, which the version 2 reader could
-  not read. The body now follows the records themselves, which is unambiguous:
-  a version 2 epoch line begins with its two-digit year, never with `>`.
+- The reader follows the records a file carries rather than the version its
+  header declares. A file declaring version 2 while carrying `>` epoch records
+  was rejected, and such files exist: this crate's own writer made them until
+  the fix above, and other tools make them too. The distinction is unambiguous,
+  since a version 2 epoch line begins with its two-digit year, never with `>`.
 - A `GLONASS COD/PHS/BIS` record carrying more entries than one line holds is
   continued on another line instead of being cut off at the sixtieth column, and
   the reader adds each line's entries to the record. A fifth entry was silently
