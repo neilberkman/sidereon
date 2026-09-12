@@ -6,6 +6,24 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- The version 2 observation code table holds what RINEX 2.11 defines and
+  nothing else. It used to carry the legacy differential-code-bias labels for
+  Galileo and BeiDou, where `P1` and `P2` mean the first and second frequency
+  whatever the constellation. Those belong to bias files, and the bias reader
+  keeps them; version 2 says "P: Pseudorange GPS and Glonass: P code", and gives
+  Galileo `C1`, `C5`, `C6`, `C7` and `C8`, whose digits already are the bands E1,
+  E5a, E6, E5b and E5a+b. So a Galileo `C2` was read as E5a data, and a
+  conforming `C5` and an invented `C2` both claimed that band. A Galileo `C5Q` is
+  now written `C5`, losing the tracking attribute version 2 cannot carry, rather
+  than a `C2` no reader defines.
+- A BeiDou version 2 observation code means the same band whatever its kind.
+  RINEX 2.11 has no BeiDou at all, so a BeiDou code there is an extension,
+  written by receivers that numbered the frequencies B1, B2, B3 as 1, 2, 3 where
+  RINEX 3 numbers those bands 2, 7 and 6. The renumbering was applied only to
+  `C`, so a file's `C1` read as B1I and its `L1` as B1C: one measurement pair
+  read as two different signals, and the phase attached to a band its own
+  pseudorange did not use. It now applies to every kind, in one place.
+
 - `PRN / # OF OBS` is read from the columns the format writes it in. The record
   is `3X,A1,I2,9I6`, so the satellite sits at columns 4 to 6 and the counts
   follow from column 7. Reading the satellite from the first three columns found

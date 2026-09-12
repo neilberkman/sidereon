@@ -2473,6 +2473,7 @@ fn canonical_rinex2_obs_code(system: GnssSystem, code: &str) -> String {
         return mapped.to_string();
     }
 
+    let band = rinex2_band(system, band);
     let canonical_kind = if kind == 'P' { 'C' } else { kind };
     let attr = rinex2_default_tracking_attr(system, kind, band);
     format!("{canonical_kind}{band}{attr}")
@@ -2533,6 +2534,43 @@ fn rinex2_obs_code_candidates(system: GnssSystem, canonical: &str) -> Vec<String
     names
 }
 
+/// The canonical code a version 2 observation type names, where the version 2
+/// digit is not the band.
+///
+/// Version 2 gives GPS and GLONASS a `P` pseudorange alongside `C`, and pairs
+/// them by frequency rather than by band label, so `P1` is GPS `C1W` and
+/// GLONASS `C1P`. Everything else falls through to the band the digit names,
+/// at that constellation's default tracking.
+///
+/// Only GPS and GLONASS have `P` rows, because that is where version 2 puts the
+/// observable: "P: Pseudorange GPS and Glonass: P code". Galileo and BeiDou used
+/// to have them too, carrying the legacy differential-code-bias labels, where
+/// `P1` and `P2` mean the first and second frequency whatever the constellation.
+/// See `map_legacy_dcb_label` in the bias module, where those labels belong.
+///
+/// Galileo has no rows at all. RINEX 2.11 gives it `C1`, `C5`, `C6`, `C7` and
+/// `C8`, whose digits already are the bands E1, E5a, E6, E5b and E5a+b, so the
+/// digit is read as the band like any other code.
+///
+/// BeiDou has no rows either. Its version 2 digits do not name RINEX 3 bands, but
+/// that belongs in [`rinex2_band`], which every kind goes through, rather than
+/// here, where only the kinds named would get it.
+/// The band a version 2 observation code's digit names.
+///
+/// For everything RINEX 2.11 covers the digit already is the band, so this is
+/// the digit. BeiDou is not in version 2 at all, and the receivers that wrote it
+/// there numbered the frequencies B1, B2, B3 as 1, 2, 3, while RINEX 3 numbers
+/// those bands 2, 7 and 6. Without the remap a file's `C1` and `L1` would land
+/// on different bands - `C1` through the table as B1I, `L1` through the digit as
+/// B1C - which is the same measurement read as two signals.
+fn rinex2_band(system: GnssSystem, band: char) -> char {
+    match (system, band) {
+        (GnssSystem::BeiDou, '1') => '2',
+        (GnssSystem::BeiDou, '2') => '7',
+        _ => band,
+    }
+}
+
 fn canonical_rinex2_code_exact(system: GnssSystem, kind: char, band: char) -> Option<&'static str> {
     match (system, kind, band) {
         (GnssSystem::Gps, 'C', '1') => Some("C1C"),
@@ -2543,14 +2581,6 @@ fn canonical_rinex2_code_exact(system: GnssSystem, kind: char, band: char) -> Op
         (GnssSystem::Glonass, 'C', '2') => Some("C2C"),
         (GnssSystem::Glonass, 'P', '1') => Some("C1P"),
         (GnssSystem::Glonass, 'P', '2') => Some("C2P"),
-        (GnssSystem::Galileo, 'C', '1') => Some("C1C"),
-        (GnssSystem::Galileo, 'C', '2') => Some("C5Q"),
-        (GnssSystem::Galileo, 'P', '1') => Some("C1X"),
-        (GnssSystem::Galileo, 'P', '2') => Some("C5X"),
-        (GnssSystem::BeiDou, 'C', '1') => Some("C2I"),
-        (GnssSystem::BeiDou, 'C', '2') => Some("C7I"),
-        (GnssSystem::BeiDou, 'P', '1') => Some("C2I"),
-        (GnssSystem::BeiDou, 'P', '2') => Some("C6I"),
         (GnssSystem::Sbas, 'C', '1') => Some("C1C"),
         _ => None,
     }
