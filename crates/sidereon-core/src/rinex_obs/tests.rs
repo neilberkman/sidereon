@@ -756,7 +756,9 @@ fn parses_crinex_v1_decoded_rinex2_into_observations() {
             "L1C".to_string(),
             "L2W".to_string(),
             "C1C".to_string(),
-            "C2C".to_string(),
+            // Version 2 added `C2` for the L2C pseudorange, which RINEX 3
+            // spells `C2S`, `C2L` or `C2X` by channel. `C2C` is L2 C/A.
+            "C2X".to_string(),
             "C2W".to_string(),
             "C1W".to_string(),
             "S1C".to_string(),
@@ -1857,6 +1859,97 @@ fn a_version_two_header_gives_a_conflicting_signal_its_own_column() {
 }
 
 #[test]
+fn a_split_column_carries_its_observation_counts_too() {
+    // `PRN / # OF OBS` counts are aligned to a constellation's own code list.
+    // When a position splits, the counts have to move with the values, or a
+    // count sits under the name beside the one it counts.
+    let mut obs = version_two_fixture();
+    obs.header.obs_codes.clear();
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Gps, vec!["C1W".to_string()]);
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Glonass, vec!["C1C".to_string()]);
+    obs.header.prn_obs_counts.clear();
+    let glonass = GnssSatelliteId {
+        system: GnssSystem::Glonass,
+        prn: 2,
+    };
+    obs.header.prn_obs_counts.insert(glonass, vec![Some(7)]);
+    obs.epochs.clear();
+
+    let encoded = obs.to_rinex_string();
+    let declared = encoded
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..18], "     2    P1    C1");
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(
+        reparsed.header().prn_obs_counts[&glonass],
+        vec![None, Some(7)],
+        "the count sits under C1, the column GLONASS uses"
+    );
+}
+
+#[test]
+fn a_version_two_header_does_not_repeat_a_column_it_already_has() {
+    // Splitting works a position at a time, so two constellations holding the
+    // same two signals in opposite order used to come out as four columns.
+    // Two columns naming the same code carry the same signal.
+    let mut obs = version_two_fixture();
+    obs.header.obs_codes.clear();
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Gps, vec!["C1C".to_string(), "C1W".to_string()]);
+    obs.header.obs_codes.insert(
+        GnssSystem::Glonass,
+        vec!["C1P".to_string(), "C1C".to_string()],
+    );
+
+    let encoded = obs.to_rinex_string();
+    let declared = encoded
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..18], "     2    C1    P1", "{declared:?}");
+
+    // And a code version 2 cannot spell shares the column of the one it becomes.
+    let mut obs = version_two_fixture();
+    obs.header.obs_codes.clear();
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Gps, vec!["C1X".to_string()]);
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Glonass, vec!["C1C".to_string()]);
+    let encoded = obs.to_rinex_string();
+    let declared = encoded
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..12], "     1    C1", "{declared:?}");
+}
+
+#[test]
+fn a_version_two_observation_type_wider_than_its_field_is_rejected() {
+    // `# / TYPES OF OBSERV` is `9(4X,A2)`. A three-character token means the
+    // line is not in that layout, and the code could not be written back into a
+    // two-character field: it was kept, written as two characters, and read
+    // back as a different code, which the fuzz round trip fails on.
+    let text = version_two_fixture_text().replace(
+        "     8    L1    L2    C1    C2    P2    P1    S1    S2",
+        "     8   L1X    L2    C1    C2    P2    P1    S1    S2",
+    );
+    let error = RinexObs::parse(&text).expect_err("a three-character version 2 code is rejected");
+    assert!(
+        error.to_string().contains("A2"),
+        "the error names the field: {error}"
+    );
+}
+
+#[test]
 fn a_version_two_header_shares_one_column_where_the_constellations_agree() {
     // The split is only for a conflict. A file read at version 2 gave every
     // constellation its list from the same record, so one name serves them all
@@ -2010,11 +2103,17 @@ fn a_version_two_file_writes_values_a_scale_factor_would_have_declared() {
     assert!(!encoded.contains("SYS / SCALE FACTOR"));
     // Scaling it would have written ten times this, well inside `F14.3`, so the
     // written field is what tells the two apart.
-    let written = encoded
-        .lines()
-        .find(|line| line.starts_with(&format!("{first_value:14.3}")))
-        .unwrap_or_else(|| panic!("{first_sat:?} is written unscaled as {first_value:14.3}"));
-    assert!(!written.starts_with(&format!("{:14.3}", first_value * 10.0)));
+    assert!(
+        encoded
+            .lines()
+            .any(|line| line.starts_with(&format!("{first_value:14.3}"))),
+        "{first_sat:?} is written unscaled as {first_value:14.3}"
+    );
+    let scaled = format!("{:14.3}", first_value * 10.0);
+    assert!(
+        !encoded.lines().any(|line| line.starts_with(&scaled)),
+        "no line carries the scaled value {scaled:?}"
+    );
 
     let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
     assert_eq!(
@@ -2022,6 +2121,54 @@ fn a_version_two_file_writes_values_a_scale_factor_would_have_declared() {
         obs.epochs[0].sats,
         "the values come back as they went in, unscaled"
     );
+}
+
+#[test]
+fn a_version_two_cycle_slip_epoch_reads_its_records_and_writes_them_back() {
+    // Flag 6 reports cycle slips, and version 2 says its count is the number of
+    // records, which are observation records. With eight observation types each
+    // record is two lines, so a one-satellite event is two lines, not one.
+    // Reading its count as a line count left the second line to be read as an
+    // epoch, and the file was rejected.
+    let mut text = String::new();
+    for line in version_two_fixture_text().lines() {
+        text.push_str(line);
+        text.push('\n');
+        if line.contains("END OF HEADER") {
+            text.push_str(" 15  1  1  0  0  0.0000000  6  1G 5\n");
+            text.push_str("       0             0             0             0             0\n");
+            text.push_str("       1             0             0\n");
+        }
+    }
+
+    let obs = RinexObs::parse(&text).expect("parse a file with a cycle slip event");
+    let event = obs
+        .epochs()
+        .iter()
+        .find(|epoch| epoch.flag == 6)
+        .expect("the cycle slip epoch is kept");
+    assert_eq!(event.special_records.len(), 2, "two lines for one record");
+    assert_eq!(event.declared_record_count, 1, "one record");
+    assert_eq!(
+        event.sats.keys().copied().collect::<Vec<_>>(),
+        vec![GnssSatelliteId {
+            system: GnssSystem::Gps,
+            prn: 5
+        }],
+        "the epoch line names the satellite its record belongs to"
+    );
+
+    let encoded = obs.to_rinex_string();
+    let line = encoded
+        .lines()
+        .find(|line| line.contains("  6  1"))
+        .expect("the event declares one record");
+    assert!(
+        line.starts_with(" 15  1  1  0  0  0.0000000  6  1G 5"),
+        "the satellite list is written back: {line:?}"
+    );
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs(), obs.epochs());
 }
 
 #[test]
@@ -2120,7 +2267,7 @@ fn a_galileo_band_five_code_keeps_its_band() {
         "the code keeps the band it was measured on: {candidates:?}"
     );
     assert!(
-        !candidates.iter().any(|name| name == "P2"),
+        !candidates.iter().any(|name| name.starts_with('P')),
         "version 2 gives Galileo no `P` observable: {candidates:?}"
     );
 
@@ -2142,6 +2289,9 @@ fn version_two_gives_only_gps_and_glonass_a_p_observable() {
     // differential-code-bias labels, where `P1` and `P2` mean the first and
     // second frequency whatever the constellation. For BeiDou that made `C2`
     // B2I and `P2` B3I: two spellings of the same digit naming different bands.
+    // 2.11 section 10.1.1 added `C2` for the L2C pseudorange, which RINEX 3
+    // spells by channel. `C2C` is L2 C/A, a different signal.
+    assert_eq!(canonical_rinex2_obs_code(GnssSystem::Gps, "C2"), "C2X");
     assert_eq!(canonical_rinex2_obs_code(GnssSystem::Gps, "P1"), "C1W");
     assert_eq!(canonical_rinex2_obs_code(GnssSystem::Gps, "P2"), "C2W");
     assert_eq!(canonical_rinex2_obs_code(GnssSystem::Glonass, "P1"), "C1P");
@@ -2151,6 +2301,30 @@ fn version_two_gives_only_gps_and_glonass_a_p_observable() {
     assert_eq!(canonical_rinex2_obs_code(GnssSystem::BeiDou, "C1"), "C2I");
     assert_eq!(canonical_rinex2_obs_code(GnssSystem::BeiDou, "C2"), "C7I");
     assert_ne!(canonical_rinex2_obs_code(GnssSystem::BeiDou, "P2"), "C6I");
+    for system in [GnssSystem::Galileo, GnssSystem::BeiDou, GnssSystem::Qzss] {
+        for canonical in ["C1C", "C2I", "C5X", "C7I", "L1C"] {
+            let candidates = rinex2_obs_code_candidates(system, canonical);
+            assert!(
+                !candidates.iter().any(|name| name.starts_with('P')),
+                "{system:?} {canonical} offers a `P` name: {candidates:?}"
+            );
+        }
+    }
+    // Dropping an attribute version 2 cannot carry must not also move the band.
+    // `C2Q` is B1I with Q tracking; `C2` would read back as B2I.
+    assert_eq!(
+        rinex2_obs_code_candidates(GnssSystem::BeiDou, "C2Q"),
+        vec!["C1".to_string()]
+    );
+    assert_eq!(canonical_rinex2_obs_code(GnssSystem::BeiDou, "C1"), "C2I");
+    // Digit 3 is B3I under the same numbering as 1 and 2, for every kind.
+    for (declared, canonical) in [("C3", "C6I"), ("L3", "L6I"), ("S3", "S6I")] {
+        assert_eq!(
+            canonical_rinex2_obs_code(GnssSystem::BeiDou, declared),
+            canonical,
+            "BeiDou {declared}"
+        );
+    }
     // And the digit means the same band whatever the kind. It used to be
     // remapped only for `C`, so a file's `C1` was B1I and its `L1` was B1C:
     // one measurement pair read as two different signals.

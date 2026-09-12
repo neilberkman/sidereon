@@ -63,6 +63,46 @@ struct Rinex2ObsLayout {
     slots: BTreeMap<GnssSystem, Vec<Option<usize>>>,
 }
 
+/// Fold a column into an earlier one of the same name when no constellation
+/// needs both.
+///
+/// Splitting works a position at a time, so two constellations whose lists hold
+/// the same two signals in opposite order come out as four columns rather than
+/// two: each position splits, and the halves repeat the names the other position
+/// already used. Two columns naming the same code carry the same signal, so one
+/// of them is enough wherever they do not overlap.
+fn merge_repeated_columns(
+    names: &mut Vec<String>,
+    slots: &mut BTreeMap<GnssSystem, Vec<Option<usize>>>,
+) {
+    let mut keep: Vec<usize> = Vec::with_capacity(names.len());
+    for column in 0..names.len() {
+        let target = keep.iter().copied().find(|earlier| {
+            names[*earlier] == names[column]
+                && slots
+                    .values()
+                    .all(|row| row[*earlier].is_none() || row[column].is_none())
+        });
+        match target {
+            Some(earlier) => {
+                for row in slots.values_mut() {
+                    if row[column].is_some() {
+                        row[earlier] = row[column];
+                    }
+                }
+            }
+            None => keep.push(column),
+        }
+    }
+    if keep.len() == names.len() {
+        return;
+    }
+    *names = keep.iter().map(|column| names[*column].clone()).collect();
+    for row in slots.values_mut() {
+        *row = keep.iter().map(|column| row[*column]).collect();
+    }
+}
+
 /// The constellations among `holders` that read `name` back as the code they
 /// hold, so one column can carry it for all of them.
 fn served_by(name: &str, holders: &[(GnssSystem, &String)]) -> Vec<GnssSystem> {
@@ -247,7 +287,20 @@ impl RinexObs {
             push_header_line(out, &format!("{count:6}"), "# OF SATELLITES");
         }
         for (sat, counts) in &h.prn_obs_counts {
-            write_prn_obs_counts(out, *sat, counts);
+            match rinex2_layout.and_then(|layout| layout.slots.get(&sat.system)) {
+                // The counts are aligned to that constellation's own code list,
+                // and the header names the layout's columns, so they move with
+                // the values. Without this a split column left a count under
+                // the name beside the one it was counting.
+                Some(row) => {
+                    let placed: Vec<Option<usize>> = row
+                        .iter()
+                        .map(|slot| slot.and_then(|index| counts.get(index).copied()).flatten())
+                        .collect();
+                    write_prn_obs_counts(out, *sat, &placed);
+                }
+                None => write_prn_obs_counts(out, *sat, counts),
+            }
         }
         push_header_line(out, "", "END OF HEADER");
     }
@@ -340,10 +393,12 @@ impl RinexObs {
                     None => first_code.chars().take(2).collect(),
                 };
                 let mut served = served_by(&name, &remaining);
-                if served.is_empty() {
-                    // No version 2 name spells this code. The best one still
-                    // stands for the constellation it was built from; every
-                    // other constellation here gets a column of its own.
+                if !served.contains(&first_system) {
+                    // No version 2 name spells this constellation's code, so the
+                    // best one stands for it and drops the tracking attribute,
+                    // which is the documented loss. It still serves whoever else
+                    // reads it back exactly, rather than taking a column of its
+                    // own under the same name.
                     served.push(first_system);
                 }
                 let position = names.len();
@@ -360,6 +415,7 @@ impl RinexObs {
         for row in slots.values_mut() {
             row.resize(names.len(), None);
         }
+        merge_repeated_columns(&mut names, &mut slots);
         Rinex2ObsLayout { names, slots }
     }
 
@@ -367,12 +423,15 @@ impl RinexObs {
     /// twelve to a line, then each satellite's observations five to a line.
     fn write_epoch_v2(&self, out: &mut String, epoch: &ObsEpoch, layout: &Rinex2ObsLayout) {
         let t = epoch.epoch;
-        // An event names no satellites. Its own records follow the epoch line,
-        // and its declared count is how many of them there are.
+        // An event names no satellites and its declared count is how many of its
+        // own records follow. Flag 6 is the exception: its records are
+        // observation records, so it names its satellites like an ordinary
+        // epoch and each one's record runs to as many lines as the types need.
         let event = epoch.flag > 1;
+        let cycle_slips = epoch.flag == super::CYCLE_SLIP_EPOCH_FLAG;
         // `12(A1,I2)`: the constellation letter then the number, space padded,
         // which is what a version 2 reader expects.
-        let satellites: Vec<String> = if event {
+        let satellites: Vec<String> = if event && !cycle_slips {
             Vec::new()
         } else {
             epoch
@@ -407,7 +466,7 @@ impl RinexObs {
                 t.second,
                 epoch.flag
             ),
-            if event {
+            if event && !cycle_slips {
                 epoch.special_records.len()
             } else {
                 satellites.len()
@@ -434,6 +493,9 @@ impl RinexObs {
         let t = epoch.epoch;
         // An event (flag > 1) declares how many of its own records follow;
         // flag 0 and 1 declare their satellites and carry observations.
+        // An event declares the records that follow it. Version 3 writes one
+        // observation record per line, so flag 6's cycle-slip records need no
+        // separate count the way they do in version 2.
         let count = if epoch.flag > 1 {
             epoch.special_records.len()
         } else {

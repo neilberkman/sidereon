@@ -1154,8 +1154,16 @@ impl Parser {
                     "RINEX OBS # / TYPES OF OBSERV lists more codes than declared in {line:?}"
                 )));
             }
-            self.rinex2_obs_codes
-                .push(obs_code_token(code, "# / TYPES OF OBSERV", line)?);
+            let code = obs_code_token(code, "# / TYPES OF OBSERV", line)?;
+            // The record is `9(4X,A2)`. A longer token means the line is not in
+            // that layout, and the code could not be written back into a field
+            // two characters wide.
+            if code.len() > 2 {
+                return Err(Error::Parse(format!(
+                    "RINEX OBS # / TYPES OF OBSERV code {code:?} is wider than the A2 field it is written in, in {line:?}"
+                )));
+            }
+            self.rinex2_obs_codes.push(code);
             self.rinex2_obs_codes_remaining -= 1;
         }
         Ok(())
@@ -1720,7 +1728,28 @@ impl Parser {
                 parse_epoch_line_v2(line, civil_second_policy_for_time_scale(time_scale))?;
 
             if flag > 1 {
-                let special_records = take_special_records(lines, numsat)?;
+                // Flag 6 reports cycle slips, and its records are observation
+                // records: the epoch line names the satellites and each one's
+                // record runs to as many lines as the observation types need.
+                // Every other event is followed by that many single lines.
+                let (sats, special_records) = if flag == CYCLE_SLIP_EPOCH_FLAG {
+                    let tokens = collect_epoch_sv_tokens_v2(line, numsat, lines)?;
+                    let per_record = self.rinex2_obs_lines_per_sat()?;
+                    let records = take_special_records(lines, numsat * per_record)?;
+                    let mut sats = BTreeMap::new();
+                    for token in tokens {
+                        match self.parse_sv_token_v2(&token) {
+                            Some(sat) => {
+                                self.ensure_rinex2_system_obs_codes(sat.system);
+                                sats.insert(sat, Vec::new());
+                            }
+                            None => self.push_unrepresentable_satellite_skip(&token),
+                        }
+                    }
+                    (sats, records)
+                } else {
+                    (BTreeMap::new(), take_special_records(lines, numsat)?)
+                };
                 self.epochs.push(ObsEpoch {
                     epoch: epoch_time,
                     flag,
@@ -1728,7 +1757,7 @@ impl Parser {
                     epoch_picoseconds: None,
                     declared_record_count: numsat,
                     special_records,
-                    sats: BTreeMap::new(),
+                    sats,
                 });
                 continue;
             }
@@ -2452,6 +2481,10 @@ fn parse_sv_token_v2(token: &str, default_system: GnssSystem) -> Option<GnssSate
     GnssSatelliteId::new(system, prn).ok()
 }
 
+/// The epoch flag whose records are cycle slips in observation-record form,
+/// rather than the header or comment lines every other event carries.
+pub(crate) const CYCLE_SLIP_EPOCH_FLAG: u8 = 6;
+
 /// Take the records an event epoch declared, as they were written.
 fn take_special_records<'a, I: Iterator<Item = &'a str>>(
     lines: &mut std::iter::Peekable<I>,
@@ -2515,7 +2548,14 @@ fn canonical_rinex2_obs_code(system: GnssSystem, code: &str) -> String {
 /// band 1. The list is empty only for a code that is not three characters, so
 /// it did not come from RINEX at all.
 fn rinex2_obs_code_candidates(system: GnssSystem, canonical: &str) -> Vec<String> {
-    const KINDS: [char; 5] = ['C', 'P', 'L', 'D', 'S'];
+    // Version 2 gives `P` to GPS and GLONASS only: "P: Pseudorange GPS and
+    // Glonass: P code". Reading someone else's `P` leniently is one thing;
+    // writing one would put a code in the file that the format does not define
+    // for that constellation.
+    let kinds: &[char] = match system {
+        GnssSystem::Gps | GnssSystem::Glonass => &['C', 'P', 'L', 'D', 'S'],
+        _ => &['C', 'L', 'D', 'S'],
+    };
     const BANDS: [char; 9] = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
     let mut chars = canonical.chars();
     let own = match (chars.next(), chars.next(), chars.next(), chars.next()) {
@@ -2524,15 +2564,21 @@ fn rinex2_obs_code_candidates(system: GnssSystem, canonical: &str) -> Vec<String
     };
     let mut names: Vec<String> = Vec::new();
     if let Some((kind, band)) = own {
+        let digit = rinex2_digit_for_band(system, band);
         // A canonical `C` may have been written `C` or `P` in version 2.
-        for spelling in [kind, if kind == 'C' { 'P' } else { kind }] {
-            let name = format!("{spelling}{band}");
+        let spellings: &[char] = if kind == 'C' && kinds.contains(&'P') {
+            &['C', 'P']
+        } else {
+            std::slice::from_ref(&kind)
+        };
+        for spelling in spellings {
+            let name = format!("{spelling}{digit}");
             if canonical_rinex2_obs_code(system, &name) == canonical && !names.contains(&name) {
                 names.push(name);
             }
         }
     }
-    for kind in KINDS {
+    for kind in kinds {
         for band in BANDS {
             let name = format!("{kind}{band}");
             if canonical_rinex2_obs_code(system, &name) == canonical && !names.contains(&name) {
@@ -2542,33 +2588,14 @@ fn rinex2_obs_code_candidates(system: GnssSystem, canonical: &str) -> Vec<String
     }
     if names.is_empty() {
         if let Some((kind, band)) = own {
-            names.push(format!("{kind}{band}"));
+            // The band comes back as the digit that names it, so dropping an
+            // attribute version 2 cannot carry does not also move the band.
+            names.push(format!("{kind}{}", rinex2_digit_for_band(system, band)));
         }
     }
     names
 }
 
-/// The canonical code a version 2 observation type names, where the version 2
-/// digit is not the band.
-///
-/// Version 2 gives GPS and GLONASS a `P` pseudorange alongside `C`, and pairs
-/// them by frequency rather than by band label, so `P1` is GPS `C1W` and
-/// GLONASS `C1P`. Everything else falls through to the band the digit names,
-/// at that constellation's default tracking.
-///
-/// Only GPS and GLONASS have `P` rows, because that is where version 2 puts the
-/// observable: "P: Pseudorange GPS and Glonass: P code". Galileo and BeiDou used
-/// to have them too, carrying the legacy differential-code-bias labels, where
-/// `P1` and `P2` mean the first and second frequency whatever the constellation.
-/// See `map_legacy_dcb_label` in the bias module, where those labels belong.
-///
-/// Galileo has no rows at all. RINEX 2.11 gives it `C1`, `C5`, `C6`, `C7` and
-/// `C8`, whose digits already are the bands E1, E5a, E6, E5b and E5a+b, so the
-/// digit is read as the band like any other code.
-///
-/// BeiDou has no rows either. Its version 2 digits do not name RINEX 3 bands, but
-/// that belongs in [`rinex2_band`], which every kind goes through, rather than
-/// here, where only the kinds named would get it.
 /// The band a version 2 observation code's digit names.
 ///
 /// For everything RINEX 2.11 covers the digit already is the band, so this is
@@ -2581,6 +2608,22 @@ fn rinex2_band(system: GnssSystem, band: char) -> char {
     match (system, band) {
         (GnssSystem::BeiDou, '1') => '2',
         (GnssSystem::BeiDou, '2') => '7',
+        (GnssSystem::BeiDou, '3') => '6',
+        _ => band,
+    }
+}
+
+/// The version 2 digit that names a band, the inverse of [`rinex2_band`].
+///
+/// A writer needs this wherever it builds a name from a canonical code's own
+/// band rather than from a name it already checked. Without it a BeiDou `C2Q`
+/// would be written `C2`, which reads back as B2I: the band changed to keep an
+/// attribute version 2 cannot carry anyway.
+fn rinex2_digit_for_band(system: GnssSystem, band: char) -> char {
+    match (system, band) {
+        (GnssSystem::BeiDou, '2') => '1',
+        (GnssSystem::BeiDou, '7') => '2',
+        (GnssSystem::BeiDou, '6') => '3',
         _ => band,
     }
 }
@@ -2588,7 +2631,11 @@ fn rinex2_band(system: GnssSystem, band: char) -> char {
 fn canonical_rinex2_code_exact(system: GnssSystem, kind: char, band: char) -> Option<&'static str> {
     match (system, kind, band) {
         (GnssSystem::Gps, 'C', '1') => Some("C1C"),
-        (GnssSystem::Gps, 'C', '2') => Some("C2C"),
+        // 2.11 section 10.1.1 added "Observation code for L2C pseudorange (C2)",
+        // and RINEX 3 spells L2C `C2S`, `C2L` or `C2X` by channel. `C2C` is L2
+        // C/A, a different signal. `X` is both channels, which is what the file
+        // says when it does not say which.
+        (GnssSystem::Gps, 'C', '2') => Some("C2X"),
         (GnssSystem::Gps, 'P', '1') => Some("C1W"),
         (GnssSystem::Gps, 'P', '2') => Some("C2W"),
         (GnssSystem::Glonass, 'C', '1') => Some("C1C"),

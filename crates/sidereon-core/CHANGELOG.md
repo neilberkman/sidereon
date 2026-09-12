@@ -12,7 +12,13 @@ All notable changes to `sidereon-core` are documented here.
   and position of a new site occupation - and those were counted and thrown
   away. The epoch was then written back declaring zero, so a file that changed
   site lost what it changed to, and nothing said so. They are kept as they were
-  written, and written back under their own count.
+  written, and written back under their own count. Flag 6, which reports cycle
+  slips, is the exception version 2 makes: its count is a number of records and
+  its records are observation records, so it names its satellites like an
+  ordinary epoch and each record runs to as many lines as the observation types
+  need. Reading that count as a line count left the rest of the record to be
+  read as an epoch, and a conforming file with more than five observation types
+  was rejected.
 - **Breaking.** The `OBS-B11` quality-control finding is gone. It reported that
   an event epoch's records were not retained, which is no longer true of any
   file. Repairing a file that has them no longer fails: it used to refuse rather
@@ -21,6 +27,11 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- GPS `C2` is the L2C pseudorange. Version 2 section 10.1.1 added it as
+  "Observation code for L2C pseudorange (C2)", and RINEX 3 spells L2C `C2S`,
+  `C2L` or `C2X` by channel. It was read as `C2C`, which is L2 C/A, a different
+  signal, so every version 2 file's L2C measurement came back named as
+  something else.
 - The version 2 observation code table holds what RINEX 2.11 defines and
   nothing else. It used to carry the legacy differential-code-bias labels for
   Galileo and BeiDou, where `P1` and `P2` mean the first and second frequency
@@ -37,7 +48,19 @@ All notable changes to `sidereon-core` are documented here.
   RINEX 3 numbers those bands 2, 7 and 6. The renumbering was applied only to
   `C`, so a file's `C1` read as B1I and its `L1` as B1C: one measurement pair
   read as two different signals, and the phase attached to a band its own
-  pseudorange did not use. It now applies to every kind, in one place.
+  pseudorange did not use. It now applies to every kind, in one place, and to
+  digit 3 as well, which names B3I under the same numbering. Writing a code back
+  reverses it, so dropping a tracking attribute version 2 cannot carry no longer
+  also moves the band: a BeiDou `C2Q` is written `C1`, which is B1I, where it
+  used to be written `C2` and read back as B2I.
+- No constellation but GPS and GLONASS is given a `P` observation code, in a
+  file this writes or in the names it considers for a shared column. Version 2
+  says "P: Pseudorange GPS and Glonass: P code". A mixed product could put a
+  Galileo `P1` in a header, which no reader defines.
+- A version 2 `# / TYPES OF OBSERV` code wider than the two characters its field
+  holds is rejected. The record is `9(4X,A2)`, so a longer token means the line
+  is not in that layout. Such a code was kept whole, written back into a
+  two-character field, and read again as a different code.
 
 - `PRN / # OF OBS` is read from the columns the format writes it in. The record
   is `3X,A1,I2,9I6`, so the satellite sits at columns 4 to 6 and the counts
@@ -89,7 +112,11 @@ All notable changes to `sidereon-core` are documented here.
   letting the other read back as a different signal was silent and wrong; the
   file grows by the columns the conflict needs instead. A file read at version 2
   gave every constellation its list from the same record, so nothing there
-  conflicts and the header keeps the width it had.
+  conflicts and the header keeps the width it had. A `PRN / # OF OBS` count
+  moves to the column its measurement went to, rather than staying at the
+  position it held in its own constellation's list. Two columns naming the same
+  code are folded into one wherever no constellation needs both, so two lists
+  holding the same signals in a different order no longer double the header.
 - The RINEX observation reader takes the records the format lays out in fixed
   columns from those columns, rather than by splitting the line on whitespace.
   Whitespace cannot read a record whose field fills its width, because it then
