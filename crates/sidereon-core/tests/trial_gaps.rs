@@ -692,11 +692,12 @@ fn extended_count_obs_text() -> String {
     text.push_str(&obs_header_line(&scale_first, "SYS / SCALE FACTOR"));
     text.push_str(&obs_header_line(&scale_second, "SYS / SCALE FACTOR"));
 
-    let mut prn_first = "G01".to_string();
+    // `3X,A1,I2,9I6`, continued as `6X,9I6`.
+    let mut prn_first = "   G01".to_string();
     for value in 1..=9 {
         prn_first.push_str(&format!("{value:6}"));
     }
-    let mut prn_second = " ".repeat(3);
+    let mut prn_second = " ".repeat(6);
     for value in 10..=13 {
         prn_second.push_str(&format!("{value:6}"));
     }

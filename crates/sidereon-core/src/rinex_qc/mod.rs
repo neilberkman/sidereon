@@ -272,13 +272,6 @@ pub enum Finding {
         /// Number of satellite entries retained in the epoch map.
         retained: usize,
     },
-    /// A retained event epoch had special records that are not retained.
-    ObsEventSpecialRecords {
-        /// Carries the zero-based event epoch index.
-        at: FindingRef,
-        /// Number of special records recorded for the event epoch.
-        count: usize,
-    },
     /// Header record is outside the retained OBS product.
     ObsUnretainedHeader {
         /// Uses the literal `header` location because only the unsupported label is retained.
@@ -444,7 +437,6 @@ impl Finding {
             Self::ObsEventEpoch { .. } => "OBS-B07",
             Self::ObsEmptySatelliteRecord { .. } => "OBS-B08",
             Self::ObsEpochGap { .. } => "OBS-B09",
-            Self::ObsEventSpecialRecords { .. } => "OBS-B11",
             Self::NavFatalParse { .. } => "NAV-H01",
             Self::NavLeapSecondsAbsent { .. } => "NAV-H02",
             Self::NavIonoMalformed { .. } => "NAV-H03",
@@ -473,7 +465,6 @@ impl Finding {
             | Self::ObsIdentityFieldIssue { .. }
             | Self::ObsImplausibleApproxPosition { .. }
             | Self::ObsImplausibleAntennaDelta { .. }
-            | Self::ObsEventSpecialRecords { .. }
             | Self::NavIonoMalformed { .. }
             | Self::NavImplausibleRecord { .. } => Severity::Warning,
             Self::ObsEventEpoch { .. }
@@ -533,7 +524,6 @@ impl Finding {
             Self::ObsEventEpoch { .. } => "RINEX 3.05 Table A3",
             Self::ObsEmptySatelliteRecord { .. } => "RINEX QC policy",
             Self::ObsEpochGap { .. } => "RINEX QC policy",
-            Self::ObsEventSpecialRecords { .. } => "RINEX 3.05/4.02 Table A3",
             Self::NavFatalParse { .. } => "RINEX 3.05 Table A5 / RINEX 4.02 Table A7",
             Self::NavLeapSecondsAbsent { .. } => "RINEX 3.05 Table A5",
             Self::NavIonoMalformed { .. } => "RINEX 3.05 Table A5",
@@ -579,7 +569,6 @@ impl Finding {
             | Self::ObsEventEpoch { at, .. }
             | Self::ObsEmptySatelliteRecord { at }
             | Self::ObsEpochGap { at, .. }
-            | Self::ObsEventSpecialRecords { at, .. }
             | Self::NavFatalParse { at, .. }
             | Self::NavLeapSecondsAbsent { at }
             | Self::NavIonoMalformed { at, .. }
@@ -1146,16 +1135,6 @@ pub fn repair_obs_text(text: &str, options: &RepairOptions) -> Result<ObsRepair>
             "RINEX OBS text repair would drop unretained header records".to_string(),
         ));
     }
-    if !options.drop_unsupported
-        && obs
-            .epochs
-            .iter()
-            .any(|epoch| epoch.flag > 1 && epoch.special_record_count > 0)
-    {
-        return Err(crate::Error::InvalidInput(
-            "RINEX OBS text repair would drop event special records".to_string(),
-        ));
-    }
     let mut repaired = repair_obs(&obs, options);
     repaired.decoded_from_crinex = decoded_from_crinex;
     repaired.remaining.decoded_from_crinex = decoded_from_crinex;
@@ -1590,12 +1569,6 @@ fn lint_obs_values(obs: &RinexObs, findings: &mut Vec<Finding>) {
                 at: FindingRef::epoch(epoch_index),
                 flag: epoch.flag,
             });
-            if epoch.special_record_count > 0 {
-                findings.push(Finding::ObsEventSpecialRecords {
-                    at: FindingRef::epoch(epoch_index),
-                    count: epoch.special_record_count,
-                });
-            }
             continue;
         }
         if epoch.declared_record_count != epoch.sats.len() {
@@ -2052,9 +2025,9 @@ fn repair_obs_unsupported_records(
     }
     let mut dropped = 0_usize;
     for epoch in &mut obs.epochs {
-        if epoch.flag > 1 && epoch.special_record_count > 0 {
-            dropped += epoch.special_record_count;
-            epoch.special_record_count = 0;
+        if epoch.flag > 1 && !epoch.special_records.is_empty() {
+            dropped += epoch.special_records.len();
+            epoch.special_records.clear();
             epoch.declared_record_count = 0;
         }
     }

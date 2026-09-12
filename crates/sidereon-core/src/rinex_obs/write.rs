@@ -12,11 +12,12 @@
 //! their absence does not change the re-parsed product. Observation values use
 //! the `F14.3` width the files carry, and any `SYS / SCALE FACTOR` in force is
 //! re-applied before formatting (the inverse of the parser's divide), so a value
-//! read from a real file re-encodes to the same `f64`. Event records (epoch flag
-//! greater than one) retain only their flag and civil epoch, so they are written
-//! with a zero special-record count.
+//! read from a real file re-encodes to the same `f64`. An event record (epoch
+//! flag greater than one) keeps the records that followed it as they were
+//! written, and they are written back unchanged under their own count.
 
 use core::fmt::Write as _;
+use std::collections::BTreeMap;
 
 use crate::id::GnssSystem;
 
@@ -24,9 +25,23 @@ use super::{ObsEpoch, ObsEpochTime, ObsValue, RinexObs, OBS_FIELD_WIDTH, OBS_VAL
 
 /// Columns a header record's content occupies before its 20-column label.
 pub(super) const HEADER_CONTENT_WIDTH: usize = 60;
+/// Columns one satellite id occupies in a version 2 epoch line, `A1,I2`.
+const RINEX2_SATELLITE_FIELD_WIDTH: usize = 3;
+/// Satellite ids a version 2 epoch line carries before continuing, `12(A1,I2)`.
+const RINEX2_EPOCH_SATELLITES_PER_LINE: usize = 12;
+/// Observation values a version 2 record carries before continuing, `5(F14.3,I1,I1)`.
+const RINEX2_OBS_VALUES_PER_LINE: usize = 5;
+/// Observation codes a `# / TYPES OF OBSERV` record carries, `9(4X,A2)`.
+const RINEX2_OBS_TYPES_PER_LINE: usize = 9;
 /// `GLONASS COD/PHS/BIS` entries that fit the sixty-column body: each takes
 /// thirteen columns, `1X,A3,1X,F8.3`.
 pub(super) const GLONASS_BIAS_ENTRIES_PER_LINE: usize = 4;
+/// Column a `PRN / # OF OBS` record's satellite id begins at, after its `3X`.
+pub(super) const PRN_OBS_SATELLITE_COLUMN: usize = 3;
+/// Column a `PRN / # OF OBS` record's counts begin at, `A1,I2` past the blanks.
+pub(super) const PRN_OBS_COUNTS_COLUMN: usize = 6;
+/// Width of one `PRN / # OF OBS` count field (`I6`).
+pub(super) const PRN_OBS_COUNT_WIDTH: usize = 6;
 /// Width of the `SYS / PHASE SHIFT` correction field (`F8.5`).
 const PHASE_SHIFT_CORRECTION_WIDTH: usize = 8;
 /// RINEX-3 observation codes per `SYS / # / OBS TYPES` line before continuation.
@@ -38,30 +53,124 @@ const PRN_OBS_COUNTS_PER_LINE: usize = 9;
 /// GLONASS slot/channel pairs per `GLONASS SLOT / FRQ #` line.
 const GLONASS_SLOTS_PER_LINE: usize = 8;
 
+/// How a version 2 file's one observation-code list lines up with each
+/// constellation's own list. Built by [`RinexObs::rinex2_obs_layout`].
+struct Rinex2ObsLayout {
+    /// The names the `# / TYPES OF OBSERV` record carries, in order.
+    names: Vec<String>,
+    /// For each constellation, the index into its own value list that each name
+    /// draws from, or `None` where that constellation has nothing to put there.
+    slots: BTreeMap<GnssSystem, Vec<Option<usize>>>,
+}
+
+/// Fold a column into an earlier one of the same name when no constellation
+/// needs both.
+///
+/// Splitting works a position at a time, so two constellations whose lists hold
+/// the same two signals in opposite order come out as four columns rather than
+/// two: each position splits, and the halves repeat the names the other position
+/// already used. Two columns naming the same code carry the same signal, so one
+/// of them is enough wherever they do not overlap.
+fn merge_repeated_columns(
+    names: &mut Vec<String>,
+    slots: &mut BTreeMap<GnssSystem, Vec<Option<usize>>>,
+) {
+    let mut keep: Vec<usize> = Vec::with_capacity(names.len());
+    for column in 0..names.len() {
+        let target = keep.iter().copied().find(|earlier| {
+            names[*earlier] == names[column]
+                && slots
+                    .values()
+                    .all(|row| row[*earlier].is_none() || row[column].is_none())
+        });
+        match target {
+            Some(earlier) => {
+                for row in slots.values_mut() {
+                    if row[column].is_some() {
+                        row[earlier] = row[column];
+                    }
+                }
+            }
+            None => keep.push(column),
+        }
+    }
+    if keep.len() == names.len() {
+        return;
+    }
+    *names = keep.iter().map(|column| names[*column].clone()).collect();
+    for row in slots.values_mut() {
+        *row = keep.iter().map(|column| row[*column]).collect();
+    }
+}
+
+/// The constellations among `holders` that read `name` back as the code they
+/// hold, so one column can carry it for all of them.
+fn served_by(name: &str, holders: &[(GnssSystem, &String)], version: f64) -> Vec<GnssSystem> {
+    holders
+        .iter()
+        .filter(|(system, canonical)| {
+            // The name has to be one this constellation may carry, not only one
+            // that reads back as its code. A Galileo `C1X` reads `P1` back
+            // correctly, and version 2 gives Galileo no `P` to read.
+            super::rinex2_name_allowed(*system, name)
+                && super::canonical_rinex2_obs_code(*system, name, version) == **canonical
+        })
+        .map(|(system, _)| *system)
+        .collect()
+}
+
 impl RinexObs {
-    /// Serialize this product to standard RINEX 3 observation text - the inverse
+    /// Serialize this product to standard RINEX observation text - the inverse
     /// of [`RinexObs::parse`].
+    ///
+    /// The version the header carries decides the records written: below 3.0
+    /// the file is version 2 throughout, otherwise version 3.
     ///
     /// Pure and deterministic. See this module's documentation for the round-trip
     /// scope: re-parsing the output reproduces the same header and epochs.
+    ///
+    /// A version 2 file cannot say everything a product can hold, and what it
+    /// cannot say is dropped rather than written where no reader looks:
+    /// `MARKER TYPE`, `SIGNAL STRENGTH UNIT`, `SYS / PHASE SHIFT`,
+    /// `SYS / SCALE FACTOR` and `GLONASS COD/PHS/BIS`, the future count, week
+    /// and day of `LEAP SECONDS`, an observation code's tracking attribute, and
+    /// the picoseconds of an epoch. Its year field holds two digits, so an
+    /// epoch outside 1980 to 2079 reads back in that window.
     pub fn to_rinex_string(&self) -> String {
         let mut out = String::new();
-        self.write_header(&mut out);
-        self.write_body(&mut out);
+        let rinex2_layout = self.is_rinex2().then(|| self.rinex2_obs_layout());
+        self.write_header(&mut out, rinex2_layout.as_ref());
+        self.write_body(&mut out, rinex2_layout.as_ref());
         out
     }
 
-    fn write_header(&self, out: &mut String) {
+    fn write_header(&self, out: &mut String, rinex2_layout: Option<&Rinex2ObsLayout>) {
         let h = &self.header;
-        push_header_line(
-            out,
-            &format!(
-                "{:<20}{:<40}",
-                format!("{:.2}", h.version),
-                "OBSERVATION DATA    M (MIXED)"
-            ),
-            "RINEX VERSION / TYPE",
-        );
+        if self.is_rinex2() {
+            // A version 2 file names its constellation in the version record and
+            // lists one set of observation codes for all of them.
+            push_header_line(
+                out,
+                &format!(
+                    "{:9.2}{:11}{:<20}{:<20}",
+                    h.version,
+                    "",
+                    "OBSERVATION DATA",
+                    self.rinex2_system_field()
+                ),
+                "RINEX VERSION / TYPE",
+            );
+        } else {
+            push_header_line(
+                out,
+                &format!(
+                    "{:<20}{:<40}",
+                    format!("{:.2}", h.version),
+                    "OBSERVATION DATA    M (MIXED)"
+                ),
+                "RINEX VERSION / TYPE",
+            );
+        }
         if let Some(pgm) = &h.program_run_by_date {
             push_header_line(
                 out,
@@ -78,7 +187,8 @@ impl RinexObs {
         if let Some(number) = &h.marker_number {
             push_header_line(out, number, "MARKER NUMBER");
         }
-        if let Some(marker_type) = &h.marker_type {
+        // `MARKER TYPE` arrived with version 3.
+        if let Some(marker_type) = h.marker_type.as_ref().filter(|_| !self.is_rinex2()) {
             push_header_line(out, marker_type, "MARKER TYPE");
         }
         if h.observer.is_some() || h.agency.is_some() {
@@ -115,10 +225,23 @@ impl RinexObs {
         if let Some(delta) = h.antenna_delta_hen_m {
             push_header_line(out, &format_vec3(delta), "ANTENNA: DELTA H/E/N");
         }
-        for (system, codes) in &h.obs_codes {
-            write_obs_types(out, *system, codes);
+        if let Some(layout) = rinex2_layout {
+            write_obs_types_v2(out, &layout.names);
+        } else {
+            for (system, codes) in &h.obs_codes {
+                write_obs_types(out, *system, codes);
+            }
         }
-        if let Some(unit) = &h.signal_strength_unit {
+        // `SIGNAL STRENGTH UNIT` is a version 3 record, as are the four below.
+        // Writing one into a version 2 file would make it a file neither
+        // version accepts, which is the very thing this writer exists to stop.
+        // A product parsed from version 2 never carries them; one built by a
+        // caller can, and loses them here.
+        if let Some(unit) = h
+            .signal_strength_unit
+            .as_ref()
+            .filter(|_| !self.is_rinex2())
+        {
             push_header_line(out, unit, "SIGNAL STRENGTH UNIT");
         }
         // A cadence the F10.3 field cannot carry is omitted rather than written
@@ -140,41 +263,262 @@ impl RinexObs {
                 push_header_line(out, &format_first_obs(epoch, label), "TIME OF LAST OBS");
             }
         }
-        for shift in &h.phase_shifts {
-            write_phase_shift(out, shift);
+        if !self.is_rinex2() {
+            for shift in &h.phase_shifts {
+                write_phase_shift(out, shift);
+            }
+            for factor in &h.scale_factors {
+                write_scale_factor(out, factor);
+            }
         }
-        for factor in &h.scale_factors {
-            write_scale_factor(out, factor);
-        }
+        // `GLONASS SLOT / FRQ #` arrived with version 3 too, but it carries the
+        // frequency channel of every slot, which nothing else in the file says.
+        // It stays, as an extension a version 2 reader skips like any label it
+        // does not know, rather than being dropped and taking the table with it.
         if !h.glonass_slots.is_empty() {
             write_glonass_slots(out, &h.glonass_slots);
         }
-        if let Some(entries) = &h.glonass_cod_phs_bis {
+        if let Some(entries) = h.glonass_cod_phs_bis.as_ref().filter(|_| !self.is_rinex2()) {
             write_glonass_cod_phs_bis(out, entries);
         }
         if let Some(leap) = h.leap_seconds {
-            write_leap_seconds(out, leap);
+            // Version 2 defines one field here. The future count, week and day
+            // arrived with version 3, and a version 2 reader takes the columns
+            // they occupy as blank comment space at best.
+            write_leap_seconds(out, leap, self.is_rinex2());
         }
         if let Some(count) = h.n_satellites {
             push_header_line(out, &format!("{count:6}"), "# OF SATELLITES");
         }
         for (sat, counts) in &h.prn_obs_counts {
-            write_prn_obs_counts(out, *sat, counts);
+            match rinex2_layout.and_then(|layout| layout.slots.get(&sat.system)) {
+                // The counts are aligned to that constellation's own code list,
+                // and the header names the layout's columns, so they move with
+                // the values. Without this a split column left a count under
+                // the name beside the one it was counting.
+                Some(row) => {
+                    let placed: Vec<Option<usize>> = row
+                        .iter()
+                        .map(|slot| slot.and_then(|index| counts.get(index).copied()).flatten())
+                        .collect();
+                    write_prn_obs_counts(out, *sat, &placed);
+                }
+                None => write_prn_obs_counts(out, *sat, counts),
+            }
         }
         push_header_line(out, "", "END OF HEADER");
     }
 
-    fn write_body(&self, out: &mut String) {
+    fn write_body(&self, out: &mut String, rinex2_layout: Option<&Rinex2ObsLayout>) {
+        if let Some(layout) = rinex2_layout {
+            for epoch in &self.epochs {
+                self.write_epoch_v2(out, epoch, layout);
+            }
+            return;
+        }
         for epoch in &self.epochs {
             self.write_epoch(out, epoch);
         }
     }
 
+    /// Whether this product is written in the version 2 record layout.
+    ///
+    /// A product carries the version its file declared, and is written back in
+    /// that version's records. Writing version 3 records under a version 2
+    /// header would produce a file that is neither.
+    fn is_rinex2(&self) -> bool {
+        self.header.version < 3.0
+    }
+
+    /// The constellation a version 2 header names: one letter, or `M` for a file
+    /// carrying more than one. The name beside it is the convention these files
+    /// follow, and sits in the columns the record leaves free.
+    fn rinex2_system_field(&self) -> String {
+        let mut systems = self.header.obs_codes.keys();
+        match (systems.next(), systems.next()) {
+            (Some(only), None) => only.letter().to_string(),
+            _ => "M (MIXED)".to_string(),
+        }
+    }
+
+    /// How a version 2 file's one observation-code list lines up with each
+    /// constellation's own list.
+    ///
+    /// Version 2 names its codes once for the whole file, so position `i` means
+    /// the same signal for every constellation. A file read at version 2 gave
+    /// every constellation its list from that one record, so one name per
+    /// position serves them all and the layout is the identity.
+    ///
+    /// A product a caller assembled can hold codes at one position that no
+    /// single version 2 name spells for every constellation holding it - GPS
+    /// `C1W` beside GLONASS `C1C`, which are `P1` and `C1`. Rather than write
+    /// one of them and let the others read back as a different signal, the
+    /// position is split: each name gets its own column, and a constellation
+    /// that name does not serve leaves that column blank. Nothing is renamed,
+    /// and the file grows by the columns the conflict needs.
+    fn rinex2_obs_layout(&self) -> Rinex2ObsLayout {
+        let version = self.header.version;
+        let longest = self
+            .header
+            .obs_codes
+            .values()
+            .map(Vec::len)
+            .max()
+            .unwrap_or_default();
+        let mut names: Vec<String> = Vec::new();
+        let mut slots: BTreeMap<GnssSystem, Vec<Option<usize>>> = self
+            .header
+            .obs_codes
+            .keys()
+            .map(|system| (*system, Vec::new()))
+            .collect();
+        // A constellation that already has a column for a code does not get a
+        // second one when the file names that code again. Version 2 names its
+        // codes once for every constellation at once, so a name one of them has
+        // no observable for - Galileo has no `P1` - lands on a code it already
+        // holds. Giving that a column of its own added one to the header on
+        // every rewrite, and the next read named it again.
+        let mut placed: BTreeMap<GnssSystem, Vec<&String>> = BTreeMap::new();
+        for index in 0..longest {
+            let mut remaining: Vec<(GnssSystem, &String)> = self
+                .header
+                .obs_codes
+                .iter()
+                .filter_map(|(system, codes)| Some((*system, codes.get(index)?)))
+                .filter(|(system, canonical)| {
+                    !placed
+                        .get(system)
+                        .is_some_and(|held| held.contains(canonical))
+                })
+                .collect();
+            while let Some(&(first_system, first_code)) = remaining.first() {
+                let candidates =
+                    super::rinex2_obs_code_candidates(first_system, first_code, version);
+                // The name that serves the most of what is left, preferring the
+                // earlier candidate on a tie, since that is the one that keeps
+                // the band the signal was measured on.
+                let mut best: Option<(&String, usize)> = None;
+                for name in &candidates {
+                    let served = served_by(name, &remaining, version).len();
+                    if best.is_none_or(|(_, most)| served > most) {
+                        best = Some((name, served));
+                    }
+                }
+                let name = match best {
+                    Some((name, _)) => name.clone(),
+                    // A code of some other shape than RINEX writes is held to
+                    // two characters, so the columns after it stay aligned.
+                    None => first_code.chars().take(2).collect(),
+                };
+                let mut served = served_by(&name, &remaining, version);
+                if !served.contains(&first_system) {
+                    // No version 2 name spells this constellation's code, so the
+                    // best one stands for it and drops the tracking attribute,
+                    // which is the documented loss. It still serves whoever else
+                    // reads it back exactly, rather than taking a column of its
+                    // own under the same name.
+                    served.push(first_system);
+                }
+                let position = names.len();
+                names.push(name);
+                for (system, row) in &mut slots {
+                    row.resize(position + 1, None);
+                    if served.contains(system) {
+                        row[position] = Some(index);
+                        if let Some((_, canonical)) =
+                            remaining.iter().find(|(holder, _)| holder == system)
+                        {
+                            placed.entry(*system).or_default().push(canonical);
+                        }
+                    }
+                }
+                remaining.retain(|(system, _)| !served.contains(system));
+            }
+        }
+        for row in slots.values_mut() {
+            row.resize(names.len(), None);
+        }
+        merge_repeated_columns(&mut names, &mut slots);
+        Rinex2ObsLayout { names, slots }
+    }
+
+    /// Write one version 2 epoch: the record, its satellite list continued
+    /// twelve to a line, then each satellite's observations five to a line.
+    fn write_epoch_v2(&self, out: &mut String, epoch: &ObsEpoch, layout: &Rinex2ObsLayout) {
+        let t = epoch.epoch;
+        // An event names no satellites. Its own records follow the epoch line,
+        // and its declared count is how many of them there are.
+        let event = epoch.flag > 1;
+        // `12(A1,I2)`: the constellation letter then the number, space padded,
+        // which is what a version 2 reader expects.
+        let satellites: Vec<String> = if event {
+            Vec::new()
+        } else {
+            epoch
+                .sats
+                .keys()
+                .map(|sat| format!("{}{:2}", sat.system.letter(), sat.prn))
+                .collect()
+        };
+        let mut chunks = satellites.chunks(RINEX2_EPOCH_SATELLITES_PER_LINE);
+        let first: String = chunks.next().unwrap_or_default().concat();
+        // The clock offset is an `F12.9` field at columns 69 to 80, so the
+        // satellite field is held to all twelve of its slots even when fewer
+        // satellites fill it. Letting the clock follow the last satellite put
+        // it wherever the count happened to end, where no reader looks.
+        let tail = match epoch.rcv_clock_offset_s {
+            Some(value) => format!(
+                "{first:<width$}{value:12.9}",
+                width = RINEX2_EPOCH_SATELLITES_PER_LINE * RINEX2_SATELLITE_FIELD_WIDTH
+            ),
+            None => first,
+        };
+        let _ = writeln!(
+            out,
+            "{}{:>3}{tail}",
+            format_args!(
+                " {:02} {:2} {:2} {:2} {:2}{:11.7}  {}",
+                t.year.rem_euclid(100),
+                t.month,
+                t.day,
+                t.hour,
+                t.minute,
+                t.second,
+                epoch.flag
+            ),
+            if event {
+                epoch.special_records.len()
+            } else {
+                satellites.len()
+            }
+        );
+        for chunk in chunks {
+            let _ = writeln!(out, "{:32}{}", "", chunk.concat());
+        }
+        for record in &epoch.special_records {
+            let _ = writeln!(out, "{record}");
+        }
+        if !event {
+            // A constellation the header does not name keeps its own order,
+            // which is all there is to go on.
+            let straight: Vec<Option<usize>> = (0..layout.names.len()).map(Some).collect();
+            for (sat, values) in &epoch.sats {
+                let row = layout.slots.get(&sat.system).unwrap_or(&straight);
+                write_sat_record_v2(out, values, row);
+            }
+        }
+    }
+
     fn write_epoch(&self, out: &mut String, epoch: &ObsEpoch) {
         let t = epoch.epoch;
-        // Event records (flag > 1) keep only their flag and epoch in the IR, so
-        // no special records follow; flag 0/1 carry the satellite observations.
-        let count = if epoch.flag > 1 { 0 } else { epoch.sats.len() };
+        // An event (flag > 1) declares how many of its own records follow;
+        // flag 0 and 1 declare their satellites and carry observations.
+        // An event declares the records that follow it.
+        let count = if epoch.flag > 1 {
+            epoch.special_records.len()
+        } else {
+            epoch.sats.len()
+        };
         let picoseconds = epoch
             .epoch_picoseconds
             .map(|value| format!(" {value:05}"))
@@ -192,6 +536,9 @@ impl RinexObs {
             t.year, t.month, t.day, t.hour, t.minute, t.second, epoch.flag, count
         );
         if epoch.flag > 1 {
+            for record in &epoch.special_records {
+                let _ = writeln!(out, "{record}");
+            }
             return;
         }
         for (sat, values) in &epoch.sats {
@@ -298,6 +645,56 @@ fn write_obs_types(out: &mut String, system: GnssSystem, codes: &[String]) {
     }
 }
 
+/// Write one satellite's observations in the version 2 layout: five to a line,
+/// with no satellite id, since the epoch's list names them in order.
+///
+/// The record runs to the number of names the header carries, blank where this
+/// satellite has nothing for one, because a reader takes that many lines for
+/// every satellite. A shorter record would put the next satellite's values
+/// under this one.
+///
+/// The values are written as they stand. A version 2 file carries no
+/// `SYS / SCALE FACTOR` record, so scaling them by a factor the file has no way
+/// to declare would change what a reader gets back.
+fn write_sat_record_v2(out: &mut String, values: &[ObsValue], row: &[Option<usize>]) {
+    const BLANK: ObsValue = ObsValue {
+        value: None,
+        lli: None,
+        ssi: None,
+    };
+    for chunk in row.chunks(RINEX2_OBS_VALUES_PER_LINE) {
+        let mut line = String::new();
+        for slot in chunk {
+            let value = slot
+                .and_then(|index| values.get(index))
+                .copied()
+                .unwrap_or(BLANK);
+            push_obs_value(&mut line, value, 1.0);
+        }
+        out.push_str(line.trim_end());
+        out.push('\n');
+    }
+}
+
+/// Write the version 2 `# / TYPES OF OBSERV` record, continued when the codes
+/// do not fit one line. The count is written once, on the first line only.
+fn write_obs_types_v2(out: &mut String, codes: &[String]) {
+    let mut chunks = codes.chunks(RINEX2_OBS_TYPES_PER_LINE);
+    let first = chunks.next().unwrap_or_default();
+    let mut content = format!("{:6}", codes.len());
+    for code in first {
+        let _ = write!(content, "    {code:>2}");
+    }
+    push_header_line(out, &content, "# / TYPES OF OBSERV");
+    for chunk in chunks {
+        let mut content = " ".repeat(6);
+        for code in chunk {
+            let _ = write!(content, "    {code:>2}");
+        }
+        push_header_line(out, &content, "# / TYPES OF OBSERV");
+    }
+}
+
 /// Write one `SYS / PHASE SHIFT` record. The optional satellite list is emitted
 /// with its count when present (otherwise the correction applies system-wide).
 fn write_phase_shift(out: &mut String, shift: &super::ObsPhaseShift) {
@@ -389,16 +786,18 @@ fn write_glonass_cod_phs_bis(out: &mut String, entries: &[(String, f64)]) {
     }
 }
 
-fn write_leap_seconds(out: &mut String, leap: super::ObsLeapSeconds) {
+fn write_leap_seconds(out: &mut String, leap: super::ObsLeapSeconds, current_only: bool) {
     let mut content = format!("{:6}", leap.current);
-    if let Some(value) = leap.delta_future {
-        let _ = write!(content, "{value:6}");
-    }
-    if let Some(value) = leap.week {
-        let _ = write!(content, "{value:6}");
-    }
-    if let Some(value) = leap.day {
-        let _ = write!(content, "{value:6}");
+    if !current_only {
+        if let Some(value) = leap.delta_future {
+            let _ = write!(content, "{value:6}");
+        }
+        if let Some(value) = leap.week {
+            let _ = write!(content, "{value:6}");
+        }
+        if let Some(value) = leap.day {
+            let _ = write!(content, "{value:6}");
+        }
     }
     push_header_line(out, &content, "LEAP SECONDS");
 }
@@ -408,15 +807,18 @@ fn write_prn_obs_counts(
     sat: crate::id::GnssSatelliteId,
     counts: &[Option<usize>],
 ) {
+    // `3X,A1,I2,9I6`, continued as `6X,9I6`: the satellite id sits at columns 4
+    // to 6, not at the start of the line, and the counts follow from column 7.
+    let heading = format!("{:blanks$}{sat:<3}", "", blanks = PRN_OBS_SATELLITE_COLUMN);
     if counts.is_empty() {
-        push_header_line(out, &format!("{sat:<3}"), "PRN / # OF OBS");
+        push_header_line(out, &heading, "PRN / # OF OBS");
         return;
     }
     for (chunk_index, chunk) in counts.chunks(PRN_OBS_COUNTS_PER_LINE).enumerate() {
         let mut content = if chunk_index == 0 {
-            format!("{sat:<3}")
+            heading.clone()
         } else {
-            " ".repeat(3)
+            " ".repeat(PRN_OBS_COUNTS_COLUMN)
         };
         for count in chunk {
             match count {

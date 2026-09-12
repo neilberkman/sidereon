@@ -109,9 +109,11 @@ fn committed_obs_fixtures_have_pinned_lint_findings() {
         ),
         (
             // The 120-epoch trim keeps full-file satellite totals and an
-            // unretained receiver-clock-offset header.
+            // unretained receiver-clock-offset header. It also keeps the
+            // full-day `PRN / # OF OBS` counts, one per satellite and code,
+            // and the trimmed body has far fewer, so OBS-H11 fires for each.
             "WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx",
-            &[("OBS-H10", 1), ("OBS-H90", 1)][..],
+            &[("OBS-H10", 1), ("OBS-H11", 1272), ("OBS-H90", 1)][..],
         ),
         (
             // RCV CLOCK OFFS APPL is parsed as an unretained disclosure only.
@@ -541,14 +543,21 @@ fn glonass_slot_findings_are_per_satellite_and_check_channel_range() {
 }
 
 #[test]
-fn obs_text_repair_guards_event_special_records() {
+fn obs_text_repair_keeps_event_special_records_unless_told_to_drop_them() {
     let headers = [header_line(
         "  2020    01    01    00    00    0.0000000     GPS",
         "TIME OF FIRST OBS",
     )];
     let body = "> 2020 01 01 00 00  0.0000000  2  1\nCOMMENT";
     let text = obs_text(&headers, body);
-    assert!(repair_obs_text(&text, &RepairOptions::default()).is_err());
+    // The repair used to refuse outright, because writing the product back
+    // dropped the records. It carries them now, so there is nothing to guard.
+    let kept = repair_obs_text(&text, &RepairOptions::default()).expect("repair keeps them");
+    assert_eq!(
+        kept.repaired.epochs()[0].special_records,
+        vec!["COMMENT".to_string()]
+    );
+    assert!(kept.repaired.to_rinex_string().contains("COMMENT"));
 
     let repair = repair_obs_text(
         &text,
