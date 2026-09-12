@@ -105,11 +105,15 @@ fn merge_repeated_columns(
 
 /// The constellations among `holders` that read `name` back as the code they
 /// hold, so one column can carry it for all of them.
-fn served_by(name: &str, holders: &[(GnssSystem, &String)]) -> Vec<GnssSystem> {
+fn served_by(name: &str, holders: &[(GnssSystem, &String)], version: f64) -> Vec<GnssSystem> {
     holders
         .iter()
         .filter(|(system, canonical)| {
-            super::canonical_rinex2_obs_code(*system, name) == **canonical
+            // The name has to be one this constellation may carry, not only one
+            // that reads back as its code. A Galileo `C1X` reads `P1` back
+            // correctly, and version 2 gives Galileo no `P` to read.
+            super::rinex2_name_allowed(*system, name)
+                && super::canonical_rinex2_obs_code(*system, name, version) == **canonical
         })
         .map(|(system, _)| *system)
         .collect()
@@ -353,6 +357,7 @@ impl RinexObs {
     /// that name does not serve leaves that column blank. Nothing is renamed,
     /// and the file grows by the columns the conflict needs.
     fn rinex2_obs_layout(&self) -> Rinex2ObsLayout {
+        let version = self.header.version;
         let longest = self
             .header
             .obs_codes
@@ -375,13 +380,14 @@ impl RinexObs {
                 .filter_map(|(system, codes)| Some((*system, codes.get(index)?)))
                 .collect();
             while let Some(&(first_system, first_code)) = remaining.first() {
-                let candidates = super::rinex2_obs_code_candidates(first_system, first_code);
+                let candidates =
+                    super::rinex2_obs_code_candidates(first_system, first_code, version);
                 // The name that serves the most of what is left, preferring the
                 // earlier candidate on a tie, since that is the one that keeps
                 // the band the signal was measured on.
                 let mut best: Option<(&String, usize)> = None;
                 for name in &candidates {
-                    let served = served_by(name, &remaining).len();
+                    let served = served_by(name, &remaining, version).len();
                     if best.is_none_or(|(_, most)| served > most) {
                         best = Some((name, served));
                     }
@@ -392,7 +398,7 @@ impl RinexObs {
                     // two characters, so the columns after it stay aligned.
                     None => first_code.chars().take(2).collect(),
                 };
-                let mut served = served_by(&name, &remaining);
+                let mut served = served_by(&name, &remaining, version);
                 if !served.contains(&first_system) {
                     // No version 2 name spells this constellation's code, so the
                     // best one stands for it and drops the tracking attribute,
@@ -423,15 +429,12 @@ impl RinexObs {
     /// twelve to a line, then each satellite's observations five to a line.
     fn write_epoch_v2(&self, out: &mut String, epoch: &ObsEpoch, layout: &Rinex2ObsLayout) {
         let t = epoch.epoch;
-        // An event names no satellites and its declared count is how many of its
-        // own records follow. Flag 6 is the exception: its records are
-        // observation records, so it names its satellites like an ordinary
-        // epoch and each one's record runs to as many lines as the types need.
+        // An event names no satellites. Its own records follow the epoch line,
+        // and its declared count is how many of them there are.
         let event = epoch.flag > 1;
-        let cycle_slips = epoch.flag == super::CYCLE_SLIP_EPOCH_FLAG;
         // `12(A1,I2)`: the constellation letter then the number, space padded,
         // which is what a version 2 reader expects.
-        let satellites: Vec<String> = if event && !cycle_slips {
+        let satellites: Vec<String> = if event {
             Vec::new()
         } else {
             epoch
@@ -466,7 +469,7 @@ impl RinexObs {
                 t.second,
                 epoch.flag
             ),
-            if event && !cycle_slips {
+            if event {
                 epoch.special_records.len()
             } else {
                 satellites.len()
@@ -493,9 +496,7 @@ impl RinexObs {
         let t = epoch.epoch;
         // An event (flag > 1) declares how many of its own records follow;
         // flag 0 and 1 declare their satellites and carry observations.
-        // An event declares the records that follow it. Version 3 writes one
-        // observation record per line, so flag 6's cycle-slip records need no
-        // separate count the way they do in version 2.
+        // An event declares the records that follow it.
         let count = if epoch.flag > 1 {
             epoch.special_records.len()
         } else {

@@ -1624,20 +1624,20 @@ fn rinex2_code_round_trips_through_its_canonical_form() {
         for kind in KINDS {
             for band in BANDS {
                 let declared = format!("{kind}{band}");
-                let canonical = canonical_rinex2_obs_code(system, &declared);
-                let candidates = rinex2_obs_code_candidates(system, &canonical);
+                let canonical = canonical_rinex2_obs_code(system, &declared, 2.11);
+                let candidates = rinex2_obs_code_candidates(system, &canonical, 2.11);
                 let written = candidates
                     .first()
                     .unwrap_or_else(|| panic!("{system:?} {declared} has no version 2 name"));
                 for alternative in &candidates {
                     assert_eq!(
-                        canonical_rinex2_obs_code(system, alternative),
+                        canonical_rinex2_obs_code(system, alternative, 2.11),
                         canonical,
                         "{system:?} {declared} lists {alternative} as an inverse"
                     );
                 }
                 assert_eq!(
-                    canonical_rinex2_obs_code(system, written),
+                    canonical_rinex2_obs_code(system, written, 2.11),
                     canonical,
                     "{system:?} {declared} became {canonical}, written back as {written}"
                 );
@@ -1944,8 +1944,53 @@ fn a_version_two_observation_type_wider_than_its_field_is_rejected() {
     );
     let error = RinexObs::parse(&text).expect_err("a three-character version 2 code is rejected");
     assert!(
-        error.to_string().contains("A2"),
+        error.to_string().contains("field width"),
         "the error names the field: {error}"
+    );
+}
+
+#[test]
+fn a_shared_column_is_a_name_every_constellation_in_it_may_carry() {
+    // GPS `C1W` is `P1`, and Galileo reads `P1` back as the code it holds, so
+    // checking only that made one `P1` column carry both. Version 2 gives
+    // Galileo no `P` observable, so that column is one no reader defines.
+    let mut obs = version_two_fixture();
+    obs.header.obs_codes.clear();
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Gps, vec!["C1W".to_string()]);
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Galileo, vec!["C1X".to_string()]);
+    obs.epochs.clear();
+
+    let encoded = obs.to_rinex_string();
+    let declared = encoded
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..18], "     2    P1    C1", "{declared:?}");
+    RinexObs::parse(&encoded).expect("its own output must read back");
+    assert!(
+        !encoded.contains("    P1    P1"),
+        "Galileo takes the C1 column, never a P1 one: {declared:?}"
+    );
+}
+
+#[test]
+fn a_beidou_band_version_two_cannot_name_is_a_known_limit() {
+    // Version 2 numbers by frequency slot, and no slot names BeiDou B1C. A
+    // product holding one, written as version 2, comes back as B1I: the slot
+    // that digit does name. There is nothing else the file can say, and
+    // `to_rinex_string` has no way to refuse.
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::BeiDou, "C1", 2.11),
+        "C2I"
+    );
+    assert_eq!(
+        rinex2_obs_code_candidates(GnssSystem::BeiDou, "C1P", 2.11),
+        vec!["C1".to_string()],
+        "no version 2 name reads back as B1C"
     );
 }
 
@@ -2124,54 +2169,6 @@ fn a_version_two_file_writes_values_a_scale_factor_would_have_declared() {
 }
 
 #[test]
-fn a_version_two_cycle_slip_epoch_reads_its_records_and_writes_them_back() {
-    // Flag 6 reports cycle slips, and version 2 says its count is the number of
-    // records, which are observation records. With eight observation types each
-    // record is two lines, so a one-satellite event is two lines, not one.
-    // Reading its count as a line count left the second line to be read as an
-    // epoch, and the file was rejected.
-    let mut text = String::new();
-    for line in version_two_fixture_text().lines() {
-        text.push_str(line);
-        text.push('\n');
-        if line.contains("END OF HEADER") {
-            text.push_str(" 15  1  1  0  0  0.0000000  6  1G 5\n");
-            text.push_str("       0             0             0             0             0\n");
-            text.push_str("       1             0             0\n");
-        }
-    }
-
-    let obs = RinexObs::parse(&text).expect("parse a file with a cycle slip event");
-    let event = obs
-        .epochs()
-        .iter()
-        .find(|epoch| epoch.flag == 6)
-        .expect("the cycle slip epoch is kept");
-    assert_eq!(event.special_records.len(), 2, "two lines for one record");
-    assert_eq!(event.declared_record_count, 1, "one record");
-    assert_eq!(
-        event.sats.keys().copied().collect::<Vec<_>>(),
-        vec![GnssSatelliteId {
-            system: GnssSystem::Gps,
-            prn: 5
-        }],
-        "the epoch line names the satellite its record belongs to"
-    );
-
-    let encoded = obs.to_rinex_string();
-    let line = encoded
-        .lines()
-        .find(|line| line.contains("  6  1"))
-        .expect("the event declares one record");
-    assert!(
-        line.starts_with(" 15  1  1  0  0  0.0000000  6  1G 5"),
-        "the satellite list is written back: {line:?}"
-    );
-    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
-    assert_eq!(reparsed.epochs(), obs.epochs());
-}
-
-#[test]
 fn an_event_epoch_keeps_the_records_that_followed_it() {
     // A flag 3 epoch is followed by the header records for a new site
     // occupation. They used to be counted and thrown away, and the epoch then
@@ -2260,7 +2257,7 @@ fn a_galileo_band_five_code_keeps_its_band() {
     // Galileo's `C5` and `P2` both canonicalise to `C5X`, so an inverse that
     // takes whichever it meets first can write `P2` for a band 5 pseudorange.
     // No reader outside this crate defines `P2` for Galileo.
-    let candidates = rinex2_obs_code_candidates(GnssSystem::Galileo, "C5X");
+    let candidates = rinex2_obs_code_candidates(GnssSystem::Galileo, "C5X", 2.11);
     assert_eq!(
         candidates.first().map(String::as_str),
         Some("C5"),
@@ -2276,10 +2273,13 @@ fn a_galileo_band_five_code_keeps_its_band() {
     // most version 2 can say; naming a different band to keep the attribute
     // would not be.
     assert_eq!(
-        rinex2_obs_code_candidates(GnssSystem::Galileo, "C5Q"),
+        rinex2_obs_code_candidates(GnssSystem::Galileo, "C5Q", 2.11),
         vec!["C5".to_string()]
     );
-    assert_eq!(canonical_rinex2_obs_code(GnssSystem::Galileo, "C5"), "C5X");
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::Galileo, "C5", 2.11),
+        "C5X"
+    );
 }
 
 #[test]
@@ -2291,19 +2291,48 @@ fn version_two_gives_only_gps_and_glonass_a_p_observable() {
     // B2I and `P2` B3I: two spellings of the same digit naming different bands.
     // 2.11 section 10.1.1 added `C2` for the L2C pseudorange, which RINEX 3
     // spells by channel. `C2C` is L2 C/A, a different signal.
-    assert_eq!(canonical_rinex2_obs_code(GnssSystem::Gps, "C2"), "C2X");
-    assert_eq!(canonical_rinex2_obs_code(GnssSystem::Gps, "P1"), "C1W");
-    assert_eq!(canonical_rinex2_obs_code(GnssSystem::Gps, "P2"), "C2W");
-    assert_eq!(canonical_rinex2_obs_code(GnssSystem::Glonass, "P1"), "C1P");
-    assert_eq!(canonical_rinex2_obs_code(GnssSystem::Glonass, "P2"), "C2P");
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::Gps, "C2", 2.11),
+        "C2X"
+    );
+    // From 2.12 the same name is L2P(Y): 2.12 gave L2C its own names.
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::Gps, "C2", 2.12),
+        "C2W"
+    );
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::Gps, "P1", 2.11),
+        "C1W"
+    );
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::Gps, "P2", 2.11),
+        "C2W"
+    );
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::Glonass, "P1", 2.11),
+        "C1P"
+    );
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::Glonass, "P2", 2.11),
+        "C2P"
+    );
     // BeiDou's `C` rows stay: version 2 has no BeiDou at all, and the receivers
     // that wrote it numbered B1, B2, B3 as 1, 2, 3.
-    assert_eq!(canonical_rinex2_obs_code(GnssSystem::BeiDou, "C1"), "C2I");
-    assert_eq!(canonical_rinex2_obs_code(GnssSystem::BeiDou, "C2"), "C7I");
-    assert_ne!(canonical_rinex2_obs_code(GnssSystem::BeiDou, "P2"), "C6I");
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::BeiDou, "C1", 2.11),
+        "C2I"
+    );
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::BeiDou, "C2", 2.11),
+        "C2I"
+    );
+    assert_ne!(
+        canonical_rinex2_obs_code(GnssSystem::BeiDou, "P2", 2.11),
+        "C6I"
+    );
     for system in [GnssSystem::Galileo, GnssSystem::BeiDou, GnssSystem::Qzss] {
         for canonical in ["C1C", "C2I", "C5X", "C7I", "L1C"] {
-            let candidates = rinex2_obs_code_candidates(system, canonical);
+            let candidates = rinex2_obs_code_candidates(system, canonical, 2.11);
             assert!(
                 !candidates.iter().any(|name| name.starts_with('P')),
                 "{system:?} {canonical} offers a `P` name: {candidates:?}"
@@ -2313,14 +2342,26 @@ fn version_two_gives_only_gps_and_glonass_a_p_observable() {
     // Dropping an attribute version 2 cannot carry must not also move the band.
     // `C2Q` is B1I with Q tracking; `C2` would read back as B2I.
     assert_eq!(
-        rinex2_obs_code_candidates(GnssSystem::BeiDou, "C2Q"),
-        vec!["C1".to_string()]
+        rinex2_obs_code_candidates(GnssSystem::BeiDou, "C2Q", 2.11),
+        vec!["C2".to_string()]
     );
-    assert_eq!(canonical_rinex2_obs_code(GnssSystem::BeiDou, "C1"), "C2I");
-    // Digit 3 is B3I under the same numbering as 1 and 2, for every kind.
-    for (declared, canonical) in [("C3", "C6I"), ("L3", "L6I"), ("S3", "S6I")] {
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::BeiDou, "C1", 2.11),
+        "C2I"
+    );
+    // Version 2 numbers by frequency slot across every constellation, so B1I is
+    // slot 2 and some writers use slot 1 for it, while B2I and B3I sit in slots
+    // 7 and 6, which RINEX 3 numbers the same. There is no slot 3.
+    for (declared, canonical) in [
+        ("C1", "C2I"),
+        ("C2", "C2I"),
+        ("L2", "L2I"),
+        ("C7", "C7I"),
+        ("C6", "C6I"),
+        ("C3", "C3X"),
+    ] {
         assert_eq!(
-            canonical_rinex2_obs_code(GnssSystem::BeiDou, declared),
+            canonical_rinex2_obs_code(GnssSystem::BeiDou, declared, 2.11),
             canonical,
             "BeiDou {declared}"
         );
@@ -2333,11 +2374,11 @@ fn version_two_gives_only_gps_and_glonass_a_p_observable() {
         ("L1", "L2I"),
         ("D1", "D2I"),
         ("S1", "S2I"),
-        ("C2", "C7I"),
-        ("L2", "L7I"),
+        ("C2", "C2I"),
+        ("L2", "L2I"),
     ] {
         assert_eq!(
-            canonical_rinex2_obs_code(GnssSystem::BeiDou, declared),
+            canonical_rinex2_obs_code(GnssSystem::BeiDou, declared, 2.11),
             canonical,
             "BeiDou {declared}"
         );
@@ -2351,22 +2392,31 @@ fn galileo_version_two_codes_are_the_ones_the_format_defines() {
     // used to carry the legacy differential-code-bias labels instead, reading
     // `C2` as E5a-Q and `P2` as E5a-X, so a conforming Galileo `C5` and an
     // invented `C2` both claimed band 5 and a band 2 code was read as band 5.
+    // Every band comes back combined: version 2 names no Galileo channel, so
+    // claiming one would say more than the file did.
     for (declared, canonical) in [
-        ("C1", "C1C"),
+        ("C1", "C1X"),
         ("C5", "C5X"),
-        ("C6", "C6C"),
+        ("C6", "C6X"),
         ("C7", "C7X"),
         ("C8", "C8X"),
         ("L5", "L5X"),
     ] {
         assert_eq!(
-            canonical_rinex2_obs_code(GnssSystem::Galileo, declared),
+            canonical_rinex2_obs_code(GnssSystem::Galileo, declared, 2.11),
             canonical,
             "Galileo {declared}"
         );
     }
     // A `C2` version 2 never should have carried is read as the band it names.
-    assert_eq!(canonical_rinex2_obs_code(GnssSystem::Galileo, "C2"), "C2X");
+    assert_eq!(
+        canonical_rinex2_obs_code(GnssSystem::Galileo, "C2", 2.11),
+        "C2X"
+    );
+    assert_eq!(
+        rinex2_obs_code_candidates(GnssSystem::Galileo, "C5X", 2.11),
+        vec!["C5".to_string()]
+    );
 }
 
 #[test]

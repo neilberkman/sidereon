@@ -12,13 +12,7 @@ All notable changes to `sidereon-core` are documented here.
   and position of a new site occupation - and those were counted and thrown
   away. The epoch was then written back declaring zero, so a file that changed
   site lost what it changed to, and nothing said so. They are kept as they were
-  written, and written back under their own count. Flag 6, which reports cycle
-  slips, is the exception version 2 makes: its count is a number of records and
-  its records are observation records, so it names its satellites like an
-  ordinary epoch and each record runs to as many lines as the observation types
-  need. Reading that count as a line count left the rest of the record to be
-  read as an epoch, and a conforming file with more than five observation types
-  was rejected.
+  written, and written back under their own count.
 - **Breaking.** The `OBS-B11` quality-control finding is gone. It reported that
   an event epoch's records were not retained, which is no longer true of any
   file. Repairing a file that has them no longer fails: it used to refuse rather
@@ -27,11 +21,15 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
-- GPS `C2` is the L2C pseudorange. Version 2 section 10.1.1 added it as
+- GPS `C2` is the L2C pseudorange below version 2.12 and the L2P(Y) pseudorange
+  from 2.12, which gave L2C its own names. Version 2 section 10.1.1 added it as
   "Observation code for L2C pseudorange (C2)", and RINEX 3 spells L2C `C2S`,
-  `C2L` or `C2X` by channel. It was read as `C2C`, which is L2 C/A, a different
-  signal, so every version 2 file's L2C measurement came back named as
-  something else.
+  `C2L` or `C2X` by channel. It was read as `C2C`, which is L2 C/A, at every
+  version, so a file's L2 measurement came back named as a signal it was not.
+- A tracking attribute is only claimed where version 2 names one. Galileo has a
+  channel on every band and version 2 names none of them, and the same is true
+  of QZSS L2C, so those read as the combined channel rather than asserting a
+  single one the file never stated.
 - The version 2 observation code table holds what RINEX 2.11 defines and
   nothing else. It used to carry the legacy differential-code-bias labels for
   Galileo and BeiDou, where `P1` and `P2` mean the first and second frequency
@@ -42,21 +40,23 @@ All notable changes to `sidereon-core` are documented here.
   conforming `C5` and an invented `C2` both claimed that band. A Galileo `C5Q` is
   now written `C5`, losing the tracking attribute version 2 cannot carry, rather
   than a `C2` no reader defines.
-- A BeiDou version 2 observation code means the same band whatever its kind.
-  RINEX 2.11 has no BeiDou at all, so a BeiDou code there is an extension,
-  written by receivers that numbered the frequencies B1, B2, B3 as 1, 2, 3 where
-  RINEX 3 numbers those bands 2, 7 and 6. The renumbering was applied only to
-  `C`, so a file's `C1` read as B1I and its `L1` as B1C: one measurement pair
-  read as two different signals, and the phase attached to a band its own
-  pseudorange did not use. It now applies to every kind, in one place, and to
-  digit 3 as well, which names B3I under the same numbering. Writing a code back
-  reverses it, so dropping a tracking attribute version 2 cannot carry no longer
-  also moves the band: a BeiDou `C2Q` is written `C1`, which is B1I, where it
-  used to be written `C2` and read back as B2I.
-- No constellation but GPS and GLONASS is given a `P` observation code, in a
-  file this writes or in the names it considers for a shared column. Version 2
-  says "P: Pseudorange GPS and Glonass: P code". A mixed product could put a
-  Galileo `P1` in a header, which no reader defines.
+- A BeiDou version 2 observation code names the band its digit does, whatever
+  its kind. RINEX 2.11 has no BeiDou at all, so a BeiDou code there is an
+  extension, and version 2 numbers its digits by frequency slot across every
+  constellation rather than by a per-constellation count: B1I is slot 2, which
+  RINEX 3 numbers band 2, while B2I and B3I are slots 7 and 6, which RINEX 3
+  numbers the same. `C2` was read as B2I, which is a different signal, and the
+  digit was remapped only for `C`, so a file's `C1` read as B1I while its `L1`
+  read as B1C: one measurement pair read as two signals, with the phase on a
+  band its own pseudorange did not use. Writing a code back reverses the
+  numbering, so dropping a tracking attribute version 2 cannot carry no longer
+  also moves the band.
+- No constellation but GPS and GLONASS is given a `P` observation code. Version
+  2 says "P: Pseudorange GPS and Glonass: P code". A mixed product could put a
+  Galileo `P1` in a header, which no reader defines. A shared column is held to
+  the same rule for every constellation in it, not only the one whose codes the
+  name came from: a Galileo `C1X` reads `P1` back correctly, and that is not
+  enough to put it under one.
 - A version 2 `# / TYPES OF OBSERV` code wider than the two characters its field
   holds is rejected. The record is `9(4X,A2)`, so a longer token means the line
   is not in that layout. Such a code was kept whole, written back into a
