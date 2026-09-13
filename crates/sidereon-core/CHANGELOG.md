@@ -6,6 +6,35 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** `RinexObs::to_rinex_string` returns
+  `Result<String, RinexObsWriteError>`, as `RinexClock::to_rinex_string` already
+  did, and returns text only when reading it back gives the product: every
+  header record, code, value, indicator and event record, compared field by
+  field. It used to drop, round, wrap or truncate whatever a file could not
+  carry and return the text anyway, so a caller could not tell a faithful file
+  from one that said something else. The error names the first field that would
+  change and its value before and after. Diagnostics about the text a product
+  was parsed from - unretained header labels, skipped records, the count an
+  epoch line declared - are not part of what is written and are not compared.
+  `Scenario::to_rinex_string` returns the same `Result`.
+- **Breaking.** A version 2 product is written only when each constellation's
+  code list is exactly what one list of version 2 names reads as, which is true
+  of every file read at version 2. Any other product is refused with
+  `RinexObsWriteError::CodeListsNotVersionTwo`, naming the constellation and
+  position no name fits. The list is found a position at a time, and because
+  what a constellation reads at a position depends only on the codes it holds
+  before it, that search finds a list whenever one exists. A version 2 product
+  carrying `SYS / SCALE FACTOR` records is refused with
+  `RinexObsWriteError::ScaleFactorsInVersionTwo`: this reader applies them, but
+  version 2 readers that do not know the record, RTKLIB among them, read the
+  scaled numbers as physical ones. A version 2 product holding a code list for
+  a constellation that no observation or `PRN / # OF OBS` count names, and that
+  the version record of a file with no observations does not name, is refused
+  with `RinexObsWriteError::CodeListNotStated` unless the type names read as
+  it: a reader builds no list for it, so the file would lose it. The names are
+  chosen to read as the largest set of such lists they can, so GPS `C2W` and
+  GLONASS `C2P` with no observations are written at 2.12 as `P2`, which reads
+  as both, rather than `C2`, which reads as only the GPS one.
 - **Breaking.** `ObsEpoch` carries `special_records`, the records an event epoch
   was followed by, in place of `special_record_count`. An event epoch is
   followed by header or comment records - a flag 3 epoch by the marker, antenna
@@ -21,6 +50,10 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- A `LEAP SECONDS` record with a blank field before a written one keeps each
+  field in its own six columns. The blank field was left out, so a record with
+  no future count but a week and day was written with the week where the future
+  count goes and the day where the week goes.
 - GPS `C2` is the L2C pseudorange below version 2.12 and the L2P(Y) pseudorange
   from 2.12, which gave L2C its own names. Version 2 section 10.1.1 added it as
   "Observation code for L2C pseudorange (C2)", and RINEX 3 spells L2C `C2S`,
@@ -37,7 +70,9 @@ All notable changes to `sidereon-core` are documented here.
   keeps them; version 2 says "P: Pseudorange GPS and Glonass: P code", and gives
   Galileo `C1`, `C5`, `C6`, `C7` and `C8`, whose digits already are the bands E1,
   E5a, E6, E5b and E5a+b. So a Galileo `C2` was read as E5a data, and a
-  conforming `C5` and an invented `C2` both claimed that band.
+  conforming `C5` and an invented `C2` both claimed that band. A Galileo `C5Q` is
+  now written `C5`, losing the tracking attribute version 2 cannot carry, rather
+  than a `C2` no reader defines.
 - A BeiDou version 2 observation code names the band its digit does, whatever
   its kind. RINEX 2.11 has no BeiDou at all, so a BeiDou code there is an
   extension, and version 2 numbers its digits by frequency slot across every
@@ -46,7 +81,15 @@ All notable changes to `sidereon-core` are documented here.
   numbers the same. `C2` was read as B2I, which is a different signal, and the
   digit was remapped only for `C`, so a file's `C1` read as B1I while its `L1`
   read as B1C: one measurement pair read as two signals, with the phase on a
-  band its own pseudorange did not use.
+  band its own pseudorange did not use. Writing a code back reverses the
+  numbering, so dropping a tracking attribute version 2 cannot carry no longer
+  also moves the band.
+- No constellation but GPS and GLONASS is given a `P` observation code. Version
+  2 says "P: Pseudorange GPS and Glonass: P code". A mixed product could put a
+  Galileo `P1` in a header, which no reader defines. A shared column is held to
+  the same rule for every constellation in it, not only the one whose codes the
+  name came from: a Galileo `C1X` reads `P1` back correctly, and that is not
+  enough to put it under one.
 - A version 2 `# / TYPES OF OBSERV` code wider than the two characters its field
   holds is rejected. The record is `9(4X,A2)`, so a longer token means the line
   is not in that layout. Such a code was kept whole, written back into a
@@ -57,6 +100,10 @@ All notable changes to `sidereon-core` are documented here.
   L1 and L2 civil signals their own letters and left the digits to the P code,
   so at 2.12 a GPS `LA` is the C/A phase and `L1` the P(Y) one. Every letter was
   read as though it were a band, producing codes like `CAX` that name no signal.
+- A version 2 name is only a constellation's where it names a band that
+  constellation measures. Version 2 shares one digit space across all of them,
+  and the writer would offer GPS a `P5` and Galileo a `C2`, neither of which
+  exists.
 
 - `PRN / # OF OBS` is read from the columns the format writes it in. The record
   is `3X,A1,I2,9I6`, so the satellite sits at columns 4 to 6 and the counts
@@ -66,22 +113,57 @@ All notable changes to `sidereon-core` are documented here.
   Files this crate wrote round-tripped; nobody else's did. Reading them now
   fires the `PRN / # OF OBS` quality-control lint on trimmed files, whose
   headers keep counts for a whole day of observations their body no longer has.
-  Counts are read once the header ends, against the observation types it ends
-  with: RINEX 3.05 fixes no order between the records, counts declared before
-  their types used to be read against no types and lost, and counts read
-  between two declarations for one constellation came out shorter or longer
-  than its list. A malformed count is still reported where it stands.
+  A version 2 file's counts are read too. Version 2 names its observation codes
+  once for the whole file and the per-constellation lists are not built until
+  the body is read, so taking the count from those lists found none while the
+  header was still being read, and every count went. A version 2 record may also
+  leave the constellation letter blank, meaning the one the header names, which
+  the version 3 satellite reader rejected. Counts are read once the header
+  ends, against the observation types it ends with: RINEX 3.05 fixes no order
+  between the records, counts declared before their types used to be read
+  against no types and lost, and counts read between two declarations for one
+  constellation came out shorter or longer than its list. A malformed count is
+  still reported where it stands.
 - A version 2 observation value is refused when its field cannot write it back:
   wider than `F14.3`, or carrying more than three decimals. Version 3 values
   were already held to this; a version 2 `0.0001` was read and then written
   back as `0.000`.
+- A RINEX 2 observation product is written as a RINEX 2 file. It used to be
+  re-emitted through the version 3 record writer, so its own output declared
+  version 2 in the header while carrying version 3 `>` epoch records: a file
+  valid as neither version, which no other reader would take. The writer now
+  emits the records the product's version names: the version record naming its
+  constellation, `# / TYPES OF OBSERV` continued past nine codes, epoch lines
+  carrying their satellite list twelve to a line with the receiver clock offset
+  in columns 69 to 80 whatever the satellite count, and observation records five
+  values to a line running to the declared count for every satellite. The
+  committed 2.11 fixture writes its observation types back byte-identical.
+  Records version 3 introduced - `MARKER TYPE`, `SIGNAL STRENGTH UNIT`,
+  `SYS / PHASE SHIFT`, `GLONASS COD/PHS/BIS` - and the
+  leap-second future count, week and day are written as extension records, the
+  way `GLONASS SLOT / FRQ #` already was, because this reader keeps them at
+  version 2 and a reader that does not know one skips it. Values are written
+  as stored; scale factors are refused, as above.
+- **Breaking.** `ObsHeader` carries `rinex2_types`, the version 2
+  `# / TYPES OF OBSERV` names as read, empty at version 3. A version 2 file lists
+  one set of names for every constellation, and a `PRN / # OF OBS` count for a
+  constellation no observation names reads by those names, not by any list in
+  `obs_codes`. The writer used to choose names from the lists alone, so a GPS
+  count beside a BeiDou observation could be written under a name that reads as
+  the same BeiDou code and a different GPS one. The writer now writes the names
+  a product was read with when they still read as every list, and otherwise
+  holds its choice to the lists those counts imply. Observations in version 3
+  layout in a version 2 file with no `# / TYPES OF OBSERV` are refused, as
+  observations in version 2 layout already were.
 - Epoch picoseconds are written where RINEX 4.02 puts them, five digits
   (`1X,I5.5`) after the receiver clock offset, whose columns are left blank when
   there is no offset, and read from there. They were written between the
   seconds and the flag, which pushed the flag and satellite count out of their
   columns for every other reader while this one read the line back unchanged,
   and a 4.02 line carrying them where the format does was read with them
-  dropped. The long-standing reading of the old placement is kept.
+  dropped. The long-standing reading of the old placement is kept. Picoseconds
+  in a product below 4.02, which introduced them, are refused with
+  `RinexObsWriteError::EpochPicosecondsNotInVersion`.
 - Picoseconds after the clock offset are read however the epoch line is
   spaced. A tab after them took a correctly laid-out line out of its columns,
   and the whitespace reading then dropped five digits after a clock offset;
@@ -91,19 +173,67 @@ All notable changes to `sidereon-core` are documented here.
   clock offset, and a flag and count run together keep theirs. Repair keeps epochs
   at the same second whose picoseconds differ, which it merged as duplicates,
   dropping the second measurement.
+- **Breaking.** `ObsHeader` carries `rinex2_system`, the constellation a
+  version 2 file's version record names (`None` for a mixed file and at version
+  3). With no observations, a version 2 file states that constellation's list,
+  so it is part of what the file says: an unused list used to change a
+  header-only GLONASS file into a GPS one when written. The version record names
+  the held constellation while every observation is from it, and `M (MIXED)`
+  otherwise, so a mixed header stays mixed.
 - A `GLONASS COD/PHS/BIS` code longer than its three-character field is refused
   when read; it was cut when written and read back as another code.
+- A version 2 file is written with names chosen only for the lists the file
+  states: one for each constellation an observation or count names, and with no
+  observations, the list its version record names. A list nothing names no
+  longer makes the writer refuse, and is kept as it was.
+- Repair drops empty satellite records before recomputing the observation
+  count headers. It counted first, so a file whose satellites held no values
+  came out declaring them in `# OF SATELLITES` and `PRN / # OF OBS` with no
+  satellite left in its body, and repairing that output changed it again.
+- A written version 2 file is compared with its product by what a reader builds
+  from it: for each constellation an observation is from, the list its type
+  names read as, and with no observations, the list for the constellation its
+  version record names. That record names the one observed constellation,
+  `M (MIXED)` for several, and with none the product's one list's constellation
+  or GPS, so rewriting a file whose observations were all removed no longer
+  flips it from `M (MIXED)` to `G`. A product whose lists a caller cleared writes
+  its retained type names, header-only included; it was refused though its file
+  states everything it holds.
+- The writer refuses an epoch flag of 10 or more with
+  `RinexObsWriteError::EpochFlagTooWide`, at either version. The reader keeps
+  its long-standing reading of such a line, and both versions write the flag in
+  one digit, so it used to be written across the satellite count and, at
+  version 3, read back as if nothing were wrong.
+- A version 2 file's observation records are read by its own
+  `# / TYPES OF OBSERV` list. A version 3 `SYS / # / OBS TYPES` record in a
+  version 2 header used to replace that list for its constellation, so a file
+  whose two records disagreed read its observations into the wrong fields; the
+  version 3 record is now reported as not retained, wherever it sits in the
+  header. Epoch records in version 3 layout in a version 2 file, which earlier
+  releases of this writer produced, are read by the file's own list as well.
 - A version 2 name a constellation has no observable under stays as the file
   wrote it, rather than being read as a signal the constellation does have, and
   so does a one-character name in the two-character type field.
   Version 2 names its codes once for every constellation at once, and Galileo
   has no `P1`, BeiDou no `P2`. Reading Galileo's `P1` as its `C1X` put one code
-  at two positions. With the name kept as written each measurement has one
-  position. The same holds for a second name of a code the constellation
-  already has - BeiDou's `C1` and `C2` are both B1I. The quality-control lint
-  treats such a name as the file's own rather than as a malformed code, so a
-  valid mixed file no longer draws an `OBS-H05` finding for every constellation
-  that lacks one of its names.
+  at two positions, and a writer then had to choose which held the measurement.
+  Choosing by name made a valid mixed file grow a column on every rewrite;
+  choosing the first position kept a blank and dropped the measurement beside
+  it, which on a real mixed file written twice as version 2 lost thousands.
+  With the name kept as written each measurement has one position, the header
+  keeps its width, and nothing is dropped. The same holds for a second name of
+  a code the constellation already has - BeiDou's `C1` and `C2` are both B1I -
+  which otherwise grew the header on every rewrite beside a constellation with
+  no version 2 names at all. The quality-control lint treats such a name as the
+  file's own rather than as a malformed code, so a valid mixed file no longer
+  draws an `OBS-H05` finding for every constellation that lacks one of its
+  names.
+- Version 2.12's lettered names are written as well as read. A 2.12 product
+  holding the L1 C/A phase was written under `L1`, which at 2.12 names the P(Y)
+  phase, and read back as a different signal. The digits a letter replaced are
+  no longer names at 2.12, so a `CA` is written `CA` rather than the `C1` that
+  2.12 refuses. GLONASS is given a `P` code on G1 and G2 only, which is where it
+  has one.
 - The RINEX observation reader takes the records the format lays out in fixed
   columns from those columns, rather than by splitting the line on whitespace.
   Whitespace cannot read a record whose field fills its width, because it then
@@ -123,11 +253,11 @@ All notable changes to `sidereon-core` are documented here.
   already being read as something its own layout contradicts. This covers both
   epoch readers, the `APPROX POSITION XYZ` and `ANTENNA: DELTA H/E/N`
   components, and the `TIME OF FIRST OBS` / `TIME OF LAST OBS` fields.
-- A RINEX 2 observation product can read the output it writes. Such a product is
-  re-emitted through the version 3 record writer, so its own file declared
-  version 2 while carrying `>` epoch records, which the version 2 reader could
-  not read. The body now follows the records themselves, which is unambiguous:
-  a version 2 epoch line begins with its two-digit year, never with `>`.
+- The reader follows the records a file carries rather than the version its
+  header declares. A file declaring version 2 while carrying `>` epoch records
+  was rejected, and such files exist: this crate's own writer made them until
+  the fix above, and other tools make them too. The distinction is unambiguous,
+  since a version 2 epoch line begins with its two-digit year, never with `>`.
 - A `GLONASS COD/PHS/BIS` record carrying more entries than one line holds is
   continued on another line instead of being cut off at the sixtieth column, and
   the reader adds each line's entries to the record. A fifth entry was silently

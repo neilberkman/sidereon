@@ -41,7 +41,8 @@ pub mod observations {
         band_frequency_hz, carrier_phase_rows, observation_frequency_hz, observation_values,
         pseudoranges, AntennaInfo, CarrierPhaseRow, ObsEpoch, ObsEpochTime, ObsHeader,
         ObsLeapSeconds, ObsPhaseShift, ObsScaleFactor, ObsValue, ObservationFilter,
-        ObservationKind, ObservationValueRow, PgmRunByDate, ReceiverInfo, RinexObs, SignalPolicy,
+        ObservationKind, ObservationValueRow, PgmRunByDate, ReceiverInfo, RinexObs,
+        RinexObsWriteError, SignalPolicy,
     };
 
     /// Role-oriented alias for a parsed RINEX observation file.

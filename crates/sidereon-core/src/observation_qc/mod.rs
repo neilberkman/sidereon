@@ -2040,6 +2040,8 @@ NONE
                 version: 3.05,
                 approx_position_m: None,
                 antenna_delta_hen_m: None,
+                rinex2_types: Vec::new(),
+                rinex2_system: None,
                 obs_codes: BTreeMap::from([(
                     GnssSystem::Gps,
                     vec![

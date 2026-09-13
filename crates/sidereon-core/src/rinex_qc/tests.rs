@@ -426,14 +426,20 @@ fn repair_replaces_a_declared_interval_the_header_cannot_record() {
 
     let first = repair_obs(&obs, &options);
     assert_eq!(first.repaired.header().interval_s, Some(30.0));
-    let first_text = first.repaired.to_rinex_string();
+    let first_text = first
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS");
     assert!(
         first_text.contains("    30.000"),
         "the recordable cadence must be written: {first_text}"
     );
 
     let reparsed = RinexObs::parse(&first_text).expect("repaired OBS must reparse");
-    let second_text = repair_obs(&reparsed, &options).repaired.to_rinex_string();
+    let second_text = repair_obs(&reparsed, &options)
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS");
     assert_eq!(second_text, first_text);
 }
 
@@ -458,7 +464,10 @@ fn repair_declines_a_cadence_the_interval_field_cannot_record() {
 
     let first = repair_obs(&obs, &options);
     assert_eq!(first.repaired.header().interval_s, None);
-    let first_text = first.repaired.to_rinex_string();
+    let first_text = first
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS");
     assert!(
         !first_text.contains("INTERVAL"),
         "an unrecordable cadence must not be written: {first_text}"
@@ -467,7 +476,10 @@ fn repair_declines_a_cadence_the_interval_field_cannot_record() {
     // The fuzz invariant: the repaired text reparses, and repairing it again
     // reproduces it byte for byte.
     let reparsed = RinexObs::parse(&first_text).expect("repaired OBS must reparse");
-    let second_text = repair_obs(&reparsed, &options).repaired.to_rinex_string();
+    let second_text = repair_obs(&reparsed, &options)
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS");
     assert_eq!(second_text, first_text);
 }
 
@@ -613,7 +625,11 @@ fn obs_text_repair_keeps_event_special_records_unless_told_to_drop_them() {
         kept.repaired.epochs()[0].special_records,
         vec!["COMMENT".to_string()]
     );
-    assert!(kept.repaired.to_rinex_string().contains("COMMENT"));
+    assert!(kept
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS")
+        .contains("COMMENT"));
 
     let repair = repair_obs_text(
         &text,
@@ -670,7 +686,7 @@ fn obs_writer_skips_unretained_header_labels() {
         vec!["UNSUPPORTED LABEL".to_string()]
     );
 
-    let serialized = obs.to_rinex_string();
+    let serialized = obs.to_rinex_string().expect("serialize RINEX OBS");
     assert!(!serialized.contains("UNSUPPORTED LABEL"));
     let reparsed = RinexObs::parse(&serialized).expect("parse serialized OBS");
     assert!(reparsed.header.unretained_header_labels.is_empty());
@@ -692,7 +708,8 @@ fn rinex4_epoch_extension_and_clock_offset_round_trip() {
     let obs = RinexObs::parse(&text).expect("parse RINEX 4 OBS");
     assert_eq!(obs.epochs[0].epoch_picoseconds, Some(12345));
     assert_eq!(obs.epochs[0].rcv_clock_offset_s, Some(0.123456789012));
-    let reparsed = RinexObs::parse(&obs.to_rinex_string()).expect("reparse RINEX 4 OBS");
+    let reparsed = RinexObs::parse(&obs.to_rinex_string().expect("serialize RINEX OBS"))
+        .expect("reparse RINEX 4 OBS");
     assert_eq!(reparsed, obs);
 }
 
@@ -868,7 +885,10 @@ fn repair_is_idempotent_for_scheduled_fuzz_non_ascii_header_regression() {
     let obs = RinexObs::parse(&text).expect("parse scheduled-fuzz regression");
     let options = repair_oracle_options();
 
-    let first = repair_obs(&obs, &options).repaired.to_rinex_string();
+    let first = repair_obs(&obs, &options)
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS");
     assert!(
         first
             .bytes()
@@ -876,7 +896,10 @@ fn repair_is_idempotent_for_scheduled_fuzz_non_ascii_header_regression() {
         "repaired RINEX must contain printable ASCII records"
     );
     let reparsed = RinexObs::parse(&first).expect("reparse repaired scheduled-fuzz regression");
-    let second = repair_obs(&reparsed, &options).repaired.to_rinex_string();
+    let second = repair_obs(&reparsed, &options)
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS");
     assert_eq!(second.as_bytes(), first.as_bytes());
 }
 
@@ -955,7 +978,10 @@ fn repair_round_trips_repeated_obs_type_records_for_one_system() {
     );
 
     let options = repair_oracle_options();
-    let first = repair_obs(&obs, &options).repaired.to_rinex_string();
+    let first = repair_obs(&obs, &options)
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS");
     let reparsed = RinexObs::parse(&first).expect("reparse repaired obs-type records");
     assert_eq!(
         reparsed
@@ -963,7 +989,10 @@ fn repair_round_trips_repeated_obs_type_records_for_one_system() {
             .expect("reparsed GPS codes"),
         ["C1C".to_string(), "L1C".to_string()]
     );
-    let second = repair_obs(&reparsed, &options).repaired.to_rinex_string();
+    let second = repair_obs(&reparsed, &options)
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS");
     assert_eq!(second.as_bytes(), first.as_bytes());
 }
 
@@ -1044,10 +1073,16 @@ fn assert_repair_roundtrip_is_total(input: &[u8]) {
         .any(|finding| finding.code == "OBS-H19"));
 
     let options = repair_oracle_options();
-    let repaired_text = repair_obs(&obs, &options).repaired.to_rinex_string();
+    let repaired_text = repair_obs(&obs, &options)
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS");
     let reparsed = RinexObs::parse(&repaired_text).expect("reparse scheduled-fuzz regression");
     let _ = crate::observation_qc::observation_qc(&reparsed);
-    let repeated_text = repair_obs(&reparsed, &options).repaired.to_rinex_string();
+    let repeated_text = repair_obs(&reparsed, &options)
+        .repaired
+        .to_rinex_string()
+        .expect("serialize RINEX OBS");
     assert_eq!(repeated_text.as_bytes(), repaired_text.as_bytes());
 }
 
@@ -1096,7 +1131,10 @@ fn repair_obs_fixture_output(input: &str, options: &RepairOptions) -> String {
     if repair.decoded_from_crinex {
         repair_obs_to_crinex_string(&repair).expect("encode repaired CRINEX")
     } else {
-        repair.repaired.to_rinex_string()
+        repair
+            .repaired
+            .to_rinex_string()
+            .expect("serialize RINEX OBS")
     }
 }
 
