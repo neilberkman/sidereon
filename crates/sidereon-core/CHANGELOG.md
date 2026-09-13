@@ -296,6 +296,21 @@ All notable changes to `sidereon-core` are documented here.
   position it held in its own constellation's list. Two columns naming the same
   code are folded into one wherever no constellation needs both, so two lists
   holding the same signals in a different order no longer double the header.
+- CRINEX compresses and expands a RINEX 2 observation file with more than nine
+  observation types. Version 2 continues its `# / TYPES OF OBSERV` list on
+  records whose count field is blank, and every record was read for a count, so
+  the blank one was refused and the whole file with it. A record with a blank
+  count now adds its codes and no count; a count that is present and malformed
+  is still refused. A continuation record that continues no declared list, one
+  naming more codes than its list has left, and a list whose records end short
+  of its count are refused, in either version. A later declaration replaces
+  the list, as `crx2rnx` applies it.
+- CRINEX applies the observation type records an event epoch carries. A flag 4
+  epoch can declare a new type list, which sets how many fields the epochs after
+  it hold; the declaration was copied through and the old widths kept.
+- The CRINEX type list check counts a code only in a field's code columns. A
+  character in a field's padding was counted as a code, so a record naming one
+  code for a count of two passed.
 - The RINEX observation reader refuses a `# / TYPES OF OBSERV` or
   `SYS / # / OBS TYPES` continuation record that continues no declared list. A
   version 2 record with a blank count and codes, before any count or after a

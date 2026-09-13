@@ -316,6 +316,158 @@ fn decode_rejects_malformed_v3_observation_count() {
     ));
 }
 
+/// A RINEX 2.11 observation file with ten observation types, the tenth on the
+/// continuation record version 2 writes past nine, and one epoch.
+fn v2_continued_types_rinex() -> String {
+    let mut types = String::from("    10");
+    for code in ["C1", "P1", "L1", "D1", "S1", "C2", "P2", "L2", "D2"] {
+        types.push_str(&format!("    {code}"));
+    }
+    let mut values = String::new();
+    for index in 0..10 {
+        values.push_str(&format!("{:14.3}  ", 20_000_000.0 + f64::from(index)));
+        if index % 5 == 4 {
+            values = values.trim_end().to_string();
+            values.push('\n');
+        }
+    }
+    [
+        labeled_header_line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        labeled_header_line(&types, "# / TYPES OF OBSERV"),
+        labeled_header_line("          S2", "# / TYPES OF OBSERV"),
+        labeled_header_line("", "END OF HEADER"),
+        " 20  1  1  0  0  0.0000000  0  1G01".to_string(),
+        values.trim_end().to_string(),
+        String::new(),
+    ]
+    .join("\n")
+}
+
+#[test]
+fn a_version_two_type_list_continued_past_nine_codes_is_compressed_and_expanded() {
+    // Version 2 writes an eleventh and later code on `# / TYPES OF OBSERV`
+    // records with a blank count. Every record was read for a count, so a
+    // file with more than nine types could be neither compressed nor
+    // expanded.
+    let rinex = v2_continued_types_rinex();
+    let compressed = encode_crinex(&rinex).expect("compress a continued type list");
+    let expanded = decode(&compressed).expect("expand it again");
+    let lines = |text: &str| -> Vec<String> {
+        text.lines()
+            .map(|line| line.trim_end().to_string())
+            .collect()
+    };
+    assert_eq!(lines(&expanded), lines(&rinex));
+}
+
+#[test]
+fn type_records_that_continue_no_list_or_end_short_are_refused() {
+    // Review built the first two: a blank-count record before any count, and one
+    // as the only type record. Reading a blank count as a continuation let both
+    // through, although neither continues a declared list.
+    let version = labeled_header_line(
+        "     2.11           OBSERVATION DATA    G (GPS)",
+        "RINEX VERSION / TYPE",
+    );
+    let types = |text: &str| labeled_header_line(text, "# / TYPES OF OBSERV");
+    let end = labeled_header_line("", "END OF HEADER");
+    let nine = "    10    C1    P1    L1    D1    S1    C2    P2    L2    D2";
+    let cases = [
+        (
+            "a continuation before any count",
+            vec![types("          S2"), types(nine), types("          S2")],
+        ),
+        (
+            "a first type record with a blank count",
+            vec![types("          C1")],
+        ),
+        ("a list ending short of its count", vec![types(nine)]),
+        (
+            "a continuation naming more codes than remain",
+            vec![types(nine), types("          S2    C5")],
+        ),
+        (
+            "a count record naming more codes than it counts",
+            vec![types("     1    C1    P1")],
+        ),
+        // Review built this: the `X` sits in the next field's padding, so the
+        // record names one code for a count of two.
+        (
+            "a character in a code field's padding",
+            vec![types("     2    C1X")],
+        ),
+    ];
+    let v3_version = labeled_header_line(
+        "     3.05           OBSERVATION DATA    G",
+        "RINEX VERSION / TYPE",
+    );
+    let sys_types = |text: &str| labeled_header_line(text, "SYS / # / OBS TYPES");
+    let v3_cases = [
+        (
+            "a RINEX 3 continuation before any system",
+            vec![sys_types("       C1C"), sys_types("G    1 C1C")],
+        ),
+        (
+            "a RINEX 3 list ending short of its count",
+            vec![sys_types("G    2 C1C")],
+        ),
+        (
+            "a RINEX 3 continuation naming more codes than remain",
+            vec![sys_types("G    1 C1C"), sys_types("       L1C")],
+        ),
+        (
+            "a character in a RINEX 3 code field's padding",
+            vec![sys_types("G    2 C1CX")],
+        ),
+    ];
+    let all = cases
+        .into_iter()
+        .map(|(what, records)| (what, &version, "1.0", records))
+        .chain(
+            v3_cases
+                .into_iter()
+                .map(|(what, records)| (what, &v3_version, "3.0", records)),
+        );
+    for (what, version_line, crinex_version, records) in all {
+        let mut lines = vec![version_line.clone()];
+        lines.extend(records);
+        lines.push(end.clone());
+        let rinex = lines.join("\n") + "\n";
+        assert!(
+            matches!(encode_crinex(&rinex), Err(Error::Parse(_))),
+            "compressing {what}"
+        );
+        let crinex = [
+            labeled_header_line(
+                &format!("{crinex_version:<20}COMPACT RINEX FORMAT"),
+                "CRINEX VERS   / TYPE",
+            ),
+            "RNX2CRX".to_string(),
+            rinex,
+        ]
+        .join("\n");
+        assert!(
+            matches!(decode(&crinex), Err(Error::Parse(_))),
+            "expanding {what}"
+        );
+    }
+
+    // A second complete declaration replaces the first, as `crx2rnx` applies it.
+    let replaced = [
+        version,
+        types(nine),
+        types("          S2"),
+        types("     1    C1"),
+        end,
+    ]
+    .join("\n")
+        + "\n";
+    encode_crinex(&replaced).expect("a replacing declaration is read");
+}
+
 #[test]
 fn decode_rejects_malformed_v1_observation_count() {
     assert_decode_parse_err(corrupt_header_field(

@@ -336,6 +336,10 @@ struct Decoder {
     obs_diff: HashMap<String, Vec<Option<NumDiff>>>,
     /// Per-satellite flag (LLI/SSI) text-diff engines.
     flag_diff: HashMap<String, TextDiff>,
+    /// Codes still to come on continuation records of the observation type
+    /// list declared last. A continuation record with none to come continues
+    /// no list.
+    types_left: usize,
 }
 
 impl Decoder {
@@ -348,6 +352,7 @@ impl Decoder {
             clock_diff: None,
             obs_diff: HashMap::new(),
             flag_diff: HashMap::new(),
+            types_left: 0,
         }
     }
 
@@ -423,26 +428,100 @@ impl Decoder {
                 }
             }
             "# / TYPES OF OBSERV" => {
-                // RINEX 2 observation-code count (shared across systems).
+                // RINEX 2 `I6,9(4X,A2)`: one list shared across systems. A list
+                // of more than nine codes continues on records whose count
+                // field is blank, which carry codes but no count.
+                let codes = header_code_count(line, 6, 4, 9);
+                if field(line, 0, 6).trim().is_empty() {
+                    return self.continue_type_list(line, label, codes);
+                }
+                self.close_type_list(label)?;
                 let n = strict_obs_count(line, 0, 6, "rinex2.obs_type_count")?;
+                self.open_type_list(line, label, n, codes)?;
                 if let Some(sys) = self.default_system {
                     self.obs_count.insert(sys, n);
                 }
                 // RINEX 2 has one shared list; record under a sentinel so a
-                // mono-system file resolves even if the letter was 'M'.
-                self.obs_count.entry(' ').or_insert(n);
+                // mono-system file resolves even if the letter was 'M'. A later
+                // declaration replaces it, as it does for `crx2rnx`.
+                self.obs_count.insert(' ', n);
             }
             "SYS / # / OBS TYPES" => {
-                let sys_field = field(line, 0, 1).trim();
-                if let Some(c) = sys_field.chars().next() {
-                    let n = strict_obs_count(line, 3, 6, "rinex3.obs_type_count")?;
-                    self.obs_count.insert(c, n);
-                }
-                // Continuation lines (blank system field) carry no count.
+                // RINEX 3 `A1,2X,I3,13(1X,A3)`, continued on records whose
+                // system field is blank.
+                let codes = header_code_count(line, 4, 1, 13);
+                let Some(c) = field(line, 0, 1).trim().chars().next() else {
+                    return self.continue_type_list(line, label, codes);
+                };
+                self.close_type_list(label)?;
+                let n = strict_obs_count(line, 3, 6, "rinex3.obs_type_count")?;
+                self.open_type_list(line, label, n, codes)?;
+                self.obs_count.insert(c, n);
             }
+            "END OF HEADER" => self.close_type_list(label)?,
             _ => {}
         }
         Ok(())
+    }
+
+    /// Start reading a declared observation type list of `count` codes, of
+    /// which the declaring record names `codes`.
+    fn open_type_list(
+        &mut self,
+        line: &str,
+        label: &str,
+        count: usize,
+        codes: usize,
+    ) -> Result<()> {
+        if codes > count {
+            return Err(Error::Parse(format!(
+                "CRINEX {label} record names {codes} codes for a count of {count}: {line:?}"
+            )));
+        }
+        self.types_left = count - codes;
+        Ok(())
+    }
+
+    /// Take a continuation record's codes against the list it continues.
+    fn continue_type_list(&mut self, line: &str, label: &str, codes: usize) -> Result<()> {
+        if self.types_left == 0 {
+            return Err(Error::Parse(format!(
+                "CRINEX {label} continuation record continues no declared list: {line:?}"
+            )));
+        }
+        if codes > self.types_left {
+            return Err(Error::Parse(format!(
+                "CRINEX {label} continuation record names {codes} codes where {} remain: {line:?}",
+                self.types_left
+            )));
+        }
+        self.types_left -= codes;
+        Ok(())
+    }
+
+    /// Refuse an observation type list whose records ended before its count
+    /// was reached, at the record `before` that follows it.
+    fn close_type_list(&self, before: &str) -> Result<()> {
+        if self.types_left > 0 {
+            return Err(Error::Parse(format!(
+                "CRINEX observation type list is {} codes short of its count before {before}",
+                self.types_left
+            )));
+        }
+        Ok(())
+    }
+
+    /// Apply the observation type records an event epoch carries. A flag 4
+    /// epoch's header records can declare a new list, which sets the widths of
+    /// the epochs after it, as `crx2rnx` and `rnx2crx` read them.
+    fn classify_event_lines(&mut self, lines: &[String]) -> Result<()> {
+        for line in lines {
+            let label = field(line, 60, 80).trim();
+            if matches!(label, "# / TYPES OF OBSERV" | "SYS / # / OBS TYPES") {
+                self.classify_header_label(line, label)?;
+            }
+        }
+        self.close_type_list("the end of an event record")
     }
 
     /// Scan a plain RINEX observation header (no CRINEX wrapper): collect the
@@ -564,6 +643,7 @@ impl Decoder {
                     .ok_or_else(|| Error::Parse("CRINEX V3 event record truncated".into()))?;
                 event_lines.push(extra.trim_end_matches(['\r', '\n']).to_string());
             }
+            self.classify_event_lines(&event_lines)?;
             return Ok(Some(EpochRecord::Event {
                 descriptor,
                 lines: event_lines,
@@ -819,6 +899,7 @@ impl Decoder {
                     .ok_or_else(|| Error::Parse("CRINEX V1 event record truncated".into()))?;
                 event_lines.push(extra.trim_end_matches(['\r', '\n']).to_string());
             }
+            self.classify_event_lines(&event_lines)?;
             return Ok(Some(EpochRecord::Event {
                 descriptor,
                 lines: event_lines,
@@ -877,7 +958,7 @@ impl Decoder {
 
     /// Parse the body of a plain RINEX-3 observation file into canonical epoch
     /// records (the inverse of [`serialize_rinex_epoch_v3`]).
-    fn parse_rinex_epochs_v3<'a, I>(&self, lines: &mut I) -> Result<Vec<EpochRecord>>
+    fn parse_rinex_epochs_v3<'a, I>(&mut self, lines: &mut I) -> Result<Vec<EpochRecord>>
     where
         I: Iterator<Item = &'a str>,
     {
@@ -896,6 +977,7 @@ impl Decoder {
 
             if flag > 1 {
                 let event_lines = read_event_lines(lines, numsat, "RINEX-3")?;
+                self.classify_event_lines(&event_lines)?;
                 epochs.push(EpochRecord::Event {
                     descriptor: line,
                     lines: event_lines,
@@ -929,7 +1011,7 @@ impl Decoder {
     /// Parse the body of a plain RINEX-2 observation file into canonical epoch
     /// records (the inverse of [`serialize_rinex_epoch_v1`]). Handles the
     /// 12-satellite epoch-line wrap and the 5-observation data-line wrap.
-    fn parse_rinex_epochs_v1<'a, I>(&self, lines: &mut I) -> Result<Vec<EpochRecord>>
+    fn parse_rinex_epochs_v1<'a, I>(&mut self, lines: &mut I) -> Result<Vec<EpochRecord>>
     where
         I: Iterator<Item = &'a str>,
     {
@@ -943,6 +1025,7 @@ impl Decoder {
 
             if flag > 1 {
                 let event_lines = read_event_lines(lines, numsat, "RINEX-2")?;
+                self.classify_event_lines(&event_lines)?;
                 epochs.push(EpochRecord::Event {
                     descriptor: first,
                     lines: event_lines,
@@ -1201,6 +1284,19 @@ fn collect_sv_tokens_v1(line: &str, count: usize, out: &mut Vec<String>) {
         let start = 32 + i * 3;
         out.push(field(line, start, start + 3).to_string());
     }
+}
+
+/// How many of an observation type record's `slots` code fields name a code.
+/// Each field is `width` columns from column 6, the first `pad` of them blank
+/// padding (`4X,A2` in RINEX 2, `1X,A3` in RINEX 3), so only the code columns
+/// are read: a character in the padding names no code.
+fn header_code_count(line: &str, width: usize, pad: usize, slots: usize) -> usize {
+    (0..slots)
+        .filter(|slot| {
+            let start = 6 + slot * width;
+            !field(line, start + pad, start + width).trim().is_empty()
+        })
+        .count()
 }
 
 /// The ASCII byte at `index` as a `char`, or a space when the line is shorter
