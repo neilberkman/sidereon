@@ -14,10 +14,9 @@ use sidereon_core::GnssSystem;
 /// flag above 9, which no one-digit flag field holds. From version 3 to 4.01:
 /// epoch picoseconds, which those epoch records have no field for. At version 2
 /// also:
-/// whether the product could lose it to be written (scale factors, picoseconds,
-/// a clock offset finer than `F12.9`), and whether it could not (a year outside
-/// 1980 to 2079, a clock offset too wide for `F12.9`). Returns (removable,
-/// permanent).
+/// whether a downgrade removes it (scale factors, picoseconds, a clock offset
+/// finer than `F12.9`), and whether nothing can (a year outside 1980 to 2079,
+/// a clock offset too wide for `F12.9`). Returns (removable, permanent).
 fn write_obstacles(product: &RinexObs) -> (bool, bool) {
     let wide_flag = product.epochs().iter().any(|epoch| epoch.flag > 9);
     let version = product.header().version;
@@ -55,8 +54,8 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
 /// for a constellation no observation or count names, other than the one a
 /// file with no observations names in its version record, which is the held
 /// constellation, else the product's one list's, else GPS. The writer refuses
-/// it only when the type names it writes do not read as the list, which this
-/// does not decide.
+/// it, and a downgrade removes it, only when the type names it writes do not
+/// read as the list, which this does not decide.
 fn holds_unstated_list(product: &RinexObs) -> bool {
     let header = product.header();
     let mut stated: BTreeSet<GnssSystem> = product
@@ -97,7 +96,10 @@ fuzz_target!(|data: &[u8]| {
     // A product may hold what its writer cannot put back: the reader keeps a
     // flag wider than the flag field, and takes version 3 epoch records and
     // scale factors in a version 2 file. A refusal is accepted only when the
-    // product shows why. Any other refusal fails.
+    // product shows why; at version 2 the downgrade then writes it when what
+    // stands in the way is removable and refuses it when it is not, and a
+    // downgrade that writes it has to report a change, since one of a product
+    // the writer takes reports none. Any other refusal fails.
     let encoded = match original.to_rinex_string() {
         Ok(encoded) => {
             assert!(
@@ -112,6 +114,19 @@ fuzz_target!(|data: &[u8]| {
                 removable || permanent,
                 "refused a version 2 product holding nothing version 2 cannot: {error}"
             );
+            let version = original.header().version;
+            match original.downgrade_to_rinex2(version) {
+                Ok((downgraded, changes)) => {
+                    assert!(!permanent, "downgraded what version 2 cannot hold");
+                    assert!(
+                        !changes.is_empty(),
+                        "refused a version 2 product its downgrade writes unchanged: {error}"
+                    );
+                    let text = downgraded.to_rinex_string().expect("serialize the downgrade");
+                    RinexObs::parse(&text).expect("the written downgrade must reparse");
+                }
+                Err(refusal) => assert!(permanent, "the downgrade refused: {refusal}"),
+            }
             return;
         }
         Err(error) => {

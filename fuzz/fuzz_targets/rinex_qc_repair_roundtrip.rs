@@ -28,10 +28,9 @@ fn repair_options() -> RepairOptions {
 /// flag above 9, which no one-digit flag field holds. From version 3 to 4.01:
 /// epoch picoseconds, which those epoch records have no field for. At version 2
 /// also:
-/// whether the product could lose it to be written (scale factors, picoseconds,
-/// a clock offset finer than `F12.9`), and whether it could not (a year outside
-/// 1980 to 2079, a clock offset too wide for `F12.9`). Returns (removable,
-/// permanent).
+/// whether a downgrade removes it (scale factors, picoseconds, a clock offset
+/// finer than `F12.9`), and whether nothing can (a year outside 1980 to 2079,
+/// a clock offset too wide for `F12.9`). Returns (removable, permanent).
 fn write_obstacles(product: &RinexObs) -> (bool, bool) {
     let wide_flag = product.epochs().iter().any(|epoch| epoch.flag > 9);
     let version = product.header().version;
@@ -69,8 +68,8 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
 /// for a constellation no observation or count names, other than the one a
 /// file with no observations names in its version record, which is the held
 /// constellation, else the product's one list's, else GPS. The writer refuses
-/// it only when the type names it writes do not read as the list, which this
-/// does not decide.
+/// it, and a downgrade removes it, only when the type names it writes do not
+/// read as the list, which this does not decide.
 fn holds_unstated_list(product: &RinexObs) -> bool {
     let header = product.header();
     let mut stated: BTreeSet<GnssSystem> = product
@@ -99,7 +98,10 @@ fn holds_unstated_list(product: &RinexObs) -> bool {
 }
 
 /// The product itself when it writes. A refusal has to be one the product
-/// shows the reason for, and gives `None`.
+/// shows the reason for. At version 2 that gives its downgrade, which has to
+/// write when what stands in the way is removable and report a change, since
+/// the downgrade of a product the writer takes reports none, or `None` when it
+/// is not and the downgrade refuses too; at version 3, `None`.
 fn stated_product(product: RinexObs) -> Option<RinexObs> {
     match product.to_rinex_string() {
         Ok(_) => {
@@ -115,7 +117,21 @@ fn stated_product(product: RinexObs) -> Option<RinexObs> {
                 removable || permanent,
                 "refused a repaired version 2 product holding nothing version 2 cannot: {error}"
             );
-            None
+            let version = product.header().version;
+            match product.downgrade_to_rinex2(version) {
+                Ok((downgraded, changes)) => {
+                    assert!(!permanent, "downgraded what version 2 cannot hold");
+                    assert!(
+                        !changes.is_empty(),
+                        "refused a repaired version 2 product its downgrade writes unchanged: {error}"
+                    );
+                    Some(downgraded)
+                }
+                Err(refusal) => {
+                    assert!(permanent, "the downgrade refused: {refusal}");
+                    None
+                }
+            }
         }
         Err(error) => {
             assert!(
@@ -142,7 +158,12 @@ fuzz_target!(|data: &[u8]| {
 
     let options = repair_options();
     let repair = repair_obs(&obs, &options);
-    let Some(repaired) = stated_product(repair.repaired) else {
+    let Some(first) = stated_product(repair.repaired) else {
+        return;
+    };
+    // Downgrading adds columns whose counts a repair then fills, so the
+    // baseline is the repair of the converted product.
+    let Some(repaired) = stated_product(repair_obs(&first, &options).repaired) else {
         return;
     };
     let repaired_text = repaired.to_rinex_string().expect("serialize RINEX OBS");
