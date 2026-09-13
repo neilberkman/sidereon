@@ -756,7 +756,9 @@ fn parses_crinex_v1_decoded_rinex2_into_observations() {
             "L1C".to_string(),
             "L2W".to_string(),
             "C1C".to_string(),
-            "C2C".to_string(),
+            // Version 2 added `C2` for the L2C pseudorange, which RINEX 3
+            // spells `C2S`, `C2L` or `C2X` by channel. `C2C` is L2 C/A.
+            "C2X".to_string(),
             "C2W".to_string(),
             "C1W".to_string(),
             "S1C".to_string(),
@@ -1601,6 +1603,160 @@ fn a_blank_glonass_bias_record_clears_the_one_before_it() {
 }
 
 #[test]
+fn prn_observation_counts_are_read_from_the_columns_they_are_written_in() {
+    // `PRN / # OF OBS` is `3X,A1,I2,9I6`: three blanks, then the satellite, then
+    // the counts. Reading the satellite from the first three columns found them
+    // blank on every real file, so the record was dropped and every count with
+    // it. The committed WTZR fixture carries the record as the format writes it.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"
+    );
+    let text = std::fs::read_to_string(path).expect("read the committed fixture");
+    let obs = RinexObs::parse(&text).expect("parse the fixture");
+
+    let counts = obs
+        .header()
+        .prn_obs_counts
+        .get(&GnssSatelliteId {
+            system: GnssSystem::BeiDou,
+            prn: 2,
+        })
+        .expect("C02 declares its counts");
+    assert_eq!(
+        counts.iter().take(3).copied().collect::<Vec<_>>(),
+        vec![Some(1628), Some(1266), Some(2215)],
+        "the counts are read from column 7 onward"
+    );
+
+    // Written back, the record lands where it was read from.
+    let encoded = obs.to_rinex_string();
+    let line = encoded
+        .lines()
+        .find(|line| line.contains("PRN / # OF OBS"))
+        .expect("the record is written");
+    assert_eq!(&line[..3], "   ", "the satellite sits at columns 4 to 6");
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(
+        reparsed.header().prn_obs_counts,
+        obs.header().prn_obs_counts
+    );
+}
+
+fn version_two_fixture_text() -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/algo0010_2015001_v1_trim.rnx"
+    );
+    std::fs::read_to_string(path).expect("read the committed RINEX 2 fixture")
+}
+
+#[test]
+fn a_version_two_observation_type_wider_than_its_field_is_rejected() {
+    // `# / TYPES OF OBSERV` is `9(4X,A2)`. A three-character token means the
+    // line is not in that layout, and the code could not be written back into a
+    // two-character field: it was kept, written as two characters, and read
+    // back as a different code, which the fuzz round trip fails on.
+    let text = version_two_fixture_text().replace(
+        "     8    L1    L2    C1    C2    P2    P1    S1    S2",
+        "     8   L1X    L2    C1    C2    P2    P1    S1    S2",
+    );
+    let error = RinexObs::parse(&text).expect_err("a three-character version 2 code is rejected");
+    assert!(
+        error.to_string().contains("field width"),
+        "the error names the field: {error}"
+    );
+}
+
+#[test]
+fn counts_declared_before_their_observation_types_are_kept() {
+    // RINEX 3.05 does not fix the order of `PRN / # OF OBS` and
+    // `SYS / # / OBS TYPES`. Counts read before their constellation's types
+    // used to parse as no counts at all, which the writer then refused.
+    let text = obs_with_code_headers(
+        &[
+            header_line("   G01     5", "PRN / # OF OBS"),
+            header_line("G    1 C1C", "SYS / # / OBS TYPES"),
+        ],
+        "> 2015 01 01 00 00  0.0000000  0  1\nG01  20000000.000\n",
+    );
+    let obs = RinexObs::parse(&text).expect("parse");
+    assert_eq!(obs.skipped_records, 0);
+    let gps = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    assert_eq!(obs.header().prn_obs_counts[&gps], vec![Some(5)]);
+    let written = obs.to_rinex_string();
+    let read = RinexObs::parse(&written).expect("reads back");
+    assert_eq!(read.header().prn_obs_counts, obs.header().prn_obs_counts);
+}
+
+#[test]
+fn a_malformed_count_is_reported_where_its_types_are_known() {
+    // Counts after their types are read at once, so a malformed one is the
+    // error the parse reports, not the header's missing end that follows.
+    let text = [
+        header_line(
+            "     3.05           OBSERVATION DATA    M (MIXED)",
+            "RINEX VERSION / TYPE",
+        ),
+        header_line("G    1 C1C", "SYS / # / OBS TYPES"),
+        header_line("   G01    x5", "PRN / # OF OBS"),
+    ]
+    .join("\n");
+    let error = RinexObs::parse(&text).expect_err("a malformed count is refused");
+    assert!(error.to_string().contains("prn_obs_count"), "{error}");
+}
+
+#[test]
+fn a_malformed_count_is_not_held_back_by_another_constellations_types() {
+    // GLONASS declares fourteen types and has given thirteen when GPS, whose
+    // one type is complete, gives a malformed count. That count is the error,
+    // not the missing end of a header GLONASS never finished.
+    let text = [
+        header_line(
+            "     3.05           OBSERVATION DATA    M (MIXED)",
+            "RINEX VERSION / TYPE",
+        ),
+        header_line("G    1 C1C", "SYS / # / OBS TYPES"),
+        header_line(
+            "R   14 C1C C1P C2C C2P L1C L1P L2C L2P D1C D1P D2C D2P S1C",
+            "SYS / # / OBS TYPES",
+        ),
+        header_line("   G01    x5", "PRN / # OF OBS"),
+    ]
+    .join("\n");
+    let error = RinexObs::parse(&text).expect_err("a malformed count is refused");
+    assert!(error.to_string().contains("prn_obs_count"), "{error}");
+}
+
+#[test]
+fn a_version_two_value_with_more_than_three_decimals_is_refused() {
+    // An F14.3 field holds three decimals. A version 2 value with a fourth was
+    // accepted and written back as a different number.
+    let line = |content: &str, label: &str| format!("{content:<60}{label}\n");
+    let text = [
+        line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        line("     1    C1", "# / TYPES OF OBSERV"),
+        line("", "END OF HEADER"),
+        " 15  1  1  0  0  0.0000000  0  1G 1\n".to_string(),
+        "        0.0001\n".to_string(),
+    ]
+    .concat();
+    let error = RinexObs::parse(&text).expect_err("a fourth decimal is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("is not representable in its F14.3"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_version_two_product_reads_back_the_output_it_writes() {
     // A version 2 file is re-emitted through the version 3 record writer, so its
     // own output declares version 2 while carrying `>` epoch records. Reading
@@ -2093,4 +2249,89 @@ fn to_rinex_string_round_trips_through_parse() {
     );
     // Deterministic output.
     assert_eq!(reparsed.to_rinex_string(), serialized);
+}
+
+#[test]
+fn a_header_with_no_observations_reads_its_names_by_the_same_rule() {
+    // A file with no epochs builds its constellation's list from the header
+    // alone, down a separate path that read every name as a code: Galileo's
+    // `P1 C1` as `C1X C1X`, and BeiDou's `C1 C2` as `C2I C2I`, one code at two
+    // positions again. Both paths now share one rule.
+    for (letter, system, names, expected) in [
+        (
+            'E',
+            GnssSystem::Galileo,
+            "     2    P1    C1",
+            ["P1", "C1X"],
+        ),
+        ('C', GnssSystem::BeiDou, "     2    C1    C2", ["C2I", "C2"]),
+    ] {
+        let text = format!(
+            "{:9.2}{:11}{:<20}{:<20}RINEX VERSION / TYPE\n\
+             {names:<60}# / TYPES OF OBSERV\n\
+             {:<60}TIME OF FIRST OBS\n\
+             {:<60}END OF HEADER\n",
+            2.11,
+            "",
+            "OBSERVATION DATA",
+            letter,
+            "  2015     1     1     0     0    0.0000000     GPS",
+            "",
+        );
+        let obs = RinexObs::parse(&text).expect("a header-only file parses");
+        assert_eq!(
+            obs.header().obs_codes[&system],
+            expected.map(String::from).to_vec(),
+            "{system:?}"
+        );
+        let reparsed = RinexObs::parse(&obs.to_rinex_string()).expect("and reads back");
+        assert_eq!(
+            reparsed.header().obs_codes,
+            obs.header().obs_codes,
+            "{system:?}"
+        );
+    }
+}
+
+/// A version 2 header record: content padded to its label.
+fn v2_record(content: &str, label: &str) -> String {
+    format!("{content:<60}{label}\n")
+}
+
+/// A one-satellite observation file at `version`, of one constellation, with
+/// these header records and body.
+fn obs_file(version: &str, letter: char, headers: &[String], body: &str) -> String {
+    let mut text = v2_record(
+        &format!("{version:>9}           OBSERVATION DATA    {letter}"),
+        "RINEX VERSION / TYPE",
+    );
+    for header in headers {
+        text.push_str(header);
+    }
+    text.push_str(&v2_record("", "END OF HEADER"));
+    text.push_str(body);
+    text
+}
+
+#[test]
+fn a_glonass_code_bias_code_wider_than_its_field_is_refused() {
+    // The code is `A3`; a longer one would be cut when written and read back
+    // as another code.
+    let text = obs_file(
+        "3.05",
+        'R',
+        &[
+            v2_record("R    1 C1C", "SYS / # / OBS TYPES"),
+            v2_record(
+                "LONGCODE 0 LONGCODE 0 LONGCODE 0 LONGCODE 0",
+                "GLONASS COD/PHS/BIS",
+            ),
+        ],
+        "",
+    );
+    let error = RinexObs::parse(&text).expect_err("a long code is refused");
+    assert!(
+        error.to_string().contains("GLONASS COD/PHS/BIS code"),
+        "{error}"
+    );
 }

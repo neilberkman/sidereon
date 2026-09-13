@@ -6,6 +6,73 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- GPS `C2` is the L2C pseudorange below version 2.12 and the L2P(Y) pseudorange
+  from 2.12, which gave L2C its own names. Version 2 section 10.1.1 added it as
+  "Observation code for L2C pseudorange (C2)", and RINEX 3 spells L2C `C2S`,
+  `C2L` or `C2X` by channel. It was read as `C2C`, which is L2 C/A, at every
+  version, so a file's L2 measurement came back named as a signal it was not.
+- A tracking attribute is only claimed where version 2 names one. Galileo has a
+  channel on every band and version 2 names none of them, and the same is true
+  of QZSS L2C, so those read as the combined channel rather than asserting a
+  single one the file never stated.
+- The version 2 observation code table holds what RINEX 2.11 defines and
+  nothing else. It used to carry the legacy differential-code-bias labels for
+  Galileo and BeiDou, where `P1` and `P2` mean the first and second frequency
+  whatever the constellation. Those belong to bias files, and the bias reader
+  keeps them; version 2 says "P: Pseudorange GPS and Glonass: P code", and gives
+  Galileo `C1`, `C5`, `C6`, `C7` and `C8`, whose digits already are the bands E1,
+  E5a, E6, E5b and E5a+b. So a Galileo `C2` was read as E5a data, and a
+  conforming `C5` and an invented `C2` both claimed that band.
+- A BeiDou version 2 observation code names the band its digit does, whatever
+  its kind. RINEX 2.11 has no BeiDou at all, so a BeiDou code there is an
+  extension, and version 2 numbers its digits by frequency slot across every
+  constellation rather than by a per-constellation count: B1I is slot 2, which
+  RINEX 3 numbers band 2, while B2I and B3I are slots 7 and 6, which RINEX 3
+  numbers the same. `C2` was read as B2I, which is a different signal, and the
+  digit was remapped only for `C`, so a file's `C1` read as B1I while its `L1`
+  read as B1C: one measurement pair read as two signals, with the phase on a
+  band its own pseudorange did not use.
+- A version 2 `# / TYPES OF OBSERV` code wider than the two characters its field
+  holds is rejected. The record is `9(4X,A2)`, so a longer token means the line
+  is not in that layout. Such a code was kept whole, written back into a
+  two-character field, and read again as a different code. This is stricter than
+  readers that take the two columns and ignore what sits beside them, which read
+  `C1CX` as `C1` and lose the rest without saying so.
+- Version 2.12's lettered names are read as the signals they name. It gave the
+  L1 and L2 civil signals their own letters and left the digits to the P code,
+  so at 2.12 a GPS `LA` is the C/A phase and `L1` the P(Y) one. Every letter was
+  read as though it were a band, producing codes like `CAX` that name no signal.
+
+- `PRN / # OF OBS` is read from the columns the format writes it in. The record
+  is `3X,A1,I2,9I6`, so the satellite sits at columns 4 to 6 and the counts
+  follow from column 7. Reading the satellite from the first three columns found
+  them blank on every conforming file, so the record was dropped and every count
+  with it, and the writer put the satellite where the reader had looked for it.
+  Files this crate wrote round-tripped; nobody else's did. Reading them now
+  fires the `PRN / # OF OBS` quality-control lint on trimmed files, whose
+  headers keep counts for a whole day of observations their body no longer has.
+  Counts are read once the header ends, against the observation types it ends
+  with: RINEX 3.05 fixes no order between the records, counts declared before
+  their types used to be read against no types and lost, and counts read
+  between two declarations for one constellation came out shorter or longer
+  than its list. A malformed count is still reported where it stands.
+- A version 2 observation value is refused when its field cannot write it back:
+  wider than `F14.3`, or carrying more than three decimals. Version 3 values
+  were already held to this; a version 2 `0.0001` was read and then written
+  back as `0.000`.
+- A `GLONASS COD/PHS/BIS` code longer than its three-character field is refused
+  when read; it was cut when written and read back as another code.
+- A version 2 name a constellation has no observable under stays as the file
+  wrote it, rather than being read as a signal the constellation does have, and
+  so does a one-character name in the two-character type field.
+  Version 2 names its codes once for every constellation at once, and Galileo
+  has no `P1`, BeiDou no `P2`. Reading Galileo's `P1` as its `C1X` put one code
+  at two positions. With the name kept as written each measurement has one
+  position. The same holds for a second name of a code the constellation
+  already has - BeiDou's `C1` and `C2` are both B1I. The quality-control lint
+  treats such a name as the file's own rather than as a malformed code, so a
+  valid mixed file no longer draws an `OBS-H05` finding for every constellation
+  that lacks one of its names.
 - The RINEX observation reader takes the records the format lays out in fixed
   columns from those columns, rather than by splitting the line on whitespace.
   Whitespace cannot read a record whose field fills its width, because it then
