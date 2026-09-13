@@ -1914,12 +1914,17 @@ fn repair_obs_order_and_duplicates(obs: &mut RinexObs, actions: &mut Vec<RepairA
         return;
     }
     let before = obs.epochs.clone();
-    obs.epochs.sort_by_key(|epoch| epoch_key(epoch.epoch));
+    // Epochs at the same seven-decimal second are distinct when their RINEX
+    // 4.02 picosecond extensions differ; an epoch without one is at zero.
+    obs.epochs
+        .sort_by_key(|epoch| (epoch_key(epoch.epoch), epoch.epoch_picoseconds.unwrap_or(0)));
     let mut merged: Vec<ObsEpoch> = Vec::new();
     let mut discarded = Vec::new();
     for epoch in obs.epochs.drain(..) {
         if let Some(last) = merged.last_mut() {
-            if same_epoch_time(last.epoch, epoch.epoch) {
+            if same_epoch_time(last.epoch, epoch.epoch)
+                && last.epoch_picoseconds.unwrap_or(0) == epoch.epoch_picoseconds.unwrap_or(0)
+            {
                 for (sat, values) in epoch.sats {
                     match last.sats.entry(sat) {
                         std::collections::btree_map::Entry::Vacant(slot) => {

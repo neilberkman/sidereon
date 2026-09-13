@@ -75,6 +75,22 @@ All notable changes to `sidereon-core` are documented here.
   wider than `F14.3`, or carrying more than three decimals. Version 3 values
   were already held to this; a version 2 `0.0001` was read and then written
   back as `0.000`.
+- Epoch picoseconds are written where RINEX 4.02 puts them, five digits
+  (`1X,I5.5`) after the receiver clock offset, whose columns are left blank when
+  there is no offset, and read from there. They were written between the
+  seconds and the flag, which pushed the flag and satellite count out of their
+  columns for every other reader while this one read the line back unchanged,
+  and a 4.02 line carrying them where the format does was read with them
+  dropped. The long-standing reading of the old placement is kept.
+- Picoseconds after the clock offset are read however the epoch line is
+  spaced. A tab after them took a correctly laid-out line out of its columns,
+  and the whitespace reading then dropped five digits after a clock offset;
+  trailing whitespace is now ignored, and in a loosely spaced line five digits
+  after a clock offset written with a decimal point or exponent are read as
+  picoseconds. A lone five-digit token after the count keeps its reading as a
+  clock offset, and a flag and count run together keep theirs. Repair keeps epochs
+  at the same second whose picoseconds differ, which it merged as duplicates,
+  dropping the second measurement.
 - A `GLONASS COD/PHS/BIS` code longer than its three-character field is refused
   when read; it was cut when written and read back as another code.
 - A version 2 name a constellation has no observable under stays as the file
