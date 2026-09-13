@@ -106,8 +106,24 @@ const V3_EPOCH_COLUMNS: [(usize, usize); 10] = [
     (32, 35),
     (41, 56),
 ];
-/// The same line carrying this writer's picosecond field, which it places after
-/// the seconds and which shifts every later field six columns right.
+/// The same line with RINEX 4.02's five further digits of the second after the
+/// clock offset, `1X,I5.5`.
+const V4_EPOCH_COLUMNS: [(usize, usize); 11] = [
+    (0, 1),
+    (2, 6),
+    (7, 9),
+    (10, 12),
+    (13, 15),
+    (16, 18),
+    (18, 29),
+    (31, 32),
+    (32, 35),
+    (41, 56),
+    (57, 62),
+];
+/// The same line carrying the picosecond field where this writer used to place
+/// it, after the seconds, shifting every later field six columns right. Still
+/// read; no longer written.
 const V3_EPOCH_PICOSECOND_COLUMNS: [(usize, usize); 11] = [
     (0, 1),
     (2, 6),
@@ -2100,6 +2116,10 @@ fn parse_epoch_line(
     line: &str,
     second_policy: validate::CivilSecondPolicy,
 ) -> Result<ParsedEpochLine> {
+    // Trailing whitespace is no field; left on, a tab after the last one takes
+    // the line out of its layout and into a reading that places fields
+    // differently.
+    let line = line.trim_end_matches([' ', '\t']);
     // Read the columns the format lays the record out in. That is the only way
     // to read an epoch whose satellite count fills its `I3` field: it then abuts
     // the flag before it, leaving no space for a tokenizer to split on. A line
@@ -2114,7 +2134,7 @@ fn parse_epoch_line(
     let body = line
         .strip_prefix('>')
         .ok_or_else(|| Error::Parse(format!("RINEX OBS epoch line lacks '>': {line:?}")))?;
-    let tokens: Vec<&str> = body.split_whitespace().collect();
+    let tokens = picoseconds_after_the_clock(body.split_whitespace().collect());
     match interpret_epoch_tokens(&tokens, line, second_policy) {
         Ok((parsed, _)) => Ok(parsed),
         // A line that is in neither the layout nor a shape the tokenizer can
@@ -2124,6 +2144,10 @@ fn parse_epoch_line(
             let Some(split) = split_merged_epoch_flag_and_count(&tokens) else {
                 return Err(error);
             };
+            // A flag and count run together only in a line written to its
+            // columns, where digits straight after the count sit in reserved
+            // columns rather than where RINEX 4.02 puts picoseconds; a
+            // column-exact 4.02 line has already been read by its layout.
             // The separated reading is preferred only when it accounts for the
             // whole line and any clock offset it read is written the way one is
             // written. Without both, a record whose trailing field this reader
@@ -2158,6 +2182,37 @@ fn clock_token_is_written_as_one(tokens: &[&str], parsed: &ParsedEpochLine) -> b
         .is_some_and(|token| token.contains(['.', 'e', 'E', 'd', 'D']))
 }
 
+/// Move RINEX 4.02 picoseconds from after the clock offset to the slot before
+/// the flag, where the epoch reader takes them.
+///
+/// Read by whitespace, a line carrying them where 4.02 puts them has them as a
+/// five-digit token after a clock offset written as one, with a decimal point
+/// or an exponent. Only that shape is taken: a lone five-digit token after the
+/// count may as well be a clock offset written as an integer, which is how this
+/// reader has always read it, and a flag that is not a single digit may be a
+/// flag and count run together, whose reading this must not shift. A line whose
+/// picoseconds already sit before the flag is left as it is.
+fn picoseconds_after_the_clock(mut tokens: Vec<&str>) -> Vec<&str> {
+    let five_digits =
+        |token: &str| token.len() == 5 && token.bytes().all(|byte| byte.is_ascii_digit());
+    let written_as_clock = |token: &str| token.contains(['.', 'e', 'E', 'd', 'D']);
+    // Time, flag and count come first; the clock offset and the picoseconds
+    // follow the count.
+    let flag = EPOCH_TIME_TOKENS;
+    let after_count = EPOCH_TIME_TOKENS + 2;
+    let shaped = tokens.len() == after_count + 2
+        && tokens[flag].len() == 1
+        && tokens[flag].bytes().all(|byte| byte.is_ascii_digit())
+        && written_as_clock(tokens[after_count])
+        && five_digits(tokens[after_count + 1]);
+    if shaped {
+        if let Some(picoseconds) = tokens.pop() {
+            tokens.insert(EPOCH_TIME_TOKENS, picoseconds);
+        }
+    }
+    tokens
+}
+
 /// Separate an epoch flag and satellite count that share one token.
 ///
 /// Returns `None` unless the token is four digits whose last three are 100 or
@@ -2184,8 +2239,9 @@ fn split_merged_epoch_flag_and_count<'a>(tokens: &[&'a str]) -> Option<Vec<&'a s
 /// Read a RINEX 3 epoch line's fields from their columns, in the order the
 /// token reader expects them.
 ///
-/// Returns `None` when the line is not laid out that way, including when this
-/// writer's picosecond field is absent from where it puts it.
+/// Returns `None` when the line is not laid out that way. Picoseconds are taken
+/// from after the clock, where RINEX 4.02 puts them, or from after the seconds,
+/// where this writer used to.
 fn v3_epoch_column_tokens(line: &str) -> Option<Vec<&str>> {
     if let Some([marker, year, month, day, hour, minute, second, flag, count, clock]) =
         fixed_record(line, V3_EPOCH_COLUMNS)
@@ -2194,6 +2250,24 @@ fn v3_epoch_column_tokens(line: &str) -> Option<Vec<&str>> {
             return Some(epoch_tokens(
                 [year, month, day, hour, minute, second],
                 "",
+                flag,
+                count,
+                clock,
+            ));
+        }
+    }
+    if let Some([marker, year, month, day, hour, minute, second, flag, count, clock, picoseconds]) =
+        fixed_record(line, V4_EPOCH_COLUMNS)
+    {
+        // Only five digits there are picoseconds; anything else in those
+        // columns leaves the line to the readings below.
+        if marker == ">"
+            && picoseconds.len() == 5
+            && picoseconds.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Some(epoch_tokens(
+                [year, month, day, hour, minute, second],
+                picoseconds,
                 flag,
                 count,
                 clock,

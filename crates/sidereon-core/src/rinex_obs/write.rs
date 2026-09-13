@@ -186,20 +186,23 @@ impl RinexObs {
         } else {
             epoch.sats.len()
         };
+        // RINEX reserves six columns between the satellite count and the clock
+        // offset. Without them a full-width negative offset abuts the count and
+        // the line no longer reads back. Version 4.02 appends five more digits
+        // of the second after the clock, `1X,I5.5`, with the clock's columns
+        // left blank when there is no offset.
         let picoseconds = epoch
             .epoch_picoseconds
             .map(|value| format!(" {value:05}"))
             .unwrap_or_default();
-        // RINEX reserves six columns between the satellite count and the clock
-        // offset. Without them a full-width negative offset abuts the count and
-        // the line no longer reads back.
-        let clock = epoch
-            .rcv_clock_offset_s
-            .map(|value| format!("      {value:15.12}"))
-            .unwrap_or_default();
+        let clock = match epoch.rcv_clock_offset_s {
+            Some(value) => format!("      {value:15.12}"),
+            None if !picoseconds.is_empty() => " ".repeat(21),
+            None => String::new(),
+        };
         let _ = writeln!(
             out,
-            "> {:04} {:02} {:02} {:02} {:02}{:11.7}{picoseconds}  {}{:3}{clock}",
+            "> {:04} {:02} {:02} {:02} {:02}{:11.7}  {}{:3}{clock}{picoseconds}",
             t.year, t.month, t.day, t.hour, t.minute, t.second, epoch.flag, count
         );
         if epoch.flag > 1 {

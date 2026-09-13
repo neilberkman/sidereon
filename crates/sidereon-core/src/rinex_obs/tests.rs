@@ -1439,19 +1439,42 @@ fn nonconforming_epoch_field_shapes_keep_their_existing_reading() {
         "a count past the I3 field must not parse"
     );
 
-    // A RINEX 4 record carries its picoseconds after the clock offset, where
-    // this reader does not look for them. Such a line keeps its rejection
-    // rather than parsing with the field silently dropped, whether the clock is
-    // written or left blank so the picoseconds land in its token.
-    for trailing in ["      -0.000000000001 12345", " 00001"] {
+    // RINEX 4.02 carries five more digits of the second after the clock
+    // offset, `1X,I5.5`, and a hundred-satellite line laid out that way is
+    // read with them, the clock written or its columns left blank.
+    for (trailing, clock) in [
+        (
+            format!("      {:15.12} {:05}", -0.000_000_000_001, 12_345),
+            Some(-0.000_000_000_001),
+        ),
+        (format!("{}{:05}", " ".repeat(22), 12_345), None),
+    ] {
         let (satellites, systems) = multi_constellation_fixture(100);
         let mut body = format!("> 2020 06 24 00 00  0.0000000  0100{trailing}");
         for satellite in &satellites {
             body.push_str(&format!("\n{satellite}   23000000.000"));
         }
+        let obs = RinexObs::parse(&obs_with_code_headers(&systems, &body))
+            .unwrap_or_else(|error| panic!("{trailing:?}: {error}"));
+        let epoch = &obs.epochs()[0];
+        assert_eq!(epoch.flag, 0, "{trailing:?}");
+        assert_eq!(epoch.sats.len(), 100, "{trailing:?}");
+        assert_eq!(epoch.epoch_picoseconds, Some(12_345), "{trailing:?}");
+        assert_eq!(epoch.rcv_clock_offset_s, clock, "{trailing:?}");
+    }
+
+    // Digits inside the reserved columns straight after the count are no field
+    // the format defines, so that line keeps its rejection rather than parsing
+    // with them dropped.
+    {
+        let (satellites, systems) = multi_constellation_fixture(100);
+        let mut body = "> 2020 06 24 00 00  0.0000000  0100 00001".to_string();
+        for satellite in &satellites {
+            body.push_str(&format!("\n{satellite}   23000000.000"));
+        }
         assert!(
             RinexObs::parse(&obs_with_code_headers(&systems, &body)).is_err(),
-            "a record whose trailing field this reader cannot place must not parse: {trailing:?}"
+            "digits in the reserved columns must not parse"
         );
     }
 
@@ -2336,6 +2359,47 @@ fn obs_file(version: &str, letter: char, headers: &[String], body: &str) -> Stri
 }
 
 #[test]
+fn picoseconds_are_read_after_the_clock_however_the_line_is_spaced() {
+    // Review built these. A tab after correctly placed picoseconds took the
+    // line out of its layout, and the looser reading then took the digits for
+    // a clock offset, or dropped them after a real one.
+    let types = [v2_record("G    1 C1C", "SYS / # / OBS TYPES")];
+    let observation = "\nG01      1234.567\n";
+    for (epoch_line, clock) in [
+        (
+            format!(
+                "> 2020 06 24 00 00  0.0000000  0  1{}00001\t",
+                " ".repeat(22)
+            ),
+            None,
+        ),
+        (
+            format!(
+                "> 2020 06 24 00 00  0.0000000  0  1      {:15.12} 00001\t",
+                0.125
+            ),
+            Some(0.125),
+        ),
+        (
+            "> 2020 06 24 00 00 0.0000000 0 1 0.125 00001".to_string(),
+            Some(0.125),
+        ),
+    ] {
+        let obs = RinexObs::parse(&obs_file(
+            "4.02",
+            'G',
+            &types,
+            &format!("{epoch_line}{observation}"),
+        ))
+        .unwrap_or_else(|error| panic!("{epoch_line:?}: {error}"));
+        let epoch = &obs.epochs()[0];
+        assert_eq!(epoch.epoch_picoseconds, Some(1), "{epoch_line:?}");
+        assert_eq!(epoch.rcv_clock_offset_s, clock, "{epoch_line:?}");
+        assert_eq!(epoch.sats.len(), 1, "{epoch_line:?}");
+    }
+}
+
+#[test]
 fn a_glonass_code_bias_code_wider_than_its_field_is_refused() {
     // The code is `A3`; a longer one would be cut when written and read back
     // as another code.
@@ -2356,4 +2420,43 @@ fn a_glonass_code_bias_code_wider_than_its_field_is_refused() {
         error.to_string().contains("GLONASS COD/PHS/BIS code"),
         "{error}"
     );
+}
+
+#[test]
+fn repair_keeps_epochs_that_differ_only_in_picoseconds() {
+    // Two epochs at the same seven-decimal second with picoseconds 1 and 2 are
+    // different instants; repair merged them as duplicates and dropped the
+    // second measurement.
+    let text = obs_file(
+        "4.02",
+        'G',
+        &[v2_record("G    1 C1C", "SYS / # / OBS TYPES")],
+        &format!(
+            "> 2020 06 24 00 00  0.0000000  0  1{blank}00001\nG01      1234.567\n\
+             > 2020 06 24 00 00  0.0000000  0  1{blank}00002\nG01      9876.543\n",
+            blank = " ".repeat(22)
+        ),
+    );
+    let obs = RinexObs::parse(&text).expect("parse");
+    assert_eq!(obs.epochs().len(), 2);
+    let options = crate::rinex_qc::RepairOptions {
+        set_interval: true,
+        set_time_of_last_obs: true,
+        set_obs_counts: true,
+        drop_empty_records: true,
+        drop_unsupported: true,
+        ..crate::rinex_qc::RepairOptions::default()
+    };
+    let repaired = crate::rinex_qc::repair_obs(&obs, &options).repaired;
+    assert_eq!(repaired.epochs().len(), 2);
+    let gps = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    let values: Vec<Option<f64>> = repaired
+        .epochs()
+        .iter()
+        .map(|epoch| epoch.sats[&gps][0].value)
+        .collect();
+    assert_eq!(values, [Some(1234.567), Some(9876.543)]);
 }
