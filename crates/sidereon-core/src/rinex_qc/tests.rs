@@ -83,6 +83,62 @@ fn nav_fixture() -> String {
 }
 
 #[test]
+fn a_version_two_name_a_constellation_lacks_is_not_an_invalid_code() {
+    // Version 2 names its codes once for every constellation. Galileo has no
+    // `P1`, so its entry under that name is kept as the two characters the
+    // file wrote, and its column is blank. That is not a malformed code, and
+    // reporting OBS-H05 on every valid mixed file said it was.
+    // `header_line` returns a record without its newline, so each one gets its
+    // own. Without them the header never ended, the file never parsed, and the
+    // absence of OBS-H05 below proved nothing.
+    let mut text = String::new();
+    text.push_str(
+        "     2.11           OBSERVATION DATA    M (MIXED)           RINEX VERSION / TYPE\n",
+    );
+    text.push_str(&header_line("     2    P1    C1", "# / TYPES OF OBSERV"));
+    text.push('\n');
+    text.push_str(&header_line(
+        "  2015     1     1     0     0    0.0000000     GPS",
+        "TIME OF FIRST OBS",
+    ));
+    text.push('\n');
+    text.push_str(&header_line("", "END OF HEADER"));
+    text.push('\n');
+    text.push_str(" 15  1  1  0  0  0.0000000  0  2G 1E11\n");
+    text.push_str("       123.000       234.000\n");
+    text.push_str("                     456.000\n");
+    let report = lint_obs_text(&text);
+    // A file that failed to parse would draw no OBS-H05 either, so the absence
+    // only means something once the parse is known to have succeeded.
+    assert!(
+        !report.findings.iter().any(|f| f.code() == "OBS-H01"),
+        "the file parses: {:?}",
+        report.findings
+    );
+    assert!(
+        !report.findings.iter().any(|f| f.code() == "OBS-H05"),
+        "{:?}",
+        report.findings
+    );
+
+    // And a two-character name no constellation carries is still malformed.
+    for bad in ["ZZ", "C9"] {
+        let malformed = text.replace("     2    P1    C1", &format!("     2    {bad}    C1"));
+        let report = lint_obs_text(&malformed);
+        assert!(
+            !report.findings.iter().any(|f| f.code() == "OBS-H01"),
+            "{bad} still parses: {:?}",
+            report.findings
+        );
+        assert!(
+            report.findings.iter().any(|f| f.code() == "OBS-H05"),
+            "{bad} is not a version 2 name: {:?}",
+            report.findings
+        );
+    }
+}
+
+#[test]
 fn committed_obs_fixtures_have_pinned_lint_findings() {
     let fixtures = [
         ("ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx", &[][..]),
@@ -109,9 +165,11 @@ fn committed_obs_fixtures_have_pinned_lint_findings() {
         ),
         (
             // The 120-epoch trim keeps full-file satellite totals and an
-            // unretained receiver-clock-offset header.
+            // unretained receiver-clock-offset header. It also keeps the
+            // full-day `PRN / # OF OBS` counts, one per satellite and code,
+            // and the trimmed body has far fewer, so OBS-H11 fires for each.
             "WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx",
-            &[("OBS-H10", 1), ("OBS-H90", 1)][..],
+            &[("OBS-H10", 1), ("OBS-H11", 1272), ("OBS-H90", 1)][..],
         ),
         (
             // RCV CLOCK OFFS APPL is parsed as an unretained disclosure only.

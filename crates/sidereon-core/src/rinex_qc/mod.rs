@@ -1313,7 +1313,18 @@ fn lint_obs_header(header: &ObsHeader, findings: &mut Vec<Finding>) {
     for (&system, codes) in &header.obs_codes {
         let mut seen = BTreeSet::new();
         for code in codes {
-            if !is_valid_obs_code(system, code, header.version) {
+            // A version 2 file names its codes once for every constellation,
+            // and a name this constellation has no observable under - Galileo
+            // `P1` - is kept as the two characters the file wrote. That is the
+            // file's own name in a column this constellation leaves blank, and
+            // is not a malformed code as long as some constellation carries a
+            // signal by that name. `ZZ` or `C9` is carried by none, and is.
+            let version_two_name = header.version < 3.0
+                && code.len() == 2
+                && ALL_SYSTEMS.iter().any(|carrier| {
+                    crate::rinex_obs::rinex2_name_allowed(*carrier, code, header.version)
+                });
+            if !version_two_name && !is_valid_obs_code(system, code, header.version) {
                 findings.push(Finding::ObsInvalidObsCode {
                     at: FindingRef::field("SYS / # / OBS TYPES"),
                     system,
@@ -2178,6 +2189,17 @@ fn repair_nav_order(records: &mut [BroadcastRecord], actions: &mut Vec<RepairAct
         });
     }
 }
+
+/// Every constellation, for a check that asks whether any of them carries a name.
+const ALL_SYSTEMS: [GnssSystem; 7] = [
+    GnssSystem::Gps,
+    GnssSystem::Glonass,
+    GnssSystem::Galileo,
+    GnssSystem::BeiDou,
+    GnssSystem::Qzss,
+    GnssSystem::Navic,
+    GnssSystem::Sbas,
+];
 
 fn published_obs_version(version: f64) -> Option<()> {
     let scaled = (version * 100.0).round() as i64;

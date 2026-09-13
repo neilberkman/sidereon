@@ -64,6 +64,7 @@ use crate::rinex_common::time_scale_label;
 use crate::rinex_nav::valid_glonass_frequency_channel;
 use crate::validate::{self, FieldError};
 use crate::{Error, Result};
+use write::{PRN_OBS_COUNTS_COLUMN, PRN_OBS_COUNT_WIDTH, PRN_OBS_SATELLITE_COLUMN};
 
 /// Width of one RINEX-3 observation field (`F14.3` value + LLI + SSI).
 const OBS_FIELD_WIDTH: usize = 16;
@@ -80,6 +81,8 @@ const OBS_FIELD_WIDTH: usize = 16;
 const VERSION_WIDTH: usize = 20;
 const VERSION_DECIMALS: usize = 2;
 const GLONASS_BIAS_WIDTH: usize = 8;
+/// Width of a `GLONASS COD/PHS/BIS` code (`A3`).
+const GLONASS_BIAS_CODE_WIDTH: usize = 3;
 const GLONASS_BIAS_DECIMALS: usize = 3;
 const EPOCH_SECOND_WIDTH: usize = 11;
 const EPOCH_SECOND_DECIMALS: usize = 7;
@@ -811,6 +814,10 @@ struct Parser {
     n_satellites: Option<usize>,
     prn_obs_counts: BTreeMap<GnssSatelliteId, Vec<Option<usize>>>,
     prn_obs_counts_current: Option<GnssSatelliteId>,
+    /// `PRN / # OF OBS` records as read, applied once the header ends: a count
+    /// only means something against its constellation's types, and a header
+    /// may declare those after the counts, or declare them again.
+    prn_obs_count_lines: Vec<String>,
     phase_shifts: Vec<ObsPhaseShift>,
     scale_factors: Vec<ObsScaleFactor>,
     scale_factor_continuation: Option<ScaleFactorContinuation>,
@@ -868,6 +875,7 @@ impl Parser {
             n_satellites: None,
             prn_obs_counts: BTreeMap::new(),
             prn_obs_counts_current: None,
+            prn_obs_count_lines: Vec::new(),
             phase_shifts: Vec::new(),
             scale_factors: Vec::new(),
             scale_factor_continuation: None,
@@ -953,7 +961,15 @@ impl Parser {
                     self.n_satellites =
                         Some(strict_int_field::<usize>(line, 0, 6, "n_satellites")?);
                 }
-                "PRN / # OF OBS" => self.parse_prn_obs_counts(line)?,
+                "PRN / # OF OBS" => {
+                    // A count only means something against its constellation's
+                    // types, which a header may declare after the counts or
+                    // declare again, so every count is read against the lists
+                    // the header ends with. Its fields are checked where it
+                    // stands, so a malformed count is still the error reported.
+                    self.check_prn_obs_count_fields(line)?;
+                    self.prn_obs_count_lines.push(line.to_string());
+                }
                 "MARKER NAME" => {
                     let name = field(line, 0, 60).trim();
                     if !name.is_empty() {
@@ -987,6 +1003,9 @@ impl Parser {
                     self.ensure_obs_type_count_complete(line)?;
                     self.ensure_obs_type_count_complete_v2(line)?;
                     self.ensure_scale_factor_count_complete(line)?;
+                    for count_line in std::mem::take(&mut self.prn_obs_count_lines) {
+                        self.parse_prn_obs_counts(&count_line)?;
+                    }
                     saw_end = true;
                     break;
                 }
@@ -1140,14 +1159,31 @@ impl Parser {
             self.rinex2_obs_codes.clear();
             self.rinex2_obs_codes_remaining = count;
         }
-        for code in field(line, 6, 60).split_whitespace() {
+        // `9(4X,A2)`: a code sits in the last two of its six columns and the
+        // four before it are blank. A token wider than the field means the line
+        // is not in that layout, and such a code could not be written back into
+        // two columns: it would read again as something else. Reading the two
+        // columns and ignoring what sits beside them would instead drop the
+        // rest of the token without saying so.
+        let mut tokens = Vec::new();
+        for token in
+            field(line, OBS_TYPE_V2_COUNT_WIDTH, write::HEADER_CONTENT_WIDTH).split_whitespace()
+        {
+            let code = obs_code_token(token, "# / TYPES OF OBSERV", line)?;
+            if code.len() > OBS_TYPE_V2_WIDTH {
+                return Err(Error::Parse(format!(
+                    "RINEX OBS # / TYPES OF OBSERV code {code:?} exceeds the A3 field width it is written in, in {line:?}"
+                )));
+            }
+            tokens.push(code);
+        }
+        for code in tokens {
             if self.rinex2_obs_codes_remaining == 0 {
                 return Err(Error::Parse(format!(
                     "RINEX OBS # / TYPES OF OBSERV lists more codes than declared in {line:?}"
                 )));
             }
-            self.rinex2_obs_codes
-                .push(obs_code_token(code, "# / TYPES OF OBSERV", line)?);
+            self.rinex2_obs_codes.push(code);
             self.rinex2_obs_codes_remaining -= 1;
         }
         Ok(())
@@ -1526,6 +1562,14 @@ impl Parser {
                     "RINEX OBS GLONASS COD/PHS/BIS has an odd token count in {line:?}"
                 )));
             }
+            // The code is `A3`: a longer one would be cut when written, and read
+            // back as another code.
+            if pair[0].len() > GLONASS_BIAS_CODE_WIDTH {
+                return Err(Error::Parse(format!(
+                    "RINEX OBS GLONASS COD/PHS/BIS code {:?} exceeds the A3 field it is written in, in {line:?}",
+                    pair[0]
+                )));
+            }
             let bias = strict_f64_token(pair[1], "glonass_code_phase_bias", line)?;
             entries.push((
                 pair[0].to_string(),
@@ -1561,8 +1605,24 @@ impl Parser {
         Ok(())
     }
 
+    /// Refuse a `PRN / # OF OBS` record whose count fields are not counts.
+    /// Which fields are read depends on the lists the header ends with, so all
+    /// nine are checked: `9I6` holds counts or blanks.
+    fn check_prn_obs_count_fields(&self, line: &str) -> Result<()> {
+        let mut start = PRN_OBS_COUNTS_COLUMN;
+        while start + PRN_OBS_COUNT_WIDTH <= write::HEADER_CONTENT_WIDTH {
+            let raw = field(line, start, start + PRN_OBS_COUNT_WIDTH).trim();
+            if !raw.is_empty() {
+                strict_int_token::<usize>(raw, "prn_obs_count", line)?;
+            }
+            start += PRN_OBS_COUNT_WIDTH;
+        }
+        Ok(())
+    }
+
     fn parse_prn_obs_counts(&mut self, line: &str) -> Result<()> {
-        let token = field(line, 0, 3).trim();
+        // `3X,A1,I2,9I6`: three blanks, then the satellite, then the counts.
+        let token = field(line, PRN_OBS_SATELLITE_COLUMN, PRN_OBS_COUNTS_COLUMN).trim();
         let sat = if token.is_empty() {
             let Some(sat) = self.prn_obs_counts_current else {
                 return Ok(());
@@ -1582,11 +1642,11 @@ impl Parser {
         let remaining = count.saturating_sub(already);
         let mut values = Vec::with_capacity(remaining.min(9));
         for idx in 0..remaining {
-            let start = 3 + idx * 6;
-            if start + 6 > 60 {
+            let start = PRN_OBS_COUNTS_COLUMN + idx * PRN_OBS_COUNT_WIDTH;
+            if start + PRN_OBS_COUNT_WIDTH > write::HEADER_CONTENT_WIDTH {
                 break;
             }
-            let raw = field(line, start, start + 6).trim();
+            let raw = field(line, start, start + PRN_OBS_COUNT_WIDTH).trim();
             if raw.is_empty() {
                 values.push(None);
             } else {
@@ -1765,12 +1825,10 @@ impl Parser {
     }
 
     fn ensure_rinex2_system_obs_codes(&mut self, system: GnssSystem) {
-        self.obs_codes.entry(system).or_insert_with(|| {
-            self.rinex2_obs_codes
-                .iter()
-                .map(|code| canonical_rinex2_obs_code(system, code))
-                .collect()
-        });
+        let version = self.version.unwrap_or(2.11);
+        self.obs_codes
+            .entry(system)
+            .or_insert_with(|| rinex2_system_obs_codes(system, &self.rinex2_obs_codes, version));
     }
 
     fn parse_sat_obs_v2(&self, system: GnssSystem, obs_lines: &[String]) -> Result<Vec<ObsValue>> {
@@ -1789,10 +1847,15 @@ impl Parser {
             } else {
                 let scale = self.scale_factor_for(system, code);
                 let parsed = strict_f64_token(value_str, "observation.value", line)? / scale;
-                if format!("{:.3}", parsed * scale).len() > OBS_VALUE_WIDTH {
-                    return Err(Error::Parse(
-                        "RINEX OBS observation value exceeds the F14.3 field width".into(),
-                    ));
+                // As in version 3: a value wider than the field or carrying more
+                // than three decimals comes back as a different number.
+                let formatted = format!("{:.*}", OBS_VALUE_DECIMALS, parsed * scale);
+                let recovered = formatted.parse::<f64>().map(|value| value / scale);
+                if formatted.len() > OBS_VALUE_WIDTH || recovered != Ok(parsed) {
+                    return Err(Error::Parse(format!(
+                        "RINEX OBS observation value {parsed} is not representable in its \
+                         F{OBS_VALUE_WIDTH}.{OBS_VALUE_DECIMALS} field in {line:?}"
+                    )));
                 }
                 Some(parsed)
             };
@@ -1918,10 +1981,7 @@ impl Parser {
             let system = self.rinex2_default_system.unwrap_or(GnssSystem::Gps);
             obs_codes.insert(
                 system,
-                self.rinex2_obs_codes
-                    .iter()
-                    .map(|code| canonical_rinex2_obs_code(system, code))
-                    .collect(),
+                rinex2_system_obs_codes(system, &self.rinex2_obs_codes, version),
             );
         }
         if obs_codes.is_empty() {
@@ -2437,7 +2497,51 @@ fn parse_sv_token_v2(token: &str, default_system: GnssSystem) -> Option<GnssSate
     GnssSatelliteId::new(system, prn).ok()
 }
 
-fn canonical_rinex2_obs_code(system: GnssSystem, code: &str) -> String {
+/// The codes one constellation reads from a version 2 file's single list.
+///
+/// Version 2 names its codes once for every constellation at once, and a
+/// constellation has no observable under some of them: Galileo has no `P1`,
+/// BeiDou no `P2`. Such a name stays as the file wrote it rather than being read
+/// as a signal the constellation does have. Reading Galileo's `P1` as its `C1X`
+/// put one code at two positions, and a writer then had to guess which held the
+/// measurement. The same holds for a second name of a code already held -
+/// BeiDou's `C1` and `C2` are both B1I - so one code sits at one position
+/// whatever the file called it elsewhere.
+///
+/// Every path that builds a constellation's list goes through here, including
+/// a header with no observations to read, so the rule cannot differ between
+/// them.
+fn rinex2_system_obs_codes(system: GnssSystem, names: &[String], version: f64) -> Vec<String> {
+    let mut held: Vec<String> = Vec::with_capacity(names.len());
+    let mut given: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(names.len());
+    for name in names {
+        let code = rinex2_next_obs_code(system, name, version, &given);
+        given.insert(code.clone());
+        held.push(code);
+    }
+    held
+}
+
+/// What a constellation reads the next version 2 name as, given the codes the
+/// names before it gave: the canonical code the first time a name it carries
+/// reads as that code, the name as written otherwise. The one rule
+/// [`rinex2_system_obs_codes`] applies name by name.
+pub(crate) fn rinex2_next_obs_code(
+    system: GnssSystem,
+    name: &str,
+    version: f64,
+    given: &std::collections::HashSet<String>,
+) -> String {
+    let canonical = canonical_rinex2_obs_code(system, name, version);
+    if rinex2_name_allowed(system, name, version) && !given.contains(&canonical) {
+        canonical
+    } else {
+        name.to_string()
+    }
+}
+
+fn canonical_rinex2_obs_code(system: GnssSystem, code: &str, version: f64) -> String {
     let code = code.trim();
     if code.len() == 3 {
         return code.to_string();
@@ -2453,33 +2557,170 @@ fn canonical_rinex2_obs_code(system: GnssSystem, code: &str) -> String {
         return code.to_string();
     }
 
-    if let Some(mapped) = canonical_rinex2_code_exact(system, kind, band) {
-        return mapped.to_string();
+    if let Some(mapped) = canonical_rinex2_code_exact(system, kind, band, version) {
+        // A leading `_` in the table means "this kind, on that band and
+        // tracking", so one row covers the pseudorange, phase, Doppler and
+        // signal strength that share a name's letter.
+        return match mapped.strip_prefix('_') {
+            Some(rest) => format!("{}{rest}", if kind == 'P' { 'C' } else { kind }),
+            None => mapped.to_string(),
+        };
     }
 
+    let band = rinex2_band(system, band);
     let canonical_kind = if kind == 'P' { 'C' } else { kind };
     let attr = rinex2_default_tracking_attr(system, kind, band);
     format!("{canonical_kind}{band}{attr}")
 }
 
-fn canonical_rinex2_code_exact(system: GnssSystem, kind: char, band: char) -> Option<&'static str> {
+/// The version that gave the L1 and L2 civil signals their own letters, leaving
+/// the digits to the P code.
+const RINEX2_LETTERED_NAMES_VERSION: f64 = 2.12;
+
+/// The version from which `C2` names the L2P(Y) pseudorange rather than L2C.
+/// 2.12 gave L2C its own names and left `C2` to the P code.
+const RINEX2_L2C_RENAMED_VERSION: f64 = 2.12;
+
+/// Whether a constellation may carry a version 2 observation code by this name.
+///
+/// Version 2 gives `P` to GPS and GLONASS only: "P: Pseudorange GPS and Glonass:
+/// P code". Reading someone else's `P` leniently is one thing; writing one puts
+/// a code in the file that the format does not define for that constellation,
+/// and a shared column has to satisfy this for every constellation in it, not
+/// only the one whose candidates it came from.
+pub(crate) fn rinex2_name_allowed(system: GnssSystem, name: &str, version: f64) -> bool {
+    let mut chars = name.chars();
+    let (Some(kind), Some(band)) = (chars.next(), chars.next()) else {
+        return false;
+    };
+    // Version 2's observation kinds are pseudorange, P code, phase, Doppler and
+    // signal strength. Any other letter is not a name, whatever band follows.
+    if !matches!(kind, 'C' | 'P' | 'L' | 'D' | 'S') {
+        return false;
+    }
+    if kind == 'P' && !matches!(system, GnssSystem::Gps | GnssSystem::Glonass) {
+        return false;
+    }
+    // 2.12's letters: `A` is L1 C/A, `B` L1C, `C` L2C and `D` GLONASS G2 C/A,
+    // each for the constellations that carry that signal, and never with `P`.
+    // From 2.12 the civil signals have letters, and the digits they left
+    // behind are no longer names: `C1` is refused outright, and `L1`, `D1`,
+    // `S1` only name a signal where a constellation has a P code on L1.
+    if version >= RINEX2_LETTERED_NAMES_VERSION {
+        if kind == 'C' && band == '1' {
+            return false;
+        }
+        if matches!(kind, 'L' | 'D' | 'S')
+            && band == '1'
+            && !matches!(system, GnssSystem::Gps | GnssSystem::Glonass)
+        {
+            return false;
+        }
+    }
+    if band.is_ascii_alphabetic() {
+        return kind != 'P'
+            && match band {
+                'A' => matches!(
+                    system,
+                    GnssSystem::Gps | GnssSystem::Glonass | GnssSystem::Qzss | GnssSystem::Sbas
+                ),
+                'B' | 'C' => matches!(system, GnssSystem::Gps | GnssSystem::Qzss),
+                'D' => system == GnssSystem::Glonass,
+                _ => false,
+            };
+    }
+    // The bands each constellation has an observable on. Version 2 shares one
+    // digit space across all of them, so a name is only this constellation's
+    // where it names a band this one measures. BeiDou is not in version 2 at
+    // all; its digits are the frequency slots receivers wrote it into.
+    let bands: &[char] = match system {
+        GnssSystem::Gps => {
+            if kind == 'P' {
+                &['1', '2']
+            } else {
+                &['1', '2', '5']
+            }
+        }
+        GnssSystem::Glonass => {
+            if kind == 'P' {
+                &['1', '2']
+            } else {
+                &['1', '2', '3']
+            }
+        }
+        GnssSystem::Galileo => &['1', '5', '6', '7', '8'],
+        GnssSystem::BeiDou => &['1', '2', '6', '7'],
+        GnssSystem::Qzss => &['1', '2', '5', '6'],
+        GnssSystem::Sbas => &['1', '5'],
+        // Version 2 has no NavIC, so no digit names one of its bands.
+        GnssSystem::Navic => &[],
+    };
+    bands.contains(&band)
+}
+
+/// Width of a version 2 observation type, the `A2` of `9(4X,A2)`.
+const OBS_TYPE_V2_WIDTH: usize = 2;
+/// Columns the `# / TYPES OF OBSERV` count occupies before its codes, `I6`.
+const OBS_TYPE_V2_COUNT_WIDTH: usize = 6;
+
+/// The band a version 2 observation code's digit names.
+///
+/// For everything RINEX 2.11 covers the digit already is the band, so this is
+/// the digit. BeiDou is not in version 2 at all, and the receivers that wrote it
+/// there numbered the frequencies B1, B2, B3 as 1, 2, 3, while RINEX 3 numbers
+/// those bands 2, 7 and 6. Without the remap a file's `C1` and `L1` would land
+/// on different bands - `C1` through the table as B1I, `L1` through the digit as
+/// B1C - which is the same measurement read as two signals.
+fn rinex2_band(system: GnssSystem, band: char) -> char {
+    match (system, band) {
+        // Version 2 numbers its digits by frequency slot across every
+        // constellation, not by a per-constellation count. BeiDou B1I sits in
+        // slot 2, which RINEX 3 numbers band 2, and some writers put it in slot
+        // 1 instead. B2I is slot 7 and B3I slot 6, which RINEX 3 numbers the
+        // same, so those digits need nothing.
+        (GnssSystem::BeiDou, '1' | '2') => '2',
+        _ => band,
+    }
+}
+
+fn canonical_rinex2_code_exact(
+    system: GnssSystem,
+    kind: char,
+    band: char,
+    version: f64,
+) -> Option<&'static str> {
     match (system, kind, band) {
+        // 2.12 gave the L1 and L2 civil signals their own letters and left the
+        // digits to the P code, so `L1` there is the P(Y) phase, not C/A.
+        (GnssSystem::Gps, _, 'A') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1C"),
+        (GnssSystem::Glonass, _, 'A') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1C"),
+        (GnssSystem::Qzss, _, 'A') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1C"),
+        (GnssSystem::Sbas, _, 'A') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1C"),
+        (GnssSystem::Gps, _, 'B') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1X"),
+        (GnssSystem::Qzss, _, 'B') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_1X"),
+        (GnssSystem::Gps, _, 'C') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_2X"),
+        (GnssSystem::Qzss, _, 'C') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_2X"),
+        (GnssSystem::Glonass, _, 'D') if version >= RINEX2_LETTERED_NAMES_VERSION => Some("_2C"),
+        (GnssSystem::Gps, 'L' | 'D' | 'S', '1') if version >= RINEX2_LETTERED_NAMES_VERSION => {
+            Some("_1W")
+        }
+        (GnssSystem::Glonass, 'L' | 'D' | 'S', '1') if version >= RINEX2_LETTERED_NAMES_VERSION => {
+            Some("_1P")
+        }
         (GnssSystem::Gps, 'C', '1') => Some("C1C"),
-        (GnssSystem::Gps, 'C', '2') => Some("C2C"),
+        // 2.11 section 10.1.1 added "Observation code for L2C pseudorange (C2)",
+        // and RINEX 3 spells L2C `C2S`, `C2L` or `C2X` by channel; `X` is both,
+        // which is what the file says when it does not say which. `C2C` is L2
+        // C/A, a different signal. From 2.12 the same name is L2P(Y), because
+        // 2.12 gave L2C its own names and left `C2` to the P code.
+        (GnssSystem::Gps, 'C', '2') if version >= RINEX2_L2C_RENAMED_VERSION => Some("C2W"),
+        (GnssSystem::Gps, 'C', '2') => Some("C2X"),
         (GnssSystem::Gps, 'P', '1') => Some("C1W"),
         (GnssSystem::Gps, 'P', '2') => Some("C2W"),
         (GnssSystem::Glonass, 'C', '1') => Some("C1C"),
         (GnssSystem::Glonass, 'C', '2') => Some("C2C"),
         (GnssSystem::Glonass, 'P', '1') => Some("C1P"),
         (GnssSystem::Glonass, 'P', '2') => Some("C2P"),
-        (GnssSystem::Galileo, 'C', '1') => Some("C1C"),
-        (GnssSystem::Galileo, 'C', '2') => Some("C5Q"),
-        (GnssSystem::Galileo, 'P', '1') => Some("C1X"),
-        (GnssSystem::Galileo, 'P', '2') => Some("C5X"),
-        (GnssSystem::BeiDou, 'C', '1') => Some("C2I"),
-        (GnssSystem::BeiDou, 'C', '2') => Some("C7I"),
-        (GnssSystem::BeiDou, 'P', '1') => Some("C2I"),
-        (GnssSystem::BeiDou, 'P', '2') => Some("C6I"),
         (GnssSystem::Sbas, 'C', '1') => Some("C1C"),
         _ => None,
     }
@@ -2505,11 +2746,10 @@ fn rinex2_default_tracking_attr(system: GnssSystem, kind: char, band: char) -> c
             '3' => 'X',
             _ => 'X',
         },
-        GnssSystem::Galileo => match band {
-            '1' | '6' => 'C',
-            '5' | '7' | '8' => 'X',
-            _ => 'X',
-        },
+        // Version 2 names no channel for Galileo, so every band reads as the
+        // combined one rather than claiming a single channel that the file
+        // never stated.
+        GnssSystem::Galileo => 'X',
         GnssSystem::BeiDou => match band {
             '2' | '6' | '7' => 'I',
             '1' => 'P',
@@ -2518,8 +2758,7 @@ fn rinex2_default_tracking_attr(system: GnssSystem, kind: char, band: char) -> c
         },
         GnssSystem::Qzss => match band {
             '1' => 'C',
-            '2' => 'L',
-            '5' | '6' => 'X',
+            // L2C, whose channel version 2 does not name.
             _ => 'X',
         },
         GnssSystem::Navic => match band {
