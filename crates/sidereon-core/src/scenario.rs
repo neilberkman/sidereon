@@ -1201,6 +1201,8 @@ impl SyntheticObservationSet {
                 approx_position_m,
                 antenna_delta_hen_m: None,
                 obs_codes,
+                rinex2_types: Vec::new(),
+                rinex2_system: None,
                 program_run_by_date: Some(PgmRunByDate {
                     program: "SIDEREON-SCENARIO".to_string(),
                     run_by: "sidereon-core".to_string(),
@@ -1246,7 +1248,13 @@ impl SyntheticObservationSet {
     }
 
     /// Serialize the synthetic observations to RINEX OBS text.
-    pub fn to_rinex_string(&self) -> String {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::rinex_obs::RinexObsWriteError`] when the observation
+    /// product would not read back as itself, for example a value its column
+    /// cannot hold exactly.
+    pub fn to_rinex_string(&self) -> Result<String, crate::rinex_obs::RinexObsWriteError> {
         self.to_rinex_observation_file().to_rinex_string()
     }
 
@@ -2746,7 +2754,7 @@ mod tests {
     fn rinex_export_reparses_to_same_observables() {
         let set = simulate_scenario(&base_scenario()).expect("simulate");
         let rinex = set.to_rinex_observation_file();
-        let text = rinex.to_rinex_string();
+        let text = rinex.to_rinex_string().expect("serialize generated RINEX");
         let reparsed = RinexObs::parse(&text).expect("parse generated RINEX");
         assert_eq!(reparsed, rinex);
         let sat = set.observations.satellite_id[0];

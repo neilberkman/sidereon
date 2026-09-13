@@ -1107,15 +1107,17 @@ pub fn repair_obs(obs: &RinexObs, options: &RepairOptions) -> ObsRepair {
     let mut repaired = obs.clone();
     let mut actions = Vec::new();
     repair_obs_order_and_duplicates(&mut repaired, &mut actions);
+    // Empty satellite records go before anything is counted from the body, so
+    // the observation count headers name only the satellites the file keeps.
+    if options.drop_empty_records {
+        repair_obs_empty_records(&mut repaired, &mut actions);
+    }
     repair_obs_times(&mut repaired, options, &mut actions);
     repair_obs_counts(&mut repaired, options, &mut actions);
     repair_obs_file_stamp(&mut repaired, options, &mut actions);
     repair_obs_unsupported_records(&mut repaired, options, &mut actions);
     if options.set_interval {
         repair_obs_interval(&mut repaired, &mut actions);
-    }
-    if options.drop_empty_records {
-        repair_obs_empty_records(&mut repaired, &mut actions);
     }
     let remaining = lint_obs(&repaired);
     ObsRepair {
@@ -1143,7 +1145,7 @@ pub fn repair_obs_text(text: &str, options: &RepairOptions) -> Result<ObsRepair>
 
 /// Encode an observation repair product as CRINEX through the existing codec.
 pub fn repair_obs_to_crinex_string(repair: &ObsRepair) -> Result<String> {
-    crinex::encode_crinex(&repair.repaired.to_rinex_string())
+    crinex::encode_crinex(&repair.repaired.to_rinex_string()?)
 }
 
 /// Repair parsed navigation records.

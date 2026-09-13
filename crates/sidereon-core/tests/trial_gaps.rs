@@ -756,7 +756,10 @@ fn repair_obs_text_outputs_strict_parseable_headers_for_trial_whitespace_cases()
 
     for case in cases {
         let repair = repair_obs_text(&case, &RepairOptions::default()).expect("repair OBS text");
-        let output = repair.repaired.to_rinex_string();
+        let output = repair
+            .repaired
+            .to_rinex_string()
+            .expect("serialize RINEX OBS");
         assert_strict_header_columns(&output);
         RinexObs::parse(&output).expect("repaired output strict parses");
     }
@@ -775,7 +778,7 @@ fn obs_writer_wraps_scale_factors_and_prn_counts_without_truncation() {
         13
     );
 
-    let output = obs.to_rinex_string();
+    let output = obs.to_rinex_string().expect("serialize RINEX OBS");
     assert_eq!(
         output
             .lines()

@@ -347,6 +347,17 @@ pub struct ObsHeader {
     pub antenna_delta_hen_m: Option<[f64; 3]>,
     /// Per-constellation observation-code list, in declared order.
     pub obs_codes: BTreeMap<GnssSystem, Vec<String>>,
+    /// The version 2 `# / TYPES OF OBSERV` names as read, in order, and empty at
+    /// version 3. A version 2 file lists one set of names for every
+    /// constellation, so a constellation's codes are what these names read as
+    /// for it - including a constellation a `PRN / # OF OBS` count names that
+    /// holds no list in [`ObsHeader::obs_codes`] because no observation names
+    /// it.
+    pub rinex2_types: Vec<String>,
+    /// The constellation a version 2 file's version record names, and `None`
+    /// for a mixed file or at version 3. With no observations, a version 2 file
+    /// states the list of this constellation, or GPS for a mixed file.
+    pub rinex2_system: Option<GnssSystem>,
     /// Program/run-by/date header record.
     pub program_run_by_date: Option<PgmRunByDate>,
     /// Header comments retained in file order.
@@ -952,6 +963,12 @@ impl Parser {
                 "COMMENT" => self.comments.push(field(line, 0, 60).trim().to_string()),
                 "APPROX POSITION XYZ" => self.parse_approx_position(line)?,
                 "ANTENNA: DELTA H/E/N" => self.parse_antenna_delta(line)?,
+                // A version 2 file's observation records are laid out by its own
+                // `# / TYPES OF OBSERV` list; this version 3 record does not
+                // describe them, so it is reported as not retained.
+                "SYS / # / OBS TYPES" if self.is_rinex2() => {
+                    self.unretained_header_labels.push(label.to_string());
+                }
                 "SYS / # / OBS TYPES" => self.parse_obs_types(line)?,
                 "# / TYPES OF OBSERV" => self.parse_obs_types_v2(line)?,
                 "SYS / SCALE FACTOR" => self.parse_scale_factor(line)?,
@@ -1023,6 +1040,17 @@ impl Parser {
                     });
                 }
                 "END OF HEADER" => {
+                    // Version 3 type records read before the version record said
+                    // version 2 do not describe its observation records either.
+                    if self.is_rinex2()
+                        && (!self.obs_codes.is_empty() || self.obs_codes_remaining > 0)
+                    {
+                        self.obs_codes.clear();
+                        self.obs_codes_remaining = 0;
+                        self.current_obs_sys = None;
+                        self.unretained_header_labels
+                            .push("SYS / # / OBS TYPES".to_string());
+                    }
                     self.ensure_obs_type_count_complete(line)?;
                     self.ensure_obs_type_count_complete_v2(line)?;
                     self.ensure_scale_factor_count_complete(line)?;
@@ -1652,7 +1680,14 @@ impl Parser {
             };
             sat
         } else {
-            let Some(sat) = parse_sv_token(token) else {
+            // A version 2 file may leave the constellation letter blank, which
+            // means the one its header names.
+            let parsed = if self.is_rinex2() {
+                self.parse_sv_token_v2(token)
+            } else {
+                parse_sv_token(token)
+            };
+            let Some(sat) = parsed else {
                 self.prn_obs_counts_current = None;
                 self.push_unrepresentable_satellite_skip(token);
                 return Ok(());
@@ -1660,7 +1695,14 @@ impl Parser {
             self.prn_obs_counts_current = Some(sat);
             sat
         };
-        let count = self.obs_codes.get(&sat.system).map_or(0, Vec::len);
+        // A version 2 header names its codes once for the whole file, and the
+        // per-constellation lists are not built until the body is read, so the
+        // count comes from that one list while the header is still being read.
+        let count = if self.is_rinex2() {
+            self.rinex2_obs_codes.len() + self.rinex2_obs_codes_remaining
+        } else {
+            self.obs_codes.get(&sat.system).map_or(0, Vec::len)
+        };
         let already = self.prn_obs_counts.get(&sat).map_or(0, Vec::len);
         let remaining = count.saturating_sub(already);
         let mut values = Vec::with_capacity(remaining.min(9));
@@ -1746,6 +1788,16 @@ impl Parser {
                     self.push_unrepresentable_satellite_skip(field(&normalized, 0, 3));
                     consume_skipped_sat_continuations(lines);
                     continue;
+                }
+                // A version 2 file's observation records are read by its own
+                // type list, epoch records in version 3 layout included.
+                if self.is_rinex2() {
+                    // With no list there is nothing to read them by, as for
+                    // records in version 2 layout.
+                    self.rinex2_obs_lines_per_sat()?;
+                    if let Some(sat) = parse_sv_token(field(&normalized, 0, 3)) {
+                        self.ensure_rinex2_system_obs_codes(sat.system);
+                    }
                 }
                 let sat_record = self.collect_sat_record(sat_line, lines)?;
                 let (sat, values) = self.parse_sat_line(&sat_record)?;
@@ -2009,6 +2061,16 @@ impl Parser {
             approx_position_m: self.approx_position_m,
             antenna_delta_hen_m: self.antenna_delta_hen_m,
             obs_codes,
+            rinex2_types: if version.floor() as i64 == 2 {
+                self.rinex2_obs_codes
+            } else {
+                Vec::new()
+            },
+            rinex2_system: if version.floor() as i64 == 2 {
+                self.rinex2_default_system
+            } else {
+                None
+            },
             program_run_by_date: self.program_run_by_date,
             comments: self.comments,
             marker_number: self.marker_number,
@@ -2597,6 +2659,13 @@ fn rinex2_system_obs_codes(system: GnssSystem, names: &[String], version: f64) -
     held
 }
 
+/// Whether a code is a version 2 name kept as written rather than a code a
+/// name reads as: one or two bytes, what a version 2 `A2` type field holds.
+/// Every code a name reads as is three characters.
+pub(crate) fn rinex2_kept_as_written(code: &str) -> bool {
+    matches!(code.len(), 1 | 2)
+}
+
 /// What a constellation reads the next version 2 name as, given the codes the
 /// names before it gave: the canonical code the first time a name it carries
 /// reads as that code, the name as written otherwise. The one rule
@@ -2746,6 +2815,86 @@ pub(crate) fn rinex2_name_allowed(system: GnssSystem, name: &str, version: f64) 
     bands.contains(&band)
 }
 
+/// Every RINEX 2 observation code a system's canonical code was mapped from,
+/// in the order a writer should prefer them.
+///
+/// The mapping into canonical codes is not injective - BeiDou's `C1` and `P1`
+/// both become `C2I`, and Galileo's `C5` and `P2` both become `C5X` - so this
+/// does not recover the text a file carried. Each name it returns maps forward
+/// to the same canonical code, which is what a version 2 file has to carry for
+/// the product to survive being written and read again;
+/// `rinex2_code_round_trips_through_its_canonical_form` holds the two together.
+///
+/// A name spelling the canonical code's own kind and band comes first, so a
+/// Galileo `C5X` is written `C5` rather than the alias `P2`, which no reader
+/// outside this crate defines for Galileo. The rest follow as alternatives, for
+/// a caller that needs one name several constellations can read.
+///
+/// A canonical code no version 2 name maps to - one a version 3 file named, on
+/// a product whose version was then set below 3 - yields its kind and band
+/// alone, losing the tracking attribute, which is the most a version 2 code can
+/// say. `C1X` becomes `C1`, and reads back as this system's default tracking on
+/// band 1. The list is empty only for a code that is not three characters, so
+/// it did not come from RINEX at all.
+fn rinex2_obs_code_candidates(system: GnssSystem, canonical: &str, version: f64) -> Vec<String> {
+    let kinds: &[char] = match system {
+        GnssSystem::Gps | GnssSystem::Glonass => &['C', 'P', 'L', 'D', 'S'],
+        _ => &['C', 'L', 'D', 'S'],
+    };
+    const BANDS: [char; 9] = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
+    let mut chars = canonical.chars();
+    let own = match (chars.next(), chars.next(), chars.next(), chars.next()) {
+        (Some(kind), Some(band), Some(_), None) => Some((kind, band)),
+        _ => None,
+    };
+    let mut names: Vec<String> = Vec::new();
+    if let Some((kind, band)) = own {
+        let digit = rinex2_digit_for_band(system, band);
+        // A canonical `C` may have been written `C` or `P` in version 2.
+        let spellings: &[char] = if kind == 'C' && kinds.contains(&'P') {
+            &['C', 'P']
+        } else {
+            std::slice::from_ref(&kind)
+        };
+        for spelling in spellings {
+            let name = format!("{spelling}{digit}");
+            if rinex2_name_allowed(system, &name, version)
+                && canonical_rinex2_obs_code(system, &name, version) == canonical
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+    }
+    // From 2.12 the civil signals have letters of their own, and a product
+    // holding one of those signals is written back under its letter rather
+    // than under a digit that names the P code.
+    let letters: &[char] = if version >= RINEX2_LETTERED_NAMES_VERSION {
+        &['A', 'B', 'C', 'D']
+    } else {
+        &[]
+    };
+    for kind in kinds {
+        for band in BANDS.iter().chain(letters) {
+            let name = format!("{kind}{band}");
+            if rinex2_name_allowed(system, &name, version)
+                && canonical_rinex2_obs_code(system, &name, version) == canonical
+                && !names.contains(&name)
+            {
+                names.push(name);
+            }
+        }
+    }
+    if names.is_empty() {
+        if let Some((kind, band)) = own {
+            // The band comes back as the digit that names it, so dropping an
+            // attribute version 2 cannot carry does not also move the band.
+            names.push(format!("{kind}{}", rinex2_digit_for_band(system, band)));
+        }
+    }
+    names
+}
+
 /// Width of a version 2 observation type, the `A2` of `9(4X,A2)`.
 const OBS_TYPE_V2_WIDTH: usize = 2;
 /// Columns the `# / TYPES OF OBSERV` count occupies before its codes, `I6`.
@@ -2767,6 +2916,19 @@ fn rinex2_band(system: GnssSystem, band: char) -> char {
         // 1 instead. B2I is slot 7 and B3I slot 6, which RINEX 3 numbers the
         // same, so those digits need nothing.
         (GnssSystem::BeiDou, '1' | '2') => '2',
+        _ => band,
+    }
+}
+
+/// The version 2 digit that names a band, the inverse of [`rinex2_band`].
+///
+/// A writer needs this wherever it builds a name from a canonical code's own
+/// band rather than from a name it already checked. Without it a BeiDou `C2Q`
+/// would be written `C2`, which reads back as B2I: the band changed to keep an
+/// attribute version 2 cannot carry anyway.
+fn rinex2_digit_for_band(system: GnssSystem, band: char) -> char {
+    match (system, band) {
+        (GnssSystem::BeiDou, '2') => '2',
         _ => band,
     }
 }
@@ -3203,6 +3365,7 @@ fn digit_at(line: &str, col: usize) -> Option<u8> {
 }
 
 mod write;
+pub use write::RinexObsWriteError;
 
 #[cfg(all(test, sidereon_repo_tests))]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
