@@ -295,7 +295,8 @@ pub struct ObsLeapSeconds {
 pub struct ObsEpoch {
     /// Civil epoch in the header time scale.
     pub epoch: ObsEpochTime,
-    /// Epoch flag: 0 = OK, 1 = power failure, >1 = an event record (skipped).
+    /// Epoch flag: 0 = OK, 1 = power failure, >1 = an event record, whose own
+    /// records are in [`ObsEpoch::special_records`].
     pub flag: u8,
     /// Optional receiver clock offset from the epoch line, seconds.
     pub rcv_clock_offset_s: Option<f64>,
@@ -303,8 +304,14 @@ pub struct ObsEpoch {
     pub epoch_picoseconds: Option<u32>,
     /// Satellite/special-record count declared on the epoch line.
     pub declared_record_count: usize,
-    /// Number of special records declared by an event epoch.
-    pub special_record_count: usize,
+    /// The records an event epoch (flag above 1) carried, as they were written.
+    ///
+    /// A flag 3 epoch is followed by the header records for a new site
+    /// occupation - its marker, antenna and position - and a flag 4 epoch by
+    /// comments. They are kept verbatim rather than parsed, because what they
+    /// mean depends on the labels they carry, and written back unchanged. Empty
+    /// for an ordinary observation epoch.
+    pub special_records: Vec<String>,
     /// Satellite → observation values, ascending satellite id. The value vector
     /// is index-aligned to [`ObsHeader::obs_codes`] for that satellite's system.
     pub sats: BTreeMap<GnssSatelliteId, Vec<ObsValue>>,
@@ -1677,21 +1684,17 @@ impl Parser {
                 parse_epoch_line(line, civil_second_policy_for_time_scale(time_scale))?;
 
             if flag > 1 {
-                // Event record: the next `numsat` lines are header/comment
-                // records, not observations. Consume and skip them, keeping a
-                // placeholder epoch so indices stay meaningful.
-                for _ in 0..numsat {
-                    lines
-                        .next()
-                        .ok_or_else(|| Error::Parse("RINEX OBS event record truncated".into()))?;
-                }
+                // Event record: the next `numsat` lines are header or comment
+                // records, not observations. They are kept as they were written
+                // so the epoch can be written back whole.
+                let special_records = take_special_records(lines, numsat)?;
                 self.epochs.push(ObsEpoch {
                     epoch: epoch_time,
                     flag,
                     rcv_clock_offset_s,
                     epoch_picoseconds,
                     declared_record_count: numsat,
-                    special_record_count: numsat,
+                    special_records,
                     sats: BTreeMap::new(),
                 });
                 continue;
@@ -1738,7 +1741,7 @@ impl Parser {
                 rcv_clock_offset_s,
                 epoch_picoseconds,
                 declared_record_count: numsat,
-                special_record_count: 0,
+                special_records: Vec::new(),
                 sats,
             });
         }
@@ -1761,18 +1764,14 @@ impl Parser {
                 parse_epoch_line_v2(line, civil_second_policy_for_time_scale(time_scale))?;
 
             if flag > 1 {
-                for _ in 0..numsat {
-                    lines
-                        .next()
-                        .ok_or_else(|| Error::Parse("RINEX OBS event record truncated".into()))?;
-                }
+                let special_records = take_special_records(lines, numsat)?;
                 self.epochs.push(ObsEpoch {
                     epoch: epoch_time,
                     flag,
                     rcv_clock_offset_s,
                     epoch_picoseconds: None,
                     declared_record_count: numsat,
-                    special_record_count: numsat,
+                    special_records,
                     sats: BTreeMap::new(),
                 });
                 continue;
@@ -1804,7 +1803,7 @@ impl Parser {
                 rcv_clock_offset_s,
                 epoch_picoseconds: None,
                 declared_record_count: numsat,
-                special_record_count: 0,
+                special_records: Vec::new(),
                 sats,
             });
         }
@@ -2497,6 +2496,7 @@ fn parse_sv_token_v2(token: &str, default_system: GnssSystem) -> Option<GnssSate
     GnssSatelliteId::new(system, prn).ok()
 }
 
+/// Take the records an event epoch declared, as they were written.
 /// The codes one constellation reads from a version 2 file's single list.
 ///
 /// Version 2 names its codes once for every constellation at once, and a
@@ -2539,6 +2539,20 @@ pub(crate) fn rinex2_next_obs_code(
     } else {
         name.to_string()
     }
+}
+
+fn take_special_records<'a, I: Iterator<Item = &'a str>>(
+    lines: &mut std::iter::Peekable<I>,
+    count: usize,
+) -> Result<Vec<String>> {
+    let mut records = Vec::with_capacity(count);
+    for _ in 0..count {
+        let line = lines
+            .next()
+            .ok_or_else(|| Error::Parse("RINEX OBS event record truncated".into()))?;
+        records.push(line.trim_end_matches(['\r', '\n']).to_string());
+    }
+    Ok(records)
 }
 
 fn canonical_rinex2_obs_code(system: GnssSystem, code: &str, version: f64) -> String {

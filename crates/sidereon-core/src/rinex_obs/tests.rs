@@ -1757,6 +1757,28 @@ fn a_version_two_value_with_more_than_three_decimals_is_refused() {
 }
 
 #[test]
+fn a_version_three_event_epoch_keeps_its_records_too() {
+    let text = concat!(
+        "     3.05           OBSERVATION DATA    M                   RINEX VERSION / TYPE\n",
+        "G    1 C1C                                                  SYS / # / OBS TYPES\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 01 01 00 00  0.0000000  4  1\n",
+        "a comment carried by the event                              COMMENT\n",
+        "> 2020 01 01 00 00 30.0000000  0  1\n",
+        "G01      20000000.000\n",
+    );
+    let obs = RinexObs::parse(text).expect("parse a version 3 file with an event");
+    assert_eq!(
+        obs.epochs()[0].special_records,
+        vec!["a comment carried by the event                              COMMENT".to_string()]
+    );
+    let encoded = obs.to_rinex_string();
+    assert!(encoded.contains("a comment carried by the event"));
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs(), obs.epochs());
+}
+
+#[test]
 fn a_version_two_product_reads_back_the_output_it_writes() {
     // A version 2 file is re-emitted through the version 3 record writer, so its
     // own output declares version 2 while carrying `>` epoch records. Reading

@@ -2096,7 +2096,7 @@ NONE
             rcv_clock_offset_s: None,
             epoch_picoseconds: None,
             declared_record_count: sats.len(),
-            special_record_count: if flag > 1 { sats.len() } else { 0 },
+            special_records: Vec::new(),
             sats,
         }
     }

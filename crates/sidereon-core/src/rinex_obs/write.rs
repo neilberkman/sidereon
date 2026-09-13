@@ -12,9 +12,9 @@
 //! their absence does not change the re-parsed product. Observation values use
 //! the `F14.3` width the files carry, and any `SYS / SCALE FACTOR` in force is
 //! re-applied before formatting (the inverse of the parser's divide), so a value
-//! read from a real file re-encodes to the same `f64`. Event records (epoch flag
-//! greater than one) retain only their flag and civil epoch, so they are written
-//! with a zero special-record count.
+//! read from a real file re-encodes to the same `f64`. An event record (epoch
+//! flag greater than one) keeps the records that followed it as they were
+//! written, and they are written back unchanged under their own count.
 
 use core::fmt::Write as _;
 
@@ -178,9 +178,14 @@ impl RinexObs {
 
     fn write_epoch(&self, out: &mut String, epoch: &ObsEpoch) {
         let t = epoch.epoch;
-        // Event records (flag > 1) keep only their flag and epoch in the IR, so
-        // no special records follow; flag 0/1 carry the satellite observations.
-        let count = if epoch.flag > 1 { 0 } else { epoch.sats.len() };
+        // An event (flag > 1) declares how many of its own records follow;
+        // flag 0 and 1 declare their satellites and carry observations.
+        // An event declares the records that follow it.
+        let count = if epoch.flag > 1 {
+            epoch.special_records.len()
+        } else {
+            epoch.sats.len()
+        };
         let picoseconds = epoch
             .epoch_picoseconds
             .map(|value| format!(" {value:05}"))
@@ -198,6 +203,9 @@ impl RinexObs {
             t.year, t.month, t.day, t.hour, t.minute, t.second, epoch.flag, count
         );
         if epoch.flag > 1 {
+            for record in &epoch.special_records {
+                let _ = writeln!(out, "{record}");
+            }
             return;
         }
         for (sat, values) in &epoch.sats {
