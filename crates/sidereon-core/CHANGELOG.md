@@ -4,6 +4,21 @@ All notable changes to `sidereon-core` are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking.** `ObsEpoch` carries `special_records`, the records an event epoch
+  was followed by, in place of `special_record_count`. An event epoch is
+  followed by header or comment records - a flag 3 epoch by the marker, antenna
+  and position of a new site occupation - and those were counted and thrown
+  away. The epoch was then written back declaring zero, so a file that changed
+  site lost what it changed to, and nothing said so. They are kept as they were
+  written, and written back under their own count.
+- **Breaking.** The `OBS-B11` quality-control finding is gone. It reported that
+  an event epoch's records were not retained, which is no longer true of any
+  file. Repairing a file that has them no longer fails: it used to refuse rather
+  than drop them, and now it carries them. `drop_unsupported` still drops them
+  and still reports having done so.
+
 ### Fixed
 
 - GPS `C2` is the L2C pseudorange below version 2.12 and the L2P(Y) pseudorange
