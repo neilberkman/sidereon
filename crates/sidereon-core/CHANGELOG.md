@@ -296,6 +296,11 @@ All notable changes to `sidereon-core` are documented here.
   position it held in its own constellation's list. Two columns naming the same
   code are folded into one wherever no constellation needs both, so two lists
   holding the same signals in a different order no longer double the header.
+- The RINEX observation reader refuses a `# / TYPES OF OBSERV` or
+  `SYS / # / OBS TYPES` continuation record that continues no declared list. A
+  version 2 record with a blank count and codes, before any count or after a
+  complete list, and a version 3 record with a blank system field before any
+  system, were skipped with their codes.
 - The RINEX observation reader takes the records the format lays out in fixed
   columns from those columns, rather than by splitting the line on whitespace.
   Whitespace cannot read a record whose field fills its width, because it then

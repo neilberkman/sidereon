@@ -1172,7 +1172,14 @@ impl Parser {
             self.obs_codes.entry(system).or_default();
         }
         let Some(system) = self.current_obs_sys else {
-            return Ok(());
+            // A blank system field continues the list declared before it, and
+            // before any there is none: its codes would belong to no system.
+            if field(line, 7, 60).trim().is_empty() {
+                return Ok(());
+            }
+            return Err(Error::Parse(format!(
+                "RINEX OBS SYS / # / OBS TYPES continuation record continues no declared list, in {line:?}"
+            )));
         };
         // Codes occupy 4-wide fields (" CCC") from column 7; collect up to the
         // remaining count.
@@ -1196,8 +1203,19 @@ impl Parser {
 
     fn parse_obs_types_v2(&mut self, line: &str) -> Result<()> {
         if field(line, 0, 6).trim().is_empty() {
+            // A blank count continues the list declared before it. With no
+            // codes left to declare there is nothing to continue, and codes on
+            // the record would be dropped without a word.
             if self.rinex2_obs_codes_remaining == 0 {
-                return Ok(());
+                if field(line, OBS_TYPE_V2_COUNT_WIDTH, write::HEADER_CONTENT_WIDTH)
+                    .trim()
+                    .is_empty()
+                {
+                    return Ok(());
+                }
+                return Err(Error::Parse(format!(
+                    "RINEX OBS # / TYPES OF OBSERV continuation record continues no declared list with codes left, in {line:?}"
+                )));
             }
         } else {
             self.ensure_obs_type_count_complete_v2(line)?;
