@@ -166,11 +166,25 @@ fn overflowing_v3_crinex() -> String {
         v3_single_sat_epoch_line(),
         String::new(),
         "1&9223372036854775807".to_string(),
-        v3_single_sat_epoch_line(),
+        // An unchanged descriptor, not a reset, so G01 keeps its arc.
+        " ".to_string(),
         String::new(),
         "1".to_string(),
     ]
     .join("\n")
+}
+
+#[test]
+fn a_satellite_after_a_reset_epoch_starts_a_new_arc() {
+    // `crx2rnx` reads every satellite of a reset epoch as new, so a difference
+    // there continues no arc; it used to continue the one before the reset.
+    let text =
+        overflowing_v3_crinex().replace("\n \n", &format!("\n{}\n", v3_single_sat_epoch_line()));
+    let err = decode(&text).unwrap_err();
+    assert!(
+        matches!(err, Error::Parse(ref msg) if msg.contains("delta before any arc init")),
+        "{err}"
+    );
 }
 
 fn corrupt_header_field(text: String, label: &str, start: usize, end: usize) -> String {
@@ -363,6 +377,49 @@ fn a_version_two_type_list_continued_past_nine_codes_is_compressed_and_expanded(
     assert_eq!(lines(&expanded), lines(&rinex));
 }
 
+fn obs_fixture(name: &str) -> String {
+    let path = format!("{}/tests/fixtures/obs/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read fixture {path}: {e}"))
+}
+
+fn assert_same_lines(found: &str, expected: &str, what: &str) {
+    let found: Vec<&str> = found.lines().collect();
+    let expected: Vec<&str> = expected.lines().collect();
+    for (index, (found, expected)) in found.iter().zip(&expected).enumerate() {
+        assert_eq!(found, expected, "{what}: line {}", index + 1);
+    }
+    assert_eq!(found.len(), expected.len(), "{what}: line count");
+}
+
+#[test]
+fn flags_and_arcs_carry_only_where_crx2rnx_carries_them() {
+    // Review found expansion carrying a CRINEX 1 observation's flags across an
+    // epoch where it was missing, so an observation flagged, then missing, then
+    // back unflagged came back flagged. Each `.crx` was compressed from its
+    // `.rnx` by RNX2CRX 4.2.0, and CRX2RNX 4.2.0 expands it back to that `.rnx`
+    // byte for byte. Each has flags that repeat, a flagged observation missing
+    // and back unflagged, a satellite missing from an epoch and back, and a
+    // flag 4 event declaring a longer type list on two records; the version 3
+    // file also has blank fields carrying flags.
+    for version in ["v2", "v3"] {
+        let rinex = obs_fixture(&format!("crinex_flag_state_{version}.rnx"));
+        let expanded = decode(&obs_fixture(&format!("crinex_flag_state_{version}.crx")))
+            .unwrap_or_else(|e| panic!("{version}: expand the RNX2CRX file: {e}"));
+        assert_same_lines(&expanded, &rinex, version);
+
+        let compressed =
+            encode_crinex(&rinex).unwrap_or_else(|e| panic!("{version}: compress: {e}"));
+        let expanded = decode(&compressed).unwrap_or_else(|e| panic!("{version}: expand: {e}"));
+        assert_same_lines(&expanded, &rinex, version);
+        let stream = parse_stream(&compressed).expect("read the compression");
+        assert_eq!(
+            parse_stream(&encode_stream(&stream)).expect("read it again"),
+            stream,
+            "{version}"
+        );
+    }
+}
+
 #[test]
 fn type_records_that_continue_no_list_or_end_short_are_refused() {
     // Review built the first two: a blank-count record before any count, and one
@@ -466,6 +523,29 @@ fn type_records_that_continue_no_list_or_end_short_are_refused() {
     .join("\n")
         + "\n";
     encode_crinex(&replaced).expect("a replacing declaration is read");
+}
+
+#[test]
+fn a_version_two_blank_field_carrying_flags_is_refused() {
+    // CRINEX 1 holds no flags for a blank field, so compressing them would lose
+    // them; `rnx2crx` refuses the same field.
+    let rinex = [
+        labeled_header_line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        labeled_header_line("     2    C1    L1", "# / TYPES OF OBSERV"),
+        labeled_header_line("", "END OF HEADER"),
+        " 20  1  1  0  0  0.0000000  0  1G01".to_string(),
+        format!("{:14.3}  {:14}17", 20_000_000.125, ""),
+        String::new(),
+    ]
+    .join("\n");
+    let error = encode_crinex(&rinex).expect_err("flags on a blank field are refused");
+    assert!(
+        matches!(error, Error::Parse(ref msg) if msg.contains("flags but no value")),
+        "{error}"
+    );
 }
 
 #[test]

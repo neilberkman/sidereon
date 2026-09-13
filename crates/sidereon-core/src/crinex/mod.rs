@@ -340,6 +340,10 @@ struct Decoder {
     /// list declared last. A continuation record with none to come continues
     /// no list.
     types_left: usize,
+    /// The satellites the previous observation epoch carried. Only they keep
+    /// their difference state: `crx2rnx` starts every other satellite, and
+    /// every satellite after a reset or an event epoch, anew.
+    previous_svs: Vec<String>,
 }
 
 impl Decoder {
@@ -353,6 +357,7 @@ impl Decoder {
             obs_diff: HashMap::new(),
             flag_diff: HashMap::new(),
             types_left: 0,
+            previous_svs: Vec::new(),
         }
     }
 
@@ -524,6 +529,18 @@ impl Decoder {
         self.close_type_list("the end of an event record")
     }
 
+    /// Keep the difference state of the satellites the previous epoch carried
+    /// and drop every other satellite's, as `crx2rnx` does: a satellite missing
+    /// from the previous epoch starts new arcs and new flags.
+    fn carry_satellite_state(&mut self, svs: &[String]) {
+        let previous = std::mem::take(&mut self.previous_svs);
+        self.obs_diff
+            .retain(|sv, _| previous.contains(sv) && svs.contains(sv));
+        self.flag_diff
+            .retain(|sv, _| previous.contains(sv) && svs.contains(sv));
+        self.previous_svs = svs.to_vec();
+    }
+
     /// Scan a plain RINEX observation header (no CRINEX wrapper): collect the
     /// header lines verbatim up to and including `END OF HEADER`, set the stream
     /// revision from `RINEX VERSION / TYPE`, and record the per-system
@@ -618,7 +635,8 @@ impl Decoder {
         // the delta lines' column offsets line up with the full RINEX-3 epoch line
         // (the seconds digits sit one column to the right of where they would be
         // in a '>'-stripped buffer).
-        let descriptor = if raw.starts_with('>') {
+        let reset = raw.starts_with('>');
+        let descriptor = if reset {
             self.epoch_diff.force_init(raw);
             self.epoch_diff.decompress("")
         } else {
@@ -644,6 +662,7 @@ impl Decoder {
                 event_lines.push(extra.trim_end_matches(['\r', '\n']).to_string());
             }
             self.classify_event_lines(&event_lines)?;
+            self.previous_svs.clear();
             return Ok(Some(EpochRecord::Event {
                 descriptor,
                 lines: event_lines,
@@ -658,6 +677,10 @@ impl Decoder {
         let clock = self.decode_clock_value(clock_line)?;
 
         let sv_list = self.sv_tokens_v3(&descriptor, numsat)?;
+        if reset {
+            self.previous_svs.clear();
+        }
+        self.carry_satellite_state(&sv_list);
         let mut sats = Vec::with_capacity(sv_list.len());
         for sv in &sv_list {
             let data_line = lines.next().ok_or_else(|| {
@@ -769,6 +792,16 @@ impl Decoder {
             values.push(Some(recovered));
         }
 
+        // A blank field ends its arc: `crx2rnx` refuses a difference after one,
+        // and `rnx2crx` starts a new arc there.
+        if let Some(engines) = self.obs_diff.get_mut(sv) {
+            for (slot, value) in engines.iter_mut().zip(&values) {
+                if value.is_none() {
+                    *slot = None;
+                }
+            }
+        }
+
         // The flag string is whatever remains. In RNX2CRX output the flags are
         // separated from the last observation token by a single space.
         let flag_raw = if cursor < bytes.len() {
@@ -777,11 +810,31 @@ impl Decoder {
         } else {
             ""
         };
-        let flags = self
-            .flag_diff
-            .entry(sv.to_string())
-            .or_default()
-            .decompress(flag_raw);
+        let version = self.version;
+        let width = n_obs * 2;
+        let carried = self.flag_diff.contains_key(sv);
+        let engine = self.flag_diff.entry(sv.to_string()).or_default();
+        if carried {
+            // `crx2rnx` takes a carried satellite's flags for this epoch's
+            // observations only.
+            engine.buffer.truncate(width);
+        }
+        engine.decompress(flag_raw);
+        if version == CrinexVersion::V1 {
+            // CRINEX 1 flags span every observation, and a blank observation's
+            // flags are blank: `crx2rnx` blanks them, and `rnx2crx` differences
+            // the next epoch's flags against blanks there.
+            if engine.buffer.len() < width {
+                engine.buffer.resize(width, b' ');
+            }
+            for (index, value) in values.iter().enumerate() {
+                if value.is_none() {
+                    engine.buffer[index * 2] = b' ';
+                    engine.buffer[index * 2 + 1] = b' ';
+                }
+            }
+        }
+        let flags = String::from_utf8_lossy(&engine.buffer).into_owned();
 
         Ok((values, flags))
     }
@@ -827,6 +880,9 @@ impl Decoder {
     fn decode_clock_value(&mut self, line: &str) -> Result<Option<i64>> {
         let token = line.trim();
         if token.is_empty() {
+            // An epoch with no clock ends the clock's arc, as it does for
+            // `rnx2crx`, which starts a new one at the next clock.
+            self.clock_diff = None;
             return Ok(None);
         }
         let value = if let Some((order, v)) = parse_reset(token)? {
@@ -877,6 +933,7 @@ impl Decoder {
         // Mirror that: seed the engine with the leading space (on reset) so both
         // the reconstruction and the standard column offsets are right. A V1
         // epoch descriptor reset is marked by a leading '&'.
+        let reset = raw.starts_with('&');
         let descriptor = if let Some(stripped) = raw.strip_prefix('&') {
             self.epoch_diff.force_init(&format!(" {stripped}"));
             self.epoch_diff.decompress("")
@@ -900,6 +957,7 @@ impl Decoder {
                 event_lines.push(extra.trim_end_matches(['\r', '\n']).to_string());
             }
             self.classify_event_lines(&event_lines)?;
+            self.previous_svs.clear();
             return Ok(Some(EpochRecord::Event {
                 descriptor,
                 lines: event_lines,
@@ -914,6 +972,10 @@ impl Decoder {
         let clock = self.decode_clock_value(clock_line)?;
 
         let sv_list = self.sv_tokens_v1(&descriptor, numsat)?;
+        if reset {
+            self.previous_svs.clear();
+        }
+        self.carry_satellite_state(&sv_list);
         let mut sats = Vec::with_capacity(sv_list.len());
         for sv in &sv_list {
             let data_line = lines.next().ok_or_else(|| {
@@ -1171,7 +1233,7 @@ fn parse_sat_obs_v3(line: &str, n_obs: usize) -> Result<(Vec<Option<i64>>, Strin
     let mut flags = String::with_capacity(n_obs * 2);
     for i in 0..n_obs {
         let base = 3 + i * OBS_FIELD_WIDTH;
-        read_obs_field(line, base, &mut values, &mut flags)?;
+        read_obs_field(line, base, true, &mut values, &mut flags)?;
     }
     Ok((values, flags))
 }
@@ -1184,24 +1246,35 @@ fn parse_sat_obs_v1(obs_lines: &[String], n_obs: usize) -> Result<(Vec<Option<i6
     for i in 0..n_obs {
         let line = obs_lines.get(i / 5).map_or("", String::as_str);
         let base = (i % 5) * OBS_FIELD_WIDTH;
-        read_obs_field(line, base, &mut values, &mut flags)?;
+        read_obs_field(line, base, false, &mut values, &mut flags)?;
     }
     Ok((values, flags))
 }
 
 /// Read one observation field at column `base` of `line`, pushing the recovered
 /// value (or `None` for a blank column) and its two LLI/SSI flag characters.
+/// A blank RINEX-3 field keeps the flags written beside it, which CRINEX 3
+/// carries. CRINEX 1 carries none for a blank field, so a RINEX-2 blank field
+/// with flags, which `rnx2crx` also refuses, is refused (`flags_on_blank` false).
 fn read_obs_field(
     line: &str,
     base: usize,
+    flags_on_blank: bool,
     values: &mut Vec<Option<i64>>,
     flags: &mut String,
 ) -> Result<()> {
     let value_text = field(line, base, base + OBS_VALUE_WIDTH);
     if value_text.trim().is_empty() {
+        let lli = char_at_or_space(line, base + OBS_VALUE_WIDTH);
+        let ssi = char_at_or_space(line, base + OBS_VALUE_WIDTH + 1);
+        if !flags_on_blank && (lli != ' ' || ssi != ' ') {
+            return Err(Error::Parse(format!(
+                "RINEX-2 observation field carries flags but no value, which CRINEX 1 cannot hold: {line:?}"
+            )));
+        }
         values.push(None);
-        flags.push(' ');
-        flags.push(' ');
+        flags.push(lli);
+        flags.push(ssi);
     } else {
         values.push(Some(parse_scaled_decimal(value_text, 3, "observation")?));
         flags.push(char_at_or_space(line, base + OBS_VALUE_WIDTH));
@@ -1351,9 +1424,9 @@ pub fn parse_stream(crinex_text: &str) -> Result<ObsStream> {
 /// CRINEX compression is not unique, so this emits the **canonical all-reset**
 /// form: every observation and the receiver clock are written as `1&value`
 /// arc-init tokens (no higher-order differencing) and every epoch descriptor is
-/// written as a text-diff reset. Only the per-satellite LLI/SSI flag strings are
-/// genuinely text-differenced, because the flag grammar has no inline reset
-/// marker. The result is therefore not byte-identical to an arbitrary source
+/// written as a text-diff reset. After a reset `crx2rnx` reads every satellite
+/// as new, so each satellite's LLI/SSI flags are written whole, as `rnx2crx`
+/// writes a new satellite's. The result is therefore not byte-identical to an arbitrary source
 /// CRINEX, but it is a valid CRINEX stream that decodes to exactly the same plain
 /// RINEX text. The round-trip guarantee is `decode(encode_stream(parse_stream(x)))
 /// == decode(x)` and `parse_stream(encode_stream(s)) == s`.
@@ -1375,20 +1448,14 @@ pub fn encode_stream(stream: &ObsStream) -> String {
         push_crinex_line(&mut out, header_line);
     }
 
-    let mut flag_state: HashMap<String, String> = HashMap::new();
     for epoch in &stream.epochs {
-        encode_epoch(epoch, stream.version, &mut flag_state, &mut out);
+        encode_epoch(epoch, stream.version, &mut out);
     }
     out
 }
 
 /// Emit one epoch (observation or event) in canonical all-reset CRINEX form.
-fn encode_epoch(
-    epoch: &EpochRecord,
-    version: CrinexVersion,
-    flag_state: &mut HashMap<String, String>,
-    out: &mut String,
-) {
+fn encode_epoch(epoch: &EpochRecord, version: CrinexVersion, out: &mut String) {
     match epoch {
         EpochRecord::Event { descriptor, lines } => {
             encode_descriptor(descriptor, version, out);
@@ -1408,10 +1475,8 @@ fn encode_epoch(
                 None => push_crinex_line(out, ""),
             }
             for sat in sats {
-                let previous = flag_state.entry(sat.sv.clone()).or_default();
-                let delta = text_diff_delta(previous.as_str(), &sat.flags);
-                previous.clone_from(&sat.flags);
-                push_crinex_line(out, &encode_sat_line(&sat.values, &delta));
+                let flags = new_satellite_flags(&sat.flags, version);
+                push_crinex_line(out, &encode_sat_line(&sat.values, &flags));
             }
         }
     }
@@ -1447,27 +1512,15 @@ fn encode_sat_line(values: &[Option<i64>], flag_delta: &str) -> String {
     line
 }
 
-/// Compute the CRINEX text-difference delta that transforms `previous` into
-/// `current` under [`TextDiff::decompress`]: a space keeps the buffered byte, an
-/// `&` blanks it, any other byte overwrites it, and bytes past the buffer extend
-/// it verbatim. Per-satellite flag strings never shrink across epochs (the
-/// buffer only grows), so no shortening case is needed.
-fn text_diff_delta(previous: &str, current: &str) -> String {
-    let prev = previous.as_bytes();
-    let curr = current.as_bytes();
-    let mut delta = Vec::with_capacity(curr.len());
-    for (index, &byte) in curr.iter().enumerate() {
-        let out = match prev.get(index) {
-            Some(&previous_byte) if byte == previous_byte => b' ',
-            Some(_) if byte == b' ' => b'&',
-            // New non-space byte, or a position past the previous buffer (which
-            // the decoder extends verbatim): emit the byte itself.
-            _ => byte,
-        };
-        delta.push(out);
+/// A satellite's LLI/SSI flags as a data line carries them for a satellite
+/// `crx2rnx` reads as new. CRINEX 1 lays the flags over blanks, so they are
+/// written as they are, trailing blanks dropped; CRINEX 3 starts from no flags,
+/// so a blank is written `&`, as `rnx2crx` writes it.
+fn new_satellite_flags(flags: &str, version: CrinexVersion) -> String {
+    match version {
+        CrinexVersion::V1 => flags.trim_end_matches(' ').to_string(),
+        CrinexVersion::V3 => flags.replace(' ', "&"),
     }
-    // Inputs are ASCII LLI/SSI flag strings, so this is always valid UTF-8.
-    String::from_utf8(delta).unwrap_or_default()
 }
 
 /// Push a line plus its newline to a CRINEX output buffer.
@@ -1671,16 +1724,13 @@ fn format_sat_line(sv: &str, values: &[Option<i64>], flags: &str) -> String {
                 }
             }
         }
-        // LLI + SSI from the flag string (2 chars per observation).
+        // LLI + SSI from the flag string (2 chars per observation). CRINEX 3
+        // evaluates flags independently of the value, so `crx2rnx` writes them
+        // beside a blank field too.
         let lli = flag_bytes.get(i * 2).copied().unwrap_or(b' ');
         let ssi = flag_bytes.get(i * 2 + 1).copied().unwrap_or(b' ');
-        if value.is_some() {
-            out.push(lli as char);
-            out.push(ssi as char);
-        } else {
-            out.push(' ');
-            out.push(' ');
-        }
+        out.push(lli as char);
+        out.push(ssi as char);
     }
     out
 }
