@@ -526,6 +526,120 @@ fn type_records_that_continue_no_list_or_end_short_are_refused() {
 }
 
 #[test]
+fn clock_offsets_are_written_as_crx2rnx_writes_them() {
+    // Review found `0.000123000` expanded where CRX2RNX 4.2.0 writes
+    // `.000123000`. Each expectation is CRX2RNX's, except the negative offsets
+    // whose last eight digits are zeros, which it misprints (`-1.4` for `-1.5`,
+    // `-.0` for `-0.1`); those are written as the value.
+    let v2 = [
+        (123_000, "  .000123000"),
+        (-123_000, " -.000123000"),
+        (0, "  .000000000"),
+        (1_500_000_000, " 1.500000000"),
+        (12_345_678_901, "12.345678901"),
+        (-9_999_999_999, "-9.999999999"),
+        (-1_500_000_000, "-1.500000000"),
+        (-100_000_000, " -.100000000"),
+    ];
+    for (value, text) in v2 {
+        assert_eq!(format_clock(value, 9, 12), text, "{value}");
+    }
+    let v3 = [
+        (123_000_000, "  .000123000000"),
+        (-123_000_000, " -.000123000000"),
+        (0, "  .000000000000"),
+        (1_500_000_000_000, " 1.500000000000"),
+        (-1_500_000_000_000, "-1.500000000000"),
+    ];
+    for (value, text) in v3 {
+        assert_eq!(format_clock(value, 12, 15), text, "{value}");
+    }
+}
+
+#[test]
+fn picoseconds_clocks_and_blank_satellite_letters_expand_as_written() {
+    // Review found RINEX 4.02 picoseconds refused both ways, clock offsets
+    // written with a leading zero CRX2RNX drops, and a mono-system RINEX 2
+    // satellite token with a blank letter written with the header's letter.
+    // Each `.crx` was compressed from its `.rnx` by RNX2CRX 4.2.0, and CRX2RNX
+    // 4.2.0 expands it back to that `.rnx` byte for byte. The version 4 file
+    // repeats its picoseconds on two epochs, which RNX2CRX leaves unwritten.
+    for name in ["crinex_clock_picoseconds_v4", "crinex_blank_letters_v2"] {
+        let rinex = obs_fixture(&format!("{name}.rnx"));
+        let expanded = decode(&obs_fixture(&format!("{name}.crx")))
+            .unwrap_or_else(|e| panic!("{name}: expand the RNX2CRX file: {e}"));
+        assert_same_lines(&expanded, &rinex, name);
+
+        let compressed = encode_crinex(&rinex).unwrap_or_else(|e| panic!("{name}: compress: {e}"));
+        let expanded = decode(&compressed).unwrap_or_else(|e| panic!("{name}: expand: {e}"));
+        assert_same_lines(&expanded, &rinex, name);
+        let stream = parse_stream(&compressed).expect("read the compression");
+        assert_eq!(
+            parse_stream(&encode_stream(&stream)).expect("read it again"),
+            stream,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn unwritten_picoseconds_carry_and_blanked_ones_are_none() {
+    // Review found expansion dropping picoseconds RNX2CRX leaves unwritten
+    // because they repeat. RNX2CRX writes an epoch with none after one with
+    // them the same way, so an unwritten value is the one before, as CRX2RNX
+    // reads it.
+    let head = "> 2020 01 01 00 00  0.0000000  0  1";
+    let crinex = [
+        labeled_header_line(
+            "3.1                 COMPACT RINEX FORMAT",
+            "CRINEX VERS   / TYPE",
+        ),
+        "RNX2CRX".to_string(),
+        labeled_header_line(
+            "     4.02           OBSERVATION DATA    G",
+            "RINEX VERSION / TYPE",
+        ),
+        v3_obs_types_line(),
+        labeled_header_line("", "END OF HEADER"),
+        v3_single_sat_epoch_line(),
+        " 12345".to_string(),
+        "1&0".to_string(),
+        " ".to_string(),
+        String::new(),
+        "1".to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let expanded = decode(&crinex).expect("expand");
+    let epochs: Vec<&str> = expanded
+        .lines()
+        .filter(|line| line.starts_with('>'))
+        .collect();
+    let carried = format!("{head:<41}{:15} 12345", "");
+    assert_eq!(epochs, [carried.as_str(), carried.as_str()]);
+
+    // An epoch with none after one with them is compressed with its
+    // picoseconds blanked, so it expands with none.
+    let rinex = [
+        labeled_header_line(
+            "     4.02           OBSERVATION DATA    G",
+            "RINEX VERSION / TYPE",
+        ),
+        labeled_header_line("G    1 C1C", "SYS / # / OBS TYPES"),
+        labeled_header_line("", "END OF HEADER"),
+        format!("{head:<41}{:15} 12345", ""),
+        format!("G01{:14.3}", 1234.567),
+        "> 2020 01 01 00 00  1.0000000  0  1".to_string(),
+        format!("G01{:14.3}", 1234.568),
+        String::new(),
+    ]
+    .join("\n");
+    let compressed = encode_crinex(&rinex).expect("compress");
+    assert!(compressed.contains("\n &&&&&\n"), "{compressed}");
+    assert_same_lines(&decode(&compressed).expect("expand"), &rinex, "blanked");
+}
+
+#[test]
 fn a_version_two_blank_field_carrying_flags_is_refused() {
     // CRINEX 1 holds no flags for a blank field, so compressing them would lose
     // them; `rnx2crx` refuses the same field.
