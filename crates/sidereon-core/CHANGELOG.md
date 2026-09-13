@@ -305,6 +305,20 @@ All notable changes to `sidereon-core` are documented here.
   naming more codes than its list has left, and a list whose records end short
   of its count are refused, in either version. A later declaration replaces
   the list, as `crx2rnx` applies it.
+- CRINEX keeps loss-of-lock and signal-strength flags where `crx2rnx` and
+  `rnx2crx` keep them. Expansion carried every satellite's flags from epoch to
+  epoch whatever happened in between, so a CRINEX 1 observation flagged, then
+  missing, then back unflagged came back with the old flags, and a satellite
+  missing from an epoch came back with the flags it had before. Only a
+  satellite the previous epoch carried keeps its flags and arcs; a reset or an
+  event epoch starts every satellite anew; a blank CRINEX 1 observation's flags
+  are blank; a blank field ends its arc; and a blank CRINEX 3 field is written
+  with its flags. Compression wrote each satellite's flags as a difference from
+  the previous epoch although every epoch it writes is a reset, after which
+  `crx2rnx` reads each satellite as new and dropped a repeated flag; it now
+  writes them whole. A RINEX 2 blank field carrying flags, which CRINEX 1 cannot
+  hold and `rnx2crx` refuses, is refused. An epoch with no clock offset ends
+  the clock's difference arc.
 - CRINEX applies the observation type records an event epoch carries. A flag 4
   epoch can declare a new type list, which sets how many fields the epochs after
   it hold; the declaration was copied through and the old widths kept.
