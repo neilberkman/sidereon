@@ -1690,6 +1690,110 @@ fn rinex2_code_round_trips_through_its_canonical_form() {
 }
 
 #[test]
+fn a_version_two_header_names_every_position_any_constellation_uses() {
+    // Lists of different lengths are not one version 2 list, so writing refuses
+    // and says which constellation holds the shorter one. The downgrade names
+    // every position any constellation uses, and the shorter list gains a blank
+    // code for the extra one.
+    let product = two_system_product(
+        2.11,
+        &(
+            GnssSystem::Gps,
+            'G',
+            1,
+            vec!["C1C".to_string(), "L1C".to_string()],
+        ),
+        &(
+            GnssSystem::Galileo,
+            'E',
+            11,
+            vec!["C1X".to_string(), "L1X".to_string(), "C5X".to_string()],
+        ),
+        true,
+    );
+    assert!(matches!(
+        product.to_rinex_string(),
+        Err(RinexObsWriteError::CodeListsNotVersionTwo {
+            system: GnssSystem::Gps,
+            position: 2,
+            code: None,
+        })
+    ));
+    let (downgraded, changes) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert_eq!(
+        changes,
+        vec![ObsDowngradeChange::CodeAdded {
+            system: GnssSystem::Gps,
+            code: "C5X".to_string(),
+        }]
+    );
+    let text = downgraded.to_rinex_string().expect("the downgrade writes");
+    let declared = text
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..24], "     3    C1    L1    C5", "{declared:?}");
+}
+
+#[test]
+fn a_version_two_code_with_no_version_two_name_is_refused_or_downgraded() {
+    // Version 2 has no field for a tracking attribute, so no name reads back as
+    // GPS `C1X`. The writer used to write `C1` and return a file that read back
+    // as `C1C`. Writing refuses now, and the downgrade makes the rename and says
+    // so.
+    let text = concat!(
+        "     2.11           OBSERVATION DATA    G (GPS)             RINEX VERSION / TYPE\n",
+        "     2    C1    L1                                          # / TYPES OF OBSERV\n",
+        "  2015     1     1     0     0    0.0000000     GPS         TIME OF FIRST OBS\n",
+        "                                                            END OF HEADER\n",
+        " 15  1  1  0  0  0.0000000  0  1G 1\n",
+        "  20000001.000    100000002.000\n",
+    );
+    let mut obs = RinexObs::parse(text).expect("parse the version 2 file");
+    obs.header
+        .obs_codes
+        .get_mut(&GnssSystem::Gps)
+        .expect("GPS codes")[0] = "C1X".to_string();
+
+    let error = obs
+        .to_rinex_string()
+        .expect_err("C1X has no version 2 name");
+    assert!(
+        matches!(
+            error,
+            RinexObsWriteError::CodeListsNotVersionTwo {
+                system: GnssSystem::Gps,
+                position: 0,
+                ..
+            }
+        ),
+        "{error}"
+    );
+
+    let (downgraded, changes) = obs.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert_eq!(
+        changes,
+        vec![ObsDowngradeChange::CodeRenamed {
+            system: GnssSystem::Gps,
+            from: "C1X".to_string(),
+            to: "C1C".to_string(),
+        }]
+    );
+    let encoded = downgraded
+        .to_rinex_string()
+        .expect("the downgraded product writes");
+    let declared = encoded
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..18], "     2    C1    L1", "{declared:?}");
+    assert_eq!(
+        RinexObs::parse(&encoded).expect("reads back").epochs(),
+        downgraded.epochs()
+    );
+}
+
+#[test]
 fn prn_observation_counts_are_read_from_the_columns_they_are_written_in() {
     // `PRN / # OF OBS` is `3X,A1,I2,9I6`: three blanks, then the satellite, then
     // the counts. Reading the satellite from the first three columns found them
@@ -1743,6 +1847,164 @@ fn version_two_fixture() -> RinexObs {
 }
 
 #[test]
+fn a_version_two_header_gives_a_conflicting_signal_its_own_column() {
+    // GPS `C1W` and GLONASS `C1C` are `P1` and `C1`, so no one version 2 list
+    // holds both at one position and writing refuses. The downgrade gives each
+    // its own column: each constellation gains a blank code for the other's, and
+    // every value keeps its own code.
+    let product = two_system_product(
+        2.11,
+        &(GnssSystem::Gps, 'G', 1, vec!["C1W".to_string()]),
+        &(GnssSystem::Glonass, 'R', 2, vec!["C1C".to_string()]),
+        true,
+    );
+    assert!(matches!(
+        product.to_rinex_string(),
+        Err(RinexObsWriteError::CodeListsNotVersionTwo { .. })
+    ));
+    let (downgraded, changes) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    let text = downgraded.to_rinex_string().expect("the downgrade writes");
+    let declared = text
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..18], "     2    P1    C1", "{declared:?}");
+    assert!(
+        changes.contains(&ObsDowngradeChange::CodeAdded {
+            system: GnssSystem::Gps,
+            code: "C1C".to_string(),
+        }) && changes.contains(&ObsDowngradeChange::CodeAdded {
+            system: GnssSystem::Glonass,
+            code: "C1P".to_string(),
+        }),
+        "{changes:?}"
+    );
+    let read = RinexObs::parse(&text).expect("reads back");
+    assert_eq!(
+        read.header().obs_codes[&GnssSystem::Gps],
+        vec!["C1W".to_string(), "C1C".to_string()]
+    );
+    assert_eq!(
+        read.header().obs_codes[&GnssSystem::Glonass],
+        vec!["C1P".to_string(), "C1C".to_string()]
+    );
+    let values = |system: GnssSystem, prn: u8| -> Vec<Option<f64>> {
+        read.epochs()[0].sats[&GnssSatelliteId { system, prn }]
+            .iter()
+            .map(|v| v.value)
+            .collect()
+    };
+    assert_eq!(values(GnssSystem::Gps, 1), vec![Some(1000.0), None]);
+    assert_eq!(values(GnssSystem::Glonass, 2), vec![None, Some(2000.0)]);
+}
+
+#[test]
+fn a_split_column_carries_its_observation_counts_too() {
+    // `PRN / # OF OBS` counts are aligned to a constellation's own code list.
+    // When the downgrade gives a code a column of its own, its count moves with
+    // it, or the count would sit under the name beside the one it counts.
+    let mut product = two_system_product(
+        2.11,
+        &(GnssSystem::Gps, 'G', 1, vec!["C1W".to_string()]),
+        &(GnssSystem::Glonass, 'R', 2, vec!["C1C".to_string()]),
+        true,
+    );
+    let gps = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    let glonass = GnssSatelliteId {
+        system: GnssSystem::Glonass,
+        prn: 2,
+    };
+    product.header.prn_obs_counts.insert(gps, vec![Some(5)]);
+    product.header.prn_obs_counts.insert(glonass, vec![Some(7)]);
+    assert!(matches!(
+        product.to_rinex_string(),
+        Err(RinexObsWriteError::CodeListsNotVersionTwo { .. })
+    ));
+
+    let (downgraded, _) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    let text = downgraded.to_rinex_string().expect("the downgrade writes");
+    let declared = text
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..18], "     2    P1    C1");
+    let read = RinexObs::parse(&text).expect("reads back");
+    assert_eq!(read.header().prn_obs_counts[&gps], vec![Some(5), None]);
+    assert_eq!(
+        read.header().prn_obs_counts[&glonass],
+        vec![None, Some(7)],
+        "the count sits under C1, the column GLONASS uses"
+    );
+}
+
+#[test]
+fn a_version_two_header_does_not_repeat_a_column_it_already_has() {
+    // Two constellations holding the same two signals in opposite order are not
+    // one version 2 list, so writing refuses. The downgrade lays them out in two
+    // columns, not four, moving GLONASS's codes and saying so, with nothing
+    // renamed or added.
+    let product = two_system_product(
+        2.11,
+        &(
+            GnssSystem::Gps,
+            'G',
+            1,
+            vec!["C1C".to_string(), "C1W".to_string()],
+        ),
+        &(
+            GnssSystem::Glonass,
+            'R',
+            2,
+            vec!["C1P".to_string(), "C1C".to_string()],
+        ),
+        true,
+    );
+    assert!(matches!(
+        product.to_rinex_string(),
+        Err(RinexObsWriteError::CodeListsNotVersionTwo { .. })
+    ));
+    let (downgraded, changes) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert!(
+        changes
+            .iter()
+            .all(|change| matches!(change, ObsDowngradeChange::CodeMoved { .. })),
+        "{changes:?}"
+    );
+    let text = downgraded.to_rinex_string().expect("the downgrade writes");
+    let declared = text
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..18], "     2    C1    P1", "{declared:?}");
+
+    // A code version 2 cannot spell shares the column of the one it becomes.
+    let product = two_system_product(
+        2.11,
+        &(GnssSystem::Gps, 'G', 1, vec!["C1X".to_string()]),
+        &(GnssSystem::Glonass, 'R', 2, vec!["C1C".to_string()]),
+        true,
+    );
+    let (downgraded, changes) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert_eq!(
+        changes,
+        vec![ObsDowngradeChange::CodeRenamed {
+            system: GnssSystem::Gps,
+            from: "C1X".to_string(),
+            to: "C1C".to_string(),
+        }]
+    );
+    let text = downgraded.to_rinex_string().expect("the downgrade writes");
+    let declared = text
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..12], "     1    C1", "{declared:?}");
+}
+
+#[test]
 fn a_version_two_observation_type_wider_than_its_field_is_rejected() {
     // `# / TYPES OF OBSERV` is `9(4X,A2)`. A three-character token means the
     // line is not in that layout, and the code could not be written back into a
@@ -1757,6 +2019,56 @@ fn a_version_two_observation_type_wider_than_its_field_is_rejected() {
         error.to_string().contains("field width"),
         "the error names the field: {error}"
     );
+}
+
+#[test]
+fn a_shared_column_is_a_name_every_constellation_in_it_may_carry() {
+    // GPS `C1W` is `P1`, and Galileo reads `P1` back as the code it holds, but
+    // version 2 gives Galileo no `P` observable, so no single column carries
+    // both and writing refuses. The downgrade gives each its own column, and
+    // each value comes back under its own code with nothing renamed.
+    let product = two_system_product(
+        2.11,
+        &(GnssSystem::Gps, 'G', 1, vec!["C1W".to_string()]),
+        &(GnssSystem::Galileo, 'E', 11, vec!["C1X".to_string()]),
+        true,
+    );
+    assert!(matches!(
+        product.to_rinex_string(),
+        Err(RinexObsWriteError::CodeListsNotVersionTwo { .. })
+    ));
+    let (downgraded, changes) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert!(
+        !changes
+            .iter()
+            .any(|change| matches!(change, ObsDowngradeChange::CodeRenamed { .. })),
+        "{changes:?}"
+    );
+    let text = downgraded.to_rinex_string().expect("the downgrade writes");
+    let declared = text
+        .lines()
+        .find(|line| line.contains("# / TYPES OF OBSERV"))
+        .expect("the header names its types");
+    assert_eq!(&declared[..18], "     2    P1    C1", "{declared:?}");
+    let read = RinexObs::parse(&text).expect("reads back");
+    let gps = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    let galileo = GnssSatelliteId {
+        system: GnssSystem::Galileo,
+        prn: 11,
+    };
+    assert_eq!(read.header().obs_codes[&GnssSystem::Gps][0], "C1W");
+    assert_eq!(read.header().obs_codes[&GnssSystem::Galileo][1], "C1X");
+    let values = |sat: GnssSatelliteId| -> Vec<Option<f64>> {
+        read.epochs()[0].sats[&sat]
+            .iter()
+            .map(|v| v.value)
+            .collect()
+    };
+    assert_eq!(values(gps), vec![Some(1000.0), None]);
+    assert_eq!(values(galileo), vec![None, Some(2000.0)]);
 }
 
 #[test]
@@ -1997,6 +2309,77 @@ fn a_version_two_value_with_more_than_three_decimals_is_refused() {
             .contains("is not representable in its F14.3"),
         "{error}"
     );
+}
+
+#[test]
+fn a_version_two_scale_factor_is_refused_by_the_writer_and_removed_by_the_downgrade() {
+    // Version 2 values read through a `SYS / SCALE FACTOR` are divided by it.
+    // A version 2 reader that does not know the record, RTKLIB among them,
+    // would take scaled numbers written back as physical ones, so the writer
+    // refuses the product. The downgrade removes the record, writes the
+    // physical values, and rounds and reports any value carrying more decimals
+    // than a field without the factor holds.
+    let line = |content: &str, label: &str| format!("{content:<60}{label}\n");
+    let text = [
+        line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        line("     2    C1    L1", "# / TYPES OF OBSERV"),
+        line("G   10   0", "SYS / SCALE FACTOR"),
+        line(
+            "  2015     1     1     0     0    0.0000000     GPS",
+            "TIME OF FIRST OBS",
+        ),
+        line("", "END OF HEADER"),
+        " 15  1  1  0  0  0.0000000  0  1G 1\n".to_string(),
+        " 200000010.000        1230.001\n".to_string(),
+    ]
+    .concat();
+    let obs = RinexObs::parse(&text).expect("parse a scaled version 2 file");
+    let gps = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    assert_eq!(obs.epochs()[0].sats[&gps][0].value, Some(20_000_001.0));
+    assert!(matches!(
+        obs.to_rinex_string(),
+        Err(RinexObsWriteError::ScaleFactorsInVersionTwo { count: 1 })
+    ));
+
+    let (downgraded, changes) = obs.downgrade_to_rinex2(2.11).expect("downgrade");
+    let held = obs.epochs()[0].sats[&gps][1].value.expect("L1 value");
+    assert_eq!(
+        changes,
+        vec![
+            ObsDowngradeChange::ScaleFactorsRemoved { count: 1 },
+            ObsDowngradeChange::ValueRounded {
+                epoch_index: 0,
+                satellite: gps,
+                code: "L1C".to_string(),
+                from: held,
+                to: 123.0,
+            },
+        ]
+    );
+    let plain = downgraded.to_rinex_string().expect("the downgrade writes");
+    assert!(!plain.contains("SYS / SCALE FACTOR"));
+    assert!(plain.contains("  20000001.000         123.000"), "{plain}");
+    assert_eq!(
+        RinexObs::parse(&plain).expect("reads back").epochs(),
+        downgraded.epochs()
+    );
+
+    let mut fixture = version_two_fixture();
+    fixture.header.scale_factors.push(super::ObsScaleFactor {
+        system: GnssSystem::Gps,
+        factor: 10.0,
+        codes: Vec::new(),
+    });
+    assert!(matches!(
+        fixture.to_rinex_string(),
+        Err(RinexObsWriteError::ScaleFactorsInVersionTwo { count: 1 })
+    ));
 }
 
 #[test]
@@ -2952,6 +3335,82 @@ fn to_rinex_string_round_trips_through_parse() {
 }
 
 #[test]
+fn a_real_mixed_version_three_file_survives_being_written_as_version_two() {
+    // A real mixed version 3 file, several constellations across 120 epochs, has
+    // per-constellation code lists that no one version 2 list reads as, so
+    // writing it as version 2 is refused. The downgrade lays it out, reports
+    // every change, and the result writes and reads back exactly, twice. Every
+    // measurement keeps its kind, band, value and both indicators: the tracking
+    // attribute is the one thing version 2 may lose, so it is the one thing not
+    // compared.
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"
+    );
+    let text = std::fs::read_to_string(path).expect("read the committed fixture");
+    let original = RinexObs::parse(&text).expect("parse the version 3 fixture");
+    assert!(
+        original.header().obs_codes.len() >= 3,
+        "the fixture is mixed"
+    );
+
+    let mut relabelled = original.clone();
+    relabelled.header.version = 2.11;
+    assert!(
+        matches!(
+            relabelled.to_rinex_string(),
+            Err(RinexObsWriteError::CodeListsNotVersionTwo { .. })
+        ),
+        "a version 3 product is not a version 2 file by relabelling it"
+    );
+
+    let (downgraded, changes) = original.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert!(
+        changes.iter().all(|change| matches!(
+            change,
+            ObsDowngradeChange::CodeRenamed { .. }
+                | ObsDowngradeChange::CodeMoved { .. }
+                | ObsDowngradeChange::CodeAdded { .. }
+        )),
+        "only codes renamed, moved or added: {changes:?}"
+    );
+    let once = downgraded.to_rinex_string().expect("the downgrade writes");
+    assert!(!once.lines().any(|line| line.starts_with('>')));
+    let reparsed = RinexObs::parse(&once).expect("reads back");
+    let twice = reparsed.to_rinex_string().expect("and writes again");
+    assert_eq!(twice, once, "a second write is byte-identical");
+
+    type Measurement = (GnssSatelliteId, char, char, u64, Option<u8>, Option<u8>);
+    fn measurements(obs: &RinexObs, epoch: &ObsEpoch) -> Vec<Measurement> {
+        let mut out = Vec::new();
+        for (sat, values) in &epoch.sats {
+            let codes = &obs.header().obs_codes[&sat.system];
+            for (code, value) in codes.iter().zip(values) {
+                let (Some(v), Some(kind), Some(band)) =
+                    (value.value, code.chars().next(), code.chars().nth(1))
+                else {
+                    continue;
+                };
+                out.push((*sat, kind, band, v.to_bits(), value.lli, value.ssi));
+            }
+        }
+        out.sort();
+        out
+    }
+    assert_eq!(reparsed.epochs().len(), original.epochs().len());
+    let mut compared = 0_usize;
+    for (before, after) in original.epochs().iter().zip(reparsed.epochs()) {
+        let expected = measurements(&original, before);
+        assert_eq!(measurements(&reparsed, after), expected);
+        compared += expected.len();
+    }
+    assert!(
+        compared > 10_000,
+        "the fixture carries real data to compare, not {compared} values"
+    );
+}
+
+#[test]
 fn a_name_a_constellation_lacks_does_not_swallow_the_one_beside_it() {
     // With the header ordered `P1 C1`, Galileo's `P1` used to read as its
     // `C1X`, the same code its `C1` reads as, and a writer choosing between
@@ -3409,6 +3868,980 @@ fn version_two_writer_refuses_exactly_the_lists_no_name_list_states() {
 }
 
 #[test]
+fn downgrade_states_every_small_mixed_product_and_names_every_change() {
+    // The downgrade is the path for a product version 2 cannot state as it is.
+    // For every small two-constellation product - lists of different lengths,
+    // codes no version 2 name spells, names kept as written - its result has to
+    // write, every value has to come back exactly once, and a value that comes
+    // back under a code other than its own has to sit under a rename the change
+    // list names. Anything else is a change nobody was told about.
+    let alphabet = |system: GnssSystem| -> Vec<&'static str> {
+        match system {
+            GnssSystem::Gps => vec!["C1C", "C1W", "C2X", "L1C", "C9X"],
+            GnssSystem::Glonass => vec!["C1C", "C1P", "C2C", "L1C", "C9X"],
+            GnssSystem::Galileo => vec!["C1X", "C5X", "L1X", "P1", "C9X"],
+            _ => vec!["C2I", "C7I", "C6I", "C2", "C9X"],
+        }
+    };
+    let lists = |system: GnssSystem| -> Vec<Vec<String>> {
+        let codes = alphabet(system);
+        let mut out: Vec<Vec<String>> =
+            codes.iter().map(|code| vec![(*code).to_string()]).collect();
+        for first in &codes {
+            for second in &codes {
+                out.push(vec![(*first).to_string(), (*second).to_string()]);
+            }
+        }
+        out
+    };
+    let mut products = 0_usize;
+    for version in [2.11, 2.12] {
+        for (sa, la, pa, sb, lb, pb) in SMALL_PAIRS {
+            for list_a in lists(sa) {
+                for list_b in lists(sb) {
+                    let label = format!("{version} {sa:?} {list_a:?} beside {sb:?} {list_b:?}");
+                    let original = two_system_product(
+                        version,
+                        &(sa, la, pa, list_a.clone()),
+                        &(sb, lb, pb, list_b.clone()),
+                        true,
+                    );
+                    let (downgraded, changes) = original
+                        .downgrade_to_rinex2(version)
+                        .unwrap_or_else(|e| panic!("{label}: downgrade: {e}"));
+                    if original.to_rinex_string().is_ok() {
+                        assert!(
+                            changes.is_empty(),
+                            "{label}: a product version 2 already states was changed: {changes:?}"
+                        );
+                    }
+                    let text = downgraded
+                        .to_rinex_string()
+                        .unwrap_or_else(|e| panic!("{label}: the downgrade does not write: {e}"));
+                    let read = RinexObs::parse(&text).expect("reads back");
+                    for (sat, values) in &original.epochs()[0].sats {
+                        let held = &original.header().obs_codes[&sat.system];
+                        let now = &read.header().obs_codes[&sat.system];
+                        let read_values = &read.epochs()[0].sats[sat];
+                        for (index, value) in values.iter().enumerate() {
+                            let Some(v) = value.value else { continue };
+                            let columns: Vec<usize> = read_values
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, found)| found.value == Some(v))
+                                .map(|(column, _)| column)
+                                .collect();
+                            assert_eq!(
+                                columns.len(),
+                                1,
+                                "{label}: {sat} value {v} comes back {} times",
+                                columns.len()
+                            );
+                            let (from, to) = (&held[index], &now[columns[0]]);
+                            assert!(
+                                from == to
+                                    || changes.contains(&ObsDowngradeChange::CodeRenamed {
+                                        system: sat.system,
+                                        from: from.clone(),
+                                        to: to.clone(),
+                                    }),
+                                "{label}: {sat} {from} came back under {to} with no change naming it: {changes:?}"
+                            );
+                        }
+                    }
+                    assert_moves_and_additions_are_itemized(
+                        &label, version, &original, &text, &read, &changes,
+                    );
+                    products += 1;
+                }
+            }
+        }
+    }
+    assert!(products > 1_000, "{products} products");
+}
+
+/// A version 2 product holding exactly these constellations' code lists, one
+/// satellite each, every value distinct.
+fn mixed_product(version: f64, lists: &[SmallList]) -> RinexObs {
+    let mut product = two_system_product(
+        version,
+        &(GnssSystem::Gps, 'G', 1, vec!["C1C".to_string()]),
+        &(GnssSystem::Glonass, 'R', 2, vec!["C1C".to_string()]),
+        true,
+    );
+    product.header.obs_codes.clear();
+    let epoch = &mut product.epochs[0];
+    epoch.sats.clear();
+    for (slot, (system, _, prn, list)) in lists.iter().enumerate() {
+        product.header.obs_codes.insert(*system, list.clone());
+        let base = 1_000.0 * (slot + 1) as f64;
+        let values = (0..list.len())
+            .map(|index| ObsValue {
+                value: Some(base + index as f64),
+                lli: (index % 2 == 0).then_some(1 + (slot % 7) as u8),
+                ssi: Some(1 + ((slot + index) % 9) as u8),
+            })
+            .collect();
+        epoch.sats.insert(
+            GnssSatelliteId {
+                system: *system,
+                prn: *prn,
+            },
+            values,
+        );
+        // A second satellite whose odd positions hold only indicators, which
+        // have to land under their codes too.
+        let indicators = (0..list.len())
+            .map(|index| ObsValue {
+                value: (index % 2 == 0).then_some(base + 500.0 + index as f64),
+                lli: (index % 2 == 1).then_some(1 + (index % 7) as u8),
+                ssi: Some(9 - (index % 9) as u8),
+            })
+            .collect();
+        epoch.sats.insert(
+            GnssSatelliteId {
+                system: *system,
+                prn: *prn + 1,
+            },
+            indicators,
+        );
+    }
+    epoch.declared_record_count = epoch.sats.len();
+    // A second epoch, its values distinct from the first's.
+    let mut later = product.epochs[0].clone();
+    later.epoch.minute += 1;
+    for values in later.sats.values_mut() {
+        for value in values.iter_mut() {
+            value.value = value.value.map(|held| held + 100_000.0);
+        }
+    }
+    product.epochs.push(later);
+    product
+}
+
+/// Downgrade a product and check everything the downgrade promises: the
+/// result writes, a product already writable is untouched, every value comes
+/// back exactly once, under its own code or a reported rename, and every move
+/// and addition is reported and no more moves are made than an order of the
+/// same columns needs.
+fn assert_downgrade_states(label: &str, version: f64, original: &RinexObs) {
+    let (downgraded, changes) = original
+        .downgrade_to_rinex2(version)
+        .unwrap_or_else(|e| panic!("{label}: downgrade: {e}"));
+    if original.to_rinex_string().is_ok() {
+        assert!(
+            changes.is_empty(),
+            "{label}: a writable product was changed: {changes:?}"
+        );
+    }
+    let text = downgraded
+        .to_rinex_string()
+        .unwrap_or_else(|e| panic!("{label}: the downgrade does not write: {e}"));
+    let read = RinexObs::parse(&text).unwrap_or_else(|e| panic!("{label}: reads back: {e}"));
+    assert_eq!(
+        read.epochs().len(),
+        original.epochs().len(),
+        "{label}: epochs"
+    );
+    for (epoch_index, epoch) in original.epochs().iter().enumerate() {
+        let read_epoch = &read.epochs()[epoch_index];
+        // Where each code landed, from the first satellite of its
+        // constellation, whose values are all present and distinct.
+        let mut landed: BTreeMap<GnssSystem, Vec<Option<usize>>> = BTreeMap::new();
+        for (sat, values) in &epoch.sats {
+            if landed.contains_key(&sat.system) {
+                continue;
+            }
+            let read_values = &read_epoch.sats[sat];
+            let row = values
+                .iter()
+                .map(|value| {
+                    let v = value.value?;
+                    let columns: Vec<usize> = read_values
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, found)| found.value == Some(v))
+                        .map(|(column, _)| column)
+                        .collect();
+                    assert_eq!(
+                        columns.len(),
+                        1,
+                        "{label}: epoch {epoch_index} {sat} value {v} comes back {} times",
+                        columns.len()
+                    );
+                    Some(columns[0])
+                })
+                .collect();
+            landed.insert(sat.system, row);
+        }
+        for (sat, values) in &epoch.sats {
+            let held = &original.header().obs_codes[&sat.system];
+            let now = &read.header().obs_codes[&sat.system];
+            let read_values = &read_epoch.sats[sat];
+            let row = &landed[&sat.system];
+            for (index, value) in values.iter().enumerate() {
+                let Some(column) = row.get(index).copied().flatten() else {
+                    continue;
+                };
+                assert_eq!(
+                    read_values[column], *value,
+                    "{label}: epoch {epoch_index} {sat} {} came back changed",
+                    held[index]
+                );
+                let (from, to) = (&held[index], &now[column]);
+                assert!(
+                    from == to
+                        || changes.contains(&ObsDowngradeChange::CodeRenamed {
+                            system: sat.system,
+                            from: from.clone(),
+                            to: to.clone(),
+                        }),
+                    "{label}: {sat} {from} came back under {to} with no change naming it: {changes:?}"
+                );
+            }
+            for (column, found) in read_values.iter().enumerate() {
+                if !row.contains(&Some(column)) {
+                    assert_eq!(
+                        *found,
+                        ObsValue {
+                            value: None,
+                            lli: None,
+                            ssi: None,
+                        },
+                        "{label}: epoch {epoch_index} {sat} column {column} holds what no code put there"
+                    );
+                }
+            }
+        }
+    }
+    assert_moves_and_additions_are_itemized(label, version, original, &text, &read, &changes);
+}
+
+/// A deterministic stream of numbers for sweeps too large to enumerate.
+struct SweepRng(u64);
+
+impl SweepRng {
+    fn below(&mut self, bound: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 % bound as u64) as usize
+    }
+}
+
+/// Every constellation a version 2 file can hold, with a satellite and the
+/// codes a sweep draws for it: codes version 2 names, codes it names under
+/// another attribute, codes no version 2 name spells, and names kept as
+/// written.
+fn sweep_constellations() -> Vec<(GnssSystem, char, u8, Vec<&'static str>)> {
+    vec![
+        (
+            GnssSystem::Gps,
+            'G',
+            1,
+            vec![
+                "Z", "C1C", "C1W", "C2X", "C2W", "L1C", "L2W", "D1C", "S1C", "C5X", "L5X", "C9X",
+                "P1", "C1",
+            ],
+        ),
+        (
+            GnssSystem::Glonass,
+            'R',
+            2,
+            vec!["C1C", "C1P", "C2C", "C2P", "L1C", "L2P", "C3X", "P2", "C4A"],
+        ),
+        (
+            GnssSystem::Galileo,
+            'E',
+            11,
+            vec!["C1X", "C5X", "C7X", "C8X", "L1X", "L5X", "C6X", "C1C", "P1"],
+        ),
+        (
+            GnssSystem::BeiDou,
+            'C',
+            5,
+            vec!["C2I", "C7I", "C6I", "L2I", "C1X", "C2", "L7I"],
+        ),
+        (
+            GnssSystem::Qzss,
+            'J',
+            1,
+            vec!["C1C", "C2X", "C5X", "L1C", "C6X", "C2L"],
+        ),
+        (GnssSystem::Sbas, 'S', 20, vec!["C1C", "L1C", "C5X", "C1W"]),
+        (
+            GnssSystem::Navic,
+            'I',
+            3,
+            vec!["C5A", "L5A", "C9A", "C5", "Z"],
+        ),
+    ]
+}
+
+#[test]
+fn downgrade_states_three_constellation_products_across_every_constellation() {
+    // The exhaustive sweep covers two constellations and two codes each. These
+    // products draw three constellations of all seven, lists of up to four
+    // codes from wider alphabets, at both version 2 revisions.
+    let constellations = sweep_constellations();
+    let mut rng = SweepRng(0x9E37_79B9_7F4A_7C15);
+    for round in 0..4_000 {
+        let version = if round % 2 == 0 { 2.11 } else { 2.12 };
+        let mut picked: Vec<usize> = Vec::new();
+        while picked.len() < 3 {
+            let at = rng.below(constellations.len());
+            if !picked.contains(&at) {
+                picked.push(at);
+            }
+        }
+        let lists: Vec<SmallList> = picked
+            .iter()
+            .map(|&at| {
+                let (system, letter, prn, alphabet) = &constellations[at];
+                let length = 1 + rng.below(4);
+                let list = (0..length)
+                    .map(|_| alphabet[rng.below(alphabet.len())].to_string())
+                    .collect();
+                (*system, *letter, *prn, list)
+            })
+            .collect();
+        let label = format!("{version} {lists:?}");
+        assert_downgrade_states(&label, version, &mixed_product(version, &lists));
+    }
+}
+
+#[test]
+fn downgrade_orders_a_wide_product_and_reports_every_change() {
+    // Forty codes a constellation, drawn with repeats, lay out wider than any
+    // order can be checked exhaustively; the order search has to finish on it
+    // and the result still has to state every change.
+    let constellations = sweep_constellations();
+    let mut rng = SweepRng(0xD1B5_4A32_D192_ED03);
+    for version in [2.11, 2.12] {
+        let lists: Vec<SmallList> = constellations[..3]
+            .iter()
+            .map(|(system, letter, prn, alphabet)| {
+                let list = (0..40)
+                    .map(|_| alphabet[rng.below(alphabet.len())].to_string())
+                    .collect();
+                (*system, *letter, *prn, list)
+            })
+            .collect();
+        let label = format!("{version} wide");
+        super::write::LAST_ORDER_SEARCH.with(|last| last.set((0, false, 0)));
+        assert_downgrade_states(&label, version, &mixed_product(version, &lists));
+        let (placements, exhausted, _) = super::write::LAST_ORDER_SEARCH.with(std::cell::Cell::get);
+        assert!(
+            !exhausted,
+            "{label}: the order search stopped at its budget after {placements} placements"
+        );
+    }
+}
+
+#[test]
+fn downgrade_orders_shuffled_distinct_codes_exactly() {
+    // Twenty distinct codes a constellation, shuffled independently, so the
+    // positions constellations want for a shared name disagree everywhere.
+    let alphabets: [(GnssSystem, char, u8, [&str; 20]); 3] = [
+        (
+            GnssSystem::Gps,
+            'G',
+            1,
+            [
+                "C1C", "C1W", "C2X", "C2W", "L1C", "L2W", "D1C", "S1C", "C5X", "L5X", "C9X", "L2X",
+                "D2W", "S2W", "D5X", "S5X", "C1X", "L1W", "D1W", "S1W",
+            ],
+        ),
+        (
+            GnssSystem::Glonass,
+            'R',
+            2,
+            [
+                "C1C", "C1P", "C2C", "C2P", "L1C", "L2P", "C3X", "D1C", "D2P", "S1C", "S2P", "L3X",
+                "D3X", "S3X", "L2C", "D2C", "S2C", "L1P", "D1P", "S1P",
+            ],
+        ),
+        (
+            GnssSystem::Galileo,
+            'E',
+            11,
+            [
+                "C1X", "C5X", "C7X", "C8X", "L1X", "L5X", "C6X", "L7X", "L8X", "D1X", "D5X", "S1X",
+                "S5X", "D7X", "S7X", "L6X", "D8X", "S8X", "D6X", "S6X",
+            ],
+        ),
+    ];
+    let mut rng = SweepRng(0x2545_F491_4F6C_DD1D);
+    for version in [2.11, 2.12] {
+        let lists: Vec<SmallList> = alphabets
+            .iter()
+            .map(|(system, letter, prn, codes)| {
+                let mut list: Vec<String> = codes.iter().map(|code| (*code).to_string()).collect();
+                for at in (1..list.len()).rev() {
+                    list.swap(at, rng.below(at + 1));
+                }
+                (*system, *letter, *prn, list)
+            })
+            .collect();
+        let label = format!("{version} shuffled");
+        super::write::LAST_ORDER_SEARCH.with(|last| last.set((0, false, 0)));
+        assert_downgrade_states(&label, version, &mixed_product(version, &lists));
+        let (placements, exhausted, _) = super::write::LAST_ORDER_SEARCH.with(std::cell::Cell::get);
+        assert!(
+            !exhausted,
+            "{label}: the order search stopped at its budget after {placements} placements"
+        );
+    }
+}
+
+#[test]
+fn downgrade_keeps_the_best_order_its_search_has_solved() {
+    // Review found the search, stopped at its budget, returning an order with 24
+    // moves while an assignment it had already solved gave a valid order with
+    // 10: feasible orders waiting behind higher bounds were dropped.
+    let codes =
+        "C1 C5 C6 C7 L5X C8 L5 L6 L7 L8 L7X D5 C1X C5X C6X C7X C8X L1X L1 D1 L6X L8X D1X D5X"
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+    let product = mixed_product(2.11, &[(GnssSystem::Galileo, 'E', 11, codes)]);
+    let (_, changes) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    let moves = changes
+        .iter()
+        .filter(|change| matches!(change, ObsDowngradeChange::CodeMoved { .. }))
+        .count();
+    assert!(moves <= 10, "{moves} moves: {changes:?}");
+    assert_downgrade_states("Galileo literals", 2.11, &product);
+}
+
+/// Each constellation's names kept as written followed by the codes they stand
+/// for: GPS and GLONASS on every kind and band they have, Galileo on four
+/// kinds and five bands.
+fn names_before_their_codes() -> Vec<SmallList> {
+    let list = |system: GnssSystem, kinds: &[char], bands: &str| -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for &kind in kinds {
+            for band in bands.chars() {
+                if kind == 'P' && band != '1' && band != '2' {
+                    continue;
+                }
+                names.push(format!("{kind}{band}"));
+            }
+        }
+        let canonical: Vec<String> = names
+            .iter()
+            .map(|name| canonical_rinex2_obs_code(system, name, 2.11))
+            .collect();
+        names.extend(canonical);
+        names
+    };
+    vec![
+        (
+            GnssSystem::Gps,
+            'G',
+            1,
+            list(GnssSystem::Gps, &['C', 'P', 'L', 'D', 'S'], "125"),
+        ),
+        (
+            GnssSystem::Glonass,
+            'R',
+            2,
+            list(GnssSystem::Glonass, &['C', 'P', 'L', 'D', 'S'], "123"),
+        ),
+        (
+            GnssSystem::Galileo,
+            'E',
+            11,
+            list(GnssSystem::Galileo, &['C', 'L', 'D', 'S'], "15678"),
+        ),
+    ]
+}
+
+fn downgrade_moves(product: &RinexObs, version: f64) -> usize {
+    let (_, changes) = product.downgrade_to_rinex2(version).expect("downgrade");
+    changes
+        .iter()
+        .filter(|change| matches!(change, ObsDowngradeChange::CodeMoved { .. }))
+        .count()
+}
+
+#[test]
+fn downgrade_improves_orders_where_its_search_cannot_finish() {
+    // Every name kept as written wants a position before the column it has to
+    // follow, so the search cannot prove an order best within its work. Review
+    // found valid orders moving 58 codes here, and 52 with each list's first 28
+    // codes rotated by four, where the downgrade reported 84 and 85.
+    let lists = names_before_their_codes();
+    let product = mixed_product(2.11, &lists);
+    let moves = downgrade_moves(&product, 2.11);
+    assert!(moves <= 58, "{moves} moves");
+    assert_downgrade_states("names before their codes", 2.11, &product);
+
+    let rotated: Vec<SmallList> = lists
+        .into_iter()
+        .map(|(system, letter, prn, mut list)| {
+            list[..28].rotate_left(4);
+            (system, letter, prn, list)
+        })
+        .collect();
+    let product = mixed_product(2.11, &rotated);
+    let moves = downgrade_moves(&product, 2.11);
+    assert!(moves <= 52, "rotated: {moves} moves");
+    assert_downgrade_states("rotated names before their codes", 2.11, &product);
+}
+
+#[test]
+fn downgrade_bounds_its_work_on_the_widest_header() {
+    // 500 GPS and 499 Galileo copies lay out as 999 columns. The assignment
+    // method alone took more than a second there, whatever the search's budget.
+    let product = mixed_product(
+        2.11,
+        &[
+            (GnssSystem::Gps, 'G', 1, vec!["C1C".to_string(); 500]),
+            (GnssSystem::Galileo, 'E', 11, vec!["L1X".to_string(); 499]),
+        ],
+    );
+    super::write::LAST_ORDER_SEARCH.with(|last| last.set((0, false, 0)));
+    let (downgraded, changes) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    // The first assignment alone would examine far more candidates than the
+    // search may; the search stops within its work and says it did not finish.
+    let (_, unfinished, spent) = super::write::LAST_ORDER_SEARCH.with(std::cell::Cell::get);
+    assert!(unfinished);
+    assert!(
+        spent <= super::write::LAYOUT_ORDER_SEARCH_WORK,
+        "{spent} steps"
+    );
+    // No order keeps more than one code at each of the 500 positions both
+    // constellations' codes held, so 499 moves is the fewest possible.
+    let moves = changes
+        .iter()
+        .filter(|change| matches!(change, ObsDowngradeChange::CodeMoved { .. }))
+        .count();
+    assert_eq!(moves, 499, "{changes:?}");
+    let text = downgraded.to_rinex_string().expect("the downgrade writes");
+    let read = RinexObs::parse(&text).expect("reads back");
+    assert_eq!(read.header().obs_codes[&GnssSystem::Gps].len(), 999);
+}
+
+#[test]
+fn downgrade_refuses_a_layout_wider_than_a_header_before_searching_it() {
+    // Seven constellations of 999 copies each fit their own lists but lay out
+    // as 6,993 columns. The order search used to build matrices that wide, for
+    // seconds and most of a gigabyte, before the width was refused.
+    let lists: Vec<SmallList> = [
+        (GnssSystem::Gps, 'G', 1, "C1C"),
+        (GnssSystem::Glonass, 'R', 2, "L1C"),
+        (GnssSystem::Galileo, 'E', 11, "D1X"),
+        (GnssSystem::BeiDou, 'C', 5, "S2I"),
+        (GnssSystem::Qzss, 'J', 1, "C5X"),
+        (GnssSystem::Sbas, 'S', 20, "L5X"),
+        (GnssSystem::Navic, 'I', 3, "D5A"),
+    ]
+    .into_iter()
+    .map(|(system, letter, prn, code)| (system, letter, prn, vec![code.to_string(); 999]))
+    .collect();
+    let product = mixed_product(2.11, &lists);
+    super::write::LAST_ORDER_SEARCH.with(|last| last.set((0, false, 0)));
+    assert!(matches!(
+        product.downgrade_to_rinex2(2.11),
+        Err(RinexObsWriteError::TooManyObservationTypes { .. })
+    ));
+    assert_eq!(
+        super::write::LAST_ORDER_SEARCH.with(std::cell::Cell::get),
+        (0, false, 0),
+        "the order search ran"
+    );
+}
+
+#[test]
+fn downgrade_keeps_a_valid_assignment_its_search_ran_out_of_work_to_check() {
+    // GPS and GLONASS hold 329 and 317 names kept as written, sharing two. The
+    // first assignment keeps 329 codes in place and keeps every reading rule,
+    // but checking it when it was solved ran out of work, so it was dropped
+    // and the emptied search reported the built order, moving every code, as
+    // proven best. Placing all of GPS's names first and GLONASS's after moves
+    // 317.
+    let lists: Vec<Vec<usize>> = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/downgrade_order_proof_lists.json"
+    )))
+    .expect("the committed lists");
+    let names: Vec<String> = "0123456789ABEFGHIJKMNOQRTUVWXYZ"
+        .chars()
+        .flat_map(|first| {
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                .chars()
+                .map(move |second| format!("{first}{second}"))
+        })
+        .take(644)
+        .collect();
+    let list =
+        |at: usize| -> Vec<String> { lists[at].iter().map(|&name| names[name].clone()).collect() };
+    let product = mixed_product(
+        2.11,
+        &[
+            (GnssSystem::Gps, 'G', 1, list(0)),
+            (GnssSystem::Glonass, 'R', 2, list(1)),
+        ],
+    );
+    let moves = downgrade_moves(&product, 2.11);
+    assert!(moves <= 317, "{moves} moves");
+    assert_downgrade_states("names kept as written", 2.11, &product);
+}
+
+/// The layout's columns as they were built before construction was indexed:
+/// every question about what a constellation reads answered by reading the
+/// names again. Kept as the reference the indexed construction has to match.
+fn reference_rinex2_obs_columns(
+    product: &RinexObs,
+) -> (Vec<String>, BTreeMap<GnssSystem, Vec<Option<usize>>>) {
+    let version = product.header.version;
+    let lists = &product.header.obs_codes;
+    let reads_as = |system: GnssSystem, name: &str| -> Option<String> {
+        rinex2_name_allowed(system, name, version)
+            .then(|| canonical_rinex2_obs_code(system, name, version))
+    };
+    let covers = |names: &[String], system: GnssSystem, code: &str| {
+        names
+            .iter()
+            .any(|name| reads_as(system, name).as_deref() == Some(code))
+    };
+    let mut providers: Vec<String> = Vec::new();
+    for (system, codes) in lists {
+        for (index, code) in codes.iter().enumerate() {
+            if rinex2_kept_as_written(code)
+                || codes[..index].contains(code)
+                || covers(&providers, *system, code)
+            {
+                continue;
+            }
+            let mut best: Option<(String, usize)> = None;
+            for name in rinex2_obs_code_candidates(*system, code, version) {
+                if reads_as(*system, &name).as_deref() != Some(code.as_str()) {
+                    continue;
+                }
+                let gain = lists
+                    .iter()
+                    .filter(|(other, other_codes)| {
+                        reads_as(**other, &name).is_some_and(|read| {
+                            other_codes.contains(&read) && !covers(&providers, **other, &read)
+                        })
+                    })
+                    .count();
+                if best.as_ref().is_none_or(|(_, most)| gain > *most) {
+                    best = Some((name, gain));
+                }
+            }
+            if let Some((name, _)) = best {
+                providers.push(name);
+            }
+        }
+    }
+    let mut kept_as_written: Vec<String> = Vec::new();
+    for (system, codes) in lists {
+        let mut wanted: BTreeMap<&str, usize> = BTreeMap::new();
+        for code in codes.iter().filter(|code| rinex2_kept_as_written(code)) {
+            *wanted.entry(code.as_str()).or_default() += 1;
+        }
+        for (name, count) in wanted {
+            if let Some(stands_for) = reads_as(*system, name) {
+                if !covers(&providers, *system, &stands_for) {
+                    providers.push(name.to_string());
+                }
+            }
+            let mut columns = providers.clone();
+            columns.extend(kept_as_written.iter().cloned());
+            let have = rinex2_system_obs_codes(*system, &columns, version)
+                .iter()
+                .filter(|read| read.as_str() == name)
+                .count();
+            for _ in have..count {
+                kept_as_written.push(name.to_string());
+            }
+        }
+    }
+    let mut names = providers;
+    names.extend(kept_as_written);
+    let mut slots: BTreeMap<GnssSystem, Vec<Option<usize>>> = BTreeMap::new();
+    let mut renamed: Vec<(GnssSystem, usize)> = Vec::new();
+    for (system, codes) in lists {
+        let read = rinex2_system_obs_codes(*system, &names, version);
+        let mut row: Vec<Option<usize>> = vec![None; names.len()];
+        for (index, code) in codes.iter().enumerate() {
+            match (0..read.len()).find(|&column| read[column] == *code && row[column].is_none()) {
+                Some(column) => row[column] = Some(index),
+                None => renamed.push((*system, index)),
+            }
+        }
+        slots.insert(*system, row);
+    }
+    for (system, index) in renamed {
+        if names.len() > MAX_OBS_TYPE_COUNT {
+            break;
+        }
+        let code = &lists[&system][index];
+        let spelling = rinex2_obs_code_candidates(system, code, version)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| code.chars().take(2).collect());
+        let duplicate = lists[&system][..index].contains(code);
+        let read = rinex2_system_obs_codes(system, &names, version);
+        let free = |column: usize| slots[&system].get(column).copied().flatten().is_none();
+        let target = match reads_as(system, &spelling) {
+            Some(target) if !duplicate && !lists[&system].contains(&target) => {
+                (0..read.len()).find(|&column| free(column) && read[column] == target)
+            }
+            _ => None,
+        };
+        let same_name = || {
+            let mut appended = names.clone();
+            appended.push(spelling.clone());
+            let would_read = rinex2_system_obs_codes(system, &appended, version)
+                .pop()
+                .unwrap_or_default();
+            (0..read.len()).find(|&column| {
+                free(column) && names[column] == spelling && read[column] == would_read
+            })
+        };
+        let column = match target.or_else(same_name) {
+            Some(column) => column,
+            None => {
+                names.push(spelling);
+                for row in slots.values_mut() {
+                    row.resize(names.len(), None);
+                }
+                names.len() - 1
+            }
+        };
+        let row = slots.entry(system).or_default();
+        row.resize(names.len(), None);
+        row[column] = Some(index);
+    }
+    for row in slots.values_mut() {
+        row.resize(names.len(), None);
+    }
+    (names, slots)
+}
+
+#[test]
+fn indexed_layout_columns_match_reading_the_names_again() {
+    // The layout's columns used to be built by reading the names again for
+    // every question, which was quadratic in the width; they are built from
+    // indexes now, and have to come out the same, column for column.
+    let check = |label: &str, product: &RinexObs| {
+        assert_eq!(
+            product.rinex2_obs_columns(),
+            reference_rinex2_obs_columns(product),
+            "{label}"
+        );
+    };
+    let mut products = 0_usize;
+    for version in [2.11, 2.12] {
+        for (sa, la, pa, sb, lb, pb) in SMALL_PAIRS {
+            for list_a in small_code_lists(sa) {
+                for list_b in small_code_lists(sb) {
+                    let product = two_system_product(
+                        version,
+                        &(sa, la, pa, list_a.clone()),
+                        &(sb, lb, pb, list_b.clone()),
+                        true,
+                    );
+                    check(&format!("{version} {list_a:?} {list_b:?}"), &product);
+                    products += 1;
+                }
+            }
+        }
+    }
+    let constellations = sweep_constellations();
+    let literal_heavy = [
+        "C1", "C2", "P1", "P2", "L1", "L2", "D1", "S1", "CA", "CB", "C5", "L5", "ZZ", "X1", "C1C",
+        "C1W", "L1C", "C5X", "C9X", "C2", "C7",
+    ];
+    let mut rng = SweepRng(0x5851_F42D_4C95_7F2D);
+    for round in 0..3_000 {
+        let version = if round % 2 == 0 { 2.11 } else { 2.12 };
+        let count = 2 + rng.below(3);
+        let mut picked: Vec<usize> = Vec::new();
+        while picked.len() < count {
+            let at = rng.below(constellations.len());
+            if !picked.contains(&at) {
+                picked.push(at);
+            }
+        }
+        let lists: Vec<SmallList> = picked
+            .iter()
+            .map(|&at| {
+                let (system, letter, prn, alphabet) = &constellations[at];
+                let length = 1 + rng.below(8);
+                let list = (0..length)
+                    .map(|_| {
+                        if round % 3 == 0 {
+                            literal_heavy[rng.below(literal_heavy.len())].to_string()
+                        } else {
+                            alphabet[rng.below(alphabet.len())].to_string()
+                        }
+                    })
+                    .collect();
+                (*system, *letter, *prn, list)
+            })
+            .collect();
+        check(
+            &format!("{version} {lists:?}"),
+            &mixed_product(version, &lists),
+        );
+        products += 1;
+    }
+    let names = names_before_their_codes();
+    check("names before their codes", &mixed_product(2.11, &names));
+    let proof: Vec<Vec<usize>> = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/downgrade_order_proof_lists.json"
+    )))
+    .expect("the committed lists");
+    let two_character: Vec<String> = "0123456789ABEFGHIJKMNOQRTUVWXYZ"
+        .chars()
+        .flat_map(|first| {
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                .chars()
+                .map(move |second| format!("{first}{second}"))
+        })
+        .take(644)
+        .collect();
+    let list = |at: usize| -> Vec<String> {
+        proof[at]
+            .iter()
+            .map(|&name| two_character[name].clone())
+            .collect()
+    };
+    check(
+        "names kept as written",
+        &mixed_product(
+            2.11,
+            &[
+                (GnssSystem::Gps, 'G', 1, list(0)),
+                (GnssSystem::Glonass, 'R', 2, list(1)),
+            ],
+        ),
+    );
+    assert!(products > 3_000, "{products} products");
+}
+
+#[test]
+fn downgrade_lays_out_seven_constellations_of_shuffled_names_kept_as_written() {
+    // Seven constellations each holding the same 999 two-character names kept
+    // as written, shuffled differently. Building the columns for them read
+    // every name again for every distinct name, over a second in a release
+    // build before the search began.
+    let names: Vec<String> = "0123456789ABEFGHIJKMNOQRTUVWXYZ"
+        .chars()
+        .flat_map(|first| {
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                .chars()
+                .map(move |second| format!("{first}{second}"))
+        })
+        .take(999)
+        .collect();
+    let mut rng = SweepRng(7);
+    let lists: Vec<SmallList> = [
+        (GnssSystem::Gps, 'G', 1_u8),
+        (GnssSystem::Glonass, 'R', 3),
+        (GnssSystem::Galileo, 'E', 5),
+        (GnssSystem::BeiDou, 'C', 7),
+        (GnssSystem::Qzss, 'J', 1),
+        (GnssSystem::Sbas, 'S', 20),
+        (GnssSystem::Navic, 'I', 3),
+    ]
+    .into_iter()
+    .map(|(system, letter, prn)| {
+        let mut codes = names.clone();
+        for at in (1..codes.len()).rev() {
+            codes.swap(at, rng.below(at + 1));
+        }
+        (system, letter, prn, codes)
+    })
+    .collect();
+    let product = mixed_product(2.11, &lists);
+    let (downgraded, _) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    let text = downgraded.to_rinex_string().expect("the downgrade writes");
+    let read = RinexObs::parse(&text).expect("reads back");
+    assert_eq!(read.header().obs_codes[&GnssSystem::Gps].len(), 999);
+}
+
+#[test]
+fn a_wide_version_two_product_of_repeated_names_writes_unchanged() {
+    // Seven constellations each reading 499 `ZZ` then 500 `C1`: a version 2
+    // list states it, so the writer writes it and the downgrade changes
+    // nothing. Finding that list asked, for every repeated `C1`, whether the
+    // codes before it held its canonical code by scanning all of them.
+    // Each constellation holds what the reader gives it for those names.
+    let mut names = vec!["ZZ".to_string(); 499];
+    names.extend(vec!["C1".to_string(); 500]);
+    let codes = |system: GnssSystem| rinex2_system_obs_codes(system, &names, 2.11);
+    let lists: Vec<SmallList> = [
+        (GnssSystem::Gps, 'G', 1_u8),
+        (GnssSystem::Glonass, 'R', 2),
+        (GnssSystem::Galileo, 'E', 11),
+        (GnssSystem::BeiDou, 'C', 5),
+        (GnssSystem::Qzss, 'J', 1),
+        (GnssSystem::Sbas, 'S', 20),
+        (GnssSystem::Navic, 'I', 3),
+    ]
+    .into_iter()
+    .map(|(system, letter, prn)| (system, letter, prn, codes(system)))
+    .collect();
+    let product = mixed_product(2.11, &lists);
+    let text = product
+        .to_rinex_string()
+        .expect("a version 2 list states it");
+    let read = RinexObs::parse(&text).expect("reads back");
+    assert_eq!(read.header().obs_codes, product.header().obs_codes);
+    let (downgraded, changes) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert!(changes.is_empty(), "{changes:?}");
+    assert_eq!(
+        downgraded.to_rinex_string().expect("the downgrade writes"),
+        text
+    );
+}
+
+#[test]
+fn a_version_two_file_with_a_one_character_type_writes_back() {
+    // A type field is two characters wide and a file may put one character in
+    // it. The reader keeps `Z` as written and the writers carry it, but the
+    // search for a name list only took two-byte names as kept as written, so
+    // the file could neither be written back nor downgraded.
+    let line = |content: &str, label: &str| format!("{content:<60}{label}\n");
+    let text = [
+        line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        line("     2     Z    C1", "# / TYPES OF OBSERV"),
+        line(
+            "  2015     1     1     0     0    0.0000000     GPS",
+            "TIME OF FIRST OBS",
+        ),
+        line("", "END OF HEADER"),
+        " 15  1  1  0  0  0.0000000  0  1G 1\n".to_string(),
+        "      1234.56715  20000000.125 7\n".to_string(),
+    ]
+    .concat();
+    let obs = RinexObs::parse(&text).expect("parse a one-character type");
+    let gps = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    assert_eq!(obs.header().obs_codes[&GnssSystem::Gps][0], "Z");
+    assert_eq!(obs.epochs()[0].sats[&gps][0].lli, Some(1));
+    let written = obs.to_rinex_string().expect("a one-character type writes");
+    let read = RinexObs::parse(&written).expect("reads back");
+    assert_eq!(read.header().obs_codes, obs.header().obs_codes);
+    assert_eq!(read.epochs(), obs.epochs());
+    let (downgraded, changes) = obs.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert!(changes.is_empty(), "{changes:?}");
+    assert_eq!(downgraded.to_rinex_string().expect("writes"), written);
+}
+
+#[test]
 fn a_one_character_type_is_kept_whichever_side_of_its_field_it_sits() {
     // An `A2` type field holding one character may put it in either column;
     // both read as the same name kept as written and write back.
@@ -3486,6 +4919,434 @@ fn a_version_two_file_keeps_its_own_type_list_over_version_three_type_records() 
 /// A version 2 header record: content padded to its label.
 fn v2_record(content: &str, label: &str) -> String {
     format!("{content:<60}{label}\n")
+}
+
+#[test]
+fn version_two_files_holding_what_version_two_cannot_are_refused_downgraded_or_written_as_they_should(
+) {
+    // Review built these: version 2 headers the reader takes with version 3
+    // type records, epoch records, scale factors, repeated declarations and
+    // counts between them. Each is written, refused, or downgraded according
+    // to what it holds, never by accident of which record came first.
+    let version2 = v2_record(
+        "     2.11           OBSERVATION DATA    G (GPS)",
+        "RINEX VERSION / TYPE",
+    );
+    let end = v2_record("", "END OF HEADER");
+    let z_types = v2_record("     1     Z", "# / TYPES OF OBSERV");
+    let z_sys = v2_record("G    1 Z", "SYS / # / OBS TYPES");
+    let v2_epoch = " 15  1  1  0  0  0.0000000  0  1G 1\n      1234.567\n";
+    let gps = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    let parse = |label: &str, text: String| {
+        let obs = RinexObs::parse(&text).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(obs.skipped_records, 0, "{label}");
+        obs
+    };
+    let writes_back = |label: &str, obs: &RinexObs| {
+        let text = obs
+            .to_rinex_string()
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        let read = RinexObs::parse(&text).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(read.epochs(), obs.epochs(), "{label}");
+        assert_eq!(
+            read.header().prn_obs_counts,
+            obs.header().prn_obs_counts,
+            "{label}"
+        );
+    };
+
+    let native = parse(
+        "native",
+        [
+            version2.clone(),
+            z_types.clone(),
+            end.clone(),
+            v2_epoch.to_string(),
+        ]
+        .concat(),
+    );
+    writes_back("native", &native);
+
+    let scale = parse(
+        "scale",
+        [
+            version2.clone(),
+            z_types.clone(),
+            v2_record("G   10  0", "SYS / SCALE FACTOR"),
+            end.clone(),
+            v2_epoch.to_string(),
+        ]
+        .concat(),
+    );
+    assert!(matches!(
+        scale.to_rinex_string(),
+        Err(RinexObsWriteError::ScaleFactorsInVersionTwo { count: 1 })
+    ));
+    // The file's 1234.567 under a factor of 10 is 123.4567, which a field with
+    // no factor to divide by holds only to three decimals.
+    let (downgraded, changes) = scale.downgrade_to_rinex2(2.11).expect("scale downgrade");
+    assert_eq!(
+        changes,
+        vec![
+            ObsDowngradeChange::ScaleFactorsRemoved { count: 1 },
+            ObsDowngradeChange::ValueRounded {
+                epoch_index: 0,
+                satellite: gps,
+                code: "Z".to_string(),
+                from: 123.4567,
+                to: 123.457,
+            },
+        ]
+    );
+    writes_back("scale downgraded", &downgraded);
+
+    let clock = parse(
+        "clock",
+        [
+            version2.clone(),
+            z_types.clone(),
+            z_sys.clone(),
+            end.clone(),
+            "> 2020 06 24 00 00  0.0000000  0  1      -0.000000000001\nG01      1234.567\n"
+                .to_string(),
+        ]
+        .concat(),
+    );
+    assert_eq!(clock.header().obs_codes[&GnssSystem::Gps], ["Z"]);
+    assert!(clock.to_rinex_string().is_err());
+    let (downgraded, changes) = clock.downgrade_to_rinex2(2.11).expect("clock downgrade");
+    assert_eq!(
+        changes,
+        vec![ObsDowngradeChange::ClockOffsetRounded {
+            epoch_index: 0,
+            from: -0.000_000_000_001,
+            to: 0.0,
+        }]
+    );
+    writes_back("clock downgraded", &downgraded);
+
+    let pico = parse(
+        "pico",
+        [
+            version2.clone(),
+            z_types.clone(),
+            z_sys.clone(),
+            end.clone(),
+            "> 2020 06 24 00 00  0.0000000 12345  0  1\nG01      1234.567\n".to_string(),
+        ]
+        .concat(),
+    );
+    assert!(pico.to_rinex_string().is_err());
+    let (downgraded, changes) = pico.downgrade_to_rinex2(2.11).expect("pico downgrade");
+    assert_eq!(
+        changes,
+        vec![ObsDowngradeChange::EpochPicosecondsRemoved {
+            epoch_index: 0,
+            picoseconds: 12345,
+        }]
+    );
+    writes_back("pico downgraded", &downgraded);
+
+    // A year outside the two-digit window has no version 2 spelling, with or
+    // without scale factors to remove first.
+    for (label, extra) in [
+        ("year", String::new()),
+        ("scale-year", v2_record("G   10  0", "SYS / SCALE FACTOR")),
+    ] {
+        let obs = parse(
+            label,
+            [
+                version2.clone(),
+                z_types.clone(),
+                z_sys.clone(),
+                extra,
+                end.clone(),
+                "> 2080 01 01 00 00  0.0000000  0  1\nG01      1234.567\n".to_string(),
+            ]
+            .concat(),
+        );
+        assert!(obs.to_rinex_string().is_err(), "{label}");
+        assert!(obs.downgrade_to_rinex2(2.11).is_err(), "{label}");
+    }
+
+    // Counts are read against the lists the header ends with.
+    let counts = parse(
+        "counts",
+        [
+            version2.clone(),
+            v2_record("     2     Z     Y", "# / TYPES OF OBSERV"),
+            v2_record("   G01     1     2", "PRN / # OF OBS"),
+            z_types.clone(),
+            end.clone(),
+            v2_epoch.to_string(),
+        ]
+        .concat(),
+    );
+    assert_eq!(counts.header().prn_obs_counts[&gps], vec![Some(1)]);
+    writes_back("counts", &counts);
+    let partial = parse(
+        "v3-partial-counts",
+        [
+            v2_record(
+                "     3.05           OBSERVATION DATA    G (GPS)",
+                "RINEX VERSION / TYPE",
+            ),
+            v2_record("G    1 C1C", "SYS / # / OBS TYPES"),
+            v2_record("   G01     1", "PRN / # OF OBS"),
+            v2_record("G    1 L1C", "SYS / # / OBS TYPES"),
+            end.clone(),
+        ]
+        .concat(),
+    );
+    assert_eq!(partial.header().prn_obs_counts[&gps], vec![Some(1), None]);
+    writes_back("v3-partial-counts", &partial);
+
+    // A version 3 type record does not replace a version 2 file's own list.
+    let c1 = rinex2_system_obs_codes(GnssSystem::Gps, &["C1".to_string()], 2.11);
+    for (label, code) in [("signal-override", "C5X"), ("two-char-override", "C1")] {
+        let obs = parse(
+            label,
+            [
+                version2.clone(),
+                v2_record("     1    C1", "# / TYPES OF OBSERV"),
+                v2_record(&format!("G    1 {code}"), "SYS / # / OBS TYPES"),
+                end.clone(),
+                v2_epoch.to_string(),
+            ]
+            .concat(),
+        );
+        assert_eq!(obs.header().obs_codes[&GnssSystem::Gps], c1, "{label}");
+        writes_back(label, &obs);
+    }
+}
+
+#[test]
+fn version_two_headers_review_found_the_reader_took_without_what_writing_needs() {
+    // Review built these: a flag too wide for its field, counts for a
+    // constellation no observation names, and observations with no type list.
+    let mixed = v2_record(
+        "     2.11           OBSERVATION DATA    M (MIXED)",
+        "RINEX VERSION / TYPE",
+    );
+    let end = v2_record("", "END OF HEADER");
+    let c1 = v2_record("     1    C1", "# / TYPES OF OBSERV");
+    let r01_count = v2_record("   R01     1", "PRN / # OF OBS");
+    let r01 = GnssSatelliteId {
+        system: GnssSystem::Glonass,
+        prn: 1,
+    };
+
+    // A flag of 10 does not fit the one-digit field either version writes it
+    // in. The reader keeps the reading it has always given such a line, and
+    // the writer and downgrade refuse it rather than write it across the count.
+    let flag_ten = [
+        v2_record(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        v2_record("     1     Z", "# / TYPES OF OBSERV"),
+        end.clone(),
+        "> 2020 06 24 00 00  0.0000000  10  1\nEvent record\n".to_string(),
+    ]
+    .concat();
+    let obs = RinexObs::parse(&flag_ten).expect("a flag of 10 is read");
+    assert_eq!(obs.epochs()[0].flag, 10);
+    assert!(obs.to_rinex_string().is_err());
+    assert!(obs.downgrade_to_rinex2(2.11).is_err());
+
+    // Counts for a constellation no observation names are read against the
+    // file's list, with no epochs at all and with only an event epoch: they
+    // write back, and the downgrade measures them against that list rather
+    // than refusing them as counts with no codes.
+    for (label, body) in [
+        ("header only", String::new()),
+        (
+            "event only",
+            " 15  1  1  0  0  0.0000000  4  0\n".to_string(),
+        ),
+    ] {
+        let obs = RinexObs::parse(
+            &[
+                mixed.clone(),
+                c1.clone(),
+                r01_count.clone(),
+                end.clone(),
+                body,
+            ]
+            .concat(),
+        )
+        .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(obs.header().prn_obs_counts[&r01], vec![Some(1)], "{label}");
+        let text = obs
+            .to_rinex_string()
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        let read = RinexObs::parse(&text).unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(read.header(), obs.header(), "{label}");
+        let (downgraded, changes) = obs
+            .downgrade_to_rinex2(2.11)
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(changes.is_empty(), "{label}: {changes:?}");
+        assert_eq!(
+            downgraded.to_rinex_string().expect("writes"),
+            text,
+            "{label}"
+        );
+    }
+
+    // With a scale factor to remove, the downgrade has codes for those counts.
+    let scaled = RinexObs::parse(
+        &[
+            mixed.clone(),
+            c1.clone(),
+            r01_count.clone(),
+            v2_record("G   10  0", "SYS / SCALE FACTOR"),
+            end.clone(),
+        ]
+        .concat(),
+    )
+    .expect("parse");
+    assert!(matches!(
+        scaled.to_rinex_string(),
+        Err(RinexObsWriteError::ScaleFactorsInVersionTwo { count: 1 })
+    ));
+    let (downgraded, _) = scaled.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert_eq!(downgraded.header().prn_obs_counts[&r01], vec![Some(1)]);
+    downgraded.to_rinex_string().expect("the downgrade writes");
+
+    // Observations with no type list have nothing to be read by.
+    let unlisted = [
+        v2_record(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        end.clone(),
+        "> 2020 06 24 00 00  0.0000000  0  1\nG01      1234.567\n".to_string(),
+    ]
+    .concat();
+    let error = RinexObs::parse(&unlisted).expect_err("observations with no list are refused");
+    assert!(
+        error.to_string().contains("no # / TYPES OF OBSERV"),
+        "{error}"
+    );
+}
+
+#[test]
+fn version_two_type_names_keep_what_counts_and_flags_mean() {
+    // Review built these. A version 2 count for a constellation with no
+    // observation reads by the file's type names, and the writer and downgrade
+    // used to lose which names those were; a flag of 10 wrote at version 3.
+    let mixed = v2_record(
+        "     2.11           OBSERVATION DATA    M (MIXED)",
+        "RINEX VERSION / TYPE",
+    );
+    let end = v2_record("", "END OF HEADER");
+
+    // A GPS count beside only a BeiDou observation keeps meaning C1C: the
+    // file is written with the name it was read with, not one that reads the
+    // same for BeiDou and differently for GPS.
+    let alias = RinexObs::parse(
+        &[
+            mixed.clone(),
+            v2_record("     1    C1", "# / TYPES OF OBSERV"),
+            v2_record("   G01     7", "PRN / # OF OBS"),
+            end.clone(),
+            "> 2020 06 24 00 00  0.0000000  0  1\nC01      1234.567\n".to_string(),
+        ]
+        .concat(),
+    )
+    .expect("parse");
+    assert_eq!(alias.header().rinex2_types, ["C1"]);
+    let written = alias.to_rinex_string().expect("writes");
+    let read = RinexObs::parse(&written).expect("reads back");
+    assert_eq!(read.header().rinex2_types, ["C1"]);
+    assert_eq!(read.header(), alias.header());
+    assert_eq!(
+        rinex2_system_obs_codes(GnssSystem::Gps, &read.header().rinex2_types, 2.11),
+        ["C1C"]
+    );
+
+    // A GLONASS count converted to 2.12 follows the code it counted: either
+    // the names still read as C2C for GLONASS, or the rename is reported.
+    let glonass = RinexObs::parse(
+        &[
+            mixed.clone(),
+            v2_record("     1    C2", "# / TYPES OF OBSERV"),
+            v2_record("   R01     7", "PRN / # OF OBS"),
+            v2_record("  1 R01 -7", "GLONASS SLOT / FRQ #"),
+            end.clone(),
+        ]
+        .concat(),
+    )
+    .expect("parse");
+    let r01 = GnssSatelliteId {
+        system: GnssSystem::Glonass,
+        prn: 1,
+    };
+    let (converted, changes) = glonass.downgrade_to_rinex2(2.12).expect("downgrade");
+    let reads =
+        rinex2_system_obs_codes(GnssSystem::Glonass, &converted.header().rinex2_types, 2.12);
+    let column = converted.header().prn_obs_counts[&r01]
+        .iter()
+        .position(|count| *count == Some(7))
+        .expect("the count survives");
+    assert!(
+        reads[column] == "C2C"
+            || changes.contains(&ObsDowngradeChange::CodeRenamed {
+                system: GnssSystem::Glonass,
+                from: "C2C".to_string(),
+                to: reads[column].clone(),
+            }),
+        "the count now reads as {} with no rename reported: {changes:?}",
+        reads[column]
+    );
+    let text = converted.to_rinex_string().expect("the downgrade writes");
+    let read = RinexObs::parse(&text).expect("reads back");
+    assert_eq!(
+        read.header().prn_obs_counts,
+        converted.header().prn_obs_counts
+    );
+
+    // A flag of 10 does not fit at version 3 either.
+    let wide = RinexObs::parse(
+        &[
+            v2_record(
+                "     3.05           OBSERVATION DATA    G (GPS)",
+                "RINEX VERSION / TYPE",
+            ),
+            v2_record("G    1 C1C", "SYS / # / OBS TYPES"),
+            end.clone(),
+            "> 2020 06 24 00 00  0.0000000  10  1\nEvent record\n".to_string(),
+        ]
+        .concat(),
+    )
+    .expect("a flag of 10 is read");
+    assert_eq!(
+        wide.to_rinex_string(),
+        Err(RinexObsWriteError::EpochFlagTooWide {
+            epoch_index: 0,
+            flag: 10,
+        })
+    );
+
+    // Two records for one satellite are declared as the one kept.
+    let twice = RinexObs::parse(
+        &[
+            mixed.clone(),
+            v2_record("     1    C1", "# / TYPES OF OBSERV"),
+            end.clone(),
+            "> 2020 06 24 00 00  0.0000000  0  2\nG01      1234.567\nG01      1234.567\n"
+                .to_string(),
+        ]
+        .concat(),
+    )
+    .expect("parse");
+    let text = twice.to_rinex_string().expect("writes");
+    let read = RinexObs::parse(&text).expect("reads back");
+    assert_eq!(read.epochs()[0].sats, twice.epochs()[0].sats);
+    assert_eq!(read.epochs()[0].declared_record_count, 1);
 }
 
 #[test]
@@ -3796,6 +5657,223 @@ fn a_loosely_spaced_epoch_line_keeps_the_reading_its_tokens_always_had() {
 }
 
 #[test]
+fn a_header_only_version_two_file_keeps_its_list_when_counts_name_another_constellation() {
+    // Review built this: GPS `C2` with only a GLONASS count and no
+    // observations. The file states the GPS list its version record names, so
+    // a conversion to 2.12 has to keep that list or report its change; it used
+    // to write `C2`, which reads as GPS C2W, with no change reported.
+    let obs = RinexObs::parse(&obs_file(
+        "2.11",
+        'G',
+        &[
+            v2_record("     1    C2", "# / TYPES OF OBSERV"),
+            v2_record("   R01     7", "PRN / # OF OBS"),
+        ],
+        "",
+    ))
+    .expect("parse");
+    let held = obs.header().obs_codes[&GnssSystem::Gps].clone();
+    let (converted, changes) = obs.downgrade_to_rinex2(2.12).expect("downgrade");
+    let text = converted.to_rinex_string().expect("writes");
+    let read = RinexObs::parse(&text).expect("reads back");
+    let now = read.header().obs_codes[&GnssSystem::Gps].clone();
+    // Each code the list held reads back where it was, or its rename is
+    // reported; any further GPS column the conversion needed is reported as
+    // added.
+    for (index, code) in held.iter().enumerate() {
+        assert!(
+            now.get(index) == Some(code)
+                || changes.contains(&ObsDowngradeChange::CodeRenamed {
+                    system: GnssSystem::Gps,
+                    from: code.clone(),
+                    to: now.get(index).cloned().unwrap_or_default(),
+                }),
+            "GPS {code} at {index} reads back as {now:?} with no change reported: {changes:?}"
+        );
+    }
+    let added = changes
+        .iter()
+        .filter(|change| {
+            matches!(change, ObsDowngradeChange::CodeAdded { system, .. } if *system == GnssSystem::Gps)
+        })
+        .count();
+    assert_eq!(added, now.len() - held.len(), "{changes:?}");
+}
+
+#[test]
+fn lists_nothing_names_do_not_change_a_downgrade() {
+    // Review built these: a GPS observation holding C1X, with and without an
+    // unused GLONASS list. The unused list took a column, moved the GPS code
+    // and reported changes; at 1,000 codes it made the conversion refuse.
+    let base = RinexObs::parse(&obs_file(
+        "3.05",
+        'G',
+        &[v2_record("G    1 C1X", "SYS / # / OBS TYPES")],
+        "> 2020 06 24 00 00  0.0000000  0  1\nG01      1234.567\n",
+    ))
+    .expect("parse");
+    let (plain, plain_changes) = base.downgrade_to_rinex2(2.11).expect("downgrade");
+    for unused in [vec!["L1C".to_string()], vec!["L1C".to_string(); 1000]] {
+        let mut obs = base.clone();
+        obs.header
+            .obs_codes
+            .insert(GnssSystem::Glonass, unused.clone());
+        let (converted, changes) = obs
+            .downgrade_to_rinex2(2.11)
+            .unwrap_or_else(|error| panic!("{} unused codes: {error}", unused.len()));
+        // The file does not state the unused list, so its removal is the one
+        // change the list adds.
+        let mut expected = plain_changes.clone();
+        expected.push(ObsDowngradeChange::CodeListRemoved {
+            system: GnssSystem::Glonass,
+            codes: unused.clone(),
+        });
+        assert_eq!(changes, expected, "{} unused codes", unused.len());
+        assert_eq!(
+            converted.header().rinex2_types,
+            plain.header().rinex2_types,
+            "{} unused codes",
+            unused.len()
+        );
+        assert_eq!(
+            converted.epochs(),
+            plain.epochs(),
+            "{} unused codes",
+            unused.len()
+        );
+    }
+}
+
+/// Whether a downgrade kept each code a list held where it was, or reported its
+/// move or rename, and reported every column it added.
+fn kept_or_reported(
+    system: GnssSystem,
+    held: &[String],
+    now: &[String],
+    changes: &[ObsDowngradeChange],
+) {
+    for (index, code) in held.iter().enumerate() {
+        let moved = changes.iter().any(|change| {
+            matches!(change, ObsDowngradeChange::CodeMoved { system: moved, code: moved_code, from, to }
+                if *moved == system && moved_code == code && *from == index && now.get(*to) == Some(code))
+        });
+        assert!(
+            now.get(index) == Some(code)
+                || moved
+                || changes.contains(&ObsDowngradeChange::CodeRenamed {
+                    system,
+                    from: code.clone(),
+                    to: now.get(index).cloned().unwrap_or_default(),
+                }),
+            "{system:?} {code} at {index} reads back as {now:?} with no change reported: {changes:?}"
+        );
+    }
+    let added = changes
+        .iter()
+        .filter(|change| {
+            matches!(change, ObsDowngradeChange::CodeAdded { system: added, .. } if *added == system)
+        })
+        .count();
+    assert_eq!(added, now.len() - held.len(), "{system:?}: {changes:?}");
+}
+
+#[test]
+fn a_header_only_file_keeps_the_list_its_version_record_names_through_a_downgrade() {
+    // Review built these. With no observations, a version 2 file states the
+    // list of the constellation its version record names; a downgrade took
+    // that list from whatever lists it had added, and left it out when the
+    // product held none.
+    let c2 = v2_record("     1    C2", "# / TYPES OF OBSERV");
+
+    // GPS C2, a GLONASS count, and the lists cleared: GPS still reads C2X by
+    // the names, and a conversion to 2.12 has to keep it or say so.
+    let mut cleared = RinexObs::parse(&obs_file(
+        "2.11",
+        'G',
+        &[c2.clone(), v2_record("   R01     7", "PRN / # OF OBS")],
+        "",
+    ))
+    .expect("parse");
+    cleared.header.obs_codes.clear();
+    let held = rinex2_system_obs_codes(GnssSystem::Gps, &["C2".to_string()], 2.11);
+    let (converted, changes) = cleared.downgrade_to_rinex2(2.12).expect("downgrade");
+    let read = RinexObs::parse(&converted.to_rinex_string().expect("writes")).expect("reads back");
+    kept_or_reported(
+        GnssSystem::Gps,
+        &held,
+        &read.header().obs_codes[&GnssSystem::Gps],
+        &changes,
+    );
+
+    // GLONASS C2 with a GPS count converts, keeping the GLONASS list.
+    let glonass = RinexObs::parse(&obs_file(
+        "2.11",
+        'R',
+        &[c2, v2_record("   G01     7", "PRN / # OF OBS")],
+        "",
+    ))
+    .expect("parse");
+    let held = glonass.header().obs_codes[&GnssSystem::Glonass].clone();
+    let (converted, changes) = glonass
+        .downgrade_to_rinex2(2.12)
+        .expect("a GLONASS header with a GPS count converts");
+    let read = RinexObs::parse(&converted.to_rinex_string().expect("writes")).expect("reads back");
+    kept_or_reported(
+        GnssSystem::Glonass,
+        &held,
+        &read.header().obs_codes[&GnssSystem::Glonass],
+        &changes,
+    );
+    let g01 = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    assert!(read.header().prn_obs_counts[&g01].contains(&Some(7)));
+}
+
+#[test]
+fn an_unused_list_does_not_change_the_constellation_a_version_record_names() {
+    // A header-only GLONASS file with an unused Galileo list is still written
+    // as a GLONASS file. The file does not state the Galileo list, so the
+    // writer refuses it and a conversion removes it and says so.
+    let mut obs = RinexObs::parse(&obs_file(
+        "2.11",
+        'R',
+        &[v2_record("     1    C2", "# / TYPES OF OBSERV")],
+        "",
+    ))
+    .expect("parse");
+    assert_eq!(obs.header().rinex2_system, Some(GnssSystem::Glonass));
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Galileo, vec!["C1X".to_string()]);
+    assert_eq!(
+        obs.to_rinex_string(),
+        Err(RinexObsWriteError::CodeListNotStated {
+            system: GnssSystem::Galileo
+        })
+    );
+    let (converted, changes) = obs.downgrade_to_rinex2(2.11).expect("converts");
+    assert_eq!(
+        changes,
+        vec![ObsDowngradeChange::CodeListRemoved {
+            system: GnssSystem::Galileo,
+            codes: vec!["C1X".to_string()],
+        }]
+    );
+    let text = converted.to_rinex_string().expect("writes");
+    let version_record = text.lines().next().expect("version record");
+    assert_eq!(&version_record[40..41], "R", "{version_record:?}");
+    assert_eq!(
+        RinexObs::parse(&text)
+            .expect("reads back")
+            .header()
+            .rinex2_system,
+        Some(GnssSystem::Glonass)
+    );
+}
+
+#[test]
 fn a_glonass_code_bias_code_wider_than_its_field_is_refused() {
     // The code is `A3`; a longer one would be cut when written and read back
     // as another code.
@@ -3816,6 +5894,159 @@ fn a_glonass_code_bias_code_wider_than_its_field_is_refused() {
         error.to_string().contains("GLONASS COD/PHS/BIS code"),
         "{error}"
     );
+}
+
+#[test]
+fn lists_nothing_names_do_not_hold_a_version_two_file_back() {
+    // A GLONASS list no observation or count names is nothing a version 2 file
+    // states, so it cannot keep the names a GPS observation needs. The writer
+    // refuses to leave it out unsaid, and a conversion removes it and changes
+    // nothing else.
+    let mut obs = RinexObs::parse(&obs_file(
+        "2.11",
+        'G',
+        &[v2_record("     1    C1", "# / TYPES OF OBSERV")],
+        " 20  6 24  0  0  0.0000000  0  1G 1\n      1234.567\n",
+    ))
+    .expect("parse");
+    obs.header
+        .obs_codes
+        .insert(GnssSystem::Glonass, vec!["L1C".to_string()]);
+    assert_eq!(
+        obs.to_rinex_string(),
+        Err(RinexObsWriteError::CodeListNotStated {
+            system: GnssSystem::Glonass
+        })
+    );
+    let (converted, changes) = obs
+        .downgrade_to_rinex2(2.11)
+        .expect("the unused list does not refuse the conversion");
+    assert_eq!(
+        changes,
+        vec![ObsDowngradeChange::CodeListRemoved {
+            system: GnssSystem::Glonass,
+            codes: vec!["L1C".to_string()],
+        }]
+    );
+    let text = converted.to_rinex_string().expect("writes");
+    let read = RinexObs::parse(&text).expect("reads back");
+    assert_eq!(read.epochs(), obs.epochs());
+}
+
+#[test]
+fn a_list_a_version_two_file_does_not_state_is_reported_by_a_conversion() {
+    // Review built the first: a 3.05 header declaring GPS C1C and GLONASS L1C,
+    // with no observations or counts. A version 2 file with no observations
+    // states one list, and a conversion to 2.11 left GLONASS's out with no
+    // change reported.
+    let both = RinexObs::parse(&obs_file(
+        "3.05",
+        'M',
+        &[
+            v2_record("G    1 C1C", "SYS / # / OBS TYPES"),
+            v2_record("R    1 L1C", "SYS / # / OBS TYPES"),
+        ],
+        "",
+    ))
+    .expect("parse");
+    let (converted, changes) = both.downgrade_to_rinex2(2.11).expect("converts");
+    assert_eq!(
+        changes,
+        vec![ObsDowngradeChange::CodeListRemoved {
+            system: GnssSystem::Glonass,
+            codes: vec!["L1C".to_string()],
+        }]
+    );
+    let read = RinexObs::parse(&converted.to_rinex_string().expect("writes")).expect("reads back");
+    assert_eq!(read.header().obs_codes, converted.header().obs_codes);
+
+    // With no GPS list the file is named for the first constellation whose
+    // list no count keeps, and a counted one is kept beside it.
+    let g01 = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    let mut named = both.clone();
+    named.header.obs_codes.clear();
+    named
+        .header
+        .obs_codes
+        .insert(GnssSystem::Gps, vec!["C1C".to_string()]);
+    named
+        .header
+        .obs_codes
+        .insert(GnssSystem::Glonass, vec!["C1C".to_string()]);
+    // Galileo reads `C1` as C1X, so an L5Q list is one the names do not say.
+    named
+        .header
+        .obs_codes
+        .insert(GnssSystem::Galileo, vec!["L5Q".to_string()]);
+    named.header.prn_obs_counts.insert(g01, vec![Some(7)]);
+    let (converted, changes) = named.downgrade_to_rinex2(2.11).expect("converts");
+    assert_eq!(
+        changes,
+        vec![ObsDowngradeChange::CodeListRemoved {
+            system: GnssSystem::Galileo,
+            codes: vec!["L5Q".to_string()],
+        }]
+    );
+    let read = RinexObs::parse(&converted.to_rinex_string().expect("writes")).expect("reads back");
+    assert_eq!(read.header().rinex2_system, Some(GnssSystem::Glonass));
+    assert_eq!(
+        read.header().obs_codes[&GnssSystem::Glonass],
+        vec!["C1C".to_string()]
+    );
+    assert_eq!(read.header().prn_obs_counts[&g01], vec![Some(7)]);
+}
+
+#[test]
+fn names_that_also_read_as_an_unused_list_keep_it() {
+    // Review built these: GPS C2W and GLONASS C2P with no observations. At 2.12
+    // `C2` reads as GPS C2W but not as GLONASS C2P, and `P2` reads as both. A
+    // conversion to 2.12 chose `C2` and removed the GLONASS list, and a 2.12
+    // product holding `C2` and both lists was refused.
+    let v3 = RinexObs::parse(&obs_file(
+        "3.05",
+        'M',
+        &[
+            v2_record("G    1 C2W", "SYS / # / OBS TYPES"),
+            v2_record("R    1 C2P", "SYS / # / OBS TYPES"),
+        ],
+        "",
+    ))
+    .expect("parse");
+    for version in [2.10, 2.11, 2.12] {
+        let (converted, changes) = v3
+            .downgrade_to_rinex2(version)
+            .unwrap_or_else(|error| panic!("{version}: {error}"));
+        assert!(changes.is_empty(), "{version}: {changes:?}");
+        assert_eq!(
+            converted.header().obs_codes,
+            v3.header().obs_codes,
+            "{version}"
+        );
+        assert_eq!(converted.header().rinex2_types, vec!["P2".to_string()]);
+    }
+
+    let mut held = RinexObs::parse(&obs_file(
+        "2.12",
+        'M',
+        &[v2_record("     1    C2", "# / TYPES OF OBSERV")],
+        "",
+    ))
+    .expect("parse");
+    assert_eq!(
+        held.header().obs_codes[&GnssSystem::Gps],
+        vec!["C2W".to_string()]
+    );
+    held.header
+        .obs_codes
+        .insert(GnssSystem::Glonass, vec!["C2P".to_string()]);
+    let text = held
+        .to_rinex_string()
+        .expect("P2 states both lists, so the product writes");
+    let read = RinexObs::parse(&text).expect("reads back");
+    assert_eq!(read.header().rinex2_types, vec!["P2".to_string()]);
 }
 
 #[test]
@@ -3894,6 +6125,455 @@ fn repair_keeps_epochs_that_differ_only_in_picoseconds() {
         .map(|epoch| epoch.sats[&gps][0].value)
         .collect();
     assert_eq!(values, [Some(1234.567), Some(9876.543)]);
+}
+
+#[test]
+fn downgrade_refuses_values_and_counts_past_the_codes() {
+    // A value past its constellation's codes names no observable. Laying the
+    // codes out used to drop it, indicators and all, with nothing reported.
+    let gps = GnssSatelliteId {
+        system: GnssSystem::Gps,
+        prn: 1,
+    };
+    let product = || {
+        two_system_product(
+            2.11,
+            &(GnssSystem::Gps, 'G', 1, vec!["C1C".to_string()]),
+            &(GnssSystem::Glonass, 'R', 2, vec!["C2C".to_string()]),
+            true,
+        )
+    };
+    let mut extra_value = product();
+    extra_value.epochs[0]
+        .sats
+        .get_mut(&gps)
+        .expect("GPS satellite")
+        .push(ObsValue {
+            value: Some(999.0),
+            lli: Some(1),
+            ssi: Some(5),
+        });
+    assert_eq!(
+        extra_value.downgrade_to_rinex2(2.11).map(|_| ()),
+        Err(RinexObsWriteError::ValuesWithoutCodes {
+            epoch_index: 0,
+            satellite: gps,
+            codes: 1,
+            values: 2,
+        })
+    );
+    let mut extra_count = product();
+    extra_count
+        .header
+        .prn_obs_counts
+        .insert(gps, vec![Some(1), Some(2)]);
+    assert_eq!(
+        extra_count.downgrade_to_rinex2(2.11).map(|_| ()),
+        Err(RinexObsWriteError::CountsWithoutCodes {
+            satellite: gps,
+            codes: 1,
+            counts: 2,
+        })
+    );
+}
+
+/// Every move and addition a downgrade reports is one its layout made, every
+/// one its layout made is reported, and no order of the same columns under
+/// which every constellation reads its placed codes the same moves fewer.
+fn assert_moves_and_additions_are_itemized(
+    label: &str,
+    version: f64,
+    original: &RinexObs,
+    text: &str,
+    read: &RinexObs,
+    changes: &[ObsDowngradeChange],
+) {
+    let names: Vec<String> = text
+        .lines()
+        .filter(|line| line.get(60..).unwrap_or("").trim() == "# / TYPES OF OBSERV")
+        .flat_map(|line| {
+            line[6..60]
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    // Where each held code landed, per constellation, from the values.
+    let mut placed: BTreeMap<GnssSystem, Vec<(usize, usize)>> = BTreeMap::new();
+    for (sat, values) in &original.epochs()[0].sats {
+        if placed.contains_key(&sat.system) {
+            continue;
+        }
+        let read_values = &read.epochs()[0].sats[sat];
+        let row = values
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| {
+                let v = value.value?;
+                let column = read_values
+                    .iter()
+                    .position(|found| found.value == Some(v))?;
+                Some((index, column))
+            })
+            .collect();
+        placed.insert(sat.system, row);
+    }
+    let mut expected_moves = 0_usize;
+    for (system, row) in &placed {
+        let now = &read.header().obs_codes[system];
+        for &(index, column) in row {
+            if index != column {
+                expected_moves += 1;
+                let change = ObsDowngradeChange::CodeMoved {
+                    system: *system,
+                    code: now[column].clone(),
+                    from: index,
+                    to: column,
+                };
+                assert!(
+                    changes.contains(&change),
+                    "{label}: {change:?} happened and is not reported: {changes:?}"
+                );
+            }
+        }
+        for (column, code) in now.iter().enumerate() {
+            if row.iter().any(|&(_, at)| at == column) {
+                continue;
+            }
+            let reported = changes
+                .iter()
+                .filter(|change| {
+                    matches!(change, ObsDowngradeChange::CodeAdded { system: s, code: c }
+                        if s == system && c == code)
+                })
+                .count();
+            let happened = now
+                .iter()
+                .enumerate()
+                .filter(|(at, c)| *c == code && !row.iter().any(|&(_, p)| p == *at))
+                .count();
+            assert_eq!(
+                reported, happened,
+                "{label}: {system:?} {code} was added {happened} times and reported {reported}: {changes:?}"
+            );
+        }
+        let added = changes
+            .iter()
+            .filter(|change| matches!(change, ObsDowngradeChange::CodeAdded { system: s, .. } if s == system))
+            .count();
+        assert_eq!(
+            added,
+            now.len() - row.len(),
+            "{label}: {system:?} additions reported beyond the columns added: {changes:?}"
+        );
+    }
+    let reported_moves = changes
+        .iter()
+        .filter(|change| matches!(change, ObsDowngradeChange::CodeMoved { .. }))
+        .count();
+    assert_eq!(
+        reported_moves, expected_moves,
+        "{label}: moves reported beyond the moves made: {changes:?}"
+    );
+    if names.len() > 6 {
+        return;
+    }
+    let mut fewest = usize::MAX;
+    for order in permutations(names.len()) {
+        let ordered: Vec<String> = order.iter().map(|&column| names[column].clone()).collect();
+        let mut moves = 0_usize;
+        let valid = placed.iter().all(|(system, row)| {
+            let now = &read.header().obs_codes[system];
+            let reordered = rinex2_system_obs_codes(*system, &ordered, version);
+            row.iter().all(|&(index, column)| {
+                let position = order.iter().position(|&c| c == column).expect("in order");
+                if position != index {
+                    moves += 1;
+                }
+                reordered[position] == now[column]
+            })
+        });
+        if valid {
+            fewest = fewest.min(moves);
+        }
+    }
+    assert!(
+        expected_moves <= fewest,
+        "{label}: {expected_moves} moves where an order of the same columns moves {fewest}: {names:?}"
+    );
+}
+
+/// Every ordering of `0..n`.
+fn permutations(n: usize) -> Vec<Vec<usize>> {
+    if n == 0 {
+        return vec![Vec::new()];
+    }
+    let mut out = Vec::new();
+    for shorter in permutations(n - 1) {
+        for at in 0..=shorter.len() {
+            let mut order = shorter.clone();
+            order.insert(at, n - 1);
+            out.push(order);
+        }
+    }
+    out
+}
+
+#[test]
+fn downgrade_shares_columns_for_the_same_second_copies_across_constellations() {
+    // Two constellations each holding 500 copies of a code no version 2 name
+    // spells need 500 columns between them, not 1,000, which is more than the
+    // 999 types a version 2 header can declare.
+    // The text template declares at most nine types, so the product is
+    // widened in memory.
+    let one = vec!["C9X".to_string()];
+    let mut product = two_system_product(
+        2.11,
+        &(GnssSystem::Gps, 'G', 1, one.clone()),
+        &(GnssSystem::Glonass, 'R', 2, one),
+        true,
+    );
+    for codes in product.header.obs_codes.values_mut() {
+        *codes = vec!["C9X".to_string(); 500];
+    }
+    for epoch in &mut product.epochs {
+        for (sat, values) in &mut epoch.sats {
+            let base = f64::from(sat.prn) * 1_000.0;
+            *values = (0..500)
+                .map(|index| ObsValue {
+                    value: Some(base + index as f64),
+                    lli: None,
+                    ssi: None,
+                })
+                .collect();
+        }
+    }
+    let (downgraded, _) = product.downgrade_to_rinex2(2.11).expect("downgrade");
+    let text = downgraded.to_rinex_string().expect("the downgrade writes");
+    let read = RinexObs::parse(&text).expect("reads back");
+    for system in [GnssSystem::Gps, GnssSystem::Glonass] {
+        assert_eq!(read.header().obs_codes[&system].len(), 500, "{system:?}");
+    }
+}
+
+/// Every code list of one or two codes a small mixed-product test draws for a
+/// constellation: codes version 2 names, a code no version 2 name spells
+/// (`C9X`), and a name kept as written.
+fn small_code_lists(system: GnssSystem) -> Vec<Vec<String>> {
+    let codes: &[&str] = match system {
+        GnssSystem::Gps => &["C1C", "C1W", "C2X", "L1C", "C9X"],
+        GnssSystem::Glonass => &["C1C", "C1P", "C2C", "L1C", "C9X"],
+        GnssSystem::Galileo => &["C1X", "C5X", "L1X", "P1", "C9X"],
+        _ => &["C2I", "C7I", "C6I", "C2", "C9X"],
+    };
+    let mut lists: Vec<Vec<String>> = codes.iter().map(|code| vec![(*code).to_string()]).collect();
+    for first in codes {
+        for second in codes {
+            lists.push(vec![(*first).to_string(), (*second).to_string()]);
+        }
+    }
+    lists
+}
+
+/// The fewest codes any version 2 layout has to rename for these two
+/// constellations' lists, by brute force: every sequence of the names that can
+/// read back as one of their codes, at every width from the longer list to both
+/// lists side by side plus one column for each name kept as written, since such
+/// a name needs a column before it reading as the code it stands for. Each code
+/// is kept where some column reads back as it.
+fn fewest_forced_renames(
+    version: f64,
+    (system_a, list_a): (GnssSystem, &[String]),
+    (system_b, list_b): (GnssSystem, &[String]),
+) -> usize {
+    let reads_back_as = |system: GnssSystem, name: &str, code: &str| {
+        if rinex2_kept_as_written(code) {
+            name == code
+                || (rinex2_name_allowed(system, name, version)
+                    && canonical_rinex2_obs_code(system, name, version)
+                        == canonical_rinex2_obs_code(system, code, version))
+        } else {
+            rinex2_name_allowed(system, name, version)
+                && canonical_rinex2_obs_code(system, name, version) == code
+        }
+    };
+    let names: Vec<String> = every_version_two_name()
+        .into_iter()
+        .filter(|name| {
+            list_a
+                .iter()
+                .any(|code| reads_back_as(system_a, name, code))
+                || list_b
+                    .iter()
+                    .any(|code| reads_back_as(system_b, name, code))
+        })
+        .collect();
+    // Codes a reading keeps in place: the multiset intersection, since each code
+    // needs a column of its own that reads back as it.
+    let kept = |list: &[String], read: &[String]| -> usize {
+        let mut pool: Vec<&String> = read.iter().collect();
+        list.iter()
+            .filter(|code| {
+                pool.iter()
+                    .position(|found| found == code)
+                    .map(|at| pool.swap_remove(at))
+                    .is_some()
+            })
+            .count()
+    };
+    let total = list_a.len() + list_b.len();
+    let mut fewest = total;
+    if names.is_empty() {
+        return fewest;
+    }
+    let kept_as_written = list_a
+        .iter()
+        .chain(list_b)
+        .filter(|code| rinex2_kept_as_written(code))
+        .count();
+    for width in list_a.len().max(list_b.len())..=total + kept_as_written {
+        let mut digits = vec![0_usize; width];
+        'sequences: loop {
+            let sequence: Vec<String> = digits.iter().map(|&d| names[d].clone()).collect();
+            let read_a = rinex2_system_obs_codes(system_a, &sequence, version);
+            let read_b = rinex2_system_obs_codes(system_b, &sequence, version);
+            fewest = fewest.min(total - kept(list_a, &read_a) - kept(list_b, &read_b));
+            if fewest == 0 {
+                return 0;
+            }
+            for place in (0..width).rev() {
+                digits[place] += 1;
+                if digits[place] < names.len() {
+                    continue 'sequences;
+                }
+                digits[place] = 0;
+            }
+            break;
+        }
+    }
+    fewest
+}
+
+/// How many codes the downgrade renamed for a product, after checking the
+/// result writes.
+fn downgrade_renames(product: &RinexObs, version: f64, label: &str) -> usize {
+    let (downgraded, changes) = product
+        .downgrade_to_rinex2(version)
+        .unwrap_or_else(|e| panic!("{label}: downgrade: {e}"));
+    downgraded
+        .to_rinex_string()
+        .unwrap_or_else(|e| panic!("{label}: the downgrade does not write: {e}"));
+    changes
+        .iter()
+        .filter(|change| matches!(change, ObsDowngradeChange::CodeRenamed { .. }))
+        .count()
+}
+
+#[test]
+fn downgrade_renames_no_more_codes_than_any_layout_must() {
+    // The downgrade may rename a code only when no version 2 layout keeps it.
+    // For every small two-constellation product it has to rename exactly as many
+    // codes as the fewest any layout must. More would be a change made when a
+    // layout without it existed.
+    let mut products = 0_usize;
+    let mut forced = 0_usize;
+    for version in [2.11, 2.12] {
+        for (sa, la, pa, sb, lb, pb) in SMALL_PAIRS {
+            for list_a in small_code_lists(sa) {
+                for list_b in small_code_lists(sb) {
+                    let label = format!("{version} {sa:?} {list_a:?} beside {sb:?} {list_b:?}");
+                    let fewest = fewest_forced_renames(version, (sa, &list_a), (sb, &list_b));
+                    let product = two_system_product(
+                        version,
+                        &(sa, la, pa, list_a.clone()),
+                        &(sb, lb, pb, list_b.clone()),
+                        true,
+                    );
+                    let renamed = downgrade_renames(&product, version, &label);
+                    assert_eq!(
+                        renamed, fewest,
+                        "{label}: the downgrade renamed {renamed} codes where a layout renames {fewest}"
+                    );
+                    forced += usize::from(fewest > 0);
+                    products += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        products > 1_000 && forced > 0,
+        "{products} products, {forced} with a rename no layout avoids"
+    );
+}
+
+#[test]
+fn downgrade_keeps_every_code_in_the_products_review_found_it_renaming() {
+    // The small sweep's alphabets do not hold the products review found the
+    // greedy layout mishandling at 2.12, so they are checked here by name,
+    // against the same brute force at the widths their longer lists need: GPS
+    // `[L1W, C2W]` beside GLONASS `[C2P, C2C]`, where the writer put GPS `C2W`
+    // under a column GLONASS claimed; the same GPS list beside GLONASS
+    // `[C2P, L1P, C2C]`, where every candidate for GPS looked unsafe; and GPS
+    // `[C2W, C2]` beside BeiDou `[P2, C2I]`, two names kept as written.
+    type NamedCase = (
+        GnssSystem,
+        char,
+        u8,
+        &'static [&'static str],
+        GnssSystem,
+        char,
+        u8,
+        &'static [&'static str],
+    );
+    let cases: [NamedCase; 3] = [
+        (
+            GnssSystem::Gps,
+            'G',
+            1,
+            &["L1W", "C2W"],
+            GnssSystem::Glonass,
+            'R',
+            2,
+            &["C2P", "C2C"],
+        ),
+        (
+            GnssSystem::Gps,
+            'G',
+            1,
+            &["L1W", "C2W"],
+            GnssSystem::Glonass,
+            'R',
+            2,
+            &["C2P", "L1P", "C2C"],
+        ),
+        (
+            GnssSystem::Gps,
+            'G',
+            1,
+            &["C2W", "C2"],
+            GnssSystem::BeiDou,
+            'C',
+            5,
+            &["P2", "C2I"],
+        ),
+    ];
+    for (sa, la, pa, codes_a, sb, lb, pb, codes_b) in cases {
+        let list_a: Vec<String> = codes_a.iter().map(|code| (*code).to_string()).collect();
+        let list_b: Vec<String> = codes_b.iter().map(|code| (*code).to_string()).collect();
+        let label = format!("2.12 {sa:?} {list_a:?} beside {sb:?} {list_b:?}");
+        let fewest = fewest_forced_renames(2.12, (sa, &list_a), (sb, &list_b));
+        let product = two_system_product(
+            2.12,
+            &(sa, la, pa, list_a.clone()),
+            &(sb, lb, pb, list_b.clone()),
+            true,
+        );
+        let renamed = downgrade_renames(&product, 2.12, &label);
+        assert_eq!(
+            renamed, fewest,
+            "{label}: the downgrade renamed {renamed} codes where a layout renames {fewest}"
+        );
+    }
 }
 
 #[test]

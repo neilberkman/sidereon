@@ -53,11 +53,23 @@ const PRN_OBS_COUNTS_PER_LINE: usize = 9;
 /// GLONASS slot/channel pairs per `GLONASS SLOT / FRQ #` line.
 const GLONASS_SLOTS_PER_LINE: usize = 8;
 
+/// How a version 2 file's one observation-code list lines up with each
+/// constellation's own list. Built by [`RinexObs::rinex2_obs_layout`].
+struct Rinex2ObsLayout {
+    /// The names the `# / TYPES OF OBSERV` record carries, in order.
+    names: Vec<String>,
+    /// For each constellation, the index into its own value list that each name
+    /// draws from, or `None` where that constellation has nothing to put there.
+    slots: BTreeMap<GnssSystem, Vec<Option<usize>>>,
+}
+
 /// Why a product could not be written as RINEX text that reads back as the
 /// product itself.
 ///
 /// The observation writer never changes what a product says to make it fit a
-/// file.
+/// file. [`RinexObs::downgrade_to_rinex2`] is the explicit path for a product
+/// that has to lose something to become a version 2 file, and it returns every
+/// change it made.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RinexObsWriteError {
     /// A version 2 product whose constellations' code lists are not what one
@@ -73,17 +85,23 @@ pub enum RinexObsWriteError {
         /// The code held there, or `None` when the lists differ in length.
         code: Option<String>,
     },
+    /// A downgrade asked for a version that is not a version 2.
+    NotVersionTwo {
+        /// The version asked for.
+        version: f64,
+    },
     /// A version 2 product carrying `SYS / SCALE FACTOR` records. This reader
     /// applies them, but version 2 readers that do not know the record, RTKLIB
     /// among them, read the scaled numbers as physical ones, so the text would
-    /// say something else to them.
+    /// say something else to them. [`RinexObs::downgrade_to_rinex2`] removes the
+    /// records and writes the physical values.
     ScaleFactorsInVersionTwo {
         /// How many records the product holds.
         count: usize,
     },
     /// A satellite holding more values than its constellation has codes. The
     /// values past the codes name no observable, so no file can say what they
-    /// are.
+    /// are, and a downgrade laying the codes out would drop them.
     ValuesWithoutCodes {
         /// Zero-based epoch index.
         epoch_index: usize,
@@ -109,6 +127,7 @@ pub enum RinexObsWriteError {
     /// a file with no observations does not name either, and that the type
     /// names do not read as. A version 2 reader builds no list for it and
     /// nothing in the file says it, so the list would be lost.
+    /// [`RinexObs::downgrade_to_rinex2`] removes it and reports that.
     CodeListNotStated {
         /// The constellation.
         system: GnssSystem,
@@ -124,12 +143,18 @@ pub enum RinexObsWriteError {
     },
     /// Epoch picoseconds in a product below version 4.02, which added them as
     /// five digits after the receiver clock offset. Earlier epoch records have
-    /// no field for them.
+    /// no field for them. A downgrade to version 2 removes them.
     EpochPicosecondsNotInVersion {
         /// Zero-based epoch index.
         epoch_index: usize,
         /// The product's version.
         version: f64,
+    },
+    /// More observation types than the record's three-digit count can declare.
+    TooManyObservationTypes {
+        /// How many a version 2 list would need, at least: the layout stops
+        /// once it is wider than any header.
+        count: usize,
     },
     /// The written text would read back as a different product.
     ReadBackMismatch {
@@ -159,10 +184,14 @@ impl core::fmt::Display for RinexObsWriteError {
                 "RINEX OBS version 2 names one list of codes for every constellation, and {system} \
                  holds {position} codes where another constellation holds a different number"
             ),
+            Self::NotVersionTwo { version } => {
+                write!(f, "RINEX OBS version {version} is not a version 2")
+            }
             Self::ScaleFactorsInVersionTwo { count } => write!(
                 f,
                 "RINEX OBS version 2 would carry {count} SYS / SCALE FACTOR records, which version 2 \
-                 readers that do not apply them read as physical values"
+                 readers that do not apply them read as physical values; downgrade_to_rinex2 \
+                 removes them"
             ),
             Self::ValuesWithoutCodes {
                 epoch_index,
@@ -187,7 +216,7 @@ impl core::fmt::Display for RinexObsWriteError {
                 f,
                 "RINEX OBS version 2 would not state {system}'s code list: no observation or \
                  PRN / # OF OBS count names {system}, so a reader builds no list for it, and \
-                 the type names do not read as it"
+                 the type names do not read as it; downgrade_to_rinex2 removes the list"
             ),
             Self::EpochFlagTooWide { epoch_index, flag } => write!(
                 f,
@@ -200,6 +229,11 @@ impl core::fmt::Display for RinexObsWriteError {
                 f,
                 "RINEX OBS epoch {epoch_index} carries picoseconds, which a version {version} epoch \
                  record has no field for"
+            ),
+            Self::TooManyObservationTypes { count } => write!(
+                f,
+                "RINEX OBS version 2 would need at least {count} observation types, more than the \
+                 999 its count field declares"
             ),
             Self::ReadBackMismatch { what } => {
                 write!(
@@ -217,6 +251,97 @@ impl From<RinexObsWriteError> for crate::Error {
     fn from(error: RinexObsWriteError) -> Self {
         crate::Error::InvalidInput(error.to_string())
     }
+}
+
+/// One change [`RinexObs::downgrade_to_rinex2`] made to turn a product into
+/// one a version 2 file can state exactly.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObsDowngradeChange {
+    /// A constellation's code became the one its version 2 column reads as:
+    /// version 2 has no field for the tracking attribute it named, or the
+    /// column's name reads as a different code for this constellation.
+    CodeRenamed {
+        /// The constellation.
+        system: GnssSystem,
+        /// The code it held.
+        from: String,
+        /// The code its column reads back as.
+        to: String,
+    },
+    /// A constellation's code moved to a different position in its list,
+    /// because version 2 names one list for every constellation. Its values
+    /// moved with it, so a value is still under its code, but not at the index
+    /// it had.
+    CodeMoved {
+        /// The constellation.
+        system: GnssSystem,
+        /// The code, as the constellation holds it after the downgrade.
+        code: String,
+        /// Its zero-based position before.
+        from: usize,
+        /// Its zero-based position after.
+        to: usize,
+    },
+    /// A constellation gained a code, with no values, because version 2 names
+    /// one list for every constellation and another one needed this column.
+    CodeAdded {
+        /// The constellation.
+        system: GnssSystem,
+        /// The code its new column reads as.
+        code: String,
+    },
+    /// A constellation's code list was removed. A version 2 file states lists
+    /// only for constellations an observation or a `PRN / # OF OBS` count
+    /// names, and in a file with no observations for the one its version
+    /// record names, so a reader would build none for this one, and the type
+    /// names do not read as it.
+    CodeListRemoved {
+        /// The constellation.
+        system: GnssSystem,
+        /// The codes it held.
+        codes: Vec<String>,
+    },
+    /// A value rounded to the three decimals an observation field holds. Values
+    /// are stored physical, so one read through a scale factor can carry more
+    /// precision than a version 2 file, which has no scale factor, can write.
+    ValueRounded {
+        /// Zero-based epoch index.
+        epoch_index: usize,
+        /// The satellite.
+        satellite: crate::id::GnssSatelliteId,
+        /// The value's code, as its constellation held it before the downgrade.
+        code: String,
+        /// The value it held.
+        from: f64,
+        /// The value it holds now.
+        to: f64,
+    },
+    /// The `SYS / SCALE FACTOR` records were removed. Values are stored
+    /// physical, so none of them change; a version 2 reader that does not know
+    /// the record would otherwise read scaled numbers as physical ones.
+    ScaleFactorsRemoved {
+        /// How many records there were.
+        count: usize,
+    },
+    /// An epoch's picoseconds were removed, since a version 2 epoch line has no
+    /// field for them.
+    EpochPicosecondsRemoved {
+        /// Zero-based epoch index.
+        epoch_index: usize,
+        /// The picoseconds it held.
+        picoseconds: u32,
+    },
+    /// A receiver clock offset rounded to the nine decimals the version 2
+    /// epoch record's `F12.9` field holds; a version 3 epoch record holds
+    /// twelve.
+    ClockOffsetRounded {
+        /// Zero-based epoch index.
+        epoch_index: usize,
+        /// The offset it held, in seconds.
+        from: f64,
+        /// The offset it holds now, in seconds.
+        to: f64,
+    },
 }
 
 impl RinexObs {
@@ -237,7 +362,9 @@ impl RinexObs {
     /// time scale a record cannot name, a version 2 product whose
     /// constellations' code lists are not what one list of version 2 names
     /// reads as, or one holding a list its file would not state, is refused
-    /// with the first field that would change.
+    /// with the first field that would change. A product
+    /// that has to lose something to become a version 2 file goes through
+    /// [`RinexObs::downgrade_to_rinex2`], which returns every change it made.
     ///
     /// # Errors
     ///
@@ -478,6 +605,366 @@ impl RinexObs {
         match (systems.next(), systems.next()) {
             (Some(only), None) => *only,
             _ => GnssSystem::Gps,
+        }
+    }
+
+    /// How this product's constellations' code lists lay out against one
+    /// version 2 list, renaming as few codes as any layout can.
+    ///
+    /// The version 2 reader gives a constellation a canonical code at the first
+    /// column whose name reads as it, and the name itself at every later one. So
+    /// whether a canonical code is kept does not depend on column order: it is
+    /// kept exactly when some column's name reads as it, and adding a column
+    /// never takes a code away. The fewest renames therefore come from naming a
+    /// column for every code any name reads as. Only a code no name spells, or a
+    /// second copy of a code its constellation already holds, has to be renamed.
+    ///
+    /// A name kept as written - Galileo's `P1`, a second BeiDou `C2` - needs, for
+    /// its constellation, a column that reads as the code it stands for before
+    /// it. Every naming column comes first and every kept-as-written column
+    /// after, which satisfies that for every constellation at once.
+    ///
+    /// A code that must be renamed gets a column of its own, named with its own
+    /// spelling and placed after every other, so it reads back as that name or
+    /// as the code the name stands for. A column already reading as the same
+    /// kind and band would say more than the file can: a second GPS `C1C` there
+    /// reads back as the P code.
+    fn rinex2_obs_layout(&self) -> Rinex2ObsLayout {
+        let (names, slots) = self.rinex2_obs_columns();
+        // A layout wider than a header declares is refused, and ordering it
+        // would build matrices as wide as it for nothing.
+        if names.len() > super::MAX_OBS_TYPE_COUNT {
+            return Rinex2ObsLayout { names, slots };
+        }
+        self.ordered_by_original_positions(names, slots)
+    }
+
+    /// The layout's columns in the order they are built, and the column each
+    /// constellation's code sits at in them, before ordering.
+    ///
+    /// Every step asks what a constellation reads a list of names as, which the
+    /// indexes here answer without reading the names again. A name a
+    /// constellation carries is two ASCII characters and reads as a code of
+    /// three, and any other name reads as itself; a name kept as written is one
+    /// or two bytes, so no code is one, and a column reads as it only when named
+    /// it.
+    /// Which column comes first among those reading as each code settles the
+    /// rest. Spellings for codes no name spells, which may be any length, are
+    /// added only after the names kept as written are counted.
+    pub(super) fn rinex2_obs_columns(
+        &self,
+    ) -> (Vec<String>, BTreeMap<GnssSystem, Vec<Option<usize>>>) {
+        use std::collections::{HashMap, HashSet};
+
+        /// A constellation's reading of the names so far, extended as names are
+        /// added: the codes, the codes given, and the columns reading as each
+        /// code and as each name and code, each list with the position before
+        /// which no column is free.
+        #[derive(Default)]
+        struct Reading {
+            codes: Vec<String>,
+            given: HashSet<String>,
+            by_code: HashMap<String, (Vec<usize>, usize)>,
+            by_name: HashMap<(String, String), (Vec<usize>, usize)>,
+        }
+
+        /// The first free column in a list of columns taken in order. A column
+        /// once taken stays taken, so the position moves past those.
+        fn first_free(
+            entry: Option<&mut (Vec<usize>, usize)>,
+            free: impl Fn(usize) -> bool,
+        ) -> Option<usize> {
+            let (columns, next) = entry?;
+            while columns.get(*next).is_some_and(|&column| !free(column)) {
+                *next += 1;
+            }
+            columns.get(*next).copied()
+        }
+
+        let version = self.header.version;
+        let stated = self.rinex2_layout_lists();
+        let lists = &stated;
+        let reads_as = |system: GnssSystem, name: &str| -> Option<String> {
+            super::rinex2_name_allowed(system, name, version)
+                .then(|| super::canonical_rinex2_obs_code(system, name, version))
+        };
+        let held: BTreeMap<GnssSystem, HashSet<&str>> = lists
+            .iter()
+            .map(|(system, codes)| (*system, codes.iter().map(String::as_str).collect()))
+            .collect();
+        // For each constellation and code, the first provider reading as it and
+        // the first column kept as written reading as it; and how many columns
+        // carry each name.
+        let mut first_provider: HashMap<(GnssSystem, String), String> = HashMap::new();
+        let mut first_kept: HashMap<(GnssSystem, String), String> = HashMap::new();
+        let mut named: HashMap<String, usize> = HashMap::new();
+        let note = |first: &mut HashMap<(GnssSystem, String), String>,
+                    named: &mut HashMap<String, usize>,
+                    name: &str| {
+            for system in lists.keys() {
+                if let Some(read) = reads_as(*system, name) {
+                    first
+                        .entry((*system, read))
+                        .or_insert_with(|| name.to_string());
+                }
+            }
+            *named.entry(name.to_string()).or_default() += 1;
+        };
+
+        // Name a column for every canonical code some name reads as, choosing
+        // the name that reads as the most codes still without one, and the
+        // earlier candidate on a tie, since that keeps the band it was measured
+        // on.
+        let mut providers: Vec<String> = Vec::new();
+        for (system, codes) in lists {
+            let mut seen: HashSet<&str> = HashSet::new();
+            for code in codes {
+                if super::rinex2_kept_as_written(code)
+                    || !seen.insert(code.as_str())
+                    || first_provider.contains_key(&(*system, code.clone()))
+                {
+                    continue;
+                }
+                let mut best: Option<(String, usize)> = None;
+                for name in super::rinex2_obs_code_candidates(*system, code, version) {
+                    if reads_as(*system, &name).as_deref() != Some(code.as_str()) {
+                        continue;
+                    }
+                    let gain = lists
+                        .keys()
+                        .filter(|other| {
+                            reads_as(**other, &name).is_some_and(|read| {
+                                held[*other].contains(read.as_str())
+                                    && !first_provider.contains_key(&(**other, read))
+                            })
+                        })
+                        .count();
+                    if best.as_ref().is_none_or(|(_, most)| gain > *most) {
+                        best = Some((name, gain));
+                    }
+                }
+                if let Some((name, _)) = best {
+                    note(&mut first_provider, &mut named, &name);
+                    providers.push(name);
+                }
+            }
+        }
+
+        // Columns for names kept as written, each after a column that reads, for
+        // its constellation, as the code the name stands for.
+        let mut kept_as_written: Vec<String> = Vec::new();
+        for (system, codes) in lists {
+            let mut wanted: BTreeMap<&str, usize> = BTreeMap::new();
+            for code in codes
+                .iter()
+                .filter(|code| super::rinex2_kept_as_written(code))
+            {
+                *wanted.entry(code.as_str()).or_default() += 1;
+            }
+            for (name, count) in wanted {
+                let stands_for = reads_as(*system, name);
+                if let Some(stands_for) = &stands_for {
+                    if !first_provider.contains_key(&(*system, stands_for.clone())) {
+                        note(&mut first_provider, &mut named, name);
+                        providers.push(name.to_string());
+                    }
+                }
+                // A column already reading as this name for this constellation
+                // counts, whether it was named for this code or another one:
+                // every column named it, but the first column reading as the
+                // code it stands for when that column is named it. Providers
+                // all come before columns kept as written.
+                let columns = named.get(name).copied().unwrap_or(0);
+                let first_reader = stands_for.and_then(|code| {
+                    first_provider
+                        .get(&(*system, code.clone()))
+                        .or_else(|| first_kept.get(&(*system, code)))
+                });
+                let have = columns
+                    - usize::from(columns > 0 && first_reader.is_some_and(|first| first == name));
+                for _ in have..count {
+                    note(&mut first_kept, &mut named, name);
+                    kept_as_written.push(name.to_string());
+                }
+            }
+        }
+        let mut names = providers;
+        names.extend(kept_as_written);
+
+        // Place every code where its column reads back as it, each taking the
+        // next column reading as it.
+        let mut slots: BTreeMap<GnssSystem, Vec<Option<usize>>> = BTreeMap::new();
+        let mut renamed: Vec<(GnssSystem, usize)> = Vec::new();
+        for (system, codes) in lists {
+            let read = super::rinex2_system_obs_codes(*system, &names, version);
+            let mut reading: HashMap<&str, (Vec<usize>, usize)> = HashMap::new();
+            for (column, code) in read.iter().enumerate() {
+                reading.entry(code.as_str()).or_default().0.push(column);
+            }
+            let mut row: Vec<Option<usize>> = vec![None; names.len()];
+            for (index, code) in codes.iter().enumerate() {
+                let column = reading.get_mut(code.as_str()).and_then(|(columns, next)| {
+                    let column = columns.get(*next).copied();
+                    *next += 1;
+                    column
+                });
+                match column {
+                    Some(column) => row[column] = Some(index),
+                    None => renamed.push((*system, index)),
+                }
+            }
+            slots.insert(*system, row);
+        }
+
+        // What no layout keeps. A code no name spells keeps its kind and band:
+        // it shares a free column that already reads, for its constellation, as
+        // the code its own spelling would, provided the constellation holds no
+        // such code itself. Otherwise the code takes a column named with its own
+        // spelling, sharing one another constellation's code already took under
+        // that name wherever it reads the same there, so constellations holding
+        // the same second copies need one column between them rather than one
+        // each. It never reads as a different tracking attribute.
+        let first_index: BTreeMap<GnssSystem, HashMap<&str, usize>> = lists
+            .iter()
+            .map(|(system, codes)| {
+                let mut first = HashMap::new();
+                for (index, code) in codes.iter().enumerate() {
+                    first.entry(code.as_str()).or_insert(index);
+                }
+                (*system, first)
+            })
+            .collect();
+        let mut readings: BTreeMap<GnssSystem, Reading> = BTreeMap::new();
+        for (system, index) in renamed {
+            // Past the widest header there is no layout to finish.
+            if names.len() > super::MAX_OBS_TYPE_COUNT {
+                break;
+            }
+            let code = &lists[&system][index];
+            let spelling = super::rinex2_obs_code_candidates(system, code, version)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| code.chars().take(2).collect());
+            let duplicate = first_index[&system][code.as_str()] < index;
+            let reading = readings.entry(system).or_default();
+            for column in reading.codes.len()..names.len() {
+                let next =
+                    super::rinex2_next_obs_code(system, &names[column], version, &reading.given);
+                reading.given.insert(next.clone());
+                reading
+                    .by_code
+                    .entry(next.clone())
+                    .or_default()
+                    .0
+                    .push(column);
+                reading
+                    .by_name
+                    .entry((names[column].clone(), next.clone()))
+                    .or_default()
+                    .0
+                    .push(column);
+                reading.codes.push(next);
+            }
+            let row = &slots[&system];
+            let free = |column: usize| row.get(column).copied().flatten().is_none();
+            let target = match reads_as(system, &spelling) {
+                Some(target) if !duplicate && !held[&system].contains(target.as_str()) => {
+                    first_free(reading.by_code.get_mut(&target), free)
+                }
+                _ => None,
+            };
+            let found = target.or_else(|| {
+                let would_read =
+                    super::rinex2_next_obs_code(system, &spelling, version, &reading.given);
+                first_free(
+                    reading.by_name.get_mut(&(spelling.clone(), would_read)),
+                    free,
+                )
+            });
+            let column = match found {
+                Some(column) => column,
+                None => {
+                    names.push(spelling);
+                    for row in slots.values_mut() {
+                        row.resize(names.len(), None);
+                    }
+                    names.len() - 1
+                }
+            };
+            let row = slots.entry(system).or_default();
+            row.resize(names.len(), None);
+            row[column] = Some(index);
+        }
+        for row in slots.values_mut() {
+            row.resize(names.len(), None);
+        }
+        (names, slots)
+    }
+
+    /// The same layout with its columns reordered to move as few codes as the
+    /// reading rule allows.
+    ///
+    /// The layout is built with naming columns first and everything else after,
+    /// an order the reader reads as intended. A code is reported moved when its
+    /// column's position differs from the position it held, so the order moving
+    /// the fewest keeps the most codes in place. Setting the reading rule aside,
+    /// that is an assignment of columns to positions, solved exactly. The rule
+    /// adds ordering: a group of names a constellation reads as one code gives
+    /// the code to its first column, so a held first column has to precede the
+    /// rest of its group, and a group whose held columns read as written has to
+    /// begin with an unheld one. Those are met by branch and bound: an
+    /// assignment breaking one splits into subproblems that narrow the positions
+    /// the two columns may take, or choose the group's first column, and
+    /// subproblems are taken most codes kept first, so the first assignment
+    /// keeping every rule keeps the most codes any order does. Every
+    /// assignment solved is also repaired into an order keeping the rules -
+    /// columns in its sequence, each once the columns it follows are placed,
+    /// or with each pulled to just before its earliest follower - and the best
+    /// such order is kept as the search goes. The search has half of
+    /// [`LAYOUT_ORDER_SEARCH_WORK`] steps, counted inside the assignment method.
+    /// When it cannot prove an order best in them, the best distinct orders it
+    /// saw are improved with the rest: one column moved or two swapped at a
+    /// time, while that keeps the rules and more codes in place. The best order
+    /// found is used; it reads back exactly and every move it makes is
+    /// reported, but another order could move fewer.
+    fn ordered_by_original_positions(
+        &self,
+        names: Vec<String>,
+        slots: BTreeMap<GnssSystem, Vec<Option<usize>>>,
+    ) -> Rinex2ObsLayout {
+        let version = self.header.version;
+        let rows: Vec<&Vec<Option<usize>>> = slots.values().collect();
+        let search = OrderSearch::new(
+            slots
+                .keys()
+                .map(|system| {
+                    let built = super::rinex2_system_obs_codes(*system, &names, version);
+                    names
+                        .iter()
+                        .enumerate()
+                        .map(|(column, name)| {
+                            super::rinex2_name_allowed(*system, name, version).then(|| {
+                                let canonical =
+                                    super::canonical_rinex2_obs_code(*system, name, version);
+                                let first = built[column] == canonical;
+                                (canonical, first)
+                            })
+                        })
+                        .collect()
+                })
+                .collect(),
+            &rows,
+            &names,
+        );
+        let chosen = search.run();
+        let ordered_names = chosen.iter().map(|&column| names[column].clone()).collect();
+        let ordered_slots = slots
+            .iter()
+            .map(|(system, row)| (*system, chosen.iter().map(|&column| row[column]).collect()))
+            .collect();
+        Rinex2ObsLayout {
+            names: ordered_names,
+            slots: ordered_slots,
         }
     }
 
@@ -1058,6 +1545,25 @@ impl RinexObs {
         Ok(names)
     }
 
+    /// Constellations a `PRN / # OF OBS` count or an observation names that
+    /// hold no code list.
+    fn rinex2_unlisted_systems(&self) -> std::collections::BTreeSet<GnssSystem> {
+        let mut systems: std::collections::BTreeSet<GnssSystem> = self
+            .header
+            .prn_obs_counts
+            .iter()
+            .filter(|(_, counts)| !counts.is_empty())
+            .map(|(sat, _)| sat.system)
+            .collect();
+        systems.extend(
+            self.epochs
+                .iter()
+                .flat_map(|epoch| epoch.sats.keys().map(|sat| sat.system)),
+        );
+        systems.retain(|system| !self.header.obs_codes.contains_key(system));
+        systems
+    }
+
     /// Constellations holding a code list a version 2 file of this product
     /// written with `names` does not state: no observation or count names them,
     /// a file with observations, or whose version record names another
@@ -1085,6 +1591,40 @@ impl RinexObs {
                         != **codes
             })
             .map(|(system, _)| *system)
+            .collect()
+    }
+
+    /// Remove, and report, the lists a version 2 file of this product written
+    /// with `names` does not state.
+    fn remove_unstated_lists(&mut self, names: &[String], changes: &mut Vec<ObsDowngradeChange>) {
+        for system in self.rinex2_unstated_systems(names) {
+            if let Some(codes) = self.header.obs_codes.remove(&system) {
+                changes.push(ObsDowngradeChange::CodeListRemoved { system, codes });
+            }
+        }
+    }
+
+    /// The lists a version 2 layout of this product places: the ones it holds
+    /// for constellations an observation or a count names, and with no
+    /// observations, the fallback constellation's. A list nothing names holds
+    /// nothing a file states, so it does not take columns or move codes.
+    fn rinex2_layout_lists(&self) -> BTreeMap<GnssSystem, Vec<String>> {
+        let mut systems = self.rinex2_observed_systems();
+        if systems.is_empty() {
+            systems.insert(self.rinex2_fallback_system());
+        }
+        systems.extend(
+            self.header
+                .prn_obs_counts
+                .iter()
+                .filter(|(_, counts)| !counts.is_empty())
+                .map(|(sat, _)| sat.system),
+        );
+        self.header
+            .obs_codes
+            .iter()
+            .filter(|(system, _)| systems.contains(system))
+            .map(|(system, codes)| (*system, codes.clone()))
             .collect()
     }
 
@@ -1158,6 +1698,19 @@ impl RinexObs {
             }
         }
         Ok(lists)
+    }
+
+    /// Leave the lists a downgrade made explicit for constellations only a
+    /// count names implied again, and keep the names that state them.
+    fn leave_implied(
+        &mut self,
+        implied: &std::collections::BTreeSet<GnssSystem>,
+        names: Vec<String>,
+    ) {
+        for system in implied {
+            self.header.obs_codes.remove(system);
+        }
+        self.header.rinex2_types = names;
     }
 
     /// The code lists a version 2 file of this product reads back as, as the
@@ -1240,6 +1793,808 @@ impl RinexObs {
         }
         product
     }
+}
+
+/// How many steps the layout order search takes before it uses the best order
+/// found: each candidate the assignment method examines, each cell of a cost
+/// matrix it builds, each column step local improvement weighs, each column it
+/// re-reads to check an order, and the sorting that repairs one.
+pub(crate) const LAYOUT_ORDER_SEARCH_WORK: u64 = 200_000_000;
+
+/// How many of the best distinct orders the search has seen are kept, and local
+/// improvement starts from when the search could not prove one best.
+const LAYOUT_ORDER_IMPROVEMENT_STARTS: usize = 16;
+
+#[cfg(test)]
+thread_local! {
+    /// The assignment problems the last order search on this thread solved,
+    /// whether it ended without proving its order moves the fewest codes, and
+    /// how many steps of [`LAYOUT_ORDER_SEARCH_WORK`] it took.
+    pub(crate) static LAST_ORDER_SEARCH: std::cell::Cell<(usize, bool, u64)> =
+        const { std::cell::Cell::new((0, false, 0)) };
+}
+
+/// One subproblem of the order search: the positions each column may take, and
+/// for each group with no held first column, which column was chosen to come
+/// before the group's held ones.
+#[derive(Clone, Default)]
+struct OrderNode {
+    lowest: Vec<usize>,
+    highest: Vec<usize>,
+    chosen: Vec<Option<usize>>,
+}
+
+/// A reading rule an assignment breaks, and so how its subproblem splits.
+enum OrderBranch {
+    /// The first column sits after the second, which it has to precede.
+    Before(usize, usize),
+    /// Every held column of this group precedes all its unheld ones.
+    Choose(usize),
+}
+
+/// The work allowed for the order search ran out.
+struct WorkSpent;
+
+/// The search for the column order that moves the fewest codes, see
+/// `RinexObs::ordered_by_original_positions`. Its matrices are square in the
+/// header's width, which the layout holds to the 999 types a header declares
+/// before searching.
+struct OrderSearch {
+    width: usize,
+    /// Per constellation, per column: the group of names reading as one code
+    /// the column belongs to, and whether it has to be the group's first
+    /// column. `None` for a name the constellation reads as written.
+    groups: Vec<Vec<Option<(usize, bool)>>>,
+    /// Per constellation, per column: whether a code sits there.
+    occupied: Vec<Vec<bool>>,
+    /// Per group, the held column that has to come first, when one does.
+    leader: Vec<Option<usize>>,
+    group_count: usize,
+    /// Per column, per position: how many codes the column keeps in place there.
+    gains: Vec<Vec<i64>>,
+    /// Per column, the positions it keeps a code in place at.
+    keeps: Vec<Vec<usize>>,
+    /// Pairs of columns the first of which has to precede the second: a group's
+    /// held first column before every other column of the group.
+    precedences: Vec<(usize, usize)>,
+    /// Groups with held columns reading as written and no held first column:
+    /// some unheld column of the group has to precede every held one.
+    choices: Vec<(Vec<usize>, Vec<usize>)>,
+    /// The order keeping every reading rule with the most codes in place seen
+    /// so far, and how many it keeps.
+    best: Vec<usize>,
+    best_kept: i64,
+    /// The best distinct orders keeping every reading rule seen so far, by how
+    /// many codes they keep in place: local improvement's starting points.
+    pool: std::collections::BTreeSet<(i64, Vec<usize>)>,
+    solves: usize,
+    /// Steps left, and how many of them the current phase has to leave.
+    work_left: u64,
+    work_floor: u64,
+    exhausted: bool,
+}
+
+impl OrderSearch {
+    fn new(
+        readings: Vec<Vec<Option<(String, bool)>>>,
+        rows: &[&Vec<Option<usize>>],
+        names: &[String],
+    ) -> Self {
+        let width = names.len();
+        let mut group_ids: BTreeMap<(usize, String), usize> = BTreeMap::new();
+        let mut leader: Vec<Option<usize>> = Vec::new();
+        let mut members: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut groups = Vec::with_capacity(readings.len());
+        for (constellation, reading) in readings.into_iter().enumerate() {
+            let mut row_groups = Vec::with_capacity(width);
+            for (column, entry) in reading.into_iter().enumerate() {
+                row_groups.push(entry.map(|(canonical, first)| {
+                    let next = group_ids.len();
+                    let id = *group_ids.entry((constellation, canonical)).or_insert(next);
+                    if id == leader.len() {
+                        leader.push(None);
+                        members.push((constellation, Vec::new()));
+                    }
+                    members[id].1.push(column);
+                    if first && rows[constellation][column].is_some() {
+                        leader[id] = Some(column);
+                    }
+                    (id, first)
+                }));
+            }
+            groups.push(row_groups);
+        }
+        let occupied: Vec<Vec<bool>> = rows
+            .iter()
+            .map(|row| row.iter().map(Option::is_some).collect())
+            .collect();
+        let mut gains = vec![vec![0_i64; width]; width];
+        let mut keeps = vec![Vec::new(); width];
+        for row in rows {
+            for (column, slot) in row.iter().enumerate() {
+                if let Some(index) = slot.filter(|&index| index < width) {
+                    if gains[column][index] == 0 {
+                        keeps[column].push(index);
+                    }
+                    gains[column][index] += 1;
+                }
+            }
+        }
+        let mut precedences = std::collections::BTreeSet::new();
+        let mut choices = Vec::new();
+        for (id, (constellation, columns)) in members.iter().enumerate() {
+            match leader[id] {
+                Some(first) => {
+                    for &then in columns.iter().filter(|&&then| then != first) {
+                        precedences.insert((first, then));
+                    }
+                }
+                None => {
+                    let (held, free): (Vec<usize>, Vec<usize>) = columns
+                        .iter()
+                        .partition(|&&column| occupied[*constellation][column]);
+                    if !held.is_empty() {
+                        choices.push((free, held));
+                    }
+                }
+            }
+        }
+        Self {
+            width,
+            groups,
+            occupied,
+            group_count: leader.len(),
+            leader,
+            gains,
+            keeps,
+            precedences: precedences.into_iter().collect(),
+            choices,
+            best: (0..width).collect(),
+            best_kept: 0,
+            pool: std::collections::BTreeSet::new(),
+            solves: 0,
+            work_left: LAYOUT_ORDER_SEARCH_WORK,
+            work_floor: 0,
+            exhausted: false,
+        }
+    }
+
+    /// Take `steps` from the work left, or report that the phase has used all
+    /// it may.
+    fn charge(&mut self, steps: u64) -> bool {
+        if self.work_left < self.work_floor.saturating_add(steps) {
+            self.exhausted = true;
+            return false;
+        }
+        self.work_left -= steps;
+        true
+    }
+
+    /// The steps repairing an order takes: two sorts of the columns under every
+    /// reading rule.
+    fn repair_steps(&self) -> u64 {
+        let width = self.width as u64;
+        let rules = self.precedences.len()
+            + self
+                .choices
+                .iter()
+                .map(|(free, held)| free.len() + held.len())
+                .sum::<usize>();
+        2 * (width * (1 + u64::from(64 - width.leading_zeros())) + rules as u64)
+    }
+
+    fn kept_in_place(&self, order: &[usize]) -> i64 {
+        order
+            .iter()
+            .enumerate()
+            .map(|(position, &column)| self.gains[column][position])
+            .sum()
+    }
+
+    /// Whether `column` can go next, given which groups have begun.
+    fn fits(&self, column: usize, begun: &[bool], placed: &[bool]) -> bool {
+        self.groups.iter().zip(&self.occupied).all(|(row, filled)| {
+            let Some((group, first)) = row[column] else {
+                return true;
+            };
+            if let Some(leader) = self.leader[group] {
+                if leader != column && !placed[leader] {
+                    return false;
+                }
+            }
+            !filled[column] || first != begun[group]
+        })
+    }
+
+    /// Whether every constellation reads every placed code as built in `order`.
+    /// Without the work to check, it is not taken to.
+    fn reads_as_built(&mut self, order: &[usize]) -> bool {
+        self.charge((self.width * (1 + self.groups.len())) as u64) && self.keeps_every_rule(order)
+    }
+
+    /// Whether every constellation reads every placed code as built in `order`,
+    /// whatever work is left.
+    fn keeps_every_rule(&self, order: &[usize]) -> bool {
+        let mut placed = vec![false; self.width];
+        let mut begun = vec![false; self.group_count];
+        for &column in order {
+            if !self.fits(column, &begun, &placed) {
+                return false;
+            }
+            for row in &self.groups {
+                if let Some((group, _)) = row[column] {
+                    begun[group] = true;
+                }
+            }
+            placed[column] = true;
+        }
+        true
+    }
+
+    /// The order keeping the most codes in place with each column inside its
+    /// allowed positions and the reading rule set aside. `Ok(None)` when the
+    /// allowed positions admit no order, `Err` when the work runs out first.
+    fn solve(&mut self, node: &OrderNode) -> Result<Option<(i64, Vec<usize>)>, WorkSpent> {
+        let width = self.width;
+        if !self.charge((width * width) as u64) {
+            return Err(WorkSpent);
+        }
+        self.solves += 1;
+        // More than every code kept in place together, so an order using a
+        // disallowed position never costs less than one that does not.
+        let disallowed = 8 * width as i64 + 1;
+        let cost: Vec<Vec<i64>> = (0..width)
+            .map(|column| {
+                (0..width)
+                    .map(|position| {
+                        if (node.lowest[column]..=node.highest[column]).contains(&position) {
+                            -self.gains[column][position]
+                        } else {
+                            disallowed
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut steps = self.work_left - self.work_floor;
+        let assignment = least_cost_assignment(&cost, &mut steps);
+        self.work_left = self.work_floor + steps;
+        let Some(assignment) = assignment else {
+            self.exhausted = true;
+            return Err(WorkSpent);
+        };
+        let mut order = vec![0_usize; width];
+        for (column, position) in assignment.into_iter().enumerate() {
+            if !(node.lowest[column]..=node.highest[column]).contains(&position) {
+                return Ok(None);
+            }
+            order[position] = column;
+        }
+        Ok(Some((self.kept_in_place(&order), order)))
+    }
+
+    /// Orders keeping every reading rule built from `order`: columns taken in
+    /// its sequence, each once the columns it has to follow are placed, either
+    /// as they come or with each column pulled to just before the earliest
+    /// column that has to follow it. Empty when the rules, with `node`'s
+    /// choices and each other group begun by its earliest unheld column, admit
+    /// no order.
+    fn repaired(&self, node: &OrderNode, order: &[usize]) -> Vec<Vec<usize>> {
+        let width = self.width;
+        let mut position = vec![0_usize; width];
+        for (at, &column) in order.iter().enumerate() {
+            position[column] = at;
+        }
+        let mut followers: Vec<Vec<usize>> = vec![Vec::new(); width];
+        for &(first, then) in &self.precedences {
+            followers[first].push(then);
+        }
+        for (index, (free, held)) in self.choices.iter().enumerate() {
+            let first = node.chosen[index]
+                .or_else(|| free.iter().copied().min_by_key(|&column| position[column]));
+            if let Some(first) = first {
+                for &then in held {
+                    followers[first].push(then);
+                }
+            }
+        }
+        let sorted = |key: &[usize]| -> Vec<usize> {
+            let mut waiting = vec![0_usize; width];
+            for &next in followers.iter().flatten() {
+                waiting[next] += 1;
+            }
+            let mut ready: std::collections::BTreeSet<(usize, usize, usize)> = (0..width)
+                .filter(|&column| waiting[column] == 0)
+                .map(|column| (key[column], position[column], column))
+                .collect();
+            let mut out = Vec::with_capacity(width);
+            while let Some((_, _, column)) = ready.pop_first() {
+                out.push(column);
+                for &next in &followers[column] {
+                    waiting[next] -= 1;
+                    if waiting[next] == 0 {
+                        ready.insert((key[next], position[next], next));
+                    }
+                }
+            }
+            out
+        };
+        let as_they_come = sorted(&position);
+        if as_they_come.len() < width {
+            return Vec::new();
+        }
+        let mut pulled = position.clone();
+        for &column in as_they_come.iter().rev() {
+            for &next in &followers[column] {
+                pulled[column] = pulled[column].min(pulled[next]);
+            }
+        }
+        let pulled_early = sorted(&pulled);
+        vec![as_they_come, pulled_early]
+    }
+
+    /// Keep an order keeping every reading rule among the best distinct ones seen.
+    fn remember(&mut self, kept: i64, order: Vec<usize>) {
+        self.pool.insert((kept, order));
+        if self.pool.len() > LAYOUT_ORDER_IMPROVEMENT_STARTS {
+            self.pool.pop_first();
+        }
+    }
+
+    /// Keep `order`, or an order repairing it into one keeping every reading
+    /// rule, when it keeps more codes in place than the best order so far, and
+    /// remember the best ones keeping the rules as starts for local improvement.
+    fn offer(&mut self, node: &OrderNode, order: &[usize]) {
+        if !self.charge(self.repair_steps()) {
+            return;
+        }
+        let mut candidates = vec![order.to_vec()];
+        candidates.extend(self.repaired(node, order));
+        for candidate in candidates {
+            if candidate.len() != self.width || !self.charge(self.width as u64) {
+                continue;
+            }
+            let kept = self.kept_in_place(&candidate);
+            if self.pool.contains(&(kept, candidate.clone())) || !self.reads_as_built(&candidate) {
+                continue;
+            }
+            if kept > self.best_kept {
+                self.best_kept = kept;
+                self.best = candidate.clone();
+            }
+            self.remember(kept, candidate);
+        }
+    }
+
+    /// The order reached from `order` by steps that keep more codes in place and
+    /// keep every reading rule, directly or once repaired: one column moved to
+    /// another position, two swapped, or three moved around a cycle in which
+    /// one goes to a position it keeps a code at. Every step moving three
+    /// columns that keeps more codes in place moves one of them to such a
+    /// position, so the cycles are all of them. Passes over every step continue
+    /// past each one taken, and end when a whole pass takes none or the work
+    /// runs out; each step taken keeps more codes in place, so the passes end.
+    fn improved(&mut self, mut order: Vec<usize>) -> (i64, Vec<usize>) {
+        let width = self.width;
+        let mut kept = self.kept_in_place(&order);
+        let free = OrderNode {
+            lowest: Vec::new(),
+            highest: Vec::new(),
+            chosen: vec![None; self.choices.len()],
+        };
+        let mut stepped = true;
+        while stepped {
+            stepped = false;
+            for a in 0..width {
+                if !self.charge(width as u64) {
+                    return (kept, order);
+                }
+                for b in a + 1..width {
+                    let (first, second) = (order[a], order[b]);
+                    let gain = self.gains[first][b] + self.gains[second][a]
+                        - self.gains[first][a]
+                        - self.gains[second][b];
+                    if gain > 0 {
+                        order.swap(a, b);
+                        match self.accepted(&free, &order, kept, gain) {
+                            Some(better) => {
+                                (kept, order) = better;
+                                stepped = true;
+                            }
+                            None => order.swap(a, b),
+                        }
+                    }
+                }
+            }
+            for a in 0..width {
+                if !self.charge(width as u64) {
+                    return (kept, order);
+                }
+                // Moving the column from `a` to `b` shifts every column between
+                // them one place toward `a`; the running sum carries that. A
+                // step taken changes the order the sum was built on, so the
+                // pass goes on to the next position.
+                let column = order[a];
+                let mut shifted = 0_i64;
+                let mut taken = false;
+                for b in a + 1..width {
+                    shifted += self.gains[order[b]][b - 1] - self.gains[order[b]][b];
+                    let gain = shifted + self.gains[column][b] - self.gains[column][a];
+                    if gain > 0 {
+                        let moved = order.remove(a);
+                        order.insert(b, moved);
+                        if let Some(better) = self.accepted(&free, &order, kept, gain) {
+                            (kept, order) = better;
+                            taken = true;
+                            break;
+                        }
+                        let moved = order.remove(b);
+                        order.insert(a, moved);
+                    }
+                }
+                if taken {
+                    stepped = true;
+                    continue;
+                }
+                let mut shifted = 0_i64;
+                for b in (0..a).rev() {
+                    shifted += self.gains[order[b]][b + 1] - self.gains[order[b]][b];
+                    let gain = shifted + self.gains[column][b] - self.gains[column][a];
+                    if gain > 0 {
+                        let moved = order.remove(a);
+                        order.insert(b, moved);
+                        if let Some(better) = self.accepted(&free, &order, kept, gain) {
+                            (kept, order) = better;
+                            stepped = true;
+                            break;
+                        }
+                        let moved = order.remove(b);
+                        order.insert(a, moved);
+                    }
+                }
+            }
+            'cycles: for a in 0..width {
+                let column = order[a];
+                let targets: Vec<usize> = self.keeps[column]
+                    .iter()
+                    .copied()
+                    .filter(|&target| target != a)
+                    .collect();
+                if !self.charge((width * (1 + targets.len())) as u64) {
+                    return (kept, order);
+                }
+                for p in targets {
+                    let displaced = order[p];
+                    for q in 0..width {
+                        if q == a || q == p {
+                            continue;
+                        }
+                        let third = order[q];
+                        let gain =
+                            self.gains[column][p] + self.gains[displaced][q] + self.gains[third][a]
+                                - self.gains[column][a]
+                                - self.gains[displaced][p]
+                                - self.gains[third][q];
+                        if gain > 0 {
+                            order[p] = column;
+                            order[q] = displaced;
+                            order[a] = third;
+                            if let Some(better) = self.accepted(&free, &order, kept, gain) {
+                                (kept, order) = better;
+                                stepped = true;
+                                continue 'cycles;
+                            }
+                            order[a] = column;
+                            order[p] = displaced;
+                            order[q] = third;
+                        }
+                    }
+                }
+            }
+        }
+        (kept, order)
+    }
+
+    /// The order a step from an order keeping `kept` codes in place to `stepped`,
+    /// gaining `gain`, leads to: `stepped` itself when it keeps every reading
+    /// rule, otherwise the best of its repairs keeping more than `kept`.
+    fn accepted(
+        &mut self,
+        free: &OrderNode,
+        stepped: &[usize],
+        kept: i64,
+        gain: i64,
+    ) -> Option<(i64, Vec<usize>)> {
+        if self.reads_as_built(stepped) {
+            return Some((kept + gain, stepped.to_vec()));
+        }
+        if !self.charge(self.repair_steps()) {
+            return None;
+        }
+        let mut best: Option<(i64, Vec<usize>)> = None;
+        for repair in self.repaired(free, stepped) {
+            if !self.charge(self.width as u64) {
+                break;
+            }
+            let repaired_kept = self.kept_in_place(&repair);
+            if repaired_kept > best.as_ref().map_or(kept, |(held, _)| *held)
+                && self.reads_as_built(&repair)
+            {
+                best = Some((repaired_kept, repair));
+            }
+        }
+        best
+    }
+
+    /// The first reading rule `order` breaks under `node`'s choices.
+    fn broken_rule(&self, node: &OrderNode, order: &[usize]) -> Option<OrderBranch> {
+        let mut position = vec![0_usize; self.width];
+        for (at, &column) in order.iter().enumerate() {
+            position[column] = at;
+        }
+        if let Some(&(first, then)) = self
+            .precedences
+            .iter()
+            .find(|(first, then)| position[*first] > position[*then])
+        {
+            return Some(OrderBranch::Before(first, then));
+        }
+        for (index, (free, held)) in self.choices.iter().enumerate() {
+            match node.chosen[index] {
+                Some(first) => {
+                    if let Some(&then) = held.iter().find(|&&then| position[first] > position[then])
+                    {
+                        return Some(OrderBranch::Before(first, then));
+                    }
+                }
+                None => {
+                    let earliest_held = held.iter().map(|&column| position[column]).min();
+                    let earliest_free = free.iter().map(|&column| position[column]).min();
+                    if earliest_free
+                        .is_none_or(|free| earliest_held.is_some_and(|held| free > held))
+                    {
+                        return Some(OrderBranch::Choose(index));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Subproblems that together hold every order `node` holds that keeps the
+    /// broken rule, none of them holding `order`.
+    fn split(&self, node: &OrderNode, order: &[usize], branch: OrderBranch) -> Vec<OrderNode> {
+        match branch {
+            OrderBranch::Before(first, then) => {
+                let at = order.iter().position(|&column| column == then).unwrap_or(0);
+                let mut children = Vec::with_capacity(2);
+                // Either the first column goes before where the second sits...
+                if at > 0 {
+                    let mut child = node.clone();
+                    child.highest[first] = child.highest[first].min(at - 1);
+                    if child.lowest[first] <= child.highest[first] {
+                        children.push(child);
+                    }
+                }
+                // ...or it goes there or later, and the second after that.
+                let mut child = node.clone();
+                child.lowest[then] = child.lowest[then].max(at + 1);
+                child.lowest[first] = child.lowest[first].max(at);
+                if child.lowest[then] <= child.highest[then]
+                    && child.lowest[first] <= child.highest[first]
+                {
+                    children.push(child);
+                }
+                children
+            }
+            OrderBranch::Choose(index) => self.choices[index]
+                .0
+                .iter()
+                .map(|&first| {
+                    let mut child = node.clone();
+                    child.chosen[index] = Some(first);
+                    child
+                })
+                .collect(),
+        }
+    }
+
+    fn run(mut self) -> Vec<usize> {
+        let width = self.width;
+        // The seed and bound below scan every column at every position once.
+        self.charge((2 * width * width) as u64);
+        let built: Vec<usize> = (0..width).collect();
+        self.best_kept = self.kept_in_place(&built);
+        self.best = built.clone();
+        self.remember(self.best_kept, built);
+        // Columns sorted by the earliest position they keep a code at, and that
+        // order's repairs, start the search off with an order near the one a
+        // wide header wants, which the search may not have the work to solve.
+        let earliest: Vec<usize> = (0..width)
+            .map(|column| self.keeps[column].iter().copied().min().unwrap_or(width))
+            .collect();
+        let mut by_earliest: Vec<usize> = (0..width).collect();
+        by_earliest.sort_by_key(|&column| (earliest[column], column));
+        let free = OrderNode {
+            lowest: Vec::new(),
+            highest: Vec::new(),
+            chosen: vec![None; self.choices.len()],
+        };
+        self.offer(&free, &by_earliest);
+        // Every position's best column bounds what any order keeps.
+        let ceiling: i64 = (0..width)
+            .map(|position| {
+                (0..width)
+                    .map(|column| self.gains[column][position])
+                    .max()
+                    .unwrap_or(0)
+            })
+            .sum();
+        if self.best_kept < ceiling {
+            // The search may take half the work left; improvement has the rest.
+            self.work_floor = self.work_left / 2;
+            let proved = self.search();
+            self.work_floor = 0;
+            self.exhausted = !proved;
+            if !proved {
+                let starts: Vec<Vec<usize>> = std::mem::take(&mut self.pool)
+                    .into_iter()
+                    .rev()
+                    .map(|(_, order)| order)
+                    .collect();
+                for start in starts {
+                    let (kept, order) = self.improved(start);
+                    if kept > self.best_kept {
+                        self.best_kept = kept;
+                        self.best = order;
+                    }
+                }
+                self.exhausted = true;
+            }
+        }
+        #[cfg(test)]
+        LAST_ORDER_SEARCH.with(|last| {
+            last.set((
+                self.solves,
+                self.exhausted,
+                LAYOUT_ORDER_SEARCH_WORK - self.work_left,
+            ));
+        });
+        self.best
+    }
+
+    /// Branch and bound down to the work floor, returning whether it proved the
+    /// best order it found keeps the most codes in place any order does.
+    fn search(&mut self) -> bool {
+        let root = OrderNode {
+            lowest: vec![0; self.width],
+            highest: vec![self.width.saturating_sub(1); self.width],
+            chosen: vec![None; self.choices.len()],
+        };
+        // Subproblems by the most codes they could keep, the latest first among
+        // equals. Every assignment solved is offered as it is and repaired, so
+        // the best order seen is kept however the search ends; once no open
+        // subproblem could keep more than it, it is the order keeping the most
+        // codes in place.
+        let mut open: Vec<(OrderNode, Vec<usize>)> = Vec::new();
+        let mut queue = std::collections::BinaryHeap::new();
+        match self.solve(&root) {
+            Err(WorkSpent) => return false,
+            Ok(None) => return true,
+            Ok(Some((kept, order))) => {
+                self.offer(&root, &order);
+                if kept > self.best_kept {
+                    open.push((root, order));
+                    queue.push((kept, 0_usize));
+                }
+            }
+        }
+        while let Some((bound, at)) = queue.pop() {
+            if bound <= self.best_kept {
+                return true;
+            }
+            if !self.charge((self.width + self.precedences.len() + self.choices.len()) as u64) {
+                return false;
+            }
+            let (node, order) = std::mem::take(&mut open[at]);
+            let Some(branch) = self.broken_rule(&node, &order) else {
+                // An assignment keeping every rule, with the most codes any open
+                // subproblem could keep. Offering it when it was solved may have
+                // run out of work before checking it, and dropping it then would
+                // let an empty queue claim a worse order best, so it is checked
+                // here whatever work is left: once per such subproblem, and the
+                // search ends at the next one popped.
+                if bound > self.best_kept && self.keeps_every_rule(&order) {
+                    self.best_kept = bound;
+                    self.best = order.clone();
+                    self.remember(bound, order);
+                }
+                continue;
+            };
+            for child in self.split(&node, &order, branch) {
+                match self.solve(&child) {
+                    Err(WorkSpent) => return false,
+                    Ok(None) => {}
+                    Ok(Some((kept, child_order))) => {
+                        self.offer(&child, &child_order);
+                        if kept > self.best_kept {
+                            open.push((child, child_order));
+                            queue.push((kept, open.len() - 1));
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
+/// The assignment of rows to columns of a square matrix costing the least in
+/// total, by the Hungarian method. Returns, for each row, its column, or `None`
+/// when examining candidates would take more than `steps`, which counts down
+/// by each one examined.
+#[allow(clippy::needless_range_loop)] // the method walks parallel one-based arrays by index
+fn least_cost_assignment(cost: &[Vec<i64>], steps: &mut u64) -> Option<Vec<usize>> {
+    let n = cost.len();
+    let infinity = i64::MAX / 4;
+    let mut u = vec![0_i64; n + 1];
+    let mut v = vec![0_i64; n + 1];
+    let mut assigned_row = vec![0_usize; n + 1];
+    let mut way = vec![0_usize; n + 1];
+    for row in 1..=n {
+        assigned_row[0] = row;
+        let mut column = 0_usize;
+        let mut slack = vec![infinity; n + 1];
+        let mut used = vec![false; n + 1];
+        loop {
+            *steps = steps.checked_sub(n as u64 + 1)?;
+            used[column] = true;
+            let current_row = assigned_row[column];
+            let mut delta = infinity;
+            let mut next = 0_usize;
+            for candidate in 1..=n {
+                if used[candidate] {
+                    continue;
+                }
+                let reduced = cost[current_row - 1][candidate - 1] - u[current_row] - v[candidate];
+                if reduced < slack[candidate] {
+                    slack[candidate] = reduced;
+                    way[candidate] = column;
+                }
+                if slack[candidate] < delta {
+                    delta = slack[candidate];
+                    next = candidate;
+                }
+            }
+            for candidate in 0..=n {
+                if used[candidate] {
+                    u[assigned_row[candidate]] += delta;
+                    v[candidate] -= delta;
+                } else {
+                    slack[candidate] -= delta;
+                }
+            }
+            column = next;
+            if assigned_row[column] == 0 {
+                break;
+            }
+        }
+        loop {
+            let previous = way[column];
+            assigned_row[column] = assigned_row[previous];
+            column = previous;
+            if column == 0 {
+                break;
+            }
+        }
+    }
+    let mut assignment = vec![0_usize; n];
+    for column in 1..=n {
+        if assigned_row[column] != 0 {
+            assignment[assigned_row[column] - 1] = column - 1;
+        }
+    }
+    Some(assignment)
 }
 
 /// The first field on which two products differ, with both values.
@@ -1359,4 +2714,352 @@ fn describe_difference(expected: &RinexObs, found: &RinexObs) -> String {
         }
     }
     "the product reads back differently".to_string()
+}
+
+impl RinexObs {
+    /// This product as one a version 2 file can state exactly, with every change
+    /// that took.
+    ///
+    /// Version 2 names one list of observation types for every constellation,
+    /// so each constellation's codes are laid out against that one list: a code
+    /// keeps its column where a name reads back as it, and moves to a column of
+    /// its own where one would read it as a different code. Values and
+    /// `PRN / # OF OBS` counts move with their codes. What the list cannot keep
+    /// is returned as a change rather than dropped: a code renamed to what its
+    /// column reads as, a code moved to another position, a blank code added so
+    /// the lists match, a code list for a constellation no observation or count
+    /// names that the file would not state, scale factor
+    /// records removed from values that are already physical, and picoseconds
+    /// a version 2 epoch has no field for. A version 3 product with no
+    /// observations is named for a constellation whose list no count keeps,
+    /// GPS first, so the file keeps every list it can.
+    ///
+    /// Columns are ordered to move as few codes as any order of them can: the
+    /// order keeping the most codes at the positions they held is found by
+    /// branch and bound over assignments of columns to positions. When proving an order
+    /// best would take more than a fixed amount of work (200 million steps of
+    /// the search, a fraction of a second in a release build), the best orders
+    /// it found are improved by moving or swapping columns one at a time and the
+    /// best result is used; it still reads back exactly and every move it makes
+    /// is reported, but a different order could move fewer.
+    ///
+    /// Values or `PRN / # OF OBS` counts past their constellation's codes name
+    /// no observable and are refused rather than dropped.
+    ///
+    /// A receiver clock offset carrying more than the nine decimals a version 2
+    /// epoch record holds is rounded and reported.
+    /// Values carrying more than the three decimals an observation field holds
+    /// are rounded and reported. The result is returned only once
+    /// [`RinexObs::to_rinex_string`] writes it, so it always reads back exactly;
+    /// what version 2 still cannot state - more than 999 observation types, a
+    /// year outside the 1980 to 2079 window, a value too wide for its field - is
+    /// refused instead.
+    ///
+    /// # Errors
+    ///
+    /// [`RinexObsWriteError::NotVersionTwo`] when `version` is not a version 2,
+    /// [`RinexObsWriteError::TooManyObservationTypes`] when the layout needs more
+    /// than 999 types, and any error writing the result gives.
+    pub fn downgrade_to_rinex2(
+        &self,
+        version: f64,
+    ) -> Result<(RinexObs, Vec<ObsDowngradeChange>), RinexObsWriteError> {
+        const BLANK: ObsValue = ObsValue {
+            value: None,
+            lli: None,
+            ssi: None,
+        };
+        if !(2.0..3.0).contains(&version) {
+            return Err(RinexObsWriteError::NotVersionTwo { version });
+        }
+        let mut product = self.clone();
+        product.header.version = version;
+        let mut changes = Vec::new();
+        if !product.header.scale_factors.is_empty() {
+            changes.push(ObsDowngradeChange::ScaleFactorsRemoved {
+                count: product.header.scale_factors.len(),
+            });
+            product.header.scale_factors.clear();
+        }
+        for (epoch_index, epoch) in product.epochs.iter_mut().enumerate() {
+            if let Some(picoseconds) = epoch.epoch_picoseconds.take() {
+                changes.push(ObsDowngradeChange::EpochPicosecondsRemoved {
+                    epoch_index,
+                    picoseconds,
+                });
+            }
+            if let Some(held) = epoch.rcv_clock_offset_s.filter(|held| held.is_finite()) {
+                if let Ok(rounded) = format!("{held:.9}").parse::<f64>() {
+                    if rounded != held {
+                        // `-0.000000000` is a zero offset, not a negative one.
+                        let to = if rounded == 0.0 { 0.0 } else { rounded };
+                        changes.push(ObsDowngradeChange::ClockOffsetRounded {
+                            epoch_index,
+                            from: held,
+                            to,
+                        });
+                        epoch.rcv_clock_offset_s = Some(to);
+                    }
+                }
+            }
+        }
+        // A version 2 product's type names are every constellation's, so a
+        // constellation a count or an observation names that holds no list has
+        // the codes those names read as at the product's own version. They are
+        // laid out and reported like any list; a list only counts named is left
+        // implied again once the names are chosen. A value or count past its
+        // constellation's codes names no observable.
+        let mut implied = std::collections::BTreeSet::new();
+        // With no observations, the list a version 2 file states is the one its
+        // version record names. That is taken from the source before any list
+        // is added here, which would otherwise decide it again.
+        let source_systems = self.rinex2_observed_systems();
+        let source_observed = !source_systems.is_empty();
+        let source_fallback = self.rinex2_fallback_system();
+        if self.is_rinex2() {
+            // A mixed header whose fallback is GPS already says so; any other
+            // fallback is held, since added lists would decide it again.
+            if !source_observed && source_fallback != GnssSystem::Gps {
+                product.header.rinex2_system = Some(source_fallback);
+            }
+        } else {
+            // A version 3 product has no version 2 constellation; a file of one
+            // constellation's observations is named for it. A file with none
+            // states the list of the constellation it is named for besides those
+            // counts name, so it is named for one whose list no count keeps,
+            // GPS first, which `M (MIXED)` already names.
+            let mut systems = source_systems.iter();
+            product.header.rinex2_system = match (systems.next(), systems.next()) {
+                (Some(only), None) => Some(*only),
+                (None, _) => {
+                    let counted: std::collections::BTreeSet<GnssSystem> = self
+                        .header
+                        .prn_obs_counts
+                        .iter()
+                        .filter(|(_, counts)| !counts.is_empty())
+                        .map(|(sat, _)| sat.system)
+                        .collect();
+                    self.header
+                        .obs_codes
+                        .keys()
+                        .find(|system| !counted.contains(system))
+                        .copied()
+                        .filter(|system| *system != GnssSystem::Gps)
+                }
+                _ => None,
+            };
+        }
+        if self.is_rinex2() && !self.header.rinex2_types.is_empty() {
+            let observed: std::collections::BTreeSet<GnssSystem> = self
+                .epochs
+                .iter()
+                .flat_map(|epoch| epoch.sats.keys().map(|sat| sat.system))
+                .collect();
+            if !source_observed && !product.header.obs_codes.contains_key(&source_fallback) {
+                product.header.obs_codes.insert(
+                    source_fallback,
+                    super::rinex2_system_obs_codes(
+                        source_fallback,
+                        &self.header.rinex2_types,
+                        self.header.version,
+                    ),
+                );
+                implied.insert(source_fallback);
+            }
+            for system in self.rinex2_unlisted_systems() {
+                product.header.obs_codes.insert(
+                    system,
+                    super::rinex2_system_obs_codes(
+                        system,
+                        &self.header.rinex2_types,
+                        self.header.version,
+                    ),
+                );
+                if !observed.contains(&system) {
+                    implied.insert(system);
+                }
+            }
+        }
+        // Laying the codes out would drop it, so it is refused before anything
+        // is transformed.
+        for (epoch_index, epoch) in product.epochs.iter().enumerate() {
+            for (sat, values) in &epoch.sats {
+                let codes = product
+                    .header
+                    .obs_codes
+                    .get(&sat.system)
+                    .map_or(0, Vec::len);
+                if values.len() > codes {
+                    return Err(RinexObsWriteError::ValuesWithoutCodes {
+                        epoch_index,
+                        satellite: *sat,
+                        codes,
+                        values: values.len(),
+                    });
+                }
+            }
+        }
+        for (sat, counts) in &product.header.prn_obs_counts {
+            let codes = product
+                .header
+                .obs_codes
+                .get(&sat.system)
+                .map_or(0, Vec::len);
+            if counts.len() > codes {
+                return Err(RinexObsWriteError::CountsWithoutCodes {
+                    satellite: *sat,
+                    codes,
+                    counts: counts.len(),
+                });
+            }
+        }
+        // Three decimals are what an observation field holds, and a value read
+        // through a scale factor can carry more once the factor is gone.
+        for (epoch_index, epoch) in product.epochs.iter_mut().enumerate() {
+            for (sat, values) in &mut epoch.sats {
+                let codes = product.header.obs_codes.get(&sat.system);
+                for (index, value) in values.iter_mut().enumerate() {
+                    let Some(held) = value.value.filter(|held| held.is_finite()) else {
+                        continue;
+                    };
+                    let Ok(rounded) = format!("{held:.3}").parse::<f64>() else {
+                        continue;
+                    };
+                    if rounded != held {
+                        changes.push(ObsDowngradeChange::ValueRounded {
+                            epoch_index,
+                            satellite: *sat,
+                            code: codes
+                                .and_then(|list| list.get(index))
+                                .cloned()
+                                .unwrap_or_default(),
+                            from: held,
+                            to: rounded,
+                        });
+                        value.value = Some(rounded);
+                    }
+                }
+            }
+        }
+        // A product version 2 already states needs no layout, and laying it out
+        // anyway could only report moves nobody needed. Once the names are
+        // chosen, a list the file does not state is removed and reported rather
+        // than left out of the file unsaid.
+        if let Ok(names) = product.rinex2_names() {
+            product.remove_unstated_lists(&names, &mut changes);
+            product.leave_implied(&implied, names);
+            product.to_rinex_string()?;
+            return Ok((product, changes));
+        }
+        let layout = product.rinex2_obs_layout();
+        if layout.names.len() > super::MAX_OBS_TYPE_COUNT {
+            return Err(RinexObsWriteError::TooManyObservationTypes {
+                count: layout.names.len(),
+            });
+        }
+        let mut obs_codes = BTreeMap::new();
+        for (system, row) in &layout.slots {
+            let read = super::rinex2_system_obs_codes(*system, &layout.names, version);
+            let held = &product.header.obs_codes[system];
+            for (column, slot) in row.iter().enumerate() {
+                if let Some(index) = slot {
+                    if *index != column {
+                        changes.push(ObsDowngradeChange::CodeMoved {
+                            system: *system,
+                            code: read[column].clone(),
+                            from: *index,
+                            to: column,
+                        });
+                    }
+                }
+                match slot {
+                    Some(index) if held[*index] != read[column] => {
+                        changes.push(ObsDowngradeChange::CodeRenamed {
+                            system: *system,
+                            from: held[*index].clone(),
+                            to: read[column].clone(),
+                        });
+                    }
+                    Some(_) => {}
+                    None => changes.push(ObsDowngradeChange::CodeAdded {
+                        system: *system,
+                        code: read[column].clone(),
+                    }),
+                }
+            }
+            obs_codes.insert(*system, read);
+        }
+        for epoch in &mut product.epochs {
+            for (sat, values) in &mut epoch.sats {
+                if let Some(row) = layout.slots.get(&sat.system) {
+                    let placed: Vec<ObsValue> = row
+                        .iter()
+                        .map(|slot| {
+                            slot.and_then(|index| values.get(index).copied())
+                                .unwrap_or(BLANK)
+                        })
+                        .collect();
+                    *values = placed;
+                }
+            }
+        }
+        for (sat, counts) in &mut product.header.prn_obs_counts {
+            if counts.is_empty() {
+                continue;
+            }
+            if let Some(row) = layout.slots.get(&sat.system) {
+                let placed: Vec<Option<usize>> = row
+                    .iter()
+                    .map(|slot| slot.and_then(|index| counts.get(index).copied()).flatten())
+                    .collect();
+                *counts = placed;
+            }
+        }
+        let types = obs_codes.values().map(Vec::len).max().unwrap_or_default();
+        // A list the layout gave no row stays as it was.
+        for (system, codes) in &product.header.obs_codes {
+            obs_codes.entry(*system).or_insert_with(|| codes.clone());
+        }
+        product.header.obs_codes = obs_codes;
+        // The laid-out lists are what the layout's names read as, so names are
+        // found for them; other names reading as them too may also read as a
+        // list nothing states, which then stays.
+        let names = product
+            .rinex2_names()
+            .unwrap_or_else(|_| layout.names.clone());
+        product.remove_unstated_lists(&names, &mut changes);
+        product.leave_implied(&implied, names);
+        if types > super::MAX_OBS_TYPE_COUNT {
+            return Err(RinexObsWriteError::TooManyObservationTypes { count: types });
+        }
+        // The result is only returned once it writes: anything version 2 still
+        // cannot state is refused here, with the field that would change.
+        product.to_rinex_string()?;
+        Ok((product, changes))
+    }
+}
+
+#[cfg(test)]
+mod order_search_tests {
+    use super::OrderSearch;
+
+    #[test]
+    fn a_search_out_of_work_to_check_an_assignment_does_not_prove_a_worse_order() {
+        // Two columns, each keeping a code at the other's position, with work
+        // for the cost matrix, the assignment and the pop but not for checking
+        // the assignment when it is offered. The search used to drop that
+        // valid assignment, empty its queue and call the built order, keeping
+        // nothing in place, the best.
+        let rows = vec![Some(1), Some(0)];
+        let names = vec!["X1".to_string(), "X2".to_string()];
+        let mut search = OrderSearch::new(vec![vec![None, None]], &[&rows], &names);
+        search.work_floor = 100_000_000;
+        search.work_left = search.work_floor + 12;
+        let proved = search.search();
+        assert!(
+            !proved || search.best_kept == 2,
+            "proved an order keeping {} codes in place, where swapping keeps 2",
+            search.best_kept
+        );
+    }
 }

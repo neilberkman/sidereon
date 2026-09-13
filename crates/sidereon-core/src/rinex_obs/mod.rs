@@ -3365,7 +3365,7 @@ fn digit_at(line: &str, col: usize) -> Option<u8> {
 }
 
 mod write;
-pub use write::RinexObsWriteError;
+pub use write::{ObsDowngradeChange, RinexObsWriteError};
 
 #[cfg(all(test, sidereon_repo_tests))]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]

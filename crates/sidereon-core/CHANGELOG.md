@@ -35,6 +35,52 @@ All notable changes to `sidereon-core` are documented here.
   chosen to read as the largest set of such lists they can, so GPS `C2W` and
   GLONASS `C2P` with no observations are written at 2.12 as `P2`, which reads
   as both, rather than `C2`, which reads as only the GPS one.
+- `RinexObs::downgrade_to_rinex2` turns any product into one a version 2 file
+  can state exactly, and returns every change it made as an
+  `ObsDowngradeChange`: a code renamed to what its column reads as, a code moved
+  to another position in its list, a blank code added so every constellation's
+  list matches, a code list the version 2 file does not state removed (a
+  version 3 product with no observations is named for a constellation whose
+  list no count keeps, GPS first, so the file keeps every list it can),
+  `SYS / SCALE FACTOR` records
+  removed from values that are already physical, a receiver clock offset
+  rounded to the nine decimals a version 2 epoch record holds, a value rounded to the three
+  decimals a field holds once no factor scales it, and epoch picoseconds
+  version 2 has no field for. Values and `PRN / # OF OBS` counts move with their
+  codes. The result is returned only once it writes and reads back exactly, and
+  what version 2 still cannot state - more than 999 observation types
+  (`RinexObsWriteError::TooManyObservationTypes`), a year outside the two-digit
+  window - is refused. It renames only codes no
+  version 2 layout can keep: a code no version 2 name spells, or a second copy
+  of a code its constellation already holds. Whether a canonical code is kept
+  does not depend on column order, since the reader gives it at the first column
+  whose name reads as it, so naming a column for every code any name reads as
+  keeps all the rest. A second copy of a held code gets a column named with its
+  own spelling rather than one that reads as a different tracking attribute,
+  shared with another constellation's second copy under the same name wherever
+  it reads the same there, and a code no name spells shares a column already
+  reading as its spelling's code. A name kept as written adds a column only when
+  no column already reads as it. Columns are ordered to move the fewest codes
+  any order of them can: keeping the most codes in place is an assignment of
+  columns to positions, and the reading rule's ordering - a group of names read
+  as one code gives it to its first column - is met by branch and bound over
+  those assignments. Every assignment solved is also repaired into an order
+  keeping the rule, and the best order seen is kept however the search ends.
+  The search is limited to 100 million steps counted inside the assignment
+  method; when that does not prove an order best, the best distinct orders it
+  saw, and columns sorted by the earliest position they keep a code at, are
+  improved with the remaining steps by moving one column, swapping two, or
+  moving three around a cycle, while that, or its repair, keeps the rule and
+  more codes in place. Every step of the search and of improvement is counted,
+  so the total work is bounded, and a search that finishes never drops a valid
+  assignment for want of work to check it, so what it proves best is. The
+  layout's columns are built from indexes of which column first reads as each
+  code, rather than by reading the names again for every question, and match
+  the previous construction column for column. A layout wider than the 999 types a header
+  declares is refused before any of it. The result still reads back exactly
+  with every move reported. Values or counts past their constellation's
+  codes are refused (`ValuesWithoutCodes`, `CountsWithoutCodes`) rather than
+  dropped. A product version 2 already states comes back unchanged.
 - **Breaking.** `ObsEpoch` carries `special_records`, the records an event epoch
   was followed by, in place of `special_record_count`. An event epoch is
   followed by header or comment records - a flag 3 epoch by the marker, antenna
@@ -150,11 +196,14 @@ All notable changes to `sidereon-core` are documented here.
   constellation no observation names reads by those names, not by any list in
   `obs_codes`. The writer used to choose names from the lists alone, so a GPS
   count beside a BeiDou observation could be written under a name that reads as
-  the same BeiDou code and a different GPS one. The writer now writes the names
-  a product was read with when they still read as every list, and otherwise
-  holds its choice to the lists those counts imply. Observations in version 3
-  layout in a version 2 file with no `# / TYPES OF OBSERV` are refused, as
-  observations in version 2 layout already were.
+  the same BeiDou code and a different GPS one, and a downgrade to 2.12 could
+  write a GLONASS count under a name that no longer counted its code, with no
+  change reported. The writer now writes the names a product was read with when
+  they still read as every list, and otherwise holds its choice to the lists
+  those counts imply; the downgrade lays those implied lists out and reports
+  their changes like any other. Observations in version 3 layout in a version 2
+  file with no `# / TYPES OF OBSERV` are refused, as observations in version 2
+  layout already were.
 - Epoch picoseconds are written where RINEX 4.02 puts them, five digits
   (`1X,I5.5`) after the receiver clock offset, whose columns are left blank when
   there is no offset, and read from there. They were written between the
@@ -163,7 +212,8 @@ All notable changes to `sidereon-core` are documented here.
   and a 4.02 line carrying them where the format does was read with them
   dropped. The long-standing reading of the old placement is kept. Picoseconds
   in a product below 4.02, which introduced them, are refused with
-  `RinexObsWriteError::EpochPicosecondsNotInVersion`.
+  `RinexObsWriteError::EpochPicosecondsNotInVersion`; a downgrade to version 2
+  removes them.
 - Picoseconds after the clock offset are read however the epoch line is
   spaced. A tab after them took a correctly laid-out line out of its columns,
   and the whitespace reading then dropped five digits after a clock offset;
@@ -177,15 +227,23 @@ All notable changes to `sidereon-core` are documented here.
   version 2 file's version record names (`None` for a mixed file and at version
   3). With no observations, a version 2 file states that constellation's list,
   so it is part of what the file says: an unused list used to change a
-  header-only GLONASS file into a GPS one when written. The version record names
-  the held constellation while every observation is from it, and `M (MIXED)`
-  otherwise, so a mixed header stays mixed.
+  header-only GLONASS file into a GPS one when written, and a downgrade decided
+  the constellation again after adding lists of its own, leaving the GLONASS
+  list out of its layout and refusing the conversion. A downgrade now keeps the
+  source's constellation and states its list, cleared or not, so a header-only
+  GPS C2X list is kept or its change reported when converting to 2.12. The
+  version record names the held constellation while every observation is from
+  it, and `M (MIXED)` otherwise, so a mixed header stays mixed; a conversion from
+  version 3 names the one constellation all observations are from.
 - A `GLONASS COD/PHS/BIS` code longer than its three-character field is refused
   when read; it was cut when written and read back as another code.
-- A version 2 file is written with names chosen only for the lists the file
-  states: one for each constellation an observation or count names, and with no
-  observations, the list its version record names. A list nothing names no
-  longer makes the writer refuse, and is kept as it was.
+- A version 2 file is written, and a product downgraded, with names chosen only
+  for the lists the file states: one for each constellation an observation or
+  count names, and with no observations, the list its version record names. A
+  list nothing names no longer makes the writer refuse, nor takes columns, moves
+  codes, adds changes or exceeds the type count in a downgrade, and is kept as
+  it was; the version record's list of a file with no observations is kept or
+  its rename reported even when counts name only another constellation.
 - Repair drops empty satellite records before recomputing the observation
   count headers. It counted first, so a file whose satellites held no values
   came out declaring them in `# OF SATELLITES` and `PRN / # OF OBS` with no
@@ -233,7 +291,11 @@ All notable changes to `sidereon-core` are documented here.
   phase, and read back as a different signal. The digits a letter replaced are
   no longer names at 2.12, so a `CA` is written `CA` rather than the `C1` that
   2.12 refuses. GLONASS is given a `P` code on G1 and G2 only, which is where it
-  has one.
+  has one. A `PRN / # OF OBS` count
+  moves to the column its measurement went to, rather than staying at the
+  position it held in its own constellation's list. Two columns naming the same
+  code are folded into one wherever no constellation needs both, so two lists
+  holding the same signals in a different order no longer double the header.
 - The RINEX observation reader takes the records the format lays out in fixed
   columns from those columns, rather than by splitting the line on whitespace.
   Whitespace cannot read a record whose field fills its width, because it then

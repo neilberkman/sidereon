@@ -39,8 +39,8 @@ pub mod nav {
 pub mod observations {
     pub use crate::rinex_obs::{
         band_frequency_hz, carrier_phase_rows, observation_frequency_hz, observation_values,
-        pseudoranges, AntennaInfo, CarrierPhaseRow, ObsEpoch, ObsEpochTime, ObsHeader,
-        ObsLeapSeconds, ObsPhaseShift, ObsScaleFactor, ObsValue, ObservationFilter,
+        pseudoranges, AntennaInfo, CarrierPhaseRow, ObsDowngradeChange, ObsEpoch, ObsEpochTime,
+        ObsHeader, ObsLeapSeconds, ObsPhaseShift, ObsScaleFactor, ObsValue, ObservationFilter,
         ObservationKind, ObservationValueRow, PgmRunByDate, ReceiverInfo, RinexObs,
         RinexObsWriteError, SignalPolicy,
     };
