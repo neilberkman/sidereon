@@ -5897,6 +5897,48 @@ fn a_glonass_code_bias_code_wider_than_its_field_is_refused() {
 }
 
 #[test]
+fn a_type_continuation_record_that_continues_no_list_is_refused() {
+    // Review found a blank-count record before any count skipped with its
+    // codes. The same held after a complete list, and for a version 3 record
+    // with a blank system field before any system.
+    let types = |content: &str| v2_record(content, "# / TYPES OF OBSERV");
+    let sys_types = |content: &str| v2_record(content, "SYS / # / OBS TYPES");
+    let cases = [
+        (
+            "2.11",
+            "before any count",
+            vec![types("          S2"), types("     1    C1")],
+        ),
+        (
+            "2.11",
+            "after a complete list",
+            vec![types("     1    C1"), types("          S2")],
+        ),
+        (
+            "3.05",
+            "before any system",
+            vec![sys_types("       C1C"), sys_types("G    1 C1C")],
+        ),
+    ];
+    for (version, what, headers) in cases {
+        let error = RinexObs::parse(&obs_file(version, 'G', &headers, "")).expect_err(what);
+        assert!(
+            error.to_string().contains("continues no declared list"),
+            "{what}: {error}"
+        );
+    }
+
+    // A continuation record with no codes on it adds nothing and is passed over.
+    RinexObs::parse(&obs_file(
+        "2.11",
+        'G',
+        &[types("     1    C1"), types("")],
+        "",
+    ))
+    .expect("an empty continuation record is passed over");
+}
+
+#[test]
 fn lists_nothing_names_do_not_hold_a_version_two_file_back() {
     // A GLONASS list no observation or count names is nothing a version 2 file
     // states, so it cannot keep the names a GPS observation needs. The writer
