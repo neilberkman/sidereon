@@ -317,11 +317,31 @@ All notable changes to `sidereon-core` are documented here.
   the previous epoch although every epoch it writes is a reset, after which
   `crx2rnx` reads each satellite as new and dropped a repeated flag; it now
   writes them whole. A RINEX 2 blank field carrying flags, which CRINEX 1 cannot
-  hold and `rnx2crx` refuses, is refused. An epoch with no clock offset ends
-  the clock's difference arc.
+  hold and `rnx2crx` refuses, is refused.
 - CRINEX applies the observation type records an event epoch carries. A flag 4
   epoch can declare a new type list, which sets how many fields the epochs after
   it hold; the declaration was copied through and the old widths kept.
+- **Breaking.** CRINEX compresses and expands RINEX 4 observation files, and
+  carries RINEX 4.02 epoch picoseconds as CRINEX 3.1 does, after the clock
+  offset on the clock line. A RINEX 4 file was refused by compression, and a
+  CRINEX 3.1 clock line carrying picoseconds by expansion. `ObsEpoch` gains
+  `picoseconds`. Compression writes CRINEX 3.1 for RINEX 4.02 and later, as
+  `rnx2crx` does. An epoch line with text past its clock offset that is not
+  picoseconds its version holds is refused rather than dropped. `rnx2crx`
+  leaves an epoch's picoseconds unwritten when they repeat the previous
+  epoch's, and writes an epoch with none after one with them the same way, so
+  expansion carries an unwritten value forward, as `crx2rnx` does. Compression
+  blanks the picoseconds of an epoch with none after one with them, which both
+  expansions read as none.
+- CRINEX expansion writes a receiver clock offset as `crx2rnx` does, with no
+  zero before the decimal point (`.000123000`), where it wrote `0.000123000`.
+  `crx2rnx` 4.2.0 misprints a negative offset whose last eight digits are zeros,
+  writing `-1.5` as `-1.4`; expansion writes the value. An epoch with no clock
+  offset ends the clock's difference arc.
+- **Breaking.** A RINEX 2 satellite token with a blank constellation letter
+  stays blank through CRINEX, as `rnx2crx` and `crx2rnx` keep it, in
+  `SatRecord::sv` too. The header's letter was written in, so a mono-system file
+  came back with tokens it did not have.
 - The CRINEX type list check counts a code only in a field's code columns. A
   character in a field's padding was counted as a code, so a record naming one
   code for a count of two passed.

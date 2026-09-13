@@ -1,0 +1,25 @@
+1.0                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE
+RNX2CRX ver.4.2.0                       13-Sep-26 18:11     CRINEX PROG / DATE
+     2.11           OBSERVATION DATA    G (GPS)             RINEX VERSION / TYPE
+     2    C1    L1                                          # / TYPES OF OBSERV
+                                                            END OF HEADER
+&20  1  1  0  0  0.0000000  0  3  1 12G03
+3&123000
+3&1234567 3&2345678
+3&1235567 3&2346678
+3&1236567 3&2347678
+                 1             2   G03&&&
+-246000
+1 1
+1 1
+                 2              G0 &12
+1500369000
+3&1234569 3&2345680
+3&1235569 3&2346680
+                 3              &&
+-14500491999
+3&1234570 3&2345681
+1 1
+                 4             1    &&
+34500122997
+1 1

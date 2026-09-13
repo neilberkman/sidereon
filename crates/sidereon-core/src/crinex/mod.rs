@@ -121,6 +121,9 @@ pub struct ObsEpoch {
     /// Recovered receiver clock offset as the scaled integer the stream carried,
     /// or `None` when the epoch carried no clock token.
     pub clock: Option<i64>,
+    /// The five picosecond digits a RINEX 4.02 epoch line carries after the
+    /// clock offset (CRINEX 3.1), as written, or `None` when it carries none.
+    pub picoseconds: Option<String>,
     /// Per-satellite recovered observations, in epoch SV-list order.
     pub sats: Vec<SatRecord>,
 }
@@ -128,7 +131,9 @@ pub struct ObsEpoch {
 /// One satellite's recovered observations at an epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SatRecord {
-    /// SV token (e.g. `G05`), already expanded for mono-system RINEX-2 streams.
+    /// SV token as the epoch record writes it (e.g. `G05`). A mono-system
+    /// RINEX-2 stream may leave the constellation letter blank (`  5`), and
+    /// the token keeps it blank, as `crx2rnx` does.
     pub sv: String,
     /// Recovered scaled-integer observation values; `None` is a blanked column.
     pub values: Vec<Option<i64>>,
@@ -144,7 +149,8 @@ const OBS_VALUE_WIDTH: usize = 14;
 /// Decode a CRINEX (Hatanaka) observation stream into the plain RINEX
 /// observation text it expands to, returning the whole text as a `String`.
 ///
-/// Supports CRINEX 1.0 (RINEX 2 host) and CRINEX 3.0 (RINEX 3 host). Returns
+/// Supports CRINEX 1.0 (RINEX 2 host), CRINEX 3.0 (RINEX 3 and 4 host) and
+/// CRINEX 3.1 (RINEX 4.02 and later, with epoch picoseconds). Returns
 /// [`Error::Parse`] with a human-readable reason on a malformed stream.
 pub fn decode(crinex_text: &str) -> Result<String> {
     let mut out = String::with_capacity(crinex_text.len() * 4);
@@ -172,8 +178,10 @@ pub fn decode_to<W: FnMut(&str)>(crinex_text: &str, mut emit: W) -> Result<()> {
 /// Encode plain RINEX observation text into a CRINEX (Hatanaka) stream, the
 /// inverse of [`decode`].
 ///
-/// Supports RINEX 2 (encoded as CRINEX 1.0) and RINEX 3 (encoded as CRINEX 3.0),
-/// selected from the embedded `RINEX VERSION / TYPE` header line. The text is
+/// Supports RINEX 2 (encoded as CRINEX 1.0), RINEX 3 and 4.00 to 4.01 (CRINEX
+/// 3.0) and RINEX 4.02 and later (CRINEX 3.1, which carries epoch picoseconds),
+/// selected from the embedded `RINEX VERSION / TYPE` header line, as `rnx2crx`
+/// selects them. The text is
 /// parsed into the canonical [`ObsStream`] IR and serialized by [`encode_stream`].
 /// Because CRINEX compression is not unique, the output is the canonical
 /// all-reset form (see [`encode_stream`]); it is not byte-identical to an
@@ -344,6 +352,11 @@ struct Decoder {
     /// their difference state: `crx2rnx` starts every other satellite, and
     /// every satellite after a reset or an event epoch, anew.
     previous_svs: Vec<String>,
+    /// Whether epochs carry picoseconds: a CRINEX 3.1 stream, or RINEX 4.02
+    /// and later text.
+    picoseconds: bool,
+    /// Picosecond text-diff engine (CRINEX 3.1).
+    picosecond_diff: TextDiff,
 }
 
 impl Decoder {
@@ -358,6 +371,8 @@ impl Decoder {
             flag_diff: HashMap::new(),
             types_left: 0,
             previous_svs: Vec::new(),
+            picoseconds: false,
+            picosecond_diff: TextDiff::default(),
         }
     }
 
@@ -389,6 +404,12 @@ impl Decoder {
                 "missing CRINEX VERS / TYPE header line".into(),
             ));
         }
+        // CRINEX 3.1 adds picoseconds to the clock line, for RINEX 4.02.
+        self.picoseconds = self.version == CrinexVersion::V3
+            && crx_ver
+                .as_bytes()
+                .get(2)
+                .is_some_and(|minor| minor.is_ascii_digit() && *minor > b'0');
         // Line 2: CRINEX PROG / DATE - dropped (it is the compaction stamp, not
         // part of the reconstructed RINEX).
         lines
@@ -558,13 +579,14 @@ impl Decoder {
                 let version = field(line, 0, 9).trim();
                 self.version = match version.chars().next() {
                     Some('2') => CrinexVersion::V1,
-                    Some('3') => CrinexVersion::V3,
+                    Some('3' | '4') => CrinexVersion::V3,
                     _ => {
                         return Err(Error::Parse(format!(
-                            "unsupported RINEX version {version:?} (expected 2 or 3)"
+                            "unsupported RINEX version {version:?} (expected 2, 3 or 4)"
                         )))
                     }
                 };
+                self.picoseconds = rinex_version_carries_picoseconds(version);
                 saw_version = true;
             }
             self.classify_header_label(line, label)?;
@@ -674,7 +696,7 @@ impl Decoder {
             .next()
             .ok_or_else(|| Error::Parse("CRINEX V3 epoch missing clock line".into()))?
             .trim_end_matches(['\r', '\n']);
-        let clock = self.decode_clock_value(clock_line)?;
+        let (clock, picoseconds) = self.decode_clock_line(clock_line)?;
 
         let sv_list = self.sv_tokens_v3(&descriptor, numsat)?;
         if reset {
@@ -698,6 +720,7 @@ impl Decoder {
         Ok(Some(EpochRecord::Obs(ObsEpoch {
             descriptor,
             clock,
+            picoseconds,
             sats,
         })))
     }
@@ -907,6 +930,40 @@ impl Decoder {
         Ok(Some(value))
     }
 
+    /// Recover an epoch's clock line: the receiver clock offset and, in a CRINEX
+    /// 3.1 stream, the picoseconds after the first blank, a text difference of
+    /// the picoseconds before. Either part may be absent.
+    ///
+    /// `rnx2crx` writes no picosecond difference when an epoch's picoseconds
+    /// repeat the previous epoch's, and writes an epoch with none after one
+    /// with them the same way, so an unwritten value is the one before, as
+    /// `crx2rnx` reads it. A value blanked to spaces, as this crate's
+    /// compression writes an epoch with none, is none.
+    fn decode_clock_line(&mut self, line: &str) -> Result<(Option<i64>, Option<String>)> {
+        let (clock_text, picosecond_text) = match line.split_once(' ') {
+            Some((clock, picoseconds)) if self.picoseconds => (clock, Some(picoseconds)),
+            _ => (line, None),
+        };
+        let clock = self.decode_clock_value(clock_text)?;
+        if !self.picoseconds {
+            return Ok((clock, None));
+        }
+        if let Some(text) = picosecond_text {
+            self.picosecond_diff.decompress(text);
+        }
+        let held = &self.picosecond_diff.buffer;
+        if held.iter().all(|byte| *byte == b' ') {
+            return Ok((clock, None));
+        }
+        if held.len() != 5 || !held.iter().all(u8::is_ascii_digit) {
+            return Err(Error::Parse(format!(
+                "CRINEX epoch picoseconds {:?} are not five digits in {line:?}",
+                String::from_utf8_lossy(held)
+            )));
+        }
+        Ok((clock, Some(String::from_utf8_lossy(held).into_owned())))
+    }
+
     // ----------------------------------------------------------------- V1 ---
 
     /// Parse the next V1 epoch into the canonical [`EpochRecord`]. See
@@ -969,7 +1026,7 @@ impl Decoder {
             .next()
             .ok_or_else(|| Error::Parse("CRINEX V1 epoch missing clock line".into()))?
             .trim_end_matches(['\r', '\n']);
-        let clock = self.decode_clock_value(clock_line)?;
+        let (clock, picoseconds) = self.decode_clock_line(clock_line)?;
 
         let sv_list = self.sv_tokens_v1(&descriptor, numsat)?;
         if reset {
@@ -993,6 +1050,7 @@ impl Decoder {
         Ok(Some(EpochRecord::Obs(ObsEpoch {
             descriptor,
             clock,
+            picoseconds,
             sats,
         })))
     }
@@ -1004,14 +1062,7 @@ impl Decoder {
         let bytes = list.as_bytes();
         let mut out = Vec::with_capacity(numsat);
         for i in 0..numsat {
-            let mut tok = fixed_sv_token(bytes, "V1", numsat, i)?.to_string();
-            if tok.starts_with(' ') {
-                if let Some(sys) = self.default_system {
-                    let prn = tok.trim();
-                    tok = format!("{sys}{prn:>2}");
-                }
-            }
-            out.push(tok);
+            out.push(fixed_sv_token(bytes, "V1", numsat, i)?.to_string());
         }
         Ok(out)
     }
@@ -1048,6 +1099,7 @@ impl Decoder {
             }
 
             let clock = parse_clock_field(&line, 41, 56, 12, "v3.epoch.clock")?;
+            let picoseconds = self.epoch_picoseconds(&line)?;
             let mut sats = Vec::with_capacity(numsat);
             let mut sv_tokens = Vec::with_capacity(numsat);
             for _ in 0..numsat {
@@ -1065,6 +1117,7 @@ impl Decoder {
             epochs.push(EpochRecord::Obs(ObsEpoch {
                 descriptor,
                 clock,
+                picoseconds,
                 sats,
             }));
         }
@@ -1096,6 +1149,7 @@ impl Decoder {
             }
 
             let clock = parse_clock_field(&first, 68, 80, 9, "v1.epoch.clock")?;
+            let picoseconds = None;
 
             // The SV list begins at column 32 and wraps after 12 satellites onto
             // continuation lines, each padded with 32 leading blanks.
@@ -1109,11 +1163,6 @@ impl Decoder {
                 let need = (numsat - sv_tokens.len()).min(12);
                 collect_sv_tokens_v1(cont, need, &mut sv_tokens);
             }
-            let sv_tokens: Vec<String> = sv_tokens
-                .into_iter()
-                .map(|tok| self.normalize_v1_sv(tok))
-                .collect();
-
             let mut sats = Vec::with_capacity(numsat);
             for sv in &sv_tokens {
                 let n_obs = self.obs_count_for(sv)?;
@@ -1136,22 +1185,39 @@ impl Decoder {
             epochs.push(EpochRecord::Obs(ObsEpoch {
                 descriptor,
                 clock,
+                picoseconds,
                 sats,
             }));
         }
     }
 
-    /// Re-attach the mono-system constellation letter to a RINEX-2 SV token that
-    /// omits it, matching [`Self::sv_tokens_v1`].
-    fn normalize_v1_sv(&self, token: String) -> String {
-        if token.starts_with(' ') {
-            if let Some(sys) = self.default_system {
-                let prn = token.trim();
-                return format!("{sys}{prn:>2}");
-            }
+    /// The picoseconds a RINEX 4.02 epoch line carries after the clock offset,
+    /// `1X,I5.5` in columns 58 to 62. Text past the clock offset that is not
+    /// that, or on a line of an earlier version, is refused rather than dropped.
+    fn epoch_picoseconds(&self, line: &str) -> Result<Option<String>> {
+        let rest = field_from(line, 56);
+        if rest.trim().is_empty() {
+            return Ok(None);
         }
-        token
+        let digits = field(line, 57, 62);
+        let written = self.picoseconds
+            && field(line, 56, 57) == " "
+            && digits.len() == 5
+            && digits.bytes().all(|byte| byte.is_ascii_digit())
+            && field_from(line, 62).trim().is_empty();
+        if !written {
+            return Err(Error::Parse(format!(
+                "RINEX epoch line carries {rest:?} after the clock offset, which is not picoseconds its version holds: {line:?}"
+            )));
+        }
+        Ok(Some(digits.to_string()))
     }
+}
+
+/// Whether a `RINEX VERSION / TYPE` version is 4.02 or later, whose epoch
+/// lines carry picoseconds and which `rnx2crx` compresses as CRINEX 3.1.
+fn rinex_version_carries_picoseconds(version: &str) -> bool {
+    version.trim().parse::<f64>().is_ok_and(|v| v >= 4.02)
 }
 
 // ── Plain RINEX -> IR ─────────────────────────────────────────────────────────
@@ -1432,7 +1498,24 @@ pub fn parse_stream(crinex_text: &str) -> Result<ObsStream> {
 /// == decode(x)` and `parse_stream(encode_stream(s)) == s`.
 pub fn encode_stream(stream: &ObsStream) -> String {
     let mut out = String::new();
+    // `rnx2crx` writes CRINEX 3.1 for RINEX 4.02 and later, whose clock lines
+    // carry picoseconds; an epoch carrying them needs 3.1 whatever the header.
+    let picoseconds = stream
+        .header
+        .iter()
+        .find(|line| field(line, 60, 80).trim() == "RINEX VERSION / TYPE")
+        .is_some_and(|line| rinex_version_carries_picoseconds(field(line, 0, 9)))
+        || stream.epochs.iter().any(|epoch| {
+            matches!(
+                epoch,
+                EpochRecord::Obs(ObsEpoch {
+                    picoseconds: Some(_),
+                    ..
+                })
+            )
+        });
     let version_label = match stream.version {
+        CrinexVersion::V3 if picoseconds => "3.1",
         CrinexVersion::V3 => "3.0",
         CrinexVersion::V1 => "1.0",
     };
@@ -1448,14 +1531,22 @@ pub fn encode_stream(stream: &ObsStream) -> String {
         push_crinex_line(&mut out, header_line);
     }
 
+    let mut picoseconds_held = false;
     for epoch in &stream.epochs {
-        encode_epoch(epoch, stream.version, &mut out);
+        encode_epoch(epoch, stream.version, &mut picoseconds_held, &mut out);
     }
     out
 }
 
 /// Emit one epoch (observation or event) in canonical all-reset CRINEX form.
-fn encode_epoch(epoch: &EpochRecord, version: CrinexVersion, out: &mut String) {
+/// `picoseconds_held` says whether the decoder holds picoseconds from an
+/// earlier epoch, which it would carry into an epoch that writes none.
+fn encode_epoch(
+    epoch: &EpochRecord,
+    version: CrinexVersion,
+    picoseconds_held: &mut bool,
+    out: &mut String,
+) {
     match epoch {
         EpochRecord::Event { descriptor, lines } => {
             encode_descriptor(descriptor, version, out);
@@ -1466,14 +1557,24 @@ fn encode_epoch(epoch: &EpochRecord, version: CrinexVersion, out: &mut String) {
         EpochRecord::Obs(ObsEpoch {
             descriptor,
             clock,
+            picoseconds,
             sats,
         }) => {
             encode_descriptor(descriptor, version, out);
             // An observation epoch always carries a clock line (possibly blank).
-            match clock {
-                Some(value) => push_crinex_line(out, &format!("1&{value}")),
-                None => push_crinex_line(out, ""),
+            let mut clock_line = clock.map_or_else(String::new, |value| format!("1&{value}"));
+            if let Some(picoseconds) = picoseconds {
+                // Five digits overwrite whatever picoseconds `crx2rnx` holds.
+                clock_line.push(' ');
+                clock_line.push_str(picoseconds);
+                *picoseconds_held = true;
+            } else if *picoseconds_held {
+                // Writing nothing would carry the earlier picoseconds into this
+                // epoch; `&` blanks each digit, which both decoders read as none.
+                clock_line.push_str(" &&&&&");
+                *picoseconds_held = false;
             }
+            push_crinex_line(out, &clock_line);
             for sat in sats {
                 let flags = new_satellite_flags(&sat.flags, version);
                 push_crinex_line(out, &encode_sat_line(&sat.values, &flags));
@@ -1546,21 +1647,26 @@ fn serialize_rinex_epoch_v3<W: FnMut(&str)>(record: &EpochRecord, emit: &mut W) 
         EpochRecord::Obs(ObsEpoch {
             descriptor,
             clock,
+            picoseconds,
             sats,
         }) => {
-            let clock_text = format_clock_v3(*clock);
             // Everything before the SV list (cols 0..35) plus the clock. The SV
             // list is not part of a RINEX-3 epoch line. The optional receiver
             // clock offset is an `F15.12` field at columns 41..56, with columns
-            // 35..41 reserved blank, so the head is padded to column 41 first.
-            let head = field(descriptor, 0, 35);
-            let mut epoch_out = head.to_string();
-            if !clock_text.is_empty() {
-                while epoch_out.len() < 41 {
-                    epoch_out.push(' ');
-                }
+            // 35..41 reserved blank, so the head is padded to column 41 first;
+            // RINEX 4.02 picoseconds follow as `1X,I5.5`, the clock field blank
+            // when the epoch has none.
+            let mut epoch_out = field(descriptor, 0, 35).to_string();
+            if clock.is_some() || picoseconds.is_some() {
+                epoch_out = pad_to(&epoch_out, 41);
+                epoch_out.push_str(
+                    &clock.map_or_else(|| " ".repeat(15), |value| format_clock(value, 12, 15)),
+                );
             }
-            epoch_out.push_str(&clock_text);
+            if let Some(picoseconds) = picoseconds {
+                epoch_out.push(' ');
+                epoch_out.push_str(picoseconds);
+            }
             emit(trim_end(&epoch_out));
             for sat in sats {
                 let out = format_sat_line(&sat.sv, &sat.values, &sat.flags);
@@ -1583,8 +1689,9 @@ fn serialize_rinex_epoch_v1<W: FnMut(&str)>(record: &EpochRecord, emit: &mut W) 
             descriptor,
             clock,
             sats,
+            ..
         }) => {
-            let clock_text = format_clock_v1(*clock);
+            let clock_text = clock.map_or_else(String::new, |value| format_clock(value, 9, 12));
             // The SV list wraps after 12 satellites with a 32-space pad.
             let sv_list: Vec<String> = sats.iter().map(|sat| sat.sv.clone()).collect();
             for line in &format_epoch_v1(descriptor, &sv_list, &clock_text) {
@@ -1599,22 +1706,28 @@ fn serialize_rinex_epoch_v1<W: FnMut(&str)>(record: &EpochRecord, emit: &mut W) 
     }
 }
 
-/// Format the recovered V3 receiver clock offset (scaled by 10^12) as the
-/// `%15.12f` field appended to the epoch line; empty when no clock is carried.
-fn format_clock_v3(clock: Option<i64>) -> String {
-    match clock {
-        Some(value) => format!("{:15.12}", value as f64 / 1.0e12),
-        None => String::new(),
-    }
-}
-
-/// Format the recovered V1 receiver clock offset (scaled by 10^9) as the RINEX-2
-/// `%12.9f` field; empty when no clock is carried.
-fn format_clock_v1(clock: Option<i64>) -> String {
-    match clock {
-        Some(value) => format!("{:12.9}", value as f64 / 1.0e9),
-        None => String::new(),
-    }
+/// Format a recovered receiver clock offset, scaled by 10^`decimals`, in a
+/// field `width` columns wide as `crx2rnx` writes it: with no zero before the
+/// decimal point, so `0.000123` is `.000123000` and `-0.000123` is
+/// `-.000123000`. Formatting from the integer keeps every decimal exact.
+/// `crx2rnx` 4.2.0 misprints a negative offset whose last eight digits are
+/// zeros, writing `-1.5` as `-1.4`; this writes the value.
+fn format_clock(value: i64, decimals: u32, width: usize) -> String {
+    let scale = 10_u64.pow(decimals);
+    let magnitude = value.unsigned_abs();
+    let whole = magnitude / scale;
+    let fraction = magnitude % scale;
+    let sign = if value < 0 { "-" } else { "" };
+    let whole = if whole == 0 {
+        String::new()
+    } else {
+        whole.to_string()
+    };
+    let text = format!(
+        "{sign}{whole}.{fraction:0digits$}",
+        digits = decimals as usize
+    );
+    format!("{text:>width$}")
 }
 
 fn strict_obs_count(
