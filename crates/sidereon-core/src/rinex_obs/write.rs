@@ -211,12 +211,6 @@ pub enum RinexObsWriteError {
         /// The reader's error.
         message: String,
     },
-    /// A product whose events change its code lists, version 2 type names or
-    /// scale factors, which [`RinexObs::downgrade_to_rinex2`] refuses.
-    MidFileChangesNotDowngraded {
-        /// Zero-based index of the first epoch whose event changes them.
-        epoch_index: usize,
-    },
     /// The written text would read back as a different product.
     ReadBackMismatch {
         /// The first field that would change, with its value before and after.
@@ -332,11 +326,6 @@ impl core::fmt::Display for RinexObsWriteError {
             Self::EventRecordsUnreadable { message } => {
                 write!(f, "RINEX OBS event header records do not read: {message}")
             }
-            Self::MidFileChangesNotDowngraded { epoch_index } => write!(
-                f,
-                "RINEX OBS epoch {epoch_index} event changes the code lists, type names or scale \
-                 factors, which a downgrade to version 2 does not lay out"
-            ),
             Self::ReadBackMismatch { what } => {
                 write!(
                     f,
@@ -459,6 +448,43 @@ pub enum ObsDowngradeChange {
         from: f64,
         /// The offset it holds now, in seconds.
         to: f64,
+    },
+    /// A change to the code lists in effect from an event's epoch, laid out
+    /// for version 2 as the file header's lists are and reported as theirs
+    /// would be: a code renamed, moved or added, or a list removed.
+    InEventLists {
+        /// Zero-based index of the event epoch.
+        epoch_index: usize,
+        /// The change.
+        change: Box<ObsDowngradeChange>,
+    },
+    /// The `SYS / PHASE SHIFT` or `GLONASS COD/PHS/BIS` records of a product read
+    /// from RINEX 4.00 or later were removed. RINEX 4.00, 4.01 and 4.02 say of
+    /// both records that "the lines should be ignored by RINEX decoders and
+    /// encoders", so the product applies none of them; a version 2 file would
+    /// give them the meaning the version 4 file declared them not to have.
+    DeprecatedRecordsRemoved {
+        /// The records' label.
+        label: String,
+        /// Zero-based index of the event epoch that carried them, or `None` for
+        /// the file header.
+        epoch_index: Option<usize>,
+        /// The records removed: an event's as it carried them, the file
+        /// header's as it would write them.
+        records: Vec<String>,
+    },
+    /// An event's special records were rewritten. Its type records became the
+    /// version 2 `# / TYPES OF OBSERV` records its lists lay out as; a
+    /// `SYS / SCALE FACTOR` record was removed, as the file header's are; or a
+    /// version 2 type record a version 3 event carried without effect was
+    /// removed, since a version 2 reader applies it.
+    EventRecordsRewritten {
+        /// Zero-based index of the event epoch.
+        epoch_index: usize,
+        /// The records it held.
+        from: Vec<String>,
+        /// The records it holds now.
+        to: Vec<String>,
     },
 }
 
@@ -1334,6 +1360,114 @@ fn placed_values(values: &[ObsValue], positions: &[Option<usize>]) -> Vec<ObsVal
         .collect()
 }
 
+/// Rewrite an event's special records for a version 2 file. A
+/// `SYS / SCALE FACTOR` record is removed, as the file header's are. The type
+/// records a version 2 reader applies - a version 3 event's
+/// `SYS / # / OBS TYPES`, and a `# / TYPES OF OBSERV` in any event - are
+/// replaced by `names`, the version 2 records its lists lay out as, where the
+/// first of them stood; with `names` `None`, a version 2 event keeps its own
+/// and a version 3 event's are removed, since at version 3 they took no
+/// effect. The rewrite is reported when the records change.
+fn rewrite_event_records(
+    source_version: f64,
+    epoch_index: usize,
+    epoch: &mut ObsEpoch,
+    names: Option<Vec<String>>,
+    changes: &mut Vec<ObsDowngradeChange>,
+) {
+    if !super::applies_header_records(epoch.flag) {
+        return;
+    }
+    let source_rinex2 = source_version.floor() as i64 == 2;
+    let mut records = Vec::with_capacity(epoch.special_records.len());
+    let mut placed = false;
+    for record in &epoch.special_records {
+        let label = super::event_record_label(record);
+        if label == "SYS / SCALE FACTOR" {
+            continue;
+        }
+        let types =
+            label == "# / TYPES OF OBSERV" || (!source_rinex2 && label == "SYS / # / OBS TYPES");
+        if !types {
+            records.push(record.clone());
+            continue;
+        }
+        match &names {
+            Some(lines) => {
+                if !placed {
+                    records.extend(lines.iter().cloned());
+                    placed = true;
+                }
+            }
+            None if source_rinex2 => records.push(record.clone()),
+            None => {}
+        }
+    }
+    if records != epoch.special_records {
+        changes.push(ObsDowngradeChange::EventRecordsRewritten {
+            epoch_index,
+            from: epoch.special_records.clone(),
+            to: records.clone(),
+        });
+        epoch.declared_record_count = records.len();
+        epoch.special_records = records;
+    }
+}
+
+/// Labels of the records RINEX 4.00 and later declare to be ignored.
+const DEPRECATED_LABELS: [&str; 2] = ["SYS / PHASE SHIFT", "GLONASS COD/PHS/BIS"];
+
+/// Remove the `SYS / PHASE SHIFT` and `GLONASS COD/PHS/BIS` records of a
+/// product read from RINEX 4.00 or later, from its file header and from each
+/// event, and report each removal. Version 4 declares them to be ignored, and a
+/// version 2 file would apply them.
+fn remove_deprecated_records(product: &mut RinexObs, changes: &mut Vec<ObsDowngradeChange>) {
+    let lines = |text: String| text.lines().map(str::to_string).collect::<Vec<_>>();
+    if !product.header.phase_shifts.is_empty() {
+        let mut text = String::new();
+        for shift in &product.header.phase_shifts {
+            write_phase_shift(&mut text, shift);
+        }
+        changes.push(ObsDowngradeChange::DeprecatedRecordsRemoved {
+            label: DEPRECATED_LABELS[0].to_string(),
+            epoch_index: None,
+            records: lines(text),
+        });
+        product.header.phase_shifts.clear();
+    }
+    if let Some(entries) = product.header.glonass_cod_phs_bis.take() {
+        let mut text = String::new();
+        write_glonass_cod_phs_bis(&mut text, &entries);
+        changes.push(ObsDowngradeChange::DeprecatedRecordsRemoved {
+            label: DEPRECATED_LABELS[1].to_string(),
+            epoch_index: None,
+            records: lines(text),
+        });
+    }
+    for (epoch_index, epoch) in product.epochs.iter_mut().enumerate() {
+        if !super::applies_header_records(epoch.flag) {
+            continue;
+        }
+        for label in DEPRECATED_LABELS {
+            let (removed, kept): (Vec<String>, Vec<String>) = epoch
+                .special_records
+                .iter()
+                .cloned()
+                .partition(|record| super::event_record_label(record) == label);
+            if removed.is_empty() {
+                continue;
+            }
+            epoch.declared_record_count = kept.len();
+            epoch.special_records = kept;
+            changes.push(ObsDowngradeChange::DeprecatedRecordsRemoved {
+                label: label.to_string(),
+                epoch_index: Some(epoch_index),
+                records: removed,
+            });
+        }
+    }
+}
+
 /// Whether a field holds nothing: no value and no indicator.
 fn is_blank(value: &ObsValue) -> bool {
     value.value.is_none() && value.lli.is_none() && value.ssi.is_none()
@@ -1471,8 +1605,14 @@ fn epoch_record_satellites(
 /// Append a header line: content padded into the first 60 columns, then the
 /// 20-column record label.
 fn push_header_line(out: &mut String, content: &str, label: &str) {
+    out.push_str(&header_line(content, label));
+    out.push('\n');
+}
+
+/// A header record: content padded into the first 60 columns, then the label.
+fn header_line(content: &str, label: &str) -> String {
     let content = header_content_60(content);
-    let _ = writeln!(out, "{content:<HEADER_CONTENT_WIDTH$}{label}");
+    format!("{content:<HEADER_CONTENT_WIDTH$}{label}")
 }
 
 fn header_content_60(content: &str) -> std::borrow::Cow<'_, str> {
@@ -1559,20 +1699,31 @@ fn write_sat_record_v2(out: &mut String, values: &[ObsValue], width: usize) {
 /// Write the version 2 `# / TYPES OF OBSERV` record, continued when the codes
 /// do not fit one line. The count is written once, on the first line only.
 fn write_obs_types_v2(out: &mut String, codes: &[String]) {
+    for line in obs_types_v2_lines(codes) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+}
+
+/// The version 2 `# / TYPES OF OBSERV` records for a list of names: the count
+/// on the first record, the names continued nine to a record.
+fn obs_types_v2_lines(codes: &[String]) -> Vec<String> {
+    let mut lines = Vec::new();
     let mut chunks = codes.chunks(RINEX2_OBS_TYPES_PER_LINE);
     let first = chunks.next().unwrap_or_default();
     let mut content = format!("{:6}", codes.len());
     for code in first {
         let _ = write!(content, "    {code:>2}");
     }
-    push_header_line(out, &content, "# / TYPES OF OBSERV");
+    lines.push(header_line(&content, "# / TYPES OF OBSERV"));
     for chunk in chunks {
         let mut content = " ".repeat(6);
         for code in chunk {
             let _ = write!(content, "    {code:>2}");
         }
-        push_header_line(out, &content, "# / TYPES OF OBSERV");
+        lines.push(header_line(&content, "# / TYPES OF OBSERV"));
     }
+    lines
 }
 
 /// Write one `SYS / PHASE SHIFT` record. The optional satellite list is emitted
@@ -3366,6 +3517,12 @@ impl RinexObs {
     ///
     /// A receiver clock offset carrying more than the nine decimals a version 2
     /// epoch record holds is rounded and reported.
+    ///
+    /// A product read from RINEX 4.00 or later loses its `SYS / PHASE SHIFT` and
+    /// `GLONASS COD/PHS/BIS` records, from the file header and from its events,
+    /// each removal reported as [`ObsDowngradeChange::DeprecatedRecordsRemoved`].
+    /// Version 4 declares them to be ignored, so the product applies none of
+    /// them, and a version 2 file would.
     /// Values carrying more than the three decimals an observation field holds
     /// are rounded and reported. The result is returned only once
     /// [`RinexObs::to_rinex_string`] writes it, so it always reads back exactly;
@@ -3382,22 +3539,8 @@ impl RinexObs {
         &self,
         version: f64,
     ) -> Result<(RinexObs, Vec<ObsDowngradeChange>), RinexObsWriteError> {
-        const BLANK: ObsValue = ObsValue {
-            value: None,
-            lli: None,
-            ssi: None,
-        };
         if !(2.0..3.0).contains(&version) {
             return Err(RinexObsWriteError::NotVersionTwo { version });
-        }
-        if let Ok(timeline) = self.header_timeline() {
-            if let Some((epoch_index, _)) = timeline.segments().skip(1).find(|(_, header)| {
-                header.declared_obs_codes != self.header.declared_obs_codes
-                    || header.rinex2_types != self.header.rinex2_types
-                    || header.scale_factors != self.header.scale_factors
-            }) {
-                return Err(RinexObsWriteError::MidFileChangesNotDowngraded { epoch_index });
-            }
         }
         let mut product = self.clone();
         product.header.version = version;
@@ -3407,6 +3550,9 @@ impl RinexObs {
                 count: product.header.scale_factors.len(),
             });
             product.header.scale_factors.clear();
+        }
+        if super::records_deprecated_in_rinex4(self.header.version) {
+            remove_deprecated_records(&mut product, &mut changes);
         }
         for (epoch_index, epoch) in product.epochs.iter_mut().enumerate() {
             if let Some(picoseconds) = epoch.epoch_picoseconds.take() {
@@ -3430,6 +3576,255 @@ impl RinexObs {
                 }
             }
         }
+        let timeline =
+            self.header_timeline()
+                .map_err(|error| RinexObsWriteError::EventRecordsUnreadable {
+                    message: error.to_string(),
+                })?;
+        let list_events = self.list_event_indices();
+        if list_events.is_empty() {
+            for (epoch_index, epoch) in product.epochs.iter_mut().enumerate() {
+                rewrite_event_records(self.header.version, epoch_index, epoch, None, &mut changes);
+            }
+            return self.downgrade_lists(product, version, changes);
+        }
+        self.downgrade_stretches(product, version, changes, &timeline, &list_events)
+    }
+
+    /// The epochs whose events declare code lists, or at version 2 type names,
+    /// that take effect.
+    fn list_event_indices(&self) -> Vec<usize> {
+        let version = self.header.version;
+        let label = if self.is_rinex2() {
+            "# / TYPES OF OBSERV"
+        } else {
+            "SYS / # / OBS TYPES"
+        };
+        self.epochs
+            .iter()
+            .enumerate()
+            .filter(|(_, epoch)| {
+                super::applies_header_records(epoch.flag)
+                    && super::event_declares_label(version, &epoch.special_records, label)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Downgrade a product whose events declare code lists or type names. Each
+    /// stretch of epochs sharing the lists in effect is laid out as a product of
+    /// its own, holding every epoch so that every constellation the file names
+    /// is named, with the values of the other stretches blank. The file header
+    /// is written with the first stretch's names, each event's type records with
+    /// its stretch's, and the values are held under the union of what every
+    /// stretch's names read as.
+    fn downgrade_stretches(
+        &self,
+        product: RinexObs,
+        version: f64,
+        mut changes: Vec<ObsDowngradeChange>,
+        timeline: &super::ObsHeaderTimeline,
+        list_events: &[usize],
+    ) -> Result<(RinexObs, Vec<ObsDowngradeChange>), RinexObsWriteError> {
+        // A value the list in effect at its epoch does not declare has no
+        // field in the stretch that epoch is laid out in.
+        let event_names = self.rinex2_event_names();
+        let mut layouts = EpochLayouts {
+            product: self,
+            timeline,
+            header_names: self
+                .is_rinex2()
+                .then_some(self.header.rinex2_types.as_slice()),
+            event_names: &event_names,
+            cache: std::collections::HashMap::new(),
+        };
+        self.check_values_declared(&mut layouts)?;
+
+        let source_version = self.header.version;
+        let starts: Vec<usize> = core::iter::once(0)
+            .chain(list_events.iter().copied())
+            .collect();
+        let mut results: Vec<RinexObs> = Vec::with_capacity(starts.len());
+        for (stretch, &first) in starts.iter().enumerate() {
+            let end = starts
+                .get(stretch + 1)
+                .copied()
+                .unwrap_or(product.epochs.len());
+            // The first stretch lays out the file header's own lists, which
+            // stay the header's to declare even where an event before the
+            // first epoch declares others.
+            let in_effect = if stretch == 0 {
+                &self.header
+            } else {
+                timeline.at(first)
+            };
+            let mut lists = in_effect.declared_obs_codes.clone();
+            for system in self.header.obs_codes.keys() {
+                lists.entry(*system).or_default();
+            }
+            let mut source = product.clone();
+            source.header.version = source_version;
+            source.header.obs_codes = lists.clone();
+            source.header.declared_obs_codes = lists.clone();
+            source.header.rinex2_types = if self.is_rinex2() {
+                in_effect.rinex2_types.clone()
+            } else {
+                Vec::new()
+            };
+            if stretch > 0 {
+                source.header.prn_obs_counts.clear();
+            }
+            for (index, epoch) in source.epochs.iter_mut().enumerate() {
+                epoch.special_records.clear();
+                epoch.declared_record_count = 0;
+                let inside = (first..end).contains(&index);
+                for (sat, values) in epoch.sats.iter_mut().chain(epoch.cycle_slips.iter_mut()) {
+                    let list = lists
+                        .get(&sat.system)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    *values = if inside {
+                        let union = layouts.union_of(sat.system);
+                        placed_values(values, &super::union_positions(list, &union))
+                    } else {
+                        vec![BLANK_VALUE; list.len()]
+                    };
+                }
+            }
+            let mut target = source.clone();
+            target.header.version = version;
+            let (result, stretch_changes) = source.downgrade_lists(target, version, Vec::new())?;
+            for change in stretch_changes {
+                let per_list = matches!(
+                    change,
+                    ObsDowngradeChange::CodeRenamed { .. }
+                        | ObsDowngradeChange::CodeMoved { .. }
+                        | ObsDowngradeChange::CodeAdded { .. }
+                        | ObsDowngradeChange::CodeListRemoved { .. }
+                );
+                // A list this stretch declares none for was held empty only so
+                // the stretch names its constellation; removing it removes
+                // nothing.
+                if let ObsDowngradeChange::CodeListRemoved { system, codes } = &change {
+                    if codes.is_empty() && !in_effect.declared_obs_codes.contains_key(system) {
+                        continue;
+                    }
+                }
+                changes.push(if per_list && stretch > 0 {
+                    ObsDowngradeChange::InEventLists {
+                        epoch_index: first,
+                        change: Box::new(change),
+                    }
+                } else {
+                    change
+                });
+            }
+            results.push(result);
+        }
+
+        let Some(header_result) = results.first() else {
+            return Err(RinexObsWriteError::ReadBackMismatch {
+                what: "a downgrade laid out no stretch of epochs".to_string(),
+            });
+        };
+        let mut assembled = product;
+        assembled.header.rinex2_types = header_result.header.rinex2_types.clone();
+        assembled.header.rinex2_system = header_result.header.rinex2_system;
+        assembled.header.prn_obs_counts = header_result.header.prn_obs_counts.clone();
+        let mut union: BTreeMap<GnssSystem, Vec<String>> = BTreeMap::new();
+        for result in &results {
+            for (system, list) in &result.header.obs_codes {
+                super::extend_code_union(union.entry(*system).or_default(), list);
+            }
+        }
+        for (index, epoch) in assembled.epochs.iter_mut().enumerate() {
+            let stretch = starts
+                .partition_point(|first| *first <= index)
+                .saturating_sub(1);
+            let Some(result) = results.get(stretch) else {
+                continue;
+            };
+            let Some(laid_epoch) = result.epochs.get(index) else {
+                continue;
+            };
+            for (records, laid_records) in [
+                (&mut epoch.sats, &laid_epoch.sats),
+                (&mut epoch.cycle_slips, &laid_epoch.cycle_slips),
+            ] {
+                for (sat, values) in records.iter_mut() {
+                    let (Some(laid), Some(held)) = (laid_records.get(sat), union.get(&sat.system))
+                    else {
+                        continue;
+                    };
+                    let list = result
+                        .header
+                        .obs_codes
+                        .get(&sat.system)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    let placed = super::values_in_union(
+                        laid,
+                        &super::union_positions(list, held),
+                        held.len(),
+                    )
+                    .ok_or(RinexObsWriteError::ValuesWithoutCodes {
+                        epoch_index: index,
+                        satellite: *sat,
+                        codes: list.len(),
+                        values: laid.len(),
+                    })?;
+                    *values = placed;
+                }
+            }
+        }
+        let header_names = assembled.header.rinex2_types.clone();
+        assembled.header.declared_obs_codes = union
+            .keys()
+            .map(|system| {
+                (
+                    *system,
+                    super::rinex2_system_obs_codes(*system, &header_names, version),
+                )
+            })
+            .collect();
+        assembled.header.obs_codes = union;
+        for (index, epoch) in assembled.epochs.iter_mut().enumerate() {
+            let names = starts
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find(|(_, first)| **first == index)
+                .map(|(stretch, _)| stretch)
+                .and_then(|stretch| results.get(stretch))
+                .map(|result| result.header.rinex2_types.clone());
+            // A version 2 event whose names are laid out unchanged keeps its
+            // records as written.
+            let names = names
+                .filter(|names| !(self.is_rinex2() && *names == timeline.at(index).rinex2_types));
+            rewrite_event_records(
+                source_version,
+                index,
+                epoch,
+                names.as_deref().map(obs_types_v2_lines),
+                &mut changes,
+            );
+        }
+        // The result is only returned once it writes.
+        assembled.to_rinex_string()?;
+        Ok((assembled, changes))
+    }
+
+    /// Lay a product's code lists out for version 2, as
+    /// [`RinexObs::downgrade_to_rinex2`] describes, with `self` the product
+    /// before the downgrade and `product` it with its version, scale factors,
+    /// picoseconds and clock offsets already downgraded.
+    fn downgrade_lists(
+        &self,
+        mut product: RinexObs,
+        version: f64,
+        mut changes: Vec<ObsDowngradeChange>,
+    ) -> Result<(RinexObs, Vec<ObsDowngradeChange>), RinexObsWriteError> {
+        const BLANK: ObsValue = BLANK_VALUE;
         // A version 2 product's type names are every constellation's, so a
         // constellation a count or an observation names that holds no list has
         // the codes those names read as at the product's own version. They are
