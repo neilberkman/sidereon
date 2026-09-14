@@ -39,22 +39,12 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
     }
     let clock_fits = |offset: f64| format!("{offset:12.9}").len() <= 12;
     let clock_exact = |offset: f64| format!("{offset:.9}").parse::<f64>() == Ok(offset);
-    let file = product.header();
     // A scale factor an event declares is refused at version 2 as the file
     // header's is.
     let event_scale_factors = timeline.as_ref().is_some_and(|timeline| {
         timeline
             .segments()
             .any(|(_, header)| !header.scale_factors.is_empty())
-    });
-    // A downgrade refuses a product whose events change its code lists, type
-    // names or scale factors.
-    let mid_file_changes = timeline.as_ref().is_some_and(|timeline| {
-        timeline.segments().skip(1).any(|(_, header)| {
-            header.declared_obs_codes != file.declared_obs_codes
-                || header.rinex2_types != file.rinex2_types
-                || header.scale_factors != file.scale_factors
-        })
     });
     let removable = event_scale_factors
         || !product.header().scale_factors.is_empty()
@@ -67,7 +57,6 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
         });
     let permanent = wide_flag
         || unreadable
-        || (mid_file_changes && removable)
         || product.epochs().iter().any(|epoch| {
             epoch
                 .epoch

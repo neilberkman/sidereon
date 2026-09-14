@@ -142,9 +142,28 @@ All notable changes to `sidereon-core` are documented here.
   refused by name with `CountsWithoutCodes` and `ValuesWithoutCodes`. At version
   2, `ScaleFactorsInVersionTwo` counts the scale factors events declare, and a
   product whose events declare type names is written with header names reading
-  as its declared lists. `RinexObs::downgrade_to_rinex2` refuses a product whose
-  events change its code lists, type names or scale factors with
-  `RinexObsWriteError::MidFileChangesNotDowngraded`.
+  as its declared lists.
+- **Breaking.** `RinexObs::downgrade_to_rinex2` downgrades a product whose
+  events declare code lists or type names. Each stretch of epochs sharing the
+  lists in effect is laid out for version 2 as the file header's lists are, and
+  its per-list changes are reported inside the new
+  `ObsDowngradeChange::InEventLists`, naming the event's epoch. Each event's
+  type records become the version 2 `# / TYPES OF OBSERV` records its stretch
+  lays out as; the file header takes the names its own lists lay out as, also where an event before the first epoch declares others, and the values
+  are held under the union of what every stretch's names read as. An event's
+  `SYS / SCALE FACTOR` records are removed as the file header's are, and a
+  version 2 type record a version 3 event carried without effect is removed,
+  since a version 2 reader applies it. Each event whose records change is
+  reported as the new `ObsDowngradeChange::EventRecordsRewritten`, with its
+  records before and after. A value the list in effect at its epoch does not
+  declare is refused with `RinexObsWriteError::ValueOutsideDeclaredList`, as the
+  writer refuses it. A product read from RINEX 4.00 or later loses its
+  `SYS / PHASE SHIFT` and `GLONASS COD/PHS/BIS` records, from the file header
+  and from its events, each removal reported as the new
+  `ObsDowngradeChange::DeprecatedRecordsRemoved` naming the label and where the
+  records were: version 4 declares them to be ignored, and a version 2 file
+  would apply them. Records contradicting each other, which version 4 does not
+  refuse, no longer make the downgrade fail.
 - **Breaking.** `carrier_phase_rows` takes the header in effect at the epoch
   rather than the product, since a phase shift or GLONASS channel an event
   declares applies to the epochs after it.

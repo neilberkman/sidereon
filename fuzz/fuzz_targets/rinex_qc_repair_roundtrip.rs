@@ -61,15 +61,6 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
             .segments()
             .any(|(_, header)| header.scale_factors.len() > file.scale_factors.len())
     });
-    // A downgrade refuses a product whose events change its code lists, type
-    // names or scale factors.
-    let mid_file_changes = timeline.as_ref().is_some_and(|timeline| {
-        timeline.segments().skip(1).any(|(_, header)| {
-            header.declared_obs_codes != file.declared_obs_codes
-                || header.rinex2_types != file.rinex2_types
-                || header.scale_factors != file.scale_factors
-        })
-    });
     let removable = event_scale_factors
         || !product.header().scale_factors.is_empty()
         || holds_unstated_list(product)
@@ -81,7 +72,6 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
         });
     let permanent = wide_flag
         || unreadable
-        || (mid_file_changes && removable)
         || product.epochs().iter().any(|epoch| {
             epoch
                 .epoch

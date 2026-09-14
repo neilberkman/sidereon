@@ -3457,12 +3457,316 @@ fn the_strict_writer_refuses_what_the_lists_in_effect_cannot_hold() {
         unreadable.to_rinex_string(),
         Err(RinexObsWriteError::EventRecordsUnreadable { .. })
     ));
+}
 
-    // The downgrade does not lay out the lists an event declares.
-    assert_eq!(
-        obs.downgrade_to_rinex2(2.11).map(|_| ()),
-        Err(RinexObsWriteError::MidFileChangesNotDowngraded { epoch_index: 1 })
+/// Every value a product holds, by epoch, record kind, satellite and code.
+fn values_by_code(obs: &RinexObs) -> BTreeMap<(usize, bool, String, String), ObsValue> {
+    let mut held = BTreeMap::new();
+    for (index, epoch) in obs.epochs().iter().enumerate() {
+        for (slip, records) in [(false, &epoch.sats), (true, &epoch.cycle_slips)] {
+            for (sat, values) in records {
+                let codes = &obs.header().obs_codes[&sat.system];
+                let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+                for (code, value) in codes.iter().zip(values) {
+                    let copy = seen.entry(code.as_str()).or_default();
+                    *copy += 1;
+                    if value.value.is_some() || value.lli.is_some() || value.ssi.is_some() {
+                        held.insert(
+                            (index, slip, sat.to_string(), format!("{code}#{copy}")),
+                            *value,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    held
+}
+
+#[test]
+fn a_downgrade_lays_out_the_lists_each_event_declares() {
+    // Each stretch of epochs between events declaring lists is laid out for
+    // version 2 as the file header's lists are, and each event's
+    // SYS / # / OBS TYPES records become the # / TYPES OF OBSERV records its
+    // stretch lays out as. Every value stays under its code.
+    let obs = RinexObs::parse(&version_three_type_change_text()).expect("parse");
+    let (downgraded, changes) = obs.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert_eq!(values_by_code(&downgraded), values_by_code(&obs));
+    assert_writes_back(&downgraded);
+    for epoch_index in [1, 3] {
+        let rewritten = changes.iter().find_map(|change| match change {
+            ObsDowngradeChange::EventRecordsRewritten {
+                epoch_index: at,
+                to,
+                ..
+            } if *at == epoch_index => Some(to),
+            _ => None,
+        });
+        let records = rewritten.unwrap_or_else(|| panic!("event {epoch_index}: {changes:?}"));
+        assert!(
+            records
+                .iter()
+                .all(|record| record.ends_with("# / TYPES OF OBSERV")),
+            "{records:?}"
+        );
+        assert_eq!(downgraded.epochs()[epoch_index].special_records, *records);
+    }
+    // GLONASS reads the names laid out for GPS as codes it did not declare,
+    // which are reported for the stretch they are in effect for.
+    assert!(
+        changes.iter().any(|change| matches!(
+            change,
+            ObsDowngradeChange::InEventLists { epoch_index: 1, .. }
+        )),
+        "{changes:?}"
     );
+    let header = downgraded.header();
+    assert_eq!(
+        downgraded
+            .header_at(2)
+            .expect("header in effect")
+            .declared_obs_codes[&GnssSystem::Gps],
+        rinex2_system_obs_codes(
+            GnssSystem::Gps,
+            &downgraded
+                .header_at(2)
+                .expect("header in effect")
+                .rinex2_types,
+            2.11
+        )
+    );
+    assert!(header.obs_codes[&GnssSystem::Gps].contains(&"S1C".to_string()));
+}
+
+#[test]
+fn a_downgrade_keeps_the_file_header_declaration_when_the_first_epoch_changes_lists() {
+    // The first epoch is an event declaring another list. The file header's
+    // own list is in effect for no epoch, and is still what the file header
+    // declares: laid out for version 2 it stays in the header, and the event
+    // keeps its own list.
+    let text = obs_with_code_headers(
+        &[header_line("G    1 C1C", "SYS / # / OBS TYPES")],
+        &[
+            blank_event(4, &[header_line("G    1 L1C", "SYS / # / OBS TYPES")]),
+            "> 2020 01 01 00 00  0.0000000  0  1".to_string(),
+            obs_record("G01", &[Some(123.0)]),
+        ]
+        .join("\n"),
+    );
+    let obs = RinexObs::parse(&text).expect("parse");
+    assert_eq!(
+        obs.header().obs_codes[&GnssSystem::Gps],
+        codes(&["C1C", "L1C"])
+    );
+    let (downgraded, changes) = obs.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert_eq!(values_by_code(&downgraded), values_by_code(&obs));
+    let header = downgraded.header();
+    assert_eq!(
+        header.declared_obs_codes[&GnssSystem::Gps],
+        codes(&["C1C"]),
+        "{changes:?}"
+    );
+    assert_eq!(
+        downgraded
+            .header_at(0)
+            .expect("header in effect")
+            .declared_obs_codes[&GnssSystem::Gps],
+        codes(&["L1C"])
+    );
+    let mut union = header.obs_codes[&GnssSystem::Gps].clone();
+    union.sort();
+    assert_eq!(union, codes(&["C1C", "L1C"]));
+    let records = &downgraded.epochs()[0].special_records;
+    assert!(
+        !records.is_empty()
+            && records
+                .iter()
+                .all(|record| record.ends_with("# / TYPES OF OBSERV")),
+        "{records:?}"
+    );
+    assert_writes_back(&downgraded);
+}
+
+#[test]
+fn a_downgrade_removes_event_records_version_two_cannot_hold() {
+    // A scale factor an event declares is removed as the file header's is;
+    // values are held physical, so none changes. A version 2 type record a
+    // version 3 event carried took no effect there, and a version 2 reader
+    // would apply it, so it is removed.
+    let text = obs_with_code_headers(
+        &[header_line("G    2 C1C L1C", "SYS / # / OBS TYPES")],
+        &[
+            "> 2020 01 01 00 00  0.0000000  0  1".to_string(),
+            obs_record("G01", &[Some(20_000_000.0), Some(100_000.0)]),
+            blank_event(
+                4,
+                &[
+                    header_line("G   10   1 L1C", "SYS / SCALE FACTOR"),
+                    header_line("     1    C1", "# / TYPES OF OBSERV"),
+                    header_line("kept", "COMMENT"),
+                ],
+            ),
+            "> 2020 01 01 00 00 30.0000000  0  1".to_string(),
+            obs_record("G01", &[Some(20_000_030.0), Some(1_000_300.0)]),
+        ]
+        .join("\n"),
+    );
+    let obs = RinexObs::parse(&text).expect("parse");
+    let (downgraded, changes) = obs.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert_eq!(values_by_code(&downgraded), values_by_code(&obs));
+    assert_eq!(
+        downgraded.epochs()[1].special_records,
+        vec![header_line("kept", "COMMENT")]
+    );
+    assert!(
+        changes.iter().any(|change| matches!(
+            change,
+            ObsDowngradeChange::EventRecordsRewritten { epoch_index: 1, .. }
+        )),
+        "{changes:?}"
+    );
+    assert_writes_back(&downgraded);
+
+    // Read at version 2 the scale factor is refused by the writer, and the
+    // downgrade removes it.
+    let reread = RinexObs::parse(
+        &[
+            header_line(
+                "     2.11           OBSERVATION DATA    G (GPS)",
+                "RINEX VERSION / TYPE",
+            ),
+            header_line("     2    C1    L1", "# / TYPES OF OBSERV"),
+            header_line("", "END OF HEADER"),
+            v2_epoch_line(
+                ObsEpochTime {
+                    year: 2020,
+                    month: 1,
+                    day: 1,
+                    hour: 0,
+                    minute: 0,
+                    second: 0.0,
+                },
+                0,
+                1,
+                "G01",
+            ),
+            obs_record("", &[Some(20_000_000.0), Some(100_000.0)]),
+            format!("{:28}4  1", ""),
+            header_line("G   10   1 L1C", "SYS / SCALE FACTOR"),
+            v2_epoch_line(
+                ObsEpochTime {
+                    year: 2020,
+                    month: 1,
+                    day: 1,
+                    hour: 0,
+                    minute: 0,
+                    second: 30.0,
+                },
+                0,
+                1,
+                "G01",
+            ),
+            obs_record("", &[Some(20_000_030.0), Some(1_000_300.0)]),
+        ]
+        .join("\n"),
+    )
+    .expect("parse version 2");
+    assert!(matches!(
+        reread.to_rinex_string(),
+        Err(RinexObsWriteError::ScaleFactorsInVersionTwo { count: 1 })
+    ));
+    let (removed, changes) = reread.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert!(removed.epochs()[1].special_records.is_empty());
+    assert!(
+        changes.iter().any(|change| matches!(
+            change,
+            ObsDowngradeChange::EventRecordsRewritten { epoch_index: 1, .. }
+        )),
+        "{changes:?}"
+    );
+    assert_eq!(values_by_code(&removed), values_by_code(&reread));
+    assert_writes_back(&removed);
+}
+
+#[test]
+fn a_version_two_file_whose_events_declare_types_downgrades_to_version_two() {
+    // A version 2 source whose flag 4 events declare # / TYPES OF OBSERV,
+    // downgraded to its own version and to 2.12, which reads `C1` as no GPS
+    // code and `L1` as the P code's phase. Every value stays under its code,
+    // and each epoch's lists hold the codes they held.
+    let at = |minute: u8, second: f64| ObsEpochTime {
+        year: 2015,
+        month: 1,
+        day: 1,
+        hour: 0,
+        minute,
+        second,
+    };
+    let values = |values: &[Option<f64>]| obs_record("", values);
+    let text = [
+        header_line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        header_line("     2    C1    L1", "# / TYPES OF OBSERV"),
+        header_line("", "END OF HEADER"),
+        v2_epoch_line(at(0, 0.0), 0, 1, "G01"),
+        values(&[Some(20_000_000.0), Some(100_000.0)]),
+        format!("{:28}4  1", ""),
+        header_line("     3    L1    C1    S1", "# / TYPES OF OBSERV"),
+        v2_epoch_line(at(0, 30.0), 0, 1, "G01"),
+        values(&[Some(100_030.0), Some(20_000_030.0), Some(45.0)]),
+        format!("{:28}4  1", ""),
+        header_line("     1    C1", "# / TYPES OF OBSERV"),
+        v2_epoch_line(at(1, 0.0), 0, 1, "G01"),
+        values(&[Some(20_000_060.0)]),
+    ]
+    .join("\n");
+    let obs = RinexObs::parse(&text).expect("parse");
+    let declared_sets = |product: &RinexObs| -> Vec<Vec<String>> {
+        (0..product.epochs().len())
+            .map(|index| {
+                let mut codes = product
+                    .header_at(index)
+                    .expect("header in effect")
+                    .declared_obs_codes[&GnssSystem::Gps]
+                    .clone();
+                codes.sort();
+                codes
+            })
+            .collect()
+    };
+
+    // To its own version nothing changes, and the events keep their records.
+    let (same, changes) = obs.downgrade_to_rinex2(2.11).expect("downgrade to 2.11");
+    assert!(changes.is_empty(), "{changes:?}");
+    assert_eq!(same.epochs(), obs.epochs());
+    assert_eq!(values_by_code(&same), values_by_code(&obs));
+    assert_writes_back(&same);
+
+    // At 2.12 the names change, so the events' type records are rewritten.
+    let (later, changes) = obs.downgrade_to_rinex2(2.12).expect("downgrade to 2.12");
+    assert_eq!(values_by_code(&later), values_by_code(&obs));
+    assert_eq!(declared_sets(&later), declared_sets(&obs));
+    assert_writes_back(&later);
+    assert_ne!(later.header().rinex2_types, obs.header().rinex2_types);
+    for epoch_index in [1, 3] {
+        let records = &later.epochs()[epoch_index].special_records;
+        assert!(
+            changes.iter().any(|change| matches!(
+                change,
+                ObsDowngradeChange::EventRecordsRewritten { epoch_index: at, to, .. }
+                    if *at == epoch_index && to == records
+            )),
+            "event {epoch_index}: {changes:?}"
+        );
+        assert!(
+            records
+                .iter()
+                .all(|record| record.ends_with("# / TYPES OF OBSERV")),
+            "{records:?}"
+        );
+    }
 }
 
 /// The phase shift a satellite's L1 carrier reads with at an epoch.
@@ -9290,6 +9594,156 @@ fn a_version_two_file_keeps_its_columns_through_repeated_rewrites() {
             "rewrite {round} moved a value"
         );
     }
+}
+
+#[test]
+fn a_rinex_4_downgrade_removes_the_deprecated_records_and_reports_them() {
+    // A version 4 file declares SYS / PHASE SHIFT and GLONASS COD/PHS/BIS
+    // records to be ignored. A version 2 file would give them meaning, so the
+    // downgrade removes them, from the file header and from an event, also
+    // where they contradict each other.
+    let epoch = format!(
+        "> 2020 01 01 00 00  0.0000000  0  1\n{}",
+        obs_record("G01", &[Some(100.0)])
+    );
+    for version in [4.00, 4.01, 4.02] {
+        for (label, one, other) in [
+            ("SYS / PHASE SHIFT", "G L1C  0.25000", "G L1C  0.50000"),
+            ("GLONASS COD/PHS/BIS", " C1C    0.250", " C1C    0.500"),
+        ] {
+            for contradictory in [false, true] {
+                let mut records = vec![header_line(one, label)];
+                if contradictory {
+                    records.push(header_line(other, label));
+                }
+                for in_event in [false, true] {
+                    let what =
+                        format!("{version} {label} contradictory {contradictory} event {in_event}");
+                    let mut headers = vec![header_line("G    1 L1C", "SYS / # / OBS TYPES")];
+                    let body = if in_event {
+                        [blank_event(4, &records), epoch.clone()].join("\n")
+                    } else {
+                        headers.extend(records.iter().cloned());
+                        epoch.clone()
+                    };
+                    let obs = RinexObs::parse(&obs_with_version_and_code_headers(
+                        version, &headers, &body,
+                    ))
+                    .unwrap_or_else(|error| panic!("{what}: {error}"));
+                    let (downgraded, changes) = obs
+                        .downgrade_to_rinex2(2.11)
+                        .unwrap_or_else(|error| panic!("{what}: {error}"));
+                    let removed: Vec<(&str, Option<usize>, &Vec<String>)> = changes
+                        .iter()
+                        .filter_map(|change| match change {
+                            ObsDowngradeChange::DeprecatedRecordsRemoved {
+                                label,
+                                epoch_index,
+                                records,
+                            } => Some((label.as_str(), *epoch_index, records)),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(removed.len(), 1, "{what}: {changes:?}");
+                    let (removed_label, removed_at, removed_records) = removed[0];
+                    assert_eq!(removed_label, label, "{what}");
+                    assert_eq!(removed_at, in_event.then_some(0), "{what}");
+                    if in_event {
+                        assert_eq!(removed_records, &obs.epochs()[0].special_records, "{what}");
+                    } else {
+                        assert!(!removed_records.is_empty(), "{what}");
+                        assert!(
+                            removed_records.iter().all(|record| record.ends_with(label)),
+                            "{what}: {removed_records:?}"
+                        );
+                    }
+                    let last = downgraded.epochs().len() - 1;
+                    for header in [
+                        downgraded.header().clone(),
+                        downgraded.header_at(last).expect(&what),
+                    ] {
+                        assert!(header.phase_shifts.is_empty(), "{what}");
+                        assert_eq!(header.glonass_cod_phs_bis, None, "{what}");
+                    }
+                    let text = downgraded.to_rinex_string().expect(&what);
+                    assert!(!text.contains(label), "{what}:\n{text}");
+                    assert_writes_back(&downgraded);
+                }
+            }
+        }
+    }
+    // A version 3 product's records apply, and a downgrade keeps them.
+    let obs = RinexObs::parse(&obs_with_version_and_code_headers(
+        3.05,
+        &[
+            header_line("G    1 L1C", "SYS / # / OBS TYPES"),
+            header_line("G L1C  0.25000", "SYS / PHASE SHIFT"),
+        ],
+        &epoch,
+    ))
+    .expect("parse");
+    let (downgraded, changes) = obs.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert_eq!(downgraded.header().phase_shifts, obs.header().phase_shifts);
+    assert!(!changes
+        .iter()
+        .any(|change| matches!(change, ObsDowngradeChange::DeprecatedRecordsRemoved { .. })));
+}
+
+#[test]
+fn a_downgrade_keeps_or_removes_phase_shift_records_naming_a_satellite_no_id_holds() {
+    let types = header_line("R    2 C1C L1C", "SYS / # / OBS TYPES");
+    let shift = |content: &str| header_line(content, "SYS / PHASE SHIFT");
+    let record = |sat: &str| obs_record(sat, &[Some(20_000_000.0), Some(100.0)]);
+    let epoch = |minute: u8| {
+        format!(
+            "> 2020 01 01 00 {minute:02}  0.0000000  0  2\n{}\n{}",
+            record("R01"),
+            record("R02")
+        )
+    };
+    let body = [
+        epoch(0),
+        blank_event(4, &[shift("R L1C  0.50000  03 R28 R02 R29")]),
+        epoch(1),
+    ]
+    .join("\n");
+    let text = obs_with_code_headers(&[types.clone(), shift("R L1C  0.25000  02 R01 R28")], &body);
+    let obs = RinexObs::parse(&text).expect("parse");
+    // RINEX 4: kept and not applied, contradictory records not refused, and a
+    // downgrade removes them, designators and all.
+    let version_four = RinexObs::parse(&obs_with_version_and_code_headers(
+        4.02,
+        &[
+            types.clone(),
+            shift("R L1C  0.25000  02 R01 R28"),
+            shift("R L1C  0.50000  01 R28"),
+        ],
+        &epoch(0),
+    ))
+    .expect("parse version 4");
+    assert_eq!(l1_shift_at(&version_four, 0, "R01", "L1C"), 0.0);
+    assert_writes_back(&version_four);
+    let (downgraded, changes) = version_four.downgrade_to_rinex2(2.11).expect("downgrade");
+    assert!(downgraded.header().phase_shifts.is_empty());
+    assert!(changes.iter().any(|change| matches!(
+        change,
+        ObsDowngradeChange::DeprecatedRecordsRemoved { records, .. }
+            if records.iter().any(|record| record.contains(" R28"))
+    )));
+
+    // Version 3 to version 2 keeps the records whole.
+    let (version_two, _) = obs.downgrade_to_rinex2(2.11).expect("downgrade");
+    let written = version_two.to_rinex_string().expect("write version 2");
+    let reread = RinexObs::parse(&written).expect("read version 2");
+    assert_eq!(
+        reread.header().phase_shifts,
+        version_two.header().phase_shifts
+    );
+    assert_eq!(
+        unrepresentable_tokens(&reread.header().phase_shifts[0]),
+        ["R28"]
+    );
+    assert_eq!(l1_shift_at(&reread, 0, "R01", "L1C"), 0.25);
 }
 
 #[test]
