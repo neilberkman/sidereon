@@ -42,7 +42,7 @@ pub mod observations {
         pseudoranges, AntennaInfo, CarrierPhaseRow, ObsDowngradeChange, ObsEpoch, ObsEpochTime,
         ObsHeader, ObsLeapSeconds, ObsPhaseShift, ObsScaleFactor, ObsValue, ObservationFilter,
         ObservationKind, ObservationValueRow, PgmRunByDate, ReceiverInfo, RinexObs,
-        RinexObsWriteError, SignalPolicy,
+        RinexObsWriteError, SignalPolicy, CYCLE_SLIP_FLAG,
     };
 
     /// Role-oriented alias for a parsed RINEX observation file.

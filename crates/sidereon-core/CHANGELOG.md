@@ -6,6 +6,28 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** `ObsEpoch` gains `cycle_slips`, the cycle slips a flag 6 epoch
+  reports, per satellite and index-aligned to `ObsHeader::obs_codes` as `sats`
+  is. RINEX writes them in the observation record layout, with the slip in
+  place of the observation, and counts satellites on the epoch line, listing
+  them there at version 2. Every flag above 1 was read as an event whose count
+  was a number of verbatim records, so a version 3 file's slips were kept as
+  text no consumer read, and a version 2 slip epoch whose records ran past one
+  line, or whose satellite list continued, left lines behind to be read as
+  epochs. Flag 6 records are now read exactly as observation records are, in
+  both layouts, and written back from `cycle_slips`; the strict read-back
+  compares them. `sats` and `special_records` stay empty for a slip epoch, so
+  positioning, observation QC and repair, which skip epochs flagged above 1,
+  never take a slip for a measurement: `TIME OF LAST OBS` and
+  `PRN / # OF OBS` count observation records only. Lint no longer reports a
+  slip epoch as an event (OBS-B07), and compares its declared count with the
+  satellites whose slips it holds. `CYCLE_SLIP_FLAG` names the flag.
+- **Breaking.** `RinexObs::downgrade_to_rinex2` moves cycle slips with their
+  codes as it moves observations, refuses slips past their constellation's
+  codes with `RinexObsWriteError::ValuesWithoutCodes`, and reports a slip
+  rounded to three decimals as the new `ObsDowngradeChange::CycleSlipRounded`.
+  A constellation named only by slips has its list stated in a version 2 file,
+  as a reader builds one for it.
 - **Breaking.** `RinexObs::to_rinex_string` returns
   `Result<String, RinexObsWriteError>`, as `RinexClock::to_rinex_string` already
   did, and returns text only when reading it back gives the product: every

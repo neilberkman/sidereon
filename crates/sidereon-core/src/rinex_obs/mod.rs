@@ -311,8 +311,9 @@ pub struct ObsLeapSeconds {
 pub struct ObsEpoch {
     /// Civil epoch in the header time scale.
     pub epoch: ObsEpochTime,
-    /// Epoch flag: 0 = OK, 1 = power failure, >1 = an event record, whose own
-    /// records are in [`ObsEpoch::special_records`].
+    /// Epoch flag: 0 = OK, 1 = power failure, 6 = cycle slip records, whose
+    /// slips are in [`ObsEpoch::cycle_slips`], and any other flag above 1 an
+    /// event, whose own records are in [`ObsEpoch::special_records`].
     pub flag: u8,
     /// Optional receiver clock offset from the epoch line, seconds.
     pub rcv_clock_offset_s: Option<f64>,
@@ -320,17 +321,37 @@ pub struct ObsEpoch {
     pub epoch_picoseconds: Option<u32>,
     /// Satellite/special-record count declared on the epoch line.
     pub declared_record_count: usize,
-    /// The records an event epoch (flag above 1) carried, as they were written.
+    /// The records an event epoch (flag above 1 other than 6) carried, as they
+    /// were written.
     ///
     /// A flag 3 epoch is followed by the header records for a new site
     /// occupation - its marker, antenna and position - and a flag 4 epoch by
-    /// comments. They are kept verbatim rather than parsed, because what they
-    /// mean depends on the labels they carry, and written back unchanged. Empty
-    /// for an ordinary observation epoch.
+    /// header records or comments. They are kept verbatim rather than parsed,
+    /// because what they mean depends on the labels they carry, and written back
+    /// unchanged. Empty for an observation epoch and a cycle slip epoch.
     pub special_records: Vec<String>,
     /// Satellite → observation values, ascending satellite id. The value vector
     /// is index-aligned to [`ObsHeader::obs_codes`] for that satellite's system.
+    /// Empty for an event epoch and a cycle slip epoch.
     pub sats: BTreeMap<GnssSatelliteId, Vec<ObsValue>>,
+    /// Satellite → cycle slips a flag 6 epoch reports, ascending satellite id,
+    /// index-aligned to [`ObsHeader::obs_codes`] as [`ObsEpoch::sats`] is.
+    ///
+    /// RINEX writes detected and repaired cycle slips in the observation record
+    /// layout, with the slip in place of the observation and the loss-of-lock
+    /// and signal-strength indicators blank or zero. They are slips, not
+    /// measurements, so they are held apart from the observations. Empty for
+    /// every epoch whose flag is not 6.
+    pub cycle_slips: BTreeMap<GnssSatelliteId, Vec<ObsValue>>,
+}
+
+/// The epoch flag whose records report cycle slips.
+pub const CYCLE_SLIP_FLAG: u8 = 6;
+
+/// Whether an epoch flag marks an event, whose records are
+/// [`ObsEpoch::special_records`]: every flag above 1 except the cycle slip flag.
+pub(crate) fn is_event_flag(flag: u8) -> bool {
+    flag > 1 && flag != CYCLE_SLIP_FLAG
 }
 
 /// Parsed RINEX observation header.
@@ -414,8 +435,9 @@ pub struct ObsHeader {
 pub struct RinexObs {
     /// The parsed header.
     pub header: ObsHeader,
-    /// Epoch records in file order. Event records (flag > 1) are retained with
-    /// an empty satellite map so epoch indices stay stable.
+    /// Epoch records in file order. Event records and cycle slip records (flag
+    /// above 1) are retained with an empty satellite map so epoch indices stay
+    /// stable.
     pub epochs: Vec<ObsEpoch>,
     /// Count of records skipped because their satellite token did not parse to a
     /// representable [`GnssSatelliteId`]: an out-of-range entry in the `GLONASS
@@ -1759,7 +1781,7 @@ impl Parser {
             let (epoch_time, flag, numsat, rcv_clock_offset_s, epoch_picoseconds) =
                 parse_epoch_line(line, civil_second_policy_for_time_scale(time_scale))?;
 
-            if flag > 1 {
+            if is_event_flag(flag) {
                 // Event record: the next `numsat` lines are header or comment
                 // records, not observations. They are kept as they were written
                 // so the epoch can be written back whole.
@@ -1772,10 +1794,13 @@ impl Parser {
                     declared_record_count: numsat,
                     special_records,
                     sats: BTreeMap::new(),
+                    cycle_slips: BTreeMap::new(),
                 });
                 continue;
             }
 
+            // Cycle slip records are read exactly as observation records are,
+            // and kept apart from them.
             let mut sats = BTreeMap::new();
             for _ in 0..numsat {
                 let sat_line = lines.next().ok_or_else(|| {
@@ -1821,6 +1846,7 @@ impl Parser {
                 let (sat, values) = self.parse_sat_line(&sat_record)?;
                 sats.insert(sat, values);
             }
+            let (sats, cycle_slips) = split_cycle_slips(flag, sats);
             self.epochs.push(ObsEpoch {
                 epoch: epoch_time,
                 flag,
@@ -1829,6 +1855,7 @@ impl Parser {
                 declared_record_count: numsat,
                 special_records: Vec::new(),
                 sats,
+                cycle_slips,
             });
         }
         Ok(())
@@ -1849,7 +1876,7 @@ impl Parser {
             let (epoch_time, flag, numsat, rcv_clock_offset_s) =
                 parse_epoch_line_v2(line, civil_second_policy_for_time_scale(time_scale))?;
 
-            if flag > 1 {
+            if is_event_flag(flag) {
                 let special_records = take_special_records(lines, numsat)?;
                 self.epochs.push(ObsEpoch {
                     epoch: epoch_time,
@@ -1859,6 +1886,7 @@ impl Parser {
                     declared_record_count: numsat,
                     special_records,
                     sats: BTreeMap::new(),
+                    cycle_slips: BTreeMap::new(),
                 });
                 continue;
             }
@@ -1883,6 +1911,7 @@ impl Parser {
                 let values = self.parse_sat_obs_v2(sat.system, &obs_lines)?;
                 sats.insert(sat, values);
             }
+            let (sats, cycle_slips) = split_cycle_slips(flag, sats);
             self.epochs.push(ObsEpoch {
                 epoch: epoch_time,
                 flag,
@@ -1891,6 +1920,7 @@ impl Parser {
                 declared_record_count: numsat,
                 special_records: Vec::new(),
                 sats,
+                cycle_slips,
             });
         }
         Ok(())
@@ -2650,7 +2680,19 @@ fn parse_sv_token_v2(token: &str, default_system: GnssSystem) -> Option<GnssSate
     GnssSatelliteId::new(system, prn).ok()
 }
 
-/// Take the records an event epoch declared, as they were written.
+/// The records of an epoch read in the observation record layout, as the
+/// observations and cycle slips they are: a flag 6 epoch's records are slips,
+/// and every other epoch read this way holds observations.
+type SatRecords = BTreeMap<GnssSatelliteId, Vec<ObsValue>>;
+
+fn split_cycle_slips(flag: u8, records: SatRecords) -> (SatRecords, SatRecords) {
+    if flag == CYCLE_SLIP_FLAG {
+        (BTreeMap::new(), records)
+    } else {
+        (records, BTreeMap::new())
+    }
+}
+
 /// The codes one constellation reads from a version 2 file's single list.
 ///
 /// Version 2 names its codes once for every constellation at once, and a
@@ -2702,6 +2744,7 @@ pub(crate) fn rinex2_next_obs_code(
     }
 }
 
+/// Take the records an event epoch declared, as they were written.
 fn take_special_records<'a, I: Iterator<Item = &'a str>>(
     lines: &mut std::iter::Peekable<I>,
     count: usize,

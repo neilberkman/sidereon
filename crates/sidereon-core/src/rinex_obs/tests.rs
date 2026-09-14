@@ -2473,6 +2473,201 @@ fn a_version_two_event_epoch_names_no_satellites() {
 }
 
 #[test]
+fn a_version_three_cycle_slip_epoch_reads_its_records_as_slips() {
+    // RINEX 3.05 Table A3: flag 6 is followed by cycle slip records in the
+    // observation record layout, a slip in place of an observation. They were
+    // kept as uninterpreted event text; they are slips, held apart from the
+    // observations, and written back in the same layout.
+    let slip_line = format!("G01{}{:14.3}", blank_obs_field(), 1.0);
+    let text = [
+        "     3.05           OBSERVATION DATA    M                   RINEX VERSION / TYPE"
+            .to_string(),
+        "G    2 C1C L1C                                              SYS / # / OBS TYPES"
+            .to_string(),
+        "                                                            END OF HEADER".to_string(),
+        "> 2020 01 01 00 00  0.0000000  0  1".to_string(),
+        format!(
+            "G01{}{}",
+            obs_field(20_000_000.0, 0, 7),
+            obs_field(100_000.125, 0, 7)
+        ),
+        "> 2020 01 01 00 00 30.0000000  6  1".to_string(),
+        slip_line.clone(),
+        "> 2020 01 01 00 01  0.0000000  0  1".to_string(),
+        format!(
+            "G01{}{}",
+            obs_field(20_000_100.0, 0, 7),
+            obs_field(100_300.25, 1, 7)
+        ),
+    ]
+    .join("\n");
+    let obs = RinexObs::parse(&text).expect("parse a file with cycle slip records");
+    let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("G01");
+    let slips = &obs.epochs()[1];
+    assert_eq!(slips.flag, CYCLE_SLIP_FLAG);
+    assert!(slips.sats.is_empty());
+    assert!(slips.special_records.is_empty());
+    assert_eq!(slips.declared_record_count, 1);
+    assert_eq!(
+        slips.cycle_slips[&g01],
+        vec![
+            ObsValue {
+                value: None,
+                lli: None,
+                ssi: None
+            },
+            ObsValue {
+                value: Some(1.0),
+                lli: None,
+                ssi: None
+            },
+        ]
+    );
+    assert!(obs.epochs()[0].cycle_slips.is_empty());
+    assert!(obs.epochs()[2].cycle_slips.is_empty());
+
+    // Slips feed no observation consumer.
+    let policy = SignalPolicy::default_for(3.05).expect("policy");
+    assert!(pseudoranges(&obs, slips, &policy)
+        .expect("pseudoranges")
+        .is_empty());
+    let report = crate::observation_qc::observation_qc(&obs);
+    assert_eq!(report.observation_epochs, 2);
+    assert_eq!(report.event_records, 1);
+
+    let encoded = obs.to_rinex_string().expect("serialize RINEX OBS");
+    assert!(encoded.contains("> 2020 01 01 00 00 30.0000000  6  1\n"));
+    assert!(encoded.contains(&format!("{slip_line}\n")), "{encoded}");
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs(), obs.epochs());
+}
+
+#[test]
+fn a_version_two_cycle_slip_epoch_reads_its_satellite_list_and_records() {
+    // RINEX 2.11: flag 6's count is satellites, listed on the epoch line, each
+    // followed by its record in the observation layout. Taken as that many
+    // verbatim lines, a record continued past five types, or a list continued
+    // past twelve satellites, left lines to be read as epochs.
+    let names = ["C1", "L1", "D1", "S1", "C2", "L2"];
+    let types = format!(
+        "{:6}{}",
+        names.len(),
+        names
+            .iter()
+            .map(|name| format!("{name:>6}"))
+            .collect::<String>()
+    );
+    let t0 = ObsEpochTime {
+        year: 2015,
+        month: 1,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0.0,
+    };
+    let t1 = ObsEpochTime { second: 30.0, ..t0 };
+    let record = |base: f64| {
+        let fields: Vec<String> = (0..6)
+            .map(|index| obs_field(base + f64::from(index), 0, 6))
+            .collect();
+        format!("{}\n{}", fields[..5].concat(), fields[5])
+    };
+    let slip_record = format!("{}{:14.3}\n{:14.3}", blank_obs_field(), -2.0, 3.0);
+    let text = [
+        header_line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        header_line(&types, "# / TYPES OF OBSERV"),
+        header_line("", "END OF HEADER"),
+        v2_epoch_line(t0, 0, 2, "G01G02"),
+        record(20_000_000.0),
+        record(21_000_000.0),
+        v2_epoch_line(t1, 6, 1, "G02"),
+        slip_record,
+    ]
+    .join("\n");
+    let obs = RinexObs::parse(&text).expect("parse a version 2 file with cycle slip records");
+    assert_eq!(obs.epochs().len(), 2);
+    let slips = &obs.epochs()[1];
+    let g02 = GnssSatelliteId::new(GnssSystem::Gps, 2).expect("G02");
+    assert_eq!(slips.flag, CYCLE_SLIP_FLAG);
+    assert!(slips.sats.is_empty());
+    let values: Vec<Option<f64>> = slips.cycle_slips[&g02]
+        .iter()
+        .map(|value| value.value)
+        .collect();
+    assert_eq!(values, vec![None, Some(-2.0), None, None, None, Some(3.0)]);
+
+    let encoded = obs.to_rinex_string().expect("serialize RINEX OBS");
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs(), obs.epochs());
+}
+
+#[test]
+fn a_downgrade_moves_and_rounds_cycle_slips_with_their_codes() {
+    // GPS `C1W` and GLONASS `C1C` take one version 2 column each, so GLONASS's
+    // code moves, and its slip has to move with it. The GLONASS slip was read
+    // through a scale factor of 10 and carries four decimals, which a version 2
+    // field cannot hold: it is rounded and reported as a slip.
+    let text = concat!(
+        "     3.05           OBSERVATION DATA    M                   RINEX VERSION / TYPE\n",
+        "G    1 C1W                                                  SYS / # / OBS TYPES\n",
+        "R    1 C1C                                                  SYS / # / OBS TYPES\n",
+        "R   10   1 C1C                                              SYS / SCALE FACTOR\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 01 01 00 00  0.0000000  0  2\n",
+        "G01  20000000.000\n",
+        "R02 200000001.230\n",
+        "> 2020 01 01 00 00 30.0000000  6  2\n",
+        "G01         1.000\n",
+        "R02        12.345\n",
+    );
+    let obs = RinexObs::parse(text).expect("parse");
+    let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("G01");
+    let r02 = GnssSatelliteId::new(GnssSystem::Glonass, 2).expect("R02");
+    let held = obs.epochs()[1].cycle_slips[&r02][0]
+        .value
+        .expect("the GLONASS slip");
+    assert_eq!(obs.epochs()[1].cycle_slips[&g01][0].value, Some(1.0));
+
+    let (downgraded, changes) = obs.downgrade_to_rinex2(2.11).expect("downgrade");
+    let rounded: f64 = format!("{held:.3}").parse().expect("rounded slip");
+    assert!(
+        changes.contains(&ObsDowngradeChange::CycleSlipRounded {
+            epoch_index: 1,
+            satellite: r02,
+            code: "C1C".to_string(),
+            from: held,
+            to: rounded,
+        }),
+        "{changes:?}"
+    );
+    let at = |system: GnssSystem, code: &str| {
+        downgraded.header().obs_codes[&system]
+            .iter()
+            .position(|held| held == code)
+            .unwrap_or_else(|| panic!("{system} holds {code}"))
+    };
+    let glonass = &downgraded.epochs()[1].cycle_slips[&r02];
+    for (index, value) in glonass.iter().enumerate() {
+        let expected = (index == at(GnssSystem::Glonass, "C1C")).then_some(rounded);
+        assert_eq!(
+            value.value, expected,
+            "GLONASS slip at {index}: {glonass:?}"
+        );
+    }
+    let gps = &downgraded.epochs()[1].cycle_slips[&g01];
+    for (index, value) in gps.iter().enumerate() {
+        let expected = (index == at(GnssSystem::Gps, "C1W")).then_some(1.0);
+        assert_eq!(value.value, expected, "GPS slip at {index}: {gps:?}");
+    }
+    let written = downgraded.to_rinex_string().expect("the downgrade writes");
+    let read = RinexObs::parse(&written).expect("reads back");
+    assert_eq!(read.epochs(), downgraded.epochs());
+}
+
+#[test]
 fn a_galileo_band_five_code_keeps_its_band() {
     // Galileo's `C5` and `P2` both canonicalise to `C5X`, so an inverse that
     // takes whichever it meets first can write `P2` for a band 5 pseudorange.
