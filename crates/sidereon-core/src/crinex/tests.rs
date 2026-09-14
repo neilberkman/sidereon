@@ -846,3 +846,200 @@ fn round_trip_v1_matches_crx2rnx_reference_byte_for_byte() {
         );
     }
 }
+
+fn v2_slip_rinex(names: &[&str], body: &[String]) -> String {
+    let mut types = format!("{:6}", names.len());
+    for name in names.iter().take(9) {
+        types.push_str(&format!("{name:>6}"));
+    }
+    let mut lines = vec![
+        labeled_header_line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        labeled_header_line(&types, "# / TYPES OF OBSERV"),
+        labeled_header_line("", "END OF HEADER"),
+    ];
+    lines.extend(body.iter().cloned());
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn v2_epoch(second: f64, flag: u8, sats: &[&str]) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut chunks = sats.chunks(12);
+    let first = chunks.next().unwrap_or_default().concat();
+    lines.push(format!(
+        " 20  1  1  0  0{second:11.7}  {flag}{:3}{first}",
+        sats.len()
+    ));
+    for chunk in chunks {
+        lines.push(format!("{:32}{}", "", chunk.concat()));
+    }
+    lines
+}
+
+fn v2_values(values: &[f64]) -> Vec<String> {
+    values
+        .chunks(5)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|value| format!("{value:14.3}  "))
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn a_version_two_cycle_slip_epoch_crinex_1_cannot_carry_is_refused() {
+    // CRINEX 1 copies exactly `numsat` lines after an epoch flagged above 1,
+    // as RNX2CRX and CRX2RNX do. A flag 6 epoch's count is satellites, and its
+    // records may run past one line each, or its satellite list past twelve.
+    let refused = |text: &str, what: &str| {
+        let error = encode_crinex(text).expect_err(what);
+        assert!(
+            error.to_string().contains("CRINEX 1 copies exactly"),
+            "{what}: {error}"
+        );
+    };
+
+    // Six types: each record takes two lines.
+    let six = ["C1", "L1", "D1", "S1", "C2", "L2"];
+    let mut body = v2_epoch(0.0, 6, &["G01"]);
+    body.extend(v2_values(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
+    refused(&v2_slip_rinex(&six, &body), "six types");
+
+    // Thirteen satellites: the list continues on a second line.
+    let sats: Vec<String> = (1..=13).map(|prn| format!("G{prn:02}")).collect();
+    let sats: Vec<&str> = sats.iter().map(String::as_str).collect();
+    let mut body = v2_epoch(0.0, 6, &sats);
+    for _ in &sats {
+        body.extend(v2_values(&[1.0]));
+    }
+    refused(&v2_slip_rinex(&["L1"], &body), "thirteen satellites");
+
+    // Five types in the header fit, until an event declares six.
+    let five = ["C1", "L1", "D1", "S1", "C2"];
+    let mut event_types = format!("{:6}", six.len());
+    for name in six {
+        event_types.push_str(&format!("{name:>6}"));
+    }
+    let mut body = vec![" 20  1  1  0  0  0.0000000  4  1".to_string()];
+    body.push(labeled_header_line(&event_types, "# / TYPES OF OBSERV"));
+    body.extend(v2_epoch(30.0, 6, &["G01"]));
+    body.extend(v2_values(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]));
+    refused(&v2_slip_rinex(&five, &body), "six types an event declares");
+
+    // Within the limit, the epoch is carried and expands back as written.
+    let mut body = v2_epoch(0.0, 6, &["G01", "G02"]);
+    body.extend(v2_values(&[1.0, 2.0, 3.0, 4.0, 5.0]));
+    body.extend(v2_values(&[-1.0, -2.0]));
+    let rinex = v2_slip_rinex(&five, &body);
+    let compressed = encode_crinex(&rinex).expect("a slip epoch within the limit compresses");
+    let expanded = decode(&compressed).expect("expand");
+    assert_same_lines(&expanded, &rinex, "version 2 slips");
+}
+
+#[test]
+fn a_version_three_cycle_slip_epoch_round_trips_through_crinex_3() {
+    // A RINEX 3 flag 6 epoch has one record line per satellite, so the
+    // `numsat` lines CRINEX 3 copies after it are its records.
+    let rinex = [
+        labeled_header_line(
+            "     3.05           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        labeled_header_line("G    2 C1C L1C", "SYS / # / OBS TYPES"),
+        labeled_header_line("", "END OF HEADER"),
+        "> 2020 01 01 00 00  0.0000000  0  1".to_string(),
+        "G01  20000000.000 7    100000.125 7".to_string(),
+        "> 2020 01 01 00 00 30.0000000  6  2".to_string(),
+        "G01                         1.000".to_string(),
+        "G02                        -2.000".to_string(),
+        "> 2020 01 01 00 01  0.0000000  0  1".to_string(),
+        "G01  20000060.000 7    100060.250 7".to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let compressed = encode_crinex(&rinex).expect("compress");
+    let expanded = decode(&compressed).expect("expand");
+    assert_same_lines(&expanded, &rinex, "version 3 slips");
+    let obs = crate::rinex_obs::RinexObs::parse(&expanded).expect("parse the expansion");
+    assert_eq!(obs.epochs()[1].cycle_slips.len(), 2);
+}
+
+#[test]
+fn a_crinex_1_cycle_slip_epoch_within_one_line_expands() {
+    // RNX2CRX writes an event epoch's line with `&` in its first column and
+    // copies the `numsat` lines after it; CRX2RNX reads them back as written.
+    let crinex = [
+        labeled_header_line(
+            "1.0                 COMPACT RINEX FORMAT",
+            "CRINEX VERS   / TYPE",
+        ),
+        "RNX2CRX".to_string(),
+        labeled_header_line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        labeled_header_line("     2    C1    L1", "# / TYPES OF OBSERV"),
+        labeled_header_line("", "END OF HEADER"),
+        "&20  1  1  0  0 30.0000000  6  2G01G02".to_string(),
+        "                         1.000".to_string(),
+        "                        -2.000".to_string(),
+        String::new(),
+    ]
+    .join("\n");
+    let expanded = decode(&crinex).expect("expand a CRINEX 1 slip epoch");
+    let lines: Vec<&str> = expanded.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| *line == " 20  1  1  0  0 30.0000000  6  2G01G02")
+        .unwrap_or_else(|| panic!("the slip epoch line: {expanded}"));
+    assert_eq!(
+        lines[at + 1..],
+        [
+            "                         1.000",
+            "                        -2.000"
+        ]
+    );
+    let obs = crate::rinex_obs::RinexObs::parse(&expanded).expect("parse the expansion");
+    let slips = &obs.epochs()[0].cycle_slips;
+    let values = |prn: u8| -> Vec<Option<f64>> {
+        let sat =
+            crate::id::GnssSatelliteId::new(crate::id::GnssSystem::Gps, prn).expect("satellite");
+        slips[&sat].iter().map(|value| value.value).collect()
+    };
+    assert_eq!(values(1), vec![None, Some(1.0)]);
+    assert_eq!(values(2), vec![None, Some(-2.0)]);
+}
+
+#[test]
+fn an_event_epoch_line_is_compressed_and_expanded_whole() {
+    // RNX2CRX copies an event's epoch line whole as a descriptor reset, and
+    // CRX2RNX prints it back with trailing blanks removed. Expansion wrote an
+    // event's line only to its count field, so a timed event lost its clock
+    // offset and its RINEX 4.02 picoseconds. Each `.crx` was compressed by
+    // RNX2CRX 4.2.0 and each `.rnx` is CRX2RNX 4.2.0's expansion of it: timed
+    // flag 5 events with a clock offset at 2.11, 3.05 and 4.02, and at 4.02 one
+    // with picoseconds alone and one with both. An event's picoseconds do not
+    // carry into the next epoch, which CRX2RNX gives the earlier observation
+    // epoch's.
+    for version in ["v2", "v3", "v4"] {
+        let rinex = obs_fixture(&format!("crinex_event_clocks_{version}.rnx"));
+        let expanded = decode(&obs_fixture(&format!("crinex_event_clocks_{version}.crx")))
+            .unwrap_or_else(|e| panic!("{version}: expand the RNX2CRX file: {e}"));
+        assert_same_lines(&expanded, &rinex, version);
+        let compressed =
+            encode_crinex(&rinex).unwrap_or_else(|e| panic!("{version}: compress: {e}"));
+        let expanded = decode(&compressed).unwrap_or_else(|e| panic!("{version}: expand: {e}"));
+        assert_same_lines(&expanded, &rinex, version);
+        assert!(
+            rinex.lines().any(|line| line.contains("0.123456789")),
+            "{version}: the fixture holds a timed event with a clock offset"
+        );
+    }
+}

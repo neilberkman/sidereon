@@ -1,0 +1,9 @@
+     2.11           OBSERVATION DATA    G (GPS)             RINEX VERSION / TYPE
+     1    C1                                                # / TYPES OF OBSERV
+  2020     1     1     0     0    0.0000000     GPS         TIME OF FIRST OBS
+                                                            END OF HEADER
+ 20  1  1  0  0  0.0000000  0  1G01                                   .000001000
+  20000000.000
+ 20  1  1  0  0 15.0000000  5  0                                     0.123456789
+ 20  1  1  0  0 30.0000000  0  1G01                                   .000002000
+  20000001.000

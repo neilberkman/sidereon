@@ -1,0 +1,14 @@
+3.1                 COMPACT RINEX FORMAT                    CRINEX VERS   / TYPE
+RNX2CRX ver.4.2.0                       14-Sep-26 05:30     CRINEX PROG / DATE
+     4.02           OBSERVATION DATA    G (GPS)             RINEX VERSION / TYPE
+G    1 C1C                                                  SYS / # / OBS TYPES
+  2020     1     1     0     0    0.0000000     GPS         TIME OF FIRST OBS
+                                                            END OF HEADER
+> 2020 01 01 00 00  0.0000000  0  1      G01
+3&1000000 54321
+3&20000000000 &&
+> 2020 01 01 00 00 15.0000000  5  0                      12345
+> 2020 01 01 00 00 20.0000000  5  0       0.123456789000 22222
+> 2020 01 01 00 00 30.0000000  0  1      G01
+3&2000000
+3&20000001000 &&

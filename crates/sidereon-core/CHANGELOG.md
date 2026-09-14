@@ -343,6 +343,20 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- CRINEX compression refuses a RINEX 2 cycle slip epoch that CRINEX 1 cannot
+  carry. CRINEX 1 copies exactly as many lines after an epoch flagged above 1
+  as its count, as RNX2CRX and CRX2RNX do, but a flag 6 epoch's count is
+  satellites: a list continued past twelve of them, or records continued past
+  five observation types, by the count in effect after any event that declared
+  one, occupy more lines. Those lines were copied short, and the rest read as
+  epochs, so the stream could not be read back. Such an epoch is refused with
+  the lines it occupies; one within the limit is carried as before, and a
+  RINEX 3 slip epoch, one record line per satellite, is unaffected. Expansion
+  wrote every event's epoch line only to its count field, which dropped a slip
+  epoch's satellite list and a timed event's clock offset and RINEX 4.02
+  picoseconds. Every event's epoch line is now compressed and expanded whole,
+  trimmed on the right, as RNX2CRX and CRX2RNX 4.2.0 copy it; an event's
+  picoseconds take no part in the clock line's picosecond carry, as in CRX2RNX.
 - A `LEAP SECONDS` record with a blank field before a written one keeps each
   field in its own six columns. The blank field was left out, so a record with
   no future count but a week and day was written with the week where the future
