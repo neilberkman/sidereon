@@ -342,9 +342,6 @@ All notable changes to `sidereon-core` are documented here.
   stays blank through CRINEX, as `rnx2crx` and `crx2rnx` keep it, in
   `SatRecord::sv` too. The header's letter was written in, so a mono-system file
   came back with tokens it did not have.
-- The CRINEX type list check counts a code only in a field's code columns. A
-  character in a field's padding was counted as a code, so a record naming one
-  code for a count of two passed.
 - The RINEX observation reader refuses a `# / TYPES OF OBSERV` or
   `SYS / # / OBS TYPES` continuation record that continues no declared list. A
   version 2 record with a blank count and codes, before any count or after a
