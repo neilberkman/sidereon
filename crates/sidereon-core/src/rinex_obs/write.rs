@@ -13,15 +13,20 @@
 //! the `F14.3` width the files carry, and any `SYS / SCALE FACTOR` in force is
 //! re-applied before formatting (the inverse of the parser's divide), so a value
 //! read from a real file re-encodes to the same `f64`. An event record (epoch
-//! flag greater than one) keeps the records that followed it as they were
-//! written, and they are written back unchanged under their own count.
+//! flag greater than one, other than six) keeps the records that followed it as
+//! they were written, and they are written back unchanged under their own count.
+//! A cycle slip epoch (flag six) is written in the observation record layout,
+//! one record per satellite that reports a slip.
 
 use core::fmt::Write as _;
 use std::collections::BTreeMap;
 
 use crate::id::GnssSystem;
 
-use super::{ObsEpoch, ObsEpochTime, ObsValue, RinexObs, OBS_FIELD_WIDTH, OBS_VALUE_WIDTH};
+use super::{
+    is_event_flag, ObsEpoch, ObsEpochTime, ObsValue, RinexObs, SatRecords, CYCLE_SLIP_FLAG,
+    OBS_FIELD_WIDTH, OBS_VALUE_WIDTH,
+};
 
 /// Columns a header record's content occupies before its 20-column label.
 pub(super) const HEADER_CONTENT_WIDTH: usize = 60;
@@ -99,9 +104,10 @@ pub enum RinexObsWriteError {
         /// How many records the product holds.
         count: usize,
     },
-    /// A satellite holding more values than its constellation has codes. The
-    /// values past the codes name no observable, so no file can say what they
-    /// are, and a downgrade laying the codes out would drop them.
+    /// A satellite holding more observations or cycle slips than its
+    /// constellation has codes. The values past the codes name no observable,
+    /// so no file can say what they are, and a downgrade laying the codes out
+    /// would drop them.
     ValuesWithoutCodes {
         /// Zero-based epoch index.
         epoch_index: usize,
@@ -314,6 +320,22 @@ pub enum ObsDowngradeChange {
         /// The value it held.
         from: f64,
         /// The value it holds now.
+        to: f64,
+    },
+    /// A cycle slip rounded to the three decimals a slip field holds, as
+    /// [`ObsDowngradeChange::ValueRounded`] reports for an observation. A slip
+    /// is written in the observation record layout, so a slip read through a
+    /// scale factor can carry more precision than a version 2 file can write.
+    CycleSlipRounded {
+        /// Zero-based epoch index.
+        epoch_index: usize,
+        /// The satellite.
+        satellite: crate::id::GnssSatelliteId,
+        /// The slip's code, as its constellation held it before the downgrade.
+        code: String,
+        /// The slip it held.
+        from: f64,
+        /// The slip it holds now.
         to: f64,
     },
     /// The `SYS / SCALE FACTOR` records were removed. Values are stored
@@ -586,11 +608,14 @@ impl RinexObs {
         }
     }
 
-    /// Constellations this product's observations are from.
+    /// Constellations this product's observations and cycle slips are from. A
+    /// version 2 epoch names each satellite whose record follows, a slip's as
+    /// much as an observation's, and a reader builds a code list for its
+    /// constellation either way.
     fn rinex2_observed_systems(&self) -> std::collections::BTreeSet<GnssSystem> {
         self.epochs
             .iter()
-            .flat_map(|epoch| epoch.sats.keys().map(|sat| sat.system))
+            .flat_map(|epoch| epoch_record_satellites(epoch).map(|sat| sat.system))
             .collect()
     }
 
@@ -974,18 +999,14 @@ impl RinexObs {
         let t = epoch.epoch;
         // An event names no satellites. Its own records follow the epoch line,
         // and its declared count is how many of them there are.
-        let event = epoch.flag > 1;
+        let event = is_event_flag(epoch.flag);
+        let records = epoch_records(epoch);
         // `12(A1,I2)`: the constellation letter then the number, space padded,
         // which is what a version 2 reader expects.
-        let satellites: Vec<String> = if event {
-            Vec::new()
-        } else {
-            epoch
-                .sats
-                .keys()
-                .map(|sat| format!("{}{:2}", sat.system.letter(), sat.prn))
-                .collect()
-        };
+        let satellites: Vec<String> = records
+            .keys()
+            .map(|sat| format!("{}{:2}", sat.system.letter(), sat.prn))
+            .collect();
         let mut chunks = satellites.chunks(RINEX2_EPOCH_SATELLITES_PER_LINE);
         let first: String = chunks.next().unwrap_or_default().concat();
         // The clock offset is an `F12.9` field at columns 69 to 80, so the
@@ -1024,26 +1045,20 @@ impl RinexObs {
         for record in &epoch.special_records {
             let _ = writeln!(out, "{record}");
         }
-        if !event {
-            // Every satellite's record runs to the number of names the header
-            // carries, and its values are in the order its constellation's list
-            // names them, which is the header's own order.
-            for values in epoch.sats.values() {
-                write_sat_record_v2(out, values, width);
-            }
+        // Every satellite's record runs to the number of names the header
+        // carries, and its values are in the order its constellation's list
+        // names them, which is the header's own order. A cycle slip record is
+        // laid out as an observation record is.
+        for values in records.values() {
+            write_sat_record_v2(out, values, width);
         }
     }
 
     fn write_epoch(&self, out: &mut String, epoch: &ObsEpoch) {
         let t = epoch.epoch;
-        // An event (flag > 1) declares how many of its own records follow;
-        // flag 0 and 1 declare their satellites and carry observations.
-        // An event declares the records that follow it.
-        let count = if epoch.flag > 1 {
-            epoch.special_records.len()
-        } else {
-            epoch.sats.len()
-        };
+        // An event declares how many of its own records follow; every other
+        // epoch declares the satellites whose observations or slips follow.
+        let count = declared_count(epoch);
         // RINEX reserves six columns between the satellite count and the clock
         // offset. Without them a full-width negative offset abuts the count and
         // the line no longer reads back. Version 4.02 appends five more digits
@@ -1063,13 +1078,13 @@ impl RinexObs {
             "> {:04} {:02} {:02} {:02} {:02}{:11.7}  {}{:3}{clock}{picoseconds}",
             t.year, t.month, t.day, t.hour, t.minute, t.second, epoch.flag, count
         );
-        if epoch.flag > 1 {
+        if is_event_flag(epoch.flag) {
             for record in &epoch.special_records {
                 let _ = writeln!(out, "{record}");
             }
             return;
         }
-        for (sat, values) in &epoch.sats {
+        for (sat, values) in epoch_records(epoch) {
             self.write_sat_record(out, *sat, values);
         }
     }
@@ -1108,6 +1123,35 @@ impl RinexObs {
             })
             .map_or(1.0, |record| record.factor)
     }
+}
+
+/// The records an epoch writes in the observation record layout: a cycle slip
+/// epoch's slips, an event's none, and every other epoch's observations.
+fn epoch_records(epoch: &ObsEpoch) -> &SatRecords {
+    static NONE: SatRecords = BTreeMap::new();
+    if epoch.flag == CYCLE_SLIP_FLAG {
+        &epoch.cycle_slips
+    } else if is_event_flag(epoch.flag) {
+        &NONE
+    } else {
+        &epoch.sats
+    }
+}
+
+/// The count an epoch line declares for the records written after it.
+fn declared_count(epoch: &ObsEpoch) -> usize {
+    if is_event_flag(epoch.flag) {
+        epoch.special_records.len()
+    } else {
+        epoch_records(epoch).len()
+    }
+}
+
+/// Every satellite an epoch holds observations or cycle slips for.
+fn epoch_record_satellites(
+    epoch: &ObsEpoch,
+) -> impl Iterator<Item = &crate::id::GnssSatelliteId> + '_ {
+    epoch.sats.keys().chain(epoch.cycle_slips.keys())
 }
 
 /// Append a header line: content padded into the first 60 columns, then the
@@ -1558,7 +1602,7 @@ impl RinexObs {
         systems.extend(
             self.epochs
                 .iter()
-                .flat_map(|epoch| epoch.sats.keys().map(|sat| sat.system)),
+                .flat_map(|epoch| epoch_record_satellites(epoch).map(|sat| sat.system)),
         );
         systems.retain(|system| !self.header.obs_codes.contains_key(system));
         systems
@@ -1686,7 +1730,11 @@ impl RinexObs {
                 });
             }
             for (epoch_index, epoch) in self.epochs.iter().enumerate() {
-                if let Some((sat, values)) = epoch.sats.iter().find(|(sat, _)| sat.system == system)
+                if let Some((sat, values)) = epoch
+                    .sats
+                    .iter()
+                    .chain(&epoch.cycle_slips)
+                    .find(|(sat, _)| sat.system == system)
                 {
                     return Err(RinexObsWriteError::ValuesWithoutCodes {
                         epoch_index,
@@ -1770,11 +1818,7 @@ impl RinexObs {
         product.header.unretained_header_labels.clear();
         product.skipped_records = 0;
         for epoch in &mut product.epochs {
-            epoch.declared_record_count = if epoch.flag > 1 {
-                epoch.special_records.len()
-            } else {
-                epoch.sats.len()
-            };
+            epoch.declared_record_count = declared_count(epoch);
         }
         if product.is_rinex2() {
             if let Some(names) = rinex2_names {
@@ -2683,37 +2727,73 @@ fn describe_difference(expected: &RinexObs, found: &RinexObs) -> String {
             declared_record_count,
             special_records,
         );
-        let satellites_before: Vec<_> = before.sats.keys().collect();
-        let satellites_after: Vec<_> = after.sats.keys().collect();
-        if satellites_before != satellites_after {
-            return clipped(format!(
-                "epoch {index} satellites {satellites_before:?} read back as {satellites_after:?}"
-            ));
-        }
-        for (sat, values) in &before.sats {
-            let Some(read) = after.sats.get(sat) else {
-                return format!("epoch {index} {sat} does not read back");
-            };
-            if values.len() != read.len() {
-                return format!(
-                    "epoch {index} {sat} holds {} values and reads back with {}",
-                    values.len(),
-                    read.len()
-                );
-            }
-            if let Some(at) = values
-                .iter()
-                .zip(read)
-                .position(|(value, back)| value != back)
+        for (what, records_before, records_after) in [
+            ("satellites", &before.sats, &after.sats),
+            (
+                "cycle slip satellites",
+                &before.cycle_slips,
+                &after.cycle_slips,
+            ),
+        ] {
+            if let Some(difference) =
+                describe_records_difference(index, what, records_before, records_after)
             {
-                return clipped(format!(
-                    "epoch {index} {sat} value {at}: {:?} reads back as {:?}",
-                    values[at], read[at]
-                ));
+                return difference;
             }
         }
     }
     "the product reads back differently".to_string()
+}
+
+/// The first difference between an epoch's observation or cycle slip records
+/// before and after reading back, named with `what` they are.
+fn describe_records_difference(
+    index: usize,
+    what: &str,
+    before: &SatRecords,
+    after: &SatRecords,
+) -> Option<String> {
+    const LIMIT: usize = 400;
+    let clipped = |text: String| {
+        if text.len() <= LIMIT {
+            return text;
+        }
+        let mut end = LIMIT;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}...", &text[..end])
+    };
+    let satellites_before: Vec<_> = before.keys().collect();
+    let satellites_after: Vec<_> = after.keys().collect();
+    if satellites_before != satellites_after {
+        return Some(clipped(format!(
+            "epoch {index} {what} {satellites_before:?} read back as {satellites_after:?}"
+        )));
+    }
+    for (sat, values) in before {
+        let Some(read) = after.get(sat) else {
+            return Some(format!("epoch {index} {sat} does not read back"));
+        };
+        if values.len() != read.len() {
+            return Some(format!(
+                "epoch {index} {what} {sat} holds {} values and reads back with {}",
+                values.len(),
+                read.len()
+            ));
+        }
+        if let Some(at) = values
+            .iter()
+            .zip(read)
+            .position(|(value, back)| value != back)
+        {
+            return Some(clipped(format!(
+                "epoch {index} {what} {sat} value {at}: {:?} reads back as {:?}",
+                values[at], read[at]
+            )));
+        }
+    }
+    None
 }
 
 impl RinexObs {
@@ -2850,11 +2930,7 @@ impl RinexObs {
             };
         }
         if self.is_rinex2() && !self.header.rinex2_types.is_empty() {
-            let observed: std::collections::BTreeSet<GnssSystem> = self
-                .epochs
-                .iter()
-                .flat_map(|epoch| epoch.sats.keys().map(|sat| sat.system))
-                .collect();
+            let observed = self.rinex2_observed_systems();
             if !source_observed && !product.header.obs_codes.contains_key(&source_fallback) {
                 product.header.obs_codes.insert(
                     source_fallback,
@@ -2883,7 +2959,7 @@ impl RinexObs {
         // Laying the codes out would drop it, so it is refused before anything
         // is transformed.
         for (epoch_index, epoch) in product.epochs.iter().enumerate() {
-            for (sat, values) in &epoch.sats {
+            for (sat, values) in epoch.sats.iter().chain(&epoch.cycle_slips) {
                 let codes = product
                     .header
                     .obs_codes
@@ -2914,9 +2990,15 @@ impl RinexObs {
             }
         }
         // Three decimals are what an observation field holds, and a value read
-        // through a scale factor can carry more once the factor is gone.
+        // through a scale factor can carry more once the factor is gone. A
+        // cycle slip sits in the same field.
         for (epoch_index, epoch) in product.epochs.iter_mut().enumerate() {
-            for (sat, values) in &mut epoch.sats {
+            let records = epoch
+                .sats
+                .iter_mut()
+                .map(|record| (false, record))
+                .chain(epoch.cycle_slips.iter_mut().map(|record| (true, record)));
+            for (slip, (sat, values)) in records {
                 let codes = product.header.obs_codes.get(&sat.system);
                 for (index, value) in values.iter_mut().enumerate() {
                     let Some(held) = value.value.filter(|held| held.is_finite()) else {
@@ -2926,15 +3008,26 @@ impl RinexObs {
                         continue;
                     };
                     if rounded != held {
-                        changes.push(ObsDowngradeChange::ValueRounded {
-                            epoch_index,
-                            satellite: *sat,
-                            code: codes
-                                .and_then(|list| list.get(index))
-                                .cloned()
-                                .unwrap_or_default(),
-                            from: held,
-                            to: rounded,
+                        let code = codes
+                            .and_then(|list| list.get(index))
+                            .cloned()
+                            .unwrap_or_default();
+                        changes.push(if slip {
+                            ObsDowngradeChange::CycleSlipRounded {
+                                epoch_index,
+                                satellite: *sat,
+                                code,
+                                from: held,
+                                to: rounded,
+                            }
+                        } else {
+                            ObsDowngradeChange::ValueRounded {
+                                epoch_index,
+                                satellite: *sat,
+                                code,
+                                from: held,
+                                to: rounded,
+                            }
                         });
                         value.value = Some(rounded);
                     }
@@ -2990,7 +3083,7 @@ impl RinexObs {
             obs_codes.insert(*system, read);
         }
         for epoch in &mut product.epochs {
-            for (sat, values) in &mut epoch.sats {
+            for (sat, values) in epoch.sats.iter_mut().chain(epoch.cycle_slips.iter_mut()) {
                 if let Some(row) = layout.slots.get(&sat.system) {
                     let placed: Vec<ObsValue> = row
                         .iter()

@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use libfuzzer_sys::fuzz_target;
-use sidereon_core::rinex::observations::RinexObs;
+use sidereon_core::rinex::observations::{RinexObs, CYCLE_SLIP_FLAG};
 use sidereon_core::GnssSystem;
 
 // Round-trip class: a parsed observation product must re-encode to text that
@@ -58,10 +58,18 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
 /// read as the list, which this does not decide.
 fn holds_unstated_list(product: &RinexObs) -> bool {
     let header = product.header();
+    // A cycle slip record names its satellite on the epoch line as an
+    // observation record does.
     let mut stated: BTreeSet<GnssSystem> = product
         .epochs()
         .iter()
-        .flat_map(|epoch| epoch.sats.keys().map(|sat| sat.system))
+        .flat_map(|epoch| {
+            epoch
+                .sats
+                .keys()
+                .chain(epoch.cycle_slips.keys())
+                .map(|sat| sat.system)
+        })
         .collect();
     if stated.is_empty() {
         let mut lists = header.obs_codes.keys();
@@ -149,7 +157,9 @@ fuzz_target!(|data: &[u8]| {
     // writer states the records it has, so two records for one satellite are
     // declared as the one kept.
     for epoch in original.epochs.iter_mut().chain(reparsed.epochs.iter_mut()) {
-        epoch.declared_record_count = if epoch.flag > 1 {
+        epoch.declared_record_count = if epoch.flag == CYCLE_SLIP_FLAG {
+            epoch.cycle_slips.len()
+        } else if epoch.flag > 1 {
             epoch.special_records.len()
         } else {
             epoch.sats.len()
@@ -162,7 +172,13 @@ fuzz_target!(|data: &[u8]| {
         if original
             .epochs
             .iter()
-            .any(|epoch| epoch.sats.keys().any(|sat| sat.system != system))
+            .any(|epoch| {
+                epoch
+                    .sats
+                    .keys()
+                    .chain(epoch.cycle_slips.keys())
+                    .any(|sat| sat.system != system)
+            })
         {
             original.header.rinex2_system = None;
         }

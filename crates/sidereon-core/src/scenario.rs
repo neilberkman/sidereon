@@ -1179,6 +1179,7 @@ impl SyntheticObservationSet {
                 declared_record_count: sats.len(),
                 special_records: Vec::new(),
                 sats,
+                cycle_slips: BTreeMap::new(),
             });
         }
 

@@ -650,6 +650,45 @@ fn obs_text_repair_keeps_event_special_records_unless_told_to_drop_them() {
 }
 
 #[test]
+fn obs_repair_counts_no_cycle_slip_as_an_observation() {
+    // TIME OF LAST OBS is the time of the last observation record, and
+    // PRN / # OF OBS counts observations. A cycle slip epoch after the last
+    // observation is neither, and the repair keeps its slips as they are.
+    let body = [
+        gps_epoch(0, 0.0, "  20000000.000  "),
+        "> 2020 01 01 00 00 30.0000000  6  1\nG01         1.000".to_string(),
+    ]
+    .join("\n");
+    let obs = RinexObs::parse(&obs_text(&[], &body)).expect("parse OBS");
+    let repair = repair_obs(
+        &obs,
+        &RepairOptions {
+            set_time_of_last_obs: true,
+            set_obs_counts: true,
+            drop_empty_records: true,
+            drop_unsupported: true,
+            ..RepairOptions::default()
+        },
+    );
+    let repaired = &repair.repaired;
+    // A cycle slip epoch is not an event, so lint reports no OBS-B07 for it.
+    assert!(
+        !finding_code_counts(&lint_obs(&obs)).contains_key("OBS-B07"),
+        "{:?}",
+        lint_obs(&obs).findings
+    );
+    let (last, _) = repaired.header.time_of_last_obs.expect("TIME OF LAST OBS");
+    assert_eq!(last.second, 0.0);
+    let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("G01");
+    assert_eq!(repaired.header.prn_obs_counts[&g01], vec![Some(1)]);
+    assert_eq!(repaired.header.n_satellites, Some(1));
+    assert_eq!(repaired.epochs, obs.epochs);
+    let written = repaired.to_rinex_string().expect("serialize RINEX OBS");
+    let reparsed = RinexObs::parse(&written).expect("reparse");
+    assert_eq!(reparsed.epochs, obs.epochs);
+}
+
+#[test]
 fn obs_text_repair_guards_unretained_header_records() {
     let headers = [header_line("payload", "UNSUPPORTED LABEL")];
     let text = obs_text(&headers, &gps_epoch(0, 0.0, "  20000000.000  "));

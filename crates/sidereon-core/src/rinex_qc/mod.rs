@@ -1577,6 +1577,18 @@ fn lint_obs_glonass_slots(obs: &RinexObs, findings: &mut Vec<Finding>) {
 
 fn lint_obs_values(obs: &RinexObs, findings: &mut Vec<Finding>) {
     for (epoch_index, epoch) in obs.epochs.iter().enumerate() {
+        // A cycle slip epoch is not an event: its count is satellites, as an
+        // observation epoch's is, and its records are slips, not observations.
+        if epoch.flag == crate::rinex_obs::CYCLE_SLIP_FLAG {
+            if epoch.declared_record_count != epoch.cycle_slips.len() {
+                findings.push(Finding::ObsEpochSatCountMismatch {
+                    at: FindingRef::epoch(epoch_index),
+                    declared: epoch.declared_record_count,
+                    retained: epoch.cycle_slips.len(),
+                });
+            }
+            continue;
+        }
         if epoch.flag > 1 {
             findings.push(Finding::ObsEventEpoch {
                 at: FindingRef::epoch(epoch_index),

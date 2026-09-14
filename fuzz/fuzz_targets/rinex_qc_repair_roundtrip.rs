@@ -72,10 +72,18 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
 /// read as the list, which this does not decide.
 fn holds_unstated_list(product: &RinexObs) -> bool {
     let header = product.header();
+    // A cycle slip record names its satellite on the epoch line as an
+    // observation record does.
     let mut stated: BTreeSet<GnssSystem> = product
         .epochs()
         .iter()
-        .flat_map(|epoch| epoch.sats.keys().map(|sat| sat.system))
+        .flat_map(|epoch| {
+            epoch
+                .sats
+                .keys()
+                .chain(epoch.cycle_slips.keys())
+                .map(|sat| sat.system)
+        })
         .collect();
     if stated.is_empty() {
         let mut lists = header.obs_codes.keys();
