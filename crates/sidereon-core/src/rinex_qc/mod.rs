@@ -1419,29 +1419,29 @@ fn lint_obs_body(obs: &RinexObs, findings: &mut Vec<Finding>) {
             count: obs.skipped_records,
         });
     }
-    if let Some(first) = first_normal_epoch(obs) {
+    if let Some(first) = first_normal_epoch_time(obs) {
         if let Some((declared, declared_scale)) = obs.header.time_of_first_obs {
             let observed_scale = obs_body_time_scale(obs);
-            if !same_epoch_time(declared, first.epoch) || declared_scale != observed_scale {
+            if !same_epoch_time(declared, first) || declared_scale != observed_scale {
                 findings.push(Finding::ObsTimeOfFirstMismatch {
                     at: FindingRef::field("TIME OF FIRST OBS"),
                     declared,
                     declared_scale,
-                    observed: first.epoch,
+                    observed: first,
                     observed_scale,
                 });
             }
         }
     }
-    if let Some(last) = last_normal_epoch(obs) {
+    if let Some(last) = last_normal_epoch_time(obs) {
         if let Some((declared, declared_scale)) = obs.header.time_of_last_obs {
             let observed_scale = obs_body_time_scale(obs);
-            if !same_epoch_time(declared, last.epoch) || declared_scale != observed_scale {
+            if !same_epoch_time(declared, last) || declared_scale != observed_scale {
                 findings.push(Finding::ObsTimeOfLastMismatch {
                     at: FindingRef::field("TIME OF LAST OBS"),
                     declared,
                     declared_scale,
-                    observed: last.epoch,
+                    observed: last,
                     observed_scale,
                 });
             }
@@ -1472,24 +1472,24 @@ fn lint_obs_body(obs: &RinexObs, findings: &mut Vec<Finding>) {
 fn lint_obs_epoch_order(obs: &RinexObs, findings: &mut Vec<Finding>) {
     let mut previous: Option<(usize, ObsEpochTime)> = None;
     let mut seen = BTreeMap::new();
-    for (idx, epoch) in obs.epochs.iter().enumerate().filter(|(_, e)| e.flag <= 1) {
-        let key = epoch_key(epoch.epoch);
+    for (idx, time) in normal_epoch_times(obs) {
+        let key = epoch_key(time);
         if let Some((_, prev)) = previous {
             if key < epoch_key(prev) {
                 findings.push(Finding::ObsEpochOrder {
                     at: FindingRef::epoch(idx),
                     previous: prev,
-                    current: epoch.epoch,
+                    current: time,
                 });
             }
         }
         if seen.insert(key, idx).is_some() {
             findings.push(Finding::ObsDuplicateEpoch {
                 at: FindingRef::epoch(idx),
-                epoch: epoch.epoch,
+                epoch: time,
             });
         }
-        previous = Some((idx, epoch.epoch));
+        previous = Some((idx, time));
     }
 }
 
@@ -1642,9 +1642,9 @@ fn lint_obs_values(obs: &RinexObs, findings: &mut Vec<Finding>) {
 
 fn lint_obs_gaps(obs: &RinexObs, interval_s: f64, findings: &mut Vec<Finding>) {
     let mut previous: Option<ObsEpochTime> = None;
-    for (idx, epoch) in obs.epochs.iter().enumerate().filter(|(_, e)| e.flag <= 1) {
+    for (idx, time) in normal_epoch_times(obs) {
         if let Some(prev) = previous {
-            let gap = obs_epoch_seconds(epoch.epoch) - obs_epoch_seconds(prev);
+            let gap = obs_epoch_seconds(time) - obs_epoch_seconds(prev);
             if gap > interval_s * 1.5 {
                 findings.push(Finding::ObsEpochGap {
                     at: FindingRef::epoch(idx),
@@ -1653,7 +1653,7 @@ fn lint_obs_gaps(obs: &RinexObs, interval_s: f64, findings: &mut Vec<Finding>) {
                 });
             }
         }
-        previous = Some(epoch.epoch);
+        previous = Some(time);
     }
 }
 
@@ -1930,13 +1930,22 @@ fn repair_obs_order_and_duplicates(obs: &mut RinexObs, actions: &mut Vec<RepairA
     let before = obs.epochs.clone();
     // Epochs at the same seven-decimal second are distinct when their RINEX
     // 4.02 picosecond extensions differ; an epoch without one is at zero.
-    obs.epochs
-        .sort_by_key(|epoch| (epoch_key(epoch.epoch), epoch.epoch_picoseconds.unwrap_or(0)));
+    // An epoch without a time has nowhere to be sorted to or merged with, and
+    // stays first.
+    obs.epochs.sort_by_key(|epoch| {
+        (
+            epoch.epoch.map(epoch_key),
+            epoch.epoch_picoseconds.unwrap_or(0),
+        )
+    });
     let mut merged: Vec<ObsEpoch> = Vec::new();
     let mut discarded = Vec::new();
     for epoch in obs.epochs.drain(..) {
         if let Some(last) = merged.last_mut() {
-            if same_epoch_time(last.epoch, epoch.epoch)
+            if last
+                .epoch
+                .zip(epoch.epoch)
+                .is_some_and(|(held, next)| same_epoch_time(held, next))
                 && last.epoch_picoseconds.unwrap_or(0) == epoch.epoch_picoseconds.unwrap_or(0)
             {
                 for (sat, values) in epoch.sats {
@@ -1972,7 +1981,7 @@ fn repair_obs_order_and_duplicates(obs: &mut RinexObs, actions: &mut Vec<RepairA
 }
 
 fn repair_obs_times(obs: &mut RinexObs, options: &RepairOptions, actions: &mut Vec<RepairAction>) {
-    let Some(first) = first_normal_epoch(obs).map(|epoch| epoch.epoch) else {
+    let Some(first) = first_normal_epoch_time(obs) else {
         return;
     };
     let scale = obs_body_time_scale(obs);
@@ -1989,7 +1998,7 @@ fn repair_obs_times(obs: &mut RinexObs, options: &RepairOptions, actions: &mut V
             message: "recomputed TIME OF FIRST OBS".to_string(),
         });
     }
-    let Some(last) = last_normal_epoch(obs).map(|epoch| epoch.epoch) else {
+    let Some(last) = last_normal_epoch_time(obs) else {
         return;
     };
     // TIME OF FIRST OBS is the time-system authority (RINEX 3.05); a
@@ -2269,12 +2278,26 @@ fn obs_code_band_attr_allowed(system: GnssSystem, band: char, attr: char, _versi
     }
 }
 
-fn first_normal_epoch(obs: &RinexObs) -> Option<&ObsEpoch> {
-    obs.epochs.iter().find(|epoch| epoch.flag <= 1)
+/// The time of an observation epoch: flag 0 or 1, with an epoch time. Events
+/// and cycle slip records are not observations.
+fn normal_epoch_time(epoch: &ObsEpoch) -> Option<ObsEpochTime> {
+    epoch.epoch.filter(|_| epoch.flag <= 1)
 }
 
-fn last_normal_epoch(obs: &RinexObs) -> Option<&ObsEpoch> {
-    obs.epochs.iter().rev().find(|epoch| epoch.flag <= 1)
+/// Each observation epoch's index and time, in file order.
+fn normal_epoch_times(obs: &RinexObs) -> impl Iterator<Item = (usize, ObsEpochTime)> + '_ {
+    obs.epochs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, epoch)| normal_epoch_time(epoch).map(|time| (index, time)))
+}
+
+fn first_normal_epoch_time(obs: &RinexObs) -> Option<ObsEpochTime> {
+    obs.epochs.iter().find_map(normal_epoch_time)
+}
+
+fn last_normal_epoch_time(obs: &RinexObs) -> Option<ObsEpochTime> {
+    obs.epochs.iter().rev().find_map(normal_epoch_time)
 }
 
 /// RINEX 3.05 Table A2: TIME OF FIRST OBS carries the file's time system, so
@@ -2288,11 +2311,7 @@ fn obs_body_time_scale(obs: &RinexObs) -> TimeScale {
 }
 
 fn dominant_interval_for_epochs(epochs: &[ObsEpoch]) -> Option<f64> {
-    let normal: Vec<_> = epochs
-        .iter()
-        .filter(|epoch| epoch.flag <= 1)
-        .map(|epoch| epoch.epoch)
-        .collect();
+    let normal: Vec<_> = epochs.iter().filter_map(normal_epoch_time).collect();
     dominant_obs_interval_s(&normal)
 }
 

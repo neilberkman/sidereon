@@ -94,14 +94,15 @@ fn gps_float_epochs(obs: &RinexObs, count: usize, excluded: &[&str]) -> Vec<Floa
         .iter()
         .take(count)
         .map(|epoch| {
+            let time = epoch.epoch.expect("fixture epochs carry a time");
             let observations = float_observations(epoch, obs, &excluded);
             assert!(
                 observations.len() >= 6,
                 "fixture epoch {:?} has only {} complete GPS L1/L2 rows",
-                epoch.epoch,
+                time,
                 observations.len()
             );
-            float_epoch(epoch.epoch, observations)
+            float_epoch(time, observations)
         })
         .collect()
 }
@@ -170,15 +171,16 @@ fn gps_dual_epochs(obs: &RinexObs, count: usize) -> Vec<DualFrequencyEpoch> {
         .iter()
         .take(count)
         .map(|epoch| {
+            let time = epoch.epoch.expect("fixture epochs carry a time");
             let observations = dual_observations(epoch, obs);
             assert!(
                 observations.len() >= 6,
                 "fixture epoch {:?} has only {} complete GPS L1/L2 rows",
-                epoch.epoch,
+                time,
                 observations.len()
             );
             DualFrequencyEpoch {
-                gap_time_s: Some(j2000_seconds(epoch.epoch)),
+                gap_time_s: Some(j2000_seconds(time)),
                 observations,
             }
         })
@@ -723,7 +725,9 @@ fn esbc_real_slipped_arcs_can_be_split_before_narrow_lane_search() {
         .epochs
         .iter()
         .map(|prepared| {
-            let raw_epoch = obs.epochs()[prepared.epoch_index].epoch;
+            let raw_epoch = obs.epochs()[prepared.epoch_index]
+                .epoch
+                .expect("fixture epochs carry a time");
             let observations = prepared
                 .observations
                 .iter()

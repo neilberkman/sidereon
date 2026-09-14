@@ -182,7 +182,12 @@ fn first_gps_epoch(obs: &RinexObs) -> FloatEpoch {
         "fixture epoch has only {} GPS L1/L2 rows",
         observations.len()
     );
-    float_epoch(epoch.epoch, observations)
+    float_epoch(
+        epoch
+            .epoch
+            .expect("the fixture's first epoch carries a time"),
+        observations,
+    )
 }
 
 fn initial_state(epochs: &[FloatEpoch], approx: [f64; 3]) -> FloatState {
@@ -522,9 +527,12 @@ fn real_igs_ssr_corrected_gps_states_move_toward_ultra_rapid_sp3() {
 
     let obs = load_real_obs();
     assert_eq!(obs.epochs().len(), 4);
-    assert_eq!(obs.epochs()[0].epoch.hour, 14);
-    assert_eq!(obs.epochs()[0].epoch.minute, 7);
-    assert_eq!(obs.epochs()[0].epoch.second, 40.0);
+    let first = obs.epochs()[0]
+        .epoch
+        .expect("the fixture's first epoch carries a time");
+    assert_eq!(first.hour, 14);
+    assert_eq!(first.minute, 7);
+    assert_eq!(first.second, 40.0);
     assert!(
         obs.header().approx_position_m.is_some(),
         "matching observation fixture must retain LAMA station position"

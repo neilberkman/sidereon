@@ -32,7 +32,10 @@ fn repair_options() -> RepairOptions {
 /// finer than `F12.9`), and whether nothing can (a year outside 1980 to 2079,
 /// a clock offset too wide for `F12.9`). Returns (removable, permanent).
 fn write_obstacles(product: &RinexObs) -> (bool, bool) {
-    let wide_flag = product.epochs().iter().any(|epoch| epoch.flag > 9);
+    // Only an event may leave its epoch fields blank, at any version.
+    let wide_flag = product.epochs().iter().any(|epoch| {
+        epoch.flag > 9 || (epoch.epoch.is_none() && (epoch.flag <= 1 || epoch.flag == 6))
+    });
     let version = product.header().version;
     if version >= 3.0 {
         // Epoch records before 4.02 have no picosecond field and nothing
@@ -56,7 +59,9 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
         });
     let permanent = wide_flag
         || product.epochs().iter().any(|epoch| {
-            !(1980..=2079).contains(&epoch.epoch.year)
+            epoch
+                .epoch
+                .is_some_and(|time| !(1980..=2079).contains(&time.year))
                 || epoch
                     .rcv_clock_offset_s
                     .is_some_and(|offset| !offset.is_finite() || !clock_fits(offset))

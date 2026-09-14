@@ -23,7 +23,7 @@ use crate::precise_positioning::{
     detect_cycle_slips as detect_dual_frequency_cycle_slips, CycleSlipConfig, DualFrequencyEpoch,
     DualFrequencyObservation,
 };
-use crate::rinex::observations::{ObsEpochTime, RinexObs};
+use crate::rinex::observations::{ObsEpoch, ObsEpochTime, RinexObs};
 use crate::rinex_common::{
     dominant_obs_interval_s, obs_epoch_seconds, time_scale_rinex_label, usable_obs_interval_s,
 };
@@ -380,12 +380,15 @@ fn observation_qc_validated(obs: &RinexObs, options: ObservationQcOptions) -> Ob
             event_records += 1;
             continue;
         }
+        let Some(epoch_time) = epoch.epoch else {
+            continue;
+        };
 
         observation_epochs += 1;
         if epoch.flag == 1 {
             power_failure_epochs += 1;
         }
-        observation_epoch_times.push(epoch.epoch);
+        observation_epoch_times.push(epoch_time);
 
         let mut epoch_systems = BTreeSet::new();
         for (satellite, values) in &epoch.sats {
@@ -435,7 +438,7 @@ fn observation_qc_validated(obs: &RinexObs, options: ObservationQcOptions) -> Ob
             system_epoch_times
                 .entry(system)
                 .or_default()
-                .push(epoch.epoch);
+                .push(epoch_time);
         }
     }
 
@@ -776,10 +779,10 @@ fn clock_offset_deltas(obs: &RinexObs) -> Vec<ClockOffsetDelta> {
     let mut deltas = Vec::new();
 
     for (epoch_index, epoch) in obs.epochs().iter().enumerate() {
-        if epoch.flag > 1 {
+        if !is_observation_epoch(epoch) {
             continue;
         }
-        let Some(offset_s) = epoch.rcv_clock_offset_s else {
+        let (Some(epoch_time), Some(offset_s)) = (epoch.epoch, epoch.rcv_clock_offset_s) else {
             continue;
         };
         if !offset_s.is_finite() {
@@ -788,8 +791,8 @@ fn clock_offset_deltas(obs: &RinexObs) -> Vec<ClockOffsetDelta> {
 
         let sample = ClockOffsetSample {
             epoch_index,
-            epoch: epoch.epoch,
-            epoch_time_s: obs_epoch_seconds(epoch.epoch),
+            epoch: epoch_time,
+            epoch_time_s: obs_epoch_seconds(epoch_time),
             offset_s,
         };
 
@@ -871,12 +874,19 @@ fn observations_per_slip(observations: usize, slips: usize) -> Option<f64> {
     (slips > 0).then(|| observations as f64 / slips as f64)
 }
 
+/// Whether an epoch holds observations taken at a known time: flag 0 or 1,
+/// with an epoch time. Events and cycle slip records hold none, and every
+/// per-epoch series in this report is built from the same epochs.
+pub(crate) fn is_observation_epoch(epoch: &ObsEpoch) -> bool {
+    epoch.flag <= 1 && epoch.epoch.is_some()
+}
+
 fn dual_frequency_epochs(obs: &RinexObs) -> Vec<DualFrequencyEpoch> {
     obs.epochs()
         .iter()
-        .filter(|epoch| epoch.flag <= 1)
+        .filter(|epoch| is_observation_epoch(epoch))
         .map(|epoch| DualFrequencyEpoch {
-            gap_time_s: Some(obs_epoch_seconds(epoch.epoch)),
+            gap_time_s: epoch.epoch.map(obs_epoch_seconds),
             observations: epoch
                 .sats
                 .iter()
@@ -1485,7 +1495,11 @@ mod tests {
         for nonfinite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let mut obs = original.clone();
             obs.header.interval_s = None;
-            obs.epochs[1].epoch.second = nonfinite;
+            obs.epochs[1]
+                .epoch
+                .as_mut()
+                .expect("the second epoch has a time")
+                .second = nonfinite;
             let report = observation_qc(&obs);
             assert_eq!(report.interval_s, None, "{nonfinite:?}");
             assert_eq!(
@@ -2086,14 +2100,14 @@ NONE
         sats: BTreeMap<GnssSatelliteId, Vec<ObsValue>>,
     ) -> ObsEpoch {
         ObsEpoch {
-            epoch: ObsEpochTime {
+            epoch: Some(ObsEpochTime {
                 year: 2024,
                 month: 1,
                 day: 1,
                 hour: 0,
                 minute,
                 second,
-            },
+            }),
             flag,
             rcv_clock_offset_s: None,
             epoch_picoseconds: None,

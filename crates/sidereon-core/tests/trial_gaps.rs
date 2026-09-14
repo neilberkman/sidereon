@@ -377,10 +377,11 @@ fn esbc_solve_inputs(obs: &RinexObs, epoch: &ObsEpoch) -> SolveInputs {
         observations.len()
     );
     let approx = obs.header().approx_position_m.expect("APPROX POSITION XYZ");
-    let sod = second_of_day(epoch.epoch);
+    let time = epoch.epoch.expect("fixture epochs carry a time");
+    let sod = second_of_day(time);
     SolveInputs {
         observations,
-        t_rx_j2000_s: j2000_seconds(epoch.epoch),
+        t_rx_j2000_s: j2000_seconds(time),
         t_rx_second_of_day_s: sod,
         day_of_year: 177.0 + sod / SECONDS_PER_DAY,
         initial_guess: [approx[0], approx[1], approx[2], 0.0],

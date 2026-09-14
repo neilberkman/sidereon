@@ -195,12 +195,16 @@ pub fn multipath_stats(obs: &RinexObs, cycle_slip_config: &CycleSlipConfig) -> M
     let slip_boundaries = slip_boundaries(obs, cycle_slip_config);
     let gap_starts = gap_start_epoch_indices(obs);
     let mut states = BTreeMap::<GnssSatelliteId, SatelliteMultipathState>::new();
-    let epoch_count = obs.epochs().iter().filter(|epoch| epoch.flag <= 1).count();
+    let epoch_count = obs
+        .epochs()
+        .iter()
+        .filter(|epoch| super::is_observation_epoch(epoch))
+        .count();
 
     for (epoch_index, epoch) in obs
         .epochs()
         .iter()
-        .filter(|epoch| epoch.flag <= 1)
+        .filter(|epoch| super::is_observation_epoch(epoch))
         .enumerate()
     {
         if gap_starts.contains(&epoch_index) {
@@ -347,8 +351,8 @@ fn gap_start_epoch_indices(obs: &RinexObs) -> BTreeSet<usize> {
 fn observation_epoch_times(obs: &RinexObs) -> Vec<ObsEpochTime> {
     obs.epochs()
         .iter()
-        .filter(|epoch| epoch.flag <= 1)
-        .map(|epoch| epoch.epoch)
+        .filter(|epoch| super::is_observation_epoch(epoch))
+        .filter_map(|epoch| epoch.epoch)
         .collect()
 }
 
