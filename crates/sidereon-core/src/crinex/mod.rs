@@ -1139,6 +1139,9 @@ impl Decoder {
             let numsat = strict_int_field::<usize>(&first, 29, 32, "v1.epoch.satellite_count")?;
 
             if flag > 1 {
+                if flag == crate::rinex_obs::CYCLE_SLIP_FLAG {
+                    self.ensure_cycle_slip_epoch_fits_v1(&first, numsat)?;
+                }
                 let event_lines = read_event_lines(lines, numsat, "RINEX-2")?;
                 self.classify_event_lines(&event_lines)?;
                 epochs.push(EpochRecord::Event {
@@ -1189,6 +1192,43 @@ impl Decoder {
                 sats,
             }));
         }
+    }
+
+    /// Refuse a RINEX 2 cycle slip epoch whose records occupy any number of
+    /// lines other than its satellite count.
+    ///
+    /// CRINEX 1 carries every epoch flagged above 1 as its epoch line and
+    /// exactly as many lines after it as its count, which is how RNX2CRX and
+    /// CRX2RNX copy an event. A flag 6 epoch's count is satellites, listed on
+    /// the epoch line and continued twelve to a line, each followed by its
+    /// record continued five values to a line, by the observation count in
+    /// effect. When those lines number other than the count, the stream would
+    /// be misaligned, and no CRINEX 1 reader could read it back.
+    fn ensure_cycle_slip_epoch_fits_v1(&self, first: &str, numsat: usize) -> Result<()> {
+        let continuation = numsat.saturating_sub(1) / 12;
+        let mut tokens = Vec::with_capacity(numsat.min(12));
+        collect_sv_tokens_v1(first, numsat.min(12), &mut tokens);
+        let mut records = 0_usize;
+        for index in 0..numsat {
+            // A satellite past the epoch line's twelve is listed on a
+            // continuation line. RINEX 2 declares one type count for every
+            // constellation, so the first satellite's count stands for it.
+            let token = tokens
+                .get(index)
+                .or(tokens.first())
+                .map_or(" ", String::as_str);
+            records += self.obs_count_for(token)?.div_ceil(5);
+        }
+        let occupied = continuation + records;
+        if occupied == numsat {
+            return Ok(());
+        }
+        Err(Error::Parse(format!(
+            "RINEX-2 cycle slip epoch for {numsat} satellites occupies {occupied} lines after \
+             its epoch line ({continuation} satellite list continuation lines and {records} \
+             record lines), but CRINEX 1 copies exactly {numsat} lines after an event epoch, so \
+             this flag 6 epoch cannot be carried: {first:?}"
+        )))
     }
 
     /// The picoseconds a RINEX 4.02 epoch line carries after the clock offset,
@@ -1639,7 +1679,11 @@ fn labeled_crinex(body: &str, label: &str) -> String {
 fn serialize_rinex_epoch_v3<W: FnMut(&str)>(record: &EpochRecord, emit: &mut W) {
     match record {
         EpochRecord::Event { descriptor, lines } => {
-            emit(trim_end(field(descriptor, 0, 35)));
+            // RNX2CRX copies an event's epoch line whole as a descriptor reset,
+            // and CRX2RNX prints it back with trailing blanks removed: a slip
+            // epoch's satellite list and an event's clock offset and
+            // picoseconds are part of the line.
+            emit(trim_end(descriptor));
             for line in lines {
                 emit(line);
             }
@@ -1680,7 +1724,11 @@ fn serialize_rinex_epoch_v3<W: FnMut(&str)>(record: &EpochRecord, emit: &mut W) 
 fn serialize_rinex_epoch_v1<W: FnMut(&str)>(record: &EpochRecord, emit: &mut W) {
     match record {
         EpochRecord::Event { descriptor, lines } => {
-            emit(trim_end(field(descriptor, 0, 32)));
+            // RNX2CRX copies an event's epoch line whole as a descriptor reset,
+            // and CRX2RNX prints it back with trailing blanks removed: a slip
+            // epoch's satellite list and an event's clock offset and
+            // picoseconds are part of the line.
+            emit(trim_end(descriptor));
             for line in lines {
                 emit(line);
             }
