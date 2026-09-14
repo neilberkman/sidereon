@@ -1143,7 +1143,10 @@ pub fn prepare_ionosphere_free_rtk_arc(
 
     let epochs = merged_epochs
         .into_iter()
-        .map(|(index, epoch)| ionosphere_free_arc_epoch(&epochs[index], epoch))
+        .map(|(index, mut epoch)| {
+            qualify_reference_dependent_ambiguities(&mut epoch, &references);
+            ionosphere_free_arc_epoch(&epochs[index], epoch)
+        })
         .collect();
 
     Ok(RtkIonosphereFreeArcSolution {
@@ -1436,22 +1439,92 @@ fn insert_derived_scale(
     }
 }
 
+/// The wavelength or offset a source holds for an ambiguity id. The id's own
+/// entry comes first; then, for a double-difference id, its single-difference
+/// part's; then the entry qualified by a reference, `<id>|ref=<reference>`,
+/// which the ionosphere-free preparation keys the ambiguities it derives by;
+/// then the same for the carrier arc the id was derived from by splitting or
+/// reacquisition. The satellite's entry is taken only where the source holds
+/// no entry for that carrier arc in any form, since an entry for another of the
+/// satellite's carrier arcs holds another carrier's value.
 fn scale_value_for(
     source: &BTreeMap<String, f64>,
     ambiguity_id: &str,
     satellite_id: &str,
 ) -> Option<f64> {
-    source
+    let (sd_id, reference) = match ambiguity_id.split_once("|ref=") {
+        Some((sd_id, reference)) => (sd_id, Some(reference)),
+        None => (ambiguity_id, None),
+    };
+    let carrier_id = carrier_ambiguity_id(sd_id);
+    // A double-difference id over a single difference already qualified by its
+    // reference, `<sd>|ref=<reference>|ref=<reference>`, is keyed by the part
+    // before its last qualifier.
+    let qualified_sd = ambiguity_id
+        .rsplit_once("|ref=")
+        .map_or(ambiguity_id, |(sd, _)| sd);
+    let found = source
         .get(ambiguity_id)
-        .or_else(|| {
-            ambiguity_id
-                .split_once("|ref=")
-                .and_then(|(sd_id, _)| source.get(sd_id))
-        })
-        .or_else(|| source.get(satellite_id))
+        .or_else(|| source.get(qualified_sd))
+        .or_else(|| source.get(sd_id))
         .copied()
+        .or_else(|| qualified_scale_value(source, sd_id, reference))
+        .or_else(|| source.get(carrier_id).copied())
+        .or_else(|| qualified_scale_value(source, carrier_id, reference));
+    if found.is_some() {
+        return found;
+    }
+    let carrier_held = source.keys().any(|key| {
+        let sd_key = key.split_once("|ref=").map_or(key.as_str(), |(id, _)| id);
+        carrier_ambiguity_id(sd_key) == carrier_id
+    });
+    if carrier_held {
+        return None;
+    }
+    source.get(satellite_id).copied()
 }
 
+/// The value a source holds for `id` qualified by a reference. A
+/// double-difference query takes the entry for its own reference only. A
+/// single-difference query takes the entries for any reference when they hold
+/// one value, and none when they differ, as then no one value is its own.
+fn qualified_scale_value(
+    source: &BTreeMap<String, f64>,
+    id: &str,
+    reference: Option<&str>,
+) -> Option<f64> {
+    if let Some(reference) = reference {
+        return source.get(&format!("{id}|ref={reference}")).copied();
+    }
+    let prefix = format!("{id}|ref=");
+    let mut values = source
+        .iter()
+        .filter(|(key, _)| key.starts_with(&prefix))
+        .map(|(_, value)| *value);
+    let first = values.next()?;
+    values.all(|value| value == first).then_some(first)
+}
+
+/// The carrier arc a derived single-difference id was made from, whose scale it
+/// keeps: the base side of a divergent id, without its reacquisition suffix
+/// (`~ra<n>`) and its split suffix (`@<receiver>#<segment>`). A builder names a
+/// satellite's carrier arcs `<satellite>` and `<satellite>~freq<n>`, and
+/// splitting and reacquisition keep that name at the front of the id.
+fn carrier_ambiguity_id(sd_id: &str) -> &str {
+    let side = sd_id.split_once(":base=").map_or(sd_id, |(_, sides)| {
+        sides.split_once(",rover=").map_or(sides, |(base, _)| base)
+    });
+    let side = match side.rfind("~ra") {
+        Some(index)
+            if side.len() > index + 3
+                && side[index + 3..].bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            &side[..index]
+        }
+        _ => side,
+    };
+    side.rsplit_once('@').map_or(side, |(carrier, _)| carrier)
+}
 fn build_static_batch_epochs(
     epochs: &[RtkArcEpoch],
     config: &RtkArcConfig,
@@ -1875,6 +1948,78 @@ fn merge_ionosphere_free_epoch(
     entry.rover_observations.extend(epoch.rover_observations);
 }
 
+/// Give each non-reference satellite's ionosphere-free ambiguity, at an epoch
+/// whose reference single-difference ambiguity is not the reference satellite's
+/// first arc, the double-difference id its wavelength and offset are keyed by,
+/// `<single difference>|ref=<reference single difference>`.
+///
+/// An ionosphere-free ambiguity's offset holds the double-difference wide-lane
+/// integer, which changes with the reference's own wide-lane ambiguity, so one
+/// single-difference ambiguity has another offset on every reference arc. Named
+/// by its reference arc, each is an ambiguity of its own, which the solve
+/// starts afresh at the reference's change as it starts a satellite's own new
+/// arc, and whose offset is the one its reference arc gives. With the reference
+/// on its first arc every offset is the one that arc gives, and the ids are left
+/// as they are.
+fn qualify_reference_dependent_ambiguities(
+    epoch: &mut MergedIonosphereFreeEpoch,
+    references: &BTreeMap<String, String>,
+) {
+    for (system, reference) in references {
+        let reference_id = |observations: &[CoreRtkObservation]| {
+            observations
+                .iter()
+                .find(|observation| observation.satellite_id == *reference)
+                .map(|observation| observation.ambiguity_id.clone())
+        };
+        let (Some(base_id), Some(rover_id)) = (
+            reference_id(&epoch.base_observations),
+            reference_id(&epoch.rover_observations),
+        ) else {
+            continue;
+        };
+        let reference_sd = sd_ambiguity_token(reference, &base_id, &rover_id);
+        if reference_sd == *reference {
+            continue;
+        }
+        let rover_ids: BTreeMap<&str, &str> = epoch
+            .rover_observations
+            .iter()
+            .map(|observation| {
+                (
+                    observation.satellite_id.as_str(),
+                    observation.ambiguity_id.as_str(),
+                )
+            })
+            .collect();
+        let mut qualified = BTreeMap::new();
+        for base in &epoch.base_observations {
+            if base.satellite_id == *reference
+                || constellation_letter(&base.satellite_id) != system.as_str()
+            {
+                continue;
+            }
+            let Some(rover_id) = rover_ids.get(base.satellite_id.as_str()) else {
+                continue;
+            };
+            let sd = sd_ambiguity_token(&base.satellite_id, &base.ambiguity_id, rover_id);
+            qualified.insert(
+                base.satellite_id.clone(),
+                dd_ambiguity_token(&base.satellite_id, &sd, &reference_sd, reference),
+            );
+        }
+        for observation in epoch
+            .base_observations
+            .iter_mut()
+            .chain(epoch.rover_observations.iter_mut())
+        {
+            if let Some(id) = qualified.get(&observation.satellite_id) {
+                observation.ambiguity_id.clone_from(id);
+            }
+        }
+    }
+}
+
 fn ionosphere_free_arc_epoch(
     original: &RtkDualFrequencyArcEpoch,
     epoch: MergedIonosphereFreeEpoch,
@@ -2077,6 +2222,7 @@ fn solve_prepared_arc(
             normalized_epoch.velocity_mps,
             dt_s,
         )?;
+        refer_to_epoch_references(&mut state, &epoch);
 
         let update = update_epoch(
             state,
@@ -2095,7 +2241,7 @@ fn solve_prepared_arc(
         solutions.push(epoch_solution(
             &update,
             normalized_epoch.available.clone(),
-            &references,
+            &update.state.references,
         ));
         state = update.state;
     }
@@ -2105,6 +2251,36 @@ fn solve_prepared_arc(
         epochs: solutions,
         final_state: state,
     })
+}
+
+/// Refer the filter to the reference ambiguities an epoch carries. A reference
+/// satellite's ambiguity arc can change within an arc, at a slip or a carrier
+/// change; its constellation's double differences then refer to another
+/// ambiguity. The integers held against the old one no longer hold and are
+/// released, the single-difference states are kept, and the new reference
+/// ambiguity starts from its prior, so the constellation's integers are fixed
+/// again against it. The streaming update refuses such a change, as a caller
+/// carrying a state across it holds integers it has to release first.
+fn refer_to_epoch_references(state: &mut FilterState, epoch: &Epoch) {
+    for reference in &epoch.references {
+        let system = constellation_letter(&reference.sat);
+        if state
+            .references
+            .get(system)
+            .is_none_or(|held| *held == reference.sd_ambiguity_id)
+        {
+            continue;
+        }
+        state
+            .references
+            .insert(system.to_string(), reference.sd_ambiguity_id.clone());
+        state
+            .fixed_cycles
+            .retain(|id, _| constellation_letter(id) != system);
+        state
+            .fixed_m
+            .retain(|id, _| constellation_letter(id) != system);
+    }
 }
 
 /// Pair an epoch's base and rover observations by satellite and resolve the
@@ -2553,6 +2729,368 @@ mod tests {
             tokens.iter().map(|t| (t.clone(), wavelength_m)).collect();
         let offsets_m: BTreeMap<String, f64> = tokens.iter().map(|t| (t.clone(), 0.0)).collect();
         (epochs, config(wavelengths_m, offsets_m), baseline, tokens)
+    }
+
+    /// G02 on a second carrier arc from `change_at`, `G02~freq2`, with loss of
+    /// lock at epoch 3 on the base (`side` 0), the rover (1) or both (2).
+    #[test]
+    fn fixing_and_holding_keep_a_carrier_arcs_scale_after_a_split() {
+        for side in 0..3 {
+            for change_at in [2, 3, 4] {
+                let (template, mut config, baseline, _) = integer_arc();
+                let mut epochs = vec![template[0].clone(); 12];
+                let lambda = config.wavelengths_m["G02"];
+                config.wavelengths_m.insert("G02~freq2".into(), lambda);
+                config.offsets_m.insert("G02~freq2".into(), 0.0);
+                config.preprocessing.cycle_slip = Some(CycleSlipPolicy::SplitArc);
+                for (index, epoch) in epochs.iter_mut().enumerate() {
+                    for (receiver, observation) in
+                        [(0, &mut epoch.base[1]), (1, &mut epoch.rover[1])]
+                    {
+                        if index >= change_at {
+                            observation.ambiguity_id = "G02~freq2".into();
+                        }
+                        if index == 3 && (side == 2 || side == receiver) {
+                            observation.lli = Some(1);
+                        }
+                        if receiver == 1 {
+                            observation.phase_m = observation.code_m - 2.0 * lambda;
+                        }
+                    }
+                }
+                let what = format!("side {side}, change at {change_at}");
+                let solved = solve_rtk_arc(&epochs, &config).expect(&what);
+                let last = solved.epochs.last().expect("last epoch");
+                assert!(
+                    norm3(sub3(last.reported_baseline_m, baseline)) < 1e-3,
+                    "{what}"
+                );
+                assert!(last.integer_fixed, "{what}");
+                assert!(
+                    last.fixed_ids.iter().any(|id| id.contains("G02~freq2")),
+                    "{what}: {:?}",
+                    last.fixed_ids
+                );
+            }
+        }
+    }
+
+    /// The single-frequency arc of the test above solved with wavelength and
+    /// offset maps keyed as the ionosphere-free preparation keys its own: a
+    /// satellite on its own clean arc by its id, every other ambiguity by its
+    /// double-difference id, `<single-difference id>|ref=G01`, and nothing for
+    /// G02 alone. Fixing and holding look each single-difference id up in them.
+    #[test]
+    fn fixing_and_holding_resolve_ids_keyed_by_their_reference() {
+        for side in 0..3 {
+            for change_at in [2, 3, 4] {
+                let (template, mut config, baseline, _) = integer_arc();
+                let lambda = config.wavelengths_m["G02"];
+                let mut epochs = vec![template[0].clone(); 12];
+                config.preprocessing.cycle_slip = Some(CycleSlipPolicy::SplitArc);
+                for (index, epoch) in epochs.iter_mut().enumerate() {
+                    for (receiver, observation) in
+                        [(0, &mut epoch.base[1]), (1, &mut epoch.rover[1])]
+                    {
+                        if index >= change_at {
+                            observation.ambiguity_id = "G02~freq2".into();
+                        }
+                        if index == 3 && (side == 2 || side == receiver) {
+                            observation.lli = Some(1);
+                        }
+                        if receiver == 1 {
+                            observation.phase_m = observation.code_m - 2.0 * lambda;
+                        }
+                    }
+                }
+                let smoothing: Vec<CodeSmoothingEpoch> =
+                    epochs.iter().map(to_code_smoothing_epoch).collect();
+                let prepared =
+                    prepare_cycle_slip_baseline_epochs(&smoothing, CycleSlipPolicy::SplitArc)
+                        .expect("prepare");
+                let mut wavelengths_m = BTreeMap::new();
+                let mut offsets_m = BTreeMap::new();
+                for epoch in &prepared.epochs {
+                    for base in &epoch.base_observations {
+                        let rover = epoch
+                            .rover_observations
+                            .iter()
+                            .find(|rover| rover.satellite_id == base.satellite_id)
+                            .expect("rover observation");
+                        let sat = base.satellite_id.as_str();
+                        let sd = sd_ambiguity_token(sat, &base.ambiguity_id, &rover.ambiguity_id);
+                        let key = dd_ambiguity_token(sat, &sd, "G01", "G01");
+                        wavelengths_m.insert(key.clone(), lambda);
+                        offsets_m.insert(key, 0.0);
+                    }
+                }
+                let what = format!("side {side}, change at {change_at}");
+                assert!(!wavelengths_m.contains_key("G02"), "{what}");
+                config.wavelengths_m = wavelengths_m;
+                config.offsets_m = offsets_m;
+                let solved = solve_rtk_arc(&epochs, &config)
+                    .unwrap_or_else(|error| panic!("{what}: {error:?}"));
+                assert_eq!(
+                    solved.references.get("G").map(String::as_str),
+                    Some("G01"),
+                    "{what}"
+                );
+                // Fixed by the end and held over the last epochs.
+                for last in &solved.epochs[solved.epochs.len() - 3..] {
+                    assert!(
+                        norm3(sub3(last.reported_baseline_m, baseline)) < 1e-3,
+                        "{what}"
+                    );
+                    assert!(last.integer_fixed, "{what}");
+                    assert!(
+                        last.fixed_ids.iter().any(|id| id.contains("G02~freq2")),
+                        "{what}: {:?}",
+                        last.fixed_ids
+                    );
+                }
+            }
+        }
+    }
+
+    /// The dual-frequency pipeline with G02 on a second carrier arc from
+    /// `change_at`, and loss of lock at epoch 3 on the base (`side` 0), the
+    /// rover (1), both (2) or neither (3). The ionosphere-free maps are keyed by
+    /// double-difference ids, `<id>|ref=G01`; the fixed solve looks each
+    /// single-difference id up in them.
+    #[test]
+    fn dual_frequency_fixing_resolves_each_ambiguity_to_its_carrier_arcs_scale() {
+        for side in 0..4 {
+            for change_at in [2, 3, 4] {
+                let (template, mut wide) = dual_arc();
+                let mut epochs = vec![template[0].clone(); 12];
+                wide.options.min_epochs = 1;
+                let slip_options = CycleSlipOptions {
+                    gf_threshold_m: 1e9,
+                    mw_threshold_cycles: 1e9,
+                    ..CycleSlipOptions::default()
+                };
+                wide.cycle_slip = Some(RtkDualCycleSlipConfig::new(
+                    CycleSlipPolicy::SplitArc,
+                    slip_options,
+                ));
+                for (index, epoch) in epochs.iter_mut().enumerate() {
+                    epoch.epoch_sort_key = Some(format!("{index:03}"));
+                    epoch.gap_time_s = Some(index as f64);
+                    let observation = &mut epoch.observations[1];
+                    for (receiver, carrier) in
+                        [(0, &mut observation.base), (1, &mut observation.rover)]
+                    {
+                        if index >= change_at {
+                            carrier.ambiguity_id = "G02~freq2".into();
+                            if receiver == 1 {
+                                carrier.phi1_cycles += 1.0;
+                            }
+                        }
+                        if index == 3 && (side == 2 || side == receiver) {
+                            carrier.lli1 = Some(1);
+                        }
+                    }
+                }
+                let combined = RtkWideLaneFixedArcConfig {
+                    ionosphere_free: RtkIonosphereFreeArcConfig {
+                        base_m: wide.base_m,
+                        initial_baseline_m: [0.0; 3],
+                        reference: wide.reference.clone(),
+                        apply_troposphere: false,
+                    },
+                    wide_lane: wide,
+                    solve: RtkWideLaneFixedArcSolveConfig::Sequential(config(
+                        BTreeMap::new(),
+                        BTreeMap::new(),
+                    )),
+                };
+                let what = format!("side {side}, change at {change_at}");
+                let wide_lane = fix_wide_lane_rtk_arc(&epochs, &combined.wide_lane).expect(&what);
+                let ionosphere_free = prepare_ionosphere_free_rtk_arc(
+                    &wide_lane.epochs,
+                    &wide_lane.wide_lane_cycles,
+                    &combined.ionosphere_free,
+                )
+                .expect(&what);
+                // Each single-difference id resolves to the value its own
+                // reference-qualified entry holds, never to another carrier
+                // arc's or to the satellite's first.
+                let mut resolved = 0;
+                for epoch in &ionosphere_free.epochs {
+                    for base in &epoch.base {
+                        let Some(rover) = epoch
+                            .rover
+                            .iter()
+                            .find(|rover| rover.satellite_id == base.satellite_id)
+                        else {
+                            continue;
+                        };
+                        let sd = sd_ambiguity_token(
+                            &base.satellite_id,
+                            &base.ambiguity_id,
+                            &rover.ambiguity_id,
+                        );
+                        for map in [&ionosphere_free.wavelengths_m, &ionosphere_free.offsets_m] {
+                            let own: Vec<f64> = map
+                                .iter()
+                                .filter(|(key, _)| {
+                                    key.as_str() == sd
+                                        || key.split_once("|ref=").is_some_and(|(id, _)| id == sd)
+                                })
+                                .map(|(_, value)| *value)
+                                .collect();
+                            let [expected] = own[..] else {
+                                continue;
+                            };
+                            assert_eq!(
+                                scale_value_for(map, &sd, &base.satellite_id),
+                                Some(expected),
+                                "{what}: {sd}"
+                            );
+                            resolved += 1;
+                        }
+                    }
+                }
+                assert!(resolved > 0, "{what}");
+                let solution = solve_wide_lane_fixed_rtk_arc(&epochs, &combined)
+                    .unwrap_or_else(|error| panic!("{what}: {error:?}"));
+                let RtkWideLaneFixedArcSolution::Sequential(solution) = solution else {
+                    panic!("{what}: the sequential solve was configured");
+                };
+                assert_eq!(solution.solution.epochs.len(), epochs.len(), "{what}");
+            }
+        }
+    }
+
+    /// The integer arc over twelve epochs with the reference, G01, slipping by
+    /// one cycle on the rover at epoch 7, flagged on the rover. Its ambiguity
+    /// arc changes there, and the arc fixes and holds again against the new one.
+    #[test]
+    fn single_frequency_fixing_holds_across_a_reference_slip() {
+        let (template, mut config, baseline, _) = integer_arc();
+        let lambda = config.wavelengths_m["G01"];
+        config.preprocessing.cycle_slip = Some(CycleSlipPolicy::SplitArc);
+        let mut epochs = vec![template[0].clone(); 12];
+        for (index, epoch) in epochs.iter_mut().enumerate() {
+            let reference = &mut epoch.rover[0];
+            assert_eq!(reference.satellite_id, "G01");
+            if index >= 7 {
+                reference.phase_m += lambda;
+            }
+            if index == 7 {
+                reference.lli = Some(1);
+            }
+        }
+        let solved = solve_rtk_arc(&epochs, &config).unwrap_or_else(|error| panic!("{error:?}"));
+        for epoch in &solved.epochs[9..] {
+            assert!(epoch.integer_fixed);
+            assert!(norm3(sub3(epoch.reported_baseline_m, baseline)) < 1e-3);
+        }
+    }
+
+    /// The dual-frequency pipeline over sixteen epochs of the integer arc's
+    /// geometry, G01 the reference. G02 moves to a second carrier arc at epoch 4
+    /// and slips at 5; with `reference_change`, G01 moves to one at 7 and slips
+    /// at 8. Each slip is flagged on the base (`side` 0), the rover (1) or both
+    /// (2). The ionosphere-free offsets of every satellite depend on the
+    /// reference's wide-lane ambiguity, which changes with the reference's arc.
+    #[test]
+    fn dual_frequency_fixing_holds_across_a_reference_ambiguity_change() {
+        for reference_change in [false, true] {
+            for side in 0..3 {
+                let (single, solve, baseline, _) = integer_arc();
+                let (template, mut wide) = dual_arc();
+                wide.options.min_epochs = 1;
+                wide.cycle_slip = Some(RtkDualCycleSlipConfig::new(
+                    CycleSlipPolicy::SplitArc,
+                    CycleSlipOptions {
+                        gf_threshold_m: 1e9,
+                        mw_threshold_cycles: 1e9,
+                        ..CycleSlipOptions::default()
+                    },
+                ));
+                let mut epochs = vec![template[0].clone(); 16];
+                for (index, epoch) in epochs.iter_mut().enumerate() {
+                    epoch.epoch_sort_key = Some(format!("{index:03}"));
+                    epoch.gap_time_s = Some(index as f64);
+                    epoch.satellite_positions_m = single[0].satellite_positions_m.clone();
+                    epoch.observations = single[0]
+                        .base
+                        .iter()
+                        .zip(&single[0].rover)
+                        .enumerate()
+                        .map(|(position, (base, rover))| {
+                            let changed = (position == 1 && index >= 4)
+                                || (position == 0 && reference_change && index >= 7);
+                            let slipped = (position == 1 && index == 5)
+                                || (position == 0 && reference_change && index == 8);
+                            let carrier = if changed {
+                                format!("{}~freq2", base.satellite_id)
+                            } else {
+                                base.satellite_id.clone()
+                            };
+                            let make = |receiver: usize, code_m: f64| {
+                                let mut n1 = if receiver == 1 {
+                                    position as f64 + 3.0
+                                } else {
+                                    0.0
+                                };
+                                let n2 = if receiver == 1 { position as f64 } else { 0.0 };
+                                if receiver == 1 && position == 1 && index >= 4 {
+                                    n1 += 2.0;
+                                }
+                                if receiver == 1 && position == 0 && reference_change && index >= 7
+                                {
+                                    n1 += 1.0;
+                                }
+                                RtkDualFrequencyObservation {
+                                    ambiguity_id: carrier.clone(),
+                                    p1_m: code_m,
+                                    p2_m: code_m,
+                                    phi1_cycles: code_m / (C_M_S / F_L1_HZ) + n1,
+                                    phi2_cycles: code_m / (C_M_S / F_L2_HZ) + n2,
+                                    f1_hz: F_L1_HZ,
+                                    f2_hz: F_L2_HZ,
+                                    lli1: Some(i64::from(
+                                        slipped && (side == 2 || side == receiver),
+                                    )),
+                                    lli2: None,
+                                }
+                            };
+                            RtkDualFrequencySatelliteObservation {
+                                satellite_id: base.satellite_id.clone(),
+                                base: make(0, base.code_m),
+                                rover: make(1, rover.code_m),
+                            }
+                        })
+                        .collect();
+                }
+                let combined = RtkWideLaneFixedArcConfig {
+                    ionosphere_free: RtkIonosphereFreeArcConfig {
+                        base_m: wide.base_m,
+                        initial_baseline_m: [0.0; 3],
+                        reference: wide.reference.clone(),
+                        apply_troposphere: false,
+                    },
+                    wide_lane: wide,
+                    solve: RtkWideLaneFixedArcSolveConfig::Sequential(solve),
+                };
+                let what = format!("reference change {reference_change}, side {side}");
+                let solution = solve_wide_lane_fixed_rtk_arc(&epochs, &combined)
+                    .unwrap_or_else(|error| panic!("{what}: {error:?}"));
+                let RtkWideLaneFixedArcSolution::Sequential(solution) = solution else {
+                    panic!("{what}: the sequential solve was configured");
+                };
+                // Fixed, and held, over the last three epochs.
+                for epoch in &solution.solution.epochs[13..] {
+                    assert!(epoch.integer_fixed, "{what}");
+                    assert!(
+                        norm3(sub3(epoch.reported_baseline_m, baseline)) < 1e-3,
+                        "{what}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -3499,5 +4037,132 @@ mod tests {
             });
 
         assert_eq!(driver, expected);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod carrier_arc_tests {
+    use super::*;
+    use crate::carrier_phase::CycleSlipOptions;
+    use crate::rtk::{
+        prepare_cycle_slip_baseline_epochs, prepare_dual_cycle_slip_baseline_epochs,
+        sd_ambiguity_token, CycleSlipEpoch, CycleSlipObservation, CycleSlipPolicy,
+        DualCycleSlipEpoch, DualCycleSlipObservation,
+    };
+
+    /// R01 over three epochs: the builder's carrier arcs, `R01` twice then
+    /// `R01~freq2`, with loss of lock at the second epoch on both receivers.
+    fn single_epochs() -> Vec<CycleSlipEpoch> {
+        (0..3)
+            .map(|index| {
+                let observation = CycleSlipObservation {
+                    satellite_id: "R01".to_string(),
+                    ambiguity_id: if index < 2 { "R01" } else { "R01~freq2" }.to_string(),
+                    code_m: 20_000_000.0,
+                    phase_m: 100.0,
+                    lli: Some(if index == 1 { 1 } else { 0 }),
+                };
+                CycleSlipEpoch {
+                    base_observations: vec![observation.clone()],
+                    rover_observations: vec![observation],
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_slip_split_keeps_a_carrier_change_apart_and_its_wavelength() {
+        let prepared =
+            prepare_cycle_slip_baseline_epochs(&single_epochs(), CycleSlipPolicy::SplitArc)
+                .expect("prepare");
+        let ids: Vec<(String, String)> = prepared
+            .epochs
+            .iter()
+            .map(|epoch| {
+                (
+                    epoch.base_observations[0].ambiguity_id.clone(),
+                    epoch.rover_observations[0].ambiguity_id.clone(),
+                )
+            })
+            .collect();
+        // A slip splits the arc, and so does the carrier change after it.
+        assert_ne!(ids[0], ids[1], "{ids:?}");
+        assert_ne!(ids[1], ids[2], "{ids:?}");
+        // Every derived id keeps its carrier's wavelength.
+        let wavelengths = BTreeMap::from([
+            ("R01".to_string(), 0.187_597_455),
+            ("R01~freq2".to_string(), 0.186_742_947),
+        ]);
+        for (index, (base, rover)) in ids.iter().enumerate() {
+            let sd = sd_ambiguity_token("R01", base, rover);
+            let expected = if index < 2 {
+                0.187_597_455
+            } else {
+                0.186_742_947
+            };
+            assert_eq!(
+                scale_value_for(&wavelengths, &sd, "R01"),
+                Some(expected),
+                "epoch {index}: {sd}"
+            );
+            let dd = crate::rtk::dd_ambiguity_token("R01", &sd, "R02", "R02");
+            assert_eq!(
+                scale_value_for(&wavelengths, &dd, "R01"),
+                Some(expected),
+                "{dd}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dual_frequency_slip_split_keeps_a_carrier_change_apart() {
+        // Only the loss of lock flags a slip.
+        let options = CycleSlipOptions {
+            gf_threshold_m: 1e9,
+            mw_threshold_cycles: 1e9,
+            min_arc_gap_s: 1000.0,
+            ..CycleSlipOptions::default()
+        };
+        let epochs: Vec<DualCycleSlipEpoch> = (0..3)
+            .map(|index| {
+                let observation = DualCycleSlipObservation {
+                    satellite_id: "R01".to_string(),
+                    ambiguity_id: if index < 2 { "R01" } else { "R01~freq2" }.to_string(),
+                    p1_m: 20_000_000.0,
+                    p2_m: 20_000_000.0,
+                    phi1_cycles: 100.0,
+                    phi2_cycles: 90.0,
+                    f1_hz: if index < 2 {
+                        1_598_062_500.0
+                    } else {
+                        1_605_375_000.0
+                    },
+                    f2_hz: if index < 2 {
+                        1_242_937_500.0
+                    } else {
+                        1_248_625_000.0
+                    },
+                    lli1: Some(if index == 1 { 1 } else { 0 }),
+                    lli2: Some(0),
+                };
+                DualCycleSlipEpoch {
+                    epoch_sort_key: format!("{index}"),
+                    gap_time_s: Some(index as f64 * 10.0),
+                    base_observations: vec![observation.clone()],
+                    rover_observations: vec![observation],
+                }
+            })
+            .collect();
+        let prepared =
+            prepare_dual_cycle_slip_baseline_epochs(&epochs, CycleSlipPolicy::SplitArc, options)
+                .expect("prepare");
+        let ids: Vec<String> = prepared
+            .epochs
+            .iter()
+            .map(|epoch| epoch.base_observations[0].ambiguity_id.clone())
+            .collect();
+        assert_ne!(ids[0], ids[1], "{ids:?}");
+        assert_ne!(ids[1], ids[2], "{ids:?}");
     }
 }

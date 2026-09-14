@@ -37,6 +37,10 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
         epoch.flag > 9 || (epoch.epoch.is_none() && (epoch.flag <= 1 || epoch.flag == 6))
     });
     let version = product.header().version;
+    // An event's header records that do not read leave every later list and
+    // scale factor unknown; a product read from text never holds them.
+    let timeline = product.header_timeline().ok();
+    let unreadable = timeline.is_none();
     if version >= 3.0 {
         // Epoch records before 4.02 have no picosecond field and nothing
         // removes them; 4.02 records carry them after the clock.
@@ -45,11 +49,29 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
                 .epochs()
                 .iter()
                 .any(|epoch| epoch.epoch_picoseconds.is_some());
-        return (false, wide_flag || picoseconds);
+        return (false, wide_flag || picoseconds || unreadable);
     }
     let clock_fits = |offset: f64| format!("{offset:12.9}").len() <= 12;
     let clock_exact = |offset: f64| format!("{offset:.9}").parse::<f64>() == Ok(offset);
-    let removable = !product.header().scale_factors.is_empty()
+    let file = product.header();
+    // A scale factor an event declares is refused at version 2 as the file
+    // header's is.
+    let event_scale_factors = timeline.as_ref().is_some_and(|timeline| {
+        timeline
+            .segments()
+            .any(|(_, header)| header.scale_factors.len() > file.scale_factors.len())
+    });
+    // A downgrade refuses a product whose events change its code lists, type
+    // names or scale factors.
+    let mid_file_changes = timeline.as_ref().is_some_and(|timeline| {
+        timeline.segments().skip(1).any(|(_, header)| {
+            header.declared_obs_codes != file.declared_obs_codes
+                || header.rinex2_types != file.rinex2_types
+                || header.scale_factors != file.scale_factors
+        })
+    });
+    let removable = event_scale_factors
+        || !product.header().scale_factors.is_empty()
         || holds_unstated_list(product)
         || product.epochs().iter().any(|epoch| {
             epoch.epoch_picoseconds.is_some()
@@ -58,6 +80,8 @@ fn write_obstacles(product: &RinexObs) -> (bool, bool) {
                     .is_some_and(|offset| !clock_exact(offset))
         });
     let permanent = wide_flag
+        || unreadable
+        || (mid_file_changes && removable)
         || product.epochs().iter().any(|epoch| {
             epoch
                 .epoch

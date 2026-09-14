@@ -43,6 +43,13 @@ fn obs_text(headers: &[String], body: &str) -> String {
             "TIME OF FIRST OBS",
         ),
     ];
+    // A header block may not give a label holding one value two values, so a
+    // record the test declares takes the place of the default for its label.
+    let label = |line: &String| line.get(60..).unwrap_or("").trim().to_string();
+    lines.retain(|line| {
+        !crate::rinex_obs::SINGLE_VALUE_LABELS.contains(&label(line).as_str())
+            || !headers.iter().any(|header| label(header) == label(line))
+    });
     lines.extend(headers.iter().cloned());
     lines.push(header_line("", "END OF HEADER"));
     lines.extend(body.lines().map(str::to_string));
@@ -689,6 +696,119 @@ fn obs_repair_counts_no_cycle_slip_as_an_observation() {
 }
 
 #[test]
+fn obs_repair_keeps_the_header_records_an_event_carries() {
+    // drop_unsupported drops records outside the product. A header record an
+    // event carries changes the epochs after it and is part of the product;
+    // the comment beside it is not.
+    let body = [
+        gps_epoch(0, 0.0, "  20000000.000  "),
+        "> 2020 01 01 00 00 30.0000000  4  2".to_string(),
+        header_line("a comment", "COMMENT"),
+        header_line("QC02", "MARKER NAME"),
+        gps_epoch(1, 0.0, "  20000060.000  "),
+    ]
+    .join("\n");
+    let obs = RinexObs::parse(&obs_text(&[], &body)).expect("parse OBS");
+    let repair = repair_obs(
+        &obs,
+        &RepairOptions {
+            drop_unsupported: true,
+            ..RepairOptions::default()
+        },
+    );
+    assert_eq!(
+        repair.repaired.epochs[1].special_records,
+        vec![header_line("QC02", "MARKER NAME")]
+    );
+    assert_eq!(repair.repaired.epochs[1].declared_record_count, 1);
+    assert_eq!(
+        repair
+            .repaired
+            .header_at(2)
+            .expect("header in effect")
+            .marker_name
+            .as_deref(),
+        Some("QC02")
+    );
+    assert!(repair.actions.iter().any(|action| action.id == "OBS-B11"));
+}
+
+#[test]
+fn obs_interval_checks_take_each_interval_for_the_epochs_it_is_in_effect_for() {
+    // One-second epochs under the header's INTERVAL, then a flag 4 event
+    // declaring 30 s before 30 s epochs. Judged against one interval, the 30 s
+    // epochs were gaps and the header's INTERVAL a mismatch.
+    let epoch = |minute: u8, second: f64| gps_epoch(minute, second, "  20000000.000  ");
+    let body = [
+        epoch(0, 0.0),
+        epoch(0, 1.0),
+        epoch(0, 2.0),
+        epoch(0, 3.0),
+        format!(">{:30}4  1", ""),
+        header_line("    30.000", "INTERVAL"),
+        epoch(0, 33.0),
+        epoch(1, 3.0),
+        epoch(1, 33.0),
+    ]
+    .join("\n");
+    let obs = RinexObs::parse(&obs_text(&[header_line("     1.000", "INTERVAL")], &body))
+        .expect("parse OBS");
+    let codes = finding_code_counts(&lint_obs(&obs));
+    assert!(!codes.contains_key("OBS-H09"), "{codes:?}");
+    assert!(!codes.contains_key("OBS-B09"), "{codes:?}");
+    let report = crate::observation_qc::observation_qc(&obs);
+    assert!(report.data_gaps.is_empty(), "{:?}", report.data_gaps);
+
+    let repair = repair_obs(
+        &obs,
+        &RepairOptions {
+            set_interval: true,
+            ..RepairOptions::default()
+        },
+    );
+    assert_eq!(repair.repaired.header.interval_s, Some(1.0));
+    assert!(!repair.actions.iter().any(|action| action.id == "A6"));
+}
+
+#[test]
+fn obs_lint_takes_a_glonass_slot_an_event_declares() {
+    let headers = [header_line("R    1 C1C", "SYS / # / OBS TYPES")];
+    let body = [
+        "> 2020 01 01 00 00  0.0000000  4  1".to_string(),
+        header_line("  1 R01  1", "GLONASS SLOT / FRQ #"),
+        "> 2020 01 01 00 00 30.0000000  0  1\nR01  20000000.000".to_string(),
+    ]
+    .join("\n");
+    let obs = RinexObs::parse(&obs_text(&headers, &body)).expect("parse OBS");
+    let codes = finding_code_counts(&lint_obs(&obs));
+    assert!(!codes.contains_key("OBS-H12"), "{codes:?}");
+}
+
+#[test]
+fn obs_repair_counts_only_the_codes_the_file_header_declares() {
+    // PRN / # OF OBS holds a count for each code the header's SYS / # / OBS
+    // TYPES declares; a code only an event declares has no field there.
+    let body = [
+        gps_epoch(0, 0.0, "  20000000.000  "),
+        "> 2020 01 01 00 00 30.0000000  4  1".to_string(),
+        header_line("G    2 C1C L1C", "SYS / # / OBS TYPES"),
+        gps_epoch(1, 0.0, "  20000060.000     100000.000  "),
+    ]
+    .join("\n");
+    let obs = RinexObs::parse(&obs_text(&[], &body)).expect("parse OBS");
+    assert_eq!(obs.header.obs_codes[&GnssSystem::Gps], ["C1C", "L1C"]);
+    let repair = repair_obs(
+        &obs,
+        &RepairOptions {
+            set_obs_counts: true,
+            ..RepairOptions::default()
+        },
+    );
+    let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("G01");
+    assert_eq!(repair.repaired.header.prn_obs_counts[&g01], vec![Some(2)]);
+}
+
+#[test]
 fn obs_text_repair_guards_unretained_header_records() {
     let headers = [header_line("payload", "UNSUPPORTED LABEL")];
     let text = obs_text(&headers, &gps_epoch(0, 0.0, "  20000000.000  "));
@@ -969,7 +1089,21 @@ fn repair_is_total_for_exact_scheduled_fuzz_crash_artifact() {
         sha256_hex(&input),
         "8091e235ba62ac613623e4d3c1856e8d0b9e04685584e42bed993fe8f9c2838a"
     );
-    assert_repair_roundtrip_is_total(&input);
+    // The artifact's header block holds two INTERVAL records, reading as 2 and
+    // then 0, which contradict each other.
+    let err = RinexObs::parse(&String::from_utf8_lossy(&input))
+        .expect_err("two intervals in one header block");
+    assert!(
+        err.to_string()
+            .contains("INTERVAL records in one header block contradict"),
+        "{err}"
+    );
+    // With the first record reading as 0 too, the header holds the product the
+    // artifact used to read as, whose repair has to stay total.
+    let mut agreeing = input.clone();
+    assert_eq!(agreeing[89], b'2');
+    agreeing[89] = b'0';
+    assert_repair_roundtrip_is_total(&agreeing);
 }
 
 #[test]

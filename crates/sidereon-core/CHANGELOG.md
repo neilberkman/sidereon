@@ -6,6 +6,195 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** `SYS / PHASE SHIFT` records are read in their columns,
+  `A1,1X,A3,1X,F8.5,2X,I2.2,10(1X,A3)`, or by their fields where a record is not
+  laid out in them, and written in those columns at every version. Satellite
+  lists continue past ten satellites on `18X,10(1X,A3)` records, in the file
+  header and after an event, and the writer writes them ten to a record. A list
+  of more than ten was refused as a count mismatch, and a list read on one
+  record was refused as too wide to write. A record not in its columns is read
+  by the reading its fields agree with: after the code, a number is a
+  correction followed by a satellite count, or a count after a blank
+  correction, and the reading whose count agrees with the satellites after it
+  is taken; a lone whole number, which reads both ways, is refused as
+  ambiguous. A satellite a list names by a well-formed designator that
+  `GnssSatelliteId` does not hold, such as `R28`, is kept as written in the new
+  `ObsPhaseShift::unrepresentable_satellites`, written back in its list,
+  counted in `skipped_records` and given no correction; a record naming only
+  such satellites is not one for every satellite, as the new
+  `ObsPhaseShift::covers_every_satellite` says, and contradictions and later
+  blocks key it by its designator. A token naming no satellite is still
+  refused. A record naming only its constellation, which RINEX 3.05 section
+  5.2.12 gives where "the applied phase corrections or the phase alignment is
+  unknown" ("the observation code field and the rest of the SYS / PHASE SHIFT
+  header record field of the respective satellite system(s) are left blank"),
+  is read, kept and written back, `ObsPhaseShift::code` being
+  `Option<String>`; the IGS headers of JOZ200POL, NKAY00LAO, POLV00UKR,
+  POVE00BRA, SCTB00ATA and TOAY00LAO for 2026 day 001 carry such records and
+  were refused. The IGS headers of BADG00RUS and ARHT00ATA for 2026 day 001, each
+  naming R28 in four lists, were refused, for a list longer than ten.
+  `ObsPhaseShift::correction_cycles` is
+  `Option<f64>`, `None` where the correction is blank, which RINEX 4.02 gives as
+  "Correction applied (cycles) or blank if none"; a record with a blank
+  correction before its satellite count was refused, its first satellite read
+  as the count. A correction its `F8.5` field cannot hold is refused where it is
+  read, and the writer refuses a product holding one; the writer used to write
+  such a correction in exponent form.
+- **Breaking.** The header records in one block, the file header or one event's
+  records, apply whatever their order. RINEX "allows the free ordering of the
+  header records" (3.05 section 5.2.1) and does not say how overlapping records
+  in one block combine; the rules here are this reader's policy, chosen to be
+  consistent with that free ordering, not rules RINEX states. A
+  `SYS / PHASE SHIFT` record naming a satellite applies to it over the record
+  for every satellite of its code, as it did, and a `SYS / SCALE FACTOR` record
+  naming a code applies over the record for every code of its constellation,
+  where the last covering record applied. A block giving a key that changes how
+  observations are read two values is refused as contradictory, values
+  compared as numbers so `-0.0` and `0.0` are one value: two factors for one
+  code or for every code of a constellation, or two channels for a GLONASS
+  slot. Phase shifts and GLONASS biases change nothing an observation reads
+  as, so a block giving a satellite's code two corrections, or a GLONASS code
+  two biases, is read: the records are kept and written back, each
+  contradiction is counted in `skipped_records`, and that signal reads as the
+  new `CorrectionUnavailable::Ambiguous`. The IGS header of MET300FIN for 2026
+  day 001, which gives C02 and C05 L2I and L6I corrections of both 0 and 0.5,
+  was refused. A blank `GLONASS COD/PHS/BIS` record beside biases in one block
+  is still refused, as the header holds no blank record beside biases. Two records of a label holding one value that read as
+  different values are refused the same way, naming the label: `INTERVAL`,
+  `MARKER NAME`, `MARKER NUMBER`, `MARKER TYPE`, `APPROX POSITION XYZ`,
+  `ANTENNA: DELTA H/E/N`, `ANT # / TYPE`, `REC # / TYPE / VERS`,
+  `OBSERVER / AGENCY` and `SIGNAL STRENGTH UNIT` in any block, and
+  `RINEX VERSION / TYPE`, `TIME OF FIRST OBS`, `TIME OF LAST OBS`,
+  `LEAP SECONDS` and `# OF SATELLITES` in the file header. Identical duplicates,
+  and records whose text differs but which read as one value, are read; the
+  later of two records used to apply. `PGM / RUN BY / DATE`, `COMMENT` and
+  `PRN / # OF OBS` are read as they were. From RINEX 4.00, which says of `SYS / PHASE SHIFT` and
+  `GLONASS COD/PHS/BIS` that "the lines should be ignored by RINEX decoders and
+  encoders", `CarrierPhaseRow::phase_shift_cycles` is 0 whatever those records
+  say, and they are not refused as contradictory; they are kept and written
+  back.
+- **Breaking.** `CarrierPhaseRow::phase_shift_cycles` is
+  `Result<f64, CorrectionUnavailable>`: `Ambiguous` where one header block gives
+  the satellite's code different corrections, and `Unknown` where the only
+  record covering it names just its constellation. `GLONASS COD/PHS/BIS`
+  records are read in their columns, `4(1X,A3,1X,F8.3)`, or by their fields
+  where a record is not laid out in them, and written in those columns;
+  `ObsHeader::glonass_cod_phs_bis` holds `Option<f64>` biases, a blank bias
+  kept and written back blank. The IGS header of NICO00CYP for 2026 day 001,
+  whose C1P bias is blank, was refused, the code after it read as the bias.
+  The new `ObsHeader::glonass_code_phase_bias` gives a GLONASS signal's bias:
+  `Unknown` for a blank record or bias, and `Ambiguous` where a block gives the
+  code two.
+- **Breaking.** The header records an event epoch carries take effect for the
+  epochs after it. RINEX has allowed header records after every event flag
+  since 2.10, and flag 4 says "header information follows"; they were kept as
+  text and never applied, so a flag 4 epoch declaring a longer, reordered or
+  shorter type list left the epochs after it read by the old list, with values
+  unread, under the wrong codes, or blanks read as missing values, and a scale
+  factor, phase shift, GLONASS channel, interval, marker, position or antenna an
+  event declared was never in effect. Every such record after flags 2 to 5 is
+  now read as the file header reads it, and refused as the file header refuses
+  it: `SYS / # / OBS TYPES` at version 3 and `# / TYPES OF OBSERV` at version 2,
+  with continuations, `SYS / SCALE FACTOR`, `SYS / PHASE SHIFT`,
+  `GLONASS SLOT / FRQ #`, `GLONASS COD/PHS/BIS`, `INTERVAL`,
+  `MARKER NAME/NUMBER/TYPE`, `APPROX POSITION XYZ`, `ANTENNA: DELTA H/E/N`,
+  `ANT # / TYPE`, `REC # / TYPE / VERS`, `OBSERVER / AGENCY` and
+  `SIGNAL STRENGTH UNIT`. The records stay verbatim in `special_records`; any
+  other record takes no effect.
+- **Breaking.** `ObsHeader::obs_codes` is the union of every list the file
+  declares for each constellation, the file header's codes first, then codes
+  declared later in the order first declared, and every epoch's observations
+  and cycle slips are index-aligned to it, blank under a code the list in effect
+  at the epoch does not declare. The new `ObsHeader::declared_obs_codes` holds
+  the lists the header itself declares. Scale factors apply to the values read
+  after them, and values stay physical.
+- `RinexObs::header_at` returns the header in effect at an epoch: the file
+  header with every event at or before it laid over it, `obs_codes` the union
+  and `declared_obs_codes` the lists in effect. `RinexObs::header_timeline`
+  builds every header once, as an `ObsHeaderTimeline` a loop over the epochs
+  looks each up in. An event's records are one header block laid over the header
+  in effect, by this reader's policy, chosen to be consistent with "Each value
+  remains valid until changed by an additional header record" (section 6.5): a
+  value replaces the one in effect, a type list replaces its constellation's
+  list, and a block's complete declarations for one constellation add to one
+  another as the file header's do. RINEX gives each constellation one
+  declaration, so adding a repeated one is this reader's policy too. A phase
+  shift or scale factor for every
+  satellite or code replaces the earlier records for its code or constellation,
+  and one naming satellites or codes replaces those only; a GLONASS slot or bias
+  replaces that slot's or code's, and a blank `GLONASS COD/PHS/BIS` record
+  replaces every bias. One event's records give the header the same records give
+  split across consecutive events wherever no two of them give one key a value,
+  and `obs_codes` holds every code a declaration names however the declarations
+  are grouped. Both refuse a product whose event record does not read.
+- **Breaking.** `RinexObs::to_rinex_string` writes a product whose events
+  declare header records back whole: the file header's own lists from
+  `declared_obs_codes`, each event's records verbatim, and each epoch by the
+  code lists or version 2 names and the scale factors in effect at it, its
+  values placed by code from the union. The strict read-back compares
+  `declared_obs_codes` too. It refuses, with new variants of
+  `RinexObsWriteError`, a product whose `obs_codes` is not the union of the
+  lists its header and events declare (`CodeListsNotUnion`), a value or cycle
+  slip under a code the list in effect at its epoch does not declare
+  (`ValueOutsideDeclaredList`), and an event record that does not read
+  (`EventRecordsUnreadable`), and a version 2 product holding a declared list its type names do not state (`DeclaredListNotStated`), which the comparison used to rebuild on both sides; a version 3 `PRN / # OF OBS` count past the codes
+  the file header declares, and a value past its constellation's union, are
+  refused by name with `CountsWithoutCodes` and `ValuesWithoutCodes`. At version
+  2, `ScaleFactorsInVersionTwo` counts the scale factors events declare, and a
+  product whose events declare type names is written with header names reading
+  as its declared lists. `RinexObs::downgrade_to_rinex2` refuses a product whose
+  events change its code lists, type names or scale factors with
+  `RinexObsWriteError::MidFileChangesNotDowngraded`.
+- **Breaking.** `carrier_phase_rows` takes the header in effect at the epoch
+  rather than the product, since a phase shift or GLONASS channel an event
+  declares applies to the epochs after it.
+- Positioning seeds each epoch from the `APPROX POSITION XYZ` and GLONASS
+  channels in effect at it, and the RTK arc builders read carrier frequencies by
+  each side's GLONASS channels in effect. A satellite whose carrier changes, as a
+  GLONASS slot re-declared on another channel changes it, starts a new ambiguity
+  id, `<satellite>~freq<n>`, with its own wavelength, where one wavelength used to
+  scale every epoch, also where the change falls in an epoch left out of the
+  arc. At each epoch a satellite's measurement is formed from the first
+  configured pair whose code and carrier phase are both present, and its
+  ambiguity is named by the carriers that measurement is on: a measurement on
+  another carrier phase observable or frequency, including a return to an
+  earlier one, starts a new ambiguity, and a fallback to another code on the
+  same carrier keeps it. Each receiver's carriers are followed over every epoch
+  wherever their phase is recorded, whether or not a code was, so a frequency
+  change at an epoch left out still starts a new ambiguity, and a loss of lock
+  at an epoch left out is set on the carrier's next measurement. Splitting arcs at cycle slips splits them at a carrier change too, and a
+  split id, `<id>@<receiver>#<segment>`, is built from the carrier's ambiguity
+  id and keeps its wavelength, where it was built from the satellite id, ran
+  across the change and took the satellite's first wavelength. Fixing and
+  holding look a derived id's wavelength and offset up by its own entry, its
+  reference-qualified entry `<id>|ref=<reference>` as the ionosphere-free
+  preparation keys them, then its carrier arc's, before the satellite's; the
+  dual-frequency pipeline refused a split arc with a missing wavelength and
+  scaled a later carrier arc by the first. Where the reference satellite's
+  single-difference ambiguity is not its first arc, the dual-frequency pipeline
+  names each other satellite's ionosphere-free ambiguity by the reference arc
+  too, `<id>|ref=<reference>`, since its offset holds the double-difference
+  wide-lane integer; a change of the reference's ambiguity made the pipeline
+  refuse the arc for want of an offset. `solve_rtk_arc` refers the filter to
+  the reference ambiguity each epoch carries: where the reference satellite's
+  ambiguity arc changes, at a slip or a carrier change, the integers held
+  against the old one are released and fixed again against the new one, where
+  the arc was refused with `UpdateError::ReferenceChanged`. `update_epoch`
+  still refuses a state carried across such a change. A code a list declares twice is read
+  by its first copy, blank or not, in the RTK builders and in observation QC,
+  where RTK read the last and QC the first holding a value; a satellite the two sides track on different carriers is
+  left out of that epoch, as no integer single difference exists for it. Observation QC expects only the codes
+  in effect at each epoch, picks each band's code by the order of the list in
+  effect there rather than the union's, reads GLONASS channels in effect, and judges a gap by
+  the `INTERVAL` in effect at the later epoch; multipath arcs do the same. Lint
+  compares each `INTERVAL` with the spacing of the epochs it is in effect for,
+  judges gaps within that spacing, and takes a GLONASS slot an event declares.
+  Repair sets `INTERVAL` from the epochs before an event declaring another,
+  counts `PRN / # OF OBS` only for codes the file header declares, and keeps the
+  header records an event carries when dropping unsupported records. An event
+  record that does not read is the new lint finding
+  `Finding::ObsEventHeaderUnreadable` and the new QC note
+  `ObservationQcNote::EventHeaderRecordsUnread`.
 - **Breaking.** `ObsEpoch::epoch` is `Option<ObsEpochTime>`, `None` for an
   event whose epoch fields are blank. RINEX 2.11 and 3.05 let an event without
   a significant epoch leave them blank, and both specifications' example files

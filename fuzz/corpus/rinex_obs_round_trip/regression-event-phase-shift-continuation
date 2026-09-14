@@ -1,0 +1,30 @@
+     3.05           OBSERVATION DATA    M (MIXED)           RINEX VERSION / TYPE
+G    1 L1C                                                  SYS / # / OBS TYPES
+                                                            END OF HEADER
+> 2020 01 01 00 00  0.0000000  0 11
+G01         1e+02
+G02         1e+02
+G03         1e+02
+G04         1e+02
+G05         1e+02
+G06         1e+02
+G07         1e+02
+G08         1e+02
+G09         1e+02
+G10         1e+02
+G11         1e+02
+>                              4  2
+G L1C 0.25000 11 G01 G02 G03 G04 G05 G06 G07 G08 G09 G10    SYS / PHASE SHIFT
+                   G11                                      SYS / PHASE SHIFT
+> 2020 01 01 00 01  0.0000000  0 11
+G01         1e+02
+G02         1e+02
+G03         1e+02
+G04         1e+02
+G05         1e+02
+G06         1e+02
+G07         1e+02
+G08         1e+02
+G09         1e+02
+G10         1e+02
+G11         1e+02

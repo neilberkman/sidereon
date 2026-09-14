@@ -23,7 +23,7 @@ use crate::precise_positioning::{
     detect_cycle_slips as detect_dual_frequency_cycle_slips, CycleSlipConfig, DualFrequencyEpoch,
     DualFrequencyObservation,
 };
-use crate::rinex::observations::{ObsEpoch, ObsEpochTime, RinexObs};
+use crate::rinex::observations::{ObsEpoch, ObsEpochTime, ObsHeader, ObsHeaderTimeline, RinexObs};
 use crate::rinex_common::{
     dominant_obs_interval_s, obs_epoch_seconds, time_scale_rinex_label, usable_obs_interval_s,
 };
@@ -92,6 +92,9 @@ pub enum ObservationQcNote {
     },
     /// No interval could be resolved.
     IntervalUnresolved,
+    /// An event's header records did not read, so every epoch was taken with
+    /// the file header. A product read from text always reads.
+    EventHeaderRecordsUnread,
 }
 
 /// Aggregate QC report for one parsed RINEX observation file.
@@ -368,14 +371,17 @@ fn observation_qc_validated(obs: &RinexObs, options: ObservationQcOptions) -> Ob
     let mut systems: BTreeMap<GnssSystem, SystemObservationAccum> = BTreeMap::new();
     let mut satellite_signals: BTreeMap<(GnssSatelliteId, String), SignalAccum> = BTreeMap::new();
     let mut system_signals: BTreeMap<(GnssSystem, String), SignalAccum> = BTreeMap::new();
+    let (timeline, events_unread) = header_timeline_or_file(obs);
     let mut observation_epoch_times = Vec::new();
-    let mut system_epoch_times: BTreeMap<GnssSystem, Vec<ObsEpochTime>> = BTreeMap::new();
+    let mut observation_epoch_intervals: Vec<(ObsEpochTime, Option<f64>)> = Vec::new();
+    let mut system_epoch_times: BTreeMap<GnssSystem, Vec<(ObsEpochTime, Option<f64>)>> =
+        BTreeMap::new();
 
     let mut observation_epochs = 0;
     let mut event_records = 0;
     let mut power_failure_epochs = 0;
 
-    for epoch in obs.epochs() {
+    for (epoch_index, epoch) in obs.epochs().iter().enumerate() {
         if epoch.flag > 1 {
             event_records += 1;
             continue;
@@ -388,13 +394,22 @@ fn observation_qc_validated(obs: &RinexObs, options: ObservationQcOptions) -> Ob
         if epoch.flag == 1 {
             power_failure_epochs += 1;
         }
+        let header = timeline.at(epoch_index);
+        let header_interval_s = header
+            .interval_s
+            .filter(|interval_s| usable_obs_interval_s(*interval_s));
         observation_epoch_times.push(epoch_time);
+        observation_epoch_intervals.push((epoch_time, header_interval_s));
 
         let mut epoch_systems = BTreeSet::new();
         for (satellite, values) in &epoch.sats {
             let value_observations = values.iter().filter(|value| value.value.is_some()).count();
             let system_acc = systems.entry(satellite.system).or_default();
-            system_acc.expected_observations += values.len();
+            // A code the list in effect does not declare is not expected.
+            system_acc.expected_observations += header
+                .declared_obs_codes
+                .get(&satellite.system)
+                .map_or(values.len(), Vec::len);
             system_acc.value_observations += value_observations;
 
             if value_observations == 0 {
@@ -438,14 +453,21 @@ fn observation_qc_validated(obs: &RinexObs, options: ObservationQcOptions) -> Ob
             system_epoch_times
                 .entry(system)
                 .or_default()
-                .push(epoch_time);
+                .push((epoch_time, header_interval_s));
         }
     }
 
     let mut notes = non_monotonic_notes(&observation_epoch_times);
     let (interval_s, interval_source) =
         resolve_interval(obs, options, &observation_epoch_times, &mut notes);
-    let data_gaps = detect_gaps(options, &observation_epoch_times, interval_s);
+    if events_unread {
+        notes.push(ObservationQcNote::EventHeaderRecordsUnread);
+    }
+    let nominal = NominalInterval {
+        override_s: options.interval_override_s,
+        inferred_s: dominant_obs_interval_s(&observation_epoch_times),
+    };
+    let data_gaps = detect_gaps(options, &observation_epoch_intervals, nominal);
     let missing_epochs = data_gaps
         .iter()
         .map(|gap| gap.missing_epochs)
@@ -453,7 +475,7 @@ fn observation_qc_validated(obs: &RinexObs, options: ObservationQcOptions) -> Ob
     let clock_jumps = detect_clock_jumps(obs, options.clock_jump_threshold_s);
     let cycle_slips = aggregate_cycle_slips(obs);
     let multipath = multipath_stats(obs, &CycleSlipConfig::default());
-    let systems = finish_system_observation_qc(systems, &system_epoch_times, options, interval_s);
+    let systems = finish_system_observation_qc(systems, &system_epoch_times, options, nominal);
 
     ObservationQcReport {
         header: observation_qc_header(obs, &observation_epoch_times),
@@ -591,9 +613,9 @@ fn unstamped_time(epoch: ObsEpochTime) -> ObservationQcTime {
 
 fn finish_system_observation_qc(
     systems: BTreeMap<GnssSystem, SystemObservationAccum>,
-    system_epoch_times: &BTreeMap<GnssSystem, Vec<ObsEpochTime>>,
+    system_epoch_times: &BTreeMap<GnssSystem, Vec<(ObsEpochTime, Option<f64>)>>,
     options: ObservationQcOptions,
-    interval_s: Option<f64>,
+    nominal: NominalInterval,
 ) -> Vec<SystemObservationQc> {
     systems
         .into_iter()
@@ -602,7 +624,7 @@ fn finish_system_observation_qc(
                 .get(&system)
                 .map(Vec::as_slice)
                 .unwrap_or(&[]);
-            let gaps = detect_gaps(options, times, interval_s);
+            let gaps = detect_gaps(options, times, nominal);
             let total_gap_s = gaps
                 .iter()
                 .map(|gap| gap.missing_epochs as f64 * gap.nominal_interval_s)
@@ -635,6 +657,31 @@ fn observation_qc_findings(obs: &RinexObs) -> Vec<ObservationQcFinding> {
         .collect()
 }
 
+/// The nominal epoch spacing gaps are judged by: an override, else the usable
+/// `INTERVAL` of the header in effect at the epoch, else the spacing inferred
+/// from the epochs.
+#[derive(Debug, Clone, Copy)]
+struct NominalInterval {
+    override_s: Option<f64>,
+    inferred_s: Option<f64>,
+}
+
+impl NominalInterval {
+    fn at(self, header_interval_s: Option<f64>) -> Option<f64> {
+        self.override_s.or(header_interval_s).or(self.inferred_s)
+    }
+}
+
+/// The header in effect at each epoch, and whether an event's header records
+/// did not read, in which case every epoch is taken with the file header. A
+/// product read from text always reads.
+fn header_timeline_or_file(obs: &RinexObs) -> (ObsHeaderTimeline, bool) {
+    match obs.header_timeline() {
+        Ok(timeline) => (timeline, false),
+        Err(_) => (ObsHeaderTimeline::file_only(obs.header().clone()), true),
+    }
+}
+
 fn resolve_interval(
     obs: &RinexObs,
     options: ObservationQcOptions,
@@ -660,17 +707,17 @@ fn resolve_interval(
 
 fn detect_gaps(
     options: ObservationQcOptions,
-    observation_epoch_times: &[ObsEpochTime],
-    interval_s: Option<f64>,
+    observation_epochs: &[(ObsEpochTime, Option<f64>)],
+    nominal: NominalInterval,
 ) -> Vec<ObservationDataGap> {
-    let Some(interval_s) = interval_s else {
-        return Vec::new();
-    };
-
     let mut gaps = Vec::new();
-    for window in observation_epoch_times.windows(2) {
-        let start_epoch = window[0];
-        let end_epoch = window[1];
+    for window in observation_epochs.windows(2) {
+        let (start_epoch, _) = window[0];
+        let (end_epoch, header_interval_s) = window[1];
+        // The interval in effect when the later epoch was recorded.
+        let Some(interval_s) = nominal.at(header_interval_s) else {
+            continue;
+        };
         let observed_delta_s = obs_epoch_seconds(end_epoch) - obs_epoch_seconds(start_epoch);
         if !observed_delta_s.is_finite()
             || observed_delta_s <= 0.0
@@ -882,18 +929,23 @@ pub(crate) fn is_observation_epoch(epoch: &ObsEpoch) -> bool {
 }
 
 fn dual_frequency_epochs(obs: &RinexObs) -> Vec<DualFrequencyEpoch> {
+    let (timeline, _) = header_timeline_or_file(obs);
     obs.epochs()
         .iter()
-        .filter(|epoch| is_observation_epoch(epoch))
-        .map(|epoch| DualFrequencyEpoch {
-            gap_time_s: epoch.epoch.map(obs_epoch_seconds),
-            observations: epoch
-                .sats
-                .iter()
-                .filter_map(|(satellite, values)| {
-                    dual_frequency_observation(obs, *satellite, values)
-                })
-                .collect(),
+        .enumerate()
+        .filter(|(_, epoch)| is_observation_epoch(epoch))
+        .map(|(epoch_index, epoch)| {
+            let header = timeline.at(epoch_index);
+            DualFrequencyEpoch {
+                gap_time_s: epoch.epoch.map(obs_epoch_seconds),
+                observations: epoch
+                    .sats
+                    .iter()
+                    .filter_map(|(satellite, values)| {
+                        dual_frequency_observation(header, *satellite, values)
+                    })
+                    .collect(),
+            }
         })
         .collect()
 }
@@ -910,12 +962,12 @@ struct DualFrequencyBand {
 }
 
 fn dual_frequency_observation(
-    obs: &RinexObs,
+    header: &ObsHeader,
     satellite: GnssSatelliteId,
     values: &[crate::rinex::observations::ObsValue],
 ) -> Option<DualFrequencyObservation> {
     dual_frequency_observation_with_pseudorange_selection(
-        obs,
+        header,
         satellite,
         values,
         PseudorangeSelection::HeaderOrder,
@@ -923,12 +975,12 @@ fn dual_frequency_observation(
 }
 
 fn multipath_dual_frequency_observation(
-    obs: &RinexObs,
+    header: &ObsHeader,
     satellite: GnssSatelliteId,
     values: &[crate::rinex::observations::ObsValue],
 ) -> Option<DualFrequencyObservation> {
     dual_frequency_observation_with_pseudorange_selection(
-        obs,
+        header,
         satellite,
         values,
         PseudorangeSelection::PreferPreciseCode,
@@ -942,16 +994,32 @@ enum PseudorangeSelection {
 }
 
 fn dual_frequency_observation_with_pseudorange_selection(
-    obs: &RinexObs,
+    header: &ObsHeader,
     satellite: GnssSatelliteId,
     values: &[crate::rinex::observations::ObsValue],
     pseudorange_selection: PseudorangeSelection,
 ) -> Option<DualFrequencyObservation> {
-    let codes = obs.header().obs_codes.get(&satellite.system)?;
-    let glonass_channel = obs.header().glonass_slots.get(&satellite.prn).copied();
+    let union = header.obs_codes.get(&satellite.system)?;
+    // Values are held under the union of every list the file declares; which
+    // code of a kind comes first is the order of the list in effect at the
+    // epoch, as it is when that list is the file header's.
+    let declared = header
+        .declared_obs_codes
+        .get(&satellite.system)
+        .unwrap_or(union);
+    let positions = crate::rinex_obs::union_positions(declared, union);
+    let glonass_channel = header.glonass_slots.get(&satellite.prn).copied();
     let mut bands = Vec::<DualFrequencyBand>::new();
 
-    for (index, (code, value)) in codes.iter().zip(values.iter()).enumerate() {
+    for (index, (code, position)) in declared.iter().zip(positions).enumerate() {
+        // A code the list declares twice is read by its first copy, blank or
+        // not, as the RTK builders and the pseudorange selection read it.
+        if declared[..index].contains(code) {
+            continue;
+        }
+        let Some(value) = position.and_then(|position| values.get(position)) else {
+            continue;
+        };
         let kind = code.as_bytes().first().copied();
         if !matches!(kind, Some(b'C' | b'L')) {
             continue;
@@ -966,7 +1034,7 @@ fn dual_frequency_observation_with_pseudorange_selection(
         let frequency_hz = rinex_observation_frequency_hz(
             satellite.system,
             code,
-            obs.header().version,
+            header.version,
             glonass_channel,
         )?;
 
@@ -2049,6 +2117,16 @@ NONE
 "#;
 
     fn observation_file(epochs: Vec<ObsEpoch>) -> RinexObs {
+        let obs_codes = BTreeMap::from([(
+            GnssSystem::Gps,
+            vec![
+                "C1C".to_string(),
+                "L1C".to_string(),
+                "S1C".to_string(),
+                "C2W".to_string(),
+                "L2W".to_string(),
+            ],
+        )]);
         RinexObs {
             header: ObsHeader {
                 version: 3.05,
@@ -2056,16 +2134,8 @@ NONE
                 antenna_delta_hen_m: None,
                 rinex2_types: Vec::new(),
                 rinex2_system: None,
-                obs_codes: BTreeMap::from([(
-                    GnssSystem::Gps,
-                    vec![
-                        "C1C".to_string(),
-                        "L1C".to_string(),
-                        "S1C".to_string(),
-                        "C2W".to_string(),
-                        "L2W".to_string(),
-                    ],
-                )]),
+                declared_obs_codes: obs_codes.clone(),
+                obs_codes,
                 program_run_by_date: None,
                 comments: Vec::new(),
                 marker_number: None,
@@ -2381,5 +2451,91 @@ NONE
                 context,
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod declaration_order_tests {
+    use super::*;
+
+    fn header_line(content: &str, label: &str) -> String {
+        format!("{content:<60}{label}")
+    }
+
+    #[test]
+    fn observations_are_picked_by_the_list_in_effect_not_the_union_order() {
+        // The file header lists L1C before L1W; a leading event reverses them.
+        // The first carrier phase on L1 is L1W by the list in effect at every
+        // epoch, as it is with the event's declaration in the file header.
+        let initial = header_line("G    5 C1C L1C L1W C2W L2W", "SYS / # / OBS TYPES");
+        let changed = header_line("G    5 C1C L1W L1C C2W L2W", "SYS / # / OBS TYPES");
+        let mut body = Vec::new();
+        for index in 0..5 {
+            body.push(format!("> 2020 01 01 00 00 {:2}.0000000  0  1", index * 10));
+            body.push(format!(
+                "G01{:14.3}  {:14.3}  {:14.3}  {:14.3}  {:14.3}",
+                20_000_000.0,
+                100.0,
+                100.0 + f64::from(index) * 0.01,
+                20_000_000.0,
+                90.0
+            ));
+        }
+        let text = |headers: &[String], body: &[String]| {
+            let mut lines = vec![header_line(
+                "     3.05           OBSERVATION DATA    G (GPS)",
+                "RINEX VERSION / TYPE",
+            )];
+            lines.extend(headers.iter().cloned());
+            lines.push(header_line("", "END OF HEADER"));
+            lines.extend(body.iter().cloned());
+            lines.join("\n")
+        };
+        let mut with_event = vec![format!(">{:30}4  1", ""), changed.clone()];
+        with_event.extend(body.iter().cloned());
+        let event = RinexObs::parse(&text(&[initial], &with_event)).expect("parse");
+        let moved = RinexObs::parse(&text(&[changed], &body)).expect("parse");
+        let event_report = observation_qc(&event);
+        let moved_report = observation_qc(&moved);
+        assert_eq!(event_report.multipath, moved_report.multipath);
+        assert_eq!(event_report.cycle_slips, moved_report.cycle_slips);
+    }
+
+    #[test]
+    fn a_code_declared_twice_is_read_by_its_first_copy_even_when_it_is_blank() {
+        // RTK and the pseudorange selection read a duplicated code's first
+        // copy; QC reads the same one.
+        let parse = |first: &str, second: &str| {
+            let text = [
+                header_line(
+                    "     3.05           OBSERVATION DATA    G (GPS)",
+                    "RINEX VERSION / TYPE",
+                ),
+                header_line("G    5 C1C L1C L1C C2W L2W", "SYS / # / OBS TYPES"),
+                header_line("", "END OF HEADER"),
+                "> 2020 01 01 00 00  0.0000000  0  1".to_string(),
+                format!(
+                    "G01{:14.3}  {first:>14}  {second:>14}  {:14.3}  {:14.3}",
+                    20_000_000.0, 20_000_000.0, 90.0
+                ),
+            ]
+            .join("\n");
+            RinexObs::parse(&text).expect("parse")
+        };
+        let observation = |obs: &RinexObs| {
+            let header = obs.header_at(0).expect("header in effect");
+            let (satellite, values) = obs.epochs()[0].sats.iter().next().expect("G01");
+            (
+                dual_frequency_observation(&header, *satellite, values),
+                multipath_dual_frequency_observation(&header, *satellite, values),
+            )
+        };
+        let (qc, multipath) = observation(&parse("", "100.000"));
+        assert!(qc.is_none(), "{qc:?}");
+        assert!(multipath.is_none(), "{multipath:?}");
+        let (qc, multipath) = observation(&parse("100.000", "200.000"));
+        assert_eq!(qc.expect("both copies held").phi1_cyc, 100.0);
+        assert_eq!(multipath.expect("both copies held").phi1_cyc, 100.0);
     }
 }

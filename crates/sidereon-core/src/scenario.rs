@@ -1203,6 +1203,7 @@ impl SyntheticObservationSet {
                 version: 3.05,
                 approx_position_m,
                 antenna_delta_hen_m: None,
+                declared_obs_codes: obs_codes.clone(),
                 obs_codes,
                 rinex2_types: Vec::new(),
                 rinex2_system: None,

@@ -164,6 +164,11 @@ const HEADER_SECOND_WIDTH: usize = 13;
 const HEADER_SECOND_DECIMALS: usize = 7;
 /// Width of the numeric part of one observation field (`F14.3`).
 const OBS_VALUE_WIDTH: usize = 14;
+/// Width and decimals of a `SYS / PHASE SHIFT` correction, `F8.5`.
+const PHASE_SHIFT_CORRECTION_WIDTH: usize = 8;
+const PHASE_SHIFT_CORRECTION_DECIMALS: usize = 5;
+/// Largest satellite count a `SYS / PHASE SHIFT` record's `I2.2` field holds.
+const MAX_PHASE_SHIFT_SATELLITES: usize = 99;
 /// Largest record count representable by a RINEX epoch `I3` field.
 const MAX_EPOCH_RECORD_COUNT: usize = 999;
 /// Width of one observation descriptor in every header code list: the `A3`
@@ -236,18 +241,107 @@ pub struct ObsValue {
     pub ssi: Option<u8>,
 }
 
+impl ObsHeader {
+    /// The `GLONASS COD/PHS/BIS` code-phase bias the header gives a GLONASS
+    /// signal, in metres, or `None` where it gives none. From RINEX 4.00, whose
+    /// Table A2 says the record's "lines should be ignored by RINEX decoders and
+    /// encoders", it gives none.
+    ///
+    /// # Errors
+    ///
+    /// [`CorrectionUnavailable::Unknown`] for a blank record, "If the GLONASS
+    /// code phase alignment is unknown, then all fields within GLONASS
+    /// COD/PHS/BIS header record are left blank" (RINEX 3.05 section 5.2.16),
+    /// or a blank bias for the signal; [`CorrectionUnavailable::Ambiguous`]
+    /// where one header block gives the signal different biases.
+    pub fn glonass_code_phase_bias(
+        &self,
+        code: &str,
+    ) -> core::result::Result<Option<f64>, CorrectionUnavailable> {
+        if records_deprecated_in_rinex4(self.version) {
+            return Ok(None);
+        }
+        let Some(entries) = &self.glonass_cod_phs_bis else {
+            return Ok(None);
+        };
+        if entries.is_empty() {
+            return Err(CorrectionUnavailable::Unknown);
+        }
+        let mut distinct: Vec<Option<f64>> = Vec::new();
+        for (entry_code, bias) in entries {
+            if entry_code == code && !distinct.contains(bias) {
+                distinct.push(*bias);
+            }
+        }
+        match distinct.as_slice() {
+            [] => Ok(None),
+            [Some(bias)] => Ok(Some(*bias)),
+            [None] => Err(CorrectionUnavailable::Unknown),
+            _ => Err(CorrectionUnavailable::Ambiguous {
+                corrections: distinct,
+            }),
+        }
+    }
+}
+
 /// One `SYS / PHASE SHIFT` header record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObsPhaseShift {
     /// Constellation the phase-shift record applies to.
     pub system: GnssSystem,
-    /// RINEX carrier observable code, e.g. `L1C`.
-    pub code: String,
-    /// Phase correction in carrier cycles.
-    pub correction_cycles: f64,
-    /// Optional satellite restriction. Empty means the correction applies to
-    /// all satellites of the system/code.
+    /// RINEX carrier observable code, e.g. `L1C`, or `None` for a record naming
+    /// only its constellation. RINEX 3.05 section 5.2.12: "If the applied phase
+    /// corrections or the phase alignment is unknown, then the observation code
+    /// field and the rest of the SYS / PHASE SHIFT header record field of the
+    /// respective satellite system(s) are left blank. This use case is intended
+    /// for exceptional situations where the data is intended for special
+    /// projects and analysis." Such a record gives no correction; a
+    /// satellite's code no other record covers reads as
+    /// [`CorrectionUnavailable::Unknown`].
+    pub code: Option<String>,
+    /// Phase correction in carrier cycles, or `None` where the record leaves
+    /// the field blank: "Correction applied (cycles) or blank if none" (RINEX
+    /// 3.05 and 4.02 Table A2).
+    pub correction_cycles: Option<f64>,
+    /// Optional satellite restriction. Empty, with no
+    /// [`ObsPhaseShift::unrepresentable_satellites`] either, means the
+    /// correction applies to all satellites of the system/code.
     pub satellites: Vec<GnssSatelliteId>,
+    /// Satellites the record names by a well-formed RINEX designator that
+    /// [`GnssSatelliteId`] does not hold, such as `R28`, as written. No
+    /// observation of theirs is kept, so the correction applies to none of
+    /// them; they are kept so the record is written back whole, and each is
+    /// counted in [`RinexObs::skipped_records`].
+    pub unrepresentable_satellites: Vec<String>,
+}
+
+impl ObsPhaseShift {
+    /// Whether the record applies to every satellite of its system and code:
+    /// it names no satellite, representable or not.
+    pub fn covers_every_satellite(&self) -> bool {
+        self.satellites.is_empty() && self.unrepresentable_satellites.is_empty()
+    }
+
+    /// How many satellites the record names, representable or not.
+    pub fn satellite_count(&self) -> usize {
+        self.satellites.len() + self.unrepresentable_satellites.len()
+    }
+}
+
+/// Why a header states no one correction for a satellite's signal.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CorrectionUnavailable {
+    /// Records in one header block give the signal different corrections. RINEX
+    /// gives a block's records no order to choose one by; the records are kept
+    /// as written. A blank value is `None`.
+    Ambiguous {
+        /// The different corrections, in the order the records give them.
+        corrections: Vec<Option<f64>>,
+    },
+    /// The header declares the correction unknown: a `SYS / PHASE SHIFT`
+    /// record naming only the constellation, or a blank `GLONASS COD/PHS/BIS`
+    /// record or bias.
+    Unknown,
 }
 
 /// One `SYS / SCALE FACTOR` header record.
@@ -335,7 +429,8 @@ pub struct ObsEpoch {
     /// unchanged. Empty for an observation epoch and a cycle slip epoch.
     pub special_records: Vec<String>,
     /// Satellite → observation values, ascending satellite id. The value vector
-    /// is index-aligned to [`ObsHeader::obs_codes`] for that satellite's system.
+    /// is index-aligned to [`ObsHeader::obs_codes`] for that satellite's system,
+    /// blank under a code the list in effect at this epoch does not declare.
     /// Empty for an event epoch and a cycle slip epoch.
     pub sats: BTreeMap<GnssSatelliteId, Vec<ObsValue>>,
     /// Satellite → cycle slips a flag 6 epoch reports, ascending satellite id,
@@ -370,10 +465,23 @@ pub struct ObsHeader {
     /// height/east/north convention (meters), if the file carries an
     /// `ANTENNA: DELTA H/E/N` record.
     pub antenna_delta_hen_m: Option<[f64; 3]>,
-    /// Per-constellation observation-code list, in declared order.
+    /// Per-constellation observation codes: the union of every list the file
+    /// declares for the constellation, in its header and after its events. The
+    /// file header's codes come first, in its order, then each code a later list
+    /// declares that the union does not yet hold, in the order first declared.
+    /// Observation values and cycle slips are index-aligned to these lists, blank
+    /// under a code the list in effect at their epoch does not declare.
     pub obs_codes: BTreeMap<GnssSystem, Vec<String>>,
+    /// Per-constellation code lists this header itself declares, in declared
+    /// order. In the file header they are the lists its `SYS / # / OBS TYPES`
+    /// records declare, or at version 2 what `rinex2_types` reads as for each
+    /// constellation in `obs_codes`; in a header from [`RinexObs::header_at`]
+    /// they are the lists in effect at that epoch. A product whose events
+    /// declare no list holds the same lists here as in `obs_codes`.
+    pub declared_obs_codes: BTreeMap<GnssSystem, Vec<String>>,
     /// The version 2 `# / TYPES OF OBSERV` names as read, in order, and empty at
-    /// version 3. A version 2 file lists one set of names for every
+    /// version 3. In a header from [`RinexObs::header_at`], the names in effect
+    /// at that epoch. A version 2 file lists one set of names for every
     /// constellation, so a constellation's codes are what these names read as
     /// for it - including a constellation a `PRN / # OF OBS` count names that
     /// holds no list in [`ObsHeader::obs_codes`] because no observation names
@@ -419,7 +527,7 @@ pub struct ObsHeader {
     /// GLONASS slot → frequency channel map (`GLONASS SLOT / FRQ #`), if present.
     pub glonass_slots: BTreeMap<u8, i8>,
     /// GLONASS code-phase bias/alignment record.
-    pub glonass_cod_phs_bis: Option<Vec<(String, f64)>>,
+    pub glonass_cod_phs_bis: Option<Vec<(String, Option<f64>)>>,
     /// Signal-strength unit, e.g. `DBHZ`.
     pub signal_strength_unit: Option<String>,
     /// Observation-header leap-second record.
@@ -677,13 +785,31 @@ pub struct CarrierPhaseRow {
     pub value_m: Option<f64>,
     /// Reported `SYS / PHASE SHIFT` correction in cycles. RINEX 3 stores
     /// already-aligned phase observations, so this correction is metadata for
-    /// reconstructing originals and is not re-applied here.
-    pub phase_shift_cycles: f64,
+    /// reconstructing originals and is not re-applied here. No record, or a
+    /// blank correction, is 0. From RINEX 4.00 the record "should be ignored by
+    /// RINEX decoders and encoders" (Table A2), so a file of that version reports
+    /// 0 whatever its records say; the records are still kept and written back.
+    ///
+    /// [`CorrectionUnavailable::Ambiguous`] where records in one header block
+    /// give the satellite's code different corrections, and
+    /// [`CorrectionUnavailable::Unknown`] where the only record covering it
+    /// names just the constellation, which declares the alignment unknown.
+    pub phase_shift_cycles: core::result::Result<f64, CorrectionUnavailable>,
 }
 
 /// Return labelled raw observation rows for one epoch, grouped by satellite.
 pub fn observation_values(
     obs: &RinexObs,
+    epoch: &ObsEpoch,
+    filter: &ObservationFilter,
+) -> Result<Vec<(GnssSatelliteId, Vec<ObservationValueRow>)>> {
+    labelled_values(&obs.header, epoch, filter)
+}
+
+/// Labelled rows for one epoch by a header's code lists. Every header in
+/// effect holds the product's union, which the values are aligned to.
+fn labelled_values(
+    header: &ObsHeader,
     epoch: &ObsEpoch,
     filter: &ObservationFilter,
 ) -> Result<Vec<(GnssSatelliteId, Vec<ObservationValueRow>)>> {
@@ -696,7 +822,7 @@ pub fn observation_values(
         let Some(allowed_codes) = filter.allowed_codes(sat.system) else {
             continue;
         };
-        let Some(code_list) = obs.header.obs_codes.get(&sat.system) else {
+        let Some(code_list) = header.obs_codes.get(&sat.system) else {
             continue;
         };
         let mut rows = Vec::new();
@@ -722,18 +848,23 @@ pub fn observation_values(
 }
 
 /// Return carrier-phase rows for one epoch, grouped by satellite.
+///
+/// `header` is the header in effect at the epoch, from [`RinexObs::header_at`]
+/// or [`RinexObs::header_timeline`]. A phase shift or GLONASS channel an event
+/// declares applies to the epochs after it, where the file header still holds
+/// the value from before it.
 pub fn carrier_phase_rows(
-    obs: &RinexObs,
+    header: &ObsHeader,
     epoch: &ObsEpoch,
     filter: &ObservationFilter,
 ) -> Result<Vec<(GnssSatelliteId, Vec<CarrierPhaseRow>)>> {
-    validate_finite_input(obs.header.version, "version")?;
+    validate_finite_input(header.version, "version")?;
     let mut out = Vec::new();
-    for (sat, rows) in observation_values(obs, epoch, filter)? {
+    for (sat, rows) in labelled_values(header, epoch, filter)? {
         let phases = rows
             .into_iter()
             .filter(|row| row.kind == ObservationKind::CarrierPhase)
-            .map(|row| carrier_phase_row(obs, sat, row))
+            .map(|row| carrier_phase_row(header, sat, row))
             .collect::<Result<Vec<_>>>()?;
         out.push((sat, phases));
     }
@@ -769,17 +900,17 @@ pub fn observation_frequency_hz(
 }
 
 fn carrier_phase_row(
-    obs: &RinexObs,
+    header: &ObsHeader,
     sat: GnssSatelliteId,
     row: ObservationValueRow,
 ) -> Result<CarrierPhaseRow> {
-    let glonass_channel = obs.header.glonass_slots.get(&sat.prn).copied();
+    let glonass_channel = header.glonass_slots.get(&sat.prn).copied();
     let frequency_hz =
-        observation_frequency_hz(sat.system, &row.code, obs.header.version, glonass_channel)?;
-    let phase_shift_cycles = phase_shift_cycles(obs, sat, &row.code);
+        observation_frequency_hz(sat.system, &row.code, header.version, glonass_channel)?;
+    let phase_shift_cycles = phase_shift_cycles(header, sat, &row.code);
     let value_cycles = row.value;
     let wavelength_m =
-        rinex_observation_wavelength_m(sat.system, &row.code, obs.header.version, glonass_channel);
+        rinex_observation_wavelength_m(sat.system, &row.code, header.version, glonass_channel);
     let value_m = match value_cycles.zip(wavelength_m) {
         Some((cycles, lambda)) => {
             let value_m = cycles * lambda;
@@ -800,21 +931,97 @@ fn carrier_phase_row(
     })
 }
 
-fn phase_shift_cycles(obs: &RinexObs, sat: GnssSatelliteId, code: &str) -> f64 {
-    let mut system_wide = None;
-    for shift in obs.header.phase_shifts.iter().rev() {
-        if shift.system != sat.system || shift.code != code {
-            continue;
-        }
-        if shift.satellites.is_empty() {
-            if system_wide.is_none() {
-                system_wide = Some(shift.correction_cycles);
-            }
-        } else if shift.satellites.contains(&sat) {
-            return shift.correction_cycles;
+/// The phase shift in effect for a satellite's code: the records for the code
+/// naming the satellite, else the records for every satellite of the system,
+/// else a record naming only the constellation, which declares the alignment
+/// unknown, whatever their order; records of one kind that give different
+/// corrections are ambiguous. RINEX does not say which of the two applies; taking the
+/// record naming the satellite is this reader's policy, chosen to be consistent
+/// with the free ordering of header records (RINEX 3.05 section 5.2.1), under
+/// which no record's position can decide it. A blank correction is none. From
+/// RINEX 4.00 the records are ignored and no correction is in effect.
+fn phase_shift_cycles(
+    header: &ObsHeader,
+    sat: GnssSatelliteId,
+    code: &str,
+) -> core::result::Result<f64, CorrectionUnavailable> {
+    if records_deprecated_in_rinex4(header.version) {
+        return Ok(0.0);
+    }
+    let covering = |naming: bool| {
+        header
+            .phase_shifts
+            .iter()
+            .filter(move |shift| {
+                shift.system == sat.system
+                    && shift.code.as_deref() == Some(code)
+                    && if naming {
+                        shift.satellites.contains(&sat)
+                    } else {
+                        shift.covers_every_satellite()
+                    }
+            })
+            .map(|shift| shift.correction_cycles)
+    };
+    if let Some(correction) = one_correction(covering(true))? {
+        return Ok(correction);
+    }
+    if let Some(correction) = one_correction(covering(false))? {
+        return Ok(correction);
+    }
+    if header
+        .phase_shifts
+        .iter()
+        .any(|shift| shift.system == sat.system && shift.code.is_none())
+    {
+        return Err(CorrectionUnavailable::Unknown);
+    }
+    Ok(0.0)
+}
+
+/// The one correction a set of covering records gives, a blank one being 0;
+/// `None` for no record; the corrections as written where they differ.
+fn one_correction(
+    corrections: impl Iterator<Item = Option<f64>>,
+) -> core::result::Result<Option<f64>, CorrectionUnavailable> {
+    let mut distinct: Vec<Option<f64>> = Vec::new();
+    for correction in corrections {
+        let value = correction.unwrap_or(0.0);
+        if !distinct.iter().any(|held| held.unwrap_or(0.0) == value) {
+            distinct.push(correction);
         }
     }
-    system_wide.unwrap_or(0.0)
+    match distinct.as_slice() {
+        [] => Ok(None),
+        [one] => Ok(Some(one.unwrap_or(0.0))),
+        _ => Err(CorrectionUnavailable::Ambiguous {
+            corrections: distinct,
+        }),
+    }
+}
+/// Whether a version's `SYS / PHASE SHIFT` and `GLONASS COD/PHS/BIS` records are
+/// deprecated. RINEX 4.00, 4.01 and 4.02 Table A2 say each "is strongly
+/// deprecated. It is allowed in this version for compatibility with previous
+/// RINEX versions but the lines should be ignored by RINEX decoders and
+/// encoders."
+pub(crate) fn records_deprecated_in_rinex4(version: f64) -> bool {
+    version >= 4.0
+}
+
+/// The scale factor in effect for a code: the record naming the code, else the
+/// record for every code of the system, whatever their order, or 1. As for
+/// phase shifts, taking the record naming the code is this reader's policy, not
+/// a rule RINEX states.
+pub(crate) fn scale_factor_in(factors: &[ObsScaleFactor], system: GnssSystem, code: &str) -> f64 {
+    factors
+        .iter()
+        .find(|record| record.system == system && record.codes.iter().any(|c| c == code))
+        .or_else(|| {
+            factors
+                .iter()
+                .find(|record| record.system == system && record.codes.is_empty())
+        })
+        .map_or(1.0, |record| record.factor)
 }
 
 /// Extract single-frequency pseudoranges for one epoch under a [`SignalPolicy`].
@@ -883,7 +1090,7 @@ struct Parser {
     scale_factor_continuation: Option<ScaleFactorContinuation>,
     glonass_slots: BTreeMap<u8, i8>,
     glonass_slots_remaining: Option<usize>,
-    glonass_cod_phs_bis: Option<Vec<(String, f64)>>,
+    glonass_cod_phs_bis: Option<Vec<(String, Option<f64>)>>,
     signal_strength_unit: Option<String>,
     leap_seconds: Option<ObsLeapSeconds>,
     marker_name: Option<String>,
@@ -906,6 +1113,46 @@ struct Parser {
     /// pushed here as a typed [`Skip`] rather than silently dropped. The public
     /// [`RinexObs::skipped_records`] is derived from the skip count.
     diagnostics: Diagnostics,
+    /// Whether a `# / TYPES OF OBSERV` record with a count was read.
+    rinex2_obs_types_declared: bool,
+    /// Satellites the last `SYS / PHASE SHIFT` record's count declares that its
+    /// records have not yet listed.
+    phase_shift_satellites_remaining: usize,
+    /// The GLONASS slots this header block has declared, to refuse a slot it
+    /// gives two channels.
+    glonass_slots_in_block: BTreeMap<u8, i8>,
+    /// The GLONASS code-phase biases this header block has declared, and
+    /// whether it declared the biases unknown with a blank record.
+    glonass_biases_in_block: (
+        BTreeMap<String, Option<f64>>,
+        bool,
+        std::collections::BTreeSet<String>,
+    ),
+    /// The value each record of a label holding one value set in this header
+    /// block, as its parsed value reads, to refuse a record setting another.
+    single_values_in_block: BTreeMap<String, SingleValue>,
+    /// The header the file declares, as it stands at `END OF HEADER`, before
+    /// any event lays records over it.
+    file_header: Option<ObsHeader>,
+    /// The header in effect for the epochs being read: the file header with
+    /// every event read so far laid over it.
+    effective: Option<ObsHeader>,
+    /// The code lists in effect for each stretch of epochs, the file header's
+    /// first, then each an event declared.
+    code_list_segments: Vec<CodeListSegment>,
+    /// For each epoch read, the stretch of code lists it was read by.
+    epoch_segments: Vec<usize>,
+    /// The constellations a version 2 file's records name.
+    rinex2_systems: std::collections::BTreeSet<GnssSystem>,
+}
+
+/// The code lists in effect for a stretch of epochs: the file header's, or the
+/// ones an event declared. A version 3 file declares a list per constellation,
+/// a version 2 file one list of names.
+#[derive(Debug, Clone)]
+struct CodeListSegment {
+    lists: BTreeMap<GnssSystem, Vec<String>>,
+    names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -953,6 +1200,16 @@ impl Parser {
             rinex2_obs_codes: Vec::new(),
             rinex2_obs_codes_remaining: 0,
             diagnostics: Diagnostics::new(),
+            rinex2_obs_types_declared: false,
+            phase_shift_satellites_remaining: 0,
+            glonass_slots_in_block: BTreeMap::new(),
+            glonass_biases_in_block: (BTreeMap::new(), false, std::collections::BTreeSet::new()),
+            single_values_in_block: BTreeMap::new(),
+            file_header: None,
+            effective: None,
+            code_list_segments: Vec::new(),
+            epoch_segments: Vec::new(),
+            rinex2_systems: std::collections::BTreeSet::new(),
         }
     }
 
@@ -983,49 +1240,42 @@ impl Parser {
             let line = normalize_header_line(&ascii_line);
             let line = line.as_ref();
             let label = raw_field_from(line, 60).trim();
+            // A version 2 file's observation records are laid out by its own
+            // `# / TYPES OF OBSERV` list; this version 3 record does not
+            // describe them, so it is reported as not retained.
+            if label == "SYS / # / OBS TYPES" && self.is_rinex2() {
+                self.unretained_header_labels.push(label.to_string());
+                continue;
+            }
+            // The records an event may also carry have one reader, so an event's
+            // records are read as the file header's are.
+            if self.parse_layered_record(label, line)? {
+                self.check_single_value(label, line)?;
+                continue;
+            }
             match label {
-                "RINEX VERSION / TYPE" => self.parse_version(line)?,
+                "RINEX VERSION / TYPE" => {
+                    self.parse_version(line)?;
+                    self.check_single_value(label, line)?;
+                }
                 "PGM / RUN BY / DATE" => self.parse_pgm_run_by_date(line),
                 "COMMENT" => self.comments.push(field(line, 0, 60).trim().to_string()),
-                "APPROX POSITION XYZ" => self.parse_approx_position(line)?,
-                "ANTENNA: DELTA H/E/N" => self.parse_antenna_delta(line)?,
-                // A version 2 file's observation records are laid out by its own
-                // `# / TYPES OF OBSERV` list; this version 3 record does not
-                // describe them, so it is reported as not retained.
-                "SYS / # / OBS TYPES" if self.is_rinex2() => {
-                    self.unretained_header_labels.push(label.to_string());
+                "TIME OF FIRST OBS" => {
+                    self.parse_time_of_first_obs(line)?;
+                    self.check_single_value(label, line)?;
                 }
-                "SYS / # / OBS TYPES" => self.parse_obs_types(line)?,
-                "# / TYPES OF OBSERV" => self.parse_obs_types_v2(line)?,
-                "SYS / SCALE FACTOR" => self.parse_scale_factor(line)?,
-                "SYS / PHASE SHIFT" => self.parse_phase_shift(line)?,
-                "TIME OF FIRST OBS" => self.parse_time_of_first_obs(line)?,
-                "TIME OF LAST OBS" => self.parse_time_of_last_obs(line)?,
-                "INTERVAL" => {
-                    self.interval_s = optional_f64_field(line, 0, 10, "interval_s")?
-                        .map(|interval_s| {
-                            exact_in_field(
-                                interval_s,
-                                crate::rinex_common::OBS_INTERVAL_WIDTH,
-                                crate::rinex_common::OBS_INTERVAL_DECIMALS,
-                                "interval_s",
-                                line,
-                            )
-                        })
-                        .transpose()?;
+                "TIME OF LAST OBS" => {
+                    self.parse_time_of_last_obs(line)?;
+                    self.check_single_value(label, line)?;
                 }
-                "GLONASS SLOT / FRQ #" => self.parse_glonass_slots(line)?,
-                "GLONASS COD/PHS/BIS" => self.parse_glonass_cod_phs_bis(line)?,
-                "SIGNAL STRENGTH UNIT" => {
-                    let unit = field(line, 0, 20).trim();
-                    if !unit.is_empty() {
-                        self.signal_strength_unit = Some(unit.to_string());
-                    }
+                "LEAP SECONDS" => {
+                    self.parse_leap_seconds(line)?;
+                    self.check_single_value(label, line)?;
                 }
-                "LEAP SECONDS" => self.parse_leap_seconds(line)?,
                 "# OF SATELLITES" => {
                     self.n_satellites =
                         Some(strict_int_field::<usize>(line, 0, 6, "n_satellites")?);
+                    self.check_single_value(label, line)?;
                 }
                 "PRN / # OF OBS" => {
                     // A count only means something against its constellation's
@@ -1035,35 +1285,6 @@ impl Parser {
                     // stands, so a malformed count is still the error reported.
                     self.check_prn_obs_count_fields(line)?;
                     self.prn_obs_count_lines.push(line.to_string());
-                }
-                "MARKER NAME" => {
-                    let name = field(line, 0, 60).trim();
-                    if !name.is_empty() {
-                        self.marker_name = Some(name.to_string());
-                    }
-                }
-                "MARKER NUMBER" => {
-                    self.marker_number = optional_trimmed(line, 0, 20);
-                }
-                "MARKER TYPE" => {
-                    self.marker_type = optional_trimmed(line, 0, 20);
-                }
-                "OBSERVER / AGENCY" => {
-                    self.observer = optional_trimmed(line, 0, 20);
-                    self.agency = optional_trimmed(line, 20, 60);
-                }
-                "REC # / TYPE / VERS" => {
-                    self.receiver = Some(ReceiverInfo {
-                        number: field(line, 0, 20).trim().to_string(),
-                        receiver_type: field(line, 20, 40).trim().to_string(),
-                        version: field(line, 40, 60).trim().to_string(),
-                    });
-                }
-                "ANT # / TYPE" => {
-                    self.antenna = Some(AntennaInfo {
-                        number: field(line, 0, 20).trim().to_string(),
-                        antenna_type: field(line, 20, 40).trim().to_string(),
-                    });
                 }
                 "END OF HEADER" => {
                     // Version 3 type records read before the version record said
@@ -1080,9 +1301,18 @@ impl Parser {
                     self.ensure_obs_type_count_complete(line)?;
                     self.ensure_obs_type_count_complete_v2(line)?;
                     self.ensure_scale_factor_count_complete(line)?;
+                    self.ensure_phase_shift_count_complete(line)?;
+                    for skip in phase_shift_contradictions(
+                        self.version.unwrap_or_default(),
+                        &self.phase_shifts,
+                    ) {
+                        self.diagnostics.push_skip(skip);
+                    }
+                    check_block_scale_factors(&self.scale_factors)?;
                     for count_line in std::mem::take(&mut self.prn_obs_count_lines) {
                         self.parse_prn_obs_counts(&count_line)?;
                     }
+                    self.begin_body()?;
                     saw_end = true;
                     break;
                 }
@@ -1099,6 +1329,167 @@ impl Parser {
             return Err(Error::Parse("RINEX OBS header has no END OF HEADER".into()));
         }
         Ok(())
+    }
+
+    /// Read one of the header records an event may also carry, as the file
+    /// header reads it. Returns `false`, reading nothing, for any other label.
+    fn parse_layered_record(&mut self, label: &str, line: &str) -> Result<bool> {
+        match label {
+            "APPROX POSITION XYZ" => self.parse_approx_position(line)?,
+            "ANTENNA: DELTA H/E/N" => self.parse_antenna_delta(line)?,
+            "SYS / # / OBS TYPES" => self.parse_obs_types(line)?,
+            "# / TYPES OF OBSERV" => self.parse_obs_types_v2(line)?,
+            "SYS / SCALE FACTOR" => self.parse_scale_factor(line)?,
+            "SYS / PHASE SHIFT" => self.parse_phase_shift(line)?,
+            "INTERVAL" => {
+                self.interval_s = optional_f64_field(line, 0, 10, "interval_s")?
+                    .map(|interval_s| {
+                        exact_in_field(
+                            interval_s,
+                            crate::rinex_common::OBS_INTERVAL_WIDTH,
+                            crate::rinex_common::OBS_INTERVAL_DECIMALS,
+                            "interval_s",
+                            line,
+                        )
+                    })
+                    .transpose()?;
+            }
+            "GLONASS SLOT / FRQ #" => self.parse_glonass_slots(line)?,
+            "GLONASS COD/PHS/BIS" => self.parse_glonass_cod_phs_bis(line)?,
+            "SIGNAL STRENGTH UNIT" => {
+                let unit = field(line, 0, 20).trim();
+                if !unit.is_empty() {
+                    self.signal_strength_unit = Some(unit.to_string());
+                }
+            }
+            "MARKER NAME" => {
+                let name = field(line, 0, 60).trim();
+                if !name.is_empty() {
+                    self.marker_name = Some(name.to_string());
+                }
+            }
+            "MARKER NUMBER" => {
+                self.marker_number = optional_trimmed(line, 0, 20);
+            }
+            "MARKER TYPE" => {
+                self.marker_type = optional_trimmed(line, 0, 20);
+            }
+            "OBSERVER / AGENCY" => {
+                self.observer = optional_trimmed(line, 0, 20);
+                self.agency = optional_trimmed(line, 20, 60);
+            }
+            "REC # / TYPE / VERS" => {
+                self.receiver = Some(ReceiverInfo {
+                    number: field(line, 0, 20).trim().to_string(),
+                    receiver_type: field(line, 20, 40).trim().to_string(),
+                    version: field(line, 40, 60).trim().to_string(),
+                });
+            }
+            "ANT # / TYPE" => {
+                self.antenna = Some(AntennaInfo {
+                    number: field(line, 0, 20).trim().to_string(),
+                    antenna_type: field(line, 20, 40).trim().to_string(),
+                });
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Keep the header the file declares, as it stands at `END OF HEADER`, and
+    /// start the header in effect for the body from it.
+    fn begin_body(&mut self) -> Result<()> {
+        let version = self
+            .version
+            .ok_or_else(|| Error::Parse("RINEX OBS missing RINEX VERSION / TYPE".into()))?;
+        let rinex2 = version.floor() as i64 == 2;
+        let header = ObsHeader {
+            version,
+            approx_position_m: self.approx_position_m,
+            antenna_delta_hen_m: self.antenna_delta_hen_m,
+            obs_codes: self.obs_codes.clone(),
+            declared_obs_codes: self.obs_codes.clone(),
+            rinex2_types: if rinex2 {
+                self.rinex2_obs_codes.clone()
+            } else {
+                Vec::new()
+            },
+            rinex2_system: if rinex2 {
+                self.rinex2_default_system
+            } else {
+                None
+            },
+            program_run_by_date: self.program_run_by_date.clone(),
+            comments: self.comments.clone(),
+            marker_number: self.marker_number.clone(),
+            marker_type: self.marker_type.clone(),
+            observer: self.observer.clone(),
+            agency: self.agency.clone(),
+            receiver: self.receiver.clone(),
+            antenna: self.antenna.clone(),
+            interval_s: self.interval_s,
+            time_of_first_obs: self.time_of_first_obs,
+            time_of_last_obs: self.time_of_last_obs,
+            n_satellites: self.n_satellites,
+            prn_obs_counts: self.prn_obs_counts.clone(),
+            phase_shifts: self.phase_shifts.clone(),
+            scale_factors: self.scale_factors.clone(),
+            glonass_slots: self.glonass_slots.clone(),
+            glonass_cod_phs_bis: self.glonass_cod_phs_bis.clone(),
+            signal_strength_unit: self.signal_strength_unit.clone(),
+            leap_seconds: self.leap_seconds,
+            marker_name: self.marker_name.clone(),
+            unretained_header_labels: self.unretained_header_labels.clone(),
+        };
+        self.code_list_segments.push(CodeListSegment {
+            lists: self.obs_codes.clone(),
+            names: self.rinex2_obs_codes.clone(),
+        });
+        self.effective = Some(header.clone());
+        self.file_header = Some(header);
+        Ok(())
+    }
+
+    /// Lay an event's header records over the header in effect, and read the
+    /// epochs after it by the code lists and scale factors in effect then.
+    fn apply_event(&mut self, records: &[String]) -> Result<()> {
+        let epoch_index = self.epochs.len();
+        let Some(effective) = self.effective.as_mut() else {
+            return Ok(());
+        };
+        let effect = apply_event_records(effective, records)
+            .map_err(|error| event_records_error(epoch_index, error))?;
+        let scale_factors = effective.scale_factors.clone();
+        let lists = effective.declared_obs_codes.clone();
+        let names = effective.rinex2_types.clone();
+        if effect.scale_factors {
+            self.scale_factors = scale_factors;
+        }
+        if effect.lists {
+            if self.is_rinex2() {
+                // Each constellation's list is read from the new names when
+                // its next record is.
+                self.rinex2_obs_codes = names;
+                self.obs_codes.clear();
+            } else {
+                self.obs_codes = lists;
+            }
+            self.code_list_segments.push(CodeListSegment {
+                lists: self.obs_codes.clone(),
+                names: self.rinex2_obs_codes.clone(),
+            });
+        }
+        for skip in effect.skips {
+            self.diagnostics.push_skip(skip);
+        }
+        Ok(())
+    }
+
+    /// Keep an epoch, with the stretch of code lists it was read by.
+    fn push_epoch(&mut self, epoch: ObsEpoch) {
+        self.epochs.push(epoch);
+        self.epoch_segments
+            .push(self.code_list_segments.len().saturating_sub(1));
     }
 
     fn parse_version(&mut self, line: &str) -> Result<()> {
@@ -1195,6 +1586,11 @@ impl Parser {
             self.ensure_obs_type_count_fits(system, count, line)?;
             self.current_obs_sys = Some(system);
             self.obs_codes_remaining = count;
+            // A repeated complete declaration for a constellation adds its codes
+            // to the list read so far. RINEX gives each constellation one
+            // declaration ("In mixed files: Repeat for each satellite system");
+            // adding a repeated one rather than refusing it is this reader's
+            // policy.
             self.obs_codes.entry(system).or_default();
         }
         let Some(system) = self.current_obs_sys else {
@@ -1253,6 +1649,7 @@ impl Parser {
             }
             self.rinex2_obs_codes.clear();
             self.rinex2_obs_codes_remaining = count;
+            self.rinex2_obs_types_declared = true;
         }
         // `9(4X,A2)`: a code sits in the last two of its six columns and the
         // four before it are blank. A token wider than the field means the line
@@ -1386,73 +1783,152 @@ impl Parser {
     }
 
     fn parse_phase_shift(&mut self, line: &str) -> Result<()> {
-        let tokens: Vec<&str> = field(line, 0, 60).split_whitespace().collect();
-        if tokens.is_empty() {
+        // `18X,10(1X,A3)`: a record whose first eighteen columns are blank
+        // continues the satellite list of the record before it.
+        if self.phase_shift_satellites_remaining > 0
+            && field(line, 0, write::PHASE_SHIFT_CONTINUATION_COLUMN)
+                .trim()
+                .is_empty()
+        {
+            return self.continue_phase_shift_satellites(line);
+        }
+        self.ensure_phase_shift_count_complete(line)?;
+        let content = field(line, 0, 60);
+        if content.trim().is_empty() {
             return Ok(());
         }
-        if tokens.len() < 2 {
-            return Err(Error::Parse(format!(
-                "RINEX OBS phase-shift header has too few fields in {line:?}"
-            )));
+        // A record naming only its constellation declares the constellation's
+        // phase alignment unknown: "the observation code field and the rest of
+        // the SYS / PHASE SHIFT header record field of the respective satellite
+        // system(s) are left blank" (RINEX 3.05 section 5.2.12).
+        let mut tokens = content.split_whitespace();
+        if let (Some(only), None) = (tokens.next(), tokens.next()) {
+            if let Some(system) = only
+                .chars()
+                .next()
+                .filter(|_| only.len() == 1)
+                .and_then(GnssSystem::from_letter)
+            {
+                self.phase_shifts.push(ObsPhaseShift {
+                    system,
+                    code: None,
+                    correction_cycles: None,
+                    satellites: Vec::new(),
+                    unrepresentable_satellites: Vec::new(),
+                });
+                return Ok(());
+            }
         }
+        // `A1,1X,A3,1X,F8.5,2X,I2.2,10(1X,A3)`: read in its columns where the
+        // record is laid out in them, which tells a blank correction before a
+        // satellite count from a correction. A record not in its columns is
+        // read by the reading its fields agree with.
+        let fields = match phase_shift_columns(content) {
+            Some(fields) => fields,
+            None => loose_phase_shift_fields(content, line)?,
+        };
 
-        let system = tokens[0]
+        let system = fields
+            .system
             .chars()
             .next()
+            .filter(|_| fields.system.len() == 1)
             .and_then(GnssSystem::from_letter)
             .ok_or_else(|| {
                 Error::Parse(format!(
                     "RINEX OBS phase-shift system unparsable in {line:?}"
                 ))
             })?;
-        let code = obs_code_token(tokens[1], "SYS / PHASE SHIFT", line)?;
-        let correction_cycles = match tokens.get(2) {
-            Some(token) => strict_f64_token(token, "phase_shift.correction_cycles", line)?,
-            None => 0.0,
-        };
-
-        let satellites = if let Some(count_token) = tokens.get(3) {
-            let count =
-                strict_int_token::<usize>(count_token, "phase_shift.satellite_count", line)?;
-            let sat_tokens = &tokens[4..];
-            if sat_tokens.len() != count {
-                return Err(Error::Parse(format!(
-                    "RINEX OBS phase-shift satellite count mismatch in {line:?}"
-                )));
-            }
-            sat_tokens
-                .iter()
-                .map(|token| {
-                    parse_sv_token(token).ok_or_else(|| {
-                        Error::Parse(format!(
-                            "RINEX OBS phase-shift satellite token {token:?} unparsable in {line:?}"
-                        ))
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?
+        let code = Some(obs_code_token(fields.code, "SYS / PHASE SHIFT", line)?);
+        let correction_cycles = if fields.correction.is_empty() {
+            None
         } else {
-            Vec::new()
+            let correction =
+                strict_f64_token(fields.correction, "phase_shift.correction_cycles", line)?;
+            Some(exact_in_field(
+                correction,
+                PHASE_SHIFT_CORRECTION_WIDTH,
+                PHASE_SHIFT_CORRECTION_DECIMALS,
+                "phase_shift.correction_cycles",
+                line,
+            )?)
         };
-
-        let shift = ObsPhaseShift {
+        let count = if fields.count.is_empty() {
+            0
+        } else {
+            strict_int_token::<usize>(fields.count, "phase_shift.satellite_count", line)?
+        };
+        if count > MAX_PHASE_SHIFT_SATELLITES {
+            return Err(Error::Parse(format!(
+                "RINEX OBS phase-shift satellite count {count} exceeds the I2.2 field maximum of {MAX_PHASE_SHIFT_SATELLITES} in {line:?}"
+            )));
+        }
+        // A list longer than its first record holds continues on the records
+        // after it; one naming more satellites than its count does not
+        // describe itself.
+        if fields.satellites.len() > count {
+            return Err(Error::Parse(format!(
+                "RINEX OBS phase-shift satellite count mismatch in {line:?}"
+            )));
+        }
+        let (satellites, unrepresentable_satellites) =
+            phase_shift_satellites(&fields.satellites, line)?;
+        for token in &unrepresentable_satellites {
+            self.push_unrepresentable_satellite_skip(token);
+        }
+        let remaining = count - fields.satellites.len();
+        self.phase_shifts.push(ObsPhaseShift {
             system,
             code,
             correction_cycles,
             satellites,
-        };
-        // Satellite tokens may be written more compactly than the `1X,A3` fields
-        // they are re-emitted in ("G1" for "G01"), so a record the parser can
-        // read is not always one it can write back. Reject what would overrun
-        // the content area rather than truncate it into a shorter list.
-        let content_width = write::phase_shift_content(&shift).len();
-        if content_width > write::HEADER_CONTENT_WIDTH {
+            unrepresentable_satellites,
+        });
+        self.phase_shift_satellites_remaining = remaining;
+        Ok(())
+    }
+
+    /// Add a continuation record's satellites to the phase shift before it.
+    fn continue_phase_shift_satellites(&mut self, line: &str) -> Result<()> {
+        let tokens: Vec<&str> = field(line, write::PHASE_SHIFT_CONTINUATION_COLUMN, 60)
+            .split_whitespace()
+            .collect();
+        if tokens.len() > self.phase_shift_satellites_remaining {
             return Err(Error::Parse(format!(
-                "RINEX OBS SYS / PHASE SHIFT record needs {content_width} columns, exceeding the {} a header record carries, in {line:?}",
-                write::HEADER_CONTENT_WIDTH
+                "RINEX OBS phase-shift satellite count mismatch: the continuation lists more satellites than its record declares, in {line:?}"
             )));
         }
-        self.phase_shifts.push(shift);
+        let (satellites, unrepresentable) = phase_shift_satellites(&tokens, line)?;
+        if self.phase_shifts.is_empty() {
+            return Err(Error::Parse(format!(
+                "RINEX OBS SYS / PHASE SHIFT continuation continues no record, in {line:?}"
+            )));
+        }
+        for token in &unrepresentable {
+            self.push_unrepresentable_satellite_skip(token);
+        }
+        self.phase_shift_satellites_remaining -= tokens.len();
+        if let Some(shift) = self.phase_shifts.last_mut() {
+            shift.satellites.extend(satellites);
+            shift.unrepresentable_satellites.extend(unrepresentable);
+        }
         Ok(())
+    }
+
+    /// Refuse a `SYS / PHASE SHIFT` record whose continuations ended before its
+    /// count's satellites were listed.
+    fn ensure_phase_shift_count_complete(&self, line: &str) -> Result<()> {
+        if self.phase_shift_satellites_remaining == 0 {
+            return Ok(());
+        }
+        let supplied = self
+            .phase_shifts
+            .last()
+            .map_or(0, ObsPhaseShift::satellite_count);
+        let declared = supplied + self.phase_shift_satellites_remaining;
+        Err(Error::Parse(format!(
+            "RINEX OBS phase-shift satellite count mismatch: SYS / PHASE SHIFT declares {declared} satellites but supplies {supplied} before {line:?}"
+        )))
     }
 
     fn parse_scale_factor(&mut self, line: &str) -> Result<()> {
@@ -1643,45 +2119,104 @@ impl Parser {
                     "RINEX OBS invalid glonass_slot.channel: {channel} out of range in {line:?}"
                 )));
             }
+            // A header block gives its records no order, so a slot given two
+            // channels in one block says two things at once.
+            if let Some(held) = self.glonass_slots_in_block.get(&sat.prn) {
+                if *held != channel {
+                    return Err(Error::Parse(format!(
+                        "RINEX OBS GLONASS SLOT / FRQ # records in one header block contradict: R{:02} is given channels {held} and {channel}",
+                        sat.prn
+                    )));
+                }
+            }
+            self.glonass_slots_in_block.insert(sat.prn, channel);
             self.glonass_slots.insert(sat.prn, channel);
         }
         Ok(())
     }
 
     fn parse_glonass_cod_phs_bis(&mut self, line: &str) -> Result<()> {
-        let tokens: Vec<&str> = field(line, 0, 60).split_whitespace().collect();
-        let mut entries = Vec::new();
-        for pair in tokens.chunks(2) {
-            if pair.len() != 2 {
-                return Err(Error::Parse(format!(
-                    "RINEX OBS GLONASS COD/PHS/BIS has an odd token count in {line:?}"
-                )));
+        let content = field(line, 0, 60);
+        // `4(1X,A3,1X,F8.3)`: read in its columns where the record is laid out
+        // in them, which is the only way to read a blank bias beside others. A
+        // record not in its columns is read by its fields, a code and a bias
+        // each.
+        let fields = match glonass_bias_columns(content) {
+            Some(fields) => fields,
+            None => {
+                let tokens: Vec<&str> = content.split_whitespace().collect();
+                if !tokens.len().is_multiple_of(2) {
+                    return Err(Error::Parse(format!(
+                        "RINEX OBS GLONASS COD/PHS/BIS has an odd token count in {line:?}"
+                    )));
+                }
+                tokens.chunks(2).map(|pair| (pair[0], pair[1])).collect()
             }
+        };
+        let mut entries = Vec::new();
+        for (code, value) in fields {
             // The code is `A3`: a longer one would be cut when written, and read
             // back as another code.
-            if pair[0].len() > GLONASS_BIAS_CODE_WIDTH {
+            if code.len() > GLONASS_BIAS_CODE_WIDTH {
                 return Err(Error::Parse(format!(
-                    "RINEX OBS GLONASS COD/PHS/BIS code {:?} exceeds the A3 field it is written in, in {line:?}",
-                    pair[0]
+                    "RINEX OBS GLONASS COD/PHS/BIS code {code:?} exceeds the A3 field it is written in, in {line:?}"
                 )));
             }
-            let bias = strict_f64_token(pair[1], "glonass_code_phase_bias", line)?;
-            entries.push((
-                pair[0].to_string(),
-                exact_in_field(
+            let bias = if value.is_empty() {
+                None
+            } else {
+                let bias = strict_f64_token(value, "glonass_code_phase_bias", line)?;
+                Some(exact_in_field(
                     bias,
                     GLONASS_BIAS_WIDTH,
                     GLONASS_BIAS_DECIMALS,
                     "glonass_code_phase_bias",
                     line,
-                )?,
-            ));
+                )?)
+            };
+            entries.push((code.to_string(), bias));
         }
         // RINEX gives this record four biases, which fit one line. More than
         // that is an extension of this crate's own: the writer continues them
         // onto another line rather than cutting them off at the sixtieth
-        // column, and a further line adds to the record. A blank record still
-        // means "unknown" and so clears what came before it.
+        // column, and a further line adds to the record. A blank record means
+        // "unknown" and so clears what came before it.
+        //
+        // A blank record beside records giving biases in the same header block
+        // cannot be held beside them, and is refused rather than lost.
+        let (held, blank, reported) = &mut self.glonass_biases_in_block;
+        if entries.is_empty() && !held.is_empty() || !entries.is_empty() && *blank {
+            return Err(Error::Parse(format!(
+                "RINEX OBS GLONASS COD/PHS/BIS records in one header block contradict: a blank record declares the biases unknown beside records giving them, in {line:?}"
+            )));
+        }
+        *blank |= entries.is_empty();
+        // A code given two biases in one block, which gives its records no
+        // order, is kept as written and read as ambiguous; each is counted.
+        // From RINEX 4.00 the record is ignored and not checked.
+        let deprecated = records_deprecated_in_rinex4(self.version.unwrap_or_default());
+        let mut contradicted = Vec::new();
+        for (code, bias) in &entries {
+            match held.get(code) {
+                Some(earlier) if earlier != bias => {
+                    if !deprecated && reported.insert(code.clone()) {
+                        contradicted.push(code.clone());
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    held.insert(code.clone(), *bias);
+                }
+            }
+        }
+        for code in contradicted {
+            self.diagnostics.push_skip(Skip {
+                at: RecordRef::default().with_satellite(code),
+                reason: SkipReason::InconsistentRecord(
+                    "GLONASS COD/PHS/BIS records in one header block give a code different biases",
+                ),
+            });
+        }
         match &mut self.glonass_cod_phs_bis {
             Some(existing) if !entries.is_empty() => existing.extend(entries),
             slot => *slot = Some(entries),
@@ -1790,7 +2325,10 @@ impl Parser {
                 // records, not observations. They are kept as they were written
                 // so the epoch can be written back whole.
                 let special_records = take_special_records(lines, numsat)?;
-                self.epochs.push(ObsEpoch {
+                if applies_header_records(flag) {
+                    self.apply_event(&special_records)?;
+                }
+                self.push_epoch(ObsEpoch {
                     epoch: epoch_time,
                     flag,
                     rcv_clock_offset_s,
@@ -1851,7 +2389,7 @@ impl Parser {
                 sats.insert(sat, values);
             }
             let (sats, cycle_slips) = split_cycle_slips(flag, sats);
-            self.epochs.push(ObsEpoch {
+            self.push_epoch(ObsEpoch {
                 epoch: epoch_time,
                 flag,
                 rcv_clock_offset_s,
@@ -1882,7 +2420,10 @@ impl Parser {
 
             if is_event_flag(flag) {
                 let special_records = take_special_records(lines, numsat)?;
-                self.epochs.push(ObsEpoch {
+                if applies_header_records(flag) {
+                    self.apply_event(&special_records)?;
+                }
+                self.push_epoch(ObsEpoch {
                     epoch: epoch_time,
                     flag,
                     rcv_clock_offset_s,
@@ -1916,7 +2457,7 @@ impl Parser {
                 sats.insert(sat, values);
             }
             let (sats, cycle_slips) = split_cycle_slips(flag, sats);
-            self.epochs.push(ObsEpoch {
+            self.push_epoch(ObsEpoch {
                 epoch: epoch_time,
                 flag,
                 rcv_clock_offset_s,
@@ -1944,6 +2485,7 @@ impl Parser {
     }
 
     fn ensure_rinex2_system_obs_codes(&mut self, system: GnssSystem) {
+        self.rinex2_systems.insert(system);
         let version = self.version.unwrap_or(2.11);
         self.obs_codes
             .entry(system)
@@ -2084,10 +2626,7 @@ impl Parser {
         Ok((sat, values))
     }
 
-    fn finish(self) -> Result<RinexObs> {
-        let version = self
-            .version
-            .ok_or_else(|| Error::Parse("RINEX OBS missing RINEX VERSION / TYPE".into()))?;
+    fn finish(mut self) -> Result<RinexObs> {
         if let Some(remaining) = self.glonass_slots_remaining {
             if remaining != 0 {
                 return Err(Error::Parse(format!(
@@ -2095,56 +2634,121 @@ impl Parser {
                 )));
             }
         }
-        let mut obs_codes = self.obs_codes;
-        if obs_codes.is_empty() && !self.rinex2_obs_codes.is_empty() {
-            let system = self.rinex2_default_system.unwrap_or(GnssSystem::Gps);
-            obs_codes.insert(
-                system,
-                rinex2_system_obs_codes(system, &self.rinex2_obs_codes, version),
-            );
+        let Some(mut header) = self.file_header.take() else {
+            return Err(Error::Parse(
+                "RINEX OBS missing RINEX VERSION / TYPE".into(),
+            ));
+        };
+        let version = header.version;
+        let rinex2 = version.floor() as i64 == 2;
+        // Each constellation's codes are the union of every list the file
+        // declares for it, the file header's first.
+        let mut union: BTreeMap<GnssSystem, Vec<String>> = BTreeMap::new();
+        if rinex2 {
+            // A version 2 file names its codes once for every constellation,
+            // and states a list for each constellation its records name, or
+            // with none, for the one its version record names.
+            let mut systems = self.rinex2_systems.clone();
+            if systems.is_empty()
+                && self
+                    .code_list_segments
+                    .iter()
+                    .any(|segment| !segment.names.is_empty())
+            {
+                systems.insert(self.rinex2_default_system.unwrap_or(GnssSystem::Gps));
+            }
+            for system in systems {
+                let list = union.entry(system).or_default();
+                for segment in &self.code_list_segments {
+                    extend_code_union(
+                        list,
+                        &rinex2_system_obs_codes(system, &segment.names, version),
+                    );
+                }
+            }
+        } else {
+            for segment in &self.code_list_segments {
+                for (system, list) in &segment.lists {
+                    extend_code_union(union.entry(*system).or_default(), list);
+                }
+            }
+            // A header declaring its types only as version 2 names states the
+            // list those names read as, whatever its version.
+            if union.is_empty() && !header_names_fallback_is_empty(&self.code_list_segments) {
+                let system = self.rinex2_default_system.unwrap_or(GnssSystem::Gps);
+                let names = self
+                    .code_list_segments
+                    .first()
+                    .map(|segment| segment.names.as_slice())
+                    .unwrap_or_default();
+                union.insert(system, rinex2_system_obs_codes(system, names, version));
+            }
         }
-        if obs_codes.is_empty() {
+        if union.is_empty() {
             return Err(Error::Parse(
                 "RINEX OBS header has no SYS / # / OBS TYPES records".into(),
             ));
         }
-        let header = ObsHeader {
-            version,
-            approx_position_m: self.approx_position_m,
-            antenna_delta_hen_m: self.antenna_delta_hen_m,
-            obs_codes,
-            rinex2_types: if version.floor() as i64 == 2 {
-                self.rinex2_obs_codes
-            } else {
-                Vec::new()
-            },
-            rinex2_system: if version.floor() as i64 == 2 {
-                self.rinex2_default_system
-            } else {
-                None
-            },
-            program_run_by_date: self.program_run_by_date,
-            comments: self.comments,
-            marker_number: self.marker_number,
-            marker_type: self.marker_type,
-            observer: self.observer,
-            agency: self.agency,
-            receiver: self.receiver,
-            antenna: self.antenna,
-            interval_s: self.interval_s,
-            time_of_first_obs: self.time_of_first_obs,
-            time_of_last_obs: self.time_of_last_obs,
-            n_satellites: self.n_satellites,
-            prn_obs_counts: self.prn_obs_counts,
-            phase_shifts: self.phase_shifts,
-            scale_factors: self.scale_factors,
-            glonass_slots: self.glonass_slots,
-            glonass_cod_phs_bis: self.glonass_cod_phs_bis,
-            signal_strength_unit: self.signal_strength_unit,
-            leap_seconds: self.leap_seconds,
-            marker_name: self.marker_name,
-            unretained_header_labels: self.unretained_header_labels,
+        header.declared_obs_codes = if rinex2 {
+            union
+                .keys()
+                .map(|system| {
+                    (
+                        *system,
+                        rinex2_system_obs_codes(*system, &header.rinex2_types, version),
+                    )
+                })
+                .collect()
+        } else if self
+            .code_list_segments
+            .first()
+            .is_some_and(|segment| segment.lists.is_empty())
+        {
+            // The list the file header's names read as is the one it declares.
+            union.clone()
+        } else {
+            self.code_list_segments
+                .first()
+                .map(|segment| segment.lists.clone())
+                .unwrap_or_default()
         };
+        // Values were read by the list in effect at their epoch, and are held
+        // aligned to the union.
+        if self.code_list_segments.len() > 1 {
+            let mut positions: BTreeMap<(usize, GnssSystem), Option<Vec<Option<usize>>>> =
+                BTreeMap::new();
+            let segments = &self.code_list_segments;
+            for (epoch_index, (epoch, segment)) in
+                self.epochs.iter_mut().zip(&self.epoch_segments).enumerate()
+            {
+                for (sat, values) in epoch.sats.iter_mut().chain(epoch.cycle_slips.iter_mut()) {
+                    let Some(held) = union.get(&sat.system) else {
+                        continue;
+                    };
+                    let map = positions.entry((*segment, sat.system)).or_insert_with(|| {
+                        let list = match segments.get(*segment) {
+                            Some(segment) if rinex2 => {
+                                rinex2_system_obs_codes(sat.system, &segment.names, version)
+                            }
+                            Some(segment) => {
+                                segment.lists.get(&sat.system).cloned().unwrap_or_default()
+                            }
+                            None => Vec::new(),
+                        };
+                        (list != *held).then(|| union_positions(&list, held))
+                    });
+                    if let Some(map) = map {
+                        *values = values_in_union(values, map, held.len()).ok_or_else(|| {
+                            Error::Parse(format!(
+                                "RINEX OBS epoch {epoch_index} {sat} holds values under codes \
+                                 the union of its code lists does not hold"
+                            ))
+                        })?;
+                    }
+                }
+            }
+        }
+        header.obs_codes = union;
         Ok(RinexObs {
             header,
             epochs: self.epochs,
@@ -2152,15 +2756,56 @@ impl Parser {
         })
     }
 
+    /// Refuse a record of a label holding one value whose parsed value differs
+    /// from the value the same label's record before it set in this header
+    /// block. A block gives its records no order, so neither could be the one
+    /// in effect. Records whose text differs but which read as one value are
+    /// one value. A blank `MARKER NAME` or `SIGNAL STRENGTH UNIT` record sets no
+    /// value, and is not compared.
+    fn check_single_value(&mut self, label: &str, line: &str) -> Result<()> {
+        if !SINGLE_VALUE_LABELS.contains(&label) {
+            return Ok(());
+        }
+        let value = match label {
+            "RINEX VERSION / TYPE" => {
+                SingleValue::Version(self.version, self.rinex2_default_system)
+            }
+            "INTERVAL" => SingleValue::Number(self.interval_s),
+            "MARKER NAME" if !field(line, 0, 60).trim().is_empty() => {
+                SingleValue::Text(self.marker_name.clone())
+            }
+            "MARKER NUMBER" => SingleValue::Text(self.marker_number.clone()),
+            "MARKER TYPE" => SingleValue::Text(self.marker_type.clone()),
+            "APPROX POSITION XYZ" => SingleValue::Vector(self.approx_position_m),
+            "ANTENNA: DELTA H/E/N" => SingleValue::Vector(self.antenna_delta_hen_m),
+            "ANT # / TYPE" => SingleValue::Antenna(self.antenna.clone()),
+            "REC # / TYPE / VERS" => SingleValue::Receiver(self.receiver.clone()),
+            "OBSERVER / AGENCY" => {
+                SingleValue::ObserverAgency(self.observer.clone(), self.agency.clone())
+            }
+            "SIGNAL STRENGTH UNIT" if !field(line, 0, 20).trim().is_empty() => {
+                SingleValue::Text(self.signal_strength_unit.clone())
+            }
+            "TIME OF FIRST OBS" => SingleValue::Time(self.time_of_first_obs),
+            "TIME OF LAST OBS" => SingleValue::Time(self.time_of_last_obs),
+            "LEAP SECONDS" => SingleValue::LeapSeconds(self.leap_seconds),
+            "# OF SATELLITES" => SingleValue::Count(self.n_satellites),
+            _ => return Ok(()),
+        };
+        match self.single_values_in_block.get(label) {
+            Some(held) if *held != value => Err(Error::Parse(format!(
+                "RINEX OBS {label} records in one header block contradict: {held:?} and {value:?}, in {line:?}"
+            ))),
+            Some(_) => Ok(()),
+            None => {
+                self.single_values_in_block.insert(label.to_string(), value);
+                Ok(())
+            }
+        }
+    }
+
     fn scale_factor_for(&self, system: GnssSystem, code: &str) -> f64 {
-        self.scale_factors
-            .iter()
-            .rev()
-            .find(|record| {
-                record.system == system
-                    && (record.codes.is_empty() || record.codes.iter().any(|c| c == code))
-            })
-            .map_or(1.0, |record| record.factor)
+        scale_factor_in(&self.scale_factors, system, code)
     }
 }
 
@@ -2809,6 +3454,40 @@ pub(crate) fn rinex2_next_obs_code(
     } else {
         name.to_string()
     }
+}
+
+/// Read a phase shift record's satellite tokens.
+/// A phase-shift record's satellite tokens: the satellites [`GnssSatelliteId`]
+/// holds, and the well-formed designators it does not hold, such as `R28`, as
+/// written. A token that is not a satellite designator is refused.
+fn phase_shift_satellites(
+    tokens: &[&str],
+    line: &str,
+) -> Result<(Vec<GnssSatelliteId>, Vec<String>)> {
+    let mut satellites = Vec::new();
+    let mut unrepresentable = Vec::new();
+    for token in tokens {
+        if let Some(sat) = parse_sv_token(token) {
+            satellites.push(sat);
+        } else if is_satellite_designator(token) {
+            unrepresentable.push((*token).to_string());
+        } else {
+            return Err(Error::Parse(format!(
+                "RINEX OBS phase-shift satellite token {token:?} unparsable in {line:?}"
+            )));
+        }
+    }
+    Ok((satellites, unrepresentable))
+}
+
+/// Whether a token is a RINEX satellite designator as [`GnssSatelliteId`] reads
+/// one, a constellation letter and a one- or two-digit number, whatever the
+/// number is.
+fn is_satellite_designator(token: &str) -> bool {
+    let mut chars = token.chars();
+    chars.next().and_then(GnssSystem::from_letter).is_some()
+        && (1..=2).contains(&chars.as_str().len())
+        && chars.as_str().bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Take the records an event epoch declared, as they were written.
@@ -3490,6 +4169,773 @@ fn digit_at(line: &str, col: usize) -> Option<u8> {
         .get(col)
         .filter(|b| b.is_ascii_digit())
         .map(|b| b - b'0')
+}
+
+/// Whether an epoch flag's special records may be header records that take
+/// effect for the epochs after them. RINEX 2.10 allowed header records after
+/// every event flag, which are 2 to 5; flag 6 is followed by cycle slip records,
+/// and no flag above it is defined.
+pub(crate) fn applies_header_records(flag: u8) -> bool {
+    (2..=5).contains(&flag)
+}
+
+/// The header records an event's special records lay over the header in effect:
+/// every record that changes how later epochs read or what they mean. The type
+/// lists are each read at their own version only.
+const EVENT_HEADER_LABELS: &[&str] = &[
+    "SYS / SCALE FACTOR",
+    "SYS / PHASE SHIFT",
+    "GLONASS SLOT / FRQ #",
+    "GLONASS COD/PHS/BIS",
+    "INTERVAL",
+    "MARKER NAME",
+    "MARKER NUMBER",
+    "MARKER TYPE",
+    "APPROX POSITION XYZ",
+    "ANTENNA: DELTA H/E/N",
+    "ANT # / TYPE",
+    "REC # / TYPE / VERS",
+    "OBSERVER / AGENCY",
+    "SIGNAL STRENGTH UNIT",
+];
+
+/// A special record as the header reader reads a header record: printable
+/// ASCII, with a label out of its columns moved into them.
+fn event_record_line(record: &str) -> String {
+    let ascii = printable_ascii_header_columns(record.trim_end_matches(['\r', '\n']));
+    normalize_header_line(&ascii).into_owned()
+}
+
+fn event_label_takes_effect(version: f64, label: &str) -> bool {
+    let rinex2 = version.floor() as i64 == 2;
+    match label {
+        "SYS / # / OBS TYPES" => !rinex2,
+        "# / TYPES OF OBSERV" => rinex2,
+        _ => EVENT_HEADER_LABELS.contains(&label),
+    }
+}
+
+/// The label a special record carries, read as the header reader reads a
+/// header record's label.
+pub(crate) fn event_record_label(record: &str) -> String {
+    raw_field_from(&event_record_line(record), 60)
+        .trim()
+        .to_string()
+}
+
+/// Whether a special record following an event takes effect for the epochs
+/// after it in a file of this version. Every other record - a comment, a record
+/// no later epoch depends on - is kept as written and changes nothing.
+pub(crate) fn event_record_takes_effect(version: f64, record: &str) -> bool {
+    event_label_takes_effect(version, &event_record_label(record))
+}
+
+/// Whether an event's special records include a record with this label that
+/// takes effect in a file of this version.
+pub(crate) fn event_declares_label(version: f64, records: &[String], label: &str) -> bool {
+    records.iter().any(|record| {
+        let held = event_record_label(record);
+        held == label && event_label_takes_effect(version, &held)
+    })
+}
+
+/// What laying an event's records over a header changed.
+#[derive(Debug, Default)]
+pub(crate) struct EventEffect {
+    /// Whether any record took effect.
+    pub(crate) applied: bool,
+    /// Whether the records declared a code list, or at version 2 a list of
+    /// observation types.
+    pub(crate) lists: bool,
+    /// Whether the records declared a scale factor.
+    pub(crate) scale_factors: bool,
+    /// Records skipped as the file header skips them: a GLONASS slot the
+    /// engine cannot represent.
+    pub(crate) skips: Vec<Skip>,
+}
+
+/// Lay the header records an event epoch carries over the header in effect
+/// before it, reading each as the file header reads it and refusing a malformed
+/// one as the file header refuses it.
+///
+/// RINEX says "Each value remains valid until changed by an additional header
+/// record" (3.05 and 4.02 section 6.5) and "allows the free ordering of the
+/// header records" (section 5.2.1). It does not say how records overlapping
+/// within one header block, or an event's records overlapping the header's,
+/// combine. What follows is this reader's policy, chosen to be consistent with
+/// those two sentences: no record's position within a block decides anything,
+/// and a later block changes what it gives values to.
+///
+/// An event's records are one header block, laid over the header in effect.
+/// Within a block, a block giving a key that changes how observations are read
+/// two values is refused as contradictory: a scale factor, a GLONASS slot, or a
+/// record holding one value. Phase shifts and GLONASS biases change nothing an
+/// observation reads as, so a block giving a satellite's code two corrections,
+/// or a GLONASS code two biases, keeps both records as written, counts the
+/// contradiction as a skip, and that signal reads as
+/// [`CorrectionUnavailable::Ambiguous`]. A record naming satellites or codes
+/// applies to them over the block's record for every satellite or code, and a
+/// phase shift record for a code over one naming only the constellation.
+///
+/// Across blocks: a value replaces the one in effect. A constellation's type
+/// declaration replaces its list; a repeated complete declaration for the same
+/// constellation within the block adds its codes to the list, as the file
+/// header reads one. RINEX gives each constellation one declaration ("In mixed
+/// files: Repeat for each satellite system"), so adding a repeated one is a
+/// policy too. A phase shift record naming only a constellation replaces every
+/// earlier record for it; one for every satellite of a code replaces the
+/// default and every earlier satellite exception for the code, and one naming
+/// satellites replaces those satellites only; a scale factor for every code of
+/// a system and one naming codes do the same. A GLONASS slot's channel and a
+/// code's GLONASS bias replace that slot's and that code's. `obs_codes`, the
+/// union of every list the file declares, is not changed.
+pub(crate) fn apply_event_records(
+    header: &mut ObsHeader,
+    records: &[String],
+) -> Result<EventEffect> {
+    let mut effect = EventEffect::default();
+    let version = header.version;
+    let lines: Vec<String> = records
+        .iter()
+        .map(|record| event_record_line(record))
+        .filter(|line| event_label_takes_effect(version, raw_field_from(line, 60).trim()))
+        .collect();
+    if lines.is_empty() {
+        return Ok(effect);
+    }
+    let mut scratch = Parser::new();
+    scratch.version = Some(version);
+    scratch.approx_position_m = header.approx_position_m;
+    scratch.antenna_delta_hen_m = header.antenna_delta_hen_m;
+    scratch.interval_s = header.interval_s;
+    scratch.marker_name = header.marker_name.clone();
+    scratch.marker_number = header.marker_number.clone();
+    scratch.marker_type = header.marker_type.clone();
+    scratch.observer = header.observer.clone();
+    scratch.agency = header.agency.clone();
+    scratch.receiver = header.receiver.clone();
+    scratch.antenna = header.antenna.clone();
+    scratch.signal_strength_unit = header.signal_strength_unit.clone();
+    for line in &lines {
+        let label = raw_field_from(line, 60).trim();
+        scratch.parse_layered_record(label, line)?;
+        scratch.check_single_value(label, line)?;
+    }
+    let end = "the end of the event's records";
+    scratch.ensure_obs_type_count_complete(end)?;
+    scratch.ensure_obs_type_count_complete_v2(end)?;
+    scratch.ensure_scale_factor_count_complete(end)?;
+    scratch.ensure_phase_shift_count_complete(end)?;
+    for skip in phase_shift_contradictions(version, &scratch.phase_shifts) {
+        scratch.diagnostics.push_skip(skip);
+    }
+    check_block_scale_factors(&scratch.scale_factors)?;
+    if let Some(remaining) = scratch.glonass_slots_remaining.filter(|left| *left != 0) {
+        return Err(Error::Parse(format!(
+            "RINEX OBS GLONASS slot table missing {remaining} declared entries"
+        )));
+    }
+    effect.applied = true;
+    header.approx_position_m = scratch.approx_position_m;
+    header.antenna_delta_hen_m = scratch.antenna_delta_hen_m;
+    header.interval_s = scratch.interval_s;
+    header.marker_name = scratch.marker_name;
+    header.marker_number = scratch.marker_number;
+    header.marker_type = scratch.marker_type;
+    header.observer = scratch.observer;
+    header.agency = scratch.agency;
+    header.receiver = scratch.receiver;
+    header.antenna = scratch.antenna;
+    header.signal_strength_unit = scratch.signal_strength_unit;
+    if version.floor() as i64 == 2 {
+        if scratch.rinex2_obs_types_declared {
+            header.rinex2_types = scratch.rinex2_obs_codes;
+            header.declared_obs_codes = header
+                .obs_codes
+                .keys()
+                .map(|system| {
+                    (
+                        *system,
+                        rinex2_system_obs_codes(*system, &header.rinex2_types, version),
+                    )
+                })
+                .collect();
+            effect.lists = true;
+        }
+    } else if !scratch.obs_codes.is_empty() {
+        header.declared_obs_codes.extend(scratch.obs_codes);
+        effect.lists = true;
+    }
+    // The event is a block of its own, laid over the blocks before it.
+    effect.scale_factors = !scratch.scale_factors.is_empty();
+    lay_scale_factors_over(&mut header.scale_factors, scratch.scale_factors);
+    lay_phase_shifts_over(&mut header.phase_shifts, scratch.phase_shifts);
+    header.glonass_slots.extend(scratch.glonass_slots);
+    if let Some(entries) = scratch.glonass_cod_phs_bis {
+        lay_glonass_biases_over(&mut header.glonass_cod_phs_bis, entries);
+    }
+    effect.skips = scratch.diagnostics.skips;
+    Ok(effect)
+}
+
+/// The value a record of a label holding one value sets, compared as parsed:
+/// numbers by value, so `-0.0` and `0.0` are one value, and text as trimmed.
+#[derive(Debug, Clone, PartialEq)]
+enum SingleValue {
+    Version(Option<f64>, Option<GnssSystem>),
+    Number(Option<f64>),
+    Text(Option<String>),
+    Vector(Option<[f64; 3]>),
+    Antenna(Option<AntennaInfo>),
+    Receiver(Option<ReceiverInfo>),
+    ObserverAgency(Option<String>, Option<String>),
+    Time(Option<(ObsEpochTime, TimeScale)>),
+    LeapSeconds(Option<ObsLeapSeconds>),
+    Count(Option<usize>),
+}
+
+/// Labels whose records each set one value the product applies, and which this
+/// reader's policy refuses to see given two values in one header block, where
+/// no record's position could decide between them. The first ten are read in the file
+/// header and after an event; the rest only in the file header. A label whose
+/// records add to a list, `COMMENT` or `PRN / # OF OBS`, or whose value nothing
+/// applies, `PGM / RUN BY / DATE`, is not among them.
+pub(crate) const SINGLE_VALUE_LABELS: [&str; 15] = [
+    "INTERVAL",
+    "MARKER NAME",
+    "MARKER NUMBER",
+    "MARKER TYPE",
+    "APPROX POSITION XYZ",
+    "ANTENNA: DELTA H/E/N",
+    "ANT # / TYPE",
+    "REC # / TYPE / VERS",
+    "OBSERVER / AGENCY",
+    "SIGNAL STRENGTH UNIT",
+    "RINEX VERSION / TYPE",
+    "TIME OF FIRST OBS",
+    "TIME OF LAST OBS",
+    "LEAP SECONDS",
+    "# OF SATELLITES",
+];
+
+/// The contradictions among a header block's phase shifts: a satellite's code,
+/// or every satellite's, given two corrections, a blank one being 0. RINEX gives
+/// a block's records no order to choose one by. Phase shift records do not
+/// change how observations are read, so the records are kept as written, the
+/// satellite's code reads as [`CorrectionUnavailable::Ambiguous`], and each
+/// contradiction is counted as a skip. From RINEX 4.00 the records are ignored
+/// and not checked.
+fn phase_shift_contradictions(version: f64, shifts: &[ObsPhaseShift]) -> Vec<Skip> {
+    if records_deprecated_in_rinex4(version) {
+        return Vec::new();
+    }
+    // A satellite is keyed by its id, and one the id does not hold by its
+    // designator as written.
+    type Key<'a> = (GnssSystem, Option<&'a str>, Option<String>);
+    let mut held: BTreeMap<Key<'_>, f64> = BTreeMap::new();
+    let mut reported = std::collections::BTreeSet::new();
+    let mut skips = Vec::new();
+    for shift in shifts {
+        let covered: Vec<Option<String>> = if shift.covers_every_satellite() {
+            vec![None]
+        } else {
+            shift
+                .satellites
+                .iter()
+                .map(ToString::to_string)
+                .chain(shift.unrepresentable_satellites.iter().cloned())
+                .map(Some)
+                .collect()
+        };
+        let correction = shift.correction_cycles.unwrap_or(0.0);
+        for satellite in covered {
+            let key = (shift.system, shift.code.as_deref(), satellite);
+            match held.get(&key) {
+                Some(earlier) if *earlier != correction => {
+                    if reported.insert(key.clone()) {
+                        skips.push(Skip {
+                            at: RecordRef::default().with_satellite(
+                                key.2
+                                    .clone()
+                                    .unwrap_or_else(|| shift.system.letter().to_string()),
+                            ),
+                            reason: SkipReason::InconsistentRecord(
+                                "SYS / PHASE SHIFT records in one header block give one code different corrections",
+                            ),
+                        });
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    held.insert(key, correction);
+                }
+            }
+        }
+    }
+    skips
+}
+
+/// Refuse a header block's scale factors giving one code, or every code of a
+/// system, two factors.
+fn check_block_scale_factors(factors: &[ObsScaleFactor]) -> Result<()> {
+    let mut held: BTreeMap<(GnssSystem, Option<&str>), f64> = BTreeMap::new();
+    for record in factors {
+        let covered: Vec<Option<&str>> = if record.codes.is_empty() {
+            vec![None]
+        } else {
+            record
+                .codes
+                .iter()
+                .map(|code| Some(code.as_str()))
+                .collect()
+        };
+        for code in covered {
+            let key = (record.system, code);
+            match held.get(&key) {
+                Some(factor) if *factor != record.factor => {
+                    return Err(Error::Parse(format!(
+                        "RINEX OBS SYS / SCALE FACTOR records in one header block contradict: {} {} is given two factors",
+                        record.system,
+                        code.unwrap_or("every observation type")
+                    )));
+                }
+                _ => {
+                    held.insert(key, record.factor);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Lay a block's phase shifts over the ones in effect. A shift for every
+/// satellite of its code replaces every earlier shift for that code, and a
+/// shift naming satellites takes those satellites out of the earlier shifts
+/// naming them. The block's own shifts are kept as it gives them, after the
+/// earlier ones, since which of them applies does not depend on their order.
+fn lay_phase_shifts_over(held: &mut Vec<ObsPhaseShift>, block: Vec<ObsPhaseShift>) {
+    for shift in &block {
+        let same_code =
+            |earlier: &ObsPhaseShift| earlier.system == shift.system && earlier.code == shift.code;
+        if shift.code.is_none() {
+            // A record naming only the constellation replaces every earlier
+            // record for it.
+            held.retain(|earlier| earlier.system != shift.system);
+        } else if shift.covers_every_satellite() {
+            held.retain(|earlier| !same_code(earlier));
+        } else {
+            held.retain_mut(|earlier| {
+                if !same_code(earlier) || earlier.covers_every_satellite() {
+                    return true;
+                }
+                earlier
+                    .satellites
+                    .retain(|satellite| !shift.satellites.contains(satellite));
+                earlier
+                    .unrepresentable_satellites
+                    .retain(|token| !shift.unrepresentable_satellites.contains(token));
+                !earlier.covers_every_satellite()
+            });
+        }
+    }
+    held.extend(block);
+}
+
+/// Lay a block's scale factors over the ones in effect, as phase shifts are
+/// laid: a factor for every code of a system replaces every earlier factor for
+/// the system, and one naming codes takes those codes out of the earlier ones
+/// naming them.
+fn lay_scale_factors_over(held: &mut Vec<ObsScaleFactor>, block: Vec<ObsScaleFactor>) {
+    for record in &block {
+        if record.codes.is_empty() {
+            held.retain(|earlier| earlier.system != record.system);
+        } else {
+            held.retain_mut(|earlier| {
+                if earlier.system != record.system || earlier.codes.is_empty() {
+                    return true;
+                }
+                earlier.codes.retain(|code| !record.codes.contains(code));
+                !earlier.codes.is_empty()
+            });
+        }
+    }
+    held.extend(block);
+}
+
+/// Lay a block's `GLONASS COD/PHS/BIS` entries over the ones in effect: each
+/// code's bias replaces that code's, and a blank record, which says the biases
+/// are unknown, replaces them all.
+fn lay_glonass_biases_over(
+    held: &mut Option<Vec<(String, Option<f64>)>>,
+    block: Vec<(String, Option<f64>)>,
+) {
+    match held {
+        Some(entries) if !block.is_empty() => {
+            entries.retain(|(code, _)| !block.iter().any(|(replacing, _)| replacing == code));
+            entries.extend(block);
+        }
+        slot => *slot = Some(block),
+    }
+}
+
+/// Satellites the first `SYS / PHASE SHIFT` record of a list holds before the
+/// list continues, `10(1X,A3)`.
+const PHASE_SHIFT_SATELLITES_PER_RECORD: usize = 10;
+
+/// A `SYS / PHASE SHIFT` record not laid out in its columns, read by its fields.
+/// After the system and code, a number is either a correction followed by a
+/// satellite count, or a satellite count after a blank correction, and the
+/// fields alone do not say which. The reading taken is the one whose count
+/// agrees with the satellite tokens after it: a blank or 0 count names none, a
+/// count names that many, and a count past ten names at least the ten a first
+/// record holds. Where both readings agree, which happens only for a number
+/// with no satellites after it, a number with a decimal point would be a
+/// correction, since no count has one; a whole number is refused as ambiguous.
+/// Where neither agrees, the record is read as a correction and a count, and
+/// the checks that reading meets refuse it.
+fn loose_phase_shift_fields<'a>(content: &'a str, line: &str) -> Result<PhaseShiftFields<'a>> {
+    let tokens: Vec<&'a str> = content.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return Err(Error::Parse(format!(
+            "RINEX OBS phase-shift header has too few fields in {line:?}"
+        )));
+    }
+    let (system, code) = (tokens[0], tokens[1]);
+    let rest = &tokens[2..];
+    let fields = |correction: &'a str, count: &'a str, satellites: &[&'a str]| PhaseShiftFields {
+        system,
+        code,
+        correction,
+        count,
+        satellites: satellites.to_vec(),
+    };
+    let Some(&number) = rest.first() else {
+        return Ok(fields("", "", &[]));
+    };
+    let agrees = |count: &str, satellites: &[&str]| {
+        let count = if count.is_empty() {
+            0
+        } else {
+            match strict_int_token::<usize>(count, "phase_shift.satellite_count", line) {
+                Ok(count) => count,
+                Err(_) => return false,
+            }
+        };
+        (satellites.len() == count
+            || (satellites.len() >= PHASE_SHIFT_SATELLITES_PER_RECORD && satellites.len() < count))
+            && phase_shift_satellites(satellites, line).is_ok()
+    };
+    let (count_after, satellites_after) = (
+        rest.get(1).copied().unwrap_or(""),
+        rest.get(2..).unwrap_or(&[]),
+    );
+    let as_correction = strict_f64_token(number, "phase_shift.correction_cycles", line).is_ok()
+        && agrees(count_after, satellites_after);
+    let as_count = agrees(number, &rest[1..]);
+    match (as_correction, as_count) {
+        (false, true) => Ok(fields("", number, &rest[1..])),
+        (true, true) if !number.contains('.') => Err(Error::Parse(format!(
+            "RINEX OBS SYS / PHASE SHIFT record is ambiguous: {number:?} reads as a correction and as the satellite count after a blank correction, in {line:?}"
+        ))),
+        _ => Ok(fields(number, count_after, satellites_after)),
+    }
+}
+
+/// Columns of one `GLONASS COD/PHS/BIS` entry, `1X,A3,1X,F8.3`, and the entries
+/// a record holds.
+const GLONASS_BIAS_ENTRY_WIDTH: usize = 13;
+const GLONASS_BIAS_ENTRIES_PER_RECORD: usize = 4;
+
+/// A `GLONASS COD/PHS/BIS` record's codes and biases read from their columns,
+/// `4(1X,A3,1X,F8.3)`, a blank bias as empty text, or `None` when the record is
+/// not laid out in them: a gap holding text, a code not three characters, a
+/// bias that does not read as a number, a bias with no code, or text past the
+/// fourth entry.
+fn glonass_bias_columns(content: &str) -> Option<Vec<(&str, &str)>> {
+    if !content.is_ascii() {
+        return None;
+    }
+    let column = |start: usize, end: usize| {
+        content
+            .get(start.min(content.len())..end.min(content.len()))
+            .unwrap_or("")
+    };
+    let blank = |start: usize, end: usize| column(start, end).trim().is_empty();
+    let width = GLONASS_BIAS_ENTRY_WIDTH * GLONASS_BIAS_ENTRIES_PER_RECORD;
+    if !blank(width, content.len()) {
+        return None;
+    }
+    let mut entries = Vec::new();
+    for entry in 0..GLONASS_BIAS_ENTRIES_PER_RECORD {
+        let start = entry * GLONASS_BIAS_ENTRY_WIDTH;
+        if !blank(start, start + 1) || !blank(start + 4, start + 5) {
+            return None;
+        }
+        let code = column(start + 1, start + 4).trim();
+        let bias = column(start + 5, start + GLONASS_BIAS_ENTRY_WIDTH).trim();
+        if code.is_empty() {
+            if !bias.is_empty() {
+                return None;
+            }
+            continue;
+        }
+        if code.len() != GLONASS_BIAS_CODE_WIDTH
+            || bias.contains(' ')
+            || !bias.is_empty() && bias.parse::<f64>().is_err()
+        {
+            return None;
+        }
+        entries.push((code, bias));
+    }
+    Some(entries)
+}
+
+/// The fields of a `SYS / PHASE SHIFT` record.
+struct PhaseShiftFields<'a> {
+    system: &'a str,
+    code: &'a str,
+    correction: &'a str,
+    count: &'a str,
+    satellites: Vec<&'a str>,
+}
+
+/// A `SYS / PHASE SHIFT` record's fields read from their columns,
+/// `A1,1X,A3,1X,F8.5,2X,I2.2,10(1X,A3)`, or `None` when the record is not laid
+/// out in them: a gap holding text, or a field that does not read as what it is.
+fn phase_shift_columns(content: &str) -> Option<PhaseShiftFields<'_>> {
+    if !content.is_ascii() {
+        return None;
+    }
+    let column =
+        |start: usize, end: usize| content.get(start..end.min(content.len())).unwrap_or("");
+    let blank = |start: usize, end: usize| column(start, end).trim().is_empty();
+    let system = column(0, 1).trim();
+    let code = column(2, 5).trim();
+    let correction = column(6, 14).trim();
+    let count = column(16, 18).trim();
+    if system.is_empty()
+        || !blank(1, 2)
+        || code.len() != 3
+        || !blank(5, 6)
+        || correction.contains(' ')
+        || !correction.is_empty() && correction.parse::<f64>().is_err()
+        || !blank(14, 16)
+        || !count.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let mut satellites = Vec::new();
+    let mut start = 18;
+    while start < content.len() {
+        if !blank(start, start + 1) {
+            return None;
+        }
+        let token = column(start + 1, start + 4).trim();
+        if token.contains(' ') || token.is_empty() && !blank(start, content.len()) {
+            return None;
+        }
+        if !token.is_empty() {
+            satellites.push(token);
+        }
+        start += 4;
+    }
+    Some(PhaseShiftFields {
+        system,
+        code,
+        correction,
+        count,
+        satellites,
+    })
+}
+
+/// Add to a union of code lists the codes a list declares that it does not
+/// yet hold, in the order the list declares them. A code the list declares
+/// more than once is held as many times.
+pub(crate) fn extend_code_union(union: &mut Vec<String>, list: &[String]) {
+    let mut additions: Vec<String> = Vec::new();
+    let mut declared: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for code in list {
+        let wanted = declared.entry(code.as_str()).or_default();
+        *wanted += 1;
+        let held = union.iter().filter(|held| *held == code).count()
+            + additions.iter().filter(|added| *added == code).count();
+        if held < *wanted {
+            additions.push(code.clone());
+        }
+    }
+    union.extend(additions);
+}
+
+/// Where each code of a list sits in a union holding it: the `n`th time the
+/// list declares a code, at the union's `n`th copy of it. `None` for a code the
+/// union does not hold that many times.
+pub(crate) fn union_positions(list: &[String], union: &[String]) -> Vec<Option<usize>> {
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    list.iter()
+        .map(|code| {
+            let copy = seen.entry(code.as_str()).or_default();
+            let position = union
+                .iter()
+                .enumerate()
+                .filter(|(_, held)| *held == code)
+                .nth(*copy)
+                .map(|(position, _)| position);
+            *copy += 1;
+            position
+        })
+        .collect()
+}
+
+/// Whether the file header declared no version 2 names.
+fn header_names_fallback_is_empty(segments: &[CodeListSegment]) -> bool {
+    segments
+        .first()
+        .is_none_or(|segment| segment.names.is_empty())
+}
+
+/// A value read by a code list, placed at its code's position in the union,
+/// blank at every position the list does not declare. `None` when a value
+/// has no position.
+pub(crate) fn values_in_union(
+    values: &[ObsValue],
+    positions: &[Option<usize>],
+    width: usize,
+) -> Option<Vec<ObsValue>> {
+    if values.len() > positions.len() {
+        return None;
+    }
+    let mut placed = vec![
+        ObsValue {
+            value: None,
+            lli: None,
+            ssi: None,
+        };
+        width
+    ];
+    for (value, position) in values.iter().zip(positions) {
+        *placed.get_mut((*position)?)? = *value;
+    }
+    Some(placed)
+}
+
+/// Wrap an error laying an event's records over the header with the epoch
+/// they follow.
+fn event_records_error(epoch_index: usize, error: Error) -> Error {
+    match error {
+        Error::Parse(message) => Error::Parse(format!(
+            "RINEX OBS epoch {epoch_index} event records: {message}"
+        )),
+        other => other,
+    }
+}
+
+/// The header in effect at each epoch of a product: the file header, and from
+/// each event whose records take effect, the header those records lay over the
+/// one before. Built once by [`RinexObs::header_timeline`], so a loop over the
+/// epochs looks each header up rather than reading the event records again.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObsHeaderTimeline {
+    file: ObsHeader,
+    later: Vec<(usize, ObsHeader)>,
+}
+
+impl ObsHeaderTimeline {
+    /// The header in effect at an epoch index: the file header with every event
+    /// at or before it laid over it. Past the last epoch, the header after every
+    /// event.
+    pub fn at(&self, epoch_index: usize) -> &ObsHeader {
+        let after = self
+            .later
+            .partition_point(|(first, _)| *first <= epoch_index);
+        match after.checked_sub(1).and_then(|index| self.later.get(index)) {
+            Some((_, header)) => header,
+            None => &self.file,
+        }
+    }
+
+    /// The position, in [`ObsHeaderTimeline::segments`] order, of the header in
+    /// effect at an epoch index.
+    pub fn segment_index(&self, epoch_index: usize) -> usize {
+        self.later
+            .partition_point(|(first, _)| *first <= epoch_index)
+    }
+
+    /// A timeline holding the file header alone, for a consumer that cannot
+    /// return an error and has reported the event records it could not read.
+    pub(crate) fn file_only(file: ObsHeader) -> Self {
+        Self {
+            file,
+            later: Vec::new(),
+        }
+    }
+
+    /// Each header with the index of the first epoch it is in effect at, in
+    /// file order, beginning with the file header at index 0.
+    pub fn segments(&self) -> impl Iterator<Item = (usize, &ObsHeader)> + '_ {
+        core::iter::once((0, &self.file))
+            .chain(self.later.iter().map(|(first, header)| (*first, header)))
+    }
+}
+
+impl RinexObs {
+    /// The header in effect at every epoch, for a loop over the epochs.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Parse`] when an event's header record does not read, as the
+    /// reader would have refused it; a product read from text never holds one.
+    pub fn header_timeline(&self) -> Result<ObsHeaderTimeline> {
+        let version = self.header.version;
+        let mut later: Vec<(usize, ObsHeader)> = Vec::new();
+        for (index, epoch) in self.epochs.iter().enumerate() {
+            if !applies_header_records(epoch.flag)
+                || !epoch
+                    .special_records
+                    .iter()
+                    .any(|record| event_record_takes_effect(version, record))
+            {
+                continue;
+            }
+            let mut next = later
+                .last()
+                .map_or(&self.header, |(_, header)| header)
+                .clone();
+            apply_event_records(&mut next, &epoch.special_records)
+                .map_err(|error| event_records_error(index, error))?;
+            later.push((index, next));
+        }
+        Ok(ObsHeaderTimeline {
+            file: self.header.clone(),
+            later,
+        })
+    }
+
+    /// The header in effect at one epoch: the file header with the header
+    /// records of every event at or before `epoch_index` laid over it. Its
+    /// `obs_codes` is the product's union, and its `declared_obs_codes` the
+    /// lists in effect at the epoch. A loop over many epochs uses
+    /// [`RinexObs::header_timeline`] instead.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when `epoch_index` is past the last epoch, and
+    /// [`Error::Parse`] when an event's header record does not read.
+    pub fn header_at(&self, epoch_index: usize) -> Result<ObsHeader> {
+        let Some(epochs) = self.epochs.get(..=epoch_index) else {
+            return Err(Error::InvalidInput(format!(
+                "RINEX OBS epoch index {epoch_index} is past the product's {} epochs",
+                self.epochs.len()
+            )));
+        };
+        let mut header = self.header.clone();
+        for (index, epoch) in epochs.iter().enumerate() {
+            if applies_header_records(epoch.flag) {
+                apply_event_records(&mut header, &epoch.special_records)
+                    .map_err(|error| event_records_error(index, error))?;
+            }
+        }
+        Ok(header)
+    }
 }
 
 mod write;

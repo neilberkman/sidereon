@@ -174,7 +174,7 @@ fn rinex_carrier_phase_rows_match_georinex_fixture_bits() {
         .epochs()
         .iter()
         .map(|epoch| {
-            carrier_phase_rows(&obs, epoch, &ObservationFilter::all())
+            carrier_phase_rows(obs.header(), epoch, &ObservationFilter::all())
                 .expect("valid carrier-phase rows")
         })
         .collect();
@@ -196,7 +196,10 @@ fn rinex_carrier_phase_rows_match_georinex_fixture_bits() {
 
         assert_eq!(actual.lli, maybe_u8(&row["lli"]));
         assert_eq!(actual.ssi, maybe_u8(&row["ssi"]));
-        assert_eq!(actual.phase_shift_cycles.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(
+            actual.phase_shift_cycles.clone().map(f64::to_bits),
+            Ok(0.0_f64.to_bits())
+        );
         assert_maybe_bits(
             actual.value_cycles,
             &row["value_cycles"],
