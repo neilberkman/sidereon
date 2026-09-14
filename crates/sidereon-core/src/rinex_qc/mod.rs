@@ -297,6 +297,15 @@ pub enum Finding {
         /// Raw loss-of-lock indicator greater than 7.
         lli: u8,
     },
+    /// An event's header records do not read, so the epochs after it are
+    /// linted with the header in effect before it. A product read from text
+    /// always reads.
+    ObsEventHeaderUnreadable {
+        /// No location; the message names the epoch.
+        at: FindingRef,
+        /// The reader's error.
+        message: String,
+    },
     /// Event epoch retained with no special records.
     ObsEventEpoch {
         /// Carries the zero-based event epoch index.
@@ -435,6 +444,7 @@ impl Finding {
             Self::ObsPseudorangeOutOfRange { .. } => "OBS-B05",
             Self::ObsLossOfLockOutOfRange { .. } => "OBS-B06",
             Self::ObsEventEpoch { .. } => "OBS-B07",
+            Self::ObsEventHeaderUnreadable { .. } => "OBS-B10",
             Self::ObsEmptySatelliteRecord { .. } => "OBS-B08",
             Self::ObsEpochGap { .. } => "OBS-B09",
             Self::NavFatalParse { .. } => "NAV-H01",
@@ -522,6 +532,7 @@ impl Finding {
             Self::ObsPseudorangeOutOfRange { .. } => "RINEX QC policy",
             Self::ObsLossOfLockOutOfRange { .. } => "RINEX 3.05 Table A3 note 1",
             Self::ObsEventEpoch { .. } => "RINEX 3.05 Table A3",
+            Self::ObsEventHeaderUnreadable { .. } => "RINEX 3.05 section 5.3.2",
             Self::ObsEmptySatelliteRecord { .. } => "RINEX QC policy",
             Self::ObsEpochGap { .. } => "RINEX QC policy",
             Self::NavFatalParse { .. } => "RINEX 3.05 Table A5 / RINEX 4.02 Table A7",
@@ -567,6 +578,7 @@ impl Finding {
             | Self::ObsPseudorangeOutOfRange { at, .. }
             | Self::ObsLossOfLockOutOfRange { at, .. }
             | Self::ObsEventEpoch { at, .. }
+            | Self::ObsEventHeaderUnreadable { at, .. }
             | Self::ObsEmptySatelliteRecord { at }
             | Self::ObsEpochGap { at, .. }
             | Self::NavFatalParse { at, .. }
@@ -1349,15 +1361,19 @@ fn lint_obs_header(header: &ObsHeader, findings: &mut Vec<Finding>) {
         lint_identity_field(findings, "ANT TYPE", Some(&antenna.antenna_type), 20);
     }
     for shift in &header.phase_shifts {
+        // A record naming only its constellation names no code.
+        let Some(shift_code) = &shift.code else {
+            continue;
+        };
         if !header
             .obs_codes
             .get(&shift.system)
-            .is_some_and(|codes| codes.iter().any(|code| code == &shift.code))
+            .is_some_and(|codes| codes.iter().any(|code| code == shift_code))
         {
             findings.push(Finding::ObsPhaseShiftUndeclaredCode {
                 at: FindingRef::field("SYS / PHASE SHIFT"),
                 system: shift.system,
-                code: shift.code.clone(),
+                code: shift_code.clone(),
             });
         }
     }
@@ -1447,26 +1463,92 @@ fn lint_obs_body(obs: &RinexObs, findings: &mut Vec<Finding>) {
             }
         }
     }
+    let timeline = match obs.header_timeline() {
+        Ok(timeline) => timeline,
+        Err(error) => {
+            findings.push(Finding::ObsEventHeaderUnreadable {
+                at: FindingRef::default(),
+                message: error.to_string(),
+            });
+            crate::rinex_obs::ObsHeaderTimeline::file_only(obs.header.clone())
+        }
+    };
     lint_obs_counts(obs, findings);
     lint_obs_epoch_order(obs, findings);
-    if let Some(observed) = dominant_interval_for_epochs(&obs.epochs) {
-        if let Some(declared) = obs
-            .header
-            .interval_s
-            .filter(|interval_s| usable_obs_interval_s(*interval_s))
-        {
-            if (declared - observed).abs() > 1.0e-6 {
-                findings.push(Finding::ObsIntervalMismatch {
-                    at: FindingRef::field("INTERVAL"),
-                    declared_s: declared,
-                    observed_s: observed,
-                });
-            }
-        }
-        lint_obs_gaps(obs, observed, findings);
-    }
-    lint_obs_glonass_slots(obs, findings);
+    let stretches = interval_stretches(obs, &timeline);
+    lint_obs_intervals(obs, &stretches, findings);
+    lint_obs_gaps(obs, &stretches, findings);
+    lint_obs_glonass_slots(obs, &timeline, findings);
     lint_obs_values(obs, findings);
+}
+
+/// The stretches of epochs one `INTERVAL` is in effect for, as (first epoch,
+/// end, the interval declared): the file header's up to the first event
+/// declaring another, and each such event's from its epoch. Consecutive headers
+/// declaring the same interval are one stretch.
+fn interval_stretches(
+    obs: &RinexObs,
+    timeline: &crate::rinex_obs::ObsHeaderTimeline,
+) -> Vec<(usize, usize, Option<f64>)> {
+    let mut starts: Vec<(usize, Option<f64>)> = Vec::new();
+    for (first, header) in timeline.segments() {
+        let declared = header.interval_s;
+        if starts
+            .last()
+            .is_some_and(|(_, held)| held.map(f64::to_bits) == declared.map(f64::to_bits))
+        {
+            continue;
+        }
+        starts.push((first, declared));
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(index, (first, declared))| {
+            let end = starts
+                .get(index + 1)
+                .map_or(obs.epochs.len(), |(next, _)| *next);
+            (*first, end, *declared)
+        })
+        .collect()
+}
+
+/// Compare each declared `INTERVAL` with the spacing of the epochs it is in
+/// effect for.
+fn lint_obs_intervals(
+    obs: &RinexObs,
+    stretches: &[(usize, usize, Option<f64>)],
+    findings: &mut Vec<Finding>,
+) {
+    for (first, end, declared) in stretches {
+        let Some(declared) = declared.filter(|interval_s| usable_obs_interval_s(*interval_s))
+        else {
+            continue;
+        };
+        let Some(observed) = obs
+            .epochs
+            .get(*first..*end)
+            .and_then(dominant_interval_for_epochs)
+        else {
+            continue;
+        };
+        if (declared - observed).abs() > 1.0e-6 {
+            let at = if *first == 0 {
+                FindingRef::field("INTERVAL")
+            } else {
+                FindingRef {
+                    epoch_index: Some(*first),
+                    field: Some("INTERVAL"),
+                    ..FindingRef::default()
+                }
+            };
+            findings.push(Finding::ObsIntervalMismatch {
+                at,
+                declared_s: declared,
+                observed_s: observed,
+            });
+        }
+    }
 }
 
 fn lint_obs_epoch_order(obs: &RinexObs, findings: &mut Vec<Finding>) {
@@ -1533,7 +1615,11 @@ fn lint_obs_counts(obs: &RinexObs, findings: &mut Vec<Finding>) {
     }
 }
 
-fn lint_obs_glonass_slots(obs: &RinexObs, findings: &mut Vec<Finding>) {
+fn lint_obs_glonass_slots(
+    obs: &RinexObs,
+    timeline: &crate::rinex_obs::ObsHeaderTimeline,
+    findings: &mut Vec<Finding>,
+) {
     let has_glonass_codes = obs.header.obs_codes.contains_key(&GnssSystem::Glonass);
     if !has_glonass_codes {
         return;
@@ -1554,13 +1640,15 @@ fn lint_obs_glonass_slots(obs: &RinexObs, findings: &mut Vec<Finding>) {
             }
         }
     }
-    for epoch in &obs.epochs {
+    for (epoch_index, epoch) in obs.epochs.iter().enumerate() {
+        // A slot an event declares is in effect from its epoch.
+        let slots = &timeline.at(epoch_index).glonass_slots;
         for sat in epoch
             .sats
             .keys()
             .filter(|sat| sat.system == GnssSystem::Glonass)
         {
-            if !obs.header.glonass_slots.contains_key(&sat.prn) && reported_missing.insert(*sat) {
+            if !slots.contains_key(&sat.prn) && reported_missing.insert(*sat) {
                 findings.push(Finding::ObsGlonassSlotIssue {
                     at: FindingRef {
                         satellite: Some(sat.to_string()),
@@ -1640,10 +1728,31 @@ fn lint_obs_values(obs: &RinexObs, findings: &mut Vec<Finding>) {
     }
 }
 
-fn lint_obs_gaps(obs: &RinexObs, interval_s: f64, findings: &mut Vec<Finding>) {
+/// Report gaps in the observation epochs, each judged by the spacing of the
+/// epochs in its `INTERVAL` stretch, or of the whole body where the stretch has
+/// none.
+fn lint_obs_gaps(
+    obs: &RinexObs,
+    stretches: &[(usize, usize, Option<f64>)],
+    findings: &mut Vec<Finding>,
+) {
+    let overall = dominant_interval_for_epochs(&obs.epochs);
+    let spacings: Vec<Option<f64>> = stretches
+        .iter()
+        .map(|(first, end, _)| {
+            obs.epochs
+                .get(*first..*end)
+                .and_then(dominant_interval_for_epochs)
+                .or(overall)
+        })
+        .collect();
     let mut previous: Option<ObsEpochTime> = None;
     for (idx, time) in normal_epoch_times(obs) {
-        if let Some(prev) = previous {
+        let stretch = stretches
+            .partition_point(|(first, _, _)| *first <= idx)
+            .saturating_sub(1);
+        if let (Some(prev), Some(interval_s)) = (previous, spacings.get(stretch).copied().flatten())
+        {
             let gap = obs_epoch_seconds(time) - obs_epoch_seconds(prev);
             if gap > interval_s * 1.5 {
                 findings.push(Finding::ObsEpochGap {
@@ -2028,10 +2137,17 @@ fn repair_obs_counts(obs: &mut RinexObs, options: &RepairOptions, actions: &mut 
     }
     let counts = body_obs_counts(obs);
     obs.header.n_satellites = Some(counts.len());
-    obs.header.prn_obs_counts = counts
+    // A count stands for a code the file header declares. A code only an event
+    // declares has no count field in the header.
+    let declared = &obs.header.declared_obs_codes;
+    let counts = counts
         .into_iter()
-        .map(|(sat, values)| (sat, values.into_iter().map(Some).collect()))
+        .map(|(sat, values)| {
+            let width = declared.get(&sat.system).map_or(0, Vec::len);
+            (sat, values.into_iter().take(width).map(Some).collect())
+        })
         .collect();
+    obs.header.prn_obs_counts = counts;
     actions.push(RepairAction {
         id: "A5",
         message: "recomputed observation count headers".to_string(),
@@ -2063,11 +2179,21 @@ fn repair_obs_unsupported_records(
         return;
     }
     let mut dropped = 0_usize;
+    let version = obs.header.version;
     for epoch in &mut obs.epochs {
         if epoch.flag > 1 && !epoch.special_records.is_empty() {
-            dropped += epoch.special_records.len();
-            epoch.special_records.clear();
-            epoch.declared_record_count = 0;
+            // A header record an event carries changes the epochs after it,
+            // and is kept; every other record is outside the product.
+            let before = epoch.special_records.len();
+            if crate::rinex_obs::applies_header_records(epoch.flag) {
+                epoch
+                    .special_records
+                    .retain(|record| crate::rinex_obs::event_record_takes_effect(version, record));
+            } else {
+                epoch.special_records.clear();
+            }
+            dropped += before - epoch.special_records.len();
+            epoch.declared_record_count = epoch.special_records.len();
         }
     }
     if dropped > 0 {
@@ -2101,7 +2227,25 @@ fn recordable_obs_interval_s(interval_s: f64) -> bool {
 fn repair_obs_interval(obs: &mut RinexObs, actions: &mut Vec<RepairAction>) {
     // A cadence the `INTERVAL` field cannot record is no better than none: the
     // header would be written as a line that no longer reads back.
-    let Some(interval) = dominant_interval_for_epochs(&obs.epochs)
+    // The file header's INTERVAL is in effect up to the first event declaring
+    // another, and the epochs after that are that event's.
+    let version = obs.header.version;
+    let in_effect = obs
+        .epochs
+        .iter()
+        .position(|epoch| {
+            crate::rinex_obs::applies_header_records(epoch.flag)
+                && crate::rinex_obs::event_declares_label(
+                    version,
+                    &epoch.special_records,
+                    "INTERVAL",
+                )
+        })
+        .unwrap_or(obs.epochs.len());
+    let Some(interval) = obs
+        .epochs
+        .get(..in_effect)
+        .and_then(dominant_interval_for_epochs)
         .filter(|interval| writable_obs_interval_s(*interval))
     else {
         if let Some(declared) = obs

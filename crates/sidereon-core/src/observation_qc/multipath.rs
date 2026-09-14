@@ -194,6 +194,7 @@ pub fn arc_multipath_rms(series_m: &[f64]) -> f64 {
 pub fn multipath_stats(obs: &RinexObs, cycle_slip_config: &CycleSlipConfig) -> MultipathReport {
     let slip_boundaries = slip_boundaries(obs, cycle_slip_config);
     let gap_starts = gap_start_epoch_indices(obs);
+    let (timeline, _) = super::header_timeline_or_file(obs);
     let mut states = BTreeMap::<GnssSatelliteId, SatelliteMultipathState>::new();
     let epoch_count = obs
         .epochs()
@@ -201,12 +202,14 @@ pub fn multipath_stats(obs: &RinexObs, cycle_slip_config: &CycleSlipConfig) -> M
         .filter(|epoch| super::is_observation_epoch(epoch))
         .count();
 
-    for (epoch_index, epoch) in obs
+    for (epoch_index, (file_index, epoch)) in obs
         .epochs()
         .iter()
-        .filter(|epoch| super::is_observation_epoch(epoch))
+        .enumerate()
+        .filter(|(_, epoch)| super::is_observation_epoch(epoch))
         .enumerate()
     {
+        let header = timeline.at(file_index);
         if gap_starts.contains(&epoch_index) {
             close_all_arcs(&mut states);
         }
@@ -214,7 +217,8 @@ pub fn multipath_stats(obs: &RinexObs, cycle_slip_config: &CycleSlipConfig) -> M
         let mut samples =
             BTreeMap::<GnssSatelliteId, (DualFrequencyObservation, MultipathSample)>::new();
         for (satellite, values) in &epoch.sats {
-            let Some(observation) = multipath_dual_frequency_observation(obs, *satellite, values)
+            let Some(observation) =
+                multipath_dual_frequency_observation(header, *satellite, values)
             else {
                 continue;
             };
@@ -335,24 +339,36 @@ fn slip_boundaries(
 }
 
 fn gap_start_epoch_indices(obs: &RinexObs) -> BTreeSet<usize> {
-    let epoch_times = observation_epoch_times(obs);
-    let interval_s = obs
-        .header()
-        .interval_s
-        .filter(|interval_s| interval_s.is_finite() && *interval_s > 0.0)
-        .or_else(|| dominant_obs_interval_s(&epoch_times));
-    let gaps = detect_gaps(ObservationQcOptions::default(), &epoch_times, interval_s);
+    let epochs = observation_epochs_with_interval(obs);
+    let epoch_times: Vec<ObsEpochTime> = epochs.iter().map(|(time, _)| *time).collect();
+    let nominal = super::NominalInterval {
+        override_s: None,
+        inferred_s: dominant_obs_interval_s(&epoch_times),
+    };
+    let gaps = detect_gaps(ObservationQcOptions::default(), &epochs, nominal);
 
     gaps.into_iter()
         .filter_map(|gap| epoch_times.iter().position(|epoch| *epoch == gap.end_epoch))
         .collect()
 }
 
-fn observation_epoch_times(obs: &RinexObs) -> Vec<ObsEpochTime> {
+/// Each observation epoch's time, with the `INTERVAL` of the header in effect
+/// at it when that interval is usable.
+fn observation_epochs_with_interval(obs: &RinexObs) -> Vec<(ObsEpochTime, Option<f64>)> {
+    let (timeline, _) = super::header_timeline_or_file(obs);
     obs.epochs()
         .iter()
-        .filter(|epoch| super::is_observation_epoch(epoch))
-        .filter_map(|epoch| epoch.epoch)
+        .enumerate()
+        .filter(|(_, epoch)| super::is_observation_epoch(epoch))
+        .filter_map(|(index, epoch)| {
+            epoch.epoch.map(|time| {
+                let interval_s = timeline
+                    .at(index)
+                    .interval_s
+                    .filter(|interval_s| interval_s.is_finite() && *interval_s > 0.0);
+                (time, interval_s)
+            })
+        })
         .collect()
 }
 

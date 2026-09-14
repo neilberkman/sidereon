@@ -1,0 +1,70 @@
+     3.05           OBSERVATION DATA    M (MIXED)           RINEX VERSION / TYPE
+MAKERINEX 2.0.67456 NTRIPS20_6FD0E6     2026-01-02 07:56    PGM / RUN BY / DATE
+NICO00CYP                                                   MARKER NAME
+14302M001                                                   MARKER NUMBER
+GEODETIC                                                    MARKER TYPE
+GOWOP               BKG                                     OBSERVER / AGENCY
+1830231             LEICA GR50          4.83/7.900          REC # / TYPE / VERS
+725285              LEIAR25.R4      LEIT                    ANT # / TYPE
+GLONASS CODE AND PHASE OBSERVATIONS ARE ALREADY ALIGNED IN  COMMENT
+RECEIVERS RAW DATA. NO ADDITIONAL OFFSETS ARE APPLIED WHILE COMMENT
+CREATING THE RINEX FILE.                                    COMMENT
+  4359417.8000  2874117.0000  3650778.3000                  APPROX POSITION XYZ
+         .0650         .0000         .0000                  ANTENNA: DELTA H/E/N
+   130                                                      # OF SATELLITES
+G   16 C1C C2S C2W C5Q L1C L2S L2W L5Q D1C D2S D2W D5Q S1C  SYS / # / OBS TYPES
+       S2S S2W S5Q                                          SYS / # / OBS TYPES
+R   16 C1C C2C C2P C3Q L1C L2C L2P L3Q D1C D2C D2P D3Q S1C  SYS / # / OBS TYPES
+       S2C S2P S3Q                                          SYS / # / OBS TYPES
+E   20 C1C C5Q C6C C7Q C8Q L1C L5Q L6C L7Q L8Q D1C D5Q D6C  SYS / # / OBS TYPES
+       D7Q D8Q S1C S5Q S6C S7Q S8Q                          SYS / # / OBS TYPES
+S    4 C1C L1C D1C S1C                                      SYS / # / OBS TYPES
+C   20 C1P C2I C5P C6I C7I L1P L2I L5P L6I L7I D1P D2I D5P  SYS / # / OBS TYPES
+       D6I D7I S1P S2I S5P S6I S7I                          SYS / # / OBS TYPES
+G L1C                                                       SYS / PHASE SHIFT
+G L2S  -.25000  26 G01 G03 G04 G05 G06 G07 G08 G09 G10 G11  SYS / PHASE SHIFT
+                   G12 G14 G15 G17 G18 G21 G23 G24 G25 G26  SYS / PHASE SHIFT
+                   G27 G28 G29 G30 G31 G32                  SYS / PHASE SHIFT
+G L2W                                                       SYS / PHASE SHIFT
+G L5Q  -.25000  19 G01 G03 G04 G06 G08 G09 G10 G11 G14 G18  SYS / PHASE SHIFT
+                   G21 G23 G24 G25 G26 G27 G28 G30 G32      SYS / PHASE SHIFT
+R L1C                                                       SYS / PHASE SHIFT
+R L2C                                                       SYS / PHASE SHIFT
+R L2P   .25000  19 R02 R03 R04 R05 R06 R07 R08 R09 R12 R14  SYS / PHASE SHIFT
+                   R15 R16 R17 R18 R19 R20 R21 R22 R24      SYS / PHASE SHIFT
+R L3Q   .25000  07 R04 R05 R12 R16 R21 R22 R24              SYS / PHASE SHIFT
+E L1C   .50000  27 E02 E03 E04 E05 E06 E07 E08 E09 E10 E11  SYS / PHASE SHIFT
+                   E12 E13 E14 E15 E18 E19 E21 E23 E25 E26  SYS / PHASE SHIFT
+                   E27 E29 E30 E31 E33 E34 E36              SYS / PHASE SHIFT
+E L5Q  -.25000  27 E02 E03 E04 E05 E06 E07 E08 E09 E10 E11  SYS / PHASE SHIFT
+                   E12 E13 E14 E15 E18 E19 E21 E23 E25 E26  SYS / PHASE SHIFT
+                   E27 E29 E30 E31 E33 E34 E36              SYS / PHASE SHIFT
+E L6C  -.50000  25 E02 E03 E04 E05 E06 E07 E08 E09 E10 E11  SYS / PHASE SHIFT
+                   E12 E13 E15 E19 E21 E23 E25 E26 E27 E29  SYS / PHASE SHIFT
+                   E30 E31 E33 E34 E36                      SYS / PHASE SHIFT
+E L7Q  -.25000  27 E02 E03 E04 E05 E06 E07 E08 E09 E10 E11  SYS / PHASE SHIFT
+                   E12 E13 E14 E15 E18 E19 E21 E23 E25 E26  SYS / PHASE SHIFT
+                   E27 E29 E30 E31 E33 E34 E36              SYS / PHASE SHIFT
+E L8Q  -.25000  27 E02 E03 E04 E05 E06 E07 E08 E09 E10 E11  SYS / PHASE SHIFT
+                   E12 E13 E14 E15 E18 E19 E21 E23 E25 E26  SYS / PHASE SHIFT
+                   E27 E29 E30 E31 E33 E34 E36              SYS / PHASE SHIFT
+S L1C                                                       SYS / PHASE SHIFT
+C L1P   .25000  30 C19 C20 C21 C22 C23 C24 C25 C26 C27 C28  SYS / PHASE SHIFT
+                   C29 C30 C32 C33 C34 C35 C36 C37 C38 C39  SYS / PHASE SHIFT
+                   C40 C41 C42 C43 C44 C45 C47 C48 C49 C50  SYS / PHASE SHIFT
+C L2I                                                       SYS / PHASE SHIFT
+C L5P   .25000  27 C19 C20 C21 C22 C23 C24 C25 C26 C27 C28  SYS / PHASE SHIFT
+                   C29 C30 C32 C33 C34 C35 C36 C37 C38 C39  SYS / PHASE SHIFT
+                   C40 C41 C42 C43 C44 C45 C49              SYS / PHASE SHIFT
+C L6I                                                       SYS / PHASE SHIFT
+C L7I                                                       SYS / PHASE SHIFT
+ C1C     .000 C1P          C2C     .000 C2P     .000        GLONASS COD/PHS/BIS
+ 24 R01  1 R02 -4 R03  5 R04  6 R05  1 R06 -4 R07  5 R08  6 GLONASS SLOT / FRQ #
+    R09 -2 R10 -7 R11  0 R12 -1 R13 -2 R14 -7 R15  0 R16 -1 GLONASS SLOT / FRQ #
+    R17  4 R18 -3 R19  3 R20  2 R21  4 R22 -3 R23  3 R24  2 GLONASS SLOT / FRQ #
+    30.000                                                  INTERVAL
+  2026     1     1     0     0    0.0000000     GPS         TIME OF FIRST OBS
+  2026     1     1    23    59   30.0000000     GPS         TIME OF LAST OBS
+    18                                                      LEAP SECONDS
+     0                                                      RCV CLOCK OFFS APPL
+                                                            END OF HEADER

@@ -211,7 +211,7 @@ fn gps_l1_constants(obs: &RinexObs) -> (f64, f64) {
     obs.epochs()
         .iter()
         .find_map(|epoch| {
-            carrier_phase_rows(obs, epoch, &filter)
+            carrier_phase_rows(obs.header(), epoch, &filter)
                 .expect("valid carrier-phase rows")
                 .into_iter()
                 .flat_map(|(_, rows)| rows)

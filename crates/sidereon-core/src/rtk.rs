@@ -2513,6 +2513,7 @@ fn split_cycle_slip_arcs(
         .collect::<BTreeSet<_>>();
     let mut split_epochs = epochs.to_vec();
     let mut segments = BTreeMap::<(CycleSlipReceiver, String), usize>::new();
+    let mut carriers = BTreeMap::<(CycleSlipReceiver, String), String>::new();
 
     for (epoch_index, epoch) in split_epochs.iter_mut().enumerate() {
         split_receiver_cycle_slip_arcs(
@@ -2522,6 +2523,7 @@ fn split_cycle_slip_arcs(
             split_sides,
             &slip_epochs,
             &mut segments,
+            &mut carriers,
         );
         split_receiver_cycle_slip_arcs(
             CycleSlipReceiver::Rover,
@@ -2530,6 +2532,7 @@ fn split_cycle_slip_arcs(
             split_sides,
             &slip_epochs,
             &mut segments,
+            &mut carriers,
         );
     }
 
@@ -2547,6 +2550,7 @@ fn split_dual_cycle_slip_arcs(
         .collect::<BTreeSet<_>>();
     let mut split_epochs = epochs.to_vec();
     let mut segments = BTreeMap::<(CycleSlipReceiver, String), usize>::new();
+    let mut carriers = BTreeMap::<(CycleSlipReceiver, String), String>::new();
 
     for (epoch_index, epoch) in split_epochs.iter_mut().enumerate() {
         split_dual_receiver_cycle_slip_arcs(
@@ -2556,6 +2560,7 @@ fn split_dual_cycle_slip_arcs(
             split_sides,
             &slip_epochs,
             &mut segments,
+            &mut carriers,
         );
         split_dual_receiver_cycle_slip_arcs(
             CycleSlipReceiver::Rover,
@@ -2564,6 +2569,7 @@ fn split_dual_cycle_slip_arcs(
             split_sides,
             &slip_epochs,
             &mut segments,
+            &mut carriers,
         );
     }
 
@@ -2577,6 +2583,7 @@ fn split_receiver_cycle_slip_arcs(
     split_sides: &BTreeSet<(CycleSlipReceiver, String)>,
     slip_epochs: &BTreeSet<(CycleSlipReceiver, String, usize)>,
     segments: &mut BTreeMap<(CycleSlipReceiver, String), usize>,
+    carriers: &mut BTreeMap<(CycleSlipReceiver, String), String>,
 ) {
     observations.sort_by(|a, b| a.satellite_id.cmp(&b.satellite_id));
 
@@ -2584,14 +2591,21 @@ fn split_receiver_cycle_slip_arcs(
         let key = (receiver, obs.satellite_id.clone());
         if split_sides.contains(&key) {
             let current_segment = segments.get(&key).copied().unwrap_or(1);
-            let segment =
-                if slip_epochs.contains(&(receiver, obs.satellite_id.clone(), epoch_index)) {
-                    current_segment + 1
-                } else {
-                    current_segment
-                };
-            obs.ambiguity_id = split_side_ambiguity_id_core(&obs.satellite_id, receiver, segment);
-            segments.insert(key, segment);
+            // The arc the observation arrives in, which a builder names anew
+            // when the satellite's carrier changes. A new one splits the arc
+            // as a slip does, and the split id keeps it, so no split arc spans
+            // a carrier change and each keeps its carrier's scale.
+            let carrier = obs.ambiguity_id.clone();
+            let carrier_changed = carriers.get(&key).is_some_and(|held| *held != carrier);
+            let slipped = slip_epochs.contains(&(receiver, obs.satellite_id.clone(), epoch_index));
+            let segment = if slipped || carrier_changed {
+                current_segment + 1
+            } else {
+                current_segment
+            };
+            obs.ambiguity_id = split_side_ambiguity_id_core(&carrier, receiver, segment);
+            segments.insert(key.clone(), segment);
+            carriers.insert(key, carrier);
         }
     }
 }
@@ -2603,6 +2617,7 @@ fn split_dual_receiver_cycle_slip_arcs(
     split_sides: &BTreeSet<(CycleSlipReceiver, String)>,
     slip_epochs: &BTreeSet<(CycleSlipReceiver, String, usize)>,
     segments: &mut BTreeMap<(CycleSlipReceiver, String), usize>,
+    carriers: &mut BTreeMap<(CycleSlipReceiver, String), String>,
 ) {
     observations.sort_by(|a, b| a.satellite_id.cmp(&b.satellite_id));
 
@@ -2610,14 +2625,21 @@ fn split_dual_receiver_cycle_slip_arcs(
         let key = (receiver, obs.satellite_id.clone());
         if split_sides.contains(&key) {
             let current_segment = segments.get(&key).copied().unwrap_or(1);
-            let segment =
-                if slip_epochs.contains(&(receiver, obs.satellite_id.clone(), epoch_index)) {
-                    current_segment + 1
-                } else {
-                    current_segment
-                };
-            obs.ambiguity_id = split_side_ambiguity_id_core(&obs.satellite_id, receiver, segment);
-            segments.insert(key, segment);
+            // The arc the observation arrives in, which a builder names anew
+            // when the satellite's carrier changes. A new one splits the arc
+            // as a slip does, and the split id keeps it, so no split arc spans
+            // a carrier change and each keeps its carrier's scale.
+            let carrier = obs.ambiguity_id.clone();
+            let carrier_changed = carriers.get(&key).is_some_and(|held| *held != carrier);
+            let slipped = slip_epochs.contains(&(receiver, obs.satellite_id.clone(), epoch_index));
+            let segment = if slipped || carrier_changed {
+                current_segment + 1
+            } else {
+                current_segment
+            };
+            obs.ambiguity_id = split_side_ambiguity_id_core(&carrier, receiver, segment);
+            segments.insert(key.clone(), segment);
+            carriers.insert(key, carrier);
         }
     }
 }
@@ -2825,13 +2847,15 @@ fn segment_dual_receiver_reacquisitions(
     }
 }
 
+/// A split arc's ambiguity id: the arc it was split from, which is the
+/// satellite id or a carrier arc's id, then the receiver and the segment.
 fn split_side_ambiguity_id_core(
-    satellite_id: &str,
+    carrier_id: &str,
     receiver: CycleSlipReceiver,
     segment: usize,
 ) -> String {
     format!(
-        "{satellite_id}@{}#{segment}",
+        "{carrier_id}@{}#{segment}",
         cycle_slip_receiver_tag(receiver)
     )
 }

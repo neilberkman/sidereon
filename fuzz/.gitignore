@@ -43,3 +43,12 @@
 /corpus/rinex_nav_round_trip/*
 !/corpus/rinex_nav_round_trip/valid-v4-cnav.rnx
 !/corpus/rinex_nav_round_trip/cnav-top-week-borrow-rounds-to-week-length
+
+# Curated seeds for the observation round trip: inputs review found refused
+# or misread.
+!/corpus/rinex_obs_round_trip/
+/corpus/rinex_obs_round_trip/*
+!/corpus/rinex_obs_round_trip/regression-blank-event-hundred-records
+!/corpus/rinex_obs_round_trip/regression-event-phase-shift-continuation
+!/corpus/rinex_obs_round_trip/regression-event-phase-shift-order
+!/corpus/rinex_obs_round_trip/regression-leading-event-type-list

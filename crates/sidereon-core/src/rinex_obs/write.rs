@@ -47,6 +47,11 @@ pub(super) const PRN_OBS_SATELLITE_COLUMN: usize = 3;
 pub(super) const PRN_OBS_COUNTS_COLUMN: usize = 6;
 /// Width of one `PRN / # OF OBS` count field (`I6`).
 pub(super) const PRN_OBS_COUNT_WIDTH: usize = 6;
+/// Satellites a `SYS / PHASE SHIFT` record lists before continuing,
+/// `10(1X,A3)`.
+const PHASE_SHIFT_SATELLITES_PER_LINE: usize = 10;
+/// Blank columns a `SYS / PHASE SHIFT` continuation record opens with, `18X`.
+pub(super) const PHASE_SHIFT_CONTINUATION_COLUMN: usize = 18;
 /// Width of the `SYS / PHASE SHIFT` correction field (`F8.5`).
 const PHASE_SHIFT_CORRECTION_WIDTH: usize = 8;
 /// RINEX-3 observation codes per `SYS / # / OBS TYPES` line before continuation.
@@ -172,6 +177,46 @@ pub enum RinexObsWriteError {
         /// once it is wider than any header.
         count: usize,
     },
+    /// A product whose `obs_codes` is not the union of the lists its file
+    /// header and its events declare: the file header's codes first, then each
+    /// code a later list declares, in the order first declared. A reader builds
+    /// that union from the text, so any other list reads back as it.
+    CodeListsNotUnion {
+        /// The constellation.
+        system: GnssSystem,
+    },
+    /// An observation or cycle slip under a code the list in effect at its
+    /// epoch does not declare, or of a constellation with no list in effect
+    /// there. The epoch's records are written by that list, which has no field
+    /// for it.
+    ValueOutsideDeclaredList {
+        /// Zero-based epoch index.
+        epoch_index: usize,
+        /// The satellite.
+        satellite: crate::id::GnssSatelliteId,
+        /// The code, or `None` when the constellation has no list in effect.
+        code: Option<String>,
+    },
+    /// A version 2 product holding a `declared_obs_codes` list that its file's
+    /// type names do not state: a version 2 header declares names, and a reader
+    /// rebuilds each constellation's declared list as what they read as.
+    DeclaredListNotStated {
+        /// The constellation.
+        system: GnssSystem,
+    },
+    /// An event's header record that does not read, so the lists and scale
+    /// factors in effect after it are unknown. A product read from text never
+    /// holds one.
+    EventRecordsUnreadable {
+        /// The reader's error.
+        message: String,
+    },
+    /// A product whose events change its code lists, version 2 type names or
+    /// scale factors, which [`RinexObs::downgrade_to_rinex2`] refuses.
+    MidFileChangesNotDowngraded {
+        /// Zero-based index of the first epoch whose event changes them.
+        epoch_index: usize,
+    },
     /// The written text would read back as a different product.
     ReadBackMismatch {
         /// The first field that would change, with its value before and after.
@@ -255,6 +300,42 @@ impl core::fmt::Display for RinexObsWriteError {
                 f,
                 "RINEX OBS version 2 would need at least {count} observation types, more than the \
                  999 its count field declares"
+            ),
+            Self::CodeListsNotUnion { system } => write!(
+                f,
+                "RINEX OBS {system} code list is not the union of the lists the header and its \
+                 events declare"
+            ),
+            Self::ValueOutsideDeclaredList {
+                epoch_index,
+                satellite,
+                code: Some(code),
+            } => write!(
+                f,
+                "RINEX OBS epoch {epoch_index} satellite {satellite} holds a value under {code:?}, \
+                 which the list in effect at that epoch does not declare"
+            ),
+            Self::ValueOutsideDeclaredList {
+                epoch_index,
+                satellite,
+                code: None,
+            } => write!(
+                f,
+                "RINEX OBS epoch {epoch_index} satellite {satellite} is of a constellation with no \
+                 code list in effect at that epoch"
+            ),
+            Self::DeclaredListNotStated { system } => write!(
+                f,
+                "RINEX OBS {system} declared code list is not what the version 2 type names \
+                 state for it"
+            ),
+            Self::EventRecordsUnreadable { message } => {
+                write!(f, "RINEX OBS event header records do not read: {message}")
+            }
+            Self::MidFileChangesNotDowngraded { epoch_index } => write!(
+                f,
+                "RINEX OBS epoch {epoch_index} event changes the code lists, type names or scale \
+                 factors, which a downgrade to version 2 does not lay out"
             ),
             Self::ReadBackMismatch { what } => {
                 write!(
@@ -441,23 +522,60 @@ impl RinexObs {
                 });
             }
         }
-        if self.is_rinex2() && !self.header.scale_factors.is_empty() {
-            return Err(RinexObsWriteError::ScaleFactorsInVersionTwo {
-                count: self.header.scale_factors.len(),
-            });
+        // The lists, names and scale factors an event declares are in effect for
+        // the epochs after it, and each epoch is written by them.
+        let timeline =
+            self.header_timeline()
+                .map_err(|error| RinexObsWriteError::EventRecordsUnreadable {
+                    message: error.to_string(),
+                })?;
+        if self.is_rinex2()
+            && timeline
+                .segments()
+                .any(|(_, header)| !header.scale_factors.is_empty())
+        {
+            // Every record the file header and the events declare.
+            let count = self.header.scale_factors.len()
+                + self
+                    .epochs
+                    .iter()
+                    .filter(|epoch| super::applies_header_records(epoch.flag))
+                    .flat_map(|epoch| &epoch.special_records)
+                    .filter(|record| {
+                        super::event_record_label(record) == "SYS / SCALE FACTOR"
+                            && !record.starts_with(' ')
+                    })
+                    .count();
+            return Err(RinexObsWriteError::ScaleFactorsInVersionTwo { count });
         }
+        let event_names = self.rinex2_event_names();
         let rinex2_names = if self.is_rinex2() {
-            let names = self.rinex2_names()?;
+            let names = if event_names.is_empty() {
+                self.rinex2_names()?
+            } else {
+                self.rinex2_event_header_names(&event_names)?
+            };
             if let Some(system) = self.rinex2_unstated_systems(&names).into_iter().next() {
                 return Err(RinexObsWriteError::CodeListNotStated { system });
             }
+            self.check_rinex2_declared(&names)?;
             Some(names)
         } else {
+            self.check_code_union(&timeline)?;
+            self.check_counts_declared()?;
             None
         };
+        let mut layouts = EpochLayouts {
+            product: self,
+            timeline: &timeline,
+            header_names: rinex2_names.as_deref(),
+            event_names: &event_names,
+            cache: std::collections::HashMap::new(),
+        };
+        self.check_values_declared(&mut layouts)?;
         let mut out = String::new();
         self.write_header(&mut out, rinex2_names.as_deref());
-        self.write_body(&mut out, rinex2_names.as_deref());
+        self.write_body(&mut out, &mut layouts);
         self.check_reads_back(&out, rinex2_names.as_deref())?;
         Ok(out)
     }
@@ -545,7 +663,8 @@ impl RinexObs {
         if let Some(names) = rinex2_names {
             write_obs_types_v2(out, names);
         } else {
-            for (system, codes) in &h.obs_codes {
+            // The lists the file header declares; an event declares its own.
+            for (system, codes) in &h.declared_obs_codes {
                 write_obs_types(out, *system, codes);
             }
         }
@@ -589,15 +708,13 @@ impl RinexObs {
         push_header_line(out, "", "END OF HEADER");
     }
 
-    fn write_body(&self, out: &mut String, rinex2_names: Option<&[String]>) {
-        if let Some(names) = rinex2_names {
-            for epoch in &self.epochs {
-                self.write_epoch_v2(out, epoch, names.len());
+    fn write_body(&self, out: &mut String, layouts: &mut EpochLayouts<'_>) {
+        for (epoch_index, epoch) in self.epochs.iter().enumerate() {
+            if layouts.header_names.is_some() {
+                self.write_epoch_v2(out, epoch_index, epoch, layouts);
+            } else {
+                self.write_epoch(out, epoch_index, epoch, layouts);
             }
-            return;
-        }
-        for epoch in &self.epochs {
-            self.write_epoch(out, epoch);
         }
     }
 
@@ -1021,7 +1138,15 @@ impl RinexObs {
 
     /// Write one version 2 epoch: the record, its satellite list continued
     /// twelve to a line, then each satellite's observations five to a line.
-    fn write_epoch_v2(&self, out: &mut String, epoch: &ObsEpoch, width: usize) {
+    fn write_epoch_v2(
+        &self,
+        out: &mut String,
+        epoch_index: usize,
+        epoch: &ObsEpoch,
+        layouts: &mut EpochLayouts<'_>,
+    ) {
+        // Every record runs to the number of names in effect at the epoch.
+        let width = layouts.names_at(epoch_index).len();
         // An event without a significant epoch leaves the epoch fields, the
         // first 28 columns, blank.
         let head = match epoch.epoch {
@@ -1075,16 +1200,27 @@ impl RinexObs {
         for record in &epoch.special_records {
             let _ = writeln!(out, "{record}");
         }
-        // Every satellite's record runs to the number of names the header
-        // carries, and its values are in the order its constellation's list
-        // names them, which is the header's own order. A cycle slip record is
-        // laid out as an observation record is.
-        for values in records.values() {
-            write_sat_record_v2(out, values, width);
+        // Each satellite's values are in the order its constellation reads the
+        // names in effect as, placed by code from the union they are held under.
+        // A cycle slip record is laid out as an observation record is.
+        for (sat, values) in records {
+            let stretch = layouts.prepare(epoch_index, sat.system);
+            match layouts.get(stretch, sat.system) {
+                Some(layout) if !layout.identity => {
+                    write_sat_record_v2(out, &placed_values(values, &layout.positions), width);
+                }
+                _ => write_sat_record_v2(out, values, width),
+            }
         }
     }
 
-    fn write_epoch(&self, out: &mut String, epoch: &ObsEpoch) {
+    fn write_epoch(
+        &self,
+        out: &mut String,
+        epoch_index: usize,
+        epoch: &ObsEpoch,
+        layouts: &mut EpochLayouts<'_>,
+    ) {
         // An event without a significant epoch leaves the epoch fields, the 28
         // columns after the `>`, blank.
         let time = match epoch.epoch {
@@ -1122,44 +1258,184 @@ impl RinexObs {
             }
             return;
         }
+        // Each satellite's values are written by the list in effect at the
+        // epoch, placed by code from the union, and scaled by the factors in
+        // effect.
+        let timeline = layouts.timeline;
+        let scale_factors = &timeline.at(epoch_index).scale_factors;
         for (sat, values) in epoch_records(epoch) {
-            self.write_sat_record(out, *sat, values);
+            let stretch = layouts.prepare(epoch_index, sat.system);
+            match layouts.get(stretch, sat.system) {
+                Some(layout) if !layout.identity => {
+                    let placed = placed_values(values, &layout.positions);
+                    write_sat_record(out, *sat, &placed, &layout.list, scale_factors);
+                }
+                Some(layout) => write_sat_record(out, *sat, values, &layout.list, scale_factors),
+                None => write_sat_record(out, *sat, values, &[], scale_factors),
+            }
+        }
+    }
+}
+
+/// Write one satellite's record in the version 3 layout, its values in the
+/// order of `codes`, each scaled by the factor in effect for its code.
+fn write_sat_record(
+    out: &mut String,
+    sat: crate::id::GnssSatelliteId,
+    values: &[ObsValue],
+    codes: &[String],
+    scale_factors: &[super::ObsScaleFactor],
+) {
+    let mut line = format!("{:<3}", sat.to_string());
+    for (index, value) in values.iter().enumerate() {
+        let code = codes.get(index).map(String::as_str);
+        push_obs_value(
+            &mut line,
+            *value,
+            scale_for(scale_factors, sat.system, code),
+        );
+    }
+    // Trailing blank observations carry no information; drop them.
+    let trimmed = line.trim_end();
+    out.push_str(trimmed);
+    out.push('\n');
+}
+
+/// The `SYS / SCALE FACTOR` divisor in force for a system/code, mirroring the
+/// parser's lookup so a value re-multiplies back to its stored ASCII.
+fn scale_for(
+    scale_factors: &[super::ObsScaleFactor],
+    system: GnssSystem,
+    code: Option<&str>,
+) -> f64 {
+    code.map_or(1.0, |code| {
+        super::scale_factor_in(scale_factors, system, code)
+    })
+}
+
+/// A blank observation field.
+const BLANK_VALUE: ObsValue = ObsValue {
+    value: None,
+    lli: None,
+    ssi: None,
+};
+
+/// Values held under the union, laid out by a list: each at its code's
+/// position in the union, blank where the list's code has none.
+fn placed_values(values: &[ObsValue], positions: &[Option<usize>]) -> Vec<ObsValue> {
+    positions
+        .iter()
+        .map(|position| {
+            position
+                .and_then(|position| values.get(position))
+                .copied()
+                .unwrap_or(BLANK_VALUE)
+        })
+        .collect()
+}
+
+/// Whether a field holds nothing: no value and no indicator.
+fn is_blank(value: &ObsValue) -> bool {
+    value.value.is_none() && value.lli.is_none() && value.ssi.is_none()
+}
+
+/// The code list in effect for one constellation over a stretch of epochs, and
+/// where each of its codes sits in the product's union.
+struct Layout {
+    list: Vec<String>,
+    positions: Vec<Option<usize>>,
+    /// Whether the list is the union itself, so values are written as held.
+    identity: bool,
+}
+
+/// The code lists each epoch is written by: at version 3 the lists the header
+/// in effect declares, at version 2 what the names in effect read as.
+struct EpochLayouts<'a> {
+    product: &'a RinexObs,
+    timeline: &'a super::ObsHeaderTimeline,
+    /// The names a version 2 file header is written with; `None` at version 3.
+    header_names: Option<&'a [String]>,
+    /// The names each version 2 event declaring them carries, by epoch index.
+    event_names: &'a [(usize, Vec<String>)],
+    cache: std::collections::HashMap<(usize, GnssSystem), Option<Layout>>,
+}
+
+impl<'a> EpochLayouts<'a> {
+    /// The stretch of epochs sharing a list, identified by the lists declared
+    /// at or before the epoch.
+    fn stretch(&self, epoch_index: usize) -> usize {
+        match self.header_names {
+            Some(_) => self
+                .event_names
+                .partition_point(|(first, _)| *first <= epoch_index),
+            None => self.timeline.segment_index(epoch_index),
         }
     }
 
-    fn write_sat_record(
-        &self,
-        out: &mut String,
-        sat: crate::id::GnssSatelliteId,
-        values: &[ObsValue],
-    ) {
-        let codes = self.header.obs_codes.get(&sat.system).map(Vec::as_slice);
-        let mut line = format!("{:<3}", sat.to_string());
-        for (index, value) in values.iter().enumerate() {
-            let code = codes.and_then(|c| c.get(index)).map(String::as_str);
-            push_obs_value(&mut line, *value, self.scale_for(sat.system, code));
+    /// The version 2 names in effect at an epoch.
+    fn names_at(&self, epoch_index: usize) -> &'a [String] {
+        let stretch = self
+            .event_names
+            .partition_point(|(first, _)| *first <= epoch_index);
+        match stretch
+            .checked_sub(1)
+            .and_then(|index| self.event_names.get(index))
+        {
+            Some((_, names)) => names,
+            None => self.header_names.unwrap_or_default(),
         }
-        // Trailing blank observations carry no information; drop them.
-        let trimmed = line.trim_end();
-        out.push_str(trimmed);
-        out.push('\n');
     }
 
-    /// The `SYS / SCALE FACTOR` divisor in force for a system/code, mirroring the
-    /// parser's lookup so a value re-multiplies back to its stored ASCII.
-    fn scale_for(&self, system: GnssSystem, code: Option<&str>) -> f64 {
-        let Some(code) = code else {
-            return 1.0;
-        };
-        self.header
-            .scale_factors
-            .iter()
-            .rev()
-            .find(|record| {
-                record.system == system
-                    && (record.codes.is_empty() || record.codes.iter().any(|c| c == code))
-            })
-            .map_or(1.0, |record| record.factor)
+    /// Work out the layout of a constellation at an epoch, once per stretch,
+    /// and return the stretch to look it up by.
+    fn prepare(&mut self, epoch_index: usize, system: GnssSystem) -> usize {
+        let stretch = self.stretch(epoch_index);
+        let key = (stretch, system);
+        if !self.cache.contains_key(&key) {
+            let list = match self.header_names {
+                Some(_) => Some(super::rinex2_system_obs_codes(
+                    system,
+                    self.names_at(epoch_index),
+                    self.product.header.version,
+                )),
+                None => self
+                    .timeline
+                    .at(epoch_index)
+                    .declared_obs_codes
+                    .get(&system)
+                    .cloned(),
+            };
+            let union = self.union_of(system);
+            let layout = list.map(|list| {
+                let positions = super::union_positions(&list, &union);
+                let identity = list.as_slice() == &*union;
+                Layout {
+                    list,
+                    positions,
+                    identity,
+                }
+            });
+            self.cache.insert(key, layout);
+        }
+        stretch
+    }
+
+    /// The union a constellation's values are held under: its list, or at
+    /// version 2, for a constellation holding none, what the file's names read
+    /// as for it.
+    fn union_of(&self, system: GnssSystem) -> std::borrow::Cow<'a, [String]> {
+        let product = self.product;
+        match (product.header.obs_codes.get(&system), self.header_names) {
+            (Some(list), _) => std::borrow::Cow::Borrowed(list.as_slice()),
+            (None, Some(names)) => {
+                std::borrow::Cow::Owned(product.rinex2_union_read(system, names, self.event_names))
+            }
+            (None, None) => std::borrow::Cow::Borrowed(&[]),
+        }
+    }
+
+    fn get(&self, stretch: usize, system: GnssSystem) -> Option<&Layout> {
+        self.cache.get(&(stretch, system)).and_then(Option::as_ref)
     }
 }
 
@@ -1303,27 +1579,53 @@ fn write_obs_types_v2(out: &mut String, codes: &[String]) {
 /// with its count when present (otherwise the correction applies system-wide).
 fn write_phase_shift(out: &mut String, shift: &super::ObsPhaseShift) {
     push_header_line(out, &phase_shift_content(shift), "SYS / PHASE SHIFT");
+    // Satellites past the first record's ten continue, ten to a record.
+    for chunk in phase_shift_tokens(shift)
+        .chunks(PHASE_SHIFT_SATELLITES_PER_LINE)
+        .skip(1)
+    {
+        let mut content = " ".repeat(PHASE_SHIFT_CONTINUATION_COLUMN);
+        for token in chunk {
+            let _ = write!(content, " {token}");
+        }
+        push_header_line(out, &content, "SYS / PHASE SHIFT");
+    }
 }
 
-/// The 60-column content of one `SYS / PHASE SHIFT` record.
-///
-/// [`RinexObs::parse`] measures a record with this before accepting it, so a
-/// list it could not re-emit inside the content area is rejected there instead
-/// of being truncated here.
+/// The satellites a phase shift names, as a record writes them: the ones
+/// [`crate::id::GnssSatelliteId`] holds, then the designators it does not hold,
+/// as they were written.
+fn phase_shift_tokens(shift: &super::ObsPhaseShift) -> Vec<String> {
+    shift
+        .satellites
+        .iter()
+        .map(ToString::to_string)
+        .chain(shift.unrepresentable_satellites.iter().cloned())
+        .collect()
+}
+
+/// The 60-column content of the first `SYS / PHASE SHIFT` record for a shift,
+/// holding its count and first ten satellites, in the record's columns.
 pub(super) fn phase_shift_content(shift: &super::ObsPhaseShift) -> String {
-    let mut content = format!(
-        "{} {} {}",
-        shift.system.letter(),
-        shift.code,
-        fmt_shortest(shift.correction_cycles)
+    // `A1,1X,A3,1X,F8.5,2X,I2.2,10(1X,A3)`: the correction blank if none, the
+    // count blank for every satellite of the system.
+    let correction = shift.correction_cycles.map_or_else(
+        || " ".repeat(PHASE_SHIFT_CORRECTION_WIDTH),
+        |correction| format!("{correction:8.5}"),
     );
-    if !shift.satellites.is_empty() {
-        let _ = write!(content, " {}", shift.satellites.len());
-        for sat in &shift.satellites {
-            let _ = write!(content, " {sat}");
+    // A record naming only its constellation leaves every other field blank.
+    let Some(code) = &shift.code else {
+        return shift.system.letter().to_string();
+    };
+    let mut content = format!("{} {:<3} {correction}", shift.system.letter(), code);
+    if !shift.covers_every_satellite() {
+        let tokens = phase_shift_tokens(shift);
+        let _ = write!(content, "  {:02}", tokens.len());
+        for token in tokens.iter().take(PHASE_SHIFT_SATELLITES_PER_LINE) {
+            let _ = write!(content, " {token}");
         }
     }
-    content
+    content.trim_end().to_string()
 }
 
 /// Write one `SYS / SCALE FACTOR` record (factor at columns 2-5, code count at
@@ -1373,20 +1675,28 @@ fn write_glonass_slots(out: &mut String, slots: &std::collections::BTreeMap<u8, 
     }
 }
 
-fn write_glonass_cod_phs_bis(out: &mut String, entries: &[(String, f64)]) {
+fn write_glonass_cod_phs_bis(out: &mut String, entries: &[(String, Option<f64>)]) {
     if entries.is_empty() {
         push_header_line(out, "", "GLONASS COD/PHS/BIS");
         return;
     }
-    // Each entry takes thirteen of the sixty columns, so a fifth one would be
-    // cut off the end of the line and lost. The record continues on another line
-    // instead, which is how the reader takes it back.
+    // Each entry takes thirteen of the sixty columns, `1X,A3,1X,F8.3`, so a
+    // fifth one would be cut off the end of the line and lost. The record
+    // continues on another line instead, which is how the reader takes it
+    // back. A blank bias is written blank in its columns.
     for chunk in entries.chunks(GLONASS_BIAS_ENTRIES_PER_LINE) {
         let mut content = String::new();
         for (code, value) in chunk {
-            let _ = write!(content, " {code:>3} {value:8.3}");
+            match value {
+                Some(value) => {
+                    let _ = write!(content, " {code:>3} {value:8.3}");
+                }
+                None => {
+                    let _ = write!(content, " {code:>3} {:8}", "");
+                }
+            }
         }
-        push_header_line(out, content.trim_start(), "GLONASS COD/PHS/BIS");
+        push_header_line(out, content.trim_end(), "GLONASS COD/PHS/BIS");
     }
 }
 
@@ -1461,28 +1771,6 @@ fn push_indicator(line: &mut String, indicator: Option<u8>) {
             let _ = write!(line, "{digit}");
         }
         None => line.push(' '),
-    }
-}
-
-/// Shortest spelling that round-trips back to the same `f64`, keeping the plain
-/// decimal whenever it fits the record's `F8.5` field.
-///
-/// Rust's `Display` never switches to an exponent, so a correction far from
-/// unity renders as hundreds of digits - wider than the content area, where it
-/// would be truncated into a different value and take the satellite list with
-/// it. Exponent form is the shortest round-tripping spelling at those
-/// magnitudes and the parser reads it back exactly. A conforming correction
-/// fits the `F8.5` field and is unaffected.
-fn fmt_shortest(value: f64) -> String {
-    let plain = format!("{value}");
-    if plain.len() <= PHASE_SHIFT_CORRECTION_WIDTH {
-        return plain;
-    }
-    let exponent = format!("{value:e}");
-    if exponent.len() < plain.len() {
-        exponent
-    } else {
-        plain
     }
 }
 
@@ -1627,6 +1915,154 @@ impl RinexObs {
         Ok(names)
     }
 
+    /// The version 2 type names each event declaring them carries, with the
+    /// index of its epoch, in file order. Empty at version 3 and for a product
+    /// whose event records do not read.
+    fn rinex2_event_names(&self) -> Vec<(usize, Vec<String>)> {
+        if !self.is_rinex2() {
+            return Vec::new();
+        }
+        let version = self.header.version;
+        let Ok(timeline) = self.header_timeline() else {
+            return Vec::new();
+        };
+        self.epochs
+            .iter()
+            .enumerate()
+            .filter(|(_, epoch)| {
+                super::applies_header_records(epoch.flag)
+                    && super::event_declares_label(
+                        version,
+                        &epoch.special_records,
+                        "# / TYPES OF OBSERV",
+                    )
+            })
+            .map(|(index, _)| (index, timeline.at(index).rinex2_types.clone()))
+            .collect()
+    }
+
+    /// What a constellation reads a version 2 file's header names and every
+    /// event's names as, together: the union of those readings.
+    fn rinex2_union_read(
+        &self,
+        system: GnssSystem,
+        names: &[String],
+        event_names: &[(usize, Vec<String>)],
+    ) -> Vec<String> {
+        let version = self.header.version;
+        let mut read = super::rinex2_system_obs_codes(system, names, version);
+        for (_, event) in event_names {
+            super::extend_code_union(
+                &mut read,
+                &super::rinex2_system_obs_codes(system, event, version),
+            );
+        }
+        read
+    }
+
+    /// Header names for a version 2 product whose events declare type names:
+    /// names reading as the lists the file header declares, found as
+    /// `rinex2_names_for` finds them, whose reading together with the events'
+    /// names is each stated constellation's union.
+    fn rinex2_event_header_names(
+        &self,
+        event_names: &[(usize, Vec<String>)],
+    ) -> Result<Vec<String>, RinexObsWriteError> {
+        let stated = self.rinex2_stated_lists_from(&self.header.declared_obs_codes)?;
+        let names = self.rinex2_names_for(&stated)?;
+        for (system, held) in &self.header.obs_codes {
+            if stated.contains_key(system)
+                && self.rinex2_union_read(*system, &names, event_names) != *held
+            {
+                return Err(RinexObsWriteError::CodeListsNotUnion { system: *system });
+            }
+        }
+        Ok(names)
+    }
+
+    /// Refuse a version 3 product whose `obs_codes` is not the union of the
+    /// lists its file header and events declare.
+    fn check_code_union(
+        &self,
+        timeline: &super::ObsHeaderTimeline,
+    ) -> Result<(), RinexObsWriteError> {
+        let mut union: BTreeMap<GnssSystem, Vec<String>> = BTreeMap::new();
+        for (_, header) in timeline.segments() {
+            for (system, list) in &header.declared_obs_codes {
+                super::extend_code_union(union.entry(*system).or_default(), list);
+            }
+        }
+        for system in union.keys().chain(self.header.obs_codes.keys()) {
+            if union.get(system) != self.header.obs_codes.get(system) {
+                return Err(RinexObsWriteError::CodeListsNotUnion { system: *system });
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse `PRN / # OF OBS` counts past the codes the file header declares:
+    /// the record holds a count for each, and no field for any other.
+    fn check_counts_declared(&self) -> Result<(), RinexObsWriteError> {
+        for (sat, counts) in &self.header.prn_obs_counts {
+            let codes = self
+                .header
+                .declared_obs_codes
+                .get(&sat.system)
+                .map_or(0, Vec::len);
+            if counts.len() > codes {
+                return Err(RinexObsWriteError::CountsWithoutCodes {
+                    satellite: *sat,
+                    codes,
+                    counts: counts.len(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse a value past its constellation's union, and a value under a code
+    /// the list in effect at its epoch does not declare: the epoch's records are
+    /// written by that list.
+    fn check_values_declared(
+        &self,
+        layouts: &mut EpochLayouts<'_>,
+    ) -> Result<(), RinexObsWriteError> {
+        for (epoch_index, epoch) in self.epochs.iter().enumerate() {
+            for (sat, values) in epoch_records(epoch) {
+                let union = layouts.union_of(sat.system);
+                if values.len() > union.len() {
+                    return Err(RinexObsWriteError::ValuesWithoutCodes {
+                        epoch_index,
+                        satellite: *sat,
+                        codes: union.len(),
+                        values: values.len(),
+                    });
+                }
+                let stretch = layouts.prepare(epoch_index, sat.system);
+                let Some(layout) = layouts.get(stretch, sat.system) else {
+                    return Err(RinexObsWriteError::ValueOutsideDeclaredList {
+                        epoch_index,
+                        satellite: *sat,
+                        code: None,
+                    });
+                };
+                if layout.identity {
+                    continue;
+                }
+                for (position, value) in values.iter().enumerate() {
+                    if !is_blank(value) && !layout.positions.contains(&Some(position)) {
+                        return Err(RinexObsWriteError::ValueOutsideDeclaredList {
+                            epoch_index,
+                            satellite: *sat,
+                            code: union.get(position).cloned(),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Constellations a `PRN / # OF OBS` count or an observation names that
     /// hold no code list.
     fn rinex2_unlisted_systems(&self) -> std::collections::BTreeSet<GnssSystem> {
@@ -1653,6 +2089,7 @@ impl RinexObs {
     /// their list either. A list the names read as is still in the file, as a
     /// list read from a version 2 file whose body a repair emptied is.
     fn rinex2_unstated_systems(&self, names: &[String]) -> std::collections::BTreeSet<GnssSystem> {
+        let events = self.rinex2_event_names();
         let mut stated = self.rinex2_observed_systems();
         if stated.is_empty() {
             stated.insert(self.rinex2_fallback_system());
@@ -1669,8 +2106,7 @@ impl RinexObs {
             .iter()
             .filter(|(system, codes)| {
                 !stated.contains(system)
-                    && super::rinex2_system_obs_codes(**system, names, self.header.version)
-                        != **codes
+                    && self.rinex2_union_read(**system, names, &events) != **codes
             })
             .map(|(system, _)| *system)
             .collect()
@@ -1719,6 +2155,15 @@ impl RinexObs {
     /// names back. A count or observation with neither a list nor names to read
     /// names no observable and is refused.
     fn rinex2_stated_lists(&self) -> Result<BTreeMap<GnssSystem, Vec<String>>, RinexObsWriteError> {
+        self.rinex2_stated_lists_from(&self.header.obs_codes)
+    }
+
+    /// The lists [`Self::rinex2_stated_lists`] gives, taken from `lists`: the
+    /// product's own, or the lists its file header declares.
+    fn rinex2_stated_lists_from(
+        &self,
+        source: &BTreeMap<GnssSystem, Vec<String>>,
+    ) -> Result<BTreeMap<GnssSystem, Vec<String>>, RinexObsWriteError> {
         let mut systems = self.rinex2_observed_systems();
         systems.extend(
             self.header
@@ -1737,7 +2182,7 @@ impl RinexObs {
         }
         let mut lists = BTreeMap::new();
         for system in systems {
-            if let Some(codes) = self.header.obs_codes.get(&system) {
+            if let Some(codes) = source.get(&system) {
                 lists.insert(system, codes.clone());
                 continue;
             }
@@ -1807,9 +2252,25 @@ impl RinexObs {
     /// themselves. With no names, the lists are the product's own.
     fn rinex2_read_lists(&self) -> BTreeMap<GnssSystem, Vec<String>> {
         let names = &self.header.rinex2_types;
-        if names.is_empty() {
+        let events = self.rinex2_event_names();
+        if names.is_empty() && events.is_empty() {
             return self.header.obs_codes.clone();
         }
+        let mut systems = self.rinex2_observed_systems();
+        if systems.is_empty() {
+            systems.insert(self.rinex2_fallback_system());
+        }
+        systems
+            .into_iter()
+            .map(|system| (system, self.rinex2_union_read(system, names, &events)))
+            .collect()
+    }
+
+    /// The lists a reader of this version 2 product's file declares in its
+    /// header, written with `names`: what the names read as for each
+    /// constellation the file states a list for.
+    fn rinex2_rebuilt_declared(&self, names: &[String]) -> BTreeMap<GnssSystem, Vec<String>> {
+        let version = self.header.version;
         let mut systems = self.rinex2_observed_systems();
         if systems.is_empty() {
             systems.insert(self.rinex2_fallback_system());
@@ -1819,10 +2280,43 @@ impl RinexObs {
             .map(|system| {
                 (
                     system,
-                    super::rinex2_system_obs_codes(system, names, self.header.version),
+                    super::rinex2_system_obs_codes(system, names, version),
                 )
             })
             .collect()
+    }
+
+    /// The declared lists of a version 2 product a downgrade leaves: its lists,
+    /// with each list its file states what its type names read as, which is
+    /// the list a reader rebuilds, including the list of the constellation a
+    /// file with no observations names.
+    fn rinex2_declared_after_downgrade(&self) -> BTreeMap<GnssSystem, Vec<String>> {
+        let mut declared = self.header.obs_codes.clone();
+        declared.extend(self.rinex2_rebuilt_declared(&self.header.rinex2_types));
+        declared
+    }
+
+    /// Refuse a version 2 product whose `declared_obs_codes` a reader would not
+    /// rebuild from the file written with `names`. A version 2 header declares
+    /// type names, not lists: each list the file states is what the names read
+    /// as for its constellation, and a list the file does not state is held
+    /// only where the names read as it, as for `obs_codes`.
+    fn check_rinex2_declared(&self, names: &[String]) -> Result<(), RinexObsWriteError> {
+        let version = self.header.version;
+        let rebuilt = self.rinex2_rebuilt_declared(names);
+        for (system, list) in &rebuilt {
+            if self.header.declared_obs_codes.get(system) != Some(list) {
+                return Err(RinexObsWriteError::DeclaredListNotStated { system: *system });
+            }
+        }
+        for (system, list) in &self.header.declared_obs_codes {
+            if !rebuilt.contains_key(system)
+                && super::rinex2_system_obs_codes(*system, names, version) != *list
+            {
+                return Err(RinexObsWriteError::DeclaredListNotStated { system: *system });
+            }
+        }
+        Ok(())
     }
 
     /// Refuse text that would read back as anything but this product.
@@ -1869,6 +2363,11 @@ impl RinexObs {
                 .filter(|letter| *letter != 'M')
                 .and_then(GnssSystem::from_letter);
             product.header.obs_codes = product.rinex2_read_lists();
+            // A reader rebuilds `declared_obs_codes` from the type names for the
+            // lists the file states; the writer has checked the product's own
+            // against the same, so both sides are compared as a reader holds them.
+            product.header.declared_obs_codes =
+                product.rinex2_rebuilt_declared(&product.header.rinex2_types.clone());
         } else {
             product.header.rinex2_types.clear();
             product.header.rinex2_system = None;
@@ -2720,6 +3219,7 @@ fn describe_difference(expected: &RinexObs, found: &RinexObs) -> String {
         approx_position_m,
         antenna_delta_hen_m,
         obs_codes,
+        declared_obs_codes,
         signal_strength_unit,
         interval_s,
         time_of_first_obs,
@@ -2889,6 +3389,15 @@ impl RinexObs {
         };
         if !(2.0..3.0).contains(&version) {
             return Err(RinexObsWriteError::NotVersionTwo { version });
+        }
+        if let Ok(timeline) = self.header_timeline() {
+            if let Some((epoch_index, _)) = timeline.segments().skip(1).find(|(_, header)| {
+                header.declared_obs_codes != self.header.declared_obs_codes
+                    || header.rinex2_types != self.header.rinex2_types
+                    || header.scale_factors != self.header.scale_factors
+            }) {
+                return Err(RinexObsWriteError::MidFileChangesNotDowngraded { epoch_index });
+            }
         }
         let mut product = self.clone();
         product.header.version = version;
@@ -3079,6 +3588,7 @@ impl RinexObs {
         if let Ok(names) = product.rinex2_names() {
             product.remove_unstated_lists(&names, &mut changes);
             product.leave_implied(&implied, names);
+            product.header.declared_obs_codes = product.rinex2_declared_after_downgrade();
             product.to_rinex_string()?;
             return Ok((product, changes));
         }
@@ -3160,6 +3670,7 @@ impl RinexObs {
             .unwrap_or_else(|_| layout.names.clone());
         product.remove_unstated_lists(&names, &mut changes);
         product.leave_implied(&implied, names);
+        product.header.declared_obs_codes = product.rinex2_declared_after_downgrade();
         if types > super::MAX_OBS_TYPE_COUNT {
             return Err(RinexObsWriteError::TooManyObservationTypes { count: types });
         }

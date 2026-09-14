@@ -519,10 +519,12 @@ fn select_rtcm_signal<'a>(
 /// cycle slip epochs (`flag > 1`) and any epoch without an epoch time, selects
 /// one single-frequency pseudorange per satellite
 /// under [`RinexSppOptions::signal_policy`], derives receive time from the RINEX
-/// civil epoch, seeds the receiver from `APPROX POSITION XYZ` unless
-/// `initial_guess` is supplied, and combines GLONASS channels from the assembly
-/// source with any observation-header `GLONASS SLOT / FRQ #` entries. Observation
-/// header channels take precedence.
+/// civil epoch, seeds the receiver from the `APPROX POSITION XYZ` in effect at
+/// each epoch unless `initial_guess` is supplied, and combines GLONASS channels
+/// from the assembly source with the observation `GLONASS SLOT / FRQ #` entries
+/// in effect at each epoch. Observation header channels take precedence. A
+/// record an event carries is in effect from its epoch, as
+/// [`ObservationFile::header_at`] gives it.
 pub fn spp_inputs_from_rinex_obs<S>(
     obs: &ObservationFile,
     source: &S,
@@ -531,8 +533,14 @@ pub fn spp_inputs_from_rinex_obs<S>(
 where
     S: RinexSppAssemblySource + ?Sized,
 {
-    let initial_guess = initial_guess(obs, options)?;
-    let base_corrections = merged_broadcast_corrections(obs, source);
+    // A position, an antenna or a GLONASS channel an event declares applies to
+    // the epochs after it.
+    let timeline = obs.header_timeline()?;
+    let source_corrections = source.rinex_spp_broadcast_corrections();
+    let segment_corrections: Vec<RinexSppBroadcastCorrections> = timeline
+        .segments()
+        .map(|(_, header)| merged_broadcast_corrections(header, &source_corrections))
+        .collect();
     let mut out = Vec::new();
 
     for (epoch_index, epoch) in obs.epochs().iter().enumerate() {
@@ -541,6 +549,12 @@ where
         let Some(epoch_time) = epoch.epoch.filter(|_| epoch.flag <= 1) else {
             continue;
         };
+        let header = timeline.at(epoch_index);
+        let Some(base_corrections) = segment_corrections.get(timeline.segment_index(epoch_index))
+        else {
+            continue;
+        };
+        let initial_guess = initial_guess(header, options)?;
         let mut selected = pseudoranges(obs, epoch, &options.signal_policy)?;
         if let Some(allowed) = &options.satellites {
             selected.retain(|(sat, _)| allowed.contains(sat));
@@ -629,29 +643,25 @@ const fn zero_klobuchar() -> KlobucharCoeffs {
 }
 
 fn initial_guess(
-    obs: &ObservationFile,
+    header: &crate::rinex::observations::ObsHeader,
     options: &RinexSppOptions,
 ) -> Result<[f64; 4], RinexSppError> {
     if let Some(initial_guess) = options.initial_guess {
         return Ok(initial_guess);
     }
-    let approx = obs
-        .header()
+    let approx = header
         .approx_position_m
         .ok_or(RinexSppError::MissingApproxPosition)?;
     Ok([approx[0], approx[1], approx[2], 0.0])
 }
 
-fn merged_broadcast_corrections<S>(
-    obs: &ObservationFile,
-    source: &S,
-) -> RinexSppBroadcastCorrections
-where
-    S: RinexSppAssemblySource + ?Sized,
-{
-    let mut corrections = source.rinex_spp_broadcast_corrections();
+fn merged_broadcast_corrections(
+    header: &crate::rinex::observations::ObsHeader,
+    source_corrections: &RinexSppBroadcastCorrections,
+) -> RinexSppBroadcastCorrections {
+    let mut corrections = source_corrections.clone();
     corrections.glonass_channels.extend(
-        obs.header()
+        header
             .glonass_slots
             .iter()
             .map(|(&slot, &channel)| (slot, channel)),
