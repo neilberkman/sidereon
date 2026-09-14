@@ -722,7 +722,7 @@ fn parses_plain_rinex2_observation_file() {
     );
     assert_eq!(obs.epochs().len(), 1);
     let epoch = &obs.epochs()[0];
-    assert_eq!(epoch.epoch.year, 2020);
+    assert_eq!(epoch.epoch.map(|time| time.year), Some(2020));
     assert_eq!(epoch.declared_record_count, 1);
     let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id");
     let values = epoch.sats.get(&g01).expect("G01 present");
@@ -1535,7 +1535,7 @@ fn reading_by_column_leaves_every_looser_shape_as_it_was() {
     // `0 1` is one second, as the looser reading has always made it.
     let spaced = obs_with_code_headers(&systems, &format!("> 2020 06 24 00 00{:11}  0  0", "0 1"));
     let obs = RinexObs::parse(&spaced).expect("a seconds field with a space still parses");
-    assert_eq!(obs.epochs()[0].epoch.second, 1.0);
+    assert_eq!(obs.epochs()[0].epoch.map(|time| time.second), Some(1.0));
 
     // Column-shaped but not column-valued: the layout read parses badly, so the
     // looser reading takes over rather than the line being rejected.
@@ -2668,6 +2668,242 @@ fn a_downgrade_moves_and_rounds_cycle_slips_with_their_codes() {
 }
 
 #[test]
+fn an_event_without_a_significant_epoch_leaves_its_epoch_fields_blank() {
+    // RINEX 3.05 Table A3: "For events without significant epoch the epoch
+    // fields in the EPOCH RECORD can be left blank". The reader refused every
+    // such record. It holds no time now, and is written back blank.
+    let comment = |text: &str| format!("{text:<60}COMMENT");
+    let text = [
+        "     3.05           OBSERVATION DATA    M                   RINEX VERSION / TYPE"
+            .to_string(),
+        "G    1 C1C                                                  SYS / # / OBS TYPES"
+            .to_string(),
+        "                                                            END OF HEADER".to_string(),
+        "> 2020 01 01 00 00  0.0000000  0  1".to_string(),
+        "G01  20000000.000".to_string(),
+        // In the record's columns: the flag in column 32, the count after it.
+        format!(">{:30}4  1", ""),
+        comment("written in the record's columns"),
+        // Spaced as the specification's own example writes it.
+        format!(">{:33}4 1", ""),
+        comment("written as the example writes it"),
+        "> 2020 01 01 00 00 30.0000000  5  0".to_string(),
+        "> 2020 01 01 00 01  0.0000000  0  1".to_string(),
+        "G01  20000100.000".to_string(),
+    ]
+    .join("\n");
+    let obs = RinexObs::parse(&text).expect("parse events with blank epoch fields");
+    let read: Vec<(u8, bool, usize)> = obs
+        .epochs()
+        .iter()
+        .map(|epoch| {
+            (
+                epoch.flag,
+                epoch.epoch.is_some(),
+                epoch.special_records.len(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            (0, true, 0),
+            (4, false, 1),
+            (4, false, 1),
+            (5, true, 0),
+            (0, true, 0)
+        ]
+    );
+
+    let encoded = obs.to_rinex_string().expect("serialize RINEX OBS");
+    assert_eq!(
+        encoded
+            .lines()
+            .filter(|line| *line == format!(">{:30}4  1", ""))
+            .count(),
+        2,
+        "{encoded}"
+    );
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs(), obs.epochs());
+
+    // An observation or cycle slip record is tagged with its time.
+    for flag in [0, 1, CYCLE_SLIP_FLAG] {
+        let text = minimal_obs(&[], &format!(">{:30}{flag}  1\nG01  20000000.000", ""));
+        let error = RinexObs::parse(&text).expect_err("blank epoch fields are refused");
+        assert!(
+            error.to_string().contains("leaves its epoch fields blank"),
+            "flag {flag}: {error}"
+        );
+    }
+    let mut untimed = obs.clone();
+    untimed.epochs[0].epoch = None;
+    assert_eq!(
+        untimed.to_rinex_string(),
+        Err(RinexObsWriteError::EpochTimeMissing {
+            epoch_index: 0,
+            flag: 0
+        })
+    );
+}
+
+#[test]
+fn a_version_two_event_without_a_significant_epoch_leaves_its_epoch_fields_blank() {
+    let t0 = ObsEpochTime {
+        year: 2015,
+        month: 1,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0.0,
+    };
+    let t1 = ObsEpochTime { second: 30.0, ..t0 };
+    let text = [
+        header_line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        header_line("     1    C1", "# / TYPES OF OBSERV"),
+        header_line("", "END OF HEADER"),
+        v2_epoch_line(t0, 0, 1, "G01"),
+        "  20000000.000".to_string(),
+        format!("{:28}4  1", ""),
+        header_line("a comment after a blank event", "COMMENT"),
+        v2_epoch_line(t1, 0, 1, "G01"),
+        "  20000100.000".to_string(),
+    ]
+    .join("\n");
+    let obs = RinexObs::parse(&text).expect("parse a version 2 blank event");
+    assert_eq!(obs.epochs().len(), 3);
+    assert_eq!(obs.epochs()[1].epoch, None);
+    assert_eq!(obs.epochs()[1].flag, 4);
+    let encoded = obs.to_rinex_string().expect("serialize RINEX OBS");
+    assert!(
+        encoded.lines().any(|line| line == format!("{:28}4  1", "")),
+        "{encoded}"
+    );
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs(), obs.epochs());
+}
+
+#[test]
+fn a_blank_event_declaring_a_hundred_records_or_more_reads_and_writes_back() {
+    // RINEX 2.11 Table A2 allows an event up to 999 special records, and a
+    // count of 100 or more fills its I3 field, so it abuts the flag: a blank
+    // version 2 event line reads `4100` as one token after 28 blank columns.
+    let comments: Vec<String> = (0..100)
+        .map(|index| header_line(&format!("record {index}"), "COMMENT"))
+        .collect();
+    let t0 = ObsEpochTime {
+        year: 2015,
+        month: 1,
+        day: 1,
+        hour: 0,
+        minute: 0,
+        second: 0.0,
+    };
+    let mut lines = vec![
+        header_line(
+            "     2.11           OBSERVATION DATA    G (GPS)",
+            "RINEX VERSION / TYPE",
+        ),
+        header_line("     1    C1", "# / TYPES OF OBSERV"),
+        header_line("", "END OF HEADER"),
+        format!("{}4100", " ".repeat(28)),
+    ];
+    lines.extend(comments.iter().cloned());
+    lines.push(v2_epoch_line(t0, 0, 1, "G01"));
+    lines.push("  20000000.000".to_string());
+    let obs = RinexObs::parse(&lines.join("\n")).expect("parse a version 2 event of 100 records");
+    assert_eq!(obs.epochs()[0].epoch, None);
+    assert_eq!(obs.epochs()[0].flag, 4);
+    assert_eq!(obs.epochs()[0].special_records, comments);
+    let encoded = obs.to_rinex_string().expect("serialize");
+    assert!(
+        encoded
+            .lines()
+            .any(|line| line == format!("{}4100", " ".repeat(28))),
+        "{encoded}"
+    );
+    assert_eq!(
+        RinexObs::parse(&encoded).expect("reads back").epochs(),
+        obs.epochs()
+    );
+
+    // The version 3 line holds its count in its own columns.
+    let mut body = vec![format!(">{:30}4100", "")];
+    body.extend(comments.iter().cloned());
+    body.push("> 2020 01 01 00 00  0.0000000  0  1".to_string());
+    body.push("G01  20000000.000".to_string());
+    let obs = RinexObs::parse(&minimal_obs(&[], &body.join("\n")))
+        .expect("parse a version 3 event of 100 records");
+    assert_eq!(obs.epochs()[0].epoch, None);
+    assert_eq!(obs.epochs()[0].special_records.len(), 100);
+    let encoded = obs.to_rinex_string().expect("serialize");
+    assert_eq!(
+        RinexObs::parse(&encoded).expect("reads back").epochs(),
+        obs.epochs()
+    );
+}
+
+fn rinex211_table_a7_example() -> String {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/obs/rinex211_table_a7_example.rnx"
+    );
+    std::fs::read_to_string(path).expect("read the RINEX 2.11 Table A7 example")
+}
+
+#[test]
+fn the_rinex_211_example_file_reads_and_writes_back() {
+    // Table A7 of RINEX 2.11 as the specification prints it: a flag 2 event, a
+    // new site occupation (flag 3) and header records (flag 4) with blank epoch
+    // fields, an external event (flag 5) with a significant epoch and no
+    // records, and cycle slip records (flag 6).
+    let obs = RinexObs::parse(&rinex211_table_a7_example())
+        .expect("parse the specification's example file");
+    let read: Vec<(u8, bool)> = obs
+        .epochs()
+        .iter()
+        .map(|epoch| (epoch.flag, epoch.epoch.is_some()))
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            (0, true),
+            (4, true),
+            (0, true),
+            (2, true),
+            (0, true),
+            (3, false),
+            (0, true),
+            (5, true),
+            (4, false),
+            (0, true),
+            (4, false),
+            (6, true),
+            (4, false),
+            (0, true),
+            (4, false),
+        ]
+    );
+    let slips = &obs.epochs()[11].cycle_slips;
+    let values = |prn: u8| -> Vec<Option<f64>> {
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, prn).expect("satellite");
+        slips[&sat].iter().map(|value| value.value).collect()
+    };
+    assert_eq!(
+        values(16),
+        vec![None, Some(123_456_789.0), Some(-9_876_543.5), None, None]
+    );
+    assert_eq!(values(9), vec![None, Some(0.0), Some(-0.5), None, None]);
+
+    let encoded = obs.to_rinex_string().expect("serialize the example");
+    let reparsed = RinexObs::parse(&encoded).expect("its own output must read back");
+    assert_eq!(reparsed.epochs(), obs.epochs());
+}
+
+#[test]
 fn a_galileo_band_five_code_keeps_its_band() {
     // Galileo's `C5` and `P2` both canonicalise to `C5X`, so an inverse that
     // takes whichever it meets first can write `P2` for a band 5 pseudorange.
@@ -3289,7 +3525,7 @@ fn accepts_utc_leap_second_epoch_fields() {
     let (t0, scale) = obs.header.time_of_first_obs.expect("time of first obs");
     assert_eq!(scale, TimeScale::Utc);
     assert_eq!(t0.second, 60.0);
-    assert_eq!(obs.epochs()[0].epoch.second, 60.0);
+    assert_eq!(obs.epochs()[0].epoch.map(|time| time.second), Some(60.0));
 }
 
 #[test]
@@ -3304,7 +3540,7 @@ fn accepts_glonass_utc_leap_second_epoch_fields() {
     let (t0, scale) = obs.header.time_of_first_obs.expect("time of first obs");
     assert_eq!(scale, TimeScale::Utc);
     assert_eq!(t0.second, 60.0);
-    assert_eq!(obs.epochs()[0].epoch.second, 60.0);
+    assert_eq!(obs.epochs()[0].epoch.map(|time| time.second), Some(60.0));
 }
 
 #[test]
@@ -4204,7 +4440,7 @@ fn mixed_product(version: f64, lists: &[SmallList]) -> RinexObs {
     epoch.declared_record_count = epoch.sats.len();
     // A second epoch, its values distinct from the first's.
     let mut later = product.epochs[0].clone();
-    later.epoch.minute += 1;
+    later.epoch.as_mut().expect("a timed epoch").minute += 1;
     for values in later.sats.values_mut() {
         for value in values.iter_mut() {
             value.value = value.value.map(|held| held + 100_000.0);

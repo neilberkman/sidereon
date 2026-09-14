@@ -515,8 +515,9 @@ fn select_rtcm_signal<'a>(
 /// Assemble every non-event RINEX observation epoch with at least one selected
 /// pseudorange into SPP [`SolveInputs`].
 ///
-/// The function preserves observation-file epoch order, skips RINEX event
-/// epochs (`flag > 1`), selects one single-frequency pseudorange per satellite
+/// The function preserves observation-file epoch order, skips RINEX event and
+/// cycle slip epochs (`flag > 1`) and any epoch without an epoch time, selects
+/// one single-frequency pseudorange per satellite
 /// under [`RinexSppOptions::signal_policy`], derives receive time from the RINEX
 /// civil epoch, seeds the receiver from `APPROX POSITION XYZ` unless
 /// `initial_guess` is supplied, and combines GLONASS channels from the assembly
@@ -535,9 +536,11 @@ where
     let mut out = Vec::new();
 
     for (epoch_index, epoch) in obs.epochs().iter().enumerate() {
-        if epoch.flag > 1 {
+        // An event, a cycle slip record, and an epoch with no epoch time hold
+        // no measurement a receive time can be derived for.
+        let Some(epoch_time) = epoch.epoch.filter(|_| epoch.flag <= 1) else {
             continue;
-        }
+        };
         let mut selected = pseudoranges(obs, epoch, &options.signal_policy)?;
         if let Some(allowed) = &options.satellites {
             selected.retain(|(sat, _)| allowed.contains(sat));
@@ -546,7 +549,7 @@ where
             continue;
         }
 
-        let epoch_context = epoch_time_context(epoch.epoch);
+        let epoch_context = epoch_time_context(epoch_time);
         let observations = selected
             .into_iter()
             .map(|(satellite_id, pseudorange_m)| Observation {
@@ -557,7 +560,7 @@ where
 
         out.push(RinexSppEpochInputs {
             epoch_index,
-            epoch: epoch.epoch,
+            epoch: epoch_time,
             inputs: SolveInputs {
                 observations,
                 t_rx_j2000_s: epoch_context.t_rx_j2000_s,

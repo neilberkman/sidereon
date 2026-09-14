@@ -271,7 +271,8 @@ fn gps_float_epochs(sp3: &Sp3, obs: &RinexObs, approx: [f64; 3]) -> Vec<FloatEpo
     obs.epochs()
         .iter()
         .map(|epoch| {
-            let split = civil_to_julian_split(epoch.epoch);
+            let time = epoch.epoch.expect("fixture epochs carry a time");
+            let split = civil_to_julian_split(time);
             let t_rx = j2000_seconds_from_split(split.jd_whole, split.fraction)
                 .expect("valid split Julian date");
             let observations = float_observations(epoch, obs)
@@ -284,7 +285,7 @@ fn gps_float_epochs(sp3: &Sp3, obs: &RinexObs, approx: [f64; 3]) -> Vec<FloatEpo
                 epoch.epoch,
                 observations.len()
             );
-            float_epoch(epoch.epoch, observations)
+            float_epoch(time, observations)
         })
         .collect()
 }

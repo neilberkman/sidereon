@@ -150,10 +150,11 @@ fn glonass_spp_agrees_with_rtklib_demo5_l1_single() {
     let store = combined_broadcast_store();
 
     let epoch = obs.epochs().first().expect("at least one obs epoch");
-    let t_rx_j2000_s = j2000_seconds(epoch.epoch);
-    let sod = f64::from(epoch.epoch.hour) * SECONDS_PER_HOUR
-        + f64::from(epoch.epoch.minute) * SECONDS_PER_MINUTE
-        + epoch.epoch.second;
+    let time = epoch.epoch.expect("the first epoch carries a time");
+    let t_rx_j2000_s = j2000_seconds(time);
+    let sod = f64::from(time.hour) * SECONDS_PER_HOUR
+        + f64::from(time.minute) * SECONDS_PER_MINUTE
+        + time.second;
     let day_of_year = 177.0 + sod / SECONDS_PER_DAY;
 
     // Broadcast Klobuchar coefficients (GPSA/GPSB) from the nav header; the same

@@ -309,11 +309,15 @@ pub fn build_rinex_rtk_arc(
         .iter()
         .take(options.max_epochs.unwrap_or(usize::MAX))
     {
-        let Some(rover_epoch) = rover_by_epoch.get(&epoch_key(base_epoch.epoch)).copied() else {
+        let Some(base_time) = observation_epoch_time(base_epoch) else {
             skipped_epoch_count += 1;
             continue;
         };
-        let epoch_j2000_s = j2000_seconds(base_epoch.epoch);
+        let Some(rover_epoch) = rover_by_epoch.get(&epoch_key(base_time)).copied() else {
+            skipped_epoch_count += 1;
+            continue;
+        };
+        let epoch_j2000_s = j2000_seconds(base_time);
         let base_values =
             single_frequency_observations(base_obs, base_epoch, &filter, &pair_by_system)?;
         let rover_values =
@@ -404,11 +408,15 @@ pub fn build_dual_frequency_rinex_rtk_arc(
         .iter()
         .take(options.max_epochs.unwrap_or(usize::MAX))
     {
-        let Some(rover_epoch) = rover_by_epoch.get(&epoch_key(base_epoch.epoch)).copied() else {
+        let Some(base_time) = observation_epoch_time(base_epoch) else {
             skipped_epoch_count += 1;
             continue;
         };
-        let epoch_j2000_s = j2000_seconds(base_epoch.epoch);
+        let Some(rover_epoch) = rover_by_epoch.get(&epoch_key(base_time)).copied() else {
+            skipped_epoch_count += 1;
+            continue;
+        };
+        let epoch_j2000_s = j2000_seconds(base_time);
         let base_values =
             dual_frequency_observations(base_obs, base_epoch, &filter, &pair_by_system)?;
         let rover_values =
@@ -450,11 +458,11 @@ pub fn build_dual_frequency_rinex_rtk_arc(
             continue;
         }
 
-        let (jd_whole, jd_fraction) = civil_to_julian_split(base_epoch.epoch);
+        let (jd_whole, jd_fraction) = civil_to_julian_split(base_time);
         epochs.push(RtkDualFrequencyArcEpoch {
             jd_whole,
             jd_fraction,
-            epoch_sort_key: Some(epoch_sort_key(base_epoch.epoch)),
+            epoch_sort_key: Some(epoch_sort_key(base_time)),
             gap_time_s: Some(epoch_j2000_s),
             observations,
             satellite_positions_m,
@@ -642,10 +650,17 @@ fn dual_observation_filter(pairs: &[RtkRinexDualSignalPair]) -> ObservationFilte
     )
 }
 
+/// The time of an epoch holding observations: flag 0 or 1, with an epoch time.
+/// An event or cycle slip epoch can share an observation epoch's time, and
+/// holds no observation to pair.
+fn observation_epoch_time(epoch: &ObsEpoch) -> Option<ObsEpochTime> {
+    epoch.epoch.filter(|_| epoch.flag <= 1)
+}
+
 fn rover_epoch_index(obs: &RinexObs) -> BTreeMap<(i32, u8, u8, u8, u8, u64), &ObsEpoch> {
     obs.epochs()
         .iter()
-        .map(|epoch| (epoch_key(epoch.epoch), epoch))
+        .filter_map(|epoch| observation_epoch_time(epoch).map(|time| (epoch_key(time), epoch)))
         .collect()
 }
 

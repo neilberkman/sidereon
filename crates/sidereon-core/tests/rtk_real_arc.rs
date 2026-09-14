@@ -375,12 +375,13 @@ fn real_gps_l1_epochs(
     let rover_by_epoch: BTreeMap<_, _> = rover_obs
         .epochs()
         .iter()
-        .map(|epoch| (epoch_key(epoch.epoch), epoch))
+        .filter_map(|epoch| epoch.epoch.map(|time| (epoch_key(time), epoch)))
         .collect();
     let mut out = Vec::new();
 
     for base_epoch in base_obs.epochs().iter().take(count) {
-        let Some(rover_epoch) = rover_by_epoch.get(&epoch_key(base_epoch.epoch)).copied() else {
+        let base_time = base_epoch.epoch.expect("fixture epochs carry a time");
+        let Some(rover_epoch) = rover_by_epoch.get(&epoch_key(base_time)).copied() else {
             continue;
         };
         let base_values = l1_observations(base_obs, base_epoch);
@@ -398,21 +399,17 @@ fn real_gps_l1_epochs(
         let mut usable = Vec::new();
 
         for sat in common {
-            let Some(position) = position_at(sp3, &sat, base_epoch.epoch) else {
+            let Some(position) = position_at(sp3, &sat, base_time) else {
                 continue;
             };
             let Some(base_tx) =
-                transmit_position_at(sp3, &sat, base_epoch.epoch, base_values[&sat].code_m, c_m_s)
+                transmit_position_at(sp3, &sat, base_time, base_values[&sat].code_m, c_m_s)
             else {
                 continue;
             };
-            let Some(rover_tx) = transmit_position_at(
-                sp3,
-                &sat,
-                base_epoch.epoch,
-                rover_values[&sat].code_m,
-                c_m_s,
-            ) else {
+            let Some(rover_tx) =
+                transmit_position_at(sp3, &sat, base_time, rover_values[&sat].code_m, c_m_s)
+            else {
                 continue;
             };
             satellite_positions_m.insert(sat.clone(), position);
@@ -423,7 +420,7 @@ fn real_gps_l1_epochs(
 
         if usable.len() >= 4 {
             out.push(RawEpoch {
-                epoch: base_epoch.epoch,
+                epoch: base_time,
                 satellite_positions_m,
                 base_satellite_positions_m,
                 rover_satellite_positions_m,
@@ -452,12 +449,13 @@ fn real_multignss_l1_epochs(
     let rover_by_epoch: BTreeMap<_, _> = rover_obs
         .epochs()
         .iter()
-        .map(|epoch| (epoch_key(epoch.epoch), epoch))
+        .filter_map(|epoch| epoch.epoch.map(|time| (epoch_key(time), epoch)))
         .collect();
     let mut out = Vec::new();
 
     for base_epoch in base_obs.epochs().iter().take(count) {
-        let Some(rover_epoch) = rover_by_epoch.get(&epoch_key(base_epoch.epoch)).copied() else {
+        let base_time = base_epoch.epoch.expect("fixture epochs carry a time");
+        let Some(rover_epoch) = rover_by_epoch.get(&epoch_key(base_time)).copied() else {
             continue;
         };
         let base_values = multignss_l1_observations(base_obs, base_epoch, systems);
@@ -475,21 +473,17 @@ fn real_multignss_l1_epochs(
         let mut usable = Vec::new();
 
         for sat in common {
-            let Some(position) = position_at(sp3, &sat, base_epoch.epoch) else {
+            let Some(position) = position_at(sp3, &sat, base_time) else {
                 continue;
             };
             let Some(base_tx) =
-                transmit_position_at(sp3, &sat, base_epoch.epoch, base_values[&sat].code_m, C_M_S)
+                transmit_position_at(sp3, &sat, base_time, base_values[&sat].code_m, C_M_S)
             else {
                 continue;
             };
-            let Some(rover_tx) = transmit_position_at(
-                sp3,
-                &sat,
-                base_epoch.epoch,
-                rover_values[&sat].code_m,
-                C_M_S,
-            ) else {
+            let Some(rover_tx) =
+                transmit_position_at(sp3, &sat, base_time, rover_values[&sat].code_m, C_M_S)
+            else {
                 continue;
             };
             satellite_positions_m.insert(sat.clone(), position);
@@ -500,7 +494,7 @@ fn real_multignss_l1_epochs(
 
         if usable.len() >= 4 {
             out.push(RawEpoch {
-                epoch: base_epoch.epoch,
+                epoch: base_time,
                 satellite_positions_m,
                 base_satellite_positions_m,
                 rover_satellite_positions_m,
@@ -528,12 +522,13 @@ fn real_gps_l1_l2_epochs(
     let rover_by_epoch: BTreeMap<_, _> = rover_obs
         .epochs()
         .iter()
-        .map(|epoch| (epoch_key(epoch.epoch), epoch))
+        .filter_map(|epoch| epoch.epoch.map(|time| (epoch_key(time), epoch)))
         .collect();
     let mut out = Vec::new();
 
     for base_epoch in base_obs.epochs().iter().take(count) {
-        let Some(rover_epoch) = rover_by_epoch.get(&epoch_key(base_epoch.epoch)).copied() else {
+        let base_time = base_epoch.epoch.expect("fixture epochs carry a time");
+        let Some(rover_epoch) = rover_by_epoch.get(&epoch_key(base_time)).copied() else {
             continue;
         };
         let base_values = l1_l2_observations(base_obs, base_epoch);
@@ -551,16 +546,16 @@ fn real_gps_l1_l2_epochs(
         let mut usable = Vec::new();
 
         for sat in common {
-            let Some(position) = position_at(sp3, &sat, base_epoch.epoch) else {
+            let Some(position) = position_at(sp3, &sat, base_time) else {
                 continue;
             };
             let Some(base_tx) =
-                transmit_position_at(sp3, &sat, base_epoch.epoch, base_values[&sat].p1_m, C_M_S)
+                transmit_position_at(sp3, &sat, base_time, base_values[&sat].p1_m, C_M_S)
             else {
                 continue;
             };
             let Some(rover_tx) =
-                transmit_position_at(sp3, &sat, base_epoch.epoch, rover_values[&sat].p1_m, C_M_S)
+                transmit_position_at(sp3, &sat, base_time, rover_values[&sat].p1_m, C_M_S)
             else {
                 continue;
             };
@@ -572,7 +567,7 @@ fn real_gps_l1_l2_epochs(
 
         if usable.len() >= 4 {
             out.push(RawDualEpoch {
-                epoch: base_epoch.epoch,
+                epoch: base_time,
                 satellite_positions_m,
                 base_satellite_positions_m,
                 rover_satellite_positions_m,

@@ -97,12 +97,13 @@ fn first_epoch_inputs() -> SolveInputs {
     let obs = RinexObs::parse(&obs_text).expect("parse ESBC observation file");
     let epoch = obs.epochs().first().expect("at least one obs epoch");
 
-    let split = civil_to_julian_split(epoch.epoch);
+    let time = epoch.epoch.expect("the first epoch carries a time");
+    let split = civil_to_julian_split(time);
     let t_rx_j2000_s =
         j2000_seconds_from_split(split.jd_whole, split.fraction).expect("valid split");
-    let sod = f64::from(epoch.epoch.hour) * SECONDS_PER_HOUR
-        + f64::from(epoch.epoch.minute) * SECONDS_PER_MINUTE
-        + epoch.epoch.second;
+    let sod = f64::from(time.hour) * SECONDS_PER_HOUR
+        + f64::from(time.minute) * SECONDS_PER_MINUTE
+        + time.second;
 
     let filter = ObservationFilter::from_entries([(GnssSystem::Gps, vec!["C1C".to_string()])]);
     let values = observation_values(&obs, epoch, &filter).expect("observation values");

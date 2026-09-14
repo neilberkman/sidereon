@@ -309,8 +309,12 @@ pub struct ObsLeapSeconds {
 /// observation values (aligned to that system's `SYS / # / OBS TYPES` order).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ObsEpoch {
-    /// Civil epoch in the header time scale.
-    pub epoch: ObsEpochTime,
+    /// Civil epoch in the header time scale, or `None` for an event whose epoch
+    /// fields are blank.
+    ///
+    /// RINEX lets an event without a significant epoch leave its epoch fields
+    /// blank. An observation epoch and a cycle slip epoch always carry one.
+    pub epoch: Option<ObsEpochTime>,
     /// Epoch flag: 0 = OK, 1 = power failure, 6 = cycle slip records, whose
     /// slips are in [`ObsEpoch::cycle_slips`], and any other flag above 1 an
     /// event, whose own records are in [`ObsEpoch::special_records`].
@@ -2219,8 +2223,9 @@ fn truncate_header_content(content: &str) -> Cow<'_, str> {
 }
 
 /// Parse a RINEX-3 epoch line `> YYYY MM DD HH MM SS.sssssss  F NN [clock]`,
-/// returning the civil time, event flag, and satellite count.
-type ParsedEpochLine = (ObsEpochTime, u8, usize, Option<f64>, Option<u32>);
+/// returning the civil time, event flag, and satellite count. The time is
+/// `None` for an event whose epoch fields are blank.
+type ParsedEpochLine = (Option<ObsEpochTime>, u8, usize, Option<f64>, Option<u32>);
 
 fn parse_epoch_line(
     line: &str,
@@ -2245,6 +2250,18 @@ fn parse_epoch_line(
         .strip_prefix('>')
         .ok_or_else(|| Error::Parse(format!("RINEX OBS epoch line lacks '>': {line:?}")))?;
     let tokens = picoseconds_after_the_clock(body.split_whitespace().collect());
+    // An event without a significant epoch leaves the six epoch fields blank,
+    // so only its flag, its count and an optional clock offset remain; a line
+    // with an epoch has at least eight fields.
+    if (2..=3).contains(&tokens.len()) {
+        let flag = strict_int_token::<u8>(tokens[0], "epoch.flag", line)?;
+        let count = parse_epoch_record_count(tokens[1], line)?;
+        let clock = tokens
+            .get(2)
+            .map(|token| epoch_clock_offset(token, line))
+            .transpose()?;
+        return blank_epoch_line(flag, line).map(|()| (None, flag, count, clock, None));
+    }
     match interpret_epoch_tokens(&tokens, line, second_policy) {
         Ok((parsed, _)) => Ok(parsed),
         // A line that is in neither the layout nor a shape the tokenizer can
@@ -2436,26 +2453,32 @@ fn interpret_epoch_tokens(
     // would silently drop anything inside a field that contains a space, which a
     // column read can legitimately hand over.
     let time: [&str; EPOCH_TIME_TOKENS] = core::array::from_fn(|index| tokens[index]);
-    let epoch = parse_epoch_time_fields(
-        time,
-        line,
-        [
-            "epoch.year",
-            "epoch.month",
-            "epoch.day",
-            "epoch.hour",
-            "epoch.minute",
+    // A column read hands over an event's blank epoch fields as six empty ones.
+    let epoch = if time.iter().all(|field| field.is_empty()) {
+        None
+    } else {
+        let epoch = parse_epoch_time_fields(
+            time,
+            line,
+            [
+                "epoch.year",
+                "epoch.month",
+                "epoch.day",
+                "epoch.hour",
+                "epoch.minute",
+                "epoch.second",
+            ],
+            second_policy,
+        )?;
+        exact_in_field(
+            epoch.second,
+            EPOCH_SECOND_WIDTH,
+            EPOCH_SECOND_DECIMALS,
             "epoch.second",
-        ],
-        second_policy,
-    )?;
-    exact_in_field(
-        epoch.second,
-        EPOCH_SECOND_WIDTH,
-        EPOCH_SECOND_DECIMALS,
-        "epoch.second",
-        line,
-    )?;
+            line,
+        )?;
+        Some(epoch)
+    };
 
     let mut index = EPOCH_TIME_TOKENS;
     let epoch_picoseconds = if tokens
@@ -2473,18 +2496,18 @@ fn interpret_epoch_tokens(
     index += 1;
     let numsat = parse_epoch_record_count(tokens[index], line)?;
     index += 1;
+    if epoch.is_none() {
+        blank_epoch_line(flag, line)?;
+        // Picoseconds extend the epoch's second, and a blank epoch has none.
+        if epoch_picoseconds.is_some() {
+            return Err(Error::Parse(format!(
+                "RINEX OBS epoch record carries picoseconds with blank epoch fields in {line:?}"
+            )));
+        }
+    }
     let rcv_clock_offset_s = tokens
         .get(index)
-        .map(|token| {
-            let offset = strict_f64_token(token, "epoch.rcv_clock_offset_s", line)?;
-            exact_in_field(
-                offset,
-                CLOCK_OFFSET_WIDTH,
-                CLOCK_OFFSET_DECIMALS,
-                "epoch.rcv_clock_offset_s",
-                line,
-            )
-        })
+        .map(|token| epoch_clock_offset(token, line))
         .transpose()?;
     let consumed = index + usize::from(rcv_clock_offset_s.is_some());
     Ok((
@@ -2493,7 +2516,32 @@ fn interpret_epoch_tokens(
     ))
 }
 
-type ParsedEpochLineV2 = (ObsEpochTime, u8, usize, Option<f64>);
+/// Read an epoch record's receiver clock offset, held to its `F15.12` field.
+fn epoch_clock_offset(token: &str, line: &str) -> Result<f64> {
+    let offset = strict_f64_token(token, "epoch.rcv_clock_offset_s", line)?;
+    exact_in_field(
+        offset,
+        CLOCK_OFFSET_WIDTH,
+        CLOCK_OFFSET_DECIMALS,
+        "epoch.rcv_clock_offset_s",
+        line,
+    )
+}
+
+/// Refuse blank epoch fields on a record that is not an event. RINEX lets an
+/// event without a significant epoch leave them blank; observation and cycle
+/// slip records are tagged with the time they were taken at.
+fn blank_epoch_line(flag: u8, line: &str) -> Result<()> {
+    if is_event_flag(flag) {
+        return Ok(());
+    }
+    Err(Error::Parse(format!(
+        "RINEX OBS epoch record with flag {flag} leaves its epoch fields blank, which only an \
+         event may, in {line:?}"
+    )))
+}
+
+type ParsedEpochLineV2 = (Option<ObsEpochTime>, u8, usize, Option<f64>);
 
 fn parse_epoch_line_v2(
     line: &str,
@@ -2511,7 +2559,29 @@ fn parse_epoch_line_v2(
             return Ok(parsed);
         }
     }
+    // An event without a significant epoch leaves the six epoch fields blank,
+    // and names no satellites, so its flag and count are all the window holds.
+    // A count of 100 or more fills its `I3` field and abuts the flag, so the
+    // two are read from their columns when the epoch columns are blank.
+    if field(head, 0, V2_EPOCH_HEAD_COLUMNS[6].0).trim().is_empty() {
+        let (flag_start, flag_end) = V2_EPOCH_HEAD_COLUMNS[6];
+        let (count_start, count_end) = V2_EPOCH_HEAD_COLUMNS[7];
+        let flag_field = field(head, flag_start, flag_end).trim();
+        let count_field = field(head, count_start, count_end).trim();
+        if !flag_field.is_empty() && !count_field.is_empty() {
+            let flag = strict_int_token::<u8>(flag_field, "epoch.flag", line)?;
+            let numsat = parse_epoch_record_count(count_field, line)?;
+            blank_epoch_line(flag, line)?;
+            return Ok((None, flag, numsat, rinex2_epoch_clock_offset(line)?));
+        }
+    }
     let whitespace: Vec<&str> = head.split_whitespace().collect();
+    if whitespace.len() == 2 {
+        let flag = strict_int_token::<u8>(whitespace[0], "epoch.flag", line)?;
+        let numsat = parse_epoch_record_count(whitespace[1], line)?;
+        blank_epoch_line(flag, line)?;
+        return Ok((None, flag, numsat, rinex2_epoch_clock_offset(line)?));
+    }
     match interpret_epoch_tokens_v2(&whitespace, line, second_policy) {
         Ok(parsed) => Ok(parsed),
         // The repaired head has to be exactly the eight fields the record is,
@@ -2566,32 +2636,29 @@ fn interpret_epoch_tokens_v2(
     )?;
     let flag = strict_int_token::<u8>(tokens[6], "epoch.flag", line)?;
     let numsat = parse_epoch_record_count(tokens[7], line)?;
-    let clock = field(line, 68, line.len()).trim();
-    let rcv_clock_offset_s = if clock.is_empty() {
-        None
-    } else {
-        let offset = strict_f64_token(clock, "epoch.rcv_clock_offset_s", line)?;
-        Some(exact_in_field(
-            offset,
-            CLOCK_OFFSET_WIDTH,
-            CLOCK_OFFSET_DECIMALS,
-            "epoch.rcv_clock_offset_s",
-            line,
-        )?)
-    };
     Ok((
-        ObsEpochTime {
+        Some(ObsEpochTime {
             year,
             month: civil.month as u8,
             day: civil.day as u8,
             hour: civil.hour as u8,
             minute: civil.minute as u8,
             second: civil.second,
-        },
+        }),
         flag,
         numsat,
-        rcv_clock_offset_s,
+        rinex2_epoch_clock_offset(line)?,
     ))
+}
+
+/// A version 2 epoch record's receiver clock offset, from column 69, or `None`
+/// when those columns are blank.
+fn rinex2_epoch_clock_offset(line: &str) -> Result<Option<f64>> {
+    let clock = field(line, 68, line.len()).trim();
+    if clock.is_empty() {
+        return Ok(None);
+    }
+    epoch_clock_offset(clock, line).map(Some)
 }
 
 fn expand_rinex2_year(year: i32) -> i32 {

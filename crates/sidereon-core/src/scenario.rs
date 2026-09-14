@@ -1172,7 +1172,9 @@ impl SyntheticObservationSet {
                 );
             }
             epochs.push(ObsEpoch {
-                epoch: obs_epoch_time(self.receiver_truth[epoch_index].t_rx_j2000_s),
+                epoch: Some(obs_epoch_time(
+                    self.receiver_truth[epoch_index].t_rx_j2000_s,
+                )),
                 flag: 0,
                 rcv_clock_offset_s: None,
                 epoch_picoseconds: None,

@@ -6,6 +6,23 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** `ObsEpoch::epoch` is `Option<ObsEpochTime>`, `None` for an
+  event whose epoch fields are blank. RINEX 2.11 and 3.05 let an event without
+  a significant epoch leave them blank, and both specifications' example files
+  do; the reader refused every such record, so it could not read those files.
+  A version 3 record is read in its columns or loosely, as `>`, the flag, the
+  count and an optional clock offset, and a version 2 record as the flag and
+  count after 28 blank columns, read from their columns so a count of 100 to
+  999, which abuts the flag, is read too. Blank epoch fields on an observation or cycle
+  slip record, or with picoseconds, are refused. The writer writes a blank
+  event's epoch fields blank, and refuses an observation or cycle slip epoch
+  with no time with the new `RinexObsWriteError::EpochTimeMissing`. Positioning,
+  observation QC and repair skip an observation epoch with no time, as they
+  have no time to place it at.
+- The RINEX RTK arc builders index rover epochs by time over observation
+  epochs only. Every rover epoch was indexed, so an event or cycle slip epoch
+  sharing an observation epoch's time replaced that epoch in the index, and
+  the base epoch it matched was skipped for want of rover observations.
 - **Breaking.** `ObsEpoch` gains `cycle_slips`, the cycle slips a flag 6 epoch
   reports, per satellite and index-aligned to `ObsHeader::obs_codes` as `sats`
   is. RINEX writes them in the observation record layout, with the slip in

@@ -1242,12 +1242,23 @@ fn obs_span(obs: &ObservationFile) -> Option<String> {
         .header()
         .time_of_first_obs
         .map(|(epoch, _)| format_epoch(epoch))
-        .or_else(|| obs.epochs().first().map(|epoch| format_epoch(epoch.epoch)))?;
+        .or_else(|| {
+            obs.epochs()
+                .iter()
+                .find_map(|epoch| epoch.epoch)
+                .map(format_epoch)
+        })?;
     let last = obs
         .header()
         .time_of_last_obs
         .map(|(epoch, _)| format_epoch(epoch))
-        .or_else(|| obs.epochs().last().map(|epoch| format_epoch(epoch.epoch)))?;
+        .or_else(|| {
+            obs.epochs()
+                .iter()
+                .rev()
+                .find_map(|epoch| epoch.epoch)
+                .map(format_epoch)
+        })?;
     Some(format!("{first} to {last}"))
 }
 

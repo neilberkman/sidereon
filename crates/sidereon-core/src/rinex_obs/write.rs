@@ -147,6 +147,16 @@ pub enum RinexObsWriteError {
         /// The flag.
         flag: u8,
     },
+    /// An observation or cycle slip epoch with no epoch time. RINEX lets an
+    /// event without a significant epoch leave its epoch fields blank; the
+    /// records of every other epoch are tagged with the time they were taken
+    /// at, and a reader refuses the line without one.
+    EpochTimeMissing {
+        /// Zero-based epoch index.
+        epoch_index: usize,
+        /// The flag.
+        flag: u8,
+    },
     /// Epoch picoseconds in a product below version 4.02, which added them as
     /// five digits after the receiver clock offset. Earlier epoch records have
     /// no field for them. A downgrade to version 2 removes them.
@@ -227,6 +237,11 @@ impl core::fmt::Display for RinexObsWriteError {
             Self::EpochFlagTooWide { epoch_index, flag } => write!(
                 f,
                 "RINEX OBS epoch {epoch_index} flag {flag} does not fit the one-digit flag field"
+            ),
+            Self::EpochTimeMissing { epoch_index, flag } => write!(
+                f,
+                "RINEX OBS epoch {epoch_index} with flag {flag} has no epoch time, which only an \
+                 event may leave blank"
             ),
             Self::EpochPicosecondsNotInVersion {
                 epoch_index,
@@ -399,6 +414,17 @@ impl RinexObs {
             .find(|(_, epoch)| epoch.flag > 9)
         {
             return Err(RinexObsWriteError::EpochFlagTooWide {
+                epoch_index,
+                flag: epoch.flag,
+            });
+        }
+        if let Some((epoch_index, epoch)) = self
+            .epochs
+            .iter()
+            .enumerate()
+            .find(|(_, epoch)| epoch.epoch.is_none() && !is_event_flag(epoch.flag))
+        {
+            return Err(RinexObsWriteError::EpochTimeMissing {
                 epoch_index,
                 flag: epoch.flag,
             });
@@ -996,7 +1022,21 @@ impl RinexObs {
     /// Write one version 2 epoch: the record, its satellite list continued
     /// twelve to a line, then each satellite's observations five to a line.
     fn write_epoch_v2(&self, out: &mut String, epoch: &ObsEpoch, width: usize) {
-        let t = epoch.epoch;
+        // An event without a significant epoch leaves the epoch fields, the
+        // first 28 columns, blank.
+        let head = match epoch.epoch {
+            Some(t) => format!(
+                " {:02} {:2} {:2} {:2} {:2}{:11.7}  {}",
+                t.year.rem_euclid(100),
+                t.month,
+                t.day,
+                t.hour,
+                t.minute,
+                t.second,
+                epoch.flag
+            ),
+            None => format!("{:28}{}", "", epoch.flag),
+        };
         // An event names no satellites. Its own records follow the epoch line,
         // and its declared count is how many of them there are.
         let event = is_event_flag(epoch.flag);
@@ -1022,17 +1062,7 @@ impl RinexObs {
         };
         let _ = writeln!(
             out,
-            "{}{:>3}{tail}",
-            format_args!(
-                " {:02} {:2} {:2} {:2} {:2}{:11.7}  {}",
-                t.year.rem_euclid(100),
-                t.month,
-                t.day,
-                t.hour,
-                t.minute,
-                t.second,
-                epoch.flag
-            ),
+            "{head}{:>3}{tail}",
             if event {
                 epoch.special_records.len()
             } else {
@@ -1055,7 +1085,15 @@ impl RinexObs {
     }
 
     fn write_epoch(&self, out: &mut String, epoch: &ObsEpoch) {
-        let t = epoch.epoch;
+        // An event without a significant epoch leaves the epoch fields, the 28
+        // columns after the `>`, blank.
+        let time = match epoch.epoch {
+            Some(t) => format!(
+                " {:04} {:02} {:02} {:02} {:02}{:11.7}",
+                t.year, t.month, t.day, t.hour, t.minute, t.second
+            ),
+            None => " ".repeat(28),
+        };
         // An event declares how many of its own records follow; every other
         // epoch declares the satellites whose observations or slips follow.
         let count = declared_count(epoch);
@@ -1075,8 +1113,8 @@ impl RinexObs {
         };
         let _ = writeln!(
             out,
-            "> {:04} {:02} {:02} {:02} {:02}{:11.7}  {}{:3}{clock}{picoseconds}",
-            t.year, t.month, t.day, t.hour, t.minute, t.second, epoch.flag, count
+            ">{time}  {}{:3}{clock}{picoseconds}",
+            epoch.flag, count
         );
         if is_event_flag(epoch.flag) {
             for record in &epoch.special_records {
