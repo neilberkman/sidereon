@@ -6,6 +6,7 @@ use crate::astro::math::vec3::{
     dot3_fused_z_yx_ref as dot_three_fused, unit3_ref_unchecked as unit_vector,
 };
 
+use super::{IonexMissingNodePolicy, IonexMissingNodes, IonexNodeGap};
 use crate::constants::DEG_TO_RAD;
 pub use crate::constants::MEAN_EARTH_RADIUS_M as EARTH_RADIUS_M;
 use crate::frequencies::{self, CarrierBand};
@@ -44,6 +45,13 @@ pub enum TecGridError {
         /// Short reason returned by `validate::FieldError::reason()` for the rejected input.
         reason: &'static str,
     },
+    /// A query weights grid nodes that hold no value.
+    ///
+    /// Each [`IonexMissingNodes`] names the epoch by `map_number`, counting
+    /// from 1, and the
+    /// latitude and longitude axes by the cell's lower-index node.
+    #[error("TEC grid nodes not available: {0}")]
+    NodesNotAvailable(IonexNodeGap),
     /// A query lies outside the grid's interpolation bounds.
     #[error("{name} {value} is out of TEC grid bounds")]
     OutOfBounds {
@@ -226,29 +234,51 @@ impl TecGridEvalOptions {
     }
 }
 
+/// A regular-grid TEC value, with the nodes a renormalizing fallback
+/// interpolated around.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TecGridEvaluation<T> {
+    /// The evaluated value.
+    pub value: T,
+    /// The weighted nodes that hold no value, where
+    /// [`IonexMissingNodePolicy::Renormalize`] interpolated around them. A value
+    /// with this set is degraded.
+    pub degraded: Option<IonexNodeGap>,
+}
+
 #[derive(Clone, Debug)]
-/// [`TecGrid::new`] stores finite TECU values on strictly increasing epoch,
-/// latitude, and longitude axes in epoch-latitude-longitude order. Queries
-/// interpolate the eight corners of the surrounding cell.
+/// [`TecGrid::new`] stores TECU values on strictly increasing epoch, latitude,
+/// and longitude axes in epoch-latitude-longitude order, `None` marking a node
+/// without a value. Queries interpolate the eight corners of the surrounding
+/// cell: bilinearly within each of the two bracketing epochs, then linearly in
+/// time.
+///
+/// A corner is weighted when its weight is nonzero. When a weighted corner holds
+/// no value, the strict query functions return
+/// [`TecGridError::NodesNotAvailable`], and the `_with_policy` functions under
+/// [`IonexMissingNodePolicy::Renormalize`] interpolate from the weighted corners
+/// that hold values, the bilinear weights of each epoch and then the temporal
+/// weights renormalized to sum to one, and mark the result degraded. With no
+/// weighted corner holding a value there is no value under either policy.
 pub struct TecGrid {
     epochs_ns: Vec<f64>,
     latitudes_deg: Vec<f64>,
     longitudes_deg: Vec<f64>,
-    values: Vec<f64>,
+    values: Vec<Option<f64>>,
 }
 
 impl TecGrid {
     /// Builds a grid from epoch, latitude, and longitude axes and flat cell values.
     ///
     /// Each axis must contain at least two strictly increasing entries. The
-    /// value count must equal the checked product of the axis lengths, and all
-    /// values must be finite; otherwise the returned error describes the failed
-    /// invariant.
+    /// value count must equal the checked product of the axis lengths, and every
+    /// value present must be finite; otherwise the returned error describes the
+    /// failed invariant. `None` marks a node without a value.
     pub fn new(
         epochs_ns: Vec<f64>,
         latitudes_deg: Vec<f64>,
         longitudes_deg: Vec<f64>,
-        values: Vec<f64>,
+        values: Vec<Option<f64>>,
     ) -> Result<Self, TecGridError> {
         if epochs_ns.len() < 2 || latitudes_deg.len() < 2 || longitudes_deg.len() < 2 {
             return Err(TecGridError::AxesTooShort);
@@ -270,7 +300,9 @@ impl TecGrid {
                 expected,
             });
         }
-        validate::finite_slice(&values, "TEC grid values").map_err(field_error_string)?;
+        for value in values.iter().flatten() {
+            validate::finite(*value, "TEC grid values").map_err(field_error_string)?;
+        }
         Ok(Self {
             epochs_ns,
             latitudes_deg,
@@ -285,26 +317,68 @@ impl TecGrid {
     /// The epoch's Unix-nanosecond timestamp is converted to the grid's
     /// floating-point epoch coordinate, and the effective epoch, latitude, and
     /// longitude query values must be finite and within their respective axes.
+    /// A weighted node without a value returns
+    /// [`TecGridError::NodesNotAvailable`].
     pub fn vtec_at_pierce_point(
         &self,
         epoch: TecGridEpoch,
         longitude_deg: f64,
         latitude_deg: f64,
     ) -> Result<f64, TecGridError> {
+        self.vtec_at_pierce_point_with_policy(
+            epoch,
+            longitude_deg,
+            latitude_deg,
+            IonexMissingNodePolicy::Strict,
+        )
+        .map(|evaluation| evaluation.value)
+    }
+
+    /// [`TecGrid::vtec_at_pierce_point`] with an explicit policy for weighted
+    /// nodes that hold no value.
+    pub fn vtec_at_pierce_point_with_policy(
+        &self,
+        epoch: TecGridEpoch,
+        longitude_deg: f64,
+        latitude_deg: f64,
+        policy: IonexMissingNodePolicy,
+    ) -> Result<TecGridEvaluation<f64>, TecGridError> {
         let latitude_deg = if latitude_deg.abs() > 87.5 {
             clamp(latitude_deg, -87.5, 87.5)
         } else {
             latitude_deg
         };
-        self.interpolate_vtec(epoch.unix_nanos as f64, latitude_deg, longitude_deg)
+        self.interpolate_vtec_with_policy(
+            epoch.unix_nanos as f64,
+            latitude_deg,
+            longitude_deg,
+            policy,
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn interpolate_vtec(
         &self,
         epoch_ns: f64,
         latitude_deg: f64,
         longitude_deg: f64,
     ) -> Result<f64, TecGridError> {
+        self.interpolate_vtec_with_policy(
+            epoch_ns,
+            latitude_deg,
+            longitude_deg,
+            IonexMissingNodePolicy::Strict,
+        )
+        .map(|evaluation| evaluation.value)
+    }
+
+    pub(crate) fn interpolate_vtec_with_policy(
+        &self,
+        epoch_ns: f64,
+        latitude_deg: f64,
+        longitude_deg: f64,
+        policy: IonexMissingNodePolicy,
+    ) -> Result<TecGridEvaluation<f64>, TecGridError> {
         let epoch_ns = finite_query_value(epoch_ns, "timestamp")?;
         let latitude_deg = finite_query_value(latitude_deg, "latitude")?;
         let longitude_deg = finite_query_value(longitude_deg, "longitude")?;
@@ -320,6 +394,53 @@ impl TecGrid {
             1.0 - norm_distances[2],
         ];
         let shift_indices = [indices[0] + 1, indices[1] + 1, indices[2] + 1];
+        let weight_of = |axis: usize, upper: usize| {
+            if upper == 0 {
+                shift_norm_distances[axis]
+            } else {
+                norm_distances[axis]
+            }
+        };
+
+        // The weighted corners of each bracketing epoch that hold no value.
+        let mut missing = [[false; 4]; 2];
+        for a in 0..2 {
+            for b in 0..2 {
+                for c in 0..2 {
+                    let weight = weight_of(0, a) * weight_of(1, b) * weight_of(2, c);
+                    let node = self.value_at(indices[0] + a, indices[1] + b, indices[2] + c);
+                    missing[a][2 * b + c] = weight != 0.0 && node.is_none();
+                }
+            }
+        }
+        let gap_on = |a: usize| {
+            missing[a].contains(&true).then_some(IonexMissingNodes {
+                // The epoch axis is indexed from 0; a map is named from 1.
+                map_number: indices[0] + a + 1,
+                lat_index: indices[1],
+                lon_index: indices[2],
+                // A regular grid names both edges of its longitude range, so it
+                // has no cell closing the circle and no column that wraps.
+                lon_index_next: indices[2] + 1,
+                missing: missing[a],
+            })
+        };
+        let gap = IonexNodeGap {
+            earlier: gap_on(0),
+            later: gap_on(1),
+        };
+        if gap.earlier.is_some() || gap.later.is_some() {
+            return match policy {
+                IonexMissingNodePolicy::Strict => Err(TecGridError::NodesNotAvailable(gap)),
+                IonexMissingNodePolicy::Renormalize => self
+                    .renormalized_vtec(indices, &weight_of)
+                    .map(|value| TecGridEvaluation {
+                        value,
+                        degraded: Some(gap),
+                    })
+                    .ok_or(TecGridError::NodesNotAvailable(gap)),
+            };
+        }
 
         let mut value = 0.0;
         for a in 0..2 {
@@ -348,15 +469,56 @@ impl TecGrid {
                     weight *= w0;
                     weight *= w1;
                     weight *= w2;
-                    let term = self.value_at(i0, i1, i2) * weight;
+                    // Every corner with weight holds a value here; a corner
+                    // without weight contributes nothing whatever it holds.
+                    let term = self.value_at(i0, i1, i2).unwrap_or(0.0) * weight;
                     value += term;
                 }
             }
         }
-        Ok(value)
+        Ok(TecGridEvaluation {
+            value,
+            degraded: None,
+        })
     }
 
-    fn value_at(&self, epoch_i: usize, lat_i: usize, lon_i: usize) -> f64 {
+    /// Interpolate from the weighted corners that hold values: within each
+    /// weighted epoch, bilinear weights renormalized over its corners with values,
+    /// then temporal weights renormalized over the epochs with a value. `None`
+    /// when no weighted corner holds a value.
+    fn renormalized_vtec(
+        &self,
+        indices: [usize; 3],
+        weight_of: &impl Fn(usize, usize) -> f64,
+    ) -> Option<f64> {
+        let mut time_weight = 0.0;
+        let mut time_sum = 0.0;
+        for a in 0..2 {
+            let epoch_weight = weight_of(0, a);
+            if epoch_weight == 0.0 {
+                continue;
+            }
+            let mut cell_weight = 0.0;
+            let mut cell_sum = 0.0;
+            for b in 0..2 {
+                for c in 0..2 {
+                    let weight = weight_of(1, b) * weight_of(2, c);
+                    let node = self.value_at(indices[0] + a, indices[1] + b, indices[2] + c);
+                    if let (true, Some(value)) = (weight != 0.0, node) {
+                        cell_weight += weight;
+                        cell_sum += weight * value;
+                    }
+                }
+            }
+            if cell_weight != 0.0 {
+                time_weight += epoch_weight;
+                time_sum += epoch_weight * (cell_sum / cell_weight);
+            }
+        }
+        (time_weight != 0.0).then(|| time_sum / time_weight)
+    }
+
+    fn value_at(&self, epoch_i: usize, lat_i: usize, lon_i: usize) -> Option<f64> {
         let n_lat = self.latitudes_deg.len();
         let n_lon = self.longitudes_deg.len();
         self.values[(epoch_i * n_lat + lat_i) * n_lon + lon_i]
@@ -380,13 +542,40 @@ pub fn iono_delay_xyz<F>(
 where
     F: Fn(&[f64; 3]) -> [f64; 3],
 {
+    iono_delay_xyz_with_policy(
+        grid,
+        options,
+        sat_xyz,
+        receiver_xyz,
+        ecef_to_lla,
+        IonexMissingNodePolicy::Strict,
+    )
+    .map(|evaluation| evaluation.value)
+}
+
+/// [`iono_delay_xyz`] with an explicit policy for weighted grid nodes that hold
+/// no value.
+pub fn iono_delay_xyz_with_policy<F>(
+    grid: &TecGrid,
+    options: TecGridEvalOptions,
+    sat_xyz: &[f64; 3],
+    receiver_xyz: &[f64; 3],
+    ecef_to_lla: F,
+    policy: IonexMissingNodePolicy,
+) -> Result<TecGridEvaluation<f64>, TecGridError>
+where
+    F: Fn(&[f64; 3]) -> [f64; 3],
+{
     validate_frequency(options.frequency_hz)?;
 
-    let (_vtec, stec) = tec_xyz(grid, options, sat_xyz, receiver_xyz, ecef_to_lla)?;
+    let tec = tec_xyz_with_policy(grid, options, sat_xyz, receiver_xyz, ecef_to_lla, policy)?;
+    let (_vtec, stec) = tec.value;
     let delay_m = IONOSPHERE_CONSTANT * stec / (options.frequency_hz * options.frequency_hz);
-    validate::finite(delay_m, "ionosphere_delay_m")
-        .map_err(field_error_string)
-        .map(|_| delay_m)
+    validate::finite(delay_m, "ionosphere_delay_m").map_err(field_error_string)?;
+    Ok(TecGridEvaluation {
+        value: delay_m,
+        degraded: tec.degraded,
+    })
 }
 
 /// Computes vertical and slant TEC for an ECEF satellite and receiver pair.
@@ -404,6 +593,30 @@ pub fn tec_xyz<F>(
     receiver_xyz: &[f64; 3],
     ecef_to_lla: F,
 ) -> Result<(f64, f64), TecGridError>
+where
+    F: Fn(&[f64; 3]) -> [f64; 3],
+{
+    tec_xyz_with_policy(
+        grid,
+        options,
+        sat_xyz,
+        receiver_xyz,
+        ecef_to_lla,
+        IonexMissingNodePolicy::Strict,
+    )
+    .map(|evaluation| evaluation.value)
+}
+
+/// [`tec_xyz`] with an explicit policy for weighted grid nodes that hold no
+/// value.
+pub fn tec_xyz_with_policy<F>(
+    grid: &TecGrid,
+    options: TecGridEvalOptions,
+    sat_xyz: &[f64; 3],
+    receiver_xyz: &[f64; 3],
+    ecef_to_lla: F,
+    policy: IonexMissingNodePolicy,
+) -> Result<TecGridEvaluation<(f64, f64)>, TecGridError>
 where
     F: Fn(&[f64; 3]) -> [f64; 3],
 {
@@ -426,7 +639,13 @@ where
         pp_lonlatalt
     };
 
-    let vtec = grid.vtec_at_pierce_point(options.epoch, pp_lonlatalt[0], pp_lonlatalt[1])?;
+    let evaluation = grid.vtec_at_pierce_point_with_policy(
+        options.epoch,
+        pp_lonlatalt[0],
+        pp_lonlatalt[1],
+        policy,
+    )?;
+    let vtec = evaluation.value;
     validate::finite(vtec, "vtec").map_err(field_error_string)?;
     let obliquity_arg =
         options.shell_geometry.earth_radius_m * libm::cos(elevation_rad) / shell_radius_m;
@@ -436,7 +655,10 @@ where
         .map_err(field_error_string)?;
     let stec = vtec / mapping_denominator.sqrt();
     validate::finite(stec, "stec").map_err(field_error_string)?;
-    Ok((vtec, stec))
+    Ok(TecGridEvaluation {
+        value: (vtec, stec),
+        degraded: evaluation.degraded,
+    })
 }
 
 pub fn pierce_point_with_shell_radius<F>(
@@ -564,7 +786,7 @@ mod tests {
             vec![0.0, 10.0],
             vec![0.0, 10.0],
             vec![20.0, 30.0],
-            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].map(Some).to_vec(),
         )
         .expect("small TEC grid")
     }
@@ -612,7 +834,9 @@ mod tests {
             vec![0.0, 10.0],
             vec![0.0, 10.0],
             vec![20.0, 30.0],
-            vec![1.0, f64::NAN, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            [1.0, f64::NAN, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+                .map(Some)
+                .to_vec(),
         )
         .expect_err("nonfinite TEC grid cells must be rejected");
 
@@ -630,7 +854,7 @@ mod tests {
             vec![0.0, 1.0],
             vec![-10.0, 10.0],
             vec![0.0, 20.0],
-            vec![0.0; 8],
+            vec![Some(0.0); 8],
         )
         .expect("regular TEC grid");
         let mut options = TecGridEvalOptions::l1(TecGridEpoch::new(0, 0));

@@ -15,6 +15,16 @@ All notable changes to `sidereon-core` are documented here.
   clamping follow it, and the writer writes the axis records back as they were
   read. A file with an ascending latitude axis was refused for nodes "not
   strictly descending".
+- An IONEX slant delay interpolates across the longitude seam of a grid that
+  closes the circle. IONEX 1's example 1 runs its longitudes 0 to 355 by 5,
+  covering every longitude without naming the seam twice; a query at 357.5 was
+  refused as outside the coverage under the strict policy, and held at 355 under
+  the hold policy, rather than interpolating between the node at 355 and the
+  node at 0.
+- An IONEX slant delay along a line of sight through a pole gives a value. The
+  quotient that names the pierce-point longitude divides by the cosine of its
+  latitude, which is zero at a pole, and the spherical-trig quotients can round
+  past 1, where `asin` gives NaN; each is held inside its domain now.
 - A data record inside an IONEX map holding a character outside ASCII is refused
   where it is read, naming the map, the band and the line. Such a record was
   split on whitespace instead, which can place its values at the wrong nodes
@@ -29,6 +39,86 @@ All notable changes to `sidereon-core` are documented here.
   maps: 25 with 25 RMS maps, 97 with 97. A product read from a file writes the
   count it came with; one built from samples writes the TEC map count, which is
   what those producers write.
+- **Breaking.** An IONEX slant delay maps vertical TEC to the line of sight with
+  the single-layer `1/cos(z')` at the shell height whatever the product's
+  `MAPPING FUNCTION` declares, and the new
+  `IonexSlantDelayStatus::assumed_mapping` names the case a product declaring
+  anything but `COSZ` falls in, as the new `IonexAssumedMapping`, while
+  `IonexSlantRefusal::MappingFunction` carries the declaration itself, as the
+  new `IonexMappingDeclaration`: `Declared(function)` for the record the product
+  carries, `Absent` for a product with no record. IONEX 1 gives `COSZ` as
+  `1/cos(z)`, `NONE` as "no MF used (e.g. altimetry)" and `QFAC` as "Q-factor"
+  with no formula, and says others might be introduced. The CODE, ESA, JPL and
+  UPC final GIMs for 2024 day 001 declare `NONE` and
+  `EMR0OPSFIN_20240010000_01D_01H_GIM.INX` declares `MOD`, while their
+  descriptions name the mapping function their maps were determined with, so a
+  delay on them is computed and flagged rather than refused; it was computed
+  with `1/cos(z')` before and carried no flag. The new
+  `IonexMappingPolicy::Declared` maps only with the factor the product declares
+  and refuses one whose code defines none, with the new
+  `Error::IonexSlantUnavailable` carrying `IonexSlantRefusal::MappingFunction`.
+  A product whose height maps give every node one and the same height uses the
+  shell height `HGT1` plus that height, as IONEX 1 defines a node's height. One
+  whose height maps give nodes different heights, or give a height as
+  non-available, is refused with `IonexSlantRefusal::VaryingHeights` or
+  `IonexSlantRefusal::HeightNotAvailable` under either mapping policy, since the
+  delay uses one shell height.
+- **Breaking.** `ionex_slant_delay_with_policy`, `ionex_slant_delay_results`,
+  `Ionex::slant_delays_batch_results` and
+  `ObservableIonosphereCorrection::IonexWithPolicy` take the new
+  `IonexSlantPolicy`, which holds an `IonexCoveragePolicy`, the new
+  `IonexMissingNodePolicy` and the new `IonexMappingPolicy`; an
+  `IonexCoveragePolicy` converts into it. `IonexSlantDelayStatus` is a struct:
+  `held` holds the coverage miss a hold policy held the value through,
+  `degraded` the non-available nodes a renormalizing policy interpolated around,
+  and `assumed_mapping` which case a product falls in where the single-layer
+  factor mapped it and it declares anything but `COSZ`, as the new
+  `IonexAssumedMapping`: `NoMapping`, `QFactor`, `Other` or `Absent`. That names
+  the case without the code's text, so the status stays `Copy` and a batch
+  allocates nothing per ray; the text of an `Other` code is in
+  `IonexHeader::mapping_function`, as `IonexMappingFunction::code`.
+  `IonexSlantDelayStatus::VALID` replaces `IonexSlantDelayStatus::Valid` with
+  its three fields `None`, and a status with `held: Some(error)` replaces
+  `IonexSlantDelayStatus::Held(error)`. `is_valid` is true when `held` and
+  `degraded` are both `None`, which is to say the value is the one the grid
+  gives at the request. It does not read `assumed_mapping`, which the CODE, ESA,
+  JPL, UPC and EMR final GIMs all carry: the factor applied is the single-layer
+  one either way, and a caller that will not take it on such a product reads
+  that field or uses `IonexMappingPolicy::Declared`.
+- IONEX slant-delay refusals count maps from 1 too: `IonexMissingNodes` carries
+  `map_number` in place of `map_index`, and so do
+  `IonexSlantRefusal::VaryingHeights` and
+  `IonexSlantRefusal::HeightNotAvailable`. A message named the first height map
+  "height map 0". The cell indices such a message gives stay 0-based, since a
+  map's nodes are an array a file does not number. `IonexMissingNodes` carries
+  the cell's other column as `lon_index_next`, which is `0` on the cell that
+  closes the circle rather than `lon_index + 1`: a grid running 0 to 355 by 5
+  has no column 72, and a message named a missing node there `[lat][72]`, which
+  a caller indexing the longitude axis with it could not read.
+- `Error::IonexNodesNotAvailable` carries its `IonexNodeGap` in a `Box`. The gap
+  names two cells of four nodes each and is 80 bytes, which sat inline in the
+  crate's `Error`, and so in every `Result` the library returns: `Error` is 32
+  bytes with it boxed where it was 80 without. `sidereon-scoreboard`'s error
+  wraps `Error` and had reached the 128 bytes at which `clippy::result_large_err`
+  fires; it is 120 again. The allocation falls only where a query weights a
+  non-available node, and `IonexSlantDelayStatus` holds the gap directly rather
+  than through `Error`, so it stays `Copy`.
+- `IonexMissingNodePolicy::Renormalize` gives an IONEX slant delay whose
+  interpolation weights non-available nodes a value from the weighted nodes that
+  hold values, their bilinear weights renormalized to sum to one, and from the
+  weighted maps that give a value, their temporal weights renormalized the same
+  way, and marks the value degraded. With no weighted node holding a value there
+  is still no value.
+  `IonexMissingNodePolicy::Strict`, the default, refuses.
+- **Breaking.** `TecGrid::new` takes `Option<f64>` values, `None` marking a node
+  without a value. A grid could not hold such a node, so a caller building one
+  from IONEX maps with non-available nodes had to put a number there. A query
+  that weights such a node returns the new `TecGridError::NodesNotAvailable`, and
+  the new `TecGrid::vtec_at_pierce_point_with_policy`,
+  `regular_tec_xyz_with_policy` and `regular_tec_grid_delay_xyz_with_policy` take
+  an `IonexMissingNodePolicy` and return a `TecGridEvaluation` whose `degraded`
+  field marks a renormalized value, renormalized within each bracketing epoch and
+  then in time, as for IONEX products.
 - **Breaking.** An IONEX value a file gives as `9999` is `None`. IONEX 1 says
   "Non-available TEC values are written as '9999'", and that RMS and height
   values are "formatted exactly in the same way". `Ionex::tec_maps`,

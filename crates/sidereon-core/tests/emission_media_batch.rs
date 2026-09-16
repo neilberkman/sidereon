@@ -8,7 +8,7 @@ use sidereon_core::observables::{
     ObservableIonosphereCorrection, ObservableMediaOptions, PredictOptions,
 };
 use sidereon_core::{
-    atmosphere::{Ionex, IonexCoveragePolicy},
+    atmosphere::{Ionex, IonexCoveragePolicy, IonexSlantPolicy},
     geodetic_to_itrf, GnssSatelliteId, GnssSystem, Wgs84Geodetic,
 };
 
@@ -36,7 +36,7 @@ fn media_options<'a>(ionex: &'a Ionex) -> ObservableMediaOptions<'a> {
     options.troposphere = Some(Default::default());
     options.ionosphere = Some(ObservableIonosphereCorrection::IonexWithPolicy(
         ionex,
-        IonexCoveragePolicy::Hold,
+        IonexSlantPolicy::from(IonexCoveragePolicy::Hold),
     ));
     options
 }

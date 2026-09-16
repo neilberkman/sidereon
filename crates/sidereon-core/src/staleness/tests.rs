@@ -36,6 +36,7 @@ fn make_ionex(year: i64, month: i64, day: i64, base_tec: i64) -> Ionex {
     text.push_str(&ionex_record("-180.0 180.0 180.0", "LON1 / LON2 / DLON"));
     text.push_str(&ionex_record("450.0 450.0 0.0", "HGT1 / HGT2 / DHGT"));
     text.push_str(&ionex_record("6371.0", "BASE RADIUS"));
+    text.push_str(&ionex_record("COSZ", "MAPPING FUNCTION"));
     text.push_str(&ionex_record("0", "EXPONENT"));
     text.push_str(&ionex_record("", "END OF HEADER"));
     for (map_idx, hour) in [(1i64, 0i64), (2, 6)] {
@@ -103,6 +104,7 @@ fn make_ionex_days(year: i64, month: i64, day_hours: &[(i64, i64)], base_tec: i6
     text.push_str(&ionex_record("-2.0 2.0 2.0", "LON1 / LON2 / DLON"));
     text.push_str(&ionex_record("450.0 450.0 0.0", "HGT1 / HGT2 / DHGT"));
     text.push_str(&ionex_record("6371.0", "BASE RADIUS"));
+    text.push_str(&ionex_record("COSZ", "MAPPING FUNCTION"));
     text.push_str(&ionex_record("0", "EXPONENT"));
     text.push_str(&ionex_record("", "END OF HEADER"));
     for (i, (day, hour)) in day_hours.iter().enumerate() {
@@ -670,6 +672,7 @@ fn make_ionex_at(
     text.push_str(&ionex_record("-2.0 2.0 2.0", "LON1 / LON2 / DLON"));
     text.push_str(&ionex_record("450.0 450.0 0.0", "HGT1 / HGT2 / DHGT"));
     text.push_str(&ionex_record("6371.0", "BASE RADIUS"));
+    text.push_str(&ionex_record("COSZ", "MAPPING FUNCTION"));
     text.push_str(&ionex_record("0", "EXPONENT"));
     text.push_str(&ionex_record("", "END OF HEADER"));
     text.push_str(&ionex_record("1", "START OF TEC MAP"));

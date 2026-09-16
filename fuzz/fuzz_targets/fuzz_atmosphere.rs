@@ -129,7 +129,7 @@ fuzz_target!(|data: &[u8]| {
         vec![0.0, 1.0],
         vec![-10.0, 10.0],
         vec![0.0, 20.0],
-        input.grid_values.to_vec(),
+        input.grid_values.map(Some).to_vec(),
     );
     if let Ok(grid) = grid {
         let epoch = TecGridEpoch::new(input.nanos, input.doy);

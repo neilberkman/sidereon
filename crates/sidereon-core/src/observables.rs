@@ -20,7 +20,7 @@ use crate::estimation::recipe::SagnacRecipe;
 use crate::frame::Wgs84Geodetic;
 use crate::id::GnssSatelliteId;
 use crate::ionex::{
-    ionex_slant_delay, ionex_slant_delay_with_policy, ionosphere_delay, Ionex, IonexCoveragePolicy,
+    ionex_slant_delay, ionex_slant_delay_with_policy, ionosphere_delay, Ionex, IonexSlantPolicy,
     IonoModel,
 };
 use crate::sp3::Sp3;
@@ -580,8 +580,9 @@ pub enum ObservableIonosphereCorrection<'a> {
     Broadcast(IonoModel),
     /// Parsed IONEX vertical-TEC grid evaluated on the requested carrier.
     Ionex(&'a Ionex),
-    /// Parsed IONEX vertical-TEC grid evaluated with an explicit coverage policy.
-    IonexWithPolicy(&'a Ionex, IonexCoveragePolicy),
+    /// Parsed IONEX vertical-TEC grid evaluated with explicit coverage,
+    /// missing-node and mapping policies.
+    IonexWithPolicy(&'a Ionex, IonexSlantPolicy),
 }
 
 /// Optional media corrections for one predicted tracking observable.
@@ -1741,9 +1742,9 @@ fn rounded_j2000_seconds(t_rx_j2000_s: f64) -> Result<i64, ObservablesError> {
 fn map_media_error(error: Error) -> ObservablesError {
     match error {
         Error::InvalidInput(message) => map_media_invalid_input(&message),
-        Error::IonexOutOfCoverage(_) | Error::IonexNodesNotAvailable(_) => {
-            ObservablesError::Media(error)
-        }
+        Error::IonexOutOfCoverage(_)
+        | Error::IonexNodesNotAvailable(_)
+        | Error::IonexSlantUnavailable(_) => ObservablesError::Media(error),
         _ => invalid_observable_input("media", ObservablesInputErrorKind::OutOfRange),
     }
 }

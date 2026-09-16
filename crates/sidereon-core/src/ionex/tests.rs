@@ -31,9 +31,10 @@ use super::slant::{slant_delay_components, PierceLineOfSight, SlantComponents, V
 use super::{
     galileo_nequick_g_native, ionex_slant_delay_results, ionex_slant_delay_with_policy,
     ionex_slant_delays, ionosphere_delay, GalileoNequickCoeffs, GalileoNequickEval,
-    IonexCoverageError, IonexCoveragePolicy, IonexHeader, IonexMappingFunction, IonexMissingNodes,
-    IonexNodeGap, IonexSlantDelayStatus, IonexSlantRequest, IonexWarning, IonoModel,
-    TecGridSamples, TecSample, TecSamplesError,
+    IonexAssumedMapping, IonexCoverageError, IonexCoveragePolicy, IonexHeader,
+    IonexMappingDeclaration, IonexMappingFunction, IonexMappingPolicy, IonexMissingNodePolicy,
+    IonexMissingNodes, IonexNodeGap, IonexSlantDelayStatus, IonexSlantPolicy, IonexSlantRefusal,
+    IonexSlantRequest, IonexWarning, IonoModel, TecGridSamples, TecSample, TecSamplesError,
 };
 
 const REAL_IONEX_EXCERPT: &[u8] =
@@ -899,10 +900,10 @@ fn ionex_strict_rejects_epoch_outside_coverage_and_hold_marks_status() {
             request.azimuth_rad,
             request.epoch_j2000_s,
             request.frequency_hz,
-            IonexCoveragePolicy::Strict,
+            IonexCoveragePolicy::Strict.into(),
         )
         .expect("boundary epoch is covered");
-        assert_eq!(strict.status, IonexSlantDelayStatus::Valid);
+        assert_eq!(strict.status, IonexSlantDelayStatus::VALID);
         let scalar = super::ionex_slant_delay(
             &ionex,
             request.receiver,
@@ -945,12 +946,16 @@ fn ionex_strict_rejects_epoch_outside_coverage_and_hold_marks_status() {
         before.azimuth_rad,
         before.epoch_j2000_s,
         before.frequency_hz,
-        IonexCoveragePolicy::Hold,
+        IonexCoveragePolicy::Hold.into(),
     )
     .expect("hold policy returns before-coverage value");
     assert_eq!(
         held_before.status,
-        IonexSlantDelayStatus::Held(IonexCoverageError::EpochBeforeFirstMap)
+        IonexSlantDelayStatus {
+            held: Some(IonexCoverageError::EpochBeforeFirstMap),
+            degraded: None,
+            assumed_mapping: None,
+        }
     );
 
     let held_after = ionex_slant_delay_with_policy(
@@ -960,12 +965,16 @@ fn ionex_strict_rejects_epoch_outside_coverage_and_hold_marks_status() {
         after.azimuth_rad,
         after.epoch_j2000_s,
         after.frequency_hz,
-        IonexCoveragePolicy::Hold,
+        IonexCoveragePolicy::Hold.into(),
     )
     .expect("hold policy returns after-coverage value");
     assert_eq!(
         held_after.status,
-        IonexSlantDelayStatus::Held(IonexCoverageError::EpochAfterLastMap)
+        IonexSlantDelayStatus {
+            held: Some(IonexCoverageError::EpochAfterLastMap),
+            degraded: None,
+            assumed_mapping: None,
+        }
     );
 }
 
@@ -980,10 +989,10 @@ fn ionex_strict_rejects_spatial_outside_coverage_and_includes_boundaries() {
             request.azimuth_rad,
             request.epoch_j2000_s,
             request.frequency_hz,
-            IonexCoveragePolicy::Strict,
+            IonexCoveragePolicy::Strict.into(),
         )
         .expect("grid boundary is covered");
-        assert_eq!(eval.status, IonexSlantDelayStatus::Valid);
+        assert_eq!(eval.status, IonexSlantDelayStatus::VALID);
     }
 
     let north = coverage_request(1.25, 0.5, 0);
@@ -1025,12 +1034,16 @@ fn ionex_strict_rejects_spatial_outside_coverage_and_includes_boundaries() {
         east.azimuth_rad,
         east.epoch_j2000_s,
         east.frequency_hz,
-        IonexCoveragePolicy::Hold,
+        IonexCoveragePolicy::Hold.into(),
     )
     .expect("hold policy returns spatial edge value");
     assert_eq!(
         held.status,
-        IonexSlantDelayStatus::Held(IonexCoverageError::LongitudeOutOfRange)
+        IonexSlantDelayStatus {
+            held: Some(IonexCoverageError::LongitudeOutOfRange),
+            degraded: None,
+            assumed_mapping: None,
+        }
     );
 }
 
@@ -1047,11 +1060,11 @@ fn ionex_batch_results_report_coverage_per_element() {
         },
     ];
 
-    let strict = ionex_slant_delay_results(&ionex, &requests, IonexCoveragePolicy::Strict);
+    let strict = ionex_slant_delay_results(&ionex, &requests, IonexCoveragePolicy::Strict.into());
     assert_eq!(strict.len(), requests.len());
     assert_eq!(
         strict[0].as_ref().expect("first element covered").status,
-        IonexSlantDelayStatus::Valid
+        IonexSlantDelayStatus::VALID
     );
     assert_eq!(
         strict[1]
@@ -1070,18 +1083,26 @@ fn ionex_batch_results_report_coverage_per_element() {
         "invalid request should stay element-local"
     );
 
-    let held = ionex.slant_delays_batch_results(&requests[..3], IonexCoveragePolicy::Hold);
+    let held = ionex.slant_delays_batch_results(&requests[..3], IonexCoveragePolicy::Hold.into());
     assert_eq!(
         held[0].as_ref().expect("first element covered").status,
-        IonexSlantDelayStatus::Valid
+        IonexSlantDelayStatus::VALID
     );
     assert_eq!(
         held[1].as_ref().expect("second element held").status,
-        IonexSlantDelayStatus::Held(IonexCoverageError::EpochBeforeFirstMap)
+        IonexSlantDelayStatus {
+            held: Some(IonexCoverageError::EpochBeforeFirstMap),
+            degraded: None,
+            assumed_mapping: None,
+        }
     );
     assert_eq!(
         held[2].as_ref().expect("third element held").status,
-        IonexSlantDelayStatus::Held(IonexCoverageError::LongitudeOutOfRange)
+        IonexSlantDelayStatus {
+            held: Some(IonexCoverageError::LongitudeOutOfRange),
+            degraded: None,
+            assumed_mapping: None,
+        }
     );
 
     let mut out = [0.0; 3];
@@ -1989,7 +2010,10 @@ fn regular_tec_grid_matches_scipy_regular_grid_bits() {
         bits_vec(&doc["epochs_bits"]),
         bits_vec(&doc["lats_bits"]),
         bits_vec(&doc["lons_bits"]),
-        bits_vec(&doc["values_bits"]),
+        bits_vec(&doc["values_bits"])
+            .into_iter()
+            .map(Some)
+            .collect(),
     )
     .expect("regular TEC grid");
 
@@ -2033,7 +2057,7 @@ fn regular_tec_grid_shell_geometry_is_configurable() {
         vec![0.0, 1_000_000_000.0],
         vec![-90.0, 90.0],
         vec![-180.0, 180.0],
-        vec![10.0; 8],
+        vec![Some(10.0); 8],
     )
     .expect("constant TEC grid");
     let epoch = TecGridEpoch::new(0, 1);
@@ -3037,19 +3061,20 @@ fn ionex_slant_delay_refuses_a_weighted_non_available_node() {
     let err = zenith_delay(&ionex, 82.5, 2.5, epochs[0]).expect_err("weighted node");
     assert_eq!(
         err,
-        crate::error::Error::IonexNodesNotAvailable(IonexNodeGap {
+        crate::error::Error::IonexNodesNotAvailable(Box::new(IonexNodeGap {
             earlier: Some(IonexMissingNodes {
-                map_index: 0,
+                map_number: 1,
                 lat_index: 0,
                 lon_index: 0,
+                lon_index_next: 1,
                 missing: [false, false, false, true],
             }),
             later: None,
-        })
+        }))
     );
     assert_eq!(
         err.to_string(),
-        "IONEX nodes not available: map 0 cell [0][0] missing [1][1]"
+        "IONEX nodes not available: map 1 cell [0][0] missing [1][1]"
     );
 
     // Between the maps both carry weight; TEC map 2 holds every node of the cell.
@@ -3057,10 +3082,8 @@ fn ionex_slant_delay_refuses_a_weighted_non_available_node() {
     assert!(
         matches!(
             err,
-            crate::error::Error::IonexNodesNotAvailable(IonexNodeGap {
-                earlier: Some(_),
-                later: None
-            })
+            crate::error::Error::IonexNodesNotAvailable(ref gap)
+                if gap.earlier.is_some() && gap.later.is_none()
         ),
         "{err:?}"
     );
@@ -3074,7 +3097,7 @@ fn ionex_slant_delay_refuses_a_weighted_non_available_node() {
         coverage_request(82.5, 2.5, epochs[0]),
         coverage_request(82.5, 12.5, epochs[0]),
     ];
-    let results = ionex_slant_delay_results(&ionex, &requests, IonexCoveragePolicy::Hold);
+    let results = ionex_slant_delay_results(&ionex, &requests, IonexCoveragePolicy::Hold.into());
     assert!(matches!(
         results[0],
         Err(crate::error::Error::IonexNodesNotAvailable(_))
@@ -3166,4 +3189,623 @@ fn ionex_exponent_record_between_maps_sets_the_unit_of_the_maps_after_it() {
 
 // ---------------------------------------------------------------------------
 // Slant-delay policies: renormalizing fallback, mapping function, height maps.
+// ---------------------------------------------------------------------------
+
+fn renormalizing() -> IonexSlantPolicy {
+    IonexSlantPolicy::default().with_missing_nodes(IonexMissingNodePolicy::Renormalize)
+}
+
+fn delay_with(
+    ionex: &Ionex,
+    request: IonexSlantRequest,
+    policy: IonexSlantPolicy,
+) -> crate::Result<super::IonexSlantDelayEvaluation> {
+    ionex_slant_delay_with_policy(
+        ionex,
+        request.receiver,
+        request.elevation_rad,
+        request.azimuth_rad,
+        request.epoch_j2000_s,
+        request.frequency_hz,
+        policy,
+    )
+}
+
+/// Meters of L1 group delay per TECU of slant TEC.
+fn l1_delay_per_tecu() -> f64 {
+    super::slant::K_IONO / (1_575_420_000.0 * 1_575_420_000.0)
+}
+
+fn assert_relative(got: f64, want: f64) {
+    assert!(
+        (got - want).abs() <= 1.0e-9 * want.abs(),
+        "got {got}, want {want}"
+    );
+}
+
+#[test]
+fn ionex_renormalize_interpolates_around_missing_nodes_and_marks_the_value_degraded() {
+    let ionex =
+        zenith_product(&Ionex::parse_str(&fixture_text("spec_example_2d.inx")).expect("example"));
+    let epochs = ionex.map_epochs_s();
+    let gap = IonexNodeGap {
+        earlier: Some(IonexMissingNodes {
+            map_number: 1,
+            lat_index: 0,
+            lon_index: 0,
+            lon_index_next: 1,
+            missing: [false, false, false, true],
+        }),
+        later: None,
+    };
+
+    let evaluation = delay_with(
+        &ionex,
+        coverage_request(82.5, 2.5, epochs[0]),
+        renormalizing(),
+    )
+    .expect("renormalized value");
+    assert_eq!(
+        evaluation.status,
+        IonexSlantDelayStatus {
+            held: None,
+            degraded: Some(gap),
+            assumed_mapping: None,
+        }
+    );
+    assert!(!evaluation.status.is_valid());
+    // The three nodes left carry equal weight: latitude 85 longitudes 0 and 5,
+    // and latitude 80 longitude 0. A zenith pierce point maps with factor 1.
+    let vtec = (scaled(1000, -1) + scaled(1001, -1) + scaled(1100, -1)) / 3.0;
+    assert_relative(evaluation.delay_m, l1_delay_per_tecu() * vtec);
+
+    // A cell with every node present gives the strict value, not degraded.
+    let request = coverage_request(82.5, 12.5, epochs[0]);
+    let renormalized = delay_with(&ionex, request, renormalizing()).expect("full cell");
+    let strict = delay_with(&ionex, request, IonexSlantPolicy::default()).expect("strict");
+    assert_eq!(renormalized.status, IonexSlantDelayStatus::VALID);
+    assert_eq!(renormalized.delay_m.to_bits(), strict.delay_m.to_bits());
+}
+
+#[test]
+fn ionex_renormalize_blends_only_the_maps_that_give_a_value() {
+    let mut samples = valid_tec_grid_samples();
+    samples.base_radius_km = 0.0;
+    samples.map_epochs = vec![
+        super::ionex_epoch_from_j2000_seconds(0),
+        super::ionex_epoch_from_j2000_seconds(10),
+    ];
+    samples.tec_maps = vec![
+        vec![vec![None, None], vec![None, None]],
+        vec![vec![Some(10.0), Some(11.0)], vec![Some(12.0), Some(13.0)]],
+    ];
+    let ionex = Ionex::from_samples(samples).expect("one map without values");
+    let gap = IonexNodeGap {
+        earlier: Some(IonexMissingNodes {
+            map_number: 1,
+            lat_index: 0,
+            lon_index: 0,
+            lon_index_next: 1,
+            missing: [true; 4],
+        }),
+        later: None,
+    };
+
+    let between = coverage_request(0.5, 0.5, 5);
+    assert_eq!(
+        delay_with(&ionex, between, IonexSlantPolicy::default()).expect_err("strict"),
+        crate::error::Error::IonexNodesNotAvailable(Box::new(gap))
+    );
+    let evaluation = delay_with(&ionex, between, renormalizing()).expect("later map");
+    assert_eq!(evaluation.status.degraded, Some(gap));
+    assert_relative(evaluation.delay_m, l1_delay_per_tecu() * 11.5);
+
+    // At the epoch of the map without values only that map carries weight.
+    assert_eq!(
+        delay_with(&ionex, coverage_request(0.5, 0.5, 0), renormalizing()).expect_err("no value"),
+        crate::error::Error::IonexNodesNotAvailable(Box::new(gap))
+    );
+}
+
+#[test]
+fn ionex_real_non_available_node_is_refused_or_renormalized() {
+    let ionex = Ionex::parse_str(&fixture_text("EMR0OPSFIN_20240010000_01D_01H_GIM_trim.INX"))
+        .expect("EMR trim");
+    // TEC map 2 gives latitude 10 longitude 145 as 9999.
+    let request = coverage_request(9.0, 147.0, ionex.map_epochs_s()[1]);
+    let gap = IonexNodeGap {
+        earlier: Some(IonexMissingNodes {
+            map_number: 2,
+            lat_index: 0,
+            lon_index: 65,
+            lon_index_next: 66,
+            missing: [true, false, false, false],
+        }),
+        later: None,
+    };
+    assert_eq!(
+        delay_with(&ionex, request, IonexSlantPolicy::default()).expect_err("strict"),
+        crate::error::Error::IonexNodesNotAvailable(Box::new(gap))
+    );
+    let evaluation = delay_with(&ionex, request, renormalizing()).expect("renormalized");
+    assert_eq!(evaluation.status.degraded, Some(gap));
+    assert!(evaluation.delay_m.is_finite() && evaluation.delay_m > 0.0);
+}
+
+#[test]
+fn ionex_slant_delay_maps_single_layer_by_default_and_names_what_the_product_declares() {
+    let request_at = |ionex: &Ionex| coverage_request(0.0, 0.0, ionex.map_epochs_s()[0]);
+    let declared_only = IonexSlantPolicy::default().with_mapping(IonexMappingPolicy::Declared);
+    for (name, assumed, declared) in [
+        (
+            "COD0OPSFIN_20240010000_01D_01H_GIM_trim.INX",
+            IonexAssumedMapping::NoMapping,
+            IonexMappingDeclaration::Declared(IonexMappingFunction::NoMapping),
+        ),
+        (
+            "EMR0OPSFIN_20240010000_01D_01H_GIM_trim.INX",
+            IonexAssumedMapping::Other,
+            IonexMappingDeclaration::Declared(IonexMappingFunction::Other("MOD".into())),
+        ),
+        (
+            "esa_2024176_first_map_2row.inx",
+            IonexAssumedMapping::Absent,
+            IonexMappingDeclaration::Absent,
+        ),
+    ] {
+        let ionex = Ionex::parse_str(&fixture_text(name)).expect(name);
+        let request = request_at(&ionex);
+
+        // The default maps these with 1/cos(z') and names what they declare.
+        let chosen = delay_with(&ionex, request, IonexSlantPolicy::default()).expect(name);
+        assert_eq!(chosen.status.assumed_mapping, Some(assumed), "{name}");
+        // Nothing was held and nothing was degraded, so the value is the one
+        // the grid gives at the request. The assumed mapping is its own field,
+        // for a caller that will not take a single-layer factor on a product
+        // determined some other way.
+        assert!(chosen.status.is_valid(), "{name}");
+
+        assert_eq!(
+            delay_with(&ionex, request, declared_only).expect_err(name),
+            crate::error::Error::IonexSlantUnavailable(IonexSlantRefusal::MappingFunction(
+                declared
+            )),
+            "{name}"
+        );
+
+        let mut samples = ionex.tec_grid_samples();
+        samples.header.mapping_function = Some(IonexMappingFunction::CosZ);
+        let cosz = Ionex::from_samples(samples).expect("COSZ copy");
+        let declared_cosz = delay_with(&cosz, request, declared_only).expect(name);
+        assert_eq!(
+            chosen.delay_m.to_bits(),
+            declared_cosz.delay_m.to_bits(),
+            "{name}: the default applies the COSZ factor"
+        );
+        assert_eq!(declared_cosz.status, IonexSlantDelayStatus::VALID, "{name}");
+    }
+    let message = crate::error::Error::IonexSlantUnavailable(IonexSlantRefusal::MappingFunction(
+        IonexMappingDeclaration::Declared(IonexMappingFunction::NoMapping),
+    ))
+    .to_string();
+    assert!(message.contains("MAPPING FUNCTION NONE"), "{message}");
+
+    // A product declaring COSZ is mapped with the factor it declares, so its
+    // status names none.
+    let igs = Ionex::parse_str(&fixture_text("IGS0OPSFIN_20240010000_01D_02H_GIM_trim.INX"))
+        .expect("IGS trim");
+    let cosz = delay_with(&igs, request_at(&igs), IonexSlantPolicy::default()).expect("COSZ trim");
+    assert_eq!(cosz.status, IonexSlantDelayStatus::VALID);
+
+    // QFAC names a factor the spec gives no formula for, and reads as NONE does.
+    let mut samples = valid_tec_grid_samples();
+    samples.header.mapping_function = Some(IonexMappingFunction::QFactor);
+    let qfac = Ionex::from_samples(samples).expect("QFAC product");
+    let request = coverage_request(0.5, 0.5, 0);
+    let mut out = [0.0];
+    ionex_slant_delays(&qfac, &[request], &mut out).expect("QFAC batch");
+    assert!(out[0].is_finite() && out[0] > 0.0);
+    assert_eq!(
+        delay_with(&qfac, request, declared_only).expect_err("QFAC declared"),
+        crate::error::Error::IonexSlantUnavailable(IonexSlantRefusal::MappingFunction(
+            IonexMappingDeclaration::Declared(IonexMappingFunction::QFactor)
+        ))
+    );
+
+    // Batch results carry the flag element by element.
+    let results = ionex_slant_delay_results(&qfac, &[request], IonexSlantPolicy::default());
+    assert_eq!(
+        results[0]
+            .as_ref()
+            .expect("QFAC element")
+            .status
+            .assumed_mapping,
+        Some(IonexAssumedMapping::QFactor)
+    );
+}
+
+#[test]
+fn ionex_slant_delay_uses_the_one_height_height_maps_give_and_refuses_others() {
+    let parsed = Ionex::parse_str(&fixture_text("spec_example_2d.inx")).expect("example");
+    let request = IonexSlantRequest::new(
+        crate::frame::Wgs84Geodetic::new(80.0_f64.to_radians(), 180.0_f64.to_radians(), 0.0)
+            .expect("receiver"),
+        45.0_f64.to_radians(),
+        90.0_f64.to_radians(),
+        parsed.map_epochs_s()[0],
+        1_575_420_000.0,
+    );
+    let with_heights = |heights: Vec<Vec<Vec<Option<f64>>>>, shell_height_km: f64| {
+        let mut samples = parsed.tec_grid_samples();
+        samples.height_maps = heights;
+        samples.shell_height_km = shell_height_km;
+        Ionex::from_samples(samples).expect("product")
+    };
+    let uniform = |height: f64| vec![vec![vec![Some(height); 72]; 3]; 2];
+    let refusal = |map_number, lat_index, lon_index, varying: bool| {
+        crate::error::Error::IonexSlantUnavailable(if varying {
+            IonexSlantRefusal::VaryingHeights {
+                map_number,
+                lat_index,
+                lon_index,
+            }
+        } else {
+            IonexSlantRefusal::HeightNotAvailable {
+                map_number,
+                lat_index,
+                lon_index,
+            }
+        })
+    };
+
+    for mapping in [
+        IonexMappingPolicy::Declared,
+        IonexMappingPolicy::SingleLayer,
+    ] {
+        let policy = IonexSlantPolicy::default().with_mapping(mapping);
+        let at_400 = delay_with(&with_heights(Vec::new(), 400.0), request, policy).expect("400 km");
+        let at_450 = delay_with(&with_heights(Vec::new(), 450.0), request, policy).expect("450 km");
+        assert_ne!(at_400.delay_m.to_bits(), at_450.delay_m.to_bits());
+
+        // The spec's example 1 gives every height as 0, which leaves the shell at
+        // HGT1.
+        let zero = delay_with(&with_heights(uniform(0.0), 400.0), request, policy)
+            .expect("every height 0");
+        assert_eq!(zero.delay_m.to_bits(), at_400.delay_m.to_bits());
+        // Every height 50 km puts the shell at HGT1 + 50 km.
+        let fifty = delay_with(&with_heights(uniform(50.0), 400.0), request, policy)
+            .expect("every height 50");
+        assert_eq!(fifty.delay_m.to_bits(), at_450.delay_m.to_bits());
+
+        // The fixture's heights vary from the second node on.
+        assert_eq!(
+            delay_with(&parsed, request, policy).expect_err("varying heights"),
+            refusal(1, 0, 1, true)
+        );
+        let mut one_missing = uniform(0.0);
+        one_missing[1][2][3] = None;
+        assert_eq!(
+            delay_with(&with_heights(one_missing, 400.0), request, policy)
+                .expect_err("a non-available height"),
+            refusal(2, 2, 3, false)
+        );
+        assert_eq!(
+            delay_with(
+                &with_heights(vec![vec![vec![None; 72]; 3]; 2], 400.0),
+                request,
+                policy
+            )
+            .expect_err("no height available"),
+            refusal(1, 0, 0, false)
+        );
+    }
+}
+
+#[test]
+fn regular_tec_grid_refuses_or_renormalizes_missing_nodes() {
+    use super::tec_grid::{TecGrid, TecGridError};
+
+    let mut values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].map(Some).to_vec();
+    values[3] = None;
+    let grid = TecGrid::new(vec![0.0, 10.0], vec![0.0, 10.0], vec![20.0, 30.0], values)
+        .expect("grid with one missing node");
+    let gap = IonexNodeGap {
+        earlier: Some(IonexMissingNodes {
+            map_number: 1,
+            lat_index: 0,
+            lon_index: 0,
+            lon_index_next: 1,
+            missing: [false, false, false, true],
+        }),
+        later: None,
+    };
+    assert_eq!(
+        grid.interpolate_vtec(5.0, 5.0, 25.0).expect_err("strict"),
+        TecGridError::NodesNotAvailable(gap)
+    );
+    let renormalized = grid
+        .interpolate_vtec_with_policy(5.0, 5.0, 25.0, IonexMissingNodePolicy::Renormalize)
+        .expect("renormalized");
+    // Epoch 0 gives (1 + 2 + 3) / 3 = 2 and epoch 1 gives 6.5, blended evenly.
+    assert_eq!(renormalized.value.to_bits(), 4.25f64.to_bits());
+    assert_eq!(renormalized.degraded, Some(gap));
+    assert_eq!(
+        grid.interpolate_vtec(0.0, 0.0, 20.0)
+            .expect("a query on a node uses no neighbour")
+            .to_bits(),
+        1.0f64.to_bits()
+    );
+
+    let mut values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].map(Some).to_vec();
+    values[..4].fill(None);
+    let grid = TecGrid::new(vec![0.0, 10.0], vec![0.0, 10.0], vec![20.0, 30.0], values)
+        .expect("grid with an epoch without values");
+    let later_only = grid
+        .interpolate_vtec_with_policy(5.0, 5.0, 25.0, IonexMissingNodePolicy::Renormalize)
+        .expect("later epoch");
+    assert_eq!(later_only.value.to_bits(), 6.5f64.to_bits());
+    assert!(matches!(
+        grid.interpolate_vtec_with_policy(0.0, 5.0, 25.0, IonexMissingNodePolicy::Renormalize),
+        Err(TecGridError::NodesNotAvailable(_))
+    ));
+}
+
+#[test]
+fn ionex_longitude_seam_interpolates_between_the_last_node_and_the_first() {
+    // IONEX 1's example 1 runs its longitudes 0 to 355 by 5, which closes the
+    // circle without naming the seam twice, so 357.5 lies in the cell between
+    // the node at 355 and the node at 0.
+    let ionex =
+        zenith_product(&Ionex::parse_str(&fixture_text("spec_example_2d.inx")).expect("example"));
+    let epochs = ionex.map_epochs_s();
+    // Map 1 holds 1000 + 100 * lat_index + lon_index at EXPONENT -1.
+    let node = |lon_index: i64| scaled(1000 + lon_index, -1);
+
+    // A receiver longitude is given in [-180, 180]; -2.5 is the 357.5 of the
+    // grid, which the query normalizes onto the seam cell.
+    for (lon_deg, p) in [(-2.5, 0.5), (-0.1, (359.9 - 355.0) / 5.0)] {
+        let got = zenith_delay(&ionex, 85.0, lon_deg, epochs[0]).expect("the seam is covered");
+        let vtec = (1.0 - p) * node(71) + p * node(0);
+        assert_relative(got, l1_delay_per_tecu() * vtec);
+    }
+
+    // A node of the grid still reads as that node: -5 is its 355.
+    assert_relative(
+        zenith_delay(&ionex, 85.0, -5.0, epochs[0]).expect("last node"),
+        l1_delay_per_tecu() * node(71),
+    );
+}
+
+#[test]
+fn ionex_seam_cell_reads_the_same_from_any_turn() {
+    // The cell that closes the circle runs past the turn, and a receiver
+    // longitude arrives in [-180, 180], any number of turns from the node that
+    // opens that cell. The offset is taken in whole turns of the axis, so one
+    // point reads the same however it is named.
+    let lat_arr = [1.0_f64, 0.0];
+    let map = vec![
+        vec![Some(10.0), Some(20.0), Some(30.0), Some(40.0)],
+        vec![Some(50.0), Some(60.0), Some(70.0), Some(80.0)],
+    ];
+    // Latitude 1 is the first node row, so the value is the longitude
+    // interpolation alone.
+    let at = |lon_arr: &[f64], dlon: f64, lam: f64| {
+        super::slant::bilinear_vtec(&map, &lat_arr, lon_arr, -1.0, dlon, 1.0, lam)
+    };
+
+    // West to east, where the cell from the node at 270 runs to 360, which is
+    // the node at 0. Every name below is 315.
+    let west_to_east = [0.0_f64, 90.0, 180.0, 270.0];
+    for lam in [315.0_f64, -45.0, -405.0, 675.0] {
+        let got = at(&west_to_east, 90.0, lam);
+        assert_eq!(got.lon_index, 3, "{lam}");
+        assert_eq!(got.p, 0.5, "{lam}");
+        assert_eq!(got.vtec, Some(0.5 * 40.0 + 0.5 * 10.0), "{lam}");
+    }
+    // A query at the node that closes the cell reads that node, not a turn
+    // past it. Every name below is the node at 0.
+    for lam in [0.0_f64, 360.0, -360.0, 720.0] {
+        let got = at(&west_to_east, 90.0, lam);
+        assert_eq!(got.p, 0.0, "{lam}");
+        assert_eq!(got.vtec, Some(10.0), "{lam}");
+    }
+
+    // East to west, where a turn is the same count of cells the other way.
+    // Its node at 270 is index 0 and its node at 0 is index 3.
+    let east_to_west = [270.0_f64, 180.0, 90.0, 0.0];
+    for lam in [315.0_f64, -45.0, -405.0, 675.0] {
+        let got = at(&east_to_west, -90.0, lam);
+        assert_eq!(got.lon_index, 3, "{lam}");
+        assert_eq!(got.p, 0.5, "{lam}");
+        assert_eq!(got.vtec, Some(0.5 * 40.0 + 0.5 * 10.0), "{lam}");
+    }
+    for lam in [270.0_f64, -90.0, -450.0, 630.0] {
+        let got = at(&east_to_west, -90.0, lam);
+        assert_eq!(got.p, 0.0, "{lam}");
+        assert_eq!(got.vtec, Some(10.0), "{lam}");
+    }
+}
+
+#[test]
+fn ionex_seam_cell_names_the_column_that_closes_the_circle() {
+    // The example's longitudes run 0 to 355 by 5, so the cell that closes the
+    // circle opens at column 71 and reaches the node at column 0. The grid has
+    // no column 72, and a caller who indexes the axes with what a refusal
+    // reports must land on a node the product has.
+    let parsed = Ionex::parse_str(&fixture_text("spec_example_2d.inx")).expect("example");
+    let mut samples = parsed.tec_grid_samples();
+    // A zero base radius puts a zenith pierce point on the receiver coordinate.
+    samples.base_radius_km = 0.0;
+    samples.height_maps.clear();
+    // The node the seam cell reaches over the turn.
+    samples.tec_maps[0][0][0] = None;
+    let ionex = Ionex::from_samples(samples).expect("a non-available node across the seam");
+    let epochs = ionex.map_epochs_s();
+
+    // Latitude 85 is the first node row, so only the two nodes of that row
+    // carry weight, and the one across the seam is non-available.
+    let err = zenith_delay(&ionex, 85.0, -2.5, epochs[0]).expect_err("the seam node is weighted");
+    let nodes = IonexMissingNodes {
+        map_number: 1,
+        lat_index: 0,
+        lon_index: 71,
+        lon_index_next: 0,
+        missing: [false, true, false, false],
+    };
+    assert_eq!(
+        err,
+        crate::error::Error::IonexNodesNotAvailable(Box::new(IonexNodeGap {
+            earlier: Some(nodes),
+            later: None,
+        }))
+    );
+    // The message names column 0, not the column 72 the product has not got.
+    assert_eq!(
+        err.to_string(),
+        "IONEX nodes not available: map 1 cell [0][71] missing [0][0]"
+    );
+
+    // Indexing the axes with what the refusal reports lands on the node the
+    // product gives as non-available.
+    assert_eq!(ionex.lon_nodes_deg().len(), 72);
+    assert_eq!(ionex.lat_nodes_deg()[nodes.lat_index], 85.0);
+    assert_eq!(ionex.lon_nodes_deg()[nodes.lon_index], 355.0);
+    assert_eq!(ionex.lon_nodes_deg()[nodes.lon_index_next], 0.0);
+    assert_eq!(
+        ionex.tec_maps()[0][nodes.lat_index][nodes.lon_index_next],
+        None
+    );
+}
+
+#[test]
+fn ionex_slant_delay_reads_an_ascending_product_as_a_descending_one() {
+    // One grid holds 10 at latitude 0 longitude 0, 11 at 0 and 1, 12 at 1 and
+    // 0, and 13 at 1 and 1. Written south to north with its longitudes east to
+    // west, and north to south with them west to east, it is that same grid,
+    // so a pierce point in the middle of its one cell reads the same.
+    let product = |lat: &str, lon: &str, bands: String| {
+        let mut text = String::new();
+        text.push_str(&ionex_record(
+            "     1.0            IONOSPHERE MAPS     GPS",
+            "IONEX VERSION / TYPE",
+        ));
+        text.push_str(&ionex_record(lat, "LAT1 / LAT2 / DLAT"));
+        text.push_str(&ionex_record(lon, "LON1 / LON2 / DLON"));
+        text.push_str(&ionex_record("   450.0 450.0   0.0", "HGT1 / HGT2 / DHGT"));
+        text.push_str(&ionex_record("  6371.0", "BASE RADIUS"));
+        text.push_str(&ionex_record("     0", "EXPONENT"));
+        text.push_str(&ionex_record("  COSZ", "MAPPING FUNCTION"));
+        text.push_str(&ionex_record("     2", "MAP DIMENSION"));
+        text.push_str(&ionex_record("", "END OF HEADER"));
+        text.push_str(&ionex_record("     1", "START OF TEC MAP"));
+        text.push_str(&ionex_record(LAYOUT_EPOCH_0, "EPOCH OF CURRENT MAP"));
+        text.push_str(&bands);
+        text.push_str(&ionex_record("     1", "END OF TEC MAP"));
+        text.push_str(&layout_end());
+        zenith_product(&Ionex::parse_str(&text).expect("product"))
+    };
+
+    let ascending = product(
+        "     0.0   1.0   1.0",
+        "     1.0   0.0  -1.0",
+        layout_band(0.0, 1.0, 0.0, -1.0, 450.0, "   11   10")
+            + &layout_band(1.0, 1.0, 0.0, -1.0, 450.0, "   13   12"),
+    );
+    let descending = product(
+        "     1.0   0.0  -1.0",
+        "     0.0   1.0   1.0",
+        layout_band(1.0, 0.0, 1.0, 1.0, 450.0, "   12   13")
+            + &layout_band(0.0, 0.0, 1.0, 1.0, 450.0, "   10   11"),
+    );
+    assert_eq!(ascending.lat_nodes_deg(), &[0.0, 1.0]);
+    assert_eq!(descending.lat_nodes_deg(), &[1.0, 0.0]);
+
+    // The centre of the cell weighs the four nodes equally.
+    let epoch = ascending.map_epochs_s()[0];
+    assert_eq!(descending.map_epochs_s()[0], epoch);
+    let up = zenith_delay(&ascending, 0.5, 0.5, epoch).expect("ascending");
+    let down = zenith_delay(&descending, 0.5, 0.5, epoch).expect("descending");
+    assert_relative(up, l1_delay_per_tecu() * 11.5);
+    assert_eq!(up.to_bits(), down.to_bits());
+}
+
+#[test]
+fn ionex_pierce_point_through_a_pole_gives_a_value() {
+    // The quotient that names the pierce-point longitude divides by the cosine
+    // of its latitude, which is zero at a pole, and the spherical-trig
+    // quotients can round past 1, where asin gives NaN.
+    for az_deg in [0.0_f64, 45.0, 90.0, 179.0, 180.0, 270.0, 359.0] {
+        for el_deg in [1.0_f64, 5.0, 30.0, 89.0, 90.0] {
+            for lat_deg in [89.999_999_f64, 90.0, -90.0] {
+                let geom = super::slant::pierce_point(
+                    lat_deg.to_radians(),
+                    0.0,
+                    az_deg.to_radians(),
+                    el_deg.to_radians(),
+                    6371.0,
+                    450.0,
+                );
+                assert!(
+                    geom.phi_ipp_deg.is_finite() && geom.lambda_ipp_deg.is_finite(),
+                    "lat {lat_deg} az {az_deg} el {el_deg}: {geom:?}"
+                );
+            }
+        }
+    }
+
+    // Straight up from a pole the pierce point stays on the pole, and takes the
+    // receiver's meridian. The quotient the other branch forms divides a sine
+    // of about -5.7e-17 by a cosine of about 6.1e-17, which gives about -0.93
+    // and an arcsine 69 degrees round the pole, so a meridian read back
+    // unchanged is this branch's own answer and not the general one.
+    for lat_deg in [90.0_f64, -90.0] {
+        for lon_deg in [0.0_f64, 40.0, -125.0] {
+            for az_deg in [0.0_f64, 90.0, 180.0, 270.0] {
+                let geom = super::slant::pierce_point(
+                    lat_deg.to_radians(),
+                    lon_deg.to_radians(),
+                    az_deg.to_radians(),
+                    core::f64::consts::FRAC_PI_2,
+                    6371.0,
+                    450.0,
+                );
+                let at = format!("lat {lat_deg} lon {lon_deg} az {az_deg}");
+                assert!(
+                    (geom.phi_ipp_deg - lat_deg).abs() <= 1.0e-9,
+                    "{at}: {geom:?}"
+                );
+                assert!(
+                    (geom.lambda_ipp_deg - lon_deg).abs() <= 1.0e-9,
+                    "{at}: {geom:?}"
+                );
+            }
+        }
+    }
+
+    // A line of sight straight up from the pole reaches the grid through the
+    // hold policy, which carries the latitude to the grid edge. The example's
+    // height maps give nodes different heights, which the slant delay refuses
+    // whatever the geometry, so this product keeps only its TEC maps.
+    let parsed = Ionex::parse_str(&fixture_text("spec_example_2d.inx")).expect("example");
+    let mut samples = parsed.tec_grid_samples();
+    samples.height_maps.clear();
+    let ionex = Ionex::from_samples(samples).expect("product without height maps");
+    let evaluation = ionex_slant_delay_with_policy(
+        &ionex,
+        crate::frame::Wgs84Geodetic::new(core::f64::consts::FRAC_PI_2, 0.0, 0.0).expect("pole"),
+        core::f64::consts::FRAC_PI_2,
+        0.0,
+        ionex.map_epochs_s()[0],
+        1_575_420_000.0,
+        IonexSlantPolicy::from(IonexCoveragePolicy::Hold),
+    )
+    .expect("a value at the pole");
+    assert!(
+        evaluation.delay_m.is_finite() && evaluation.delay_m > 0.0,
+        "{evaluation:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Writer: IONEX 1 columns, exact values, refusals.
 // ---------------------------------------------------------------------------
