@@ -6,6 +6,18 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- An IONEX value scales as the reference readers scale it, `field * 10^EXPONENT`,
+  with the factor built from an exact power of ten rather than taken from a
+  `pow` implementation, so a node does not depend on a library's rounding: `10^n`
+  is exact in a double up to `n` of 22, and `1.0` over an exact power is
+  correctly rounded. Every TEC, RMS and height node of the fifteen public GIMs
+  for 2024 day 001 is the node RTKLIB's `readtec` holds. The writer states a
+  value with a field the reader takes back as that value, so a product read from
+  a file writes and reads back exactly. A value no such field reaches is stated
+  as the field whose decimal is the value, and reads back one unit in the last
+  place away: a product built from samples holding `0.7` was refused, since
+  every field that fits `I5` gives `0x1.6666666666667p-1` where `0.7` is
+  `0x1.6666666666666p-1`, and it is written and read back as that product.
 - **Breaking.** An IONEX axis is read in the direction its step gives. IONEX 1
   gives an axis as "'LAT1' to 'LAT2' with increment 'DLAT'", which says nothing
   about the direction, so a file may run its latitudes south to north or its
@@ -25,6 +37,17 @@ All notable changes to `sidereon-core` are documented here.
   quotient that names the pierce-point longitude divides by the cosine of its
   latitude, which is zero at a pole, and the spherical-trig quotients can round
   past 1, where `asin` gives NaN; each is held inside its domain now.
+- An IONEX `EXPONENT` an earlier map set stays in effect for the maps after it,
+  and the map that inherits one reads at it and is reported as the new
+  `IonexWarning::ExponentCarriedIntoMap`, naming the map, the exponent and the
+  line that set it. IONEX 1 says of the header records that "Each value remains
+  valid until changed by an additional header record", which carries an exponent
+  across a map boundary; its 3-D example restates one at the start of a map
+  rather than relying on the carry, so it neither needs nor contradicts the
+  rule. Such a map was refused, which compounded: one map changing the exponent
+  refused every later map that did not restate it. The writer still restates an
+  exponent at a map start, as that example does and as RTKLIB, which reads only
+  the header `EXPONENT`, needs.
 - A data record inside an IONEX map holding a character outside ASCII is refused
   where it is read, naming the map, the band and the line. Such a record was
   split on whitespace instead, which can place its values at the wrong nodes
@@ -39,6 +62,30 @@ All notable changes to `sidereon-core` are documented here.
   maps: 25 with 25 RMS maps, 97 with 97. A product read from a file writes the
   count it came with; one built from samples writes the TEC map count, which is
   what those producers write.
+- **Breaking.** `Ionex::to_ionex_string` returns `Result<String>` and refuses,
+  naming it, a value, axis or header field that its IONEX field cannot hold
+  exactly, and `scenario::ionex_content_fingerprint` returns
+  `Result<String, ScenarioError>` because it hashes that text. The writer
+  rounded every value to the header exponent without checking that it read back
+  as the value held, wrote an axis step such as 0.25 degrees as 0.2, and wrote a
+  field wider than its columns out of them. It now writes every value exactly.
+  When one exponent does, the file has that one: the product's `EXPONENT` where
+  it writes each TEC, RMS and height value as a whole number within `I5` other
+  than the non-available marker `9999`, otherwise the nearest exponent that
+  does, the finer of two equally near, which the product read back then has.
+  Such a file has no `EXPONENT` record inside a map, so RTKLIB, which reads only
+  the header `EXPONENT`, reads it too. RTKLIB places every node of a file that
+  does carry those records at the right latitude and longitude, band splits
+  included, but scales each value by the header exponent, so it reads the values
+  of such a file as other numbers. Otherwise the header keeps the product's
+  `EXPONENT`, an `EXPONENT` record before a band record gives each data block an
+  exponent that writes it exactly, a latitude whose values no one exponent
+  writes is split into band records over runs of its longitudes, and a map
+  restates the exponent where the map before it left another in effect. Only a
+  value that no exponent writes exactly is refused. A text field is written when
+  it reads back as itself: within its columns, counted in bytes as the reader
+  takes them, without control characters or the blanks the reader trims, so the
+  UTF-8 `Hernández` in a `DESCRIPTION` of `uhrg0010.24i` is written back.
 - **Breaking.** An IONEX slant delay maps vertical TEC to the line of sight with
   the single-layer `1/cos(z')` at the shell height whatever the product's
   `MAPPING FUNCTION` declares, and the new
@@ -506,6 +553,12 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- The IONEX writer lays records out as IONEX 1 defines them: axes in
+  `2X,3F6.1`, band records in `2X,5F6.1`, values in `16I5`, and `EXPONENT` only
+  where it is not `-1`. Axis and band records were written in `8.1` fields, which
+  a reader that takes those records by column, as RTKLIB does, reads as other
+  numbers, and values were written as a blank and four columns, so a five-digit
+  value broke the columns.
 - IONEX values are read in their `16I5` columns, so two adjacent five-digit
   values read as two values, not one. A data record not laid out in those
   columns is read by its whitespace-separated fields. One laid out in them with

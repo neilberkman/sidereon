@@ -1616,10 +1616,16 @@ where
 }
 
 /// Compute the core-verified fingerprint for a parsed IONEX product.
-pub fn ionex_content_fingerprint(ionex: &Ionex) -> String {
+///
+/// The fingerprint hashes the product's IONEX text, so a product the IONEX
+/// writer refuses has none and returns [`ScenarioError::Ionosphere`].
+pub fn ionex_content_fingerprint(ionex: &Ionex) -> Result<String, ScenarioError> {
+    let text = ionex
+        .to_ionex_string()
+        .map_err(|error| ScenarioError::Ionosphere(error.to_string()))?;
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    hash_str(&mut hash, &ionex.to_ionex_string());
-    fingerprint_label(hash)
+    hash_str(&mut hash, &text);
+    Ok(fingerprint_label(hash))
 }
 
 fn simulate_resolved_scenario<E>(
@@ -1990,7 +1996,7 @@ where
         return Err(ScenarioError::ExternalIonosphereRequired);
     };
     validate_identity("error_budget.ionosphere.source", expected, ionex.identity())?;
-    let actual = ionex_content_fingerprint(ionex.product());
+    let actual = ionex_content_fingerprint(ionex.product())?;
     if actual != expected.content_digest {
         return Err(ScenarioError::ExternalSourceMismatch {
             field: "error_budget.ionosphere.source.content_digest",
@@ -2936,7 +2942,7 @@ mod tests {
         let identity = product(
             ScenarioExternalProductKind::Ionex,
             "synthetic-ionex",
-            &ionex_content_fingerprint(&ionex),
+            &ionex_content_fingerprint(&ionex).expect("writable IONEX"),
         );
         scenario.error_budget.ionosphere = ScenarioIonosphereModel::SuppliedIonex {
             source: identity.clone(),
