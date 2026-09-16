@@ -7,10 +7,11 @@ pub mod ionosphere {
         ionex_slant_delay_results, ionex_slant_delay_with_policy, ionex_slant_delays,
         ionosphere_delay, klobuchar, klobuchar_native, nequick_g_delay_m, nequick_g_stec_tecu,
         regular_tec_grid_delay_xyz, regular_tec_xyz, GalileoNequickCoeffs, GalileoNequickEval,
-        Ionex, IonexCoverageError, IonexCoveragePolicy, IonexSlantDelayEvaluation,
-        IonexSlantDelayStatus, IonexSlantRequest, IonoModel, KlobucharParams, NequickGRayEval,
-        TecGrid, TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridSamples,
-        TecGridShellGeometry, TecSample, TecSamplesError,
+        Ionex, IonexCoverageError, IonexCoveragePolicy, IonexHeader, IonexMappingFunction,
+        IonexMissingNodes, IonexNodeGap, IonexSlantDelayEvaluation, IonexSlantDelayStatus,
+        IonexSlantRequest, IonexWarning, IonoModel, KlobucharParams, NequickGRayEval, TecGrid,
+        TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridSamples, TecGridShellGeometry,
+        TecSample, TecSamplesError,
     };
     pub use crate::rinex_nav::{IonoCorrections, KlobucharAlphaBeta};
 
@@ -33,8 +34,9 @@ pub use ionosphere::{
     ionex_slant_delay_results, ionex_slant_delay_with_policy, ionex_slant_delays, ionosphere_delay,
     klobuchar, klobuchar_native, nequick_g_delay_m, nequick_g_stec_tecu,
     regular_tec_grid_delay_xyz, regular_tec_xyz, GalileoNequickCoeffs, GalileoNequickEval, Ionex,
-    IonexCoverageError, IonexCoveragePolicy, IonexGrid, IonexSlantDelayEvaluation,
-    IonexSlantDelayStatus, IonexSlantRequest, IonoModel, KlobucharParams, NequickGRayEval, TecGrid,
+    IonexCoverageError, IonexCoveragePolicy, IonexGrid, IonexHeader, IonexMappingFunction,
+    IonexMissingNodes, IonexNodeGap, IonexSlantDelayEvaluation, IonexSlantDelayStatus,
+    IonexSlantRequest, IonexWarning, IonoModel, KlobucharParams, NequickGRayEval, TecGrid,
     TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridSamples, TecGridShellGeometry,
     TecSample, TecSamplesError,
 };

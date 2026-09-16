@@ -31,7 +31,8 @@ use super::slant::{slant_delay_components, PierceLineOfSight, SlantComponents, V
 use super::{
     galileo_nequick_g_native, ionex_slant_delay_results, ionex_slant_delay_with_policy,
     ionex_slant_delays, ionosphere_delay, GalileoNequickCoeffs, GalileoNequickEval,
-    IonexCoverageError, IonexCoveragePolicy, IonexSlantDelayStatus, IonexSlantRequest, IonoModel,
+    IonexCoverageError, IonexCoveragePolicy, IonexHeader, IonexMappingFunction, IonexMissingNodes,
+    IonexNodeGap, IonexSlantDelayStatus, IonexSlantRequest, IonexWarning, IonoModel,
     TecGridSamples, TecSample, TecSamplesError,
 };
 
@@ -269,7 +270,7 @@ fn ionex_slant_zero_ulp_full_branch_matrix() {
                 check(
                     &mut failures,
                     format!("maps_vtec[{m}][{i}][{j}]"),
-                    ionex.tec_maps()[m][i][j],
+                    ionex.tec_maps()[m][i][j].expect("synthetic node holds a value"),
                     want.as_str().unwrap(),
                 );
             }
@@ -322,7 +323,8 @@ fn ionex_slant_zero_ulp_full_branch_matrix() {
                     dlat,
                     dlon,
                 },
-            );
+            )
+            .expect("synthetic grid holds every node");
 
             // The temporal-bracket index is a discrete branch outcome, not a float.
             assert_eq!(
@@ -338,8 +340,8 @@ fn ionex_slant_zero_ulp_full_branch_matrix() {
                 ("lambda_ipp_deg_raw", got.lambda_ipp_deg_raw),
                 ("lambda_ipp_deg", got.lambda_ipp_deg),
                 ("w", got.w),
-                ("vtec0", got.vtec0),
-                ("vtec1", got.vtec1),
+                ("vtec0", got.vtec0.expect("lower map value")),
+                ("vtec1", got.vtec1.expect("upper map value")),
                 ("p0", got.p0),
                 ("q0", got.q0),
                 ("vtec", got.vtec),
@@ -392,7 +394,9 @@ fn ionex_real_grid_nodes_evaluate_to_parsed_map_values() {
         let lat_deg = ionex.lat_nodes_deg()[lat_index];
         let lon_deg = ionex.lon_nodes_deg()[lon_index];
         assert_eq!(
-            map[lat_index][lon_index].to_bits(),
+            map[lat_index][lon_index]
+                .expect("ESA node holds a value")
+                .to_bits(),
             expected_bits,
             "IONEX parsed source node lat={lat_deg} lon={lon_deg}"
         );
@@ -406,7 +410,7 @@ fn ionex_real_grid_nodes_evaluate_to_parsed_map_values() {
             lon_deg,
         );
         assert_eq!(
-            evaluated.vtec.to_bits(),
+            evaluated.vtec.expect("bilinear value").to_bits(),
             expected_bits,
             "IONEX node lat={lat_deg} lon={lon_deg}"
         );
@@ -453,8 +457,13 @@ fn valid_tec_grid_samples() -> TecGridSamples {
         shell_height_km: 450.0,
         base_radius_km: 6371.0,
         exponent: 0,
-        tec_maps: vec![vec![vec![10.0, 11.0], vec![12.0, 13.0]]],
+        tec_maps: vec![vec![
+            vec![Some(10.0), Some(11.0)],
+            vec![Some(12.0), Some(13.0)],
+        ]],
         rms_maps: Vec::new(),
+        height_maps: Vec::new(),
+        header: IonexHeader::new(IonexMappingFunction::CosZ),
     }
 }
 
@@ -497,6 +506,8 @@ fn ionex_from_samples_rejects_empty() {
         exponent: 0,
         tec_maps: Vec::new(),
         rms_maps: Vec::new(),
+        height_maps: Vec::new(),
+        header: IonexHeader::new(IonexMappingFunction::CosZ),
     })
     .expect_err("empty IONEX samples must fail");
     assert_eq!(err, TecSamplesError::Empty);
@@ -506,7 +517,7 @@ fn ionex_from_samples_rejects_empty() {
 fn ionex_from_samples_rejects_too_few_nodes() {
     let mut samples = valid_tec_grid_samples();
     samples.lat_nodes_deg = vec![1.0];
-    samples.tec_maps = vec![vec![vec![10.0, 11.0]]];
+    samples.tec_maps = vec![vec![vec![Some(10.0), Some(11.0)]]];
     let err = Ionex::from_samples(samples).expect_err("single latitude node must fail");
     assert_eq!(err, TecSamplesError::TooFewNodes(1));
 }
@@ -550,7 +561,7 @@ fn ionex_from_samples_rejects_epoch_not_representable() {
 #[test]
 fn ionex_from_samples_rejects_dimension_mismatch() {
     let mut samples = valid_tec_grid_samples();
-    samples.tec_maps = vec![vec![vec![10.0, 11.0]]];
+    samples.tec_maps = vec![vec![vec![Some(10.0), Some(11.0)]]];
     let err = Ionex::from_samples(samples).expect_err("short TEC grid must fail");
     assert_eq!(err, TecSamplesError::ShapeMismatch);
 }
@@ -559,8 +570,8 @@ fn ionex_from_samples_rejects_dimension_mismatch() {
 fn ionex_from_samples_rejects_rms_count_mismatch() {
     let mut samples = valid_tec_grid_samples();
     samples.rms_maps = vec![
-        vec![vec![1.0, 2.0], vec![3.0, 4.0]],
-        vec![vec![5.0, 6.0], vec![7.0, 8.0]],
+        vec![vec![Some(1.0), Some(2.0)], vec![Some(3.0), Some(4.0)]],
+        vec![vec![Some(5.0), Some(6.0)], vec![Some(7.0), Some(8.0)]],
     ];
     let err = Ionex::from_samples(samples).expect_err("extra RMS map must fail");
     assert_eq!(err, TecSamplesError::RmsCountMismatch);
@@ -569,7 +580,7 @@ fn ionex_from_samples_rejects_rms_count_mismatch() {
 #[test]
 fn ionex_from_samples_rejects_non_finite_values() {
     let mut samples = valid_tec_grid_samples();
-    samples.tec_maps[0][0][0] = f64::NAN;
+    samples.tec_maps[0][0][0] = Some(f64::NAN);
     let err = Ionex::from_samples(samples).expect_err("non-finite TEC value must fail");
     assert_eq!(err, TecSamplesError::NonFiniteValue);
 }
@@ -628,39 +639,49 @@ fn ionex_from_node_samples_treats_signed_zero_as_one_axis_node() {
             epoch,
             lat_deg: 1.0,
             lon_deg: -0.0,
-            vtec_tecu: 10.0,
+            vtec_tecu: Some(10.0),
             rms_tecu: None,
+            height_offset_km: None,
         },
         TecSample {
             epoch,
             lat_deg: 1.0,
             lon_deg: 1.0,
-            vtec_tecu: 11.0,
+            vtec_tecu: Some(11.0),
             rms_tecu: None,
+            height_offset_km: None,
         },
         TecSample {
             epoch,
             lat_deg: 0.0,
             lon_deg: 0.0,
-            vtec_tecu: 12.0,
+            vtec_tecu: Some(12.0),
             rms_tecu: None,
+            height_offset_km: None,
         },
         TecSample {
             epoch,
             lat_deg: 0.0,
             lon_deg: 1.0,
-            vtec_tecu: 13.0,
+            vtec_tecu: Some(13.0),
             rms_tecu: None,
+            height_offset_km: None,
         },
     ];
 
-    let ionex =
-        Ionex::from_node_samples(samples, 450.0, 6371.0, 0).expect("signed-zero nodes rebuild");
+    let ionex = Ionex::from_node_samples(
+        samples,
+        450.0,
+        6371.0,
+        0,
+        IonexHeader::new(IonexMappingFunction::CosZ),
+    )
+    .expect("signed-zero nodes rebuild");
     assert_eq!(ionex.lon_nodes_deg().len(), 2);
     assert_eq!(ionex.lon_nodes_deg()[0].to_bits(), (-0.0_f64).to_bits());
     assert_eq!(
         ionex.tec_maps()[0],
-        vec![vec![10.0, 11.0], vec![12.0, 13.0]]
+        vec![vec![Some(10.0), Some(11.0)], vec![Some(12.0), Some(13.0)]]
     );
 }
 
@@ -672,6 +693,7 @@ fn ionex_from_node_samples_rebuilds_synthetic_ir_byte_identically() {
         original.shell_height_km(),
         original.base_radius_km(),
         original.exponent(),
+        original.header().clone(),
     )
     .expect("flat node samples rebuild IONEX");
     assert_eq!(
@@ -835,7 +857,7 @@ fn coverage_ionex(epoch_s: &[i64]) -> Ionex {
         .iter()
         .map(|&seconds| super::ionex_epoch_from_j2000_seconds(seconds))
         .collect();
-    let map = vec![vec![10.0, 11.0], vec![12.0, 13.0]];
+    let map = vec![vec![Some(10.0), Some(11.0)], vec![Some(12.0), Some(13.0)]];
     samples.tec_maps = epoch_s.iter().map(|_| map.clone()).collect();
     Ionex::from_samples(samples).expect("coverage-test IONEX")
 }
@@ -1471,6 +1493,14 @@ fn equatorial_zenith_components(
     lon_arr: &[f64],
     maps: &[Vec<Vec<f64>>],
 ) -> SlantComponents {
+    let maps: Vec<Vec<Vec<Option<f64>>>> = maps
+        .iter()
+        .map(|map| {
+            map.iter()
+                .map(|row| row.iter().copied().map(Some).collect())
+                .collect()
+        })
+        .collect();
     let epochs = [super::ionex_epoch_from_j2000_seconds(0)];
     let lat_arr = [0.0, -1.0];
     slant_delay_components(
@@ -1486,13 +1516,14 @@ fn equatorial_zenith_components(
         0,
         VtecGridView {
             map_epochs: &epochs,
-            maps,
+            maps: &maps,
             lat_arr: &lat_arr,
             lon_arr,
             dlat: -1.0,
             dlon: lon_arr[1] - lon_arr[0],
         },
     )
+    .expect("every node holds a value")
 }
 
 fn assert_close(got: f64, want: f64) {
@@ -2076,3 +2107,1063 @@ fn regular_tec_grid_shell_geometry_is_configurable() {
         "non-default shell height should change the mapped delay"
     );
 }
+
+// ---------------------------------------------------------------------------
+// IONEX 1 layout: the spec's examples, real products, and RTKLIB's reading.
+// ---------------------------------------------------------------------------
+
+fn fixture_text(name: &str) -> String {
+    let path = fixtures_dir().join("ionex").join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+fn scaled(raw: i64, exponent: i32) -> f64 {
+    super::grid::scale_value(raw, exponent)
+}
+
+fn node_bits(value: Option<f64>) -> Option<u64> {
+    value.map(f64::to_bits)
+}
+
+const REAL_TRIMS: [&str; 5] = [
+    "COD0OPSFIN_20240010000_01D_01H_GIM_trim",
+    "EMR0OPSFIN_20240010000_01D_01H_GIM_trim",
+    "IGS0OPSFIN_20240010000_01D_02H_GIM_trim",
+    "uqrg0010.24i_trim",
+    "uqrg0010.24i_nan_trim",
+];
+
+/// The warnings and skipped records a trimmed real product reads with: the
+/// `uqrg` products have no `OBSERVABLES USED` or `END OF FILE` record and seven
+/// `AUX DATA` blocks, and each other product one `AUX DATA` block. The `uqrg`
+/// trim around map 55 keeps the one RMS field that product gives as `nan`.
+fn real_trim_findings(name: &str) -> (Vec<IonexWarning>, usize) {
+    if name.starts_with("uqrg") {
+        // The header findings come first, then the ones the maps gave.
+        let mut warnings = vec![
+            IonexWarning::MissingRecord("OBSERVABLES USED"),
+            IonexWarning::MissingRecord("END OF FILE"),
+        ];
+        if name.ends_with("nan_trim") {
+            warnings.push(IonexWarning::NotANumberValue {
+                kind: "RMS",
+                map_number: 1,
+                line: 227,
+                lat_deg: 40.0,
+                lon_deg: -125.0,
+            });
+        }
+        (warnings, 7)
+    } else {
+        (Vec::new(), 1)
+    }
+}
+
+#[test]
+fn ionex_spec_example_2d_reads_every_map_by_its_own_records() {
+    let (ionex, warnings) =
+        Ionex::parse_str_with_warnings(&fixture_text("spec_example_2d.inx")).expect("example");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(ionex.skipped_records(), 0);
+    assert_eq!(ionex.lat_nodes_deg(), &[85.0, 80.0, 75.0]);
+    assert_eq!(ionex.lon_nodes_deg().len(), 72);
+    assert_eq!(ionex.map_epochs_s().len(), 2);
+    assert_eq!(ionex.exponent(), -1);
+    assert_eq!(ionex.shell_height_km(), 400.0);
+
+    let header = ionex.header();
+    assert_eq!(header.version, 1.0);
+    assert_eq!(header.satellite_system, "GPS");
+    assert_eq!(header.program, "ionpgm v1.0");
+    assert_eq!(header.run_by, "aiub");
+    assert_eq!(header.date, "29-jan-96 17:29");
+    assert_eq!(header.interval_s, 21600);
+    assert_eq!(header.mapping_function, Some(IonexMappingFunction::CosZ));
+    assert_eq!(header.elevation_cutoff_deg, 20.0);
+    assert_eq!(header.observables_used, "double-difference carrier phase");
+    assert_eq!(header.station_count, Some(80));
+    assert_eq!(header.satellite_count, Some(24));
+    assert_eq!(header.descriptions.len(), 2);
+    assert_eq!(header.comments.len(), 6);
+
+    for i in 0..3usize {
+        for j in 0..72usize {
+            let (ri, rj) = (i as i64, j as i64);
+            let tec1 = (i, j) != (1, 1);
+            assert_eq!(
+                node_bits(ionex.tec_maps()[0][i][j]),
+                node_bits(tec1.then(|| scaled(1000 + 100 * ri + rj, -1))),
+                "TEC map 1 [{i}][{j}]"
+            );
+            let tec2 = match i {
+                0 => Some(scaled(10000 + 10 * rj, -2)),
+                1 => Some(scaled(100 + rj, -1)),
+                _ => (j != 71).then(|| scaled(12000 + 10 * rj, -2)),
+            };
+            assert_eq!(
+                node_bits(ionex.tec_maps()[1][i][j]),
+                node_bits(tec2),
+                "TEC map 2 [{i}][{j}]"
+            );
+            assert_eq!(
+                node_bits(ionex.rms_maps()[0][i][j]),
+                node_bits(((i, j) != (0, 0)).then(|| scaled(10 + ri + rj, -1))),
+                "RMS map 1 [{i}][{j}]"
+            );
+            assert_eq!(
+                node_bits(ionex.rms_maps()[1][i][j]),
+                node_bits(Some(scaled(20 + ri + rj, -1))),
+                "RMS map 2 [{i}][{j}]"
+            );
+            assert_eq!(
+                node_bits(ionex.height_maps()[0][i][j]),
+                node_bits(((i, j) != (2, 5)).then(|| scaled(10 * ri + rj, -1))),
+                "height map 1 [{i}][{j}]"
+            );
+            assert_eq!(
+                node_bits(ionex.height_maps()[1][i][j]),
+                node_bits(Some(scaled(5 + rj, -1))),
+                "height map 2 [{i}][{j}]"
+            );
+        }
+    }
+}
+
+#[test]
+fn ionex_spec_example_3d_is_refused_by_name() {
+    let text = fixture_text("spec_example_3d.inx");
+    let err = Ionex::parse_str(&text).expect_err("3-D maps");
+    assert!(err.to_string().contains("MAP DIMENSION 3"), "{err}");
+
+    let without_dimension: String = text
+        .lines()
+        .filter(|line| !line.ends_with("MAP DIMENSION"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    let err = Ionex::parse_str(&without_dimension).expect_err("3-D heights");
+    assert!(err.to_string().contains("more than one height"), "{err}");
+}
+
+#[test]
+fn ionex_real_products_match_rtklib_at_every_node() {
+    for name in REAL_TRIMS {
+        let (ionex, warnings) =
+            Ionex::parse_str_with_warnings(&fixture_text(&format!("{name}.INX"))).expect(name);
+        let (expected_warnings, expected_skips) = real_trim_findings(name);
+        assert_eq!(warnings, expected_warnings, "{name}");
+        assert_eq!(
+            ionex.skipped_records(),
+            expected_skips,
+            "{name}: AUX DATA blocks"
+        );
+
+        let listing = fixture_text(&format!("rtklib/{name}.nodes"));
+        let mut map = 0usize;
+        let mut nodes = 0usize;
+        let mut not_available = 0usize;
+        let mut rms_not_available = 0usize;
+        for line in listing.lines() {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            match fields[0] {
+                "file" => continue,
+                "map" => {
+                    map = fields[1].parse::<usize>().expect("map number") - 1;
+                    assert_eq!(
+                        ionex.map_epochs_s()[map],
+                        crate::astro::time::civil::j2000_seconds(
+                            fields[2][0..4].parse().expect("year"),
+                            fields[2][5..7].parse().expect("month"),
+                            fields[2][8..10].parse().expect("day"),
+                            fields[3][0..2].parse().expect("hour"),
+                            fields[3][3..5].parse().expect("minute"),
+                            0.0,
+                        ) as i64,
+                        "{name}: epoch of map {}",
+                        map + 1
+                    );
+                    continue;
+                }
+                _ => {}
+            }
+            let [k, i, j] =
+                [fields[0], fields[1], fields[2]].map(|f| f.parse::<usize>().expect("index"));
+            assert_eq!(k, 0, "{name}: one height layer");
+            // RTKLIB prints the node it read from a `nan` field as `nan`, which
+            // is no hex float.
+            let rtklib_value = |field: &str| {
+                if field.eq_ignore_ascii_case("nan") {
+                    f64::NAN
+                } else {
+                    parse_hex_float(field)
+                }
+            };
+            let rtklib_tec = rtklib_value(fields[3]);
+            let rtklib_rms = rtklib_value(fields[4]);
+            match ionex.tec_maps()[map][i][j] {
+                // RTKLIB forms a value as `raw * 10^k`, this reader as the
+                // decimal `raw / 10^-k`, which IEEE division rounds correctly.
+                // The two are the same number to one unit in the last place,
+                // and differ by that much wherever the product is not the
+                // decimal: RTKLIB reads `73` at EXPONENT -1 as
+                // 7.300000000000001, this reader as 7.3.
+                Some(tec) => assert!(
+                    ulp_distance(tec, rtklib_tec) <= 1,
+                    "{name}: TEC map {} [{i}][{j}] sidereon {tec} rtklib {rtklib_tec}",
+                    map + 1
+                ),
+                None => {
+                    assert_eq!(rtklib_tec, 0.0, "{name}: RTKLIB leaves a 9999 node unset");
+                    not_available += 1;
+                }
+            }
+            match ionex.rms_maps()[map][i][j] {
+                Some(rms) => assert_eq!(
+                    (rms as f32).to_bits(),
+                    (rtklib_rms as f32).to_bits(),
+                    "{name}: RMS map {} [{i}][{j}] (RTKLIB keeps RMS as a float)",
+                    map + 1
+                ),
+                // RTKLIB reads the `nan` field of uqrg through `sscanf`, which
+                // gives it a NaN; this reader gives the node no value.
+                None => {
+                    assert!(
+                        rtklib_rms.is_nan(),
+                        "{name}: RMS map {} [{i}][{j}] is non-available here, RTKLIB has \
+                         {rtklib_rms}",
+                        map + 1
+                    );
+                    rms_not_available += 1;
+                }
+            }
+            nodes += 1;
+        }
+        assert_eq!(
+            nodes,
+            ionex.tec_maps().len() * ionex.lat_nodes_deg().len() * ionex.lon_nodes_deg().len(),
+            "{name}: every node compared"
+        );
+        let expected_not_available = usize::from(name.starts_with("EMR"));
+        assert_eq!(not_available, expected_not_available, "{name}");
+        assert_eq!(
+            rms_not_available,
+            usize::from(name.ends_with("nan_trim")),
+            "{name}: RMS nodes without a value"
+        );
+    }
+}
+
+#[test]
+fn ionex_hour_24_reads_as_midnight_of_the_next_day() {
+    let text = fixture_text("uqrg0010.24i_trim.INX");
+    let ionex = Ionex::parse_str(&text).expect("uqrg trim");
+    let epochs = ionex.map_epochs_s();
+    let midnight = crate::astro::time::civil::j2000_seconds(2024, 1, 2, 0, 0, 0.0) as i64;
+    assert_eq!(epochs, vec![midnight - 1800, midnight - 900, midnight]);
+    assert_eq!(ionex.header().interval_s, 900);
+
+    let refused = text.replacen(
+        "  2024     1     1    24     0     0                        EPOCH OF CURRENT MAP",
+        "  2024     1     1    24     0     1                        EPOCH OF CURRENT MAP",
+        1,
+    );
+    assert_ne!(refused, text);
+    let message = Ionex::parse_str(&refused)
+        .expect_err("24:00:01")
+        .to_string();
+    assert!(message.contains("IONEX epoch"), "{message}");
+}
+
+#[test]
+fn ionex_real_non_available_node_reads_as_none() {
+    let ionex = Ionex::parse_str(&fixture_text("EMR0OPSFIN_20240010000_01D_01H_GIM_trim.INX"))
+        .expect("EMR trim");
+    assert_eq!(ionex.lat_nodes_deg()[0], 10.0);
+    assert_eq!(ionex.lon_nodes_deg()[65], 145.0);
+    assert_eq!(ionex.tec_maps()[1][0][65], None);
+    assert_eq!(
+        ionex
+            .tec_maps()
+            .iter()
+            .flatten()
+            .flatten()
+            .filter(|v| v.is_none())
+            .count(),
+        1
+    );
+    assert_eq!(ionex.rms_maps()[1][0][65], Some(scaled(44, -1)));
+    assert_eq!(
+        ionex.header().mapping_function,
+        Some(IonexMappingFunction::Other("MOD".into()))
+    );
+
+    let code = Ionex::parse_str(&fixture_text("COD0OPSFIN_20240010000_01D_01H_GIM_trim.INX"))
+        .expect("CODE trim");
+    assert_eq!(
+        code.header().mapping_function,
+        Some(IonexMappingFunction::NoMapping)
+    );
+    assert_eq!(code.header().program, "ADDNEQ2 V5.5");
+    assert_eq!(code.header().satellite_system, "GNSS");
+    let igs = Ionex::parse_str(&fixture_text("IGS0OPSFIN_20240010000_01D_02H_GIM_trim.INX"))
+        .expect("IGS trim");
+    assert_eq!(
+        igs.header().mapping_function,
+        Some(IonexMappingFunction::CosZ)
+    );
+}
+
+#[test]
+fn ionex_real_products_round_trip_through_the_serializer() {
+    for name in REAL_TRIMS {
+        let original = Ionex::parse_str(&fixture_text(&format!("{name}.INX"))).expect(name);
+        let reparsed = Ionex::parse_str(&original.to_ionex_string()).expect("reparse");
+        let without_skips =
+            Ionex::from_samples(original.tec_grid_samples()).expect("sample-built copy");
+        assert_eq!(reparsed, without_skips, "{name}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Records built one at a time.
+// ---------------------------------------------------------------------------
+
+const LAYOUT_LAT: &str = "     1.0   0.0  -1.0";
+const LAYOUT_LON: &str = "     0.0   1.0   1.0";
+const LAYOUT_EPOCH_0: &str = "  2020     1     1     0     0     0";
+const LAYOUT_EPOCH_1: &str = "  2020     1     1     1     0     0";
+
+fn layout_header(maps: usize, last_epoch: &str, extra: &str) -> String {
+    let mut t = String::new();
+    t.push_str(&ionex_record(
+        "     1.0            IONOSPHERE MAPS     GPS",
+        "IONEX VERSION / TYPE",
+    ));
+    t.push_str(&ionex_record("layout test", "PGM / RUN BY / DATE"));
+    t.push_str(&ionex_record(LAYOUT_EPOCH_0, "EPOCH OF FIRST MAP"));
+    t.push_str(&ionex_record(last_epoch, "EPOCH OF LAST MAP"));
+    t.push_str(&ionex_record("  3600", "INTERVAL"));
+    t.push_str(&ionex_record(&format!("{maps:6}"), "# OF MAPS IN FILE"));
+    t.push_str(&ionex_record("  COSZ", "MAPPING FUNCTION"));
+    t.push_str(&ionex_record("     0.0", "ELEVATION CUTOFF"));
+    t.push_str(&ionex_record("", "OBSERVABLES USED"));
+    t.push_str(&ionex_record("  6371.0", "BASE RADIUS"));
+    t.push_str(&ionex_record("     2", "MAP DIMENSION"));
+    t.push_str(&ionex_record("   450.0 450.0   0.0", "HGT1 / HGT2 / DHGT"));
+    t.push_str(&ionex_record(LAYOUT_LAT, "LAT1 / LAT2 / DLAT"));
+    t.push_str(&ionex_record(LAYOUT_LON, "LON1 / LON2 / DLON"));
+    t.push_str(extra);
+    t.push_str(&ionex_record("", "END OF HEADER"));
+    t
+}
+
+fn layout_band(lat: f64, lon1: f64, lon2: f64, dlon: f64, h: f64, values: &str) -> String {
+    format!(
+        "{}{values}\n",
+        ionex_record(
+            &format!("  {lat:6.1}{lon1:6.1}{lon2:6.1}{dlon:6.1}{h:6.1}"),
+            "LAT/LON1/LON2/DLON/H"
+        )
+    )
+}
+
+fn layout_bands(north: &str, south: &str) -> String {
+    layout_band(1.0, 0.0, 1.0, 1.0, 450.0, north) + &layout_band(0.0, 0.0, 1.0, 1.0, 450.0, south)
+}
+
+fn layout_map(kind: &str, index: usize, epoch: Option<&str>, body: &str) -> String {
+    let mut t = ionex_record(&format!("{index:6}"), &format!("START OF {kind} MAP"));
+    if let Some(epoch) = epoch {
+        t.push_str(&ionex_record(epoch, "EPOCH OF CURRENT MAP"));
+    }
+    t.push_str(body);
+    t.push_str(&ionex_record(
+        &format!("{index:6}"),
+        &format!("END OF {kind} MAP"),
+    ));
+    t
+}
+
+fn layout_end() -> String {
+    ionex_record("", "END OF FILE")
+}
+
+fn exponent_record(exponent: i32) -> String {
+    ionex_record(&format!("{exponent:6}"), "EXPONENT")
+}
+
+fn one_map_file(extra_header: &str, body: &str) -> String {
+    layout_header(1, LAYOUT_EPOCH_0, extra_header)
+        + &layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), body)
+        + &layout_end()
+}
+
+fn parse_error(text: &str) -> String {
+    Ionex::parse_str(text).expect_err("refused").to_string()
+}
+
+#[test]
+fn ionex_bands_are_placed_by_their_own_latitude_and_longitudes() {
+    // South band first, its longitudes east to west; north band split in two.
+    let body = layout_band(0.0, 1.0, 0.0, -1.0, 450.0, "    4    3")
+        + &layout_band(1.0, 1.0, 1.0, 1.0, 450.0, "    2")
+        + &layout_band(1.0, 0.0, 0.0, 1.0, 450.0, "    1");
+    let text = one_map_file(&exponent_record(0), &body);
+    let (ionex, warnings) = Ionex::parse_str_with_warnings(&text).expect("placed bands");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        ionex.tec_maps()[0],
+        vec![vec![Some(1.0), Some(2.0)], vec![Some(3.0), Some(4.0)]]
+    );
+}
+
+#[test]
+fn ionex_band_off_the_header_grid_is_refused_by_name() {
+    let exponent = exponent_record(0);
+    let north = layout_band(1.0, 0.0, 1.0, 1.0, 450.0, "    1    2");
+    for (band, expected) in [
+        (
+            layout_band(0.5, 0.0, 1.0, 1.0, 450.0, "    3    4"),
+            "latitude 0.5",
+        ),
+        (
+            layout_band(0.0, 5.0, 6.0, 1.0, 450.0, "    3    4"),
+            "longitude 5",
+        ),
+        (
+            layout_band(0.0, 0.0, 1.0, 1.0, 350.0, "    3    4"),
+            "height 350",
+        ),
+        (
+            layout_band(0.0, 0.0, 1.0, 0.0, 450.0, "    3    4"),
+            "not a range",
+        ),
+    ] {
+        let message = parse_error(&one_map_file(&exponent, &(north.clone() + &band)));
+        assert!(message.contains(expected), "{expected}: {message}");
+    }
+}
+
+#[test]
+fn ionex_node_given_twice_or_left_without_a_value_is_refused() {
+    let exponent = exponent_record(0);
+    let north = layout_band(1.0, 0.0, 1.0, 1.0, 450.0, "    1    2");
+    let twice = parse_error(&one_map_file(&exponent, &(north.clone() + &north)));
+    assert!(twice.contains("latitude 1 longitude 0 twice"), "{twice}");
+
+    let missing_band = parse_error(&one_map_file(&exponent, &north));
+    assert!(
+        missing_band.contains("no LAT/LON1/LON2/DLON/H band for latitude 0"),
+        "{missing_band}"
+    );
+
+    let partial = north + &layout_band(0.0, 0.0, 0.0, 1.0, 450.0, "    3");
+    let partial = parse_error(&one_map_file(&exponent, &partial));
+    assert!(
+        partial.contains("gives no value for latitude 0 longitude 1"),
+        "{partial}"
+    );
+}
+
+#[test]
+fn ionex_in_map_exponent_sets_the_unit_of_the_blocks_after_it() {
+    let before_first = exponent_record(-2) + &layout_bands("  100  200", "  300  400");
+    let ionex = Ionex::parse_str(&one_map_file("", &before_first)).expect("exponent in map");
+    assert_eq!(
+        ionex.tec_maps()[0],
+        vec![
+            vec![Some(scaled(100, -2)), Some(scaled(200, -2))],
+            vec![Some(scaled(300, -2)), Some(scaled(400, -2))]
+        ]
+    );
+    assert_eq!(
+        ionex.exponent(),
+        -1,
+        "the header exponent stays the default"
+    );
+
+    let between = layout_band(1.0, 0.0, 1.0, 1.0, 450.0, "   10   20")
+        + &exponent_record(-2)
+        + &layout_band(0.0, 0.0, 1.0, 1.0, 450.0, "  300  400");
+    let ionex = Ionex::parse_str(&one_map_file("", &between)).expect("exponent between bands");
+    assert_eq!(
+        ionex.tec_maps()[0],
+        vec![
+            vec![Some(scaled(10, -1)), Some(scaled(20, -1))],
+            vec![Some(scaled(300, -2)), Some(scaled(400, -2))]
+        ]
+    );
+}
+
+#[test]
+fn ionex_exponent_a_map_leaves_changed_carries_into_the_next() {
+    let changed = exponent_record(-2) + &layout_bands("  100  200", "  300  400");
+    let unstated = layout_bands("  100  200", "  300  400");
+    // IONEX 1: "Each value remains valid until changed by an additional header
+    // record", so map 2 reads at the -2 map 1 set, and is reported for it.
+    let text = layout_header(2, LAYOUT_EPOCH_1, "")
+        + &layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), &changed)
+        + &layout_map("TEC", 2, Some(LAYOUT_EPOCH_1), &unstated)
+        + &layout_end();
+    let (inherited, warnings) = Ionex::parse_str_with_warnings(&text).expect("carried exponent");
+    assert_eq!(inherited.tec_maps()[1][0][0], Some(scaled(100, -2)));
+    assert_eq!(
+        warnings,
+        vec![IonexWarning::ExponentCarriedIntoMap {
+            kind: "TEC",
+            map_number: 2,
+            line: 26,
+            exponent: -2,
+            set_by_line: 16,
+        }]
+    );
+    // The map is named once, however many bands it carries.
+    assert_eq!(
+        warnings
+            .iter()
+            .filter(|w| matches!(w, IonexWarning::ExponentCarriedIntoMap { .. }))
+            .count(),
+        1
+    );
+
+    let restated = exponent_record(-1) + &unstated;
+    let text = layout_header(2, LAYOUT_EPOCH_1, "")
+        + &layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), &changed)
+        + &layout_map("TEC", 2, Some(LAYOUT_EPOCH_1), &restated)
+        + &layout_end();
+    let ionex = Ionex::parse_str(&text).expect("restated exponent");
+    assert_eq!(ionex.tec_maps()[1][0][0], Some(scaled(100, -1)));
+
+    let set_between_maps = layout_header(2, LAYOUT_EPOCH_1, "")
+        + &layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), &changed)
+        + &exponent_record(-2)
+        + &layout_map("TEC", 2, Some(LAYOUT_EPOCH_1), &unstated)
+        + &layout_end();
+    let ionex = Ionex::parse_str(&set_between_maps).expect("exponent between maps");
+    assert_eq!(ionex.tec_maps()[1][0][0], Some(scaled(100, -2)));
+}
+
+#[test]
+fn ionex_values_are_read_in_their_i5_columns() {
+    let exponent = exponent_record(0);
+    let merged = Ionex::parse_str(&one_map_file(
+        &exponent,
+        &layout_bands("1000010000", " 9999   -5"),
+    ))
+    .expect("adjacent five-digit values");
+    assert_eq!(
+        merged.tec_maps()[0],
+        vec![vec![Some(10000.0), Some(10000.0)], vec![None, Some(-5.0)]]
+    );
+
+    let whitespace = Ionex::parse_str(&one_map_file(&exponent, &layout_bands("10 11", "12 13")))
+        .expect("values not in columns");
+    assert_eq!(whitespace.tec_maps()[0][1], vec![Some(12.0), Some(13.0)]);
+
+    let empty = parse_error(&one_map_file(
+        &exponent,
+        &layout_bands("    1         2", "3 4"),
+    ));
+    assert!(empty.contains("empty field"), "{empty}");
+
+    let letters = parse_error(&one_map_file(&exponent, &layout_bands("    1    x", "3 4")));
+    assert!(letters.contains("not integer values"), "{letters}");
+
+    let short = parse_error(&one_map_file(
+        &exponent,
+        &layout_bands("    1", "    3    4"),
+    ));
+    assert!(
+        short.contains("latitude band 1 has 1 values, expected 2"),
+        "{short}"
+    );
+
+    let long = parse_error(&one_map_file(
+        &exponent,
+        &layout_bands("    1    2    3", "3 4"),
+    ));
+    assert!(long.contains("more than 2 values"), "{long}");
+
+    let stray = one_map_file(&exponent, &(layout_bands("1 2", "3 4") + "    5    6\n"));
+    let stray = parse_error(&stray);
+    assert!(
+        stray.contains("outside a LAT/LON1/LON2/DLON/H block"),
+        "{stray}"
+    );
+}
+
+#[test]
+fn ionex_nan_value_reads_as_non_available_with_a_warning() {
+    // uqrg0010.24i gives one RMS value as `  nan`.
+    let text = one_map_file(
+        &exponent_record(0),
+        &layout_bands("    1  nan", "    3    4"),
+    );
+    let (ionex, warnings) = Ionex::parse_str_with_warnings(&text).expect("nan field");
+    assert_eq!(
+        ionex.tec_maps()[0],
+        vec![vec![Some(1.0), None], vec![Some(3.0), Some(4.0)]]
+    );
+    assert_eq!(
+        warnings,
+        vec![IonexWarning::NotANumberValue {
+            kind: "TEC",
+            map_number: 1,
+            line: 20,
+            lat_deg: 1.0,
+            lon_deg: 1.0,
+        }]
+    );
+}
+
+#[test]
+fn ionex_map_numbers_and_related_maps_are_checked() {
+    let exponent = exponent_record(0);
+    let bands = layout_bands("    1    2", "    3    4");
+    let two_maps = |second: usize, end: usize| {
+        let mut text = layout_header(2, LAYOUT_EPOCH_1, &exponent)
+            + &layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), &bands);
+        text.push_str(&ionex_record(&format!("{second:6}"), "START OF TEC MAP"));
+        text.push_str(&ionex_record(LAYOUT_EPOCH_1, "EPOCH OF CURRENT MAP"));
+        text.push_str(&bands);
+        text.push_str(&ionex_record(&format!("{end:6}"), "END OF TEC MAP"));
+        text + &layout_end()
+    };
+    let skipped = parse_error(&two_maps(3, 3));
+    assert!(
+        skipped.contains("numbered 3, but TEC map 2 comes next"),
+        "{skipped}"
+    );
+    let end = parse_error(&two_maps(2, 1));
+    assert!(
+        end.contains("does not give the number of TEC map 2"),
+        "{end}"
+    );
+    Ionex::parse_str(&two_maps(2, 2)).expect("numbered in sequence");
+
+    let with_related = |related: &str| {
+        layout_header(1, LAYOUT_EPOCH_0, &exponent)
+            + &layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), &bands)
+            + related
+            + &layout_end()
+    };
+    let epoch = parse_error(&with_related(&layout_map(
+        "RMS",
+        1,
+        Some(LAYOUT_EPOCH_1),
+        &bands,
+    )));
+    assert!(
+        epoch.contains("RMS map 1 gives epoch 2020-01-01 01:00:00"),
+        "{epoch}"
+    );
+    let orphan = parse_error(&with_related(&layout_map("RMS", 2, None, &bands)));
+    assert!(orphan.contains("RMS map 2 at line"), "{orphan}");
+    let twice = parse_error(&with_related(
+        &(layout_map("HEIGHT", 1, None, &bands) + &layout_map("HEIGHT", 1, None, &bands)),
+    ));
+    assert!(twice.contains("HEIGHT map 1 appears at lines"), "{twice}");
+
+    let rms_for_second_only = layout_header(2, LAYOUT_EPOCH_1, &exponent)
+        + &layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), &bands)
+        + &layout_map("TEC", 2, Some(LAYOUT_EPOCH_1), &bands)
+        + &layout_map("RMS", 2, Some(LAYOUT_EPOCH_1), &bands)
+        + &layout_end();
+    let ionex = Ionex::parse_str(&rms_for_second_only).expect("RMS for one map");
+    assert_eq!(
+        ionex.rms_maps()[0],
+        vec![vec![None, None], vec![None, None]]
+    );
+    assert_eq!(ionex.rms_maps()[1], ionex.tec_maps()[1]);
+
+    let all_non_available = layout_bands(" 9999 9999", " 9999 9999");
+    let ionex = Ionex::parse_str(&with_related(&layout_map(
+        "RMS",
+        1,
+        None,
+        &all_non_available,
+    )))
+    .expect("RMS map without values");
+    assert!(ionex.rms_maps().is_empty());
+}
+
+#[test]
+fn ionex_height_maps_are_kept_apart_from_the_tec_maps() {
+    let exponent = exponent_record(0);
+    let text = layout_header(1, LAYOUT_EPOCH_0, &exponent)
+        + &layout_map(
+            "TEC",
+            1,
+            Some(LAYOUT_EPOCH_0),
+            &layout_bands("    1    2", "    3    4"),
+        )
+        + &layout_map("HEIGHT", 1, None, &layout_bands("    7    8", " 9999    6"))
+        + &layout_end();
+    let ionex = Ionex::parse_str(&text).expect("height map");
+    assert_eq!(
+        ionex.tec_maps()[0],
+        vec![vec![Some(1.0), Some(2.0)], vec![Some(3.0), Some(4.0)]]
+    );
+    assert_eq!(
+        ionex.height_maps()[0],
+        vec![vec![Some(7.0), Some(8.0)], vec![None, Some(6.0)]]
+    );
+    assert!(ionex.rms_maps().is_empty());
+
+    let without_values = layout_header(1, LAYOUT_EPOCH_0, &exponent)
+        + &layout_map(
+            "TEC",
+            1,
+            Some(LAYOUT_EPOCH_0),
+            &layout_bands("    1    2", "    3    4"),
+        )
+        + &layout_map("HEIGHT", 1, None, &layout_bands(" 9999 9999", " 9999 9999"))
+        + &layout_end();
+    let ionex = Ionex::parse_str(&without_values).expect("height map without values");
+    assert_eq!(
+        ionex.height_maps(),
+        &[vec![vec![None, None], vec![None, None]]]
+    );
+}
+
+#[test]
+fn ionex_summary_records_are_checked_against_the_maps() {
+    let exponent = exponent_record(0);
+    let bands = layout_bands("    1    2", "    3    4");
+    let two_maps = |header: String| {
+        header
+            + &layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), &bands)
+            + &layout_map("TEC", 2, Some(LAYOUT_EPOCH_1), &bands)
+            + &layout_end()
+    };
+    let clean = two_maps(layout_header(2, LAYOUT_EPOCH_1, &exponent));
+    let (_, warnings) = Ionex::parse_str_with_warnings(&clean).expect("clean");
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let wrong_last = two_maps(layout_header(2, LAYOUT_EPOCH_0, &exponent));
+    let (_, warnings) = Ionex::parse_str_with_warnings(&wrong_last).expect("wrong last epoch");
+    assert!(
+        matches!(
+            warnings.as_slice(),
+            [IonexWarning::EpochMismatch {
+                label: "EPOCH OF LAST MAP",
+                line: 4,
+                ..
+            }]
+        ),
+        "{warnings:?}"
+    );
+
+    let wrong_count = two_maps(layout_header(3, LAYOUT_EPOCH_1, &exponent));
+    let (_, warnings) = Ionex::parse_str_with_warnings(&wrong_count).expect("wrong count");
+    assert_eq!(
+        warnings,
+        vec![IonexWarning::MapCountMismatch {
+            line: 6,
+            declared: 3,
+            tec_maps: 2,
+            all_maps: 2
+        }]
+    );
+    let counting_rms = layout_header(2, LAYOUT_EPOCH_0, &exponent)
+        + &layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), &bands)
+        + &layout_map("RMS", 1, None, &bands)
+        + &layout_end();
+    let (_, warnings) = Ionex::parse_str_with_warnings(&counting_rms).expect("TEC and RMS count");
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let wrong_interval =
+        two_maps(layout_header(2, LAYOUT_EPOCH_1, &exponent).replace("  3600", "  1800"));
+    let (_, warnings) = Ionex::parse_str_with_warnings(&wrong_interval).expect("interval");
+    assert_eq!(
+        warnings,
+        vec![IonexWarning::IntervalMismatch {
+            line: 5,
+            declared_s: 1800,
+            map_number: 2,
+            spacing_s: 3600
+        }]
+    );
+    let variable =
+        two_maps(layout_header(2, LAYOUT_EPOCH_1, &exponent).replace("  3600", "     0"));
+    let (ionex, warnings) = Ionex::parse_str_with_warnings(&variable).expect("variable");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(ionex.header().interval_s, 0);
+
+    let decimals = two_maps(
+        layout_header(2, LAYOUT_EPOCH_1, &exponent)
+            .replace("  3600", "  3600.0")
+            .replace(LAYOUT_EPOCH_1, "  2020     1     1     1     0  0.00"),
+    );
+    let (ionex, warnings) = Ionex::parse_str_with_warnings(&decimals).expect("whole decimals");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(ionex.header().interval_s, 3600);
+
+    let unreadable =
+        two_maps(layout_header(2, LAYOUT_EPOCH_1, &exponent).replace("  3600", "  36.5"));
+    let (ionex, warnings) = Ionex::parse_str_with_warnings(&unreadable).expect("unreadable");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(ionex.skipped_records(), 1);
+
+    let no_end = clean.replace(&layout_end(), "");
+    let (_, warnings) = Ionex::parse_str_with_warnings(&no_end).expect("no END OF FILE");
+    assert_eq!(warnings, vec![IonexWarning::MissingRecord("END OF FILE")]);
+
+    let comment_first = ionex_record("a comment first", "COMMENT") + &clean;
+    let (_, warnings) = Ionex::parse_str_with_warnings(&comment_first).expect("comment first");
+    assert_eq!(
+        warnings,
+        vec![IonexWarning::VersionRecordNotFirst { line: 2 }]
+    );
+
+    let mut bare = String::new();
+    bare.push_str(&ionex_record("  6371.0", "BASE RADIUS"));
+    bare.push_str(&ionex_record("   450.0 450.0   0.0", "HGT1 / HGT2 / DHGT"));
+    bare.push_str(&ionex_record(LAYOUT_LAT, "LAT1 / LAT2 / DLAT"));
+    bare.push_str(&ionex_record(LAYOUT_LON, "LON1 / LON2 / DLON"));
+    bare.push_str(&exponent);
+    bare.push_str(&ionex_record("", "END OF HEADER"));
+    bare.push_str(&layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), &bands));
+    let (ionex, warnings) = Ionex::parse_str_with_warnings(&bare).expect("bare header");
+    assert_eq!(
+        warnings,
+        [
+            "IONEX VERSION / TYPE",
+            "PGM / RUN BY / DATE",
+            "EPOCH OF FIRST MAP",
+            "EPOCH OF LAST MAP",
+            "INTERVAL",
+            "# OF MAPS IN FILE",
+            "MAPPING FUNCTION",
+            "ELEVATION CUTOFF",
+            "OBSERVABLES USED",
+            "MAP DIMENSION",
+            "END OF FILE",
+        ]
+        .map(IonexWarning::MissingRecord)
+        .to_vec()
+    );
+    assert_eq!(ionex.header().mapping_function, None);
+    assert_eq!(ionex.header().elevation_cutoff_deg, 0.0);
+}
+
+#[test]
+fn ionex_header_records_that_disagree_or_do_not_describe_ionosphere_maps_are_refused() {
+    let exponent = exponent_record(0);
+    let bands = layout_bands("    1    2", "    3    4");
+    let twice = one_map_file(
+        &(exponent.clone() + &ionex_record("     1.0   0.0  -0.5", "LAT1 / LAT2 / DLAT")),
+        &bands,
+    );
+    let message = parse_error(&twice);
+    assert!(
+        message.contains("LAT1 / LAT2 / DLAT at lines 13 and 16 with different values"),
+        "{message}"
+    );
+    let same_twice = one_map_file(
+        &(exponent.clone() + &ionex_record(LAYOUT_LAT, "LAT1 / LAT2 / DLAT")),
+        &bands,
+    );
+    Ionex::parse_str(&same_twice).expect("identical duplicate");
+
+    let other_type = one_map_file(&exponent, &bands).replacen(
+        "     1.0            IONOSPHERE MAPS",
+        "     1.0            OBSERVATION DATA",
+        1,
+    );
+    let message = parse_error(&other_type);
+    assert!(message.contains("file type 'O'"), "{message}");
+
+    let unclosed = one_map_file(&(exponent + &ionex_record("", "START OF AUX DATA")), &bands);
+    let message = parse_error(&unclosed);
+    assert!(
+        message.contains("not closed before END OF HEADER"),
+        "{message}"
+    );
+}
+
+#[test]
+fn ionex_sample_round_trips_keep_non_available_nodes() {
+    let parsed = Ionex::parse_str(&fixture_text("spec_example_2d.inx")).expect("example");
+    let rebuilt = Ionex::from_samples(parsed.tec_grid_samples()).expect("grid samples");
+    assert_eq!(rebuilt, parsed);
+    let from_nodes = Ionex::from_node_samples(
+        parsed.tec_samples(),
+        parsed.shell_height_km(),
+        parsed.base_radius_km(),
+        parsed.exponent(),
+        parsed.header().clone(),
+    )
+    .expect("node samples");
+    assert_eq!(from_nodes, parsed);
+}
+
+// ---------------------------------------------------------------------------
+// Slant delay over non-available nodes.
+// ---------------------------------------------------------------------------
+
+fn zenith_product(ionex: &Ionex) -> Ionex {
+    let mut samples = ionex.tec_grid_samples();
+    // A zero base radius puts a zenith pierce point on the receiver coordinate.
+    samples.base_radius_km = 0.0;
+    samples.height_maps.clear();
+    Ionex::from_samples(samples).expect("zenith product")
+}
+
+fn zenith_delay(
+    ionex: &Ionex,
+    lat_deg: f64,
+    lon_deg: f64,
+    epoch_j2000_s: i64,
+) -> crate::Result<f64> {
+    let request = coverage_request(lat_deg, lon_deg, epoch_j2000_s);
+    super::ionex_slant_delay(
+        ionex,
+        request.receiver,
+        request.elevation_rad,
+        request.azimuth_rad,
+        request.epoch_j2000_s,
+        request.frequency_hz,
+    )
+}
+
+#[test]
+fn ionex_slant_delay_refuses_a_weighted_non_available_node() {
+    let ionex =
+        zenith_product(&Ionex::parse_str(&fixture_text("spec_example_2d.inx")).expect("example"));
+    let epochs = ionex.map_epochs_s();
+
+    // TEC map 1 gives latitude 80 longitude 5 as 9999: the cell from
+    // [0][0] to [1][1] weights it.
+    let err = zenith_delay(&ionex, 82.5, 2.5, epochs[0]).expect_err("weighted node");
+    assert_eq!(
+        err,
+        crate::error::Error::IonexNodesNotAvailable(IonexNodeGap {
+            earlier: Some(IonexMissingNodes {
+                map_index: 0,
+                lat_index: 0,
+                lon_index: 0,
+                missing: [false, false, false, true],
+            }),
+            later: None,
+        })
+    );
+    assert_eq!(
+        err.to_string(),
+        "IONEX nodes not available: map 0 cell [0][0] missing [1][1]"
+    );
+
+    // Between the maps both carry weight; TEC map 2 holds every node of the cell.
+    let err = zenith_delay(&ionex, 82.5, 2.5, (epochs[0] + epochs[1]) / 2).expect_err("between");
+    assert!(
+        matches!(
+            err,
+            crate::error::Error::IonexNodesNotAvailable(IonexNodeGap {
+                earlier: Some(_),
+                later: None
+            })
+        ),
+        "{err:?}"
+    );
+
+    // A node without weight is not used: on the available node at latitude
+    // 80 longitude 0, and at the epoch of the second map.
+    zenith_delay(&ionex, 80.0, 0.0, epochs[0]).expect("query on an available node");
+    zenith_delay(&ionex, 82.5, 2.5, epochs[1]).expect("epoch of the other map");
+
+    let requests = [
+        coverage_request(82.5, 2.5, epochs[0]),
+        coverage_request(82.5, 12.5, epochs[0]),
+    ];
+    let results = ionex_slant_delay_results(&ionex, &requests, IonexCoveragePolicy::Hold);
+    assert!(matches!(
+        results[0],
+        Err(crate::error::Error::IonexNodesNotAvailable(_))
+    ));
+    assert!(results[1].is_ok(), "{:?}", results[1]);
+}
+
+#[test]
+fn ionex_axes_read_in_either_direction() {
+    // IONEX 1 gives an axis as "'LAT1' to 'LAT2' with increment 'DLAT'", which
+    // says nothing about the direction. This file runs its latitudes south to
+    // north and its longitudes east to west.
+    let mut text = String::new();
+    text.push_str(&ionex_record(
+        "     1.0            IONOSPHERE MAPS     GPS",
+        "IONEX VERSION / TYPE",
+    ));
+    text.push_str(&ionex_record("     0.0   1.0   1.0", "LAT1 / LAT2 / DLAT"));
+    text.push_str(&ionex_record("     1.0   0.0  -1.0", "LON1 / LON2 / DLON"));
+    text.push_str(&ionex_record("   450.0 450.0   0.0", "HGT1 / HGT2 / DHGT"));
+    text.push_str(&ionex_record("  6371.0", "BASE RADIUS"));
+    text.push_str(&ionex_record("     0", "EXPONENT"));
+    text.push_str(&ionex_record("  COSZ", "MAPPING FUNCTION"));
+    text.push_str(&ionex_record("     2", "MAP DIMENSION"));
+    text.push_str(&ionex_record("", "END OF HEADER"));
+    text.push_str(&ionex_record("     1", "START OF TEC MAP"));
+    text.push_str(&ionex_record(LAYOUT_EPOCH_0, "EPOCH OF CURRENT MAP"));
+    text.push_str(&layout_band(0.0, 1.0, 0.0, -1.0, 450.0, "   11   10"));
+    text.push_str(&layout_band(1.0, 1.0, 0.0, -1.0, 450.0, "   13   12"));
+    text.push_str(&ionex_record("     1", "END OF TEC MAP"));
+    text.push_str(&layout_end());
+
+    let ionex = Ionex::parse_str(&text).expect("axes in either direction");
+    assert_eq!(ionex.lat_nodes_deg(), &[0.0, 1.0]);
+    assert_eq!(ionex.lon_nodes_deg(), &[1.0, 0.0]);
+    assert_eq!(ionex.dlat_deg(), 1.0);
+    assert_eq!(ionex.dlon_deg(), -1.0);
+    // Each band is placed by its own latitude and longitudes.
+    assert_eq!(
+        ionex.tec_maps()[0],
+        vec![vec![Some(11.0), Some(10.0)], vec![Some(13.0), Some(12.0)]]
+    );
+
+    // A step whose sign contradicts its bounds is refused.
+    let wrong = text.replace("     0.0   1.0   1.0", "     0.0   1.0  -1.0");
+    assert!(
+        parse_error(&wrong).contains("IONEX"),
+        "a contradicting step is refused"
+    );
+}
+
+#[test]
+fn ionex_data_record_outside_ascii_is_refused_by_name() {
+    // A value field is an ASCII number in its columns. A record holding any
+    // other character cannot be cut into them, and splitting it on whitespace
+    // would place its values at the wrong nodes where a field is also blank.
+    let body = layout_bands("    1    2", "    3    \u{e9}");
+    let message = parse_error(&one_map_file(&exponent_record(0), &body));
+    assert!(message.contains("outside ASCII"), "{message}");
+}
+
+#[test]
+fn ionex_exponent_record_between_maps_sets_the_unit_of_the_maps_after_it() {
+    // A record between maps states the unit at file level, which is what the
+    // carry-over refusal asks a map to state, so the map after it carries no
+    // EXPONENT record of its own and nothing is inherited silently.
+    let bands = layout_bands("    1    2", "    3    4");
+    let text = layout_header(2, LAYOUT_EPOCH_1, &exponent_record(0))
+        + &layout_map("TEC", 1, Some(LAYOUT_EPOCH_0), &bands)
+        + &exponent_record(-1)
+        + &layout_map("TEC", 2, Some(LAYOUT_EPOCH_1), &bands)
+        + &layout_end();
+    let (ionex, warnings) = Ionex::parse_str_with_warnings(&text).expect("exponent between maps");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(
+        ionex.tec_maps()[0],
+        vec![vec![Some(1.0), Some(2.0)], vec![Some(3.0), Some(4.0)]]
+    );
+    assert_eq!(
+        ionex.tec_maps()[1],
+        vec![
+            vec![Some(scaled(1, -1)), Some(scaled(2, -1))],
+            vec![Some(scaled(3, -1)), Some(scaled(4, -1))]
+        ]
+    );
+    // `EXPONENT` stays the header's own value.
+    assert_eq!(ionex.exponent(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Slant-delay policies: renormalizing fallback, mapping function, height maps.
+// ---------------------------------------------------------------------------

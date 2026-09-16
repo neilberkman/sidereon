@@ -6,6 +6,79 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** An IONEX axis is read in the direction its step gives. IONEX 1
+  gives an axis as "'LAT1' to 'LAT2' with increment 'DLAT'", which says nothing
+  about the direction, so a file may run its latitudes south to north or its
+  longitudes east to west; only a step whose sign contradicts its bounds is
+  refused. `Ionex::lat_nodes_deg`, `Ionex::lon_nodes_deg` and the matching
+  `TecGridSamples` fields hold the nodes in that order, the bracketing and
+  clamping follow it, and the writer writes the axis records back as they were
+  read. A file with an ascending latitude axis was refused for nodes "not
+  strictly descending".
+- A data record inside an IONEX map holding a character outside ASCII is refused
+  where it is read, naming the map, the band and the line. Such a record was
+  split on whitespace instead, which can place its values at the wrong nodes
+  where a field is also blank. Header text is unchanged, so the UTF-8
+  `DESCRIPTION` records of `uhrg0010.24i` still read.
+- IONEX reader messages count maps from 1, as a file numbers its own maps in its
+  `START OF ... MAP` records, and the `INTERVAL` finding names the later map of
+  the first pair spaced otherwise. A message named the first map "map 0".
+- **Breaking.** `IonexHeader::maps_in_file` keeps the `# OF MAPS IN FILE` record
+  a file carried, and the writer writes that value back. IONEX 1 counts every
+  TEC, RMS and height map there, while CODE, IGS and UPC write the number of TEC
+  maps: 25 with 25 RMS maps, 97 with 97. A product read from a file writes the
+  count it came with; one built from samples writes the TEC map count, which is
+  what those producers write.
+- **Breaking.** An IONEX value a file gives as `9999` is `None`. IONEX 1 says
+  "Non-available TEC values are written as '9999'", and that RMS and height
+  values are "formatted exactly in the same way". `Ionex::tec_maps`,
+  `Ionex::rms_maps`, `TecGridSamples::tec_maps`, `TecGridSamples::rms_maps`,
+  `TecSample::vtec_tecu` and `TecSample::rms_tecu` hold `Option<f64>`. A `9999`
+  field was read as 999.9 TECU at the default exponent, and the slant delay
+  interpolated it; `EMR0OPSFIN_20240010000_01D_01H_GIM.INX` gives TEC map 21 at
+  latitude 10.0, longitude 145.0 as `9999`. A slant delay whose interpolation
+  weights such a node is refused with the new `Error::IonexNodesNotAvailable`,
+  whose `IonexNodeGap` names the map, the cell and the missing nodes as
+  `IonexMissingNodes`. A node or map whose interpolation weight is zero is not
+  used, so a query on an available node, or at a map's epoch, still has a value.
+  A TEC map the file gives no RMS map for has an RMS map of `None`, and RMS maps
+  without a value at any node are dropped.
+- **Breaking.** IONEX `START OF HEIGHT MAP` blocks are read into the new
+  `Ionex::height_maps`, `TecGridSamples::height_maps` and
+  `TecSample::height_offset_km`, in kilometers. The value a height map holds at a
+  node is added to `HGT1` to give the single-layer height there, rather than
+  being a shell height of its own: IONEX 1's example 1 gives every height as `0`
+  with `HGT1` at 400 km. A height map without a value at any node is kept, since
+  it says the heights are unknown. A height map's bands used to be added to
+  whichever grid was open, and its `END OF HEIGHT MAP` record then failed to
+  read as a value.
+- **Breaking.** An IONEX product keeps its descriptive header records in the new
+  `IonexHeader`, from `Ionex::header` and in `TecGridSamples::header`: the version
+  and satellite system, `PGM / RUN BY / DATE`, the `DESCRIPTION` and `COMMENT`
+  records, `INTERVAL`, `MAPPING FUNCTION` as the new `IonexMappingFunction`,
+  `ELEVATION CUTOFF`, `OBSERVABLES USED`, `# OF STATIONS` and `# OF SATELLITES`.
+  A file without one of them reads as the value `IonexHeader::new` gives it.
+  `Ionex::from_node_samples` takes the header as its last argument. The writer
+  writes these records back, and writes `EPOCH OF FIRST MAP`,
+  `EPOCH OF LAST MAP`, `# OF MAPS IN FILE`, `MAP DIMENSION` and `END OF FILE`
+  from the maps; it wrote none of them. `ELEVATION CUTOFF` describes the data the
+  maps were determined from and does not limit the elevations a slant delay is
+  evaluated at.
+- `Ionex::parse_with_warnings` and `Ionex::parse_str_with_warnings` return the
+  product with `IonexWarning`s for header records that summarize the maps and
+  disagree with them or are absent: an `EPOCH OF FIRST MAP` or
+  `EPOCH OF LAST MAP` naming another epoch than the maps carry, a
+  `# OF MAPS IN FILE` counting neither the TEC maps nor every map, a nonzero
+  `INTERVAL` that is not the spacing of the maps, an `IONEX VERSION / TYPE` that
+  is not the first record, and a missing record IONEX 1 marks mandatory,
+  `END OF FILE` included. These are reported rather than refused because every
+  map carries its own epoch and bands, so the values read do not depend on them.
+  `UPC0OPSFIN_20240010000_01D_02H_GIM.INX` gives an `EPOCH OF LAST MAP` of
+  2024-01-01 23:59:24 for a last map at 2024-01-02 00:00:00, and
+  `IGS0OPSRAP_20240010000_01D_02H_GIM.INX` has no `END OF FILE`. A summary
+  record that cannot be read is skipped and counted in `skipped_records`, and a
+  whole-valued decimal reads as its whole number, as in the `0.00` seconds and
+  `1800.0` interval of `CAS0OPSFIN_20240010000_01D_30M_GIM.INX`.
 - **Breaking.** `SYS / PHASE SHIFT` records are read in their columns,
   `A1,1X,A3,1X,F8.5,2X,I2.2,10(1X,A3)`, or by their fields where a record is not
   laid out in them, and written in those columns at every version. Satellite
@@ -343,6 +416,52 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- IONEX values are read in their `16I5` columns, so two adjacent five-digit
+  values read as two values, not one. A data record not laid out in those
+  columns is read by its whitespace-separated fields. One laid out in them with
+  an empty field is refused, since no reading of it can tell which value is
+  absent, and a data record outside a band is refused rather than passed over.
+- Each IONEX `LAT/LON1/LON2/DLON/H` record places its values by its own
+  latitude, its longitudes `LON1 + DLON * m` and its height, read in its
+  `2X,5F6.1` columns, or by its fields where it is not laid out in them. The
+  record was not read and bands were placed in the order they came, so a band out
+  of latitude order, or with another longitude range, was misplaced. A band whose
+  latitude, longitude or height is not a node of the header grid is refused
+  naming the coordinate, as is a map that gives a node twice or leaves one
+  without a value. Bands may come in any order, and one latitude may span several
+  bands.
+- An IONEX `EXPONENT` record inside a map sets the unit of the data blocks after
+  it, where the spec's 3-D example places it; the header `EXPONENT`, or `-1`
+  without one, applies before it. Values are stored in TECU. Such a record before
+  a map's first band was ignored, scaling the map by the wrong power of ten, and
+  one between bands failed to read as a value. A map that gives no `EXPONENT`
+  after an earlier map left another in effect is refused, because the spec does
+  not say whether an exponent set in one map carries into the next.
+- An IONEX `MAP DIMENSION 3` product, or one whose `HGT1 / HGT2 / DHGT` gives
+  more than one height, is refused naming the record. Its TEC values are layer
+  contributions, electron density times `DHGT`, which no single-layer map, sample
+  set or slant delay here holds or uses. Such a file failed as a latitude band
+  count mismatch.
+- IONEX `START OF TEC MAP` records must number the maps 1, 2, 3 in order, and
+  each `END OF ... MAP` record must give the number of the map it closes. An RMS
+  or height map must give the number of a TEC map, once, and an
+  `EPOCH OF CURRENT MAP` it gives must be that TEC map's epoch. None of this was
+  checked, and RMS maps were paired with TEC maps by position.
+- An IONEX epoch at hour 24 with a zero minute and second reads as 00:00 of
+  the next day, in `EPOCH OF CURRENT MAP`, `EPOCH OF FIRST MAP` and
+  `EPOCH OF LAST MAP`. `uqrg0010.24i` gives its 97th map, at `INTERVAL 900`, as
+  `2024 1 1 24 0 0`, and the whole file was refused. Hour 24 with a nonzero
+  minute or second is still refused.
+- An IONEX value field reading `nan`, which IONEX 1 does not define, reads as
+  non-available and is reported as `IonexWarning::NotANumberValue`, naming the
+  map, the line and the node. `uqrg0010.24i` gives RMS map 55 at latitude 40.0,
+  longitude -125.0 as `nan`, and the whole file was refused.
+- An IONEX `AUX DATA` block in the header, where IONEX 1 defines it and real
+  products carry their code biases, counts in `skipped_records` as one after the
+  header did; it was passed over uncounted, as were unrecognized header records,
+  which count too. An `AUX DATA` block that is not closed is refused, as are a
+  file type other than `I` in `IONEX VERSION / TYPE` and two records of one
+  header label that read as different values.
 - CRINEX compression refuses a RINEX 2 cycle slip epoch that CRINEX 1 cannot
   carry. CRINEX 1 copies exactly as many lines after an epoch flagged above 1
   as its count, as RNX2CRX and CRX2RNX do, but a flag 6 epoch's count is

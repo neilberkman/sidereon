@@ -1,26 +1,29 @@
 //! Sample-backed IONEX vertical-TEC source.
 //!
 //! The canonical IONEX intermediate representation is a set of vertical-TEC
-//! maps on a strictly increasing epoch axis, with descending latitude nodes,
-//! ascending longitude nodes, signed grid steps, shell geometry, and optional
-//! RMS maps. IONEX text is one serialization of that IR; [`super::Ionex`] is
-//! the parser. This module builds the same evaluatable product directly from
-//! samples, with no text in the loop, and drives the exact same slant-delay
-//! evaluator the parsed path uses.
+//! maps on a strictly increasing epoch axis, with latitude and longitude nodes
+//! in the order their signed steps give, shell geometry, optional RMS
+//! and height maps, and the descriptive header records. A node whose value is
+//! not available is `None`. IONEX text is one serialization of that IR;
+//! [`super::Ionex`] is the parser. This module builds the same evaluatable
+//! product directly from samples, with no text in the loop, and drives the
+//! exact same slant-delay evaluator the parsed path uses.
 //!
 //! # Byte-identical parity with the parser path
 //!
 //! [`Ionex::from_samples`] accepts the same field values the parser stores:
-//! map epochs, TEC/RMS grids in TECU, node axes, signed steps, shell geometry,
-//! and `EXPONENT`. [`Ionex::tec_grid_samples`] clones those fields out of a
-//! parsed or sample-built product. Therefore
-//! `Ionex::from_samples(ionex.tec_grid_samples())` rebuilds an equal product
-//! byte-for-byte in every stored float and epoch. Unlike SP3 samples, there is
-//! no SI reconstruction boundary here: VTEC is TECU on both sides. The only
-//! lossy boundary remains serialize-through-text, where the existing writer
-//! recovers scaled integer fields with `round(value / 10^EXPONENT)`.
+//! map epochs, TEC/RMS grids in TECU, height grids in kilometers, node axes,
+//! signed steps, shell geometry, `EXPONENT`, and the header records.
+//! [`Ionex::tec_grid_samples`] clones those fields out of a parsed or
+//! sample-built product. Therefore `Ionex::from_samples(ionex.tec_grid_samples())`
+//! rebuilds an equal product byte-for-byte in every stored float and epoch,
+//! except [`Ionex::skipped_records`], which a sample-built product has none of.
+//! Unlike SP3 samples, there is no SI reconstruction boundary here: VTEC is TECU
+//! on both sides. Serializing through text is exact too: the writer refuses a
+//! value it cannot write exactly rather than rounding it.
 
-use super::grid::{Ionex, IonexParts};
+use super::grid::{Grid, Ionex, IonexParts};
+use super::header::IonexHeader;
 use super::j2000_seconds_from_instant;
 use crate::astro::time::model::{Instant, InstantRepr};
 
@@ -36,10 +39,16 @@ pub struct TecSample {
     pub lat_deg: f64,
     /// Longitude node in degrees.
     pub lon_deg: f64,
-    /// Vertical TEC in TECU.
-    pub vtec_tecu: f64,
-    /// Optional RMS value in TECU.
+    /// Vertical TEC in TECU; `None` where the value is not available.
+    pub vtec_tecu: Option<f64>,
+    /// RMS value in TECU; `None` where the node has no RMS value.
     pub rms_tecu: Option<f64>,
+    /// The value this node's IONEX height map holds, in kilometers, which is
+    /// added to `HGT1` to give the single-layer height there; `None` where the
+    /// node has no height value. It is an offset from `HGT1`, not a shell
+    /// height: IONEX 1's example 1 gives every height as `0` with `HGT1` at
+    /// 400 km.
+    pub height_offset_km: Option<f64>,
 }
 
 /// Whole-grid IONEX vertical-TEC samples.
@@ -47,9 +56,11 @@ pub struct TecSample {
 pub struct TecGridSamples {
     /// Map epochs as instants, strictly increasing.
     pub map_epochs: Vec<Instant>,
-    /// Latitude node values in degrees, descending.
+    /// Latitude node values in degrees, monotonic in the direction `dlat_deg`
+    /// gives.
     pub lat_nodes_deg: Vec<f64>,
-    /// Longitude node values in degrees, ascending.
+    /// Longitude node values in degrees, monotonic in the direction `dlon_deg`
+    /// gives.
     pub lon_nodes_deg: Vec<f64>,
     /// Signed latitude step in degrees.
     pub dlat_deg: f64,
@@ -61,10 +72,17 @@ pub struct TecGridSamples {
     pub base_radius_km: f64,
     /// The IONEX `EXPONENT` header field.
     pub exponent: i32,
-    /// Per-map vertical-TEC grids, indexed `[map][i_lat][i_lon]` (TECU).
-    pub tec_maps: Vec<Vec<Vec<f64>>>,
-    /// Per-map RMS grids, indexed `[map][i_lat][i_lon]` (TECU); empty if absent.
-    pub rms_maps: Vec<Vec<Vec<f64>>>,
+    /// Per-map vertical-TEC grids, indexed `[map][i_lat][i_lon]` (TECU); `None`
+    /// where the value is not available.
+    pub tec_maps: Vec<Vec<Vec<Option<f64>>>>,
+    /// Per-map RMS grids, indexed `[map][i_lat][i_lon]` (TECU); empty if absent,
+    /// `None` where a node has no RMS value.
+    pub rms_maps: Vec<Vec<Vec<Option<f64>>>>,
+    /// Per-map height grids, indexed `[map][i_lat][i_lon]` (km); empty if
+    /// absent, `None` where a node has no height value.
+    pub height_maps: Vec<Vec<Vec<Option<f64>>>>,
+    /// Descriptive header records.
+    pub header: IonexHeader,
 }
 
 /// Validation failure building an IONEX sample source.
@@ -74,9 +92,11 @@ pub enum TecSamplesError {
     Empty,
     /// A latitude or longitude axis has fewer than two nodes.
     TooFewNodes(usize),
-    /// Latitude nodes are not strictly descending.
+    /// Latitude nodes are not strictly monotonic in the direction `dlat_deg`
+    /// gives.
     NonMonotonicLat,
-    /// Longitude nodes are not strictly ascending.
+    /// Longitude nodes are not strictly monotonic in the direction `dlon_deg`
+    /// gives.
     NonMonotonicLon,
     /// Map epochs are not strictly increasing.
     NonMonotonicEpochs,
@@ -86,9 +106,11 @@ pub enum TecSamplesError {
     ShapeMismatch,
     /// RMS map count or node coverage does not match the TEC maps.
     RmsCountMismatch,
+    /// Height map count or node coverage does not match the TEC maps.
+    HeightCountMismatch,
     /// A supplied float was NaN or infinite.
     NonFiniteValue,
-    /// A signed grid step is zero or has the wrong sign for the node ordering.
+    /// A signed grid step is zero, so it names no direction for its axis.
     NonPositiveStep,
     /// An axis coordinate or step falls outside `[-360, 360]` degrees.
     AxisOutOfRange(f64),
@@ -101,12 +123,14 @@ impl core::fmt::Display for TecSamplesError {
             Self::TooFewNodes(count) => {
                 write!(f, "IONEX grid axis has {count} nodes; need at least two")
             }
-            Self::NonMonotonicLat => {
-                write!(f, "IONEX latitude nodes must be strictly descending")
-            }
-            Self::NonMonotonicLon => {
-                write!(f, "IONEX longitude nodes must be strictly ascending")
-            }
+            Self::NonMonotonicLat => write!(
+                f,
+                "IONEX latitude nodes must be strictly monotonic in the direction of DLAT"
+            ),
+            Self::NonMonotonicLon => write!(
+                f,
+                "IONEX longitude nodes must be strictly monotonic in the direction of DLON"
+            ),
             Self::NonMonotonicEpochs => {
                 write!(f, "IONEX map epochs must be strictly increasing")
             }
@@ -117,8 +141,9 @@ impl core::fmt::Display for TecSamplesError {
                 write!(f, "IONEX TEC grid dimensions do not match the axes")
             }
             Self::RmsCountMismatch => write!(f, "IONEX RMS maps do not match TEC maps"),
+            Self::HeightCountMismatch => write!(f, "IONEX height maps do not match TEC maps"),
             Self::NonFiniteValue => write!(f, "IONEX sample value is not finite"),
-            Self::NonPositiveStep => write!(f, "IONEX grid step is not valid"),
+            Self::NonPositiveStep => write!(f, "IONEX grid step is zero"),
             Self::AxisOutOfRange(value) => {
                 write!(f, "IONEX axis value {value} is outside [-360, 360] degrees")
             }
@@ -130,11 +155,13 @@ impl std::error::Error for TecSamplesError {}
 
 impl Ionex {
     /// Build an IONEX product directly from whole-grid samples.
-    // invariant: epoch and axis membership are validated before these lookups.
-    #[allow(clippy::expect_used)]
+    ///
+    /// RMS maps with no value at any node are dropped, as they are for a parsed
+    /// product; height maps are kept.
     pub fn from_samples(samples: TecGridSamples) -> core::result::Result<Self, TecSamplesError> {
         validate_grid_samples(&samples)?;
         Self::from_parts(IonexParts {
+            header: samples.header,
             lat_nodes_deg: samples.lat_nodes_deg,
             lon_nodes_deg: samples.lon_nodes_deg,
             dlat_deg: samples.dlat_deg,
@@ -145,6 +172,7 @@ impl Ionex {
             map_epochs: samples.map_epochs,
             tec_maps: samples.tec_maps,
             rms_maps: samples.rms_maps,
+            height_maps: samples.height_maps,
             skipped_records: 0,
         })
         .map_err(|_| {
@@ -156,6 +184,10 @@ impl Ionex {
     }
 
     /// Build an IONEX product from a flat stream of node samples.
+    ///
+    /// Every node of the grid the samples span must appear exactly once. A
+    /// product has RMS maps when any sample has an RMS value, and height maps
+    /// when any has a height value; a node without one is `None` there.
     // invariant: epoch and axis membership are validated before these lookups.
     #[allow(clippy::expect_used)]
     pub fn from_node_samples(
@@ -163,6 +195,7 @@ impl Ionex {
         shell_height_km: f64,
         base_radius_km: f64,
         exponent: i32,
+        header: IonexHeader,
     ) -> core::result::Result<Self, TecSamplesError> {
         let samples: Vec<TecSample> = samples.into_iter().collect();
         if samples.is_empty() {
@@ -171,9 +204,11 @@ impl Ionex {
         for sample in &samples {
             validate_axis_value(sample.lat_deg)?;
             validate_axis_value(sample.lon_deg)?;
-            validate_finite(sample.vtec_tecu)?;
-            if let Some(rms) = sample.rms_tecu {
-                validate_finite(rms)?;
+            for value in [sample.vtec_tecu, sample.rms_tecu, sample.height_offset_km]
+                .into_iter()
+                .flatten()
+            {
+                validate_finite(value)?;
             }
             exact_j2000_second(sample.epoch).ok_or(TecSamplesError::EpochNotRepresentable)?;
         }
@@ -210,13 +245,20 @@ impl Ionex {
         let nmap = map_epochs.len();
         let nlat = lat_nodes_deg.len();
         let nlon = lon_nodes_deg.len();
-        let has_rms = samples.iter().any(|sample| sample.rms_tecu.is_some());
-        let mut tec_maps = vec![vec![vec![f64::NAN; nlon]; nlat]; nmap];
-        let mut rms_maps = if has_rms {
-            vec![vec![vec![f64::NAN; nlon]; nlat]; nmap]
-        } else {
-            Vec::new()
+        let empty_maps = |present: bool| -> Vec<Grid> {
+            if present {
+                vec![vec![vec![None; nlon]; nlat]; nmap]
+            } else {
+                Vec::new()
+            }
         };
+        let mut tec_maps = empty_maps(true);
+        let mut rms_maps = empty_maps(samples.iter().any(|sample| sample.rms_tecu.is_some()));
+        let mut height_maps = empty_maps(
+            samples
+                .iter()
+                .any(|sample| sample.height_offset_km.is_some()),
+        );
         let mut seen = vec![false; nmap * nlat * nlon];
 
         for sample in samples {
@@ -234,9 +276,11 @@ impl Ionex {
             }
             seen[flat_index] = true;
             tec_maps[map_index][lat_index][lon_index] = sample.vtec_tecu;
-            if has_rms {
-                let rms = sample.rms_tecu.ok_or(TecSamplesError::RmsCountMismatch)?;
-                rms_maps[map_index][lat_index][lon_index] = rms;
+            if let Some(map) = rms_maps.get_mut(map_index) {
+                map[lat_index][lon_index] = sample.rms_tecu;
+            }
+            if let Some(map) = height_maps.get_mut(map_index) {
+                map[lat_index][lon_index] = sample.height_offset_km;
             }
         }
         if seen.iter().any(|&value| !value) {
@@ -254,6 +298,8 @@ impl Ionex {
             exponent,
             tec_maps,
             rms_maps,
+            height_maps,
+            header,
         })
     }
 
@@ -270,6 +316,8 @@ impl Ionex {
             exponent: self.exponent(),
             tec_maps: self.tec_maps().to_vec(),
             rms_maps: self.rms_maps().to_vec(),
+            height_maps: self.height_maps().to_vec(),
+            header: self.header().clone(),
         }
     }
 
@@ -279,20 +327,20 @@ impl Ionex {
         let nlat = self.lat_nodes_deg().len();
         let nlon = self.lon_nodes_deg().len();
         let mut out = Vec::with_capacity(nmap * nlat * nlon);
-        let has_rms = !self.rms_maps().is_empty();
         for (map_index, &epoch) in self.map_epochs().iter().enumerate() {
             for (lat_index, &lat_deg) in self.lat_nodes_deg().iter().enumerate() {
                 for (lon_index, &lon_deg) in self.lon_nodes_deg().iter().enumerate() {
+                    let node = |maps: &[Grid]| {
+                        maps.get(map_index)
+                            .and_then(|map| map[lat_index][lon_index])
+                    };
                     out.push(TecSample {
                         epoch,
                         lat_deg,
                         lon_deg,
-                        vtec_tecu: self.tec_maps()[map_index][lat_index][lon_index],
-                        rms_tecu: if has_rms {
-                            Some(self.rms_maps()[map_index][lat_index][lon_index])
-                        } else {
-                            None
-                        },
+                        vtec_tecu: node(self.tec_maps()),
+                        rms_tecu: node(self.rms_maps()),
+                        height_offset_km: node(self.height_maps()),
                     });
                 }
             }
@@ -305,57 +353,78 @@ fn validate_grid_samples(samples: &TecGridSamples) -> core::result::Result<(), T
     if samples.map_epochs.is_empty() || samples.tec_maps.is_empty() {
         return Err(TecSamplesError::Empty);
     }
-    validate_axis(&samples.lat_nodes_deg, true)?;
-    validate_axis(&samples.lon_nodes_deg, false)?;
+    validate_axis(
+        &samples.lat_nodes_deg,
+        samples.dlat_deg,
+        TecSamplesError::NonMonotonicLat,
+    )?;
+    validate_axis(
+        &samples.lon_nodes_deg,
+        samples.dlon_deg,
+        TecSamplesError::NonMonotonicLon,
+    )?;
     validate_finite(samples.dlat_deg)?;
     validate_finite(samples.dlon_deg)?;
     validate_axis_value(samples.dlat_deg)?;
     validate_axis_value(samples.dlon_deg)?;
-    if samples.dlat_deg >= 0.0 || samples.dlon_deg <= 0.0 {
+    // A step carries the direction its axis runs in, either way; only a zero
+    // step names no direction. A step whose sign contradicts its nodes is
+    // refused as a node-order failure above.
+    if samples.dlat_deg == 0.0 || samples.dlon_deg == 0.0 {
         return Err(TecSamplesError::NonPositiveStep);
     }
     validate_finite(samples.shell_height_km)?;
     validate_finite(samples.base_radius_km)?;
+    validate_finite(samples.header.version)?;
+    validate_finite(samples.header.elevation_cutoff_deg)?;
     validate_epochs(&samples.map_epochs)?;
 
     if samples.tec_maps.len() != samples.map_epochs.len() {
         return Err(TecSamplesError::ShapeMismatch);
     }
-    validate_maps(
-        &samples.tec_maps,
+    let dimensions = (
         samples.map_epochs.len(),
         samples.lat_nodes_deg.len(),
         samples.lon_nodes_deg.len(),
+    );
+    validate_maps(
+        &samples.tec_maps,
+        dimensions,
         TecSamplesError::ShapeMismatch,
     )?;
-    if !samples.rms_maps.is_empty() {
-        if samples.rms_maps.len() != samples.map_epochs.len() {
-            return Err(TecSamplesError::RmsCountMismatch);
+    for (maps, error) in [
+        (&samples.rms_maps, TecSamplesError::RmsCountMismatch),
+        (&samples.height_maps, TecSamplesError::HeightCountMismatch),
+    ] {
+        if !maps.is_empty() {
+            validate_maps(maps, dimensions, error)?;
         }
-        validate_maps(
-            &samples.rms_maps,
-            samples.map_epochs.len(),
-            samples.lat_nodes_deg.len(),
-            samples.lon_nodes_deg.len(),
-            TecSamplesError::RmsCountMismatch,
-        )?;
     }
     Ok(())
 }
 
-fn validate_axis(nodes: &[f64], descending: bool) -> core::result::Result<(), TecSamplesError> {
+fn validate_axis(
+    nodes: &[f64],
+    step: f64,
+    error: TecSamplesError,
+) -> core::result::Result<(), TecSamplesError> {
     if nodes.len() < 2 {
         return Err(TecSamplesError::TooFewNodes(nodes.len()));
     }
     for &node in nodes {
         validate_axis_value(node)?;
     }
-    if descending {
-        if nodes.windows(2).any(|w| w[1] >= w[0]) {
-            return Err(TecSamplesError::NonMonotonicLat);
-        }
-    } else if nodes.windows(2).any(|w| w[1] <= w[0]) {
-        return Err(TecSamplesError::NonMonotonicLon);
+    let ordered = if step > 0.0 {
+        nodes.windows(2).all(|w| w[1] > w[0])
+    } else if step < 0.0 {
+        nodes.windows(2).all(|w| w[1] < w[0])
+    } else {
+        // A zero or non-finite step names no direction to check the nodes
+        // against; the step checks refuse it by name.
+        true
+    };
+    if !ordered {
+        return Err(error);
     }
     Ok(())
 }
@@ -373,25 +442,23 @@ fn validate_epochs(map_epochs: &[Instant]) -> core::result::Result<(), TecSample
 }
 
 fn validate_maps(
-    maps: &[Vec<Vec<f64>>],
-    expected_maps: usize,
-    expected_lat: usize,
-    expected_lon: usize,
+    maps: &[Grid],
+    (expected_maps, expected_lat, expected_lon): (usize, usize, usize),
     dimension_error: TecSamplesError,
 ) -> core::result::Result<(), TecSamplesError> {
     if maps.len() != expected_maps {
-        return Err(dimension_error.clone());
+        return Err(dimension_error);
     }
     for map in maps {
         if map.len() != expected_lat {
-            return Err(dimension_error.clone());
+            return Err(dimension_error);
         }
         for row in map {
             if row.len() != expected_lon {
-                return Err(dimension_error.clone());
+                return Err(dimension_error);
             }
-            for &value in row {
-                validate_finite(value)?;
+            for value in row.iter().flatten() {
+                validate_finite(*value)?;
             }
         }
     }

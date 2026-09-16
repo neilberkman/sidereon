@@ -1,0 +1,212 @@
+     1.0            IONOSPHERE MAPS     GNSS                IONEX VERSION / TYPE
+ADDNEQ2 V5.5        AIUB                05-JAN-24 21:31     PGM / RUN BY / DATE
+CODE'S GLOBAL IONOSPHERE MAPS FOR DAY 001, 2024             COMMENT
+Global ionosphere maps (GIM) are generated on a daily basis DESCRIPTION
+at CODE using data from about 300 GNSS sites of the IGS and DESCRIPTION
+other institutions. The vertical total electron content     DESCRIPTION
+(VTEC) is modeled in a solar-geomagnetic reference frame    DESCRIPTION
+using a spherical harmonics expansion up to degree and      DESCRIPTION
+order 15. Piece-wise linear functions are used for          DESCRIPTION
+representation in the time domain. The time spacing of      DESCRIPTION
+their vertices is 1 hour, conforming with the epochs of the DESCRIPTION
+VTEC maps.                                                  DESCRIPTION
+To convert line-of-sight TEC into vertical TEC, a modified  DESCRIPTION
+single-layer model mapping function approximating the JPL   DESCRIPTION
+extended slab model mapping function is adopted. The        DESCRIPTION
+mapping function is evaluated at geodetic satellite         DESCRIPTION
+elevation angles. For the computation of the ionospheric    DESCRIPTION
+pierce points, a spherical layer with a radius of 6821 km   DESCRIPTION
+is assumed, implying geocentric, not geodetic IONEX         DESCRIPTION
+latitudes.                                                  DESCRIPTION
+Instrumental biases with respect to each involved GNSS code DESCRIPTION
+observable are estimated as constant values for each        DESCRIPTION
+day. They are modeled with one set of bias parameters for   DESCRIPTION
+each satellite and each station in case of GPS and for each DESCRIPTION
+satellite-station link in case of GLONASS. The code bias    DESCRIPTION
+datum is defined by zero-mean conditions imposed on the     DESCRIPTION
+satellite bias estimates. In this file, just GPS C1W-C2W    DESCRIPTION
+satellite and station bias values are included. The         DESCRIPTION
+complete set of GNSS code bias results is provided in an    DESCRIPTION
+additional Bias-SINEX file as pseudo-absolute values        DESCRIPTION
+specific to each observable.                                DESCRIPTION
+Note: These GIM results correspond to the results for the   DESCRIPTION
+middle day of a 3-day combination analysis solving for 73   DESCRIPTION
+times 256, or 18688 VTEC parameters and 3 daily sets of     DESCRIPTION
+GNSS code bias parameters.                                  DESCRIPTION
+Contact address: code(at)aiub.unibe.ch                      DESCRIPTION
+Data archive:    ftp.aiub.unibe.ch/CODE/                    DESCRIPTION
+                 www.aiub.unibe.ch/download/CODE/           DESCRIPTION
+  2024     1     1     0     0     0                        EPOCH OF FIRST MAP
+  2024     1     1     2     0     0                        EPOCH OF LAST MAP
+  3600                                                      INTERVAL
+     3                                                      # OF MAPS IN FILE
+  NONE                                                      MAPPING FUNCTION
+    10.0                                                    ELEVATION CUTOFF
+One-way carrier phase leveled to code                       OBSERVABLES USED
+   200                                                      # OF STATIONS
+    80                                                      # OF SATELLITES
+  6371.0                                                    BASE RADIUS
+     2                                                      MAP DIMENSION
+   450.0 450.0   0.0                                        HGT1 / HGT2 / DHGT
+     2.5  -2.5  -2.5                                        LAT1 / LAT2 / DLAT
+  -180.0 180.0   5.0                                        LON1 / LON2 / DLON
+    -1                                                      EXPONENT
+TEC/RMS values in 0.1 TECU; 9999, if no value available     COMMENT
+Peak TEC values for the included maps:                      COMMENT
+1090 1085  948  849  781  726  683  722  773  757  705  684 COMMENT
+ 657  659  688  717  755  833  890  877  915  954 1027 1105 COMMENT
+1153                                                        COMMENT
+List of stations:                                           COMMENT
+albh algo alic amu2 antc ascg aspa auck badg bake barh bndy COMMENT
+boav bogo bogt bor1 braz brft brst cas1 ccj2 cedu chpg chti COMMENT
+chur coco cord cpvg cpxf cro1 daej darw dav1 dgar dhlg drao COMMENT
+dubo ebre flin flrs frdn func ganp glsv godz gol2 gold gope COMMENT
+gras guam guat guug hers hert hlfx hnpt hob2 hofn hrao hyde COMMENT
+iddr ieng iisc invk iqal irkj jog2 joz2 joze karr kerg kir0 COMMENT
+kiri kokv kouc krgg lama laut lmmf lpal lpgs m0se mac1 madr COMMENT
+mana mat1 mate maui maw1 mcil mcm4 mdvj medi mets mnls mobs COMMENT
+monp morp mqzg mro1 mtka naur nico nist nium nlib not1 nrc1 COMMENT
+nrmd ntus nya1 nyal onsa pado parc park pdel penc pert pie1 COMMENT
+pimo pohn pol2 polv pots pove prds ptbb ptvl qaq1 quin rabt COMMENT
+reun reyk rgdg roth salu sant savo sch2 scor scrz sctb scub COMMENT
+seyg sfer sofi spt0 sthl stjo stk2 str2 sutm sydn syog tabv COMMENT
+tash thti thu2 tidb tlse tn22 tong tow2 tro1 tskb twtf txes COMMENT
+ufpr ulab unb3 unbj urum usn7 vald voim vtsp wab1 wab2 wark COMMENT
+wgtn whit wind wsrt wtza wtzl wtzr wtzs wtzz wuhn xmis yar2 COMMENT
+yar3 yarr yell ykro zeck zim2 zim3 zimm                     COMMENT
+Trimmed from COD0OPSFIN_20240010000_01D_01H_GIM.INX:        COMMENT
+maps 1 to 3, latitudes 2.5 to -2.5, AUX DATA cut short,     COMMENT
+trailing blanks removed                                     COMMENT
+DIFFERENTIAL CODE BIASES                                    START OF AUX DATA
+Reference observables for GPS    : C1W-C2W                  COMMENT
+   G01    -7.120     0.051                                  PRN / BIAS / RMS
+   G02     7.517     0.043                                  PRN / BIAS / RMS
+DIFFERENTIAL CODE BIASES                                    END OF AUX DATA
+                                                            END OF HEADER
+     1                                                      START OF TEC MAP
+  2024     1     1     0     0     0                        EPOCH OF CURRENT MAP
+     2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+  627  641  637  618  597  593  615  660  711  755  779  773  735  674  614  568
+  529  481  423  382  384  426  469  472  425  355  298  271  272  291  318  341
+  352  348  333  310  279  236  191  159  150  157  163  157  143  128  119  114
+  114  118  123  123  121  128  156  198  240  269  290  316  351  391  425  452
+  474  494  510  523  536  553  575  602  627
+     0.0-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+  631  642  630  595  550  518  519  553  610  672  720  738  721  678  632  598
+  569  531  483  445  441  465  481  458  397  331  294  296  327  369  409  434
+  440  425  398  360  312  253  197  162  156  168  176  170  156  143  136  133
+  132  134  137  137  135  143  168  208  247  275  296  322  355  391  421  445
+  465  485  502  517  532  552  577  606  631
+    -2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+  655  671  661  622  565  515  492  507  553  613  668  698  696  669  637  615
+  597  572  535  503  490  491  479  435  370  320  311  346  402  459  501  519
+  513  487  447  398  337  268  206  170  167  181  190  185  172  163  159  156
+  152  151  151  150  150  158  182  219  255  282  303  327  358  389  414  435
+  456  478  498  515  532  556  588  623  655
+     1                                                      END OF TEC MAP
+     2                                                      START OF TEC MAP
+  2024     1     1     1     0     0                        EPOCH OF CURRENT MAP
+     2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+  620  594  570  564  573  587  605  630  667  710  747  767  760  720  642  533
+  412  313  267  282  343  412  455  454  418  370  335  323  326  332  331  323
+  312  303  296  290  285  282  280  279  275  267  250  225  192  158  131  113
+  106  109  119  140  175  223  275  318  345  357  363  373  390  412  439  469
+  499  519  526  527  539  569  606  627  620
+     0.0-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+  646  616  575  541  519  507  507  526  565  616  664  695  701  675  613  518
+  409  320  283  309  375  439  463  437  385  338  320  331  353  369  375  373
+  369  363  355  342  327  314  302  292  281  268  248  219  185  151  125  112
+  111  118  131  153  185  228  275  315  343  358  368  380  396  415  438  464
+  489  504  506  506  522  561  611  645  646
+    -2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+  686  665  623  578  538  504  482  481  505  546  589  619  628  610  562  483
+  391  317  292  325  390  441  445  400  338  301  306  342  381  406  415  417
+  418  414  401  379  354  331  311  293  275  258  238  212  182  152  130  121
+  123  133  148  167  194  230  270  307  336  356  372  386  401  417  437  462
+  485  498  500  500  518  563  624  672  686
+     2                                                      END OF TEC MAP
+     3                                                      START OF TEC MAP
+  2024     1     1     2     0     0                        EPOCH OF CURRENT MAP
+     2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+  588  569  552  543  547  570  609  654  692  709  691  633  541  439  356  311
+  301  312  331  354  384  411  421  403  369  338  322  314  300  277  256  248
+  254  265  272  271  266  258  250  241  230  216  196  171  143  120  108  112
+  133  169  213  258  297  331  361  384  400  408  419  441  472  504  522  526
+  524  530  551  580  606  619  618  605  588
+     0.0-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+  615  586  554  525  508  511  537  577  616  636  625  577  501  416  349  315
+  315  335  363  392  420  437  431  399  358  327  317  317  312  297  282  278
+  288  301  308  304  292  276  261  246  230  210  185  156  130  112  106  114
+  137  173  216  260  298  331  359  382  398  407  419  440  471  500  516  515
+  511  518  542  579  616  640  646  636  615
+    -2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+  672  646  609  567  531  510  513  535  560  572  559  517  454  386  333  310
+  317  343  377  409  432  437  418  379  338  315  315  326  330  321  310  309
+  319  331  334  323  304  282  262  244  225  202  174  146  124  112  112  124
+  147  181  222  262  297  326  353  375  392  405  418  439  468  496  511  513
+  511  520  547  589  633  668  686  687  672
+     3                                                      END OF TEC MAP
+     1                                                      START OF RMS MAP
+  2024     1     1     0     0     0                        EPOCH OF CURRENT MAP
+     2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+   31   40   47   52   55   56   56   57   58   58   57   57   55   53   50   47
+   43   38   34   30   26   23   22   24   27   29   28   27   28   30   32   33
+   32   29   27   27   33   41   45   47   48   49   48   45   41   37   32   29
+   30   30   29   29   31   32   31   26   22   22   25   29   34   37   37   35
+   33   31   29   25   22   20   20   23   31
+     0.0-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+   29   37   44   49   53   55   56   57   58   59   59   58   57   54   52   49
+   45   41   37   33   28   25   23   24   26   27   25   24   25   28   31   33
+   32   29   27   29   35   42   46   47   48   48   47   44   40   35   29   26
+   27   28   28   28   31   32   30   25   21   20   23   28   33   36   37   35
+   34   33   30   27   24   21   20   23   29
+    -2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+   28   34   40   45   49   52   53   56   58   59   59   59   57   56   53   50
+   47   43   39   35   30   27   24   24   25   26   24   23   23   26   29   31
+   30   28   27   30   37   43   46   47   47   47   46   43   38   33   27   24
+   25   26   26   27   30   31   29   24   20   19   21   26   31   34   35   34
+   34   33   31   28   25   22   21   23   28
+     1                                                      END OF RMS MAP
+     2                                                      START OF RMS MAP
+  2024     1     1     1     0     0                        EPOCH OF CURRENT MAP
+     2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+   33   41   48   54   58   62   66   71   76   80   83   86   88   90   89   84
+   77   66   54   42   32   27   26   27   28   28   28   29   31   33   35   37
+   36   34   29   27   32   40   49   56   62   67   71   73   69   58   45   38
+   37   36   34   33   35   38   38   33   27   25   27   32   37   41   42   40
+   38   36   33   29   24   22   22   26   33
+     0.0-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+   30   37   44   51   58   63   67   72   77   81   85   88   91   93   93   91
+   86   77   64   51   39   31   28   27   27   27   26   25   26   29   33   36
+   36   33   29   29   34   42   50   56   61   66   70   71   66   53   39   31
+   31   32   32   32   35   38   38   32   25   23   25   30   35   39   40   39
+   39   38   35   31   26   23   22   24   30
+    -2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+   27   33   40   47   55   61   66   71   76   81   85   88   91   94   96   96
+   93   86   74   60   46   34   29   27   27   27   26   23   22   25   30   34
+   34   31   28   30   36   42   49   55   59   63   67   68   62   48   35   27
+   27   29   29   30   34   37   36   30   24   21   23   28   33   37   37   37
+   38   39   37   33   28   24   22   23   27
+     2                                                      END OF RMS MAP
+     3                                                      START OF RMS MAP
+  2024     1     1     2     0     0                        EPOCH OF CURRENT MAP
+     2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+   30   37   45   51   56   61   66   70   73   76   79   81   80   78   72   63
+   54   46   38   32   27   23   23   23   23   25   26   26   26   27   28   30
+   29   27   24   25   30   38   46   53   58   60   59   54   49   42   36   32
+   30   30   29   28   30   32   31   27   23   22   24   28   32   34   35   34
+   33   31   27   24   21   20   21   24   30
+     0.0-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+   28   35   43   50   56   61   65   70   74   77   81   83   84   83   78   70
+   61   51   43   36   30   25   24   23   23   24   24   23   22   24   27   29
+   29   26   24   26   32   39   47   53   58   59   56   51   44   37   30   27
+   26   27   27   28   30   32   31   26   22   20   22   27   31   33   34   35
+   35   33   30   26   22   20   20   22   28
+    -2.5-180.0 180.0   5.0 450.0                            LAT/LON1/LON2/DLON/H
+   26   33   41   47   53   58   63   68   72   76   80   83   86   86   83   76
+   67   57   47   40   33   27   24   23   23   23   22   21   20   22   26   28
+   27   25   24   26   32   39   46   52   57   57   54   48   41   33   27   24
+   24   24   25   27   30   32   30   25   21   19   21   25   29   31   32   33
+   35   34   32   27   23   20   20   22   26
+     3                                                      END OF RMS MAP
+                                                            END OF FILE

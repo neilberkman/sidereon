@@ -8,6 +8,13 @@
 //! between the two bracketing maps; the obliquity factor maps vertical to slant
 //! TEC; and the dispersive frequency scaling turns slant TEC into meters.
 //!
+//! A node the product gives as non-available has no value to interpolate. A
+//! node or map is weighted when its bilinear or temporal weight is nonzero; when
+//! a weighted node is non-available the evaluation gives no value and names the
+//! map, the cell and the missing nodes. A node or map without weight contributes
+//! nothing, so a query on an available node, or at the epoch of a map, uses no
+//! neighbour.
+//!
 //! The delay returned is a group delay and is positive: it increases the
 //! measured pseudorange (the carrier-phase advance is the negation of this
 //! value).
@@ -19,7 +26,10 @@
 //! the operation tree is identical to the reference recipe and the result is
 //! bit-stable.
 
-use super::{j2000_seconds_from_instant, IonexCoverageError, IonexCoveragePolicy};
+use super::{
+    j2000_seconds_from_instant, IonexCoverageError, IonexCoveragePolicy, IonexMissingNodes,
+    IonexNodeGap,
+};
 use crate::astro::time::model::Instant;
 
 /// Ionospheric frequency-scaling constant `40.3 * 1e16`.
@@ -152,12 +162,20 @@ fn bracket(value: f64, v1: f64, step: f64, n: usize) -> usize {
 /// One map's bilinear VTEC at a pierce point, with the interpolation weights.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct BilinearVtec {
-    /// Interpolated vertical TEC at the pierce point (TECU).
-    pub vtec: f64,
+    /// Interpolated vertical TEC at the pierce point (TECU), when every node
+    /// with a nonzero weight holds a value.
+    pub vtec: Option<f64>,
     /// Longitude-direction fractional offset within the cell.
     pub p: f64,
     /// Latitude-direction fractional offset within the cell (signed step).
     pub q: f64,
+    /// Latitude index of the cell's first node row.
+    pub lat_index: usize,
+    /// Longitude index of the cell's first node column.
+    pub lon_index: usize,
+    /// Nodes with a nonzero weight that hold no value, in the order `E00`,
+    /// `E01`, `E10`, `E11`.
+    pub missing: [bool; 4],
 }
 
 /// Explicit four-term bilinear VTEC at `(phi_deg, lam_deg)` on one map.
@@ -168,7 +186,7 @@ pub(crate) struct BilinearVtec {
 /// `(1-p)(1-q)E00 + p(1-q)E01 + (1-p)q E10 + p q E11` with `(1-p)`/`(1-q)`
 /// formed once.
 pub(crate) fn bilinear_vtec(
-    vtec_map: &[Vec<f64>],
+    vtec_map: &[Vec<Option<f64>>],
     lat_arr: &[f64],
     lon_arr: &[f64],
     dlat: f64,
@@ -209,16 +227,34 @@ pub(crate) fn bilinear_vtec(
     let q = (phi - lat0) / dlat;
     let p = (lam - lon0) / dlon;
 
-    let e00 = vtec_map[i][j];
-    let e01 = vtec_map[i][j + 1];
-    let e10 = vtec_map[i + 1][j];
-    let e11 = vtec_map[i + 1][j + 1];
+    let nodes = [
+        vtec_map[i][j],
+        vtec_map[i][j + 1],
+        vtec_map[i + 1][j],
+        vtec_map[i + 1][j + 1],
+    ];
 
     let one_p = 1.0 - p;
     let one_q = 1.0 - q;
-    let vtec = one_p * one_q * e00 + p * one_q * e01 + one_p * q * e10 + p * q * e11;
+    let weights = [one_p * one_q, p * one_q, one_p * q, p * q];
+    let missing = [0, 1, 2, 3].map(|k| nodes[k].is_none() && weights[k] != 0.0);
+    let vtec = if missing.contains(&true) {
+        None
+    } else {
+        // Only a node without weight can hold no value here, and its term is
+        // zero whatever it holds.
+        let [e00, e01, e10, e11] = nodes.map(|node| node.unwrap_or(0.0));
+        Some(one_p * one_q * e00 + p * one_q * e01 + one_p * q * e10 + p * q * e11)
+    };
 
-    BilinearVtec { vtec, p, q }
+    BilinearVtec {
+        vtec,
+        p,
+        q,
+        lat_index: i,
+        lon_index: j,
+        missing,
+    }
 }
 
 /// All intermediate quantities of one slant-delay evaluation.
@@ -242,10 +278,10 @@ pub(crate) struct SlantComponents {
     pub map_index: usize,
     /// Temporal blend weight in `[0, 1]` toward the upper bracketing map.
     pub w: f64,
-    /// Bilinear VTEC on the lower bracketing map (TECU).
-    pub vtec0: f64,
-    /// Bilinear VTEC on the upper bracketing map (TECU).
-    pub vtec1: f64,
+    /// Bilinear VTEC on the lower bracketing map (TECU), where it has one.
+    pub vtec0: Option<f64>,
+    /// Bilinear VTEC on the upper bracketing map (TECU), where it has one.
+    pub vtec1: Option<f64>,
     /// Longitude fractional offset on the lower map.
     pub p0: f64,
     /// Latitude fractional offset on the lower map.
@@ -260,14 +296,6 @@ pub(crate) struct SlantComponents {
     pub delay_m: f64,
 }
 
-/// Full IONEX slant group delay in meters, with all intermediates.
-///
-/// `maps` is one VTEC grid per epoch in `map_epochs` (canonical instants), each a
-/// 2-D array indexed `[i_lat][i_lon]`. The pierce-point VTEC is bilinearly
-/// interpolated on the two maps bracketing `epoch_s` and then blended
-/// linearly in time, holding the endpoint map outside coverage. The obliquity
-/// factor `m = 1/cos(z') = 1/sqrt(1 - s^2)` maps vertical to slant TEC, and the
-/// dispersive scaling `(40.3e16 / f^2) * STEC` gives the positive group delay.
 /// Receiver-to-satellite line of sight for the single-layer pierce point: the
 /// receiver geodetic latitude/longitude and the satellite azimuth/elevation, all
 /// in radians.
@@ -285,13 +313,30 @@ pub(crate) struct PierceLineOfSight {
 #[derive(Clone, Copy)]
 pub(crate) struct VtecGridView<'a> {
     pub map_epochs: &'a [Instant],
-    pub maps: &'a [Vec<Vec<f64>>],
+    pub maps: &'a [Vec<Vec<Option<f64>>>],
     pub lat_arr: &'a [f64],
     pub lon_arr: &'a [f64],
     pub dlat: f64,
     pub dlon: f64,
 }
 
+/// Why a slant-delay evaluation gives no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SlantMiss {
+    /// The query is outside the product's coverage and the policy is strict.
+    Coverage(IonexCoverageError),
+    /// A node the interpolation weights holds no value.
+    Nodes(IonexNodeGap),
+}
+
+/// Full IONEX slant group delay in meters, with all intermediates.
+///
+/// `maps` is one VTEC grid per epoch in `map_epochs` (canonical instants), each a
+/// 2-D array indexed `[i_lat][i_lon]`. The pierce-point VTEC is bilinearly
+/// interpolated on the two maps bracketing `epoch_s` and then blended
+/// linearly in time, holding the endpoint map outside coverage. The obliquity
+/// factor `m = 1/cos(z') = 1/sqrt(1 - s^2)` maps vertical to slant TEC, and the
+/// dispersive scaling `(40.3e16 / f^2) * STEC` gives the positive group delay.
 #[cfg(all(test, sidereon_repo_tests))]
 pub(crate) fn slant_delay_components(
     los: PierceLineOfSight,
@@ -300,7 +345,7 @@ pub(crate) fn slant_delay_components(
     h_km: f64,
     epoch_s: i64,
     grid: VtecGridView,
-) -> SlantComponents {
+) -> Result<SlantComponents, IonexNodeGap> {
     slant_delay_components_with_coverage(los, frequency_hz, re_km, h_km, epoch_s, grid).0
 }
 
@@ -312,13 +357,14 @@ pub(crate) fn slant_delay_components_with_policy(
     epoch_s: i64,
     grid: VtecGridView,
     policy: IonexCoveragePolicy,
-) -> Result<(SlantComponents, Option<IonexCoverageError>), IonexCoverageError> {
+) -> Result<(SlantComponents, Option<IonexCoverageError>), SlantMiss> {
     let (components, coverage) =
         slant_delay_components_with_coverage(los, frequency_hz, re_km, h_km, epoch_s, grid);
-    match (policy, coverage) {
-        (IonexCoveragePolicy::Strict, Some(error)) => Err(error),
-        (_, coverage) => Ok((components, coverage)),
+    if let (IonexCoveragePolicy::Strict, Some(error)) = (policy, coverage) {
+        return Err(SlantMiss::Coverage(error));
     }
+    let components = components.map_err(SlantMiss::Nodes)?;
+    Ok((components, coverage))
 }
 
 fn slant_delay_components_with_coverage(
@@ -328,7 +374,10 @@ fn slant_delay_components_with_coverage(
     h_km: f64,
     epoch_s: i64,
     grid: VtecGridView,
-) -> (SlantComponents, Option<IonexCoverageError>) {
+) -> (
+    Result<SlantComponents, IonexNodeGap>,
+    Option<IonexCoverageError>,
+) {
     let PierceLineOfSight {
         lat_rad,
         lon_rad,
@@ -372,6 +421,7 @@ fn slant_delay_components_with_coverage(
     } else {
         None
     };
+    let coverage = time_coverage.or(lat_coverage).or(lon_coverage);
     let (ti, ti1, w) = if nmaps <= 1 {
         (0usize, 0usize, 0.0)
     } else {
@@ -397,9 +447,23 @@ fn slant_delay_components_with_coverage(
 
     let b0 = bilinear_vtec(&maps[ti], lat_arr, lon_arr, dlat, dlon, phi_deg, lam_deg);
     let b1 = bilinear_vtec(&maps[ti1], lat_arr, lon_arr, dlat, dlon, phi_deg, lam_deg);
-    let vtec0 = b0.vtec;
-    let vtec1 = b1.vtec;
-    let vtec = (1.0 - w) * vtec0 + w * vtec1;
+
+    let missing_on = |b: &BilinearVtec, map_index: usize, weighted: bool| {
+        (weighted && b.vtec.is_none()).then_some(IonexMissingNodes {
+            map_index,
+            lat_index: b.lat_index,
+            lon_index: b.lon_index,
+            missing: b.missing,
+        })
+    };
+    let earlier = missing_on(&b0, ti, 1.0 - w != 0.0);
+    let later = missing_on(&b1, ti1, ti1 != ti && w != 0.0);
+    if earlier.is_some() || later.is_some() {
+        return (Err(IonexNodeGap { earlier, later }), coverage);
+    }
+
+    // A map without temporal weight contributes nothing, whatever it holds.
+    let vtec = (1.0 - w) * b0.vtec.unwrap_or(0.0) + w * b1.vtec.unwrap_or(0.0);
 
     // Obliquity (slant) factor m(E) = 1 / cos(z') = 1 / sqrt(1 - s^2).
     let m = 1.0 / (1.0 - s * s).sqrt();
@@ -415,8 +479,8 @@ fn slant_delay_components_with_coverage(
         lambda_ipp_deg: lam_deg,
         map_index: ti,
         w,
-        vtec0,
-        vtec1,
+        vtec0: b0.vtec,
+        vtec1: b1.vtec,
         p0: b0.p,
         q0: b0.q,
         vtec,
@@ -424,8 +488,7 @@ fn slant_delay_components_with_coverage(
         stec,
         delay_m,
     };
-    let coverage = time_coverage.or(lat_coverage).or(lon_coverage);
-    (components, coverage)
+    (Ok(components), coverage)
 }
 
 // invariant: map epochs come from the validated IONEX product axis.
