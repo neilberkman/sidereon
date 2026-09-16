@@ -40,12 +40,16 @@ use crate::frequencies::{self, CarrierBand};
 use crate::GnssSystem;
 
 pub use grid::Ionex;
-pub use header::{IonexHeader, IonexMappingFunction, IonexWarning};
+pub use header::{
+    IonexAssumedMapping, IonexHeader, IonexMappingDeclaration, IonexMappingFunction, IonexWarning,
+};
 pub use nequick_g::{nequick_g_delay_m, nequick_g_stec_tecu, NequickGRayEval};
 pub use samples::{TecGridSamples, TecSample, TecSamplesError};
 pub use tec_grid::{
-    iono_delay_xyz as regular_tec_grid_delay_xyz, tec_xyz as regular_tec_xyz, TecGrid,
-    TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridShellGeometry,
+    iono_delay_xyz as regular_tec_grid_delay_xyz,
+    iono_delay_xyz_with_policy as regular_tec_grid_delay_xyz_with_policy,
+    tec_xyz as regular_tec_xyz, tec_xyz_with_policy as regular_tec_xyz_with_policy, TecGrid,
+    TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridEvaluation, TecGridShellGeometry,
 };
 
 /// Policy applied when an IONEX query lands outside the product's coverage.
@@ -83,13 +87,200 @@ impl core::fmt::Display for IonexCoverageError {
     }
 }
 
-/// Coverage status for a successful IONEX slant-delay value.
+/// Policy applied when an IONEX interpolation weights grid nodes the product
+/// gives as non-available.
+///
+/// A node is weighted when its bilinear weight is nonzero, and a map when its
+/// temporal weight is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IonexMissingNodePolicy {
+    /// Return [`Error::IonexNodesNotAvailable`], naming the map, the cell and the
+    /// missing nodes.
+    #[default]
+    Strict,
+    /// Interpolate from the weighted nodes that hold values, their bilinear
+    /// weights renormalized to sum to one, and from the weighted maps that give
+    /// a value, their temporal weights renormalized the same way, and mark the
+    /// value degraded. With no weighted node holding a value on any weighted map
+    /// there is no value, and the evaluation returns
+    /// [`Error::IonexNodesNotAvailable`].
+    Renormalize,
+}
+
+/// The factor an IONEX slant delay maps vertical TEC to the line of sight with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IonexMappingPolicy {
+    /// The factor the product's `MAPPING FUNCTION` defines. `COSZ` defines the
+    /// single-layer `1/cos(z')` at the shell height. `NONE` says no mapping
+    /// function was used, `QFAC` names one the spec gives no formula for, and
+    /// another code or no code defines none, so the evaluation returns
+    /// [`Error::IonexSlantUnavailable`].
+    Declared,
+    /// The single-layer `1/cos(z')` at the shell height, whatever the product
+    /// declares, with [`IonexSlantDelayStatus::assumed_mapping`] naming what a
+    /// product that declares anything but `COSZ` declares. This is the default:
+    /// most global products declare `NONE` while their descriptions name the
+    /// mapping function their maps were determined with, and a vertical TEC map
+    /// is mapped to the line of sight this way whatever determined it.
+    #[default]
+    SingleLayer,
+}
+
+/// The policies an IONEX slant-delay evaluation applies.
+///
+/// The default refuses a query the product's grid cannot answer as it stands, a
+/// query outside its coverage and one whose interpolation weights a
+/// non-available node, and maps vertical TEC to the line of sight with the
+/// single-layer `1/cos(z')`, naming what the product declares in
+/// [`IonexSlantDelayStatus::assumed_mapping`] where that is not `COSZ`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct IonexSlantPolicy {
+    /// Queries outside the product's epochs, latitudes or longitudes.
+    pub coverage: IonexCoveragePolicy,
+    /// Queries whose interpolation weights nodes the product gives as
+    /// non-available.
+    pub missing_nodes: IonexMissingNodePolicy,
+    /// The factor that maps vertical TEC to the line of sight.
+    pub mapping: IonexMappingPolicy,
+}
+
+impl IonexSlantPolicy {
+    /// This policy with `coverage`.
+    #[must_use]
+    pub const fn with_coverage(mut self, coverage: IonexCoveragePolicy) -> Self {
+        self.coverage = coverage;
+        self
+    }
+
+    /// This policy with `missing_nodes`.
+    #[must_use]
+    pub const fn with_missing_nodes(mut self, missing_nodes: IonexMissingNodePolicy) -> Self {
+        self.missing_nodes = missing_nodes;
+        self
+    }
+
+    /// This policy with `mapping`.
+    #[must_use]
+    pub const fn with_mapping(mut self, mapping: IonexMappingPolicy) -> Self {
+        self.mapping = mapping;
+        self
+    }
+}
+
+impl From<IonexCoveragePolicy> for IonexSlantPolicy {
+    fn from(coverage: IonexCoveragePolicy) -> Self {
+        Self::default().with_coverage(coverage)
+    }
+}
+
+/// Why an IONEX product gives no slant delay under the requested policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IonexSlantRefusal {
+    /// The product's height maps give nodes different single-layer heights, and
+    /// the slant delay uses one shell height. The indices name the first node
+    /// whose height differs from the first height map's first node.
+    VaryingHeights {
+        /// Number of the height map, counting from 1 as the file numbers its
+        /// maps.
+        map_number: usize,
+        /// Latitude index of the node.
+        lat_index: usize,
+        /// Longitude index of the node.
+        lon_index: usize,
+    },
+    /// A height map gives a node's height as non-available, so the single-layer
+    /// height there is unknown.
+    HeightNotAvailable {
+        /// Number of the height map, counting from 1 as the file numbers its
+        /// maps.
+        map_number: usize,
+        /// Latitude index of the node.
+        lat_index: usize,
+        /// Longitude index of the node.
+        lon_index: usize,
+    },
+    /// Under [`IonexMappingPolicy::Declared`], the product's `MAPPING FUNCTION`
+    /// defines no factor the slant delay applies.
+    MappingFunction(IonexMappingDeclaration),
+}
+
+impl core::fmt::Display for IonexSlantRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::VaryingHeights {
+                map_number,
+                lat_index,
+                lon_index,
+            } => write!(
+                f,
+                "height map {map_number} gives node [{lat_index}][{lon_index}] another \
+                 single-layer height than the first node; the slant delay uses one shell height"
+            ),
+            Self::HeightNotAvailable {
+                map_number,
+                lat_index,
+                lon_index,
+            } => write!(
+                f,
+                "height map {map_number} gives the height of node [{lat_index}][{lon_index}] as \
+                 non-available"
+            ),
+            Self::MappingFunction(IonexMappingDeclaration::Declared(function)) => write!(
+                f,
+                "MAPPING FUNCTION {} defines no factor the slant delay applies; \
+                 IonexMappingPolicy::SingleLayer, the default, applies 1/cos(z')",
+                function.code()
+            ),
+            Self::MappingFunction(IonexMappingDeclaration::Absent) => f.write_str(
+                "the product gives no MAPPING FUNCTION; IonexMappingPolicy::SingleLayer, the \
+                 default, applies 1/cos(z')",
+            ),
+        }
+    }
+}
+
+/// Status of a successful IONEX slant-delay value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IonexSlantDelayStatus {
-    /// The query was inside the product's temporal and spatial coverage.
-    Valid,
-    /// The value was produced by the explicit hold policy.
-    Held(IonexCoverageError),
+pub struct IonexSlantDelayStatus {
+    /// The coverage miss [`IonexCoveragePolicy::Hold`] held the value through,
+    /// if any.
+    pub held: Option<IonexCoverageError>,
+    /// The non-available nodes [`IonexMissingNodePolicy::Renormalize`]
+    /// interpolated around, if any. A value with this set is degraded.
+    pub degraded: Option<IonexNodeGap>,
+    /// Which mapping function the product declares, where the single-layer
+    /// `1/cos(z')` mapped a product that declares anything else. `None` where
+    /// the product declares `COSZ`, which is the factor applied, so the value
+    /// rests on nothing the product does not state. The code's text, for an
+    /// [`IonexAssumedMapping::Other`], is in [`IonexHeader::mapping_function`].
+    ///
+    /// This is not a coverage or node failure: the value is a nominal one, and
+    /// [`Self::is_valid`] stays true with it set.
+    pub assumed_mapping: Option<IonexAssumedMapping>,
+}
+
+impl IonexSlantDelayStatus {
+    /// A value inside the product's coverage, interpolated from nodes that all
+    /// hold values, mapped with the factor the product declares.
+    pub const VALID: Self = Self {
+        held: None,
+        degraded: None,
+        assumed_mapping: None,
+    };
+
+    /// Whether the value was neither held through a coverage miss nor degraded
+    /// by a non-available node.
+    ///
+    /// [`Self::assumed_mapping`] is not part of this: most published products
+    /// declare something other than `COSZ`, so a caller asking whether a value
+    /// is inside coverage with every node present would read false on nominal
+    /// results from the CODE, ESA, JPL and UPC GIMs. A caller that cares which
+    /// factor was applied reads that field.
+    pub fn is_valid(&self) -> bool {
+        self.held.is_none() && self.degraded.is_none()
+    }
 }
 
 /// IONEX slant-delay value with its coverage status.
@@ -108,40 +299,57 @@ pub struct IonexSlantDelayEvaluation {
 /// node, or on the edge between two nodes, uses only the nodes it lies on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IonexMissingNodes {
-    /// Index of the map in [`Ionex::map_epochs`].
-    pub map_index: usize,
-    /// Index in [`Ionex::lat_nodes_deg`] of the cell's first node row.
+    /// The map's number, counting from 1 as a file numbers its maps.
+    pub map_number: usize,
+    /// Index in [`Ionex::lat_nodes_deg`] of the cell's first node row. A cell
+    /// index is a position in the node axes, which count from 0, where a map
+    /// number counts from 1.
     pub lat_index: usize,
     /// Index in [`Ionex::lon_nodes_deg`] of the cell's first node column.
     pub lon_index: usize,
+    /// Index in [`Ionex::lon_nodes_deg`] of the cell's other node column.
+    ///
+    /// Within the grid this is `lon_index + 1`. On the cell that closes the
+    /// circle it is `0`: a longitude axis such as 0 to 355 by 5 covers every
+    /// longitude without naming the seam twice, so that cell runs from the last
+    /// column to the first, and the grid has no column 72. The latitude axis
+    /// does not wrap, so the cell's other node row is always `lat_index + 1`.
+    pub lon_index_next: usize,
     /// Which weighted nodes are non-available, in the order
-    /// `[lat_index][lon_index]`,
-    /// `[lat_index][lon_index + 1]`, `[lat_index + 1][lon_index]`,
-    /// `[lat_index + 1][lon_index + 1]`.
+    /// `[lat_index][lon_index]`, `[lat_index][lon_index_next]`,
+    /// `[lat_index + 1][lon_index]`, `[lat_index + 1][lon_index_next]`.
     pub missing: [bool; 4],
 }
 
 impl core::fmt::Display for IonexMissingNodes {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let Self {
-            map_index,
+            map_number,
             lat_index,
             lon_index,
+            lon_index_next,
             missing,
         } = *self;
-        write!(f, "map {map_index} cell [{lat_index}][{lon_index}] missing")?;
-        let offsets = [(0, 0), (0, 1), (1, 0), (1, 1)];
-        for ((lat_offset, lon_offset), _) in offsets
-            .iter()
+        // The map counts from 1 as a file numbers its maps; the cell and node
+        // indices are positions in the node axes, which count from 0.
+        write!(
+            f,
+            "map {map_number} cell [{lat_index}][{lon_index}] missing"
+        )?;
+        // The cell's other column wraps to the first on the cell that closes
+        // the circle, so it is carried rather than added to.
+        let corners = [
+            (0, lon_index),
+            (0, lon_index_next),
+            (1, lon_index),
+            (1, lon_index_next),
+        ];
+        for ((lat_offset, lon), _) in corners
+            .into_iter()
             .zip(missing)
             .filter(|(_, is_missing)| *is_missing)
         {
-            write!(
-                f,
-                " [{}][{}]",
-                lat_index + lat_offset,
-                lon_index + lon_offset
-            )?;
+            write!(f, " [{}][{}]", lat_index + lat_offset, lon)?;
         }
         Ok(())
     }
@@ -529,7 +737,13 @@ fn single_layer_mapping(el_deg: f64) -> f64 {
 /// product's own epoch axis, with no float-rounded time entering the temporal
 /// bracket. `frequency_hz` is the carrier on which the delay is reported. The
 /// returned value is positive meters that increase the pseudorange. This
-/// default entry uses [`IonexCoveragePolicy::Strict`].
+/// default entry uses [`IonexSlantPolicy::default`]: it refuses a query outside
+/// the product's coverage, one whose interpolation weights a non-available node,
+/// and a product whose height maps do not give every node one height. It maps
+/// with the single-layer `1/cos(z')` whatever the product's `MAPPING FUNCTION`
+/// declares; [`ionex_slant_delay_with_policy`] reports what a product declaring
+/// anything but `COSZ` declares in
+/// [`IonexSlantDelayStatus::assumed_mapping`].
 pub fn ionex_slant_delay(
     ionex: &Ionex,
     receiver: Wgs84Geodetic,
@@ -545,12 +759,12 @@ pub fn ionex_slant_delay(
         azimuth_rad,
         epoch_j2000_s,
         frequency_hz,
-        IonexCoveragePolicy::Strict,
+        IonexSlantPolicy::default(),
     )?
     .delay_m)
 }
 
-/// IONEX slant delay with an explicit coverage policy.
+/// IONEX slant delay with explicit coverage, missing-node and mapping policies.
 pub fn ionex_slant_delay_with_policy(
     ionex: &Ionex,
     receiver: Wgs84Geodetic,
@@ -558,7 +772,7 @@ pub fn ionex_slant_delay_with_policy(
     azimuth_rad: f64,
     epoch_j2000_s: i64,
     frequency_hz: f64,
-    policy: IonexCoveragePolicy,
+    policy: IonexSlantPolicy,
 ) -> Result<IonexSlantDelayEvaluation> {
     validate_ionex_slant_inputs(receiver, elevation_rad, azimuth_rad, frequency_hz)?;
 
@@ -572,6 +786,7 @@ pub fn ionex_slant_delay_with_policy(
             frequency_hz,
         },
         ionex_vtec_grid_view(ionex),
+        &slant_shell_height(ionex, policy.mapping),
         policy,
     )?;
     validate_finite(evaluation.delay_m, "ionosphere_delay_m")?;
@@ -635,6 +850,7 @@ pub fn ionex_slant_delays(
     }
 
     let grid = ionex_vtec_grid_view(ionex);
+    let shell_height_km = slant_shell_height(ionex, IonexSlantPolicy::default().mapping);
     for (request, output) in requests.iter().zip(out.iter_mut()) {
         validate_ionex_slant_request(*request)?;
 
@@ -642,7 +858,8 @@ pub fn ionex_slant_delays(
             ionex,
             *request,
             grid,
-            IonexCoveragePolicy::Strict,
+            &shell_height_km,
+            IonexSlantPolicy::default(),
         )?;
         let delay_m = evaluation.delay_m;
         validate_finite(delay_m, "ionosphere_delay_m")?;
@@ -660,15 +877,21 @@ pub fn ionex_slant_delays(
 pub fn ionex_slant_delay_results(
     ionex: &Ionex,
     requests: &[IonexSlantRequest],
-    policy: IonexCoveragePolicy,
+    policy: IonexSlantPolicy,
 ) -> Vec<Result<IonexSlantDelayEvaluation>> {
     let grid = ionex_vtec_grid_view(ionex);
+    let shell_height_km = slant_shell_height(ionex, policy.mapping);
     requests
         .iter()
         .map(|request| {
             validate_ionex_slant_request(*request)?;
-            let evaluation =
-                ionex_slant_delay_unchecked_with_policy(ionex, *request, grid, policy)?;
+            let evaluation = ionex_slant_delay_unchecked_with_policy(
+                ionex,
+                *request,
+                grid,
+                &shell_height_km,
+                policy,
+            )?;
             validate_finite(evaluation.delay_m, "ionosphere_delay_m")?;
             Ok(evaluation)
         })
@@ -707,7 +930,7 @@ impl Ionex {
     pub fn slant_delays_batch_results(
         &self,
         requests: &[IonexSlantRequest],
-        policy: IonexCoveragePolicy,
+        policy: IonexSlantPolicy,
     ) -> Vec<Result<IonexSlantDelayEvaluation>> {
         ionex_slant_delay_results(self, requests, policy)
     }
@@ -717,9 +940,14 @@ fn ionex_slant_delay_unchecked_with_policy(
     ionex: &Ionex,
     request: IonexSlantRequest,
     grid: slant::VtecGridView<'_>,
-    policy: IonexCoveragePolicy,
+    shell: &core::result::Result<SlantShell, IonexSlantRefusal>,
+    policy: IonexSlantPolicy,
 ) -> Result<IonexSlantDelayEvaluation> {
-    let (components, coverage) = slant::slant_delay_components_with_policy(
+    let shell = match shell {
+        Ok(shell) => shell,
+        Err(refusal) => return Err(Error::IonexSlantUnavailable(refusal.clone())),
+    };
+    let (components, held, degraded) = slant::slant_delay_components_with_policy(
         slant::PierceLineOfSight {
             lat_rad: request.receiver.lat_rad,
             lon_rad: request.receiver.lon_rad,
@@ -728,22 +956,93 @@ fn ionex_slant_delay_unchecked_with_policy(
         },
         request.frequency_hz,
         ionex.base_radius_km(),
-        ionex.shell_height_km(),
+        shell.height_km,
         request.epoch_j2000_s,
         grid,
         policy,
     )
     .map_err(|miss| match miss {
         slant::SlantMiss::Coverage(error) => Error::IonexOutOfCoverage(error),
-        slant::SlantMiss::Nodes(gap) => Error::IonexNodesNotAvailable(gap),
+        slant::SlantMiss::Nodes(gap) => Error::IonexNodesNotAvailable(Box::new(gap)),
     })?;
-    let status = match coverage {
-        Some(error) => IonexSlantDelayStatus::Held(error),
-        None => IonexSlantDelayStatus::Valid,
-    };
     Ok(IonexSlantDelayEvaluation {
         delay_m: components.delay_m,
-        status,
+        status: IonexSlantDelayStatus {
+            held,
+            degraded,
+            assumed_mapping: shell.assumed_mapping,
+        },
+    })
+}
+
+/// The single layer a slant delay on `ionex` maps vertical TEC on.
+#[derive(Clone, Copy)]
+struct SlantShell {
+    /// Height of the layer above the base radius, kilometers.
+    height_km: f64,
+    /// Which mapping function the product declares where the single-layer
+    /// factor maps a product declaring anything but `COSZ`, as
+    /// [`IonexSlantDelayStatus::assumed_mapping`].
+    assumed_mapping: Option<IonexAssumedMapping>,
+}
+
+/// The shell a slant delay on `ionex` uses under `mapping`, or the reason the
+/// product gives none.
+fn slant_shell_height(
+    ionex: &Ionex,
+    mapping: IonexMappingPolicy,
+) -> core::result::Result<SlantShell, IonexSlantRefusal> {
+    let height_km = uniform_shell_height(ionex)?;
+    let declared = &ionex.header().mapping_function;
+    // `IonexAssumedMapping::of` gives `None` for `COSZ`, the factor applied, so
+    // a product declaring it carries nothing in its status either way.
+    match (mapping, declared) {
+        (_, Some(IonexMappingFunction::CosZ)) => Ok(SlantShell {
+            height_km,
+            assumed_mapping: None,
+        }),
+        (IonexMappingPolicy::SingleLayer, declared) => Ok(SlantShell {
+            height_km,
+            assumed_mapping: IonexAssumedMapping::of(declared),
+        }),
+        (IonexMappingPolicy::Declared, declared) => Err(IonexSlantRefusal::MappingFunction(
+            IonexMappingDeclaration::of(declared),
+        )),
+    }
+}
+
+/// The one single-layer height of `ionex`: `HGT1` for a product without height
+/// maps, and `HGT1` plus the height every node of its height maps gives, which
+/// IONEX 1 defines as a node's height, when every node gives one and the same.
+fn uniform_shell_height(ionex: &Ionex) -> core::result::Result<f64, IonexSlantRefusal> {
+    let mut common: Option<f64> = None;
+    for (map_index, grid) in ionex.height_maps().iter().enumerate() {
+        for (lat_index, row) in grid.iter().enumerate() {
+            for (lon_index, height) in row.iter().enumerate() {
+                let Some(height) = *height else {
+                    return Err(IonexSlantRefusal::HeightNotAvailable {
+                        map_number: map_index + 1,
+                        lat_index,
+                        lon_index,
+                    });
+                };
+                match common {
+                    None => common = Some(height),
+                    Some(first) if first != height => {
+                        return Err(IonexSlantRefusal::VaryingHeights {
+                            map_number: map_index + 1,
+                            lat_index,
+                            lon_index,
+                        });
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    Ok(match common {
+        Some(height) => ionex.shell_height_km() + height,
+        None => ionex.shell_height_km(),
     })
 }
 

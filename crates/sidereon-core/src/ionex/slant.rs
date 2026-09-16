@@ -9,26 +9,28 @@
 //! TEC; and the dispersive frequency scaling turns slant TEC into meters.
 //!
 //! A node the product gives as non-available has no value to interpolate. A
-//! node or map is weighted when its bilinear or temporal weight is nonzero; when
-//! a weighted node is non-available the evaluation gives no value and names the
-//! map, the cell and the missing nodes. A node or map without weight contributes
-//! nothing, so a query on an available node, or at the epoch of a map, uses no
-//! neighbour.
+//! node or map is weighted when its bilinear or temporal weight is nonzero.
+//! When a weighted node is non-available, the strict policy gives no value and
+//! names the map, the cell and the missing nodes; the renormalizing policy
+//! interpolates from the weighted nodes and maps that hold values, their weights
+//! renormalized to sum to one, and reports the missing nodes with the value. A
+//! node or map without weight contributes nothing, so a query on an available
+//! node, or at the epoch of a map, uses no neighbour.
 //!
 //! The delay returned is a group delay and is positive: it increases the
 //! measured pseudorange (the carrier-phase advance is the negation of this
 //! value).
 //!
-//! The grid is stored north-to-south in latitude (negative latitude step) and
-//! west-to-east in longitude (positive longitude step); the bracketing and the
+//! The grid is stored in the order the file writes each axis, which the sign of
+//! its step gives; the bracketing and the
 //! signed-step fractional offsets follow that ordering directly. There is no
 //! fused multiply-add anywhere: every product and sum is a plain operator, so
 //! the operation tree is identical to the reference recipe and the result is
 //! bit-stable.
 
 use super::{
-    j2000_seconds_from_instant, IonexCoverageError, IonexCoveragePolicy, IonexMissingNodes,
-    IonexNodeGap,
+    j2000_seconds_from_instant, IonexCoverageError, IonexCoveragePolicy, IonexMissingNodePolicy,
+    IonexMissingNodes, IonexNodeGap, IonexSlantPolicy,
 };
 use crate::astro::time::model::Instant;
 
@@ -76,19 +78,61 @@ pub(crate) fn pierce_point(
     let s = re_km / (re_km + h_km) * libm::cos(el_rad);
 
     // Earth-central angle from receiver to pierce point.
-    let psi = PI / 2.0 - el_rad - libm::asin(s);
+    let psi = PI / 2.0 - el_rad - libm::asin(sine_argument(s));
 
-    let phi_ipp = libm::asin(
+    let phi_ipp = libm::asin(sine_argument(
         libm::sin(lat_rad) * libm::cos(psi)
             + libm::cos(lat_rad) * libm::sin(psi) * libm::cos(az_rad),
-    );
-    let lambda_ipp = lon_rad + libm::asin(libm::sin(psi) * libm::sin(az_rad) / libm::cos(phi_ipp));
+    ));
+    // A pierce point at a pole lies on every meridian, and the quotient that
+    // names its longitude divides by the cosine of its latitude, which is that
+    // close to zero there. `cos` never returns zero for a finite argument -- at
+    // `pi/2` it is about 6.1e-17 -- so the test is a tolerance, not equality:
+    // dividing by that value instead sends the quotient past the domain, and
+    // the clamp below would turn it into the receiver's meridian a quarter turn
+    // off. The receiver's meridian is one of the meridians through the pole,
+    // and the grid rows meet there, so the value read does not depend on which
+    // is taken.
+    let cos_phi_ipp = libm::cos(phi_ipp);
+    let lambda_ipp = if cos_phi_ipp.abs() <= POLE_COS_TOLERANCE {
+        lon_rad
+    } else {
+        lon_rad
+            + libm::asin(sine_argument(
+                libm::sin(psi) * libm::sin(az_rad) / cos_phi_ipp,
+            ))
+    };
 
     PiercePoint {
         s,
         psi,
         phi_ipp_deg: phi_ipp * RAD_TO_DEG,
         lambda_ipp_deg: lambda_ipp * RAD_TO_DEG,
+    }
+}
+
+/// How near the cosine of a pierce-point latitude comes to zero before the
+/// pierce point counts as being at a pole.
+///
+/// `1e-12` is a latitude within about `1e-12` radians of `pi/2`, which is a few
+/// micrometres of ground distance; every meridian meets at the pole, so no
+/// longitude is more right than another there.
+const POLE_COS_TOLERANCE: f64 = 1.0e-12;
+
+/// An argument for `asin`, held inside `[-1, 1]`.
+///
+/// The spherical-trig quotients reach `1` at the limit and can round just past
+/// it, or past `-1`, where `asin` gives NaN. Two explicit comparisons, not a
+/// clamp call, so a value already inside the interval is returned unchanged and
+/// the operation order of the reference recipe is kept.
+#[allow(clippy::manual_clamp)]
+fn sine_argument(value: f64) -> f64 {
+    if value > 1.0 {
+        1.0
+    } else if value < -1.0 {
+        -1.0
+    } else {
+        value
     }
 }
 
@@ -101,16 +145,33 @@ fn normalize_lon_deg_with_coverage(
     mut lon_deg: f64,
     lon1: f64,
     lon2: f64,
+    dlon_abs: f64,
 ) -> (f64, Option<IonexCoverageError>) {
     if !lon_deg.is_finite() {
         return (lon_deg, None);
     }
 
+    // A grid whose ends are a full turn apart names the seam twice, so every
+    // longitude lies between them.
     if lon2 - lon1 >= 360.0 {
         while lon_deg < lon1 {
             lon_deg += 360.0;
         }
         while lon_deg > lon2 {
+            lon_deg -= 360.0;
+        }
+        return (lon_deg, None);
+    }
+
+    // A grid that closes the circle without naming the seam twice, as the
+    // 0 to 355 by 5 of IONEX 1's example 1 does, also covers every longitude:
+    // the cell between its last node and its first carries the rest of the
+    // turn.
+    if lon2 - lon1 + dlon_abs >= 360.0 {
+        while lon_deg < lon1 {
+            lon_deg += 360.0;
+        }
+        while lon_deg >= lon1 + 360.0 {
             lon_deg -= 360.0;
         }
         return (lon_deg, None);
@@ -144,6 +205,39 @@ fn normalize_lon_deg_with_coverage(
     (best_lon, coverage)
 }
 
+/// The lowest and highest node of an axis, whichever end the file writes first.
+///
+/// IONEX 1 gives an axis as its two bounds and a signed step, so a file may run
+/// its latitudes north to south or south to north, and its longitudes either
+/// way.
+fn axis_bounds(nodes: &[f64]) -> (f64, f64) {
+    let first = nodes[0];
+    let last = nodes[nodes.len() - 1];
+    if first <= last {
+        (first, last)
+    } else {
+        (last, first)
+    }
+}
+
+/// Whether the longitude axis closes the circle without naming the seam twice,
+/// so the cell between its last node and its first covers the rest of the turn.
+fn closes_circle(lon_arr: &[f64], dlon: f64) -> bool {
+    let (lon1, lon2) = axis_bounds(lon_arr);
+    let span = lon2 - lon1;
+    span < 360.0 && span + dlon.abs() >= 360.0
+}
+
+/// Lower bracket index on a longitude axis that closes the circle, where the
+/// last node in step order brackets with the first.
+fn seam_bracket(value: f64, v1: f64, step: f64, n: usize) -> usize {
+    let units = ((value - v1) / step).floor();
+    if !units.is_finite() {
+        return 0;
+    }
+    (units as i64).rem_euclid(n as i64) as usize
+}
+
 /// Lower bracket index along an axis with signed `step` and `n` nodes.
 ///
 /// Returns `i` such that nodes `i` and `i+1` bracket `value`, clamped so both
@@ -165,6 +259,10 @@ pub(crate) struct BilinearVtec {
     /// Interpolated vertical TEC at the pierce point (TECU), when every node
     /// with a nonzero weight holds a value.
     pub vtec: Option<f64>,
+    /// Vertical TEC from the nodes with a nonzero weight that hold values,
+    /// their weights renormalized to sum to one (TECU), when some such node
+    /// holds no value and another does.
+    pub renormalized: Option<f64>,
     /// Longitude-direction fractional offset within the cell.
     pub p: f64,
     /// Latitude-direction fractional offset within the cell (signed step).
@@ -173,6 +271,9 @@ pub(crate) struct BilinearVtec {
     pub lat_index: usize,
     /// Longitude index of the cell's first node column.
     pub lon_index: usize,
+    /// Longitude index of the cell's other node column, which is `0` on the
+    /// cell that closes the circle.
+    pub lon_index_next: usize,
     /// Nodes with a nonzero weight that hold no value, in the order `E00`,
     /// `E01`, `E10`, `E11`.
     pub missing: [bool; 4],
@@ -180,9 +281,11 @@ pub(crate) struct BilinearVtec {
 
 /// Explicit four-term bilinear VTEC at `(phi_deg, lam_deg)` on one map.
 ///
-/// `vtec_map` is indexed `[i_lat][i_lon]` matching `lat_arr` (descending) and
-/// `lon_arr` (ascending). The pierce-point latitude and longitude are clamped to
-/// the grid edge before bracketing. The weighted sum is the explicit four-term form
+/// `vtec_map` is indexed `[i_lat][i_lon]` matching `lat_arr` and `lon_arr`, each
+/// in the order its signed step gives. The pierce-point latitude is clamped to
+/// the grid edge before bracketing, and so is the longitude unless the grid
+/// closes the circle, where the cell between the last node and the first
+/// carries the seam. The weighted sum is the explicit four-term form
 /// `(1-p)(1-q)E00 + p(1-q)E01 + (1-p)q E10 + p q E11` with `(1-p)`/`(1-q)`
 /// formed once.
 pub(crate) fn bilinear_vtec(
@@ -197,9 +300,9 @@ pub(crate) fn bilinear_vtec(
     let nlat = lat_arr.len();
     let nlon = lon_arr.len();
 
-    // Clamp the pierce-point latitude to the grid extent (descending lat).
-    let lat_hi = lat_arr[0];
-    let lat_lo = lat_arr[nlat - 1];
+    // Clamp the pierce-point latitude to the grid extent, whichever end the
+    // file writes first.
+    let (lat_lo, lat_hi) = axis_bounds(lat_arr);
     let mut phi = phi_deg;
     if phi > lat_hi {
         phi = lat_hi;
@@ -207,52 +310,90 @@ pub(crate) fn bilinear_vtec(
     if phi < lat_lo {
         phi = lat_lo;
     }
-    let lon_lo = lon_arr[0];
-    let lon_hi = lon_arr[nlon - 1];
+    // A grid that closes the circle interpolates across the seam; one that does
+    // not holds the query at its nearest edge, as before.
+    let wraps = closes_circle(lon_arr, dlon);
+    let (lon_lo, lon_hi) = axis_bounds(lon_arr);
     let mut lam = lam_deg;
-    if lam < lon_lo {
-        lam = lon_lo;
-    }
-    if lam > lon_hi {
-        lam = lon_hi;
+    if !wraps {
+        if lam < lon_lo {
+            lam = lon_lo;
+        }
+        if lam > lon_hi {
+            lam = lon_hi;
+        }
     }
 
     let i = bracket(phi, lat_arr[0], dlat, nlat);
-    let j = bracket(lam, lon_arr[0], dlon, nlon);
+    let j = if wraps {
+        seam_bracket(lam, lon_arr[0], dlon, nlon)
+    } else {
+        bracket(lam, lon_arr[0], dlon, nlon)
+    };
+    // The node after the last one in step order is the first, a turn away.
+    let j1 = if j + 1 == nlon { 0 } else { j + 1 };
 
     let lat0 = lat_arr[i];
     let lon0 = lon_arr[j];
 
     // Signed-step fractional offsets: both land in [0, 1].
     let q = (phi - lat0) / dlat;
-    let p = (lam - lon0) / dlon;
+    let mut p = (lam - lon0) / dlon;
+    if wraps {
+        // A grid that closes the circle has a cell that runs past the turn, and
+        // a query can sit any number of turns from the node that opens it. A
+        // turn is `360 / |dlon|` cells whichever way the axis runs, so moving
+        // by whole turns in the direction that shortens the offset brings the
+        // query into the cell, leaving `p` in `[0, 1]`. A query already there,
+        // the closing node at exactly 1 included, is left alone.
+        let turn = (360.0 / dlon).abs();
+        if turn > 0.0 && turn.is_finite() {
+            while p < 0.0 {
+                p += turn;
+            }
+            while p > 1.0 {
+                p -= turn;
+            }
+        }
+    }
 
     let nodes = [
         vtec_map[i][j],
-        vtec_map[i][j + 1],
+        vtec_map[i][j1],
         vtec_map[i + 1][j],
-        vtec_map[i + 1][j + 1],
+        vtec_map[i + 1][j1],
     ];
 
     let one_p = 1.0 - p;
     let one_q = 1.0 - q;
     let weights = [one_p * one_q, p * one_q, one_p * q, p * q];
     let missing = [0, 1, 2, 3].map(|k| nodes[k].is_none() && weights[k] != 0.0);
-    let vtec = if missing.contains(&true) {
-        None
+    let (vtec, renormalized) = if missing.contains(&true) {
+        let mut weight = 0.0;
+        let mut sum = 0.0;
+        for (node, node_weight) in nodes.into_iter().zip(weights) {
+            if let (Some(value), true) = (node, node_weight != 0.0) {
+                weight += node_weight;
+                sum += node_weight * value;
+            }
+        }
+        (None, (weight != 0.0).then(|| sum / weight))
     } else {
         // Only a node without weight can hold no value here, and its term is
         // zero whatever it holds.
         let [e00, e01, e10, e11] = nodes.map(|node| node.unwrap_or(0.0));
-        Some(one_p * one_q * e00 + p * one_q * e01 + one_p * q * e10 + p * q * e11)
+        let vtec = one_p * one_q * e00 + p * one_q * e01 + one_p * q * e10 + p * q * e11;
+        (Some(vtec), None)
     };
 
     BilinearVtec {
         vtec,
+        renormalized,
         p,
         q,
         lat_index: i,
         lon_index: j,
+        lon_index_next: j1,
         missing,
     }
 }
@@ -346,9 +487,22 @@ pub(crate) fn slant_delay_components(
     epoch_s: i64,
     grid: VtecGridView,
 ) -> Result<SlantComponents, IonexNodeGap> {
-    slant_delay_components_with_coverage(los, frequency_hz, re_km, h_km, epoch_s, grid).0
+    slant_delay_components_with_coverage(
+        los,
+        frequency_hz,
+        re_km,
+        h_km,
+        epoch_s,
+        grid,
+        IonexMissingNodePolicy::Strict,
+    )
+    .0
+    .map(|(components, _)| components)
 }
 
+/// One slant-delay evaluation under `policy`: its components, the coverage miss
+/// a hold policy held it through, and the non-available nodes a renormalizing
+/// policy interpolated around.
 pub(crate) fn slant_delay_components_with_policy(
     los: PierceLineOfSight,
     frequency_hz: f64,
@@ -356,16 +510,34 @@ pub(crate) fn slant_delay_components_with_policy(
     h_km: f64,
     epoch_s: i64,
     grid: VtecGridView,
-    policy: IonexCoveragePolicy,
-) -> Result<(SlantComponents, Option<IonexCoverageError>), SlantMiss> {
-    let (components, coverage) =
-        slant_delay_components_with_coverage(los, frequency_hz, re_km, h_km, epoch_s, grid);
-    if let (IonexCoveragePolicy::Strict, Some(error)) = (policy, coverage) {
+    policy: IonexSlantPolicy,
+) -> Result<
+    (
+        SlantComponents,
+        Option<IonexCoverageError>,
+        Option<IonexNodeGap>,
+    ),
+    SlantMiss,
+> {
+    let (evaluation, coverage) = slant_delay_components_with_coverage(
+        los,
+        frequency_hz,
+        re_km,
+        h_km,
+        epoch_s,
+        grid,
+        policy.missing_nodes,
+    );
+    if let (IonexCoveragePolicy::Strict, Some(error)) = (policy.coverage, coverage) {
         return Err(SlantMiss::Coverage(error));
     }
-    let components = components.map_err(SlantMiss::Nodes)?;
-    Ok((components, coverage))
+    let (components, degraded) = evaluation.map_err(SlantMiss::Nodes)?;
+    Ok((components, coverage, degraded))
 }
+
+/// The components with the non-available nodes interpolated around, or the
+/// nodes that left the evaluation without a value.
+type NodeEvaluation = Result<(SlantComponents, Option<IonexNodeGap>), IonexNodeGap>;
 
 fn slant_delay_components_with_coverage(
     los: PierceLineOfSight,
@@ -374,10 +546,8 @@ fn slant_delay_components_with_coverage(
     h_km: f64,
     epoch_s: i64,
     grid: VtecGridView,
-) -> (
-    Result<SlantComponents, IonexNodeGap>,
-    Option<IonexCoverageError>,
-) {
+    missing_nodes: IonexMissingNodePolicy,
+) -> (NodeEvaluation, Option<IonexCoverageError>) {
     let PierceLineOfSight {
         lat_rad,
         lon_rad,
@@ -395,12 +565,11 @@ fn slant_delay_components_with_coverage(
     let geom = pierce_point(lat_rad, lon_rad, az_rad, el_rad, re_km, h_km);
     let s = geom.s;
 
-    let lon1 = lon_arr[0];
-    let lon2 = lon_arr[lon_arr.len() - 1];
-    let (lam_deg, lon_coverage) = normalize_lon_deg_with_coverage(geom.lambda_ipp_deg, lon1, lon2);
+    let (lon1, lon2) = axis_bounds(lon_arr);
+    let (lam_deg, lon_coverage) =
+        normalize_lon_deg_with_coverage(geom.lambda_ipp_deg, lon1, lon2, dlon.abs());
     let phi_deg = geom.phi_ipp_deg;
-    let lat_hi = lat_arr[0];
-    let lat_lo = lat_arr[lat_arr.len() - 1];
+    let (lat_lo, lat_hi) = axis_bounds(lat_arr);
     let lat_coverage = if phi_deg > lat_hi || phi_deg < lat_lo {
         Some(IonexCoverageError::LatitudeOutOfRange)
     } else {
@@ -448,22 +617,43 @@ fn slant_delay_components_with_coverage(
     let b0 = bilinear_vtec(&maps[ti], lat_arr, lon_arr, dlat, dlon, phi_deg, lam_deg);
     let b1 = bilinear_vtec(&maps[ti1], lat_arr, lon_arr, dlat, dlon, phi_deg, lam_deg);
 
+    let earlier_weighted = 1.0 - w != 0.0;
+    let later_weighted = ti1 != ti && w != 0.0;
+    // The epoch axis is indexed from 0; a map is named by its number, from 1.
     let missing_on = |b: &BilinearVtec, map_index: usize, weighted: bool| {
         (weighted && b.vtec.is_none()).then_some(IonexMissingNodes {
-            map_index,
+            map_number: map_index + 1,
             lat_index: b.lat_index,
             lon_index: b.lon_index,
+            lon_index_next: b.lon_index_next,
             missing: b.missing,
         })
     };
-    let earlier = missing_on(&b0, ti, 1.0 - w != 0.0);
-    let later = missing_on(&b1, ti1, ti1 != ti && w != 0.0);
-    if earlier.is_some() || later.is_some() {
-        return (Err(IonexNodeGap { earlier, later }), coverage);
-    }
+    let earlier = missing_on(&b0, ti, earlier_weighted);
+    let later = missing_on(&b1, ti1, later_weighted);
+    let gap = (earlier.is_some() || later.is_some()).then_some(IonexNodeGap { earlier, later });
 
-    // A map without temporal weight contributes nothing, whatever it holds.
-    let vtec = (1.0 - w) * b0.vtec.unwrap_or(0.0) + w * b1.vtec.unwrap_or(0.0);
+    let vtec = match (gap, missing_nodes) {
+        // A map without temporal weight contributes nothing, whatever it holds.
+        (None, _) => (1.0 - w) * b0.vtec.unwrap_or(0.0) + w * b1.vtec.unwrap_or(0.0),
+        (Some(gap), IonexMissingNodePolicy::Strict) => return (Err(gap), coverage),
+        (Some(gap), IonexMissingNodePolicy::Renormalize) => {
+            let mut weight = 0.0;
+            let mut sum = 0.0;
+            for (b, map_weight, weighted) in
+                [(&b0, 1.0 - w, earlier_weighted), (&b1, w, later_weighted)]
+            {
+                if let (true, Some(value)) = (weighted, b.vtec.or(b.renormalized)) {
+                    weight += map_weight;
+                    sum += map_weight * value;
+                }
+            }
+            if weight == 0.0 {
+                return (Err(gap), coverage);
+            }
+            sum / weight
+        }
+    };
 
     // Obliquity (slant) factor m(E) = 1 / cos(z') = 1 / sqrt(1 - s^2).
     let m = 1.0 / (1.0 - s * s).sqrt();
@@ -488,7 +678,7 @@ fn slant_delay_components_with_coverage(
         stec,
         delay_m,
     };
-    (Ok(components), coverage)
+    (Ok((components, gap)), coverage)
 }
 
 // invariant: map epochs come from the validated IONEX product axis.

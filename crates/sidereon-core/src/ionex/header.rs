@@ -40,6 +40,60 @@ impl IonexMappingFunction {
     }
 }
 
+/// What a product says about the mapping function its maps were determined
+/// with, which is either a `MAPPING FUNCTION` record or no such record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IonexMappingDeclaration {
+    /// The `MAPPING FUNCTION` record the product carries.
+    Declared(IonexMappingFunction),
+    /// The product carries no `MAPPING FUNCTION` record.
+    Absent,
+}
+
+/// Which mapping function a product declares, where a slant delay applied the
+/// single-layer `1/cos(z')` to a product that declares something else.
+///
+/// This names the case without carrying the code's text, so a slant-delay
+/// status stays `Copy` and a batch allocates nothing per ray. The text of an
+/// [`IonexAssumedMapping::Other`] code is in
+/// [`IonexHeader::mapping_function`], as [`IonexMappingFunction::code`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IonexAssumedMapping {
+    /// The product declares `NONE`: no mapping function was used.
+    NoMapping,
+    /// The product declares `QFAC`, which the spec gives no formula for.
+    QFactor,
+    /// The product declares a code the spec does not name; read it from
+    /// [`IonexHeader::mapping_function`].
+    Other,
+    /// The product carries no `MAPPING FUNCTION` record.
+    Absent,
+}
+
+impl IonexAssumedMapping {
+    /// The case a header's `MAPPING FUNCTION` falls in, or `None` where it
+    /// declares `COSZ`, which is the factor applied.
+    pub(crate) fn of(function: &Option<IonexMappingFunction>) -> Option<Self> {
+        match function {
+            Some(IonexMappingFunction::CosZ) => None,
+            Some(IonexMappingFunction::NoMapping) => Some(Self::NoMapping),
+            Some(IonexMappingFunction::QFactor) => Some(Self::QFactor),
+            Some(IonexMappingFunction::Other(_)) => Some(Self::Other),
+            None => Some(Self::Absent),
+        }
+    }
+}
+
+impl IonexMappingDeclaration {
+    /// The declaration a header's `MAPPING FUNCTION` field makes.
+    pub(crate) fn of(function: &Option<IonexMappingFunction>) -> Self {
+        match function {
+            Some(function) => Self::Declared(function.clone()),
+            None => Self::Absent,
+        }
+    }
+}
+
 /// Descriptive IONEX header records, kept so a product written back carries
 /// them.
 ///

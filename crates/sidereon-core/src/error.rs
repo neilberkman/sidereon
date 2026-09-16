@@ -29,7 +29,9 @@ pub enum Error {
     IonexOutOfCoverage(crate::ionex::IonexCoverageError),
     /// An IONEX slant-delay interpolation weights grid nodes the product gives
     /// as non-available.
-    IonexNodesNotAvailable(crate::ionex::IonexNodeGap),
+    IonexNodesNotAvailable(Box<crate::ionex::IonexNodeGap>),
+    /// An IONEX product gives no slant delay under the requested policy.
+    IonexSlantUnavailable(crate::ionex::IonexSlantRefusal),
     /// A requested epoch lies outside the sampled / valid span.
     EpochOutOfRange,
     /// An operation received inputs it cannot combine (e.g. an empty set of
@@ -50,6 +52,9 @@ impl fmt::Display for Error {
             } => write!(f, "missing terrain tile ({lat_index},{lon_index})"),
             Error::IonexOutOfCoverage(error) => write!(f, "IONEX out of coverage: {error}"),
             Error::IonexNodesNotAvailable(gap) => write!(f, "IONEX nodes not available: {gap}"),
+            Error::IonexSlantUnavailable(refusal) => {
+                write!(f, "IONEX slant delay unavailable: {refusal}")
+            }
             Error::EpochOutOfRange => write!(f, "epoch out of range"),
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
         }

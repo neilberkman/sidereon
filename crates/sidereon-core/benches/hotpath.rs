@@ -91,7 +91,9 @@ fn media_options(ionex: &Ionex) -> ObservableMediaOptions<'_> {
     options.troposphere = Some(Default::default());
     options.ionosphere = Some(ObservableIonosphereCorrection::IonexWithPolicy(
         ionex,
-        IonexCoveragePolicy::Hold,
+        // `into()` so this file also compiles against the merge base, where
+        // the variant takes the coverage policy itself.
+        IonexCoveragePolicy::Hold.into(),
     ));
     options
 }
