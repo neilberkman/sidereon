@@ -708,7 +708,7 @@ fn ionex_from_samples_text_round_trip_reparses_to_same_ir() {
     let original = synthetic_ionex();
     let sample_built =
         Ionex::from_samples(original.tec_grid_samples()).expect("sample-built IONEX");
-    let encoded = sample_built.to_ionex_string();
+    let encoded = sample_built.to_ionex_string().expect("writable IONEX");
     let reparsed = Ionex::parse_str(&encoded).expect("serialized sample-built IONEX reparses");
     assert_eq!(
         reparsed, sample_built,
@@ -1749,11 +1749,11 @@ fn ionex_round_trips_through_the_serializer() {
 
     // Encode -> parse must reproduce the canonical IR bit-for-bit, and a second
     // encode of the reparsed product must be byte-identical (deterministic).
-    let encoded = original.to_ionex_string();
+    let encoded = original.to_ionex_string().expect("writable IONEX");
     let reparsed = Ionex::parse_str(&encoded).expect("serialized IONEX reparses");
     assert_eq!(reparsed, original, "round-trip preserves the IONEX IR");
     assert_eq!(
-        reparsed.to_ionex_string(),
+        reparsed.to_ionex_string().expect("writable IONEX"),
         encoded,
         "serializer is deterministic"
     );
@@ -1802,11 +1802,11 @@ fn ionex_round_trips_a_product_with_rms_maps() {
     let original = Ionex::parse_str(&text).expect("parse IONEX with RMS map");
     assert_eq!(original.rms_maps().len(), 1, "one RMS map present");
 
-    let encoded = original.to_ionex_string();
+    let encoded = original.to_ionex_string().expect("writable IONEX");
     let reparsed = Ionex::parse_str(&encoded).expect("serialized IONEX reparses");
     assert_eq!(reparsed, original, "round-trip preserves TEC and RMS grids");
     assert_eq!(
-        reparsed.to_ionex_string(),
+        reparsed.to_ionex_string().expect("writable IONEX"),
         encoded,
         "serializer is deterministic"
     );
@@ -2440,7 +2440,8 @@ fn ionex_real_non_available_node_reads_as_none() {
 fn ionex_real_products_round_trip_through_the_serializer() {
     for name in REAL_TRIMS {
         let original = Ionex::parse_str(&fixture_text(&format!("{name}.INX"))).expect(name);
-        let reparsed = Ionex::parse_str(&original.to_ionex_string()).expect("reparse");
+        let reparsed = Ionex::parse_str(&original.to_ionex_string().expect("writable IONEX"))
+            .expect("reparse");
         let without_skips =
             Ionex::from_samples(original.tec_grid_samples()).expect("sample-built copy");
         assert_eq!(reparsed, without_skips, "{name}");
@@ -3809,3 +3810,464 @@ fn ionex_pierce_point_through_a_pole_gives_a_value() {
 // ---------------------------------------------------------------------------
 // Writer: IONEX 1 columns, exact values, refusals.
 // ---------------------------------------------------------------------------
+
+fn written(ionex: &Ionex) -> String {
+    ionex.to_ionex_string().expect("writable product")
+}
+
+#[test]
+fn ionex_writer_keeps_the_axis_direction_it_read() {
+    // The axis records carry the direction the nodes run in, so a product whose
+    // latitudes run south to north and whose longitudes run east to west writes
+    // back the axes it holds.
+    let mut samples = valid_tec_grid_samples();
+    samples.lat_nodes_deg = vec![0.0, 1.0];
+    samples.dlat_deg = 1.0;
+    samples.lon_nodes_deg = vec![1.0, 0.0];
+    samples.dlon_deg = -1.0;
+    let ionex = Ionex::from_samples(samples).expect("axes in either direction");
+    let text = written(&ionex);
+    assert!(text.contains("     0.0   1.0   1.0"), "{text}");
+    assert!(text.contains("     1.0   0.0  -1.0"), "{text}");
+    assert_rereads_as(&ionex, &text);
+}
+
+#[test]
+fn ionex_writer_states_a_value_no_field_reads_back() {
+    // No field states 0.7 for the reader: 7 * 1e-1 through 70000 * 1e-5, every
+    // one that fits I5, give 0x1.6666666666667p-1, while 0.7 is
+    // 0x1.6666666666666p-1, and 700000 leaves the five columns. The file states
+    // it as the decimal the field names, and the value read back is the product
+    // that field gives, one unit in the last place away.
+    let mut samples = valid_tec_grid_samples();
+    samples.tec_maps = vec![vec![vec![Some(0.7), Some(0.7)], vec![Some(0.7), Some(0.7)]]];
+    let ionex = Ionex::from_samples(samples).expect("0.7 product");
+    let text = written(&ionex);
+    assert_rereads_within_one_ulp(&ionex, &text);
+
+    let reparsed = Ionex::parse_str(&text).expect("written 0.7 reparses");
+    let got = reparsed.tec_maps()[0][0][0].expect("node holds a value");
+    assert_ne!(
+        got.to_bits(),
+        0.7_f64.to_bits(),
+        "no field reads back as 0.7, so the round trip is not exact here"
+    );
+    assert_eq!(ulp_distance(got, 0.7), 1, "read back as {got}");
+}
+
+#[test]
+fn ionex_writer_writes_a_product_built_from_decimal_values() {
+    // A product built from samples holds decimals that no whole number of
+    // tenths reaches. Hundredths hold a field the reader takes back for three
+    // of these, and state the fourth: 0.7 is written as the decimal 70, which
+    // reads back one unit in the last place away. One unit writes them all, so
+    // the file carries that exponent in its header and no record inside a map.
+    let mut samples = valid_tec_grid_samples();
+    samples.tec_maps = vec![vec![
+        vec![Some(0.7), Some(12.3)],
+        vec![Some(-0.25), Some(100.0)],
+    ]];
+    let ionex = Ionex::from_samples(samples).expect("decimal product");
+    let out = written(&ionex);
+    assert_rereads_within_one_ulp(&ionex, &out);
+
+    let reparsed = Ionex::parse_str(&out).expect("written decimals reparse");
+    // Hundredths hold a field the reader takes back for three of these, so they
+    // read back as themselves. 0.7 has no such field at any exponent, so the
+    // file states the decimal 70 and the reader gives back the product of it.
+    for (want, got) in [
+        (12.3_f64, reparsed.tec_maps()[0][0][1]),
+        (-0.25, reparsed.tec_maps()[0][1][0]),
+        (100.0, reparsed.tec_maps()[0][1][1]),
+    ] {
+        let got = got.expect("node holds a value");
+        assert_eq!(got.to_bits(), want.to_bits(), "{want} read back as {got}");
+    }
+    let seven = reparsed.tec_maps()[0][0][0].expect("node holds a value");
+    assert_eq!(ulp_distance(seven, 0.7), 1, "0.7 read back as {seven}");
+    // Hundredths state every one of them, so that is the unit chosen.
+    assert_eq!(reparsed.exponent(), -2);
+}
+
+/// Reparse `text` and compare it with `original` rebuilt from its samples at the
+/// exponent the text declares, and check the writer reproduces the text.
+fn assert_rereads_as(original: &Ionex, text: &str) {
+    let reparsed = Ionex::parse_str(text).expect("written text reparses");
+    let mut expected = original.tec_grid_samples();
+    expected.exponent = reparsed.exponent();
+    // A product built from samples states no `# OF MAPS IN FILE`; the file the
+    // writer wrote states one, so the product read back from it carries that
+    // record.
+    expected.header.maps_in_file = reparsed.header().maps_in_file;
+    assert_eq!(
+        reparsed,
+        Ionex::from_samples(expected).expect("samples rebuild")
+    );
+    assert_eq!(written(&reparsed), text, "the writer is deterministic");
+}
+
+/// As [`assert_rereads_as`], for a product built from samples rather than read
+/// from a file: every node within one unit in the last place.
+///
+/// The writer states a value with the field the file can hold it in, and the
+/// reader forms the product the reference readers form, so a value that never
+/// came from a field can come back one unit away. A product parsed from text
+/// has no such gap.
+fn assert_rereads_within_one_ulp(original: &Ionex, text: &str) {
+    let reparsed = Ionex::parse_str(text).expect("written text reparses");
+    assert_eq!(reparsed.map_epochs_s(), original.map_epochs_s());
+    for (maps, rebuilt) in [
+        (original.tec_maps(), reparsed.tec_maps()),
+        (original.rms_maps(), reparsed.rms_maps()),
+        (original.height_maps(), reparsed.height_maps()),
+    ] {
+        assert_eq!(maps.len(), rebuilt.len(), "map count");
+        for (map, remap) in maps.iter().zip(rebuilt) {
+            for (row, rerow) in map.iter().zip(remap) {
+                for (node, renode) in row.iter().zip(rerow) {
+                    match (node, renode) {
+                        (Some(want), Some(got)) => assert!(
+                            ulp_distance(*want, *got) <= 1,
+                            "node {want} read back as {got}"
+                        ),
+                        (None, None) => {}
+                        _ => panic!("node availability changed: {node:?} became {renode:?}"),
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(written(&reparsed), text, "the writer is deterministic");
+}
+
+fn data_records(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter(|line| {
+        !line.is_empty()
+            && line
+                .bytes()
+                .all(|byte| byte == b' ' || byte == b'-' || byte.is_ascii_digit())
+    })
+}
+
+#[test]
+fn ionex_writer_lays_out_every_record_as_ionex_1_defines() {
+    let original = synthetic_ionex();
+    let text = written(&original);
+    assert!(text.lines().all(|line| line.len() <= 80), "{text}");
+
+    let header: Vec<&str> = text
+        .lines()
+        .take_while(|line| !line.ends_with("END OF HEADER"))
+        .map(|line| line[60..].trim())
+        .collect();
+    assert_eq!(
+        header,
+        [
+            "IONEX VERSION / TYPE",
+            "PGM / RUN BY / DATE",
+            "EPOCH OF FIRST MAP",
+            "EPOCH OF LAST MAP",
+            "INTERVAL",
+            "# OF MAPS IN FILE",
+            "MAPPING FUNCTION",
+            "ELEVATION CUTOFF",
+            "OBSERVABLES USED",
+            "BASE RADIUS",
+            "MAP DIMENSION",
+            "HGT1 / HGT2 / DHGT",
+            "LAT1 / LAT2 / DLAT",
+            "LON1 / LON2 / DLON",
+        ]
+    );
+    for (data, label) in [
+        (
+            "     1.1            IONOSPHERE MAPS",
+            "IONEX VERSION / TYPE",
+        ),
+        ("  2020     6    24     0     0     0", "EPOCH OF FIRST MAP"),
+        ("  2020     6    24     2     0     0", "EPOCH OF LAST MAP"),
+        ("  COSZ", "MAPPING FUNCTION"),
+        ("  6371.0", "BASE RADIUS"),
+        ("   450.0 450.0   0.0", "HGT1 / HGT2 / DHGT"),
+        ("    60.0 -60.0 -20.0", "LAT1 / LAT2 / DLAT"),
+        ("  -180.0 180.0  60.0", "LON1 / LON2 / DLON"),
+        ("    60.0-180.0 180.0  60.0 450.0", "LAT/LON1/LON2/DLON/H"),
+        ("   -60.0-180.0 180.0  60.0 450.0", "LAT/LON1/LON2/DLON/H"),
+    ] {
+        assert!(
+            text.contains(&format!("{data:<60}{label}\n")),
+            "{label} {data:?}:\n{text}"
+        );
+    }
+    assert!(
+        text.contains("\n  100  101  102  103  104  105  106\n"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("EXPONENT"),
+        "the default exponent is not written"
+    );
+    assert!(text.ends_with(&format!("{:60}END OF FILE\n", "")));
+    assert!(data_records(&text).all(|line| line.len() % 5 == 0));
+    assert_rereads_as(&original, &text);
+}
+
+#[test]
+fn ionex_writer_writes_non_available_values_as_9999_and_rereads_exactly() {
+    let mut products = Vec::new();
+    for name in [
+        "spec_example_2d.inx",
+        "COD0OPSFIN_20240010000_01D_01H_GIM_trim.INX",
+        "EMR0OPSFIN_20240010000_01D_01H_GIM_trim.INX",
+        "IGS0OPSFIN_20240010000_01D_02H_GIM_trim.INX",
+        "uqrg0010.24i_trim.INX",
+    ] {
+        products.push((name, Ionex::parse_str(&fixture_text(name)).expect(name)));
+    }
+    for (name, original) in products {
+        let text = written(&original);
+        assert_rereads_as(&original, &text);
+
+        let non_available = [
+            original.tec_maps(),
+            original.rms_maps(),
+            original.height_maps(),
+        ]
+        .iter()
+        .flat_map(|maps| maps.iter().flatten().flatten())
+        .filter(|value| value.is_none())
+        .count();
+        let written_9999 = data_records(&text)
+            .flat_map(|line| line.as_bytes().chunks(5))
+            .filter(|field| *field == b" 9999")
+            .count();
+        assert_eq!(written_9999, non_available, "{name}");
+        assert!(
+            data_records(&text).all(|line| line.len() <= 80 && line.len() % 5 == 0),
+            "{name}: values in 16I5"
+        );
+    }
+}
+
+#[test]
+fn ionex_writer_chooses_an_exponent_that_writes_every_value_exactly() {
+    // Hundredths of a TECU that tenths cannot write.
+    let mut samples = valid_tec_grid_samples();
+    samples.exponent = -1;
+    samples.tec_maps = vec![vec![
+        vec![Some(scaled(123, -2)), Some(scaled(450, -2))],
+        vec![Some(scaled(-5, -2)), Some(scaled(99999, -2))],
+    ]];
+    let original = Ionex::from_samples(samples).expect("hundredths");
+    let text = written(&original);
+    assert!(
+        text.contains(&format!("{:<60}EXPONENT\n", "    -2")),
+        "{text}"
+    );
+    assert_rereads_as(&original, &text);
+
+    // 9999 units marks a non-available value, so 9999 TECU is written in tenths.
+    let mut samples = valid_tec_grid_samples();
+    samples.tec_maps = vec![vec![
+        vec![Some(9999.0), Some(1.0)],
+        vec![Some(2.0), Some(3.0)],
+    ]];
+    let original = Ionex::from_samples(samples).expect("9999 TECU");
+    let text = written(&original);
+    // Tenths are the default unit, so no EXPONENT record is written.
+    assert!(!text.contains("EXPONENT"), "{text}");
+    assert_rereads_as(&original, &text);
+    let reparsed = Ionex::parse_str(&text).expect("reparse");
+    assert_eq!(reparsed.exponent(), -1);
+    assert_eq!(reparsed.tec_maps()[0][0][0], Some(9999.0));
+
+    // No one exponent writes 1.23 and 1234500 TECU, so the band at latitude 0
+    // splits into two band records, each after its own EXPONENT record, and the
+    // second map restates the header exponent the first map left changed.
+    let mut samples = valid_tec_grid_samples();
+    samples.exponent = 0;
+    samples.map_epochs = vec![
+        super::ionex_epoch_from_j2000_seconds(0),
+        super::ionex_epoch_from_j2000_seconds(10),
+    ];
+    samples.tec_maps = vec![
+        vec![
+            vec![Some(12.0), Some(13.0)],
+            vec![Some(scaled(123, -2)), Some(scaled(12345, 2))],
+        ],
+        vec![vec![Some(10.0), Some(11.0)], vec![Some(12.0), Some(13.0)]],
+    ];
+    let original = Ionex::from_samples(samples).expect("mixed units");
+    let text = written(&original);
+    let records: Vec<&str> = text
+        .lines()
+        .filter(|line| line.ends_with("EXPONENT") || line.ends_with("LAT/LON1/LON2/DLON/H"))
+        .map(|line| line[..60].trim_end())
+        .collect();
+    assert_eq!(
+        records,
+        [
+            "     0",
+            "     1.0   0.0   1.0   1.0 450.0",
+            "    -2",
+            "     0.0   0.0   0.0   1.0 450.0",
+            "     2",
+            "     0.0   1.0   1.0   1.0 450.0",
+            "     0",
+            "     1.0   0.0   1.0   1.0 450.0",
+            "     0.0   0.0   1.0   1.0 450.0",
+        ],
+        "{text}"
+    );
+    let reparsed = Ionex::parse_str(&text).expect("per-block exponents read back");
+    let mut expected = original.tec_grid_samples();
+    // The written file states its map count, which the product built from
+    // samples did not.
+    expected.header.maps_in_file = reparsed.header().maps_in_file;
+    assert_eq!(
+        reparsed,
+        Ionex::from_samples(expected).expect("samples rebuild"),
+        "the header keeps the product's exponent"
+    );
+    assert_eq!(written(&reparsed), text);
+
+    // IONEX 1 example 1, as the fixture gives it, mixes units across its bands.
+    let spec = Ionex::parse_str(&fixture_text("spec_example_2d.inx")).expect("example");
+    let text = written(&spec);
+    assert!(
+        text.lines()
+            .skip_while(|line| !line.ends_with("END OF HEADER"))
+            .any(|line| line.ends_with("EXPONENT")),
+        "{text}"
+    );
+    assert_eq!(Ionex::parse_str(&text).expect("reparse"), spec);
+
+    // No exponent writes 12345.6 TECU within I5.
+    let mut samples = valid_tec_grid_samples();
+    samples.exponent = -1;
+    samples.tec_maps = vec![vec![
+        vec![Some(scaled(123_456, -1)), Some(1.0)],
+        vec![Some(2.0), Some(3.0)],
+    ]];
+    let message = Ionex::from_samples(samples)
+        .expect("wide value")
+        .to_ionex_string()
+        .expect_err("no exponent writes it")
+        .to_string();
+    assert!(
+        message.contains("TEC map 1 value 12345.6")
+            && message.contains("latitude 1 longitude 0")
+            && message.contains("within I5"),
+        "{message}"
+    );
+}
+
+/// A change to a header and the record label its refusal names.
+type HeaderEdit = (fn(&mut IonexHeader), &'static str);
+
+#[test]
+fn ionex_writer_refuses_fields_its_columns_cannot_hold() {
+    let mut samples = valid_tec_grid_samples();
+    samples.lat_nodes_deg = vec![0.5, 0.25];
+    samples.lon_nodes_deg = vec![0.0, 0.25];
+    samples.dlat_deg = -0.25;
+    samples.dlon_deg = 0.25;
+    let message = Ionex::from_samples(samples)
+        .expect("quarter-degree grid")
+        .to_ionex_string()
+        .expect_err("F6.1 axis")
+        .to_string();
+    assert!(
+        message.contains("LAT1 / LAT2 / DLAT nodes 0.5 to 0.25 by -0.25"),
+        "{message}"
+    );
+
+    let edits: [HeaderEdit; 6] = [
+        (
+            |header| header.program = "a program name over twenty".into(),
+            "PGM / RUN BY / DATE",
+        ),
+        (
+            |header| header.descriptions.push("a trailing blank ".into()),
+            "DESCRIPTION",
+        ),
+        (
+            |header| header.observables_used = "carrier\tphase".into(),
+            "OBSERVABLES USED",
+        ),
+        (
+            |header| header.elevation_cutoff_deg = 10.25,
+            "ELEVATION CUTOFF",
+        ),
+        (
+            |header| header.mapping_function = Some(IonexMappingFunction::Other("COSZ".into())),
+            "MAPPING FUNCTION",
+        ),
+        (
+            |header| header.mapping_function = Some(IonexMappingFunction::Other("MSLM1".into())),
+            "MAPPING FUNCTION",
+        ),
+    ];
+    for (edit, label) in edits {
+        let mut samples = valid_tec_grid_samples();
+        edit(&mut samples.header);
+        let message = Ionex::from_samples(samples)
+            .expect("product")
+            .to_ionex_string()
+            .expect_err(label)
+            .to_string();
+        assert!(message.contains(label), "{label}: {message}");
+    }
+}
+
+#[test]
+fn ionex_writer_keeps_utf8_header_text_in_byte_columns() {
+    // uhrg0010.24i gives its contact address in UTF-8, with an accented name.
+    let mut samples = valid_tec_grid_samples();
+    samples.header.descriptions = vec![
+        "Contact address: Manuel Hernández-Pajares".into(),
+        format!("{:<58}á", "sixty bytes in fifty-nine characters:"),
+    ];
+    samples.header.run_by = "Hernández UPC".into();
+    let original = Ionex::from_samples(samples).expect("product");
+    let text = written(&original);
+    let accented: Vec<&str> = text.lines().filter(|line| line.contains('á')).collect();
+    assert_eq!(accented.len(), 3, "{text}");
+    for line in accented {
+        assert!(line.is_char_boundary(60), "{line:?}");
+        assert!(
+            matches!(&line[60..], "DESCRIPTION" | "PGM / RUN BY / DATE"),
+            "{line:?}"
+        );
+    }
+    assert_rereads_as(&original, &text);
+}
+
+#[test]
+fn ionex_writer_writes_the_spec_values_for_unstated_header_records() {
+    let original = Ionex::from_samples(valid_tec_grid_samples()).expect("samples");
+    let text = written(&original);
+    for (data, label) in [
+        (
+            "     1.0            IONOSPHERE MAPS",
+            "IONEX VERSION / TYPE",
+        ),
+        ("", "PGM / RUN BY / DATE"),
+        ("     0", "INTERVAL"),
+        ("     1", "# OF MAPS IN FILE"),
+        ("  COSZ", "MAPPING FUNCTION"),
+        ("     0.0", "ELEVATION CUTOFF"),
+        ("", "OBSERVABLES USED"),
+        ("     2", "MAP DIMENSION"),
+        ("     0", "EXPONENT"),
+        ("", "END OF FILE"),
+    ] {
+        assert!(
+            text.contains(&format!("{data:<60}{label}\n")),
+            "{label}:\n{text}"
+        );
+    }
+    assert_rereads_as(&original, &text);
+    let (_, warnings) = Ionex::parse_str_with_warnings(&text).expect("reparse");
+    assert!(warnings.is_empty(), "{warnings:?}");
+}

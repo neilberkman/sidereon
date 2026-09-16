@@ -1,194 +1,670 @@
 //! IONEX serialization - the inverse of the grid parser ([`Ionex::parse`]).
 //!
 //! Pure and deterministic: the same [`Ionex`] always produces byte-identical
-//! text, and no I/O is performed. A parse -> encode -> parse pipeline round-trips
-//! the canonical IR (node axes, geometry, exponent, header records, map epochs,
-//! and every TEC, RMS and height value), so re-reading the output yields an
-//! equal product.
+//! text, and no I/O is performed. The text is laid out as IONEX 1 defines it:
+//! every required header record, axes in `2X,3F6.1`, band records in
+//! `2X,5F6.1`, values in `16I5` with `9999` for a non-available value, and a
+//! final `END OF FILE`. The records a product's maps determine,
+//! `EPOCH OF FIRST MAP`, `EPOCH OF LAST MAP`, `# OF MAPS IN FILE` and
+//! `MAP DIMENSION`, are written from the maps. `MAPPING FUNCTION` is written with
+//! a blank code for a product that has none. Records the reader does not keep,
+//! such as an auxiliary data block, are not written.
 //!
-//! The grid is reconstructed from the canonical IR, not echoed from the source
-//! bytes: the latitude/longitude axis bounds come from the node arrays, the
-//! scaled-integer field is recovered as `round(value / 10^EXPONENT)` with `9999`
-//! for a non-available value, and the map epochs are rendered back to the IONEX
-//! civil `year month day hour minute second` record. The records a product's
-//! maps determine, `EPOCH OF FIRST MAP`, `EPOCH OF LAST MAP`,
-//! `# OF MAPS IN FILE` and `MAP DIMENSION`, are written from the maps. Records
-//! the reader does not keep, such as an auxiliary data block, are not emitted.
+//! # Exponents
+//!
+//! A value is written as a field the reader takes back as that value, a whole
+//! number of `10^EXPONENT` units within `I5` other than `9999`, which keeps a
+//! product read from a file exact through the round trip. A value no such field
+//! reaches, which only a product built from samples holds, is written as the
+//! field whose decimal is the value, and reads back one unit in the last place
+//! away. When one exponent writes every TEC, RMS and height value the first
+//! way, the file has that one: the product's own [`Ionex::exponent`] where it
+//! does, otherwise the nearest that does, the finer of two equally near. Such a
+//! file carries no `EXPONENT` record inside a map, so readers that take only
+//! the header `EXPONENT`, as RTKLIB does, read it too.
+//!
+//! Otherwise the header `EXPONENT` is the product's own, and an `EXPONENT`
+//! record before a `LAT/LON1/LON2/DLON/H` record gives each data block an
+//! exponent that writes its values exactly. A latitude whose values no one
+//! exponent writes is split into several band records over runs of its
+//! longitudes. A map that starts while an exponent other than the header's is
+//! in effect restates one before its first block. An exponent stays in effect
+//! until another record changes it, so the restatement is not needed to read
+//! the file; it is written because IONEX 1's own 3-D example restates one that
+//! way, and because RTKLIB takes only the header `EXPONENT`.
+//!
+//! `EXPONENT` in the header is written when it is not the default `-1`. Only a
+//! value that no exponent states either way is refused, and a value, axis or
+//! header field that its field cannot hold exactly is refused by name rather
+//! than rounded.
+//!
+//! Re-reading the text yields an equal product, except that it has no skipped
+//! records and, where the file has one exponent other than the product's, that
+//! exponent.
+//!
+//! A product built from samples writes the header records its
+//! [`super::IonexHeader`] holds. [`super::IonexHeader::new`] gives the values
+//! the spec gives for a record whose value is unstated: `INTERVAL` `0` (may
+//! vary), `ELEVATION CUTOFF` `0.0` (unknown) and blank `OBSERVABLES USED` (a
+//! theoretical model), with version `1.0` and a blank satellite system,
+//! program, agency and date.
 
 use core::fmt::Write as _;
 
 use super::grid::{
-    Grid, Ionex, BAND, BASE_RADIUS, COMMENT, DESCRIPTION, ELEVATION_CUTOFF, END_OF_FILE,
-    END_OF_HEADER, END_OF_HEIGHT_MAP, END_OF_RMS_MAP, END_OF_TEC_MAP, EPOCH_OF_CURRENT_MAP,
-    EPOCH_OF_FIRST_MAP, EPOCH_OF_LAST_MAP, EXPONENT, HGT_AXIS, INTERVAL, LAT_AXIS, LON_AXIS,
-    MAPPING_FUNCTION, MAPS_IN_FILE, MAP_DIMENSION, NON_AVAILABLE, OBSERVABLES_USED,
-    PGM_RUN_BY_DATE, SATELLITES, START_OF_HEIGHT_MAP, START_OF_RMS_MAP, START_OF_TEC_MAP, STATIONS,
-    VERSION_TYPE,
+    node_axis, pow10, scale_value, Grid, Ionex, BAND, BASE_RADIUS, COMMENT, DEFAULT_EXPONENT,
+    DESCRIPTION, ELEVATION_CUTOFF, END_OF_FILE, END_OF_HEADER, END_OF_HEIGHT_MAP, END_OF_RMS_MAP,
+    END_OF_TEC_MAP, EPOCH_OF_CURRENT_MAP, EPOCH_OF_FIRST_MAP, EPOCH_OF_LAST_MAP, EXPONENT,
+    HGT_AXIS, INTERVAL, LAT_AXIS, LON_AXIS, MAPPING_FUNCTION, MAPS_IN_FILE, MAP_DIMENSION,
+    NON_AVAILABLE, OBSERVABLES_USED, PGM_RUN_BY_DATE, SATELLITES, START_OF_HEIGHT_MAP,
+    START_OF_RMS_MAP, START_OF_TEC_MAP, STATIONS, VERSION_TYPE,
 };
+use super::header::IonexMappingFunction;
 use super::j2000_seconds_from_instant;
 use crate::astro::time::civil::civil_from_j2000_seconds;
 use crate::astro::time::model::Instant;
+use crate::error::{Error, Result};
 
-/// TEC/RMS scaled-integer fields per data line (IONEX standard layout).
+/// Values per data record in the `16I5` layout.
 const VALUES_PER_LINE: usize = 16;
 /// First byte column of the 20-character record-label field.
 const LABEL_COLUMN: usize = 60;
+/// The largest integer an `I5` field holds.
+const I5_MAX: i64 = 99_999;
+/// The smallest integer an `I5` field holds.
+const I5_MIN: i64 = -9_999;
+/// The smallest and largest exponents an `I6` `EXPONENT` field holds.
+const I6_EXPONENTS: core::ops::RangeInclusive<i32> = -99_999..=999_999;
 
 impl Ionex {
-    /// Serialize this product to standard IONEX text.
+    /// Serialize this product to IONEX 1 text.
     ///
-    /// Pure and deterministic. See this module's docs for the round-trip
-    /// guarantee: re-parsing the result yields an equal [`Ionex`].
-    pub fn to_ionex_string(&self) -> String {
-        let mut out = String::new();
-        self.write_header(&mut out);
+    /// Refuses, naming it, a value that no exponent writes exactly in `I5`, and
+    /// an axis or header field that its IONEX field cannot hold exactly. See this
+    /// module's docs for the layout, the exponents written and the round trip.
+    pub fn to_ionex_string(&self) -> Result<String> {
+        let layout = self.exponent_layout()?;
+        let axes = self.axis_records()?;
+        // IONEX 1 counts every TEC, RMS and height map here, while CODE, IGS and
+        // UPC write the number of TEC maps. A parsed product writes back the
+        // value its own header carried, so the round trip is faithful; one built
+        // from samples writes the TEC map count, which is what those producers
+        // write.
+        let map_count = integer_field(
+            self.header()
+                .maps_in_file
+                .map_or(self.map_epochs().len() as i64, i64::from),
+            6,
+            MAPS_IN_FILE,
+        )?;
 
-        let scale = libm::pow(10.0, self.exponent() as f64);
-        for (index, epoch) in self.map_epochs().iter().enumerate() {
-            let map_number = index + 1;
-            write_labeled(&mut out, &format!("{map_number:6}"), START_OF_TEC_MAP);
-            write_labeled(&mut out, &epoch_data(*epoch), EPOCH_OF_CURRENT_MAP);
-            self.write_map(&mut out, &self.tec_maps()[index], scale);
-            write_labeled(&mut out, &format!("{map_number:6}"), END_OF_TEC_MAP);
-        }
+        let mut out = String::new();
+        self.write_header(&mut out, layout.header, &axes, &map_count)?;
+        let mut blocks = layout.maps.iter();
         for (maps, start, end) in [
+            (self.tec_maps(), START_OF_TEC_MAP, END_OF_TEC_MAP),
             (self.rms_maps(), START_OF_RMS_MAP, END_OF_RMS_MAP),
             (self.height_maps(), START_OF_HEIGHT_MAP, END_OF_HEIGHT_MAP),
         ] {
             for (index, grid) in maps.iter().enumerate() {
-                let map_number = index + 1;
-                write_labeled(&mut out, &format!("{map_number:6}"), start);
-                if let Some(epoch) = self.map_epochs().get(index) {
-                    write_labeled(&mut out, &epoch_data(*epoch), EPOCH_OF_CURRENT_MAP);
-                }
-                self.write_map(&mut out, grid, scale);
-                write_labeled(&mut out, &format!("{map_number:6}"), end);
+                let number = format!("{:6}", index + 1);
+                write_labeled(&mut out, &number, start);
+                write_labeled(
+                    &mut out,
+                    &epoch_data(self.map_epochs()[index])?,
+                    EPOCH_OF_CURRENT_MAP,
+                );
+                let map_blocks = blocks.next().ok_or_else(|| {
+                    Error::InvalidInput("IONEX writer has no block layout for a map".into())
+                })?;
+                write_blocks(&mut out, grid, map_blocks, &axes)?;
+                write_labeled(&mut out, &number, end);
             }
         }
         write_labeled(&mut out, "", END_OF_FILE);
-        out
+        Ok(out)
     }
 
-    fn write_header(&self, out: &mut String) {
+    fn write_header(
+        &self,
+        out: &mut String,
+        exponent: i32,
+        axes: &AxisRecords,
+        map_count: &str,
+    ) -> Result<()> {
         let header = self.header();
-        let lat1 = self.lat_nodes_deg().first().copied().unwrap_or(0.0);
-        let lat2 = self.lat_nodes_deg().last().copied().unwrap_or(0.0);
-        let lon1 = self.lon_nodes_deg().first().copied().unwrap_or(0.0);
-        let lon2 = self.lon_nodes_deg().last().copied().unwrap_or(0.0);
-
+        let system = text_field(&header.satellite_system, 20, VERSION_TYPE, true)?;
         write_labeled(
             out,
             &format!(
-                "{:8.1}{:12}{:<20}{}",
-                header.version, "", "IONOSPHERE MAPS", header.satellite_system
+                "{}{:12}{:<20}{system}",
+                float_field(header.version, 8, VERSION_TYPE)?,
+                "",
+                "IONOSPHERE MAPS"
             ),
             VERSION_TYPE,
         );
         write_labeled(
             out,
-            &format!("{:<20}{:<20}{}", header.program, header.run_by, header.date),
+            &format!(
+                "{}{}{}",
+                padded(text_field(&header.program, 20, PGM_RUN_BY_DATE, true)?, 20),
+                padded(text_field(&header.run_by, 20, PGM_RUN_BY_DATE, true)?, 20),
+                text_field(&header.date, 20, PGM_RUN_BY_DATE, true)?
+            ),
             PGM_RUN_BY_DATE,
         );
         for description in &header.descriptions {
-            write_labeled(out, description, DESCRIPTION);
-        }
-        if let (Some(first), Some(last)) = (self.map_epochs().first(), self.map_epochs().last()) {
-            write_labeled(out, &epoch_data(*first), EPOCH_OF_FIRST_MAP);
-            write_labeled(out, &epoch_data(*last), EPOCH_OF_LAST_MAP);
-        }
-        write_labeled(out, &format!("{:6}", header.interval_s), INTERVAL);
-        write_labeled(out, &format!("{:6}", self.map_epochs().len()), MAPS_IN_FILE);
-        let mapping_function = header
-            .mapping_function
-            .as_ref()
-            .map_or(String::new(), |function| format!("  {}", function.code()));
-        write_labeled(out, &mapping_function, MAPPING_FUNCTION);
-        write_labeled(
-            out,
-            &format!("{:8.1}", header.elevation_cutoff_deg),
-            ELEVATION_CUTOFF,
-        );
-        write_labeled(out, &header.observables_used, OBSERVABLES_USED);
-        if let Some(count) = header.station_count {
-            write_labeled(out, &format!("{count:6}"), STATIONS);
-        }
-        if let Some(count) = header.satellite_count {
-            write_labeled(out, &format!("{count:6}"), SATELLITES);
-        }
-        write_labeled(out, &format!("{:8.1}", self.base_radius_km()), BASE_RADIUS);
-        write_labeled(out, &format!("{:6}", 2), MAP_DIMENSION);
-        let height = self.shell_height_km();
-        write_labeled(
-            out,
-            &format!("{height:8.1}{height:8.1}{:8.1}", 0.0),
-            HGT_AXIS,
-        );
-        write_labeled(
-            out,
-            &format!("{lat1:8.1}{lat2:8.1}{:8.1}", self.dlat_deg()),
-            LAT_AXIS,
-        );
-        write_labeled(
-            out,
-            &format!("{lon1:8.1}{lon2:8.1}{:8.1}", self.dlon_deg()),
-            LON_AXIS,
-        );
-        write_labeled(out, &format!("{:6}", self.exponent()), EXPONENT);
-        for comment in &header.comments {
-            write_labeled(out, comment, COMMENT);
-        }
-        write_labeled(out, "", END_OF_HEADER);
-    }
-
-    /// Emit one map's latitude bands. Each band is a `LAT/LON1/LON2/DLON/H`
-    /// record followed by the band's scaled integer fields, with `9999` for a
-    /// non-available value.
-    fn write_map(&self, out: &mut String, grid: &Grid, scale: f64) {
-        let lon1 = self.lon_nodes_deg().first().copied().unwrap_or(0.0);
-        let lon2 = self.lon_nodes_deg().last().copied().unwrap_or(0.0);
-        let height = self.shell_height_km();
-        for (lat_index, band) in grid.iter().enumerate() {
-            let lat = self.lat_nodes_deg().get(lat_index).copied().unwrap_or(0.0);
             write_labeled(
                 out,
-                &format!(
-                    "{lat:8.1}{lon1:8.1}{lon2:8.1}{:8.1}{height:8.1}",
-                    self.dlon_deg()
-                ),
-                BAND,
+                text_field(description, 60, DESCRIPTION, false)?,
+                DESCRIPTION,
             );
-            for chunk in band.chunks(VALUES_PER_LINE) {
-                for value in chunk {
-                    let scaled = match value {
-                        Some(value) => (value / scale).round() as i64,
-                        None => NON_AVAILABLE,
-                    };
-                    // Emit a guaranteed leading space: values within I5 keep
-                    // their right-justified five-column form, and wider values
-                    // stay separated.
-                    let _ = write!(out, " {scaled:4}");
+        }
+        let first = self.map_epochs()[0];
+        let last = self.map_epochs()[self.map_epochs().len() - 1];
+        write_labeled(out, &epoch_data(first)?, EPOCH_OF_FIRST_MAP);
+        write_labeled(out, &epoch_data(last)?, EPOCH_OF_LAST_MAP);
+        write_labeled(
+            out,
+            &integer_field(i64::from(header.interval_s), 6, INTERVAL)?,
+            INTERVAL,
+        );
+        write_labeled(out, map_count, MAPS_IN_FILE);
+        write_labeled(
+            out,
+            &mapping_function_data(header.mapping_function.as_ref())?,
+            MAPPING_FUNCTION,
+        );
+        write_labeled(
+            out,
+            &float_field(header.elevation_cutoff_deg, 8, ELEVATION_CUTOFF)?,
+            ELEVATION_CUTOFF,
+        );
+        write_labeled(
+            out,
+            text_field(&header.observables_used, 60, OBSERVABLES_USED, false)?,
+            OBSERVABLES_USED,
+        );
+        for (count, label) in [
+            (header.station_count, STATIONS),
+            (header.satellite_count, SATELLITES),
+        ] {
+            if let Some(count) = count {
+                write_labeled(out, &integer_field(i64::from(count), 6, label)?, label);
+            }
+        }
+        write_labeled(
+            out,
+            &float_field(self.base_radius_km(), 8, BASE_RADIUS)?,
+            BASE_RADIUS,
+        );
+        write_labeled(out, &format!("{:6}", 2), MAP_DIMENSION);
+        write_labeled(out, &axes.hgt, HGT_AXIS);
+        write_labeled(out, &axes.lat, LAT_AXIS);
+        write_labeled(out, &axes.lon, LON_AXIS);
+        if exponent != DEFAULT_EXPONENT {
+            write_labeled(
+                out,
+                &integer_field(i64::from(exponent), 6, EXPONENT)?,
+                EXPONENT,
+            );
+        }
+        for comment in &header.comments {
+            write_labeled(out, text_field(comment, 60, COMMENT, false)?, COMMENT);
+        }
+        write_labeled(out, "", END_OF_HEADER);
+        Ok(())
+    }
+
+    /// The header exponent and the data blocks of every map; see the module
+    /// docs.
+    fn exponent_layout(&self) -> Result<ExponentLayout> {
+        let preferred = self.exponent();
+        let target = if I6_EXPONENTS.contains(&preferred) {
+            preferred
+        } else {
+            DEFAULT_EXPONENT
+        };
+        let maps = || {
+            [
+                ("TEC", self.tec_maps()),
+                ("RMS", self.rms_maps()),
+                ("HEIGHT", self.height_maps()),
+            ]
+            .into_iter()
+            .flat_map(|(kind, maps)| {
+                maps.iter()
+                    .enumerate()
+                    .map(move |(map, grid)| (kind, map, grid))
+            })
+        };
+        let values =
+            || maps().flat_map(|(_, _, grid)| grid.iter().flatten().filter_map(|value| *value));
+
+        let scale = pow10(target.abs());
+        let one_exponent = if scale.is_finite()
+            && scale > 0.0
+            && values().all(|value| field_reads_back(value, target).is_some())
+        {
+            Some(target)
+        } else {
+            let mut common = ExponentSet::Any;
+            for value in values() {
+                common = common.intersect(exact_exponents(value));
+                if common.is_empty() {
+                    break;
                 }
-                out.push('\n');
+            }
+            common.nearest(target)
+        };
+
+        if let Some(exponent) = one_exponent {
+            let maps = maps()
+                .map(|(_, _, grid)| {
+                    (0..grid.len())
+                        .map(|lat| Block {
+                            lat,
+                            lons: 0..self.lon_nodes_deg().len(),
+                            exponent,
+                            record: false,
+                        })
+                        .collect()
+                })
+                .collect();
+            return Ok(ExponentLayout {
+                header: exponent,
+                maps,
+            });
+        }
+
+        let mut in_effect = target;
+        let mut layout = ExponentLayout {
+            header: target,
+            maps: Vec::new(),
+        };
+        for (kind, map, grid) in maps() {
+            let mut restate = in_effect != target;
+            let mut blocks = Vec::new();
+            for (lat, row) in grid.iter().enumerate() {
+                let mut start = 0;
+                while start < row.len() {
+                    let mut set = ExponentSet::Any;
+                    let mut end = start;
+                    while end < row.len() {
+                        let next = match row[end] {
+                            Some(value) => set.clone().intersect(exact_exponents(value)),
+                            None => set.clone(),
+                        };
+                        if next.is_empty() {
+                            break;
+                        }
+                        set = next;
+                        end += 1;
+                    }
+                    if end == start {
+                        let value = row[start].unwrap_or_default();
+                        return Err(Error::InvalidInput(format!(
+                            "IONEX {kind} map {} value {value} at latitude {} longitude {} is not, \
+                             for any EXPONENT k, a whole number of 10^k units within I5 other \
+                             than 9999",
+                            map + 1,
+                            self.lat_nodes_deg()[lat],
+                            self.lon_nodes_deg()[start]
+                        )));
+                    }
+                    let exponent = if !restate && set.contains(in_effect) {
+                        in_effect
+                    } else {
+                        set.nearest(target).unwrap_or(target)
+                    };
+                    blocks.push(Block {
+                        lat,
+                        lons: start..end,
+                        exponent,
+                        record: restate || exponent != in_effect,
+                    });
+                    in_effect = exponent;
+                    restate = false;
+                    start = end;
+                }
+            }
+            layout.maps.push(blocks);
+        }
+        Ok(layout)
+    }
+
+    fn axis_records(&self) -> Result<AxisRecords> {
+        let lat = axis_data(self.lat_nodes_deg(), self.dlat_deg(), LAT_AXIS)?;
+        let lon = axis_data(self.lon_nodes_deg(), self.dlon_deg(), LON_AXIS)?;
+        let height = float_field(self.shell_height_km(), 6, HGT_AXIS)?;
+        let zero = float_field(0.0, 6, HGT_AXIS)?;
+        // The axis records rebuild every node exactly from F6.1 fields, so each
+        // node written in F6.1 reads back as that node.
+        let in_f6_1 = |nodes: &[f64]| nodes.iter().map(|node| format!("{node:6.1}")).collect();
+        Ok(AxisRecords {
+            hgt: format!("  {height}{height}{zero}"),
+            lat,
+            lon,
+            band_lats: in_f6_1(self.lat_nodes_deg()),
+            band_lons: in_f6_1(self.lon_nodes_deg()),
+            band_step_height: format!("{}{height}", float_field(self.dlon_deg(), 6, BAND)?),
+        })
+    }
+}
+
+/// The header exponent and, in writing order (TEC, RMS, then height maps), the
+/// data blocks each map is written in.
+struct ExponentLayout {
+    header: i32,
+    maps: Vec<Vec<Block>>,
+}
+
+/// One `LAT/LON1/LON2/DLON/H` record and the values after it.
+struct Block {
+    lat: usize,
+    /// The longitude indices the block covers.
+    lons: core::ops::Range<usize>,
+    exponent: i32,
+    /// Whether an `EXPONENT` record precedes the block.
+    record: bool,
+}
+
+/// The exponents that write a set of values exactly.
+#[derive(Clone, Debug, PartialEq)]
+enum ExponentSet {
+    /// Every exponent, as for zero or no value.
+    Any,
+    /// These exponents, ascending.
+    Only(Vec<i32>),
+}
+
+impl ExponentSet {
+    fn intersect(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Any, other) | (other, Self::Any) => other,
+            (Self::Only(mut left), Self::Only(right)) => {
+                left.retain(|exponent| right.contains(exponent));
+                Self::Only(left)
             }
         }
     }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Only(exponents) if exponents.is_empty())
+    }
+
+    fn contains(&self, exponent: i32) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Only(exponents) => exponents.contains(&exponent),
+        }
+    }
+
+    /// The exponent nearest `target`, the finer of two equally near.
+    fn nearest(&self, target: i32) -> Option<i32> {
+        match self {
+            Self::Any => Some(target),
+            Self::Only(exponents) => exponents.iter().copied().min_by_key(|&exponent| {
+                ((i64::from(exponent) - i64::from(target)).abs(), exponent)
+            }),
+        }
+    }
 }
 
-/// Write `data` left-justified into the 0..60 field, the record label at column
-/// 60, and a newline - the column layout the parser's `label_of` / `data_of`
-/// read back.
+/// The exponents that write `value` exactly in `I5`.
+///
+/// A nonzero value's field is at most 99999 in magnitude and at least 1, so its
+/// exponent lies within a few of the value's decimal magnitude.
+fn exact_exponents(value: f64) -> ExponentSet {
+    if value == 0.0 {
+        return ExponentSet::Any;
+    }
+    let magnitude = libm::floor(libm::log10(value.abs())) as i32;
+    let exponents = |reads_back: bool| -> Vec<i32> {
+        (magnitude - 6..=magnitude + 1)
+            .filter(|&exponent| {
+                let scale = pow10(exponent.abs());
+                if !scale.is_finite() || scale <= 0.0 {
+                    return false;
+                }
+                if reads_back {
+                    field_reads_back(value, exponent).is_some()
+                } else {
+                    field_states(value, exponent).is_some()
+                }
+            })
+            .collect()
+    };
+    // A value a file gave has a field the reader takes back as it, and writing
+    // one of those keeps the round trip exact, so they are the only units
+    // considered. A value no such field reaches, which only a product built
+    // from samples holds, is stated as the decimal instead.
+    let reads_back = exponents(true);
+    if reads_back.is_empty() {
+        ExponentSet::Only(exponents(false))
+    } else {
+        ExponentSet::Only(reads_back)
+    }
+}
+
+/// The axis records, and the fields of each band record.
+struct AxisRecords {
+    hgt: String,
+    lat: String,
+    lon: String,
+    /// Each latitude node in `F6.1`.
+    band_lats: Vec<String>,
+    /// Each longitude node in `F6.1`.
+    band_lons: Vec<String>,
+    /// `DLON` and `H` of every band, in `2F6.1`.
+    band_step_height: String,
+}
+
+/// Emit one map's data blocks: each an optional `EXPONENT` record, a
+/// `LAT/LON1/LON2/DLON/H` record in `2X,5F6.1`, then its values in `16I5` with
+/// `9999` for a non-available value.
+fn write_blocks(out: &mut String, grid: &Grid, blocks: &[Block], axes: &AxisRecords) -> Result<()> {
+    for block in blocks {
+        if block.record {
+            write_labeled(
+                out,
+                &integer_field(i64::from(block.exponent), 6, EXPONENT)?,
+                EXPONENT,
+            );
+        }
+        write_labeled(
+            out,
+            &format!(
+                "  {}{}{}{}",
+                axes.band_lats[block.lat],
+                axes.band_lons[block.lons.start],
+                axes.band_lons[block.lons.end - 1],
+                axes.band_step_height
+            ),
+            BAND,
+        );
+        for chunk in grid[block.lat][block.lons.clone()].chunks(VALUES_PER_LINE) {
+            for value in chunk {
+                let field = match value {
+                    Some(value) => field_integer(*value, block.exponent).ok_or_else(|| {
+                        Error::InvalidInput(format!(
+                            "IONEX value {value} is not a whole number of 10^{} units",
+                            block.exponent
+                        ))
+                    })?,
+                    None => NON_AVAILABLE,
+                };
+                let _ = write!(out, "{field:5}");
+            }
+            out.push('\n');
+        }
+    }
+    Ok(())
+}
+
+/// The `I5` integer a file can state `value` with at `10^exponent`, if there is
+/// one other than the non-available marker.
+///
+/// Two readings are accepted, and they differ on purpose. A field the reader
+/// takes back as the value is writable: the reader scales as the reference
+/// readers do, `N * 10^k`. A value that never came from a field is writable
+/// too, when the decimal the field names is that value, `N / 10^-k`: a product
+/// built from samples holds `0.7`, which no `N * 10^k` reaches, and the file
+/// states it as `7` at `EXPONENT -1` all the same. Reading matches the
+/// reference readers; writing refuses only what the file cannot state.
+fn field_integer(value: f64, exponent: i32) -> Option<i64> {
+    field_reads_back(value, exponent).or_else(|| field_states(value, exponent))
+}
+
+/// The `I5` integer the reader takes back as exactly `value` at `10^exponent`.
+///
+/// Writing such a field keeps a product read from a file exact through a round
+/// trip: the reader forms `N * 10^k`, as the reference readers do, and that is
+/// the value again.
+fn field_reads_back(value: f64, exponent: i32) -> Option<i64> {
+    let raw = field_candidate(value, exponent)?;
+    (scale_value(raw, exponent) == value).then_some(raw)
+}
+
+/// The `I5` integer whose decimal at `10^exponent` is exactly `value`.
+///
+/// A value that never came from a field, which a product built from samples
+/// holds, can be one no `N * 10^k` reaches: `0.7` is 7 tenths, though `7 * 0.1`
+/// is one unit in the last place above it. The file states it as `7` all the
+/// same, and the value read back is that product.
+fn field_states(value: f64, exponent: i32) -> Option<i64> {
+    let raw = field_candidate(value, exponent)?;
+    (exponent < 0 && raw as f64 / pow10(-exponent) == value).then_some(raw)
+}
+
+/// The `I5` integer a field at `10^exponent` would hold for `value`, before
+/// either reading is checked.
+fn field_candidate(value: f64, exponent: i32) -> Option<i64> {
+    let raw = if exponent < 0 {
+        value * pow10(-exponent)
+    } else {
+        value / pow10(exponent)
+    }
+    .round();
+    if !(I5_MIN as f64..=I5_MAX as f64).contains(&raw) {
+        return None;
+    }
+    let raw = raw as i64;
+    (raw != NON_AVAILABLE).then_some(raw)
+}
+
+/// An axis record in `2X,3F6.1`, written only when it rebuilds `nodes` exactly.
+fn axis_data(nodes: &[f64], step: f64, label: &str) -> Result<String> {
+    let first = nodes[0];
+    let last = nodes[nodes.len() - 1];
+    let refuse = || {
+        Error::InvalidInput(format!(
+            "IONEX {label} nodes {first} to {last} by {step} cannot be written exactly in \
+             2X,3F6.1"
+        ))
+    };
+    let fields = [first, last, step].map(|value| format!("{value:6.1}"));
+    let mut read = [0.0; 3];
+    for (slot, field) in read.iter_mut().zip(&fields) {
+        if field.len() != 6 {
+            return Err(refuse());
+        }
+        *slot = field.trim().parse::<f64>().map_err(|_| refuse())?;
+    }
+    let rebuilt = node_axis(read[0], read[1], read[2]).map_err(|_| refuse())?;
+    if read[2] != step || rebuilt != nodes {
+        return Err(refuse());
+    }
+    Ok(format!("  {}{}{}", fields[0], fields[1], fields[2]))
+}
+
+/// `value` in `F{width}.1`, written only when it reads back exactly.
+fn float_field(value: f64, width: usize, label: &str) -> Result<String> {
+    let field = format!("{value:width$.1}");
+    let exact = field.len() == width && field.trim().parse::<f64>().is_ok_and(|read| read == value);
+    if exact {
+        Ok(field)
+    } else {
+        Err(Error::InvalidInput(format!(
+            "IONEX {label} value {value} cannot be written exactly in F{width}.1"
+        )))
+    }
+}
+
+/// `value` in `I{width}`.
+fn integer_field(value: i64, width: usize, label: &str) -> Result<String> {
+    let field = format!("{value:width$}");
+    if field.len() == width {
+        Ok(field)
+    } else {
+        Err(Error::InvalidInput(format!(
+            "IONEX {label} value {value} does not fit I{width}"
+        )))
+    }
+}
+
+/// A text field, written only when it reads back as itself: at most `width`
+/// bytes, which is how the reader takes its columns, without control characters,
+/// without the trailing blanks the reader trims, and, for a field the reader
+/// trims on both sides, without leading blanks.
+fn text_field<'a>(value: &'a str, width: usize, label: &str, trimmed: bool) -> Result<&'a str> {
+    let controls = value.chars().any(char::is_control);
+    let blanks =
+        value.ends_with(char::is_whitespace) || (trimmed && value.starts_with(char::is_whitespace));
+    if !controls && !blanks && value.len() <= width {
+        Ok(value)
+    } else {
+        Err(Error::InvalidInput(format!(
+            "IONEX {label} text {value:?} cannot be written: the field holds {width} bytes, \
+             without control characters or blanks the reader trims"
+        )))
+    }
+}
+
+/// `text` followed by blanks to `width` bytes.
+fn padded(text: &str, width: usize) -> String {
+    let mut field = String::with_capacity(width.max(text.len()));
+    field.push_str(text);
+    field.extend(core::iter::repeat_n(' ', width.saturating_sub(text.len())));
+    field
+}
+
+/// The `2X,A4` data of a `MAPPING FUNCTION` record, blank for no code.
+fn mapping_function_data(function: Option<&IonexMappingFunction>) -> Result<String> {
+    let Some(function) = function else {
+        return Ok(String::new());
+    };
+    let code = function.code();
+    let reads_back = IonexMappingFunction::from_code(code).as_ref() == Some(function);
+    if reads_back && code.len() <= 4 && !code.contains(char::is_whitespace) {
+        Ok(format!("  {code}"))
+    } else {
+        Err(Error::InvalidInput(format!(
+            "IONEX MAPPING FUNCTION code {code:?} cannot be written: the field holds a code of \
+             at most four characters other than a blank or a code the spec names"
+        )))
+    }
+}
+
+/// Write `data` into the first 60 bytes, the record label at byte 60, and a
+/// newline - the byte columns the parser's `label_of` / `data_of` read back.
 fn write_labeled(out: &mut String, data: &str, label: &str) {
-    let _ = writeln!(out, "{data:<LABEL_COLUMN$}{label}");
+    out.push_str(&padded(data, LABEL_COLUMN));
+    out.push_str(label);
+    out.push('\n');
 }
 
 /// The `6I6` data of an epoch record, the inverse of the parser's epoch read.
-// invariant: serializable IONEX epochs are whole, representable J2000 seconds.
-#[allow(clippy::expect_used)]
-fn epoch_data(epoch: Instant) -> String {
-    let seconds =
-        j2000_seconds_from_instant(epoch).expect("IONEX map epoch is convertible to J2000 seconds");
+fn epoch_data(epoch: Instant) -> Result<String> {
+    let seconds = j2000_seconds_from_instant(epoch)
+        .ok_or_else(|| Error::InvalidInput("IONEX map epoch is not a whole J2000 second".into()))?;
     let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(seconds);
-    format!("{year:6}{month:6}{day:6}{hour:6}{minute:6}{second:6}")
+    let mut data = String::new();
+    for field in [year, month, day, hour, minute, second] {
+        data.push_str(&integer_field(field, 6, EPOCH_OF_CURRENT_MAP)?);
+    }
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -230,5 +706,62 @@ mod tests {
             assert!((0..60).contains(&second), "second in range: {second}");
             assert!(year >= 1999, "year plausible: {year}");
         }
+    }
+
+    #[test]
+    fn field_integer_writes_only_exact_i5_values_other_than_9999() {
+        // A field the reader takes back as the value is writable, and so is the
+        // field whose decimal is the value: a product built from 0.7 writes as
+        // 7 tenths, though 7 * 0.1 is not 0.7.
+        assert_eq!(field_integer(scale_value(651, -1), -1), Some(651));
+        assert_eq!(field_integer(65.1, -1), Some(651));
+        assert_eq!(field_integer(0.7, -1), Some(7));
+        assert_eq!(field_integer(scale_value(-9999, -1), -1), Some(-9999));
+        assert_eq!(field_integer(scale_value(9999, -1), -1), None);
+        assert_eq!(field_integer(scale_value(100_000, -1), -1), None);
+        assert_eq!(field_integer(0.25, -1), None);
+        assert_eq!(field_integer(-0.0, -1), Some(0));
+    }
+
+    #[test]
+    fn exact_exponents_lists_every_exponent_that_writes_a_value() {
+        // 651 * 0.1 is not the product 6510 * 0.01 or 65100 * 0.001 gives, and
+        // no decimal of those units is it either, so only tenths write it.
+        let tenths = exact_exponents(scale_value(651, -1));
+        assert_eq!(tenths, ExponentSet::Only(vec![-1]));
+        let hundreds = exact_exponents(1200.0);
+        for exponent in [0, 1, 2] {
+            assert!(hundreds.contains(exponent), "{exponent}: {hundreds:?}");
+        }
+        assert!(
+            !hundreds.contains(3) && !hundreds.contains(-2),
+            "{hundreds:?}"
+        );
+        assert_eq!(exact_exponents(0.0), ExponentSet::Any);
+        assert_eq!(exact_exponents(9999.0), ExponentSet::Only(vec![-1]));
+        assert_eq!(
+            exact_exponents(123_456.0 * pow10(-1)),
+            ExponentSet::Only(Vec::new())
+        );
+        assert_eq!(
+            ExponentSet::Only(vec![-3, -2, -1]).nearest(0),
+            Some(-1),
+            "nearest to the target"
+        );
+        assert_eq!(
+            ExponentSet::Only(vec![-2, 0]).nearest(-1),
+            Some(-2),
+            "the finer of two equally near"
+        );
+    }
+
+    #[test]
+    fn axis_data_writes_only_axes_f6_1_rebuilds() {
+        let nodes: Vec<f64> = (0..71).map(|i| 87.5 + (i as f64) * -2.5).collect();
+        assert_eq!(
+            axis_data(&nodes, -2.5, LAT_AXIS).expect("global latitudes"),
+            "    87.5 -87.5  -2.5"
+        );
+        assert!(axis_data(&[0.5, 0.25, 0.0], -0.25, LAT_AXIS).is_err());
     }
 }
