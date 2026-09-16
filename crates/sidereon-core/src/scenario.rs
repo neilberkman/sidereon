@@ -2541,7 +2541,7 @@ mod tests {
 
     use super::*;
     use crate::astro::time::civil::j2000_seconds;
-    use crate::atmosphere::TecGridSamples;
+    use crate::atmosphere::{IonexHeader, IonexMappingFunction, TecGridSamples};
     use crate::clock_stability::{allan_deviation_power_law_slope, overlapping_adev, AllanSeries};
     use crate::positioning::{solve, SolveInputs};
     use crate::rinex::observations::{observation_values, ObservationFilter, ObservationKind};
@@ -2569,11 +2569,7 @@ mod tests {
     }
 
     fn constant_ionex(epoch_j2000_s: i64, tecu: f64) -> Ionex {
-        let map = vec![
-            vec![tecu, tecu, tecu],
-            vec![tecu, tecu, tecu],
-            vec![tecu, tecu, tecu],
-        ];
+        let map = vec![vec![Some(tecu); 3]; 3];
         Ionex::from_samples(TecGridSamples {
             map_epochs: vec![instant_from_j2000(epoch_j2000_s)],
             lat_nodes_deg: vec![90.0, 0.0, -90.0],
@@ -2585,6 +2581,8 @@ mod tests {
             exponent: 0,
             tec_maps: vec![map],
             rms_maps: Vec::new(),
+            height_maps: Vec::new(),
+            header: IonexHeader::new(IonexMappingFunction::CosZ),
         })
         .expect("valid IONEX samples")
     }

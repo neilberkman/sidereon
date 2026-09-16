@@ -2,20 +2,29 @@
 //!
 //! Pure and deterministic: the same [`Ionex`] always produces byte-identical
 //! text, and no I/O is performed. A parse -> encode -> parse pipeline round-trips
-//! the canonical IR (node axes, geometry, exponent, map epochs, and every TEC /
-//! RMS value), so re-reading the output yields an equal product.
+//! the canonical IR (node axes, geometry, exponent, header records, map epochs,
+//! and every TEC, RMS and height value), so re-reading the output yields an
+//! equal product.
 //!
 //! The grid is reconstructed from the canonical IR, not echoed from the source
 //! bytes: the latitude/longitude axis bounds come from the node arrays, the
-//! scaled-integer TEC field is recovered as `round(value / 10^EXPONENT)`, and the
-//! map epoch is rendered back to the IONEX civil `year month day hour minute
-//! second` record. Records the reader does not consume (the auxiliary block, the
-//! free header descriptors) are not emitted; the output is the minimal IONEX that
-//! re-parses to the same product.
+//! scaled-integer field is recovered as `round(value / 10^EXPONENT)` with `9999`
+//! for a non-available value, and the map epochs are rendered back to the IONEX
+//! civil `year month day hour minute second` record. The records a product's
+//! maps determine, `EPOCH OF FIRST MAP`, `EPOCH OF LAST MAP`,
+//! `# OF MAPS IN FILE` and `MAP DIMENSION`, are written from the maps. Records
+//! the reader does not keep, such as an auxiliary data block, are not emitted.
 
 use core::fmt::Write as _;
 
-use super::grid::Ionex;
+use super::grid::{
+    Grid, Ionex, BAND, BASE_RADIUS, COMMENT, DESCRIPTION, ELEVATION_CUTOFF, END_OF_FILE,
+    END_OF_HEADER, END_OF_HEIGHT_MAP, END_OF_RMS_MAP, END_OF_TEC_MAP, EPOCH_OF_CURRENT_MAP,
+    EPOCH_OF_FIRST_MAP, EPOCH_OF_LAST_MAP, EXPONENT, HGT_AXIS, INTERVAL, LAT_AXIS, LON_AXIS,
+    MAPPING_FUNCTION, MAPS_IN_FILE, MAP_DIMENSION, NON_AVAILABLE, OBSERVABLES_USED,
+    PGM_RUN_BY_DATE, SATELLITES, START_OF_HEIGHT_MAP, START_OF_RMS_MAP, START_OF_TEC_MAP, STATIONS,
+    VERSION_TYPE,
+};
 use super::j2000_seconds_from_instant;
 use crate::astro::time::civil::civil_from_j2000_seconds;
 use crate::astro::time::model::Instant;
@@ -37,59 +46,104 @@ impl Ionex {
         let scale = libm::pow(10.0, self.exponent() as f64);
         for (index, epoch) in self.map_epochs().iter().enumerate() {
             let map_number = index + 1;
-            write_labeled(&mut out, &format!("{map_number:6}"), "START OF TEC MAP");
-            write_epoch(&mut out, *epoch);
+            write_labeled(&mut out, &format!("{map_number:6}"), START_OF_TEC_MAP);
+            write_labeled(&mut out, &epoch_data(*epoch), EPOCH_OF_CURRENT_MAP);
             self.write_map(&mut out, &self.tec_maps()[index], scale);
-            write_labeled(&mut out, &format!("{map_number:6}"), "END OF TEC MAP");
+            write_labeled(&mut out, &format!("{map_number:6}"), END_OF_TEC_MAP);
         }
-        for (index, grid) in self.rms_maps().iter().enumerate() {
-            let map_number = index + 1;
-            write_labeled(&mut out, &format!("{map_number:6}"), "START OF RMS MAP");
-            if let Some(epoch) = self.map_epochs().get(index) {
-                write_epoch(&mut out, *epoch);
+        for (maps, start, end) in [
+            (self.rms_maps(), START_OF_RMS_MAP, END_OF_RMS_MAP),
+            (self.height_maps(), START_OF_HEIGHT_MAP, END_OF_HEIGHT_MAP),
+        ] {
+            for (index, grid) in maps.iter().enumerate() {
+                let map_number = index + 1;
+                write_labeled(&mut out, &format!("{map_number:6}"), start);
+                if let Some(epoch) = self.map_epochs().get(index) {
+                    write_labeled(&mut out, &epoch_data(*epoch), EPOCH_OF_CURRENT_MAP);
+                }
+                self.write_map(&mut out, grid, scale);
+                write_labeled(&mut out, &format!("{map_number:6}"), end);
             }
-            self.write_map(&mut out, grid, scale);
-            write_labeled(&mut out, &format!("{map_number:6}"), "END OF RMS MAP");
         }
+        write_labeled(&mut out, "", END_OF_FILE);
         out
     }
 
     fn write_header(&self, out: &mut String) {
+        let header = self.header();
         let lat1 = self.lat_nodes_deg().first().copied().unwrap_or(0.0);
         let lat2 = self.lat_nodes_deg().last().copied().unwrap_or(0.0);
         let lon1 = self.lon_nodes_deg().first().copied().unwrap_or(0.0);
         let lon2 = self.lon_nodes_deg().last().copied().unwrap_or(0.0);
 
-        write_labeled(out, "     1.0            I", "IONEX VERSION / TYPE");
         write_labeled(
             out,
-            &format!("{lat1:8.1}{lat2:8.1}{:8.1}", self.dlat_deg()),
-            "LAT1 / LAT2 / DLAT",
+            &format!(
+                "{:8.1}{:12}{:<20}{}",
+                header.version, "", "IONOSPHERE MAPS", header.satellite_system
+            ),
+            VERSION_TYPE,
         );
         write_labeled(
             out,
-            &format!("{lon1:8.1}{lon2:8.1}{:8.1}", self.dlon_deg()),
-            "LON1 / LON2 / DLON",
+            &format!("{:<20}{:<20}{}", header.program, header.run_by, header.date),
+            PGM_RUN_BY_DATE,
         );
+        for description in &header.descriptions {
+            write_labeled(out, description, DESCRIPTION);
+        }
+        if let (Some(first), Some(last)) = (self.map_epochs().first(), self.map_epochs().last()) {
+            write_labeled(out, &epoch_data(*first), EPOCH_OF_FIRST_MAP);
+            write_labeled(out, &epoch_data(*last), EPOCH_OF_LAST_MAP);
+        }
+        write_labeled(out, &format!("{:6}", header.interval_s), INTERVAL);
+        write_labeled(out, &format!("{:6}", self.map_epochs().len()), MAPS_IN_FILE);
+        let mapping_function = header
+            .mapping_function
+            .as_ref()
+            .map_or(String::new(), |function| format!("  {}", function.code()));
+        write_labeled(out, &mapping_function, MAPPING_FUNCTION);
+        write_labeled(
+            out,
+            &format!("{:8.1}", header.elevation_cutoff_deg),
+            ELEVATION_CUTOFF,
+        );
+        write_labeled(out, &header.observables_used, OBSERVABLES_USED);
+        if let Some(count) = header.station_count {
+            write_labeled(out, &format!("{count:6}"), STATIONS);
+        }
+        if let Some(count) = header.satellite_count {
+            write_labeled(out, &format!("{count:6}"), SATELLITES);
+        }
+        write_labeled(out, &format!("{:8.1}", self.base_radius_km()), BASE_RADIUS);
+        write_labeled(out, &format!("{:6}", 2), MAP_DIMENSION);
         let height = self.shell_height_km();
         write_labeled(
             out,
             &format!("{height:8.1}{height:8.1}{:8.1}", 0.0),
-            "HGT1 / HGT2 / DHGT",
+            HGT_AXIS,
         );
         write_labeled(
             out,
-            &format!("{:8.1}", self.base_radius_km()),
-            "BASE RADIUS",
+            &format!("{lat1:8.1}{lat2:8.1}{:8.1}", self.dlat_deg()),
+            LAT_AXIS,
         );
-        write_labeled(out, &format!("{:6}", self.exponent()), "EXPONENT");
-        write_labeled(out, "", "END OF HEADER");
+        write_labeled(
+            out,
+            &format!("{lon1:8.1}{lon2:8.1}{:8.1}", self.dlon_deg()),
+            LON_AXIS,
+        );
+        write_labeled(out, &format!("{:6}", self.exponent()), EXPONENT);
+        for comment in &header.comments {
+            write_labeled(out, comment, COMMENT);
+        }
+        write_labeled(out, "", END_OF_HEADER);
     }
 
     /// Emit one map's latitude bands. Each band is a `LAT/LON1/LON2/DLON/H`
-    /// record (the reader keys only on the label) followed by the band's scaled
-    /// integer fields, the inverse of the parser's band accumulation.
-    fn write_map(&self, out: &mut String, grid: &[Vec<f64>], scale: f64) {
+    /// record followed by the band's scaled integer fields, with `9999` for a
+    /// non-available value.
+    fn write_map(&self, out: &mut String, grid: &Grid, scale: f64) {
         let lon1 = self.lon_nodes_deg().first().copied().unwrap_or(0.0);
         let lon2 = self.lon_nodes_deg().last().copied().unwrap_or(0.0);
         let height = self.shell_height_km();
@@ -101,17 +155,17 @@ impl Ionex {
                     "{lat:8.1}{lon1:8.1}{lon2:8.1}{:8.1}{height:8.1}",
                     self.dlon_deg()
                 ),
-                "LAT/LON1/LON2/DLON/H",
+                BAND,
             );
             for chunk in band.chunks(VALUES_PER_LINE) {
                 for value in chunk {
-                    let scaled = (value / scale).round() as i64;
-                    // The reader splits TEC/RMS fields on whitespace, so two
-                    // adjacent values that each fill the I5 column would merge
-                    // into one token. Emit a guaranteed leading space: values
-                    // within I5 keep their familiar right-justified five-column
-                    // form (byte-identical to a plain `{:5}` for any value up to
-                    // four characters), and wider values stay separated.
+                    let scaled = match value {
+                        Some(value) => (value / scale).round() as i64,
+                        None => NON_AVAILABLE,
+                    };
+                    // Emit a guaranteed leading space: values within I5 keep
+                    // their right-justified five-column form, and wider values
+                    // stay separated.
                     let _ = write!(out, " {scaled:4}");
                 }
                 out.push('\n');
@@ -127,19 +181,14 @@ fn write_labeled(out: &mut String, data: &str, label: &str) {
     let _ = writeln!(out, "{data:<LABEL_COLUMN$}{label}");
 }
 
-/// Emit an `EPOCH OF CURRENT MAP` record from a map epoch, the inverse of the
-/// parser's `parse_epoch_j2000_s`.
+/// The `6I6` data of an epoch record, the inverse of the parser's epoch read.
 // invariant: serializable IONEX epochs are whole, representable J2000 seconds.
 #[allow(clippy::expect_used)]
-fn write_epoch(out: &mut String, epoch: Instant) {
+fn epoch_data(epoch: Instant) -> String {
     let seconds =
         j2000_seconds_from_instant(epoch).expect("IONEX map epoch is convertible to J2000 seconds");
     let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(seconds);
-    write_labeled(
-        out,
-        &format!("{year:6}{month:6}{day:6}{hour:6}{minute:6}{second:6}"),
-        "EPOCH OF CURRENT MAP",
-    );
+    format!("{year:6}{month:6}{day:6}{hour:6}{minute:6}{second:6}")
 }
 
 #[cfg(test)]

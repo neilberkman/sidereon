@@ -1741,7 +1741,9 @@ fn rounded_j2000_seconds(t_rx_j2000_s: f64) -> Result<i64, ObservablesError> {
 fn map_media_error(error: Error) -> ObservablesError {
     match error {
         Error::InvalidInput(message) => map_media_invalid_input(&message),
-        Error::IonexOutOfCoverage(_) => ObservablesError::Media(error),
+        Error::IonexOutOfCoverage(_) | Error::IonexNodesNotAvailable(_) => {
+            ObservablesError::Media(error)
+        }
         _ => invalid_observable_input("media", ObservablesInputErrorKind::OutOfRange),
     }
 }
@@ -2231,7 +2233,7 @@ mod media_validation_tests {
 
     use super::*;
     use crate::astro::time::civil::split_julian_date_from_j2000_seconds;
-    use crate::ionex::TecGridSamples;
+    use crate::ionex::{IonexHeader, IonexMappingFunction, TecGridSamples};
     use crate::GnssSystem;
 
     const T_RX_J2000_S: f64 = 646_272_000.0;
@@ -2276,11 +2278,7 @@ mod media_validation_tests {
     }
 
     fn ionex() -> Ionex {
-        let map = vec![
-            vec![12.0, 12.0, 12.0],
-            vec![12.0, 12.0, 12.0],
-            vec![12.0, 12.0, 12.0],
-        ];
+        let map = vec![vec![Some(12.0); 3]; 3];
         Ionex::from_samples(TecGridSamples {
             map_epochs: vec![epoch()],
             lat_nodes_deg: vec![90.0, 0.0, -90.0],
@@ -2292,6 +2290,8 @@ mod media_validation_tests {
             exponent: 0,
             tec_maps: vec![map],
             rms_maps: Vec::new(),
+            height_maps: Vec::new(),
+            header: IonexHeader::new(IonexMappingFunction::CosZ),
         })
         .expect("valid IONEX samples")
     }

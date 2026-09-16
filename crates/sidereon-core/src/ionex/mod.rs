@@ -13,6 +13,7 @@
 #![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod grid;
+mod header;
 mod klobuchar;
 mod nequick_g;
 mod nequick_g_data;
@@ -39,6 +40,7 @@ use crate::frequencies::{self, CarrierBand};
 use crate::GnssSystem;
 
 pub use grid::Ionex;
+pub use header::{IonexHeader, IonexMappingFunction, IonexWarning};
 pub use nequick_g::{nequick_g_delay_m, nequick_g_stec_tecu, NequickGRayEval};
 pub use samples::{TecGridSamples, TecSample, TecSamplesError};
 pub use tec_grid::{
@@ -97,6 +99,74 @@ pub struct IonexSlantDelayEvaluation {
     pub delay_m: f64,
     /// Coverage status for `delay_m`.
     pub status: IonexSlantDelayStatus,
+}
+
+/// Nodes of one map's interpolation cell that carry weight in a slant-delay
+/// query and that the product gives as non-available.
+///
+/// A node carries weight when its bilinear weight is nonzero, so a query on a
+/// node, or on the edge between two nodes, uses only the nodes it lies on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IonexMissingNodes {
+    /// Index of the map in [`Ionex::map_epochs`].
+    pub map_index: usize,
+    /// Index in [`Ionex::lat_nodes_deg`] of the cell's first node row.
+    pub lat_index: usize,
+    /// Index in [`Ionex::lon_nodes_deg`] of the cell's first node column.
+    pub lon_index: usize,
+    /// Which weighted nodes are non-available, in the order
+    /// `[lat_index][lon_index]`,
+    /// `[lat_index][lon_index + 1]`, `[lat_index + 1][lon_index]`,
+    /// `[lat_index + 1][lon_index + 1]`.
+    pub missing: [bool; 4],
+}
+
+impl core::fmt::Display for IonexMissingNodes {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Self {
+            map_index,
+            lat_index,
+            lon_index,
+            missing,
+        } = *self;
+        write!(f, "map {map_index} cell [{lat_index}][{lon_index}] missing")?;
+        let offsets = [(0, 0), (0, 1), (1, 0), (1, 1)];
+        for ((lat_offset, lon_offset), _) in offsets
+            .iter()
+            .zip(missing)
+            .filter(|(_, is_missing)| *is_missing)
+        {
+            write!(
+                f,
+                " [{}][{}]",
+                lat_index + lat_offset,
+                lon_index + lon_offset
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// The non-available nodes a slant-delay query weights, on each weighted map
+/// that has any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IonexNodeGap {
+    /// On the earlier of the two maps bracketing the query epoch, or the only
+    /// map.
+    pub earlier: Option<IonexMissingNodes>,
+    /// On the later of the two maps bracketing the query epoch.
+    pub later: Option<IonexMissingNodes>,
+}
+
+impl core::fmt::Display for IonexNodeGap {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut separator = "";
+        for nodes in [self.earlier, self.later].into_iter().flatten() {
+            write!(f, "{separator}{nodes}")?;
+            separator = "; ";
+        }
+        Ok(())
+    }
 }
 
 pub(crate) use klobuchar::klobuchar_l1_components;
@@ -663,7 +733,10 @@ fn ionex_slant_delay_unchecked_with_policy(
         grid,
         policy,
     )
-    .map_err(Error::IonexOutOfCoverage)?;
+    .map_err(|miss| match miss {
+        slant::SlantMiss::Coverage(error) => Error::IonexOutOfCoverage(error),
+        slant::SlantMiss::Nodes(gap) => Error::IonexNodesNotAvailable(gap),
+    })?;
     let status = match coverage {
         Some(error) => IonexSlantDelayStatus::Held(error),
         None => IonexSlantDelayStatus::Valid,
