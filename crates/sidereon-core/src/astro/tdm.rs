@@ -301,10 +301,14 @@ pub enum TdmError {
         detail: &'static str,
     },
     /// A non-comment line was not a valid KVN assignment or section marker.
+    ///
+    /// [`encode_kvn`] returns this for a field the KVN form cannot carry, where
+    /// `line` counts the encoding it refused to emit rather than an input line.
     MalformedLine {
-        /// One-based input line number.
+        /// One-based line number, in the input when parsing and in the output
+        /// when encoding.
         line: usize,
-        /// The offending input line.
+        /// The offending line.
         text: String,
     },
     /// A data record did not contain `epoch value`.
@@ -373,6 +377,11 @@ struct DataBuilder {
 /// `DATA_START` / `DATA_STOP` blocks, and every data record with a numeric
 /// keyword must contain a finite value. Frequency records are not converted to
 /// range rate and keep their original decimal token for later serialization.
+///
+/// A line whose keyword is `COMMENT` is a comment, never an assignment: CCSDS
+/// 503.0-B-2 4.2.5 c) excepts `COMMENT` from the KVN syntax, and 4.5.3 requires
+/// at least one space after the keyword. `COMMENT=value` satisfies neither form
+/// and is refused as a malformed line.
 pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
     let mut header = HeaderBuilder::default();
     let mut metadata: Option<MetadataBuilder> = None;
@@ -458,6 +467,17 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
             text: line.to_string(),
         })?;
 
+        // `COMMENT` is excepted from the KVN syntax (4.2.5 c)) and a comment
+        // line needs a space after the keyword (4.5.3), so `COMMENT=value` is
+        // neither a comment nor an assignment. Keeping it as a field produced a
+        // value whose encoding, `COMMENT = value`, reparsed as a comment.
+        if key == COMMENT_KEY {
+            return Err(TdmError::MalformedLine {
+                line: line_no,
+                text: line.to_string(),
+            });
+        }
+
         if let Some(builder) = data.as_mut() {
             let range_units = pending_metadata
                 .as_ref()
@@ -522,6 +542,10 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
 /// `KEY = epoch decimal-token`. Record decimals are not reformatted. Encoding
 /// validates that every stored decimal token parses back to the stored `f64`
 /// bits, which keeps `RECEIVE_FREQ` and `TRANSMIT_FREQ_n` values lossless.
+///
+/// A header or metadata field keyed `COMMENT` is refused rather than written:
+/// `COMMENT = value` reparses as a comment, so the encoding would not read back
+/// as the value it was given.
 pub fn encode_kvn(tdm: &Tdm) -> Result<String, TdmError> {
     validate_tdm(tdm)?;
 
@@ -537,12 +561,16 @@ pub fn encode_kvn(tdm: &Tdm) -> Result<String, TdmError> {
     if let Some(message_id) = &tdm.message_id {
         lines.push(format!("MESSAGE_ID = {message_id}"));
     }
-    lines.extend(tdm.header_fields.iter().map(field_line));
+    for field in &tdm.header_fields {
+        push_field(&mut lines, field)?;
+    }
 
     for segment in &tdm.segments {
         lines.push("META_START".to_string());
         lines.extend(segment.metadata.comments.iter().map(comment_line));
-        lines.extend(segment.metadata.fields.iter().map(field_line));
+        for field in &segment.metadata.fields {
+            push_field(&mut lines, field)?;
+        }
         lines.push("META_STOP".to_string());
         lines.push("DATA_START".to_string());
         lines.extend(segment.data.comments.iter().map(comment_line));
@@ -1131,6 +1159,26 @@ fn field_line(field: &TdmField) -> String {
     format!("{} = {}", field.key, field.value)
 }
 
+/// Append one `KEY = VALUE` line, refusing a field the KVN form cannot carry.
+///
+/// `COMMENT` is excepted from the KVN syntax by CCSDS 503.0-B-2 4.2.5 c), and
+/// 4.5.3 reads any line whose keyword is followed by a space as a comment. A
+/// field keyed `COMMENT` has no assignment form: writing `COMMENT = value`
+/// emits a line that reads back as a comment rather than as the field.
+fn push_field(lines: &mut Vec<String>, field: &TdmField) -> Result<(), TdmError> {
+    let text = field_line(field);
+    // The key is compared trimmed: a key of `"COMMENT "` writes the same
+    // line, which reads back as a comment just as an untrimmed one does.
+    if field.key.trim() == COMMENT_KEY {
+        return Err(TdmError::MalformedLine {
+            line: lines.len().saturating_add(1),
+            text,
+        });
+    }
+    lines.push(text);
+    Ok(())
+}
+
 fn empty_to_none(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
@@ -1362,5 +1410,91 @@ DATA_STOP",
                 kind: TdmInputErrorKind::NotPositive,
             }
         );
+    }
+
+    #[test]
+    fn comment_assignment_is_refused_in_header_and_metadata() {
+        let header = "\
+CCSDS_TDM_VERS = 2.0
+COMMENT=
+META_START
+TIME_SYSTEM = UTC
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP";
+        assert_eq!(
+            parse_kvn(header),
+            Err(TdmError::MalformedLine {
+                line: 2,
+                text: "COMMENT=".to_string(),
+            })
+        );
+
+        let metadata = "\
+CCSDS_TDM_VERS = 2.0
+META_START
+TIME_SYSTEM = UTC
+COMMENT=file = tdm.dat
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP";
+        assert_eq!(
+            parse_kvn(metadata),
+            Err(TdmError::MalformedLine {
+                line: 4,
+                text: "COMMENT=file = tdm.dat".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn comment_keyword_followed_by_a_space_stays_a_comment() {
+        // 4.5.3 takes the rest of the line as the comment value, so a comment
+        // whose text opens with `=` is still a comment, not an assignment.
+        let tdm = parse_kvn(
+            "\
+CCSDS_TDM_VERS = 2.0
+COMMENT = file = tdm.dat
+META_START
+TIME_SYSTEM = UTC
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP",
+        )
+        .unwrap();
+        assert_eq!(tdm.comments, vec!["= file = tdm.dat".to_string()]);
+        assert!(tdm.header_fields.is_empty());
+    }
+
+    #[test]
+    fn encode_refuses_a_comment_keyed_field() {
+        let comment_field = TdmField {
+            key: COMMENT_KEY.to_string(),
+            value: String::new(),
+        };
+
+        let mut header_case = parse_kvn(SIMPLE).unwrap();
+        header_case.header_fields.push(comment_field.clone());
+        assert_eq!(
+            encode_kvn(&header_case),
+            Err(TdmError::MalformedLine {
+                line: 5,
+                text: "COMMENT = ".to_string(),
+            })
+        );
+
+        let mut metadata_case = parse_kvn(SIMPLE).unwrap();
+        metadata_case.segments[0]
+            .metadata
+            .fields
+            .push(comment_field);
+        let err = encode_kvn(&metadata_case).unwrap_err();
+        assert!(matches!(
+            err,
+            TdmError::MalformedLine { ref text, .. } if text == "COMMENT = "
+        ));
     }
 }

@@ -553,6 +553,17 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Fixed
 
+- A TDM line whose keyword is `COMMENT` is a comment or nothing. CCSDS
+  503.0-B-2 4.2.5 c) excepts `COMMENT` from the KVN syntax, and 4.5.3 requires
+  at least one space after the keyword, so `COMMENT=value` is neither a comment
+  nor an assignment; `tdm::parse_kvn` read it as a field keyed `COMMENT` and now
+  refuses it with `TdmError::MalformedLine`. `tdm::encode_kvn` wrote such a field
+  as `COMMENT = value`, which reads back as a comment whose text is
+  `= value`, so a message carrying one parsed, encoded and reparsed to a
+  different value, one comment longer and one field shorter; the writer refuses
+  the field instead. The scheduled fuzz run on the `tdm_round_trip` target found
+  this on a 1071-byte input whose line 112 is `COMMENT=`, kept as a regression
+  fixture.
 - The IONEX writer lays records out as IONEX 1 defines them: axes in
   `2X,3F6.1`, band records in `2X,5F6.1`, values in `16I5`, and `EXPONENT` only
   where it is not `-1`. Axis and band records were written in `8.1` fields, which

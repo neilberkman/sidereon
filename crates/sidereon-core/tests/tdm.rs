@@ -6,8 +6,9 @@
 //! Annex E KVN examples, then checked as exact decimal tokens and as `f64` bit
 //! equality after parsing.
 
+use sha2::{Digest, Sha256};
 use sidereon_core::astro::tdm::{
-    self, Tdm, TdmDataRecord, TdmError, TdmInputErrorKind, TdmObservable, TdmUnit,
+    self, Tdm, TdmDataRecord, TdmError, TdmField, TdmInputErrorKind, TdmObservable, TdmUnit,
 };
 
 const ANNEX_E_ALL_KVN: &[(&str, &str, usize, usize)] = &[
@@ -1282,4 +1283,141 @@ fn observable_variants_are_specific_for_required_keywords() {
         observables[5],
         TdmObservable::ReceiveFreq { participant: None }
     ));
+}
+
+fn decode_hex(encoded: &[u8]) -> Vec<u8> {
+    let digits: Vec<u8> = encoded
+        .iter()
+        .copied()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    let (pairs, rest) = digits.as_chunks::<2>();
+    assert!(rest.is_empty(), "hex fixture must have complete bytes");
+    pairs
+        .iter()
+        .map(|[high, low]| {
+            let high = (*high as char).to_digit(16).expect("hex high nibble");
+            let low = (*low as char).to_digit(16).expect("hex low nibble");
+            ((high << 4) | low) as u8
+        })
+        .collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// The scheduled bounded fuzz run on the `tdm_round_trip` target failed on this
+/// input. Line 112 of it is `COMMENT=`, inside a metadata block; that parsed as
+/// a field keyed `COMMENT`, the writer emitted it as `COMMENT = `, and the
+/// reparse read that line as a comment whose text is `=`. The reparsed value
+/// then held one more comment and one fewer field than the value it came from.
+///
+/// CCSDS 503.0-B-2 4.2.5 c) excepts `COMMENT` from the KVN syntax and 4.5.3
+/// requires at least one space after the keyword, so the line is not an
+/// assignment in any section and is refused where it appears.
+#[test]
+fn scheduled_fuzz_comment_assignment_is_refused() {
+    let encoded = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tdm/",
+        "tdm_round_trip-crash-cb1c6e75.hex"
+    ));
+    let input = decode_hex(encoded);
+    assert_eq!(input.len(), 1071);
+    assert_eq!(
+        sha256_hex(&input),
+        "384540c19b79b5e7ee69373def4b6746e7a21cd1aa4dfb4e0c8c866f2dd77c35"
+    );
+
+    let text = String::from_utf8_lossy(&input);
+    assert_eq!(
+        tdm::parse_kvn(&text),
+        Err(TdmError::MalformedLine {
+            line: 112,
+            text: "COMMENT=".to_string(),
+        })
+    );
+}
+
+/// The smallest message carrying the refused line, so the property is pinned on
+/// a file with nothing else wrong with it rather than only on the fuzz payload.
+/// CCSDS 503.0-B-2 4.2.5 c) excepts `COMMENT` from the KVN syntax and 4.5.3
+/// requires at least one space after the keyword, so `COMMENT=value` is an
+/// assignment the standard does not define, in a header or in metadata.
+#[test]
+fn a_comment_keyed_assignment_is_refused_in_both_sections() {
+    let header =
+        "CCSDS_TDM_VERS = 2.0\nCOMMENT=note\nMETA_START\nMETA_STOP\nDATA_START\nDATA_STOP\n";
+    assert_eq!(
+        tdm::parse_kvn(header),
+        Err(TdmError::MalformedLine {
+            line: 2,
+            text: "COMMENT=note".to_string(),
+        })
+    );
+
+    let metadata = "CCSDS_TDM_VERS = 2.0\nMETA_START\nCOMMENT=\nMETA_STOP\nDATA_START\nDATA_STOP\n";
+    assert_eq!(
+        tdm::parse_kvn(metadata),
+        Err(TdmError::MalformedLine {
+            line: 3,
+            text: "COMMENT=".to_string(),
+        })
+    );
+}
+
+/// The refusal turns on the space 4.5.3 requires, not on what the text holds: a
+/// comment whose own text opens with an equals sign still reads as a comment.
+#[test]
+fn a_comment_line_with_a_space_still_reads_as_a_comment() {
+    let text = "CCSDS_TDM_VERS = 2.0\nCOMMENT note\nMETA_START\nCOMMENT =value\nMETA_STOP\nDATA_START\nDATA_STOP\n";
+    let parsed = tdm::parse_kvn(text).expect("comment lines parse");
+    // A comment's text is everything after the keyword, so `COMMENT = note`
+    // would read as the text `= note` rather than as an assignment.
+    assert_eq!(parsed.comments, vec!["note".to_string()]);
+    assert_eq!(
+        parsed.segments[0].metadata.comments,
+        vec!["=value".to_string()]
+    );
+}
+
+/// `TdmField` is public, so a caller can hold the state the parser refuses.
+/// Encoding it would write `COMMENT = note`, which reads back as a comment
+/// rather than as the field, so the writer refuses it in either section.
+#[test]
+fn encoding_refuses_a_field_keyed_comment() {
+    let text = "CCSDS_TDM_VERS = 2.0\nMETA_START\nMETA_STOP\nDATA_START\nDATA_STOP\n";
+    let base = tdm::parse_kvn(text).expect("the minimal message parses");
+    tdm::encode_kvn(&base).expect("the minimal message encodes");
+
+    let field = TdmField {
+        key: "COMMENT".to_string(),
+        value: "note".to_string(),
+    };
+
+    let mut header = base.clone();
+    header.header_fields.push(field.clone());
+    match tdm::encode_kvn(&header) {
+        Err(TdmError::MalformedLine { text, .. }) => assert_eq!(text, "COMMENT = note"),
+        other => panic!("a header field keyed COMMENT must be refused, got {other:?}"),
+    }
+
+    let mut metadata = base.clone();
+    metadata.segments[0].metadata.fields.push(field);
+    match tdm::encode_kvn(&metadata) {
+        Err(TdmError::MalformedLine { text, .. }) => assert_eq!(text, "COMMENT = note"),
+        other => panic!("a metadata field keyed COMMENT must be refused, got {other:?}"),
+    }
+
+    // A padded key writes the same line, so it is refused on the same footing.
+    let mut padded = base;
+    padded.header_fields.push(TdmField {
+        key: "COMMENT ".to_string(),
+        value: "note".to_string(),
+    });
+    match tdm::encode_kvn(&padded) {
+        Err(TdmError::MalformedLine { .. }) => {}
+        other => panic!("a padded COMMENT key must be refused, got {other:?}"),
+    }
 }
