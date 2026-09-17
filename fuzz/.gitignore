@@ -52,3 +52,25 @@
 !/corpus/rinex_obs_round_trip/regression-event-phase-shift-continuation
 !/corpus/rinex_obs_round_trip/regression-event-phase-shift-order
 !/corpus/rinex_obs_round_trip/regression-leading-event-type-list
+
+# Curated seeds for both TDM targets, which had no corpus at all: Annex E
+# examples covering one and three segments, PATH_1/PATH_2, media, phase counts
+# and TRACK_ID, plus the scheduled-fuzz reproducer for the COMMENT assignment.
+!/corpus/tdm_parse/
+/corpus/tdm_parse/*
+!/corpus/tdm_parse/valid-annex-e01.kvn
+!/corpus/tdm_parse/valid-annex-e07.kvn
+!/corpus/tdm_parse/valid-annex-e11.kvn
+!/corpus/tdm_parse/valid-annex-e13.kvn
+!/corpus/tdm_parse/valid-annex-e18.kvn
+!/corpus/tdm_parse/valid-annex-e22.kvn
+!/corpus/tdm_parse/regression-comment-assignment
+!/corpus/tdm_round_trip/
+/corpus/tdm_round_trip/*
+!/corpus/tdm_round_trip/valid-annex-e01.kvn
+!/corpus/tdm_round_trip/valid-annex-e07.kvn
+!/corpus/tdm_round_trip/valid-annex-e11.kvn
+!/corpus/tdm_round_trip/valid-annex-e13.kvn
+!/corpus/tdm_round_trip/valid-annex-e18.kvn
+!/corpus/tdm_round_trip/valid-annex-e22.kvn
+!/corpus/tdm_round_trip/regression-comment-assignment
