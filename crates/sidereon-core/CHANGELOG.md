@@ -81,6 +81,23 @@ All notable changes to `sidereon-core` are documented here.
   built that no input produced. The version was also filtered for emptiness
   before being reported absent, which became unreachable once an empty value was
   refused at the line that gives it.
+- **Breaking.** TDM tracking data records are read by the timetags CCSDS
+  503.0-B-2 4.3.9 defines, and ordered and deduplicated by them. The epoch was
+  kept as a raw string and never checked, so any text passed and no record could
+  be placed in time. Both forms, `YYYY-MM-DDThh:mm:ss[.d->d][Z]` and
+  `YYYY-DDDThh:mm:ss[.d->d][Z]`, are read and compare against each other, so a
+  message may write either; a timetag outside them is the new
+  `TdmError::MalformedEpoch`. 3.4.10 requires each keyword's records to be in
+  chronological order and 3.4.11 requires each keyword and timetag pair to be
+  unique; neither was checked, and a repeat passed through with both values kept
+  and nothing saying so. They are now `TdmError::RecordsOutOfOrder` and
+  `TdmError::DuplicateRecord`, both forgivable: a data section is a sequence
+  rather than a set of keyed slots, so a lenient read keeps both records in file
+  order and warns, inventing nothing. Figure E-17 needs exactly that, giving
+  `RCS` twice at `2011-05-11T10:26:33.7008` with different values. The writer
+  refuses a repeat whatever the reader forgave, so a forgiven message is never
+  written back in a form the standard forbids. `TdmPolicy::strict` is a constant
+  form of the default, for callers building a policy in a `const`.
 - **Breaking.** A TDM keyword outside the table for its section is refused.
   3.2.3 says "Only those keywords shown in table 3-2 shall be used in a TDM
   Header" and 3.3.1.7 says the same of table 3-3 and a metadata section; both

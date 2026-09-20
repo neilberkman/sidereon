@@ -12,6 +12,11 @@ use sidereon_core::astro::tdm::{
 };
 
 /// Parse an annex example.
+///
+/// Two of the twenty-one are refused: figure E-10 writes a timetag 4.3.9 does
+/// not define, and figure E-17 repeats a keyword and timetag with different
+/// values. Both are skipped where the annex set is walked for values, and
+/// `the_annex_examples_that_depart_are_named` asserts each refusal.
 fn parse_annex(label: &str, fixture: &str) -> Tdm {
     tdm::parse_kvn(fixture).unwrap_or_else(|err| panic!("{label} failed parse: {err}"))
 }
@@ -322,6 +327,12 @@ RANGE = 2005-09-17T00:42:56.000000 3268.63267268713
 RANGE = 2005-09-17T00:42:58.000000 3270.46440460551
 DATA_STOP\n";
 
+/// Figure E-10 writes the `TRANSMIT_FREQ_1` timetag as `04:10:0000`, missing
+/// the decimal point every neighbouring record in the same block carries. 4.3.9
+/// defines no such form, so the reader refuses it, and `annex_e_10.kvn` keeps
+/// the published spelling and asserts that refusal. This copy exists to pin
+/// parsed values rather than to transcribe the figure, so it carries the
+/// intended `04:10:00.0000`.
 const ANNEX_E10_DIFFERENCED_DOPPLER: &str = "\
 CCSDS_TDM_VERS = 2.0
 COMMENT This TDM example contains single differenced Doppler data.
@@ -347,7 +358,7 @@ DATA_QUALITY = VALIDATED
 META_STOP
 DATA_START
 COMMENT Transmit frequency is S/C beacon one OWLT prior to receive time
-TRANSMIT_FREQ_1 = 2003-07-08T04:10:0000 8.435360E+09
+TRANSMIT_FREQ_1 = 2003-07-08T04:10:00.0000 8.435360E+09
 RECEIVE_FREQ = 2003-07-08T04:45:25.0000 8.738750457763670E+00
 RECEIVE_FREQ = 2003-07-08T04:45:35.0000 8.320683479309080E+00
 RECEIVE_FREQ = 2003-07-08T04:45:45.0000 7.909399032592770E+00
@@ -463,6 +474,12 @@ const SYNTHETIC_CANONICAL_FNV1A64: u64 = 13028237734340361061;
 #[test]
 fn all_annex_e_kvn_examples_parse_and_canonicalize() {
     for (label, example, expected_segments, expected_records) in ANNEX_E_ALL_KVN {
+        // Figure E-10's TRANSMIT_FREQ_1 timetag is missing a decimal point and
+        // figure E-17 repeats a timetag, so neither reads;
+        // `the_annex_examples_that_depart_are_named` pins both refusals.
+        if *label == "E-10" || *label == "E-17" {
+            continue;
+        }
         let parsed = parse_annex(label, example);
         assert_eq!(
             parsed.segments.len(),
@@ -487,6 +504,39 @@ fn all_annex_e_kvn_examples_parse_and_canonicalize() {
             encoded,
             "{label} canonical KVN must be byte-stable"
         );
+    }
+}
+
+/// Two of the twenty-one annex examples depart from the standard, each in one
+/// way, and the other nineteen read with nothing to forgive.
+///
+/// E-10 writes a timetag 4.3.9 does not define, missing a decimal point its
+/// neighbours carry, so inferring the point would be guessing a value. E-17
+/// repeats a keyword and timetag with different values, which 3.4.11 forbids.
+#[test]
+fn the_annex_examples_that_depart_are_named() {
+    for (label, fixture, _, _) in ANNEX_E_ALL_KVN {
+        match *label {
+            "E-10" => assert_eq!(
+                tdm::parse_kvn(fixture),
+                Err(TdmError::MalformedEpoch {
+                    line: 25,
+                    keyword: "TRANSMIT_FREQ_1".to_string(),
+                    text: "2003-07-08T04:10:0000".to_string(),
+                })
+            ),
+            "E-17" => assert_eq!(
+                tdm::parse_kvn(fixture),
+                Err(TdmError::DuplicateRecord {
+                    segment: 1,
+                    keyword: "RCS".to_string(),
+                    epoch: "2011-05-11T10:26:33.7008".to_string(),
+                })
+            ),
+            _ => {
+                tdm::parse_kvn(fixture).unwrap_or_else(|err| panic!("{label} strict: {err}"));
+            }
+        }
     }
 }
 
@@ -682,7 +732,7 @@ fn annex_e_examples_parse_to_pinned_values() {
     assert_record(
         &e10,
         "TRANSMIT_FREQ_1",
-        "2003-07-08T04:10:0000",
+        "2003-07-08T04:10:00.0000",
         "8.435360E+09",
         TdmUnit::Hertz,
     );
@@ -796,7 +846,7 @@ fn frequency_records_preserve_pinned_ieee_bits() {
     assert_record_bits(
         &e10,
         "TRANSMIT_FREQ_1",
-        "2003-07-08T04:10:0000",
+        "2003-07-08T04:10:00.0000",
         "8.435360E+09",
         0x41ff_6c96_1000_0000,
         TdmUnit::Hertz,
