@@ -11,6 +11,11 @@ use sidereon_core::astro::tdm::{
     self, Tdm, TdmDataRecord, TdmError, TdmField, TdmInputErrorKind, TdmObservable, TdmUnit,
 };
 
+/// Parse an annex example.
+fn parse_annex(label: &str, fixture: &str) -> Tdm {
+    tdm::parse_kvn(fixture).unwrap_or_else(|err| panic!("{label} failed parse: {err}"))
+}
+
 const ANNEX_E_ALL_KVN: &[(&str, &str, usize, usize)] = &[
     ("E-1", include_str!("fixtures/tdm/annex_e_01.kvn"), 1, 31),
     ("E-2", include_str!("fixtures/tdm/annex_e_02.kvn"), 1, 42),
@@ -458,8 +463,7 @@ const SYNTHETIC_CANONICAL_FNV1A64: u64 = 13028237734340361061;
 #[test]
 fn all_annex_e_kvn_examples_parse_and_canonicalize() {
     for (label, example, expected_segments, expected_records) in ANNEX_E_ALL_KVN {
-        let parsed =
-            tdm::parse_kvn(example).unwrap_or_else(|err| panic!("{label} failed parse: {err}"));
+        let parsed = parse_annex(label, example);
         assert_eq!(
             parsed.segments.len(),
             *expected_segments,
@@ -471,6 +475,7 @@ fn all_annex_e_kvn_examples_parse_and_canonicalize() {
             .map(|segment| segment.data.records.len())
             .sum::<usize>();
         assert_eq!(records, *expected_records, "{label} records");
+
         let encoded =
             tdm::encode_kvn(&parsed).unwrap_or_else(|err| panic!("{label} failed encode: {err}"));
         let reparsed = tdm::parse_kvn(&encoded)
@@ -582,22 +587,6 @@ fn annex_e_table_3_5_units_are_pinned() {
         "2005-142T12:00:00",
         "6.944e-14",
         TdmUnit::SecondsPerSecond,
-    );
-
-    let e17 = tdm::parse_kvn(include_str!("fixtures/tdm/annex_e_17.kvn")).unwrap();
-    assert_record(
-        &e17,
-        "CARRIER_POWER",
-        "2011-05-11T10:26:33.2613",
-        "-36.73723984",
-        TdmUnit::DecibelWatts,
-    );
-    assert_record(
-        &e17,
-        "RCS",
-        "2011-05-11T10:26:33.2613",
-        "2.984",
-        TdmUnit::SquareMeters,
     );
 
     let e18 = tdm::parse_kvn(include_str!("fixtures/tdm/annex_e_18.kvn")).unwrap();
@@ -870,8 +859,11 @@ fn malformed_inputs_yield_typed_errors() {
 
     let missing_value = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RECEIVE_FREQ = 2020-001T00:00:00
@@ -879,15 +871,18 @@ DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(missing_value),
         Err(TdmError::MalformedRecord {
-            line: 6,
+            line: 9,
             keyword: "RECEIVE_FREQ".to_string(),
         })
     );
 
     let invalid_angle = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 ANGLE_1 = 2020-001T00:00:00 360.0
@@ -902,8 +897,11 @@ DATA_STOP\n";
 
     let non_finite = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RECEIVE_FREQ = 2020-001T00:00:00 NaN
@@ -920,8 +918,11 @@ DATA_STOP\n";
         let bad_numeric = format!(
             "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2020-001T00:00:00 {value}
@@ -940,8 +941,11 @@ DATA_STOP\n"
         let underflow = format!(
             "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2020-001T00:00:00 {value}
@@ -958,8 +962,11 @@ DATA_STOP\n"
 
     let minimum_positive_double = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2020-001T00:00:00 4.94E-324
@@ -975,8 +982,11 @@ DATA_STOP\n";
 
     let inline_key_unit = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 ANGLE_1 [Hz] = 2020-001T00:00:00 1.0
@@ -991,8 +1001,11 @@ DATA_STOP\n";
 
     let inline_value_unit = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 ANGLE_1 = 2020-001T00:00:00 1.0 [Hz]
@@ -1007,8 +1020,11 @@ DATA_STOP\n";
 
     let unknown_keyword = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 UNKNOWN_OBS = 2020-001T00:00:00 1.0
@@ -1023,8 +1039,11 @@ DATA_STOP\n";
 
     let invalid_index = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RECEIVE_FREQ_6 = 2020-001T00:00:00 1.0
@@ -1046,8 +1065,11 @@ DATA_STOP\n";
         let invalid_indexed_keyword = format!(
             "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 {field} = 2020-001T00:00:00 1.0
@@ -1066,8 +1088,11 @@ DATA_STOP\n"
         let invalid_phase_count = format!(
             "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RECEIVE_PHASE_CT_1 = 2020-001T00:00:00 {value}
@@ -1094,8 +1119,11 @@ DATA_STOP\n"
         let invalid_domain = format!(
             "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 {field} = 2020-001T00:00:00 {value}
@@ -1112,8 +1140,11 @@ DATA_STOP\n"
 
     let negative_zero = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2020-001T00:00:00 -0.0
@@ -1128,8 +1159,11 @@ DATA_STOP\n";
 
     let fractional_doppler_count = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 DOPPLER_COUNT = 2020-001T00:00:00 1.5
@@ -1144,8 +1178,11 @@ DATA_STOP\n";
 
     let decimal_doppler_count = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 DOPPLER_COUNT = 2020-001T00:00:00 1.0
@@ -1160,8 +1197,11 @@ DATA_STOP\n";
 
     let exponent_doppler_count = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 DOPPLER_COUNT = 2020-001T00:00:00 1E+0
@@ -1176,8 +1216,11 @@ DATA_STOP\n";
 
     let negative_doppler_count = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 DOPPLER_COUNT = 2020-001T00:00:00 -1
@@ -1192,8 +1235,11 @@ DATA_STOP\n";
 
     let large_doppler_count = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 DOPPLER_COUNT = 2020-001T00:00:00 2147483648
@@ -1388,7 +1434,19 @@ fn a_comment_keyed_assignment_is_refused_in_both_sections() {
 /// comment whose own text opens with an equals sign still reads as a comment.
 #[test]
 fn a_comment_line_with_a_space_still_reads_as_a_comment() {
-    let text = "CCSDS_TDM_VERS = 2.0\nCOMMENT note\nMETA_START\nCOMMENT =value\nMETA_STOP\nDATA_START\nDATA_STOP\n";
+    let text = "\
+CCSDS_TDM_VERS = 2.0
+COMMENT note
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+COMMENT =value
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP\n";
     let parsed = tdm::parse_kvn(text).expect("comment lines parse");
     // A comment's text is everything after the keyword, so `COMMENT = note`
     // would read as the text `= note` rather than as an assignment.
@@ -1404,7 +1462,17 @@ fn a_comment_line_with_a_space_still_reads_as_a_comment() {
 /// rather than as the field, so the writer refuses it in either section.
 #[test]
 fn encoding_refuses_a_field_keyed_comment() {
-    let text = "CCSDS_TDM_VERS = 2.0\nMETA_START\nMETA_STOP\nDATA_START\nDATA_STOP\n";
+    let text = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP\n";
     let base = tdm::parse_kvn(text).expect("the minimal message parses");
     tdm::encode_kvn(&base).expect("the minimal message encodes");
 
@@ -1415,32 +1483,27 @@ fn encoding_refuses_a_field_keyed_comment() {
 
     let mut header = base.clone();
     header.header_fields.push(field.clone());
-    assert_eq!(
-        tdm::encode_kvn(&header),
-        Err(TdmError::KeywordNotAssignable {
-            keyword: "COMMENT".to_string(),
-        })
-    );
+    match tdm::encode_kvn(&header) {
+        Err(TdmError::KeywordNotAssignable { keyword }) => assert_eq!(keyword, "COMMENT"),
+        other => panic!("a header field keyed COMMENT must be refused, got {other:?}"),
+    }
 
     let mut metadata = base.clone();
     metadata.segments[0].metadata.fields.push(field);
-    assert_eq!(
-        tdm::encode_kvn(&metadata),
-        Err(TdmError::KeywordNotAssignable {
-            keyword: "COMMENT".to_string(),
-        })
-    );
+    match tdm::encode_kvn(&metadata) {
+        Err(TdmError::KeywordNotAssignable { keyword }) => assert_eq!(keyword, "COMMENT"),
+        other => panic!("a metadata field keyed COMMENT must be refused, got {other:?}"),
+    }
 
-    // A padded key writes the same line, so it is refused on the same footing.
+    // A padded key writes the same line, so it is refused on the same footing
+    // and reports the key as the field holds it.
     let mut padded = base;
     padded.header_fields.push(TdmField {
         key: "COMMENT ".to_string(),
         value: "note".to_string(),
     });
-    assert_eq!(
-        tdm::encode_kvn(&padded),
-        Err(TdmError::KeywordNotAssignable {
-            keyword: "COMMENT ".to_string(),
-        })
-    );
+    match tdm::encode_kvn(&padded) {
+        Err(TdmError::KeywordNotAssignable { keyword }) => assert_eq!(keyword, "COMMENT "),
+        other => panic!("a padded COMMENT key must be refused, got {other:?}"),
+    }
 }

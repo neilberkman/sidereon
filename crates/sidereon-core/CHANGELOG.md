@@ -28,6 +28,37 @@ All notable changes to `sidereon-core` are documented here.
   form, and a message with no segment. A character outside printable ASCII and a
   line over 254 characters stay ahead of those, since each names a position in
   one line and explains how the rest of that line reads.
+- **Breaking.** A TDM data-section comment keeps its place. `TdmDataSection`
+  holds `Vec<TdmComment>` rather than `Vec<String>`, each carrying the index of
+  the record it precedes, and the writer puts each one back where it was read.
+  Comments were gathered to the top of the block on write, so a caller who read
+  a file, changed one record and wrote it back got a rearranged file; nothing
+  reported the move. CCSDS 503.0-B-2 4.5.2 c) puts a data-section comment
+  between `DATA_START` and the first record, so one after a record is refused
+  with `TdmError::KeywordOutOfOrder` naming the line, and forgiven under a
+  lenient `keyword_order` with the same warning. Keeping the position is what
+  makes the forgiven message write back to the bytes it came from.
+- **Breaking.** TDM keywords out of the order tables 3-2 and 3-3 fix are
+  refused with the new `TdmError::KeywordOutOfOrder`. 3.2.3 and 3.3.1.8 make
+  that order binding and nothing checked it, so a header comment written after
+  `ORIGINATOR`, where 4.5.2 a) puts it before `CREATION_DATE`, read as if it
+  were in place. Order changes no value, so it is forgivable: a lenient read
+  takes the message and reports each keyword out of place by line. An indexed
+  keyword ranks where its base does, so `PARTICIPANT_2` beside `PARTICIPANT_1`
+  is in order whichever comes first. Seven of the 32 producer files among the 53
+  gathered for this audit deviate, three in the header and six in metadata; none
+  of the 21 annex examples does, so this is a place the standard and practice
+  have parted company rather than one where the standard contradicts itself.
+- **Breaking.** A TDM `PATH` naming a participant index its segment does not
+  define is refused with the new `TdmError::UndefinedParticipant`. A path entry
+  is a participant number, and one that resolves to nothing left the
+  measurements it describes belonging to no participant, with the reader
+  carrying the path on regardless. It is refused under every policy, lenient
+  included, since choosing which participant was meant would be inventing one.
+  A gap in the indices is untouched: CCSDS 503.0-B-2 3.3.1.9 requires them to
+  differ, not to run consecutively, so `PARTICIPANT_1` beside `PARTICIPANT_3`
+  with nothing pointing into the gap stays legal. No public file on hand carries
+  a dangling reference.
 - **Breaking.** `TdmError` and `TdmWarning` carry one payload convention. A
   keyword is `keyword: String` in every variant, whether this crate named it or
   read it from the message; it was `key`, `field` or `keyword` by turns, and
@@ -50,6 +81,50 @@ All notable changes to `sidereon-core` are documented here.
   built that no input produced. The version was also filtered for emptiness
   before being reported absent, which became unreachable once an empty value was
   refused at the line that gives it.
+- **Breaking.** A TDM keyword outside the table for its section is refused.
+  3.2.3 says "Only those keywords shown in table 3-2 shall be used in a TDM
+  Header" and 3.3.1.7 says the same of table 3-3 and a metadata section; both
+  catch-alls accepted anything and wrote it back, so a misspelled keyword
+  travelled through the reader carrying data whose meaning nothing defines. It
+  is now the new `TdmError::UndefinedKeyword`, naming the line, the keyword and
+  the section. This is refused under every policy, lenient included, since
+  reading it would mean inventing what it means. `EPHEMERIS_NAME` is taken
+  unindexed as well as indexed: table 3-3 lists only `EPHEMERIS_NAME_n`, but
+  figure E-17 writes the bare keyword and the annex I summary sheet lists it
+  bare five times. The four section markers join `COMMENT` as keywords 4.2.5 c)
+  excepts from the KVN syntax, so `META_START = 1` and its three companions are
+  refused as malformed lines on read and as `TdmError::KeywordNotAssignable` on
+  write, where only `COMMENT` was caught before.
+- **Breaking.** TDM indexed keywords are bounded by the ranges their tables
+  give. Table 3-3 indexes `PARTICIPANT_n` with n = {1,2,3,4,5} and 3.3.1.11 caps
+  a segment at five participants, and the table defines `PATH`, `PATH_1` and
+  `PATH_2` and no other index; any suffix that fit a `u8` was accepted, so
+  `PARTICIPANT_0`, `PARTICIPANT_99` and `PATH_03` all parsed and wrote back out.
+  A suffix outside the range is refused with `TdmInputErrorKind::InvalidIndex`,
+  as the data keywords already were. A padded suffix such as `PARTICIPANT_01` is
+  refused on the same footing: the table writes the indexer as a single digit,
+  and reading `01` as 1 gave one index two spellings that the writer then
+  emitted unchanged. 3.3.1.9 says "The indexer shall not be the same for any two
+  participants in a given Metadata Section"; both were kept and the second
+  silently shadowed the first wherever an index is resolved, and a repeat is now
+  the new `TdmError::DuplicateIndex`.
+- **Breaking.** A TDM carries the records and keywords CCSDS 503.0-B-2 makes
+  mandatory, or it is refused by name. Table 3-2 marks `CREATION_DATE` and
+  `ORIGINATOR` mandatory, table 3-3 marks `TIME_SYSTEM` mandatory and
+  `PARTICIPANT_n` mandatory with "at least one", and 3.1.3 gives each segment a
+  data section of "a minimum of one Tracking Data Record"; none was required, so
+  a message missing any of them parsed and wrote back out still missing it. The
+  absent keyword is now `TdmError::MissingKeyword`, naming the keyword and the
+  segment that wanted it, and an empty data block is
+  `TdmError::EmptyDataSection`. 4.3.1 requires "A non-empty value field must be
+  specified for each keyword provided"; `KEY =` was read as an empty value,
+  which the modeled header fields then dropped on write so the message lost a
+  keyword it had declared, and is now `TdmError::EmptyValue`. 3.2.5 gives the
+  version "the form of x.y"; any text passed, and a value outside that form is
+  now `TdmError::InvalidVersion`. `tdm::encode_kvn` applies the same rules to a
+  value built by a caller, looking for the mandatory metadata keywords in the
+  fields it writes rather than in the parsed properties beside them, so an
+  encoding that would omit one is refused instead of produced.
 - **Breaking.** A TDM is read in the lines and characters CCSDS 503.0-B-2
   defines. 4.2.11 terminates a line with "a single Carriage Return or a single
   Line Feed or a Carriage Return/Line Feed pair or a Line Feed/Carriage Return
