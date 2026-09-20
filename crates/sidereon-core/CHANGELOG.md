@@ -6,6 +6,61 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** `tdm::encode_kvn` and `tdm::encode_kvn_with_policy` enforce the
+  reader's rules over what they are about to write, refusing a value by name
+  under `TdmWritePolicy::strict()` and reporting a named departure under a
+  policy that forgives that axis. The writer previously checked only line caps
+  and character sets, so a caller-built message carrying structural errors,
+  records out of chronological order (3.4.10), duplicate records (3.4.11),
+  keywords out of table order (3.2.3 and 3.3.1.8), missing mandatory keywords
+  (3.1.3, 3.3.1.7, Table 3-2, Table 3-3), a `PATH` naming an undefined
+  participant (3.3.1.9), indexed keywords outside Table 3-3 range, an empty
+  mandatory value (4.3.1), or a malformed timetag (4.3.9) was written out into
+  a non-conforming file. A data-section comment after the first record
+  (4.5.2 c)) is now refused under strict policy with
+  `TdmError::KeywordOutOfOrder` and emitted as `TdmDeparture::KeywordOutOfOrder`
+  when `keyword_order` is forgiven. `TdmWritePolicy::as_read` translates the
+  write policy to the reader's vocabulary for mirrored validation.
+- **Breaking.** `tdm::encode_kvn` and `tdm::parse_kvn` refuse a keyword repeated
+  in one header or metadata block with different values using the new
+  `TdmError::ConflictingKeyword`. CCSDS 503.0-B-2 4.2.5 a) gives each keyword "a
+  single value assignment", and 3.2.3 and 3.3.1.8 give it one place in its
+  table's order; choosing between two values that disagree would be inventing
+  data, which no policy forgives.
+- `TdmWritePolicy` gained `repeated_keywords: TdmLeniency`. A keyword written
+  twice in one block with the same value violates CCSDS 503.0-B-2 4.2.5 a); the
+  writer refuses it under `TdmWritePolicy::strict()` with the new
+  `TdmError::RepeatedKeyword` and emits `TdmDeparture::RepeatedKeyword` when
+  forgiven. The reader has no policy axis for repeated keywords because no file
+  in the 53-file corpus repeats one; it takes identical repeats unconditionally
+  and reports `TdmWarning::RepeatedKeyword`.
+- **Breaking.** `TdmError::MalformedEpoch`, `TdmError::KeywordOutOfOrder`, and
+  `TdmError::EmptyValue` carry `line: Option<usize>` in place of `line: usize`.
+  The writer raises each with no input line to point at when validating
+  caller-built messages. A read fills `line` with `Some` and the input line number.
+- `tdm::encode_kvn_with_policy` writes a TDM under a `TdmWritePolicy`,
+  returning the text together with the departures from CCSDS 503.0-B-2 it
+  emitted as `TdmDeparture` values. The default emits none, so `tdm::encode_kvn`
+  is unchanged and refuses a value it cannot write conformingly. A field set to
+  `TdmLeniency::Forgive` lets the writer emit one departure and names it, so a
+  caller asking for a non-conforming file is told exactly what makes it one. The
+  set mirrors what `TdmPolicy` forgives on the way in, in the same vocabulary,
+  so a message read leniently can be written back by asking for the same
+  departures. Nothing outside that mirror is emittable under any policy: a field
+  keyed `COMMENT`, a key holding an equals sign or whitespace, a comment
+  carrying a newline, a value that does not parse as its keyword's type. Those
+  produce a file that reads back as something other than what was written, which
+  no policy can make correct.
+- **Breaking.** `tdm::encode_kvn` refuses a line it would write that departs
+  from CCSDS 503.0-B-2 4.2.1: one holding a character outside printable ASCII,
+  or one over 254 characters. Both reach the writer from a message read under a
+  lenient `non_printable` or `long_lines`, since a character inside a comment or
+  a free-text value is part of the value and a long value keeps its length, and
+  neither can be shortened or dropped without losing what the value says. Under
+  a matching `TdmWritePolicy` the writer emits the line and names it as
+  `TdmDeparture::NonPrintableCharacter` or `TdmDeparture::LineTooLong`. Both
+  departures existed and neither was ever produced, so a message carrying either
+  was written non-conforming and unreported.
 - **Breaking.** `TdmError::NonPrintableCharacter` and `TdmError::LineTooLong`
   carry `line: Option<usize>` in place of `line: usize`, and each gained
   `keyword: String`. The writer raises both with no input line to point at, and
@@ -28,6 +83,15 @@ All notable changes to `sidereon-core` are documented here.
   form, and a message with no segment. A character outside printable ASCII and a
   line over 254 characters stay ahead of those, since each names a position in
   one line and explains how the rest of that line reads.
+- **Breaking.** `tdm::encode_kvn` refuses a field or comment the KVN form
+  cannot carry, with the new `TdmError::Unwritable` naming the keyword and the
+  reason. `TdmField` and the comment vectors are public, so a caller can hold a
+  key that is empty, holds an equals sign, or is padded with whitespace, a value
+  padded the same way, or either carrying a line terminator; each was written
+  out and read back as a different value, which is the defect this work exists
+  to close. The writer also checks keyword membership per section as the reader
+  does: the mandatory-keyword check looked for a `PARTICIPANT_` prefix, so a
+  caller-built `PARTICIPANT_9` satisfied it and was written out.
 - **Breaking.** A TDM data-section comment keeps its place. `TdmDataSection`
   holds `Vec<TdmComment>` rather than `Vec<String>`, each carrying the index of
   the record it precedes, and the writer puts each one back where it was read.
@@ -123,8 +187,25 @@ All notable changes to `sidereon-core` are documented here.
   and reading `01` as 1 gave one index two spellings that the writer then
   emitted unchanged. 3.3.1.9 says "The indexer shall not be the same for any two
   participants in a given Metadata Section"; both were kept and the second
-  silently shadowed the first wherever an index is resolved, and a repeat is now
-  the new `TdmError::DuplicateIndex`.
+  silently shadowed the first wherever an index is resolved. Two participants
+  sharing an indexer is the same keyword written twice, so it is refused as
+  `TdmError::ConflictingKeyword`, naming the line and both values; an identical
+  repeat reports `TdmWarning::RepeatedKeyword` and yields one participant.
+- `tdm::parse_kvn_with_policy` reads a TDM under a `TdmPolicy`, returning the
+  message together with the departures from CCSDS 503.0-B-2 it forgave as
+  `TdmWarning` values. The default policy forgives nothing, so `tdm::parse_kvn`
+  is unchanged and returns no warnings. A field set to `TdmLeniency::Forgive`
+  forgives a departure that does not change what a value means: a character
+  outside printable ASCII, a keyword tables 3-2 and 3-3 mark mandatory that the
+  message omits, a line over the 254 characters 4.2.1 allows, and a data section
+  holding none of the records 3.1.3 requires. Nothing that
+  changes what the message means is forgivable under any policy, including a
+  value that does not parse, a unit contradicting table 3-5, an undefined
+  keyword carrying data, a structural error, and a `COMMENT` used as an
+  assignment key. The writer stays strict whatever the reader forgave: a
+  leniently read message either writes back unchanged or is refused naming what
+  the standard forbids, never quietly repaired. This follows the shape the IONEX
+  reader uses for its own policies and warnings.
 - **Breaking.** A TDM carries the records and keywords CCSDS 503.0-B-2 makes
   mandatory, or it is refused by name. Table 3-2 marks `CREATION_DATE` and
   `ORIGINATOR` mandatory, table 3-3 marks `TIME_SYSTEM` mandatory and

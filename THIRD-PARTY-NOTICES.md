@@ -1,9 +1,33 @@
 # Third-Party Notices
 
 sidereon is licensed under the MIT License (see LICENSE). It contains, ports,
-or reimplements algorithms from the following third-party sources. All are
-permissive licenses; their required attributions are reproduced below. No
-copyleft (GPL/LGPL/AGPL/MPL/EUPL/CDDL) code or dependencies are included.
+or reimplements algorithms from the following third-party sources, and vendors
+test data from some of them. All are permissive licenses; their required
+attributions are reproduced below. No copyleft (GPL/LGPL/AGPL/MPL/EUPL/CDDL)
+code or dependencies are included.
+
+--------------------------------------------------------------------------------
+## Orekit (Apache License 2.0) — test data
+
+Four CCSDS TDM KVN files under `crates/sidereon-core/tests/fixtures/tdm/`, named
+`orekit_*.kvn`, are copied byte for byte from Orekit's
+`src/test/resources/ccsds/tdm/kvn/`. No Orekit source code is used. Each file
+carries whitespace or a line length CCSDS 503.0-B-2 forbids, which is what the
+tests measure, so the bytes are kept as published rather than cleaned up.
+
+  OREKIT Copyright 2002-2026 CS GROUP
+
+  Licensed under the Apache License, Version 2.0 (the "License"); you may not
+  use these files except in compliance with the License. You may obtain a copy
+  of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+  WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+  License for the specific language governing permissions and limitations under
+  the License.
 
 --------------------------------------------------------------------------------
 ## RTKLIB (BSD 2-Clause)

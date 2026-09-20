@@ -466,6 +466,9 @@ pub enum TdmWarning {
     NonPrintableCharacter {
         /// One-based input line number.
         line: usize,
+        /// The line's first whitespace-delimited token, which is the keyword
+        /// the writer names for the same departure.
+        keyword: String,
         /// One-based character position within the line.
         column: usize,
         /// The offending character.
@@ -475,8 +478,21 @@ pub enum TdmWarning {
     LineTooLong {
         /// One-based input line number.
         line: usize,
+        /// The line's first whitespace-delimited token, which is the keyword
+        /// the writer names for the same departure.
+        keyword: String,
         /// The line's length in characters, excluding its terminator.
         length: usize,
+    },
+    /// A keyword appeared twice in one block carrying the same value, which
+    /// 4.2.5 a) gives one value assignment.
+    RepeatedKeyword {
+        /// One-based input line number of the repeat.
+        line: usize,
+        /// The repeated keyword.
+        keyword: String,
+        /// The section it appeared in, `header` or `metadata`.
+        section: &'static str,
     },
     /// A keyword CCSDS 503.0-B-2 marks mandatory was absent.
     MissingKeyword {
@@ -530,15 +546,28 @@ impl fmt::Display for TdmWarning {
         match self {
             Self::NonPrintableCharacter {
                 line,
+                keyword: _,
                 column,
                 character,
             } => write!(
                 f,
                 "TDM line {line} column {column} holds {character:?}, which is not printable ASCII"
             ),
-            Self::LineTooLong { line, length } => write!(
+            Self::LineTooLong {
+                line,
+                keyword: _,
+                length,
+            } => write!(
                 f,
                 "TDM line {line} is {length} characters, over the {MAX_LINE_CHARACTERS} allowed"
+            ),
+            Self::RepeatedKeyword {
+                line,
+                keyword,
+                section,
+            } => write!(
+                f,
+                "TDM {section} keyword {keyword} repeats at line {line} with the same value"
             ),
             Self::MissingKeyword {
                 keyword,
@@ -613,6 +642,16 @@ pub struct TdmWritePolicy {
     pub keyword_order: TdmLeniency,
     /// A final line with none of the terminators 4.2.11 requires.
     pub final_terminator: TdmLeniency,
+    /// A keyword written twice in one block with the same value.
+    ///
+    /// This axis has no counterpart on [`TdmPolicy`]. No file in the 53-file
+    /// corpus repeats a keyword within a block, so a reader axis would be dead;
+    /// the writer has one because it is choosing to emit the line rather than
+    /// forgiving one someone else wrote. A reader meeting the repeat takes the
+    /// message whatever the policy says, since both lines say the same thing,
+    /// and reports [`TdmWarning::RepeatedKeyword`]. A writer is choosing to
+    /// produce the line, so a conforming write does not.
+    pub repeated_keywords: TdmLeniency,
 }
 
 impl TdmWritePolicy {
@@ -629,6 +668,7 @@ impl TdmWritePolicy {
             duplicate_records: TdmLeniency::Strict,
             keyword_order: TdmLeniency::Strict,
             final_terminator: TdmLeniency::Strict,
+            repeated_keywords: TdmLeniency::Strict,
         }
     }
 
@@ -644,7 +684,36 @@ impl TdmWritePolicy {
             duplicate_records: TdmLeniency::Forgive,
             keyword_order: TdmLeniency::Forgive,
             final_terminator: TdmLeniency::Forgive,
+            repeated_keywords: TdmLeniency::Forgive,
         }
+    }
+
+    /// The reader policy this write policy mirrors.
+    ///
+    /// The writer holds a value to the rules the reader holds a file to by
+    /// running the reader's own checks over what it is about to write, which
+    /// needs the axes in the reader's vocabulary. Every field is named here
+    /// rather than copied with `..`, so an axis added to one policy and not the
+    /// other stops the build.
+    #[must_use]
+    pub const fn as_read(self) -> TdmPolicy {
+        TdmPolicy {
+            non_printable: self.non_printable,
+            missing_keywords: self.missing_keywords,
+            long_lines: self.long_lines,
+            empty_data_sections: self.empty_data_sections,
+            record_order: self.record_order,
+            duplicate_records: self.duplicate_records,
+            keyword_order: self.keyword_order,
+            final_terminator: self.final_terminator,
+        }
+    }
+
+    /// This policy with `repeated_keywords`.
+    #[must_use]
+    pub const fn with_repeated_keywords(mut self, repeated_keywords: TdmLeniency) -> Self {
+        self.repeated_keywords = repeated_keywords;
+        self
     }
 
     /// This policy with `non_printable`.
@@ -757,6 +826,13 @@ pub enum TdmDeparture {
         /// The repeated timetag.
         epoch: String,
     },
+    /// A keyword the writer emitted twice in one block with the same value.
+    RepeatedKeyword {
+        /// The repeated keyword.
+        keyword: String,
+        /// The section it was written in, `header` or `metadata`.
+        section: &'static str,
+    },
     /// A keyword is written out of the order its table fixes.
     KeywordOutOfOrder {
         /// The keyword out of place.
@@ -804,6 +880,10 @@ impl fmt::Display for TdmDeparture {
                 keyword,
                 epoch,
             } => write!(f, "TDM segment {segment} writes {keyword} at {epoch} twice"),
+            Self::RepeatedKeyword { keyword, section } => write!(
+                f,
+                "TDM {section} writes {keyword} twice with the same value"
+            ),
             Self::KeywordOutOfOrder { keyword, section } => write!(
                 f,
                 "TDM {section} writes {keyword} out of the order its table fixes"
@@ -931,21 +1011,12 @@ pub enum TdmError {
         /// The line's length in characters, excluding its terminator.
         length: usize,
     },
-    /// Two keywords in one metadata block carry the same index, which CCSDS
-    /// 503.0-B-2 3.3.1.9 forbids for participants.
-    DuplicateIndex {
-        /// The keyword family, such as `PARTICIPANT`.
-        keyword: String,
-        /// The index both carry.
-        index: u8,
-        /// The one-based segment they are in.
-        segment: usize,
-    },
     /// A tracking data record's timetag is not one of the two forms CCSDS
     /// 503.0-B-2 4.3.9 defines.
     MalformedEpoch {
-        /// One-based input line number.
-        line: usize,
+        /// One-based input line number, or `None` for a record a caller built
+        /// that no input produced.
+        line: Option<usize>,
         /// The record's keyword.
         keyword: String,
         /// The offending timetag.
@@ -984,8 +1055,9 @@ pub enum TdmError {
     },
     /// A keyword appeared before one the table for its section orders earlier.
     KeywordOutOfOrder {
-        /// One-based input line number.
-        line: usize,
+        /// One-based input line number, or `None` for a line [`encode_kvn`]
+        /// would write, which no input produced.
+        line: Option<usize>,
         /// The keyword out of place.
         keyword: String,
         /// The section it appeared in, `header` or `metadata`.
@@ -999,6 +1071,40 @@ pub enum TdmError {
         keyword: String,
         /// The participant index it names.
         index: u8,
+    },
+    /// A keyword appeared twice in one block carrying different values.
+    ///
+    /// 4.2.5 a) gives a header or metadata keyword "a single value
+    /// assignment", and 3.2.3 and 3.3.1.8 give it one place in the order its
+    /// table fixes, so it carries one value. CCSDS 503.0-B-2 3.3.1.9 similarly
+    /// forbids two participants sharing an indexer (`PARTICIPANT_n`). Choosing
+    /// between two that disagree is inventing one, which no policy forgives.
+    ConflictingKeyword {
+        /// One-based input line number of the repeat, or `None` for a
+        /// caller-built value that no input produced.
+        line: Option<usize>,
+        /// The repeated keyword.
+        keyword: String,
+        /// The section it appeared in, `header` or `metadata`.
+        section: &'static str,
+        /// The value read first.
+        first: String,
+        /// The value that disagrees with it.
+        second: String,
+    },
+    /// A keyword appeared twice in one block carrying the same value, which
+    /// 4.2.5 a) gives one value assignment.
+    ///
+    /// Raised by [`encode_kvn`] only: a reader meeting the repeat takes the
+    /// message whatever the policy says, since both lines say the same thing.
+    RepeatedKeyword {
+        /// One-based input line number, or `None` for a line [`encode_kvn`]
+        /// would write, which no input produced.
+        line: Option<usize>,
+        /// The repeated keyword.
+        keyword: String,
+        /// The section it appeared in, `header` or `metadata`.
+        section: &'static str,
     },
     /// A keyword is not one the table for its section defines: table 3-2 for a
     /// header, table 3-3 for a metadata section.
@@ -1117,21 +1223,21 @@ impl fmt::Display for TdmError {
                 keyword,
                 segment: None,
             } => write!(f, "missing TDM {keyword}"),
-            Self::DuplicateIndex {
-                keyword,
-                index,
-                segment,
-            } => write!(
-                f,
-                "TDM segment {segment} gives {keyword}_{index} more than once"
-            ),
             Self::MalformedEpoch {
-                line,
+                line: Some(line),
                 keyword,
                 text,
             } => write!(
                 f,
                 "TDM record {keyword} at line {line} has the timetag {text}, which is not a form 4.3.9 defines"
+            ),
+            Self::MalformedEpoch {
+                line: None,
+                keyword,
+                text,
+            } => write!(
+                f,
+                "TDM record {keyword} has the timetag {text}, which is not a form 4.3.9 defines"
             ),
             Self::RecordsOutOfOrder {
                 segment,
@@ -1147,13 +1253,34 @@ impl fmt::Display for TdmError {
                 epoch,
             } => write!(f, "TDM segment {segment} repeats {keyword} at {epoch}"),
             Self::KeywordOutOfOrder {
-                line,
+                line: Some(line),
                 keyword,
                 section,
             } => write!(
                 f,
                 "TDM {section} keyword {keyword} at line {line} is out of the order its table fixes"
             ),
+            Self::KeywordOutOfOrder {
+                line: None,
+                keyword,
+                section,
+            } => write!(
+                f,
+                "TDM {section} writes {keyword} out of the order its table fixes"
+            ),
+            Self::RepeatedKeyword {
+                line: Some(line),
+                keyword,
+                section,
+            } => write!(
+                f,
+                "TDM {section} keyword {keyword} repeats at line {line} with the same value"
+            ),
+            Self::RepeatedKeyword {
+                line: None,
+                keyword,
+                section,
+            } => write!(f, "TDM {section} writes {keyword} twice with the same value"),
             Self::UnterminatedFinalLine { line } => {
                 write!(f, "TDM line {line} carries no terminator")
             }
@@ -1167,6 +1294,26 @@ impl fmt::Display for TdmError {
             } => write!(
                 f,
                 "TDM segment {segment} gives {keyword} naming participant {index}, which it does not define"
+            ),
+            Self::ConflictingKeyword {
+                line: Some(line),
+                keyword,
+                section,
+                first,
+                second,
+            } => write!(
+                f,
+                "TDM {section} keyword {keyword} at line {line} repeats with {second:?} after {first:?}"
+            ),
+            Self::ConflictingKeyword {
+                line: None,
+                keyword,
+                section,
+                first,
+                second,
+            } => write!(
+                f,
+                "TDM {section} keyword {keyword} carries both {first:?} and {second:?}"
             ),
             Self::UndefinedKeyword { line, keyword, section } => write!(
                 f,
@@ -1210,6 +1357,10 @@ struct HeaderBuilder {
     /// One-based line the `CCSDS_TDM_VERS` record was read from.
     version_line: Option<usize>,
     comments: Vec<String>,
+    /// Every header assignment in the order it was read, which is what a
+    /// repeated keyword is judged against; the modeled fields below are built
+    /// from it.
+    assignments: Vec<TdmField>,
     creation_date: Option<String>,
     originator: Option<String>,
     message_id: Option<String>,
@@ -1245,18 +1396,34 @@ struct DataBuilder {
 /// at least one space after the keyword. `COMMENT=value` satisfies neither form
 /// and is refused as a malformed line.
 pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
+    parse_kvn_with_policy(text, TdmPolicy::default()).map(|(tdm, _)| tdm)
+}
+
+/// Parse a TDM in CCSDS KVN format under `policy`, with the departures from the
+/// standard it forgave.
+///
+/// [`TdmPolicy::default`] forgives nothing and this returns no warnings, which
+/// is what [`parse_kvn`] does. A field set to [`TdmLeniency::Forgive`] reads a
+/// message a strict read refuses and reports each departure as a
+/// [`TdmWarning`]. What is never forgiven, and the writer staying strict
+/// whatever was forgiven, are described on [`TdmPolicy`].
+pub fn parse_kvn_with_policy(
+    text: &str,
+    policy: TdmPolicy,
+) -> Result<(Tdm, Vec<TdmWarning>), TdmError> {
     let mut header = HeaderBuilder::default();
     let mut metadata: Option<MetadataBuilder> = None;
     let mut pending_metadata: Option<TdmMetadata> = None;
     let mut data: Option<DataBuilder> = None;
     let mut segments = Vec::new();
+    let mut warnings = Vec::new();
 
     let source_lines = tdm_lines(text);
     let past_end = source_lines.len().saturating_add(1);
 
     for (idx, raw_line) in source_lines.iter().copied().enumerate() {
         let line_no = idx + 1;
-        check_line(line_no, raw_line)?;
+        check_line(line_no, raw_line, policy, &mut warnings)?;
         let line = raw_line.trim();
         if line.is_empty() {
             continue;
@@ -1267,11 +1434,22 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                 // 4.5.2 c) puts a data-section comment "between the
                 // 'DATA_START' keyword and the first Tracking Data Record".
                 if !builder.records.is_empty() {
-                    return Err(TdmError::KeywordOutOfOrder {
-                        line: line_no,
-                        keyword: COMMENT_KEY.to_string(),
-                        section: "data",
-                    });
+                    match policy.keyword_order {
+                        TdmLeniency::Strict => {
+                            return Err(TdmError::KeywordOutOfOrder {
+                                line: Some(line_no),
+                                keyword: COMMENT_KEY.to_string(),
+                                section: "data",
+                            })
+                        }
+                        TdmLeniency::Forgive => {
+                            warnings.push(TdmWarning::KeywordOutOfOrder {
+                                line: line_no,
+                                keyword: COMMENT_KEY.to_string(),
+                                section: "data",
+                            });
+                        }
+                    }
                 }
                 let before_record = builder.records.len();
                 builder.comments.push(TdmComment {
@@ -1285,17 +1463,29 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                     "metadata",
                     &METADATA_ORDER,
                     &mut builder.highest_rank,
+                    policy,
+                    &mut warnings,
                 )?;
                 builder.comments.push(comment);
-            } else if pending_metadata.is_none() {
+            } else if pending_metadata.is_none() && segments.is_empty() {
                 check_keyword_order(
                     line_no,
                     COMMENT_KEY,
                     "header",
                     &HEADER_ORDER,
                     &mut header.highest_rank,
+                    policy,
+                    &mut warnings,
                 )?;
                 header.comments.push(comment);
+            } else if pending_metadata.is_none() {
+                // 3.1.2 puts the header once, before the first segment, so a
+                // comment after DATA_STOP belongs to no block the standard
+                // defines. It used to join the header it is not part of.
+                return Err(TdmError::Section {
+                    line: line_no,
+                    detail: "comment after a segment",
+                });
             } else {
                 return Err(TdmError::Section {
                     line: line_no,
@@ -1321,7 +1511,12 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                     line: line_no,
                     detail: "metadata stop without metadata start",
                 })?;
-                pending_metadata = Some(build_metadata(builder, segments.len().saturating_add(1))?);
+                pending_metadata = Some(build_metadata(
+                    builder,
+                    segments.len().saturating_add(1),
+                    policy,
+                    &mut warnings,
+                )?);
                 continue;
             }
             "DATA_START" => {
@@ -1347,9 +1542,19 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                 // Tracking Data Record".
                 if builder.records.is_empty() {
                     let segment = segments.len().saturating_add(1);
-                    return Err(TdmError::EmptyDataSection { segment });
+                    match policy.empty_data_sections {
+                        TdmLeniency::Strict => return Err(TdmError::EmptyDataSection { segment }),
+                        TdmLeniency::Forgive => {
+                            warnings.push(TdmWarning::EmptyDataSection { segment });
+                        }
+                    }
                 }
-                check_record_order(&builder, segments.len().saturating_add(1))?;
+                check_record_order(
+                    &builder,
+                    segments.len().saturating_add(1),
+                    policy,
+                    &mut warnings,
+                )?;
                 segments.push(TdmSegment {
                     metadata,
                     data: TdmDataSection {
@@ -1395,7 +1600,7 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                 .unwrap_or(TdmUnit::Kilometers);
             let record = parse_record(line_no, &key, &value, &range_units)?;
             let epoch = parse_epoch_key(&record.epoch).ok_or_else(|| TdmError::MalformedEpoch {
-                line: line_no,
+                line: Some(line_no),
                 keyword: record.keyword.clone(),
                 text: record.epoch.clone(),
             })?;
@@ -1417,9 +1622,19 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                 "metadata",
                 &METADATA_ORDER,
                 &mut builder.highest_rank,
+                policy,
+                &mut warnings,
+            )?;
+            check_repeated_field(
+                line_no,
+                "metadata",
+                &key,
+                &value,
+                &builder.fields,
+                &mut warnings,
             )?;
             builder.fields.push(TdmField { key, value });
-        } else if pending_metadata.is_none() {
+        } else if pending_metadata.is_none() && segments.is_empty() {
             // 3.2.3: "Only those keywords shown in table 3-2 shall be used in a
             // TDM Header."
             if !known_header_keyword(&key) {
@@ -1435,8 +1650,30 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                 "header",
                 &HEADER_ORDER,
                 &mut header.highest_rank,
+                policy,
+                &mut warnings,
             )?;
+            check_repeated_field(
+                line_no,
+                "header",
+                &key,
+                &value,
+                &header.assignments,
+                &mut warnings,
+            )?;
+            header.assignments.push(TdmField {
+                key: key.clone(),
+                value: value.clone(),
+            });
             parse_header_field(&mut header, line_no, key, value);
+        } else if pending_metadata.is_none() {
+            // 3.1.2 puts the header once, before the first segment. An
+            // assignment after DATA_STOP used to reopen it, so a keyword read
+            // after a segment joined the header it is not part of.
+            return Err(TdmError::Section {
+                line: line_no,
+                detail: "header field after a segment",
+            });
         } else {
             return Err(TdmError::Section {
                 line: line_no,
@@ -1472,8 +1709,20 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
     check_version(header.version_line, &version)?;
     // Table 3-2 marks CREATION_DATE and ORIGINATOR mandatory. An empty value is
     // already refused above, so absence is the only way either is None here.
-    require_keyword(header.creation_date.is_some(), "CREATION_DATE", None)?;
-    require_keyword(header.originator.is_some(), "ORIGINATOR", None)?;
+    require_keyword(
+        header.creation_date.is_some(),
+        "CREATION_DATE",
+        None,
+        policy,
+        &mut warnings,
+    )?;
+    require_keyword(
+        header.originator.is_some(),
+        "ORIGINATOR",
+        None,
+        policy,
+        &mut warnings,
+    )?;
     if segments.is_empty() {
         return Err(TdmError::NoSegments);
     }
@@ -1496,20 +1745,30 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
     // keyword, and reporting the undefined keyword names the wrong problem.
     // Nothing downstream turns on whether the file's last line was terminated.
     if !text.is_empty() && !text.ends_with(['\r', '\n']) {
-        return Err(TdmError::UnterminatedFinalLine {
-            line: source_lines.len(),
-        });
+        match policy.final_terminator {
+            TdmLeniency::Strict => {
+                return Err(TdmError::UnterminatedFinalLine {
+                    line: source_lines.len(),
+                })
+            }
+            TdmLeniency::Forgive => warnings.push(TdmWarning::UnterminatedFinalLine {
+                line: source_lines.len(),
+            }),
+        }
     }
 
-    Ok(Tdm {
-        version,
-        comments: header.comments,
-        creation_date: header.creation_date,
-        originator: header.originator,
-        message_id: header.message_id,
-        header_fields: header.fields,
-        segments,
-    })
+    Ok((
+        Tdm {
+            version,
+            comments: header.comments,
+            creation_date: header.creation_date,
+            originator: header.originator,
+            message_id: header.message_id,
+            header_fields: header.fields,
+            segments,
+        },
+        warnings,
+    ))
 }
 
 /// Encode a TDM to canonical CCSDS KVN text.
@@ -1523,7 +1782,25 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
 /// `COMMENT = value` reparses as a comment, so the encoding would not read back
 /// as the value it was given.
 pub fn encode_kvn(tdm: &Tdm) -> Result<String, TdmError> {
-    validate_tdm(tdm)?;
+    encode_kvn_with_policy(tdm, TdmWritePolicy::default()).map(|(text, _)| text)
+}
+
+/// Encode a TDM under `policy`, with the departures from CCSDS 503.0-B-2 it
+/// emitted.
+///
+/// [`TdmWritePolicy::default`] emits none, which is what [`encode_kvn`] does: a
+/// value that cannot be written conformingly is refused instead. A field set to
+/// [`TdmLeniency::Forgive`] lets the writer emit the matching departure and
+/// names it in the returned list, so a caller asking for a non-conforming file
+/// is told exactly what makes it one. The set mirrors what [`TdmPolicy`]
+/// forgives on the way in, so a message read leniently can be written back by
+/// asking for the same departures.
+pub fn encode_kvn_with_policy(
+    tdm: &Tdm,
+    policy: TdmWritePolicy,
+) -> Result<(String, Vec<TdmDeparture>), TdmError> {
+    let mut departures = Vec::new();
+    validate_tdm(tdm, policy, &mut departures)?;
 
     let mut lines = Vec::new();
     lines.push(format!("{VERSION_KEY} = {}", tdm.version));
@@ -1567,9 +1844,21 @@ pub fn encode_kvn(tdm: &Tdm) -> Result<String, TdmError> {
         lines.push("DATA_STOP".to_string());
     }
 
-    // 4.2.11 terminates every line, so the last one carries one too.
-    lines.push(String::new());
-    Ok(lines.join("\n"))
+    // 4.2.1 holds every line the writer built to printable ASCII and 254
+    // characters, the two rules check_line holds the reader to. A value read
+    // under a lenient policy carries both departures back out here, so the
+    // check runs over what was built rather than over what the value came from.
+    for line in &lines {
+        check_written_line(line, policy, &mut departures)?;
+    }
+
+    // 4.2.11 terminates every line, so the last one carries one too unless the
+    // policy asks for the departure a lenient reader forgives.
+    match policy.final_terminator {
+        TdmLeniency::Strict => lines.push(String::new()),
+        TdmLeniency::Forgive => departures.push(TdmDeparture::UnterminatedFinalLine),
+    }
+    Ok((lines.join("\n"), departures))
 }
 
 fn parse_header_field(header: &mut HeaderBuilder, line: usize, key: String, value: String) {
@@ -1585,7 +1874,12 @@ fn parse_header_field(header: &mut HeaderBuilder, line: usize, key: String, valu
     }
 }
 
-fn build_metadata(builder: MetadataBuilder, segment: usize) -> Result<TdmMetadata, TdmError> {
+fn build_metadata(
+    builder: MetadataBuilder,
+    segment: usize,
+    policy: TdmPolicy,
+    warnings: &mut Vec<TdmWarning>,
+) -> Result<TdmMetadata, TdmError> {
     let mut participants = Vec::new();
     let mut mode = None;
     let mut paths = Vec::new();
@@ -1601,22 +1895,17 @@ fn build_metadata(builder: MetadataBuilder, segment: usize) -> Result<TdmMetadat
         // the reader to guess which participant a measurement belongs to, which
         // changes what the file means.
         if let Some(index) = indexed_suffix_in_range(&field.key, "PARTICIPANT", 1, 5)? {
-            // 3.3.1.9: "The indexer shall not be the same for any two
-            // participants in a given Metadata Section."
-            if participants
+            // An identical repeat is reported as RepeatedKeyword; avoid
+            // producing a phantom second participant for the same index.
+            if !participants
                 .iter()
                 .any(|existing: &TdmParticipant| existing.index == index)
             {
-                return Err(TdmError::DuplicateIndex {
-                    keyword: "PARTICIPANT".to_string(),
+                participants.push(TdmParticipant {
                     index,
-                    segment,
+                    name: field.value.clone(),
                 });
             }
-            participants.push(TdmParticipant {
-                index,
-                name: field.value.clone(),
-            });
         } else if field.key == "MODE" {
             mode = empty_to_none(field.value.clone());
         } else if field.key == "PATH" || field.key.starts_with("PATH_") {
@@ -1633,8 +1922,20 @@ fn build_metadata(builder: MetadataBuilder, segment: usize) -> Result<TdmMetadat
     // Table 3-3 marks TIME_SYSTEM mandatory and PARTICIPANT_n mandatory with
     // "at least one"; 3.3.1.7 requires every mandatory item in every metadata
     // section.
-    require_keyword(time_system.is_some(), "TIME_SYSTEM", Some(segment))?;
-    require_keyword(!participants.is_empty(), "PARTICIPANT_n", Some(segment))?;
+    require_keyword(
+        time_system.is_some(),
+        "TIME_SYSTEM",
+        Some(segment),
+        policy,
+        warnings,
+    )?;
+    require_keyword(
+        !participants.is_empty(),
+        "PARTICIPANT_n",
+        Some(segment),
+        policy,
+        warnings,
+    )?;
 
     // 3.3.1.9 requires participant indices to differ, not to run consecutively,
     // so PARTICIPANT_1 beside PARTICIPANT_3 with no _2 is legal and nothing
@@ -2113,7 +2414,11 @@ fn validate_doppler_count(keyword: &str, scalar: &TdmScalar) -> Result<(), TdmEr
     Ok(())
 }
 
-fn validate_tdm(tdm: &Tdm) -> Result<(), TdmError> {
+fn validate_tdm(
+    tdm: &Tdm,
+    policy: TdmWritePolicy,
+    departures: &mut Vec<TdmDeparture>,
+) -> Result<(), TdmError> {
     if tdm.version.is_empty() {
         return Err(TdmError::MissingKeyword {
             keyword: VERSION_KEY.to_string(),
@@ -2127,54 +2432,134 @@ fn validate_tdm(tdm: &Tdm) -> Result<(), TdmError> {
             _ => tdm.originator.is_some(),
         };
         if !present {
-            return Err(TdmError::MissingKeyword {
-                keyword: keyword.to_string(),
-                segment: None,
-            });
+            emit_or_refuse(
+                policy.missing_keywords,
+                TdmError::MissingKeyword {
+                    keyword: keyword.to_string(),
+                    segment: None,
+                },
+                TdmDeparture::MissingKeyword {
+                    keyword: keyword.to_string(),
+                    segment: None,
+                },
+                departures,
+            )?;
         }
     }
     if tdm.segments.is_empty() {
         return Err(TdmError::NoSegments);
     }
+    for comment in &tdm.comments {
+        check_comment(comment)?;
+    }
     for field in &tdm.header_fields {
         check_field(field)?;
+        if !known_header_keyword(&field.key) {
+            return Err(TdmError::Unwritable {
+                keyword: field.key.clone(),
+                reason: "table 3-2 does not define it for a header",
+            });
+        }
     }
+    // The header the writer will emit, in the order it will emit it, held to
+    // the rules the reader holds a header to.
+    check_written_section(
+        "header",
+        &HEADER_ORDER,
+        &written_header_fields(tdm),
+        policy,
+        departures,
+    )?;
+
     for (index, segment) in tdm.segments.iter().enumerate() {
         let number = index.saturating_add(1);
+        for comment in &segment.metadata.comments {
+            check_comment(comment)?;
+        }
+        for comment in &segment.data.comments {
+            check_comment(&comment.text)?;
+        }
         for field in &segment.metadata.fields {
             check_field(field)?;
-        }
-        // The writer emits `fields`, so the mandatory keywords are looked for
-        // there rather than in the parsed properties beside it: that is what
-        // decides whether the encoding carries them.
-        if !writes_keyword(segment, |key| key == "TIME_SYSTEM") {
-            return Err(TdmError::MissingKeyword {
-                keyword: "TIME_SYSTEM".to_string(),
-                segment: Some(number),
-            });
-        }
-        if !writes_keyword(segment, |key| key.starts_with("PARTICIPANT_")) {
-            return Err(TdmError::MissingKeyword {
-                keyword: "PARTICIPANT_n".to_string(),
-                segment: Some(number),
-            });
-        }
-        if segment.data.records.is_empty() {
-            return Err(TdmError::EmptyDataSection { segment: number });
-        }
-        // The writer is strict whatever the reader forgave, so a section read
-        // under a lenient policy is refused here rather than written back in a
-        // form 3.4.10 and 3.4.11 forbid.
-        let mut written: HashSet<(&str, String)> = HashSet::new();
-        for record in &segment.data.records {
-            if !written.insert((record.keyword.as_str(), record.epoch.clone())) {
-                return Err(TdmError::DuplicateRecord {
-                    segment: number,
-                    keyword: record.keyword.clone(),
-                    epoch: record.epoch.clone(),
+            if !known_metadata_keyword(&field.key)? {
+                return Err(TdmError::Unwritable {
+                    keyword: field.key.clone(),
+                    reason: "table 3-3 does not define it for a metadata section",
                 });
             }
         }
+
+        // The writer holds the value to the reader's rules by running the
+        // reader's own checks over what it is about to write, so a rule cannot
+        // hold in one direction and not the other. build_metadata is the
+        // reader's: it bounds the indexed keywords, resolves every PATH
+        // against the participants the segment defines, and requires
+        // TIME_SYSTEM and PARTICIPANT_n. It reads `fields`, which is what the
+        // writer emits, rather than the parsed properties beside it.
+        let mut reader_warnings = Vec::new();
+        build_metadata(
+            MetadataBuilder {
+                highest_rank: 0,
+                comments: segment.metadata.comments.clone(),
+                fields: segment.metadata.fields.clone(),
+            },
+            number,
+            policy.as_read(),
+            &mut reader_warnings,
+        )?;
+        check_written_section(
+            "metadata",
+            &METADATA_ORDER,
+            &written_metadata_fields(segment),
+            policy,
+            departures,
+        )?;
+
+        // 4.5.2 c) puts a data-section comment before the first record, so a
+        // comment the reader kept further in is one the writer is asked to put
+        // back there.
+        for comment in &segment.data.comments {
+            if comment.before_record > 0 {
+                emit_or_refuse(
+                    policy.keyword_order,
+                    TdmError::KeywordOutOfOrder {
+                        line: None,
+                        keyword: COMMENT_KEY.to_string(),
+                        section: "data",
+                    },
+                    TdmDeparture::KeywordOutOfOrder {
+                        keyword: COMMENT_KEY.to_string(),
+                        section: "data",
+                    },
+                    departures,
+                )?;
+            }
+        }
+
+        if segment.data.records.is_empty() {
+            emit_or_refuse(
+                policy.empty_data_sections,
+                TdmError::EmptyDataSection { segment: number },
+                TdmDeparture::EmptyDataSection { segment: number },
+                departures,
+            )?;
+        }
+
+        // 4.3.9's timetags, 3.4.10's order and 3.4.11's uniqueness, checked by
+        // the reader's own check_record_order over the records to be written.
+        let mut data = DataBuilder::default();
+        for record in &segment.data.records {
+            let epoch = parse_epoch_key(&record.epoch).ok_or_else(|| TdmError::MalformedEpoch {
+                line: None,
+                keyword: record.keyword.clone(),
+                text: record.epoch.clone(),
+            })?;
+            data.epochs.push(epoch);
+            data.records.push(record.clone());
+        }
+        check_record_order(&data, number, policy.as_read(), &mut reader_warnings)?;
+        departures.extend(reader_warnings.into_iter().map(departure_for));
+
         for record in &segment.data.records {
             if !record.value.value.is_finite() {
                 return Err(TdmError::InvalidField {
@@ -2252,32 +2637,70 @@ fn tdm_lines(text: &str) -> Vec<&str> {
 /// except as indicated below for the termination of the TDM line. A TDM line
 /// must not exceed 254 ASCII characters and spaces (excluding line termination
 /// character[s])."
-fn check_line(line_no: usize, line: &str) -> Result<(), TdmError> {
+/// A forgiven line reports one warning naming its first offending character,
+/// matching what a strict read names, rather than one per character.
+fn check_line(
+    line_no: usize,
+    line: &str,
+    policy: TdmPolicy,
+    warnings: &mut Vec<TdmWarning>,
+) -> Result<(), TdmError> {
+    let mut characters = 0;
+    let mut reported = false;
     for (index, character) in line.chars().enumerate() {
-        if !matches!(character, ' '..='~') {
-            return Err(TdmError::NonPrintableCharacter {
-                line: Some(line_no),
-                keyword: line_keyword(line),
-                column: index + 1,
-                character,
-            });
+        characters = index + 1;
+        if matches!(character, ' '..='~') {
+            continue;
+        }
+        match policy.non_printable {
+            TdmLeniency::Strict => {
+                return Err(TdmError::NonPrintableCharacter {
+                    line: Some(line_no),
+                    keyword: line_keyword(line),
+                    column: index + 1,
+                    character,
+                })
+            }
+            TdmLeniency::Forgive => {
+                if !reported {
+                    reported = true;
+                    warnings.push(TdmWarning::NonPrintableCharacter {
+                        line: line_no,
+                        keyword: line_keyword(line),
+                        column: index + 1,
+                        character,
+                    });
+                }
+            }
         }
     }
-    // Every character is printable ASCII by here, so one byte is one character.
-    if line.len() > MAX_LINE_CHARACTERS {
-        return Err(TdmError::LineTooLong {
-            line: Some(line_no),
-            keyword: line_keyword(line),
-            length: line.len(),
-        });
+    // 4.2.1 counts characters, which is the count above rather than the byte
+    // length: a forgiven line can hold characters wider than one byte.
+    if characters > MAX_LINE_CHARACTERS {
+        match policy.long_lines {
+            TdmLeniency::Strict => {
+                return Err(TdmError::LineTooLong {
+                    line: Some(line_no),
+                    keyword: line_keyword(line),
+                    length: characters,
+                })
+            }
+            TdmLeniency::Forgive => warnings.push(TdmWarning::LineTooLong {
+                line: line_no,
+                keyword: line_keyword(line),
+                length: characters,
+            }),
+        }
     }
     Ok(())
 }
 
 /// A line's first whitespace-delimited token.
 ///
-/// On the way in this is whatever the line opens with, which is the keyword on
-/// a line 4.2.5 defines and the only name there is on one it does not.
+/// Every line the writer builds is `KEYWORD = value`, `COMMENT text` or a
+/// section marker, so this is the keyword. On the way in it is whatever the
+/// line opens with, which is the keyword on a line 4.2.5 defines and the only
+/// name there is on one it does not.
 fn line_keyword(line: &str) -> String {
     line.split_whitespace()
         .next()
@@ -2285,15 +2708,294 @@ fn line_keyword(line: &str) -> String {
         .to_string()
 }
 
-/// Refuse an absent mandatory keyword.
-fn require_keyword(present: bool, keyword: &str, segment: Option<usize>) -> Result<(), TdmError> {
+/// Hold a line the writer built to the two rules 4.2.1 sets for one: printable
+/// ASCII and at most 254 characters.
+///
+/// These are the two axes `TdmWritePolicy` mirrors that the value itself can
+/// carry. A tab never reaches here from a read, because 4.2.7 and 4.2.9 discard
+/// the whitespace around a keyword and a value, but a character outside
+/// printable ASCII inside a comment or a free-text value does, and so does a
+/// value long enough to put its line over the cap. Neither can be repaired
+/// without losing what the value says, so a strict write refuses and a lenient
+/// one emits the departure and names the keyword.
+fn check_written_line(
+    line: &str,
+    policy: TdmWritePolicy,
+    departures: &mut Vec<TdmDeparture>,
+) -> Result<(), TdmError> {
+    let mut characters = 0;
+    let mut reported = false;
+    for (index, character) in line.chars().enumerate() {
+        characters = index + 1;
+        if matches!(character, ' '..='~') {
+            continue;
+        }
+        if !reported {
+            reported = true;
+            emit_or_refuse(
+                policy.non_printable,
+                TdmError::NonPrintableCharacter {
+                    line: None,
+                    keyword: line_keyword(line),
+                    column: index + 1,
+                    character,
+                },
+                TdmDeparture::NonPrintableCharacter {
+                    keyword: line_keyword(line),
+                    character,
+                },
+                departures,
+            )?;
+        }
+    }
+    if characters > MAX_LINE_CHARACTERS {
+        emit_or_refuse(
+            policy.long_lines,
+            TdmError::LineTooLong {
+                line: None,
+                keyword: line_keyword(line),
+                length: characters,
+            },
+            TdmDeparture::LineTooLong {
+                keyword: line_keyword(line),
+                length: characters,
+            },
+            departures,
+        )?;
+    }
+    Ok(())
+}
+
+/// The header lines the writer will emit, keyed and in emission order.
+///
+/// A comment is carried as a `COMMENT` field so the order check sees it where
+/// 4.5.2 a) puts it; it is excepted from the one-value rule, since 4.2.5 c)
+/// excepts `COMMENT` from the KVN syntax the rule is part of.
+fn written_header_fields(tdm: &Tdm) -> Vec<TdmField> {
+    let mut fields = vec![TdmField {
+        key: VERSION_KEY.to_string(),
+        value: tdm.version.clone(),
+    }];
+    fields.extend(tdm.comments.iter().map(|text| TdmField {
+        key: COMMENT_KEY.to_string(),
+        value: text.clone(),
+    }));
+    for (key, held) in [
+        ("CREATION_DATE", &tdm.creation_date),
+        ("ORIGINATOR", &tdm.originator),
+        ("MESSAGE_ID", &tdm.message_id),
+    ] {
+        if let Some(value) = held {
+            fields.push(TdmField {
+                key: key.to_string(),
+                value: value.clone(),
+            });
+        }
+    }
+    fields.extend(tdm.header_fields.iter().cloned());
+    fields
+}
+
+/// The metadata lines the writer will emit for a segment, keyed and in
+/// emission order.
+fn written_metadata_fields(segment: &TdmSegment) -> Vec<TdmField> {
+    let mut fields: Vec<TdmField> = segment
+        .metadata
+        .comments
+        .iter()
+        .map(|text| TdmField {
+            key: COMMENT_KEY.to_string(),
+            value: text.clone(),
+        })
+        .collect();
+    fields.extend(segment.metadata.fields.iter().cloned());
+    fields
+}
+
+/// Hold a section the writer is about to emit to the two rules the reader
+/// holds the same section to: the order its table fixes, and the single value
+/// assignment 4.2.5 a) gives each keyword.
+fn check_written_section(
+    section: &'static str,
+    order: &[&str],
+    fields: &[TdmField],
+    policy: TdmWritePolicy,
+    departures: &mut Vec<TdmDeparture>,
+) -> Result<(), TdmError> {
+    let mut highest = 0;
+    for (index, field) in fields.iter().enumerate() {
+        if let Some(rank) = keyword_rank(&field.key, order) {
+            if rank < highest {
+                emit_or_refuse(
+                    policy.keyword_order,
+                    TdmError::KeywordOutOfOrder {
+                        line: None,
+                        keyword: field.key.clone(),
+                        section,
+                    },
+                    TdmDeparture::KeywordOutOfOrder {
+                        keyword: field.key.clone(),
+                        section,
+                    },
+                    departures,
+                )?;
+            } else {
+                highest = rank;
+            }
+        }
+        if field.key == COMMENT_KEY {
+            continue;
+        }
+        let Some(previous) = fields[..index].iter().find(|held| held.key == field.key) else {
+            continue;
+        };
+        if previous.value != field.value {
+            return Err(TdmError::ConflictingKeyword {
+                line: None,
+                keyword: field.key.clone(),
+                section,
+                first: previous.value.clone(),
+                second: field.value.clone(),
+            });
+        }
+        emit_or_refuse(
+            policy.repeated_keywords,
+            TdmError::RepeatedKeyword {
+                line: None,
+                keyword: field.key.clone(),
+                section,
+            },
+            TdmDeparture::RepeatedKeyword {
+                keyword: field.key.clone(),
+                section,
+            },
+            departures,
+        )?;
+    }
+    Ok(())
+}
+
+/// Refuse a keyword repeated with a different value, and report one repeated
+/// with the same value.
+///
+/// 4.2.5 a) makes a header or metadata line "a keyword, followed by an equals
+/// sign ... followed by a single value assignment", and 3.2.3 and 3.3.1.8 give
+/// each keyword one place in the order its table fixes, so a keyword carries
+/// one value. Two that disagree leave the reader to choose, and choosing is
+/// inventing a value, so it is refused under every policy. Two that agree say
+/// the same thing twice, so both are kept where they were read and the repeat
+/// is reported.
+///
+/// None of the 53 public files gathered for this audit repeats a keyword at
+/// all, with the same value or a different one, which is why the reader has no
+/// leniency axis here: there is nothing for one to forgive.
+fn check_repeated_field(
+    line: usize,
+    section: &'static str,
+    key: &str,
+    value: &str,
+    existing: &[TdmField],
+    warnings: &mut Vec<TdmWarning>,
+) -> Result<(), TdmError> {
+    let Some(previous) = existing.iter().find(|field| field.key == key) else {
+        return Ok(());
+    };
+    if previous.value != value {
+        return Err(TdmError::ConflictingKeyword {
+            line: Some(line),
+            keyword: key.to_string(),
+            section,
+            first: previous.value.clone(),
+            second: value.to_string(),
+        });
+    }
+    warnings.push(TdmWarning::RepeatedKeyword {
+        line,
+        keyword: key.to_string(),
+        section,
+    });
+    Ok(())
+}
+
+/// The departure a warning becomes on the way out.
+///
+/// The reader and the writer hold a value to the same rules, so a departure the
+/// reader forgives is one the writer can be asked to emit. This match is where
+/// that correspondence is written down; it carries no wildcard arm, so a
+/// warning added to the reader without a departure to match it stops the build.
+fn departure_for(warning: TdmWarning) -> TdmDeparture {
+    match warning {
+        TdmWarning::NonPrintableCharacter {
+            line: _,
+            keyword,
+            column: _,
+            character,
+        } => TdmDeparture::NonPrintableCharacter { keyword, character },
+        TdmWarning::LineTooLong {
+            line: _,
+            keyword,
+            length,
+        } => TdmDeparture::LineTooLong { keyword, length },
+        TdmWarning::RepeatedKeyword {
+            line: _,
+            keyword,
+            section,
+        } => TdmDeparture::RepeatedKeyword { keyword, section },
+        TdmWarning::MissingKeyword { keyword, segment } => {
+            TdmDeparture::MissingKeyword { keyword, segment }
+        }
+        TdmWarning::EmptyDataSection { segment } => TdmDeparture::EmptyDataSection { segment },
+        TdmWarning::RecordsOutOfOrder {
+            segment,
+            keyword,
+            epoch,
+        } => TdmDeparture::RecordsOutOfOrder {
+            segment,
+            keyword,
+            epoch,
+        },
+        TdmWarning::DuplicateRecord {
+            segment,
+            keyword,
+            epoch,
+        } => TdmDeparture::DuplicateRecord {
+            segment,
+            keyword,
+            epoch,
+        },
+        TdmWarning::UnterminatedFinalLine { line: _ } => TdmDeparture::UnterminatedFinalLine,
+        TdmWarning::KeywordOutOfOrder {
+            line: _,
+            keyword,
+            section,
+        } => TdmDeparture::KeywordOutOfOrder { keyword, section },
+    }
+}
+
+/// Refuse an absent mandatory keyword, or forgive it under `policy`.
+fn require_keyword(
+    present: bool,
+    keyword: &str,
+    segment: Option<usize>,
+    policy: TdmPolicy,
+    warnings: &mut Vec<TdmWarning>,
+) -> Result<(), TdmError> {
     if present {
         return Ok(());
     }
-    Err(TdmError::MissingKeyword {
-        keyword: keyword.to_string(),
-        segment,
-    })
+    match policy.missing_keywords {
+        TdmLeniency::Strict => Err(TdmError::MissingKeyword {
+            keyword: keyword.to_string(),
+            segment,
+        }),
+        TdmLeniency::Forgive => {
+            warnings.push(TdmWarning::MissingKeyword {
+                keyword: keyword.to_string(),
+                segment,
+            });
+            Ok(())
+        }
+    }
 }
 
 fn parse_assignment(line: &str) -> Option<(String, String)> {
@@ -2356,16 +3058,51 @@ fn check_field(field: &TdmField) -> Result<(), TdmError> {
         });
     }
 
+    // What follows is the set no reader can take back, whatever policy wrote
+    // it: each gives a line that reparses as a different value, which is the
+    // defect this module exists to close. parse_kvn cannot produce any of
+    // them, so only a caller building a value directly reaches here.
+    let unwritable = if field.key.is_empty() {
+        Some("the keyword is empty")
+    } else if field.key.contains('=') {
+        Some("an equals sign in the keyword would split the line elsewhere")
+    } else if field.key.trim() != field.key {
+        Some("whitespace around the keyword, which 4.2.7 drops on the way back")
+    } else if field.value.trim() != field.value {
+        Some("whitespace around the value, which 4.2.8 and 4.2.9 drop on the way back")
+    } else if field.key.contains(['\r', '\n']) || field.value.contains(['\r', '\n']) {
+        Some("a line terminator, which would write a second line")
+    } else {
+        None
+    };
+    if let Some(reason) = unwritable {
+        return Err(TdmError::Unwritable {
+            keyword: field.key.clone(),
+            reason,
+        });
+    }
+
     Ok(())
 }
 
-/// Report whether a segment's metadata writes a key the predicate accepts.
-fn writes_keyword(segment: &TdmSegment, accepts: impl Fn(&str) -> bool) -> bool {
-    segment
-        .metadata
-        .fields
-        .iter()
-        .any(|field| accepts(field.key.trim()))
+/// Emit a departure the policy allows, or refuse the value.
+///
+/// A refusal that no policy forgives — [`TdmError::ConflictingKeyword`] is the
+/// case — does not go through `emit_or_refuse` and cannot, because there is no
+/// departure to emit.
+fn emit_or_refuse(
+    leniency: TdmLeniency,
+    error: TdmError,
+    departure: TdmDeparture,
+    departures: &mut Vec<TdmDeparture>,
+) -> Result<(), TdmError> {
+    match leniency {
+        TdmLeniency::Strict => Err(error),
+        TdmLeniency::Forgive => {
+            departures.push(departure);
+            Ok(())
+        }
+    }
 }
 
 /// A record's timetag reduced to something two records can be compared by.
@@ -2493,28 +3230,53 @@ fn parse_epoch_key(text: &str) -> Option<EpochKey> {
 /// its own timetag, so reading them out of order changes no value. Figure E-17
 /// needs the first of these, giving `RCS` twice at `2011-05-11T10:26:33.7008`
 /// with different values, which looks like a typo for its neighbour's timetag.
-fn check_record_order(builder: &DataBuilder, segment: usize) -> Result<(), TdmError> {
+fn check_record_order(
+    builder: &DataBuilder,
+    segment: usize,
+    policy: TdmPolicy,
+    warnings: &mut Vec<TdmWarning>,
+) -> Result<(), TdmError> {
     let mut seen: HashSet<(&str, i64, u64)> = HashSet::new();
     let mut latest: HashMap<&str, EpochKey> = HashMap::new();
 
     for (record, epoch) in builder.records.iter().zip(&builder.epochs) {
         let keyword = record.keyword.as_str();
         if !seen.insert((keyword, epoch.day, epoch.second_of_day.to_bits())) {
-            return Err(TdmError::DuplicateRecord {
-                segment,
-                keyword: record.keyword.clone(),
-                epoch: record.epoch.clone(),
-            });
+            match policy.duplicate_records {
+                TdmLeniency::Strict => {
+                    return Err(TdmError::DuplicateRecord {
+                        segment,
+                        keyword: record.keyword.clone(),
+                        epoch: record.epoch.clone(),
+                    })
+                }
+                TdmLeniency::Forgive => warnings.push(TdmWarning::DuplicateRecord {
+                    segment,
+                    keyword: record.keyword.clone(),
+                    epoch: record.epoch.clone(),
+                }),
+            }
         }
 
         match latest.get_mut(keyword) {
             Some(previous) => {
                 if epoch < previous {
-                    return Err(TdmError::RecordsOutOfOrder {
-                        segment,
-                        keyword: record.keyword.clone(),
-                        epoch: record.epoch.clone(),
-                    });
+                    match policy.record_order {
+                        TdmLeniency::Strict => {
+                            return Err(TdmError::RecordsOutOfOrder {
+                                segment,
+                                keyword: record.keyword.clone(),
+                                epoch: record.epoch.clone(),
+                            })
+                        }
+                        TdmLeniency::Forgive => {
+                            warnings.push(TdmWarning::RecordsOutOfOrder {
+                                segment,
+                                keyword: record.keyword.clone(),
+                                epoch: record.epoch.clone(),
+                            });
+                        }
+                    }
                 } else {
                     *previous = *epoch;
                 }
@@ -2543,17 +3305,20 @@ fn keyword_rank(keyword: &str, order: &[&str]) -> Option<usize> {
     })
 }
 
-/// Check a keyword against the order its table fixes.
+/// Check a keyword against the order its table fixes, or forgive it.
 ///
 /// 3.2.3: "The order of occurrence of the mandatory and optional KVN
 /// assignments shall be fixed as shown in table 3-2", and 3.3.1.8 says the same
-/// of table 3-3.
+/// of table 3-3. Order changes no value, so it is forgivable; each keyword
+/// carries its own meaning wherever it sits.
 fn check_keyword_order(
     line: usize,
     keyword: &str,
     section: &'static str,
     order: &[&str],
     highest: &mut usize,
+    policy: TdmPolicy,
+    warnings: &mut Vec<TdmWarning>,
 ) -> Result<(), TdmError> {
     let Some(rank) = keyword_rank(keyword, order) else {
         return Ok(());
@@ -2562,11 +3327,21 @@ fn check_keyword_order(
         *highest = rank;
         return Ok(());
     }
-    Err(TdmError::KeywordOutOfOrder {
-        line,
-        keyword: keyword.to_string(),
-        section,
-    })
+    match policy.keyword_order {
+        TdmLeniency::Strict => Err(TdmError::KeywordOutOfOrder {
+            line: Some(line),
+            keyword: keyword.to_string(),
+            section,
+        }),
+        TdmLeniency::Forgive => {
+            warnings.push(TdmWarning::KeywordOutOfOrder {
+                line,
+                keyword: keyword.to_string(),
+                section,
+            });
+            Ok(())
+        }
+    }
 }
 
 /// Report whether `key` is a keyword 4.2.5 c) excepts from the KVN syntax.
@@ -2650,6 +3425,30 @@ fn known_metadata_keyword(key: &str) -> Result<bool, TdmError> {
             | "CORRECTION_ABERRATION_YEARLY"
             | "CORRECTION_ABERRATION_DIURNAL"
     ))
+}
+
+/// Refuse a comment whose text the KVN form cannot carry.
+///
+/// 4.5.3 takes "the remainder of the line" as the comment value after the
+/// keyword and its space, and 4.2.9 drops whitespace before the end of a line,
+/// so text padded at either end does not read back as itself. A newline would
+/// write a second line, which reparses as a fabricated field or a malformed
+/// line rather than as part of this comment.
+fn check_comment(text: &str) -> Result<(), TdmError> {
+    let reason = if text.trim() != text {
+        Some("whitespace around the text, which 4.2.9 drops on the way back")
+    } else if text.contains(['\r', '\n']) {
+        Some("a line terminator, which would write a second line")
+    } else {
+        None
+    };
+    match reason {
+        Some(reason) => Err(TdmError::Unwritable {
+            keyword: COMMENT_KEY.to_string(),
+            reason,
+        }),
+        None => Ok(()),
+    }
 }
 
 /// Check a `CCSDS_TDM_VERS` value is the `x.y` form CCSDS 503.0-B-2 3.2.5 sets.
@@ -3355,7 +4154,7 @@ DATA_STOP\n";
             assert_eq!(
                 parse_kvn(&text),
                 Err(TdmError::MalformedEpoch {
-                    line: 9,
+                    line: Some(9),
                     keyword: "RANGE".to_string(),
                     text: bad.to_string(),
                 }),
@@ -3377,7 +4176,7 @@ DATA_STOP\n";
     }
 
     #[test]
-    fn records_out_of_order_or_repeated_are_refused() {
+    fn records_out_of_order_or_repeated_follow_the_policy() {
         // 3.4.10: "the data for any given keyword shall be in chronological
         // order". 3.4.11: "Each keyword/timetag combination must be unique".
         let backwards = records("RANGE = 2005-159T17:41:01 1.0\nRANGE = 2005-159T17:41:00 2.0");
@@ -3389,10 +4188,45 @@ DATA_STOP\n";
                 epoch: "2005-159T17:41:00".to_string(),
             })
         );
+        let (tdm, warnings) = parse_kvn_with_policy(
+            &backwards,
+            TdmPolicy::strict().with_record_order(TdmLeniency::Forgive),
+        )
+        .expect("a forgiven order reads");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(tdm.segments[0].data.records.len(), 2);
 
         let repeated = records("RANGE = 2005-159T17:41:00 1.0\nRANGE = 2005-159T17:41:00 2.0");
         assert_eq!(
             parse_kvn(&repeated),
+            Err(TdmError::DuplicateRecord {
+                segment: 1,
+                keyword: "RANGE".to_string(),
+                epoch: "2005-159T17:41:00".to_string(),
+            })
+        );
+        let (tdm, warnings) = parse_kvn_with_policy(
+            &repeated,
+            TdmPolicy::strict().with_duplicate_records(TdmLeniency::Forgive),
+        )
+        .expect("a forgiven repeat reads");
+        assert_eq!(
+            warnings,
+            vec![TdmWarning::DuplicateRecord {
+                segment: 1,
+                keyword: "RANGE".to_string(),
+                epoch: "2005-159T17:41:00".to_string(),
+            }]
+        );
+        // Both records are kept, in the order the file gave them: a data
+        // section is a sequence, so nothing has to be chosen between them.
+        assert_eq!(tdm.segments[0].data.records.len(), 2);
+        assert_eq!(tdm.segments[0].data.records[0].value.text, "1.0");
+        assert_eq!(tdm.segments[0].data.records[1].value.text, "2.0");
+
+        // The writer stays strict whatever the reader forgave.
+        assert_eq!(
+            encode_kvn(&tdm),
             Err(TdmError::DuplicateRecord {
                 segment: 1,
                 keyword: "RANGE".to_string(),
@@ -3542,16 +4376,134 @@ DATA_STOP\n";
     }
 
     #[test]
-    fn a_final_line_with_no_terminator_is_refused() {
-        // 4.2.11 terminates every TDM line, the last one included.
+    fn the_refused_states_read_back_as_something_other_than_they_were() {
+        // Why each state below is refused, shown on the line the writer would
+        // have emitted rather than asserted as a rule: parse_assignment takes
+        // that line back as a different key and value.
+        for (key, value, reads_back_as) in [
+            ("A=B", "x", ("A", "B = x")),
+            (" A", "x", ("A", "x")),
+            ("A", "x ", ("A", "x")),
+        ] {
+            let line = format!("{key} = {value}");
+            let (read_key, read_value) =
+                parse_assignment(line.trim()).expect("the emitted line parses");
+            assert_eq!(
+                (read_key.as_str(), read_value.as_str()),
+                reads_back_as,
+                "{line:?}"
+            );
+            assert_ne!(
+                (read_key.as_str(), read_value.as_str()),
+                (key, value),
+                "{line:?} must not read back as the field it came from"
+            );
+        }
+    }
+
+    #[test]
+    fn a_value_the_kvn_form_cannot_carry_is_refused_rather_than_written() {
+        // States parse_kvn cannot produce but a caller can build directly.
+        let base = parse_kvn(CONFORMING).unwrap();
+        for (key, value, fragment) in [
+            ("", "x", "empty"),
+            ("A=B", "x", "equals sign"),
+            (" TIME_SYSTEM", "UTC", "around the keyword"),
+            ("TIME_SYSTEM ", "UTC", "around the keyword"),
+            ("TIME_SYSTEM", " UTC", "around the value"),
+            ("TIME_SYSTEM", "UTC ", "around the value"),
+            ("TIME\nSYSTEM", "UTC", "line terminator"),
+            ("TIME_SYSTEM", "U\nTC", "line terminator"),
+        ] {
+            let mut tdm = base.clone();
+            tdm.segments[0].metadata.fields.push(TdmField {
+                key: key.to_string(),
+                value: value.to_string(),
+            });
+            match encode_kvn(&tdm) {
+                Err(TdmError::Unwritable { reason, .. }) => assert!(
+                    reason.contains(fragment),
+                    "{key:?} = {value:?} refused for {reason:?}, wanted {fragment:?}"
+                ),
+                other => panic!("{key:?} = {value:?} must be refused, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_comment_the_kvn_form_cannot_carry_is_refused() {
+        let base = parse_kvn(CONFORMING).unwrap();
+        for (text, fragment) in [
+            (" padded", "around the text"),
+            ("padded ", "around the text"),
+            ("two\nlines", "line terminator"),
+        ] {
+            let mut tdm = base.clone();
+            tdm.comments.push(text.to_string());
+            match encode_kvn(&tdm) {
+                Err(TdmError::Unwritable { keyword, reason }) => {
+                    assert_eq!(keyword, COMMENT_KEY);
+                    assert!(reason.contains(fragment), "{text:?}: {reason}");
+                }
+                other => panic!("{text:?} must be refused, got {other:?}"),
+            }
+        }
+
+        // A comment the form carries writes and reads back as itself.
+        let mut tdm = base;
+        tdm.comments.push("plain text".to_string());
+        let encoded = encode_kvn(&tdm).expect("a plain comment writes");
+        assert_eq!(parse_kvn(&encoded).unwrap().comments, tdm.comments);
+    }
+
+    #[test]
+    fn the_writer_checks_keyword_membership_as_the_reader_does() {
+        // The mandatory-keyword check looked for a PARTICIPANT_ prefix, so a
+        // caller-built PARTICIPANT_9 satisfied it and was written out.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].metadata.fields.push(TdmField {
+            key: "PARTICIPANT_9".to_string(),
+            value: "DSS-99".to_string(),
+        });
+        assert!(matches!(
+            encode_kvn(&tdm),
+            Err(TdmError::InvalidField {
+                kind: TdmInputErrorKind::InvalidIndex,
+                ..
+            })
+        ));
+
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.header_fields.push(TdmField {
+            key: "NOT_A_HEADER_KEYWORD".to_string(),
+            value: "x".to_string(),
+        });
+        assert!(matches!(encode_kvn(&tdm), Err(TdmError::Unwritable { .. })));
+    }
+
+    #[test]
+    fn a_final_line_with_no_terminator_follows_the_policy() {
+        // 4.2.11 terminates every TDM line, the last one included. Thirteen
+        // of the 53 public files gathered for this audit end without one, and
+        // a file's last record reads the same either way, so it is forgivable.
         let unterminated = CONFORMING.trim_end_matches('\n');
         assert_eq!(
             parse_kvn(unterminated),
             Err(TdmError::UnterminatedFinalLine { line: 10 })
         );
 
-        // The writer terminates its last line, and what it writes reads back.
-        let tdm = parse_kvn(CONFORMING).expect("a terminated message reads");
+        let (tdm, warnings) = parse_kvn_with_policy(
+            unterminated,
+            TdmPolicy::strict().with_final_terminator(TdmLeniency::Forgive),
+        )
+        .expect("a forgiven final line reads");
+        assert_eq!(
+            warnings,
+            vec![TdmWarning::UnterminatedFinalLine { line: 10 }]
+        );
+
+        // The writer terminates its last line, so a forgiven message writes
+        // back conforming rather than unterminated as it arrived.
         let encoded = encode_kvn(&tdm).expect("the message writes");
         assert!(encoded.ends_with('\n'));
         assert_eq!(parse_kvn(&encoded).unwrap(), tdm);
@@ -3620,15 +4572,52 @@ DATA_STOP\n";
         assert_eq!(
             parse_kvn(&late),
             Err(TdmError::KeywordOutOfOrder {
-                line: 10,
+                line: Some(10),
                 keyword: COMMENT_KEY.to_string(),
                 section: "data",
             })
         );
+
+        // Forgiven, it is read where it sits and written back there. Nothing
+        // moves: the message round-trips to the bytes it came from, rather than
+        // returning with its comments gathered to the top of the block.
+        let (tdm, warnings) = parse_kvn_with_policy(
+            &late,
+            TdmPolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("a forgiven comment reads");
+        assert_eq!(
+            warnings,
+            vec![TdmWarning::KeywordOutOfOrder {
+                line: 10,
+                keyword: COMMENT_KEY.to_string(),
+                section: "data",
+            }]
+        );
+        assert_eq!(
+            tdm.segments[0].data.comments,
+            vec![TdmComment {
+                text: "after the first record".to_string(),
+                before_record: 1,
+            }]
+        );
+        let (encoded, departures) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("the message writes under a forgiving policy");
+        assert_eq!(
+            departures,
+            vec![TdmDeparture::KeywordOutOfOrder {
+                keyword: COMMENT_KEY.to_string(),
+                section: "data",
+            }]
+        );
+        assert_eq!(encoded, late);
     }
 
     #[test]
-    fn a_keyword_out_of_the_order_its_table_fixes_is_refused() {
+    fn a_keyword_out_of_the_order_its_table_fixes_follows_the_policy() {
         // 3.2.3: "The order of occurrence of the mandatory and optional KVN
         // assignments shall be fixed as shown in table 3-2", which puts COMMENT
         // between CCSDS_TDM_VERS and CREATION_DATE, as 4.5.2 a) also says.
@@ -3639,10 +4628,28 @@ DATA_STOP\n";
         assert_eq!(
             parse_kvn(&late_comment),
             Err(TdmError::KeywordOutOfOrder {
-                line: 4,
+                line: Some(4),
                 keyword: COMMENT_KEY.to_string(),
                 section: "header",
             })
+        );
+        let (tdm, warnings) = parse_kvn_with_policy(
+            &late_comment,
+            TdmPolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("a forgiven order reads");
+        assert_eq!(
+            warnings,
+            vec![TdmWarning::KeywordOutOfOrder {
+                line: 4,
+                keyword: COMMENT_KEY.to_string(),
+                section: "header",
+            }]
+        );
+        // Forgiving the order keeps the comment; only its position was wrong.
+        assert_eq!(
+            tdm.comments,
+            vec!["written after the originator".to_string()]
         );
 
         // 3.3.1.8 fixes the metadata order the same way, and table 3-3 puts
@@ -3654,7 +4661,7 @@ DATA_STOP\n";
         assert_eq!(
             parse_kvn(&swapped),
             Err(TdmError::KeywordOutOfOrder {
-                line: 6,
+                line: Some(6),
                 keyword: "TIME_SYSTEM".to_string(),
                 section: "metadata",
             })
@@ -3694,6 +4701,13 @@ DATA_STOP\n";
             })
         );
 
+        // Refused under every policy: picking which participant was meant
+        // would be inventing one.
+        assert!(matches!(
+            parse_kvn_with_policy(&dangling, TdmPolicy::lenient()).map(|(tdm, _)| tdm),
+            Err(TdmError::UndefinedParticipant { .. })
+        ));
+
         // A path across a gap resolves when both ends are defined.
         let over_gap = CONFORMING.replace(
             "PARTICIPANT_1 = DSS-25",
@@ -3706,18 +4720,40 @@ DATA_STOP\n";
     fn two_participants_sharing_an_index_are_refused() {
         // 3.3.1.9: "The indexer shall not be the same for any two participants
         // in a given Metadata Section." Both were kept, and the second silently
-        // shadowed the first everywhere an index is resolved.
+        // shadowed the first everywhere an index is resolved. Two participants
+        // sharing an index means PARTICIPANT_1 twice with different values, so
+        // it is refused as a conflicting keyword naming the line and both values.
         let text = CONFORMING.replace(
             "PARTICIPANT_1 = DSS-25",
             "PARTICIPANT_1 = DSS-25\nPARTICIPANT_1 = DSS-34",
         );
         assert_eq!(
             parse_kvn(&text),
-            Err(TdmError::DuplicateIndex {
-                keyword: "PARTICIPANT".to_string(),
-                index: 1,
-                segment: 1,
+            Err(TdmError::ConflictingKeyword {
+                line: Some(7),
+                keyword: "PARTICIPANT_1".to_string(),
+                section: "metadata",
+                first: "DSS-25".to_string(),
+                second: "DSS-34".to_string(),
             })
+        );
+
+        // An identical repeat of a participant keyword does not produce a
+        // phantom second participant downstream.
+        let identical = CONFORMING.replace(
+            "PARTICIPANT_1 = DSS-25",
+            "PARTICIPANT_1 = DSS-25\nPARTICIPANT_1 = DSS-25",
+        );
+        let (tdm, warnings) = parse_kvn_with_policy(&identical, TdmPolicy::strict())
+            .expect("an identical repeat reads under strict policy");
+        assert_eq!(tdm.segments[0].metadata.participants.len(), 1);
+        assert_eq!(
+            warnings,
+            vec![TdmWarning::RepeatedKeyword {
+                line: 7,
+                keyword: "PARTICIPANT_1".to_string(),
+                section: "metadata",
+            }]
         );
 
         // Two different indices are what the standard expects.
@@ -3727,6 +4763,163 @@ DATA_STOP\n";
         );
         let tdm = parse_kvn(&text).expect("two indices parse");
         assert_eq!(tdm.segments[0].metadata.participants.len(), 2);
+    }
+
+    #[test]
+    fn a_forgiven_departure_is_read_and_reported() {
+        // Each forgivable departure twice: the strict read refuses it by name,
+        // the lenient read takes the message and reports one warning.
+        let tab = CONFORMING.replace("TIME_SYSTEM = UTC", "\tTIME_SYSTEM = UTC");
+        assert_eq!(
+            parse_kvn(&tab),
+            Err(TdmError::NonPrintableCharacter {
+                line: Some(5),
+                keyword: "TIME_SYSTEM".to_string(),
+                column: 1,
+                character: '\t',
+            })
+        );
+        let (tdm, warnings) = parse_kvn_with_policy(
+            &tab,
+            TdmPolicy::default().with_non_printable(TdmLeniency::Forgive),
+        )
+        .expect("a forgiven tab reads");
+        assert_eq!(
+            warnings,
+            vec![TdmWarning::NonPrintableCharacter {
+                line: 5,
+                keyword: "TIME_SYSTEM".to_string(),
+                column: 1,
+                character: '\t',
+            }]
+        );
+        assert_eq!(tdm.segments[0].metadata.time_system.as_deref(), Some("UTC"));
+
+        let missing = CONFORMING.replace("ORIGINATOR = NASA\n", "");
+        assert_eq!(
+            parse_kvn(&missing),
+            Err(TdmError::MissingKeyword {
+                keyword: "ORIGINATOR".to_string(),
+                segment: None,
+            })
+        );
+        let (tdm, warnings) = parse_kvn_with_policy(
+            &missing,
+            TdmPolicy::default().with_missing_keywords(TdmLeniency::Forgive),
+        )
+        .expect("a forgiven absent ORIGINATOR reads");
+        assert_eq!(
+            warnings,
+            vec![TdmWarning::MissingKeyword {
+                keyword: "ORIGINATOR".to_string(),
+                segment: None,
+            }]
+        );
+        assert_eq!(tdm.originator, None);
+
+        let long_value = "A".repeat(MAX_LINE_CHARACTERS);
+        let long = CONFORMING.replace("TIME_SYSTEM = UTC", &format!("TIME_SYSTEM = {long_value}"));
+        assert_eq!(
+            parse_kvn(&long),
+            Err(TdmError::LineTooLong {
+                line: Some(5),
+                keyword: "TIME_SYSTEM".to_string(),
+                length: "TIME_SYSTEM = ".len() + MAX_LINE_CHARACTERS,
+            })
+        );
+        let (_, warnings) = parse_kvn_with_policy(
+            &long,
+            TdmPolicy::default().with_long_lines(TdmLeniency::Forgive),
+        )
+        .expect("a forgiven long line reads");
+        assert_eq!(
+            warnings,
+            vec![TdmWarning::LineTooLong {
+                line: 5,
+                keyword: "TIME_SYSTEM".to_string(),
+                length: "TIME_SYSTEM = ".len() + MAX_LINE_CHARACTERS,
+            }]
+        );
+    }
+
+    #[test]
+    fn an_empty_data_section_is_forgivable_and_still_unwritable() {
+        // 3.1.3 gives a data section "a minimum of one Tracking Data Record".
+        // Reading on invents nothing: the segment carries no measurements, and
+        // a caller sees that in the records it gets. The fuzz payload that
+        // started this work held six such segments.
+        let empty = CONFORMING.replace("RANGE = 2005-159T17:41:00 1.0\n", "");
+        assert_eq!(
+            parse_kvn(&empty),
+            Err(TdmError::EmptyDataSection { segment: 1 })
+        );
+
+        let (tdm, warnings) = parse_kvn_with_policy(
+            &empty,
+            TdmPolicy::default().with_empty_data_sections(TdmLeniency::Forgive),
+        )
+        .expect("a forgiven empty data section reads");
+        assert_eq!(warnings, vec![TdmWarning::EmptyDataSection { segment: 1 }]);
+        assert_eq!(tdm.segments.len(), 1);
+        assert!(tdm.segments[0].data.records.is_empty());
+
+        // The writer stays strict, so the forgiven message is refused by name
+        // rather than written back missing what 3.1.3 requires.
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::EmptyDataSection { segment: 1 })
+        );
+    }
+
+    #[test]
+    fn a_leniently_read_message_writes_unchanged_or_is_refused_by_name() {
+        // The writer is strict whatever the reader forgave. A forgiven message
+        // either writes back as it was read, or is refused naming what the
+        // standard forbids; it is never quietly repaired.
+        let missing = CONFORMING.replace("ORIGINATOR = NASA\n", "");
+        let (tdm, _) = parse_kvn_with_policy(
+            &missing,
+            TdmPolicy::default().with_missing_keywords(TdmLeniency::Forgive),
+        )
+        .unwrap();
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::MissingKeyword {
+                keyword: "ORIGINATOR".to_string(),
+                segment: None,
+            })
+        );
+
+        // A forgiven tab here is whitespace before the keyword, which 4.2.7
+        // makes insignificant, so this message does write back conforming.
+        let tab = CONFORMING.replace("TIME_SYSTEM = UTC", "\tTIME_SYSTEM = UTC");
+        let (tdm, _) = parse_kvn_with_policy(
+            &tab,
+            TdmPolicy::default().with_non_printable(TdmLeniency::Forgive),
+        )
+        .unwrap();
+        let encoded = encode_kvn(&tdm).expect("insignificant whitespace leaves a writable value");
+        assert_eq!(parse_kvn(&encoded).unwrap(), tdm);
+    }
+
+    #[test]
+    fn the_default_policy_forgives_nothing() {
+        assert_eq!(TdmPolicy::default().non_printable, TdmLeniency::Strict);
+        assert_eq!(TdmPolicy::default().missing_keywords, TdmLeniency::Strict);
+        assert_eq!(TdmPolicy::default().long_lines, TdmLeniency::Strict);
+        assert_eq!(
+            TdmPolicy::default().empty_data_sections,
+            TdmLeniency::Strict
+        );
+        assert_eq!(TdmPolicy::default().record_order, TdmLeniency::Strict);
+        assert_eq!(TdmPolicy::default().duplicate_records, TdmLeniency::Strict);
+        // The constant form and the derived default agree.
+        assert_eq!(TdmPolicy::default(), TdmPolicy::strict());
+
+        let (tdm, warnings) =
+            parse_kvn_with_policy(CONFORMING, TdmPolicy::default()).expect("conforming parses");
+        assert!(warnings.is_empty());
+        assert_eq!(tdm, parse_kvn(CONFORMING).unwrap());
     }
 
     #[test]
@@ -3741,6 +4934,323 @@ DATA_STOP\n";
             Err(TdmError::EmptyValue {
                 line: None,
                 keyword: "RANGE_MODE".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn writer_mirror_refuses_or_forgives_keyword_order() {
+        // Tables 3-2 and 3-3 fix the order of occurrence of KVN assignments.
+        // Reversing metadata fields puts PARTICIPANT_1 before TIME_SYSTEM.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].metadata.fields.reverse();
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::KeywordOutOfOrder {
+                line: None,
+                keyword: "TIME_SYSTEM".to_string(),
+                section: "metadata",
+            })
+        );
+        let (encoded, departures) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("keyword order is forgivable on write");
+        assert_eq!(
+            departures,
+            vec![TdmDeparture::KeywordOutOfOrder {
+                keyword: "TIME_SYSTEM".to_string(),
+                section: "metadata",
+            }]
+        );
+        assert!(encoded.contains("PARTICIPANT_1 = DSS-25\nTIME_SYSTEM = UTC"));
+    }
+
+    #[test]
+    fn writer_mirror_refuses_or_forgives_record_chronological_order() {
+        // CCSDS 503.0-B-2 3.4.10 requires records to be in chronological order.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        let mut earlier = tdm.segments[0].data.records[0].clone();
+        earlier.epoch = "2005-159T17:40:00".to_string();
+        tdm.segments[0].data.records.push(earlier);
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::RecordsOutOfOrder {
+                segment: 1,
+                keyword: "RANGE".to_string(),
+                epoch: "2005-159T17:40:00".to_string(),
+            })
+        );
+        let (encoded, departures) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_record_order(TdmLeniency::Forgive),
+        )
+        .expect("record chronological order is forgivable on write");
+        assert_eq!(
+            departures,
+            vec![TdmDeparture::RecordsOutOfOrder {
+                segment: 1,
+                keyword: "RANGE".to_string(),
+                epoch: "2005-159T17:40:00".to_string(),
+            }]
+        );
+        assert!(encoded.contains("2005-159T17:40:00"));
+    }
+
+    #[test]
+    fn writer_mirror_refuses_or_forgives_duplicate_record() {
+        // CCSDS 503.0-B-2 3.4.11 forbids duplicate tracking data records.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        let duplicate = tdm.segments[0].data.records[0].clone();
+        tdm.segments[0].data.records.push(duplicate);
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::DuplicateRecord {
+                segment: 1,
+                keyword: "RANGE".to_string(),
+                epoch: "2005-159T17:41:00".to_string(),
+            })
+        );
+        let (encoded, departures) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_duplicate_records(TdmLeniency::Forgive),
+        )
+        .expect("duplicate record is forgivable on write");
+        assert_eq!(
+            departures,
+            vec![TdmDeparture::DuplicateRecord {
+                segment: 1,
+                keyword: "RANGE".to_string(),
+                epoch: "2005-159T17:41:00".to_string(),
+            }]
+        );
+        assert!(encoded.contains("2005-159T17:41:00"));
+    }
+
+    #[test]
+    fn writer_mirror_refuses_path_naming_undefined_participant_under_all_policies() {
+        // A PATH naming a participant index the segment does not define leaves
+        // the measurements belonging to nobody, which no policy forgives.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].metadata.fields.push(TdmField {
+            key: "PATH".to_string(),
+            value: "1,2".to_string(),
+        });
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::UndefinedParticipant {
+                segment: 1,
+                keyword: "PATH".to_string(),
+                index: 2,
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::lenient()),
+            Err(TdmError::UndefinedParticipant {
+                segment: 1,
+                keyword: "PATH".to_string(),
+                index: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn writer_mirror_refuses_indexed_keyword_outside_range_under_all_policies() {
+        // Table 3-3 indexes PARTICIPANT_n with n = {1,2,3,4,5}. Indices outside
+        // that range are refused under all policies.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].metadata.fields.push(TdmField {
+            key: "PARTICIPANT_6".to_string(),
+            value: "DSS-65".to_string(),
+        });
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::InvalidField {
+                keyword: "PARTICIPANT_6".to_string(),
+                kind: TdmInputErrorKind::InvalidIndex,
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::lenient()),
+            Err(TdmError::InvalidField {
+                keyword: "PARTICIPANT_6".to_string(),
+                kind: TdmInputErrorKind::InvalidIndex,
+            })
+        );
+    }
+
+    #[test]
+    fn writer_mirror_refuses_or_forgives_missing_mandatory_keyword() {
+        // Table 3-3 marks TIME_SYSTEM and PARTICIPANT_n mandatory.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0]
+            .metadata
+            .fields
+            .retain(|field| field.key != "TIME_SYSTEM");
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::MissingKeyword {
+                keyword: "TIME_SYSTEM".to_string(),
+                segment: Some(1),
+            })
+        );
+        let (encoded, departures) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_missing_keywords(TdmLeniency::Forgive),
+        )
+        .expect("missing mandatory keyword is forgivable on write");
+        assert_eq!(
+            departures,
+            vec![TdmDeparture::MissingKeyword {
+                keyword: "TIME_SYSTEM".to_string(),
+                segment: Some(1),
+            }]
+        );
+        assert!(!encoded.contains("TIME_SYSTEM"));
+
+        let mut tdm_no_part = parse_kvn(CONFORMING).unwrap();
+        tdm_no_part.segments[0]
+            .metadata
+            .fields
+            .retain(|field| !field.key.starts_with("PARTICIPANT_"));
+        assert_eq!(
+            encode_kvn_with_policy(&tdm_no_part, TdmWritePolicy::strict()),
+            Err(TdmError::MissingKeyword {
+                keyword: "PARTICIPANT_n".to_string(),
+                segment: Some(1),
+            })
+        );
+        let (_, departures_part) = encode_kvn_with_policy(
+            &tdm_no_part,
+            TdmWritePolicy::strict().with_missing_keywords(TdmLeniency::Forgive),
+        )
+        .expect("missing participant is forgivable on write");
+        assert_eq!(
+            departures_part,
+            vec![TdmDeparture::MissingKeyword {
+                keyword: "PARTICIPANT_n".to_string(),
+                segment: Some(1),
+            }]
+        );
+    }
+
+    #[test]
+    fn writer_mirror_refuses_empty_mandatory_value_under_all_policies() {
+        // CCSDS 503.0-B-2 4.3.1 requires a non-empty value for each keyword provided.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        for field in &mut tdm.segments[0].metadata.fields {
+            if field.key == "TIME_SYSTEM" {
+                field.value.clear();
+            }
+        }
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::EmptyValue {
+                line: None,
+                keyword: "TIME_SYSTEM".to_string(),
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::lenient()),
+            Err(TdmError::EmptyValue {
+                line: None,
+                keyword: "TIME_SYSTEM".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn writer_mirror_refuses_malformed_epoch_under_all_policies() {
+        // CCSDS 503.0-B-2 4.3.9 defines two valid timetag forms. A record with a
+        // malformed epoch is refused under all policies.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].data.records[0].epoch = "2005-159-17:41:00".to_string();
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::MalformedEpoch {
+                line: None,
+                keyword: "RANGE".to_string(),
+                text: "2005-159-17:41:00".to_string(),
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::lenient()),
+            Err(TdmError::MalformedEpoch {
+                line: None,
+                keyword: "RANGE".to_string(),
+                text: "2005-159-17:41:00".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn writer_mirror_refuses_or_forgives_repeated_keyword_identical_value() {
+        // 4.2.5 a) gives each keyword a single value assignment. Repeating a keyword
+        // with the same value is refused under strict policy and reported as a departure
+        // under repeated_keywords leniency.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].metadata.fields.insert(
+            1,
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "UTC".to_string(),
+            },
+        );
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::RepeatedKeyword {
+                line: None,
+                keyword: "TIME_SYSTEM".to_string(),
+                section: "metadata",
+            })
+        );
+        let (encoded, departures) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_repeated_keywords(TdmLeniency::Forgive),
+        )
+        .expect("identical repeated keyword is forgivable on write");
+        assert_eq!(
+            departures,
+            vec![TdmDeparture::RepeatedKeyword {
+                keyword: "TIME_SYSTEM".to_string(),
+                section: "metadata",
+            }]
+        );
+        assert_eq!(encoded.matches("TIME_SYSTEM = UTC").count(), 2);
+    }
+
+    #[test]
+    fn writer_mirror_refuses_repeated_keyword_conflicting_values_under_all_policies() {
+        // 4.2.5 a) gives each keyword a single value assignment. Repeating a keyword
+        // with different values leaves the writer to guess which value was intended,
+        // which no policy forgives.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].metadata.fields.insert(
+            1,
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "GPS".to_string(),
+            },
+        );
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::ConflictingKeyword {
+                line: None,
+                keyword: "TIME_SYSTEM".to_string(),
+                section: "metadata",
+                first: "UTC".to_string(),
+                second: "GPS".to_string(),
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::lenient()),
+            Err(TdmError::ConflictingKeyword {
+                line: None,
+                keyword: "TIME_SYSTEM".to_string(),
+                section: "metadata",
+                first: "UTC".to_string(),
+                second: "GPS".to_string(),
             })
         );
     }
