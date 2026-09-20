@@ -5,20 +5,51 @@
 //! Message" publication, Annex E. Expected values below are copied from the
 //! Annex E KVN examples, then checked as exact decimal tokens and as `f64` bit
 //! equality after parsing.
+//!
+//! Fixture provenance, the vendored producer files:
+//! `fixtures/tdm/orekit_example_04.kvn`, `orekit_example_08.kvn`,
+//! `orekit_example_15.kvn`, `orekit_all_keywords_sequential.kvn`
+//! Source: Orekit, `src/test/resources/ccsds/tdm/kvn/`, files
+//! `TDMExample4.txt`, `TDMExample8.txt`, `TDMExample15.txt` and
+//! `TDMExampleAllKeywordsSequential.txt`.
+//! Source URL: `https://github.com/CS-SI/Orekit`
+//! Retrieval date: 2026-09-20
+//! License: Apache-2.0, attribution in `THIRD-PARTY-NOTICES.md`.
+//! SHA-256:
+//! `b2d469d8aa47d64ffc09ab3c35a3c1a9febeae1e5320089bc1ff629157479227`,
+//! `3b7fd1edb6466911e08b7cbaff205697f985f76e988e7d217b27faab5736a2d7`,
+//! `f7d97119b840f41c93579e44486dca806d035cb6fdfe49d7f5f3f0fc5c843d4c`,
+//! `6a19fef6ca52d64b68a002c462fd7d88b83dc957e8be2f4b478c60c58b418dc8`
+//!
+//! They are copied byte for byte. The tabs, the 708-character line and the
+//! missing final terminators are what the tests measure, so nothing in them is
+//! cleaned up; `fixtures/tdm/.gitattributes` turns off the whitespace check
+//! that would otherwise report them as diff errors.
+//!
+//! `fixtures/tdm/over_length_data_types.kvn` is not vendored. It was written
+//! for this suite, and its own comments say so: the four public files carrying
+//! an over-length line are one Orekit example and three near-copies of it, all
+//! refused for record values 4.3 does not define, so none of them reaches a
+//! write. It reproduces that file's `DATA_TYPES` line on a message with
+//! nothing else wrong with it.
 
 use sha2::{Digest, Sha256};
 use sidereon_core::astro::tdm::{
-    self, Tdm, TdmDataRecord, TdmError, TdmField, TdmInputErrorKind, TdmObservable, TdmUnit,
+    self, Tdm, TdmDataRecord, TdmDeparture, TdmError, TdmField, TdmInputErrorKind, TdmLeniency,
+    TdmObservable, TdmPolicy, TdmUnit, TdmWarning, TdmWritePolicy,
 };
 
-/// Parse an annex example.
-///
-/// Two of the twenty-one are refused: figure E-10 writes a timetag 4.3.9 does
-/// not define, and figure E-17 repeats a keyword and timetag with different
-/// values. Both are skipped where the annex set is walked for values, and
-/// `the_annex_examples_that_depart_are_named` asserts each refusal.
+/// Figure E-17 gives `RCS` twice at `2011-05-11T10:26:33.7008` with different
+/// values, which 3.4.11 forbids and which reads as a typo for its neighbour's
+/// timetag. The annex examples are parsed with that one departure forgiven;
+/// `only_figure_e_17_departs_from_the_standard` pins that it is the only one.
+const ANNEX_POLICY: TdmPolicy = TdmPolicy::strict().with_duplicate_records(TdmLeniency::Forgive);
+
+/// Parse an annex example, forgiving the one departure figure E-17 carries.
 fn parse_annex(label: &str, fixture: &str) -> Tdm {
-    tdm::parse_kvn(fixture).unwrap_or_else(|err| panic!("{label} failed parse: {err}"))
+    tdm::parse_kvn_with_policy(fixture, ANNEX_POLICY)
+        .unwrap_or_else(|err| panic!("{label} failed parse: {err}"))
+        .0
 }
 
 const ANNEX_E_ALL_KVN: &[(&str, &str, usize, usize)] = &[
@@ -474,10 +505,10 @@ const SYNTHETIC_CANONICAL_FNV1A64: u64 = 13028237734340361061;
 #[test]
 fn all_annex_e_kvn_examples_parse_and_canonicalize() {
     for (label, example, expected_segments, expected_records) in ANNEX_E_ALL_KVN {
-        // Figure E-10's TRANSMIT_FREQ_1 timetag is missing a decimal point and
-        // figure E-17 repeats a timetag, so neither reads;
-        // `the_annex_examples_that_depart_are_named` pins both refusals.
-        if *label == "E-10" || *label == "E-17" {
+        // Figure E-10's TRANSMIT_FREQ_1 timetag is missing a decimal point, so
+        // no policy reads it; `the_annex_examples_that_depart_are_named` pins
+        // that refusal.
+        if *label == "E-10" {
             continue;
         }
         let parsed = parse_annex(label, example);
@@ -493,6 +524,20 @@ fn all_annex_e_kvn_examples_parse_and_canonicalize() {
             .sum::<usize>();
         assert_eq!(records, *expected_records, "{label} records");
 
+        // The writer is strict whatever the reader forgave, so the one example
+        // that needs forgiveness is refused on the way out rather than written
+        // back in the form 3.4.11 forbids.
+        if *label == "E-17" {
+            assert!(
+                matches!(
+                    tdm::encode_kvn(&parsed),
+                    Err(TdmError::DuplicateRecord { .. })
+                ),
+                "E-17 carries a repeated timetag and must not be written back"
+            );
+            continue;
+        }
+
         let encoded =
             tdm::encode_kvn(&parsed).unwrap_or_else(|err| panic!("{label} failed encode: {err}"));
         let reparsed = tdm::parse_kvn(&encoded)
@@ -507,35 +552,468 @@ fn all_annex_e_kvn_examples_parse_and_canonicalize() {
     }
 }
 
+/// The contrast the two policies exist for, on two published files.
+///
+/// A tab-indented file needs the reader's permission alone. 4.2.7 puts the
+/// keyword at the start of the line "possibly preceded by white space", and
+/// 4.2.9 makes trailing white space insignificant, so no tab reaches a value.
+/// What the writer then emits carries none, and a strict write of it emits no
+/// departure at all.
+///
+/// Figure E-17 needs the writer's permission as well, because its departure is
+/// in what the file says: two `RCS` records at one instant with different
+/// values, which no writer may emit unasked.
+#[test]
+fn a_tab_indented_file_needs_the_reader_alone_and_figure_e_17_needs_both() {
+    let tabbed = &FORGIVEN_FIXTURES[0];
+    let (indented, warnings) =
+        tdm::parse_kvn_with_policy(tabbed.text, TdmPolicy::strict().with_non_printable(FORGIVE))
+            .expect("the reader forgives the tabs");
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| matches!(warning, TdmWarning::NonPrintableCharacter { .. })),
+        "the tabs are all it departs in"
+    );
+
+    // The writer is asked for nothing and emits nothing: the tabs are gone
+    // because reading discarded them, not because writing repaired anything.
+    let (written, departures) = tdm::encode_kvn_with_policy(&indented, TdmWritePolicy::strict())
+        .expect("a tab-indented file writes back conforming");
+    assert_eq!(departures, vec![]);
+    assert!(!written.contains('\t'));
+    assert_eq!(
+        tdm::parse_kvn(&written).expect("and the strict reader takes it back"),
+        indented
+    );
+
+    let fixture = include_str!("fixtures/tdm/annex_e_17.kvn");
+    let (tdm, warnings) = tdm::parse_kvn_with_policy(fixture, ANNEX_POLICY)
+        .expect("the reader forgives the repeated timetag");
+    assert_eq!(warnings.len(), 1, "one departure on the way in");
+
+    // A strict write refuses it, exactly as a strict read does.
+    assert!(matches!(
+        tdm::encode_kvn(&tdm),
+        Err(TdmError::DuplicateRecord { .. })
+    ));
+
+    // Allowing the same departure on the way out writes the file and names it.
+    let write = TdmWritePolicy::strict().with_duplicate_records(TdmLeniency::Forgive);
+    let (encoded, departures) =
+        tdm::encode_kvn_with_policy(&tdm, write).expect("the writer emits what it was asked to");
+    assert_eq!(
+        departures,
+        vec![TdmDeparture::DuplicateRecord {
+            segment: 1,
+            keyword: "RCS".to_string(),
+            epoch: "2011-05-11T10:26:33.7008".to_string(),
+        }]
+    );
+
+    // And it reads back as the value it was written from.
+    let (reparsed, _) = tdm::parse_kvn_with_policy(&encoded, ANNEX_POLICY)
+        .expect("what the writer emitted, the reader takes back");
+    assert_eq!(reparsed, tdm);
+}
+
+const FORGIVE: TdmLeniency = TdmLeniency::Forgive;
+
+/// A file that reads once the reader is allowed to forgive the departures it
+/// carries, with every one of them written out so the tests assert positions
+/// rather than counts.
+struct ForgivenFixture {
+    /// The file name, for a failing assertion to name.
+    label: &'static str,
+    /// The bytes, copied unmodified where the file was vendored.
+    text: &'static str,
+    /// Inclusive one-based line ranges whose first character is a tab. Every
+    /// tab in these files is indentation, so the column is always 1.
+    tab_lines: &'static [(usize, usize)],
+    /// The line over 254 characters, as `(line, characters)`.
+    long_line: Option<(usize, usize)>,
+    /// The file's line count.
+    lines: usize,
+    /// Whether the last line carries one of the terminators 4.2.11 requires.
+    terminated: bool,
+    /// The first token of the first line that departs, which the error names
+    /// alongside the line.
+    first_keyword: &'static str,
+}
+
+/// The departures producers make on lines, on files that carry them and are
+/// otherwise readable.
+///
+/// 4.2.1 confines a TDM line to printable ASCII and spaces and caps it at 254
+/// characters. Of the 53 public files gathered for this audit, 11 indent with
+/// tabs and four carry a `DATA_TYPES` line of 708 characters. Three of the
+/// tab-indented files are vendored here, each carrying a combination the other
+/// two do not. All four of the over-length files are the same Orekit example,
+/// whose record values 4.3 does not define, so none of them reads under any
+/// policy; `the_over_length_line_is_refused_before_the_values_behind_it` keeps
+/// one of them for the refusal, and the last fixture here reproduces the long
+/// line on a message with nothing else wrong with it.
+const FORGIVEN_FIXTURES: &[ForgivenFixture] = &[
+    // Tabs and nothing else: the last line carries its terminator.
+    ForgivenFixture {
+        label: "orekit_example_04.kvn",
+        text: include_str!("fixtures/tdm/orekit_example_04.kvn"),
+        tab_lines: &[(2, 4), (6, 24), (28, 47)],
+        long_line: None,
+        lines: 48,
+        terminated: true,
+        first_keyword: "COMMENT",
+    },
+    // Tabs in three places 4.2.7 and 4.2.9 discard: before a keyword, between a
+    // keyword and its equals sign, and alone on an otherwise blank line. Two
+    // segments, and the last line carries no terminator.
+    ForgivenFixture {
+        label: "orekit_example_08.kvn",
+        text: include_str!("fixtures/tdm/orekit_example_08.kvn"),
+        tab_lines: &[
+            (2, 4),
+            (6, 17),
+            (21, 23),
+            (25, 27),
+            (29, 31),
+            (36, 49),
+            (55, 58),
+            (60, 68),
+        ],
+        long_line: None,
+        lines: 69,
+        terminated: false,
+        first_keyword: "COMMENT",
+    },
+    // Tabs, no terminator, and a right double quotation mark inside the comment
+    // on line 6, which is the character 4.2.1 excludes that is not a tab.
+    ForgivenFixture {
+        label: "orekit_example_15.kvn",
+        text: include_str!("fixtures/tdm/orekit_example_15.kvn"),
+        tab_lines: &[
+            (2, 9),
+            (11, 16),
+            (20, 26),
+            (31, 35),
+            (39, 45),
+            (50, 54),
+            (57, 64),
+        ],
+        long_line: None,
+        lines: 65,
+        terminated: false,
+        first_keyword: "COMMENT",
+    },
+    // The 708-character `DATA_TYPES` value on a message that is otherwise
+    // conforming, so the line length is read, reported and written back.
+    ForgivenFixture {
+        label: "over_length_data_types.kvn",
+        text: include_str!("fixtures/tdm/over_length_data_types.kvn"),
+        tab_lines: &[],
+        long_line: Some((12, 685)),
+        lines: 21,
+        terminated: true,
+        first_keyword: "DATA_TYPES",
+    },
+];
+
+impl ForgivenFixture {
+    /// The first whitespace-delimited token of a one-based line of this file,
+    /// which is the keyword a line warning names. Every fixture here ends its
+    /// lines with a line feed, so `str::lines` numbers them as the reader does.
+    fn keyword_at(&self, line: usize) -> String {
+        self.text
+            .lines()
+            .nth(line - 1)
+            .and_then(|text| text.split_whitespace().next())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Every warning a read of this file reports, in the order it reports them.
+    fn warnings(&self) -> Vec<TdmWarning> {
+        let mut warnings: Vec<TdmWarning> = self
+            .tab_lines
+            .iter()
+            .flat_map(|(first, last)| *first..=*last)
+            .map(|line| TdmWarning::NonPrintableCharacter {
+                line,
+                keyword: self.keyword_at(line),
+                column: 1,
+                character: '\t',
+            })
+            .collect();
+        if let Some((line, length)) = self.long_line {
+            warnings.push(TdmWarning::LineTooLong {
+                line,
+                keyword: self.keyword_at(line),
+                length,
+            });
+        }
+        if !self.terminated {
+            warnings.push(TdmWarning::UnterminatedFinalLine { line: self.lines });
+        }
+        warnings
+    }
+
+    /// The strictest policy that reads this file: one axis per departure it
+    /// carries, and no other.
+    fn policy(&self) -> TdmPolicy {
+        let mut policy = TdmPolicy::strict();
+        if !self.tab_lines.is_empty() {
+            policy = policy.with_non_printable(FORGIVE);
+        }
+        if self.long_line.is_some() {
+            policy = policy.with_long_lines(FORGIVE);
+        }
+        if !self.terminated {
+            policy = policy.with_final_terminator(FORGIVE);
+        }
+        policy
+    }
+}
+
+/// Each file is refused strictly, names its first departure in the error, and
+/// reports every one of them at its line once the reader is allowed to forgive
+/// that kind.
+#[test]
+fn the_forgiven_fixtures_report_each_departure_at_its_line() {
+    for fixture in FORGIVEN_FIXTURES {
+        let expected = fixture.warnings();
+        assert!(
+            !expected.is_empty(),
+            "{}: a fixture with nothing to forgive belongs with the annex set",
+            fixture.label
+        );
+
+        // The first departure, as the error a strict read returns. Reader and
+        // writer name the same keyword for these two, so the warning and the
+        // error carry the same payload but for the line.
+        let first = match &expected[0] {
+            TdmWarning::NonPrintableCharacter {
+                line,
+                keyword,
+                column,
+                character,
+            } => {
+                assert_eq!(keyword, fixture.first_keyword, "{}", fixture.label);
+                TdmError::NonPrintableCharacter {
+                    line: Some(*line),
+                    keyword: keyword.clone(),
+                    column: *column,
+                    character: *character,
+                }
+            }
+            TdmWarning::LineTooLong {
+                line,
+                keyword,
+                length,
+            } => {
+                assert_eq!(keyword, fixture.first_keyword, "{}", fixture.label);
+                TdmError::LineTooLong {
+                    line: Some(*line),
+                    keyword: keyword.clone(),
+                    length: *length,
+                }
+            }
+            other => panic!("{}: unexpected first departure {other:?}", fixture.label),
+        };
+        assert_eq!(
+            tdm::parse_kvn(fixture.text),
+            Err(first),
+            "{}",
+            fixture.label
+        );
+
+        // The narrowest policy that reads it reports all of them and no more,
+        // so the file departs in the ways named here and in no other way.
+        let (narrow, warnings) = tdm::parse_kvn_with_policy(fixture.text, fixture.policy())
+            .unwrap_or_else(|err| panic!("{}: {err}", fixture.label));
+        assert_eq!(warnings, expected, "{}", fixture.label);
+
+        // Forgiving everything else changes nothing, in the warnings or in the
+        // value.
+        let (wide, warnings) = tdm::parse_kvn_with_policy(fixture.text, TdmPolicy::lenient())
+            .unwrap_or_else(|err| panic!("{}: {err}", fixture.label));
+        assert_eq!(warnings, expected, "{}", fixture.label);
+        assert_eq!(wide, narrow, "{}", fixture.label);
+    }
+}
+
+/// A forgiven character is kept, not dropped or replaced, and the writer meets
+/// it on the way out.
+///
+/// Line 6 of `orekit_example_15.kvn` holds a right double quotation mark inside
+/// a comment, and the line opens with a tab. `check_line` reports the first
+/// character a line departs on and moves to the next line, so the warning names
+/// the tab and the quotation mark is not separately reported. The tab is
+/// whitespace the read discards; the quotation mark is part of the comment, so
+/// it reaches the value and then the line the writer builds from it, where the
+/// write refuses it or names it as a departure.
+#[test]
+fn a_forgiven_character_survives_into_the_value_and_back_out() {
+    let fixture = &FORGIVEN_FIXTURES[2];
+    let (tdm, _) = tdm::parse_kvn_with_policy(fixture.text, fixture.policy())
+        .expect("the reader forgives the tabs");
+    assert!(tdm
+        .comments
+        .iter()
+        .any(|comment| comment.ends_with("Value is \"station clock minus UTC\u{201d}.")));
+
+    assert_eq!(
+        tdm::encode_kvn(&tdm),
+        Err(TdmError::NonPrintableCharacter {
+            line: None,
+            keyword: "COMMENT".to_string(),
+            column: 55,
+            character: '\u{201d}',
+        })
+    );
+
+    let write = TdmWritePolicy::strict().with_non_printable(FORGIVE);
+    let (encoded, departures) =
+        tdm::encode_kvn_with_policy(&tdm, write).expect("the writer emits what it was asked to");
+    assert_eq!(
+        departures,
+        vec![TdmDeparture::NonPrintableCharacter {
+            keyword: "COMMENT".to_string(),
+            character: '\u{201d}',
+        }]
+    );
+    let (reparsed, _) = tdm::parse_kvn_with_policy(&encoded, fixture.policy())
+        .expect("what the writer emitted, the reader takes back");
+    assert_eq!(reparsed, tdm);
+}
+
+/// The over-length line is one keyword's value, not a run-on: `DATA_TYPES`
+/// lists every data type the segment carries, which table 3-3 defines and 4.2.1
+/// caps at 254 characters. The read keeps the whole list.
+#[test]
+fn the_over_length_data_types_line_is_read_whole() {
+    let fixture = &FORGIVEN_FIXTURES[3];
+    let (tdm, _) = tdm::parse_kvn_with_policy(fixture.text, fixture.policy())
+        .expect("the reader forgives the line length");
+    let data_types = tdm.segments[0]
+        .metadata
+        .get_last("DATA_TYPES")
+        .expect("DATA_TYPES survives the read");
+    // 685 characters, less the 13 of the keyword and its equals sign.
+    assert_eq!(data_types.len(), 672);
+    assert!(data_types.starts_with("CARRIER_POWER,DOPPLER_COUNT,"));
+    assert!(data_types.ends_with(",PRESSURE,RHUMIDITY,TEMPERATURE"));
+    assert_eq!(data_types.split(',').count(), 47);
+}
+
+/// The second contrast: an over-length line needs both policies, where a tab
+/// needs only the reader's.
+///
+/// A tab is whitespace the read discards, so what the writer emits is already
+/// conforming. The 685 characters of `DATA_TYPES` are the value itself, and the
+/// writer cannot shorten them without losing data types, so writing the file
+/// back needs the same permission reading it did, and the departure names the
+/// keyword and the length.
+#[test]
+fn an_over_length_line_needs_the_writer_policy_as_well() {
+    let fixture = &FORGIVEN_FIXTURES[3];
+    let (tdm, _) = tdm::parse_kvn_with_policy(fixture.text, fixture.policy())
+        .expect("the reader forgives the line length");
+
+    assert_eq!(
+        tdm::encode_kvn(&tdm),
+        Err(TdmError::LineTooLong {
+            line: None,
+            keyword: "DATA_TYPES".to_string(),
+            length: 685,
+        })
+    );
+
+    let write = TdmWritePolicy::strict().with_long_lines(FORGIVE);
+    let (encoded, departures) =
+        tdm::encode_kvn_with_policy(&tdm, write).expect("the writer emits what it was asked to");
+    assert_eq!(
+        departures,
+        vec![TdmDeparture::LineTooLong {
+            keyword: "DATA_TYPES".to_string(),
+            length: 685,
+        }]
+    );
+    let (reparsed, _) = tdm::parse_kvn_with_policy(&encoded, fixture.policy())
+        .expect("what the writer emitted, the reader takes back");
+    assert_eq!(reparsed, tdm);
+}
+
+/// The four over-length files in the public corpus are one Orekit example and
+/// three near-copies of it, and none of them reads under any policy: the
+/// example fills every data keyword with a placeholder, and the first of those
+/// is `1.`, which is neither of the decimal forms 4.3 defines. Forgiving the
+/// line length reaches the value and stops there, which is the audit's line —
+/// how a message is presented is forgivable, what it says is not.
+#[test]
+fn the_over_length_line_is_refused_before_the_values_behind_it() {
+    let fixture = include_str!("fixtures/tdm/orekit_all_keywords_sequential.kvn");
+    assert_eq!(
+        tdm::parse_kvn(fixture),
+        Err(TdmError::LineTooLong {
+            line: Some(10),
+            keyword: "DATA_TYPES".to_string(),
+            length: 708,
+        })
+    );
+    for policy in [
+        TdmPolicy::strict().with_long_lines(FORGIVE),
+        TdmPolicy::lenient(),
+    ] {
+        assert_eq!(
+            tdm::parse_kvn_with_policy(fixture, policy).map(|(tdm, _)| tdm),
+            Err(TdmError::InvalidField {
+                keyword: "CARRIER_POWER".to_string(),
+                kind: TdmInputErrorKind::FloatParse,
+            })
+        );
+    }
+}
+
 /// Two of the twenty-one annex examples depart from the standard, each in one
-/// way, and the other nineteen read with nothing to forgive.
+/// way, and the other nineteen parse strictly with nothing forgiven.
 ///
 /// E-10 writes a timetag 4.3.9 does not define, missing a decimal point its
-/// neighbours carry, so inferring the point would be guessing a value. E-17
-/// repeats a keyword and timetag with different values, which 3.4.11 forbids.
+/// neighbours carry; no policy reads it, because inferring the point would be
+/// guessing a value. E-17 repeats a keyword and timetag with different values,
+/// which a lenient read keeps in file order and reports.
 #[test]
 fn the_annex_examples_that_depart_are_named() {
     for (label, fixture, _, _) in ANNEX_E_ALL_KVN {
-        match *label {
-            "E-10" => assert_eq!(
-                tdm::parse_kvn(fixture),
-                Err(TdmError::MalformedEpoch {
-                    line: 25,
-                    keyword: "TRANSMIT_FREQ_1".to_string(),
-                    text: "2003-07-08T04:10:0000".to_string(),
-                })
-            ),
-            "E-17" => assert_eq!(
-                tdm::parse_kvn(fixture),
-                Err(TdmError::DuplicateRecord {
+        if *label == "E-10" {
+            for policy in [TdmPolicy::strict(), TdmPolicy::lenient()] {
+                assert_eq!(
+                    tdm::parse_kvn_with_policy(fixture, policy).map(|(tdm, _)| tdm),
+                    Err(TdmError::MalformedEpoch {
+                        line: Some(25),
+                        keyword: "TRANSMIT_FREQ_1".to_string(),
+                        text: "2003-07-08T04:10:0000".to_string(),
+                    })
+                );
+            }
+            continue;
+        }
+        let (_, warnings) = tdm::parse_kvn_with_policy(fixture, ANNEX_POLICY)
+            .unwrap_or_else(|err| panic!("{label}: {err}"));
+        if *label == "E-17" {
+            assert_eq!(
+                warnings,
+                vec![TdmWarning::DuplicateRecord {
                     segment: 1,
                     keyword: "RCS".to_string(),
                     epoch: "2011-05-11T10:26:33.7008".to_string(),
-                })
-            ),
-            _ => {
-                tdm::parse_kvn(fixture).unwrap_or_else(|err| panic!("{label} strict: {err}"));
-            }
+                }]
+            );
+            assert!(matches!(
+                tdm::parse_kvn(fixture),
+                Err(TdmError::DuplicateRecord { .. })
+            ));
+        } else {
+            assert!(warnings.is_empty(), "{label} needs no forgiveness");
+            tdm::parse_kvn(fixture).unwrap_or_else(|err| panic!("{label} strict: {err}"));
         }
     }
 }
@@ -637,6 +1115,22 @@ fn annex_e_table_3_5_units_are_pinned() {
         "2005-142T12:00:00",
         "6.944e-14",
         TdmUnit::SecondsPerSecond,
+    );
+
+    let e17 = parse_annex("E-17", include_str!("fixtures/tdm/annex_e_17.kvn"));
+    assert_record(
+        &e17,
+        "CARRIER_POWER",
+        "2011-05-11T10:26:33.2613",
+        "-36.73723984",
+        TdmUnit::DecibelWatts,
+    );
+    assert_record(
+        &e17,
+        "RCS",
+        "2011-05-11T10:26:33.2613",
+        "2.984",
+        TdmUnit::SquareMeters,
     );
 
     let e18 = tdm::parse_kvn(include_str!("fixtures/tdm/annex_e_18.kvn")).unwrap();
@@ -749,6 +1243,34 @@ fn annex_e_examples_parse_to_pinned_values() {
         "2003-07-08T04:48:25.0000",
         "3.872203646461000E+00",
         TdmUnit::Hertz,
+    );
+
+    let (e17, warnings) = tdm::parse_kvn_with_policy(
+        include_str!("fixtures/tdm/annex_e_17.kvn"),
+        TdmPolicy::lenient(),
+    )
+    .unwrap();
+    assert_eq!(
+        warnings,
+        vec![TdmWarning::DuplicateRecord {
+            segment: 1,
+            keyword: "RCS".to_string(),
+            epoch: "2011-05-11T10:26:33.7008".to_string(),
+        }]
+    );
+    assert_record(
+        &e17,
+        "CARRIER_POWER",
+        "2011-05-11T10:26:33.2613",
+        "-36.73723984",
+        TdmUnit::DecibelWatts,
+    );
+    assert_record(
+        &e17,
+        "RCS",
+        "2011-05-11T10:26:33.2613",
+        "2.984",
+        TdmUnit::SquareMeters,
     );
 
     let e22 = tdm::parse_kvn(ANNEX_E22_TRACK_ID).unwrap();

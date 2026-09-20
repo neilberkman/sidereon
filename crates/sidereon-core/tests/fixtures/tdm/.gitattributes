@@ -1,0 +1,5 @@
+# These fixtures are vendored byte for byte, and their whitespace is what the
+# tests measure: a tab-indented line, a line holding nothing but a tab, a file
+# whose last line carries no terminator. Git's whitespace check would report
+# each as an error in the diff.
+*.kvn -whitespace
