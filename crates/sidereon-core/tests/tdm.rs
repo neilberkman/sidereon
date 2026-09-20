@@ -862,7 +862,10 @@ fn canonical_synthetic_encoding_matches_pinned_bytes_and_hash() {
 fn malformed_inputs_yield_typed_errors() {
     assert_eq!(
         tdm::parse_kvn("CREATION_DATE = 2020-001T00:00:00"),
-        Err(TdmError::MissingVersion)
+        Err(TdmError::MissingKeyword {
+            keyword: "CCSDS_TDM_VERS".to_string(),
+            segment: None,
+        })
     );
 
     let missing_value = "\
@@ -892,7 +895,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(invalid_angle),
         Err(TdmError::InvalidField {
-            field: "ANGLE_1".to_string(),
+            keyword: "ANGLE_1".to_string(),
             kind: TdmInputErrorKind::OutOfRange,
         })
     );
@@ -908,7 +911,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(non_finite),
         Err(TdmError::InvalidField {
-            field: "RECEIVE_FREQ".to_string(),
+            keyword: "RECEIVE_FREQ".to_string(),
             kind: TdmInputErrorKind::NonFinite,
         })
     );
@@ -927,7 +930,7 @@ DATA_STOP"
         assert_eq!(
             tdm::parse_kvn(&bad_numeric),
             Err(TdmError::InvalidField {
-                field: "RANGE".to_string(),
+                keyword: "RANGE".to_string(),
                 kind: TdmInputErrorKind::FloatParse,
             })
         );
@@ -947,7 +950,7 @@ DATA_STOP"
         assert_eq!(
             tdm::parse_kvn(&underflow),
             Err(TdmError::InvalidField {
-                field: "RANGE".to_string(),
+                keyword: "RANGE".to_string(),
                 kind: TdmInputErrorKind::OutOfRange,
             })
         );
@@ -981,7 +984,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(inline_key_unit),
         Err(TdmError::InvalidField {
-            field: "ANGLE_1 [Hz]".to_string(),
+            keyword: "ANGLE_1 [Hz]".to_string(),
             kind: TdmInputErrorKind::UnexpectedUnit,
         })
     );
@@ -997,7 +1000,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(inline_value_unit),
         Err(TdmError::InvalidField {
-            field: "ANGLE_1".to_string(),
+            keyword: "ANGLE_1".to_string(),
             kind: TdmInputErrorKind::UnexpectedUnit,
         })
     );
@@ -1013,7 +1016,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(unknown_keyword),
         Err(TdmError::InvalidField {
-            field: "UNKNOWN_OBS".to_string(),
+            keyword: "UNKNOWN_OBS".to_string(),
             kind: TdmInputErrorKind::UnknownKeyword,
         })
     );
@@ -1029,7 +1032,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(invalid_index),
         Err(TdmError::InvalidField {
-            field: "RECEIVE_FREQ_6".to_string(),
+            keyword: "RECEIVE_FREQ_6".to_string(),
             kind: TdmInputErrorKind::InvalidIndex,
         })
     );
@@ -1053,7 +1056,7 @@ DATA_STOP"
         assert_eq!(
             tdm::parse_kvn(&invalid_indexed_keyword),
             Err(TdmError::InvalidField {
-                field: field.to_string(),
+                keyword: field.to_string(),
                 kind: TdmInputErrorKind::InvalidIndex,
             })
         );
@@ -1073,7 +1076,7 @@ DATA_STOP"
         assert_eq!(
             tdm::parse_kvn(&invalid_phase_count),
             Err(TdmError::InvalidField {
-                field: "RECEIVE_PHASE_CT_1".to_string(),
+                keyword: "RECEIVE_PHASE_CT_1".to_string(),
                 kind: TdmInputErrorKind::FloatParse,
             })
         );
@@ -1101,7 +1104,7 @@ DATA_STOP"
         assert_eq!(
             tdm::parse_kvn(&invalid_domain),
             Err(TdmError::InvalidField {
-                field: field.to_string(),
+                keyword: field.to_string(),
                 kind,
             })
         );
@@ -1118,7 +1121,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(negative_zero),
         Err(TdmError::InvalidField {
-            field: "RANGE".to_string(),
+            keyword: "RANGE".to_string(),
             kind: TdmInputErrorKind::NegativeZero,
         })
     );
@@ -1134,7 +1137,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(fractional_doppler_count),
         Err(TdmError::InvalidField {
-            field: "DOPPLER_COUNT".to_string(),
+            keyword: "DOPPLER_COUNT".to_string(),
             kind: TdmInputErrorKind::NonInteger,
         })
     );
@@ -1150,7 +1153,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(decimal_doppler_count),
         Err(TdmError::InvalidField {
-            field: "DOPPLER_COUNT".to_string(),
+            keyword: "DOPPLER_COUNT".to_string(),
             kind: TdmInputErrorKind::NonInteger,
         })
     );
@@ -1166,7 +1169,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(exponent_doppler_count),
         Err(TdmError::InvalidField {
-            field: "DOPPLER_COUNT".to_string(),
+            keyword: "DOPPLER_COUNT".to_string(),
             kind: TdmInputErrorKind::NonInteger,
         })
     );
@@ -1182,7 +1185,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(negative_doppler_count),
         Err(TdmError::InvalidField {
-            field: "DOPPLER_COUNT".to_string(),
+            keyword: "DOPPLER_COUNT".to_string(),
             kind: TdmInputErrorKind::Negative,
         })
     );
@@ -1198,7 +1201,7 @@ DATA_STOP";
     assert_eq!(
         tdm::parse_kvn(large_doppler_count),
         Err(TdmError::InvalidField {
-            field: "DOPPLER_COUNT".to_string(),
+            keyword: "DOPPLER_COUNT".to_string(),
             kind: TdmInputErrorKind::OutOfRange,
         })
     );
@@ -1398,17 +1401,21 @@ fn encoding_refuses_a_field_keyed_comment() {
 
     let mut header = base.clone();
     header.header_fields.push(field.clone());
-    match tdm::encode_kvn(&header) {
-        Err(TdmError::MalformedLine { text, .. }) => assert_eq!(text, "COMMENT = note"),
-        other => panic!("a header field keyed COMMENT must be refused, got {other:?}"),
-    }
+    assert_eq!(
+        tdm::encode_kvn(&header),
+        Err(TdmError::KeywordNotAssignable {
+            keyword: "COMMENT".to_string(),
+        })
+    );
 
     let mut metadata = base.clone();
     metadata.segments[0].metadata.fields.push(field);
-    match tdm::encode_kvn(&metadata) {
-        Err(TdmError::MalformedLine { text, .. }) => assert_eq!(text, "COMMENT = note"),
-        other => panic!("a metadata field keyed COMMENT must be refused, got {other:?}"),
-    }
+    assert_eq!(
+        tdm::encode_kvn(&metadata),
+        Err(TdmError::KeywordNotAssignable {
+            keyword: "COMMENT".to_string(),
+        })
+    );
 
     // A padded key writes the same line, so it is refused on the same footing.
     let mut padded = base;
@@ -1416,8 +1423,10 @@ fn encoding_refuses_a_field_keyed_comment() {
         key: "COMMENT ".to_string(),
         value: "note".to_string(),
     });
-    match tdm::encode_kvn(&padded) {
-        Err(TdmError::MalformedLine { .. }) => {}
-        other => panic!("a padded COMMENT key must be refused, got {other:?}"),
-    }
+    assert_eq!(
+        tdm::encode_kvn(&padded),
+        Err(TdmError::KeywordNotAssignable {
+            keyword: "COMMENT ".to_string(),
+        })
+    );
 }
