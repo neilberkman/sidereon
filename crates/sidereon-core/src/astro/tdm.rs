@@ -11,7 +11,6 @@ use std::fmt;
 
 const VERSION_KEY: &str = "CCSDS_TDM_VERS";
 const COMMENT_KEY: &str = "COMMENT";
-
 /// The longest line CCSDS 503.0-B-2 4.2.1 allows, excluding its terminator.
 const MAX_LINE_CHARACTERS: usize = 254;
 
@@ -1170,8 +1169,12 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
     let mut data: Option<DataBuilder> = None;
     let mut segments = Vec::new();
 
-    for (idx, raw_line) in text.lines().enumerate() {
+    let source_lines = tdm_lines(text);
+    let past_end = source_lines.len().saturating_add(1);
+
+    for (idx, raw_line) in source_lines.iter().copied().enumerate() {
         let line_no = idx + 1;
+        check_line(line_no, raw_line)?;
         let line = raw_line.trim();
         if line.is_empty() {
             continue;
@@ -1281,19 +1284,19 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
 
     if metadata.is_some() {
         return Err(TdmError::Section {
-            line: text.lines().count().saturating_add(1),
+            line: past_end,
             detail: "unclosed metadata block",
         });
     }
     if data.is_some() {
         return Err(TdmError::Section {
-            line: text.lines().count().saturating_add(1),
+            line: past_end,
             detail: "unclosed data block",
         });
     }
     if pending_metadata.is_some() {
         return Err(TdmError::Section {
-            line: text.lines().count().saturating_add(1),
+            line: past_end,
             detail: "metadata without data block",
         });
     }
@@ -1308,6 +1311,26 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
             })?;
     if segments.is_empty() {
         return Err(TdmError::NoSegments);
+    }
+
+    // 4.2.11 terminates every TDM line, the last one included.
+    //
+    // It is the last check in the function, behind everything about what the
+    // message says: the unclosed-block checks, CCSDS_TDM_VERS and the segment
+    // count. Someone handed "missing TDM CCSDS_TDM_VERS" can fix the file;
+    // handed "line 1 carries no terminator" about a file that is also missing
+    // its version, they get the smaller of the two problems first.
+    //
+    // check_line keeps its place at the top of the read loop, ahead of all of
+    // this. A character outside printable ASCII or a line past 254 characters
+    // names a position in one line and explains how the rest of that line
+    // reads: a keyword holding a non-breaking space reads as an undefined
+    // keyword, and reporting the undefined keyword names the wrong problem.
+    // Nothing downstream turns on whether the file's last line was terminated.
+    if !text.is_empty() && !text.ends_with(['\r', '\n']) {
+        return Err(TdmError::UnterminatedFinalLine {
+            line: source_lines.len(),
+        });
     }
 
     Ok(Tdm {
@@ -1364,6 +1387,8 @@ pub fn encode_kvn(tdm: &Tdm) -> Result<String, TdmError> {
         lines.push("DATA_STOP".to_string());
     }
 
+    // 4.2.11 terminates every line, so the last one carries one too.
+    lines.push(String::new());
     Ok(lines.join("\n"))
 }
 
@@ -1915,6 +1940,78 @@ fn validate_tdm(tdm: &Tdm) -> Result<(), TdmError> {
     Ok(())
 }
 
+/// Split TDM text into lines on the terminators CCSDS 503.0-B-2 4.2.11 allows.
+///
+/// 4.2.11 terminates a line with "a single Carriage Return or a single Line Feed
+/// or a Carriage Return/Line Feed pair or a Line Feed/Carriage Return pair", so
+/// each pair ends one line rather than leaving an empty line between them.
+/// `str::lines` splits on line feeds alone, which reads a file terminated with
+/// carriage returns as a single line and refuses a message the standard allows.
+fn tdm_lines(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut lines = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if !matches!(byte, b'\r' | b'\n') {
+            index += 1;
+            continue;
+        }
+        lines.push(&text[start..index]);
+        let paired = matches!(
+            (byte, bytes.get(index + 1).copied()),
+            (b'\r', Some(b'\n')) | (b'\n', Some(b'\r'))
+        );
+        index += if paired { 2 } else { 1 };
+        start = index;
+    }
+    if start < bytes.len() {
+        lines.push(&text[start..]);
+    }
+    lines
+}
+
+/// Refuse a line whose characters or length CCSDS 503.0-B-2 4.2.1 forbids.
+///
+/// 4.2.1: "The TDM line must contain only printable ASCII characters and
+/// blanks. ASCII control characters (such as TAB, etc.) must not be used,
+/// except as indicated below for the termination of the TDM line. A TDM line
+/// must not exceed 254 ASCII characters and spaces (excluding line termination
+/// character[s])."
+fn check_line(line_no: usize, line: &str) -> Result<(), TdmError> {
+    for (index, character) in line.chars().enumerate() {
+        if !matches!(character, ' '..='~') {
+            return Err(TdmError::NonPrintableCharacter {
+                line: Some(line_no),
+                keyword: line_keyword(line),
+                column: index + 1,
+                character,
+            });
+        }
+    }
+    // Every character is printable ASCII by here, so one byte is one character.
+    if line.len() > MAX_LINE_CHARACTERS {
+        return Err(TdmError::LineTooLong {
+            line: Some(line_no),
+            keyword: line_keyword(line),
+            length: line.len(),
+        });
+    }
+    Ok(())
+}
+
+/// A line's first whitespace-delimited token.
+///
+/// On the way in this is whatever the line opens with, which is the keyword on
+/// a line 4.2.5 defines and the only name there is on one it does not.
+fn line_keyword(line: &str) -> String {
+    line.split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn parse_assignment(line: &str) -> Option<(String, String)> {
     let (key, raw_value) = line.split_once('=')?;
     let key = key.trim().to_string();
@@ -2131,7 +2228,7 @@ RECEIVE_FREQ_1 = 2005-159T17:41:00 32021034790.7265
 RANGE = 2005-159T17:41:00 80452.7542
 ANGLE_1 = 2005-159T17:41:00 256.64002393
 ANGLE_2 = 2005-159T17:41:00 13.38100016
-DATA_STOP";
+DATA_STOP\n";
 
     #[test]
     fn parses_frequency_records_without_reformatting_decimal_tokens() {
@@ -2165,7 +2262,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RECEIVE_FREQ_1 = 2005-159T17:41:00
-DATA_STOP",
+DATA_STOP\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -2187,7 +2284,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 TRANSMIT_FREQ_1 = 2005-159T17:41:00 0.0
-DATA_STOP",
+DATA_STOP\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -2209,7 +2306,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RANGE = 2005-159T17:41:00 1.0
-DATA_STOP";
+DATA_STOP\n";
         assert_eq!(
             parse_kvn(header),
             Err(TdmError::MalformedLine {
@@ -2226,7 +2323,7 @@ COMMENT=file = tdm.dat
 META_STOP
 DATA_START
 RANGE = 2005-159T17:41:00 1.0
-DATA_STOP";
+DATA_STOP\n";
         assert_eq!(
             parse_kvn(metadata),
             Err(TdmError::MalformedLine {
@@ -2249,7 +2346,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RANGE = 2005-159T17:41:00 1.0
-DATA_STOP",
+DATA_STOP\n",
         )
         .unwrap();
         assert_eq!(tdm.comments, vec!["= file = tdm.dat".to_string()]);
@@ -2282,6 +2379,245 @@ DATA_STOP",
             Err(TdmError::KeywordNotAssignable {
                 keyword: COMMENT_KEY.to_string(),
             })
+        );
+    }
+
+    const TERMINATOR_BODY: &str = "CCSDS_TDM_VERS = 2.0|META_START|TIME_SYSTEM = UTC|\
+META_STOP|DATA_START|RANGE = 2005-159T17:41:00 1.0|DATA_STOP\n";
+
+    #[test]
+    fn a_line_ends_at_every_terminator_the_standard_allows() {
+        // 4.2.11: "a single Carriage Return or a single Line Feed or a Carriage
+        // Return/Line Feed pair or a Line Feed/Carriage Return pair".
+        //
+        // Asserted on the lines the splitter produced. A pair read as two
+        // terminators leaves an empty line between them, which the parser then
+        // skips, so a message parses either way and parsing alone cannot tell
+        // the two apart.
+        for terminator in ["\n", "\r", "\r\n", "\n\r"] {
+            assert_eq!(
+                tdm_lines(&format!("A{terminator}B{terminator}C")),
+                vec!["A", "B", "C"],
+                "between lines, terminator {terminator:?}"
+            );
+            assert_eq!(
+                tdm_lines(&format!("A{terminator}")),
+                vec!["A"],
+                "a trailing terminator closes the last line, {terminator:?}"
+            );
+        }
+
+        // 4.2.10 allows a blank line anywhere, so two single terminators in a
+        // row keep the empty line between them. That is the case a pair must
+        // not produce, and the one the old assertion could not see.
+        assert_eq!(tdm_lines("A\n\nB"), vec!["A", "", "B"]);
+        assert_eq!(tdm_lines("A\r\rB"), vec!["A", "", "B"]);
+
+        // And a message reads the same under each of the four.
+        for terminator in ["\n", "\r", "\r\n", "\n\r"] {
+            let text = TERMINATOR_BODY.replace('|', terminator);
+            let tdm = parse_kvn(&text)
+                .unwrap_or_else(|err| panic!("terminator {terminator:?} must parse: {err}"));
+            assert_eq!(tdm.segments.len(), 1, "terminator {terminator:?} segments");
+            assert_eq!(
+                tdm.segments[0].data.records.len(),
+                1,
+                "terminator {terminator:?} records"
+            );
+        }
+    }
+
+    #[test]
+    fn end_of_input_line_numbers_count_the_lines_the_file_has() {
+        // The three end-of-input errors report the line past the last, and that
+        // count comes from the terminators the file uses rather than from line
+        // feeds alone. A carriage-return-terminated file used to arrive as one
+        // line, so none of these could report a number that meant anything.
+        const HEAD: [&str; 3] = [
+            "CCSDS_TDM_VERS = 2.0",
+            "CREATION_DATE = 2005-160T20:15:00Z",
+            "ORIGINATOR = NASA",
+        ];
+        const META: [&str; 3] = ["META_START", "TIME_SYSTEM = UTC", "PARTICIPANT_1 = DSS-25"];
+
+        for terminator in ["\n", "\r", "\r\n", "\n\r"] {
+            let unclosed_metadata = [&HEAD[..], &META[..2]].concat().join(terminator);
+            assert_eq!(
+                parse_kvn(&unclosed_metadata),
+                Err(TdmError::Section {
+                    line: 6,
+                    detail: "unclosed metadata block",
+                }),
+                "unclosed metadata, terminator {terminator:?}"
+            );
+
+            let metadata_without_data = [&HEAD[..], &META[..], &["META_STOP"][..]]
+                .concat()
+                .join(terminator);
+            assert_eq!(
+                parse_kvn(&metadata_without_data),
+                Err(TdmError::Section {
+                    line: 8,
+                    detail: "metadata without data block",
+                }),
+                "metadata without data, terminator {terminator:?}"
+            );
+
+            let unclosed_data = [
+                &HEAD[..],
+                &META[..],
+                &["META_STOP", "DATA_START", "RANGE = 2005-159T17:41:00 1.0"][..],
+            ]
+            .concat()
+            .join(terminator);
+            assert_eq!(
+                parse_kvn(&unclosed_data),
+                Err(TdmError::Section {
+                    line: 10,
+                    detail: "unclosed data block",
+                }),
+                "unclosed data, terminator {terminator:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_final_line_with_no_terminator_is_refused() {
+        // 4.2.11 terminates every TDM line, the last one included. Nothing
+        // checked it, and the writer joined its lines with a line feed and
+        // added none at the end, so every message sidereon wrote departed here.
+        let terminated = TERMINATOR_BODY.replace('|', "\n");
+        let tdm = parse_kvn(&terminated).expect("a terminated message reads");
+        assert_eq!(
+            parse_kvn(terminated.trim_end_matches('\n')),
+            Err(TdmError::UnterminatedFinalLine { line: 7 })
+        );
+
+        // The writer terminates its last line, and what it writes reads back.
+        let encoded = encode_kvn(&tdm).expect("the message writes");
+        assert!(encoded.ends_with('\n'));
+        assert_eq!(parse_kvn(&encoded).unwrap(), tdm);
+
+        // Every failure about what the message says is reported ahead of the
+        // missing terminator. An unclosed block is unterminated by
+        // construction, and a file with no version has a defect its author can
+        // act on, which "the last line carries no terminator" is not.
+        assert_eq!(
+            parse_kvn("CCSDS_TDM_VERS = 2.0\nMETA_START"),
+            Err(TdmError::Section {
+                line: 3,
+                detail: "unclosed metadata block",
+            })
+        );
+        assert_eq!(
+            parse_kvn("CREATION_DATE = 2005-160T20:15:00Z"),
+            Err(TdmError::MissingKeyword {
+                keyword: VERSION_KEY.to_string(),
+                segment: None,
+            })
+        );
+
+        // A character-set or line-length defect keeps its place ahead of them:
+        // each names a position in a line and explains how the rest of that
+        // line reads.
+        assert_eq!(
+            parse_kvn("CREATION\u{a0}_DATE = 2005-160T20:15:00Z"),
+            Err(TdmError::NonPrintableCharacter {
+                // U+00A0 is whitespace, so the token before it is all the
+                // keyword there is to name.
+                line: Some(1),
+                keyword: "CREATION".to_string(),
+                column: 9,
+                character: '\u{a0}',
+            })
+        );
+    }
+
+    #[test]
+    fn a_character_outside_printable_ascii_is_refused() {
+        // 4.2.1: "The TDM line must contain only printable ASCII characters and
+        // blanks. ASCII control characters (such as TAB, etc.) must not be used".
+        let with_tab = "\
+CCSDS_TDM_VERS = 2.0
+META_START
+\tTIME_SYSTEM = UTC
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP\n";
+        assert_eq!(
+            parse_kvn(with_tab),
+            Err(TdmError::NonPrintableCharacter {
+                line: Some(3),
+                keyword: "TIME_SYSTEM".to_string(),
+                column: 1,
+                character: '\t',
+            })
+        );
+
+        // A right double quotation mark, as two public TDM corpora carry in a
+        // clock-offset comment.
+        let with_non_ascii = "\
+CCSDS_TDM_VERS = 2.0
+COMMENT clock minus UTC\u{201d}
+META_START
+TIME_SYSTEM = UTC
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP\n";
+        assert_eq!(
+            parse_kvn(with_non_ascii),
+            Err(TdmError::NonPrintableCharacter {
+                line: Some(2),
+                keyword: COMMENT_KEY.to_string(),
+                column: 24,
+                character: '\u{201d}',
+            })
+        );
+    }
+
+    #[test]
+    fn a_line_over_the_character_limit_is_refused() {
+        // 4.2.1: "A TDM line must not exceed 254 ASCII characters and spaces
+        // (excluding line termination character[s])".
+        let prefix = "TIME_SYSTEM = ";
+        let value = "A".repeat(MAX_LINE_CHARACTERS);
+        let text = format!(
+            "\
+CCSDS_TDM_VERS = 2.0
+META_START
+{prefix}{value}
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP\n"
+        );
+        assert_eq!(
+            parse_kvn(&text),
+            Err(TdmError::LineTooLong {
+                line: Some(3),
+                keyword: "TIME_SYSTEM".to_string(),
+                length: prefix.len() + MAX_LINE_CHARACTERS,
+            })
+        );
+
+        // A line of exactly the limit is accepted.
+        let exact = "B".repeat(MAX_LINE_CHARACTERS - prefix.len());
+        let text = format!(
+            "\
+CCSDS_TDM_VERS = 2.0
+META_START
+{prefix}{exact}
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP\n"
+        );
+        let tdm = parse_kvn(&text).expect("a line of exactly 254 characters is allowed");
+        assert_eq!(
+            tdm.segments[0].metadata.time_system.as_deref(),
+            Some(exact.as_str())
         );
     }
 }

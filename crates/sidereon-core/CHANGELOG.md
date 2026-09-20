@@ -12,6 +12,22 @@ All notable changes to `sidereon-core` are documented here.
   the keyword is the locator it does have: the first token of the line it built.
   A read fills `line` with `Some` and the keyword with the offending line's
   first token.
+- **Breaking.** A TDM whose last line carries no terminator is refused with the
+  new `TdmError::UnterminatedFinalLine`, and forgiven under a lenient
+  `final_terminator`. CCSDS 503.0-B-2 4.2.11 terminates every line, the last one
+  included; 13 of the 53 public files gathered for this audit end without one,
+  10 of those indent with tabs as well, and seven read once both are forgiven.
+  None of the 53 turns on the terminator alone, since the other six are refused
+  for what they say rather than for how they end, so the axis earns its place as
+  the second permission those seven need and on the class generally.
+  `tdm::encode_kvn` terminates its last line, which it did not: every message
+  the writer produced ended unterminated, so sidereon
+  emitted the departure it now names. The missing terminator is reported behind
+  every failure about what the message says: an unclosed block, an absent
+  `CCSDS_TDM_VERS`, `CREATION_DATE` or `ORIGINATOR`, a version outside the `x.y`
+  form, and a message with no segment. A character outside printable ASCII and a
+  line over 254 characters stay ahead of those, since each names a position in
+  one line and explains how the rest of that line reads.
 - **Breaking.** `TdmError` and `TdmWarning` carry one payload convention. A
   keyword is `keyword: String` in every variant, whether this crate named it or
   read it from the message; it was `key`, `field` or `keyword` by turns, and
@@ -34,6 +50,21 @@ All notable changes to `sidereon-core` are documented here.
   built that no input produced. The version was also filtered for emptiness
   before being reported absent, which became unreachable once an empty value was
   refused at the line that gives it.
+- **Breaking.** A TDM is read in the lines and characters CCSDS 503.0-B-2
+  defines. 4.2.11 terminates a line with "a single Carriage Return or a single
+  Line Feed or a Carriage Return/Line Feed pair or a Line Feed/Carriage Return
+  pair"; the reader split on line feeds alone, so a file written with carriage
+  returns read as one long line and was refused for having no
+  `CCSDS_TDM_VERS`. Each pair now ends one line rather than leaving an empty
+  line behind it. 4.2.1 allows "only printable ASCII characters and blanks",
+  says "ASCII control characters (such as TAB, etc.) must not be used", and caps
+  a line at 254 characters excluding its terminator; none of that was checked,
+  so a tab, a NUL or a typographic quotation mark travelled through the reader
+  into a parsed value and back out of the writer. A line holding one is refused
+  with the new `TdmError::NonPrintableCharacter`, naming the line, the column
+  and the character, and an over-long line with the new `TdmError::LineTooLong`.
+  Two public TDM corpora carry a right double quotation mark in a clock-offset
+  comment, and those files are now refused by name rather than read.
 - **Breaking.** `TdmError` and `TdmInputErrorKind` are `#[non_exhaustive]`, so a
   caller matching on either needs a wildcard arm. The CCSDS 503.0-B-2 audit adds
   failure modes as it covers more of the standard, and the annotation is what

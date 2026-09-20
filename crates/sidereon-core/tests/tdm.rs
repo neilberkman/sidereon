@@ -247,7 +247,7 @@ ANGLE_1      =   1998-06-10T00:57:44            256.64002393
 ANGLE_2      =   1998-06-10T00:57:44             13.38100016
 TRANSMIT_FREQ_1 = 1998-06-10T00:57:44    2106395199.07917
 RECEIVE_FREQ =   1998-06-10T00:57:44     2287487999.0
-DATA_STOP";
+DATA_STOP\n";
 
 const ANNEX_E9_RANGE_TRANSMIT_TAG: &str = "\
 CCSDS_TDM_VERS = 2.0
@@ -315,7 +315,7 @@ RANGE = 2005-09-17T00:42:52.000000 3264.97295625609
 RANGE = 2005-09-17T00:42:54.000000 3266.80169024990
 RANGE = 2005-09-17T00:42:56.000000 3268.63267268713
 RANGE = 2005-09-17T00:42:58.000000 3270.46440460551
-DATA_STOP";
+DATA_STOP\n";
 
 const ANNEX_E10_DIFFERENCED_DOPPLER: &str = "\
 CCSDS_TDM_VERS = 2.0
@@ -362,7 +362,7 @@ RECEIVE_FREQ = 2003-07-08T04:47:55.0000 4.281702585856000E+00
 RECEIVE_FREQ = 2003-07-08T04:48:05.0000 4.127402919189000E+00
 RECEIVE_FREQ = 2003-07-08T04:48:15.0000 3.990903272724000E+00
 RECEIVE_FREQ = 2003-07-08T04:48:25.0000 3.872203646461000E+00
-DATA_STOP";
+DATA_STOP\n";
 
 const ANNEX_E22_TRACK_ID: &str = "\
 CCSDS_TDM_VERS = 2.0
@@ -393,7 +393,7 @@ MAG = 2019-10-21T19:00:24.405696 10.77
 ANGLE_1 = 2019-10-21T19:00:39.023021 333.89958508
 ANGLE_2 = 2019-10-21T19:00:39.023021 5.23604417
 MAG = 2019-10-21T19:00:39.023021 10.80
-DATA_STOP";
+DATA_STOP\n";
 
 const SYNTHETIC_DOPPLER: &str = "\
 CCSDS_TDM_VERS=2.0
@@ -414,7 +414,7 @@ DOPPLER_INTEGRATED=2020-001T00:00:00 -0.0126
 TRANSMIT_FREQ_1=2020-001T00:00:00 8435360000.125
 TRANSMIT_FREQ_RATE_1=2020-001T00:00:00 -0.125
 RECEIVE_FREQ=2020-001T00:00:00 8435359991.38625
-DATA_STOP";
+DATA_STOP\n";
 
 const TABLE_3_5_EXTRA: &str = "\
 CCSDS_TDM_VERS = 2.0
@@ -430,7 +430,7 @@ META_STOP
 DATA_START
 PC_N0 = 2020-001T00:00:00 41.5
 DOPPLER_COUNT = 2020-001T00:00:01 0
-DATA_STOP";
+DATA_STOP\n";
 
 const SYNTHETIC_CANONICAL: &str = "\
 CCSDS_TDM_VERS = 2.0
@@ -451,9 +451,9 @@ DOPPLER_INTEGRATED = 2020-001T00:00:00 -0.0126
 TRANSMIT_FREQ_1 = 2020-001T00:00:00 8435360000.125
 TRANSMIT_FREQ_RATE_1 = 2020-001T00:00:00 -0.125
 RECEIVE_FREQ = 2020-001T00:00:00 8435359991.38625
-DATA_STOP";
+DATA_STOP\n";
 
-const SYNTHETIC_CANONICAL_FNV1A64: u64 = 6279402006941602445;
+const SYNTHETIC_CANONICAL_FNV1A64: u64 = 13028237734340361061;
 
 #[test]
 fn all_annex_e_kvn_examples_parse_and_canonicalize() {
@@ -875,7 +875,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RECEIVE_FREQ = 2020-001T00:00:00
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(missing_value),
         Err(TdmError::MalformedRecord {
@@ -891,7 +891,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 ANGLE_1 = 2020-001T00:00:00 360.0
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(invalid_angle),
         Err(TdmError::InvalidField {
@@ -907,7 +907,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RECEIVE_FREQ = 2020-001T00:00:00 NaN
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(non_finite),
         Err(TdmError::InvalidField {
@@ -925,7 +925,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RANGE = 2020-001T00:00:00 {value}
-DATA_STOP"
+DATA_STOP\n"
         );
         assert_eq!(
             tdm::parse_kvn(&bad_numeric),
@@ -945,7 +945,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RANGE = 2020-001T00:00:00 {value}
-DATA_STOP"
+DATA_STOP\n"
         );
         assert_eq!(
             tdm::parse_kvn(&underflow),
@@ -963,7 +963,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RANGE = 2020-001T00:00:00 4.94E-324
-DATA_STOP";
+DATA_STOP\n";
     let parsed_minimum = tdm::parse_kvn(minimum_positive_double).unwrap();
     assert_eq!(
         find_record(&parsed_minimum, "RANGE", "2020-001T00:00:00")
@@ -980,7 +980,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 ANGLE_1 [Hz] = 2020-001T00:00:00 1.0
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(inline_key_unit),
         Err(TdmError::InvalidField {
@@ -996,7 +996,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 ANGLE_1 = 2020-001T00:00:00 1.0 [Hz]
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(inline_value_unit),
         Err(TdmError::InvalidField {
@@ -1012,7 +1012,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 UNKNOWN_OBS = 2020-001T00:00:00 1.0
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(unknown_keyword),
         Err(TdmError::InvalidField {
@@ -1028,7 +1028,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RECEIVE_FREQ_6 = 2020-001T00:00:00 1.0
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(invalid_index),
         Err(TdmError::InvalidField {
@@ -1051,7 +1051,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 {field} = 2020-001T00:00:00 1.0
-DATA_STOP"
+DATA_STOP\n"
         );
         assert_eq!(
             tdm::parse_kvn(&invalid_indexed_keyword),
@@ -1071,7 +1071,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RECEIVE_PHASE_CT_1 = 2020-001T00:00:00 {value}
-DATA_STOP"
+DATA_STOP\n"
         );
         assert_eq!(
             tdm::parse_kvn(&invalid_phase_count),
@@ -1099,7 +1099,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 {field} = 2020-001T00:00:00 {value}
-DATA_STOP"
+DATA_STOP\n"
         );
         assert_eq!(
             tdm::parse_kvn(&invalid_domain),
@@ -1117,7 +1117,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 RANGE = 2020-001T00:00:00 -0.0
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(negative_zero),
         Err(TdmError::InvalidField {
@@ -1133,7 +1133,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 DOPPLER_COUNT = 2020-001T00:00:00 1.5
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(fractional_doppler_count),
         Err(TdmError::InvalidField {
@@ -1149,7 +1149,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 DOPPLER_COUNT = 2020-001T00:00:00 1.0
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(decimal_doppler_count),
         Err(TdmError::InvalidField {
@@ -1165,7 +1165,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 DOPPLER_COUNT = 2020-001T00:00:00 1E+0
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(exponent_doppler_count),
         Err(TdmError::InvalidField {
@@ -1181,7 +1181,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 DOPPLER_COUNT = 2020-001T00:00:00 -1
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(negative_doppler_count),
         Err(TdmError::InvalidField {
@@ -1197,7 +1197,7 @@ TIME_SYSTEM = UTC
 META_STOP
 DATA_START
 DOPPLER_COUNT = 2020-001T00:00:00 2147483648
-DATA_STOP";
+DATA_STOP\n";
     assert_eq!(
         tdm::parse_kvn(large_doppler_count),
         Err(TdmError::InvalidField {
@@ -1319,8 +1319,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// CCSDS 503.0-B-2 4.2.5 c) excepts `COMMENT` from the KVN syntax and 4.5.3
 /// requires at least one space after the keyword, so the line is not an
 /// assignment in any section and is refused where it appears.
+///
+/// The payload also carries bytes 4.2.1 forbids, and the reader meets the first
+/// of those before it reaches line 112. Both are asserted: the refusal this file
+/// now gets, and that line 112 still holds the construct that broke the round
+/// trip. `a_comment_keyed_assignment_is_refused_in_both_sections` pins that
+/// construct on a message with nothing else wrong with it.
 #[test]
-fn scheduled_fuzz_comment_assignment_is_refused() {
+fn scheduled_fuzz_payload_is_refused() {
     let encoded = include_bytes!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/tdm/",
@@ -1334,13 +1340,21 @@ fn scheduled_fuzz_comment_assignment_is_refused() {
     );
 
     let text = String::from_utf8_lossy(&input);
+
+    // 4.2.1 allows printable ASCII and blanks only. Line 2 of the payload is
+    // `CCSDS_TDM_VERS= 'U` followed by three NUL bytes.
     assert_eq!(
         tdm::parse_kvn(&text),
-        Err(TdmError::MalformedLine {
-            line: 112,
-            text: "COMMENT=".to_string(),
+        Err(TdmError::NonPrintableCharacter {
+            line: Some(2),
+            keyword: "CCSDS_TDM_VERS=".to_string(),
+            column: 19,
+            character: '\0',
         })
     );
+
+    // The line that broke the round trip is still the 112th.
+    assert_eq!(text.lines().nth(111), Some("COMMENT="));
 }
 
 /// The smallest message carrying the refused line, so the property is pinned on
