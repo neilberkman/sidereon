@@ -35,8 +35,8 @@
 
 use sha2::{Digest, Sha256};
 use sidereon_core::astro::tdm::{
-    self, Tdm, TdmDataRecord, TdmDeparture, TdmError, TdmField, TdmInputErrorKind, TdmLeniency,
-    TdmObservable, TdmPolicy, TdmUnit, TdmWarning, TdmWritePolicy,
+    self, Tdm, TdmComment, TdmDataRecord, TdmDeparture, TdmError, TdmField, TdmInputErrorKind,
+    TdmLeniency, TdmObservable, TdmPolicy, TdmUnit, TdmWarning, TdmWritePolicy,
 };
 
 /// Figure E-17 gives `RCS` twice at `2011-05-11T10:26:33.7008` with different
@@ -855,10 +855,9 @@ fn a_forgiven_character_survives_into_the_value_and_back_out() {
     let fixture = &FORGIVEN_FIXTURES[2];
     let (tdm, _) = tdm::parse_kvn_with_policy(fixture.text, fixture.policy())
         .expect("the reader forgives the tabs");
-    assert!(tdm
-        .comments
-        .iter()
-        .any(|comment| comment.ends_with("Value is \"station clock minus UTC\u{201d}.")));
+    assert!(tdm.comments.iter().any(|comment| comment
+        .text
+        .ends_with("Value is \"station clock minus UTC\u{201d}.")));
 
     assert_eq!(
         tdm::encode_kvn(&tdm),
@@ -2022,10 +2021,19 @@ DATA_STOP\n";
     let parsed = tdm::parse_kvn(text).expect("comment lines parse");
     // A comment's text is everything after the keyword, so `COMMENT = note`
     // would read as the text `= note` rather than as an assignment.
-    assert_eq!(parsed.comments, vec!["note".to_string()]);
+    assert_eq!(
+        parsed.comments,
+        vec![TdmComment {
+            text: "note".to_string(),
+            before_record: 1,
+        }]
+    );
     assert_eq!(
         parsed.segments[0].metadata.comments,
-        vec!["=value".to_string()]
+        vec![TdmComment {
+            text: "=value".to_string(),
+            before_record: 0,
+        }]
     );
 }
 

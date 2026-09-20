@@ -6,6 +6,31 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** `Tdm` and `TdmMetadata` hold `comments: Vec<TdmComment>` rather
+  than `Vec<String>`, preserving the position of header and metadata comments
+  among fields. Comments are written back in their original position rather than
+  gathered to the top of their block. A header or metadata comment positioned
+  away from the start of its block (CCSDS 503.0-B-2 4.5.2 a), 4.5.2 b)) is
+  refused under strict policy with `TdmError::KeywordOutOfOrder` and emitted as
+  `TdmDeparture::KeywordOutOfOrder` when `keyword_order` is forgiven.
+- A comment's text retains leading whitespace (indentation) following the
+  required single space after `COMMENT` (CCSDS 503.0-B-2 4.5.3). Trailing
+  whitespace at the end of a comment line remains insignificant (4.2.9). A bare
+  `COMMENT` line represents an empty comment and encodes as a bare `COMMENT`
+  line.
+- **Breaking.** A timetag carrying the `Z` time code terminator alongside a
+  `TIME_SYSTEM` other than `UTC` is refused under every policy with
+  `TdmError::MalformedEpoch`. CCSDS 503.0-B-2 4.3.9 permits `Z` only for UTC;
+  declaring another time system while suffixing with Zulu specifies an instant
+  it is not. None of the 53 files in the test corpus carry `Z` alongside a
+  non-UTC time system.
+- Timetag comparison and uniqueness keys for tracking data records (CCSDS
+  503.0-B-2 3.4.10, 3.4.11) are built entirely from integer components: civil
+  day, whole seconds of day, and fractional seconds as an aligned integer.
+  Timetags differing in the last decimal place of fractional seconds no longer
+  compare equal or alias into duplicate records. Leap second timetags
+  (`23:59:60`) preserve second-of-minute as written without cross-day
+  normalisation into the next day's `00:00:00`.
 - **Breaking.** `tdm::encode_kvn` and `tdm::encode_kvn_with_policy` enforce the
   reader's rules over what they are about to write, refusing a value by name
   under `TdmWritePolicy::strict()` and reporting a named departure under a

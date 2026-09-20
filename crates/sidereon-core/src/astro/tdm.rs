@@ -76,8 +76,8 @@ const MAX_LINE_CHARACTERS: usize = 254;
 pub struct Tdm {
     /// The `CCSDS_TDM_VERS` header value.
     pub version: String,
-    /// Header comments in parse order.
-    pub comments: Vec<String>,
+    /// Header comments in parse order, each with its position.
+    pub comments: Vec<TdmComment>,
     /// The optional `CREATION_DATE` header value.
     pub creation_date: Option<String>,
     /// The optional `ORIGINATOR` header value.
@@ -111,8 +111,8 @@ pub struct TdmField {
 /// Metadata extracted from a TDM `META_START` / `META_STOP` block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TdmMetadata {
-    /// Metadata comments in parse order.
-    pub comments: Vec<String>,
+    /// Metadata comments in parse order, each with its position.
+    pub comments: Vec<TdmComment>,
     /// Raw metadata fields in parse order.
     pub fields: Vec<TdmField>,
     /// Parsed `PARTICIPANT_n` entries.
@@ -161,20 +161,24 @@ pub struct TdmPath {
     pub participants: Vec<u8>,
 }
 
-/// A data-section comment and where it sits among the records.
+/// A comment and where it sits among the fields or records.
 ///
-/// 4.5.2 c) puts a data-section comment between `DATA_START` and the first
-/// record, so a conforming message gives every comment `before_record` of 0.
-/// The position is kept anyway: a message read under a policy that forgives the
-/// placement writes back with each comment where it was, rather than gathered
-/// to the top of the block.
+/// CCSDS 503.0-B-2 4.5.2 puts comments at the top of their enclosing section:
+/// - header comments between `CCSDS_TDM_VERS` and the first header field,
+/// - metadata comments between `META_START` and the first metadata field,
+/// - data comments between `DATA_START` and the first data record.
+///
+/// Conforming messages therefore give header comments `before_record: 1`
+/// (following the version keyword), and metadata and data comments
+/// `before_record: 0`. The position is kept anyway: a message read under a
+/// policy that forgives the placement writes back with each comment where it
+/// was, rather than gathered to the top of the block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TdmComment {
     /// The comment text: everything after the keyword and the space 4.5.3
     /// requires.
     pub text: String,
-    /// The index of the record this comment precedes, which is the record count
-    /// for a comment after the last one.
+    /// The index of the field or record this comment precedes.
     pub before_record: usize,
 }
 
@@ -1356,7 +1360,7 @@ struct HeaderBuilder {
     version: Option<String>,
     /// One-based line the `CCSDS_TDM_VERS` record was read from.
     version_line: Option<usize>,
-    comments: Vec<String>,
+    comments: Vec<TdmComment>,
     /// Every header assignment in the order it was read, which is what a
     /// repeated keyword is judged against; the modeled fields below are built
     /// from it.
@@ -1371,7 +1375,7 @@ struct HeaderBuilder {
 struct MetadataBuilder {
     /// The highest rank any keyword in this block has reached, for 3.3.1.8.
     highest_rank: usize,
-    comments: Vec<String>,
+    comments: Vec<TdmComment>,
     fields: Vec<TdmField>,
 }
 
@@ -1466,7 +1470,11 @@ pub fn parse_kvn_with_policy(
                     policy,
                     &mut warnings,
                 )?;
-                builder.comments.push(comment);
+                let before_record = builder.fields.len();
+                builder.comments.push(TdmComment {
+                    text: comment,
+                    before_record,
+                });
             } else if pending_metadata.is_none() && segments.is_empty() {
                 check_keyword_order(
                     line_no,
@@ -1477,7 +1485,11 @@ pub fn parse_kvn_with_policy(
                     policy,
                     &mut warnings,
                 )?;
-                header.comments.push(comment);
+                let before_record = header.assignments.len();
+                header.comments.push(TdmComment {
+                    text: comment,
+                    before_record,
+                });
             } else if pending_metadata.is_none() {
                 // 3.1.2 puts the header once, before the first segment, so a
                 // comment after DATA_STOP belongs to no block the standard
@@ -1599,10 +1611,15 @@ pub fn parse_kvn_with_policy(
                 .map(|metadata| metadata.range_units.clone())
                 .unwrap_or(TdmUnit::Kilometers);
             let record = parse_record(line_no, &key, &value, &range_units)?;
-            let epoch = parse_epoch_key(&record.epoch).ok_or_else(|| TdmError::MalformedEpoch {
-                line: Some(line_no),
-                keyword: record.keyword.clone(),
-                text: record.epoch.clone(),
+            let time_system = pending_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.time_system.as_deref());
+            let epoch = parse_epoch_key(&record.epoch, time_system).ok_or_else(|| {
+                TdmError::MalformedEpoch {
+                    line: Some(line_no),
+                    keyword: record.keyword.clone(),
+                    text: record.epoch.clone(),
+                }
             })?;
             builder.epochs.push(epoch);
             builder.records.push(record);
@@ -1803,23 +1820,36 @@ pub fn encode_kvn_with_policy(
     validate_tdm(tdm, policy, &mut departures)?;
 
     let mut lines = Vec::new();
-    lines.push(format!("{VERSION_KEY} = {}", tdm.version));
-    lines.extend(tdm.comments.iter().map(comment_line));
-    if let Some(creation_date) = &tdm.creation_date {
-        lines.push(format!("CREATION_DATE = {creation_date}"));
+    let header_fields = unannotated_header_fields(tdm);
+    for (index, field) in header_fields.iter().enumerate() {
+        for comment in &tdm.comments {
+            if comment.before_record == index {
+                lines.push(comment_line(&comment.text));
+            }
+        }
+        lines.push(field_line(field));
     }
-    if let Some(originator) = &tdm.originator {
-        lines.push(format!("ORIGINATOR = {originator}"));
+    for comment in &tdm.comments {
+        if comment.before_record >= header_fields.len() {
+            lines.push(comment_line(&comment.text));
+        }
     }
-    if let Some(message_id) = &tdm.message_id {
-        lines.push(format!("MESSAGE_ID = {message_id}"));
-    }
-    lines.extend(tdm.header_fields.iter().map(field_line));
 
     for segment in &tdm.segments {
         lines.push("META_START".to_string());
-        lines.extend(segment.metadata.comments.iter().map(comment_line));
-        lines.extend(segment.metadata.fields.iter().map(field_line));
+        for (index, field) in segment.metadata.fields.iter().enumerate() {
+            for comment in &segment.metadata.comments {
+                if comment.before_record == index {
+                    lines.push(comment_line(&comment.text));
+                }
+            }
+            lines.push(field_line(field));
+        }
+        for comment in &segment.metadata.comments {
+            if comment.before_record >= segment.metadata.fields.len() {
+                lines.push(comment_line(&comment.text));
+            }
+        }
         lines.push("META_STOP".to_string());
         lines.push("DATA_START".to_string());
         // Each comment goes back where it was read, so a message that carried
@@ -2450,7 +2480,7 @@ fn validate_tdm(
         return Err(TdmError::NoSegments);
     }
     for comment in &tdm.comments {
-        check_comment(comment)?;
+        check_comment(&comment.text)?;
     }
     for field in &tdm.header_fields {
         check_field(field)?;
@@ -2474,7 +2504,7 @@ fn validate_tdm(
     for (index, segment) in tdm.segments.iter().enumerate() {
         let number = index.saturating_add(1);
         for comment in &segment.metadata.comments {
-            check_comment(comment)?;
+            check_comment(&comment.text)?;
         }
         for comment in &segment.data.comments {
             check_comment(&comment.text)?;
@@ -2548,11 +2578,14 @@ fn validate_tdm(
         // 4.3.9's timetags, 3.4.10's order and 3.4.11's uniqueness, checked by
         // the reader's own check_record_order over the records to be written.
         let mut data = DataBuilder::default();
+        let time_system = segment.metadata.time_system.as_deref();
         for record in &segment.data.records {
-            let epoch = parse_epoch_key(&record.epoch).ok_or_else(|| TdmError::MalformedEpoch {
-                line: None,
-                keyword: record.keyword.clone(),
-                text: record.epoch.clone(),
+            let epoch = parse_epoch_key(&record.epoch, time_system).ok_or_else(|| {
+                TdmError::MalformedEpoch {
+                    line: None,
+                    keyword: record.keyword.clone(),
+                    text: record.epoch.clone(),
+                }
             })?;
             data.epochs.push(epoch);
             data.records.push(record.clone());
@@ -2766,20 +2799,12 @@ fn check_written_line(
     Ok(())
 }
 
-/// The header lines the writer will emit, keyed and in emission order.
-///
-/// A comment is carried as a `COMMENT` field so the order check sees it where
-/// 4.5.2 a) puts it; it is excepted from the one-value rule, since 4.2.5 c)
-/// excepts `COMMENT` from the KVN syntax the rule is part of.
-fn written_header_fields(tdm: &Tdm) -> Vec<TdmField> {
+/// The header fields without comments that the writer will emit.
+fn unannotated_header_fields(tdm: &Tdm) -> Vec<TdmField> {
     let mut fields = vec![TdmField {
         key: VERSION_KEY.to_string(),
         value: tdm.version.clone(),
     }];
-    fields.extend(tdm.comments.iter().map(|text| TdmField {
-        key: COMMENT_KEY.to_string(),
-        value: text.clone(),
-    }));
     for (key, held) in [
         ("CREATION_DATE", &tdm.creation_date),
         ("ORIGINATOR", &tdm.originator),
@@ -2796,19 +2821,60 @@ fn written_header_fields(tdm: &Tdm) -> Vec<TdmField> {
     fields
 }
 
+/// The header lines the writer will emit, keyed and in emission order.
+///
+/// A comment is carried as a `COMMENT` field so the order check sees it where
+/// it sits; it is excepted from the one-value rule, since 4.2.5 c)
+/// excepts `COMMENT` from the KVN syntax the rule is part of.
+fn written_header_fields(tdm: &Tdm) -> Vec<TdmField> {
+    let unannotated = unannotated_header_fields(tdm);
+    let mut fields = Vec::with_capacity(unannotated.len() + tdm.comments.len());
+    for (index, field) in unannotated.iter().enumerate() {
+        for comment in &tdm.comments {
+            if comment.before_record == index {
+                fields.push(TdmField {
+                    key: COMMENT_KEY.to_string(),
+                    value: comment.text.clone(),
+                });
+            }
+        }
+        fields.push(field.clone());
+    }
+    for comment in &tdm.comments {
+        if comment.before_record >= unannotated.len() {
+            fields.push(TdmField {
+                key: COMMENT_KEY.to_string(),
+                value: comment.text.clone(),
+            });
+        }
+    }
+    fields
+}
+
 /// The metadata lines the writer will emit for a segment, keyed and in
 /// emission order.
 fn written_metadata_fields(segment: &TdmSegment) -> Vec<TdmField> {
-    let mut fields: Vec<TdmField> = segment
-        .metadata
-        .comments
-        .iter()
-        .map(|text| TdmField {
-            key: COMMENT_KEY.to_string(),
-            value: text.clone(),
-        })
-        .collect();
-    fields.extend(segment.metadata.fields.iter().cloned());
+    let unannotated = &segment.metadata.fields;
+    let mut fields = Vec::with_capacity(unannotated.len() + segment.metadata.comments.len());
+    for (index, field) in unannotated.iter().enumerate() {
+        for comment in &segment.metadata.comments {
+            if comment.before_record == index {
+                fields.push(TdmField {
+                    key: COMMENT_KEY.to_string(),
+                    value: comment.text.clone(),
+                });
+            }
+        }
+        fields.push(field.clone());
+    }
+    for comment in &segment.metadata.comments {
+        if comment.before_record >= unannotated.len() {
+            fields.push(TdmField {
+                key: COMMENT_KEY.to_string(),
+                value: comment.text.clone(),
+            });
+        }
+    }
     fields
 }
 
@@ -3009,18 +3075,10 @@ fn comment_text(line: &str) -> Option<String> {
         return Some(String::new());
     }
     let rest = line.strip_prefix(COMMENT_KEY)?;
-    if rest
-        .chars()
-        .next()
-        .is_some_and(|character| character.is_ascii_whitespace())
-    {
-        Some(rest.trim_start().to_string())
-    } else {
-        None
-    }
+    rest.strip_prefix(' ').map(|text| text.to_string())
 }
 
-fn comment_line(comment: &String) -> String {
+fn comment_line(comment: &str) -> String {
     if comment.is_empty() {
         COMMENT_KEY.to_string()
     } else {
@@ -3112,10 +3170,11 @@ fn emit_or_refuse(
 /// day, so a message may use either and still be ordered. Leap seconds are not
 /// modeled: 3.4.10 asks only for chronological order within one time system,
 /// which the reduction preserves.
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct EpochKey {
     day: i64,
-    second_of_day: f64,
+    second_of_day: u32,
+    subsecond: u128,
 }
 
 /// Days from 1970-01-01 for a proleptic Gregorian date, after Howard Hinnant's
@@ -3156,7 +3215,10 @@ fn fixed_digits(text: &str, width: usize) -> Option<i64> {
 }
 
 /// Read a timetag in either form 4.3.9 defines.
-fn parse_epoch_key(text: &str) -> Option<EpochKey> {
+fn parse_epoch_key(text: &str, time_system: Option<&str>) -> Option<EpochKey> {
+    if text.ends_with('Z') && time_system.is_some_and(|ts| !ts.eq_ignore_ascii_case("UTC")) {
+        return None;
+    }
     let body = text.strip_suffix('Z').unwrap_or(text);
     let (date, time) = body.split_once('T')?;
 
@@ -3191,14 +3253,19 @@ fn parse_epoch_key(text: &str) -> Option<EpochKey> {
         _ => return None,
     };
 
-    let (clock, fraction) = match time.split_once('.') {
+    let (clock, subsecond) = match time.split_once('.') {
         Some((clock, digits)) => {
             if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
                 return None;
             }
-            (clock, format!("0.{digits}").parse::<f64>().ok()?)
+            let mut padded = [b'0'; 30];
+            let len = digits.len().min(30);
+            padded[..len].copy_from_slice(&digits.as_bytes()[..len]);
+            let s = std::str::from_utf8(&padded).ok()?;
+            let subsecond = s.parse::<u128>().ok()?;
+            (clock, subsecond)
         }
-        None => (time, 0.0),
+        None => (time, 0),
     };
     if clock.len() != 8 || clock.get(2..3)? != ":" || clock.get(5..6)? != ":" {
         return None;
@@ -3213,7 +3280,8 @@ fn parse_epoch_key(text: &str) -> Option<EpochKey> {
 
     Some(EpochKey {
         day,
-        second_of_day: (hours * 3600 + minutes * 60 + seconds) as f64 + fraction,
+        second_of_day: (hours * 3600 + minutes * 60 + seconds) as u32,
+        subsecond,
     })
 }
 
@@ -3236,12 +3304,12 @@ fn check_record_order(
     policy: TdmPolicy,
     warnings: &mut Vec<TdmWarning>,
 ) -> Result<(), TdmError> {
-    let mut seen: HashSet<(&str, i64, u64)> = HashSet::new();
+    let mut seen: HashSet<(&str, EpochKey)> = HashSet::new();
     let mut latest: HashMap<&str, EpochKey> = HashMap::new();
 
     for (record, epoch) in builder.records.iter().zip(&builder.epochs) {
         let keyword = record.keyword.as_str();
-        if !seen.insert((keyword, epoch.day, epoch.second_of_day.to_bits())) {
+        if !seen.insert((keyword, *epoch)) {
             match policy.duplicate_records {
                 TdmLeniency::Strict => {
                     return Err(TdmError::DuplicateRecord {
@@ -3430,13 +3498,13 @@ fn known_metadata_keyword(key: &str) -> Result<bool, TdmError> {
 /// Refuse a comment whose text the KVN form cannot carry.
 ///
 /// 4.5.3 takes "the remainder of the line" as the comment value after the
-/// keyword and its space, and 4.2.9 drops whitespace before the end of a line,
-/// so text padded at either end does not read back as itself. A newline would
-/// write a second line, which reparses as a fabricated field or a malformed
-/// line rather than as part of this comment.
+/// keyword and its space, indentation included. 4.2.9 drops whitespace before
+/// the end of a line, so text with trailing whitespace does not read back as
+/// itself. A newline would write a second line, which reparses as a fabricated
+/// field or a malformed line rather than as part of this comment.
 fn check_comment(text: &str) -> Result<(), TdmError> {
-    let reason = if text.trim() != text {
-        Some("whitespace around the text, which 4.2.9 drops on the way back")
+    let reason = if text.trim_end() != text {
+        Some("whitespace at the end of the text, which 4.2.9 drops on the way back")
     } else if text.contains(['\r', '\n']) {
         Some("a line terminator, which would write a second line")
     } else {
@@ -3780,7 +3848,13 @@ RANGE = 2005-159T17:41:00 1.0
 DATA_STOP\n",
         )
         .unwrap();
-        assert_eq!(tdm.comments, vec!["= file = tdm.dat".to_string()]);
+        assert_eq!(
+            tdm.comments,
+            vec![TdmComment {
+                text: "= file = tdm.dat".to_string(),
+                before_record: 1,
+            }]
+        );
         assert!(tdm.header_fields.is_empty());
     }
 
@@ -4433,13 +4507,12 @@ DATA_STOP\n";
     #[test]
     fn a_comment_the_kvn_form_cannot_carry_is_refused() {
         let base = parse_kvn(CONFORMING).unwrap();
-        for (text, fragment) in [
-            (" padded", "around the text"),
-            ("padded ", "around the text"),
-            ("two\nlines", "line terminator"),
-        ] {
+        for (text, fragment) in [("padded ", "4.2.9"), ("two\nlines", "line terminator")] {
             let mut tdm = base.clone();
-            tdm.comments.push(text.to_string());
+            tdm.comments.push(TdmComment {
+                text: text.to_string(),
+                before_record: 1,
+            });
             match encode_kvn(&tdm) {
                 Err(TdmError::Unwritable { keyword, reason }) => {
                     assert_eq!(keyword, COMMENT_KEY);
@@ -4451,7 +4524,10 @@ DATA_STOP\n";
 
         // A comment the form carries writes and reads back as itself.
         let mut tdm = base;
-        tdm.comments.push("plain text".to_string());
+        tdm.comments.push(TdmComment {
+            text: "plain text".to_string(),
+            before_record: 1,
+        });
         let encoded = encode_kvn(&tdm).expect("a plain comment writes");
         assert_eq!(parse_kvn(&encoded).unwrap().comments, tdm.comments);
     }
@@ -4649,7 +4725,10 @@ DATA_STOP\n";
         // Forgiving the order keeps the comment; only its position was wrong.
         assert_eq!(
             tdm.comments,
-            vec!["written after the originator".to_string()]
+            vec![TdmComment {
+                text: "written after the originator".to_string(),
+                before_record: 3,
+            }]
         );
 
         // 3.3.1.8 fixes the metadata order the same way, and table 3-3 puts
@@ -5253,5 +5332,279 @@ DATA_STOP\n";
                 second: "GPS".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn an_indented_comment_survives_round_trip_byte_for_byte() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+COMMENT   indented by two spaces
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+COMMENT     indented by four spaces
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+COMMENT       indented by six spaces
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP\n";
+
+        let (tdm, warnings) = parse_kvn_with_policy(input, TdmPolicy::strict())
+            .expect("indented comments parse strictly");
+        assert!(warnings.is_empty());
+        assert_eq!(
+            tdm.comments,
+            vec![TdmComment {
+                text: "  indented by two spaces".to_string(),
+                before_record: 1,
+            }]
+        );
+        assert_eq!(
+            tdm.segments[0].metadata.comments,
+            vec![TdmComment {
+                text: "    indented by four spaces".to_string(),
+                before_record: 0,
+            }]
+        );
+        assert_eq!(
+            tdm.segments[0].data.comments,
+            vec![TdmComment {
+                text: "      indented by six spaces".to_string(),
+                before_record: 0,
+            }]
+        );
+
+        let encoded = encode_kvn(&tdm).expect("indented comments encode strictly");
+        assert_eq!(encoded, input);
+
+        let (reparsed, warnings2) = parse_kvn_with_policy(&encoded, TdmPolicy::strict())
+            .expect("encoded output reparses strictly");
+        assert!(warnings2.is_empty());
+        assert_eq!(reparsed, tdm);
+    }
+
+    #[test]
+    fn comments_after_originator_and_time_system_round_trip_under_forgiven_keyword_order() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+COMMENT after originator
+META_START
+TIME_SYSTEM = UTC
+COMMENT after time system
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP\n";
+
+        assert_eq!(
+            parse_kvn(input),
+            Err(TdmError::KeywordOutOfOrder {
+                line: Some(4),
+                keyword: COMMENT_KEY.to_string(),
+                section: "header",
+            })
+        );
+
+        let read_policy = TdmPolicy::strict().with_keyword_order(TdmLeniency::Forgive);
+        let (tdm, warnings) =
+            parse_kvn_with_policy(input, read_policy).expect("forgiving keyword order reads");
+        assert_eq!(
+            warnings,
+            vec![
+                TdmWarning::KeywordOutOfOrder {
+                    line: 4,
+                    keyword: COMMENT_KEY.to_string(),
+                    section: "header",
+                },
+                TdmWarning::KeywordOutOfOrder {
+                    line: 7,
+                    keyword: COMMENT_KEY.to_string(),
+                    section: "metadata",
+                },
+            ]
+        );
+        assert_eq!(
+            tdm.comments,
+            vec![TdmComment {
+                text: "after originator".to_string(),
+                before_record: 3,
+            }]
+        );
+        assert_eq!(
+            tdm.segments[0].metadata.comments,
+            vec![TdmComment {
+                text: "after time system".to_string(),
+                before_record: 1,
+            }]
+        );
+
+        let write_policy = TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive);
+        let (encoded, departures) =
+            encode_kvn_with_policy(&tdm, write_policy).expect("mirror write policy encodes");
+        assert_eq!(
+            departures,
+            vec![
+                TdmDeparture::KeywordOutOfOrder {
+                    keyword: COMMENT_KEY.to_string(),
+                    section: "header",
+                },
+                TdmDeparture::KeywordOutOfOrder {
+                    keyword: COMMENT_KEY.to_string(),
+                    section: "metadata",
+                },
+            ]
+        );
+        assert_eq!(encoded, input);
+    }
+
+    #[test]
+    fn a_bare_comment_line_round_trips_bare() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+COMMENT
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+COMMENT
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+COMMENT
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP\n";
+
+        let (tdm, warnings) =
+            parse_kvn_with_policy(input, TdmPolicy::strict()).expect("bare comments parse");
+        assert!(warnings.is_empty());
+        assert_eq!(
+            tdm.comments,
+            vec![TdmComment {
+                text: String::new(),
+                before_record: 1,
+            }]
+        );
+        assert_eq!(
+            tdm.segments[0].metadata.comments,
+            vec![TdmComment {
+                text: String::new(),
+                before_record: 0,
+            }]
+        );
+        assert_eq!(
+            tdm.segments[0].data.comments,
+            vec![TdmComment {
+                text: String::new(),
+                before_record: 0,
+            }]
+        );
+
+        let encoded = encode_kvn(&tdm).expect("bare comments encode");
+        assert_eq!(encoded, input);
+
+        let (reparsed, warnings2) = parse_kvn_with_policy(&encoded, TdmPolicy::strict())
+            .expect("reparsed bare comments parse");
+        assert!(warnings2.is_empty());
+        assert_eq!(reparsed, tdm);
+    }
+
+    #[test]
+    fn timetags_differing_in_last_fractional_digit_are_distinct() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T20:15:00.1234567890123456 1.0
+RANGE = 2005-160T20:15:00.1234567890123457 2.0
+DATA_STOP\n";
+
+        let (tdm, warnings) = parse_kvn_with_policy(input, TdmPolicy::strict())
+            .expect("high-precision timetags are distinct and in order");
+        assert!(warnings.is_empty());
+        assert_eq!(tdm.segments[0].data.records.len(), 2);
+    }
+
+    #[test]
+    fn leap_second_does_not_alias_onto_next_day_midnight() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T23:59:59 1.0
+RANGE = 2005-160T23:59:60 2.0
+RANGE = 2005-161T00:00:00 3.0
+DATA_STOP\n";
+
+        let (tdm, warnings) = parse_kvn_with_policy(input, TdmPolicy::strict())
+            .expect("leap second orders after 23:59:59 and before next day 00:00:00");
+        assert!(warnings.is_empty());
+        assert_eq!(tdm.segments[0].data.records.len(), 3);
+    }
+
+    #[test]
+    fn z_suffix_with_non_utc_time_system_is_refused_under_all_policies() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = GPS
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T20:15:00Z 1.0
+DATA_STOP\n";
+
+        assert_eq!(
+            parse_kvn(input),
+            Err(TdmError::MalformedEpoch {
+                line: Some(9),
+                keyword: "RANGE".to_string(),
+                text: "2005-160T20:15:00Z".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_kvn_with_policy(input, TdmPolicy::lenient()),
+            Err(TdmError::MalformedEpoch {
+                line: Some(9),
+                keyword: "RANGE".to_string(),
+                text: "2005-160T20:15:00Z".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn z_suffix_with_utc_time_system_is_accepted() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T20:15:00Z 1.0
+DATA_STOP\n";
+
+        let (tdm, warnings) =
+            parse_kvn_with_policy(input, TdmPolicy::strict()).expect("Z with UTC parses");
+        assert!(warnings.is_empty());
+        assert_eq!(tdm.segments[0].data.records.len(), 1);
     }
 }
