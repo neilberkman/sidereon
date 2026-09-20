@@ -10,7 +10,63 @@
 use std::fmt;
 
 const VERSION_KEY: &str = "CCSDS_TDM_VERS";
+/// The keywords CCSDS 503.0-B-2 4.2.5 c) excepts from the `keyword = value`
+/// syntax. None of them can carry a value, in any section.
+const EXCEPTED_KEYWORDS: [&str; 5] = [
+    COMMENT_KEY,
+    "META_START",
+    "META_STOP",
+    "DATA_START",
+    "DATA_STOP",
+];
 const COMMENT_KEY: &str = "COMMENT";
+/// The order table 3-2 fixes for header keywords, which 3.2.3 makes binding.
+const HEADER_ORDER: [&str; 5] = [
+    VERSION_KEY,
+    COMMENT_KEY,
+    "CREATION_DATE",
+    "ORIGINATOR",
+    "MESSAGE_ID",
+];
+
+/// The order table 3-3 fixes for metadata keywords, which 3.3.1.8 makes
+/// binding, by family: an indexed keyword ranks where its base does.
+const METADATA_ORDER: [&str; 33] = [
+    COMMENT_KEY,
+    "TRACK_ID",
+    "DATA_TYPES",
+    "TIME_SYSTEM",
+    "START_TIME",
+    "STOP_TIME",
+    "PARTICIPANT",
+    "MODE",
+    "PATH",
+    "EPHEMERIS_NAME",
+    "TRANSMIT_BAND",
+    "RECEIVE_BAND",
+    "TURNAROUND_NUMERATOR",
+    "TURNAROUND_DENOMINATOR",
+    "TIMETAG_REF",
+    "INTEGRATION_INTERVAL",
+    "INTEGRATION_REF",
+    "FREQ_OFFSET",
+    "RANGE_MODE",
+    "RANGE_MODULUS",
+    "RANGE_UNITS",
+    "ANGLE_TYPE",
+    "REFERENCE_FRAME",
+    "INTERPOLATION",
+    "INTERPOLATION_DEGREE",
+    "DOPPLER_COUNT_BIAS",
+    "DOPPLER_COUNT_SCALE",
+    "DOPPLER_COUNT_ROLLOVER",
+    "TRANSMIT_DELAY",
+    "RECEIVE_DELAY",
+    "DATA_QUALITY",
+    "CORRECTION",
+    "CORRECTIONS_APPLIED",
+];
+
 /// The longest line CCSDS 503.0-B-2 4.2.1 allows, excluding its terminator.
 const MAX_LINE_CHARACTERS: usize = 254;
 
@@ -104,11 +160,28 @@ pub struct TdmPath {
     pub participants: Vec<u8>,
 }
 
+/// A data-section comment and where it sits among the records.
+///
+/// 4.5.2 c) puts a data-section comment between `DATA_START` and the first
+/// record, so a conforming message gives every comment `before_record` of 0.
+/// The position is kept anyway: a message read under a policy that forgives the
+/// placement writes back with each comment where it was, rather than gathered
+/// to the top of the block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TdmComment {
+    /// The comment text: everything after the keyword and the space 4.5.3
+    /// requires.
+    pub text: String,
+    /// The index of the record this comment precedes, which is the record count
+    /// for a comment after the last one.
+    pub before_record: usize,
+}
+
 /// A TDM data block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TdmDataSection {
-    /// Data-section comments in parse order.
-    pub comments: Vec<String>,
+    /// Data-section comments in parse order, each with its position.
+    pub comments: Vec<TdmComment>,
     /// Data records in parse order.
     pub records: Vec<TdmDataRecord>,
 }
@@ -1130,7 +1203,11 @@ impl std::error::Error for TdmError {}
 
 #[derive(Default)]
 struct HeaderBuilder {
+    /// The highest rank any keyword in this section has reached, for 3.2.3.
+    highest_rank: usize,
     version: Option<String>,
+    /// One-based line the `CCSDS_TDM_VERS` record was read from.
+    version_line: Option<usize>,
     comments: Vec<String>,
     creation_date: Option<String>,
     originator: Option<String>,
@@ -1140,13 +1217,15 @@ struct HeaderBuilder {
 
 #[derive(Default)]
 struct MetadataBuilder {
+    /// The highest rank any keyword in this block has reached, for 3.3.1.8.
+    highest_rank: usize,
     comments: Vec<String>,
     fields: Vec<TdmField>,
 }
 
 #[derive(Default)]
 struct DataBuilder {
-    comments: Vec<String>,
+    comments: Vec<TdmComment>,
     records: Vec<TdmDataRecord>,
 }
 
@@ -1182,10 +1261,37 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
 
         if let Some(comment) = comment_text(line) {
             if let Some(builder) = data.as_mut() {
-                builder.comments.push(comment);
+                // 4.5.2 c) puts a data-section comment "between the
+                // 'DATA_START' keyword and the first Tracking Data Record".
+                if !builder.records.is_empty() {
+                    return Err(TdmError::KeywordOutOfOrder {
+                        line: line_no,
+                        keyword: COMMENT_KEY.to_string(),
+                        section: "data",
+                    });
+                }
+                let before_record = builder.records.len();
+                builder.comments.push(TdmComment {
+                    text: comment,
+                    before_record,
+                });
             } else if let Some(builder) = metadata.as_mut() {
+                check_keyword_order(
+                    line_no,
+                    COMMENT_KEY,
+                    "metadata",
+                    &METADATA_ORDER,
+                    &mut builder.highest_rank,
+                )?;
                 builder.comments.push(comment);
             } else if pending_metadata.is_none() {
+                check_keyword_order(
+                    line_no,
+                    COMMENT_KEY,
+                    "header",
+                    &HEADER_ORDER,
+                    &mut header.highest_rank,
+                )?;
                 header.comments.push(comment);
             } else {
                 return Err(TdmError::Section {
@@ -1212,7 +1318,7 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                     line: line_no,
                     detail: "metadata stop without metadata start",
                 })?;
-                pending_metadata = Some(build_metadata(builder)?);
+                pending_metadata = Some(build_metadata(builder, segments.len().saturating_add(1))?);
                 continue;
             }
             "DATA_START" => {
@@ -1234,6 +1340,12 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                     line: line_no,
                     detail: "data stop without metadata",
                 })?;
+                // 3.1.3: a segment's data section holds "a minimum of one
+                // Tracking Data Record".
+                if builder.records.is_empty() {
+                    let segment = segments.len().saturating_add(1);
+                    return Err(TdmError::EmptyDataSection { segment });
+                }
                 segments.push(TdmSegment {
                     metadata,
                     data: TdmDataSection {
@@ -1255,10 +1367,20 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
         // line needs a space after the keyword (4.5.3), so `COMMENT=value` is
         // neither a comment nor an assignment. Keeping it as a field produced a
         // value whose encoding, `COMMENT = value`, reparsed as a comment.
-        if key == COMMENT_KEY {
+        if keyword_takes_no_value(&key) {
             return Err(TdmError::MalformedLine {
                 line: line_no,
                 text: line.to_string(),
+            });
+        }
+
+        // 4.3.1: "A non-empty value field must be specified for each keyword
+        // provided." An empty value was read as an empty string, which the
+        // modeled header fields then dropped on write and the rest carried.
+        if value.is_empty() {
+            return Err(TdmError::EmptyValue {
+                line: Some(line_no),
+                keyword: key,
             });
         }
 
@@ -1267,13 +1389,44 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                 .as_ref()
                 .map(|metadata| metadata.range_units.clone())
                 .unwrap_or(TdmUnit::Kilometers);
-            builder
-                .records
-                .push(parse_record(line_no, &key, &value, &range_units)?);
+            let record = parse_record(line_no, &key, &value, &range_units)?;
+            builder.records.push(record);
         } else if let Some(builder) = metadata.as_mut() {
+            // 3.3.1.7: "Only those keywords shown in table 3-3 shall be used in
+            // a TDM Metadata Section."
+            if !known_metadata_keyword(&key)? {
+                return Err(TdmError::UndefinedKeyword {
+                    line: line_no,
+                    keyword: key,
+                    section: "metadata",
+                });
+            }
+            check_keyword_order(
+                line_no,
+                &key,
+                "metadata",
+                &METADATA_ORDER,
+                &mut builder.highest_rank,
+            )?;
             builder.fields.push(TdmField { key, value });
         } else if pending_metadata.is_none() {
-            parse_header_field(&mut header, key, value);
+            // 3.2.3: "Only those keywords shown in table 3-2 shall be used in a
+            // TDM Header."
+            if !known_header_keyword(&key) {
+                return Err(TdmError::UndefinedKeyword {
+                    line: line_no,
+                    keyword: key,
+                    section: "header",
+                });
+            }
+            check_keyword_order(
+                line_no,
+                &key,
+                "header",
+                &HEADER_ORDER,
+                &mut header.highest_rank,
+            )?;
+            parse_header_field(&mut header, line_no, key, value);
         } else {
             return Err(TdmError::Section {
                 line: line_no,
@@ -1301,25 +1454,30 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
         });
     }
 
-    let version =
-        header
-            .version
-            .filter(|value| !value.is_empty())
-            .ok_or(TdmError::MissingKeyword {
-                keyword: VERSION_KEY.to_string(),
-                segment: None,
-            })?;
+    // An empty value is refused above, so absence is the only way this is None.
+    let version = header.version.ok_or(TdmError::MissingKeyword {
+        keyword: VERSION_KEY.to_string(),
+        segment: None,
+    })?;
+    check_version(header.version_line, &version)?;
+    // Table 3-2 marks CREATION_DATE and ORIGINATOR mandatory. An empty value is
+    // already refused above, so absence is the only way either is None here.
+    require_keyword(header.creation_date.is_some(), "CREATION_DATE", None)?;
+    require_keyword(header.originator.is_some(), "ORIGINATOR", None)?;
     if segments.is_empty() {
         return Err(TdmError::NoSegments);
     }
 
-    // 4.2.11 terminates every TDM line, the last one included.
+    // 4.2.11 terminates every TDM line, the last one included. Thirteen of the
+    // 53 public files gathered for this audit end without one, which is why it
+    // is forgivable: a file's last record reads the same either way.
     //
     // It is the last check in the function, behind everything about what the
-    // message says: the unclosed-block checks, CCSDS_TDM_VERS and the segment
-    // count. Someone handed "missing TDM CCSDS_TDM_VERS" can fix the file;
-    // handed "line 1 carries no terminator" about a file that is also missing
-    // its version, they get the smaller of the two problems first.
+    // message says: the unclosed-block checks, the mandatory keywords, the
+    // version form and the segment count. Someone handed "missing TDM
+    // CCSDS_TDM_VERS" can fix the file; handed "line 1 carries no terminator"
+    // for a file that is also missing its version, they get the smaller of the
+    // two problems first.
     //
     // check_line keeps its place at the top of the read loop, ahead of all of
     // this. A character outside printable ASCII or a line past 254 characters
@@ -1377,12 +1535,24 @@ pub fn encode_kvn(tdm: &Tdm) -> Result<String, TdmError> {
         lines.extend(segment.metadata.fields.iter().map(field_line));
         lines.push("META_STOP".to_string());
         lines.push("DATA_START".to_string());
-        lines.extend(segment.data.comments.iter().map(comment_line));
-        for record in &segment.data.records {
+        // Each comment goes back where it was read, so a message that carried
+        // one away from the start of its block writes back unchanged rather
+        // than with its comments gathered to the top.
+        for (index, record) in segment.data.records.iter().enumerate() {
+            for comment in &segment.data.comments {
+                if comment.before_record == index {
+                    lines.push(comment_line(&comment.text));
+                }
+            }
             lines.push(format!(
                 "{} = {} {}",
                 record.keyword, record.epoch, record.value.text
             ));
+        }
+        for comment in &segment.data.comments {
+            if comment.before_record >= segment.data.records.len() {
+                lines.push(comment_line(&comment.text));
+            }
         }
         lines.push("DATA_STOP".to_string());
     }
@@ -1392,9 +1562,12 @@ pub fn encode_kvn(tdm: &Tdm) -> Result<String, TdmError> {
     Ok(lines.join("\n"))
 }
 
-fn parse_header_field(header: &mut HeaderBuilder, key: String, value: String) {
+fn parse_header_field(header: &mut HeaderBuilder, line: usize, key: String, value: String) {
     match key.as_str() {
-        VERSION_KEY => header.version = Some(value),
+        VERSION_KEY => {
+            header.version = Some(value);
+            header.version_line = Some(line);
+        }
         "CREATION_DATE" => header.creation_date = empty_to_none(value),
         "ORIGINATOR" => header.originator = empty_to_none(value),
         "MESSAGE_ID" => header.message_id = empty_to_none(value),
@@ -1402,7 +1575,7 @@ fn parse_header_field(header: &mut HeaderBuilder, key: String, value: String) {
     }
 }
 
-fn build_metadata(builder: MetadataBuilder) -> Result<TdmMetadata, TdmError> {
+fn build_metadata(builder: MetadataBuilder, segment: usize) -> Result<TdmMetadata, TdmError> {
     let mut participants = Vec::new();
     let mut mode = None;
     let mut paths = Vec::new();
@@ -1411,7 +1584,25 @@ fn build_metadata(builder: MetadataBuilder) -> Result<TdmMetadata, TdmError> {
     let mut range_units = TdmUnit::Kilometers;
 
     for field in &builder.fields {
-        if let Some(index) = indexed_suffix(&field.key, "PARTICIPANT")? {
+        // Table 3-3 indexes PARTICIPANT_n with n = {1,2,3,4,5}. An index past
+        // five is refused under every policy, not for the cap itself but
+        // because 3.3.1.11 allows more only by arrangement outside the message:
+        // a PATH entry naming an index the message cannot resolve would leave
+        // the reader to guess which participant a measurement belongs to, which
+        // changes what the file means.
+        if let Some(index) = indexed_suffix_in_range(&field.key, "PARTICIPANT", 1, 5)? {
+            // 3.3.1.9: "The indexer shall not be the same for any two
+            // participants in a given Metadata Section."
+            if participants
+                .iter()
+                .any(|existing: &TdmParticipant| existing.index == index)
+            {
+                return Err(TdmError::DuplicateIndex {
+                    keyword: "PARTICIPANT".to_string(),
+                    index,
+                    segment,
+                });
+            }
             participants.push(TdmParticipant {
                 index,
                 name: field.value.clone(),
@@ -1426,6 +1617,30 @@ fn build_metadata(builder: MetadataBuilder) -> Result<TdmMetadata, TdmError> {
             time_system = empty_to_none(field.value.clone());
         } else if field.key == "RANGE_UNITS" && !field.value.is_empty() {
             range_units = range_unit_from_label(&field.value)?;
+        }
+    }
+
+    // Table 3-3 marks TIME_SYSTEM mandatory and PARTICIPANT_n mandatory with
+    // "at least one"; 3.3.1.7 requires every mandatory item in every metadata
+    // section.
+    require_keyword(time_system.is_some(), "TIME_SYSTEM", Some(segment))?;
+    require_keyword(!participants.is_empty(), "PARTICIPANT_n", Some(segment))?;
+
+    // 3.3.1.9 requires participant indices to differ, not to run consecutively,
+    // so PARTICIPANT_1 beside PARTICIPANT_3 with no _2 is legal and nothing
+    // points into the gap. A PATH naming an index the segment does not define
+    // is a different matter: the measurements it describes would belong to
+    // nobody, and choosing which participant was meant is inventing one. It is
+    // refused under every policy for that reason.
+    for path in &paths {
+        for index in &path.participants {
+            if !participants.iter().any(|held| held.index == *index) {
+                return Err(TdmError::UndefinedParticipant {
+                    segment,
+                    keyword: path.key.clone(),
+                    index: *index,
+                });
+            }
         }
     }
 
@@ -1445,7 +1660,10 @@ fn parse_path(field: &TdmField) -> Result<TdmPath, TdmError> {
     let index = if field.key == "PATH" {
         None
     } else {
-        Some(indexed_suffix(&field.key, "PATH")?.ok_or_else(|| invalid_index(&field.key))?)
+        Some(
+            indexed_suffix_in_range(&field.key, "PATH", 1, 2)?
+                .ok_or_else(|| invalid_index(&field.key))?,
+        )
     };
     let mut participants = Vec::new();
     for token in field.value.split(',') {
@@ -1892,15 +2110,47 @@ fn validate_tdm(tdm: &Tdm) -> Result<(), TdmError> {
             segment: None,
         });
     }
+    check_version(None, &tdm.version)?;
+    for keyword in ["CREATION_DATE", "ORIGINATOR"] {
+        let present = match keyword {
+            "CREATION_DATE" => tdm.creation_date.is_some(),
+            _ => tdm.originator.is_some(),
+        };
+        if !present {
+            return Err(TdmError::MissingKeyword {
+                keyword: keyword.to_string(),
+                segment: None,
+            });
+        }
+    }
     if tdm.segments.is_empty() {
         return Err(TdmError::NoSegments);
     }
     for field in &tdm.header_fields {
-        check_key_assignable(field)?;
+        check_field(field)?;
     }
-    for segment in &tdm.segments {
+    for (index, segment) in tdm.segments.iter().enumerate() {
+        let number = index.saturating_add(1);
         for field in &segment.metadata.fields {
-            check_key_assignable(field)?;
+            check_field(field)?;
+        }
+        // The writer emits `fields`, so the mandatory keywords are looked for
+        // there rather than in the parsed properties beside it: that is what
+        // decides whether the encoding carries them.
+        if !writes_keyword(segment, |key| key == "TIME_SYSTEM") {
+            return Err(TdmError::MissingKeyword {
+                keyword: "TIME_SYSTEM".to_string(),
+                segment: Some(number),
+            });
+        }
+        if !writes_keyword(segment, |key| key.starts_with("PARTICIPANT_")) {
+            return Err(TdmError::MissingKeyword {
+                keyword: "PARTICIPANT_n".to_string(),
+                segment: Some(number),
+            });
+        }
+        if segment.data.records.is_empty() {
+            return Err(TdmError::EmptyDataSection { segment: number });
         }
         for record in &segment.data.records {
             if !record.value.value.is_finite() {
@@ -2012,6 +2262,17 @@ fn line_keyword(line: &str) -> String {
         .to_string()
 }
 
+/// Refuse an absent mandatory keyword.
+fn require_keyword(present: bool, keyword: &str, segment: Option<usize>) -> Result<(), TdmError> {
+    if present {
+        return Ok(());
+    }
+    Err(TdmError::MissingKeyword {
+        keyword: keyword.to_string(),
+        segment,
+    })
+}
+
 fn parse_assignment(line: &str) -> Option<(String, String)> {
     let (key, raw_value) = line.split_once('=')?;
     let key = key.trim().to_string();
@@ -2046,21 +2307,189 @@ fn field_line(field: &TdmField) -> String {
     format!("{} = {}", field.key, field.value)
 }
 
-/// Append one `KEY = VALUE` line, refusing a field the KVN form cannot carry.
+/// Refuse a field whose key is a keyword that cannot carry a value.
 ///
 /// `COMMENT` is excepted from the KVN syntax by CCSDS 503.0-B-2 4.2.5 c), and
 /// 4.5.3 reads any line whose keyword is followed by a space as a comment. A
 /// field keyed `COMMENT` has no assignment form: writing `COMMENT = value`
 /// emits a line that reads back as a comment rather than as the field.
-fn check_key_assignable(field: &TdmField) -> Result<(), TdmError> {
-    // The key is compared trimmed: a key of `"COMMENT "` writes the same
-    // line, which reads back as a comment just as an untrimmed one does.
-    if field.key.trim() == COMMENT_KEY {
+///
+/// The key is compared trimmed, because [`field_line`] writes `"COMMENT "` and
+/// `"COMMENT"` as the same line and a reader takes both back as a comment.
+///
+/// An empty value is refused on the same footing: 4.3.1 requires "A non-empty
+/// value field must be specified for each keyword provided", and `KEY = ` reads
+/// back as the empty value the standard does not allow.
+fn check_field(field: &TdmField) -> Result<(), TdmError> {
+    if keyword_takes_no_value(&field.key) {
         return Err(TdmError::KeywordNotAssignable {
             keyword: field.key.clone(),
         });
     }
+    if field.value.is_empty() {
+        return Err(TdmError::EmptyValue {
+            line: None,
+            keyword: field.key.clone(),
+        });
+    }
+
     Ok(())
+}
+
+/// Report whether a segment's metadata writes a key the predicate accepts.
+fn writes_keyword(segment: &TdmSegment, accepts: impl Fn(&str) -> bool) -> bool {
+    segment
+        .metadata
+        .fields
+        .iter()
+        .any(|field| accepts(field.key.trim()))
+}
+
+/// The rank a keyword has in the order its table fixes, or `None` for a
+/// keyword the table does not order.
+///
+/// An indexed keyword ranks where its base does, so `PARTICIPANT_2` ranks with
+/// `PARTICIPANT_1` and neither is out of order beside the other.
+fn keyword_rank(keyword: &str, order: &[&str]) -> Option<usize> {
+    if let Some(index) = order.iter().position(|named| *named == keyword) {
+        return Some(index);
+    }
+    order.iter().position(|base| {
+        keyword
+            .strip_prefix(*base)
+            .is_some_and(|rest| rest.starts_with('_'))
+    })
+}
+
+/// Check a keyword against the order its table fixes.
+///
+/// 3.2.3: "The order of occurrence of the mandatory and optional KVN
+/// assignments shall be fixed as shown in table 3-2", and 3.3.1.8 says the same
+/// of table 3-3.
+fn check_keyword_order(
+    line: usize,
+    keyword: &str,
+    section: &'static str,
+    order: &[&str],
+    highest: &mut usize,
+) -> Result<(), TdmError> {
+    let Some(rank) = keyword_rank(keyword, order) else {
+        return Ok(());
+    };
+    if rank >= *highest {
+        *highest = rank;
+        return Ok(());
+    }
+    Err(TdmError::KeywordOutOfOrder {
+        line,
+        keyword: keyword.to_string(),
+        section,
+    })
+}
+
+/// Report whether `key` is a keyword 4.2.5 c) excepts from the KVN syntax.
+///
+/// The key is compared trimmed, because [`field_line`] writes `"COMMENT "` and
+/// `"COMMENT"` as the same line and a reader takes both back the same way.
+fn keyword_takes_no_value(key: &str) -> bool {
+    EXCEPTED_KEYWORDS.contains(&key.trim())
+}
+
+/// Report whether table 3-2 defines `key` for a TDM header.
+fn known_header_keyword(key: &str) -> bool {
+    matches!(
+        key,
+        VERSION_KEY | "CREATION_DATE" | "ORIGINATOR" | "MESSAGE_ID"
+    )
+}
+
+/// Report whether table 3-3 defines `key` for a TDM metadata section.
+///
+/// An indexed family reports its own out-of-range suffix, so `PARTICIPANT_9` is
+/// an invalid index rather than an undefined keyword.
+///
+/// `EPHEMERIS_NAME` is taken unindexed as well as indexed. Table 3-3 lists only
+/// `EPHEMERIS_NAME_n`, but Figure E-17 writes the bare keyword and the annex I
+/// summary sheet lists it bare five times, so refusing it would refuse the
+/// standard's own worked example. The bare form covers the single-participant
+/// case, as it does for `PATH` and `RECEIVE_FREQ`, which the tables define
+/// alongside their indexed forms.
+fn known_metadata_keyword(key: &str) -> Result<bool, TdmError> {
+    for (base, max) in [
+        ("PARTICIPANT", 5u8),
+        ("PATH", 2),
+        ("EPHEMERIS_NAME", 5),
+        ("TRANSMIT_DELAY", 5),
+        ("RECEIVE_DELAY", 5),
+    ] {
+        if indexed_suffix_in_range(key, base, 1, max)?.is_some() {
+            return Ok(true);
+        }
+    }
+
+    Ok(matches!(
+        key,
+        "TRACK_ID"
+            | "DATA_TYPES"
+            | "EPHEMERIS_NAME"
+            | "TIME_SYSTEM"
+            | "START_TIME"
+            | "STOP_TIME"
+            | "MODE"
+            | "PATH"
+            | "TRANSMIT_BAND"
+            | "RECEIVE_BAND"
+            | "TURNAROUND_NUMERATOR"
+            | "TURNAROUND_DENOMINATOR"
+            | "TIMETAG_REF"
+            | "INTEGRATION_INTERVAL"
+            | "INTEGRATION_REF"
+            | "FREQ_OFFSET"
+            | "RANGE_MODE"
+            | "RANGE_MODULUS"
+            | "RANGE_UNITS"
+            | "ANGLE_TYPE"
+            | "REFERENCE_FRAME"
+            | "INTERPOLATION"
+            | "INTERPOLATION_DEGREE"
+            | "DOPPLER_COUNT_BIAS"
+            | "DOPPLER_COUNT_SCALE"
+            | "DOPPLER_COUNT_ROLLOVER"
+            | "DATA_QUALITY"
+            | "CORRECTIONS_APPLIED"
+            | "CORRECTION_ANGLE_1"
+            | "CORRECTION_ANGLE_2"
+            | "CORRECTION_DOPPLER"
+            | "CORRECTION_MAG"
+            | "CORRECTION_RANGE"
+            | "CORRECTION_RCS"
+            | "CORRECTION_RECEIVE"
+            | "CORRECTION_TRANSMIT"
+            | "CORRECTION_ABERRATION_YEARLY"
+            | "CORRECTION_ABERRATION_DIURNAL"
+    ))
+}
+
+/// Check a `CCSDS_TDM_VERS` value is the `x.y` form CCSDS 503.0-B-2 3.2.5 sets.
+///
+/// 3.2.5: "the value shall have the form of x.y where y is incremented for
+/// corrections and minor changes, and x is incremented for major changes."
+/// Table 3-2 gives `0.12`, `1.0` and `2.0` as the values so far.
+fn check_version(line: Option<usize>, value: &str) -> Result<(), TdmError> {
+    let well_formed = value.split_once('.').is_some_and(|(major, minor)| {
+        !major.is_empty()
+            && !minor.is_empty()
+            && major.bytes().all(|byte| byte.is_ascii_digit())
+            && minor.bytes().all(|byte| byte.is_ascii_digit())
+    });
+    if well_formed {
+        Ok(())
+    } else {
+        Err(TdmError::InvalidVersion {
+            line,
+            value: value.to_string(),
+        })
+    }
 }
 
 fn empty_to_none(value: String) -> Option<String> {
@@ -2086,7 +2515,13 @@ fn indexed_suffix(key: &str, base: &str) -> Result<Option<u8>, TdmError> {
     else {
         return Ok(None);
     };
-    if suffix.is_empty() || !suffix.chars().all(|character| character.is_ascii_digit()) {
+    // Table 3-3 writes the indexer as a single digit, so a padded suffix such
+    // as `PARTICIPANT_01` is not one of the keywords it defines, and reading it
+    // as 1 would give one index two spellings.
+    if suffix.is_empty()
+        || !suffix.chars().all(|character| character.is_ascii_digit())
+        || (suffix.len() > 1 && suffix.starts_with('0'))
+    {
         return Err(invalid_index(key));
     }
     suffix
@@ -2111,16 +2546,16 @@ fn indexed_suffix_in_range(
     }
 }
 
-fn invalid_index(field: &str) -> TdmError {
+fn invalid_index(keyword: &str) -> TdmError {
     TdmError::InvalidField {
-        keyword: field.to_string(),
+        keyword: keyword.to_string(),
         kind: TdmInputErrorKind::InvalidIndex,
     }
 }
 
-fn unknown_keyword(field: &str) -> TdmError {
+fn unknown_keyword(keyword: &str) -> TdmError {
     TdmError::InvalidField {
-        keyword: field.to_string(),
+        keyword: keyword.to_string(),
         kind: TdmInputErrorKind::UnknownKeyword,
     }
 }
@@ -2257,8 +2692,11 @@ DATA_STOP\n";
         let err = parse_kvn(
             "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RECEIVE_FREQ_1 = 2005-159T17:41:00
@@ -2268,7 +2706,7 @@ DATA_STOP\n",
         assert_eq!(
             err,
             TdmError::MalformedRecord {
-                line: 6,
+                line: 9,
                 keyword: "RECEIVE_FREQ_1".to_string()
             }
         );
@@ -2279,8 +2717,11 @@ DATA_STOP\n",
         let err = parse_kvn(
             "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 TRANSMIT_FREQ_1 = 2005-159T17:41:00 0.0
@@ -2300,9 +2741,12 @@ DATA_STOP\n",
     fn comment_assignment_is_refused_in_header_and_metadata() {
         let header = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 COMMENT=
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2005-159T17:41:00 1.0
@@ -2310,16 +2754,19 @@ DATA_STOP\n";
         assert_eq!(
             parse_kvn(header),
             Err(TdmError::MalformedLine {
-                line: 2,
+                line: 4,
                 text: "COMMENT=".to_string(),
             })
         );
 
         let metadata = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
 COMMENT=file = tdm.dat
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2005-159T17:41:00 1.0
@@ -2327,7 +2774,7 @@ DATA_STOP\n";
         assert_eq!(
             parse_kvn(metadata),
             Err(TdmError::MalformedLine {
-                line: 4,
+                line: 6,
                 text: "COMMENT=file = tdm.dat".to_string(),
             })
         );
@@ -2341,8 +2788,11 @@ DATA_STOP\n";
             "\
 CCSDS_TDM_VERS = 2.0
 COMMENT = file = tdm.dat
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2005-159T17:41:00 1.0
@@ -2380,10 +2830,25 @@ DATA_STOP\n",
                 keyword: COMMENT_KEY.to_string(),
             })
         );
+
+        // A padded key writes the same line, so it is refused on the same
+        // footing and reports the key as the field holds it.
+        let mut padded_case = parse_kvn(SIMPLE).unwrap();
+        padded_case.header_fields.push(TdmField {
+            key: "COMMENT ".to_string(),
+            value: String::new(),
+        });
+        assert_eq!(
+            encode_kvn(&padded_case),
+            Err(TdmError::KeywordNotAssignable {
+                keyword: "COMMENT ".to_string(),
+            })
+        );
     }
 
-    const TERMINATOR_BODY: &str = "CCSDS_TDM_VERS = 2.0|META_START|TIME_SYSTEM = UTC|\
-META_STOP|DATA_START|RANGE = 2005-159T17:41:00 1.0|DATA_STOP\n";
+    const TERMINATOR_BODY: &str = "CCSDS_TDM_VERS = 2.0|CREATION_DATE = 2005-160T20:15:00Z|\
+ORIGINATOR = NASA|META_START|TIME_SYSTEM = UTC|PARTICIPANT_1 = DSS-25|META_STOP|\
+DATA_START|RANGE = 2005-159T17:41:00 1.0|DATA_STOP\n";
 
     #[test]
     fn a_line_ends_at_every_terminator_the_standard_allows() {
@@ -2482,65 +2947,16 @@ META_STOP|DATA_START|RANGE = 2005-159T17:41:00 1.0|DATA_STOP\n";
     }
 
     #[test]
-    fn a_final_line_with_no_terminator_is_refused() {
-        // 4.2.11 terminates every TDM line, the last one included. Nothing
-        // checked it, and the writer joined its lines with a line feed and
-        // added none at the end, so every message sidereon wrote departed here.
-        let terminated = TERMINATOR_BODY.replace('|', "\n");
-        let tdm = parse_kvn(&terminated).expect("a terminated message reads");
-        assert_eq!(
-            parse_kvn(terminated.trim_end_matches('\n')),
-            Err(TdmError::UnterminatedFinalLine { line: 7 })
-        );
-
-        // The writer terminates its last line, and what it writes reads back.
-        let encoded = encode_kvn(&tdm).expect("the message writes");
-        assert!(encoded.ends_with('\n'));
-        assert_eq!(parse_kvn(&encoded).unwrap(), tdm);
-
-        // Every failure about what the message says is reported ahead of the
-        // missing terminator. An unclosed block is unterminated by
-        // construction, and a file with no version has a defect its author can
-        // act on, which "the last line carries no terminator" is not.
-        assert_eq!(
-            parse_kvn("CCSDS_TDM_VERS = 2.0\nMETA_START"),
-            Err(TdmError::Section {
-                line: 3,
-                detail: "unclosed metadata block",
-            })
-        );
-        assert_eq!(
-            parse_kvn("CREATION_DATE = 2005-160T20:15:00Z"),
-            Err(TdmError::MissingKeyword {
-                keyword: VERSION_KEY.to_string(),
-                segment: None,
-            })
-        );
-
-        // A character-set or line-length defect keeps its place ahead of them:
-        // each names a position in a line and explains how the rest of that
-        // line reads.
-        assert_eq!(
-            parse_kvn("CREATION\u{a0}_DATE = 2005-160T20:15:00Z"),
-            Err(TdmError::NonPrintableCharacter {
-                // U+00A0 is whitespace, so the token before it is all the
-                // keyword there is to name.
-                line: Some(1),
-                keyword: "CREATION".to_string(),
-                column: 9,
-                character: '\u{a0}',
-            })
-        );
-    }
-
-    #[test]
     fn a_character_outside_printable_ascii_is_refused() {
         // 4.2.1: "The TDM line must contain only printable ASCII characters and
         // blanks. ASCII control characters (such as TAB, etc.) must not be used".
         let with_tab = "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 \tTIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2005-159T17:41:00 1.0
@@ -2548,7 +2964,7 @@ DATA_STOP\n";
         assert_eq!(
             parse_kvn(with_tab),
             Err(TdmError::NonPrintableCharacter {
-                line: Some(3),
+                line: Some(5),
                 keyword: "TIME_SYSTEM".to_string(),
                 column: 1,
                 character: '\t',
@@ -2556,12 +2972,16 @@ DATA_STOP\n";
         );
 
         // A right double quotation mark, as two public TDM corpora carry in a
-        // clock-offset comment.
+        // clock-offset comment. 4.5.2 a) puts a header comment between
+        // CCSDS_TDM_VERS and CREATION_DATE.
         let with_non_ascii = "\
 CCSDS_TDM_VERS = 2.0
 COMMENT clock minus UTC\u{201d}
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2005-159T17:41:00 1.0
@@ -2586,8 +3006,11 @@ DATA_STOP\n";
         let text = format!(
             "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 {prefix}{value}
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2005-159T17:41:00 1.0
@@ -2596,7 +3019,7 @@ DATA_STOP\n"
         assert_eq!(
             parse_kvn(&text),
             Err(TdmError::LineTooLong {
-                line: Some(3),
+                line: Some(5),
                 keyword: "TIME_SYSTEM".to_string(),
                 length: prefix.len() + MAX_LINE_CHARACTERS,
             })
@@ -2607,8 +3030,11 @@ DATA_STOP\n"
         let text = format!(
             "\
 CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
 META_START
 {prefix}{exact}
+PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
 RANGE = 2005-159T17:41:00 1.0
@@ -2618,6 +3044,439 @@ DATA_STOP\n"
         assert_eq!(
             tdm.segments[0].metadata.time_system.as_deref(),
             Some(exact.as_str())
+        );
+    }
+
+    const CONFORMING: &str = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-159T17:41:00 1.0
+DATA_STOP\n";
+
+    #[test]
+    fn the_keywords_the_standard_makes_mandatory_are_required() {
+        parse_kvn(CONFORMING).expect("a conforming message parses");
+
+        // Table 3-2 marks CREATION_DATE and ORIGINATOR mandatory, table 3-3
+        // marks TIME_SYSTEM mandatory and PARTICIPANT_n mandatory with "at
+        // least one", and 3.1.3 gives each data section "a minimum of one
+        // Tracking Data Record".
+        for (dropped, expected) in [
+            (
+                "CREATION_DATE = 2005-160T20:15:00Z\n",
+                TdmError::MissingKeyword {
+                    keyword: "CREATION_DATE".to_string(),
+                    segment: None,
+                },
+            ),
+            (
+                "ORIGINATOR = NASA\n",
+                TdmError::MissingKeyword {
+                    keyword: "ORIGINATOR".to_string(),
+                    segment: None,
+                },
+            ),
+            (
+                "TIME_SYSTEM = UTC\n",
+                TdmError::MissingKeyword {
+                    keyword: "TIME_SYSTEM".to_string(),
+                    segment: Some(1),
+                },
+            ),
+            (
+                "PARTICIPANT_1 = DSS-25\n",
+                TdmError::MissingKeyword {
+                    keyword: "PARTICIPANT_n".to_string(),
+                    segment: Some(1),
+                },
+            ),
+            (
+                "RANGE = 2005-159T17:41:00 1.0\n",
+                TdmError::EmptyDataSection { segment: 1 },
+            ),
+        ] {
+            let without = CONFORMING.replace(dropped, "");
+            assert_eq!(parse_kvn(&without), Err(expected), "dropping {dropped:?}");
+        }
+    }
+
+    #[test]
+    fn an_empty_value_is_refused() {
+        // 4.3.1: "A non-empty value field must be specified for each keyword
+        // provided." An empty ORIGINATOR was read as absent and dropped on
+        // write, so a message lost the keyword it declared.
+        let text = CONFORMING.replace("ORIGINATOR = NASA", "ORIGINATOR =");
+        assert_eq!(
+            parse_kvn(&text),
+            Err(TdmError::EmptyValue {
+                line: Some(3),
+                keyword: "ORIGINATOR".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_version_outside_the_x_y_form_is_refused() {
+        // 3.2.5: "the value shall have the form of x.y where y is incremented
+        // for corrections and minor changes, and x is incremented for major
+        // changes."
+        for value in ["2", "2.0.0", "x.y", "2.", "v2.0"] {
+            let text =
+                CONFORMING.replace("CCSDS_TDM_VERS = 2.0", &format!("CCSDS_TDM_VERS = {value}"));
+            assert_eq!(
+                parse_kvn(&text),
+                Err(TdmError::InvalidVersion {
+                    line: Some(1),
+                    value: value.to_string(),
+                }),
+                "version {value:?}"
+            );
+        }
+
+        // Table 3-2 gives 0.12 for testing, 1.0 for the 2007 version and 2.0
+        // for this one.
+        for value in ["0.12", "1.0", "2.0"] {
+            let text =
+                CONFORMING.replace("CCSDS_TDM_VERS = 2.0", &format!("CCSDS_TDM_VERS = {value}"));
+            let tdm = parse_kvn(&text).unwrap_or_else(|err| panic!("version {value:?}: {err}"));
+            assert_eq!(tdm.version, value);
+        }
+    }
+
+    /// `CONFORMING` with its single data record replaced by `lines`.
+    fn records(lines: &str) -> String {
+        CONFORMING.replace("RANGE = 2005-159T17:41:00 1.0", lines)
+    }
+
+    #[test]
+    fn a_keyword_the_tables_do_not_define_is_refused() {
+        // 3.2.3: "Only those keywords shown in table 3-2 shall be used in a TDM
+        // Header." 3.3.1.7 says the same of table 3-3 and a metadata section.
+        let header =
+            CONFORMING.replace("ORIGINATOR = NASA", "ORIGINATOR = NASA\nWRONG_KEYWORD = 1");
+        assert_eq!(
+            parse_kvn(&header),
+            Err(TdmError::UndefinedKeyword {
+                line: 4,
+                keyword: "WRONG_KEYWORD".to_string(),
+                section: "header",
+            })
+        );
+
+        let metadata =
+            CONFORMING.replace("TIME_SYSTEM = UTC", "TIME_SYSTEM = UTC\nWRONG_KEYWORD = 1");
+        assert_eq!(
+            parse_kvn(&metadata),
+            Err(TdmError::UndefinedKeyword {
+                line: 6,
+                keyword: "WRONG_KEYWORD".to_string(),
+                section: "metadata",
+            })
+        );
+
+        // A public Artemis 1 file writes SYSTEM TIME where TIME_SYSTEM belongs.
+        // That is an undefined keyword, reported where it is, rather than only
+        // the absence it leaves behind.
+        let swapped = CONFORMING.replace("TIME_SYSTEM = UTC", "SYSTEM TIME = UTC");
+        assert_eq!(
+            parse_kvn(&swapped),
+            Err(TdmError::UndefinedKeyword {
+                line: 5,
+                keyword: "SYSTEM TIME".to_string(),
+                section: "metadata",
+            })
+        );
+    }
+
+    #[test]
+    fn a_keyword_that_cannot_carry_a_value_is_refused_both_ways() {
+        // 4.2.5 c) excepts COMMENT, META_START, META_STOP, DATA_START and
+        // DATA_STOP from the KVN syntax, so none of them is an assignment key.
+        for keyword in ["META_START", "META_STOP", "DATA_START", "DATA_STOP"] {
+            let text = CONFORMING.replace(
+                "TIME_SYSTEM = UTC",
+                &format!("TIME_SYSTEM = UTC\n{keyword} = 1"),
+            );
+            assert_eq!(
+                parse_kvn(&text),
+                Err(TdmError::MalformedLine {
+                    line: 6,
+                    text: format!("{keyword} = 1"),
+                }),
+                "{keyword}"
+            );
+        }
+
+        // The writer refuses the same set, since a caller can hold it.
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].metadata.fields.push(TdmField {
+            key: "DATA_START".to_string(),
+            value: "1".to_string(),
+        });
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::KeywordNotAssignable {
+                keyword: "DATA_START".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn the_bare_ephemeris_name_the_standard_writes_is_read() {
+        // Table 3-3 lists EPHEMERIS_NAME_n only, but figure E-17 writes the
+        // keyword bare and the annex I summary sheet lists it bare five times.
+        let text = CONFORMING.replace(
+            "PARTICIPANT_1 = DSS-25",
+            "PARTICIPANT_1 = DSS-25\nEPHEMERIS_NAME = 3203_2013-11-09T23-02-30",
+        );
+        let tdm = parse_kvn(&text).expect("the bare keyword the standard writes is read");
+        assert_eq!(
+            tdm.segments[0].metadata.get_last("EPHEMERIS_NAME"),
+            Some("3203_2013-11-09T23-02-30")
+        );
+    }
+
+    #[test]
+    fn an_indexed_keyword_outside_its_table_range_is_refused() {
+        // Table 3-3 indexes PARTICIPANT_n with n = {1,2,3,4,5}, and 3.3.1.11
+        // caps a segment at five participants. A padded suffix is not one of
+        // the keywords the table defines.
+        for keyword in ["PARTICIPANT_0", "PARTICIPANT_6", "PARTICIPANT_01"] {
+            let text = CONFORMING.replace("PARTICIPANT_1 = DSS-25", &format!("{keyword} = DSS-25"));
+            assert_eq!(
+                parse_kvn(&text),
+                Err(TdmError::InvalidField {
+                    keyword: keyword.to_string(),
+                    kind: TdmInputErrorKind::InvalidIndex,
+                }),
+                "{keyword}"
+            );
+        }
+
+        // Table 3-3 defines PATH, PATH_1 and PATH_2 and no other index.
+        for keyword in ["PATH_0", "PATH_3", "PATH_02"] {
+            let text = CONFORMING.replace(
+                "PARTICIPANT_1 = DSS-25",
+                &format!("PARTICIPANT_1 = DSS-25\n{keyword} = 1"),
+            );
+            assert_eq!(
+                parse_kvn(&text),
+                Err(TdmError::InvalidField {
+                    keyword: keyword.to_string(),
+                    kind: TdmInputErrorKind::InvalidIndex,
+                }),
+                "{keyword}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_final_line_with_no_terminator_is_refused() {
+        // 4.2.11 terminates every TDM line, the last one included.
+        let unterminated = CONFORMING.trim_end_matches('\n');
+        assert_eq!(
+            parse_kvn(unterminated),
+            Err(TdmError::UnterminatedFinalLine { line: 10 })
+        );
+
+        // The writer terminates its last line, and what it writes reads back.
+        let tdm = parse_kvn(CONFORMING).expect("a terminated message reads");
+        let encoded = encode_kvn(&tdm).expect("the message writes");
+        assert!(encoded.ends_with('\n'));
+        assert_eq!(parse_kvn(&encoded).unwrap(), tdm);
+
+        // Every failure about what the message says is reported ahead of the
+        // missing terminator. An unclosed block is unterminated by
+        // construction, and a file with no version has a defect its author can
+        // act on, which "the last line carries no terminator" is not.
+        assert_eq!(
+            parse_kvn("CCSDS_TDM_VERS = 2.0\nMETA_START"),
+            Err(TdmError::Section {
+                line: 3,
+                detail: "unclosed metadata block",
+            })
+        );
+        assert_eq!(
+            parse_kvn("CREATION_DATE = 2005-160T20:15:00Z"),
+            Err(TdmError::MissingKeyword {
+                keyword: VERSION_KEY.to_string(),
+                segment: None,
+            })
+        );
+        assert_eq!(
+            parse_kvn("CCSDS_TDM_VERS = 2.0\nCREATION_DATE = 2005-160T20:15:00Z"),
+            Err(TdmError::MissingKeyword {
+                keyword: "ORIGINATOR".to_string(),
+                segment: None,
+            })
+        );
+
+        // A character-set or line-length defect keeps its place ahead of them:
+        // each names a position in a line and explains how the rest of that
+        // line reads.
+        assert_eq!(
+            parse_kvn("CREATION\u{a0}_DATE = 2005-160T20:15:00Z"),
+            Err(TdmError::NonPrintableCharacter {
+                // U+00A0 is whitespace, so the token before it is all the
+                // keyword there is to name.
+                line: Some(1),
+                keyword: "CREATION".to_string(),
+                column: 9,
+                character: '\u{a0}',
+            })
+        );
+    }
+
+    #[test]
+    fn a_data_comment_keeps_its_place_through_a_round_trip() {
+        // A comment at the start of the block is where 4.5.2 c) puts one.
+        let at_start = records("COMMENT before any record\nRANGE = 2005-159T17:41:00 1.0");
+        let tdm = parse_kvn(&at_start).expect("a comment at the start is in place");
+        assert_eq!(
+            tdm.segments[0].data.comments,
+            vec![TdmComment {
+                text: "before any record".to_string(),
+                before_record: 0,
+            }]
+        );
+
+        // 4.5.2 c) puts a data-section comment "between the 'DATA_START'
+        // keyword and the first Tracking Data Record", so one after a record is
+        // out of place and strict names it.
+        let late = records(
+            "RANGE = 2005-159T17:41:00 1.0\nCOMMENT after the first record\nRANGE = 2005-159T17:41:01 2.0",
+        );
+        assert_eq!(
+            parse_kvn(&late),
+            Err(TdmError::KeywordOutOfOrder {
+                line: 10,
+                keyword: COMMENT_KEY.to_string(),
+                section: "data",
+            })
+        );
+    }
+
+    #[test]
+    fn a_keyword_out_of_the_order_its_table_fixes_is_refused() {
+        // 3.2.3: "The order of occurrence of the mandatory and optional KVN
+        // assignments shall be fixed as shown in table 3-2", which puts COMMENT
+        // between CCSDS_TDM_VERS and CREATION_DATE, as 4.5.2 a) also says.
+        let late_comment = CONFORMING.replace(
+            "ORIGINATOR = NASA",
+            "ORIGINATOR = NASA\nCOMMENT written after the originator",
+        );
+        assert_eq!(
+            parse_kvn(&late_comment),
+            Err(TdmError::KeywordOutOfOrder {
+                line: 4,
+                keyword: COMMENT_KEY.to_string(),
+                section: "header",
+            })
+        );
+
+        // 3.3.1.8 fixes the metadata order the same way, and table 3-3 puts
+        // TIME_SYSTEM before PARTICIPANT_n.
+        let swapped = CONFORMING.replace(
+            "TIME_SYSTEM = UTC\nPARTICIPANT_1 = DSS-25",
+            "PARTICIPANT_1 = DSS-25\nTIME_SYSTEM = UTC",
+        );
+        assert_eq!(
+            parse_kvn(&swapped),
+            Err(TdmError::KeywordOutOfOrder {
+                line: 6,
+                keyword: "TIME_SYSTEM".to_string(),
+                section: "metadata",
+            })
+        );
+
+        // An indexed keyword ranks where its base does, so two participants sit
+        // in order beside each other whichever index comes first.
+        let descending = CONFORMING.replace(
+            "PARTICIPANT_1 = DSS-25",
+            "PARTICIPANT_2 = yyyy-nnnA\nPARTICIPANT_1 = DSS-25",
+        );
+        parse_kvn(&descending).expect("indexed keywords rank together");
+    }
+
+    #[test]
+    fn a_path_naming_a_participant_the_segment_lacks_is_refused() {
+        // 3.3.1.9 requires participant indices to differ, not to run
+        // consecutively, so a gap nothing points into is legal.
+        let gap = CONFORMING.replace(
+            "PARTICIPANT_1 = DSS-25",
+            "PARTICIPANT_1 = DSS-25\nPARTICIPANT_3 = yyyy-nnnA",
+        );
+        parse_kvn(&gap).expect("a gap no PATH points into is legal");
+
+        // A PATH naming an index the segment does not define is not legal: the
+        // measurements it describes would belong to nobody.
+        let dangling = CONFORMING.replace(
+            "PARTICIPANT_1 = DSS-25",
+            "PARTICIPANT_1 = DSS-25\nPATH = 1,2",
+        );
+        assert_eq!(
+            parse_kvn(&dangling),
+            Err(TdmError::UndefinedParticipant {
+                segment: 1,
+                keyword: "PATH".to_string(),
+                index: 2,
+            })
+        );
+
+        // A path across a gap resolves when both ends are defined.
+        let over_gap = CONFORMING.replace(
+            "PARTICIPANT_1 = DSS-25",
+            "PARTICIPANT_1 = DSS-25\nPARTICIPANT_3 = yyyy-nnnA\nPATH = 1,3,1",
+        );
+        parse_kvn(&over_gap).expect("a path across a gap resolves");
+    }
+
+    #[test]
+    fn two_participants_sharing_an_index_are_refused() {
+        // 3.3.1.9: "The indexer shall not be the same for any two participants
+        // in a given Metadata Section." Both were kept, and the second silently
+        // shadowed the first everywhere an index is resolved.
+        let text = CONFORMING.replace(
+            "PARTICIPANT_1 = DSS-25",
+            "PARTICIPANT_1 = DSS-25\nPARTICIPANT_1 = DSS-34",
+        );
+        assert_eq!(
+            parse_kvn(&text),
+            Err(TdmError::DuplicateIndex {
+                keyword: "PARTICIPANT".to_string(),
+                index: 1,
+                segment: 1,
+            })
+        );
+
+        // Two different indices are what the standard expects.
+        let text = CONFORMING.replace(
+            "PARTICIPANT_1 = DSS-25",
+            "PARTICIPANT_1 = DSS-25\nPARTICIPANT_2 = yyyy-nnnA",
+        );
+        let tdm = parse_kvn(&text).expect("two indices parse");
+        assert_eq!(tdm.segments[0].metadata.participants.len(), 2);
+    }
+
+    #[test]
+    fn encoding_refuses_a_caller_built_empty_value() {
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].metadata.fields.push(TdmField {
+            key: "RANGE_MODE".to_string(),
+            value: String::new(),
+        });
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::EmptyValue {
+                line: None,
+                keyword: "RANGE_MODE".to_string(),
+            })
         );
     }
 }
