@@ -7,6 +7,7 @@
 //! records such as `RECEIVE_FREQ` and `TRANSMIT_FREQ_n` re-emit without decimal
 //! rewriting.
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 const VERSION_KEY: &str = "CCSDS_TDM_VERS";
@@ -1227,6 +1228,8 @@ struct MetadataBuilder {
 struct DataBuilder {
     comments: Vec<TdmComment>,
     records: Vec<TdmDataRecord>,
+    /// Each record's timetag, read once when the record is read.
+    epochs: Vec<EpochKey>,
 }
 
 /// Parse a TDM in CCSDS KVN format.
@@ -1346,6 +1349,7 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                     let segment = segments.len().saturating_add(1);
                     return Err(TdmError::EmptyDataSection { segment });
                 }
+                check_record_order(&builder, segments.len().saturating_add(1))?;
                 segments.push(TdmSegment {
                     metadata,
                     data: TdmDataSection {
@@ -1390,6 +1394,12 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
                 .map(|metadata| metadata.range_units.clone())
                 .unwrap_or(TdmUnit::Kilometers);
             let record = parse_record(line_no, &key, &value, &range_units)?;
+            let epoch = parse_epoch_key(&record.epoch).ok_or_else(|| TdmError::MalformedEpoch {
+                line: line_no,
+                keyword: record.keyword.clone(),
+                text: record.epoch.clone(),
+            })?;
+            builder.epochs.push(epoch);
             builder.records.push(record);
         } else if let Some(builder) = metadata.as_mut() {
             // 3.3.1.7: "Only those keywords shown in table 3-3 shall be used in
@@ -2152,6 +2162,19 @@ fn validate_tdm(tdm: &Tdm) -> Result<(), TdmError> {
         if segment.data.records.is_empty() {
             return Err(TdmError::EmptyDataSection { segment: number });
         }
+        // The writer is strict whatever the reader forgave, so a section read
+        // under a lenient policy is refused here rather than written back in a
+        // form 3.4.10 and 3.4.11 forbid.
+        let mut written: HashSet<(&str, String)> = HashSet::new();
+        for record in &segment.data.records {
+            if !written.insert((record.keyword.as_str(), record.epoch.clone())) {
+                return Err(TdmError::DuplicateRecord {
+                    segment: number,
+                    keyword: record.keyword.clone(),
+                    epoch: record.epoch.clone(),
+                });
+            }
+        }
         for record in &segment.data.records {
             if !record.value.value.is_finite() {
                 return Err(TdmError::InvalidField {
@@ -2343,6 +2366,165 @@ fn writes_keyword(segment: &TdmSegment, accepts: impl Fn(&str) -> bool) -> bool 
         .fields
         .iter()
         .any(|field| accepts(field.key.trim()))
+}
+
+/// A record's timetag reduced to something two records can be compared by.
+///
+/// CCSDS 503.0-B-2 4.3.9 gives two forms, `YYYY-MM-DDThh:mm:ss[.d->d][Z]` and
+/// `YYYY-DDDThh:mm:ss[.d->d][Z]`. Both reduce to a day number and a second of
+/// day, so a message may use either and still be ordered. Leap seconds are not
+/// modeled: 3.4.10 asks only for chronological order within one time system,
+/// which the reduction preserves.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+struct EpochKey {
+    day: i64,
+    second_of_day: f64,
+}
+
+/// Days from 1970-01-01 for a proleptic Gregorian date, after Howard Hinnant's
+/// `days_from_civil`.
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let shifted_month = (month + 9) % 12;
+    let day_of_year = (153 * shifted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// Report whether `year` is a leap year in the proleptic Gregorian calendar.
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+/// The days in `month` of `year`, both one-based.
+fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+/// Read a fixed-width run of decimal digits with the leading zeros 4.3.9
+/// requires, as an integer.
+fn fixed_digits(text: &str, width: usize) -> Option<i64> {
+    if text.len() != width || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse::<i64>().ok()
+}
+
+/// Read a timetag in either form 4.3.9 defines.
+fn parse_epoch_key(text: &str) -> Option<EpochKey> {
+    let body = text.strip_suffix('Z').unwrap_or(text);
+    let (date, time) = body.split_once('T')?;
+
+    let day = match date.len() {
+        10 => {
+            let year = fixed_digits(date.get(0..4)?, 4)?;
+            if date.get(4..5)? != "-" || date.get(7..8)? != "-" {
+                return None;
+            }
+            let month = fixed_digits(date.get(5..7)?, 2)?;
+            let day_of_month = fixed_digits(date.get(8..10)?, 2)?;
+            if !(1..=12).contains(&month) || day_of_month < 1 {
+                return None;
+            }
+            if day_of_month > days_in_month(year, month) {
+                return None;
+            }
+            days_from_civil(year, month, day_of_month)
+        }
+        8 => {
+            let year = fixed_digits(date.get(0..4)?, 4)?;
+            if date.get(4..5)? != "-" {
+                return None;
+            }
+            let day_of_year = fixed_digits(date.get(5..8)?, 3)?;
+            let length = if is_leap_year(year) { 366 } else { 365 };
+            if !(1..=length).contains(&day_of_year) {
+                return None;
+            }
+            days_from_civil(year, 1, 1) + day_of_year - 1
+        }
+        _ => return None,
+    };
+
+    let (clock, fraction) = match time.split_once('.') {
+        Some((clock, digits)) => {
+            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            (clock, format!("0.{digits}").parse::<f64>().ok()?)
+        }
+        None => (time, 0.0),
+    };
+    if clock.len() != 8 || clock.get(2..3)? != ":" || clock.get(5..6)? != ":" {
+        return None;
+    }
+    let hours = fixed_digits(clock.get(0..2)?, 2)?;
+    let minutes = fixed_digits(clock.get(3..5)?, 2)?;
+    let seconds = fixed_digits(clock.get(6..8)?, 2)?;
+    // A leap second is written as 60, so the range runs to 60 rather than 59.
+    if hours > 23 || minutes > 59 || seconds > 60 {
+        return None;
+    }
+
+    Some(EpochKey {
+        day,
+        second_of_day: (hours * 3600 + minutes * 60 + seconds) as f64 + fraction,
+    })
+}
+
+/// Check a data section against the ordering rules 3.4.10 and 3.4.11 set.
+///
+/// 3.4.10: "in any given Data Section, the data for any given keyword shall be
+/// in chronological order". 3.4.11: "Each keyword/timetag combination must be
+/// unique within a given Data Section".
+///
+/// Both are forgivable. A data section is a sequence rather than a set of keyed
+/// slots, so two records stamped at one instant can both be kept, in file
+/// order, with nothing invented and nothing dropped; the caller sees what the
+/// producer wrote. Order is forgivable for the same reason: each record carries
+/// its own timetag, so reading them out of order changes no value. Figure E-17
+/// needs the first of these, giving `RCS` twice at `2011-05-11T10:26:33.7008`
+/// with different values, which looks like a typo for its neighbour's timetag.
+fn check_record_order(builder: &DataBuilder, segment: usize) -> Result<(), TdmError> {
+    let mut seen: HashSet<(&str, i64, u64)> = HashSet::new();
+    let mut latest: HashMap<&str, EpochKey> = HashMap::new();
+
+    for (record, epoch) in builder.records.iter().zip(&builder.epochs) {
+        let keyword = record.keyword.as_str();
+        if !seen.insert((keyword, epoch.day, epoch.second_of_day.to_bits())) {
+            return Err(TdmError::DuplicateRecord {
+                segment,
+                keyword: record.keyword.clone(),
+                epoch: record.epoch.clone(),
+            });
+        }
+
+        match latest.get_mut(keyword) {
+            Some(previous) => {
+                if epoch < previous {
+                    return Err(TdmError::RecordsOutOfOrder {
+                        segment,
+                        keyword: record.keyword.clone(),
+                        epoch: record.epoch.clone(),
+                    });
+                } else {
+                    *previous = *epoch;
+                }
+            }
+            None => {
+                latest.insert(keyword, *epoch);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The rank a keyword has in the order its table fixes, or `None` for a
@@ -3152,6 +3334,89 @@ DATA_STOP\n";
     /// `CONFORMING` with its single data record replaced by `lines`.
     fn records(lines: &str) -> String {
         CONFORMING.replace("RANGE = 2005-159T17:41:00 1.0", lines)
+    }
+
+    #[test]
+    fn a_timetag_outside_the_two_forms_is_refused() {
+        // 4.3.9 gives `YYYY-MM-DDThh:mm:ss[.d->d][Z]` and
+        // `YYYY-DDDThh:mm:ss[.d->d][Z]`, with leading zeros throughout.
+        for bad in [
+            "05-159T17:41:00",
+            "2005-159T17:41",
+            "2005-13-01T00:00:00",
+            "2005-02-30T00:00:00",
+            "2005-366T00:00:00",
+            "2005-000T00:00:00",
+            "2005-159T24:00:00",
+            "2005-159T17:60:00",
+            "2005-159T17:41:00.",
+        ] {
+            let text = records(&format!("RANGE = {bad} 1.0"));
+            assert_eq!(
+                parse_kvn(&text),
+                Err(TdmError::MalformedEpoch {
+                    line: 9,
+                    keyword: "RANGE".to_string(),
+                    text: bad.to_string(),
+                }),
+                "{bad}"
+            );
+        }
+
+        for good in [
+            "2005-06-08T17:41:00",
+            "2005-159T17:41:00",
+            "2005-159T17:41:00.25",
+            "2005-159T17:41:00Z",
+            "2004-366T00:00:00",
+            "2005-159T17:41:60",
+        ] {
+            let text = records(&format!("RANGE = {good} 1.0"));
+            parse_kvn(&text).unwrap_or_else(|err| panic!("{good}: {err}"));
+        }
+    }
+
+    #[test]
+    fn records_out_of_order_or_repeated_are_refused() {
+        // 3.4.10: "the data for any given keyword shall be in chronological
+        // order". 3.4.11: "Each keyword/timetag combination must be unique".
+        let backwards = records("RANGE = 2005-159T17:41:01 1.0\nRANGE = 2005-159T17:41:00 2.0");
+        assert_eq!(
+            parse_kvn(&backwards),
+            Err(TdmError::RecordsOutOfOrder {
+                segment: 1,
+                keyword: "RANGE".to_string(),
+                epoch: "2005-159T17:41:00".to_string(),
+            })
+        );
+
+        let repeated = records("RANGE = 2005-159T17:41:00 1.0\nRANGE = 2005-159T17:41:00 2.0");
+        assert_eq!(
+            parse_kvn(&repeated),
+            Err(TdmError::DuplicateRecord {
+                segment: 1,
+                keyword: "RANGE".to_string(),
+                epoch: "2005-159T17:41:00".to_string(),
+            })
+        );
+
+        // The rule is per keyword, so two keywords may share a timetag.
+        let paired = records("RANGE = 2005-159T17:41:00 1.0\nANGLE_1 = 2005-159T17:41:00 10.0");
+        parse_kvn(&paired).expect("two keywords may share a timetag");
+    }
+
+    #[test]
+    fn the_two_timetag_forms_order_against_each_other() {
+        // Day 159 of 2005 is 2005-06-08, so a message may write either form and
+        // still be ordered.
+        let forward = records("RANGE = 2005-159T17:41:00 1.0\nRANGE = 2005-06-08T18:41:00 2.0");
+        parse_kvn(&forward).expect("the two forms compare");
+
+        let backward = records("RANGE = 2005-06-08T18:41:00 1.0\nRANGE = 2005-159T17:41:00 2.0");
+        assert!(matches!(
+            parse_kvn(&backward),
+            Err(TdmError::RecordsOutOfOrder { .. })
+        ));
     }
 
     #[test]
