@@ -6,6 +6,46 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** `TdmError::NonPrintableCharacter` and `TdmError::LineTooLong`
+  carry `line: Option<usize>` in place of `line: usize`, and each gained
+  `keyword: String`. The writer raises both with no input line to point at, and
+  the keyword is the locator it does have: the first token of the line it built.
+  A read fills `line` with `Some` and the keyword with the offending line's
+  first token.
+- **Breaking.** `TdmError` and `TdmWarning` carry one payload convention. A
+  keyword is `keyword: String` in every variant, whether this crate named it or
+  read it from the message; it was `key`, `field` or `keyword` by turns, and
+  `&'static str` in the variants this crate named and `String` in the ones it
+  read, so a caller rendering an error had to know which. A label this crate
+  classifies with rather than reads, `section` and `detail`, stays
+  `&'static str`. Each variant names where the problem is with the most specific
+  locator meaningful in both directions: `line` where only the reader can raise
+  it, `line: Option<usize>` where the writer raises the same failure with no
+  input line, and `segment` where the problem belongs to a segment. The
+  `#[non_exhaustive]` annotation makes a later variant additive but does not
+  make changing an existing payload free, which is why this lands with the rest
+  of the breaking work rather than after it.
+- **Breaking.** An absent `CCSDS_TDM_VERS` reports `TdmError::MissingKeyword`
+  like every other mandatory keyword, and `TdmError::MissingVersion` is gone. It
+  is one of the keywords table 3-2 marks mandatory, and a caller asking which
+  mandatory keyword a message lacks should not need a second match arm for the
+  one that happens to come first. `TdmError::InvalidVersion` carries the line it
+  was read from, as every other parse error does, or `None` for a value a caller
+  built that no input produced. The version was also filtered for emptiness
+  before being reported absent, which became unreachable once an empty value was
+  refused at the line that gives it.
+- **Breaking.** `TdmError` and `TdmInputErrorKind` are `#[non_exhaustive]`, so a
+  caller matching on either needs a wildcard arm. The CCSDS 503.0-B-2 audit adds
+  failure modes as it covers more of the standard, and the annotation is what
+  makes those later additions additive rather than a compatibility event each
+  time. The refusal of a field whose key cannot carry a value is now its own
+  variant, `TdmError::KeywordNotAssignable`, naming the key as the field holds
+  it. It was reported as `TdmError::MalformedLine` carrying a line number
+  counted from an encoding that is never produced, which said a line was
+  malformed in a stream the caller could not look at; the distinction a caller
+  needs is between a line that is not a KVN assignment and a key that the
+  standard does not let carry a value at all. `tdm::encode_kvn` raises it from
+  `validate_tdm`, with the whole value checked before any line is built.
 - An IONEX value scales as the reference readers scale it, `field * 10^EXPONENT`,
   with the factor built from an exact power of ten rather than taken from a
   `pow` implementation, so a node does not depend on a library's rounding: `10^n`
@@ -560,10 +600,15 @@ All notable changes to `sidereon-core` are documented here.
   refuses it with `TdmError::MalformedLine`. `tdm::encode_kvn` wrote such a field
   as `COMMENT = value`, which reads back as a comment whose text is
   `= value`, so a message carrying one parsed, encoded and reparsed to a
-  different value, one comment longer and one field shorter; the writer refuses
-  the field instead. The scheduled fuzz run on the `tdm_round_trip` target found
-  this on a 1071-byte input whose line 112 is `COMMENT=`, kept as a regression
-  fixture.
+  different value, one comment longer and one field shorter. The writer refuses
+  such a field with `TdmError::KeywordNotAssignable`, which `validate_tdm` raises
+  for a value a caller built, since the reader no longer produces one. The
+  scheduled fuzz run on the `tdm_round_trip` target found the parse-side defect
+  on a 1071-byte input whose line 112 is `COMMENT=`; that input is kept as a
+  regression fixture, and now meets the character-set rule at line 2 before it
+  reaches line 112, so it pins that refusal and that line 112 still holds the
+  construct. The minimal messages in `a_comment_keyed_assignment_is_refused_in_both_sections`
+  pin the `COMMENT` assignment itself.
 - The IONEX writer lays records out as IONEX 1 defines them: axes in
   `2X,3F6.1`, band records in `2X,5F6.1`, values in `16I5`, and `EXPONENT` only
   where it is not `-1`. Axis and band records were written in `8.1` fields, which

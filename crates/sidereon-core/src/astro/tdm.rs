@@ -12,6 +12,9 @@ use std::fmt;
 const VERSION_KEY: &str = "CCSDS_TDM_VERS";
 const COMMENT_KEY: &str = "COMMENT";
 
+/// The longest line CCSDS 503.0-B-2 4.2.1 allows, excluding its terminator.
+const MAX_LINE_CHARACTERS: usize = 254;
+
 /// A parsed CCSDS Tracking Data Message.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tdm {
@@ -234,8 +237,518 @@ impl TdmUnit {
     }
 }
 
+/// Whether the TDM reader forgives one kind of departure from CCSDS 503.0-B-2
+/// or refuses the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TdmLeniency {
+    /// Refuse the message, naming what was wrong.
+    #[default]
+    Strict,
+    /// Read the message and report the departure as a [`TdmWarning`].
+    Forgive,
+}
+
+/// The policies the TDM reader applies to departures from CCSDS 503.0-B-2.
+///
+/// The default refuses every departure. A field set to
+/// [`TdmLeniency::Forgive`] forgives one that does not change what a value
+/// means, and the read reports it as a [`TdmWarning`] naming the line.
+///
+/// Nothing that changes what the message means is forgivable under any policy:
+/// a value that does not parse, a unit that contradicts table 3-5, a keyword
+/// the standard does not define and whose meaning would have to be invented,
+/// duplicate keys with conflicting values, a structural error such as a nested
+/// or unmatched block, and a `COMMENT` used as an assignment key. A reader that
+/// guesses a value is worse than one that refuses. `PARTICIPANT_6` and up are
+/// refused under every policy for the same reason: 3.3.1.11 allows them only by
+/// arrangement outside the message, so a `PATH` entry naming an index the
+/// message cannot resolve would leave the reader to guess which participant a
+/// measurement belongs to.
+///
+/// The writer stays strict whatever the reader forgave. Reading a message
+/// leniently does not let [`encode_kvn`] emit a non-conforming one: it refuses
+/// what the standard forbids, and the [`TdmWarning`] from the read is what says
+/// why. A message read under a lenient policy either writes back unchanged or
+/// is refused by name, and is never quietly repaired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct TdmPolicy {
+    /// Characters outside the printable ASCII 4.2.1 allows.
+    pub non_printable: TdmLeniency,
+    /// Keywords tables 3-2 and 3-3 mark mandatory that the message omits.
+    pub missing_keywords: TdmLeniency,
+    /// Lines longer than the 254 characters 4.2.1 allows.
+    pub long_lines: TdmLeniency,
+    /// Data sections holding none of the records 3.1.3 requires.
+    pub empty_data_sections: TdmLeniency,
+    /// A keyword's records out of the chronological order 3.4.10 requires.
+    pub record_order: TdmLeniency,
+    /// A keyword and timetag pair repeating, which 3.4.11 forbids.
+    pub duplicate_records: TdmLeniency,
+    /// Keywords out of the order tables 3-2 and 3-3 fix.
+    pub keyword_order: TdmLeniency,
+    /// A final line with none of the terminators 4.2.11 requires.
+    pub final_terminator: TdmLeniency,
+}
+
+impl TdmPolicy {
+    /// This policy with `non_printable`.
+    #[must_use]
+    pub const fn with_non_printable(mut self, non_printable: TdmLeniency) -> Self {
+        self.non_printable = non_printable;
+        self
+    }
+
+    /// This policy with `missing_keywords`.
+    #[must_use]
+    pub const fn with_missing_keywords(mut self, missing_keywords: TdmLeniency) -> Self {
+        self.missing_keywords = missing_keywords;
+        self
+    }
+
+    /// This policy with `long_lines`.
+    #[must_use]
+    pub const fn with_long_lines(mut self, long_lines: TdmLeniency) -> Self {
+        self.long_lines = long_lines;
+        self
+    }
+
+    /// This policy with `empty_data_sections`.
+    #[must_use]
+    pub const fn with_empty_data_sections(mut self, empty_data_sections: TdmLeniency) -> Self {
+        self.empty_data_sections = empty_data_sections;
+        self
+    }
+
+    /// A policy that forgives nothing, the same as [`TdmPolicy::default`] but
+    /// usable in a constant.
+    #[must_use]
+    pub const fn strict() -> Self {
+        Self {
+            non_printable: TdmLeniency::Strict,
+            missing_keywords: TdmLeniency::Strict,
+            long_lines: TdmLeniency::Strict,
+            empty_data_sections: TdmLeniency::Strict,
+            record_order: TdmLeniency::Strict,
+            duplicate_records: TdmLeniency::Strict,
+            keyword_order: TdmLeniency::Strict,
+            final_terminator: TdmLeniency::Strict,
+        }
+    }
+
+    /// This policy with `final_terminator`.
+    #[must_use]
+    pub const fn with_final_terminator(mut self, final_terminator: TdmLeniency) -> Self {
+        self.final_terminator = final_terminator;
+        self
+    }
+
+    /// This policy with `keyword_order`.
+    #[must_use]
+    pub const fn with_keyword_order(mut self, keyword_order: TdmLeniency) -> Self {
+        self.keyword_order = keyword_order;
+        self
+    }
+
+    /// This policy with `duplicate_records`.
+    #[must_use]
+    pub const fn with_duplicate_records(mut self, duplicate_records: TdmLeniency) -> Self {
+        self.duplicate_records = duplicate_records;
+        self
+    }
+
+    /// This policy with `record_order`.
+    #[must_use]
+    pub const fn with_record_order(mut self, record_order: TdmLeniency) -> Self {
+        self.record_order = record_order;
+        self
+    }
+
+    /// This policy with every forgivable departure forgiven.
+    #[must_use]
+    pub const fn lenient() -> Self {
+        Self {
+            non_printable: TdmLeniency::Forgive,
+            missing_keywords: TdmLeniency::Forgive,
+            long_lines: TdmLeniency::Forgive,
+            empty_data_sections: TdmLeniency::Forgive,
+            record_order: TdmLeniency::Forgive,
+            duplicate_records: TdmLeniency::Forgive,
+            keyword_order: TdmLeniency::Forgive,
+            final_terminator: TdmLeniency::Forgive,
+        }
+    }
+}
+
+/// A departure from CCSDS 503.0-B-2 the reader forgave under a [`TdmPolicy`]
+/// instead of refusing the message.
+///
+/// Each names where the departure is, so a caller can report it or decide the
+/// message is not good enough. The corresponding [`TdmError`] is what a strict
+/// read returns for the same input.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TdmWarning {
+    /// A line held a character outside the printable ASCII 4.2.1 allows.
+    NonPrintableCharacter {
+        /// One-based input line number.
+        line: usize,
+        /// One-based character position within the line.
+        column: usize,
+        /// The offending character.
+        character: char,
+    },
+    /// A line was longer than the 254 characters 4.2.1 allows.
+    LineTooLong {
+        /// One-based input line number.
+        line: usize,
+        /// The line's length in characters, excluding its terminator.
+        length: usize,
+    },
+    /// A keyword CCSDS 503.0-B-2 marks mandatory was absent.
+    MissingKeyword {
+        /// The absent keyword.
+        keyword: String,
+        /// The one-based segment that required it, or `None` for the header.
+        segment: Option<usize>,
+    },
+    /// A data section held none of the records 3.1.3 requires.
+    EmptyDataSection {
+        /// The one-based segment index.
+        segment: usize,
+    },
+    /// A keyword's records were not in the chronological order 3.4.10 requires.
+    RecordsOutOfOrder {
+        /// One-based segment index.
+        segment: usize,
+        /// The keyword whose records go backwards.
+        keyword: String,
+        /// The timetag that goes back.
+        epoch: String,
+    },
+    /// The last line carried none of the terminators 4.2.11 requires.
+    UnterminatedFinalLine {
+        /// One-based number of the unterminated line.
+        line: usize,
+    },
+    /// A keyword appeared before one the table for its section orders earlier.
+    KeywordOutOfOrder {
+        /// One-based input line number.
+        line: usize,
+        /// The keyword out of place.
+        keyword: String,
+        /// The section it appeared in, `header` or `metadata`.
+        section: &'static str,
+    },
+    /// A keyword and timetag pair repeated, which 3.4.11 forbids. Both records
+    /// are kept, in the order the file gives them.
+    DuplicateRecord {
+        /// One-based segment index.
+        segment: usize,
+        /// The repeated keyword.
+        keyword: String,
+        /// The repeated timetag.
+        epoch: String,
+    },
+}
+
+impl fmt::Display for TdmWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonPrintableCharacter {
+                line,
+                column,
+                character,
+            } => write!(
+                f,
+                "TDM line {line} column {column} holds {character:?}, which is not printable ASCII"
+            ),
+            Self::LineTooLong { line, length } => write!(
+                f,
+                "TDM line {line} is {length} characters, over the {MAX_LINE_CHARACTERS} allowed"
+            ),
+            Self::MissingKeyword {
+                keyword,
+                segment: Some(segment),
+            } => write!(f, "missing TDM {keyword} in segment {segment}"),
+            Self::MissingKeyword {
+                keyword,
+                segment: None,
+            } => write!(f, "missing TDM {keyword}"),
+            Self::EmptyDataSection { segment } => {
+                write!(f, "TDM segment {segment} holds no tracking data record")
+            }
+            Self::RecordsOutOfOrder {
+                segment,
+                keyword,
+                epoch,
+            } => write!(
+                f,
+                "TDM segment {segment} gives {keyword} at {epoch} after a later one"
+            ),
+            Self::DuplicateRecord {
+                segment,
+                keyword,
+                epoch,
+            } => write!(f, "TDM segment {segment} repeats {keyword} at {epoch}"),
+            Self::KeywordOutOfOrder {
+                line,
+                keyword,
+                section,
+            } => write!(
+                f,
+                "TDM {section} keyword {keyword} at line {line} is out of the order its table fixes"
+            ),
+            Self::UnterminatedFinalLine { line } => {
+                write!(f, "TDM line {line} carries no terminator")
+            }
+        }
+    }
+}
+
+/// The policies the TDM writer applies to departures from CCSDS 503.0-B-2.
+///
+/// The default emits none, so [`encode_kvn`] writes a conforming message or
+/// refuses the value. A field set to [`TdmLeniency::Forgive`] lets the writer
+/// emit one departure that a reader under the matching [`TdmPolicy`] forgives,
+/// and [`encode_kvn_with_policy`] returns each one it emitted. The two policies
+/// mirror each other deliberately: a message read leniently can be written back
+/// by asking for the same departures, and the list that comes back says exactly
+/// what makes the file non-conforming.
+///
+/// Nothing outside that mirror is emittable under any policy. A field keyed
+/// `COMMENT` or another keyword 4.2.5 c) excepts, a key holding an equals sign
+/// or whitespace, a comment carrying a newline, a value that does not parse as
+/// its keyword's type: each produces a file that reads back as something other
+/// than the value written, which no policy can make correct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct TdmWritePolicy {
+    /// Characters outside the printable ASCII 4.2.1 allows.
+    pub non_printable: TdmLeniency,
+    /// Keywords tables 3-2 and 3-3 mark mandatory that the value omits.
+    pub missing_keywords: TdmLeniency,
+    /// Lines longer than the 254 characters 4.2.1 allows.
+    pub long_lines: TdmLeniency,
+    /// Data sections holding none of the records 3.1.3 requires.
+    pub empty_data_sections: TdmLeniency,
+    /// A keyword's records out of the chronological order 3.4.10 requires.
+    pub record_order: TdmLeniency,
+    /// A keyword and timetag pair repeating, which 3.4.11 forbids.
+    pub duplicate_records: TdmLeniency,
+    /// Keywords out of the order tables 3-2 and 3-3 fix.
+    pub keyword_order: TdmLeniency,
+    /// A final line with none of the terminators 4.2.11 requires.
+    pub final_terminator: TdmLeniency,
+}
+
+impl TdmWritePolicy {
+    /// A policy that emits no departure, the same as [`TdmWritePolicy::default`]
+    /// but usable in a constant.
+    #[must_use]
+    pub const fn strict() -> Self {
+        Self {
+            non_printable: TdmLeniency::Strict,
+            missing_keywords: TdmLeniency::Strict,
+            long_lines: TdmLeniency::Strict,
+            empty_data_sections: TdmLeniency::Strict,
+            record_order: TdmLeniency::Strict,
+            duplicate_records: TdmLeniency::Strict,
+            keyword_order: TdmLeniency::Strict,
+            final_terminator: TdmLeniency::Strict,
+        }
+    }
+
+    /// A policy that emits every departure the mirror allows.
+    #[must_use]
+    pub const fn lenient() -> Self {
+        Self {
+            non_printable: TdmLeniency::Forgive,
+            missing_keywords: TdmLeniency::Forgive,
+            long_lines: TdmLeniency::Forgive,
+            empty_data_sections: TdmLeniency::Forgive,
+            record_order: TdmLeniency::Forgive,
+            duplicate_records: TdmLeniency::Forgive,
+            keyword_order: TdmLeniency::Forgive,
+            final_terminator: TdmLeniency::Forgive,
+        }
+    }
+
+    /// This policy with `non_printable`.
+    #[must_use]
+    pub const fn with_non_printable(mut self, non_printable: TdmLeniency) -> Self {
+        self.non_printable = non_printable;
+        self
+    }
+
+    /// This policy with `missing_keywords`.
+    #[must_use]
+    pub const fn with_missing_keywords(mut self, missing_keywords: TdmLeniency) -> Self {
+        self.missing_keywords = missing_keywords;
+        self
+    }
+
+    /// This policy with `long_lines`.
+    #[must_use]
+    pub const fn with_long_lines(mut self, long_lines: TdmLeniency) -> Self {
+        self.long_lines = long_lines;
+        self
+    }
+
+    /// This policy with `empty_data_sections`.
+    #[must_use]
+    pub const fn with_empty_data_sections(mut self, empty_data_sections: TdmLeniency) -> Self {
+        self.empty_data_sections = empty_data_sections;
+        self
+    }
+
+    /// This policy with `record_order`.
+    #[must_use]
+    pub const fn with_record_order(mut self, record_order: TdmLeniency) -> Self {
+        self.record_order = record_order;
+        self
+    }
+
+    /// This policy with `duplicate_records`.
+    #[must_use]
+    pub const fn with_duplicate_records(mut self, duplicate_records: TdmLeniency) -> Self {
+        self.duplicate_records = duplicate_records;
+        self
+    }
+
+    /// This policy with `keyword_order`.
+    #[must_use]
+    pub const fn with_keyword_order(mut self, keyword_order: TdmLeniency) -> Self {
+        self.keyword_order = keyword_order;
+        self
+    }
+
+    /// This policy with `final_terminator`.
+    #[must_use]
+    pub const fn with_final_terminator(mut self, final_terminator: TdmLeniency) -> Self {
+        self.final_terminator = final_terminator;
+        self
+    }
+}
+
+/// A departure from CCSDS 503.0-B-2 the writer emitted under a
+/// [`TdmWritePolicy`].
+///
+/// Each names what makes the written file non-conforming, in the vocabulary
+/// [`TdmWarning`] uses for the same departure on the way in. A reader under the
+/// matching [`TdmPolicy`] forgives exactly these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TdmDeparture {
+    /// A written line holds a character outside printable ASCII.
+    NonPrintableCharacter {
+        /// The keyword whose line holds it.
+        keyword: String,
+        /// The offending character.
+        character: char,
+    },
+    /// A written line is longer than the 254 characters 4.2.1 allows.
+    LineTooLong {
+        /// The keyword whose line is too long.
+        keyword: String,
+        /// The line's length in characters.
+        length: usize,
+    },
+    /// A keyword CCSDS 503.0-B-2 marks mandatory is absent from the message.
+    MissingKeyword {
+        /// The absent keyword.
+        keyword: String,
+        /// The one-based segment that required it, or `None` for the header.
+        segment: Option<usize>,
+    },
+    /// A data section is written holding none of the records 3.1.3 requires.
+    EmptyDataSection {
+        /// The one-based segment index.
+        segment: usize,
+    },
+    /// A keyword's records are written out of chronological order.
+    RecordsOutOfOrder {
+        /// One-based segment index.
+        segment: usize,
+        /// The keyword whose records go backwards.
+        keyword: String,
+        /// The timetag that goes back.
+        epoch: String,
+    },
+    /// A keyword and timetag pair is written twice.
+    DuplicateRecord {
+        /// One-based segment index.
+        segment: usize,
+        /// The repeated keyword.
+        keyword: String,
+        /// The repeated timetag.
+        epoch: String,
+    },
+    /// A keyword is written out of the order its table fixes.
+    KeywordOutOfOrder {
+        /// The keyword out of place.
+        keyword: String,
+        /// The section it is written in, `header` or `metadata`.
+        section: &'static str,
+    },
+    /// The last line is written with no terminator.
+    UnterminatedFinalLine,
+}
+
+impl fmt::Display for TdmDeparture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonPrintableCharacter { keyword, character } => write!(
+                f,
+                "TDM {keyword} is written with {character:?}, which is not printable ASCII"
+            ),
+            Self::LineTooLong { keyword, length } => write!(
+                f,
+                "TDM {keyword} is written as {length} characters, over the {MAX_LINE_CHARACTERS} allowed"
+            ),
+            Self::MissingKeyword {
+                keyword,
+                segment: Some(segment),
+            } => write!(f, "TDM segment {segment} is written without {keyword}"),
+            Self::MissingKeyword {
+                keyword,
+                segment: None,
+            } => write!(f, "TDM written without {keyword}"),
+            Self::EmptyDataSection { segment } => write!(
+                f,
+                "TDM segment {segment} is written with no tracking data record"
+            ),
+            Self::RecordsOutOfOrder {
+                segment,
+                keyword,
+                epoch,
+            } => write!(
+                f,
+                "TDM segment {segment} writes {keyword} at {epoch} after a later one"
+            ),
+            Self::DuplicateRecord {
+                segment,
+                keyword,
+                epoch,
+            } => write!(f, "TDM segment {segment} writes {keyword} at {epoch} twice"),
+            Self::KeywordOutOfOrder { keyword, section } => write!(
+                f,
+                "TDM {section} writes {keyword} out of the order its table fixes"
+            ),
+            Self::UnterminatedFinalLine => {
+                write!(f, "TDM is written with no terminator on its last line")
+            }
+        }
+    }
+}
+
 /// Boundary validation failure category for TDM parsing and encoding.
+///
+/// Marked `#[non_exhaustive]`: the CCSDS 503.0-B-2 audit adds categories as it
+/// covers more of the standard, and the annotation keeps each addition additive
+/// for callers, who match with a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TdmInputErrorKind {
     /// A required field or token was absent.
     Missing,
@@ -287,10 +800,23 @@ impl fmt::Display for TdmInputErrorKind {
 }
 
 /// Failure modes for TDM KVN parsing and encoding.
+///
+///
+/// Payload conventions, settled across every variant: a keyword, whether this
+/// crate named it or the message did, is `keyword: String`, so a caller
+/// rendering an error never has to know which. A label this crate classifies
+/// with rather than reads, such as `section` or `detail`, stays
+/// `&'static str`. Each variant names where the problem is with the most
+/// specific locator that means something in both directions: `line` for a
+/// failure only the reader can raise, `line: Option<usize>` where the writer
+/// raises the same failure with no input line to point at, and `segment` where
+/// the problem belongs to a segment rather than to one line.
+/// Marked `#[non_exhaustive]`: the CCSDS 503.0-B-2 audit adds failure modes as
+/// it covers more of the standard, and the annotation keeps each addition
+/// additive for callers, who match with a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TdmError {
-    /// The `CCSDS_TDM_VERS` header value was missing.
-    MissingVersion,
     /// The message contained no complete metadata/data segment.
     NoSegments,
     /// A section marker appeared in an invalid location.
@@ -301,15 +827,152 @@ pub enum TdmError {
         detail: &'static str,
     },
     /// A non-comment line was not a valid KVN assignment or section marker.
-    ///
-    /// [`encode_kvn`] returns this for a field the KVN form cannot carry, where
-    /// `line` counts the encoding it refused to emit rather than an input line.
     MalformedLine {
-        /// One-based line number, in the input when parsing and in the output
-        /// when encoding.
+        /// One-based input line number.
         line: usize,
-        /// The offending line.
+        /// The offending input line.
         text: String,
+    },
+    /// A line held a character outside the printable ASCII set CCSDS 503.0-B-2
+    /// 4.2.1 allows.
+    NonPrintableCharacter {
+        /// One-based input line number, or `None` for a line [`encode_kvn`]
+        /// would write, which no input produced.
+        line: Option<usize>,
+        /// The line's first whitespace-delimited token, which is the keyword on
+        /// every line the writer builds and the only locator it has.
+        keyword: String,
+        /// One-based character position within the line.
+        column: usize,
+        /// The offending character.
+        character: char,
+    },
+    /// A line was longer than the 254 characters CCSDS 503.0-B-2 4.2.1 allows.
+    LineTooLong {
+        /// One-based input line number, or `None` for a line [`encode_kvn`]
+        /// would write, which no input produced.
+        line: Option<usize>,
+        /// The line's first whitespace-delimited token, which is the keyword on
+        /// every line the writer builds and the only locator it has.
+        keyword: String,
+        /// The line's length in characters, excluding its terminator.
+        length: usize,
+    },
+    /// Two keywords in one metadata block carry the same index, which CCSDS
+    /// 503.0-B-2 3.3.1.9 forbids for participants.
+    DuplicateIndex {
+        /// The keyword family, such as `PARTICIPANT`.
+        keyword: String,
+        /// The index both carry.
+        index: u8,
+        /// The one-based segment they are in.
+        segment: usize,
+    },
+    /// A tracking data record's timetag is not one of the two forms CCSDS
+    /// 503.0-B-2 4.3.9 defines.
+    MalformedEpoch {
+        /// One-based input line number.
+        line: usize,
+        /// The record's keyword.
+        keyword: String,
+        /// The offending timetag.
+        text: String,
+    },
+    /// A keyword's records are not in the chronological order 3.4.10 requires.
+    RecordsOutOfOrder {
+        /// One-based segment index.
+        segment: usize,
+        /// The keyword whose records go backwards.
+        keyword: String,
+        /// The timetag that goes back.
+        epoch: String,
+    },
+    /// A keyword and timetag pair repeats, which 3.4.11 forbids.
+    DuplicateRecord {
+        /// One-based segment index.
+        segment: usize,
+        /// The repeated keyword.
+        keyword: String,
+        /// The repeated timetag.
+        epoch: String,
+    },
+    /// The last line carried none of the terminators 4.2.11 requires.
+    UnterminatedFinalLine {
+        /// One-based number of the unterminated line.
+        line: usize,
+    },
+    /// A field or comment holds text the KVN form cannot carry, so writing it
+    /// would give a line that reads back as something other than the value.
+    Unwritable {
+        /// The keyword, or `COMMENT` for a comment.
+        keyword: String,
+        /// What the KVN form cannot carry.
+        reason: &'static str,
+    },
+    /// A keyword appeared before one the table for its section orders earlier.
+    KeywordOutOfOrder {
+        /// One-based input line number.
+        line: usize,
+        /// The keyword out of place.
+        keyword: String,
+        /// The section it appeared in, `header` or `metadata`.
+        section: &'static str,
+    },
+    /// A `PATH` entry names a participant index the segment does not define.
+    UndefinedParticipant {
+        /// One-based segment index.
+        segment: usize,
+        /// The path keyword naming it.
+        keyword: String,
+        /// The participant index it names.
+        index: u8,
+    },
+    /// A keyword is not one the table for its section defines: table 3-2 for a
+    /// header, table 3-3 for a metadata section.
+    UndefinedKeyword {
+        /// One-based input line number.
+        line: usize,
+        /// The offending keyword.
+        keyword: String,
+        /// The section it appeared in, `header` or `metadata`.
+        section: &'static str,
+    },
+    /// A keyword CCSDS 503.0-B-2 marks mandatory was absent.
+    MissingKeyword {
+        /// The absent keyword.
+        keyword: String,
+        /// The one-based segment that required it, or `None` for the header.
+        segment: Option<usize>,
+    },
+    /// A data section held no tracking data record, which 3.1.3 requires.
+    EmptyDataSection {
+        /// The one-based segment index.
+        segment: usize,
+    },
+    /// A keyword was given the empty value CCSDS 503.0-B-2 4.3.1 forbids.
+    EmptyValue {
+        /// One-based input line number, or `None` for a caller-built field that
+        /// no input produced.
+        line: Option<usize>,
+        /// The keyword whose value was empty.
+        keyword: String,
+    },
+    /// The `CCSDS_TDM_VERS` value was not the `x.y` form 3.2.5 requires.
+    InvalidVersion {
+        /// One-based input line number, or `None` for a caller-built value that
+        /// no input produced.
+        line: Option<usize>,
+        /// The offending value.
+        value: String,
+    },
+    /// A field key is a keyword CCSDS 503.0-B-2 4.2.5 c) excepts from the
+    /// `keyword = value` syntax, so the field has no assignment form to write.
+    ///
+    /// Returned by [`encode_kvn`] for a value a caller built directly, which
+    /// [`parse_kvn`] cannot produce because it refuses such a line on the way in.
+    KeywordNotAssignable {
+        /// The offending keyword, as the field holds it.
+        keyword: String,
     },
     /// A data record did not contain `epoch value`.
     MalformedRecord {
@@ -321,7 +984,7 @@ pub enum TdmError {
     /// A field failed numeric or indexed-keyword validation.
     InvalidField {
         /// The offending field name.
-        field: String,
+        keyword: String,
         /// The validation failure category.
         kind: TdmInputErrorKind,
     },
@@ -330,7 +993,6 @@ pub enum TdmError {
 impl fmt::Display for TdmError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingVersion => write!(f, "missing {VERSION_KEY}"),
             Self::NoSegments => write!(f, "missing TDM segment"),
             Self::Section { line, detail } => {
                 write!(f, "invalid TDM section at line {line}: {detail}")
@@ -338,10 +1000,129 @@ impl fmt::Display for TdmError {
             Self::MalformedLine { line, text } => {
                 write!(f, "malformed TDM KVN line {line}: {text}")
             }
+            Self::NonPrintableCharacter {
+                line: Some(line),
+                keyword: _,
+                column,
+                character,
+            } => write!(
+                f,
+                "TDM line {line} column {column} holds {character:?}, which is not printable ASCII"
+            ),
+            Self::NonPrintableCharacter {
+                line: None,
+                keyword,
+                column,
+                character,
+            } => write!(
+                f,
+                "the TDM {keyword} line holds {character:?} at column {column}, \
+                 which is not printable ASCII"
+            ),
+            Self::LineTooLong {
+                line: Some(line),
+                keyword: _,
+                length,
+            } => write!(
+                f,
+                "TDM line {line} is {length} characters, over the {MAX_LINE_CHARACTERS} allowed"
+            ),
+            Self::LineTooLong {
+                line: None,
+                keyword,
+                length,
+            } => write!(
+                f,
+                "the TDM {keyword} line is {length} characters, \
+                 over the {MAX_LINE_CHARACTERS} allowed"
+            ),
+            Self::MissingKeyword {
+                keyword,
+                segment: Some(segment),
+            } => write!(f, "missing TDM {keyword} in segment {segment}"),
+            Self::MissingKeyword {
+                keyword,
+                segment: None,
+            } => write!(f, "missing TDM {keyword}"),
+            Self::DuplicateIndex {
+                keyword,
+                index,
+                segment,
+            } => write!(
+                f,
+                "TDM segment {segment} gives {keyword}_{index} more than once"
+            ),
+            Self::MalformedEpoch {
+                line,
+                keyword,
+                text,
+            } => write!(
+                f,
+                "TDM record {keyword} at line {line} has the timetag {text}, which is not a form 4.3.9 defines"
+            ),
+            Self::RecordsOutOfOrder {
+                segment,
+                keyword,
+                epoch,
+            } => write!(
+                f,
+                "TDM segment {segment} gives {keyword} at {epoch} after a later one"
+            ),
+            Self::DuplicateRecord {
+                segment,
+                keyword,
+                epoch,
+            } => write!(f, "TDM segment {segment} repeats {keyword} at {epoch}"),
+            Self::KeywordOutOfOrder {
+                line,
+                keyword,
+                section,
+            } => write!(
+                f,
+                "TDM {section} keyword {keyword} at line {line} is out of the order its table fixes"
+            ),
+            Self::UnterminatedFinalLine { line } => {
+                write!(f, "TDM line {line} carries no terminator")
+            }
+            Self::Unwritable { keyword, reason } => {
+                write!(f, "TDM {keyword} cannot be written: {reason}")
+            }
+            Self::UndefinedParticipant {
+                segment,
+                keyword,
+                index,
+            } => write!(
+                f,
+                "TDM segment {segment} gives {keyword} naming participant {index}, which it does not define"
+            ),
+            Self::UndefinedKeyword { line, keyword, section } => write!(
+                f,
+                "TDM {section} keyword {keyword} at line {line} is not one the standard defines"
+            ),
+            Self::EmptyDataSection { segment } => {
+                write!(f, "TDM segment {segment} holds no tracking data record")
+            }
+            Self::EmptyValue {
+                line: Some(line),
+                keyword,
+            } => write!(f, "TDM keyword {keyword} has no value at line {line}"),
+            Self::EmptyValue { line: None, keyword } => {
+                write!(f, "TDM keyword {keyword} has no value")
+            }
+            Self::InvalidVersion {
+                line: Some(line),
+                value,
+            } => write!(f, "TDM version {value} at line {line} is not in the form x.y"),
+            Self::InvalidVersion { line: None, value } => {
+                write!(f, "TDM version {value} is not in the form x.y")
+            }
+            Self::KeywordNotAssignable { keyword } => {
+                write!(f, "TDM keyword {keyword} cannot be given a value")
+            }
             Self::MalformedRecord { line, keyword } => {
                 write!(f, "malformed TDM data record {keyword} at line {line}")
             }
-            Self::InvalidField { field, kind } => write!(f, "invalid TDM field {field}: {kind}"),
+            Self::InvalidField { keyword, kind } => write!(f, "invalid TDM field {keyword}: {kind}"),
         }
     }
 }
@@ -517,10 +1298,14 @@ pub fn parse_kvn(text: &str) -> Result<Tdm, TdmError> {
         });
     }
 
-    let version = header
-        .version
-        .filter(|value| !value.is_empty())
-        .ok_or(TdmError::MissingVersion)?;
+    let version =
+        header
+            .version
+            .filter(|value| !value.is_empty())
+            .ok_or(TdmError::MissingKeyword {
+                keyword: VERSION_KEY.to_string(),
+                segment: None,
+            })?;
     if segments.is_empty() {
         return Err(TdmError::NoSegments);
     }
@@ -561,16 +1346,12 @@ pub fn encode_kvn(tdm: &Tdm) -> Result<String, TdmError> {
     if let Some(message_id) = &tdm.message_id {
         lines.push(format!("MESSAGE_ID = {message_id}"));
     }
-    for field in &tdm.header_fields {
-        push_field(&mut lines, field)?;
-    }
+    lines.extend(tdm.header_fields.iter().map(field_line));
 
     for segment in &tdm.segments {
         lines.push("META_START".to_string());
         lines.extend(segment.metadata.comments.iter().map(comment_line));
-        for field in &segment.metadata.fields {
-            push_field(&mut lines, field)?;
-        }
+        lines.extend(segment.metadata.fields.iter().map(field_line));
         lines.push("META_STOP".to_string());
         lines.push("DATA_START".to_string());
         lines.extend(segment.data.comments.iter().map(comment_line));
@@ -670,7 +1451,7 @@ fn parse_record(
 ) -> Result<TdmDataRecord, TdmError> {
     if has_displayed_unit(keyword) || has_displayed_unit(value) {
         return Err(TdmError::InvalidField {
-            field: keyword.to_string(),
+            keyword: keyword.to_string(),
             kind: TdmInputErrorKind::UnexpectedUnit,
         });
     }
@@ -707,37 +1488,37 @@ fn parse_scalar(
 ) -> Result<TdmScalar, TdmError> {
     if is_nonfinite_float_token(text) {
         return Err(TdmError::InvalidField {
-            field: field.to_string(),
+            keyword: field.to_string(),
             kind: TdmInputErrorKind::NonFinite,
         });
     }
     validate_numeric_token(field, text, observable)?;
     let value = text.parse::<f64>().map_err(|_| TdmError::InvalidField {
-        field: field.to_string(),
+        keyword: field.to_string(),
         kind: TdmInputErrorKind::FloatParse,
     })?;
     if !value.is_finite() {
         return Err(TdmError::InvalidField {
-            field: field.to_string(),
+            keyword: field.to_string(),
             kind: TdmInputErrorKind::NonFinite,
         });
     }
     let lexical_zero = numeric_token_is_zero(text);
     if !lexical_zero && decimal_magnitude_below_minimum_positive_double(text) {
         return Err(TdmError::InvalidField {
-            field: field.to_string(),
+            keyword: field.to_string(),
             kind: TdmInputErrorKind::OutOfRange,
         });
     }
     if value == 0.0 && text.trim_start().starts_with('-') {
         return Err(TdmError::InvalidField {
-            field: field.to_string(),
+            keyword: field.to_string(),
             kind: TdmInputErrorKind::NegativeZero,
         });
     }
     if value == 0.0 && !lexical_zero {
         return Err(TdmError::InvalidField {
-            field: field.to_string(),
+            keyword: field.to_string(),
             kind: TdmInputErrorKind::OutOfRange,
         });
     }
@@ -767,7 +1548,7 @@ fn validate_numeric_token(
         Ok(())
     } else {
         Err(TdmError::InvalidField {
-            field: field.to_string(),
+            keyword: field.to_string(),
             kind: TdmInputErrorKind::FloatParse,
         })
     }
@@ -777,23 +1558,23 @@ fn validate_integer_token(field: &str, text: &str) -> Result<(), TdmError> {
     let digits = strip_ascii_sign(text);
     if digits.is_empty() {
         return Err(TdmError::InvalidField {
-            field: field.to_string(),
+            keyword: field.to_string(),
             kind: TdmInputErrorKind::NonInteger,
         });
     }
     if !digits.chars().all(|character| character.is_ascii_digit()) {
         return Err(TdmError::InvalidField {
-            field: field.to_string(),
+            keyword: field.to_string(),
             kind: TdmInputErrorKind::NonInteger,
         });
     }
     let value = text.parse::<i64>().map_err(|_| TdmError::InvalidField {
-        field: field.to_string(),
+        keyword: field.to_string(),
         kind: TdmInputErrorKind::OutOfRange,
     })?;
     if !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&value) {
         return Err(TdmError::InvalidField {
-            field: field.to_string(),
+            keyword: field.to_string(),
             kind: TdmInputErrorKind::OutOfRange,
         });
     }
@@ -805,7 +1586,7 @@ fn validate_phase_count_token(field: &str, text: &str) -> Result<(), TdmError> {
         Ok(())
     } else {
         Err(TdmError::InvalidField {
-            field: field.to_string(),
+            keyword: field.to_string(),
             kind: TdmInputErrorKind::FloatParse,
         })
     }
@@ -1003,13 +1784,13 @@ fn validate_record_value(
     let value = scalar.value;
     if value == 0.0 && scalar.text.trim_start().starts_with('-') {
         return Err(TdmError::InvalidField {
-            field: keyword.to_string(),
+            keyword: keyword.to_string(),
             kind: TdmInputErrorKind::NegativeZero,
         });
     }
     if matches!(observable, TdmObservable::TransmitFreq { .. }) && value <= 0.0 {
         return Err(TdmError::InvalidField {
-            field: keyword.to_string(),
+            keyword: keyword.to_string(),
             kind: TdmInputErrorKind::NotPositive,
         });
     }
@@ -1020,7 +1801,7 @@ fn validate_record_value(
         && value <= 0.0
     {
         return Err(TdmError::InvalidField {
-            field: keyword.to_string(),
+            keyword: keyword.to_string(),
             kind: TdmInputErrorKind::NotPositive,
         });
     }
@@ -1028,7 +1809,7 @@ fn validate_record_value(
         && value < 0.0
     {
         return Err(TdmError::InvalidField {
-            field: keyword.to_string(),
+            keyword: keyword.to_string(),
             kind: TdmInputErrorKind::Negative,
         });
     }
@@ -1036,7 +1817,7 @@ fn validate_record_value(
         && !(0.0..=100.0).contains(&value)
     {
         return Err(TdmError::InvalidField {
-            field: keyword.to_string(),
+            keyword: keyword.to_string(),
             kind: TdmInputErrorKind::OutOfRange,
         });
     }
@@ -1044,7 +1825,7 @@ fn validate_record_value(
         && !(-180.0..360.0).contains(&value)
     {
         return Err(TdmError::InvalidField {
-            field: keyword.to_string(),
+            keyword: keyword.to_string(),
             kind: TdmInputErrorKind::OutOfRange,
         });
     }
@@ -1055,24 +1836,24 @@ fn validate_doppler_count(keyword: &str, scalar: &TdmScalar) -> Result<(), TdmEr
     let text = scalar.text.trim_start();
     if text.starts_with('-') {
         return Err(TdmError::InvalidField {
-            field: keyword.to_string(),
+            keyword: keyword.to_string(),
             kind: TdmInputErrorKind::Negative,
         });
     }
     let digits = text.strip_prefix('+').unwrap_or(text);
     if digits.is_empty() || !digits.chars().all(|character| character.is_ascii_digit()) {
         return Err(TdmError::InvalidField {
-            field: keyword.to_string(),
+            keyword: keyword.to_string(),
             kind: TdmInputErrorKind::NonInteger,
         });
     }
     let count = digits.parse::<u64>().map_err(|_| TdmError::InvalidField {
-        field: keyword.to_string(),
+        keyword: keyword.to_string(),
         kind: TdmInputErrorKind::OutOfRange,
     })?;
     if count > i32::MAX as u64 {
         return Err(TdmError::InvalidField {
-            field: keyword.to_string(),
+            keyword: keyword.to_string(),
             kind: TdmInputErrorKind::OutOfRange,
         });
     }
@@ -1081,16 +1862,25 @@ fn validate_doppler_count(keyword: &str, scalar: &TdmScalar) -> Result<(), TdmEr
 
 fn validate_tdm(tdm: &Tdm) -> Result<(), TdmError> {
     if tdm.version.is_empty() {
-        return Err(TdmError::MissingVersion);
+        return Err(TdmError::MissingKeyword {
+            keyword: VERSION_KEY.to_string(),
+            segment: None,
+        });
     }
     if tdm.segments.is_empty() {
         return Err(TdmError::NoSegments);
     }
+    for field in &tdm.header_fields {
+        check_key_assignable(field)?;
+    }
     for segment in &tdm.segments {
+        for field in &segment.metadata.fields {
+            check_key_assignable(field)?;
+        }
         for record in &segment.data.records {
             if !record.value.value.is_finite() {
                 return Err(TdmError::InvalidField {
-                    field: record.keyword.clone(),
+                    keyword: record.keyword.clone(),
                     kind: TdmInputErrorKind::NonFinite,
                 });
             }
@@ -1098,13 +1888,13 @@ fn validate_tdm(tdm: &Tdm) -> Result<(), TdmError> {
             let parsed = parse_scalar(&record.keyword, &record.value.text, &observable)?;
             if parsed.value.to_bits() != record.value.value.to_bits() {
                 return Err(TdmError::InvalidField {
-                    field: record.keyword.clone(),
+                    keyword: record.keyword.clone(),
                     kind: TdmInputErrorKind::DecimalMismatch,
                 });
             }
             if observable != record.observable {
                 return Err(TdmError::InvalidField {
-                    field: record.keyword.clone(),
+                    keyword: record.keyword.clone(),
                     kind: TdmInputErrorKind::UnknownKeyword,
                 });
             }
@@ -1115,7 +1905,7 @@ fn validate_tdm(tdm: &Tdm) -> Result<(), TdmError> {
             );
             if expected_unit != record.unit {
                 return Err(TdmError::InvalidField {
-                    field: record.keyword.clone(),
+                    keyword: record.keyword.clone(),
                     kind: TdmInputErrorKind::UnitMismatch,
                 });
             }
@@ -1165,17 +1955,14 @@ fn field_line(field: &TdmField) -> String {
 /// 4.5.3 reads any line whose keyword is followed by a space as a comment. A
 /// field keyed `COMMENT` has no assignment form: writing `COMMENT = value`
 /// emits a line that reads back as a comment rather than as the field.
-fn push_field(lines: &mut Vec<String>, field: &TdmField) -> Result<(), TdmError> {
-    let text = field_line(field);
+fn check_key_assignable(field: &TdmField) -> Result<(), TdmError> {
     // The key is compared trimmed: a key of `"COMMENT "` writes the same
     // line, which reads back as a comment just as an untrimmed one does.
     if field.key.trim() == COMMENT_KEY {
-        return Err(TdmError::MalformedLine {
-            line: lines.len().saturating_add(1),
-            text,
+        return Err(TdmError::KeywordNotAssignable {
+            keyword: field.key.clone(),
         });
     }
-    lines.push(text);
     Ok(())
 }
 
@@ -1229,14 +2016,14 @@ fn indexed_suffix_in_range(
 
 fn invalid_index(field: &str) -> TdmError {
     TdmError::InvalidField {
-        field: field.to_string(),
+        keyword: field.to_string(),
         kind: TdmInputErrorKind::InvalidIndex,
     }
 }
 
 fn unknown_keyword(field: &str) -> TdmError {
     TdmError::InvalidField {
-        field: field.to_string(),
+        keyword: field.to_string(),
         kind: TdmInputErrorKind::UnknownKeyword,
     }
 }
@@ -1247,7 +2034,7 @@ fn range_unit_from_label(label: &str) -> Result<TdmUnit, TdmError> {
         "s" => Ok(TdmUnit::Seconds),
         "RU" => Ok(TdmUnit::RangeUnits),
         _ => Err(TdmError::InvalidField {
-            field: "RANGE_UNITS".to_string(),
+            keyword: "RANGE_UNITS".to_string(),
             kind: TdmInputErrorKind::UnitMismatch,
         }),
     }
@@ -1406,7 +2193,7 @@ DATA_STOP",
         assert_eq!(
             err,
             TdmError::InvalidField {
-                field: "TRANSMIT_FREQ_1".to_string(),
+                keyword: "TRANSMIT_FREQ_1".to_string(),
                 kind: TdmInputErrorKind::NotPositive,
             }
         );
@@ -1480,9 +2267,8 @@ DATA_STOP",
         header_case.header_fields.push(comment_field.clone());
         assert_eq!(
             encode_kvn(&header_case),
-            Err(TdmError::MalformedLine {
-                line: 5,
-                text: "COMMENT = ".to_string(),
+            Err(TdmError::KeywordNotAssignable {
+                keyword: COMMENT_KEY.to_string(),
             })
         );
 
@@ -1491,10 +2277,11 @@ DATA_STOP",
             .metadata
             .fields
             .push(comment_field);
-        let err = encode_kvn(&metadata_case).unwrap_err();
-        assert!(matches!(
-            err,
-            TdmError::MalformedLine { ref text, .. } if text == "COMMENT = "
-        ));
+        assert_eq!(
+            encode_kvn(&metadata_case),
+            Err(TdmError::KeywordNotAssignable {
+                keyword: COMMENT_KEY.to_string(),
+            })
+        );
     }
 }
