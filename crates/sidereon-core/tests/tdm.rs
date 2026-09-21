@@ -1971,7 +1971,12 @@ fn scheduled_fuzz_payload_is_refused() {
     );
 
     // The line that broke the round trip is still the 112th.
-    assert_eq!(text.lines().nth(111), Some("COMMENT="));
+    let (before, rest) = text
+        .split_once("COMMENT=")
+        .expect("payload carries COMMENT=");
+    assert_eq!(before.matches('\n').count() + 1, 112);
+    assert!(before.ends_with('\n'));
+    assert!(rest.starts_with('\n'));
 }
 
 /// The smallest message carrying the refused line, so the property is pinned on

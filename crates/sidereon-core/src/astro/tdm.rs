@@ -179,6 +179,10 @@ pub struct TdmComment {
     /// requires.
     pub text: String,
     /// The index of the field or record this comment precedes.
+    ///
+    /// A comment belongs at the beginning of its section per 4.5.2, and the
+    /// writer knows only that a comment sat after a record, not which line it
+    /// came from.
     pub before_record: usize,
 }
 
@@ -524,13 +528,14 @@ pub enum TdmWarning {
         /// One-based number of the unterminated line.
         line: usize,
     },
-    /// A keyword appeared before one the table for its section orders earlier.
+    /// A keyword appeared before one the table for its section orders earlier,
+    /// or a data comment sat after a record.
     KeywordOutOfOrder {
         /// One-based input line number.
         line: usize,
         /// The keyword out of place.
         keyword: String,
-        /// The section it appeared in, `header` or `metadata`.
+        /// The section it appeared in, `header`, `metadata`, or `data`.
         section: &'static str,
     },
     /// A keyword and timetag pair repeated, which 3.4.11 forbids. Both records
@@ -601,10 +606,19 @@ impl fmt::Display for TdmWarning {
                 line,
                 keyword,
                 section,
-            } => write!(
-                f,
-                "TDM {section} keyword {keyword} at line {line} is out of the order its table fixes"
-            ),
+            } => {
+                if *section == "data" {
+                    write!(
+                        f,
+                        "TDM data comment at line {line} sat after a record; a comment belongs at the beginning of its section per 4.5.2"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "TDM {section} keyword {keyword} at line {line} is out of the order its table fixes"
+                    )
+                }
+            }
             Self::UnterminatedFinalLine { line } => {
                 write!(f, "TDM line {line} carries no terminator")
             }
@@ -837,11 +851,12 @@ pub enum TdmDeparture {
         /// The section it was written in, `header` or `metadata`.
         section: &'static str,
     },
-    /// A keyword is written out of the order its table fixes.
+    /// A keyword is written out of the order its table fixes, or a data
+    /// comment is written after a record.
     KeywordOutOfOrder {
         /// The keyword out of place.
         keyword: String,
-        /// The section it is written in, `header` or `metadata`.
+        /// The section it is written in, `header`, `metadata`, or `data`.
         section: &'static str,
     },
     /// The last line is written with no terminator.
@@ -888,10 +903,19 @@ impl fmt::Display for TdmDeparture {
                 f,
                 "TDM {section} writes {keyword} twice with the same value"
             ),
-            Self::KeywordOutOfOrder { keyword, section } => write!(
-                f,
-                "TDM {section} writes {keyword} out of the order its table fixes"
-            ),
+            Self::KeywordOutOfOrder { keyword, section } => {
+                if *section == "data" {
+                    write!(
+                        f,
+                        "TDM data writes a comment after a record; a comment belongs at the beginning of its section per 4.5.2"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "TDM {section} writes {keyword} out of the order its table fixes"
+                    )
+                }
+            }
             Self::UnterminatedFinalLine => {
                 write!(f, "TDM is written with no terminator on its last line")
             }
@@ -1057,14 +1081,15 @@ pub enum TdmError {
         /// What the KVN form cannot carry.
         reason: &'static str,
     },
-    /// A keyword appeared before one the table for its section orders earlier.
+    /// A keyword appeared before one the table for its section orders earlier,
+    /// or a data comment sat after a record.
     KeywordOutOfOrder {
         /// One-based input line number, or `None` for a line [`encode_kvn`]
         /// would write, which no input produced.
         line: Option<usize>,
         /// The keyword out of place.
         keyword: String,
-        /// The section it appeared in, `header` or `metadata`.
+        /// The section it appeared in, `header`, `metadata`, or `data`.
         section: &'static str,
     },
     /// A `PATH` entry names a participant index the segment does not define.
@@ -1260,18 +1285,36 @@ impl fmt::Display for TdmError {
                 line: Some(line),
                 keyword,
                 section,
-            } => write!(
-                f,
-                "TDM {section} keyword {keyword} at line {line} is out of the order its table fixes"
-            ),
+            } => {
+                if *section == "data" {
+                    write!(
+                        f,
+                        "TDM data comment at line {line} sat after a record; a comment belongs at the beginning of its section per 4.5.2"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "TDM {section} keyword {keyword} at line {line} is out of the order its table fixes"
+                    )
+                }
+            }
             Self::KeywordOutOfOrder {
                 line: None,
                 keyword,
                 section,
-            } => write!(
-                f,
-                "TDM {section} writes {keyword} out of the order its table fixes"
-            ),
+            } => {
+                if *section == "data" {
+                    write!(
+                        f,
+                        "TDM data writes a comment after a record; a comment belongs at the beginning of its section per 4.5.2"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "TDM {section} writes {keyword} out of the order its table fixes"
+                    )
+                }
+            }
             Self::RepeatedKeyword {
                 line: Some(line),
                 keyword,
@@ -1854,11 +1897,16 @@ pub fn encode_kvn_with_policy(
         lines.push("DATA_START".to_string());
         // Each comment goes back where it was read, so a message that carried
         // one away from the start of its block writes back unchanged rather
-        // than with its comments gathered to the top.
+        // than with its comments gathered to the top. The walk is linear in
+        // the records and comments together.
+        let mut comments = segment.data.comments.iter().peekable();
         for (index, record) in segment.data.records.iter().enumerate() {
-            for comment in &segment.data.comments {
-                if comment.before_record == index {
+            while let Some(comment) = comments.peek() {
+                if comment.before_record <= index {
                     lines.push(comment_line(&comment.text));
+                    comments.next();
+                } else {
+                    break;
                 }
             }
             lines.push(format!(
@@ -1866,10 +1914,8 @@ pub fn encode_kvn_with_policy(
                 record.keyword, record.epoch, record.value.text
             ));
         }
-        for comment in &segment.data.comments {
-            if comment.before_record >= segment.data.records.len() {
-                lines.push(comment_line(&comment.text));
-            }
+        for comment in comments {
+            lines.push(comment_line(&comment.text));
         }
         lines.push("DATA_STOP".to_string());
     }
@@ -3903,7 +3949,7 @@ DATA_STOP\n",
 
     const TERMINATOR_BODY: &str = "CCSDS_TDM_VERS = 2.0|CREATION_DATE = 2005-160T20:15:00Z|\
 ORIGINATOR = NASA|META_START|TIME_SYSTEM = UTC|PARTICIPANT_1 = DSS-25|META_STOP|\
-DATA_START|RANGE = 2005-159T17:41:00 1.0|DATA_STOP\n";
+DATA_START|RANGE = 2005-159T17:41:00 1.0|DATA_STOP|";
 
     #[test]
     fn a_line_ends_at_every_terminator_the_standard_allows() {
@@ -3961,43 +4007,54 @@ DATA_START|RANGE = 2005-159T17:41:00 1.0|DATA_STOP\n";
         const META: [&str; 3] = ["META_START", "TIME_SYSTEM = UTC", "PARTICIPANT_1 = DSS-25"];
 
         for terminator in ["\n", "\r", "\r\n", "\n\r"] {
-            let unclosed_metadata = [&HEAD[..], &META[..2]].concat().join(terminator);
-            assert_eq!(
-                parse_kvn(&unclosed_metadata),
-                Err(TdmError::Section {
-                    line: 6,
-                    detail: "unclosed metadata block",
-                }),
-                "unclosed metadata, terminator {terminator:?}"
-            );
+            for trailing in ["", terminator] {
+                let unclosed_metadata = format!(
+                    "{}{trailing}",
+                    [&HEAD[..], &META[..2]].concat().join(terminator)
+                );
+                assert_eq!(
+                    parse_kvn(&unclosed_metadata),
+                    Err(TdmError::Section {
+                        line: 6,
+                        detail: "unclosed metadata block",
+                    }),
+                    "unclosed metadata, terminator {terminator:?}, trailing {trailing:?}"
+                );
 
-            let metadata_without_data = [&HEAD[..], &META[..], &["META_STOP"][..]]
-                .concat()
-                .join(terminator);
-            assert_eq!(
-                parse_kvn(&metadata_without_data),
-                Err(TdmError::Section {
-                    line: 8,
-                    detail: "metadata without data block",
-                }),
-                "metadata without data, terminator {terminator:?}"
-            );
+                let metadata_without_data = format!(
+                    "{}{trailing}",
+                    [&HEAD[..], &META[..], &["META_STOP"][..]]
+                        .concat()
+                        .join(terminator)
+                );
+                assert_eq!(
+                    parse_kvn(&metadata_without_data),
+                    Err(TdmError::Section {
+                        line: 8,
+                        detail: "metadata without data block",
+                    }),
+                    "metadata without data, terminator {terminator:?}, trailing {trailing:?}"
+                );
 
-            let unclosed_data = [
-                &HEAD[..],
-                &META[..],
-                &["META_STOP", "DATA_START", "RANGE = 2005-159T17:41:00 1.0"][..],
-            ]
-            .concat()
-            .join(terminator);
-            assert_eq!(
-                parse_kvn(&unclosed_data),
-                Err(TdmError::Section {
-                    line: 10,
-                    detail: "unclosed data block",
-                }),
-                "unclosed data, terminator {terminator:?}"
-            );
+                let unclosed_data = format!(
+                    "{}{trailing}",
+                    [
+                        &HEAD[..],
+                        &META[..],
+                        &["META_STOP", "DATA_START", "RANGE = 2005-159T17:41:00 1.0"][..],
+                    ]
+                    .concat()
+                    .join(terminator)
+                );
+                assert_eq!(
+                    parse_kvn(&unclosed_data),
+                    Err(TdmError::Section {
+                        line: 10,
+                        detail: "unclosed data block",
+                    }),
+                    "unclosed data, terminator {terminator:?}, trailing {trailing:?}"
+                );
+            }
         }
     }
 
@@ -4588,13 +4645,16 @@ DATA_STOP\n";
         // missing terminator. An unclosed block is unterminated by
         // construction, and a file with no version has a defect its author can
         // act on, which "the last line carries no terminator" is not.
-        assert_eq!(
-            parse_kvn("CCSDS_TDM_VERS = 2.0\nMETA_START"),
-            Err(TdmError::Section {
-                line: 3,
-                detail: "unclosed metadata block",
-            })
-        );
+        for terminator in ["\n", "\r", "\r\n", "\n\r"] {
+            assert_eq!(
+                parse_kvn(&format!("CCSDS_TDM_VERS = 2.0{terminator}META_START")),
+                Err(TdmError::Section {
+                    line: 3,
+                    detail: "unclosed metadata block",
+                }),
+                "unclosed metadata ahead of terminator {terminator:?}"
+            );
+        }
         assert_eq!(
             parse_kvn("CREATION_DATE = 2005-160T20:15:00Z"),
             Err(TdmError::MissingKeyword {
@@ -4645,13 +4705,18 @@ DATA_STOP\n";
         let late = records(
             "RANGE = 2005-159T17:41:00 1.0\nCOMMENT after the first record\nRANGE = 2005-159T17:41:01 2.0",
         );
+        let err = parse_kvn(&late).unwrap_err();
         assert_eq!(
-            parse_kvn(&late),
-            Err(TdmError::KeywordOutOfOrder {
+            err,
+            TdmError::KeywordOutOfOrder {
                 line: Some(10),
                 keyword: COMMENT_KEY.to_string(),
                 section: "data",
-            })
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "TDM data comment at line 10 sat after a record; a comment belongs at the beginning of its section per 4.5.2"
         );
 
         // Forgiven, it is read where it sits and written back there. Nothing
@@ -4669,6 +4734,10 @@ DATA_STOP\n";
                 keyword: COMMENT_KEY.to_string(),
                 section: "data",
             }]
+        );
+        assert_eq!(
+            warnings[0].to_string(),
+            "TDM data comment at line 10 sat after a record; a comment belongs at the beginning of its section per 4.5.2"
         );
         assert_eq!(
             tdm.segments[0].data.comments,
@@ -4689,7 +4758,71 @@ DATA_STOP\n";
                 section: "data",
             }]
         );
+        assert_eq!(
+            departures[0].to_string(),
+            "TDM data writes a comment after a record; a comment belongs at the beginning of its section per 4.5.2"
+        );
+        assert_eq!(
+            TdmError::KeywordOutOfOrder {
+                line: None,
+                keyword: COMMENT_KEY.to_string(),
+                section: "data",
+            }
+            .to_string(),
+            "TDM data writes a comment after a record; a comment belongs at the beginning of its section per 4.5.2"
+        );
         assert_eq!(encoded, late);
+    }
+
+    #[test]
+    fn data_comments_round_trip_interleaved_with_multiple_records() {
+        let interleaved = records(
+            "COMMENT first comment before records\n\
+COMMENT second comment before records\n\
+RANGE = 2005-159T17:41:00 1.0\n\
+COMMENT comment between records\n\
+RANGE = 2005-159T17:41:01 2.0\n\
+COMMENT trailing comment after records\n\
+COMMENT final trailing comment",
+        );
+        let (tdm, warnings) = parse_kvn_with_policy(
+            &interleaved,
+            TdmPolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("interleaved data comments read");
+        assert_eq!(warnings.len(), 3);
+        assert_eq!(
+            tdm.segments[0].data.comments,
+            vec![
+                TdmComment {
+                    text: "first comment before records".to_string(),
+                    before_record: 0,
+                },
+                TdmComment {
+                    text: "second comment before records".to_string(),
+                    before_record: 0,
+                },
+                TdmComment {
+                    text: "comment between records".to_string(),
+                    before_record: 1,
+                },
+                TdmComment {
+                    text: "trailing comment after records".to_string(),
+                    before_record: 2,
+                },
+                TdmComment {
+                    text: "final trailing comment".to_string(),
+                    before_record: 2,
+                },
+            ]
+        );
+        let (encoded, departures) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("interleaved data comments write");
+        assert_eq!(departures.len(), 3);
+        assert_eq!(encoded, interleaved);
     }
 
     #[test]
