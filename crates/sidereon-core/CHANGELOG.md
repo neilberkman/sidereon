@@ -46,6 +46,13 @@ All notable changes to `sidereon-core` are documented here.
   `TdmError::KeywordOutOfOrder` and emitted as `TdmDeparture::KeywordOutOfOrder`
   when `keyword_order` is forgiven. `TdmWritePolicy::as_read` translates the
   write policy to the reader's vocabulary for mirrored validation.
+- `tdm::encode_kvn` serializes data section comments in an in-step linear walk
+  `O(records + comments)` rather than scanning every comment for each record.
+- Display formatting for `TdmError::KeywordOutOfOrder`,
+  `TdmWarning::KeywordOutOfOrder`, and `TdmDeparture::KeywordOutOfOrder`
+  distinguishes data section comments from header and metadata keywords, citing
+  placement at the beginning of the section per CCSDS 503.0-B-2 4.5.2 rather
+  than table order.
 - **Breaking.** `tdm::encode_kvn` and `tdm::parse_kvn` refuse a keyword repeated
   in one header or metadata block with different values using the new
   `TdmError::ConflictingKeyword`. CCSDS 503.0-B-2 4.2.5 a) gives each keyword "a
