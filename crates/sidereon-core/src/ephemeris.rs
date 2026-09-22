@@ -51,7 +51,8 @@ pub use crate::sp3::{
     Sp3ClockRecord, Sp3DataType, Sp3EpochPrediction, Sp3Flags, Sp3FrameLabelSet,
     Sp3FrameReconciliation, Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions, Sp3Header,
     Sp3MergeInputIdentity, Sp3MergeInputIdentityError, Sp3PredictionSummary, Sp3State,
-    Sp3TimeSystem, Sp3Version, SP3_MERGE_INPUT_ID_PREFIX, SP3_MERGE_INPUT_SCHEMA_VERSION,
+    Sp3TimeSystem, Sp3Version, Sp3WriteError, SP3_MERGE_INPUT_ID_PREFIX,
+    SP3_MERGE_INPUT_SCHEMA_VERSION,
 };
 pub use crate::sp3::{
     check_continuity, ContinuityCheck, ContinuityDefect, ContinuityOptions, ContinuityReport,

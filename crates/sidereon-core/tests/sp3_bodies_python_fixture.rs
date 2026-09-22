@@ -100,7 +100,7 @@ fn sp3_bodies_reference_self_validates() {
 
     // Write round-trips structurally: re-parsing the serialized text yields the
     // same epoch count and satellite list.
-    let text = sp3.to_sp3_string();
+    let text = sp3.to_sp3_string().expect("serialize SP3 product");
     let reparsed = Sp3::parse(text.as_bytes()).expect("re-parse written SP3");
     assert_eq!(reparsed.epoch_count(), sp3.epoch_count());
     assert_eq!(reparsed.satellites(), sp3.satellites());
@@ -185,7 +185,7 @@ fn dump_fixture() {
             "maneuver": rec.flags.maneuver,
             "orbit_predicted": rec.flags.orbit_predicted,
         },
-        "to_sp3_string": sp3.to_sp3_string(),
+        "to_sp3_string": sp3.to_sp3_string().expect("serialize SP3 product"),
     });
 
     let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
