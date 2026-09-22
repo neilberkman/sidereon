@@ -1,27 +1,29 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sidereon_core::rinex::clock::{RinexClock, RinexClockError};
+use sidereon_core::rinex::clock::RinexClock;
 
-// Round-trip class: a parsed clock product must re-encode to text that reparses
-// to an equal product (time scale + per-satellite series).
+// Round-trip class: a product read from text restates that text byte for byte,
+// whether the strict or the lossy reader produced it, and reading the restated
+// text gives an equal product.
 fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
-    let Ok(original) = RinexClock::parse(&text) else {
+
+    let lossy = RinexClock::parse_lossy(&text);
+    let restated = lossy
+        .to_rinex_string()
+        .expect("an unedited product restates its input");
+    assert_eq!(restated, text);
+    assert_eq!(RinexClock::parse_lossy(&restated), lossy);
+
+    let Ok(strict) = RinexClock::parse(&text) else {
         return;
     };
-    if !original.skipped_records.is_empty() {
-        return;
-    }
-    let encoded = match original.to_rinex_string() {
-        Ok(s) => s,
-        Err(RinexClockError::InvalidInput { reason, .. })
-            if reason.contains("without loss of precision") =>
-        {
-            return;
-        }
-        Err(err) => panic!("unexpected serialization error: {err:?}"),
-    };
-    let reparsed = RinexClock::parse(&encoded).expect("encoded RINEX clock must reparse");
-    assert_eq!(reparsed, original);
+    assert_eq!(strict, lossy);
+    let encoded = strict
+        .to_rinex_string()
+        .expect("an unedited product restates its input");
+    assert_eq!(encoded, text);
+    let reparsed = RinexClock::parse(&encoded).expect("restated RINEX clock must reparse");
+    assert_eq!(reparsed, strict);
 });

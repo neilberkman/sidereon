@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-09-22",
+  "retrieval": {
+    "digest_tool": "shasum -a 256"
+  },
+  "fixtures": [
+    {
+      "file": "COD0OPSRAP_20262600000_first_epoch_excerpt.clk",
+      "sha256": "a9208423b8e3089da86c2e2905d7efd54b5114a535ad20c6ef5e42ac7422fc31",
+      "bytes": 27612,
+      "lines": 320,
+      "classification": "real product excerpt",
+      "product": "COD0OPSRAP_20262600000_01D_30S_CLK.CLK",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGSac/products/2436/COD0OPSRAP_20262600000_01D_30S_CLK.CLK.gz",
+      "extraction": "the first 320 lines of the decompressed product: the complete header through END OF HEADER and every data line of the first epoch, copied byte for byte (the excerpt is a byte prefix of the product)",
+      "licence": "not verified; public IGS product",
+      "product_sha256": "0b51606318c60ddf3bb5424fef604450132ffa9e7b9a66d507525be888a43d35"
+    },
+    {
+      "file": "EMR0OPSRAP_20262600000_first_epoch_excerpt.clk",
+      "sha256": "36d37a245839fad18e0f24fbdfc585f43d90df3285d72e483b84b1b01db3e577",
+      "bytes": 23094,
+      "lines": 287,
+      "classification": "real product excerpt",
+      "product": "EMR0OPSRAP_20262600000_01D_30S_CLK.CLK",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGSac/products/2436/EMR0OPSRAP_20262600000_01D_30S_CLK.CLK.gz",
+      "extraction": "the first 287 lines of the decompressed product: the complete header through END OF HEADER and every data line of the first epoch, copied byte for byte (the excerpt is a byte prefix of the product)",
+      "licence": "not verified; public IGS product",
+      "product_sha256": "f3c4a1a69391626c200bbd1b1d7657f51d02ff52305135acbb882e459de579c8"
+    },
+    {
+      "file": "ESA0OPSRAP_20262600000_first_epoch_excerpt.clk",
+      "sha256": "23bfdbbec90dafb6faffe9aeb4162407605eb1c5b9f8cd23b0237576b40ca454",
+      "bytes": 28350,
+      "lines": 350,
+      "classification": "real product excerpt",
+      "product": "ESA0OPSRAP_20262600000_01D_30S_CLK.CLK",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGSac/products/2436/ESA0OPSRAP_20262600000_01D_30S_CLK.CLK.gz",
+      "extraction": "the first 350 lines of the decompressed product: the complete header through END OF HEADER and every data line of the first epoch, copied byte for byte (the excerpt is a byte prefix of the product)",
+      "licence": "not verified; public IGS product",
+      "product_sha256": "a53ff09a02255457c998d42e1e1db5cf49b1e1734a6cdd1579ff6c589967fe3e"
+    },
+    {
+      "file": "GBM0MGXRAP_20262600000_first_epoch_excerpt.clk",
+      "sha256": "d4b7cd79f0c33b01a27b5a69182ded863e63793a3544f22bda95d2cc86d3c9b4",
+      "bytes": 34832,
+      "lines": 515,
+      "classification": "real product excerpt",
+      "product": "GBM0MGXRAP_20262600000_01D_05M_CLK.CLK",
+      "url": "https://igs.bkg.bund.de/root_ftp/IGSac/products/2436/GBM0MGXRAP_20262600000_01D_05M_CLK.CLK.gz",
+      "extraction": "the first 515 lines of the decompressed product: the complete header through END OF HEADER and every data line of the first epoch, copied byte for byte (the excerpt is a byte prefix of the product)",
+      "licence": "not verified; public IGS product",
+      "product_sha256": "a420bb4c741bab8f355b803a9570d41d3252c28e824b5e00dbd8e6f2d5d3e0c2"
+    },
+    {
+      "file": "rinex_clock300_table_a17.clk",
+      "sha256": "bae17b858bd9b2089047de0baaa94ebb9b1028bc0b27cdcc18279737730fa791",
+      "bytes": 2574,
+      "lines": 34,
+      "classification": "specification example",
+      "source": "RINEX clock 3.00, Table A17 (example for analysis data)",
+      "url": "https://files.igs.org/pub/data/format/rinex_clock300.txt",
+      "source_sha256": "4df43da9463732f4a2c94c4b407e8f7e5a892eda0bb4b0c6c2bc142aecffbc40",
+      "extraction": "lines 628-661 of the specification text, copied byte for byte including line terminators and trailing blanks"
+    },
+    {
+      "file": "rinex_clock300_table_a18.clk",
+      "sha256": "f735529495e3928e80b4270a40b4b7d962500a4539457ab75327a7b2180f60f0",
+      "bytes": 997,
+      "lines": 13,
+      "classification": "specification example",
+      "source": "RINEX clock 3.00, Table A18 (example for calibration/discontinuity data, written as version 2.00)",
+      "url": "https://files.igs.org/pub/data/format/rinex_clock300.txt",
+      "source_sha256": "4df43da9463732f4a2c94c4b407e8f7e5a892eda0bb4b0c6c2bc142aecffbc40",
+      "extraction": "lines 674-686 of the specification text, copied byte for byte including line terminators and trailing blanks"
+    },
+    {
+      "file": "rinex_clock304_another_example.clk",
+      "sha256": "4c7182d319da0d5d859f0742a8d0cb8fdd51f32d62db0f16defb903bb5388425",
+      "bytes": 4155,
+      "lines": 48,
+      "classification": "specification example",
+      "source": "RINEX clock 3.04, \"ANOTHER EXAMPLE\" after Table A17",
+      "url": "https://files.igs.org/pub/data/format/rinex_clock304.txt",
+      "source_sha256": "aafb0b6e5da002978b49f88ede3c6cf810f058c985bf960b7c31e9831c4dead9",
+      "extraction": "lines 667-714 of the specification text, copied byte for byte including line terminators and trailing blanks"
+    },
+    {
+      "file": "rinex_clock304_table_a17.clk",
+      "sha256": "7c573e7f5e8a34af728cec0b153735b98eb76b278e3627105b6c7c191c220373",
+      "bytes": 2784,
+      "lines": 34,
+      "classification": "specification example",
+      "source": "RINEX clock 3.04, Table A17 (example for analysis data)",
+      "url": "https://files.igs.org/pub/data/format/rinex_clock304.txt",
+      "source_sha256": "aafb0b6e5da002978b49f88ede3c6cf810f058c985bf960b7c31e9831c4dead9",
+      "extraction": "lines 622-655 of the specification text, copied byte for byte including line terminators and trailing blanks"
+    },
+    {
+      "file": "rinex_clock304_table_a18.clk",
+      "sha256": "ab4572cf8aa24d44e6dcd0b91debb878781e55c7255f729c3d5387657093aad8",
+      "bytes": 1084,
+      "lines": 13,
+      "classification": "specification example",
+      "source": "RINEX clock 3.04, Table A18 (example for calibration/discontinuity data)",
+      "url": "https://files.igs.org/pub/data/format/rinex_clock304.txt",
+      "source_sha256": "aafb0b6e5da002978b49f88ede3c6cf810f058c985bf960b7c31e9831c4dead9",
+      "extraction": "lines 727-739 of the specification text, copied byte for byte including line terminators and trailing blanks"
+    }
+  ]
+}
