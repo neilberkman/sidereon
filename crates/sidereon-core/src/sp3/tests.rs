@@ -2033,3 +2033,351 @@ fn nodes_admitted_too_far_from_the_query_to_stay_distinct_are_an_error_not_a_pan
         other => panic!("expected InvalidInput, got {other:?}"),
     }
 }
+
+#[test]
+fn sp3_records_ep_and_ev_skips_and_refuses_unrecognized_lines() {
+    let file_with_corr = "\
+#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 259200.00000000   900.00000000 59024 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* TEST SP3-c FIXTURE
+*  2020  6 24  0  0  0.00000000
+PG01  15000.000000 -20000.000000   5000.000000    123.456789
+EPG01       100       100       100         100
+EVG01       100       100       100         100
+EOF
+";
+    let sp3 = Sp3::parse(file_with_corr.as_bytes()).expect("file with EP/EV records must parse");
+    assert_eq!(
+        sp3.skipped_records, 2,
+        "EP and EV records must be counted in skipped_records"
+    );
+
+    let file_with_bogus = file_with_corr.replace("EOF", "BOGUS LINE\nEOF");
+    assert!(
+        Sp3::parse(file_with_bogus.as_bytes()).is_err(),
+        "unrecognized line must be refused"
+    );
+}
+
+#[test]
+fn sp3_refuses_epoch_line_with_abutting_fields() {
+    // Month 6 and day 24 run together without the format-mandated blank separator (" 624").
+    // Abutting fields straddle the fixed layout columns and reduce the whitespace token count
+    // in the compact fallback, failing both parsers.
+    let baseline = "\
+#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 259200.00000000   900.00000000 59024 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc ccccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+*  2020  6 24  0  0  0.00000000
+PG01  15000.000000 -20000.000000   5000.000000    123.456789
+EOF
+";
+    assert!(
+        Sp3::parse(baseline.as_bytes()).is_ok(),
+        "baseline with properly separated fields must parse"
+    );
+
+    let bad = baseline.replace(
+        "*  2020  6 24  0  0  0.00000000",
+        "*  2020 624  0  0  0.00000000",
+    );
+    assert_parse_error_contains(&bad, "epoch");
+}
+
+#[test]
+fn sp3_compact_epoch_line_compatibility() {
+    // Conforming compact format with single space delimiters (* 2020 6 24 0 0 0.00000000)
+    // succeeds via whitespace fallback when fixed columns do not match.
+    let compact = "\
+#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 259200.00000000   900.00000000 59024 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc ccccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+* 2020 6 24 0 0 0.00000000
+PG01  15000.000000 -20000.000000   5000.000000    123.456789
+EOF
+";
+    let sp3 = Sp3::parse(compact.as_bytes()).expect("compact epoch line must parse via fallback");
+    assert_eq!(sp3.epochs.len(), 1);
+}
+
+#[test]
+fn sp3_retains_clock_only_record_with_absent_orbit() {
+    let file = "\
+#dV2022  1  2  3  4  5.00000000       1 ORBIT IGS20 FIT  TST
+## 2191  11045.00000000   300.00000000 59581 0.1278356481481
++    2   G01G02  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c M  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+*  2022  1  2  3  4  5.00000000
+PG01  10000.000000  20000.000000  30000.000000    -50.000000
+VG01  10000.000000 -20000.000000  30000.000000      1.000000
+PG02      0.000000      0.000000      0.000000    123.456789
+VG02      0.000000      0.000000      0.000000      2.500000
+EOF
+";
+    let sp3 = Sp3::parse(file.as_bytes()).expect("parse SP3 with clock-only satellite");
+    assert_eq!(
+        sp3.skipped_records, 0,
+        "retained clock-only record must not be counted as skipped"
+    );
+
+    let g01 = id(GnssSystem::Gps, 1);
+    let g02 = id(GnssSystem::Gps, 2);
+
+    // G01 has valid orbit and clock
+    assert!(sp3.state(g01, 0).is_ok());
+
+    // G02 has absent orbit: state() returns UnknownSatellite
+    assert!(
+        matches!(sp3.state(g02, 0), Err(Error::UnknownSatellite(sat)) if sat == g02),
+        "absent orbit must not produce a valid Sp3State"
+    );
+    assert!(!sp3.states_at(0).expect("states_at").contains_key(&g02));
+
+    // G02 clock-only record is retained and accessible
+    let clock_rec = sp3.clock_record(g02, 0).expect("clock_record for G02");
+    assert_eq!(clock_rec.clock_us, 123.456789);
+    assert!((clock_rec.clock_s - 123.456789 * US_TO_S).abs() < 1e-15);
+    assert_eq!(clock_rec.clock_rate_raw, Some(2.5));
+    assert!(
+        clock_rec.velocity.is_none(),
+        "absent velocity sentinel must not fabricate velocity"
+    );
+
+    let records_at = sp3.clock_records_at(0).expect("clock_records_at");
+    assert_eq!(records_at.get(&g02), Some(&clock_rec));
+
+    // Writer re-emits clock-only satellite as missing orbit sentinel with numeric clock and rate
+    let text = sp3.to_sp3_string();
+    assert!(
+        text.contains("PG02      0.000000      0.000000      0.000000    123.456789"),
+        "writer must preserve clock-only record with 0,0,0 orbit sentinel and numeric clock:\n{text}"
+    );
+    assert!(
+        text.contains("VG02      0.000000      0.000000      0.000000      2.500000"),
+        "writer must preserve paired velocity line with 0,0,0 velocity sentinel and numeric clock rate:\n{text}"
+    );
+
+    let reparsed = Sp3::parse(text.as_bytes()).expect("reparse written clock-only record");
+    assert_eq!(
+        reparsed, sp3,
+        "full product equality must survive write/parse round trip"
+    );
+}
+
+#[test]
+fn sp3_true_zero_clock_distinct_from_absent_clock() {
+    let file = "\
+#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 259200.00000000   900.00000000 59024 0.0000000000000
++    2   G01G02  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+*  2020  6 24  0  0  0.00000000
+PG01      0.000000      0.000000      0.000000      0.000000
+PG02      0.000000      0.000000      0.000000 999999.999999
+EOF
+";
+    let sp3 = Sp3::parse(file.as_bytes()).expect("parse zero clock and absent clock");
+    assert_eq!(sp3.skipped_records, 0);
+
+    let g01 = id(GnssSystem::Gps, 1);
+    let g02 = id(GnssSystem::Gps, 2);
+
+    // G01 has a genuine 0.0 us clock estimate; it is retained
+    let rec01 = sp3.clock_record(g01, 0).expect("G01 has true zero clock");
+    assert_eq!(rec01.clock_us, 0.0);
+    assert_eq!(rec01.clock_s, 0.0);
+
+    // G02 has 999999.999999 missing-clock sentinel; it is absent, not retained
+    assert!(sp3.clock_record(g02, 0).is_err());
+    assert!(sp3.state(g01, 0).is_err());
+    assert!(sp3.state(g02, 0).is_err());
+
+    let text = sp3.to_sp3_string();
+    assert!(
+        text.contains("PG01      0.000000      0.000000      0.000000      0.000000"),
+        "true zero clock must be preserved:\n{text}"
+    );
+    assert!(
+        text.contains("PG02      0.000000      0.000000      0.000000 999999.999999"),
+        "absent clock must be re-emitted as missing sentinel:\n{text}"
+    );
+
+    let reparsed = Sp3::parse(text.as_bytes()).expect("reparse written product");
+    assert_eq!(reparsed, sp3);
+}
+
+#[test]
+fn sp3_clock_only_record_preserves_flags() {
+    let file = "\
+#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 259200.00000000   900.00000000 59024 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+*  2020  6 24  0  0  0.00000000
+PG01      0.000000      0.000000      0.000000    123.456789              EP
+EOF
+";
+    let sp3 = Sp3::parse(file.as_bytes()).expect("parse clock-only record with flags");
+    let g01 = id(GnssSystem::Gps, 1);
+    let rec = sp3.clock_record(g01, 0).expect("G01 clock record");
+    assert!(rec.flags.clock_event, "E flag must be parsed");
+    assert!(rec.flags.clock_predicted, "P clock flag must be parsed");
+    assert!(!rec.flags.maneuver, "M flag is not set");
+    assert!(!rec.flags.orbit_predicted, "orbit P flag is not set");
+
+    let summary = sp3.prediction_summary();
+    assert_eq!(
+        summary.epochs[0].clock_predicted_satellites,
+        vec![g01],
+        "prediction_summary must include clock-predicted satellites from clock-only records"
+    );
+
+    let text = sp3.to_sp3_string();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("PG01"))
+        .expect("PG01 line in output");
+    assert_eq!(
+        &line[74..76],
+        "EP",
+        "clock event and clock predicted flags must be preserved at 1-based columns 75..76 (0-based offsets 74..75):\n{line}"
+    );
+
+    let reparsed = Sp3::parse(text.as_bytes()).expect("reparse written product");
+    assert_eq!(reparsed, sp3);
+}
+
+#[test]
+fn sp3_sentinel_for_both_absent() {
+    let file = "\
+#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 259200.00000000   900.00000000 59024 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+*  2020  6 24  0  0  0.00000000
+PG01      0.000000      0.000000      0.000000 999999.999999
+EOF
+";
+    let sp3 = Sp3::parse(file.as_bytes()).expect("parse missing orbit and missing clock sentinel");
+    let g01 = id(GnssSystem::Gps, 1);
+
+    assert_eq!(
+        sp3.skipped_records, 0,
+        "standard missing sentinel is not a skip"
+    );
+    assert!(sp3.state(g01, 0).is_err());
+    assert!(sp3.clock_record(g01, 0).is_err());
+    assert!(sp3
+        .clock_records_at(0)
+        .expect("clock_records_at")
+        .is_empty());
+
+    let text = sp3.to_sp3_string();
+    assert!(
+        text.contains("PG01      0.000000      0.000000      0.000000 999999.999999"),
+        "missing satellite must re-emit missing sentinel:\n{text}"
+    );
+
+    let reparsed = Sp3::parse(text.as_bytes()).expect("reparse written product");
+    assert_eq!(reparsed, sp3);
+}
+
+#[test]
+fn sp3_clock_only_record_does_not_interpolate_orbit() {
+    let file = "\
+#cP2020  6 24  0  0  0.00000000       2 ORBIT IGS14 FIT  TST
+## 2111 259200.00000000   900.00000000 59024 0.0000000000000
++    2   G01G02  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+*  2020  6 24  0  0  0.00000000
+PG01  15000.000000 -20000.000000   5000.000000    123.456789
+PG02      0.000000      0.000000      0.000000    100.000000
+*  2020  6 24  0 15  0.00000000
+PG01  15100.000000 -20100.000000   5100.000000    124.456789
+PG02      0.000000      0.000000      0.000000    101.000000
+EOF
+";
+    let sp3 = Sp3::parse(file.as_bytes()).expect("parse SP3 multi-epoch fixture");
+    let g01 = id(GnssSystem::Gps, 1);
+    let g02 = id(GnssSystem::Gps, 2);
+
+    // G01 has valid orbit states and nodes
+    assert!(sp3.state(g01, 0).is_ok());
+    assert!(sp3.state(g01, 1).is_ok());
+    assert!(sp3.interp_raw[0].contains_key(&g01));
+    assert!(sp3.interp_raw[1].contains_key(&g01));
+    assert!(sp3.position(g01, sp3.epochs[0]).is_ok());
+
+    // G02 has only clock records: never creates an interpolation node or valid orbit state
+    assert!(sp3.clock_record(g02, 0).is_ok());
+    assert!(sp3.clock_record(g02, 1).is_ok());
+    assert!(sp3.state(g02, 0).is_err());
+    assert!(sp3.state(g02, 1).is_err());
+    assert!(
+        !sp3.interp_raw[0].contains_key(&g02),
+        "clock-only record must never populate interp_raw node at epoch 0"
+    );
+    assert!(
+        !sp3.interp_raw[1].contains_key(&g02),
+        "clock-only record must never populate interp_raw node at epoch 1"
+    );
+
+    // Orbit interpolation for G02 must fail as UnknownSatellite, never interpolating (0,0,0)
+    let interp_res = sp3.position(g02, sp3.epochs[0]);
+    assert!(
+        matches!(interp_res, Err(Error::UnknownSatellite(sat)) if sat == g02),
+        "orbit interpolation must fail for satellite with only clock records; got {interp_res:?}"
+    );
+}

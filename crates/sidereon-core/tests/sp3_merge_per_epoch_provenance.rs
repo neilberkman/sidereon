@@ -90,8 +90,12 @@ fn a_single_contributor_merge_records_it_for_every_epoch_with_no_mid_arc_transit
     let provenance = report.provenance.expect("provenance requested");
     assert_eq!(provenance.cells.len(), 2, "two accepted cells");
     for cell in &provenance.cells {
+        let pos = cell
+            .position
+            .as_ref()
+            .expect("position selection present for genuine orbit fixture");
         assert_eq!(
-            cell.position.selected_source(),
+            pos.selected_source(),
             Some(0),
             "the only contributor supplies every cell"
         );
@@ -144,8 +148,22 @@ fn a_forced_precedence_switch_records_one_transition_naming_both_sides() {
 
     let provenance = report.provenance.expect("provenance requested");
     assert_eq!(provenance.cells.len(), 2);
-    assert_eq!(provenance.cells[0].position.selected_source(), Some(0));
-    assert_eq!(provenance.cells[1].position.selected_source(), Some(1));
+    assert_eq!(
+        provenance.cells[0]
+            .position
+            .as_ref()
+            .expect("position selection present for genuine orbit fixture")
+            .selected_source(),
+        Some(0)
+    );
+    assert_eq!(
+        provenance.cells[1]
+            .position
+            .as_ref()
+            .expect("position selection present for genuine orbit fixture")
+            .selected_source(),
+        Some(1)
+    );
 
     // The opening entry plus exactly one real change.
     let changes: Vec<_> = provenance
@@ -191,9 +209,20 @@ fn outlier_rejection_is_recorded_as_its_own_reason() {
     let (_merged, report) = merge(&[wild, steady_a, steady_b], &options).expect("merge");
 
     let provenance = report.provenance.expect("provenance requested");
-    assert_eq!(provenance.cells[0].position.selected_source(), Some(0));
     assert_eq!(
-        provenance.cells[1].position.selected_source(),
+        provenance.cells[0]
+            .position
+            .as_ref()
+            .expect("position selection present for genuine orbit fixture")
+            .selected_source(),
+        Some(0)
+    );
+    assert_eq!(
+        provenance.cells[1]
+            .position
+            .as_ref()
+            .expect("position selection present for genuine orbit fixture")
+            .selected_source(),
         Some(1),
         "the rejected preferred source must not supply the cell"
     );
@@ -229,16 +258,20 @@ fn a_combined_cell_names_no_single_supplier() {
 
     let provenance = report.provenance.expect("provenance requested");
     for cell in &provenance.cells {
+        let pos = cell
+            .position
+            .as_ref()
+            .expect("position selection present for genuine orbit fixture");
         assert!(
-            matches!(cell.position, CellSelection::Combined { .. }),
+            matches!(pos, CellSelection::Combined { .. }),
             "a mean-combined cell must be recorded as combined"
         );
         assert_eq!(
-            cell.position.selected_source(),
+            pos.selected_source(),
             None,
             "a combined value has no single supplier"
         );
-        assert_eq!(cell.position.members(), vec![0, 1], "both members recorded");
+        assert_eq!(pos.members(), vec![0, 1], "both members recorded");
     }
     for coverage in &provenance.coverage {
         assert_eq!(
