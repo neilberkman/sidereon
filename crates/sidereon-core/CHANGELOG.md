@@ -25,12 +25,29 @@ All notable changes to `sidereon-core` are documented here.
   it is not. None of the 53 files in the test corpus carry `Z` alongside a
   non-UTC time system.
 - Timetag comparison and uniqueness keys for tracking data records (CCSDS
-  503.0-B-2 3.4.10, 3.4.11) are built entirely from integer components: civil
-  day, whole seconds of day, and fractional seconds as an aligned integer.
-  Timetags differing in the last decimal place of fractional seconds no longer
-  compare equal or alias into duplicate records. Leap second timetags
-  (`23:59:60`) preserve second-of-minute as written without cross-day
-  normalisation into the next day's `00:00:00`.
+  503.0-B-2 3.4.10, 3.4.11) are keyed on discrete calendar day and clock
+  components (`day`, `hour`, `minute`, `second`, and fractional digits as an
+  aligned 128-bit integer) rather than a collapsed second count of the day.
+  This avoids key collisions across leap seconds: under `GLONASS`, records at
+  `02:59:60` and `03:00:00` on the same day order chronologically and remain
+  distinct rather than collapsing into a duplicate record. Under `UTC`,
+  `23:59:60` and the following day's `00:00:00` likewise order without aliasing.
+- **Breaking.** A timetag carrying a second of `60` is refused under every
+  policy with `TdmError::MalformedEpoch` unless it is placed at `23:59` under
+  `UTC` or `02:59` under `GLONASS`. CCSDS 503.0-B-2 4.3.9 and CCSDS 301.0-B-4
+  ASCII Time Code A and B permit a second of 60 only for a leap second;
+  GLONASS time tracks UTC(SU) + 3 hours, placing the leap second at 02:59:60,
+  while continuous scales (such as `GPS`, `GST`, and `TAI`) have no leap
+  seconds. The check deliberately verifies only the scale's clock reading
+  rather than validating against a historical IERS leap-second table that
+  would age. Previously, a second of 60 was accepted at any minute and under
+  any time system.
+- **Breaking.** A timetag whose fractional seconds field exceeds thirty-eight
+  decimal digits is refused under every policy with `TdmError::MalformedEpoch`.
+  Thirty-eight digits is the widest fractional part the 128-bit epoch key can
+  represent without loss (10^38 - 1 < 2^128); timetags beyond that length are
+  refused because the key cannot distinguish a longer fraction, not because
+  the CCSDS standard forbids it.
 - **Breaking.** `tdm::encode_kvn` and `tdm::encode_kvn_with_policy` enforce the
   reader's rules over what they are about to write, refusing a value by name
   under `TdmWritePolicy::strict()` and reporting a named departure under a
