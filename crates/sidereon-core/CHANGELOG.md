@@ -6,6 +6,10 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** `seconds_of_week_from_calendar` returns `Option<f64>` and rejects invalid month, day, hour, minute and second fields. Weekday calculation uses the Gregorian 400-year cycle to handle negative years and the full `i64` year range without overflow.
+- **Breaking.** `week_from_calendar` returns `None` for invalid calendar dates.
+- **Breaking.** SBAS EMS and RTKLIB log readers reject candidate records with malformed fields, invalid dates, unsupported PRNs or non-hexadecimal payloads. Odd-length hexadecimal payloads are rejected instead of inventing the final four bits. Non-record header lines remain readable.
+
 - **Breaking.** `Tdm` and `TdmMetadata` hold `comments: Vec<TdmComment>` rather
   than `Vec<String>`, preserving the position of header and metadata comments
   among fields. Comments are written back in their original position rather than
