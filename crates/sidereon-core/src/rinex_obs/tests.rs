@@ -2103,11 +2103,74 @@ fn a_shared_column_is_a_name_every_constellation_in_it_may_carry() {
 }
 
 #[test]
-fn a_beidou_band_version_two_cannot_name_is_a_known_limit() {
-    // Version 2 numbers by frequency slot, and no slot names BeiDou B1C. A
-    // product holding one, written as version 2, comes back as B1I: the slot
-    // that digit does name. There is nothing else the file can say, and
-    // `to_rinex_string` has no way to refuse.
+fn beidou_b1c_version_two_refusal_and_native_serialization() {
+    let fixture_b1c_305 = concat!(
+        "     3.05           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    2 C1P L1P                                              SYS / # / OBS TYPES\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000          10.000  \n",
+    );
+    let parsed = RinexObs::parse(fixture_b1c_305).expect("parse 3.05 B1C");
+
+    // Direct write refusal via public entry point: clone, set version=2.11, assert existing named refusal.
+    let mut v2 = parsed.clone();
+    v2.header.version = 2.11;
+    let write_err = v2
+        .to_rinex_string()
+        .expect_err("direct write as 2.11 must refuse");
+    assert_eq!(
+        write_err,
+        RinexObsWriteError::CodeListsNotVersionTwo {
+            system: GnssSystem::BeiDou,
+            position: 0,
+            code: Some("C1P".to_string()),
+        }
+    );
+
+    // Native 3.05 serialization retains both codes.
+    let native_str = parsed.to_rinex_string().expect("native 3.05 serialize");
+    let reparsed = RinexObs::parse(&native_str).expect("reparse native 3.05");
+    assert_eq!(
+        reparsed.header().obs_codes.get(&GnssSystem::BeiDou),
+        Some(&vec!["C1P".to_string(), "L1P".to_string()])
+    );
+
+    // Explicit downgrade_to_rinex2 refusal for 2.11 and 2.12 without source mutation.
+    let parsed_before = parsed.clone();
+    let downgrade_211_err = parsed
+        .downgrade_to_rinex2(2.11)
+        .expect_err("downgrade to 2.11 must refuse");
+    assert_eq!(
+        downgrade_211_err,
+        RinexObsWriteError::ObservableNotRepresentable {
+            system: GnssSystem::BeiDou,
+            code: "C1P".to_string(),
+            version: 2.11,
+        }
+    );
+    assert_eq!(
+        parsed, parsed_before,
+        "downgrade refusal must not mutate source"
+    );
+
+    let downgrade_212_err = parsed
+        .downgrade_to_rinex2(2.12)
+        .expect_err("downgrade to 2.12 must refuse");
+    assert_eq!(
+        downgrade_212_err,
+        RinexObsWriteError::ObservableNotRepresentable {
+            system: GnssSystem::BeiDou,
+            code: "C1P".to_string(),
+            version: 2.12,
+        }
+    );
+    assert_eq!(
+        parsed, parsed_before,
+        "downgrade refusal must not mutate source"
+    );
+
+    // Retain useful private mapping checks
     assert_eq!(
         canonical_rinex2_obs_code(GnssSystem::BeiDou, "C1", 2.11),
         "C2I"
@@ -2117,6 +2180,314 @@ fn a_beidou_band_version_two_cannot_name_is_a_known_limit() {
         vec!["C1".to_string()],
         "no version 2 name reads back as B1C"
     );
+}
+
+#[test]
+fn beidou_b1i_302_downgrades_to_version_two() {
+    let fixture_b1i_302 = concat!(
+        "     3.02           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    2 C1I L1I                                              SYS / # / OBS TYPES\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000 7        10.00015\n",
+        "> 2020 06 24 00 00 30.0000000  6  1\n",
+        "C01                       100.000  \n",
+    );
+    let parsed = RinexObs::parse(fixture_b1i_302).expect("parse 3.02 B1I");
+
+    let sat = GnssSatelliteId::new(GnssSystem::BeiDou, 1).expect("valid satellite id");
+    // Baseline parsed cycle-slip value and indicators before downgrade
+    assert_eq!(parsed.epochs()[1].cycle_slips[&sat][0].value, None);
+    assert_eq!(parsed.epochs()[1].cycle_slips[&sat][0].lli, None);
+    assert_eq!(parsed.epochs()[1].cycle_slips[&sat][0].ssi, None);
+    assert_eq!(parsed.epochs()[1].cycle_slips[&sat][1].value, Some(100.0));
+    assert_eq!(parsed.epochs()[1].cycle_slips[&sat][1].lli, None);
+    assert_eq!(parsed.epochs()[1].cycle_slips[&sat][1].ssi, None);
+
+    // Downgrade to 2.11
+    let (v211, changes_211) = parsed
+        .downgrade_to_rinex2(2.11)
+        .expect("downgrade 3.02 B1I to 2.11");
+    assert_eq!(
+        v211.header().obs_codes.get(&GnssSystem::BeiDou),
+        Some(&vec!["C2I".to_string(), "L2I".to_string()])
+    );
+    assert!(changes_211.iter().any(|c| matches!(
+        c,
+        ObsDowngradeChange::CodeRenamed {
+            system: GnssSystem::BeiDou,
+            from,
+            to,
+        } if from == "C1I" && to == "C2I"
+    )));
+    assert!(changes_211.iter().any(|c| matches!(
+        c,
+        ObsDowngradeChange::CodeRenamed {
+            system: GnssSystem::BeiDou,
+            from,
+            to,
+        } if from == "L1I" && to == "L2I"
+    )));
+    // Epoch 0: observations with indicators retained
+    assert_eq!(v211.epochs()[0].sats[&sat][0].value, Some(22000000.0));
+    assert_eq!(v211.epochs()[0].sats[&sat][0].lli, None);
+    assert_eq!(v211.epochs()[0].sats[&sat][0].ssi, Some(7));
+    assert_eq!(v211.epochs()[0].sats[&sat][1].value, Some(10.0));
+    assert_eq!(v211.epochs()[0].sats[&sat][1].lli, Some(1));
+    assert_eq!(v211.epochs()[0].sats[&sat][1].ssi, Some(5));
+    // Epoch 1: flag 6 cycle slip data retained
+    assert_eq!(v211.epochs()[1].cycle_slips[&sat][0].value, None);
+    assert_eq!(v211.epochs()[1].cycle_slips[&sat][1].value, Some(100.0));
+    assert_eq!(v211.epochs()[1].cycle_slips[&sat][1].lli, None);
+    assert_eq!(v211.epochs()[1].cycle_slips[&sat][1].ssi, None);
+
+    // Downgrade to 2.12
+    let (v212, changes_212) = parsed
+        .downgrade_to_rinex2(2.12)
+        .expect("downgrade 3.02 B1I to 2.12");
+    assert_eq!(
+        v212.header().obs_codes.get(&GnssSystem::BeiDou),
+        Some(&vec!["C2I".to_string(), "L2I".to_string()])
+    );
+    assert!(changes_212.iter().any(|c| matches!(
+        c,
+        ObsDowngradeChange::CodeRenamed {
+            system: GnssSystem::BeiDou,
+            from,
+            to,
+        } if from == "C1I" && to == "C2I"
+    )));
+    assert!(changes_212.iter().any(|c| matches!(
+        c,
+        ObsDowngradeChange::CodeRenamed {
+            system: GnssSystem::BeiDou,
+            from,
+            to,
+        } if from == "L1I" && to == "L2I"
+    )));
+    assert_eq!(v212.epochs()[0].sats[&sat][0].value, Some(22000000.0));
+    assert_eq!(v212.epochs()[0].sats[&sat][0].lli, None);
+    assert_eq!(v212.epochs()[0].sats[&sat][0].ssi, Some(7));
+    assert_eq!(v212.epochs()[0].sats[&sat][1].value, Some(10.0));
+    assert_eq!(v212.epochs()[0].sats[&sat][1].lli, Some(1));
+    assert_eq!(v212.epochs()[0].sats[&sat][1].ssi, Some(5));
+    assert_eq!(v212.epochs()[1].cycle_slips[&sat][0].value, None);
+    assert_eq!(v212.epochs()[1].cycle_slips[&sat][1].value, Some(100.0));
+    assert_eq!(v212.epochs()[1].cycle_slips[&sat][1].lli, None);
+    assert_eq!(v212.epochs()[1].cycle_slips[&sat][1].ssi, None);
+}
+
+#[test]
+fn beidou_b1i_302_c1q_c1x_downgrades_to_version_two() {
+    let fixture_b1i_302_q = concat!(
+        "     3.02           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    2 C1Q L1Q                                              SYS / # / OBS TYPES\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000 7        10.00015\n",
+        "> 2020 06 24 00 00 30.0000000  6  1\n",
+        "C01                       100.000  \n",
+    );
+    let parsed_q = RinexObs::parse(fixture_b1i_302_q).expect("parse 3.02 B1I Q");
+    let sat = GnssSatelliteId::new(GnssSystem::BeiDou, 1).expect("valid satellite id");
+
+    for version in [2.11, 2.12] {
+        let (v2, changes) = parsed_q
+            .downgrade_to_rinex2(version)
+            .unwrap_or_else(|e| panic!("downgrade 3.02 B1I Q to {version}: {e}"));
+        assert_eq!(
+            v2.header().obs_codes.get(&GnssSystem::BeiDou),
+            Some(&vec!["C2I".to_string(), "L2I".to_string()])
+        );
+        assert!(changes.iter().any(|c| matches!(
+            c,
+            ObsDowngradeChange::CodeRenamed {
+                system: GnssSystem::BeiDou,
+                from,
+                to,
+            } if from == "C1Q" && to == "C2I"
+        )));
+        assert!(changes.iter().any(|c| matches!(
+            c,
+            ObsDowngradeChange::CodeRenamed {
+                system: GnssSystem::BeiDou,
+                from,
+                to,
+            } if from == "L1Q" && to == "L2I"
+        )));
+        assert_eq!(v2.epochs()[0].sats[&sat][0].value, Some(22000000.0));
+        assert_eq!(v2.epochs()[0].sats[&sat][0].lli, None);
+        assert_eq!(v2.epochs()[0].sats[&sat][0].ssi, Some(7));
+        assert_eq!(v2.epochs()[0].sats[&sat][1].value, Some(10.0));
+        assert_eq!(v2.epochs()[0].sats[&sat][1].lli, Some(1));
+        assert_eq!(v2.epochs()[0].sats[&sat][1].ssi, Some(5));
+        assert_eq!(v2.epochs()[1].cycle_slips[&sat][0].value, None);
+        assert_eq!(v2.epochs()[1].cycle_slips[&sat][1].value, Some(100.0));
+    }
+
+    let fixture_b1i_302_x = concat!(
+        "     3.02           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    2 C1X L1X                                              SYS / # / OBS TYPES\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  33000000.000 6        20.00024\n",
+        "> 2020 06 24 00 00 30.0000000  6  1\n",
+        "C01                       200.000  \n",
+    );
+    let parsed_x = RinexObs::parse(fixture_b1i_302_x).expect("parse 3.02 B1I X");
+
+    for version in [2.11, 2.12] {
+        let (v2, changes) = parsed_x
+            .downgrade_to_rinex2(version)
+            .unwrap_or_else(|e| panic!("downgrade 3.02 B1I X to {version}: {e}"));
+        assert_eq!(
+            v2.header().obs_codes.get(&GnssSystem::BeiDou),
+            Some(&vec!["C2I".to_string(), "L2I".to_string()])
+        );
+        assert!(changes.iter().any(|c| matches!(
+            c,
+            ObsDowngradeChange::CodeRenamed {
+                system: GnssSystem::BeiDou,
+                from,
+                to,
+            } if from == "C1X" && to == "C2I"
+        )));
+        assert!(changes.iter().any(|c| matches!(
+            c,
+            ObsDowngradeChange::CodeRenamed {
+                system: GnssSystem::BeiDou,
+                from,
+                to,
+            } if from == "L1X" && to == "L2I"
+        )));
+        assert_eq!(v2.epochs()[0].sats[&sat][0].value, Some(33000000.0));
+        assert_eq!(v2.epochs()[0].sats[&sat][0].lli, None);
+        assert_eq!(v2.epochs()[0].sats[&sat][0].ssi, Some(6));
+        assert_eq!(v2.epochs()[0].sats[&sat][1].value, Some(20.0));
+        assert_eq!(v2.epochs()[0].sats[&sat][1].lli, Some(2));
+        assert_eq!(v2.epochs()[0].sats[&sat][1].ssi, Some(4));
+        assert_eq!(v2.epochs()[1].cycle_slips[&sat][0].value, None);
+        assert_eq!(v2.epochs()[1].cycle_slips[&sat][1].value, Some(200.0));
+    }
+}
+
+#[test]
+fn beidou_modern_c1x_refuses_downgrade_to_version_two() {
+    for version_str in ["3.03", "3.04", "3.05"] {
+        let text = format!(
+            concat!(
+                "     {version_str}           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+                "C    2 C1X L1X                                              SYS / # / OBS TYPES\n",
+                "                                                            END OF HEADER\n",
+                "> 2020 06 24 00 00  0.0000000  0  1\n",
+                "C01  22000000.000          10.000  \n",
+            ),
+            version_str = version_str,
+        );
+        let parsed = RinexObs::parse(&text).unwrap_or_else(|e| panic!("parse {version_str}: {e}"));
+        let expected_version: f64 = version_str.parse().unwrap();
+        assert!((parsed.header().version - expected_version).abs() < 1e-9);
+        assert_eq!(
+            parsed.header().obs_codes.get(&GnssSystem::BeiDou),
+            Some(&vec!["C1X".to_string(), "L1X".to_string()])
+        );
+        for target_version in [2.11, 2.12] {
+            let before = parsed.clone();
+            let err = parsed
+                .downgrade_to_rinex2(target_version)
+                .err()
+                .unwrap_or_else(|| {
+                    panic!("{version_str} C1X must refuse downgrade to {target_version}")
+                });
+            assert_eq!(
+                err,
+                RinexObsWriteError::ObservableNotRepresentable {
+                    system: GnssSystem::BeiDou,
+                    code: "C1X".to_string(),
+                    version: target_version,
+                }
+            );
+            assert_eq!(parsed, before, "refusal must not mutate source");
+        }
+    }
+}
+
+#[test]
+fn sbas_unmodeled_carrier_passes_downgrade_without_refusal() {
+    let fixture_sbas_305 = concat!(
+        "     3.05           OBSERVATION DATA    M                   RINEX VERSION / TYPE\n",
+        "S    2 C1C L1C                                              SYS / # / OBS TYPES\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "S20  38000000.000 3        15.00014\n",
+    );
+    let parsed = RinexObs::parse(fixture_sbas_305).expect("parse SBAS 3.05");
+    let sat = GnssSatelliteId::new(GnssSystem::Sbas, 20).expect("valid satellite id");
+
+    for version in [2.11, 2.12] {
+        let (v2, _) = parsed
+            .downgrade_to_rinex2(version)
+            .unwrap_or_else(|e| panic!("downgrade SBAS to {version}: {e}"));
+        assert_eq!(v2.epochs()[0].sats[&sat][0].value, Some(38000000.0));
+        assert_eq!(v2.epochs()[0].sats[&sat][0].ssi, Some(3));
+        assert_eq!(v2.epochs()[0].sats[&sat][1].value, Some(15.0));
+        assert_eq!(v2.epochs()[0].sats[&sat][1].lli, Some(1));
+        assert_eq!(v2.epochs()[0].sats[&sat][1].ssi, Some(4));
+    }
+}
+
+#[test]
+fn beidou_b1c_with_event_records_refuses_downgrade_without_bypass() {
+    let text = concat!(
+        "     3.05           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C2I                                                  SYS / # / OBS TYPES\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+        "> 2020 06 24 00 01  0.0000000  4  1\n",
+        "C    2 C1P L1P                                              SYS / # / OBS TYPES\n",
+        "> 2020 06 24 00 02  0.0000000  0  1\n",
+        "C01  22000000.000          10.000 1\n",
+    );
+    let parsed = RinexObs::parse(text).expect("parse with event types");
+    for target_version in [2.11, 2.12] {
+        let err = parsed
+            .downgrade_to_rinex2(target_version)
+            .expect_err("downgrade must refuse unrepresentable observable in event segment");
+        assert_eq!(
+            err,
+            RinexObsWriteError::ObservableNotRepresentable {
+                system: GnssSystem::BeiDou,
+                code: "C1P".to_string(),
+                version: target_version,
+            }
+        );
+    }
+}
+
+#[test]
+fn beidou_same_spelling_c1_carrier_change_refuses_downgrade() {
+    let text = concat!(
+        "     3.05           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C1                                                   SYS / # / OBS TYPES\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+    );
+    let parsed = RinexObs::parse(text).expect("parse with raw C1");
+    for version in [2.11, 2.12] {
+        let err = parsed
+            .downgrade_to_rinex2(version)
+            .expect_err("same spelling C1 must refuse downgrade when carrier differs");
+        assert_eq!(
+            err,
+            RinexObsWriteError::ObservableNotRepresentable {
+                system: GnssSystem::BeiDou,
+                code: "C1".to_string(),
+                version,
+            }
+        );
+    }
 }
 
 #[test]
@@ -7087,7 +7458,7 @@ fn sweep_constellations() -> Vec<(GnssSystem, char, u8, Vec<&'static str>)> {
             GnssSystem::BeiDou,
             'C',
             5,
-            vec!["C2I", "C7I", "C6I", "L2I", "C1X", "C2", "L7I"],
+            vec!["C2I", "C7I", "C6I", "L2I", "C2Q", "C2", "L7I"],
         ),
         (
             GnssSystem::Qzss,
@@ -7135,6 +7506,60 @@ fn downgrade_states_three_constellation_products_across_every_constellation() {
         let label = format!("{version} {lists:?}");
         assert_downgrade_states(&label, version, &mixed_product(version, &lists));
     }
+}
+
+#[test]
+fn downgrade_refuses_unrepresentable_beidou_carrier_across_generated_products() {
+    let mut constellations = sweep_constellations();
+    for (system, _, _, alphabet) in &mut constellations {
+        if *system == GnssSystem::BeiDou {
+            *alphabet = vec!["C2I", "C7I", "C6I", "L2I", "C1X", "C2", "L7I"];
+        }
+    }
+    let mut rng = SweepRng(0x9E37_79B9_7F4A_7C15);
+    let mut tested_refusals = 0;
+    for round in 0..4_000 {
+        let version = if round % 2 == 0 { 2.11 } else { 2.12 };
+        let mut picked: Vec<usize> = Vec::new();
+        while picked.len() < 3 {
+            let at = rng.below(constellations.len());
+            if !picked.contains(&at) {
+                picked.push(at);
+            }
+        }
+        let lists: Vec<SmallList> = picked
+            .iter()
+            .map(|&at| {
+                let (system, letter, prn, alphabet) = &constellations[at];
+                let length = 1 + rng.below(4);
+                let list = (0..length)
+                    .map(|_| alphabet[rng.below(alphabet.len())].to_string())
+                    .collect();
+                (*system, *letter, *prn, list)
+            })
+            .collect();
+        let has_c1x = lists.iter().any(|(system, _, _, codes)| {
+            *system == GnssSystem::BeiDou && codes.iter().any(|code| code == "C1X")
+        });
+        if has_c1x {
+            let product = mixed_product(version, &lists);
+            let before = product.clone();
+            let err = product
+                .downgrade_to_rinex2(version)
+                .expect_err("modern BeiDou C1X must refuse downgrade to version 2");
+            assert_eq!(
+                err,
+                RinexObsWriteError::ObservableNotRepresentable {
+                    system: GnssSystem::BeiDou,
+                    code: "C1X".to_string(),
+                    version,
+                }
+            );
+            assert_eq!(product, before, "refusal must not mutate source");
+            tested_refusals += 1;
+        }
+    }
+    assert!(tested_refusals >= 500, "{tested_refusals} refusal products");
 }
 
 #[test]

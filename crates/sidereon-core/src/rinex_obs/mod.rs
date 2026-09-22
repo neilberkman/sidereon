@@ -3570,7 +3570,8 @@ pub(crate) fn rinex2_name_allowed(system: GnssSystem, name: &str, version: f64) 
     // From 2.12 the civil signals have letters, and the digits they left
     // behind are no longer names: `C1` is refused outright, and `L1`, `D1`,
     // `S1` only name a signal where a constellation has a P code on L1.
-    if version >= RINEX2_LETTERED_NAMES_VERSION {
+    // BeiDou has no 2.12 lettered signals and continues to use digit band 1.
+    if version >= RINEX2_LETTERED_NAMES_VERSION && system != GnssSystem::BeiDou {
         if kind == 'C' && band == '1' {
             return false;
         }
