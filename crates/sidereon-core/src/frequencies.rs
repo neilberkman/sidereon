@@ -343,9 +343,10 @@ pub fn rinex_band_frequency_hz_classified(
 /// RINEX observation-code frequency in hertz for a system and full code.
 ///
 /// BeiDou's band labels changed across RINEX 3 minor versions: in RINEX 3.02
-/// `C1I`/`L1I` are B1I (1561.098 MHz), while in RINEX 3.03 and later band 1 is
-/// B1C (1575.42 MHz). Use this helper when the observation code and file
-/// version are available instead of reducing the code to a band digit first.
+/// `C1I`/`L1I`, `C1Q`/`L1Q`, and `C1X`/`L1X` are B1I (1561.098 MHz), while in
+/// RINEX 3.03 and later band 1 is B1C (1575.42 MHz). Use this helper when the
+/// observation code and file version are available instead of reducing the code
+/// to a band digit first.
 pub fn rinex_observation_frequency_hz(
     system: GnssSystem,
     code: &str,
@@ -398,7 +399,12 @@ fn rinex_beidou_band(
     rinex_version: Option<f64>,
 ) -> Option<CarrierBand> {
     match band {
-        '1' if tracking == Some('I') && rinex_version.is_some_and(is_rinex_302) => {
+        '1' if matches!(tracking, Some('I' | 'Q' | 'X'))
+            && rinex_version.is_some_and(is_rinex_302) =>
+        {
+            Some(CarrierBand::B1i)
+        }
+        '1' if tracking.is_none() && rinex_version.is_some_and(is_rinex_2) => {
             Some(CarrierBand::B1i)
         }
         '1' => Some(CarrierBand::B1c),
@@ -409,6 +415,10 @@ fn rinex_beidou_band(
         '8' => Some(CarrierBand::B2),
         _ => None,
     }
+}
+
+fn is_rinex_2(version: f64) -> bool {
+    (2.0..3.0).contains(&version)
 }
 
 fn is_rinex_302(version: f64) -> bool {
@@ -602,16 +612,46 @@ mod tests {
 
     #[test]
     fn rinex_observation_code_resolves_beidou_302_b1i() {
-        for code in ["C1I", "L1I"] {
+        for code in ["C1I", "L1I", "C1Q", "L1Q", "C1X", "L1X"] {
             assert_eq!(
                 rinex_observation_frequency_hz(GnssSystem::BeiDou, code, 3.02, None)
                     .map(f64::to_bits),
-                Some(F_B1I_HZ.to_bits())
+                Some(F_B1I_HZ.to_bits()),
+                "{code} in 3.02 must resolve to B1I frequency"
             );
         }
+        for code in ["C1X", "L1X", "C1P", "L1P"] {
+            assert_eq!(
+                rinex_observation_frequency_hz(GnssSystem::BeiDou, code, 3.03, None)
+                    .map(f64::to_bits),
+                Some(F_L1_HZ.to_bits()),
+                "{code} in 3.03 must resolve to B1C frequency"
+            );
+            assert_eq!(
+                rinex_observation_frequency_hz(GnssSystem::BeiDou, code, 3.05, None)
+                    .map(f64::to_bits),
+                Some(F_L1_HZ.to_bits()),
+                "{code} in 3.05 must resolve to B1C frequency"
+            );
+        }
+    }
+
+    #[test]
+    fn rinex_observation_code_resolves_beidou_version_two_raw_b1i() {
+        for version in [2.11, 2.12] {
+            for code in ["C1", "L1", "C2", "L2"] {
+                assert_eq!(
+                    rinex_observation_frequency_hz(GnssSystem::BeiDou, code, version, None)
+                        .map(f64::to_bits),
+                    Some(F_B1I_HZ.to_bits()),
+                    "{code} in version {version} must resolve to B1I frequency"
+                );
+            }
+        }
         assert_eq!(
-            rinex_observation_frequency_hz(GnssSystem::BeiDou, "L1X", 3.03, None).map(f64::to_bits),
-            Some(F_L1_HZ.to_bits())
+            rinex_band_frequency_hz(GnssSystem::BeiDou, '1', None).map(f64::to_bits),
+            Some(F_L1_HZ.to_bits()),
+            "version-less BeiDou band 1 must resolve to modern B1C frequency"
         );
     }
 

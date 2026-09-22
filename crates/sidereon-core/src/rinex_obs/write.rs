@@ -211,6 +211,17 @@ pub enum RinexObsWriteError {
         /// The reader's error.
         message: String,
     },
+    /// A code on a physical carrier that the target version cannot represent.
+    /// Downgrading would change the carrier frequency while keeping the numeric
+    /// observation, which moves the measurement to another signal.
+    ObservableNotRepresentable {
+        /// The constellation.
+        system: GnssSystem,
+        /// The original code.
+        code: String,
+        /// The target version.
+        version: f64,
+    },
     /// The written text would read back as a different product.
     ReadBackMismatch {
         /// The first field that would change, with its value before and after.
@@ -326,6 +337,14 @@ impl core::fmt::Display for RinexObsWriteError {
             Self::EventRecordsUnreadable { message } => {
                 write!(f, "RINEX OBS event header records do not read: {message}")
             }
+            Self::ObservableNotRepresentable {
+                system,
+                code,
+                version,
+            } => write!(
+                f,
+                "RINEX OBS {system} code {code} is on a carrier that version {version} cannot represent"
+            ),
             Self::ReadBackMismatch { what } => {
                 write!(
                     f,
@@ -3982,6 +4001,18 @@ impl RinexObs {
         // than left out of the file unsaid.
         if let Ok(names) = product.rinex2_names() {
             product.remove_unstated_lists(&names, &mut changes);
+            for (system, held) in &product.header.obs_codes {
+                let read = super::rinex2_system_obs_codes(*system, &names, version);
+                for (original, proposed) in held.iter().zip(read.iter()) {
+                    check_carrier_preservation(
+                        *system,
+                        original,
+                        proposed,
+                        self.header.version,
+                        version,
+                    )?;
+                }
+            }
             product.leave_implied(&implied, names);
             product.header.declared_obs_codes = product.rinex2_declared_after_downgrade();
             product.to_rinex_string()?;
@@ -3992,6 +4023,23 @@ impl RinexObs {
             return Err(RinexObsWriteError::TooManyObservationTypes {
                 count: layout.names.len(),
             });
+        }
+        for (system, row) in &layout.slots {
+            let read = super::rinex2_system_obs_codes(*system, &layout.names, version);
+            let held = &product.header.obs_codes[system];
+            for (column, slot) in row.iter().enumerate() {
+                if let Some(index) = slot {
+                    let original = &held[*index];
+                    let proposed = &read[column];
+                    check_carrier_preservation(
+                        *system,
+                        original,
+                        proposed,
+                        self.header.version,
+                        version,
+                    )?;
+                }
+            }
         }
         let mut obs_codes = BTreeMap::new();
         for (system, row) in &layout.slots {
@@ -4074,6 +4122,37 @@ impl RinexObs {
         product.to_rinex_string()?;
         Ok((product, changes))
     }
+}
+
+fn check_carrier_preservation(
+    system: GnssSystem,
+    original: &str,
+    proposed: &str,
+    source_version: f64,
+    target_version: f64,
+) -> Result<(), RinexObsWriteError> {
+    let source_freq = crate::frequencies::rinex_observation_frequency_hz(
+        system,
+        original,
+        source_version,
+        Some(0),
+    );
+    let target_freq = crate::frequencies::rinex_observation_frequency_hz(
+        system,
+        proposed,
+        target_version,
+        Some(0),
+    );
+    if let (Some(f_src), Some(f_tgt)) = (source_freq, target_freq) {
+        if f_src != f_tgt {
+            return Err(RinexObsWriteError::ObservableNotRepresentable {
+                system,
+                code: original.to_string(),
+                version: target_version,
+            });
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
