@@ -6,6 +6,9 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- RTCM MSM5/MSM7 readers and writers retain unavailable rough and fine phase-range rates as `None`, using the DF399 and DF404 wire sentinels. A measured zero remains `Some(0)`.
+- **Breaking.** RTCM ephemeris conversion to `BroadcastRecord` rejects absent GPS, BeiDou and QZSS URA predictions and Galileo spare or NAPA SISA values instead of inventing an accuracy in metres. Raw RTCM messages retain those indices for lossless encoding.
+
 - **Breaking.** `seconds_of_week_from_calendar` returns `Option<f64>` and rejects invalid month, day, hour, minute and second fields. Weekday calculation uses the Gregorian 400-year cycle to handle negative years and the full `i64` year range without overflow.
 - **Breaking.** `week_from_calendar` returns `None` for invalid calendar dates.
 - **Breaking.** SBAS EMS and RTKLIB log readers reject candidate records with malformed fields, invalid dates, unsupported PRNs or non-hexadecimal payloads. Odd-length hexadecimal payloads are rejected instead of inventing the final four bits. Non-record header lines remain readable.

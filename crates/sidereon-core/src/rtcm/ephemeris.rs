@@ -52,18 +52,33 @@ fn gnss_week_tow(
         .map_err(|_| Error::InvalidInput(format!("RTCM broadcast {field} is not representable")))
 }
 
-fn galileo_sisa_m(index: u8) -> f64 {
+fn galileo_sisa_m(index: u8) -> Result<f64> {
     match index {
-        0..=49 => f64::from(index) * 0.01,
-        50..=74 => 0.50 + f64::from(index - 50) * 0.02,
-        75..=99 => 1.00 + f64::from(index - 75) * 0.04,
-        100..=125 => 2.00 + f64::from(index - 100) * 0.16,
-        _ => 8192.0,
+        0..=49 => Ok(f64::from(index) * 0.01),
+        50..=74 => Ok(0.50 + f64::from(index - 50) * 0.02),
+        75..=99 => Ok(1.00 + f64::from(index - 75) * 0.04),
+        100..=125 => Ok(2.00 + f64::from(index - 100) * 0.16),
+        126..=254 => Err(Error::InvalidInput(format!(
+            "RTCM Galileo ephemeris SISA index {index} is spare with no defined accuracy"
+        ))),
+        255 => Err(Error::InvalidInput(
+            "RTCM Galileo ephemeris SISA index 255 indicates no accuracy prediction available (NAPA)"
+                .to_string(),
+        )),
     }
 }
 
-fn ura_or_wide(index: u8) -> f64 {
-    gps_ura_index_to_meters(i64::from(index)).unwrap_or(8192.0)
+fn gps_ura_to_meters(index: u8, system_label: &'static str) -> Result<f64> {
+    if index > 15 {
+        return Err(Error::InvalidInput(format!(
+            "RTCM {system_label} ephemeris URA index {index} exceeds 4-bit range"
+        )));
+    }
+    gps_ura_index_to_meters(i64::from(index)).ok_or_else(|| {
+        Error::InvalidInput(format!(
+            "RTCM {system_label} ephemeris URA index {index} has no accuracy prediction"
+        ))
+    })
 }
 
 fn raw_health(healthy: bool) -> f64 {
@@ -237,7 +252,11 @@ impl GpsEphemeris {
 
     /// Convert this decoded RTCM ephemeris to the broadcast record consumed by
     /// the solver. `full_week` is the caller-unrolled GPS week and must agree
-    /// with the 10-bit RTCM week residue.
+    /// with the 10-bit RTCM week residue. Conversion fails with
+    /// [`Error::InvalidInput`] if the week residue disagrees, if an unrepresentable
+    /// time or invalid satellite ID is encountered, or if the accuracy index
+    /// lacks a defined numerical accuracy prediction (URA index 15) or exceeds
+    /// the 4-bit domain.
     pub fn to_broadcast_record(&self, full_week: u32) -> Result<BroadcastRecord> {
         if full_week % 1024 != u32::from(self.week_number) {
             return Err(Error::InvalidInput(format!(
@@ -293,7 +312,7 @@ impl GpsEphemeris {
             group_delays: BroadcastGroupDelays::gps_lnav(scaled_i(self.t_gd, -31)),
             cnav: None,
             sv_health: f64::from(self.sv_health),
-            sv_accuracy_m: ura_or_wide(self.sv_accuracy),
+            sv_accuracy_m: gps_ura_to_meters(self.sv_accuracy, "GPS")?,
             fit_interval_s: Some(fit_interval_s),
         })
     }
@@ -485,7 +504,9 @@ impl GalileoFnavEphemeris {
     /// the orbital evaluator. Reference counts become seconds of GST week,
     /// orbital and clock integers receive their broadcast scale factors, and
     /// `iod_nav`, SISA, group delay, and health are copied into their canonical
-    /// record fields; an invalid SVID or overflowing aligned week is rejected.
+    /// record fields; an invalid SVID, overflowing aligned week, or SISA index
+    /// lacking a defined numerical accuracy prediction (spare indices 126..=254
+    /// or NAPA 255) is rejected with [`Error::InvalidInput`].
     pub fn to_broadcast_record(&self) -> Result<BroadcastRecord> {
         galileo_to_record(
             self.satellite()?,
@@ -721,7 +742,9 @@ impl GalileoInavEphemeris {
     /// the orbital evaluator. Reference counts become seconds of GST week,
     /// orbital and clock integers receive their broadcast scale factors, and
     /// both group delays plus the combined signal-health state are retained;
-    /// an invalid SVID or overflowing aligned week is rejected.
+    /// an invalid SVID, overflowing aligned week, or SISA index lacking a
+    /// defined numerical accuracy prediction (spare indices 126..=254 or NAPA
+    /// 255) is rejected with [`Error::InvalidInput`].
     pub fn to_broadcast_record(&self) -> Result<BroadcastRecord> {
         galileo_to_record(
             self.satellite()?,
@@ -839,7 +862,7 @@ fn galileo_to_record(
         ),
         cnav: None,
         sv_health,
-        sv_accuracy_m: galileo_sisa_m(sisa),
+        sv_accuracy_m: galileo_sisa_m(sisa)?,
         fit_interval_s: None,
     })
 }
@@ -1030,8 +1053,9 @@ impl BeidouEphemeris {
     /// Convert this raw message into the BDT-tagged BeiDou broadcast record
     /// used by the orbital evaluator. The satellite selects the D1 or D2
     /// message tag, integer fields receive their broadcast scales, and both
-    /// TGD terms are retained; an invalid satellite or unrepresentable time is
-    /// rejected.
+    /// TGD terms are retained; an invalid satellite, unrepresentable time, or
+    /// URA index lacking a defined numerical accuracy prediction (index 15) or
+    /// exceeding the 4-bit domain is rejected with [`Error::InvalidInput`].
     pub fn to_broadcast_record(&self) -> Result<BroadcastRecord> {
         let satellite_id = self.satellite()?;
         let week = u32::from(self.week_number);
@@ -1084,7 +1108,7 @@ impl BeidouEphemeris {
             ),
             cnav: None,
             sv_health: f64::from(u8::from(self.sv_health)),
-            sv_accuracy_m: ura_or_wide(self.sv_urai),
+            sv_accuracy_m: gps_ura_to_meters(self.sv_urai, "BeiDou")?,
             fit_interval_s: None,
         })
     }
@@ -1280,7 +1304,9 @@ impl QzssEphemeris {
     /// used by the orbital evaluator. `full_week` must have the same ten-bit
     /// residue as [`Self::week_number`]; reference counts and scale factors are
     /// applied before the record is returned, and mismatched weeks, invalid
-    /// satellite IDs, or unrepresentable times are rejected.
+    /// satellite IDs, unrepresentable times, or URA indices lacking a defined
+    /// numerical accuracy prediction (index 15) or exceeding the 4-bit domain
+    /// are rejected with [`Error::InvalidInput`].
     pub fn to_broadcast_record(&self, full_week: u32) -> Result<BroadcastRecord> {
         if full_week % 1024 != u32::from(self.week_number) {
             return Err(Error::InvalidInput(format!(
@@ -1330,7 +1356,7 @@ impl QzssEphemeris {
             group_delays: BroadcastGroupDelays::gps_lnav(scaled_i(self.t_gd, -31)),
             cnav: None,
             sv_health: f64::from(self.sv_health),
-            sv_accuracy_m: ura_or_wide(self.ura),
+            sv_accuracy_m: gps_ura_to_meters(self.ura, "QZSS")?,
             fit_interval_s: Some(if self.fit_interval {
                 6.0 * SECONDS_PER_HOUR
             } else {

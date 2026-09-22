@@ -3,6 +3,7 @@
 use super::bits::{BitReader, BitWriter};
 use super::crc::{crc24q, crc24q_with_init};
 use super::*;
+use crate::error::Error;
 
 // ---------------------------------------------------------------------------
 // Bit codec
@@ -1374,6 +1375,65 @@ fn build_msm7_from_scratch_round_trips() {
 }
 
 #[test]
+fn msm7_absent_phase_range_rate_distinguished_from_zero() {
+    let satellites = vec![
+        MsmSatellite {
+            id: 1,
+            rough_range_ms: 70,
+            rough_range_mod1: 256,
+            extended_info: Some(0),
+            rough_phase_range_rate_m_s: None,
+        },
+        MsmSatellite {
+            id: 2,
+            rough_range_ms: 72,
+            rough_range_mod1: 512,
+            extended_info: Some(0),
+            rough_phase_range_rate_m_s: Some(0),
+        },
+    ];
+    let signals = vec![
+        MsmSignal {
+            satellite_id: 1,
+            signal_id: 1,
+            fine_pseudorange: 100,
+            fine_phase_range: 200,
+            lock_time_indicator: 50,
+            half_cycle_ambiguity: false,
+            cnr: 400,
+            fine_phase_range_rate: None,
+        },
+        MsmSignal {
+            satellite_id: 2,
+            signal_id: 1,
+            fine_pseudorange: 300,
+            fine_phase_range: 400,
+            lock_time_indicator: 60,
+            half_cycle_ambiguity: false,
+            cnr: 450,
+            fine_phase_range_rate: Some(0),
+        },
+    ];
+    let message = MsmMessage {
+        message_number: 1077,
+        system: crate::id::GnssSystem::Gps,
+        kind: MsmKind::Msm7,
+        header: msm_header(),
+        satellites,
+        signals,
+    };
+    let body = message.encode();
+    let decoded = MsmMessage::decode(&body).unwrap();
+    assert_eq!(decoded.satellites[0].rough_phase_range_rate_m_s, None);
+    assert_eq!(decoded.satellites[1].rough_phase_range_rate_m_s, Some(0));
+    assert_eq!(decoded.signals[0].fine_phase_range_rate, None);
+    assert_eq!(decoded.signals[1].fine_phase_range_rate, Some(0));
+    assert_eq!(decoded, message);
+    assert_eq!(decoded.encode(), body);
+    assert_round_trips(Message::Msm(message));
+}
+
+#[test]
 fn message_enum_is_matched_exhaustively_without_wildcard() {
     // With `#[non_exhaustive]` removed, a caller can match every variant
     // without a catch-all arm; this compiles only while the set is exhaustive.
@@ -1392,4 +1452,409 @@ fn message_enum_is_matched_exhaustively_without_wildcard() {
         Message::Unsupported(u) => u.message_number,
     };
     assert_eq!(number, 1005);
+}
+
+fn valid_gps_ephemeris() -> GpsEphemeris {
+    GpsEphemeris {
+        satellite_id: 14,
+        week_number: 386,
+        sv_accuracy: 0,
+        code_on_l2: 1,
+        idot: -1234,
+        iode: 42,
+        t_oc: 30_000,
+        a_f2: 0,
+        a_f1: -7,
+        a_f0: 123_456,
+        iodc: 42,
+        c_rs: -8000,
+        delta_n: 4500,
+        m0: -1_073_741_824,
+        c_uc: -512,
+        eccentricity: 21_000_000,
+        c_us: 600,
+        sqrt_a: 2_705_000_000,
+        t_oe: 30_000,
+        c_ic: -10,
+        omega0: 1_000_000_000,
+        c_is: 12,
+        i0: 600_000_000,
+        c_rc: 7000,
+        omega: -900_000_000,
+        omega_dot: -2000,
+        t_gd: -5,
+        sv_health: 0,
+        l2_p_data_flag: false,
+        fit_interval: true,
+    }
+}
+
+fn valid_beidou_ephemeris() -> BeidouEphemeris {
+    BeidouEphemeris {
+        satellite_id: 19,
+        week_number: 1070,
+        sv_urai: 0,
+        idot: 115,
+        aode: 17,
+        t_oc: 9000,
+        a_f2: -12,
+        a_f1: 45_000,
+        a_f0: -123_456,
+        aodc: 18,
+        c_rs: -12_000,
+        delta_n: 2200,
+        m0: 300_000_000,
+        c_uc: -11_000,
+        eccentricity: 70_000_000,
+        c_us: 10_000,
+        sqrt_a: 3_404_333_056,
+        t_oe: 9000,
+        c_ic: -9000,
+        omega0: -600_000_000,
+        c_is: 8500,
+        i0: 620_000_000,
+        c_rc: 11_500,
+        omega: 500_000_000,
+        omega_dot: -1800,
+        t_gd1: -16,
+        t_gd2: 12,
+        sv_health: false,
+    }
+}
+
+fn valid_qzss_ephemeris() -> QzssEphemeris {
+    QzssEphemeris {
+        satellite_id: 2,
+        t_oc: 4500,
+        a_f2: -1,
+        a_f1: 1234,
+        a_f0: -234_567,
+        iode: 44,
+        c_rs: -1500,
+        delta_n: 2400,
+        m0: 250_000_000,
+        c_uc: -100,
+        eccentricity: 65_000_000,
+        c_us: 130,
+        sqrt_a: 2_701_770_752,
+        t_oe: 3000,
+        c_ic: -40,
+        omega0: 350_000_000,
+        c_is: 38,
+        i0: 610_000_000,
+        c_rc: 7100,
+        omega: -260_000_000,
+        omega_dot: -1600,
+        idot: 110,
+        codes_on_l2: 2,
+        week_number: 386,
+        ura: 0,
+        sv_health: 0,
+        t_gd: -4,
+        iodc: 44,
+        fit_interval: false,
+    }
+}
+
+fn valid_galileo_fnav_ephemeris() -> GalileoFnavEphemeris {
+    GalileoFnavEphemeris {
+        satellite_id: 11,
+        week_number: 1380,
+        iod_nav: 321,
+        sisa: 0,
+        idot: -120,
+        t_oc: 1200,
+        a_f2: -2,
+        a_f1: 3456,
+        a_f0: -456_789,
+        c_rs: -2000,
+        delta_n: 3200,
+        m0: -500_000_000,
+        c_uc: -120,
+        eccentricity: 85_899_345,
+        c_us: 145,
+        sqrt_a: 2_852_126_720,
+        t_oe: 1200,
+        c_ic: -55,
+        omega0: 400_000_000,
+        c_is: 42,
+        i0: 650_000_000,
+        c_rc: 9000,
+        omega: -300_000_000,
+        omega_dot: -2400,
+        bgd_e5a_e1: -8,
+        e5a_signal_health: 0,
+        e5a_data_validity: false,
+        reserved: 0,
+    }
+}
+
+fn valid_galileo_inav_ephemeris() -> GalileoInavEphemeris {
+    GalileoInavEphemeris {
+        satellite_id: 12,
+        week_number: 1380,
+        iod_nav: 322,
+        sisa_index: 0,
+        idot: -125,
+        t_oc: 1200,
+        a_f2: -1,
+        a_f1: 2345,
+        a_f0: -345_678,
+        c_rs: -2100,
+        delta_n: 3100,
+        m0: -450_000_000,
+        c_uc: -118,
+        eccentricity: 82_000_000,
+        c_us: 140,
+        sqrt_a: 2_852_126_720,
+        t_oe: 1200,
+        c_ic: -53,
+        omega0: 420_000_000,
+        c_is: 41,
+        i0: 650_000_000,
+        c_rc: 8800,
+        omega: -310_000_000,
+        omega_dot: -2300,
+        bgd_e5a_e1: -8,
+        bgd_e5b_e1: 6,
+        e5b_signal_health: 0,
+        e5b_data_validity: false,
+        e1b_signal_health: 0,
+        e1b_data_validity: false,
+        reserved: 0,
+    }
+}
+
+#[test]
+fn broadcast_conversion_refuses_ura_absence_and_range_for_gps_beidou_qzss() {
+    // GPS (message 1019)
+    let mut gps_eph = valid_gps_ephemeris();
+    gps_eph.sv_accuracy = 0;
+    assert_eq!(
+        gps_eph.to_broadcast_record(2434).unwrap().sv_accuracy_m,
+        2.4
+    );
+    gps_eph.sv_accuracy = 14;
+    assert_eq!(
+        gps_eph.to_broadcast_record(2434).unwrap().sv_accuracy_m,
+        6144.0
+    );
+    gps_eph.sv_accuracy = 15;
+    match gps_eph.to_broadcast_record(2434) {
+        Err(Error::InvalidInput(msg)) => {
+            assert!(msg.contains("GPS"));
+            assert!(msg.contains("URA index 15"));
+            assert!(msg.contains("no accuracy prediction"));
+        }
+        other => panic!("expected InvalidInput for GPS URA 15 absence, got {other:?}"),
+    }
+    gps_eph.sv_accuracy = 16;
+    match gps_eph.to_broadcast_record(2434) {
+        Err(Error::InvalidInput(msg)) => {
+            assert!(msg.contains("GPS"));
+            assert!(msg.contains("URA index 16"));
+            assert!(msg.contains("exceeds 4-bit range"));
+        }
+        other => panic!("expected InvalidInput for GPS URA 16 out of range, got {other:?}"),
+    }
+
+    // BeiDou (message 1042)
+    let mut bds_eph = valid_beidou_ephemeris();
+    bds_eph.sv_urai = 0;
+    assert_eq!(bds_eph.to_broadcast_record().unwrap().sv_accuracy_m, 2.4);
+    bds_eph.sv_urai = 14;
+    assert_eq!(bds_eph.to_broadcast_record().unwrap().sv_accuracy_m, 6144.0);
+    bds_eph.sv_urai = 15;
+    match bds_eph.to_broadcast_record() {
+        Err(Error::InvalidInput(msg)) => {
+            assert!(msg.contains("BeiDou"));
+            assert!(msg.contains("URA index 15"));
+            assert!(msg.contains("no accuracy prediction"));
+        }
+        other => panic!("expected InvalidInput for BeiDou URA 15 absence, got {other:?}"),
+    }
+    bds_eph.sv_urai = 16;
+    match bds_eph.to_broadcast_record() {
+        Err(Error::InvalidInput(msg)) => {
+            assert!(msg.contains("BeiDou"));
+            assert!(msg.contains("URA index 16"));
+            assert!(msg.contains("exceeds 4-bit range"));
+        }
+        other => panic!("expected InvalidInput for BeiDou URA 16 out of range, got {other:?}"),
+    }
+
+    // QZSS (message 1044)
+    let mut qzss_eph = valid_qzss_ephemeris();
+    qzss_eph.ura = 0;
+    assert_eq!(
+        qzss_eph.to_broadcast_record(2434).unwrap().sv_accuracy_m,
+        2.4
+    );
+    qzss_eph.ura = 14;
+    assert_eq!(
+        qzss_eph.to_broadcast_record(2434).unwrap().sv_accuracy_m,
+        6144.0
+    );
+    qzss_eph.ura = 15;
+    match qzss_eph.to_broadcast_record(2434) {
+        Err(Error::InvalidInput(msg)) => {
+            assert!(msg.contains("QZSS"));
+            assert!(msg.contains("URA index 15"));
+            assert!(msg.contains("no accuracy prediction"));
+        }
+        other => panic!("expected InvalidInput for QZSS URA 15 absence, got {other:?}"),
+    }
+    qzss_eph.ura = 16;
+    match qzss_eph.to_broadcast_record(2434) {
+        Err(Error::InvalidInput(msg)) => {
+            assert!(msg.contains("QZSS"));
+            assert!(msg.contains("URA index 16"));
+            assert!(msg.contains("exceeds 4-bit range"));
+        }
+        other => panic!("expected InvalidInput for QZSS URA 16 out of range, got {other:?}"),
+    }
+}
+
+#[test]
+fn broadcast_conversion_refuses_galileo_sisa_spare_and_napa_and_accepts_valid_indices() {
+    let mut fnav = valid_galileo_fnav_ephemeris();
+    let mut inav = valid_galileo_inav_ephemeris();
+
+    // Valid characterized indices: 0 => 0.00 m, 15 => 0.15 m, 125 => 6.00 m
+    for (sisa, expected_m) in [(0, 0.0), (15, 0.15), (125, 6.00)] {
+        fnav.sisa = sisa;
+        assert_eq!(
+            fnav.to_broadcast_record().unwrap().sv_accuracy_m,
+            expected_m
+        );
+        inav.sisa_index = sisa;
+        assert_eq!(
+            inav.to_broadcast_record().unwrap().sv_accuracy_m,
+            expected_m
+        );
+    }
+
+    // Spare indices (126..=254): test lower and upper bounds
+    for spare_idx in [126, 254] {
+        fnav.sisa = spare_idx;
+        match fnav.to_broadcast_record() {
+            Err(Error::InvalidInput(msg)) => {
+                assert!(msg.contains("Galileo"));
+                assert!(msg.contains(&format!("SISA index {spare_idx}")));
+                assert!(msg.contains("spare with no defined accuracy"));
+            }
+            other => {
+                panic!("expected spare InvalidInput for F/NAV SISA {spare_idx}, got {other:?}")
+            }
+        }
+        inav.sisa_index = spare_idx;
+        match inav.to_broadcast_record() {
+            Err(Error::InvalidInput(msg)) => {
+                assert!(msg.contains("Galileo"));
+                assert!(msg.contains(&format!("SISA index {spare_idx}")));
+                assert!(msg.contains("spare with no defined accuracy"));
+            }
+            other => {
+                panic!("expected spare InvalidInput for I/NAV SISA {spare_idx}, got {other:?}")
+            }
+        }
+    }
+
+    // NAPA index (255)
+    fnav.sisa = 255;
+    match fnav.to_broadcast_record() {
+        Err(Error::InvalidInput(msg)) => {
+            assert!(msg.contains("Galileo"));
+            assert!(msg.contains("SISA index 255"));
+            assert!(msg.contains("no accuracy prediction available (NAPA)"));
+        }
+        other => panic!("expected NAPA InvalidInput for F/NAV SISA 255, got {other:?}"),
+    }
+    inav.sisa_index = 255;
+    match inav.to_broadcast_record() {
+        Err(Error::InvalidInput(msg)) => {
+            assert!(msg.contains("Galileo"));
+            assert!(msg.contains("SISA index 255"));
+            assert!(msg.contains("no accuracy prediction available (NAPA)"));
+        }
+        other => panic!("expected NAPA InvalidInput for I/NAV SISA 255, got {other:?}"),
+    }
+}
+
+#[test]
+fn galileo_sisa_piecewise_boundaries_map_accurately() {
+    let mut fnav = valid_galileo_fnav_ephemeris();
+    let mut inav = valid_galileo_inav_ephemeris();
+    let boundaries = [
+        (49, 0.49),
+        (50, 0.50),
+        (74, 0.98),
+        (75, 1.00),
+        (99, 1.96),
+        (100, 2.00),
+        (125, 6.00),
+    ];
+    for (sisa, expected_m) in boundaries {
+        fnav.sisa = sisa;
+        let fnav_rec = fnav.to_broadcast_record().unwrap();
+        assert!(
+            (fnav_rec.sv_accuracy_m - expected_m).abs() < 1e-12,
+            "F/NAV SISA index {sisa} mapped to {}, expected {expected_m}",
+            fnav_rec.sv_accuracy_m
+        );
+        inav.sisa_index = sisa;
+        let inav_rec = inav.to_broadcast_record().unwrap();
+        assert!(
+            (inav_rec.sv_accuracy_m - expected_m).abs() < 1e-12,
+            "I/NAV SISA index {sisa} mapped to {}, expected {expected_m}",
+            inav_rec.sv_accuracy_m
+        );
+    }
+}
+
+#[test]
+fn raw_codec_round_trips_retain_absence_and_spare_accuracy_indices() {
+    // GPS with URA 15 (absence)
+    let mut gps = valid_gps_ephemeris();
+    gps.sv_accuracy = 15;
+    let bytes = gps.encode();
+    let decoded = GpsEphemeris::decode(&bytes).unwrap();
+    assert_eq!(decoded.sv_accuracy, 15);
+    assert_eq!(decoded, gps);
+
+    // BeiDou with URA 15 (absence)
+    let mut bds = valid_beidou_ephemeris();
+    bds.sv_urai = 15;
+    let bytes = bds.encode();
+    let decoded = BeidouEphemeris::decode(&bytes).unwrap();
+    assert_eq!(decoded.sv_urai, 15);
+    assert_eq!(decoded, bds);
+
+    // QZSS with URA 15 (absence)
+    let mut qzss = valid_qzss_ephemeris();
+    qzss.ura = 15;
+    let bytes = qzss.encode();
+    let decoded = QzssEphemeris::decode(&bytes).unwrap();
+    assert_eq!(decoded.ura, 15);
+    assert_eq!(decoded, qzss);
+
+    // Galileo F/NAV with spare 126, spare 254, and NAPA 255
+    let mut fnav = valid_galileo_fnav_ephemeris();
+    for sisa in [126, 254, 255] {
+        fnav.sisa = sisa;
+        let bytes = fnav.encode();
+        let decoded = GalileoFnavEphemeris::decode(&bytes).unwrap();
+        assert_eq!(decoded.sisa, sisa);
+        assert_eq!(decoded, fnav);
+    }
+
+    // Galileo I/NAV with spare 126, spare 254, and NAPA 255
+    let mut inav = valid_galileo_inav_ephemeris();
+    for sisa in [126, 254, 255] {
+        inav.sisa_index = sisa;
+        let bytes = inav.encode();
+        let decoded = GalileoInavEphemeris::decode(&bytes).unwrap();
+        assert_eq!(decoded.sisa_index, sisa);
+        assert_eq!(decoded, inav);
+    }
 }
