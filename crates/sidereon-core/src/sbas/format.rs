@@ -25,8 +25,7 @@ pub struct SbasLogBlock {
     /// [`SbasWireForm::Body226`] and 32 bytes use [`SbasWireForm::Framed250`].
     pub form: SbasWireForm,
     /// Hex-decoded bytes from the source line, with whitespace removed before
-    /// decoding. An odd number of hexadecimal digits is completed with a zero
-    /// digit before byte pairs are formed.
+    /// decoding.
     pub bytes: Vec<u8>,
 }
 
@@ -35,10 +34,9 @@ pub struct SbasLogBlock {
 /// For each line, the first seven non-empty comma-separated fields provide the
 /// broadcast PRN and calendar components, and the last non-empty field
 /// provides the hexadecimal block. Years numerically below 100 are increased
-/// by 2000 before the calendar time is converted to GPST. Lines that fail the
-/// field, PRN, calendar-week, or hexadecimal-character checks are ignored; the
-/// result preserves input order, while block-length and epoch-construction
-/// errors are returned.
+/// by 2000 before the calendar time is converted to GPST. Lines with fewer
+/// than eight comma-separated fields are ignored as non-record lines. Record
+/// lines that fail the PRN, calendar, or hexadecimal checks return an error.
 pub fn parse_ems_lines(text: &str) -> Result<Vec<SbasLogBlock>> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -54,9 +52,9 @@ pub fn parse_ems_lines(text: &str) -> Result<Vec<SbasLogBlock>> {
 /// Each recognized record has at least four whitespace-separated header fields
 /// before a colon: week, seconds-of-week, broadcast PRN, and an additional
 /// header field. The text after the first colon is decoded as the block's
-/// hexadecimal bytes. Lines without the required delimiter or parseable,
-/// supported fields are ignored, recognized records retain input order, and
-/// block-length or epoch-construction errors are returned.
+/// hexadecimal bytes. Lines without the colon delimiter are ignored as
+/// non-record lines; record lines with invalid fields, unsupported PRNs, or
+/// malformed hexadecimal blocks return an error.
 pub fn parse_rtklib_lines(text: &str) -> Result<Vec<SbasLogBlock>> {
     let mut out = Vec::new();
     for line in text.lines() {
@@ -76,38 +74,46 @@ fn parse_ems_line(line: &str) -> Result<Option<SbasLogBlock>> {
     if parts.len() < 8 {
         return Ok(None);
     }
-    let Some(hex) = parts.last().copied().filter(|s| looks_hex(s)) else {
-        return Ok(None);
-    };
-    let Some(prn) = parse_u16(parts[0]) else {
-        return Ok(None);
-    };
-    let Some(satellite_id) = sbas_prn_to_sat(prn) else {
-        return Ok(None);
-    };
-    let Some(year) = parse_i64(parts[1]) else {
-        return Ok(None);
-    };
-    let Some(month) = parse_i64(parts[2]) else {
-        return Ok(None);
-    };
-    let Some(day) = parse_i64(parts[3]) else {
-        return Ok(None);
-    };
-    let Some(hour) = parse_i64(parts[4]) else {
-        return Ok(None);
-    };
-    let Some(minute) = parse_i64(parts[5]) else {
-        return Ok(None);
-    };
-    let Some(second) = parse_i64(parts[6]) else {
-        return Ok(None);
-    };
+    let hex = parts
+        .last()
+        .copied()
+        .filter(|s| looks_hex(s))
+        .ok_or_else(|| Error::Parse(format!("invalid hex block in SBAS EMS record: {line}")))?;
+    let prn = parse_u16(parts[0])
+        .ok_or_else(|| Error::Parse(format!("invalid PRN integer in SBAS EMS record: {line}")))?;
+    let satellite_id = sbas_prn_to_sat(prn)
+        .ok_or_else(|| Error::Parse(format!("unsupported SBAS PRN {prn} in EMS record: {line}")))?;
+    let year = parse_i64(parts[1])
+        .ok_or_else(|| Error::Parse(format!("invalid year integer in SBAS EMS record: {line}")))?;
+    let month = parse_i64(parts[2])
+        .ok_or_else(|| Error::Parse(format!("invalid month integer in SBAS EMS record: {line}")))?;
+    let day = parse_i64(parts[3])
+        .ok_or_else(|| Error::Parse(format!("invalid day integer in SBAS EMS record: {line}")))?;
+    let hour = parse_i64(parts[4])
+        .ok_or_else(|| Error::Parse(format!("invalid hour integer in SBAS EMS record: {line}")))?;
+    let minute = parse_i64(parts[5]).ok_or_else(|| {
+        Error::Parse(format!("invalid minute integer in SBAS EMS record: {line}"))
+    })?;
+    let second = parse_i64(parts[6]).ok_or_else(|| {
+        Error::Parse(format!("invalid second integer in SBAS EMS record: {line}"))
+    })?;
     let year = if year < 100 { 2000 + year } else { year };
-    let Some(week) = week_from_calendar(TimeScale::Gpst, year, month, day) else {
-        return Ok(None);
-    };
-    let tow_s = seconds_of_week_from_calendar(year, month, day, hour, minute, second);
+    if !(1..=12).contains(&month)
+        || !(1..=crate::astro::time::civil::days_in_month(year, month)).contains(&day)
+    {
+        return Err(Error::Parse(format!(
+            "invalid calendar date in SBAS EMS record: {line}"
+        )));
+    }
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) || !(0..=60).contains(&second) {
+        return Err(Error::Parse(format!(
+            "invalid calendar time in SBAS EMS record: {line}"
+        )));
+    }
+    let week = week_from_calendar(TimeScale::Gpst, year, month, day)
+        .ok_or_else(|| Error::Parse(format!("invalid calendar date in SBAS EMS record: {line}")))?;
+    let tow_s = seconds_of_week_from_calendar(year, month, day, hour, minute, second)
+        .ok_or_else(|| Error::Parse(format!("invalid calendar time in SBAS EMS record: {line}")))?;
     let epoch = GnssWeekTow::new(TimeScale::Gpst, week, tow_s)
         .map_err(|e| Error::Parse(format!("invalid SBAS EMS epoch: {e}")))?;
     let (form, bytes) = decode_hex_block(hex)?;
@@ -124,24 +130,31 @@ fn parse_rtklib_line(line: &str) -> Result<Option<SbasLogBlock>> {
         return Ok(None);
     };
     if !looks_hex(hex.trim()) {
-        return Ok(None);
+        return Err(Error::Parse(format!(
+            "invalid hex block in SBAS RTKLIB record: {line}"
+        )));
     }
     let fields: Vec<&str> = head.split_whitespace().collect();
     if fields.len() < 4 {
-        return Ok(None);
+        return Err(Error::Parse(format!(
+            "too few header fields in SBAS RTKLIB record: {line}"
+        )));
     }
-    let Some(week) = parse_u32(fields[0]) else {
-        return Ok(None);
-    };
-    let Some(tow_s) = parse_f64(fields[1]) else {
-        return Ok(None);
-    };
-    let Some(prn) = parse_u16(fields[2]) else {
-        return Ok(None);
-    };
-    let Some(satellite_id) = sbas_prn_to_sat(prn) else {
-        return Ok(None);
-    };
+    let week = parse_u32(fields[0]).ok_or_else(|| {
+        Error::Parse(format!(
+            "invalid week integer in SBAS RTKLIB record: {line}"
+        ))
+    })?;
+    let tow_s = parse_f64(fields[1])
+        .ok_or_else(|| Error::Parse(format!("invalid TOW float in SBAS RTKLIB record: {line}")))?;
+    let prn = parse_u16(fields[2]).ok_or_else(|| {
+        Error::Parse(format!("invalid PRN integer in SBAS RTKLIB record: {line}"))
+    })?;
+    let satellite_id = sbas_prn_to_sat(prn).ok_or_else(|| {
+        Error::Parse(format!(
+            "unsupported SBAS PRN {prn} in RTKLIB record: {line}"
+        ))
+    })?;
     let epoch = GnssWeekTow::new(TimeScale::Gpst, week, tow_s)
         .map_err(|e| Error::Parse(format!("invalid SBAS RTKLIB epoch: {e}")))?;
     let (form, bytes) = decode_hex_block(hex.trim())?;
@@ -154,9 +167,11 @@ fn parse_rtklib_line(line: &str) -> Result<Option<SbasLogBlock>> {
 }
 
 fn decode_hex_block(hex: &str) -> Result<(SbasWireForm, Vec<u8>)> {
-    let mut clean: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
+    let clean: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
     if !clean.len().is_multiple_of(2) {
-        clean.push('0');
+        return Err(Error::Parse(
+            "odd number of hexadecimal digits in SBAS block".to_string(),
+        ));
     }
     let mut bytes = Vec::with_capacity(clean.len() / 2);
     for idx in (0..clean.len()).step_by(2) {
@@ -267,5 +282,54 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].satellite_id.to_string(), "S20");
         assert_eq!(parsed[0].form, SbasWireForm::Body226);
+    }
+
+    #[test]
+    fn decode_hex_block_rejects_odd_hex_length() {
+        let hex = block_hex(&RTKLIB_MT2_BODY);
+        let truncated = &hex[..hex.len() - 1];
+        let err = decode_hex_block(truncated).unwrap_err();
+        assert!(
+            matches!(err, Error::Parse(ref msg) if msg.contains("odd number of hexadecimal digits")),
+            "expected Error::Parse with odd hex digits message, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_ems_lines_rejects_corrupted_record_fields() {
+        let hex = block_hex(&RTKLIB_MT2_BODY);
+        let text_bad_prn = format!("999,26,7,1,0,0,1,1,{hex}\n");
+        assert!(parse_ems_lines(&text_bad_prn).is_err());
+
+        let text_bad_hex = "120,26,7,1,0,0,1,1,NOT_HEX_BLOCK\n";
+        assert!(parse_ems_lines(text_bad_hex).is_err());
+
+        let text_bad_date = format!("120,26,13,1,0,0,1,1,{hex}\n");
+        assert!(parse_ems_lines(&text_bad_date).is_err());
+
+        let text_bad_day = format!("120,26,7,32,0,0,1,1,{hex}\n");
+        assert!(parse_ems_lines(&text_bad_day).is_err());
+
+        let text_bad_hour = format!("120,26,7,1,24,0,1,1,{hex}\n");
+        assert!(parse_ems_lines(&text_bad_hour).is_err());
+
+        let text_bad_minute = format!("120,26,7,1,0,60,1,1,{hex}\n");
+        assert!(parse_ems_lines(&text_bad_minute).is_err());
+
+        let text_bad_second = format!("120,26,7,1,0,0,61,1,{hex}\n");
+        assert!(parse_ems_lines(&text_bad_second).is_err());
+    }
+
+    #[test]
+    fn parse_rtklib_lines_rejects_corrupted_record_fields() {
+        let hex = block_hex(&RTKLIB_MT2_BODY);
+        let text_bad_prn = format!("2360 259200 999 1 : {hex}\n");
+        assert!(parse_rtklib_lines(&text_bad_prn).is_err());
+
+        let text_bad_week = format!("not_a_week 259200 120 1 : {hex}\n");
+        assert!(parse_rtklib_lines(&text_bad_week).is_err());
+
+        let text_bad_hex = "2360 259200 120 1 : NOT_HEX_BLOCK\n";
+        assert!(parse_rtklib_lines(text_bad_hex).is_err());
     }
 }

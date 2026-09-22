@@ -2147,7 +2147,11 @@ fn parse_toc(
         i64::from(civil.hour),
         i64::from(civil.minute),
         civil.second as i64,
-    );
+    )
+    .ok_or_else(|| NavParseError::BadField {
+        satellite: sat.to_string(),
+        field: "toc epoch",
+    })?;
     Ok(ClockReferenceEpoch { week, sow })
 }
 

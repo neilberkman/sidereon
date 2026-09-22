@@ -783,7 +783,8 @@ fn exact_candidate_sp3_custom_agency(
     let gps_week = week_from_calendar(TimeScale::Gpst, year, month, day)
         .expect("post-transition fixture GPS week");
     let seconds_of_week =
-        seconds_of_week_from_calendar(year, month, day, start_hour, start_minute, start_second);
+        seconds_of_week_from_calendar(year, month, day, start_hour, start_minute, start_second)
+            .expect("valid calendar seconds of week");
     let (jd_whole, mjd_fraction) = split_julian_date(
         i32::try_from(year).expect("fixture year"),
         i32::try_from(month).expect("fixture month"),
