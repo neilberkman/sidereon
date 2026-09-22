@@ -21,23 +21,34 @@ use crate::astro::time::scales::julian_day_number;
 use crate::constants::{
     GPS_EPOCH_TO_J2000_S, J2000_JD, MICROSECONDS_PER_SECOND, SECONDS_PER_DAY, SECONDS_PER_HOUR,
 };
+use crate::format::columns::fixed_record;
 use crate::validate::{self, FieldError};
 
 const INSTANT_SCALE_ORDER_STRIDE_S: f64 = 1.0e15;
 
 /// One satellite clock-bias sample.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClockPoint {
     /// Scale-tagged epoch from the RINEX clock file's declared time system.
     pub epoch: Instant,
     /// Satellite clock bias in seconds.
     pub bias_s: f64,
+    /// Additional numeric clock values following the bias, in standard order:
+    /// bias sigma (s), clock rate (dimensionless), clock rate sigma (dimensionless),
+    /// clock acceleration (s^-1), and clock acceleration sigma (s^-1).
+    pub additional_values: Vec<f64>,
 }
 
 impl ClockPoint {
     /// This sample's epoch as GPS seconds, when the sample is actually GPST.
     pub fn gps_seconds(&self) -> Option<f64> {
         instant_to_gps_seconds(&self.epoch)
+    }
+
+    /// Validate that this clock point has a valid epoch instant, finite bias,
+    /// at most 5 additional values, and all additional values finite.
+    pub fn validate(&self) -> Result<(), RinexClockError> {
+        validate_clock_point(self)
     }
 }
 
@@ -58,6 +69,57 @@ pub struct ClockEpoch {
     pub second: f64,
 }
 
+/// An unmodelled record skipped during RINEX clock parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RinexClockSkip {
+    /// One-based input line number where the record appeared.
+    pub line: usize,
+    /// Two-letter RINEX clock record type identifier (e.g. `"AR"`, `"CR"`, `"DR"`, `"MS"`).
+    pub record_type: String,
+}
+
+impl RinexClockSkip {
+    /// Create a new skipped record report entry.
+    pub fn new(line: usize, record_type: impl Into<String>) -> Self {
+        Self {
+            line,
+            record_type: record_type.into(),
+        }
+    }
+}
+
+impl fmt::Display for RinexClockSkip {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "skipped unmodelled {} record at line {}",
+            self.record_type, self.line
+        )
+    }
+}
+
+/// A diagnostic recorded when lossy parsing skips a malformed record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RinexClockDiagnostic {
+    /// One-based line number of the malformed or invalid record.
+    pub line: usize,
+    /// The underlying parse error that caused the record to be skipped.
+    pub error: RinexClockError,
+}
+
+impl RinexClockDiagnostic {
+    /// Create a new parse diagnostic entry.
+    pub fn new(line: usize, error: RinexClockError) -> Self {
+        Self { line, error }
+    }
+}
+
+impl fmt::Display for RinexClockDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "parse diagnostic at line {}: {}", self.line, self.error)
+    }
+}
+
 /// Parsed RINEX clock product.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RinexClock {
@@ -65,6 +127,10 @@ pub struct RinexClock {
     pub time_scale: TimeScale,
     /// Per-satellite, strictly time-ordered clock-bias series.
     pub series: BTreeMap<String, Vec<ClockPoint>>,
+    /// Unmodelled records skipped during parsing (e.g. receiver clock records `AR`, `CR`, `DR`, `MS`).
+    pub skipped_records: Vec<RinexClockSkip>,
+    /// Diagnostics for malformed records skipped during lossy parsing.
+    pub diagnostics: Vec<RinexClockDiagnostic>,
 }
 
 /// RINEX clock parse error.
@@ -73,6 +139,22 @@ pub enum RinexClockError {
     /// An `AS` satellite clock row is too short to carry the required bias.
     MalformedAsRecord {
         /// One-based input line number.
+        line: usize,
+        /// Human-readable parse failure.
+        reason: &'static str,
+        /// The full record text.
+        record: String,
+    },
+    /// A declared continuation record was missing.
+    MissingContinuation {
+        /// One-based input line number of the parent record.
+        line: usize,
+        /// Record type of the parent record.
+        record_type: String,
+    },
+    /// A continuation record was malformed or truncated.
+    MalformedContinuation {
+        /// One-based input line number of the continuation record.
         line: usize,
         /// Human-readable parse failure.
         reason: &'static str,
@@ -113,6 +195,18 @@ impl fmt::Display for RinexClockError {
                 f,
                 "malformed RINEX AS clock record at line {line}: {reason}: {record}"
             ),
+            RinexClockError::MissingContinuation { line, record_type } => write!(
+                f,
+                "missing required continuation record for {record_type} at line {line}"
+            ),
+            RinexClockError::MalformedContinuation {
+                line,
+                reason,
+                record,
+            } => write!(
+                f,
+                "malformed RINEX clock continuation record at line {line}: {reason}: {record}"
+            ),
             RinexClockError::BadField { line, field, value } => write!(
                 f,
                 "bad RINEX AS clock field at line {line}: {field}={value}"
@@ -135,16 +229,23 @@ impl RinexClock {
         let time_scale = parse_time_scale(text)?;
         let lines = data_lines(text);
         let mut by_sat = BTreeMap::<String, Vec<(ClockPoint, usize)>>::new();
+        let mut skipped_records = Vec::new();
+        let mut diagnostics = Vec::new();
 
-        for (line_number, line) in lines {
-            if let Some((sat, point)) = parse_record(line_number, line, time_scale)? {
-                by_sat.entry(sat).or_default().push((point, line_number));
-            }
-        }
+        parse_logical_records(
+            lines,
+            time_scale,
+            false,
+            &mut by_sat,
+            &mut skipped_records,
+            &mut diagnostics,
+        )?;
 
         Ok(Self {
             time_scale,
             series: build_series(by_sat),
+            skipped_records,
+            diagnostics: Vec::new(),
         })
     }
 
@@ -153,20 +254,27 @@ impl RinexClock {
         let time_scale = parse_time_scale(text).unwrap_or(TimeScale::Gpst);
         let lines = data_lines(text);
         let mut by_sat = BTreeMap::<String, Vec<(ClockPoint, usize)>>::new();
+        let mut skipped_records = Vec::new();
+        let mut diagnostics = Vec::new();
 
-        for (line_number, line) in lines {
-            if let Ok(Some((sat, point))) = parse_record(line_number, line, time_scale) {
-                by_sat.entry(sat).or_default().push((point, line_number));
-            }
-        }
+        let _ = parse_logical_records(
+            lines,
+            time_scale,
+            true,
+            &mut by_sat,
+            &mut skipped_records,
+            &mut diagnostics,
+        );
 
         Self {
             time_scale,
             series: build_series(by_sat),
+            skipped_records,
+            diagnostics,
         }
     }
 
-    /// Rebuild a GPST product from the legacy public GPS-second row shape.
+    /// Rebuild a GPST product from the legacy public GPS-second rows.
     pub fn from_series_rows(rows: Vec<(String, Vec<(f64, f64)>)>) -> Result<Self, RinexClockError> {
         let rows = rows
             .into_iter()
@@ -200,8 +308,12 @@ impl RinexClock {
                 .into_iter()
                 .enumerate()
                 .map(|(idx, (epoch, bias_s))| {
-                    let point = ClockPoint { epoch, bias_s };
-                    validate_clock_point(point)?;
+                    let point = ClockPoint {
+                        epoch,
+                        bias_s,
+                        additional_values: Vec::new(),
+                    };
+                    validate_clock_point(&point)?;
                     Ok((point, idx))
                 })
                 .collect::<Result<Vec<_>, RinexClockError>>()?;
@@ -211,7 +323,12 @@ impl RinexClock {
             });
             series.insert(sat, dedup_by_time(indexed));
         }
-        Ok(Self { time_scale, series })
+        Ok(Self {
+            time_scale,
+            series,
+            skipped_records: Vec::new(),
+            diagnostics: Vec::new(),
+        })
     }
 
     /// Export GPST samples as `[(satellite, [(gps_seconds, bias_s), ...]), ...]`.
@@ -290,16 +407,19 @@ impl RinexClock {
         self.clock_s_at_instant(satellite_id, gps_seconds_to_instant(gps_seconds))
     }
 
-    /// Serialize this product to standard RINEX clock text - the inverse of
-    /// [`RinexClock::parse`].
+    /// Serialize this product to standard RINEX 3.00 clock text.
     ///
     /// Pure and deterministic: the same product always produces byte-identical
-    /// text and no I/O is performed. The header declares the product time system
-    /// and each sample is written as an `AS` satellite clock-bias record, so
-    /// re-parsing the output reproduces the same time scale and per-satellite
-    /// series. Epoch components are written on the microsecond civil grid the
-    /// parser reads, and bias values use their shortest round-tripping decimal,
-    /// so a parsed product re-encodes to the same `f64`s.
+    /// text and no I/O is performed. The minimal header declares the product
+    /// time scale, and each sample is written as a fixed-column `AS` satellite
+    /// clock-bias record (with continuation records when more than two values are
+    /// present). Epoch components are written on the civil microsecond grid.
+    /// Numeric values are formatted into fixed 19-column scientific fields
+    /// (`E19.12`) guaranteeing exact bit readback upon re-parsing; values that
+    /// cannot fit within the field width or cannot be represented without loss
+    /// of precision are refused with a named [`RinexClockError::InvalidInput`]
+    /// error. Unsupported epoch time scales return
+    /// [`RinexClockError::UnsupportedTimeScale`].
     pub fn to_rinex_string(&self) -> Result<String, RinexClockError> {
         let mut out = String::new();
         let label = crate::rinex_common::time_scale_rinex_label(self.time_scale).ok_or(
@@ -313,7 +433,7 @@ impl RinexClock {
         for (satellite, points) in &self.series {
             for point in points {
                 validate_serializable_clock_point(self.time_scale, point)?;
-                write_as_record(&mut out, satellite, point);
+                write_as_record(&mut out, satellite, point)?;
             }
         }
         Ok(out)
@@ -321,17 +441,50 @@ impl RinexClock {
 }
 
 /// Append one `AS` satellite clock-bias record for a sample.
-fn write_as_record(out: &mut String, satellite: &str, point: &ClockPoint) {
+fn write_as_record(
+    out: &mut String,
+    satellite: &str,
+    point: &ClockPoint,
+) -> Result<(), RinexClockError> {
     let (year, month, day, hour, minute, second_us) = instant_civil_microsecond(&point.epoch);
     let second = second_us / 1_000_000;
     let microsecond = second_us % 1_000_000;
-    // RINEX clock epochs are space-delimited (the parser splits on whitespace),
-    // and one data value (the bias) is written.
-    let _ = writeln!(
-        out,
-        "AS {satellite:<3} {year:04} {month:02} {day:02} {hour:02} {minute:02} {second:2}.{microsecond:06}  1  {bias}",
-        bias = point.bias_s,
-    );
+    let count = 1 + point.additional_values.len();
+    if count > 6 {
+        return Err(invalid_input(
+            "additional_values",
+            "at most 5 additional values are supported",
+        ));
+    }
+
+    let bias_str = format_e19_12(point.bias_s, "bias_s")?;
+
+    if count == 1 {
+        let _ = writeln!(
+            out,
+            "AS {satellite:<4} {year:04} {month:02} {day:02} {hour:02} {minute:02} {second:>2}.{microsecond:06}  1   {bias_str}",
+        );
+    } else {
+        let sigma_str = format_e19_12(point.additional_values[0], "additional_values")?;
+        let _ = writeln!(
+            out,
+            "AS {satellite:<4} {year:04} {month:02} {day:02} {hour:02} {minute:02} {second:>2}.{microsecond:06}  {count}   {bias_str} {sigma_str}",
+        );
+    }
+
+    if count > 2 {
+        let mut cont = String::with_capacity(80);
+        for (i, &val) in point.additional_values[1..].iter().enumerate() {
+            let val_str = format_e19_12(val, "additional_values")?;
+            if i > 0 {
+                cont.push(' ');
+            }
+            cont.push_str(&val_str);
+        }
+        let _ = writeln!(out, "{cont}");
+    }
+
+    Ok(())
 }
 
 /// Decompose a clock-sample instant into civil `(year, month, day, hour, minute,
@@ -493,15 +646,26 @@ fn gps_seconds_to_instant(gps_seconds: f64) -> Instant {
     )
 }
 
-fn validate_clock_point(point: ClockPoint) -> Result<(), RinexClockError> {
+fn validate_clock_point(point: &ClockPoint) -> Result<(), RinexClockError> {
     validate_instant(point.epoch, "epoch")?;
-    validate_finite(point.bias_s, "bias_s")
+    validate_finite(point.bias_s, "bias_s")?;
+    if point.additional_values.len() > 5 {
+        return Err(invalid_input(
+            "additional_values",
+            "cannot exceed 5 additional values (maximum count is 6)",
+        ));
+    }
+    for (idx, &val) in point.additional_values.iter().enumerate() {
+        validate_finite(val, field_name_for_value_index(idx + 1))?;
+    }
+    Ok(())
 }
 
 fn validate_serializable_clock_point(
     product_scale: TimeScale,
     point: &ClockPoint,
 ) -> Result<(), RinexClockError> {
+    validate_clock_point(point)?;
     if crate::rinex_common::time_scale_rinex_label(point.epoch.scale).is_none() {
         return Err(RinexClockError::UnsupportedTimeScale {
             scale: point.epoch.scale,
@@ -513,7 +677,274 @@ fn validate_serializable_clock_point(
             "epoch scale does not match clock time scale",
         ));
     }
+    format_e19_12(point.bias_s, "bias")?;
+    for (idx, &val) in point.additional_values.iter().enumerate() {
+        format_e19_12(val, field_name_for_value_index(idx + 1))?;
+    }
     Ok(())
+}
+
+fn field_name_for_value_index(idx: usize) -> &'static str {
+    match idx {
+        0 => "bias",
+        1 => "sigma",
+        2 => "rate",
+        3 => "rate_sigma",
+        4 => "acceleration",
+        5 => "acceleration_sigma",
+        _ => "additional_values",
+    }
+}
+
+fn format_e19_12(value: f64, field: &'static str) -> Result<String, RinexClockError> {
+    if !value.is_finite() {
+        return Err(invalid_input(field, "must be finite"));
+    }
+    if value == 0.0 {
+        let sign = if value.is_sign_negative() { '-' } else { ' ' };
+        return Ok(format!("{sign}0.000000000000E+00"));
+    }
+
+    let sign = if value.is_sign_negative() { '-' } else { ' ' };
+    let abs_val = value.abs();
+
+    if let Some(formatted) = try_format_leading_zero(sign, abs_val) {
+        if formatted.len() == 19 {
+            if let Ok(reparsed) = formatted.trim().parse::<f64>() {
+                if reparsed.to_bits() == value.to_bits() {
+                    return Ok(formatted);
+                }
+            }
+        }
+    }
+
+    if let Some(formatted) = try_format_nonzero_leading(sign, abs_val) {
+        if formatted.len() == 19 {
+            if let Ok(reparsed) = formatted.trim().parse::<f64>() {
+                if reparsed.to_bits() == value.to_bits() {
+                    return Ok(formatted);
+                }
+            }
+        }
+    }
+
+    if let Some(formatted) = try_format_3digit_exp(sign, abs_val) {
+        if formatted.len() == 19 {
+            if let Ok(reparsed) = formatted.trim().parse::<f64>() {
+                if reparsed.to_bits() == value.to_bits() {
+                    return Ok(formatted);
+                }
+            }
+        }
+    }
+
+    if let Some(formatted) = try_format_canonical_scientific(sign, abs_val) {
+        if formatted.len() == 19 {
+            if let Ok(reparsed) = formatted.trim().parse::<f64>() {
+                if reparsed.to_bits() == value.to_bits() {
+                    return Ok(formatted);
+                }
+            }
+        }
+    }
+
+    if let Some(formatted) = try_format_scientific_fallback(value) {
+        return Ok(formatted);
+    }
+
+    Err(invalid_input(
+        field,
+        "value cannot be represented in Fortran E19.12 format without loss of precision",
+    ))
+}
+
+fn try_format_leading_zero(sign: char, abs_val: f64) -> Option<String> {
+    let s = format!("{abs_val:.11e}");
+    let (mantissa_str, exp_str) = s.split_once('e')?;
+    let rust_exp: i32 = exp_str.parse().ok()?;
+    let (d0, rest) = mantissa_str.split_once('.')?;
+    let new_exp = rust_exp + 1;
+    if !(-99..=99).contains(&new_exp) {
+        return None;
+    }
+    let formatted_exp = if new_exp >= 0 {
+        format!("E+{new_exp:02}")
+    } else {
+        format!("E-{:02}", new_exp.abs())
+    };
+    Some(format!("{sign}0.{d0}{rest}{formatted_exp}"))
+}
+
+fn try_format_nonzero_leading(sign: char, abs_val: f64) -> Option<String> {
+    let s = format!("{abs_val:.12e}");
+    let (mantissa_str, exp_str) = s.split_once('e')?;
+    let rust_exp: i32 = exp_str.parse().ok()?;
+    if !(-99..=99).contains(&rust_exp) {
+        return None;
+    }
+    let formatted_exp = if rust_exp >= 0 {
+        format!("E+{rust_exp:02}")
+    } else {
+        format!("E-{:02}", rust_exp.abs())
+    };
+    Some(format!("{sign}{mantissa_str}{formatted_exp}"))
+}
+
+fn try_format_3digit_exp(sign: char, abs_val: f64) -> Option<String> {
+    let s = format!("{abs_val:.11e}");
+    let (mantissa_str, exp_str) = s.split_once('e')?;
+    let rust_exp: i32 = exp_str.parse().ok()?;
+    let (d0, rest) = mantissa_str.split_once('.')?;
+    let new_exp = rust_exp + 1;
+    if !(-999..=-100).contains(&new_exp) && !(100..=999).contains(&new_exp) {
+        return None;
+    }
+    let formatted_exp = if new_exp >= 0 {
+        format!("E+{new_exp:03}")
+    } else {
+        format!("E-{:03}", new_exp.abs())
+    };
+    Some(format!("{sign}.{d0}{rest}{formatted_exp}"))
+}
+
+fn try_format_canonical_scientific(sign: char, abs_val: f64) -> Option<String> {
+    let s = format!("{abs_val:.12e}");
+    let (mantissa_str, exp_str) = s.split_once('e')?;
+    let rust_exp: i32 = exp_str.parse().ok()?;
+    let formatted_exp = if (-99..=99).contains(&rust_exp) {
+        if rust_exp >= 0 {
+            format!("E+{rust_exp:02}")
+        } else {
+            format!("E-{:02}", rust_exp.abs())
+        }
+    } else if (-999..=999).contains(&rust_exp) {
+        if rust_exp >= 0 {
+            format!("E+{rust_exp:03}")
+        } else {
+            format!("E-{:03}", rust_exp.abs())
+        }
+    } else {
+        return None;
+    };
+
+    let raw = if sign == '-' {
+        format!("-{mantissa_str}{formatted_exp}")
+    } else {
+        format!("{mantissa_str}{formatted_exp}")
+    };
+
+    if raw.len() > 19 {
+        return None;
+    }
+
+    Some(format!("{raw:>19}"))
+}
+
+/// Formats a finite non-zero floating-point value into an exact 19-column
+/// scientific representation when standard preferred formatters cannot fit within 19 bytes.
+/// Evaluates finite 1..=17 significant digit candidates strictly containing an
+/// explicit decimal point and 'E', testing finite point placement and exponent
+/// adjustments alongside optional positive plus signs for input compatibility rather
+/// than canonical Fortran output. Candidates of length <= 19 bytes are left-padded with
+/// spaces to exactly 19 bytes and accepted only on strict bit readback (`to_bits()`).
+///
+/// This does not guarantee that all legally representable mathematical values fit
+/// within the 19-column budget; values exceeding candidate width limits are refused.
+fn try_format_scientific_fallback(value: f64) -> Option<String> {
+    let abs_val = value.abs();
+    let sign_prefix = if value.is_sign_negative() { "-" } else { "" };
+
+    for sig_digits in (1..=17).rev() {
+        let prec = sig_digits - 1;
+        let s = format!("{abs_val:.prec$e}");
+        let Some((mantissa_part, exp_part)) = s.split_once('e') else {
+            continue;
+        };
+        let Ok(rust_exp) = exp_part.parse::<i32>() else {
+            continue;
+        };
+        let digits: String = mantissa_part
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .collect();
+        if digits.len() != sig_digits {
+            continue;
+        }
+
+        let mut mantissa_candidates = Vec::with_capacity(sig_digits + 2);
+
+        // 1. Standard normalized form (decimal point after first digit).
+        if sig_digits == 1 {
+            mantissa_candidates.push((format!("{sign_prefix}{digits}."), 0));
+        } else {
+            mantissa_candidates
+                .push((format!("{sign_prefix}{}.{}", &digits[..1], &digits[1..]), 0));
+        }
+
+        // 2. Leading zero form (0.dddd...).
+        mantissa_candidates.push((format!("{sign_prefix}0.{digits}"), 1));
+
+        // 3. Leading dot form (.dddd...).
+        mantissa_candidates.push((format!("{sign_prefix}.{digits}"), 1));
+
+        // 4. Shift decimal point to the right across the remaining positions.
+        if sig_digits > 1 {
+            for k in 2..=sig_digits {
+                let exp_delta = -(k as i32 - 1);
+                if k < sig_digits {
+                    mantissa_candidates.push((
+                        format!("{sign_prefix}{}.{}", &digits[..k], &digits[k..]),
+                        exp_delta,
+                    ));
+                } else {
+                    mantissa_candidates.push((format!("{sign_prefix}{digits}."), exp_delta));
+                }
+            }
+        }
+
+        for (mantissa, exp_delta) in mantissa_candidates {
+            let adj_exp = rust_exp + exp_delta;
+            if !(-999..=999).contains(&adj_exp) {
+                continue;
+            }
+
+            let mut exp_spellings = Vec::with_capacity(4);
+            if adj_exp >= 0 {
+                if adj_exp <= 99 {
+                    exp_spellings.push(format!("E+{adj_exp:02}"));
+                    exp_spellings.push(format!("E{adj_exp:02}"));
+                    exp_spellings.push(format!("E+{adj_exp:03}"));
+                    exp_spellings.push(format!("E{adj_exp:03}"));
+                } else {
+                    exp_spellings.push(format!("E+{adj_exp:03}"));
+                    exp_spellings.push(format!("E{adj_exp:03}"));
+                }
+            } else {
+                let abs_exp = adj_exp.unsigned_abs();
+                if abs_exp <= 99 {
+                    exp_spellings.push(format!("E-{abs_exp:02}"));
+                    exp_spellings.push(format!("E-{abs_exp:03}"));
+                } else {
+                    exp_spellings.push(format!("E-{abs_exp:03}"));
+                }
+            }
+
+            for exp_spelling in exp_spellings {
+                let candidate_raw = format!("{mantissa}{exp_spelling}");
+                if candidate_raw.len() > 19 {
+                    continue;
+                }
+                let candidate = format!("{candidate_raw:>19}");
+                if let Ok(reparsed) = validate::strict_f64(&candidate, "bias") {
+                    if reparsed.to_bits() == value.to_bits() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn validate_instant(epoch: Instant, field: &'static str) -> Result<(), RinexClockError> {
@@ -616,47 +1047,736 @@ struct ClockEpochFields<'a> {
     second: &'a str,
 }
 
-fn parse_record(
+const AS_RECORD_COLUMNS: [(usize, usize); 11] = [
+    (0, 2),   // Record type "AS" (cols 1..=2, A2)
+    (3, 7),   // Satellite "G01 " or "G  1" (cols 4..=7, A4)
+    (8, 12),  // Year "2026" (cols 9..=12, I4)
+    (12, 15), // Month " 05" (cols 13..=15, I3)
+    (15, 18), // Day " 13" (cols 16..=18, I3)
+    (18, 21), // Hour " 00" (cols 19..=21, I3)
+    (21, 24), // Minute " 00" (cols 22..=24, I3)
+    (24, 34), // Second "  0.000000" (cols 25..=34, F10.6)
+    (34, 37), // Count "  1" or "  2" (cols 35..=37, I3)
+    (40, 59), // Bias (cols 41..=59, E19.12)
+    (60, 79), // Sigma (optional, cols 61..=79, E19.12)
+];
+
+const AS_RECORD_304_COLUMNS: [(usize, usize); 11] = [
+    (0, 2),   // Record type "AS", "AR", etc. (cols 1..=2, A2)
+    (3, 12),  // Satellite/receiver "G16       " or "AREQ00USA" (cols 4..=12, A9)
+    (13, 17), // Year "1994" (cols 14..=17, I4)
+    (18, 20), // Month "07" (cols 19..=20, I2)
+    (21, 23), // Day "14" (cols 22..=23, I2)
+    (24, 26), // Hour "20" (cols 25..=26, I2)
+    (27, 29), // Minute "59" (cols 28..=29, I2)
+    (30, 39), // Second " 0.000000" (cols 31..=39, F9.6)
+    (40, 42), // Count " 6" (cols 41..=42, I2)
+    (45, 64), // Bias (cols 46..=64, E19.12)
+    (66, 85), // Sigma (optional, cols 67..=85, E19.12)
+];
+
+const CONT_RECORD_300_COLUMNS: [(usize, usize); 4] = [
+    (0, 19),  // Value 3 (cols 1..=19, E19.12)
+    (20, 39), // Value 4 (cols 21..=39, E19.12)
+    (40, 59), // Value 5 (cols 41..=59, E19.12)
+    (60, 79), // Value 6 (cols 61..=79, E19.12)
+];
+
+const CONT_RECORD_304_COLUMNS: [(usize, usize); 4] = [
+    (3, 22),  // Value 3 (cols 4..=22, 3X, E19.12)
+    (24, 43), // Value 4 (cols 25..=43, 2X, E19.12)
+    (45, 64), // Value 5 (cols 46..=64, 2X, E19.12)
+    (66, 85), // Value 6 (cols 67..=85, 2X, E19.12)
+];
+
+fn is_known_clock_record_type(token: &str) -> bool {
+    matches!(token, "AR" | "CR" | "DR" | "MS")
+}
+
+fn is_potential_parent_record(line: &str) -> bool {
+    let mut tokens = line.split_whitespace();
+    matches!(tokens.next(), Some("AS" | "AR" | "CR" | "DR" | "MS"))
+}
+
+enum RawParent {
+    Satellite {
+        sat: String,
+        epoch: Instant,
+        bias_s: f64,
+        count: usize,
+        sigma: Option<f64>,
+    },
+    Unsupported {
+        line: usize,
+        record_type: String,
+        count: usize,
+    },
+}
+
+fn parse_raw_parent(
     line_number: usize,
     line: &str,
     time_scale: TimeScale,
-) -> Result<Option<(String, ClockPoint)>, RinexClockError> {
-    let mut fields = line.split_whitespace();
-    if fields.next() != Some("AS") {
-        return Ok(None);
+) -> Result<RawParent, RinexClockError> {
+    if let Some(
+        [record_type, sat_field, year_field, month_field, day_field, hour_field, minute_field, second_field, count_field, bias_field, sigma_field],
+    ) = fixed_record(line, AS_RECORD_COLUMNS)
+    {
+        if record_type.len() == 2 && record_type.chars().all(|c| c.is_ascii_alphabetic()) {
+            if record_type == "AS" {
+                if bias_field.is_empty() {
+                    return Err(RinexClockError::MalformedAsRecord {
+                        line: line_number,
+                        reason: "expected at least 10 fields",
+                        record: line.trim().to_string(),
+                    });
+                }
+                let sat = validate::strict_gnss_satellite_id(sat_field, "satellite")
+                    .map_err(|error| map_field_error(line_number, error, sat_field))?
+                    .to_string();
+                let year = parse_int_field::<i32>(line_number, "year", year_field)?;
+                let month = parse_int_field::<u8>(line_number, "month", month_field)?;
+                let day = parse_int_field::<u8>(line_number, "day", day_field)?;
+                let hour = parse_int_field::<u8>(line_number, "hour", hour_field)?;
+                let minute = parse_int_field::<u8>(line_number, "minute", minute_field)?;
+                let epoch = ClockEpochFields {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second: second_field,
+                };
+                let bias_s = parse_f64_field(line_number, "bias", bias_field)?;
+                let epoch = civil_decimal_second_to_instant(time_scale, epoch)
+                    .map_err(|error| map_epoch_error(line_number, error, epoch))?;
+
+                let count = parse_int_field::<usize>(line_number, "count", count_field)?;
+                if !(1..=6).contains(&count) {
+                    return Err(RinexClockError::BadField {
+                        line: line_number,
+                        field: "count",
+                        value: count_field.to_string(),
+                    });
+                }
+
+                let sigma = if count == 1 {
+                    if !sigma_field.is_empty() {
+                        return Err(RinexClockError::BadField {
+                            line: line_number,
+                            field: "sigma",
+                            value: sigma_field.to_string(),
+                        });
+                    }
+                    None
+                } else {
+                    if sigma_field.is_empty() {
+                        return Err(RinexClockError::BadField {
+                            line: line_number,
+                            field: "sigma",
+                            value: "".to_string(),
+                        });
+                    }
+                    Some(parse_f64_field(line_number, "sigma", sigma_field)?)
+                };
+
+                return Ok(RawParent::Satellite {
+                    sat,
+                    epoch,
+                    bias_s,
+                    count,
+                    sigma,
+                });
+            } else if is_known_clock_record_type(record_type) {
+                let count = parse_int_field::<usize>(line_number, "count", count_field)?;
+                if !(1..=6).contains(&count) {
+                    return Err(RinexClockError::BadField {
+                        line: line_number,
+                        field: "count",
+                        value: count_field.to_string(),
+                    });
+                }
+                if count == 1 && !sigma_field.is_empty() {
+                    return Err(RinexClockError::BadField {
+                        line: line_number,
+                        field: "sigma",
+                        value: sigma_field.to_string(),
+                    });
+                }
+                if count >= 2 && sigma_field.is_empty() {
+                    return Err(RinexClockError::BadField {
+                        line: line_number,
+                        field: "sigma",
+                        value: "".to_string(),
+                    });
+                }
+                return Ok(RawParent::Unsupported {
+                    line: line_number,
+                    record_type: record_type.to_string(),
+                    count,
+                });
+            } else {
+                return Err(RinexClockError::BadField {
+                    line: line_number,
+                    field: "record_type",
+                    value: record_type.to_string(),
+                });
+            }
+        }
     }
 
-    let sat_field = next_as_field(&mut fields, line_number, line)?;
-    let year_field = next_as_field(&mut fields, line_number, line)?;
-    let month_field = next_as_field(&mut fields, line_number, line)?;
-    let day_field = next_as_field(&mut fields, line_number, line)?;
-    let hour_field = next_as_field(&mut fields, line_number, line)?;
-    let minute_field = next_as_field(&mut fields, line_number, line)?;
-    let second_field = next_as_field(&mut fields, line_number, line)?;
-    let _value_count_field = next_as_field(&mut fields, line_number, line)?;
-    let bias_field = next_as_field(&mut fields, line_number, line)?;
+    if let Some(
+        [record_type, sat_field, year_field, month_field, day_field, hour_field, minute_field, second_field, count_field, bias_field, sigma_field],
+    ) = fixed_record(line, AS_RECORD_304_COLUMNS)
+    {
+        if record_type.len() == 2 && record_type.chars().all(|c| c.is_ascii_alphabetic()) {
+            if record_type == "AS" {
+                if bias_field.is_empty() {
+                    return Err(RinexClockError::MalformedAsRecord {
+                        line: line_number,
+                        reason: "expected at least 10 fields",
+                        record: line.trim().to_string(),
+                    });
+                }
+                let sat = validate::strict_gnss_satellite_id(sat_field, "satellite")
+                    .map_err(|error| map_field_error(line_number, error, sat_field))?
+                    .to_string();
+                let year = parse_int_field::<i32>(line_number, "year", year_field)?;
+                let month = parse_int_field::<u8>(line_number, "month", month_field)?;
+                let day = parse_int_field::<u8>(line_number, "day", day_field)?;
+                let hour = parse_int_field::<u8>(line_number, "hour", hour_field)?;
+                let minute = parse_int_field::<u8>(line_number, "minute", minute_field)?;
+                let epoch = ClockEpochFields {
+                    year,
+                    month,
+                    day,
+                    hour,
+                    minute,
+                    second: second_field,
+                };
+                let bias_s = parse_f64_field(line_number, "bias", bias_field)?;
+                let epoch = civil_decimal_second_to_instant(time_scale, epoch)
+                    .map_err(|error| map_epoch_error(line_number, error, epoch))?;
 
-    let sat = validate::strict_gnss_satellite_id(sat_field, "satellite")
-        .map_err(|error| map_field_error(line_number, error, sat_field))?
-        .to_string();
-    let year = parse_int_field::<i32>(line_number, "year", year_field)?;
-    let month = parse_int_field::<u8>(line_number, "month", month_field)?;
-    let day = parse_int_field::<u8>(line_number, "day", day_field)?;
-    let hour = parse_int_field::<u8>(line_number, "hour", hour_field)?;
-    let minute = parse_int_field::<u8>(line_number, "minute", minute_field)?;
-    let epoch = ClockEpochFields {
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second: second_field,
+                let count = parse_int_field::<usize>(line_number, "count", count_field)?;
+                if !(1..=6).contains(&count) {
+                    return Err(RinexClockError::BadField {
+                        line: line_number,
+                        field: "count",
+                        value: count_field.to_string(),
+                    });
+                }
+
+                let sigma = if count == 1 {
+                    if !sigma_field.is_empty() {
+                        return Err(RinexClockError::BadField {
+                            line: line_number,
+                            field: "sigma",
+                            value: sigma_field.to_string(),
+                        });
+                    }
+                    None
+                } else {
+                    if sigma_field.is_empty() {
+                        return Err(RinexClockError::BadField {
+                            line: line_number,
+                            field: "sigma",
+                            value: "".to_string(),
+                        });
+                    }
+                    Some(parse_f64_field(line_number, "sigma", sigma_field)?)
+                };
+
+                return Ok(RawParent::Satellite {
+                    sat,
+                    epoch,
+                    bias_s,
+                    count,
+                    sigma,
+                });
+            } else if is_known_clock_record_type(record_type) {
+                let count = parse_int_field::<usize>(line_number, "count", count_field)?;
+                if !(1..=6).contains(&count) {
+                    return Err(RinexClockError::BadField {
+                        line: line_number,
+                        field: "count",
+                        value: count_field.to_string(),
+                    });
+                }
+                if count == 1 && !sigma_field.is_empty() {
+                    return Err(RinexClockError::BadField {
+                        line: line_number,
+                        field: "sigma",
+                        value: sigma_field.to_string(),
+                    });
+                }
+                if count >= 2 && sigma_field.is_empty() {
+                    return Err(RinexClockError::BadField {
+                        line: line_number,
+                        field: "sigma",
+                        value: "".to_string(),
+                    });
+                }
+                return Ok(RawParent::Unsupported {
+                    line: line_number,
+                    record_type: record_type.to_string(),
+                    count,
+                });
+            } else {
+                return Err(RinexClockError::BadField {
+                    line: line_number,
+                    field: "record_type",
+                    value: record_type.to_string(),
+                });
+            }
+        }
+    }
+
+    let mut fields = line.split_whitespace();
+    let Some(first) = fields.next() else {
+        return Err(RinexClockError::BadField {
+            line: line_number,
+            field: "record_type",
+            value: "".to_string(),
+        });
     };
-    let bias_s = parse_f64_field(line_number, "bias", bias_field)?;
-    let epoch = civil_decimal_second_to_instant(time_scale, epoch)
-        .map_err(|error| map_epoch_error(line_number, error, epoch))?;
 
-    Ok(Some((sat, ClockPoint { epoch, bias_s })))
+    if first == "AS" {
+        let sat_field = next_as_field(&mut fields, line_number, line)?;
+        let year_field = next_as_field(&mut fields, line_number, line)?;
+        let month_field = next_as_field(&mut fields, line_number, line)?;
+        let day_field = next_as_field(&mut fields, line_number, line)?;
+        let hour_field = next_as_field(&mut fields, line_number, line)?;
+        let minute_field = next_as_field(&mut fields, line_number, line)?;
+        let second_field = next_as_field(&mut fields, line_number, line)?;
+        let count_field = next_as_field(&mut fields, line_number, line)?;
+        let bias_field = next_as_field(&mut fields, line_number, line)?;
+
+        let sat = validate::strict_gnss_satellite_id(sat_field, "satellite")
+            .map_err(|error| map_field_error(line_number, error, sat_field))?
+            .to_string();
+        let year = parse_int_field::<i32>(line_number, "year", year_field)?;
+        let month = parse_int_field::<u8>(line_number, "month", month_field)?;
+        let day = parse_int_field::<u8>(line_number, "day", day_field)?;
+        let hour = parse_int_field::<u8>(line_number, "hour", hour_field)?;
+        let minute = parse_int_field::<u8>(line_number, "minute", minute_field)?;
+        let epoch = ClockEpochFields {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second: second_field,
+        };
+        let bias_s = parse_f64_field(line_number, "bias", bias_field)?;
+        let epoch = civil_decimal_second_to_instant(time_scale, epoch)
+            .map_err(|error| map_epoch_error(line_number, error, epoch))?;
+
+        let count = parse_int_field::<usize>(line_number, "count", count_field)?;
+        if !(1..=6).contains(&count) {
+            return Err(RinexClockError::BadField {
+                line: line_number,
+                field: "count",
+                value: count_field.to_string(),
+            });
+        }
+
+        let sigma = if count == 1 {
+            if fields.next().is_some() {
+                return Err(RinexClockError::MalformedAsRecord {
+                    line: line_number,
+                    reason: "excess values in parent record",
+                    record: line.trim().to_string(),
+                });
+            }
+            None
+        } else {
+            let sigma_field = fields.next().ok_or_else(|| RinexClockError::BadField {
+                line: line_number,
+                field: "sigma",
+                value: "".to_string(),
+            })?;
+            let s = parse_f64_field(line_number, "sigma", sigma_field)?;
+            if fields.next().is_some() {
+                return Err(RinexClockError::MalformedAsRecord {
+                    line: line_number,
+                    reason: "excess values in parent record",
+                    record: line.trim().to_string(),
+                });
+            }
+            Some(s)
+        };
+
+        Ok(RawParent::Satellite {
+            sat,
+            epoch,
+            bias_s,
+            count,
+            sigma,
+        })
+    } else if is_known_clock_record_type(first) {
+        for _ in 0..7 {
+            if fields.next().is_none() {
+                return Err(RinexClockError::BadField {
+                    line: line_number,
+                    field: "count",
+                    value: "".to_string(),
+                });
+            }
+        }
+        let count_field = fields.next().ok_or_else(|| RinexClockError::BadField {
+            line: line_number,
+            field: "count",
+            value: "".to_string(),
+        })?;
+        let count = parse_int_field::<usize>(line_number, "count", count_field)?;
+        if !(1..=6).contains(&count) {
+            return Err(RinexClockError::BadField {
+                line: line_number,
+                field: "count",
+                value: count_field.to_string(),
+            });
+        }
+        if fields.next().is_none() {
+            return Err(RinexClockError::BadField {
+                line: line_number,
+                field: "bias",
+                value: "".to_string(),
+            });
+        }
+        if count == 1 {
+            if fields.next().is_some() {
+                return Err(RinexClockError::BadField {
+                    line: line_number,
+                    field: "sigma",
+                    value: "excess value in parent record".to_string(),
+                });
+            }
+        } else {
+            if fields.next().is_none() {
+                return Err(RinexClockError::BadField {
+                    line: line_number,
+                    field: "sigma",
+                    value: "".to_string(),
+                });
+            }
+            if fields.next().is_some() {
+                return Err(RinexClockError::BadField {
+                    line: line_number,
+                    field: "sigma",
+                    value: "excess value in parent record".to_string(),
+                });
+            }
+        }
+        Ok(RawParent::Unsupported {
+            line: line_number,
+            record_type: first.to_string(),
+            count,
+        })
+    } else {
+        Err(RinexClockError::BadField {
+            line: line_number,
+            field: "record_type",
+            value: first.to_string(),
+        })
+    }
+}
+
+fn parse_continuation_line(
+    line_number: usize,
+    line: &str,
+    needed: usize,
+) -> Result<Vec<f64>, RinexClockError> {
+    if needed == 0 || needed > 4 {
+        return Err(RinexClockError::MalformedContinuation {
+            line: line_number,
+            reason: "invalid needed value count",
+            record: line.trim().to_string(),
+        });
+    }
+
+    if line.starts_with("   ") {
+        if let Some(fields) = fixed_record(line, CONT_RECORD_304_COLUMNS) {
+            if fields.iter().any(|f| !f.is_empty())
+                && fields.iter().all(|f| f.split_whitespace().count() <= 1)
+            {
+                for &f in &fields[..needed] {
+                    if f.is_empty() {
+                        return Err(RinexClockError::MalformedContinuation {
+                            line: line_number,
+                            reason: "missing required continuation value",
+                            record: line.trim().to_string(),
+                        });
+                    }
+                }
+                for &f in &fields[needed..] {
+                    if !f.is_empty() {
+                        return Err(RinexClockError::MalformedContinuation {
+                            line: line_number,
+                            reason: "excess values in continuation line",
+                            record: line.trim().to_string(),
+                        });
+                    }
+                }
+                let mut vals = Vec::with_capacity(needed);
+                for (i, &f) in fields[..needed].iter().enumerate() {
+                    let val = parse_f64_field(line_number, field_name_for_value_index(i + 2), f)
+                        .map_err(|_| RinexClockError::MalformedContinuation {
+                            line: line_number,
+                            reason: "invalid numeric field",
+                            record: line.trim().to_string(),
+                        })?;
+                    vals.push(val);
+                }
+                return Ok(vals);
+            }
+        }
+    }
+
+    if let Some(fields) = fixed_record(line, CONT_RECORD_300_COLUMNS) {
+        if fields.iter().any(|f| !f.is_empty())
+            && fields.iter().all(|f| f.split_whitespace().count() <= 1)
+        {
+            for &f in &fields[..needed] {
+                if f.is_empty() {
+                    return Err(RinexClockError::MalformedContinuation {
+                        line: line_number,
+                        reason: "missing required continuation value",
+                        record: line.trim().to_string(),
+                    });
+                }
+            }
+            for &f in &fields[needed..] {
+                if !f.is_empty() {
+                    return Err(RinexClockError::MalformedContinuation {
+                        line: line_number,
+                        reason: "excess values in continuation line",
+                        record: line.trim().to_string(),
+                    });
+                }
+            }
+            let mut vals = Vec::with_capacity(needed);
+            for (i, &f) in fields[..needed].iter().enumerate() {
+                let val = parse_f64_field(line_number, field_name_for_value_index(i + 2), f)
+                    .map_err(|_| RinexClockError::MalformedContinuation {
+                        line: line_number,
+                        reason: "invalid numeric field",
+                        record: line.trim().to_string(),
+                    })?;
+                vals.push(val);
+            }
+            return Ok(vals);
+        }
+    }
+
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < needed {
+        return Err(RinexClockError::MalformedContinuation {
+            line: line_number,
+            reason: "too few values in continuation line",
+            record: line.trim().to_string(),
+        });
+    }
+    if tokens.len() > needed {
+        return Err(RinexClockError::MalformedContinuation {
+            line: line_number,
+            reason: "excess values in continuation line",
+            record: line.trim().to_string(),
+        });
+    }
+
+    let mut vals = Vec::with_capacity(needed);
+    for (i, &tok) in tokens.iter().enumerate() {
+        let val =
+            parse_f64_field(line_number, field_name_for_value_index(i + 2), tok).map_err(|_| {
+                RinexClockError::MalformedContinuation {
+                    line: line_number,
+                    reason: "invalid numeric field",
+                    record: line.trim().to_string(),
+                }
+            })?;
+        vals.push(val);
+    }
+    Ok(vals)
+}
+
+fn parse_logical_records(
+    lines: Vec<(usize, &str)>,
+    time_scale: TimeScale,
+    lossy: bool,
+    by_sat: &mut BTreeMap<String, Vec<(ClockPoint, usize)>>,
+    skipped_records: &mut Vec<RinexClockSkip>,
+    diagnostics: &mut Vec<RinexClockDiagnostic>,
+) -> Result<(), RinexClockError> {
+    let mut i = 0;
+    let mut sample_index = 0usize;
+
+    while i < lines.len() {
+        let (line_number, line) = lines[i];
+        if line.trim().is_empty() {
+            i += 1;
+            continue;
+        }
+
+        let parent_result = parse_raw_parent(line_number, line, time_scale);
+
+        let raw_parent = match parent_result {
+            Ok(p) => p,
+            Err(err) => {
+                if lossy {
+                    diagnostics.push(RinexClockDiagnostic::new(line_number, err));
+                    i += 1;
+                    continue;
+                } else {
+                    return Err(err);
+                }
+            }
+        };
+
+        match raw_parent {
+            RawParent::Satellite {
+                sat,
+                epoch,
+                bias_s,
+                count,
+                sigma,
+            } => {
+                let mut additional_values = Vec::new();
+                if let Some(s) = sigma {
+                    additional_values.push(s);
+                }
+
+                if count > 2 {
+                    let needed = count - 2;
+                    let mut cont_idx = i + 1;
+                    while cont_idx < lines.len() && lines[cont_idx].1.trim().is_empty() {
+                        cont_idx += 1;
+                    }
+
+                    if cont_idx >= lines.len() {
+                        let err = RinexClockError::MissingContinuation {
+                            line: line_number,
+                            record_type: "AS".to_string(),
+                        };
+                        if lossy {
+                            diagnostics.push(RinexClockDiagnostic::new(line_number, err));
+                            i = cont_idx;
+                            continue;
+                        } else {
+                            return Err(err);
+                        }
+                    }
+
+                    let (cont_line_num, cont_line) = lines[cont_idx];
+                    if is_potential_parent_record(cont_line) {
+                        let err = RinexClockError::MissingContinuation {
+                            line: line_number,
+                            record_type: "AS".to_string(),
+                        };
+                        if lossy {
+                            diagnostics.push(RinexClockDiagnostic::new(line_number, err));
+                            i = cont_idx;
+                            continue;
+                        } else {
+                            return Err(err);
+                        }
+                    }
+
+                    match parse_continuation_line(cont_line_num, cont_line, needed) {
+                        Ok(vals) => {
+                            additional_values.extend(vals);
+                            i = cont_idx + 1;
+                        }
+                        Err(err) => {
+                            if lossy {
+                                diagnostics.push(RinexClockDiagnostic::new(cont_line_num, err));
+                                i = cont_idx + 1;
+                                continue;
+                            } else {
+                                return Err(err);
+                            }
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+
+                let point = ClockPoint {
+                    epoch,
+                    bias_s,
+                    additional_values,
+                };
+                by_sat.entry(sat).or_default().push((point, sample_index));
+                sample_index += 1;
+            }
+            RawParent::Unsupported {
+                line: p_line,
+                record_type,
+                count,
+            } => {
+                if count > 2 {
+                    let needed = count - 2;
+                    let mut cont_idx = i + 1;
+                    while cont_idx < lines.len() && lines[cont_idx].1.trim().is_empty() {
+                        cont_idx += 1;
+                    }
+
+                    if cont_idx >= lines.len() {
+                        let err = RinexClockError::MissingContinuation {
+                            line: p_line,
+                            record_type,
+                        };
+                        if lossy {
+                            diagnostics.push(RinexClockDiagnostic::new(p_line, err));
+                            i = cont_idx;
+                            continue;
+                        } else {
+                            return Err(err);
+                        }
+                    }
+
+                    let (cont_line_num, cont_line) = lines[cont_idx];
+                    if is_potential_parent_record(cont_line) {
+                        let err = RinexClockError::MissingContinuation {
+                            line: p_line,
+                            record_type,
+                        };
+                        if lossy {
+                            diagnostics.push(RinexClockDiagnostic::new(p_line, err));
+                            i = cont_idx;
+                            continue;
+                        } else {
+                            return Err(err);
+                        }
+                    }
+
+                    match parse_continuation_line(cont_line_num, cont_line, needed) {
+                        Ok(_) => {
+                            i = cont_idx + 1;
+                        }
+                        Err(err) => {
+                            if lossy {
+                                diagnostics.push(RinexClockDiagnostic::new(cont_line_num, err));
+                                i = cont_idx + 1;
+                                continue;
+                            } else {
+                                return Err(err);
+                            }
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+
+                skipped_records.push(RinexClockSkip {
+                    line: p_line,
+                    record_type,
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn next_as_field<'a, I>(
@@ -855,13 +1975,13 @@ fn dedup_by_time(points: Vec<(ClockPoint, usize)>) -> Vec<ClockPoint> {
 }
 
 fn interpolate(records: &[ClockPoint], epoch: Instant) -> Option<f64> {
-    let mut prev: Option<ClockPoint> = None;
+    let mut prev: Option<&ClockPoint> = None;
     for point in records {
         match compare_instants_same_scale(&point.epoch, &epoch)? {
             Ordering::Equal => return Some(point.bias_s),
             Ordering::Greater => {
                 let p0 = prev?;
-                let p1 = *point;
+                let p1 = point;
                 let span_s = seconds_between(&p1.epoch, &p0.epoch)?;
                 if span_s <= 0.0 {
                     return None;
@@ -872,7 +1992,7 @@ fn interpolate(records: &[ClockPoint], epoch: Instant) -> Option<f64> {
                 }
                 return Some(lerp_ratio(p0.bias_s, p1.bias_s, query_s, span_s));
             }
-            Ordering::Less => prev = Some(*point),
+            Ordering::Less => prev = Some(point),
         }
     }
     None
@@ -1196,10 +2316,12 @@ mod tests {
             ClockPoint {
                 epoch: p0,
                 bias_s: 1.0e-4,
+                additional_values: Vec::new(),
             },
             ClockPoint {
                 epoch: p1,
                 bias_s: 2.0e-4,
+                additional_values: Vec::new(),
             },
         ];
 
@@ -1391,6 +2513,240 @@ mod tests {
         assert_eq!(
             reparsed, clock,
             "leap-second epoch must round-trip bit-exact"
+        );
+    }
+
+    #[test]
+    fn parse_fixed_column_satellite_with_internal_space() {
+        let text = "AS G  1 2026 05 13 00 00  0.000000  1   1.000000000000e-04\n";
+        let clock = RinexClock::parse(text).expect("parse satellite with internal space");
+        assert!(clock.series.contains_key("G01"));
+        assert_eq!(clock.series["G01"].len(), 1);
+    }
+
+    #[test]
+    fn parse_fixed_column_abutting_fields() {
+        let text =
+            "AS G01  2026 05 13 00 00  0.000000  2    2.761547232975e-04 4.197517456140e-11\n";
+        let clock = RinexClock::parse(text).expect("parse abutting bias and sigma");
+        assert!(clock.series.contains_key("G01"));
+        let point = &clock.series["G01"][0];
+        assert_eq!(point.bias_s.to_bits(), (2.761547232975e-4_f64).to_bits());
+    }
+
+    #[test]
+    fn strict_parse_rejects_unrecognized_record_type() {
+        let text = "XX G01  2026 05 13 00 00  0.000000  1   1.0e-04\n";
+        let err =
+            RinexClock::parse(text).expect_err("strict parse must reject unknown record type");
+        assert_eq!(
+            err,
+            RinexClockError::BadField {
+                line: 1,
+                field: "record_type",
+                value: "XX".to_string(),
+            }
+        );
+        let lossy = RinexClock::parse_lossy(text);
+        assert!(lossy.series.is_empty());
+    }
+
+    #[test]
+    fn write_as_record_formats_fixed_columns_single_digit_seconds() {
+        let instant = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 5.123456).unwrap();
+        let point = ClockPoint {
+            epoch: instant,
+            bias_s: 2.761547232975e-4,
+            additional_values: Vec::new(),
+        };
+        let mut out = String::new();
+        write_as_record(&mut out, "G01", &point).unwrap();
+        assert!(
+            out.starts_with("AS G01  2026 05 13 00 00  5.123456  1"),
+            "expected fixed-column layout without space split in seconds: {out}"
+        );
+        assert!(
+            fixed_record(out.trim_end(), AS_RECORD_COLUMNS).is_some(),
+            "formatted record must match AS_RECORD_COLUMNS: {out}"
+        );
+    }
+
+    #[test]
+    fn write_as_record_formats_exact_19_column_fields_and_continuation() {
+        let instant = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 0.0).unwrap();
+        let point = ClockPoint {
+            epoch: instant,
+            bias_s: 1.234567890123e100,
+            additional_values: vec![2.761547232975e-4, -0.0, 1.234567890123e-100],
+        };
+        let mut out = String::new();
+        write_as_record(&mut out, "G01", &point).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        let parent = lines[0];
+        assert_eq!(parent.len(), 79);
+        assert_eq!(&parent[40..59], "1.234567890123E+100");
+        assert_eq!(&parent[59..60], " ");
+        assert_eq!(&parent[60..79], " 2.761547232975E-04");
+
+        let cont = lines[1];
+        assert_eq!(cont.len(), 39);
+        assert_eq!(&cont[0..19], "-0.000000000000E+00");
+        assert_eq!(&cont[19..20], " ");
+        assert_eq!(&cont[20..39], "1.234567890123E-100");
+    }
+
+    #[test]
+    fn parse_reports_unmodelled_clock_records_while_returning_modelled_satellite_series() {
+        let text = "\
+     3.00           C                                       RINEX VERSION / TYPE
+     2    AR    AS                                          # / TYPES OF DATA
+                                                            END OF HEADER
+AS G01  2026 05 13 00 00  0.000000  1   1.000000000000e-04
+AR ALIC 2026 05 13 00 00  0.000000  2   2.000000000000e-04 1.0e-10
+AS G02  2026 05 13 00 00  0.000000  1   3.000000000000e-04
+CR ALGO 2026 05 13 00 00  0.000000  2   4.000000000000e-04 1.0e-10
+DR AREQ 2026 05 13 00 00  0.000000  2   5.000000000000e-04 1.0e-10
+MS ASCG 2026 05 13 00 00  0.000000  2   6.000000000000e-04 1.0e-10
+AS G01  2026 05 13 00 00 30.000000  1   1.500000000000e-04
+";
+        let clock = RinexClock::parse(text).expect("parse clock file with mixed records");
+        assert_eq!(clock.series.len(), 2);
+        assert_eq!(clock.series["G01"].len(), 2);
+        assert_eq!(clock.series["G02"].len(), 1);
+        assert_eq!(clock.series["G01"][0].bias_s, 1.0e-4);
+        assert_eq!(clock.series["G01"][1].bias_s, 1.5e-4);
+        assert_eq!(clock.series["G02"][0].bias_s, 3.0e-4);
+
+        assert_eq!(clock.skipped_records.len(), 4);
+        assert_eq!(
+            clock.skipped_records[0],
+            RinexClockSkip {
+                line: 5,
+                record_type: "AR".to_string(),
+            }
+        );
+        assert_eq!(
+            clock.skipped_records[1],
+            RinexClockSkip {
+                line: 7,
+                record_type: "CR".to_string(),
+            }
+        );
+        assert_eq!(
+            clock.skipped_records[2],
+            RinexClockSkip {
+                line: 8,
+                record_type: "DR".to_string(),
+            }
+        );
+        assert_eq!(
+            clock.skipped_records[3],
+            RinexClockSkip {
+                line: 9,
+                record_type: "MS".to_string(),
+            }
+        );
+
+        let lossy = RinexClock::parse_lossy(text);
+        assert_eq!(lossy.series.len(), 2);
+        assert_eq!(lossy.skipped_records, clock.skipped_records);
+        assert!(lossy.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn format_e19_12_formats_standard_examples_and_rejects_unrepresentable() {
+        assert_eq!(
+            format_e19_12(-0.123456789012, "bias").unwrap(),
+            "-0.123456789012E+00"
+        );
+        assert_eq!(
+            format_e19_12(-1.23456789012, "bias").unwrap(),
+            "-0.123456789012E+01"
+        );
+        assert_eq!(
+            format_e19_12(-12.3456789012, "bias").unwrap(),
+            "-0.123456789012E+02"
+        );
+        assert_eq!(format_e19_12(0.0, "bias").unwrap(), " 0.000000000000E+00");
+        assert_eq!(format_e19_12(-0.0, "bias").unwrap(), "-0.000000000000E+00");
+        assert_eq!(
+            format_e19_12(1.0e-4, "bias").unwrap(),
+            " 0.100000000000E-03"
+        );
+        assert_eq!(
+            format_e19_12(2.761547232975e-4, "bias").unwrap(),
+            " 2.761547232975E-04"
+        );
+        assert_eq!(
+            format_e19_12(1.0e-105, "bias").unwrap(),
+            " .100000000000E-104"
+        );
+        assert_eq!(
+            format_e19_12(1.234567890123e100, "bias").unwrap(),
+            "1.234567890123E+100"
+        );
+        assert_eq!(
+            format_e19_12(1.234567890123e-100, "bias").unwrap(),
+            "1.234567890123E-100"
+        );
+
+        assert!(format_e19_12(f64::NAN, "bias").is_err());
+        assert!(format_e19_12(f64::INFINITY, "bias").is_err());
+        assert!(format_e19_12(f64::NEG_INFINITY, "bias").is_err());
+
+        let fb_neg_e100 = format_e19_12(-1.234567890123e100, "bias").unwrap();
+        assert_eq!(fb_neg_e100.len(), 19);
+        assert_eq!(
+            fb_neg_e100.trim().parse::<f64>().unwrap().to_bits(),
+            (-1.234567890123e100_f64).to_bits()
+        );
+
+        let fb_neg_em100 = format_e19_12(-1.234567890123e-100, "bias").unwrap();
+        assert_eq!(fb_neg_em100.len(), 19);
+        assert_eq!(
+            fb_neg_em100.trim().parse::<f64>().unwrap().to_bits(),
+            (-1.234567890123e-100_f64).to_bits()
+        );
+
+        assert_eq!(
+            format_e19_12(-1.2345678901234e100, "bias").unwrap(),
+            "-12.345678901234E99"
+        );
+
+        assert!(format_e19_12(1.23456789012345e-4, "bias").is_err());
+        assert!(format_e19_12(-1.2345678901234e-100, "bias").is_err());
+    }
+
+    #[test]
+    fn validate_clock_point_bounds_and_finite_checks() {
+        let epoch = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 0.0).unwrap();
+        let valid = ClockPoint {
+            epoch,
+            bias_s: 1.0e-4,
+            additional_values: vec![1.0e-5, 2.0e-6, 3.0e-7, 4.0e-8, 5.0e-9],
+        };
+        assert!(valid.validate().is_ok());
+
+        let mut too_many = valid.clone();
+        too_many.additional_values.push(6.0e-10);
+        assert_eq!(
+            too_many.validate(),
+            Err(RinexClockError::InvalidInput {
+                field: "additional_values",
+                reason: "cannot exceed 5 additional values (maximum count is 6)",
+            })
+        );
+
+        let mut non_finite = valid;
+        non_finite.additional_values[2] = f64::NAN;
+        assert_eq!(
+            non_finite.validate(),
+            Err(RinexClockError::InvalidInput {
+                field: "rate_sigma",
+                reason: "must be finite",
+            })
         );
     }
 }
