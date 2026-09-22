@@ -11,6 +11,7 @@ All notable changes to `sidereon-core` are documented here.
 - RINEX clock serialization preserves every retained numeric value with exact readback in 19-column fields, including signed zero and supported wider-exponent spellings, and refuses values it cannot emit without loss.
 
 - `TecGrid` exposes immutable epoch, latitude, longitude and optional-value slices so bindings can return validated grid contents without keeping a second copy as authority.
+- IONEX retains a declared RMS map stack whose nodes are all missing through parsing, whole-grid sample construction and serialization, keeping it distinct from a product that declares no RMS maps.
 
 - `TdmMetadata` gains strict and policy-aware construction and atomic replacement from ordered raw fields and positioned comments, returning every typed departure. Writer validation derives time system and range units from those fields rather than stale convenience properties.
 - **Breaking.** TDM writing refuses header, metadata and data comment positions or ordering that cannot be emitted unchanged instead of moving or omitting those comments silently.

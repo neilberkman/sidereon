@@ -2808,7 +2808,13 @@ fn ionex_map_numbers_and_related_maps_are_checked() {
         &all_non_available,
     )))
     .expect("RMS map without values");
-    assert!(ionex.rms_maps().is_empty());
+    // The file states an RMS map for TEC map 1 and gives every value as
+    // non-available. That is not the same as stating no RMS map, so the stack
+    // stays, holding no value.
+    assert_eq!(
+        ionex.rms_maps(),
+        &[vec![vec![None, None], vec![None, None]]]
+    );
 }
 
 #[test]
@@ -2848,6 +2854,237 @@ fn ionex_height_maps_are_kept_apart_from_the_tec_maps() {
         ionex.height_maps(),
         &[vec![vec![None, None], vec![None, None]]]
     );
+}
+
+/// Two files whose TEC maps, header records, axes and epochs are the same but
+/// which differ in whether they state RMS maps at all stay apart: the one
+/// giving every RMS value as non-available declares the maps, the other
+/// declares none. Both give no RMS number anywhere; only the first says the
+/// maps exist, and only the first writes RMS map records back.
+#[test]
+fn ionex_keeps_a_parsed_rms_stack_that_states_no_value() {
+    let exponent = exponent_record(0);
+    let tec = layout_map(
+        "TEC",
+        1,
+        Some(LAYOUT_EPOCH_0),
+        &layout_bands("    1    2", "    3    4"),
+    );
+    let without_rms = layout_header(1, LAYOUT_EPOCH_0, &exponent) + &tec + &layout_end();
+    let with_valueless_rms = layout_header(1, LAYOUT_EPOCH_0, &exponent)
+        + &tec
+        + &layout_map(
+            "RMS",
+            1,
+            Some(LAYOUT_EPOCH_0),
+            &layout_bands(" 9999 9999", " 9999 9999"),
+        )
+        + &layout_end();
+
+    let absent = Ionex::parse_str(&without_rms).expect("product stating no RMS map");
+    let present = Ionex::parse_str(&with_valueless_rms).expect("product stating an RMS map");
+
+    assert!(
+        absent.rms_maps().is_empty(),
+        "a file with no RMS map record has no RMS map"
+    );
+    assert_eq!(
+        present.rms_maps(),
+        &[vec![vec![None, None], vec![None, None]]],
+        "a stated RMS map survives every value being non-available"
+    );
+    assert_ne!(absent, present, "the two products are not the same product");
+    assert_eq!(
+        absent.tec_maps(),
+        present.tec_maps(),
+        "the RMS stack changes no TEC value"
+    );
+    assert_eq!(absent.map_epochs(), present.map_epochs());
+    assert_eq!(absent.lat_nodes_deg(), present.lat_nodes_deg());
+    assert_eq!(absent.lon_nodes_deg(), present.lon_nodes_deg());
+
+    // Whole-grid samples carry each product's own RMS authority, so rebuilding
+    // from them gives the same product back.
+    for (ionex, label) in [(&absent, "absent"), (&present, "stated")] {
+        let samples = ionex.tec_grid_samples();
+        assert_eq!(
+            samples.rms_maps,
+            ionex.rms_maps().to_vec(),
+            "{label} RMS stack reaches the samples"
+        );
+        let rebuilt = Ionex::from_samples(samples).expect("sample-built copy");
+        assert_eq!(
+            rebuilt, *ionex,
+            "{label} RMS stack survives the sample rebuild"
+        );
+    }
+
+    // Writing states the difference, and reading the written text back keeps it.
+    let absent_text = absent.to_ionex_string().expect("writable product");
+    let present_text = present.to_ionex_string().expect("writable product");
+    assert!(
+        !absent_text.contains("START OF RMS MAP"),
+        "no RMS map is written for a product stating none:\n{absent_text}"
+    );
+    assert!(
+        present_text.contains("START OF RMS MAP"),
+        "the stated RMS map is written:\n{present_text}"
+    );
+    assert_eq!(
+        Ionex::parse_str(&absent_text)
+            .expect("written text reparses")
+            .rms_maps(),
+        absent.rms_maps()
+    );
+    let reparsed = Ionex::parse_str(&present_text).expect("written text reparses");
+    assert_eq!(reparsed.rms_maps(), present.rms_maps());
+    assert!(
+        reparsed
+            .rms_maps()
+            .iter()
+            .flatten()
+            .flatten()
+            .all(Option::is_none),
+        "the stated stack still gives no RMS number at any node"
+    );
+}
+
+/// An RMS stack where one map states values and the other states none keeps
+/// both maps at their own index, and the values it does state are unchanged.
+#[test]
+fn ionex_rms_stack_keeps_each_map_at_its_tec_map_index() {
+    let exponent = exponent_record(0);
+    let text = layout_header(2, LAYOUT_EPOCH_1, &exponent)
+        + &layout_map(
+            "TEC",
+            1,
+            Some(LAYOUT_EPOCH_0),
+            &layout_bands("    1    2", "    3    4"),
+        )
+        + &layout_map(
+            "TEC",
+            2,
+            Some(LAYOUT_EPOCH_1),
+            &layout_bands("    5    6", "    7    8"),
+        )
+        + &layout_map(
+            "RMS",
+            1,
+            Some(LAYOUT_EPOCH_0),
+            &layout_bands(" 9999 9999", " 9999 9999"),
+        )
+        + &layout_map(
+            "RMS",
+            2,
+            Some(LAYOUT_EPOCH_1),
+            &layout_bands("    0    9", " 9999   11"),
+        )
+        + &layout_end();
+
+    let ionex = Ionex::parse_str(&text).expect("two TEC maps with one valued RMS map");
+    assert_eq!(ionex.rms_maps().len(), 2, "one RMS map per TEC map");
+    assert_eq!(
+        ionex.rms_maps()[0],
+        vec![vec![None, None], vec![None, None]],
+        "the first RMS map states no value"
+    );
+    assert_eq!(
+        ionex.rms_maps()[1],
+        vec![vec![Some(0.0), Some(9.0)], vec![None, Some(11.0)]],
+        "the second RMS map states its values, a stated zero among them"
+    );
+    assert_eq!(
+        ionex.rms_maps()[1][0][0].map(f64::to_bits),
+        Some(0.0_f64.to_bits()),
+        "a stated zero RMS is a value, not a missing node"
+    );
+    assert_eq!(
+        ionex.tec_maps()[1],
+        vec![vec![Some(5.0), Some(6.0)], vec![Some(7.0), Some(8.0)]],
+        "the RMS stack changes no TEC value"
+    );
+
+    // Node samples see the stack by map index; the second map's values are
+    // there and the first map's nodes are empty.
+    let samples = ionex.tec_samples();
+    assert_eq!(samples.len(), 8, "one sample per node of two maps");
+    assert!(
+        samples[..4].iter().all(|sample| sample.rms_tecu.is_none()),
+        "the first map states no RMS value"
+    );
+    assert_eq!(
+        samples[4..]
+            .iter()
+            .map(|sample| sample.rms_tecu)
+            .collect::<Vec<_>>(),
+        vec![Some(0.0), Some(9.0), None, Some(11.0)]
+    );
+
+    let rebuilt = Ionex::from_samples(ionex.tec_grid_samples()).expect("sample-built copy");
+    assert_eq!(rebuilt, ionex, "the mixed stack survives a sample rebuild");
+    let text = ionex.to_ionex_string().expect("writable product");
+    assert_eq!(
+        Ionex::parse_str(&text).expect("written text reparses"),
+        ionex,
+        "the mixed stack survives writing and reading back"
+    );
+}
+
+/// Whole-grid construction carries the same distinction as a parsed file: an
+/// empty `rms_maps` stack states no RMS map, and a stack whose every node is
+/// `None` states the maps with no value in them. Flat node samples have no
+/// field for that, which this pins as the input model's limit.
+#[test]
+fn ionex_from_samples_keeps_an_rms_stack_that_states_no_value() {
+    let mut absent_samples = valid_tec_grid_samples();
+    absent_samples.rms_maps = Vec::new();
+    let mut present_samples = valid_tec_grid_samples();
+    present_samples.rms_maps = vec![vec![vec![None, None], vec![None, None]]];
+
+    let absent = Ionex::from_samples(absent_samples).expect("product stating no RMS map");
+    let present = Ionex::from_samples(present_samples).expect("product stating an RMS map");
+
+    assert!(absent.rms_maps().is_empty());
+    assert_eq!(
+        present.rms_maps(),
+        &[vec![vec![None, None], vec![None, None]]],
+        "a stated RMS stack with no value at any node is kept"
+    );
+    assert_ne!(absent, present);
+    assert_eq!(absent.tec_maps(), present.tec_maps());
+    assert_eq!(
+        present.tec_grid_samples().rms_maps,
+        vec![vec![vec![None, None], vec![None, None]]],
+        "the stack reaches the samples the product is rebuilt from"
+    );
+
+    let absent_text = absent.to_ionex_string().expect("writable product");
+    let present_text = present.to_ionex_string().expect("writable product");
+    assert!(!absent_text.contains("START OF RMS MAP"), "{absent_text}");
+    assert!(present_text.contains("START OF RMS MAP"), "{present_text}");
+    assert_eq!(
+        Ionex::parse_str(&present_text)
+            .expect("written text reparses")
+            .rms_maps(),
+        present.rms_maps(),
+        "the written RMS map reads back as a stated stack with no value"
+    );
+
+    // A flat node stream has no map-presence field: with no RMS value anywhere
+    // it can only build the product that states no RMS map.
+    let from_nodes = Ionex::from_node_samples(
+        present.tec_samples(),
+        present.shell_height_km(),
+        present.base_radius_km(),
+        present.exponent(),
+        present.header().clone(),
+    )
+    .expect("node-built product");
+    assert!(
+        from_nodes.rms_maps().is_empty(),
+        "flat node samples cannot state an RMS stack with no value at any node"
+    );
+    assert_eq!(from_nodes.tec_maps(), present.tec_maps());
 }
 
 #[test]

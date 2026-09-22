@@ -125,7 +125,8 @@ pub struct Ionex {
     map_epochs: Vec<Instant>,
     /// Per-map vertical-TEC grids, indexed `[map][i_lat][i_lon]` (TECU).
     tec_maps: Vec<Grid>,
-    /// Per-map RMS grids, indexed `[map][i_lat][i_lon]` (TECU); empty if absent.
+    /// Per-map RMS grids, indexed `[map][i_lat][i_lon]` (TECU); empty only
+    /// where the product declares no RMS map.
     rms_maps: Vec<Grid>,
     /// Per-map height grids, indexed `[map][i_lat][i_lon]` (km); empty if absent.
     height_maps: Vec<Grid>,
@@ -228,12 +229,15 @@ impl Ionex {
         &self.tec_maps
     }
 
-    /// Per-map RMS grids, indexed `[map][i_lat][i_lon]` (TECU); empty if the
-    /// product has no RMS value at any node.
+    /// Per-map RMS grids, indexed `[map][i_lat][i_lon]` (TECU); empty only
+    /// where the product declares no RMS map.
     ///
     /// Each grid belongs to the TEC map of the same index. A node is `None`
     /// where the product gives no RMS value for it, including every node of a
-    /// TEC map the file gives no RMS map for.
+    /// TEC map the file gives no RMS map for. A product whose RMS maps hold no
+    /// value at any node keeps that stack, so a file stating RMS maps with
+    /// every value non-available stays apart from a file stating no RMS map:
+    /// both give no RMS number anywhere, and only the first declares the maps.
     pub fn rms_maps(&self) -> &[Grid] {
         &self.rms_maps
     }
@@ -281,11 +285,14 @@ impl Ionex {
 
     /// Build an IONEX product from materialized grid fields.
     ///
-    /// RMS maps with no value at any node are dropped, so a product holds the
-    /// same RMS maps whether a file gave every RMS value as `9999` or gave no RMS
-    /// map. Height maps are kept either way: a height map without values says the
-    /// single-layer heights are unknown, where a product without height maps has
-    /// the one height `HGT1`.
+    /// The optional RMS and height map stacks are stored as given. A stack
+    /// holding no value at any node stays present: it says the product declares
+    /// those maps and states no value in them, where an empty stack says the
+    /// product declares no map of that kind at all. A file giving every RMS
+    /// value as `9999` therefore keeps its RMS maps, while a file with no RMS
+    /// map has none. Height maps read the same way: a height map without values
+    /// says the single-layer heights are unknown, where a product without height
+    /// maps has the one height `HGT1`.
     pub(crate) fn from_parts(parts: IonexParts) -> Result<Self> {
         validate_ionex_parts(&parts)?;
         let IonexParts {
@@ -299,13 +306,10 @@ impl Ionex {
             exponent,
             map_epochs,
             tec_maps,
-            mut rms_maps,
+            rms_maps,
             height_maps,
             skipped_records,
         } = parts;
-        if no_value_at_any_node(&rms_maps) {
-            rms_maps.clear();
-        }
 
         Ok(Self {
             header,
@@ -555,10 +559,6 @@ fn validate_map_values(kind: &'static str, maps: &[Grid]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn no_value_at_any_node(maps: &[Grid]) -> bool {
-    maps.iter().flatten().flatten().all(Option::is_none)
 }
 
 // ---------------------------------------------------------------------------
