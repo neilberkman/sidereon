@@ -428,6 +428,20 @@ impl SbasCorrectionStore {
         self.partitions.get(&geo)?.fast.get(&sat).map(|t| &t.value)
     }
 
+    /// Count the corrections a source GEO addressed to active PRN-mask bits that
+    /// name no satellite held here, per 1-based PRN mask number.
+    ///
+    /// Such a bit - a future-GNSS or unassigned mask number - keeps its place
+    /// among the active bits, so the corrections after it still reach their own
+    /// satellites. The corrections addressed to it are applied to no satellite
+    /// and are counted here instead of being dropped silently. `None` means the
+    /// GEO has no partition.
+    pub fn unassigned_mask_corrections(&self, geo: GnssSatelliteId) -> Option<&BTreeMap<u8, u64>> {
+        self.partitions
+            .get(&geo)
+            .map(|partition| &partition.unassigned_corrections)
+    }
+
     /// Return the latest stored long-term correction for a source GEO and satellite.
     ///
     /// `None` means that no correction is stored for the pair; this public
@@ -572,7 +586,10 @@ impl SbasCorrectionStore {
 #[derive(Debug, Default)]
 struct GeoPartition {
     active_iodp: Option<u8>,
-    masks: BTreeMap<u8, Vec<GnssSatelliteId>>,
+    masks: BTreeMap<u8, Vec<MaskSlot>>,
+    /// Corrections addressed to a mask slot that names no satellite held here,
+    /// counted per 1-based PRN mask number.
+    unassigned_corrections: BTreeMap<u8, u64>,
     fast: BTreeMap<GnssSatelliteId, Timed<SbasFastCorrection>>,
     previous_fast: BTreeMap<GnssSatelliteId, SbasFastCorrection>,
     long_term: BTreeMap<GnssSatelliteId, Timed<SbasLongTermCorrection>>,
@@ -702,11 +719,12 @@ fn ingest_long_half(
         return;
     }
     for record in &half.records {
-        let Some(sat) = monitored_sat(
-            partition,
-            half.iodp,
-            usize::from(record.monitored_index.saturating_sub(1)),
-        ) else {
+        // Mask index 0 is the fill value of an unused record slot, not the
+        // first monitored satellite.
+        let Some(zero_based_index) = record.monitored_index.checked_sub(1) else {
+            continue;
+        };
+        let Some(sat) = monitored_sat(partition, half.iodp, usize::from(zero_based_index)) else {
             continue;
         };
         if sat.system != GnssSystem::Gps {
@@ -821,49 +839,127 @@ fn geo_state_from_message(message: &SbasGeoNav, epoch: GnssWeekTow) -> SbasGeoSt
     }
 }
 
+/// One active bit of a PRN mask, in set-bit order.
+///
+/// Corrections address the monitored satellites by their position among the
+/// active bits, so every active bit keeps its place whether or not it names a
+/// satellite held here. Dropping an unassigned bit would move every later
+/// correction onto the next satellite in the mask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaskSlot {
+    /// The bit names this satellite.
+    Satellite(GnssSatelliteId),
+    /// The bit names no satellite held here; the value is its 1-based PRN mask
+    /// number.
+    Unassigned(u8),
+}
+
+/// The satellite a correction at `zero_based_index` of the `iodp` mask
+/// addresses. `None` when the index is past the mask's active bits or names an
+/// unassigned mask number, in which case the correction is counted against
+/// that mask number and applied to no satellite.
 fn monitored_sat(
-    partition: &GeoPartition,
+    partition: &mut GeoPartition,
     iodp: u8,
     zero_based_index: usize,
 ) -> Option<GnssSatelliteId> {
-    partition.masks.get(&iodp)?.get(zero_based_index).copied()
+    let slot = *partition.masks.get(&iodp)?.get(zero_based_index)?;
+    match slot {
+        MaskSlot::Satellite(sat) => Some(sat),
+        MaskSlot::Unassigned(mask_number) => {
+            *partition
+                .unassigned_corrections
+                .entry(mask_number)
+                .or_insert(0) += 1;
+            None
+        }
+    }
 }
 
-fn resolve_prn_mask(mask: &[bool; 210]) -> Vec<GnssSatelliteId> {
+fn resolve_prn_mask(mask: &[bool; 210]) -> Vec<MaskSlot> {
     mask.iter()
         .enumerate()
-        .filter_map(|(idx, active)| active.then(|| mask_position_to_sat(idx)).flatten())
+        .filter(|(_, active)| **active)
+        .map(|(position, _)| match mask_position_to_sat(position) {
+            Some(sat) => MaskSlot::Satellite(sat),
+            // 210 positions, so the 1-based mask number always fits a u8.
+            None => MaskSlot::Unassigned(u8::try_from(position + 1).unwrap_or(u8::MAX)),
+        })
         .collect()
 }
 
+/// Map a zero-based PRN-mask position to a satellite id.
+///
+/// The mask is a fixed 210-position table whose assignments are RTCA DO-229's
+/// PRN mask table. With `n` the 1-based mask number, `position + 1`:
+///
+/// - `n` 1..=37 are GPS PRN `n` (positions 0..=36);
+/// - `n` 38..=61 are GLONASS slot `n - 37`, slots 1..=24 (positions 37..=60);
+/// - `n` 62..=119 are future GNSS, unassigned;
+/// - `n` 120..=158 are SBAS broadcast PRN `n` (positions 119..=157);
+/// - `n` 159..=210 are unassigned.
+///
+/// Those bounds belong to the mask definition, not to the shared
+/// satellite-token range, so no extended GLONASS slot such as `R28` has a mask
+/// position. RTKLIB `decode_sbstype1` agrees only for `n` 1..=61 and
+/// 120..=138: it reads 139..=182 as reserved, and 183..=202 as QZSS L1S and
+/// QZSS PRNs from the QZSS interface specification. That QZSS assignment is not
+/// DO-229's and is not read here, so those positions stay unassigned.
 fn mask_position_to_sat(position: usize) -> Option<GnssSatelliteId> {
-    match position {
-        0..=31 => GnssSatelliteId::new(GnssSystem::Gps, (position + 1) as u8).ok(),
-        37..=63 => GnssSatelliteId::new(GnssSystem::Glonass, (position - 36) as u8).ok(),
-        119..=157 => sbas_prn_to_sat((position + 1) as u16),
+    let mask_number = position + 1;
+    match mask_number {
+        1..=37 => GnssSatelliteId::new(GnssSystem::Gps, u8::try_from(mask_number).ok()?).ok(),
+        38..=61 => {
+            GnssSatelliteId::new(GnssSystem::Glonass, u8::try_from(mask_number - 37).ok()?).ok()
+        }
+        120..=158 => sbas_prn_to_sat(u16::try_from(mask_number).ok()?),
         _ => None,
     }
 }
+
+/// The SBAS broadcast PRN window, and the stored slot window it maps onto.
+///
+/// These two are the same 39 satellites written two ways: the broadcast PRN as
+/// it appears in the SBAS signal and in the WAAS/EGNOS message definitions, and
+/// the `S20`..`S58` slot form the IGS product formats use. The pairing, not the
+/// shared `S01`..`S99` token range, is what bounds these converters.
+const SBAS_BROADCAST_PRN_RANGE: core::ops::RangeInclusive<u16> = 120..=158;
+/// The stored slot form of [`SBAS_BROADCAST_PRN_RANGE`].
+const SBAS_SLOT_RANGE: core::ops::RangeInclusive<u16> = 20..=58;
+/// The fixed offset between the two windows.
+const SBAS_PRN_MINUS_SLOT: u16 = 100;
 
 /// Convert an SBAS broadcast PRN to the library's slot-form satellite id.
 ///
 /// Broadcast PRNs 120 through 158 map to SBAS slots 20 through 58; values
 /// outside that interval return `None`.
 pub fn sbas_prn_to_sat(broadcast_prn: u16) -> Option<GnssSatelliteId> {
-    let slot = broadcast_prn.checked_sub(100)?;
-    if (20..=58).contains(&slot) {
-        GnssSatelliteId::new(GnssSystem::Sbas, slot as u8).ok()
-    } else {
-        None
+    if !SBAS_BROADCAST_PRN_RANGE.contains(&broadcast_prn) {
+        return None;
     }
+    let slot = broadcast_prn.checked_sub(SBAS_PRN_MINUS_SLOT)?;
+    GnssSatelliteId::new(GnssSystem::Sbas, u8::try_from(slot).ok()?).ok()
 }
 
 /// Convert an SBAS slot-form satellite id to its broadcast PRN.
 ///
-/// An SBAS id maps to its stored PRN plus 100; ids from other GNSS systems
-/// return `None`.
+/// Only the SBAS slots that a broadcast PRN exists for convert: slot 20 through
+/// 58, giving PRN 120 through 158. Every other input returns `None` - an id from
+/// another constellation, an SBAS slot outside the window (`S01`, `S19`, `S59`,
+/// `S99` are all spellable satellite tokens but name no broadcast PRN), and a
+/// `prn` that bypassed [`GnssSatelliteId::new`] through the public fields (`0`,
+/// `100`, `255`). The shared satellite-token range is `1..=99` for every
+/// constellation, so this check is the only thing standing between a widened id
+/// and an invented PRN such as 101 or 355.
 pub fn sat_to_sbas_prn(sat: GnssSatelliteId) -> Option<u16> {
-    (sat.system == GnssSystem::Sbas).then_some(u16::from(sat.prn) + 100)
+    if sat.system != GnssSystem::Sbas {
+        return None;
+    }
+    let slot = u16::from(sat.prn);
+    if !SBAS_SLOT_RANGE.contains(&slot) {
+        return None;
+    }
+    slot.checked_add(SBAS_PRN_MINUS_SLOT)
 }
 
 fn epoch_to_j2000_s(epoch: GnssWeekTow) -> f64 {
@@ -1559,7 +1655,8 @@ mod tests {
     use super::*;
     use crate::astro::time::model::TimeScale;
     use crate::sbas::message::{
-        SbasFastCorrections, SbasIgpDelay, SbasIgpMask, SbasIonoDelays, SbasPrnMask, SpareBits,
+        SbasFastCorrections, SbasIgpDelay, SbasIgpMask, SbasIonoDelays, SbasLongTermCorrections,
+        SbasPrnMask, SpareBits,
     };
 
     fn epoch(tow_s: f64) -> GnssWeekTow {
@@ -1591,6 +1688,217 @@ mod tests {
         assert_eq!(sbas_prn_to_sat(120), Some(geo()));
         assert_eq!(sat_to_sbas_prn(geo()), Some(120));
         assert_eq!(sbas_prn_to_sat(119), None);
+    }
+
+    /// Every broadcast PRN in the window round-trips to its slot and back, and
+    /// the two values sitting just outside either end do not.
+    #[test]
+    fn sbas_prn_window_round_trips_and_stops_at_its_edges() {
+        for broadcast_prn in 120..=158u16 {
+            let sat = sbas_prn_to_sat(broadcast_prn)
+                .unwrap_or_else(|| panic!("PRN {broadcast_prn} is inside the SBAS window"));
+            assert_eq!(sat.system, GnssSystem::Sbas);
+            assert_eq!(u16::from(sat.prn) + 100, broadcast_prn);
+            assert_eq!(sat_to_sbas_prn(sat), Some(broadcast_prn));
+        }
+        for outside in [0u16, 1, 100, 119, 159, 160, 255, 355, u16::MAX] {
+            assert_eq!(sbas_prn_to_sat(outside), None, "{outside}");
+        }
+    }
+
+    /// The shared satellite-token range is 1..=99 for every constellation, so
+    /// `S01`, `S19`, `S59` and `S99` are all now constructible identifiers. None
+    /// of them names a broadcast PRN, and `sat_to_sbas_prn` must say so rather
+    /// than return 101, 119, 159 or 199.
+    #[test]
+    fn sat_to_sbas_prn_rejects_slots_outside_the_broadcast_window() {
+        for slot in [1u8, 2, 19, 59, 60, 99] {
+            let sat = GnssSatelliteId::new(GnssSystem::Sbas, slot)
+                .expect("the shared token range accepts S01..S99");
+            assert_eq!(sat_to_sbas_prn(sat), None, "S{slot:02}");
+        }
+        for slot in 20..=58u8 {
+            let sat = GnssSatelliteId::new(GnssSystem::Sbas, slot).expect("valid SBAS slot");
+            assert_eq!(sat_to_sbas_prn(sat), Some(u16::from(slot) + 100));
+        }
+    }
+
+    /// Other constellations never convert, however the id was built.
+    #[test]
+    fn sat_to_sbas_prn_rejects_other_constellations() {
+        for system in [
+            GnssSystem::Gps,
+            GnssSystem::Glonass,
+            GnssSystem::Galileo,
+            GnssSystem::BeiDou,
+            GnssSystem::Qzss,
+            GnssSystem::Navic,
+        ] {
+            for prn in [1u8, 20, 30, 58, 99] {
+                let sat = GnssSatelliteId::new(system, prn).expect("valid satellite token");
+                assert_eq!(sat_to_sbas_prn(sat), None, "{system:?} {prn}");
+            }
+        }
+    }
+
+    /// `system` and `prn` are public and the derived `Deserialize` writes them
+    /// straight through, so an id that never passed the constructor can reach
+    /// this converter. Slot 0 would otherwise alias PRN 100, slot 100 would
+    /// alias PRN 200 and slot 255 would alias PRN 355 - none of which exists.
+    #[test]
+    fn sat_to_sbas_prn_rejects_constructor_bypassing_struct_literals() {
+        for prn in [0u8, 100, 255] {
+            let bypass = GnssSatelliteId {
+                system: GnssSystem::Sbas,
+                prn,
+            };
+            assert!(
+                GnssSatelliteId::new(GnssSystem::Sbas, prn).is_err(),
+                "prn {prn} must not be constructible through new()"
+            );
+            assert_eq!(sat_to_sbas_prn(bypass), None, "prn {prn}");
+        }
+        // The same bypass on another constellation is refused by the system
+        // check before the slot check ever runs.
+        assert_eq!(
+            sat_to_sbas_prn(GnssSatelliteId {
+                system: GnssSystem::Gps,
+                prn: 255,
+            }),
+            None
+        );
+    }
+
+    /// The PRN mask layout is DO-229's: mask numbers 1..=37 are GPS, 38..=61
+    /// GLONASS slot `n - 37` (R01..R24), 62..=119 future GNSS, 120..=158 SBAS.
+    /// Position is `n - 1`. RTKLIB `decode_sbstype1` agrees only for 1..=61 and
+    /// 120..=138; it reads 139..=182 as reserved and 183..=202 as QZSS. Widening
+    /// the shared token range adds no position, so no extended slot such as
+    /// `R28` has one, and position 63 is future GNSS, not `R27`.
+    #[test]
+    fn prn_mask_layout_follows_do_229() {
+        let glonass =
+            |slot| GnssSatelliteId::new(GnssSystem::Glonass, slot).expect("valid GLONASS slot");
+        assert_eq!(mask_position_to_sat(0), Some(gps(1)));
+        assert_eq!(mask_position_to_sat(31), Some(gps(32)));
+        assert_eq!(mask_position_to_sat(32), Some(gps(33)));
+        assert_eq!(mask_position_to_sat(36), Some(gps(37)));
+        assert_eq!(mask_position_to_sat(37), Some(glonass(1)));
+        assert_eq!(mask_position_to_sat(60), Some(glonass(24)));
+        for position in [61, 62, 63, 64, 100, 118] {
+            assert_eq!(mask_position_to_sat(position), None, "position {position}");
+        }
+        assert_eq!(mask_position_to_sat(119), Some(geo()));
+        assert_eq!(
+            mask_position_to_sat(157),
+            Some(GnssSatelliteId::new(GnssSystem::Sbas, 58).expect("valid SBAS slot"))
+        );
+        for position in [158, 182, 192, 201, 209] {
+            assert_eq!(mask_position_to_sat(position), None, "position {position}");
+        }
+    }
+
+    /// An active mask bit that names no satellite keeps its place among the
+    /// active bits. Corrections address satellites by that order, so dropping
+    /// the bit would hand the correction after it to the wrong satellite.
+    #[test]
+    fn unassigned_mask_bits_keep_later_corrections_on_their_own_satellites() {
+        let mut mask = [false; 210];
+        mask[0] = true; // G01
+        mask[70] = true; // mask number 71, future GNSS
+        mask[119] = true; // SBAS PRN 120
+        let mut store = SbasCorrectionStore::new();
+        store
+            .ingest(
+                &SbasMessage::PrnMask(SbasPrnMask {
+                    preamble: 0x53,
+                    iodp: 1,
+                    mask,
+                    reserved: SpareBits::new(),
+                }),
+                geo(),
+                epoch(10.0),
+            )
+            .unwrap();
+        let mut prc = [0i16; 13];
+        prc[0] = 8;
+        prc[1] = 16;
+        prc[2] = 24;
+        store
+            .ingest(
+                &SbasMessage::FastCorrections(SbasFastCorrections {
+                    preamble: 0x53,
+                    message_type: 2,
+                    iodf: 1,
+                    iodp: 1,
+                    prc,
+                    udrei: [0u8; 13],
+                    reserved: SpareBits::new(),
+                }),
+                geo(),
+                epoch(20.0),
+            )
+            .unwrap();
+
+        let g01 = store.fast(geo(), gps(1)).expect("G01 correction");
+        assert_eq!(g01.prc_m.to_bits(), 1.0_f64.to_bits());
+        let s20 = store.fast(geo(), geo()).expect("S20 correction");
+        assert_eq!(
+            s20.prc_m.to_bits(),
+            3.0_f64.to_bits(),
+            "the third active bit's correction reaches the third bit's satellite"
+        );
+        assert_eq!(
+            store
+                .unassigned_mask_corrections(geo())
+                .and_then(|counts| counts.get(&71).copied()),
+            Some(1),
+            "the correction for mask number 71 is counted, not applied"
+        );
+    }
+
+    /// A long-term record with mask index 0 is the fill of an unused record
+    /// slot; it must not overwrite the first monitored satellite's correction.
+    #[test]
+    fn long_term_record_with_mask_index_zero_is_fill() {
+        let mut store = SbasCorrectionStore::new();
+        store.ingest(&mask_message(), geo(), epoch(10.0)).unwrap();
+        let record = |monitored_index, delta_x| SbasLongTermRecord {
+            monitored_index,
+            iode: 7,
+            delta_x,
+            delta_y: 0,
+            delta_z: 0,
+            delta_x_rate: 0,
+            delta_y_rate: 0,
+            delta_z_rate: 0,
+            delta_a_f0: 0,
+            delta_a_f1: 0,
+            time_of_day_s: None,
+        };
+        let half = |records| SbasLongTermHalf {
+            velocity_code: false,
+            iodp: 1,
+            records,
+            reserved: SpareBits::new(),
+        };
+        store
+            .ingest(
+                &SbasMessage::LongTermCorrections(SbasLongTermCorrections {
+                    preamble: 0x53,
+                    halves: [
+                        half(vec![record(1, 8), record(0, 0)]),
+                        half(vec![record(0, 0), record(0, 0)]),
+                    ],
+                }),
+                geo(),
+                epoch(20.0),
+            )
+            .unwrap();
+        let g01 = store
+            .long_term(geo(), gps(1))
+            .expect("G01 long-term correction");
+        assert_eq!(g01.delta_ecef_m[0].to_bits(), 1.0_f64.to_bits());
     }
 
     #[test]

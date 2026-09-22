@@ -1776,7 +1776,7 @@ mod tests {
         assert_eq!(lossy_bias.value.records().len(), bias.records().len());
 
         let dcb = parse_code_dcb(DCB_BYTES, None).expect("parse CODE DCB fixture");
-        assert_eq!(dcb.records().len(), 496);
+        assert_eq!(dcb.records().len(), 498);
         let loaded_dcb =
             load_code_dcb(fixture_path(&["bias", "P1C1_RINEX.DCB"]), None).expect("load CODE DCB");
         assert_eq!(loaded_dcb.records().len(), dcb.records().len());

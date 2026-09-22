@@ -58,7 +58,7 @@ use crate::format::columns::{
 };
 use crate::format::{Diagnostics, RecordRef, Skip, SkipReason};
 use crate::frame::{ItrfPositionM, ItrfVelocityMS};
-use crate::id::{is_valid_prn, GnssSatelliteId, GnssSystem};
+use crate::id::{is_shared_token_prn, GnssSatelliteId, GnssSystem};
 use crate::validate;
 use crate::{Error, Result};
 
@@ -451,9 +451,15 @@ pub struct Sp3 {
     /// Free-form `/*` comment lines (notice retained for provenance).
     pub comments: Vec<String>,
     /// Count of entries skipped because their satellite token did not parse to a
-    /// representable [`GnssSatelliteId`] (e.g. an extended GLONASS slot like `R28`
-    /// beyond the engine's PRN cap): position/velocity records, plus `+`-header
-    /// satellite declarations. Lets callers tell a clean file
+    /// representable [`GnssSatelliteId`]: position/velocity records, plus
+    /// `+`-header satellite declarations. The satellite-token range is `01..=99`
+    /// for every GNSS system letter, so what lands here is a token naming
+    /// something this library has no constellation for - an SP3-d `Lnn`
+    /// Low-Earth Orbiter, say, or one of the other satellite types the format
+    /// reserves further letters for. `EP`/`EV` correlation records, and a `V`
+    /// record carrying a velocity or clock rate with no `P` record for its
+    /// satellite at that epoch, are counted here too, since neither is held in
+    /// the product. Lets callers tell a clean file
     /// (`skipped_records == 0`) apart from one carrying unsupported satellites,
     /// without aborting the whole parse on one such entry. Mirrors
     /// [`crate::astro::sgp4::TleFile::skipped`].
@@ -1136,9 +1142,9 @@ impl Parser {
                     self.sat_list.push(id);
                 }
             } else {
-                // A declared satellite whose token is not representable (e.g. an
-                // extended GLONASS slot R28 beyond the engine's PRN cap) is
-                // dropped from the satellite list, but counted rather than dropped
+                // A declared satellite whose token names no GNSS constellation
+                // (an SP3-d `Lnn` Low-Earth Orbiter, say) is dropped from the
+                // satellite list, but counted rather than dropped
                 // silently - consistent with the position/velocity record paths
                 // (see `Sp3::skipped_records`). Record the slot so its accuracy
                 // column is skipped, keeping the surviving codes aligned.
@@ -1359,8 +1365,8 @@ impl Parser {
             .push(('P', token.trim().to_owned()));
         let Some(sat) = parse_sv_token(token, self.version) else {
             // A token that does not parse to a representable `GnssSatelliteId`
-            // (e.g. an extended GLONASS slot like R28 beyond the engine's PRN
-            // cap) is an independent, unsupported record. One such record must
+            // (an SP3-d `Lnn` Low-Earth Orbiter, say) is an independent,
+            // unsupported record. One such record must
             // not reject the whole file - skip and count it, mirroring nav
             // `parse_glonass` and `parse_tle_file`.
             self.push_unrepresentable_satellite_skip(line_number, token);
@@ -1509,7 +1515,20 @@ impl Parser {
             // Treat it as malformed and skip - consistent with the parser's
             // tolerant skipping of other malformed records. No state is
             // inserted, so the satellite stays UnknownSatellite at this
-            // epoch and no (0,0,0) position is ever exposed.
+            // epoch and no (0,0,0) position is ever exposed. A record carrying
+            // a velocity or a clock rate is counted as skipped, so that value
+            // is not lost silently. One carrying only the missing-velocity and
+            // bad-clock-rate sentinels states nothing, which is how the format
+            // writes the `V` line of a satellite absent at this epoch, and is
+            // not a skip.
+            if !missing_velocity || clock_rate_s_s.is_some() {
+                self.diagnostics.push_skip(Skip {
+                    at: RecordRef::at_line(line_number).with_satellite(token),
+                    reason: SkipReason::InconsistentRecord(
+                        "velocity record with no position record for its satellite at this epoch",
+                    ),
+                });
+            }
         }
         Ok(())
     }
@@ -1737,6 +1756,12 @@ fn parse_flags(line: &str) -> Sp3Flags {
 
 /// Parse a 3-char SV token (e.g. `G01`, `C30`, or a bare `  1` in SP3-a) into a
 /// [`GnssSatelliteId`]. Returns `None` on an unrecognized token.
+///
+/// Both branches take the shared `1..=99` satellite-token range, which is the
+/// range SP3-d states for the lettered identifier. The format-specific parts
+/// stay here: only the GPS-only SP3-a version accepts a bare numeric PRN with no
+/// system letter, and the fixed three-column field is what bounds the token
+/// text in the first place.
 fn parse_sv_token(token: &str, version: Option<Sp3Version>) -> Option<GnssSatelliteId> {
     let token = token.trim();
     if token.is_empty() {
@@ -1747,7 +1772,7 @@ fn parse_sv_token(token: &str, version: Option<Sp3Version>) -> Option<GnssSatell
         // SP3-a GPS-only: bare numeric PRN, optionally space-padded.
         if matches!(version, Some(Sp3Version::A)) || version.is_none() {
             let prn = token.parse::<u8>().ok()?;
-            if !is_valid_prn(GnssSystem::Gps, prn) {
+            if !is_shared_token_prn(prn) {
                 return None;
             }
             return GnssSatelliteId::new(GnssSystem::Gps, prn).ok();

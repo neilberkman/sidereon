@@ -1517,22 +1517,64 @@ fn glonass_nonintegral_frequency_channel_is_bad_field() {
     );
 }
 
+/// A whole-number channel outside the `-7..=6` FDMA allocation is the value the
+/// record states, and the record is kept with it, as RTKLIB keeps it. Refusing
+/// it discarded every GLONASS ephemeris in the file. The allocation is checked
+/// where a carrier is resolved, not here.
 #[test]
-fn glonass_out_of_range_frequency_channel_is_bad_field() {
-    for value in ["-8", "7"] {
+fn glonass_frequency_channel_outside_the_allocation_is_kept() {
+    for (value, channel) in [("-8", -8), ("7", 7), ("13", 13)] {
         let mut lines = r01_glonass_lines();
         lines[2] = replace_fourth_orbit_field(&lines[2], value);
 
-        let err = parse_glonass(&glonass_text(&lines))
-            .expect_err("out-of-range GLONASS frequency channel must be a bad field");
-        assert_eq!(
-            err,
-            NavParseError::BadField {
-                satellite: "R01".to_string(),
-                field: "frequency channel",
-            }
-        );
+        let recs = parse_glonass(&glonass_text(&lines))
+            .unwrap_or_else(|err| panic!("channel {value} is a stated integer: {err}"));
+        assert_eq!(recs[0].freq_channel, channel, "channel {value}");
     }
+}
+
+/// A channel that is not a whole number fitting the record's integer field is
+/// still a bad field.
+#[test]
+fn glonass_frequency_channel_beyond_the_integer_field_is_bad_field() {
+    let mut lines = r01_glonass_lines();
+    lines[2] = replace_fourth_orbit_field(&lines[2], "3.000000000000e+09");
+
+    let err = parse_glonass(&glonass_text(&lines))
+        .expect_err("a channel beyond i32 is not a channel the record can hold");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "R01".to_string(),
+            field: "frequency channel",
+        }
+    );
+}
+
+/// The extended slot `R28` with the channel `7` real IGS products give it: the
+/// record is read, the channel kept, and the store's channel map carries it
+/// beside R01's. Resolving a carrier from it is the consumer's check.
+#[test]
+fn extended_slot_r28_with_channel_7_is_read_and_kept() {
+    let mut lines = r01_glonass_lines();
+    let mut r28 = satellite_lines(R01_GLONASS_LINES, "R28");
+    r28[2] = replace_fourth_orbit_field(&r28[2], "7");
+    lines.extend(r28);
+
+    let recs = parse_glonass(&glonass_text(&lines)).expect("R28 with channel 7 parses");
+    assert_eq!(recs.len(), 2);
+    assert_eq!(recs[1].satellite_id.to_string(), "R28");
+    assert_eq!(recs[1].freq_channel, 7);
+
+    let store = BroadcastStore::from_nav(&glonass_text(&lines)).expect("GLONASS NAV parses");
+    let channels = store.glonass_frequency_channels();
+    assert_eq!(channels.get(&1).copied(), Some(1));
+    assert_eq!(channels.get(&28).copied(), Some(7));
+    assert_eq!(
+        crate::frequencies::rinex_band_frequency_hz(GnssSystem::Glonass, '1', Some(7)),
+        None,
+        "channel 7 is outside the FDMA allocation, so no carrier is resolved"
+    );
 }
 
 #[test]
@@ -1545,28 +1587,68 @@ fn glonass_integral_frequency_channel_parses() {
 }
 
 #[test]
-fn out_of_range_glonass_nav_slots_are_skipped_not_rejected() {
-    // A slot the engine cannot represent (an extended GLONASS slot beyond the
-    // PRN cap, e.g. R28 in real BKG/IGS products, or a nonsense R00/R99) must be
-    // skipped, not reject the whole file. A real R01 record alongside it still
-    // loads.
-    for token in ["R00", "R28", "R99"] {
-        let mut lines = satellite_lines(R01_GLONASS_LINES, token);
+fn unrepresentable_glonass_nav_slots_are_skipped_not_rejected() {
+    // `R00` is not a satellite token - the slot range is 01..99 - so it is
+    // skipped rather than rejecting the whole file. A real R01 record alongside
+    // it still loads.
+    let mut lines = satellite_lines(R01_GLONASS_LINES, "R00");
+    lines.extend(r01_glonass_lines());
+
+    let store = BroadcastStore::from_nav(&glonass_text(&lines))
+        .unwrap_or_else(|err| panic!("slot R00 must be skipped, not reject the file: {err}"));
+    assert_eq!(
+        store.glonass_records().len(),
+        1,
+        "only the representable R01 record is kept alongside R00"
+    );
+    assert_eq!(
+        store.glonass_records()[0].satellite_id,
+        GnssSatelliteId::new(GnssSystem::Glonass, 1).expect("valid satellite id"),
+        "kept record is R01 (with R00 skipped)"
+    );
+}
+
+#[test]
+fn extended_glonass_nav_slots_are_retained_with_their_own_data() {
+    // R28 is an extended GLONASS slot that real BKG/IGS broadcast-nav files
+    // carry, and R99 is the top of the slot-token range. Both are ordinary
+    // satellite tokens and must be kept with their own ephemeris and channel,
+    // alongside R01.
+    for slot in [28u8, 99] {
+        let token = format!("R{slot:02}");
+        let mut lines = satellite_lines(R01_GLONASS_LINES, &token);
         lines.extend(r01_glonass_lines());
 
-        let store = BroadcastStore::from_nav(&glonass_text(&lines)).unwrap_or_else(|err| {
-            panic!("slot {token} must be skipped, not reject the file: {err}")
-        });
+        let store = BroadcastStore::from_nav(&glonass_text(&lines))
+            .unwrap_or_else(|err| panic!("slot {token} must load: {err}"));
+        let records = store.glonass_records();
+        assert_eq!(records.len(), 2, "{token} is kept alongside R01");
+
+        let extended = records
+            .iter()
+            .find(|r| r.satellite_id.prn == slot)
+            .unwrap_or_else(|| panic!("{token} record present"));
+        assert_eq!(extended.satellite_id.system, GnssSystem::Glonass);
+        assert_eq!(extended.satellite_id.to_string(), token);
+        // Its own values, read from its own record - not a neighbour's.
         assert_eq!(
-            store.glonass_records().len(),
-            1,
-            "only the representable R01 record is kept alongside {token}"
+            extended.freq_channel, 1,
+            "{token} keeps the channel its record carried"
         );
         assert_eq!(
-            store.glonass_records()[0].satellite_id,
-            GnssSatelliteId::new(GnssSystem::Glonass, 1).expect("valid satellite id"),
-            "kept record is R01 (with {token} skipped)"
+            extended.clk_bias, 6.355_904_042_721e-05,
+            "{token} clock bias"
         );
+        assert_eq!(
+            extended.pos_m[0],
+            1.090_894_238_281e04 * 1_000.0,
+            "{token} position X"
+        );
+
+        // The channel accessor keys by slot, so both slots are reachable.
+        let channels = store.glonass_frequency_channels();
+        assert_eq!(channels.get(&slot).copied(), Some(1), "{token}");
+        assert_eq!(channels.get(&1).copied(), Some(1), "R01 alongside {token}");
     }
 }
 
@@ -1583,12 +1665,13 @@ fn valid_edge_glonass_nav_prn_parses_into_broadcast_store() {
 }
 
 #[test]
-fn rejects_out_of_range_keplerian_nav_prns() {
-    for (token, template) in [("G33", G01_LINES), ("E37", E01_LINES), ("C64", G01_LINES)] {
+fn rejects_zero_keplerian_nav_prns() {
+    // The satellite-token range is 01..99, so `nn = 00` names no satellite in
+    // any constellation and is a malformed PRN field, not a skip.
+    for (token, template) in [("G00", G01_LINES), ("E00", E01_LINES), ("C00", G01_LINES)] {
         let lines = satellite_lines(template, token);
 
-        let err = parse_nav(&nav_text(&lines))
-            .expect_err("out-of-range NAV satellite PRN must be rejected");
+        let err = parse_nav(&nav_text(&lines)).expect_err("PRN 00 is not a satellite token");
         assert_eq!(
             err,
             NavParseError::BadField {
@@ -1597,6 +1680,72 @@ fn rejects_out_of_range_keplerian_nav_prns() {
             }
         );
     }
+}
+
+#[test]
+fn keplerian_nav_prns_above_the_operational_roster_are_retained() {
+    // Real products carry satellite numbers above the constellation's current
+    // operational roster - the SP3-d identifier is a letter plus 01..99 and
+    // says nothing about how many satellites are flying. G33, E37 and C64 must
+    // load with their own ephemeris rather than being refused.
+    let mut lines = satellite_lines(G01_LINES, "G33");
+
+    let mut galileo = satellite_lines(E01_LINES, "E37");
+    galileo[5] = replace_orbit_field(&galileo[5], 1, "5.120000000000e+02");
+    lines.extend(galileo);
+    lines.extend(satellite_lines(G01_LINES, "C64"));
+
+    let store = BroadcastStore::from_nav(&nav_text(&lines))
+        .expect("satellite numbers above the roster are ordinary tokens");
+    let sats: Vec<_> = store
+        .records()
+        .iter()
+        .map(|record| record.satellite_id)
+        .collect();
+    assert_eq!(sats.len(), 3);
+    for expected in [
+        GnssSatelliteId::new(GnssSystem::Gps, 33).expect("G33"),
+        GnssSatelliteId::new(GnssSystem::Galileo, 37).expect("E37"),
+        GnssSatelliteId::new(GnssSystem::BeiDou, 64).expect("C64"),
+    ] {
+        assert!(sats.contains(&expected), "{expected} must be retained");
+    }
+
+    // The retained record carries its own values, not a neighbour's.
+    let g33 = store
+        .records()
+        .iter()
+        .find(|r| r.satellite_id.prn == 33 && r.satellite_id.system == GnssSystem::Gps)
+        .expect("G33 record present");
+    let g01_store = BroadcastStore::from_nav(&nav_text(&g01_lines())).expect("G01 parses");
+    let g01 = &g01_store.records()[0];
+    assert_eq!(g33.elements.sqrt_a, g01.elements.sqrt_a);
+    assert_eq!(g33.elements.e, g01.elements.e);
+    assert_eq!(g33.clock.af0, g01.clock.af0);
+    assert_eq!(g33.week, g01.week);
+}
+
+/// BeiDou GEO satellites are PRN 1-5 and 59-63 (BDS ICD; RTKLIB `eph2pos`
+/// `prn<=5||prn>=59`). C62 is a real GEO satellite, so its RINEX 3 record takes
+/// the D2 message; PRN 6..=58 and 64 upward do not.
+#[test]
+fn beidou_geo_prns_are_one_to_five_and_fifty_nine_to_sixty_three() {
+    let beidou = |prn| GnssSatelliteId::new(GnssSystem::BeiDou, prn).expect("valid satellite id");
+    for prn in (1..=5).chain(59..=63) {
+        assert!(crate::rinex_nav::is_beidou_geo(beidou(prn)), "C{prn:02}");
+    }
+    for prn in [6u8, 30, 46, 58, 64, 99] {
+        assert!(!crate::rinex_nav::is_beidou_geo(beidou(prn)), "C{prn:02}");
+    }
+    assert!(!crate::rinex_nav::is_beidou_geo(
+        GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id")
+    ));
+
+    let text = nav_text(&satellite_lines(G01_LINES, "C62"));
+    let records = parse_nav(&text).expect("a C62 record parses");
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].satellite_id, beidou(62));
+    assert_eq!(records[0].message, NavMessage::BeidouD2);
 }
 
 #[test]
@@ -4583,44 +4732,59 @@ fn from_lnav_uses_extended_fit_interval_for_flag_1() {
 }
 
 #[test]
-fn parse_glonass_skips_extended_slot_and_keeps_others() {
-    // R28 is an extended GLONASS slot beyond the engine's PRN cap (R01-R27),
-    // as seen in real BKG/IGS broadcast-nav files. It must be skipped while a
-    // valid R01 record in the same file still parses - one unrepresentable
-    // record must not reject the whole file.
+fn parse_glonass_keeps_extended_slot_alongside_others() {
+    // R28 is an extended GLONASS slot as seen in real BKG/IGS broadcast-nav
+    // files. The slot token range is R01..R99, so it is parsed and kept
+    // alongside R01 rather than dropped.
     let mut lines = r01_glonass_lines();
     lines.extend(satellite_lines(R01_GLONASS_LINES, "R28"));
 
-    let recs = parse_glonass(&glonass_text(&lines))
-        .expect("an extended GLONASS slot must not reject the file");
-    assert_eq!(recs.len(), 1, "only the representable R01 record is kept");
+    let recs = parse_glonass(&glonass_text(&lines)).expect("an extended GLONASS slot must parse");
+    assert_eq!(recs.len(), 2, "both records are kept");
     assert_eq!(recs[0].satellite_id.prn, 1);
-}
-
-#[test]
-fn parse_glonass_lenient_surfaces_skipped_extended_slots() {
-    // The lenient parser keeps the representable records and reports the slots it
-    // dropped (here R28) with their tokens, rather than discarding them silently.
-    let mut lines = r01_glonass_lines();
-    lines.extend(satellite_lines(R01_GLONASS_LINES, "R28"));
-
-    let parsed = parse_glonass_lenient(&glonass_text(&lines))
-        .expect("an extended GLONASS slot must not reject the file");
-    assert_eq!(parsed.records.len(), 1, "only R01 is representable");
-    assert_eq!(parsed.records[0].satellite_id.prn, 1);
+    assert_eq!(recs[1].satellite_id.prn, 28);
     assert_eq!(
-        parsed.skipped,
-        vec![SkippedGlonass {
-            token: "R28".to_string()
-        }],
-        "the dropped extended slot is surfaced, not silent"
+        recs[1].satellite_id.system,
+        GnssSystem::Glonass,
+        "R28 is a GLONASS slot"
+    );
+    assert_eq!(recs[1].freq_channel, 1, "R28 keeps its own FDMA channel");
+    assert_eq!(
+        recs[1].pos_m, recs[0].pos_m,
+        "the fixture gives both records the same orbit, read independently"
     );
 }
 
 #[test]
-fn extended_glonass_slot_does_not_discard_other_systems() {
+fn parse_glonass_lenient_surfaces_only_unrepresentable_slots() {
+    // The lenient parser keeps every representable record and reports only the
+    // tokens it could not represent. R28 is representable; R00 is not.
+    let mut lines = r01_glonass_lines();
+    lines.extend(satellite_lines(R01_GLONASS_LINES, "R28"));
+    lines.extend(satellite_lines(R01_GLONASS_LINES, "R00"));
+
+    let parsed = parse_glonass_lenient(&glonass_text(&lines))
+        .expect("an extended GLONASS slot must not reject the file");
+    assert_eq!(
+        parsed.records.len(),
+        2,
+        "R01 and R28 are both representable"
+    );
+    assert_eq!(parsed.records[0].satellite_id.prn, 1);
+    assert_eq!(parsed.records[1].satellite_id.prn, 28);
+    assert_eq!(
+        parsed.skipped,
+        vec![SkippedGlonass {
+            token: "R00".to_string()
+        }],
+        "only the unrepresentable token is surfaced"
+    );
+}
+
+#[test]
+fn extended_glonass_slot_loads_beside_other_systems() {
     // A mixed file: a GPS Keplerian record, a healthy GLONASS R01, and an
-    // extended R28. The R28 slot is skipped; GPS and R01 both survive.
+    // extended R28. All three survive.
     let mut lines = g01_lines();
     lines.extend(r01_glonass_lines());
     lines.extend(satellite_lines(R01_GLONASS_LINES, "R28"));
@@ -4630,14 +4794,19 @@ fn extended_glonass_slot_does_not_discard_other_systems() {
     let gps = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id");
     assert!(
         store.records().iter().any(|r| r.satellite_id == gps),
-        "GPS record still loads alongside the skipped R28"
+        "GPS record still loads alongside R28"
     );
     assert_eq!(
         store.glonass_records().len(),
-        1,
-        "R01 kept, extended R28 skipped"
+        2,
+        "R01 and the extended R28 are both kept"
     );
-    assert_eq!(store.glonass_records()[0].satellite_id.prn, 1);
+    let slots: Vec<u8> = store
+        .glonass_records()
+        .iter()
+        .map(|r| r.satellite_id.prn)
+        .collect();
+    assert_eq!(slots, vec![1, 28]);
 }
 
 #[test]
@@ -5169,6 +5338,12 @@ fn parse_nav_v4_eph_marker_validation_strict_and_lenient() {
     );
 }
 
+/// `parse_nav` reads the Keplerian navigation messages only, so a version-4
+/// `FDMA` frame is skipped whatever slot it names - GLONASS ephemeris is not
+/// Keplerian and comes out of `parse_glonass` instead. The slot here is `R28`
+/// because that is what real files carry; it is a representable satellite
+/// token, and nothing in this test turns on that. A GLONASS record appearing
+/// in this output would mean the wrong entry point had produced it.
 #[test]
 fn parse_nav_v4_skips_unsupported_r28_fdma_beside_supported_gps() {
     let mut text = String::from(V4_NAV_HEADER);

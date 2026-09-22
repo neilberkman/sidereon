@@ -2784,10 +2784,11 @@ fn glonass_iono_changes_monotonically_with_channel() {
 }
 
 // ---------------------------------------------------------------------------
-// GLONASS channel validation at the SPP boundary: an observed GLONASS satellite
-// whose FDMA channel is missing OR outside the valid [-7, +6] range is rejected
-// with a typed `IonosphereUnsupported` error when the ionosphere is enabled,
-// rather than silently scaling against a bogus-but-positive carrier frequency.
+// GLONASS channel validation in SPP selection: an observed GLONASS satellite
+// whose FDMA channel is missing OR outside the `-7..=6` allocation cannot take
+// the ionosphere correction, so with the ionosphere enabled it is excluded and
+// reported as `RejectionReason::IonosphereCarrierUnresolved` - never scaled
+// against a bogus-but-positive carrier - and the rest of the epoch is solved.
 // ---------------------------------------------------------------------------
 
 fn glonass_validation_inputs(channels: std::collections::BTreeMap<u8, i8>) -> SolveInputs {
@@ -2815,57 +2816,225 @@ fn glonass_validation_inputs(channels: std::collections::BTreeMap<u8, i8>) -> So
     }
 }
 
+/// These used to assert that the whole solve failed with
+/// `SppError::IonosphereUnsupported` when any one observed satellite had no
+/// resolvable carrier. That asserted the wrong thing: one satellite's missing
+/// carrier says nothing about the others, and failing the epoch discarded every
+/// good measurement in it - on a real IGS file, every epoch that observes `R28`
+/// with the channel `7` its header states. RTKLIB `pntpos` skips such a
+/// satellite (`continue` when its carrier frequency is zero). The satellite is
+/// now excluded and reported, and the remaining satellites solve.
 #[test]
-fn glonass_out_of_range_channel_is_rejected() {
+fn satellite_without_a_resolvable_carrier_is_excluded_and_the_rest_solve() {
+    let directions = [
+        [0.85, 0.20, 0.49],
+        [0.60, -0.62, 0.50],
+        [0.70, 0.62, -0.35],
+        [0.92, -0.15, -0.36],
+    ];
+    let (base_eph, mut base_inputs) = synthetic_spp_case(&directions);
+    base_inputs.corrections = Corrections::IONO;
+    let gps_ids: Vec<GnssSatelliteId> = base_inputs
+        .observations
+        .iter()
+        .map(|o| o.satellite_id)
+        .collect();
+    let reference = solve(&base_eph, &base_inputs, false).expect("four GPS satellites solve");
+
+    let r07 = GnssSatelliteId::new(GnssSystem::Glonass, 7).expect("valid GLONASS id");
+    let r28 = GnssSatelliteId::new(GnssSystem::Glonass, 28).expect("valid GLONASS id");
+    // (satellite, its channel entry): out of the allocation above and below,
+    // the `R28  7` real IGS headers carry, and no entry at all.
+    let cases = [
+        (r07, Some(99i8)),
+        (r07, Some(-8)),
+        (r28, Some(7)),
+        (r07, None),
+    ];
+    // Well above the horizon, so ephemeris and elevation pass and the carrier
+    // is the reason tested.
+    let up = normalized([0.8, 0.3, 0.52]);
+    let glonass_position = [
+        6_378_137.0 + 22_000_000.0 * up[0],
+        22_000_000.0 * up[1],
+        22_000_000.0 * up[2],
+    ];
+    for (glonass, channel) in cases {
+        let mut eph = base_eph.clone();
+        eph.positions.push((glonass, glonass_position));
+        let mut inputs = base_inputs.clone();
+        inputs.observations.push(Observation {
+            satellite_id: glonass,
+            pseudorange_m: 22_000_000.0,
+        });
+        if let Some(k) = channel {
+            inputs.glonass_channels.insert(glonass.prn, k);
+        }
+
+        let solution = solve(&eph, &inputs, false).unwrap_or_else(|err| {
+            panic!("{glonass} channel {channel:?}: the epoch must still solve, got {err:?}")
+        });
+        assert_eq!(
+            solution.used_sats, gps_ids,
+            "{glonass} channel {channel:?}: the GPS satellites are used"
+        );
+        assert_eq!(
+            solution.rejected_sats,
+            vec![super::RejectedSat {
+                satellite_id: glonass,
+                reason: RejectionReason::IonosphereCarrierUnresolved,
+            }],
+            "{glonass} channel {channel:?}: the satellite is excluded and reported"
+        );
+        // The others solve exactly as they do alone.
+        let label = format!("{glonass} channel {channel:?}");
+        assert_eq!(
+            [
+                solution.position.x_m.to_bits(),
+                solution.position.y_m.to_bits(),
+                solution.position.z_m.to_bits(),
+            ],
+            [
+                reference.position.x_m.to_bits(),
+                reference.position.y_m.to_bits(),
+                reference.position.z_m.to_bits(),
+            ],
+            "{label}: position"
+        );
+        let clock_bits = |clocks: &[(GnssSystem, f64)]| {
+            clocks
+                .iter()
+                .map(|(system, clock)| (*system, clock.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            clock_bits(&solution.system_clocks_s),
+            clock_bits(&reference.system_clocks_s),
+            "{label}: receiver clocks, with no GLONASS clock added"
+        );
+        assert_eq!(
+            solution
+                .residuals_m
+                .iter()
+                .map(|r| r.to_bits())
+                .collect::<Vec<_>>(),
+            reference
+                .residuals_m
+                .iter()
+                .map(|r| r.to_bits())
+                .collect::<Vec<_>>(),
+            "{label}: residuals"
+        );
+        assert_eq!(
+            solution.metadata.iterations, reference.metadata.iterations,
+            "{label}: iterations"
+        );
+        let dop_bits = |dop: &Option<crate::dop::Dop>| {
+            dop.as_ref().map(|dop| {
+                (
+                    [
+                        dop.gdop.to_bits(),
+                        dop.pdop.to_bits(),
+                        dop.hdop.to_bits(),
+                        dop.vdop.to_bits(),
+                        dop.tdop.to_bits(),
+                    ],
+                    clock_bits(&dop.system_tdops),
+                )
+            })
+        };
+        assert_eq!(
+            dop_bits(&solution.dop),
+            dop_bits(&reference.dop),
+            "{label}: DOP"
+        );
+    }
+}
+
+/// The carrier is the last reason tested, as in RTKLIB `rescode`: a satellite
+/// with no carrier that also has no ephemeris, or is below the elevation mask,
+/// is reported for that first.
+#[test]
+fn a_missing_carrier_is_reported_after_ephemeris_and_elevation() {
+    let directions = [
+        [0.85, 0.20, 0.49],
+        [0.60, -0.62, 0.50],
+        [0.70, 0.62, -0.35],
+        [0.92, -0.15, -0.36],
+    ];
+    let (base_eph, mut base_inputs) = synthetic_spp_case(&directions);
+    base_inputs.corrections = Corrections::IONO;
+    let r07 = GnssSatelliteId::new(GnssSystem::Glonass, 7).expect("valid GLONASS id");
+    // Below the horizon: the direction points away from local up.
+    let down = normalized([-0.8, 0.3, 0.52]);
+    let below = [
+        6_378_137.0 + 22_000_000.0 * down[0],
+        22_000_000.0 * down[1],
+        22_000_000.0 * down[2],
+    ];
+    for (position, expected) in [
+        (None, RejectionReason::NoEphemeris),
+        (Some(below), RejectionReason::LowElevation),
+    ] {
+        let mut eph = base_eph.clone();
+        if let Some(position) = position {
+            eph.positions.push((r07, position));
+        }
+        let mut inputs = base_inputs.clone();
+        inputs.observations.push(Observation {
+            satellite_id: r07,
+            pseudorange_m: 22_000_000.0,
+        });
+        let solution = solve(&eph, &inputs, false).expect("the GPS satellites solve");
+        assert_eq!(
+            solution.rejected_sats,
+            vec![super::RejectedSat {
+                satellite_id: r07,
+                reason: expected,
+            }]
+        );
+    }
+}
+
+/// Without the ionosphere correction no carrier is needed, so a GLONASS
+/// satellite with no channel is not excluded for it.
+#[test]
+fn missing_carrier_excludes_nothing_when_the_ionosphere_is_off() {
     let (_rx, eph) = fdma_geometry();
-    let glonass = GnssSatelliteId::new(GnssSystem::Glonass, 7).expect("valid GLONASS id");
-
-    // Channel 99 is outside the valid [-7, +6] FDMA range. glonass_g1_frequency_hz
-    // would return a bogus-but-positive carrier for it, so the boundary must
-    // reject the satellite instead.
-    let mut channels = std::collections::BTreeMap::new();
-    channels.insert(7u8, 99i8);
-    let err = super::solve(&eph, &glonass_validation_inputs(channels), false)
-        .expect_err("out-of-range GLONASS channel must be rejected");
+    let mut inputs = glonass_validation_inputs(std::collections::BTreeMap::new());
+    inputs.corrections = Corrections::NONE;
+    let err = super::solve(&eph, &inputs, false).expect_err("one satellite cannot solve");
     assert!(
-        matches!(err, SppError::IonosphereUnsupported { satellite } if satellite == glonass),
-        "expected IonosphereUnsupported for the out-of-range GLONASS sat, got {err:?}"
-    );
-
-    // The low end is rejected the same way.
-    let mut channels = std::collections::BTreeMap::new();
-    channels.insert(7u8, -8i8);
-    let err = super::solve(&eph, &glonass_validation_inputs(channels), false)
-        .expect_err("channel -8 is below the valid range");
-    assert!(
-        matches!(err, SppError::IonosphereUnsupported { satellite } if satellite == glonass),
-        "expected IonosphereUnsupported for channel -8, got {err:?}"
+        matches!(err, SppError::TooFewSatellites { used: 1, .. }),
+        "the satellite is used, so only the count is short (got {err:?})"
     );
 }
 
+/// When the excluded satellite was the only one, too few remain and the solve
+/// fails with the ordinary under-determination error.
 #[test]
-fn glonass_missing_channel_is_rejected() {
+fn excluding_the_only_satellite_leaves_too_few() {
     let (_rx, eph) = fdma_geometry();
-    let glonass = GnssSatelliteId::new(GnssSystem::Glonass, 7).expect("valid GLONASS id");
-
-    // No channel entry for the observed GLONASS satellite: still unresolvable.
-    let err = super::solve(
-        &eph,
-        &glonass_validation_inputs(std::collections::BTreeMap::new()),
-        false,
-    )
-    .expect_err("missing GLONASS channel must be rejected");
-    assert!(
-        matches!(err, SppError::IonosphereUnsupported { satellite } if satellite == glonass),
-        "expected IonosphereUnsupported for the channel-less GLONASS sat, got {err:?}"
-    );
+    for channel in [Some(99i8), Some(-8), Some(7), None] {
+        let mut channels = std::collections::BTreeMap::new();
+        if let Some(k) = channel {
+            channels.insert(7u8, k);
+        }
+        let err = super::solve(&eph, &glonass_validation_inputs(channels), false)
+            .expect_err("no satellite remains");
+        assert!(
+            matches!(err, SppError::TooFewSatellites { used: 0, .. }),
+            "channel {channel:?}: expected TooFewSatellites with none used, got {err:?}"
+        );
+    }
 }
 
 #[test]
 fn glonass_boundary_channels_are_accepted_for_iono_scaling() {
-    // The extremes of the valid range must resolve (no false rejection). A
-    // single-satellite solve is underdetermined, so the solve fails LATER with
-    // TooFewSatellites, never with IonosphereUnsupported.
+    // The extremes of the allocation must resolve (no false exclusion). A
+    // single-satellite solve is underdetermined, so it fails with
+    // TooFewSatellites - with the satellite used, where an excluded one would
+    // leave none.
     let (_rx, eph) = fdma_geometry();
     for k in [-7i8, 6i8] {
         let mut channels = std::collections::BTreeMap::new();
@@ -2873,8 +3042,8 @@ fn glonass_boundary_channels_are_accepted_for_iono_scaling() {
         let err = super::solve(&eph, &glonass_validation_inputs(channels), false)
             .expect_err("one satellite cannot determine a position");
         assert!(
-            matches!(err, SppError::TooFewSatellites { .. }),
-            "valid channel k={k} must pass the ionosphere gate (got {err:?})"
+            matches!(err, SppError::TooFewSatellites { used: 1, .. }),
+            "valid channel k={k} must keep the satellite in the solve (got {err:?})"
         );
     }
 }

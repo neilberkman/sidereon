@@ -105,10 +105,11 @@ use crate::velocity::{
 
 /// The single-frequency carrier (Hz) the ionosphere correction is reported on
 /// for a constellation with one fixed single-frequency carrier, or `None` for a
-/// system that has none (GLONASS, whose FDMA carrier is per-satellite). GPS L1
-/// C/A and Galileo E1 are both at [`F_L1_HZ`]; BeiDou uses B1I. Klobuchar and
-/// Galileo broadcast delays are reported on this carrier. GLONASS is resolved
-/// per satellite by [`spp_iono_frequency_hz`] from its FDMA channel instead.
+/// system that has none (GLONASS, whose FDMA carrier is per-satellite). GPS,
+/// QZSS and SBAS L1 and Galileo E1 are all at [`F_L1_HZ`]; BeiDou uses B1I and
+/// NavIC L5. Klobuchar and Galileo broadcast delays are reported on this
+/// carrier. GLONASS is resolved per satellite by [`spp_iono_frequency_hz`] from
+/// its FDMA channel instead.
 pub(crate) const fn carrier_frequency_hz(system: GnssSystem) -> Option<f64> {
     match system {
         GnssSystem::Sbas => Some(F_L1_HZ),
@@ -120,14 +121,14 @@ pub(crate) const fn carrier_frequency_hz(system: GnssSystem) -> Option<f64> {
 /// single satellite, or `None` if the satellite's system has no carrier the
 /// model can resolve.
 ///
-/// For the fixed-carrier systems (GPS L1, Galileo E1, BeiDou B1I) this is the
-/// system carrier from [`carrier_frequency_hz`]. GLONASS is FDMA, so its carrier
+/// For the fixed-carrier systems (GPS, QZSS and SBAS L1, Galileo E1, BeiDou
+/// B1I, NavIC L5) this is the system carrier from [`carrier_frequency_hz`]. GLONASS is FDMA, so its carrier
 /// is per-satellite: it is resolved from `glonass_channels` (the broadcast /
 /// observation FDMA channel `k` keyed by GLONASS slot number) as the G1
 /// frequency `1602.0 MHz + k * 562.5 kHz`. A GLONASS satellite whose channel is
-/// not in the map, or whose channel is outside the valid FDMA range
-/// `[-7, +6]` (the same domain the RINEX nav/obs parsers enforce via
-/// [`crate::rinex_nav::valid_glonass_frequency_channel`]), has no resolvable
+/// not in the map, or whose channel is outside the FDMA allocation
+/// `[-7, +6]` ([`crate::rinex_nav::valid_glonass_frequency_channel`]; the RINEX
+/// nav/obs readers keep a stated channel outside it), has no resolvable
 /// carrier and returns `None` -- `glonass_g1_frequency_hz` is a pure
 /// `1602.0 MHz + k * 562.5 kHz` evaluation that would otherwise return a
 /// bogus-but-positive carrier for an out-of-domain `k`. Mirroring RTKLIB-demo5,
@@ -191,7 +192,13 @@ pub struct Observation {
     pub pseudorange_m: f64,
 }
 
-/// Why a satellite was excluded from the solve, in pinned priority order.
+/// Why a satellite was excluded from the solve.
+///
+/// SPP selection tests a satellite in the order RTKLIB `rescode` does and
+/// reports the first reason that applies: [`Self::NoEphemeris`], then
+/// [`Self::LowElevation`], then [`Self::SbasIonoUncovered`], then
+/// [`Self::IonosphereCarrierUnresolved`]. [`Self::SbasWithdrawn`] is not
+/// reported by SPP selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RejectionReason {
     /// The SP3 product has no usable position or clock for the satellite at the
@@ -203,6 +210,16 @@ pub enum RejectionReason {
     SbasWithdrawn,
     /// The augmentation ionosphere grid does not cover the satellite line of sight.
     SbasIonoUncovered,
+    /// The ionosphere correction was requested and the satellite has no
+    /// resolvable carrier frequency, so the L1 delay cannot be scaled to it.
+    /// GPS, QZSS, SBAS, Galileo, BeiDou and NavIC have fixed carriers and never
+    /// land here. A GLONASS satellite does when it has no channel in
+    /// [`SolveInputs::glonass_channels`], or when its channel is outside the
+    /// `-7..=6` FDMA allocation (the `7` real IGS headers give the extended
+    /// slot `R28`, say). The satellite is left out of the solve, as RTKLIB
+    /// `rescode` leaves out a satellite whose `sat2freq` is zero, and the rest
+    /// of the epoch is solved.
+    IonosphereCarrierUnresolved,
 }
 
 /// A rejected satellite paired with its rejection reason.
@@ -509,8 +526,9 @@ pub struct SolveInputs {
     /// GLONASS carrier for the ionosphere `(f_L1 / f_k)^2` scaling; an empty map
     /// is correct for any solve with no GLONASS observation and leaves every
     /// other constellation bit-identical. A GLONASS observation with the
-    /// ionosphere correction requested but no channel here is rejected with
-    /// [`SppError::IonosphereUnsupported`].
+    /// ionosphere correction requested but no channel here, or a channel outside
+    /// the FDMA allocation, is excluded from the solve and reported with
+    /// [`RejectionReason::IonosphereCarrierUnresolved`].
     pub glonass_channels: BTreeMap<u8, i8>,
     /// Surface meteorology (used iff `corrections.troposphere`).
     pub met: SurfaceMet,
@@ -636,18 +654,6 @@ pub enum SppError {
         /// The satellite whose ephemeris became unavailable during the solve.
         satellite: GnssSatelliteId,
     },
-    /// The ionosphere correction was requested but an observed satellite has no
-    /// resolvable carrier frequency, so the L1 Klobuchar delay cannot be scaled
-    /// to it. GPS L1, Galileo E1, and BeiDou B1I have fixed carriers; a GLONASS
-    /// satellite resolves its per-satellite FDMA carrier from
-    /// [`SolveInputs::glonass_channels`], so a GLONASS observation whose channel
-    /// is absent from that map -- or present but outside the valid FDMA range
-    /// `[-7, +6]` -- (rather than GLONASS as a whole) is rejected here rather
-    /// than corrected with an undefined or out-of-domain frequency.
-    IonosphereUnsupported {
-        /// The satellite the ionosphere model does not cover.
-        satellite: GnssSatelliteId,
-    },
 }
 
 impl core::fmt::Display for SppError {
@@ -668,10 +674,6 @@ impl core::fmt::Display for SppError {
             SppError::EphemerisLost { satellite } => {
                 write!(f, "satellite {satellite} lost ephemeris during the solve")
             }
-            SppError::IonosphereUnsupported { satellite } => write!(
-                f,
-                "ionosphere correction has no modeled carrier frequency for {satellite}"
-            ),
         }
     }
 }
@@ -978,10 +980,12 @@ pub(crate) fn sat_model(
         let lon_deg = rad_to_deg_ref(g.geodetic.lon_rad);
         let az_deg = rad_to_deg_ref(g.az_rad);
         let el_deg = rad_to_deg_ref(g.el_rad);
-        // A used satellite always has a resolvable carrier here (the solve
-        // rejects an ionosphere request for any satellite that does not, GLONASS
-        // included via its FDMA channel), so the fallback is unreachable. The
-        // GLONASS per-satellite carrier makes the Klobuchar delay scale by
+        // A used satellite always has a resolvable carrier here: selection
+        // excludes, from an ionosphere-corrected solve, any satellite that does
+        // not, GLONASS included via its FDMA channel. Selection evaluates such a
+        // satellite with the L1 fallback only to classify it and then discards
+        // that model, so no solved measurement uses the fallback. The GLONASS
+        // per-satellite carrier makes the Klobuchar delay scale by
         // `(f_L1 / f_k)^2` inside the kernel, exactly as RTKLIB-demo5 does.
         let freq_hz = spp_iono_frequency_hz(sat, env.glonass_channels).unwrap_or(F_L1_HZ);
         iono_m = match ionosphere {
@@ -1091,30 +1095,66 @@ pub(crate) fn select_sats(
         model,
     };
     for ob in obs {
-        let ionosphere = ionosphere_for(ob.satellite_id.system, inputs);
-        let uses_sbas_grid = matches!(ionosphere, SppIonosphere::SbasGrid(_));
-        let model = sat_model(&env, ob.satellite_id, rx0, b0, ob.pseudorange_m, ionosphere);
-        let Some(model) = model else {
+        let sat = ob.satellite_id;
+        let ionosphere = ionosphere_for(sat.system, inputs);
+        // Reasons are tested in RTKLIB `rescode` order: ephemeris, elevation
+        // mask, ionosphere coverage, then the carrier the delay is scaled to.
+        let Some(model) = sat_model(&env, sat, rx0, b0, ob.pseudorange_m, ionosphere) else {
+            // With an augmentation grid bound, a line of sight the grid does
+            // not cover leaves no model either. The grid-free model tells an
+            // ephemeris gap from that, and gives the elevation, which is
+            // tested before coverage.
+            let reason = match ionosphere {
+                SppIonosphere::SbasGrid(_) => {
+                    let grid_free = SppIonosphere::Klobuchar(KlobucharCoeffs {
+                        alpha: [0.0; 4],
+                        beta: [0.0; 4],
+                    });
+                    match sat_model(&env, sat, rx0, b0, ob.pseudorange_m, grid_free) {
+                        None => RejectionReason::NoEphemeris,
+                        Some(geometry) if geometry.el_rad < ELEVATION_MASK_RAD => {
+                            RejectionReason::LowElevation
+                        }
+                        Some(_) => RejectionReason::SbasIonoUncovered,
+                    }
+                }
+                _ => RejectionReason::NoEphemeris,
+            };
             rejected.push(RejectedSat {
-                satellite_id: ob.satellite_id,
-                reason: if uses_sbas_grid {
-                    RejectionReason::SbasIonoUncovered
-                } else {
-                    RejectionReason::NoEphemeris
-                },
+                satellite_id: sat,
+                reason,
             });
             continue;
         };
         if model.el_rad < ELEVATION_MASK_RAD {
             rejected.push(RejectedSat {
-                satellite_id: ob.satellite_id,
+                satellite_id: sat,
                 reason: RejectionReason::LowElevation,
+            });
+            continue;
+        }
+        // The ionosphere delay is computed on L1 and scaled to each satellite's
+        // carrier by `(f_L1 / f)^2`. GPS, QZSS and SBAS L1, Galileo E1, BeiDou
+        // B1I and NavIC L5 are fixed carriers; GLONASS is FDMA, so its carrier
+        // is resolved per satellite from `glonass_channels`. A satellite whose
+        // carrier cannot be resolved (a GLONASS observation with no channel in
+        // the map, or a channel outside the `-7..=6` FDMA allocation) cannot
+        // take the correction, so it is excluded and reported, and the other
+        // satellites are solved without it, as RTKLIB `rescode` skips a
+        // satellite whose `sat2freq` is zero. Its model above was evaluated with
+        // the L1 fallback only to classify it, and is discarded.
+        if inputs.corrections.ionosphere
+            && spp_iono_frequency_hz(sat, &inputs.glonass_channels).is_none()
+        {
+            rejected.push(RejectedSat {
+                satellite_id: sat,
+                reason: RejectionReason::IonosphereCarrierUnresolved,
             });
             continue;
         }
         let sin_el = libm::sin(model.el_rad);
         let weight = (sin_el * sin_el) / (SIGMA0_M * SIGMA0_M);
-        used.push(ob.satellite_id);
+        used.push(sat);
         weights.push(weight);
     }
 
@@ -1364,25 +1404,9 @@ fn solve_inner(
         return Err(SppError::DuplicateObservation { satellite: w[0] });
     }
 
-    // The broadcast Klobuchar delay is computed on L1 and scaled to each
-    // satellite's carrier by `(f_L1 / f)^2`. GPS L1, Galileo E1, and BeiDou B1I
-    // have fixed carriers; GLONASS is FDMA, so its carrier is resolved per
-    // satellite from `glonass_channels`. A satellite whose carrier cannot be
-    // resolved (a GLONASS observation with no channel in the map, or a channel
-    // outside the valid `[-7, +6]` FDMA range) cannot be scaled, so reject an
-    // ionosphere-corrected solve that includes it rather
-    // than apply an undefined correction. This runs before selection so the
-    // model is never evaluated for it (`select_sats` would otherwise call
-    // `sat_model` with the correction for every observation).
-    if inputs.corrections.ionosphere {
-        if let Some(sat) = ids
-            .iter()
-            .find(|s| spp_iono_frequency_hz(**s, &inputs.glonass_channels).is_none())
-        {
-            return Err(SppError::IonosphereUnsupported { satellite: *sat });
-        }
-    }
-
+    // A satellite whose carrier the ionosphere correction cannot be scaled to
+    // is excluded by `select_sats` with its own reason, and the rest of the
+    // epoch is solved.
     let sel = select_sats(eph, inputs, model);
 
     // One receiver-clock parameter per distinct GNSS (a reference clock plus an

@@ -29,12 +29,14 @@
 //! | BeiDou ephemeris   | 1042                                     | [`BeidouEphemeris`] |
 //! | QZSS ephemeris     | 1044                                     | [`QzssEphemeris`] |
 //! | Galileo ephemeris  | 1045 / 1046                              | [`GalileoFnavEphemeris`] / [`GalileoInavEphemeris`] |
+//! | SSR corrections    | GPS 1057-1062, 1265; GLONASS 1063-1068; Galileo 1240-1245, 1267; QZSS 1246-1251, 1268; BeiDou 1258-1263, 1270 | [`SsrMessage`] |
 //!
 //! Any other message number is preserved losslessly as [`Message::Unsupported`]
 //! (its raw body is kept so the frame still round-trips). Deferred message types
 //! include the other MSM variants (MSM1/2/3/5/6), the legacy L1/L1-L2
-//! observation messages (1001-1004, 1009-1012), the network-RTK and SSR
-//! correction families. They decode as `Unsupported` rather than erroring.
+//! observation messages (1001-1004, 1009-1012), the network-RTK correction
+//! families and the SSR messages not listed above. They decode as
+//! `Unsupported` rather than erroring.
 //!
 //! ## Quick start
 //!
@@ -61,7 +63,7 @@
 //! // A constructed message encodes either directly on the typed value or
 //! // through the [`Message`] wrapper; both produce the same body bytes.
 //! let body = station.encode();
-//! assert_eq!(body, Message::StationCoordinates(station).encode());
+//! assert_eq!(body, Message::StationCoordinates(station).encode().unwrap());
 //! let frame = rtcm::encode_frame(&body).unwrap();
 //!
 //! // Decode it back out of the framed stream.
@@ -106,6 +108,7 @@ pub use lli::{
     LockTimeTracker, PreviousLock, LLI_HALF_CYCLE, LLI_LOSS_OF_LOCK,
 };
 pub use msm::{MsmHeader, MsmKind, MsmMessage, MsmSatellite, MsmSignal};
+pub(crate) use ssr::is_native_qzss_ssr;
 pub use ssr::{
     SsrClockRecord, SsrCodeBiasRecord, SsrHeader, SsrKind, SsrMessage, SsrOrbitRecord,
     SsrPhaseBiasRecord, SsrPhaseBiasSignal,
@@ -287,11 +290,18 @@ impl Message {
     }
 
     /// Encode this message back into a body (without the transport frame).
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::InvalidInput`] when an MSM's satellite or signal lists
+    /// cannot be stated in its masks, or an ephemeris or SSR satellite field is
+    /// wider than the message's field; see [`MsmMessage::encode`],
+    /// [`SsrMessage::encode`] and the ephemeris `encode` methods.
+    pub fn encode(&self) -> Result<Vec<u8>> {
         match self {
             Message::Msm(m) => m.encode(),
-            Message::StationCoordinates(s) => s.encode(),
-            Message::AntennaDescriptor(a) => a.encode(),
+            Message::StationCoordinates(s) => Ok(s.encode()),
+            Message::AntennaDescriptor(a) => Ok(a.encode()),
             Message::GpsEphemeris(e) => e.encode(),
             Message::GlonassEphemeris(e) => e.encode(),
             Message::BeidouEphemeris(e) => e.encode(),
@@ -299,7 +309,7 @@ impl Message {
             Message::GalileoFnavEphemeris(e) => e.encode(),
             Message::GalileoInavEphemeris(e) => e.encode(),
             Message::Ssr(s) => s.encode(),
-            Message::Unsupported(u) => u.body.clone(),
+            Message::Unsupported(u) => Ok(u.body.clone()),
         }
     }
 
@@ -322,10 +332,10 @@ impl Message {
 
     /// Decode this message and wrap it in a fresh RTCM transport frame.
     ///
-    /// Returns [`crate::Error::InvalidInput`] if the encoded body exceeds the frame
-    /// length limit.
+    /// Returns [`crate::Error::InvalidInput`] if the body cannot be encoded (see
+    /// [`Message::encode`]) or exceeds the frame length limit.
     pub fn to_frame(&self) -> Result<Vec<u8>> {
-        encode_frame(&self.encode())
+        encode_frame(&self.encode()?)
     }
 }
 

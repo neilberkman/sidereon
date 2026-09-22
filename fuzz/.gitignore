@@ -17,7 +17,8 @@
 !/corpus/sp3_round_trip/
 /corpus/sp3_round_trip/*
 !/corpus/sp3_round_trip/regression-corrupt-plus-slot-skip-count
-!/corpus/sp3_round_trip/regression-r28-record-skip-count
+!/corpus/sp3_round_trip/regression-r28-extended-slot-round-trip
+!/corpus/sp3_round_trip/regression-leo-record-skip-count
 !/corpus/sp3_round_trip/regression-over-precision-coordinate
 !/corpus/sp3_round_trip/regression-over-precision-epoch-seconds
 !/corpus/sp3_round_trip/regression-sp3-round-trip-no-comment.sp3

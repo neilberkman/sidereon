@@ -117,6 +117,10 @@ pub struct RtkRinexArc {
     /// Number of considered base epochs omitted because the rover civil-time key
     /// was absent or too few usable satellites remained.
     pub skipped_epoch_count: usize,
+    /// Carrier-phase measurements left out of an epoch because their observable
+    /// has no carrier frequency in the file's context; see
+    /// [`RtkRinexUnresolvedCarrier`].
+    pub unresolved_carriers: Vec<RtkRinexUnresolvedCarrier>,
 }
 
 /// One dual-frequency code/carrier selection for one constellation.
@@ -210,6 +214,39 @@ pub struct RtkRinexDualFrequencyArc {
     /// Number of considered base epochs omitted because the rover civil-time key
     /// was absent or too few usable dual-frequency satellites remained.
     pub skipped_epoch_count: usize,
+    /// Carrier-phase measurements left out of an epoch because an observable
+    /// has no carrier frequency in the file's context; see
+    /// [`RtkRinexUnresolvedCarrier`].
+    pub unresolved_carriers: Vec<RtkRinexUnresolvedCarrier>,
+}
+
+/// The receiver whose observation file a reported measurement comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtkRinexReceiver {
+    /// The base receiver's file.
+    Base,
+    /// The rover receiver's file.
+    Rover,
+}
+
+/// A satellite's measurement left out of one epoch because a selected phase
+/// observable has no carrier frequency in the file's context - a GLONASS slot
+/// with no `GLONASS SLOT / FRQ #` channel, or one whose channel is outside the
+/// `-7..=6` FDMA allocation, such as the `7` real IGS headers give `R28`.
+///
+/// Only that satellite is left out of that epoch, as RTKLIB leaves out a
+/// measurement whose carrier frequency is zero; the rest of the epoch and the
+/// arc are built as usual.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RtkRinexUnresolvedCarrier {
+    /// The receiver whose file holds the measurement.
+    pub receiver: RtkRinexReceiver,
+    /// Index of the epoch in that receiver's file.
+    pub epoch_index: usize,
+    /// Satellite token.
+    pub satellite_id: String,
+    /// Full RINEX phase observable code with no carrier frequency.
+    pub observable_code: String,
 }
 
 /// Failure while building RTK arc records from RINEX.
@@ -238,13 +275,6 @@ pub enum RtkRinexArcError {
     NoSignalPairs,
     /// No considered base epoch met the configured usable-satellite threshold.
     NoUsableEpochs,
-    /// A selected phase observable has no carrier frequency in its RINEX context.
-    MissingFrequency {
-        /// Satellite token for the missing carrier frequency.
-        satellite_id: String,
-        /// Full RINEX phase observable code whose frequency is missing.
-        observable_code: String,
-    },
 }
 
 impl core::fmt::Display for RtkRinexArcError {
@@ -264,13 +294,6 @@ impl core::fmt::Display for RtkRinexArcError {
             ),
             Self::NoSignalPairs => write!(f, "RTK RINEX arc requires at least one signal pair"),
             Self::NoUsableEpochs => write!(f, "RTK RINEX arc produced no usable epochs"),
-            Self::MissingFrequency {
-                satellite_id,
-                observable_code,
-            } => write!(
-                f,
-                "RTK RINEX arc has no carrier frequency for {satellite_id} {observable_code}"
-            ),
         }
     }
 }
@@ -316,6 +339,7 @@ pub fn build_rinex_rtk_arc(
     let rover_timeline = rover_obs.header_timeline()?;
     let mut epochs = Vec::new();
     let mut skipped_epoch_count = 0;
+    let mut unresolved_carriers = Vec::new();
     let mut wavelengths_m = BTreeMap::new();
     let mut arcs = CarrierArcs::default();
     // Every carrier each receiver tracks, over every epoch whether or not a
@@ -358,6 +382,11 @@ pub fn build_rinex_rtk_arc(
             base_epoch,
             &filter,
             &pair_by_system,
+            UnresolvedSink {
+                receiver: RtkRinexReceiver::Base,
+                epoch_index: base_index,
+                out: &mut unresolved_carriers,
+            },
         )?;
         let mut rover_values = single_frequency_observations(
             rover_obs,
@@ -365,6 +394,11 @@ pub fn build_rinex_rtk_arc(
             rover_epoch,
             &filter,
             &pair_by_system,
+            UnresolvedSink {
+                receiver: RtkRinexReceiver::Rover,
+                epoch_index: rover_index,
+                out: &mut unresolved_carriers,
+            },
         )?;
         let common = common_keys(base_values.keys(), rover_values.keys());
 
@@ -478,6 +512,7 @@ pub fn build_rinex_rtk_arc(
         wavelengths_m,
         offsets_m,
         skipped_epoch_count,
+        unresolved_carriers,
     })
 }
 
@@ -501,6 +536,7 @@ pub fn build_dual_frequency_rinex_rtk_arc(
     let rover_timeline = rover_obs.header_timeline()?;
     let mut epochs = Vec::new();
     let mut skipped_epoch_count = 0;
+    let mut unresolved_carriers = Vec::new();
     let mut arcs = CarrierArcs::default();
     // Every carrier each receiver tracks, over every epoch.
     let phase_codes = phase_codes_by_system(options.signal_pairs.iter().flat_map(|pair| {
@@ -541,6 +577,11 @@ pub fn build_dual_frequency_rinex_rtk_arc(
             base_epoch,
             &filter,
             &pair_by_system,
+            UnresolvedSink {
+                receiver: RtkRinexReceiver::Base,
+                epoch_index: base_index,
+                out: &mut unresolved_carriers,
+            },
         )?;
         let rover_values = dual_frequency_observations(
             rover_obs,
@@ -548,6 +589,11 @@ pub fn build_dual_frequency_rinex_rtk_arc(
             rover_epoch,
             &filter,
             &pair_by_system,
+            UnresolvedSink {
+                receiver: RtkRinexReceiver::Rover,
+                epoch_index: rover_index,
+                out: &mut unresolved_carriers,
+            },
         )?;
         let common = common_keys(base_values.keys(), rover_values.keys());
 
@@ -672,6 +718,7 @@ pub fn build_dual_frequency_rinex_rtk_arc(
     Ok(RtkRinexDualFrequencyArc {
         epochs,
         skipped_epoch_count,
+        unresolved_carriers,
     })
 }
 
@@ -685,12 +732,32 @@ struct SingleObservation {
     phase_observable: String,
 }
 
+/// Where one receiver's epoch reports the measurements it leaves out for want
+/// of a carrier frequency.
+struct UnresolvedSink<'a> {
+    receiver: RtkRinexReceiver,
+    epoch_index: usize,
+    out: &'a mut Vec<RtkRinexUnresolvedCarrier>,
+}
+
+impl UnresolvedSink<'_> {
+    fn report(&mut self, sat: GnssSatelliteId, observable_code: &str) {
+        self.out.push(RtkRinexUnresolvedCarrier {
+            receiver: self.receiver,
+            epoch_index: self.epoch_index,
+            satellite_id: sat.to_string(),
+            observable_code: observable_code.to_string(),
+        });
+    }
+}
+
 fn single_frequency_observations(
     obs: &RinexObs,
     header: &ObsHeader,
     epoch: &ObsEpoch,
     filter: &ObservationFilter,
     pair_by_system: &BTreeMap<GnssSystem, Vec<RtkRinexSignalPair>>,
+    mut unresolved: UnresolvedSink<'_>,
 ) -> Result<BTreeMap<String, SingleObservation>, RtkRinexArcError> {
     let mut out = BTreeMap::new();
     for (sat, rows) in observation_values(obs, epoch, filter)? {
@@ -698,8 +765,15 @@ fn single_frequency_observations(
             continue;
         };
         let rows_by_code = rows_by_code(rows);
-        let Some(pair) = selected_single_pair(pairs, &rows_by_code) else {
-            continue;
+        let (pair, frequency_hz) = match selected_single_pair(header, sat, pairs, &rows_by_code)? {
+            PairSelection::Selected(selected) => selected,
+            PairSelection::NoneHeld => continue,
+            PairSelection::NoneResolved(observables) => {
+                for observable in observables {
+                    unresolved.report(sat, observable);
+                }
+                continue;
+            }
         };
         let (Some(code_m), Some(phase_cycles)) = (
             row_value(&rows_by_code, &pair.code_observable),
@@ -707,7 +781,6 @@ fn single_frequency_observations(
         ) else {
             continue;
         };
-        let frequency_hz = carrier_frequency_hz(header, sat, &pair.phase_observable)?;
         let wavelength_m = C_M_S / frequency_hz;
         out.insert(
             sat.to_string(),
@@ -726,35 +799,97 @@ fn single_frequency_observations(
     Ok(out)
 }
 
+/// The outcome of choosing the pair a satellite's measurement is formed from.
+enum PairSelection<'a, P, F> {
+    /// The first configured pair whose values the epoch holds and whose
+    /// carriers all resolve, with their frequencies.
+    Selected((&'a P, F)),
+    /// No configured pair's values are all present.
+    NoneHeld,
+    /// Some pair's values are present, but no such pair has every carrier
+    /// resolved; the unresolved phase observables, in pair order.
+    NoneResolved(Vec<&'a str>),
+}
+
+/// Note an unresolved phase observable once, however many pairs name it.
+fn push_once<'a>(unresolved: &mut Vec<&'a str>, observable: &'a str) {
+    if !unresolved.contains(&observable) {
+        unresolved.push(observable);
+    }
+}
+
 /// The pair a satellite's single-frequency measurement is formed from at an
 /// epoch: the first configured pair whose code and carrier phase the epoch both
-/// hold.
+/// hold and whose carrier has a frequency in the header in effect. A pair whose
+/// carrier does not resolve - GLONASS FDMA `L1C` on a channel outside the
+/// allocation, say - gives way to a later one that does, such as the CDMA `L3Q`.
 fn selected_single_pair<'a>(
+    header: &ObsHeader,
+    sat: GnssSatelliteId,
     pairs: &'a [RtkRinexSignalPair],
     rows_by_code: &BTreeMap<String, ObservationValueRow>,
-) -> Option<&'a RtkRinexSignalPair> {
-    pairs.iter().find(|pair| {
-        row_value(rows_by_code, &pair.code_observable).is_some()
-            && row_value(rows_by_code, &pair.phase_observable).is_some()
+) -> Result<PairSelection<'a, RtkRinexSignalPair, f64>, RtkRinexArcError> {
+    let mut unresolved = Vec::new();
+    for pair in pairs {
+        if row_value(rows_by_code, &pair.code_observable).is_none()
+            || row_value(rows_by_code, &pair.phase_observable).is_none()
+        {
+            continue;
+        }
+        match carrier_frequency_hz(header, sat, &pair.phase_observable)? {
+            Some(frequency_hz) => return Ok(PairSelection::Selected((pair, frequency_hz))),
+            None => push_once(&mut unresolved, &pair.phase_observable),
+        }
+    }
+    Ok(if unresolved.is_empty() {
+        PairSelection::NoneHeld
+    } else {
+        PairSelection::NoneResolved(unresolved)
     })
 }
 
 /// The pair a satellite's dual-frequency measurement is formed from at an
 /// epoch: the first configured pair whose two codes and two carrier phases the
-/// epoch all holds.
+/// epoch all holds and whose two carriers both resolve.
 fn selected_dual_pair<'a>(
+    header: &ObsHeader,
+    sat: GnssSatelliteId,
     pairs: &'a [RtkRinexDualSignalPair],
     rows_by_code: &BTreeMap<String, ObservationValueRow>,
-) -> Option<&'a RtkRinexDualSignalPair> {
-    pairs.iter().find(|pair| {
-        [
+) -> Result<PairSelection<'a, RtkRinexDualSignalPair, (f64, f64)>, RtkRinexArcError> {
+    let mut unresolved = Vec::new();
+    for pair in pairs {
+        let held = [
             &pair.code1_observable,
             &pair.phase1_observable,
             &pair.code2_observable,
             &pair.phase2_observable,
         ]
         .iter()
-        .all(|code| row_value(rows_by_code, code).is_some())
+        .all(|code| row_value(rows_by_code, code).is_some());
+        if !held {
+            continue;
+        }
+        let f1 = carrier_frequency_hz(header, sat, &pair.phase1_observable)?;
+        let f2 = carrier_frequency_hz(header, sat, &pair.phase2_observable)?;
+        match (f1, f2) {
+            (Some(f1_hz), Some(f2_hz)) => {
+                return Ok(PairSelection::Selected((pair, (f1_hz, f2_hz))));
+            }
+            _ => {
+                if f1.is_none() {
+                    push_once(&mut unresolved, &pair.phase1_observable);
+                }
+                if f2.is_none() {
+                    push_once(&mut unresolved, &pair.phase2_observable);
+                }
+            }
+        }
+    }
+    Ok(if unresolved.is_empty() {
+        PairSelection::NoneHeld
+    } else {
+        PairSelection::NoneResolved(unresolved)
     })
 }
 
@@ -767,6 +902,7 @@ fn dual_frequency_observations(
     epoch: &ObsEpoch,
     filter: &ObservationFilter,
     pair_by_system: &BTreeMap<GnssSystem, Vec<RtkRinexDualSignalPair>>,
+    mut unresolved: UnresolvedSink<'_>,
 ) -> Result<BTreeMap<String, DualObservationOnPhases>, RtkRinexArcError> {
     let mut out = BTreeMap::new();
     for (sat, rows) in observation_values(obs, epoch, filter)? {
@@ -774,8 +910,15 @@ fn dual_frequency_observations(
             continue;
         };
         let rows_by_code = rows_by_code(rows);
-        let Some(pair) = selected_dual_pair(pairs, &rows_by_code) else {
-            continue;
+        let (pair, (f1_hz, f2_hz)) = match selected_dual_pair(header, sat, pairs, &rows_by_code)? {
+            PairSelection::Selected(selected) => selected,
+            PairSelection::NoneHeld => continue,
+            PairSelection::NoneResolved(observables) => {
+                for observable in observables {
+                    unresolved.report(sat, observable);
+                }
+                continue;
+            }
         };
         let (Some(p1_m), Some(p2_m), Some(phi1_cycles), Some(phi2_cycles)) = (
             row_value(&rows_by_code, &pair.code1_observable),
@@ -785,8 +928,6 @@ fn dual_frequency_observations(
         ) else {
             continue;
         };
-        let f1_hz = carrier_frequency_hz(header, sat, &pair.phase1_observable)?;
-        let f2_hz = carrier_frequency_hz(header, sat, &pair.phase2_observable)?;
         out.insert(
             sat.to_string(),
             (
@@ -834,8 +975,12 @@ fn phase_codes_by_system<'a>(
 /// was measured with it or a measurement was formed.
 #[derive(Debug, Default)]
 struct CarrierHistory {
-    /// The epoch index each frequency starts at, with the frequency's bits.
-    frequency_starts: Vec<(usize, u64)>,
+    /// The epoch index each frequency starts at, with the frequency's bits, or
+    /// `None` from an epoch whose phase is recorded but whose carrier has no
+    /// frequency in the header in effect there. An unresolved stretch is an arc
+    /// of its own, so a carrier that returns to its earlier frequency after one
+    /// is not taken for the carrier it was before.
+    frequency_starts: Vec<(usize, Option<u64>)>,
     /// The epoch indices whose loss of lock indicator is set.
     losses: Vec<usize>,
 }
@@ -895,7 +1040,7 @@ fn receiver_carriers(
                 let key = (sat.to_string(), code.clone());
                 if row.value.is_some() {
                     if let Ok(frequency_hz) = carrier_frequency_hz(header, sat, code) {
-                        let bits = frequency_hz.to_bits();
+                        let bits = frequency_hz.map(f64::to_bits);
                         let history = carriers.entry(key.clone()).or_default();
                         if history
                             .frequency_starts
@@ -1059,19 +1204,19 @@ fn row_value(rows: &BTreeMap<String, ObservationValueRow>, code: &str) -> Option
     rows.get(code).and_then(|row| row.value)
 }
 
+/// The carrier frequency of a phase observable in the file's context, or `None`
+/// when the context gives it none (a GLONASS slot with no channel, or a
+/// channel outside the FDMA allocation).
 fn carrier_frequency_hz(
     header: &ObsHeader,
     sat: GnssSatelliteId,
     observable_code: &str,
-) -> Result<f64, RtkRinexArcError> {
+) -> Result<Option<f64>, RtkRinexArcError> {
     let glonass_channel = (sat.system == GnssSystem::Glonass)
         .then(|| header.glonass_slots.get(&sat.prn).copied())
         .flatten();
-    observation_frequency_hz(sat.system, observable_code, header.version, glonass_channel)?
-        .ok_or_else(|| RtkRinexArcError::MissingFrequency {
-            satellite_id: sat.to_string(),
-            observable_code: observable_code.to_string(),
-        })
+    observation_frequency_hz(sat.system, observable_code, header.version, glonass_channel)
+        .map_err(RtkRinexArcError::from)
 }
 
 fn transmit_epoch_j2000_s(receive_epoch_j2000_s: f64, code_m: f64) -> f64 {
@@ -1336,6 +1481,163 @@ mod tests {
             );
         }
     }
+    /// R01 on channel -7 and R28 on the channel 7 real IGS headers state for it,
+    /// both observed at one epoch.
+    fn r28_channel_7_text(types: &str, r01: &str, r28: &str) -> String {
+        [
+            header_line(
+                "     3.05           OBSERVATION DATA    R (GLONASS)",
+                "RINEX VERSION / TYPE",
+            ),
+            header_line(types, "SYS / # / OBS TYPES"),
+            header_line("  2 R01 -7 R28  7", "GLONASS SLOT / FRQ #"),
+            header_line("", "END OF HEADER"),
+            "> 2020 01 01 00 00  0.0000000  0  2".to_string(),
+            r01.to_string(),
+            r28.to_string(),
+        ]
+        .join("\n")
+    }
+
+    /// A satellite whose phase observable has no carrier frequency - R28 on
+    /// channel 7, outside the FDMA allocation - is left out of its epoch and
+    /// reported for each receiver, and the arc is built from the other
+    /// satellites. It used to fail the whole arc with `MissingFrequency`.
+    #[test]
+    fn an_unresolved_carrier_leaves_out_one_satellite_not_the_arc() {
+        let record = |sat: &str| format!("{sat}{:14.3}  {:14.3}", 20_000_000.0, 100.0);
+        let text = r28_channel_7_text("R    2 C1C L1C", &record("R01"), &record("R28"));
+        let obs = RinexObs::parse(&text).expect("parse");
+        assert_eq!(obs.header().glonass_slots.get(&28).copied(), Some(7));
+        let options = RtkRinexArcOptions::new(
+            vec![RtkRinexSignalPair {
+                system: GnssSystem::Glonass,
+                code_observable: "C1C".to_string(),
+                phase_observable: "L1C".to_string(),
+            }],
+            None,
+            1,
+            false,
+        );
+        let arc = build_rinex_rtk_arc(&FixedSource, &obs, &obs, &options)
+            .expect("the arc is built from R01");
+        assert_eq!(arc.epochs.len(), 1);
+        assert_eq!(arc.epochs[0].base.len(), 1);
+        assert_eq!(arc.epochs[0].base[0].ambiguity_id, "R01");
+        let expected: Vec<RtkRinexUnresolvedCarrier> =
+            [RtkRinexReceiver::Base, RtkRinexReceiver::Rover]
+                .into_iter()
+                .map(|receiver| RtkRinexUnresolvedCarrier {
+                    receiver,
+                    epoch_index: 0,
+                    satellite_id: "R28".to_string(),
+                    observable_code: "L1C".to_string(),
+                })
+                .collect();
+        assert_eq!(arc.unresolved_carriers, expected);
+
+        let dual_record = |sat: &str| {
+            format!(
+                "{sat}{:14.3}  {:14.3}  {:14.3}  {:14.3}",
+                20_000_000.0, 100.0, 20_000_001.0, 90.0
+            )
+        };
+        let text = r28_channel_7_text(
+            "R    4 C1C L1C C2C L2C",
+            &dual_record("R01"),
+            &dual_record("R28"),
+        );
+        let obs = RinexObs::parse(&text).expect("parse");
+        let options = RtkRinexDualArcOptions::new(
+            vec![RtkRinexDualSignalPair {
+                system: GnssSystem::Glonass,
+                code1_observable: "C1C".to_string(),
+                phase1_observable: "L1C".to_string(),
+                code2_observable: "C2C".to_string(),
+                phase2_observable: "L2C".to_string(),
+            }],
+            None,
+            1,
+            false,
+        );
+        let arc = build_dual_frequency_rinex_rtk_arc(&FixedSource, &obs, &obs, &options)
+            .expect("the dual arc is built from R01");
+        assert_eq!(arc.epochs.len(), 1);
+        assert_eq!(arc.epochs[0].observations.len(), 1);
+        assert_eq!(arc.epochs[0].observations[0].base.ambiguity_id, "R01");
+        let reported: Vec<(RtkRinexReceiver, &str, &str)> = arc
+            .unresolved_carriers
+            .iter()
+            .map(|item| {
+                (
+                    item.receiver,
+                    item.satellite_id.as_str(),
+                    item.observable_code.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            reported,
+            vec![
+                (RtkRinexReceiver::Base, "R28", "L1C"),
+                (RtkRinexReceiver::Base, "R28", "L2C"),
+                (RtkRinexReceiver::Rover, "R28", "L1C"),
+                (RtkRinexReceiver::Rover, "R28", "L2C"),
+            ]
+        );
+    }
+
+    /// A satellite whose first configured pair has no carrier frequency is
+    /// formed from a later pair whose carrier resolves, and is not reported:
+    /// R28 on channel 7 has no FDMA G1 carrier, but its CDMA G3 `L3Q` needs no
+    /// channel. Only a satellite no configured pair resolves for is reported.
+    #[test]
+    fn a_later_pair_with_a_resolvable_carrier_is_used_before_reporting() {
+        let record = |sat: &str| {
+            format!(
+                "{sat}{:14.3}  {:14.3}  {:14.3}  {:14.3}",
+                20_000_000.0, 100.0, 20_000_002.0, 80.0
+            )
+        };
+        let text = r28_channel_7_text("R    4 C1C L1C C3Q L3Q", &record("R01"), &record("R28"));
+        let obs = RinexObs::parse(&text).expect("parse");
+        let options = RtkRinexArcOptions::new(
+            vec![
+                RtkRinexSignalPair {
+                    system: GnssSystem::Glonass,
+                    code_observable: "C1C".to_string(),
+                    phase_observable: "L1C".to_string(),
+                },
+                RtkRinexSignalPair {
+                    system: GnssSystem::Glonass,
+                    code_observable: "C3Q".to_string(),
+                    phase_observable: "L3Q".to_string(),
+                },
+            ],
+            None,
+            1,
+            false,
+        );
+        let arc = build_rinex_rtk_arc(&FixedSource, &obs, &obs, &options).expect("arc");
+        assert!(
+            arc.unresolved_carriers.is_empty(),
+            "{:?}",
+            arc.unresolved_carriers
+        );
+        let base = &arc.epochs[0].base;
+        let satellites: Vec<&str> = base.iter().map(|o| o.satellite_id.as_str()).collect();
+        assert_eq!(satellites, ["R01", "R28"]);
+        let r01_scale = arc.wavelengths_m[&base[0].ambiguity_id];
+        assert!((r01_scale - wavelength_m(-7)).abs() < 1e-12);
+        let r28_scale = arc.wavelengths_m[&base[1].ambiguity_id];
+        let g3_wavelength = C_M_S
+            / observation_frequency_hz(GnssSystem::Glonass, "L3Q", 3.05, None)
+                .expect("frequency")
+                .expect("GLONASS G3 is a fixed CDMA carrier");
+        assert!((r28_scale - g3_wavelength).abs() < 1e-12);
+        assert!((base[1].phase_m / r28_scale - 80.0).abs() < 1e-9);
+    }
+
     /// R01 on each listed channel in turn, one epoch every ten seconds, each
     /// epoch after a flag 4 event re-declaring the slot.
     fn channel_sequence_text(types: &str, record: &str, channels: &[i8]) -> String {
@@ -1367,69 +1669,75 @@ mod tests {
     fn a_channel_change_in_an_epoch_left_out_still_starts_a_new_ambiguity() {
         // The base changes channel at the middle epoch and back; the rover does
         // not, so the middle epoch holds no single difference and is left out.
-        // The ambiguity after it is not the one before it.
-        let single_record = format!("R01{:14.3}  {:14.3}", 20_000_000.0, 100.0);
-        let base = RinexObs::parse(&channel_sequence_text(
-            "R    2 C1C L1C",
-            &single_record,
-            &[-7, 6, -7],
-        ))
-        .expect("parse base");
-        let rover = RinexObs::parse(&channel_sequence_text(
-            "R    2 C1C L1C",
-            &single_record,
-            &[-7, -7, -7],
-        ))
-        .expect("parse rover");
-        let options = RtkRinexArcOptions::new(
-            vec![RtkRinexSignalPair {
-                system: GnssSystem::Glonass,
-                code_observable: "C1C".to_string(),
-                phase_observable: "L1C".to_string(),
-            }],
-            None,
-            1,
-            false,
-        );
-        let arc = build_rinex_rtk_arc(&FixedSource, &base, &rover, &options).expect("arc");
-        assert_eq!(arc.epochs.len(), 2);
-        assert_ne!(
-            arc.epochs[0].base[0].ambiguity_id,
-            arc.epochs[1].base[0].ambiguity_id
-        );
-        for epoch in &arc.epochs {
-            let scale = arc.wavelengths_m[&epoch.base[0].ambiguity_id];
-            assert!((scale - wavelength_m(-7)).abs() < 1e-12);
-        }
-
-        let dual_record = format!(
-            "R01{:14.3}  {:14.3}  {:14.3}  {:14.3}",
-            20_000_000.0, 100.0, 20_000_001.0, 90.0
-        );
-        let types = "R    4 C1C L1C C2C L2C";
-        let base = RinexObs::parse(&channel_sequence_text(types, &dual_record, &[-7, 6, -7]))
+        // The ambiguity after it is not the one before it. Channel 7 is outside
+        // the FDMA allocation, so the middle carrier has no frequency at all:
+        // that unresolved stretch breaks the ambiguity as a channel change does,
+        // rather than letting the return to -7 continue the first arc.
+        for base_channels in [[-7i8, 6, -7], [-7, 7, -7]] {
+            let single_record = format!("R01{:14.3}  {:14.3}", 20_000_000.0, 100.0);
+            let base = RinexObs::parse(&channel_sequence_text(
+                "R    2 C1C L1C",
+                &single_record,
+                &base_channels,
+            ))
             .expect("parse base");
-        let rover = RinexObs::parse(&channel_sequence_text(types, &dual_record, &[-7, -7, -7]))
+            let rover = RinexObs::parse(&channel_sequence_text(
+                "R    2 C1C L1C",
+                &single_record,
+                &[-7, -7, -7],
+            ))
             .expect("parse rover");
-        let options = RtkRinexDualArcOptions::new(
-            vec![RtkRinexDualSignalPair {
-                system: GnssSystem::Glonass,
-                code1_observable: "C1C".to_string(),
-                phase1_observable: "L1C".to_string(),
-                code2_observable: "C2C".to_string(),
-                phase2_observable: "L2C".to_string(),
-            }],
-            None,
-            1,
-            false,
-        );
-        let arc =
-            build_dual_frequency_rinex_rtk_arc(&FixedSource, &base, &rover, &options).expect("arc");
-        assert_eq!(arc.epochs.len(), 2);
-        assert_ne!(
-            arc.epochs[0].observations[0].base.ambiguity_id,
-            arc.epochs[1].observations[0].base.ambiguity_id
-        );
+            let options = RtkRinexArcOptions::new(
+                vec![RtkRinexSignalPair {
+                    system: GnssSystem::Glonass,
+                    code_observable: "C1C".to_string(),
+                    phase_observable: "L1C".to_string(),
+                }],
+                None,
+                1,
+                false,
+            );
+            let arc = build_rinex_rtk_arc(&FixedSource, &base, &rover, &options).expect("arc");
+            assert_eq!(arc.epochs.len(), 2, "{base_channels:?}");
+            assert_ne!(
+                arc.epochs[0].base[0].ambiguity_id, arc.epochs[1].base[0].ambiguity_id,
+                "{base_channels:?}"
+            );
+            for epoch in &arc.epochs {
+                let scale = arc.wavelengths_m[&epoch.base[0].ambiguity_id];
+                assert!((scale - wavelength_m(-7)).abs() < 1e-12);
+            }
+
+            let dual_record = format!(
+                "R01{:14.3}  {:14.3}  {:14.3}  {:14.3}",
+                20_000_000.0, 100.0, 20_000_001.0, 90.0
+            );
+            let types = "R    4 C1C L1C C2C L2C";
+            let base = RinexObs::parse(&channel_sequence_text(types, &dual_record, &base_channels))
+                .expect("parse base");
+            let rover = RinexObs::parse(&channel_sequence_text(types, &dual_record, &[-7, -7, -7]))
+                .expect("parse rover");
+            let options = RtkRinexDualArcOptions::new(
+                vec![RtkRinexDualSignalPair {
+                    system: GnssSystem::Glonass,
+                    code1_observable: "C1C".to_string(),
+                    phase1_observable: "L1C".to_string(),
+                    code2_observable: "C2C".to_string(),
+                    phase2_observable: "L2C".to_string(),
+                }],
+                None,
+                1,
+                false,
+            );
+            let arc = build_dual_frequency_rinex_rtk_arc(&FixedSource, &base, &rover, &options)
+                .expect("arc");
+            assert_eq!(arc.epochs.len(), 2, "{base_channels:?}");
+            assert_ne!(
+                arc.epochs[0].observations[0].base.ambiguity_id,
+                arc.epochs[1].observations[0].base.ambiguity_id,
+                "{base_channels:?}"
+            );
+        }
     }
 
     /// R01 on each listed channel in turn, one epoch every ten seconds, each

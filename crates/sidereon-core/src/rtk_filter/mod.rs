@@ -89,7 +89,7 @@ use normal::{
 pub use rinex_arc::{
     build_dual_frequency_rinex_rtk_arc, build_rinex_rtk_arc, RtkRinexArc, RtkRinexArcError,
     RtkRinexArcOptions, RtkRinexDualArcOptions, RtkRinexDualFrequencyArc, RtkRinexDualSignalPair,
-    RtkRinexSignalPair,
+    RtkRinexReceiver, RtkRinexSignalPair, RtkRinexUnresolvedCarrier,
 };
 #[cfg(test)]
 use rows::DdRow;

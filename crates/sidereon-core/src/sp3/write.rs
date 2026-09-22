@@ -16,8 +16,9 @@
 //! that says something other than what the product holds. Every value is checked
 //! against the fixed columns that carry it: text fields must be printable ASCII
 //! no wider than their columns and must survive the reader's trim unchanged, the
-//! header satellite list must agree with the records stored against it, and the
-//! per-epoch arrays must be parallel to the epoch list.
+//! header satellite list must agree with the records stored against it, each
+//! header satellite must have a `01`..`99` token that reads back as itself, and
+//! the per-epoch arrays must be parallel to the epoch list.
 //!
 //! Every numeric field is checked by writing it: the column is formatted, read
 //! back the way [`Sp3::parse`] reads it, and the result - after the unit factor
@@ -364,6 +365,16 @@ pub enum Sp3WriteError {
         /// The satellite declared more than once.
         sat: GnssSatelliteId,
     },
+    /// A header satellite has no three-column token that reads back as the same
+    /// satellite. SP3 numbers satellites `01` through `99` under every system
+    /// letter; [`GnssSatelliteId::new`] enforces that range, but the fields are
+    /// public, so a `prn` of `0` or of `100` and up can reach the writer. `G00`
+    /// would read back as an unrepresentable token and be skipped, and `G100`
+    /// does not fit the column.
+    SatelliteNotRepresentable {
+        /// The satellite as the product holds it.
+        sat: GnssSatelliteId,
+    },
     /// A stored per-epoch array is not parallel to the epoch list.
     EpochArrayLengthMismatch {
         /// The product array that does not line up.
@@ -572,6 +583,11 @@ impl core::fmt::Display for Sp3WriteError {
             Self::DuplicateSatellite { sat } => {
                 write!(f, "SP3 header satellite list names {sat} more than once")
             }
+            Self::SatelliteNotRepresentable { sat } => write!(
+                f,
+                "SP3 header satellite {:?} {} has no 01..99 token that reads back as itself",
+                sat.system, sat.prn
+            ),
             Self::EpochArrayLengthMismatch {
                 field,
                 epochs,
@@ -716,13 +732,16 @@ impl Sp3 {
             if !declared.insert(*sat) {
                 return Err(Sp3WriteError::DuplicateSatellite { sat: *sat });
             }
+            // The token is checked by reading it back the way the `+` line
+            // parser does. A satellite whose fields bypassed the constructor
+            // (`prn` 0, or 100 and up) either spills out of its three columns
+            // or reads back as an unrepresentable token and is skipped, and
+            // either way the declaration would not come back.
             let token = sat.to_string();
-            if token.len() != SATELLITE_TOKEN_COLUMNS {
-                return Err(Sp3WriteError::TextTooWide {
-                    field: "satellite id",
-                    columns: SATELLITE_TOKEN_COLUMNS,
-                    value: token,
-                });
+            if token.len() != SATELLITE_TOKEN_COLUMNS
+                || super::parse_sv_token(&token, Some(h.version)) != Some(*sat)
+            {
+                return Err(Sp3WriteError::SatelliteNotRepresentable { sat: *sat });
             }
         }
 

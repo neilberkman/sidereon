@@ -118,7 +118,11 @@ impl BroadcastStore {
     }
 
     /// The GLONASS FDMA frequency channels carried by the held broadcast
-    /// records, keyed by satellite PRN/slot (`[-7, 6]`).
+    /// records, keyed by satellite PRN/slot, as the records state them. A
+    /// channel outside the `-7..=6` allocation is kept, as the observation
+    /// header keeps one, and consumers that resolve a carrier check the
+    /// allocation; a stated channel too wide for `i8` names no FDMA channel at
+    /// all and is left out of the map rather than wrapped onto another one.
     ///
     /// Lets a consumer source the per-satellite channel numbers - needed to
     /// scale the GLONASS ionospheric delay per carrier - from the broadcast
@@ -130,7 +134,11 @@ impl BroadcastStore {
     pub fn glonass_frequency_channels(&self) -> std::collections::BTreeMap<u8, i8> {
         self.glonass
             .iter()
-            .map(|r| (r.satellite_id.prn, r.freq_channel as i8))
+            .filter_map(|r| {
+                i8::try_from(r.freq_channel)
+                    .ok()
+                    .map(|channel| (r.satellite_id.prn, channel))
+            })
             .collect()
     }
 

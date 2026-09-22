@@ -176,6 +176,13 @@ pub(crate) fn ssr_kind(message_number: u16) -> Option<(GnssSystem, SsrKind)> {
         1244 => Some((GnssSystem::Galileo, SsrKind::Ura)),
         1245 => Some((GnssSystem::Galileo, SsrKind::HighRateClock)),
         1267 => Some((GnssSystem::Galileo, SsrKind::PhaseBias)),
+        1246 => Some((GnssSystem::Qzss, SsrKind::Orbit)),
+        1247 => Some((GnssSystem::Qzss, SsrKind::Clock)),
+        1248 => Some((GnssSystem::Qzss, SsrKind::CodeBias)),
+        1249 => Some((GnssSystem::Qzss, SsrKind::CombinedOrbitClock)),
+        1250 => Some((GnssSystem::Qzss, SsrKind::Ura)),
+        1251 => Some((GnssSystem::Qzss, SsrKind::HighRateClock)),
+        1268 => Some((GnssSystem::Qzss, SsrKind::PhaseBias)),
         1258 => Some((GnssSystem::BeiDou, SsrKind::Orbit)),
         1259 => Some((GnssSystem::BeiDou, SsrKind::Clock)),
         1260 => Some((GnssSystem::BeiDou, SsrKind::CodeBias)),
@@ -207,6 +214,7 @@ impl SsrMessage {
             ))
         })?;
         let header = read_header(&mut r, system, kind)?;
+        let sat_bits = satellite_id_bits(system, message_number);
         let count = usize::from(header.satellite_count);
         let mut orbit = Vec::new();
         let mut clock = Vec::new();
@@ -218,20 +226,20 @@ impl SsrMessage {
             SsrKind::Orbit => {
                 orbit.reserve(count);
                 for _ in 0..count {
-                    orbit.push(read_orbit_record(&mut r, system)?);
+                    orbit.push(read_orbit_record(&mut r, system, sat_bits)?);
                 }
             }
             SsrKind::Clock => {
                 clock.reserve(count);
                 for _ in 0..count {
-                    clock.push(read_clock_record(&mut r, system)?);
+                    clock.push(read_clock_record(&mut r, sat_bits)?);
                 }
             }
             SsrKind::CombinedOrbitClock => {
                 orbit.reserve(count);
                 clock.reserve(count);
                 for _ in 0..count {
-                    let rec = read_orbit_record(&mut r, system)?;
+                    let rec = read_orbit_record(&mut r, system, sat_bits)?;
                     let satellite_id = rec.satellite_id;
                     orbit.push(rec);
                     clock.push(SsrClockRecord {
@@ -245,7 +253,7 @@ impl SsrMessage {
             SsrKind::Ura => {
                 ura.reserve(count);
                 for _ in 0..count {
-                    let satellite_id = r.u(satellite_id_bits(system))? as u8;
+                    let satellite_id = r.u(sat_bits)? as u8;
                     let index = r.u(6)? as u8;
                     ura.push((satellite_id, index));
                 }
@@ -254,7 +262,7 @@ impl SsrMessage {
                 clock.reserve(count);
                 for _ in 0..count {
                     clock.push(SsrClockRecord {
-                        satellite_id: r.u(satellite_id_bits(system))? as u8,
+                        satellite_id: r.u(sat_bits)? as u8,
                         c0: r.i(22)? as i32,
                         c1: 0,
                         c2: 0,
@@ -264,13 +272,13 @@ impl SsrMessage {
             SsrKind::CodeBias => {
                 code_bias.reserve(count);
                 for _ in 0..count {
-                    code_bias.push(read_code_bias_record(&mut r, system)?);
+                    code_bias.push(read_code_bias_record(&mut r, sat_bits)?);
                 }
             }
             SsrKind::PhaseBias => {
                 phase_bias.reserve(count);
                 for _ in 0..count {
-                    phase_bias.push(read_phase_bias_record(&mut r, system)?);
+                    phase_bias.push(read_phase_bias_record(&mut r, sat_bits)?);
                 }
             }
             SsrKind::Vtec => {
@@ -301,7 +309,27 @@ impl SsrMessage {
     }
 
     /// Encode this message back into an RTCM body.
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when a record's satellite field does not fit the
+    /// message's satellite field width: five bits for GLONASS, four for the
+    /// native QZSS messages (1246..1251, 1268), six otherwise. Writing it would
+    /// keep only its low bits and name another satellite.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        let sat_bits = satellite_id_bits(self.system, self.message_number);
+        let widest = (1u64 << sat_bits) - 1;
+        if let Some(satellite_id) = self
+            .satellite_fields()
+            .into_iter()
+            .find(|id| u64::from(*id) > widest)
+        {
+            return Err(Error::InvalidInput(format!(
+                "RTCM SSR {} satellite id {satellite_id} does not fit the {sat_bits}-bit \
+                 satellite field (0..={widest})",
+                self.message_number
+            )));
+        }
         let mut w = BitWriter::new();
         w.push_u(u64::from(self.message_number), 12);
         write_header(&mut w, self.system, &self.header, self.kind);
@@ -309,17 +337,17 @@ impl SsrMessage {
         match self.kind {
             SsrKind::Orbit => {
                 for rec in &self.orbit {
-                    write_orbit_record(&mut w, self.system, rec);
+                    write_orbit_record(&mut w, self.system, sat_bits, rec);
                 }
             }
             SsrKind::Clock => {
                 for rec in &self.clock {
-                    write_clock_record(&mut w, self.system, rec);
+                    write_clock_record(&mut w, sat_bits, rec);
                 }
             }
             SsrKind::CombinedOrbitClock => {
                 for (orbit, clock) in self.orbit.iter().zip(&self.clock) {
-                    write_orbit_record(&mut w, self.system, orbit);
+                    write_orbit_record(&mut w, self.system, sat_bits, orbit);
                     w.push_i(i64::from(clock.c0), 22);
                     w.push_i(i64::from(clock.c1), 21);
                     w.push_i(i64::from(clock.c2), 27);
@@ -327,24 +355,24 @@ impl SsrMessage {
             }
             SsrKind::Ura => {
                 for &(satellite_id, index) in &self.ura {
-                    w.push_u(u64::from(satellite_id), satellite_id_bits(self.system));
+                    w.push_u(u64::from(satellite_id), sat_bits);
                     w.push_u(u64::from(index), 6);
                 }
             }
             SsrKind::HighRateClock => {
                 for rec in &self.clock {
-                    w.push_u(u64::from(rec.satellite_id), satellite_id_bits(self.system));
+                    w.push_u(u64::from(rec.satellite_id), sat_bits);
                     w.push_i(i64::from(rec.c0), 22);
                 }
             }
             SsrKind::CodeBias => {
                 for rec in &self.code_bias {
-                    write_code_bias_record(&mut w, self.system, rec);
+                    write_code_bias_record(&mut w, sat_bits, rec);
                 }
             }
             SsrKind::PhaseBias => {
                 for rec in &self.phase_bias {
-                    write_phase_bias_record(&mut w, self.system, rec);
+                    write_phase_bias_record(&mut w, sat_bits, rec);
                 }
             }
             SsrKind::Vtec => {}
@@ -353,7 +381,27 @@ impl SsrMessage {
         for &bit in &self.padding_bits {
             w.push_flag(bit);
         }
-        w.into_bytes()
+        Ok(w.into_bytes())
+    }
+
+    /// Every satellite field the encoder writes for this message's kind.
+    fn satellite_fields(&self) -> Vec<u8> {
+        match self.kind {
+            SsrKind::Orbit => self.orbit.iter().map(|r| r.satellite_id).collect(),
+            SsrKind::Clock | SsrKind::HighRateClock => {
+                self.clock.iter().map(|r| r.satellite_id).collect()
+            }
+            SsrKind::CombinedOrbitClock => self
+                .orbit
+                .iter()
+                .zip(&self.clock)
+                .map(|(orbit, _)| orbit.satellite_id)
+                .collect(),
+            SsrKind::Ura => self.ura.iter().map(|&(id, _)| id).collect(),
+            SsrKind::CodeBias => self.code_bias.iter().map(|r| r.satellite_id).collect(),
+            SsrKind::PhaseBias => self.phase_bias.iter().map(|r| r.satellite_id).collect(),
+            SsrKind::Vtec => Vec::new(),
+        }
     }
 }
 
@@ -416,9 +464,13 @@ fn write_header(w: &mut BitWriter, system: GnssSystem, header: &SsrHeader, kind:
     w.push_u(u64::from(header.satellite_count), 6);
 }
 
-fn read_orbit_record(r: &mut BitReader<'_>, system: GnssSystem) -> DecodeResult<SsrOrbitRecord> {
+fn read_orbit_record(
+    r: &mut BitReader<'_>,
+    system: GnssSystem,
+    sat_bits: usize,
+) -> DecodeResult<SsrOrbitRecord> {
     Ok(SsrOrbitRecord {
-        satellite_id: r.u(satellite_id_bits(system))? as u8,
+        satellite_id: r.u(sat_bits)? as u8,
         iode: r.u(iode_bits(system))? as u32,
         delta_radial: r.i(22)? as i32,
         delta_along: r.i(20)? as i32,
@@ -429,8 +481,13 @@ fn read_orbit_record(r: &mut BitReader<'_>, system: GnssSystem) -> DecodeResult<
     })
 }
 
-fn write_orbit_record(w: &mut BitWriter, system: GnssSystem, rec: &SsrOrbitRecord) {
-    w.push_u(u64::from(rec.satellite_id), satellite_id_bits(system));
+fn write_orbit_record(
+    w: &mut BitWriter,
+    system: GnssSystem,
+    sat_bits: usize,
+    rec: &SsrOrbitRecord,
+) {
+    w.push_u(u64::from(rec.satellite_id), sat_bits);
     w.push_u(u64::from(rec.iode), iode_bits(system));
     w.push_i(i64::from(rec.delta_radial), 22);
     w.push_i(i64::from(rec.delta_along), 20);
@@ -440,17 +497,17 @@ fn write_orbit_record(w: &mut BitWriter, system: GnssSystem, rec: &SsrOrbitRecor
     w.push_i(i64::from(rec.dot_delta_cross), 19);
 }
 
-fn read_clock_record(r: &mut BitReader<'_>, system: GnssSystem) -> DecodeResult<SsrClockRecord> {
+fn read_clock_record(r: &mut BitReader<'_>, sat_bits: usize) -> DecodeResult<SsrClockRecord> {
     Ok(SsrClockRecord {
-        satellite_id: r.u(satellite_id_bits(system))? as u8,
+        satellite_id: r.u(sat_bits)? as u8,
         c0: r.i(22)? as i32,
         c1: r.i(21)? as i32,
         c2: r.i(27)? as i32,
     })
 }
 
-fn write_clock_record(w: &mut BitWriter, system: GnssSystem, rec: &SsrClockRecord) {
-    w.push_u(u64::from(rec.satellite_id), satellite_id_bits(system));
+fn write_clock_record(w: &mut BitWriter, sat_bits: usize, rec: &SsrClockRecord) {
+    w.push_u(u64::from(rec.satellite_id), sat_bits);
     w.push_i(i64::from(rec.c0), 22);
     w.push_i(i64::from(rec.c1), 21);
     w.push_i(i64::from(rec.c2), 27);
@@ -458,9 +515,9 @@ fn write_clock_record(w: &mut BitWriter, system: GnssSystem, rec: &SsrClockRecor
 
 fn read_code_bias_record(
     r: &mut BitReader<'_>,
-    system: GnssSystem,
+    sat_bits: usize,
 ) -> DecodeResult<SsrCodeBiasRecord> {
-    let satellite_id = r.u(satellite_id_bits(system))? as u8;
+    let satellite_id = r.u(sat_bits)? as u8;
     let count = r.u(5)? as usize;
     let mut biases = Vec::with_capacity(count);
     for _ in 0..count {
@@ -474,8 +531,8 @@ fn read_code_bias_record(
     })
 }
 
-fn write_code_bias_record(w: &mut BitWriter, system: GnssSystem, rec: &SsrCodeBiasRecord) {
-    w.push_u(u64::from(rec.satellite_id), satellite_id_bits(system));
+fn write_code_bias_record(w: &mut BitWriter, sat_bits: usize, rec: &SsrCodeBiasRecord) {
+    w.push_u(u64::from(rec.satellite_id), sat_bits);
     w.push_u(rec.biases.len() as u64, 5);
     for &(signal_id, bias) in &rec.biases {
         w.push_u(u64::from(signal_id), 5);
@@ -485,9 +542,9 @@ fn write_code_bias_record(w: &mut BitWriter, system: GnssSystem, rec: &SsrCodeBi
 
 fn read_phase_bias_record(
     r: &mut BitReader<'_>,
-    system: GnssSystem,
+    sat_bits: usize,
 ) -> DecodeResult<SsrPhaseBiasRecord> {
-    let satellite_id = r.u(satellite_id_bits(system))? as u8;
+    let satellite_id = r.u(sat_bits)? as u8;
     let count = r.u(5)? as usize;
     let yaw_angle = r.u(9)? as u16;
     let yaw_rate = r.i(8)? as i8;
@@ -509,8 +566,8 @@ fn read_phase_bias_record(
     })
 }
 
-fn write_phase_bias_record(w: &mut BitWriter, system: GnssSystem, rec: &SsrPhaseBiasRecord) {
-    w.push_u(u64::from(rec.satellite_id), satellite_id_bits(system));
+fn write_phase_bias_record(w: &mut BitWriter, sat_bits: usize, rec: &SsrPhaseBiasRecord) {
+    w.push_u(u64::from(rec.satellite_id), sat_bits);
     w.push_u(rec.biases.len() as u64, 5);
     w.push_u(u64::from(rec.yaw_angle), 9);
     w.push_i(i64::from(rec.yaw_rate), 8);
@@ -523,11 +580,21 @@ fn write_phase_bias_record(w: &mut BitWriter, system: GnssSystem, rec: &SsrPhase
     }
 }
 
-fn satellite_id_bits(system: GnssSystem) -> usize {
+/// Width of an SSR record's satellite field: five bits for GLONASS, four for
+/// the native QZSS messages (1246..1251 and the 1268 phase bias), six
+/// otherwise - the widths RTKLIB `decode_ssr1`..`decode_ssr7` read.
+fn satellite_id_bits(system: GnssSystem, message_number: u16) -> usize {
     match system {
         GnssSystem::Glonass => 5,
+        GnssSystem::Qzss if is_native_qzss_ssr(message_number) => 4,
         _ => 6,
     }
+}
+
+/// Whether a message number is a native RTCM QZSS SSR message, whose satellite
+/// field is four bits: 1246..1251 and the 1268 phase bias.
+pub(crate) fn is_native_qzss_ssr(message_number: u16) -> bool {
+    (1246..=1251).contains(&message_number) || message_number == 1268
 }
 
 fn iode_bits(system: GnssSystem) -> usize {
@@ -727,6 +794,47 @@ mod tests {
             .collect()
     }
 
+    /// The native QZSS messages carry a four-bit satellite field, and QZSS in
+    /// any other message a six-bit one, as the decoder reads them: 15 is the
+    /// widest native value and round-trips; 16 is refused rather than written
+    /// as its low four bits. The six-bit case is checked on the written bits,
+    /// since this codec decodes no non-native QZSS message number.
+    #[test]
+    fn qzss_satellite_field_width_follows_the_message_number() {
+        let mut native = message(1246, GnssSystem::Qzss, SsrKind::Orbit);
+        native.orbit[0].satellite_id = 15;
+        let body = native.encode().expect("J15 fits the native four-bit field");
+        let decoded = SsrMessage::decode(&body).expect("decode native QZSS orbit");
+        // The body is padded with zero bits to a whole byte, and the decoder
+        // keeps that padding; every other field comes back as built, and the
+        // decoded message encodes to the same bytes.
+        assert!(decoded.padding_bits.iter().all(|bit| !bit));
+        let mut expected = native.clone();
+        expected.padding_bits = decoded.padding_bits.clone();
+        assert_eq!(decoded, expected);
+        assert_eq!(decoded.encode().unwrap(), body);
+        native.orbit[0].satellite_id = 16;
+        let err = native
+            .encode()
+            .expect_err("16 does not fit the native four-bit field");
+        assert!(err.to_string().contains("4-bit"), "{err}");
+
+        // Outside the native numbers the field is six bits: 63 is written in
+        // full after the 12-bit number and the orbit header, and 64 is refused.
+        let mut igs = message(4076, GnssSystem::Qzss, SsrKind::Orbit);
+        igs.orbit[0].satellite_id = 63;
+        let body = igs.encode().expect("63 fits the six-bit field");
+        let mut r = BitReader::new(&body);
+        assert_eq!(r.u(12).unwrap(), 4076);
+        // Orbit header: epoch 20, update interval 4, multiple message 1, datum
+        // 1, IOD SSR 4, provider 16, solution 4, satellite count 6.
+        r.u(20 + 4 + 1 + 1 + 4 + 16 + 4 + 6).unwrap();
+        assert_eq!(r.u(6).unwrap(), 63);
+        igs.orbit[0].satellite_id = 64;
+        let err = igs.encode().expect_err("64 does not fit the six-bit field");
+        assert!(err.to_string().contains("6-bit"), "{err}");
+    }
+
     #[test]
     fn phase_a_messages_decode_fields_and_roundtrip() {
         for (number, system, kind) in [
@@ -757,9 +865,16 @@ mod tests {
             (1262, GnssSystem::BeiDou, SsrKind::Ura),
             (1263, GnssSystem::BeiDou, SsrKind::HighRateClock),
             (1270, GnssSystem::BeiDou, SsrKind::PhaseBias),
+            (1246, GnssSystem::Qzss, SsrKind::Orbit),
+            (1247, GnssSystem::Qzss, SsrKind::Clock),
+            (1248, GnssSystem::Qzss, SsrKind::CodeBias),
+            (1249, GnssSystem::Qzss, SsrKind::CombinedOrbitClock),
+            (1250, GnssSystem::Qzss, SsrKind::Ura),
+            (1251, GnssSystem::Qzss, SsrKind::HighRateClock),
+            (1268, GnssSystem::Qzss, SsrKind::PhaseBias),
         ] {
             let expected = message(number, system, kind);
-            let body = expected.encode();
+            let body = expected.encode().unwrap();
             let decoded = SsrMessage::decode(&body).unwrap();
             assert_eq!(
                 decoded.message_number, expected.message_number,
@@ -773,7 +888,11 @@ mod tests {
             assert_eq!(decoded.code_bias, expected.code_bias, "message {number}");
             assert_eq!(decoded.phase_bias, expected.phase_bias, "message {number}");
             assert_eq!(decoded.ura, expected.ura, "message {number}");
-            assert_eq!(decoded.encode(), body, "message {number} round trip");
+            assert_eq!(
+                decoded.encode().unwrap(),
+                body,
+                "message {number} round trip"
+            );
             assert!(matches!(Message::decode(&body).unwrap(), Message::Ssr(_)));
         }
     }
@@ -803,7 +922,7 @@ mod tests {
         assert_eq!(gal.header.satellite_count, 27);
         assert_rtklib_combined_records(gal, RTKLIB_GALILEO_1243);
         assert_eq!(
-            encode_frame(&Message::Ssr(gal.clone()).encode()).unwrap(),
+            encode_frame(&Message::Ssr(gal.clone()).encode().unwrap()).unwrap(),
             gal_frame
         );
 
@@ -822,11 +941,17 @@ mod tests {
         assert_eq!(gps.header.satellite_count, 2);
         assert_rtklib_combined_records(gps, RTKLIB_GPS_1060);
         assert_eq!(
-            encode_frame(&Message::Ssr(gps.clone()).encode()).unwrap(),
+            encode_frame(&Message::Ssr(gps.clone()).encode().unwrap()).unwrap(),
             gps_frame
         );
-        assert_eq!(decode_frame(&gal_frame).unwrap().body, gal.encode());
-        assert_eq!(decode_frame(&gps_frame).unwrap().body, gps.encode());
+        assert_eq!(
+            decode_frame(&gal_frame).unwrap().body,
+            gal.encode().unwrap()
+        );
+        assert_eq!(
+            decode_frame(&gps_frame).unwrap().body,
+            gps.encode().unwrap()
+        );
         assert_eq!(assembler.retained_len(), 0);
     }
 
@@ -867,7 +992,9 @@ mod tests {
 
     #[test]
     fn truncated_supported_ssr_is_parse_error() {
-        let body = message(1057, GnssSystem::Gps, SsrKind::Orbit).encode();
+        let body = message(1057, GnssSystem::Gps, SsrKind::Orbit)
+            .encode()
+            .unwrap();
         let err = SsrMessage::decode(&body[..body.len() - 1]).unwrap_err();
         assert!(matches!(err, Error::Parse(_)));
     }
@@ -923,7 +1050,10 @@ mod tests {
         let mut assembler = SsrStreamAssembler::new();
         let decoded = assembler.push(&frame);
         assert_eq!(decoded.len(), 1);
-        assert_eq!(decoded[0].as_ref().unwrap().encode(), message.encode());
-        assert_eq!(encode_frame(&message.encode()).unwrap(), frame);
+        assert_eq!(
+            decoded[0].as_ref().unwrap().encode().unwrap(),
+            message.encode().unwrap()
+        );
+        assert_eq!(encode_frame(&message.encode().unwrap()).unwrap(), frame);
     }
 }

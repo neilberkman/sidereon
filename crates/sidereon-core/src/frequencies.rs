@@ -17,6 +17,13 @@ const F_GLONASS_G1_BASE_HZ: f64 = 1_602_000_000.0;
 const F_GLONASS_G1_STEP_HZ: f64 = 562_500.0;
 const F_GLONASS_G2_BASE_HZ: f64 = 1_246_000_000.0;
 const F_GLONASS_G2_STEP_HZ: f64 = 437_500.0;
+/// GLONASS CDMA carriers, which need no FDMA channel: G3 (RINEX band `3`), G1a
+/// (band `4`) and G2a (band `6`), as RTKLIB `code2freq_GLO` gives them.
+const F_GLONASS_G3_HZ: f64 = 1_202_025_000.0;
+const F_GLONASS_G1A_HZ: f64 = 1_600_995_000.0;
+const F_GLONASS_G2A_HZ: f64 = 1_248_060_000.0;
+/// NavIC S-band carrier (RINEX band `9`), RTKLIB `FREQs`.
+const F_NAVIC_S_HZ: f64 = 2_492_028_000.0;
 
 /// GNSS carrier band.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -155,7 +162,7 @@ pub struct CarrierFrequency {
 
 /// Fixed-frequency carrier entries. GLONASS FDMA carriers are channel-derived
 /// through [`rinex_band_frequency_hz`] and therefore do not appear here.
-pub const fn fixed_carrier_frequencies() -> [CarrierFrequency; 17] {
+pub const fn fixed_carrier_frequencies() -> [CarrierFrequency; 18] {
     [
         CarrierFrequency {
             system: GnssSystem::Gps,
@@ -184,6 +191,11 @@ pub const fn fixed_carrier_frequencies() -> [CarrierFrequency; 17] {
         },
         CarrierFrequency {
             system: GnssSystem::Qzss,
+            band: CarrierBand::L5,
+            frequency_hz: F_E5A_HZ,
+        },
+        CarrierFrequency {
+            system: GnssSystem::Navic,
             band: CarrierBand::L5,
             frequency_hz: F_E5A_HZ,
         },
@@ -290,6 +302,7 @@ pub const fn frequency_hz(system: GnssSystem, band: CarrierBand) -> Option<f64> 
         (GnssSystem::Qzss, CarrierBand::L1) => Some(F_L1_HZ),
         (GnssSystem::Qzss, CarrierBand::L2) => Some(F_L2_HZ),
         (GnssSystem::Qzss, CarrierBand::L5) => Some(F_E5A_HZ),
+        (GnssSystem::Navic, CarrierBand::L5) => Some(F_E5A_HZ),
         (GnssSystem::Galileo, CarrierBand::E1) => Some(F_E1_HZ),
         (GnssSystem::Galileo, CarrierBand::E5a) => Some(F_E5A_HZ),
         (GnssSystem::Galileo, CarrierBand::E6) => Some(F_E6_HZ),
@@ -313,7 +326,11 @@ pub fn wavelength_m(system: GnssSystem, band: CarrierBand) -> Option<f64> {
 /// RINEX observation band frequency in hertz for a system and band digit.
 ///
 /// GLONASS G1/G2 carriers require the FDMA channel number from the observation
-/// file's `GLONASS SLOT / FRQ #` records.
+/// file's `GLONASS SLOT / FRQ #` records, and resolve only for a channel in the
+/// `-7..=6` allocation. The GLONASS CDMA carriers G3 (band `3`), G1a (band `4`)
+/// and G2a (band `6`) are fixed and need no channel. SBAS resolves bands `1`
+/// and `5`, NavIC bands `5`, `9` (S) and `1`, and QZSS band `6` (L6) besides
+/// L1, L2 and L5.
 pub fn rinex_band_frequency_hz(
     system: GnssSystem,
     band: char,
@@ -325,7 +342,10 @@ pub fn rinex_band_frequency_hz(
 /// Carrier frequency in hertz for a system and RINEX band digit.
 ///
 /// Unlike [`rinex_band_frequency_hz`], this classified lookup distinguishes a
-/// missing GLONASS FDMA channel.
+/// missing GLONASS FDMA channel: GLONASS G1 or G2 with no channel is
+/// [`crate::Error::MissingGlonassChannel`]. A channel that is present but
+/// outside the `-7..=6` FDMA allocation is not an error and resolves no carrier,
+/// so it returns `Ok(None)`, as a band with no carrier does.
 pub fn rinex_band_frequency_hz_classified(
     system: GnssSystem,
     band: char,
@@ -374,6 +394,8 @@ fn rinex_signal_frequency_hz(
         (GnssSystem::Qzss, '1', _) => frequency_hz(system, CarrierBand::L1),
         (GnssSystem::Qzss, '2', _) => frequency_hz(system, CarrierBand::L2),
         (GnssSystem::Qzss, '5', _) => frequency_hz(system, CarrierBand::L5),
+        // QZSS L6 (LEX/CLAS), as RTKLIB `code2freq_QZS` gives it (`FREQL6`).
+        (GnssSystem::Qzss, '6', _) => Some(F_E6_HZ),
         (GnssSystem::Galileo, '1', _) => frequency_hz(system, CarrierBand::E1),
         (GnssSystem::Galileo, '5', _) => frequency_hz(system, CarrierBand::E5a),
         (GnssSystem::Galileo, '6', _) => frequency_hz(system, CarrierBand::E6),
@@ -382,12 +404,30 @@ fn rinex_signal_frequency_hz(
         (GnssSystem::BeiDou, _, _) => {
             frequency_hz(system, rinex_beidou_band(band, tracking, rinex_version)?)
         }
-        (GnssSystem::Glonass, '1', Some(channel)) => {
+        // The FDMA carrier is resolved only for a channel in the `-7..=6`
+        // allocation, as RTKLIB `code2freq_GLO` resolves it. The observation and
+        // navigation readers keep a stated channel outside it, such as the `7`
+        // real headers give `R28`, and that channel names no carrier here.
+        (GnssSystem::Glonass, '1', Some(channel))
+            if crate::rinex_nav::valid_glonass_frequency_channel(i32::from(channel)) =>
+        {
             Some(F_GLONASS_G1_BASE_HZ + f64::from(channel) * F_GLONASS_G1_STEP_HZ)
         }
-        (GnssSystem::Glonass, '2', Some(channel)) => {
+        (GnssSystem::Glonass, '2', Some(channel))
+            if crate::rinex_nav::valid_glonass_frequency_channel(i32::from(channel)) =>
+        {
             Some(F_GLONASS_G2_BASE_HZ + f64::from(channel) * F_GLONASS_G2_STEP_HZ)
         }
+        // SBAS L1 and L5, and NavIC L5, S and L1, as RTKLIB `code2freq_SBS`
+        // and `code2freq_IRN` give them.
+        (GnssSystem::Sbas, '1', _) => Some(F_L1_HZ),
+        (GnssSystem::Sbas, '5', _) => Some(F_E5A_HZ),
+        (GnssSystem::Navic, '5', _) => frequency_hz(system, CarrierBand::L5),
+        (GnssSystem::Navic, '9', _) => Some(F_NAVIC_S_HZ),
+        (GnssSystem::Navic, '1', _) => Some(F_L1_HZ),
+        (GnssSystem::Glonass, '3', _) => Some(F_GLONASS_G3_HZ),
+        (GnssSystem::Glonass, '4', _) => Some(F_GLONASS_G1A_HZ),
+        (GnssSystem::Glonass, '6', _) => Some(F_GLONASS_G2A_HZ),
         _ => None,
     }?;
     valid_frequency_hz(frequency_hz)
@@ -476,12 +516,16 @@ pub const fn glonass_g1_frequency_hz(channel: i8) -> f64 {
     F_GLONASS_G1_BASE_HZ + (channel as f64) * F_GLONASS_G1_STEP_HZ
 }
 
-/// Single-frequency carrier used by the SPP ionosphere-scaling policy.
+/// Single-frequency carrier used by the SPP ionosphere-scaling policy: GPS and
+/// QZSS L1, Galileo E1, BeiDou B1I and NavIC L5, the carriers RTKLIB
+/// `sat2freq` gives their single-frequency codes. GLONASS has none (its FDMA
+/// carrier is per satellite) and SBAS is handled by the SPP model itself.
 pub const fn default_spp_carrier(system: GnssSystem) -> Option<CarrierBand> {
     match system {
-        GnssSystem::Gps => Some(CarrierBand::L1),
+        GnssSystem::Gps | GnssSystem::Qzss => Some(CarrierBand::L1),
         GnssSystem::Galileo => Some(CarrierBand::E1),
         GnssSystem::BeiDou => Some(CarrierBand::B1i),
+        GnssSystem::Navic => Some(CarrierBand::L5),
         _ => None,
     }
 }
@@ -576,6 +620,31 @@ mod tests {
         );
     }
 
+    /// SBAS L1/L5, NavIC L5/S/L1 and QZSS L6, as RTKLIB `code2freq_SBS`,
+    /// `code2freq_IRN` and `code2freq_QZS` give them; other bands resolve
+    /// nothing.
+    #[test]
+    fn sbas_and_navic_rinex_bands_follow_rtklib() {
+        let cases = [
+            (GnssSystem::Sbas, "C1C", Some(1_575_420_000.0_f64)),
+            (GnssSystem::Sbas, "L5I", Some(1_176_450_000.0)),
+            (GnssSystem::Sbas, "L2C", None),
+            (GnssSystem::Navic, "L5A", Some(1_176_450_000.0)),
+            (GnssSystem::Navic, "C9A", Some(2_492_028_000.0)),
+            (GnssSystem::Navic, "L1D", Some(1_575_420_000.0)),
+            (GnssSystem::Navic, "L2C", None),
+            (GnssSystem::Qzss, "L6L", Some(1_278_750_000.0)),
+            (GnssSystem::Qzss, "C6Z", Some(1_278_750_000.0)),
+        ];
+        for (system, code, expected) in cases {
+            assert_eq!(
+                rinex_observation_frequency_hz(system, code, 4.01, None).map(f64::to_bits),
+                expected.map(f64::to_bits),
+                "{system:?} {code}"
+            );
+        }
+    }
+
     #[test]
     fn classified_rinex_band_lookup_distinguishes_missing_channels() {
         for band in ['1', '2'] {
@@ -588,10 +657,33 @@ mod tests {
                 None
             );
         }
+        // The CDMA carriers need no channel, so their lookup never reports one
+        // missing; a band with no GLONASS carrier resolves nothing.
+        for (band, expected) in [
+            ('3', 1_202_025_000.0_f64),
+            ('4', 1_600_995_000.0),
+            ('6', 1_248_060_000.0),
+        ] {
+            assert_eq!(
+                rinex_band_frequency_hz_classified(GnssSystem::Glonass, band, None)
+                    .map(|frequency| frequency.map(f64::to_bits)),
+                Ok(Some(expected.to_bits())),
+                "G band {band}"
+            );
+        }
         assert_eq!(
-            rinex_band_frequency_hz_classified(GnssSystem::Glonass, '3', None),
+            rinex_band_frequency_hz_classified(GnssSystem::Glonass, '5', None),
             Ok(None)
         );
+        // A channel outside the FDMA allocation is present, so it is not
+        // reported missing; it resolves no carrier.
+        for band in ['1', '2'] {
+            assert_eq!(
+                rinex_band_frequency_hz_classified(GnssSystem::Glonass, band, Some(7)),
+                Ok(None),
+                "G band {band} channel 7"
+            );
+        }
     }
 
     #[test]
@@ -675,6 +767,27 @@ mod tests {
                     .expect("GLONASS G1 channel frequency")
                     .to_bits()
             );
+        }
+    }
+
+    /// A channel outside the `-7..=6` FDMA allocation resolves no G1 or G2
+    /// carrier, matching RTKLIB `code2freq_GLO`; the edges of the allocation do.
+    #[test]
+    fn glonass_fdma_carrier_needs_a_channel_in_the_allocation() {
+        for band in ['1', '2'] {
+            for channel in [-8_i8, 7, 13, i8::MIN, i8::MAX] {
+                assert_eq!(
+                    rinex_band_frequency_hz(GnssSystem::Glonass, band, Some(channel)),
+                    None,
+                    "G{band} channel {channel}"
+                );
+            }
+            for channel in [-7_i8, 6] {
+                assert!(
+                    rinex_band_frequency_hz(GnssSystem::Glonass, band, Some(channel)).is_some(),
+                    "G{band} channel {channel}"
+                );
+            }
         }
     }
 

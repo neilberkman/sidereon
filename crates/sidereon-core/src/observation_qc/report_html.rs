@@ -119,7 +119,7 @@ fn write_system_table(out: &mut String, report: &ObservationQcReport) {
             cell(out, &row.snr, true);
             cell(out, &row.mp1, false);
             cell(out, &row.mp2, false);
-            cell(out, &row.slips.to_string(), false);
+            cell(out, &row.slips, false);
             cell(out, &row.gaps.to_string(), false);
             cell(out, &row.gap_s, false);
             out.push_str("</tr>");

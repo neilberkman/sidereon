@@ -77,6 +77,9 @@ const GPS_LEGACY_EXTENDED_FIT_INTERVAL_S: f64 = 6.0 * SECONDS_PER_HOUR;
 const GLONASS_FREQ_CHANNEL_MIN: i32 = -7;
 const GLONASS_FREQ_CHANNEL_MAX: i32 = 6;
 
+/// Whether a GLONASS frequency channel lies in the `-7..=6` FDMA allocation,
+/// the channels a carrier frequency is resolved for. The readers keep a stated
+/// channel outside it; this is the check their consumers apply.
 pub(crate) fn valid_glonass_frequency_channel(channel: i32) -> bool {
     (GLONASS_FREQ_CHANNEL_MIN..=GLONASS_FREQ_CHANNEL_MAX).contains(&channel)
 }
@@ -425,10 +428,15 @@ pub fn cnav_ura_ned_m(params: &CnavParameters, t: GnssWeekTow) -> Option<f64> {
     }
 }
 
-/// Whether a BeiDou PRN is a geostationary satellite (BDS-2 C01-C05, BDS-3
-/// C59-C61), which take the geostationary orbit-evaluation branch.
+/// Whether a BeiDou PRN is a geostationary satellite, which takes the
+/// geostationary orbit-evaluation branch and the D2 message.
+///
+/// The BDS ICD assigns PRN 1-5 and 59-63 to GEO satellites, and RTKLIB
+/// `eph2pos` tests `prn<=5||prn>=59` over its 1..=63 BeiDou range. PRN 64 and
+/// above are spellable satellite tokens but no GEO assignment covers them, so
+/// they take the MEO/IGSO branch.
 pub fn is_beidou_geo(sat: GnssSatelliteId) -> bool {
-    sat.system == GnssSystem::BeiDou && (sat.prn <= 5 || (59..=61).contains(&sat.prn))
+    sat.system == GnssSystem::BeiDou && ((1..=5).contains(&sat.prn) || (59..=63).contains(&sat.prn))
 }
 
 /// A Klobuchar-8 broadcast ionosphere coefficient set (the eight alpha/beta
@@ -484,12 +492,15 @@ pub struct GlonassRecord {
     pub freq_channel: i32,
 }
 
-/// A GLONASS record skipped by [`parse_glonass_lenient`] because its slot is not
-/// representable as a [`GnssSatelliteId`] (an extended slot beyond the engine's
-/// PRN cap, e.g. `R28` in real BKG/IGS products).
+/// A GLONASS record skipped by [`parse_glonass_lenient`] because its slot token
+/// is not representable as a [`GnssSatelliteId`].
+///
+/// The satellite-token range is `R01`..`R99`, which covers the extended slots
+/// real BKG/IGS products carry, so what lands here is a token outside that
+/// syntax altogether - `R00`, or a malformed slot field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedGlonass {
-    /// The 3-character satellite token as it appeared in the file (`R28`).
+    /// The 3-character satellite token as it appeared in the file (`R00`).
     pub token: String,
 }
 
@@ -1728,9 +1739,9 @@ fn parse_glonass_block(block: &[&str]) -> Result<GlonassRecord, NavParseError> {
 
 /// Parse all GLONASS (`R`) records from a RINEX 3.x navigation file, in file
 /// order; selection is the caller's job. A malformed *supported* record is a
-/// [`NavParseError`] rather than a silently dropped one, but a record for a slot
-/// the engine cannot represent (an extended GLONASS slot beyond the PRN cap, e.g.
-/// `R28` in real BKG/IGS products) is skipped rather than rejecting the whole
+/// [`NavParseError`] rather than a silently dropped one, but a record whose slot
+/// token is not a representable satellite id (`R00`, or a malformed slot field)
+/// is skipped rather than rejecting the whole
 /// file - the same treatment unsupported constellations get in
 /// `parse_nav_v3`. (Version-4 GLONASS frames are not yet parsed.)
 pub fn parse_glonass(text: &str) -> Result<Vec<GlonassRecord>, NavParseError> {
@@ -1738,8 +1749,8 @@ pub fn parse_glonass(text: &str) -> Result<Vec<GlonassRecord>, NavParseError> {
 }
 
 /// Like [`parse_glonass`], but also returns the slots that were skipped because
-/// they are not representable as a [`GnssSatelliteId`] (an extended slot beyond
-/// the PRN cap, e.g. `R28`).
+/// their token is not representable as a [`GnssSatelliteId`] (`R00`, or a
+/// malformed slot field).
 ///
 /// [`parse_glonass`] drops that list silently; use this when a caller needs to
 /// surface how many / which records were skipped, consistent with the
@@ -1758,8 +1769,8 @@ pub fn parse_glonass_lenient(text: &str) -> Result<GlonassParse, NavParseError> 
     }
     let mut out = GlonassParse::default();
     for block in blocks.iter().filter(|b| b[0].starts_with('R')) {
-        // A GLONASS slot beyond the engine's PRN cap is not representable as a
-        // `GnssSatelliteId`. Skip such a record (one out-of-range slot must not
+        // A slot token that is not a representable `GnssSatelliteId` (`R00`, a
+        // malformed field) is skipped (one such record must not
         // discard every other satellite's ephemeris) instead of erroring, but
         // record its identity so it is not lost silently; a representable slot
         // with a malformed numeric field still errors.
@@ -2328,17 +2339,25 @@ fn optional_keplerian_delay(
     Ok(Some(value))
 }
 
+/// Read the GLONASS frequency channel field as the integer it states.
+///
+/// The field must hold a whole number that fits [`GlonassRecord::freq_channel`];
+/// it is not held to the `-7..=6` FDMA allocation. RTKLIB keeps a record whose
+/// channel is outside that allocation, reporting it only in its trace, and real
+/// products carry such values for extended slots, so refusing the record would
+/// lose a broadcast ephemeris the file states plainly. Consumers that need a
+/// carrier check the allocation themselves with
+/// [`valid_glonass_frequency_channel`].
 fn glonass_frequency_channel(value: f64, sat: &str) -> Result<i32, NavParseError> {
     const FIELD: &str = "frequency channel";
     validate::finite(value, FIELD).map_err(|error| map_record_field_error(error, sat))?;
-    let channel = value as i32;
-    if value.trunc() != value || !valid_glonass_frequency_channel(channel) {
+    if value.trunc() != value || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
         return Err(NavParseError::BadField {
             satellite: sat.to_string(),
             field: FIELD,
         });
     }
-    Ok(channel)
+    Ok(value as i32)
 }
 
 fn strict_header_f64(
