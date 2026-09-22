@@ -52,6 +52,69 @@ fn gnss_week_tow(
         .map_err(|_| Error::InvalidInput(format!("RTCM broadcast {field} is not representable")))
 }
 
+/// First DF009 satellite ID that names an SBAS satellite rather than a GPS PRN.
+const DF009_FIRST_SBAS_ID: u8 = 40;
+/// Last DF009 satellite ID the six-bit field carries.
+const DF009_LAST_ID: u8 = 63;
+/// DF009 SBAS satellite ID to SBAS broadcast PRN offset (`40` is PRN 120).
+const DF009_SBAS_PRN_OFFSET: u16 = 80;
+
+/// Refuse a raw satellite field value wider than the message's field.
+fn raw_satellite_field(
+    satellite_id: u8,
+    field_bits: u32,
+    field: &'static str,
+    message: &'static str,
+) -> Result<()> {
+    let widest = (1u16 << field_bits) - 1;
+    if u16::from(satellite_id) > widest {
+        return Err(Error::InvalidInput(format!(
+            "{field} {satellite_id} in {message} does not fit the \
+             {field_bits}-bit raw satellite field (0..={widest})"
+        )));
+    }
+    Ok(())
+}
+
+/// Build the identifier for an ephemeris message's raw satellite field.
+///
+/// Two independent things are checked here, in order, and neither stands in for
+/// the other:
+///
+/// 1. Raw representability: the value must fit the message's satellite field -
+///    six bits for GPS 1019, GLONASS 1020, BeiDou 1042 and Galileo 1045/1046,
+///    four bits for QZSS 1044. A decoder can never produce a wider value, but
+///    every field on these structs is public, so a caller can write one in. A
+///    `satellite_id` of 100 in a six-bit field is not a satellite this message
+///    can name: re-encoding it would drop the high bits and emit 36, quietly
+///    relabelling the ephemeris as another satellite's.
+/// 2. Token syntax: the value must be a spellable satellite token, which is
+///    what rejects 0. The shared range is `1..=99` for every constellation, so
+///    for these messages the raw field width is the tighter of the two bounds.
+///
+/// The refusal is typed and lossless. The raw struct keeps whatever it held, so
+/// a decoded body still round-trips byte for byte and no value is zeroed,
+/// clamped or aliased onto a different satellite. Passing says the value is a
+/// well-formed identifier that the message can carry; it does not assert that
+/// the satellite is on orbit or that the constellation assigned that number.
+fn raw_satellite(
+    system: GnssSystem,
+    satellite_id: u8,
+    field_bits: u32,
+    field: &'static str,
+    message: &'static str,
+) -> Result<GnssSatelliteId> {
+    let widest = (1u16 << field_bits) - 1;
+    if u16::from(satellite_id) > widest {
+        return Err(Error::Parse(format!(
+            "{field} {satellite_id} in {message} does not fit the \
+             {field_bits}-bit raw satellite field (0..={widest})"
+        )));
+    }
+    GnssSatelliteId::new(system, satellite_id)
+        .map_err(|e| Error::Parse(format!("invalid {field} in {message}: {e}")))
+}
+
 fn galileo_sisa_m(index: u8) -> Result<f64> {
     match index {
         0..=49 => Ok(f64::from(index) * 0.01),
@@ -160,9 +223,26 @@ pub struct GpsEphemeris {
 
 impl GpsEphemeris {
     /// The satellite identifier for this ephemeris.
+    ///
+    /// Refuses a `satellite_id` that does not fit the six-bit DF009 field or is
+    /// not a spellable satellite token; see `raw_satellite`.
+    ///
+    /// DF009 values 40..=63 name SBAS satellites, broadcast PRN `value + 80`,
+    /// not GPS PRNs. RTKLIB `decode_type1019` reads the rest of the message the
+    /// same way and relabels the satellite, so this returns the SBAS satellite,
+    /// `S20`..`S43`.
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
-        GnssSatelliteId::new(GnssSystem::Gps, self.satellite_id)
-            .map_err(|e| Error::Parse(format!("invalid GPS PRN in 1019: {e}")))
+        if (DF009_FIRST_SBAS_ID..=DF009_LAST_ID).contains(&self.satellite_id) {
+            let broadcast_prn = u16::from(self.satellite_id) + DF009_SBAS_PRN_OFFSET;
+            return crate::sbas::store::sbas_prn_to_sat(broadcast_prn).ok_or_else(|| {
+                Error::Parse(format!(
+                    "GPS PRN {} in 1019 names SBAS PRN {broadcast_prn}, outside the SBAS \
+                     broadcast PRN window",
+                    self.satellite_id
+                ))
+            });
+        }
+        raw_satellite(GnssSystem::Gps, self.satellite_id, 6, "GPS PRN", "1019")
     }
 
     /// Decode a message 1019 body (without the transport frame).
@@ -214,7 +294,14 @@ impl GpsEphemeris {
     }
 
     /// Encode this GPS ephemeris body (without the transport frame).
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// satellite field; writing it would keep only its low bits and name
+    /// another satellite.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        raw_satellite_field(self.satellite_id, 6, "GPS PRN", "1019")?;
         let mut w = BitWriter::new();
         w.push_u(1019, 12);
         w.push_u(u64::from(self.satellite_id), 6);
@@ -247,16 +334,16 @@ impl GpsEphemeris {
         w.push_u(u64::from(self.sv_health), 6);
         w.push_flag(self.l2_p_data_flag);
         w.push_flag(self.fit_interval);
-        w.into_bytes()
+        Ok(w.into_bytes())
     }
 
     /// Convert this decoded RTCM ephemeris to the broadcast record consumed by
     /// the solver. `full_week` is the caller-unrolled GPS week and must agree
     /// with the 10-bit RTCM week residue. Conversion fails with
     /// [`Error::InvalidInput`] if the week residue disagrees, if an unrepresentable
-    /// time or invalid satellite ID is encountered, or if the accuracy index
-    /// lacks a defined numerical accuracy prediction (URA index 15) or exceeds
-    /// the 4-bit domain.
+    /// time or invalid satellite ID is encountered, if the satellite ID names an
+    /// SBAS satellite (DF009 40..=63), or if the accuracy index lacks a defined
+    /// numerical accuracy prediction (URA index 15) or exceeds the 4-bit domain.
     pub fn to_broadcast_record(&self, full_week: u32) -> Result<BroadcastRecord> {
         if full_week % 1024 != u32::from(self.week_number) {
             return Err(Error::InvalidInput(format!(
@@ -265,6 +352,16 @@ impl GpsEphemeris {
             )));
         }
         let satellite_id = self.satellite()?;
+        // A DF009 SBAS satellite has no GPS LNAV record: the broadcast model
+        // holds none for SBAS, and RTKLIB, which relabels it the same way,
+        // positions SBAS satellites from their own GEO navigation message
+        // rather than from this one. The raw message keeps every field.
+        if satellite_id.system != GnssSystem::Gps {
+            return Err(Error::InvalidInput(format!(
+                "1019 satellite {} names {satellite_id}, which has no GPS LNAV broadcast record",
+                self.satellite_id
+            )));
+        }
         let toe_sow = f64::from(self.t_oe) * 16.0;
         let toc_sow = f64::from(self.t_oc) * 16.0;
         let toe = gnss_week_tow(TimeScale::Gpst, full_week, toe_sow, "GPS toe")?;
@@ -407,9 +504,17 @@ pub struct GalileoFnavEphemeris {
 
 impl GalileoFnavEphemeris {
     /// Validate the decoded SVID and return its Galileo [`GnssSatelliteId`].
+    ///
+    /// Refuses an SVID that does not fit the six-bit raw field or is not a
+    /// spellable satellite token; see `raw_satellite`.
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
-        GnssSatelliteId::new(GnssSystem::Galileo, self.satellite_id)
-            .map_err(|e| Error::Parse(format!("invalid Galileo SVID in 1045: {e}")))
+        raw_satellite(
+            GnssSystem::Galileo,
+            self.satellite_id,
+            6,
+            "Galileo SVID",
+            "1045",
+        )
     }
 
     /// Decode an unframed RTCM 1045 body.
@@ -466,7 +571,14 @@ impl GalileoFnavEphemeris {
     /// The result preserves every field, including the reserved tail, so a
     /// decode followed by an encode retains the 62-byte body used by the
     /// round-trip test.
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// satellite field; writing it would keep only its low bits and name
+    /// another satellite.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        raw_satellite_field(self.satellite_id, 6, "Galileo SVID", "1045")?;
         let mut w = BitWriter::new();
         w.push_u(1045, 12);
         w.push_u(u64::from(self.satellite_id), 6);
@@ -497,7 +609,7 @@ impl GalileoFnavEphemeris {
         w.push_u(u64::from(self.e5a_signal_health), 2);
         w.push_flag(self.e5a_data_validity);
         w.push_u(u64::from(self.reserved), 7);
-        w.into_bytes()
+        Ok(w.into_bytes())
     }
 
     /// Convert this raw F/NAV message into the Galileo broadcast record used by
@@ -639,9 +751,17 @@ pub struct GalileoInavEphemeris {
 
 impl GalileoInavEphemeris {
     /// Validate the decoded SVID and return its Galileo [`GnssSatelliteId`].
+    ///
+    /// Refuses an SVID that does not fit the six-bit raw field or is not a
+    /// spellable satellite token; see `raw_satellite`.
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
-        GnssSatelliteId::new(GnssSystem::Galileo, self.satellite_id)
-            .map_err(|e| Error::Parse(format!("invalid Galileo SVID in 1046: {e}")))
+        raw_satellite(
+            GnssSystem::Galileo,
+            self.satellite_id,
+            6,
+            "Galileo SVID",
+            "1046",
+        )
     }
 
     /// Decode an unframed RTCM 1046 body.
@@ -701,7 +821,14 @@ impl GalileoInavEphemeris {
     /// The result preserves every field, including the reserved tail, so a
     /// decode followed by an encode retains the 63-byte body used by the
     /// round-trip test.
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// satellite field; writing it would keep only its low bits and name
+    /// another satellite.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        raw_satellite_field(self.satellite_id, 6, "Galileo SVID", "1046")?;
         let mut w = BitWriter::new();
         w.push_u(1046, 12);
         w.push_u(u64::from(self.satellite_id), 6);
@@ -735,7 +862,7 @@ impl GalileoInavEphemeris {
         w.push_u(u64::from(self.e1b_signal_health), 2);
         w.push_flag(self.e1b_data_validity);
         w.push_u(u64::from(self.reserved), 2);
-        w.into_bytes()
+        Ok(w.into_bytes())
     }
 
     /// Convert this raw I/NAV message into the Galileo broadcast record used by
@@ -957,9 +1084,19 @@ pub struct BeidouEphemeris {
 impl BeidouEphemeris {
     /// Validate the decoded satellite number and return its BeiDou
     /// [`GnssSatelliteId`].
+    ///
+    /// Refuses a satellite number that does not fit the six-bit raw field or is
+    /// not a spellable satellite token; see `raw_satellite`. The value is
+    /// taken as the BeiDou satellite number exactly as transmitted, with no
+    /// offset applied.
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
-        GnssSatelliteId::new(GnssSystem::BeiDou, self.satellite_id)
-            .map_err(|e| Error::Parse(format!("invalid BeiDou satellite ID in 1042: {e}")))
+        raw_satellite(
+            GnssSystem::BeiDou,
+            self.satellite_id,
+            6,
+            "BeiDou satellite ID",
+            "1042",
+        )
     }
 
     /// Decode an unframed RTCM 1042 body.
@@ -1016,7 +1153,14 @@ impl BeidouEphemeris {
     /// The result preserves every field, including both delay terms, so a
     /// decode followed by an encode retains the 64-byte body used by the
     /// round-trip test.
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// satellite field; writing it would keep only its low bits and name
+    /// another satellite.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        raw_satellite_field(self.satellite_id, 6, "BeiDou satellite ID", "1042")?;
         let mut w = BitWriter::new();
         w.push_u(1042, 12);
         w.push_u(u64::from(self.satellite_id), 6);
@@ -1047,7 +1191,7 @@ impl BeidouEphemeris {
         w.push_i(i64::from(self.t_gd1), 10);
         w.push_i(i64::from(self.t_gd2), 10);
         w.push_flag(self.sv_health);
-        w.into_bytes()
+        Ok(w.into_bytes())
     }
 
     /// Convert this raw message into the BDT-tagged BeiDou broadcast record
@@ -1205,9 +1349,19 @@ pub struct QzssEphemeris {
 impl QzssEphemeris {
     /// Validate the decoded satellite number and return its QZSS
     /// [`GnssSatelliteId`].
+    ///
+    /// The 1044 satellite field is four bits, so only `1..=15` converts; see
+    /// `raw_satellite`. The shared satellite-token range is wider than that,
+    /// which is why the width is checked here rather than left to the
+    /// identifier constructor.
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
-        GnssSatelliteId::new(GnssSystem::Qzss, self.satellite_id)
-            .map_err(|e| Error::Parse(format!("invalid QZSS satellite ID in 1044: {e}")))
+        raw_satellite(
+            GnssSystem::Qzss,
+            self.satellite_id,
+            4,
+            "QZSS satellite ID",
+            "1044",
+        )
     }
 
     /// Decode an unframed RTCM 1044 body.
@@ -1265,7 +1419,14 @@ impl QzssEphemeris {
     /// The result preserves every field, including the clock-data issue, so a
     /// decode followed by an encode retains the 61-byte body used by the
     /// round-trip test.
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 4-bit
+    /// satellite field; writing it would keep only its low bits and name
+    /// another satellite.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        raw_satellite_field(self.satellite_id, 4, "QZSS satellite ID", "1044")?;
         let mut w = BitWriter::new();
         w.push_u(1044, 12);
         w.push_u(u64::from(self.satellite_id), 4);
@@ -1297,7 +1458,7 @@ impl QzssEphemeris {
         w.push_i(i64::from(self.t_gd), 8);
         w.push_u(u64::from(self.iodc), 10);
         w.push_flag(self.fit_interval);
-        w.into_bytes()
+        Ok(w.into_bytes())
     }
 
     /// Convert this raw message into the GPST-tagged QZSS L/NAV broadcast record
@@ -1453,9 +1614,19 @@ pub struct GlonassEphemeris {
 
 impl GlonassEphemeris {
     /// The satellite identifier for this ephemeris.
+    ///
+    /// Refuses a slot number that does not fit the six-bit raw field or is not a
+    /// spellable satellite token; see `raw_satellite`. Extended slots above
+    /// the 24-satellite nominal constellation, such as `R28`, are ordinary
+    /// six-bit values and convert normally.
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
-        GnssSatelliteId::new(GnssSystem::Glonass, self.satellite_id)
-            .map_err(|e| Error::Parse(format!("invalid GLONASS slot in 1020: {e}")))
+        raw_satellite(
+            GnssSystem::Glonass,
+            self.satellite_id,
+            6,
+            "GLONASS slot",
+            "1020",
+        )
     }
 
     /// Decode a message 1020 body (without the transport frame).
@@ -1513,7 +1684,14 @@ impl GlonassEphemeris {
     }
 
     /// Encode this GLONASS ephemeris body (without the transport frame).
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// satellite field; writing it would keep only its low bits and name
+    /// another satellite.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        raw_satellite_field(self.satellite_id, 6, "GLONASS slot", "1020")?;
         let mut w = BitWriter::new();
         w.push_u(1020, 12);
         w.push_u(u64::from(self.satellite_id), 6);
@@ -1552,6 +1730,6 @@ impl GlonassEphemeris {
         w.push_ism(i64::from(self.m_tau_gps), 22);
         w.push_flag(self.m_l_n_fifth);
         w.push_u(u64::from(self.reserved), 7);
-        w.into_bytes()
+        Ok(w.into_bytes())
     }
 }

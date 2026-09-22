@@ -25,14 +25,17 @@ use sidereon_core::ephemeris::{Sp3, Sp3WriteError};
 /// this parser accepted and this writer cannot state back, which is exactly the
 /// regression this target exists to find.
 ///
-/// `YearNotRepresentable` and `DuplicateSatellite` are absent for the same
-/// reason, and must stay absent. `Sp3::parse` bounds every epoch year to
-/// `0..=9999` through `civil_datetime_with_second_policy`, the same range the
-/// writer's own four-column check states, so no file states a year out of
-/// range; the only way that refusal reaches this target is a day-number
-/// derivation bug in the writer's own epoch candidates. `parse_plus_line`
-/// keeps a satellite out of the list when it is already there, so no parsed
-/// header carries a duplicate.
+/// `YearNotRepresentable`, `DuplicateSatellite` and `SatelliteNotRepresentable`
+/// are absent for the same reason, and must stay absent. `Sp3::parse` bounds
+/// every epoch year to `0..=9999` through `civil_datetime_with_second_policy`,
+/// the same range the writer's own four-column check states, so no file states
+/// a year out of range; the only way that refusal reaches this target is a
+/// day-number derivation bug in the writer's own epoch candidates.
+/// `parse_plus_line` keeps a satellite out of the list when it is already
+/// there, so no parsed header carries a duplicate. Every satellite the parser
+/// holds came through the shared `01..=99` token syntax, so its token is three
+/// columns wide and reads back as itself; a satellite token the parser cannot
+/// hold is skipped at read time and never reaches the writer.
 fn is_readable_input_refusal(error: &Sp3WriteError) -> bool {
     match error {
         // A header with no epoch records at all.
@@ -96,13 +99,16 @@ fuzz_target!(|data: &[u8]| {
     assert_eq!(re_encoded, encoded);
 
     // `skipped_records` counts entries the input text carried but the product
-    // cannot represent - an extended GLONASS slot such as `R28` beyond the
-    // engine's PRN cap. Those are deliberately dropped instead of aborting the
-    // parse (see `Sp3::skipped_records`), and nothing of them survives into the
-    // product, so serialization has nothing to re-emit and a faithful re-encode
-    // always reports zero. Asserting zero is stricter than comparing the two
-    // counts: the writer must never emit a record that re-parses as
-    // unrepresentable.
+    // cannot represent - a satellite token naming no GNSS constellation, such
+    // as an SP3-d `Lnn` Low-Earth Orbiter, an `EP`/`EV` correlation record, or
+    // a `V` record carrying data with no `P` record for its satellite at that
+    // epoch. The satellite-token range is `01..=99` for every system letter, so
+    // the extended slots real products carry are held, not counted here. These
+    // entries are deliberately dropped instead of aborting the parse (see
+    // `Sp3::skipped_records`), and nothing of them survives into the product,
+    // so serialization has nothing to re-emit and a faithful re-encode always
+    // reports zero. Asserting zero is stricter than comparing the two counts:
+    // the writer must never emit a record that re-parses as a skip.
     assert_eq!(reparsed.skipped_records, 0);
 
     // Structural equality is asserted from the canonical generation onward, not

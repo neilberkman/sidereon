@@ -96,8 +96,12 @@ fn fixture_schema_is_exact_and_counts_add_up() {
 
 #[test]
 fn parser_skipped_records_are_visible() {
+    // `L09` is an SP3-d Low-Earth Orbiter token: legal SP3, but no GNSS
+    // constellation, so the parser skips and counts its declaration. (An
+    // extended GLONASS slot such as `R28` is an ordinary satellite now and is
+    // read, not skipped.)
     let bytes = include_str!("fixtures/minimal_sp3.sp3")
-        .replace("+    1   G01  0", "+    2   G01R28  0")
+        .replace("+    1   G01  0", "+    2   G01L09  0")
         .into_bytes();
     let report = score_sp3_bytes(
         &bytes,

@@ -37,7 +37,9 @@ pub(super) struct SystemRenderRow {
     pub snr: String,
     pub mp1: String,
     pub mp2: String,
-    pub slips: usize,
+    /// Cycle-slip count, or `-` for a system that formed no dual-frequency
+    /// observation, so no slip test ran.
+    pub slips: String,
     pub gaps: usize,
     pub gap_s: String,
 }
@@ -72,7 +74,9 @@ pub(super) fn system_rows(report: &ObservationQcReport) -> Vec<SystemRenderRow> 
                 snr: fit_ascii(&snr_by_band(report, row.system), SNR_COL_WIDTH),
                 mp1: format_optional_mp(mp.and_then(|mp| mp.mp1)),
                 mp2: format_optional_mp(mp.and_then(|mp| mp.mp2)),
-                slips: *slips_by_system.get(&row.system).unwrap_or(&0),
+                slips: slips_by_system
+                    .get(&row.system)
+                    .map_or_else(|| "-".to_owned(), ToString::to_string),
                 gaps: row.gap_count,
                 gap_s: fixed_decimals(row.total_gap_s, 1),
             }

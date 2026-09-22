@@ -643,6 +643,8 @@ EOF
         sp3.states_at(0).unwrap().is_empty(),
         "no (0,0,0) state leaked"
     );
+    // The velocity the record carried is held nowhere, so it is counted.
+    assert_eq!(sp3.skipped_records, 1);
 }
 
 #[test]
@@ -1215,16 +1217,17 @@ fn rejects_position_record_for_undeclared_satellite() {
     }
 }
 
-/// A position record whose satellite token is out of range / unrepresentable
-/// (an extended GLONASS slot `R28`, beyond the engine's 1..=27 PRN cap, as seen
-/// in real BKG/IGS products) must be skipped and counted, not reject the whole
-/// file. The surrounding GPS records must all survive.
+/// `R28` is an extended GLONASS slot that real BKG/IGS products carry. SP3-d
+/// defines the identifier as a system letter plus a 2-digit integer 01..99, so
+/// `R28` is an ordinary satellite token and its record must be retained in
+/// full - its own position and clock, alongside the GPS records, with nothing
+/// skipped.
 #[test]
-fn skips_out_of_range_satellite_position_record_and_counts_it() {
+fn retains_extended_glonass_slot_position_record() {
     const FILE: &str = "\
 #cP2020  6 24  0  0  0.00000000       2 ORBIT IGS14 FIT  TST
 ## 2111 432000.00000000   900.00000000 59024 0.0000000000000
-+    2   G01G02  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
++    3   G01R28G02  0  0  0  0  0  0  0  0  0  0  0  0  0  0
 ++         0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
 %c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
 %c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
@@ -1239,22 +1242,45 @@ PR28  16000.000000 -21000.000000   6000.000000    222.222222
 PG02  -1234.567890   2345.678901  -3456.789012    111.111111
 EOF
 ";
-    let sp3 = Sp3::parse(FILE.as_bytes()).expect("file with one out-of-range sat must still parse");
-    assert_eq!(sp3.skipped_records, 1, "the R28 record must be counted");
+    let sp3 = Sp3::parse(FILE.as_bytes()).expect("R28 is an ordinary SP3 satellite token");
+    assert_eq!(sp3.skipped_records, 0, "nothing in this file is skipped");
+    assert_eq!(
+        sp3.header.satellites,
+        vec![
+            id(GnssSystem::Gps, 1),
+            id(GnssSystem::Glonass, 28),
+            id(GnssSystem::Gps, 2)
+        ],
+        "the declared satellite list keeps R28 in its declared slot"
+    );
+
     let states = sp3.states_at(0).expect("epoch 0 present");
-    let present: Vec<u8> = states.keys().map(|s| s.prn).collect();
-    assert_eq!(present, vec![1, 2], "both GPS records must survive");
+    assert_eq!(states.len(), 3, "all three records are stored");
     assert!(sp3.state(id(GnssSystem::Gps, 1), 0).is_ok());
     assert!(sp3.state(id(GnssSystem::Gps, 2), 0).is_ok());
+
+    // R28's own numbers, not a neighbour's: km -> m and microseconds -> seconds.
+    let r28 = sp3
+        .state(id(GnssSystem::Glonass, 28), 0)
+        .expect("R28 state present");
+    assert_eq!(r28.position.x_m, 16000.000000 * 1_000.0);
+    assert_eq!(r28.position.y_m, -21000.000000 * 1_000.0);
+    assert_eq!(r28.position.z_m, 6000.000000 * 1_000.0);
+    assert_eq!(r28.clock_s, Some(222.222222 * 1.0e-6));
+
+    let g01 = sp3.state(id(GnssSystem::Gps, 1), 0).expect("G01 present");
+    assert_eq!(g01.position.x_m, 15000.000000 * 1_000.0, "G01 is unchanged");
+    let g02 = sp3.state(id(GnssSystem::Gps, 2), 0).expect("G02 present");
+    assert_eq!(g02.position.x_m, -1234.567890 * 1_000.0, "G02 is unchanged");
 }
 
-/// An unrepresentable satellite token declared in the `+` header satellite list
-/// (`R28`) must be dropped from the list but counted, not skipped silently - and
-/// the positional `++` accuracy codes must stay aligned with the surviving
-/// satellites (the dropped slot's column is skipped, not inherited by a
-/// neighbour).
+/// A satellite declared in the `+` header list but carrying no position record
+/// keeps its declaration slot, and the positional `++` accuracy codes stay
+/// aligned with it. `R28` is declared here between `G01` and `G02`, so the
+/// three codes 5, 9 and 17 belong to those three satellites in that order - no
+/// column may be dropped or inherited by a neighbour.
 #[test]
-fn skips_out_of_range_satellite_header_declaration_and_counts_it() {
+fn header_accuracy_codes_stay_aligned_with_every_declared_satellite() {
     const FILE: &str = "\
 #cP2020  6 24  0  0  0.00000000       2 ORBIT IGS14 FIT  TST
 ## 2111 432000.00000000   900.00000000 59024 0.0000000000000
@@ -1272,27 +1298,47 @@ PG01  15000.000000 -20000.000000   5000.000000    123.456789
 PG02  -1234.567890   2345.678901  -3456.789012    111.111111
 EOF
 ";
-    let sp3 = Sp3::parse(FILE.as_bytes())
-        .expect("file with one out-of-range header sat must still parse");
+    let sp3 = Sp3::parse(FILE.as_bytes()).expect("R28 is an ordinary SP3 satellite token");
+    assert_eq!(sp3.skipped_records, 0, "nothing in this file is skipped");
     assert_eq!(
-        sp3.skipped_records, 1,
-        "the R28 header declaration must be counted"
+        sp3.header.satellites,
+        vec![
+            id(GnssSystem::Gps, 1),
+            id(GnssSystem::Glonass, 28),
+            id(GnssSystem::Gps, 2)
+        ],
+        "the declared list keeps all three satellites in declaration order"
     );
-    let states = sp3.states_at(0).expect("epoch 0 present");
-    let present: Vec<u8> = states.keys().map(|s| s.prn).collect();
-    assert_eq!(present, vec![1, 2], "both representable GPS sats survive");
-    // The dropped R28 column is skipped: G01 keeps 5, G02 keeps 17 (not 9).
     assert_eq!(
         sp3.header.satellite_accuracy_codes,
-        vec![5, 17],
-        "accuracy codes stay aligned with the surviving satellites"
+        vec![5, 9, 17],
+        "every declared satellite keeps its own accuracy column"
+    );
+    // Only G01 and G02 have position records; a declaration is not a state.
+    let states = sp3.states_at(0).expect("epoch 0 present");
+    let present: Vec<u8> = states.keys().map(|s| s.prn).collect();
+    assert_eq!(
+        present,
+        vec![1, 2],
+        "only the two records present are stored"
+    );
+    assert!(
+        sp3.state(id(GnssSystem::Glonass, 28), 0).is_err(),
+        "a declared satellite with no record has no fabricated state"
     );
 }
 
-/// A velocity record whose satellite token is out of range / unrepresentable
-/// (`R28`) must be skipped and counted, leaving the valid records intact.
+/// A velocity record for a satellite with no position record at that epoch.
+///
+/// `R28` is a representable satellite token, so the record is read and its raw
+/// velocity token is kept. What it is not given is a position: an SP3 `V`
+/// record always follows its own `P` record, and with none present there is no
+/// orbit to attach the velocity to. Synthesizing one - the geocenter, or a
+/// neighbour's - would fabricate an orbit, so the satellite has no state at
+/// this epoch, and the record is counted as skipped so the velocity it carried
+/// is not dropped silently.
 #[test]
-fn skips_out_of_range_satellite_velocity_record_and_counts_it() {
+fn velocity_only_satellite_keeps_its_raw_record_without_a_fabricated_position() {
     const FILE: &str = "\
 #dV2022  1  2  3  4  5.00000000       1 ORBIT IGS20 FIT  TST
 ## 2191 270245.00000000   300.00000000 59581 0.1281597222222
@@ -1311,10 +1357,34 @@ VG05  10000.000000 -20000.000000  30000.000000      1.000000
 VR28  10000.000000 -20000.000000  30000.000000      1.000000
 EOF
 ";
-    let sp3 = Sp3::parse(FILE.as_bytes()).expect("file with one out-of-range V record must parse");
-    assert_eq!(sp3.skipped_records, 1, "the VR28 record must be counted");
+    let sp3 = Sp3::parse(FILE.as_bytes()).expect("R28 is an ordinary SP3 satellite token");
+    assert_eq!(
+        sp3.skipped_records, 1,
+        "a velocity record with no position record is held nowhere, so it is counted"
+    );
     let state = sp3.state(id(GnssSystem::Gps, 5), 0).expect("G05 present");
-    assert!(state.velocity.is_some(), "G05 velocity must be applied");
+    let velocity = state.velocity.expect("G05 velocity must be applied");
+    assert_eq!(
+        velocity.vx_m_s,
+        10_000.0 * 0.1,
+        "G05 keeps its own velocity"
+    );
+
+    // The R28 velocity record is retained in the raw per-epoch velocity tokens.
+    assert_eq!(
+        sp3.epoch_velocity_tokens[0],
+        vec!["G05".to_string(), "R28".to_string()],
+        "both velocity records are kept in file order"
+    );
+    // But no position, and therefore no state, is invented for it.
+    assert!(
+        sp3.state(id(GnssSystem::Glonass, 28), 0).is_err(),
+        "a velocity record alone must not produce a position"
+    );
+    assert!(!sp3
+        .states_at(0)
+        .expect("epoch 0 present")
+        .contains_key(&id(GnssSystem::Glonass, 28)));
 }
 
 /// Regression (fuzz `sp3_round_trip`): a real GBM multi-GNSS file whose unused
@@ -1340,15 +1410,62 @@ fn round_trips_plus_line_padded_with_00_zero_fill() {
     );
 }
 
+/// An extended GLONASS slot survives parse -> write -> parse intact.
+///
+/// `R28` is a satellite the product can name, so the writer must re-emit it:
+/// its header declaration, its accuracy column and its record, all with the
+/// values it was read with.
+#[test]
+fn extended_glonass_slot_round_trips_through_the_writer() {
+    const FILE: &str = "\
+#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 432000.00000000   900.00000000 59024 0.0000000000000
++    2   G01R28  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  7  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* TEST SP3-c FIXTURE
+*  2020  6 24  0  0  0.00000000
+PG01  15000.000000 -20000.000000   5000.000000    123.456789
+PR28  16000.000000 -21000.000000   6000.000000    222.222222
+EOF
+";
+    let original = Sp3::parse(FILE.as_bytes()).expect("R28 is an ordinary SP3 satellite token");
+    assert_eq!(original.skipped_records, 0);
+    assert_eq!(original.header.satellite_accuracy_codes, vec![5, 7]);
+
+    let encoded = original.to_sp3_string().expect("serialize SP3 product");
+    assert!(
+        encoded.contains("PR28  16000.000000 -21000.000000   6000.000000    222.222222"),
+        "the R28 record must be re-emitted with its own values, got:\n{encoded}"
+    );
+    assert!(
+        encoded.contains("G01R28"),
+        "and its header declaration kept, got:\n{encoded}"
+    );
+
+    let reparsed = Sp3::parse(encoded.as_bytes()).expect("re-encoded product must reparse");
+    assert_eq!(
+        reparsed, original,
+        "parse -> write -> parse changed the product"
+    );
+}
+
 /// Regression (fuzz `sp3_round_trip`, scheduled run 30262991024): a product that
 /// dropped an unrepresentable satellite re-encodes to a file that carries no
 /// trace of it, so the reparse reports no skips while every other field is
 /// unchanged.
 ///
-/// `skipped_records` is evidence about the input text: an `R28` record has no
-/// [`GnssSatelliteId`] to store and is deliberately skipped rather than
-/// aborting the parse, so serialization cannot re-emit it. The writer must
-/// still never *invent* one - a re-encode that re-parses with a skip would mean
+/// The control here is `L09`. SP3-d assigns `Lnn` to Low-Earth Orbiting
+/// satellites and says other letters are allowed for other satellite types, so
+/// it is a legal SP3 token that names no GNSS constellation - there is no
+/// [`GnssSatelliteId`] for it and there should not be one. It is skipped rather
+/// than aborting the parse, so serialization cannot re-emit it. The writer must
+/// still never *invent* one: a re-encode that re-parses with a skip would mean
 /// it emitted a record the parser cannot represent.
 #[test]
 fn unrepresentable_satellites_are_absent_from_the_re_encoded_product() {
@@ -1366,18 +1483,18 @@ fn unrepresentable_satellites_are_absent_from_the_re_encoded_product() {
 /* TEST SP3-c FIXTURE
 *  2020  6 24  0  0  0.00000000
 PG01  15000.000000 -20000.000000   5000.000000    123.456789
-PR28  16000.000000 -21000.000000   6000.000000    222.222222
+PL09  16000.000000 -21000.000000   6000.000000    222.222222
 EOF
 ";
-    let original = Sp3::parse(FILE.as_bytes()).expect("file with an R28 record must parse");
+    let original = Sp3::parse(FILE.as_bytes()).expect("file with an L09 record must parse");
     assert_eq!(
         original.skipped_records, 1,
-        "the R28 record must be counted"
+        "the L09 record must be counted"
     );
 
     let encoded = original.to_sp3_string().expect("serialize SP3 product");
     assert!(
-        !encoded.contains("R28"),
+        !encoded.contains("L09"),
         "the writer must not re-emit an unrepresentable satellite"
     );
 
@@ -2947,6 +3064,36 @@ fn test_writer_refuses_a_product_whose_stored_arrays_disagree() {
             epoch_index: 0,
         })
     );
+
+    // The identifier fields are public, so a satellite that never passed the
+    // constructor can reach the writer. `G00` would read back as an
+    // unrepresentable token and be skipped, and `G100` spills out of its
+    // three columns; neither declaration would come back, so both are refused.
+    // `G99`, the top of the shared token range, is written.
+    for prn in [0u8, 100, 255] {
+        let bypass = GnssSatelliteId {
+            system: GnssSystem::Gps,
+            prn,
+        };
+        let mut unrepresentable = base.clone();
+        unrepresentable.header.satellites.push(bypass);
+        unrepresentable.header.satellite_accuracy_codes.push(0);
+        assert_eq!(
+            unrepresentable.to_sp3_string(),
+            Err(Sp3WriteError::SatelliteNotRepresentable { sat: bypass }),
+            "prn {prn}"
+        );
+    }
+    let g99 = id(GnssSystem::Gps, 99);
+    let mut top_of_range = base.clone();
+    top_of_range.header.satellites.push(g99);
+    top_of_range.header.satellite_accuracy_codes.push(0);
+    let text = top_of_range
+        .to_sp3_string()
+        .expect("G99 is a representable SP3 satellite token");
+    let reparsed = Sp3::parse(text.as_bytes()).expect("re-parse written SP3");
+    assert!(reparsed.header.satellites.contains(&g99));
+    assert_eq!(reparsed.skipped_records, 0);
 
     // Header line 1 states the product's start epoch; a product with no epoch
     // has none, and is not given an invented one.

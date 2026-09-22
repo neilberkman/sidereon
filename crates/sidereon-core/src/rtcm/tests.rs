@@ -276,7 +276,7 @@ fn gps_ephemeris_1019_round_trip() {
         l2_p_data_flag: false,
         fit_interval: true,
     };
-    let body = eph.encode();
+    let body = eph.encode().unwrap();
     // 1019 body is exactly 61 bytes (488 bits).
     assert_eq!(body.len(), 61);
     let decoded = GpsEphemeris::decode(&body).unwrap();
@@ -331,7 +331,7 @@ fn glonass_ephemeris_1020_round_trip() {
         m_l_n_fifth: false,
         reserved: 0,
     };
-    let body = eph.encode();
+    let body = eph.encode().unwrap();
     // 1020 body is exactly 45 bytes (360 bits).
     assert_eq!(body.len(), 45);
     let decoded = GlonassEphemeris::decode(&body).unwrap();
@@ -424,9 +424,88 @@ fn msm4_gps_round_trip() {
         satellites,
         signals,
     };
-    let body = message.encode();
+    let body = message.encode().unwrap();
     let decoded = MsmMessage::decode(&body).unwrap();
     assert_eq!(decoded, message);
+}
+
+/// The MSM satellite mask holds ids 1..=64 and the signal mask ids 1..=32. An
+/// id outside those, a satellite or cell listed twice, or a signal whose
+/// satellite is not listed cannot be stated in the masks, so the encoder
+/// refuses it by name instead of shifting it onto another bit or dropping it.
+#[test]
+fn msm_encode_refuses_satellite_and_signal_lists_its_masks_cannot_state() {
+    let satellite = |id| MsmSatellite {
+        id,
+        rough_range_ms: 70,
+        rough_range_mod1: 256,
+        extended_info: None,
+        rough_phase_range_rate_m_s: None,
+    };
+    let signal = |satellite_id, signal_id| MsmSignal {
+        satellite_id,
+        signal_id,
+        fine_pseudorange: 16,
+        fine_phase_range: -7,
+        lock_time_indicator: 15,
+        half_cycle_ambiguity: false,
+        cnr: 50,
+        fine_phase_range_rate: None,
+    };
+    let message = |satellites, signals| MsmMessage {
+        message_number: 1074,
+        system: crate::id::GnssSystem::Gps,
+        kind: MsmKind::Msm4,
+        header: msm_header(),
+        satellites,
+        signals,
+    };
+
+    // The edges of both masks encode and decode.
+    let edges = message(
+        vec![satellite(1), satellite(64)],
+        vec![signal(1, 1), signal(64, 32)],
+    );
+    let body = edges.encode().expect("ids 1 and 64, signals 1 and 32 fit");
+    assert_eq!(MsmMessage::decode(&body).unwrap(), edges);
+
+    for (satellites, signals, needle) in [
+        (
+            vec![satellite(0)],
+            vec![],
+            "outside the 1..=64 satellite mask",
+        ),
+        (
+            vec![satellite(65)],
+            vec![],
+            "outside the 1..=64 satellite mask",
+        ),
+        (
+            vec![satellite(3)],
+            vec![signal(3, 0)],
+            "outside the 1..=32 signal mask",
+        ),
+        (
+            vec![satellite(3)],
+            vec![signal(3, 33)],
+            "outside the 1..=32 signal mask",
+        ),
+        (vec![satellite(3), satellite(3)], vec![], "listed twice"),
+        (
+            vec![satellite(3)],
+            vec![signal(3, 2), signal(3, 2)],
+            "listed twice",
+        ),
+        (vec![satellite(3)], vec![signal(4, 2)], "does not hold"),
+    ] {
+        let err = message(satellites, signals)
+            .encode()
+            .expect_err("the masks cannot state this message");
+        assert!(
+            matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+            "expected {needle:?}, got {err}"
+        );
+    }
 }
 
 #[test]
@@ -504,7 +583,7 @@ fn msm_kind_maps_constellation_and_type() {
             satellites: Vec::new(),
             signals: Vec::new(),
         };
-        let body = m.encode();
+        let body = m.encode().unwrap();
         let decoded = MsmMessage::decode(&body).unwrap();
         assert_eq!(decoded.system, sys);
         assert_eq!(decoded.kind, kind);
@@ -784,7 +863,7 @@ fn unsupported_message_round_trips_verbatim() {
         Message::Unsupported(u) => assert_eq!(u.message_number, 1230),
         _ => panic!("expected Unsupported"),
     }
-    assert_eq!(message.encode(), body);
+    assert_eq!(message.encode().unwrap(), body);
     assert_eq!(message.message_number(), 1230);
 
     let frame = message.to_frame().unwrap();
@@ -906,7 +985,7 @@ fn decode_stream_and_frame_scanner_agree_after_overlength_preamble() {
         stream
             .messages
             .iter()
-            .map(Message::encode)
+            .map(|message| message.encode().expect("a decoded message encodes"))
             .collect::<Vec<_>>(),
         frames
             .iter()
@@ -929,10 +1008,14 @@ fn decode_stream_and_frame_scanner_agree_after_overlength_preamble() {
 fn assert_round_trips(message: Message) {
     // Body: build -> encode -> decode is field-for-field identical, and
     // re-encoding the decoded value reproduces the body bytes.
-    let body = message.encode();
+    let body = message.encode().unwrap();
     let decoded = Message::decode(&body).unwrap();
     assert_eq!(decoded, message, "decoded IR must equal the constructed IR");
-    assert_eq!(decoded.encode(), body, "re-encode must be byte-identical");
+    assert_eq!(
+        decoded.encode().unwrap(),
+        body,
+        "re-encode must be byte-identical"
+    );
     assert_eq!(decoded.message_number(), message.message_number());
 
     // Frame: wrapping, scanning, and re-framing all round-trip byte-for-byte.
@@ -1033,57 +1116,20 @@ fn build_gps_ephemeris_from_scratch_round_trips() {
         l2_p_data_flag: false,
         fit_interval: true,
     };
-    let body = eph.encode();
+    let body = eph.encode().unwrap();
     let decoded = GpsEphemeris::decode(&body).unwrap();
     assert_eq!(decoded, eph);
-    assert_eq!(decoded.encode(), body);
+    assert_eq!(decoded.encode().unwrap(), body);
     assert_round_trips(Message::GpsEphemeris(eph));
 }
 
 #[test]
 fn build_glonass_ephemeris_from_scratch_round_trips() {
-    let eph = GlonassEphemeris {
-        satellite_id: 7,
-        frequency_channel: 4,
-        almanac_health: true,
-        almanac_health_availability: true,
-        p1: 1,
-        t_k: 1234,
-        b_n_msb: false,
-        p2: true,
-        t_b: 76,
-        xn_dot: -123_456,
-        xn: 67_108_000,
-        xn_dot_dot: -3,
-        yn_dot: 7777,
-        yn: -67_000_000,
-        yn_dot_dot: 2,
-        zn_dot: -1,
-        zn: 12_345_678,
-        zn_dot_dot: -1,
-        p3: true,
-        gamma_n: -1000,
-        m_p: 2,
-        m_l_n_third: false,
-        tau_n: -2_000_000,
-        delta_tau_n: 4,
-        e_n: 10,
-        m_p4: true,
-        m_f_t: 6,
-        m_n_t: 1500,
-        m_m: 1,
-        additional_data_available: true,
-        n_a: 700,
-        tau_c: -1_500_000_000,
-        m_n4: 5,
-        m_tau_gps: -987_654,
-        m_l_n_fifth: false,
-        reserved: 0,
-    };
-    let body = eph.encode();
+    let eph = valid_glonass_ephemeris();
+    let body = eph.encode().unwrap();
     let decoded = GlonassEphemeris::decode(&body).unwrap();
     assert_eq!(decoded, eph);
-    assert_eq!(decoded.encode(), body);
+    assert_eq!(decoded.encode().unwrap(), body);
     assert_round_trips(Message::GlonassEphemeris(eph));
 }
 
@@ -1119,11 +1165,11 @@ fn build_galileo_fnav_ephemeris_from_scratch_round_trips_and_evaluates() {
         e5a_data_validity: false,
         reserved: 0,
     };
-    let body = eph.encode();
+    let body = eph.encode().unwrap();
     assert_eq!(body.len(), 62);
     let decoded = GalileoFnavEphemeris::decode(&body).unwrap();
     assert_eq!(decoded, eph);
-    assert_eq!(decoded.encode(), body);
+    assert_eq!(decoded.encode().unwrap(), body);
     assert_round_trips(Message::GalileoFnavEphemeris(eph));
     assert_broadcast_record_is_nontrivial(decoded.to_broadcast_record().unwrap());
 }
@@ -1163,11 +1209,11 @@ fn build_galileo_inav_ephemeris_from_scratch_round_trips_and_evaluates() {
         e1b_data_validity: false,
         reserved: 0,
     };
-    let body = eph.encode();
+    let body = eph.encode().unwrap();
     assert_eq!(body.len(), 63);
     let decoded = GalileoInavEphemeris::decode(&body).unwrap();
     assert_eq!(decoded, eph);
-    assert_eq!(decoded.encode(), body);
+    assert_eq!(decoded.encode().unwrap(), body);
     assert_round_trips(Message::GalileoInavEphemeris(eph));
     assert_broadcast_record_is_nontrivial(decoded.to_broadcast_record().unwrap());
 }
@@ -1204,11 +1250,11 @@ fn build_beidou_ephemeris_from_scratch_round_trips_and_evaluates() {
         t_gd2: 12,
         sv_health: false,
     };
-    let body = eph.encode();
+    let body = eph.encode().unwrap();
     assert_eq!(body.len(), 64);
     let decoded = BeidouEphemeris::decode(&body).unwrap();
     assert_eq!(decoded, eph);
-    assert_eq!(decoded.encode(), body);
+    assert_eq!(decoded.encode().unwrap(), body);
     assert_round_trips(Message::BeidouEphemeris(eph));
     assert_broadcast_record_is_nontrivial(decoded.to_broadcast_record().unwrap());
 }
@@ -1246,11 +1292,11 @@ fn build_qzss_ephemeris_from_scratch_round_trips_and_evaluates() {
         iodc: 44,
         fit_interval: false,
     };
-    let body = eph.encode();
+    let body = eph.encode().unwrap();
     assert_eq!(body.len(), 61);
     let decoded = QzssEphemeris::decode(&body).unwrap();
     assert_eq!(decoded, eph);
-    assert_eq!(decoded.encode(), body);
+    assert_eq!(decoded.encode().unwrap(), body);
     assert_round_trips(Message::QzssEphemeris(eph));
     assert_broadcast_record_is_nontrivial(decoded.to_broadcast_record(2434).unwrap());
 }
@@ -1333,10 +1379,10 @@ fn build_msm4_from_scratch_round_trips() {
         satellites,
         signals,
     };
-    let body = message.encode();
+    let body = message.encode().unwrap();
     let decoded = MsmMessage::decode(&body).unwrap();
     assert_eq!(decoded, message);
-    assert_eq!(decoded.encode(), body);
+    assert_eq!(decoded.encode().unwrap(), body);
     assert_round_trips(Message::Msm(message));
 }
 
@@ -1367,10 +1413,10 @@ fn build_msm7_from_scratch_round_trips() {
         satellites,
         signals,
     };
-    let body = message.encode();
+    let body = message.encode().unwrap();
     let decoded = MsmMessage::decode(&body).unwrap();
     assert_eq!(decoded, message);
-    assert_eq!(decoded.encode(), body);
+    assert_eq!(decoded.encode().unwrap(), body);
     assert_round_trips(Message::Msm(message));
 }
 
@@ -1422,14 +1468,14 @@ fn msm7_absent_phase_range_rate_distinguished_from_zero() {
         satellites,
         signals,
     };
-    let body = message.encode();
+    let body = message.encode().unwrap();
     let decoded = MsmMessage::decode(&body).unwrap();
     assert_eq!(decoded.satellites[0].rough_phase_range_rate_m_s, None);
     assert_eq!(decoded.satellites[1].rough_phase_range_rate_m_s, Some(0));
     assert_eq!(decoded.signals[0].fine_phase_range_rate, None);
     assert_eq!(decoded.signals[1].fine_phase_range_rate, Some(0));
     assert_eq!(decoded, message);
-    assert_eq!(decoded.encode(), body);
+    assert_eq!(decoded.encode().unwrap(), body);
     assert_round_trips(Message::Msm(message));
 }
 
@@ -1625,6 +1671,289 @@ fn valid_galileo_inav_ephemeris() -> GalileoInavEphemeris {
     }
 }
 
+fn valid_glonass_ephemeris() -> GlonassEphemeris {
+    GlonassEphemeris {
+        satellite_id: 7,
+        frequency_channel: 4,
+        almanac_health: true,
+        almanac_health_availability: true,
+        p1: 1,
+        t_k: 1234,
+        b_n_msb: false,
+        p2: true,
+        t_b: 76,
+        xn_dot: -123_456,
+        xn: 67_108_000,
+        xn_dot_dot: -3,
+        yn_dot: 7777,
+        yn: -67_000_000,
+        yn_dot_dot: 2,
+        zn_dot: -1,
+        zn: 12_345_678,
+        zn_dot_dot: -1,
+        p3: true,
+        gamma_n: -1000,
+        m_p: 2,
+        m_l_n_third: false,
+        tau_n: -2_000_000,
+        delta_tau_n: 4,
+        e_n: 10,
+        m_p4: true,
+        m_f_t: 6,
+        m_n_t: 1500,
+        m_m: 1,
+        additional_data_available: true,
+        n_a: 700,
+        tau_c: -1_500_000_000,
+        m_n4: 5,
+        m_tau_gps: -987_654,
+        m_l_n_fifth: false,
+        reserved: 0,
+    }
+}
+
+/// `expect_err` with the message number and the raw value in the panic text.
+fn expect_refusal(
+    result: crate::error::Result<crate::id::GnssSatelliteId>,
+    message: &str,
+    satellite_id: u8,
+) -> Error {
+    match result {
+        Err(err) => err,
+        Ok(sat) => panic!("{message} accepted satellite id {satellite_id} as {sat}"),
+    }
+}
+
+/// Call `satellite()` on each ephemeris message with a given raw satellite
+/// field, returning one result per message in a fixed order:
+/// 1019, 1020, 1042, 1045, 1046 (all six-bit), then 1044 (four-bit).
+fn ephemeris_satellites(
+    satellite_id: u8,
+) -> Vec<(
+    &'static str,
+    crate::error::Result<crate::id::GnssSatelliteId>,
+)> {
+    let mut gps = valid_gps_ephemeris();
+    gps.satellite_id = satellite_id;
+    let mut glonass = valid_glonass_ephemeris();
+    glonass.satellite_id = satellite_id;
+    let mut beidou = valid_beidou_ephemeris();
+    beidou.satellite_id = satellite_id;
+    let mut fnav = valid_galileo_fnav_ephemeris();
+    fnav.satellite_id = satellite_id;
+    let mut inav = valid_galileo_inav_ephemeris();
+    inav.satellite_id = satellite_id;
+    let mut qzss = valid_qzss_ephemeris();
+    qzss.satellite_id = satellite_id;
+    vec![
+        ("1019", gps.satellite()),
+        ("1020", glonass.satellite()),
+        ("1042", beidou.satellite()),
+        ("1045", fnav.satellite()),
+        ("1046", inav.satellite()),
+        ("1044", qzss.satellite()),
+    ]
+}
+
+/// The shared satellite-token range is 1..=99 for every constellation, so the
+/// raw field is what actually bounds these messages. 63 is the widest value a
+/// six-bit field carries and 15 the widest a four-bit one carries; both
+/// convert, and converting says only that the number is well formed and
+/// transmissible, not that the constellation flies that satellite. GPS 1019
+/// values 40..=63 convert too, to the SBAS satellites DF009 names with them.
+#[test]
+fn ephemeris_satellite_accepts_every_value_its_raw_field_can_carry() {
+    for satellite_id in 1..=63u8 {
+        for (message, result) in ephemeris_satellites(satellite_id) {
+            // 1044 is the only four-bit field; the rest take the whole six-bit
+            // range.
+            let expected_ok = message != "1044" || satellite_id <= 15;
+            assert_eq!(
+                result.is_ok(),
+                expected_ok,
+                "{message} satellite id {satellite_id}"
+            );
+            if let Ok(sat) = result {
+                if message == "1019" && satellite_id >= 40 {
+                    assert_eq!(sat.system, crate::id::GnssSystem::Sbas, "{satellite_id}");
+                    assert_eq!(sat.prn, satellite_id - 20, "{satellite_id}");
+                } else {
+                    assert_eq!(sat.prn, satellite_id, "{message}");
+                }
+            }
+        }
+    }
+
+    // Numbers above the operational roster are ordinary field values: an
+    // extended GLONASS slot, and the GPS satellite number CODE's DCB tables
+    // carry as G34.
+    let mut glonass = valid_glonass_ephemeris();
+    glonass.satellite_id = 28;
+    assert_eq!(glonass.satellite().unwrap().to_string(), "R28");
+    let mut gps = valid_gps_ephemeris();
+    gps.satellite_id = 34;
+    assert_eq!(gps.satellite().unwrap().to_string(), "G34");
+}
+
+/// Zero is not a spellable satellite token, and a value wider than the raw
+/// field is not a satellite the message can name at all. Both are refused,
+/// per message, with a typed error.
+#[test]
+fn ephemeris_satellite_refuses_zero_and_values_wider_than_the_raw_field() {
+    for (message, result) in ephemeris_satellites(0) {
+        let err = result.expect_err("satellite id 0 is not a spellable token");
+        assert!(
+            matches!(err, Error::Parse(_)),
+            "{message}: refusal must be typed, got {err}"
+        );
+        assert!(
+            err.to_string().contains("1..=99"),
+            "{message}: zero is refused as a token, got {err}"
+        );
+    }
+
+    for satellite_id in [64u8, 65, 100, 199, 255] {
+        for (message, result) in ephemeris_satellites(satellite_id) {
+            let err = expect_refusal(result, message, satellite_id);
+            assert!(
+                matches!(err, Error::Parse(_)),
+                "{message} {satellite_id}: refusal must be typed, got {err}"
+            );
+            assert!(
+                err.to_string().contains("raw satellite field"),
+                "{message} {satellite_id}: refusal must name the raw field, got {err}"
+            );
+        }
+    }
+
+    // QZSS 1044 is four bits, so it stops at 15 while the six-bit messages
+    // still accept 16..=63.
+    for satellite_id in [16u8, 20, 63] {
+        let mut qzss = valid_qzss_ephemeris();
+        qzss.satellite_id = satellite_id;
+        let err = qzss
+            .satellite()
+            .expect_err("1044 carries a four-bit satellite field")
+            .to_string();
+        assert!(err.contains("4-bit"), "{satellite_id}: {err}");
+        let mut beidou = valid_beidou_ephemeris();
+        beidou.satellite_id = satellite_id;
+        assert!(beidou.satellite().is_ok(), "1042 {satellite_id}");
+    }
+}
+
+/// DF009 values 40..=63 name SBAS satellites, broadcast PRN `value + 80`,
+/// which is how RTKLIB `decode_type1019` reads them after reading the rest of
+/// the message the same way. The satellite is the SBAS one; the GPS LNAV
+/// broadcast record is refused, since no such record exists for an SBAS
+/// satellite. 33..=39 are GPS numbers above the operational roster.
+#[test]
+fn gps_1019_df009_sbas_range_names_sbas_satellites() {
+    for satellite_id in 33..=39u8 {
+        let mut gps = valid_gps_ephemeris();
+        gps.satellite_id = satellite_id;
+        let sat = gps.satellite().expect("DF009 33..=39 is a GPS number");
+        assert_eq!(sat.system, crate::id::GnssSystem::Gps);
+        assert_eq!(sat.prn, satellite_id);
+    }
+    for (satellite_id, token) in [(40u8, "S20"), (58, "S38"), (63, "S43")] {
+        let mut gps = valid_gps_ephemeris();
+        gps.satellite_id = satellite_id;
+        assert_eq!(
+            gps.satellite().expect("DF009 SBAS satellite").to_string(),
+            token
+        );
+        let full_week = 2048 + u32::from(gps.week_number);
+        let err = gps
+            .to_broadcast_record(full_week)
+            .expect_err("no GPS LNAV record for an SBAS satellite");
+        assert!(
+            err.to_string().contains("no GPS LNAV broadcast record"),
+            "{satellite_id}: {err}"
+        );
+    }
+}
+
+/// A refused satellite id is refused, not repaired. The raw struct keeps the
+/// value it held, `to_broadcast_record` fails instead of emitting a record for
+/// the wrong satellite, and a decoded body still round-trips byte for byte.
+#[test]
+fn ephemeris_satellite_refusal_leaves_the_raw_record_untouched() {
+    let mut gps = valid_gps_ephemeris();
+    gps.satellite_id = 100;
+    assert!(gps.satellite().is_err());
+    assert!(gps.to_broadcast_record(2434).is_err());
+    assert_eq!(
+        gps.satellite_id, 100,
+        "the raw field is not zeroed or clamped"
+    );
+
+    // A body that really was transmitted with the widest six-bit value decodes
+    // to that value, keeps its reserved bits, and re-encodes identically.
+    let mut widest = valid_gps_ephemeris();
+    widest.satellite_id = 63;
+    let body = widest.encode().unwrap();
+    let decoded = GpsEphemeris::decode(&body).unwrap();
+    assert_eq!(decoded, widest);
+    assert_eq!(decoded.satellite_id, 63);
+    assert_eq!(decoded.encode().unwrap(), body);
+    assert_eq!(decoded.satellite().unwrap().to_string(), "S43");
+
+    let mut qzss = valid_qzss_ephemeris();
+    qzss.satellite_id = 15;
+    let qzss_body = qzss.encode().unwrap();
+    let qzss_decoded = QzssEphemeris::decode(&qzss_body).unwrap();
+    assert_eq!(qzss_decoded, qzss);
+    assert_eq!(qzss_decoded.encode().unwrap(), qzss_body);
+    assert_eq!(qzss_decoded.satellite().unwrap().to_string(), "J15");
+}
+
+/// A satellite id wider than its message's raw field is refused by the
+/// encoder instead of being written as its low bits, which would name another
+/// satellite: 100 would become 36 in six bits and 20 would become 4 in four.
+#[test]
+fn raw_ephemeris_encoders_refuse_out_of_width_satellite_ids() {
+    let mut gps = valid_gps_ephemeris();
+    gps.satellite_id = 100;
+    let mut glonass = valid_glonass_ephemeris();
+    glonass.satellite_id = 64;
+    let mut beidou = valid_beidou_ephemeris();
+    beidou.satellite_id = 64;
+    let mut fnav = valid_galileo_fnav_ephemeris();
+    fnav.satellite_id = 255;
+    let mut inav = valid_galileo_inav_ephemeris();
+    inav.satellite_id = 64;
+    let mut qzss = valid_qzss_ephemeris();
+    qzss.satellite_id = 20;
+    for (message, result) in [
+        ("1019", gps.encode()),
+        ("1020", glonass.encode()),
+        ("1042", beidou.encode()),
+        ("1045", fnav.encode()),
+        ("1046", inav.encode()),
+        ("1044", qzss.encode()),
+    ] {
+        let err = result.expect_err("an out-of-width satellite id is refused");
+        assert!(
+            matches!(err, Error::InvalidInput(ref text)
+                if text.contains("raw satellite field") && text.contains(message)),
+            "{message}: {err}"
+        );
+    }
+    assert!(
+        Message::GpsEphemeris(gps).to_frame().is_err(),
+        "the framed path refuses it too"
+    );
+
+    // The widest value each field carries still encodes.
+    let mut qzss = valid_qzss_ephemeris();
+    qzss.satellite_id = 15;
+    assert!(qzss.encode().is_ok());
+    let mut gps = valid_gps_ephemeris();
+    gps.satellite_id = 63;
+    assert!(gps.encode().is_ok());
+}
+
 #[test]
 fn broadcast_conversion_refuses_ura_absence_and_range_for_gps_beidou_qzss() {
     // GPS (message 1019)
@@ -1817,7 +2146,7 @@ fn raw_codec_round_trips_retain_absence_and_spare_accuracy_indices() {
     // GPS with URA 15 (absence)
     let mut gps = valid_gps_ephemeris();
     gps.sv_accuracy = 15;
-    let bytes = gps.encode();
+    let bytes = gps.encode().unwrap();
     let decoded = GpsEphemeris::decode(&bytes).unwrap();
     assert_eq!(decoded.sv_accuracy, 15);
     assert_eq!(decoded, gps);
@@ -1825,7 +2154,7 @@ fn raw_codec_round_trips_retain_absence_and_spare_accuracy_indices() {
     // BeiDou with URA 15 (absence)
     let mut bds = valid_beidou_ephemeris();
     bds.sv_urai = 15;
-    let bytes = bds.encode();
+    let bytes = bds.encode().unwrap();
     let decoded = BeidouEphemeris::decode(&bytes).unwrap();
     assert_eq!(decoded.sv_urai, 15);
     assert_eq!(decoded, bds);
@@ -1833,7 +2162,7 @@ fn raw_codec_round_trips_retain_absence_and_spare_accuracy_indices() {
     // QZSS with URA 15 (absence)
     let mut qzss = valid_qzss_ephemeris();
     qzss.ura = 15;
-    let bytes = qzss.encode();
+    let bytes = qzss.encode().unwrap();
     let decoded = QzssEphemeris::decode(&bytes).unwrap();
     assert_eq!(decoded.ura, 15);
     assert_eq!(decoded, qzss);
@@ -1842,7 +2171,7 @@ fn raw_codec_round_trips_retain_absence_and_spare_accuracy_indices() {
     let mut fnav = valid_galileo_fnav_ephemeris();
     for sisa in [126, 254, 255] {
         fnav.sisa = sisa;
-        let bytes = fnav.encode();
+        let bytes = fnav.encode().unwrap();
         let decoded = GalileoFnavEphemeris::decode(&bytes).unwrap();
         assert_eq!(decoded.sisa, sisa);
         assert_eq!(decoded, fnav);
@@ -1852,7 +2181,7 @@ fn raw_codec_round_trips_retain_absence_and_spare_accuracy_indices() {
     let mut inav = valid_galileo_inav_ephemeris();
     for sisa in [126, 254, 255] {
         inav.sisa_index = sisa;
-        let bytes = inav.encode();
+        let bytes = inav.encode().unwrap();
         let decoded = GalileoInavEphemeris::decode(&bytes).unwrap();
         assert_eq!(decoded.sisa_index, sisa);
         assert_eq!(decoded, inav);

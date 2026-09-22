@@ -16,8 +16,8 @@
 //!
 //! - **GPS:** `(PRN nn)` in the object name is the PRN directly.
 //! - **BeiDou:** `(Cnn)` in the object name is the PRN directly.
-//! - **QZSS:** `(QZSS/PRN nnn)` carries the broadcast PRN (193..=201); the
-//!   RINEX slot is `nnn - 192` (`J01`..`J09`), per RINEX 3.0x.
+//! - **QZSS:** `(QZSS/PRN nnn)` carries the broadcast PRN (193..=202); the
+//!   RINEX slot is `nnn - 192` (`J01`..`J10`), per RINEX 3.0x.
 //! - **Galileo:** the object name is the `GSATdddd` build id, which carries no
 //!   PRN; the SVID/PRN is resolved from the published GSAT->SVID table
 //!   [`galileo_prn_for_gsat`].
@@ -609,15 +609,17 @@ fn paren_number(name: Option<&str>) -> Option<u16> {
 /// Parse the QZSS RINEX slot from a CelesTrak object name.
 ///
 /// QZSS names carry the broadcast PRN, e.g. `QZS-2 (QZSS/PRN 194)`; the RINEX
-/// slot is `PRN - 192` (`J01`..`J09`), per RINEX 3.0x. Broadcast PRNs outside
-/// `193..=201` are rejected.
+/// slot is `PRN - 192`, per RINEX 3.0x. QZSS L1C/A broadcast PRNs run
+/// `193..=202` (`J01`..`J10`), the window RTKLIB (`MINPRNQZS`..`MAXPRNQZS`) and
+/// the NMEA satellite-number table in `nmea::fields` both use; a PRN outside it
+/// is not a QZSS navigation PRN and is rejected.
 fn qzss_slot_from_object_name(name: Option<&str>) -> Option<u16> {
     let name = name?;
     let mut from = 0;
     while let Some(rel) = find_ci(&name[from..], "PRN") {
         let after = from + rel + "PRN".len();
         if let Some(prn) = leading_uint(&name[after..]) {
-            if (193..=201).contains(&prn) {
+            if (193..=202).contains(&prn) {
                 return Some(prn - 192);
             }
         }
@@ -1793,7 +1795,7 @@ mod tests {
 
     #[test]
     fn qzss_slot_is_broadcast_prn_minus_192() {
-        // RINEX 3.0x: J-slot = broadcast PRN - 192, valid only for 193..=201.
+        // RINEX 3.0x: J-slot = broadcast PRN - 192, for QZSS PRNs 193..=202.
         assert_eq!(
             qzss_slot_from_object_name(Some("QZS-2 (QZSS/PRN 194)")),
             Some(2)
@@ -1806,8 +1808,16 @@ mod tests {
             qzss_slot_from_object_name(Some("QZS-6 (QZSS/PRN 200)")),
             Some(8)
         );
-        // Out-of-band broadcast PRN (e.g. an SBAS-style 122) is rejected.
+        // PRN 202 is the top of the QZSS window, J10.
+        assert_eq!(
+            qzss_slot_from_object_name(Some("QZS-7 (QZSS/PRN 202)")),
+            Some(10)
+        );
+        // Out-of-band broadcast PRNs (an SBAS-style 122, and either neighbour
+        // of the window) are rejected.
         assert_eq!(qzss_slot_from_object_name(Some("X (PRN 122)")), None);
+        assert_eq!(qzss_slot_from_object_name(Some("X (PRN 192)")), None);
+        assert_eq!(qzss_slot_from_object_name(Some("X (PRN 203)")), None);
     }
 
     #[test]

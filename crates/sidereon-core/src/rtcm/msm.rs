@@ -330,7 +330,17 @@ impl MsmMessage {
     }
 
     /// Encode this message back into an MSM body (without the transport frame).
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when the satellite and signal lists cannot be
+    /// stated in the MSM masks: a satellite id outside `1..=64` or a signal id
+    /// outside `1..=32` (the mask bit it names does not exist), a satellite or a
+    /// satellite/signal cell listed twice, or a signal whose satellite is not in
+    /// the satellite list. Each of those would otherwise be shifted onto another
+    /// bit or left out of the body without a trace.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.check_masks()?;
         let mut w = BitWriter::new();
         w.push_u(u64::from(self.message_number), 12);
         w.push_u(u64::from(self.header.reference_station_id), 12);
@@ -459,9 +469,58 @@ impl MsmMessage {
             }
         }
 
-        w.into_bytes()
+        Ok(w.into_bytes())
+    }
+
+    /// Refuse satellite and signal lists the MSM masks cannot state exactly.
+    fn check_masks(&self) -> Result<()> {
+        let refuse = |what: String| {
+            Err(Error::InvalidInput(format!(
+                "RTCM MSM {} cannot be encoded: {what}",
+                self.message_number
+            )))
+        };
+        let mut sat_ids = std::collections::BTreeSet::new();
+        for satellite in &self.satellites {
+            if !(1..=MSM_SATELLITE_MASK_BITS).contains(&satellite.id) {
+                return refuse(format!(
+                    "satellite id {} is outside the 1..={MSM_SATELLITE_MASK_BITS} satellite mask",
+                    satellite.id
+                ));
+            }
+            if !sat_ids.insert(satellite.id) {
+                return refuse(format!("satellite id {} is listed twice", satellite.id));
+            }
+        }
+        let mut cells = std::collections::BTreeSet::new();
+        for signal in &self.signals {
+            if !(1..=MSM_SIGNAL_MASK_BITS).contains(&signal.signal_id) {
+                return refuse(format!(
+                    "signal id {} is outside the 1..={MSM_SIGNAL_MASK_BITS} signal mask",
+                    signal.signal_id
+                ));
+            }
+            if !sat_ids.contains(&signal.satellite_id) {
+                return refuse(format!(
+                    "signal {} names satellite id {}, which the satellite list does not hold",
+                    signal.signal_id, signal.satellite_id
+                ));
+            }
+            if !cells.insert((signal.satellite_id, signal.signal_id)) {
+                return refuse(format!(
+                    "the cell for satellite id {} signal {} is listed twice",
+                    signal.satellite_id, signal.signal_id
+                ));
+            }
+        }
+        Ok(())
     }
 }
+
+/// Satellite mask width (DF394): satellite ids run `1..=64`.
+const MSM_SATELLITE_MASK_BITS: u8 = 64;
+/// Signal mask width (DF395): signal ids run `1..=32`.
+const MSM_SIGNAL_MASK_BITS: u8 = 32;
 
 /// Read `n` values with `f`, collecting into a vector.
 fn read_vec<T>(

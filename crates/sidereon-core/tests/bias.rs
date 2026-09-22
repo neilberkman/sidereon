@@ -130,8 +130,11 @@ fn code_dcb_parse_round_trips_fixture() {
     let parsed = BiasSet::parse_code_dcb(DCB, None).expect("parse DCB fixture");
     let set = parsed.value;
     assert_eq!(set.mode, BiasMode::Relative);
-    assert_eq!(set.skipped_records(), 2);
-    assert_eq!(set.records().len(), 496);
+    // The file's two satellite numbers above the operational roster - G34 on
+    // line 40 and R28 on line 67 - are ordinary satellite tokens, so every
+    // record in the file is retained and nothing is skipped.
+    assert_eq!(set.skipped_records(), 0);
+    assert_eq!(set.records().len(), 498);
 
     let g01 = sat(GnssSystem::Gps, 1);
     assert_eq!(
@@ -180,6 +183,90 @@ fn code_dcb_parse_round_trips_fixture() {
         .unwrap()
         .to_bits(),
         ns(0.218).to_bits()
+    );
+
+    // The two satellites above the operational roster keep their own values,
+    // in the file's own nanosecond units, with the sign convention the
+    // neighbouring records use.
+    let g34 = sat(GnssSystem::Gps, 34);
+    assert_eq!(
+        set.code_dsb_seconds(g34, "C1W", "C1C", epoch(2026, 153, 0))
+            .unwrap()
+            .to_bits(),
+        ns(0.941).to_bits()
+    );
+    assert_eq!(
+        set.code_dsb_seconds(g34, "C1C", "C1W", epoch(2026, 153, 0))
+            .unwrap()
+            .to_bits(),
+        (-ns(0.941)).to_bits()
+    );
+    let r28 = sat(GnssSystem::Glonass, 28);
+    assert_eq!(
+        set.code_dsb_seconds(r28, "C1P", "C1C", epoch(2026, 153, 0))
+            .unwrap()
+            .to_bits(),
+        ns(1.184).to_bits()
+    );
+    assert_eq!(
+        set.code_dsb_seconds(r28, "C1C", "C1P", epoch(2026, 153, 0))
+            .unwrap()
+            .to_bits(),
+        (-ns(1.184)).to_bits()
+    );
+    // Their neighbours are unchanged: G32 and R27 keep their own values, so
+    // nothing has shifted by a record.
+    assert_eq!(
+        set.code_dsb_seconds(sat(GnssSystem::Gps, 32), "C1W", "C1C", epoch(2026, 153, 0))
+            .unwrap()
+            .to_bits(),
+        ns(0.343).to_bits()
+    );
+    assert_eq!(
+        set.code_dsb_seconds(
+            sat(GnssSystem::Glonass, 27),
+            "C1P",
+            "C1C",
+            epoch(2026, 153, 0)
+        )
+        .unwrap()
+        .to_bits(),
+        (-ns(1.160)).to_bits()
+    );
+    // G33 is absent from the file and stays absent; no record is invented for
+    // the gap between G32 and G34.
+    assert!(set
+        .code_dsb_seconds(sat(GnssSystem::Gps, 33), "C1W", "C1C", epoch(2026, 153, 0))
+        .is_none());
+
+    // The retained records survive a write and read back unchanged.
+    let written = write_code_dcb(&set).expect("write DCB");
+    assert!(
+        written.lines().any(|line| line.starts_with("G34")),
+        "G34 must be written back"
+    );
+    assert!(
+        written.lines().any(|line| line.starts_with("R28")),
+        "R28 must be written back"
+    );
+    let reparsed = BiasSet::parse_code_dcb(written.as_bytes(), None)
+        .expect("reparse written DCB")
+        .value;
+    assert_eq!(reparsed.skipped_records(), 0);
+    assert_eq!(reparsed.records().len(), set.records().len());
+    assert_eq!(
+        reparsed
+            .code_dsb_seconds(g34, "C1W", "C1C", epoch(2026, 153, 0))
+            .unwrap()
+            .to_bits(),
+        ns(0.941).to_bits()
+    );
+    assert_eq!(
+        reparsed
+            .code_dsb_seconds(r28, "C1P", "C1C", epoch(2026, 153, 0))
+            .unwrap()
+            .to_bits(),
+        ns(1.184).to_bits()
     );
 }
 

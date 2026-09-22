@@ -312,6 +312,79 @@ fn single_epoch_static_matches_spp_bits() {
     assert_eq!(static_solution.used_sats[0], spp_solution.used_sats);
 }
 
+/// An ionosphere-corrected epoch holding a satellite whose carrier cannot be
+/// resolved keeps its other satellites: the satellite is excluded and reported
+/// in `rejected_sats` for its epoch, as SPP excludes it, instead of the static
+/// solve failing. `R28` carries the channel `7` real IGS headers state for it;
+/// `R07` has no channel at all.
+#[test]
+fn static_epoch_excludes_a_satellite_without_a_resolvable_carrier() {
+    let mut eph = make_store(2);
+    let mut epochs = clean_epochs(&eph, 2);
+    for epoch in &mut epochs {
+        epoch.corrections = Corrections::IONO;
+    }
+    let reference = solve_static(&eph, &epochs, options()).expect("GPS-only static solve");
+
+    let r28 = GnssSatelliteId::new(GnssSystem::Glonass, 28).expect("valid GLONASS id");
+    let r07 = GnssSatelliteId::new(GnssSystem::Glonass, 7).expect("valid GLONASS id");
+    eph.positions.insert(r28, sat_position(10.0, 60.0));
+    eph.positions.insert(r07, sat_position(190.0, 55.0));
+    epochs[0].measurements.push(Observation {
+        satellite_id: r28,
+        pseudorange_m: RANGE_M,
+    });
+    epochs[0].glonass_channels.insert(28, 7);
+    epochs[1].measurements.push(Observation {
+        satellite_id: r07,
+        pseudorange_m: RANGE_M,
+    });
+
+    let solution = solve_static(&eph, &epochs, options())
+        .expect("the epochs keep their GPS satellites and solve");
+    assert_eq!(solution.used_sats, reference.used_sats);
+    for (epoch_index, glonass) in [(0usize, r28), (1, r07)] {
+        assert_eq!(
+            solution.rejected_sats[epoch_index],
+            vec![RejectedSat {
+                satellite_id: glonass,
+                reason: crate::spp::RejectionReason::IonosphereCarrierUnresolved,
+            }],
+            "epoch {epoch_index} reports {glonass}"
+        );
+    }
+    // The GPS measurements solve exactly as they do alone.
+    let position_bits = |solution: &StaticSolution| {
+        [
+            solution.position.x_m.to_bits(),
+            solution.position.y_m.to_bits(),
+            solution.position.z_m.to_bits(),
+        ]
+    };
+    assert_eq!(position_bits(&solution), position_bits(&reference));
+    let clock_bits = |solution: &StaticSolution| {
+        solution
+            .per_epoch_clock
+            .iter()
+            .map(|clock| (clock.epoch_index, clock.system, clock.clock_s.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(clock_bits(&solution), clock_bits(&reference));
+    let residual_bits = |solution: &StaticSolution| {
+        solution
+            .residuals_m
+            .iter()
+            .map(|row| (row.epoch_index, row.satellite_id, row.residual_m.to_bits()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(residual_bits(&solution), residual_bits(&reference));
+    assert_eq!(solution.metadata.iterations, reference.metadata.iterations);
+    assert_eq!(
+        solution.geometry_quality.gdop.to_bits(),
+        reference.geometry_quality.gdop.to_bits()
+    );
+}
+
 #[test]
 fn single_epoch_multi_system_static_matches_spp_bits() {
     let (eph, epoch) = mixed_system_store_and_epoch();

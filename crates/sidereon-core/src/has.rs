@@ -245,7 +245,21 @@ impl HasMt1Message {
     }
 
     /// Encode this message back to an MT1 payload.
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when the mask block cannot state its lists
+    /// exactly: a system HAS gives no GNSS ID, satellites outside `1..=40` (HAS
+    /// SIS ICD Table 19) or signals outside `0..=15`, a satellite or signal list
+    /// that is not strictly ascending (the masks state sets in ascending order,
+    /// and every correction block is written in that order), or a cell mask
+    /// whose length is not satellites times signals. Each of those would
+    /// otherwise be written as a different mask, or shift corrections onto
+    /// other satellites.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        if let Some(mask) = &self.mask {
+            check_mask_block(mask)?;
+        }
         let mut w = BitWriter::new();
         write_header(&mut w, self.header);
         if let Some(mask) = &self.mask {
@@ -269,7 +283,7 @@ impl HasMt1Message {
         for &bit in &self.padding_bits {
             w.push_flag(bit);
         }
-        w.into_bytes()
+        Ok(w.into_bytes())
     }
 }
 
@@ -383,6 +397,70 @@ fn read_mask_block(r: &mut BitReader<'_>) -> Result<HasMaskBlock> {
         });
     }
     Ok(HasMaskBlock { systems })
+}
+
+/// Satellite mask width: HAS satellites run `1..=40` (HAS SIS ICD Table 19).
+const HAS_SATELLITE_MASK_BITS: u8 = 40;
+/// Signal mask width: HAS signal indices run `0..=15`.
+const HAS_SIGNAL_MASK_BITS: u8 = 16;
+
+/// Refuse a mask block whose lists the MT1 masks cannot state exactly.
+fn check_mask_block(mask: &HasMaskBlock) -> Result<()> {
+    let refuse = |what: String| Err(Error::InvalidInput(format!("HAS MT1 mask {what}")));
+    // Nsys is four bits and 0 is reserved, which the reader refuses.
+    if !(1..=15).contains(&mask.systems.len()) {
+        return refuse(format!(
+            "holds {} systems; Nsys states 1..=15",
+            mask.systems.len()
+        ));
+    }
+    for system in &mask.systems {
+        let name = system.system;
+        if has_gnss_id(name).is_none() {
+            return refuse(format!("names {name:?}, which has no HAS GNSS ID"));
+        }
+        if let Some(&prn) = system
+            .satellites
+            .iter()
+            .find(|&&prn| !(1..=HAS_SATELLITE_MASK_BITS).contains(&prn))
+        {
+            return refuse(format!(
+                "{name:?} satellite {prn} is outside 1..={HAS_SATELLITE_MASK_BITS}"
+            ));
+        }
+        if !system.satellites.windows(2).all(|pair| pair[0] < pair[1]) {
+            return refuse(format!(
+                "{name:?} satellite list {:?} is not strictly ascending",
+                system.satellites
+            ));
+        }
+        if let Some(&signal) = system
+            .signals
+            .iter()
+            .find(|&&signal| signal >= HAS_SIGNAL_MASK_BITS)
+        {
+            return refuse(format!(
+                "{name:?} signal {signal} is outside 0..={}",
+                HAS_SIGNAL_MASK_BITS - 1
+            ));
+        }
+        if !system.signals.windows(2).all(|pair| pair[0] < pair[1]) {
+            return refuse(format!(
+                "{name:?} signal list {:?} is not strictly ascending",
+                system.signals
+            ));
+        }
+        if let Some(cells) = &system.cell_mask {
+            let expected = system.satellites.len() * system.signals.len();
+            if cells.len() != expected {
+                return refuse(format!(
+                    "{name:?} cell mask holds {} cells for {expected} satellite/signal pairs",
+                    cells.len()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn write_mask_block(w: &mut BitWriter, mask: &HasMaskBlock) {
@@ -736,7 +814,16 @@ fn has_gnss_system(gnss_id: u8) -> Result<GnssSystem> {
     }
 }
 
+/// The satellite a HAS mask entry names. HAS numbers satellites `1..=40` for
+/// both GPS and Galileo (HAS SIS ICD Table 19), narrower than the shared
+/// satellite-token range, so the bound is checked here rather than left to the
+/// identifier constructor.
 fn has_satellite(system: GnssSystem, prn: u8) -> Result<GnssSatelliteId> {
+    if !(1..=HAS_SATELLITE_MASK_BITS).contains(&prn) {
+        return Err(Error::Parse(format!(
+            "invalid HAS satellite {system:?} {prn}: outside 1..={HAS_SATELLITE_MASK_BITS}"
+        )));
+    }
     GnssSatelliteId::new(system, prn)
         .map_err(|err| Error::Parse(format!("invalid HAS satellite {system:?} {prn}: {err}")))
 }
@@ -875,9 +962,109 @@ mod tests {
             padding_bits: Vec::new(),
         };
 
-        let body = message.encode();
+        let body = message.encode().expect("encode HAS MT1");
         let decoded = HasMt1Message::decode(&body).unwrap();
         assert_eq!(decoded, message);
+    }
+
+    fn mask_only_message(systems: Vec<HasGnssMask>) -> HasMt1Message {
+        HasMt1Message {
+            header: HasMt1Header {
+                toh_s: 1234,
+                mask: true,
+                orbit: false,
+                clock_full_set: false,
+                clock_subset: false,
+                code_bias: false,
+                phase_bias: false,
+                reserved: 0,
+                mask_id: 7,
+                iod_set_id: 9,
+            },
+            mask: Some(HasMaskBlock { systems }),
+            orbit: None,
+            clock_full_set: None,
+            clock_subset: None,
+            code_bias: None,
+            phase_bias: None,
+            padding_bits: Vec::new(),
+        }
+    }
+
+    fn system_mask(system: GnssSystem, satellites: Vec<u8>, signals: Vec<u8>) -> HasGnssMask {
+        HasGnssMask {
+            system,
+            satellites,
+            signals,
+            cell_mask: None,
+            nav_message: 0,
+        }
+    }
+
+    /// HAS SIS ICD Table 19 numbers GPS and Galileo satellites 1..=40, so G33..G40
+    /// and E37..E40 - past the old per-constellation caps - encode and decode.
+    #[test]
+    fn mt1_mask_carries_satellites_up_to_forty() {
+        let message = mask_only_message(vec![
+            system_mask(GnssSystem::Gps, vec![1, 32, 33, 40], vec![0]),
+            system_mask(GnssSystem::Galileo, vec![36, 37, 40], vec![0, 15]),
+        ]);
+        let body = message.encode().expect("a Table 19 mask encodes");
+        let decoded = HasMt1Message::decode(&body).expect("and decodes");
+        assert_eq!(decoded.mask, message.mask);
+    }
+
+    /// A mask list the MT1 masks cannot state is refused by name before any bit
+    /// is written, instead of underflowing, shifting onto another bit, or
+    /// relabelling the system.
+    #[test]
+    fn mt1_encode_refuses_masks_it_cannot_state() {
+        for (systems, needle) in [
+            (
+                vec![system_mask(GnssSystem::Gps, vec![0], vec![0])],
+                "outside 1..=40",
+            ),
+            (
+                vec![system_mask(GnssSystem::Gps, vec![41], vec![0])],
+                "outside 1..=40",
+            ),
+            (
+                vec![system_mask(GnssSystem::Galileo, vec![1], vec![16])],
+                "outside 0..=15",
+            ),
+            (
+                vec![system_mask(GnssSystem::Gps, vec![5, 3], vec![0])],
+                "not strictly ascending",
+            ),
+            (
+                vec![system_mask(GnssSystem::Gps, vec![3, 3], vec![0])],
+                "not strictly ascending",
+            ),
+            (
+                vec![system_mask(GnssSystem::Gps, vec![3], vec![9, 0])],
+                "not strictly ascending",
+            ),
+            (
+                vec![system_mask(GnssSystem::Glonass, vec![3], vec![0])],
+                "no HAS GNSS ID",
+            ),
+            (Vec::new(), "Nsys states 1..=15"),
+        ] {
+            let err = mask_only_message(systems)
+                .encode()
+                .expect_err("the mask cannot be stated");
+            assert!(
+                matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+                "expected {needle:?}, got {err}"
+            );
+        }
+
+        let mut wrong_cells = system_mask(GnssSystem::Gps, vec![3, 4], vec![0, 9]);
+        wrong_cells.cell_mask = Some(vec![true; 3]);
+        let err = mask_only_message(vec![wrong_cells])
+            .encode()
+            .expect_err("three cells for four pairs");
+        assert!(err.to_string().contains("cell mask holds 3 cells"), "{err}");
     }
 
     #[test]

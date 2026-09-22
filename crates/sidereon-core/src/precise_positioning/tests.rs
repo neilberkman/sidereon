@@ -2519,7 +2519,8 @@ fn static_float_rows_apply_ssr_code_and_phase_biases_with_expected_signs() {
         }),
         padding_bits: Vec::new(),
     };
-    let decoded = HasMt1Message::decode(&has.encode()).expect("decode HAS MT1");
+    let decoded =
+        HasMt1Message::decode(&has.encode().expect("encode HAS MT1")).expect("decode HAS MT1");
     let mut store = SsrCorrectionStore::new();
     let reception = crate::astro::time::model::GnssWeekTow::new(
         crate::astro::time::model::TimeScale::Gst,

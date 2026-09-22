@@ -999,6 +999,19 @@ fn dual_frequency_observation_with_pseudorange_selection(
     values: &[crate::rinex::observations::ObsValue],
     pseudorange_selection: PseudorangeSelection,
 ) -> Option<DualFrequencyObservation> {
+    // An SBAS GEO's L1 and L5 carrier phases are steered by separate uplink
+    // control loops, and published measurements find their geometry-free
+    // combination several times noisier than a medium-orbit satellite's. On
+    // the ESBC fixture the 30 s step of the SBAS L1/L5 geometry-free
+    // combination scatters by 5.2 cm (S23) and 1.07 m (S36), with steps that
+    // do not persist as a cycle slip's would, against a median of 5.0 mm over
+    // the GPS and Galileo satellites. The slip and multipath statistics are
+    // tuned for medium-orbit noise and would report that noise as 155 slips in
+    // 240 epochs and as multipath, so SBAS forms no dual-frequency observation
+    // here; its carriers still resolve for carrier-phase rows.
+    if satellite.system == GnssSystem::Sbas {
+        return None;
+    }
     let union = header.obs_codes.get(&satellite.system)?;
     // Values are held under the union of every list the file declares; which
     // code of a kind comes first is the order of the list in effect at the
@@ -1031,12 +1044,16 @@ fn dual_frequency_observation_with_pseudorange_selection(
         if !raw_value.is_finite() {
             continue;
         }
-        let frequency_hz = rinex_observation_frequency_hz(
-            satellite.system,
-            code,
-            header.version,
-            glonass_channel,
-        )?;
+        // A code whose carrier has no frequency here - a GLONASS FDMA code with
+        // no channel or one outside the allocation, a band this table does not
+        // resolve - is left out on its own. The satellite's other codes still
+        // form its bands, so one uncarried code no longer drops the whole
+        // satellite-epoch.
+        let Some(frequency_hz) =
+            rinex_observation_frequency_hz(satellite.system, code, header.version, glonass_channel)
+        else {
+            continue;
+        };
 
         let band_index = if let Some(existing) = bands
             .iter()
@@ -1959,14 +1976,21 @@ mod tests {
         let obs = RinexObs::parse(&text).unwrap_or_else(|e| panic!("parse {rel}: {e}"));
         let report = observation_qc(&obs);
 
-        assert_eq!(report.cycle_slips.observations, 4135);
-        assert_eq!(report.cycle_slips.total_slips, 27);
+        // Dual-frequency observations per system: every record whose code and
+        // carrier phase are both held on two bands with a resolvable carrier.
+        // GLONASS counts its 920 such records, the 136 of R09 and R12 that also
+        // carry G3 values included. SBAS forms none: its L1 and L5 carriers are
+        // not coherent (see `dual_frequency_observation_with_pseudorange_selection`).
+        // Counted from the fixture: GPS 1282, GLONASS 920, Galileo 1023,
+        // BeiDou 1046.
+        assert_eq!(report.cycle_slips.observations, 4271);
+        assert_eq!(report.cycle_slips.total_slips, 29);
         assert_close(
             report
                 .cycle_slips
                 .observations_per_slip
                 .expect("observations per slip"),
-            4135.0 / 27.0,
+            4271.0 / 29.0,
             rel,
         );
 
@@ -1977,27 +2001,32 @@ mod tests {
             .map(|row| {
                 (
                     row.system,
-                    (
-                        row.observations,
-                        row.slips,
-                        row.observations_per_slip
-                            .expect("system observations per slip"),
-                    ),
+                    (row.observations, row.slips, row.observations_per_slip),
                 )
             })
             .collect::<BTreeMap<_, _>>();
         assert_eq!(by_system[&GnssSystem::Gps].0, 1282);
         assert_eq!(by_system[&GnssSystem::Gps].1, 4);
-        assert_close(by_system[&GnssSystem::Gps].2, 1282.0 / 4.0, rel);
-        assert_eq!(by_system[&GnssSystem::Glonass].0, 784);
-        assert_eq!(by_system[&GnssSystem::Glonass].1, 10);
-        assert_close(by_system[&GnssSystem::Glonass].2, 784.0 / 10.0, rel);
+        assert_close(by_system[&GnssSystem::Gps].2.unwrap(), 1282.0 / 4.0, rel);
+        assert_eq!(by_system[&GnssSystem::Glonass].0, 920);
+        assert_eq!(by_system[&GnssSystem::Glonass].1, 12);
+        assert_close(
+            by_system[&GnssSystem::Glonass].2.unwrap(),
+            920.0 / 12.0,
+            rel,
+        );
         assert_eq!(by_system[&GnssSystem::Galileo].0, 1023);
         assert_eq!(by_system[&GnssSystem::Galileo].1, 9);
-        assert_close(by_system[&GnssSystem::Galileo].2, 1023.0 / 9.0, rel);
+        assert_close(
+            by_system[&GnssSystem::Galileo].2.unwrap(),
+            1023.0 / 9.0,
+            rel,
+        );
         assert_eq!(by_system[&GnssSystem::BeiDou].0, 1046);
         assert_eq!(by_system[&GnssSystem::BeiDou].1, 4);
-        assert_close(by_system[&GnssSystem::BeiDou].2, 1046.0 / 4.0, rel);
+        assert_close(by_system[&GnssSystem::BeiDou].2.unwrap(), 1046.0 / 4.0, rel);
+        assert!(!by_system.contains_key(&GnssSystem::Sbas));
+        assert_eq!(by_system.len(), 4);
     }
 
     #[test]
@@ -2009,7 +2038,7 @@ mod tests {
         let report = observation_qc(&obs);
         let rendered = render_text(&report);
 
-        assert_eq!(rendered, ESBC_QC_REPORT_TEXT);
+        assert_eq!(rendered, esbc_qc_report_text());
         assert!(rendered.contains("G   GPS"));
         assert!(rendered.contains("R   GLONASS"));
         assert!(rendered.contains("E   Galileo"));
@@ -2086,7 +2115,7 @@ mod tests {
         assert!(!html.contains("http"));
     }
 
-    const ESBC_QC_REPORT_TEXT: &str = r#"RINEX OBSERVATION QC +QC SUMMARY
+    const ESBC_QC_REPORT_TEMPLATE: &str = r#"RINEX OBSERVATION QC +QC SUMMARY
 
 HEADER
   MARKER NAME        ESBC00DNK
@@ -2105,16 +2134,48 @@ PER-CONSTELLATION
 SYS NAME     SATS EPOCHS      OBS   EXPECT     COMP SNR MEAN/MIN BY BAND                                                                              MP1 RMS  MP2 RMS  SLIPS GAPS     GAP S
 --- -------- ---- ------ -------- -------- -------- ------------------------------------------------------------------------------------------------ -------- -------- ------ ---- ---------
 G   GPS        13    120    18645    23292    0.800 1:39.0/5.5 2:37.7/5.5 5:36.0/23.8                                                                   0.292    0.281      4    0       0.0
-R   GLONASS    12    120    16323    22600    0.722 1:42.9/20.5 2:42.0/21.5 3:35.4/25.2                                                                 0.519    0.314     10    0       0.0
+@GLONASS_ROW@
 E   Galileo     9    120    19147    20540    0.932 1:42.2/18.8 5:36.5/20.5 6:34.8/24.0 7:45.2/25.5 8:45.2/26.0                                         0.386    0.483      9    0       0.0
 C   BeiDou     12    120    11213    15708    0.714 2:42.6/32.5 6:35.6/26.8 7:41.2/36.0                                                                 1.017    1.174      4    0       0.0
-S   SBAS        5    120     3032     4144    0.732 1:38.2/30.8 5:33.5/31.5                                                                                 -        -      0    0       0.0
+@SBAS_ROW@
 
 FINDINGS
 CODE     SEVERITY SPEC REF
 -------- -------- ------------------------------------------------
 NONE
 "#;
+
+    // GLONASS MP1 RMS, MP2 RMS and slips, with the G3-carrying satellite-epochs
+    // of R09 and R12 included (measured on the gate host).
+    const ESBC_GLONASS_MP1_MP2_SLIPS: (&str, &str, &str) = ("0.525", "0.390", "12");
+    // SBAS forms no dual-frequency observation, so it has no MP and no slips.
+    const ESBC_SBAS_MP1_MP2_SLIPS: (&str, &str, &str) = ("-", "-", "-");
+
+    /// The ESBC text report: the template with the GLONASS and SBAS rows' MP1,
+    /// MP2 and slip columns filled from the pinned values above, each column
+    /// right-aligned in its own width as `render_text` writes it.
+    fn esbc_qc_report_text() -> String {
+        let row = |prefix: &str, (mp1, mp2, slips): (&str, &str, &str), suffix: &str| {
+            format!("{prefix} {mp1:>8} {mp2:>8} {slips:>6}{suffix}")
+        };
+        ESBC_QC_REPORT_TEMPLATE
+            .replace(
+                "@GLONASS_ROW@",
+                &row(
+                    "R   GLONASS    12    120    16323    22600    0.722 1:42.9/20.5 2:42.0/21.5 3:35.4/25.2                                                             ",
+                    ESBC_GLONASS_MP1_MP2_SLIPS,
+                    "    0       0.0",
+                ),
+            )
+            .replace(
+                "@SBAS_ROW@",
+                &row(
+                    "S   SBAS        5    120     3032     4144    0.732 1:38.2/30.8 5:33.5/31.5                                                                         ",
+                    ESBC_SBAS_MP1_MP2_SLIPS,
+                    "    0       0.0",
+                ),
+            )
+    }
 
     fn observation_file(epochs: Vec<ObsEpoch>) -> RinexObs {
         let obs_codes = BTreeMap::from([(

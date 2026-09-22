@@ -299,10 +299,16 @@ impl SsrCorrectionStore {
             solution_id: message.header.solution_id,
         };
 
+        // Every record's satellite is checked before any is applied, so a
+        // refused message leaves the store as it was rather than half-applied.
+        for satellite_id in ssr_message_satellite_ids(message) {
+            ssr_satellite(message, satellite_id)?;
+        }
+
         match message.kind {
             SsrKind::Orbit => {
                 for record in &message.orbit {
-                    let sat = ssr_satellite(message.system, record.satellite_id)?;
+                    let sat = ssr_satellite(message, record.satellite_id)?;
                     let orbit = orbit_from_rtcm(
                         self.reference_point,
                         message,
@@ -317,7 +323,7 @@ impl SsrCorrectionStore {
             }
             SsrKind::Clock => {
                 for record in &message.clock {
-                    let sat = ssr_satellite(message.system, record.satellite_id)?;
+                    let sat = ssr_satellite(message, record.satellite_id)?;
                     let entry = self.corrections.entry(sat).or_default();
                     let mut clock = SsrClockCorrection {
                         solution,
@@ -339,7 +345,7 @@ impl SsrCorrectionStore {
             }
             SsrKind::CombinedOrbitClock => {
                 for (orbit_record, clock_record) in message.orbit.iter().zip(&message.clock) {
-                    let sat = ssr_satellite(message.system, orbit_record.satellite_id)?;
+                    let sat = ssr_satellite(message, orbit_record.satellite_id)?;
                     let orbit = orbit_from_rtcm(
                         self.reference_point,
                         message,
@@ -364,13 +370,13 @@ impl SsrCorrectionStore {
             }
             SsrKind::Ura => {
                 for &(satellite_id, ura_index) in &message.ura {
-                    let sat = ssr_satellite(message.system, satellite_id)?;
+                    let sat = ssr_satellite(message, satellite_id)?;
                     self.corrections.entry(sat).or_default().ura_index = Some(ura_index);
                 }
             }
             SsrKind::CodeBias => {
                 for record in &message.code_bias {
-                    let sat = ssr_satellite(message.system, record.satellite_id)?;
+                    let sat = ssr_satellite(message, record.satellite_id)?;
                     let entry = self.corrections.entry(sat).or_default();
                     for &(signal, bias) in &record.biases {
                         entry
@@ -382,7 +388,7 @@ impl SsrCorrectionStore {
             }
             SsrKind::HighRateClock => {
                 for record in &message.clock {
-                    let sat = ssr_satellite(message.system, record.satellite_id)?;
+                    let sat = ssr_satellite(message, record.satellite_id)?;
                     let high_rate = SsrHighRateClock {
                         solution,
                         iod_ssr: message.header.iod_ssr,
@@ -401,7 +407,7 @@ impl SsrCorrectionStore {
             }
             SsrKind::PhaseBias => {
                 for record in &message.phase_bias {
-                    let sat = ssr_satellite(message.system, record.satellite_id)?;
+                    let sat = ssr_satellite(message, record.satellite_id)?;
                     let entry = self.corrections.entry(sat).or_default();
                     for bias in &record.biases {
                         entry.phase_bias.biases_m.insert(
@@ -974,9 +980,81 @@ fn ssr_epoch_j2000_s(
     })
 }
 
-fn ssr_satellite(system: GnssSystem, satellite_id: u8) -> Result<GnssSatelliteId> {
+/// Build the identifier for an SSR record's raw satellite field.
+///
+/// The field is read the way RTKLIB `decode_ssr1`..`decode_ssr7` read it:
+///
+/// - GLONASS: five bits, the slot as transmitted.
+/// - GPS, Galileo: six bits, the satellite number as transmitted.
+/// - BeiDou: six bits, the PRN as transmitted. The native messages this crate
+///   decodes (1258..1263, 1270) carry a 10-bit issue and an 8-bit IOD after the
+///   satellite field. That is the layout real IGS `SSRA03IGS0` 1261 frames
+///   have - 23 satellites fill 5013 of the frame's 5016 bits - and the layout
+///   RTKLIB `decode_ssr1` reads in rtklib-ex 2.5.1 (`np=6, ni=10, nj=8`). The
+///   bit count establishes the layout, not the satellite offset: the offset
+///   follows rtklib-ex, the reader whose layout matches these frames, which
+///   adds nothing (`offp=0`). RTKLIB demo5 adds one (`offp=1`) with its older
+///   draft layout (`ni=10, nj=24`), which these frames do not have.
+/// - QZSS: four bits in the native messages (1246..1251 and the 1268 phase
+///   bias), six bits otherwise (the IGS SSR layout). In both the broadcast PRN
+///   is the field plus 192, which is the `Jnn` slot the field states.
+///
+/// SBAS is refused. RTKLIB adds 120 to the native field (1252..1257) and 119
+/// to the IGS SSR field, so the offset depends on a layout an `SsrMessage` here
+/// does not identify, and the native layout carries an IOD CRC these records do
+/// not hold. Reading the field as the `Snn` slot itself, as this function once
+/// did, matched neither layout. NavIC is refused because no SSR layout for it
+/// is read here.
+///
+/// The raw width is checked separately from the identifier range. The shared
+/// satellite-token range is `1..=99` for every constellation, so `R32` is a
+/// valid identifier, but a five-bit GLONASS field holds at most 31; the
+/// identifier constructor cannot reject 32 there, and the width check does.
+fn ssr_satellite(message: &SsrMessage, satellite_id: u8) -> Result<GnssSatelliteId> {
+    let system = message.system;
+    let field_bits = match system {
+        GnssSystem::Glonass => 5u32,
+        GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::BeiDou => 6,
+        GnssSystem::Qzss if crate::rtcm::is_native_qzss_ssr(message.message_number) => 4,
+        GnssSystem::Qzss => 6,
+        GnssSystem::Navic | GnssSystem::Sbas => {
+            return Err(Error::Parse(format!(
+                "no SSR layout read here carries {system} corrections, \
+                 so satellite id {satellite_id} has no defined field layout"
+            )))
+        }
+    };
+    let widest = (1u16 << field_bits) - 1;
+    if u16::from(satellite_id) > widest {
+        return Err(Error::Parse(format!(
+            "SSR {system} satellite id {satellite_id} does not fit the \
+             {field_bits}-bit raw satellite field (0..={widest})"
+        )));
+    }
     GnssSatelliteId::new(system, satellite_id)
         .map_err(|e| Error::Parse(format!("invalid SSR satellite id {satellite_id}: {e}")))
+}
+
+/// Every raw satellite field the records of `message`'s kind carry, in the
+/// order ingestion applies them. A combined orbit/clock message is applied by
+/// pairs, keyed by the orbit record.
+fn ssr_message_satellite_ids(message: &SsrMessage) -> Vec<u8> {
+    match message.kind {
+        SsrKind::Orbit => message.orbit.iter().map(|r| r.satellite_id).collect(),
+        SsrKind::Clock | SsrKind::HighRateClock => {
+            message.clock.iter().map(|r| r.satellite_id).collect()
+        }
+        SsrKind::CombinedOrbitClock => message
+            .orbit
+            .iter()
+            .zip(&message.clock)
+            .map(|(orbit, _)| orbit.satellite_id)
+            .collect(),
+        SsrKind::Ura => message.ura.iter().map(|&(id, _)| id).collect(),
+        SsrKind::CodeBias => message.code_bias.iter().map(|r| r.satellite_id).collect(),
+        SsrKind::PhaseBias => message.phase_bias.iter().map(|r| r.satellite_id).collect(),
+        SsrKind::Vtec => Vec::new(),
+    }
 }
 
 fn high_rate_matches(clock: &SsrClockCorrection, high_rate: &SsrHighRateClock) -> bool {
@@ -1213,6 +1291,245 @@ mod tests {
         assert_eq!(clock.c0_m.to_bits(), 1.0_f64.to_bits());
         assert!((clock.c1_m_s + 0.002).abs() < 1.0e-18);
         assert!((clock.c2_m_s2 - 6.0e-6).abs() < 1.0e-18);
+    }
+
+    /// Build a one-record SSR orbit message for the given constellation and raw
+    /// satellite field, using the message number the decoder assigns to that
+    /// constellation's orbit family.
+    fn orbit_message(system: GnssSystem, satellite_id: u8) -> SsrMessage {
+        let message_number = match system {
+            GnssSystem::Gps => 1057,
+            GnssSystem::Glonass => 1063,
+            GnssSystem::Galileo => 1240,
+            GnssSystem::BeiDou => 1258,
+            GnssSystem::Qzss => 1246,
+            GnssSystem::Sbas => 1252,
+            // No SSR layout for NavIC is read here; the number is a placeholder
+            // so the refusal can be exercised through ingestion.
+            GnssSystem::Navic => 1057,
+        };
+        SsrMessage {
+            message_number,
+            system,
+            kind: SsrKind::Orbit,
+            header: header(SsrKind::Orbit),
+            orbit: vec![SsrOrbitRecord {
+                satellite_id,
+                iode: 42,
+                delta_radial: 10_000,
+                delta_along: -20_000,
+                delta_cross: 30_000,
+                dot_delta_radial: 0,
+                dot_delta_along: 0,
+                dot_delta_cross: 0,
+            }],
+            clock: Vec::new(),
+            code_bias: Vec::new(),
+            phase_bias: Vec::<SsrPhaseBiasRecord>::new(),
+            ura: Vec::new(),
+            padding_bits: Vec::new(),
+        }
+    }
+
+    fn ssr_week() -> GnssWeekTow {
+        GnssWeekTow::new(TimeScale::Gpst, 2_400, 100_000.0).expect("valid SSR week")
+    }
+
+    /// The GLONASS SSR satellite field is five bits, so slot 31 is the widest
+    /// value it carries. `R32` is a valid identifier under the shared 1..=99
+    /// range, so the identifier constructor accepts 32; no five-bit field holds
+    /// it, and the width check refuses it.
+    #[test]
+    fn ssr_glonass_satellite_field_is_five_bits_wide() {
+        let mut store = SsrCorrectionStore::new();
+        store
+            .ingest_ssr(&orbit_message(GnssSystem::Glonass, 31), ssr_week())
+            .expect("R31 fits the five-bit GLONASS SSR satellite field");
+        let r31 = GnssSatelliteId::new(GnssSystem::Glonass, 31).unwrap();
+        assert_eq!(store.orbit(r31).unwrap().iode, 42);
+
+        let mut refusing = SsrCorrectionStore::new();
+        let err = refusing
+            .ingest_ssr(&orbit_message(GnssSystem::Glonass, 32), ssr_week())
+            .expect_err("R32 does not fit the five-bit GLONASS SSR satellite field");
+        assert!(
+            err.to_string().contains("5-bit"),
+            "the refusal must name the raw field width, got {err}"
+        );
+        assert!(
+            GnssSatelliteId::new(GnssSystem::Glonass, 32).is_ok(),
+            "R32 is a valid identifier, so only the width check refuses it"
+        );
+        assert!(
+            refusing.corrections.is_empty(),
+            "a refused record must not leave a correction behind"
+        );
+    }
+
+    /// GPS, Galileo and BeiDou SSR records carry a six-bit satellite field: 63
+    /// is the widest value, 64 does not fit. Accepting 63 is a statement about
+    /// the wire field, not a claim that the constellation flies that satellite.
+    #[test]
+    fn ssr_six_bit_constellations_stop_at_sixty_three() {
+        for system in [GnssSystem::Gps, GnssSystem::Galileo, GnssSystem::BeiDou] {
+            let mut store = SsrCorrectionStore::new();
+            store
+                .ingest_ssr(&orbit_message(system, 63), ssr_week())
+                .unwrap_or_else(|e| panic!("{system:?} 63 fits the six-bit field: {e}"));
+            let sat = GnssSatelliteId::new(system, 63).unwrap();
+            assert_eq!(store.orbit(sat).unwrap().iode, 42, "{system:?}");
+
+            let mut refusing = SsrCorrectionStore::new();
+            let err = refusing
+                .ingest_ssr(&orbit_message(system, 64), ssr_week())
+                .expect_err("64 does not fit a six-bit raw satellite field");
+            assert!(
+                err.to_string().contains("6-bit"),
+                "{system:?} refusal must name the raw field width, got {err}"
+            );
+            assert!(
+                refusing.corrections.is_empty(),
+                "{system:?}: a refused record must not leave a correction behind"
+            );
+        }
+    }
+
+    /// The native BeiDou SSR messages carry the PRN itself, in the layout real
+    /// IGS 1261 frames have and rtklib-ex reads (`offp=0`): field 63 is C63 and
+    /// 64 does not fit the six-bit field.
+    #[test]
+    fn ssr_native_beidou_field_is_the_prn() {
+        for field in [1u8, 59, 63] {
+            let mut store = SsrCorrectionStore::new();
+            store
+                .ingest_ssr(&orbit_message(GnssSystem::BeiDou, field), ssr_week())
+                .unwrap_or_else(|e| panic!("native field {field}: {e}"));
+            let sat = GnssSatelliteId::new(GnssSystem::BeiDou, field).unwrap();
+            assert_eq!(store.orbit(sat).unwrap().iode, 42, "field {field}");
+        }
+        let err = SsrCorrectionStore::new()
+            .ingest_ssr(&orbit_message(GnssSystem::BeiDou, 64), ssr_week())
+            .expect_err("64 does not fit the six-bit field");
+        assert!(err.to_string().contains("6-bit"), "{err}");
+    }
+
+    /// Raw satellite field values that no decoder produces can still be written
+    /// straight into a public `SsrOrbitRecord`. Zero names no satellite and
+    /// 255 fits no SSR field; neither may be normalised, truncated onto another
+    /// satellite, or dropped in silence.
+    #[test]
+    fn ssr_refuses_raw_satellite_field_bypasses() {
+        for system in [
+            GnssSystem::Gps,
+            GnssSystem::Glonass,
+            GnssSystem::Galileo,
+            GnssSystem::BeiDou,
+        ] {
+            for satellite_id in [0u8, 255] {
+                let mut store = SsrCorrectionStore::new();
+                let err = store
+                    .ingest_ssr(&orbit_message(system, satellite_id), ssr_week())
+                    .expect_err("out-of-domain raw satellite id must be refused");
+                assert!(
+                    matches!(err, Error::Parse(_)),
+                    "{system:?} {satellite_id}: refusal must be a typed parse error, got {err}"
+                );
+                assert!(
+                    store.corrections.is_empty(),
+                    "{system:?} {satellite_id}: nothing may be stored"
+                );
+            }
+        }
+    }
+
+    /// QZSS SSR records are read as RTKLIB reads them: the broadcast PRN is the
+    /// field plus 192, which is the `Jnn` slot the field states, over four bits
+    /// in the native messages 1246..1251 and the 1268 phase bias, and six bits
+    /// in the IGS SSR layout.
+    #[test]
+    fn ssr_qzss_satellite_is_the_slot_the_field_states() {
+        let mut native = SsrCorrectionStore::new();
+        native
+            .ingest_ssr(&orbit_message(GnssSystem::Qzss, 15), ssr_week())
+            .expect("J15 fits the four-bit native QZSS field");
+        let j15 = GnssSatelliteId::new(GnssSystem::Qzss, 15).unwrap();
+        assert_eq!(native.orbit(j15).unwrap().iode, 42);
+
+        let mut refusing = SsrCorrectionStore::new();
+        let err = refusing
+            .ingest_ssr(&orbit_message(GnssSystem::Qzss, 16), ssr_week())
+            .expect_err("16 does not fit the four-bit native QZSS field");
+        assert!(err.to_string().contains("4-bit"), "{err}");
+        assert!(refusing.corrections.is_empty());
+
+        // The native QZSS phase bias 1268 carries the same four-bit field.
+        let mut phase_bias_number = orbit_message(GnssSystem::Qzss, 16);
+        phase_bias_number.message_number = 1268;
+        let err = SsrCorrectionStore::new()
+            .ingest_ssr(&phase_bias_number, ssr_week())
+            .expect_err("1268 carries a four-bit QZSS field");
+        assert!(err.to_string().contains("4-bit"), "{err}");
+
+        // Outside 1246..1251 the field is the six-bit IGS SSR one.
+        let mut igs = orbit_message(GnssSystem::Qzss, 63);
+        igs.message_number = 4076;
+        let mut store = SsrCorrectionStore::new();
+        store
+            .ingest_ssr(&igs, ssr_week())
+            .expect("J63 fits the six-bit IGS SSR field");
+        let j63 = GnssSatelliteId::new(GnssSystem::Qzss, 63).unwrap();
+        assert!(store.orbit(j63).is_some());
+        igs.orbit[0].satellite_id = 64;
+        let err = SsrCorrectionStore::new()
+            .ingest_ssr(&igs, ssr_week())
+            .expect_err("64 does not fit a six-bit field");
+        assert!(err.to_string().contains("6-bit"), "{err}");
+    }
+
+    /// SBAS and NavIC have no SSR layout read here. RTKLIB offsets the SBAS
+    /// field by 120 or 119 depending on the layout, and reading the field as
+    /// the slot itself matched neither, so a hand-built message naming either
+    /// system is refused rather than given a guessed width and offset.
+    #[test]
+    fn ssr_refuses_constellations_with_no_layout_read_here() {
+        for system in [GnssSystem::Navic, GnssSystem::Sbas] {
+            let mut store = SsrCorrectionStore::new();
+            let err = store
+                .ingest_ssr(&orbit_message(system, 5), ssr_week())
+                .expect_err("no SSR layout read here carries this constellation");
+            assert!(
+                err.to_string().contains("no SSR layout read here"),
+                "{system:?} refusal must say why, got {err}"
+            );
+            assert!(store.corrections.is_empty(), "{system:?}");
+        }
+    }
+
+    /// Every record's satellite is checked before any record is applied, so a
+    /// message with one refused record changes nothing in the store, wherever
+    /// in the message that record sits.
+    #[test]
+    fn ssr_refusal_leaves_the_store_unchanged() {
+        let template = orbit_message(GnssSystem::Gps, 5);
+        let good = template.orbit[0].clone();
+        let bad = SsrOrbitRecord {
+            satellite_id: 64,
+            ..good.clone()
+        };
+        for records in [vec![good.clone(), bad.clone()], vec![bad, good]] {
+            let mut message = template.clone();
+            message.orbit = records;
+            message.header.satellite_count = 2;
+
+            let mut store = SsrCorrectionStore::new();
+            store
+                .ingest_ssr(&message, ssr_week())
+                .expect_err("one record does not fit the six-bit field");
+            assert!(
+                store.corrections.is_empty(),
+                "a refused message applies no record"
+            );
+        }
     }
 
     #[test]
@@ -1757,7 +2074,8 @@ mod tests {
             }),
             padding_bits: Vec::new(),
         };
-        let decoded = HasMt1Message::decode(&message.encode()).expect("decode HAS MT1");
+        let decoded = HasMt1Message::decode(&message.encode().expect("encode HAS MT1"))
+            .expect("decode HAS MT1");
         let mut store = SsrCorrectionStore::new();
         let reception = GnssWeekTow::new(TimeScale::Gst, REAL_SSR_WEEK, REAL_SSR_EPOCH_TOW_S)
             .expect("GST reception");

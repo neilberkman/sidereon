@@ -47,9 +47,9 @@ use crate::geometry_quality::{classify, GeometryQuality, GeometryQualityThreshol
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::sbas::SbasIonoGrid;
 use crate::spp::{
-    clock_systems, residual_unweighted, select_sats, spp_iono_frequency_hz, validate_solve_inputs,
-    Corrections, EphemerisSource, GalileoNequickCoeffs, KlobucharCoeffs, Observation, RejectedSat,
-    RobustConfig, SolveInputs, SppError, SppInputErrorKind, SppModelRecipe, SurfaceMet, C_M_S,
+    clock_systems, residual_unweighted, select_sats, validate_solve_inputs, Corrections,
+    EphemerisSource, GalileoNequickCoeffs, KlobucharCoeffs, Observation, RejectedSat, RobustConfig,
+    SolveInputs, SppError, SppInputErrorKind, SppModelRecipe, SurfaceMet, C_M_S,
 };
 use crate::validate;
 
@@ -381,13 +381,6 @@ pub enum StaticSolveError {
         /// Satellite that was duplicated.
         satellite: GnssSatelliteId,
     },
-    /// An ionosphere-corrected epoch used a satellite without a modeled carrier.
-    IonosphereUnsupported {
-        /// Epoch index in the input slice.
-        epoch_index: usize,
-        /// Satellite without a modeled carrier.
-        satellite: GnssSatelliteId,
-    },
     /// Too few accepted measurements remained for the stacked state.
     TooFewMeasurements {
         /// Accepted measurement count.
@@ -423,13 +416,6 @@ impl core::fmt::Display for StaticSolveError {
             } => write!(
                 f,
                 "static epoch {epoch_index} observes satellite {satellite} more than once"
-            ),
-            Self::IonosphereUnsupported {
-                epoch_index,
-                satellite,
-            } => write!(
-                f,
-                "static epoch {epoch_index} has no ionosphere carrier model for {satellite}"
             ),
             Self::TooFewMeasurements { used, required } => write!(
                 f,
@@ -701,20 +687,10 @@ fn prepare_static(
                 satellite,
             });
         }
-        if epoch.corrections.ionosphere {
-            if let Some(satellite) = epoch
-                .measurements
-                .iter()
-                .map(|m| m.satellite_id)
-                .find(|sat| spp_iono_frequency_hz(*sat, &epoch.glonass_channels).is_none())
-            {
-                return Err(StaticSolveError::IonosphereUnsupported {
-                    epoch_index,
-                    satellite,
-                });
-            }
-        }
-
+        // A satellite whose carrier an ionosphere-corrected epoch cannot scale
+        // to is excluded by `select_sats`, reported in `rejected_sats` with
+        // `RejectionReason::IonosphereCarrierUnresolved`, and the epoch keeps
+        // its other satellites.
         let inputs = solve_inputs_for_epoch(epoch, options);
         validate_solve_inputs(&inputs).map_err(|source| StaticSolveError::EpochInput {
             epoch_index,
@@ -1206,8 +1182,7 @@ fn influence_status(error: &StaticSolveError) -> StaticInfluenceStatus {
         StaticSolveError::Singular(_) => StaticInfluenceStatus::SingularGeometry,
         StaticSolveError::InvalidInput { .. }
         | StaticSolveError::EpochInput { .. }
-        | StaticSolveError::DuplicateObservation { .. }
-        | StaticSolveError::IonosphereUnsupported { .. } => StaticInfluenceStatus::InvalidInput,
+        | StaticSolveError::DuplicateObservation { .. } => StaticInfluenceStatus::InvalidInput,
         StaticSolveError::EphemerisLost { .. } => StaticInfluenceStatus::EphemerisUnavailable,
     }
 }

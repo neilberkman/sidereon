@@ -314,6 +314,28 @@ pub struct RtcmSppEpochInputs {
     pub inputs: SolveInputs,
 }
 
+/// Offset from an SBAS MSM satellite-mask number to the SBAS broadcast PRN:
+/// number `n` is PRN `119 + n`, as RTKLIB `decode_msm7` applies it
+/// (`prn += MINPRNSBS - 1`).
+const MSM_SBAS_PRN_OFFSET: u16 = 119;
+
+/// Map an MSM satellite-mask number to the satellite it names.
+///
+/// MSM numbers satellites from 1 within each system. For SBAS, number `n` is
+/// broadcast PRN `119 + n`, so it is converted through the SBAS broadcast PRN
+/// window (`n` 1..=39 gives `S20`..`S58`) instead of being read as the slot
+/// itself. For QZSS, number `n` is PRN `192 + n`, which is already the `Jnn`
+/// slot. Every other system uses the number as its PRN or slot. A number that
+/// names no satellite in that form returns `None`.
+fn msm_satellite_id(system: GnssSystem, number: u8) -> Option<GnssSatelliteId> {
+    match system {
+        GnssSystem::Sbas => {
+            crate::sbas::store::sbas_prn_to_sat(u16::from(number).checked_add(MSM_SBAS_PRN_OFFSET)?)
+        }
+        _ => GnssSatelliteId::new(system, number).ok(),
+    }
+}
+
 /// Convert RTCM MSM observation messages into SPP-ready epoch inputs.
 ///
 /// Messages are grouped by `(system, epoch_time)` in stream order, so each
@@ -403,7 +425,7 @@ where
             ) else {
                 continue;
             };
-            if let Ok(satellite_id) = GnssSatelliteId::new(system, satellite_id) {
+            if let Some(satellite_id) = msm_satellite_id(system, satellite_id) {
                 observations.push(Observation {
                     satellite_id,
                     pseudorange_m,
@@ -786,5 +808,45 @@ mod tests {
             epoch.inputs.observations[0].pseudorange_m as i64,
             30_129_142
         );
+    }
+
+    /// SBAS MSM number `n` is broadcast PRN `119 + n` (RTKLIB `decode_msm7`),
+    /// so it names slot `n + 19`, not slot `n`. Numbers past the broadcast
+    /// window name no SBAS satellite.
+    #[test]
+    fn msm_sbas_numbers_map_through_the_broadcast_prn_window() {
+        assert_eq!(
+            msm_satellite_id(GnssSystem::Sbas, 1).map(|sat| sat.to_string()),
+            Some("S20".to_string())
+        );
+        assert_eq!(
+            msm_satellite_id(GnssSystem::Sbas, 39).map(|sat| sat.to_string()),
+            Some("S58".to_string())
+        );
+        for number in [0u8, 40, 64, 255] {
+            assert_eq!(msm_satellite_id(GnssSystem::Sbas, number), None, "{number}");
+        }
+    }
+
+    /// QZSS MSM number `n` is PRN `192 + n`, which is already the `Jnn` slot;
+    /// the other systems use the number directly, across the whole 64-wide mask.
+    #[test]
+    fn msm_numbers_of_other_systems_are_the_satellite_number() {
+        for system in [
+            GnssSystem::Gps,
+            GnssSystem::Glonass,
+            GnssSystem::Galileo,
+            GnssSystem::Qzss,
+            GnssSystem::BeiDou,
+            GnssSystem::Navic,
+        ] {
+            for number in 1..=64u8 {
+                let sat = msm_satellite_id(system, number)
+                    .unwrap_or_else(|| panic!("{system:?} MSM number {number}"));
+                assert_eq!(sat.system, system);
+                assert_eq!(sat.prn, number);
+            }
+            assert_eq!(msm_satellite_id(system, 0), None, "{system:?} 0");
+        }
     }
 }

@@ -61,7 +61,6 @@ use crate::frequencies::{
 };
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::rinex_common::time_scale_label;
-use crate::rinex_nav::valid_glonass_frequency_channel;
 use crate::validate::{self, FieldError};
 use crate::{Error, Result};
 use write::{PRN_OBS_COUNTS_COLUMN, PRN_OBS_COUNT_WIDTH, PRN_OBS_SATELLITE_COLUMN};
@@ -308,7 +307,7 @@ pub struct ObsPhaseShift {
     /// correction applies to all satellites of the system/code.
     pub satellites: Vec<GnssSatelliteId>,
     /// Satellites the record names by a well-formed RINEX designator that
-    /// [`GnssSatelliteId`] does not hold, such as `R28`, as written. No
+    /// [`GnssSatelliteId`] does not hold, such as `R00`, as written. No
     /// observation of theirs is kept, so the correction applies to none of
     /// them; they are kept so the record is written back whole, and each is
     /// counted in [`RinexObs::skipped_records`].
@@ -594,10 +593,12 @@ pub struct RinexObs {
     /// stable.
     pub epochs: Vec<ObsEpoch>,
     /// Count of records skipped because their satellite token did not parse to a
-    /// representable [`GnssSatelliteId`]: an out-of-range entry in the `GLONASS
-    /// SLOT / FRQ #` header table, or an unknown/out-of-range satellite record
-    /// inside an epoch (e.g. an extended GLONASS slot like `R28` beyond the
-    /// engine's PRN cap). One such record is skipped rather than aborting the
+    /// representable [`GnssSatelliteId`]: an entry in the `GLONASS SLOT / FRQ #`
+    /// header table, or a satellite record inside an epoch. The token range is
+    /// `01..=99` for every constellation letter, which covers the extended
+    /// slots real products carry, so what lands here is a designator naming no
+    /// satellite - `R00` - or a token that is not a designator at all. One such
+    /// record is skipped rather than aborting the
     /// whole file, mirroring [`crate::astro::sgp4::TleFile::skipped`].
     pub skipped_records: usize,
 }
@@ -2141,8 +2142,7 @@ impl Parser {
                 *remaining -= 1;
             }
             // A slot token that does not parse to a representable
-            // `GnssSatelliteId` (e.g. an extended GLONASS slot beyond the
-            // engine's PRN cap, like R28 in real BKG/IGS products) must not
+            // `GnssSatelliteId` (`R00`, which names no satellite) must not
             // reject the whole header: skip the entry and count it, the same
             // treatment nav `parse_glonass` gives such slots.
             let Some(sat) = parse_sv_token(pair[0]) else {
@@ -2155,12 +2155,13 @@ impl Parser {
                     pair[0]
                 )));
             }
+            // The channel is kept as the file states it. `-7..=6` is the FDMA
+            // allocation, not the field's syntax: real IGS headers give the
+            // extended slot `R28` channel 7. A channel outside the allocation
+            // resolves no carrier in SPP and is reported by `rinex_qc`, and
+            // dropping it here would lose a stated value or, as a refusal,
+            // the whole file.
             let channel = strict_int_token::<i8>(pair[1], "glonass_slot.channel", line)?;
-            if !valid_glonass_frequency_channel(i32::from(channel)) {
-                return Err(Error::Parse(format!(
-                    "RINEX OBS invalid glonass_slot.channel: {channel} out of range in {line:?}"
-                )));
-            }
             // A header block gives its records no order, so a slot given two
             // channels in one block says two things at once.
             if let Some(held) = self.glonass_slots_in_block.get(&sat.prn) {
@@ -2415,8 +2416,8 @@ impl Parser {
                 })?;
                 let sat_line = sat_line.trim_end_matches(['\r', '\n']);
                 // Resolve the satellite token first: a token that does not parse
-                // to a representable `GnssSatelliteId` (e.g. an extended GLONASS
-                // slot like R28) is an independent record that must not reject
+                // to a representable `GnssSatelliteId` (`R00`, which names no
+                // satellite) is an independent record that must not reject
                 // the whole epoch/file. Skip the whole record - including any
                 // wrapped continuation lines so the stream stays aligned - and
                 // count it. No observation values are fabricated.
@@ -2431,8 +2432,8 @@ impl Parser {
                     ));
                 }
                 if parse_sv_token(field(&normalized, 0, 3)).is_none() {
-                    // Lexically a satellite designator but the system/PRN is not
-                    // representable (e.g. extended GLONASS slot R28): skip the whole
+                    // Lexically a satellite designator but the PRN is not
+                    // representable (`R00`): skip the whole
                     // record - including wrapped continuation lines - and count it.
                     // No observation values are fabricated.
                     self.push_unrepresentable_satellite_skip(field(&normalized, 0, 3));
@@ -2613,8 +2614,8 @@ impl Parser {
             let next = ascii_fixed_columns(next);
             // Stop at the next record boundary. Use the *lexical* designator
             // check, not `parse_sv_token`: a new record whose token does not
-            // resolve to a representable id (e.g. an extended GLONASS slot like
-            // R28) is still a new satellite record, not continuation data. Only a
+            // resolve to a representable id (`R00`) is still a new satellite
+            // record, not continuation data. Only a
             // lexical check recognizes it; otherwise its observations would be
             // spliced onto this record and the skip would never be counted.
             if next.starts_with('>') || starts_with_sat_designator(&next) {
@@ -3526,7 +3527,7 @@ pub(crate) fn rinex2_next_obs_code(
 
 /// Read a phase shift record's satellite tokens.
 /// A phase-shift record's satellite tokens: the satellites [`GnssSatelliteId`]
-/// holds, and the well-formed designators it does not hold, such as `R28`, as
+/// holds, and the well-formed designators it does not hold, such as `R00`, as
 /// written. A token that is not a satellite designator is refused.
 fn phase_shift_satellites(
     tokens: &[&str],

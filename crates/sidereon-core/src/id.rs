@@ -100,6 +100,21 @@ impl fmt::Display for GnssSystem {
 /// spec (line 112). The `prn` is the within-constellation satellite number as
 /// it appears in the product (e.g. the `01` in the SP3/RINEX token `G01`); it
 /// is only meaningful in combination with [`GnssSatelliteId::system`].
+///
+/// [`GnssSatelliteId::new`] and the [`FromStr`](core::str::FromStr) impl accept
+/// the shared SP3-d satellite-token range `01..=99` for every constellation.
+/// That range is file-token syntax, not a roster of on-orbit satellites and not
+/// a wire-field width: a `GnssSatelliteId` says only that the token was
+/// spellable. Narrower domains - the SBAS broadcast PRN window, the Galileo HAS
+/// 40-satellite mask, the RTCM raw satellite-id field widths - are checked by
+/// the modules that own them, at the point of conversion.
+///
+/// Both fields are public and the derived `Deserialize` writes them directly,
+/// so a value that never passed [`GnssSatelliteId::new`] can exist: a struct
+/// literal or a deserialized record may hold `prn` `0`, `100` or `255`. There
+/// is therefore no constructor-enforced invariant to rely on. Code that
+/// converts an identifier back to a bounded wire field must re-check the value
+/// itself rather than assume the constructor already did.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
@@ -113,14 +128,15 @@ pub struct GnssSatelliteId {
 /// Error returned when constructing a GNSS satellite identifier from invalid input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SatelliteIdError {
-    /// The PRN is outside the documented range for its constellation.
+    /// The PRN is outside the shared satellite-token range.
     #[error("invalid GNSS satellite {field}: {reason}")]
     InvalidInput {
         /// The rejected input name; [`GnssSatelliteId::new`] sets this to
-        /// `"prn"` for its constellation-specific range check.
+        /// `"prn"` for its shared-token range check.
         field: &'static str,
-        /// The diagnostic from [`GnssSatelliteId::new`] when the PRN fails the
-        /// [`GnssSystem`] range check: `"out of range for constellation"`.
+        /// The diagnostic from [`GnssSatelliteId::new`] when the PRN is not a
+        /// spellable two-digit token: `"outside the 1..=99 satellite-token
+        /// range"`.
         reason: &'static str,
     },
 }
@@ -131,9 +147,17 @@ const fn invalid_input(field: &'static str, reason: &'static str) -> SatelliteId
 
 impl GnssSatelliteId {
     /// Construct an identifier from a constellation and PRN.
+    ///
+    /// Accepts the shared SP3-d satellite-token range `1..=99` for every
+    /// constellation and rejects `0` and `100..=255`, which no two-digit token
+    /// can spell. It does not check the PRN against an on-orbit roster or
+    /// against any protocol's field width; see the type-level note.
     pub const fn new(system: GnssSystem, prn: u8) -> Result<Self, SatelliteIdError> {
-        if !is_valid_prn(system, prn) {
-            return Err(invalid_input("prn", "out of range for constellation"));
+        if !is_shared_token_prn(prn) {
+            return Err(invalid_input(
+                "prn",
+                "outside the 1..=99 satellite-token range",
+            ));
         }
         Ok(Self { system, prn })
     }
@@ -170,6 +194,12 @@ impl core::str::FromStr for GnssSatelliteId {
     /// the token and around the PRN is ignored, matching the SP3/RINEX field
     /// readers. This is the single canonical satellite-token parser; the
     /// SP3/RINEX/DGNSS readers delegate to it.
+    ///
+    /// The PRN must be one or two ASCII digits in `1..=99`: `G00`, `G001` and
+    /// `G100` are all rejected, so no token can name `prn` `0` or `>= 100`. The
+    /// unpadded `G1` and space-padded `G 1` spellings stay accepted for the
+    /// fixed-column readers even though SP3-d itself requires `G01` on output;
+    /// [`Display`](fmt::Display) always writes the padded canonical form.
     fn from_str(token: &str) -> Result<Self, Self::Err> {
         let token = token.trim();
         let first = token.chars().next().ok_or(ParseSatelliteIdError)?;
@@ -179,23 +209,43 @@ impl core::str::FromStr for GnssSatelliteId {
             return Err(ParseSatelliteIdError);
         }
         let prn = prn_token.parse::<u8>().map_err(|_| ParseSatelliteIdError)?;
-        if !is_valid_prn(system, prn) {
-            return Err(ParseSatelliteIdError);
-        }
         Self::new(system, prn).map_err(|_| ParseSatelliteIdError)
     }
 }
 
-pub(crate) const fn is_valid_prn(system: GnssSystem, prn: u8) -> bool {
-    match system {
-        GnssSystem::Gps => prn >= 1 && prn <= 32,
-        GnssSystem::Glonass => prn >= 1 && prn <= 27,
-        GnssSystem::Galileo => prn >= 1 && prn <= 36,
-        GnssSystem::BeiDou => prn >= 1 && prn <= 63,
-        GnssSystem::Qzss => prn >= 1 && prn <= 9,
-        GnssSystem::Navic => prn >= 1 && prn <= 14,
-        GnssSystem::Sbas => prn >= 20 && prn <= 58,
-    }
+/// The shared satellite-token PRN range: `1..=99`, for every constellation.
+///
+/// SP3-d defines a satellite identifier as "a letter followed by a 2-digit
+/// integer between 01 and 99" and names `Gnn`/`Rnn`/`Snn`/`Enn`/`Cnn`/`Inn`/
+/// `Jnn` as the system spellings, so `01..=99` is the token syntax every
+/// SP3/RINEX/IONEX/bias reader has to be able to hold. Products really do carry
+/// tokens above the operational roster (extended GLONASS slots `R28`/`R29`,
+/// GPS `G34` in CODE DCB tables), and dropping them loses real data.
+///
+/// This range is deliberately not a constellation roster and not a wire-field
+/// width. It says which tokens a product may legally spell - not which
+/// satellites are on orbit, and not which values a given protocol field can
+/// carry. Every narrower domain is enforced at the boundary that owns it, with
+/// its own primary source:
+///
+/// - SBAS broadcast PRN `120..=158` <-> stored slot `20..=58`, and the DO-229
+///   PRN mask layout (`sbas::store`).
+/// - Galileo HAS satellites `1..=40` for GPS and Galileo, Table 19 of the HAS
+///   SIS ICD: the 40-bit mask bounds decoding, and the mask entries are checked
+///   when a satellite is formed from one and when a message is encoded (`has`).
+/// - RTCM ephemeris raw satellite fields: 6 bits for 1019/1020/1042/1045/1046,
+///   4 bits for QZSS 1044, checked on conversion and on encoding; 1019 values
+///   40..=63 name SBAS satellites (`rtcm::ephemeris`).
+/// - RTCM MSM satellite and signal masks, ids `1..=64` and `1..=32`, checked on
+///   encoding (`rtcm::msm`); an SBAS MSM number `n` is PRN `119 + n`
+///   (`positioning`).
+/// - RTCM SSR raw satellite fields: 5 bits for GLONASS, 6 bits for the GPS,
+///   Galileo and BeiDou families, 4 bits for native QZSS (`ssr`).
+///
+/// Neither `0` nor `>= 100` is a spellable two-digit token, so both are
+/// rejected here.
+pub(crate) const fn is_shared_token_prn(prn: u8) -> bool {
+    prn >= 1 && prn <= 99
 }
 
 /// The leading constellation letter of a satellite or single/double-difference
@@ -261,26 +311,97 @@ mod tests {
         );
     }
 
+    const EVERY_SYSTEM: [GnssSystem; 7] = [
+        GnssSystem::Gps,
+        GnssSystem::Glonass,
+        GnssSystem::Galileo,
+        GnssSystem::BeiDou,
+        GnssSystem::Qzss,
+        GnssSystem::Navic,
+        GnssSystem::Sbas,
+    ];
+
     #[test]
-    fn satellite_constructor_validates_prn_range() {
+    fn satellite_constructor_takes_the_shared_token_range() {
         let id = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id");
         assert_eq!(id.system, GnssSystem::Gps);
         assert_eq!(id.prn, 1);
 
-        assert_eq!(
-            GnssSatelliteId::new(GnssSystem::Gps, 0),
-            Err(SatelliteIdError::InvalidInput {
-                field: "prn",
-                reason: "out of range for constellation"
-            })
-        );
-        assert_eq!(
-            GnssSatelliteId::new(GnssSystem::Sbas, 19),
-            Err(SatelliteIdError::InvalidInput {
-                field: "prn",
-                reason: "out of range for constellation"
-            })
-        );
+        // SP3-d gives the identifier as a system letter plus a 2-digit integer
+        // 01..99, and says nothing about how many satellites a constellation
+        // flies. Every system takes the whole range.
+        for system in EVERY_SYSTEM {
+            for prn in 1..=99u8 {
+                let id = GnssSatelliteId::new(system, prn)
+                    .unwrap_or_else(|e| panic!("{system:?} {prn}: {e}"));
+                assert_eq!(id.system, system);
+                assert_eq!(id.prn, prn);
+            }
+        }
+    }
+
+    #[test]
+    fn satellite_constructor_rejects_unspellable_prns() {
+        // 0 and anything from 100 up cannot be written as a two-digit token.
+        for system in EVERY_SYSTEM {
+            for prn in [0u8, 100, 101, 199, 200, 254, 255] {
+                assert_eq!(
+                    GnssSatelliteId::new(system, prn),
+                    Err(SatelliteIdError::InvalidInput {
+                        field: "prn",
+                        reason: "outside the 1..=99 satellite-token range"
+                    }),
+                    "{system:?} {prn}"
+                );
+            }
+        }
+    }
+
+    /// The shared range is token syntax, not a roster and not a wire-field
+    /// width. This pins that it stays uniform across constellations: a
+    /// narrower bound belongs to the boundary that owns it, not here.
+    #[test]
+    fn shared_token_range_is_the_same_for_every_constellation() {
+        for prn in 0..=255u8 {
+            let accepted: Vec<bool> = EVERY_SYSTEM
+                .iter()
+                .map(|system| GnssSatelliteId::new(*system, prn).is_ok())
+                .collect();
+            assert!(
+                accepted.iter().all(|ok| *ok == accepted[0]),
+                "prn {prn} is accepted for some constellations and not others"
+            );
+            assert_eq!(accepted[0], (1..=99).contains(&prn), "prn {prn}");
+        }
+    }
+
+    /// Every accepted identifier writes a canonical padded token that parses
+    /// back to itself.
+    #[test]
+    fn every_accepted_identifier_round_trips_through_display_and_from_str() {
+        for system in EVERY_SYSTEM {
+            for prn in 1..=99u8 {
+                let id = GnssSatelliteId::new(system, prn).expect("valid satellite id");
+                let token = id.to_string();
+                assert_eq!(token.len(), 3, "{token}");
+                assert_eq!(token.chars().next(), Some(system.letter()), "{token}");
+                assert_eq!(&token[1..], format!("{prn:02}"), "{token}");
+                assert_eq!(token.parse(), Ok(id), "{token}");
+                // The unpadded and space-padded spellings parse to the same id.
+                assert_eq!(
+                    format!("{}{prn}", system.letter()).parse(),
+                    Ok(id),
+                    "unpadded {token}"
+                );
+                if prn < 10 {
+                    assert_eq!(
+                        format!("{} {prn}", system.letter()).parse(),
+                        Ok(id),
+                        "space-padded {token}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -333,6 +454,16 @@ mod tests {
             "S58".parse(),
             Ok(GnssSatelliteId::new(GnssSystem::Sbas, 58).expect("valid satellite id"))
         );
+        // Tokens real products carry above the operational roster: extended
+        // GLONASS slots, and the GPS number CODE's DCB tables use.
+        assert_eq!(
+            "R28".parse(),
+            Ok(GnssSatelliteId::new(GnssSystem::Glonass, 28).expect("valid satellite id"))
+        );
+        assert_eq!(
+            "G34".parse(),
+            Ok(GnssSatelliteId::new(GnssSystem::Gps, 34).expect("valid satellite id"))
+        );
         // Surrounding whitespace and a padded PRN both parse, matching the
         // SP3/RINEX field readers.
         assert_eq!(
@@ -347,13 +478,20 @@ mod tests {
         assert_eq!("X01".parse::<GnssSatelliteId>(), Err(ParseSatelliteIdError));
         assert_eq!("G".parse::<GnssSatelliteId>(), Err(ParseSatelliteIdError));
         assert_eq!("GAB".parse::<GnssSatelliteId>(), Err(ParseSatelliteIdError));
+        // The SP3-d `Lnn` Low-Earth Orbiter identifier names no GNSS
+        // constellation and is not a satellite id here.
+        assert_eq!("L09".parse::<GnssSatelliteId>(), Err(ParseSatelliteIdError));
+        // Lowercase system letters are not the canonical spelling.
+        assert_eq!("g01".parse::<GnssSatelliteId>(), Err(ParseSatelliteIdError));
     }
 
     #[test]
     fn satellite_token_rejects_bad_prn_width_and_range() {
+        // `nn = 00` names no satellite, one to three digits cannot reach 100,
+        // and a three-digit PRN field is not a satellite token at all.
         for token in [
-            "G0", "G001", "G00", "G33", "G255", "R28", "E37", "C64", "J10", "I15", "S01", "S19",
-            "S59",
+            "G0", "G00", "G000", "G001", "G100", "G255", "R00", "E00", "C00", "J00", "I00", "S00",
+            "S100", "G 0", "G 00", "G+1", "G-1", "G 1 1",
         ] {
             assert_eq!(
                 token.parse::<GnssSatelliteId>(),
@@ -361,6 +499,48 @@ mod tests {
                 "{token}"
             );
         }
+        // And every system letter rejects 00 while taking 01 and 99.
+        for system in EVERY_SYSTEM {
+            let letter = system.letter();
+            assert_eq!(
+                format!("{letter}00").parse::<GnssSatelliteId>(),
+                Err(ParseSatelliteIdError),
+                "{letter}00"
+            );
+            assert!(format!("{letter}01").parse::<GnssSatelliteId>().is_ok());
+            assert!(format!("{letter}99").parse::<GnssSatelliteId>().is_ok());
+        }
+    }
+
+    /// `system` and `prn` are public and the derived `Deserialize` writes them
+    /// straight through, so an identifier that never passed the constructor can
+    /// exist. There is no constructor-enforced invariant to rely on; each wire
+    /// conversion has to re-check the value itself.
+    #[test]
+    fn public_fields_and_serde_can_bypass_the_constructor() {
+        for prn in [0u8, 100, 255] {
+            let bypass = GnssSatelliteId {
+                system: GnssSystem::Gps,
+                prn,
+            };
+            assert_eq!(bypass.prn, prn);
+            assert!(GnssSatelliteId::new(GnssSystem::Gps, prn).is_err());
+
+            let json = serde_json::to_string(&bypass).expect("serialize");
+            let back: GnssSatelliteId = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, bypass, "deserialization applies no range check");
+        }
+        // Display still formats a bypassing value; it does not normalize it,
+        // and the token it writes does not parse back.
+        let hundred = GnssSatelliteId {
+            system: GnssSystem::Gps,
+            prn: 100,
+        };
+        assert_eq!(hundred.to_string(), "G100");
+        assert_eq!(
+            hundred.to_string().parse::<GnssSatelliteId>(),
+            Err(ParseSatelliteIdError)
+        );
     }
 
     #[test]

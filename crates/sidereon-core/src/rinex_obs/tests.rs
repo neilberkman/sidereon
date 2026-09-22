@@ -5488,16 +5488,20 @@ fn unrepresentable_tokens(shift: &ObsPhaseShift) -> Vec<String> {
 fn real_igs_headers_naming_r28_in_phase_shift_lists_are_read_and_written_back() {
     // The BADG00RUS and ARHT00ATA headers of IGS 2026 day 001, expanded from
     // the CRINEX RNX2CRX 4.1.0 wrote, with PRN / # OF OBS kept for R01 and R28
-    // only. Each names R28, which `GnssSatelliteId` does not hold, in its
-    // GLONASS slot table, in four SYS / PHASE SHIFT lists and in a
-    // PRN / # OF OBS record. Both were refused.
-    for (name, header) in [
+    // only. Each names the extended GLONASS slot R28 in its GLONASS slot table,
+    // in four SYS / PHASE SHIFT lists and in a PRN / # OF OBS record. All of it
+    // is real observed data and must be retained.
+    for (name, header, r28_obs_counts) in [
         (
             "BADG00RUS",
             include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/fixtures/obs/BADG00RUS_R_20260010000_01D_30S_MO_header_trim.rnx"
             )),
+            vec![
+                994, 994, 994, 994, 993, 993, 993, 993, 994, 994, 994, 994, 980, 980, 980, 980, 0,
+                0, 0, 0,
+            ],
         ),
         (
             "ARHT00ATA",
@@ -5505,11 +5509,15 @@ fn real_igs_headers_naming_r28_in_phase_shift_lists_are_read_and_written_back() 
                 env!("CARGO_MANIFEST_DIR"),
                 "/tests/fixtures/obs/ARHT00ATA_R_20260010000_01D_30S_MO_header_trim.rnx"
             )),
+            vec![
+                884, 884, 884, 878, 878, 878, 883, 883, 883, 871, 871, 871, 0, 0, 0,
+            ],
         ),
     ] {
         let obs = RinexObs::parse(header).unwrap_or_else(|error| panic!("{name}: {error}"));
-        // R28 in the slot table, the four lists and the count record.
-        assert_eq!(obs.skipped_records, 6, "{name}");
+        assert_eq!(obs.skipped_records, 0, "{name}: nothing is skipped");
+
+        let r28: GnssSatelliteId = "R28".parse().expect("R28");
         let glonass: Vec<&ObsPhaseShift> = obs
             .header()
             .phase_shifts
@@ -5521,18 +5529,58 @@ fn real_igs_headers_naming_r28_in_phase_shift_lists_are_read_and_written_back() 
                 .iter()
                 .find(|shift| shift.code.as_deref() == Some(code))
                 .unwrap_or_else(|| panic!("{name} {code}"));
-            assert_eq!(unrepresentable_tokens(shift), ["R28"], "{name} {code}");
-            assert!(!shift.satellites.is_empty(), "{name} {code}");
+            assert!(
+                unrepresentable_tokens(shift).is_empty(),
+                "{name} {code}: R28 is an ordinary satellite designator"
+            );
+            assert!(
+                shift.satellites.contains(&r28),
+                "{name} {code}: R28 must be held as a satellite"
+            );
         }
         let l3x = glonass
             .iter()
             .find(|shift| shift.code.as_deref() == Some("L3X"))
             .expect("L3X");
-        assert!(unrepresentable_tokens(l3x).is_empty(), "{name}");
+        assert!(
+            !l3x.satellites.contains(&r28),
+            "{name}: L3X names no R28, and none may be invented"
+        );
 
-        // Written back whole: the R28 tokens stay in their lists, and the
-        // product reads back as itself. The slot and count R28 names are not
-        // written, as before, so the skip count differs.
+        // The slot table's own channel for R28 is kept - not defaulted, not a
+        // neighbour's. R27 sits beside it with a different channel.
+        assert_eq!(
+            obs.header().glonass_slots.get(&28).copied(),
+            Some(7),
+            "{name}: R28 keeps the channel its slot record carried"
+        );
+        assert_eq!(
+            obs.header().glonass_slots.get(&1).copied(),
+            Some(1),
+            "{name}"
+        );
+        assert_eq!(
+            obs.header().glonass_slots.get(&25).copied(),
+            None,
+            "{name}: slot 25 is absent from the table and stays absent"
+        );
+
+        // And the PRN / # OF OBS record for R28, value for value.
+        let counts = obs
+            .header()
+            .prn_obs_counts
+            .get(&r28)
+            .unwrap_or_else(|| panic!("{name}: R28 observation counts"));
+        assert_eq!(
+            counts,
+            &r28_obs_counts
+                .iter()
+                .map(|n| Some(*n))
+                .collect::<Vec<Option<usize>>>(),
+            "{name}"
+        );
+
+        // Written back whole, and the product reads back as itself.
         let written = obs
             .to_rinex_string()
             .unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -5544,22 +5592,33 @@ fn real_igs_headers_naming_r28_in_phase_shift_lists_are_read_and_written_back() 
             4,
             "{name}"
         );
+        assert!(
+            written
+                .lines()
+                .any(|line| line.ends_with("GLONASS SLOT / FRQ #") && line.contains("R28  7")),
+            "{name}: the R28 slot and its channel are written back"
+        );
+        assert!(
+            written
+                .lines()
+                .any(|line| line.ends_with("PRN / # OF OBS") && line.contains("R28")),
+            "{name}: the R28 observation counts are written back"
+        );
         let mut reread = RinexObs::parse(&written).expect("reads back");
+        assert_eq!(reread.skipped_records, 0, "{name}");
         assert_eq!(
             reread.header().phase_shifts,
             obs.header().phase_shifts,
             "{name}"
         );
-        assert_eq!(reread.skipped_records, 4, "{name}");
         let mut original = obs.clone();
         for product in [&mut original, &mut reread] {
-            product.skipped_records = 0;
             product.header.unretained_header_labels.clear();
         }
         assert_eq!(reread, original, "{name}");
 
-        // An epoch of R01 and R28: the corrections apply to R01, and R28's
-        // record is skipped as epoch records naming it already were.
+        // An epoch of R01 and R28: both records are kept, and each satellite
+        // gets the corrections its own phase-shift lists name.
         let width = obs.header().obs_codes[&GnssSystem::Glonass].len();
         let values = vec![Some(1_000.0); width];
         let body = format!(
@@ -5569,16 +5628,36 @@ fn real_igs_headers_naming_r28_in_phase_shift_lists_are_read_and_written_back() 
         );
         let with_epoch = RinexObs::parse(&format!("{}\n{body}", header.trim_end()))
             .unwrap_or_else(|error| panic!("{name}: {error}"));
-        assert_eq!(with_epoch.skipped_records, 7, "{name}");
-        assert_eq!(l1_shift_at(&with_epoch, 0, "R01", "L1C"), 0.0, "{name}");
-        assert_eq!(l1_shift_at(&with_epoch, 0, "R01", "L1P"), -0.25, "{name}");
-        assert_eq!(l1_shift_at(&with_epoch, 0, "R01", "L2C"), 0.25, "{name}");
+        assert_eq!(with_epoch.skipped_records, 0, "{name}");
+        assert_eq!(
+            with_epoch.epochs()[0].sats.len(),
+            2,
+            "{name}: both satellite records are held"
+        );
+        assert!(
+            with_epoch.epochs()[0].sats.contains_key(&r28),
+            "{name}: the R28 record is held"
+        );
+        for sat in ["R01", "R28"] {
+            assert_eq!(l1_shift_at(&with_epoch, 0, sat, "L1C"), 0.0, "{name} {sat}");
+            assert_eq!(
+                l1_shift_at(&with_epoch, 0, sat, "L1P"),
+                -0.25,
+                "{name} {sat}"
+            );
+            assert_eq!(
+                l1_shift_at(&with_epoch, 0, sat, "L2C"),
+                0.25,
+                "{name} {sat}"
+            );
+        }
+        // L3X names R01 but not R28, so only R01 is corrected there.
         assert_eq!(l1_shift_at(&with_epoch, 0, "R01", "L3X"), 0.25, "{name}");
     }
 }
 
 #[test]
-fn a_phase_shift_satellite_no_satellite_id_holds_is_kept_and_counted() {
+fn a_phase_shift_naming_extended_glonass_slots_holds_them_as_satellites() {
     let types = header_line("R    2 C1C L1C", "SYS / # / OBS TYPES");
     let shift = |content: &str| header_line(content, "SYS / PHASE SHIFT");
     let record = |sat: &str| obs_record(sat, &[Some(20_000_000.0), Some(100.0)]);
@@ -5597,27 +5676,117 @@ fn a_phase_shift_satellite_no_satellite_id_holds_is_kept_and_counted() {
     .join("\n");
     let text = obs_with_code_headers(&[types.clone(), shift("R L1C  0.25000  02 R01 R28")], &body);
     let obs = RinexObs::parse(&text).expect("parse");
-    // R28 in the file header, R28 and R29 in the event.
-    assert_eq!(obs.skipped_records, 3);
+    // R28 and R29 are ordinary satellite designators, so nothing is skipped.
+    assert_eq!(obs.skipped_records, 0);
+    let held = &obs.header().phase_shifts[0];
+    assert_eq!(
+        held.satellites,
+        [
+            "R01".parse::<GnssSatelliteId>().expect("R01"),
+            "R28".parse::<GnssSatelliteId>().expect("R28")
+        ]
+    );
+    assert!(unrepresentable_tokens(held).is_empty());
+    // The corrections apply to the satellites each record names.
+    assert_eq!(l1_shift_at(&obs, 0, "R01", "L1C"), 0.25);
+    assert_eq!(l1_shift_at(&obs, 0, "R02", "L1C"), 0.0);
+    assert_eq!(l1_shift_at(&obs, 2, "R01", "L1C"), 0.25);
+    assert_eq!(l1_shift_at(&obs, 2, "R02", "L1C"), 0.5);
+    // The event adds its record beside the file header's; both name satellites.
+    let after = obs.header_at(2).expect("header in effect");
+    assert_eq!(after.phase_shifts.len(), 2);
+    assert!(unrepresentable_tokens(&after.phase_shifts[0]).is_empty());
+    assert!(unrepresentable_tokens(&after.phase_shifts[1]).is_empty());
+    assert_eq!(
+        after.phase_shifts[1].satellites,
+        [
+            "R28".parse::<GnssSatelliteId>().expect("R28"),
+            "R02".parse::<GnssSatelliteId>().expect("R02"),
+            "R29".parse::<GnssSatelliteId>().expect("R29")
+        ],
+        "the event's record names R28, R02 and R29, in that order"
+    );
+    assert_writes_back(&obs);
+
+    // Records giving one satellite two corrections in one block contradict each
+    // other: both are kept and the contradiction is counted. Identical records,
+    // and records for different satellites, contradict nothing.
+    let block = |second: &str| {
+        RinexObs::parse(&obs_with_code_headers(
+            std::slice::from_ref(&types),
+            &blank_event(4, &[shift("R L1C  0.25000  01 R28"), shift(second)]),
+        ))
+        .unwrap_or_else(|error| panic!("{second}: {error}"))
+    };
+    let contradicted = block("R L1C  0.50000  01 R28");
+    assert_eq!(contradicted.skipped_records, 1, "the contradiction alone");
+    assert_eq!(
+        contradicted
+            .header_at(0)
+            .expect("header in effect")
+            .phase_shifts
+            .len(),
+        2
+    );
+    assert_writes_back(&contradicted);
+    assert_eq!(block("R L1C  0.25000  01 R28").skipped_records, 0);
+    assert_eq!(block("R L1C  0.50000  01 R29").skipped_records, 0);
+
+    // A token that names no satellite is still refused.
+    for token in ["R2X", "X28", "R", "28"] {
+        assert_parse_err(minimal_obs_with_phase_shift(&format!(
+            "R L1C  0.25000  01 {token}"
+        )));
+    }
+}
+
+#[test]
+fn a_phase_shift_satellite_no_satellite_id_holds_is_kept_and_counted() {
+    // The satellite-token range is 01..99 for every constellation, so what is
+    // left unrepresentable is a designator whose number names no satellite at
+    // all: `R00`, and its one-digit spelling `R0`. Both are well-formed RINEX
+    // designators - a constellation letter and digits - so they are kept as
+    // written and counted rather than rejecting the header.
+    let types = header_line("R    2 C1C L1C", "SYS / # / OBS TYPES");
+    let shift = |content: &str| header_line(content, "SYS / PHASE SHIFT");
+    let record = |sat: &str| obs_record(sat, &[Some(20_000_000.0), Some(100.0)]);
+    let epoch = |minute: u8| {
+        format!(
+            "> 2020 01 01 00 {minute:02}  0.0000000  0  2\n{}\n{}",
+            record("R01"),
+            record("R02")
+        )
+    };
+    let body = [
+        epoch(0),
+        blank_event(4, &[shift("R L1C  0.50000  02 R00 R02")]),
+        epoch(1),
+    ]
+    .join("\n");
+    let text = obs_with_code_headers(&[types.clone(), shift("R L1C  0.25000  02 R01 R00")], &body);
+    let obs = RinexObs::parse(&text).expect("parse");
+    // R00 in the file header and R00 again in the event.
+    assert_eq!(obs.skipped_records, 2);
     let held = &obs.header().phase_shifts[0];
     assert_eq!(
         held.satellites,
         ["R01".parse::<GnssSatelliteId>().expect("R01")]
     );
-    assert_eq!(unrepresentable_tokens(held), ["R28"]);
+    assert_eq!(unrepresentable_tokens(held), ["R00"]);
     // The corrections apply to the satellites held, and a record naming only
-    // R28 besides them is not one for every satellite.
+    // R00 besides them is not one for every satellite.
     assert_eq!(l1_shift_at(&obs, 0, "R01", "L1C"), 0.25);
     assert_eq!(l1_shift_at(&obs, 0, "R02", "L1C"), 0.0);
     assert_eq!(l1_shift_at(&obs, 2, "R01", "L1C"), 0.25);
     assert_eq!(l1_shift_at(&obs, 2, "R02", "L1C"), 0.5);
-    // The event's record replaces R28 by its designator and keeps R01's.
+    // The event's record keeps its designator as written beside R02's id.
     let after = obs.header_at(2).expect("header in effect");
     assert_eq!(after.phase_shifts.len(), 2);
     assert!(unrepresentable_tokens(&after.phase_shifts[0]).is_empty());
+    assert_eq!(unrepresentable_tokens(&after.phase_shifts[1]), ["R00"]);
     assert_eq!(
-        unrepresentable_tokens(&after.phase_shifts[1]),
-        ["R28", "R29"]
+        after.phase_shifts[1].satellites,
+        ["R02".parse::<GnssSatelliteId>().expect("R02")]
     );
     assert_writes_back(&obs);
 
@@ -5628,11 +5797,11 @@ fn a_phase_shift_satellite_no_satellite_id_holds_is_kept_and_counted() {
     let block = |second: &str| {
         RinexObs::parse(&obs_with_code_headers(
             std::slice::from_ref(&types),
-            &blank_event(4, &[shift("R L1C  0.25000  01 R28"), shift(second)]),
+            &blank_event(4, &[shift("R L1C  0.25000  01 R00"), shift(second)]),
         ))
         .unwrap_or_else(|error| panic!("{second}: {error}"))
     };
-    let contradicted = block("R L1C  0.50000  01 R28");
+    let contradicted = block("R L1C  0.50000  01 R00");
     assert_eq!(contradicted.skipped_records, 3);
     assert_eq!(
         contradicted
@@ -5643,15 +5812,10 @@ fn a_phase_shift_satellite_no_satellite_id_holds_is_kept_and_counted() {
         2
     );
     assert_writes_back(&contradicted);
-    assert_eq!(block("R L1C  0.25000  01 R28").skipped_records, 2);
-    assert_eq!(block("R L1C  0.50000  01 R29").skipped_records, 2);
-
-    // A token that names no satellite is still refused.
-    for token in ["R2X", "X28", "R", "28"] {
-        assert_parse_err(minimal_obs_with_phase_shift(&format!(
-            "R L1C  0.25000  01 {token}"
-        )));
-    }
+    assert_eq!(block("R L1C  0.25000  01 R00").skipped_records, 2);
+    // `R0` is the same number spelled with one digit: a different designator as
+    // written, so the two records contradict nothing.
+    assert_eq!(block("R L1C  0.50000  01 R0 ").skipped_records, 2);
 }
 
 #[test]
@@ -6211,17 +6375,20 @@ fn rejects_malformed_glonass_slot_records() {
     }
 }
 
+/// A slot channel outside the `-7..=6` FDMA allocation is kept as stated, as
+/// the `R28  7` real IGS headers carry. Refusing it refused the whole file. The
+/// channel resolves no carrier, and `rinex_qc` reports it.
 #[test]
-fn rejects_out_of_range_glonass_slot_channel() {
+fn keeps_a_glonass_slot_channel_outside_the_fdma_allocation() {
     let header = header_line("  1 R01 99", "GLONASS SLOT / FRQ #");
-    let err = RinexObs::parse(&minimal_obs(&[header], ""))
-        .expect_err("out-of-range GLONASS slot channel must be rejected");
+    let obs = RinexObs::parse(&minimal_obs(&[header], ""))
+        .expect("a stated integer channel is read, not refused");
 
-    assert!(
-        matches!(err, Error::Parse(ref message)
-            if message.contains("glonass_slot.channel")
-                && message.contains("out of range")),
-        "{err}"
+    assert_eq!(obs.header().glonass_slots.get(&1).copied(), Some(99));
+    assert_eq!(
+        rinex_observation_frequency_hz(GnssSystem::Glonass, "L1C", 3.05, Some(99)),
+        None,
+        "a channel outside the allocation names no carrier"
     );
 }
 
@@ -6466,41 +6633,88 @@ fn rejects_unsupported_observation_file_version() {
 }
 
 #[test]
-fn skips_out_of_range_glonass_slot_entry_and_counts_it() {
-    // A GLONASS SLOT / FRQ # table that declares two slots, one of which (R28)
-    // is an extended slot beyond the engine's 1..=27 PRN cap. The out-of-range
-    // entry must be skipped and counted, not reject the whole header; the
-    // representable slot (R01) must survive with its channel.
+fn retains_extended_glonass_slot_entry_with_its_own_channel() {
+    // A GLONASS SLOT / FRQ # table declaring two slots, one of which (R28) is
+    // an extended slot. Both are kept, each with the channel its own entry
+    // gives - no channel is defaulted, inherited or invented.
     let header = header_line("  2 R01  1 R28 -3", "GLONASS SLOT / FRQ #");
     let obs = RinexObs::parse(&minimal_obs(&[header], ""))
-        .expect("one out-of-range GLONASS slot must not reject the header");
-    assert_eq!(obs.skipped_records, 1, "the R28 slot entry must be counted");
-    assert_eq!(obs.header().glonass_slots.len(), 1, "only R01 stored");
+        .expect("an extended GLONASS slot is an ordinary slot entry");
+    assert_eq!(obs.skipped_records, 0);
+    assert_eq!(obs.header().glonass_slots.len(), 2);
     assert_eq!(obs.header().glonass_slots.get(&1), Some(&1));
-    assert_eq!(obs.header().glonass_slots.get(&28), None);
+    assert_eq!(obs.header().glonass_slots.get(&28), Some(&-3));
+    // A slot the table does not name has no channel, rather than a zero.
+    assert_eq!(obs.header().glonass_slots.get(&2), None);
 }
 
 #[test]
-fn skips_unknown_satellite_epoch_record_and_counts_it() {
-    // An epoch advertising three satellite records, the middle of which is an
-    // out-of-range GLONASS slot (R28). The unknown record must be skipped and
-    // counted, leaving the valid GPS and GLONASS records intact - no
-    // observation values fabricated, no epoch lost.
+fn skips_unrepresentable_glonass_slot_entry_and_counts_it() {
+    // `R00` names no satellite - the slot range is 01..99 - so the entry is
+    // skipped and counted rather than rejecting the whole header. The
+    // representable slot beside it survives with its channel.
+    let header = header_line("  2 R01  1 R00 -3", "GLONASS SLOT / FRQ #");
+    let obs = RinexObs::parse(&minimal_obs(&[header], ""))
+        .expect("one unrepresentable GLONASS slot must not reject the header");
+    assert_eq!(obs.skipped_records, 1, "the R00 slot entry must be counted");
+    assert_eq!(obs.header().glonass_slots.len(), 1, "only R01 stored");
+    assert_eq!(obs.header().glonass_slots.get(&1), Some(&1));
+    assert_eq!(obs.header().glonass_slots.get(&0), None);
+}
+
+/// Build a three-record epoch whose middle record names `middle`.
+fn three_record_epoch(middle: &str) -> String {
+    let headers = [
+        header_line("G    1 C1C", "SYS / # / OBS TYPES"),
+        header_line("R    1 C1C", "SYS / # / OBS TYPES"),
+    ];
     let body = format!(
-        "> 2020 06 25 00 00 00.0000000  0  3\nG01{}\nR28{}\nR01{}",
+        "> 2020 06 25 00 00 00.0000000  0  3\nG01{}\n{middle}{}\nR01{}",
         obs_field(20_000_000.0, 0, 0),
         obs_field(21_000_000.0, 0, 0),
         obs_field(22_000_000.0, 0, 0),
     );
-    let obs = RinexObs::parse(&obs_with_code_headers(
-        &[
-            header_line("G    1 C1C", "SYS / # / OBS TYPES"),
-            header_line("R    1 C1C", "SYS / # / OBS TYPES"),
-        ],
-        &body,
-    ))
-    .expect("one unknown satellite record must not reject the epoch");
-    assert_eq!(obs.skipped_records, 1, "the R28 record must be counted");
+    obs_with_code_headers(&headers, &body)
+}
+
+#[test]
+fn retains_extended_glonass_slot_epoch_record() {
+    // An epoch of three satellite records, the middle one an extended GLONASS
+    // slot. All three are kept, each with its own observation.
+    let obs = RinexObs::parse(&three_record_epoch("R28"))
+        .expect("an extended GLONASS slot is an ordinary epoch record");
+    assert_eq!(obs.skipped_records, 0);
+    assert_eq!(obs.epochs().len(), 1);
+    let sats = &obs.epochs()[0].sats;
+    assert_eq!(sats.len(), 3, "all three records are held");
+    let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id");
+    let r01 = GnssSatelliteId::new(GnssSystem::Glonass, 1).expect("valid satellite id");
+    let r28 = GnssSatelliteId::new(GnssSystem::Glonass, 28).expect("valid satellite id");
+    assert_eq!(
+        sats.get(&g01).expect("G01 present")[0].value,
+        Some(20_000_000.0)
+    );
+    assert_eq!(
+        sats.get(&r28).expect("R28 present")[0].value,
+        Some(21_000_000.0),
+        "R28 keeps its own observation, not a neighbour's"
+    );
+    assert_eq!(
+        sats.get(&r01).expect("R01 present")[0].value,
+        Some(22_000_000.0)
+    );
+    assert_writes_back(&obs);
+}
+
+#[test]
+fn skips_unknown_satellite_epoch_record_and_counts_it() {
+    // An epoch advertising three satellite records, the middle of which names
+    // no satellite (`R00`). The unknown record must be skipped and counted,
+    // leaving the valid GPS and GLONASS records intact - no observation values
+    // fabricated, no epoch lost.
+    let obs = RinexObs::parse(&three_record_epoch("R00"))
+        .expect("one unknown satellite record must not reject the epoch");
+    assert_eq!(obs.skipped_records, 1, "the R00 record must be counted");
     assert_eq!(obs.epochs().len(), 1);
     let sats = &obs.epochs()[0].sats;
     assert_eq!(sats.len(), 2, "both representable records must survive");
@@ -6516,33 +6730,40 @@ fn skips_unknown_satellite_epoch_record_and_counts_it() {
     );
 }
 
-#[test]
-fn unrepresentable_record_at_continuation_boundary_is_not_eaten_as_continuation() {
-    // G01 omits its trailing observation (RINEX permits dropping trailing blank
-    // fields), so the parser is still awaiting a continuation line when it reaches
-    // the *next* record, which is an out-of-range GLONASS slot (R28). R28 is a new
-    // satellite record, not continuation data: it must terminate G01's record,
-    // then be skipped and counted - never spliced into G01's missing L1C.
+/// Build an epoch whose first record (`G01`) omits its trailing observation, so
+/// the parser is still awaiting a continuation line when it reaches the next
+/// record - which names `second`.
+fn epoch_with_short_first_record(second: &str) -> String {
     let short_g01 = format!("G01{}", obs_field(20_000_000.0, 0, 0));
     let body = format!(
-        "> 2020 06 25 00 00 00.0000000  0  3\n{short_g01}\nR28{}{}\nR01{}{}",
+        "> 2020 06 25 00 00 00.0000000  0  3\n{short_g01}\n{second}{}{}\nR01{}{}",
         obs_field(21_000_000.0, 0, 0),
         obs_field(21_000_001.0, 0, 0),
         obs_field(22_000_000.0, 0, 0),
         obs_field(22_000_001.0, 0, 0),
     );
-    let obs = RinexObs::parse(&obs_with_code_headers(
+    obs_with_code_headers(
         &[
             header_line("G    2 C1C L1C", "SYS / # / OBS TYPES"),
             header_line("R    2 C1C L1C", "SYS / # / OBS TYPES"),
         ],
         &body,
-    ))
-    .expect("an unrepresentable record at a continuation boundary must not reject the epoch");
+    )
+}
+
+#[test]
+fn unrepresentable_record_at_continuation_boundary_is_not_eaten_as_continuation() {
+    // RINEX permits dropping trailing blank fields, so the parser is still
+    // awaiting a continuation line when it reaches the next record, which names
+    // no satellite (`R00`). That is a new satellite record, not continuation
+    // data: it must terminate G01's record, then be skipped and counted - never
+    // spliced into G01's missing L1C.
+    let obs = RinexObs::parse(&epoch_with_short_first_record("R00"))
+        .expect("an unrepresentable record at a continuation boundary must not reject the epoch");
 
     assert_eq!(
         obs.skipped_records, 1,
-        "R28 must be counted as a skipped record, not absorbed as continuation"
+        "R00 must be counted as a skipped record, not absorbed as continuation"
     );
     assert_eq!(obs.epochs().len(), 1);
     let sats = &obs.epochs()[0].sats;
@@ -6554,8 +6775,39 @@ fn unrepresentable_record_at_continuation_boundary_is_not_eaten_as_continuation(
     assert_eq!(g01_vals[0].value, Some(20_000_000.0), "G01 C1C intact");
     assert_eq!(
         g01_vals[1].value, None,
+        "G01 L1C stays empty - R00 data must not leak in as continuation"
+    );
+    assert_eq!(
+        sats.get(&r01).expect("R01 present")[0].value,
+        Some(22_000_000.0)
+    );
+}
+
+#[test]
+fn retained_record_at_continuation_boundary_is_not_eaten_as_continuation() {
+    // The same boundary with a record that is kept: an extended GLONASS slot.
+    // It must still terminate G01's short record rather than be spliced into
+    // it, and keep its own two observations.
+    let obs = RinexObs::parse(&epoch_with_short_first_record("R28"))
+        .expect("a retained record at a continuation boundary must not reject the epoch");
+
+    assert_eq!(obs.skipped_records, 0);
+    assert_eq!(obs.epochs().len(), 1);
+    let sats = &obs.epochs()[0].sats;
+    assert_eq!(sats.len(), 3, "G01, R28 and R01 all survive");
+
+    let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id");
+    let r01 = GnssSatelliteId::new(GnssSystem::Glonass, 1).expect("valid satellite id");
+    let r28 = GnssSatelliteId::new(GnssSystem::Glonass, 28).expect("valid satellite id");
+    let g01_vals = sats.get(&g01).expect("G01 present");
+    assert_eq!(g01_vals[0].value, Some(20_000_000.0), "G01 C1C intact");
+    assert_eq!(
+        g01_vals[1].value, None,
         "G01 L1C stays empty - R28 data must not leak in as continuation"
     );
+    let r28_vals = sats.get(&r28).expect("R28 present");
+    assert_eq!(r28_vals[0].value, Some(21_000_000.0));
+    assert_eq!(r28_vals[1].value, Some(21_000_001.0));
     assert_eq!(
         sats.get(&r01).expect("R01 present")[0].value,
         Some(22_000_000.0)
@@ -10119,6 +10371,9 @@ fn a_rinex_4_downgrade_removes_the_deprecated_records_and_reports_them() {
 
 #[test]
 fn a_downgrade_keeps_or_removes_phase_shift_records_naming_a_satellite_no_id_holds() {
+    // `R00` names no satellite - the slot range is 01..99 - so it is kept as a
+    // designator rather than as an id, and a downgrade must carry it through
+    // or remove it whole.
     let types = header_line("R    2 C1C L1C", "SYS / # / OBS TYPES");
     let shift = |content: &str| header_line(content, "SYS / PHASE SHIFT");
     let record = |sat: &str| obs_record(sat, &[Some(20_000_000.0), Some(100.0)]);
@@ -10131,11 +10386,11 @@ fn a_downgrade_keeps_or_removes_phase_shift_records_naming_a_satellite_no_id_hol
     };
     let body = [
         epoch(0),
-        blank_event(4, &[shift("R L1C  0.50000  03 R28 R02 R29")]),
+        blank_event(4, &[shift("R L1C  0.50000  02 R00 R02")]),
         epoch(1),
     ]
     .join("\n");
-    let text = obs_with_code_headers(&[types.clone(), shift("R L1C  0.25000  02 R01 R28")], &body);
+    let text = obs_with_code_headers(&[types.clone(), shift("R L1C  0.25000  02 R01 R00")], &body);
     let obs = RinexObs::parse(&text).expect("parse");
     // RINEX 4: kept and not applied, contradictory records not refused, and a
     // downgrade removes them, designators and all.
@@ -10143,8 +10398,8 @@ fn a_downgrade_keeps_or_removes_phase_shift_records_naming_a_satellite_no_id_hol
         4.02,
         &[
             types.clone(),
-            shift("R L1C  0.25000  02 R01 R28"),
-            shift("R L1C  0.50000  01 R28"),
+            shift("R L1C  0.25000  02 R01 R00"),
+            shift("R L1C  0.50000  01 R00"),
         ],
         &epoch(0),
     ))
@@ -10156,7 +10411,7 @@ fn a_downgrade_keeps_or_removes_phase_shift_records_naming_a_satellite_no_id_hol
     assert!(changes.iter().any(|change| matches!(
         change,
         ObsDowngradeChange::DeprecatedRecordsRemoved { records, .. }
-            if records.iter().any(|record| record.contains(" R28"))
+            if records.iter().any(|record| record.contains(" R00"))
     )));
 
     // Version 3 to version 2 keeps the records whole.
@@ -10169,7 +10424,7 @@ fn a_downgrade_keeps_or_removes_phase_shift_records_naming_a_satellite_no_id_hol
     );
     assert_eq!(
         unrepresentable_tokens(&reread.header().phase_shifts[0]),
-        ["R28"]
+        ["R00"]
     );
     assert_eq!(l1_shift_at(&reread, 0, "R01", "L1C"), 0.25);
 }
@@ -10245,9 +10500,11 @@ fn real_igs_headers_with_unknown_alignment_contradictory_shifts_and_blank_biases
                 }
             }
             "MET300FIN" => {
-                // Four satellite designators the id does not hold, and C02 and
-                // C05 given two L2I and two L6I corrections.
-                assert_eq!(obs.skipped_records, 8);
+                // C02 and C05 are each given two L2I and two L6I corrections.
+                // The four R28 designators in the GLONASS lists are ordinary
+                // satellites and are not skips.
+                assert_eq!(obs.skipped_records, 4);
+                assert_eq!(shift("R28", "L1C"), Ok(0.0));
                 for sat in ["C02", "C05"] {
                     for code in ["L2I", "L6I"] {
                         assert_eq!(
