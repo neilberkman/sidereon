@@ -3212,14 +3212,18 @@ fn emit_or_refuse(
 /// A record's timetag reduced to something two records can be compared by.
 ///
 /// CCSDS 503.0-B-2 4.3.9 gives two forms, `YYYY-MM-DDThh:mm:ss[.d->d][Z]` and
-/// `YYYY-DDDThh:mm:ss[.d->d][Z]`. Both reduce to a day number and a second of
-/// day, so a message may use either and still be ordered. Leap seconds are not
-/// modeled: 3.4.10 asks only for chronological order within one time system,
-/// which the reduction preserves.
+/// `YYYY-DDDThh:mm:ss[.d->d][Z]`. Both reduce to a calendar day number and
+/// clock components. Keying on discrete components (day, hour, minute, second,
+/// subsecond) rather than a collapsed second count preserves total ordering
+/// across leap seconds: second 60 orders after 59 and before the following
+/// minute's 0 without colliding (e.g. GLONASS 02:59:60 does not collapse onto
+/// 03:00:00).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct EpochKey {
     day: i64,
-    second_of_day: u32,
+    hour: u8,
+    minute: u8,
+    second: u8,
     subsecond: u128,
 }
 
@@ -3258,6 +3262,57 @@ fn fixed_digits(text: &str, width: usize) -> Option<i64> {
         return None;
     }
     text.parse::<i64>().ok()
+}
+
+/// Maximum decimal digits the 128-bit integer fractional key can hold without
+/// losing a digit (10^38 - 1 < 2^128).
+///
+/// CCSDS 503.0-B-2 4.3.9 and CCSDS 301.0-B-4 define sub-second precision as
+/// `[.d->d]` with no explicit length cap. Rather than refusing based on
+/// fixed-point numeric field limits, timetags with more than 38 fractional
+/// digits are refused because the internal integer key cannot distinguish a
+/// longer fraction without truncation or aliasing, not because the standard
+/// forbids it.
+const MAX_FRACTIONAL_DIGITS: usize = 38;
+
+/// Where a leap second falls in the scale in force, as `(hour, minute)`.
+///
+/// CCSDS 503.0-B-2 Table 3-3 and Annex B2 define `TIME_SYSTEM` values by reference
+/// to the SANA Time Systems Registry (https://sanaregistry.org/r/time_systems),
+/// with `UTC`, `TAI`, `GPS`, and `SCLK` given as customary examples in Table 3-3.
+///
+/// The full set of time systems in the standard's SANA registry comprises:
+/// - `UTC`: Coordinated Universal Time, where a leap second falls at 23:59:60.
+/// - `GLONASS`: GLONASS time is linked to UTC(SU) + 3 hours (Moscow time offset).
+///   Because GLONASS time tracks UTC(SU) with a constant three-hour offset, it
+///   carries the leap second; when UTC reads 23:59:60, a GLONASS-time clock reads
+///   02:59:60 on the following day.
+/// - Continuous atomic and coordinate scales that do not have leap seconds:
+///   `TAI`, `TT`, `TCG`, `TCB`, `TDB`, and `ET`.
+/// - GNSS continuous time scales: `GPS`, `GALILEO` (GST), `BEIDOU` (BDT), and `NAVIC`.
+/// - Earth rotation and mission scales: `UT1`, `GMST`, and `SCLK`.
+///
+/// Second 60 is legal at 23:59 under `UTC` and at 02:59 under `GLONASS`.
+/// Under a continuous scale or an unspecified time system, second 60 is not legal
+/// at any reading.
+///
+/// The check deliberately verifies only that the reading is syntactically legal
+/// for the time scale; it does not validate against a table of declared IERS
+/// leap seconds. An embedded leap-second table ages: a file recording a leap
+/// second declared after this library was compiled would be refused by a reader
+/// that is simply out of date, which is a worse failure than accepting an
+/// unhistorical timetag that conforms to the scale's syntax. The same deliberate
+/// omission applies to correlating the GLONASS reading with the calendar date
+/// it falls on.
+fn leap_second_reading(time_system: Option<&str>) -> Option<(i64, i64)> {
+    let ts = time_system?;
+    if ts.eq_ignore_ascii_case("UTC") {
+        Some((23, 59))
+    } else if ts.eq_ignore_ascii_case("GLONASS") {
+        Some((2, 59))
+    } else {
+        None
+    }
 }
 
 /// Read a timetag in either form 4.3.9 defines.
@@ -3301,12 +3356,14 @@ fn parse_epoch_key(text: &str, time_system: Option<&str>) -> Option<EpochKey> {
 
     let (clock, subsecond) = match time.split_once('.') {
         Some((clock, digits)) => {
-            if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            if digits.is_empty()
+                || digits.len() > MAX_FRACTIONAL_DIGITS
+                || !digits.bytes().all(|byte| byte.is_ascii_digit())
+            {
                 return None;
             }
-            let mut padded = [b'0'; 30];
-            let len = digits.len().min(30);
-            padded[..len].copy_from_slice(&digits.as_bytes()[..len]);
+            let mut padded = [b'0'; MAX_FRACTIONAL_DIGITS];
+            padded[..digits.len()].copy_from_slice(digits.as_bytes());
             let s = std::str::from_utf8(&padded).ok()?;
             let subsecond = s.parse::<u128>().ok()?;
             (clock, subsecond)
@@ -3319,14 +3376,25 @@ fn parse_epoch_key(text: &str, time_system: Option<&str>) -> Option<EpochKey> {
     let hours = fixed_digits(clock.get(0..2)?, 2)?;
     let minutes = fixed_digits(clock.get(3..5)?, 2)?;
     let seconds = fixed_digits(clock.get(6..8)?, 2)?;
-    // A leap second is written as 60, so the range runs to 60 rather than 59.
+    // A leap second is written as 60 per CCSDS 503.0-B-2 4.3.9 and CCSDS 301.0-B-4
+    // ASCII Time Code A/B, which occurs at 23:59 under UTC and 02:59 under GLONASS.
     if hours > 23 || minutes > 59 || seconds > 60 {
+        return None;
+    }
+    // Deliberately checked only against the scale's valid clock reading (23:59
+    // for UTC, 02:59 for GLONASS) rather than an IERS leap-second calendar table.
+    // A table ages, and an out-of-date reader refusing a newly announced leap
+    // second is worse than accepting a timetag that is syntactically legal for its
+    // scale. The same applies to correlating the GLONASS reading with its date.
+    if seconds == 60 && leap_second_reading(time_system) != Some((hours, minutes)) {
         return None;
     }
 
     Some(EpochKey {
         day,
-        second_of_day: (hours * 3600 + minutes * 60 + seconds) as u32,
+        hour: hours as u8,
+        minute: minutes as u8,
+        second: seconds as u8,
         subsecond,
     })
 }
@@ -4279,6 +4347,7 @@ DATA_STOP\n";
             "2005-000T00:00:00",
             "2005-159T24:00:00",
             "2005-159T17:60:00",
+            "2005-159T17:41:60",
             "2005-159T17:41:00.",
         ] {
             let text = records(&format!("RANGE = {bad} 1.0"));
@@ -4299,7 +4368,7 @@ DATA_STOP\n";
             "2005-159T17:41:00.25",
             "2005-159T17:41:00Z",
             "2004-366T00:00:00",
-            "2005-159T17:41:60",
+            "2005-159T23:59:60",
         ] {
             let text = records(&format!("RANGE = {good} 1.0"));
             parse_kvn(&text).unwrap_or_else(|err| panic!("{good}: {err}"));
@@ -5657,14 +5726,39 @@ TIME_SYSTEM = UTC
 PARTICIPANT_1 = DSS-25
 META_STOP
 DATA_START
-RANGE = 2005-160T20:15:00.1234567890123456 1.0
-RANGE = 2005-160T20:15:00.1234567890123457 2.0
+RANGE = 2005-160T20:15:00.12345678901234567890123456789012345678 1.0
+RANGE = 2005-160T20:15:00.12345678901234567890123456789012345679 2.0
 DATA_STOP\n";
 
         let (tdm, warnings) = parse_kvn_with_policy(input, TdmPolicy::strict())
             .expect("high-precision timetags are distinct and in order");
         assert!(warnings.is_empty());
         assert_eq!(tdm.segments[0].data.records.len(), 2);
+
+        let (encoded, departures) = encode_kvn_with_policy(&tdm, TdmWritePolicy::strict())
+            .expect("38-digit fractional timetags serialize strictly");
+        assert!(departures.is_empty());
+        assert_eq!(encoded, input);
+
+        let (reparsed, reparsed_warnings) =
+            parse_kvn_with_policy(&encoded, TdmPolicy::strict()).expect("encoded output reparses");
+        assert!(reparsed_warnings.is_empty());
+        assert_eq!(reparsed, tdm);
+        assert_eq!(reparsed.segments[0].data.records.len(), 2);
+        assert_ne!(
+            reparsed.segments[0].data.records[0].epoch,
+            reparsed.segments[0].data.records[1].epoch
+        );
+        assert_eq!(
+            reparsed.segments[0].data.records[0].epoch,
+            "2005-160T20:15:00.12345678901234567890123456789012345678"
+        );
+        assert_eq!(reparsed.segments[0].data.records[0].value.text, "1.0");
+        assert_eq!(
+            reparsed.segments[0].data.records[1].epoch,
+            "2005-160T20:15:00.12345678901234567890123456789012345679"
+        );
+        assert_eq!(reparsed.segments[0].data.records[1].value.text, "2.0");
     }
 
     #[test]
@@ -5687,6 +5781,32 @@ DATA_STOP\n";
             .expect("leap second orders after 23:59:59 and before next day 00:00:00");
         assert!(warnings.is_empty());
         assert_eq!(tdm.segments[0].data.records.len(), 3);
+
+        let (encoded, departures) = encode_kvn_with_policy(&tdm, TdmWritePolicy::strict())
+            .expect("UTC leap second encodes strictly");
+        assert!(departures.is_empty());
+        assert_eq!(encoded, input);
+
+        let (reparsed, reparsed_warnings) =
+            parse_kvn_with_policy(&encoded, TdmPolicy::strict()).expect("encoded output reparses");
+        assert!(reparsed_warnings.is_empty());
+        assert_eq!(reparsed, tdm);
+        assert_eq!(reparsed.segments[0].data.records.len(), 3);
+        assert_eq!(
+            reparsed.segments[0].data.records[0].epoch,
+            "2005-160T23:59:59"
+        );
+        assert_eq!(reparsed.segments[0].data.records[0].value.text, "1.0");
+        assert_eq!(
+            reparsed.segments[0].data.records[1].epoch,
+            "2005-160T23:59:60"
+        );
+        assert_eq!(reparsed.segments[0].data.records[1].value.text, "2.0");
+        assert_eq!(
+            reparsed.segments[0].data.records[2].epoch,
+            "2005-161T00:00:00"
+        );
+        assert_eq!(reparsed.segments[0].data.records[2].value.text, "3.0");
     }
 
     #[test]
@@ -5739,5 +5859,384 @@ DATA_STOP\n";
             parse_kvn_with_policy(input, TdmPolicy::strict()).expect("Z with UTC parses");
         assert!(warnings.is_empty());
         assert_eq!(tdm.segments[0].data.records.len(), 1);
+    }
+
+    #[test]
+    fn leap_second_outside_twenty_three_fifty_nine_is_refused_under_all_policies() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T12:34:60 1.0
+DATA_STOP\n";
+
+        assert_eq!(
+            parse_kvn(input),
+            Err(TdmError::MalformedEpoch {
+                line: Some(9),
+                keyword: "RANGE".to_string(),
+                text: "2005-160T12:34:60".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_kvn_with_policy(input, TdmPolicy::lenient()),
+            Err(TdmError::MalformedEpoch {
+                line: Some(9),
+                keyword: "RANGE".to_string(),
+                text: "2005-160T12:34:60".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn leap_second_at_twenty_three_fifty_nine_under_utc_is_accepted() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T23:59:60 1.0
+DATA_STOP\n";
+
+        let (tdm, warnings) =
+            parse_kvn_with_policy(input, TdmPolicy::strict()).expect("23:59:60 with UTC parses");
+        assert!(warnings.is_empty());
+        assert_eq!(tdm.segments[0].data.records.len(), 1);
+    }
+
+    #[test]
+    fn leap_second_under_continuous_time_scale_is_refused_under_all_policies() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = GPS
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T23:59:60 1.0
+DATA_STOP\n";
+
+        assert_eq!(
+            parse_kvn(input),
+            Err(TdmError::MalformedEpoch {
+                line: Some(9),
+                keyword: "RANGE".to_string(),
+                text: "2005-160T23:59:60".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_kvn_with_policy(input, TdmPolicy::lenient()),
+            Err(TdmError::MalformedEpoch {
+                line: Some(9),
+                keyword: "RANGE".to_string(),
+                text: "2005-160T23:59:60".to_string(),
+            })
+        );
+
+        let valid_gps = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = GPS
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T20:15:00 1.0
+DATA_STOP\n";
+
+        let (mut tdm, warnings) = parse_kvn_with_policy(valid_gps, TdmPolicy::strict())
+            .expect("valid GPS message parses");
+        assert!(warnings.is_empty());
+        tdm.segments[0].data.records[0].epoch = "2005-160T23:59:60".to_string();
+
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict()),
+            Err(TdmError::MalformedEpoch {
+                line: None,
+                keyword: "RANGE".to_string(),
+                text: "2005-160T23:59:60".to_string(),
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::lenient()),
+            Err(TdmError::MalformedEpoch {
+                line: None,
+                keyword: "RANGE".to_string(),
+                text: "2005-160T23:59:60".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn leap_second_under_glonass_time_is_accepted_at_two_fifty_nine_and_refused_at_twenty_three_fifty_nine(
+    ) {
+        let accepted = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = GLONASS
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T02:59:60 1.0
+DATA_STOP\n";
+
+        let (tdm, warnings) = parse_kvn_with_policy(accepted, TdmPolicy::strict())
+            .expect("02:59:60 with GLONASS parses");
+        assert!(warnings.is_empty());
+        assert_eq!(tdm.segments[0].data.records.len(), 1);
+
+        let refused = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = GLONASS
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T23:59:60 1.0
+DATA_STOP\n";
+
+        assert_eq!(
+            parse_kvn(refused),
+            Err(TdmError::MalformedEpoch {
+                line: Some(9),
+                keyword: "RANGE".to_string(),
+                text: "2005-160T23:59:60".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_kvn_with_policy(refused, TdmPolicy::lenient()),
+            Err(TdmError::MalformedEpoch {
+                line: Some(9),
+                keyword: "RANGE".to_string(),
+                text: "2005-160T23:59:60".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn fractional_seconds_past_limit_is_refused_while_longest_legal_parses() {
+        // A 128-bit unsigned integer fractional key can represent up to 38
+        // decimal digits without loss (10^38 - 1 < 2^128). A 38-digit fraction
+        // parses, while 39 digits is refused because the key cannot distinguish
+        // a longer fraction.
+        let legal = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T17:41:00.12345678901234567890123456789012345678 1.0
+DATA_STOP\n";
+
+        let (tdm, warnings) = parse_kvn_with_policy(legal, TdmPolicy::strict())
+            .expect("38-digit fractional seconds parses");
+        assert!(warnings.is_empty());
+        assert_eq!(tdm.segments[0].data.records.len(), 1);
+
+        let over_limit = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T17:41:00.123456789012345678901234567890123456789 1.0
+DATA_STOP\n";
+
+        assert_eq!(
+            parse_kvn(over_limit),
+            Err(TdmError::MalformedEpoch {
+                line: Some(9),
+                keyword: "RANGE".to_string(),
+                text: "2005-160T17:41:00.123456789012345678901234567890123456789".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_kvn_with_policy(over_limit, TdmPolicy::lenient()),
+            Err(TdmError::MalformedEpoch {
+                line: Some(9),
+                keyword: "RANGE".to_string(),
+                text: "2005-160T17:41:00.123456789012345678901234567890123456789".to_string(),
+            })
+        );
+
+        let mut invalid_tdm = tdm;
+        invalid_tdm.segments[0].data.records[0].epoch =
+            "2005-160T17:41:00.123456789012345678901234567890123456789".to_string();
+        assert_eq!(
+            encode_kvn_with_policy(&invalid_tdm, TdmWritePolicy::strict()),
+            Err(TdmError::MalformedEpoch {
+                line: None,
+                keyword: "RANGE".to_string(),
+                text: "2005-160T17:41:00.123456789012345678901234567890123456789".to_string(),
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(&invalid_tdm, TdmWritePolicy::lenient()),
+            Err(TdmError::MalformedEpoch {
+                line: None,
+                keyword: "RANGE".to_string(),
+                text: "2005-160T17:41:00.123456789012345678901234567890123456789".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn leap_second_under_glonass_does_not_alias_onto_three_o_clock() {
+        let input = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = GLONASS
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T02:59:59 1.0
+RANGE = 2005-160T02:59:60 2.0
+RANGE = 2005-160T03:00:00 3.0
+DATA_STOP\n";
+
+        let (tdm, warnings) = parse_kvn_with_policy(input, TdmPolicy::strict())
+            .expect("GLONASS leap second orders after 02:59:59 and before 03:00:00");
+        assert!(warnings.is_empty());
+        assert_eq!(tdm.segments[0].data.records.len(), 3);
+
+        let (encoded, departures) = encode_kvn_with_policy(&tdm, TdmWritePolicy::strict())
+            .expect("GLONASS leap second encodes strictly");
+        assert!(departures.is_empty());
+        assert_eq!(encoded, input);
+
+        let (reparsed, reparsed_warnings) =
+            parse_kvn_with_policy(&encoded, TdmPolicy::strict()).expect("encoded output reparses");
+        assert!(reparsed_warnings.is_empty());
+        assert_eq!(reparsed, tdm);
+        assert_eq!(reparsed.segments[0].data.records.len(), 3);
+        assert_eq!(
+            reparsed.segments[0].data.records[0].epoch,
+            "2005-160T02:59:59"
+        );
+        assert_eq!(reparsed.segments[0].data.records[0].value.text, "1.0");
+        assert_eq!(
+            reparsed.segments[0].data.records[1].epoch,
+            "2005-160T02:59:60"
+        );
+        assert_eq!(reparsed.segments[0].data.records[1].value.text, "2.0");
+        assert_eq!(
+            reparsed.segments[0].data.records[2].epoch,
+            "2005-160T03:00:00"
+        );
+        assert_eq!(reparsed.segments[0].data.records[2].value.text, "3.0");
+    }
+
+    #[test]
+    fn leap_second_and_following_minute_or_day_are_distinct_records_in_order() {
+        let glonass = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = GLONASS
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T02:59:60 1.0
+RANGE = 2005-160T03:00:00 2.0
+DATA_STOP\n";
+
+        let (tdm, warnings) = parse_kvn_with_policy(glonass, TdmPolicy::strict())
+            .expect("02:59:60 and 03:00:00 on one day under GLONASS are two records in that order");
+        assert!(warnings.is_empty());
+        assert_eq!(tdm.segments[0].data.records.len(), 2);
+
+        let (encoded_glonass, departures_glonass) =
+            encode_kvn_with_policy(&tdm, TdmWritePolicy::strict())
+                .expect("GLONASS leap second and following minute encode strictly");
+        assert!(departures_glonass.is_empty());
+        assert_eq!(encoded_glonass, glonass);
+
+        let (reparsed_glonass, reparsed_glonass_warnings) =
+            parse_kvn_with_policy(&encoded_glonass, TdmPolicy::strict())
+                .expect("encoded GLONASS output reparses");
+        assert!(reparsed_glonass_warnings.is_empty());
+        assert_eq!(reparsed_glonass, tdm);
+        assert_eq!(reparsed_glonass.segments[0].data.records.len(), 2);
+        assert_eq!(
+            reparsed_glonass.segments[0].data.records[0].epoch,
+            "2005-160T02:59:60"
+        );
+        assert_eq!(
+            reparsed_glonass.segments[0].data.records[0].value.text,
+            "1.0"
+        );
+        assert_eq!(
+            reparsed_glonass.segments[0].data.records[1].epoch,
+            "2005-160T03:00:00"
+        );
+        assert_eq!(
+            reparsed_glonass.segments[0].data.records[1].value.text,
+            "2.0"
+        );
+
+        let utc = "\
+CCSDS_TDM_VERS = 2.0
+CREATION_DATE = 2005-160T20:15:00Z
+ORIGINATOR = NASA
+META_START
+TIME_SYSTEM = UTC
+PARTICIPANT_1 = DSS-25
+META_STOP
+DATA_START
+RANGE = 2005-160T23:59:60 1.0
+RANGE = 2005-161T00:00:00 2.0
+DATA_STOP\n";
+
+        let (tdm, warnings) = parse_kvn_with_policy(utc, TdmPolicy::strict())
+            .expect("23:59:60 and following day 00:00:00 under UTC are two records in that order");
+        assert!(warnings.is_empty());
+        assert_eq!(tdm.segments[0].data.records.len(), 2);
+
+        let (encoded_utc, departures_utc) = encode_kvn_with_policy(&tdm, TdmWritePolicy::strict())
+            .expect("UTC leap second and following day encode strictly");
+        assert!(departures_utc.is_empty());
+        assert_eq!(encoded_utc, utc);
+
+        let (reparsed_utc, reparsed_utc_warnings) =
+            parse_kvn_with_policy(&encoded_utc, TdmPolicy::strict())
+                .expect("encoded UTC output reparses");
+        assert!(reparsed_utc_warnings.is_empty());
+        assert_eq!(reparsed_utc, tdm);
+        assert_eq!(reparsed_utc.segments[0].data.records.len(), 2);
+        assert_eq!(
+            reparsed_utc.segments[0].data.records[0].epoch,
+            "2005-160T23:59:60"
+        );
+        assert_eq!(reparsed_utc.segments[0].data.records[0].value.text, "1.0");
+        assert_eq!(
+            reparsed_utc.segments[0].data.records[1].epoch,
+            "2005-161T00:00:00"
+        );
+        assert_eq!(reparsed_utc.segments[0].data.records[1].value.text, "2.0");
     }
 }
