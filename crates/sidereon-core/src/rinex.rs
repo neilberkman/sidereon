@@ -4,11 +4,14 @@
 //! parsed through [`nav`] or loaded into an [`crate::ephemeris::BroadcastEphemeris`],
 //! while observation files are parsed through [`observations`].
 
-/// RINEX clock parsing and satellite clock-bias interpolation.
+/// RINEX clock reading, writing, editing and satellite clock-bias interpolation.
 pub mod clock {
     pub use crate::rinex_clock::{
-        civil_to_clock_instant, civil_to_gps_seconds, ClockEpoch, ClockPoint, RinexClock,
-        RinexClockDiagnostic, RinexClockError, RinexClockSkip,
+        civil_to_clock_instant, civil_to_gps_seconds, ClockEpoch, ClockHeaderField,
+        ClockHeaderReading, ClockHeaderRecord, ClockLayout, ClockPoint, ClockRecord,
+        ClockRecordReading, ClockRecordType, ClockSurplusValue, ClockTimeSystem,
+        ClockTimeSystemStatus, ClockWriteDeparture, ClockWriteLeniency, ClockWritePolicy,
+        RinexClock, RinexClockDiagnostic, RinexClockError, RinexClockNotice, RinexClockSkip,
     };
 }
 

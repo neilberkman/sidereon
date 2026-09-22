@@ -1,0 +1,5 @@
+# These fixtures are vendored byte for byte, and their bytes are what the tests
+# measure: trailing blanks padding records to fixed widths, and CRLF line
+# terminators in the RINEX clock 3.04 specification examples. Git must neither
+# convert their line endings nor report their whitespace.
+*.clk -text -whitespace

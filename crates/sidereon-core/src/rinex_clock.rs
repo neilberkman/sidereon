@@ -1,30 +1,47 @@
-//! RINEX clock (`.CLK`) satellite-clock parser and interpolation.
-//!
-//! The parser owns the product grammar for `AS` satellite clock-bias records.
-//! The strict parser reports malformed `AS` rows. Use
-//! [`RinexClock::parse_lossy`] only when best-effort input recovery is intended.
+//! RINEX clock (`.CLK`) products: lossless reading, typed views, editing and
+//! writing. [`RinexClock`] describes how the source lines and the derived
+//! views relate.
 
 #![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
-use std::fmt::{self, Write as _};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
-use crate::astro::constants::time::SECONDS_PER_DAY_I64;
-use crate::astro::math::interp::lerp_ratio;
-use crate::astro::time::civil::{
-    civil_from_julian_day_number, j2000_seconds_from_split, seconds_between_splits,
-    J2000_JULIAN_DAY_NUMBER, J2000_NOON_OFFSET_S,
-};
-use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale};
-use crate::astro::time::scales::julian_day_number;
-use crate::constants::{
-    GPS_EPOCH_TO_J2000_S, J2000_JD, MICROSECONDS_PER_SECOND, SECONDS_PER_DAY, SECONDS_PER_HOUR,
-};
-use crate::format::columns::fixed_record;
+use crate::astro::time::model::{Instant, TimeScale};
 use crate::validate::{self, FieldError};
 
-const INSTANT_SCALE_ORDER_STRIDE_S: f64 = 1.0e15;
+mod derived;
+mod epoch;
+mod header;
+mod numeric;
+mod policy;
+mod record;
+#[cfg(test)]
+mod tests;
+
+pub use epoch::{civil_to_clock_instant, civil_to_gps_seconds};
+pub use header::{
+    ClockHeaderField, ClockHeaderReading, ClockHeaderRecord, ClockLayout, ClockTimeSystem,
+    ClockTimeSystemStatus,
+};
+pub use policy::{ClockWriteDeparture, ClockWriteLeniency, ClockWritePolicy};
+pub use record::{ClockRecord, ClockRecordReading, ClockRecordType, ClockSurplusValue};
+
+use derived::{Derived, DerivedBuilder};
+use epoch::{
+    civil_second_policy_for_time_scale, civil_to_instant, epoch_cmp, gps_seconds_to_instant,
+    instant_to_gps_seconds, interpolate, validate_instant, Civil,
+};
+use header::{
+    constructed_layout, identify_label, is_end_of_header, label_rank, read_header,
+    render_constructed_header, render_time_system_line, HeaderContext, Label, TimeResolution,
+};
+use record::{
+    is_potential_parent_record, read_continuation, read_parent, render_record, render_record_with,
+    sigma_gap_of_line, validate_name, validate_values, EpochContext, SigmaGap, TypedEpoch,
+    TypedRecord,
+};
 
 /// One satellite clock-bias sample.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,14 +50,18 @@ pub struct ClockPoint {
     pub epoch: Instant,
     /// Satellite clock bias in seconds.
     pub bias_s: f64,
-    /// Additional numeric clock values following the bias, in standard order:
-    /// bias sigma (s), clock rate (dimensionless), clock rate sigma (dimensionless),
-    /// clock acceleration (s^-1), and clock acceleration sigma (s^-1).
+    /// Additional declared clock values following the bias, in standard order:
+    /// bias sigma (s), clock rate (dimensionless), clock rate sigma
+    /// (dimensionless), clock acceleration (s^-1), and clock acceleration sigma
+    /// (s^-1). Values a record carries beyond its declared count are not
+    /// included; [`ClockRecord::surplus_values`] reports them.
     pub additional_values: Vec<f64>,
 }
 
 impl ClockPoint {
-    /// This sample's epoch as GPS seconds, when the sample is actually GPST.
+    /// This sample's epoch as GPS seconds, when the sample is on the GPST
+    /// timeline. GPST and QZSST samples project (QZSST shares the TAI - 19 s
+    /// alignment of GPST); every other scale returns `None`.
     pub fn gps_seconds(&self) -> Option<f64> {
         instant_to_gps_seconds(&self.epoch)
     }
@@ -65,11 +86,16 @@ pub struct ClockEpoch {
     pub hour: u8,
     /// Minute of hour, 0..=59.
     pub minute: u8,
-    /// Seconds of minute, including fractional seconds.
+    /// Seconds of minute, including fractional seconds. A UTC product accepts
+    /// `60.x` on a day that ends with a positive leap second.
     pub second: f64,
 }
 
-/// An unmodelled record skipped during RINEX clock parsing.
+/// A data record read from the source that is not part of the satellite
+/// series (`AR`, `CR`, `DR` and `MS` records).
+///
+/// The record itself is retained; [`RinexClock::records`] returns it with its
+/// typed values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RinexClockSkip {
     /// One-based input line number where the record appeared.
@@ -92,18 +118,18 @@ impl fmt::Display for RinexClockSkip {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "skipped unmodelled {} record at line {}",
+            "{} record at line {} is outside the satellite series",
             self.record_type, self.line
         )
     }
 }
 
-/// A diagnostic recorded when lossy parsing skips a malformed record.
+/// A diagnostic recorded when lossy parsing keeps a line it cannot read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RinexClockDiagnostic {
     /// One-based line number of the malformed or invalid record.
     pub line: usize,
-    /// The underlying parse error that caused the record to be skipped.
+    /// The underlying parse error.
     pub error: RinexClockError,
 }
 
@@ -120,17 +146,221 @@ impl fmt::Display for RinexClockDiagnostic {
     }
 }
 
-/// Parsed RINEX clock product.
-#[derive(Debug, Clone, PartialEq)]
+/// A finding about how a product was read that does not stop it being read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RinexClockNotice {
+    /// No `TIME SYSTEM ID` record; the default in
+    /// [`ClockTimeSystemStatus::Defaulted`] applies.
+    TimeSystemDefaulted {
+        /// The system applied.
+        system: ClockTimeSystem,
+    },
+    /// A version 3.04 or later file has no `TIME SYSTEM ID` record, which its
+    /// version requires. The 3.00 default was applied and reported with
+    /// [`RinexClockNotice::TimeSystemDefaulted`].
+    TimeSystemMissing,
+    /// The time system has no core time scale (`IRN`). Record epochs keep their
+    /// civil fields and have no instant.
+    TimeSystemWithoutScale {
+        /// The declared system.
+        system: ClockTimeSystem,
+    },
+    /// A header record read at the other layout's columns or as
+    /// whitespace-separated values.
+    HeaderRecordNonconforming {
+        /// One-based line number.
+        line: usize,
+    },
+    /// A header record with a known label whose fields do not read.
+    HeaderRecordUninterpreted {
+        /// One-based line number.
+        line: usize,
+    },
+    /// A header line whose label is not a RINEX clock header label.
+    HeaderRecordUnknownLabel {
+        /// One-based line number.
+        line: usize,
+    },
+    /// Records carrying values beyond their declared count, such as a bias
+    /// sigma on a record that declares one value.
+    SurplusValues {
+        /// Number of records.
+        records: usize,
+        /// One-based line number of the first.
+        first_line: usize,
+    },
+    /// Records read at the columns of the layout the file does not declare.
+    OtherLayoutRecords {
+        /// Number of records.
+        records: usize,
+        /// One-based line number of the first.
+        first_line: usize,
+    },
+    /// Records read as whitespace-separated values.
+    WhitespaceRecords {
+        /// Number of records.
+        records: usize,
+        /// One-based line number of the first.
+        first_line: usize,
+    },
+}
+
+impl fmt::Display for RinexClockNotice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TimeSystemDefaulted { system } => write!(
+                f,
+                "no TIME SYSTEM ID record; epochs read in the default {} time system",
+                system.label()
+            ),
+            Self::TimeSystemMissing => f.write_str(
+                "version 3.04 or later file without the TIME SYSTEM ID record its version requires",
+            ),
+            Self::TimeSystemWithoutScale { system } => write!(
+                f,
+                "time system {} has no supported time scale; epochs have no instant",
+                system.label()
+            ),
+            Self::HeaderRecordNonconforming { line } => write!(
+                f,
+                "header record at line {line} does not follow its version's columns"
+            ),
+            Self::HeaderRecordUninterpreted { line } => {
+                write!(f, "header record at line {line} has fields that do not read")
+            }
+            Self::HeaderRecordUnknownLabel { line } => {
+                write!(f, "header line {line} has no RINEX clock header label")
+            }
+            Self::SurplusValues {
+                records,
+                first_line,
+            } => write!(
+                f,
+                "{records} records carry values beyond their declared count, first at line {first_line}"
+            ),
+            Self::OtherLayoutRecords {
+                records,
+                first_line,
+            } => write!(
+                f,
+                "{records} records follow the other version's columns, first at line {first_line}"
+            ),
+            Self::WhitespaceRecords {
+                records,
+                first_line,
+            } => write!(
+                f,
+                "{records} records read as whitespace-separated values, first at line {first_line}"
+            ),
+        }
+    }
+}
+
+/// A RINEX clock product.
+///
+/// A product read from text keeps the text as its authority: every header
+/// line with its exact label and payload, and every body line in order,
+/// including blank lines, records of every type (`AR`, `AS`, `CR`, `DR`,
+/// `MS`), continuation lines and, in a lossy read, lines that do not read as a
+/// record. Header fields, data records, the per-satellite [`ClockPoint`]
+/// series, skipped-record reports, diagnostics and notices are derived from
+/// those lines and cannot be changed independently of them. Writing an
+/// unedited product restates its input byte for byte, line terminators
+/// included.
+///
+/// Edits go through typed setters ([`RinexClock::set_time_system`],
+/// [`RinexClock::set_record_values`], [`RinexClock::insert_record`],
+/// [`RinexClock::remove_record`], and the batch forms
+/// [`RinexClock::retain_records`] and [`RinexClock::edit_records`]) that
+/// validate the whole change first and then replace the affected lines. An edited or inserted record, and every
+/// record of a product built from series rows, is held as typed values and
+/// written in the product's column layout; the writer refuses by name a value
+/// it cannot state exactly.
+///
+/// Records are read at the columns of the file's declared version (before
+/// 3.04: the 80-column layout; from 3.04: the 85-column layout), then at the
+/// other version's columns, then as whitespace-separated values, and each
+/// record reports how it was read. The strict parser fails on the first line
+/// it cannot read; [`RinexClock::parse_lossy`] keeps such lines verbatim with
+/// a diagnostic and reads the rest.
+///
+/// Equality compares the retained source text, the ordered header and body
+/// entries and the typed records; two products with the same satellite series
+/// but different headers are not equal.
+#[derive(Clone)]
 pub struct RinexClock {
-    /// Time scale declared by the RINEX clock header. Missing headers default to GPST.
-    pub time_scale: TimeScale,
-    /// Per-satellite, strictly time-ordered clock-bias series.
-    pub series: BTreeMap<String, Vec<ClockPoint>>,
-    /// Unmodelled records skipped during parsing (e.g. receiver clock records `AR`, `CR`, `DR`, `MS`).
-    pub skipped_records: Vec<RinexClockSkip>,
-    /// Diagnostics for malformed records skipped during lossy parsing.
-    pub diagnostics: Vec<RinexClockDiagnostic>,
+    source: String,
+    line_starts: Vec<usize>,
+    header: Vec<HeaderEntry>,
+    body: Vec<BodyEntry>,
+    /// File-order key of each body entry, strictly increasing; an inserted
+    /// entry takes a key between its neighbours.
+    order_keys: Vec<u64>,
+    /// Body position of each record, in record order.
+    record_positions: Vec<usize>,
+    constructed: Option<TimeScale>,
+    /// Blanks before the bias sigma in 3.04-layout records this product writes.
+    sigma_gap: SigmaGap,
+    context: HeaderContext,
+    derived: Derived,
+    diagnostics: Vec<RinexClockDiagnostic>,
+    header_notices: Vec<RinexClockNotice>,
+    notices: Vec<RinexClockNotice>,
+}
+
+impl PartialEq for RinexClock {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.header == other.header
+            && self.body == other.body
+            && self.constructed == other.constructed
+    }
+}
+
+/// Spacing between consecutive order keys when keys are assigned afresh.
+const ORDER_KEY_GAP: u64 = 1 << 20;
+
+/// One header line: a source line by index, or a line written by an edit.
+#[derive(Debug, Clone, PartialEq)]
+enum HeaderEntry {
+    Source(usize),
+    Written(String),
+}
+
+/// One body entry, in file order.
+#[derive(Debug, Clone, PartialEq)]
+enum BodyEntry {
+    /// A whitespace-only source line.
+    Blank(usize),
+    /// A record read from source lines `first..first + count`.
+    Record { first: usize, count: usize },
+    /// Source lines `first..first + count` that do not read as a record.
+    Unparsed {
+        first: usize,
+        count: usize,
+        diagnostic: Box<RinexClockDiagnostic>,
+    },
+    /// A record held as typed values.
+    Typed(Box<TypedRecord>),
+}
+
+impl fmt::Debug for RinexClock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RinexClock")
+            .field("version", &self.context.version)
+            .field("layout", &self.context.layout)
+            .field("time_system", &self.context.time.system)
+            .field("time_system_status", &self.context.time.status)
+            .field("time_scale", &self.context.time.scale)
+            .field("header_lines", &self.header.len())
+            .field("body_entries", &self.body.len())
+            .field("series_satellites", &self.derived.series().len())
+            .field("skipped_records", &self.derived.skipped().len())
+            .field("diagnostics", &self.diagnostics)
+            .field("notices", &self.notices)
+            .finish()
+    }
 }
 
 /// RINEX clock parse error.
@@ -161,7 +391,7 @@ pub enum RinexClockError {
         /// The full record text.
         record: String,
     },
-    /// A required `AS` field could not be parsed or was out of range.
+    /// A record or header field could not be parsed or was out of range.
     BadField {
         /// One-based input line number.
         line: usize,
@@ -207,10 +437,9 @@ impl fmt::Display for RinexClockError {
                 f,
                 "malformed RINEX clock continuation record at line {line}: {reason}: {record}"
             ),
-            RinexClockError::BadField { line, field, value } => write!(
-                f,
-                "bad RINEX AS clock field at line {line}: {field}={value}"
-            ),
+            RinexClockError::BadField { line, field, value } => {
+                write!(f, "bad RINEX clock field at line {line}: {field}={value}")
+            }
             RinexClockError::InvalidInput { field, reason } => {
                 write!(f, "invalid RINEX clock input {field}: {reason}")
             }
@@ -224,57 +453,32 @@ impl fmt::Display for RinexClockError {
 impl std::error::Error for RinexClockError {}
 
 impl RinexClock {
-    /// Parse a RINEX clock text into per-satellite `AS` records.
+    /// Parse RINEX clock text, failing on the first line that does not read.
+    ///
+    /// Every line is retained; see [`RinexClock`]. Text without an
+    /// `END OF HEADER` line has no header section, and every line is then read
+    /// as a data line.
     pub fn parse(text: &str) -> Result<Self, RinexClockError> {
-        let time_scale = parse_time_scale(text)?;
-        let lines = data_lines(text);
-        let mut by_sat = BTreeMap::<String, Vec<(ClockPoint, usize)>>::new();
-        let mut skipped_records = Vec::new();
-        let mut diagnostics = Vec::new();
-
-        parse_logical_records(
-            lines,
-            time_scale,
-            false,
-            &mut by_sat,
-            &mut skipped_records,
-            &mut diagnostics,
-        )?;
-
-        Ok(Self {
-            time_scale,
-            series: build_series(by_sat),
-            skipped_records,
-            diagnostics: Vec::new(),
-        })
-    }
-
-    /// Parse a RINEX clock text while skipping malformed and non-`AS` records.
-    pub fn parse_lossy(text: &str) -> Self {
-        let time_scale = parse_time_scale(text).unwrap_or(TimeScale::Gpst);
-        let lines = data_lines(text);
-        let mut by_sat = BTreeMap::<String, Vec<(ClockPoint, usize)>>::new();
-        let mut skipped_records = Vec::new();
-        let mut diagnostics = Vec::new();
-
-        let _ = parse_logical_records(
-            lines,
-            time_scale,
-            true,
-            &mut by_sat,
-            &mut skipped_records,
-            &mut diagnostics,
-        );
-
-        Self {
-            time_scale,
-            series: build_series(by_sat),
-            skipped_records,
-            diagnostics,
+        match Self::read(text, true) {
+            (clock, None) => Ok(clock),
+            (_, Some(error)) => Err(error),
         }
     }
 
+    /// Parse RINEX clock text, keeping lines that do not read verbatim with a
+    /// diagnostic.
+    ///
+    /// Nothing is dropped: [`RinexClock::to_rinex_string`] on the result
+    /// restates the input exactly. An unrecognised `TIME SYSTEM ID` leaves
+    /// the time system unresolved rather than assuming one.
+    pub fn parse_lossy(text: &str) -> Self {
+        Self::read(text, false).0
+    }
+
     /// Rebuild a GPST product from the legacy public GPS-second rows.
+    ///
+    /// GPS seconds outside the civil years 1 through 9999 are refused with
+    /// [`RinexClockError::InvalidInput`].
     pub fn from_series_rows(rows: Vec<(String, Vec<(f64, f64)>)>) -> Result<Self, RinexClockError> {
         let rows = rows
             .into_iter()
@@ -288,7 +492,7 @@ impl RinexClock {
                     .into_iter()
                     .map(|(gps_seconds, bias_s)| {
                         validate_finite(bias_s, "bias_s")?;
-                        Ok((gps_seconds_to_instant(gps_seconds), bias_s))
+                        Ok((gps_seconds_to_instant(gps_seconds)?, bias_s))
                     })
                     .collect::<Result<Vec<_>, RinexClockError>>()?;
                 Ok((sat, points))
@@ -297,45 +501,198 @@ impl RinexClock {
         Self::from_instant_series_rows(TimeScale::Gpst, rows)
     }
 
-    /// Rebuild a parsed product from scale-tagged instant rows.
+    /// Build a product from scale-tagged instant rows.
     pub fn from_instant_series_rows(
         time_scale: TimeScale,
         rows: Vec<(String, Vec<(Instant, f64)>)>,
     ) -> Result<Self, RinexClockError> {
-        let mut series = BTreeMap::new();
+        Self::from_clock_points(
+            time_scale,
+            rows.into_iter()
+                .map(|(sat, points)| {
+                    let points = points
+                        .into_iter()
+                        .map(|(epoch, bias_s)| ClockPoint {
+                            epoch,
+                            bias_s,
+                            additional_values: Vec::new(),
+                        })
+                        .collect();
+                    (sat, points)
+                })
+                .collect(),
+        )
+    }
+
+    /// Build a product from per-satellite clock points, keeping every declared
+    /// value of each point.
+    ///
+    /// Each satellite's points must be strictly increasing in time. A
+    /// satellite named in more than one row keeps the points of every row.
+    /// The records are held as typed values; [`RinexClock::to_rinex_string`]
+    /// writes them in the layout the time scale needs (3.00 for GPST, GST, UTC
+    /// and TAI; 3.04 for QZSST and BDT), refuses a scale no RINEX clock time
+    /// system names (GLONASS system time among them, since `GLO` names UTC
+    /// hours), and refuses by name a value or epoch it cannot state exactly.
+    pub fn from_clock_points(
+        time_scale: TimeScale,
+        rows: Vec<(String, Vec<ClockPoint>)>,
+    ) -> Result<Self, RinexClockError> {
+        let mut by_satellite = BTreeMap::<String, Vec<ClockPoint>>::new();
         for (sat, points) in rows {
-            let mut indexed = points
+            let indexed = points
                 .into_iter()
                 .enumerate()
-                .map(|(idx, (epoch, bias_s))| {
-                    let point = ClockPoint {
-                        epoch,
-                        bias_s,
-                        additional_values: Vec::new(),
-                    };
+                .map(|(idx, point)| {
                     validate_clock_point(&point)?;
                     Ok((point, idx))
                 })
                 .collect::<Result<Vec<_>, RinexClockError>>()?;
             validate_instant_series_order(&indexed)?;
-            indexed.sort_by(|(a, ai), (b, bi)| {
-                compare_instants(&a.epoch, &b.epoch).then_with(|| ai.cmp(bi))
-            });
-            series.insert(sat, dedup_by_time(indexed));
+            by_satellite
+                .entry(sat)
+                .or_default()
+                .extend(indexed.into_iter().map(|(point, _)| point));
         }
-        Ok(Self {
-            time_scale,
-            series,
-            skipped_records: Vec::new(),
+        let body: Vec<BodyEntry> = by_satellite
+            .into_iter()
+            .flat_map(|(sat, points)| {
+                points.into_iter().map(move |point| {
+                    BodyEntry::Typed(Box::new(TypedRecord {
+                        record_type: ClockRecordType::As,
+                        name: sat.clone(),
+                        epoch: TypedEpoch::Instant(point.epoch),
+                        values: std::iter::once(point.bias_s)
+                            .chain(point.additional_values)
+                            .collect(),
+                    }))
+                })
+            })
+            .collect();
+        let entries = body.len();
+        let mut clock = Self {
+            source: String::new(),
+            line_starts: Vec::new(),
+            header: Vec::new(),
+            body,
+            order_keys: fresh_order_keys(entries),
+            record_positions: (0..entries).collect(),
+            constructed: Some(time_scale),
+            sigma_gap: SigmaGap::One,
+            context: HeaderContext::constructed(time_scale),
+            derived: Derived::default(),
             diagnostics: Vec::new(),
+            header_notices: Vec::new(),
+            notices: Vec::new(),
+        };
+        clock.rebuild();
+        Ok(clock)
+    }
+
+    /// Declared format version; for a product built from rows, the version it
+    /// is written in.
+    pub fn version(&self) -> Option<f64> {
+        self.context.version
+    }
+
+    /// Column layout records are read and written in. `None` when the text
+    /// declares no version (records are then read at the 3.00 columns first
+    /// and written in them) or a built product's time scale has no RINEX
+    /// clock time system.
+    pub fn layout(&self) -> Option<ClockLayout> {
+        self.context.layout
+    }
+
+    /// Satellite system code of the `RINEX VERSION / TYPE` record (`G`, `R`,
+    /// `E`, `C`, `I`, `J`, `S` or `M`), when one is written.
+    pub fn satellite_system(&self) -> Option<char> {
+        self.context.satellite_system
+    }
+
+    /// The product's time system, when one is declared, defaulted or built in.
+    pub fn time_system(&self) -> Option<ClockTimeSystem> {
+        self.context.time.system
+    }
+
+    /// How the time system was established.
+    pub fn time_system_status(&self) -> &ClockTimeSystemStatus {
+        &self.context.time.status
+    }
+
+    /// The time scale record epochs are interpreted in; `None` when the time
+    /// system is missing, unrecognised, conflicting or has no core scale.
+    pub fn time_scale(&self) -> Option<TimeScale> {
+        self.context.time.scale
+    }
+
+    /// Every header line in order with its typed reading. A product built
+    /// from rows has no header lines; its header is written from its time
+    /// scale.
+    pub fn header_records(&self) -> Vec<ClockHeaderRecord> {
+        read_header(&self.header_lines()).0
+    }
+
+    /// Every data record in order, including duplicate records for one name
+    /// and epoch (RINEX clock section 4 uses two `AR` records at one epoch to
+    /// state a discontinuity). Lines a lossy read could not read are not
+    /// records; [`RinexClock::diagnostics`] names them.
+    pub fn records(&self) -> impl Iterator<Item = ClockRecord> + '_ {
+        let ctx = epoch_context(&self.context.time);
+        let layout = self.context.layout;
+        self.body.iter().filter_map(move |entry| match entry {
+            BodyEntry::Record { first, .. } => {
+                read_record_at(&self.source, &self.line_starts, *first, layout, &ctx)
+                    .ok()
+                    .map(|(record, _)| record)
+            }
+            BodyEntry::Typed(record) => Some(record.view(&ctx)),
+            BodyEntry::Blank(_) | BodyEntry::Unparsed { .. } => None,
         })
     }
 
-    /// Export GPST samples as `[(satellite, [(gps_seconds, bias_s), ...]), ...]`.
+    /// Number of data records.
+    pub fn record_count(&self) -> usize {
+        self.record_positions.len()
+    }
+
+    /// One line of the text the product was read from, by one-based line
+    /// number, without its terminator.
+    pub fn source_line(&self, line: usize) -> Option<&str> {
+        let index = line.checked_sub(1)?;
+        (index < self.line_starts.len())
+            .then(|| line_content(&self.source, &self.line_starts, index))
+    }
+
+    /// Per-satellite clock-bias series derived from the `AS` records whose
+    /// epoch resolves to an instant, each strictly time-ordered. Where records
+    /// repeat one satellite and instant, the last in file order is the sample;
+    /// every such record remains in [`RinexClock::records`].
+    pub fn series(&self) -> &BTreeMap<String, Vec<ClockPoint>> {
+        self.derived.series()
+    }
+
+    /// Records read from the source that are not in the satellite series.
+    pub fn skipped_records(&self) -> &[RinexClockSkip] {
+        self.derived.skipped()
+    }
+
+    /// Lines a lossy read kept without reading them as records, and header
+    /// time-system errors.
+    pub fn diagnostics(&self) -> &[RinexClockDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// Findings about how the product was read that do not stop it being read.
+    pub fn notices(&self) -> &[RinexClockNotice] {
+        &self.notices
+    }
+
+    /// Export GPST and QZSST samples as `[(satellite, [(gps_seconds, bias_s), ...]), ...]`.
     ///
-    /// Non-GPST samples are not coerced into GPS seconds and are omitted.
+    /// Samples on other time scales are not coerced into GPS seconds and are
+    /// omitted.
     pub fn series_rows(&self) -> Vec<(String, Vec<(f64, f64)>)> {
-        self.series
+        self.series()
             .iter()
             .map(|(sat, points)| {
                 (
@@ -351,7 +708,7 @@ impl RinexClock {
 
     /// Export the product as scale-tagged instant rows.
     pub fn instant_series_rows(&self) -> Vec<(String, Vec<(Instant, f64)>)> {
-        self.series
+        self.series()
             .iter()
             .map(|(sat, points)| {
                 (
@@ -365,14 +722,22 @@ impl RinexClock {
             .collect()
     }
 
-    /// Interpolate one satellite clock bias at a civil epoch in this file's scale.
+    /// Interpolate one satellite clock bias at a civil epoch in this file's
+    /// scale. On a UTC product a `23:59:60.x` label on a leap-second day is a
+    /// valid query, and interpolation across a leap second uses elapsed time.
     pub fn clock_s(
         &self,
         satellite_id: &str,
         epoch: ClockEpoch,
     ) -> Result<Option<f64>, RinexClockError> {
+        let scale = self.time_scale().ok_or_else(|| {
+            invalid_input(
+                "time_system",
+                "the product's time system does not resolve to a time scale",
+            )
+        })?;
         let epoch = civil_to_clock_instant(
-            self.time_scale,
+            scale,
             epoch.year,
             epoch.month,
             epoch.day,
@@ -391,259 +756,942 @@ impl RinexClock {
         epoch: Instant,
     ) -> Result<Option<f64>, RinexClockError> {
         validate_instant(epoch, "epoch")?;
-        let Some(records) = self.series.get(satellite_id) else {
+        let Some(records) = self.series().get(satellite_id) else {
             return Ok(None);
         };
         Ok(interpolate(records, epoch))
     }
 
-    /// Interpolate one satellite clock bias at GPS seconds.
+    /// Interpolate one satellite clock bias at GPS seconds. GPST and QZSST
+    /// series answer; GPS seconds outside the civil years 1 through 9999 are
+    /// refused with [`RinexClockError::InvalidInput`].
     pub fn clock_s_at_gps_seconds(
         &self,
         satellite_id: &str,
         gps_seconds: f64,
     ) -> Result<Option<f64>, RinexClockError> {
-        validate_finite(gps_seconds, "gps_seconds")?;
-        self.clock_s_at_instant(satellite_id, gps_seconds_to_instant(gps_seconds))
+        self.clock_s_at_instant(satellite_id, gps_seconds_to_instant(gps_seconds)?)
     }
 
-    /// Serialize this product to standard RINEX 3.00 clock text.
+    /// Write the product as RINEX clock text.
     ///
-    /// Pure and deterministic: the same product always produces byte-identical
-    /// text and no I/O is performed. The minimal header declares the product
-    /// time scale, and each sample is written as a fixed-column `AS` satellite
-    /// clock-bias record (with continuation records when more than two values are
-    /// present). Epoch components are written on the civil microsecond grid.
-    /// Numeric values are formatted into fixed 19-column scientific fields
-    /// (`E19.12`) guaranteeing exact bit readback upon re-parsing; values that
-    /// cannot fit within the field width or cannot be represented without loss
-    /// of precision are refused with a named [`RinexClockError::InvalidInput`]
-    /// error. Unsupported epoch time scales return
-    /// [`RinexClockError::UnsupportedTimeScale`].
+    /// A product read from text restates every retained line byte for byte,
+    /// including header records, blank lines, records of every type and, after
+    /// a lossy read, lines that did not read. Records held as typed values are
+    /// written in the product's layout (3.00 columns when the text declared no
+    /// version) with the product's line terminator. Values are written in
+    /// 19-column `E19.12` fields only when they read back to the same bits;
+    /// otherwise the value is refused by name with
+    /// [`RinexClockError::InvalidInput`]. An epoch is written only when its
+    /// microsecond text states it exactly: an edited record restates its source
+    /// seconds text, and an instant is written when it is, bit for bit, the
+    /// split the reader, the GPS-seconds constructor (from the seconds
+    /// `series_rows` exports or from the correctly rounded double of the GPS
+    /// seconds the text states) or the whole-J2000-second constructor builds
+    /// from that text; any other epoch is refused rather
+    /// than rounded ([`RinexClock::to_rinex_string_with_policy`] can allow the
+    /// nearest microsecond and report it). A product built from rows is written
+    /// with a header stating its version, satellite system, time system and
+    /// data types; a time scale no RINEX clock time system names is refused
+    /// with [`RinexClockError::UnsupportedTimeScale`].
     pub fn to_rinex_string(&self) -> Result<String, RinexClockError> {
-        let mut out = String::new();
-        let label = crate::rinex_common::time_scale_rinex_label(self.time_scale).ok_or(
-            RinexClockError::UnsupportedTimeScale {
-                scale: self.time_scale,
-            },
-        )?;
-        let _ = writeln!(out, "{:<60}RINEX VERSION / TYPE", "     3.00           C");
-        let _ = writeln!(out, "{label:<60}TIME SYSTEM ID");
-        let _ = writeln!(out, "{:<60}END OF HEADER", "");
-        for (satellite, points) in &self.series {
-            for point in points {
-                validate_serializable_clock_point(self.time_scale, point)?;
-                write_as_record(&mut out, satellite, point)?;
+        self.to_rinex_string_with_policy(ClockWritePolicy::strict())
+            .map(|(text, _)| text)
+    }
+
+    /// Write the product under `policy`, with the departures from what the
+    /// product states that the policy allowed and the writer emitted.
+    ///
+    /// [`ClockWritePolicy::default`] allows none, which is what
+    /// [`RinexClock::to_rinex_string`] does. With
+    /// [`ClockWritePolicy::nearest_microsecond_epochs`] allowed, an epoch no
+    /// microsecond text states exactly is written as the nearest one and
+    /// reported as [`ClockWriteDeparture::EpochAtNearestMicrosecond`] with the
+    /// record's index, name, epoch and the epoch text written.
+    pub fn to_rinex_string_with_policy(
+        &self,
+        policy: ClockWritePolicy,
+    ) -> Result<(String, Vec<ClockWriteDeparture>), RinexClockError> {
+        if let Some(scale) = self.constructed {
+            return self.write_constructed(scale, policy);
+        }
+        let layout = self.context.layout.unwrap_or(ClockLayout::V300);
+        let scale = self.context.time.scale;
+        let ctx = epoch_context(&self.context.time);
+        let eol = self.line_ending();
+        let mut out = String::with_capacity(self.source.len() + 128);
+        let mut departures = Vec::new();
+        let mut open = false;
+        for entry in &self.header {
+            match entry {
+                HeaderEntry::Source(index) => self.push_source(&mut out, &mut open, *index, eol),
+                HeaderEntry::Written(text) => push_written(&mut out, &mut open, text, eol),
             }
         }
-        Ok(out)
+        let mut record_index = 0;
+        for entry in &self.body {
+            match entry {
+                BodyEntry::Blank(index) => self.push_source(&mut out, &mut open, *index, eol),
+                BodyEntry::Record { first, count } | BodyEntry::Unparsed { first, count, .. } => {
+                    for index in *first..*first + *count {
+                        self.push_source(&mut out, &mut open, index, eol);
+                    }
+                }
+                BodyEntry::Typed(record) => {
+                    let (lines, rounded) = render_record_with(
+                        record,
+                        layout,
+                        scale,
+                        self.sigma_gap,
+                        policy.nearest_microsecond_epochs,
+                    )?;
+                    if rounded {
+                        departures.push(epoch_departure(
+                            record_index,
+                            record,
+                            &ctx,
+                            layout,
+                            &lines,
+                        ));
+                    }
+                    for line in lines {
+                        push_written(&mut out, &mut open, &line, eol);
+                    }
+                }
+            }
+            if matches!(entry, BodyEntry::Record { .. } | BodyEntry::Typed(_)) {
+                record_index += 1;
+            }
+        }
+        Ok((out, departures))
+    }
+
+    /// Declare the product's time system.
+    ///
+    /// Replaces every `TIME SYSTEM ID` record with one written at the `3X,A3`
+    /// columns of the product's layout, or inserts one before the first header
+    /// record that Table A15 orders after it. Every record epoch is checked in
+    /// the new time system first; if one does not convert (a `23:59:60` label
+    /// in a continuous scale), nothing changes and the error is returned. A
+    /// product with no header section, or built from rows, is refused.
+    pub fn set_time_system(&mut self, system: ClockTimeSystem) -> Result<(), RinexClockError> {
+        if self.constructed.is_some() {
+            return Err(invalid_input(
+                "time_system",
+                "a product built from series rows states its time scale on every epoch",
+            ));
+        }
+        if self.header.is_empty() {
+            return Err(invalid_input(
+                "time_system",
+                "the product has no header section to declare a time system in",
+            ));
+        }
+        let layout = self.context.layout.unwrap_or(ClockLayout::V300);
+        let written = render_time_system_line(system, layout);
+        let mut header = Vec::with_capacity(self.header.len() + 1);
+        let mut placed = false;
+        for entry in &self.header {
+            let content = header_entry_content(&self.source, &self.line_starts, entry);
+            let label = identify_label(content).map(|(label, _)| label);
+            if label == Some(Label::TimeSystem) {
+                if !placed {
+                    header.push(HeaderEntry::Written(written.clone()));
+                    placed = true;
+                }
+                continue;
+            }
+            if !placed
+                && label.is_some_and(|label| label_rank(label) > label_rank(Label::TimeSystem))
+            {
+                header.push(HeaderEntry::Written(written.clone()));
+                placed = true;
+            }
+            header.push(entry.clone());
+        }
+        if !placed {
+            let at = header.len().saturating_sub(1);
+            header.insert(at, HeaderEntry::Written(written));
+        }
+
+        let lines: Vec<(Option<usize>, &str)> = header
+            .iter()
+            .map(|entry| {
+                (
+                    header_entry_line(entry),
+                    header_entry_content(&self.source, &self.line_starts, entry),
+                )
+            })
+            .collect();
+        let (_, context, diagnostics, _) = read_header(&lines);
+        if let Some(diagnostic) = diagnostics.into_iter().next() {
+            return Err(diagnostic.error);
+        }
+        let ctx = epoch_context(&context.time);
+        for entry in &self.body {
+            match entry {
+                BodyEntry::Record { first, .. } => {
+                    read_record_at(
+                        &self.source,
+                        &self.line_starts,
+                        *first,
+                        context.layout,
+                        &ctx,
+                    )
+                    .map_err(|(diagnostic, _)| diagnostic.error)?;
+                }
+                BodyEntry::Typed(record) => {
+                    if let TypedEpoch::Civil { civil, .. } = &record.epoch {
+                        check_civil_in_context(*civil, &ctx)?;
+                    }
+                }
+                BodyEntry::Blank(_) | BodyEntry::Unparsed { .. } => {}
+            }
+        }
+        drop(lines);
+        self.header = header;
+        self.rebuild();
+        Ok(())
+    }
+
+    /// Replace the declared values of the record at `index` (in
+    /// [`RinexClock::records`] order), bias first.
+    ///
+    /// The record keeps its type, name and epoch, including the exact text of
+    /// its seconds field, and is then held as typed values written in the
+    /// product's layout. The edit is refused, and nothing changes, when the
+    /// record could not then be written (a value no 19-column field states
+    /// exactly, a name or year the layout cannot hold, an epoch the seconds
+    /// field cannot state), or when the source record carries values beyond
+    /// its declared count that the new value list does not restate: those
+    /// values are never dropped silently.
+    pub fn set_record_values(
+        &mut self,
+        index: usize,
+        values: Vec<f64>,
+    ) -> Result<(), RinexClockError> {
+        let position = self.record_position(index)?;
+        let current = self.view_at(position)?;
+        let typed = self.edited_record(position, current.clone(), values)?;
+        self.detach(position, current)?;
+        self.body[position] = BodyEntry::Typed(Box::new(typed));
+        self.attach(position)?;
+        self.refresh_notices();
+        Ok(())
+    }
+
+    /// Insert a record before the record at `index` (in
+    /// [`RinexClock::records`] order), or after the last record when `index`
+    /// equals [`RinexClock::record_count`].
+    ///
+    /// The record must be writable in the product's layout (name width, year,
+    /// values stated exactly in 19-column fields, an epoch the seconds field
+    /// can state) and its epoch valid in the product's time scale. A record
+    /// carrying surplus values is refused: a written record states only its
+    /// declared values. Appending records one by one takes time linear in
+    /// their number.
+    pub fn insert_record(
+        &mut self,
+        index: usize,
+        record: ClockRecord,
+    ) -> Result<(), RinexClockError> {
+        if !record.surplus.is_empty() {
+            return Err(invalid_input(
+                "surplus_values",
+                "a written record states only its declared values",
+            ));
+        }
+        validate_values(&record.values)?;
+        let count = self.record_count();
+        if index > count {
+            return Err(invalid_input("index", "past the end of the records"));
+        }
+        let name = match (&record.satellite, record.record_type) {
+            (Some(satellite), ClockRecordType::As) => satellite.clone(),
+            (None, ClockRecordType::As) => {
+                return Err(invalid_input(
+                    "satellite",
+                    "not a RINEX satellite identifier",
+                ));
+            }
+            _ => record.name.clone(),
+        };
+        if let Some(layout) = self.writing_layout() {
+            let name_field = if record.record_type == ClockRecordType::As {
+                "satellite"
+            } else {
+                "name"
+            };
+            validate_name(&name, name_field, layout)?;
+        }
+        let ctx = epoch_context(&self.context.time);
+        check_civil_in_context(record.civil, &ctx)?;
+        let epoch = match self.constructed {
+            Some(scale) => TypedEpoch::Instant(
+                civil_to_instant(scale, record.civil)
+                    .map_err(|_| invalid_input("epoch", "invalid civil clock epoch"))?,
+            ),
+            None => TypedEpoch::Civil {
+                civil: record.civil,
+                second_text: record.second_text.clone(),
+            },
+        };
+        let typed = TypedRecord {
+            record_type: record.record_type,
+            name,
+            epoch,
+            values: record.values,
+        };
+        self.check_writable(&typed)?;
+        let position = if index == count {
+            self.body.len()
+        } else {
+            self.record_position(index)?
+        };
+        let key = self.order_key_before(position);
+        self.body
+            .insert(position, BodyEntry::Typed(Box::new(typed)));
+        self.order_keys.insert(position, key);
+        for later in &mut self.record_positions[index..] {
+            *later += 1;
+        }
+        self.record_positions.insert(index, position);
+        self.attach(position)?;
+        self.refresh_notices();
+        Ok(())
+    }
+
+    /// Keep the records `keep` accepts and remove every other, with every line
+    /// it spans, in one pass; returns the number removed. Blank and unread
+    /// lines stay. The derived views are rebuilt once, so removing many
+    /// records, such as every `AR` record of a product, takes time linear in
+    /// the product's size apart from one sort of the satellite series.
+    pub fn retain_records(&mut self, mut keep: impl FnMut(&ClockRecord) -> bool) -> usize {
+        let ctx = epoch_context(&self.context.time);
+        let mut kept_body = Vec::with_capacity(self.body.len());
+        let mut kept_keys = Vec::with_capacity(self.order_keys.len());
+        let mut record_positions = Vec::with_capacity(self.record_positions.len());
+        let mut removed = 0;
+        let body = std::mem::take(&mut self.body);
+        let keys = std::mem::take(&mut self.order_keys);
+        for (entry, key) in body.into_iter().zip(keys) {
+            let view = match &entry {
+                BodyEntry::Record { first, .. } => read_record_at(
+                    &self.source,
+                    &self.line_starts,
+                    *first,
+                    self.context.layout,
+                    &ctx,
+                )
+                .ok()
+                .map(|(record, _)| record),
+                BodyEntry::Typed(record) => Some(record.view(&ctx)),
+                BodyEntry::Blank(_) | BodyEntry::Unparsed { .. } => None,
+            };
+            // A record entry always reads back; were one not to, it is kept
+            // rather than removed unseen.
+            if let Some(record) = &view {
+                if !keep(record) {
+                    removed += 1;
+                    continue;
+                }
+            }
+            if matches!(entry, BodyEntry::Record { .. } | BodyEntry::Typed(_)) {
+                record_positions.push(kept_body.len());
+            }
+            kept_body.push(entry);
+            kept_keys.push(key);
+        }
+        self.body = kept_body;
+        self.order_keys = kept_keys;
+        self.record_positions = record_positions;
+        self.rebuild();
+        removed
+    }
+
+    /// Replace the declared values of every record for which `edit` returns
+    /// new values, bias first, in one pass; returns the number edited.
+    ///
+    /// Each edit follows [`RinexClock::set_record_values`], and the whole batch
+    /// is checked before anything changes: if one edit is refused, none is
+    /// applied and its error is returned. The derived views are rebuilt once.
+    pub fn edit_records(
+        &mut self,
+        mut edit: impl FnMut(&ClockRecord) -> Option<Vec<f64>>,
+    ) -> Result<usize, RinexClockError> {
+        let ctx = epoch_context(&self.context.time);
+        let mut replacements = Vec::new();
+        for &position in &self.record_positions {
+            let current = match &self.body[position] {
+                BodyEntry::Record { first, .. } => read_record_at(
+                    &self.source,
+                    &self.line_starts,
+                    *first,
+                    self.context.layout,
+                    &ctx,
+                )
+                .map(|(record, _)| record)
+                .map_err(|(diagnostic, _)| diagnostic.error)?,
+                BodyEntry::Typed(record) => record.view(&ctx),
+                BodyEntry::Blank(_) | BodyEntry::Unparsed { .. } => continue,
+            };
+            let Some(values) = edit(&current) else {
+                continue;
+            };
+            let typed = self.edited_record(position, current, values)?;
+            replacements.push((position, typed));
+        }
+        let edited = replacements.len();
+        for (position, typed) in replacements {
+            self.body[position] = BodyEntry::Typed(Box::new(typed));
+        }
+        if edited > 0 {
+            self.rebuild();
+        }
+        Ok(edited)
+    }
+
+    /// Remove the record at `index` (in [`RinexClock::records`] order) with
+    /// every line it spans, returning it.
+    pub fn remove_record(&mut self, index: usize) -> Result<ClockRecord, RinexClockError> {
+        let position = self.record_position(index)?;
+        let record = self.view_at(position)?;
+        self.detach(position, record.clone())?;
+        self.body.remove(position);
+        self.order_keys.remove(position);
+        self.record_positions.remove(index);
+        for later in &mut self.record_positions[index..] {
+            *later -= 1;
+        }
+        self.refresh_notices();
+        Ok(record)
+    }
+
+    fn read(text: &str, strict: bool) -> (Self, Option<RinexClockError>) {
+        let line_starts = split_lines(text);
+        let line_total = line_starts.len();
+        let header_len = (0..line_total)
+            .find(|&index| is_end_of_header(line_content(text, &line_starts, index)))
+            .map_or(0, |index| index + 1);
+        let header_lines: Vec<(Option<usize>, &str)> = (0..header_len)
+            .map(|index| (Some(index + 1), line_content(text, &line_starts, index)))
+            .collect();
+        let (_, context, header_diagnostics, header_notices) = read_header(&header_lines);
+        let ctx = epoch_context(&context.time);
+
+        let mut first_error = None;
+        if strict {
+            first_error = header_diagnostics
+                .first()
+                .map(|diagnostic| diagnostic.error.clone());
+        }
+        let mut diagnostics = header_diagnostics;
+        let mut body = Vec::new();
+        let mut builder = DerivedBuilder::new(context.layout);
+        let mut record_positions = Vec::new();
+        let mut sigma_gap = None;
+        let mut index = header_len;
+        while first_error.is_none() && index < line_total {
+            let key = order_key_at(body.len());
+            if line_content(text, &line_starts, index).trim().is_empty() {
+                body.push(BodyEntry::Blank(index));
+                index += 1;
+                continue;
+            }
+            match read_record_at(text, &line_starts, index, context.layout, &ctx) {
+                Ok((record, used)) => {
+                    let carries_sigma = record.values.len() >= 2
+                        || record.surplus.iter().any(|value| value.position == 1);
+                    if sigma_gap.is_none()
+                        && carries_sigma
+                        && record.reading == ClockRecordReading::Columns(ClockLayout::V304)
+                    {
+                        sigma_gap = sigma_gap_of_line(line_content(text, &line_starts, index));
+                    }
+                    record_positions.push(body.len());
+                    builder.add(&record, key);
+                    body.push(BodyEntry::Record {
+                        first: index,
+                        count: used,
+                    });
+                    index += used;
+                }
+                Err((diagnostic, used)) => {
+                    if strict {
+                        first_error = Some(diagnostic.error);
+                        break;
+                    }
+                    diagnostics.push(diagnostic.clone());
+                    body.push(BodyEntry::Unparsed {
+                        first: index,
+                        count: used,
+                        diagnostic: Box::new(diagnostic),
+                    });
+                    index += used;
+                }
+            }
+        }
+        let derived = builder.finish();
+        let mut notices = header_notices.clone();
+        notices.extend(derived.notices());
+        let entries = body.len();
+        let clock = Self {
+            source: text.to_string(),
+            line_starts,
+            header: (0..header_len).map(HeaderEntry::Source).collect(),
+            body,
+            order_keys: fresh_order_keys(entries),
+            record_positions,
+            constructed: None,
+            sigma_gap: sigma_gap.unwrap_or(SigmaGap::One),
+            context,
+            derived,
+            diagnostics,
+            header_notices,
+            notices,
+        };
+        (clock, first_error)
+    }
+
+    /// Recompute the header context and every derived view from the entries.
+    fn rebuild(&mut self) {
+        let (context, header_diagnostics, header_notices) = match self.constructed {
+            Some(scale) => (HeaderContext::constructed(scale), Vec::new(), Vec::new()),
+            None => {
+                let (_, context, diagnostics, notices) = read_header(&self.header_lines());
+                (context, diagnostics, notices)
+            }
+        };
+        let ctx = epoch_context(&context.time);
+        let mut diagnostics = header_diagnostics;
+        let mut builder = DerivedBuilder::new(context.layout);
+        for (entry, &key) in self.body.iter().zip(&self.order_keys) {
+            match entry {
+                BodyEntry::Blank(_) => {}
+                BodyEntry::Record { first, .. } => {
+                    if let Ok((record, _)) = read_record_at(
+                        &self.source,
+                        &self.line_starts,
+                        *first,
+                        context.layout,
+                        &ctx,
+                    ) {
+                        builder.add(&record, key);
+                    }
+                }
+                BodyEntry::Unparsed { diagnostic, .. } => diagnostics.push((**diagnostic).clone()),
+                BodyEntry::Typed(record) => builder.add(&record.view(&ctx), key),
+            }
+        }
+        self.derived = builder.finish();
+        self.context = context;
+        self.diagnostics = diagnostics;
+        self.header_notices = header_notices;
+        self.refresh_notices();
+    }
+
+    /// The typed view of the record at a body position.
+    fn view_at(&self, position: usize) -> Result<ClockRecord, RinexClockError> {
+        let ctx = epoch_context(&self.context.time);
+        match self.body.get(position) {
+            Some(BodyEntry::Record { first, .. }) => read_record_at(
+                &self.source,
+                &self.line_starts,
+                *first,
+                self.context.layout,
+                &ctx,
+            )
+            .map(|(record, _)| record)
+            .map_err(|(diagnostic, _)| diagnostic.error),
+            Some(BodyEntry::Typed(record)) => Ok(record.view(&ctx)),
+            _ => Err(invalid_input("index", "no record at this index")),
+        }
+    }
+
+    /// Add the record at a body position to the derived views.
+    fn attach(&mut self, position: usize) -> Result<(), RinexClockError> {
+        let record = self.view_at(position)?;
+        let key = self.order_keys[position];
+        self.derived.insert(&record, key, self.context.layout);
+        Ok(())
+    }
+
+    /// Remove `record`, the record at a body position, from the derived views.
+    fn detach(&mut self, position: usize, record: ClockRecord) -> Result<(), RinexClockError> {
+        let key = self.order_keys[position];
+        let replacement = match self.derived.removal_replacement(&record, key) {
+            Some(replacement_key) => {
+                let replacement_position = self
+                    .order_keys
+                    .binary_search(&replacement_key)
+                    .map_err(|_| invalid_input("index", "no record at this index"))?;
+                self.view_at(replacement_position)?.clock_point()
+            }
+            None => None,
+        };
+        self.derived
+            .remove(&record, key, self.context.layout, replacement);
+        Ok(())
+    }
+
+    fn refresh_notices(&mut self) {
+        self.notices = self.header_notices.clone();
+        self.notices.extend(self.derived.notices());
+    }
+
+    /// An order key for an entry inserted at a body position, between the keys
+    /// of its neighbours. Keys are reassigned when two neighbours leave no room.
+    fn order_key_before(&mut self, position: usize) -> u64 {
+        let bounds = |keys: &[u64]| {
+            let low = position
+                .checked_sub(1)
+                .and_then(|previous| keys.get(previous))
+                .copied()
+                .unwrap_or(0);
+            let high = keys
+                .get(position)
+                .copied()
+                .unwrap_or_else(|| low.saturating_add(2 * ORDER_KEY_GAP));
+            (low, high)
+        };
+        let (low, high) = bounds(&self.order_keys);
+        if high > low.saturating_add(1) {
+            return low + (high - low) / 2;
+        }
+        let old_keys = std::mem::replace(&mut self.order_keys, fresh_order_keys(self.body.len()));
+        self.derived.renumber(|old| {
+            let index = old_keys.partition_point(|&key| key < old);
+            order_key_at(index)
+        });
+        let (low, high) = bounds(&self.order_keys);
+        low + (high - low) / 2
+    }
+
+    /// The typed record a value edit of the record at a body position makes,
+    /// refused when the writer would refuse it or when it would drop values
+    /// the record carries beyond its declared count.
+    fn edited_record(
+        &self,
+        position: usize,
+        current: ClockRecord,
+        values: Vec<f64>,
+    ) -> Result<TypedRecord, RinexClockError> {
+        validate_values(&values)?;
+        if let Some(last) = current.surplus.iter().map(|value| value.position).max() {
+            if values.len() <= last {
+                return Err(invalid_input(
+                    "values",
+                    "the record carries values beyond its declared count; the new values must restate them",
+                ));
+            }
+        }
+        let typed = match &self.body[position] {
+            BodyEntry::Typed(record) => TypedRecord {
+                values,
+                ..(**record).clone()
+            },
+            _ => TypedRecord {
+                record_type: current.record_type,
+                name: current.satellite.unwrap_or(current.name),
+                epoch: TypedEpoch::Civil {
+                    civil: current.civil,
+                    second_text: current.second_text,
+                },
+                values,
+            },
+        };
+        self.check_writable(&typed)?;
+        Ok(typed)
+    }
+
+    /// Refuse a typed record the writer would refuse.
+    fn check_writable(&self, record: &TypedRecord) -> Result<(), RinexClockError> {
+        match self.writing_layout() {
+            Some(layout) => {
+                render_record(record, layout, self.context.time.scale, self.sigma_gap).map(|_| ())
+            }
+            None => Ok(()),
+        }
+    }
+
+    fn header_lines(&self) -> Vec<(Option<usize>, &str)> {
+        self.header
+            .iter()
+            .map(|entry| {
+                (
+                    header_entry_line(entry),
+                    header_entry_content(&self.source, &self.line_starts, entry),
+                )
+            })
+            .collect()
+    }
+
+    fn record_position(&self, index: usize) -> Result<usize, RinexClockError> {
+        self.record_positions
+            .get(index)
+            .copied()
+            .ok_or_else(|| invalid_input("index", "no record at this index"))
+    }
+
+    fn writing_layout(&self) -> Option<ClockLayout> {
+        match self.constructed {
+            Some(_) => self.context.layout,
+            None => Some(self.context.layout.unwrap_or(ClockLayout::V300)),
+        }
+    }
+
+    fn line_ending(&self) -> &'static str {
+        (0..self.line_starts.len())
+            .map(|index| line_span(&self.source, &self.line_starts, index))
+            .find(|span| span.ends_with('\n'))
+            .map_or(
+                "\n",
+                |span| {
+                    if span.ends_with("\r\n") {
+                        "\r\n"
+                    } else {
+                        "\n"
+                    }
+                },
+            )
+    }
+
+    fn push_source(&self, out: &mut String, open: &mut bool, index: usize, eol: &str) {
+        if *open {
+            out.push_str(eol);
+        }
+        let span = line_span(&self.source, &self.line_starts, index);
+        out.push_str(span);
+        *open = !span.ends_with('\n');
+    }
+
+    fn write_constructed(
+        &self,
+        scale: TimeScale,
+        policy: ClockWritePolicy,
+    ) -> Result<(String, Vec<ClockWriteDeparture>), RinexClockError> {
+        let system = ClockTimeSystem::for_time_scale(scale)
+            .ok_or(RinexClockError::UnsupportedTimeScale { scale })?;
+        let (layout, _) = constructed_layout(system);
+        let ctx = epoch_context(&self.context.time);
+        let mut record_lines = Vec::new();
+        let mut departures = Vec::new();
+        let mut systems = BTreeSet::new();
+        let mut types = BTreeSet::new();
+        for (record_index, entry) in self.body.iter().enumerate() {
+            if let BodyEntry::Typed(record) = entry {
+                let (lines, rounded) = render_record_with(
+                    record,
+                    layout,
+                    Some(scale),
+                    SigmaGap::One,
+                    policy.nearest_microsecond_epochs,
+                )?;
+                if rounded {
+                    departures.push(epoch_departure(record_index, record, &ctx, layout, &lines));
+                }
+                record_lines.extend(lines);
+                types.insert(record.record_type);
+                if record.record_type == ClockRecordType::As {
+                    if let Some(letter) = record.name.chars().next() {
+                        systems.insert(letter);
+                    }
+                }
+            }
+        }
+        let valid_letters: &[char] = match layout {
+            ClockLayout::V300 => &['G', 'R', 'E', 'S'],
+            ClockLayout::V304 => &['G', 'R', 'E', 'C', 'I', 'J', 'S'],
+        };
+        let satellite_system = match systems.iter().next() {
+            None => ' ',
+            Some(&letter) if systems.len() == 1 && valid_letters.contains(&letter) => letter,
+            Some(_) => 'M',
+        };
+        let type_codes: Vec<&str> = types.iter().map(|record_type| record_type.code()).collect();
+        let mut out = String::new();
+        for line in render_constructed_header(system, satellite_system, &type_codes)
+            .into_iter()
+            .chain(record_lines)
+        {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        Ok((out, departures))
     }
 }
 
-/// Append one `AS` satellite clock-bias record for a sample.
-fn write_as_record(
-    out: &mut String,
-    satellite: &str,
-    point: &ClockPoint,
-) -> Result<(), RinexClockError> {
-    let (year, month, day, hour, minute, second_us) = instant_civil_microsecond(&point.epoch);
-    let second = second_us / 1_000_000;
-    let microsecond = second_us % 1_000_000;
-    let count = 1 + point.additional_values.len();
-    if count > 6 {
+/// The departure a record written at its nearest microsecond epoch makes.
+fn epoch_departure(
+    record_index: usize,
+    record: &TypedRecord,
+    ctx: &EpochContext,
+    layout: ClockLayout,
+    lines: &[String],
+) -> ClockWriteDeparture {
+    let columns = match layout {
+        ClockLayout::V300 => 8..34,
+        ClockLayout::V304 => 13..39,
+    };
+    let written = lines
+        .first()
+        .and_then(|line| line.get(columns))
+        .map(|text| text.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+    ClockWriteDeparture::EpochAtNearestMicrosecond {
+        record: record_index,
+        name: record.name.clone(),
+        epoch: record.view(ctx).epoch,
+        written,
+    }
+}
+
+/// Read the record starting at source line `first`, returning it and the
+/// number of lines it spans, or a diagnostic and the lines to keep with it.
+fn read_record_at(
+    text: &str,
+    starts: &[usize],
+    first: usize,
+    layout: Option<ClockLayout>,
+    ctx: &EpochContext,
+) -> Result<(ClockRecord, usize), (RinexClockDiagnostic, usize)> {
+    let line_number = first + 1;
+    let content = line_content(text, starts, first);
+    let parent = read_parent(line_number, content, layout, ctx)
+        .map_err(|error| (RinexClockDiagnostic::new(line_number, error), 1))?;
+    let record_type = parent.record_type;
+    let count = parent.count;
+    let mut record = ClockRecord {
+        record_type,
+        name: parent.name,
+        satellite: parent.satellite,
+        civil: parent.civil,
+        second_text: Some(parent.second_text),
+        epoch: parent.epoch,
+        values: parent.values,
+        surplus: parent.surplus,
+        line: Some(line_number),
+        line_count: 1,
+        reading: parent.reading,
+        continuation_reading: None,
+    };
+    if count <= 2 {
+        return Ok((record, 1));
+    }
+
+    let missing = || {
+        (
+            RinexClockDiagnostic::new(
+                line_number,
+                RinexClockError::MissingContinuation {
+                    line: line_number,
+                    record_type: record_type.code().to_string(),
+                },
+            ),
+            1,
+        )
+    };
+    let mut continuation = first + 1;
+    while continuation < starts.len() && line_content(text, starts, continuation).trim().is_empty()
+    {
+        continuation += 1;
+    }
+    if continuation >= starts.len() {
+        return Err(missing());
+    }
+    let continuation_content = line_content(text, starts, continuation);
+    if is_potential_parent_record(continuation_content) {
+        return Err(missing());
+    }
+    let used = continuation - first + 1;
+    let read = read_continuation(continuation + 1, continuation_content, count - 2, layout)
+        .map_err(|error| (RinexClockDiagnostic::new(continuation + 1, error), used))?;
+    record.values.extend(read.values);
+    record.surplus.extend(read.surplus);
+    record.line_count = used;
+    record.continuation_reading = Some(read.reading);
+    Ok((record, used))
+}
+
+fn epoch_context(time: &TimeResolution) -> EpochContext {
+    let policy = match (time.scale, time.system) {
+        (Some(scale), _) => civil_second_policy_for_time_scale(scale),
+        (None, Some(ClockTimeSystem::Irn)) => validate::CivilSecondPolicy::Continuous,
+        (None, _) => validate::CivilSecondPolicy::UtcLike,
+    };
+    EpochContext {
+        scale: time.scale,
+        policy,
+    }
+}
+
+/// Check that a civil epoch names an instant in a product's time scale.
+fn check_civil_in_context(civil: Civil, ctx: &EpochContext) -> Result<(), RinexClockError> {
+    if civil.second == 60 && ctx.policy == validate::CivilSecondPolicy::Continuous {
         return Err(invalid_input(
-            "additional_values",
-            "at most 5 additional values are supported",
+            "epoch",
+            "a 23:59:60 label names no epoch in a continuous time scale",
         ));
     }
-
-    let bias_str = format_e19_12(point.bias_s, "bias_s")?;
-
-    if count == 1 {
-        let _ = writeln!(
-            out,
-            "AS {satellite:<4} {year:04} {month:02} {day:02} {hour:02} {minute:02} {second:>2}.{microsecond:06}  1   {bias_str}",
-        );
-    } else {
-        let sigma_str = format_e19_12(point.additional_values[0], "additional_values")?;
-        let _ = writeln!(
-            out,
-            "AS {satellite:<4} {year:04} {month:02} {day:02} {hour:02} {minute:02} {second:>2}.{microsecond:06}  {count}   {bias_str} {sigma_str}",
-        );
+    if let Some(scale) = ctx.scale {
+        civil_to_instant(scale, civil)
+            .map_err(|_| invalid_input("epoch", "invalid civil clock epoch"))?;
     }
-
-    if count > 2 {
-        let mut cont = String::with_capacity(80);
-        for (i, &val) in point.additional_values[1..].iter().enumerate() {
-            let val_str = format_e19_12(val, "additional_values")?;
-            if i > 0 {
-                cont.push(' ');
-            }
-            cont.push_str(&val_str);
-        }
-        let _ = writeln!(out, "{cont}");
-    }
-
     Ok(())
 }
 
-/// Decompose a clock-sample instant into civil `(year, month, day, hour, minute,
-/// total-microseconds-of-minute)` on the microsecond grid the parser reads.
-///
-/// This inverts [`civil_microsecond_to_julian_split`]: the standard epoch grid
-/// from its split Julian date, a UTC `:60` leap-second epoch from its stored
-/// sub-midnight fraction, and a nanosecond-repr instant from its J2000 offset.
-fn instant_civil_microsecond(epoch: &Instant) -> (i64, i64, i64, i64, i64, i64) {
-    let (day_number, total_us) = match epoch.repr {
-        InstantRepr::JulianDate(split) => {
-            // A UTC leap-second epoch is stored by the parser as `remaining_s`
-            // seconds before the next day's midnight (see
-            // civil_microsecond_to_julian_split): a small negative fraction on the
-            // next day's whole JD. Rebuild the `23:59:60.xxxxxx` label on the
-            // previous civil day so it round-trips, rather than emitting a wrong
-            // time from a negative time-of-day.
-            if (-1.0 / SECONDS_PER_DAY..0.0).contains(&split.fraction) {
-                return leap_second_civil(split);
-            }
-            // The parser stores `jd_whole = JDN - 0.5` (civil-day midnight
-            // boundary) and carries the time-of-day as `fraction`. Read the day
-            // number and the time-of-day from each part separately: recombining
-            // into a single JD and subtracting the seven-digit day number would
-            // lose microsecond precision to catastrophic cancellation.
-            let day_number = (split.jd_whole + 0.5).round() as i64;
-            let total_us =
-                (split.fraction * SECONDS_PER_DAY * MICROSECONDS_PER_SECOND).round() as i64;
-            (day_number, total_us)
-        }
-        // Nanoseconds count from J2000 (2000-01-01 12:00:00) in the instant's own
-        // scale, matching the IONEX/SP3 convention. Convert the actual epoch
-        // rather than fabricating J2000.
-        InstantRepr::Nanos(nanos) => nanos_civil_day_microsecond(nanos),
-    };
-    let (year, month, day) = civil_from_julian_day_number(day_number);
-    let hour = total_us / 3_600_000_000;
-    let rem = total_us % 3_600_000_000;
-    let minute = rem / 60_000_000;
-    let second_us = rem % 60_000_000;
-    (year, month, day, hour, minute, second_us)
-}
-
-/// Civil decomposition of a UTC leap-second instant whose `fraction` lies in
-/// `[-1/86400, 0)` on the next day's whole JD. The instant sits `remaining_s`
-/// seconds before the next day's midnight - inside the `23:59:60` leap second of
-/// the previous civil day - so rebuild that label on the microsecond grid.
-fn leap_second_civil(split: JulianDateSplit) -> (i64, i64, i64, i64, i64, i64) {
-    let next_day_number = (split.jd_whole + 0.5).round() as i64;
-    let (year, month, day) = civil_from_julian_day_number(next_day_number - 1);
-    let remaining_s = -split.fraction * SECONDS_PER_DAY; // in (0, 1]
-    let microsecond = ((1.0 - remaining_s) * 1_000_000.0).round() as i64;
-    // Encode the `:60` second as total microseconds of minute so the shared
-    // `write_as_record` split (`second_us / 1_000_000`) yields `second == 60`.
-    (year, month, day, 23, 59, 60 * 1_000_000 + microsecond)
-}
-
-/// Decompose a J2000-nanosecond instant into the civil-midnight `(day number,
-/// microseconds of day)` the shared decomposition consumes. Nanoseconds are
-/// rounded to the microsecond grid the RINEX clock epoch field carries.
-fn nanos_civil_day_microsecond(nanos: i128) -> (i64, i64) {
-    const US_PER_DAY: i128 = SECONDS_PER_DAY_I64 as i128 * 1_000_000;
-    // J2000 is noon (12:00:00) of 2000-01-01, whose civil-midnight day number is
-    // JD 2_451_545 (jd_whole 2_451_544.5 + 0.5).
-    const J2000_NOON_US: i128 = J2000_NOON_OFFSET_S as i128 * 1_000_000;
-    const J2000_DAY_NUMBER: i128 = J2000_JULIAN_DAY_NUMBER as i128;
-    let micros = (nanos + nanos.signum() * 500) / 1_000; // round to nearest us
-    let from_midnight = J2000_NOON_US + micros;
-    let day_offset = from_midnight.div_euclid(US_PER_DAY);
-    let us_of_day = from_midnight.rem_euclid(US_PER_DAY);
-    ((J2000_DAY_NUMBER + day_offset) as i64, us_of_day as i64)
-}
-
-/// Convert a civil clock tag in the given scale into a scale-tagged instant.
-pub fn civil_to_clock_instant(
-    scale: TimeScale,
-    year: i32,
-    month: u8,
-    day: u8,
-    hour: u8,
-    minute: u8,
-    second: f64,
-) -> Option<Instant> {
-    let civil = validate::civil_datetime_with_fractional_second_policy(
-        i64::from(year),
-        i64::from(month),
-        i64::from(day),
-        i64::from(hour),
-        i64::from(minute),
-        second,
-        civil_second_policy_for_time_scale(scale),
-    )
-    .ok()?;
-    civil_microsecond_to_instant(scale, civil).ok()
-}
-
-/// Convert a civil GPS-time tag into seconds since 1980-01-06 00:00:00.
-pub fn civil_to_gps_seconds(
-    year: i32,
-    month: u8,
-    day: u8,
-    hour: u8,
-    minute: u8,
-    second: f64,
-) -> Option<f64> {
-    let civil = validate::civil_datetime_with_fractional_second_policy(
-        i64::from(year),
-        i64::from(month),
-        i64::from(day),
-        i64::from(hour),
-        i64::from(minute),
-        second,
-        validate::CivilSecondPolicy::Continuous,
-    )
-    .ok()?;
-    gps_seconds_from_civil(civil)
-}
-
-fn parse_time_scale(text: &str) -> Result<TimeScale, RinexClockError> {
-    let mut time_scale = TimeScale::Gpst;
-    for (idx, line) in text.lines().enumerate() {
-        if line.contains("END OF HEADER") {
-            break;
-        }
-        if line.contains("TIME SYSTEM ID") {
-            let label = line
-                .split("TIME SYSTEM ID")
-                .next()
-                .unwrap_or(line)
-                .split_whitespace()
-                .next()
-                .unwrap_or("");
-            if label.is_empty() {
-                time_scale = TimeScale::Gpst;
-            } else {
-                time_scale = crate::rinex_common::time_scale_label(label).ok_or_else(|| {
-                    RinexClockError::BadField {
-                        line: idx + 1,
-                        field: "time_system",
-                        value: label.to_string(),
-                    }
-                })?;
-            }
-        }
+fn header_entry_line(entry: &HeaderEntry) -> Option<usize> {
+    match entry {
+        HeaderEntry::Source(index) => Some(index + 1),
+        HeaderEntry::Written(_) => None,
     }
-    Ok(time_scale)
 }
 
-// invariant: the parser validates GPS seconds before constructing its split JD.
-#[allow(clippy::expect_used)]
-fn gps_seconds_to_instant(gps_seconds: f64) -> Instant {
-    let gps_epoch_jd = J2000_JD - GPS_EPOCH_TO_J2000_S / SECONDS_PER_DAY;
-    let days = (gps_seconds / SECONDS_PER_DAY).floor();
-    let seconds_of_day = gps_seconds - days * SECONDS_PER_DAY;
-    Instant::from_julian_date(
-        TimeScale::Gpst,
-        JulianDateSplit::new(gps_epoch_jd + days, seconds_of_day / SECONDS_PER_DAY)
-            .expect("valid split Julian date"),
-    )
+fn header_entry_content<'a>(source: &'a str, starts: &[usize], entry: &'a HeaderEntry) -> &'a str {
+    match entry {
+        HeaderEntry::Source(index) => line_content(source, starts, *index),
+        HeaderEntry::Written(text) => text.as_str(),
+    }
+}
+
+fn push_written(out: &mut String, open: &mut bool, text: &str, eol: &str) {
+    if *open {
+        out.push_str(eol);
+    }
+    out.push_str(text);
+    out.push_str(eol);
+    *open = false;
+}
+
+/// Start offset of every physical line. A line runs to and includes its `\n`;
+/// a final line without one is still a line.
+fn split_lines(text: &str) -> Vec<usize> {
+    let mut starts = Vec::new();
+    let mut position = 0;
+    while position < text.len() {
+        starts.push(position);
+        position = match text[position..].find('\n') {
+            Some(offset) => position + offset + 1,
+            None => text.len(),
+        };
+    }
+    starts
+}
+
+/// A physical line including its terminator.
+fn line_span<'a>(text: &'a str, starts: &[usize], index: usize) -> &'a str {
+    let start = starts.get(index).copied().unwrap_or(text.len());
+    let end = starts.get(index + 1).copied().unwrap_or(text.len());
+    text.get(start..end).unwrap_or("")
+}
+
+/// A physical line without its `\n` or `\r\n` terminator.
+fn line_content<'a>(text: &'a str, starts: &[usize], index: usize) -> &'a str {
+    let span = line_span(text, starts, index);
+    match span.strip_suffix('\n') {
+        Some(rest) => rest.strip_suffix('\r').unwrap_or(rest),
+        None => span,
+    }
 }
 
 fn validate_clock_point(point: &ClockPoint) -> Result<(), RinexClockError> {
@@ -656,309 +1704,9 @@ fn validate_clock_point(point: &ClockPoint) -> Result<(), RinexClockError> {
         ));
     }
     for (idx, &val) in point.additional_values.iter().enumerate() {
-        validate_finite(val, field_name_for_value_index(idx + 1))?;
+        validate_finite(val, numeric::field_name_for_value_index(idx + 1))?;
     }
     Ok(())
-}
-
-fn validate_serializable_clock_point(
-    product_scale: TimeScale,
-    point: &ClockPoint,
-) -> Result<(), RinexClockError> {
-    validate_clock_point(point)?;
-    if crate::rinex_common::time_scale_rinex_label(point.epoch.scale).is_none() {
-        return Err(RinexClockError::UnsupportedTimeScale {
-            scale: point.epoch.scale,
-        });
-    }
-    if point.epoch.scale != product_scale {
-        return Err(invalid_input(
-            "epoch",
-            "epoch scale does not match clock time scale",
-        ));
-    }
-    format_e19_12(point.bias_s, "bias")?;
-    for (idx, &val) in point.additional_values.iter().enumerate() {
-        format_e19_12(val, field_name_for_value_index(idx + 1))?;
-    }
-    Ok(())
-}
-
-fn field_name_for_value_index(idx: usize) -> &'static str {
-    match idx {
-        0 => "bias",
-        1 => "sigma",
-        2 => "rate",
-        3 => "rate_sigma",
-        4 => "acceleration",
-        5 => "acceleration_sigma",
-        _ => "additional_values",
-    }
-}
-
-fn format_e19_12(value: f64, field: &'static str) -> Result<String, RinexClockError> {
-    if !value.is_finite() {
-        return Err(invalid_input(field, "must be finite"));
-    }
-    if value == 0.0 {
-        let sign = if value.is_sign_negative() { '-' } else { ' ' };
-        return Ok(format!("{sign}0.000000000000E+00"));
-    }
-
-    let sign = if value.is_sign_negative() { '-' } else { ' ' };
-    let abs_val = value.abs();
-
-    if let Some(formatted) = try_format_leading_zero(sign, abs_val) {
-        if formatted.len() == 19 {
-            if let Ok(reparsed) = formatted.trim().parse::<f64>() {
-                if reparsed.to_bits() == value.to_bits() {
-                    return Ok(formatted);
-                }
-            }
-        }
-    }
-
-    if let Some(formatted) = try_format_nonzero_leading(sign, abs_val) {
-        if formatted.len() == 19 {
-            if let Ok(reparsed) = formatted.trim().parse::<f64>() {
-                if reparsed.to_bits() == value.to_bits() {
-                    return Ok(formatted);
-                }
-            }
-        }
-    }
-
-    if let Some(formatted) = try_format_3digit_exp(sign, abs_val) {
-        if formatted.len() == 19 {
-            if let Ok(reparsed) = formatted.trim().parse::<f64>() {
-                if reparsed.to_bits() == value.to_bits() {
-                    return Ok(formatted);
-                }
-            }
-        }
-    }
-
-    if let Some(formatted) = try_format_canonical_scientific(sign, abs_val) {
-        if formatted.len() == 19 {
-            if let Ok(reparsed) = formatted.trim().parse::<f64>() {
-                if reparsed.to_bits() == value.to_bits() {
-                    return Ok(formatted);
-                }
-            }
-        }
-    }
-
-    if let Some(formatted) = try_format_scientific_fallback(value) {
-        return Ok(formatted);
-    }
-
-    Err(invalid_input(
-        field,
-        "value cannot be represented in Fortran E19.12 format without loss of precision",
-    ))
-}
-
-fn try_format_leading_zero(sign: char, abs_val: f64) -> Option<String> {
-    let s = format!("{abs_val:.11e}");
-    let (mantissa_str, exp_str) = s.split_once('e')?;
-    let rust_exp: i32 = exp_str.parse().ok()?;
-    let (d0, rest) = mantissa_str.split_once('.')?;
-    let new_exp = rust_exp + 1;
-    if !(-99..=99).contains(&new_exp) {
-        return None;
-    }
-    let formatted_exp = if new_exp >= 0 {
-        format!("E+{new_exp:02}")
-    } else {
-        format!("E-{:02}", new_exp.abs())
-    };
-    Some(format!("{sign}0.{d0}{rest}{formatted_exp}"))
-}
-
-fn try_format_nonzero_leading(sign: char, abs_val: f64) -> Option<String> {
-    let s = format!("{abs_val:.12e}");
-    let (mantissa_str, exp_str) = s.split_once('e')?;
-    let rust_exp: i32 = exp_str.parse().ok()?;
-    if !(-99..=99).contains(&rust_exp) {
-        return None;
-    }
-    let formatted_exp = if rust_exp >= 0 {
-        format!("E+{rust_exp:02}")
-    } else {
-        format!("E-{:02}", rust_exp.abs())
-    };
-    Some(format!("{sign}{mantissa_str}{formatted_exp}"))
-}
-
-fn try_format_3digit_exp(sign: char, abs_val: f64) -> Option<String> {
-    let s = format!("{abs_val:.11e}");
-    let (mantissa_str, exp_str) = s.split_once('e')?;
-    let rust_exp: i32 = exp_str.parse().ok()?;
-    let (d0, rest) = mantissa_str.split_once('.')?;
-    let new_exp = rust_exp + 1;
-    if !(-999..=-100).contains(&new_exp) && !(100..=999).contains(&new_exp) {
-        return None;
-    }
-    let formatted_exp = if new_exp >= 0 {
-        format!("E+{new_exp:03}")
-    } else {
-        format!("E-{:03}", new_exp.abs())
-    };
-    Some(format!("{sign}.{d0}{rest}{formatted_exp}"))
-}
-
-fn try_format_canonical_scientific(sign: char, abs_val: f64) -> Option<String> {
-    let s = format!("{abs_val:.12e}");
-    let (mantissa_str, exp_str) = s.split_once('e')?;
-    let rust_exp: i32 = exp_str.parse().ok()?;
-    let formatted_exp = if (-99..=99).contains(&rust_exp) {
-        if rust_exp >= 0 {
-            format!("E+{rust_exp:02}")
-        } else {
-            format!("E-{:02}", rust_exp.abs())
-        }
-    } else if (-999..=999).contains(&rust_exp) {
-        if rust_exp >= 0 {
-            format!("E+{rust_exp:03}")
-        } else {
-            format!("E-{:03}", rust_exp.abs())
-        }
-    } else {
-        return None;
-    };
-
-    let raw = if sign == '-' {
-        format!("-{mantissa_str}{formatted_exp}")
-    } else {
-        format!("{mantissa_str}{formatted_exp}")
-    };
-
-    if raw.len() > 19 {
-        return None;
-    }
-
-    Some(format!("{raw:>19}"))
-}
-
-/// Formats a finite non-zero floating-point value into an exact 19-column
-/// scientific representation when standard preferred formatters cannot fit within 19 bytes.
-/// Evaluates finite 1..=17 significant digit candidates strictly containing an
-/// explicit decimal point and 'E', testing finite point placement and exponent
-/// adjustments alongside optional positive plus signs for input compatibility rather
-/// than canonical Fortran output. Candidates of length <= 19 bytes are left-padded with
-/// spaces to exactly 19 bytes and accepted only on strict bit readback (`to_bits()`).
-///
-/// This does not guarantee that all legally representable mathematical values fit
-/// within the 19-column budget; values exceeding candidate width limits are refused.
-fn try_format_scientific_fallback(value: f64) -> Option<String> {
-    let abs_val = value.abs();
-    let sign_prefix = if value.is_sign_negative() { "-" } else { "" };
-
-    for sig_digits in (1..=17).rev() {
-        let prec = sig_digits - 1;
-        let s = format!("{abs_val:.prec$e}");
-        let Some((mantissa_part, exp_part)) = s.split_once('e') else {
-            continue;
-        };
-        let Ok(rust_exp) = exp_part.parse::<i32>() else {
-            continue;
-        };
-        let digits: String = mantissa_part
-            .chars()
-            .filter(|c| c.is_ascii_digit())
-            .collect();
-        if digits.len() != sig_digits {
-            continue;
-        }
-
-        let mut mantissa_candidates = Vec::with_capacity(sig_digits + 2);
-
-        // 1. Standard normalized form (decimal point after first digit).
-        if sig_digits == 1 {
-            mantissa_candidates.push((format!("{sign_prefix}{digits}."), 0));
-        } else {
-            mantissa_candidates
-                .push((format!("{sign_prefix}{}.{}", &digits[..1], &digits[1..]), 0));
-        }
-
-        // 2. Leading zero form (0.dddd...).
-        mantissa_candidates.push((format!("{sign_prefix}0.{digits}"), 1));
-
-        // 3. Leading dot form (.dddd...).
-        mantissa_candidates.push((format!("{sign_prefix}.{digits}"), 1));
-
-        // 4. Shift decimal point to the right across the remaining positions.
-        if sig_digits > 1 {
-            for k in 2..=sig_digits {
-                let exp_delta = -(k as i32 - 1);
-                if k < sig_digits {
-                    mantissa_candidates.push((
-                        format!("{sign_prefix}{}.{}", &digits[..k], &digits[k..]),
-                        exp_delta,
-                    ));
-                } else {
-                    mantissa_candidates.push((format!("{sign_prefix}{digits}."), exp_delta));
-                }
-            }
-        }
-
-        for (mantissa, exp_delta) in mantissa_candidates {
-            let adj_exp = rust_exp + exp_delta;
-            if !(-999..=999).contains(&adj_exp) {
-                continue;
-            }
-
-            let mut exp_spellings = Vec::with_capacity(4);
-            if adj_exp >= 0 {
-                if adj_exp <= 99 {
-                    exp_spellings.push(format!("E+{adj_exp:02}"));
-                    exp_spellings.push(format!("E{adj_exp:02}"));
-                    exp_spellings.push(format!("E+{adj_exp:03}"));
-                    exp_spellings.push(format!("E{adj_exp:03}"));
-                } else {
-                    exp_spellings.push(format!("E+{adj_exp:03}"));
-                    exp_spellings.push(format!("E{adj_exp:03}"));
-                }
-            } else {
-                let abs_exp = adj_exp.unsigned_abs();
-                if abs_exp <= 99 {
-                    exp_spellings.push(format!("E-{abs_exp:02}"));
-                    exp_spellings.push(format!("E-{abs_exp:03}"));
-                } else {
-                    exp_spellings.push(format!("E-{abs_exp:03}"));
-                }
-            }
-
-            for exp_spelling in exp_spellings {
-                let candidate_raw = format!("{mantissa}{exp_spelling}");
-                if candidate_raw.len() > 19 {
-                    continue;
-                }
-                let candidate = format!("{candidate_raw:>19}");
-                if let Ok(reparsed) = validate::strict_f64(&candidate, "bias") {
-                    if reparsed.to_bits() == value.to_bits() {
-                        return Some(candidate);
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn validate_instant(epoch: Instant, field: &'static str) -> Result<(), RinexClockError> {
-    match epoch.repr {
-        InstantRepr::JulianDate(split) => {
-            validate_finite(split.jd_whole, field)?;
-            validate_finite(split.fraction, field)?;
-            if !(-1.0..=1.0).contains(&split.fraction) {
-                return Err(invalid_input(field, "Julian-date fraction out of range"));
-            }
-            Ok(())
-        }
-        InstantRepr::Nanos(_) => Ok(()),
-    }
 }
 
 fn validate_finite(value: f64, field: &'static str) -> Result<(), RinexClockError> {
@@ -982,1771 +1730,21 @@ fn map_manual_order_error(error: FieldError) -> RinexClockError {
 }
 
 fn validate_instant_series_order(points: &[(ClockPoint, usize)]) -> Result<(), RinexClockError> {
-    validate::require_strictly_increasing(
-        points
-            .iter()
-            .map(|(point, _)| instant_order_key(&point.epoch)),
-        "epoch",
-    )
-    .map_err(map_manual_order_error)
-}
-
-fn instant_order_key(epoch: &Instant) -> f64 {
-    let offset_s = time_scale_rank(epoch.scale) as f64 * INSTANT_SCALE_ORDER_STRIDE_S;
-    let instant_s = match epoch.repr {
-        InstantRepr::JulianDate(split) => {
-            split.jd_whole * SECONDS_PER_DAY + split.fraction * SECONDS_PER_DAY
-        }
-        InstantRepr::Nanos(nanos) => nanos as f64 / 1.0e9,
-    };
-    offset_s + instant_s
-}
-
-fn instant_to_gps_seconds(epoch: &Instant) -> Option<f64> {
-    if epoch.scale != TimeScale::Gpst {
-        return None;
-    }
-    instant_to_j2000_seconds(epoch).map(|seconds| seconds + GPS_EPOCH_TO_J2000_S)
-}
-
-fn instant_to_j2000_seconds(epoch: &Instant) -> Option<f64> {
-    match epoch.repr {
-        InstantRepr::JulianDate(split) => {
-            Some(j2000_seconds_from_split(split.jd_whole, split.fraction))
-        }
-        InstantRepr::Nanos(_) => None,
-    }
-}
-
-fn data_lines(text: &str) -> Vec<(usize, &str)> {
-    drop_header(
-        text.lines()
-            .enumerate()
-            .map(|(idx, line)| (idx + 1, line))
-            .collect(),
-    )
-}
-
-fn drop_header(lines: Vec<(usize, &str)>) -> Vec<(usize, &str)> {
-    match lines
-        .iter()
-        .position(|(_, line)| line.contains("END OF HEADER"))
+    if points
+        .windows(2)
+        .any(|pair| epoch_cmp(&pair[0].0.epoch, &pair[1].0.epoch) != Ordering::Less)
     {
-        Some(idx) => lines.into_iter().skip(idx + 1).collect(),
-        None => lines,
+        return Err(invalid_input("epoch", "must be strictly increasing"));
     }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ClockEpochFields<'a> {
-    year: i32,
-    month: u8,
-    day: u8,
-    hour: u8,
-    minute: u8,
-    second: &'a str,
-}
-
-const AS_RECORD_COLUMNS: [(usize, usize); 11] = [
-    (0, 2),   // Record type "AS" (cols 1..=2, A2)
-    (3, 7),   // Satellite "G01 " or "G  1" (cols 4..=7, A4)
-    (8, 12),  // Year "2026" (cols 9..=12, I4)
-    (12, 15), // Month " 05" (cols 13..=15, I3)
-    (15, 18), // Day " 13" (cols 16..=18, I3)
-    (18, 21), // Hour " 00" (cols 19..=21, I3)
-    (21, 24), // Minute " 00" (cols 22..=24, I3)
-    (24, 34), // Second "  0.000000" (cols 25..=34, F10.6)
-    (34, 37), // Count "  1" or "  2" (cols 35..=37, I3)
-    (40, 59), // Bias (cols 41..=59, E19.12)
-    (60, 79), // Sigma (optional, cols 61..=79, E19.12)
-];
-
-const AS_RECORD_304_COLUMNS: [(usize, usize); 11] = [
-    (0, 2),   // Record type "AS", "AR", etc. (cols 1..=2, A2)
-    (3, 12),  // Satellite/receiver "G16       " or "AREQ00USA" (cols 4..=12, A9)
-    (13, 17), // Year "1994" (cols 14..=17, I4)
-    (18, 20), // Month "07" (cols 19..=20, I2)
-    (21, 23), // Day "14" (cols 22..=23, I2)
-    (24, 26), // Hour "20" (cols 25..=26, I2)
-    (27, 29), // Minute "59" (cols 28..=29, I2)
-    (30, 39), // Second " 0.000000" (cols 31..=39, F9.6)
-    (40, 42), // Count " 6" (cols 41..=42, I2)
-    (45, 64), // Bias (cols 46..=64, E19.12)
-    (66, 85), // Sigma (optional, cols 67..=85, E19.12)
-];
-
-const CONT_RECORD_300_COLUMNS: [(usize, usize); 4] = [
-    (0, 19),  // Value 3 (cols 1..=19, E19.12)
-    (20, 39), // Value 4 (cols 21..=39, E19.12)
-    (40, 59), // Value 5 (cols 41..=59, E19.12)
-    (60, 79), // Value 6 (cols 61..=79, E19.12)
-];
-
-const CONT_RECORD_304_COLUMNS: [(usize, usize); 4] = [
-    (3, 22),  // Value 3 (cols 4..=22, 3X, E19.12)
-    (24, 43), // Value 4 (cols 25..=43, 2X, E19.12)
-    (45, 64), // Value 5 (cols 46..=64, 2X, E19.12)
-    (66, 85), // Value 6 (cols 67..=85, 2X, E19.12)
-];
-
-fn is_known_clock_record_type(token: &str) -> bool {
-    matches!(token, "AR" | "CR" | "DR" | "MS")
-}
-
-fn is_potential_parent_record(line: &str) -> bool {
-    let mut tokens = line.split_whitespace();
-    matches!(tokens.next(), Some("AS" | "AR" | "CR" | "DR" | "MS"))
-}
-
-enum RawParent {
-    Satellite {
-        sat: String,
-        epoch: Instant,
-        bias_s: f64,
-        count: usize,
-        sigma: Option<f64>,
-    },
-    Unsupported {
-        line: usize,
-        record_type: String,
-        count: usize,
-    },
-}
-
-fn parse_raw_parent(
-    line_number: usize,
-    line: &str,
-    time_scale: TimeScale,
-) -> Result<RawParent, RinexClockError> {
-    if let Some(
-        [record_type, sat_field, year_field, month_field, day_field, hour_field, minute_field, second_field, count_field, bias_field, sigma_field],
-    ) = fixed_record(line, AS_RECORD_COLUMNS)
-    {
-        if record_type.len() == 2 && record_type.chars().all(|c| c.is_ascii_alphabetic()) {
-            if record_type == "AS" {
-                if bias_field.is_empty() {
-                    return Err(RinexClockError::MalformedAsRecord {
-                        line: line_number,
-                        reason: "expected at least 10 fields",
-                        record: line.trim().to_string(),
-                    });
-                }
-                let sat = validate::strict_gnss_satellite_id(sat_field, "satellite")
-                    .map_err(|error| map_field_error(line_number, error, sat_field))?
-                    .to_string();
-                let year = parse_int_field::<i32>(line_number, "year", year_field)?;
-                let month = parse_int_field::<u8>(line_number, "month", month_field)?;
-                let day = parse_int_field::<u8>(line_number, "day", day_field)?;
-                let hour = parse_int_field::<u8>(line_number, "hour", hour_field)?;
-                let minute = parse_int_field::<u8>(line_number, "minute", minute_field)?;
-                let epoch = ClockEpochFields {
-                    year,
-                    month,
-                    day,
-                    hour,
-                    minute,
-                    second: second_field,
-                };
-                let bias_s = parse_f64_field(line_number, "bias", bias_field)?;
-                let epoch = civil_decimal_second_to_instant(time_scale, epoch)
-                    .map_err(|error| map_epoch_error(line_number, error, epoch))?;
-
-                let count = parse_int_field::<usize>(line_number, "count", count_field)?;
-                if !(1..=6).contains(&count) {
-                    return Err(RinexClockError::BadField {
-                        line: line_number,
-                        field: "count",
-                        value: count_field.to_string(),
-                    });
-                }
-
-                let sigma = if count == 1 {
-                    if !sigma_field.is_empty() {
-                        return Err(RinexClockError::BadField {
-                            line: line_number,
-                            field: "sigma",
-                            value: sigma_field.to_string(),
-                        });
-                    }
-                    None
-                } else {
-                    if sigma_field.is_empty() {
-                        return Err(RinexClockError::BadField {
-                            line: line_number,
-                            field: "sigma",
-                            value: "".to_string(),
-                        });
-                    }
-                    Some(parse_f64_field(line_number, "sigma", sigma_field)?)
-                };
-
-                return Ok(RawParent::Satellite {
-                    sat,
-                    epoch,
-                    bias_s,
-                    count,
-                    sigma,
-                });
-            } else if is_known_clock_record_type(record_type) {
-                let count = parse_int_field::<usize>(line_number, "count", count_field)?;
-                if !(1..=6).contains(&count) {
-                    return Err(RinexClockError::BadField {
-                        line: line_number,
-                        field: "count",
-                        value: count_field.to_string(),
-                    });
-                }
-                if count == 1 && !sigma_field.is_empty() {
-                    return Err(RinexClockError::BadField {
-                        line: line_number,
-                        field: "sigma",
-                        value: sigma_field.to_string(),
-                    });
-                }
-                if count >= 2 && sigma_field.is_empty() {
-                    return Err(RinexClockError::BadField {
-                        line: line_number,
-                        field: "sigma",
-                        value: "".to_string(),
-                    });
-                }
-                return Ok(RawParent::Unsupported {
-                    line: line_number,
-                    record_type: record_type.to_string(),
-                    count,
-                });
-            } else {
-                return Err(RinexClockError::BadField {
-                    line: line_number,
-                    field: "record_type",
-                    value: record_type.to_string(),
-                });
-            }
-        }
-    }
-
-    if let Some(
-        [record_type, sat_field, year_field, month_field, day_field, hour_field, minute_field, second_field, count_field, bias_field, sigma_field],
-    ) = fixed_record(line, AS_RECORD_304_COLUMNS)
-    {
-        if record_type.len() == 2 && record_type.chars().all(|c| c.is_ascii_alphabetic()) {
-            if record_type == "AS" {
-                if bias_field.is_empty() {
-                    return Err(RinexClockError::MalformedAsRecord {
-                        line: line_number,
-                        reason: "expected at least 10 fields",
-                        record: line.trim().to_string(),
-                    });
-                }
-                let sat = validate::strict_gnss_satellite_id(sat_field, "satellite")
-                    .map_err(|error| map_field_error(line_number, error, sat_field))?
-                    .to_string();
-                let year = parse_int_field::<i32>(line_number, "year", year_field)?;
-                let month = parse_int_field::<u8>(line_number, "month", month_field)?;
-                let day = parse_int_field::<u8>(line_number, "day", day_field)?;
-                let hour = parse_int_field::<u8>(line_number, "hour", hour_field)?;
-                let minute = parse_int_field::<u8>(line_number, "minute", minute_field)?;
-                let epoch = ClockEpochFields {
-                    year,
-                    month,
-                    day,
-                    hour,
-                    minute,
-                    second: second_field,
-                };
-                let bias_s = parse_f64_field(line_number, "bias", bias_field)?;
-                let epoch = civil_decimal_second_to_instant(time_scale, epoch)
-                    .map_err(|error| map_epoch_error(line_number, error, epoch))?;
-
-                let count = parse_int_field::<usize>(line_number, "count", count_field)?;
-                if !(1..=6).contains(&count) {
-                    return Err(RinexClockError::BadField {
-                        line: line_number,
-                        field: "count",
-                        value: count_field.to_string(),
-                    });
-                }
-
-                let sigma = if count == 1 {
-                    if !sigma_field.is_empty() {
-                        return Err(RinexClockError::BadField {
-                            line: line_number,
-                            field: "sigma",
-                            value: sigma_field.to_string(),
-                        });
-                    }
-                    None
-                } else {
-                    if sigma_field.is_empty() {
-                        return Err(RinexClockError::BadField {
-                            line: line_number,
-                            field: "sigma",
-                            value: "".to_string(),
-                        });
-                    }
-                    Some(parse_f64_field(line_number, "sigma", sigma_field)?)
-                };
-
-                return Ok(RawParent::Satellite {
-                    sat,
-                    epoch,
-                    bias_s,
-                    count,
-                    sigma,
-                });
-            } else if is_known_clock_record_type(record_type) {
-                let count = parse_int_field::<usize>(line_number, "count", count_field)?;
-                if !(1..=6).contains(&count) {
-                    return Err(RinexClockError::BadField {
-                        line: line_number,
-                        field: "count",
-                        value: count_field.to_string(),
-                    });
-                }
-                if count == 1 && !sigma_field.is_empty() {
-                    return Err(RinexClockError::BadField {
-                        line: line_number,
-                        field: "sigma",
-                        value: sigma_field.to_string(),
-                    });
-                }
-                if count >= 2 && sigma_field.is_empty() {
-                    return Err(RinexClockError::BadField {
-                        line: line_number,
-                        field: "sigma",
-                        value: "".to_string(),
-                    });
-                }
-                return Ok(RawParent::Unsupported {
-                    line: line_number,
-                    record_type: record_type.to_string(),
-                    count,
-                });
-            } else {
-                return Err(RinexClockError::BadField {
-                    line: line_number,
-                    field: "record_type",
-                    value: record_type.to_string(),
-                });
-            }
-        }
-    }
-
-    let mut fields = line.split_whitespace();
-    let Some(first) = fields.next() else {
-        return Err(RinexClockError::BadField {
-            line: line_number,
-            field: "record_type",
-            value: "".to_string(),
-        });
-    };
-
-    if first == "AS" {
-        let sat_field = next_as_field(&mut fields, line_number, line)?;
-        let year_field = next_as_field(&mut fields, line_number, line)?;
-        let month_field = next_as_field(&mut fields, line_number, line)?;
-        let day_field = next_as_field(&mut fields, line_number, line)?;
-        let hour_field = next_as_field(&mut fields, line_number, line)?;
-        let minute_field = next_as_field(&mut fields, line_number, line)?;
-        let second_field = next_as_field(&mut fields, line_number, line)?;
-        let count_field = next_as_field(&mut fields, line_number, line)?;
-        let bias_field = next_as_field(&mut fields, line_number, line)?;
-
-        let sat = validate::strict_gnss_satellite_id(sat_field, "satellite")
-            .map_err(|error| map_field_error(line_number, error, sat_field))?
-            .to_string();
-        let year = parse_int_field::<i32>(line_number, "year", year_field)?;
-        let month = parse_int_field::<u8>(line_number, "month", month_field)?;
-        let day = parse_int_field::<u8>(line_number, "day", day_field)?;
-        let hour = parse_int_field::<u8>(line_number, "hour", hour_field)?;
-        let minute = parse_int_field::<u8>(line_number, "minute", minute_field)?;
-        let epoch = ClockEpochFields {
-            year,
-            month,
-            day,
-            hour,
-            minute,
-            second: second_field,
-        };
-        let bias_s = parse_f64_field(line_number, "bias", bias_field)?;
-        let epoch = civil_decimal_second_to_instant(time_scale, epoch)
-            .map_err(|error| map_epoch_error(line_number, error, epoch))?;
-
-        let count = parse_int_field::<usize>(line_number, "count", count_field)?;
-        if !(1..=6).contains(&count) {
-            return Err(RinexClockError::BadField {
-                line: line_number,
-                field: "count",
-                value: count_field.to_string(),
-            });
-        }
-
-        let sigma = if count == 1 {
-            if fields.next().is_some() {
-                return Err(RinexClockError::MalformedAsRecord {
-                    line: line_number,
-                    reason: "excess values in parent record",
-                    record: line.trim().to_string(),
-                });
-            }
-            None
-        } else {
-            let sigma_field = fields.next().ok_or_else(|| RinexClockError::BadField {
-                line: line_number,
-                field: "sigma",
-                value: "".to_string(),
-            })?;
-            let s = parse_f64_field(line_number, "sigma", sigma_field)?;
-            if fields.next().is_some() {
-                return Err(RinexClockError::MalformedAsRecord {
-                    line: line_number,
-                    reason: "excess values in parent record",
-                    record: line.trim().to_string(),
-                });
-            }
-            Some(s)
-        };
-
-        Ok(RawParent::Satellite {
-            sat,
-            epoch,
-            bias_s,
-            count,
-            sigma,
-        })
-    } else if is_known_clock_record_type(first) {
-        for _ in 0..7 {
-            if fields.next().is_none() {
-                return Err(RinexClockError::BadField {
-                    line: line_number,
-                    field: "count",
-                    value: "".to_string(),
-                });
-            }
-        }
-        let count_field = fields.next().ok_or_else(|| RinexClockError::BadField {
-            line: line_number,
-            field: "count",
-            value: "".to_string(),
-        })?;
-        let count = parse_int_field::<usize>(line_number, "count", count_field)?;
-        if !(1..=6).contains(&count) {
-            return Err(RinexClockError::BadField {
-                line: line_number,
-                field: "count",
-                value: count_field.to_string(),
-            });
-        }
-        if fields.next().is_none() {
-            return Err(RinexClockError::BadField {
-                line: line_number,
-                field: "bias",
-                value: "".to_string(),
-            });
-        }
-        if count == 1 {
-            if fields.next().is_some() {
-                return Err(RinexClockError::BadField {
-                    line: line_number,
-                    field: "sigma",
-                    value: "excess value in parent record".to_string(),
-                });
-            }
-        } else {
-            if fields.next().is_none() {
-                return Err(RinexClockError::BadField {
-                    line: line_number,
-                    field: "sigma",
-                    value: "".to_string(),
-                });
-            }
-            if fields.next().is_some() {
-                return Err(RinexClockError::BadField {
-                    line: line_number,
-                    field: "sigma",
-                    value: "excess value in parent record".to_string(),
-                });
-            }
-        }
-        Ok(RawParent::Unsupported {
-            line: line_number,
-            record_type: first.to_string(),
-            count,
-        })
-    } else {
-        Err(RinexClockError::BadField {
-            line: line_number,
-            field: "record_type",
-            value: first.to_string(),
-        })
-    }
-}
-
-fn parse_continuation_line(
-    line_number: usize,
-    line: &str,
-    needed: usize,
-) -> Result<Vec<f64>, RinexClockError> {
-    if needed == 0 || needed > 4 {
-        return Err(RinexClockError::MalformedContinuation {
-            line: line_number,
-            reason: "invalid needed value count",
-            record: line.trim().to_string(),
-        });
-    }
-
-    if line.starts_with("   ") {
-        if let Some(fields) = fixed_record(line, CONT_RECORD_304_COLUMNS) {
-            if fields.iter().any(|f| !f.is_empty())
-                && fields.iter().all(|f| f.split_whitespace().count() <= 1)
-            {
-                for &f in &fields[..needed] {
-                    if f.is_empty() {
-                        return Err(RinexClockError::MalformedContinuation {
-                            line: line_number,
-                            reason: "missing required continuation value",
-                            record: line.trim().to_string(),
-                        });
-                    }
-                }
-                for &f in &fields[needed..] {
-                    if !f.is_empty() {
-                        return Err(RinexClockError::MalformedContinuation {
-                            line: line_number,
-                            reason: "excess values in continuation line",
-                            record: line.trim().to_string(),
-                        });
-                    }
-                }
-                let mut vals = Vec::with_capacity(needed);
-                for (i, &f) in fields[..needed].iter().enumerate() {
-                    let val = parse_f64_field(line_number, field_name_for_value_index(i + 2), f)
-                        .map_err(|_| RinexClockError::MalformedContinuation {
-                            line: line_number,
-                            reason: "invalid numeric field",
-                            record: line.trim().to_string(),
-                        })?;
-                    vals.push(val);
-                }
-                return Ok(vals);
-            }
-        }
-    }
-
-    if let Some(fields) = fixed_record(line, CONT_RECORD_300_COLUMNS) {
-        if fields.iter().any(|f| !f.is_empty())
-            && fields.iter().all(|f| f.split_whitespace().count() <= 1)
-        {
-            for &f in &fields[..needed] {
-                if f.is_empty() {
-                    return Err(RinexClockError::MalformedContinuation {
-                        line: line_number,
-                        reason: "missing required continuation value",
-                        record: line.trim().to_string(),
-                    });
-                }
-            }
-            for &f in &fields[needed..] {
-                if !f.is_empty() {
-                    return Err(RinexClockError::MalformedContinuation {
-                        line: line_number,
-                        reason: "excess values in continuation line",
-                        record: line.trim().to_string(),
-                    });
-                }
-            }
-            let mut vals = Vec::with_capacity(needed);
-            for (i, &f) in fields[..needed].iter().enumerate() {
-                let val = parse_f64_field(line_number, field_name_for_value_index(i + 2), f)
-                    .map_err(|_| RinexClockError::MalformedContinuation {
-                        line: line_number,
-                        reason: "invalid numeric field",
-                        record: line.trim().to_string(),
-                    })?;
-                vals.push(val);
-            }
-            return Ok(vals);
-        }
-    }
-
-    let tokens: Vec<&str> = line.split_whitespace().collect();
-    if tokens.len() < needed {
-        return Err(RinexClockError::MalformedContinuation {
-            line: line_number,
-            reason: "too few values in continuation line",
-            record: line.trim().to_string(),
-        });
-    }
-    if tokens.len() > needed {
-        return Err(RinexClockError::MalformedContinuation {
-            line: line_number,
-            reason: "excess values in continuation line",
-            record: line.trim().to_string(),
-        });
-    }
-
-    let mut vals = Vec::with_capacity(needed);
-    for (i, &tok) in tokens.iter().enumerate() {
-        let val =
-            parse_f64_field(line_number, field_name_for_value_index(i + 2), tok).map_err(|_| {
-                RinexClockError::MalformedContinuation {
-                    line: line_number,
-                    reason: "invalid numeric field",
-                    record: line.trim().to_string(),
-                }
-            })?;
-        vals.push(val);
-    }
-    Ok(vals)
-}
-
-fn parse_logical_records(
-    lines: Vec<(usize, &str)>,
-    time_scale: TimeScale,
-    lossy: bool,
-    by_sat: &mut BTreeMap<String, Vec<(ClockPoint, usize)>>,
-    skipped_records: &mut Vec<RinexClockSkip>,
-    diagnostics: &mut Vec<RinexClockDiagnostic>,
-) -> Result<(), RinexClockError> {
-    let mut i = 0;
-    let mut sample_index = 0usize;
-
-    while i < lines.len() {
-        let (line_number, line) = lines[i];
-        if line.trim().is_empty() {
-            i += 1;
-            continue;
-        }
-
-        let parent_result = parse_raw_parent(line_number, line, time_scale);
-
-        let raw_parent = match parent_result {
-            Ok(p) => p,
-            Err(err) => {
-                if lossy {
-                    diagnostics.push(RinexClockDiagnostic::new(line_number, err));
-                    i += 1;
-                    continue;
-                } else {
-                    return Err(err);
-                }
-            }
-        };
-
-        match raw_parent {
-            RawParent::Satellite {
-                sat,
-                epoch,
-                bias_s,
-                count,
-                sigma,
-            } => {
-                let mut additional_values = Vec::new();
-                if let Some(s) = sigma {
-                    additional_values.push(s);
-                }
-
-                if count > 2 {
-                    let needed = count - 2;
-                    let mut cont_idx = i + 1;
-                    while cont_idx < lines.len() && lines[cont_idx].1.trim().is_empty() {
-                        cont_idx += 1;
-                    }
-
-                    if cont_idx >= lines.len() {
-                        let err = RinexClockError::MissingContinuation {
-                            line: line_number,
-                            record_type: "AS".to_string(),
-                        };
-                        if lossy {
-                            diagnostics.push(RinexClockDiagnostic::new(line_number, err));
-                            i = cont_idx;
-                            continue;
-                        } else {
-                            return Err(err);
-                        }
-                    }
-
-                    let (cont_line_num, cont_line) = lines[cont_idx];
-                    if is_potential_parent_record(cont_line) {
-                        let err = RinexClockError::MissingContinuation {
-                            line: line_number,
-                            record_type: "AS".to_string(),
-                        };
-                        if lossy {
-                            diagnostics.push(RinexClockDiagnostic::new(line_number, err));
-                            i = cont_idx;
-                            continue;
-                        } else {
-                            return Err(err);
-                        }
-                    }
-
-                    match parse_continuation_line(cont_line_num, cont_line, needed) {
-                        Ok(vals) => {
-                            additional_values.extend(vals);
-                            i = cont_idx + 1;
-                        }
-                        Err(err) => {
-                            if lossy {
-                                diagnostics.push(RinexClockDiagnostic::new(cont_line_num, err));
-                                i = cont_idx + 1;
-                                continue;
-                            } else {
-                                return Err(err);
-                            }
-                        }
-                    }
-                } else {
-                    i += 1;
-                }
-
-                let point = ClockPoint {
-                    epoch,
-                    bias_s,
-                    additional_values,
-                };
-                by_sat.entry(sat).or_default().push((point, sample_index));
-                sample_index += 1;
-            }
-            RawParent::Unsupported {
-                line: p_line,
-                record_type,
-                count,
-            } => {
-                if count > 2 {
-                    let needed = count - 2;
-                    let mut cont_idx = i + 1;
-                    while cont_idx < lines.len() && lines[cont_idx].1.trim().is_empty() {
-                        cont_idx += 1;
-                    }
-
-                    if cont_idx >= lines.len() {
-                        let err = RinexClockError::MissingContinuation {
-                            line: p_line,
-                            record_type,
-                        };
-                        if lossy {
-                            diagnostics.push(RinexClockDiagnostic::new(p_line, err));
-                            i = cont_idx;
-                            continue;
-                        } else {
-                            return Err(err);
-                        }
-                    }
-
-                    let (cont_line_num, cont_line) = lines[cont_idx];
-                    if is_potential_parent_record(cont_line) {
-                        let err = RinexClockError::MissingContinuation {
-                            line: p_line,
-                            record_type,
-                        };
-                        if lossy {
-                            diagnostics.push(RinexClockDiagnostic::new(p_line, err));
-                            i = cont_idx;
-                            continue;
-                        } else {
-                            return Err(err);
-                        }
-                    }
-
-                    match parse_continuation_line(cont_line_num, cont_line, needed) {
-                        Ok(_) => {
-                            i = cont_idx + 1;
-                        }
-                        Err(err) => {
-                            if lossy {
-                                diagnostics.push(RinexClockDiagnostic::new(cont_line_num, err));
-                                i = cont_idx + 1;
-                                continue;
-                            } else {
-                                return Err(err);
-                            }
-                        }
-                    }
-                } else {
-                    i += 1;
-                }
-
-                skipped_records.push(RinexClockSkip {
-                    line: p_line,
-                    record_type,
-                });
-            }
-        }
-    }
-
     Ok(())
 }
 
-fn next_as_field<'a, I>(
-    fields: &mut I,
-    line_number: usize,
-    line: &str,
-) -> Result<&'a str, RinexClockError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    fields
-        .next()
-        .ok_or_else(|| RinexClockError::MalformedAsRecord {
-            line: line_number,
-            reason: "expected at least 10 fields",
-            record: line.trim().to_string(),
-        })
+/// Order keys for `count` entries assigned afresh.
+fn fresh_order_keys(count: usize) -> Vec<u64> {
+    (0..count).map(order_key_at).collect()
 }
 
-fn parse_int_field<T>(
-    line_number: usize,
-    field: &'static str,
-    value: &str,
-) -> Result<T, RinexClockError>
-where
-    T: std::str::FromStr,
-{
-    validate::strict_int(value, field).map_err(|error| map_field_error(line_number, error, value))
-}
-
-fn parse_f64_field(
-    line_number: usize,
-    field: &'static str,
-    value: &str,
-) -> Result<f64, RinexClockError> {
-    validate::strict_f64(value, field).map_err(|error| map_field_error(line_number, error, value))
-}
-
-fn civil_decimal_second_to_instant(
-    scale: TimeScale,
-    epoch: ClockEpochFields<'_>,
-) -> Result<Instant, FieldError> {
-    let civil = validate::civil_datetime_with_decimal_second_policy(
-        i64::from(epoch.year),
-        i64::from(epoch.month),
-        i64::from(epoch.day),
-        i64::from(epoch.hour),
-        i64::from(epoch.minute),
-        epoch.second,
-        civil_second_policy_for_time_scale(scale),
-    )?;
-    civil_microsecond_to_instant(scale, civil)
-}
-
-fn civil_microsecond_to_instant(
-    scale: TimeScale,
-    civil: validate::ValidCivilMicrosecond,
-) -> Result<Instant, FieldError> {
-    let split = civil_microsecond_to_julian_split(scale, civil)?;
-    Ok(Instant::from_julian_date(scale, split))
-}
-
-// invariant: the civil fields have passed range validation before split-JD construction.
-#[allow(clippy::expect_used)]
-fn civil_microsecond_to_julian_split(
-    scale: TimeScale,
-    civil: validate::ValidCivilMicrosecond,
-) -> Result<JulianDateSplit, FieldError> {
-    if civil.year < 1 {
-        return Err(FieldError::InvalidCivilDate {
-            field: "civil datetime",
-            year: civil.year,
-            month: i64::from(civil.month),
-            day: i64::from(civil.day),
-        });
-    }
-
-    let jdn = julian_day_number(civil.year as i32, civil.month as i32, civil.day as i32);
-    let jd_whole = jdn as f64 - 0.5;
-    if scale == TimeScale::Utc && civil.second == 60 {
-        let remaining_s = 1.0 - civil.microsecond as f64 / 1_000_000.0;
-        return Ok(
-            JulianDateSplit::new(jd_whole + 1.0, -remaining_s / SECONDS_PER_DAY)
-                .expect("valid leap-second split Julian date"),
-        );
-    }
-
-    let day_seconds = civil.hour as f64 * SECONDS_PER_HOUR
-        + civil.minute as f64 * 60.0
-        + civil.second as f64
-        + civil.microsecond as f64 / 1_000_000.0;
-    Ok(
-        JulianDateSplit::new(jd_whole, day_seconds / SECONDS_PER_DAY)
-            .expect("valid split Julian date"),
-    )
-}
-
-fn civil_second_policy_for_time_scale(scale: TimeScale) -> validate::CivilSecondPolicy {
-    match scale {
-        TimeScale::Utc => validate::CivilSecondPolicy::UtcLike,
-        // GLONASST is UTC(SU)-based, but a civil GLONASST leap-second (:60) label
-        // is not a supported civil input: no time-system label parses to
-        // GLONASST (RINEX/SP3 "GLO" is UTC), and GLONASST is reached numerically
-        // via `timescale_offset_at_s`. Treat it as Continuous so a stray :60
-        // GLONASST label is rejected, not silently rolled into the next minute.
-        TimeScale::Glonasst
-        | TimeScale::Tai
-        | TimeScale::Tt
-        | TimeScale::Tcg
-        | TimeScale::Tdb
-        | TimeScale::Tcb
-        | TimeScale::Gpst
-        | TimeScale::Gst
-        | TimeScale::Bdt
-        | TimeScale::Qzsst => validate::CivilSecondPolicy::Continuous,
-    }
-}
-
-fn gps_seconds_from_civil(civil: validate::ValidCivilMicrosecond) -> Option<f64> {
-    if civil.year < 1 {
-        return None;
-    }
-
-    let days = days_since_gps_epoch(civil.year as i32, civil.month as u8, civil.day as u8);
-    let whole = days as f64 * SECONDS_PER_DAY
-        + (i64::from(civil.hour) * 3_600 + i64::from(civil.minute) * 60 + i64::from(civil.second))
-            as f64;
-    Some(whole + f64::from(civil.microsecond) / 1_000_000.0)
-}
-
-fn map_field_error(line_number: usize, error: FieldError, value: &str) -> RinexClockError {
-    RinexClockError::BadField {
-        line: line_number,
-        field: error.field(),
-        value: value.to_string(),
-    }
-}
-
-fn map_epoch_error(
-    line_number: usize,
-    error: FieldError,
-    epoch: ClockEpochFields<'_>,
-) -> RinexClockError {
-    match error {
-        FieldError::FloatParse { .. }
-        | FieldError::Missing { .. }
-        | FieldError::NonFinite { .. } => RinexClockError::BadField {
-            line: line_number,
-            field: "second",
-            value: epoch.second.to_string(),
-        },
-        _ => RinexClockError::BadField {
-            line: line_number,
-            field: "epoch",
-            value: format!(
-                "{} {} {} {} {} {}",
-                epoch.year,
-                epoch.month,
-                epoch.day,
-                epoch.hour,
-                epoch.minute,
-                normalized_second_text(epoch.second)
-            ),
-        },
-    }
-}
-
-fn normalized_second_text(second: &str) -> String {
-    validate::strict_f64(second, "second")
-        .map_or_else(|_| second.to_string(), |value| value.to_string())
-}
-
-fn build_series(
-    by_sat: BTreeMap<String, Vec<(ClockPoint, usize)>>,
-) -> BTreeMap<String, Vec<ClockPoint>> {
-    by_sat
-        .into_iter()
-        .map(|(sat, mut points)| {
-            points.sort_by(|(a, ai), (b, bi)| {
-                compare_instants(&a.epoch, &b.epoch).then_with(|| ai.cmp(bi))
-            });
-            (sat, dedup_by_time(points))
-        })
-        .collect()
-}
-
-fn dedup_by_time(points: Vec<(ClockPoint, usize)>) -> Vec<ClockPoint> {
-    let mut deduped = Vec::<ClockPoint>::new();
-    for (point, _) in points {
-        match deduped.last_mut() {
-            Some(prev) if prev.epoch == point.epoch => *prev = point,
-            _ => deduped.push(point),
-        }
-    }
-    deduped
-}
-
-fn interpolate(records: &[ClockPoint], epoch: Instant) -> Option<f64> {
-    let mut prev: Option<&ClockPoint> = None;
-    for point in records {
-        match compare_instants_same_scale(&point.epoch, &epoch)? {
-            Ordering::Equal => return Some(point.bias_s),
-            Ordering::Greater => {
-                let p0 = prev?;
-                let p1 = point;
-                let span_s = seconds_between(&p1.epoch, &p0.epoch)?;
-                if span_s <= 0.0 {
-                    return None;
-                }
-                let query_s = seconds_between(&epoch, &p0.epoch)?;
-                if query_s < 0.0 {
-                    return None;
-                }
-                return Some(lerp_ratio(p0.bias_s, p1.bias_s, query_s, span_s));
-            }
-            Ordering::Less => prev = Some(point),
-        }
-    }
-    None
-}
-
-fn compare_instants(a: &Instant, b: &Instant) -> Ordering {
-    time_scale_rank(a.scale)
-        .cmp(&time_scale_rank(b.scale))
-        .then_with(|| match (a.julian_date(), b.julian_date()) {
-            (Some(a), Some(b)) => compare_julian_splits(a, b),
-            _ => Ordering::Equal,
-        })
-}
-
-/// Canonical clock timeline for a scale.
-///
-/// QZSST is synchronous with GPST (IS-QZSS-PNT sec. 3.2.2; both read TAI - 19 s),
-/// so a clock file whose header tags it QZSST lives on the GPST timeline. Mapping
-/// QZSST -> GPST here lets a GPST-built query instant (e.g. from
-/// [`RinexClock::clock_s_at_gps_seconds`]) interpolate QZSST rows, which an
-/// exact-scale match would otherwise reject. No other scale is collapsed: GST
-/// carries a broadcast GGTO and the leap-second scales are genuinely distinct.
-fn clock_timeline(scale: TimeScale) -> TimeScale {
-    match scale {
-        TimeScale::Qzsst => TimeScale::Gpst,
-        other => other,
-    }
-}
-
-fn compare_instants_same_scale(a: &Instant, b: &Instant) -> Option<Ordering> {
-    if clock_timeline(a.scale) != clock_timeline(b.scale) {
-        return None;
-    }
-    Some(compare_julian_splits(a.julian_date()?, b.julian_date()?))
-}
-
-fn compare_julian_splits(a: JulianDateSplit, b: JulianDateSplit) -> Ordering {
-    a.jd_whole
-        .partial_cmp(&b.jd_whole)
-        .unwrap_or(Ordering::Equal)
-        .then_with(|| {
-            a.fraction
-                .partial_cmp(&b.fraction)
-                .unwrap_or(Ordering::Equal)
-        })
-}
-
-fn seconds_between(later: &Instant, earlier: &Instant) -> Option<f64> {
-    if clock_timeline(later.scale) != clock_timeline(earlier.scale) {
-        return None;
-    }
-    let later = later.julian_date()?;
-    let earlier = earlier.julian_date()?;
-    let seconds = seconds_between_splits(
-        later.jd_whole,
-        later.fraction,
-        earlier.jd_whole,
-        earlier.fraction,
-    );
-    seconds.is_finite().then_some(seconds)
-}
-
-fn time_scale_rank(scale: TimeScale) -> u8 {
-    match scale {
-        TimeScale::Utc => 0,
-        TimeScale::Tai => 1,
-        TimeScale::Tt => 2,
-        TimeScale::Tcg => 3,
-        TimeScale::Tdb => 4,
-        TimeScale::Tcb => 5,
-        TimeScale::Gpst => 6,
-        TimeScale::Gst => 7,
-        TimeScale::Bdt => 8,
-        TimeScale::Glonasst => 9,
-        TimeScale::Qzsst => 10,
-    }
-}
-
-fn days_since_gps_epoch(year: i32, month: u8, day: u8) -> i64 {
-    julian_day_number(year, i32::from(month), i32::from(day)) - julian_day_number(1980, 1, 6)
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
-mod tests {
-    use super::*;
-
-    fn as_record(satellite: &str, bias: &str) -> String {
-        format!("AS {satellite} 2020 01 01 00 00 00.000000 1 {bias}")
-    }
-
-    #[test]
-    fn parse_rejects_non_finite_as_bias() {
-        let err = RinexClock::parse(&as_record("G01", "NaN")).unwrap_err();
-        assert_eq!(
-            err,
-            RinexClockError::BadField {
-                line: 1,
-                field: "bias",
-                value: "NaN".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn parse_rejects_malformed_as_satellite_token() {
-        let err = RinexClock::parse(&as_record("X01", "1.0e-9")).unwrap_err();
-        assert_eq!(
-            err,
-            RinexClockError::BadField {
-                line: 1,
-                field: "satellite",
-                value: "X01".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn explicit_utc_time_system_preserves_clock_epoch_scale() {
-        let text = " 3.00           C                                       RINEX VERSION / TYPE\n\
-                    UTC                                                     TIME SYSTEM ID\n\
-                                                                        END OF HEADER\n\
-                    AS G05  2017 01 01 00 00  0.000000  1   1.0e-04\n\
-                    AS G05  2017 01 01 00 00 30.000000  1   2.0e-04\n";
-        let clock = RinexClock::parse(text).expect("UTC RINEX clock");
-
-        assert_eq!(clock.time_scale, TimeScale::Utc);
-        assert_eq!(clock.series["G05"][0].epoch.scale, TimeScale::Utc);
-        let interpolated = clock
-            .clock_s(
-                "G05",
-                ClockEpoch {
-                    year: 2017,
-                    month: 1,
-                    day: 1,
-                    hour: 0,
-                    minute: 0,
-                    second: 15.0,
-                },
-            )
-            .expect("valid clock query")
-            .expect("UTC interpolated clock");
-        assert!((interpolated - 1.5e-4).abs() < 1.0e-18);
-
-        let gpst_query =
-            civil_to_clock_instant(TimeScale::Gpst, 2017, 1, 1, 0, 0, 15.0).expect("GPST instant");
-        assert_eq!(
-            clock
-                .clock_s_at_instant("G05", gpst_query)
-                .expect("valid clock query"),
-            None
-        );
-
-        let rows = clock.instant_series_rows();
-        assert_eq!(rows[0].1[0].0.scale, TimeScale::Utc);
-        let rebuilt = RinexClock::from_instant_series_rows(clock.time_scale, rows)
-            .expect("valid manual RINEX clock rows");
-        assert_eq!(rebuilt, clock);
-    }
-
-    #[test]
-    fn manual_series_rows_reject_non_finite_inputs() {
-        assert_eq!(
-            RinexClock::from_series_rows(vec![("G05".to_string(), vec![(f64::NAN, 1.0e-4)])])
-                .unwrap_err(),
-            RinexClockError::InvalidInput {
-                field: "gps_seconds",
-                reason: "must be finite",
-            }
-        );
-        assert_eq!(
-            RinexClock::from_series_rows(vec![(
-                "G05".to_string(),
-                vec![(1_463_904_000.0, f64::INFINITY)]
-            )])
-            .unwrap_err(),
-            RinexClockError::InvalidInput {
-                field: "bias_s",
-                reason: "must be finite",
-            }
-        );
-    }
-
-    #[test]
-    fn manual_series_rows_reject_unsorted_gps_seconds() {
-        assert_eq!(
-            RinexClock::from_series_rows(vec![(
-                "G05".to_string(),
-                vec![(1_463_904_030.0, 1.0e-4), (1_463_904_000.0, 2.0e-4)]
-            )])
-            .unwrap_err(),
-            RinexClockError::InvalidInput {
-                field: "gps_seconds",
-                reason: "must be strictly increasing",
-            }
-        );
-    }
-
-    #[test]
-    fn manual_instant_rows_reject_non_finite_inputs() {
-        let bad_epoch = Instant::from_julian_date(
-            TimeScale::Gpst,
-            JulianDateSplit {
-                jd_whole: f64::NAN,
-                fraction: 0.0,
-            },
-        );
-        assert_eq!(
-            RinexClock::from_instant_series_rows(
-                TimeScale::Gpst,
-                vec![("G05".to_string(), vec![(bad_epoch, 1.0e-4)])],
-            )
-            .unwrap_err(),
-            RinexClockError::InvalidInput {
-                field: "epoch",
-                reason: "must be finite",
-            }
-        );
-
-        let good_epoch =
-            civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 0.0).expect("GPST instant");
-        assert_eq!(
-            RinexClock::from_instant_series_rows(
-                TimeScale::Gpst,
-                vec![("G05".to_string(), vec![(good_epoch, f64::NAN)])],
-            )
-            .unwrap_err(),
-            RinexClockError::InvalidInput {
-                field: "bias_s",
-                reason: "must be finite",
-            }
-        );
-    }
-
-    #[test]
-    fn manual_instant_rows_reject_unsorted_epochs() {
-        let later =
-            civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 30.0).expect("later epoch");
-        let earlier =
-            civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 0.0).expect("earlier epoch");
-
-        assert_eq!(
-            RinexClock::from_instant_series_rows(
-                TimeScale::Gpst,
-                vec![("G05".to_string(), vec![(later, 1.0e-4), (earlier, 2.0e-4)])],
-            )
-            .unwrap_err(),
-            RinexClockError::InvalidInput {
-                field: "epoch",
-                reason: "must be strictly increasing",
-            }
-        );
-    }
-
-    #[test]
-    fn rinex_clock_queries_reject_non_finite_inputs() {
-        let clock = RinexClock::from_series_rows(vec![(
-            "G05".to_string(),
-            vec![(1_463_904_000.0, 1.0e-4)],
-        )])
-        .expect("valid manual RINEX clock rows");
-        let bad_epoch = Instant::from_julian_date(
-            TimeScale::Gpst,
-            JulianDateSplit {
-                jd_whole: f64::INFINITY,
-                fraction: 0.0,
-            },
-        );
-        assert_eq!(
-            clock.clock_s_at_instant("G05", bad_epoch).unwrap_err(),
-            RinexClockError::InvalidInput {
-                field: "epoch",
-                reason: "must be finite",
-            }
-        );
-        assert_eq!(
-            clock.clock_s_at_gps_seconds("G05", f64::NAN).unwrap_err(),
-            RinexClockError::InvalidInput {
-                field: "gps_seconds",
-                reason: "must be finite",
-            }
-        );
-        assert_eq!(
-            clock
-                .clock_s(
-                    "G05",
-                    ClockEpoch {
-                        year: 2026,
-                        month: 5,
-                        day: 13,
-                        hour: 0,
-                        minute: 0,
-                        second: f64::NAN,
-                    },
-                )
-                .unwrap_err(),
-            RinexClockError::InvalidInput {
-                field: "epoch",
-                reason: "invalid civil clock epoch",
-            }
-        );
-    }
-
-    #[test]
-    fn interpolation_rejects_non_positive_bracket_span() {
-        let day = 2_457_753.5;
-        let p0 = Instant::from_julian_date(
-            TimeScale::Utc,
-            JulianDateSplit::new(day, 1.0).expect("valid split Julian date"),
-        );
-        let p1 = Instant::from_julian_date(
-            TimeScale::Utc,
-            JulianDateSplit::new(day + 1.0, 0.0).expect("valid split Julian date"),
-        );
-        let query = Instant::from_julian_date(
-            TimeScale::Utc,
-            JulianDateSplit::new(day + 1.0, 0.5 / SECONDS_PER_DAY)
-                .expect("valid split Julian date"),
-        );
-        let records = [
-            ClockPoint {
-                epoch: p0,
-                bias_s: 1.0e-4,
-                additional_values: Vec::new(),
-            },
-            ClockPoint {
-                epoch: p1,
-                bias_s: 2.0e-4,
-                additional_values: Vec::new(),
-            },
-        ];
-
-        assert_eq!(interpolate(&records, query), None);
-    }
-
-    #[test]
-    fn qzsst_rows_are_queryable_on_the_gpst_timeline() {
-        // A QZSS clock file is tagged QZSST, which is synchronous with GPST. A
-        // GPST-built query (clock_s_at_gps_seconds) must interpolate those rows;
-        // an exact-scale match previously rejected them, returning None.
-        let p0 = civil_to_clock_instant(TimeScale::Qzsst, 2026, 5, 13, 0, 0, 0.0)
-            .expect("QZSST instant");
-        let p1 = civil_to_clock_instant(TimeScale::Qzsst, 2026, 5, 13, 0, 0, 30.0)
-            .expect("QZSST instant");
-        let clock = RinexClock::from_instant_series_rows(
-            TimeScale::Qzsst,
-            vec![("J02".to_string(), vec![(p0, 1.0e-4), (p1, 3.0e-4)])],
-        )
-        .expect("QZSST clock builds");
-
-        // QZSST civil time equals GPST civil time, so this is the GPS-seconds tag
-        // of the bracket midpoint (00:00:15).
-        let mid = civil_to_gps_seconds(2026, 5, 13, 0, 0, 15.0).expect("gps seconds");
-        let bias = clock
-            .clock_s_at_gps_seconds("J02", mid)
-            .expect("query succeeds")
-            .expect("QZSST row interpolates on the GPST timeline");
-        assert!(
-            (bias - 2.0e-4).abs() < 1.0e-12,
-            "expected midpoint interpolation 2.0e-4, got {bias}"
-        );
-
-        // An exact-epoch GPST query returns the stored bias.
-        let start = civil_to_gps_seconds(2026, 5, 13, 0, 0, 0.0).expect("gps seconds");
-        assert_eq!(
-            clock
-                .clock_s_at_gps_seconds("J02", start)
-                .expect("query succeeds"),
-            Some(1.0e-4)
-        );
-    }
-
-    #[test]
-    fn to_rinex_string_round_trips_through_parse() {
-        // The canonical IR is the parsed product (time scale + per-satellite
-        // series). Serializing it and re-parsing must reproduce both, across
-        // multiple satellites and epochs with fractional seconds.
-        let text =
-            "     3.00           C                                       RINEX VERSION / TYPE\n\
-                    GPS                                                         TIME SYSTEM ID\n\
-                                                                        END OF HEADER\n\
-                    AS G05  2026 05 13 00 00  0.000000  1   -2.000000000000e-04\n\
-                    AS G05  2026 05 13 00 00 30.500000  1   -2.000000600000e-04\n\
-                    AS G24  2026 05 13 00 01  0.000000  1    5.000000000000e-05\n\
-                    AS E11  2026 05 13 00 00  0.000000  1    1.234500000000e-09\n";
-        let clock = RinexClock::parse(text).expect("parse GPST RINEX clock");
-        let serialized = clock.to_rinex_string().expect("serialize RINEX clock");
-        let reparsed = RinexClock::parse(&serialized).expect("re-parse serialized");
-        assert_eq!(reparsed, clock, "serializer must round-trip through parse");
-        // Deterministic output.
-        assert_eq!(
-            reparsed
-                .to_rinex_string()
-                .expect("serialize reparsed clock"),
-            serialized
-        );
-    }
-
-    #[test]
-    fn to_rinex_string_round_trips_utc_time_scale() {
-        // The time-system label round-trips: a UTC product re-parses as UTC.
-        let text =
-            "     3.00           C                                       RINEX VERSION / TYPE\n\
-                    UTC                                                         TIME SYSTEM ID\n\
-                                                                        END OF HEADER\n\
-                    AS G05  2017 01 01 00 00  0.000000  1    1.000000000000e-04\n\
-                    AS G05  2017 01 01 00 00 30.000000  1    2.000000000000e-04\n";
-        let clock = RinexClock::parse(text).expect("parse UTC RINEX clock");
-        assert_eq!(clock.time_scale, TimeScale::Utc);
-        let serialized = clock.to_rinex_string().expect("serialize RINEX clock");
-        let reparsed = RinexClock::parse(&serialized).expect("re-parse serialized");
-        assert_eq!(reparsed.time_scale, TimeScale::Utc);
-        assert_eq!(reparsed, clock);
-    }
-
-    #[test]
-    fn to_rinex_string_rejects_unsupported_time_scale() {
-        let epoch =
-            civil_to_clock_instant(TimeScale::Tcg, 2026, 5, 13, 0, 0, 0.0).expect("TCG instant");
-        let clock = RinexClock::from_instant_series_rows(
-            TimeScale::Tcg,
-            vec![("G05".to_string(), vec![(epoch, 1.0e-4)])],
-        )
-        .expect("TCG clock builds");
-
-        assert_eq!(
-            clock.to_rinex_string(),
-            Err(RinexClockError::UnsupportedTimeScale {
-                scale: TimeScale::Tcg
-            })
-        );
-    }
-
-    #[test]
-    fn to_rinex_string_rejects_unsupported_row_time_scale() {
-        let epoch =
-            civil_to_clock_instant(TimeScale::Tcg, 2026, 5, 13, 0, 0, 0.0).expect("TCG instant");
-        let clock = RinexClock::from_instant_series_rows(
-            TimeScale::Gpst,
-            vec![("G05".to_string(), vec![(epoch, 1.0e-4)])],
-        )
-        .expect("mixed-scale clock builds");
-
-        assert_eq!(
-            clock.to_rinex_string(),
-            Err(RinexClockError::UnsupportedTimeScale {
-                scale: TimeScale::Tcg
-            })
-        );
-    }
-
-    #[test]
-    fn nanos_repr_epoch_serializes_to_true_civil_time() {
-        // A `Nanos`-repr instant counts from J2000 in its own scale. The
-        // serializer must render its actual civil time, not a fabricated J2000
-        // (2000-01-01 12:00:00). Build the same epoch in both reprs and confirm
-        // they serialize identically and the Nanos product re-parses to the
-        // (Julian-date) parsed product.
-        let jd_epoch =
-            civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 30.0).expect("GPST instant");
-        let j2000_s = instant_to_j2000_seconds(&jd_epoch).expect("J2000 seconds");
-        let nanos = (j2000_s * 1.0e9).round() as i128;
-        let nanos_epoch = Instant::from_nanos(TimeScale::Gpst, nanos);
-
-        let nanos_clock = RinexClock::from_instant_series_rows(
-            TimeScale::Gpst,
-            vec![("G05".to_string(), vec![(nanos_epoch, 1.0e-4)])],
-        )
-        .expect("nanos clock builds");
-        let jd_clock = RinexClock::from_instant_series_rows(
-            TimeScale::Gpst,
-            vec![("G05".to_string(), vec![(jd_epoch, 1.0e-4)])],
-        )
-        .expect("jd clock builds");
-
-        let serialized = nanos_clock
-            .to_rinex_string()
-            .expect("serialize nanos RINEX clock");
-        assert!(
-            serialized.contains("2026 05 13 00 00 30.000000"),
-            "Nanos epoch must serialize to its true civil time, got:\n{serialized}"
-        );
-        assert_eq!(
-            serialized,
-            jd_clock
-                .to_rinex_string()
-                .expect("serialize JD RINEX clock"),
-            "Nanos- and Julian-date-repr epochs of the same instant must serialize identically"
-        );
-
-        let reparsed = RinexClock::parse(&serialized).expect("re-parse serialized Nanos product");
-        assert_eq!(reparsed, jd_clock);
-    }
-
-    #[test]
-    fn to_rinex_string_round_trips_utc_leap_second_epoch() {
-        // The parser accepts a UTC `23:59:60.x` leap-second label, storing it as a
-        // sub-midnight fraction on the next day's whole JD. The serializer must
-        // reproduce that `:60` label exactly, not a wrong time from the negative
-        // time-of-day.
-        let text =
-            "     3.00           C                                       RINEX VERSION / TYPE\n\
-                    UTC                                                         TIME SYSTEM ID\n\
-                                                                        END OF HEADER\n\
-                    AS G05  2016 12 31 23 59 60.000000  1    1.000000000000e-04\n\
-                    AS G05  2016 12 31 23 59 60.500000  1    2.000000000000e-04\n";
-        let clock = RinexClock::parse(text).expect("parse UTC leap-second RINEX clock");
-        let serialized = clock.to_rinex_string().expect("serialize RINEX clock");
-        assert!(
-            serialized.contains("23 59 60.000000"),
-            "leap-second label must round-trip, got:\n{serialized}"
-        );
-        assert!(
-            serialized.contains("23 59 60.500000"),
-            "fractional leap second must round-trip, got:\n{serialized}"
-        );
-        let reparsed = RinexClock::parse(&serialized).expect("re-parse serialized leap second");
-        assert_eq!(
-            reparsed, clock,
-            "leap-second epoch must round-trip bit-exact"
-        );
-    }
-
-    #[test]
-    fn parse_fixed_column_satellite_with_internal_space() {
-        let text = "AS G  1 2026 05 13 00 00  0.000000  1   1.000000000000e-04\n";
-        let clock = RinexClock::parse(text).expect("parse satellite with internal space");
-        assert!(clock.series.contains_key("G01"));
-        assert_eq!(clock.series["G01"].len(), 1);
-    }
-
-    #[test]
-    fn parse_fixed_column_abutting_fields() {
-        let text =
-            "AS G01  2026 05 13 00 00  0.000000  2    2.761547232975e-04 4.197517456140e-11\n";
-        let clock = RinexClock::parse(text).expect("parse abutting bias and sigma");
-        assert!(clock.series.contains_key("G01"));
-        let point = &clock.series["G01"][0];
-        assert_eq!(point.bias_s.to_bits(), (2.761547232975e-4_f64).to_bits());
-    }
-
-    #[test]
-    fn strict_parse_rejects_unrecognized_record_type() {
-        let text = "XX G01  2026 05 13 00 00  0.000000  1   1.0e-04\n";
-        let err =
-            RinexClock::parse(text).expect_err("strict parse must reject unknown record type");
-        assert_eq!(
-            err,
-            RinexClockError::BadField {
-                line: 1,
-                field: "record_type",
-                value: "XX".to_string(),
-            }
-        );
-        let lossy = RinexClock::parse_lossy(text);
-        assert!(lossy.series.is_empty());
-    }
-
-    #[test]
-    fn write_as_record_formats_fixed_columns_single_digit_seconds() {
-        let instant = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 5.123456).unwrap();
-        let point = ClockPoint {
-            epoch: instant,
-            bias_s: 2.761547232975e-4,
-            additional_values: Vec::new(),
-        };
-        let mut out = String::new();
-        write_as_record(&mut out, "G01", &point).unwrap();
-        assert!(
-            out.starts_with("AS G01  2026 05 13 00 00  5.123456  1"),
-            "expected fixed-column layout without space split in seconds: {out}"
-        );
-        assert!(
-            fixed_record(out.trim_end(), AS_RECORD_COLUMNS).is_some(),
-            "formatted record must match AS_RECORD_COLUMNS: {out}"
-        );
-    }
-
-    #[test]
-    fn write_as_record_formats_exact_19_column_fields_and_continuation() {
-        let instant = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 0.0).unwrap();
-        let point = ClockPoint {
-            epoch: instant,
-            bias_s: 1.234567890123e100,
-            additional_values: vec![2.761547232975e-4, -0.0, 1.234567890123e-100],
-        };
-        let mut out = String::new();
-        write_as_record(&mut out, "G01", &point).unwrap();
-        let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), 2);
-
-        let parent = lines[0];
-        assert_eq!(parent.len(), 79);
-        assert_eq!(&parent[40..59], "1.234567890123E+100");
-        assert_eq!(&parent[59..60], " ");
-        assert_eq!(&parent[60..79], " 2.761547232975E-04");
-
-        let cont = lines[1];
-        assert_eq!(cont.len(), 39);
-        assert_eq!(&cont[0..19], "-0.000000000000E+00");
-        assert_eq!(&cont[19..20], " ");
-        assert_eq!(&cont[20..39], "1.234567890123E-100");
-    }
-
-    #[test]
-    fn parse_reports_unmodelled_clock_records_while_returning_modelled_satellite_series() {
-        let text = "\
-     3.00           C                                       RINEX VERSION / TYPE
-     2    AR    AS                                          # / TYPES OF DATA
-                                                            END OF HEADER
-AS G01  2026 05 13 00 00  0.000000  1   1.000000000000e-04
-AR ALIC 2026 05 13 00 00  0.000000  2   2.000000000000e-04 1.0e-10
-AS G02  2026 05 13 00 00  0.000000  1   3.000000000000e-04
-CR ALGO 2026 05 13 00 00  0.000000  2   4.000000000000e-04 1.0e-10
-DR AREQ 2026 05 13 00 00  0.000000  2   5.000000000000e-04 1.0e-10
-MS ASCG 2026 05 13 00 00  0.000000  2   6.000000000000e-04 1.0e-10
-AS G01  2026 05 13 00 00 30.000000  1   1.500000000000e-04
-";
-        let clock = RinexClock::parse(text).expect("parse clock file with mixed records");
-        assert_eq!(clock.series.len(), 2);
-        assert_eq!(clock.series["G01"].len(), 2);
-        assert_eq!(clock.series["G02"].len(), 1);
-        assert_eq!(clock.series["G01"][0].bias_s, 1.0e-4);
-        assert_eq!(clock.series["G01"][1].bias_s, 1.5e-4);
-        assert_eq!(clock.series["G02"][0].bias_s, 3.0e-4);
-
-        assert_eq!(clock.skipped_records.len(), 4);
-        assert_eq!(
-            clock.skipped_records[0],
-            RinexClockSkip {
-                line: 5,
-                record_type: "AR".to_string(),
-            }
-        );
-        assert_eq!(
-            clock.skipped_records[1],
-            RinexClockSkip {
-                line: 7,
-                record_type: "CR".to_string(),
-            }
-        );
-        assert_eq!(
-            clock.skipped_records[2],
-            RinexClockSkip {
-                line: 8,
-                record_type: "DR".to_string(),
-            }
-        );
-        assert_eq!(
-            clock.skipped_records[3],
-            RinexClockSkip {
-                line: 9,
-                record_type: "MS".to_string(),
-            }
-        );
-
-        let lossy = RinexClock::parse_lossy(text);
-        assert_eq!(lossy.series.len(), 2);
-        assert_eq!(lossy.skipped_records, clock.skipped_records);
-        assert!(lossy.diagnostics.is_empty());
-    }
-
-    #[test]
-    fn format_e19_12_formats_standard_examples_and_rejects_unrepresentable() {
-        assert_eq!(
-            format_e19_12(-0.123456789012, "bias").unwrap(),
-            "-0.123456789012E+00"
-        );
-        assert_eq!(
-            format_e19_12(-1.23456789012, "bias").unwrap(),
-            "-0.123456789012E+01"
-        );
-        assert_eq!(
-            format_e19_12(-12.3456789012, "bias").unwrap(),
-            "-0.123456789012E+02"
-        );
-        assert_eq!(format_e19_12(0.0, "bias").unwrap(), " 0.000000000000E+00");
-        assert_eq!(format_e19_12(-0.0, "bias").unwrap(), "-0.000000000000E+00");
-        assert_eq!(
-            format_e19_12(1.0e-4, "bias").unwrap(),
-            " 0.100000000000E-03"
-        );
-        assert_eq!(
-            format_e19_12(2.761547232975e-4, "bias").unwrap(),
-            " 2.761547232975E-04"
-        );
-        assert_eq!(
-            format_e19_12(1.0e-105, "bias").unwrap(),
-            " .100000000000E-104"
-        );
-        assert_eq!(
-            format_e19_12(1.234567890123e100, "bias").unwrap(),
-            "1.234567890123E+100"
-        );
-        assert_eq!(
-            format_e19_12(1.234567890123e-100, "bias").unwrap(),
-            "1.234567890123E-100"
-        );
-
-        assert!(format_e19_12(f64::NAN, "bias").is_err());
-        assert!(format_e19_12(f64::INFINITY, "bias").is_err());
-        assert!(format_e19_12(f64::NEG_INFINITY, "bias").is_err());
-
-        let fb_neg_e100 = format_e19_12(-1.234567890123e100, "bias").unwrap();
-        assert_eq!(fb_neg_e100.len(), 19);
-        assert_eq!(
-            fb_neg_e100.trim().parse::<f64>().unwrap().to_bits(),
-            (-1.234567890123e100_f64).to_bits()
-        );
-
-        let fb_neg_em100 = format_e19_12(-1.234567890123e-100, "bias").unwrap();
-        assert_eq!(fb_neg_em100.len(), 19);
-        assert_eq!(
-            fb_neg_em100.trim().parse::<f64>().unwrap().to_bits(),
-            (-1.234567890123e-100_f64).to_bits()
-        );
-
-        assert_eq!(
-            format_e19_12(-1.2345678901234e100, "bias").unwrap(),
-            "-12.345678901234E99"
-        );
-
-        assert!(format_e19_12(1.23456789012345e-4, "bias").is_err());
-        assert!(format_e19_12(-1.2345678901234e-100, "bias").is_err());
-    }
-
-    #[test]
-    fn validate_clock_point_bounds_and_finite_checks() {
-        let epoch = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 0.0).unwrap();
-        let valid = ClockPoint {
-            epoch,
-            bias_s: 1.0e-4,
-            additional_values: vec![1.0e-5, 2.0e-6, 3.0e-7, 4.0e-8, 5.0e-9],
-        };
-        assert!(valid.validate().is_ok());
-
-        let mut too_many = valid.clone();
-        too_many.additional_values.push(6.0e-10);
-        assert_eq!(
-            too_many.validate(),
-            Err(RinexClockError::InvalidInput {
-                field: "additional_values",
-                reason: "cannot exceed 5 additional values (maximum count is 6)",
-            })
-        );
-
-        let mut non_finite = valid;
-        non_finite.additional_values[2] = f64::NAN;
-        assert_eq!(
-            non_finite.validate(),
-            Err(RinexClockError::InvalidInput {
-                field: "rate_sigma",
-                reason: "must be finite",
-            })
-        );
-    }
+/// The order key a fresh assignment gives the entry at a body position.
+fn order_key_at(position: usize) -> u64 {
+    (position as u64 + 1).saturating_mul(ORDER_KEY_GAP)
 }

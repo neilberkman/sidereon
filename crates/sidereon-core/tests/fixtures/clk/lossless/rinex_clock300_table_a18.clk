@@ -1,0 +1,13 @@
+     2.00           CLOCK DATA                              RINEX VERSION / TYPE
+TORINEXC V9.9       USNO                 3-APR-96 00:10     PGM / RUN BY / DATE
+EXAMPLE OF A CLOCK DATA FILE                                COMMENT
+IN THIS CASE CALIBRATION/DISCONTINUITY DATA GIVEN           COMMENT
+    10                                                      LEAP SECONDS
+     2    CR    DR                                          # / TYPES OF DATA
+USNO 40451S003                                              STATION NAME / NUM
+UTC(USNO) MASTER CLOCK VIA CONTINUOUS CABLE MONITOR         STATION CLK REF
+                                                            END OF HEADER
+CR USNO 1994 07 14 20 59 50.000000  2     .123456789012E+00   .123456789012E-01
+CR USNO 1994 07 14 22 19 30.000000  2    -.123456789012E+00   .123456789012E-02
+DR USNO 1994 07 14 22 23 14.500000  2    -.123456789012E+01   .123456789012E+00
+CR USNO 1994 07 14 23 44 50.000000  2    -.123456789012E+02   .123456789012E+00

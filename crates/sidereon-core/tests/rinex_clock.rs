@@ -14,8 +14,9 @@ use sidereon_core::astro::time::model::{Instant, TimeScale};
 use sidereon_core::constants::SECONDS_PER_DAY;
 use sidereon_core::ephemeris::Sp3;
 use sidereon_core::rinex::clock::{
-    civil_to_clock_instant, civil_to_gps_seconds, ClockEpoch, ClockPoint, RinexClock,
-    RinexClockError, RinexClockSkip,
+    civil_to_clock_instant, civil_to_gps_seconds, ClockEpoch, ClockLayout, ClockPoint,
+    ClockRecordReading, ClockRecordType, ClockSurplusValue, RinexClock, RinexClockError,
+    RinexClockNotice, RinexClockSkip,
 };
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 
@@ -106,11 +107,11 @@ fn real_clk_and_sp3_clocks_match_at_shared_record_epochs() {
 #[test]
 fn parses_satellite_clock_records_and_ignores_receivers() {
     let clock = RinexClock::parse(CLK).expect("RINEX clock");
-    assert_eq!(clock.time_scale, TimeScale::Gpst);
-    let sats = clock.series.keys().cloned().collect::<Vec<_>>();
+    assert_eq!(clock.time_scale(), Some(TimeScale::Gpst));
+    let sats = clock.series().keys().cloned().collect::<Vec<_>>();
     assert_eq!(sats, vec!["G05".to_string(), "G24".to_string()]);
-    assert_eq!(clock.series["G05"].len(), 3);
-    assert_eq!(clock.series["G24"].len(), 2);
+    assert_eq!(clock.series()["G05"].len(), 3);
+    assert_eq!(clock.series()["G24"].len(), 2);
 }
 
 #[test]
@@ -169,26 +170,38 @@ fn duplicate_time_tags_keep_the_last_record() {
         .expect("valid clock query")
         .expect("duplicate point");
     assert_eq!(bias.to_bits(), (2.0e-4_f64).to_bits());
+    // The series keeps the last record; both records remain in the product.
+    assert_eq!(clock.series()["G05"].len(), 1);
+    let biases: Vec<f64> = clock.records().map(|record| record.bias_s()).collect();
+    assert_eq!(biases, vec![1.0e-4, 2.0e-4]);
+    assert_eq!(clock.to_rinex_string().unwrap(), text);
 }
 
 #[test]
-fn rounded_fractional_second_carries_to_next_second() {
+fn seven_digit_seconds_are_read_as_stated() {
+    // The seconds field states 0.4 microseconds before the minute. It was
+    // rounded into the next minute, which merged it with a sample at the
+    // minute; it is now read as stated, as RTKLIB reads it, and the text is
+    // restated unchanged.
     let text = "AS G05  2026 05 13 00 00 59.9999996  1   1.0e-04\n";
-    let clock = RinexClock::parse(text).expect("rounded clock epoch must parse");
-    let expected = civil_to_gps_seconds(2026, 5, 13, 0, 1, 0.0).expect("next minute");
-
-    assert_eq!(
-        clock.series["G05"][0]
-            .gps_seconds()
-            .expect("GPST sample")
-            .to_bits(),
-        expected.to_bits()
+    let clock = RinexClock::parse(text).expect("seven-digit clock epoch must parse");
+    let next_minute = civil_to_gps_seconds(2026, 5, 13, 0, 1, 0.0).expect("next minute");
+    let gps_seconds = clock.series()["G05"][0].gps_seconds().expect("GPST sample");
+    assert!(gps_seconds < next_minute, "{gps_seconds} {next_minute}");
+    assert!(
+        next_minute - gps_seconds < 1.0e-6,
+        "{gps_seconds} {next_minute}"
     );
+    assert_eq!(clock.to_rinex_string().unwrap(), text);
+    // A query second is read the same way, so the civil helper names the
+    // record's epoch rather than the next minute.
+    let stated = civil_to_gps_seconds(2026, 5, 13, 0, 0, 59.9999996).expect("stated epoch");
+    assert!(stated < next_minute, "{stated} {next_minute}");
     assert_eq!(
-        civil_to_gps_seconds(2026, 5, 13, 0, 0, 59.9999996)
-            .expect("rounded public epoch")
-            .to_bits(),
-        expected.to_bits()
+        clock
+            .clock_s("G05", epoch(2026, 5, 13, 0, 0, 59.9999996))
+            .expect("valid query"),
+        Some(1.0e-4)
     );
 }
 
@@ -201,8 +214,8 @@ fn utc_time_system_preserves_scale_and_queries_by_utc_instant() {
                 AS G05  2017 01 01 00 00 30.000000  1   2.0e-04\n";
     let clock = RinexClock::parse(text).expect("UTC RINEX clock");
 
-    assert_eq!(clock.time_scale, TimeScale::Utc);
-    assert_eq!(clock.series["G05"][0].epoch.scale, TimeScale::Utc);
+    assert_eq!(clock.time_scale(), Some(TimeScale::Utc));
+    assert_eq!(clock.series()["G05"][0].epoch.scale, TimeScale::Utc);
     assert_eq!(clock.series_rows(), vec![("G05".to_string(), vec![])]);
     let interpolated = clock
         .clock_s("G05", epoch(2017, 1, 1, 0, 0, 15.0))
@@ -221,9 +234,10 @@ fn utc_time_system_preserves_scale_and_queries_by_utc_instant() {
 
     let rows = clock.instant_series_rows();
     assert_eq!(rows[0].1[0].0.scale, TimeScale::Utc);
-    let rebuilt = RinexClock::from_instant_series_rows(clock.time_scale, rows)
+    let rebuilt = RinexClock::from_instant_series_rows(TimeScale::Utc, rows)
         .expect("valid manual RINEX clock rows");
-    assert_eq!(rebuilt, clock);
+    // The rebuilt product carries the series but not the source header.
+    assert_eq!(rebuilt.series(), clock.series());
 }
 
 #[test]
@@ -234,7 +248,7 @@ fn rinex_clock_utc_leap_second_interval_to_midnight_interpolates_forward() {
                 AS G05  2016 12 31 23 59 60.250000  1   1.0e-04\n\
                 AS G05  2017 01 01 00 00  0.000000  1   4.0e-04\n";
     let clock = RinexClock::parse(text).expect("UTC leap-second RINEX clock");
-    let points = &clock.series["G05"];
+    let points = &clock.series()["G05"];
     assert_eq!(points.len(), 2);
 
     let leap = points[0].epoch.julian_date().expect("leap-second split");
@@ -349,7 +363,7 @@ fn parse_lossy_keeps_legacy_skip_behavior() {
                 AS G06  2026 05 13 00 00  bad-second  1   2.0e-04\n";
     let clock = RinexClock::parse_lossy(text);
     assert_eq!(
-        clock.series.keys().cloned().collect::<Vec<_>>(),
+        clock.series().keys().cloned().collect::<Vec<_>>(),
         vec!["G05"]
     );
     assert_eq!(
@@ -360,8 +374,8 @@ fn parse_lossy_keeps_legacy_skip_behavior() {
             .to_bits(),
         (1.0e-4_f64).to_bits()
     );
-    assert_eq!(clock.diagnostics.len(), 1);
-    assert_eq!(clock.diagnostics[0].line, 2);
+    assert_eq!(clock.diagnostics().len(), 1);
+    assert_eq!(clock.diagnostics()[0].line, 2);
 }
 
 #[test]
@@ -401,13 +415,13 @@ DR AREQ 2026 05 13 00 00  0.000000  2   5.000000000000e-04 1.0e-10
 MS ASCG 2026 05 13 00 00  0.000000  2   6.000000000000e-04 1.0e-10
 ";
     let clock = RinexClock::parse(text).expect("parse clock file with mixed records");
-    assert_eq!(clock.series.len(), 2);
-    assert_eq!(clock.series["G01"].len(), 1);
-    assert_eq!(clock.series["G02"].len(), 1);
+    assert_eq!(clock.series().len(), 2);
+    assert_eq!(clock.series()["G01"].len(), 1);
+    assert_eq!(clock.series()["G02"].len(), 1);
 
-    assert_eq!(clock.skipped_records.len(), 4);
+    assert_eq!(clock.skipped_records().len(), 4);
     assert_eq!(
-        clock.skipped_records,
+        clock.skipped_records(),
         vec![
             RinexClockSkip {
                 line: 5,
@@ -443,11 +457,11 @@ fn blank_and_whitespace_lines_compatibility() {
         "   \n",
     );
     let strict = RinexClock::parse(text).expect("blank lines must parse in strict mode");
-    assert_eq!(strict.series["G01"].len(), 2);
+    assert_eq!(strict.series()["G01"].len(), 2);
 
     let lossy = RinexClock::parse_lossy(text);
-    assert_eq!(lossy.series["G01"].len(), 2);
-    assert!(lossy.diagnostics.is_empty());
+    assert_eq!(lossy.series()["G01"].len(), 2);
+    assert!(lossy.diagnostics().is_empty());
 }
 
 #[test]
@@ -461,14 +475,14 @@ AS G16  1994 07 14 20 59  0.000000  2    -.123456789012E+00  -.123456789012E-01
 ";
     let clock = RinexClock::parse(text).expect("parse official 3.00 mixed lines");
     assert_eq!(
-        clock.skipped_records,
+        clock.skipped_records(),
         vec![RinexClockSkip {
             line: 4,
             record_type: "AR".to_string(),
         }]
     );
-    assert_eq!(clock.series.len(), 1);
-    let point = &clock.series["G16"][0];
+    assert_eq!(clock.series().len(), 1);
+    let point = &clock.series()["G16"][0];
     assert_eq!(point.bias_s, -0.123456789012);
     assert_eq!(point.additional_values, vec![-0.0123456789012]);
 }
@@ -486,10 +500,10 @@ AS G04  2026 05 13 00 00  0.000000  6   -0.123456789012E+00 -0.123456789012E+01
 -0.123456789012E+02 -0.123456789012E+03 -0.123456789012E+04 -0.123456789012E+05
 ";
     let clock = RinexClock::parse(text).expect("parse records of counts 1, 2, 4, 6");
-    assert_eq!(clock.series["G01"][0].additional_values.len(), 0);
-    assert_eq!(clock.series["G02"][0].additional_values.len(), 1);
-    assert_eq!(clock.series["G03"][0].additional_values.len(), 3);
-    assert_eq!(clock.series["G04"][0].additional_values.len(), 5);
+    assert_eq!(clock.series()["G01"][0].additional_values.len(), 0);
+    assert_eq!(clock.series()["G02"][0].additional_values.len(), 1);
+    assert_eq!(clock.series()["G03"][0].additional_values.len(), 3);
+    assert_eq!(clock.series()["G04"][0].additional_values.len(), 5);
 
     let serialized = clock
         .to_rinex_string()
@@ -498,7 +512,7 @@ AS G04  2026 05 13 00 00  0.000000  6   -0.123456789012E+00 -0.123456789012E+01
     assert_eq!(reparsed, clock);
 
     assert_eq!(
-        reparsed.series["G04"][0].additional_values,
+        reparsed.series()["G04"][0].additional_values,
         vec![
             -1.23456789012,
             -12.3456789012,
@@ -526,12 +540,12 @@ AS G02  2026 05 13 00 00  0.000000  1   -0.123456789012E+00
     );
 
     let lossy = RinexClock::parse_lossy(text);
-    assert!(!lossy.series.contains_key("G01"));
-    assert!(lossy.series.contains_key("G02"));
-    assert_eq!(lossy.series["G02"].len(), 1);
-    assert_eq!(lossy.diagnostics.len(), 1);
-    assert_eq!(lossy.diagnostics[0].line, 3);
-    assert_eq!(lossy.diagnostics[0].error, err);
+    assert!(!lossy.series().contains_key("G01"));
+    assert!(lossy.series().contains_key("G02"));
+    assert_eq!(lossy.series()["G02"].len(), 1);
+    assert_eq!(lossy.diagnostics().len(), 1);
+    assert_eq!(lossy.diagnostics()[0].line, 3);
+    assert_eq!(lossy.diagnostics()[0].error, err);
 }
 
 #[test]
@@ -554,12 +568,12 @@ AS G02  2026 05 13 00 00  0.000000  1   -0.123456789012E+00
     );
 
     let lossy = RinexClock::parse_lossy(text);
-    assert!(!lossy.series.contains_key("G01"));
-    assert!(lossy.series.contains_key("G02"));
-    assert_eq!(lossy.series["G02"].len(), 1);
-    assert_eq!(lossy.diagnostics.len(), 1);
-    assert_eq!(lossy.diagnostics[0].line, 4);
-    assert_eq!(lossy.diagnostics[0].error, err);
+    assert!(!lossy.series().contains_key("G01"));
+    assert!(lossy.series().contains_key("G02"));
+    assert_eq!(lossy.series()["G02"].len(), 1);
+    assert_eq!(lossy.diagnostics().len(), 1);
+    assert_eq!(lossy.diagnostics()[0].line, 4);
+    assert_eq!(lossy.diagnostics()[0].error, err);
 }
 
 #[test]
@@ -578,10 +592,10 @@ fn unknown_standalone_numeric_line_is_rejected() {
         }
     );
     let lossy = RinexClock::parse_lossy(text);
-    assert!(lossy.series.is_empty());
-    assert_eq!(lossy.diagnostics.len(), 1);
-    assert_eq!(lossy.diagnostics[0].line, 3);
-    assert_eq!(lossy.diagnostics[0].error, err);
+    assert!(lossy.series().is_empty());
+    assert_eq!(lossy.diagnostics().len(), 1);
+    assert_eq!(lossy.diagnostics()[0].line, 3);
+    assert_eq!(lossy.diagnostics()[0].error, err);
 }
 
 #[test]
@@ -591,7 +605,7 @@ fn fixed_column_adjacent_full_width_values() {
 AS G01  2026 05 13 00 00  0.000000  2   -0.123456789012E+00 -0.123456789012E+01
 ";
     let clock = RinexClock::parse(text).expect("parse fixed-column adjacent full-width values");
-    let pt = &clock.series["G01"][0];
+    let pt = &clock.series()["G01"][0];
     assert_eq!(pt.bias_s, -0.123456789012);
     assert_eq!(pt.additional_values, vec![-1.23456789012]);
 }
@@ -609,14 +623,14 @@ AS G16       1994 07 14 20 59  0.000000  6   -0.123456789012E+00  -0.12345678901
 ";
     let clock = RinexClock::parse(text).expect("parse 3.04 layout");
     assert_eq!(
-        clock.skipped_records,
+        clock.skipped_records(),
         vec![RinexClockSkip {
             line: 4,
             record_type: "AR".to_string(),
         }]
     );
-    assert_eq!(clock.series.len(), 1);
-    let pt = &clock.series["G16"][0];
+    assert_eq!(clock.series().len(), 1);
+    let pt = &clock.series()["G16"][0];
     assert_eq!(pt.bias_s, -0.123456789012);
     assert_eq!(
         pt.additional_values,
@@ -660,18 +674,19 @@ fn public_validation_and_refusal_for_additional_values() {
         })
     );
 
+    // A sigma that no 19-column field states exactly is held by the product
+    // and refused by name when written.
     let unrep = ClockPoint {
         epoch,
         bias_s: 1.0e-4,
         additional_values: vec![1.23456789012345e-4],
     };
-    let unrep_clock = RinexClock::from_instant_series_rows(
+    let bad_series = RinexClock::from_clock_points(
         TimeScale::Gpst,
-        vec![("G01".to_string(), vec![(epoch, 1.0e-4)])],
+        vec![("G01".to_string(), vec![unrep.clone()])],
     )
     .unwrap();
-    let mut bad_series = unrep_clock;
-    bad_series.series.get_mut("G01").unwrap()[0] = unrep;
+    assert_eq!(bad_series.series()["G01"], vec![unrep]);
     assert_eq!(
         bad_series.to_rinex_string(),
         Err(RinexClockError::InvalidInput {
@@ -700,12 +715,12 @@ AS G01  2026 05 13 00 00  0.000000  1   -0.123456789012E+00
         }
     );
     let lossy_0 = RinexClock::parse_lossy(text_0);
-    assert_eq!(lossy_0.diagnostics.len(), 1);
-    assert_eq!(lossy_0.diagnostics[0].line, 3);
-    assert_eq!(lossy_0.diagnostics[0].error, err_0);
-    assert_eq!(lossy_0.series.len(), 1);
-    assert_eq!(lossy_0.series["G01"].len(), 1);
-    assert!(lossy_0.skipped_records.is_empty());
+    assert_eq!(lossy_0.diagnostics().len(), 1);
+    assert_eq!(lossy_0.diagnostics()[0].line, 3);
+    assert_eq!(lossy_0.diagnostics()[0].error, err_0);
+    assert_eq!(lossy_0.series().len(), 1);
+    assert_eq!(lossy_0.series()["G01"].len(), 1);
+    assert!(lossy_0.skipped_records().is_empty());
 
     // 2. AR count 7 followed by valid AS
     let text_7 = " 3.00           C                                       RINEX VERSION / TYPE
@@ -723,11 +738,11 @@ AS G01  2026 05 13 00 00  0.000000  1   -0.123456789012E+00
         }
     );
     let lossy_7 = RinexClock::parse_lossy(text_7);
-    assert_eq!(lossy_7.diagnostics.len(), 1);
-    assert_eq!(lossy_7.diagnostics[0].line, 3);
-    assert_eq!(lossy_7.diagnostics[0].error, err_7);
-    assert_eq!(lossy_7.series["G01"].len(), 1);
-    assert!(lossy_7.skipped_records.is_empty());
+    assert_eq!(lossy_7.diagnostics().len(), 1);
+    assert_eq!(lossy_7.diagnostics()[0].line, 3);
+    assert_eq!(lossy_7.diagnostics()[0].error, err_7);
+    assert_eq!(lossy_7.series()["G01"].len(), 1);
+    assert!(lossy_7.skipped_records().is_empty());
 
     // 3. AR huge count followed by valid AS
     let text_huge = " 3.00           C                                       RINEX VERSION / TYPE
@@ -745,10 +760,10 @@ AS G01  2026 05 13 00 00  0.000000  1   -0.123456789012E+00
         }
     ));
     let lossy_huge = RinexClock::parse_lossy(text_huge);
-    assert_eq!(lossy_huge.diagnostics.len(), 1);
-    assert_eq!(lossy_huge.diagnostics[0].line, 3);
-    assert_eq!(lossy_huge.series["G01"].len(), 1);
-    assert!(lossy_huge.skipped_records.is_empty());
+    assert_eq!(lossy_huge.diagnostics().len(), 1);
+    assert_eq!(lossy_huge.diagnostics()[0].line, 3);
+    assert_eq!(lossy_huge.series()["G01"].len(), 1);
+    assert!(lossy_huge.skipped_records().is_empty());
 
     // 4. AR malformed count followed by valid AS
     let text_malformed =
@@ -767,10 +782,10 @@ AS G01  2026 05 13 00 00  0.000000  1   -0.123456789012E+00
         }
     );
     let lossy_malformed = RinexClock::parse_lossy(text_malformed);
-    assert_eq!(lossy_malformed.diagnostics.len(), 1);
-    assert_eq!(lossy_malformed.diagnostics[0].line, 3);
-    assert_eq!(lossy_malformed.series["G01"].len(), 1);
-    assert!(lossy_malformed.skipped_records.is_empty());
+    assert_eq!(lossy_malformed.diagnostics().len(), 1);
+    assert_eq!(lossy_malformed.diagnostics()[0].line, 3);
+    assert_eq!(lossy_malformed.series()["G01"].len(), 1);
+    assert!(lossy_malformed.skipped_records().is_empty());
 
     // 5. AS count 0, 7, huge, malformed
     let text_as_0 = " 3.00           C                                       RINEX VERSION / TYPE
@@ -788,10 +803,10 @@ AS G02  2026 05 13 00 00  0.000000  1   -0.123456789012E+00
         }
     );
     let lossy_as_0 = RinexClock::parse_lossy(text_as_0);
-    assert_eq!(lossy_as_0.diagnostics.len(), 1);
-    assert_eq!(lossy_as_0.diagnostics[0].line, 3);
-    assert!(!lossy_as_0.series.contains_key("G01"));
-    assert_eq!(lossy_as_0.series["G02"].len(), 1);
+    assert_eq!(lossy_as_0.diagnostics().len(), 1);
+    assert_eq!(lossy_as_0.diagnostics()[0].line, 3);
+    assert!(!lossy_as_0.series().contains_key("G01"));
+    assert_eq!(lossy_as_0.series()["G02"].len(), 1);
 
     // 6. Missing count in parent
     let text_missing_count =
@@ -810,9 +825,9 @@ AS G01  2026 05 13 00 00  0.000000  1   -0.123456789012E+00
         }
     ));
     let lossy_missing = RinexClock::parse_lossy(text_missing_count);
-    assert_eq!(lossy_missing.diagnostics.len(), 1);
-    assert_eq!(lossy_missing.diagnostics[0].line, 3);
-    assert_eq!(lossy_missing.series["G01"].len(), 1);
+    assert_eq!(lossy_missing.diagnostics().len(), 1);
+    assert_eq!(lossy_missing.diagnostics()[0].line, 3);
+    assert_eq!(lossy_missing.series()["G01"].len(), 1);
 }
 
 #[test]
@@ -825,20 +840,20 @@ AS G01  2026 05 13 00 00  0.000000  1   -0.123456789012E+00
 ";
     let clock = RinexClock::parse(text).expect("valid unsupported count 6 must parse");
     assert_eq!(
-        clock.skipped_records,
+        clock.skipped_records(),
         vec![RinexClockSkip {
             line: 3,
             record_type: "AR".to_string(),
         }]
     );
-    assert_eq!(clock.series.len(), 1);
-    assert_eq!(clock.series["G01"].len(), 1);
-    assert!(clock.diagnostics.is_empty());
+    assert_eq!(clock.series().len(), 1);
+    assert_eq!(clock.series()["G01"].len(), 1);
+    assert!(clock.diagnostics().is_empty());
 
     let lossy = RinexClock::parse_lossy(text);
-    assert_eq!(lossy.skipped_records, clock.skipped_records);
-    assert_eq!(lossy.series, clock.series);
-    assert!(lossy.diagnostics.is_empty());
+    assert_eq!(lossy.skipped_records(), clock.skipped_records());
+    assert_eq!(lossy.series(), clock.series());
+    assert!(lossy.diagnostics().is_empty());
 }
 
 #[test]
@@ -882,114 +897,163 @@ AS G16       1994 07 14 20 59  0.000000  4   -0.123456789012E+00  -0.12345678901
 }
 
 #[test]
-fn continuation_excess_values_rejected_300_and_304() {
-    // 3.00 continuation excess values: count 3 requires 1 value (value 3).
-    // Cols 20..39 has extra value (value 4).
+fn continuation_values_beyond_the_declared_count_are_retained_300_and_304() {
+    // A continuation line carrying a value in a column past the declared count
+    // is read, and the extra value is kept as a surplus value at its position.
+    // This was previously a strict parse error; the value reads correctly from
+    // a defined column, so refusing it discarded readable data.
     let text_300 = " 3.00           C                                       RINEX VERSION / TYPE
                                                             END OF HEADER
 AS G01  2026 05 13 00 00  0.000000  3   -0.123456789012E+00 -0.123456789012E+01
 -0.123456789012E+02 -0.123456789012E+03
 ";
-    let err_300 =
-        RinexClock::parse(text_300).expect_err("excess values in 3.00 continuation must error");
+    let clock_300 = RinexClock::parse(text_300).expect("3.00 continuation with surplus value");
+    let record = clock_300.records().next().expect("record");
+    assert_eq!(record.declared_count(), 3);
     assert_eq!(
-        err_300,
-        RinexClockError::MalformedContinuation {
-            line: 4,
-            reason: "excess values in continuation line",
-            record: "-0.123456789012E+02 -0.123456789012E+03".to_string(),
-        }
+        record.values(),
+        &[-0.123456789012, -1.23456789012, -12.3456789012]
     );
+    assert_eq!(
+        record.surplus_values(),
+        &[ClockSurplusValue {
+            position: 3,
+            value: -123.456789012,
+        }]
+    );
+    assert_eq!(
+        record.continuation_reading(),
+        Some(ClockRecordReading::Columns(ClockLayout::V300))
+    );
+    assert_eq!(
+        clock_300.series()["G01"][0].additional_values,
+        vec![-1.23456789012, -12.3456789012]
+    );
+    assert!(clock_300
+        .notices()
+        .contains(&RinexClockNotice::SurplusValues {
+            records: 1,
+            first_line: 3,
+        }));
+    assert_eq!(clock_300.to_rinex_string().unwrap(), text_300);
 
-    // 3.04 continuation excess values: count 3 requires 1 value. Extra value present.
     let text_304 =
         " 3.04                 C                    G                      RINEX VERSION / TYPE
+    GPS                                                           TIME SYSTEM ID
                                                                   END OF HEADER
 AS G16       1994 07 14 20 59  0.000000  3   -0.123456789012E+00  -0.123456789012E+01
    -0.123456789012E+02  -0.123456789012E+03
 ";
-    let err_304 =
-        RinexClock::parse(text_304).expect_err("excess values in 3.04 continuation must error");
+    let clock_304 = RinexClock::parse(text_304).expect("3.04 continuation with surplus value");
+    let record = clock_304.records().next().expect("record");
+    assert_eq!(record.declared_count(), 3);
     assert_eq!(
-        err_304,
-        RinexClockError::MalformedContinuation {
-            line: 4,
-            reason: "excess values in continuation line",
-            record: "-0.123456789012E+02  -0.123456789012E+03".to_string(),
-        }
+        record.surplus_values(),
+        &[ClockSurplusValue {
+            position: 3,
+            value: -123.456789012,
+        }]
     );
+    assert_eq!(
+        record.continuation_reading(),
+        Some(ClockRecordReading::Columns(ClockLayout::V304))
+    );
+    assert_eq!(clock_304.to_rinex_string().unwrap(), text_304);
 
-    // Compact continuation fallback excess values:
+    // Whitespace-separated parent whose continuation line is in the 3.00
+    // columns; a whitespace-separated continuation holds at most the four
+    // values a continuation line has room for.
     let text_compact =
         " 3.00           C                                       RINEX VERSION / TYPE
                                                             END OF HEADER
 AS G01 2026 05 13 00 00 0.000000 3 -0.123456789012E+00 -0.123456789012E+01
 -0.123456789012E+02 -0.123456789012E+03
 ";
-    let err_compact =
-        RinexClock::parse(text_compact).expect_err("compact excess continuation values must error");
+    let compact = RinexClock::parse(text_compact).expect("compact continuation with surplus");
+    let record = compact.records().next().expect("record");
+    assert_eq!(record.reading(), ClockRecordReading::Whitespace);
     assert_eq!(
-        err_compact,
+        record.continuation_reading(),
+        Some(ClockRecordReading::Columns(ClockLayout::V300))
+    );
+    assert_eq!(record.surplus_values().len(), 1);
+    assert_eq!(compact.to_rinex_string().unwrap(), text_compact);
+
+    let text_five = " 3.00           C                                       RINEX VERSION / TYPE
+                                                            END OF HEADER
+AS G01 2026 05 13 00 00 0.000000 3 -0.123456789012E+00 -0.123456789012E+01
+-0.12E+02 -0.12E+03 -0.12E+04 -0.12E+05 -0.12E+06
+";
+    let err = RinexClock::parse(text_five).expect_err("five continuation values must error");
+    assert_eq!(
+        err,
         RinexClockError::MalformedContinuation {
             line: 4,
             reason: "excess values in continuation line",
-            record: "-0.123456789012E+02 -0.123456789012E+03".to_string(),
+            record: "-0.12E+02 -0.12E+03 -0.12E+04 -0.12E+05 -0.12E+06".to_string(),
         }
     );
+    let lossy = RinexClock::parse_lossy(text_five);
+    assert_eq!(lossy.record_count(), 0);
+    assert_eq!(lossy.to_rinex_string().unwrap(), text_five);
 }
 
 #[test]
-fn parent_count_1_with_sigma_and_compact_excess_rejected() {
-    // 3.00 fixed parent count 1 with populated sigma field
+fn parent_count_1_with_sigma_is_retained_and_compact_excess_rejected() {
+    // A record that declares one value but carries a number in the bias sigma
+    // column keeps that number as a surplus value. EMR0OPSRAP writes every AS
+    // record this way (140,974 records in EMR0OPSRAP_20262600000_01D_30S_CLK),
+    // so refusing the shape refused a whole real product.
     let text_300 = " 3.00           C                                       RINEX VERSION / TYPE
                                                             END OF HEADER
 AS G01  2026 05 13 00 00  0.000000  1   -0.123456789012E+00 -0.123456789012E+01
 ";
-    let err_300 = RinexClock::parse(text_300).expect_err("3.00 count 1 with sigma must error");
+    let clock_300 = RinexClock::parse(text_300).expect("3.00 count 1 with sigma");
+    let record = clock_300.records().next().expect("record");
+    assert_eq!(record.values(), &[-0.123456789012]);
     assert_eq!(
-        err_300,
-        RinexClockError::BadField {
-            line: 3,
-            field: "sigma",
-            value: "-0.123456789012E+01".to_string(),
-        }
+        record.surplus_values(),
+        &[ClockSurplusValue {
+            position: 1,
+            value: -1.23456789012,
+        }]
     );
+    assert!(clock_300.series()["G01"][0].additional_values.is_empty());
+    assert_eq!(clock_300.to_rinex_string().unwrap(), text_300);
 
-    // 3.04 fixed parent count 1 with populated sigma field
     let text_304 =
         " 3.04                 C                    G                      RINEX VERSION / TYPE
+    GPS                                                           TIME SYSTEM ID
                                                                   END OF HEADER
 AS G16       1994 07 14 20 59  0.000000  1   -0.123456789012E+00  -0.123456789012E+01
 ";
-    let err_304 = RinexClock::parse(text_304).expect_err("3.04 count 1 with sigma must error");
+    let clock_304 = RinexClock::parse(text_304).expect("3.04 count 1 with sigma");
+    let record = clock_304.records().next().expect("record");
     assert_eq!(
-        err_304,
-        RinexClockError::BadField {
-            line: 3,
-            field: "sigma",
-            value: "-0.123456789012E+01".to_string(),
-        }
+        record.reading(),
+        ClockRecordReading::Columns(ClockLayout::V304)
+    );
+    assert_eq!(
+        record.surplus_values(),
+        &[ClockSurplusValue {
+            position: 1,
+            value: -1.23456789012,
+        }]
     );
 
-    // Compact parent count 1 with extra value
+    // Whitespace-separated parent with one value past the declared bias.
     let text_compact_1 =
         " 3.00           C                                       RINEX VERSION / TYPE
                                                             END OF HEADER
 AS G01 2026 05 13 00 00 0.000000 1 -0.123456789012E+00 -0.123456789012E+01
 ";
-    let err_compact_1 =
-        RinexClock::parse(text_compact_1).expect_err("compact count 1 with extra value must error");
-    assert_eq!(
-        err_compact_1,
-        RinexClockError::MalformedAsRecord {
-            line: 3,
-            reason: "excess values in parent record",
-            record: "AS G01 2026 05 13 00 00 0.000000 1 -0.123456789012E+00 -0.123456789012E+01"
-                .to_string(),
-        }
-    );
+    let compact_1 = RinexClock::parse(text_compact_1).expect("compact count 1 with sigma");
+    let record = compact_1.records().next().expect("record");
+    assert_eq!(record.reading(), ClockRecordReading::Whitespace);
+    assert_eq!(record.surplus_values().len(), 1);
 
-    // Compact parent count 2 with extra value
+    // A parent line holds at most the bias and its sigma; a third value has no
+    // place in the record.
     let text_compact_2 =
         " 3.00           C                                       RINEX VERSION / TYPE
                                                             END OF HEADER
@@ -1005,6 +1069,30 @@ AS G01 2026 05 13 00 00 0.000000 2 -0.123456789012E+00 -0.123456789012E+01 -0.12
             record: "AS G01 2026 05 13 00 00 0.000000 2 -0.123456789012E+00 -0.123456789012E+01 -0.123456789012E+02".to_string(),
         }
     );
+
+    // A non-numeric sigma column is still a bad field.
+    let text_bad = " 3.00           C                                       RINEX VERSION / TYPE
+                                                            END OF HEADER
+AS G01  2026 05 13 00 00  0.000000  1   -0.123456789012E+00        not-a-number
+";
+    assert_eq!(
+        RinexClock::parse(text_bad).unwrap_err(),
+        RinexClockError::BadField {
+            line: 3,
+            field: "sigma",
+            value: "not-a-number".to_string(),
+        }
+    );
+
+    // Record types other than AS follow the same rule.
+    let text_ar = " 3.00           C                                       RINEX VERSION / TYPE
+                                                            END OF HEADER
+AR AREQ 2026 05 13 00 00  0.000000  1   -0.123456789012E+00 -0.123456789012E+01
+";
+    let clock_ar = RinexClock::parse(text_ar).expect("AR count 1 with sigma");
+    let record = clock_ar.records().next().expect("record");
+    assert_eq!(record.record_type(), ClockRecordType::Ar);
+    assert_eq!(record.surplus_values().len(), 1);
 }
 
 #[test]
@@ -1018,14 +1106,14 @@ AS G05  2026 05 13 00 00  0.000000  5   -0.123456789012E+00 -0.123456789012E+01
 -0.123456789012E+02 -0.123456789012E+03 -0.123456789012E+04
 ";
     let clock = RinexClock::parse(text).expect("parse records of counts 3 and 5");
-    assert_eq!(clock.series["G03"][0].additional_values.len(), 2);
-    assert_eq!(clock.series["G05"][0].additional_values.len(), 4);
+    assert_eq!(clock.series()["G03"][0].additional_values.len(), 2);
+    assert_eq!(clock.series()["G05"][0].additional_values.len(), 4);
     assert_eq!(
-        clock.series["G03"][0].additional_values,
+        clock.series()["G03"][0].additional_values,
         vec![-1.23456789012, -12.3456789012]
     );
     assert_eq!(
-        clock.series["G05"][0].additional_values,
+        clock.series()["G05"][0].additional_values,
         vec![
             -1.23456789012,
             -12.3456789012,
@@ -1049,11 +1137,11 @@ AR BAD RECORD LINE
 AS\tG01\t2026\t05\t13\t00\t00\t0.000000\t1\t-0.123456789012E+00
 ";
     let lossy = RinexClock::parse_lossy(text);
-    assert_eq!(lossy.diagnostics.len(), 1);
-    assert_eq!(lossy.diagnostics[0].line, 3);
-    assert_eq!(lossy.series.len(), 1);
-    assert_eq!(lossy.series["G01"].len(), 1);
-    assert_eq!(lossy.series["G01"][0].bias_s, -0.123456789012);
+    assert_eq!(lossy.diagnostics().len(), 1);
+    assert_eq!(lossy.diagnostics()[0].line, 3);
+    assert_eq!(lossy.series().len(), 1);
+    assert_eq!(lossy.series()["G01"].len(), 1);
+    assert_eq!(lossy.series()["G01"][0].bias_s, -0.123456789012);
 }
 
 #[test]
@@ -1066,7 +1154,7 @@ fn positive_13digit_3digit_exponent_and_negative_zero_serialize_and_roundtrip() 
         "-0.000000000000E+00 1.234567890123E-100\n",
     );
     let clock = RinexClock::parse(text).expect("parse positive 13-digit clock with 3-digit exp");
-    let pt = &clock.series["G01"][0];
+    let pt = &clock.series()["G01"][0];
     assert_eq!(pt.bias_s, 1.234567890123e100);
     assert_eq!(pt.bias_s.to_bits(), (1.234567890123e100_f64).to_bits());
     assert_eq!(pt.additional_values[0], 2.761547232975e-4);
@@ -1088,7 +1176,7 @@ fn positive_13digit_3digit_exponent_and_negative_zero_serialize_and_roundtrip() 
     let reparsed = RinexClock::parse(&serialized).expect("re-parse serialized text");
     assert_eq!(reparsed, clock);
 
-    let reparsed_pt = &reparsed.series["G01"][0];
+    let reparsed_pt = &reparsed.series()["G01"][0];
     assert_eq!(reparsed_pt.bias_s.to_bits(), pt.bias_s.to_bits());
     assert_eq!(
         reparsed_pt.additional_values[0].to_bits(),
@@ -1134,7 +1222,7 @@ fn negative_13digit_3digit_exponent_and_signed_zero_serialize_and_roundtrip() {
         "-0.000000000000E+00  2.761547232975E-04 1.234567890123E+100 1.234567890123E-100\n",
     );
     let clock = RinexClock::parse(text).expect("parse negative 13-digit clock with 3-digit exp");
-    let pt1 = &clock.series["G01"][0];
+    let pt1 = &clock.series()["G01"][0];
     assert_eq!(pt1.bias_s, -1.234567890123e100);
     assert_eq!(pt1.bias_s.to_bits(), (-1.234567890123e100_f64).to_bits());
     assert_eq!(pt1.additional_values[0], 2.761547232975e-4);
@@ -1150,7 +1238,7 @@ fn negative_13digit_3digit_exponent_and_signed_zero_serialize_and_roundtrip() {
         (-1.234567890123e-100_f64).to_bits()
     );
 
-    let pt2 = &clock.series["G02"][0];
+    let pt2 = &clock.series()["G02"][0];
     assert_eq!(pt2.bias_s, -1.234567890123e-100);
     assert_eq!(pt2.bias_s.to_bits(), (-1.234567890123e-100_f64).to_bits());
     assert_eq!(pt2.additional_values[0], -1.234567890123e100);
@@ -1172,13 +1260,33 @@ fn negative_13digit_3digit_exponent_and_signed_zero_serialize_and_roundtrip() {
         (1.234567890123e-100_f64).to_bits()
     );
 
-    let serialized = clock
+    // The unedited product restates its input, including the G01 line's
+    // spacing, which follows neither layout's columns and was read as
+    // whitespace-separated values.
+    assert_eq!(clock.to_rinex_string().expect("restate input"), text);
+    let g01 = clock
+        .records()
+        .find(|record| record.name() == "G01")
+        .expect("G01 record");
+    assert_eq!(g01.reading(), ClockRecordReading::Whitespace);
+
+    // A product built from the parsed samples writes them in the 3.00 columns.
+    let rebuilt = RinexClock::from_clock_points(
+        TimeScale::Gpst,
+        clock
+            .series()
+            .iter()
+            .map(|(sat, points)| (sat.clone(), points.clone()))
+            .collect(),
+    )
+    .expect("rebuild from parsed samples");
+    let serialized = rebuilt
         .to_rinex_string()
         .expect("serialize clock with fallback candidates");
     let reparsed = RinexClock::parse(&serialized).expect("re-parse serialized text");
-    assert_eq!(reparsed, clock);
+    assert_eq!(reparsed.series(), clock.series());
 
-    let reparsed_pt1 = &reparsed.series["G01"][0];
+    let reparsed_pt1 = &reparsed.series()["G01"][0];
     assert_eq!(reparsed_pt1.bias_s.to_bits(), pt1.bias_s.to_bits());
     assert_eq!(
         reparsed_pt1.additional_values[0].to_bits(),
@@ -1193,7 +1301,7 @@ fn negative_13digit_3digit_exponent_and_signed_zero_serialize_and_roundtrip() {
         pt1.additional_values[2].to_bits()
     );
 
-    let reparsed_pt2 = &reparsed.series["G02"][0];
+    let reparsed_pt2 = &reparsed.series()["G02"][0];
     assert_eq!(reparsed_pt2.bias_s.to_bits(), pt2.bias_s.to_bits());
     assert_eq!(
         reparsed_pt2.additional_values[0].to_bits(),
@@ -1290,22 +1398,19 @@ fn negative_14digit_shifted_exponent_serialize_and_roundtrip() {
         bias_s: val_14d,
         additional_values: vec![val_14d, 2.761547232975e-4, -0.0],
     };
-    let clock = RinexClock::from_instant_series_rows(
-        TimeScale::Gpst,
-        vec![("G01".to_string(), vec![(epoch, val_14d)])],
-    )
-    .expect("valid instant series rows");
-    let mut clock_with_additional = clock;
-    clock_with_additional.series.get_mut("G01").unwrap()[0] = point;
+    let clock_with_additional =
+        RinexClock::from_clock_points(TimeScale::Gpst, vec![("G01".to_string(), vec![point])])
+            .expect("valid clock points");
 
     let serialized = clock_with_additional
         .to_rinex_string()
         .expect("serialize clock with 14-digit shifted exponent candidate");
 
     let reparsed = RinexClock::parse(&serialized).expect("re-parse serialized text");
-    assert_eq!(reparsed, clock_with_additional);
+    assert_eq!(reparsed.series(), clock_with_additional.series());
+    assert_eq!(reparsed.to_rinex_string().unwrap(), serialized);
 
-    let reparsed_pt = &reparsed.series["G01"][0];
+    let reparsed_pt = &reparsed.series()["G01"][0];
     assert_eq!(reparsed_pt.bias_s.to_bits(), val_14d.to_bits());
     assert_eq!(
         reparsed_pt.additional_values[0].to_bits(),
@@ -1369,13 +1474,18 @@ fn unrepresentable_precision_exceeding_candidate_budget_refused() {
         }
     );
 
-    let clock_sigma = RinexClock::from_instant_series_rows(
+    let bad_sigma_series = RinexClock::from_clock_points(
         TimeScale::Gpst,
-        vec![("G01".to_string(), vec![(epoch, 1.0e-4)])],
+        vec![(
+            "G01".to_string(),
+            vec![ClockPoint {
+                epoch,
+                bias_s: 1.0e-4,
+                additional_values: vec![neg_val],
+            }],
+        )],
     )
-    .expect("valid instant series rows");
-    let mut bad_sigma_series = clock_sigma;
-    bad_sigma_series.series.get_mut("G01").unwrap()[0].additional_values = vec![neg_val];
+    .expect("valid clock points");
     let sigma_err = bad_sigma_series
         .to_rinex_string()
         .expect_err("14-digit negative value with exponent -100 in sigma must be refused");
