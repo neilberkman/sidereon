@@ -6,6 +6,10 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- Bias-SINEX reports corrupted optional sigma, slope and slope-uncertainty fields and unknown bias modes through typed diagnostics. Blank optional fields remain absent.
+- CODE DCB retains the complete receiver station text and constellation while normalized lookup keys continue to resolve it. Missing RMS stays absent, independently of measured zero or signed values.
+- **Breaking.** CODE DCB writing refuses nonfinite values, field overflow, precision loss and station text that cannot survive fixed-column readback.
+
 - ANTEX reads and writes the fixed numeric columns from version 1.4, retaining blank PCV cells at their declared zenith positions and extending rows through the declared grid endpoint.
 - **Breaking.** `Antex::encode` returns `Result<String, AntexError>` and refuses field overflow, precision loss, unreconstructable sample coordinates, and disagreement between public antenna fields and retained validity intervals. Representable signed zero is preserved.
 
