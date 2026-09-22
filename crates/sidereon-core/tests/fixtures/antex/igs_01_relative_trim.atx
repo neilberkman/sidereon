@@ -1,0 +1,36 @@
+     1.3            M                                       ANTEX VERSION / SYST
+R                   AOAD/M_T                                PCV TYPE / REFANT   
+########################################################### COMMENT             
+igs_01.pcv (version from July 2007) converted to ANTEX      COMMENT             
+Ralf Schmid (TUM), email: schmid@bv.tum.de                  COMMENT             
+27-JUL-07                                                   COMMENT             
+########################################################### COMMENT             
+                                                            END OF HEADER       
+                                                            START OF ANTENNA    
+BLOCK I                                                     TYPE / SERIAL NO    
+                                             0    21-APR-04 METH / BY / # / DATE
+     0.0                                                    DAZI                
+     0.0  14.0   1.0                                        ZEN1 / ZEN2 / DZEN  
+     2                                                      # OF FREQUENCIES    
+IGS_01                                                      SINEX CODE          
+   G01                                                      START OF FREQUENCY  
+    210.00      0.00    854.00                              NORTH / EAST / UP   
+   NOAZI    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00
+   G01                                                      END OF FREQUENCY    
+   G02                                                      START OF FREQUENCY  
+    210.00      0.00    854.00                              NORTH / EAST / UP   
+   NOAZI    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00
+   G02                                                      END OF FREQUENCY    
+                                                            END OF ANTENNA      
+                                                            START OF ANTENNA    
+ASH700699.L1    NONE                                        TYPE / SERIAL NO    
+FIELD               IGEX                          12-NOV-98 METH / BY / # / DATE
+     0.0                                                    DAZI                
+     0.0  90.0   5.0                                        ZEN1 / ZEN2 / DZEN  
+     1                                                      # OF FREQUENCIES    
+IGS_01                                                      SINEX CODE          
+   G01                                                      START OF FREQUENCY  
+      0.00      0.00     51.50                              NORTH / EAST / UP   
+   NOAZI    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00    0.00
+   G01                                                      END OF FREQUENCY    
+                                                            END OF ANTENNA      

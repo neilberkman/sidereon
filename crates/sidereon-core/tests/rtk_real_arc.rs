@@ -1228,10 +1228,12 @@ fn receiver_antenna_corrections(
 }
 
 fn receiver_antenna_calibration(antenna: &Antenna, frequency: &str) -> ReceiverAntennaCalibration {
-    let frequency = antenna
-        .frequencies
-        .get(frequency)
-        .unwrap_or_else(|| panic!("ANTEX missing frequency {frequency} for {}", antenna.id));
+    let frequency = antenna.frequency(frequency).unwrap_or_else(|err| {
+        panic!(
+            "ANTEX missing frequency {frequency} for {}: {err}",
+            antenna.id
+        )
+    });
     ReceiverAntennaCalibration {
         pco_neu_m: frequency.pco_m,
         noazi_pcv_m: frequency

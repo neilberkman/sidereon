@@ -437,9 +437,8 @@ fn receiver_antenna_options(antex: &Antex) -> ReceiverAntennaOptions {
         .into_iter()
         .map(|label| {
             let freq = antenna
-                .frequencies
-                .get(label)
-                .unwrap_or_else(|| panic!("ANTEX receiver frequency {label}"));
+                .frequency(label)
+                .unwrap_or_else(|err| panic!("ANTEX receiver frequency {label}: {err}"));
             ReceiverAntennaFrequency {
                 label: label.to_string(),
                 pco_m: freq.pco_m,
@@ -467,38 +466,38 @@ fn receiver_antenna_options(antex: &Antex) -> ReceiverAntennaOptions {
 /// Satellite antenna correction options from the ANTEX satellite blocks for the
 /// observed GPS PRNs. Satellites carry NOAZI PCV only.
 fn satellite_antenna_options(antex: &Antex, prns: &[String]) -> SatelliteAntennaOptions {
-    let antennas =
-        prns.iter()
-            .map(|prn| {
-                let antenna = antex
-                    .satellite_antenna(prn, antex_epoch())
-                    .unwrap_or_else(|| panic!("ANTEX satellite block for {prn}"));
-                let frequencies = ["G01", "G02"]
-                    .into_iter()
-                    .map(|label| {
-                        let freq = antenna.frequencies.get(label).unwrap_or_else(|| {
-                            panic!("ANTEX satellite frequency {label} for {prn}")
-                        });
-                        SatelliteAntennaFrequency {
-                            label: label.to_string(),
-                            pco_m: freq.pco_m,
-                            noazi_pcv_m: freq
-                                .pcv_samples
-                                .iter()
-                                .filter(|s| s.grid == PcvGrid::NoAzimuth)
-                                .map(|s| (s.zenith_deg, s.value_m))
-                                .collect(),
-                        }
-                    })
-                    .collect();
-                SatelliteAntenna {
-                    sat: gps_id(prn),
-                    valid_from: None,
-                    valid_until: None,
-                    frequencies,
-                }
-            })
-            .collect();
+    let antennas = prns
+        .iter()
+        .map(|prn| {
+            let antenna = antex
+                .satellite_antenna(prn, antex_epoch())
+                .unwrap_or_else(|| panic!("ANTEX satellite block for {prn}"));
+            let frequencies = ["G01", "G02"]
+                .into_iter()
+                .map(|label| {
+                    let freq = antenna.frequency(label).unwrap_or_else(|err| {
+                        panic!("ANTEX satellite frequency {label} for {prn}: {err}")
+                    });
+                    SatelliteAntennaFrequency {
+                        label: label.to_string(),
+                        pco_m: freq.pco_m,
+                        noazi_pcv_m: freq
+                            .pcv_samples
+                            .iter()
+                            .filter(|s| s.grid == PcvGrid::NoAzimuth)
+                            .map(|s| (s.zenith_deg, s.value_m))
+                            .collect(),
+                    }
+                })
+                .collect();
+            SatelliteAntenna {
+                sat: gps_id(prn),
+                valid_from: None,
+                valid_until: None,
+                frequencies,
+            }
+        })
+        .collect();
     SatelliteAntennaOptions::new(
         "G01".to_string(),
         F_L1_HZ,
