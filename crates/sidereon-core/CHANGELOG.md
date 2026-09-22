@@ -6,6 +6,9 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- ANTEX reads and writes the fixed numeric columns from version 1.4, retaining blank PCV cells at their declared zenith positions and extending rows through the declared grid endpoint.
+- **Breaking.** `Antex::encode` returns `Result<String, AntexError>` and refuses field overflow, precision loss, unreconstructable sample coordinates, and disagreement between public antenna fields and retained validity intervals. Representable signed zero is preserved.
+
 - **Breaking.** RINEX navigation readers reject unknown systems, unknown version 4 ephemeris messages and malformed frame markers with named errors; lenient parsing records each refusal. Supported non-padded satellite identifiers and recognized non-ephemeris frames remain readable.
 - RINEX navigation retains absent group delays separately from measured zero, including QZSS LNAV TGD. Writers emit fixed-width blanks for absent delays and unmodeled fields.
 - GPS navigation fit intervals retain unknown values as `None`. RINEX 3.00–3.02 flags mean four or six hours; later positive values mean hours, while blank and zero mean unknown. Orbit selection uses a documented fallback window when the record provides no interval.
