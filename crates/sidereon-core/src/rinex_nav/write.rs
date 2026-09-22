@@ -96,25 +96,25 @@ fn write_record(out: &mut String, record: &BroadcastRecord) {
     write_orbit(out, [e.cuc, e.e, e.cus, e.sqrt_a]);
     write_orbit(out, [e.toe_sow, e.cic, e.omega0, e.cis]);
     write_orbit(out, [e.i0, e.crc, e.omega, e.omega_dot]);
-    write_orbit(
+    write_orbit_opt(
         out,
         [
-            e.idot,
-            data_source_word(system, record.message),
-            f64::from(record.week),
-            0.0,
+            Some(e.idot),
+            Some(data_source_word(system, record.message)),
+            Some(f64::from(record.week)),
+            None,
         ],
     );
-    write_orbit(
+    write_orbit_opt(
         out,
         [
-            record.sv_accuracy_m,
-            record.sv_health,
-            group_delay_field(record, 0),
-            group_delay_field(record, 1),
+            Some(record.sv_accuracy_m),
+            Some(record.sv_health),
+            group_delay_opt(record, 0),
+            group_delay_opt(record, 1),
         ],
     );
-    write_orbit(out, [0.0, fit_interval_hours(record), 0.0, 0.0]);
+    write_orbit_opt(out, [None, fit_interval_hours(record), None, None]);
 }
 
 // invariant: write_record dispatches here only for a record carrying CNAV data.
@@ -229,27 +229,28 @@ fn data_source_word(system: GnssSystem, message: NavMessage) -> f64 {
 
 /// The two ORBIT-6 group-delay columns for a record (index 0 = field 3, index 1
 /// = field 4), per the constellation's RINEX layout.
-fn group_delay_field(record: &BroadcastRecord, index: usize) -> f64 {
+fn group_delay_opt(record: &BroadcastRecord, index: usize) -> Option<f64> {
     use super::BroadcastGroupDelayTerm as T;
     let gd = &record.group_delays;
     let term = match (record.satellite_id.system, index) {
-        (GnssSystem::Gps, 0) => Some(T::GpsTgd),
+        (GnssSystem::Gps, 0) | (GnssSystem::Qzss, 0) => Some(T::GpsTgd),
         (GnssSystem::Galileo, 0) => Some(T::GalileoBgdE5aE1),
         (GnssSystem::Galileo, 1) => Some(T::GalileoBgdE5bE1),
         (GnssSystem::BeiDou, 0) => Some(T::BeidouTgd1),
         (GnssSystem::BeiDou, 1) => Some(T::BeidouTgd2),
         _ => None,
     };
-    term.and_then(|t| gd.get(t)).unwrap_or(0.0)
+    term.and_then(|t| gd.get(t))
 }
 
-/// The ORBIT-7 fit-interval column in hours. Only GPS broadcasts it; the value
-/// re-decodes through [`super::gps_fit_interval_s`] (hours -> seconds) on a
-/// non-legacy header.
-fn fit_interval_hours(record: &BroadcastRecord) -> f64 {
+/// The ORBIT-7 fit-interval column in hours (RINEX 3.03 Table A6).
+///
+/// Only GPS LNAV records carry a fit interval in ORBIT-7 field 2; an absent
+/// interval (`None`) or non-GPS system is formatted as blanks per Section 6.6.
+fn fit_interval_hours(record: &BroadcastRecord) -> Option<f64> {
     match (record.satellite_id.system, record.fit_interval_s) {
-        (GnssSystem::Gps, Some(seconds)) => seconds / SECONDS_PER_HOUR,
-        _ => 0.0,
+        (GnssSystem::Gps, Some(seconds)) => Some(seconds / SECONDS_PER_HOUR),
+        _ => None,
     }
 }
 

@@ -3586,17 +3586,44 @@ fn rinex_302_gps_fit_interval_flag_one_keeps_extended_validity() {
     assert_eq!(recs.len(), 1);
     let rec = recs[0];
     let fit = rec.fit_interval_s.expect("GPS fit interval");
-    assert!(
-        fit > GPS_NOMINAL_FIT_INTERVAL_S,
-        "legacy flag 1 must decode as more than four hours, got {fit}"
+    assert_eq!(
+        fit,
+        6.0 * SECONDS_PER_HOUR,
+        "legacy flag 1 must decode as literal six hours (21600 s) per RINEX 3.02 Table A6"
     );
+    assert_eq!(fit, GPS_LEGACY_EXTENDED_FIT_INTERVAL_S);
 
     let sat = rec.satellite_id;
-    let query = toe_as_j2000_s(&rec) + 2.5 * SECONDS_PER_HOUR;
+    let toe = toe_as_j2000_s(&rec);
     let store = BroadcastStore::new(recs).expect("valid manual fit-boundary records");
+
+    // Inside +/- 3h validity window: queries within 3 hours of toe must be served.
     assert!(
-        store.position_clock_at_j2000_s(sat, query).is_some(),
-        "legacy flag 1 must not collapse the fit window to +/-30 minutes"
+        store
+            .position_clock_at_j2000_s(sat, toe + 2.5 * SECONDS_PER_HOUR)
+            .is_some(),
+        "query within +3h of toe must be valid"
+    );
+    assert!(
+        store
+            .position_clock_at_j2000_s(sat, toe - 2.5 * SECONDS_PER_HOUR)
+            .is_some(),
+        "query within -3h of toe must be valid"
+    );
+
+    // Outside +/- 3h validity window: queries beyond 3 hours of toe must be rejected.
+    // Using the wrong 8-hour shared constant would give a ±4h half-window and wrongly accept these.
+    assert!(
+        store
+            .position_clock_at_j2000_s(sat, toe + 3.5 * SECONDS_PER_HOUR)
+            .is_none(),
+        "query outside +3h of toe must be rejected"
+    );
+    assert!(
+        store
+            .position_clock_at_j2000_s(sat, toe - 3.5 * SECONDS_PER_HOUR)
+            .is_none(),
+        "query outside -3h of toe must be rejected"
     );
 }
 
@@ -3634,34 +3661,100 @@ fn gps_fit_interval_field_distinguishes_blank_zero_value_and_malformed() {
     let legacy = RinexVersion { major: 3, minor: 2 };
     let modern = RinexVersion { major: 3, minor: 5 };
 
-    // Blank/absent -> the nominal four hours.
-    assert_eq!(
-        gps_fit_interval_s(&with_field2(""), modern),
-        Ok(GPS_NOMINAL_FIT_INTERVAL_S)
-    );
-    // Explicit zero -> the nominal four hours.
+    // Blank/absent -> None across both modern and legacy headers per RINEX Section 6.6.
+    assert_eq!(gps_fit_interval_s(&with_field2(""), modern), Ok(None));
+    assert_eq!(gps_fit_interval_s(&with_field2(""), legacy), Ok(None));
+
+    // Modern numeric zero represents missing/unpopulated field -> None.
     assert_eq!(
         gps_fit_interval_s(&with_field2("0.000000000000e+00"), modern),
-        Ok(GPS_NOMINAL_FIT_INTERVAL_S)
+        Ok(None)
     );
-    // Legacy RINEX may carry the broadcast fit flag: 1 means more than four
-    // hours, not a one-hour fit interval.
+
+    // Legacy RINEX 3.02 Table A6 explicitly defines flag 0 = 4 hours.
+    assert_eq!(
+        gps_fit_interval_s(&with_field2("0.000000000000e+00"), legacy),
+        Ok(Some(GPS_NOMINAL_FIT_INTERVAL_S))
+    );
+
+    // Legacy RINEX 3.02 Table A6 explicitly defines flag 1 = 6 hours (extended fit).
     assert_eq!(
         gps_fit_interval_s(&with_field2("1.000000000000e+00"), legacy),
-        Ok(GPS_LEGACY_EXTENDED_FIT_INTERVAL_S)
+        Ok(Some(6.0 * SECONDS_PER_HOUR))
     );
-    // Modern RINEX keeps the same numeric field hours-valued.
+    assert_eq!(
+        gps_fit_interval_s(&with_field2("1.000000000000e+00"), legacy),
+        Ok(Some(GPS_LEGACY_EXTENDED_FIT_INTERVAL_S))
+    );
+
+    // Modern RINEX keeps the numeric field hours-valued: 1.0 h = 3600 s.
     assert_eq!(
         gps_fit_interval_s(&with_field2("1.000000000000e+00"), modern),
-        Ok(SECONDS_PER_HOUR)
+        Ok(Some(SECONDS_PER_HOUR))
     );
-    // A nonzero interval is taken verbatim (hours -> seconds).
+
+    // A nonzero interval is taken verbatim (hours -> seconds): 6.0 h = 21600 s.
     assert_eq!(
         gps_fit_interval_s(&with_field2("6.000000000000e+00"), modern),
-        Ok(6.0 * SECONDS_PER_HOUR)
+        Ok(Some(6.0 * SECONDS_PER_HOUR))
     );
-    // Present but non-numeric -> an error, not a silent nominal substitution.
+
+    // Present but non-numeric -> an error, not a silent substitution.
     assert!(gps_fit_interval_s(&with_field2("garbage"), modern).is_err());
+
+    // Negative interval -> an error.
+    assert!(gps_fit_interval_s(&with_field2("-1.000000000000e+00"), modern).is_err());
+}
+
+#[test]
+fn gps_fit_interval_modern_zero_and_blank_preserve_fallback_window() {
+    use crate::spp::EphemerisSource;
+
+    // 1. Modern header with blank field 2
+    let mut lines = g01_lines();
+    lines[7] = blank_orbit_field(&lines[7], 1);
+    let text = nav_text_with_version("3.05", &lines);
+    let recs = parse_nav(&text).expect("parse modern GPS record with blank fit interval");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(
+        recs[0].fit_interval_s, None,
+        "blank fit interval decodes to None"
+    );
+
+    let sat = recs[0].satellite_id;
+    let query = toe_as_j2000_s(&recs[0]) + 2.5 * SECONDS_PER_HOUR;
+    let store = BroadcastStore::new(recs).expect("store with None fit interval");
+    assert!(
+        store.position_clock_at_j2000_s(sat, query).is_some(),
+        "None fit interval retains MAX_EPHEMERIS_AGE_S (+/-4h) coarse fallback window"
+    );
+
+    // 2. Modern header with 0.0 field 2
+    let mut lines = g01_lines();
+    lines[7] = replace_orbit_field(&lines[7], 1, "0.000000000000e+00");
+    let text = nav_text_with_version("3.05", &lines);
+    let recs = parse_nav(&text).expect("parse modern GPS record with zero fit interval");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(
+        recs[0].fit_interval_s, None,
+        "modern zero fit interval decodes to None under missing-value rule"
+    );
+
+    let store = BroadcastStore::new(recs).expect("store with None fit interval");
+    assert!(
+        store.position_clock_at_j2000_s(sat, query).is_some(),
+        "modern zero retains MAX_EPHEMERIS_AGE_S coarse fallback window"
+    );
+
+    // 3. Legacy header with flag 0
+    let text = nav_text_with_version("3.02", &lines);
+    let recs = parse_nav(&text).expect("parse legacy GPS record with flag 0");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(
+        recs[0].fit_interval_s,
+        Some(GPS_NOMINAL_FIT_INTERVAL_S),
+        "legacy flag 0 decodes to nominal 4 hours per RINEX 3.02 Table A6"
+    );
 }
 
 #[test]
@@ -4626,4 +4719,579 @@ fn encode_nav_round_trips_through_parse() {
 
     // Deterministic: the same records always serialize byte-identically.
     assert_eq!(encode_nav(&original), encoded);
+}
+
+#[test]
+fn parse_nav_v3_refuses_unrecognized_system_letter() {
+    let mut bad_lines = G01_LINES.to_vec();
+    let l0 = bad_lines[0].replacen("G01", "Z01", 1);
+    bad_lines[0] = &l0;
+    let text = format!("{V3_NAV_HEADER}{}", join(&bad_lines));
+
+    let err = parse_nav(&text).expect_err("unrecognized system Z must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "Z01".to_string(),
+            field: "system",
+        }
+    );
+
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "Z01");
+}
+
+#[test]
+fn parse_nav_v4_refuses_unknown_ephemeris_message_token() {
+    let mut text = String::from(V4_NAV_HEADER);
+    text.push_str("> EPH G01 UNKNOWN\n");
+    text.push_str(&join(G01_LINES));
+
+    let err = parse_nav(&text).expect_err("unknown v4 message token must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G01".to_string(),
+            field: "message",
+        }
+    );
+
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "G01");
+}
+
+#[test]
+fn encode_nav_emits_spaces_for_unmodeled_and_absent_fields() {
+    let original = records();
+    let encoded = encode_nav(&original);
+
+    // ORBIT-7 line (8th line of each Keplerian body block) starts with 4 spaces indent
+    // followed by 19 spaces for the unmodeled transmission time (23 spaces total), rather
+    // than 0.000000000000e+00.
+    let lines: Vec<&str> = encoded.lines().collect();
+    let mut saw_orbit7 = false;
+    for i in 0..lines.len() {
+        if lines[i].len() >= 3 && is_record_start(lines[i]) && i + 7 < lines.len() {
+            let orbit7 = lines[i + 7];
+            assert!(
+                orbit7.starts_with("                       "),
+                "ORBIT-7 field 1 must be blank (unmodeled transmission time): {orbit7:?}"
+            );
+            assert!(
+                !orbit7[4..23].contains("0.000000000000e+00"),
+                "ORBIT-7 field 1 must not invent 0.0: {orbit7:?}"
+            );
+            saw_orbit7 = true;
+        }
+    }
+    assert!(saw_orbit7, "must verify at least one ORBIT-7 line");
+}
+
+#[test]
+fn keplerian_group_delay_round_trip_invariance() {
+    let mut base_gps = records()
+        .into_iter()
+        .find(|r| r.satellite_id.system == GnssSystem::Gps)
+        .expect("GPS record");
+
+    // 1. GPS
+    for delay in [None, Some(0.0), Some(5.122274160385e-09)] {
+        base_gps.group_delays = BroadcastGroupDelays::gps_lnav_opt(delay);
+        let encoded = encode_nav(&[base_gps]);
+        let reparsed = parse_nav(&encoded).expect("parse encoded GPS record");
+        assert_eq!(reparsed.len(), 1);
+        assert_eq!(reparsed[0].group_delays.gps_tgd_s, delay);
+    }
+
+    // 2. QZSS
+    let mut base_qzss = base_gps;
+    base_qzss.satellite_id = GnssSatelliteId::new(GnssSystem::Qzss, 1).unwrap();
+    base_qzss.message = NavMessage::QzssLnav;
+    base_qzss.fit_interval_s = None;
+    for delay in [None, Some(0.0), Some(3.25e-09)] {
+        base_qzss.group_delays = BroadcastGroupDelays::gps_lnav_opt(delay);
+        let encoded = encode_nav(&[base_qzss]);
+        let reparsed = parse_nav(&encoded).expect("parse encoded QZSS record");
+        assert_eq!(reparsed.len(), 1);
+        assert_eq!(reparsed[0].group_delays.gps_tgd_s, delay);
+    }
+
+    // 3. Galileo
+    let mut base_gal = records()
+        .into_iter()
+        .find(|r| r.satellite_id.system == GnssSystem::Galileo)
+        .expect("Galileo record");
+    let gal_cases = [
+        (None, None),
+        (Some(0.0), Some(0.0)),
+        (Some(-1.862645149231e-09), Some(2.15e-09)),
+        (Some(1.23e-09), None),
+        (None, Some(4.56e-09)),
+    ];
+    for (bgd_a, bgd_b) in gal_cases {
+        base_gal.group_delays = BroadcastGroupDelays::galileo_opt(bgd_a, bgd_b);
+        let encoded = encode_nav(&[base_gal]);
+        let reparsed = parse_nav(&encoded).expect("parse encoded Galileo record");
+        assert_eq!(reparsed.len(), 1);
+        assert_eq!(reparsed[0].group_delays.galileo_bgd_e5a_e1_s, bgd_a);
+        assert_eq!(reparsed[0].group_delays.galileo_bgd_e5b_e1_s, bgd_b);
+    }
+
+    // 4. BeiDou
+    let mut base_bds = records()
+        .into_iter()
+        .find(|r| r.satellite_id.system == GnssSystem::BeiDou)
+        .expect("BeiDou record");
+    let bds_cases = [
+        (None, None),
+        (Some(0.0), Some(0.0)),
+        (Some(1.2e-09), Some(3.4e-09)),
+        (Some(1.2e-09), None),
+        (None, Some(3.4e-09)),
+    ];
+    for (tgd1, tgd2) in bds_cases {
+        base_bds.group_delays = BroadcastGroupDelays::beidou_opt(tgd1, tgd2);
+        let encoded = encode_nav(&[base_bds]);
+        let reparsed = parse_nav(&encoded).expect("parse encoded BeiDou record");
+        assert_eq!(reparsed.len(), 1);
+        assert_eq!(reparsed[0].group_delays.beidou_tgd1_s, tgd1);
+        assert_eq!(reparsed[0].group_delays.beidou_tgd2_s, tgd2);
+    }
+}
+
+#[test]
+fn keplerian_parser_refuses_malformed_nonblank_group_delay() {
+    let mut lines = g01_lines();
+    lines[6] = replace_orbit_field(&lines[6], 2, "not-a-delay-float");
+    let text = nav_text(&lines);
+    let err = parse_nav(&text).expect_err("malformed GPS group delay must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G01".to_string(),
+            field: "gps tgd",
+        }
+    );
+
+    let mut qzss_lines = satellite_lines(G01_LINES, "J01");
+    qzss_lines[6] = replace_orbit_field(&qzss_lines[6], 2, "not-a-delay-float");
+    let qzss_text = nav_text(&qzss_lines);
+    let err = parse_nav(&qzss_text).expect_err("malformed QZSS group delay must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "J01".to_string(),
+            field: "qzss tgd",
+        }
+    );
+
+    let mut gal_lines = e01_lines();
+    gal_lines[6] = replace_orbit_field(&gal_lines[6], 2, "not-a-delay-float");
+    let gal_text = nav_text(&gal_lines);
+    let err = parse_nav(&gal_text).expect_err("malformed Galileo group delay must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "E01".to_string(),
+            field: "bgd e5a/e1",
+        }
+    );
+
+    let mut bds_lines = satellite_lines(G01_LINES, "C19");
+    bds_lines[6] = replace_orbit_field(&bds_lines[6], 3, "not-a-delay-float");
+    let bds_text = nav_text(&bds_lines);
+    let err = parse_nav(&bds_text).expect_err("malformed BeiDou group delay must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "C19".to_string(),
+            field: "beidou tgd2",
+        }
+    );
+}
+
+#[test]
+fn parse_nav_v4_eph_marker_validation_strict_and_lenient() {
+    let make_v4 = |marker: &str, body_sat: &str| {
+        let mut text = String::from(V4_NAV_HEADER);
+        text.push_str(marker);
+        text.push('\n');
+        let mut body = g01_lines();
+        body[0].replace_range(0..3, body_sat);
+        for line in &body {
+            text.push_str(line);
+            text.push('\n');
+        }
+        text
+    };
+
+    // 1. Standard valid marker with standard body line
+    let text = make_v4("> EPH G01 LNAV", "G01");
+    let recs = parse_nav(&text).expect("valid standard G01 marker");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(
+        recs[0].satellite_id,
+        GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap()
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert_eq!(lenient.records.len(), 1);
+    assert!(lenient.skipped.is_empty());
+
+    // 2. Space-padded marker with standard body line
+    let text = make_v4("> EPH G 1 LNAV", "G01");
+    let recs = parse_nav(&text).expect("valid space-padded G 1 marker");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(
+        recs[0].satellite_id,
+        GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap()
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert_eq!(lenient.records.len(), 1);
+    assert!(lenient.skipped.is_empty());
+
+    // 3. Space-padded body line: proves existing body parser natively supports G 1
+    let text = make_v4("> EPH G 1 LNAV", "G 1");
+    let recs = parse_nav(&text).expect("valid space-padded marker and body");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(
+        recs[0].satellite_id,
+        GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap()
+    );
+    let text_std_marker = make_v4("> EPH G01 LNAV", "G 1");
+    let recs = parse_nav(&text_std_marker).expect("standard marker with space-padded body");
+    assert_eq!(recs.len(), 1);
+    assert_eq!(
+        recs[0].satellite_id,
+        GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap()
+    );
+
+    // 4. Lone constellation letter without PRN: > EPH G LNAV
+    let text = make_v4("> EPH G LNAV", "G01");
+    let err = parse_nav(&text).expect_err("lone constellation letter G must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G".to_string(),
+            field: "prn",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "G");
+    assert!(lenient.skipped[0].message.contains("prn"));
+
+    // 5. Missing PRN on bare marker: > EPH G
+    let text = make_v4("> EPH G", "G01");
+    let err = parse_nav(&text).expect_err("bare lone constellation letter G must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G".to_string(),
+            field: "prn",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "G");
+
+    // 6. Invalid PRN (shifting prevented): > EPH G 101 LNAV and > EPH G101 LNAV
+    let text = make_v4("> EPH G 101 LNAV", "G01");
+    let err = parse_nav(&text).expect_err("invalid 3-digit PRN token must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G 101".to_string(),
+            field: "prn",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "G 101");
+    assert!(lenient.skipped[0].message.contains("prn"));
+
+    let text = make_v4("> EPH G101 LNAV", "G01");
+    let err = parse_nav(&text).expect_err("invalid G101 PRN must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G101".to_string(),
+            field: "prn",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "G101");
+
+    // 7. Unknown constellation Z: > EPH Z01 LNAV and > EPH Z 1 LNAV
+    let text = make_v4("> EPH Z01 LNAV", "Z01");
+    let err = parse_nav(&text).expect_err("unknown system Z01 must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "Z01".to_string(),
+            field: "system",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "Z01");
+
+    let text = make_v4("> EPH Z 1 LNAV", "Z 1");
+    let err = parse_nav(&text).expect_err("unknown system Z 1 must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "Z 1".to_string(),
+            field: "system",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "Z 1");
+
+    // 8. Missing message token: > EPH G01 and > EPH G 1
+    let text = make_v4("> EPH G01", "G01");
+    let err = parse_nav(&text).expect_err("missing message token must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G01".to_string(),
+            field: "message",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "G01");
+
+    let text = make_v4("> EPH G 1", "G01");
+    let err = parse_nav(&text).expect_err("missing message token must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G 1".to_string(),
+            field: "message",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "G 1");
+
+    // 9. Extra data tokens: > EPH G01 LNAV EXTRA and > EPH G 1 LNAV EXTRA
+    let text = make_v4("> EPH G01 LNAV EXTRA", "G01");
+    let err = parse_nav(&text).expect_err("extra marker token must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G01".to_string(),
+            field: "frame marker",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "G01");
+
+    let text = make_v4("> EPH G 1 LNAV EXTRA", "G01");
+    let err = parse_nav(&text).expect_err("extra marker token must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G 1".to_string(),
+            field: "frame marker",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "G 1");
+
+    // 10. Marker/body satellite mismatch: > EPH G01 LNAV with body G02
+    let text = make_v4("> EPH G01 LNAV", "G02");
+    let err = parse_nav(&text).expect_err("mismatched marker and body satellite must be refused");
+    assert_eq!(
+        err,
+        NavParseError::BadField {
+            satellite: "G01".to_string(),
+            field: "frame marker",
+        }
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert!(lenient.records.is_empty());
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].satellite, "G01");
+    assert!(lenient.skipped[0].message.contains("frame marker"));
+
+    // 11. Recognized non-EPH grammars (ION, STO, EOP) must not be treated as malformed EPH
+    let mut mixed = String::from(V4_NAV_HEADER);
+    mixed.push_str("> ION G29 LNAV\n");
+    mixed.push_str(
+        "   1.024454832077e-08 0.000000000000e+00 0.000000000000e+00-1.192092895508e-07\n",
+    );
+    mixed.push_str(
+        "   9.625600000000e+04 0.000000000000e+00 0.000000000000e+00-5.898240000000e+05\n",
+    );
+    mixed.push_str("> STO G01 UTC\n");
+    mixed.push_str(
+        "   0.000000000000e+00 0.000000000000e+00 0.000000000000e+00 0.000000000000e+00\n",
+    );
+    mixed.push_str("> EOP G01\n");
+    mixed.push_str(
+        "   0.000000000000e+00 0.000000000000e+00 0.000000000000e+00 0.000000000000e+00\n",
+    );
+    mixed.push_str("> EPH G01 LNAV\n");
+    for line in &g01_lines() {
+        mixed.push_str(line);
+        mixed.push('\n');
+    }
+    let strict_recs = parse_nav(&mixed).expect("strict parse skips recognized non-EPH frames");
+    assert_eq!(strict_recs.len(), 1);
+    assert_eq!(
+        strict_recs[0].satellite_id,
+        GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap()
+    );
+    let lenient = parse_nav_lenient(&mixed).expect("lenient parse");
+    assert_eq!(lenient.records.len(), 1);
+    assert!(
+        lenient.skipped.is_empty(),
+        "recognized non-EPH frames produce no skips"
+    );
+}
+
+#[test]
+fn parse_nav_v4_skips_unsupported_r28_fdma_beside_supported_gps() {
+    let mut text = String::from(V4_NAV_HEADER);
+    text.push_str("> EPH R28 FDMA\n");
+    for line in &satellite_lines(R01_GLONASS_LINES, "R28") {
+        text.push_str(line);
+        text.push('\n');
+    }
+    text.push_str("> EPH G01 LNAV\n");
+    for line in &g01_lines() {
+        text.push_str(line);
+        text.push('\n');
+    }
+
+    let records =
+        parse_nav(&text).expect("syntactically valid R28 FDMA frame must not abort reader");
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].satellite_id,
+        GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap()
+    );
+
+    let lenient = parse_nav_lenient(&text).expect("lenient parse");
+    assert_eq!(lenient.records.len(), 1);
+    assert_eq!(
+        lenient.records[0].satellite_id,
+        GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap()
+    );
+    assert!(
+        lenient.skipped.is_empty(),
+        "unsupported R28 FDMA frame must not introduce a skipped diagnostic"
+    );
+
+    // Also verify when the supported GPS frame precedes the unsupported R28 FDMA frame.
+    let mut reverse = String::from(V4_NAV_HEADER);
+    reverse.push_str("> EPH G01 LNAV\n");
+    for line in &g01_lines() {
+        reverse.push_str(line);
+        reverse.push('\n');
+    }
+    reverse.push_str("> EPH R28 FDMA\n");
+    for line in &satellite_lines(R01_GLONASS_LINES, "R28") {
+        reverse.push_str(line);
+        reverse.push('\n');
+    }
+
+    let records =
+        parse_nav(&reverse).expect("syntactically valid R28 FDMA frame must not abort reader");
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].satellite_id,
+        GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap()
+    );
+
+    let lenient = parse_nav_lenient(&reverse).expect("lenient parse");
+    assert_eq!(lenient.records.len(), 1);
+    assert_eq!(
+        lenient.records[0].satellite_id,
+        GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap()
+    );
+    assert!(
+        lenient.skipped.is_empty(),
+        "unsupported R28 FDMA frame must not introduce a skipped diagnostic"
+    );
+}
+
+#[test]
+fn fit_interval_round_trip_preserves_none_and_explicit_hours() {
+    let mut base_gps = records()
+        .into_iter()
+        .find(|r| r.satellite_id.system == GnssSystem::Gps)
+        .expect("GPS record");
+
+    // Per RINEX 3.03 Table A6 and Section 6.6, an absent fit interval is
+    // written as blank spaces. On re-parse, blank fields decode to None,
+    // preserving exact absence across round trips without fabricating an interval.
+    base_gps.fit_interval_s = None;
+    let encoded = encode_nav(&[base_gps]);
+    let reparsed = parse_nav(&encoded).expect("parse encoded GPS record without fit interval");
+    assert_eq!(reparsed.len(), 1);
+    assert_eq!(
+        reparsed[0].fit_interval_s, None,
+        "absent fit interval field round-trips as None per RINEX 3.03 Section 6.6 and Table A6"
+    );
+
+    // When serialized with an explicit value (e.g. 6 hours), it round-trips exactly.
+    base_gps.fit_interval_s = Some(6.0 * SECONDS_PER_HOUR);
+    let encoded = encode_nav(&[base_gps]);
+    let reparsed = parse_nav(&encoded).expect("parse encoded GPS record with 6h fit interval");
+    assert_eq!(reparsed.len(), 1);
+    assert_eq!(
+        reparsed[0].fit_interval_s,
+        Some(6.0 * SECONDS_PER_HOUR),
+        "explicit 6 h fit interval round-trips exactly"
+    );
+
+    // QZSS, Galileo, and BeiDou carry no fit interval in ORBIT-7 and round-trip as None.
+    let mut base_qzss = base_gps;
+    base_qzss.satellite_id = GnssSatelliteId::new(GnssSystem::Qzss, 1).unwrap();
+    base_qzss.message = NavMessage::QzssLnav;
+    base_qzss.fit_interval_s = None;
+    let encoded_qzss = encode_nav(&[base_qzss]);
+    let reparsed_qzss = parse_nav(&encoded_qzss).expect("parse encoded QZSS record");
+    assert_eq!(reparsed_qzss.len(), 1);
+    assert_eq!(reparsed_qzss[0].satellite_id.system, GnssSystem::Qzss);
+    assert_eq!(reparsed_qzss[0].message, NavMessage::QzssLnav);
+    assert_eq!(reparsed_qzss[0].fit_interval_s, None);
+
+    let mut base_gal = records()
+        .into_iter()
+        .find(|r| r.satellite_id.system == GnssSystem::Galileo)
+        .expect("Galileo record");
+    base_gal.fit_interval_s = None;
+    let encoded_gal = encode_nav(&[base_gal]);
+    let reparsed_gal = parse_nav(&encoded_gal).expect("parse encoded Galileo record");
+    assert_eq!(reparsed_gal[0].fit_interval_s, None);
+
+    let mut base_bds = records()
+        .into_iter()
+        .find(|r| r.satellite_id.system == GnssSystem::BeiDou)
+        .expect("BeiDou record");
+    base_bds.fit_interval_s = None;
+    let encoded_bds = encode_nav(&[base_bds]);
+    let reparsed_bds = parse_nav(&encoded_bds).expect("parse encoded BeiDou record");
+    assert_eq!(reparsed_bds[0].fit_interval_s, None);
 }

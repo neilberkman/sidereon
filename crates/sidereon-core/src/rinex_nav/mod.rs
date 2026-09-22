@@ -56,11 +56,12 @@ fn parse_f64(line: &str, start: usize, end: usize) -> Option<f64> {
 }
 
 /// Fallback half-window (seconds, either side of `toe`) for a record that does
-/// not broadcast a fit interval (Galileo, BeiDou). A coarse validity guard - a
-/// stale or wrong-week product is off by at least a week, so this rejects it as
-/// "no ephemeris" rather than silently extrapolating. GPS records carry an
-/// explicit curve-fit interval (see [`BroadcastRecord::fit_interval_s`]) and use
-/// half of that instead.
+/// not carry a fit interval (Galileo, BeiDou, QZSS, or GPS records where the
+/// fit-interval field is absent or zero). This is a coarse safety window and
+/// computation fallback to reject stale or wrong-week products rather than
+/// silently extrapolating; it is not reported broadcast metadata. Records
+/// carrying an explicit fit interval ([`BroadcastRecord::fit_interval_s`]) use
+/// half of that interval instead.
 pub(crate) const MAX_EPHEMERIS_AGE_S: f64 = 4.0 * SECONDS_PER_HOUR;
 
 /// GLONASS broadcast records are valid +/-15 minutes around their reference
@@ -68,7 +69,11 @@ pub(crate) const MAX_EPHEMERIS_AGE_S: f64 = 4.0 * SECONDS_PER_HOUR;
 /// reports no ephemeris rather than extrapolating the RK4 integration.
 pub(crate) const GLONASS_MAX_AGE_S: f64 = 15.0 * 60.0;
 const GPS_NOMINAL_FIT_INTERVAL_S: f64 = 4.0 * SECONDS_PER_HOUR;
-const GPS_LEGACY_EXTENDED_FIT_INTERVAL_S: f64 = 8.0 * SECONDS_PER_HOUR;
+/// Fit interval for legacy RINEX 3.00–3.02 GPS records when the fit-interval flag
+/// is 1 (extended fit). RINEX 3.02 Table A6 explicitly defines flag 1 as 6 hours
+/// (21600.0 s). The old constant was an inherited defect now independently
+/// verified against primary text.
+const GPS_LEGACY_EXTENDED_FIT_INTERVAL_S: f64 = 6.0 * SECONDS_PER_HOUR;
 const GLONASS_FREQ_CHANNEL_MIN: i32 = -7;
 const GLONASS_FREQ_CHANNEL_MAX: i32 = 6;
 
@@ -135,7 +140,7 @@ pub struct BroadcastIssue {
 /// A broadcast group-delay term carried by a RINEX NAV record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadcastGroupDelayTerm {
-    /// GPS LNAV TGD.
+    /// GPS/QZSS LNAV TGD.
     GpsTgd,
     /// Galileo BGD E5a/E1.
     GalileoBgdE5aE1,
@@ -179,7 +184,7 @@ pub enum CnavSignal {
 /// Per-signal broadcast group delays preserved from one NAV record.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct BroadcastGroupDelays {
-    /// GPS LNAV TGD, seconds.
+    /// GPS/QZSS LNAV TGD, seconds.
     pub gps_tgd_s: Option<f64>,
     /// Galileo BGD E5a/E1, seconds.
     pub galileo_bgd_e5a_e1_s: Option<f64>,
@@ -204,12 +209,34 @@ pub struct BroadcastGroupDelays {
 }
 
 impl BroadcastGroupDelays {
-    /// Build the GPS LNAV delay set.
-    pub const fn gps_lnav(tgd_s: f64) -> Self {
+    /// Build a GPS/QZSS LNAV delay set with an optional TGD.
+    pub const fn gps_lnav_opt(tgd_s: Option<f64>) -> Self {
         Self {
-            gps_tgd_s: Some(tgd_s),
+            gps_tgd_s: tgd_s,
             galileo_bgd_e5a_e1_s: None,
             galileo_bgd_e5b_e1_s: None,
+            beidou_tgd1_s: None,
+            beidou_tgd2_s: None,
+            cnav_isc_l1ca_s: None,
+            cnav_isc_l2c_s: None,
+            cnav_isc_l5i5_s: None,
+            cnav_isc_l5q5_s: None,
+            cnav_isc_l1cd_s: None,
+            cnav_isc_l1cp_s: None,
+        }
+    }
+
+    /// Build the GPS LNAV delay set.
+    pub const fn gps_lnav(tgd_s: f64) -> Self {
+        Self::gps_lnav_opt(Some(tgd_s))
+    }
+
+    /// Build a Galileo delay set with optional BGD terms.
+    pub const fn galileo_opt(bgd_e5a_e1_s: Option<f64>, bgd_e5b_e1_s: Option<f64>) -> Self {
+        Self {
+            gps_tgd_s: None,
+            galileo_bgd_e5a_e1_s: bgd_e5a_e1_s,
+            galileo_bgd_e5b_e1_s: bgd_e5b_e1_s,
             beidou_tgd1_s: None,
             beidou_tgd2_s: None,
             cnav_isc_l1ca_s: None,
@@ -223,12 +250,17 @@ impl BroadcastGroupDelays {
 
     /// Build the Galileo delay set.
     pub const fn galileo(bgd_e5a_e1_s: f64, bgd_e5b_e1_s: f64) -> Self {
+        Self::galileo_opt(Some(bgd_e5a_e1_s), Some(bgd_e5b_e1_s))
+    }
+
+    /// Build a BeiDou delay set with optional TGD terms.
+    pub const fn beidou_opt(tgd1_s: Option<f64>, tgd2_s: Option<f64>) -> Self {
         Self {
             gps_tgd_s: None,
-            galileo_bgd_e5a_e1_s: Some(bgd_e5a_e1_s),
-            galileo_bgd_e5b_e1_s: Some(bgd_e5b_e1_s),
-            beidou_tgd1_s: None,
-            beidou_tgd2_s: None,
+            galileo_bgd_e5a_e1_s: None,
+            galileo_bgd_e5b_e1_s: None,
+            beidou_tgd1_s: tgd1_s,
+            beidou_tgd2_s: tgd2_s,
             cnav_isc_l1ca_s: None,
             cnav_isc_l2c_s: None,
             cnav_isc_l5i5_s: None,
@@ -240,19 +272,7 @@ impl BroadcastGroupDelays {
 
     /// Build the BeiDou delay set.
     pub const fn beidou(tgd1_s: f64, tgd2_s: f64) -> Self {
-        Self {
-            gps_tgd_s: None,
-            galileo_bgd_e5a_e1_s: None,
-            galileo_bgd_e5b_e1_s: None,
-            beidou_tgd1_s: Some(tgd1_s),
-            beidou_tgd2_s: Some(tgd2_s),
-            cnav_isc_l1ca_s: None,
-            cnav_isc_l2c_s: None,
-            cnav_isc_l5i5_s: None,
-            cnav_isc_l5q5_s: None,
-            cnav_isc_l1cd_s: None,
-            cnav_isc_l1cp_s: None,
-        }
+        Self::beidou_opt(Some(tgd1_s), Some(tgd2_s))
     }
 
     /// Build a GPS/QZSS CNAV-family delay set.
@@ -515,10 +535,12 @@ pub struct BroadcastRecord {
     pub sv_health: f64,
     /// Signal-in-space accuracy: GPS URA (m) / Galileo SISA (m).
     pub sv_accuracy_m: f64,
-    /// GPS curve-fit interval in seconds, centered on `toe` (IS-GPS-200): the
-    /// record is valid for `toe ± fit_interval_s / 2`. `None` for Galileo and
-    /// BeiDou, which do not broadcast a fit interval in the RINEX record; those
-    /// fall back to the crate's nominal four-hour age bound.
+    /// GPS curve-fit interval in seconds, centered on `toe` (IS-GPS-200): when
+    /// present, the record is valid for `toe ± fit_interval_s / 2`. `None` when
+    /// absent or unknown (including Galileo, BeiDou, QZSS, and GPS records
+    /// where the fit-interval field is blank or zero); orbit selection falls
+    /// back to [`MAX_EPHEMERIS_AGE_S`] as a computational safety window rather
+    /// than reported broadcast metadata.
     pub fit_interval_s: Option<f64>,
 }
 
@@ -935,8 +957,15 @@ where
             | Some(GnssSystem::Galileo)
             | Some(GnssSystem::BeiDou)
             | Some(GnssSystem::Qzss) => records.push(parse_keplerian_block(block, None, version)?),
-            // Recognized boundary, unsupported model (GLONASS state-vector, SBAS): skip.
-            _ => {}
+            Some(GnssSystem::Glonass) | Some(GnssSystem::Sbas) | Some(GnssSystem::Navic) => {
+                // Recognized boundary, unsupported model (GLONASS state-vector, SBAS, NavIC): skip.
+            }
+            None => {
+                return Err(NavParseError::BadField {
+                    satellite: nav_block_satellite(block),
+                    field: "system",
+                });
+            }
         }
     }
     Ok(records)
@@ -973,7 +1002,17 @@ where
                     message: error.to_string(),
                 }),
             },
-            _ => {}
+            Some(GnssSystem::Glonass) | Some(GnssSystem::Sbas) | Some(GnssSystem::Navic) => {}
+            None => {
+                skipped.push(SkippedNavBlock {
+                    satellite: nav_block_satellite(block),
+                    message: NavParseError::BadField {
+                        satellite: nav_block_satellite(block),
+                        field: "system",
+                    }
+                    .to_string(),
+                });
+            }
         }
     }
     (records, skipped)
@@ -998,15 +1037,16 @@ where
     let frames = v4_frames(lines);
     let mut records = Vec::new();
     for (marker, body) in &frames {
-        let Some((frame_type, sv, msg_token)) = parse_v4_marker(marker) else {
-            continue;
+        let (sv, msg_token) = match parse_v4_eph_marker(marker, body)? {
+            V4MarkerHeader::Eph { sv, msg_token } => (sv, msg_token),
+            V4MarkerHeader::RecognizedNonEph => continue,
         };
-        if frame_type != "EPH" {
-            continue; // STO/EOP/ION carry no ephemeris.
-        }
         let letter = sv.as_bytes().first().copied().map_or(' ', char::from);
         let Some(system) = GnssSystem::from_letter(letter) else {
-            continue;
+            return Err(NavParseError::BadField {
+                satellite: sv.to_string(),
+                field: "system",
+            });
         };
         let supported = matches!(
             system,
@@ -1015,6 +1055,25 @@ where
         if !supported {
             continue; // GLONASS/SBAS/NavIC: not a supported Keplerian system here.
         }
+        if sv.parse::<GnssSatelliteId>().is_err() {
+            return Err(NavParseError::BadField {
+                satellite: sv.to_string(),
+                field: "prn",
+            });
+        }
+        if let Some(body_sv) = body
+            .first()
+            .and_then(|line| line.get(0..3))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !satellites_match(sv, body_sv) {
+                return Err(NavParseError::BadField {
+                    satellite: sv.to_string(),
+                    field: "frame marker",
+                });
+            }
+        }
         if let Some(message) = nav_message_from_v4_token(msg_token, system) {
             validate_v4_ephemeris_marker(sv, message, body)?;
             if message.is_cnav_family() {
@@ -1022,9 +1081,7 @@ where
             } else {
                 records.push(parse_keplerian_block(body, Some(message), version)?);
             }
-        } else if known_v4_ephemeris_token(msg_token)
-            && !explicitly_skipped_v4_message(msg_token, system)
-        {
+        } else if !explicitly_skipped_v4_message(msg_token, system) {
             return Err(NavParseError::BadField {
                 satellite: sv.to_string(),
                 field: "message",
@@ -1045,14 +1102,31 @@ where
     let mut records = Vec::new();
     let mut skipped = Vec::new();
     for (marker, body) in &frames {
-        let Some((frame_type, sv, msg_token)) = parse_v4_marker(marker) else {
-            continue;
+        let (sv, msg_token) = match parse_v4_eph_marker(marker, body) {
+            Ok(V4MarkerHeader::Eph { sv, msg_token }) => (sv, msg_token),
+            Ok(V4MarkerHeader::RecognizedNonEph) => continue,
+            Err(error) => {
+                let satellite = match &error {
+                    NavParseError::BadField { satellite, .. } => satellite.clone(),
+                    _ => nav_block_satellite(body),
+                };
+                skipped.push(SkippedNavBlock {
+                    satellite,
+                    message: error.to_string(),
+                });
+                continue;
+            }
         };
-        if frame_type != "EPH" {
-            continue;
-        }
         let letter = sv.as_bytes().first().copied().map_or(' ', char::from);
         let Some(system) = GnssSystem::from_letter(letter) else {
+            skipped.push(SkippedNavBlock {
+                satellite: sv.to_string(),
+                message: NavParseError::BadField {
+                    satellite: sv.to_string(),
+                    field: "system",
+                }
+                .to_string(),
+            });
             continue;
         };
         let supported = matches!(
@@ -1061,6 +1135,35 @@ where
         );
         if !supported {
             continue;
+        }
+        if sv.parse::<GnssSatelliteId>().is_err() {
+            skipped.push(SkippedNavBlock {
+                satellite: sv.to_string(),
+                message: NavParseError::BadField {
+                    satellite: sv.to_string(),
+                    field: "prn",
+                }
+                .to_string(),
+            });
+            continue;
+        }
+        if let Some(body_sv) = body
+            .first()
+            .and_then(|line| line.get(0..3))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if !satellites_match(sv, body_sv) {
+                skipped.push(SkippedNavBlock {
+                    satellite: sv.to_string(),
+                    message: NavParseError::BadField {
+                        satellite: sv.to_string(),
+                        field: "frame marker",
+                    }
+                    .to_string(),
+                });
+                continue;
+            }
         }
         if let Some(message) = nav_message_from_v4_token(msg_token, system) {
             let parsed = validate_v4_ephemeris_marker(sv, message, body).and_then(|()| {
@@ -1077,6 +1180,15 @@ where
                     message: error.to_string(),
                 }),
             }
+        } else if !explicitly_skipped_v4_message(msg_token, system) {
+            skipped.push(SkippedNavBlock {
+                satellite: sv.to_string(),
+                message: NavParseError::BadField {
+                    satellite: sv.to_string(),
+                    field: "message",
+                }
+                .to_string(),
+            });
         }
     }
     (records, skipped)
@@ -1111,6 +1223,111 @@ fn is_v4_frame_marker(line: &str) -> bool {
     line.starts_with("> ")
 }
 
+enum V4MarkerHeader<'a> {
+    Eph { sv: &'a str, msg_token: &'a str },
+    RecognizedNonEph,
+}
+
+fn parse_v4_eph_marker<'a>(
+    marker: &'a str,
+    body: &[&str],
+) -> Result<V4MarkerHeader<'a>, NavParseError> {
+    let rest = marker.strip_prefix('>').unwrap_or(marker).trim();
+    let body_sat = nav_block_satellite(body);
+    if rest.is_empty() {
+        return Err(NavParseError::BadField {
+            satellite: body_sat,
+            field: "frame marker",
+        });
+    }
+    let mut fields = rest.split_whitespace().peekable();
+    let Some(frame_type) = fields.next() else {
+        return Err(NavParseError::BadField {
+            satellite: body_sat,
+            field: "frame marker",
+        });
+    };
+    if matches!(frame_type, "ION" | "STO" | "EOP") {
+        return Ok(V4MarkerHeader::RecognizedNonEph);
+    }
+    if frame_type != "EPH" {
+        return Err(NavParseError::BadField {
+            satellite: body_sat,
+            field: "frame marker",
+        });
+    }
+    let Some(first_sv) = fields.next() else {
+        return Err(NavParseError::BadField {
+            satellite: body_sat,
+            field: "prn",
+        });
+    };
+    let sv = if first_sv.len() == 1 {
+        let first_char = first_sv.chars().next().unwrap_or(' ');
+        if !first_char.is_ascii_alphabetic() {
+            return Err(NavParseError::BadField {
+                satellite: first_sv.to_string(),
+                field: "system",
+            });
+        }
+        let Some(&prn_token) = fields.peek() else {
+            return Err(NavParseError::BadField {
+                satellite: first_sv.to_string(),
+                field: "prn",
+            });
+        };
+        if !prn_token.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(NavParseError::BadField {
+                satellite: first_sv.to_string(),
+                field: "prn",
+            });
+        }
+        let _ = fields.next();
+        let start = first_sv.as_ptr() as usize - marker.as_ptr() as usize;
+        let end = prn_token.as_ptr() as usize - marker.as_ptr() as usize + prn_token.len();
+        let combined = &marker[start..end];
+        if !(1..=2).contains(&prn_token.len()) {
+            return Err(NavParseError::BadField {
+                satellite: combined.to_string(),
+                field: "prn",
+            });
+        }
+        combined
+    } else {
+        let first_char = first_sv.chars().next().unwrap_or(' ');
+        if !first_char.is_ascii_alphabetic() {
+            return Err(NavParseError::BadField {
+                satellite: first_sv.to_string(),
+                field: "system",
+            });
+        }
+        let prn_part = &first_sv[first_char.len_utf8()..];
+        if !prn_part.bytes().all(|b| b.is_ascii_digit()) || !(1..=2).contains(&prn_part.len()) {
+            return Err(NavParseError::BadField {
+                satellite: first_sv.to_string(),
+                field: "prn",
+            });
+        }
+        first_sv
+    };
+
+    let Some(msg_token) = fields.next() else {
+        return Err(NavParseError::BadField {
+            satellite: sv.to_string(),
+            field: "message",
+        });
+    };
+
+    if fields.next().is_some() {
+        return Err(NavParseError::BadField {
+            satellite: sv.to_string(),
+            field: "frame marker",
+        });
+    }
+
+    Ok(V4MarkerHeader::Eph { sv, msg_token })
+}
+
 /// Split a version-4 frame marker `> EPH G01 LNAV` into (frame type, SV, message
 /// token), or `None` if it is malformed. Mirrors the RINEX-4 marker layout:
 /// `>` then the 4-column frame class, the SV, and the message-type token.
@@ -1118,8 +1335,31 @@ fn parse_v4_marker(line: &str) -> Option<(&str, &str, &str)> {
     let rest = line.strip_prefix('>')?;
     let mut fields = rest.split_whitespace();
     let frame_type = fields.next()?;
-    let sv = fields.next()?;
-    let msg_token = fields.next()?;
+    let first_sv = fields.next()?;
+    // Non-padded satellite identifiers (e.g. "G 1") have whitespace between constellation
+    // and PRN, producing separate whitespace tokens that must be recombined.
+    let (sv, msg_token) = if first_sv.len() == 1
+        && first_sv
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        let mut peek = fields.clone();
+        let prn_token = peek.next()?;
+        if prn_token.bytes().all(|b| b.is_ascii_digit()) && (1..=2).contains(&prn_token.len()) {
+            let _ = fields.next();
+            let msg_token = fields.next()?;
+            let start = first_sv.as_ptr() as usize - line.as_ptr() as usize;
+            let end = prn_token.as_ptr() as usize - line.as_ptr() as usize + prn_token.len();
+            (&line[start..end], msg_token)
+        } else {
+            let msg_token = fields.next()?;
+            (first_sv, msg_token)
+        }
+    } else {
+        let msg_token = fields.next()?;
+        (first_sv, msg_token)
+    };
     Some((frame_type, sv, msg_token))
 }
 
@@ -1142,18 +1382,21 @@ fn nav_message_from_v4_token(token: &str, system: GnssSystem) -> Option<NavMessa
     }
 }
 
-fn known_v4_ephemeris_token(token: &str) -> bool {
-    matches!(
-        token,
-        "LNAV" | "CNAV" | "CNV1" | "CNV2" | "CNV3" | "INAV" | "FNAV" | "D1" | "D2"
-    )
-}
-
 fn explicitly_skipped_v4_message(token: &str, system: GnssSystem) -> bool {
     matches!(
         (token, system),
         ("CNV1" | "CNV2" | "CNV3", GnssSystem::BeiDou)
     )
+}
+
+fn satellites_match(marker_sv: &str, body_sv: &str) -> bool {
+    match (
+        marker_sv.parse::<GnssSatelliteId>(),
+        body_sv.parse::<GnssSatelliteId>(),
+    ) {
+        (Ok(marker), Ok(body)) => marker == body,
+        _ => marker_sv == body_sv,
+    }
 }
 
 fn validate_v4_ephemeris_marker(
@@ -1170,15 +1413,7 @@ fn validate_v4_ephemeris_marker(
         return Ok(());
     };
 
-    let same_satellite = match (
-        marker_sv.parse::<GnssSatelliteId>(),
-        body_sv.parse::<GnssSatelliteId>(),
-    ) {
-        (Ok(marker), Ok(body)) => marker == body,
-        _ => marker_sv == body_sv,
-    };
-
-    if !same_satellite {
+    if !satellites_match(marker_sv, body_sv) {
         return Err(NavParseError::BadField {
             satellite: marker_sv.to_string(),
             field: "frame marker",
@@ -1728,24 +1963,35 @@ fn parse_keplerian_block(
     let sv_accuracy_m = g(o6[0], "accuracy")?;
     let sv_health = g(o6[1], "health")?;
     let group_delays = match system {
-        GnssSystem::Gps => BroadcastGroupDelays::gps_lnav(g(o6[2], "gps tgd")?),
+        GnssSystem::Gps => BroadcastGroupDelays::gps_lnav_opt(optional_keplerian_delay(
+            raw_orbit_field(block[6], 2),
+            "gps tgd",
+            &sat,
+        )?),
+        GnssSystem::Qzss => BroadcastGroupDelays::gps_lnav_opt(optional_keplerian_delay(
+            raw_orbit_field(block[6], 2),
+            "qzss tgd",
+            &sat,
+        )?),
         // RINEX Galileo ORBIT-6 carries BGD E5a/E1 in field 3 and BGD E5b/E1 in
         // field 4; both are part of the message representation regardless of
         // which one a clock consumer later selects.
-        GnssSystem::Galileo => {
-            BroadcastGroupDelays::galileo(g(o6[2], "bgd e5a/e1")?, g(o6[3], "bgd e5b/e1")?)
-        }
-        GnssSystem::BeiDou => {
-            BroadcastGroupDelays::beidou(g(o6[2], "beidou tgd1")?, g(o6[3], "beidou tgd2")?)
-        }
+        GnssSystem::Galileo => BroadcastGroupDelays::galileo_opt(
+            optional_keplerian_delay(raw_orbit_field(block[6], 2), "bgd e5a/e1", &sat)?,
+            optional_keplerian_delay(raw_orbit_field(block[6], 3), "bgd e5b/e1", &sat)?,
+        ),
+        GnssSystem::BeiDou => BroadcastGroupDelays::beidou_opt(
+            optional_keplerian_delay(raw_orbit_field(block[6], 2), "beidou tgd1", &sat)?,
+            optional_keplerian_delay(raw_orbit_field(block[6], 3), "beidou tgd2", &sat)?,
+        ),
         _ => BroadcastGroupDelays::default(),
     };
 
-    // Only GPS LNAV broadcasts a curve-fit interval (ORBIT-7 field 2); Galileo
-    // and BeiDou leave that column blank or spare, so they carry no fit interval.
+    // Only GPS LNAV broadcasts a curve-fit interval (ORBIT-7 field 2); other
+    // constellations (Galileo, BeiDou, QZSS) leave that column blank or spare.
     let fit_interval_s = match system {
         GnssSystem::Gps => {
-            Some(gps_fit_interval_s(block[7], version).map_err(|()| bad("fit interval"))?)
+            gps_fit_interval_s(block[7], version).map_err(|()| bad("fit interval"))?
         }
         _ => None,
     };
@@ -1920,27 +2166,46 @@ fn parse_cnav_block(block: &[&str], message: NavMessage) -> Result<BroadcastReco
 }
 
 /// The GPS curve-fit interval in seconds from the ORBIT-7 fit-interval field.
-/// RINEX 3.03+ and 4.xx record this field in hours. Legacy RINEX 3.02 and older
-/// files may carry the broadcast 0/1 fit-interval flag instead, where 1 means
-/// more than four hours rather than one hour. Per IS-GPS-200 the decoded value
-/// is the total interval centered on `toe`; a zero or absent field denotes the
-/// nominal four hours.
 ///
-/// A blank/absent field is the legitimate nominal case (some products omit it);
-/// a present but non-numeric field is a malformed record, reported as `Err` so
-/// the caller can raise the same `BadField` error as for other numeric fields
-/// rather than silently substituting four hours.
-fn gps_fit_interval_s(orbit7: &str, version: RinexVersion) -> Result<f64, ()> {
-    let value = match field(orbit7, 23, 42) {
-        None => 0.0,
-        Some(_) => parse_f64(orbit7, 23, 42).ok_or(())?,
-    };
+/// RINEX 3.03 Table A6 specifies ORBIT-7 field 2 in hours. Per Section 6.6,
+/// unknown or unmodeled fields are blank. A blank or absent field indicates an
+/// unknown or unprovided fit interval and decodes as `Ok(None)`.
+///
+/// In modern headers, numeric zero (`0.0`) follows the standard missing-value
+/// convention for unpopulated fields (rather than representing a physical
+/// zero-length interval or an unsourced 4-hour broadcast interval). To preserve
+/// readable files without rejecting zero and without fabricating metadata, a
+/// modern zero decodes as `Ok(None)`. If `None` reaches orbit selection,
+/// downstream logic retains [`MAX_EPHEMERIS_AGE_S`] as a computational safety
+/// fallback rather than reported broadcast metadata. Explicit positive values
+/// in modern headers decode as hours (`value * SECONDS_PER_HOUR`).
+///
+/// For legacy files (RINEX 3.02 and older), RINEX 3.02 Table A6 explicitly defines
+/// flag values `0 = 4 hours` and `1 = 6 hours` (extended fit). This established
+/// legacy compatibility is preserved: `0.0` decodes as nominal 4 hours
+/// ([`GPS_NOMINAL_FIT_INTERVAL_S`]), and `1.0` decodes as extended fit
+/// ([`GPS_LEGACY_EXTENDED_FIT_INTERVAL_S`]). The old constant of 8.0 hours was an
+/// inherited defect now independently verified against primary text.
+///
+/// A present but non-numeric, negative, or unrepresentable field is an error (`Err(())`).
+fn gps_fit_interval_s(orbit7: &str, version: RinexVersion) -> Result<Option<f64>, ()> {
+    if field(orbit7, 23, 42).is_none() {
+        return Ok(None);
+    }
+    let value = parse_f64(orbit7, 23, 42).ok_or(())?;
+    if value < 0.0 {
+        return Err(());
+    }
     if value == 0.0 {
-        Ok(GPS_NOMINAL_FIT_INTERVAL_S)
+        if version.gps_fit_interval_uses_legacy_flag() {
+            Ok(Some(GPS_NOMINAL_FIT_INTERVAL_S))
+        } else {
+            Ok(None)
+        }
     } else if version.gps_fit_interval_uses_legacy_flag() && value == 1.0 {
-        Ok(GPS_LEGACY_EXTENDED_FIT_INTERVAL_S)
+        Ok(Some(GPS_LEGACY_EXTENDED_FIT_INTERVAL_S))
     } else {
-        Ok(value * SECONDS_PER_HOUR)
+        Ok(Some(value * SECONDS_PER_HOUR))
     }
 }
 
@@ -2042,6 +2307,25 @@ fn optional_cnav_delay(
     } else {
         Ok(Some(value))
     }
+}
+
+fn optional_keplerian_delay(
+    raw: &str,
+    field: &'static str,
+    sat: &str,
+) -> Result<Option<f64>, NavParseError> {
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    let value =
+        validate::strict_f64(raw, field).map_err(|error| map_record_field_error(error, sat))?;
+    if !write::d19_12_representable(value) {
+        return Err(NavParseError::BadField {
+            satellite: sat.to_string(),
+            field,
+        });
+    }
+    Ok(Some(value))
 }
 
 fn glonass_frequency_channel(value: f64, sat: &str) -> Result<i32, NavParseError> {
