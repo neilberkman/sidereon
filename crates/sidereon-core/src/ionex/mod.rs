@@ -28,8 +28,8 @@ mod tests;
 
 use crate::astro::constants::time::{DAYS_PER_JULIAN_YEAR, SECONDS_PER_DAY, SECONDS_PER_HOUR};
 use crate::astro::time::civil::{
-    fractional_day_of_year_from_instant, j2000_seconds_from_split, second_of_day_from_instant,
-    split_julian_date_from_j2000_seconds,
+    fractional_day_of_year_from_instant, second_of_day_from_instant,
+    split_julian_date_from_j2000_seconds, J2000_JULIAN_DAY_NUMBER,
 };
 use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale};
 
@@ -394,25 +394,190 @@ pub(crate) fn instant_from_j2000_seconds(scale: TimeScale, seconds: i64) -> Inst
     )
 }
 
-pub(crate) fn j2000_seconds_from_instant(epoch: Instant) -> Option<i64> {
-    match epoch.repr {
-        InstantRepr::JulianDate(split) => {
-            let seconds = j2000_seconds_from_split(split.jd_whole, split.fraction);
-            if seconds.is_finite() && seconds >= i64::MIN as f64 && seconds <= i64::MAX as f64 {
-                Some(seconds.round() as i64)
-            } else {
-                None
-            }
-        }
+/// Nanoseconds per second, for the integer-nanosecond instant representation.
+const NANOS_PER_SECOND_I128: i128 = 1_000_000_000;
+
+/// `86_400 = 2^7 * 675`. A Julian-date offset in days is a whole number of
+/// seconds exactly when it is a whole multiple of `2^-7` days, and the second
+/// it names is `675` times that multiple. Scaling by the power of two is an
+/// exponent shift, so it is exact for every finite double.
+const DAY_SCALE: f64 = 128.0;
+const DAY_SCALE_I128: i128 = 128;
+const SECONDS_PER_SCALED_DAY: i128 = 675;
+
+/// The J2000 Julian-date origin on the `2^-7`-day scale. JD 2451545.0 is noon
+/// of Julian day number [`J2000_JULIAN_DAY_NUMBER`], so the origin is a whole
+/// number of days and scales without a remainder.
+const J2000_SCALED_DAYS: i128 = J2000_JULIAN_DAY_NUMBER as i128 * DAY_SCALE_I128;
+
+/// `2^47` days, the magnitude bound on a split Julian date's recombined value.
+///
+/// A recombined value this far from zero is more than `i64::MAX` seconds from
+/// the J2000 origin in either direction - `(2^47 - 2_451_546) * 86_400` already
+/// exceeds `2^63` - so the bound refuses only epochs the whole-second axis
+/// could not hold anyway. Below it, the scaled value stays under `2^54` and
+/// every remaining step is exact in `i128`.
+const JD_SUM_LIMIT: f64 = 140_737_488_355_328.0;
+
+/// The exact whole J2000 second an IONEX map epoch names, or `None` where the
+/// instant names no whole second the epoch axis can hold.
+///
+/// An IONEX file states every map epoch as six whole civil fields, so the epoch
+/// axis is an axis of whole seconds. Every place that reads a second off a
+/// stored [`Instant`] - sample validation and grouping, the
+/// strictly-increasing check, the whole-day diurnal shift, the
+/// [`Ionex::map_epochs_s`] compatibility view, slant map-time evaluation and
+/// the writer's epoch record - goes through this one contract, so no two of
+/// them can disagree about which second an epoch is, and none of them can
+/// silently move an epoch onto a different second. The instant is read as it
+/// stands: its scale tag is not consulted and no time system is shifted.
+///
+/// [`InstantRepr::Nanos`] counts nanoseconds from the J2000 origin in the
+/// instant's own scale, the convention
+/// [`crate::astro::time::civil::julian_date_from_instant`] documents. The count
+/// is divided in `i128`, so a count past the 53-bit integers an `f64` holds
+/// keeps every second it states. A count that is not a whole number of seconds,
+/// or whose seconds fall outside `i64`, is refused rather than rounded or
+/// saturated.
+///
+/// [`InstantRepr::JulianDate`] carries a day boundary and a residual day
+/// fraction. Two readings are accepted, in this order.
+///
+/// 1. *The value the two parts sum to.* Both parts are binary floats, so their
+///    exact real sum is a dyadic rational, and `86_400 = 2^7 * 675` makes that
+///    sum a whole number of seconds exactly when it is a whole multiple of
+///    `2^-7` days. [`two_sum`] recovers the sum and its rounding error exactly,
+///    both are scaled by `2^7`, and the reading holds only when both are
+///    integral; the second is then `675` times the scaled day count. This is
+///    exact real arithmetic, so it does not care which boundary `jd_whole`
+///    names: `2_451_545.25` with a zero fraction is J2000 + 21_600 s and is
+///    read as that, and a `jd_whole` one bit above `2_451_545.0` with a
+///    fraction of exactly the negative of that bit sums to the origin and is
+///    read as second 0.
+/// 2. *The whole second the two parts encode.* A day fraction is a binary
+///    approximation: `11 / 86_400` is not a dyadic rational, so the reader's
+///    own J2000 + 11 s epoch has no whole-second value in exact real arithmetic
+///    and reading 1 alone would refuse it. Where the boundary alone names a
+///    whole second by reading 1, the fraction is therefore also read as an
+///    encoding: the candidate residual `(fraction * 86_400).round()` is taken
+///    only when `residual as f64 / 86_400.0` - the expression both
+///    [`split_julian_date_from_j2000_seconds`] and
+///    [`crate::astro::time::split_julian_date`] form - reproduces `fraction`
+///    bit for bit.
+///
+/// The two readings cannot disagree. Reading 2 only adds epochs whose fraction
+/// is not exactly `residual / 86_400`, and for those the exact sum is not a
+/// whole multiple of `2^-7` days at all, so reading 1 has already declined
+/// them; where the fraction is exact - a residual that is a whole multiple of
+/// 675 s - both readings give the same second.
+///
+/// Reading 2 is the one place this conversion is not exact real arithmetic, and
+/// the imprecision is bounded rather than hidden. An accepted encoding lies
+/// within `86_400 * 2^-53` s of the second it is read as, under a hundredth of
+/// a nanosecond, while distinct residuals are `1 / 86_400` apart in day
+/// fraction, eleven orders of magnitude wider. No two seconds can therefore
+/// share an encoding, and the one `f64` either side of an accepted fraction is
+/// refused by both readings. No tolerance is applied anywhere: every acceptance
+/// is an equality.
+///
+/// One case is left out deliberately, and it is a limit rather than a
+/// restriction on any epoch that can be shown to name a second. A split whose
+/// boundary names no whole second on its own and whose fraction is not exactly
+/// a whole number of seconds carries no exact evidence of which second it
+/// means: its exact value is not one, and the pair is not a form either encoder
+/// produces, so reading it would mean picking a nearby second on no better
+/// ground than proximity. Such a split is refused. Every split whose parts do
+/// state a second - by their exact sum, or as a boundary that names one plus an
+/// encoded residual - is read, whatever boundary it uses.
+///
+/// Representability here is this converter's, not the file grammar's: a second
+/// returned here may still have a civil year no `I6` epoch field can print,
+/// which the writer refuses by name when it formats the record.
+pub(crate) fn exact_j2000_second(epoch: Instant) -> Option<i64> {
+    let seconds = match epoch.repr {
         InstantRepr::Nanos(nanos) => {
-            let seconds = (nanos as f64 / 1.0e9).round();
-            if seconds.is_finite() && seconds >= i64::MIN as f64 && seconds <= i64::MAX as f64 {
-                Some(seconds as i64)
-            } else {
-                None
+            if nanos.rem_euclid(NANOS_PER_SECOND_I128) != 0 {
+                return None;
             }
+            nanos.div_euclid(NANOS_PER_SECOND_I128)
         }
+        InstantRepr::JulianDate(split) => split_j2000_second(split.jd_whole, split.fraction)?,
+    };
+    i64::try_from(seconds).ok()
+}
+
+/// The whole J2000 second a split Julian date names, held as `i128` so the one
+/// narrowing onto the epoch axis happens in [`exact_j2000_second`] and cannot
+/// wrap on the way.
+fn split_j2000_second(jd_whole: f64, fraction: f64) -> Option<i128> {
+    summed_split_second(jd_whole, fraction).or_else(|| encoded_split_second(jd_whole, fraction))
+}
+
+/// Reading 1: the whole second the two parts sum to in exact real arithmetic.
+fn summed_split_second(jd_whole: f64, fraction: f64) -> Option<i128> {
+    let (sum, residue) = two_sum(jd_whole, fraction);
+    // A non-finite part leaves `sum` non-finite, so the finiteness test refuses
+    // NaN and both infinities before the magnitude bound is consulted.
+    if !sum.is_finite() || sum.abs() >= JD_SUM_LIMIT {
+        return None;
     }
+    // Exact: multiplying by `2^7` only moves the exponent, and neither product
+    // can overflow below the bound above.
+    let scaled_sum = sum * DAY_SCALE;
+    let scaled_residue = residue * DAY_SCALE;
+    // `sum + residue` is the exact real value, and `residue` is the rounding
+    // error of `sum`, so `|scaled_residue| <= ulp(scaled_sum) / 2`. A double
+    // that is not an integer is a whole multiple of its own ulp and so sits at
+    // least one ulp from every integer, which is more than `scaled_residue` can
+    // move it; and an integer plus a non-integer is never an integer. The sum
+    // of the two is therefore a whole number of scaled days exactly when both
+    // are, with no tolerance in the test.
+    if scaled_sum.fract() != 0.0 || scaled_residue.fract() != 0.0 {
+        return None;
+    }
+    // Both are integral doubles under `2^54`, so both casts are exact.
+    let scaled_days = scaled_sum as i128 + scaled_residue as i128 - J2000_SCALED_DAYS;
+    Some(scaled_days * SECONDS_PER_SCALED_DAY)
+}
+
+/// Reading 2: the whole second a day boundary that names one itself and an
+/// encoded residual day fraction state together.
+fn encoded_split_second(jd_whole: f64, fraction: f64) -> Option<i128> {
+    let boundary_s = summed_split_second(jd_whole, 0.0)?;
+    let residual_s = encoded_second_of_day(fraction)?;
+    Some(boundary_s + i128::from(residual_s))
+}
+
+/// The integer residual second count a day `fraction` encodes, or `None` where
+/// it encodes none.
+fn encoded_second_of_day(fraction: f64) -> Option<i64> {
+    // `JulianDateSplit` states the residual as within one day either way, which
+    // is what `JulianDateSplit::new` and this module's own `validate_instant`
+    // both check. Refusing anything else here also keeps the product below
+    // `86_400`, so the cast cannot saturate.
+    if !fraction.is_finite() || fraction.abs() > 1.0 {
+        return None;
+    }
+    // Only a candidate; re-encoding it decides.
+    let seconds = (fraction * SECONDS_PER_DAY).round() as i64;
+    (seconds as f64 / SECONDS_PER_DAY == fraction).then_some(seconds)
+}
+
+/// The sum of two doubles and the exact rounding error that sum dropped:
+/// `sum + residue` is `a + b` with no error at all.
+///
+/// Knuth's two-sum (TAOCP vol. 2, sec. 4.2.2, theorem B), the same form the
+/// compensated summation in [`crate::astro::math`] uses. It is exact for any
+/// finite operands whose sum does not overflow, needs no ordering of `a` and
+/// `b`, and uses only addition and subtraction, so it holds under the crate's
+/// no-FMA numerical contract.
+fn two_sum(a: f64, b: f64) -> (f64, f64) {
+    let sum = a + b;
+    let b_virtual = sum - a;
+    let a_virtual = sum - b_virtual;
+    let b_roundoff = b - b_virtual;
+    let a_roundoff = a - a_virtual;
+    (sum, a_roundoff + b_roundoff)
 }
 
 /// Broadcast Klobuchar alpha/beta coefficients.

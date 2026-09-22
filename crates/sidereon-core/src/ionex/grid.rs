@@ -39,7 +39,7 @@
 //! maps, samples or slant-delay evaluations here could hold or use.
 
 use super::header::{IonexHeader, IonexMappingFunction, IonexWarning};
-use super::{ionex_epoch_from_j2000_seconds, j2000_seconds_from_instant};
+use super::{exact_j2000_second, ionex_epoch_from_j2000_seconds};
 use crate::astro::constants::time::SECONDS_PER_DAY_I64;
 use crate::astro::time::civil::{civil_from_j2000_seconds, j2000_seconds};
 use crate::astro::time::model::Instant;
@@ -216,8 +216,7 @@ impl Ionex {
         self.map_epochs
             .iter()
             .map(|epoch| {
-                j2000_seconds_from_instant(*epoch)
-                    .expect("IONEX map epoch is convertible to J2000 seconds")
+                exact_j2000_second(*epoch).expect("IONEX map epoch is convertible to J2000 seconds")
             })
             .collect()
     }
@@ -272,7 +271,7 @@ impl Ionex {
         })?;
         let mut shifted = self.clone();
         for epoch in &mut shifted.map_epochs {
-            let seconds = j2000_seconds_from_instant(*epoch).ok_or_else(|| {
+            let seconds = exact_j2000_second(*epoch).ok_or_else(|| {
                 Error::Parse("IONEX map epoch cannot be projected onto J2000 seconds".into())
             })?;
             let target = seconds.checked_add(shift_s).ok_or_else(|| {
@@ -400,7 +399,7 @@ impl Ionex {
 pub(crate) fn validate_map_epochs_strictly_increasing(map_epochs: &[Instant]) -> Result<()> {
     let mut previous_s = None;
     for (index, &epoch) in map_epochs.iter().enumerate() {
-        let seconds = j2000_seconds_from_instant(epoch).ok_or_else(|| {
+        let seconds = exact_j2000_second(epoch).ok_or_else(|| {
             Error::Parse(format!(
                 "IONEX map epoch {} cannot be projected onto J2000 seconds",
                 index + 1
@@ -898,7 +897,7 @@ impl HeaderRecords {
             }
         }
 
-        let seconds = |epoch: Instant| j2000_seconds_from_instant(epoch);
+        let seconds = |epoch: Instant| exact_j2000_second(epoch);
         for (record, label, maps) in [
             (self.first_epoch, EPOCH_OF_FIRST_MAP, map_epochs.first()),
             (self.last_epoch, EPOCH_OF_LAST_MAP, map_epochs.last()),
@@ -1439,7 +1438,7 @@ impl Body {
                 })?;
             if let Some((line, epoch)) = map.epoch {
                 let tec_epoch = self.map_epochs[tec_index];
-                if j2000_seconds_from_instant(epoch) != j2000_seconds_from_instant(tec_epoch) {
+                if exact_j2000_second(epoch) != exact_j2000_second(tec_epoch) {
                     return Err(Error::Parse(format!(
                         "IONEX {kind} map {} gives epoch {} at line {line}, but TEC map {} is at {}",
                         map.index,
@@ -1462,7 +1461,7 @@ impl Body {
 }
 
 fn epoch_text(epoch: Instant) -> String {
-    match j2000_seconds_from_instant(epoch) {
+    match exact_j2000_second(epoch) {
         Some(seconds) => {
             let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(seconds);
             format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}")
@@ -1947,7 +1946,7 @@ mod tests {
     #[test]
     fn parse_epoch_accepts_valid_civil_datetime() {
         assert_eq!(
-            j2000_seconds_from_instant(
+            exact_j2000_second(
                 parse_epoch_instant(
                     "  2020     6    25     0     0     0                        EPOCH OF CURRENT MAP"
                 )
