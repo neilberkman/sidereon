@@ -54,7 +54,7 @@ use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale
 
 use crate::constants::{KM_TO_M, US_TO_S};
 use crate::format::columns::{
-    char_at, raw_field as field, raw_field_from as field_from, strict_f64,
+    char_at, fixed_record, raw_field as field, raw_field_from as field_from, strict_f64,
 };
 use crate::format::{Diagnostics, RecordRef, Skip, SkipReason};
 use crate::frame::{ItrfPositionM, ItrfVelocityMS};
@@ -260,6 +260,31 @@ pub struct Sp3State {
     pub flags: Sp3Flags,
 }
 
+/// A retained clock-only record for a satellite at one SP3 epoch where orbit
+/// coordinates are absent (`0.0, 0.0, 0.0`) but a valid clock estimate was
+/// recorded.
+///
+/// Kept separately from [`Sp3State`] so consumers requiring valid orbit vectors
+/// never encounter a fabricated geocenter position or interpolate across absent
+/// coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sp3ClockRecord {
+    /// Satellite clock offset in **seconds**.
+    pub clock_s: f64,
+    /// Satellite clock offset in native SP3 **microseconds**, exact ASCII->f64.
+    pub clock_us: f64,
+    /// Satellite velocity in the ITRF/IGS ECEF frame, m/s (present if the
+    /// paired velocity record carried a non-zero velocity estimate).
+    pub velocity: Option<ItrfVelocityMS>,
+    /// Satellite clock rate in **seconds per second** (present if the paired
+    /// velocity record carried a clock-rate estimate).
+    pub clock_rate_s_s: Option<f64>,
+    /// Satellite clock rate in native SP3 units (1e-4 us/s), exact ASCII->f64.
+    pub clock_rate_raw: Option<f64>,
+    /// Per-record status flags.
+    pub flags: Sp3Flags,
+}
+
 /// Prediction status aggregated over every satellite record at one SP3 epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sp3EpochPrediction {
@@ -376,6 +401,10 @@ pub struct Sp3 {
     epoch_j2000_s: Vec<f64>,
     /// `epoch_index -> (satellite -> state)`. Parallel to [`Sp3::epochs`].
     states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
+    /// `epoch_index -> (satellite -> clock_record)`. Parallel to [`Sp3::epochs`].
+    /// Retains records where orbit coordinates are absent (`0.0, 0.0, 0.0`) but a
+    /// valid clock estimate was present.
+    clock_records: Vec<BTreeMap<GnssSatelliteId, Sp3ClockRecord>>,
     /// `epoch_index -> (satellite -> native-unit node)`. Parallel to
     /// [`Sp3::epochs`]; populated **only** from genuine position records. The
     /// interpolator fits its spline over these (km/us straight from the ASCII,
@@ -408,6 +437,7 @@ impl PartialEq for Sp3 {
             && self.epochs == other.epochs
             && self.epoch_j2000_s == other.epoch_j2000_s
             && self.states == other.states
+            && self.clock_records == other.clock_records
             && self.interp_raw == other.interp_raw
             && self.comments == other.comments
             && self.skipped_records == other.skipped_records
@@ -517,32 +547,69 @@ impl Sp3 {
         self.states.get(epoch_index).ok_or(Error::EpochOutOfRange)
     }
 
+    /// The retained clock-only record of `sat` at the parsed epoch with index `epoch_index`.
+    ///
+    /// Returns [`Error::EpochOutOfRange`] if the index is past the end, or
+    /// [`Error::UnknownSatellite`] if the satellite has no clock-only record at that epoch.
+    pub fn clock_record(&self, sat: GnssSatelliteId, epoch_index: usize) -> Result<Sp3ClockRecord> {
+        let per_epoch = self
+            .clock_records
+            .get(epoch_index)
+            .ok_or(Error::EpochOutOfRange)?;
+        per_epoch
+            .get(&sat)
+            .copied()
+            .ok_or(Error::UnknownSatellite(sat))
+    }
+
+    /// All `(satellite, clock_record)` pairs recorded at `epoch_index`, in ascending
+    /// satellite order.
+    pub fn clock_records_at(
+        &self,
+        epoch_index: usize,
+    ) -> Result<&BTreeMap<GnssSatelliteId, Sp3ClockRecord>> {
+        self.clock_records
+            .get(epoch_index)
+            .ok_or(Error::EpochOutOfRange)
+    }
+
     /// Aggregate the per-record SP3 orbit/clock prediction flags by epoch and
     /// compute the contiguous observed-through boundary.
     ///
     /// This uses the actual `P` flags carried by position records; it never
     /// assumes a fixed ultra-rapid observed duration. Individual cell flags
-    /// remain available through [`Sp3::state`] and [`Sp3::states_at`].
+    /// remain available through [`Sp3::state`], [`Sp3::states_at`], and
+    /// [`Sp3::clock_records_at`].
     pub fn prediction_summary(&self) -> Sp3PredictionSummary {
         let epochs: Vec<Sp3EpochPrediction> = self
             .epochs
             .iter()
             .copied()
             .zip(self.states.iter())
-            .map(|(epoch, states)| Sp3EpochPrediction {
-                epoch,
-                orbit_predicted_satellites: states
-                    .iter()
-                    .filter_map(|(satellite, state)| {
-                        state.flags.orbit_predicted.then_some(*satellite)
-                    })
-                    .collect(),
-                clock_predicted_satellites: states
+            .zip(self.clock_records.iter())
+            .map(|((epoch, states), clock_records)| {
+                let mut clock_predicted_satellites: Vec<GnssSatelliteId> = states
                     .iter()
                     .filter_map(|(satellite, state)| {
                         state.flags.clock_predicted.then_some(*satellite)
                     })
-                    .collect(),
+                    .collect();
+                for (sat, rec) in clock_records {
+                    if rec.flags.clock_predicted && !clock_predicted_satellites.contains(sat) {
+                        clock_predicted_satellites.push(*sat);
+                    }
+                }
+                clock_predicted_satellites.sort_unstable();
+                Sp3EpochPrediction {
+                    epoch,
+                    orbit_predicted_satellites: states
+                        .iter()
+                        .filter_map(|(satellite, state)| {
+                            state.flags.orbit_predicted.then_some(*satellite)
+                        })
+                        .collect(),
+                    clock_predicted_satellites,
+                }
             })
             .collect();
         let first_predicted = epochs.iter().position(|epoch| !epoch.is_observed());
@@ -733,6 +800,7 @@ struct Parser {
     epochs: Vec<Instant>,
     epoch_j2000_s: Vec<f64>,
     states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
+    clock_records: Vec<BTreeMap<GnssSatelliteId, Sp3ClockRecord>>,
     interp_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
     epoch_position_tokens: Vec<Vec<String>>,
     epoch_velocity_tokens: Vec<Vec<String>>,
@@ -777,6 +845,7 @@ impl Parser {
             epochs: Vec::new(),
             epoch_j2000_s: Vec::new(),
             states: Vec::new(),
+            clock_records: Vec::new(),
             interp_raw: Vec::new(),
             epoch_position_tokens: Vec::new(),
             epoch_velocity_tokens: Vec::new(),
@@ -877,9 +946,30 @@ impl Parser {
             self.parse_velocity_line(line, line_number)?;
             return Ok(());
         }
-        // Unknown / ignorable line (e.g. `%/`); skip without failing - SP3 has
-        // optional descriptor lines a parser must tolerate.
-        Ok(())
+        if line.starts_with("EP") {
+            self.diagnostics.push_skip(Skip {
+                at: RecordRef::at_line(line_number),
+                reason: SkipReason::UnsupportedRecordType("EP"),
+            });
+            return Ok(());
+        }
+        if line.starts_with("EV") {
+            self.diagnostics.push_skip(Skip {
+                at: RecordRef::at_line(line_number),
+                reason: SkipReason::UnsupportedRecordType("EV"),
+            });
+            return Ok(());
+        }
+        if line.starts_with("/*")
+            || line.starts_with("EOF")
+            || line.starts_with("%/")
+            || line.trim().is_empty()
+        {
+            return Ok(());
+        }
+        Err(Error::Parse(format!(
+            "unrecognized SP3 line at line {line_number}: {line:?}"
+        )))
     }
 
     /// Header line 1: `#cP2020 ...` / `#dV...`.
@@ -1081,15 +1171,50 @@ impl Parser {
             Error::Parse("SP3 epoch encountered with no time system (missing %c descriptor)".into())
         })?;
         let scale = time_system.time_scale();
-        // Fields after the leading `*  ` (3 chars), then space-delimited.
-        let body = &line[1..];
-        let mut it = body.split_whitespace();
-        let year: i64 = next_field(&mut it, "epoch year")?;
-        let month: i64 = next_field(&mut it, "epoch month")?;
-        let day: i64 = next_field(&mut it, "epoch day")?;
-        let hour: i64 = next_field(&mut it, "epoch hour")?;
-        let minute: i64 = next_field(&mut it, "epoch minute")?;
-        let seconds: f64 = next_field(&mut it, "epoch seconds")?;
+        const EPOCH_COLUMNS: [(usize, usize); 7] = [
+            (0, 1),   // `*`
+            (3, 7),   // Year: cols 4..7 (I4)
+            (8, 10),  // Month: cols 9..10 (I2)
+            (11, 13), // Day: cols 12..13 (I2)
+            (14, 16), // Hour: cols 15..16 (I2)
+            (17, 19), // Minute: cols 18..19 (I2)
+            (20, 31), // Second: cols 21..31 (F11.8)
+        ];
+
+        let (year, month, day, hour, minute, seconds) =
+            if let Some([_, y_str, mo_str, d_str, h_str, mi_str, s_str]) =
+                fixed_record(line, EPOCH_COLUMNS)
+            {
+                let year = y_str
+                    .parse::<i64>()
+                    .map_err(|_| Error::Parse(format!("SP3 epoch year {y_str:?} unparsable")))?;
+                let month = mo_str
+                    .parse::<i64>()
+                    .map_err(|_| Error::Parse(format!("SP3 epoch month {mo_str:?} unparsable")))?;
+                let day = d_str
+                    .parse::<i64>()
+                    .map_err(|_| Error::Parse(format!("SP3 epoch day {d_str:?} unparsable")))?;
+                let hour = h_str
+                    .parse::<i64>()
+                    .map_err(|_| Error::Parse(format!("SP3 epoch hour {h_str:?} unparsable")))?;
+                let minute = mi_str
+                    .parse::<i64>()
+                    .map_err(|_| Error::Parse(format!("SP3 epoch minute {mi_str:?} unparsable")))?;
+                let seconds = s_str
+                    .parse::<f64>()
+                    .map_err(|_| Error::Parse(format!("SP3 epoch seconds {s_str:?} unparsable")))?;
+                (year, month, day, hour, minute, seconds)
+            } else {
+                let body = &line[1..];
+                let mut it = body.split_whitespace();
+                let year: i64 = next_field(&mut it, "epoch year")?;
+                let month: i64 = next_field(&mut it, "epoch month")?;
+                let day: i64 = next_field(&mut it, "epoch day")?;
+                let hour: i64 = next_field(&mut it, "epoch hour")?;
+                let minute: i64 = next_field(&mut it, "epoch minute")?;
+                let seconds: f64 = next_field(&mut it, "epoch seconds")?;
+                (year, month, day, hour, minute, seconds)
+            };
         // The epoch instant is written back through this same `F11.8` field, so
         // seconds carrying more precision than it expresses would re-parse as a
         // different instant and shift the epoch (`0.0000009999` re-emits as
@@ -1128,6 +1253,7 @@ impl Parser {
         self.epochs.push(epoch);
         self.epoch_j2000_s.push(epoch_j2000_s);
         self.states.push(BTreeMap::new());
+        self.clock_records.push(BTreeMap::new());
         self.interp_raw.push(BTreeMap::new());
         self.epoch_position_tokens.push(Vec::new());
         self.epoch_velocity_tokens.push(Vec::new());
@@ -1182,14 +1308,30 @@ impl Parser {
         let x_km = parse_coord(line, 4, 18)?;
         let y_km = parse_coord(line, 18, 32)?;
         let z_km = parse_coord(line, 32, 46)?;
+        let clock_us = parse_clock_us(line)?;
 
-        // All-zero position is the missing-orbit sentinel: skip the record.
+        // All-zero position is the missing-orbit sentinel. If a valid clock estimate
+        // is present, retain it independently as a clock-only record without fabricating
+        // a zero orbit or interpolation node. If clock is absent as well, the satellite
+        // is absent and skipped without diagnostic warning.
         if x_km == MISSING_POSITION_KM && y_km == MISSING_POSITION_KM && z_km == MISSING_POSITION_KM
         {
+            if let Some(us) = clock_us {
+                let flags = parse_flags(line);
+                let clock_rec = Sp3ClockRecord {
+                    clock_s: us * US_TO_S,
+                    clock_us: us,
+                    velocity: None,
+                    clock_rate_s_s: None,
+                    clock_rate_raw: None,
+                    flags,
+                };
+                let idx = self.clock_records.len() - 1;
+                self.clock_records[idx].insert(sat, clock_rec);
+            }
             return Ok(());
         }
 
-        let clock_us = parse_clock_us(line)?;
         let clock_s = clock_us.map(|us| us * US_TO_S);
 
         let flags = parse_flags(line);
@@ -1219,7 +1361,7 @@ impl Parser {
     }
 
     /// Velocity record: `VG01  vx  vy  vz  clkrate ...`. Augments the matching
-    /// position record at the current epoch (must follow it).
+    /// position or clock record at the current epoch (must follow it).
     // invariant: current_epoch is checked immediately before the synchronized raw lists.
     #[allow(clippy::expect_used)]
     fn parse_velocity_line(&mut self, line: &str, line_number: usize) -> Result<()> {
@@ -1266,27 +1408,36 @@ impl Parser {
         .map_err(|e| Error::Parse(format!("SP3 invalid velocity record: {e}")))?;
 
         // Clock-rate field shares the clock column; bad-clock sentinel applies.
-        let clock_rate_s_s = parse_clock_us(line)?.map(|rate| rate * CLOCK_RATE_TO_S_PER_S);
+        let clock_rate_raw = parse_clock_us(line)?;
+        let clock_rate_s_s = clock_rate_raw.map(|rate| rate * CLOCK_RATE_TO_S_PER_S);
 
         let idx = self.states.len() - 1;
-        match self.states[idx].get_mut(&sat) {
-            Some(state) if !missing_velocity => {
+        if let Some(state) = self.states[idx].get_mut(&sat) {
+            if !missing_velocity {
                 state.velocity = Some(velocity);
+            }
+            if clock_rate_s_s.is_some() {
                 state.clock_rate_s_s = clock_rate_s_s;
             }
-            Some(_) => {}
-            None => {
-                // A V-record always follows its P-record for the same satellite
-                // at the same epoch (SP3 format invariant). With no preceding
-                // P-record this satellite has NO valid position at this epoch;
-                // synthesizing one (e.g. the geocenter (0,0,0)) would fabricate
-                // an orbit that the all-zero missing-orbit guard exists to
-                // reject, and would leak through the public state()/states_at().
-                // Treat it as malformed and skip - consistent with the parser's
-                // tolerant skipping of other malformed records. No state is
-                // inserted, so the satellite stays UnknownSatellite at this
-                // epoch and no (0,0,0) position is ever exposed.
+        } else if let Some(clock_rec) = self.clock_records[idx].get_mut(&sat) {
+            if !missing_velocity {
+                clock_rec.velocity = Some(velocity);
             }
+            if clock_rate_s_s.is_some() {
+                clock_rec.clock_rate_s_s = clock_rate_s_s;
+                clock_rec.clock_rate_raw = clock_rate_raw;
+            }
+        } else {
+            // A V-record always follows its P-record for the same satellite
+            // at the same epoch (SP3 format invariant). With no preceding
+            // P-record this satellite has NO valid position or clock at this epoch;
+            // synthesizing one (e.g. the geocenter (0,0,0)) would fabricate
+            // an orbit that the all-zero missing-orbit guard exists to
+            // reject, and would leak through the public state()/states_at().
+            // Treat it as malformed and skip - consistent with the parser's
+            // tolerant skipping of other malformed records. No state is
+            // inserted, so the satellite stays UnknownSatellite at this
+            // epoch and no (0,0,0) position is ever exposed.
         }
         Ok(())
     }
@@ -1362,6 +1513,7 @@ impl Parser {
             epoch_state_record_sequence: self.epoch_state_record_sequence,
             epoch_j2000_s: self.epoch_j2000_s,
             states: self.states,
+            clock_records: self.clock_records,
             interp_raw: self.interp_raw,
             interpolation: Sp3InterpolationOptions::default(),
             comments: self.comments,

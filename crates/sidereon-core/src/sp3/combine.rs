@@ -26,7 +26,9 @@ use crate::astro::time::gnss;
 use crate::astro::time::model::Instant;
 
 use super::interp::{instant_to_j2000_seconds, sp3_epoch_j2000_seconds, Sp3InterpolationOptions};
-use super::{RawNode, Sp3, Sp3DataType, Sp3Flags, Sp3Header, Sp3State, TerminalRecordState};
+use super::{
+    RawNode, Sp3, Sp3ClockRecord, Sp3DataType, Sp3Flags, Sp3Header, Sp3State, TerminalRecordState,
+};
 use crate::constants::{DAYS_PER_JULIAN_YEAR, GPS_EPOCH_TO_J2000_S, KM_TO_M, SECONDS_PER_DAY};
 use crate::frame::{ItrfPositionM, ItrfVelocityMS};
 use crate::frame_catalog::{
@@ -104,25 +106,40 @@ pub fn clock_reference_offset(
             continue;
         };
 
-        let (Ok(ref_states), Ok(other_states)) =
-            (reference.states_at(ref_idx), other.states_at(other_idx))
-        else {
-            continue;
+        let get_clock = |sp3: &Sp3, ei: usize, sat: &GnssSatelliteId| -> Option<f64> {
+            sp3.states_at(ei)
+                .ok()
+                .and_then(|m| m.get(sat))
+                .and_then(|s| s.clock_s)
+                .or_else(|| {
+                    sp3.clock_records_at(ei)
+                        .ok()
+                        .and_then(|m| m.get(sat))
+                        .map(|r| r.clock_s)
+                })
         };
 
+        let mut ref_sats = Vec::new();
+        if let Ok(states) = reference.states_at(ref_idx) {
+            ref_sats.extend(states.keys().copied());
+        }
+        if let Ok(clocks) = reference.clock_records_at(ref_idx) {
+            ref_sats.extend(clocks.keys().copied());
+        }
+        ref_sats.sort_unstable();
+        ref_sats.dedup();
+
         let mut diffs: Vec<f64> = Vec::new();
-        for (sat, ref_state) in ref_states.iter() {
-            let Some(ref_clock) = ref_state.clock_s else {
-                continue;
-            };
-            if let Some(other_state) = other_states.get(sat) {
-                if let Some(other_clock) = other_state.clock_s {
-                    let diff = other_clock - ref_clock;
-                    // SP3 should not carry NaN/inf clocks, but the parser can
-                    // accept them; merge infrastructure must not panic on data.
-                    if diff.is_finite() {
-                        diffs.push(diff);
-                    }
+        for sat in ref_sats {
+            if let (Some(ref_clock), Some(other_clock)) = (
+                get_clock(reference, ref_idx, &sat),
+                get_clock(other, other_idx, &sat),
+            ) {
+                let diff = other_clock - ref_clock;
+                // SP3 should not carry NaN/inf clocks, but the parser can
+                // accept them; merge infrastructure must not panic on data.
+                if diff.is_finite() {
+                    diffs.push(diff);
                 }
             }
         }
@@ -368,14 +385,16 @@ pub struct AgreementMetric {
     pub epoch: Instant,
     /// The satellite.
     pub satellite: GnssSatelliteId,
-    /// Number of sources in the accepted position consensus (>= 1).
+    /// Number of sources in the accepted position consensus (0 when the cell carries
+    /// no position).
     pub position_members: usize,
     /// RMS, over the position-consensus members, of the 3D distance from the
-    /// combined position, meters. Zero for a single-source cell.
-    pub position_rms_m: f64,
+    /// combined position, meters. Zero for a single-source cell; `None` when the
+    /// cell carries no position.
+    pub position_rms_m: Option<f64>,
     /// Largest 3D distance of any position-consensus member from the combined
-    /// position, meters.
-    pub position_max_m: f64,
+    /// position, meters; `None` when the cell carries no position.
+    pub position_max_m: Option<f64>,
     /// Number of sources in the accepted clock consensus (0 when the cell carries
     /// no clock).
     pub clock_members: usize,
@@ -397,11 +416,11 @@ pub struct EpochAgreement {
     /// Satellites at this epoch with a multi-source position consensus.
     pub satellites: usize,
     /// Member-count-weighted pooled RMS of the per-cell position dispersion over
-    /// those satellites, meters (i.e. the RMS of every member-to-combined 3D
-    /// distance pooled across the epoch).
-    pub position_rms_m: f64,
-    /// Worst per-cell position dispersion at this epoch, meters.
-    pub position_max_m: f64,
+    /// those satellites, meters; `None` when no multi-source position consensus
+    /// existed at this epoch.
+    pub position_rms_m: Option<f64>,
+    /// Worst per-cell position dispersion at this epoch, meters; `None` as above.
+    pub position_max_m: Option<f64>,
     /// As `position_rms_m` for the clock channel; `None` when no multi-source
     /// clock consensus existed at this epoch.
     pub clock_rms_s: Option<f64>,
@@ -543,8 +562,9 @@ pub struct CellProvenance {
     pub epoch: Instant,
     /// The satellite.
     pub satellite: GnssSatelliteId,
-    /// How the written position was arrived at.
-    pub position: CellSelection,
+    /// How the written position was arrived at; `None` when the cell carries no
+    /// position (e.g. clock-only record).
+    pub position: Option<CellSelection>,
     /// How the written clock was arrived at; `None` when the cell carries no
     /// clock.
     pub clock: Option<CellSelection>,
@@ -587,7 +607,7 @@ pub struct PrecedenceTransition {
 pub struct ContributorCoverage {
     /// Index into the input slice.
     pub source: usize,
-    /// Accepted cells where this source was in the position consensus.
+    /// Accepted cells where this source was in the position or clock consensus.
     pub cells_contributed: usize,
     /// Accepted cells whose written position came from this source alone
     /// (single-source carry or precedence pick). Always zero under a combining
@@ -800,20 +820,19 @@ impl MergeReport {
     /// not by itself mean the whole product was corroborated - check
     /// [`MergeReport::single_source_fraction`] for the un-cross-checked share.
     pub fn position_agreement_rms_m(&self) -> Option<f64> {
-        pooled_rms(
-            self.agreement
-                .iter()
-                .filter(|m| m.position_members >= 2)
-                .map(|m| (m.position_rms_m, m.position_members)),
-        )
+        pooled_rms(self.agreement.iter().filter_map(|m| {
+            m.position_rms_m
+                .filter(|_| m.position_members >= 2)
+                .map(|rms| (rms, m.position_members))
+        }))
     }
 
     /// Largest single-cell position dispersion over all accepted cells, meters.
-    /// `None` when there are no accepted cells.
+    /// `None` when there are no accepted cells with position.
     pub fn position_agreement_max_m(&self) -> Option<f64> {
         self.agreement
             .iter()
-            .map(|m| m.position_max_m)
+            .filter_map(|m| m.position_max_m)
             .fold(None, |acc, v| Some(fold_max(acc, v)))
     }
 
@@ -836,8 +855,8 @@ impl MergeReport {
 
     /// Per-epoch aggregate agreement, in output-epoch order. Each entry pools the
     /// multi-source cells at that epoch (see [`EpochAgreement`]); epochs whose
-    /// cells were all single-source are still listed with `satellites == 0` and a
-    /// zero position spread so the caller sees every output epoch.
+    /// cells were all single-source are still listed with `satellites == 0` and
+    /// `None` position spread so the caller sees every output epoch.
     pub fn per_epoch_agreement(&self) -> Vec<EpochAgreement> {
         let mut out: Vec<EpochAgreement> = Vec::new();
         let mut current_key: Option<i64> = None;
@@ -847,8 +866,8 @@ impl MergeReport {
                 out.push(EpochAgreement {
                     epoch: m.epoch,
                     satellites: 0,
-                    position_rms_m: 0.0,
-                    position_max_m: 0.0,
+                    position_rms_m: None,
+                    position_max_m: None,
                     clock_rms_s: None,
                     clock_max_s: None,
                 });
@@ -858,9 +877,11 @@ impl MergeReport {
             // lookup, and every later aggregate remains in `out`.
             #[allow(clippy::expect_used)]
             let agg = out.last_mut().expect("just pushed");
-            agg.position_max_m = agg.position_max_m.max(m.position_max_m);
             if m.position_members >= 2 {
                 agg.satellites += 1;
+                if let Some(max) = m.position_max_m {
+                    agg.position_max_m = Some(fold_max(agg.position_max_m, max));
+                }
             }
             // Only multi-source clock cells contribute to the epoch clock max,
             // matching the RMS path: a single-member cell has zero dispersion and
@@ -881,9 +902,8 @@ impl MergeReport {
                         m.position_members >= 2
                             && instant_to_j2000_seconds(&m.epoch).map(|s| s.floor() as i64) == key
                     })
-                    .map(|m| (m.position_rms_m, m.position_members)),
-            )
-            .unwrap_or(0.0);
+                    .filter_map(|m| m.position_rms_m.map(|rms| (rms, m.position_members))),
+            );
             agg.clock_rms_s = pooled_rms(
                 self.agreement
                     .iter()
@@ -965,6 +985,13 @@ fn fold_max(acc: Option<f64>, value: f64) -> f64 {
 /// first-epoch fields describe the union's first epoch and its data type is
 /// position-only.
 ///
+/// Preservation of velocities and rates: merge policy intentionally drops
+/// velocities and clock rates for all records (both position states and clock-only
+/// records) in the merged product. Merged states retain combined positions and
+/// clocks, but have `velocity: None` and `clock_rate_s_s: None`. Clock-only records
+/// retain combined clocks, but have `velocity: None`, `clock_rate_s_s: None`, and
+/// `clock_rate_raw: None`.
+///
 /// Pure and deterministic: order the inputs by center precedence and ties (equal
 /// cluster sizes, `Precedence` combine) resolve to the earliest-listed source.
 /// The merged product's interpolation nodes are the consensus values, so it
@@ -1012,6 +1039,7 @@ struct MergeCellOutput {
     out_epochs: Vec<Instant>,
     out_epoch_j2000_s: Vec<f64>,
     out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>>,
+    out_clock_records: Vec<BTreeMap<GnssSatelliteId, Sp3ClockRecord>>,
     out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>>,
     all_sats: BTreeSet<GnssSatelliteId>,
     report: MergeReport,
@@ -1048,6 +1076,7 @@ fn emit_merged_product(
         out_epochs,
         out_epoch_j2000_s,
         out_states,
+        out_clock_records,
         out_raw,
         report,
         continuity_selection,
@@ -1072,6 +1101,7 @@ fn emit_merged_product(
         epoch_state_record_sequence,
         epoch_j2000_s: out_epoch_j2000_s,
         states: out_states,
+        clock_records: out_clock_records,
         interp_raw: out_raw,
         interpolation: Sp3InterpolationOptions::default(),
         comments: vec![format!("MERGED from {} SP3 products", sources.len())],
@@ -1228,6 +1258,8 @@ fn emit_merge_cells(
     let mut out_epoch_j2000_s: Vec<f64> = Vec::with_capacity(epoch_keys.len());
     let mut out_states: Vec<BTreeMap<GnssSatelliteId, Sp3State>> =
         Vec::with_capacity(epoch_keys.len());
+    let mut out_clock_records: Vec<BTreeMap<GnssSatelliteId, Sp3ClockRecord>> =
+        Vec::with_capacity(epoch_keys.len());
     let mut out_raw: Vec<BTreeMap<GnssSatelliteId, RawNode>> = Vec::with_capacity(epoch_keys.len());
     let mut report = MergeReport {
         frame_reconciliations,
@@ -1239,6 +1271,7 @@ fn emit_merge_cells(
         out_epochs.push(epoch);
         out_epoch_j2000_s.push(key as f64);
         let mut states: BTreeMap<GnssSatelliteId, Sp3State> = BTreeMap::new();
+        let mut clock_records: BTreeMap<GnssSatelliteId, Sp3ClockRecord> = BTreeMap::new();
         let mut raws: BTreeMap<GnssSatelliteId, RawNode> = BTreeMap::new();
 
         // Satellites present at this epoch in any source, after any requested
@@ -1247,6 +1280,9 @@ fn emit_merge_cells(
         for (idx, s) in sources.iter().enumerate() {
             if let Some(&ei) = epoch_index[idx].get(&key) {
                 if let Ok(map) = s.states_at(ei) {
+                    sats.extend(map.keys().copied().filter(|sat| allowed_system(sat)));
+                }
+                if let Ok(map) = s.clock_records_at(ei) {
                     sats.extend(map.keys().copied().filter(|sat| allowed_system(sat)));
                 }
             }
@@ -1268,19 +1304,36 @@ fn emit_merge_cells(
                 let Some(&ei) = epoch_index[idx].get(&key) else {
                     continue;
                 };
-                let Ok(map) = s.states_at(ei) else { continue };
-                let Some(state) = map.get(&sat) else { continue };
-                pos.push((idx, state.position.as_array(), state.flags));
-                if let Some(c) = state.clock_s {
-                    let offset = if idx == 0 {
-                        Some(0.0)
-                    } else {
-                        clock_offset_at(&clock_offset[idx], key)
-                    };
-                    if let Some(off) = offset {
-                        let aligned = c - off;
-                        if aligned.is_finite() {
-                            clk.push((idx, aligned, state.flags));
+                if let Ok(map) = s.states_at(ei) {
+                    if let Some(state) = map.get(&sat) {
+                        pos.push((idx, state.position.as_array(), state.flags));
+                        if let Some(c) = state.clock_s {
+                            let offset = if idx == 0 {
+                                Some(0.0)
+                            } else {
+                                clock_offset_at(&clock_offset[idx], key)
+                            };
+                            if let Some(off) = offset {
+                                let aligned = c - off;
+                                if aligned.is_finite() {
+                                    clk.push((idx, aligned, state.flags));
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Ok(map) = s.clock_records_at(ei) {
+                    if let Some(clock_rec) = map.get(&sat) {
+                        let offset = if idx == 0 {
+                            Some(0.0)
+                        } else {
+                            clock_offset_at(&clock_offset[idx], key)
+                        };
+                        if let Some(off) = offset {
+                            let aligned = clock_rec.clock_s - off;
+                            if aligned.is_finite() {
+                                clk.push((idx, aligned, clock_rec.flags));
+                            }
                         }
                     }
                 }
@@ -1305,89 +1358,89 @@ fn emit_merge_cells(
             // `pos`) of the sources that contributed it. Cell precedence selects
             // the first source present here; satellite-arc precedence can leave
             // a deliberate hole when the arc owner is missing.
-            let (position_m, pos_members, pos_selection) = if opts.combine
-                == MergeCombine::Precedence
-            {
-                let Some(preferred_source) = position_preferred_source else {
-                    continue;
-                };
-                let Some(preferred_idx) =
-                    pos.iter().position(|(src, _, _)| *src == preferred_source)
-                else {
-                    continue;
-                };
-
-                if pos.len() == 1 {
-                    report.single_source.push(flag(vec![pos[preferred_idx].0]));
-                    (
-                        pos[preferred_idx].1,
-                        vec![preferred_idx],
-                        CellSelection::SingleSource {
-                            source: pos[preferred_idx].0,
-                        },
-                    )
-                } else if let Some(reject) = opts.outlier_reject {
-                    let pts: Vec<[f64; 3]> = pos.iter().map(|(_, p, _)| *p).collect();
-                    let cluster =
-                        largest_within(&pts, |a, b| dist3(a, b) <= reject.position_tolerance_m);
-                    if cluster.len() >= opts.min_agree.max(2) {
-                        let selected_idx = if cluster.contains(&preferred_idx) {
-                            preferred_idx
+            let pos_result = if opts.combine == MergeCombine::Precedence {
+                if let Some(preferred_source) = position_preferred_source {
+                    if let Some(preferred_idx) =
+                        pos.iter().position(|(src, _, _)| *src == preferred_source)
+                    {
+                        if pos.len() == 1 {
+                            report.single_source.push(flag(vec![pos[preferred_idx].0]));
+                            Some((
+                                pos[preferred_idx].1,
+                                vec![preferred_idx],
+                                CellSelection::SingleSource {
+                                    source: pos[preferred_idx].0,
+                                },
+                            ))
+                        } else if let Some(reject) = opts.outlier_reject {
+                            let pts: Vec<[f64; 3]> = pos.iter().map(|(_, p, _)| *p).collect();
+                            let cluster = largest_within(&pts, |a, b| {
+                                dist3(a, b) <= reject.position_tolerance_m
+                            });
+                            if cluster.len() >= opts.min_agree.max(2) {
+                                let selected_idx = if cluster.contains(&preferred_idx) {
+                                    preferred_idx
+                                } else {
+                                    cluster[0]
+                                };
+                                let rejected: Vec<usize> = (0..pos.len())
+                                    .filter(|i| !cluster.contains(i))
+                                    .map(|i| pos[i].0)
+                                    .collect();
+                                let rejected_selection = !rejected.is_empty();
+                                if rejected_selection {
+                                    report.position_outliers.push(flag(rejected));
+                                }
+                                let selection = CellSelection::Precedence {
+                                    source: pos[selected_idx].0,
+                                    members: cluster.iter().map(|&i| pos[i].0).collect(),
+                                };
+                                Some((pos[selected_idx].1, cluster, selection))
+                            } else {
+                                report
+                                    .quarantined
+                                    .push(flag(pos.iter().map(|(i, _, _)| *i).collect()));
+                                None
+                            }
                         } else {
-                            cluster[0]
-                        };
-                        let rejected: Vec<usize> = (0..pos.len())
-                            .filter(|i| !cluster.contains(i))
-                            .map(|i| pos[i].0)
-                            .collect();
-                        let rejected_selection = !rejected.is_empty();
-                        if rejected_selection {
-                            report.position_outliers.push(flag(rejected));
+                            let pts: Vec<[f64; 3]> = pos.iter().map(|(_, p, _)| *p).collect();
+                            let cluster = largest_within_containing(&pts, preferred_idx, |a, b| {
+                                dist3(a, b) <= opts.position_tolerance_m
+                            });
+                            if cluster.len() >= opts.min_agree {
+                                let rejected: Vec<usize> = (0..pos.len())
+                                    .filter(|i| !cluster.contains(i))
+                                    .map(|i| pos[i].0)
+                                    .collect();
+                                if !rejected.is_empty() {
+                                    report.position_outliers.push(flag(rejected));
+                                }
+                                let selection = CellSelection::Precedence {
+                                    source: pos[preferred_idx].0,
+                                    members: cluster.iter().map(|&i| pos[i].0).collect(),
+                                };
+                                Some((pos[preferred_idx].1, cluster, selection))
+                            } else {
+                                report
+                                    .quarantined
+                                    .push(flag(pos.iter().map(|(i, _, _)| *i).collect()));
+                                None
+                            }
                         }
-                        let selection = CellSelection::Precedence {
-                            source: pos[selected_idx].0,
-                            members: cluster.iter().map(|&i| pos[i].0).collect(),
-                        };
-                        (pos[selected_idx].1, cluster, selection)
                     } else {
-                        report
-                            .quarantined
-                            .push(flag(pos.iter().map(|(i, _, _)| *i).collect()));
-                        continue;
+                        None
                     }
                 } else {
-                    let pts: Vec<[f64; 3]> = pos.iter().map(|(_, p, _)| *p).collect();
-                    let cluster = largest_within_containing(&pts, preferred_idx, |a, b| {
-                        dist3(a, b) <= opts.position_tolerance_m
-                    });
-                    if cluster.len() >= opts.min_agree {
-                        let rejected: Vec<usize> = (0..pos.len())
-                            .filter(|i| !cluster.contains(i))
-                            .map(|i| pos[i].0)
-                            .collect();
-                        if !rejected.is_empty() {
-                            report.position_outliers.push(flag(rejected));
-                        }
-                        let selection = CellSelection::Precedence {
-                            source: pos[preferred_idx].0,
-                            members: cluster.iter().map(|&i| pos[i].0).collect(),
-                        };
-                        (pos[preferred_idx].1, cluster, selection)
-                    } else {
-                        report
-                            .quarantined
-                            .push(flag(pos.iter().map(|(i, _, _)| *i).collect()));
-                        continue;
-                    }
+                    None
                 }
             } else if pos.len() == 1 {
                 report.single_source.push(flag(vec![pos[0].0]));
-                (
+                Some((
                     pos[0].1,
                     vec![0usize],
                     CellSelection::SingleSource { source: pos[0].0 },
-                )
-            } else {
+                ))
+            } else if !pos.is_empty() {
                 let pts: Vec<[f64; 3]> = pos.iter().map(|(_, p, _)| *p).collect();
                 let cluster = largest_within(&pts, |a, b| dist3(a, b) <= opts.position_tolerance_m);
                 if cluster.len() >= opts.min_agree {
@@ -1404,13 +1457,15 @@ fn emit_merge_cells(
                         rule: opts.combine,
                         members: members.iter().map(|(source, _)| *source).collect(),
                     };
-                    (combine3(&members, opts.combine), cluster, selection)
+                    Some((combine3(&members, opts.combine), cluster, selection))
                 } else {
                     report
                         .quarantined
                         .push(flag(pos.iter().map(|(i, _, _)| *i).collect()));
-                    continue;
+                    None
                 }
+            } else {
+                None
             };
 
             // Clock consensus, independent of position -> the merged clock and the
@@ -1511,96 +1566,196 @@ fn emit_merge_cells(
                 }
             };
 
+            // If neither position nor clock was agreed upon, satellite is absent.
+            if pos_result.is_none() && clock_s.is_none() {
+                continue;
+            }
+
             // Preserve record flags: OR the orbit flags across the position
             // members and the clock flags across the clock members, so a
             // `clock_event` (clock reset) or maneuver on any contributing source
             // survives into the merged product.
             let mut flags = Sp3Flags::default();
-            for &i in &pos_members {
-                flags.maneuver |= pos[i].2.maneuver;
-                flags.orbit_predicted |= pos[i].2.orbit_predicted;
+            if let Some((_, ref pos_members, _)) = pos_result {
+                for &i in pos_members {
+                    flags.maneuver |= pos[i].2.maneuver;
+                    flags.orbit_predicted |= pos[i].2.orbit_predicted;
+                }
             }
             for &i in &clk_members {
                 flags.clock_event |= clk[i].2.clock_event;
                 flags.clock_predicted |= clk[i].2.clock_predicted;
             }
 
-            // Per-cell agreement: dispersion of the accepted consensus members
-            // about the combined value actually written below.
-            let (position_rms_m, position_max_m) =
-                position_dispersion(&pos, &pos_members, &position_m);
-            let (clock_members_n, clock_rms_s, clock_max_s) = match clock_s {
-                Some(c) => {
+            if let Some((position_m, pos_members, pos_selection)) = pos_result {
+                // Per-cell agreement: dispersion of the accepted consensus members
+                // about the combined value actually written below.
+                let (position_rms_m, position_max_m) =
+                    position_dispersion(&pos, &pos_members, &position_m);
+                let (clock_members_n, clock_rms_s, clock_max_s) = match clock_s {
+                    Some(c) => {
+                        let (rms, max) = clock_dispersion(&clk, &clk_members, c);
+                        (clk_members.len(), Some(rms), Some(max))
+                    }
+                    None => (0, None, None),
+                };
+                report.agreement.push(AgreementMetric {
+                    epoch,
+                    satellite: sat,
+                    position_members: pos_members.len(),
+                    position_rms_m: Some(position_rms_m),
+                    position_max_m: Some(position_max_m),
+                    clock_members: clock_members_n,
+                    clock_rms_s,
+                    clock_max_s,
+                });
+
+                if opts.verify_continuity.is_some() {
+                    continuity_selection.insert((sat, key), pos_selection.clone());
+                }
+
+                if let Some(provenance_mode) = opts.provenance {
+                    record_cell_provenance(
+                        RecordCellProvenance {
+                            epoch,
+                            sat,
+                            position: Some(&pos_selection),
+                            clock: clk_selection.as_ref(),
+                            candidates: &pos.iter().map(|(src, _, _)| *src).collect::<Vec<_>>(),
+                            mode: provenance_mode,
+                        },
+                        &mut ProvenanceAccumulator {
+                            cells: &mut prov_cells,
+                            transitions: &mut prov_transitions,
+                            contributed: &mut prov_contributed,
+                            selected: &mut prov_selected,
+                            first: &mut prov_first,
+                            last: &mut prov_last,
+                            accepted_cells: &mut prov_accepted_cells,
+                            previous: &mut prov_previous,
+                        },
+                    );
+                }
+
+                all_sats.insert(sat);
+                states.insert(
+                    sat,
+                    Sp3State {
+                        position: ItrfPositionM::new(position_m[0], position_m[1], position_m[2])
+                            .map_err(|error| Error::InvalidInput(error.to_string()))?,
+                        clock_s,
+                        velocity: None,
+                        clock_rate_s_s: None,
+                        flags,
+                    },
+                );
+                let clock_us = match clock_s {
+                    Some(c) => match preserved_source_raw_clock_us(
+                        sources,
+                        epoch_index,
+                        key,
+                        &sat,
+                        clk_selection.as_ref(),
+                        clock_offset,
+                        c,
+                    ) {
+                        Some(raw_opt) => raw_opt,
+                        None => Some(c * 1.0e6),
+                    },
+                    None => None,
+                };
+                raws.insert(
+                    sat,
+                    RawNode {
+                        km: [
+                            position_m[0] / KM_TO_M,
+                            position_m[1] / KM_TO_M,
+                            position_m[2] / KM_TO_M,
+                        ],
+                        clock_us,
+                        clock_event: flags.clock_event,
+                    },
+                );
+            } else if let Some(c) = clock_s {
+                // Position is absent or quarantined, but valid clock consensus exists:
+                // retain as a clock-only record.
+                let (clock_members_n, clock_rms_s, clock_max_s) = {
                     let (rms, max) = clock_dispersion(&clk, &clk_members, c);
                     (clk_members.len(), Some(rms), Some(max))
+                };
+                report.agreement.push(AgreementMetric {
+                    epoch,
+                    satellite: sat,
+                    position_members: 0,
+                    position_rms_m: None,
+                    position_max_m: None,
+                    clock_members: clock_members_n,
+                    clock_rms_s,
+                    clock_max_s,
+                });
+
+                if clk.len() == 1 {
+                    report.single_source.push(flag(vec![clk[0].0]));
                 }
-                None => (0, None, None),
-            };
-            report.agreement.push(AgreementMetric {
-                epoch,
-                satellite: sat,
-                position_members: pos_members.len(),
-                position_rms_m,
-                position_max_m,
-                clock_members: clock_members_n,
-                clock_rms_s,
-                clock_max_s,
-            });
 
-            if opts.verify_continuity.is_some() {
-                continuity_selection.insert((sat, key), pos_selection.clone());
-            }
+                if opts.verify_continuity.is_some() {
+                    if let Some(ref clk_sel) = clk_selection {
+                        continuity_selection.insert((sat, key), clk_sel.clone());
+                    }
+                }
 
-            if let Some(provenance_mode) = opts.provenance {
-                record_cell_provenance(
-                    RecordCellProvenance {
-                        epoch,
-                        sat,
-                        position: &pos_selection,
-                        clock: clk_selection.as_ref(),
-                        candidates: &pos.iter().map(|(src, _, _)| *src).collect::<Vec<_>>(),
-                        mode: provenance_mode,
-                    },
-                    &mut ProvenanceAccumulator {
-                        cells: &mut prov_cells,
-                        transitions: &mut prov_transitions,
-                        contributed: &mut prov_contributed,
-                        selected: &mut prov_selected,
-                        first: &mut prov_first,
-                        last: &mut prov_last,
-                        accepted_cells: &mut prov_accepted_cells,
-                        previous: &mut prov_previous,
+                if let Some(provenance_mode) = opts.provenance {
+                    record_cell_provenance(
+                        RecordCellProvenance {
+                            epoch,
+                            sat,
+                            position: None,
+                            clock: clk_selection.as_ref(),
+                            candidates: &clk.iter().map(|(src, _, _)| *src).collect::<Vec<_>>(),
+                            mode: provenance_mode,
+                        },
+                        &mut ProvenanceAccumulator {
+                            cells: &mut prov_cells,
+                            transitions: &mut prov_transitions,
+                            contributed: &mut prov_contributed,
+                            selected: &mut prov_selected,
+                            first: &mut prov_first,
+                            last: &mut prov_last,
+                            accepted_cells: &mut prov_accepted_cells,
+                            previous: &mut prov_previous,
+                        },
+                    );
+                }
+
+                all_sats.insert(sat);
+                let clock_us = match preserved_source_raw_clock_us(
+                    sources,
+                    epoch_index,
+                    key,
+                    &sat,
+                    clk_selection.as_ref(),
+                    clock_offset,
+                    c,
+                ) {
+                    Some(Some(raw_us)) => raw_us,
+                    _ => c * 1.0e6,
+                };
+                clock_records.insert(
+                    sat,
+                    Sp3ClockRecord {
+                        clock_s: c,
+                        clock_us,
+                        velocity: None,
+                        clock_rate_s_s: None,
+                        clock_rate_raw: None,
+                        flags,
                     },
                 );
             }
-
-            all_sats.insert(sat);
-            states.insert(
-                sat,
-                Sp3State {
-                    position: ItrfPositionM::new(position_m[0], position_m[1], position_m[2])
-                        .map_err(|error| Error::InvalidInput(error.to_string()))?,
-                    clock_s,
-                    velocity: None,
-                    clock_rate_s_s: None,
-                    flags,
-                },
-            );
-            raws.insert(
-                sat,
-                RawNode {
-                    km: [
-                        position_m[0] / KM_TO_M,
-                        position_m[1] / KM_TO_M,
-                        position_m[2] / KM_TO_M,
-                    ],
-                    clock_us: clock_s.map(|c| c * 1.0e6),
-                    clock_event: flags.clock_event,
-                },
-            );
         }
 
         out_states.push(states);
+        out_clock_records.push(clock_records);
         out_raw.push(raws);
     }
 
@@ -1624,6 +1779,7 @@ fn emit_merge_cells(
         out_epochs,
         out_epoch_j2000_s,
         out_states,
+        out_clock_records,
         out_raw,
         all_sats,
         report,
@@ -2135,6 +2291,117 @@ fn clock_offset_at(offsets: &BTreeMap<i64, f64>, key: i64) -> Option<f64> {
     Some(before + fraction * (after - before))
 }
 
+fn source_clock_raw_at(
+    source: &Sp3,
+    ei: usize,
+    sat: &GnssSatelliteId,
+) -> Option<(f64, Option<f64>)> {
+    if let Ok(clock_records) = source.clock_records_at(ei) {
+        if let Some(clock_rec) = clock_records.get(sat) {
+            return Some((clock_rec.clock_s, Some(clock_rec.clock_us)));
+        }
+    }
+
+    if let Ok(states) = source.states_at(ei) {
+        if let Some(state) = states.get(sat) {
+            if let Some(state_clock_s) = state.clock_s {
+                let raw_us = source
+                    .interp_raw
+                    .get(ei)
+                    .and_then(|map| map.get(sat))
+                    .and_then(|node| node.clock_us);
+                return Some((state_clock_s, raw_us));
+            }
+        }
+    }
+
+    None
+}
+
+fn source_has_zero_applied_offset(
+    clock_offset: &[BTreeMap<i64, f64>],
+    source_idx: usize,
+    key: i64,
+) -> bool {
+    let offset = if source_idx == 0 {
+        Some(0.0)
+    } else {
+        clock_offset
+            .get(source_idx)
+            .and_then(|offsets| clock_offset_at(offsets, key))
+    };
+    offset.is_some_and(|off| off.to_bits() == 0.0_f64.to_bits())
+}
+
+/// Retrieve the unperturbed raw `clock_us` value from the selected source(s) for
+/// a single-source, precedence-selected, or uniformly agreeing combined clock
+/// when the applied datum offset is exactly zero and the selected seconds value
+/// is unchanged.
+///
+/// Returns:
+/// - `Some(Some(raw_us))` when a raw value exists in the source and was preserved.
+/// - `Some(None)` when the selected source explicitly lacked a raw node value
+///   (no raw value should be fabricated).
+/// - `None` when preservation is not eligible (e.g. diverging combined clock,
+///   non-zero applied offset, missing raw values, or modified clock seconds).
+fn preserved_source_raw_clock_us(
+    sources: &[Sp3],
+    epoch_index: &[BTreeMap<i64, usize>],
+    key: i64,
+    sat: &GnssSatelliteId,
+    clock_selection: Option<&CellSelection>,
+    clock_offset: &[BTreeMap<i64, f64>],
+    selected_s: f64,
+) -> Option<Option<f64>> {
+    match clock_selection {
+        Some(CellSelection::SingleSource { source })
+        | Some(CellSelection::Precedence { source, .. }) => {
+            if !source_has_zero_applied_offset(clock_offset, *source, key) {
+                return None;
+            }
+            let &ei = epoch_index.get(*source).and_then(|idx| idx.get(&key))?;
+            let src = sources.get(*source)?;
+            let (src_s, raw_us) = source_clock_raw_at(src, ei, sat)?;
+            if selected_s.to_bits() != src_s.to_bits() {
+                return None;
+            }
+            Some(raw_us)
+        }
+        Some(CellSelection::Combined { members, .. }) => {
+            if members.is_empty() {
+                return None;
+            }
+            let mut common_raw_bits: Option<u64> = None;
+            let mut preserved_raw_us = 0.0;
+
+            for &member in members {
+                if !source_has_zero_applied_offset(clock_offset, member, key) {
+                    return None;
+                }
+                let &ei = epoch_index.get(member).and_then(|idx| idx.get(&key))?;
+                let src = sources.get(member)?;
+                let (src_s, raw_us_opt) = source_clock_raw_at(src, ei, sat)?;
+                if selected_s.to_bits() != src_s.to_bits() {
+                    return None;
+                }
+                let raw_us = raw_us_opt?;
+                let raw_bits = raw_us.to_bits();
+                if let Some(expected_bits) = common_raw_bits {
+                    if raw_bits != expected_bits {
+                        return None;
+                    }
+                } else {
+                    common_raw_bits = Some(raw_bits);
+                    preserved_raw_us = raw_us;
+                }
+            }
+
+            Some(Some(preserved_raw_us))
+        }
+        _ => None,
+    }
+}
+
 fn precedence_sources_for_satellites(
     sources: &[Sp3],
     epoch_index: &[BTreeMap<i64, usize>],
@@ -2148,13 +2415,18 @@ fn precedence_sources_for_satellites(
             let Some(&epoch_idx) = epoch_index[idx].get(key) else {
                 continue;
             };
-            let Ok(states) = source.states_at(epoch_idx) else {
-                continue;
-            };
-
-            for sat in states.keys() {
-                if systems.is_none_or(|allowed| allowed.contains(&sat.system)) {
-                    by_sat.entry(*sat).or_insert(idx);
+            if let Ok(states) = source.states_at(epoch_idx) {
+                for sat in states.keys() {
+                    if systems.is_none_or(|allowed| allowed.contains(&sat.system)) {
+                        by_sat.entry(*sat).or_insert(idx);
+                    }
+                }
+            }
+            if let Ok(clock_records) = source.clock_records_at(epoch_idx) {
+                for sat in clock_records.keys() {
+                    if systems.is_none_or(|allowed| allowed.contains(&sat.system)) {
+                        by_sat.entry(*sat).or_insert(idx);
+                    }
                 }
             }
         }
@@ -2490,6 +2762,10 @@ pub fn align_clock_reference(reference: &Sp3, other: &Sp3, min_common: usize) ->
                 *us -= off * 1.0e6;
             }
         }
+        for clock_rec in aligned.clock_records[ei].values_mut() {
+            clock_rec.clock_s -= off;
+            clock_rec.clock_us -= off * 1.0e6;
+        }
     }
     aligned
 }
@@ -2498,9 +2774,9 @@ pub fn align_clock_reference(reference: &Sp3, other: &Sp3, min_common: usize) ->
 struct RecordCellProvenance<'a> {
     epoch: Instant,
     sat: GnssSatelliteId,
-    position: &'a CellSelection,
+    position: Option<&'a CellSelection>,
     clock: Option<&'a CellSelection>,
-    /// Every source that offered a position for this cell, whether or not it
+    /// Every source that offered a position or clock for this cell, whether or not it
     /// survived into the consensus. Distinguishing "did not offer" from
     /// "offered and was rejected" is the whole difference between a transition
     /// caused by availability and one caused by outlier rejection, and the
@@ -2530,33 +2806,54 @@ struct ProvenanceAccumulator<'a> {
 fn record_cell_provenance(cell: RecordCellProvenance<'_>, acc: &mut ProvenanceAccumulator<'_>) {
     *acc.accepted_cells += 1;
 
-    for source in cell.position.members() {
+    let selection = cell.position.or(cell.clock);
+
+    let mut contributing_sources = Vec::new();
+    if let Some(pos) = cell.position {
+        contributing_sources.extend(pos.members());
+    }
+    if let Some(clk) = cell.clock {
+        contributing_sources.extend(clk.members());
+    }
+    contributing_sources.sort_unstable();
+    contributing_sources.dedup();
+
+    for source in contributing_sources {
         acc.contributed[source] += 1;
         if acc.first[source].is_none() {
             acc.first[source] = Some(cell.epoch);
         }
         acc.last[source] = Some(cell.epoch);
     }
-    if let Some(source) = cell.position.selected_source() {
-        acc.selected[source] += 1;
+
+    if let Some(pos) = cell.position {
+        if let Some(source) = pos.selected_source() {
+            acc.selected[source] += 1;
+        }
+    } else if let Some(clk) = cell.clock {
+        if let Some(source) = clk.selected_source() {
+            acc.selected[source] += 1;
+        }
     }
 
-    if let Some(transition) = transition_between(
-        cell.sat,
-        cell.epoch,
-        acc.previous.get(&cell.sat),
-        cell.position,
-        cell.candidates,
-    ) {
-        acc.transitions.push(transition);
+    if let Some(sel) = selection {
+        if let Some(transition) = transition_between(
+            cell.sat,
+            cell.epoch,
+            acc.previous.get(&cell.sat),
+            sel,
+            cell.candidates,
+        ) {
+            acc.transitions.push(transition);
+        }
+        acc.previous.insert(cell.sat, sel.clone());
     }
-    acc.previous.insert(cell.sat, cell.position.clone());
 
     if cell.mode == ProvenanceMode::Full {
         acc.cells.push(CellProvenance {
             epoch: cell.epoch,
             satellite: cell.sat,
-            position: cell.position.clone(),
+            position: cell.position.cloned(),
             clock: cell.clock.cloned(),
         });
     }
@@ -2624,13 +2921,16 @@ fn transition_between(
 mod tests {
     use super::super::Sp3;
     use super::{
-        align_clock_reference, clock_reference_offset, merge, MergeCombine, MergeOptions,
-        MergePrecedenceScope, MergeReport, OutlierRejectOptions, Sp3FrameLabelSet,
-        Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions,
+        align_clock_reference, clock_reference_offset, merge, CellSelection, MergeCombine,
+        MergeOptions, MergePrecedenceScope, MergeReport, OutlierRejectOptions, ProvenanceMode,
+        Sp3FrameLabelSet, Sp3FrameReconciliationMethod, Sp3FrameReconciliationOptions,
+        TransitionReason,
     };
     use crate::constants::SECONDS_PER_DAY;
+    use crate::error::Error;
     use crate::frame::ItrfPositionM;
     use crate::id::{GnssSatelliteId, GnssSystem};
+    use crate::sp3::Sp3DataType;
     use sha2::{Digest, Sha256};
     use std::collections::BTreeSet;
 
@@ -4152,13 +4452,13 @@ mod tests {
         assert_eq!(m.satellite, gps(1));
         assert_eq!(m.position_members, 3);
         assert!(
-            (m.position_rms_m - 6.0_f64.sqrt()).abs() < 1.0e-6,
-            "got rms {}",
+            (m.position_rms_m.unwrap() - 6.0_f64.sqrt()).abs() < 1.0e-6,
+            "got rms {:?}",
             m.position_rms_m
         );
         assert!(
-            (m.position_max_m - 3.0).abs() < 1.0e-6,
-            "got max {}",
+            (m.position_max_m.unwrap() - 3.0).abs() < 1.0e-6,
+            "got max {:?}",
             m.position_max_m
         );
 
@@ -4170,8 +4470,8 @@ mod tests {
         let per_epoch = report.per_epoch_agreement();
         assert_eq!(per_epoch.len(), 1);
         assert_eq!(per_epoch[0].satellites, 1);
-        assert!((per_epoch[0].position_rms_m - 6.0_f64.sqrt()).abs() < 1.0e-6);
-        assert!((per_epoch[0].position_max_m - 3.0).abs() < 1.0e-6);
+        assert!((per_epoch[0].position_rms_m.unwrap() - 6.0_f64.sqrt()).abs() < 1.0e-6);
+        assert!((per_epoch[0].position_max_m.unwrap() - 3.0).abs() < 1.0e-6);
     }
 
     #[test]
@@ -4220,7 +4520,7 @@ mod tests {
                 .expect("metric");
             assert!(m.clock_rms_s.unwrap().abs() < 1.0e-18, "prn {prn}");
             // Positions identical across centers -> zero position dispersion too.
-            assert!(m.position_rms_m.abs() < 1.0e-9, "prn {prn}");
+            assert!(m.position_rms_m.unwrap().abs() < 1.0e-9, "prn {prn}");
         }
 
         // The clock pooled summary is the RMS over the three multi-source cells
@@ -4353,6 +4653,468 @@ mod tests {
         assert!(
             dispersion < 0.05,
             "inter-center position dispersion {dispersion:.4} m"
+        );
+    }
+
+    #[test]
+    fn merge_retains_clock_only_single_source() {
+        let a = sp3_records(&[("G01", [15000.0, -20000.0, 5000.0], Some(100.0))]);
+        let b = sp3_records(&[
+            ("G01", [15000.0002, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [0.0, 0.0, 0.0], Some(250.0)),
+        ]);
+        let opts = MergeOptions {
+            clock_min_common: 1,
+            provenance: Some(ProvenanceMode::Full),
+            ..MergeOptions::default()
+        };
+
+        let (merged, report) = merge(&[a, b], &opts).expect("merge");
+
+        let g01 = gps(1);
+        let g02 = gps(2);
+
+        // G01 has a merged state with position and clock
+        assert!(merged.state(g01, 0).is_ok());
+        let g01_state = merged.state(g01, 0).unwrap();
+        assert!((g01_state.clock_s.unwrap() - 100.0e-6).abs() < 1.0e-12);
+
+        // G02 has absent orbit: state() returns UnknownSatellite
+        assert!(matches!(
+            merged.state(g02, 0),
+            Err(Error::UnknownSatellite(sat)) if sat == g02
+        ));
+        assert!(!merged.states_at(0).unwrap().contains_key(&g02));
+
+        // G02 is retained as clock-only record
+        let g02_clock = merged
+            .clock_record(g02, 0)
+            .expect("G02 clock record retained");
+        assert_eq!(g02_clock.clock_us, 250.0);
+        assert!((g02_clock.clock_s - 250.0e-6).abs() < 1.0e-12);
+        assert!(g02_clock.velocity.is_none());
+        assert!(g02_clock.clock_rate_s_s.is_none());
+        assert_eq!(
+            merged.clock_records_at(0).unwrap().get(&g02),
+            Some(&g02_clock)
+        );
+
+        // Single-source report tracks G02 from source 1
+        assert!(
+            report
+                .single_source
+                .iter()
+                .any(|f| f.satellite == g02 && f.sources == vec![1]),
+            "single source report must track G02"
+        );
+
+        // Agreement metric for G02 represents clock-only without invented position metrics
+        let g02_agreement = report
+            .agreement
+            .iter()
+            .find(|m| m.satellite == g02)
+            .expect("G02 agreement metric");
+        assert_eq!(g02_agreement.position_members, 0);
+        assert_eq!(g02_agreement.position_rms_m, None);
+        assert_eq!(g02_agreement.position_max_m, None);
+        assert_eq!(g02_agreement.clock_members, 1);
+        assert_eq!(g02_agreement.clock_rms_s, Some(0.0));
+        assert_eq!(g02_agreement.clock_max_s, Some(0.0));
+
+        // Provenance in Full mode describes G02 cell with position: None
+        let prov = report.provenance.as_ref().expect("provenance recorded");
+        let g02_prov = prov
+            .cells
+            .iter()
+            .find(|c| c.satellite == g02)
+            .expect("G02 cell provenance");
+        assert_eq!(g02_prov.position, None);
+        assert_eq!(
+            g02_prov.clock,
+            Some(CellSelection::SingleSource { source: 1 })
+        );
+
+        // Contributor coverage tracks G02 under source 1
+        assert_eq!(prov.coverage[1].cells_selected, 1); // G02 (G01 was combined)
+        assert_eq!(prov.coverage[1].cells_contributed, 2);
+    }
+
+    #[test]
+    fn align_clock_reference_shifts_clock_only_satellite() {
+        let source0 = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(200.0)),
+        ]);
+        let source1 = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(105.0)),
+            ("G03", [0.0, 0.0, 0.0], Some(305.0)),
+        ]);
+
+        let aligned = align_clock_reference(&source0, &source1, 1);
+
+        let g01 = gps(1);
+        let g03 = gps(3);
+
+        // Offset is +5 us (105 - 100); aligned clocks shift by -5 us
+        let g01_clock = aligned.state(g01, 0).unwrap().clock_s.unwrap();
+        assert!((g01_clock - 100.0e-6).abs() < 1.0e-12);
+
+        let g03_rec = aligned.clock_record(g03, 0).expect("G03 clock record");
+        assert!((g03_rec.clock_us - 300.0).abs() < 1.0e-9);
+        assert!((g03_rec.clock_s - 300.0e-6).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn merge_shared_clocks_alignment_with_clock_only_satellite() {
+        let source0 = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(200.0)),
+        ]);
+        let source1 = sp3_records(&[
+            ("G01", [15000.0002, -20000.0, 5000.0], Some(105.0)),
+            ("G03", [0.0, 0.0, 0.0], Some(305.0)),
+        ]);
+        let opts = MergeOptions {
+            clock_min_common: 1,
+            ..MergeOptions::default()
+        };
+
+        let g01 = gps(1);
+        let g02 = gps(2);
+        let g03 = gps(3);
+
+        let input_delta_m = super::dist3(
+            &source0.state(g01, 0).unwrap().position.as_array(),
+            &source1.state(g01, 0).unwrap().position.as_array(),
+        );
+        assert!(
+            input_delta_m > 0.0 && input_delta_m <= opts.position_tolerance_m,
+            "input delta {input_delta_m} m must be distinct and within configured tolerance {}",
+            opts.position_tolerance_m
+        );
+
+        let (merged, report) = merge(&[source0, source1], &opts).expect("merge");
+
+        // G01 agreed on position and datum-aligned clock
+        assert!(merged.state(g01, 0).is_ok());
+        let g01_clk = merged.state(g01, 0).unwrap().clock_s.unwrap();
+        assert!((g01_clk - 100.0e-6).abs() < 1.0e-12);
+
+        // G02 single-source from source 0
+        assert!(merged.state(g02, 0).is_ok());
+
+        // G03 clock-only record from source 1, aligned onto source 0 datum (-5 us)
+        let g03_clk = merged.clock_record(g03, 0).expect("G03 clock-only record");
+        assert!((g03_clk.clock_us - 300.0).abs() < 1.0e-9);
+        assert!((g03_clk.clock_s - 300.0e-6).abs() < 1.0e-15);
+
+        assert_eq!(report.single_source.len(), 2); // G02 and G03
+    }
+
+    #[test]
+    fn merge_output_write_read_retention_round_trip() {
+        // Verify retention round-trip fidelity using distinct within-tolerance
+        // source positions whose mean is exactly representable in both binary
+        // metres and F14.6 kilometres (0.25 m separation -> 0.125 m mean).
+        let source0 = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(200.0)),
+        ]);
+        let source1 = sp3_records(&[
+            ("G01", [15000.00025, -20000.0, 5000.0], Some(100.0)),
+            ("G03", [0.0, 0.0, 0.0], Some(300.0)),
+        ]);
+        let opts = MergeOptions {
+            clock_min_common: 1,
+            ..MergeOptions::default()
+        };
+        let (merged, _) = merge(&[source0, source1], &opts).expect("merge");
+
+        let g01 = gps(1);
+        assert_eq!(
+            merged.state(g01, 0).unwrap().position.as_array()[0],
+            15000000.125,
+            "computed mean must match intended exact binary/wire mean"
+        );
+
+        let text = merged.to_sp3_string();
+        // Serialized output must contain 0,0,0 sentinel for G03 with numeric clock
+        let g03_line = text
+            .lines()
+            .find(|l| l.starts_with("PG03"))
+            .expect("PG03 line in serialized merged output");
+        assert!(
+            g03_line.contains("0.000000      0.000000      0.000000    300.000000"),
+            "got line: {g03_line}"
+        );
+
+        let reparsed = Sp3::parse(text.as_bytes()).expect("reparse serialized merged SP3");
+        assert_eq!(reparsed.clock_records, merged.clock_records);
+        assert_eq!(reparsed.states, merged.states);
+        assert_eq!(reparsed.header.satellites, merged.header.satellites);
+        assert_eq!(
+            reparsed, merged,
+            "full product equality across write/read round trip"
+        );
+    }
+
+    #[test]
+    fn merge_raw_clock_preservation_in_selected_orbit_and_clock_only_sources() {
+        // Source 0: G01 anchor (100.0 us), G02 orbit record with clock_us = 200.0
+        let source0 = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(200.0)),
+        ]);
+        // Source 1: G01 anchor (100.0 us -> 0.0 us offset), G03 clock-only record with clock_us = 200.0
+        let source1 = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G03", [0.0, 0.0, 0.0], Some(200.0)),
+        ]);
+        let opts = MergeOptions {
+            clock_min_common: 1,
+            ..MergeOptions::default()
+        };
+        let (merged, _) = merge(&[source0, source1], &opts).expect("merge");
+
+        let g01 = gps(1);
+        let g02 = gps(2);
+        let g03 = gps(3);
+
+        // Combined identical G01 raw clock preserved bit-for-bit from sources (100.0 us)
+        let g01_raw = merged.interp_raw[0].get(&g01).expect("G01 raw node");
+        assert_eq!(g01_raw.clock_us, Some(100.0));
+
+        // Orbit clock raw node preserved from source 0 without float drift (200.0 us)
+        let g02_raw = merged.interp_raw[0].get(&g02).expect("G02 raw node");
+        assert_eq!(g02_raw.clock_us, Some(200.0));
+
+        // Clock-only raw record preserved from source 1 (200.0 us)
+        let g03_clk = merged.clock_record(g03, 0).expect("G03 clock record");
+        assert_eq!(g03_clk.clock_us, 200.0);
+
+        // Differing clock consensus falls back to calculated clock arithmetic
+        let diff_source0 = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(100.0)),
+            ("G03", [17000.0, -22000.0, 7000.0], Some(200.0)),
+        ]);
+        let diff_source1 = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(100.000002)),
+            ("G03", [17000.0, -22000.0, 7000.0], Some(200.0)),
+        ]);
+        let (diff_merged, _) = merge(&[diff_source0, diff_source1], &opts).expect("merge");
+        let g02_diff_raw = diff_merged.interp_raw[0]
+            .get(&g02)
+            .expect("G02 diff raw node");
+        let g02_diff_state = diff_merged.state(g02, 0).expect("G02 state");
+        let computed_us = g02_diff_state.clock_s.expect("G02 clock_s") * 1.0e6;
+        assert_eq!(g02_diff_raw.clock_us, Some(computed_us));
+        assert_ne!(g02_diff_raw.clock_us, Some(100.0));
+    }
+
+    #[test]
+    fn merge_clock_only_satellite_never_creates_interp_nodes() {
+        let source0 = sp3_records(&[("G01", [15000.0, -20000.0, 5000.0], Some(100.0))]);
+        let source1 = sp3_records(&[
+            ("G01", [15000.0002, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [0.0, 0.0, 0.0], Some(200.0)),
+        ]);
+        let opts = MergeOptions {
+            clock_min_common: 1,
+            ..MergeOptions::default()
+        };
+        let (merged, _) = merge(&[source0, source1], &opts).expect("merge");
+
+        let g02 = gps(2);
+        // Verify actual retained clock before asserting absence of orbit nodes
+        let g02_clk = merged
+            .clock_record(g02, 0)
+            .expect("G02 clock record retained");
+        assert_eq!(g02_clk.clock_us, 200.0);
+
+        // Interp raw node must not exist for G02
+        assert!(
+            !merged.interp_raw[0].contains_key(&g02),
+            "interp_raw must never contain clock-only satellite"
+        );
+
+        // Position evaluation must fail with UnknownSatellite
+        let err = merged.position(g02, merged.epochs[0]);
+        assert!(
+            matches!(err, Err(Error::UnknownSatellite(sat)) if sat == g02),
+            "expected UnknownSatellite, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn merge_satellite_arc_precedence_selects_clock_only_owner() {
+        let source0 = sp3_records(&[("G01", [15000.0, -20000.0, 5000.0], Some(100.0))]);
+        let source1 = sp3_records(&[
+            ("G01", [15000.0002, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [0.0, 0.0, 0.0], Some(200.0)),
+        ]);
+        let opts = MergeOptions {
+            clock_min_common: 1,
+            combine: MergeCombine::Precedence,
+            precedence_scope: MergePrecedenceScope::SatelliteArc,
+            ..MergeOptions::default()
+        };
+
+        let (merged, _) = merge(&[source0, source1], &opts).expect("merge arc precedence");
+        let g02 = gps(2);
+        // Source 1 is identified as arc owner for G02 despite it being clock-only
+        assert!(merged.clock_record(g02, 0).is_ok());
+        assert_eq!(merged.clock_record(g02, 0).unwrap().clock_us, 200.0);
+    }
+
+    #[test]
+    fn merge_provenance_tracks_clock_only_transitions_and_coverage() {
+        let source0 = sp3_records(&[("G01", [15000.0, -20000.0, 5000.0], Some(100.0))]);
+        let source1 = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], Some(100.0)),
+            ("G02", [0.0, 0.0, 0.0], Some(200.0)),
+        ]);
+        let opts = MergeOptions {
+            clock_min_common: 1,
+            provenance: Some(ProvenanceMode::Full),
+            ..MergeOptions::default()
+        };
+
+        let (_merged, report) = merge(&[source0, source1], &opts).expect("merge provenance");
+        let prov = report.provenance.expect("provenance");
+
+        let g02 = gps(2);
+        // Transition for G02 exists as SoleAvailability
+        let g02_trans = prov
+            .transitions
+            .iter()
+            .find(|t| t.satellite == g02)
+            .expect("G02 transition");
+        assert_eq!(g02_trans.from_source, None);
+        assert_eq!(g02_trans.to_source, Some(1));
+        assert_eq!(g02_trans.reason, TransitionReason::SoleAvailability);
+
+        // Coverage accurately counts accepted cells without dropping G02
+        assert_eq!(prov.coverage[0].cells_contributed, 1);
+        assert_eq!(prov.coverage[1].cells_contributed, 2);
+        assert_eq!(prov.coverage[0].cells_absent, 1); // missed G02
+        assert_eq!(prov.coverage[1].cells_absent, 0);
+    }
+
+    #[test]
+    fn merge_provenance_mixed_availability_tracks_distinct_position_and_clock_contributors() {
+        // Source 0 supplies position for G01 but has no clock (sentinel).
+        // Source 1 supplies clock for G01 but has no orbit (sentinel 0,0,0).
+        // Both share G02 with valid orbit and clock to anchor the clock datum offset (0.0 us).
+        let source0 = sp3_records(&[
+            ("G01", [15000.0, -20000.0, 5000.0], None),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(100.0)),
+        ]);
+        let source1 = sp3_records(&[
+            ("G01", [0.0, 0.0, 0.0], Some(200.0)),
+            ("G02", [16000.0, -21000.0, 6000.0], Some(100.0)),
+        ]);
+        let opts = MergeOptions {
+            clock_min_common: 1,
+            provenance: Some(ProvenanceMode::Full),
+            ..MergeOptions::default()
+        };
+
+        let (merged, report) = merge(&[source0, source1], &opts).expect("merge mixed availability");
+        let g01 = gps(1);
+
+        // G01 has position from source 0 and clock from source 1
+        let g01_state = merged.state(g01, 0).expect("G01 merged state");
+        assert!((g01_state.clock_s.unwrap() - 200.0e-6).abs() < 1.0e-12);
+
+        let prov = report.provenance.expect("provenance recorded");
+        let g01_prov = prov
+            .cells
+            .iter()
+            .find(|c| c.satellite == g01)
+            .expect("G01 cell provenance");
+        assert_eq!(
+            g01_prov.position,
+            Some(CellSelection::SingleSource { source: 0 })
+        );
+        assert_eq!(
+            g01_prov.clock,
+            Some(CellSelection::SingleSource { source: 1 })
+        );
+
+        // Both sources contributed to G01 (source 0 position, source 1 clock),
+        // and both contributed to G02. Thus both sources contributed to 2 accepted cells.
+        assert_eq!(prov.coverage[0].cells_contributed, 2);
+        assert_eq!(prov.coverage[1].cells_contributed, 2);
+        assert_eq!(prov.coverage[0].cells_absent, 0);
+        assert_eq!(prov.coverage[1].cells_absent, 0);
+    }
+
+    #[test]
+    fn merge_drops_velocities_and_rates_for_all_records() {
+        // Construct SP3-c Velocity product (#cV) with V records
+        let v_file = "\
+#cV2020  6 25  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 432000.00000000   900.00000000 59025 0.0000000000000
++    2   G01G02  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* TEST SP3-c FIXTURE
+*  2020  6 25  0  0  0.00000000
+PG01  15000.000000 -20000.000000   5000.000000    100.000000
+VG01   1000.000000  -2000.000000   3000.000000      1.500000
+PG02      0.000000      0.000000      0.000000    200.000000
+VG02   1000.000000  -2000.000000   3000.000000      2.500000
+EOF
+";
+        let sp3_input = Sp3::parse(v_file.as_bytes()).expect("parse velocity product");
+        assert_eq!(sp3_input.header.data_type, Sp3DataType::Velocity);
+        let g01 = gps(1);
+        let g02 = gps(2);
+        assert!(sp3_input.state(g01, 0).unwrap().velocity.is_some());
+        assert!(sp3_input.state(g01, 0).unwrap().clock_rate_s_s.is_some());
+        assert!(sp3_input.clock_record(g02, 0).unwrap().velocity.is_some());
+        assert!(sp3_input
+            .clock_record(g02, 0)
+            .unwrap()
+            .clock_rate_raw
+            .is_some());
+
+        let (merged, _) = merge(&[sp3_input], &MergeOptions::default()).expect("merge");
+
+        // Merged header is position-only
+        assert_eq!(merged.header.data_type, Sp3DataType::Position);
+
+        // Position state drops velocity and clock rate
+        let m_g01 = merged.state(g01, 0).expect("merged state G01");
+        assert!(
+            m_g01.velocity.is_none(),
+            "merged state velocity must be None"
+        );
+        assert!(
+            m_g01.clock_rate_s_s.is_none(),
+            "merged state clock_rate_s_s must be None"
+        );
+
+        // Clock record drops velocity and clock rate
+        let m_g02 = merged.clock_record(g02, 0).expect("merged clock G02");
+        assert!(
+            m_g02.velocity.is_none(),
+            "merged clock velocity must be None"
+        );
+        assert!(
+            m_g02.clock_rate_s_s.is_none(),
+            "merged clock clock_rate_s_s must be None"
+        );
+        assert!(
+            m_g02.clock_rate_raw.is_none(),
+            "merged clock clock_rate_raw must be None"
         );
     }
 }

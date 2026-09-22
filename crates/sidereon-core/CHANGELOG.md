@@ -6,6 +6,9 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- SP3 readers use the defined epoch columns while retaining compact epoch compatibility. Valid clocks with missing orbit coordinates survive reading, writing, datum alignment and merging without creating orbit interpolation samples. `Sp3ClockRecord` and clock-record accessors expose the retained clock, flags and associated velocity/rate fields.
+- **Breaking.** SP3 merge position agreement metrics and `CellProvenance.position` are optional when no orbit exists. Contributor coverage counts sources providing either position or clock, without counting the same source twice. Merged products continue to omit velocities and clock rates.
+
 - Bias-SINEX reports corrupted optional sigma, slope and slope-uncertainty fields and unknown bias modes through typed diagnostics. Blank optional fields remain absent.
 - CODE DCB retains the complete receiver station text and constellation while normalized lookup keys continue to resolve it. Missing RMS stays absent, independently of measured zero or signed values.
 - **Breaking.** CODE DCB writing refuses nonfinite values, field overflow, precision loss and station text that cannot survive fixed-column readback.

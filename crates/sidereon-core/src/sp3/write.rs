@@ -157,6 +157,7 @@ impl Sp3 {
             let _ = writeln!(out, "*  {}", format_calendar(y, mo, d, hh, mi, ss));
 
             let states = &self.states[idx];
+            let clock_records = &self.clock_records[idx];
             // Every header satellite gets a record at every epoch; an absent one
             // is the missing-orbit sentinel (so a quarantined cell is "missing",
             // never a fabricated zero position). Velocity products also get the
@@ -176,6 +177,24 @@ impl Sp3 {
                     out.push('\n');
                     if with_velocity {
                         write_velocity_record(out, sat, state.velocity, state.clock_rate_s_s);
+                    }
+                } else if let Some(clock_rec) = clock_records.get(sat) {
+                    let clk_us = clock_rec.clock_us;
+                    let _ = write!(
+                        out,
+                        "P{sat}{:14.6}{:14.6}{:14.6}{clk_us:14.6}",
+                        MISSING_POSITION_KM, MISSING_POSITION_KM, MISSING_POSITION_KM,
+                    );
+                    write_record_flags(out, clock_rec.flags);
+                    out.push('\n');
+                    if with_velocity {
+                        write_velocity_record_raw(
+                            out,
+                            sat,
+                            clock_rec.velocity,
+                            clock_rec.clock_rate_raw,
+                            clock_rec.clock_rate_s_s,
+                        );
                     }
                 } else {
                     let _ = writeln!(
@@ -214,6 +233,16 @@ fn write_velocity_record(
     velocity: Option<crate::frame::ItrfVelocityMS>,
     clock_rate_s_s: Option<f64>,
 ) {
+    write_velocity_record_raw(out, sat, velocity, None, clock_rate_s_s);
+}
+
+fn write_velocity_record_raw(
+    out: &mut String,
+    sat: &crate::id::GnssSatelliteId,
+    velocity: Option<crate::frame::ItrfVelocityMS>,
+    clock_rate_raw: Option<f64>,
+    clock_rate_s_s: Option<f64>,
+) {
     let ((vx, vy, vz), rate) = match velocity {
         Some(v) => (
             (
@@ -221,7 +250,10 @@ fn write_velocity_record(
                 v.vy_m_s / DM_S_TO_M_S,
                 v.vz_m_s / DM_S_TO_M_S,
             ),
-            clock_rate_field(clock_rate_s_s),
+            match clock_rate_raw {
+                Some(r) => r,
+                None => clock_rate_field(clock_rate_s_s),
+            },
         ),
         None => (
             (
@@ -229,7 +261,10 @@ fn write_velocity_record(
                 MISSING_VELOCITY_DM_S,
                 MISSING_VELOCITY_DM_S,
             ),
-            BAD_CLOCK_US,
+            match clock_rate_raw {
+                Some(r) => r,
+                None => clock_rate_field(clock_rate_s_s),
+            },
         ),
     };
     let _ = writeln!(out, "V{sat}{vx:14.6}{vy:14.6}{vz:14.6}{rate:14.6}");
