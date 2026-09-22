@@ -1,0 +1,35 @@
+     1.4            M                                       ANTEX VERSION / SYST
+R                   AOAD/M_T                                PCV TYPE / REFANT
+seed with RMS and a repeated frequency                      COMMENT
+                                                            END OF HEADER
+                                                            START OF ANTENNA
+TESTANT             TESTSER                                 TYPE / SERIAL NO
+ROBOT               TEST                     1    22-SEP-26 METH / BY / # / DATE
+     5.0                                                    DAZI
+     0.0  10.0   5.0                                        ZEN1 / ZEN2 / DZEN
+     2                                                      # OF FREQUENCIES
+  2020     1     1     0     0    0.0000000                 VALID FROM
+  2020    12    31    23    59   59.9999999                 VALID UNTIL
+TEST                                                        SINEX CODE
+antenna comment                                             COMMENT
+   G01                                                      START OF FREQUENCY
+      1.00      1.00      1.00                              NORTH / EAST / UP
+   NOAZI    1.00    2.00    3.00
+     0.0    1.10    2.10    3.10
+   360.0    1.10    2.10    3.10
+   G01                                                      END OF FREQUENCY
+   G01                                                      START OF FREQ RMS
+      0.10      0.10      0.10                              NORTH / EAST / UP
+   NOAZI    0.05    0.05    0.05
+   G01                                                      END OF FREQ RMS
+   G01                                                      START OF FREQUENCY
+      2.00      2.00      2.00                              NORTH / EAST / UP
+   NOAZI    1.00    2.00    3.00
+     0.0    1.10    2.10    3.10
+   360.0    1.10    2.10    3.10
+   G01                                                      END OF FREQUENCY
+   G01                                                      START OF FREQ RMS
+      0.10      0.10      0.10                              NORTH / EAST / UP
+   NOAZI    0.05    0.05    0.05
+   G01                                                      END OF FREQ RMS
+                                                            END OF ANTENNA

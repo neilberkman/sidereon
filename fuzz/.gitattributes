@@ -1,0 +1,3 @@
+# ANTEX seed files are excerpts of IGS files kept byte for byte; trailing blanks
+# pad each record to its label columns.
+corpus/antex_parse/*.atx -whitespace

@@ -1,0 +1,24 @@
+     1.4            M                                       ANTEX VERSION / SYST
+A                                                           PCV TYPE / REFANT   
+########################################################### COMMENT             
+General hint for satellite antenna corrections:             COMMENT             
+########################################################### COMMENT             
+                                                            END OF HEADER       
+                                                            START OF ANTENNA    
+BLOCK I             G03                 G011      1985-093A TYPE / SERIAL NO    
+                                             0    29-JAN-17 METH / BY / # / DATE
+     0.0                                                    DAZI                
+     0.0  14.0   1.0                                        ZEN1 / ZEN2 / DZEN  
+     2                                                      # OF FREQUENCIES    
+  1985    10     9     0     0    0.0000000                 VALID FROM          
+  1994     4    17    23    59   59.9999999                 VALID UNTIL         
+IGS20_2434                                                  SINEX CODE          
+   G01                                                      START OF FREQUENCY  
+    210.00      0.00   1745.98                              NORTH / EAST / UP   
+   NOAZI   -1.00   -2.60   -1.20   -0.90    0.50    1.40    2.00    2.00    1.70    0.50   -0.10   -0.60   -0.70   -0.60   -0.30
+   G01                                                      END OF FREQUENCY    
+   G02                                                      START OF FREQUENCY  
+    210.00      0.00   1745.98                              NORTH / EAST / UP   
+   NOAZI   -1.00   -2.60   -1.20   -0.90    0.50    1.40    2.00    2.00    1.70    0.50   -0.10   -0.60   -0.70   -0.60   -0.30
+   G02                                                      END OF FREQUENCY    
+                                                            END OF ANTENNA      

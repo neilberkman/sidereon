@@ -82,3 +82,13 @@
 /corpus/terrain_store_round_trip/*
 !/corpus/terrain_store_round_trip/valid-one-tile-5x5
 !/corpus/terrain_store_round_trip/regression-index-bounds-1e300
+
+# Curated seeds for the ANTEX target, which reads and round-trips: two real
+# IGS excerpts (relative igs_01 header and blocks, an igs20 block with a
+# fractional VALID UNTIL) and a block with RMS sections and a repeated
+# frequency label.
+!/corpus/antex_parse/
+/corpus/antex_parse/*
+!/corpus/antex_parse/valid-igs01-relative-trim.atx
+!/corpus/antex_parse/valid-igs20-block-i-g03-trim.atx
+!/corpus/antex_parse/valid-rms-repeated-frequency.atx

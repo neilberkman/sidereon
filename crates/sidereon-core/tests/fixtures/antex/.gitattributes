@@ -1,0 +1,4 @@
+# These fixtures are excerpts of IGS ANTEX files kept byte for byte. ANTEX pads
+# every record to its label columns, so trailing blanks are part of the lines
+# the tests compare. Git's whitespace check would report each as an error.
+*.atx -whitespace
