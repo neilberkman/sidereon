@@ -101,6 +101,14 @@ const LINE2_MJD_FRACTION_DECIMALS: usize = 13;
 /// Columns and decimals of the epoch-record (`*`) seconds field (`F11.8`).
 const EPOCH_SECONDS_WIDTH: usize = 11;
 const EPOCH_SECONDS_DECIMALS: usize = 8;
+/// Canonical columns and decimals of the first float header line (`%f`) pos/vel
+/// base (`F10.7`) and clock/rate base (`F12.9`) values. The reader accepts any
+/// finite value its source field carried; these are the widths the writer emits
+/// them in, and what it measures a base against before refusing to write it.
+const LINE_PF_POS_VEL_BASE_WIDTH: usize = 10;
+const LINE_PF_POS_VEL_BASE_DECIMALS: usize = 7;
+const LINE_PF_CLOCK_RATE_BASE_WIDTH: usize = 12;
+const LINE_PF_CLOCK_RATE_BASE_DECIMALS: usize = 9;
 
 /// SP3 format version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +331,9 @@ pub struct Sp3Header {
     pub data_type: Sp3DataType,
     /// Number of parsed epochs in the canonical product.
     pub num_epochs: u64,
+    /// Data-used descriptor from header line 1, columns 41-45 (`A5`, e.g.
+    /// `MIXED`, `ORBIT`). `None` when the field is absent or blank.
+    pub data_used: Option<String>,
     /// Coordinate-system / IGS-realization label (e.g. `IGS14`, `ITRF2`).
     pub coordinate_system: String,
     /// Orbit-type label (e.g. `FIT`, `BHN`).
@@ -339,6 +350,9 @@ pub struct Sp3Header {
     pub mjd: u32,
     /// Fractional day of the first epoch.
     pub mjd_fraction: f64,
+    /// File-type descriptor from the first `%c` line, columns 4-5 (`A2`, e.g.
+    /// `G`, `M`). `None` when the field is absent or blank.
+    pub file_type: Option<String>,
     /// Time system label the epochs are expressed in. For SP3-b/c/d this is read
     /// strictly from the first `%c` descriptor (a missing/short/blank descriptor
     /// is a parse error, never a silent GPST default); SP3-a is implicitly GPST.
@@ -347,6 +361,25 @@ pub struct Sp3Header {
     /// [`Sp3Header::time_system`] for the exact SP3 label when the product uses
     /// a standard SP3 time system that is not modeled as a distinct core scale.
     pub time_scale: TimeScale,
+    /// Floating-point base for the satellite position/velocity standard
+    /// deviations, from the first `%f` line, columns 4-13 (mm and 10^-4 mm/s).
+    /// `None` when the field is absent or blank; `Some(0.0)` for an explicit
+    /// numeric zero, whose sign is preserved.
+    ///
+    /// Any finite value the field carried is kept, including one finer than the
+    /// `F10.7` the canonical layout writes it back in. Serialization is where
+    /// that is reported, as [`Sp3WriteError::PrecisionNotRepresentable`] - a
+    /// value the source file stated plainly is never refused at read time.
+    pub pos_vel_base: Option<f64>,
+    /// Floating-point base for the satellite clock/clock-rate standard
+    /// deviations, from the first `%f` line, columns 15-26 (ps and 10^-4 ps/s).
+    /// `None` when the field is absent or blank; `Some(0.0)` for an explicit
+    /// numeric zero, whose sign is preserved.
+    ///
+    /// Read on the same terms as [`Sp3Header::pos_vel_base`]: any finite value
+    /// the field carried, with the canonical `F12.9` width enforced by the
+    /// writer rather than the reader.
+    pub clock_rate_base: Option<f64>,
     /// The satellite list declared in the `+` header lines.
     pub satellites: Vec<GnssSatelliteId>,
     /// Per-satellite accuracy exponent codes from the `++` header lines,
@@ -758,12 +791,16 @@ struct Parser {
     coordinate_system: String,
     orbit_type: String,
     agency: String,
+    data_used: Option<String>,
     gnss_week: u32,
     seconds_of_week: f64,
     epoch_interval_s: f64,
     mjd: u32,
     mjd_fraction: f64,
+    file_type: Option<String>,
     time_system: Option<Sp3TimeSystem>,
+    pos_vel_base: Option<f64>,
+    clock_rate_base: Option<f64>,
     /// `+`-line declared satellites, in file order.
     sat_list: Vec<GnssSatelliteId>,
     declared_satellite_count: Option<usize>,
@@ -820,12 +857,16 @@ impl Parser {
             coordinate_system: String::new(),
             orbit_type: String::new(),
             agency: String::new(),
+            data_used: None,
             gnss_week: 0,
             seconds_of_week: 0.0,
             epoch_interval_s: 0.0,
             mjd: 0,
             mjd_fraction: 0.0,
+            file_type: None,
             time_system: None,
+            pos_vel_base: None,
+            clock_rate_base: None,
             sat_list: Vec::new(),
             declared_satellite_count: None,
             declared_satellite_tokens: Vec::new(),
@@ -923,9 +964,7 @@ impl Parser {
             return Ok(());
         }
         if line.starts_with("%f") {
-            self.float_header_lines += 1;
-            // Float accuracy descriptors are retained only as structural
-            // evidence for exact validation.
+            self.parse_pf_line(line)?;
             return Ok(());
         }
         if line.starts_with("%i") {
@@ -1004,6 +1043,12 @@ impl Parser {
         // parse here: malformed values remain parse-compatible but are rejected
         // by the exact validator as unavailable declared metadata.
         self.declared_start_j2000_s = parse_declared_start_j2000_s(line);
+        let raw_data_used = field(line, 40, 45).trim();
+        self.data_used = if raw_data_used.is_empty() {
+            None
+        } else {
+            Some(raw_data_used.to_string())
+        };
         self.coordinate_system = field(line, 45, 51).trim().to_string();
         self.orbit_type = field(line, 51, 55).trim().to_string();
         self.agency = field_from(line, 55).trim().to_string();
@@ -1157,8 +1202,35 @@ impl Parser {
                     "SP3 %c descriptor too short to carry a time system: {line:?}"
                 )));
             }
+
+            let raw_file_type = field(line, 3, 5).trim();
+            self.file_type = if raw_file_type.is_empty() {
+                None
+            } else {
+                Some(raw_file_type.to_string())
+            };
         }
         self.pc_count += 1;
+        Ok(())
+    }
+
+    /// `%f` floating-point descriptor line: the first one carries the pos/vel
+    /// and clock/rate standard-deviation bases in columns 4-13 and 15-26.
+    ///
+    /// A blank field is "no base declared"; a present one must be a finite
+    /// number, and is then kept exactly as written. The canonical layout states
+    /// these as `F10.7` and `F12.9`, but the fields themselves are ten and
+    /// twelve bytes of decimal text: a source writing `1.25000001` there stated
+    /// a value that reads back unambiguously, and rejecting it would refuse a
+    /// file that says what it means. Whether the canonical columns can restate
+    /// such a value is the writer's question, answered by
+    /// [`Sp3WriteError::PrecisionNotRepresentable`].
+    fn parse_pf_line(&mut self, line: &str) -> Result<()> {
+        if self.float_header_lines == 0 {
+            self.pos_vel_base = parse_pf_base(line, 3, 13, "pos_vel_base")?;
+            self.clock_rate_base = parse_pf_base(line, 14, 26, "clock_rate_base")?;
+        }
+        self.float_header_lines += 1;
         Ok(())
     }
 
@@ -1480,6 +1552,7 @@ impl Parser {
             version,
             data_type,
             num_epochs: self.epochs.len() as u64,
+            data_used: self.data_used,
             coordinate_system: self.coordinate_system,
             orbit_type: self.orbit_type,
             agency: self.agency,
@@ -1488,8 +1561,11 @@ impl Parser {
             epoch_interval_s: self.epoch_interval_s,
             mjd: self.mjd,
             mjd_fraction: self.mjd_fraction,
+            file_type: self.file_type,
             time_system,
             time_scale,
+            pos_vel_base: self.pos_vel_base,
+            clock_rate_base: self.clock_rate_base,
             satellites: self.sat_list,
             satellite_accuracy_codes,
         };
@@ -1628,6 +1704,20 @@ fn parse_clock_us(line: &str) -> Result<Option<f64>> {
     .map(Some)
 }
 
+/// Read one `%f` standard-deviation base column.
+///
+/// A blank field is "no base declared". A present one must be a finite number,
+/// and is then kept exactly as the field stated it; see
+/// [`Parser::parse_pf_line`] for why the canonical width is not imposed here.
+fn parse_pf_base(line: &str, start: usize, end: usize, what: &'static str) -> Result<Option<f64>> {
+    let raw = field(line, start, end).trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let value = strict_f64(raw, what).map_err(|error| map_field_error(error, line))?;
+    Ok(Some(value))
+}
+
 fn map_field_error(error: validate::FieldError, line: &str) -> Error {
     Error::Parse(format!("SP3 {error} in {line:?}"))
 }
@@ -1723,6 +1813,7 @@ pub use samples::{
 pub use verify::{
     compare_position_series, InterpolationComparison, InterpolationDivergence, ReferenceState,
 };
+pub use write::Sp3WriteError;
 
 #[cfg(all(test, sidereon_repo_tests))]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]

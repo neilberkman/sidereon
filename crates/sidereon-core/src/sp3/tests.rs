@@ -76,6 +76,35 @@ PG02      0.000000      0.000000      0.000000    100.000000
 EOF
 ";
 
+/// The same shape as [`SP3C_FILE`] on a day whose epochs are *not* a whole
+/// number of minutes past midnight: J2000 plus eleven seconds, and the epoch a
+/// quarter of an hour after it.
+///
+/// A fraction of a day carries 53 bits and a day holds 8.64e12 ticks of the
+/// `F11.8` seconds field, so an epoch like this one scales to 4321099999999.9995
+/// ticks - a legitimate epoch, read from a file, whose tick count is not a whole
+/// number. Nothing about it may be rounded, tightened, or refused.
+const SP3C_FRACTIONAL_EPOCH_FILE: &str = "\
+#cP2000  1  1 12  0 11.00000000       2 ORBIT IGS14 FIT  TST
+## 1042 561611.00000000   900.00000000 51544 0.5001273148148
++    2   G01G02  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* TEST SP3-c FRACTIONAL EPOCH FIXTURE
+*  2000  1  1 12  0 11.00000000
+PG01  15000.000000 -20000.000000   5000.000000    123.456789
+PG02  -1234.567890   2345.678901  -3456.789012    -98.765432
+*  2000  1  1 12 15 11.00000000
+PG01  15100.000000 -20100.000000   5100.000000   -987.654321
+PG02  -1334.567890   2445.678901  -3556.789012    -99.765432
+EOF
+";
+
 /// A minimal SP3-d multi-GNSS file with position+velocity records, GPS +
 /// Galileo + BeiDou, and predicted/maneuver flags.
 const SP3D_FILE: &str = "\
@@ -119,6 +148,7 @@ fn parses_sp3c_header() {
     assert_eq!(h.version, Sp3Version::C);
     assert_eq!(h.data_type, Sp3DataType::Position);
     assert_eq!(h.num_epochs, 2);
+    assert_eq!(h.data_used.as_deref(), Some("ORBIT"));
     assert_eq!(h.coordinate_system, "IGS14");
     assert_eq!(h.orbit_type, "FIT");
     assert_eq!(h.agency, "TST");
@@ -126,8 +156,11 @@ fn parses_sp3c_header() {
     assert_eq!(h.seconds_of_week, 432000.0);
     assert_eq!(h.epoch_interval_s, 900.0);
     assert_eq!(h.mjd, 59024);
+    assert_eq!(h.file_type.as_deref(), Some("G"));
     assert_eq!(h.time_system, Sp3TimeSystem::Gps);
     assert_eq!(h.time_scale, TimeScale::Gpst);
+    assert_eq!(h.pos_vel_base, Some(1.25));
+    assert_eq!(h.clock_rate_base, Some(1.025));
     assert_eq!(
         h.satellites,
         vec![id(GnssSystem::Gps, 1), id(GnssSystem::Gps, 2)]
@@ -756,7 +789,7 @@ EOF\n"
 /// Re-parse the written SP3 and assert it is semantically equal to `original`:
 /// same epochs, satellite set, positions (mm), clocks (sub-ns), velocities.
 fn assert_round_trip(original: &Sp3) {
-    let text = original.to_sp3_string();
+    let text = original.to_sp3_string().expect("serialize SP3 product");
     let reparsed = Sp3::parse(text.as_bytes())
         .unwrap_or_else(|e| panic!("re-parse of written SP3 failed: {e}\n--- written ---\n{text}"));
 
@@ -773,6 +806,22 @@ fn assert_round_trip(original: &Sp3) {
     assert_eq!(
         reparsed.header.coordinate_system, original.header.coordinate_system,
         "coordinate system"
+    );
+    assert_eq!(
+        reparsed.header.data_used, original.header.data_used,
+        "data used"
+    );
+    assert_eq!(
+        reparsed.header.file_type, original.header.file_type,
+        "file type"
+    );
+    assert_eq!(
+        reparsed.header.pos_vel_base, original.header.pos_vel_base,
+        "pos/vel base"
+    );
+    assert_eq!(
+        reparsed.header.clock_rate_base, original.header.clock_rate_base,
+        "clock/rate base"
     );
     assert_eq!(
         reparsed.header.satellites, original.header.satellites,
@@ -855,7 +904,7 @@ fn writer_preserves_satellite_accuracy_codes() {
     let original = Sp3::parse(file.as_bytes()).expect("parse SP3 accuracy codes");
     assert_eq!(original.header.satellite_accuracy_codes, vec![5, 17]);
 
-    let text = original.to_sp3_string();
+    let text = original.to_sp3_string().expect("serialize SP3 product");
     let first_accuracy_line = text
         .lines()
         .find(|line| line.starts_with("++"))
@@ -875,7 +924,7 @@ fn writer_preserves_satellite_accuracy_codes() {
 
 fn assert_exact_parse_write_parse_round_trip(file: &str) {
     let original = Sp3::parse(file.as_bytes()).expect("parse source SP3");
-    let text = original.to_sp3_string();
+    let text = original.to_sp3_string().expect("serialize SP3 product");
     let reparsed = Sp3::parse(text.as_bytes())
         .unwrap_or_else(|err| panic!("reparse written SP3: {err}\n--- written ---\n{text}"));
     assert_eq!(
@@ -904,7 +953,7 @@ EOF
     let original = Sp3::parse(no_comment.as_bytes()).expect("parse no-comment SP3");
     assert!(original.comments.is_empty());
 
-    let text = original.to_sp3_string();
+    let text = original.to_sp3_string().expect("serialize SP3 product");
     let comments = text
         .lines()
         .filter(|line| line.starts_with("/*"))
@@ -953,7 +1002,7 @@ fn writer_round_trips_utc_like_leap_second_epoch_without_hour_24() {
         let original = Sp3::parse(file.as_bytes()).expect("parse UTC-like leap-second SP3");
         assert_eq!(original.header.time_system, expected_system);
 
-        let text = original.to_sp3_string();
+        let text = original.to_sp3_string().expect("serialize SP3 product");
         assert!(
             text.contains("#cP2016 12 31 23 59 60.00000000"),
             "line-1 epoch must preserve the accepted leap-second label for {label}:\n{text}"
@@ -982,8 +1031,8 @@ fn writer_round_trips_utc_like_leap_second_epoch_without_hour_24() {
 fn writer_is_deterministic() {
     let sp3 = Sp3::parse(SP3D_FILE.as_bytes()).unwrap();
     assert_eq!(
-        sp3.to_sp3_string(),
-        sp3.to_sp3_string(),
+        sp3.to_sp3_string().expect("serialize SP3 product"),
+        sp3.to_sp3_string().expect("serialize SP3 product"),
         "byte-identical output"
     );
 }
@@ -1018,7 +1067,7 @@ EOF
         expected
     );
 
-    let text = original.to_sp3_string();
+    let text = original.to_sp3_string().expect("serialize SP3 product");
     let p_line = text
         .lines()
         .find(|line| line.starts_with("PG05"))
@@ -1052,7 +1101,7 @@ fn writer_emits_velocity_records_for_missing_velocity_cells() {
         .remove(&absent_sat)
         .expect("fixture absent-sat state");
 
-    let text = sp3.to_sp3_string();
+    let text = sp3.to_sp3_string().expect("serialize SP3 product");
     let lines: Vec<_> = text.lines().collect();
     let data_record_count = lines
         .iter()
@@ -1107,7 +1156,7 @@ fn writer_emits_missing_satellite_as_sentinel_not_fabricated() {
     // writer must re-emit it as the 0,0,0 sentinel, so it re-reads as absent -
     // never a fabricated position.
     let original = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
-    let text = original.to_sp3_string();
+    let text = original.to_sp3_string().expect("serialize SP3 product");
     assert!(
         text.contains("PG02      0.000000      0.000000      0.000000"),
         "absent G02 must be the 0,0,0 missing sentinel:\n{text}"
@@ -1283,7 +1332,7 @@ fn round_trips_plus_line_padded_with_00_zero_fill() {
         original.skipped_records, 0,
         "` 00` zero-fill slots are padding, not skipped satellites"
     );
-    let encoded = original.to_sp3_string();
+    let encoded = original.to_sp3_string().expect("serialize SP3 product");
     let reparsed = Sp3::parse(encoded.as_bytes()).expect("re-encoded GBM fixture must reparse");
     assert_eq!(
         reparsed, original,
@@ -1326,7 +1375,7 @@ EOF
         "the R28 record must be counted"
     );
 
-    let encoded = original.to_sp3_string();
+    let encoded = original.to_sp3_string().expect("serialize SP3 product");
     assert!(
         !encoded.contains("R28"),
         "the writer must not re-emit an unrepresentable satellite"
@@ -1398,8 +1447,8 @@ EOF
     // The conforming six-decimal record still parses and round-trips.
     let text = file_with_record("PG01      1.000000  36.019431      3.000000    123.456789");
     let original = Sp3::parse(text.as_bytes()).expect("six-decimal values stay accepted");
-    let reparsed =
-        Sp3::parse(original.to_sp3_string().as_bytes()).expect("re-encoded product must reparse");
+    let encoded = original.to_sp3_string().expect("serialize SP3 product");
+    let reparsed = Sp3::parse(encoded.as_bytes()).expect("re-encoded product must reparse");
     assert_eq!(
         reparsed, original,
         "parse -> write -> parse changed product"
@@ -1408,11 +1457,11 @@ EOF
 
 /// A non-finite header start value stays permissive at parse time - exact
 /// validation is what rejects it - so the representability guard must let it
-/// through, and serialization must still be byte-idempotent for it. Such a
-/// product is not equal to itself (`NaN != NaN`), which is why the round-trip
-/// fuzz target asserts byte idempotence separately from structural equality.
+/// through. Writing it is where it stops: fixed-column SP3 has no form for a
+/// NaN or an infinity, and the writer reports the field instead of filling the
+/// columns with something no reader takes back as a start time.
 #[test]
-fn non_finite_header_start_metadata_stays_permissive_and_byte_idempotent() {
+fn non_finite_header_start_metadata_stays_permissive_and_is_refused_by_the_writer() {
     let file = [
         "#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST",
         "## 2111             NaN   900.00000000 59024 0.0000000000000",
@@ -1435,13 +1484,19 @@ fn non_finite_header_start_metadata_stays_permissive_and_byte_idempotent() {
     let original = Sp3::parse(file.as_bytes()).expect("a non-finite start value stays permissive");
     assert!(original.header.seconds_of_week.is_nan());
 
-    let encoded = original.to_sp3_string();
-    let reparsed = Sp3::parse(encoded.as_bytes()).expect("re-encoded product must reparse");
-    assert!(reparsed.header.seconds_of_week.is_nan());
+    // This case used to assert that the written text was byte-idempotent, which
+    // took for granted that the writer would put a non-finite value in a
+    // fixed-column field at all. It has no form there: `NaN` in the
+    // seconds-of-week columns is not a number any reader takes back as this
+    // product's start, and the three characters do not fill the field. The
+    // reading side is unchanged - the value is still kept for
+    // `validate_exact_sp3` to report - and the writing side now says why.
     assert_eq!(
-        reparsed.to_sp3_string(),
-        encoded,
-        "serialization must be byte-idempotent for a non-finite header value"
+        original.to_sp3_string(),
+        Err(Sp3WriteError::NonFinite {
+            field: "seconds-of-week",
+        }),
+        "a non-finite header value is reported, not written"
     );
 }
 
@@ -1497,8 +1552,8 @@ EOF
 
     let text = file_with_line2("## 2111 432000.00000000   900.00000000 59024 0.0000000000000");
     let original = Sp3::parse(text.as_bytes()).expect("conforming header values stay accepted");
-    let reparsed =
-        Sp3::parse(original.to_sp3_string().as_bytes()).expect("re-encoded product must reparse");
+    let encoded = original.to_sp3_string().expect("serialize SP3 product");
+    let reparsed = Sp3::parse(encoded.as_bytes()).expect("re-encoded product must reparse");
     assert_eq!(
         reparsed, original,
         "parse -> write -> parse changed product"
@@ -1548,8 +1603,8 @@ EOF
     // A value the field expresses exactly stays accepted and round-trips.
     let text = file_with_epoch("*  2020  6 24  0  0 12.34567891");
     let original = Sp3::parse(text.as_bytes()).expect("conforming epoch seconds stay accepted");
-    let reparsed =
-        Sp3::parse(original.to_sp3_string().as_bytes()).expect("re-encoded product must reparse");
+    let encoded = original.to_sp3_string().expect("serialize SP3 product");
+    let reparsed = Sp3::parse(encoded.as_bytes()).expect("re-encoded product must reparse");
     assert_eq!(
         reparsed, original,
         "parse -> write -> parse changed product"
@@ -1770,7 +1825,8 @@ fn a_product_parses_with_the_default_gap_threshold_and_keeps_it_out_of_equality(
     // The policy is not product content: same records, equal products.
     assert_eq!(wide, default);
     // And it is not SP3 text either: a text round trip yields the default.
-    let reparsed = Sp3::parse(wide.to_sp3_string().as_bytes()).expect("reparse");
+    let encoded = wide.to_sp3_string().expect("serialize SP3 product");
+    let reparsed = Sp3::parse(encoded.as_bytes()).expect("reparse");
     assert_eq!(
         reparsed.interpolation_options(),
         Sp3InterpolationOptions::default()
@@ -2175,7 +2231,7 @@ EOF
     assert_eq!(records_at.get(&g02), Some(&clock_rec));
 
     // Writer re-emits clock-only satellite as missing orbit sentinel with numeric clock and rate
-    let text = sp3.to_sp3_string();
+    let text = sp3.to_sp3_string().expect("serialize SP3 product");
     assert!(
         text.contains("PG02      0.000000      0.000000      0.000000    123.456789"),
         "writer must preserve clock-only record with 0,0,0 orbit sentinel and numeric clock:\n{text}"
@@ -2226,7 +2282,7 @@ EOF
     assert!(sp3.state(g01, 0).is_err());
     assert!(sp3.state(g02, 0).is_err());
 
-    let text = sp3.to_sp3_string();
+    let text = sp3.to_sp3_string().expect("serialize SP3 product");
     assert!(
         text.contains("PG01      0.000000      0.000000      0.000000      0.000000"),
         "true zero clock must be preserved:\n{text}"
@@ -2272,7 +2328,7 @@ EOF
         "prediction_summary must include clock-predicted satellites from clock-only records"
     );
 
-    let text = sp3.to_sp3_string();
+    let text = sp3.to_sp3_string().expect("serialize SP3 product");
     let line = text
         .lines()
         .find(|l| l.starts_with("PG01"))
@@ -2318,7 +2374,7 @@ EOF
         .expect("clock_records_at")
         .is_empty());
 
-    let text = sp3.to_sp3_string();
+    let text = sp3.to_sp3_string().expect("serialize SP3 product");
     assert!(
         text.contains("PG01      0.000000      0.000000      0.000000 999999.999999"),
         "missing satellite must re-emit missing sentinel:\n{text}"
@@ -2379,5 +2435,1379 @@ EOF
     assert!(
         matches!(interp_res, Err(Error::UnknownSatellite(sat)) if sat == g02),
         "orbit interpolation must fail for satellite with only clock records; got {interp_res:?}"
+    );
+}
+
+// --- retained header descriptors --------------------------------------------
+
+/// A whole SP3 header record is 60 columns. A fixture that drifts off that
+/// silently moves every field after the drift, so the retention tests below
+/// would be reading the wrong columns and still pass.
+fn assert_header_records_are_60_columns(text: &str) {
+    for line in text.lines() {
+        if line.starts_with("%c") || line.starts_with("%f") || line.starts_with("%i") {
+            assert_eq!(line.len(), 60, "header record is not 60 columns: {line:?}");
+        }
+    }
+}
+
+#[test]
+fn test_header_retention_mixed_g_bases_roundtrip() {
+    let fixture = "\
+#dP2026  9 22  0  0  0.00000000       1 MIXED IGS20 FIT  COD
+## 2437 172800.00000000   900.00000000 61305 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  2.0000000  1.500000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* TEST MIXED G FIXTURE
+*  2026  9 22  0  0  0.00000000
+PG01 -11044.805800 -10475.672350  21929.418200    189.163300
+EOF
+";
+    assert_header_records_are_60_columns(fixture);
+    let sp3 = Sp3::parse(fixture.as_bytes()).expect("parse test fixture");
+    let h = &sp3.header;
+    assert_eq!(h.data_used.as_deref(), Some("MIXED"));
+    assert_eq!(h.file_type.as_deref(), Some("G"));
+    assert_eq!(h.pos_vel_base, Some(2.0));
+    assert_eq!(h.clock_rate_base, Some(1.5));
+    assert_eq!(h.agency, "COD");
+
+    // Round-trip preserves all header retention fields
+    assert_round_trip(&sp3);
+
+    // Exact emitted text checks
+    let emitted = sp3.to_sp3_string().expect("serialize SP3 product");
+    assert_header_records_are_60_columns(&emitted);
+    let l1 = emitted.lines().next().expect("line 1");
+    assert_eq!(
+        l1,
+        "#dP2026  9 22  0  0  0.00000000       1 MIXED IGS20 FIT  COD"
+    );
+    assert_eq!(l1.len(), 60, "line 1 exact width 60");
+
+    let l_pc = emitted
+        .lines()
+        .find(|l| l.starts_with("%c"))
+        .expect("%c line");
+    assert_eq!(
+        l_pc,
+        "%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc"
+    );
+
+    let l_pf = emitted
+        .lines()
+        .find(|l| l.starts_with("%f"))
+        .expect("%f line");
+    assert_eq!(
+        l_pf,
+        "%f  2.0000000  1.500000000  0.00000000000  0.000000000000000"
+    );
+}
+
+#[test]
+fn test_header_retention_merge_preserves_metadata() {
+    let f1 = "\
+#dP2026  9 22  0  0  0.00000000       1 MIXED IGS20 FIT  COD
+## 2437 172800.00000000   900.00000000 61305 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  2.0000000  1.500000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* SOURCE 1
+*  2026  9 22  0  0  0.00000000
+PG01 -11044.805800 -10475.672350  21929.418200    189.163300
+EOF
+";
+    let f2 = "\
+#dP2026  9 22  0  0  0.00000000       1 MIXED IGS20 FIT  GFZ
+## 2437 172800.00000000   900.00000000 61305 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         5  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  2.0000000  1.500000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* SOURCE 2
+*  2026  9 22  0  0  0.00000000
+PG01 -11044.805800 -10475.672350  21929.418200    189.163300
+EOF
+";
+    assert_header_records_are_60_columns(f1);
+    assert_header_records_are_60_columns(f2);
+    let s1 = Sp3::parse(f1.as_bytes()).expect("parse s1");
+    let s2 = Sp3::parse(f2.as_bytes()).expect("parse s2");
+    let (merged, _report) = merge(&[s1, s2], &MergeOptions::default()).expect("merge sources");
+
+    assert_eq!(merged.header.data_used.as_deref(), Some("MIXED"));
+    assert_eq!(merged.header.file_type.as_deref(), Some("G"));
+    assert_eq!(merged.header.pos_vel_base, Some(2.0));
+    assert_eq!(merged.header.clock_rate_base, Some(1.5));
+}
+
+#[test]
+fn test_header_blank_vs_zero_independence() {
+    // Blank descriptors and bases -> None. The `%c` file type (columns 4-5) and
+    // both `%f` bases (columns 4-13 and 15-26) are blank; every other column
+    // keeps its canonical content, so the blanks are what is under test.
+    let blank_fixture = "\
+#cP2020  6 24  0  0  0.00000000       1       IGS14 FIT  TST
+## 2111 432000.00000000   900.00000000 59024 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c    cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f                          0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* BLANK TEST
+*  2020  6 24  0  0  0.00000000
+PG01  15000.000000 -20000.000000   5000.000000    123.456789
+EOF
+";
+    assert_header_records_are_60_columns(blank_fixture);
+    let sp3_blank = Sp3::parse(blank_fixture.as_bytes()).expect("parse blank fixture");
+    assert_eq!(sp3_blank.header.data_used, None);
+    assert_eq!(sp3_blank.header.file_type, None);
+    assert_eq!(sp3_blank.header.pos_vel_base, None);
+    assert_eq!(sp3_blank.header.clock_rate_base, None);
+    assert_round_trip(&sp3_blank);
+
+    // A blank field is written back blank, in its own columns, never as a zero.
+    let blank_text = sp3_blank.to_sp3_string().expect("serialize SP3 product");
+    assert_header_records_are_60_columns(&blank_text);
+    let l_pf = blank_text
+        .lines()
+        .find(|l| l.starts_with("%f"))
+        .expect("%f line");
+    assert_eq!(&l_pf[3..13], "          ", "blank pos/vel base columns");
+    assert_eq!(
+        &l_pf[14..26],
+        "            ",
+        "blank clock/rate base columns"
+    );
+    let re_blank = Sp3::parse(blank_text.as_bytes()).unwrap();
+    assert_eq!(re_blank.header.data_used, None);
+    assert_eq!(re_blank.header.file_type, None);
+    assert_eq!(re_blank.header.pos_vel_base, None);
+    assert_eq!(re_blank.header.clock_rate_base, None);
+
+    // Explicit numeric zero bases -> Some(0.0)
+    let zero_fixture = "\
+#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 432000.00000000   900.00000000 59024 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c M  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* ZERO TEST
+*  2020  6 24  0  0  0.00000000
+PG01  15000.000000 -20000.000000   5000.000000    123.456789
+EOF
+";
+    assert_header_records_are_60_columns(zero_fixture);
+    let sp3_zero = Sp3::parse(zero_fixture.as_bytes()).expect("parse zero fixture");
+    assert_eq!(sp3_zero.header.data_used.as_deref(), Some("ORBIT"));
+    assert_eq!(sp3_zero.header.file_type.as_deref(), Some("M"));
+    assert_eq!(sp3_zero.header.pos_vel_base, Some(0.0));
+    assert_eq!(sp3_zero.header.clock_rate_base, Some(0.0));
+    assert_round_trip(&sp3_zero);
+
+    let zero_text = sp3_zero.to_sp3_string().expect("serialize SP3 product");
+    let re_zero = Sp3::parse(zero_text.as_bytes()).unwrap();
+    assert_eq!(re_zero.header.pos_vel_base, Some(0.0));
+    assert_eq!(re_zero.header.clock_rate_base, Some(0.0));
+}
+
+/// An explicit negative zero is a value the field states, not the absence of
+/// one, and `Some(-0.0) == Some(0.0)` compares equal - so the sign is checked
+/// on its own rather than through the round-trip equality above.
+#[test]
+fn test_header_base_negative_zero_keeps_its_sign() {
+    let fixture = SP3C_FILE
+        .replace(" 1.2500000", "-0.0000000")
+        .replace(" 1.025000000", "-0.000000000");
+    assert_header_records_are_60_columns(&fixture);
+    let sp3 = Sp3::parse(fixture.as_bytes()).expect("negative zero bases parse");
+
+    let pv = sp3.header.pos_vel_base.expect("pos/vel base present");
+    let clk = sp3.header.clock_rate_base.expect("clock/rate base present");
+    assert_eq!(pv, 0.0);
+    assert_eq!(clk, 0.0);
+    assert!(
+        pv.is_sign_negative(),
+        "pos/vel base keeps its negative sign"
+    );
+    assert!(
+        clk.is_sign_negative(),
+        "clock/rate base keeps its negative sign"
+    );
+
+    let text = sp3.to_sp3_string().expect("serialize SP3 product");
+    let l_pf = text.lines().find(|l| l.starts_with("%f")).expect("%f line");
+    assert_eq!(
+        &l_pf[3..13],
+        "-0.0000000",
+        "negative zero is written signed"
+    );
+    assert_eq!(&l_pf[14..26], "-0.000000000");
+
+    let reparsed = Sp3::parse(text.as_bytes()).expect("reparse");
+    let pv = reparsed.header.pos_vel_base.expect("pos/vel base present");
+    let clk = reparsed
+        .header
+        .clock_rate_base
+        .expect("clock/rate base present");
+    assert!(pv.is_sign_negative(), "written text keeps the pos/vel sign");
+    assert!(
+        clk.is_sign_negative(),
+        "written text keeps the clock/rate sign"
+    );
+}
+
+#[test]
+fn test_header_base_malformed_or_non_finite_is_rejected() {
+    // Malformed pos_vel_base is rejected
+    let bad_pv = SP3C_FILE.replace(" 1.2500000", " INVALID_F");
+    assert_parse_error_contains(&bad_pv, "pos_vel_base");
+
+    // Non-finite pos_vel_base (NaN) is rejected
+    let nan_pv = SP3C_FILE.replace(" 1.2500000", "       NaN");
+    assert_parse_error_contains(&nan_pv, "pos_vel_base");
+
+    // Non-finite clock_rate_base (infinity) is rejected
+    let inf_clk = SP3C_FILE.replace(" 1.025000000", "         inf");
+    assert_parse_error_contains(&inf_clk, "clock_rate_base");
+
+    // Malformed clock_rate_base is rejected
+    let bad_clk = SP3C_FILE.replace(" 1.025000000", "  BAD_CLOCK ");
+    assert_parse_error_contains(&bad_clk, "clock_rate_base");
+}
+
+/// A `%f` base finer than the canonical `F10.7` / `F12.9` form still reads back
+/// unambiguously from the bytes the source spent on it, so the reader keeps it.
+/// The writer is what cannot restate it in those columns, and it says so.
+#[test]
+fn test_header_base_finer_than_canonical_field_reads_but_does_not_write() {
+    let fine_pv = SP3C_FILE.replace(" 1.2500000", "1.25000001");
+    assert_header_records_are_60_columns(&fine_pv);
+    let sp3 = Sp3::parse(fine_pv.as_bytes()).expect("a finite value the field states must parse");
+    assert_eq!(
+        sp3.header.pos_vel_base,
+        Some(1.25000001),
+        "the reader keeps the value the source field stated"
+    );
+    assert_eq!(
+        sp3.to_sp3_string(),
+        Err(Sp3WriteError::PrecisionNotRepresentable {
+            field: "pos/vel base",
+            columns: 10,
+            decimals: 7,
+            value: 1.25000001,
+        }),
+        "the canonical F10.7 column cannot restate it, and the writer says so"
+    );
+
+    let fine_clk = SP3C_FILE.replace(" 1.025000000", "1.0250000001");
+    assert_header_records_are_60_columns(&fine_clk);
+    let sp3 = Sp3::parse(fine_clk.as_bytes()).expect("a finite value the field states must parse");
+    assert_eq!(sp3.header.clock_rate_base, Some(1.0250000001));
+    assert_eq!(
+        sp3.to_sp3_string(),
+        Err(Sp3WriteError::PrecisionNotRepresentable {
+            field: "clock/rate base",
+            columns: 12,
+            decimals: 9,
+            value: 1.0250000001,
+        })
+    );
+}
+
+#[test]
+fn test_exact_header_column_spans() {
+    let sp3 = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    let text = sp3.to_sp3_string().expect("serialize SP3 product");
+    let lines: Vec<&str> = text.lines().collect();
+
+    // Line 1: 60 chars, cols 41..45 is "ORBIT", cols 57..60 is " TST"
+    let l1 = lines[0];
+    assert_eq!(l1.len(), 60, "line 1 exact width");
+    assert_eq!(&l1[40..45], "ORBIT", "cols 41..45 Data Used");
+    assert_eq!(&l1[46..51], "IGS14", "cols 47..51 Coordinate System");
+    assert_eq!(&l1[52..55], "FIT", "cols 53..55 Orbit Type");
+    assert_eq!(&l1[56..60], " TST", "cols 57..60 Agency");
+    // The reserved blanks the layout puts between those labels. A label wide
+    // enough to take one would read back truncated from the columns the
+    // specification names, whatever this reader accepts.
+    for column in [40, 46, 52, 56] {
+        assert_eq!(
+            &l1[column - 1..column],
+            " ",
+            "column {column} is reserved blank"
+        );
+    }
+
+    // First %c line: 60 chars, cols 4..5 is "G ", cols 10..12 is "GPS"
+    let l_pc = lines.iter().find(|l| l.starts_with("%c")).unwrap();
+    assert_eq!(l_pc.len(), 60, "%c line 1 exact width");
+    assert_eq!(&l_pc[3..5], "G ", "cols 4..5 File Type");
+    assert_eq!(&l_pc[9..12], "GPS", "cols 10..12 Time System");
+
+    // First %f line: 60 chars, cols 4..13 and 15..26 carry the two bases.
+    let l_pf = lines.iter().find(|l| l.starts_with("%f")).unwrap();
+    assert_eq!(l_pf.len(), 60, "%f line 1 exact width");
+    assert_eq!(&l_pf[3..13], " 1.2500000", "cols 4..13 Pos/Vel base");
+    assert_eq!(&l_pf[14..26], " 1.025000000", "cols 15..26 Clock/Rate base");
+}
+
+// --- writer refusals --------------------------------------------------------
+
+#[test]
+fn test_writer_refuses_header_text_its_columns_cannot_hold() {
+    let base = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+
+    let mut wide = base.clone();
+    wide.header.agency = "AGENCY".to_string();
+    assert_eq!(
+        wide.to_sp3_string(),
+        Err(Sp3WriteError::TextTooWide {
+            field: "agency",
+            columns: 4,
+            value: "AGENCY".to_string(),
+        })
+    );
+
+    let mut wide_descriptor = base.clone();
+    wide_descriptor.header.data_used = Some("TOOWIDE".to_string());
+    assert_eq!(
+        wide_descriptor.to_sp3_string(),
+        Err(Sp3WriteError::TextTooWide {
+            field: "data used",
+            columns: 5,
+            value: "TOOWIDE".to_string(),
+        })
+    );
+
+    // A line break would turn one header record into two, and the second would
+    // be read as whatever its first bytes happen to look like.
+    let mut injected = base.clone();
+    injected.header.orbit_type = "F\nIT".to_string();
+    assert_eq!(
+        injected.to_sp3_string(),
+        Err(Sp3WriteError::TextNotColumnSafe {
+            field: "orbit type",
+            value: "F\nIT".to_string(),
+        })
+    );
+
+    let mut non_ascii = base.clone();
+    non_ascii.comments = vec!["caf\u{e9}".to_string()];
+    assert_eq!(
+        non_ascii.to_sp3_string(),
+        Err(Sp3WriteError::TextNotColumnSafe {
+            field: "comment",
+            value: "caf\u{e9}".to_string(),
+        })
+    );
+
+    let mut long_comment = base;
+    long_comment.comments = vec!["C".repeat(78)];
+    assert_eq!(
+        long_comment.to_sp3_string(),
+        Err(Sp3WriteError::TextTooWide {
+            field: "comment",
+            columns: 77,
+            value: "C".repeat(78),
+        })
+    );
+}
+
+/// `Sp3::parse` keeps a non-finite line-2 value so `validate_exact_sp3` can
+/// report it as a typed integrity failure. It has no fixed-column form, so the
+/// writer reports it rather than emitting a column that reads back as text.
+#[test]
+fn test_writer_refuses_non_finite_header_numbers() {
+    let base = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+
+    let mut nan_sow = base.clone();
+    nan_sow.header.seconds_of_week = f64::NAN;
+    assert_eq!(
+        nan_sow.to_sp3_string(),
+        Err(Sp3WriteError::NonFinite {
+            field: "seconds-of-week",
+        })
+    );
+
+    let mut inf_interval = base;
+    inf_interval.header.epoch_interval_s = f64::INFINITY;
+    assert_eq!(
+        inf_interval.to_sp3_string(),
+        Err(Sp3WriteError::NonFinite {
+            field: "epoch interval",
+        })
+    );
+}
+
+#[test]
+fn test_writer_refuses_values_wider_than_their_columns() {
+    let base = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+
+    let mut wide_week = base.clone();
+    wide_week.header.gnss_week = 12_345;
+    assert_eq!(
+        wide_week.to_sp3_string(),
+        Err(Sp3WriteError::IntegerTooWide {
+            field: "GNSS week",
+            columns: 4,
+            value: 12_345,
+        })
+    );
+
+    // A position no F14.6 column can hold would otherwise push the clock field
+    // out of its own columns and re-read as a different record entirely.
+    let mut far = base;
+    let g01 = id(GnssSystem::Gps, 1);
+    far.states[0]
+        .get_mut(&g01)
+        .expect("G01 has a state at the first epoch")
+        .position
+        .x_m = 1.0e15;
+    assert_eq!(
+        far.to_sp3_string(),
+        Err(Sp3WriteError::RecordValueTooWide {
+            field: "position x",
+            sat: g01,
+            epoch_index: 0,
+            columns: 14,
+            decimals: 6,
+            column_value: 1.0e12,
+        })
+    );
+}
+
+#[test]
+fn test_writer_refuses_a_product_whose_stored_arrays_disagree() {
+    let base = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    let g01 = id(GnssSystem::Gps, 1);
+
+    let mut short_states = base.clone();
+    short_states.states.pop();
+    assert_eq!(
+        short_states.to_sp3_string(),
+        Err(Sp3WriteError::EpochArrayLengthMismatch {
+            field: "satellite states",
+            epochs: 2,
+            entries: 1,
+        })
+    );
+
+    let mut short_codes = base.clone();
+    short_codes.header.satellite_accuracy_codes.pop();
+    assert_eq!(
+        short_codes.to_sp3_string(),
+        Err(Sp3WriteError::AccuracyCodeCountMismatch {
+            satellites: 2,
+            codes: 1,
+        })
+    );
+
+    let mut duplicated = base.clone();
+    duplicated.header.satellites.push(g01);
+    duplicated.header.satellite_accuracy_codes.push(0);
+    assert_eq!(
+        duplicated.to_sp3_string(),
+        Err(Sp3WriteError::DuplicateSatellite { sat: g01 })
+    );
+
+    // Dropping a satellite from the header would drop every record held
+    // against it, silently, at every epoch.
+    let mut undeclared = base.clone();
+    undeclared.header.satellites.remove(0);
+    undeclared.header.satellite_accuracy_codes.remove(0);
+    assert_eq!(
+        undeclared.to_sp3_string(),
+        Err(Sp3WriteError::UndeclaredSatelliteRecord {
+            sat: g01,
+            epoch_index: 0,
+        })
+    );
+
+    // Header line 1 states the product's start epoch; a product with no epoch
+    // has none, and is not given an invented one.
+    // Every per-epoch array goes with the epoch list, and the header's own
+    // count goes with it too, or the product is reported as out of shape before
+    // its emptiness is ever considered. This is the shape `Sp3::parse` gives a
+    // file that carries a header and no epoch records.
+    let mut epochless = base;
+    epochless.header.num_epochs = 0;
+    epochless.epochs.clear();
+    epochless.states.clear();
+    epochless.clock_records.clear();
+    epochless.interp_raw.clear();
+    epochless.epoch_j2000_s.clear();
+    assert_eq!(epochless.to_sp3_string(), Err(Sp3WriteError::NoEpochs));
+}
+
+// --- record values must restate what the product holds ----------------------
+
+/// The value-level round trip, checked in the units the product stores: every
+/// position, velocity, clock, and clock rate a file states comes back from the
+/// writer's text bit for bit, not merely close.
+#[test]
+fn test_record_columns_restate_every_stored_value_bit_for_bit() {
+    for (label, file) in [("SP3-c", SP3C_FILE), ("SP3-d", SP3D_FILE)] {
+        let original = Sp3::parse(file.as_bytes()).expect("parse source SP3");
+        let text = original.to_sp3_string().expect("serialize SP3 product");
+        let reparsed = Sp3::parse(text.as_bytes()).expect("re-parse written SP3");
+
+        for (idx, (states, clocks)) in reparsed
+            .states
+            .iter()
+            .zip(&reparsed.clock_records)
+            .enumerate()
+        {
+            for (sat, state) in states {
+                let before = original.states[idx]
+                    .get(sat)
+                    .unwrap_or_else(|| panic!("{label}: {sat} state at epoch {idx}"));
+                let written = state.position.as_array();
+                let stored = before.position.as_array();
+                for axis in 0..3 {
+                    assert_eq!(
+                        written[axis].to_bits(),
+                        stored[axis].to_bits(),
+                        "{label}: position bits"
+                    );
+                }
+                assert_eq!(
+                    state.clock_s.map(f64::to_bits),
+                    before.clock_s.map(f64::to_bits),
+                    "{label}: clock bits"
+                );
+                assert_eq!(
+                    state.velocity.map(|v| v.as_array().map(f64::to_bits)),
+                    before.velocity.map(|v| v.as_array().map(f64::to_bits)),
+                    "{label}: velocity bits"
+                );
+                assert_eq!(
+                    state.clock_rate_s_s.map(f64::to_bits),
+                    before.clock_rate_s_s.map(f64::to_bits),
+                    "{label}: clock rate bits"
+                );
+            }
+            for (sat, record) in clocks {
+                let before = original.clock_records[idx]
+                    .get(sat)
+                    .unwrap_or_else(|| panic!("{label}: {sat} clock record at epoch {idx}"));
+                assert_eq!(
+                    record.clock_s.to_bits(),
+                    before.clock_s.to_bits(),
+                    "{label}: clock-only seconds bits"
+                );
+                assert_eq!(
+                    record.clock_us.to_bits(),
+                    before.clock_us.to_bits(),
+                    "{label}: clock-only retained microseconds bits"
+                );
+            }
+        }
+    }
+}
+
+/// A record value finer than the millimetre its column states is refused by
+/// name, with the value the product holds in the refusal. The format's limit is
+/// a reason to decline, never a licence to publish a rounded number under a
+/// header that says it is the product.
+#[test]
+fn test_writer_refuses_a_record_value_finer_than_its_column() {
+    let g01 = id(GnssSystem::Gps, 1);
+
+    let mut fine_position = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    // Half a micrometre past the stated millimetre: an F14.6 kilometre column
+    // states 15000.000000, which is a different position.
+    let demanding_m = 15_000_000.000_000_5_f64;
+    fine_position.states[0]
+        .get_mut(&g01)
+        .expect("G01 has a state at the first epoch")
+        .position
+        .x_m = demanding_m;
+    assert_eq!(
+        fine_position.to_sp3_string(),
+        Err(Sp3WriteError::RecordValueNotRepresentable {
+            field: "position x",
+            sat: g01,
+            epoch_index: 0,
+            columns: 14,
+            decimals: 6,
+            stored: demanding_m,
+            column_value: demanding_m / KM_TO_M,
+        }),
+        "a position the column cannot state must be reported, not rounded"
+    );
+
+    let mut fine_clock = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    // A tenth of a picosecond below the column's resolution.
+    let demanding_s = 123.456_789_1e-6_f64;
+    fine_clock.states[0]
+        .get_mut(&g01)
+        .expect("G01 has a state at the first epoch")
+        .clock_s = Some(demanding_s);
+    assert_eq!(
+        fine_clock.to_sp3_string(),
+        Err(Sp3WriteError::RecordValueNotRepresentable {
+            field: "clock",
+            sat: g01,
+            epoch_index: 0,
+            columns: 14,
+            decimals: 6,
+            stored: demanding_s,
+            column_value: demanding_s / US_TO_S,
+        })
+    );
+}
+
+/// A merged value the format cannot state is refused the same way, naming the
+/// cell and the merged number. The merge arithmetic is untouched: the mean of
+/// two millimetre-resolution positions is half a millimetre, and no `F14.6`
+/// kilometre column says that.
+#[test]
+fn test_writer_refuses_a_merged_mean_finer_than_the_record_column() {
+    fn source(x_km: f64) -> Sp3 {
+        let file = format!(
+            "\
+#cP2020  6 24  0  0  0.00000000       1 ORBIT IGS14 FIT  TST
+## 2111 432000.00000000   900.00000000 59024 0.0000000000000
++    1   G01  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+++         0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0
+%c G  cc GPS ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%c cc cc ccc ccc cccc cccc cccc cccc ccccc ccccc ccccc ccccc
+%f  1.2500000  1.025000000  0.00000000000  0.000000000000000
+%f  0.0000000  0.000000000  0.00000000000  0.000000000000000
+%i    0    0    0    0      0      0      0      0         0
+%i    0    0    0    0      0      0      0      0         0
+/* TEST SP3-c FIXTURE
+*  2020  6 24  0  0  0.00000000
+PG01{x_km:14.6} -20000.000000   5000.000000    123.456789
+EOF
+"
+        );
+        Sp3::parse(file.as_bytes()).expect("parse merge source")
+    }
+
+    // One millimetre apart, so the mean sits half a millimetre off the grid.
+    let (merged, _) = merge(
+        &[source(15_000.000_000), source(15_000.000_001)],
+        &MergeOptions {
+            min_agree: 1,
+            ..MergeOptions::default()
+        },
+    )
+    .expect("merge two agreeing sources");
+
+    let g01 = id(GnssSystem::Gps, 1);
+    let mean_m = merged.state(g01, 0).expect("merged G01 state").position.x_m;
+    assert!(
+        mean_m > 15_000_000.0 && mean_m < 15_000_000.001,
+        "the mean must lie strictly between the two sources: {mean_m}"
+    );
+    assert_eq!(
+        merged.to_sp3_string(),
+        Err(Sp3WriteError::RecordValueNotRepresentable {
+            field: "position x",
+            sat: g01,
+            epoch_index: 0,
+            columns: 14,
+            decimals: 6,
+            stored: mean_m,
+            column_value: mean_m / KM_TO_M,
+        }),
+        "a merged mean the column cannot state must be reported by name"
+    );
+}
+
+/// A signed zero is a value the format states, and the writer keeps its sign
+/// through the record column.
+#[test]
+fn test_record_column_keeps_a_negative_zero() {
+    let g01 = id(GnssSystem::Gps, 1);
+    let mut sp3 = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    sp3.states[0]
+        .get_mut(&g01)
+        .expect("G01 has a state at the first epoch")
+        .position
+        .x_m = -0.0;
+
+    let text = sp3.to_sp3_string().expect("serialize SP3 product");
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("PG01"))
+        .expect("PG01 record");
+    assert_eq!(&line[4..18], "     -0.000000", "the sign is written");
+
+    let reparsed = Sp3::parse(text.as_bytes()).expect("re-parse written SP3");
+    let x_m = reparsed.state(g01, 0).expect("G01 state").position.x_m;
+    assert_eq!(x_m.to_bits(), (-0.0_f64).to_bits(), "the sign comes back");
+}
+
+/// The format spells some absences with a value. A stored value that would land
+/// on one of them is refused: it would come back missing, which is not what the
+/// product says.
+#[test]
+fn test_writer_refuses_values_the_format_reads_back_as_absent() {
+    let g01 = id(GnssSystem::Gps, 1);
+
+    let mut geocentre = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    {
+        let state = geocentre.states[0]
+            .get_mut(&g01)
+            .expect("G01 has a state at the first epoch");
+        state.position.x_m = 0.0;
+        state.position.y_m = 0.0;
+        state.position.z_m = 0.0;
+    }
+    assert_eq!(
+        geocentre.to_sp3_string(),
+        Err(Sp3WriteError::RecordReadsAsAbsent {
+            field: "position",
+            sat: g01,
+            epoch_index: 0,
+            column_value: 0.0,
+        }),
+        "an all-zero position is the missing-orbit sentinel, not a position"
+    );
+
+    let mut big_clock = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    // One second of clock offset is 1e6 microseconds, past the bad-clock
+    // sentinel the reader treats as "no estimate".
+    big_clock.states[0]
+        .get_mut(&g01)
+        .expect("G01 has a state at the first epoch")
+        .clock_s = Some(1.0);
+    assert_eq!(
+        big_clock.to_sp3_string(),
+        Err(Sp3WriteError::RecordReadsAsAbsent {
+            field: "clock",
+            sat: g01,
+            epoch_index: 0,
+            column_value: 1.0 / US_TO_S,
+        })
+    );
+
+    let g05 = id(GnssSystem::Gps, 5);
+    let mut still = Sp3::parse(SP3D_FILE.as_bytes()).unwrap();
+    {
+        let state = still.states[0]
+            .get_mut(&g05)
+            .expect("G05 has a state at the first epoch");
+        let mut velocity = state.velocity.expect("SP3-d fixture carries velocities");
+        velocity.vx_m_s = 0.0;
+        velocity.vy_m_s = 0.0;
+        velocity.vz_m_s = 0.0;
+        state.velocity = Some(velocity);
+    }
+    assert_eq!(
+        still.to_sp3_string(),
+        Err(Sp3WriteError::RecordReadsAsAbsent {
+            field: "velocity",
+            sat: g05,
+            epoch_index: 0,
+            column_value: 0.0,
+        }),
+        "an all-zero velocity vector is the missing-velocity sentinel"
+    );
+}
+
+/// A position product declares no `V` records, so a velocity or clock rate
+/// stored in one has no column to be written into.
+#[test]
+fn test_writer_refuses_velocity_state_in_a_position_product() {
+    let g01 = id(GnssSystem::Gps, 1);
+
+    let mut with_velocity = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    with_velocity.states[0]
+        .get_mut(&g01)
+        .expect("G01 has a state at the first epoch")
+        .velocity = Some(ItrfVelocityMS::new(1.0, 2.0, 3.0).expect("finite velocity"));
+    assert_eq!(
+        with_velocity.to_sp3_string(),
+        Err(Sp3WriteError::VelocityStateInPositionProduct {
+            field: "velocity",
+            sat: g01,
+            epoch_index: 0,
+        })
+    );
+
+    let mut with_rate = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    with_rate.states[0]
+        .get_mut(&g01)
+        .expect("G01 has a state at the first epoch")
+        .clock_rate_s_s = Some(1.0e-12);
+    assert_eq!(
+        with_rate.to_sp3_string(),
+        Err(Sp3WriteError::VelocityStateInPositionProduct {
+            field: "clock rate",
+            sat: g01,
+            epoch_index: 0,
+        })
+    );
+}
+
+/// One `P` record states an orbit or the missing-orbit sentinel with a clock,
+/// never both, so a satellite holding a state and a clock-only record at one
+/// epoch cannot be written without dropping one of them.
+#[test]
+fn test_writer_refuses_a_state_and_clock_record_for_one_cell() {
+    let g01 = id(GnssSystem::Gps, 1);
+    let mut sp3 = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    sp3.clock_records[0].insert(
+        g01,
+        Sp3ClockRecord {
+            clock_s: 100.0 * US_TO_S,
+            clock_us: 100.0,
+            velocity: None,
+            clock_rate_s_s: None,
+            clock_rate_raw: None,
+            flags: Sp3Flags::default(),
+        },
+    );
+    assert_eq!(
+        sp3.to_sp3_string(),
+        Err(Sp3WriteError::ConflictingRecords {
+            sat: g01,
+            epoch_index: 0,
+        })
+    );
+}
+
+/// A clock-only record keeps the microseconds it was read from, and that is
+/// what its column carries: the round trip is exact in the native unit, not
+/// only in seconds.
+#[test]
+fn test_clock_only_record_writes_its_retained_microseconds() {
+    let g02 = id(GnssSystem::Gps, 2);
+    let sp3 = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    let record = sp3
+        .clock_record(g02, 1)
+        .expect("G02 is a clock-only record at the second epoch");
+    assert_eq!(record.clock_us, 100.0);
+
+    let text = sp3.to_sp3_string().expect("serialize SP3 product");
+    let reparsed = Sp3::parse(text.as_bytes()).expect("re-parse written SP3");
+    let written = reparsed
+        .clock_record(g02, 1)
+        .expect("the clock-only record survives the round trip");
+    assert_eq!(
+        written.clock_us.to_bits(),
+        record.clock_us.to_bits(),
+        "retained microseconds are written back unchanged"
+    );
+    assert_eq!(written.clock_s.to_bits(), record.clock_s.to_bits());
+}
+
+/// A retained native value with no value in the product's own units beside it
+/// has no column: writing it would give the reader a rate the product does not
+/// hold.
+#[test]
+fn test_writer_refuses_a_native_rate_with_no_stored_rate() {
+    let c30 = id(GnssSystem::BeiDou, 30);
+    let mut sp3 = Sp3::parse(SP3D_FILE.as_bytes()).unwrap();
+    sp3.states[0].remove(&c30).expect("C30 state");
+    sp3.clock_records[0].insert(
+        c30,
+        Sp3ClockRecord {
+            clock_s: 100.0 * US_TO_S,
+            clock_us: 100.0,
+            velocity: None,
+            clock_rate_s_s: None,
+            clock_rate_raw: Some(1.0),
+            flags: Sp3Flags::default(),
+        },
+    );
+    assert_eq!(
+        sp3.to_sp3_string(),
+        Err(Sp3WriteError::RecordFieldsDisagree {
+            field: "clock rate",
+            sat: c30,
+            epoch_index: 0,
+            stored: None,
+            native: Some(1.0),
+        })
+    );
+}
+
+// --- epochs and header fields the writer would otherwise derive away --------
+
+/// The epoch records carry no time scale of their own, so an epoch tagged with
+/// a scale the header does not state cannot be written as itself.
+#[test]
+fn test_writer_refuses_an_epoch_in_another_time_scale() {
+    let mut sp3 = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    sp3.epochs[1].scale = TimeScale::Tai;
+    assert_eq!(
+        sp3.to_sp3_string(),
+        Err(Sp3WriteError::EpochTimeScaleMismatch {
+            epoch_index: 1,
+            epoch_scale: TimeScale::Tai,
+            header_scale: TimeScale::Gpst,
+        })
+    );
+}
+
+/// The day fraction an epoch is stored in, for a test that means to move one.
+fn epoch_fraction(epoch: &Instant) -> f64 {
+    match epoch.repr {
+        InstantRepr::JulianDate(split) => split.fraction,
+        InstantRepr::Nanos(_) => panic!("the SP3 parser stores epochs as split Julian dates"),
+    }
+}
+
+/// Replace the day fraction of an epoch, leaving its day boundary alone.
+fn set_epoch_fraction(epoch: &mut Instant, fraction: f64) {
+    let InstantRepr::JulianDate(split) = &mut epoch.repr else {
+        panic!("the SP3 parser stores epochs as split Julian dates");
+    };
+    *split = JulianDateSplit::new(split.jd_whole, fraction).expect("a finite day fraction");
+}
+
+/// Replace the whole split an epoch is stored as, boundary and residual both.
+fn set_epoch_split(epoch: &mut Instant, jd_whole: f64, fraction: f64) {
+    let InstantRepr::JulianDate(split) = &mut epoch.repr else {
+        panic!("the SP3 parser stores epochs as split Julian dates");
+    };
+    *split = JulianDateSplit::new(jd_whole, fraction).expect("a finite split Julian date");
+}
+
+/// The last-place residual the tick count of a day fraction leaves behind.
+///
+/// This is the quantity a numerical tolerance on the epoch grid would have to
+/// judge: `fraction * 86400 * 1e8` for an epoch a record states exactly is a
+/// whole number only in exact arithmetic.
+fn epoch_tick_residual(fraction: f64) -> f64 {
+    let ticks = fraction * crate::constants::SECONDS_PER_DAY * 1.0e8;
+    ticks - ticks.round()
+}
+
+/// An epoch is written only when its record restates the instant the product
+/// holds. Nothing here is a tolerance, and it cannot be one: the stored
+/// fraction `f64::from_bits(0.5f64.to_bits() + 1)` is nine picoseconds past
+/// noon and leaves *exactly* the tick residual an ordinary parsed epoch eleven
+/// seconds after J2000 leaves (see
+/// `test_writer_preserves_a_parsed_epoch_whose_tick_count_is_not_whole`), yet
+/// one must be refused and the other must be written. Only reading the record
+/// back separates them.
+#[test]
+fn test_writer_refuses_an_epoch_whose_record_would_state_another_instant() {
+    // The control: a fraction of exactly one half is noon, and noon is a time
+    // the record states. This is what the refusal below must not sweep up.
+    let mut noon = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    set_epoch_fraction(&mut noon.epochs[1], 0.5);
+    let text = noon
+        .to_sp3_string()
+        .expect("an epoch at noon is an epoch the record states");
+    assert!(
+        text.contains("*  2020  6 24 12  0  0.00000000"),
+        "the epoch at exactly noon is written as noon:\n{text}"
+    );
+    let reparsed = Sp3::parse(text.as_bytes()).expect("the written product reparses");
+    assert_eq!(
+        reparsed.epochs, noon.epochs,
+        "a written epoch comes back as the instant it was"
+    );
+
+    // One unit in the last place above that fraction is a different instant.
+    // The old grid bound put its tick residual (0.00048828125 ticks) far inside
+    // a 0.06-tick slack, so the record was written as plain noon and the bit
+    // was gone; the epoch it came back as was not the epoch the product held.
+    let perturbed = f64::from_bits(0.5f64.to_bits() + 1);
+    let mut moved = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    set_epoch_fraction(&mut moved.epochs[1], perturbed);
+    let refusal = moved
+        .to_sp3_string()
+        .expect_err("an epoch no record states must be refused, not rounded onto one");
+    let Sp3WriteError::EpochNotRestatable {
+        epoch_index,
+        field_seconds,
+        residual_s,
+    } = refusal
+    else {
+        panic!("expected an unrestatable-epoch refusal; got {refusal:?}");
+    };
+    assert_eq!(epoch_index, 1);
+    assert_eq!(
+        field_seconds, 0.0,
+        "the record the writer declined to emit would have stated noon"
+    );
+    assert_eq!(
+        residual_s,
+        (perturbed - 0.5) * crate::constants::SECONDS_PER_DAY,
+        "the refusal states the whole of the offset, 9.6 ps, not a rounded view of it"
+    );
+    assert!(
+        residual_s > 0.0 && residual_s < 1.0e-11,
+        "the epoch that was erased sat picoseconds from the record: {residual_s}"
+    );
+
+    // And the tick residual - the only quantity a numerical grid bound can see -
+    // is the *same size* for this refused epoch as for an epoch that has to be
+    // written. No bound on it, however tight, could have told the two apart.
+    let legitimate = Sp3::parse(SP3C_FRACTIONAL_EPOCH_FILE.as_bytes()).unwrap();
+    legitimate
+        .to_sp3_string()
+        .expect("a parsed epoch writes back");
+    assert_eq!(
+        epoch_tick_residual(perturbed).abs(),
+        epoch_tick_residual(epoch_fraction(&legitimate.epochs[0])).abs(),
+        "the refused epoch and a required one leave the same tick residual"
+    );
+}
+
+/// An ordinary epoch read from a file writes back exactly, tick residual and
+/// all. J2000 plus eleven seconds is the case that proves the readback did not
+/// tighten anything it should not have: its fraction scales to
+/// 4321099999999.9995 ticks, half a thousandth of a tick short of whole, the
+/// same distance the refused epoch above sits on the other side.
+#[test]
+fn test_writer_preserves_a_parsed_epoch_whose_tick_count_is_not_whole() {
+    let sp3 = Sp3::parse(SP3C_FRACTIONAL_EPOCH_FILE.as_bytes()).unwrap();
+    assert_ne!(
+        epoch_tick_residual(epoch_fraction(&sp3.epochs[0])),
+        0.0,
+        "this fixture is only worth anything if its tick count is not whole"
+    );
+
+    let text = sp3
+        .to_sp3_string()
+        .expect("every epoch the parser produces writes back");
+    assert!(
+        text.contains("*  2000  1  1 12  0 11.00000000"),
+        "the parsed epoch is restated as the clock fields it was read from:\n{text}"
+    );
+    assert!(
+        text.contains("*  2000  1  1 12 15 11.00000000"),
+        "and so is the second one:\n{text}"
+    );
+    assert!(
+        text.starts_with("#cP2000  1  1 12  0 11.00000000"),
+        "header line 1 states the first epoch, on the same terms:\n{text}"
+    );
+
+    let reparsed = Sp3::parse(text.as_bytes()).expect("the written product reparses");
+    assert_eq!(
+        reparsed.epochs, sp3.epochs,
+        "the epochs come back as the same split Julian dates, bit for bit"
+    );
+}
+
+/// An epoch whose split does not carry its day on the `*.5` midnight boundary
+/// is still an epoch a record states, and it is written.
+///
+/// `JulianDateSplit::new` accepts any finite `jd_whole` with a residual inside
+/// one day, and `Sp3::epochs` is public, so a product can hold noon as
+/// `(2451545.0, 0.0)` - the J2000 instant as the astronomy path states it - or
+/// six in the evening as `(2451545.25, 0.0)`. Both land on whole ticks of the
+/// record's own grid. Taking the date from `jd_whole` alone rounds each onto
+/// the *following* midnight and offers a record a day off the instant, which
+/// the readback then refuses: a refusal of a perfectly writable epoch rather
+/// than a report of anything wrong with the product.
+#[test]
+fn test_writer_writes_an_epoch_held_off_the_midnight_boundary() {
+    let mut sp3 = Sp3::parse(SP3C_FRACTIONAL_EPOCH_FILE.as_bytes()).unwrap();
+    // 2000-01-01 12:00 and 18:00, held on a whole and on a quarter Julian day.
+    set_epoch_split(&mut sp3.epochs[0], 2_451_545.0, 0.0);
+    set_epoch_split(&mut sp3.epochs[1], 2_451_545.25, 0.0);
+
+    let text = sp3
+        .to_sp3_string()
+        .expect("an epoch on a whole or quarter Julian day is an epoch the record states");
+    assert!(
+        text.contains("*  2000  1  1 12  0  0.00000000\n"),
+        "Julian day 2451545.0 is noon on 2000-01-01, not midnight on the 2nd:\n{text}"
+    );
+    assert!(
+        text.contains("*  2000  1  1 18  0  0.00000000\n"),
+        "a quarter day past it is 18:00 the same day:\n{text}"
+    );
+    assert!(
+        text.starts_with("#cP2000  1  1 12  0  0.00000000"),
+        "header line 1 states the first epoch on the same terms:\n{text}"
+    );
+
+    let reparsed = Sp3::parse(text.as_bytes()).expect("the written product reparses");
+    for (index, stated_jd) in [(0, 2_451_545.0), (1, 2_451_545.25)] {
+        let InstantRepr::JulianDate(split) = reparsed.epochs[index].repr else {
+            panic!("the SP3 parser stores epochs as split Julian dates");
+        };
+        assert_eq!(
+            split.jd_whole + split.fraction,
+            stated_jd,
+            "the epoch comes back as the instant it was, on the parser's own boundary"
+        );
+    }
+}
+
+/// Two splits that divide one instant differently are one epoch, and the writer
+/// states them as the same file - byte for byte, including the divisions that
+/// put a whole day of residual on either side of the boundary.
+///
+/// `exact_instant` is what lets the readback see such a pair as one instant.
+/// The date the candidate record states has to be derived on the same terms, or
+/// the comparison would be judging a record against an instant it was never
+/// offered a statement of.
+#[test]
+fn test_writer_states_every_division_of_one_instant_identically() {
+    // The same two instants - 2000-01-01 12:00 and 18:00 - divided three ways:
+    // on the whole and quarter Julian day, on the `*.5` midnight boundary the
+    // parser itself builds, and with a whole day of residual either side of it.
+    let divisions = [
+        [(2_451_545.0, 0.0), (2_451_545.25, 0.0)],
+        [(2_451_544.5, 0.5), (2_451_545.5, -0.25)],
+        [(2_451_546.0, -1.0), (2_451_544.25, 1.0)],
+    ];
+    let written: Vec<String> = divisions
+        .iter()
+        .map(|division| {
+            let mut sp3 = Sp3::parse(SP3C_FRACTIONAL_EPOCH_FILE.as_bytes()).unwrap();
+            for (index, (jd_whole, fraction)) in division.iter().enumerate() {
+                set_epoch_split(&mut sp3.epochs[index], *jd_whole, *fraction);
+            }
+            sp3.to_sp3_string()
+                .expect("every division of a stated instant writes")
+        })
+        .collect();
+
+    for text in &written[1..] {
+        assert_eq!(
+            text, &written[0],
+            "a different division of the same two instants must write the same file"
+        );
+    }
+    assert!(
+        written[0].contains("*  2000  1  1 12  0  0.00000000\n")
+            && written[0].contains("*  2000  1  1 18  0  0.00000000\n"),
+        "and it is the file those two instants state:\n{}",
+        written[0]
+    );
+}
+
+/// A day added to every epoch on its day *boundary* is exact arithmetic, and
+/// the shifted product writes and reparses unchanged. A day added through the
+/// day *fraction* is not exact - it costs the fraction its low bits - and the
+/// product that results holds epochs no record states. The writer says which
+/// of the two it was given rather than writing both.
+#[test]
+fn test_writer_day_shift_is_written_when_it_is_exact_and_refused_when_it_is_not() {
+    let mut next_day = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    for epoch in &mut next_day.epochs {
+        let InstantRepr::JulianDate(split) = &mut epoch.repr else {
+            panic!("the SP3 parser stores epochs as split Julian dates");
+        };
+        // `jd_whole` is an integer day number less a half; adding one to it is
+        // exact at every Julian date a four-digit year can hold, and the day
+        // fraction - the within-day clock - is untouched.
+        *split = JulianDateSplit::new(split.jd_whole + 1.0, split.fraction).expect("shifted split");
+    }
+    let text = next_day
+        .to_sp3_string()
+        .expect("a day-shifted product whose epochs are still stated writes");
+    assert!(
+        text.contains("*  2020  6 25  0  0  0.00000000"),
+        "the shifted epoch keeps its civil time:\n{text}"
+    );
+    assert!(
+        text.contains("*  2020  6 25  0 15  0.00000000"),
+        "including the one that is not midnight:\n{text}"
+    );
+    let reparsed = Sp3::parse(text.as_bytes()).expect("the written product reparses");
+    assert_eq!(
+        reparsed.epochs, next_day.epochs,
+        "an exactly shifted epoch survives the round trip bit for bit"
+    );
+
+    // The same day, added as 86400 seconds of day fraction. The first epoch is
+    // at midnight, where the carry is exact and the record still states it; the
+    // second is at 00:15, where adding one to the fraction and taking it back
+    // out costs seven bits and moves the epoch 6.4 picoseconds.
+    let mut drifted = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    for epoch in &mut drifted.epochs {
+        let InstantRepr::JulianDate(split) = &mut epoch.repr else {
+            panic!("the SP3 parser stores epochs as split Julian dates");
+        };
+        let (jd_whole, fraction) = crate::astro::time::civil::split_julian_date_add_seconds(
+            split.jd_whole,
+            split.fraction,
+            crate::constants::SECONDS_PER_DAY,
+        );
+        *split = JulianDateSplit::new(jd_whole, fraction).expect("shifted split");
+    }
+    let refusal = drifted
+        .to_sp3_string()
+        .expect_err("an epoch the shift moved off every record is refused");
+    let Sp3WriteError::EpochNotRestatable {
+        epoch_index,
+        field_seconds,
+        residual_s,
+    } = refusal
+    else {
+        panic!("expected an unrestatable-epoch refusal; got {refusal:?}");
+    };
+    assert_eq!(
+        epoch_index, 1,
+        "the midnight epoch shifted exactly; the 00:15 one did not"
+    );
+    assert_eq!(field_seconds, 0.0, "00:15:00 is the record it would state");
+    assert!(
+        residual_s != 0.0 && residual_s.abs() < 1.0e-11,
+        "the refusal measures the picoseconds the shift cost: {residual_s}"
+    );
+}
+
+/// Header fields the writer forms from the body must already say what the body
+/// says, or the product's own statement would be the one that is dropped.
+#[test]
+fn test_writer_refuses_header_fields_that_disagree_with_the_product() {
+    let mut count = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    count.header.num_epochs = 7;
+    assert_eq!(
+        count.to_sp3_string(),
+        Err(Sp3WriteError::EpochCountMismatch {
+            declared: 7,
+            epochs: 2,
+        })
+    );
+
+    let mut scale = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    scale.header.time_scale = TimeScale::Tai;
+    assert_eq!(
+        scale.to_sp3_string(),
+        Err(Sp3WriteError::HeaderTimeScaleMismatch {
+            time_system: Sp3TimeSystem::Gps,
+            time_scale: TimeScale::Tai,
+        })
+    );
+}
+
+/// The reader spells an absent descriptor with blank columns and trims the
+/// labels it reads, so text that depends on either would not come back.
+#[test]
+fn test_writer_refuses_text_the_reader_would_not_return() {
+    let mut blank = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    blank.header.data_used = Some(String::new());
+    assert_eq!(
+        blank.to_sp3_string(),
+        Err(Sp3WriteError::BlankDescriptor {
+            field: "data used",
+            value: String::new(),
+        }),
+        "Some(\"\") is not the same statement as None"
+    );
+
+    let mut padded = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    padded.header.agency = " TST".to_string();
+    assert_eq!(
+        padded.to_sp3_string(),
+        Err(Sp3WriteError::TextNotColumnStable {
+            field: "agency",
+            value: " TST".to_string(),
+        })
+    );
+
+    let mut empty_comment = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    empty_comment.comments = vec![String::new()];
+    assert_eq!(
+        empty_comment.to_sp3_string(),
+        Err(Sp3WriteError::EmptyComment {
+            index: 0,
+            value: String::new(),
+        })
+    );
+
+    let mut trailing_comment = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    trailing_comment.comments = vec!["MERGED ".to_string()];
+    assert_eq!(
+        trailing_comment.to_sp3_string(),
+        Err(Sp3WriteError::TextNotColumnStable {
+            field: "comment",
+            value: "MERGED ".to_string(),
+        })
+    );
+}
+
+/// The columns the layout reserves as blanks are not spare width for the label
+/// beside them. This reader accepts a label that takes one, because it reads
+/// from the separator onwards; a reader indexing the specified columns returns
+/// a truncated label, so the writer declines to produce one.
+#[test]
+fn test_writer_refuses_labels_that_would_take_a_reserved_column() {
+    let mut wide_frame = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    wide_frame.header.coordinate_system = "IGS14X".to_string();
+    assert_eq!(
+        wide_frame.to_sp3_string(),
+        Err(Sp3WriteError::TextTooWide {
+            field: "coordinate system",
+            columns: 5,
+            value: "IGS14X".to_string(),
+        })
+    );
+
+    let mut wide_orbit = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    wide_orbit.header.orbit_type = "FITX".to_string();
+    assert_eq!(
+        wide_orbit.to_sp3_string(),
+        Err(Sp3WriteError::TextTooWide {
+            field: "orbit type",
+            columns: 3,
+            value: "FITX".to_string(),
+        })
+    );
+}
+
+/// Two values this writer has no record for: a record field that is not a
+/// number, and an epoch held as a count of nanoseconds.
+///
+/// The second is a limit of the SP3 writer's contract rather than of the
+/// instant. An integer-nanosecond count is exact and core reads one against the
+/// J2000 origin elsewhere, but `InstantRepr::Nanos` names no origin of its own
+/// and SP3's own node axis declines the conversion for exactly that reason, so
+/// the writer refuses by name instead of choosing one here.
+#[test]
+fn test_writer_refuses_record_and_epoch_values_with_no_written_form() {
+    let g01 = id(GnssSystem::Gps, 1);
+
+    let mut not_a_number = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    not_a_number.states[0]
+        .get_mut(&g01)
+        .expect("G01 has a state at the first epoch")
+        .position
+        .y_m = f64::NAN;
+    assert_eq!(
+        not_a_number.to_sp3_string(),
+        Err(Sp3WriteError::RecordValueNonFinite {
+            field: "position y",
+            sat: g01,
+            epoch_index: 0,
+        })
+    );
+
+    let mut counted_in_nanos = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    counted_in_nanos.epochs[1].repr = InstantRepr::Nanos(0);
+    assert_eq!(
+        counted_in_nanos.to_sp3_string(),
+        Err(Sp3WriteError::EpochRepresentationUnsupported { epoch_index: 1 })
     );
 }

@@ -137,7 +137,10 @@ fn the_post_condition_reports_without_refusing_the_merge() {
 
     assert!(!report.continuity.expect("requested").attested());
     assert!(
-        !merged.to_sp3_string().is_empty(),
+        !merged
+            .to_sp3_string()
+            .expect("serialize SP3 product")
+            .is_empty(),
         "the product is returned alongside its defects"
     );
 }
@@ -155,8 +158,8 @@ fn the_post_condition_is_absent_and_the_product_unchanged_when_not_requested() {
     assert!(without_report.continuity.is_none());
     assert!(with_report.continuity.is_some());
     assert_eq!(
-        with.to_sp3_string(),
-        without.to_sp3_string(),
+        with.to_sp3_string().expect("serialize SP3 product"),
+        without.to_sp3_string().expect("serialize SP3 product"),
         "verifying continuity must not change one byte of the merged product"
     );
 }

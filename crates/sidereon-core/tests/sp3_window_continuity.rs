@@ -10,11 +10,11 @@
 //! Verified with `shasum -a 256` on 2026-08-21.
 //!
 //! No consecutive daily pair is committed. Only the seam-injection test makes
-//! a second day: it clones the real product, advances every public epoch and
-//! line-2 day field by 86,400 seconds, serializes through [`Sp3::to_sp3_string`],
-//! and reparses it. No derived file is treated as an external continuity oracle.
+//! a second day: it clones the real product, moves every public epoch to the
+//! next civil day by adding one to its whole-day boundary, advances the line-2
+//! day fields by the same day, serializes through [`Sp3::to_sp3_string`], and
+//! reparses it. No derived file is treated as an external continuity oracle.
 
-use sidereon_core::astro::time::civil::split_julian_date_add_seconds;
 use sidereon_core::astro::time::model::{InstantRepr, JulianDateSplit};
 use sidereon_core::ephemeris::{
     check_continuity, merge, ContinuityDefect, ContinuityOptions, ContinuityReport, EpochWindow,
@@ -35,10 +35,15 @@ fn writer_derived_next_day(product: &Sp3) -> Sp3 {
     let mut shifted = product.clone();
     for epoch in &mut shifted.epochs {
         match &mut epoch.repr {
+            // Exactly the next civil day: one day added to the whole-day
+            // boundary, the within-day fraction untouched. Adding the same day
+            // as 86,400 seconds of *fraction* would carry through the fraction
+            // and cost it low bits, moving each epoch by picoseconds onto an
+            // instant no epoch record states - which the writer then refuses,
+            // rather than a seam one day on from the real product.
             InstantRepr::JulianDate(split) => {
-                let (jd_whole, fraction) =
-                    split_julian_date_add_seconds(split.jd_whole, split.fraction, DAY_S);
-                *split = JulianDateSplit::new(jd_whole, fraction).expect("shifted split epoch");
+                *split = JulianDateSplit::new(split.jd_whole + 1.0, split.fraction)
+                    .expect("shifted split epoch");
             }
             InstantRepr::Nanos(nanos) => *nanos += 86_400_000_000_000_i128,
         }
@@ -50,7 +55,8 @@ fn writer_derived_next_day(product: &Sp3) -> Sp3 {
     }
     shifted.header.mjd += 1;
 
-    Sp3::parse(shifted.to_sp3_string().as_bytes()).expect("reparse writer-derived next day")
+    let text = shifted.to_sp3_string().expect("serialize SP3 product");
+    Sp3::parse(text.as_bytes()).expect("reparse writer-derived next day")
 }
 
 fn precedence_options() -> MergeOptions {

@@ -3183,33 +3183,77 @@ mod tests {
                 "union coverage",
                 vec![union_a, union_b],
                 MergeOptions::default(),
-                "f4ae5c18581e9d5805085f62525d1c912590cd41297bfdc0eb6322b8e48ad598",
+                "6462f7f385f8141cc728c152a0c90276cae3727f3031482a95781ea6665f8d28",
             ),
             (
                 "mean consensus",
                 vec![mean_a, mean_b, mean_c],
                 mean_options,
-                "c4080215254a49dd4800348bc1d064e36e2da7a79dd499671588ae54566152a8",
+                "9fd9021f4262ea0303984974fa26f4fdb132bc7ffec4ac06ecf1e2a735eafe40",
             ),
             (
                 "guarded precedence",
                 vec![preferred, agreeing, outlier],
                 guarded_precedence_options,
-                "5fc60fe118f462faae9f3d25b579ae4917ee97796a79cf3737aaf8d21a6a7507",
+                "e3f498d13e3fadbf3d3e8b029417a8f45ca4efd19778e7b0bcef2218f281f960",
             ),
             (
                 "mixed cadence union",
                 vec![mixed_a, mixed_b],
                 mixed_options,
-                "b18983adea82b57990a1bdfe88b4816e593472775b395ec611654894a9f54cdd",
+                "0923299915c137218a2ab5c8648425a5952f42d8e06734e5d3caa5beae1b5c1d",
             ),
         ];
 
+        // Each synthetic case is still an exact-byte comparison, but the four
+        // comparisons are made together below rather than one at a time inside
+        // the loop. Asserting per case stopped the loop at the first stale
+        // golden, so a regeneration only ever learned one hash per run and the
+        // remaining cases had not been merged at all; collecting them first
+        // means one failure reports every case's actual hash beside the value
+        // frozen for it.
+        let mut frozen_hashes: Vec<(&str, String, &str)> = Vec::new();
+
         for (name, sources, options, expected) in cases {
             let (merged, _) = merge(&sources, &options).expect("frozen merge case");
-            let actual = sha256_hex(merged.to_sp3_string().as_bytes());
-            assert_eq!(actual, expected, "{name}");
+            let text = merged.to_sp3_string().expect("serialize SP3 product");
+            // The bytes under these hashes now carry header descriptors the
+            // reader retains and the writer states back, where it used to write
+            // constants of its own: the data-used field, the `%c` file type and
+            // the two `%f` bases all come from the base source, and the agency
+            // sits in the four columns the layout gives it rather than starting
+            // one column early. Pinning those columns here is what makes a hash
+            // regeneration reviewable - a new hash has to be this content.
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(&lines[0][40..45], "ORBIT", "{name}: data used");
+            assert_eq!(&lines[0][56..60], " TST", "{name}: agency columns 57-60");
+            let pc = lines
+                .iter()
+                .find(|line| line.starts_with("%c"))
+                .expect("first %c line");
+            assert_eq!(&pc[3..5], "G ", "{name}: %c file type");
+            let pf = lines
+                .iter()
+                .find(|line| line.starts_with("%f"))
+                .expect("first %f line");
+            assert_eq!(&pf[3..13], " 1.2500000", "{name}: %f pos/vel base");
+            assert_eq!(&pf[14..26], " 1.025000000", "{name}: %f clock/rate base");
+
+            frozen_hashes.push((name, sha256_hex(text.as_bytes()), expected));
         }
+
+        let actual_hashes: Vec<(&str, &str)> = frozen_hashes
+            .iter()
+            .map(|(name, actual, _)| (*name, actual.as_str()))
+            .collect();
+        let expected_hashes: Vec<(&str, &str)> = frozen_hashes
+            .iter()
+            .map(|(name, _, expected)| (*name, *expected))
+            .collect();
+        assert_eq!(
+            actual_hashes, expected_hashes,
+            "frozen synthetic merge output hashes"
+        );
 
         #[cfg(sidereon_repo_tests)]
         {
@@ -3225,10 +3269,125 @@ mod tests {
                 load("JPL0OPSFIN_20261200945_02H30M_15M_ORB_trim.SP3"),
             ];
             let (merged, _) = merge(&sources, &MergeOptions::default()).expect("real frozen merge");
+
+            // This case froze the bytes of a *mean-combined* merge, which meant
+            // freezing numbers the format cannot state: the default combine
+            // averages the agreeing centers, and the mean of millimetre-
+            // resolution positions is not a millimetre. The writer now reports
+            // that by name instead of rounding it away, so what is asserted
+            // here is the refusal and the value behind it. A byte golden for
+            // real data needs a merge whose values SP3 can state - precedence,
+            // which keeps each contributor's own numbers.
+            let refusal = merged
+                .to_sp3_string()
+                .expect_err("a mean-combined merge is finer than the record columns");
+            let crate::sp3::Sp3WriteError::RecordValueNotRepresentable {
+                field,
+                sat,
+                epoch_index,
+                stored,
+                column_value,
+                ..
+            } = refusal
+            else {
+                panic!("expected a record-value refusal; got {refusal:?}");
+            };
+
+            // The refusal names a value the merged product really holds ...
+            let (held, scale) = match merged.state(sat, epoch_index) {
+                Ok(state) => match field {
+                    "position x" => (state.position.x_m, crate::constants::KM_TO_M),
+                    "position y" => (state.position.y_m, crate::constants::KM_TO_M),
+                    "position z" => (state.position.z_m, crate::constants::KM_TO_M),
+                    "clock" => (
+                        state.clock_s.expect("a refused clock column holds a clock"),
+                        crate::constants::US_TO_S,
+                    ),
+                    other => panic!("unexpected refused record field {other:?}"),
+                },
+                Err(_) => {
+                    // A cell with no orbit is a clock-only record, which has
+                    // only the one column.
+                    assert_eq!(field, "clock", "a clock-only record has one column");
+                    let record = merged
+                        .clock_record(sat, epoch_index)
+                        .expect("the refused cell holds a record");
+                    (record.clock_s, crate::constants::US_TO_S)
+                }
+            };
             assert_eq!(
-                sha256_hex(merged.to_sp3_string().as_bytes()),
-                "850c10dfc9b3394bc72d6c3bcd96634310b8d654a9908ed068b7fe165d224442",
-                "real three-center merge"
+                held.to_bits(),
+                stored.to_bits(),
+                "the refusal states the value the product holds"
+            );
+            // ... and a column that really cannot state it: read the column
+            // back the way the parser does and the value does not return.
+            let read: f64 = format!("{column_value:.6}")
+                .parse()
+                .expect("a formatted column re-reads as a number");
+            assert_ne!(
+                (read * scale).to_bits(),
+                stored.to_bits(),
+                "the column the writer refused would in fact have restated the value"
+            );
+
+            // The positive half of the same case. The refusal above is only
+            // the right answer if a real three-center merge whose values the
+            // format *can* state still serializes - and comes back from the
+            // text value for value. Precedence keeps each cell's numbers from
+            // the contributor that supplied them, and those came out of an
+            // `F14.6` column, so they go back into one.
+            let precedence = MergeOptions {
+                combine: MergeCombine::Precedence,
+                precedence_scope: MergePrecedenceScope::Cell,
+                ..MergeOptions::default()
+            };
+            let (merged, report) = merge(&sources, &precedence).expect("real precedence merge");
+            assert!(
+                report
+                    .agreement
+                    .iter()
+                    .any(|metric| metric.position_members == 3),
+                "this is only a three-center case if some cell was carried by three"
+            );
+
+            let text = merged
+                .to_sp3_string()
+                .expect("a precedence merge holds values the record columns state");
+            let reparsed = Sp3::parse(text.as_bytes()).expect("the merged product reparses");
+
+            assert_eq!(
+                reparsed.epochs, merged.epochs,
+                "every merged epoch comes back as the instant it was, bit for bit"
+            );
+            assert_eq!(reparsed.epoch_count(), merged.epoch_count());
+            assert_eq!(
+                reparsed.header.satellites, merged.header.satellites,
+                "the merged satellite list survives the round trip"
+            );
+            for idx in 0..merged.epoch_count() {
+                assert_eq!(
+                    reparsed.states_at(idx).ok(),
+                    merged.states_at(idx).ok(),
+                    "merged states differ at epoch {idx} after a write/read cycle"
+                );
+                assert_eq!(
+                    reparsed.clock_records_at(idx).ok(),
+                    merged.clock_records_at(idx).ok(),
+                    "merged clock-only records differ at epoch {idx} after a write/read cycle"
+                );
+            }
+            // Written text this writer accepted holds only values it accepts,
+            // so writing the reparsed product again is the same bytes. No hash
+            // is pinned here: the assertions above say what the bytes have to
+            // mean, which is what a regenerated golden would have to be checked
+            // against anyway.
+            assert_eq!(
+                reparsed
+                    .to_sp3_string()
+                    .expect("a product parsed from written SP3 re-encodes"),
+                text,
+                "serializing the merged product is idempotent"
             );
         }
     }
@@ -4137,7 +4296,7 @@ mod tests {
         let (merged, _) = merge(&[a, b], &opts).expect("mixed-cadence merge");
 
         assert_eq!(merged.epochs.len(), 5, "union epochs run every 7.5 minutes");
-        let text = merged.to_sp3_string();
+        let text = merged.to_sp3_string().expect("serialize SP3 product");
         let header = text
             .lines()
             .find(|line| line.starts_with("## "))
@@ -4837,7 +4996,7 @@ mod tests {
             "computed mean must match intended exact binary/wire mean"
         );
 
-        let text = merged.to_sp3_string();
+        let text = merged.to_sp3_string().expect("serialize SP3 product");
         // Serialized output must contain 0,0,0 sentinel for G03 with numeric clock
         let g03_line = text
             .lines()

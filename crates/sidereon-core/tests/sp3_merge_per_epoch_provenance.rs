@@ -328,8 +328,8 @@ fn the_merged_product_is_byte_identical_whether_or_not_provenance_is_enabled() {
         .expect("merge with provenance");
 
     assert_eq!(
-        without.to_sp3_string(),
-        with.to_sp3_string(),
+        without.to_sp3_string().expect("serialize SP3 product"),
+        with.to_sp3_string().expect("serialize SP3 product"),
         "enabling provenance must not change one byte of the merged product"
     );
 

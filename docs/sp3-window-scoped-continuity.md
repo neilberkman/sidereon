@@ -68,8 +68,11 @@ from the repository's established IGS fixture set and the canonical CDDIS MGEX
 week 2111 archive. The digest was verified with `shasum -a 256` on 2026-08-21.
 
 No consecutive daily pair is committed. The seam test constructs only its
-second day by advancing the real product by 86,400 seconds, serializing with
-Sidereon's SP3 writer, and reparsing. It injects a structured seam finding into
-the merge report. This derived day is test input for window selection, not an
-external continuity oracle. The untouched real product remains the primary
+second day by advancing every epoch to the next civil day on its whole-day
+boundary, advancing the line-2 day fields by the same day, serializing with
+Sidereon's SP3 writer, and reparsing. Adding the day through the day *fraction*
+instead can move an epoch onto an instant no epoch record states, which the
+writer refuses. The test injects a structured seam finding into the merge
+report. This derived day is test input for window selection, not an external
+continuity oracle. The untouched real product remains the primary
 continuity fixture and attests under the existing checker.
