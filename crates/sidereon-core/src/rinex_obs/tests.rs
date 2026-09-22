@@ -6057,8 +6057,9 @@ fn a_version_two_file_keeps_the_leap_second_extras() {
         delta_future: Some(18),
         week: Some(2000),
         day: Some(3),
+        time_system: None,
     };
-    obs.header.leap_seconds = Some(leap);
+    obs.header.leap_seconds = Some(leap.clone());
 
     let encoded = obs.to_rinex_string().expect("serialize RINEX OBS");
     let reparsed = RinexObs::parse(&encoded).expect("reads back");
@@ -9454,6 +9455,7 @@ fn a_blank_leap_second_field_keeps_its_columns() {
         delta_future: None,
         week: Some(2300),
         day: Some(1),
+        time_system: None,
     };
     let obs = RinexObs::parse(&obs_file(
         "3.05",
@@ -9465,7 +9467,7 @@ fn a_blank_leap_second_field_keeps_its_columns() {
         "> 2020 06 24 00 00  0.0000000  0  1\nG01      1234.567\n",
     ))
     .expect("parse");
-    assert_eq!(obs.header().leap_seconds, Some(leap));
+    assert_eq!(obs.header().leap_seconds, Some(leap.clone()));
     let read = RinexObs::parse(&obs.to_rinex_string().expect("writes")).expect("reads back");
     assert_eq!(read.header().leap_seconds, Some(leap));
 
@@ -9476,8 +9478,9 @@ fn a_blank_leap_second_field_keeps_its_columns() {
         delta_future: None,
         week: Some(2300),
         day: None,
+        time_system: None,
     };
-    v2.header.leap_seconds = Some(week_only);
+    v2.header.leap_seconds = Some(week_only.clone());
     let read = RinexObs::parse(&v2.to_rinex_string().expect("writes")).expect("reads back");
     assert_eq!(read.header().leap_seconds, Some(week_only));
 }
@@ -10487,4 +10490,516 @@ fn glonass_biases_are_read_in_their_columns_with_a_blank_bias_kept_blank() {
         );
         assert_writes_back(&obs);
     }
+}
+
+#[test]
+fn leap_seconds_fixtures_survive_parse_and_write() {
+    let leap_bds_304 = concat!(
+        "     3.04           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C2I                                                  SYS / # / OBS TYPES\n",
+        "     4        1000     6BDS                                 LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+    );
+    let leap_bdt_305 = concat!(
+        "     3.05           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C2I                                                  SYS / # / OBS TYPES\n",
+        "     4        1000     6BDT                                 LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+    );
+    let leap_gps_305 = concat!(
+        "     3.05           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C2I                                                  SYS / # / OBS TYPES\n",
+        "    18        2300     1GPS                                 LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+    );
+    let leap_blank_305 = concat!(
+        "     3.05           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C2I                                                  SYS / # / OBS TYPES\n",
+        "    18        2300     1                                    LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+    );
+    let leap_gps_402 = concat!(
+        "     4.02           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C2I                                                  SYS / # / OBS TYPES\n",
+        "    18        2300     1GPS                                 LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+    );
+    let leap_gps_211 = concat!(
+        "     2.11           OBSERVATION DATA    G (GPS)             RINEX VERSION / TYPE\n",
+        "     1    C1                                                # / TYPES OF OBSERV\n",
+        "    18                  GPS                                 LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        " 15  1  1  0  0  0.0000000  0  1G 1\n",
+        "      22000000.000\n",
+    );
+    let leap_gps_302 = concat!(
+        "     3.02           OBSERVATION DATA    G (GPS)             RINEX VERSION / TYPE\n",
+        "G    1 C1C                                                  SYS / # / OBS TYPES\n",
+        "    18        2300     1GPS                                 LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "G01  22000000.000  \n",
+    );
+
+    // 3.04 BDS
+    let obs = RinexObs::parse(leap_bds_304).expect("parse 3.04 BDS");
+    let leap = obs.header().leap_seconds.as_ref().expect("leap present");
+    assert_eq!(leap.current, 4);
+    assert_eq!(leap.delta_future, None);
+    assert_eq!(leap.week, Some(1000));
+    assert_eq!(leap.day, Some(6));
+    assert_eq!(leap.time_system, Some("BDS".to_string()));
+    let text = obs.to_rinex_string().expect("write 3.04 BDS");
+    let line = text
+        .lines()
+        .find(|l| l.ends_with("LEAP SECONDS"))
+        .expect("line");
+    assert_eq!(&line[24..27], "BDS");
+    assert_eq!(&line[60..72], "LEAP SECONDS");
+    let re = RinexObs::parse(&text).expect("reparse 3.04 BDS");
+    assert_eq!(re.header().leap_seconds, obs.header().leap_seconds);
+
+    // 3.05 BDT
+    let obs = RinexObs::parse(leap_bdt_305).expect("parse 3.05 BDT");
+    let leap = obs.header().leap_seconds.as_ref().expect("leap present");
+    assert_eq!(leap.current, 4);
+    assert_eq!(leap.delta_future, None);
+    assert_eq!(leap.week, Some(1000));
+    assert_eq!(leap.day, Some(6));
+    assert_eq!(leap.time_system, Some("BDT".to_string()));
+    let text = obs.to_rinex_string().expect("write 3.05 BDT");
+    let line = text
+        .lines()
+        .find(|l| l.ends_with("LEAP SECONDS"))
+        .expect("line");
+    assert_eq!(&line[24..27], "BDT");
+    assert_eq!(&line[60..72], "LEAP SECONDS");
+    let re = RinexObs::parse(&text).expect("reparse 3.05 BDT");
+    assert_eq!(re.header().leap_seconds, obs.header().leap_seconds);
+
+    // 3.05 GPS
+    let obs = RinexObs::parse(leap_gps_305).expect("parse 3.05 GPS");
+    let leap = obs.header().leap_seconds.as_ref().expect("leap present");
+    assert_eq!(leap.current, 18);
+    assert_eq!(leap.delta_future, None);
+    assert_eq!(leap.week, Some(2300));
+    assert_eq!(leap.day, Some(1));
+    assert_eq!(leap.time_system, Some("GPS".to_string()));
+    let text = obs.to_rinex_string().expect("write 3.05 GPS");
+    let line = text
+        .lines()
+        .find(|l| l.ends_with("LEAP SECONDS"))
+        .expect("line");
+    assert_eq!(&line[24..27], "GPS");
+    assert_eq!(&line[60..72], "LEAP SECONDS");
+    let re = RinexObs::parse(&text).expect("reparse 3.05 GPS");
+    assert_eq!(re.header().leap_seconds, obs.header().leap_seconds);
+
+    // 3.05 blank
+    let obs = RinexObs::parse(leap_blank_305).expect("parse 3.05 blank");
+    let leap = obs.header().leap_seconds.as_ref().expect("leap present");
+    assert_eq!(leap.current, 18);
+    assert_eq!(leap.delta_future, None);
+    assert_eq!(leap.week, Some(2300));
+    assert_eq!(leap.day, Some(1));
+    assert_eq!(leap.time_system, None);
+    let text = obs.to_rinex_string().expect("write 3.05 blank");
+    let line = text
+        .lines()
+        .find(|l| l.ends_with("LEAP SECONDS"))
+        .expect("line");
+    assert_eq!(&line[24..27], "   ");
+    assert_eq!(&line[60..72], "LEAP SECONDS");
+    let re = RinexObs::parse(&text).expect("reparse 3.05 blank");
+    assert_eq!(re.header().leap_seconds, obs.header().leap_seconds);
+
+    // 4.02 GPS
+    let obs = RinexObs::parse(leap_gps_402).expect("parse 4.02 GPS");
+    let leap = obs.header().leap_seconds.as_ref().expect("leap present");
+    assert_eq!(leap.current, 18);
+    assert_eq!(leap.delta_future, None);
+    assert_eq!(leap.week, Some(2300));
+    assert_eq!(leap.day, Some(1));
+    assert_eq!(leap.time_system, Some("GPS".to_string()));
+    let text = obs.to_rinex_string().expect("write 4.02 GPS");
+    let line = text
+        .lines()
+        .find(|l| l.ends_with("LEAP SECONDS"))
+        .expect("line");
+    assert_eq!(&line[24..27], "GPS");
+    assert_eq!(&line[60..72], "LEAP SECONDS");
+    let re = RinexObs::parse(&text).expect("reparse 4.02 GPS");
+    assert_eq!(re.header().leap_seconds, obs.header().leap_seconds);
+
+    // 2.11 GPS extension
+    let obs = RinexObs::parse(leap_gps_211).expect("parse 2.11 GPS extension");
+    let leap = obs.header().leap_seconds.as_ref().expect("leap present");
+    assert_eq!(leap.current, 18);
+    assert_eq!(leap.delta_future, None);
+    assert_eq!(leap.week, None);
+    assert_eq!(leap.day, None);
+    assert_eq!(leap.time_system, Some("GPS".to_string()));
+    let text = obs.to_rinex_string().expect("write 2.11 GPS extension");
+    let line = text
+        .lines()
+        .find(|l| l.ends_with("LEAP SECONDS"))
+        .expect("line");
+    assert_eq!(&line[0..6], "    18");
+    assert_eq!(&line[24..27], "GPS");
+    assert_eq!(&line[60..72], "LEAP SECONDS");
+    let re = RinexObs::parse(&text).expect("reparse 2.11 GPS extension");
+    assert_eq!(re.header().leap_seconds, obs.header().leap_seconds);
+
+    // 3.02 GPS extension
+    let obs = RinexObs::parse(leap_gps_302).expect("parse 3.02 GPS extension");
+    let leap = obs.header().leap_seconds.as_ref().expect("leap present");
+    assert_eq!(leap.current, 18);
+    assert_eq!(leap.delta_future, None);
+    assert_eq!(leap.week, Some(2300));
+    assert_eq!(leap.day, Some(1));
+    assert_eq!(leap.time_system, Some("GPS".to_string()));
+    let text = obs.to_rinex_string().expect("write 3.02 GPS extension");
+    let line = text
+        .lines()
+        .find(|l| l.ends_with("LEAP SECONDS"))
+        .expect("line");
+    assert_eq!(&line[0..6], "    18");
+    assert_eq!(&line[24..27], "GPS");
+    assert_eq!(&line[60..72], "LEAP SECONDS");
+    let re = RinexObs::parse(&text).expect("reparse 3.02 GPS extension");
+    assert_eq!(re.header().leap_seconds, obs.header().leap_seconds);
+}
+
+#[test]
+fn leap_seconds_absent_and_explicit_gps_stay_distinct() {
+    let leap_blank = ObsLeapSeconds {
+        current: 18,
+        delta_future: None,
+        week: Some(2300),
+        day: Some(1),
+        time_system: None,
+    };
+    let leap_gps = ObsLeapSeconds {
+        current: 18,
+        delta_future: None,
+        week: Some(2300),
+        day: Some(1),
+        time_system: Some("GPS".to_string()),
+    };
+    assert_ne!(leap_blank, leap_gps);
+    assert_eq!(leap_blank.time_system, None);
+    assert_eq!(leap_gps.time_system, Some("GPS".to_string()));
+}
+
+#[test]
+fn leap_seconds_independently_blank_fields_remain_aligned() {
+    let mut obs = RinexObs::parse(&minimal_obs(&[], "")).expect("parse minimal obs");
+    obs.header.version = 3.05;
+    obs.header.leap_seconds = Some(ObsLeapSeconds {
+        current: 18,
+        delta_future: None,
+        week: None,
+        day: None,
+        time_system: Some("GPS".to_string()),
+    });
+    let text = obs.to_rinex_string().expect("write aligned");
+    let line = text
+        .lines()
+        .find(|l| l.ends_with("LEAP SECONDS"))
+        .expect("line");
+    assert_eq!(&line[0..6], "    18");
+    assert_eq!(&line[6..12], "      ");
+    assert_eq!(&line[12..18], "      ");
+    assert_eq!(&line[18..24], "      ");
+    assert_eq!(&line[24..27], "GPS");
+    assert_eq!(&line[60..72], "LEAP SECONDS");
+    let re = RinexObs::parse(&text).expect("reparse aligned");
+    assert_eq!(re.header().leap_seconds, obs.header.leap_seconds);
+}
+
+#[test]
+fn leap_seconds_bad_token_and_unsupported_version_fails() {
+    let mut obs = RinexObs::parse(&minimal_obs(&[], "")).expect("parse minimal obs");
+    obs.header.version = 3.05;
+
+    // Bad programmatic token: unknown identifier
+    obs.header.leap_seconds = Some(ObsLeapSeconds {
+        current: 18,
+        delta_future: None,
+        week: None,
+        day: None,
+        time_system: Some("XYZ".to_string()),
+    });
+    let err = obs.to_rinex_string().expect_err("unknown token must fail");
+    assert_eq!(
+        err,
+        RinexObsWriteError::InvalidLeapSecondsTimeSystem {
+            time_system: "XYZ".to_string(),
+        }
+    );
+
+    // Bad programmatic token: newline injection
+    obs.header.leap_seconds = Some(ObsLeapSeconds {
+        current: 18,
+        delta_future: None,
+        week: None,
+        day: None,
+        time_system: Some("GP\n".to_string()),
+    });
+    let err = obs.to_rinex_string().expect_err("newline must fail");
+    assert_eq!(
+        err,
+        RinexObsWriteError::InvalidLeapSecondsTimeSystem {
+            time_system: "GP\n".to_string(),
+        }
+    );
+
+    // Unsupported target version on write: BDS in 3.05
+    obs.header.leap_seconds = Some(ObsLeapSeconds {
+        current: 4,
+        delta_future: None,
+        week: Some(1000),
+        day: Some(6),
+        time_system: Some("BDS".to_string()),
+    });
+    let err = obs.to_rinex_string().expect_err("BDS in 3.05 must fail");
+    assert_eq!(
+        err,
+        RinexObsWriteError::LeapSecondsTimeSystemNotInVersion {
+            time_system: "BDS".to_string(),
+            version: 3.05,
+        }
+    );
+
+    // Unsupported target version on write: BDT in 3.04
+    obs.header.version = 3.04;
+    obs.header.leap_seconds = Some(ObsLeapSeconds {
+        current: 4,
+        delta_future: None,
+        week: Some(1000),
+        day: Some(6),
+        time_system: Some("BDT".to_string()),
+    });
+    let err = obs.to_rinex_string().expect_err("BDT in 3.04 must fail");
+    assert_eq!(
+        err,
+        RinexObsWriteError::LeapSecondsTimeSystemNotInVersion {
+            time_system: "BDT".to_string(),
+            version: 3.04,
+        }
+    );
+
+    // Unsupported target version on downgrade: BDS to 2.11
+    obs.header.version = 3.04;
+    obs.header.leap_seconds = Some(ObsLeapSeconds {
+        current: 4,
+        delta_future: None,
+        week: Some(1000),
+        day: Some(6),
+        time_system: Some("BDS".to_string()),
+    });
+    let err = obs
+        .downgrade_to_rinex2(2.11)
+        .expect_err("BDS to 2.11 downgrade must fail");
+    assert_eq!(
+        err,
+        RinexObsWriteError::LeapSecondsTimeSystemNotInVersion {
+            time_system: "BDS".to_string(),
+            version: 2.11,
+        }
+    );
+
+    // Unsupported target version on downgrade: BDT to 2.11
+    obs.header.version = 3.05;
+    obs.header.leap_seconds = Some(ObsLeapSeconds {
+        current: 4,
+        delta_future: None,
+        week: Some(1000),
+        day: Some(6),
+        time_system: Some("BDT".to_string()),
+    });
+    let err = obs
+        .downgrade_to_rinex2(2.11)
+        .expect_err("BDT to 2.11 downgrade must fail");
+    assert_eq!(
+        err,
+        RinexObsWriteError::LeapSecondsTimeSystemNotInVersion {
+            time_system: "BDT".to_string(),
+            version: 2.11,
+        }
+    );
+
+    // Unsupported target version: BDS in 4.02
+    obs.header.version = 4.02;
+    obs.header.leap_seconds = Some(ObsLeapSeconds {
+        current: 4,
+        delta_future: None,
+        week: Some(1000),
+        day: Some(6),
+        time_system: Some("BDS".to_string()),
+    });
+    let err = obs.to_rinex_string().expect_err("BDS in 4.02 must fail");
+    assert_eq!(
+        err,
+        RinexObsWriteError::LeapSecondsTimeSystemNotInVersion {
+            time_system: "BDS".to_string(),
+            version: 4.02,
+        }
+    );
+
+    // Unsupported target version: BDT in 4.02
+    obs.header.version = 4.02;
+    obs.header.leap_seconds = Some(ObsLeapSeconds {
+        current: 4,
+        delta_future: None,
+        week: Some(1000),
+        day: Some(6),
+        time_system: Some("BDT".to_string()),
+    });
+    let err = obs.to_rinex_string().expect_err("BDT in 4.02 must fail");
+    assert_eq!(
+        err,
+        RinexObsWriteError::LeapSecondsTimeSystemNotInVersion {
+            time_system: "BDT".to_string(),
+            version: 4.02,
+        }
+    );
+
+    // Parser rejection: unknown identifier token
+    for bad_token in ["XYZ", "GLO"] {
+        let text = obs_with_version_and_code_headers(
+            3.05,
+            &[
+                header_line("G    1 C1C", "SYS / # / OBS TYPES"),
+                header_line(
+                    &format!("    18        2300     1{bad_token}"),
+                    "LEAP SECONDS",
+                ),
+            ],
+            "",
+        );
+        let err = RinexObs::parse(&text).expect_err("unknown token must fail parse");
+        assert!(
+            err.to_string()
+                .contains(&format!("unknown leap_seconds.time_system {bad_token:?}")),
+            "{err}"
+        );
+    }
+
+    // Parser rejection: version-invalid BDS and BDT
+    for (version, token) in [
+        (2.11, "BDS"),
+        (2.11, "BDT"),
+        (3.02, "BDS"),
+        (3.02, "BDT"),
+        (3.04, "BDT"),
+        (3.05, "BDS"),
+        (4.00, "BDS"),
+        (4.00, "BDT"),
+        (4.02, "BDS"),
+        (4.02, "BDT"),
+    ] {
+        let text = if version < 3.0 {
+            obs_file(
+                &format!("{version:.2}"),
+                'G',
+                &[
+                    v2_record("     1    C1", "# / TYPES OF OBSERV"),
+                    v2_record(&format!("    18                  {token}"), "LEAP SECONDS"),
+                ],
+                "",
+            )
+        } else {
+            obs_with_version_and_code_headers(
+                version,
+                &[
+                    header_line("G    1 C1C", "SYS / # / OBS TYPES"),
+                    header_line(&format!("    18        2300     1{token}"), "LEAP SECONDS"),
+                ],
+                "",
+            )
+        };
+        let err = RinexObs::parse(&text).expect_err("version-invalid token must fail parse");
+        assert!(
+            err.to_string().contains(&format!(
+                "leap_seconds.time_system {token:?} not supported in version {version:.2}"
+            )),
+            "{version:.2} {token}: {err}"
+        );
+    }
+}
+
+#[test]
+fn leap_seconds_duplicate_comparison_policy() {
+    // None and GPS are semantically equivalent; second accepted and retained.
+    let text_none_then_gps = concat!(
+        "     3.05           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C2I                                                  SYS / # / OBS TYPES\n",
+        "    18        2300     1                                    LEAP SECONDS\n",
+        "    18        2300     1GPS                                 LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+    );
+    let obs = RinexObs::parse(text_none_then_gps).expect("None then GPS must be accepted");
+    assert_eq!(
+        obs.header().leap_seconds.as_ref().unwrap().time_system,
+        Some("GPS".to_string())
+    );
+
+    let text_gps_then_none = concat!(
+        "     3.05           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C2I                                                  SYS / # / OBS TYPES\n",
+        "    18        2300     1GPS                                 LEAP SECONDS\n",
+        "    18        2300     1                                    LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+    );
+    let obs = RinexObs::parse(text_gps_then_none).expect("GPS then None must be accepted");
+    assert_eq!(
+        obs.header().leap_seconds.as_ref().unwrap().time_system,
+        None
+    );
+
+    // GPS and BeiDou contradict and must be refused.
+    let text_gps_then_bds = concat!(
+        "     3.04           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C2I                                                  SYS / # / OBS TYPES\n",
+        "     4        1000     6GPS                                 LEAP SECONDS\n",
+        "     4        1000     6BDS                                 LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+    );
+    let err = RinexObs::parse(text_gps_then_bds).expect_err("GPS then BDS must contradict");
+    assert!(err
+        .to_string()
+        .contains("LEAP SECONDS records in one header block contradict"));
+
+    // Contradicting numeric values must be refused.
+    let text_numeric_contradiction = concat!(
+        "     3.05           OBSERVATION DATA    C                   RINEX VERSION / TYPE\n",
+        "C    1 C2I                                                  SYS / # / OBS TYPES\n",
+        "    18        2300     1GPS                                 LEAP SECONDS\n",
+        "    17        2300     1GPS                                 LEAP SECONDS\n",
+        "                                                            END OF HEADER\n",
+        "> 2020 06 24 00 00  0.0000000  0  1\n",
+        "C01  22000000.000  \n",
+    );
+    let err =
+        RinexObs::parse(text_numeric_contradiction).expect_err("Numeric mismatch must contradict");
+    assert!(err
+        .to_string()
+        .contains("LEAP SECONDS records in one header block contradict"));
 }

@@ -387,7 +387,7 @@ pub struct AntennaInfo {
 }
 
 /// `LEAP SECONDS` header record retained from an observation file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObsLeapSeconds {
     /// Current leap-second count.
     pub current: i64,
@@ -397,6 +397,48 @@ pub struct ObsLeapSeconds {
     pub week: Option<i64>,
     /// Day field, if present.
     pub day: Option<i64>,
+    /// Optional time system identifier (`GPS`, `BDS`, `BDT`) from columns 25..27.
+    ///
+    /// RINEX 3.03 introduced `BDS` and `GPS`, with RINEX 3.05 renaming `BDS` to `BDT`.
+    /// RINEX 4 permits only `GPS`. As an accepted extension, `GPS` is also accepted
+    /// in pre-3.03 versions (including RINEX 2) where files populate this optional field.
+    pub time_system: Option<String>,
+}
+
+/// The validation status of a `LEAP SECONDS` time system identifier token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeapTimeSystemValidity {
+    /// Token is valid and supported in the given format version.
+    Valid,
+    /// Token is a recognized time system identifier, but not supported in the given format version.
+    UnsupportedInVersion,
+    /// Token is not a recognized time system identifier (`GPS`, `BDS`, `BDT`).
+    UnknownToken,
+}
+
+/// Validate a `LEAP SECONDS` time system identifier token against a format version.
+///
+/// Recognized identifiers are `GPS`, `BDS` (RINEX 3.03–3.04), and `BDT` (RINEX 3.05;
+/// excluded in RINEX 4, which permits only `GPS`). As an accepted extension, `GPS` is
+/// also accepted in pre-3.03 versions (including RINEX 2).
+pub(crate) fn check_leap_seconds_time_system(token: &str, version: f64) -> LeapTimeSystemValidity {
+    if !matches!(token, "GPS" | "BDS" | "BDT") {
+        return LeapTimeSystemValidity::UnknownToken;
+    }
+    let supported = if version < 3.025 {
+        token == "GPS"
+    } else if (3.025..3.045).contains(&version) {
+        matches!(token, "GPS" | "BDS")
+    } else if (3.045..3.99).contains(&version) {
+        matches!(token, "GPS" | "BDT")
+    } else {
+        token == "GPS"
+    };
+    if supported {
+        LeapTimeSystemValidity::Valid
+    } else {
+        LeapTimeSystemValidity::UnsupportedInVersion
+    }
 }
 
 /// One epoch record: the civil time, the event flag, and the per-satellite
@@ -1437,7 +1479,7 @@ impl Parser {
             glonass_slots: self.glonass_slots.clone(),
             glonass_cod_phs_bis: self.glonass_cod_phs_bis.clone(),
             signal_strength_unit: self.signal_strength_unit.clone(),
-            leap_seconds: self.leap_seconds,
+            leap_seconds: self.leap_seconds.clone(),
             marker_name: self.marker_name.clone(),
             unretained_header_labels: self.unretained_header_labels.clone(),
         };
@@ -2226,11 +2268,34 @@ impl Parser {
 
     fn parse_leap_seconds(&mut self, line: &str) -> Result<()> {
         let current = strict_int_field::<i64>(line, 0, 6, "leap_seconds.current")?;
+        let delta_future = optional_i64_field(line, 6, 12, "leap_seconds.delta_future")?;
+        let week = optional_i64_field(line, 12, 18, "leap_seconds.week")?;
+        let day = optional_i64_field(line, 18, 24, "leap_seconds.day")?;
+        let raw_token = field(line, 24, 27).trim();
+        let time_system = if raw_token.is_empty() {
+            None
+        } else {
+            let version = self.version.unwrap_or(0.0);
+            match check_leap_seconds_time_system(raw_token, version) {
+                LeapTimeSystemValidity::Valid => Some(raw_token.to_string()),
+                LeapTimeSystemValidity::UnknownToken => {
+                    return Err(Error::Parse(format!(
+                        "RINEX OBS unknown leap_seconds.time_system {raw_token:?} in {line:?}"
+                    )));
+                }
+                LeapTimeSystemValidity::UnsupportedInVersion => {
+                    return Err(Error::Parse(format!(
+                        "RINEX OBS leap_seconds.time_system {raw_token:?} not supported in version {version:.2} in {line:?}"
+                    )));
+                }
+            }
+        };
         self.leap_seconds = Some(ObsLeapSeconds {
             current,
-            delta_future: optional_i64_field(line, 6, 12, "leap_seconds.delta_future")?,
-            week: optional_i64_field(line, 12, 18, "leap_seconds.week")?,
-            day: optional_i64_field(line, 18, 24, "leap_seconds.day")?,
+            delta_future,
+            week,
+            day,
+            time_system,
         });
         Ok(())
     }
@@ -2788,7 +2853,7 @@ impl Parser {
             }
             "TIME OF FIRST OBS" => SingleValue::Time(self.time_of_first_obs),
             "TIME OF LAST OBS" => SingleValue::Time(self.time_of_last_obs),
-            "LEAP SECONDS" => SingleValue::LeapSeconds(self.leap_seconds),
+            "LEAP SECONDS" => SingleValue::LeapSeconds(self.leap_seconds.clone()),
             "# OF SATELLITES" => SingleValue::Count(self.n_satellites),
             _ => return Ok(()),
         };
@@ -2796,7 +2861,10 @@ impl Parser {
             Some(held) if *held != value => Err(Error::Parse(format!(
                 "RINEX OBS {label} records in one header block contradict: {held:?} and {value:?}, in {line:?}"
             ))),
-            Some(_) => Ok(()),
+            Some(_) => {
+                self.single_values_in_block.insert(label.to_string(), value);
+                Ok(())
+            }
             None => {
                 self.single_values_in_block.insert(label.to_string(), value);
                 Ok(())
@@ -4381,7 +4449,7 @@ pub(crate) fn apply_event_records(
 
 /// The value a record of a label holding one value sets, compared as parsed:
 /// numbers by value, so `-0.0` and `0.0` are one value, and text as trimmed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 enum SingleValue {
     Version(Option<f64>, Option<GnssSystem>),
     Number(Option<f64>),
@@ -4393,6 +4461,55 @@ enum SingleValue {
     Time(Option<(ObsEpochTime, TimeScale)>),
     LeapSeconds(Option<ObsLeapSeconds>),
     Count(Option<usize>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EffectiveLeapTimeSystem {
+    Gps,
+    BeiDou,
+}
+
+impl EffectiveLeapTimeSystem {
+    fn from_token(token: Option<&str>) -> Option<Self> {
+        match token {
+            None | Some("GPS") => Some(Self::Gps),
+            Some("BDS" | "BDT") => Some(Self::BeiDou),
+            _ => None,
+        }
+    }
+}
+
+fn leap_seconds_semantically_equal(a: &Option<ObsLeapSeconds>, b: &Option<ObsLeapSeconds>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.current == b.current
+                && a.delta_future == b.delta_future
+                && a.week == b.week
+                && a.day == b.day
+                && EffectiveLeapTimeSystem::from_token(a.time_system.as_deref())
+                    == EffectiveLeapTimeSystem::from_token(b.time_system.as_deref())
+        }
+        _ => false,
+    }
+}
+
+impl PartialEq for SingleValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Version(a1, a2), Self::Version(b1, b2)) => a1 == b1 && a2 == b2,
+            (Self::Number(a), Self::Number(b)) => a == b,
+            (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Vector(a), Self::Vector(b)) => a == b,
+            (Self::Antenna(a), Self::Antenna(b)) => a == b,
+            (Self::Receiver(a), Self::Receiver(b)) => a == b,
+            (Self::ObserverAgency(a1, a2), Self::ObserverAgency(b1, b2)) => a1 == b1 && a2 == b2,
+            (Self::Time(a), Self::Time(b)) => a == b,
+            (Self::LeapSeconds(a), Self::LeapSeconds(b)) => leap_seconds_semantically_equal(a, b),
+            (Self::Count(a), Self::Count(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 /// Labels whose records each set one value the product applies, and which this

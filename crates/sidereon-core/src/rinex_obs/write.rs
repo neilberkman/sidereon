@@ -222,6 +222,22 @@ pub enum RinexObsWriteError {
         /// The target version.
         version: f64,
     },
+    /// A `LEAP SECONDS` time system identifier that the target version does not
+    /// support.
+    ///
+    /// RINEX 3.03 introduced `BDS` and `GPS`, with 3.05 updating BeiDou to `BDT`.
+    /// As an accepted extension, `GPS` is also accepted in pre-3.03 versions.
+    LeapSecondsTimeSystemNotInVersion {
+        /// The time system identifier.
+        time_system: String,
+        /// The target version.
+        version: f64,
+    },
+    /// An unknown or malformed `LEAP SECONDS` time system identifier.
+    InvalidLeapSecondsTimeSystem {
+        /// The invalid identifier.
+        time_system: String,
+    },
     /// The written text would read back as a different product.
     ReadBackMismatch {
         /// The first field that would change, with its value before and after.
@@ -344,6 +360,17 @@ impl core::fmt::Display for RinexObsWriteError {
             } => write!(
                 f,
                 "RINEX OBS {system} code {code} is on a carrier that version {version} cannot represent"
+            ),
+            Self::LeapSecondsTimeSystemNotInVersion {
+                time_system,
+                version,
+            } => write!(
+                f,
+                "RINEX OBS LEAP SECONDS time system {time_system} is not supported in version {version}"
+            ),
+            Self::InvalidLeapSecondsTimeSystem { time_system } => write!(
+                f,
+                "RINEX OBS LEAP SECONDS invalid time system identifier: {time_system:?}"
             ),
             Self::ReadBackMismatch { what } => {
                 write!(
@@ -567,6 +594,9 @@ impl RinexObs {
                 });
             }
         }
+        if let Some(leap) = &self.header.leap_seconds {
+            validate_leap_seconds(leap, self.header.version)?;
+        }
         // The lists, names and scale factors an event declares are in effect for
         // the epochs after it, and each epoch is written by them.
         let timeline =
@@ -741,7 +771,7 @@ impl RinexObs {
         if let Some(entries) = &h.glonass_cod_phs_bis {
             write_glonass_cod_phs_bis(out, entries);
         }
-        if let Some(leap) = h.leap_seconds {
+        if let Some(leap) = &h.leap_seconds {
             write_leap_seconds(out, leap, false);
         }
         if let Some(count) = h.n_satellites {
@@ -1870,16 +1900,43 @@ fn write_glonass_cod_phs_bis(out: &mut String, entries: &[(String, Option<f64>)]
     }
 }
 
-fn write_leap_seconds(out: &mut String, leap: super::ObsLeapSeconds, current_only: bool) {
+fn validate_leap_seconds(
+    leap: &super::ObsLeapSeconds,
+    version: f64,
+) -> Result<(), RinexObsWriteError> {
+    if let Some(ref token) = leap.time_system {
+        match super::check_leap_seconds_time_system(token, version) {
+            super::LeapTimeSystemValidity::Valid => {}
+            super::LeapTimeSystemValidity::UnknownToken => {
+                return Err(RinexObsWriteError::InvalidLeapSecondsTimeSystem {
+                    time_system: token.clone(),
+                });
+            }
+            super::LeapTimeSystemValidity::UnsupportedInVersion => {
+                return Err(RinexObsWriteError::LeapSecondsTimeSystemNotInVersion {
+                    time_system: token.clone(),
+                    version,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_leap_seconds(out: &mut String, leap: &super::ObsLeapSeconds, current_only: bool) {
     let mut content = format!("{:6}", leap.current);
     if !current_only {
         // Each field has its own six columns, so a blank one before a value is
         // written blank; leaving it out would put the next value in its place.
         let fields = [leap.delta_future, leap.week, leap.day];
-        let written = fields
-            .iter()
-            .rposition(Option::is_some)
-            .map_or(0, |last| last + 1);
+        let written = if leap.time_system.is_some() {
+            3
+        } else {
+            fields
+                .iter()
+                .rposition(Option::is_some)
+                .map_or(0, |last| last + 1)
+        };
         for field in &fields[..written] {
             match field {
                 Some(value) => {
@@ -1887,6 +1944,9 @@ fn write_leap_seconds(out: &mut String, leap: super::ObsLeapSeconds, current_onl
                 }
                 None => content.push_str("      "),
             }
+        }
+        if let Some(ref token) = leap.time_system {
+            content.push_str(token);
         }
     }
     push_header_line(out, &content, "LEAP SECONDS");
@@ -3560,6 +3620,9 @@ impl RinexObs {
     ) -> Result<(RinexObs, Vec<ObsDowngradeChange>), RinexObsWriteError> {
         if !(2.0..3.0).contains(&version) {
             return Err(RinexObsWriteError::NotVersionTwo { version });
+        }
+        if let Some(leap) = &self.header.leap_seconds {
+            validate_leap_seconds(leap, version)?;
         }
         let mut product = self.clone();
         product.header.version = version;

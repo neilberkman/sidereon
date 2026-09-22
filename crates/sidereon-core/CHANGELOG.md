@@ -6,6 +6,8 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** `ObsLeapSeconds` retains its optional raw time-system identifier and no longer implements `Copy`. Readers and writers preserve blank versus explicit GPS and validate BDS/BDT against the RINEX version. Downgrades that cannot state that time system fail by name; intermediate blank numeric fields keep their fixed positions.
+
 - **Breaking.** RINEX observation downgrade refuses a conversion that changes a modeled physical carrier frequency with `ObservableNotRepresentable`. Modern BeiDou B1C cannot be relabeled as B1I in version 2; RINEX 3.02 B1I I/Q/X observations retain their carrier when renamed, including event-declared lists and cycle slips.
 
 - SP3 readers use the defined epoch columns while retaining compact epoch compatibility. Valid clocks with missing orbit coordinates survive reading, writing, datum alignment and merging without creating orbit interpolation samples. `Sp3ClockRecord` and clock-record accessors expose the retained clock, flags and associated velocity/rate fields.
