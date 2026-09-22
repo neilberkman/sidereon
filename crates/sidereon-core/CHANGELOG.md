@@ -6,6 +6,10 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** `ClockPoint` retains all declared AS clock values, including uncertainty, rate and acceleration fields, and no longer implements `Copy`. RINEX clock parsing follows version-specific fixed columns and continuation counts; compact readable records remain supported.
+- **Breaking.** `RinexClock` exposes typed skipped-record and lossy-parse diagnostics. Unknown record types and malformed strict records fail by name instead of disappearing silently.
+- RINEX clock serialization preserves every retained numeric value with exact readback in 19-column fields, including signed zero and supported wider-exponent spellings, and refuses values it cannot emit without loss.
+
 - `TecGrid` exposes immutable epoch, latitude, longitude and optional-value slices so bindings can return validated grid contents without keeping a second copy as authority.
 
 - `TdmMetadata` gains strict and policy-aware construction and atomic replacement from ordered raw fields and positioned comments, returning every typed departure. Writer validation derives time system and range units from those fields rather than stale convenience properties.

@@ -8,7 +8,7 @@
 pub mod clock {
     pub use crate::rinex_clock::{
         civil_to_clock_instant, civil_to_gps_seconds, ClockEpoch, ClockPoint, RinexClock,
-        RinexClockError,
+        RinexClockDiagnostic, RinexClockError, RinexClockSkip,
     };
 }
 
