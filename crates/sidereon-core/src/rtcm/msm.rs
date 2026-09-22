@@ -40,6 +40,12 @@ use crate::id::GnssSystem;
 use super::bits::{BitReader, BitWriter, OutOfInput};
 use super::DecodeResult;
 
+/// DF399 rough phase-range-rate invalid / not available sentinel (-8192 = -(1 << 13)).
+pub const MSM_ROUGH_PHASE_RANGE_RATE_INVALID: i16 = -(1 << 13);
+
+/// DF404 fine phase-range-rate invalid / not available sentinel (-16384 = -(1 << 14)).
+pub const MSM_FINE_PHASE_RANGE_RATE_INVALID: i16 = -(1 << 14);
+
 /// Which MSM variant a message is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MsmKind {
@@ -240,7 +246,8 @@ impl MsmMessage {
         let rough_prr = if kind == MsmKind::Msm7 {
             let mut v = Vec::with_capacity(nsat);
             for _ in 0..nsat {
-                v.push(Some(r.i(14)? as i16));
+                let raw = r.i(14)? as i16;
+                v.push((raw != MSM_ROUGH_PHASE_RANGE_RATE_INVALID).then_some(raw));
             }
             v
         } else {
@@ -294,15 +301,19 @@ impl MsmMessage {
                 cells
                     .iter()
                     .enumerate()
-                    .map(|(c, &(sat, sig))| MsmSignal {
-                        satellite_id: sat,
-                        signal_id: sig,
-                        fine_pseudorange: fine_pr[c],
-                        fine_phase_range: fine_ph[c],
-                        lock_time_indicator: lock[c],
-                        half_cycle_ambiguity: half[c],
-                        cnr: cnr[c],
-                        fine_phase_range_rate: Some(fine_prr[c]),
+                    .map(|(c, &(sat, sig))| {
+                        let prr = fine_prr[c];
+                        MsmSignal {
+                            satellite_id: sat,
+                            signal_id: sig,
+                            fine_pseudorange: fine_pr[c],
+                            fine_phase_range: fine_ph[c],
+                            lock_time_indicator: lock[c],
+                            half_cycle_ambiguity: half[c],
+                            cnr: cnr[c],
+                            fine_phase_range_rate: (prr != MSM_FINE_PHASE_RANGE_RATE_INVALID)
+                                .then_some(prr),
+                        }
                     })
                     .collect()
             }
@@ -387,7 +398,7 @@ impl MsmMessage {
             for &id in &sat_ids {
                 let prr = sat_by_id(id)
                     .and_then(|s| s.rough_phase_range_rate_m_s)
-                    .unwrap_or(0);
+                    .unwrap_or(MSM_ROUGH_PHASE_RANGE_RATE_INVALID);
                 w.push_i(i64::from(prr), 14);
             }
         }
@@ -437,7 +448,13 @@ impl MsmMessage {
                     w.push_u(u64::from(s.cnr), 10);
                 }
                 for s in &ordered {
-                    w.push_i(i64::from(s.fine_phase_range_rate.unwrap_or(0)), 15);
+                    w.push_i(
+                        i64::from(
+                            s.fine_phase_range_rate
+                                .unwrap_or(MSM_FINE_PHASE_RANGE_RATE_INVALID),
+                        ),
+                        15,
+                    );
                 }
             }
         }
