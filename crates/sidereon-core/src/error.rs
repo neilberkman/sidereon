@@ -25,6 +25,30 @@ pub enum Error {
         /// Integer longitude tile id.
         lon_index: i32,
     },
+    /// A terrain lookup weights a posting that the product marks as an unknown
+    /// elevation (the DTED null value, all bits set), so the query has no
+    /// height.
+    UnknownTerrainElevation {
+        /// Integer latitude tile id.
+        lat_index: i32,
+        /// Integer longitude tile id.
+        lon_index: i32,
+        /// Zero-based latitude posting index of the null posting in the tile.
+        latitude_posting: usize,
+        /// Zero-based longitude posting (profile) index of the null posting.
+        longitude_posting: usize,
+    },
+    /// A terrain tile states a horizontal datum other than WGS84, so it cannot
+    /// answer a WGS84 geodetic query without a datum transformation the
+    /// terrain readers do not perform.
+    NonWgs84TerrainTile {
+        /// Integer latitude tile id.
+        lat_index: i32,
+        /// Integer longitude tile id.
+        lon_index: i32,
+        /// Datum the tile states.
+        datum: crate::terrain::DtedHorizontalDatum,
+    },
     /// An IONEX slant-delay query lies outside the product coverage.
     IonexOutOfCoverage(crate::ionex::IonexCoverageError),
     /// An IONEX slant-delay interpolation weights grid nodes the product gives
@@ -50,6 +74,23 @@ impl fmt::Display for Error {
                 lat_index,
                 lon_index,
             } => write!(f, "missing terrain tile ({lat_index},{lon_index})"),
+            Error::UnknownTerrainElevation {
+                lat_index,
+                lon_index,
+                latitude_posting,
+                longitude_posting,
+            } => write!(
+                f,
+                "unknown terrain elevation at posting lon={longitude_posting} lat={latitude_posting} of tile ({lat_index},{lon_index})"
+            ),
+            Error::NonWgs84TerrainTile {
+                lat_index,
+                lon_index,
+                datum,
+            } => write!(
+                f,
+                "terrain tile ({lat_index},{lon_index}) states horizontal datum {datum}, not WGS84"
+            ),
             Error::IonexOutOfCoverage(error) => write!(f, "IONEX out of coverage: {error}"),
             Error::IonexNodesNotAvailable(gap) => write!(f, "IONEX nodes not available: {gap}"),
             Error::IonexSlantUnavailable(refusal) => {

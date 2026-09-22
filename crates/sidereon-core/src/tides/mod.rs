@@ -43,7 +43,8 @@ mod ocean;
 mod pole;
 pub use ocean::{
     ocean_tide_loading, parse_ocean_loading_blq_block, parse_ocean_loading_blq_blocks,
-    OceanLoadingBlq, OceanLoadingBlqBlock, OceanTideConstituent, NUM_OCEAN_CONSTITUENTS,
+    write_ocean_loading_blq_blocks, OceanLoadingBlq, OceanLoadingBlqBlock, OceanLoadingBlqComment,
+    OceanLoadingBlqCommentPlacement, OceanTideConstituent, NUM_OCEAN_CONSTITUENTS,
     OCEAN_LOADING_CONSTITUENTS,
 };
 pub use pole::solid_earth_pole_tide;
@@ -142,6 +143,122 @@ pub enum BlqParseErrorKind {
         /// Number of complete station blocks found.
         found: usize,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Reasons a BLQ block cannot be written so that the parser reads it back
+/// unchanged.
+pub enum BlqWriteErrorKind {
+    /// The station identifier is empty.
+    EmptyStation,
+    /// The station identifier contains a line break.
+    StationLineBreak,
+    /// The station identifier has leading or trailing whitespace, which the
+    /// parser trims.
+    StationSurroundingWhitespace,
+    /// The station identifier starts with a comment marker (`$`, `#`, `!`).
+    StationReadsAsComment,
+    /// The station identifier would be read as a column-order header.
+    StationReadsAsHeader,
+    /// The station identifier would be read as a coefficient row.
+    StationReadsAsCoefficientRow,
+    /// A coefficient is NaN or infinite.
+    NonFiniteCoefficient {
+        /// Zero-based BLQ row: amplitudes radial, EW, NS, then phases.
+        row: usize,
+        /// Constituent of the value.
+        constituent: crate::tides::OceanTideConstituent,
+    },
+    /// A retained comment line contains a line break or ends with a carriage
+    /// return.
+    CommentLineBreak {
+        /// Index in [`crate::tides::OceanLoadingBlqBlock::comments`].
+        index: usize,
+    },
+    /// A retained line is blank or has no comment marker and is not a
+    /// column-order header, so it would not be read as a comment.
+    NotACommentLine {
+        /// Index in [`crate::tides::OceanLoadingBlqBlock::comments`].
+        index: usize,
+    },
+    /// A retained comment names a coefficient row after the sixth.
+    CommentPlacementOutOfRange {
+        /// Index in [`crate::tides::OceanLoadingBlqBlock::comments`].
+        index: usize,
+    },
+    /// A retained line is a column-order header the parser refuses.
+    InvalidHeader {
+        /// Index in [`crate::tides::OceanLoadingBlqBlock::comments`].
+        index: usize,
+        /// The parser's refusal.
+        kind: BlqParseErrorKind,
+    },
+    /// A retained comment is placed after the coefficient rows of a block
+    /// that is not the last one written; the parser reads such a line as part
+    /// of the next block.
+    AfterRowsBeforeAnotherBlock {
+        /// Index in [`crate::tides::OceanLoadingBlqBlock::comments`].
+        index: usize,
+    },
+    /// Retained comments are not grouped by placement in file order (before
+    /// the station, before rows 0 to 5, after the rows); the parser would read
+    /// them back in that order.
+    CommentsOutOfPlacementOrder {
+        /// Index of the first comment placed before its predecessor.
+        index: usize,
+    },
+}
+
+impl core::fmt::Display for BlqWriteErrorKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::EmptyStation => f.write_str("empty station identifier"),
+            Self::StationLineBreak => f.write_str("station identifier contains a line break"),
+            Self::StationSurroundingWhitespace => {
+                f.write_str("station identifier has leading or trailing whitespace")
+            }
+            Self::StationReadsAsComment => {
+                f.write_str("station identifier starts with a comment marker")
+            }
+            Self::StationReadsAsHeader => {
+                f.write_str("station identifier reads as a column-order header")
+            }
+            Self::StationReadsAsCoefficientRow => {
+                f.write_str("station identifier reads as a coefficient row")
+            }
+            Self::NonFiniteCoefficient { row, constituent } => write!(
+                f,
+                "coefficient row {row} constituent {} is not finite",
+                constituent.label()
+            ),
+            Self::CommentLineBreak { index } => {
+                write!(f, "comment {index} contains a line break")
+            }
+            Self::NotACommentLine { index } => {
+                write!(f, "comment {index} would not be read as a comment")
+            }
+            Self::CommentPlacementOutOfRange { index } => {
+                write!(
+                    f,
+                    "comment {index} is placed after the sixth coefficient row"
+                )
+            }
+            Self::InvalidHeader { index, kind } => {
+                write!(
+                    f,
+                    "comment {index} is a column-order header the parser refuses: {kind}"
+                )
+            }
+            Self::AfterRowsBeforeAnotherBlock { index } => write!(
+                f,
+                "comment {index} follows the coefficient rows of a block that is not the last"
+            ),
+            Self::CommentsOutOfPlacementOrder { index } => write!(
+                f,
+                "comment {index} is placed before the comment preceding it"
+            ),
+        }
+    }
 }
 
 impl core::fmt::Display for BlqParseErrorKind {
@@ -249,6 +366,14 @@ pub enum TideError {
         line: usize,
         /// Detailed BLQ parsing failure and its source payload.
         kind: BlqParseErrorKind,
+    },
+    /// A BLQ block could not be written so that it reads back unchanged.
+    #[error("cannot write BLQ block {block}: {kind}")]
+    BlqWrite {
+        /// Zero-based index of the block in the written sequence.
+        block: usize,
+        /// Reason the block was refused.
+        kind: BlqWriteErrorKind,
     },
 }
 

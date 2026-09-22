@@ -10,6 +10,22 @@
 //! DTED and SRTM postings are orthometric heights, `H`, above the EGM96 mean sea
 //! level geoid. Ellipsoidal height conversion is an explicit `h = H + N` step
 //! using [`TerrainGeoidModel`].
+//!
+//! A DTED null posting (all bits set, the unknown elevation of MIL-PRF-89020B
+//! 3.11.3.1) is stored as [`TERRAIN_STORE_NULL_POSTING`], the value that bit
+//! pattern has under DTED signed magnitude and the value the specification
+//! itself names as the null placeholder. No DTED height decodes to it, and a
+//! lookup that weights such a posting returns
+//! [`Error::UnknownTerrainElevation`] instead of a height. When the posting a
+//! nearest lookup selects is a null on the tile edge, a neighbouring tile's
+//! posting at exactly the same coordinates answers; a bilinear query exactly on
+//! a tile edge is answered by the next tile sharing that edge, since every
+//! weighted posting then lies on it.
+//!
+//! Each tile index record covers exactly the one-degree cell its integer tile
+//! id names: latitude ids lie in `-90..=89`, longitude ids in `-180..=179`, and
+//! the four stored bounds equal the id and the id plus one. The parser refuses
+//! any other bounds, so lookups only ever see in-tile offsets.
 
 use crate::artifact_bytes::ArtifactBytes;
 pub use crate::artifact_bytes::DigestProvenance;
@@ -19,8 +35,8 @@ use std::path::{Path, PathBuf};
 
 use crate::geoid::{egm96_undulation, GeoidError, GeoidGrid};
 use crate::terrain::{
-    self, terrain_grid_candidates, validate_lookup_coordinates, DtedInterpolation,
-    DtedLookupOptions, DtedTile,
+    self, terrain_grid_candidates, validate_lookup_coordinates, DtedHorizontalDatum,
+    DtedInterpolation, DtedLookupOptions, DtedTile, TileGrid,
 };
 use crate::{Error, Result};
 
@@ -49,6 +65,17 @@ const INDEX_MAX_LON_OFFSET: usize = 64;
 const INDEX_DATUM_OFFSET: usize = 72;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+const MIN_TILE_LAT_INDEX: i32 = -90;
+const MAX_TILE_LAT_INDEX: i32 = 89;
+const MIN_TILE_LON_INDEX: i32 = -180;
+const MAX_TILE_LON_INDEX: i32 = 179;
+
+/// Stored posting value marking a DTED null (unknown) elevation.
+///
+/// It is the value DTED's all-bits-set null decodes to under signed magnitude
+/// (MIL-PRF-89020B 3.11.3.1 names it as -32,767), so stores written before the
+/// null was typed read back the same way.
+pub const TERRAIN_STORE_NULL_POSTING: i16 = -32_767;
 const EGM96_DAC_REMEDIATION: &str =
     "obtain the public NGA EGM96 15-arcminute WW15MGH.DAC file and load it with Egm96FifteenMinuteGeoid::from_ww15mgh_dac_path or Egm96FifteenMinuteGeoid::from_ww15mgh_dac_bytes";
 
@@ -428,6 +455,33 @@ pub enum TerrainStoreError {
         /// Checksum computed from the full store byte span.
         found: u64,
     },
+    /// A tile index record names a tile id outside the coordinate domain:
+    /// latitude ids lie in `-90..=89` and longitude ids in `-180..=179`.
+    TileIdOutOfRange {
+        /// Latitude tile id.
+        lat_index: i32,
+        /// Longitude tile id.
+        lon_index: i32,
+    },
+    /// A tile index bound is not the edge of the one-degree cell its tile id
+    /// names.
+    TileBoundsMismatch {
+        /// Latitude tile id.
+        lat_index: i32,
+        /// Longitude tile id.
+        lon_index: i32,
+        /// Index field whose value disagrees with the tile id.
+        field: &'static str,
+    },
+    /// A DTED input states a horizontal datum other than WGS84. The store
+    /// records no datum and answers WGS84 queries, so such a tile is refused
+    /// rather than stored as if it were WGS84.
+    NonWgs84Tile {
+        /// Path of the DTED tile.
+        path: PathBuf,
+        /// Datum the tile's DSI record states.
+        datum: DtedHorizontalDatum,
+    },
 }
 
 impl core::fmt::Display for TerrainStoreError {
@@ -471,6 +525,26 @@ impl core::fmt::Display for TerrainStoreError {
                 f,
                 "attested terrain store checksum expected {expected:#x} but found {found:#x}"
             ),
+            Self::TileIdOutOfRange {
+                lat_index,
+                lon_index,
+            } => write!(
+                f,
+                "terrain tile id ({lat_index},{lon_index}) is outside the coordinate domain"
+            ),
+            Self::TileBoundsMismatch {
+                lat_index,
+                lon_index,
+                field,
+            } => write!(
+                f,
+                "terrain tile ({lat_index},{lon_index}) {field} is not an edge of that one-degree tile"
+            ),
+            Self::NonWgs84Tile { path, datum } => write!(
+                f,
+                "{} states horizontal datum {datum}, not WGS84",
+                path.display()
+            ),
         }
     }
 }
@@ -510,6 +584,14 @@ impl MmapTile {
             lon_count - 1,
         )
         .map_err(Error::Parse)?;
+        self.posting(bytes, longitude_index, latitude_index)
+    }
+
+    /// Stored posting `(longitude_index, latitude_index)`, or
+    /// [`Error::UnknownTerrainElevation`] for the null marker.
+    fn posting(&self, bytes: &[u8], longitude_index: usize, latitude_index: usize) -> Result<i16> {
+        let lat_count = self.index.lat_count as usize;
+        let lon_count = self.index.lon_count as usize;
         if latitude_index >= lat_count || longitude_index >= lon_count {
             return Err(Error::Parse(format!(
                 "posting index out of bounds lon={longitude_index} lat={latitude_index}"
@@ -518,10 +600,25 @@ impl MmapTile {
 
         let sample_start =
             self.index.data_offset as usize + 2 * (longitude_index * lat_count + latitude_index);
-        Ok(i16::from_le_bytes([
-            bytes[sample_start],
-            bytes[sample_start + 1],
-        ]))
+        let value = i16::from_le_bytes([bytes[sample_start], bytes[sample_start + 1]]);
+        if value == TERRAIN_STORE_NULL_POSTING {
+            return Err(Error::UnknownTerrainElevation {
+                lat_index: self.index.lat_index,
+                lon_index: self.index.lon_index,
+                latitude_posting: latitude_index,
+                longitude_posting: longitude_index,
+            });
+        }
+        Ok(value)
+    }
+
+    fn grid(&self) -> TileGrid {
+        TileGrid {
+            lat_index: self.index.lat_index,
+            lon_index: self.index.lon_index,
+            lon_count: self.index.lon_count as usize,
+            lat_count: self.index.lat_count as usize,
+        }
     }
 }
 
@@ -834,17 +931,9 @@ impl<'a> MmapTerrain<'a> {
         options: DtedLookupOptions,
     ) -> Result<OrthometricHeightM> {
         validate_lookup_coordinates(longitude_deg, latitude_deg)?;
-        let Some(tile_idx) = self.resolve_grid(longitude_deg, latitude_deg) else {
-            return Err(missing_terrain_tile(longitude_deg, latitude_deg));
-        };
-        height_from_tile(
-            self.bytes.as_ref(),
-            &self.tiles[tile_idx],
-            longitude_deg,
-            latitude_deg,
-            options,
-        )
-        .map(OrthometricHeightM::new)
+        self.height_from_candidates(longitude_deg, latitude_deg, options)
+            .1
+            .map(OrthometricHeightM::new)
     }
 
     /// Evaluate `(longitude_deg, latitude_deg)` points in order as orthometric
@@ -883,46 +972,31 @@ impl<'a> MmapTerrain<'a> {
                 continue;
             }
 
+            // The primary grid is always the first candidate, so its tile
+            // answers unless it gives the point an unknown elevation.
             let primary_grid = terrain::terrain_grid(longitude_deg, latitude_deg);
             if current == Some(primary_grid) {
                 if let Some(&tile_idx) = self.by_grid.get(&primary_grid) {
                     let tile = &self.tiles[tile_idx];
                     if tile.contains(longitude_deg, latitude_deg) {
-                        out.push(
-                            height_from_tile(
-                                self.bytes.as_ref(),
-                                tile,
-                                longitude_deg,
-                                latitude_deg,
-                                options,
-                            )
-                            .map(OrthometricHeightM::new),
-                        );
-                        continue;
-                    }
-                }
-            }
-
-            match self.resolve_grid(longitude_deg, latitude_deg) {
-                Some(tile_idx) => {
-                    let tile = &self.tiles[tile_idx];
-                    current = Some((tile.index.lat_index, tile.index.lon_index));
-                    out.push(
-                        height_from_tile(
+                        let result = height_from_tile(
                             self.bytes.as_ref(),
                             tile,
                             longitude_deg,
                             latitude_deg,
                             options,
-                        )
-                        .map(OrthometricHeightM::new),
-                    );
-                }
-                None => {
-                    current = None;
-                    out.push(Err(missing_terrain_tile(longitude_deg, latitude_deg)));
+                        );
+                        if !matches!(result, Err(Error::UnknownTerrainElevation { .. })) {
+                            out.push(result.map(OrthometricHeightM::new));
+                            continue;
+                        }
+                    }
                 }
             }
+
+            let (grid, result) = self.height_from_candidates(longitude_deg, latitude_deg, options);
+            current = grid;
+            out.push(result.map(OrthometricHeightM::new));
         }
 
         out
@@ -987,12 +1061,86 @@ impl<'a> MmapTerrain<'a> {
         orthometric.to_ellipsoidal_height_deg(latitude_deg, longitude_deg, geoid)
     }
 
-    fn resolve_grid(&self, longitude_deg: f64, latitude_deg: f64) -> Option<usize> {
+    /// Answer a query from the tiles that contain it, in candidate order.
+    ///
+    /// Returns the first containing tile's grid, if any, with the result.
+    /// When the first tile gives the point an unknown elevation, a nearest
+    /// lookup takes a neighbouring tile's posting at exactly the coordinates
+    /// of the null edge posting, and a bilinear lookup defers to the next
+    /// containing tile, which exists only for a point on a tile edge, where
+    /// every weighted posting lies on that shared edge. The first unknown is
+    /// returned when no neighbour knows the height.
+    fn height_from_candidates(
+        &self,
+        longitude_deg: f64,
+        latitude_deg: f64,
+        options: DtedLookupOptions,
+    ) -> (Option<(i32, i32)>, Result<f64>) {
+        let mut first_grid = None;
+        let mut unknown = None;
         for grid_idx in terrain_grid_candidates(longitude_deg, latitude_deg) {
-            if let Some(&tile_idx) = self.by_grid.get(&grid_idx) {
-                if self.tiles[tile_idx].contains(longitude_deg, latitude_deg) {
-                    return Some(tile_idx);
+            let Some(&tile_idx) = self.by_grid.get(&grid_idx) else {
+                continue;
+            };
+            let tile = &self.tiles[tile_idx];
+            if !tile.contains(longitude_deg, latitude_deg) {
+                continue;
+            }
+            if first_grid.is_none() {
+                first_grid = Some(grid_idx);
+            }
+            let result = height_from_tile(
+                self.bytes.as_ref(),
+                tile,
+                longitude_deg,
+                latitude_deg,
+                options,
+            );
+            let unknown_at = result.as_ref().err().and_then(terrain::unknown_posting);
+            let Some((lon_posting, lat_posting)) = unknown_at else {
+                // A later candidate is consulted only because an earlier one
+                // gave an unknown elevation; its failure leaves that unknown
+                // standing and the remaining candidates still get a turn.
+                if unknown.is_some() && result.is_err() {
+                    continue;
                 }
+                return (first_grid, result);
+            };
+            if options.interpolation == DtedInterpolation::NearestPosting {
+                let neighbour = self.nearest_from_edge_neighbours(tile, lon_posting, lat_posting);
+                return (first_grid, neighbour.map_or(result, Ok));
+            }
+            if unknown.is_none() {
+                unknown = result.err();
+            }
+        }
+        let missing = || missing_terrain_tile(longitude_deg, latitude_deg);
+        (first_grid, Err(unknown.unwrap_or_else(missing)))
+    }
+
+    /// Value of a neighbouring tile's posting at exactly the coordinates of
+    /// the null posting `(lon_posting, lat_posting)` of `tile`, when that
+    /// posting lies on the tile edge and a neighbour holds a known height
+    /// there. Matches the raw DTED reader.
+    fn nearest_from_edge_neighbours(
+        &self,
+        tile: &MmapTile,
+        lon_posting: usize,
+        lat_posting: usize,
+    ) -> Option<f64> {
+        let primary = tile.grid();
+        for neighbour_grid in terrain::edge_neighbour_grids(primary, lon_posting, lat_posting) {
+            let Some(&tile_idx) = self.by_grid.get(&neighbour_grid) else {
+                continue;
+            };
+            let neighbour = &self.tiles[tile_idx];
+            let Some((lon_index, lat_index)) =
+                terrain::coincident_posting(primary, lon_posting, lat_posting, neighbour.grid())
+            else {
+                continue;
+            };
+            if let Ok(value) = neighbour.posting(self.bytes.as_ref(), lon_index, lat_index) {
+                return Some(f64::from(value));
             }
         }
         None
@@ -1011,9 +1159,12 @@ impl<'a> MmapTerrain<'a> {
 /// symlinked directories and symlinked `.dt2` files. A symlinked file is treated
 /// as DTED when either the link name or the resolved target name ends in
 /// `.dt2`. Tiles are then sorted by integer tile id. DTED signed-magnitude
-/// postings are decoded once into `i16` orthometric metres. DTED negative zero
-/// and SRTM voids already encoded as zero remain zero, matching the existing
-/// lazy DTED reader.
+/// postings are decoded once into `i16` orthometric metres, matching the lazy
+/// DTED reader. DTED null postings, including the SRTM voids that
+/// [`crate::data::hgt_to_dted`] writes as nulls, are stored as
+/// [`TERRAIN_STORE_NULL_POSTING`] and read back as unknown elevations. A tile
+/// whose DSI states a horizontal datum other than WGS84 is refused with
+/// [`TerrainStoreError::NonWgs84Tile`].
 pub fn dted_tree_to_mmap_store(
     root: impl AsRef<Path>,
 ) -> core::result::Result<Vec<u8>, TerrainStoreError> {
@@ -1123,12 +1274,14 @@ fn height_from_tile(
     let postings_per_deg_lon = tile.index.lon_count as usize - 1;
     let postings_per_deg_lat = tile.index.lat_count as usize - 1;
 
-    let lon = terrain::scaled_cell_fraction(
-        longitude_deg - tile.index.min_longitude_deg,
+    let lon = terrain::in_tile_cell_fraction(
+        longitude_deg,
+        tile.index.min_longitude_deg,
         postings_per_deg_lon,
     );
-    let lat = terrain::scaled_cell_fraction(
-        latitude_deg - tile.index.min_latitude_deg,
+    let lat = terrain::in_tile_cell_fraction(
+        latitude_deg,
+        tile.index.min_latitude_deg,
         postings_per_deg_lat,
     );
     let lon_lo = lon.cell;
@@ -1172,6 +1325,12 @@ fn pending_tile_from_dted_path(
     let tile = DtedTile::from_path(path).map_err(|reason| TerrainStoreError::Parse {
         reason: format!("{}: {reason}", path.display()),
     })?;
+    if !tile.horizontal_datum().is_wgs84_compatible() {
+        return Err(TerrainStoreError::NonWgs84Tile {
+            path: path.to_path_buf(),
+            datum: tile.horizontal_datum().clone(),
+        });
+    }
     let decoded = tile
         .decoded_postings_lon_major()
         .map_err(|reason| TerrainStoreError::Parse {
@@ -1179,7 +1338,8 @@ fn pending_tile_from_dted_path(
         })?;
     let mut data = Vec::with_capacity(decoded.len() * 2);
     for posting in decoded {
-        data.extend_from_slice(&posting.to_le_bytes());
+        let stored = posting.unwrap_or(TERRAIN_STORE_NULL_POSTING);
+        data.extend_from_slice(&stored.to_le_bytes());
     }
     let lat_index = tile.origin_latitude().floor() as i32;
     let lon_index = tile.origin_longitude().floor() as i32;
@@ -1297,10 +1457,13 @@ fn parse_store(
     ensure_zero(bytes, 40, STORE_HEADER_LEN, "header reserved bytes")?;
 
     let vertical_datum = VerticalDatum::from_tag(bytes[HEADER_DATUM_OFFSET])?;
-    let tile_count = read_u32(bytes, HEADER_TILE_COUNT_OFFSET)? as usize;
-    let index_offset = read_u64(bytes, HEADER_INDEX_OFFSET_OFFSET)? as usize;
-    let data_offset = read_u64(bytes, HEADER_DATA_OFFSET_OFFSET)? as usize;
-    let total_len = read_u64(bytes, HEADER_TOTAL_LEN_OFFSET)? as usize;
+    let tile_count = wire_usize(
+        u64::from(read_u32(bytes, HEADER_TILE_COUNT_OFFSET)?),
+        "tile count",
+    )?;
+    let index_offset = wire_usize(read_u64(bytes, HEADER_INDEX_OFFSET_OFFSET)?, "index offset")?;
+    let data_offset = wire_usize(read_u64(bytes, HEADER_DATA_OFFSET_OFFSET)?, "data offset")?;
+    let total_len = wire_usize(read_u64(bytes, HEADER_TOTAL_LEN_OFFSET)?, "total length")?;
     if total_len != bytes.len() {
         return Err(TerrainStoreError::Parse {
             reason: format!(
@@ -1351,6 +1514,14 @@ fn parse_store(
         let record = &bytes[record_offset..record_offset + STORE_INDEX_RECORD_LEN];
         let lat_index = read_i32(record, INDEX_LAT_OFFSET)?;
         let lon_index = read_i32(record, INDEX_LON_OFFSET)?;
+        if !(MIN_TILE_LAT_INDEX..=MAX_TILE_LAT_INDEX).contains(&lat_index)
+            || !(MIN_TILE_LON_INDEX..=MAX_TILE_LON_INDEX).contains(&lon_index)
+        {
+            return Err(TerrainStoreError::TileIdOutOfRange {
+                lat_index,
+                lon_index,
+            });
+        }
         let tile_id = (lat_index, lon_index);
         if previous_id.is_some_and(|previous| tile_id <= previous) {
             return Err(TerrainStoreError::Parse {
@@ -1368,8 +1539,11 @@ fn parse_store(
                 ),
             });
         }
-        let offset = read_u64(record, INDEX_DATA_OFFSET_OFFSET)? as usize;
-        let data_len = read_u64(record, INDEX_DATA_LEN_OFFSET)? as usize;
+        let offset = wire_usize(
+            read_u64(record, INDEX_DATA_OFFSET_OFFSET)?,
+            "tile data offset",
+        )?;
+        let data_len = wire_usize(read_u64(record, INDEX_DATA_LEN_OFFSET)?, "tile data length")?;
         let expected_len = (lon_count as usize)
             .checked_mul(lat_count as usize)
             .and_then(|count| count.checked_mul(2))
@@ -1421,15 +1595,27 @@ fn parse_store(
         let min_longitude_deg = read_f64(record, INDEX_MIN_LON_OFFSET)?;
         let max_latitude_deg = read_f64(record, INDEX_MAX_LAT_OFFSET)?;
         let max_longitude_deg = read_f64(record, INDEX_MAX_LON_OFFSET)?;
-        for (field, value) in [
-            ("min_latitude_deg", min_latitude_deg),
-            ("min_longitude_deg", min_longitude_deg),
-            ("max_latitude_deg", max_latitude_deg),
-            ("max_longitude_deg", max_longitude_deg),
+        let south = f64::from(lat_index);
+        let west = f64::from(lon_index);
+        for (field, value, edge) in [
+            ("min_latitude_deg", min_latitude_deg, south),
+            ("min_longitude_deg", min_longitude_deg, west),
+            ("max_latitude_deg", max_latitude_deg, south + 1.0),
+            ("max_longitude_deg", max_longitude_deg, west + 1.0),
         ] {
             if !value.is_finite() {
                 return Err(TerrainStoreError::Parse {
                     reason: format!("tile ({lat_index},{lon_index}) {field} is not finite"),
+                });
+            }
+            // Exact equality: the cell edges are small integers, and a bound
+            // off by any amount would place postings where the payload does
+            // not hold them. A signed zero equals zero.
+            if value != edge {
+                return Err(TerrainStoreError::TileBoundsMismatch {
+                    lat_index,
+                    lon_index,
+                    field,
                 });
             }
         }
@@ -1482,6 +1668,14 @@ fn parse_store(
         by_grid,
         tile_index,
         tile_ids,
+    })
+}
+
+/// Convert a wire integer to `usize`, refusing a value this target cannot
+/// address instead of truncating it.
+fn wire_usize(value: u64, field: &str) -> core::result::Result<usize, TerrainStoreError> {
+    usize::try_from(value).map_err(|_| TerrainStoreError::Parse {
+        reason: format!("{field} {value} does not fit this target's address width"),
     })
 }
 
@@ -1684,4 +1878,29 @@ fn write_u64(bytes: &mut [u8], offset: usize, value: u64) {
 
 fn write_f64(bytes: &mut [u8], offset: usize, value: f64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+#[cfg(test)]
+mod wire_width_tests {
+    use super::{wire_usize, TerrainStoreError};
+
+    /// A wire value above the target's address width is refused by name. On a
+    /// 64-bit target every `u64` fits, so the refusal is exercised where it
+    /// can occur and the exact conversion everywhere else.
+    #[test]
+    fn wire_integers_convert_exactly_or_are_refused() {
+        let above_u32 = (1u64 << 32) + 4146;
+        match usize::try_from(above_u32) {
+            Ok(expected) => assert_eq!(wire_usize(above_u32, "total length"), Ok(expected)),
+            Err(_) => assert_eq!(
+                wire_usize(above_u32, "total length"),
+                Err(TerrainStoreError::Parse {
+                    reason: format!(
+                        "total length {above_u32} does not fit this target's address width"
+                    ),
+                })
+            ),
+        }
+        assert_eq!(wire_usize(4146, "total length"), Ok(4146));
+    }
 }

@@ -74,3 +74,11 @@
 !/corpus/tdm_round_trip/valid-annex-e18.kvn
 !/corpus/tdm_round_trip/valid-annex-e22.kvn
 !/corpus/tdm_round_trip/regression-comment-assignment
+
+# Terrain store round trip: a valid one-tile store written field by field, and
+# the same store with index bounds of -1e300/1e300 that once reached the
+# lookup arithmetic; the target now queries every accepted tile.
+!/corpus/terrain_store_round_trip/
+/corpus/terrain_store_round_trip/*
+!/corpus/terrain_store_round_trip/valid-one-tile-5x5
+!/corpus/terrain_store_round_trip/regression-index-bounds-1e300

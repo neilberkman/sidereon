@@ -4,14 +4,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use sidereon_core::data::{dted_cache_relpath, hgt_to_dted, HgtConversionError};
 use sidereon_core::terrain::{DtedInterpolation, DtedLookupOptions, DtedTerrain};
+use sidereon_core::Error;
 
 const POSTINGS: usize = 3601;
 const HGT_LEN: usize = POSTINGS * POSTINGS * 2;
 const DTED_LEN: usize = 25_981_042;
 const LAT_INDEX: i32 = 36;
 const LON_INDEX: i32 = -107;
+// SHA-256 of the converted reference fixture. The fixture's one void sample
+// (-32768) is written as the DTED null 0xFFFF; with voids written as 0 the
+// digest was 1aef121ba4cadf1180efb74eabf6118d2df7b290957739ef99abf50d9a0f8304.
 const REFERENCE_DT2_SHA256: &str =
-    "1aef121ba4cadf1180efb74eabf6118d2df7b290957739ef99abf50d9a0f8304";
+    "fe3ed0e6fa9809f0e1194089359e847c026d8a2c42ccefb96fae5bf58b8f8dc5";
 
 // Fixture provenance: the HGT payload in these tests is generated in memory
 // from the closed-form `synthetic_hgt_sample` function below. No external
@@ -49,12 +53,20 @@ fn synthetic_hgt_sample(row: usize, col: usize) -> i16 {
     }
 }
 
-fn expected_posting(lat_posting: usize, lon_posting: usize) -> i16 {
+/// The height a converted posting reads back as: the source sample, or an
+/// unknown elevation for an SRTM void (-32768), which is written as the DTED
+/// null.
+fn expected_posting(lat_posting: usize, lon_posting: usize) -> Result<f64, Error> {
     let sample = synthetic_hgt_sample(POSTINGS - 1 - lat_posting, lon_posting);
     if sample == i16::MIN {
-        0
+        Err(Error::UnknownTerrainElevation {
+            lat_index: LAT_INDEX,
+            lon_index: LON_INDEX,
+            latitude_posting: lat_posting,
+            longitude_posting: lon_posting,
+        })
     } else {
-        sample
+        Ok(f64::from(sample))
     }
 }
 
@@ -91,14 +103,22 @@ fn hgt_to_dted_round_trips_selected_postings_through_reader() {
     let mut nearest = DtedLookupOptions::default();
     nearest.interpolation = DtedInterpolation::NearestPosting;
 
+    // (1234, 2345) is the void: synthetic sample (2366, 2345) is -32768.
+    assert_eq!(
+        expected_posting(1234, 2345),
+        Err(Error::UnknownTerrainElevation {
+            lat_index: 36,
+            lon_index: -107,
+            latitude_posting: 1234,
+            longitude_posting: 2345,
+        })
+    );
     for (lat_posting, lon_posting) in [(0, 0), (100, 200), (1234, 2345), (2000, 3000), (3600, 3600)]
     {
         let lat = f64::from(LAT_INDEX) + lat_posting as f64 / 3600.0;
         let lon = f64::from(LON_INDEX) + lon_posting as f64 / 3600.0;
-        let got = terrain
-            .height_m_with_options(lon, lat, nearest)
-            .expect("read converted DTED posting");
-        let expected = f64::from(expected_posting(lat_posting, lon_posting));
+        let got = terrain.height_m_with_options(lon, lat, nearest);
+        let expected = expected_posting(lat_posting, lon_posting);
         assert_eq!(
             got, expected,
             "posting lat_index={lat_posting} lon_index={lon_posting}"

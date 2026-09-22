@@ -3,7 +3,9 @@
 //! are existing repository fixtures generated from the public DTED
 //! UHL/DSI/ACC/data-record layout. The HGT void test uses the synthetic
 //! `tests/fixtures/dted/hgt/n36_w107_reference.hgt` fixture already committed
-//! for the SRTM1-to-DTED converter. Legacy store regression cases compare
+//! for the SRTM1-to-DTED converter; its one void sample (-32768, at HGT row
+//! 2366 column 2345) converts to the DTED null and reads as an unknown
+//! elevation. Legacy store regression cases compare
 //! terrain heights by `f64::to_bits()` against committed fixture values, and
 //! source-post checks use the public Skadi SRTM1 excerpt in
 //! `skadi_n36w107_5x5_posts.json`.
@@ -16,11 +18,13 @@ use serde_json::Value;
 
 use sidereon_core::data::hgt_to_dted;
 use sidereon_core::geoid::egm96_undulation;
-use sidereon_core::terrain::{DtedInterpolation, DtedLookupOptions, DtedTerrain};
+use sidereon_core::terrain::{
+    DtedHorizontalDatum, DtedInterpolation, DtedLookupOptions, DtedTerrain,
+};
 use sidereon_core::terrain_store::{
     dted_tile_list_to_mmap_store, dted_tree_to_mmap_store, terrain_store_checksum64,
     DtedTileListEntry, Egm96FifteenMinuteGeoid, MmapTerrain, OrthometricHeightM, TerrainDatumError,
-    TerrainGeoidModel, TerrainTileId, VerticalDatum,
+    TerrainGeoidModel, TerrainStoreError, TerrainTileId, VerticalDatum, TERRAIN_STORE_NULL_POSTING,
 };
 
 const MULTI_TILE_STORE_CHECKSUM64: u64 = 0xff51_4a67_6a94_d479;
@@ -394,7 +398,7 @@ fn mmap_store_nearest_posting_matches_real_skadi_source_posts() {
 }
 
 #[test]
-fn mmap_store_returns_typed_zero_for_hgt_void_posting() {
+fn hgt_void_posting_reads_as_unknown_elevation_on_every_path() {
     let hgt = fs::read(fixture_path("hgt/n36_w107_reference.hgt")).expect("read HGT fixture");
     let dt2 = hgt_to_dted(36, -107, &hgt).expect("convert HGT fixture");
     let root = temp_path("terrain-store-hgt-void");
@@ -408,26 +412,36 @@ fn mmap_store_returns_typed_zero_for_hgt_void_posting() {
     options.interpolation = DtedInterpolation::NearestPosting;
     let latitude_deg = 36.0 + 1234.0 / 3600.0;
     let longitude_deg = -107.0 + 2345.0 / 3600.0;
+    let unknown = sidereon_core::Error::UnknownTerrainElevation {
+        lat_index: 36,
+        lon_index: -107,
+        latitude_posting: 1234,
+        longitude_posting: 2345,
+    };
 
-    let got = mmap
-        .height_m_with_options(longitude_deg, latitude_deg, options)
-        .expect("mmap void height");
-    let want = dted
-        .height_m_with_options(longitude_deg, latitude_deg, options)
-        .expect("DTED void height");
-    let typed = mmap
-        .orthometric_height_m_with_options(longitude_deg, latitude_deg, options)
-        .expect("typed orthometric void height");
-    let typed_batch = mmap.orthometric_height_batch(&[(longitude_deg, latitude_deg)], options);
-
-    assert_eq!(got.to_bits(), want.to_bits());
-    assert_eq!(typed.metres().to_bits(), want.to_bits());
-    assert_eq!(got.to_bits(), 0.0f64.to_bits());
     assert_eq!(
-        typed_batch[0]
-            .as_ref()
-            .map(|height| height.metres().to_bits()),
-        Ok(0.0f64.to_bits())
+        dted.height_m_with_options(longitude_deg, latitude_deg, options),
+        Err(unknown.clone())
+    );
+    assert_eq!(
+        dted.height_batch(&[(longitude_deg, latitude_deg)], options),
+        vec![Err(unknown.clone())]
+    );
+    assert_eq!(
+        mmap.height_m_with_options(longitude_deg, latitude_deg, options),
+        Err(unknown.clone())
+    );
+    assert_eq!(
+        mmap.orthometric_height_m_with_options(longitude_deg, latitude_deg, options),
+        Err(unknown.clone())
+    );
+    assert_eq!(
+        mmap.orthometric_height_batch(&[(longitude_deg, latitude_deg)], options),
+        vec![Err(unknown.clone())]
+    );
+    assert_eq!(
+        mmap.height_batch(&[(longitude_deg, latitude_deg)], options),
+        vec![Err(unknown)]
     );
 
     fs::remove_dir_all(root).expect("remove temp DTED root");
@@ -626,4 +640,440 @@ fn store_file_round_trips_through_path_reader() {
     assert_eq!(mmap.to_bytes(), bytes);
 
     fs::remove_file(store_path).expect("remove temp store");
+}
+
+/// Posting of the committed n36_w107 fixture formula, used to fill stores
+/// written byte by byte below.
+fn primary_fixture_posting(lon_index: usize, lat_index: usize) -> i16 {
+    (-20 + 7 * lon_index as i32 - 5 * lat_index as i32 + (lon_index * lat_index) as i32) as i16
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// A one-tile TMMAP001 store for tile (36,-107) with 5x5 postings, written
+/// field by field from the container layout rather than by the converter:
+/// 64-byte header, one 80-byte index record at byte 64, zero padding to the
+/// 4096-byte data offset, then the little-endian `i16` payload.
+fn hand_built_one_tile_store() -> Vec<u8> {
+    let mut payload = Vec::new();
+    for lon_index in 0..5 {
+        for lat_index in 0..5 {
+            payload.extend_from_slice(&primary_fixture_posting(lon_index, lat_index).to_le_bytes());
+        }
+    }
+    let mut store = vec![0u8; 4096];
+    store[0..8].copy_from_slice(b"TMMAP001");
+    store[8..10].copy_from_slice(&1u16.to_le_bytes());
+    store[10] = 1;
+    store[12..16].copy_from_slice(&1u32.to_le_bytes());
+    store[16..24].copy_from_slice(&64u64.to_le_bytes());
+    store[24..32].copy_from_slice(&4096u64.to_le_bytes());
+    store[32..40].copy_from_slice(&(4096 + payload.len() as u64).to_le_bytes());
+    let record = 64;
+    store[record..record + 4].copy_from_slice(&36i32.to_le_bytes());
+    store[record + 4..record + 8].copy_from_slice(&(-107i32).to_le_bytes());
+    store[record + 8..record + 12].copy_from_slice(&5u32.to_le_bytes());
+    store[record + 12..record + 16].copy_from_slice(&5u32.to_le_bytes());
+    store[record + 16..record + 24].copy_from_slice(&4096u64.to_le_bytes());
+    store[record + 24..record + 32].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+    store[record + 32..record + 40].copy_from_slice(&fnv1a64(&payload).to_le_bytes());
+    store[record + 40..record + 48].copy_from_slice(&36.0f64.to_le_bytes());
+    store[record + 48..record + 56].copy_from_slice(&(-107.0f64).to_le_bytes());
+    store[record + 56..record + 64].copy_from_slice(&37.0f64.to_le_bytes());
+    store[record + 64..record + 72].copy_from_slice(&(-106.0f64).to_le_bytes());
+    store[record + 72] = 1;
+    store.extend_from_slice(&payload);
+    store
+}
+
+#[test]
+fn hand_built_store_parses_and_matches_the_converter() {
+    let store = hand_built_one_tile_store();
+    let mut mmap = MmapTerrain::from_bytes(&store).expect("parse hand-built store");
+    let mut options = DtedLookupOptions::default();
+    options.interpolation = DtedInterpolation::NearestPosting;
+    // Posting (2, 2): -20 + 14 - 10 + 4.
+    assert_eq!(mmap.height_m_with_options(-106.5, 36.5, options), Ok(-12.0));
+    let converted = dted_tile_list_to_mmap_store(&[DtedTileListEntry::from_indices(
+        36,
+        -107,
+        fixture_path("tiles").join("n36_w107_1arc_v3.dt2"),
+    )])
+    .expect("convert fixture tile");
+    assert_eq!(converted, store);
+}
+
+#[test]
+fn index_bounds_that_disagree_with_the_tile_id_are_refused_at_parse() {
+    // Absolute bytes 112 and 128 are the first record's min_longitude_deg and
+    // max_longitude_deg. Finite but absurd bounds kept the tile selected for
+    // (-106.5, 36.5) and fed an offset near 1e300 to the cell arithmetic.
+    // The payload checksum does not cover index metadata.
+    let mut store = hand_built_one_tile_store();
+    store[112..120].copy_from_slice(&(-1e300f64).to_le_bytes());
+    store[128..136].copy_from_slice(&1e300f64.to_le_bytes());
+    assert_eq!(
+        MmapTerrain::from_bytes(&store).expect_err("absurd bounds must be refused"),
+        TerrainStoreError::TileBoundsMismatch {
+            lat_index: 36,
+            lon_index: -107,
+            field: "min_longitude_deg",
+        }
+    );
+
+    let above = |value: f64| f64::from_bits(value.to_bits() + 1);
+    let below = |value: f64| f64::from_bits(value.to_bits() - 1);
+    for (offset, field, value) in [
+        (104, "min_latitude_deg", above(36.0)),
+        (112, "min_longitude_deg", below(-107.0)),
+        (120, "max_latitude_deg", below(37.0)),
+        (128, "max_longitude_deg", above(-106.0)),
+        (120, "max_latitude_deg", 36.0),
+        (128, "max_longitude_deg", 1e300),
+    ] {
+        let mut store = hand_built_one_tile_store();
+        store[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        assert_eq!(
+            MmapTerrain::from_bytes(&store).expect_err("bound off the tile edge"),
+            TerrainStoreError::TileBoundsMismatch {
+                lat_index: 36,
+                lon_index: -107,
+                field,
+            },
+            "{field} = {value:e}"
+        );
+    }
+
+    for (lat_index, lon_index) in [(90, -107), (-91, -107), (36, 180), (36, -181)] {
+        let mut store = hand_built_one_tile_store();
+        store[64..68].copy_from_slice(&i32::to_le_bytes(lat_index));
+        store[68..72].copy_from_slice(&i32::to_le_bytes(lon_index));
+        assert_eq!(
+            MmapTerrain::from_bytes(&store).expect_err("tile id outside the domain"),
+            TerrainStoreError::TileIdOutOfRange {
+                lat_index,
+                lon_index,
+            }
+        );
+    }
+}
+
+#[test]
+fn store_wire_lengths_with_high_bits_are_refused_not_truncated() {
+    // Adding 2^32 or 2^63 to a length leaves its low 32 bits unchanged; the
+    // parser must see the whole value on every target.
+    for (offset, high_bit) in [
+        (32usize, 32u32),
+        (32, 63),
+        (16, 32),
+        (24, 32),
+        (88, 32),
+        (80, 32),
+    ] {
+        let mut store = hand_built_one_tile_store();
+        let value = u64::from_le_bytes(store[offset..offset + 8].try_into().expect("u64 field"));
+        store[offset..offset + 8].copy_from_slice(&(value + (1u64 << high_bit)).to_le_bytes());
+        assert!(
+            matches!(
+                MmapTerrain::from_bytes(&store),
+                Err(TerrainStoreError::Parse { .. })
+            ),
+            "field at byte {offset} with bit {high_bit} set"
+        );
+    }
+}
+
+#[test]
+fn dted_null_postings_are_carried_into_the_store_as_unknown_elevations() {
+    // The committed 5x5 fixture with posting (lon 2, lat 3) set to the DTED
+    // null bit pattern and that profile's byte-sum checksum recomputed.
+    let mut tile = fs::read(fixture_path("tiles/n36_w107_1arc_v3.dt2")).expect("read fixture");
+    let block_len = 12 + 2 * 5;
+    let block = 3428 + 2 * block_len;
+    tile[block + 8 + 2 * 3..block + 8 + 2 * 3 + 2].copy_from_slice(&[0xFF, 0xFF]);
+    let sum = tile[block..block + block_len - 4]
+        .iter()
+        .fold(0i32, |acc, b| acc + i32::from(*b));
+    tile[block + block_len - 4..block + block_len].copy_from_slice(&sum.to_be_bytes());
+
+    let root = temp_path("terrain-store-null-posting");
+    fs::create_dir_all(&root).expect("create temp DTED root");
+    fs::write(root.join("n36_w107_1arc_v3.dt2"), &tile).expect("write null-posting tile");
+    let bytes = dted_tree_to_mmap_store(&root).expect("convert DTED tree");
+
+    // Payload offset 4096; posting (lon 2, lat 3) is element 2*5 + 3.
+    let stored = 4096 + 2 * (2 * 5 + 3);
+    assert_eq!(
+        i16::from_le_bytes([bytes[stored], bytes[stored + 1]]),
+        TERRAIN_STORE_NULL_POSTING
+    );
+
+    let mut mmap = MmapTerrain::from_bytes(&bytes).expect("parse terrain store");
+    let mut dted = DtedTerrain::new(&root);
+    let unknown = sidereon_core::Error::UnknownTerrainElevation {
+        lat_index: 36,
+        lon_index: -107,
+        latitude_posting: 3,
+        longitude_posting: 2,
+    };
+    let mut nearest = DtedLookupOptions::default();
+    nearest.interpolation = DtedInterpolation::NearestPosting;
+    let bilinear = DtedLookupOptions::default();
+    for (longitude_deg, latitude_deg, options, want) in [
+        (-106.5, 36.75, nearest, Err(unknown.clone())),
+        (-106.5, 36.75, bilinear, Err(unknown.clone())),
+        (-106.375, 36.625, bilinear, Err(unknown.clone())),
+        (-106.625, 36.875, bilinear, Err(unknown.clone())),
+        (-106.25, 36.75, bilinear, Ok(-5.0)),
+        (-106.25, 36.75, nearest, Ok(-5.0)),
+    ] {
+        let got = mmap.height_m_with_options(longitude_deg, latitude_deg, options);
+        assert_eq!(got, want, "mapped ({longitude_deg}, {latitude_deg})");
+        assert_eq!(
+            dted.height_m_with_options(longitude_deg, latitude_deg, options),
+            want,
+            "raw ({longitude_deg}, {latitude_deg})"
+        );
+        assert_eq!(
+            mmap.orthometric_height_batch(&[(longitude_deg, latitude_deg)], options),
+            vec![want.clone().map(OrthometricHeightM::new)]
+        );
+    }
+    assert_eq!(
+        mmap.ellipsoidal_height_m(-106.375, 36.625),
+        Err(TerrainDatumError::Terrain(unknown))
+    );
+
+    let reserialized = MmapTerrain::from_bytes(&bytes)
+        .expect("parse terrain store")
+        .to_bytes();
+    assert_eq!(reserialized, bytes);
+
+    fs::remove_dir_all(root).expect("remove temp DTED root");
+}
+
+/// A copy of both committed fixture tiles in which the eastern tile's western
+/// edge posting at 36.5 N (profile 0, posting 2) is the DTED null.
+fn fixture_pair_with_null_edge_posting(name: &str, with_west: bool) -> PathBuf {
+    let root = temp_path(name);
+    fs::create_dir_all(&root).expect("create temp DTED root");
+    let mut east = fs::read(fixture_path("tiles/n36_w106_1arc_v3.dt2")).expect("read east tile");
+    let block_len = 12 + 2 * 5;
+    let block = 3428;
+    east[block + 8 + 2 * 2..block + 8 + 2 * 2 + 2].copy_from_slice(&[0xFF, 0xFF]);
+    let sum = east[block..block + block_len - 4]
+        .iter()
+        .fold(0i32, |acc, b| acc + i32::from(*b));
+    east[block + block_len - 4..block + block_len].copy_from_slice(&sum.to_be_bytes());
+    fs::write(root.join("n36_w106_1arc_v3.dt2"), east).expect("write east tile");
+    if with_west {
+        fs::copy(
+            fixture_path("tiles/n36_w107_1arc_v3.dt2"),
+            root.join("n36_w107_1arc_v3.dt2"),
+        )
+        .expect("copy west tile");
+    }
+    root
+}
+
+#[test]
+fn a_null_edge_posting_defers_to_the_neighbouring_tile_on_that_edge() {
+    let mut nearest = DtedLookupOptions::default();
+    nearest.interpolation = DtedInterpolation::NearestPosting;
+    let bilinear = DtedLookupOptions::default();
+    let unknown = Err(sidereon_core::Error::UnknownTerrainElevation {
+        lat_index: 36,
+        lon_index: -106,
+        latitude_posting: 2,
+        longitude_posting: 0,
+    });
+    // The eastern tile (36,-106) is the first candidate on -106 and the only
+    // one just east of it. Its edge posting (0, 2) at (-106, 36.5) is null;
+    // the western tile's posting (4, 2) at exactly that point is
+    // -20 + 7*4 - 5*2 + 4*2 = 6, and (4, 3) is 5.
+    let just_east = -106.0 + 1e-9;
+    let cases = [
+        ((-106.0, 36.5), nearest, Ok(6.0)),
+        // Its nearest posting is the same null edge posting.
+        ((just_east, 36.5), nearest, Ok(6.0)),
+        ((-106.0, 36.5), bilinear, Ok(6.0)),
+        ((-106.0, 36.625), bilinear, Ok(5.5)),
+        // Inside the eastern tile the null has nonzero bilinear weight.
+        ((just_east, 36.5), bilinear, unknown.clone()),
+    ];
+
+    let root = fixture_pair_with_null_edge_posting("terrain-edge-null-pair", true);
+    let store = dted_tree_to_mmap_store(&root).expect("convert pair");
+    let mmap = MmapTerrain::from_bytes(&store).expect("parse pair store");
+    for ((longitude_deg, latitude_deg), options, want) in cases.clone() {
+        assert_eq!(
+            DtedTerrain::new(&root).height_m_with_options(longitude_deg, latitude_deg, options),
+            want,
+            "raw ({longitude_deg}, {latitude_deg}) {options:?}"
+        );
+        assert_eq!(
+            mmap.orthometric_height_m_with_options(longitude_deg, latitude_deg, options)
+                .map(OrthometricHeightM::metres),
+            want,
+            "mapped ({longitude_deg}, {latitude_deg}) {options:?}"
+        );
+    }
+    // Batches answer the same, including after a query that made the
+    // eastern tile current.
+    for (options, points, tail) in [
+        (
+            bilinear,
+            [(-105.5, 36.5), (-106.0, 36.5), (-106.0, 36.625)],
+            [Ok(6.0), Ok(5.5)],
+        ),
+        (
+            nearest,
+            [(-105.5, 36.5), (-106.0, 36.5), (just_east, 36.5)],
+            [Ok(6.0), Ok(6.0)],
+        ),
+    ] {
+        let first = DtedTerrain::new(&root).height_m_with_options(-105.5, 36.5, options);
+        assert!(first.is_ok());
+        let want = vec![first, tail[0].clone(), tail[1].clone()];
+        assert_eq!(
+            DtedTerrain::new(&root).height_batch(&points, options),
+            want,
+            "raw batch {options:?}"
+        );
+        assert_eq!(
+            MmapTerrain::from_bytes(&store)
+                .expect("parse pair store")
+                .height_batch(&points, options),
+            want,
+            "mapped batch {options:?}"
+        );
+    }
+    fs::remove_dir_all(root).expect("remove temp DTED root");
+
+    // Without the neighbour the null stays unknown.
+    let root = fixture_pair_with_null_edge_posting("terrain-edge-null-alone", false);
+    let store = dted_tree_to_mmap_store(&root).expect("convert east tile");
+    let mmap = MmapTerrain::from_bytes(&store).expect("parse east store");
+    for ((longitude_deg, latitude_deg), options, _) in cases.clone() {
+        assert_eq!(
+            DtedTerrain::new(&root).height_m_with_options(longitude_deg, latitude_deg, options),
+            unknown
+        );
+        assert_eq!(
+            mmap.orthometric_height_m_with_options(longitude_deg, latitude_deg, options)
+                .map(OrthometricHeightM::metres),
+            unknown
+        );
+    }
+    fs::remove_dir_all(root).expect("remove temp DTED root");
+
+    // A neighbour consulted only because the first tile gave an unknown
+    // elevation leaves that unknown standing when it cannot be read or states
+    // another datum.
+    let mut wgs72_west = fs::read(fixture_path("tiles/n36_w107_1arc_v3.dt2")).expect("read west");
+    wgs72_west[224..229].copy_from_slice(b"WGS72");
+    for (label, west) in [
+        ("corrupt", b"not a DTED tile".to_vec()),
+        ("wgs72", wgs72_west),
+    ] {
+        let root = fixture_pair_with_null_edge_posting(&format!("terrain-edge-{label}"), false);
+        fs::write(root.join("n36_w107_1arc_v3.dt2"), west).expect("write west tile");
+        for ((longitude_deg, latitude_deg), options, _) in cases.clone() {
+            assert_eq!(
+                DtedTerrain::new(&root).height_m_with_options(longitude_deg, latitude_deg, options),
+                unknown,
+                "{label} ({longitude_deg}, {latitude_deg}) {options:?}"
+            );
+        }
+        fs::remove_dir_all(root).expect("remove temp DTED root");
+    }
+}
+
+#[test]
+fn store_conversion_refuses_a_tile_on_another_horizontal_datum() {
+    let root = temp_path("terrain-store-wgs72");
+    fs::create_dir_all(&root).expect("create temp DTED root");
+    let mut tile = fs::read(fixture_path("tiles/n36_w107_1arc_v3.dt2")).expect("read fixture");
+    // DSI character 145, after the 80-byte UHL.
+    tile[224..229].copy_from_slice(b"WGS72");
+    let path = root.join("n36_w107_1arc_v3.dt2");
+    fs::write(&path, tile).expect("write WGS72 tile");
+
+    assert_eq!(
+        dted_tree_to_mmap_store(&root).expect_err("WGS72 tile must not be stored as WGS84"),
+        TerrainStoreError::NonWgs84Tile {
+            path: path.clone(),
+            datum: DtedHorizontalDatum::Wgs72,
+        }
+    );
+    assert_eq!(
+        dted_tile_list_to_mmap_store(&[DtedTileListEntry::from_indices(36, -107, &path)])
+            .expect_err("WGS72 tile must not be stored as WGS84"),
+        TerrainStoreError::NonWgs84Tile {
+            path,
+            datum: DtedHorizontalDatum::Wgs72,
+        }
+    );
+    fs::remove_dir_all(root).expect("remove temp DTED root");
+}
+
+#[test]
+fn a_corner_query_tries_every_candidate_after_an_unreadable_neighbour() {
+    // Candidates at the corner (-106, 37), in order: (37,-106), (36,-106),
+    // (37,-107), (36,-107). The first holds a null at its corner posting, the
+    // second is corrupt, and the third holds the height: its posting (4, 0)
+    // is -20 + 7*4 = 8.
+    let root = temp_path("terrain-corner-candidates");
+    fs::create_dir_all(&root).expect("create temp DTED root");
+    let north_latitude = |mut tile: Vec<u8>| {
+        tile[12..20].copy_from_slice(b"0370000N");
+        tile
+    };
+    let mut first =
+        north_latitude(fs::read(fixture_path("tiles/n36_w106_1arc_v3.dt2")).expect("read tile"));
+    let block_len = 12 + 2 * 5;
+    let block = 3428;
+    first[block + 8..block + 10].copy_from_slice(&[0xFF, 0xFF]);
+    let sum = first[block..block + block_len - 4]
+        .iter()
+        .fold(0i32, |acc, b| acc + i32::from(*b));
+    first[block + block_len - 4..block + block_len].copy_from_slice(&sum.to_be_bytes());
+    fs::write(root.join("n37_w106_1arc_v3.dt2"), first).expect("write first tile");
+    fs::write(root.join("n36_w106_1arc_v3.dt2"), b"not a DTED tile").expect("write corrupt tile");
+    let third =
+        north_latitude(fs::read(fixture_path("tiles/n36_w107_1arc_v3.dt2")).expect("read tile"));
+    fs::write(root.join("n37_w107_1arc_v3.dt2"), third).expect("write third tile");
+
+    let mut nearest = DtedLookupOptions::default();
+    nearest.interpolation = DtedInterpolation::NearestPosting;
+    for options in [DtedLookupOptions::default(), nearest] {
+        assert_eq!(
+            DtedTerrain::new(&root).height_m_with_options(-106.0, 37.0, options),
+            Ok(8.0),
+            "{options:?}"
+        );
+        assert_eq!(
+            DtedTerrain::new(&root).height_batch(&[(-105.5, 37.5), (-106.0, 37.0)], options)[1],
+            Ok(8.0),
+            "batch {options:?}"
+        );
+    }
+
+    // Without the third tile the fourth is absent too, and the first tile's
+    // unknown elevation stands rather than the corrupt tile's error.
+    fs::remove_file(root.join("n37_w107_1arc_v3.dt2")).expect("remove third tile");
+    assert_eq!(
+        DtedTerrain::new(&root).height_m(-106.0, 37.0),
+        Err(sidereon_core::Error::UnknownTerrainElevation {
+            lat_index: 37,
+            lon_index: -106,
+            latitude_posting: 0,
+            longitude_posting: 0,
+        })
+    );
+    fs::remove_dir_all(root).expect("remove temp DTED root");
 }
