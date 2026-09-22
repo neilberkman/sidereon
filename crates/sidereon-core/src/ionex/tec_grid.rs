@@ -311,6 +311,37 @@ impl TecGrid {
         })
     }
 
+    /// Returns the grid epoch coordinates as an immutable slice.
+    ///
+    /// Epoch coordinates are `f64` Unix nanoseconds, and adjacent nanoseconds
+    /// may not be distinguishable at large magnitudes.
+    #[must_use]
+    pub fn epochs_ns(&self) -> &[f64] {
+        &self.epochs_ns
+    }
+
+    /// Returns the grid latitude coordinates as an immutable slice, with angles in degrees.
+    #[must_use]
+    pub fn latitudes_deg(&self) -> &[f64] {
+        &self.latitudes_deg
+    }
+
+    /// Returns the grid longitude coordinates as an immutable slice, with angles in degrees.
+    #[must_use]
+    pub fn longitudes_deg(&self) -> &[f64] {
+        &self.longitudes_deg
+    }
+
+    /// Returns the flat grid TEC values in TECU as an immutable slice in epoch-latitude-longitude order.
+    ///
+    /// Grid values are stored in units of TECU in flat epoch-latitude-longitude
+    /// order with longitude varying fastest, where `None` indicates a missing
+    /// node value and `Some(0.0)` indicates a valid zero-valued node.
+    #[must_use]
+    pub fn values(&self) -> &[Option<f64>] {
+        &self.values
+    }
+
     /// Returns VTEC interpolated at a pierce-point longitude and latitude.
     ///
     /// Latitude values outside `[-87.5, 87.5]` are clamped to that interval.
@@ -892,5 +923,42 @@ mod tests {
             assert!(error.to_string().contains("frequency_hz"), "{error}");
             assert!(error.to_string().contains(reason), "{error}");
         }
+    }
+
+    #[test]
+    fn tec_grid_slice_accessors_preserve_stored_data_and_order() {
+        let epochs = vec![0.0, 30_000_000_000.0];
+        let latitudes = vec![-10.0, 0.0, 10.0];
+        let longitudes = vec![100.0, 110.0];
+        let values = vec![
+            Some(1.5),
+            Some(0.0),
+            None,
+            Some(3.0),
+            Some(4.0),
+            Some(5.0),
+            None,
+            Some(7.0),
+            Some(8.0),
+            Some(9.0),
+            Some(10.0),
+            Some(0.0),
+        ];
+
+        let grid = TecGrid::new(
+            epochs.clone(),
+            latitudes.clone(),
+            longitudes.clone(),
+            values.clone(),
+        )
+        .expect("valid TEC grid");
+
+        assert_eq!(grid.epochs_ns(), epochs.as_slice());
+        assert_eq!(grid.latitudes_deg(), latitudes.as_slice());
+        assert_eq!(grid.longitudes_deg(), longitudes.as_slice());
+        assert_eq!(grid.values(), values.as_slice());
+
+        assert_eq!(grid.values()[1], Some(0.0));
+        assert_eq!(grid.values()[2], None);
     }
 }

@@ -6,6 +6,8 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- `TecGrid` exposes immutable epoch, latitude, longitude and optional-value slices so bindings can return validated grid contents without keeping a second copy as authority.
+
 - `TdmMetadata` gains strict and policy-aware construction and atomic replacement from ordered raw fields and positioned comments, returning every typed departure. Writer validation derives time system and range units from those fields rather than stale convenience properties.
 - **Breaking.** TDM writing refuses header, metadata and data comment positions or ordering that cannot be emitted unchanged instead of moving or omitting those comments silently.
 
