@@ -139,6 +139,66 @@ impl TdmMetadata {
             .map(|field| field.value.as_str())
             .filter(|value| !value.is_empty())
     }
+
+    /// Construct metadata from raw ordered fields and positioned comments under strict policy.
+    ///
+    /// Validates raw field syntax, comment syntax and offsets, Table 3-3 keyword membership
+    /// and ordering, duplicate and conflicting keywords, mandatory `TIME_SYSTEM` and
+    /// `PARTICIPANT_n` presence, and path participant references. All convenience properties
+    /// (`participants`, `mode`, `paths`, `timetag_ref`, `time_system`, `range_units`) are
+    /// derived synchronously from the raw fields.
+    ///
+    /// Any segment-specific validation error uses a 1-based segment number of `1`.
+    pub fn from_raw(fields: Vec<TdmField>, comments: Vec<TdmComment>) -> Result<Self, TdmError> {
+        Self::from_raw_with_policy(fields, comments, TdmWritePolicy::strict()).map(|(meta, _)| meta)
+    }
+
+    /// Construct metadata from raw ordered fields and positioned comments under an explicit write policy.
+    ///
+    /// Forgivable departures (e.g. `missing_keywords`, `repeated_keywords`, `keyword_order`,
+    /// `long_lines`, `non_printable`) are recorded as typed [`TdmDeparture`] values and returned
+    /// alongside the derived metadata. Unforgivable departures (e.g. conflicting keywords,
+    /// malformed syntax, invalid indices, undefined path participants, out-of-bounds comment
+    /// offsets) are always refused.
+    ///
+    /// Any segment-specific validation error uses a 1-based segment number of `1`.
+    pub fn from_raw_with_policy(
+        fields: Vec<TdmField>,
+        comments: Vec<TdmComment>,
+        policy: TdmWritePolicy,
+    ) -> Result<(Self, Vec<TdmDeparture>), TdmError> {
+        let mut departures = Vec::new();
+        let metadata =
+            validate_and_build_metadata(fields, comments, 1, policy, true, &mut departures)?;
+        Ok((metadata, departures))
+    }
+
+    /// Atomically replace raw fields and comments under strict policy.
+    ///
+    /// If candidate validation fails, `self` remains completely unchanged.
+    pub fn replace_raw(
+        &mut self,
+        fields: Vec<TdmField>,
+        comments: Vec<TdmComment>,
+    ) -> Result<(), TdmError> {
+        self.replace_raw_with_policy(fields, comments, TdmWritePolicy::strict())
+            .map(|_| ())
+    }
+
+    /// Atomically replace raw fields and comments under an explicit write policy.
+    ///
+    /// If candidate validation fails, `self` remains completely unchanged. On success,
+    /// all raw fields, comments, and derived properties are updated simultaneously.
+    pub fn replace_raw_with_policy(
+        &mut self,
+        fields: Vec<TdmField>,
+        comments: Vec<TdmComment>,
+        policy: TdmWritePolicy,
+    ) -> Result<Vec<TdmDeparture>, TdmError> {
+        let (candidate, departures) = Self::from_raw_with_policy(fields, comments, policy)?;
+        *self = candidate;
+        Ok(departures)
+    }
 }
 
 /// One named tracking participant.
@@ -2537,6 +2597,7 @@ fn validate_tdm(
             });
         }
     }
+    validate_comment_positions(&tdm.comments, unannotated_header_fields(tdm).len())?;
     // The header the writer will emit, in the order it will emit it, held to
     // the rules the reader holds a header to.
     check_written_section(
@@ -2549,45 +2610,17 @@ fn validate_tdm(
 
     for (index, segment) in tdm.segments.iter().enumerate() {
         let number = index.saturating_add(1);
-        for comment in &segment.metadata.comments {
-            check_comment(&comment.text)?;
-        }
         for comment in &segment.data.comments {
             check_comment(&comment.text)?;
         }
-        for field in &segment.metadata.fields {
-            check_field(field)?;
-            if !known_metadata_keyword(&field.key)? {
-                return Err(TdmError::Unwritable {
-                    keyword: field.key.clone(),
-                    reason: "table 3-3 does not define it for a metadata section",
-                });
-            }
-        }
+        validate_comment_positions(&segment.data.comments, segment.data.records.len())?;
 
-        // The writer holds the value to the reader's rules by running the
-        // reader's own checks over what it is about to write, so a rule cannot
-        // hold in one direction and not the other. build_metadata is the
-        // reader's: it bounds the indexed keywords, resolves every PATH
-        // against the participants the segment defines, and requires
-        // TIME_SYSTEM and PARTICIPANT_n. It reads `fields`, which is what the
-        // writer emits, rather than the parsed properties beside it.
-        let mut reader_warnings = Vec::new();
-        build_metadata(
-            MetadataBuilder {
-                highest_rank: 0,
-                comments: segment.metadata.comments.clone(),
-                fields: segment.metadata.fields.clone(),
-            },
+        let derived_metadata = validate_and_build_metadata(
+            segment.metadata.fields.clone(),
+            segment.metadata.comments.clone(),
             number,
-            policy.as_read(),
-            &mut reader_warnings,
-        )?;
-        check_written_section(
-            "metadata",
-            &METADATA_ORDER,
-            &written_metadata_fields(segment),
             policy,
+            false,
             departures,
         )?;
 
@@ -2624,7 +2657,7 @@ fn validate_tdm(
         // 4.3.9's timetags, 3.4.10's order and 3.4.11's uniqueness, checked by
         // the reader's own check_record_order over the records to be written.
         let mut data = DataBuilder::default();
-        let time_system = segment.metadata.time_system.as_deref();
+        let time_system = derived_metadata.time_system.as_deref();
         for record in &segment.data.records {
             let epoch = parse_epoch_key(&record.epoch, time_system).ok_or_else(|| {
                 TdmError::MalformedEpoch {
@@ -2636,8 +2669,9 @@ fn validate_tdm(
             data.epochs.push(epoch);
             data.records.push(record.clone());
         }
-        check_record_order(&data, number, policy.as_read(), &mut reader_warnings)?;
-        departures.extend(reader_warnings.into_iter().map(departure_for));
+        let mut record_warnings = Vec::new();
+        check_record_order(&data, number, policy.as_read(), &mut record_warnings)?;
+        departures.extend(record_warnings.into_iter().map(departure_for));
 
         for record in &segment.data.records {
             if !record.value.value.is_finite() {
@@ -2663,7 +2697,7 @@ fn validate_tdm(
             let expected_unit = unit_for_keyword(
                 &record.keyword,
                 &record.observable,
-                &segment.metadata.range_units,
+                &derived_metadata.range_units,
             );
             if expected_unit != record.unit {
                 return Err(TdmError::InvalidField {
@@ -2897,13 +2931,15 @@ fn written_header_fields(tdm: &Tdm) -> Vec<TdmField> {
     fields
 }
 
-/// The metadata lines the writer will emit for a segment, keyed and in
-/// emission order.
-fn written_metadata_fields(segment: &TdmSegment) -> Vec<TdmField> {
-    let unannotated = &segment.metadata.fields;
-    let mut fields = Vec::with_capacity(unannotated.len() + segment.metadata.comments.len());
+/// The metadata lines the writer will emit for a metadata block from raw fields and comments,
+/// keyed and in emission order.
+fn written_metadata_fields_from_raw(
+    unannotated: &[TdmField],
+    comments: &[TdmComment],
+) -> Vec<TdmField> {
+    let mut fields = Vec::with_capacity(unannotated.len() + comments.len());
     for (index, field) in unannotated.iter().enumerate() {
-        for comment in &segment.metadata.comments {
+        for comment in comments {
             if comment.before_record == index {
                 fields.push(TdmField {
                     key: COMMENT_KEY.to_string(),
@@ -2913,7 +2949,7 @@ fn written_metadata_fields(segment: &TdmSegment) -> Vec<TdmField> {
         }
         fields.push(field.clone());
     }
-    for comment in &segment.metadata.comments {
+    for comment in comments {
         if comment.before_record >= unannotated.len() {
             fields.push(TdmField {
                 key: COMMENT_KEY.to_string(),
@@ -2922,6 +2958,92 @@ fn written_metadata_fields(segment: &TdmSegment) -> Vec<TdmField> {
         }
     }
     fields
+}
+
+/// Validate comment positions and ordering against a section's record or field count.
+///
+/// Refuses comments whose `before_record` offset exceeds `count` or whose offsets
+/// descend, while permitting equal offsets (preserving insertion order) and exact
+/// at-end positions (`before_record == count`).
+fn validate_comment_positions(comments: &[TdmComment], count: usize) -> Result<(), TdmError> {
+    for comment in comments {
+        if comment.before_record > count {
+            return Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment position is out of bounds",
+            });
+        }
+    }
+
+    if comments
+        .windows(2)
+        .any(|w| w[0].before_record > w[1].before_record)
+    {
+        return Err(TdmError::Unwritable {
+            keyword: COMMENT_KEY.to_string(),
+            reason: "comment order cannot be emitted unchanged",
+        });
+    }
+
+    Ok(())
+}
+
+/// Validate raw metadata fields and comments, deriving synchronous convenience properties.
+///
+/// Shared between `TdmMetadata` construction/replacement and `validate_tdm`.
+fn validate_and_build_metadata(
+    fields: Vec<TdmField>,
+    comments: Vec<TdmComment>,
+    segment: usize,
+    policy: TdmWritePolicy,
+    check_lines: bool,
+    departures: &mut Vec<TdmDeparture>,
+) -> Result<TdmMetadata, TdmError> {
+    validate_comment_positions(&comments, fields.len())?;
+
+    for comment in &comments {
+        check_comment(&comment.text)?;
+    }
+
+    for field in &fields {
+        check_field(field)?;
+        if !known_metadata_keyword(&field.key)? {
+            return Err(TdmError::Unwritable {
+                keyword: field.key.clone(),
+                reason: "table 3-3 does not define it for a metadata section",
+            });
+        }
+    }
+
+    let mut reader_warnings = Vec::new();
+    let metadata = build_metadata(
+        MetadataBuilder {
+            highest_rank: 0,
+            comments,
+            fields,
+        },
+        segment,
+        policy.as_read(),
+        &mut reader_warnings,
+    )?;
+
+    let written = written_metadata_fields_from_raw(&metadata.fields, &metadata.comments);
+    check_written_section("metadata", &METADATA_ORDER, &written, policy, departures)?;
+
+    departures.extend(reader_warnings.into_iter().map(departure_for));
+
+    if check_lines {
+        for field in &written {
+            let line = if field.key == COMMENT_KEY {
+                comment_line(&field.value)
+            } else {
+                field_line(field)
+            };
+            check_written_line(&line, policy, departures)?;
+        }
+    }
+
+    Ok(metadata)
 }
 
 /// Hold a section the writer is about to emit to the two rules the reader
@@ -6238,5 +6360,1177 @@ DATA_STOP\n";
             "2005-161T00:00:00"
         );
         assert_eq!(reparsed_utc.segments[0].data.records[1].value.text, "2.0");
+    }
+
+    #[test]
+    fn metadata_conforming_raw_construction_and_encode_round_trip() {
+        let fields = vec![
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "UTC".to_string(),
+            },
+            TdmField {
+                key: "START_TIME".to_string(),
+                value: "2026-001T00:00:00".to_string(),
+            },
+            TdmField {
+                key: "STOP_TIME".to_string(),
+                value: "2026-001T01:00:00".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_1".to_string(),
+                value: "DSS-14".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_2".to_string(),
+                value: "SPACECRAFT".to_string(),
+            },
+            TdmField {
+                key: "MODE".to_string(),
+                value: "SEQUENTIAL".to_string(),
+            },
+            TdmField {
+                key: "PATH".to_string(),
+                value: "1,2".to_string(),
+            },
+            TdmField {
+                key: "TIMETAG_REF".to_string(),
+                value: "TRANSMIT".to_string(),
+            },
+            TdmField {
+                key: "RANGE_UNITS".to_string(),
+                value: "km".to_string(),
+            },
+        ];
+        let comments = vec![TdmComment {
+            text: "conforming metadata comment".to_string(),
+            before_record: 0,
+        }];
+
+        let meta = TdmMetadata::from_raw(fields.clone(), comments.clone())
+            .expect("conforming raw metadata constructs strictly");
+
+        assert_eq!(meta.fields, fields);
+        assert_eq!(meta.comments, comments);
+        assert_eq!(meta.time_system.as_deref(), Some("UTC"));
+        assert_eq!(
+            meta.participants,
+            vec![
+                TdmParticipant {
+                    index: 1,
+                    name: "DSS-14".to_string(),
+                },
+                TdmParticipant {
+                    index: 2,
+                    name: "SPACECRAFT".to_string(),
+                },
+            ]
+        );
+        assert_eq!(meta.mode.as_deref(), Some("SEQUENTIAL"));
+        assert_eq!(
+            meta.paths,
+            vec![TdmPath {
+                key: "PATH".to_string(),
+                index: None,
+                participants: vec![1, 2],
+            }]
+        );
+        assert_eq!(meta.timetag_ref.as_deref(), Some("TRANSMIT"));
+        assert_eq!(meta.range_units, TdmUnit::Kilometers);
+
+        // Build a complete Tdm document with a valid data record and verify encode + parse round-trip
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].metadata = meta.clone();
+        let encoded = encode_kvn(&tdm).expect("tdm with constructed metadata encodes strictly");
+        let parsed = parse_kvn(&encoded).expect("encoded tdm reparses strictly");
+        assert_eq!(parsed.segments[0].metadata, meta);
+    }
+
+    #[test]
+    fn metadata_missing_mandatory_keywords_strict_and_lenient() {
+        // 1. Missing TIME_SYSTEM
+        let no_time_system_fields = vec![TdmField {
+            key: "PARTICIPANT_1".to_string(),
+            value: "DSS-14".to_string(),
+        }];
+        assert_eq!(
+            TdmMetadata::from_raw(no_time_system_fields.clone(), Vec::new()),
+            Err(TdmError::MissingKeyword {
+                keyword: "TIME_SYSTEM".to_string(),
+                segment: Some(1),
+            })
+        );
+        let (meta_no_ts, departures_no_ts) = TdmMetadata::from_raw_with_policy(
+            no_time_system_fields,
+            Vec::new(),
+            TdmWritePolicy::strict().with_missing_keywords(TdmLeniency::Forgive),
+        )
+        .expect("missing TIME_SYSTEM forgiven under write policy");
+        assert_eq!(meta_no_ts.time_system, None);
+        assert_eq!(
+            departures_no_ts,
+            vec![TdmDeparture::MissingKeyword {
+                keyword: "TIME_SYSTEM".to_string(),
+                segment: Some(1),
+            }]
+        );
+
+        // 2. Missing PARTICIPANT_n
+        let no_participants_fields = vec![TdmField {
+            key: "TIME_SYSTEM".to_string(),
+            value: "UTC".to_string(),
+        }];
+        assert_eq!(
+            TdmMetadata::from_raw(no_participants_fields.clone(), Vec::new()),
+            Err(TdmError::MissingKeyword {
+                keyword: "PARTICIPANT_n".to_string(),
+                segment: Some(1),
+            })
+        );
+        let (meta_no_part, departures_no_part) = TdmMetadata::from_raw_with_policy(
+            no_participants_fields,
+            Vec::new(),
+            TdmWritePolicy::strict().with_missing_keywords(TdmLeniency::Forgive),
+        )
+        .expect("missing participant forgiven under write policy");
+        assert!(meta_no_part.participants.is_empty());
+        assert_eq!(
+            departures_no_part,
+            vec![TdmDeparture::MissingKeyword {
+                keyword: "PARTICIPANT_n".to_string(),
+                segment: Some(1),
+            }]
+        );
+
+        // 3. Both missing
+        let (meta_none, departures_none) = TdmMetadata::from_raw_with_policy(
+            Vec::new(),
+            Vec::new(),
+            TdmWritePolicy::strict().with_missing_keywords(TdmLeniency::Forgive),
+        )
+        .expect("both missing mandatory keywords forgiven under write policy");
+        assert_eq!(meta_none.time_system, None);
+        assert!(meta_none.participants.is_empty());
+        assert_eq!(
+            departures_none,
+            vec![
+                TdmDeparture::MissingKeyword {
+                    keyword: "TIME_SYSTEM".to_string(),
+                    segment: Some(1),
+                },
+                TdmDeparture::MissingKeyword {
+                    keyword: "PARTICIPANT_n".to_string(),
+                    segment: Some(1),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_repeated_identical_and_conflicting_fields() {
+        // Identical repeats: TIME_SYSTEM = UTC twice
+        let repeated_fields = vec![
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "UTC".to_string(),
+            },
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "UTC".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_1".to_string(),
+                value: "DSS-14".to_string(),
+            },
+        ];
+
+        // Strict refusal
+        assert_eq!(
+            TdmMetadata::from_raw(repeated_fields.clone(), Vec::new()),
+            Err(TdmError::RepeatedKeyword {
+                line: None,
+                keyword: "TIME_SYSTEM".to_string(),
+                section: "metadata",
+            })
+        );
+
+        // Policy-aware preservation and single departure
+        let (meta_rep, departures_rep) = TdmMetadata::from_raw_with_policy(
+            repeated_fields.clone(),
+            Vec::new(),
+            TdmWritePolicy::strict().with_repeated_keywords(TdmLeniency::Forgive),
+        )
+        .expect("repeated identical field allowed under policy");
+        assert_eq!(meta_rep.fields, repeated_fields);
+        assert_eq!(meta_rep.time_system.as_deref(), Some("UTC"));
+        assert_eq!(
+            departures_rep,
+            vec![TdmDeparture::RepeatedKeyword {
+                keyword: "TIME_SYSTEM".to_string(),
+                section: "metadata",
+            }]
+        );
+
+        // Conflicting repeats: TIME_SYSTEM = UTC and TIME_SYSTEM = GPS
+        let conflicting_fields = vec![
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "UTC".to_string(),
+            },
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "GPS".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_1".to_string(),
+                value: "DSS-14".to_string(),
+            },
+        ];
+        let expected_conflict = TdmError::ConflictingKeyword {
+            line: None,
+            keyword: "TIME_SYSTEM".to_string(),
+            section: "metadata",
+            first: "UTC".to_string(),
+            second: "GPS".to_string(),
+        };
+        assert_eq!(
+            TdmMetadata::from_raw(conflicting_fields.clone(), Vec::new()),
+            Err(expected_conflict.clone())
+        );
+        assert_eq!(
+            TdmMetadata::from_raw_with_policy(
+                conflicting_fields,
+                Vec::new(),
+                TdmWritePolicy::lenient(),
+            ),
+            Err(expected_conflict)
+        );
+    }
+
+    #[test]
+    fn metadata_constructor_validation_errors() {
+        let base_fields = vec![
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "UTC".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_1".to_string(),
+                value: "DSS-14".to_string(),
+            },
+        ];
+
+        // 1. Unknown keyword
+        let mut unknown_kw = base_fields.clone();
+        unknown_kw.push(TdmField {
+            key: "UNKNOWN_KEYWORD".to_string(),
+            value: "VAL".to_string(),
+        });
+        assert_eq!(
+            TdmMetadata::from_raw(unknown_kw, Vec::new()),
+            Err(TdmError::Unwritable {
+                keyword: "UNKNOWN_KEYWORD".to_string(),
+                reason: "table 3-3 does not define it for a metadata section",
+            })
+        );
+
+        // 2. Invalid index: PARTICIPANT_9 (range is 1..=5)
+        let invalid_idx_part = vec![
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "UTC".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_9".to_string(),
+                value: "DSS-14".to_string(),
+            },
+        ];
+        assert_eq!(
+            TdmMetadata::from_raw(invalid_idx_part, Vec::new()),
+            Err(TdmError::InvalidField {
+                keyword: "PARTICIPANT_9".to_string(),
+                kind: TdmInputErrorKind::InvalidIndex,
+            })
+        );
+
+        // 3. Invalid index: PATH_3 (range is 1..=2)
+        let mut invalid_idx_path = base_fields.clone();
+        invalid_idx_path.push(TdmField {
+            key: "PATH_3".to_string(),
+            value: "1".to_string(),
+        });
+        assert_eq!(
+            TdmMetadata::from_raw(invalid_idx_path, Vec::new()),
+            Err(TdmError::InvalidField {
+                keyword: "PATH_3".to_string(),
+                kind: TdmInputErrorKind::InvalidIndex,
+            })
+        );
+
+        // 4. Undefined participant in PATH: references participant 2 when only 1 exists
+        let mut undef_part = base_fields.clone();
+        undef_part.push(TdmField {
+            key: "PATH".to_string(),
+            value: "1,2".to_string(),
+        });
+        assert_eq!(
+            TdmMetadata::from_raw(undef_part, Vec::new()),
+            Err(TdmError::UndefinedParticipant {
+                segment: 1,
+                keyword: "PATH".to_string(),
+                index: 2,
+            })
+        );
+
+        // 5. Malformed raw field: empty value
+        let mut empty_val = base_fields.clone();
+        empty_val.push(TdmField {
+            key: "MODE".to_string(),
+            value: String::new(),
+        });
+        assert_eq!(
+            TdmMetadata::from_raw(empty_val, Vec::new()),
+            Err(TdmError::EmptyValue {
+                line: None,
+                keyword: "MODE".to_string(),
+            })
+        );
+
+        // 6. Malformed raw field: equals sign in key
+        let mut eq_in_key = base_fields.clone();
+        eq_in_key.push(TdmField {
+            key: "MO=DE".to_string(),
+            value: "SEQUENTIAL".to_string(),
+        });
+        assert_eq!(
+            TdmMetadata::from_raw(eq_in_key, Vec::new()),
+            Err(TdmError::Unwritable {
+                keyword: "MO=DE".to_string(),
+                reason: "an equals sign in the keyword would split the line elsewhere",
+            })
+        );
+
+        // 7. Malformed raw field: whitespace around value
+        let mut ws_val = base_fields.clone();
+        ws_val.push(TdmField {
+            key: "MODE".to_string(),
+            value: " SEQUENTIAL ".to_string(),
+        });
+        assert_eq!(
+            TdmMetadata::from_raw(ws_val, Vec::new()),
+            Err(TdmError::Unwritable {
+                keyword: "MODE".to_string(),
+                reason: "whitespace around the value, which 4.2.8 and 4.2.9 drop on the way back",
+            })
+        );
+
+        // 8. Malformed raw comment: trailing whitespace
+        let bad_comment_ws = vec![TdmComment {
+            text: "trailing whitespace ".to_string(),
+            before_record: 0,
+        }];
+        assert_eq!(
+            TdmMetadata::from_raw(base_fields.clone(), bad_comment_ws),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "whitespace at the end of the text, which 4.2.9 drops on the way back",
+            })
+        );
+
+        // 9. Malformed raw comment: line terminator
+        let bad_comment_nl = vec![TdmComment {
+            text: "two\nlines".to_string(),
+            before_record: 0,
+        }];
+        assert_eq!(
+            TdmMetadata::from_raw(base_fields, bad_comment_nl),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "a line terminator, which would write a second line",
+            })
+        );
+    }
+
+    #[test]
+    fn metadata_out_of_order_nonprintable_and_long_with_writer_parity() {
+        let long_text = "x".repeat(250);
+        let comments = vec![TdmComment {
+            text: format!("Caf\u{00E9} {long_text}"),
+            before_record: 0,
+        }];
+        // MODE (rank 7) before TIME_SYSTEM (rank 3) and PARTICIPANT_1 (rank 6)
+        let fields = vec![
+            TdmField {
+                key: "MODE".to_string(),
+                value: "SEQUENTIAL".to_string(),
+            },
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "UTC".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_1".to_string(),
+                value: "DSS-14".to_string(),
+            },
+        ];
+
+        let policy = TdmWritePolicy::strict()
+            .with_keyword_order(TdmLeniency::Forgive)
+            .with_non_printable(TdmLeniency::Forgive)
+            .with_long_lines(TdmLeniency::Forgive);
+
+        let (meta, departures) =
+            TdmMetadata::from_raw_with_policy(fields, comments.clone(), policy)
+                .expect("permissive policy allows out-of-order, non-printable, and long metadata");
+
+        let full_comment_line = format!("COMMENT {}", comments[0].text);
+        let expected_char_count = full_comment_line.chars().count();
+        let expected_departures = vec![
+            TdmDeparture::KeywordOutOfOrder {
+                keyword: "TIME_SYSTEM".to_string(),
+                section: "metadata",
+            },
+            TdmDeparture::KeywordOutOfOrder {
+                keyword: "PARTICIPANT_1".to_string(),
+                section: "metadata",
+            },
+            TdmDeparture::NonPrintableCharacter {
+                keyword: "COMMENT".to_string(),
+                character: '\u{00E9}',
+            },
+            TdmDeparture::LineTooLong {
+                keyword: "COMMENT".to_string(),
+                length: expected_char_count,
+            },
+        ];
+        assert_eq!(departures, expected_departures);
+
+        // Test writer parity without duplicate warnings
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        tdm.segments[0].metadata = meta;
+        let (_, writer_departures) =
+            encode_kvn_with_policy(&tdm, policy).expect("writer encodes under permissive policy");
+        assert_eq!(writer_departures, expected_departures);
+    }
+
+    #[test]
+    fn metadata_comment_bounds_and_ordering() {
+        let base_fields = vec![
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "UTC".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_1".to_string(),
+                value: "DSS-14".to_string(),
+            },
+        ];
+        // fields.len() == 2. Valid before_record values are 0, 1, and 2.
+
+        // 1. Out-of-bounds before_record: 3 > fields.len()
+        let out_of_bounds_comment = vec![TdmComment {
+            text: "out of bounds".to_string(),
+            before_record: 3,
+        }];
+        assert_eq!(
+            TdmMetadata::from_raw(base_fields.clone(), out_of_bounds_comment.clone()),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment position is out of bounds",
+            })
+        );
+        // Bounds check is non-forgivable even under forgiving policy
+        assert_eq!(
+            TdmMetadata::from_raw_with_policy(
+                base_fields.clone(),
+                out_of_bounds_comment,
+                TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+            ),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment position is out of bounds",
+            })
+        );
+
+        // 2. Non-emittable comment order: comment 0 has before_record 1, comment 1 has before_record 0
+        let non_emittable_comments = vec![
+            TdmComment {
+                text: "first comment in vec".to_string(),
+                before_record: 1,
+            },
+            TdmComment {
+                text: "second comment in vec".to_string(),
+                before_record: 0,
+            },
+        ];
+        assert_eq!(
+            TdmMetadata::from_raw(base_fields.clone(), non_emittable_comments.clone()),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment order cannot be emitted unchanged",
+            })
+        );
+        // Descending order check is non-forgivable even under forgiving policy
+        assert_eq!(
+            TdmMetadata::from_raw_with_policy(
+                base_fields.clone(),
+                non_emittable_comments,
+                TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+            ),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment order cannot be emitted unchanged",
+            })
+        );
+
+        // 3. Valid at-end offset retained: before_record == fields.len() (2)
+        let at_end_comments = vec![TdmComment {
+            text: "at end of metadata".to_string(),
+            before_record: 2,
+        }];
+        // Under strict policy, comments after fields violate Table 3-3 order (rank 0 after rank > 0)
+        assert_eq!(
+            TdmMetadata::from_raw(base_fields.clone(), at_end_comments.clone()),
+            Err(TdmError::KeywordOutOfOrder {
+                line: None,
+                keyword: COMMENT_KEY.to_string(),
+                section: "metadata",
+            })
+        );
+        // Under policy with keyword_order forgiven, at-end offset is retained
+        let (meta_at_end, departures_at_end) = TdmMetadata::from_raw_with_policy(
+            base_fields.clone(),
+            at_end_comments.clone(),
+            TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("valid at-end comment offset accepted with departure under keyword_order policy");
+        assert_eq!(meta_at_end.comments, at_end_comments);
+        assert_eq!(
+            departures_at_end,
+            vec![TdmDeparture::KeywordOutOfOrder {
+                keyword: COMMENT_KEY.to_string(),
+                section: "metadata",
+            }]
+        );
+
+        // Roundtrip at-end metadata comment in a full message
+        let mut tdm_at_end = parse_kvn(CONFORMING).unwrap();
+        tdm_at_end.segments[0].metadata = meta_at_end;
+        let (encoded_at_end, full_departures) = encode_kvn_with_policy(
+            &tdm_at_end,
+            TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("at-end metadata comment encodes under keyword_order Forgive");
+        assert_eq!(
+            full_departures,
+            vec![TdmDeparture::KeywordOutOfOrder {
+                keyword: COMMENT_KEY.to_string(),
+                section: "metadata",
+            }]
+        );
+        let (parsed_at_end, warnings_at_end) = parse_kvn_with_policy(
+            &encoded_at_end,
+            TdmPolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("roundtrips with keyword_order Forgive");
+        assert_eq!(
+            warnings_at_end,
+            vec![TdmWarning::KeywordOutOfOrder {
+                line: 7,
+                keyword: COMMENT_KEY.to_string(),
+                section: "metadata",
+            }]
+        );
+        assert_eq!(parsed_at_end.segments[0].metadata.comments, at_end_comments);
+        assert_eq!(
+            parsed_at_end.segments[0].metadata.comments[0].before_record,
+            2
+        );
+
+        // 4. Equal offsets order stable
+        let equal_comments = vec![
+            TdmComment {
+                text: "meta comment 1".to_string(),
+                before_record: 0,
+            },
+            TdmComment {
+                text: "meta comment 2".to_string(),
+                before_record: 0,
+            },
+        ];
+        let (meta_equal, departures_equal) = TdmMetadata::from_raw_with_policy(
+            base_fields.clone(),
+            equal_comments.clone(),
+            TdmWritePolicy::strict(),
+        )
+        .expect("equal comment offsets permitted under strict policy");
+        assert_eq!(meta_equal.comments, equal_comments);
+        assert!(departures_equal.is_empty());
+
+        let mut tdm_equal = parse_kvn(CONFORMING).unwrap();
+        tdm_equal.segments[0].metadata = meta_equal;
+        let encoded_equal =
+            encode_kvn(&tdm_equal).expect("conforming metadata comments encode strictly");
+        let parsed_equal = parse_kvn(&encoded_equal).expect("roundtrips equal metadata comments");
+        assert_eq!(parsed_equal.segments[0].metadata.comments, equal_comments);
+
+        // 5. Valid interleaving retained: before_record == 1
+        let interleaved_comment = vec![TdmComment {
+            text: "interleaved between field 0 and 1".to_string(),
+            before_record: 1,
+        }];
+        let (meta_interleaved, departures_interleaved) = TdmMetadata::from_raw_with_policy(
+            base_fields,
+            interleaved_comment.clone(),
+            TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("interleaved comment accepted under keyword_order policy");
+        assert_eq!(meta_interleaved.comments, interleaved_comment);
+        assert_eq!(
+            departures_interleaved,
+            vec![TdmDeparture::KeywordOutOfOrder {
+                keyword: COMMENT_KEY.to_string(),
+                section: "metadata",
+            }]
+        );
+    }
+
+    #[test]
+    fn header_comment_bounds_and_ordering() {
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        // CONFORMING header has CCSDS_TDM_VERS, CREATION_DATE, ORIGINATOR.
+        // unannotated_header_fields len is 3. Valid offsets: 0, 1, 2, 3.
+
+        // 1. Out-of-bounds offset rejected under both strict and forgiving policies
+        let out_of_bounds = vec![TdmComment {
+            text: "late".to_string(),
+            before_record: 4,
+        }];
+        tdm.comments = out_of_bounds;
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment position is out of bounds",
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(
+                &tdm,
+                TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+            ),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment position is out of bounds",
+            })
+        );
+
+        // 2. Descending offsets rejected under both strict and forgiving policies
+        let descending = vec![
+            TdmComment {
+                text: "second".to_string(),
+                before_record: 2,
+            },
+            TdmComment {
+                text: "first".to_string(),
+                before_record: 1,
+            },
+        ];
+        tdm.comments = descending;
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment order cannot be emitted unchanged",
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(
+                &tdm,
+                TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+            ),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment order cannot be emitted unchanged",
+            })
+        );
+
+        // 3. Equal offsets order stable (conforming placement: before_record 1 sits after VERSION and before CREATION_DATE)
+        let equal_comments = vec![
+            TdmComment {
+                text: "hdr comment 1".to_string(),
+                before_record: 1,
+            },
+            TdmComment {
+                text: "hdr comment 2".to_string(),
+                before_record: 1,
+            },
+        ];
+        tdm.comments = equal_comments.clone();
+        let encoded = encode_kvn(&tdm).expect("conforming equal header comments encode strictly");
+        let parsed = parse_kvn(&encoded).expect("roundtrip conforming header comments");
+        assert_eq!(parsed.comments, equal_comments);
+
+        // 4. Legal exact at-end offset (before_record == 3) survives write/read under forgiving policy
+        let at_end = vec![TdmComment {
+            text: "at end of header".to_string(),
+            before_record: 3,
+        }];
+        tdm.comments = at_end.clone();
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::KeywordOutOfOrder {
+                line: None,
+                keyword: COMMENT_KEY.to_string(),
+                section: "header",
+            })
+        );
+        let (encoded_at_end, departures_at_end) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("legal at-end header comment accepted under keyword_order Forgive");
+        assert_eq!(
+            departures_at_end,
+            vec![TdmDeparture::KeywordOutOfOrder {
+                keyword: COMMENT_KEY.to_string(),
+                section: "header",
+            }]
+        );
+        let (parsed_at_end, warnings_at_end) = parse_kvn_with_policy(
+            &encoded_at_end,
+            TdmPolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("roundtrips at-end header comment");
+        assert_eq!(
+            warnings_at_end,
+            vec![TdmWarning::KeywordOutOfOrder {
+                line: 4,
+                keyword: COMMENT_KEY.to_string(),
+                section: "header",
+            }]
+        );
+        assert_eq!(parsed_at_end.comments, at_end);
+        assert_eq!(parsed_at_end.comments[0].before_record, 3);
+
+        // 5. Header actual count includes optional modeled fields (e.g. MESSAGE_ID expands count to 4)
+        tdm.message_id = Some("MSG_12345".to_string());
+        // Now count is 4. before_record 4 is legal at-end; 5 is out of bounds.
+        tdm.comments = vec![TdmComment {
+            text: "end with message_id".to_string(),
+            before_record: 4,
+        }];
+        let (encoded_opt, departures_opt) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("offset 4 legal when MESSAGE_ID is present");
+        assert_eq!(
+            departures_opt,
+            vec![TdmDeparture::KeywordOutOfOrder {
+                keyword: COMMENT_KEY.to_string(),
+                section: "header",
+            }]
+        );
+        let (parsed_opt, warnings_opt) = parse_kvn_with_policy(
+            &encoded_opt,
+            TdmPolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("roundtrips header with optional MESSAGE_ID and comment");
+        assert_eq!(
+            warnings_opt,
+            vec![TdmWarning::KeywordOutOfOrder {
+                line: 5,
+                keyword: COMMENT_KEY.to_string(),
+                section: "header",
+            }]
+        );
+        assert_eq!(parsed_opt.comments, tdm.comments);
+        assert_eq!(parsed_opt.comments[0].before_record, 4);
+
+        tdm.comments = vec![TdmComment {
+            text: "past message_id".to_string(),
+            before_record: 5,
+        }];
+        assert_eq!(
+            encode_kvn_with_policy(
+                &tdm,
+                TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+            ),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment position is out of bounds",
+            })
+        );
+
+        // 6. Unknown header field normative refusal is not bypassed by comment position check
+        tdm.header_fields.push(TdmField {
+            key: "UNKNOWN_HDR_KEYWORD".to_string(),
+            value: "val".to_string(),
+        });
+        tdm.comments = vec![TdmComment {
+            text: "out of bounds comment".to_string(),
+            before_record: 99,
+        }];
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::Unwritable {
+                keyword: "UNKNOWN_HDR_KEYWORD".to_string(),
+                reason: "table 3-2 does not define it for a header",
+            })
+        );
+    }
+
+    #[test]
+    fn data_comment_bounds_and_ordering() {
+        let mut tdm = parse_kvn(CONFORMING).unwrap();
+        // CONFORMING segment 0 has 1 data record. Valid offsets: 0, 1.
+
+        // 1. Out-of-bounds offset rejected under both strict and forgiving policies
+        let out_of_bounds = vec![TdmComment {
+            text: "late data comment".to_string(),
+            before_record: 2,
+        }];
+        tdm.segments[0].data.comments = out_of_bounds;
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment position is out of bounds",
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(
+                &tdm,
+                TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+            ),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment position is out of bounds",
+            })
+        );
+
+        // Also test far out-of-bounds like 99
+        tdm.segments[0].data.comments = vec![TdmComment {
+            text: "offset 99".to_string(),
+            before_record: 99,
+        }];
+        assert_eq!(
+            encode_kvn_with_policy(
+                &tdm,
+                TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+            ),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment position is out of bounds",
+            })
+        );
+
+        // 2. Descending offsets rejected under both strict and forgiving policies
+        let descending = vec![
+            TdmComment {
+                text: "second".to_string(),
+                before_record: 1,
+            },
+            TdmComment {
+                text: "first".to_string(),
+                before_record: 0,
+            },
+        ];
+        tdm.segments[0].data.comments = descending;
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment order cannot be emitted unchanged",
+            })
+        );
+        assert_eq!(
+            encode_kvn_with_policy(
+                &tdm,
+                TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+            ),
+            Err(TdmError::Unwritable {
+                keyword: COMMENT_KEY.to_string(),
+                reason: "comment order cannot be emitted unchanged",
+            })
+        );
+
+        // 3. Equal offsets order stable (conforming placement: before_record 0 conforms to 4.5.2 c)
+        let equal_comments = vec![
+            TdmComment {
+                text: "data comment 1".to_string(),
+                before_record: 0,
+            },
+            TdmComment {
+                text: "data comment 2".to_string(),
+                before_record: 0,
+            },
+        ];
+        tdm.segments[0].data.comments = equal_comments.clone();
+        let encoded = encode_kvn(&tdm).expect("conforming equal data comments encode strictly");
+        let parsed = parse_kvn(&encoded).expect("roundtrip conforming data comments");
+        assert_eq!(parsed.segments[0].data.comments, equal_comments);
+
+        // 4. Legal exact at-end offset (before_record == 1) survives write/read under forgiving policy
+        let at_end = vec![TdmComment {
+            text: "at end of data".to_string(),
+            before_record: 1,
+        }];
+        tdm.segments[0].data.comments = at_end.clone();
+        assert_eq!(
+            encode_kvn(&tdm),
+            Err(TdmError::KeywordOutOfOrder {
+                line: None,
+                keyword: COMMENT_KEY.to_string(),
+                section: "data",
+            })
+        );
+        let (encoded_at_end, departures_at_end) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("legal at-end data comment accepted under keyword_order Forgive");
+        assert_eq!(
+            departures_at_end,
+            vec![TdmDeparture::KeywordOutOfOrder {
+                keyword: COMMENT_KEY.to_string(),
+                section: "data",
+            }]
+        );
+        let (parsed_at_end, warnings_at_end) = parse_kvn_with_policy(
+            &encoded_at_end,
+            TdmPolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("roundtrips at-end data comment");
+        assert_eq!(
+            warnings_at_end,
+            vec![TdmWarning::KeywordOutOfOrder {
+                line: 10,
+                keyword: COMMENT_KEY.to_string(),
+                section: "data",
+            }]
+        );
+        assert_eq!(parsed_at_end.segments[0].data.comments, at_end);
+        assert_eq!(parsed_at_end.segments[0].data.comments[0].before_record, 1);
+
+        // 5. Equal offsets at legal at-end position order stable under forgiving policy
+        let equal_at_end = vec![
+            TdmComment {
+                text: "at end 1".to_string(),
+                before_record: 1,
+            },
+            TdmComment {
+                text: "at end 2".to_string(),
+                before_record: 1,
+            },
+        ];
+        tdm.segments[0].data.comments = equal_at_end.clone();
+        let (encoded_multi_end, departures_multi) = encode_kvn_with_policy(
+            &tdm,
+            TdmWritePolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("multiple equal at-end data comments encode under keyword_order Forgive");
+        assert_eq!(departures_multi.len(), 2);
+        let (parsed_multi_end, warnings_multi) = parse_kvn_with_policy(
+            &encoded_multi_end,
+            TdmPolicy::strict().with_keyword_order(TdmLeniency::Forgive),
+        )
+        .expect("roundtrips multiple equal at-end data comments");
+        assert_eq!(
+            warnings_multi,
+            vec![
+                TdmWarning::KeywordOutOfOrder {
+                    line: 10,
+                    keyword: COMMENT_KEY.to_string(),
+                    section: "data",
+                },
+                TdmWarning::KeywordOutOfOrder {
+                    line: 11,
+                    keyword: COMMENT_KEY.to_string(),
+                    section: "data",
+                },
+            ]
+        );
+        assert_eq!(parsed_multi_end.segments[0].data.comments, equal_at_end);
+    }
+
+    #[test]
+    fn metadata_replace_raw_atomicity_and_coherence() {
+        let initial_fields = vec![
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "UTC".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_1".to_string(),
+                value: "DSS-14".to_string(),
+            },
+            TdmField {
+                key: "MODE".to_string(),
+                value: "SEQUENTIAL".to_string(),
+            },
+        ];
+        let initial_comments = vec![TdmComment {
+            text: "initial".to_string(),
+            before_record: 0,
+        }];
+
+        let mut meta = TdmMetadata::from_raw(initial_fields, initial_comments)
+            .expect("initial metadata constructs strictly");
+        let original_snapshot = meta.clone();
+
+        // 1. Failed replace_raw (missing PARTICIPANT_n under strict policy)
+        let invalid_fields = vec![TdmField {
+            key: "TIME_SYSTEM".to_string(),
+            value: "UTC".to_string(),
+        }];
+        let res = meta.replace_raw(invalid_fields, Vec::new());
+        assert_eq!(
+            res,
+            Err(TdmError::MissingKeyword {
+                keyword: "PARTICIPANT_n".to_string(),
+                segment: Some(1),
+            })
+        );
+        // Assert meta remains completely untouched
+        assert_eq!(meta, original_snapshot);
+
+        // 2. Successful replacement updating all properties coherently
+        let replacement_fields = vec![
+            TdmField {
+                key: "TIME_SYSTEM".to_string(),
+                value: "TAI".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_1".to_string(),
+                value: "PARKES".to_string(),
+            },
+            TdmField {
+                key: "PARTICIPANT_2".to_string(),
+                value: "GOLDSTONE".to_string(),
+            },
+            TdmField {
+                key: "MODE".to_string(),
+                value: "SINGLE_DIRECTION".to_string(),
+            },
+            TdmField {
+                key: "PATH".to_string(),
+                value: "1,2".to_string(),
+            },
+            TdmField {
+                key: "TIMETAG_REF".to_string(),
+                value: "RECEIVE".to_string(),
+            },
+            TdmField {
+                key: "RANGE_UNITS".to_string(),
+                value: "RU".to_string(),
+            },
+        ];
+        let replacement_comments = vec![TdmComment {
+            text: "replaced".to_string(),
+            before_record: 0,
+        }];
+
+        let res_success =
+            meta.replace_raw(replacement_fields.clone(), replacement_comments.clone());
+        assert!(res_success.is_ok());
+
+        assert_eq!(meta.fields, replacement_fields);
+        assert_eq!(meta.comments, replacement_comments);
+        assert_eq!(meta.time_system.as_deref(), Some("TAI"));
+        assert_eq!(
+            meta.participants,
+            vec![
+                TdmParticipant {
+                    index: 1,
+                    name: "PARKES".to_string(),
+                },
+                TdmParticipant {
+                    index: 2,
+                    name: "GOLDSTONE".to_string(),
+                },
+            ]
+        );
+        assert_eq!(meta.mode.as_deref(), Some("SINGLE_DIRECTION"));
+        assert_eq!(
+            meta.paths,
+            vec![TdmPath {
+                key: "PATH".to_string(),
+                index: None,
+                participants: vec![1, 2],
+            }]
+        );
+        assert_eq!(meta.timetag_ref.as_deref(), Some("RECEIVE"));
+        assert_eq!(meta.range_units, TdmUnit::RangeUnits);
+    }
+
+    #[test]
+    fn writer_validates_against_derived_metadata_ignoring_stale_cache() {
+        // Case 1: TIME_SYSTEM stale cache vs raw fields.
+        // Baseline CONFORMING has TIME_SYSTEM = UTC.
+        // Mutate the data record timetag to 23:59:60, which is valid under UTC.
+        let mut tdm_time = parse_kvn(CONFORMING).unwrap();
+        tdm_time.segments[0].data.records[0].epoch = "2005-159T23:59:60".to_string();
+
+        // Stale cache: mutate raw field to TAI, but leave segment.metadata.time_system as Some("UTC").
+        // Under TAI, leap second :60 is invalid. Writer must derive TAI from raw fields and reject :60.
+        tdm_time.segments[0].metadata.fields[0] = TdmField {
+            key: "TIME_SYSTEM".to_string(),
+            value: "TAI".to_string(),
+        };
+        assert_eq!(
+            tdm_time.segments[0].metadata.time_system.as_deref(),
+            Some("UTC")
+        );
+        assert_eq!(
+            encode_kvn(&tdm_time),
+            Err(TdmError::MalformedEpoch {
+                line: None,
+                keyword: "RANGE".to_string(),
+                text: "2005-159T23:59:60".to_string(),
+            })
+        );
+
+        // Conversely, raw field is UTC, but cache is mutated to stale "TAI".
+        // Genuine UTC leap second must be accepted because emitted field is UTC.
+        tdm_time.segments[0].metadata.fields[0] = TdmField {
+            key: "TIME_SYSTEM".to_string(),
+            value: "UTC".to_string(),
+        };
+        tdm_time.segments[0].metadata.time_system = Some("TAI".to_string());
+        assert!(
+            encode_kvn(&tdm_time).is_ok(),
+            "emitted TIME_SYSTEM is UTC so genuine leap second must be accepted despite stale TAI cache"
+        );
+
+        // Case 2: RANGE_UNITS stale cache vs raw fields.
+        // Baseline CONFORMING has RANGE record with unit Kilometers.
+        let mut tdm_range = parse_kvn(CONFORMING).unwrap();
+        assert_eq!(
+            tdm_range.segments[0].data.records[0].unit,
+            TdmUnit::Kilometers
+        );
+
+        // Append RANGE_UNITS = RU to raw fields (after PARTICIPANT_1, maintaining Table 3-3 order).
+        // Leave stale cache segment.metadata.range_units as TdmUnit::Kilometers.
+        tdm_range.segments[0].metadata.fields.push(TdmField {
+            key: "RANGE_UNITS".to_string(),
+            value: "RU".to_string(),
+        });
+        assert_eq!(
+            tdm_range.segments[0].metadata.range_units,
+            TdmUnit::Kilometers
+        );
+
+        // Writer must derive RANGE_UNITS = RangeUnits from emitted raw fields,
+        // which conflicts with the record's stored unit Kilometers and raises UnitMismatch.
+        assert_eq!(
+            encode_kvn(&tdm_range),
+            Err(TdmError::InvalidField {
+                keyword: "RANGE".to_string(),
+                kind: TdmInputErrorKind::UnitMismatch,
+            })
+        );
     }
 }

@@ -6,6 +6,9 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- `TdmMetadata` gains strict and policy-aware construction and atomic replacement from ordered raw fields and positioned comments, returning every typed departure. Writer validation derives time system and range units from those fields rather than stale convenience properties.
+- **Breaking.** TDM writing refuses header, metadata and data comment positions or ordering that cannot be emitted unchanged instead of moving or omitting those comments silently.
+
 - **Breaking.** `ObsLeapSeconds` retains its optional raw time-system identifier and no longer implements `Copy`. Readers and writers preserve blank versus explicit GPS and validate BDS/BDT against the RINEX version. Downgrades that cannot state that time system fail by name; intermediate blank numeric fields keep their fixed positions.
 
 - **Breaking.** RINEX observation downgrade refuses a conversion that changes a modeled physical carrier frequency with `ObservableNotRepresentable`. Modern BeiDou B1C cannot be relabeled as B1I in version 2; RINEX 3.02 B1I I/Q/X observations retain their carrier when renamed, including event-declared lists and cycle slips.
