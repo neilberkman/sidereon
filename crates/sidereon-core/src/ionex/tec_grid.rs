@@ -563,6 +563,9 @@ impl TecGrid {
 /// carrier frequency, obtains slant TEC from [`tec_xyz`], and applies
 /// `IONOSPHERE_CONSTANT * stec / frequency_hz^2`, returning the finite result in
 /// meters. The altitude component is used only for the NaN check.
+///
+/// [`TecGridDelayXyzConversion`] performs the same evaluation in steps for a
+/// caller that cannot supply the conversion as a Rust closure.
 pub fn iono_delay_xyz<F>(
     grid: &TecGrid,
     options: TecGridEvalOptions,
@@ -597,16 +600,10 @@ pub fn iono_delay_xyz_with_policy<F>(
 where
     F: Fn(&[f64; 3]) -> [f64; 3],
 {
-    validate_frequency(options.frequency_hz)?;
-
-    let tec = tec_xyz_with_policy(grid, options, sat_xyz, receiver_xyz, ecef_to_lla, policy)?;
-    let (_vtec, stec) = tec.value;
-    let delay_m = IONOSPHERE_CONSTANT * stec / (options.frequency_hz * options.frequency_hz);
-    validate::finite(delay_m, "ionosphere_delay_m").map_err(field_error_string)?;
-    Ok(TecGridEvaluation {
-        value: delay_m,
-        degraded: tec.degraded,
-    })
+    let frequency_hz = validate_frequency(options.frequency_hz)?;
+    let stage = PiercePointStage::prepare(options, sat_xyz, receiver_xyz, policy)?;
+    let tec = stage.drive(grid, &ecef_to_lla)?;
+    group_delay_from_tec(tec, frequency_hz)
 }
 
 /// Computes vertical and slant TEC for an ECEF satellite and receiver pair.
@@ -617,6 +614,9 @@ where
 /// `nan_pierce_point_height_m` are used instead. The result is
 /// `(vtec_tecu, stec_tecu)`, with slant TEC obtained from the configured shell
 /// geometry and the elevation after applying `min_elevation_rad`.
+///
+/// [`TecGridXyzConversion`] performs the same evaluation in steps for a caller
+/// that cannot supply the conversion as a Rust closure.
 pub fn tec_xyz<F>(
     grid: &TecGrid,
     options: TecGridEvalOptions,
@@ -651,48 +651,400 @@ pub fn tec_xyz_with_policy<F>(
 where
     F: Fn(&[f64; 3]) -> [f64; 3],
 {
-    let shell_radius_m = validate_tec_geometry_inputs(options, sat_xyz, receiver_xyz)?;
-    let (_pp_xyz, pp_lonlatalt, mut elevation_rad) =
-        pierce_point_with_shell_radius(sat_xyz, receiver_xyz, shell_radius_m, &ecef_to_lla);
-    if elevation_rad < options.min_elevation_rad {
-        elevation_rad = options.min_elevation_rad;
-    }
-    validate::finite(elevation_rad, "elevation_rad").map_err(field_error_string)?;
+    PiercePointStage::prepare(options, sat_xyz, receiver_xyz, policy)?.drive(grid, &ecef_to_lla)
+}
 
-    let pp_lonlatalt = if pp_lonlatalt.iter().any(|v| v.is_nan()) {
-        let receiver_lonlatalt = ecef_to_lla(receiver_xyz);
-        [
+/// The ECEF position a [`TecGridXyzConversion`] or
+/// [`TecGridDelayXyzConversion`] asks the caller to convert.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TecGridXyzTarget {
+    /// The ionospheric pierce point, the first conversion of every evaluation.
+    ///
+    /// Its coordinates are whatever the shell intersection produced. A line of
+    /// sight that misses the shell gives NaN components, and they are still
+    /// requested, as [`tec_xyz`] passes them to its callback.
+    PiercePoint,
+    /// The receiver position, requested only after the pierce-point answer held
+    /// a NaN component. Its coordinates are the receiver ECEF position exactly
+    /// as supplied.
+    Receiver,
+}
+
+/// A [`tec_xyz_with_policy`] evaluation waiting for one ECEF to geodetic
+/// coordinate conversion.
+///
+/// The conversion is owned and holds no reference to a grid: it keeps the
+/// validated options, the missing-node policy, the receiver position, the shell
+/// radius and the geometry computed so far. [`Self::prepare`] validates the
+/// inputs in the order [`tec_xyz_with_policy`] does and returns a conversion
+/// for the pierce point. The caller converts [`Self::xyz`], ECEF meters, to
+/// `[longitude_deg, latitude_deg, altitude]` and passes that answer with the
+/// grid to [`Self::resume`], which consumes the conversion and returns either
+/// the next conversion or the finished evaluation.
+///
+/// An evaluation requests at most two conversions: the pierce point, and the
+/// receiver only when the pierce-point answer held a NaN component. Resuming a
+/// receiver conversion always finishes, with a value or an error. Every step
+/// runs the same code as [`tec_xyz_with_policy`], so a caller answering each
+/// request as that function's callback would get the same result, error and
+/// sequence of requested coordinates.
+///
+/// The type is not `Clone`: each conversion is answered once, and a caller that
+/// has to answer again starts a new evaluation with [`Self::prepare`]. The grid
+/// is checked only when a step reads it, so a timestamp outside the grid, a
+/// pierce point outside it or a missing node is reported by [`Self::resume`]
+/// after the conversions that precede that check, not by [`Self::prepare`].
+/// The evaluated grid is the one passed to the step that finishes; keeping the
+/// same grid across steps is up to the caller.
+#[derive(Debug)]
+#[must_use = "a conversion does nothing until it is resumed"]
+pub struct TecGridXyzConversion {
+    stage: ConversionStage,
+}
+
+/// The result of resuming a [`TecGridXyzConversion`].
+#[derive(Debug)]
+#[must_use = "a step either requests another conversion or holds the evaluation"]
+pub enum TecGridXyzStep {
+    /// The receiver conversion, requested after a NaN pierce-point answer.
+    Convert(TecGridXyzConversion),
+    /// The finished `(vtec_tecu, stec_tecu)` evaluation, as
+    /// [`tec_xyz_with_policy`] returns it.
+    Complete(TecGridEvaluation<(f64, f64)>),
+}
+
+impl TecGridXyzConversion {
+    /// Validates a vertical and slant TEC evaluation and returns the conversion
+    /// of its pierce point.
+    ///
+    /// The checks and their order are those of [`tec_xyz_with_policy`]: finite
+    /// satellite and receiver positions, finite `min_elevation_rad` and
+    /// `nan_pierce_point_height_m`, a finite positive Earth radius, a finite
+    /// nonnegative shell height, a finite positive shell radius, a finite
+    /// positive receiver radius and a finite nonzero line of sight. The carrier
+    /// frequency is not read. Positions are ECEF meters. Nothing about the grid
+    /// is checked here.
+    pub fn prepare(
+        options: TecGridEvalOptions,
+        sat_xyz: &[f64; 3],
+        receiver_xyz: &[f64; 3],
+        policy: IonexMissingNodePolicy,
+    ) -> Result<Self, TecGridError> {
+        PiercePointStage::prepare(options, sat_xyz, receiver_xyz, policy).map(|stage| Self {
+            stage: ConversionStage::PiercePoint(stage),
+        })
+    }
+
+    /// Returns the ECEF position in meters to convert, bit for bit as
+    /// [`tec_xyz`] passes it to its callback, including NaN components.
+    #[must_use]
+    pub fn xyz(&self) -> [f64; 3] {
+        self.stage.xyz()
+    }
+
+    /// Returns which position [`Self::xyz`] is.
+    #[must_use]
+    pub fn target(&self) -> TecGridXyzTarget {
+        self.stage.target()
+    }
+
+    /// Consumes the conversion with the answer for [`Self::xyz`],
+    /// `[longitude_deg, latitude_deg, altitude]`, and continues the evaluation
+    /// on `grid`.
+    ///
+    /// For the pierce point, the elevation is raised to `min_elevation_rad` and
+    /// must be finite; then an answer with any NaN component, altitude included,
+    /// returns [`TecGridXyzStep::Convert`] for the receiver. For the receiver,
+    /// only the longitude and latitude are used, and the returned altitude is
+    /// ignored. A finished evaluation interpolates `grid` at the selected
+    /// longitude and latitude, where a latitude beyond ±87.5 degrees, infinite
+    /// included, is clamped and every other query coordinate must be finite
+    /// and inside the grid.
+    pub fn resume(
+        self,
+        grid: &TecGrid,
+        lonlatalt: [f64; 3],
+    ) -> Result<TecGridXyzStep, TecGridError> {
+        Ok(match self.stage.resume(grid, lonlatalt)? {
+            StageOutcome::Receiver(stage) => TecGridXyzStep::Convert(Self {
+                stage: ConversionStage::Receiver(stage),
+            }),
+            StageOutcome::Complete(evaluation) => TecGridXyzStep::Complete(evaluation),
+        })
+    }
+}
+
+/// An [`iono_delay_xyz_with_policy`] evaluation waiting for one ECEF to
+/// geodetic coordinate conversion.
+///
+/// This is a [`TecGridXyzConversion`] that also holds the validated carrier
+/// frequency and finishes with the group delay in meters. Its preparation,
+/// requests, ownership and single-use semantics are those of
+/// [`TecGridXyzConversion`].
+#[derive(Debug)]
+#[must_use = "a conversion does nothing until it is resumed"]
+pub struct TecGridDelayXyzConversion {
+    tec: TecGridXyzConversion,
+    frequency_hz: f64,
+}
+
+/// The result of resuming a [`TecGridDelayXyzConversion`].
+#[derive(Debug)]
+#[must_use = "a step either requests another conversion or holds the evaluation"]
+pub enum TecGridDelayXyzStep {
+    /// The receiver conversion, requested after a NaN pierce-point answer.
+    Convert(TecGridDelayXyzConversion),
+    /// The finished group delay in meters, as [`iono_delay_xyz_with_policy`]
+    /// returns it.
+    Complete(TecGridEvaluation<f64>),
+}
+
+impl TecGridDelayXyzConversion {
+    /// Validates an ionospheric group-delay evaluation and returns the
+    /// conversion of its pierce point.
+    ///
+    /// The carrier frequency, in Hz, must be finite and positive, and is checked
+    /// before the geometry, as [`iono_delay_xyz_with_policy`] checks it; the
+    /// geometry is then checked as by [`TecGridXyzConversion::prepare`]. The
+    /// square of the frequency is not checked here, as it is not in
+    /// [`iono_delay_xyz_with_policy`]: a frequency whose square underflows to
+    /// zero gives an infinite delay, refused when the evaluation finishes, and
+    /// a frequency whose square overflows to infinity gives a delay of zero,
+    /// which is returned.
+    pub fn prepare(
+        options: TecGridEvalOptions,
+        sat_xyz: &[f64; 3],
+        receiver_xyz: &[f64; 3],
+        policy: IonexMissingNodePolicy,
+    ) -> Result<Self, TecGridError> {
+        let frequency_hz = validate_frequency(options.frequency_hz)?;
+        let tec = TecGridXyzConversion::prepare(options, sat_xyz, receiver_xyz, policy)?;
+        Ok(Self { tec, frequency_hz })
+    }
+
+    /// Returns the ECEF position in meters to convert, bit for bit as
+    /// [`iono_delay_xyz`] passes it to its callback, including NaN components.
+    #[must_use]
+    pub fn xyz(&self) -> [f64; 3] {
+        self.tec.xyz()
+    }
+
+    /// Returns which position [`Self::xyz`] is.
+    #[must_use]
+    pub fn target(&self) -> TecGridXyzTarget {
+        self.tec.target()
+    }
+
+    /// Consumes the conversion with the answer for [`Self::xyz`],
+    /// `[longitude_deg, latitude_deg, altitude]`, and continues the evaluation
+    /// on `grid` as [`TecGridXyzConversion::resume`] does. A finished
+    /// evaluation converts slant TEC to
+    /// `IONOSPHERE_CONSTANT * stec / frequency_hz^2` meters, which must be
+    /// finite.
+    pub fn resume(
+        self,
+        grid: &TecGrid,
+        lonlatalt: [f64; 3],
+    ) -> Result<TecGridDelayXyzStep, TecGridError> {
+        let frequency_hz = self.frequency_hz;
+        match self.tec.resume(grid, lonlatalt)? {
+            TecGridXyzStep::Convert(tec) => {
+                Ok(TecGridDelayXyzStep::Convert(Self { tec, frequency_hz }))
+            }
+            TecGridXyzStep::Complete(tec) => {
+                group_delay_from_tec(tec, frequency_hz).map(TecGridDelayXyzStep::Complete)
+            }
+        }
+    }
+}
+
+/// The validated inputs every stage of one XYZ evaluation carries.
+#[derive(Clone, Copy, Debug)]
+struct XyzContext {
+    options: TecGridEvalOptions,
+    policy: IonexMissingNodePolicy,
+    receiver_xyz: [f64; 3],
+    shell_radius_m: f64,
+}
+
+/// Waiting for the pierce-point conversion, with the unclamped elevation.
+#[derive(Debug)]
+struct PiercePointStage {
+    context: XyzContext,
+    pp_xyz: [f64; 3],
+    elevation_rad: f64,
+}
+
+/// Waiting for the receiver conversion, with the clamped, finite elevation.
+#[derive(Debug)]
+struct ReceiverStage {
+    context: XyzContext,
+    elevation_rad: f64,
+}
+
+#[derive(Debug)]
+enum ConversionStage {
+    PiercePoint(PiercePointStage),
+    Receiver(ReceiverStage),
+}
+
+enum StageOutcome {
+    Receiver(ReceiverStage),
+    Complete(TecGridEvaluation<(f64, f64)>),
+}
+
+impl PiercePointStage {
+    fn prepare(
+        options: TecGridEvalOptions,
+        sat_xyz: &[f64; 3],
+        receiver_xyz: &[f64; 3],
+        policy: IonexMissingNodePolicy,
+    ) -> Result<Self, TecGridError> {
+        let shell_radius_m = validate_tec_geometry_inputs(options, sat_xyz, receiver_xyz)?;
+        let (pp_xyz, elevation_rad) = pierce_point_geometry(sat_xyz, receiver_xyz, shell_radius_m);
+        Ok(Self {
+            context: XyzContext {
+                options,
+                policy,
+                receiver_xyz: *receiver_xyz,
+                shell_radius_m,
+            },
+            pp_xyz,
+            elevation_rad,
+        })
+    }
+
+    fn resume(self, grid: &TecGrid, pp_lonlatalt: [f64; 3]) -> Result<StageOutcome, TecGridError> {
+        let context = self.context;
+        let mut elevation_rad = self.elevation_rad;
+        if elevation_rad < context.options.min_elevation_rad {
+            elevation_rad = context.options.min_elevation_rad;
+        }
+        validate::finite(elevation_rad, "elevation_rad").map_err(field_error_string)?;
+
+        if pp_lonlatalt.iter().any(|v| v.is_nan()) {
+            return Ok(StageOutcome::Receiver(ReceiverStage {
+                context,
+                elevation_rad,
+            }));
+        }
+        context
+            .complete(grid, pp_lonlatalt[0], pp_lonlatalt[1], elevation_rad)
+            .map(StageOutcome::Complete)
+    }
+
+    /// Answers each request with `ecef_to_lla`, called once per request in
+    /// request order.
+    fn drive<F>(
+        self,
+        grid: &TecGrid,
+        ecef_to_lla: &F,
+    ) -> Result<TecGridEvaluation<(f64, f64)>, TecGridError>
+    where
+        F: Fn(&[f64; 3]) -> [f64; 3],
+    {
+        let pp_lonlatalt = ecef_to_lla(&self.pp_xyz);
+        match self.resume(grid, pp_lonlatalt)? {
+            StageOutcome::Complete(evaluation) => Ok(evaluation),
+            StageOutcome::Receiver(stage) => {
+                let receiver_lonlatalt = ecef_to_lla(&stage.context.receiver_xyz);
+                stage.resume(grid, receiver_lonlatalt)
+            }
+        }
+    }
+}
+
+impl ReceiverStage {
+    /// Uses the receiver longitude and latitude. The returned altitude is not
+    /// read, so a NaN there requests nothing further.
+    fn resume(
+        self,
+        grid: &TecGrid,
+        receiver_lonlatalt: [f64; 3],
+    ) -> Result<TecGridEvaluation<(f64, f64)>, TecGridError> {
+        self.context.complete(
+            grid,
             receiver_lonlatalt[0],
             receiver_lonlatalt[1],
-            options.nan_pierce_point_height_m,
-        ]
-    } else {
-        pp_lonlatalt
-    };
+            self.elevation_rad,
+        )
+    }
+}
 
-    let evaluation = grid.vtec_at_pierce_point_with_policy(
-        options.epoch,
-        pp_lonlatalt[0],
-        pp_lonlatalt[1],
-        policy,
-    )?;
-    let vtec = evaluation.value;
-    validate::finite(vtec, "vtec").map_err(field_error_string)?;
-    let obliquity_arg =
-        options.shell_geometry.earth_radius_m * libm::cos(elevation_rad) / shell_radius_m;
-    validate::finite(obliquity_arg, "obliquity_arg").map_err(field_error_string)?;
-    let mapping_denominator = 1.0 - obliquity_arg * obliquity_arg;
-    validate::finite_positive(mapping_denominator, "TEC mapping denominator")
-        .map_err(field_error_string)?;
-    let stec = vtec / mapping_denominator.sqrt();
-    validate::finite(stec, "stec").map_err(field_error_string)?;
+impl ConversionStage {
+    fn xyz(&self) -> [f64; 3] {
+        match self {
+            Self::PiercePoint(stage) => stage.pp_xyz,
+            Self::Receiver(stage) => stage.context.receiver_xyz,
+        }
+    }
+
+    fn target(&self) -> TecGridXyzTarget {
+        match self {
+            Self::PiercePoint(_) => TecGridXyzTarget::PiercePoint,
+            Self::Receiver(_) => TecGridXyzTarget::Receiver,
+        }
+    }
+
+    fn resume(self, grid: &TecGrid, lonlatalt: [f64; 3]) -> Result<StageOutcome, TecGridError> {
+        match self {
+            Self::PiercePoint(stage) => stage.resume(grid, lonlatalt),
+            Self::Receiver(stage) => stage.resume(grid, lonlatalt).map(StageOutcome::Complete),
+        }
+    }
+}
+
+impl XyzContext {
+    /// Interpolates VTEC at the selected longitude and latitude and maps it to
+    /// slant TEC with the clamped elevation.
+    fn complete(
+        &self,
+        grid: &TecGrid,
+        longitude_deg: f64,
+        latitude_deg: f64,
+        elevation_rad: f64,
+    ) -> Result<TecGridEvaluation<(f64, f64)>, TecGridError> {
+        let options = self.options;
+        let evaluation = grid.vtec_at_pierce_point_with_policy(
+            options.epoch,
+            longitude_deg,
+            latitude_deg,
+            self.policy,
+        )?;
+        let vtec = evaluation.value;
+        validate::finite(vtec, "vtec").map_err(field_error_string)?;
+        let obliquity_arg =
+            options.shell_geometry.earth_radius_m * libm::cos(elevation_rad) / self.shell_radius_m;
+        validate::finite(obliquity_arg, "obliquity_arg").map_err(field_error_string)?;
+        let mapping_denominator = 1.0 - obliquity_arg * obliquity_arg;
+        validate::finite_positive(mapping_denominator, "TEC mapping denominator")
+            .map_err(field_error_string)?;
+        let stec = vtec / mapping_denominator.sqrt();
+        validate::finite(stec, "stec").map_err(field_error_string)?;
+        Ok(TecGridEvaluation {
+            value: (vtec, stec),
+            degraded: evaluation.degraded,
+        })
+    }
+}
+
+fn group_delay_from_tec(
+    tec: TecGridEvaluation<(f64, f64)>,
+    frequency_hz: f64,
+) -> Result<TecGridEvaluation<f64>, TecGridError> {
+    let (_vtec, stec) = tec.value;
+    let delay_m = IONOSPHERE_CONSTANT * stec / (frequency_hz * frequency_hz);
+    validate::finite(delay_m, "ionosphere_delay_m").map_err(field_error_string)?;
     Ok(TecGridEvaluation {
-        value: (vtec, stec),
-        degraded: evaluation.degraded,
+        value: delay_m,
+        degraded: tec.degraded,
     })
 }
 
-pub fn pierce_point_with_shell_radius<F>(
+/// Returns the ECEF pierce point, `ecef_to_lla` applied to it once, and the
+/// unclamped elevation.
+#[cfg(all(test, sidereon_repo_tests))]
+pub(crate) fn pierce_point_with_shell_radius<F>(
     sat_xyz: &[f64; 3],
     receiver_xyz: &[f64; 3],
     shell_radius_m: f64,
@@ -701,6 +1053,19 @@ pub fn pierce_point_with_shell_radius<F>(
 where
     F: Fn(&[f64; 3]) -> [f64; 3],
 {
+    let (pp_xyz, elevation_rad) = pierce_point_geometry(sat_xyz, receiver_xyz, shell_radius_m);
+    let pp_lonlatalt = ecef_to_lla(&pp_xyz);
+    (pp_xyz, pp_lonlatalt, elevation_rad)
+}
+
+/// Intersects the receiver-to-satellite ray with the shell and returns the
+/// ECEF pierce point and the unclamped elevation. A ray that misses the shell
+/// gives NaN pierce-point components.
+fn pierce_point_geometry(
+    sat_xyz: &[f64; 3],
+    receiver_xyz: &[f64; 3],
+    shell_radius_m: f64,
+) -> ([f64; 3], f64) {
     let receiver_sat_vector = [
         sat_xyz[0] - receiver_xyz[0],
         sat_xyz[1] - receiver_xyz[1],
@@ -721,8 +1086,7 @@ where
         receiver_xyz[1] + t * sat_unit[1],
         receiver_xyz[2] + t * sat_unit[2],
     ];
-    let pp_lonlatalt = ecef_to_lla(&pp_xyz);
-    (pp_xyz, pp_lonlatalt, elevation_rad)
+    (pp_xyz, elevation_rad)
 }
 
 fn clamp(v: f64, lo: f64, hi: f64) -> f64 {
@@ -750,10 +1114,8 @@ fn field_error_string(error: validate::FieldError) -> TecGridError {
     }
 }
 
-fn validate_frequency(frequency_hz: f64) -> Result<(), TecGridError> {
-    validate::finite_positive(frequency_hz, "frequency_hz")
-        .map(|_| ())
-        .map_err(field_error_string)
+fn validate_frequency(frequency_hz: f64) -> Result<f64, TecGridError> {
+    validate::finite_positive(frequency_hz, "frequency_hz").map_err(field_error_string)
 }
 
 fn validate_tec_geometry_inputs(
@@ -960,5 +1322,611 @@ mod tests {
 
         assert_eq!(grid.values()[1], Some(0.0));
         assert_eq!(grid.values()[2], None);
+    }
+}
+
+/// Staged XYZ evaluation: request coordinates, order and count, error order
+/// and values, each derived by hand from the geometry and the grid rather than
+/// from the synchronous functions, which share the staged code.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod staged_xyz_tests {
+    use super::*;
+    use core::cell::RefCell;
+
+    /// Mean Earth radius plus the default shell height, meters.
+    const SHELL_RADIUS_M: f64 = 6_821_000.0;
+    const L1_HZ: f64 = 1_575_420_000.0;
+
+    /// Values `1 + (lon - 20) / 10 + 2 (lat / 10) + 4 (t / 10)` on the corners
+    /// of one cell, so a dyadic query interpolates exactly.
+    fn small_grid() -> TecGrid {
+        TecGrid::new(
+            vec![0.0, 10.0],
+            vec![0.0, 10.0],
+            vec![20.0, 30.0],
+            [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].map(Some).to_vec(),
+        )
+        .expect("small TEC grid")
+    }
+
+    /// A binding keeps a conversion inside a native resource between steps,
+    /// which requires owned, thread-safe data.
+    #[test]
+    fn staged_types_are_owned_and_thread_safe() {
+        fn assert_owned<T: Send + Sync + 'static>() {}
+        assert_owned::<TecGridXyzConversion>();
+        assert_owned::<TecGridXyzStep>();
+        assert_owned::<TecGridDelayXyzConversion>();
+        assert_owned::<TecGridDelayXyzStep>();
+    }
+
+    /// Mid-cell epoch of [`small_grid`].
+    fn options() -> TecGridEvalOptions {
+        TecGridEvalOptions::new(TecGridEpoch::new(5, 1), L1_HZ)
+    }
+
+    /// A receiver on the mean sphere with the satellite straight overhead. The
+    /// ray meets the default shell at exactly `[6_821_000, 0, 0]`, and the
+    /// elevation is π/2, whose cosine leaves the obliquity factor at exactly 1.
+    const RECEIVER: [f64; 3] = [6_371_000.0, 0.0, 0.0];
+    const SATELLITE: [f64; 3] = [26_371_000.0, 0.0, 0.0];
+    const PIERCE_POINT: [f64; 3] = [SHELL_RADIUS_M, 0.0, 0.0];
+
+    fn bits(v: [f64; 3]) -> [u64; 3] {
+        v.map(f64::to_bits)
+    }
+
+    /// A converter that records each request and answers from `answers` in
+    /// order.
+    fn recorder<'a>(
+        calls: &'a RefCell<Vec<[f64; 3]>>,
+        answers: &'a [[f64; 3]],
+    ) -> impl Fn(&[f64; 3]) -> [f64; 3] + 'a {
+        move |xyz: &[f64; 3]| {
+            let mut calls = calls.borrow_mut();
+            let answer = *answers
+                .get(calls.len())
+                .expect("no more conversions were expected");
+            calls.push(*xyz);
+            answer
+        }
+    }
+
+    type Requests = Vec<(TecGridXyzTarget, [f64; 3])>;
+
+    fn drive_tec(
+        grid: &TecGrid,
+        mut conversion: TecGridXyzConversion,
+        answers: &[[f64; 3]],
+    ) -> (
+        Requests,
+        Result<TecGridEvaluation<(f64, f64)>, TecGridError>,
+    ) {
+        let mut requests = Vec::new();
+        loop {
+            requests.push((conversion.target(), conversion.xyz()));
+            let answer = *answers
+                .get(requests.len() - 1)
+                .expect("no more conversions were expected");
+            match conversion.resume(grid, answer) {
+                Err(error) => return (requests, Err(error)),
+                Ok(TecGridXyzStep::Complete(evaluation)) => return (requests, Ok(evaluation)),
+                Ok(TecGridXyzStep::Convert(next)) => conversion = next,
+            }
+        }
+    }
+
+    fn drive_delay(
+        grid: &TecGrid,
+        mut conversion: TecGridDelayXyzConversion,
+        answers: &[[f64; 3]],
+    ) -> (Requests, Result<TecGridEvaluation<f64>, TecGridError>) {
+        let mut requests = Vec::new();
+        loop {
+            requests.push((conversion.target(), conversion.xyz()));
+            let answer = *answers
+                .get(requests.len() - 1)
+                .expect("no more conversions were expected");
+            match conversion.resume(grid, answer) {
+                Err(error) => return (requests, Err(error)),
+                Ok(TecGridDelayXyzStep::Complete(evaluation)) => return (requests, Ok(evaluation)),
+                Ok(TecGridDelayXyzStep::Convert(next)) => conversion = next,
+            }
+        }
+    }
+
+    fn invalid(field: &'static str, reason: &'static str) -> TecGridError {
+        TecGridError::InvalidField { field, reason }
+    }
+
+    /// Runs the synchronous and staged TEC paths with the same answers and
+    /// checks both against the expected requests and result.
+    #[allow(clippy::too_many_arguments)]
+    fn check_tec(
+        grid: &TecGrid,
+        options: TecGridEvalOptions,
+        sat: [f64; 3],
+        receiver: [f64; 3],
+        policy: IonexMissingNodePolicy,
+        answers: &[[f64; 3]],
+        expected_requests: &[(TecGridXyzTarget, [f64; 3])],
+        expected: &Result<TecGridEvaluation<(f64, f64)>, TecGridError>,
+    ) {
+        let calls = RefCell::new(Vec::new());
+        let sync = tec_xyz_with_policy(
+            grid,
+            options,
+            &sat,
+            &receiver,
+            recorder(&calls, answers),
+            policy,
+        );
+        let calls = calls.into_inner();
+        assert_eq!(
+            calls.iter().copied().map(bits).collect::<Vec<_>>(),
+            expected_requests
+                .iter()
+                .map(|(_, xyz)| bits(*xyz))
+                .collect::<Vec<_>>(),
+            "callback coordinates, order and count"
+        );
+        assert_evaluation_eq(&sync, expected);
+
+        let conversion = TecGridXyzConversion::prepare(options, &sat, &receiver, policy)
+            .expect("the expected requests imply a valid preparation");
+        let (requests, staged) = drive_tec(grid, conversion, answers);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|(target, xyz)| (*target, bits(*xyz)))
+                .collect::<Vec<_>>(),
+            expected_requests
+                .iter()
+                .map(|(target, xyz)| (*target, bits(*xyz)))
+                .collect::<Vec<_>>(),
+            "staged request targets, coordinates, order and count"
+        );
+        assert_evaluation_eq(&staged, expected);
+    }
+
+    fn assert_evaluation_eq<T: PartialEq + core::fmt::Debug + Copy + ValueBits>(
+        got: &Result<TecGridEvaluation<T>, TecGridError>,
+        want: &Result<TecGridEvaluation<T>, TecGridError>,
+    ) {
+        match (got, want) {
+            (Ok(got), Ok(want)) => {
+                assert_eq!(got.value.value_bits(), want.value.value_bits(), "{got:?}");
+                assert_eq!(got.degraded, want.degraded);
+            }
+            _ => assert_eq!(got, want),
+        }
+    }
+
+    trait ValueBits {
+        fn value_bits(self) -> Vec<u64>;
+    }
+
+    impl ValueBits for f64 {
+        fn value_bits(self) -> Vec<u64> {
+            vec![self.to_bits()]
+        }
+    }
+
+    impl ValueBits for (f64, f64) {
+        fn value_bits(self) -> Vec<u64> {
+            vec![self.0.to_bits(), self.1.to_bits()]
+        }
+    }
+
+    fn complete<T>(value: T) -> Result<TecGridEvaluation<T>, TecGridError> {
+        Ok(TecGridEvaluation {
+            value,
+            degraded: None,
+        })
+    }
+
+    #[test]
+    fn finite_answer_requests_the_pierce_point_once() {
+        // Answer (25, 5) is the cell center at the mid epoch: 1 + 0.5 + 1 + 2.
+        check_tec(
+            &small_grid(),
+            options(),
+            SATELLITE,
+            RECEIVER,
+            IonexMissingNodePolicy::Strict,
+            &[[25.0, 5.0, 450_000.0]],
+            &[(TecGridXyzTarget::PiercePoint, PIERCE_POINT)],
+            &complete((4.5, 4.5)),
+        );
+    }
+
+    #[test]
+    fn nan_answer_requests_the_receiver_once_and_ignores_its_altitude() {
+        // (22.5, 2.5) interpolates to 1 + 0.25 + 0.5 + 2. The NaN receiver
+        // altitude is not read, so there is no third request.
+        for first in [
+            [f64::NAN, f64::NAN, f64::NAN],
+            [25.0, 5.0, f64::NAN],
+            [f64::NAN, 5.0, 450_000.0],
+        ] {
+            check_tec(
+                &small_grid(),
+                options(),
+                SATELLITE,
+                RECEIVER,
+                IonexMissingNodePolicy::Strict,
+                &[first, [22.5, 2.5, f64::NAN]],
+                &[
+                    (TecGridXyzTarget::PiercePoint, PIERCE_POINT),
+                    (TecGridXyzTarget::Receiver, RECEIVER),
+                ],
+                &complete((3.75, 3.75)),
+            );
+        }
+    }
+
+    #[test]
+    fn nan_receiver_answer_is_not_retried() {
+        check_tec(
+            &small_grid(),
+            options(),
+            SATELLITE,
+            RECEIVER,
+            IonexMissingNodePolicy::Strict,
+            &[[f64::NAN; 3], [22.5, f64::NAN, 0.0]],
+            &[
+                (TecGridXyzTarget::PiercePoint, PIERCE_POINT),
+                (TecGridXyzTarget::Receiver, RECEIVER),
+            ],
+            &Err(invalid("latitude", "not finite")),
+        );
+    }
+
+    #[test]
+    fn tangent_ray_missing_the_shell_still_requests_its_nan_pierce_point() {
+        // The ray along +y from radius 7,000,000 m touches that sphere and
+        // never meets the 6,821,000 m shell: b = 0, c > 0, so t and every
+        // pierce-point component are NaN. The elevation is 0, raised to 5°.
+        let receiver = [7_000_000.0, 0.0, 0.0];
+        let sat = [7_000_000.0, 1_000_000.0, 0.0];
+        let grid = small_grid();
+
+        let conversion = TecGridXyzConversion::prepare(
+            options(),
+            &sat,
+            &receiver,
+            IonexMissingNodePolicy::Strict,
+        )
+        .expect("finite inputs with a nonzero line of sight are valid");
+        assert_eq!(conversion.target(), TecGridXyzTarget::PiercePoint);
+        assert!(conversion.xyz().iter().all(|v| v.is_nan()));
+
+        let calls = RefCell::new(Vec::new());
+        let (vtec, stec) = tec_xyz(
+            &grid,
+            options(),
+            &sat,
+            &receiver,
+            recorder(&calls, &[[25.0, 5.0, 0.0]]),
+        )
+        .expect("a finite answer finishes");
+        let calls = calls.into_inner();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].iter().all(|v| v.is_nan()));
+        assert_eq!(vtec.to_bits(), 4.5f64.to_bits());
+        // Thin-shell mapping 4.5 / sqrt(1 - (R cos 5° / (R + h))^2).
+        let expected_stec = 12.282_985_570_258_32;
+        assert!(
+            ((stec - expected_stec) / expected_stec).abs() < 1e-12,
+            "{stec}"
+        );
+
+        // A NaN answer to that request falls back to the receiver.
+        let (requests, staged) = drive_tec(&grid, conversion, &[[f64::NAN; 3], [25.0, 5.0, 0.0]]);
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].1.iter().all(|v| v.is_nan()));
+        assert_eq!(requests[1], (TecGridXyzTarget::Receiver, receiver));
+        let staged = staged.expect("receiver fallback finishes");
+        assert_eq!(staged.value.0.to_bits(), vtec.to_bits());
+        assert_eq!(staged.value.1.to_bits(), stec.to_bits());
+    }
+
+    #[test]
+    fn invalid_elevation_fails_after_the_first_request_without_fallback() {
+        // |x|^2 = 1e-320 is subnormal, so the receiver norm rounds to
+        // 9.99994e-161 and the receiver unit vector has x = 1.0000056: the
+        // elevation is asin of a value above 1, NaN. The pierce point is still
+        // exactly the shell radius on +x.
+        check_tec(
+            &small_grid(),
+            options(),
+            [20_000_000.0, 0.0, 0.0],
+            [1e-160, 0.0, 0.0],
+            IonexMissingNodePolicy::Strict,
+            &[[f64::NAN; 3]],
+            &[(TecGridXyzTarget::PiercePoint, PIERCE_POINT)],
+            &Err(invalid("elevation_rad", "not finite")),
+        );
+    }
+
+    #[test]
+    fn invalid_geometry_requests_nothing() {
+        let calls = RefCell::new(Vec::new());
+        let error = tec_xyz(
+            &small_grid(),
+            options(),
+            &SATELLITE,
+            &[0.0, 0.0, 0.0],
+            recorder(&calls, &[]),
+        )
+        .expect_err("zero receiver");
+        assert_eq!(error, invalid("receiver radius_m", "not positive"));
+        assert!(calls.into_inner().is_empty());
+        let error = TecGridXyzConversion::prepare(
+            options(),
+            &SATELLITE,
+            &[0.0, 0.0, 0.0],
+            IonexMissingNodePolicy::Strict,
+        )
+        .expect_err("zero receiver");
+        assert_eq!(error, invalid("receiver radius_m", "not positive"));
+
+        let error = TecGridXyzConversion::prepare(
+            options(),
+            &RECEIVER,
+            &RECEIVER,
+            IonexMissingNodePolicy::Strict,
+        )
+        .expect_err("zero line of sight");
+        assert_eq!(error, invalid("line of sight_m", "not positive"));
+    }
+
+    #[test]
+    fn delay_checks_frequency_before_geometry() {
+        let mut options = options();
+        options.frequency_hz = 0.0;
+        let calls = RefCell::new(Vec::new());
+        let error = iono_delay_xyz(
+            &small_grid(),
+            options,
+            &[f64::NAN, 0.0, 0.0],
+            &[0.0, 0.0, 0.0],
+            recorder(&calls, &[]),
+        )
+        .expect_err("invalid frequency and geometry");
+        assert_eq!(error, invalid("frequency_hz", "not positive"));
+        assert!(calls.into_inner().is_empty());
+
+        let error = TecGridDelayXyzConversion::prepare(
+            options,
+            &[f64::NAN, 0.0, 0.0],
+            &[0.0, 0.0, 0.0],
+            IonexMissingNodePolicy::Strict,
+        )
+        .expect_err("invalid frequency and geometry");
+        assert_eq!(error, invalid("frequency_hz", "not positive"));
+    }
+
+    #[test]
+    fn tec_ignores_the_frequency() {
+        let mut options = options();
+        options.frequency_hz = f64::NAN;
+        check_tec(
+            &small_grid(),
+            options,
+            SATELLITE,
+            RECEIVER,
+            IonexMissingNodePolicy::Strict,
+            &[[25.0, 5.0, 0.0]],
+            &[(TecGridXyzTarget::PiercePoint, PIERCE_POINT)],
+            &complete((4.5, 4.5)),
+        );
+    }
+
+    #[test]
+    fn delay_scales_slant_tec_on_both_paths() {
+        // 40.308193e16 * stec / 1575.42e6^2 meters.
+        let grid = small_grid();
+        for (answers, targets, expected) in [
+            (
+                vec![[25.0, 5.0, 0.0]],
+                vec![TecGridXyzTarget::PiercePoint],
+                0.730_824_560_418_891_8,
+            ),
+            (
+                vec![[f64::NAN; 3], [22.5, 2.5, 0.0]],
+                vec![TecGridXyzTarget::PiercePoint, TecGridXyzTarget::Receiver],
+                0.609_020_467_015_743_1,
+            ),
+        ] {
+            let calls = RefCell::new(Vec::new());
+            let sync = iono_delay_xyz(
+                &grid,
+                options(),
+                &SATELLITE,
+                &RECEIVER,
+                recorder(&calls, &answers),
+            )
+            .expect("delay");
+            assert_eq!(sync.to_bits(), f64::to_bits(expected));
+            assert_eq!(calls.into_inner().len(), answers.len());
+
+            let conversion = TecGridDelayXyzConversion::prepare(
+                options(),
+                &SATELLITE,
+                &RECEIVER,
+                IonexMissingNodePolicy::Strict,
+            )
+            .expect("valid delay inputs");
+            let (requests, staged) = drive_delay(&grid, conversion, &answers);
+            assert_eq!(
+                requests.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+                targets
+            );
+            assert_evaluation_eq(&staged, &complete(expected));
+        }
+    }
+
+    #[test]
+    fn delay_frequency_whose_square_underflows_fails_after_the_request() {
+        // 1e-200 is finite and positive; its square is 0 and the delay is
+        // infinite, which only the final delay check refuses.
+        let mut options = options();
+        options.frequency_hz = 1e-200;
+        let calls = RefCell::new(Vec::new());
+        let error = iono_delay_xyz(
+            &small_grid(),
+            options,
+            &SATELLITE,
+            &RECEIVER,
+            recorder(&calls, &[[25.0, 5.0, 0.0]]),
+        )
+        .expect_err("infinite delay");
+        assert_eq!(error, invalid("ionosphere_delay_m", "not finite"));
+        assert_eq!(calls.into_inner().len(), 1);
+
+        let conversion = TecGridDelayXyzConversion::prepare(
+            options,
+            &SATELLITE,
+            &RECEIVER,
+            IonexMissingNodePolicy::Strict,
+        )
+        .expect("the frequency itself is valid");
+        let (requests, staged) = drive_delay(&small_grid(), conversion, &[[25.0, 5.0, 0.0]]);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(staged, Err(invalid("ionosphere_delay_m", "not finite")));
+    }
+
+    #[test]
+    fn timestamp_outside_the_grid_is_reported_after_the_conversion() {
+        let mut options = options();
+        options.epoch = TecGridEpoch::new(100, 1);
+        check_tec(
+            &small_grid(),
+            options,
+            SATELLITE,
+            RECEIVER,
+            IonexMissingNodePolicy::Strict,
+            &[[25.0, 5.0, 0.0]],
+            &[(TecGridXyzTarget::PiercePoint, PIERCE_POINT)],
+            &Err(TecGridError::OutOfBounds {
+                name: "timestamp",
+                value: 100.0,
+            }),
+        );
+    }
+
+    #[test]
+    fn missing_node_is_strict_or_renormalized() {
+        let mut values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0].map(Some).to_vec();
+        values[0] = None;
+        let grid = TecGrid::new(vec![0.0, 10.0], vec![0.0, 10.0], vec![20.0, 30.0], values)
+            .expect("grid with one missing node");
+        let gap = IonexNodeGap {
+            earlier: Some(IonexMissingNodes {
+                map_number: 1,
+                lat_index: 0,
+                lon_index: 0,
+                lon_index_next: 1,
+                missing: [true, false, false, false],
+            }),
+            later: None,
+        };
+        let requests = [(TecGridXyzTarget::PiercePoint, PIERCE_POINT)];
+        let answers = [[25.0, 5.0, 0.0]];
+
+        check_tec(
+            &grid,
+            options(),
+            SATELLITE,
+            RECEIVER,
+            IonexMissingNodePolicy::Strict,
+            &answers,
+            &requests,
+            &Err(TecGridError::NodesNotAvailable(gap)),
+        );
+        // Earlier map: mean of 2, 3 and 4 is 3; later map: mean of 5..8 is
+        // 6.5; equal temporal weights give 4.75.
+        check_tec(
+            &grid,
+            options(),
+            SATELLITE,
+            RECEIVER,
+            IonexMissingNodePolicy::Renormalize,
+            &answers,
+            &requests,
+            &Ok(TecGridEvaluation {
+                value: (4.75, 4.75),
+                degraded: Some(gap),
+            }),
+        );
+    }
+
+    #[test]
+    fn infinite_latitude_clamps_and_infinite_longitude_is_refused() {
+        // Latitude rows -87.5 and 87.5 hold 1 and 3 on both maps.
+        let grid = TecGrid::new(
+            vec![0.0, 10.0],
+            vec![-87.5, 87.5],
+            vec![20.0, 30.0],
+            [1.0, 1.0, 3.0, 3.0, 1.0, 1.0, 3.0, 3.0].map(Some).to_vec(),
+        )
+        .expect("polar grid");
+        let requests = [(TecGridXyzTarget::PiercePoint, PIERCE_POINT)];
+        for (answer, expected) in [
+            ([25.0, f64::INFINITY, f64::INFINITY], complete((3.0, 3.0))),
+            ([25.0, f64::NEG_INFINITY, 0.0], complete((1.0, 1.0))),
+            (
+                [f64::INFINITY, 0.0, 0.0],
+                Err(invalid("longitude", "not finite")),
+            ),
+            (
+                [f64::NEG_INFINITY, 0.0, 0.0],
+                Err(invalid("longitude", "not finite")),
+            ),
+        ] {
+            check_tec(
+                &grid,
+                options(),
+                SATELLITE,
+                RECEIVER,
+                IonexMissingNodePolicy::Strict,
+                &[answer],
+                &requests,
+                &expected,
+            );
+        }
+    }
+
+    #[test]
+    fn conversion_holds_no_grid_between_steps() {
+        let conversion = TecGridXyzConversion::prepare(
+            options(),
+            &SATELLITE,
+            &RECEIVER,
+            IonexMissingNodePolicy::Strict,
+        )
+        .expect("valid inputs");
+        let step = {
+            // A grid that lives only for the first step.
+            let first = small_grid();
+            conversion
+                .resume(&first, [f64::NAN; 3])
+                .expect("fallback request")
+        };
+        let TecGridXyzStep::Convert(receiver) = step else {
+            panic!("a NaN answer requests the receiver");
+        };
+        assert_eq!(receiver.target(), TecGridXyzTarget::Receiver);
+        assert_eq!(bits(receiver.xyz()), bits(RECEIVER));
+        let second = small_grid();
+        let TecGridXyzStep::Complete(evaluation) = receiver
+            .resume(&second, [22.5, 2.5, 0.0])
+            .expect("receiver answer finishes")
+        else {
+            panic!("a receiver answer always finishes");
+        };
+        assert_eq!(evaluation.value, (3.75, 3.75));
     }
 }

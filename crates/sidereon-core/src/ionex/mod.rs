@@ -49,7 +49,9 @@ pub use tec_grid::{
     iono_delay_xyz as regular_tec_grid_delay_xyz,
     iono_delay_xyz_with_policy as regular_tec_grid_delay_xyz_with_policy,
     tec_xyz as regular_tec_xyz, tec_xyz_with_policy as regular_tec_xyz_with_policy, TecGrid,
-    TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridEvaluation, TecGridShellGeometry,
+    TecGridDelayXyzConversion, TecGridDelayXyzStep, TecGridEpoch, TecGridError, TecGridEvalOptions,
+    TecGridEvaluation, TecGridShellGeometry, TecGridXyzConversion, TecGridXyzStep,
+    TecGridXyzTarget,
 };
 
 /// Policy applied when an IONEX query lands outside the product's coverage.

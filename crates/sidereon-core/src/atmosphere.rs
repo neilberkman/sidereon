@@ -12,8 +12,10 @@ pub mod ionosphere {
         IonexMappingDeclaration, IonexMappingFunction, IonexMappingPolicy, IonexMissingNodePolicy,
         IonexMissingNodes, IonexNodeGap, IonexSlantDelayEvaluation, IonexSlantDelayStatus,
         IonexSlantPolicy, IonexSlantRefusal, IonexSlantRequest, IonexWarning, IonoModel,
-        KlobucharParams, NequickGRayEval, TecGrid, TecGridEpoch, TecGridError, TecGridEvalOptions,
-        TecGridEvaluation, TecGridSamples, TecGridShellGeometry, TecSample, TecSamplesError,
+        KlobucharParams, NequickGRayEval, TecGrid, TecGridDelayXyzConversion, TecGridDelayXyzStep,
+        TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridEvaluation, TecGridSamples,
+        TecGridShellGeometry, TecGridXyzConversion, TecGridXyzStep, TecGridXyzTarget, TecSample,
+        TecSamplesError,
     };
     pub use crate::rinex_nav::{IonoCorrections, KlobucharAlphaBeta};
 
@@ -41,8 +43,10 @@ pub use ionosphere::{
     IonexMappingDeclaration, IonexMappingFunction, IonexMappingPolicy, IonexMissingNodePolicy,
     IonexMissingNodes, IonexNodeGap, IonexSlantDelayEvaluation, IonexSlantDelayStatus,
     IonexSlantPolicy, IonexSlantRefusal, IonexSlantRequest, IonexWarning, IonoModel,
-    KlobucharParams, NequickGRayEval, TecGrid, TecGridEpoch, TecGridError, TecGridEvalOptions,
-    TecGridEvaluation, TecGridSamples, TecGridShellGeometry, TecSample, TecSamplesError,
+    KlobucharParams, NequickGRayEval, TecGrid, TecGridDelayXyzConversion, TecGridDelayXyzStep,
+    TecGridEpoch, TecGridError, TecGridEvalOptions, TecGridEvaluation, TecGridSamples,
+    TecGridShellGeometry, TecGridXyzConversion, TecGridXyzStep, TecGridXyzTarget, TecSample,
+    TecSamplesError,
 };
 pub use troposphere::{
     tropo_mapping, tropo_slant, tropo_zenith, tropo_zwd_delay_xyz, zwd_zenith_wet_delay,
