@@ -75,8 +75,11 @@ pub struct TecGridSamples {
     /// Per-map vertical-TEC grids, indexed `[map][i_lat][i_lon]` (TECU); `None`
     /// where the value is not available.
     pub tec_maps: Vec<Vec<Vec<Option<f64>>>>,
-    /// Per-map RMS grids, indexed `[map][i_lat][i_lon]` (TECU); empty if absent,
-    /// `None` where a node has no RMS value.
+    /// Per-map RMS grids, indexed `[map][i_lat][i_lon]` (TECU); empty where the
+    /// product declares no RMS map, `None` where a node has no RMS value. This
+    /// field is the authority on whether the maps exist: a stack whose every
+    /// node is `None` is retained, and says the maps are declared with no value
+    /// anywhere.
     pub rms_maps: Vec<Vec<Vec<Option<f64>>>>,
     /// Per-map height grids, indexed `[map][i_lat][i_lon]` (km); empty if
     /// absent, `None` where a node has no height value.
@@ -156,8 +159,10 @@ impl std::error::Error for TecSamplesError {}
 impl Ionex {
     /// Build an IONEX product directly from whole-grid samples.
     ///
-    /// RMS maps with no value at any node are dropped, as they are for a parsed
-    /// product; height maps are kept.
+    /// The RMS and height map stacks are stored as given, as they are for a
+    /// parsed product: a stack with no value at any node stays present and is
+    /// distinct from an empty one, which says the product declares no map of
+    /// that kind.
     pub fn from_samples(samples: TecGridSamples) -> core::result::Result<Self, TecSamplesError> {
         validate_grid_samples(&samples)?;
         Self::from_parts(IonexParts {
@@ -188,6 +193,12 @@ impl Ionex {
     /// Every node of the grid the samples span must appear exactly once. A
     /// product has RMS maps when any sample has an RMS value, and height maps
     /// when any has a height value; a node without one is `None` there.
+    ///
+    /// Flat node samples carry no map-presence field, so this input model
+    /// cannot state RMS (or height) maps that are declared yet hold no value at
+    /// any node: samples whose `rms_tecu` is `None` everywhere give a product
+    /// with no RMS map. Build such a product through [`TecGridSamples`], whose
+    /// `rms_maps` stack states the maps explicitly and is retained.
     // invariant: epoch and axis membership are validated before these lookups.
     #[allow(clippy::expect_used)]
     pub fn from_node_samples(
