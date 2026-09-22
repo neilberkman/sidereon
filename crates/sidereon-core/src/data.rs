@@ -2698,8 +2698,10 @@ pub fn terrain_tile_index(lat_deg: f64, lon_deg: f64) -> Result<(i32, i32), Data
 /// The HGT payload must be 3601 by 3601 big-endian `i16` samples in row-major
 /// order. HGT rows run north to south; DTED data records are longitude columns
 /// with postings south to north, so output posting `(i, j)` reads source sample
-/// `hgt[r = 3600 - i][c = j]`. SRTM void samples (`-32768`) are written as sea
-/// level (`0`) so the existing terrain reader returns `0` for those postings.
+/// `hgt[r = 3600 - i][c = j]`. SRTM void samples (`-32768`) are written as the
+/// DTED null value (all bits set), as MIL-PRF-89020B 3.10.9.1 requires of voids
+/// in SRTM DTED, so terrain lookups report them as unknown elevations rather
+/// than as sea level.
 pub fn hgt_to_dted(
     lat_index: i32,
     lon_index: i32,
@@ -4161,9 +4163,12 @@ fn dted_coord_field(index: i32, is_longitude: bool) -> String {
     format!("{:03}0000{hemi}", index.abs())
 }
 
+/// Raw DTED null (unknown elevation) posting, MIL-PRF-89020B 3.11.3.1.
+const DTED_NULL_POSTING: u16 = 0xFFFF;
+
 fn encode_dted_signed_magnitude(sample: i16) -> u16 {
     if sample == i16::MIN {
-        0
+        DTED_NULL_POSTING
     } else if sample >= 0 {
         sample as u16
     } else {

@@ -75,7 +75,10 @@ use crate::astro::math::vec3::norm3_ref as norm;
 use crate::validate;
 use std::fmt::Write as _;
 
-use super::{gregorian_to_two_part_julian_date, invalid_tide_input, BlqParseErrorKind, TideError};
+use super::{
+    gregorian_to_two_part_julian_date, invalid_tide_input, BlqParseErrorKind, BlqWriteErrorKind,
+    TideError,
+};
 
 /// Number of BLQ tidal constituents (M2 S2 N2 K2 K1 O1 P1 Q1 Mf Mm Ssa).
 pub const NUM_OCEAN_CONSTITUENTS: usize = 11;
@@ -236,35 +239,236 @@ pub struct OceanLoadingBlq {
     pub phase_deg: [[f64; NUM_OCEAN_CONSTITUENTS]; 3],
 }
 
+/// Position of a retained comment or header line within its station block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OceanLoadingBlqCommentPlacement {
+    /// Before the station line. The parser gives a block every line after the
+    /// previous block's last coefficient row, so file header comments belong
+    /// to the first block.
+    BeforeStation,
+    /// Before the zero-based coefficient row, `0..=5`; `BeforeRow(0)` is
+    /// between the station line and the first row. A column-order header here
+    /// sets the order of this row and every later one.
+    BeforeRow(usize),
+    /// After the sixth coefficient row. The parser uses it only for lines
+    /// that follow the last block of the input, and the writer accepts it
+    /// only on the last block it writes.
+    AfterRows,
+}
+
+/// One comment or header line retained from a BLQ block, as read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OceanLoadingBlqComment {
+    /// Where the line sits in the block.
+    pub placement: OceanLoadingBlqCommentPlacement,
+    /// The line exactly as read, without its line terminator.
+    pub line: String,
+}
+
 /// One parsed standard BLQ station block.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OceanLoadingBlqBlock {
-    /// Station identifier line from the BLQ block.
+    /// Station identifier line from the BLQ block, trimmed.
     pub station: String,
     /// Parsed and reordered BLQ coefficients.
     pub coefficients: OceanLoadingBlq,
+    /// Comment and column-order header lines of the block, in input order.
+    /// They carry the model, frame, unit and row-direction declarations the
+    /// provider writes as comments; the writer restates them unchanged.
+    pub comments: Vec<OceanLoadingBlqComment>,
 }
 
 impl OceanLoadingBlqBlock {
-    /// Format as a standard six-row BLQ block in the supported constituent order.
-    #[must_use]
-    pub fn to_blq_block(&self) -> String {
+    /// Format as a standard six-row BLQ block.
+    ///
+    /// The retained comments are written back at their placements, the station
+    /// line starts in the third column (two leading spaces, as in the
+    /// provider's files and where RTKLIB `readblq` reads the name), and each
+    /// row is written in the column order its retained header declares, or the
+    /// standard order when none does. Output reads back to an equal block.
+    ///
+    /// Returns [`TideError::BlqWrite`] for a station, comment or coefficient
+    /// that the parser would not read back unchanged, including comments not
+    /// grouped by placement in file order. To write several blocks as one
+    /// file, use [`write_ocean_loading_blq_blocks`], which carries a
+    /// column-order header across blocks the way the parser does.
+    pub fn to_blq_block(&self) -> Result<String, TideError> {
         let mut out = String::new();
-        let labels = OCEAN_LOADING_CONSTITUENTS
-            .iter()
-            .map(|constituent| constituent.label())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let _ = writeln!(out, "$$ Column order: {labels}");
-        let _ = writeln!(out, "{}", self.station);
-        for row in self.coefficients.amplitude_m {
-            write_blq_row(&mut out, row);
-        }
-        for row in self.coefficients.phase_deg {
-            write_blq_row(&mut out, row);
-        }
-        out
+        let mut column_order = OCEAN_LOADING_CONSTITUENTS;
+        self.write_blq(&mut out, &mut column_order, 0, true)?;
+        Ok(out)
     }
+
+    fn write_blq(
+        &self,
+        out: &mut String,
+        column_order: &mut [OceanTideConstituent; NUM_OCEAN_CONSTITUENTS],
+        block: usize,
+        is_last: bool,
+    ) -> Result<(), TideError> {
+        let fail = |kind| TideError::BlqWrite { block, kind };
+        validate_blq_station(&self.station).map_err(fail)?;
+        let rows = self.coefficient_rows();
+        for (row_index, row) in rows.iter().enumerate() {
+            for constituent in OCEAN_LOADING_CONSTITUENTS {
+                if !row[constituent.index()].is_finite() {
+                    return Err(fail(BlqWriteErrorKind::NonFiniteCoefficient {
+                        row: row_index,
+                        constituent,
+                    }));
+                }
+            }
+        }
+        let mut headers = Vec::with_capacity(self.comments.len());
+        let mut previous_rank = 0;
+        for (index, comment) in self.comments.iter().enumerate() {
+            headers.push(validate_blq_comment(index, comment).map_err(fail)?);
+            let rank = placement_rank(comment.placement);
+            if rank < previous_rank {
+                return Err(fail(BlqWriteErrorKind::CommentsOutOfPlacementOrder {
+                    index,
+                }));
+            }
+            previous_rank = rank;
+            if !is_last && comment.placement == OceanLoadingBlqCommentPlacement::AfterRows {
+                return Err(fail(BlqWriteErrorKind::AfterRowsBeforeAnotherBlock {
+                    index,
+                }));
+            }
+        }
+
+        let placements = std::iter::once(OceanLoadingBlqCommentPlacement::BeforeStation);
+        self.write_comments(out, column_order, &headers, placements);
+        let _ = writeln!(out, "  {}", self.station);
+        for (row_index, row) in rows.iter().enumerate() {
+            let placement = OceanLoadingBlqCommentPlacement::BeforeRow(row_index);
+            self.write_comments(out, column_order, &headers, std::iter::once(placement));
+            write_blq_row(out, row, column_order);
+        }
+        let placements = std::iter::once(OceanLoadingBlqCommentPlacement::AfterRows);
+        self.write_comments(out, column_order, &headers, placements);
+        Ok(())
+    }
+
+    /// Write the retained lines at `placements`, in retained order, applying
+    /// each header's column order as it is passed.
+    fn write_comments(
+        &self,
+        out: &mut String,
+        column_order: &mut [OceanTideConstituent; NUM_OCEAN_CONSTITUENTS],
+        headers: &[Option<[OceanTideConstituent; NUM_OCEAN_CONSTITUENTS]>],
+        placements: impl Iterator<Item = OceanLoadingBlqCommentPlacement>,
+    ) {
+        for placement in placements {
+            for (comment, header) in self.comments.iter().zip(headers) {
+                if comment.placement == placement {
+                    if let Some(order) = header {
+                        *column_order = *order;
+                    }
+                    out.push_str(&comment.line);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+
+    fn coefficient_rows(&self) -> [[f64; NUM_OCEAN_CONSTITUENTS]; 6] {
+        let amplitude = self.coefficients.amplitude_m;
+        let phase = self.coefficients.phase_deg;
+        [
+            amplitude[0],
+            amplitude[1],
+            amplitude[2],
+            phase[0],
+            phase[1],
+            phase[2],
+        ]
+    }
+}
+
+/// Write station blocks as one BLQ file.
+///
+/// Blocks are written in order with [`OceanLoadingBlqBlock::to_blq_block`]'s
+/// layout. A column-order header retained on one block stays in force for the
+/// blocks after it, as it does when the parser reads the file, so parsing the
+/// output of this function gives back equal blocks. A comment placed after the
+/// rows of any block but the last is refused, because the parser reads it as
+/// part of the next block.
+pub fn write_ocean_loading_blq_blocks(
+    blocks: &[OceanLoadingBlqBlock],
+) -> Result<String, TideError> {
+    let mut out = String::new();
+    let mut column_order = OCEAN_LOADING_CONSTITUENTS;
+    for (index, block) in blocks.iter().enumerate() {
+        block.write_blq(
+            &mut out,
+            &mut column_order,
+            index,
+            index + 1 == blocks.len(),
+        )?;
+    }
+    Ok(out)
+}
+
+/// Position of a placement in file order, which is the order the parser
+/// retains comments in.
+fn placement_rank(placement: OceanLoadingBlqCommentPlacement) -> usize {
+    match placement {
+        OceanLoadingBlqCommentPlacement::BeforeStation => 0,
+        OceanLoadingBlqCommentPlacement::BeforeRow(row) => 1 + row,
+        OceanLoadingBlqCommentPlacement::AfterRows => 7,
+    }
+}
+
+/// Refuse a station name the parser would not read back as the same station.
+fn validate_blq_station(station: &str) -> Result<(), BlqWriteErrorKind> {
+    if station.is_empty() {
+        return Err(BlqWriteErrorKind::EmptyStation);
+    }
+    if station.contains('\n') {
+        return Err(BlqWriteErrorKind::StationLineBreak);
+    }
+    if station.trim() != station {
+        return Err(BlqWriteErrorKind::StationSurroundingWhitespace);
+    }
+    if is_blq_comment(station) {
+        return Err(BlqWriteErrorKind::StationReadsAsComment);
+    }
+    if !matches!(parse_constituent_header(station, 0), Ok(None)) {
+        return Err(BlqWriteErrorKind::StationReadsAsHeader);
+    }
+    if looks_like_numeric_row(station) {
+        return Err(BlqWriteErrorKind::StationReadsAsCoefficientRow);
+    }
+    Ok(())
+}
+
+/// Refuse a retained line the parser would not read back as the same comment
+/// or header at the same placement; return the column order a header declares.
+fn validate_blq_comment(
+    index: usize,
+    comment: &OceanLoadingBlqComment,
+) -> Result<Option<[OceanTideConstituent; NUM_OCEAN_CONSTITUENTS]>, BlqWriteErrorKind> {
+    if comment.line.contains('\n') || comment.line.ends_with('\r') {
+        return Err(BlqWriteErrorKind::CommentLineBreak { index });
+    }
+    if let OceanLoadingBlqCommentPlacement::BeforeRow(row) = comment.placement {
+        if row > 5 {
+            return Err(BlqWriteErrorKind::CommentPlacementOutOfRange { index });
+        }
+    }
+    let trimmed = comment.line.trim();
+    if trimmed.is_empty() {
+        return Err(BlqWriteErrorKind::NotACommentLine { index });
+    }
+    let header = parse_constituent_header(trimmed, 0).map_err(|error| match error {
+        TideError::BlqParse { kind, .. } => BlqWriteErrorKind::InvalidHeader { index, kind },
+        _ => BlqWriteErrorKind::NotACommentLine { index },
+    })?;
+    if header.is_none() && !is_blq_comment(trimmed) {
+        return Err(BlqWriteErrorKind::NotACommentLine { index });
+    }
+    Ok(header)
 }
 
 impl OceanLoadingBlq {
@@ -293,10 +497,23 @@ pub fn parse_ocean_loading_blq_block(text: &str) -> Result<OceanLoadingBlqBlock,
 }
 
 /// Parse all standard station blocks in a BLQ file.
+///
+/// Lines starting with `$`, `#` or `!` are comments. A column-order header is
+/// a line whose text after any comment markers is `COLUMN ORDER` (any case,
+/// optional colon) followed by the constituent labels, or consists only of
+/// two or more constituent labels, or is a comment in which a word `ORDER` is
+/// followed to the end of the line by two or more constituent labels, such as
+/// `$$ Constituent order: S2 M2 ...`. Other comments are prose, even when they
+/// list constituents. A header sets the column order for every later row until
+/// the next header, including the remaining rows of a block it appears inside.
+/// Every label of a header must be one of the eleven supported constituents,
+/// each once; anything else is refused by name rather than dropped. Comment
+/// and header lines are retained on the block they belong to.
 pub fn parse_ocean_loading_blq_blocks(text: &str) -> Result<Vec<OceanLoadingBlqBlock>, TideError> {
-    let mut blocks = Vec::new();
+    let mut blocks: Vec<OceanLoadingBlqBlock> = Vec::new();
     let mut station: Option<(usize, String)> = None;
     let mut rows: Vec<[f64; NUM_OCEAN_CONSTITUENTS]> = Vec::new();
+    let mut comments: Vec<OceanLoadingBlqComment> = Vec::new();
     let mut column_order = OCEAN_LOADING_CONSTITUENTS;
     let mut saw_content = false;
 
@@ -308,11 +525,20 @@ pub fn parse_ocean_loading_blq_blocks(text: &str) -> Result<Vec<OceanLoadingBlqB
         }
         saw_content = true;
 
-        if let Some(order) = parse_constituent_header(trimmed, line_no)? {
-            column_order = order;
-            continue;
-        }
-        if is_blq_comment(trimmed) {
+        let header = parse_constituent_header(trimmed, line_no)?;
+        if header.is_some() || is_blq_comment(trimmed) {
+            let placement = if station.is_some() {
+                OceanLoadingBlqCommentPlacement::BeforeRow(rows.len())
+            } else {
+                OceanLoadingBlqCommentPlacement::BeforeStation
+            };
+            if let Some(order) = header {
+                column_order = order;
+            }
+            comments.push(OceanLoadingBlqComment {
+                placement,
+                line: raw_line.to_string(),
+            });
             continue;
         }
 
@@ -339,21 +565,15 @@ pub fn parse_ocean_loading_blq_blocks(text: &str) -> Result<Vec<OceanLoadingBlqB
 
         let row = parse_blq_numeric_row(trimmed, line_no, column_order)?;
         rows.push(row);
-        if rows.len() > 6 {
-            let station_name = station
-                .as_ref()
-                .map(|(_, name)| name.clone())
-                .unwrap_or_default();
-            return Err(TideError::BlqParse {
-                line: line_no,
-                kind: BlqParseErrorKind::TooManyCoefficientRows {
-                    station: station_name,
-                },
-            });
-        }
         if rows.len() == 6 {
-            let (_, station_name) = station.take().expect("station present");
-            blocks.push(block_from_rows(station_name, &rows));
+            let Some((_, station_name)) = station.take() else {
+                unreachable!("coefficient rows are only collected after a station line");
+            };
+            blocks.push(block_from_rows(
+                station_name,
+                &rows,
+                std::mem::take(&mut comments),
+            ));
             rows.clear();
         }
     }
@@ -374,6 +594,13 @@ pub fn parse_ocean_loading_blq_blocks(text: &str) -> Result<Vec<OceanLoadingBlqB
             },
         });
     }
+    if let Some(last) = blocks.last_mut() {
+        last.comments
+            .extend(comments.into_iter().map(|comment| OceanLoadingBlqComment {
+                placement: OceanLoadingBlqCommentPlacement::AfterRows,
+                line: comment.line,
+            }));
+    }
 
     Ok(blocks)
 }
@@ -381,6 +608,7 @@ pub fn parse_ocean_loading_blq_blocks(text: &str) -> Result<Vec<OceanLoadingBlqB
 fn block_from_rows(
     station: String,
     rows: &[[f64; NUM_OCEAN_CONSTITUENTS]],
+    comments: Vec<OceanLoadingBlqComment>,
 ) -> OceanLoadingBlqBlock {
     let mut amplitude_m = [[0.0_f64; NUM_OCEAN_CONSTITUENTS]; 3];
     let mut phase_deg = [[0.0_f64; NUM_OCEAN_CONSTITUENTS]; 3];
@@ -392,11 +620,17 @@ fn block_from_rows(
             amplitude_m,
             phase_deg,
         },
+        comments,
     }
 }
 
-fn write_blq_row(out: &mut String, row: [f64; NUM_OCEAN_CONSTITUENTS]) {
-    for value in row {
+fn write_blq_row(
+    out: &mut String,
+    row: &[f64; NUM_OCEAN_CONSTITUENTS],
+    column_order: &[OceanTideConstituent; NUM_OCEAN_CONSTITUENTS],
+) {
+    for constituent in column_order {
+        let value = row[constituent.index()];
         let _ = write!(out, " {value:>16}");
     }
     out.push('\n');
@@ -458,40 +692,93 @@ fn parse_blq_float_token(token: &str) -> Result<f64, BlqParseErrorKind> {
     Ok(value)
 }
 
+/// Recognize a column-order header and return the order it declares.
+///
+/// Three forms are headers:
+///
+/// 1. The declared form: `COLUMN ORDER` (any case, optionally followed by a
+///    colon) after any comment markers, as in the provider's
+///    `$$ COLUMN ORDER:  M2  S2 ...`. Everything after it is the label list.
+/// 2. The bare form: a line of two or more tokens that all look like tidal
+///    constituent labels, at least one of them a supported one.
+/// 3. The ordered comment: a comment line in which a word `ORDER` (any case,
+///    optionally followed by a colon) is followed, to the end of the line, by
+///    two or more tokens that all look like constituent labels, at least one
+///    of them a supported one, such as
+///    `$$ Constituent order: S2 M2 ...`. Surrounding punctuation `: ; ( ) [ ] .`
+///    is not part of a token.
+///
+/// Any other line is not a header, including prose that lists constituents
+/// without declaring an order, such as
+/// `$$ diurnal K1 O1 P1 Q1, semidiurnal M2 S2 N2 K2, long-period MF MM SSA`.
+/// The labels of every header form must be exactly the eleven supported
+/// constituents, each once, or the header is refused by name.
 fn parse_constituent_header(
     line: &str,
     line_no: usize,
 ) -> Result<Option<[OceanTideConstituent; NUM_OCEAN_CONSTITUENTS]>, TideError> {
-    if line
-        .split_whitespace()
-        .all(|token| parse_blq_float_token(token).is_ok())
-    {
-        return Ok(None);
-    }
+    let body = line.trim_start_matches(['$', '#', '!']).trim_start();
+    let split_labels = |text: &str| {
+        text.split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|token| !token.is_empty())
+            .map(str::to_ascii_uppercase)
+            .collect::<Vec<_>>()
+    };
 
-    let upper = line.to_ascii_uppercase();
-    let header_hint = upper.contains("COLUMN") || upper.contains("CONSTITUENT");
-    let labels = line
-        .split_whitespace()
-        .map(normalize_constituent_token)
-        .filter(|token| is_constituent_like(token))
-        .collect::<Vec<_>>();
-    if labels.is_empty() {
-        return Ok(None);
-    }
-    if labels.len() != NUM_OCEAN_CONSTITUENTS && !header_hint {
-        return Ok(None);
-    }
-    if labels.len() != NUM_OCEAN_CONSTITUENTS {
-        return Err(TideError::BlqParse {
-            line: line_no,
-            kind: BlqParseErrorKind::WrongColumnCount {
-                expected: NUM_OCEAN_CONSTITUENTS,
-                found: labels.len(),
-            },
+    const DECLARATION: &str = "COLUMN ORDER";
+    let declared = body
+        .get(..DECLARATION.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(DECLARATION))
+        .map(|_| &body[DECLARATION.len()..])
+        .filter(|rest| {
+            rest.is_empty() || rest.starts_with(':') || rest.starts_with(char::is_whitespace)
         });
+    if let Some(rest) = declared {
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix(':').unwrap_or(rest);
+        return constituent_order(&split_labels(rest), line_no).map(Some);
     }
 
+    let labels = split_labels(body);
+    let is_bare_header = labels.len() >= 2
+        && labels.iter().all(|label| is_constituent_like(label))
+        && labels
+            .iter()
+            .any(|label| OceanTideConstituent::from_label(label).is_some());
+    if is_bare_header {
+        return constituent_order(&labels, line_no).map(Some);
+    }
+
+    if is_blq_comment(line) {
+        let tokens = labels
+            .iter()
+            .map(|token| {
+                token
+                    .trim_matches(|c: char| matches!(c, ':' | ';' | '(' | ')' | '[' | ']' | '.'))
+                    .to_string()
+            })
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>();
+        for (index, token) in tokens.iter().enumerate() {
+            let list = &tokens[index + 1..];
+            if token == "ORDER"
+                && list.len() >= 2
+                && list.iter().all(|label| is_constituent_like(label))
+                && list
+                    .iter()
+                    .any(|label| OceanTideConstituent::from_label(label).is_some())
+            {
+                return constituent_order(list, line_no).map(Some);
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn constituent_order(
+    labels: &[String],
+    line_no: usize,
+) -> Result<[OceanTideConstituent; NUM_OCEAN_CONSTITUENTS], TideError> {
     let mut order = [OceanTideConstituent::M2; NUM_OCEAN_CONSTITUENTS];
     let mut seen = [false; NUM_OCEAN_CONSTITUENTS];
     for (idx, label) in labels.iter().enumerate() {
@@ -513,26 +800,20 @@ fn parse_constituent_header(
             });
         }
         seen[constituent_index] = true;
-        order[idx] = constituent;
+        if idx < NUM_OCEAN_CONSTITUENTS {
+            order[idx] = constituent;
+        }
     }
-    Ok(Some(order))
-}
-
-fn normalize_constituent_token(token: &str) -> String {
-    token
-        .trim_matches(|c: char| {
-            c == '$'
-                || c == '#'
-                || c == '!'
-                || c == ':'
-                || c == ';'
-                || c == ','
-                || c == '('
-                || c == ')'
-                || c == '['
-                || c == ']'
-        })
-        .to_ascii_uppercase()
+    if labels.len() != NUM_OCEAN_CONSTITUENTS {
+        return Err(TideError::BlqParse {
+            line: line_no,
+            kind: BlqParseErrorKind::WrongColumnCount {
+                expected: NUM_OCEAN_CONSTITUENTS,
+                found: labels.len(),
+            },
+        });
+    }
+    Ok(order)
 }
 
 fn is_constituent_like(token: &str) -> bool {
@@ -546,6 +827,7 @@ fn is_constituent_like(token: &str) -> bool {
         )
         || (token.len() <= 4
             && token.chars().any(|c| c.is_ascii_digit())
+            && token.chars().any(|c| c.is_ascii_alphabetic())
             && token.chars().all(|c| c.is_ascii_alphanumeric()))
 }
 

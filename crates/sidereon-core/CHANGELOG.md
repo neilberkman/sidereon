@@ -886,8 +886,89 @@ All notable changes to `sidereon-core` are documented here.
   than drop them, and now it carries them. `drop_unsupported` still drops them
   and still reports having done so.
 
+- **Breaking.** A DTED posting holding the null value (all bits set,
+  MIL-PRF-89020B 3.11.3.1) is an unknown elevation. `DtedTile::get_elevation`
+  returns `DtedTileError::NullPosting`, and `DtedTerrain` and `MmapTerrain`
+  lookups that give a null posting nonzero weight return the new
+  `Error::UnknownTerrainElevation`, naming the tile and posting. A bilinear
+  query exactly on a known posting next to a null still returns that posting.
+  When the posting a nearest lookup selects is a null on the tile edge, a
+  neighbouring tile's posting at exactly the same coordinates answers, and a
+  bilinear query exactly on a shared edge is answered by the neighbouring tile;
+  a neighbour that is absent, unreadable or on another datum leaves the unknown
+  elevation standing. The terrain-store converter stores a null as
+  `TERRAIN_STORE_NULL_POSTING` (-32767, the value the specification names for
+  it). Null postings in stores written before this release, which lookups
+  formerly returned as a -32767 m height, now read as unknown elevations.
+- **Breaking.** `hgt_to_dted` writes SRTM void samples (-32768) as the DTED
+  null, as MIL-PRF-89020B 3.10.9.1 requires of voids in SRTM DTED, instead of as
+  sea level. Lookups at a void now return `Error::UnknownTerrainElevation`
+  instead of 0 m. Tiles converted by earlier releases still hold 0 at their
+  voids; reconvert cached SRTM-derived DTED tiles, and terrain stores built from
+  them, from the source HGT files to recover the voids.
+- **Breaking.** DTED tiles are checked against the metadata the reader places
+  postings by. UHL origins must be whole degrees inside their axis with the
+  axis's hemisphere letters and minutes and seconds below 60; a stated UHL data
+  interval must span one degree over the posting count (blank intervals are read
+  as before); each data record must declare the longitude count of its position
+  and latitude count zero. Inconsistent metadata and the partial profiles of
+  magnetic-tape cells are refused with named `DtedTileError` variants.
+  `DtedTerrain` refuses a tile whose origin disagrees with the tile its file
+  name names, which previously read as sea level.
+- **Breaking.** `DtedTile` keeps the DSI horizontal datum as the new
+  `DtedHorizontalDatum` (`Wgs84`, `Wgs72`, `Unstated` or `Other`), read by
+  `DtedTile::horizontal_datum`. Tiles on any datum read as tiles. `DtedTerrain`
+  refuses to answer a WGS84 query from a tile whose datum is `Wgs72` or `Other`,
+  with the new `Error::NonWgs84TerrainTile`, and the terrain-store converter
+  refuses such a tile with the new `TerrainStoreError::NonWgs84Tile`, since the
+  store records no datum. A blank datum field is read as WGS84, as before. No
+  datum transformation is performed.
+- **Breaking.** Negative DTED postings written in two's complement are read as
+  GDAL's DTED driver reads them: a signed-magnitude value below -16000 m other
+  than the null is reinterpreted as two's complement. Such a posting formerly
+  read as a height below -16000 m, under the -12,000 m floor of MIL-PRF-89020B
+  3.11.2. Terrain stores decode postings once, at conversion, so a store built
+  from such a tile before this release keeps the old value (for example -32763 m
+  where the reader now gives -5 m); rebuild stores built from such tiles.
+- **Breaking.** Terrain-store index records must name a tile id inside the
+  coordinate domain and bounds equal to that one-degree cell's edges. Other
+  values, which the payload checksum does not cover and which could reach the
+  lookup arithmetic and panic, are refused at parse with the new
+  `TerrainStoreError::TileIdOutOfRange` and
+  `TerrainStoreError::TileBoundsMismatch`.
+- **Breaking.** `OceanLoadingBlqBlock::to_blq_block` returns
+  `Result<String, TideError>` and refuses, with the new `TideError::BlqWrite`
+  and `BlqWriteErrorKind`, a block the parser would not read back unchanged: an
+  empty station, one with a line break, surrounding whitespace, a comment
+  marker, or text that reads as a header or coefficient row; NaN or infinite
+  coefficients; and retained comments that would not read back as the same
+  comments in the same places. The station line is written from the third
+  column, where the provider's files put it and RTKLIB `readblq` reads it; the
+  parser reads it in either column. The writer no longer adds a column-order
+  line of its own.
+- **Breaking.** `OceanLoadingBlqBlock` gains `comments`, the block's comment and
+  header lines in input order with their placement, and the writer restates
+  them. `write_ocean_loading_blq_blocks` writes several blocks as one file,
+  carrying a column-order header across blocks as the parser does.
+- **Breaking.** BLQ column-order headers follow a stated grammar: a
+  `COLUMN ORDER` declaration, a line of constituent labels only, or a comment in
+  which a word `ORDER` is followed to the end of the line by constituent labels,
+  such as `$$ Constituent order: S2 M2 ...`. Other comments are prose, including
+  ones that list constituents without declaring an order. A header of any of
+  these forms with a label that is not one of the eleven supported constituents,
+  such as `SA` for `Ssa`, a repeated label or a count other than eleven is
+  refused instead of being filtered or ignored. A header between coefficient
+  rows of a block sets the order of the rows after it and is retained at that
+  position.
+
 ### Fixed
 
+- Terrain-store header and index integers are converted to `usize` with a
+  checked conversion before validation, so a value above a 32-bit target's
+  address width is refused rather than truncated to one that passes.
+- Terrain-store bilinear lookup locates the cell with the same exact in-tile
+  offset as raw DTED lookup, so the two agree bit for bit in the tiles west of
+  the prime meridian and south of the equator.
 - A TDM line whose keyword is `COMMENT` is a comment or nothing. CCSDS
   503.0-B-2 4.2.5 c) excepts `COMMENT` from the KVN syntax, and 4.5.3 requires
   at least one space after the keyword, so `COMMENT=value` is neither a comment

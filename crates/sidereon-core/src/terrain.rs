@@ -1,4 +1,28 @@
 //! DTED tile reader and bilinear terrain lookup.
+//!
+//! Tiles are read as MIL-PRF-89020B one-degree cells with full profiles: the
+//! UHL origin is a whole degree with the hemisphere letters of its axis, any
+//! stated UHL data interval spans one degree over the posting count, and every
+//! data record declares the longitude count of its position and latitude count
+//! zero. The partial profiles of magnetic-tape cells are refused by name. A
+//! posting holding the null value is an unknown elevation: a lookup that
+//! weights it returns [`Error::UnknownTerrainElevation`], never a height. When
+//! the posting a nearest lookup selects is a null on the tile edge, a
+//! neighbouring tile's posting at exactly the same coordinates answers; a
+//! bilinear query exactly on a shared edge is answered by the neighbouring tile
+//! when the first gives it an unknown elevation.
+//!
+//! A tile keeps the horizontal datum its DSI record states
+//! ([`DtedTile::horizontal_datum`]). Cells compiled on an earlier WGS, such as
+//! WGS72 (MIL-PRF-89020B DSI note n), read as tiles, but [`DtedTerrain`]
+//! answers WGS84 geodetic queries and refuses such a tile rather than
+//! transforming it; a blank datum field is read as WGS84, as before.
+//!
+//! Some producers wrote negative postings in two's complement instead of
+//! signed magnitude. As GDAL's DTED driver does (`dted_api.c`, citing
+//! `w_069_s50.dt0`), a negative signed-magnitude value below -16000 m other
+//! than the null is reinterpreted as two's complement; no conforming posting
+//! lies there, since MIL-PRF-89020B 3.11.2 bounds terrain at -12,000 m.
 
 #![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -13,6 +37,14 @@ pub(crate) const DSI_SIZE: usize = 648;
 pub(crate) const ACC_SIZE: usize = 2700;
 pub(crate) const DATA_OFFSET: usize = UHL_SIZE + DSI_SIZE + ACC_SIZE;
 pub(crate) const DATA_SENTINEL: u8 = 0xAA;
+/// Raw DTED posting with every bit set: the null (unknown) elevation of
+/// MIL-PRF-89020B 3.11.3.1. Under signed magnitude it reads as -32767.
+pub(crate) const DTED_NULL_POSTING_RAW: u16 = 0xFFFF;
+/// Arc length of one tile side in tenths of an arc second, the unit of the UHL
+/// data interval fields.
+const ONE_DEGREE_TENTHS_ARCSEC: u64 = 36_000;
+/// Offset of the DSI horizontal datum code (DSI character 145).
+const DSI_HORIZONTAL_DATUM: std::ops::Range<usize> = UHL_SIZE + 144..UHL_SIZE + 149;
 pub(crate) const DTED_SUFFIX: &str = concat!("_1arc_v3.d", "t", "2");
 const MIN_LOOKUP_LATITUDE_DEG: f64 = -90.0;
 const MAX_LOOKUP_LATITUDE_DEG: f64 = 90.0;
@@ -122,6 +154,81 @@ pub enum DtedTileError {
         /// Signed nearest posting index that could not convert to `usize`.
         index: i64,
     },
+    /// A UHL origin field states degrees outside its axis, or minutes or
+    /// seconds outside `0..60`.
+    #[error("DTED {field} {text:?} is out of range")]
+    CoordinateOutOfRange {
+        /// Name of the UHL field.
+        field: &'static str,
+        /// Field text as read.
+        text: String,
+    },
+    /// A UHL origin field carries a hemisphere letter of the other axis.
+    #[error("DTED {field} has hemisphere {hemisphere}, expected {expected}")]
+    WrongHemisphere {
+        /// Name of the UHL field.
+        field: &'static str,
+        /// Hemisphere letter found in the field.
+        hemisphere: char,
+        /// Hemisphere letters the field allows.
+        expected: &'static str,
+    },
+    /// A UHL origin is not a whole degree. MIL-PRF-89020B states the UHL
+    /// origin as a full degree value, and every lookup assumes a tile spans
+    /// exactly one degree from it.
+    #[error("DTED {field} {text:?} is not a whole degree")]
+    OriginNotWholeDegree {
+        /// Name of the UHL field.
+        field: &'static str,
+        /// Field text as read.
+        text: String,
+    },
+    /// A UHL data interval and posting count do not span one degree, so the
+    /// postings are not where the reader places them.
+    #[error(
+        "DTED {field} of {interval_tenths_arcsec} tenths of an arc second over {count} postings does not span one degree"
+    )]
+    IntervalCountMismatch {
+        /// Name of the UHL interval field.
+        field: &'static str,
+        /// Interval in tenths of an arc second.
+        interval_tenths_arcsec: u32,
+        /// Posting count on the same axis.
+        count: usize,
+    },
+    /// A data record's longitude count does not match its position in the
+    /// file, so its postings belong to a different meridian.
+    #[error("DTED block {longitude_index} declares longitude count {declared}")]
+    ProfileLongitudeCountMismatch {
+        /// Zero-based position of the data record in the file.
+        longitude_index: usize,
+        /// Longitude count declared by the record.
+        declared: i32,
+    },
+    /// A data record's latitude count is not zero. Only full profiles, whose
+    /// first posting lies on the origin parallel, are read; the partial
+    /// profiles MIL-PRF-89020B allows on magnetic tape (3.11.3.2.2) are
+    /// refused rather than read at the wrong latitudes.
+    #[error(
+        "DTED block {longitude_index} is a partial profile starting at latitude count {first_latitude_index}"
+    )]
+    UnsupportedPartialProfile {
+        /// Zero-based position of the data record in the file.
+        longitude_index: usize,
+        /// Latitude count declared by the record.
+        first_latitude_index: i32,
+    },
+    /// The posting holds the DTED null value (all bits set, MIL-PRF-89020B
+    /// 3.11.3.1), an unknown elevation rather than a height.
+    #[error(
+        "DTED posting lon={longitude_index} lat={latitude_index} is a null (unknown) elevation"
+    )]
+    NullPosting {
+        /// Zero-based longitude posting (profile) index.
+        longitude_index: usize,
+        /// Zero-based latitude posting index.
+        latitude_index: usize,
+    },
 }
 
 #[cfg(test)]
@@ -211,6 +318,20 @@ mod error_display_tests {
                 DtedTileError::NegativePostingIndex { index: -1 },
                 "cannot round negative posting index -1",
             ),
+            (
+                DtedTileError::NullPosting {
+                    longitude_index: 2,
+                    latitude_index: 3,
+                },
+                "DTED posting lon=2 lat=3 is a null (unknown) elevation",
+            ),
+            (
+                DtedTileError::ProfileLongitudeCountMismatch {
+                    longitude_index: 1,
+                    declared: 2,
+                },
+                "DTED block 1 declares longitude count 2",
+            ),
         ];
 
         for (error, expected) in cases {
@@ -283,6 +404,16 @@ impl DtedTerrain {
 
     /// Return the orthometric height `H` in metres at a longitude-first
     /// geodetic position in degrees using explicit lookup options.
+    ///
+    /// A missing tile reads as sea level, `0.0`. A lookup that gives nonzero
+    /// weight to a null posting returns [`Error::UnknownTerrainElevation`],
+    /// unless a neighbouring present tile knows the height at the same place.
+    /// For a nearest lookup that is the neighbour's posting at exactly the
+    /// coordinates of a null edge posting. For a bilinear lookup exactly on a
+    /// shared edge it is the neighbour's interpolation there: every weighted
+    /// posting lies on that edge, so both tiles describe the same point. A
+    /// tile whose DSI names a horizontal datum other than WGS84 is refused with
+    /// [`Error::NonWgs84TerrainTile`], since queries are WGS84 positions.
     pub fn height_m_with_options(
         &mut self,
         longitude_deg: f64,
@@ -290,10 +421,8 @@ impl DtedTerrain {
         options: DtedLookupOptions,
     ) -> crate::Result<f64> {
         validate_lookup_coordinates(longitude_deg, latitude_deg)?;
-        let Some(tile) = self.load_tile(longitude_deg, latitude_deg)? else {
-            return Ok(0.0);
-        };
-        height_from_tile(tile, longitude_deg, latitude_deg, options)
+        self.height_from_candidates(longitude_deg, latitude_deg, options)
+            .1
     }
 
     /// Evaluate `(longitude_deg, latitude_deg)` points in order using one
@@ -301,7 +430,7 @@ impl DtedTerrain {
     ///
     /// The tuple order is intentionally longitude-first, matching
     /// [`Self::height_m_with_options`], even though geoid batch helpers use
-    /// latitude-first points.
+    /// latitude-first points. Each result equals the scalar lookup's.
     pub fn height_batch(
         &mut self,
         points: &[(f64, f64)],
@@ -316,65 +445,156 @@ impl DtedTerrain {
                 continue;
             }
 
+            // The primary grid is always the first candidate, so its tile
+            // answers unless it gives the point an unknown elevation.
             let primary_grid = terrain_grid(longitude_deg, latitude_deg);
             if current == Some(primary_grid) {
                 if let Some(tile) = self.tiles.get(&primary_grid) {
                     if tile.contains(longitude_deg, latitude_deg) {
-                        out.push(height_from_tile(tile, longitude_deg, latitude_deg, options));
-                        continue;
+                        let result = height_from_tile(tile, longitude_deg, latitude_deg, options);
+                        if !matches!(result, Err(Error::UnknownTerrainElevation { .. })) {
+                            out.push(result);
+                            continue;
+                        }
                     }
                 }
             }
 
-            match self.resolve_grid(longitude_deg, latitude_deg) {
-                Ok(Some(grid_idx)) => {
-                    current = Some(grid_idx);
-                    let Some(tile) = self.tiles.get(&grid_idx) else {
-                        out.push(Err(Error::Parse(
-                            "resolved DTED grid is missing from the tile cache".to_string(),
-                        )));
-                        continue;
-                    };
-                    out.push(height_from_tile(tile, longitude_deg, latitude_deg, options));
-                }
-                Ok(None) => {
-                    current = None;
-                    out.push(Ok(0.0));
-                }
-                Err(err) => out.push(Err(err)),
-            }
+            let (grid, result) = self.height_from_candidates(longitude_deg, latitude_deg, options);
+            current = grid;
+            out.push(result);
         }
 
         out
     }
 
-    fn load_tile(&mut self, longitude: f64, latitude: f64) -> crate::Result<Option<&DtedTile>> {
-        let Some(grid_idx) = self.resolve_grid(longitude, latitude)? else {
-            return Ok(None);
-        };
-        Ok(self.tiles.get(&grid_idx))
-    }
-
-    fn resolve_grid(&mut self, longitude: f64, latitude: f64) -> crate::Result<Option<(i32, i32)>> {
+    /// Answer a query from the tiles that contain it, in candidate order.
+    ///
+    /// Returns the first containing tile's grid, if any, with the result. No
+    /// containing tile at all reads as sea level.
+    ///
+    /// When the first tile gives the point an unknown elevation, a nearest
+    /// lookup takes the value of a neighbouring tile's posting at exactly the
+    /// coordinates of the null posting, when that posting lies on the tile
+    /// edge ([`edge_neighbour_grids`], [`coincident_posting`]). A bilinear
+    /// lookup defers to the next containing candidate, which exists only for a
+    /// point on a tile edge, where every weighted posting lies on that edge.
+    /// A neighbouring tile is consulted only because the first tile gave an
+    /// unknown elevation, so a neighbour that cannot be read, or that states
+    /// another datum, leaves that unknown standing rather than replacing it
+    /// with an error about a different tile, and the remaining candidates are
+    /// still tried.
+    fn height_from_candidates(
+        &mut self,
+        longitude: f64,
+        latitude: f64,
+        options: DtedLookupOptions,
+    ) -> (Option<(i32, i32)>, crate::Result<f64>) {
+        let mut first_grid = None;
+        let mut unknown = None;
         for grid_idx in terrain_grid_candidates(longitude, latitude) {
-            if !self.tiles.contains_key(&grid_idx) {
-                let Some(path) = self.terrain_path_for_grid(grid_idx.0, grid_idx.1) else {
-                    continue;
-                };
-                if !path.is_file() {
-                    continue;
-                }
-                let tile =
-                    DtedTile::from_path(path).map_err(|error| Error::Parse(error.to_string()))?;
-                self.tiles.insert(grid_idx, tile);
+            match self.load_tile(grid_idx) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(_) if unknown.is_some() => continue,
+                Err(err) => return (first_grid, Err(err)),
             }
-            if let Some(tile) = self.tiles.get(&grid_idx) {
-                if tile.contains(longitude, latitude) {
-                    return Ok(Some(grid_idx));
+            let Some(tile) = self.tiles.get(&grid_idx) else {
+                continue;
+            };
+            if !tile.contains(longitude, latitude) {
+                continue;
+            }
+            if first_grid.is_none() {
+                first_grid = Some(grid_idx);
+            }
+            let result = height_from_tile(tile, longitude, latitude, options);
+            let unknown_at = result.as_ref().err().and_then(unknown_posting);
+            let Some((lon_posting, lat_posting)) = unknown_at else {
+                // A later candidate is consulted only because an earlier one
+                // gave an unknown elevation; its failure leaves that unknown
+                // standing and the remaining candidates still get a turn.
+                if unknown.is_some() && result.is_err() {
+                    continue;
                 }
+                return (first_grid, result);
+            };
+            if options.interpolation == DtedInterpolation::NearestPosting {
+                let neighbour =
+                    self.nearest_from_edge_neighbours(grid_idx, lon_posting, lat_posting);
+                return (first_grid, neighbour.map_or(result, Ok));
+            }
+            if unknown.is_none() {
+                unknown = result.err();
             }
         }
-        Ok(None)
+        (first_grid, unknown.map_or(Ok(0.0), Err))
+    }
+
+    /// Value of a neighbouring tile's posting at exactly the coordinates of
+    /// the null posting `(lon_posting, lat_posting)` of the tile at `grid`,
+    /// when that posting lies on the tile edge and a neighbour holds a known
+    /// height there.
+    fn nearest_from_edge_neighbours(
+        &mut self,
+        grid: (i32, i32),
+        lon_posting: usize,
+        lat_posting: usize,
+    ) -> Option<f64> {
+        let primary = self.tiles.get(&grid)?.grid();
+        for neighbour_grid in edge_neighbour_grids(primary, lon_posting, lat_posting) {
+            if !matches!(self.load_tile(neighbour_grid), Ok(true)) {
+                continue;
+            }
+            let Some(neighbour) = self.tiles.get(&neighbour_grid) else {
+                continue;
+            };
+            let Some((lon_index, lat_index)) =
+                coincident_posting(primary, lon_posting, lat_posting, neighbour.grid())
+            else {
+                continue;
+            };
+            if let Ok(value) = neighbour.posting(lon_index, lat_index) {
+                return Some(f64::from(value));
+            }
+        }
+        None
+    }
+
+    /// Load the tile for `grid_idx` into the cache if its file is present,
+    /// reporting whether it is cached.
+    fn load_tile(&mut self, grid_idx: (i32, i32)) -> crate::Result<bool> {
+        if !self.tiles.contains_key(&grid_idx) {
+            let Some(path) = self.terrain_path_for_grid(grid_idx.0, grid_idx.1) else {
+                return Ok(false);
+            };
+            if !path.is_file() {
+                return Ok(false);
+            }
+            let tile =
+                DtedTile::from_path(&path).map_err(|error| Error::Parse(error.to_string()))?;
+            if tile.origin_latitude != f64::from(grid_idx.0)
+                || tile.origin_longitude != f64::from(grid_idx.1)
+            {
+                return Err(Error::Parse(format!(
+                    "{}: DTED origin ({},{}) does not match tile ({},{}) named by the file",
+                    path.display(),
+                    tile.origin_latitude,
+                    tile.origin_longitude,
+                    grid_idx.0,
+                    grid_idx.1
+                )));
+            }
+            if !tile.horizontal_datum.is_wgs84_compatible() {
+                return Err(Error::NonWgs84TerrainTile {
+                    lat_index: grid_idx.0,
+                    lon_index: grid_idx.1,
+                    datum: tile.horizontal_datum.clone(),
+                });
+            }
+            self.tiles.insert(grid_idx, tile);
+        }
+        Ok(true)
     }
 
     fn terrain_path_for_grid(&self, latitude_index: i32, longitude_index: i32) -> Option<PathBuf> {
@@ -410,8 +630,8 @@ fn height_from_tile(
     if options.interpolation == DtedInterpolation::NearestPosting {
         return tile
             .get_elevation(longitude_deg, latitude_deg)
-            .map(|v| v as f64)
-            .map_err(|error| Error::Parse(error.to_string()));
+            .map(f64::from)
+            .map_err(|error| tile_lookup_error(tile, error));
     }
 
     let postings_per_deg_lon = tile.lon_count - 1;
@@ -437,11 +657,139 @@ fn height_from_tile(
                 tile.origin_latitude + (lat_lo + dj) as f64 / postings_per_deg_lat as f64;
             z += w * f64::from(
                 tile.get_elevation(posting_lon, posting_lat)
-                    .map_err(|error| Error::Parse(error.to_string()))?,
+                    .map_err(|error| tile_lookup_error(tile, error))?,
             );
         }
     }
     Ok(z)
+}
+
+/// Map a tile lookup failure to the crate error, keeping a null posting typed.
+fn tile_lookup_error(tile: &DtedTile, error: DtedTileError) -> Error {
+    match error {
+        DtedTileError::NullPosting {
+            longitude_index,
+            latitude_index,
+        } => Error::UnknownTerrainElevation {
+            // The origin is a validated whole degree inside [-180, 180).
+            lat_index: tile.origin_latitude as i32,
+            lon_index: tile.origin_longitude as i32,
+            latitude_posting: latitude_index,
+            longitude_posting: longitude_index,
+        },
+        other => Error::Parse(other.to_string()),
+    }
+}
+
+/// Posting indices `(longitude, latitude)` of an unknown-elevation error.
+pub(crate) fn unknown_posting(error: &Error) -> Option<(usize, usize)> {
+    match error {
+        Error::UnknownTerrainElevation {
+            latitude_posting,
+            longitude_posting,
+            ..
+        } => Some((*longitude_posting, *latitude_posting)),
+        _ => None,
+    }
+}
+
+/// Whole-degree origin and posting counts of a one-degree tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TileGrid {
+    pub(crate) lat_index: i32,
+    pub(crate) lon_index: i32,
+    pub(crate) lon_count: usize,
+    pub(crate) lat_count: usize,
+}
+
+/// Tiles other than `tile` that share the location of its posting
+/// `(lon_posting, lat_posting)`: none unless the posting lies on the tile
+/// edge, up to three at a corner. Latitude-major order.
+pub(crate) fn edge_neighbour_grids(
+    tile: TileGrid,
+    lon_posting: usize,
+    lat_posting: usize,
+) -> Vec<(i32, i32)> {
+    let axis = |index: i32, posting: usize, count: usize| {
+        if posting == 0 {
+            vec![index, index - 1]
+        } else if posting + 1 == count {
+            vec![index, index + 1]
+        } else {
+            vec![index]
+        }
+    };
+    let lats = axis(tile.lat_index, lat_posting, tile.lat_count);
+    let lons = axis(tile.lon_index, lon_posting, tile.lon_count);
+    let mut out = Vec::new();
+    for &lat in &lats {
+        for &lon in &lons {
+            if (lat, lon) != (tile.lat_index, tile.lon_index) {
+                out.push((lat, lon));
+            }
+        }
+    }
+    out
+}
+
+/// Posting indices `(longitude, latitude)` in `neighbour` at exactly the
+/// coordinates of posting `(lon_posting, lat_posting)` of `tile`, if it has a
+/// posting there.
+///
+/// Posting `i` of an axis with origin `o` and count `c` lies at
+/// `o + i / (c - 1)` degrees; the comparison is on those rationals in integer
+/// arithmetic, so neighbours with a different posting interval match only
+/// where their postings coincide.
+pub(crate) fn coincident_posting(
+    tile: TileGrid,
+    lon_posting: usize,
+    lat_posting: usize,
+    neighbour: TileGrid,
+) -> Option<(usize, usize)> {
+    Some((
+        coincident_index(
+            tile.lon_index,
+            lon_posting,
+            tile.lon_count,
+            neighbour.lon_index,
+            neighbour.lon_count,
+        )?,
+        coincident_index(
+            tile.lat_index,
+            lat_posting,
+            tile.lat_count,
+            neighbour.lat_index,
+            neighbour.lat_count,
+        )?,
+    ))
+}
+
+/// Index `k` with `other_origin + k / (other_count - 1)` equal to
+/// `origin + index / (count - 1)`, if one exists.
+fn coincident_index(
+    origin: i32,
+    index: usize,
+    count: usize,
+    other_origin: i32,
+    other_count: usize,
+) -> Option<usize> {
+    let intervals = count as i128 - 1;
+    let other_intervals = other_count as i128 - 1;
+    if intervals <= 0 || other_intervals <= 0 {
+        return None;
+    }
+    // k = ((origin - other_origin) * intervals + index) * other_intervals / intervals
+    let numerator = ((i128::from(origin) - i128::from(other_origin)) * intervals + index as i128)
+        * other_intervals;
+    if numerator % intervals != 0 {
+        return None;
+    }
+    let k = numerator / intervals;
+    if (0..=other_intervals).contains(&k) {
+        usize::try_from(k).ok()
+    } else {
+        None
+    }
 }
 
 pub(crate) fn validate_lookup_coordinates(
@@ -471,11 +819,59 @@ pub(crate) fn validate_lookup_coordinates(
     Ok(())
 }
 
+/// Horizontal datum stated by a DTED tile's DSI record (DSI character 145).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DtedHorizontalDatum {
+    /// `WGS84`, the datum MIL-PRF-89020B 3.2.1 requires.
+    Wgs84,
+    /// `WGS72`, stated by cells compiled on the earlier World Geodetic System.
+    Wgs72,
+    /// The field is blank or zero-filled.
+    Unstated,
+    /// Any other field content, as read (lossily decoded if not UTF-8).
+    Other(String),
+}
+
+impl DtedHorizontalDatum {
+    /// Classify the five-byte DSI horizontal datum field. The codes compare
+    /// without regard to ASCII case, as GDAL's DTED driver compares them.
+    fn from_dsi_field(bytes: &[u8]) -> Self {
+        if bytes.iter().all(|&b| b == b' ' || b == 0) {
+            Self::Unstated
+        } else if bytes.eq_ignore_ascii_case(b"WGS84") {
+            Self::Wgs84
+        } else if bytes.eq_ignore_ascii_case(b"WGS72") {
+            Self::Wgs72
+        } else {
+            Self::Other(String::from_utf8_lossy(bytes).into_owned())
+        }
+    }
+
+    /// Whether positions in this tile are WGS84 positions: the field states
+    /// WGS84 or is blank.
+    #[must_use]
+    pub fn is_wgs84_compatible(&self) -> bool {
+        matches!(self, Self::Wgs84 | Self::Unstated)
+    }
+}
+
+impl core::fmt::Display for DtedHorizontalDatum {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Wgs84 => f.write_str("WGS84"),
+            Self::Wgs72 => f.write_str("WGS72"),
+            Self::Unstated => f.write_str("unstated"),
+            Self::Other(text) => write!(f, "{text:?}"),
+        }
+    }
+}
+
 /// Parsed DTED tile backed by raw `.dt2` bytes.
 ///
 /// Posting values are decoded lazily from DTED signed-magnitude samples.
 /// Returned heights are orthometric metres, `H`, above the EGM96 mean sea level
-/// geoid.
+/// geoid, on the horizontal datum [`Self::horizontal_datum`] reports.
 #[derive(Debug)]
 pub struct DtedTile {
     origin_latitude: f64,
@@ -483,6 +879,7 @@ pub struct DtedTile {
     lon_count: usize,
     lat_count: usize,
     data_block_length: usize,
+    horizontal_datum: DtedHorizontalDatum,
     bytes: Vec<u8>,
 }
 
@@ -502,14 +899,8 @@ impl DtedTile {
             return Err(DtedTileError::MissingUhl1 { path: path_display });
         }
 
-        let origin_longitude = parse_dted_coord(
-            std::str::from_utf8(&bytes[4..12])
-                .map_err(|error| DtedTileError::InvalidEncoding(error.to_string()))?,
-        )?;
-        let origin_latitude = parse_dted_coord(
-            std::str::from_utf8(&bytes[12..20])
-                .map_err(|error| DtedTileError::InvalidEncoding(error.to_string()))?,
-        )?;
+        let origin_longitude = parse_origin(&bytes[4..12], OriginAxis::Longitude)?;
+        let origin_latitude = parse_origin(&bytes[12..20], OriginAxis::Latitude)?;
         let lon_count = parse_ascii_usize(&bytes[47..51])?;
         let lat_count = parse_ascii_usize(&bytes[51..55])?;
         if lon_count < 2 || lat_count < 2 {
@@ -519,6 +910,9 @@ impl DtedTile {
                 lat_count,
             });
         }
+        validate_interval(&bytes[20..24], "longitude data interval", lon_count)?;
+        validate_interval(&bytes[24..28], "latitude data interval", lat_count)?;
+        let horizontal_datum = DtedHorizontalDatum::from_dsi_field(&bytes[DSI_HORIZONTAL_DATUM]);
         let data_block_length = 12 + 2 * lat_count;
         let expected_len = DATA_OFFSET + lon_count * data_block_length;
         if bytes.len() < expected_len {
@@ -535,12 +929,22 @@ impl DtedTile {
             lon_count,
             lat_count,
             data_block_length,
+            horizontal_datum,
             bytes,
         })
     }
 
+    /// Horizontal datum stated by the tile's DSI record.
+    #[must_use]
+    pub fn horizontal_datum(&self) -> &DtedHorizontalDatum {
+        &self.horizontal_datum
+    }
+
     /// Return the nearest orthometric posting value in metres for a
     /// longitude-first geodetic position in degrees.
+    ///
+    /// A posting holding the DTED null value returns
+    /// [`DtedTileError::NullPosting`].
     pub fn get_elevation(&self, longitude: f64, latitude: f64) -> Result<i16, DtedTileError> {
         if !self.contains(longitude, latitude) {
             return Err(DtedTileError::Outside {
@@ -562,11 +966,38 @@ impl DtedTile {
             });
         }
 
-        let block = self.validated_block(longitude_index)?;
+        self.posting(longitude_index, latitude_index)
+    }
 
-        let sample_start = 8 + latitude_index * 2;
-        let raw = i16::from_be_bytes([block[sample_start], block[sample_start + 1]]);
-        Ok(convert_signed_magnitude(raw))
+    /// Decoded posting `(longitude_index, latitude_index)`, or
+    /// [`DtedTileError::NullPosting`] for the null value.
+    pub(crate) fn posting(
+        &self,
+        longitude_index: usize,
+        latitude_index: usize,
+    ) -> Result<i16, DtedTileError> {
+        if latitude_index >= self.lat_count || longitude_index >= self.lon_count {
+            return Err(DtedTileError::PostingIndexOutOfBounds {
+                longitude_index,
+                latitude_index,
+            });
+        }
+        let block = self.validated_block(longitude_index)?;
+        posting_value(block, latitude_index).ok_or(DtedTileError::NullPosting {
+            longitude_index,
+            latitude_index,
+        })
+    }
+
+    /// Whole-degree origin and posting counts. The origin is validated as a
+    /// whole degree inside the coordinate domain, so the casts are exact.
+    pub(crate) fn grid(&self) -> TileGrid {
+        TileGrid {
+            lat_index: self.origin_latitude as i32,
+            lon_index: self.origin_longitude as i32,
+            lon_count: self.lon_count,
+            lat_count: self.lat_count,
+        }
     }
 
     pub(crate) fn origin_latitude(&self) -> f64 {
@@ -585,14 +1016,13 @@ impl DtedTile {
         self.lat_count
     }
 
-    pub(crate) fn decoded_postings_lon_major(&self) -> Result<Vec<i16>, DtedTileError> {
+    /// Decoded postings, longitude-major, with `None` for each null posting.
+    pub(crate) fn decoded_postings_lon_major(&self) -> Result<Vec<Option<i16>>, DtedTileError> {
         let mut out = Vec::with_capacity(self.lon_count * self.lat_count);
         for longitude_index in 0..self.lon_count {
             let block = self.validated_block(longitude_index)?;
             for latitude_index in 0..self.lat_count {
-                let sample_start = 8 + latitude_index * 2;
-                let raw = i16::from_be_bytes([block[sample_start], block[sample_start + 1]]);
-                out.push(convert_signed_magnitude(raw));
+                out.push(posting_value(block, latitude_index));
             }
         }
         Ok(out)
@@ -628,7 +1058,44 @@ impl DtedTile {
                 sum,
             });
         }
+        // The data block count (bytes 1..4) is a tape sequencing counter that
+        // no lookup depends on, and is not checked. The longitude and latitude
+        // counts place the record's postings.
+        let declared_longitude = signed_magnitude_field(block[4], block[5]);
+        if i64::from(declared_longitude) != longitude_index as i64 {
+            return Err(DtedTileError::ProfileLongitudeCountMismatch {
+                longitude_index,
+                declared: declared_longitude,
+            });
+        }
+        let first_latitude_index = signed_magnitude_field(block[6], block[7]);
+        if first_latitude_index != 0 {
+            return Err(DtedTileError::UnsupportedPartialProfile {
+                longitude_index,
+                first_latitude_index,
+            });
+        }
         Ok(block)
+    }
+}
+
+/// Posting `latitude_index` of a validated data record, or `None` for the
+/// null value.
+fn posting_value(block: &[u8], latitude_index: usize) -> Option<i16> {
+    let sample_start = 8 + latitude_index * 2;
+    let raw = u16::from_be_bytes([block[sample_start], block[sample_start + 1]]);
+    (raw != DTED_NULL_POSTING_RAW).then(|| convert_signed_magnitude(raw as i16))
+}
+
+/// A two-byte signed-magnitude record count ("Fixed Binary" in
+/// MIL-PRF-89020B).
+fn signed_magnitude_field(high: u8, low: u8) -> i32 {
+    let raw = u16::from_be_bytes([high, low]);
+    let magnitude = i32::from(raw & 0x7fff);
+    if raw & 0x8000 == 0 {
+        magnitude
+    } else {
+        -magnitude
     }
 }
 
@@ -707,42 +1174,180 @@ fn parse_ascii_usize(bytes: &[u8]) -> Result<usize, DtedTileError> {
         .map_err(|error| DtedTileError::InvalidField(error.to_string()))
 }
 
-fn parse_dted_coord(input: &str) -> Result<f64, DtedTileError> {
-    let (hemi_start, hemi) = input
+/// Degrees, minutes, seconds and hemisphere of a DTED coordinate field, as
+/// written; ranges are checked by the caller, which knows the axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DtedCoordinate {
+    degree: u32,
+    minute: u32,
+    second: f64,
+    hemisphere: char,
+}
+
+/// Split a `D..DMMSS[.S]H` coordinate field into its subfields. Every subfield
+/// must be unsigned decimal digits.
+fn parse_dted_coord(input: &str) -> Result<DtedCoordinate, DtedTileError> {
+    let invalid = || DtedTileError::InvalidField("invalid DTED coordinate".to_string());
+    let (hemi_start, hemisphere) = input
         .char_indices()
         .last()
         .ok_or(DtedTileError::EmptyCoordinate)?;
-    let sign = match hemi {
-        'S' | 'W' => -1.0,
-        'N' | 'E' => 1.0,
-        _ => return Err(DtedTileError::InvalidHemisphere { hemisphere: hemi }),
-    };
+    if !matches!(hemisphere, 'N' | 'S' | 'E' | 'W') {
+        return Err(DtedTileError::InvalidHemisphere { hemisphere });
+    }
     let coord = &input[..hemi_start];
     if !coord.is_ascii() {
-        return Err(DtedTileError::InvalidField(
-            "invalid DTED coordinate".to_string(),
-        ));
+        return Err(invalid());
     }
     let seconds_index = if coord.as_bytes().get(coord.len().saturating_sub(2)) == Some(&b'.') {
         coord.len().checked_sub(4)
     } else {
         coord.len().checked_sub(2)
     }
-    .ok_or_else(|| DtedTileError::InvalidField("invalid DTED coordinate".to_string()))?;
+    .ok_or_else(invalid)?;
     let minutes_index = seconds_index
         .checked_sub(2)
         .filter(|&index| index > 0)
-        .ok_or_else(|| DtedTileError::InvalidField("invalid DTED coordinate".to_string()))?;
-    let degree = coord[..minutes_index]
-        .parse::<i32>()
+        .ok_or_else(invalid)?;
+    let degree_text = &coord[..minutes_index];
+    let minute_text = &coord[minutes_index..seconds_index];
+    let second_text = &coord[seconds_index..];
+    let seconds_are_digits = second_text
+        .split('.')
+        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    if !all_ascii_digits(degree_text) || !all_ascii_digits(minute_text) || !seconds_are_digits {
+        return Err(invalid());
+    }
+    let degree = degree_text
+        .parse::<u32>()
         .map_err(|error| DtedTileError::InvalidField(error.to_string()))?;
-    let minute = coord[minutes_index..seconds_index]
-        .parse::<i32>()
+    let minute = minute_text
+        .parse::<u32>()
         .map_err(|error| DtedTileError::InvalidField(error.to_string()))?;
-    let second = coord[seconds_index..]
+    let second = second_text
         .parse::<f64>()
         .map_err(|error| DtedTileError::InvalidField(error.to_string()))?;
-    Ok(sign * (degree as f64 + ((minute as f64 + second / 60.0) / 60.0)))
+    Ok(DtedCoordinate {
+        degree,
+        minute,
+        second,
+        hemisphere,
+    })
+}
+
+fn all_ascii_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OriginAxis {
+    Longitude,
+    Latitude,
+}
+
+impl OriginAxis {
+    const fn field(self) -> &'static str {
+        match self {
+            Self::Longitude => "longitude of origin",
+            Self::Latitude => "latitude of origin",
+        }
+    }
+
+    /// Positive and negative hemisphere letters.
+    const fn hemispheres(self) -> (char, char) {
+        match self {
+            Self::Longitude => ('E', 'W'),
+            Self::Latitude => ('N', 'S'),
+        }
+    }
+
+    const fn expected(self) -> &'static str {
+        match self {
+            Self::Longitude => "E or W",
+            Self::Latitude => "N or S",
+        }
+    }
+
+    /// Largest whole-degree origin on each side of zero for a one-degree tile:
+    /// the tile must end at or before 90 N / 180 E and start at or after
+    /// 90 S / 180 W.
+    const fn max_degrees(self) -> (u32, u32) {
+        match self {
+            Self::Longitude => (179, 180),
+            Self::Latitude => (89, 90),
+        }
+    }
+}
+
+/// Parse and validate a UHL origin field as signed whole degrees.
+fn parse_origin(bytes: &[u8], axis: OriginAxis) -> Result<f64, DtedTileError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| DtedTileError::InvalidEncoding(error.to_string()))?;
+    let coordinate = parse_dted_coord(text)?;
+    let field = axis.field();
+    let (positive, negative) = axis.hemispheres();
+    let is_negative = if coordinate.hemisphere == positive {
+        false
+    } else if coordinate.hemisphere == negative {
+        true
+    } else {
+        return Err(DtedTileError::WrongHemisphere {
+            field,
+            hemisphere: coordinate.hemisphere,
+            expected: axis.expected(),
+        });
+    };
+    let (max_positive, max_negative) = axis.max_degrees();
+    let max_degree = if is_negative {
+        max_negative
+    } else {
+        max_positive
+    };
+    if coordinate.minute >= 60 || coordinate.second >= 60.0 || coordinate.degree > max_degree {
+        return Err(DtedTileError::CoordinateOutOfRange {
+            field,
+            text: text.to_string(),
+        });
+    }
+    if coordinate.minute != 0 || coordinate.second != 0.0 {
+        return Err(DtedTileError::OriginNotWholeDegree {
+            field,
+            text: text.to_string(),
+        });
+    }
+    let degrees = f64::from(coordinate.degree);
+    Ok(if is_negative { -degrees } else { degrees })
+}
+
+/// Check a UHL data interval against the posting count on the same axis.
+///
+/// The reader places posting `i` at `origin + i / (count - 1)` degrees, so a
+/// stated interval must make `count - 1` intervals span exactly one degree. A
+/// blank interval field states nothing and leaves that placement in force.
+fn validate_interval(bytes: &[u8], field: &'static str, count: usize) -> Result<(), DtedTileError> {
+    if bytes.iter().all(|&b| b == b' ') {
+        return Ok(());
+    }
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| DtedTileError::InvalidEncoding(error.to_string()))?
+        .trim();
+    if !all_ascii_digits(text) {
+        return Err(DtedTileError::InvalidField(format!(
+            "invalid DTED {field} {text:?}"
+        )));
+    }
+    let interval_tenths_arcsec = text
+        .parse::<u32>()
+        .map_err(|error| DtedTileError::InvalidField(error.to_string()))?;
+    let span = u64::from(interval_tenths_arcsec) * (count as u64 - 1);
+    if span != ONE_DEGREE_TENTHS_ARCSEC {
+        return Err(DtedTileError::IntervalCountMismatch {
+            field,
+            interval_tenths_arcsec,
+            count,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1024,11 +1629,26 @@ fn round_shift_right(value: u128, shift: u32) -> u128 {
     }
 }
 
+/// Lowest decoded signed-magnitude value GDAL keeps; below it a negative
+/// posting is read as two's complement.
+const TWOS_COMPLEMENT_THRESHOLD_M: i32 = -16_000;
+
+/// Decode a non-null posting.
+///
+/// Signed magnitude per MIL-PRF-89020B, except that a negative value below
+/// -16000 is reinterpreted as two's complement, matching GDAL's
+/// `DTEDReadProfileEx` and `DTEDReadPoint` for producers that wrote negatives
+/// that way (GDAL cites `w_069_s50.dt0`). The null pattern never reaches this
+/// function.
 fn convert_signed_magnitude(raw: i16) -> i16 {
-    if raw < 0 {
-        (-32768i32 - i32::from(raw)) as i16
-    } else {
+    if raw >= 0 {
+        return raw;
+    }
+    let signed_magnitude = -32768i32 - i32::from(raw);
+    if signed_magnitude < TWOS_COMPLEMENT_THRESHOLD_M {
         raw
+    } else {
+        signed_magnitude as i16
     }
 }
 
@@ -1051,10 +1671,11 @@ mod tests {
     use crate::test_parity::f64_from_hex;
     use crate::Error;
 
+    use super::{coincident_posting, edge_neighbour_grids, TileGrid};
     use super::{
         in_tile_cell_fraction, nearest_posting_index, scaled_cell_fraction, terrain_block_dir,
-        DtedInterpolation, DtedLookupOptions, DtedTerrain, DtedTile, DtedTileError, DATA_OFFSET,
-        DATA_SENTINEL, DTED_SUFFIX,
+        DtedHorizontalDatum, DtedInterpolation, DtedLookupOptions, DtedTerrain, DtedTile,
+        DtedTileError, DATA_OFFSET, DATA_SENTINEL, DTED_SUFFIX,
     };
 
     #[test]
@@ -1266,6 +1887,11 @@ mod tests {
         for lon_index in 0..lon_count {
             let mut block = vec![0u8; data_block_length];
             block[0] = DATA_SENTINEL;
+            // MIL-PRF-89020B data record: block count, then the longitude
+            // count naming this profile's meridian, then latitude count 0 for
+            // a full profile.
+            block[1..4].copy_from_slice(&(lon_index as u32).to_be_bytes()[1..4]);
+            block[4..6].copy_from_slice(&(lon_index as u16).to_be_bytes());
             for lat_index in 0..lat_count {
                 let sample_start = 8 + lat_index * 2;
                 block[sample_start..sample_start + 2]
@@ -1730,6 +2356,578 @@ mod tests {
             got[3]
         );
         assert!(got[4].is_ok(), "index 4 remains valid");
+
+        fs::remove_dir_all(root).expect("remove temp DTED dir");
+    }
+
+    const FIXTURE_COUNT: usize = 5;
+
+    fn fixture_block_start(lon_index: usize) -> usize {
+        DATA_OFFSET + lon_index * (12 + 2 * FIXTURE_COUNT)
+    }
+
+    /// Recompute the byte-sum checksum of one data record of the committed
+    /// 5x5 fixture tile after its bytes were edited.
+    fn rewrite_fixture_checksum(bytes: &mut [u8], lon_index: usize) {
+        let start = fixture_block_start(lon_index);
+        let checksum_start = start + 12 + 2 * FIXTURE_COUNT - 4;
+        let sum = bytes[start..checksum_start]
+            .iter()
+            .fold(0i32, |acc, b| acc + i32::from(*b));
+        bytes[checksum_start..checksum_start + 4].copy_from_slice(&sum.to_be_bytes());
+    }
+
+    fn primary_fixture_bytes() -> Vec<u8> {
+        fs::read(fixture_path("tiles/n36_w107_1arc_v3.dt2")).expect("read DTED fixture tile")
+    }
+
+    /// The committed n36_w107 fixture with posting (lon 2, lat 3) replaced by
+    /// the null bit pattern and that profile's checksum recomputed.
+    fn fixture_with_null_posting() -> Vec<u8> {
+        let mut bytes = primary_fixture_bytes();
+        let sample = fixture_block_start(2) + 8 + 2 * 3;
+        bytes[sample..sample + 2].copy_from_slice(&[0xFF, 0xFF]);
+        rewrite_fixture_checksum(&mut bytes, 2);
+        bytes
+    }
+
+    #[test]
+    fn null_posting_is_an_unknown_elevation_not_a_height() {
+        let root = temp_path("dted-null-posting");
+        fs::create_dir_all(&root).expect("create temp DTED dir");
+        let tile_path = root.join("n36_w107_1arc_v3.dt2");
+        fs::write(&tile_path, fixture_with_null_posting()).expect("write null-posting tile");
+
+        let tile = DtedTile::from_path(&tile_path).expect("null postings are valid DTED");
+        assert_eq!(
+            tile.get_elevation(-106.5, 36.75),
+            Err(DtedTileError::NullPosting {
+                longitude_index: 2,
+                latitude_index: 3,
+            })
+        );
+        // Posting (lon 3, lat 3) is -20 + 7*3 - 5*3 + 3*3 = -5.
+        assert_eq!(tile.get_elevation(-106.25, 36.75), Ok(-5));
+
+        let unknown = Err(Error::UnknownTerrainElevation {
+            lat_index: 36,
+            lon_index: -107,
+            latitude_posting: 3,
+            longitude_posting: 2,
+        });
+        let nearest = DtedLookupOptions {
+            interpolation: DtedInterpolation::NearestPosting,
+        };
+        let bilinear = DtedLookupOptions {
+            interpolation: DtedInterpolation::Bilinear,
+        };
+        let cases = [
+            // The null posting itself, and a point that rounds to it.
+            ((-106.5, 36.75), nearest, unknown.clone()),
+            ((-106.52, 36.74), nearest, unknown.clone()),
+            ((-106.5, 36.75), bilinear, unknown.clone()),
+            // Interiors of cells with the null posting as a corner.
+            ((-106.375, 36.625), bilinear, unknown.clone()),
+            ((-106.625, 36.875), bilinear, unknown.clone()),
+            ((-106.5, 36.7), bilinear, unknown.clone()),
+            // A known posting next to it gives the null posting zero weight.
+            ((-106.25, 36.75), bilinear, Ok(-5.0)),
+            ((-106.25, 36.75), nearest, Ok(-5.0)),
+            // A cell that does not touch it.
+            ((-106.875, 36.125), nearest, Ok(-20.0)),
+        ];
+        let mut terrain = DtedTerrain::new(&root);
+        for ((lon, lat), options, want) in &cases {
+            assert_eq!(
+                &terrain.height_m_with_options(*lon, *lat, *options),
+                want,
+                "height at ({lon}, {lat}) with {options:?}"
+            );
+        }
+        for options in [nearest, bilinear] {
+            let points = cases
+                .iter()
+                .filter(|(_, case_options, _)| *case_options == options)
+                .map(|(point, _, _)| *point)
+                .collect::<Vec<_>>();
+            let want = cases
+                .iter()
+                .filter(|(_, case_options, _)| *case_options == options)
+                .map(|(_, _, want)| want.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(DtedTerrain::new(&root).height_batch(&points, options), want);
+        }
+
+        fs::remove_dir_all(root).expect("remove temp DTED dir");
+    }
+
+    /// Negative postings written in two's complement are read as GDAL reads
+    /// them: a signed-magnitude value below -16000 m, other than the null, is
+    /// reinterpreted as two's complement.
+    #[test]
+    fn twos_complement_negative_postings_are_read_as_gdal_reads_them() {
+        use crate::terrain_store::{dted_tree_to_mmap_store, MmapTerrain};
+
+        let root = temp_path("dted-twos-complement");
+        fs::create_dir_all(&root).expect("create temp DTED dir");
+        let mut bytes = primary_fixture_bytes();
+        let block = fixture_block_start(1);
+        for (lat_index, raw) in [
+            // -5 in two's complement; as signed magnitude it would be -32763.
+            (1, [0xFF, 0xFB]),
+            // -16000 in signed magnitude, at the threshold: kept.
+            (2, [0xBE, 0x80]),
+            // Signed magnitude -16001, below the threshold: 0xBE81 in two's
+            // complement is -16767.
+            (3, [0xBE, 0x81]),
+            // -5 in signed magnitude.
+            (4, [0x80, 0x05]),
+        ] {
+            let sample = block + 8 + 2 * lat_index;
+            bytes[sample..sample + 2].copy_from_slice(&raw);
+        }
+        rewrite_fixture_checksum(&mut bytes, 1);
+        fs::write(root.join("n36_w107_1arc_v3.dt2"), bytes).expect("write tile");
+
+        let tile = DtedTile::from_path(root.join("n36_w107_1arc_v3.dt2")).expect("tile reads");
+        let store = dted_tree_to_mmap_store(&root).expect("convert tile");
+        let mapped = MmapTerrain::from_bytes(&store).expect("parse store");
+        let nearest = DtedLookupOptions {
+            interpolation: DtedInterpolation::NearestPosting,
+        };
+        for (latitude, want) in [(36.25, -5), (36.5, -16000), (36.75, -16767), (37.0, -5)] {
+            assert_eq!(
+                tile.get_elevation(-106.75, latitude),
+                Ok(want),
+                "{latitude}"
+            );
+            assert_eq!(
+                mapped
+                    .orthometric_height_m_with_options(-106.75, latitude, nearest)
+                    .map(|height| height.metres()),
+                Ok(f64::from(want)),
+                "{latitude}"
+            );
+        }
+
+        fs::remove_dir_all(root).expect("remove temp DTED dir");
+    }
+
+    #[test]
+    fn edge_postings_map_to_coincident_neighbour_postings_in_integers() {
+        let tile = |lat_index, lon_index, lon_count, lat_count| TileGrid {
+            lat_index,
+            lon_index,
+            lon_count,
+            lat_count,
+        };
+        let east = tile(36, -106, 5, 5);
+        // Interior postings have no neighbours; edges have one; corners three.
+        assert!(edge_neighbour_grids(east, 2, 2).is_empty());
+        assert_eq!(edge_neighbour_grids(east, 0, 2), vec![(36, -107)]);
+        assert_eq!(edge_neighbour_grids(east, 4, 2), vec![(36, -105)]);
+        assert_eq!(edge_neighbour_grids(east, 2, 4), vec![(37, -106)]);
+        assert_eq!(
+            edge_neighbour_grids(east, 0, 0),
+            vec![(36, -107), (35, -106), (35, -107)]
+        );
+
+        let west = tile(36, -107, 5, 5);
+        assert_eq!(coincident_posting(east, 0, 2, west), Some((4, 2)));
+        assert_eq!(
+            coincident_posting(east, 0, 0, tile(35, -107, 5, 5)),
+            Some((4, 4))
+        );
+        // A neighbour with twice the longitude interval along a parallel edge
+        // shares every other posting.
+        let north_coarse = tile(37, -106, 3, 5);
+        assert_eq!(coincident_posting(east, 2, 4, north_coarse), Some((1, 0)));
+        assert_eq!(coincident_posting(east, 1, 4, north_coarse), None);
+        // Postings off the neighbour's extent have no counterpart.
+        assert_eq!(coincident_posting(east, 2, 2, west), None);
+    }
+
+    fn origin_result(longitude: &[u8; 8], latitude: &[u8; 8]) -> Result<(), DtedTileError> {
+        let root = temp_path("dted-origin-field");
+        fs::create_dir_all(&root).expect("create temp DTED dir");
+        let tile_path = root.join("tile.dt2");
+        write_synthetic_dted_tile_at(&tile_path, longitude, latitude, 2, 2, |_, _| 0);
+        let result = DtedTile::from_path(&tile_path).map(|_| ());
+        fs::remove_dir_all(root).expect("remove temp DTED dir");
+        result
+    }
+
+    #[test]
+    fn uhl_origin_fields_are_validated_per_axis() {
+        let out_of_range = |field: &'static str, text: &str| -> Result<(), DtedTileError> {
+            Err(DtedTileError::CoordinateOutOfRange {
+                field,
+                text: text.to_string(),
+            })
+        };
+        let lon = "longitude of origin";
+        let lat = "latitude of origin";
+
+        assert_eq!(
+            origin_result(b"0006000E", b"0360000N"),
+            out_of_range(lon, "0006000E")
+        );
+        assert_eq!(
+            origin_result(b"1070060W", b"0360000N"),
+            out_of_range(lon, "1070060W")
+        );
+        assert_eq!(
+            origin_result(b"1810000W", b"0360000N"),
+            out_of_range(lon, "1810000W")
+        );
+        assert_eq!(
+            origin_result(b"1800000E", b"0360000N"),
+            out_of_range(lon, "1800000E")
+        );
+        assert_eq!(
+            origin_result(b"1070000W", b"0900000N"),
+            out_of_range(lat, "0900000N")
+        );
+        assert_eq!(
+            origin_result(b"1070000W", b"0910000S"),
+            out_of_range(lat, "0910000S")
+        );
+        assert_eq!(
+            origin_result(b"1070000W", b"0360000E"),
+            Err(DtedTileError::WrongHemisphere {
+                field: lat,
+                hemisphere: 'E',
+                expected: "N or S",
+            })
+        );
+        assert_eq!(
+            origin_result(b"1070000N", b"0360000N"),
+            Err(DtedTileError::WrongHemisphere {
+                field: lon,
+                hemisphere: 'N',
+                expected: "E or W",
+            })
+        );
+        assert_eq!(
+            origin_result(b"1070030W", b"0360000N"),
+            Err(DtedTileError::OriginNotWholeDegree {
+                field: lon,
+                text: "1070030W".to_string(),
+            })
+        );
+        assert!(matches!(
+            origin_result(b"-070000W", b"0360000N"),
+            Err(DtedTileError::InvalidField(_))
+        ));
+
+        // Every whole-degree tile origin on both axes is accepted, including
+        // the edges of the coordinate domain.
+        for (longitude, latitude) in [
+            (b"1800000W", b"0900000S"),
+            (b"1790000E", b"0890000N"),
+            (b"0000000E", b"0000000N"),
+            (b"0000000W", b"0000000S"),
+        ] {
+            assert_eq!(origin_result(longitude, latitude), Ok(()));
+        }
+    }
+
+    fn with_uhl_patch(range: std::ops::Range<usize>, text: &[u8]) -> Result<(), DtedTileError> {
+        let root = temp_path("dted-uhl-patch");
+        fs::create_dir_all(&root).expect("create temp DTED dir");
+        let tile_path = root.join("n36_w107_1arc_v3.dt2");
+        let mut bytes = primary_fixture_bytes();
+        bytes[range].copy_from_slice(text);
+        fs::write(&tile_path, bytes).expect("write patched tile");
+        let result = DtedTile::from_path(&tile_path).map(|_| ());
+        fs::remove_dir_all(root).expect("remove temp DTED dir");
+        result
+    }
+
+    #[test]
+    fn uhl_intervals_must_span_one_degree_over_the_counts() {
+        // Five postings at 900 arc seconds (9000 tenths) span one degree.
+        assert_eq!(with_uhl_patch(20..28, b"90009000"), Ok(()));
+        // The blank intervals of the committed fixture state nothing.
+        assert_eq!(with_uhl_patch(20..28, b"        "), Ok(()));
+        assert_eq!(
+            with_uhl_patch(20..28, b"90000030"),
+            Err(DtedTileError::IntervalCountMismatch {
+                field: "latitude data interval",
+                interval_tenths_arcsec: 30,
+                count: 5,
+            })
+        );
+        assert_eq!(
+            with_uhl_patch(20..24, b"0010"),
+            Err(DtedTileError::IntervalCountMismatch {
+                field: "longitude data interval",
+                interval_tenths_arcsec: 10,
+                count: 5,
+            })
+        );
+        assert!(matches!(
+            with_uhl_patch(20..24, b"9X00"),
+            Err(DtedTileError::InvalidField(_))
+        ));
+    }
+
+    fn tile_with_datum(root: &Path, datum: &[u8; 5]) -> PathBuf {
+        let tile_path = root.join("n36_w107_1arc_v3.dt2");
+        let mut bytes = primary_fixture_bytes();
+        bytes[224..229].copy_from_slice(datum);
+        fs::write(&tile_path, bytes).expect("write datum tile");
+        tile_path
+    }
+
+    #[test]
+    fn dsi_horizontal_datum_is_kept_on_the_tile_and_refused_for_wgs84_queries() {
+        let cases = [
+            (b"WGS84", DtedHorizontalDatum::Wgs84),
+            (b"wgs84", DtedHorizontalDatum::Wgs84),
+            (b"     ", DtedHorizontalDatum::Unstated),
+            (b"\0\0\0\0\0", DtedHorizontalDatum::Unstated),
+            (b"WGS72", DtedHorizontalDatum::Wgs72),
+            (b"NAD27", DtedHorizontalDatum::Other("NAD27".to_string())),
+        ];
+        for (field, datum) in cases {
+            let root = temp_path("dted-datum");
+            fs::create_dir_all(&root).expect("create temp DTED dir");
+            let tile_path = tile_with_datum(&root, field);
+
+            // The tile itself reads, whatever datum it states.
+            let tile = DtedTile::from_path(&tile_path).expect("tile reads");
+            assert_eq!(tile.horizontal_datum(), &datum);
+            assert_eq!(tile.get_elevation(-107.0, 36.0), Ok(-20));
+
+            // A WGS84 query is answered only from a WGS84 or blank tile.
+            let got = DtedTerrain::new(&root).height_m(-106.875, 36.125);
+            if datum.is_wgs84_compatible() {
+                assert!(got.is_ok(), "{datum:?}: {got:?}");
+            } else {
+                assert_eq!(
+                    got,
+                    Err(Error::NonWgs84TerrainTile {
+                        lat_index: 36,
+                        lon_index: -107,
+                        datum: datum.clone(),
+                    })
+                );
+            }
+            fs::remove_dir_all(root).expect("remove temp DTED dir");
+        }
+    }
+
+    #[test]
+    fn swapped_profiles_are_refused_by_their_longitude_counts() {
+        let root = temp_path("dted-swapped-profiles");
+        fs::create_dir_all(&root).expect("create temp DTED dir");
+        let tile_path = root.join("n36_w107_1arc_v3.dt2");
+        let mut bytes = primary_fixture_bytes();
+        let block_len = 12 + 2 * FIXTURE_COUNT;
+        let one = fixture_block_start(1);
+        let two = fixture_block_start(2);
+        let first = bytes[one..one + block_len].to_vec();
+        let second = bytes[two..two + block_len].to_vec();
+        bytes[one..one + block_len].copy_from_slice(&second);
+        bytes[two..two + block_len].copy_from_slice(&first);
+        fs::write(&tile_path, bytes).expect("write swapped tile");
+
+        let tile = DtedTile::from_path(&tile_path).expect("headers are intact");
+        assert_eq!(
+            tile.get_elevation(-106.75, 36.0),
+            Err(DtedTileError::ProfileLongitudeCountMismatch {
+                longitude_index: 1,
+                declared: 2,
+            })
+        );
+        assert_eq!(
+            tile.get_elevation(-106.5, 36.0),
+            Err(DtedTileError::ProfileLongitudeCountMismatch {
+                longitude_index: 2,
+                declared: 1,
+            })
+        );
+        assert_eq!(tile.get_elevation(-107.0, 36.0), Ok(-20));
+        let err = DtedTerrain::new(&root)
+            .height_m(-106.625, 36.5)
+            .expect_err("a swapped profile must not be read");
+        assert!(
+            matches!(&err, Error::Parse(msg) if msg.contains("declares longitude count")),
+            "{err:?}"
+        );
+
+        fs::remove_dir_all(root).expect("remove temp DTED dir");
+    }
+
+    #[test]
+    fn partial_profiles_are_refused_by_name() {
+        let root = temp_path("dted-partial-profile");
+        fs::create_dir_all(&root).expect("create temp DTED dir");
+        let tile_path = root.join("n36_w107_1arc_v3.dt2");
+        let mut bytes = primary_fixture_bytes();
+        let start = fixture_block_start(0);
+        bytes[start + 6..start + 8].copy_from_slice(&1u16.to_be_bytes());
+        rewrite_fixture_checksum(&mut bytes, 0);
+        fs::write(&tile_path, bytes).expect("write partial-profile tile");
+
+        let tile = DtedTile::from_path(&tile_path).expect("headers are intact");
+        assert_eq!(
+            tile.get_elevation(-107.0, 36.5),
+            Err(DtedTileError::UnsupportedPartialProfile {
+                longitude_index: 0,
+                first_latitude_index: 1,
+            })
+        );
+        assert_eq!(tile.get_elevation(-106.75, 36.0), Ok(-13));
+
+        fs::remove_dir_all(root).expect("remove temp DTED dir");
+    }
+
+    #[test]
+    fn a_tile_whose_origin_disagrees_with_its_name_is_refused() {
+        let root = temp_path("dted-origin-name");
+        fs::create_dir_all(&root).expect("create temp DTED dir");
+        write_synthetic_dted_tile_at(
+            &root.join(format!("n36_w107{DTED_SUFFIX}")),
+            b"1060000W",
+            b"0360000N",
+            2,
+            2,
+            |_, _| 7,
+        );
+        let err = DtedTerrain::new(&root)
+            .height_m(-106.5, 36.5)
+            .expect_err("a misnamed tile must not read as sea level");
+        assert!(
+            matches!(&err, Error::Parse(msg) if msg.contains("does not match tile (36,-107)")),
+            "{err:?}"
+        );
+        fs::remove_dir_all(root).expect("remove temp DTED dir");
+    }
+
+    /// The mapped store's bilinear lookup locates the cell exactly as the raw
+    /// reader does. The probes are the exact-fraction coordinates of
+    /// `bilinear_cell_offset_is_exact_in_every_tile`, which carry bits below
+    /// one ulp of 1; subtracting the tile origin directly rounds them away in
+    /// the tile at -1, so a store that did so would disagree with the raw
+    /// reader and with the pinned heights.
+    #[test]
+    fn mapped_bilinear_lookup_matches_raw_dted_at_exact_fractions() {
+        use crate::terrain_store::{dted_tile_list_to_mmap_store, DtedTileListEntry, MmapTerrain};
+
+        let root = temp_path("dted-mapped-parity");
+        fs::create_dir_all(&root).expect("create temp DTED dir");
+        let postings = 1200;
+        let checkerboard = |lon_index: usize, lat_index: usize| {
+            if (lon_index + lat_index).is_multiple_of(2) {
+                0
+            } else {
+                8849
+            }
+        };
+        let tiles: [(&[u8; 8], &[u8; 8], i32, i32); 4] = [
+            (b"0010000W", b"0010000S", -1, -1),
+            (b"0000000E", b"0000000N", 0, 0),
+            (b"0010000W", b"0510000N", 51, -1),
+            (b"1070000W", b"0360000N", 36, -107),
+        ];
+        let mut entries = Vec::new();
+        for (longitude, latitude, lat_index, lon_index) in tiles {
+            let name = format!(
+                "{}_{}{DTED_SUFFIX}",
+                super::format_lat(lat_index),
+                super::format_lon(lon_index)
+            );
+            let path = root.join(name);
+            write_synthetic_dted_tile_at(
+                &path,
+                longitude,
+                latitude,
+                postings + 1,
+                postings + 1,
+                checkerboard,
+            );
+            entries.push(DtedTileListEntry::from_indices(lat_index, lon_index, path));
+        }
+        let store = dted_tile_list_to_mmap_store(&entries).expect("build store");
+        let mapped = MmapTerrain::from_bytes(&store).expect("parse store");
+        let mut raw = DtedTerrain::new(&root);
+        let bilinear = DtedLookupOptions {
+            interpolation: DtedInterpolation::Bilinear,
+        };
+
+        // (coordinate bits, tile origin) from the exact cell-offset cases.
+        const COORDINATES: &[(u64, f64)] = &[
+            (0xbf1a36e2eb1c432d, -1.0),
+            (0xbf1a36e2eb1c432c, -1.0),
+            (0xbfd73a99165fe501, -1.0),
+            (0xbfdfedcba9876543, -1.0),
+            (0xbfeffffffff24190, -1.0),
+            (0xbd719799812dea11, -1.0),
+            (0xbfe8000000000001, -1.0),
+            (0xbfd0000000000002, -1.0),
+            (0xbfeccccccccccccd, -1.0),
+            (0x3f1a36e2eb1c432d, 0.0),
+            (0x3fd73a99165fe501, 0.0),
+            (0x3fdfedcba9876543, 0.0),
+            (0x3feffffffff24190, 0.0),
+            (0x3d719799812dea11, 0.0),
+            (0x3fd0000000000002, 0.0),
+            (0x4049800346dc5d64, 51.0),
+            (0x4049ae75322cbfca, 51.0),
+            (0x4049bfdb97530ecb, 51.0),
+            (0x4049ffffffffc906, 51.0),
+            (0xc05a8001a36e2eb2, -107.0),
+            (0xc05a973a99165fe5, -107.0),
+            (0xc05abfedcba98765, -107.0),
+        ];
+        let mut points = Vec::new();
+        for &(bits, origin) in COORDINATES {
+            let coordinate = f64::from_bits(bits);
+            // Both axes in the tiles at (-1, -1) and (0, 0); latitude in the
+            // tile at (51, -1); longitude in the tile at (36, -107).
+            let point = if origin == -1.0 || origin == 0.0 {
+                (coordinate, coordinate)
+            } else if origin == 51.0 {
+                (-0.5, coordinate)
+            } else {
+                (coordinate, 36.5)
+            };
+            points.push(point);
+        }
+        // Pinned heights of `bilinear_height_is_exact_south_of_equator_and_west_of_meridian`.
+        const PINNED: &[(u64, u64, u64)] = &[
+            (0xbf1a36e2eb1c432d, 0xbf1a36e2eb1c432c, 0x409d33a29c779a6b),
+            (0xbfd73a99165fe501, 0xbfd73a99165fe500, 0x40b129828ba475c4),
+            (0xbfdfedcba9876543, 0xbfdfedcba9876542, 0x40aeb9c71c71c93c),
+            (0xbfeffffffff24190, 0xbfeffffffff920c8, 0x3f5a18c574f03816),
+            (0xbd3c25c268497682, 0xbd4c25c268497682, 0x3ecab91c416da2d4),
+        ];
+        for &(lon_bits, lat_bits, height_bits) in PINNED {
+            let point = (f64::from_bits(lon_bits), f64::from_bits(lat_bits));
+            let height = mapped
+                .orthometric_height_m_with_options(point.0, point.1, bilinear)
+                .expect("mapped pinned height")
+                .metres();
+            assert_eq!(height.to_bits(), height_bits, "mapped height at {point:?}");
+            points.push(point);
+        }
+
+        for (lon, lat) in points {
+            let raw_height = raw
+                .height_m_with_options(lon, lat, bilinear)
+                .expect("raw bilinear height");
+            let mapped_height = mapped
+                .orthometric_height_m_with_options(lon, lat, bilinear)
+                .expect("mapped bilinear height")
+                .metres();
+            assert_eq!(
+                mapped_height.to_bits(),
+                raw_height.to_bits(),
+                "raw/mapped bilinear at ({lon:e}, {lat:e})"
+            );
+        }
 
         fs::remove_dir_all(root).expect("remove temp DTED dir");
     }
