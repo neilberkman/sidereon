@@ -6,6 +6,10 @@ All notable changes to `sidereon-core` are documented here.
 
 ### Changed
 
+- **Breaking.** RINEX navigation readers reject unknown systems, unknown version 4 ephemeris messages and malformed frame markers with named errors; lenient parsing records each refusal. Supported non-padded satellite identifiers and recognized non-ephemeris frames remain readable.
+- RINEX navigation retains absent group delays separately from measured zero, including QZSS LNAV TGD. Writers emit fixed-width blanks for absent delays and unmodeled fields.
+- GPS navigation fit intervals retain unknown values as `None`. RINEX 3.00–3.02 flags mean four or six hours; later positive values mean hours, while blank and zero mean unknown. Orbit selection uses a documented fallback window when the record provides no interval.
+
 - RTCM MSM5/MSM7 readers and writers retain unavailable rough and fine phase-range rates as `None`, using the DF399 and DF404 wire sentinels. A measured zero remains `Some(0)`.
 - **Breaking.** RTCM ephemeris conversion to `BroadcastRecord` rejects absent GPS, BeiDou and QZSS URA predictions and Galileo spare or NAPA SISA values instead of inventing an accuracy in metres. Raw RTCM messages retain those indices for lossless encoding.
 
