@@ -19,10 +19,11 @@ use std::collections::BTreeMap;
 
 use sidereon_core::astro::time::model::TimeScale;
 use sidereon_core::bias::{
-    bias_epoch_instant, ionosphere_free_coefficients, write_bias_sinex, BiasEpoch, BiasError,
-    BiasKind, BiasMode, BiasSet, BiasTarget, CodeDcbOptions, SkipReason, WarningKind,
+    bias_epoch_instant, ionosphere_free_coefficients, write_bias_sinex, write_code_dcb, BiasEpoch,
+    BiasError, BiasKind, BiasMode, BiasSet, BiasTarget, CodeDcbOptions, FieldError, SkipReason,
+    WarningKind,
 };
-use sidereon_core::constants::{C_M_S, F_L1_HZ, F_L2_HZ};
+use sidereon_core::constants::{C_M_S, F_L1_HZ, F_L2_HZ, NS_TO_S};
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 const BIA: &[u8] = include_bytes!("fixtures/bias/CODE.BIA");
 const DCB: &[u8] = include_bytes!("fixtures/bias/P1C1_RINEX.DCB");
@@ -530,4 +531,657 @@ fn receiver_station_keys_are_system_scoped() {
             .unwrap(),
     );
     assert_ne!(got["G"].to_bits(), got["E"].to_bits());
+}
+
+#[test]
+fn code_dcb_parse_write_parse_systemless_stations_regression() {
+    let dcb_text = "\
+# DCB P1-C1 2026-06 G
+ PRN / STATION NAME        VALUE (ns)  RMS (ns)
+***   ****************    *****.***   *****.***
+      abmf                   -1.365       0.050
+      ab-1                    2.500       0.010
+      st_01                  -0.750       0.020
+      in sp 01                1.000       0.000
+";
+    let mut opts = dcb_options();
+    opts.receiver_system = Some(GnssSystem::Gps);
+
+    let parsed = BiasSet::parse_code_dcb(dcb_text.as_bytes(), Some(opts)).unwrap();
+    let set = parsed.value;
+    assert_eq!(set.skipped_records(), 0);
+    assert_eq!(set.records().len(), 4);
+
+    let rec_abmf = set
+        .records()
+        .iter()
+        .find(|r| matches!(&r.target, BiasTarget::Receiver { station, .. } if station == "abmf"))
+        .expect("find abmf");
+    assert_eq!(rec_abmf.value.to_bits(), (-1.365 * 1.0e-9_f64).to_bits());
+    assert_eq!(
+        rec_abmf.sigma.unwrap().to_bits(),
+        (0.050 * 1.0e-9_f64).to_bits()
+    );
+
+    let rec_hyphen = set
+        .records()
+        .iter()
+        .find(|r| matches!(&r.target, BiasTarget::Receiver { station, .. } if station == "ab-1"))
+        .expect("find ab-1");
+    assert_eq!(rec_hyphen.value.to_bits(), (2.500 * 1.0e-9_f64).to_bits());
+    assert_eq!(
+        rec_hyphen.sigma.unwrap().to_bits(),
+        (0.010 * 1.0e-9_f64).to_bits()
+    );
+
+    let rec_under = set
+        .records()
+        .iter()
+        .find(|r| matches!(&r.target, BiasTarget::Receiver { station, .. } if station == "st_01"))
+        .expect("find st_01");
+    assert_eq!(rec_under.value.to_bits(), (-0.750 * 1.0e-9_f64).to_bits());
+    assert_eq!(
+        rec_under.sigma.unwrap().to_bits(),
+        (0.020 * 1.0e-9_f64).to_bits()
+    );
+
+    let rec_space = set
+        .records()
+        .iter()
+        .find(
+            |r| matches!(&r.target, BiasTarget::Receiver { station, .. } if station == "in sp 01"),
+        )
+        .expect("find in sp 01");
+    assert_eq!(rec_space.value.to_bits(), (1.000 * 1.0e-9_f64).to_bits());
+    assert_eq!(
+        rec_space.sigma.unwrap().to_bits(),
+        (0.000 * 1.0e-9_f64).to_bits()
+    );
+
+    let t0 = epoch(2026, 153, 0);
+    // Canonical lookup succeeds with exact case and uppercase
+    assert_eq!(
+        set.receiver_code_dsb_seconds(GnssSystem::Gps, "abmf", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        (-1.365 * 1.0e-9_f64).to_bits()
+    );
+    assert_eq!(
+        set.receiver_code_dsb_seconds(GnssSystem::Gps, "ABMF", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        (-1.365 * 1.0e-9_f64).to_bits()
+    );
+    assert_eq!(
+        set.receiver_code_dsb_seconds(GnssSystem::Gps, "ab-1", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        (2.500 * 1.0e-9_f64).to_bits()
+    );
+    assert_eq!(
+        set.receiver_code_dsb_seconds(GnssSystem::Gps, "AB-1", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        (2.500 * 1.0e-9_f64).to_bits()
+    );
+    assert_eq!(
+        set.receiver_code_dsb_seconds(GnssSystem::Gps, "st_01", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        (-0.750 * 1.0e-9_f64).to_bits()
+    );
+    assert_eq!(
+        set.receiver_code_dsb_seconds(GnssSystem::Gps, "ST_01", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        (-0.750 * 1.0e-9_f64).to_bits()
+    );
+    assert_eq!(
+        set.receiver_code_dsb_seconds(GnssSystem::Gps, "in sp 01", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        (1.000 * 1.0e-9_f64).to_bits()
+    );
+    assert_eq!(
+        set.receiver_code_dsb_seconds(GnssSystem::Gps, "IN SP 01", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        (1.000 * 1.0e-9_f64).to_bits()
+    );
+
+    // Writing produces explicit system prefix in columns 0..6
+    let written = write_code_dcb(&set).unwrap();
+    assert!(written
+        .lines()
+        .any(|l| l.starts_with("G     abmf            ") && l.ends_with("    0.050")));
+    assert!(written
+        .lines()
+        .any(|l| l.starts_with("G     ab-1            ") && l.ends_with("    0.010")));
+    assert!(written
+        .lines()
+        .any(|l| l.starts_with("G     st_01           ") && l.ends_with("    0.020")));
+    assert!(written
+        .lines()
+        .any(|l| l.starts_with("G     in sp 01        ") && l.ends_with("    0.000")));
+
+    // Reparsing without options parses the explicit system records
+    let reparsed = BiasSet::parse_code_dcb(written.as_bytes(), None)
+        .unwrap()
+        .value;
+    assert_eq!(reparsed.skipped_records(), 0);
+    assert_eq!(reparsed.records().len(), 4);
+
+    let rep_abmf = reparsed
+        .records()
+        .iter()
+        .find(|r| matches!(&r.target, BiasTarget::Receiver { station, .. } if station == "abmf"))
+        .expect("find abmf in reparsed");
+    assert_eq!(rep_abmf.value.to_bits(), rec_abmf.value.to_bits());
+    assert_eq!(
+        rep_abmf.sigma.unwrap().to_bits(),
+        rec_abmf.sigma.unwrap().to_bits()
+    );
+
+    let rep_hyphen = reparsed
+        .records()
+        .iter()
+        .find(|r| matches!(&r.target, BiasTarget::Receiver { station, .. } if station == "ab-1"))
+        .expect("find ab-1 in reparsed");
+    assert_eq!(rep_hyphen.value.to_bits(), rec_hyphen.value.to_bits());
+    assert_eq!(
+        rep_hyphen.sigma.unwrap().to_bits(),
+        rec_hyphen.sigma.unwrap().to_bits()
+    );
+
+    let rep_under = reparsed
+        .records()
+        .iter()
+        .find(|r| matches!(&r.target, BiasTarget::Receiver { station, .. } if station == "st_01"))
+        .expect("find st_01 in reparsed");
+    assert_eq!(rep_under.value.to_bits(), rec_under.value.to_bits());
+    assert_eq!(
+        rep_under.sigma.unwrap().to_bits(),
+        rec_under.sigma.unwrap().to_bits()
+    );
+
+    let rep_space = reparsed
+        .records()
+        .iter()
+        .find(
+            |r| matches!(&r.target, BiasTarget::Receiver { station, .. } if station == "in sp 01"),
+        )
+        .expect("find in sp 01 in reparsed");
+    assert_eq!(rep_space.value.to_bits(), rec_space.value.to_bits());
+    assert_eq!(
+        rep_space.sigma.unwrap().to_bits(),
+        rec_space.sigma.unwrap().to_bits()
+    );
+
+    assert_eq!(
+        reparsed
+            .receiver_code_dsb_seconds(GnssSystem::Gps, "abmf", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        (-1.365 * 1.0e-9_f64).to_bits()
+    );
+    assert_eq!(
+        reparsed
+            .receiver_code_dsb_seconds(GnssSystem::Gps, "ABMF", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        (-1.365 * 1.0e-9_f64).to_bits()
+    );
+}
+
+#[test]
+fn code_dcb_negative_zero_sigma_bit_preserving_roundtrip() {
+    let dcb_text = "\
+# DCB P1-C1 2026-06 G
+ PRN / STATION NAME        VALUE (ns)  RMS (ns)
+***   ****************    *****.***   *****.***
+G01                           0.626      -0.000
+G     ABMF 97103M001         -1.365      -0.000
+";
+    let parsed = BiasSet::parse_code_dcb(dcb_text.as_bytes(), None).unwrap();
+    let set = parsed.value;
+    assert_eq!(set.skipped_records(), 0);
+    assert_eq!(set.records().len(), 2);
+
+    let rec_g01 = &set.records()[0];
+    assert_eq!(rec_g01.value.to_bits(), (0.626 * 1.0e-9_f64).to_bits());
+    assert_eq!(rec_g01.sigma.unwrap().to_bits(), (-0.0_f64).to_bits());
+
+    let rec_abmf = &set.records()[1];
+    assert_eq!(rec_abmf.value.to_bits(), (-1.365 * 1.0e-9_f64).to_bits());
+    assert_eq!(rec_abmf.sigma.unwrap().to_bits(), (-0.0_f64).to_bits());
+
+    let written = write_code_dcb(&set).unwrap();
+    assert!(written
+        .lines()
+        .any(|l| l.starts_with("G01") && l.ends_with("   -0.000")));
+    assert!(written
+        .lines()
+        .any(|l| l.starts_with("G     ABMF 97103M001") && l.ends_with("   -0.000")));
+
+    let reparsed = BiasSet::parse_code_dcb(written.as_bytes(), None)
+        .unwrap()
+        .value;
+    assert_eq!(reparsed.skipped_records(), 0);
+    assert_eq!(reparsed.records().len(), 2);
+
+    let rep_g01 = &reparsed.records()[0];
+    assert_eq!(rep_g01.value.to_bits(), rec_g01.value.to_bits());
+    assert_eq!(rep_g01.sigma.unwrap().to_bits(), (-0.0_f64).to_bits());
+
+    let rep_abmf = &reparsed.records()[1];
+    assert_eq!(rep_abmf.value.to_bits(), rec_abmf.value.to_bits());
+    assert_eq!(rep_abmf.sigma.unwrap().to_bits(), (-0.0_f64).to_bits());
+}
+
+#[test]
+fn code_dcb_negative_sigma_read_write_read_roundtrip() {
+    let dcb_text = "\
+# DCB P1-C1 2026-06 G
+ PRN / STATION NAME        VALUE (ns)  RMS (ns)
+***   ****************    *****.***   *****.***
+G01                           0.626      -0.050
+G02                           0.626      -0.000
+G     ABMF 97103M001         -1.365      -0.050
+G     ALIC 50137M001         -1.689      -0.000
+";
+    let parsed = BiasSet::parse_code_dcb(dcb_text.as_bytes(), None).unwrap();
+    let set = parsed.value;
+    assert_eq!(set.skipped_records(), 0);
+    assert_eq!(set.records().len(), 4);
+
+    let rec_g01 = &set.records()[0];
+    assert_eq!(rec_g01.value.to_bits(), (0.626 * NS_TO_S).to_bits());
+    assert_eq!(
+        rec_g01.sigma.unwrap().to_bits(),
+        (-0.050 * NS_TO_S).to_bits()
+    );
+    assert!(rec_g01.sigma.unwrap().is_sign_negative());
+
+    let rec_g02 = &set.records()[1];
+    assert_eq!(rec_g02.value.to_bits(), (0.626 * NS_TO_S).to_bits());
+    assert_eq!(rec_g02.sigma.unwrap().to_bits(), (-0.0_f64).to_bits());
+    assert!(rec_g02.sigma.unwrap().is_sign_negative());
+
+    let rec_abmf = &set.records()[2];
+    assert_eq!(
+        rec_abmf.target,
+        BiasTarget::Receiver {
+            system: GnssSystem::Gps,
+            station: "ABMF 97103M001".to_string(),
+        }
+    );
+    assert_eq!(rec_abmf.value.to_bits(), (-1.365 * NS_TO_S).to_bits());
+    assert_eq!(
+        rec_abmf.sigma.unwrap().to_bits(),
+        (-0.050 * NS_TO_S).to_bits()
+    );
+    assert!(rec_abmf.sigma.unwrap().is_sign_negative());
+
+    let rec_alic = &set.records()[3];
+    assert_eq!(
+        rec_alic.target,
+        BiasTarget::Receiver {
+            system: GnssSystem::Gps,
+            station: "ALIC 50137M001".to_string(),
+        }
+    );
+    assert_eq!(rec_alic.value.to_bits(), (-1.689 * NS_TO_S).to_bits());
+    assert_eq!(rec_alic.sigma.unwrap().to_bits(), (-0.0_f64).to_bits());
+    assert!(rec_alic.sigma.unwrap().is_sign_negative());
+
+    let written = write_code_dcb(&set).unwrap();
+    assert!(written
+        .lines()
+        .any(|l| l.starts_with("G01") && l.ends_with("   -0.050")));
+    assert!(written
+        .lines()
+        .any(|l| l.starts_with("G02") && l.ends_with("   -0.000")));
+    assert!(written
+        .lines()
+        .any(|l| l.starts_with("G     ABMF 97103M001") && l.ends_with("   -0.050")));
+    assert!(written
+        .lines()
+        .any(|l| l.starts_with("G     ALIC 50137M001") && l.ends_with("   -0.000")));
+
+    let reparsed = BiasSet::parse_code_dcb(written.as_bytes(), None)
+        .unwrap()
+        .value;
+    assert_eq!(reparsed.skipped_records(), 0);
+    assert_eq!(reparsed.records().len(), 4);
+
+    let rep_g01 = &reparsed.records()[0];
+    assert_eq!(rep_g01.target, rec_g01.target);
+    assert_eq!(rep_g01.value.to_bits(), rec_g01.value.to_bits());
+    assert_eq!(
+        rep_g01.sigma.unwrap().to_bits(),
+        (-0.050 * NS_TO_S).to_bits()
+    );
+    assert!(rep_g01.sigma.unwrap().is_sign_negative());
+
+    let rep_g02 = &reparsed.records()[1];
+    assert_eq!(rep_g02.target, rec_g02.target);
+    assert_eq!(rep_g02.value.to_bits(), rec_g02.value.to_bits());
+    assert_eq!(rep_g02.sigma.unwrap().to_bits(), (-0.0_f64).to_bits());
+    assert!(rep_g02.sigma.unwrap().is_sign_negative());
+
+    let rep_abmf = &reparsed.records()[2];
+    assert_eq!(
+        rep_abmf.target,
+        BiasTarget::Receiver {
+            system: GnssSystem::Gps,
+            station: "ABMF 97103M001".to_string(),
+        }
+    );
+    assert_eq!(rep_abmf.value.to_bits(), rec_abmf.value.to_bits());
+    assert_eq!(
+        rep_abmf.sigma.unwrap().to_bits(),
+        (-0.050 * NS_TO_S).to_bits()
+    );
+    assert!(rep_abmf.sigma.unwrap().is_sign_negative());
+
+    let rep_alic = &reparsed.records()[3];
+    assert_eq!(
+        rep_alic.target,
+        BiasTarget::Receiver {
+            system: GnssSystem::Gps,
+            station: "ALIC 50137M001".to_string(),
+        }
+    );
+    assert_eq!(rep_alic.value.to_bits(), rec_alic.value.to_bits());
+    assert_eq!(rep_alic.sigma.unwrap().to_bits(), (-0.0_f64).to_bits());
+    assert!(rep_alic.sigma.unwrap().is_sign_negative());
+}
+
+#[test]
+fn code_dcb_malformed_value_candidate_diagnostics() {
+    let mut opts = dcb_options();
+    opts.receiver_system = Some(GnssSystem::Gps);
+
+    // Satellite candidate with malformed VALUE
+    let sat_val = "\
+# DCB P1-C1 2026-06 G
+ PRN / STATION NAME        VALUE (ns)  RMS (ns)
+***   ****************    *****.***   *****.***
+G01                           VALUE       0.000
+";
+    let parsed = BiasSet::parse_code_dcb(sat_val.as_bytes(), None).unwrap();
+    assert_eq!(parsed.value.records().len(), 0);
+    assert_eq!(parsed.value.skipped_records(), 1);
+    assert!(matches!(
+        parsed.value.diagnostics().skips[0].reason,
+        SkipReason::MalformedField(FieldError::FloatParse {
+            field: "dcb value",
+            ref value,
+        }) if value == "VALUE"
+    ));
+
+    // Explicit receiver candidate with malformed VALUE
+    let rec_explicit_val = "\
+# DCB P1-C1 2026-06 G
+ PRN / STATION NAME        VALUE (ns)  RMS (ns)
+***   ****************    *****.***   *****.***
+G     ABMF 97103M001          VALUE       0.050
+";
+    let parsed = BiasSet::parse_code_dcb(rec_explicit_val.as_bytes(), None).unwrap();
+    assert_eq!(parsed.value.records().len(), 0);
+    assert_eq!(parsed.value.skipped_records(), 1);
+    assert!(matches!(
+        parsed.value.diagnostics().skips[0].reason,
+        SkipReason::MalformedField(FieldError::FloatParse {
+            field: "dcb value",
+            ref value,
+        }) if value == "VALUE"
+    ));
+
+    // Implicit receiver candidate with system option and malformed VALUE
+    let rec_sysless_val = "\
+# DCB P1-C1 2026-06 G
+ PRN / STATION NAME        VALUE (ns)  RMS (ns)
+***   ****************    *****.***   *****.***
+      ABMF 97103M001          VALUE       0.050
+";
+    let parsed = BiasSet::parse_code_dcb(rec_sysless_val.as_bytes(), Some(opts.clone())).unwrap();
+    assert_eq!(parsed.value.records().len(), 0);
+    assert_eq!(parsed.value.skipped_records(), 1);
+    assert!(matches!(
+        parsed.value.diagnostics().skips[0].reason,
+        SkipReason::MalformedField(FieldError::FloatParse {
+            field: "dcb value",
+            ref value,
+        }) if value == "VALUE"
+    ));
+
+    // Headers alone without data candidates
+    let headers_alone = "\
+# DCB P1-C1 2026-06 G
+CODE'S MONTHLY GNSS P1-C1 DCB SOLUTION, YEAR 2026, MONTH 06      01-JUL-26 08:42
+--------------------------------------------------------------------------------
+DIFFERENTIAL (P1-C1) CODE BIASES FOR SATELLITES AND RECEIVERS:
+ PRN / STATION NAME        VALUE (ns)  RMS (ns)
+***   ****************    *****.***   *****.***
+# Comment line
+";
+    let parsed_none = BiasSet::parse_code_dcb(headers_alone.as_bytes(), None).unwrap();
+    assert_eq!(parsed_none.value.records().len(), 0);
+    assert_eq!(parsed_none.value.skipped_records(), 0);
+
+    let parsed_opts = BiasSet::parse_code_dcb(headers_alone.as_bytes(), Some(opts)).unwrap();
+    assert_eq!(parsed_opts.value.records().len(), 0);
+    assert_eq!(parsed_opts.value.skipped_records(), 0);
+}
+
+#[test]
+fn code_dcb_station_name_edge_cases_and_unpadded_roundtrip() {
+    let mut opts = dcb_options();
+    opts.receiver_system = Some(GnssSystem::Gps);
+    let t0 = epoch(2026, 153, 0);
+
+    let cases = [
+        (
+            "explicit STATION NAME RMS",
+            format!(
+                "G     {:<16}    {:9.3}   {:9.3}",
+                "STATION NAME RMS", -1.365, 0.050
+            ),
+            "STATION NAME RMS",
+        ),
+        (
+            "implicit STATION NAME RMS",
+            "      STATION NAME RMS        -1.365       0.050".to_string(),
+            "STATION NAME RMS",
+        ),
+        (
+            "implicit CODE'S SOLUTION",
+            "      CODE'S SOLUTION         -1.365       0.050".to_string(),
+            "CODE'S SOLUTION",
+        ),
+        (
+            "unpadded long station ABMF97103M001",
+            "ABMF97103M001                 -1.365       0.050".to_string(),
+            "ABMF97103M001",
+        ),
+        (
+            "explicit -abmf",
+            "G     -abmf                   -1.365       0.050".to_string(),
+            "-abmf",
+        ),
+        (
+            "implicit -abmf",
+            "      -abmf                   -1.365       0.050".to_string(),
+            "-abmf",
+        ),
+        (
+            "unpadded -abmf",
+            "-abmf                         -1.365       0.050".to_string(),
+            "-abmf",
+        ),
+        (
+            "explicit #abmf",
+            "G     #abmf                   -1.365       0.050".to_string(),
+            "#abmf",
+        ),
+        (
+            "implicit #abmf",
+            "      #abmf                   -1.365       0.050".to_string(),
+            "#abmf",
+        ),
+        (
+            "unpadded #abmf",
+            "#abmf                         -1.365       0.050".to_string(),
+            "#abmf",
+        ),
+    ];
+
+    for (name, line, expected_station) in &cases {
+        let text = format!(
+            "# DCB P1-C1 2026-06 G\n\
+             PRN / STATION NAME        VALUE (ns)  RMS (ns)\n\
+            ***   ****************    *****.***   *****.***\n\
+            # Comment line\n\
+            --------------------------------------------------------------------------------\n\
+            {line}\n"
+        );
+        let parsed = BiasSet::parse_code_dcb(text.as_bytes(), Some(opts.clone()))
+            .unwrap_or_else(|e| panic!("{name}: parse error: {e:?}"));
+        let set = parsed.value;
+        assert_eq!(set.skipped_records(), 0, "{name}: expected 0 skips");
+        assert_eq!(set.records().len(), 1, "{name}: expected 1 record");
+
+        let rec = &set.records()[0];
+        match &rec.target {
+            BiasTarget::Receiver { system, station } => {
+                assert_eq!(*system, GnssSystem::Gps, "{name}: expected GPS system");
+                assert_eq!(station, expected_station, "{name}: station mismatch");
+            }
+            other => panic!("{name}: expected Receiver target, got {other:?}"),
+        }
+        assert_eq!(
+            rec.value.to_bits(),
+            ns(-1.365).to_bits(),
+            "{name}: value mismatch"
+        );
+        assert_eq!(
+            rec.sigma.unwrap().to_bits(),
+            ns(0.050).to_bits(),
+            "{name}: sigma mismatch"
+        );
+
+        let written = write_code_dcb(&set).unwrap_or_else(|e| panic!("{name}: write error: {e:?}"));
+        let reparsed = BiasSet::parse_code_dcb(written.as_bytes(), Some(opts.clone()))
+            .unwrap_or_else(|e| panic!("{name}: reparse error: {e:?}"))
+            .value;
+        assert_eq!(
+            reparsed.skipped_records(),
+            0,
+            "{name}: expected 0 skips on reparse"
+        );
+        assert_eq!(
+            reparsed.records().len(),
+            1,
+            "{name}: expected 1 record on reparse"
+        );
+
+        let rep_rec = &reparsed.records()[0];
+        assert_eq!(
+            rep_rec.target, rec.target,
+            "{name}: target preserved on reparse"
+        );
+        assert_eq!(
+            rep_rec.value.to_bits(),
+            rec.value.to_bits(),
+            "{name}: value preserved"
+        );
+        assert_eq!(
+            rep_rec.sigma.unwrap().to_bits(),
+            rec.sigma.unwrap().to_bits(),
+            "{name}: sigma preserved"
+        );
+    }
+
+    // Concrete long station ABMF97103M001: verify full station and canonical ABMF lookup survive parse/write/parse
+    let unpadded_text = "# DCB P1-C1 2026-06 G\nABMF97103M001                 -1.365       0.050\n";
+    let set_abmf = BiasSet::parse_code_dcb(unpadded_text.as_bytes(), Some(opts.clone()))
+        .unwrap()
+        .value;
+    assert_eq!(set_abmf.skipped_records(), 0);
+    assert_eq!(set_abmf.records().len(), 1);
+    assert_eq!(
+        set_abmf.records()[0].target,
+        BiasTarget::Receiver {
+            system: GnssSystem::Gps,
+            station: "ABMF97103M001".to_string(),
+        }
+    );
+    assert_eq!(
+        set_abmf
+            .receiver_code_dsb_seconds(GnssSystem::Gps, "ABMF97103M001", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        ns(-1.365).to_bits()
+    );
+    assert_eq!(
+        set_abmf
+            .receiver_code_dsb_seconds(GnssSystem::Gps, "ABMF", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        ns(-1.365).to_bits()
+    );
+
+    let written_abmf = write_code_dcb(&set_abmf).unwrap();
+    assert!(written_abmf
+        .lines()
+        .any(|l| l.starts_with("G     ABMF97103M001")));
+    let reparsed_abmf = BiasSet::parse_code_dcb(written_abmf.as_bytes(), Some(opts.clone()))
+        .unwrap()
+        .value;
+    assert_eq!(reparsed_abmf.skipped_records(), 0);
+    assert_eq!(reparsed_abmf.records().len(), 1);
+    assert_eq!(
+        reparsed_abmf.records()[0].target,
+        BiasTarget::Receiver {
+            system: GnssSystem::Gps,
+            station: "ABMF97103M001".to_string(),
+        }
+    );
+    assert_eq!(
+        reparsed_abmf
+            .receiver_code_dsb_seconds(GnssSystem::Gps, "ABMF97103M001", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        ns(-1.365).to_bits()
+    );
+    assert_eq!(
+        reparsed_abmf
+            .receiver_code_dsb_seconds(GnssSystem::Gps, "ABMF", "C1W", "C1C", t0)
+            .unwrap()
+            .to_bits(),
+        ns(-1.365).to_bits()
+    );
+
+    // Data candidates with malformed VALUE still emit typed diagnostics
+    let malformed_cases = [
+        "G     STATION NAME RMS        VALUE       0.050",
+        "      STATION NAME RMS        VALUE       0.050",
+        "      CODE'S SOLUTION         VALUE       0.050",
+        "      -abmf                   VALUE       0.050",
+        "      #abmf                   VALUE       0.050",
+    ];
+    for line in malformed_cases {
+        let text = format!("# DCB P1-C1 2026-06 G\n{line}\n");
+        let parsed = BiasSet::parse_code_dcb(text.as_bytes(), Some(opts.clone())).unwrap();
+        assert_eq!(parsed.value.records().len(), 0);
+        assert_eq!(parsed.value.skipped_records(), 1);
+        assert!(matches!(
+            parsed.value.diagnostics().skips[0].reason,
+            SkipReason::MalformedField(FieldError::FloatParse {
+                field: "dcb value",
+                ref value,
+            }) if value == "VALUE"
+        ));
+    }
 }
