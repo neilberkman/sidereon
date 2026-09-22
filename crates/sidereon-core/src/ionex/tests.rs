@@ -431,7 +431,7 @@ fn ionex_map_epochs_are_utc_instants_with_exact_j2000_seconds_view() {
     for (epoch, seconds) in ionex.map_epochs().iter().zip(epoch_seconds) {
         assert_eq!(epoch.scale, TimeScale::Utc);
         assert_eq!(
-            super::j2000_seconds_from_instant(*epoch),
+            super::exact_j2000_second(*epoch),
             Some(seconds),
             "IONEX UTC instant must recover the integer J2000-second map epoch"
         );
@@ -4507,4 +4507,707 @@ fn ionex_writer_writes_the_spec_values_for_unstated_header_records() {
     assert_rereads_as(&original, &text);
     let (_, warnings) = Ionex::parse_str_with_warnings(&text).expect("reparse");
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Exact whole-second IONEX epoch conversion
+// ---------------------------------------------------------------------------
+
+/// A split-Julian-date instant built from its two parts, bypassing the
+/// reader's encoder so a test can state a representation directly.
+fn split_epoch(jd_whole: f64, fraction: f64) -> Instant {
+    Instant::from_julian_date(
+        TimeScale::Utc,
+        JulianDateSplit::new(jd_whole, fraction).expect("split within one residual day"),
+    )
+}
+
+/// The `*.0` noon day boundary the IONEX reader's encoder places a whole
+/// J2000 second on.
+fn noon_boundary(days: i64) -> f64 {
+    crate::constants::J2000_JD + days as f64
+}
+
+fn nanos_epoch(nanos: i128) -> Instant {
+    Instant {
+        scale: TimeScale::Utc,
+        repr: InstantRepr::Nanos(nanos),
+    }
+}
+
+/// The double one representable step above a positive `value`, with the exact
+/// difference between the two.
+///
+/// The two doubles are within a factor of two of each other, so their
+/// difference is exact (Sterbenz) and the pair `(stepped, -step)` sums back to
+/// `value` with nothing dropped.
+fn next_double_up(value: f64) -> (f64, f64) {
+    assert!(value > 0.0, "the bit increment walks away from zero");
+    let stepped = f64::from_bits(value.to_bits() + 1);
+    (stepped, stepped - value)
+}
+
+#[test]
+fn exact_j2000_second_round_trips_reader_epochs_across_calendar_boundaries() {
+    // J2000 noon itself, both civil midnights either side of it, a day and a
+    // year rollover, a pre-J2000 date, and the seconds either side of each, so
+    // the encoding is exercised on and off every boundary it can land on.
+    for base in [
+        0_i64,            // 2000-01-01 12:00:00, the J2000 origin
+        -43_200,          // 2000-01-01 00:00:00, civil midnight
+        43_200,           // 2000-01-02 00:00:00, the next civil midnight
+        646_315_200,      // 2020-06-25 00:00:00
+        -43_200 - 86_400, // 1999-12-31 00:00:00, before J2000
+        -1_041_465_600,   // 12_054 whole days before the J2000 origin
+        31_579_200,       // 2001-01-01 00:00:00, a year rollover
+    ] {
+        for offset in [-1_i64, 0, 1] {
+            let seconds = base + offset;
+            let epoch = super::ionex_epoch_from_j2000_seconds(seconds);
+            assert_eq!(
+                super::exact_j2000_second(epoch),
+                Some(seconds),
+                "reader-encoded epoch {seconds} must read back as itself"
+            );
+        }
+    }
+}
+
+#[test]
+fn exact_j2000_second_reads_the_civil_midnight_boundary_convention() {
+    // `split_julian_date` places a civil date on the `*.5` midnight boundary
+    // rather than the reader's `*.0` noon boundary. 2020-06-25 00:00:00 UTC is
+    // 646_315_200 J2000 seconds, the value the writer's civil round trip pins.
+    let (jd_whole, fraction) = split_julian_date(2020, 6, 25, 0, 0, 0.0);
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(jd_whole, fraction)),
+        Some(646_315_200)
+    );
+
+    let (jd_whole, fraction) = split_julian_date(2020, 6, 25, 2, 2, 3.0);
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(jd_whole, fraction)),
+        Some(646_315_200 + 7_323)
+    );
+}
+
+#[test]
+fn exact_j2000_second_reads_any_split_whose_boundary_names_a_whole_second() {
+    // The two boundaries the crate's encoders emit are not the only ones a
+    // `JulianDateSplit` may carry: its constructor checks that both parts are
+    // finite and that the residual is within one day, and says nothing about
+    // where the boundary sits. What a split names is the value of its two
+    // parts, so every boundary below that is a whole number of seconds from
+    // J2000 is read as the second it names, with or without a residual.
+    for (offset_days, residual_s, seconds) in [
+        (0.25, 0, 21_600_i64), // six hours past the origin
+        (-0.25, 0, -21_600),   // and six hours before it
+        (0.75, 0, 64_800),
+        (-0.75, 0, -64_800),
+        (0.125, 0, 10_800),    // three hours
+        (1.0 / 128.0, 0, 675), // the finest boundary that names a second
+        (-1.0 / 128.0, 0, -675),
+        (0.25, 11, 21_611), // a quarter day carrying a residual
+        (-0.25, 11, -21_589),
+        (12_345.25, 11, 12_345 * 86_400 + 21_600 + 11),
+        (-12_345.75, 43_199, -12_345 * 86_400 - 64_800 + 43_199),
+    ] {
+        let jd_whole = crate::constants::J2000_JD + offset_days;
+        let fraction = residual_s as f64 / SECONDS_PER_DAY;
+        assert_eq!(
+            super::exact_j2000_second(split_epoch(jd_whole, fraction)),
+            Some(seconds),
+            "({jd_whole}, {residual_s} s) names J2000 + {seconds} s"
+        );
+    }
+}
+
+#[test]
+fn exact_j2000_second_reads_split_parts_that_cancel_onto_a_whole_second() {
+    // A split names the value of its two exact binary parts, whatever each part
+    // looks like alone. A boundary one representable step above the origin with
+    // a residual of exactly the negative of that step sums to the origin: it is
+    // second 0, and refusing it because the encoder would have written the pair
+    // differently would refuse an epoch that sits exactly on the axis.
+    let (stepped, step) = next_double_up(crate::constants::J2000_JD);
+    assert!(step > 0.0);
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(stepped, -step)),
+        Some(0)
+    );
+
+    // The same cancellation 36_525 whole days before the origin, and again with
+    // a half-day residual riding on top of it. `0.5 - step` is representable
+    // exactly, so the pair still sums to a whole second.
+    let earlier = crate::constants::J2000_JD - 36_525.0;
+    let (stepped, step) = next_double_up(earlier);
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(stepped, -step)),
+        Some(-36_525 * 86_400)
+    );
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(stepped, 0.5 - step)),
+        Some(-36_525 * 86_400 + 43_200)
+    );
+}
+
+#[test]
+fn exact_j2000_second_refuses_a_fractional_split_julian_date() {
+    // Either side of the rounding boundary and on it: the rounded conversion
+    // took 11.4 s as second 11 and 11.6 s as second 12, moving the epoch. None
+    // of these name a whole second, so all are refused.
+    for second_of_day in [11.4_f64, 11.5, 11.6, 0.5, 0.25, 86_399.5] {
+        let fraction = second_of_day / SECONDS_PER_DAY;
+        assert_eq!(
+            super::exact_j2000_second(split_epoch(noon_boundary(0), fraction)),
+            None,
+            "{second_of_day} s past the boundary names no whole second"
+        );
+    }
+    // The whole seconds bracketing those fractions are still read exactly, so
+    // the refusal is of the fraction and not of the neighbourhood.
+    for second_of_day in [11_i64, 12, 0, 86_399] {
+        assert_eq!(
+            super::exact_j2000_second(split_epoch(
+                noon_boundary(0),
+                second_of_day as f64 / SECONDS_PER_DAY,
+            )),
+            Some(second_of_day)
+        );
+    }
+}
+
+#[test]
+fn exact_j2000_second_refuses_a_boundary_finer_than_a_whole_second() {
+    // `86_400 = 2^7 * 675`, so a day offset is a whole number of seconds
+    // exactly when it is a whole multiple of `2^-7` days. A 256th of a day is
+    // 337.5 s: it names half a second, which the epoch axis does not hold, and
+    // it is refused on its own and carrying an otherwise valid residual.
+    let half_second_boundary = crate::constants::J2000_JD + 1.0 / 256.0;
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(half_second_boundary, 0.0)),
+        None
+    );
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(half_second_boundary, 11.0 / SECONDS_PER_DAY)),
+        None
+    );
+    // One step coarser is 675 s, which the axis does hold.
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(
+            crate::constants::J2000_JD + 1.0 / 128.0,
+            11.0 / SECONDS_PER_DAY
+        )),
+        Some(675 + 11)
+    );
+}
+
+#[test]
+fn exact_j2000_second_refuses_the_doubles_either_side_of_an_encoded_fraction() {
+    // `11 / 86_400` is not a dyadic rational, so the reader's J2000 + 11 s
+    // epoch has no whole-second value in exact arithmetic and is read as the
+    // encoding of second 11. That reading is an equality against the one double
+    // the encoder produces: the representable neighbour on either side is a
+    // different epoch and is refused, so nothing near a whole second is swept
+    // onto it.
+    let encoded = 11.0 / SECONDS_PER_DAY;
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(noon_boundary(0), encoded)),
+        Some(11)
+    );
+    for neighbour in [
+        f64::from_bits(encoded.to_bits() + 1),
+        f64::from_bits(encoded.to_bits() - 1),
+    ] {
+        assert_ne!(neighbour, encoded);
+        assert_eq!(
+            super::exact_j2000_second(split_epoch(noon_boundary(0), neighbour)),
+            None,
+            "a neighbouring double is a different epoch"
+        );
+    }
+}
+
+#[test]
+fn exact_j2000_second_refuses_a_non_finite_split() {
+    for (jd_whole, fraction) in [
+        (f64::NAN, 0.0),
+        (f64::INFINITY, 0.0),
+        (f64::NEG_INFINITY, 0.0),
+        (crate::constants::J2000_JD, f64::NAN),
+        (crate::constants::J2000_JD, f64::INFINITY),
+    ] {
+        assert_eq!(
+            super::exact_j2000_second(Instant::from_julian_date(
+                TimeScale::Utc,
+                JulianDateSplit { jd_whole, fraction },
+            )),
+            None
+        );
+    }
+}
+
+#[test]
+fn exact_j2000_second_refuses_a_boundary_beyond_the_whole_second_axis() {
+    // `2^47` days from the origin is already more than `i64::MAX` seconds away
+    // in either direction, so a boundary at or past it names no second the axis
+    // holds however the residual is stated.
+    for jd_whole in [
+        crate::constants::J2000_JD + 140_737_488_355_328.0,
+        crate::constants::J2000_JD - 140_737_488_355_328.0,
+        f64::MAX,
+        f64::MIN,
+    ] {
+        for fraction in [0.0, 0.5, -0.5] {
+            assert_eq!(
+                super::exact_j2000_second(split_epoch(jd_whole, fraction)),
+                None,
+                "{jd_whole} is past the whole-second axis"
+            );
+        }
+    }
+}
+
+#[test]
+fn exact_j2000_second_refuses_nanos_that_are_not_whole_seconds() {
+    for nanos in [1_i128, -1, 500_000_000, 1_000_000_001, -1_000_000_001] {
+        assert_eq!(
+            super::exact_j2000_second(nanos_epoch(nanos)),
+            None,
+            "{nanos} ns is not a whole second"
+        );
+    }
+    for seconds in [0_i64, 1, -1, 86_400] {
+        assert_eq!(
+            super::exact_j2000_second(nanos_epoch(i128::from(seconds) * 1_000_000_000)),
+            Some(seconds)
+        );
+    }
+}
+
+#[test]
+fn exact_j2000_second_keeps_nanos_seconds_past_the_f64_integers() {
+    // 2^53 and its neighbours: projecting the nanosecond count through `f64`
+    // collapsed these onto the same second. Integer division keeps them apart.
+    for seconds in [
+        9_007_199_254_740_991_i64,
+        9_007_199_254_740_992,
+        9_007_199_254_740_993,
+        -9_007_199_254_740_993,
+    ] {
+        assert_eq!(
+            super::exact_j2000_second(nanos_epoch(i128::from(seconds) * 1_000_000_000)),
+            Some(seconds)
+        );
+    }
+    assert_ne!(
+        super::exact_j2000_second(nanos_epoch(9_007_199_254_740_993_i128 * 1_000_000_000)),
+        super::exact_j2000_second(nanos_epoch(9_007_199_254_740_992_i128 * 1_000_000_000)),
+    );
+}
+
+#[test]
+fn exact_j2000_second_keeps_adjacent_split_epochs_past_the_f64_integers_distinct() {
+    // The same neighbourhood through the reader's split encoding: the day count
+    // and the residual second are each exact, so adjacent seconds stay
+    // adjacent where the rounded projection merged them.
+    let mut previous = None;
+    for seconds in [
+        9_007_199_254_740_992_i64,
+        9_007_199_254_740_993,
+        9_007_199_254_740_994,
+    ] {
+        let read = super::exact_j2000_second(super::ionex_epoch_from_j2000_seconds(seconds));
+        assert_eq!(read, Some(seconds));
+        assert_ne!(read, previous, "adjacent large epochs stay distinct");
+        previous = read;
+    }
+}
+
+#[test]
+fn exact_j2000_second_converts_the_i64_bounds_through_both_representations() {
+    for seconds in [i64::MIN, i64::MIN + 1, i64::MAX - 1, i64::MAX] {
+        assert_eq!(
+            super::exact_j2000_second(super::ionex_epoch_from_j2000_seconds(seconds)),
+            Some(seconds),
+            "the reader encoding of {seconds} must read back exactly"
+        );
+        assert_eq!(
+            super::exact_j2000_second(nanos_epoch(i128::from(seconds) * 1_000_000_000)),
+            Some(seconds)
+        );
+    }
+}
+
+#[test]
+fn exact_j2000_second_refuses_epochs_just_outside_the_i64_bounds() {
+    // One second past each end, stated on the same day boundary as the bound
+    // itself, so only the residual differs. The two parts are summed in `i128`,
+    // so neither wraps into a plausible second.
+    let (max_whole, max_fraction) = match super::ionex_epoch_from_j2000_seconds(i64::MAX).repr {
+        InstantRepr::JulianDate(split) => (split.jd_whole, split.fraction),
+        InstantRepr::Nanos(_) => panic!("the IONEX encoder produces a split Julian date"),
+    };
+    let max_residual = (max_fraction * SECONDS_PER_DAY).round();
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(
+            max_whole,
+            (max_residual + 1.0) / SECONDS_PER_DAY
+        )),
+        None,
+        "one second past i64::MAX is refused, not saturated"
+    );
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(max_whole, max_fraction)),
+        Some(i64::MAX)
+    );
+
+    let (min_whole, min_fraction) = match super::ionex_epoch_from_j2000_seconds(i64::MIN).repr {
+        InstantRepr::JulianDate(split) => (split.jd_whole, split.fraction),
+        InstantRepr::Nanos(_) => panic!("the IONEX encoder produces a split Julian date"),
+    };
+    let min_residual = (min_fraction * SECONDS_PER_DAY).round();
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(
+            min_whole,
+            (min_residual - 1.0) / SECONDS_PER_DAY
+        )),
+        None,
+        "one second before i64::MIN is refused, not saturated"
+    );
+    assert_eq!(
+        super::exact_j2000_second(split_epoch(min_whole, min_fraction)),
+        Some(i64::MIN)
+    );
+}
+
+#[test]
+fn exact_j2000_second_refuses_the_nanos_count_the_f64_bound_saturated() {
+    // `i64::MAX as f64` rounds up to 2^63, so an inclusive comparison against
+    // it admitted counts an `i64` cannot hold and the cast saturated them onto
+    // `i64::MAX`. Both of these were taken as `i64::MAX`; neither is.
+    let past_max = i128::from(i64::MAX) * 1_000_000_000 + 999_999_999;
+    assert_eq!(super::exact_j2000_second(nanos_epoch(past_max)), None);
+    let two_pow_63 = 9_223_372_036_854_775_808_i128;
+    assert_eq!(
+        super::exact_j2000_second(nanos_epoch(two_pow_63 * 1_000_000_000)),
+        None
+    );
+    assert_eq!(
+        super::exact_j2000_second(nanos_epoch(-two_pow_63 * 1_000_000_000 - 1_000_000_000)),
+        None
+    );
+}
+
+#[test]
+fn ionex_from_samples_keeps_a_quarter_day_map_epoch_through_writing() {
+    // A boundary neither of the crate's encoders emits still names a whole
+    // second, and public construction, the J2000-second view, the sample round
+    // trip and the writer must all agree on which one. Six hours past the J2000
+    // origin is 2000-01-01 18:00:00.
+    let mut samples = valid_tec_grid_samples();
+    samples.map_epochs = vec![split_epoch(crate::constants::J2000_JD + 0.25, 0.0)];
+    let ionex = Ionex::from_samples(samples).expect("a quarter-day map epoch names 21_600 s");
+    assert_eq!(ionex.map_epochs_s(), vec![21_600]);
+
+    let rebuilt =
+        Ionex::from_samples(ionex.tec_grid_samples()).expect("the quarter-day epoch rebuilds");
+    assert_eq!(
+        rebuilt, ionex,
+        "the sample round trip keeps the epoch as given"
+    );
+
+    let encoded = ionex.to_ionex_string().expect("writable IONEX");
+    assert!(
+        encoded.contains("  2000     1     1    18     0     0"),
+        "the written epoch record must state the second the product holds:\n{encoded}"
+    );
+    let reparsed = Ionex::parse_str(&encoded).expect("the written product reparses");
+    assert_eq!(reparsed.map_epochs_s(), vec![21_600]);
+}
+
+#[test]
+fn ionex_from_samples_refuses_a_fractional_map_epoch() {
+    // The public sample path takes the epoch as given: a half-second epoch is
+    // refused by name rather than stored as the whole second next to it.
+    let mut samples = valid_tec_grid_samples();
+    samples.map_epochs = vec![split_epoch(noon_boundary(0), 0.5 / SECONDS_PER_DAY)];
+    assert_eq!(
+        Ionex::from_samples(samples).expect_err("a fractional map epoch must be refused"),
+        TecSamplesError::EpochNotRepresentable
+    );
+}
+
+#[test]
+fn ionex_from_node_samples_refuses_a_fractional_map_epoch() {
+    let epoch = split_epoch(noon_boundary(0), 0.5 / SECONDS_PER_DAY);
+    let samples = [
+        TecSample {
+            epoch,
+            lat_deg: 1.0,
+            lon_deg: 0.0,
+            vtec_tecu: Some(10.0),
+            rms_tecu: None,
+            height_offset_km: None,
+        },
+        TecSample {
+            epoch,
+            lat_deg: 0.0,
+            lon_deg: 1.0,
+            vtec_tecu: Some(11.0),
+            rms_tecu: None,
+            height_offset_km: None,
+        },
+    ];
+    assert_eq!(
+        Ionex::from_node_samples(
+            samples,
+            450.0,
+            6371.0,
+            0,
+            IonexHeader::new(IonexMappingFunction::CosZ),
+        )
+        .expect_err("a fractional node-sample epoch must be refused"),
+        TecSamplesError::EpochNotRepresentable
+    );
+}
+
+#[test]
+fn ionex_from_samples_refuses_a_non_whole_nanosecond_map_epoch() {
+    let mut samples = valid_tec_grid_samples();
+    samples.map_epochs = vec![nanos_epoch(500_000_000)];
+    assert_eq!(
+        Ionex::from_samples(samples).expect_err("a sub-second nanosecond epoch must be refused"),
+        TecSamplesError::EpochNotRepresentable
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Slant evaluation on map times past the 53-bit integers
+// ---------------------------------------------------------------------------
+
+/// A two-map product whose maps sit at `map_times_s`, each holding one uniform
+/// VTEC value at every node so the temporal blend is readable off the result.
+fn two_map_samples_at(map_times_s: [i64; 2], vtec: [f64; 2]) -> TecGridSamples {
+    TecGridSamples {
+        map_epochs: map_times_s
+            .iter()
+            .map(|&seconds| super::ionex_epoch_from_j2000_seconds(seconds))
+            .collect(),
+        lat_nodes_deg: vec![1.0, 0.0],
+        lon_nodes_deg: vec![0.0, 1.0],
+        dlat_deg: -1.0,
+        dlon_deg: 1.0,
+        shell_height_km: 450.0,
+        base_radius_km: 6371.0,
+        exponent: 0,
+        tec_maps: vtec
+            .iter()
+            .map(|&value| {
+                vec![
+                    vec![Some(value), Some(value)],
+                    vec![Some(value), Some(value)],
+                ]
+            })
+            .collect(),
+        rms_maps: Vec::new(),
+        height_maps: Vec::new(),
+        header: IonexHeader::new(IonexMappingFunction::CosZ),
+    }
+}
+
+/// One zenith evaluation on a two-map grid whose maps hold uniform VTEC, at the
+/// grid's first node so the bilinear step is the node value itself.
+fn two_map_components_at(map_times_s: [i64; 2], vtec: [f64; 2], epoch_s: i64) -> SlantComponents {
+    let maps: Vec<Vec<Vec<Option<f64>>>> = vtec
+        .iter()
+        .map(|&value| {
+            vec![
+                vec![Some(value), Some(value)],
+                vec![Some(value), Some(value)],
+            ]
+        })
+        .collect();
+    let epochs = map_times_s.map(super::ionex_epoch_from_j2000_seconds);
+    let lat_arr = [0.0, -1.0];
+    let lon_arr = [0.0, 1.0];
+    slant_delay_components(
+        PierceLineOfSight {
+            lat_rad: 0.0,
+            lon_rad: 0.0,
+            az_rad: 0.0,
+            el_rad: 90.0_f64.to_radians(),
+        },
+        1_575_420_000.0,
+        6371.0,
+        450.0,
+        epoch_s,
+        VtecGridView {
+            map_epochs: &epochs,
+            maps: &maps,
+            lat_arr: &lat_arr,
+            lon_arr: &lon_arr,
+            dlat: -1.0,
+            dlon: 1.0,
+        },
+    )
+    .expect("every node holds a value")
+}
+
+#[test]
+fn slant_temporal_weight_is_exact_on_map_times_past_the_f64_integers() {
+    // Both map times and the query were projected through `f64` before the
+    // weight was formed. At 2^53 and 2^53 + 1 the two projections were equal,
+    // so the span was zero and the weight was not a number; at 2^53 and
+    // 2^53 + 2 the midpoint rounded onto the first endpoint, so the later map
+    // carried no weight anywhere inside the interval. The difference is now
+    // taken in whole seconds, so each of these is the weight the axis states.
+    let two_pow_53 = 9_007_199_254_740_992_i64;
+    let vtec = [10.0, 30.0];
+
+    let adjacent = [two_pow_53, two_pow_53 + 1];
+    for (epoch_s, want_w, want_index) in [
+        (adjacent[0], 0.0, 0_usize),
+        (adjacent[1], 1.0, 0),
+        (adjacent[0] - 86_400, 0.0, 0), // held before the first map
+        (adjacent[1] + 86_400, 1.0, 0), // held after the last map
+    ] {
+        let components = two_map_components_at(adjacent, vtec, epoch_s);
+        assert_eq!(components.w, want_w, "weight at {epoch_s}");
+        assert_eq!(components.map_index, want_index);
+        assert!(components.delay_m.is_finite() && components.delay_m > 0.0);
+    }
+
+    let spaced = [two_pow_53, two_pow_53 + 2];
+    for (epoch_s, want_w) in [
+        (spaced[0], 0.0),
+        (spaced[0] + 1, 0.5), // the midpoint the collapsed axis could not see
+        (spaced[1], 1.0),
+    ] {
+        let components = two_map_components_at(spaced, vtec, epoch_s);
+        assert_eq!(components.w, want_w, "weight at {epoch_s}");
+        assert!(components.delay_m.is_finite() && components.delay_m > 0.0);
+    }
+
+    // The blend itself follows the weight, so the midpoint sits strictly
+    // between the two maps rather than on one of them.
+    let low = two_map_components_at(spaced, vtec, spaced[0]);
+    let mid = two_map_components_at(spaced, vtec, spaced[0] + 1);
+    let high = two_map_components_at(spaced, vtec, spaced[1]);
+    assert!(
+        low.vtec < mid.vtec && mid.vtec < high.vtec,
+        "{} {} {}",
+        low.vtec,
+        mid.vtec,
+        high.vtec
+    );
+    assert_close(mid.vtec, 0.5 * (vtec[0] + vtec[1]));
+}
+
+#[test]
+fn slant_temporal_weight_spans_the_whole_second_axis_without_overflow() {
+    // A bracket that runs from one end of the axis to the other is wider than
+    // an `i64` difference holds, and a query may sit at either end of it or
+    // outside it altogether. The differences are formed in `i128`, so the span
+    // stays positive and every weight stays inside `[0, 1]`.
+    let ends = [i64::MIN, i64::MAX];
+    let vtec = [10.0, 30.0];
+    // The two map times themselves weight their own map exactly.
+    for (epoch_s, want_w) in [(i64::MIN, 0.0), (i64::MAX, 1.0)] {
+        let components = two_map_components_at(ends, vtec, epoch_s);
+        assert_eq!(components.w, want_w, "weight at {epoch_s}");
+        assert!(components.delay_m.is_finite());
+    }
+    // The seconds beside them, and a query outside the bracket altogether, stay
+    // inside the unit interval instead of overflowing into a wild weight.
+    for epoch_s in [i64::MIN + 1, i64::MAX - 1, 0, -86_400, 86_400] {
+        let components = two_map_components_at(ends, vtec, epoch_s);
+        assert!(
+            (0.0..=1.0).contains(&components.w),
+            "weight at {epoch_s} is {}",
+            components.w
+        );
+        assert!(components.delay_m.is_finite() && components.delay_m > 0.0);
+    }
+
+    // A query in the middle of that span is an ordinary interior blend.
+    let middle = two_map_components_at(ends, vtec, 0);
+    assert!(
+        middle.w > 0.0 && middle.w < 1.0,
+        "interior weight {}",
+        middle.w
+    );
+    assert!(middle.vtec > vtec[0] && middle.vtec < vtec[1]);
+    assert!(middle.delay_m.is_finite() && middle.delay_m > 0.0);
+}
+
+#[test]
+fn ionex_slant_delay_interpolates_across_map_times_past_the_f64_integers() {
+    // The same correction through the public product entry: the map axis is
+    // built, validated and evaluated from whole seconds end to end.
+    let two_pow_53 = 9_007_199_254_740_992_i64;
+    let map_times = [two_pow_53, two_pow_53 + 2];
+    let ionex = Ionex::from_samples(two_map_samples_at(map_times, [10.0, 30.0]))
+        .expect("map times past the f64 integers build a product");
+    assert_eq!(ionex.map_epochs_s(), map_times.to_vec());
+
+    let receiver =
+        crate::frame::Wgs84Geodetic::new(0.5_f64.to_radians(), 0.5_f64.to_radians(), 0.0)
+            .expect("valid WGS84 geodetic position");
+    let el = 90.0_f64.to_radians();
+    let az = 0.0;
+    let f_l1 = crate::frequencies::frequency_hz(
+        crate::GnssSystem::Gps,
+        crate::frequencies::CarrierBand::L1,
+    )
+    .expect("canonical GPS L1 carrier exists");
+    let delay_at = |epoch_s: i64| {
+        super::ionex_slant_delay(&ionex, receiver, el, az, epoch_s, f_l1)
+            .expect("a whole-second epoch on a valid product evaluates")
+    };
+
+    let low = delay_at(map_times[0]);
+    let mid = delay_at(map_times[0] + 1);
+    let high = delay_at(map_times[1]);
+    for delay in [low, mid, high] {
+        assert!(delay.is_finite() && delay > 0.0, "delay {delay}");
+    }
+    assert!(low < mid && mid < high, "{low} {mid} {high}");
+
+    // Outside the bracket, a holding policy holds each endpoint map bit for
+    // bit rather than extrapolating past a map time this large.
+    let held = IonexSlantPolicy::default().with_coverage(IonexCoveragePolicy::Hold);
+    let held_delay_at = |epoch_s: i64, want: IonexCoverageError| {
+        let evaluation =
+            ionex_slant_delay_with_policy(&ionex, receiver, el, az, epoch_s, f_l1, held)
+                .expect("a held query outside coverage still evaluates");
+        assert_eq!(evaluation.status.held, Some(want));
+        evaluation.delay_m
+    };
+    assert_eq!(
+        held_delay_at(
+            map_times[0] - 86_400,
+            IonexCoverageError::EpochBeforeFirstMap
+        )
+        .to_bits(),
+        low.to_bits()
+    );
+    assert_eq!(
+        held_delay_at(map_times[1] + 86_400, IonexCoverageError::EpochAfterLastMap).to_bits(),
+        high.to_bits()
+    );
+
+    // Adjacent map times leave no interior second at all; the endpoints still
+    // evaluate to their own maps rather than collapsing onto one value.
+    let adjacent = Ionex::from_samples(two_map_samples_at(
+        [two_pow_53, two_pow_53 + 1],
+        [10.0, 30.0],
+    ))
+    .expect("adjacent map times build a product");
+    let first = super::ionex_slant_delay(&adjacent, receiver, el, az, two_pow_53, f_l1)
+        .expect("the first map time evaluates");
+    let second = super::ionex_slant_delay(&adjacent, receiver, el, az, two_pow_53 + 1, f_l1)
+        .expect("the second map time evaluates");
+    assert!(first.is_finite() && second.is_finite());
+    assert!(first < second, "{first} {second}");
 }

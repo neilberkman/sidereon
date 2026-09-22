@@ -29,7 +29,7 @@
 //! bit-stable.
 
 use super::{
-    j2000_seconds_from_instant, IonexCoverageError, IonexCoveragePolicy, IonexMissingNodePolicy,
+    exact_j2000_second, IonexCoverageError, IonexCoveragePolicy, IonexMissingNodePolicy,
     IonexMissingNodes, IonexNodeGap, IonexSlantPolicy,
 };
 use crate::astro::time::model::Instant;
@@ -600,7 +600,20 @@ fn slant_delay_components_with_coverage(
         }
         let t0 = map_epoch_j2000_s(map_epochs, ti);
         let t1 = map_epoch_j2000_s(map_epochs, ti + 1);
-        let mut w = (epoch_s as f64 - t0 as f64) / (t1 as f64 - t0 as f64);
+        // Both differences are formed in `i128` and projected once. The epoch
+        // axis is a whole-second axis over the entire `i64` range, and a query
+        // may sit at the far end of it, so a difference taken in `i64` can
+        // overflow and a difference taken between two `f64` projections of the
+        // endpoints can collapse: past the 53-bit integers, `t1 as f64 - t0 as
+        // f64` is zero for adjacent map times and the numerator rounds onto an
+        // endpoint for a query between them. In `i128` neither can happen -
+        // `t1 > t0` holds exactly, so the span is at least one second - and for
+        // any epoch and bracket inside the 53-bit integers both differences are
+        // exact integers either way, so ordinary products give bit-identical
+        // weights.
+        let span_s = i128::from(t1) - i128::from(t0);
+        let offset_s = i128::from(epoch_s) - i128::from(t0);
+        let mut w = offset_s as f64 / span_s as f64;
         // Two explicit comparisons, not a clamp call: this reproduces the
         // reference recipe's operation order and NaN handling exactly so the
         // result is bit-stable.
@@ -684,6 +697,5 @@ fn slant_delay_components_with_coverage(
 // invariant: map epochs come from the validated IONEX product axis.
 #[allow(clippy::expect_used)]
 fn map_epoch_j2000_s(map_epochs: &[Instant], index: usize) -> i64 {
-    j2000_seconds_from_instant(map_epochs[index])
-        .expect("IONEX map epoch is convertible to J2000 seconds")
+    exact_j2000_second(map_epochs[index]).expect("IONEX map epoch is convertible to J2000 seconds")
 }

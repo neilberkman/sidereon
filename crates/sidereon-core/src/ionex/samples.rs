@@ -22,18 +22,18 @@
 //! on both sides. Serializing through text is exact too: the writer refuses a
 //! value it cannot write exactly rather than rounding it.
 
+use super::exact_j2000_second;
 use super::grid::{Grid, Ionex, IonexParts};
 use super::header::IonexHeader;
-use super::j2000_seconds_from_instant;
-use crate::astro::time::model::{Instant, InstantRepr};
+use crate::astro::time::model::Instant;
 
 const IONEX_AXIS_DEG_LIMIT: f64 = 360.0;
-const NANOS_PER_SECOND: i128 = 1_000_000_000;
 
 /// One vertical-TEC sample at one grid node.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TecSample {
-    /// Map epoch.
+    /// Map epoch, which must name an exact whole J2000 second; samples sharing
+    /// a second are one map.
     pub epoch: Instant,
     /// Latitude node in degrees.
     pub lat_deg: f64,
@@ -54,7 +54,8 @@ pub struct TecSample {
 /// Whole-grid IONEX vertical-TEC samples.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TecGridSamples {
-    /// Map epochs as instants, strictly increasing.
+    /// Map epochs as instants, strictly increasing, each naming an exact whole
+    /// J2000 second.
     pub map_epochs: Vec<Instant>,
     /// Latitude node values in degrees, monotonic in the direction `dlat_deg`
     /// gives.
@@ -103,7 +104,15 @@ pub enum TecSamplesError {
     NonMonotonicLon,
     /// Map epochs are not strictly increasing.
     NonMonotonicEpochs,
-    /// A map epoch cannot be expressed as an exact integer J2000 second.
+    /// A map epoch names no exact whole J2000 second.
+    ///
+    /// The IONEX epoch axis is an axis of whole seconds, so an epoch is taken
+    /// only where it states one exactly: an integer-nanosecond instant whose
+    /// count is a whole number of seconds within `i64`, or a split Julian date
+    /// whose two parts either sum to a whole second or encode one as a day
+    /// boundary that names a second and an integer residual within the day. A
+    /// fractional epoch is refused here rather than accepted as the nearest
+    /// whole second.
     EpochNotRepresentable,
     /// Grid dimensions do not match the epoch or node axes.
     ShapeMismatch,
@@ -489,19 +498,6 @@ fn validate_finite(value: f64) -> core::result::Result<(), TecSamplesError> {
         Ok(())
     } else {
         Err(TecSamplesError::NonFiniteValue)
-    }
-}
-
-fn exact_j2000_second(epoch: Instant) -> Option<i64> {
-    match epoch.repr {
-        InstantRepr::Nanos(nanos) => {
-            if nanos % NANOS_PER_SECOND != 0 {
-                return None;
-            }
-            let seconds = nanos / NANOS_PER_SECOND;
-            i64::try_from(seconds).ok()
-        }
-        InstantRepr::JulianDate(_) => j2000_seconds_from_instant(epoch),
     }
 }
 

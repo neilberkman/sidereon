@@ -51,6 +51,7 @@
 
 use core::fmt::Write as _;
 
+use super::exact_j2000_second;
 use super::grid::{
     node_axis, pow10, scale_value, Grid, Ionex, BAND, BASE_RADIUS, COMMENT, DEFAULT_EXPONENT,
     DESCRIPTION, ELEVATION_CUTOFF, END_OF_FILE, END_OF_HEADER, END_OF_HEIGHT_MAP, END_OF_RMS_MAP,
@@ -60,7 +61,6 @@ use super::grid::{
     START_OF_RMS_MAP, START_OF_TEC_MAP, STATIONS, VERSION_TYPE,
 };
 use super::header::IonexMappingFunction;
-use super::j2000_seconds_from_instant;
 use crate::astro::time::civil::civil_from_j2000_seconds;
 use crate::astro::time::model::Instant;
 use crate::error::{Error, Result};
@@ -655,10 +655,35 @@ fn write_labeled(out: &mut String, data: &str, label: &str) {
     out.push('\n');
 }
 
+/// The widest J2000 second this writer decomposes into civil fields.
+///
+/// [`civil_from_j2000_seconds`] adds the J2000 noon offset to the second
+/// without a range check of its own, so an epoch near `i64::MAX` would overflow
+/// inside it before the field writer could refuse the year it was about to
+/// produce. The year an `I6` field holds runs from `-99_999` to `999_999`, which
+/// is less than a million years either side of J2000, while this bound is over
+/// 3.1 million Julian years: every second outside it therefore has a year the
+/// field cannot state anyway, and every second inside it is more than four
+/// orders of magnitude clear of the offset overflow.
+const EPOCH_SECONDS_I6_LIMIT: i64 = 100_000_000_000_000;
+
 /// The `6I6` data of an epoch record, the inverse of the parser's epoch read.
+///
+/// The epoch is taken only where it names an exact whole J2000 second, so the
+/// record written is the epoch the product retains and never a rounded
+/// neighbour. A whole second whose civil year is too wide for the `I6` field is
+/// a separate refusal: the second is exact, the record simply cannot state it.
+/// That refusal is reached by name for every such second, including the ones
+/// whose civil decomposition could not be formed at all.
 fn epoch_data(epoch: Instant) -> Result<String> {
-    let seconds = j2000_seconds_from_instant(epoch)
+    let seconds = exact_j2000_second(epoch)
         .ok_or_else(|| Error::InvalidInput("IONEX map epoch is not a whole J2000 second".into()))?;
+    if !(-EPOCH_SECONDS_I6_LIMIT..=EPOCH_SECONDS_I6_LIMIT).contains(&seconds) {
+        return Err(Error::InvalidInput(format!(
+            "IONEX {EPOCH_OF_CURRENT_MAP} epoch {seconds} s from J2000 has a civil year \
+             that does not fit I6"
+        )));
+    }
     let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(seconds);
     let mut data = String::new();
     for field in [year, month, day, hour, minute, second] {
@@ -672,6 +697,104 @@ fn epoch_data(epoch: Instant) -> Result<String> {
 mod tests {
     use super::*;
     use crate::ionex::ionex_epoch_from_j2000_seconds;
+
+    #[test]
+    fn epoch_data_refuses_a_fractional_epoch_rather_than_rounding_it() {
+        // Half a second past 2020-06-25 00:00:00. The rounded conversion took
+        // this as the next whole second and the writer emitted an epoch record
+        // the product does not hold; it is now refused by name.
+        let fractional = Instant::from_julian_date(
+            crate::astro::time::model::TimeScale::Utc,
+            crate::astro::time::model::JulianDateSplit::new(
+                crate::constants::J2000_JD + 7_480.0,
+                43_200.5 / crate::constants::SECONDS_PER_DAY,
+            )
+            .expect("split within one residual day"),
+        );
+        let error = epoch_data(fractional).expect_err("a fractional epoch cannot be written");
+        assert!(
+            matches!(&error, Error::InvalidInput(message)
+                if message.contains("not a whole J2000 second")),
+            "{error:?}"
+        );
+
+        // The whole second on the same boundary writes the fields it names.
+        let whole = ionex_epoch_from_j2000_seconds(646_315_200);
+        assert_eq!(
+            epoch_data(whole).expect("a whole second writes"),
+            "  2020     6    25     0     0     0"
+        );
+    }
+
+    #[test]
+    fn epoch_data_separates_an_unprintable_year_from_an_inexact_epoch() {
+        // A second the converter states exactly can still have a civil year no
+        // `I6` field holds. That refusal is about the record, not the epoch:
+        // the second is exact, the record simply cannot state it.
+        let far = ionex_epoch_from_j2000_seconds(9_007_199_254_740_993);
+        assert_eq!(exact_j2000_second(far), Some(9_007_199_254_740_993));
+        let error = epoch_data(far).expect_err("the civil year does not fit I6");
+        assert!(
+            matches!(&error, Error::InvalidInput(message)
+                if message.contains("does not fit I6")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn epoch_data_refuses_the_i64_epoch_endpoints_by_name() {
+        // The converter states these seconds exactly, and the writer has to
+        // reach its named `I6` refusal for them: `civil_from_j2000_seconds` adds
+        // the J2000 noon offset to the second unguarded, so handing it an epoch
+        // this close to `i64::MAX` overflows inside it instead. The preflight
+        // decides the range before that arithmetic, so each end is refused as a
+        // record it cannot state, the `i64::MIN` end included, with no panic and
+        // no saturation onto some other year.
+        for seconds in [i64::MIN, i64::MIN + 1, i64::MAX - 1, i64::MAX] {
+            let epoch = ionex_epoch_from_j2000_seconds(seconds);
+            assert_eq!(exact_j2000_second(epoch), Some(seconds));
+            let error = epoch_data(epoch).expect_err("an unprintable civil year is refused");
+            assert!(
+                matches!(&error, Error::InvalidInput(message)
+                    if message.contains("does not fit I6")),
+                "{seconds}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn epoch_data_refuses_both_sides_of_the_preflight_bound_the_same_way() {
+        // The bound is deliberately wider than any printable year, so the
+        // second just inside it is refused by the field writer and the second
+        // just outside it by the preflight. Both are the same named refusal, so
+        // the bound cannot be observed as a change of behaviour.
+        for seconds in [
+            EPOCH_SECONDS_I6_LIMIT,
+            EPOCH_SECONDS_I6_LIMIT + 1,
+            -EPOCH_SECONDS_I6_LIMIT,
+            -EPOCH_SECONDS_I6_LIMIT - 1,
+        ] {
+            let error = epoch_data(ionex_epoch_from_j2000_seconds(seconds))
+                .expect_err("a year over six columns is refused");
+            assert!(
+                matches!(&error, Error::InvalidInput(message)
+                    if message.contains("does not fit I6")),
+                "{seconds}: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn epoch_data_writes_a_far_but_printable_civil_year() {
+        // The preflight ranges the epoch, not the year, so every year the field
+        // can hold must still be written. Year 9999 is far past any real
+        // product and well inside the bound.
+        let seconds = crate::astro::time::civil::j2000_seconds(9_999, 12, 31, 23, 59, 59.0) as i64;
+        assert_eq!(
+            epoch_data(ionex_epoch_from_j2000_seconds(seconds)).expect("year 9999 writes"),
+            "  9999    12    31    23    59    59"
+        );
+    }
 
     #[test]
     fn civil_from_j2000_seconds_inverts_the_parser_epoch() {
@@ -695,7 +818,7 @@ mod tests {
             -43_200 - 1,          // one second earlier: 1999-12-31 23:59:59
         ] {
             let epoch = ionex_epoch_from_j2000_seconds(seconds);
-            let recovered = j2000_seconds_from_instant(epoch).expect("J2000 seconds");
+            let recovered = exact_j2000_second(epoch).expect("J2000 seconds");
             assert_eq!(recovered, seconds, "instant epoch round-trips its seconds");
 
             let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(seconds);
