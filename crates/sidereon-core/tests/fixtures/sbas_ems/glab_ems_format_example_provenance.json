@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "recorded_at_utc": "2026-09-22",
+  "retrieval": {
+    "digest_tool": "shasum -a 256"
+  },
+  "fixture": {
+    "file": "glab_ems_format_example.ems",
+    "sha256": "8d1206c76c1cf02ee731fb66b15612f4023b7d8bc1ba05616180c274df297584",
+    "bytes": 267,
+    "records": 3,
+    "classification": "authored format example",
+    "not": "independent acquisition of a real EMS archive file",
+    "extraction": "HTMLParser over the source page: concatenate only the `a` elements carrying class ObsDataText2, terminate each row at `br`, retain the displayed text verbatim, keep exactly the three rows shown.",
+    "handling": "Copied byte for byte from the extraction. No GNSS parser produced or rewrote these bytes."
+  },
+  "sources": [
+    {
+      "name": "EGNOS Message Server (EMS) User Interface Document",
+      "reference": "E-RD-SYS-E31-011-ESA, Issue 2 Revision 0, 2004-11-26, section 3, page 14, figures 3 and 4",
+      "url": "https://gssc.esa.int/navipedia/images/0/0b/EMS_UID_2_0.pdf",
+      "sha256": "7da0969bae5ebf07a55eecd992f52d0b965cd590da7d9b4bd39dda2dae6dbf37",
+      "role": "normative",
+      "supports": [
+        "a data record holds PRN, a two-digit year, month, day, hour, minute and second, the message type, and the message in hexadecimal",
+        "blank characters separate the data fields and a line feed ends each record",
+        "the time stamp is GPS time from Issue 2 Revision 0 onward; earlier EMS issues used UTC",
+        "the message type is derived from message bits 9 to 14"
+      ]
+    },
+    {
+      "name": "gLAB EGNOS v2.0 file description page",
+      "url": "https://server.gage.upc.edu/gLAB/HTML/EGNOS_v2.0.html",
+      "sha256": "8e5a2285b47270b7a6bb57ce367f25060313fe9933cc9f626e93b7aef9cc23b0",
+      "role": "format example",
+      "supports": [
+        "three consecutive whitespace-separated records for PRN 120 spanning 2018-03-31 23:59:58 through 2018-04-01 00:00:00",
+        "each record carries a 64-character hexadecimal message, that is the 32-byte framed form"
+      ]
+    }
+  ],
+  "expectations": [
+    "The GPS week and seconds of week pinned by the test were computed from the printed calendar fields with the Sunday-origin 1980-01-06 GPS week epoch, independently of the parser under test: 1994/604798, 1994/604799 and 1995/0.",
+    "The expected bytes pinned by the test were converted from the hexadecimal text displayed on the source page, not read back from a parse result."
+  ],
+  "limits": [
+    "One authored example of the Issue 2 layout. It does not stand in for a real archive file, for a multi-band EMS product, or for the pre-Issue 2 UTC time stamps.",
+    "All three records carry the same PRN and the same message type, so neither field is varied by this fixture."
+  ]
+}
