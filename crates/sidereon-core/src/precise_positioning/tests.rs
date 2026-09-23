@@ -2456,8 +2456,8 @@ fn static_float_rows_apply_ssr_code_and_phase_biases_with_expected_signs() {
     let code_l2_m = -0.46;
     let phase_l1_cycles = 1.25;
     let phase_l2_cycles = -2.5;
-    let phase_l1_m = phase_l1_cycles * C_M_S / F_L1_HZ;
-    let phase_l2_m = phase_l2_cycles * C_M_S / F_L2_HZ;
+    let phase_l1_m = phase_l1_cycles * (C_M_S / F_L1_HZ);
+    let phase_l2_m = phase_l2_cycles * (C_M_S / F_L2_HZ);
     let has = HasMt1Message {
         header: HasMt1Header {
             toh_s: 0,
@@ -2479,6 +2479,7 @@ fn static_float_rows_apply_ssr_code_and_phase_biases_with_expected_signs() {
                 cell_mask: None,
                 nav_message: 0,
             }],
+            reserved: 0,
         }),
         orbit: None,
         clock_full_set: None,
@@ -2489,12 +2490,12 @@ fn static_float_rows_apply_ssr_code_and_phase_biases_with_expected_signs() {
                 HasCodeBias {
                     sat,
                     signal_id: 0,
-                    bias_m: code_l1_m,
+                    bias_m: Some(code_l1_m),
                 },
                 HasCodeBias {
                     sat,
                     signal_id: 9,
-                    bias_m: code_l2_m,
+                    bias_m: Some(code_l2_m),
                 },
             ],
         }),
@@ -2504,15 +2505,13 @@ fn static_float_rows_apply_ssr_code_and_phase_biases_with_expected_signs() {
                 HasPhaseBias {
                     sat,
                     signal_id: 0,
-                    bias_cycles: phase_l1_cycles,
-                    bias_m: phase_l1_m,
+                    bias_cycles: Some(phase_l1_cycles),
                     discontinuity_indicator: 0,
                 },
                 HasPhaseBias {
                     sat,
                     signal_id: 9,
-                    bias_cycles: phase_l2_cycles,
-                    bias_m: phase_l2_m,
+                    bias_cycles: Some(phase_l2_cycles),
                     discontinuity_indicator: 0,
                 },
             ],
