@@ -19,7 +19,9 @@ use crate::broadcast::satellite_state_unchecked;
 use crate::constants::{C_M_S, GPS_EPOCH_TO_J2000_S, SECONDS_PER_HOUR, SECONDS_PER_WEEK};
 use crate::ephemeris::{BroadcastEphemeris, BroadcastIssue, NavMessage};
 use crate::error::{Error, Result};
-use crate::has::{has_mt1_reference_j2000_s, has_validity_interval_s, HasMt1Message};
+use crate::has::{
+    has_mt1_reference_j2000_s, has_validity_interval_s, HasMt1Message, HasPhaseBiasConversion,
+};
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::observables::{ObservableEphemerisSource, ObservableState, ObservablesError};
 use crate::ppp_corrections::satellite_body_pco_to_ecef;
@@ -434,10 +436,43 @@ impl SsrCorrectionStore {
             provider_id: u16::from(message.header.mask_id),
             solution_id: message.header.iod_set_id,
         };
-        if let Some(orbit) = &message.orbit {
-            let update_interval_s = has_validity_interval_s(orbit.validity_interval)
-                .ok_or_else(|| Error::Parse("HAS orbit VI is reserved".to_string()))?;
+        // Every validity interval is read before any record is applied, so a
+        // reserved one leaves the store as it was.
+        let orbit_interval_s = message
+            .orbit
+            .as_ref()
+            .map(|orbit| {
+                has_validity_interval_s(orbit.validity_interval)
+                    .ok_or_else(|| Error::Parse("HAS orbit VI is reserved".to_string()))
+            })
+            .transpose()?;
+        let clocks = [
+            message.clock_full_set.as_ref(),
+            message.clock_subset.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|clock| {
+            has_validity_interval_s(clock.validity_interval)
+                .map(|interval_s| (clock, interval_s))
+                .ok_or_else(|| Error::Parse("HAS clock VI is reserved".to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+        if let (Some(orbit), Some(update_interval_s)) = (&message.orbit, orbit_interval_s) {
             for record in &orbit.records {
+                // A record with any component transmitted as unavailable states
+                // that the service has no orbit correction for the satellite now:
+                // the stored one is removed rather than left to be applied, and no
+                // zero is stored in place of the missing component.
+                let (Some(radial_m), Some(along_m), Some(cross_m)) =
+                    (record.radial_m, record.along_m, record.cross_m)
+                else {
+                    if let Some(entry) = self.corrections.get_mut(&record.sat) {
+                        entry.orbit = None;
+                    }
+                    continue;
+                };
                 self.corrections.entry(record.sat).or_default().orbit = Some(SsrOrbitCorrection {
                     solution,
                     iode: record.iode,
@@ -445,9 +480,9 @@ impl SsrCorrectionStore {
                     basis: OrbitBasis::VelocityAligned,
                     crs_regional: false,
                     reference_point: SsrReferencePoint::AntennaPhaseCenter,
-                    radial_m: record.radial_m,
-                    along_m: record.along_m,
-                    cross_m: record.cross_m,
+                    radial_m,
+                    along_m,
+                    cross_m,
                     radial_rate_m_s: 0.0,
                     along_rate_m_s: 0.0,
                     cross_rate_m_s: 0.0,
@@ -456,20 +491,27 @@ impl SsrCorrectionStore {
                 });
             }
         }
-        for clock in [
-            message.clock_full_set.as_ref(),
-            message.clock_subset.as_ref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let update_interval_s = has_validity_interval_s(clock.validity_interval)
-                .ok_or_else(|| Error::Parse("HAS clock VI is reserved".to_string()))?;
+        for (clock, update_interval_s) in clocks {
             for record in &clock.records {
+                // A record marked do-not-use excludes the satellite, and an
+                // unavailable one states that the service has no clock correction
+                // for it now: either way the stored clock correction is removed
+                // rather than left to be applied. A record holding a correction
+                // while marked do-not-use, which the encoder refuses, is read as
+                // do-not-use.
+                let correction_m = match record.correction_m {
+                    Some(correction_m) if !record.do_not_use => correction_m,
+                    _ => {
+                        if let Some(entry) = self.corrections.get_mut(&record.sat) {
+                            entry.clock = None;
+                        }
+                        continue;
+                    }
+                };
                 self.corrections.entry(record.sat).or_default().clock = Some(SsrClockCorrection {
                     solution,
                     iod_ssr: message.header.iod_set_id,
-                    c0_m: record.correction_m,
+                    c0_m: correction_m,
                     c1_m_s: 0.0,
                     c2_m_s2: 0.0,
                     ref_epoch_j2000_s,
@@ -480,22 +522,45 @@ impl SsrCorrectionStore {
         }
         if let Some(code_bias) = &message.code_bias {
             for record in &code_bias.records {
+                // An unavailable bias removes the signal's stored bias; no zero is
+                // stored in its place.
+                let Some(bias_m) = record.bias_m else {
+                    if let Some(entry) = self.corrections.get_mut(&record.sat) {
+                        entry.code_bias.biases_m.remove(&record.signal_id);
+                    }
+                    continue;
+                };
                 self.corrections
                     .entry(record.sat)
                     .or_default()
                     .code_bias
                     .biases_m
-                    .insert(record.signal_id, record.bias_m);
+                    .insert(record.signal_id, bias_m);
             }
         }
         if let Some(phase_bias) = &message.phase_bias {
             for record in &phase_bias.records {
+                // Metres derive from cycles and the signal's carrier. A bias
+                // transmitted as unavailable removes the signal's stored bias; a
+                // bias on a signal with no assigned carrier, or not finite, is
+                // skipped, since no wavelength is assumed for it.
+                let bias_m = match record.conversion() {
+                    HasPhaseBiasConversion::Available { bias_m, .. } => bias_m,
+                    HasPhaseBiasConversion::TransmittedUnavailable => {
+                        if let Some(entry) = self.corrections.get_mut(&record.sat) {
+                            entry.phase_bias.biases_m.remove(&record.signal_id);
+                        }
+                        continue;
+                    }
+                    HasPhaseBiasConversion::UnknownSignal
+                    | HasPhaseBiasConversion::InvalidInput => continue,
+                };
                 self.corrections
                     .entry(record.sat)
                     .or_default()
                     .phase_bias
                     .biases_m
-                    .insert(record.signal_id, record.bias_m);
+                    .insert(record.signal_id, bias_m);
             }
         }
         Ok(())
@@ -1211,9 +1276,9 @@ mod tests {
     use crate::astro::math::vec3::dot3;
     use crate::constants::{F_L1_HZ, F_L2_HZ};
     use crate::has::{
-        HasClockBlock, HasClockCorrection, HasCodeBias, HasCodeBiasBlock, HasGnssMask,
-        HasMaskBlock, HasMt1Header, HasMt1Message, HasOrbitBlock, HasOrbitCorrection, HasPhaseBias,
-        HasPhaseBiasBlock,
+        HasClockBlock, HasClockCorrection, HasClockSystem, HasCodeBias, HasCodeBiasBlock,
+        HasGnssMask, HasMaskBlock, HasMt1Header, HasMt1Message, HasOrbitBlock, HasOrbitCorrection,
+        HasPhaseBias, HasPhaseBiasBlock,
     };
     use crate::rtcm::{
         Message, SsrClockRecord, SsrHeader, SsrOrbitRecord, SsrPhaseBiasRecord, SsrPhaseBiasSignal,
@@ -1985,6 +2050,297 @@ mod tests {
         );
     }
 
+    /// A HAS MT1 message holding the given blocks, with no inline mask; ingestion
+    /// reads the records the blocks hold and does not consult a mask.
+    fn has_message(
+        orbit: Vec<HasOrbitCorrection>,
+        clock: Vec<HasClockCorrection>,
+        code_bias: Vec<HasCodeBias>,
+        phase_bias: Vec<HasPhaseBias>,
+    ) -> HasMt1Message {
+        HasMt1Message {
+            header: HasMt1Header {
+                toh_s: 10,
+                mask: false,
+                orbit: true,
+                clock_full_set: true,
+                clock_subset: false,
+                code_bias: true,
+                phase_bias: true,
+                reserved: 0,
+                mask_id: 1,
+                iod_set_id: 1,
+            },
+            mask: None,
+            orbit: Some(HasOrbitBlock {
+                validity_interval: 5,
+                records: orbit,
+            }),
+            clock_full_set: Some(HasClockBlock {
+                validity_interval: 5,
+                systems: vec![HasClockSystem {
+                    system: GnssSystem::Gps,
+                    multiplier_index: 0,
+                }],
+                records: clock,
+            }),
+            clock_subset: None,
+            code_bias: Some(HasCodeBiasBlock {
+                validity_interval: 5,
+                records: code_bias,
+            }),
+            phase_bias: Some(HasPhaseBiasBlock {
+                validity_interval: 5,
+                records: phase_bias,
+            }),
+            padding_bits: Vec::new(),
+        }
+    }
+
+    fn has_reception() -> GnssWeekTow {
+        GnssWeekTow::new(TimeScale::Gst, REAL_SSR_WEEK, 3_620.0).expect("GST reception")
+    }
+
+    /// A store holding a full HAS correction set for G01 and G02: orbit, clock,
+    /// and code and phase biases on signals 0 (L1 C/A) and 9 (L2).
+    fn store_with_has_corrections(
+        g01: GnssSatelliteId,
+        g02: GnssSatelliteId,
+    ) -> SsrCorrectionStore {
+        let mut orbit = Vec::new();
+        let mut clock = Vec::new();
+        let mut code_bias = Vec::new();
+        let mut phase_bias = Vec::new();
+        for sat in [g01, g02] {
+            orbit.push(HasOrbitCorrection {
+                sat,
+                iode: 7,
+                radial_m: Some(0.5),
+                along_m: Some(-0.25),
+                cross_m: Some(0.125),
+            });
+            clock.push(HasClockCorrection {
+                sat,
+                correction_m: Some(-0.75),
+                do_not_use: false,
+            });
+            for signal_id in [0, 9] {
+                code_bias.push(HasCodeBias {
+                    sat,
+                    signal_id,
+                    bias_m: Some(0.24),
+                });
+                phase_bias.push(HasPhaseBias {
+                    sat,
+                    signal_id,
+                    bias_cycles: Some(1.25),
+                    discontinuity_indicator: 0,
+                });
+            }
+        }
+        let mut store = SsrCorrectionStore::new();
+        store
+            .ingest_has_mt1(
+                &has_message(orbit, clock, code_bias, phase_bias),
+                has_reception(),
+            )
+            .expect("ingest full HAS correction set");
+        for sat in [g01, g02] {
+            assert!(store.orbit(sat).is_some() && store.clock(sat).is_some());
+            for signal in [0, 9] {
+                assert!(store.code_bias(sat, signal).is_some());
+                assert!(store.phase_bias(sat, signal).is_some());
+            }
+        }
+        store
+    }
+
+    /// A later HAS message that marks a satellite's correction unavailable, or
+    /// the satellite do-not-use, removes the stored correction instead of
+    /// leaving the earlier one (possibly for another IOD) to be applied. Other
+    /// satellites and other signals keep theirs, and no zero is stored.
+    #[test]
+    fn has_unavailable_and_do_not_use_records_remove_stored_corrections() {
+        let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap();
+        let g02 = GnssSatelliteId::new(GnssSystem::Gps, 2).unwrap();
+        let mut store = store_with_has_corrections(g01, g02);
+        let g02_before = store.corrections.get(&g02).cloned();
+
+        let later = has_message(
+            vec![HasOrbitCorrection {
+                sat: g01,
+                iode: 8,
+                radial_m: Some(0.5),
+                along_m: None,
+                cross_m: Some(0.125),
+            }],
+            vec![HasClockCorrection {
+                sat: g01,
+                correction_m: None,
+                do_not_use: true,
+            }],
+            vec![HasCodeBias {
+                sat: g01,
+                signal_id: 0,
+                bias_m: None,
+            }],
+            vec![HasPhaseBias {
+                sat: g01,
+                signal_id: 9,
+                bias_cycles: None,
+                discontinuity_indicator: 0,
+            }],
+        );
+        store
+            .ingest_has_mt1(&later, has_reception())
+            .expect("ingest unavailable and do-not-use records");
+
+        assert!(
+            store.orbit(g01).is_none(),
+            "unavailable orbit removes G01's"
+        );
+        assert!(store.clock(g01).is_none(), "do-not-use removes G01's clock");
+        assert_eq!(
+            store.code_bias(g01, 0),
+            None,
+            "unavailable code bias removed"
+        );
+        assert_eq!(store.code_bias(g01, 9), Some(0.24), "other signal kept");
+        assert_eq!(
+            store.phase_bias(g01, 9),
+            None,
+            "unavailable phase bias removed"
+        );
+        assert_eq!(
+            store.phase_bias(g01, 0).map(f64::to_bits),
+            Some((1.25 * (C_M_S / F_L1_HZ)).to_bits()),
+            "other signal kept"
+        );
+        assert_eq!(store.corrections.get(&g02).cloned(), g02_before);
+
+        // A satellite with nothing stored gains no entry from an unavailable record.
+        let g03 = GnssSatelliteId::new(GnssSystem::Gps, 3).unwrap();
+        let unavailable_only = has_message(
+            vec![HasOrbitCorrection {
+                sat: g03,
+                iode: 1,
+                radial_m: None,
+                along_m: None,
+                cross_m: None,
+            }],
+            vec![HasClockCorrection {
+                sat: g03,
+                correction_m: None,
+                do_not_use: true,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+        store
+            .ingest_has_mt1(&unavailable_only, has_reception())
+            .expect("ingest unavailable records for an unknown satellite");
+        assert!(!store.corrections.contains_key(&g03));
+    }
+
+    /// A clock record transmitted as unavailable removes the stored clock like
+    /// a do-not-use record, and so does a caller-built record that holds a
+    /// correction while marked do-not-use, which is read as do-not-use.
+    #[test]
+    fn has_unavailable_or_contradictory_clock_removes_stored_clock() {
+        let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap();
+        let g02 = GnssSatelliteId::new(GnssSystem::Gps, 2).unwrap();
+        let mut store = store_with_has_corrections(g01, g02);
+        let later = has_message(
+            Vec::new(),
+            vec![
+                HasClockCorrection {
+                    sat: g01,
+                    correction_m: None,
+                    do_not_use: false,
+                },
+                HasClockCorrection {
+                    sat: g02,
+                    correction_m: Some(0.5),
+                    do_not_use: true,
+                },
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        store
+            .ingest_has_mt1(&later, has_reception())
+            .expect("ingest clock records");
+        assert!(store.clock(g01).is_none());
+        assert!(store.clock(g02).is_none());
+        assert!(store.orbit(g01).is_some() && store.orbit(g02).is_some());
+    }
+
+    /// A phase bias on a signal with no assigned carrier is skipped: no
+    /// wavelength is assumed for it, and the signals that have one apply.
+    #[test]
+    fn has_phase_bias_on_unassigned_signal_is_skipped() {
+        let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap();
+        let mut store = SsrCorrectionStore::new();
+        let message = has_message(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![
+                HasPhaseBias {
+                    sat: g01,
+                    signal_id: 10,
+                    bias_cycles: Some(1.0),
+                    discontinuity_indicator: 0,
+                },
+                HasPhaseBias {
+                    sat: g01,
+                    signal_id: 0,
+                    bias_cycles: Some(1.0),
+                    discontinuity_indicator: 0,
+                },
+            ],
+        );
+        store
+            .ingest_has_mt1(&message, has_reception())
+            .expect("ingest phase biases");
+        assert_eq!(store.phase_bias(g01, 10), None);
+        assert_eq!(
+            store.phase_bias(g01, 0).map(f64::to_bits),
+            Some((C_M_S / F_L1_HZ).to_bits())
+        );
+    }
+
+    /// Every validity interval is read before any record is applied, so a
+    /// reserved clock VI leaves the orbit records before it unapplied.
+    #[test]
+    fn has_reserved_clock_vi_leaves_store_unchanged() {
+        let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap();
+        let g02 = GnssSatelliteId::new(GnssSystem::Gps, 2).unwrap();
+        let mut store = store_with_has_corrections(g01, g02);
+        let before = store.corrections.clone();
+        let mut message = has_message(
+            vec![HasOrbitCorrection {
+                sat: g01,
+                iode: 9,
+                radial_m: None,
+                along_m: Some(0.0),
+                cross_m: Some(0.0),
+            }],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        message.clock_full_set.as_mut().unwrap().validity_interval = 15;
+        let err = store
+            .ingest_has_mt1(&message, has_reception())
+            .expect_err("VI 15 is reserved");
+        assert!(
+            err.to_string().contains("HAS clock VI is reserved"),
+            "{err}"
+        );
+        assert_eq!(store.corrections, before);
+    }
+
     #[test]
     fn has_binary_orbit_clock_and_biases_ingest_with_additive_convention() {
         let nav_text = std::fs::read_to_string(concat!(
@@ -2019,22 +2375,28 @@ mod tests {
                     cell_mask: None,
                     nav_message: 0,
                 }],
+                reserved: 0,
             }),
             orbit: Some(HasOrbitBlock {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
                     iode: record.issue_of_data.issue,
-                    radial_m: 1.25,
-                    along_m: -2.0,
-                    cross_m: 3.0,
+                    radial_m: Some(1.25),
+                    along_m: Some(-2.0),
+                    cross_m: Some(3.0),
                 }],
             }),
             clock_full_set: Some(HasClockBlock {
                 validity_interval: 5,
+                systems: vec![HasClockSystem {
+                    system: GnssSystem::Gps,
+                    multiplier_index: 0,
+                }],
                 records: vec![HasClockCorrection {
                     sat,
-                    correction_m: -0.75,
+                    correction_m: Some(-0.75),
+                    do_not_use: false,
                 }],
             }),
             clock_subset: None,
@@ -2044,12 +2406,12 @@ mod tests {
                     HasCodeBias {
                         sat,
                         signal_id: 0,
-                        bias_m: 0.24,
+                        bias_m: Some(0.24),
                     },
                     HasCodeBias {
                         sat,
                         signal_id: 9,
-                        bias_m: -0.46,
+                        bias_m: Some(-0.46),
                     },
                 ],
             }),
@@ -2059,15 +2421,13 @@ mod tests {
                     HasPhaseBias {
                         sat,
                         signal_id: 0,
-                        bias_cycles: 1.25,
-                        bias_m: 1.25 * C_M_S / F_L1_HZ,
+                        bias_cycles: Some(1.25),
                         discontinuity_indicator: 1,
                     },
                     HasPhaseBias {
                         sat,
                         signal_id: 9,
-                        bias_cycles: -2.5,
-                        bias_m: -2.5 * C_M_S / F_L2_HZ,
+                        bias_cycles: Some(-2.5),
                         discontinuity_indicator: 2,
                     },
                 ],
@@ -2106,11 +2466,11 @@ mod tests {
         );
         assert_eq!(
             store.phase_bias(sat, 0).unwrap().to_bits(),
-            (1.25 * C_M_S / F_L1_HZ).to_bits()
+            (1.25 * (C_M_S / F_L1_HZ)).to_bits()
         );
         assert_eq!(
             store.phase_bias(sat, 9).unwrap().to_bits(),
-            (-2.5 * C_M_S / F_L2_HZ).to_bits()
+            (-2.5 * (C_M_S / F_L2_HZ)).to_bits()
         );
     }
 
