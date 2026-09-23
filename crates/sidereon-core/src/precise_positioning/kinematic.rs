@@ -8,11 +8,12 @@ use crate::estimation::recipe::NormalRecipe;
 use crate::observables::ObservableEphemerisSource;
 
 use super::rows::{
-    build_rows, exclude_unresolved_ssr_bias_observations, AmbiguityBinding, PppRowError,
+    build_rows, exclude_unresolved_ssr_bias_observations_with_clock,
+    leave_out_unplaced_observations, AmbiguityBinding, PppRowError,
 };
 use super::{
     estimates_ztd, FloatEpoch, FloatSolveError, FloatState, MeasurementWeights, MissingCorrection,
-    NoEphemerisReason, RangeCorrections, SsrBiasExclusion, TroposphereOptions,
+    NoEphemerisReason, RangeCorrections, SsrBiasExclusion, TroposphereOptions, UnplacedObservation,
 };
 
 const BASE_STATE_DIMENSION: usize = 5;
@@ -157,6 +158,9 @@ pub struct KinematicUpdateSummary {
     /// Observations left out of the update because an SSR/HAS bias the corrections
     /// require was not resolved for them.
     pub ssr_bias_exclusions: Vec<SsrBiasExclusion>,
+    /// Observations left out of the update because no transmission epoch can be placed
+    /// from them.
+    pub unplaced_observations: Vec<UnplacedObservation>,
 }
 
 /// Per-epoch status returned by the kinematic PPP EKF driver.
@@ -164,8 +168,9 @@ pub struct KinematicUpdateSummary {
 pub enum KinematicEpochStatus {
     /// The epoch completed the EKF predict and measurement-update steps.
     Updated,
-    /// Every observation of the epoch was left out for a missing SSR/HAS bias, listed in
-    /// the epoch's `ssr_bias_exclusions`. The epoch carries the predicted state and
+    /// Every observation of the epoch was left out, for a missing SSR/HAS bias or a code
+    /// that places no transmission epoch, listed in the epoch's `ssr_bias_exclusions` and
+    /// `unplaced_observations`. The epoch carries the predicted state and
     /// covariance without a measurement update, and the arc continues.
     PredictedOnly,
 }
@@ -190,6 +195,9 @@ pub struct KinematicEpochSolution {
     /// Observations of this epoch left out of the update because an SSR/HAS bias the
     /// corrections require was not resolved for them.
     pub ssr_bias_exclusions: Vec<SsrBiasExclusion>,
+    /// Observations of this epoch left out of the update because no transmission epoch
+    /// can be placed from them.
+    pub unplaced_observations: Vec<UnplacedObservation>,
     /// Per-epoch filter status.
     pub status: KinematicEpochStatus,
 }
@@ -369,6 +377,7 @@ pub fn solve_kinematic_ppp(
             innovation_rms_m: update.innovation_rms_m,
             status,
             ssr_bias_exclusions: update.ssr_bias_exclusions,
+            unplaced_observations: update.unplaced_observations,
         });
         previous_t_rx_j2000_s = epoch.t_rx_j2000_s;
     }
@@ -401,14 +410,14 @@ pub fn correct_kinematic_state(
     validate_measurement_config(config)?;
     let float_state = float_state_from_kinematic(state);
     let corrections = &config.corrections;
-    let (retained, ssr_bias_exclusions) = exclude_unresolved_ssr_bias_observations(
+    let (placeable, unplaced_observations) =
+        leave_out_unplaced_observations(std::slice::from_ref(epoch), epoch_index);
+    let (retained, ssr_bias_exclusions) = exclude_unresolved_ssr_bias_observations_with_clock(
         source,
-        std::slice::from_ref(epoch),
+        &placeable,
         epoch_index,
-        state.position_m,
         &corrections.ppp,
-        0,
-        super::SsrBiasExclusionStage::BeforeSolve,
+        corrections.satellite_clock.as_ref(),
     )
     .map_err(kinematic_error_from_float)?;
     let epoch = &retained[0];
@@ -417,6 +426,7 @@ pub fn correct_kinematic_state(
             innovation_rms_m: 0.0,
             used_sats: Vec::new(),
             ssr_bias_exclusions,
+            unplaced_observations,
         });
     }
     let correction_epoch_indices = [epoch_index];
@@ -428,9 +438,6 @@ pub fn correct_kinematic_state(
         normal: NormalRecipe::PppDenseLastTie,
         estimate_residual_ionosphere: false,
         correction_epoch_indices: Some(&correction_epoch_indices),
-        ssr_bias_pass: 0,
-        ssr_bias_stage: super::SsrBiasExclusionStage::BeforeSolve,
-        ssr_bias_deferred: &[],
     };
     let ambiguity_ids = state
         .ambiguities_m
@@ -461,6 +468,7 @@ pub fn correct_kinematic_state(
             .map(|obs| obs.satellite_id.clone())
             .collect(),
         ssr_bias_exclusions,
+        unplaced_observations,
     })
 }
 
@@ -1167,9 +1175,8 @@ fn symmetrize(covariance_m2: &mut [Vec<f64>]) {
 mod tests {
     use super::super::FloatObservation;
     use super::*;
-    use crate::constants::F_L1_HZ;
     use crate::estimation::substrate::rows::ResidualRow;
-    use crate::observables::{predict, ObservableState, ObservablesError, PredictOptions};
+    use crate::observables::{ObservableState, ObservablesError};
     use crate::ppp_corrections::CivilDateTime;
     use crate::{GnssSatelliteId, GnssSystem};
 
@@ -1894,18 +1901,13 @@ mod tests {
         let observations = ids
             .iter()
             .map(|id| {
-                let pred = predict(
+                let (_, pred) = crate::precise_positioning::synthetic_placed_code(
                     &source,
                     *id,
                     truth,
                     0.0,
-                    PredictOptions {
-                        carrier_hz: F_L1_HZ,
-                        light_time: true,
-                        sagnac: true,
-                    },
-                )
-                .expect("synthetic satellite should predict");
+                    |geometry| geometry.geometric_range_m + clock_m,
+                );
                 let code_m = pred.geometric_range_m + clock_m;
                 let ambiguity_m = ambiguities_m.get(&id.to_string()).copied().unwrap();
                 FloatObservation {
@@ -2153,18 +2155,13 @@ mod tests {
                 let observations = ids
                     .iter()
                     .map(|id| {
-                        let pred = predict(
+                        let (_, pred) = crate::precise_positioning::synthetic_placed_code(
                             &source,
                             *id,
                             *truth,
                             t_rx_j2000_s,
-                            PredictOptions {
-                                carrier_hz: F_L1_HZ,
-                                light_time: true,
-                                sagnac: true,
-                            },
-                        )
-                        .expect("synthetic satellite should predict");
+                            |geometry| geometry.geometric_range_m + clock_m,
+                        );
                         let code_m = pred.geometric_range_m + clock_m;
                         let ambiguity_m = ambiguities_m.get(&id.to_string()).copied().unwrap();
                         FloatObservation {

@@ -59,6 +59,43 @@ pub trait IssueAwareBroadcast: EphemerisSource {
     fn broadcast_velocity_at(&self, _sat: GnssSatelliteId, _t_j2000_s: f64) -> Option<[f64; 3]> {
         None
     }
+
+    /// [`Self::state_group_delay_by_iode_at`] at `t_j2000_s` of the record with IODE `iode`
+    /// selected at `selection_j2000_s`, the observation epoch RTKLIB `satpos_sbas` selects
+    /// at (`ephpos(time, teph, ...)`). The default selects at `t_j2000_s`; a source that
+    /// selects records by epoch overrides it.
+    fn state_group_delay_by_iode_selected_at(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+        _selection_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.state_group_delay_by_iode_at(sat, iode, t_j2000_s)
+    }
+
+    /// [`Self::velocity_by_iode_at`] of the record selected at `selection_j2000_s`. The
+    /// default selects at `t_j2000_s`.
+    fn velocity_by_iode_selected_at(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+        _selection_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
+        self.velocity_by_iode_at(sat, iode, t_j2000_s)
+    }
+
+    /// [`Self::broadcast_velocity_at`] of the record selected at `selection_j2000_s`. The
+    /// default selects at `t_j2000_s`.
+    fn broadcast_velocity_selected_at(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        _selection_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
+        self.broadcast_velocity_at(sat, t_j2000_s)
+    }
 }
 
 /// Selects the branch used when no complete or permitted partial SBAS
@@ -150,6 +187,18 @@ impl<'a> SbasCorrectedEphemeris<'a> {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.corrected_state_with_group_delay_selected(sat, t_j2000_s, t_j2000_s)
+    }
+
+    /// [`Self::corrected_state_with_group_delay`] with the broadcast record selected at
+    /// `selection_j2000_s`, the observation epoch RTKLIB `satpos_sbas` selects at; the
+    /// corrections are applied at `t_j2000_s`.
+    fn corrected_state_with_group_delay_selected(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
         if self.store.is_disabled(self.geo, t_j2000_s) || self.store.is_withdrawn(self.geo, sat) {
             return None;
         }
@@ -177,9 +226,13 @@ impl<'a> SbasCorrectedEphemeris<'a> {
 
         match (fast, long) {
             (Some(fast), Some(long)) => {
-                let (mut position, mut clock, group_delay) = self
-                    .broadcast
-                    .state_group_delay_by_iode_at(sat, long.iode, t_j2000_s)?;
+                let (mut position, mut clock, group_delay) =
+                    self.broadcast.state_group_delay_by_iode_selected_at(
+                        sat,
+                        long.iode,
+                        t_j2000_s,
+                        selection_j2000_s,
+                    )?;
                 let dt = t_j2000_s - long.t0_j2000_s;
                 for (i, component) in position.iter_mut().enumerate() {
                     *component += long.delta_ecef_m[i] + long.delta_ecef_rate_m_s[i] * dt;
@@ -189,16 +242,19 @@ impl<'a> SbasCorrectedEphemeris<'a> {
                 Some((position, clock, group_delay))
             }
             (Some(fast), None) if self.store.allow_partial_corrections() => {
-                let (position, mut clock, group_delay) = self
-                    .broadcast
-                    .position_clock_group_delay_at_j2000_s(sat, t_j2000_s)?;
+                let (position, mut clock, group_delay) =
+                    self.broadcast_state_selected(sat, t_j2000_s, selection_j2000_s)?;
                 clock += (fast.prc_m + fast.rrc_m_s * (t_j2000_s - fast.t_of_j2000_s)) / C_M_S;
                 Some((position, clock, group_delay))
             }
             (None, Some(long)) if self.store.allow_partial_corrections() => {
-                let (mut position, mut clock, group_delay) = self
-                    .broadcast
-                    .state_group_delay_by_iode_at(sat, long.iode, t_j2000_s)?;
+                let (mut position, mut clock, group_delay) =
+                    self.broadcast.state_group_delay_by_iode_selected_at(
+                        sat,
+                        long.iode,
+                        t_j2000_s,
+                        selection_j2000_s,
+                    )?;
                 let dt = t_j2000_s - long.t0_j2000_s;
                 for (i, component) in position.iter_mut().enumerate() {
                     *component += long.delta_ecef_m[i] + long.delta_ecef_rate_m_s[i] * dt;
@@ -207,9 +263,9 @@ impl<'a> SbasCorrectedEphemeris<'a> {
                 Some((position, clock, group_delay))
             }
             _ => match self.mode {
-                SbasSolveMode::MixedAugmentation => self
-                    .broadcast
-                    .position_clock_group_delay_at_j2000_s(sat, t_j2000_s),
+                SbasSolveMode::MixedAugmentation => {
+                    self.broadcast_state_selected(sat, t_j2000_s, selection_j2000_s)
+                }
                 SbasSolveMode::SbasOnly => None,
             },
         }
@@ -226,17 +282,17 @@ impl<'a> SbasCorrectedEphemeris<'a> {
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
+        selection_j2000_s: f64,
     ) -> Option<Result<[f64; 3], ObservablesError>> {
         const STEP_S: f64 = crate::rinex_nav::EPHPOS_STEP_S;
         if self.store.is_disabled(self.geo, t_j2000_s) || self.store.is_withdrawn(self.geo, sat) {
             return Some(Err(ObservablesError::NoEphemeris));
         }
         if sat == self.geo {
-            let Some(geo_state) = self
-                .store
-                .fresh_geo_nav(self.geo, t_j2000_s)
-                .filter(|_| self.corrected_state(sat, t_j2000_s).is_some())
-            else {
+            let Some(geo_state) = self.store.fresh_geo_nav(self.geo, t_j2000_s).filter(|_| {
+                self.corrected_state_with_group_delay_selected(sat, t_j2000_s, selection_j2000_s)
+                    .is_some()
+            }) else {
                 return Some(Err(ObservablesError::NoEphemeris));
             };
             // The step is added to the time from the navigation reference epoch, as
@@ -250,7 +306,10 @@ impl<'a> SbasCorrectedEphemeris<'a> {
                 (end[2] - start[2]) / STEP_S,
             ]));
         }
-        if self.corrected_state(sat, t_j2000_s).is_none() {
+        if self
+            .corrected_state_with_group_delay_selected(sat, t_j2000_s, selection_j2000_s)
+            .is_none()
+        {
             return Some(Err(ObservablesError::NoEphemeris));
         }
         let fast = self.store.fresh_fast(self.geo, sat, t_j2000_s);
@@ -258,13 +317,18 @@ impl<'a> SbasCorrectedEphemeris<'a> {
             .then(|| self.store.fresh_long_term(self.geo, sat, t_j2000_s))
             .flatten();
         let velocity = match (fast, long) {
-            (Some(_), Some(long)) => self
-                .broadcast
-                .velocity_by_iode_at(sat, long.iode, t_j2000_s),
+            (Some(_), Some(long)) => self.broadcast.velocity_by_iode_selected_at(
+                sat,
+                long.iode,
+                t_j2000_s,
+                selection_j2000_s,
+            ),
             (None, Some(long)) if self.store.allow_partial_corrections() => self
                 .broadcast
-                .velocity_by_iode_at(sat, long.iode, t_j2000_s),
-            _ => self.broadcast.broadcast_velocity_at(sat, t_j2000_s),
+                .velocity_by_iode_selected_at(sat, long.iode, t_j2000_s, selection_j2000_s),
+            _ => self
+                .broadcast
+                .broadcast_velocity_selected_at(sat, t_j2000_s, selection_j2000_s),
         };
         velocity.map(Ok)
     }
@@ -279,6 +343,43 @@ impl<'a> SbasCorrectedEphemeris<'a> {
         t_j2000_s: f64,
     ) -> Option<f64> {
         self.corrected_state_with_group_delay(sat, t_j2000_s)?.2
+    }
+
+    /// The underlying broadcast state at `t_j2000_s` of the record selected at
+    /// `selection_j2000_s`.
+    fn broadcast_state_selected(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.broadcast
+            .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
+            .ok()
+            .flatten()
+            .map(|state| state.value)
+    }
+
+    /// Satellite clock that places a pseudorange's transmission epoch, as RTKLIB `satposs`
+    /// reads it with `ephclk` for the SBAS ephemeris option: the broadcast clock
+    /// polynomial of the underlying store, uncorrected, and for the GEO its navigation
+    /// clock (`seph2clk`).
+    fn transmit_epoch_clock(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        if sat == self.geo {
+            return Ok(self
+                .store
+                .fresh_geo_nav(self.geo, t_j2000_s)
+                .map(|geo_state| {
+                    crate::astro::time::Validated::ok(geo_state.state_at(t_j2000_s).1)
+                }));
+        }
+        self.broadcast
+            .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
     }
 
     fn fast_clock_delta_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
@@ -319,6 +420,27 @@ impl EphemerisSource for SbasCorrectedEphemeris<'_> {
             .position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
             .map(crate::astro::time::Validated::ok))
     }
+
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        Ok(self
+            .corrected_state_with_group_delay_selected(sat, t_j2000_s, selection_j2000_s)
+            .map(crate::astro::time::Validated::ok))
+    }
+
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        self.transmit_epoch_clock(sat, t_j2000_s, selection_j2000_s)
+    }
 }
 
 impl ObservableEphemerisSource for SbasCorrectedEphemeris<'_> {
@@ -341,7 +463,16 @@ impl ObservableEphemerisSource for SbasCorrectedEphemeris<'_> {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<Result<[f64; 3], ObservablesError>> {
-        self.corrected_velocity(sat, t_j2000_s)
+        self.corrected_velocity(sat, t_j2000_s, t_j2000_s)
+    }
+
+    fn velocity_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        self.corrected_velocity(sat, t_j2000_s, selection_j2000_s)
     }
 
     /// True: an SBAS-corrected clock is the broadcast clock, which carries the broadcast
@@ -381,6 +512,41 @@ impl ObservableEphemerisSource for SbasCorrectedEphemeris<'_> {
     {
         ObservableEphemerisSource::observable_state_group_delay_at_j2000_s(self, sat, t_j2000_s)
             .map(crate::astro::time::Validated::ok)
+    }
+
+    fn try_observable_state_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<(ObservableState, Option<f64>)>, ObservablesError>
+    {
+        let (position_ecef_m, clock_s, group_delay) = self
+            .corrected_state_with_group_delay_selected(sat, t_j2000_s, selection_j2000_s)
+            .ok_or(ObservablesError::NoEphemeris)?;
+        Ok(crate::astro::time::Validated::ok((
+            ObservableState {
+                position_ecef_m,
+                clock_s: Some(clock_s),
+            },
+            group_delay,
+        )))
+    }
+
+    fn try_observable_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<Option<f64>>, ObservablesError> {
+        match self.transmit_epoch_clock(sat, t_j2000_s, selection_j2000_s) {
+            Ok(Some(clock)) => Ok(crate::astro::time::Validated {
+                value: Some(clock.value),
+                degraded: clock.degraded,
+            }),
+            Ok(None) => Err(ObservablesError::NoEphemeris),
+            Err(error) => Err(ObservablesError::Ephemeris(error)),
+        }
     }
 }
 
@@ -465,6 +631,27 @@ impl EphemerisSource for SbasCorrectedEphemerisOwned {
             .position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
             .map(crate::astro::time::Validated::ok))
     }
+
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        self.borrowed()
+            .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        self.borrowed()
+            .transmit_epoch_clock(sat, t_j2000_s, selection_j2000_s)
+    }
 }
 
 impl ObservableEphemerisSource for SbasCorrectedEphemerisOwned {
@@ -515,6 +702,37 @@ impl ObservableEphemerisSource for SbasCorrectedEphemerisOwned {
         ObservableEphemerisSource::observable_state_group_delay_at_j2000_s(self, sat, t_j2000_s)
             .map(crate::astro::time::Validated::ok)
     }
+
+    fn try_observable_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<Option<f64>>, ObservablesError> {
+        self.borrowed()
+            .try_observable_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn try_observable_state_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<(ObservableState, Option<f64>)>, ObservablesError>
+    {
+        self.borrowed()
+            .try_observable_state_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn velocity_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        self.borrowed()
+            .velocity_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
+    }
 }
 
 impl IssueAwareBroadcast for crate::rinex_nav::BroadcastStore {
@@ -547,6 +765,41 @@ impl IssueAwareBroadcast for crate::rinex_nav::BroadcastStore {
 
     fn broadcast_velocity_at(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<[f64; 3]> {
         self.selected_record_velocity(sat, t_j2000_s)
+    }
+
+    fn state_group_delay_by_iode_selected_at(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        crate::rinex_nav::BroadcastStore::state_group_delay_by_iode_selected_at(
+            self,
+            sat,
+            iode,
+            t_j2000_s,
+            selection_j2000_s,
+        )
+    }
+
+    fn velocity_by_iode_selected_at(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
+        self.iode_record_velocity_at(sat, iode, t_j2000_s, selection_j2000_s)
+    }
+
+    fn broadcast_velocity_selected_at(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
+        self.selected_record_velocity_at(sat, t_j2000_s, selection_j2000_s)
     }
 }
 

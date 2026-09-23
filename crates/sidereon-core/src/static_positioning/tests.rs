@@ -167,6 +167,7 @@ fn pseudorange(
         glonass_channels: &inputs.glonass_channels,
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
     };
     sat_model(
         &env,
@@ -649,6 +650,7 @@ fn hand_covariance(
             glonass_channels: &epoch.glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
         let inputs = solve_inputs_for_epoch(epoch, options());
         let sat = sat_model(
@@ -746,6 +748,88 @@ fn starved_epochs_stack_to_recover_redundancy_and_truth() {
         assert!(
             err_m < 100.0,
             "stacked fix should recover truth within 100 m, got {err_m} m"
+        );
+    }
+}
+
+/// The Go fixture's pseudoranges come from a geometric light-time model, which iterates
+/// the transmission epoch from the receiver's time tag and leaves out its clock (about
+/// 0.1 ms). `tests/go_fixture_parity.rs` replays its frozen bits through that model. At
+/// the replayed solution, every satellite's model in the static solve, which places the
+/// transmission epoch from the pseudorange as RTKLIB `satposs` does and ranges it with
+/// `geodist`, differs from the replayed one through the transmission epoch alone.
+#[cfg(feature = "test-replays")]
+#[test]
+fn go_fixture_rtklib_placement_differs_from_the_replay_by_the_transmit_epoch_alone() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/sp3/trimmed_go_static.sp3"
+    );
+    let bytes = std::fs::read(path).expect("read the Go fixture SP3");
+    let sp3 = crate::sp3::Sp3::parse(&bytes).expect("parse the Go fixture SP3");
+    let observations = [
+        (8, 23_825_519.844459895),
+        (10, 22_717_690.10174763),
+        (16, 20_478_653.376262885),
+        (18, 21_768_335.23365917),
+        (20, 21_248_327.738292538),
+        (21, 20_808_709.800933376),
+        (26, 21_126_481.58786735),
+        (27, 21_341_367.541037586),
+    ]
+    .into_iter()
+    .map(|(prn, pseudorange_m)| Observation {
+        satellite_id: gps(prn),
+        pseudorange_m,
+    })
+    .collect::<Vec<_>>();
+    let inputs = SolveInputs {
+        observations,
+        t_rx_j2000_s: 646_272_000.0,
+        t_rx_second_of_day_s: 43_200.0,
+        day_of_year: 176.5,
+        initial_guess: [4.5e6, 0.5e6, 4.5e6, 0.0],
+        corrections: Corrections::NONE,
+        klobuchar: zero_klobuchar(),
+        beidou_klobuchar: None,
+        galileo_nequick: None,
+        sbas_iono: None,
+        glonass_channels: BTreeMap::new(),
+        met: SurfaceMet::default(),
+        robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+    };
+    let epochs = [
+        StaticEpoch::from_solve_inputs(inputs.clone()),
+        StaticEpoch::from_solve_inputs(inputs.clone()),
+    ];
+    let replay =
+        solve_static_geometric_light_time_replay(&sp3, &epochs, StaticSolveOptions::default())
+            .expect("replayed static solve");
+    let rx = replay.position.as_array();
+    let b = replay.per_epoch_clock[0].clock_s * crate::constants::C_M_S;
+    let env = SatModelEnv {
+        eph: &sp3,
+        t_rx_j2000_s: inputs.t_rx_j2000_s,
+        t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
+        day_of_year: inputs.day_of_year,
+        corrections: inputs.corrections,
+        met: &inputs.met,
+        glonass_channels: &inputs.glonass_channels,
+        model: SppModelRecipe::geometric_light_time_replay(),
+        pseudorange_code: inputs.pseudorange_code,
+        placement_pseudoranges_m: None,
+    };
+    for observation in &inputs.observations {
+        crate::spp::test_support::assert_only_the_transmit_epoch_differs(
+            &sp3,
+            &env,
+            observation.satellite_id,
+            rx,
+            b,
+            observation.pseudorange_m,
+            &inputs.klobuchar,
+            &format!("Go fixture {}", observation.satellite_id),
         );
     }
 }

@@ -26,6 +26,16 @@
 //! except the term, and check at each family that the model with the term
 //! differs from it by the term alone.
 //!
+//! The reference recipe also places each transmission epoch by the geometric light
+//! time from the receiver's time tag, which leaves out the receiver clock offset
+//! (30 km in these fixtures, so each satellite sits about 0.4 m along its track from
+//! where the signal left it). Positioning places the epoch from the pseudorange as
+//! RTKLIB `satposs` does and ranges it with `geodist`. The replay runs the recipe's
+//! geometric model ([`SppModelRecipe::geometric_light_time_replay`]) and checks, at
+//! the first recorded state and at the converged one, that the positioning model
+//! differs from it through the transmission epoch alone
+//! ([`test_support::assert_only_the_transmit_epoch_differs`]).
+//!
 //! Track 2 (sub-micron, BLAS-bound) is the independent-solve agreement: the
 //! crate trust-region solver is run from the same inputs and the converged
 //! position/clock is asserted to agree with both the recorded scipy solution
@@ -567,8 +577,9 @@ fn weighted_residual_at(
         corrections: inputs.corrections,
         met: &inputs.met,
         glonass_channels: &glonass_channels,
-        model: SppModelRecipe::reference(),
+        model: SppModelRecipe::geometric_light_time_replay(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
     };
     let r: Vec<f64> = used
         .iter()
@@ -603,8 +614,9 @@ fn trace_replay_level(level: &str) {
         corrections: inputs.corrections,
         met: &inputs.met,
         glonass_channels: &glonass_channels,
-        model: SppModelRecipe::reference(),
+        model: SppModelRecipe::geometric_light_time_replay(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
     };
 
     let used = used_sats(&doc);
@@ -671,6 +683,16 @@ fn trace_replay_level(level: &str) {
             if ti == 0 {
                 assert_only_the_relativity_term_differs(
                     &sp3,
+                    &env,
+                    sat,
+                    rx,
+                    b,
+                    p_meas,
+                    &inputs.klobuchar,
+                    &pfx,
+                );
+                test_support::assert_only_the_transmit_epoch_differs(
+                    &reference,
                     &env,
                     sat,
                     rx,
@@ -885,8 +907,9 @@ fn regen_trace_level(level: &str) {
             corrections: inputs0.corrections,
             met: &inputs0.met,
             glonass_channels: &glonass_channels,
-            model: SppModelRecipe::reference(),
+            model: SppModelRecipe::geometric_light_time_replay(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
         let tr = doc["fixture"]["inputs"]["rx_truth_ecef_m"]
             .as_array()
@@ -940,8 +963,9 @@ fn regen_trace_level(level: &str) {
         corrections: inputs.corrections,
         met: &inputs.met,
         glonass_channels: &glonass_channels,
-        model: SppModelRecipe::reference(),
+        model: SppModelRecipe::geometric_light_time_replay(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
     };
     let used = used_sats(&doc);
     let obs_by_id: Vec<(GnssSatelliteId, f64)> = inputs
@@ -1027,7 +1051,13 @@ fn regen_trace_level(level: &str) {
     // recovers truth to sub-nm; the recorded `final_solution.x` becomes the
     // corrected solver's converged value.
     {
-        let sol = solve(&reference, &solve_inputs(&inputs), true).expect("solve converges");
+        let sol = test_support::solve_with_model_for_test(
+            &reference,
+            &solve_inputs(&inputs),
+            true,
+            SppModelRecipe::geometric_light_time_replay(),
+        )
+        .expect("solve converges");
         let x = [
             sol.position.x_m,
             sol.position.y_m,
@@ -1154,7 +1184,13 @@ fn independent_solve_level(level: &str) {
     let sp3 = sp3();
     let reference = NoRelativityTerm(&sp3);
 
-    let sol = solve(&reference, &solve_inputs(&inputs), true).expect("solve converges");
+    let sol = test_support::solve_with_model_for_test(
+        &reference,
+        &solve_inputs(&inputs),
+        true,
+        SppModelRecipe::geometric_light_time_replay(),
+    )
+    .expect("solve converges");
 
     // At the converged state, the model with the term differs from this one by the
     // term alone.
@@ -1168,8 +1204,9 @@ fn independent_solve_level(level: &str) {
             corrections: inputs.corrections,
             met: &inputs.met,
             glonass_channels: &glonass_channels,
-            model: SppModelRecipe::reference(),
+            model: SppModelRecipe::geometric_light_time_replay(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
         let rx = [sol.position.x_m, sol.position.y_m, sol.position.z_m];
         let b = sol.rx_clock_s * super::C_M_S;
@@ -1177,6 +1214,16 @@ fn independent_solve_level(level: &str) {
             if sol.used_sats.contains(&observation.satellite_id) {
                 assert_only_the_relativity_term_differs(
                     &sp3,
+                    &env,
+                    observation.satellite_id,
+                    rx,
+                    b,
+                    observation.pseudorange_m,
+                    &inputs.klobuchar,
+                    &format!("{level}.converged.{}", observation.satellite_id),
+                );
+                test_support::assert_only_the_transmit_epoch_differs(
+                    &reference,
                     &env,
                     observation.satellite_id,
                     rx,
@@ -1300,7 +1347,13 @@ fn dop_from_converged_geometry_agrees() {
         let doc = read_fixture(&fixture_name(level));
         let inputs = load_inputs(&doc, level);
         let sp3 = sp3();
-        let sol = solve(&NoRelativityTerm(&sp3), &solve_inputs(&inputs), false).expect("solve");
+        let sol = test_support::solve_with_model_for_test(
+            &NoRelativityTerm(&sp3),
+            &solve_inputs(&inputs),
+            false,
+            SppModelRecipe::geometric_light_time_replay(),
+        )
+        .expect("solve");
         let dop = sol.dop.expect("dop present");
         // With the term the solve lands elsewhere, so its DOP differs, but only through
         // the term: at one used satellite of this solution the two models differ by it.
@@ -1315,8 +1368,9 @@ fn dop_from_converged_geometry_agrees() {
                 corrections: inputs.corrections,
                 met: &inputs.met,
                 glonass_channels: &glonass_channels,
-                model: SppModelRecipe::reference(),
+                model: SppModelRecipe::geometric_light_time_replay(),
                 pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+                placement_pseudoranges_m: None,
             };
             let observation = inputs
                 .observations
@@ -1516,6 +1570,7 @@ fn galileo_ionosphere_uses_nequick_coefficients_and_gps_stays_klobuchar() {
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
     };
     let tr = doc["fixture"]["inputs"]["rx_truth_ecef_m"]
         .as_array()
@@ -1721,6 +1776,7 @@ fn synthetic_spp_case(directions: &[[f64; 3]]) -> (SyntheticEphemeris, SolveInpu
         glonass_channels: &std::collections::BTreeMap::new(),
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
     };
     let observations = eph
         .positions
@@ -2178,6 +2234,215 @@ fn policy_validation_applies_max_pdop() {
     }
 }
 
+/// RTKLIB `timeadd` on a `gtime_t` held as whole seconds and a fraction:
+/// `t.sec += sec; tt = floor(t.sec); t.time += tt; t.sec -= tt`.
+fn rtklib_timeadd(t: (i64, f64), sec: f64) -> (i64, f64) {
+    let fraction = t.1 + sec;
+    let whole = fraction.floor();
+    (t.0 + whole as i64, fraction - whole)
+}
+
+/// The transmission epoch of a real pseudorange is RTKLIB `satposs`'s, bit for bit:
+///
+/// ```c
+/// time[i] = timeadd(obs[i].time, -pr / CLIGHT);
+/// ephclk(time[i], teph, obs[i].sat, nav, &dt);      /* eph2clk */
+/// time[i] = timeadd(time[i], -dt);
+/// ```
+///
+/// with the record selected at `teph`, the reception epoch, and `eph2clk`
+/// `t = ts = timediff(time, toc)`, twice `t = ts - (f0 + f1 t + f2 t²)`,
+/// and `f0 + f1 t + f2 t²`. The ESBC C1C pseudoranges of 2020-06-25 00:00:00 GPST are
+/// placed on the ESBC broadcast records. The arithmetic is replayed on this crate's time
+/// line, seconds since J2000 held in one double, and the SPP model reads its state at
+/// that epoch.
+///
+/// RTKLIB holds the epoch as whole seconds and a fraction, which carries every bit of the
+/// fraction; a double near 6.5e8 s holds it to 2^-23 s (1.2e-7 s, half a millimetre of
+/// satellite motion). The same arithmetic on RTKLIB's `gtime_t` agrees within two such
+/// steps, and its clock within the clock drift over them.
+#[test]
+fn transmit_epoch_is_rtklib_satposs_arithmetic_on_a_real_pseudorange() {
+    let store = esbc_broadcast_store();
+    let (inputs, truth) = esbc_first_epoch_inputs([0.0; 4]);
+    let t_rx = inputs.t_rx_j2000_s;
+    assert_eq!(t_rx.fract(), 0.0, "the ESBC epoch is a whole second");
+    let epoch_step = 2.0_f64.powi(-23);
+    let zero_klobuchar = KlobucharCoeffs {
+        alpha: [0.0; 4],
+        beta: [0.0; 4],
+    };
+    let env = SatModelEnv {
+        eph: &store,
+        t_rx_j2000_s: t_rx,
+        t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
+        day_of_year: inputs.day_of_year,
+        corrections: inputs.corrections,
+        met: &inputs.met,
+        glonass_channels: &inputs.glonass_channels,
+        model: SppModelRecipe::reference(),
+        pseudorange_code: inputs.pseudorange_code,
+        placement_pseudoranges_m: None,
+    };
+    // The GPS week of the reception epoch, in whole J2000 seconds, as RTKLIB's `toc`
+    // is an absolute `gtime_t`.
+    let (_, rx_sow, _) =
+        crate::rinex_nav::query_native_time(inputs.observations[0].satellite_id, t_rx)
+            .expect("GPS time of week");
+    let week_start_j2000 = t_rx as i64 - rx_sow as i64;
+
+    let mut checked = 0usize;
+    for observation in &inputs.observations {
+        let sat = observation.satellite_id;
+        let pr = observation.pseudorange_m;
+
+        // time[i] = timeadd(obs[i].time, -pr / CLIGHT), on this crate's time line.
+        let t1 = t_rx + (-pr / C_M_S);
+        // seleph(teph, ...): the record is selected at the reception epoch.
+        let Some(record) = store.select_record_at(sat, t_rx) else {
+            continue;
+        };
+        let clock = record.clock;
+        assert_eq!(clock.toc_sow.fract(), 0.0, "{sat}: toc is a whole second");
+        // eph2clk: t = ts = timediff(time, toc), twice t = ts - (f0 + f1 t + f2 t²).
+        let (_, sow, _) = crate::rinex_nav::query_native_time(sat, t1).expect("time of week");
+        let ts = sow - clock.toc_sow;
+        assert!(ts.abs() < 302_400.0, "{sat}: toc in the same half week");
+        let mut t = ts;
+        for _ in 0..2 {
+            t = ts - (clock.af0 + clock.af1 * t + clock.af2 * t * t);
+        }
+        let dt = clock.af0 + clock.af1 * t + clock.af2 * t * t;
+        // time[i] = timeadd(time[i], -dt).
+        let t_tx = t1 + (-dt);
+
+        let placement_clock = store
+            .transmit_epoch_clock_s(sat, t1, t_rx)
+            .expect("broadcast clock at t_rx - P / c");
+        assert_eq!(placement_clock.to_bits(), dt.to_bits(), "{sat}: ephclk");
+        let placed = crate::observables::pseudorange_transmit_epoch_j2000_s(&store, sat, t_rx, pr)
+            .expect("placed transmission epoch");
+        assert_eq!(placed.to_bits(), t_tx.to_bits(), "{sat}: satposs epoch");
+        let model = test_support::sat_model_for_test(&env, sat, truth, 0.0, pr, &zero_klobuchar)
+            .expect("SPP model");
+        assert_eq!(
+            model.clock_epoch_j2000_s.to_bits(),
+            t_tx.to_bits(),
+            "{sat}: the SPP model reads its state at the satposs epoch"
+        );
+        let (position, clock_s, group_delay) =
+            super::EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
+                &store, sat, t_tx, t_rx,
+            )
+            .expect("no refusal")
+            .map(|state| state.value)
+            .expect("broadcast state at the transmission epoch");
+        assert_eq!(
+            model.sat_ecef_m.map(f64::to_bits),
+            position.map(f64::to_bits)
+        );
+        let d = [
+            position[0] - truth[0],
+            position[1] - truth[1],
+            position[2] - truth[2],
+        ];
+        let geodist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+            + super::OMEGA_E_DOT_RAD_S * (position[0] * truth[1] - position[1] * truth[0]) / C_M_S;
+        assert_eq!(model.rho_m.to_bits(), geodist.to_bits(), "{sat}: geodist");
+        let group_delay_s = group_delay.expect("GPS LNAV TGD");
+        assert_eq!(
+            model.dt_sat_s.to_bits(),
+            (clock_s - group_delay_s).to_bits(),
+            "{sat}: satpos clock at the transmission epoch, less TGD as prange takes it"
+        );
+
+        // The same arithmetic on RTKLIB's `gtime_t`.
+        let rtk_t1 = rtklib_timeadd((t_rx as i64, 0.0), -pr / C_M_S);
+        let toc = (week_start_j2000 + clock.toc_sow as i64, 0.0);
+        let rtk_ts = ((rtk_t1.0 - toc.0) as f64 + rtk_t1.1) - toc.1;
+        let mut rtk_t = rtk_ts;
+        for _ in 0..2 {
+            rtk_t = rtk_ts - (clock.af0 + clock.af1 * rtk_t + clock.af2 * rtk_t * rtk_t);
+        }
+        let rtk_dt = clock.af0 + clock.af1 * rtk_t + clock.af2 * rtk_t * rtk_t;
+        let rtk_tx = rtklib_timeadd(rtk_t1, -rtk_dt);
+        let rtk_tx_j2000 = rtk_tx.0 as f64 + rtk_tx.1;
+        assert!(
+            (t_tx - rtk_tx_j2000).abs() <= 2.0 * epoch_step,
+            "{sat}: {t_tx} against RTKLIB's {rtk_tx_j2000}"
+        );
+        assert!(
+            (dt - rtk_dt).abs()
+                <= clock.af1.abs() * 2.0 * epoch_step + 4.0 * dt.abs() * f64::EPSILON,
+            "{sat}: clock {dt} against RTKLIB's {rtk_dt}"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 4, "only {checked} ESBC satellites were placed");
+}
+
+/// On the ESBC epoch, whose receiver clock is about half a millisecond, the SPP model
+/// differs from the geometric light-time model only through the transmission epoch, at
+/// the converged state, and the difference is decimetres: the geometric light time
+/// leaves out the receiver clock and places each satellite `v · dtr` along its track.
+#[test]
+fn real_receiver_clock_moves_the_geometric_light_time_by_decimetres() {
+    let store = esbc_broadcast_store();
+    let (inputs, _) = esbc_first_epoch_inputs([3_582_135.0, 532_569.0, 5_232_779.0, 0.0]);
+    let solution = solve(&store, &inputs, false).expect("ESBC SPP");
+    let rx = solution.position.as_array();
+    let b = solution.rx_clock_s * C_M_S;
+    assert!(
+        solution.rx_clock_s.abs() > 1.0e-4,
+        "the ESBC receiver clock is {} s",
+        solution.rx_clock_s
+    );
+    let replay_env = SatModelEnv {
+        eph: &store,
+        t_rx_j2000_s: inputs.t_rx_j2000_s,
+        t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
+        day_of_year: inputs.day_of_year,
+        corrections: inputs.corrections,
+        met: &inputs.met,
+        glonass_channels: &inputs.glonass_channels,
+        model: SppModelRecipe::geometric_light_time_replay(),
+        pseudorange_code: inputs.pseudorange_code,
+        placement_pseudoranges_m: None,
+    };
+    let rtklib_env = SatModelEnv {
+        model: SppModelRecipe::reference(),
+        ..replay_env
+    };
+    let klobuchar = inputs.klobuchar;
+    let mut largest_m = 0.0_f64;
+    for observation in &inputs.observations {
+        let sat = observation.satellite_id;
+        if !solution.used_sats.contains(&sat) {
+            continue;
+        }
+        let pr = observation.pseudorange_m;
+        test_support::assert_only_the_transmit_epoch_differs(
+            &store,
+            &replay_env,
+            sat,
+            rx,
+            b,
+            pr,
+            &klobuchar,
+            &format!("ESBC.{sat}"),
+        );
+        let geometric = test_support::sat_model_for_test(&replay_env, sat, rx, b, pr, &klobuchar)
+            .expect("geometric model");
+        let rtklib = test_support::sat_model_for_test(&rtklib_env, sat, rx, b, pr, &klobuchar)
+            .expect("RTKLIB model");
+        largest_m = largest_m.max((rtklib.rho_m - geometric.rho_m).abs());
+    }
+    assert!(
+        largest_m > 0.05,
+        "the receiver clock moved no range by more than {largest_m} m"
+    );
+}
+
 #[test]
 fn policy_coarse_search_recovers_esbc_cold_start() {
     let store = esbc_broadcast_store();
@@ -2188,14 +2453,11 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     };
 
     let sol = solve_with_policy(&store, &inputs, true, policy).expect("coarse search solves");
-    // Re-frozen when the broadcast orbit took RTKLIB `eph2pos`'s Newton Kepler solver
-    // to 1e-13 and its inclination order, and the broadcast clock `eph2pos`'s
-    // unrefined polynomial and relativistic term (the G30 clock of the SSR oracle
-    // moved by 2.8e-15 s). The solution moved by up to 2.3e-6 m and the clock by
-    // 3.4e-15 s.
-    // Before that, re-frozen when the broadcast store began evaluating records at
-    // seconds of week that keep every bit of the query epoch. The whole array is
-    // printed on a mismatch.
+    // Re-frozen when the transmission epoch moved to RTKLIB `satposs` placement,
+    // t_rx - P / c - dts: the ESBC receiver clock is 0.48 ms, which the geometric light
+    // time from the time tag had left out, so every satellite moved by its range rate over
+    // that time. The solution moved by about 0.33 m and the clock by about 7e-10 s; the
+    // whole array is printed on a mismatch.
     let sol_bits = [
         sol.position.x_m.to_bits(),
         sol.position.y_m.to_bits(),
@@ -2205,10 +2467,10 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     assert_eq!(
         sol_bits,
         [
-            0x414b544d32219d85,
-            0x412040dc18317a03,
-            0x4153f61dfc641432,
-            0x3f3f84f50535a2c1
+            0x414b544d26d7d5ba,
+            0x412040dbb3aa3cc0,
+            0x4153f61df1646959,
+            0x3f3f84f2c4f7952f
         ],
         "x, y, z, clock bits: {:#x?}",
         sol_bits
@@ -2337,14 +2599,11 @@ fn owned_deterministic_solver_frozen_bits() {
     // Owned deterministic kernel: its own frozen-bits golden.
     let owned = solve_with_solver(&store, &inputs, true, SolverRecipe::OwnedDeterministicTrf)
         .expect("owned deterministic solve");
-    // Re-frozen when the broadcast orbit took RTKLIB `eph2pos`'s Newton Kepler solver
-    // to 1e-13 and its inclination order, and the broadcast clock `eph2pos`'s
-    // unrefined polynomial and relativistic term (the G30 clock of the SSR oracle
-    // moved by 2.8e-15 s). The solution moved by up to 1.2e-6 m and the clock by
-    // 7.2e-16 s.
-    // Before that, re-frozen when the broadcast store began evaluating records at
-    // seconds of week that keep every bit of the query epoch. The whole array is
-    // printed on a mismatch.
+    // Re-frozen when the transmission epoch moved to RTKLIB `satposs` placement,
+    // t_rx - P / c - dts: the ESBC receiver clock is 0.48 ms, which the geometric light
+    // time from the time tag had left out, so every satellite moved by its range rate over
+    // that time. The solution moved by about 0.33 m and the clock by about 7e-10 s; the
+    // whole array is printed on a mismatch.
     let owned_bits = [
         owned.position.x_m.to_bits(),
         owned.position.y_m.to_bits(),
@@ -2354,10 +2613,10 @@ fn owned_deterministic_solver_frozen_bits() {
     assert_eq!(
         owned_bits,
         [
-            0x414b544cd339da08,
-            0x412040dc0308c09b,
-            0x4153f61de1d7b9af,
-            0x3f3f84ebef61bf0a
+            0x414b544cc998eeea,
+            0x412040dba20b1951,
+            0x4153f61dd16a414b,
+            0x3f3f84e902ba2aa0
         ],
         "x, y, z, clock bits: {:#x?}",
         owned_bits
@@ -2552,6 +2811,7 @@ fn covariance_at_solution(
         glonass_channels: &inputs.glonass_channels,
         model,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
     };
     let mut los = Vec::with_capacity(solution.used_sats.len());
     let mut clock_index = Vec::with_capacity(solution.used_sats.len());
@@ -2739,13 +2999,22 @@ fn robust_max_outer_counts_total_solves_and_preserves_early_convergence() {
     assert_solution_bits_eq(&two, &five);
 }
 
-/// Bounded-tolerance band for canonical SPP vs the Skyfield-faithful reference
+/// Bounded-tolerance band for canonical SPP vs the RTKLIB-conformant reference
 /// SPP on a shared case. Canonical and reference implement the same physics and
-/// differ only in op-order: canonical iterates the light-time loop to convergence
-/// (vs the reference's fixed two-iteration truncation) and uses a meters-native
-/// WGS84 geodetic basis (vs the Skyfield AU-scaled three-iteration solve). Both
-/// refinements perturb only the atmospheric-correction az/el geometry, whose
-/// geodetic basis agrees to ~13 microarcseconds (~0.4 mm on the ground; see
+/// differ only in op-order. Canonical iterates the geometric light time to
+/// convergence from the reception epoch less the receiver clock, with the
+/// closed-form Sagnac rotation, where the reference places the transmission epoch
+/// from the pseudorange as RTKLIB `satposs` does and ranges it with `geodist`'s
+/// first-order Sagnac term. The pseudorange carries the range, the receiver and
+/// satellite clocks and the media delays; the receiver clock is the state's and the
+/// satellite clock the placement's, so the two epochs differ by the media delays over
+/// c: the broadcast ionosphere and the troposphere, together a few tens of metres at
+/// most on this epoch, about 0.1 µs, which move a satellite's range by its range rate
+/// times that, about 0.1 mm. The two Sagnac forms differ by under 0.1 mm.
+/// Canonical also uses a meters-native WGS84 geodetic basis (vs the Skyfield
+/// AU-scaled three-iteration solve), which perturbs only the atmospheric-correction
+/// az/el geometry, whose geodetic basis agrees to ~13 microarcseconds (~0.4 mm on
+/// the ground; see
 /// `frames::tests::canonical_and_skyfield_geodetic_agree_to_sub_milliarcsecond`),
 /// so the converged position can only cluster well inside a millimetre. The band
 /// is held at 1 mm; a divergence beyond it is a canonical bug to root-cause, not
@@ -2801,8 +3070,8 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     };
 
     let canonical = run_canonical();
-    // Reference SPP (Skyfield-faithful) for the bounded-tolerance comparison;
-    // this is the unchanged reference path, proving canonical is additive.
+    // Reference SPP (RTKLIB-conformant) for the bounded-tolerance comparison;
+    // this is the reference path, proving canonical is additive.
     let reference = solve_with_policy(&store, &inputs, true, policy).expect("reference SPP");
 
     // The bounded-tolerance bar only compares like with like: canonical and the
@@ -2833,14 +3102,11 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     );
 
     // BAR 1: frozen-bits determinism golden (this build's reproducible output).
-    // Re-frozen when the broadcast orbit took RTKLIB `eph2pos`'s Newton Kepler solver
-    // to 1e-13 and its inclination order, and the broadcast clock `eph2pos`'s
-    // unrefined polynomial and relativistic term (the G30 clock of the SSR oracle
-    // moved by 2.8e-15 s). The solution moved by up to 1.3e-6 m and the clock by
-    // 1.1e-15 s.
-    // Before that, re-frozen when the broadcast store began evaluating records at
-    // seconds of week that keep every bit of the query epoch. The whole array is
-    // printed on a mismatch.
+    // Re-frozen when the transmission epoch moved to RTKLIB `satposs` placement,
+    // t_rx - P / c - dts: the ESBC receiver clock is 0.48 ms, which the geometric light
+    // time from the time tag had left out, so every satellite moved by its range rate over
+    // that time. The solution moved by about 0.33 m and the clock by about 7e-10 s; the
+    // whole array is printed on a mismatch.
     let canonical_bits = [
         canonical.position.x_m.to_bits(),
         canonical.position.y_m.to_bits(),
@@ -2850,10 +3116,10 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     assert_eq!(
         canonical_bits,
         [
-            0x414b544cd339da94,
-            0x412040dc0308c39f,
-            0x4153f61de1d7b9a8,
-            0x3f3f84ebef61c768
+            0x414b544cc99b6f8a,
+            0x412040dba208b690,
+            0x4153f61dd16a80bc,
+            0x3f3f84e902c5c1b3
         ],
         "x, y, z, clock bits: {:#x?}",
         canonical_bits
@@ -3030,6 +3296,7 @@ fn iono_term_m(
         glonass_channels,
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
     };
     test_support::sat_model_with_ionosphere_for_test(
         &env,
@@ -3473,6 +3740,7 @@ fn spp_declines_a_satellite_whose_relativity_term_is_unavailable() {
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
         let rx = [inputs.x0[0], inputs.x0[1], inputs.x0[2]];
         test_support::sat_model_for_test(&env, sat, rx, inputs.x0[3], p_meas, &inputs.klobuchar)

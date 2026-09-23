@@ -1,10 +1,14 @@
+#![cfg(sidereon_repo_tests)]
+
 use std::collections::BTreeMap;
 
 use sidereon_core::ephemeris::Sp3;
 use sidereon_core::positioning::{
     Corrections, EphemerisSource, KlobucharCoeffs, Observation, SolveInputs, SurfaceMet,
 };
-use sidereon_core::static_positioning::{solve_static, StaticEpoch, StaticSolveOptions};
+use sidereon_core::static_positioning::{
+    solve_static, solve_static_geometric_light_time_replay, StaticEpoch, StaticSolveOptions,
+};
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 
 fn fixture_sp3() -> Sp3 {
@@ -79,7 +83,9 @@ impl EphemerisSource for NoRelativityTerm<'_> {
 }
 
 /// The SP3 source with the `peph2pos` term folded into its clock, and no term method:
-/// a source whose clock already carries the term.
+/// a source whose clock already carries the term. The clock that places the
+/// transmission epoch stays the product's, without the term, as RTKLIB `satposs` places
+/// it with `ephclk`, which applies no `peph2pos` term.
 struct ClockWithTerm<'a>(&'a Sp3);
 
 impl EphemerisSource for ClockWithTerm<'_> {
@@ -91,6 +97,15 @@ impl EphemerisSource for ClockWithTerm<'_> {
         let (position, clock) = EphemerisSource::position_clock_at_j2000_s(self.0, sat, t_j2000_s)?;
         let term = EphemerisSource::clock_relativity_s(self.0, sat, t_j2000_s).term()?;
         Some((position, clock + term))
+    }
+
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<sidereon_core::astro::time::Validated<f64>>, sidereon_core::Error> {
+        EphemerisSource::try_transmit_epoch_clock_s(self.0, sat, t_j2000_s, selection_j2000_s)
     }
 }
 
@@ -145,6 +160,12 @@ fn go_fixture_static_term_through_the_source_equals_the_folded_clock() {
     );
 }
 
+/// The Go fixture's pseudoranges come from a geometric light-time model, which iterates
+/// the transmission epoch from the receiver's time tag and leaves out the receiver clock
+/// (about 0.1 ms here). The frozen bits are that model's, replayed through
+/// [`solve_static_geometric_light_time_replay`]; the static solve places each epoch from
+/// the pseudorange as RTKLIB `satposs` does, and the in-crate static tests check that the
+/// two differ through the transmission epoch alone.
 #[test]
 fn go_fixture_static_portable_bits() {
     let sp3 = fixture_sp3();
@@ -152,8 +173,12 @@ fn go_fixture_static_portable_bits() {
     let inputs = go_fixture_inputs();
     let first = StaticEpoch::from_solve_inputs(inputs.clone());
     let second = StaticEpoch::from_solve_inputs(inputs.clone());
-    let static_result = solve_static(&source, &[first, second], StaticSolveOptions::default())
-        .expect("static solve");
+    let static_result = solve_static_geometric_light_time_replay(
+        &source,
+        &[first, second],
+        StaticSolveOptions::default(),
+    )
+    .expect("static solve");
 
     // With the term the same pseudoranges solve elsewhere: every satellite has a nonzero
     // term, and the solution moves by metres, not by rounding.
@@ -168,7 +193,7 @@ fn go_fixture_static_portable_bits() {
             observation.satellite_id
         );
     }
-    let with_term = solve_static(
+    let with_term = solve_static_geometric_light_time_replay(
         &sp3,
         &[
             StaticEpoch::from_solve_inputs(inputs.clone()),

@@ -7,7 +7,9 @@ use sidereon_core::astro::time::split_julian_date;
 use sidereon_core::carrier_phase::CycleSlipOptions;
 use sidereon_core::constants::{C_M_S, F_L1_HZ, F_L2_HZ};
 use sidereon_core::ephemeris::Sp3;
-use sidereon_core::observables::j2000_seconds_from_split;
+use sidereon_core::observables::{
+    j2000_seconds_from_split, pseudorange_transmit_epoch_j2000_s, ObservableEphemerisSource,
+};
 use sidereon_core::rinex::observations::{
     band_frequency_hz, carrier_phase_rows, observation_values, ObsEpoch, ObsEpochTime,
     ObservationFilter, ObservationValueRow, RinexObs,
@@ -160,19 +162,22 @@ fn position_at(sp3: &Sp3, sat: &str, epoch: ObsEpochTime) -> Option<[f64; 3]> {
     Some(state.position.as_array())
 }
 
+/// The satellite position at the transmission epoch of one receiver's pseudorange,
+/// placed as RTKLIB `satposs` places it: `t_rx - P / c` less the satellite clock read
+/// there, with the product selected at the reception epoch.
 fn transmit_position_at(
     sp3: &Sp3,
     sat: &str,
     receive_epoch: ObsEpochTime,
     code_m: f64,
-    c_m_s: f64,
 ) -> Option<[f64; 3]> {
-    let transmit_offset_us = (code_m / c_m_s * 1_000_000.0).round();
-    let t_tx = j2000_seconds(receive_epoch) - transmit_offset_us / 1_000_000.0;
+    let sat = satellite_id(sat)?;
+    let t_rx = j2000_seconds(receive_epoch);
+    let t_tx = pseudorange_transmit_epoch_j2000_s(sp3, sat, t_rx, code_m).ok()?;
     let state = sp3
-        .position_at_j2000_seconds(satellite_id(sat)?, t_tx)
+        .try_observable_state_group_delay_selected_at_j2000_s(sat, t_tx, t_rx)
         .ok()?;
-    Some(state.position.as_array())
+    Some(state.value.0.position_ecef_m)
 }
 
 fn l1_filter() -> ObservationFilter {
@@ -370,8 +375,6 @@ fn real_gps_l1_epochs(
     rover_obs: &RinexObs,
     count: usize,
 ) -> Vec<RawEpoch> {
-    let (frequency_hz, wavelength_m) = gps_l1_constants(base_obs);
-    let c_m_s = frequency_hz * wavelength_m;
     let rover_by_epoch: BTreeMap<_, _> = rover_obs
         .epochs()
         .iter()
@@ -403,12 +406,12 @@ fn real_gps_l1_epochs(
                 continue;
             };
             let Some(base_tx) =
-                transmit_position_at(sp3, &sat, base_time, base_values[&sat].code_m, c_m_s)
+                transmit_position_at(sp3, &sat, base_time, base_values[&sat].code_m)
             else {
                 continue;
             };
             let Some(rover_tx) =
-                transmit_position_at(sp3, &sat, base_time, rover_values[&sat].code_m, c_m_s)
+                transmit_position_at(sp3, &sat, base_time, rover_values[&sat].code_m)
             else {
                 continue;
             };
@@ -477,12 +480,12 @@ fn real_multignss_l1_epochs(
                 continue;
             };
             let Some(base_tx) =
-                transmit_position_at(sp3, &sat, base_time, base_values[&sat].code_m, C_M_S)
+                transmit_position_at(sp3, &sat, base_time, base_values[&sat].code_m)
             else {
                 continue;
             };
             let Some(rover_tx) =
-                transmit_position_at(sp3, &sat, base_time, rover_values[&sat].code_m, C_M_S)
+                transmit_position_at(sp3, &sat, base_time, rover_values[&sat].code_m)
             else {
                 continue;
             };
@@ -549,13 +552,12 @@ fn real_gps_l1_l2_epochs(
             let Some(position) = position_at(sp3, &sat, base_time) else {
                 continue;
             };
-            let Some(base_tx) =
-                transmit_position_at(sp3, &sat, base_time, base_values[&sat].p1_m, C_M_S)
+            let Some(base_tx) = transmit_position_at(sp3, &sat, base_time, base_values[&sat].p1_m)
             else {
                 continue;
             };
             let Some(rover_tx) =
-                transmit_position_at(sp3, &sat, base_time, rover_values[&sat].p1_m, C_M_S)
+                transmit_position_at(sp3, &sat, base_time, rover_values[&sat].p1_m)
             else {
                 continue;
             };
@@ -691,10 +693,12 @@ fn apply_mask(
     epochs: &[RawEpoch],
     mask_deg: f64,
 ) -> (Vec<RawEpoch>, Vec<String>) {
+    // The elevation at the base of each satellite placed from the base's own
+    // pseudorange, as RTKLIB `selsat` masks.
     let mask_epochs = epochs
         .iter()
         .map(|epoch| ElevationMaskEpoch {
-            satellite_positions_m: epoch.satellite_positions_m.clone(),
+            satellite_positions_m: epoch.base_satellite_positions_m.clone(),
         })
         .collect::<Vec<_>>();
     let mask = apply_elevation_mask(base_m, &mask_epochs, mask_deg)
@@ -1820,9 +1824,15 @@ fn canonical_rtk_is_deterministic_bounded_and_truthful() {
     );
 
     // BAR 1: frozen-bits determinism golden (portable: owned scalar + IEEE sqrt).
-    assert_eq!(canonical.baseline_m[0].to_bits(), 0xbfef8e410f560ebf);
-    assert_eq!(canonical.baseline_m[1].to_bits(), 0xbfe5295e5773b5a6);
-    assert_eq!(canonical.baseline_m[2].to_bits(), 0x3ff117cc1607e2d1);
+    // Re-frozen when the arcs moved to RTKLIB `satposs` placement of each receiver's transmission epochs
+    // (t_rx - P / c - dts, no whole-microsecond rounding). One array is compared, so a
+    // mismatch prints every component.
+    let canonical_bits = canonical.baseline_m.map(f64::to_bits);
+    assert_eq!(
+        canonical_bits,
+        [0xbfef8dc30b1a10ba, 0xbfe5299b164528a1, 0x3ff117adb617dadd],
+        "baseline bits: {canonical_bits:#x?}"
+    );
 
     // Determinism: a second canonical solve is bit-identical.
     let again = run_canonical();
@@ -2024,16 +2034,45 @@ fn wettzell_kinematic_rtk_filter_tracks_rtklib_truth_class() {
     assert!(fixed_errors.iter().copied().fold(0.0, f64::max) < 0.02);
     assert!(mean_fixed_error_m < 0.01);
 
-    assert_eq!(kinematic_fixed, 120);
+    // The epochs whose fix status differs from RTKLIB's, with this filter's and RTKLIB's
+    // ratio, printed with the fix count.
+    let status_differences = kinematic_updates
+        .iter()
+        .zip(oracle["per_epoch"].as_array().expect("oracle epochs"))
+        .enumerate()
+        .filter(|(_, (update, oracle_epoch))| {
+            update.integer_fixed != (oracle_epoch["fix_status"] == "fixed")
+        })
+        .map(|(index, (update, oracle_epoch))| {
+            (
+                index,
+                update.integer_fixed,
+                update.integer_ratio,
+                oracle_epoch["ratio"].as_f64(),
+            )
+        })
+        .collect::<Vec<_>>();
+    eprintln!(
+        "wettzell kinematic: {kinematic_fixed} fixed epochs, RTKLIB {oracle_fixed_epochs}; \
+         differing epochs (index, fixed here, ratio here, RTKLIB ratio): \
+         {status_differences:?}"
+    );
+    // Re-frozen when the arcs moved to RTKLIB `satposs` placement of each receiver's
+    // transmission epochs (t_rx - P / c - dts, no whole-microsecond rounding).
+    assert_eq!(
+        kinematic_fixed, 118,
+        "fixed epochs; RTKLIB fixes {oracle_fixed_epochs}; differing epochs \
+         (index, fixed here, ratio here, RTKLIB ratio): {status_differences:?}"
+    );
     assert_eq!(
         kinematic_baseline_m.map(f64::to_bits),
         [
-            // Re-frozen after enforcing the information time update's exact
-            // symmetry. The truth-class quality assertions above remain the
-            // primary gate for this process-noise-enabled solve.
-            0xbfef_7247_4ebe_0a94,
-            0xbfe4_e9cf_5f7f_631e,
-            0x3ff1_1093_a805_debb,
+            // Re-frozen when the arcs moved to RTKLIB `satposs` placement of each
+            // receiver's transmission epochs. The truth-class quality assertions
+            // above remain the primary gate for this process-noise-enabled solve.
+            0xbfef_72c7_7827_ff83,
+            0xbfe4_e7c2_c28a_6a03,
+            0x3ff1_11aa_f42f_3847,
         ]
     );
 
@@ -2114,15 +2153,17 @@ fn pasa_scoa_receiver_antenna_corrections_are_core_validated() {
 
     assert_eq!(updates.len(), epoch_count);
     let final_baseline_m = updates.last().unwrap().reported_baseline_m;
+    assert!(distance(final_baseline_m, truth_baseline_m) < 1.0);
+    // Re-frozen when the arcs moved to RTKLIB `satposs` placement of each receiver's transmission epochs
+    // (t_rx - P / c - dts, no whole-microsecond rounding).
     assert_eq!(
         final_baseline_m.map(f64::to_bits),
         [
-            0x40b3_681d_8ac5_f81c,
-            0xc0d3_f0dd_6cff_7696,
-            0xc0b7_2944_95dc_3b51,
+            0x40b3_681d_945c_3b75,
+            0xc0d3_f0dd_73c2_7a54,
+            0xc0b7_2944_96a2_0bb4,
         ]
     );
-    assert!(distance(final_baseline_m, truth_baseline_m) < 1.0);
 }
 
 #[test]
@@ -2175,9 +2216,9 @@ fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
             .reported_baseline_m
             .map(f64::to_bits),
         [
-            0x40b3_6899_e001_df77,
-            0xc0d3_f108_03a6_31e6,
-            0xc0b7_294b_cad3_6563,
+            0x40b3_689a_0dbc_d198,
+            0xc0d3_f107_fc06_fb93,
+            0xc0b7_294b_bcdf_d59f,
         ]
     );
 
@@ -2195,24 +2236,10 @@ fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
         },
     );
     assert_eq!(armed_updates.len(), epoch_count);
-    assert_eq!(
-        armed_updates
-            .last()
-            .unwrap()
-            .reported_baseline_m
-            .map(f64::to_bits),
-        [
-            0x40b3_6899_e002_143a,
-            0xc0d3_f108_03a6_8ca7,
-            0xc0b7_294b_cad2_f536,
-        ]
-    );
-
     let fixed_count = armed_updates
         .iter()
         .filter(|update| update.integer_fixed)
         .count();
-    assert_eq!(fixed_count, 206);
     assert!(fixed_count >= 20);
 
     let mut fixed_errors = armed_updates
@@ -2222,6 +2249,22 @@ fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
         .collect::<Vec<_>>();
     let fixed_median_m = median(&mut fixed_errors);
     assert!(fixed_median_m <= 2.0 * oracle["reference"]["mean_truth_error_m"].as_f64().unwrap());
+
+    // The truth-class checks above run before the frozen bits, so a pin change never
+    // hides them.
+    assert_eq!(fixed_count, 206);
+    assert_eq!(
+        armed_updates
+            .last()
+            .unwrap()
+            .reported_baseline_m
+            .map(f64::to_bits),
+        [
+            0x40b3_689a_0dbc_d9a4,
+            0xc0d3_f107_fc07_59a6,
+            0xc0b7_294b_bcdf_63d6,
+        ]
+    );
 }
 
 #[test]
@@ -2280,14 +2323,6 @@ fn multignss_static_rtk_filter_reproduces_track_b_truth_gate() {
     assert_eq!(fixed_count, oracle_fixed_epochs);
 
     let final_baseline_m = updates.last().unwrap().reported_baseline_m;
-    assert_eq!(
-        final_baseline_m.map(f64::to_bits),
-        [
-            0xbfef_90a0_d506_c17f,
-            0xbfe4_e420_4fc6_6ae5,
-            0x3ff1_1582_e7f6_a88f,
-        ]
-    );
     assert!(distance(final_baseline_m, antenna_baseline_m) < 0.01);
 
     let mut fixed_errors = updates
@@ -2298,6 +2333,17 @@ fn multignss_static_rtk_filter_reproduces_track_b_truth_gate() {
     assert!(fixed_errors.len() >= 20);
     let fixed_median_m = median(&mut fixed_errors);
     assert!(fixed_median_m <= 2.0 * oracle["reference"]["mean_truth_error_m"].as_f64().unwrap());
+    // Re-frozen when the arcs moved to RTKLIB `satposs` placement of each receiver's transmission epochs
+    // (t_rx - P / c - dts, no whole-microsecond rounding). It follows the truth-class
+    // checks, so a pin change never hides them.
+    assert_eq!(
+        final_baseline_m.map(f64::to_bits),
+        [
+            0xbfef_90d2_19cf_f47d,
+            0xbfe4_e43b_efb3_5c9e,
+            0x3ff1_1580_6599_5c19,
+        ]
+    );
 
     let oracle_sat_counts = oracle["per_epoch"]
         .as_array()

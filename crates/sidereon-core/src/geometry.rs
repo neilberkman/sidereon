@@ -999,13 +999,57 @@ mod tests {
             },
         )
         .expect("weighted DOP");
-
         assert_eq!(got.satellites, satellites);
-        assert_eq!(got.dop.gdop.to_bits(), hexf(&dop_case["gdop"]).to_bits());
-        assert_eq!(got.dop.pdop.to_bits(), hexf(&dop_case["pdop"]).to_bits());
-        assert_eq!(got.dop.hdop.to_bits(), hexf(&dop_case["hdop"]).to_bits());
-        assert_eq!(got.dop.vdop.to_bits(), hexf(&dop_case["vdop"]).to_bits());
-        assert_eq!(got.dop.tdop.to_bits(), hexf(&dop_case["tdop"]).to_bits());
+
+        // The oracle rounded each transmission epoch to whole microseconds; the replay of
+        // `dop_at_epoch` below does too and reproduces its bits. The public prediction
+        // keeps every bit of the flight time, which moves each line of sight by under a
+        // nanoradian and the DOP by far less than a part in 1e9.
+        let mut line_of_sight = Vec::new();
+        let mut weights = Vec::new();
+        for &satellite in &satellites {
+            let obs = crate::observables::rounded_microsecond_replay::predict(
+                &sp3,
+                satellite,
+                rx,
+                t,
+                PredictOptions {
+                    carrier_hz: F_L1_HZ,
+                    light_time: true,
+                    sagnac: true,
+                },
+            )
+            .expect("rounded prediction");
+            line_of_sight.push(LineOfSight::new(
+                obs.los_unit[0],
+                obs.los_unit[1],
+                obs.los_unit[2],
+            ));
+            weights.push(weight_for(DopWeighting::Elevation, obs.elevation_deg));
+        }
+        let replay = dop(
+            &line_of_sight,
+            &weights,
+            receiver_geodetic(rx).expect("receiver geodetic"),
+        )
+        .expect("replayed weighted DOP");
+        assert_eq!(replay.gdop.to_bits(), hexf(&dop_case["gdop"]).to_bits());
+        assert_eq!(replay.pdop.to_bits(), hexf(&dop_case["pdop"]).to_bits());
+        assert_eq!(replay.hdop.to_bits(), hexf(&dop_case["hdop"]).to_bits());
+        assert_eq!(replay.vdop.to_bits(), hexf(&dop_case["vdop"]).to_bits());
+        assert_eq!(replay.tdop.to_bits(), hexf(&dop_case["tdop"]).to_bits());
+        for (label, exact, rounded) in [
+            ("gdop", got.dop.gdop, replay.gdop),
+            ("pdop", got.dop.pdop, replay.pdop),
+            ("hdop", got.dop.hdop, replay.hdop),
+            ("vdop", got.dop.vdop, replay.vdop),
+            ("tdop", got.dop.tdop, replay.tdop),
+        ] {
+            assert!(
+                (exact - rounded).abs() <= 1.0e-9 * rounded,
+                "{label}: {exact} against the rounded replay's {rounded}"
+            );
+        }
     }
 
     #[test]

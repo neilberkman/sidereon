@@ -18,8 +18,8 @@ use crate::observables::ObservableEphemerisSource;
 
 use super::normal::{ppp_position_covariance, solve_normal_equations, PppNormalLayout};
 use super::rows::{
-    build_rows, drop_empty_epochs, exclude_unresolved_ssr_bias_observations, residual_rows,
-    AmbiguityBinding, PppRowError,
+    build_rows, drop_empty_epochs, exclude_unresolved_ssr_bias_observations_with_clock,
+    leave_out_unplaced_observations, residual_rows, AmbiguityBinding, PppRowError,
 };
 use super::temporal::{estimate_temporal_correlation, temporal_position_covariance};
 use super::{
@@ -28,8 +28,8 @@ use super::{
     validate_float_solution_output, validate_float_solve_boundary,
     validate_ssr_bias_exclusion_retained, weighted_rms, ztd_unknown_count, FloatEpoch,
     FloatSolution, FloatSolveConfig, FloatSolveError, FloatSolveOptions, FloatState, FloatStatus,
-    MeasurementWeights, ModelContext, RangeCorrections, SsrBiasExclusion, SsrBiasExclusionStage,
-    TroposphereOptions,
+    MeasurementWeights, ModelContext, RangeCorrections, SsrBiasExclusion, TroposphereOptions,
+    UnplacedObservation,
 };
 
 const RESIDUAL_SCREEN_THRESHOLD: f64 = 4.0;
@@ -107,11 +107,10 @@ pub fn solve_float_epoch(
         elevation_cutoff_deg: config.elevation_cutoff_deg,
     };
     let opts = config.opts;
-    let mut solution = solve_to_ssr_fixed_point(
+    let mut solution = solve_excluding_unresolved_ssr_biases(
         &arc,
         &epochs,
         initial_state,
-        FixedPointStart::default(),
         |ctx, solve_epochs, state| {
             let ambiguity_ids = solve_epochs[0]
                 .observations
@@ -152,15 +151,10 @@ fn solve_float_multi_screened(
         estimate_residual_ionosphere,
         elevation_cutoff_deg,
     };
-    let mut solution = solve_to_ssr_fixed_point(
-        &arc,
-        epochs,
-        state,
-        FixedPointStart::default(),
-        |ctx, solve_epochs, state| {
+    let mut solution =
+        solve_excluding_unresolved_ssr_biases(&arc, epochs, state, |ctx, solve_epochs, state| {
             screened_float_solution(ctx, solve_epochs, state, opts, residual_screen)
-        },
-    )?;
+        })?;
     solution.residual_screen = residual_screen;
     solution.solve_options = opts;
     Ok(solution)
@@ -177,19 +171,24 @@ pub(super) struct ArcSettings<'a> {
     pub(super) elevation_cutoff_deg: Option<f64>,
 }
 
-/// The epochs one solve pass solves: the input epochs without the observations left out
+/// The epochs a solve solves: the input epochs without the observations left out
 /// so far, and the input index of each.
 pub(super) struct PreparedArc {
     pub(super) epochs: Vec<FloatEpoch>,
     pub(super) correction_epoch_indices: Vec<usize>,
     pub(super) state: FloatState,
+    /// Observations left out because no transmission epoch can be placed from them.
+    pub(super) unplaced: Vec<UnplacedObservation>,
 }
 
-/// Prepare one solve pass over the input `epochs`, in the order the solve refuses them:
-/// the observations in `excluded` and every observation whose required SSR/HAS bias does
-/// not hold at `state`'s position are left out first, labelled `pass`, and the arc checked
-/// for sufficiency after that step; then the elevation cutoff, with its own check; then
-/// the epochs left with no observations are dropped, with their receiver clocks.
+/// Prepare the solve of the input `epochs`, in the order the solve refuses them: every
+/// observation whose code places no transmission epoch
+/// ([`super::rows::leave_out_unplaced_observations`]), the observations in `excluded`, and
+/// every observation whose required SSR/HAS bias is absent or does not hold at its
+/// transmission time are left out first, and the arc
+/// checked for sufficiency after that step; then the elevation cutoff, with its own
+/// check; then the epochs left with no observations are dropped, with their receiver
+/// clocks.
 ///
 /// SSR exclusion runs before the cutoff so that a satellite the source cannot place, and
 /// whose biases therefore do not resolve, is left out instead of failing the cutoff's
@@ -199,22 +198,18 @@ pub(super) fn prepare_arc(
     epochs: &[FloatEpoch],
     left_out: &LeftOut<'_>,
     state: &FloatState,
-    pass: usize,
 ) -> Result<(PreparedArc, Vec<SsrBiasExclusion>), FloatSolveError> {
+    let (placeable, unplaced) = leave_out_unplaced_observations(epochs, 0);
     let remaining = without_keys(
-        &without_exclusions(epochs, left_out.excluded),
+        &without_exclusions(&placeable, left_out.excluded),
         left_out.screened,
     );
-    // Observations admitted again after an exclusion are judged only at convergence, so
-    // the check from the starting state leaves them in.
-    let (_, new_exclusions) = exclude_unresolved_ssr_bias_observations(
+    let (_, new_exclusions) = exclude_unresolved_ssr_bias_observations_with_clock(
         arc.source,
-        &without_keys(&remaining, left_out.deferred),
+        &remaining,
         0,
-        state.position_m,
         &arc.corrections.ppp,
-        pass,
-        SsrBiasExclusionStage::BeforeSolve,
+        arc.corrections.satellite_clock.as_ref(),
     )?;
     let new_keys = new_exclusions
         .iter()
@@ -223,6 +218,8 @@ pub(super) fn prepare_arc(
     let bias_filtered = without_keys(&remaining, &new_keys);
     let excluded = left_out.excluded;
     let seed_ambiguities = left_out.seed_ambiguities;
+    // An arc short of observations after the SSR exclusion is refused naming it; one short
+    // for the unplaced observations alone meets the solve's own sufficiency checks.
     let excluded_count = excluded.len() + new_exclusions.len();
     if excluded_count > 0 {
         validate_ssr_bias_exclusion_retained(
@@ -240,6 +237,7 @@ pub(super) fn prepare_arc(
             cutoff_deg,
             arc.tropo,
             arc.estimate_residual_ionosphere,
+            arc.corrections.satellite_clock.as_ref(),
         )?,
         None => bias_filtered,
     };
@@ -252,10 +250,8 @@ pub(super) fn prepare_arc(
     }
     let mut solved_state = state.clone();
     solved_state.clocks_m = indices.iter().map(|&index| state.clocks_m[index]).collect();
-    // An ambiguity the state lacks, such as one whose only observations were excluded on
-    // the pass the state comes from and are now admitted again, starts from the caller's
-    // seed, or from phase minus code of its first observation as `initial_ambiguities`
-    // seeds it.
+    // An ambiguity the state lacks starts from the caller's seed, or from phase minus code
+    // of its first observation as `initial_ambiguities` seeds it.
     for obs in solved.iter().flat_map(|epoch| epoch.observations.iter()) {
         if !solved_state.ambiguities_m.contains_key(&obs.ambiguity_id) {
             let seed = seed_ambiguities
@@ -272,21 +268,19 @@ pub(super) fn prepare_arc(
             epochs: solved,
             correction_epoch_indices: indices,
             state: solved_state,
+            unplaced,
         },
         new_exclusions,
     ))
 }
 
-/// What a solve pass leaves out of the input epochs, and the ambiguity seeds for the
+/// What a solve leaves out of the input epochs, and the ambiguity seeds for the
 /// observations it keeps.
 pub(super) struct LeftOut<'a> {
     /// Exclusions already made.
     pub(super) excluded: &'a [SsrBiasExclusion],
     /// Observations the residual screen removed, as (input epoch index, ambiguity id).
     pub(super) screened: &'a [(usize, String)],
-    /// Observations admitted again after an exclusion, which the check from the starting
-    /// state leaves in.
-    pub(super) deferred: &'a [(usize, String)],
     /// Ambiguity values for observations the state has none for.
     pub(super) seed_ambiguities: &'a BTreeMap<String, f64>,
 }
@@ -333,303 +327,46 @@ pub(super) fn without_exclusions(
         .collect()
 }
 
-/// `prior`, an input-indexed state, updated from a state over the solved epochs whose
-/// input indices are `indices`: position, troposphere, ambiguities and ionosphere from
-/// `solved`, and the receiver clocks of the solved epochs.
-fn input_state(solved: &FloatState, indices: &[usize], prior: &FloatState) -> FloatState {
-    let mut state = solved.clone();
-    state.clocks_m = prior.clocks_m.clone();
-    for (clock, &index) in solved.clocks_m.iter().zip(indices) {
-        state.clocks_m[index] = *clock;
-    }
-    state
-}
-
-/// Where a fixed-point solve starts: the exclusions already made, the observations that
-/// are never admitted again, those already admitted again once, and the first pass number.
-#[derive(Default)]
-pub(super) struct FixedPointStart {
-    pub(super) exclusions: Vec<SsrBiasExclusion>,
-    /// Excluded for good.
-    pub(super) pinned: Vec<(usize, String)>,
-    /// Admitted again once already: their records are judged only at convergence, and
-    /// they are not admitted again.
-    pub(super) readmitted: Vec<(usize, String)>,
-    /// Admitted again after a fixed solve: judged at the fixed position, not at this
-    /// solve's convergence.
-    pub(super) judged_after_fix: Vec<(usize, String)>,
-    pub(super) first_pass: usize,
-}
-
-/// Solve a static float arc to a fixed point of the SSR/HAS bias exclusion.
+/// Solve a static float arc with the observations whose required SSR/HAS biases are
+/// absent, or do not hold at their transmission times, left out ([`prepare_arc`]).
 ///
-/// Each pass prepares the arc ([`prepare_arc`]) and solves it with `solve`. When a row's
-/// recorded biases stop holding at the transmission time of an iteration, including one of
-/// the residual screen's re-solves, or no longer hold at the position the pass converged
-/// to for an observation the solution kept, that observation joins the exclusions and the
-/// solve starts again from the state it reached.
-///
-/// Those exclusions depend on a position the solve had not converged to. Once a pass
-/// converges with nothing new to exclude, every exclusion made for a transmit-time reason
-/// is checked again at the converged position; those that hold are admitted again, once
-/// each, and the solve continues. The rows do not check an admitted observation's records
-/// at intermediate states; the check at convergence decides, and an observation that
-/// fails it stays excluded, so one that keeps crossing a boundary is excluded
-/// deterministically. Each pass excludes or admits at least one observation, so there are
-/// at most three passes per observation.
-pub(super) fn solve_to_ssr_fixed_point<F>(
+/// The rows place each transmission time from the observation's pseudorange, as RTKLIB
+/// `satposs` places it, so no estimated state enters it, and the records judged before the
+/// solve hold, or fail, at every iteration alike: the exclusions made before the solve are
+/// the solution's.
+pub(super) fn solve_excluding_unresolved_ssr_biases<F>(
     arc: &ArcSettings<'_>,
     epochs: &[FloatEpoch],
     initial_state: FloatState,
-    start: FixedPointStart,
-    mut solve: F,
+    solve: F,
 ) -> Result<FloatSolution, FloatSolveError>
 where
-    F: FnMut(ModelContext, &[FloatEpoch], FloatState) -> Result<FloatSolution, StepError>,
+    F: FnOnce(ModelContext, &[FloatEpoch], FloatState) -> Result<FloatSolution, FloatSolveError>,
 {
-    let observation_count = epochs.iter().map(|e| e.observations.len()).sum::<usize>();
     let seed_ambiguities = initial_state.ambiguities_m.clone();
-    let FixedPointStart {
-        mut exclusions,
-        pinned,
-        mut readmitted,
-        judged_after_fix,
-        first_pass,
-    } = start;
-    let mut state = initial_state;
-    let mut pass = first_pass;
-    let pass_limit = observation_count
-        .checked_mul(3)
-        .and_then(|count| count.checked_add(1))
-        .and_then(|count| first_pass.checked_add(count))
-        .ok_or_else(pass_overflow)?;
-    loop {
-        // Each pass excludes or admits at least one observation; an observation is
-        // excluded at most twice and admitted at most once.
-        debug_assert!(
-            pass <= pass_limit,
-            "each pass excludes or admits an observation"
-        );
-        let (prepared, new_exclusions) = prepare_arc(
-            arc,
-            epochs,
-            &LeftOut {
-                excluded: &exclusions,
-                screened: &[],
-                deferred: &readmitted,
-                seed_ambiguities: &seed_ambiguities,
-            },
-            &state,
-            pass,
-        )?;
-        exclusions.extend(new_exclusions);
-        pass = pass.checked_add(1).ok_or_else(pass_overflow)?;
-        let ctx = ModelContext {
-            source: arc.source,
-            weights: arc.weights,
-            tropo: arc.tropo,
-            corrections: arc.corrections,
-            normal: arc.normal,
-            estimate_residual_ionosphere: arc.estimate_residual_ionosphere,
-            correction_epoch_indices: Some(&prepared.correction_epoch_indices),
-            ssr_bias_pass: pass,
-            ssr_bias_stage: SsrBiasExclusionStage::DuringIteration,
-            ssr_bias_deferred: &readmitted,
-        };
-        let mut solution = match solve(ctx, &prepared.epochs, prepared.state.clone()) {
-            Ok(solution) => solution,
-            Err(StepError::Flip(flip)) => {
-                let StepFlip {
-                    exclusion,
-                    state: reached,
-                    state_epoch_indices,
-                } = *flip;
-                exclusions.push(exclusion);
-                state = input_state(&reached, &state_epoch_indices, &state);
-                continue;
-            }
-            Err(StepError::Float(error)) => return Err(error),
-        };
-        let solved_state = input_state(
-            &state_from_solution(&solution, &state),
-            &solution.solved_epoch_indices,
-            &state,
-        );
-
-        // Re-check the observations the solution kept at the converged position,
-        // including those the rows did not check because they were admitted again.
-        let late = kept_ssr_bias_failures(arc, &prepared, &solution, pass)?
-            .into_iter()
-            .filter(|exclusion| {
-                !judged_after_fix.iter().any(|(epoch_index, ambiguity_id)| {
-                    *epoch_index == exclusion.epoch_index && *ambiguity_id == exclusion.ambiguity_id
-                })
-            })
-            .collect::<Vec<_>>();
-        if !late.is_empty() {
-            exclusions.extend(late);
-            state = solved_state;
-            continue;
-        }
-
-        // Admit again, once each, the transmit-time exclusions that hold at convergence.
-        let before = exclusions.len();
-        let mut still_excluded = Vec::with_capacity(before);
-        for exclusion in exclusions.drain(..) {
-            let key = (exclusion.epoch_index, exclusion.ambiguity_id.clone());
-            if exclusion.transmit_time_failure.is_none()
-                || pinned.contains(&key)
-                || readmitted.contains(&key)
-            {
-                still_excluded.push(exclusion);
-            } else if ssr_bias_holds_at(arc, epochs, &key, solution.position_m, pass)? {
-                readmitted.push(key);
-            } else {
-                still_excluded.push(exclusion);
-            }
-        }
-        exclusions = still_excluded;
-        if exclusions.len() < before {
-            state = solved_state;
-            continue;
-        }
-        solution.ssr_bias_exclusions = exclusions;
-        solution.ssr_bias_readmissions = readmitted;
-        solution.ssr_bias_last_pass = pass;
-        return Ok(solution);
-    }
-}
-
-/// The observations `solution` kept whose SSR/HAS bias records do not hold at its
-/// position, as exclusions found at convergence on pass `pass`.
-fn kept_ssr_bias_failures(
-    arc: &ArcSettings<'_>,
-    prepared: &PreparedArc,
-    solution: &FloatSolution,
-    pass: usize,
-) -> Result<Vec<SsrBiasExclusion>, FloatSolveError> {
-    let kept = solution
-        .residuals_m
-        .iter()
-        .map(|residual| (residual.epoch_index, residual.ambiguity_id.as_str()))
-        .collect::<BTreeSet<_>>();
-    let failures = prepared
-        .epochs
-        .iter()
-        .zip(&prepared.correction_epoch_indices)
-        .map(|(epoch, &epoch_index)| {
-            let mut kept_epoch = epoch.clone();
-            kept_epoch
-                .observations
-                .retain(|obs| kept.contains(&(epoch_index, obs.ambiguity_id.as_str())));
-            exclude_unresolved_ssr_bias_observations(
-                arc.source,
-                std::slice::from_ref(&kept_epoch),
-                epoch_index,
-                solution.position_m,
-                &arc.corrections.ppp,
-                pass,
-                SsrBiasExclusionStage::AtConvergence,
-            )
-            .map(|(_, exclusions)| exclusions)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(failures.into_iter().flatten().collect())
-}
-
-/// Whether the SSR/HAS bias records of the observation `key` names in `epochs` hold at the
-/// transmission time from `position_m`, or the UT1 refusal met checking them.
-pub(super) fn ssr_bias_holds_at(
-    arc: &ArcSettings<'_>,
-    epochs: &[FloatEpoch],
-    key: &(usize, String),
-    position_m: [f64; 3],
-    pass: usize,
-) -> Result<bool, FloatSolveError> {
-    let Some(epoch) = epochs.get(key.0) else {
-        return Ok(false);
-    };
-    let mut single = epoch.clone();
-    single.observations.retain(|obs| obs.ambiguity_id == key.1);
-    if single.observations.is_empty() {
-        return Ok(false);
-    }
-    let (_, failures) = exclude_unresolved_ssr_bias_observations(
-        arc.source,
-        std::slice::from_ref(&single),
-        key.0,
-        position_m,
-        &arc.corrections.ppp,
-        pass,
-        SsrBiasExclusionStage::AtConvergence,
+    let (prepared, exclusions) = prepare_arc(
+        arc,
+        epochs,
+        &LeftOut {
+            excluded: &[],
+            screened: &[],
+            seed_ambiguities: &seed_ambiguities,
+        },
+        &initial_state,
     )?;
-    Ok(failures.is_empty())
-}
-
-/// The pass a solve continuing from `float_solution` and `exclusions` numbers first: one
-/// past the float solve's last pass and the highest pass the exclusions were found on.
-pub(super) fn next_pass(
-    float_solution: &FloatSolution,
-    exclusions: &[SsrBiasExclusion],
-) -> Result<usize, FloatSolveError> {
-    exclusions
-        .iter()
-        .map(|exclusion| exclusion.pass)
-        .chain(std::iter::once(float_solution.ssr_bias_last_pass))
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or_else(pass_overflow)
-}
-
-/// The SSR/HAS bias pass counter would pass `usize::MAX`.
-fn pass_overflow() -> FloatSolveError {
-    FloatSolveError::InvalidInput {
-        field: "ppp ssr_bias pass",
-        reason: "overflows the pass counter",
-    }
-}
-
-/// A solve step failure: SSR/HAS bias records that stopped holding at the state the rows
-/// were built at, which a fixed-point solve turns into an exclusion, or any other error.
-pub(super) enum StepError {
-    Flip(Box<StepFlip>),
-    Float(FloatSolveError),
-}
-
-/// The observation whose SSR/HAS bias records stopped holding, and the state the rows were
-/// built at with the input epoch index of each of its receiver clocks.
-pub(super) struct StepFlip {
-    pub(super) exclusion: SsrBiasExclusion,
-    pub(super) state: FloatState,
-    pub(super) state_epoch_indices: Vec<usize>,
-}
-
-impl From<FloatSolveError> for StepError {
-    fn from(error: FloatSolveError) -> Self {
-        Self::Float(error)
-    }
-}
-
-impl StepError {
-    /// A row error at `state`, the state over `epochs` in `ctx`.
-    pub(super) fn from_rows(
-        error: PppRowError,
-        ctx: ModelContext,
-        epochs: &[FloatEpoch],
-        state: &FloatState,
-    ) -> Self {
-        match error {
-            PppRowError::SsrBiasFlip { exclusion, .. } => Self::Flip(Box::new(StepFlip {
-                exclusion: *exclusion,
-                state: state.clone(),
-                state_epoch_indices: (0..epochs.len())
-                    .map(|epoch_idx| ctx.correction_epoch_index(epoch_idx))
-                    .collect(),
-            })),
-            other => Self::Float(other.into_float()),
-        }
-    }
+    let ctx = ModelContext {
+        source: arc.source,
+        weights: arc.weights,
+        tropo: arc.tropo,
+        corrections: arc.corrections,
+        normal: arc.normal,
+        estimate_residual_ionosphere: arc.estimate_residual_ionosphere,
+        correction_epoch_indices: Some(&prepared.correction_epoch_indices),
+    };
+    let mut solution = solve(ctx, &prepared.epochs, prepared.state.clone())?;
+    solution.ssr_bias_exclusions = exclusions;
+    solution.unplaced_observations = prepared.unplaced.clone();
+    Ok(solution)
 }
 
 pub(super) fn screened_float_solution(
@@ -638,7 +375,7 @@ pub(super) fn screened_float_solution(
     state: FloatState,
     opts: FloatSolveOptions,
     residual_screen: bool,
-) -> Result<FloatSolution, StepError> {
+) -> Result<FloatSolution, FloatSolveError> {
     let ambiguity_ids = multi_ambiguity_ids(solve_epochs);
     let solution = iterate_multi_steps(ctx, solve_epochs, &ambiguity_ids, state.clone(), opts, 1)?;
 
@@ -716,7 +453,7 @@ fn run_residual_screen(
     opts: FloatSolveOptions,
     solution: FloatSolution,
     pass: usize,
-) -> Result<ScreenResult, StepError> {
+) -> Result<ScreenResult, FloatSolveError> {
     if pass > RESIDUAL_SCREEN_MAX_PASSES {
         return Ok(ScreenResult::Screened {
             solution: Box::new(solution),
@@ -776,7 +513,7 @@ fn iterate_multi_steps(
     state: FloatState,
     opts: FloatSolveOptions,
     iter: usize,
-) -> Result<FloatSolution, StepError> {
+) -> Result<FloatSolution, FloatSolveError> {
     let mut current = state;
     let mut iteration = iter;
     let max_iterations = opts.max_iterations;
@@ -786,8 +523,7 @@ fn iterate_multi_steps(
             ids: ambiguity_ids,
             values: &current.ambiguities_m,
         };
-        let rows = build_rows(ctx, epochs, &binding, &current)
-            .map_err(|error| StepError::from_rows(error, ctx, epochs, &current))?;
+        let rows = build_rows(ctx, epochs, &binding, &current).map_err(PppRowError::into_float)?;
         let layout = PppNormalLayout::new(
             epochs.len(),
             ztd_unknown_count(ctx.tropo),
@@ -964,20 +700,14 @@ fn finalize_multi(
     iterations: usize,
     converged: bool,
     status: FloatStatus,
-) -> Result<FloatSolution, StepError> {
-    // A flip the rows find while the solution is assembled is found at convergence.
-    let ctx = ModelContext {
-        ssr_bias_stage: SsrBiasExclusionStage::AtConvergence,
-        ..ctx
-    };
+) -> Result<FloatSolution, FloatSolveError> {
     let residuals = residual_rows(ctx, epochs, &state.ambiguities_m, &state)
-        .map_err(|error| StepError::from_rows(error, ctx, epochs, &state))?;
+        .map_err(PppRowError::into_float)?;
     let binding = AmbiguityBinding::Estimated {
         ids: ambiguity_ids,
         values: &state.ambiguities_m,
     };
-    let rows = build_rows(ctx, epochs, &binding, &state)
-        .map_err(|error| StepError::from_rows(error, ctx, epochs, &state))?;
+    let rows = build_rows(ctx, epochs, &binding, &state).map_err(PppRowError::into_float)?;
     let covariance = ppp_position_covariance(
         &rows,
         PppNormalLayout::new(
@@ -1051,8 +781,7 @@ fn finalize_multi(
         weighted_rms_m: weighted_rms(&residuals, ctx.weights),
         solved_epoch_indices,
         ssr_bias_exclusions: Vec::new(),
-        ssr_bias_readmissions: Vec::new(),
-        ssr_bias_last_pass: 0,
+        unplaced_observations: Vec::new(),
         residual_screen: false,
         solve_options: FloatSolveOptions::default(),
         residual_screen_removals: Vec::new(),
@@ -1078,9 +807,9 @@ fn worst_multi_residual(
     ctx: ModelContext,
     epochs: &[FloatEpoch],
     state: &FloatState,
-) -> Result<Option<(usize, String)>, StepError> {
-    let rows = residual_rows(ctx, epochs, &state.ambiguities_m, state)
-        .map_err(|error| StepError::from_rows(error, ctx, epochs, state))?;
+) -> Result<Option<(usize, String)>, FloatSolveError> {
+    let rows =
+        residual_rows(ctx, epochs, &state.ambiguities_m, state).map_err(PppRowError::into_float)?;
     let candidate = rows
         .iter()
         .flat_map(|r| {

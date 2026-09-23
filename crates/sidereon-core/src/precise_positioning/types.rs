@@ -814,28 +814,16 @@ pub enum SsrTransmitTimeFailure {
     },
 }
 
-/// Where a PPP solve found an [`SsrBiasExclusion`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum SsrBiasExclusionStage {
-    /// Before a solve pass, from the state the pass starts at.
-    BeforeSolve,
-    /// While a solve pass iterated: the biases stopped holding at the transmission time of
-    /// an intermediate state.
-    DuringIteration,
-    /// At the position a solve pass converged to.
-    AtConvergence,
-    /// While the fixed solve re-solved with its integer ambiguities held.
-    FixedResolve,
-}
-
 /// An observation left out of a PPP solve because an SSR/HAS bias it requires was not
 /// resolved.
 ///
 /// The corrections require an SSR code bias when
 /// [`PppCorrectionLookup::ssr_code_bias_enabled`] is set and an SSR phase bias when
 /// [`PppCorrectionLookup::phase_bias_enabled`] is set. An observation with no entry for a
-/// required bias is excluded rather than solved without it.
+/// required bias is excluded rather than solved without it, as is one whose recorded biases
+/// do not hold at its transmission time. The solve decides both before it solves: the
+/// transmission time comes from the observation's pseudorange, as RTKLIB `satposs` places
+/// it, so no estimated state changes the decision.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SsrBiasExclusion {
     /// Zero-based index of the observation's epoch in the solve's input epochs.
@@ -851,19 +839,35 @@ pub struct SsrBiasExclusion {
     /// Why the recorded biases do not hold at the observation's transmission time, when the
     /// lookup has them but the solve's source does not apply them there.
     pub transmit_time_failure: Option<SsrTransmitTimeFailure>,
-    /// Solve pass that found the exclusion: 0 before the first solve, from the starting
-    /// position; `k` during solve pass `k`, at the position it converged to, or before the
-    /// next pass from the state it reached. A static solve adds the observations a pass
-    /// finds and solves again from that state, until a pass finds none.
-    pub pass: usize,
-    /// Where the exclusion was found: before a solve pass, during its iteration, or at the
-    /// position it converged to.
-    pub stage: SsrBiasExclusionStage,
     /// The row [`PppCorrectionLookup::with_ssr_biases`] reported for this observation,
     /// whose code and phase statuses state why the bias was not resolved. `None` when the
     /// lookup's [`PppCorrectionLookup::ssr_bias_report`] has no row for it, as for a lookup
     /// filled directly.
     pub application: Option<SsrObsApplicationReport>,
+}
+
+/// An observation left out of a PPP solve before it solves because no transmission epoch
+/// can be placed from it, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnplacedObservation {
+    /// Zero-based index of the observation's epoch in the solve's input epochs.
+    pub epoch_index: usize,
+    /// Public satellite token of the observation.
+    pub satellite_id: String,
+    /// Ambiguity state key of the observation.
+    pub ambiguity_id: String,
+    /// Why no transmission epoch can be placed from it.
+    pub reason: UnplacedObservationReason,
+}
+
+/// Why a PPP observation places no transmission epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnplacedObservationReason {
+    /// The code is zero or negative. RTKLIB reads a zero pseudorange as none and places
+    /// no satellite for it (`satposs`); a negative code places the satellite at no
+    /// meaningful epoch.
+    CodeNotPositive,
 }
 
 /// Options for applying SSR/HAS PPP biases.
@@ -1018,9 +1022,9 @@ impl PppCorrectionLookup {
     /// # Evaluated at the transmission time
     ///
     /// The solve evaluates `ephemeris` at each observation's transmission time, so every
-    /// bias is judged there too. The transmission time is predicted from the reception
-    /// time and `receiver_position_m`, the way the solve predicts it; an error of a
-    /// kilometre in the position moves it by about 3 µs. Biases are resolved with
+    /// bias is judged there too. The transmission time is placed from the reception time
+    /// and the observation's code pseudorange, the way the solve places it (RTKLIB
+    /// `satposs`), so no receiver position enters it. Biases are resolved with
     /// [`crate::ssr::SsrCorrectionStore::query_code_bias`] and
     /// [`crate::ssr::SsrCorrectionStore::query_phase_bias`] on `ephemeris`'s store at that
     /// time, so their lifetime, any Galileo HAS do-not-use exclusion and phase continuity
@@ -1102,7 +1106,6 @@ impl PppCorrectionLookup {
         mut self,
         ephemeris: &SsrCorrectedEphemeris<'_>,
         epochs: &[FloatEpoch],
-        receiver_position_m: [f64; 3],
         options: &SsrPppBiasOptions,
     ) -> (Self, SsrPppBiasApplicationReport) {
         let store = ephemeris.store();
@@ -1121,18 +1124,14 @@ impl PppCorrectionLookup {
                 // instead of reading as an unpredictable transmission time or a
                 // missing orbit and clock solution.
                 let mut ut1_refusal = None;
-                let transmit_time_j2000_s = match transmit_time_j2000_s(
-                    ephemeris,
-                    obs,
-                    receiver_position_m,
-                    epoch.t_rx_j2000_s,
-                ) {
-                    Ok(t_tx) => t_tx,
-                    Err(reason) => {
-                        ut1_refusal = Some(reason);
-                        None
-                    }
-                };
+                let transmit_time_j2000_s =
+                    match transmit_time_j2000_s(ephemeris, obs, epoch.t_rx_j2000_s) {
+                        Ok(t_tx) => t_tx,
+                        Err(reason) => {
+                            ut1_refusal = Some(reason);
+                            None
+                        }
+                    };
                 let applied_orbit_clock_solution = match transmit_time_j2000_s {
                     Some(t_tx) => {
                         match crate::ssr::SsrCorrectionSource::try_applied_orbit_clock_solution(
@@ -1469,34 +1468,18 @@ fn transmit_time_unavailable_status(views: &[BiasQueryView; 2]) -> SsrIfCombinat
     }
 }
 
-/// Transmission time of `obs` predicted the way the solve predicts it, from the reception
-/// time and an approximate receiver position: `Ok(None)` when the source cannot place the
-/// satellite, and `Err` with the reason when the source refused the satellite's state
-/// outside the UT1 table.
+/// Transmission time of `obs` placed the way the solve places it, from the reception time
+/// and its code pseudorange as RTKLIB `satposs` places it: `Ok(None)` when the source cannot
+/// place the satellite, and `Err` with the reason when the source refused the satellite's
+/// state outside the UT1 table.
 fn transmit_time_j2000_s(
     ephemeris: &SsrCorrectedEphemeris<'_>,
     obs: &FloatObservation,
-    receiver_position_m: [f64; 3],
     t_rx_j2000_s: f64,
 ) -> Result<Option<f64>, crate::astro::time::DegradeReason> {
-    let Ok(options) = super::predict_default(ephemeris, obs) else {
-        return Ok(None);
-    };
-    match crate::observables::transmit_epoch_j2000_s(
-        ephemeris,
-        obs.sat,
-        receiver_position_m,
-        t_rx_j2000_s,
-        crate::observables::TransmitTimeOptions {
-            light_time: options.light_time,
-            sagnac: options.sagnac,
-        },
-        crate::observables::flight_time_seed_s(obs.code_m),
-    ) {
-        Ok(t_tx) => Ok(t_tx.is_finite().then_some(t_tx)),
-        Err(crate::observables::ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(
-            reason,
-        ))) => Err(reason),
+    match super::observation_placed_transmit_epoch_j2000_s(ephemeris, obs, t_rx_j2000_s, None) {
+        Ok(t_tx) => Ok(t_tx),
+        Err(FloatSolveError::Ut1OutsideCoverage(reason)) => Err(reason),
         Err(_) => Ok(None),
     }
 }
@@ -1726,18 +1709,14 @@ pub struct FloatSolution {
     /// Observations left out of the solve because an SSR/HAS bias the corrections
     /// require was not resolved for them, in epoch and observation order.
     pub ssr_bias_exclusions: Vec<SsrBiasExclusion>,
+    /// Observations left out of the solve because no transmission epoch can be placed from
+    /// them, in epoch and observation order.
+    pub unplaced_observations: Vec<UnplacedObservation>,
     /// Input epoch index of each solved epoch, ascending, paired with
     /// [`Self::epoch_clocks_m`]. An input epoch left with no observations by the elevation
     /// cutoff, SSR bias exclusion or the residual screen has no receiver clock to estimate
     /// and is not solved, so it is absent here.
     pub solved_epoch_indices: Vec<usize>,
-    /// Observations, as (input epoch index, ambiguity id), the solve admitted again after
-    /// an SSR/HAS bias exclusion. A later solve from this solution, such as the fixed
-    /// solve, judges them only at convergence and does not admit them again.
-    pub ssr_bias_readmissions: Vec<(usize, String)>,
-    /// The last pass of the solve's SSR/HAS bias fixed point, from which a later solve from
-    /// this solution, such as the fixed solve, continues the numbering.
-    pub ssr_bias_last_pass: usize,
     /// Whether the solve ran the residual screen.
     pub residual_screen: bool,
     /// The iteration and convergence options the solve ran with.
@@ -2160,10 +2139,8 @@ pub struct FixedSolution {
     /// Unscaled formal covariance of north/east troposphere gradients.
     pub formal_tropo_gradient_covariance_m2: Option<[[f64; 2]; 2]>,
     /// The float solution the integers were fixed from: the caller's, or the float arc
-    /// solved again when the fixed solve changed the arc: an SSR/HAS bias stopped holding
-    /// during the fixed re-solve, an excluded observation held at the fixed position and
-    /// was admitted again, or the fixed arc observed an ambiguity the float solution did
-    /// not solve. The re-solve uses the fixed configuration's weights, troposphere,
+    /// solved again when the fixed arc observed an ambiguity the float solution did not
+    /// solve. The re-solve uses the fixed configuration's weights, troposphere,
     /// corrections, residual ionosphere setting and elevation cutoff, with the caller's
     /// float solve options and residual screen setting; the residual screen runs again
     /// over the whole arc and its removals replace the caller's.
@@ -2192,6 +2169,9 @@ pub struct FixedSolution {
     /// Observations left out of the fixed re-solve because an SSR/HAS bias the
     /// corrections require was not resolved for them, in epoch and observation order.
     pub ssr_bias_exclusions: Vec<SsrBiasExclusion>,
+    /// Observations left out of the fixed re-solve because no transmission epoch can be
+    /// placed from them, in epoch and observation order.
+    pub unplaced_observations: Vec<UnplacedObservation>,
     /// Input epoch index of each epoch of the fixed re-solve, ascending, paired with
     /// [`Self::epoch_clocks_m`]. An input epoch left with no observations by the elevation
     /// cutoff or SSR bias exclusion is not solved and is absent here.

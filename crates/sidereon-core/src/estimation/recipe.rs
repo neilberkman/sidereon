@@ -16,6 +16,15 @@
 //! spine reproduces the prior code path bit-for-bit and leaves every existing
 //! 0-ULP golden unchanged.
 //!
+//! The SPP and PPP measurement models place a pseudorange's transmission epoch as
+//! RTKLIB `satposs` does and range it with `geodist`
+//! ([`RangeRecipe::RtklibSatpossPseudorange`], [`SagnacRecipe::RtklibFirstOrderScalar`]).
+//! The external SPP and prediction references were computed with a geometric light
+//! time from the receiver's time tag, which misses the receiver clock offset; the
+//! repository's tests replay them through [`RangeRecipe::SppMeasuredPseudorangeFixedIter`]
+//! and [`RangeRecipe::ObservableRoundedMicrosecondFixedIter`] and check that the
+//! models differ from them by the transmission epoch alone.
+//!
 //! The `Canonical*` variants belong to the single consistent IERS-rigorous
 //! model (the bounded-tolerance canonical strategy, P6). They are NOT used by
 //! any reference-faithful strategy; canonical is an additional selectable
@@ -47,7 +56,8 @@ pub enum Technique {
 /// is instead pinned to the owned solver's own frozen-bits golden (P5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ReferenceTarget {
-    /// Skyfield (the SPP geometry/clock/Sagnac reference).
+    /// Skyfield (the SPP geodetic-frame reference; its geometry, clock and Sagnac
+    /// trace is replayed in tests through the geometric light-time recipe).
     #[default]
     Skyfield,
     /// RTKLIB (the RTK double-difference baseline reference).
@@ -103,7 +113,8 @@ impl Default for StrategyId {
 }
 
 impl StrategyId {
-    /// SPP, bit-exact to Skyfield (`spp::solve`).
+    /// SPP (`spp::solve`): the RTKLIB transmit-time placement and range, with the
+    /// Skyfield geodetic frame.
     pub const fn spp_reference() -> Self {
         Self::Reference {
             technique: Technique::Spp,
@@ -146,12 +157,26 @@ impl StrategyId {
 /// than copying the helper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RangeRecipe {
-    /// SPP closed-form light-time with a fixed transmit-time iteration count and
-    /// a measured-pseudorange seed (`spp/mod.rs` `sat_model`).
+    /// RTKLIB `satposs` transmit-time placement from the measured pseudorange, with
+    /// no light-time iteration: `t_tx = t_rx - P / c - dts`, `dts` the satellite clock
+    /// read at `t_rx - P / c` (`ephclk`), and the state at `t_tx`. The pseudorange
+    /// carries the receiver clock offset, so the epoch is the true transmission epoch
+    /// whatever that offset. The SPP, static, DGNSS, tight-fusion and PPP models place
+    /// every pseudorange this way (`spp/mod.rs` `sat_model`,
+    /// [`crate::observables::pseudorange_transmit_epoch_j2000_s`]).
     #[default]
+    RtklibSatpossPseudorange,
+    /// Geometric light time from the receiver's time tag, with a fixed
+    /// transmit-time iteration count and a measured-pseudorange seed. The SPP model
+    /// used it before [`Self::RtklibSatpossPseudorange`]; it misses the receiver clock
+    /// offset `dtr`, which moves each satellite by `v · dtr` along its track. The
+    /// external SPP references (the Python trace recipe, the Go fixture) were
+    /// computed with it, and the repository's tests replay them through it.
     SppMeasuredPseudorangeFixedIter,
     /// `observables::predict` rounded-microsecond transmit time with a fixed
-    /// light-time iteration count (PPP / forward-prediction model).
+    /// light-time iteration count, as the external prediction and PPP oracle
+    /// fixtures computed it. The public predictors keep every bit of the flight
+    /// time; the repository's tests replay those fixtures through the rounding.
     ObservableRoundedMicrosecondFixedIter,
     /// RTK provided-transmit-position range with the RTKLIB first-order Sagnac
     /// scalar (`rtk_filter::model` line-of-sight / geometric range).
@@ -167,11 +192,12 @@ pub enum RangeRecipe {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SagnacRecipe {
     /// Closed-form z-axis rotation of the satellite ECEF position by
-    /// `OMEGA_E_DOT * tau` (SPP / observables).
-    #[default]
+    /// `OMEGA_E_DOT * tau` (observable prediction, canonical SPP).
     ClosedFormZRotation,
-    /// RTKLIB first-order scalar Sagnac term added to the range
-    /// (`rtk_filter::model`).
+    /// RTKLIB first-order scalar Sagnac term added to the range, the satellite
+    /// position left in the transmission-epoch frame (RTKLIB `geodist`: SPP, static,
+    /// DGNSS, tight fusion, PPP, `rtk_filter::model`).
+    #[default]
     RtklibFirstOrderScalar,
     /// No Sagnac correction (synthetic / ECI-consistent inputs).
     Off,
@@ -281,8 +307,9 @@ pub enum SolverRecipe {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct EstimationRecipe {
     /// SPP transmit-time branch copied into `SppModelRecipe` and consumed by
-    /// `sat_model`: the reference uses a measured-pseudorange seed with a fixed
-    /// iteration count, while the canonical branch iterates to convergence.
+    /// `sat_model`: the reference places the transmission epoch from the
+    /// pseudorange as RTKLIB `satposs` does, while the canonical branch iterates the
+    /// geometric light time from the clock-corrected reception epoch to convergence.
     pub range: RangeRecipe,
     /// Earth-rotation operation passed by SPP to both satellite rotation and
     /// geometric-range calculation in the shared range substrate.
@@ -301,11 +328,13 @@ pub struct EstimationRecipe {
 }
 
 impl EstimationRecipe {
-    /// The current SPP reference recipe (`spp::solve`, Skyfield-parity).
+    /// The current SPP reference recipe (`spp::solve`): the RTKLIB `satposs`
+    /// transmit-time placement and `geodist` range, with the Skyfield-parity geodetic
+    /// frame.
     pub const fn spp() -> Self {
         Self {
-            range: RangeRecipe::SppMeasuredPseudorangeFixedIter,
-            sagnac: SagnacRecipe::ClosedFormZRotation,
+            range: RangeRecipe::RtklibSatpossPseudorange,
+            sagnac: SagnacRecipe::RtklibFirstOrderScalar,
             frame: FrameRecipe::SppSkyfieldAuThreeIter,
             normal: NormalRecipe::SppWeightedResidualFiniteDifference,
             solver: SolverRecipe::NalgebraTrfLegacy,
@@ -323,11 +352,12 @@ impl EstimationRecipe {
         }
     }
 
-    /// The current PPP reference recipe (`precise_positioning`, oracle-parity).
+    /// The current PPP reference recipe (`precise_positioning`): the RTKLIB `satposs`
+    /// transmit-time placement and `geodist` range of RTKLIB `ppp_res`.
     pub const fn ppp() -> Self {
         Self {
-            range: RangeRecipe::ObservableRoundedMicrosecondFixedIter,
-            sagnac: SagnacRecipe::ClosedFormZRotation,
+            range: RangeRecipe::RtklibSatpossPseudorange,
+            sagnac: SagnacRecipe::RtklibFirstOrderScalar,
             frame: FrameRecipe::GeodeticNeuCrossProduct,
             normal: NormalRecipe::PppDenseLastTie,
             solver: SolverRecipe::DenseGaussianLastTie,
@@ -346,12 +376,13 @@ impl EstimationRecipe {
     }
 
     /// The canonical SPP recipe: the single consistent IERS-rigorous SPP
-    /// measurement model. It diverges from [`Self::spp`] (the Skyfield-faithful
+    /// measurement model. It diverges from [`Self::spp`] (the RTKLIB-conformant
     /// reference) only where the physics says to:
     /// - range: [`RangeRecipe::CanonicalLightTimeClosedFormSagnac`] iterates the
-    ///   light-time loop to convergence (vs the reference's fixed
-    ///   transmit-time truncation), with the closed-form Sagnac Z-rotation (never
-    ///   a first-order scalar Sagnac).
+    ///   geometric light-time loop to convergence from the reception epoch corrected
+    ///   by the estimated receiver clock (vs the reference's placement from the
+    ///   pseudorange), with the closed-form Sagnac Z-rotation (never a first-order
+    ///   scalar Sagnac).
     /// - frame: [`FrameRecipe::CanonicalWgs84`] solves ECEF->geodetic directly in
     ///   meters on the WGS84 ellipsoid (vs the reference's Skyfield AU-scaled
     ///   three-iteration latitude loop).
@@ -359,10 +390,10 @@ impl EstimationRecipe {
     ///   assembly and subproblem factorization so canonical is deterministic
     ///   run-to-run across CPU targets.
     ///
-    /// The Sagnac stage is the closed-form Z-rotation the SPP reference already
-    /// uses (the rigorous form), and the normal stage is the SPP
+    /// The Sagnac stage is the closed-form Z-rotation (the rigorous form, where the
+    /// reference takes RTKLIB's first-order term), and the normal stage is the SPP
     /// weighted-residual finite-difference assembly the trust-region solver
-    /// consumes; neither needs a separate canonical variant for SPP.
+    /// consumes; SPP has no separate canonical normal variant.
     pub const fn canonical_spp() -> Self {
         Self {
             range: RangeRecipe::CanonicalLightTimeClosedFormSagnac,
@@ -400,8 +431,8 @@ impl EstimationRecipe {
     /// The canonical PPP recipe: the undifferenced ionosphere-free PPP arc under
     /// the numerically rigorous square-root-information solve. Like
     /// [`Self::canonical_rtk`] it keeps the PPP reference's measurement physics
-    /// (the rounded-microsecond fixed-iteration light-time with the rigorous
-    /// closed-form Sagnac Z-rotation, and the geodetic NEU antenna frame), because
+    /// (the RTKLIB `satposs` transmit-time placement and `geodist` range, and the
+    /// geodetic NEU antenna frame), because
     /// the canonical PPP divergence the physics calls for is in the linear
     /// algebra, not the observation model: the same weighted normal equations
     /// the reference assembles from the undifferenced rows are reduced by
@@ -421,8 +452,8 @@ impl EstimationRecipe {
     /// owned Cholesky solve carries the cross-platform guarantee.
     pub const fn canonical_ppp() -> Self {
         Self {
-            range: RangeRecipe::ObservableRoundedMicrosecondFixedIter,
-            sagnac: SagnacRecipe::ClosedFormZRotation,
+            range: RangeRecipe::RtklibSatpossPseudorange,
+            sagnac: SagnacRecipe::RtklibFirstOrderScalar,
             frame: FrameRecipe::GeodeticNeuCrossProduct,
             normal: NormalRecipe::CanonicalSquareRoot,
             solver: SolverRecipe::OwnedDeterministicCholesky,
@@ -613,9 +644,12 @@ mod tests {
         assert_eq!(EstimationRecipe::default(), EstimationRecipe::spp());
         assert_eq!(
             RangeRecipe::default(),
-            RangeRecipe::SppMeasuredPseudorangeFixedIter
+            RangeRecipe::RtklibSatpossPseudorange
         );
-        assert_eq!(SagnacRecipe::default(), SagnacRecipe::ClosedFormZRotation);
+        assert_eq!(
+            SagnacRecipe::default(),
+            SagnacRecipe::RtklibFirstOrderScalar
+        );
         assert_eq!(FrameRecipe::default(), FrameRecipe::SppSkyfieldAuThreeIter);
         assert_eq!(
             NormalRecipe::default(),
@@ -688,7 +722,7 @@ mod tests {
     fn canonical_spp_recipe_uses_the_rigorous_op_orders() {
         let canonical = EstimationRecipe::canonical_spp();
         // Range: full iterative light-time with closed-form Sagnac, not the SPP
-        // reference's fixed-iteration measured-pseudorange recipe.
+        // reference's RTKLIB placement from the pseudorange.
         assert_eq!(
             canonical.range,
             RangeRecipe::CanonicalLightTimeClosedFormSagnac
@@ -698,11 +732,11 @@ mod tests {
         // path.
         assert_eq!(canonical.frame, FrameRecipe::CanonicalWgs84);
         assert_ne!(canonical.frame, EstimationRecipe::spp().frame);
-        // Sagnac stays the closed-form Z-rotation (the rigorous form the SPP
-        // reference already uses); the canonical divergence is never a
-        // first-order scalar Sagnac.
+        // Sagnac is the closed-form Z-rotation (the rigorous form), never the
+        // first-order scalar Sagnac the RTKLIB-conformant reference takes.
         assert_eq!(canonical.sagnac, SagnacRecipe::ClosedFormZRotation);
         assert_ne!(canonical.sagnac, SagnacRecipe::RtklibFirstOrderScalar);
+        assert_ne!(canonical.sagnac, EstimationRecipe::spp().sagnac);
         // Solver: the owned deterministic factorization, for run-to-run
         // determinism on a pinned build.
         assert_eq!(canonical.solver, SolverRecipe::OwnedDeterministicTrf);

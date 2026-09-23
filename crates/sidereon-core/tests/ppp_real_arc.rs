@@ -503,12 +503,17 @@ fn canonical_ppp_is_deterministic_bounded_and_truthful() {
 
     // BAR 1: frozen-bits determinism golden (this-build reproducible; the solve
     // is owned scalar, the surrounding measurement model rides platform libm).
-    // Re-frozen when static PPP moved to Schur-reduced per-epoch clock
-    // elimination: X and Y moved a few ULP, Z is unchanged, and the reduced
-    // path is pinned equivalent to the dense one in normal.rs.
-    assert_eq!(canonical.position_m[0].to_bits(), 0x414b544c30f74f98);
-    assert_eq!(canonical.position_m[1].to_bits(), 0x412040d68a005500);
-    assert_eq!(canonical.position_m[2].to_bits(), 0x4153f61c555f9818);
+    // Re-frozen when the PPP rows moved to RTKLIB `satposs` placement and `geodist`: the
+    // ESBC receiver clock is 0.48 ms, which the geometric light time from the time tag
+    // had left out, and the line of sight is the unrotated one. X moved by 6.6 mm, Y by
+    // 104 mm and Z by 29 mm, as each range moved by its rate over 0.48 ms. One
+    // array is compared, so a mismatch prints every coordinate.
+    let canonical_bits = canonical.position_m.map(f64::to_bits);
+    assert_eq!(
+        canonical_bits,
+        [0x414b544c31cea88e, 0x412040d6bf5cbd51, 0x4153f61c5740315c],
+        "x, y, z bits: {canonical_bits:#x?}"
+    );
 
     // BAR 1b: a second canonical solve is bit-identical on the same build.
     let again = run_canonical();

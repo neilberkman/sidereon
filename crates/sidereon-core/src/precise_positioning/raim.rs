@@ -165,7 +165,8 @@ use crate::validate;
 
 use super::{
     solve_float_epoch, state_from_solution, ztd_unknown_count, FloatEpoch, FloatResidual,
-    FloatSolution, FloatSolveConfig, FloatSolveError, FloatState, TroposphereOptions,
+    FloatSolution, FloatSolveConfig, FloatSolveError, FloatState, SatelliteClockCorrections,
+    TroposphereOptions,
 };
 
 const DEFAULT_MISSED_DETECTION_PROBABILITY: f64 = 1.0e-3;
@@ -173,7 +174,6 @@ const DEFAULT_MEASUREMENT_SIGMA_M: f64 = 1.0;
 const RESIDUAL_COMPONENTS_PER_ROW: usize = 2;
 const SNAPSHOT_BASE_STATES: usize = 4;
 const LEVERAGE_TOLERANCE: f64 = 1.0e-12;
-const HIGH_LEVERAGE_RESIDUAL_ZERO_TOLERANCE: f64 = 1.0e-8;
 const DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
 
 /// Configuration for PPP snapshot RAIM.
@@ -250,12 +250,21 @@ pub struct RaimGeometryRow {
 pub struct SatelliteTestStatistic {
     /// Satellite token.
     pub satellite_id: String,
-    /// Standardized absolute code residual.
+    /// Standardized absolute code residual; `0.0` where the code row is untestable
+    /// ([`Self::code_testable`]).
     pub code: f64,
-    /// Standardized absolute phase residual.
+    /// Standardized absolute phase residual; `0.0` where the phase row is untestable
+    /// ([`Self::phase_testable`]).
     pub phase: f64,
-    /// Satellite statistic, currently `max(code, phase)`.
+    /// Satellite statistic: the larger of the testable components, `0.0` where neither is.
     pub statistic: f64,
+    /// Whether the code row has redundancy to be tested: `false` where the snapshot design
+    /// gives it a leverage of 1, so the states it observes absorb any error in it.
+    pub code_testable: bool,
+    /// Whether the phase row has redundancy to be tested: `false` where it is the only
+    /// observer of its ambiguity, as a single-epoch snapshot phase row always is, so the
+    /// ambiguity absorbs any error in it and its residual carries no test information.
+    pub phase_testable: bool,
 }
 
 /// Result of per-satellite RAIM residual identification.
@@ -497,8 +506,10 @@ fn per_satellite_statistics_with_ztd(
     let mut most_likely_fault = None;
     let mut worst = f64::NEG_INFINITY;
     for (idx, residual) in residuals.iter().enumerate() {
-        let code = standardized_abs(&rows[2 * idx], &q)?;
-        let phase = standardized_abs(&rows[2 * idx + 1], &q)?;
+        let code = standardized_abs(&rows, 2 * idx, &q)?;
+        let phase = standardized_abs(&rows, 2 * idx + 1, &q)?;
+        let (code_testable, phase_testable) = (code.is_some(), phase.is_some());
+        let (code, phase) = (code.unwrap_or(0.0), phase.unwrap_or(0.0));
         let statistic = code.max(phase);
         if !code.is_finite() || !phase.is_finite() || !statistic.is_finite() {
             return Err(RaimError::SingularGeometry);
@@ -512,6 +523,8 @@ fn per_satellite_statistics_with_ztd(
             code,
             phase,
             statistic,
+            code_testable,
+            phase_testable,
         });
     }
 
@@ -597,6 +610,7 @@ pub fn fde_float_epoch(
             &current_epoch,
             &solution,
             solve_config.tropo,
+            solve_config.corrections.satellite_clock.as_ref(),
             raim_config,
         )
         .map_err(RaimFdeError::Raim)?;
@@ -767,14 +781,16 @@ fn raim_for_solution(
     epoch: &FloatEpoch,
     solution: &FloatSolution,
     tropo: TroposphereOptions,
+    satellite_clock: Option<&SatelliteClockCorrections>,
     config: RaimConfig,
 ) -> Result<RaimResult, RaimError> {
-    let geometry = geometry_for_solution(source, epoch, solution, tropo).map_err(|_| {
-        RaimError::InvalidGeometry {
-            field: "solution",
-            reason: "could not build line-of-sight geometry",
-        }
-    })?;
+    let geometry =
+        geometry_for_solution(source, epoch, solution, tropo, satellite_clock).map_err(|_| {
+            RaimError::InvalidGeometry {
+                field: "solution",
+                reason: "could not build line-of-sight geometry",
+            }
+        })?;
     validate_geometry(&solution.residuals_m, &geometry.rows)?;
     let n_states = snapshot_state_count_for_solution(solution)?;
     let mut result = global_test(&solution.residuals_m, n_states, config)?;
@@ -813,6 +829,7 @@ fn geometry_for_solution(
     epoch: &FloatEpoch,
     solution: &FloatSolution,
     tropo: TroposphereOptions,
+    satellite_clock: Option<&SatelliteClockCorrections>,
 ) -> Result<RaimSolutionGeometry, FloatSolveError> {
     let mut rows = Vec::with_capacity(solution.residuals_m.len());
     let mut ztd_mappings = solution
@@ -828,8 +845,13 @@ fn geometry_for_solution(
                 field: "raim geometry ambiguity_id",
                 reason: "residual observation missing from epoch",
             })?;
-        let pred =
-            super::observation_geometry(source, obs, solution.position_m, epoch.t_rx_j2000_s)?;
+        let pred = super::observation_geometry(
+            source,
+            obs,
+            solution.position_m,
+            epoch.t_rx_j2000_s,
+            satellite_clock,
+        )?;
         validate::finite_vec3(pred.los_unit, "raim geometry los_unit").map_err(|error| {
             FloatSolveError::InvalidInput {
                 field: error.field(),
@@ -1170,28 +1192,52 @@ fn normal_matrix(rows: &[StandardizationRow]) -> Result<Vec<Vec<f64>>, RaimError
     Ok(normal)
 }
 
-fn standardized_abs(row: &StandardizationRow, q: &[Vec<f64>]) -> Result<f64, RaimError> {
-    let leverage = row_leverage(&row.h, q)?;
-    let variance_factor = 1.0 - leverage;
+/// Standardized residual magnitude of `rows[index]`, or `None` where the row has no
+/// redundancy to be tested.
+///
+/// A row that is the only one observing some state, as a snapshot phase row is for its
+/// ambiguity, has a leverage of exactly 1: that state absorbs any error in the row, so the
+/// row's residual is rounding noise of the fit and carries no test information. That is
+/// read from the structure rather than from `1 - h Q h`, whose rounding error grows with
+/// the conditioning of the normal matrix and can fall on either side of zero.
+fn standardized_abs(
+    rows: &[StandardizationRow],
+    index: usize,
+    q: &[Vec<f64>],
+) -> Result<Option<f64>, RaimError> {
+    let row = &rows[index];
+    if is_sole_observer(rows, index) {
+        return Ok(None);
+    }
+    let variance_factor = 1.0 - row_leverage(&row.h, q)?;
     if !variance_factor.is_finite() {
         return Err(RaimError::SingularGeometry);
     }
+    // A computed leverage of 1 leaves the row no redundancy either: untestable, whatever
+    // its residual, which is then rounding noise of the fit.
     if variance_factor.abs() <= LEVERAGE_TOLERANCE {
-        return if row.residual.abs() <= HIGH_LEVERAGE_RESIDUAL_ZERO_TOLERANCE {
-            Ok(0.0)
-        } else {
-            Err(RaimError::SingularGeometry)
-        };
+        return Ok(None);
     }
     if variance_factor < 0.0 {
         return Err(RaimError::SingularGeometry);
     }
     let standardized = row.residual.abs() / variance_factor.sqrt();
     if standardized.is_finite() {
-        Ok(standardized)
+        Ok(Some(standardized))
     } else {
         Err(RaimError::SingularGeometry)
     }
+}
+
+/// Whether `rows[index]` is the only row with a nonzero entry in some column.
+fn is_sole_observer(rows: &[StandardizationRow], index: usize) -> bool {
+    rows[index].h.iter().enumerate().any(|(column, value)| {
+        *value != 0.0
+            && rows
+                .iter()
+                .enumerate()
+                .all(|(other, row)| other == index || row.h.get(column).copied() == Some(0.0))
+    })
 }
 
 fn row_leverage(row: &[f64], q: &[Vec<f64>]) -> Result<f64, RaimError> {
@@ -1216,9 +1262,8 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    use crate::constants::F_L1_HZ;
     use crate::geometry::line_of_sight_from_az_el_deg;
-    use crate::observables::{predict, ObservableState, ObservablesError, PredictOptions};
+    use crate::observables::{ObservableState, ObservablesError};
     use crate::ppp_corrections::CivilDateTime;
     use crate::{GnssSatelliteId, GnssSystem};
 
@@ -1369,24 +1414,18 @@ mod tests {
             .iter()
             .map(|id| {
                 let satellite_id = id.to_string();
-                let prediction = predict(
-                    &source,
-                    *id,
-                    truth,
-                    0.0,
-                    PredictOptions {
-                        carrier_hz: F_L1_HZ,
-                        light_time: true,
-                        sagnac: true,
-                    },
-                )
-                .expect("synthetic prediction");
                 let bias = if Some(satellite_id.as_str()) == biased_satellite {
                     50.0
                 } else {
                     0.0
                 };
-                let code_m = prediction.geometric_range_m + clock_m + bias;
+                let (code_m, prediction) = crate::precise_positioning::synthetic_placed_code(
+                    &source,
+                    *id,
+                    truth,
+                    0.0,
+                    |geometry| geometry.geometric_range_m + clock_m + bias,
+                );
                 let ambiguity_m = ambiguities_m.get(&satellite_id).copied().unwrap();
                 super::super::FloatObservation {
                     sat: *id,
@@ -1494,6 +1533,7 @@ mod tests {
             &epoch,
             &solution,
             solve_tropo,
+            None,
             RaimConfig::default(),
         )
         .expect("RAIM for ZTD-estimated solution");
@@ -1552,7 +1592,7 @@ mod tests {
         }
 
         let geometry =
-            geometry_for_solution(&source, &epoch, &solution, solve_tropo).expect("geometry");
+            geometry_for_solution(&source, &epoch, &solution, solve_tropo, None).expect("geometry");
         let without_ztd =
             per_satellite_statistics(&solution.residuals_m, &geometry.rows, RaimConfig::default())
                 .expect("without ztd");
@@ -1563,6 +1603,7 @@ mod tests {
             &epoch,
             &solution,
             solve_tropo,
+            None,
             RaimConfig::default(),
         )
         .expect("RAIM with ZTD projection");
@@ -1633,10 +1674,16 @@ mod tests {
         }
         residuals[2].phase_m = 5.0;
 
-        assert_eq!(
-            per_satellite_statistics(&residuals, &test_geometry(), RaimConfig::default()),
-            Err(RaimError::SingularGeometry)
-        );
+        // Each phase row is the only observer of its ambiguity, which absorbs the outlier:
+        // the rows are reported untestable and the outlier raises no statistic.
+        let identification =
+            per_satellite_statistics(&residuals, &test_geometry(), RaimConfig::default())
+                .expect("untestable rows are not an error");
+        for stat in &identification.statistics {
+            assert!(!stat.phase_testable, "{}", stat.satellite_id);
+            assert_eq!(stat.phase, 0.0);
+            assert_eq!(stat.statistic, 0.0);
+        }
     }
 
     #[test]
@@ -1694,7 +1741,7 @@ mod tests {
         let solution = solve_float_epoch(&source, epoch.clone(), state, solve_config)
             .expect("ZTD-estimated solve");
         let geometry =
-            geometry_for_solution(&source, &epoch, &solution, solve_tropo).expect("geometry");
+            geometry_for_solution(&source, &epoch, &solution, solve_tropo, None).expect("geometry");
         let receiver = receiver_geodetic(solution.position_m);
 
         let without_ztd =
@@ -1711,6 +1758,7 @@ mod tests {
             &epoch,
             &solution,
             solve_tropo,
+            None,
             RaimConfig::default(),
         )
         .expect("RAIM with ZTD protection levels");
