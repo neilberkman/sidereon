@@ -57,14 +57,20 @@
 //! ## TLE-derived field quantization
 //!
 //! An OMM carries a full UTC calendar `EPOCH`, which is converted directly to
-//! SGP4's split Julian date. B\* and the second mean-motion derivative are still
-//! TLE-derived GP parameters:
+//! SGP4's split Julian date. B\* and the second mean-motion derivative are
+//! still TLE-derived GP parameters:
 //!
 //! - **B\* and the second mean-motion derivative.** A TLE stores these in its
-//!   "assumed decimal" field (five significant mantissa digits and a power-of-ten
-//!   exponent), and that quantized value is what SGP4 actually receives. OMM
-//!   prints the same quantities as plain decimals, so the bridge re-quantizes
-//!   them onto the assumed-decimal grid via [`crate::astro::tle`].
+//!   "assumed decimal" field (five significant mantissa digits and a
+//!   single-digit power-of-ten exponent), and that quantized value is what SGP4
+//!   actually receives. OMM prints the same quantities as plain decimals, so
+//!   the bridge re-quantizes them with the rounding the TLE writer in
+//!   [`crate::astro::tle`] uses.
+//!
+//! The quantized values are ones a TLE carries: writing them as a TLE and
+//! reading that back gives the same values. The first mean-motion derivative
+//! is carried as stated; SGP4 does not propagate with it, and a catalog OMM
+//! states the same value as its TLE.
 
 use crate::astro::ndm::{
     self, check_unit, covariance6_unit, split_unit, FieldMap, KvnLine, UnitMismatch,
@@ -348,8 +354,8 @@ pub struct Omm {
     #[serde(default, skip)]
     pub exact_sgp4_epoch: Option<JulianDate>,
     /// Whether TLE-derived GP fields (B\*, the second mean-motion derivative)
-    /// should be snapped to the legacy assumed-decimal TLE grid when bridging
-    /// into SGP4. Parsed catalog OMMs default to `true`: their GP values
+    /// should be snapped to the TLE assumed-decimal grid when bridging into
+    /// SGP4. Parsed catalog OMMs default to `true`: their GP values
     /// originate in the TLE field format, so the historical compatibility path
     /// reproduces the value a TLE consumer would see. Fitted OMMs set this
     /// `false`: their elements were estimated directly and never lived on the
@@ -3138,9 +3144,21 @@ impl Omm {
     ///
     /// The epoch is converted directly from the OMM calendar timestamp into
     /// SGP4's split Julian date, preserving years outside the TLE pivot range.
-    /// B\* and the second mean-motion derivative are quantized onto the TLE
-    /// assumed-decimal grid because those GP parameters originate in that field
-    /// format.
+    ///
+    /// With [`Omm::quantize_tle_derived_fields`] set (the default for a parsed
+    /// OMM), B\* and the second mean-motion derivative are rounded to the
+    /// values a TLE carries for them, because those GP parameters originate in
+    /// the TLE field format: the assumed-decimal field's five mantissa digits
+    /// and single-digit exponent, rounded as python-sgp4's `export_tle` rounds
+    /// them, and at exponent `-9` below `1e-10`. The rounding is the TLE
+    /// writer's, so these values written as a TLE read back unchanged, and a
+    /// catalog OMM gives exactly the values of its catalog TLE. A value no TLE
+    /// field holds (a magnitude that rounds to `1e9` or more) has no TLE value
+    /// to match and passes through unquantized: SGP4 propagates any finite B\*
+    /// and does not propagate with the derivatives, so such an element set
+    /// still propagates correctly. Only [`tle::encode`] refuses it. The first
+    /// mean-motion derivative passes through as stated. With the flag clear, as
+    /// for a fitted OMM, every value passes through unchanged.
     ///
     /// An explicitly stated `MEAN_ELEMENT_THEORY` other than `SGP4`,
     /// `SGP/SGP4` or `SDP4` (any letter case), `CENTER_NAME` other than
@@ -3161,18 +3179,20 @@ impl Omm {
     /// refused with [`OmmError::InvalidField`] for `epoch`.
     pub fn to_element_set(&self) -> Result<ElementSet, OmmError> {
         let inputs = validate_omm_bridge(self)?;
-        let bstar = if self.quantize_tle_derived_fields {
-            tle::assumed_decimal_quantize(inputs.bstar)
-        } else {
-            inputs.bstar
-        };
-        let mean_motion_double_dot = self.mean_motion_ddot.map(|value| {
+        // `validate_omm_bridge` has refused a non-finite value, so a
+        // quantizer refuses only a magnitude its TLE field cannot hold. That
+        // value has no TLE to match and SGP4 propagates it as it is.
+        let quantize = |value: f64, round: fn(f64) -> Result<f64, tle::TleError>| {
             if self.quantize_tle_derived_fields {
-                tle::assumed_decimal_quantize(value)
+                round(value).unwrap_or(value)
             } else {
                 value
             }
-        });
+        };
+        let bstar = quantize(inputs.bstar, tle::quantize_bstar);
+        let mean_motion_double_dot = self
+            .mean_motion_ddot
+            .map(|value| quantize(value, tle::quantize_mean_motion_double_dot));
         Ok(ElementSet {
             epoch: self
                 .exact_sgp4_epoch
@@ -4086,6 +4106,193 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
         let es = omm.to_element_set().expect("valid OMM bridge");
         assert_eq!(es.bstar, 0.17172 * 10.0_f64.powi(-3));
         assert_ne!(Some(es.bstar), omm.bstar);
+    }
+
+    const ISS_TLE: &str = include_str!("../../tests/fixtures/omm/25544.tle");
+
+    /// The ISS catalog TLE, the same element set as `ISS_KVN`.
+    fn iss_tle_elements() -> tle::TleElements {
+        let mut lines = ISS_TLE.lines().filter(|line| !line.trim().is_empty());
+        let _name = lines.next();
+        let (line1, line2) = (lines.next().unwrap(), lines.next().unwrap());
+        tle::parse(line1, line2).unwrap().elements
+    }
+
+    /// Bridge an ISS OMM carrying the given B\* and second derivative, write
+    /// the resulting element set as a TLE, and read that back.
+    fn omm_tle_round_trip(bstar: f64, nddot: f64) -> (ElementSet, ElementSet, String) {
+        let mut omm = parse_kvn(ISS_KVN).unwrap();
+        omm.bstar = Some(bstar);
+        omm.mean_motion_ddot = Some(nddot);
+        let from_omm = omm.to_element_set().expect("TLE-holdable terms bridge");
+
+        let mut el = iss_tle_elements();
+        el.bstar = from_omm.bstar;
+        el.bstar_text = None;
+        el.mean_motion_double_dot = from_omm.mean_motion_double_dot.unwrap();
+        el.mean_motion_double_dot_text = None;
+        let (line1, line2) = tle::encode(&el).expect("a quantized element set is writable");
+        let from_tle = tle::parse_with_policy(&line1, &line2, tle::TlePolicy::Strict)
+            .unwrap()
+            .elements
+            .to_element_set()
+            .unwrap();
+        (from_omm, from_tle, line1)
+    }
+
+    #[test]
+    fn quantized_element_set_is_a_fixed_point_of_tle_text() {
+        let cases = [
+            (-2.3456789e-12, -2.3456789e-12, "-00235-9", "-00235-9"),
+            (1.0e-10, 1.0e-10, " 10000-9", " 10000-9"),
+            (0.999996e-9, 9.999996e-11, " 10000-8", " 10000-9"),
+            (4.0e-15, -4.0e-15, " 00000+0", "-00000-0"),
+            (-0.0, 0.0, "-00000+0", " 00000-0"),
+            (1.009e-5, 0.0, " 10090-4", " 00000-0"),
+            (3.21675e-9, 0.5, " 32168-8", " 50000-0"),
+            (0.999994e9, -0.999994e9, " 99999+9", "-99999+9"),
+        ];
+        let check = |bstar: f64, nddot: f64| {
+            let (from_omm, from_tle, line1) = omm_tle_round_trip(bstar, nddot);
+            let label = format!("{bstar:e} {nddot:e}: {line1}");
+            assert_eq!(
+                from_omm.bstar.to_bits(),
+                from_tle.bstar.to_bits(),
+                "{label}"
+            );
+            assert_eq!(
+                from_omm.mean_motion_double_dot.map(f64::to_bits),
+                from_tle.mean_motion_double_dot.map(f64::to_bits),
+                "{label}"
+            );
+            (line1, label)
+        };
+        for (bstar, nddot, bstar_text, nddot_text) in cases {
+            let (line1, label) = check(bstar, nddot);
+            assert_eq!(&line1[53..61], bstar_text, "{label}");
+            assert_eq!(&line1[44..52], nddot_text, "{label}");
+        }
+
+        // Sampled values across magnitudes 1e-20 to 1e9, from a fixed
+        // SplitMix64 stream.
+        let mut state = 0x0A11_CE5E_ED00_0001_u64;
+        let mut unit = || {
+            state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = state;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            ((z ^ (z >> 31)) >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let mut sample = || {
+            let magnitude = libm::pow(10.0, -20.0 + 28.9 * unit());
+            if unit() < 0.5 {
+                magnitude
+            } else {
+                -magnitude
+            }
+        };
+        for _ in 0..5_000 {
+            let (bstar, nddot) = (sample(), sample());
+            check(bstar, nddot);
+        }
+    }
+
+    #[test]
+    fn quantized_omm_propagates_as_the_tle_carrying_its_terms() {
+        for (bstar, nddot) in [
+            (-2.3456789e-12, 0.0),
+            (1.009e-5, 1.0e-10),
+            (4.0e-15, -4.0e-15),
+        ] {
+            let mut omm = parse_kvn(ISS_KVN).unwrap();
+            omm.bstar = Some(bstar);
+            omm.mean_motion_ddot = Some(nddot);
+            let from_omm = Satellite::from_omm(&omm).unwrap();
+
+            let elements = omm.to_element_set().unwrap();
+            let mut el = iss_tle_elements();
+            el.bstar = elements.bstar;
+            el.bstar_text = None;
+            el.mean_motion_double_dot = elements.mean_motion_double_dot.unwrap();
+            el.mean_motion_double_dot_text = None;
+            let (line1, line2) = tle::encode(&el).unwrap();
+            let from_tle = Satellite::from_tle(&line1, &line2).unwrap();
+            for minutes in [0.0, 90.0, 1440.0] {
+                let a = from_omm
+                    .propagate(sgp4::MinutesSinceEpoch(minutes))
+                    .unwrap();
+                let b = from_tle
+                    .propagate(sgp4::MinutesSinceEpoch(minutes))
+                    .unwrap();
+                for axis in 0..3 {
+                    assert_eq!(
+                        a.position[axis].to_bits(),
+                        b.position[axis].to_bits(),
+                        "{bstar:e} at {minutes} min"
+                    );
+                    assert_eq!(
+                        a.velocity[axis].to_bits(),
+                        b.velocity[axis].to_bits(),
+                        "{bstar:e} at {minutes} min"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn terms_no_tle_field_holds_pass_through_unquantized() {
+        let iss = parse_kvn(ISS_KVN).unwrap().to_element_set().unwrap();
+        for (bstar, nddot) in [
+            (1.0e9, None),
+            (-0.999996e9, None),
+            (1.7172e-4, Some(2.0e12)),
+        ] {
+            let mut omm = parse_kvn(ISS_KVN).unwrap();
+            omm.bstar = Some(bstar);
+            if nddot.is_some() {
+                omm.mean_motion_ddot = nddot;
+            }
+            for quantize in [true, false] {
+                omm.quantize_tle_derived_fields = quantize;
+                let label = format!("{bstar:e} {nddot:?}, quantize {quantize}");
+                let elements = omm
+                    .to_element_set()
+                    .unwrap_or_else(|error| panic!("{label}: {error}"));
+                if bstar.abs() >= 0.999996e9 || !quantize {
+                    assert_eq!(elements.bstar.to_bits(), bstar.to_bits(), "{label}");
+                } else {
+                    assert_eq!(elements.bstar.to_bits(), iss.bstar.to_bits(), "{label}");
+                }
+                match nddot {
+                    Some(value) => assert_eq!(elements.mean_motion_double_dot, Some(value)),
+                    None => assert_eq!(elements.mean_motion_double_dot, omm.mean_motion_ddot),
+                }
+                assert_eq!(elements.mean_motion_dot, omm.mean_motion_dot, "{label}");
+                Satellite::from_omm(&omm).unwrap_or_else(|error| panic!("{label}: {error}"));
+
+                // The TLE writer refuses the element set: no TLE field holds
+                // the term.
+                let mut el = iss_tle_elements();
+                el.bstar = elements.bstar;
+                el.bstar_text = None;
+                el.mean_motion_double_dot = elements.mean_motion_double_dot.unwrap();
+                el.mean_motion_double_dot_text = None;
+                assert!(
+                    matches!(tle::encode(&el), Err(tle::TleError::InvalidField { .. })),
+                    "{label}"
+                );
+            }
+        }
+
+        // The first derivative is carried as stated, with more decimals than
+        // its TLE field or a magnitude the field cannot hold.
+        for ndot in [1.23456789e-5, 1.0, -0.999999996] {
+            let mut omm = parse_kvn(ISS_KVN).unwrap();
+            omm.mean_motion_dot = Some(ndot);
+            let elements = omm.to_element_set().unwrap();
+            assert_eq!(elements.mean_motion_dot, Some(ndot));
+        }
     }
 
     #[test]
