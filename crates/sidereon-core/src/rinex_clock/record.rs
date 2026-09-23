@@ -13,7 +13,7 @@ use crate::validate::{self, CivilSecondPolicy, FieldError};
 
 use super::epoch::{
     civil_restates_instant, civil_to_instant, clock_epoch_to_civil, instant_to_valid_civil,
-    nearest_microsecond_civil, valid_civil_to_clock_epoch, validate_instant, Civil,
+    nearest_microsecond_civil, valid_civil_to_clock_epoch, validate_instant, Civil, EpochSource,
 };
 use super::header::{ClockLayout, ClockTimeSystem};
 use super::numeric::{field_name_for_value_index, format_e19_12};
@@ -104,6 +104,8 @@ pub struct ClockRecord {
     pub(super) civil: Civil,
     pub(super) second_text: Option<String>,
     pub(super) epoch: Option<Instant>,
+    /// What `epoch` is built from.
+    pub(super) epoch_source: EpochSource,
     pub(super) values: Vec<f64>,
     pub(super) surplus: Vec<ClockSurplusValue>,
     pub(super) line: Option<usize>,
@@ -149,6 +151,7 @@ impl ClockRecord {
             civil,
             second_text: None,
             epoch: None,
+            epoch_source: EpochSource::Civil(civil),
             values,
             surplus: Vec::new(),
             line: None,
@@ -238,11 +241,12 @@ impl ClockRecord {
         if self.record_type != ClockRecordType::As {
             return None;
         }
-        Some(ClockPoint {
-            epoch: self.epoch?,
-            bias_s: *self.values.first()?,
-            additional_values: self.additional_values().to_vec(),
-        })
+        Some(ClockPoint::with_source(
+            self.epoch?,
+            *self.values.first()?,
+            self.additional_values().to_vec(),
+            self.epoch_source,
+        ))
     }
 }
 
@@ -865,21 +869,33 @@ pub(super) enum TypedEpoch {
         /// it fits the layout's seconds field.
         second_text: Option<String>,
     },
-    /// A scale-tagged instant supplied by a constructor.
-    Instant(Instant),
+    /// A scale-tagged instant supplied by a constructor, with what it was
+    /// built from.
+    Instant {
+        /// The epoch.
+        instant: Instant,
+        /// The civil tag or GPS seconds `instant` was built from, when known.
+        source: EpochSource,
+    },
 }
 
 impl TypedRecord {
     /// The public view of a typed record.
     pub(super) fn view(&self, ctx: &EpochContext) -> ClockRecord {
-        let (civil, second_text, epoch) = match &self.epoch {
+        let (civil, second_text, epoch, epoch_source) = match &self.epoch {
             TypedEpoch::Civil { civil, second_text } => (
                 *civil,
                 second_text.clone(),
                 ctx.scale
                     .and_then(|scale| civil_to_instant(scale, *civil).ok()),
+                EpochSource::Civil(*civil),
             ),
-            TypedEpoch::Instant(instant) => (instant_to_valid_civil(instant), None, Some(*instant)),
+            TypedEpoch::Instant { instant, source } => (
+                instant_to_valid_civil(instant),
+                None,
+                Some(*instant),
+                *source,
+            ),
         };
         let satellite = (self.record_type == ClockRecordType::As)
             .then(|| validate::strict_gnss_satellite_id(&self.name, "satellite").ok())
@@ -892,6 +908,7 @@ impl TypedRecord {
             civil,
             second_text,
             epoch,
+            epoch_source,
             values: self.values.clone(),
             surplus: Vec::new(),
             line: None,
@@ -1038,7 +1055,7 @@ pub(super) fn render_record_with(
                 ));
             }
         }
-        TypedEpoch::Instant(instant) => {
+        TypedEpoch::Instant { instant, .. } => {
             validate_instant(*instant, "epoch")?;
             if ClockTimeSystem::for_time_scale(instant.scale).is_none() {
                 return Err(RinexClockError::UnsupportedTimeScale {

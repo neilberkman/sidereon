@@ -1,11 +1,11 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use super::epoch::{epoch_cmp, instant_to_j2000_seconds, interpolate};
+use super::epoch::{epoch_cmp, instant_to_j2000_seconds, interpolate, nearest_microsecond_civil};
 use super::numeric::format_e19_12;
 use super::record::{read_parent, render_record, EpochContext, SigmaGap, TypedEpoch, TypedRecord};
 use super::*;
 use crate::astro::time::model::JulianDateSplit;
-use crate::constants::SECONDS_PER_DAY;
+use crate::constants::{GPS_EPOCH_TO_J2000_S, SECONDS_PER_DAY};
 use std::cmp::Ordering;
 
 fn as_record(satellite: &str, bias: &str) -> String {
@@ -23,7 +23,10 @@ fn typed_as(epoch: Instant, values: Vec<f64>) -> TypedRecord {
     TypedRecord {
         record_type: ClockRecordType::As,
         name: "G01".to_string(),
-        epoch: TypedEpoch::Instant(epoch),
+        epoch: TypedEpoch::Instant {
+            instant: epoch,
+            source: super::epoch::EpochSource::Instant,
+        },
         values,
     }
 }
@@ -288,16 +291,8 @@ fn interpolation_rejects_non_positive_bracket_span() {
         JulianDateSplit::new(day + 1.0, 0.5 / SECONDS_PER_DAY).expect("valid split Julian date"),
     );
     let records = [
-        ClockPoint {
-            epoch: p0,
-            bias_s: 1.0e-4,
-            additional_values: Vec::new(),
-        },
-        ClockPoint {
-            epoch: p1,
-            bias_s: 2.0e-4,
-            additional_values: Vec::new(),
-        },
+        ClockPoint::new(p0, 1.0e-4, Vec::new()),
+        ClockPoint::new(p1, 2.0e-4, Vec::new()),
     ];
 
     assert_eq!(interpolate(&records, query), None);
@@ -929,11 +924,7 @@ fn format_e19_12_formats_standard_examples_and_rejects_unrepresentable() {
 #[test]
 fn validate_clock_point_bounds_and_finite_checks() {
     let epoch = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 0.0).unwrap();
-    let valid = ClockPoint {
-        epoch,
-        bias_s: 1.0e-4,
-        additional_values: vec![1.0e-5, 2.0e-6, 3.0e-7, 4.0e-8, 5.0e-9],
-    };
+    let valid = ClockPoint::new(epoch, 1.0e-4, vec![1.0e-5, 2.0e-6, 3.0e-7, 4.0e-8, 5.0e-9]);
     assert!(valid.validate().is_ok());
 
     let mut too_many = valid.clone();
@@ -1630,9 +1621,9 @@ fn batch_edits_rebuild_once_and_change_nothing_on_refusal() {
 #[test]
 fn correctly_rounded_gps_seconds_are_written_strict() {
     // GPS seconds a caller writes as decimals with microsecond digits are the
-    // correctly rounded doubles of those decimals; the product's own seconds
-    // export misses about a quarter of them by one unit in the last place.
-    // Both are written as their microsecond text, and the product's series
+    // correctly rounded doubles of those decimals, the same doubles the
+    // product's own seconds export gives for records read from that text.
+    // They are written as their microsecond text, and the product's series
     // rows stay the doubles it was built from.
     let mut state = 0x853c_49e6_748f_ea9b_u64;
     let mut next = |bound: u64| {
@@ -1730,4 +1721,431 @@ fn a_leap_second_instant_just_before_midnight_rounds_to_midnight() {
         .to_rinex_string()
         .unwrap()
         .contains("AS G05  2016 12 31 23 59 60.500000"));
+}
+
+/// Year, month, day, hour and minute of a civil tag.
+type CivilMinute = (i64, i64, i64, i64, i64);
+
+/// Days from 1980-01-06 to a proleptic Gregorian date, counted without the
+/// crate's calendar code (days-from-civil over 400-year eras).
+fn reference_days_since_gps_epoch(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let year_of_era = y - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    // 719_468 days from 0000-03-01 to 1970-01-01, then 3_657 to 1980-01-06.
+    era * 146_097 + day_of_era - 719_468 - 3_657
+}
+
+/// The GPS seconds a civil tag states, as decimal text read by the correctly
+/// rounded `str::parse`: the exact rational value rounded once.
+fn reference_gps_seconds(
+    (year, month, day, hour, minute): CivilMinute,
+    whole_second: i64,
+    fraction_digits: &str,
+) -> f64 {
+    const SCALE: i128 = 10_000_000_000_000;
+    assert!(fraction_digits.len() <= 13);
+    let whole = i128::from(reference_days_since_gps_epoch(year, month, day)) * 86_400
+        + i128::from(hour * 3_600 + minute * 60 + whole_second);
+    let fraction = format!("{fraction_digits:0<13}").parse::<i128>().unwrap();
+    let total = whole * SCALE + fraction;
+    let sign = if total < 0 { "-" } else { "" };
+    let magnitude = total.unsigned_abs();
+    format!(
+        "{sign}{}.{:013}",
+        magnitude / SCALE as u128,
+        magnitude % SCALE as u128
+    )
+    .parse()
+    .unwrap()
+}
+
+#[test]
+fn a_seven_digit_tag_has_one_gps_second_value_on_every_path() {
+    // 2026-05-13 00:00:59.9999996 GPST is 1462665659.9999996 GPS seconds,
+    // whose nearest double is 0x41d5cba06efffffe. Adding the microseconds and
+    // then the sub-microsecond digits as doubles gave the next double up for
+    // the civil conversion, while the record read from the same text gave
+    // this one.
+    const STATED: u64 = 0x41d5_cba0_6eff_fffe;
+    assert_eq!(
+        "1462665659.9999996".parse::<f64>().unwrap().to_bits(),
+        STATED
+    );
+    let civil = civil_to_gps_seconds(2026, 5, 13, 0, 0, 59.9999996).expect("GPS seconds");
+    assert_eq!(civil.to_bits(), STATED);
+
+    let text = "AS G05  2026 05 13 00 00 59.9999996  1   1.0e-04\n";
+    let clock = RinexClock::parse(text).expect("seven-digit clock epoch");
+    let record = clock.series()["G05"][0].gps_seconds().expect("GPST sample");
+    assert_eq!(record.to_bits(), STATED);
+    assert_eq!(clock.series_rows()[0].1[0].0.to_bits(), STATED);
+    assert_eq!(
+        clock
+            .clock_s_at_gps_seconds("G05", civil)
+            .expect("valid query"),
+        Some(1.0e-4)
+    );
+}
+
+#[test]
+fn a_record_answers_a_query_at_its_own_gps_seconds() {
+    // 2026-05-13 00:00:30.126705 is 1462665630.126705 GPS seconds, nearest
+    // double 0x41d5cba067881bef. The split the GPS-seconds constructor builds
+    // from that double falls just before the record's own split, so the query
+    // instant lies before the first sample; the record answers at the GPS
+    // seconds it exports.
+    let text = "AS G05  2026 05 13 00 00 30.126705  1   1.0e-04\n\
+                AS G05  2026 05 13 00 01  0.000000  1   2.0e-04\n";
+    let clock = RinexClock::parse(text).expect("clock");
+    let rows = clock.series_rows();
+    let exported = rows[0].1[0].0;
+    assert_eq!(exported.to_bits(), 0x41d5_cba0_6788_1bef);
+    assert_eq!(
+        exported,
+        reference_gps_seconds((2026, 5, 13, 0, 0), 30, "126705")
+    );
+    let query = gps_seconds_to_instant(exported).expect("query instant");
+    assert_eq!(
+        epoch_cmp(&query, &clock.series()["G05"][0].epoch),
+        Ordering::Less
+    );
+    for &(gps_seconds, bias_s) in &rows[0].1 {
+        assert_eq!(
+            clock
+                .clock_s_at_gps_seconds("G05", gps_seconds)
+                .expect("valid query"),
+            Some(bias_s)
+        );
+    }
+}
+
+#[test]
+fn the_stated_second_of_a_record_is_its_nearest_double() {
+    // 30 + 0.000357 + 0.0000001 summed as doubles is 30.000357100000002; the
+    // nearest double to 30.0003571 is the one the literal reads to.
+    let text = "AS G05  2026 05 13 00 00 30.0003571  1   1.0e-04\n";
+    let clock = RinexClock::parse(text).expect("clock");
+    let second = clock.records().next().unwrap().civil_epoch().second;
+    assert_eq!(second.to_bits(), 30.000_357_1_f64.to_bits());
+}
+
+#[test]
+fn the_nearest_microsecond_rounds_the_stated_digits() {
+    let civil = |minute: u32, second: u32, microsecond: u32, femtosecond: u32| Civil {
+        year: 2026,
+        month: 5,
+        day: 13,
+        hour: 0,
+        minute,
+        second,
+        microsecond,
+        femtosecond,
+    };
+    let fields = |c: Civil| (c.minute, c.second, c.microsecond, c.femtosecond);
+    // 30.1234565 is half a microsecond past 30.123456 and rounds up; summed
+    // as doubles it read 123456.49999999964 microseconds and rounded down.
+    let tie = nearest_microsecond_civil(civil(0, 30, 123_456, 500_000_000)).unwrap();
+    assert_eq!(fields(tie), (0, 30, 123_457, 0));
+    let below = nearest_microsecond_civil(civil(0, 30, 123_456, 499_999_999)).unwrap();
+    assert_eq!(fields(below), (0, 30, 123_456, 0));
+    let carry = nearest_microsecond_civil(civil(0, 59, 999_999, 500_000_000)).unwrap();
+    assert_eq!(fields(carry), (1, 0, 0, 0));
+}
+
+#[test]
+fn gps_seconds_are_the_correctly_rounded_count_on_every_path() {
+    // Civil tags from year 1 to 9999 with up to thirteen fractional second
+    // digits. Each conversion is compared with the stated count as decimal
+    // text read by the correctly rounded `str::parse`: the civil conversion
+    // and the record path (a record stating the tag read into a GPST and a
+    // QZSST product, then `ClockPoint::gps_seconds`) for every tag, and a sample
+    // built from the reader's instant alone for tags of up to ten digits,
+    // the finest the reader's split tells apart.
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = |bound: u64| {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state % bound
+    };
+    let days_in_month = |year: i64, month: i64| match month {
+        2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    let mut cases: Vec<(CivilMinute, i64, String)> = vec![
+        ((2026, 5, 13, 0, 0), 59, "9999996".to_string()),
+        ((2026, 5, 13, 0, 0), 59, "9999999999999".to_string()),
+        ((1999, 12, 31, 23, 59), 59, "9999999999".to_string()),
+        ((9999, 12, 31, 23, 59), 59, "999999".to_string()),
+        ((1, 1, 1, 0, 0), 0, "0000000000001".to_string()),
+        ((1980, 1, 6, 0, 0), 0, "0000001".to_string()),
+        ((1980, 1, 5, 23, 59), 59, "9999999".to_string()),
+    ];
+    for _ in 0..20_000 {
+        let year = if next(2) == 0 {
+            1980 + next(120) as i64
+        } else {
+            1 + next(9999) as i64
+        };
+        let month = 1 + next(12) as i64;
+        let day = 1 + next(days_in_month(year, month) as u64) as i64;
+        let digits = next(14) as usize;
+        let fraction: String = (0..digits)
+            .map(|_| char::from(b'0' + next(10) as u8))
+            .collect();
+        cases.push((
+            (year, month, day, next(24) as i64, next(60) as i64),
+            next(60) as i64,
+            fraction,
+        ));
+    }
+    for (fields, whole_second, fraction) in cases {
+        let (year, month, day, hour, minute) = fields;
+        let second: f64 = format!("{whole_second}.{fraction}0").parse().unwrap();
+        let want = reference_gps_seconds(fields, whole_second, &fraction);
+        let label = format!(
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{whole_second:02}.{fraction}"
+        );
+        let args = (
+            year as i32,
+            month as u8,
+            day as u8,
+            hour as u8,
+            minute as u8,
+        );
+        let got = civil_to_gps_seconds(args.0, args.1, args.2, args.3, args.4, second)
+            .unwrap_or_else(|| panic!("{label}"));
+        assert_eq!(got.to_bits(), want.to_bits(), "{label}: {got:e} {want:e}");
+        for scale in [TimeScale::Gpst, TimeScale::Qzsst] {
+            assert_eq!(
+                record_gps_seconds(scale, fields, &format!("{whole_second}.{fraction}0"))
+                    .map(f64::to_bits),
+                Some(want.to_bits()),
+                "{label} {scale:?} record"
+            );
+            if fraction.trim_end_matches('0').len() <= 10 {
+                let epoch =
+                    civil_to_clock_instant(scale, args.0, args.1, args.2, args.3, args.4, second)
+                        .unwrap_or_else(|| panic!("{label}"));
+                assert_eq!(
+                    ClockPoint::new(epoch, 0.0, Vec::new())
+                        .gps_seconds()
+                        .map(f64::to_bits),
+                    Some(want.to_bits()),
+                    "{label} {scale:?} instant"
+                );
+            }
+        }
+    }
+    // GPS time has no leap-second label: a second of 60 is refused.
+    assert_eq!(civil_to_gps_seconds(2016, 12, 31, 23, 59, 60.0), None);
+    assert_eq!(civil_to_gps_seconds(2016, 12, 31, 23, 59, 60.5), None);
+}
+
+#[test]
+fn gps_seconds_rows_are_exported_as_they_were_given() {
+    // Any double from about 24 days after the GPS epoch onward, where the
+    // double grid is coarser than the day split's resolution, is exported as
+    // the double the product was built from, on either side of the epoch.
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut rows = Vec::new();
+    for _ in 0..20_000 {
+        let unit = (next() >> 11) as f64 / (1_u64 << 53) as f64;
+        let seconds = if next().is_multiple_of(2) {
+            2.0e6 + unit * 2.4e11
+        } else {
+            -2.0e6 - unit * 6.0e10
+        };
+        rows.push(seconds);
+    }
+    rows.sort_by(f64::total_cmp);
+    rows.dedup();
+    let rows: Vec<(f64, f64)> = rows.into_iter().map(|seconds| (seconds, 1.0e-4)).collect();
+    let clock =
+        RinexClock::from_series_rows(vec![("G01".to_string(), rows.clone())]).expect("rows");
+    let exported = clock.series_rows();
+    for (&(got, _), &(want, _)) in exported[0].1.iter().zip(&rows) {
+        assert_eq!(got.to_bits(), want.to_bits(), "{want:e}");
+    }
+    assert_eq!(exported[0].1.len(), rows.len());
+}
+
+/// GPS seconds of the one sample of a GPST or QZSST product read from a
+/// record stating `seconds` as its seconds field, whitespace-separated.
+fn record_gps_seconds(
+    scale: TimeScale,
+    (year, month, day, hour, minute): CivilMinute,
+    seconds: &str,
+) -> Option<f64> {
+    let (header, name) = match scale {
+        TimeScale::Qzsst => (
+            " 3.04                 C                    J                      RINEX VERSION / TYPE\n\
+                QZS                                                           TIME SYSTEM ID\n\
+                                                                              END OF HEADER\n",
+            "J02",
+        ),
+        _ => ("", "G05"),
+    };
+    let text = format!(
+        "{header}AS {name} {year:04} {month:02} {day:02} {hour:02} {minute:02} {seconds} 1 1.0e-04\n"
+    );
+    let clock = RinexClock::parse(&text).ok()?;
+    assert_eq!(clock.time_scale(), Some(scale), "{text}");
+    clock.series().get(name)?.first()?.gps_seconds()
+}
+
+#[test]
+fn tags_the_split_cannot_tell_apart_keep_their_own_gps_seconds() {
+    // Each tag's reader split is also the reader split of a ten-digit tag on
+    // the other side of a rounding boundary of the GPS-seconds grid, so the
+    // instant alone gives the neighbouring double. A record read from text,
+    // in a GPST or a QZSST product, keeps its tag and gives the correctly
+    // rounded value. (`ClockRecord::new` refuses a tag finer than a
+    // microsecond on insertion, so only a read record can hold one.)
+    for (fields, whole_second, fraction) in [
+        ((2002, 10, 2, 19, 39), 7, "79081088304"),
+        ((2022, 9, 26, 21, 6), 52, "513679146771"),
+    ] {
+        let (year, month, day, hour, minute) = fields;
+        let want = reference_gps_seconds(fields, whole_second, fraction);
+        let second: f64 = format!("{whole_second}.{fraction}").parse().unwrap();
+        let tag = ClockEpoch {
+            year: year as i32,
+            month: month as u8,
+            day: day as u8,
+            hour: hour as u8,
+            minute: minute as u8,
+            second,
+        };
+        let civil = civil_to_gps_seconds(
+            tag.year, tag.month, tag.day, tag.hour, tag.minute, tag.second,
+        )
+        .unwrap();
+        assert_eq!(civil.to_bits(), want.to_bits());
+        assert_eq!(
+            record_gps_seconds(
+                TimeScale::Qzsst,
+                fields,
+                &format!("{whole_second}.{fraction}")
+            )
+            .map(f64::to_bits),
+            Some(want.to_bits())
+        );
+        let text = format!(
+            "AS G05 {year:04} {month:02} {day:02} {hour:02} {minute:02} {whole_second}.{fraction} 1 1.0e-04\n"
+        );
+        let clock = RinexClock::parse(&text).expect("whitespace record");
+        let point = &clock.series()["G05"][0];
+        assert_eq!(
+            point.gps_seconds().map(f64::to_bits),
+            Some(want.to_bits()),
+            "{text}"
+        );
+        assert_eq!(clock.series_rows()[0].1[0].0.to_bits(), want.to_bits());
+        assert_eq!(
+            clock
+                .clock_s_at_gps_seconds("G05", want)
+                .expect("valid query"),
+            Some(1.0e-4)
+        );
+        let lookup = ClockPoint::new(point.epoch, 1.0e-4, Vec::new())
+            .gps_seconds()
+            .unwrap();
+        assert_eq!(
+            lookup.to_bits().abs_diff(want.to_bits()),
+            1,
+            "the instant alone lands on the neighbouring double"
+        );
+    }
+}
+
+#[test]
+fn a_qzsst_record_answers_a_query_at_its_own_gps_seconds() {
+    let text =
+        " 3.04                 C                    J                      RINEX VERSION / TYPE\n\
+                   QZS                                                           TIME SYSTEM ID\n\
+                                                                                 END OF HEADER\n\
+AS J02       2026 05 13 00 00 30.126705  1   -0.232835122007E-05\n\
+AS J02       2026 05 13 00 01  0.000000  1   -0.232835122107E-05\n";
+    let clock = RinexClock::parse(text).expect("QZS clock");
+    assert_eq!(clock.time_scale(), Some(TimeScale::Qzsst));
+    let rows = clock.series_rows();
+    assert_eq!(rows[0].1[0].0.to_bits(), 0x41d5_cba0_6788_1bef);
+    for &(gps_seconds, bias_s) in &rows[0].1 {
+        assert_eq!(
+            clock
+                .clock_s_at_gps_seconds("J02", gps_seconds)
+                .expect("valid query"),
+            Some(bias_s)
+        );
+    }
+}
+
+#[test]
+fn samples_sharing_one_gps_seconds_value_are_interpolated_between() {
+    // 30.1261057 and 30.1261058 are 0.1 microseconds apart and both round to
+    // 0x41d5cba06788121e GPS seconds. A query at that value names neither
+    // sample alone and is interpolated at its own instant.
+    let text = "AS G05  2026 05 13 00 00 30.1261057  1   1.0e-04\n\
+                AS G05  2026 05 13 00 00 30.1261058  1   2.0e-04\n\
+                AS G05  2026 05 13 00 01  0.000000  1   3.0e-04\n";
+    let clock = RinexClock::parse(text).expect("clock");
+    let shared = clock.series_rows()[0].1[0].0;
+    assert_eq!(shared.to_bits(), 0x41d5_cba0_6788_121e);
+    assert_eq!(clock.series_rows()[0].1[1].0.to_bits(), shared.to_bits());
+    let query = gps_seconds_to_instant(shared).expect("query instant");
+    assert_eq!(
+        clock
+            .clock_s_at_gps_seconds("G05", shared)
+            .expect("valid query"),
+        clock.clock_s_at_instant("G05", query).expect("valid query")
+    );
+}
+
+#[test]
+fn gps_seconds_exported_before_3_0_0_are_written_as_their_tags() {
+    // Before 3.0.0 `series_rows` summed the reader split's two parts in f64.
+    // For these tags that sum is one unit in the last place from the
+    // correctly rounded double. A product rebuilt from it is written strict
+    // as the tag, with no departure under the lenient policy, and reading the
+    // text back gives the correctly rounded double.
+    let tags = ["30.095029", "30.118786", "30.126705", "30.142543"];
+    let mut rows = Vec::new();
+    let mut correct = Vec::new();
+    for tag in tags {
+        let second: f64 = tag.parse().unwrap();
+        let instant =
+            civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, second).expect("instant");
+        let exported_2x = instant_to_j2000_seconds(&instant).unwrap() + GPS_EPOCH_TO_J2000_S;
+        let rounded = civil_to_gps_seconds(2026, 5, 13, 0, 0, second).unwrap();
+        assert_ne!(exported_2x, rounded, "{tag}");
+        rows.push((exported_2x, 1.0e-4));
+        correct.push((rounded, 1.0e-4));
+    }
+    let clock =
+        RinexClock::from_series_rows(vec![("G05".to_string(), rows.clone())]).expect("2.x rows");
+    assert_eq!(clock.series_rows()[0].1, rows);
+    let text = clock.to_rinex_string().expect("written strict");
+    for tag in tags {
+        let line = format!("AS G05  2026 05 13 00 00 {tag}");
+        assert!(text.contains(&line), "{line}\n{text}");
+    }
+    let (lenient, departures) = clock
+        .to_rinex_string_with_policy(ClockWritePolicy::lenient())
+        .expect("written lenient");
+    assert!(departures.is_empty(), "{departures:?}");
+    assert_eq!(lenient, text);
+    let reread = RinexClock::parse(&text).expect("reread");
+    assert_eq!(reread.series_rows()[0].1, correct);
 }

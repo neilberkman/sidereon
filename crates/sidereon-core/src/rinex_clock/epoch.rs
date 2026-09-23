@@ -6,7 +6,8 @@ use crate::astro::constants::time::SECONDS_PER_DAY_I64;
 use crate::astro::math::interp::lerp_ratio;
 use crate::astro::time::civil::{
     civil_from_julian_day_number, j2000_seconds_from_split, seconds_between_splits,
-    split_julian_date_from_j2000_seconds, J2000_JULIAN_DAY_NUMBER, J2000_NOON_OFFSET_S,
+    seconds_from_femtoseconds, seconds_from_split_exact, split_julian_date_from_j2000_seconds,
+    J2000_JULIAN_DAY_NUMBER, J2000_NOON_OFFSET_S,
 };
 use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale};
 use crate::astro::time::scales::{find_leap_seconds, julian_day_number};
@@ -52,7 +53,15 @@ pub fn civil_to_clock_instant(
 
 /// Convert a civil GPS-time tag into seconds since 1980-01-06 00:00:00.
 ///
-/// The second is read as [`civil_to_clock_instant`] reads it.
+/// The second is read as [`civil_to_clock_instant`] reads it, and the result
+/// is the `f64` nearest to the exact GPS second count the tag states. A clock
+/// record read from the same tag, or built from it with
+/// [`super::ClockRecord::new`], reports the same value from
+/// [`super::ClockPoint::gps_seconds`] and [`super::RinexClock::series_rows`].
+/// The instant [`civil_to_clock_instant`] returns does not carry the tag: a
+/// sample built from that instant alone reports the same value when the tag
+/// has at most ten fractional second digits, and otherwise the value nearest
+/// to the instant, which can be one unit in the last place away.
 pub fn civil_to_gps_seconds(
     year: i32,
     month: u8,
@@ -103,19 +112,131 @@ fn gps_seconds_split(gps_seconds: f64) -> Option<JulianDateSplit> {
     JulianDateSplit::new(gps_epoch_jd + days, seconds_of_day / SECONDS_PER_DAY).ok()
 }
 
+/// What a clock sample's instant was built from. A civil tag or GPS seconds
+/// fixes the sample's GPS seconds exactly, where the instant's split Julian
+/// date resolves time only to about 1e-11 s.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum EpochSource {
+    /// The civil tag the instant is the reader's conversion of.
+    Civil(Civil),
+    /// The GPS seconds [`gps_seconds_to_instant`] built the instant from.
+    GpsSeconds(f64),
+    /// Nothing but the instant itself.
+    Instant,
+}
+
+/// GPS seconds of a sample at `epoch` built from `source`: the source's own
+/// value while `epoch` is still the instant built from it, otherwise
+/// [`instant_to_gps_seconds`].
+pub(super) fn point_gps_seconds(epoch: &Instant, source: EpochSource) -> Option<f64> {
+    if clock_timeline(epoch.scale) != TimeScale::Gpst {
+        return None;
+    }
+    let split = epoch.julian_date()?;
+    let same = |other: JulianDateSplit| {
+        other.jd_whole.to_bits() == split.jd_whole.to_bits()
+            && other.fraction.to_bits() == split.fraction.to_bits()
+    };
+    match source {
+        EpochSource::Civil(civil) if civil_to_julian_split(epoch.scale, civil).is_ok_and(same) => {
+            gps_seconds_from_civil(civil)
+        }
+        EpochSource::GpsSeconds(gps_seconds)
+            if epoch.scale == TimeScale::Gpst
+                && gps_seconds_split(gps_seconds).is_some_and(same) =>
+        {
+            Some(gps_seconds)
+        }
+        _ => instant_to_gps_seconds(epoch),
+    }
+}
+
 /// GPS seconds of an instant on the GPST timeline.
 ///
 /// QZSST reads the same TAI - 19 s alignment as GPST (RINEX clock 3.04 Table
 /// A15; IS-QZSS-PNT sec. 3.2.2), so a QZSST epoch projects to the same GPS
 /// seconds. This is the same timeline [`clock_timeline`] uses to answer a
 /// GPS-seconds query against QZSST rows, so the projection and the query agree.
+///
+/// This is the conversion for an instant with nothing known about what it was
+/// built from ([`point_gps_seconds`] uses a sample's source first). A split
+/// Julian date that is the reader's conversion of a civil tag with at most
+/// ten fractional second digits ([`civil_read_as_split`]) takes the GPS
+/// seconds of that tag from [`gps_seconds_from_civil`]. Any other split takes
+/// the `f64` nearest to the exact time its two parts hold
+/// ([`split_gps_seconds`]).
 pub(super) fn instant_to_gps_seconds(epoch: &Instant) -> Option<f64> {
     if clock_timeline(epoch.scale) != TimeScale::Gpst {
         return None;
     }
-    instant_to_j2000_seconds(epoch).map(|seconds| seconds + GPS_EPOCH_TO_J2000_S)
+    let split = epoch.julian_date()?;
+    match civil_read_as_split(epoch.scale, split) {
+        Some(civil) => gps_seconds_from_civil(civil),
+        None => Some(split_gps_seconds(split)),
+    }
 }
 
+/// Julian date of the GPS epoch, 1980-01-06 00:00:00, times 86400.
+const GPS_EPOCH_JD_SECONDS: i64 = 211_182_724_800;
+
+/// GPS seconds of a split Julian date: the `f64` nearest to the exact time
+/// its two parts hold. A split the fixed-point sum cannot hold (see
+/// [`seconds_from_split_exact`]; no split of the civil years 1 through 9999
+/// whose `jd_whole` is a whole or half day is one) takes the J2000-seconds
+/// arithmetic.
+fn split_gps_seconds(split: JulianDateSplit) -> f64 {
+    seconds_from_split_exact(split.jd_whole, split.fraction, GPS_EPOCH_JD_SECONDS).unwrap_or_else(
+        || j2000_seconds_from_split(split.jd_whole, split.fraction) + GPS_EPOCH_TO_J2000_S,
+    )
+}
+
+/// The civil tag with at most ten fractional second digits whose reading
+/// ([`civil_to_julian_split`] in `scale`) is `split`, bit for bit.
+///
+/// The reader's split of a tag lies within 2e-11 s of the tag, and the splits
+/// of two tags 1e-10 s apart differ, so the nearest tag on the 1e-10 s grid to
+/// the time the split holds is the only candidate, and it is accepted only
+/// when its reading reproduces the split. A split read from a tag with more
+/// digits can share its bits with a ten-digit tag; that tag is returned, and
+/// its GPS seconds differ from the longer tag's only when a rounding boundary
+/// of the `f64` grid falls between the two.
+fn civil_read_as_split(scale: TimeScale, split: JulianDateSplit) -> Option<Civil> {
+    const UNITS_PER_SECOND: i64 = 10_000_000_000;
+    const UNITS_PER_DAY: i64 = SECONDS_PER_DAY_I64 * UNITS_PER_SECOND;
+    let day_boundary = split.jd_whole + 0.5;
+    if !(0.0..1.0e9).contains(&day_boundary)
+        || day_boundary.fract() != 0.0
+        || !(0.0..1.0).contains(&split.fraction)
+    {
+        return None;
+    }
+    let units = (split.fraction * UNITS_PER_DAY as f64).round() as i64;
+    if !(0..UNITS_PER_DAY).contains(&units) {
+        return None;
+    }
+    let (year, month, day) = civil_from_julian_day_number(day_boundary as i64);
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
+    let second_of_day = units / UNITS_PER_SECOND;
+    let subsecond = units % UNITS_PER_SECOND;
+    let civil = Civil {
+        year,
+        month: month as u32,
+        day: day as u32,
+        hour: (second_of_day / 3_600) as u32,
+        minute: (second_of_day % 3_600 / 60) as u32,
+        second: (second_of_day % 60) as u32,
+        microsecond: (subsecond / 10_000) as u32,
+        femtosecond: (subsecond % 10_000 * 100_000) as u32,
+    };
+    let read = civil_to_julian_split(scale, civil).ok()?;
+    (read.jd_whole.to_bits() == split.jd_whole.to_bits()
+        && read.fraction.to_bits() == split.fraction.to_bits())
+    .then_some(civil)
+}
+
+#[cfg(test)]
 pub(super) fn instant_to_j2000_seconds(epoch: &Instant) -> Option<f64> {
     match epoch.repr {
         InstantRepr::JulianDate(split) => {
@@ -195,10 +316,7 @@ fn civil_to_julian_split(scale: TimeScale, civil: Civil) -> Result<JulianDateSpl
 /// A validated civil epoch as the public [`ClockEpoch`]. The `f64` second is
 /// the nearest double to the stated second.
 pub(super) fn valid_civil_to_clock_epoch(civil: Civil) -> ClockEpoch {
-    let mut second = f64::from(civil.second) + f64::from(civil.microsecond) / 1_000_000.0;
-    if civil.femtosecond != 0 {
-        second += f64::from(civil.femtosecond) / 1.0e15;
-    }
+    let second = seconds_from_femtoseconds(civil_subminute_femtoseconds(civil));
     ClockEpoch {
         year: civil.year as i32,
         month: civil.month as u8,
@@ -257,14 +375,20 @@ pub(super) fn instant_to_valid_civil(epoch: &Instant) -> Civil {
 /// states:
 ///
 /// - the reader's conversion of `civil` itself;
-/// - the GPS-seconds conversion ([`RinexClock::from_series_rows`]) of the GPS
-///   second count the reader's instant states, which is what `series_rows`
-///   exports, so a product rebuilt from that export is restated;
-/// - the same conversion of the correctly rounded double of the GPS second
-///   count `civil` states as decimal text, so a product built from GPS seconds
-///   a caller wrote as decimals is restated (the export above misses that
-///   double by one unit in the last place for about a quarter of microsecond
-///   epochs);
+/// - the GPS-seconds conversion ([`RinexClock::from_series_rows`]) of the
+///   correctly rounded double of the GPS second count `civil` states
+///   ([`gps_seconds_from_civil`]). That double is what `series_rows` exports
+///   for a record read from `civil` and what GPS seconds a caller writes as
+///   decimal text read to, so a product rebuilt from either is restated;
+/// - the same conversion of the GPS seconds `series_rows` exported for the
+///   reader's instant of `civil` before 3.0.0, which summed the split's two
+///   parts in `f64` ([`gps_seconds_2x_export`]) and misses the correctly
+///   rounded double by one unit in the last place for some microsecond
+///   epochs. Its two roundings (half a unit in the last place of the J2000
+///   seconds, then of the GPS seconds) keep it within 0.18 microseconds of
+///   the tag from 1980 through 2047, so there it lies nearer that microsecond
+///   tag than any other; a product rebuilt from it is written as that tag,
+///   and reading the text back gives the correctly rounded double;
 /// - the whole-J2000-second conversion
 ///   ([`crate::astro::time::split_julian_date_from_j2000_seconds`], noon day
 ///   boundary) of the whole J2000 second `civil` states, counted in integer
@@ -293,28 +417,25 @@ pub(super) fn civil_restates_instant(civil: Civil, epoch: &Instant) -> bool {
             if same(read_back) {
                 return true;
             }
-            if gps_seconds_split(gps_second_count(read_back)).is_some_and(same) {
-                return true;
-            }
             if civil.femtosecond != 0 || civil.second >= 60 {
                 return false;
+            }
+            // The GPS second count `civil` states, correctly rounded: what
+            // `series_rows` exports for a record read from `civil`, and what a
+            // caller's GPS seconds written as decimal text read to.
+            if gps_seconds_from_civil(civil)
+                .and_then(gps_seconds_split)
+                .is_some_and(same)
+            {
+                return true;
+            }
+            // The GPS seconds the 2.x export gave for the reader's instant.
+            if gps_seconds_split(gps_seconds_2x_export(read_back)).is_some_and(same) {
+                return true;
             }
             let second_of_day = i64::from(civil.hour) * 3_600
                 + i64::from(civil.minute) * 60
                 + i64::from(civil.second);
-            // The GPS second count `civil` states, written as decimal text from
-            // its whole seconds and six microsecond digits and read correctly
-            // rounded, as a caller's GPS seconds are.
-            let gps_days =
-                days_since_gps_epoch(civil.year as i32, civil.month as u8, civil.day as u8);
-            if let Some(gps_seconds) = decimal_seconds(
-                gps_days * SECONDS_PER_DAY_I64 + second_of_day,
-                civil.microsecond,
-            ) {
-                if gps_seconds_split(gps_seconds).is_some_and(same) {
-                    return true;
-                }
-            }
             // The whole J2000 second `civil` states, in exact integer arithmetic.
             if civil.microsecond == 0 {
                 let days =
@@ -330,40 +451,30 @@ pub(super) fn civil_restates_instant(civil: Civil, epoch: &Instant) -> bool {
     }
 }
 
-/// The double nearest to `whole_seconds + microsecond / 10^6`, read from its
-/// decimal text by the correctly rounded `str::parse`.
-fn decimal_seconds(whole_seconds: i64, microsecond: u32) -> Option<f64> {
-    let total = i128::from(whole_seconds) * 1_000_000 + i128::from(microsecond);
-    let magnitude = total.unsigned_abs();
-    let sign = if total < 0 { "-" } else { "" };
-    format!(
-        "{sign}{}.{:06}",
-        magnitude / 1_000_000,
-        magnitude % 1_000_000
-    )
-    .parse()
-    .ok()
-}
-
-/// Seconds since the GPS epoch of a split Julian date on its own scale's
-/// labels, computed as [`instant_to_gps_seconds`] computes it.
-fn gps_second_count(split: JulianDateSplit) -> f64 {
+/// The GPS seconds `series_rows` exported for a split Julian date before
+/// 3.0.0: the J2000 seconds of the split's two parts summed in `f64`, plus the
+/// GPS epoch offset. Kept only so the writer can restate products rebuilt
+/// from those exports.
+fn gps_seconds_2x_export(split: JulianDateSplit) -> f64 {
     j2000_seconds_from_split(split.jd_whole, split.fraction) + GPS_EPOCH_TO_J2000_S
 }
 
 /// The civil epoch on the microsecond grid nearest to `civil`, for a writer
-/// allowed to round.
+/// allowed to round. The stated digits are rounded as decimal text, half a
+/// microsecond up, so no binary rounding of the second moves a tie or a
+/// near-tie to the other side.
 pub(super) fn nearest_microsecond_civil(civil: Civil) -> Option<Civil> {
-    let second = f64::from(civil.second)
-        + f64::from(civil.microsecond) / 1_000_000.0
-        + f64::from(civil.femtosecond) / 1.0e15;
-    let rounded = validate::civil_datetime_with_fractional_second_policy(
+    let second = format!(
+        "{}.{:06}{:09}",
+        civil.second, civil.microsecond, civil.femtosecond
+    );
+    let rounded = validate::civil_datetime_with_decimal_second_policy(
         civil.year,
         i64::from(civil.month),
         i64::from(civil.day),
         i64::from(civil.hour),
         i64::from(civil.minute),
-        second,
+        &second,
         validate::CivilSecondPolicy::UtcLike,
     )
     .ok()?;
@@ -479,21 +590,29 @@ pub(super) fn validate_instant(epoch: Instant, field: &'static str) -> Result<()
     }
 }
 
+/// GPS seconds of a civil tag: the `f64` nearest to the exact count, formed in
+/// whole femtoseconds and rounded once. Every civil-to-GPS-seconds conversion
+/// of the clock module goes through here.
 pub(super) fn gps_seconds_from_civil(civil: Civil) -> Option<f64> {
-    if civil.year < 1 {
+    if !(1..=9999).contains(&civil.year) {
         return None;
     }
-
     let days = days_since_gps_epoch(civil.year as i32, civil.month as u8, civil.day as u8);
-    let whole = days as f64 * SECONDS_PER_DAY
-        + (i64::from(civil.hour) * 3_600 + i64::from(civil.minute) * 60 + i64::from(civil.second))
-            as f64;
-    let seconds = whole + f64::from(civil.microsecond) / 1_000_000.0;
-    Some(if civil.femtosecond == 0 {
-        seconds
-    } else {
-        seconds + f64::from(civil.femtosecond) / 1.0e15
-    })
+    let whole_seconds = i128::from(days) * i128::from(SECONDS_PER_DAY_I64)
+        + i128::from(civil.hour) * 3_600
+        + i128::from(civil.minute) * 60;
+    Some(seconds_from_femtoseconds(
+        whole_seconds * FEMTOSECONDS_PER_SECOND + civil_subminute_femtoseconds(civil),
+    ))
+}
+
+const FEMTOSECONDS_PER_SECOND: i128 = 1_000_000_000_000_000;
+
+/// The second of the minute `civil` states, in whole femtoseconds.
+fn civil_subminute_femtoseconds(civil: Civil) -> i128 {
+    i128::from(civil.second) * FEMTOSECONDS_PER_SECOND
+        + i128::from(civil.microsecond) * 1_000_000_000
+        + i128::from(civil.femtosecond)
 }
 
 fn days_since_gps_epoch(year: i32, month: u8, day: u8) -> i64 {
@@ -522,6 +641,48 @@ pub(super) fn interpolate(records: &[ClockPoint], epoch: Instant) -> Option<f64>
         }
     }
     None
+}
+
+/// The bias of the one sample of `records` whose GPS seconds
+/// ([`ClockPoint::gps_seconds`], as `series_rows` exports them) are
+/// `gps_seconds`; `query` is the GPST instant [`gps_seconds_to_instant`]
+/// builds from them.
+///
+/// Every sample whose GPS seconds are `gps_seconds` lies within half a unit in
+/// the last place of them (plus the 2e-11 s by which a split can miss the tag
+/// it was read from), and so does `query`; the samples between any of them
+/// and `query` round to the same GPS seconds. The matching samples are
+/// therefore the run on either side of where `query` falls. `None` when no
+/// sample, or more than one, has those GPS seconds.
+pub(super) fn sample_at_gps_seconds(
+    records: &[ClockPoint],
+    query: &Instant,
+    gps_seconds: f64,
+) -> Option<f64> {
+    let after = records
+        .iter()
+        .position(|point| {
+            compare_instants_same_scale(&point.epoch, query) == Some(Ordering::Greater)
+        })
+        .unwrap_or(records.len());
+    let at = |index: usize| {
+        records
+            .get(index)
+            .is_some_and(|point| point.gps_seconds() == Some(gps_seconds))
+    };
+    let mut first = after;
+    while first > 0 && at(first - 1) {
+        first -= 1;
+    }
+    let mut end = after;
+    while at(end) {
+        end += 1;
+    }
+    if end - first == 1 {
+        records.get(first).map(|point| point.bias_s)
+    } else {
+        None
+    }
 }
 
 /// Total order of clock epochs: by time scale, then by time. Split Julian

@@ -223,6 +223,145 @@ pub fn j2000_seconds_from_split(jd_whole: f64, fraction: f64) -> f64 {
     (jd_whole - J2000_JD) * SECONDS_PER_DAY + fraction * SECONDS_PER_DAY
 }
 
+/// Femtoseconds in one second.
+const FEMTOSECONDS_PER_SECOND: u128 = 1_000_000_000_000_000;
+
+/// `2^-bits`, exact for `bits <= 1022`.
+fn two_to_minus(bits: u32) -> f64 {
+    f64::from_bits(u64::from(1023 - bits) << 52)
+}
+
+/// The `f64` nearest to `femtoseconds / 10^15` seconds, ties to even.
+///
+/// The quotient is formed in integer arithmetic and rounded once, so a count of
+/// whole femtoseconds maps to the correctly rounded double of the seconds it
+/// states. Adding a whole-second count, a microsecond fraction and a
+/// femtosecond fraction in `f64` rounds at each step and can land one unit in
+/// the last place away from it.
+pub(crate) fn seconds_from_femtoseconds(femtoseconds: i128) -> f64 {
+    let magnitude = femtoseconds.unsigned_abs();
+    if magnitude == 0 {
+        return 0.0;
+    }
+    // With the dividend's top bit at bit 126 (or 127) the quotient carries at
+    // least 76 significant bits: the 53 an f64 keeps, its rounding bit, and
+    // bits below those into which a nonzero remainder is folded, so the single
+    // rounding of the conversion sees it. Scaling back by a power of two is
+    // exact.
+    let shift = magnitude.leading_zeros().saturating_sub(1);
+    let scaled = magnitude << shift;
+    let quotient = scaled / FEMTOSECONDS_PER_SECOND;
+    let inexact = !scaled.is_multiple_of(FEMTOSECONDS_PER_SECOND);
+    let seconds = (quotient | u128::from(inexact)) as f64 * two_to_minus(shift);
+    if femtoseconds < 0 {
+        -seconds
+    } else {
+        seconds
+    }
+}
+
+/// Fraction bits of the fixed-point sum in [`seconds_from_split_exact`].
+const SPLIT_FIXED_BITS: u32 = 80;
+
+/// `value * 86400 * 2^80` rounded toward negative infinity, and whether no
+/// bit was dropped; `None` when the product does not fit the fixed-point range
+/// (`|value| >= 2^27`).
+fn day_seconds_fixed(value: f64) -> Option<(i128, bool)> {
+    if !value.is_finite() {
+        return None;
+    }
+    if value == 0.0 {
+        return Some((0, true));
+    }
+    let bits = value.to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    let stored = bits & ((1_u64 << 52) - 1);
+    let (mantissa, exponent) = if biased == 0 {
+        (stored, -1074)
+    } else {
+        (stored | (1_u64 << 52), biased - 1075)
+    };
+    // Below 2^70; shifted left by at most 54 it stays below 2^124.
+    let scaled = u128::from(mantissa) * SECONDS_PER_DAY_I64 as u128;
+    let shift = exponent + SPLIT_FIXED_BITS as i32;
+    let (magnitude, exact) = if shift >= 0 {
+        if shift > 54 {
+            return None;
+        }
+        (scaled << shift, true)
+    } else {
+        let right = shift.unsigned_abs();
+        if right >= 128 {
+            (0, false)
+        } else {
+            (scaled >> right, scaled & ((1_u128 << right) - 1) == 0)
+        }
+    };
+    let magnitude = i128::try_from(magnitude).ok()?;
+    Some(if value < 0.0 {
+        (-magnitude - i128::from(!exact), exact)
+    } else {
+        (magnitude, exact)
+    })
+}
+
+/// The seconds a split Julian date holds from an origin, `jd_whole * 86400 +
+/// fraction * 86400 - origin_day_seconds`, as the `f64` nearest to that exact
+/// value, ties to even.
+///
+/// `origin_day_seconds` is the origin's Julian date times 86400, a whole
+/// number below `2^46` in magnitude. Both parts of the split are exact binary
+/// fractions; they are scaled to seconds and summed in 80-bit fixed point,
+/// and the sum is rounded once. A `jd_whole` on the origin itself leaves
+/// `fraction * 86400`, a product of two doubles rounded once. `None` when the
+/// fixed point cannot hold the split: `|jd_whole|` of `2^27` or more, a
+/// `jd_whole` that scaled to seconds has bits below `2^-80` s (only a nonzero
+/// `jd_whole` below `2^-35` can), or a `jd_whole` off the origin whose sum
+/// lies within `2^-25` s of the origin and carries fraction bits below
+/// `2^-80` s. A `jd_whole` on the half-day grid is never the last: its
+/// distance from an origin on that grid is zero or at least 43200 s, which
+/// only a fraction of at least one half, held exactly, can cancel.
+pub(crate) fn seconds_from_split_exact(
+    jd_whole: f64,
+    fraction: f64,
+    origin_day_seconds: i64,
+) -> Option<f64> {
+    let (whole, whole_exact) = day_seconds_fixed(jd_whole)?;
+    if !whole_exact {
+        return None;
+    }
+    let (part, part_exact) = day_seconds_fixed(fraction)?;
+    if origin_day_seconds.unsigned_abs() >= 1 << 46 {
+        return None;
+    }
+    let origin = i128::from(origin_day_seconds) << SPLIT_FIXED_BITS;
+    if whole == origin {
+        return Some(fraction * SECONDS_PER_DAY);
+    }
+    // `total` is the exact sum scaled by 2^80 and floored: the sum is
+    // `total + d` for some `d` in [0, 1), with `d > 0` only when the fraction
+    // dropped bits.
+    let total = whole.checked_sub(origin)?.checked_add(part)?;
+    let (magnitude, sticky) = if part_exact {
+        (total.unsigned_abs(), false)
+    } else if total >= 0 {
+        (total.unsigned_abs(), true)
+    } else {
+        // |total + d| = (-total - 1) + (1 - d), with 1 - d in (0, 1).
+        ((total + 1).unsigned_abs(), true)
+    };
+    if magnitude == 0 && !sticky {
+        return Some(0.0);
+    }
+    // A dropped remainder can be folded into the lowest bit only when that
+    // bit lies below the rounding bit of the 53-bit result.
+    if sticky && magnitude < 1 << 55 {
+        return None;
+    }
+    let seconds = (magnitude | u128::from(sticky)) as f64 * two_to_minus(SPLIT_FIXED_BITS);
+    Some(if total < 0 { -seconds } else { seconds })
+}
+
 /// Elapsed seconds between two split Julian dates `later - earlier`.
 ///
 /// The whole-day and fractional differences are summed first and scaled once
@@ -644,5 +783,105 @@ mod tests {
             j2000_seconds_from_split(whole, frac),
             j2000_seconds(2020, 6, 25, 0, 0, 0.0)
         );
+    }
+
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn seconds_from_femtoseconds_is_the_correctly_rounded_quotient() {
+        // Each count is compared with its decimal text read by the correctly
+        // rounded `str::parse`, from one femtosecond to the ends of `i128`,
+        // including exact ties between two doubles.
+        let decimal = |femtoseconds: i128| -> f64 {
+            let magnitude = femtoseconds.unsigned_abs();
+            let sign = if femtoseconds < 0 { "-" } else { "" };
+            format!(
+                "{sign}{}.{:015}",
+                magnitude / FEMTOSECONDS_PER_SECOND,
+                magnitude % FEMTOSECONDS_PER_SECOND
+            )
+            .parse()
+            .unwrap()
+        };
+        let per_second = FEMTOSECONDS_PER_SECOND as i128;
+        let mut counts = vec![
+            0,
+            1,
+            -1,
+            999_999_999_999_999,
+            per_second,
+            1_462_665_659_999_999_600_000_000,
+            ((1 << 53) + 1) * per_second,
+            ((1 << 53) + 3) * per_second,
+            -((1 << 53) + 1) * per_second,
+            i128::MAX,
+            i128::MIN + 1,
+            i128::MIN,
+        ];
+        let mut state = 0x6a09_e667_f3bc_c909_u64;
+        for _ in 0..50_000 {
+            let bits = xorshift(&mut state) % 127 + 1;
+            let wide = (u128::from(xorshift(&mut state)) << 64) | u128::from(xorshift(&mut state));
+            let count = (wide >> (128 - bits)) as i128;
+            counts.push(if xorshift(&mut state).is_multiple_of(2) {
+                count
+            } else {
+                -count
+            });
+        }
+        for count in counts {
+            assert_eq!(
+                seconds_from_femtoseconds(count).to_bits(),
+                decimal(count).to_bits(),
+                "{count}"
+            );
+        }
+    }
+
+    #[test]
+    fn seconds_from_split_exact_rounds_the_split_once() {
+        // The GPS epoch, JD 2444244.5, times 86400.
+        const GPS_EPOCH: i64 = 211_182_724_800;
+        assert_eq!(
+            seconds_from_split_exact(2_444_244.5, 0.0, GPS_EPOCH),
+            Some(0.0)
+        );
+        // On the origin's day only the fraction remains; the J2000-seconds
+        // arithmetic cancels it against the day count.
+        assert_eq!(
+            seconds_from_split_exact(2_444_244.5, 1.0e-20, GPS_EPOCH),
+            Some(1.0e-20 * SECONDS_PER_DAY)
+        );
+        assert_eq!(seconds_from_split_exact(f64::NAN, 0.0, GPS_EPOCH), None);
+        assert_eq!(
+            seconds_from_split_exact(134_217_728.5, 0.0, GPS_EPOCH),
+            None
+        );
+        assert_eq!(seconds_from_split_exact(1.0e-30, 0.0, GPS_EPOCH), None);
+        // A double of seconds split at its civil midnight, the day count as a
+        // half-day Julian date and the seconds of the day as a fraction, reads
+        // back as that double; the two parts sum to it within the fraction's
+        // rounding, far inside half a unit in its last place.
+        let mut state = 0xbb67_ae85_84ca_a73b_u64;
+        for _ in 0..50_000 {
+            let unit = (xorshift(&mut state) >> 11) as f64 / (1_u64 << 53) as f64;
+            let seconds = if xorshift(&mut state).is_multiple_of(2) {
+                2.0e6 + unit * 2.4e11
+            } else {
+                -2.0e6 - unit * 6.0e10
+            };
+            let days = (seconds / SECONDS_PER_DAY).floor();
+            let fraction = (seconds - days * SECONDS_PER_DAY) / SECONDS_PER_DAY;
+            assert_eq!(
+                seconds_from_split_exact(2_444_244.5 + days, fraction, GPS_EPOCH).map(f64::to_bits),
+                Some(seconds.to_bits()),
+                "{seconds:e}"
+            );
+        }
     }
 }
