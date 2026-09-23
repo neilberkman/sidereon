@@ -155,6 +155,7 @@ fn pseudorange(
         glonass_channels: BTreeMap::new(),
         met: SurfaceMet::default(),
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     let env = SatModelEnv {
         eph,
@@ -165,6 +166,7 @@ fn pseudorange(
         met: &inputs.met,
         glonass_channels: &inputs.glonass_channels,
         model: SppModelRecipe::reference(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     sat_model(
         &env,
@@ -213,6 +215,7 @@ fn make_epoch(
         sbas_iono: None,
         glonass_channels: BTreeMap::new(),
         met: SurfaceMet::default(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     }
 }
 
@@ -264,6 +267,7 @@ fn mixed_system_store_and_epoch() -> (FixedEphemeris, StaticEpoch) {
             sbas_iono: None,
             glonass_channels: BTreeMap::new(),
             met: SurfaceMet::default(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         },
     )
 }
@@ -504,6 +508,7 @@ fn rank_deficient_geometry_returns_typed_error() {
         sbas_iono: None,
         glonass_channels: BTreeMap::new(),
         met: SurfaceMet::default(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
 
     let err = solve_static(&eph, &[epoch], options()).expect_err("rank deficient");
@@ -643,6 +648,7 @@ fn hand_covariance(
             met: &epoch.met,
             glonass_channels: &epoch.glonass_channels,
             model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         };
         let inputs = solve_inputs_for_epoch(epoch, options());
         let sat = sat_model(

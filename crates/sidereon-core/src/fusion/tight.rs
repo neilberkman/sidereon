@@ -981,6 +981,19 @@ fn tight_code_satellite_prediction(
     let satellite =
         transmit_time_satellite_state(source, sat, receiver_ecef_m, t_rx_j2000_s, options)?;
     let sat_clock_s = satellite.clock_s.ok_or(ObservablesError::NoEphemeris)?;
+    // The source's clock is the RTKLIB `satposs` one, without the broadcast group
+    // delay; the code measurement here is single-frequency, so the delay is taken from
+    // the clock as the SPP model takes it (RTKLIB `pntpos` `prange`: `P1 - TGD`).
+    let sat_clock_s = match source.clock_relativity_s(sat, satellite.transmit_time_j2000_s) {
+        crate::spp::ClockRelativity::NotApplicable => sat_clock_s,
+        crate::spp::ClockRelativity::Term(relativity_s) => sat_clock_s + relativity_s,
+        crate::spp::ClockRelativity::Unavailable => return Err(ObservablesError::NoEphemeris),
+    };
+    let sat_clock_s =
+        match source.single_frequency_group_delay_s(sat, satellite.transmit_time_j2000_s) {
+            Some(group_delay_s) => sat_clock_s - group_delay_s,
+            None => sat_clock_s,
+        };
     Ok(CodeSatellitePrediction {
         clock_corrected_range_m: satellite.geometric_range_m - C_M_S * sat_clock_s,
         los_unit: satellite.los_unit,
@@ -1015,6 +1028,7 @@ fn spp_code_satellite_prediction(
             },
             frame: FrameRecipe::SppSkyfieldAuThreeIter,
         },
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     let model = sat_model(
         &env,
@@ -1068,6 +1082,34 @@ impl EphemerisSource for ObservableClockSource<'_> {
             .observable_state_at_j2000_s(sat, t_j2000_s)
             .ok()?;
         Some((state.position_ecef_m, state.clock_s?))
+    }
+
+    fn single_frequency_group_delay_s(
+        &self,
+        sat: crate::GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<f64> {
+        self.source.single_frequency_group_delay_s(sat, t_j2000_s)
+    }
+
+    fn clock_relativity_s(
+        &self,
+        sat: crate::GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        self.source.clock_relativity_s(sat, t_j2000_s)
+    }
+
+    fn position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: crate::GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        let (state, group_delay) = self
+            .source
+            .observable_state_group_delay_at_j2000_s(sat, t_j2000_s)
+            .ok()?;
+        Some((state.position_ecef_m, state.clock_s?, group_delay))
     }
 }
 
@@ -1356,6 +1398,7 @@ mod tests {
             glonass_channels: std::collections::BTreeMap::new(),
             met: SurfaceMet::default(),
             robust: None,
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         }
     }
 
@@ -1765,6 +1808,7 @@ mod tests {
                 met: &met,
                 glonass_channels: &glonass_channels,
                 model: SppModelRecipe::reference(),
+                pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
             };
             let model = sat_model(
                 &env,

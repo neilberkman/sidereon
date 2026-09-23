@@ -246,6 +246,14 @@ fn gps_week_tow_to_j2000_s(week: u32, tow_s: f64) -> f64 {
     f64::from(week) * SECONDS_PER_WEEK + tow_s - GPS_EPOCH_TO_J2000_S
 }
 
+/// A synthetic RTCM SSR store whose corrections move the broadcast states at the first
+/// epoch's transmission times onto the SP3 states.
+///
+/// The clock correction adds to the SSR-corrected clock (RTKLIB `satpos_ssr`, IGS SSR),
+/// which is the broadcast polynomial less `2 r·v / c²`, without the TGD. C0 is therefore
+/// the SP3 clock less that clock, read from a first store that carries the orbit
+/// corrections and a zero C0. It was once `(broadcast - SP3) · c`, which fitted a clock
+/// that subtracted C0 from the full broadcast clock.
 fn synthetic_ssr_store(
     broadcast: &BroadcastEphemeris,
     sp3: &Sp3,
@@ -253,7 +261,7 @@ fn synthetic_ssr_store(
     receiver_m: [f64; 3],
 ) -> SsrCorrectionStore {
     let mut orbit = Vec::new();
-    let mut clock = Vec::new();
+    let mut targets = Vec::new();
     let mut used = BTreeSet::new();
     for obs in &epoch.observations {
         if !used.insert(obs.sat) {
@@ -271,7 +279,7 @@ fn synthetic_ssr_store(
         let record = broadcast
             .select_record_at(obs.sat, t_tx)
             .expect("broadcast record at transmit time");
-        let (broadcast_position, broadcast_clock) = broadcast
+        let (broadcast_position, _) = broadcast
             .position_clock_at_j2000_s(obs.sat, t_tx)
             .expect("broadcast state at transmit time");
         let sp3_state = sp3
@@ -299,20 +307,48 @@ fn synthetic_ssr_store(
             dot_delta_along: 0,
             dot_delta_cross: 0,
         });
-        clock.push(SsrClockRecord {
-            satellite_id: obs.sat.prn,
-            c0: raw_rtcm_orbit(
-                (broadcast_clock - sp3_clock) * sidereon_core::constants::C_M_S,
-                1.0e-4,
-            ),
-            c1: 0,
-            c2: 0,
-        });
+        targets.push((obs.sat, t_tx, sp3_clock));
     }
 
     let tow = epoch.t_rx_j2000_s + GPS_EPOCH_TO_J2000_S;
     let week = (tow / SECONDS_PER_WEEK).floor() as u32;
     let tow_s = tow - f64::from(week) * SECONDS_PER_WEEK;
+    let zero_clock = targets
+        .iter()
+        .map(|&(sat, _, _)| SsrClockRecord {
+            satellite_id: sat.prn,
+            c0: 0,
+            c1: 0,
+            c2: 0,
+        })
+        .collect();
+    let uncorrected = synthetic_rtcm_store(orbit.clone(), zero_clock, week, tow_s);
+    let uncorrected_source =
+        sidereon_core::ssr::SsrCorrectedEphemeris::new(broadcast, &uncorrected);
+    let clock = targets
+        .iter()
+        .map(|&(sat, t_tx, sp3_clock)| {
+            let (_, ssr_clock) = uncorrected_source
+                .corrected_state(sat, t_tx)
+                .expect("SSR-corrected state with a zero clock correction");
+            SsrClockRecord {
+                satellite_id: sat.prn,
+                c0: raw_rtcm_orbit((sp3_clock - ssr_clock) * C_M_S, 1.0e-4),
+                c1: 0,
+                c2: 0,
+            }
+        })
+        .collect();
+    synthetic_rtcm_store(orbit, clock, week, tow_s)
+}
+
+/// Ingest one GPS 1060 frame carrying `orbit` and `clock`, stamped `tow_s` of `week`.
+fn synthetic_rtcm_store(
+    orbit: Vec<SsrOrbitRecord>,
+    clock: Vec<SsrClockRecord>,
+    week: u32,
+    tow_s: f64,
+) -> SsrCorrectionStore {
     let message = Message::Ssr(SsrMessage {
         message_number: 1060,
         system: GnssSystem::Gps,

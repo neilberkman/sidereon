@@ -19,7 +19,7 @@
 use super::{
     eval_cubic_spline_for_test as eval_spline, instant_to_j2000_seconds,
     interpolate_position_neville, precise_node_j2000_seconds,
-    precise_node_j2000_seconds_from_instant, DEFAULT_GAP_THRESHOLD_FACTOR,
+    precise_node_j2000_seconds_from_instant, PreciseQuery, DEFAULT_GAP_THRESHOLD_FACTOR,
 };
 use crate::astro::constants::time::SECONDS_PER_DAY_I64;
 use crate::astro::time::civil::{J2000_JULIAN_DAY_NUMBER, J2000_NOON_OFFSET_S};
@@ -506,12 +506,24 @@ fn position_gap_window_uses_right_arc_before_second_edge() {
     let ky = [0.0; 6];
     let kz = [-3.0, -3.0, -3.0, 7.0, 7.0, 7.0];
 
-    let (_, _, left_z_m) =
-        interpolate_position_neville(&x, &kx, &ky, &kz, 25.0, DEFAULT_GAP_THRESHOLD_FACTOR);
+    let (_, _, left_z_m) = interpolate_position_neville(
+        &x,
+        &kx,
+        &ky,
+        &kz,
+        PreciseQuery::at(25.0),
+        DEFAULT_GAP_THRESHOLD_FACTOR,
+    );
     assert_eq!(left_z_m.to_bits(), (-3_000.0f64).to_bits());
 
-    let (_, _, right_z_m) =
-        interpolate_position_neville(&x, &kx, &ky, &kz, 95.0, DEFAULT_GAP_THRESHOLD_FACTOR);
+    let (_, _, right_z_m) = interpolate_position_neville(
+        &x,
+        &kx,
+        &ky,
+        &kz,
+        PreciseQuery::at(95.0),
+        DEFAULT_GAP_THRESHOLD_FACTOR,
+    );
     assert_eq!(right_z_m.to_bits(), 7_000.0f64.to_bits());
 }
 

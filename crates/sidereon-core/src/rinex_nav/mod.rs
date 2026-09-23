@@ -73,6 +73,89 @@ pub(crate) const GLONASS_MAX_AGE_S: f64 = 15.0 * 60.0;
 /// record's reduced time (time of week, or time from the reference epoch) as RTKLIB adds
 /// the step to its exact `gtime_t`.
 pub(crate) const EPHPOS_STEP_S: f64 = 1.0e-3;
+
+/// Seconds of GPS week at the J2000 epoch: `GPS_EPOCH_TO_J2000_S` is a whole number
+/// of seconds, 1042 weeks and 561600 s.
+pub(crate) const J2000_GPS_SECONDS_OF_WEEK: f64 = 561_600.0;
+const _: () = assert!(
+    crate::constants::GPS_EPOCH_TO_J2000_S - 1042.0 * SECONDS_PER_WEEK == J2000_GPS_SECONDS_OF_WEEK
+);
+
+/// A query epoch as a Keplerian broadcast record of `sat` reads it: seconds since J2000
+/// in the record's own time scale (GPS time for GPS, Galileo and QZSS, BDT for BeiDou),
+/// seconds of week in that scale, and whether `sat` takes the BeiDou geostationary
+/// orbit branch. `None` for a system without a Keplerian broadcast model here, or a
+/// non-finite epoch.
+///
+/// The seconds of week are formed as RTKLIB's `gtime_t` holds an instant, whole seconds
+/// and a fraction apart: the whole-second part of `t_j2000_s` is placed in its week with
+/// integer-valued arithmetic, which is exact, and the fraction is added once at the end.
+/// The result is `t_j2000_s`'s seconds of week rounded once, and exact whenever that
+/// value is representable, which holds for every `|t_j2000_s| >= 2^20` s (every epoch
+/// after mid-January 2000 or before mid-December 1999): there the fraction is a multiple
+/// of 2^-32 s, which doubles below one week (2^-33 s spacing) resolve. Adding
+/// `GPS_EPOCH_TO_J2000_S` to the J2000 seconds first would instead round to the 2.4e-7 s
+/// spacing of doubles near 1.4e9 s and drop the last bit of a fractional epoch. The BDT seconds since J2000, `t_j2000_s - 14`,
+/// are likewise rounded once.
+pub(crate) fn query_native_time(sat: GnssSatelliteId, t_j2000_s: f64) -> Option<(f64, f64, bool)> {
+    if !t_j2000_s.is_finite() {
+        return None;
+    }
+    let whole_s = t_j2000_s.floor();
+    let fraction_s = t_j2000_s - whole_s;
+    let gps_whole_sow_s = (whole_s.rem_euclid(SECONDS_PER_WEEK) + J2000_GPS_SECONDS_OF_WEEK)
+        .rem_euclid(SECONDS_PER_WEEK);
+    let seconds_of_week = |whole_sow_s: f64| {
+        let sow_s = whole_sow_s + fraction_s;
+        // A fraction within half an ulp of the next whole second can round the sum up to
+        // the week's end, which is the next week's start.
+        if sow_s >= SECONDS_PER_WEEK {
+            sow_s - SECONDS_PER_WEEK
+        } else {
+            sow_s
+        }
+    };
+    match sat.system {
+        GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::Qzss => {
+            Some((t_j2000_s, seconds_of_week(gps_whole_sow_s), false))
+        }
+        // BDT runs GPST - 14 s; its week epoch is a whole number of GPS weeks later.
+        GnssSystem::BeiDou => Some((
+            t_j2000_s - crate::constants::GPST_MINUS_BDT_S,
+            seconds_of_week(
+                (gps_whole_sow_s - crate::constants::GPST_MINUS_BDT_S).rem_euclid(SECONDS_PER_WEEK),
+            ),
+            is_beidou_geo(sat),
+        )),
+        _ => None,
+    }
+}
+
+/// A record's `toe` in seconds since J2000 in the record's own time scale, the scale
+/// [`query_native_time`] returns. The whole weeks and the epoch offsets are whole
+/// seconds and are summed first, so a fractional `toe` keeps every bit.
+pub(crate) fn toe_native_j2000_s(record: &BroadcastRecord) -> f64 {
+    let epoch_offset_s = match record.satellite_id.system {
+        GnssSystem::BeiDou => crate::constants::BDS_EPOCH_MINUS_GPS_EPOCH_S,
+        _ => 0.0,
+    };
+    (f64::from(record.toe.week) * SECONDS_PER_WEEK + epoch_offset_s
+        - crate::constants::GPS_EPOCH_TO_J2000_S)
+        + record.toe.tow_s
+}
+
+/// A record's reduced time `tk` one [`EPHPOS_STEP_S`] later, rounded as RTKLIB forms it.
+/// `ephpos` adds the step to its `gtime_t` with `timeadd`, which adds it to the fraction
+/// of a second and carries any whole second, and `eph2pos`/`geph2pos` then form
+/// `timediff(time, toe)`, the whole seconds plus that fraction. A broadcast reference
+/// epoch is a whole second, so `tk`'s whole and fractional parts are the instant's own,
+/// and adding the step to the fraction first rounds where RTKLIB rounds.
+pub(crate) fn ephpos_stepped_tk(tk_s: f64) -> f64 {
+    let whole_s = tk_s.floor();
+    let fraction_s = (tk_s - whole_s) + EPHPOS_STEP_S;
+    let carry_s = fraction_s.floor();
+    (whole_s + carry_s) + (fraction_s - carry_s)
+}
 const GPS_NOMINAL_FIT_INTERVAL_S: f64 = 4.0 * SECONDS_PER_HOUR;
 /// Fit interval for legacy RINEX 3.00–3.02 GPS records when the fit-interval flag
 /// is 1 (extended fit). RINEX 3.02 Table A6 explicitly defines flag 1 as 6 hours
@@ -576,7 +659,12 @@ impl BroadcastRecord {
         }
     }
 
-    /// Group delay used by the broadcast-clock evaluator for this message.
+    /// Single-frequency group delay of this message, seconds: GPS and QZSS LNAV TGD,
+    /// Galileo I/NAV BGD E5b/E1, Galileo F/NAV BGD E5a/E1, BeiDou TGD1, CNAV TGD less
+    /// ISC L1C/A. [`crate::broadcast::satellite_state`] subtracts it in
+    /// `dt_clock_total_s`; the store's clock leaves it out, as RTKLIB `satposs` does, and
+    /// returns it separately through `single_frequency_group_delay_s` for the
+    /// single-frequency pseudorange model, as RTKLIB `pntpos` applies it.
     pub fn broadcast_clock_group_delay_s(&self) -> f64 {
         self.group_delays
             .for_message(self.satellite_id.system, self.message)

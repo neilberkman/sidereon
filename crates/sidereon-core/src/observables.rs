@@ -189,6 +189,69 @@ pub trait ObservableEphemerisSource {
         None
     }
 
+    /// Whether the satellite clock this source returns already includes the satellite's
+    /// relativistic clock correction, so a model must not add `-2 r·v / c²` to it again.
+    ///
+    /// `false` by default: the clock is treated as a product clock that leaves the
+    /// periodic relativistic term to the user, as SP3 and RINEX CLK clocks do. A broadcast
+    /// source returns `true`: its clock carries the broadcast
+    /// `F·e·√A·sin E` term, as RTKLIB `eph2pos` includes it, and a GLONASS broadcast
+    /// clock needs no term, as RTKLIB `geph2pos` adds none. An SSR-corrected source
+    /// returns `true`: its clock carries `-2 r·v / c²` (RTKLIB `satpos_ssr`, HAS SIS ICD
+    /// Eq. 24). A source that wraps another returns the wrapped source's answer.
+    fn clock_includes_relativity(&self) -> bool {
+        false
+    }
+
+    /// Group delay, seconds, a single-frequency pseudorange model subtracts from the
+    /// satellite clock of `sat` at `t_j2000_s`, or `None` for none.
+    ///
+    /// The clock [`Self::observable_state_at_j2000_s`] returns is the one RTKLIB
+    /// `satposs` returns, without the broadcast TGD or BGD; an ionosphere-free model,
+    /// such as the PPP rows, uses it as it is. RTKLIB `pntpos` applies the group delay
+    /// to a single-frequency pseudorange (`prange`: `P1 - TGD`). `None` by default: a
+    /// precise clock carries no broadcast group delay. A broadcast source returns its
+    /// record's delay (see [`crate::spp::EphemerisSource::single_frequency_group_delay_s`]),
+    /// and a source that wraps another returns the wrapped source's answer.
+    fn single_frequency_group_delay_s(
+        &self,
+        _sat: GnssSatelliteId,
+        _t_j2000_s: f64,
+    ) -> Option<f64> {
+        None
+    }
+
+    /// Relativistic clock term, seconds, that a positioning model adds to the clock of
+    /// [`Self::observable_state_at_j2000_s`] for `sat` at `t_j2000_s`, where that clock is
+    /// a product clock that leaves it to the user.
+    ///
+    /// `NotApplicable` by default: the clock needs no term here, because it carries one
+    /// already (broadcast, SSR- and SBAS-corrected sources) or the source defines none.
+    /// SP3 and precise-interpolant sources return `-2 r·v / c²` as RTKLIB `peph2pos` forms
+    /// it for positioning, or `Unavailable` where the position 1 ms later cannot be
+    /// interpolated. The state itself stays the product's, so data access returns the
+    /// clock as written. The PPP rows do not call this; they add their own term under
+    /// [`Self::clock_includes_relativity`].
+    fn clock_relativity_s(
+        &self,
+        _sat: GnssSatelliteId,
+        _t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        crate::spp::ClockRelativity::NotApplicable
+    }
+
+    /// [`Self::observable_state_at_j2000_s`] and [`Self::single_frequency_group_delay_s`]
+    /// from one evaluation. The default calls the two methods; a source that forms a
+    /// corrected state overrides it to do that once.
+    fn observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<(ObservableState, Option<f64>), ObservablesError> {
+        let state = self.observable_state_at_j2000_s(sat, t_j2000_s)?;
+        Ok((state, self.single_frequency_group_delay_s(sat, t_j2000_s)))
+    }
+
     /// Satellite ECEF velocity, metres per second, of the state this source returns at
     /// `t_j2000_s`, when the source defines one.
     ///
@@ -261,6 +324,18 @@ impl ObservableEphemerisSource for Sp3 {
             clock_s: state.clock_s,
         })
     }
+
+    /// The `peph2pos` relativistic term for the SP3 clock this source returns.
+    fn clock_relativity_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        crate::sp3::peph2pos_clock_relativity(
+            self.position_at_j2000_seconds(sat, t_j2000_s),
+            || self.position_after_ephpos_step(sat, t_j2000_s),
+        )
+    }
 }
 
 impl ObservableEphemerisSource for BroadcastEphemeris {
@@ -286,6 +361,16 @@ impl ObservableEphemerisSource for BroadcastEphemeris {
         t_j2000_s: f64,
     ) -> Option<Result<[f64; 3], ObservablesError>> {
         self.selected_record_velocity(sat, t_j2000_s).map(Ok)
+    }
+
+    /// True: the broadcast clock carries the broadcast relativistic term (GPS, Galileo,
+    /// QZSS, BeiDou), and a GLONASS broadcast clock takes none.
+    fn clock_includes_relativity(&self) -> bool {
+        true
+    }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        BroadcastEphemeris::single_frequency_group_delay_s(self, sat, t_j2000_s)
     }
 }
 

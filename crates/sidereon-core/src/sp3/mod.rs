@@ -1798,6 +1798,7 @@ mod combine;
 mod continuity;
 mod exact;
 mod interp;
+pub(crate) use interp::{peph2pos_clock_relativity, peph2pos_state_clock_relativity};
 mod interpolant;
 mod interpolant_store;
 mod provenance;

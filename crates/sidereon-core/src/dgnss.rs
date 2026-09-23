@@ -101,7 +101,8 @@ impl From<SppError> for DgnssError {
 ///
 /// The correction is `PRC = pr_base - (range_base - c * sat_clock)`, with the
 /// range and satellite clock coming from the same light-time/Sagnac observable
-/// predictor used by the SPP pipeline. Observations with malformed satellite
+/// predictor used by the SPP pipeline, and the satellite clock less the source's
+/// single-frequency group delay, as the SPP model forms it. Observations with malformed satellite
 /// tokens or unavailable orbit/clock data are skipped, matching Sidereon'
 /// historical "cannot correct this satellite" behavior.
 pub fn pseudorange_corrections(
@@ -142,6 +143,24 @@ pub fn pseudorange_corrections(
                 .map_err(dgnss_invalid_input)?;
         let sat_clock_s =
             validate::finite(sat_clock_s, "predicted.sat_clock_s").map_err(dgnss_invalid_input)?;
+        // The predicted clock is RTKLIB's `satposs` clock, without the broadcast group
+        // delay. The base pseudorange is single-frequency, and the rover is solved by the
+        // SPP model, which takes the group delay from the clock; the base model takes it
+        // the same way, so the correction carries none and the two stay consistent.
+        // A product clock (SP3, RINEX CLK) takes the relativistic term RTKLIB `peph2pos`
+        // applies for positioning, as the rover's SPP model applies it.
+        // Where the term cannot be formed the satellite has no usable clock, as
+        // `peph2pos` returns no state, and gets no correction.
+        let sat_clock_s = match source.clock_relativity_s(sat, pred.transmit_time_j2000_s) {
+            crate::spp::ClockRelativity::NotApplicable => sat_clock_s,
+            crate::spp::ClockRelativity::Term(relativity_s) => sat_clock_s + relativity_s,
+            crate::spp::ClockRelativity::Unavailable => continue,
+        };
+        let sat_clock_s =
+            match source.single_frequency_group_delay_s(sat, pred.transmit_time_j2000_s) {
+                Some(group_delay_s) => sat_clock_s - group_delay_s,
+                None => sat_clock_s,
+            };
         let modeled_base_m =
             validate::finite(geometric_range_m - C_M_S * sat_clock_s, "modeled_base_m")
                 .map_err(dgnss_invalid_input)?;

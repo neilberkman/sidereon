@@ -95,7 +95,7 @@
   },
   "fixture": {
     "level": "L3_relativistic",
-    "level_note": "L2 + relativistic NO-OP: SP3 precise clock used as-is, no separate periodic term; equals L2 bit-for-bit (documented convention)",
+    "level_note": "L2 + relativistic: the recipe adds no term here (SP3 clock used as-is), so L3 equals L2 bit-for-bit. The recipe premise that SP3 clocks include the term is wrong; positioning applies the RTKLIB peph2pos term, and the tests replay this no-term model",
     "inputs": {
       "sp3_file": "GRG0MGXFIN_20201760000_01D_15M_ORB.SP3",
       "sp3_provenance": "parity/fixtures/sp3/PROVENANCE.md",
@@ -319,7 +319,7 @@
         "omega_e_dot_rad_s": "0x3f131da7d7cb8d5b",
         "form": "closed-form +theta Z-rotation; theta = OMEGA_E_DOT*tau; sat_rot.x= cos*sx+sin*sy, sat_rot.y=-sin*sx+cos*sy, sat_rot.z=sz"
       },
-      "relativistic_convention": "none added; SP3 clock used as-is",
+      "relativistic_convention": "none added; SP3 clock used as-is. The recipe omits the RTKLIB peph2pos term -2 r.v / c^2, which SP3 clocks leave to the user; the tests replay this no-term model, and positioning applies the term",
       "max_nfev": 400,
       "constants": {
         "c": "0x41b1de784a000000",

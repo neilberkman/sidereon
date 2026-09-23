@@ -2359,6 +2359,7 @@ mod tests {
                 relative_humidity: 0.5,
             },
             robust: None,
+            pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
         };
 
         let result = solve_spp(&sp3, &inputs, false, SolvePolicy::default());
@@ -2403,6 +2404,7 @@ mod tests {
                 relative_humidity: 0.5,
             },
             robust: None,
+            pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
         };
         let mut fde = quality::FdeOptions::new(quality::RaimOptions::default(), 0);
         fde.raim = quality::RaimOptions::default();

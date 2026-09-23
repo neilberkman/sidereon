@@ -776,6 +776,59 @@ mod public_api_tests {
         assert_eq!(got.to_bits(), want.to_bits());
     }
 
+    /// RTKLIB `eph2clk`: `t = ts = timediff(time, toc)`, then twice
+    /// `t = ts - (f0 + f1*t + f2*t*t)`, and `f0 + f1*t + f2*t*t`. The broadcast
+    /// clock polynomial is that, bit for bit. Record: G30 LNAV of 2026-07-02 00:00:00
+    /// GPST (toc 345600 s, af0 2.801017835736e-04 s, af1 1.364242052659e-11 s/s,
+    /// af2 0) at 344970 s, so `ts = -630 s`; the two refinements give
+    /// `t = -630.0002800931888 s` and the polynomial 2.8009318884484707e-04 s.
+    #[test]
+    fn broadcast_clock_polynomial_matches_rtklib_eph2clk() {
+        let clock = ClockPolynomial {
+            af0: 2.801_017_835_736e-4,
+            af1: 1.364_242_052_659e-11,
+            af2: 0.0,
+            toc_sow: 345_600.0,
+        };
+        let elements = KeplerianElements {
+            sqrt_a: 5.153_694_433_212e3,
+            e: 8.238_640_730_269e-3,
+            m0: 4.526_381_196_574e-1,
+            delta_n: 5.172_358_306_628e-9,
+            omega0: -2.222_277_607_240,
+            i0: 9.363_375_859_903e-1,
+            omega: -2.261_498_122_029,
+            omega_dot: -8.306_060_266_464e-9,
+            idot: 4.532_331_646_948e-10,
+            cuc: -9.313_225_746_155e-9,
+            cus: 9.464_100_003_242e-6,
+            crc: 1.836_562_5e2,
+            crs: -3.062_5,
+            cic: -7.636_845_111_847e-8,
+            cis: 7.450_580_596_924e-8,
+            toe_sow: 345_600.0,
+        };
+        let t_sow = 344_970.0;
+        let offset = satellite_clock_offset_s(
+            &clock,
+            &ConstellationConstants::GPS,
+            &elements,
+            0.5,
+            t_sow,
+            0.0,
+        )
+        .expect("valid clock");
+
+        let ts = t_sow - clock.toc_sow;
+        let mut t = ts;
+        for _ in 0..2 {
+            t = ts - (clock.af0 + clock.af1 * t + clock.af2 * t * t);
+        }
+        let eph2clk = clock.af0 + clock.af1 * t + clock.af2 * t * t;
+        assert_eq!(offset.dt_clock_poly_s.to_bits(), eph2clk.to_bits());
+        assert_eq!(offset.dt_clock_poly_s.to_bits(), 4_553_802_431_015_611_053);
+    }
+
     #[test]
     fn relativistic_clock_correction_rejects_invalid_inputs() {
         assert!(relativistic_clock_correction_s(f64::NAN, 0.01, 5_153.0, 0.5).is_err());

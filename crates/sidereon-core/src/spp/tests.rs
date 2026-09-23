@@ -14,8 +14,17 @@
 //! vector, and its 2-point finite-difference Jacobian are recomputed by the
 //! Rust SPP substrate AT THAT x and asserted bit-for-bit. The Rust solver is
 //! not run for this track. The ladder is built up by correction level (L0
-//! geometry+clock+Sagnac, L1 +ionosphere, L2 +troposphere, L3 relativistic
-//! no-op) so a miss localizes to the term added.
+//! geometry+clock+Sagnac, L1 +ionosphere, L2 +troposphere, L3 relativistic)
+//! so a miss localizes to the term added.
+//!
+//! The reference recipe omits the relativistic satellite clock term at every
+//! level, including L3, on the premise that SP3 clocks include it; they leave it
+//! to the user. Positioning applies the term RTKLIB `peph2pos` applies,
+//! `-2 r·v / c²` (on the ZIM2 arc SPP was 18.9014 m RMS from truth without it,
+//! 1.3145 m with it). These tests replay the recipe through the no-term path,
+//! the SP3 clock as written ([`NoRelativityTerm`]), so they certify everything
+//! except the term, and check at each family that the model with the term
+//! differs from it by the term alone.
 //!
 //! Track 2 (sub-micron, BLAS-bound) is the independent-solve agreement: the
 //! crate trust-region solver is run from the same inputs and the converged
@@ -100,6 +109,90 @@ fn sp3() -> crate::sp3::Sp3 {
     crate::sp3::Sp3::parse(&bytes).expect("parse real IGS SP3")
 }
 
+/// The SP3 source through the no-term path: its clock as written, with no `peph2pos`
+/// relativistic term. The external SPP reference recipe omits that term, so the trace
+/// replay, the independent-solve agreement and the DOP agreement run through this path
+/// and certify everything except the term. Positioning applies the term (on the ZIM2 arc
+/// 18.9014 m RMS from truth without it, 1.3145 m with it); the RTKLIB formula test and
+/// the ZIM2 truth test certify it, and [`assert_only_the_relativity_term_differs`]
+/// checks that it is the only difference between the two paths.
+struct NoRelativityTerm<'a>(&'a crate::sp3::Sp3);
+
+impl super::EphemerisSource for NoRelativityTerm<'_> {
+    fn position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64)> {
+        super::EphemerisSource::position_clock_at_j2000_s(self.0, sat, t_j2000_s)
+    }
+}
+
+/// At one state, the model with the `peph2pos` term differs from the no-term model only
+/// by that term: the satellite clock is the no-term clock plus the term, bit for bit, at
+/// the epoch the clock was evaluated; everything that does not depend on the clock is
+/// bit-identical; and `p_hat` moves by `-c` times the term within 3 ulp of `p_hat`. The
+/// clock enters `p_hat` as `((rho + b) - c·dt) + iono + tropo`, three rounded sums in
+/// each model, so the difference of the two `p_hat`s carries up to three half-ulp
+/// roundings from each side and the product `c·dt` no more than a half-ulp of its own,
+/// which is far below `p_hat`'s ulp.
+// The state is the model's own argument list plus a label.
+#[allow(clippy::too_many_arguments)]
+fn assert_only_the_relativity_term_differs(
+    sp3: &crate::sp3::Sp3,
+    env: &SatModelEnv<'_>,
+    sat: GnssSatelliteId,
+    rx: [f64; 3],
+    b: f64,
+    p_meas: f64,
+    klobuchar: &KlobucharCoeffs,
+    label: &str,
+) {
+    let no_term = NoRelativityTerm(sp3);
+    let no_term_env = SatModelEnv {
+        eph: &no_term,
+        ..*env
+    };
+    let with_term_env = SatModelEnv { eph: sp3, ..*env };
+    let a = test_support::sat_model_for_test(&no_term_env, sat, rx, b, p_meas, klobuchar)
+        .expect("no-term model");
+    let w = test_support::sat_model_for_test(&with_term_env, sat, rx, b, p_meas, klobuchar)
+        .expect("with-term model");
+    assert_eq!(
+        a.clock_epoch_j2000_s.to_bits(),
+        w.clock_epoch_j2000_s.to_bits(),
+        "{label}"
+    );
+    let super::ClockRelativity::Term(term) =
+        super::EphemerisSource::clock_relativity_s(sp3, sat, w.clock_epoch_j2000_s)
+    else {
+        panic!("{label}: no peph2pos term");
+    };
+    assert_ne!(term, 0.0, "{label}: the term is not zero");
+    assert_eq!(
+        w.dt_sat_s.to_bits(),
+        (a.dt_sat_s + term).to_bits(),
+        "{label}: clock with the term"
+    );
+    for (name, x, y) in [
+        ("rho", a.rho_m, w.rho_m),
+        ("tau", a.tau_s, w.tau_s),
+        ("el", a.el_rad, w.el_rad),
+        ("iono", a.iono_m, w.iono_m),
+        ("tropo", a.tropo_m, w.tropo_m),
+    ] {
+        assert_eq!(x.to_bits(), y.to_bits(), "{label}: {name}");
+    }
+    let ulp = f64::from_bits(a.p_hat_m.abs().to_bits() + 1) - a.p_hat_m.abs();
+    let moved = (w.p_hat_m - a.p_hat_m) + C_M_S * term;
+    assert!(
+        moved.abs() <= 3.0 * ulp,
+        "{label}: p_hat moved by {} where -c·term is {}",
+        w.p_hat_m - a.p_hat_m,
+        -C_M_S * term
+    );
+}
+
 fn esbc_broadcast_store() -> BroadcastStore {
     let nav = std::fs::read_to_string(fixture_path("nav/ESBC00DNK_R_20201770000_01D_MN.rnx"))
         .expect("read ESBC broadcast NAV fixture");
@@ -155,6 +248,7 @@ fn esbc_first_epoch_inputs(initial_guess: [f64; 4]) -> (SolveInputs, [f64; 3]) {
                 relative_humidity: 0.5,
             },
             robust: None,
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         },
         truth,
     )
@@ -337,6 +431,7 @@ fn solve_inputs(i: &Inputs) -> SolveInputs {
         glonass_channels: std::collections::BTreeMap::new(),
         met: i.met,
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     }
 }
 
@@ -454,7 +549,7 @@ fn used_sats(doc: &Value) -> Vec<GnssSatelliteId> {
 /// Jacobian, mirroring what scipy differences and what `LeastSquaresProblem::
 /// with_weights` scales.
 fn weighted_residual_at(
-    sp3: &crate::sp3::Sp3,
+    eph: &dyn super::EphemerisSource,
     used: &[GnssSatelliteId],
     obs_by_id: &[(GnssSatelliteId, f64)],
     sqrt_w: &[f64],
@@ -465,7 +560,7 @@ fn weighted_residual_at(
     let b = x[3];
     let glonass_channels = std::collections::BTreeMap::<u8, i8>::new();
     let env = SatModelEnv {
-        eph: sp3,
+        eph,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
         t_rx_second_of_day_s: inputs.sod_s,
         day_of_year: inputs.doy,
@@ -473,6 +568,7 @@ fn weighted_residual_at(
         met: &inputs.met,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::reference(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     let r: Vec<f64> = used
         .iter()
@@ -497,9 +593,10 @@ fn trace_replay_level(level: &str) {
     let f = &doc["fixture"];
     let inputs = load_inputs(&doc, level);
     let sp3 = sp3();
+    let reference = NoRelativityTerm(&sp3);
     let glonass_channels = std::collections::BTreeMap::<u8, i8>::new();
     let env = SatModelEnv {
-        eph: &sp3,
+        eph: &reference,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
         t_rx_second_of_day_s: inputs.sod_s,
         day_of_year: inputs.doy,
@@ -507,6 +604,7 @@ fn trace_replay_level(level: &str) {
         met: &inputs.met,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::reference(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
 
     let used = used_sats(&doc);
@@ -570,6 +668,18 @@ fn trace_replay_level(level: &str) {
                 .expect("ephemeris present");
 
             let pfx = format!("{level}.state{ti}.{sat}");
+            if ti == 0 {
+                assert_only_the_relativity_term_differs(
+                    &sp3,
+                    &env,
+                    sat,
+                    rx,
+                    b,
+                    p_meas,
+                    &inputs.klobuchar,
+                    &pfx,
+                );
+            }
             check(
                 format!("{pfx}.tau_s"),
                 m.tau_s,
@@ -679,7 +789,7 @@ fn trace_replay_level(level: &str) {
         }
 
         // (2) Weighted residual vector (used-sat order).
-        let r = weighted_residual_at(&sp3, &used, &obs_by_id, &sqrt_w, &inputs, &x);
+        let r = weighted_residual_at(&reference, &used, &obs_by_id, &sqrt_w, &inputs, &x);
         let res_v = st["residual"].as_array().unwrap();
         for (i, want) in res_v.iter().enumerate() {
             check(
@@ -705,7 +815,7 @@ fn trace_replay_level(level: &str) {
         let x_vec = DVector::from_row_slice(&x);
         let resid_closure = |p: &DVector<f64>| -> DVector<f64> {
             let pa = [p[0], p[1], p[2], p[3]];
-            weighted_residual_at(&sp3, &used, &obs_by_id, &sqrt_w, &inputs, &pa)
+            weighted_residual_at(&reference, &used, &obs_by_id, &sqrt_w, &inputs, &pa)
         };
         let jac = jacobian_2point(resid_closure, &x_vec, &f0).expect("valid SPP jacobian");
 
@@ -755,6 +865,7 @@ fn regen_trace_level(level: &str) {
     let name = fixture_name(level);
     let mut doc = read_fixture(&name);
     let sp3 = sp3();
+    let reference = NoRelativityTerm(&sp3);
 
     // (0) Re-synthesize the noise-free observations so the fixture's synthetic
     // world is self-consistent with the corrected (RTKLIB) interpolation: each
@@ -767,7 +878,7 @@ fn regen_trace_level(level: &str) {
         let inputs0 = load_inputs(&doc, level);
         let glonass_channels = std::collections::BTreeMap::<u8, i8>::new();
         let env0 = SatModelEnv {
-            eph: &sp3,
+            eph: &reference,
             t_rx_j2000_s: inputs0.t_rx_j2000_s,
             t_rx_second_of_day_s: inputs0.sod_s,
             day_of_year: inputs0.doy,
@@ -775,6 +886,7 @@ fn regen_trace_level(level: &str) {
             met: &inputs0.met,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         };
         let tr = doc["fixture"]["inputs"]["rx_truth_ecef_m"]
             .as_array()
@@ -821,7 +933,7 @@ fn regen_trace_level(level: &str) {
     let inputs = load_inputs(&doc, level);
     let glonass_channels = std::collections::BTreeMap::<u8, i8>::new();
     let env = SatModelEnv {
-        eph: &sp3,
+        eph: &reference,
         t_rx_j2000_s: inputs.t_rx_j2000_s,
         t_rx_second_of_day_s: inputs.sod_s,
         day_of_year: inputs.doy,
@@ -829,6 +941,7 @@ fn regen_trace_level(level: &str) {
         met: &inputs.met,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::reference(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     let used = used_sats(&doc);
     let obs_by_id: Vec<(GnssSatelliteId, f64)> = inputs
@@ -886,7 +999,7 @@ fn regen_trace_level(level: &str) {
             ps["residual_m"] = hexbits(r_w).into();
         }
 
-        let r = weighted_residual_at(&sp3, &used, &obs_by_id, &sqrt_w, &inputs, &x);
+        let r = weighted_residual_at(&reference, &used, &obs_by_id, &sqrt_w, &inputs, &x);
         let res_arr: Vec<Value> = (0..r.len()).map(|i| hexbits(r[i]).into()).collect();
         doc["fixture"]["trace_states"][si]["residual"] = Value::Array(res_arr);
 
@@ -894,7 +1007,7 @@ fn regen_trace_level(level: &str) {
         let x_vec = DVector::from_row_slice(&x);
         let resid_closure = |p: &DVector<f64>| -> DVector<f64> {
             let pa = [p[0], p[1], p[2], p[3]];
-            weighted_residual_at(&sp3, &used, &obs_by_id, &sqrt_w, &inputs, &pa)
+            weighted_residual_at(&reference, &used, &obs_by_id, &sqrt_w, &inputs, &pa)
         };
         let jac = jacobian_2point(resid_closure, &x_vec, &f0).expect("valid SPP jacobian");
         let jac_rows: Vec<Value> = (0..jac.nrows())
@@ -914,7 +1027,7 @@ fn regen_trace_level(level: &str) {
     // recovers truth to sub-nm; the recorded `final_solution.x` becomes the
     // corrected solver's converged value.
     {
-        let sol = solve(&sp3, &solve_inputs(&inputs), true).expect("solve converges");
+        let sol = solve(&reference, &solve_inputs(&inputs), true).expect("solve converges");
         let x = [
             sol.position.x_m,
             sol.position.y_m,
@@ -990,9 +1103,10 @@ fn trace_replay_l3_relativistic_zero_ulp() {
     trace_replay_level("L3_relativistic");
 }
 
-/// The relativistic level is a documented no-op: SP3 precise clocks are used
-/// as-is with no separate periodic term, so L3 must reproduce L2 bit-for-bit at
-/// every recorded per-satellite predicted range.
+/// The reference recipe's L3 adds no relativistic term, so its fixture reproduces
+/// L2 bit-for-bit at every recorded per-satellite predicted range. Positioning
+/// applies the `peph2pos` term at every level; the replay runs the recipe's no-term
+/// model.
 #[test]
 fn relativistic_level_equals_tropo_level() {
     let l2 = read_fixture("spp_trace_L2_tropo.json");
@@ -1006,7 +1120,7 @@ fn relativistic_level_equals_tropo_level() {
         assert_eq!(
             s2["p_hat_m"].as_str().unwrap(),
             s3["p_hat_m"].as_str().unwrap(),
-            "relativistic no-op changed p_hat for {}",
+            "L3 p_hat differs from L2 for {}",
             s2["prn"].as_str().unwrap()
         );
     }
@@ -1038,8 +1152,42 @@ fn independent_solve_level(level: &str) {
     let f = &doc["fixture"];
     let inputs = load_inputs(&doc, level);
     let sp3 = sp3();
+    let reference = NoRelativityTerm(&sp3);
 
-    let sol = solve(&sp3, &solve_inputs(&inputs), true).expect("solve converges");
+    let sol = solve(&reference, &solve_inputs(&inputs), true).expect("solve converges");
+
+    // At the converged state, the model with the term differs from this one by the
+    // term alone.
+    {
+        let glonass_channels = std::collections::BTreeMap::<u8, i8>::new();
+        let env = SatModelEnv {
+            eph: &reference,
+            t_rx_j2000_s: inputs.t_rx_j2000_s,
+            t_rx_second_of_day_s: inputs.sod_s,
+            day_of_year: inputs.doy,
+            corrections: inputs.corrections,
+            met: &inputs.met,
+            glonass_channels: &glonass_channels,
+            model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        };
+        let rx = [sol.position.x_m, sol.position.y_m, sol.position.z_m];
+        let b = sol.rx_clock_s * super::C_M_S;
+        for observation in &inputs.observations {
+            if sol.used_sats.contains(&observation.satellite_id) {
+                assert_only_the_relativity_term_differs(
+                    &sp3,
+                    &env,
+                    observation.satellite_id,
+                    rx,
+                    b,
+                    observation.pseudorange_m,
+                    &inputs.klobuchar,
+                    &format!("{level}.converged.{}", observation.satellite_id),
+                );
+            }
+        }
+    }
 
     // used_sats / rejected_sats match the fixture exactly (deterministic order).
     let want_used = used_sats(&doc);
@@ -1152,8 +1300,40 @@ fn dop_from_converged_geometry_agrees() {
         let doc = read_fixture(&fixture_name(level));
         let inputs = load_inputs(&doc, level);
         let sp3 = sp3();
-        let sol = solve(&sp3, &solve_inputs(&inputs), false).expect("solve");
+        let sol = solve(&NoRelativityTerm(&sp3), &solve_inputs(&inputs), false).expect("solve");
         let dop = sol.dop.expect("dop present");
+        // With the term the solve lands elsewhere, so its DOP differs, but only through
+        // the term: at one used satellite of this solution the two models differ by it.
+        {
+            let reference = NoRelativityTerm(&sp3);
+            let glonass_channels = std::collections::BTreeMap::<u8, i8>::new();
+            let env = SatModelEnv {
+                eph: &reference,
+                t_rx_j2000_s: inputs.t_rx_j2000_s,
+                t_rx_second_of_day_s: inputs.sod_s,
+                day_of_year: inputs.doy,
+                corrections: inputs.corrections,
+                met: &inputs.met,
+                glonass_channels: &glonass_channels,
+                model: SppModelRecipe::reference(),
+                pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            };
+            let observation = inputs
+                .observations
+                .iter()
+                .find(|o| sol.used_sats.contains(&o.satellite_id))
+                .expect("a used satellite");
+            assert_only_the_relativity_term_differs(
+                &sp3,
+                &env,
+                observation.satellite_id,
+                [sol.position.x_m, sol.position.y_m, sol.position.z_m],
+                sol.rx_clock_s * super::C_M_S,
+                observation.pseudorange_m,
+                &inputs.klobuchar,
+                &format!("{level}.dop.{}", observation.satellite_id),
+            );
+        }
         let want = &doc["fixture"]["dop"];
         for (label, got) in [
             ("gdop", dop.gdop),
@@ -1335,6 +1515,7 @@ fn galileo_ionosphere_uses_nequick_coefficients_and_gps_stays_klobuchar() {
         met: &fixture_inputs.met,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::reference(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     let tr = doc["fixture"]["inputs"]["rx_truth_ecef_m"]
         .as_array()
@@ -1539,6 +1720,7 @@ fn synthetic_spp_case(directions: &[[f64; 3]]) -> (SyntheticEphemeris, SolveInpu
         met: &SurfaceMet::default(),
         glonass_channels: &std::collections::BTreeMap::new(),
         model: SppModelRecipe::reference(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     let observations = eph
         .positions
@@ -1592,6 +1774,7 @@ fn synthetic_spp_case(directions: &[[f64; 3]]) -> (SyntheticEphemeris, SolveInpu
             glonass_channels: std::collections::BTreeMap::new(),
             met: SurfaceMet::default(),
             robust: None,
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         },
     )
 }
@@ -1699,6 +1882,7 @@ fn degenerate_geometry_case() -> (crate::sp3::Sp3, SolveInputs) {
                 relative_humidity: 0.5,
             },
             robust: None,
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         },
     )
 }
@@ -1908,10 +2092,28 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     };
 
     let sol = solve_with_policy(&store, &inputs, true, policy).expect("coarse search solves");
-    assert_eq!(sol.position.x_m.to_bits(), 0x414b544d32219a58);
-    assert_eq!(sol.position.y_m.to_bits(), 0x412040dc182a9933);
-    assert_eq!(sol.position.z_m.to_bits(), 0x4153f61dfc670fde);
-    assert_eq!(sol.rx_clock_s.to_bits(), 0x3f3f84f505aab32e);
+    // Re-frozen when the broadcast store began evaluating records at seconds of week that
+    // keep every bit of the query epoch: the transmission times here are fractional, and
+    // adding GPS_EPOCH_TO_J2000_S first had rounded about half of them by 2^-23 s, about
+    // 0.5 mm of satellite position. The solution moved by up to 2.6e-5 m and the clock
+    // in its last bits; the whole array is printed on a mismatch.
+    let sol_bits = [
+        sol.position.x_m.to_bits(),
+        sol.position.y_m.to_bits(),
+        sol.position.z_m.to_bits(),
+        sol.rx_clock_s.to_bits(),
+    ];
+    assert_eq!(
+        sol_bits,
+        [
+            0x414b544d32219b57,
+            0x412040dc18317f46,
+            0x4153f61dfc641e01,
+            0x3f3f84f505369aaa
+        ],
+        "x, y, z, clock bits: {:#x?}",
+        sol_bits
+    );
     assert!(sol.metadata.converged);
     assert!(sol.metadata.redundancy >= 1);
     assert!(sol.metadata.raim_checkable);
@@ -2036,10 +2238,28 @@ fn owned_deterministic_solver_frozen_bits() {
     // Owned deterministic kernel: its own frozen-bits golden.
     let owned = solve_with_solver(&store, &inputs, true, SolverRecipe::OwnedDeterministicTrf)
         .expect("owned deterministic solve");
-    assert_eq!(owned.position.x_m.to_bits(), 0x414b544cd339d1cd);
-    assert_eq!(owned.position.y_m.to_bits(), 0x412040dc03055a9c);
-    assert_eq!(owned.position.z_m.to_bits(), 0x4153f61de1d76f2e);
-    assert_eq!(owned.rx_clock_s.to_bits(), 0x3f3f84ebef5a8fa8);
+    // Re-frozen when the broadcast store began evaluating records at seconds of week that
+    // keep every bit of the query epoch: the transmission times here are fractional, and
+    // adding GPS_EPOCH_TO_J2000_S first had rounded about half of them by 2^-23 s, about
+    // 0.5 mm of satellite position. The solution moved by up to 2.6e-5 m and the clock
+    // in its last bits; the whole array is printed on a mismatch.
+    let owned_bits = [
+        owned.position.x_m.to_bits(),
+        owned.position.y_m.to_bits(),
+        owned.position.z_m.to_bits(),
+        owned.rx_clock_s.to_bits(),
+    ];
+    assert_eq!(
+        owned_bits,
+        [
+            0x414b544cd339d68d,
+            0x412040dc0308cf29,
+            0x4153f61de1d7becf,
+            0x3f3f84ebef61f2c5
+        ],
+        "x, y, z, clock bits: {:#x?}",
+        owned_bits
+    );
     assert_eq!(owned.used_sats, reference.used_sats);
     assert_eq!(owned.residuals_m.len(), reference.residuals_m.len());
 
@@ -2229,6 +2449,7 @@ fn covariance_at_solution(
         met: &inputs.met,
         glonass_channels: &inputs.glonass_channels,
         model,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     let mut los = Vec::with_capacity(solution.used_sats.len());
     let mut clock_index = Vec::with_capacity(solution.used_sats.len());
@@ -2510,10 +2731,28 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     );
 
     // BAR 1: frozen-bits determinism golden (this build's reproducible output).
-    assert_eq!(canonical.position.x_m.to_bits(), 0x414b544cd339d1f2);
-    assert_eq!(canonical.position.y_m.to_bits(), 0x412040dc0305586a);
-    assert_eq!(canonical.position.z_m.to_bits(), 0x4153f61de1d76f5e);
-    assert_eq!(canonical.rx_clock_s.to_bits(), 0x3f3f84ebef5a9708);
+    // Re-frozen when the broadcast store began evaluating records at seconds of week that
+    // keep every bit of the query epoch: the transmission times here are fractional, and
+    // adding GPS_EPOCH_TO_J2000_S first had rounded about half of them by 2^-23 s, about
+    // 0.5 mm of satellite position. The solution moved by up to 2.6e-5 m and the clock
+    // in its last bits; the whole array is printed on a mismatch.
+    let canonical_bits = [
+        canonical.position.x_m.to_bits(),
+        canonical.position.y_m.to_bits(),
+        canonical.position.z_m.to_bits(),
+        canonical.rx_clock_s.to_bits(),
+    ];
+    assert_eq!(
+        canonical_bits,
+        [
+            0x414b544cd339d7d0,
+            0x412040dc0308d3e8,
+            0x4153f61de1d7bf29,
+            0x3f3f84ebef6213c3
+        ],
+        "x, y, z, clock bits: {:#x?}",
+        canonical_bits
+    );
 
     // Determinism: a second canonical solve is bit-identical.
     let again = run_canonical();
@@ -2685,6 +2924,7 @@ fn iono_term_m(
         met: &met,
         glonass_channels,
         model: SppModelRecipe::reference(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     test_support::sat_model_with_ionosphere_for_test(
         &env,
@@ -2813,6 +3053,7 @@ fn glonass_validation_inputs(channels: std::collections::BTreeMap<u8, i8>) -> So
             relative_humidity: 0.5,
         },
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     }
 }
 
@@ -3046,4 +3287,92 @@ fn glonass_boundary_channels_are_accepted_for_iono_scaling() {
             "valid channel k={k} must keep the satellite in the solve (got {err:?})"
         );
     }
+}
+
+/// A precise source's relativistic term is unavailable, not absent, within 1 ms of the
+/// end of its position coverage: the position 1 ms later cannot be interpolated, where
+/// RTKLIB `peph2pos` returns no state. The product clock itself stays readable there, and
+/// 2 ms before the end the term is formed.
+#[test]
+fn precise_relativity_term_is_unavailable_within_1_ms_of_coverage_end() {
+    let sp3 = sp3();
+    let nodes = sp3.epochs_j2000_seconds();
+    let end = nodes[nodes.len() - 1] + (nodes[1] - nodes[0]);
+    let sat = sp3
+        .satellites()
+        .iter()
+        .copied()
+        .find(|&sat| {
+            sp3.position_at_j2000_seconds(sat, end)
+                .is_ok_and(|state| state.clock_s.is_some())
+                && sp3.position_at_j2000_seconds(sat, end + 0.0005).is_err()
+        })
+        .expect("a satellite covered to the end");
+    let t = end - 0.0005;
+    assert!(super::EphemerisSource::position_clock_at_j2000_s(&sp3, sat, t).is_some());
+    assert_eq!(
+        super::EphemerisSource::clock_relativity_s(&sp3, sat, t),
+        super::ClockRelativity::Unavailable
+    );
+    assert!(matches!(
+        super::EphemerisSource::clock_relativity_s(&sp3, sat, end - 0.002),
+        super::ClockRelativity::Term(term) if term != 0.0
+    ));
+}
+
+/// The SPP model declines a satellite whose relativistic term is unavailable, as RTKLIB
+/// `peph2pos` returns no state for it, and keeps it when the term does not apply.
+#[test]
+fn spp_declines_a_satellite_whose_relativity_term_is_unavailable() {
+    struct TermUnavailable<'a>(&'a crate::sp3::Sp3);
+
+    impl super::EphemerisSource for TermUnavailable<'_> {
+        fn position_clock_at_j2000_s(
+            &self,
+            sat: GnssSatelliteId,
+            t_j2000_s: f64,
+        ) -> Option<([f64; 3], f64)> {
+            super::EphemerisSource::position_clock_at_j2000_s(self.0, sat, t_j2000_s)
+        }
+
+        fn clock_relativity_s(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+        ) -> super::ClockRelativity {
+            super::ClockRelativity::Unavailable
+        }
+    }
+
+    let doc = read_fixture(&fixture_name("L0_minimal"));
+    let inputs = load_inputs(&doc, "L0_minimal");
+    let sp3 = sp3();
+    let sat = used_sats(&doc)[0];
+    let p_meas = inputs
+        .observations
+        .iter()
+        .find(|o| o.satellite_id == sat)
+        .expect("observation")
+        .pseudorange_m;
+    let glonass_channels = std::collections::BTreeMap::<u8, i8>::new();
+    let unavailable = TermUnavailable(&sp3);
+    let no_term = NoRelativityTerm(&sp3);
+    let model_with = |eph: &dyn super::EphemerisSource| {
+        let env = SatModelEnv {
+            eph,
+            t_rx_j2000_s: inputs.t_rx_j2000_s,
+            t_rx_second_of_day_s: inputs.sod_s,
+            day_of_year: inputs.doy,
+            corrections: inputs.corrections,
+            met: &inputs.met,
+            glonass_channels: &glonass_channels,
+            model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        };
+        let rx = [inputs.x0[0], inputs.x0[1], inputs.x0[2]];
+        test_support::sat_model_for_test(&env, sat, rx, inputs.x0[3], p_meas, &inputs.klobuchar)
+            .is_some()
+    };
+    assert!(model_with(&no_term));
+    assert!(!model_with(&unavailable));
 }

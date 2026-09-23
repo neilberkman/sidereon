@@ -1440,6 +1440,7 @@ mod tests {
                 relative_humidity: 0.5,
             },
             robust: None,
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         }
     }
 

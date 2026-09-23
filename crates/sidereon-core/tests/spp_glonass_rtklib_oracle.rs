@@ -225,6 +225,7 @@ fn glonass_spp_agrees_with_rtklib_demo5_l1_single() {
             relative_humidity: 0.5,
         },
         robust: None,
+        pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
     };
 
     let solution = solve(&store, &inputs, true).expect("GLONASS-included SPP solve");

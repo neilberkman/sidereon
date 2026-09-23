@@ -8,8 +8,10 @@
 //! for the epoch and its `+/-` velocity neighbours) are the exact terms the Sidereon
 //! interface marshals, captured to `broadcast_comparison_golden.json`. Feeding them
 //! to the core comparison must reproduce the expected GPS broadcast accuracy: an
-//! overall 3D orbit RMS of roughly 1-2 m, dominated by along-track and radial. The
-//! lower bound is non-tautological (a zeroed/broken eval collapses to ~0); the
+//! overall 3D orbit RMS of roughly 1-2 m, dominated by along-track and radial, and a
+//! clock RMS of 0.69 m (0.64 m with the clock datum removed), the precise clock
+//! carrying the RTKLIB `peph2pos` relativistic term and the broadcast clock no group
+//! delay. The orbit lower bound is non-tautological (a zeroed/broken eval collapses to ~0); the
 //! upper bound flags a parse/eval/coverage regression. RAC orthonormality and the
 //! clock-datum shrink are checked as structural invariants of the difference
 //! algebra. The bit-exact operation-order pins for the RAC projection, the
@@ -24,6 +26,19 @@ use sidereon_core::broadcast_comparison::{
 use sidereon_core::ephemeris::{BroadcastEphemeris, Sp3};
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 use std::path::PathBuf;
+
+/// Raw broadcast-minus-precise GPS clock RMS over the day, metres: the broadcast
+/// clock without the group delay against the SP3 clock with the RTKLIB `peph2pos`
+/// relativistic term, as measured (0.6912 m).
+const CLOCK_RAW_RMS_M: f64 = 0.6912;
+/// The same RMS after removing each epoch's common clock datum, metres, as measured
+/// (0.6445 m).
+const CLOCK_DATUM_REMOVED_RMS_M: f64 = 0.6445;
+/// Factor either side of the measured clock RMS values the bands allow. A factor of
+/// two still fails a precise clock without the relativistic term, whose RMS for GPS
+/// eccentricities is metres (`-2 r·v / c²` reaches 6.9 m at e = 0.01), and a zeroed or
+/// otherwise broken clock evaluation.
+const CLOCK_RMS_MARGIN: f64 = 2.0;
 
 const GOLDEN: &str = include_str!("fixtures/broadcast_comparison_golden.json");
 
@@ -214,10 +229,14 @@ fn removing_the_clock_datum_shrinks_the_clock_error() {
         .expect("datum-removed clock RMS");
 
     assert!(
-        raw > 0.0 && raw < 50.0,
+        raw > CLOCK_RAW_RMS_M / CLOCK_RMS_MARGIN && raw < CLOCK_RAW_RMS_M * CLOCK_RMS_MARGIN,
         "raw clock RMS out of band: {raw} m"
     );
-    assert!(datum_removed > 0.0);
+    assert!(
+        datum_removed > CLOCK_DATUM_REMOVED_RMS_M / CLOCK_RMS_MARGIN
+            && datum_removed < CLOCK_DATUM_REMOVED_RMS_M * CLOCK_RMS_MARGIN,
+        "datum-removed clock RMS out of band: {datum_removed} m"
+    );
     assert!(
         datum_removed < raw,
         "datum removal did not shrink the clock error: {datum_removed} >= {raw}"

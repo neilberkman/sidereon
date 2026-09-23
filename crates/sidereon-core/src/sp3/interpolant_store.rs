@@ -25,8 +25,8 @@ use crate::observables::{
     ObservableEphemerisSource, ObservableState, ObservableStateBatch, ObservablesError,
 };
 use crate::sp3::interp::{
-    instant_to_j2000_seconds, neville, Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR,
-    NEVILLE_POINTS,
+    instant_to_j2000_seconds, neville, PreciseQuery, Sp3InterpolationOptions,
+    DEFAULT_GAP_THRESHOLD_FACTOR, NEVILLE_POINTS,
 };
 use crate::sp3::{PreciseEphemerisInterpolant, Sp3, Sp3State};
 use crate::{validate, Error, Result};
@@ -595,6 +595,23 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
         )
     }
 
+    /// Position of `sat` 1 ms after `t_j2000_s`, the second position RTKLIB `peph2pos`
+    /// interpolates to form the satellite velocity.
+    pub(crate) fn position_after_ephpos_step(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<[f64; 3]> {
+        let series = self.series.get(&sat).ok_or(Error::UnknownSatellite(sat))?;
+        interpolate_mapped_position(
+            self.bytes.as_ref(),
+            series,
+            PreciseQuery::at(t_j2000_s).ephpos_step(),
+            self.interpolation.gap_threshold_factor(),
+        )
+        .map(|(x, y, z)| [x, y, z])
+    }
+
     /// Interpolate the state of `sat` at an arbitrary [`Instant`].
     ///
     /// The query instant must use the same time scale as the source artifact.
@@ -650,6 +667,18 @@ impl ObservableEphemerisSource for MmapPreciseEphemerisInterpolant<'_> {
             position_ecef_m: state.position.as_array(),
             clock_s: state.clock_s,
         })
+    }
+
+    /// The `peph2pos` relativistic term for the product clock this source returns.
+    fn clock_relativity_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        crate::sp3::peph2pos_clock_relativity(
+            self.position_at_j2000_seconds(sat, t_j2000_s),
+            || self.position_after_ephpos_step(sat, t_j2000_s),
+        )
     }
 }
 
@@ -1267,6 +1296,27 @@ fn interpolate_mapped_state(
     query: f64,
     gap_threshold_factor: f64,
 ) -> Result<Sp3State> {
+    let (x_m, y_m, z_m) =
+        interpolate_mapped_position(bytes, series, PreciseQuery::at(query), gap_threshold_factor)?;
+    let clock_s = interpolate_mapped_clock(bytes, series, query);
+    Ok(Sp3State {
+        position: ItrfPositionM::new(x_m, y_m, z_m).expect("valid ITRF position"),
+        clock_s,
+        velocity: None,
+        clock_rate_s_s: None,
+        flags: crate::sp3::Sp3Flags::default(),
+    })
+}
+
+/// Mapped-series position at `precise_query`, with the in-memory path's coverage and
+/// gap checks.
+fn interpolate_mapped_position(
+    bytes: &[u8],
+    series: &MmapSeries,
+    precise_query: PreciseQuery,
+    gap_threshold_factor: f64,
+) -> Result<(f64, f64, f64)> {
+    let query = precise_query.j2000_s();
     if series.pos_count < 2 {
         return Err(Error::EpochOutOfRange);
     }
@@ -1292,7 +1342,7 @@ fn interpolate_mapped_state(
     }
 
     let (x_m, y_m, z_m) =
-        interpolate_mapped_position_neville(bytes, series, query, gap_threshold_factor);
+        interpolate_mapped_position_neville(bytes, series, precise_query, gap_threshold_factor);
     if !(x_m.is_finite() && y_m.is_finite() && z_m.is_finite()) {
         // Same failure as the in-memory path: admitted nodes far from the
         // query can coincide at its precision and zero a Neville denominator.
@@ -1301,22 +1351,16 @@ fn interpolate_mapped_state(
              distinct at its precision, or the coordinates overflow"
         )));
     }
-    let clock_s = interpolate_mapped_clock(bytes, series, query);
-    Ok(Sp3State {
-        position: ItrfPositionM::new(x_m, y_m, z_m).expect("valid ITRF position"),
-        clock_s,
-        velocity: None,
-        clock_rate_s_s: None,
-        flags: crate::sp3::Sp3Flags::default(),
-    })
+    Ok((x_m, y_m, z_m))
 }
 
 fn interpolate_mapped_position_neville(
     bytes: &[u8],
     series: &MmapSeries,
-    query: f64,
+    precise_query: PreciseQuery,
     gap_threshold_factor: f64,
 ) -> (f64, f64, f64) {
+    let query = precise_query.j2000_s();
     let n = series.pos_count;
     let nominal = nominal_positive_spacing(bytes, series).unwrap_or(1.0);
     let gap_thresh = gap_threshold_factor * nominal;
@@ -1364,7 +1408,7 @@ fn interpolate_mapped_position_neville(
     let mut pz = [0.0f64; NEVILLE_POINTS];
     for j in 0..win {
         let k = start + j;
-        let tj = series.pos_x.get(bytes, k) - query;
+        let tj = precise_query.offset_from(series.pos_x.get(bytes, k));
         let kx = series.pos_kx.get(bytes, k);
         let ky = series.pos_ky.get(bytes, k);
         let kz = series.pos_kz.get(bytes, k);

@@ -377,6 +377,9 @@ fn spp_seed_inputs(epoch: &FloatEpoch, options: PppAutoInitOptions) -> spp::Solv
         glonass_channels: BTreeMap::new(),
         met: options.spp_met,
         robust: None,
+        // The float epochs carry ionosphere-free code, so no single-frequency
+        // group delay applies (RTKLIB `prange` under IFLC).
+        pseudorange_code: crate::spp::PseudorangeCode::IonosphereFree,
     }
 }
 

@@ -425,16 +425,27 @@ fn broadcast_state(
 }
 
 /// Precise ECEF position and clock at the split-Julian-date epoch, or `None`.
+///
+/// The clock carries the relativistic term RTKLIB `peph2pos` applies to a precise clock,
+/// as the broadcast clock carries the broadcast one, so the clock difference compares
+/// clocks of one convention. Without the term (within 1 ms of the end of coverage) the
+/// epoch has no precise clock.
 fn precise_state(
     precise: &Sp3,
     scale: TimeScale,
     sat: GnssSatelliteId,
     split: JulianDateSplit,
 ) -> Option<([f64; 3], Option<f64>)> {
-    let state = precise
-        .position(sat, Instant::from_julian_date(scale, split))
-        .ok()?;
-    Some((state.position.as_array(), state.clock_s))
+    let epoch = Instant::from_julian_date(scale, split);
+    let state = precise.position(sat, epoch).ok()?;
+    let clock_s = state
+        .clock_s
+        .and_then(|clock_s| match precise.clock_relativity_at(sat, epoch) {
+            crate::spp::ClockRelativity::Term(term_s) => Some(clock_s + term_s),
+            crate::spp::ClockRelativity::NotApplicable => Some(clock_s),
+            crate::spp::ClockRelativity::Unavailable => None,
+        });
+    Some((state.position.as_array(), clock_s))
 }
 
 /// Precise ECEF position only at the split-Julian-date epoch, or `None`.

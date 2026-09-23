@@ -7,13 +7,15 @@
 //! What it pins:
 //!
 //! 1. Broadcast-vs-precise agreement: a broadcast-only SPP fix and a precise SPP
-//!    fix on the same GPS C1C pseudoranges agree to within a LABELED few-meter
-//!    bound. This is the physical broadcast signal-in-space accuracy delta, not a
-//!    bit-exact claim (the broadcast orbit/clock is a fit/extrapolation where the
-//!    precise product is post-processed; the per-satellite error partly absorbs
-//!    into the receiver clock, leaving a few-meter position difference). The
-//!    underlying orbit/clock RMS is ~1-2 m, measured directly by the
-//!    `broadcast_comparison` SISRE gate.
+//!    fix on the same GPS C1C pseudoranges agree to within a LABELED 8 m bound at
+//!    each epoch of the arc (5.66 m and 5.73 m measured). This is the physical
+//!    broadcast signal-in-space accuracy delta, not a bit-exact claim (the
+//!    broadcast orbit/clock is a fit/extrapolation where the precise product is
+//!    post-processed, and the single-frequency model subtracts the broadcast TGD
+//!    where the precise ionosphere-free clock has none; the per-satellite error
+//!    partly absorbs into the receiver clock, leaving a few-metre position
+//!    difference). The underlying orbit RMS is ~1-2 m and the clock RMS 0.69 m,
+//!    measured directly by the `broadcast_comparison` SISRE gate.
 //! 2. Precise-present byte identity: with a precise product covering the epoch,
 //!    `solve_with_fallback` is bit-for-bit identical to `solve` on that SP3 and
 //!    reports `FixSource::Precise` (exact).
@@ -33,7 +35,7 @@ use sidereon_core::positioning::{
     KlobucharCoeffs, Observation, ReceiverSolution, SolveInputs, SurfaceMet,
 };
 use sidereon_core::rinex::observations::{
-    observation_values, ObsEpochTime, ObservationFilter, RinexObs,
+    observation_values, ObsEpoch, ObsEpochTime, ObservationFilter, RinexObs,
 };
 use sidereon_core::staleness::{DegradationKind, SelectionError, StalenessPolicy};
 use sidereon_core::GnssSystem;
@@ -93,10 +95,24 @@ fn civil_to_julian_split(epoch: ObsEpochTime) -> JulianDateSplit {
 /// Troposphere-only corrections with zero Klobuchar, matching the deterministic
 /// GPS C1C configuration the SPP unit tests use on this arc.
 fn first_epoch_inputs() -> SolveInputs {
-    let obs_text = load_text(&["obs", "ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx"]);
-    let obs = RinexObs::parse(&obs_text).expect("parse ESBC observation file");
+    let obs = esbc_obs();
     let epoch = obs.epochs().first().expect("at least one obs epoch");
+    let inputs = epoch_inputs(&obs, epoch);
+    assert!(
+        inputs.observations.len() >= 5,
+        "need a redundant GPS set, got {}",
+        inputs.observations.len()
+    );
+    inputs
+}
 
+fn esbc_obs() -> RinexObs {
+    let obs_text = load_text(&["obs", "ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx"]);
+    RinexObs::parse(&obs_text).expect("parse ESBC observation file")
+}
+
+/// The GPS C1C SPP inputs of one ESBC epoch, as [`first_epoch_inputs`] builds them.
+fn epoch_inputs(obs: &RinexObs, epoch: &ObsEpoch) -> SolveInputs {
     let time = epoch.epoch.expect("the first epoch carries a time");
     let split = civil_to_julian_split(time);
     let t_rx_j2000_s =
@@ -106,7 +122,7 @@ fn first_epoch_inputs() -> SolveInputs {
         + time.second;
 
     let filter = ObservationFilter::from_entries([(GnssSystem::Gps, vec!["C1C".to_string()])]);
-    let values = observation_values(&obs, epoch, &filter).expect("observation values");
+    let values = observation_values(obs, epoch, &filter).expect("observation values");
     let mut observations: Vec<Observation> = Vec::new();
     for (sat, rows) in values {
         if sat.system != GnssSystem::Gps {
@@ -119,11 +135,6 @@ fn first_epoch_inputs() -> SolveInputs {
             });
         }
     }
-    assert!(
-        observations.len() >= 5,
-        "need a redundant GPS set, got {}",
-        observations.len()
-    );
 
     let approx = obs.header().approx_position_m.expect("APPROX POSITION XYZ");
 
@@ -151,6 +162,7 @@ fn first_epoch_inputs() -> SolveInputs {
             relative_humidity: 0.5,
         },
         robust: None,
+        pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
     }
 }
 
@@ -220,18 +232,17 @@ fn assert_solution_bits_eq(a: &ReceiverSolution, b: &ReceiverSolution) {
     assert_eq!(a.metadata, b.metadata);
 }
 
-/// LABELED broadcast-vs-precise accuracy delta. The broadcast orbit error is
-/// ~1-2 m RMS (3D), but at a single epoch the position difference between a
-/// broadcast-only and a precise SPP fix on identical L1 C1C pseudoranges is
-/// larger: the broadcast L1 satellite clock (polynomial fit, relativity, minus
-/// TGD) differs from the precise SP3 ionosphere-free clock (no TGD applied) by a
-/// per-satellite amount that does not fully absorb into the receiver clock, so
-/// the geometry maps the orbit plus clock-scatter difference to the ~10 m level.
-/// The observed delta on this machine is ~13 m; the 20 m bound is that documented
-/// delta with margin, not a bit-exact claim (two orbit/clock sources legitimately
-/// differ). The underlying ~1-2 m orbit and clock RMS is measured directly by the
-/// `broadcast_comparison` SISRE gate.
-const BROADCAST_VS_PRECISE_POSITION_BOUND_M: f64 = 20.0;
+/// LABELED broadcast-vs-precise accuracy delta. On identical L1 C1C pseudoranges
+/// the broadcast-only and precise SPP fixes differ by the broadcast signal-in-space
+/// error mapped through the geometry: the broadcast orbit error (~1-2 m RMS 3D) and
+/// the broadcast clock's scatter about the precise clock (0.69 m RMS, 0.64 m with
+/// the common datum removed, measured by the `broadcast_comparison` SISRE gate), plus
+/// the remaining difference between the sources, the broadcast TGD the model
+/// subtracts for single-frequency code where the precise ionosphere-free clock has
+/// none. Both clocks carry the relativistic term. The measured delta is 5.66 m and
+/// 5.73 m at the arc's two epochs; the 8 m bound is 40% above the larger, not a
+/// bit-exact claim (two orbit/clock sources legitimately differ).
+const BROADCAST_VS_PRECISE_POSITION_BOUND_M: f64 = 8.0;
 
 #[test]
 fn broadcast_spp_agrees_with_precise_spp_within_labeled_bound() {
@@ -260,6 +271,40 @@ fn broadcast_spp_agrees_with_precise_spp_within_labeled_bound() {
         delta < BROADCAST_VS_PRECISE_POSITION_BOUND_M,
         "broadcast SPP disagrees with precise SPP by {delta:.4} m \
          (> {BROADCAST_VS_PRECISE_POSITION_BOUND_M} m)"
+    );
+}
+
+/// The broadcast-vs-precise SPP position delta at every epoch of the arc with at least
+/// five GPS observations (two epochs, 5.66 m and 5.73 m measured), under the same
+/// labeled bound. Every such epoch must solve on both sources.
+#[test]
+fn broadcast_vs_precise_spp_delta_over_the_arc() {
+    let obs = esbc_obs();
+    let store = broadcast_store();
+    let sp3 = precise_sp3();
+    let mut worst_m = 0.0_f64;
+    let mut count = 0usize;
+    for epoch in obs.epochs() {
+        if epoch.epoch.is_none() {
+            continue;
+        }
+        let inputs = epoch_inputs(&obs, epoch);
+        if inputs.observations.len() < 5 {
+            continue;
+        }
+        let broadcast = solve_broadcast(&store, &inputs, true).expect("broadcast-only SPP");
+        let precise = solve(&sp3, &inputs, true).expect("precise SPP");
+        let delta = position_delta_m(&broadcast, &precise);
+        worst_m = worst_m.max(delta);
+        count += 1;
+    }
+    assert_eq!(
+        count, 2,
+        "the arc has two epochs with five or more GPS observations"
+    );
+    assert!(
+        worst_m < BROADCAST_VS_PRECISE_POSITION_BOUND_M,
+        "max broadcast-vs-precise delta {worst_m:.4} m"
     );
 }
 
