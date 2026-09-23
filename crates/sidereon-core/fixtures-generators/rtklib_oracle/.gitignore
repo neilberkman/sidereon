@@ -1,0 +1,4 @@
+# Build outputs of the oracle harness.
+/libm_shim/target/
+/libm_shim/Cargo.lock
+/rtklib_ephemeris_oracle

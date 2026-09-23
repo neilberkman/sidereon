@@ -1,0 +1,18 @@
+# The Rust `libm` crate's transcendental functions as C symbols, so the RTKLIB
+# ephemeris oracle (`rtklib_ephemeris_oracle.c`) evaluates with the same library as
+# sidereon-core. Its own workspace: it is not a member of the sidereon workspace.
+[package]
+name = "sidereon-libm-shim"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The version sidereon-core pins.
+libm = "=0.2.16"
+
+[workspace]

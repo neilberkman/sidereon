@@ -920,7 +920,7 @@ fn nav_lint_and_repair_identical_duplicates_and_order() {
 
 #[test]
 fn nav_text_lint_reports_header_findings_without_file_io() {
-    let text = crate::rinex_nav::encode_nav(&[]);
+    let text = crate::rinex_nav::encode_nav(&[]).expect("encode empty NAV");
     let report = lint_nav_text(&text);
     assert_finding_counts(&report, &[("NAV-H02", 1)]);
 }
@@ -934,7 +934,7 @@ fn nav_text_lint_total_parse_failure_does_not_emit_block_drop() {
 #[test]
 fn nav_text_lint_reports_lenient_supported_block_drop_only_for_that_block() {
     let records = parse_nav(&nav_fixture()).expect("parse NAV fixture");
-    let text = crate::rinex_nav::encode_nav(&records[..2]);
+    let text = crate::rinex_nav::encode_nav(&records[..2]).expect("encode NAV records");
     let mut lines = text.lines().map(str::to_string).collect::<Vec<_>>();
     let damaged = lines
         .iter_mut()
@@ -1313,7 +1313,7 @@ fn repair_obs_fixture_output(input: &str, options: &RepairOptions) -> String {
 
 fn repair_nav_fixture_output(input: &str, options: &RepairOptions) -> String {
     let repair = repair_nav_text(input, options).expect("repair NAV fixture");
-    crate::rinex_nav::encode_nav(&repair.records)
+    crate::rinex_nav::encode_nav(&repair.records).expect("encode repaired NAV")
 }
 
 fn solve_esbc_first_epoch(

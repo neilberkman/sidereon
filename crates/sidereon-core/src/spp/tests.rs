@@ -2188,11 +2188,14 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     };
 
     let sol = solve_with_policy(&store, &inputs, true, policy).expect("coarse search solves");
-    // Re-frozen when the broadcast store began evaluating records at seconds of week that
-    // keep every bit of the query epoch: the transmission times here are fractional, and
-    // adding GPS_EPOCH_TO_J2000_S first had rounded about half of them by 2^-23 s, about
-    // 0.5 mm of satellite position. The solution moved by up to 2.6e-5 m and the clock
-    // in its last bits; the whole array is printed on a mismatch.
+    // Re-frozen when the broadcast orbit took RTKLIB `eph2pos`'s Newton Kepler solver
+    // to 1e-13 and its inclination order, and the broadcast clock `eph2pos`'s
+    // unrefined polynomial and relativistic term (the G30 clock of the SSR oracle
+    // moved by 2.8e-15 s). The solution moved by up to 2.3e-6 m and the clock by
+    // 3.4e-15 s.
+    // Before that, re-frozen when the broadcast store began evaluating records at
+    // seconds of week that keep every bit of the query epoch. The whole array is
+    // printed on a mismatch.
     let sol_bits = [
         sol.position.x_m.to_bits(),
         sol.position.y_m.to_bits(),
@@ -2202,10 +2205,10 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     assert_eq!(
         sol_bits,
         [
-            0x414b544d32219b57,
-            0x412040dc18317f46,
-            0x4153f61dfc641e01,
-            0x3f3f84f505369aaa
+            0x414b544d32219d85,
+            0x412040dc18317a03,
+            0x4153f61dfc641432,
+            0x3f3f84f50535a2c1
         ],
         "x, y, z, clock bits: {:#x?}",
         sol_bits
@@ -2334,11 +2337,14 @@ fn owned_deterministic_solver_frozen_bits() {
     // Owned deterministic kernel: its own frozen-bits golden.
     let owned = solve_with_solver(&store, &inputs, true, SolverRecipe::OwnedDeterministicTrf)
         .expect("owned deterministic solve");
-    // Re-frozen when the broadcast store began evaluating records at seconds of week that
-    // keep every bit of the query epoch: the transmission times here are fractional, and
-    // adding GPS_EPOCH_TO_J2000_S first had rounded about half of them by 2^-23 s, about
-    // 0.5 mm of satellite position. The solution moved by up to 2.6e-5 m and the clock
-    // in its last bits; the whole array is printed on a mismatch.
+    // Re-frozen when the broadcast orbit took RTKLIB `eph2pos`'s Newton Kepler solver
+    // to 1e-13 and its inclination order, and the broadcast clock `eph2pos`'s
+    // unrefined polynomial and relativistic term (the G30 clock of the SSR oracle
+    // moved by 2.8e-15 s). The solution moved by up to 1.2e-6 m and the clock by
+    // 7.2e-16 s.
+    // Before that, re-frozen when the broadcast store began evaluating records at
+    // seconds of week that keep every bit of the query epoch. The whole array is
+    // printed on a mismatch.
     let owned_bits = [
         owned.position.x_m.to_bits(),
         owned.position.y_m.to_bits(),
@@ -2348,10 +2354,10 @@ fn owned_deterministic_solver_frozen_bits() {
     assert_eq!(
         owned_bits,
         [
-            0x414b544cd339d68d,
-            0x412040dc0308cf29,
-            0x4153f61de1d7becf,
-            0x3f3f84ebef61f2c5
+            0x414b544cd339da08,
+            0x412040dc0308c09b,
+            0x4153f61de1d7b9af,
+            0x3f3f84ebef61bf0a
         ],
         "x, y, z, clock bits: {:#x?}",
         owned_bits
@@ -2827,11 +2833,14 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     );
 
     // BAR 1: frozen-bits determinism golden (this build's reproducible output).
-    // Re-frozen when the broadcast store began evaluating records at seconds of week that
-    // keep every bit of the query epoch: the transmission times here are fractional, and
-    // adding GPS_EPOCH_TO_J2000_S first had rounded about half of them by 2^-23 s, about
-    // 0.5 mm of satellite position. The solution moved by up to 2.6e-5 m and the clock
-    // in its last bits; the whole array is printed on a mismatch.
+    // Re-frozen when the broadcast orbit took RTKLIB `eph2pos`'s Newton Kepler solver
+    // to 1e-13 and its inclination order, and the broadcast clock `eph2pos`'s
+    // unrefined polynomial and relativistic term (the G30 clock of the SSR oracle
+    // moved by 2.8e-15 s). The solution moved by up to 1.3e-6 m and the clock by
+    // 1.1e-15 s.
+    // Before that, re-frozen when the broadcast store began evaluating records at
+    // seconds of week that keep every bit of the query epoch. The whole array is
+    // printed on a mismatch.
     let canonical_bits = [
         canonical.position.x_m.to_bits(),
         canonical.position.y_m.to_bits(),
@@ -2841,10 +2850,10 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     assert_eq!(
         canonical_bits,
         [
-            0x414b544cd339d7d0,
-            0x412040dc0308d3e8,
-            0x4153f61de1d7bf29,
-            0x3f3f84ebef6213c3
+            0x414b544cd339da94,
+            0x412040dc0308c39f,
+            0x4153f61de1d7b9a8,
+            0x3f3f84ebef61c768
         ],
         "x, y, z, clock bits: {:#x?}",
         canonical_bits

@@ -29,10 +29,10 @@ use crate::tolerances::GLONASS_TIME_EPS_S;
 
 /// Pinned RK4 fixed step (seconds).
 pub const TSTEP_S: f64 = 60.0;
-/// Most RK4 steps one propagation takes: the 15 full steps of the 900 s broadcast age
-/// limit, plus one for the remainder when the 1 ms step of a record's velocity (RTKLIB
-/// `ephpos`) is added at that limit.
-const MAX_PROPAGATION_STEPS: usize = 16;
+/// Most RK4 steps one propagation takes: the 30 full steps of the 1800 s broadcast age
+/// limit (RTKLIB `MAXDTOE_GLO`), plus one for the remainder when the 1 ms step of a
+/// record's velocity (RTKLIB `ephpos`) is added at that limit.
+const MAX_PROPAGATION_STEPS: usize = 31;
 const _: () = assert!(
     MAX_PROPAGATION_STEPS as f64 * TSTEP_S
         >= crate::rinex_nav::GLONASS_MAX_AGE_S + crate::rinex_nav::EPHPOS_STEP_S
@@ -66,10 +66,16 @@ impl std::error::Error for GlonassError {}
 pub(crate) fn deq(s: &[f64; 6], acc: &[f64; 3]) -> [f64; 6] {
     let (x, y, z, vx, vy, vz) = (s[0], s[1], s[2], s[3], s[4], s[5]);
     let r2 = x * x + y * y + z * z;
+    // RTKLIB `deq` returns a zero derivative for a state at the origin rather than
+    // dividing by zero.
+    if r2 <= 0.0 {
+        return [0.0; 6];
+    }
     let r = r2.sqrt();
     let r3 = r2 * r;
-    // a = 3/2 * J2 * mu * Re^2 / r^5, formed as (3/2 J2 mu Re^2) / (r^2 * r^3).
-    let a = 1.5 * J2 * MU * (R_E * R_E) / (r2 * r3);
+    // a = 3/2 * J2 * mu * Re^2 / r^5, formed as RTKLIB `deq` writes it:
+    // a=1.5*J2_GLO*MU_GLO*SQR(RE_GLO)/r2/r3;
+    let a = 1.5 * J2 * MU * (R_E * R_E) / r2 / r3;
     let b = 5.0 * z * z / r2;
     let c = -MU / r3 - a * (1.0 - b);
     let omg2 = OMEGA_E * OMEGA_E;
@@ -135,18 +141,32 @@ fn invalid_input(field: &'static str, reason: &'static str) -> GlonassError {
     GlonassError::InvalidInput { field, reason }
 }
 
-/// GLONASS clock offset (seconds) at `tk` = t − toe.
+/// GLONASS clock offset (seconds) at satellite clock time `tk` = t − toe: RTKLIB
+/// `geph2clk`.
 ///
 /// `clk_bias` is the broadcast line-0 field (which is −TauN) and `gamma_n` is
-/// +GammaN. The time argument is refined twice for the small clock-vs-signal time
-/// difference. There is no relativistic eccentricity term and no group delay for
-/// the basic single-frequency user.
+/// +GammaN. With `ts = tk`, the time argument is refined twice as
+/// `t = ts - (clk_bias + gamma_n·t)`, which removes the satellite clock from a
+/// time read on that clock, and the offset is `clk_bias + gamma_n·t`. There is no
+/// relativistic eccentricity term and no group delay.
 pub fn clock_offset_s(clk_bias: f64, gamma_n: f64, tk: f64) -> f64 {
-    let mut t = tk;
+    // t=ts=timediff(time,geph->toe);
+    // for (i=0;i<2;i++) t=ts-(-geph->taun+geph->gamn*t);
+    // return -geph->taun+geph->gamn*t;
+    let ts = tk;
+    let mut t = ts;
     for _ in 0..2 {
-        t -= clk_bias + gamma_n * t;
+        t = ts - (clk_bias + gamma_n * t);
     }
     clk_bias + gamma_n * t
+}
+
+/// GLONASS clock offset (seconds) at system time `tk` = t − toe, evaluated with
+/// the orbit as RTKLIB `geph2pos` does: `clk_bias + gamma_n·tk`, without
+/// iteration.
+pub fn position_clock_offset_s(clk_bias: f64, gamma_n: f64, tk: f64) -> f64 {
+    // *dts=-geph->taun+geph->gamn*t;
+    clk_bias + gamma_n * tk
 }
 
 #[cfg(test)]
@@ -177,12 +197,50 @@ mod unit_tests {
         }
     }
 
-    /// A record's velocity at the 900 s age limit propagates 1 ms past it, which takes a
-    /// sixteenth step.
+    /// A record's velocity at the 1800 s age limit propagates 1 ms past it, which takes a
+    /// thirty-first step.
     #[test]
     fn propagate_reaches_the_velocity_step_past_the_age_limit() {
         let tk = crate::rinex_nav::GLONASS_MAX_AGE_S + crate::rinex_nav::EPHPOS_STEP_S;
         assert!(propagate(state0(), [0.0, 0.0, 0.0], tk).is_ok());
+    }
+
+    #[test]
+    fn propagation_step_limit_covers_the_age_limit_and_velocity_step() {
+        assert_eq!(MAX_PROPAGATION_STEPS, 31);
+        assert_eq!(crate::rinex_nav::GLONASS_MAX_AGE_S, 1800.0);
+        assert!(propagate(state0(), [0.0, 0.0, 0.0], -1800.001).is_ok());
+    }
+
+    /// RTKLIB `geph2clk` subtracts from the first time difference `ts` on each
+    /// refinement; the second refinement is `ts - (clk_bias + gamma_n·t1)`.
+    #[test]
+    fn clock_offset_is_rtklib_geph2clk() {
+        for clk_bias in [-1.0e-3, 5.8e-5, 0.0] {
+            for gamma_n in [0.0, 9.1e-13, -2.7e-12] {
+                for tk in [-1800.0, -0.5, 0.0, 900.0] {
+                    let taun = -clk_bias;
+                    let ts = tk;
+                    let mut t = ts;
+                    for _ in 0..2 {
+                        t = ts - (-taun + gamma_n * t);
+                    }
+                    let want = -taun + gamma_n * t;
+                    let got = clock_offset_s(clk_bias, gamma_n, tk);
+                    assert_eq!(got.to_bits(), want.to_bits(), "{clk_bias} {gamma_n} {tk}");
+                    let unrefined = -taun + gamma_n * tk;
+                    assert_eq!(
+                        position_clock_offset_s(clk_bias, gamma_n, tk).to_bits(),
+                        unrefined.to_bits()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deq_at_the_origin_is_zero_as_rtklib() {
+        assert_eq!(deq(&[0.0; 6], &[1.0, 2.0, 3.0]), [0.0; 6]);
     }
 
     #[test]

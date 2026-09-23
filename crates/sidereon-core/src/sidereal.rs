@@ -604,10 +604,10 @@ mod tests {
         BroadcastRecord {
             satellite_id: sat,
             message: NavMessage::GpsLnav,
-            issue_of_data: BroadcastIssue {
+            issue_of_data: Some(BroadcastIssue {
                 issue: 0,
                 message: NavMessage::GpsLnav,
-            },
+            }),
             week: toe.week,
             toe,
             toc: toe,
@@ -638,8 +638,9 @@ mod tests {
             group_delays: BroadcastGroupDelays::default(),
             cnav: None,
             sv_health: 0.0,
-            sv_accuracy_m: 0.0,
+            sv_accuracy_m: Some(0.0),
             fit_interval_s: Some(4.0 * SECONDS_PER_HOUR),
+            stated: crate::rinex_nav::StatedNavFields::default(),
         }
     }
 

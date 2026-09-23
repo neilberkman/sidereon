@@ -27,11 +27,16 @@ pub mod crinex {
 pub mod nav {
     pub use crate::ionex::GalileoNequickCoeffs;
     pub use crate::rinex_nav::{
-        cnav_ura_ned_m, cnav_ura_nominal_m, encode_nav, parse_glonass, parse_glonass_lenient,
-        parse_iono_corrections, parse_leap_seconds, parse_nav, parse_nav_lenient,
-        BroadcastGroupDelayTerm, BroadcastGroupDelays, BroadcastRecord, CnavParameters, CnavSignal,
-        GlonassParse, GlonassRecord, IonoCorrections, KlobucharAlphaBeta, NavMessage,
-        NavMessagePreference, NavParse, NavParseError, SkippedGlonass, SkippedNavBlock,
+        cnav_ura_ned_m, cnav_ura_nominal_m, encode_nav, encode_nav_file, parse_glonass,
+        parse_glonass_lenient, parse_iono_corrections, parse_leap_seconds, parse_nav,
+        parse_nav_file, parse_nav_lenient, parse_sbas, BroadcastGroupDelayTerm,
+        BroadcastGroupDelays, BroadcastRecord, CnavParameters, CnavSignal, EarthOrientation,
+        GlonassParse, GlonassRecord, HeaderIonoRow, IonoCorrections, IonosphereFrame,
+        IonosphereModel, KlobucharAlphaBeta, NavDiagnostic, NavEntry, NavEntryKind, NavEpoch,
+        NavFile, NavHeader, NavItem, NavMessage, NavMessagePreference, NavParse, NavParseError,
+        NavVersion, NavWriteError, OtherNavBlock, OtherNavBlockKind, SbasRecord, SkippedGlonass,
+        SkippedNavBlock, StatedNavFields, SystemTimeOffset, TimeSystemCorrection, UndecodedBlock,
+        UndecodedReason,
     };
 
     /// Parse a RINEX NAV text into an evaluated broadcast ephemeris store.

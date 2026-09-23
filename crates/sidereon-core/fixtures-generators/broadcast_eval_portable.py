@@ -35,9 +35,12 @@ PI = 3.141592653589793
 TAU = 6.283185307179586
 SECONDS_PER_WEEK = 604800.0
 HALF_WEEK_S = 302400.0
-KEPLER_TOL = 1.0e-12
+KEPLER_TOL = 1.0e-13
 KEPLER_MAX_ITER = 30
 CLOCK_MAX_ITER = 2
+SPEED_OF_LIGHT = 299792458.0
+SIN_5 = -0.0871557427476582
+COS_5 = 0.9961946980917456
 
 
 def bits(value: float) -> str:
@@ -58,14 +61,18 @@ def folded_time(t_sow: float, reference_sow: float) -> float:
 
 
 def eccentric_anomaly(mean_anomaly: float, eccentricity: float) -> tuple[float, int]:
+    """Newton's method as RTKLIB eph2pos writes it."""
     current = mean_anomaly
+    previous = 0.0
     iterations = 0
-    while iterations < KEPLER_MAX_ITER:
+    while abs(current - previous) > KEPLER_TOL and iterations < KEPLER_MAX_ITER:
         previous = current
-        current = add(mean_anomaly, mul(eccentricity, sin(previous)))
+        step = div(
+            sub(sub(current, mul(eccentricity, sin(current))), mean_anomaly),
+            sub(1.0, mul(eccentricity, cos(current))),
+        )
+        current = sub(current, step)
         iterations += 1
-        if abs(current - previous) <= KEPLER_TOL:
-            break
     return current, iterations
 
 
@@ -99,7 +106,7 @@ def orbit_state(
     di = add(mul(elements["cis"], s2), mul(elements["cic"], c2))
     u = add(phi, du)
     r = add(mul(a, sub(1.0, mul(e, cos_e))), dr)
-    i = add(add(elements["i0"], di), mul(elements["idot"], tk))
+    i = add(add(elements["i0"], mul(elements["idot"], tk)), di)
     xp = mul(r, cos(u))
     yp = mul(r, sin(u))
     if is_geo:
@@ -120,17 +127,11 @@ def orbit_state(
     yg = add(mul(xp, sin_o), mul(mul(yp, cos_i), cos_o))
     zg = mul(yp, sin_i)
     if is_geo:
-        deg5 = div(mul(5.0, PI), 180.0)
-        cos_phi = cos(deg5)
-        sin_phi = -sin(deg5)
-        z_ang = mul(omega_e, tk)
-        cos_z = cos(z_ang)
-        sin_z = sin(z_ang)
-        yr = add(mul(yg, cos_phi), mul(zg, sin_phi))
-        zr = add(mul(-yg, sin_phi), mul(zg, cos_phi))
-        x = add(mul(xg, cos_z), mul(yr, sin_z))
-        y = add(mul(-xg, sin_z), mul(yr, cos_z))
-        z = zr
+        sino = sin(mul(omega_e, tk))
+        coso = cos(mul(omega_e, tk))
+        x = add(add(mul(xg, coso), mul(mul(yg, sino), COS_5)), mul(mul(zg, sino), SIN_5))
+        y = add(add(mul(-xg, sino), mul(mul(yg, coso), COS_5)), mul(mul(zg, coso), SIN_5))
+        z = add(mul(-yg, SIN_5), mul(zg, COS_5))
     else:
         x, y, z = xg, yg, zg
     return (
@@ -172,21 +173,18 @@ def clock_offset(
     t_sow: float,
     tgd: float,
 ) -> dict[str, float]:
-    dt0 = folded_time(t_sow, clock["toc_sow"])
-    dt = dt0
-    for _ in range(CLOCK_MAX_ITER):
-        dt = sub(
-            dt0,
-            add(
-                add(clock["af0"], mul(clock["af1"], dt)),
-                mul(clock["af2"], mul(dt, dt)),
-            ),
-        )
+    # RTKLIB eph2pos: the polynomial at t - toc, not iterated, then
+    # dts -= 2*sqrt(mu*A)*e*sinE/(c*c) with A = sqrtA*sqrtA.
+    dt = folded_time(t_sow, clock["toc_sow"])
     dt_poly = add(
         add(clock["af0"], mul(clock["af1"], dt)),
-        mul(clock["af2"], mul(dt, dt)),
+        mul(mul(clock["af2"], dt), dt),
     )
-    dt_rel = mul(mul(mul(consts["dtr"], elements["e"]), elements["sqrt_a"]), sin_e)
+    a = mul(elements["sqrt_a"], elements["sqrt_a"])
+    dt_rel = -div(
+        mul(mul(mul(2.0, sqrt(mul(consts["gm"], a))), elements["e"]), sin_e),
+        mul(SPEED_OF_LIGHT, SPEED_OF_LIGHT),
+    )
     return {
         "dt_clock_poly_s": dt_poly,
         "dt_rel_s": dt_rel,
@@ -231,8 +229,10 @@ def main() -> None:
         "broadcast_eval_portable.py audit: IS-GPS-200 / Galileo OS ICD "
         "Keplerian orbit + clock; mpmath high-precision audit rounded to "
         "binary64 after every operation; no FMA; explicit-multiply powers; "
-        "Kepler fixed-point E=M+e*sin(E), tol 1e-12 cap 30; clock RTKLIB "
-        "time-arg refinement x2 + relativistic + group delay"
+        "RTKLIB eph2pos statement order: Kepler Newton to 1e-13 cap 30; "
+        "i=(i0+idot*tk)+di; BeiDou GEO SIN_5/COS_5; clock polynomial at "
+        "t-toc without refinement, relativistic -2*sqrt(mu*A)*e*sinE/(c*c), "
+        "minus group delay"
     )
     doc["python_version"] = platform.python_version()
     doc["mpmath_audit"] = {

@@ -46,6 +46,17 @@ fn toe_j2000_s(record: &BroadcastRecord) -> f64 {
     }
 }
 
+/// The comparison epoch: `toe`, or one second after it for Galileo, since the store
+/// serves a Galileo record only after its `toe`, as RTKLIB `seleph` skips a record
+/// whose age of data is not positive.
+fn query_j2000_s(record: &BroadcastRecord) -> f64 {
+    if record.satellite_id.system == GnssSystem::Galileo {
+        toe_j2000_s(record) + 1.0
+    } else {
+        toe_j2000_s(record)
+    }
+}
+
 fn position_error_m(a: [f64; 3], b: [f64; 3]) -> f64 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
@@ -57,7 +68,7 @@ fn assert_sp3_agreement(records: Vec<BroadcastRecord>, sp3: &Sp3, ceiling_m: f64
     let broadcast = BroadcastEphemeris::new(records.clone()).expect("build broadcast store");
     let mut max_error_m = 0.0_f64;
     for record in &records {
-        let query = toe_j2000_s(record);
+        let query = query_j2000_s(record);
         let (broadcast_position, _) = broadcast
             .position_clock_at_j2000_s(record.satellite_id, query)
             .expect("broadcast state at toe");
@@ -82,7 +93,7 @@ fn assert_corrupted_breaks_sp3(
     min_break_m: f64,
 ) {
     let bad_broadcast = BroadcastEphemeris::new(vec![record]).expect("build corrupted store");
-    let query = toe_j2000_s(&record);
+    let query = query_j2000_s(&record);
     let (bad_position, _) = bad_broadcast
         .position_clock_at_j2000_s(record.satellite_id, query)
         .expect("corrupted broadcast state at toe");
