@@ -37,14 +37,33 @@
 use crate::error::{Error, Result};
 use crate::id::GnssSystem;
 
-use super::bits::{BitReader, BitWriter, OutOfInput};
-use super::DecodeResult;
+use super::bits::{BitReader, FieldWriter, OutOfInput};
+use super::{decode_body, write_trailing, DecodeContext, DecodeResult, RtcmDeparture, RtcmPolicy};
+
+/// DF397 rough range invalid / not available value (255), as RTKLIB
+/// `decode_msm4`..`decode_msm7` test it.
+pub const MSM_ROUGH_RANGE_INVALID: u8 = 255;
 
 /// DF399 rough phase-range-rate invalid / not available sentinel (-8192 = -(1 << 13)).
 pub const MSM_ROUGH_PHASE_RANGE_RATE_INVALID: i16 = -(1 << 13);
 
 /// DF404 fine phase-range-rate invalid / not available sentinel (-16384 = -(1 << 14)).
 pub const MSM_FINE_PHASE_RANGE_RATE_INVALID: i16 = -(1 << 14);
+
+/// DF400 (MSM4) fine pseudorange invalid value, `-2^14`.
+pub const MSM4_FINE_PSEUDORANGE_INVALID: i32 = -(1 << 14);
+
+/// DF401 (MSM4) fine phase range invalid value, `-2^21`.
+pub const MSM4_FINE_PHASE_RANGE_INVALID: i32 = -(1 << 21);
+
+/// DF405 (MSM7) fine pseudorange invalid value, `-2^19`.
+pub const MSM7_FINE_PSEUDORANGE_INVALID: i32 = -(1 << 19);
+
+/// DF406 (MSM7) fine phase range invalid value, `-2^23`.
+pub const MSM7_FINE_PHASE_RANGE_INVALID: i32 = -(1 << 23);
+
+/// Longest cell mask (DF396) RTCM 10403 allows, in bits.
+const MSM_MAX_CELLS: usize = 64;
 
 /// Which MSM variant a message is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,8 +106,8 @@ pub struct MsmSatellite {
     /// Satellite identifier: the 1-based index of the set bit in the satellite
     /// mask (DF394). For most constellations this equals the PRN / slot number.
     pub id: u8,
-    /// Rough range, whole milliseconds (DF397). The value 255 marks the
-    /// satellite range as invalid.
+    /// Rough range, whole milliseconds (DF397). The value 255
+    /// ([`MSM_ROUGH_RANGE_INVALID`]) marks the satellite range as invalid.
     pub rough_range_ms: u8,
     /// Rough range remainder, in units of 1/1024 ms (DF398, scale 2^-10 ms).
     pub rough_range_mod1: u16,
@@ -107,10 +126,14 @@ pub struct MsmSignal {
     /// Signal id: the 1-based index of the set bit in the signal mask (DF395).
     pub signal_id: u8,
     /// Fine pseudorange (DF400 for MSM4, scale 2^-24 ms; DF405 for MSM7, scale
-    /// 2^-29 ms). The MSM4 invalid marker is -16384.
+    /// 2^-29 ms). The invalid value is [`MSM4_FINE_PSEUDORANGE_INVALID`]
+    /// (`-2^14`) in MSM4 and [`MSM7_FINE_PSEUDORANGE_INVALID`] (`-2^19`) in
+    /// MSM7.
     pub fine_pseudorange: i32,
     /// Fine phase range (DF401 for MSM4, scale 2^-29 ms; DF406 for MSM7, scale
-    /// 2^-31 ms).
+    /// 2^-31 ms). The invalid value is [`MSM4_FINE_PHASE_RANGE_INVALID`]
+    /// (`-2^21`) in MSM4 and [`MSM7_FINE_PHASE_RANGE_INVALID`] (`-2^23`) in
+    /// MSM7.
     pub fine_phase_range: i32,
     /// Phase-range lock-time indicator (DF402, 4-bit, for MSM4; DF407, 10-bit,
     /// for MSM7).
@@ -146,10 +169,25 @@ pub struct MsmMessage {
     pub kind: MsmKind,
     /// Common MSM header.
     pub header: MsmHeader,
+    /// The signal mask (DF395) as transmitted: bit `32 - id` is set for each
+    /// signal id the message lists. A listed signal may have no cell, so the
+    /// mask is kept rather than rebuilt from [`Self::signals`]; every cell's
+    /// signal must be set in it.
+    pub signal_mask: u32,
     /// Active satellites, in ascending id order.
     pub satellites: Vec<MsmSatellite>,
     /// Active signal cells, in satellite-major then signal order.
     pub signals: Vec<MsmSignal>,
+    /// Every body bit after the last field, the zeros that align the body to a
+    /// byte included, kept whenever those bits are anything other than fewer
+    /// than eight zeros: read under [`RtcmPolicy::Lenient`] and written back
+    /// after the last field by `encode_with_policy` under that policy, so the
+    /// body re-encodes byte for byte. Empty when the bits after the last field
+    /// are fewer than eight zeros, for every body read under
+    /// [`RtcmPolicy::Strict`], and for a message built by hand; `encode`
+    /// refuses a nonempty value. A tail set by hand is zero-padded to the byte
+    /// when written and reads back with that padding.
+    pub trailing_bits: Vec<bool>,
 }
 
 /// Map an MSM message number to its constellation and (supported) MSM type.
@@ -185,13 +223,19 @@ pub(crate) fn is_supported_msm(message_number: u16) -> bool {
 }
 
 impl MsmMessage {
-    /// Decode an MSM4 / MSM7 message body (without the transport frame).
+    /// Decode an MSM4 / MSM7 message body (without the transport frame) under
+    /// [`RtcmPolicy::Strict`]: a cell mask over 64 bits and bits after the last
+    /// field other than the zero byte alignment are refused.
     pub fn decode(body: &[u8]) -> Result<Self> {
-        Self::decode_inner(body).map_err(Into::into)
+        decode_body(
+            body,
+            &mut DecodeContext::new(RtcmPolicy::Strict),
+            Self::read,
+        )
+        .map_err(Into::into)
     }
 
-    pub(crate) fn decode_inner(body: &[u8]) -> DecodeResult<Self> {
-        let mut r = BitReader::new(body);
+    pub(crate) fn read(r: &mut BitReader<'_>, ctx: &mut DecodeContext) -> DecodeResult<Self> {
         let message_number = r.u(12)? as u16;
         let (system, kind) = msm_kind(message_number).ok_or_else(|| {
             Error::Parse(format!(
@@ -218,6 +262,12 @@ impl MsmMessage {
 
         let nsat = sat_ids.len();
         let nsig = sig_ids.len();
+        if nsat * nsig > MSM_MAX_CELLS {
+            ctx.depart(RtcmDeparture::MsmCellMaskOver64 {
+                message_number,
+                cells: nsat * nsig,
+            })?;
+        }
 
         // Cell mask: nsat * nsig bits, satellite-major.
         let mut cell_present = Vec::with_capacity(nsat * nsig);
@@ -271,11 +321,11 @@ impl MsmMessage {
         // Signal block (column-major over cells).
         let signals = match kind {
             MsmKind::Msm4 => {
-                let fine_pr = read_vec(&mut r, ncell, |rr| rr.i(15).map(|v| v as i32))?;
-                let fine_ph = read_vec(&mut r, ncell, |rr| rr.i(22).map(|v| v as i32))?;
-                let lock = read_vec(&mut r, ncell, |rr| rr.u(4).map(|v| v as u16))?;
-                let half = read_vec(&mut r, ncell, |rr| rr.flag())?;
-                let cnr = read_vec(&mut r, ncell, |rr| rr.u(6).map(|v| v as u16))?;
+                let fine_pr = read_vec(r, ncell, |rr| rr.i(15).map(|v| v as i32))?;
+                let fine_ph = read_vec(r, ncell, |rr| rr.i(22).map(|v| v as i32))?;
+                let lock = read_vec(r, ncell, |rr| rr.u(4).map(|v| v as u16))?;
+                let half = read_vec(r, ncell, |rr| rr.flag())?;
+                let cnr = read_vec(r, ncell, |rr| rr.u(6).map(|v| v as u16))?;
                 cells
                     .iter()
                     .enumerate()
@@ -292,12 +342,12 @@ impl MsmMessage {
                     .collect()
             }
             MsmKind::Msm7 => {
-                let fine_pr = read_vec(&mut r, ncell, |rr| rr.i(20).map(|v| v as i32))?;
-                let fine_ph = read_vec(&mut r, ncell, |rr| rr.i(24).map(|v| v as i32))?;
-                let lock = read_vec(&mut r, ncell, |rr| rr.u(10).map(|v| v as u16))?;
-                let half = read_vec(&mut r, ncell, |rr| rr.flag())?;
-                let cnr = read_vec(&mut r, ncell, |rr| rr.u(10).map(|v| v as u16))?;
-                let fine_prr = read_vec(&mut r, ncell, |rr| rr.i(15).map(|v| v as i16))?;
+                let fine_pr = read_vec(r, ncell, |rr| rr.i(20).map(|v| v as i32))?;
+                let fine_ph = read_vec(r, ncell, |rr| rr.i(24).map(|v| v as i32))?;
+                let lock = read_vec(r, ncell, |rr| rr.u(10).map(|v| v as u16))?;
+                let half = read_vec(r, ncell, |rr| rr.flag())?;
+                let cnr = read_vec(r, ncell, |rr| rr.u(10).map(|v| v as u16))?;
+                let fine_prr = read_vec(r, ncell, |rr| rr.i(15).map(|v| v as i16))?;
                 cells
                     .iter()
                     .enumerate()
@@ -324,152 +374,229 @@ impl MsmMessage {
             system,
             kind,
             header,
+            signal_mask,
             satellites,
             signals,
+            trailing_bits: Vec::new(),
         })
     }
 
-    /// Encode this message back into an MSM body (without the transport frame).
+    /// Encode this message back into an MSM body (without the transport frame)
+    /// under [`RtcmPolicy::Strict`].
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] when the satellite and signal lists cannot be
-    /// stated in the MSM masks: a satellite id outside `1..=64` or a signal id
-    /// outside `1..=32` (the mask bit it names does not exist), a satellite or a
-    /// satellite/signal cell listed twice, or a signal whose satellite is not in
-    /// the satellite list. Each of those would otherwise be shifted onto another
-    /// bit or left out of the body without a trace.
+    /// [`Error::InvalidInput`] naming what cannot be written as the MSM wire
+    /// form states it:
+    ///
+    /// * a message number whose constellation and MSM type differ from
+    ///   [`Self::system`] and [`Self::kind`];
+    /// * satellite and signal lists the masks cannot state: a satellite id
+    ///   outside `1..=64`, a satellite or cell listed twice, a signal id
+    ///   outside `1..=32` or not set in [`Self::signal_mask`], or a signal
+    ///   whose satellite is not in the satellite list;
+    /// * a cell mask over 64 bits ([`RtcmDeparture::MsmCellMaskOver64`]);
+    /// * an MSM7 satellite without extended info, or an MSM4 satellite or
+    ///   signal holding extended info or a phase-range rate, which MSM4 does
+    ///   not carry;
+    /// * a phase-range rate of `Some` holding its field's invalid value, which
+    ///   is how `None` is written and would be read back as `None`;
+    /// * a value wider than its field.
+    ///
+    /// Each would otherwise be shifted onto another bit, filled, or left out of
+    /// the body without a trace.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        self.check_masks()?;
-        let mut w = BitWriter::new();
-        w.push_u(u64::from(self.message_number), 12);
-        w.push_u(u64::from(self.header.reference_station_id), 12);
-        w.push_u(u64::from(self.header.epoch_time), 30);
-        w.push_flag(self.header.multiple_message);
-        w.push_u(u64::from(self.header.iods), 3);
-        w.push_u(u64::from(self.header.reserved), 7);
-        w.push_u(u64::from(self.header.clock_steering), 2);
-        w.push_u(u64::from(self.header.external_clock), 2);
-        w.push_flag(self.header.divergence_free_smoothing);
-        w.push_u(u64::from(self.header.smoothing_interval), 3);
+        self.encode_with_policy(RtcmPolicy::Strict)
+            .map(|(body, _)| body)
+    }
 
-        // Reconstruct the satellite ids (sorted) and the satellite mask.
+    /// Encode this message under `policy`. Under [`RtcmPolicy::Lenient`] a cell
+    /// mask over 64 bits is written and reported; every other refusal of
+    /// [`Self::encode`] applies under both policies.
+    pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
+        let number = self.message_number;
+        if msm_kind(number) != Some((self.system, self.kind)) {
+            return Err(Error::InvalidInput(format!(
+                "RTCM message number {number} is not the {:?} {:?} message this MSM holds",
+                self.system, self.kind
+            )));
+        }
+        self.check_masks()?;
+        self.check_optional_fields()?;
+
+        // Satellite ids (sorted) and the satellite mask.
         let mut sat_ids: Vec<u8> = self.satellites.iter().map(|s| s.id).collect();
         sat_ids.sort_unstable();
         let mut satellite_mask: u64 = 0;
         for &id in &sat_ids {
             satellite_mask |= 1u64 << (64 - u32::from(id));
         }
+        let sig_ids = set_bits_u32(self.signal_mask);
 
-        // Signal ids = sorted union of signals referenced by the cells.
-        let mut sig_ids: Vec<u8> = self.signals.iter().map(|s| s.signal_id).collect();
-        sig_ids.sort_unstable();
-        sig_ids.dedup();
-        let mut signal_mask: u32 = 0;
-        for &id in &sig_ids {
-            signal_mask |= 1u32 << (32 - u32::from(id));
+        let mut departures = Vec::new();
+        let cells = sat_ids.len() * sig_ids.len();
+        if cells > MSM_MAX_CELLS {
+            let departure = RtcmDeparture::MsmCellMaskOver64 {
+                message_number: number,
+                cells,
+            };
+            match policy {
+                RtcmPolicy::Strict => {
+                    return Err(Error::InvalidInput(format!(
+                        "{departure} (refused under the strict policy)"
+                    )))
+                }
+                RtcmPolicy::Lenient => departures.push(departure),
+            }
         }
 
-        w.push_u(satellite_mask, 64);
-        w.push_u(u64::from(signal_mask), 32);
+        let mut w = FieldWriter::new(number);
+        w.u("message number", u64::from(number), 12)?;
+        w.u(
+            "reference station ID",
+            u64::from(self.header.reference_station_id),
+            12,
+        )?;
+        w.u("epoch time", u64::from(self.header.epoch_time), 30)?;
+        w.flag(self.header.multiple_message);
+        w.u("IODS", u64::from(self.header.iods), 3)?;
+        w.u("reserved", u64::from(self.header.reserved), 7)?;
+        w.u(
+            "clock steering indicator",
+            u64::from(self.header.clock_steering),
+            2,
+        )?;
+        w.u(
+            "external clock indicator",
+            u64::from(self.header.external_clock),
+            2,
+        )?;
+        w.flag(self.header.divergence_free_smoothing);
+        w.u(
+            "smoothing interval",
+            u64::from(self.header.smoothing_interval),
+            3,
+        )?;
+        w.u("satellite mask", satellite_mask, 64)?;
+        w.u("signal mask", u64::from(self.signal_mask), 32)?;
 
         // Cell mask, satellite-major, plus the ordered active cell list.
-        let mut ordered_cells: Vec<(u8, u8)> = Vec::new();
+        let mut ordered: Vec<&MsmSignal> = Vec::with_capacity(self.signals.len());
         for &sat in &sat_ids {
             for &sig in &sig_ids {
-                let present = self
+                let cell = self
                     .signals
                     .iter()
-                    .any(|s| s.satellite_id == sat && s.signal_id == sig);
-                w.push_flag(present);
-                if present {
-                    ordered_cells.push((sat, sig));
-                }
+                    .find(|s| s.satellite_id == sat && s.signal_id == sig);
+                w.flag(cell.is_some());
+                ordered.extend(cell);
             }
         }
 
         // Satellite block, column-major, in the same sorted id order.
-        let sat_by_id = |id: u8| self.satellites.iter().find(|s| s.id == id);
-        for &id in &sat_ids {
-            let sat = sat_by_id(id);
-            w.push_u(u64::from(sat.map_or(0, |s| s.rough_range_ms)), 8);
+        let mut satellites: Vec<&MsmSatellite> = self.satellites.iter().collect();
+        satellites.sort_unstable_by_key(|s| s.id);
+        for s in &satellites {
+            w.u(
+                format_args!("satellite {} rough range", s.id),
+                u64::from(s.rough_range_ms),
+                8,
+            )?;
         }
         if self.kind == MsmKind::Msm7 {
-            for &id in &sat_ids {
-                let ext = sat_by_id(id).and_then(|s| s.extended_info).unwrap_or(0);
-                w.push_u(u64::from(ext), 4);
+            for s in &satellites {
+                // `check_optional_fields` has refused an MSM7 satellite without it.
+                let ext = s.extended_info.unwrap_or_default();
+                w.u(
+                    format_args!("satellite {} extended info", s.id),
+                    u64::from(ext),
+                    4,
+                )?;
             }
         }
-        for &id in &sat_ids {
-            let sat = sat_by_id(id);
-            w.push_u(u64::from(sat.map_or(0, |s| s.rough_range_mod1)), 10);
+        for s in &satellites {
+            w.u(
+                format_args!("satellite {} rough range modulo 1 ms", s.id),
+                u64::from(s.rough_range_mod1),
+                10,
+            )?;
         }
         if self.kind == MsmKind::Msm7 {
-            for &id in &sat_ids {
-                let prr = sat_by_id(id)
-                    .and_then(|s| s.rough_phase_range_rate_m_s)
+            for s in &satellites {
+                let prr = s
+                    .rough_phase_range_rate_m_s
                     .unwrap_or(MSM_ROUGH_PHASE_RANGE_RATE_INVALID);
-                w.push_i(i64::from(prr), 14);
+                w.i(
+                    format_args!("satellite {} rough phase-range rate", s.id),
+                    i64::from(prr),
+                    14,
+                )?;
             }
         }
 
         // Signal block, column-major over the ordered cells.
-        let ordered: Vec<&MsmSignal> = ordered_cells
-            .iter()
-            .filter_map(|&(sat, sig)| {
-                self.signals
-                    .iter()
-                    .find(|s| s.satellite_id == sat && s.signal_id == sig)
-            })
-            .collect();
-
-        match self.kind {
-            MsmKind::Msm4 => {
-                for s in &ordered {
-                    w.push_i(i64::from(s.fine_pseudorange), 15);
-                }
-                for s in &ordered {
-                    w.push_i(i64::from(s.fine_phase_range), 22);
-                }
-                for s in &ordered {
-                    w.push_u(u64::from(s.lock_time_indicator), 4);
-                }
-                for s in &ordered {
-                    w.push_flag(s.half_cycle_ambiguity);
-                }
-                for s in &ordered {
-                    w.push_u(u64::from(s.cnr), 6);
-                }
-            }
-            MsmKind::Msm7 => {
-                for s in &ordered {
-                    w.push_i(i64::from(s.fine_pseudorange), 20);
-                }
-                for s in &ordered {
-                    w.push_i(i64::from(s.fine_phase_range), 24);
-                }
-                for s in &ordered {
-                    w.push_u(u64::from(s.lock_time_indicator), 10);
-                }
-                for s in &ordered {
-                    w.push_flag(s.half_cycle_ambiguity);
-                }
-                for s in &ordered {
-                    w.push_u(u64::from(s.cnr), 10);
-                }
-                for s in &ordered {
-                    w.push_i(
-                        i64::from(
-                            s.fine_phase_range_rate
-                                .unwrap_or(MSM_FINE_PHASE_RANGE_RATE_INVALID),
-                        ),
-                        15,
-                    );
-                }
+        let (pr_bits, ph_bits, lock_bits, cnr_bits) = match self.kind {
+            MsmKind::Msm4 => (15, 22, 4, 6),
+            MsmKind::Msm7 => (20, 24, 10, 10),
+        };
+        for s in &ordered {
+            w.i(
+                format_args!(
+                    "satellite {} signal {} fine pseudorange",
+                    s.satellite_id, s.signal_id
+                ),
+                i64::from(s.fine_pseudorange),
+                pr_bits,
+            )?;
+        }
+        for s in &ordered {
+            w.i(
+                format_args!(
+                    "satellite {} signal {} fine phase range",
+                    s.satellite_id, s.signal_id
+                ),
+                i64::from(s.fine_phase_range),
+                ph_bits,
+            )?;
+        }
+        for s in &ordered {
+            w.u(
+                format_args!(
+                    "satellite {} signal {} lock-time indicator",
+                    s.satellite_id, s.signal_id
+                ),
+                u64::from(s.lock_time_indicator),
+                lock_bits,
+            )?;
+        }
+        for s in &ordered {
+            w.flag(s.half_cycle_ambiguity);
+        }
+        for s in &ordered {
+            w.u(
+                format_args!("satellite {} signal {} CNR", s.satellite_id, s.signal_id),
+                u64::from(s.cnr),
+                cnr_bits,
+            )?;
+        }
+        if self.kind == MsmKind::Msm7 {
+            for s in &ordered {
+                w.i(
+                    format_args!(
+                        "satellite {} signal {} fine phase-range rate",
+                        s.satellite_id, s.signal_id
+                    ),
+                    i64::from(
+                        s.fine_phase_range_rate
+                            .unwrap_or(MSM_FINE_PHASE_RANGE_RATE_INVALID),
+                    ),
+                    15,
+                )?;
             }
         }
 
-        Ok(w.into_bytes())
+        departures.extend(write_trailing(&mut w, &self.trailing_bits, policy)?);
+        Ok((w.into_bytes(), departures))
     }
 
     /// Refuse satellite and signal lists the MSM masks cannot state exactly.
@@ -500,6 +627,12 @@ impl MsmMessage {
                     signal.signal_id
                 ));
             }
+            if self.signal_mask & (1u32 << (32 - u32::from(signal.signal_id))) == 0 {
+                return refuse(format!(
+                    "signal id {} is not set in the signal mask {:#010x}",
+                    signal.signal_id, self.signal_mask
+                ));
+            }
             if !sat_ids.contains(&signal.satellite_id) {
                 return refuse(format!(
                     "signal {} names satellite id {}, which the satellite list does not hold",
@@ -515,6 +648,71 @@ impl MsmMessage {
         }
         Ok(())
     }
+
+    /// Refuse optional values the message's MSM type does not carry, a
+    /// missing value it does, and `Some` of an invalid value (the spelling of
+    /// `None`).
+    fn check_optional_fields(&self) -> Result<()> {
+        let number = self.message_number;
+        let msm7 = self.kind == MsmKind::Msm7;
+        for s in &self.satellites {
+            let id = s.id;
+            match (msm7, s.extended_info.is_some()) {
+                (true, false) => {
+                    return Err(Error::InvalidInput(format!(
+                        "RTCM MSM7 {number} satellite {id} has no extended info, which MSM7 carries"
+                    )))
+                }
+                (false, true) => {
+                    return Err(Error::InvalidInput(format!(
+                        "RTCM MSM4 {number} satellite {id} holds extended info, which MSM4 does not carry"
+                    )))
+                }
+                _ => {}
+            }
+            match s.rough_phase_range_rate_m_s {
+                Some(_) if !msm7 => {
+                    return Err(Error::InvalidInput(format!(
+                        "RTCM MSM4 {number} satellite {id} holds a rough phase-range rate, which MSM4 does not carry"
+                    )))
+                }
+                Some(MSM_ROUGH_PHASE_RANGE_RATE_INVALID) => {
+                    return Err(Error::InvalidInput(format!(
+                        "RTCM MSM7 {number} satellite {id} rough phase-range rate Some({MSM_ROUGH_PHASE_RANGE_RATE_INVALID}) is the invalid value, written for None"
+                    )))
+                }
+                _ => {}
+            }
+        }
+        for s in &self.signals {
+            let (sat, sig) = (s.satellite_id, s.signal_id);
+            match s.fine_phase_range_rate {
+                Some(_) if !msm7 => {
+                    return Err(Error::InvalidInput(format!(
+                        "RTCM MSM4 {number} satellite {sat} signal {sig} holds a fine phase-range rate, which MSM4 does not carry"
+                    )))
+                }
+                Some(MSM_FINE_PHASE_RANGE_RATE_INVALID) => {
+                    return Err(Error::InvalidInput(format!(
+                        "RTCM MSM7 {number} satellite {sat} signal {sig} fine phase-range rate Some({MSM_FINE_PHASE_RANGE_RATE_INVALID}) is the invalid value, written for None"
+                    )))
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The signal mask (DF395) with a bit set for every signal id in `signals`,
+/// for building a message whose every listed signal has a cell.
+pub fn msm_signal_mask(signals: &[MsmSignal]) -> u32 {
+    signals
+        .iter()
+        .filter(|s| (1..=MSM_SIGNAL_MASK_BITS).contains(&s.signal_id))
+        .fold(0u32, |mask, s| {
+            mask | (1u32 << (32 - u32::from(s.signal_id)))
+        })
 }
 
 /// Satellite mask width (DF394): satellite ids run `1..=64`.
@@ -570,4 +768,10 @@ fn active_cells(sat_ids: &[u8], sig_ids: &[u8], cell_present: &[bool]) -> Vec<(u
         }
     }
     cells
+}
+
+impl super::TrailingBits for MsmMessage {
+    fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.trailing_bits
+    }
 }

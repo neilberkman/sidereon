@@ -114,9 +114,9 @@ fn real_beidou_1042_decodes_and_propagates_against_sp3() {
     let mut records = Vec::new();
 
     for frame in &frames {
-        let messages = decode_messages(frame);
+        let messages = decode_messages(frame).expect("fixture frame decodes in full");
         assert_eq!(messages.len(), 1, "each fixture frame carries one message");
-        let Message::BeidouEphemeris(eph) = messages[0] else {
+        let Message::BeidouEphemeris(eph) = &messages[0] else {
             panic!("expected BeiDou 1042");
         };
         assert_eq!(messages[0].to_frame().expect("re-frame 1042"), *frame);
@@ -124,7 +124,7 @@ fn real_beidou_1042_decodes_and_propagates_against_sp3() {
             eph.sqrt_a > 2_700_000_000 && eph.eccentricity > 0,
             "decoded orbital fields must be non-trivial"
         );
-        raw_messages.push(eph);
+        raw_messages.push(eph.clone());
         records.push(eph.to_broadcast_record().expect("1042 to broadcast record"));
     }
 
@@ -141,7 +141,7 @@ fn real_beidou_1042_decodes_and_propagates_against_sp3() {
     // accuracy expectations while still allowing product differences.
     let (count, max_error_m) = assert_sp3_agreement(records, &sp3, 100.0);
 
-    let mut corrupted: BeidouEphemeris = raw_messages[0];
+    let mut corrupted: BeidouEphemeris = raw_messages[0].clone();
     corrupted.sqrt_a += 50_000_000;
     assert_corrupted_breaks_sp3(
         corrupted
@@ -162,9 +162,9 @@ fn real_qzss_1044_decodes_and_propagates_against_sp3() {
     let mut records = Vec::new();
 
     for frame in &frames {
-        let messages = decode_messages(frame);
+        let messages = decode_messages(frame).expect("fixture frame decodes in full");
         assert_eq!(messages.len(), 1, "each fixture frame carries one message");
-        let Message::QzssEphemeris(eph) = messages[0] else {
+        let Message::QzssEphemeris(eph) = &messages[0] else {
             panic!("expected QZSS 1044");
         };
         assert_eq!(messages[0].to_frame().expect("re-frame 1044"), *frame);
@@ -172,7 +172,7 @@ fn real_qzss_1044_decodes_and_propagates_against_sp3() {
             eph.sqrt_a > 2_700_000_000 && eph.eccentricity > 0,
             "decoded orbital fields must be non-trivial"
         );
-        raw_messages.push(eph);
+        raw_messages.push(eph.clone());
         records.push(
             eph.to_broadcast_record(GPS_WEEK_AT_BCEP_CAPTURE)
                 .expect("1044 to broadcast record"),
@@ -192,7 +192,7 @@ fn real_qzss_1044_decodes_and_propagates_against_sp3() {
     // mistakes, including the t_oe conversion exercised by this capture.
     let (count, max_error_m) = assert_sp3_agreement(records, &sp3, 100.0);
 
-    let mut corrupted = raw_messages[0];
+    let mut corrupted = raw_messages[0].clone();
     corrupted.sqrt_a += 50_000_000;
     assert_corrupted_breaks_sp3(
         corrupted
@@ -213,9 +213,9 @@ fn real_galileo_fnav_1045_decodes_and_propagates_against_sp3() {
     let mut records = Vec::new();
 
     for frame in &frames {
-        let messages = decode_messages(frame);
+        let messages = decode_messages(frame).expect("fixture frame decodes in full");
         assert_eq!(messages.len(), 1, "each fixture frame carries one message");
-        let Message::GalileoFnavEphemeris(eph) = messages[0] else {
+        let Message::GalileoFnavEphemeris(eph) = &messages[0] else {
             panic!("expected Galileo F/NAV 1045");
         };
         assert_eq!(messages[0].to_frame().expect("re-frame 1045"), *frame);
@@ -223,7 +223,7 @@ fn real_galileo_fnav_1045_decodes_and_propagates_against_sp3() {
             eph.sqrt_a > 2_800_000_000 && eph.eccentricity > 0,
             "decoded orbital fields must be non-trivial"
         );
-        raw_messages.push(eph);
+        raw_messages.push(eph.clone());
         records.push(eph.to_broadcast_record().expect("1045 to broadcast record"));
     }
 
@@ -238,7 +238,7 @@ fn real_galileo_fnav_1045_decodes_and_propagates_against_sp3() {
     // against GRG ultra-rapid SP3 with the same 100 m loose ceiling as 1046.
     let (count, max_error_m) = assert_sp3_agreement(records, &sp3, 100.0);
 
-    let mut corrupted: GalileoFnavEphemeris = raw_messages[0];
+    let mut corrupted: GalileoFnavEphemeris = raw_messages[0].clone();
     corrupted.sqrt_a += 50_000_000;
     assert_corrupted_breaks_sp3(
         corrupted

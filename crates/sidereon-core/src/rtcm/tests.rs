@@ -145,13 +145,14 @@ fn sample_station(message_number: u16, height: Option<u16>) -> StationCoordinate
         quarter_cycle_indicator: 2,
         ecef_z: 12_602_528_900,
         antenna_height: height,
+        trailing_bits: Vec::new(),
     }
 }
 
 #[test]
 fn station_1005_round_trip() {
     let station = sample_station(1005, None);
-    let body = station.encode();
+    let body = station.encode().unwrap();
     // 1005 body is exactly 19 bytes (152 bits).
     assert_eq!(body.len(), 19);
     assert_eq!(message_number(&body).unwrap(), 1005);
@@ -162,7 +163,7 @@ fn station_1005_round_trip() {
 #[test]
 fn station_1006_round_trip_and_meters() {
     let station = sample_station(1006, Some(15_000));
-    let body = station.encode();
+    let body = station.encode().unwrap();
     // 1006 body is exactly 21 bytes (168 bits).
     assert_eq!(body.len(), 21);
     let decoded = StationCoordinates::decode(&body).unwrap();
@@ -177,7 +178,7 @@ fn station_1006_round_trip_and_meters() {
 fn station_full_frame_round_trip() {
     let message = Message::StationCoordinates(sample_station(1006, Some(0)));
     let frame = message.to_frame().unwrap();
-    let decoded = decode_messages(&frame);
+    let decoded = decode_messages(&frame).unwrap();
     assert_eq!(decoded, vec![message]);
 }
 
@@ -196,8 +197,9 @@ fn antenna_1007_round_trip() {
         receiver_type: None,
         receiver_firmware_version: None,
         receiver_serial_number: None,
+        trailing_bits: Vec::new(),
     };
-    let body = descriptor.encode();
+    let body = descriptor.encode().unwrap();
     assert_eq!(AntennaDescriptor::decode(&body).unwrap(), descriptor);
 }
 
@@ -212,8 +214,9 @@ fn antenna_1008_round_trip() {
         receiver_type: None,
         receiver_firmware_version: None,
         receiver_serial_number: None,
+        trailing_bits: Vec::new(),
     };
-    let body = descriptor.encode();
+    let body = descriptor.encode().unwrap();
     assert_eq!(AntennaDescriptor::decode(&body).unwrap(), descriptor);
 }
 
@@ -228,12 +231,13 @@ fn antenna_1033_round_trip() {
         receiver_type: Some("LEICA GR50".to_string()),
         receiver_firmware_version: Some("4.50".to_string()),
         receiver_serial_number: Some("1830080".to_string()),
+        trailing_bits: Vec::new(),
     };
     let frame = Message::AntennaDescriptor(descriptor.clone())
         .to_frame()
         .unwrap();
     assert_eq!(
-        decode_messages(&frame),
+        decode_messages(&frame).unwrap(),
         vec![Message::AntennaDescriptor(descriptor)]
     );
 }
@@ -275,6 +279,7 @@ fn gps_ephemeris_1019_round_trip() {
         sv_health: 0,
         l2_p_data_flag: false,
         fit_interval: true,
+        trailing_bits: Vec::new(),
     };
     let body = eph.encode().unwrap();
     // 1019 body is exactly 61 bytes (488 bits).
@@ -330,6 +335,8 @@ fn glonass_ephemeris_1020_round_trip() {
         m_tau_gps: -987_654,
         m_l_n_fifth: false,
         reserved: 0,
+        negative_zero: 0,
+        trailing_bits: Vec::new(),
     };
     let body = eph.encode().unwrap();
     // 1020 body is exactly 45 bytes (360 bits).
@@ -421,8 +428,10 @@ fn msm4_gps_round_trip() {
         system: crate::id::GnssSystem::Gps,
         kind: MsmKind::Msm4,
         header: msm_header(),
+        signal_mask: msm_signal_mask(&signals),
         satellites,
         signals,
+        trailing_bits: Vec::new(),
     };
     let body = message.encode().unwrap();
     let decoded = MsmMessage::decode(&body).unwrap();
@@ -452,13 +461,15 @@ fn msm_encode_refuses_satellite_and_signal_lists_its_masks_cannot_state() {
         cnr: 50,
         fine_phase_range_rate: None,
     };
-    let message = |satellites, signals| MsmMessage {
+    let message = |satellites: Vec<MsmSatellite>, signals: Vec<MsmSignal>| MsmMessage {
         message_number: 1074,
         system: crate::id::GnssSystem::Gps,
         kind: MsmKind::Msm4,
         header: msm_header(),
+        signal_mask: msm_signal_mask(&signals),
         satellites,
         signals,
+        trailing_bits: Vec::new(),
     };
 
     // The edges of both masks encode and decode.
@@ -553,11 +564,13 @@ fn msm7_glonass_round_trip_with_extended_info() {
         system: crate::id::GnssSystem::Glonass,
         kind: MsmKind::Msm7,
         header: msm_header(),
+        signal_mask: msm_signal_mask(&signals),
         satellites,
         signals,
+        trailing_bits: Vec::new(),
     };
     let frame = Message::Msm(message.clone()).to_frame().unwrap();
-    let decoded = decode_messages(&frame);
+    let decoded = decode_messages(&frame).unwrap();
     assert_eq!(decoded, vec![Message::Msm(message)]);
 }
 
@@ -580,8 +593,10 @@ fn msm_kind_maps_constellation_and_type() {
             system: sys,
             kind,
             header: msm_header(),
+            signal_mask: 0,
             satellites: Vec::new(),
             signals: Vec::new(),
+            trailing_bits: Vec::new(),
         };
         let body = m.encode().unwrap();
         let decoded = MsmMessage::decode(&body).unwrap();
@@ -623,6 +638,7 @@ fn lli_msm(
         system,
         kind,
         header,
+        signal_mask: 1u32 << (32 - u32::from(signal_id)),
         satellites: vec![MsmSatellite {
             id: satellite_id,
             rough_range_ms: 75,
@@ -640,6 +656,7 @@ fn lli_msm(
             cnr: 40,
             fine_phase_range_rate: (kind == MsmKind::Msm7).then_some(0),
         }],
+        trailing_bits: Vec::new(),
     }
 }
 
@@ -867,7 +884,7 @@ fn unsupported_message_round_trips_verbatim() {
     assert_eq!(message.message_number(), 1230);
 
     let frame = message.to_frame().unwrap();
-    assert_eq!(decode_messages(&frame), vec![message]);
+    assert_eq!(decode_messages(&frame).unwrap(), vec![message]);
 }
 
 #[test]
@@ -904,12 +921,13 @@ fn multiple_messages_in_one_stream() {
         sv_health: 0,
         l2_p_data_flag: false,
         fit_interval: false,
+        trailing_bits: Vec::new(),
     });
 
     let mut stream = station.to_frame().unwrap();
     stream.extend_from_slice(&eph.to_frame().unwrap());
 
-    assert_eq!(decode_messages(&stream), vec![station, eph]);
+    assert_eq!(decode_messages(&stream).unwrap(), vec![station, eph]);
 }
 
 #[test]
@@ -952,8 +970,11 @@ fn decode_stream_surfaces_skipped_frames_without_dropping_unsupported_messages()
         stream.messages,
         vec![valid.clone(), unsupported.clone(), valid.clone()]
     );
-    assert_eq!(decode_messages(&stream_bytes), stream.messages);
+    // The strict whole-stream reader refuses a stream it cannot read in full.
+    assert!(decode_messages(&stream_bytes).is_err());
     assert_eq!(stream.diagnostics.resync_bytes, garbage.len());
+    // The stray 0xD3 declares an empty body whose CRC-24Q fails.
+    assert_eq!(stream.diagnostics.crc_failures, 1);
     assert_eq!(
         stream.diagnostics.skipped_frames,
         vec![FrameSkip {
@@ -1020,7 +1041,7 @@ fn assert_round_trips(message: Message) {
 
     // Frame: wrapping, scanning, and re-framing all round-trip byte-for-byte.
     let frame = message.to_frame().unwrap();
-    let scanned = decode_messages(&frame);
+    let scanned = decode_messages(&frame).unwrap();
     assert_eq!(scanned, vec![message.clone()]);
     assert_eq!(scanned[0].to_frame().unwrap(), frame);
 }
@@ -1030,10 +1051,10 @@ fn build_station_from_scratch_round_trips() {
     for (number, height) in [(1005u16, None), (1006u16, Some(15_000u16))] {
         let station = sample_station(number, height);
         // Exercise the public per-type encode/decode directly.
-        let body = station.encode();
+        let body = station.encode().unwrap();
         let decoded = StationCoordinates::decode(&body).unwrap();
         assert_eq!(decoded, station);
-        assert_eq!(decoded.encode(), body);
+        assert_eq!(decoded.encode().unwrap(), body);
         // And the same value through the `Message` wrapper.
         assert_round_trips(Message::StationCoordinates(station));
     }
@@ -1051,6 +1072,7 @@ fn build_antenna_from_scratch_round_trips() {
             receiver_type: None,
             receiver_firmware_version: None,
             receiver_serial_number: None,
+            trailing_bits: Vec::new(),
         },
         AntennaDescriptor {
             message_number: 1008,
@@ -1061,6 +1083,7 @@ fn build_antenna_from_scratch_round_trips() {
             receiver_type: None,
             receiver_firmware_version: None,
             receiver_serial_number: None,
+            trailing_bits: Vec::new(),
         },
         AntennaDescriptor {
             message_number: 1033,
@@ -1071,13 +1094,14 @@ fn build_antenna_from_scratch_round_trips() {
             receiver_type: Some("LEICA GR50".to_string()),
             receiver_firmware_version: Some("4.50".to_string()),
             receiver_serial_number: Some("1830080".to_string()),
+            trailing_bits: Vec::new(),
         },
     ];
     for descriptor in descriptors {
-        let body = descriptor.encode();
+        let body = descriptor.encode().unwrap();
         let decoded = AntennaDescriptor::decode(&body).unwrap();
         assert_eq!(decoded, descriptor);
-        assert_eq!(decoded.encode(), body);
+        assert_eq!(decoded.encode().unwrap(), body);
         assert_round_trips(Message::AntennaDescriptor(descriptor));
     }
 }
@@ -1115,6 +1139,7 @@ fn build_gps_ephemeris_from_scratch_round_trips() {
         sv_health: 0,
         l2_p_data_flag: false,
         fit_interval: true,
+        trailing_bits: Vec::new(),
     };
     let body = eph.encode().unwrap();
     let decoded = GpsEphemeris::decode(&body).unwrap();
@@ -1164,6 +1189,7 @@ fn build_galileo_fnav_ephemeris_from_scratch_round_trips_and_evaluates() {
         e5a_signal_health: 0,
         e5a_data_validity: false,
         reserved: 0,
+        trailing_bits: Vec::new(),
     };
     let body = eph.encode().unwrap();
     assert_eq!(body.len(), 62);
@@ -1208,6 +1234,7 @@ fn build_galileo_inav_ephemeris_from_scratch_round_trips_and_evaluates() {
         e1b_signal_health: 0,
         e1b_data_validity: false,
         reserved: 0,
+        trailing_bits: Vec::new(),
     };
     let body = eph.encode().unwrap();
     assert_eq!(body.len(), 63);
@@ -1249,6 +1276,7 @@ fn build_beidou_ephemeris_from_scratch_round_trips_and_evaluates() {
         t_gd1: -16,
         t_gd2: 12,
         sv_health: false,
+        trailing_bits: Vec::new(),
     };
     let body = eph.encode().unwrap();
     assert_eq!(body.len(), 64);
@@ -1291,13 +1319,14 @@ fn build_qzss_ephemeris_from_scratch_round_trips_and_evaluates() {
         t_gd: -4,
         iodc: 44,
         fit_interval: false,
+        trailing_bits: Vec::new(),
     };
     let body = eph.encode().unwrap();
     assert_eq!(body.len(), 61);
     let decoded = QzssEphemeris::decode(&body).unwrap();
     assert_eq!(decoded, eph);
     assert_eq!(decoded.encode().unwrap(), body);
-    assert_round_trips(Message::QzssEphemeris(eph));
+    assert_round_trips(Message::QzssEphemeris(eph.clone()));
     assert_broadcast_record_is_nontrivial(decoded.to_broadcast_record(2434).unwrap());
 
     // The fit flag reads as RTKLIB reads it from RTCM and from RINEX (0: 2 h, 1: 4 h), so
@@ -1305,7 +1334,7 @@ fn build_qzss_ephemeris_from_scratch_round_trips_and_evaluates() {
     for (flag, hours) in [(false, 2.0), (true, 4.0)] {
         let record = QzssEphemeris {
             fit_interval: flag,
-            ..eph
+            ..eph.clone()
         }
         .to_broadcast_record(2434)
         .unwrap();
@@ -1399,8 +1428,10 @@ fn build_msm4_from_scratch_round_trips() {
         system: crate::id::GnssSystem::Gps,
         kind: MsmKind::Msm4,
         header: msm_header(),
+        signal_mask: msm_signal_mask(&signals),
         satellites,
         signals,
+        trailing_bits: Vec::new(),
     };
     let body = message.encode().unwrap();
     let decoded = MsmMessage::decode(&body).unwrap();
@@ -1433,8 +1464,10 @@ fn build_msm7_from_scratch_round_trips() {
         system: crate::id::GnssSystem::Gps,
         kind: MsmKind::Msm7,
         header: msm_header(),
+        signal_mask: msm_signal_mask(&signals),
         satellites,
         signals,
+        trailing_bits: Vec::new(),
     };
     let body = message.encode().unwrap();
     let decoded = MsmMessage::decode(&body).unwrap();
@@ -1488,8 +1521,10 @@ fn msm7_absent_phase_range_rate_distinguished_from_zero() {
         system: crate::id::GnssSystem::Gps,
         kind: MsmKind::Msm7,
         header: msm_header(),
+        signal_mask: msm_signal_mask(&signals),
         satellites,
         signals,
+        trailing_bits: Vec::new(),
     };
     let body = message.encode().unwrap();
     let decoded = MsmMessage::decode(&body).unwrap();
@@ -1555,6 +1590,7 @@ fn valid_gps_ephemeris() -> GpsEphemeris {
         sv_health: 0,
         l2_p_data_flag: false,
         fit_interval: true,
+        trailing_bits: Vec::new(),
     }
 }
 
@@ -1588,6 +1624,7 @@ fn valid_beidou_ephemeris() -> BeidouEphemeris {
         t_gd1: -16,
         t_gd2: 12,
         sv_health: false,
+        trailing_bits: Vec::new(),
     }
 }
 
@@ -1622,6 +1659,7 @@ fn valid_qzss_ephemeris() -> QzssEphemeris {
         t_gd: -4,
         iodc: 44,
         fit_interval: false,
+        trailing_bits: Vec::new(),
     }
 }
 
@@ -1655,6 +1693,7 @@ fn valid_galileo_fnav_ephemeris() -> GalileoFnavEphemeris {
         e5a_signal_health: 0,
         e5a_data_validity: false,
         reserved: 0,
+        trailing_bits: Vec::new(),
     }
 }
 
@@ -1691,6 +1730,7 @@ fn valid_galileo_inav_ephemeris() -> GalileoInavEphemeris {
         e1b_signal_health: 0,
         e1b_data_validity: false,
         reserved: 0,
+        trailing_bits: Vec::new(),
     }
 }
 
@@ -1732,6 +1772,8 @@ fn valid_glonass_ephemeris() -> GlonassEphemeris {
         m_tau_gps: -987_654,
         m_l_n_fifth: false,
         reserved: 0,
+        negative_zero: 0,
+        trailing_bits: Vec::new(),
     }
 }
 
@@ -2239,4 +2281,782 @@ fn raw_codec_round_trips_retain_absence_and_spare_accuracy_indices() {
         assert_eq!(decoded.sisa_index, sisa);
         assert_eq!(decoded, inav);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Format audit: framing diagnostics, departures and policy
+// ---------------------------------------------------------------------------
+
+fn unsupported_1230_frame() -> Vec<u8> {
+    let mut w = BitWriter::new();
+    w.push_u(1230, 12);
+    w.push_u(0xABCD, 16);
+    encode_frame(&w.into_bytes()).unwrap()
+}
+
+/// The six reserved header bits are read into `DecodedFrame::reserved` and
+/// written back by `encode_frame_with_reserved`. A nonzero value is refused by
+/// name under the strict policy and read and reported under the lenient one;
+/// it was ignored and dropped before.
+#[test]
+fn frame_reserved_bits_are_kept_refused_strictly_and_reported_leniently() {
+    let station = sample_station(1005, None);
+    let body = station.encode().unwrap();
+    let frame = encode_frame_with_reserved(&body, 5).unwrap();
+    assert_eq!(frame[1] >> 2, 5);
+    let decoded = decode_frame(&frame).unwrap();
+    assert_eq!(decoded.reserved, 5);
+    assert_eq!(decoded.body, body.as_slice());
+    assert_eq!(
+        encode_frame_with_reserved(decoded.body, decoded.reserved).unwrap(),
+        frame
+    );
+    assert_eq!(
+        decode_frame(&encode_frame(&body).unwrap())
+            .unwrap()
+            .reserved,
+        0
+    );
+    assert!(encode_frame_with_reserved(&body, 64).is_err());
+
+    let departure = RtcmDeparture::FrameReservedBits { reserved: 5 };
+    let strict = decode_stream(&frame);
+    assert!(strict.messages.is_empty());
+    assert_eq!(
+        strict.diagnostics.skipped_frames,
+        vec![FrameSkip {
+            offset: 0,
+            message_number: Some(1005),
+            reason: FrameSkipReason::Departure(departure.clone()),
+        }]
+    );
+    assert!(decode_messages(&frame).is_err());
+
+    let lenient = decode_stream_with_policy(&frame, RtcmPolicy::Lenient);
+    assert_eq!(lenient.messages, vec![Message::StationCoordinates(station)]);
+    assert!(lenient.diagnostics.skipped_frames.is_empty());
+    assert_eq!(
+        lenient.diagnostics.departures,
+        vec![StreamDeparture {
+            offset: 0,
+            departure,
+        }]
+    );
+}
+
+/// A preamble whose declared frame lies in the buffer but fails its CRC-24Q is
+/// counted, by the stream decoder, the frame scanner and the chunked
+/// assembler alike, and its bytes are counted as resynchronized. The
+/// assembler counted neither before.
+#[test]
+fn crc_failures_and_resync_bytes_are_counted_by_every_scanner() {
+    let a = Message::StationCoordinates(sample_station(1005, None))
+        .to_frame()
+        .unwrap();
+    let mut bad = unsupported_1230_frame();
+    let last = bad.len() - 1;
+    bad[last] ^= 0x01;
+    assert!(
+        !bad[1..].contains(&PREAMBLE),
+        "one preamble in the bad frame"
+    );
+    let c = unsupported_1230_frame();
+    let mut bytes = vec![0x00, 0x01];
+    bytes.extend_from_slice(&a);
+    bytes.extend_from_slice(&bad);
+    bytes.extend_from_slice(&c);
+
+    let stream = decode_stream(&bytes);
+    assert_eq!(stream.messages.len(), 2);
+    assert_eq!(stream.diagnostics.crc_failures, 1);
+    assert_eq!(stream.diagnostics.resync_bytes, 2 + bad.len());
+    assert!(!stream.diagnostics.is_clean());
+
+    let mut scanner = FrameScanner::new(&bytes);
+    assert_eq!(scanner.by_ref().count(), 2);
+    assert_eq!(scanner.crc_failures(), 1);
+    assert_eq!(scanner.resync_bytes(), 2 + bad.len());
+
+    let mut assembler = SsrStreamAssembler::new();
+    let split = 2 + a.len() + 3;
+    let mut decoded = assembler.push(&bytes[..split]);
+    decoded.extend(assembler.push(&bytes[split..]));
+    assert_eq!(decoded.len(), 2);
+    assert!(decoded.iter().all(|result| result.is_ok()));
+    assert_eq!(assembler.diagnostics().crc_failures, 1);
+    assert_eq!(assembler.diagnostics().resync_bytes, 2 + bad.len());
+    assert_eq!(assembler.retained_len(), 0);
+
+    let err = decode_messages(&bytes).expect_err("the stream is not read in full");
+    assert!(err.to_string().contains("1 CRC-24Q failures"), "{err}");
+    assert_eq!(decode_messages(&a).unwrap().len(), 1);
+}
+
+/// The chunked assembler reports lenient departures with offsets counted from
+/// the first byte pushed, across chunks, and refuses them under the strict
+/// policy.
+#[test]
+fn assembler_departures_carry_stream_offsets_across_chunks() {
+    let body = sample_station(1005, None).encode().unwrap();
+    let plain = encode_frame(&body).unwrap();
+    let marked = encode_frame_with_reserved(&body, 1).unwrap();
+
+    let mut lenient = SsrStreamAssembler::with_policy(RtcmPolicy::Lenient);
+    assert_eq!(lenient.push(&plain).len(), 1);
+    let mut chunk = vec![0xAA];
+    chunk.extend_from_slice(&marked);
+    let out = lenient.push(&chunk);
+    assert_eq!(out.len(), 1);
+    assert!(out[0].is_ok());
+    assert_eq!(
+        lenient.diagnostics().departures,
+        vec![StreamDeparture {
+            offset: plain.len() + 1,
+            departure: RtcmDeparture::FrameReservedBits { reserved: 1 },
+        }]
+    );
+    assert_eq!(lenient.diagnostics().resync_bytes, 1);
+
+    let mut strict = SsrStreamAssembler::new();
+    let out = strict.push(&marked);
+    assert_eq!(out.len(), 1);
+    let err = out[0]
+        .as_ref()
+        .expect_err("strict refuses the reserved bits");
+    assert!(err.to_string().contains("reserved bits"), "{err}");
+}
+
+/// Bits after a message's last field other than the fewer than eight zero bits
+/// that align the body are a departure: refused by name under the strict
+/// policy, read under the lenient one into the message's `trailing_bits`, and
+/// written back by the lenient encoder so the body re-encodes byte for byte.
+/// They were dropped without a trace before, so a decode followed by an encode
+/// silently shortened the body.
+#[test]
+fn trailing_bits_after_the_last_field_are_a_departure() {
+    // 1005 fills exactly 152 bits; one more byte is eight trailing bits.
+    let station = sample_station(1005, None);
+    let mut body = station.encode().unwrap();
+    body.push(0x00);
+    let err = StationCoordinates::decode(&body).expect_err("strict per-type decode");
+    assert!(
+        err.to_string().contains("8 bits after its last field"),
+        "{err}"
+    );
+    assert!(Message::decode(&body).is_err());
+    let departure = RtcmDeparture::TrailingBits {
+        message_number: 1005,
+        bits: vec![false; 8],
+    };
+    let (message, departures) = Message::decode_with_policy(&body, RtcmPolicy::Lenient).unwrap();
+    let mut expected = station.clone();
+    expected.trailing_bits = vec![false; 8];
+    assert_eq!(message, Message::StationCoordinates(expected.clone()));
+    assert_eq!(departures, vec![departure.clone()]);
+    let err = message
+        .encode()
+        .expect_err("strict encode refuses the tail");
+    assert!(err.to_string().contains("strict policy"), "{err}");
+    assert_eq!(
+        message.encode_with_policy(RtcmPolicy::Lenient).unwrap(),
+        (body.clone(), vec![departure])
+    );
+    assert_eq!(
+        expected.encode_with_policy(RtcmPolicy::Lenient).unwrap().0,
+        body
+    );
+    let frame = encode_frame(&body).unwrap();
+    assert!(matches!(
+        decode_stream(&frame).diagnostics.skipped_frames[0].reason,
+        FrameSkipReason::Departure(RtcmDeparture::TrailingBits { .. })
+    ));
+    let lenient = decode_stream_with_policy(&frame, RtcmPolicy::Lenient);
+    assert_eq!(
+        encode_frame(
+            &lenient.messages[0]
+                .encode_with_policy(RtcmPolicy::Lenient)
+                .unwrap()
+                .0
+        )
+        .unwrap(),
+        frame
+    );
+
+    // 1044 fills 485 bits, so three pad bits close its 61 bytes; a set pad bit
+    // is a departure, three zero bits are not.
+    let qzss = valid_qzss_ephemeris();
+    let body = qzss.encode().unwrap();
+    assert_eq!(body.len(), 61);
+    assert_eq!(QzssEphemeris::decode(&body).unwrap(), qzss);
+    let mut marked = body.clone();
+    marked[60] |= 0x01;
+    assert!(QzssEphemeris::decode(&marked).is_err());
+    let (message, departures) = Message::decode_with_policy(&marked, RtcmPolicy::Lenient).unwrap();
+    let mut expected = qzss.clone();
+    expected.trailing_bits = vec![false, false, true];
+    assert_eq!(message, Message::QzssEphemeris(expected));
+    assert_eq!(
+        departures,
+        vec![RtcmDeparture::TrailingBits {
+            message_number: 1044,
+            bits: vec![false, false, true],
+        }]
+    );
+    assert_eq!(
+        message.encode_with_policy(RtcmPolicy::Lenient).unwrap().0,
+        marked
+    );
+
+    // Every other type keeps and writes back its tail the same way.
+    let mut msm = msm4(vec![msm4_satellite(3)], vec![msm4_signal(3, 2)]);
+    let mut body = msm.encode().unwrap();
+    body.extend_from_slice(&[0xA5, 0x00]);
+    let (message, _) = Message::decode_with_policy(&body, RtcmPolicy::Lenient).unwrap();
+    assert_eq!(
+        message.encode_with_policy(RtcmPolicy::Lenient).unwrap().0,
+        body
+    );
+    let Message::Msm(read) = &message else {
+        panic!("expected MSM");
+    };
+    assert!(read.trailing_bits.len() >= 16);
+    // A tail of zero bits that would read back as the alignment alone is
+    // refused under both policies, since it would not be read back.
+    msm.trailing_bits = vec![false];
+    assert!(msm.encode_with_policy(RtcmPolicy::Lenient).is_err());
+    for body in [
+        valid_gps_ephemeris().encode().unwrap(),
+        valid_glonass_ephemeris().encode().unwrap(),
+        valid_beidou_ephemeris().encode().unwrap(),
+        valid_galileo_fnav_ephemeris().encode().unwrap(),
+        valid_galileo_inav_ephemeris().encode().unwrap(),
+        sample_station(1006, Some(7)).encode().unwrap(),
+        AntennaDescriptor {
+            message_number: 1033,
+            reference_station_id: 4095,
+            antenna_descriptor: "LEIAR25.R4      LEIT".to_string(),
+            antenna_setup_id: 0,
+            antenna_serial_number: Some("09120119".to_string()),
+            receiver_type: Some("LEICA GR50".to_string()),
+            receiver_firmware_version: Some("4.50".to_string()),
+            receiver_serial_number: Some("1830080".to_string()),
+            trailing_bits: Vec::new(),
+        }
+        .encode()
+        .unwrap(),
+    ] {
+        let mut body = body;
+        body.push(0x80);
+        assert!(Message::decode(&body).is_err());
+        let (message, departures) =
+            Message::decode_with_policy(&body, RtcmPolicy::Lenient).unwrap();
+        assert_eq!(departures.len(), 1, "{}", message.message_number());
+        assert_eq!(
+            message.encode_with_policy(RtcmPolicy::Lenient).unwrap().0,
+            body,
+            "{}",
+            message.message_number()
+        );
+    }
+
+    // SSR keeps its tail in `padding_bits` and is held to the same rule.
+    let ssr = Message::Ssr(crate::rtcm::SsrMessage {
+        message_number: 1058,
+        system: crate::id::GnssSystem::Gps,
+        kind: SsrKind::Clock,
+        header: SsrHeader {
+            epoch_time_s: 1,
+            update_interval: 0,
+            multiple_message: false,
+            iod_ssr: 0,
+            provider_id: 0,
+            solution_id: 0,
+            satellite_reference_datum: None,
+            dispersive_bias_consistency: None,
+            mw_consistency: None,
+            satellite_count: 0,
+        },
+        orbit: Vec::new(),
+        clock: Vec::new(),
+        code_bias: Vec::new(),
+        phase_bias: Vec::new(),
+        ura: Vec::new(),
+        padding_bits: Vec::new(),
+    });
+    let mut body = ssr.encode().unwrap();
+    body.push(0x00);
+    assert!(Message::decode(&body).is_err());
+    let (message, departures) = Message::decode_with_policy(&body, RtcmPolicy::Lenient).unwrap();
+    assert!(matches!(
+        departures[..],
+        [RtcmDeparture::TrailingBits { .. }]
+    ));
+    assert!(message.encode().is_err());
+    assert_eq!(
+        message.encode_with_policy(RtcmPolicy::Lenient).unwrap().0,
+        body
+    );
+}
+
+fn msm4_satellite(id: u8) -> MsmSatellite {
+    MsmSatellite {
+        id,
+        rough_range_ms: 70,
+        rough_range_mod1: 256,
+        extended_info: None,
+        rough_phase_range_rate_m_s: None,
+    }
+}
+
+fn msm4_signal(satellite_id: u8, signal_id: u8) -> MsmSignal {
+    MsmSignal {
+        satellite_id,
+        signal_id,
+        fine_pseudorange: 16,
+        fine_phase_range: -7,
+        lock_time_indicator: 15,
+        half_cycle_ambiguity: false,
+        cnr: 50,
+        fine_phase_range_rate: None,
+    }
+}
+
+fn msm4(satellites: Vec<MsmSatellite>, signals: Vec<MsmSignal>) -> MsmMessage {
+    MsmMessage {
+        message_number: 1074,
+        system: crate::id::GnssSystem::Gps,
+        kind: MsmKind::Msm4,
+        header: msm_header(),
+        signal_mask: msm_signal_mask(&signals),
+        satellites,
+        signals,
+        trailing_bits: Vec::new(),
+    }
+}
+
+/// A signal-mask bit with no cell is kept in `signal_mask` and written back.
+/// The encoder rebuilt the mask from the cells before, so such a message
+/// re-encoded with the bit cleared and a narrower cell mask.
+#[test]
+fn msm_signal_mask_bit_without_cells_round_trips() {
+    let mut message = msm4(vec![msm4_satellite(3)], vec![msm4_signal(3, 2)]);
+    // Signal 5 is listed but carries no cell.
+    message.signal_mask |= 1 << (32 - 5);
+    let body = message.encode().unwrap();
+    let decoded = MsmMessage::decode(&body).unwrap();
+    assert_eq!(decoded, message);
+    assert_eq!(decoded.encode().unwrap(), body);
+
+    // A cell whose signal is not in the mask is refused, not added to it.
+    let mut unlisted = message.clone();
+    unlisted.signal_mask = 1 << (32 - 5);
+    let err = unlisted.encode().expect_err("signal 2 is not in the mask");
+    assert!(
+        err.to_string().contains("not set in the signal mask"),
+        "{err}"
+    );
+}
+
+/// A cell mask over 64 bits departs from RTCM 10403, and RTKLIB
+/// `decode_msm_head` refuses it. The strict policy refuses it on both decode
+/// and encode; the lenient policy reads and writes it and reports it.
+#[test]
+fn msm_cell_mask_over_64_bits_is_a_departure() {
+    // Nine satellites by eight signals is 72 cells.
+    let satellites: Vec<_> = (1..=9).map(msm4_satellite).collect();
+    let signals: Vec<_> = (1..=9).map(|id| msm4_signal(id, id.min(8))).collect();
+    let mut message = msm4(satellites, signals);
+    message.signal_mask = 0xFF00_0000;
+    let departure = RtcmDeparture::MsmCellMaskOver64 {
+        message_number: 1074,
+        cells: 72,
+    };
+
+    let err = message
+        .encode()
+        .expect_err("strict encode refuses 72 cells");
+    assert!(err.to_string().contains("72 bits"), "{err}");
+    let (body, departures) = message.encode_with_policy(RtcmPolicy::Lenient).unwrap();
+    assert_eq!(departures, vec![departure.clone()]);
+
+    assert!(MsmMessage::decode(&body).is_err());
+    assert!(Message::decode(&body).is_err());
+    let (decoded, departures) = Message::decode_with_policy(&body, RtcmPolicy::Lenient).unwrap();
+    assert_eq!(decoded, Message::Msm(message.clone()));
+    assert_eq!(departures, vec![departure.clone()]);
+    assert_eq!(
+        decoded.encode_with_policy(RtcmPolicy::Lenient).unwrap().0,
+        body
+    );
+
+    let frame = encode_frame(&body).unwrap();
+    assert_eq!(
+        decode_stream(&frame).diagnostics.skipped_frames[0].reason,
+        FrameSkipReason::Departure(departure)
+    );
+    assert_eq!(
+        decode_stream_with_policy(&frame, RtcmPolicy::Lenient).messages,
+        vec![Message::Msm(message)]
+    );
+}
+
+/// The MSM encoder refuses by name every value it would otherwise truncate,
+/// fill or drop, and a message number that names another layout.
+#[test]
+fn msm_encode_refuses_values_it_would_truncate_fill_or_drop() {
+    let base = msm4(vec![msm4_satellite(3)], vec![msm4_signal(3, 2)]);
+    base.encode().expect("the base message encodes");
+    let refused = |edit: &dyn Fn(&mut MsmMessage), needle: &str| {
+        let mut m = base.clone();
+        edit(&mut m);
+        let err = m.encode().expect_err(needle);
+        assert!(
+            matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+            "expected {needle:?}, got {err}"
+        );
+    };
+    refused(&|m| m.message_number = 1077, "is not the");
+    refused(&|m| m.kind = MsmKind::Msm7, "is not the");
+    refused(
+        &|m| m.header.reference_station_id = 4096,
+        "reference station ID 4096",
+    );
+    refused(&|m| m.header.epoch_time = 1 << 30, "epoch time 1073741824");
+    refused(&|m| m.header.iods = 8, "IODS 8");
+    refused(&|m| m.header.smoothing_interval = 8, "smoothing interval 8");
+    refused(
+        &|m| m.satellites[0].rough_range_mod1 = 1024,
+        "rough range modulo 1 ms 1024",
+    );
+    refused(
+        &|m| m.satellites[0].extended_info = Some(1),
+        "holds extended info",
+    );
+    refused(
+        &|m| m.satellites[0].rough_phase_range_rate_m_s = Some(1),
+        "holds a rough phase-range rate",
+    );
+    refused(
+        &|m| m.signals[0].fine_phase_range_rate = Some(1),
+        "holds a fine phase-range rate",
+    );
+    refused(
+        &|m| m.signals[0].fine_pseudorange = 1 << 14,
+        "fine pseudorange 16384",
+    );
+    refused(
+        &|m| m.signals[0].fine_phase_range = -(1 << 21) - 1,
+        "fine phase range",
+    );
+    refused(
+        &|m| m.signals[0].lock_time_indicator = 16,
+        "lock-time indicator 16",
+    );
+    refused(&|m| m.signals[0].cnr = 64, "CNR 64");
+
+    // MSM7: extended info is carried and must be given; `Some` of an invalid
+    // value is the spelling of `None` and is refused.
+    let mut msm7 = base.clone();
+    msm7.message_number = 1077;
+    msm7.kind = MsmKind::Msm7;
+    msm7.satellites[0].extended_info = Some(0);
+    msm7.encode().expect("a well-formed MSM7 encodes");
+    let mut missing = msm7.clone();
+    missing.satellites[0].extended_info = None;
+    assert!(missing
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("has no extended info"));
+    let mut wide = msm7.clone();
+    wide.satellites[0].extended_info = Some(16);
+    assert!(wide
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("extended info 16"));
+    let mut rough = msm7.clone();
+    rough.satellites[0].rough_phase_range_rate_m_s = Some(MSM_ROUGH_PHASE_RANGE_RATE_INVALID);
+    assert!(rough
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("invalid value"));
+    let mut fine = msm7.clone();
+    fine.signals[0].fine_phase_range_rate = Some(MSM_FINE_PHASE_RANGE_RATE_INVALID);
+    assert!(fine
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("invalid value"));
+    let mut cnr = msm7.clone();
+    cnr.signals[0].cnr = 1024;
+    assert!(cnr.encode().unwrap_err().to_string().contains("CNR 1024"));
+    let mut prr = msm7;
+    prr.signals[0].fine_phase_range_rate = Some(i16::MAX);
+    assert!(prr
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("fine phase-range rate 32767"));
+}
+
+/// The MSM invalid values decode as transmitted and are exported by name.
+#[test]
+fn msm_invalid_values_round_trip_as_transmitted() {
+    let mut message = msm4(vec![msm4_satellite(3)], vec![msm4_signal(3, 2)]);
+    message.satellites[0].rough_range_ms = MSM_ROUGH_RANGE_INVALID;
+    message.signals[0].fine_pseudorange = MSM4_FINE_PSEUDORANGE_INVALID;
+    message.signals[0].fine_phase_range = MSM4_FINE_PHASE_RANGE_INVALID;
+    let body = message.encode().unwrap();
+    assert_eq!(MsmMessage::decode(&body).unwrap(), message);
+
+    let mut msm7 = message.clone();
+    msm7.message_number = 1077;
+    msm7.kind = MsmKind::Msm7;
+    msm7.satellites[0].extended_info = Some(0);
+    msm7.signals[0].fine_pseudorange = MSM7_FINE_PSEUDORANGE_INVALID;
+    msm7.signals[0].fine_phase_range = MSM7_FINE_PHASE_RANGE_INVALID;
+    let body = msm7.encode().unwrap();
+    assert_eq!(MsmMessage::decode(&body).unwrap(), msm7);
+}
+
+/// A GLONASS sign-magnitude field transmitted as negative zero reads as `0`,
+/// as RTKLIB `getbitg` reads it, and its sign is kept in `negative_zero` so the
+/// body re-encodes as transmitted. It was written back with the sign clear.
+#[test]
+fn glonass_negative_zero_is_kept_and_written_back() {
+    let mut eph = valid_glonass_ephemeris();
+    eph.delta_tau_n = 0;
+    let body = eph.encode().unwrap();
+    // DF125 delta_tau_n starts at bit 253: its sign bit is bit 5 of byte 31.
+    let mut flipped = body.clone();
+    assert_eq!(flipped[31] & 0x04, 0);
+    flipped[31] |= 0x04;
+    let decoded = GlonassEphemeris::decode(&flipped).unwrap();
+    assert_eq!(decoded.delta_tau_n, 0);
+    assert_eq!(
+        decoded.negative_zero,
+        GlonassEphemeris::NEGATIVE_ZERO_DELTA_TAU_N
+    );
+    assert_eq!(decoded.encode().unwrap(), flipped);
+    let mut expected = eph.clone();
+    expected.negative_zero = GlonassEphemeris::NEGATIVE_ZERO_DELTA_TAU_N;
+    assert_eq!(decoded, expected);
+
+    // Negative zero on a nonzero value, or a bit naming no field, is refused.
+    let mut contradictory = eph.clone();
+    contradictory.negative_zero = GlonassEphemeris::NEGATIVE_ZERO_XN;
+    assert!(contradictory
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("marked negative zero"));
+    let mut undefined = eph;
+    undefined.negative_zero = 1 << 14;
+    assert!(undefined
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("name no sign-magnitude field"));
+}
+
+/// Every ephemeris field is written in its own width or refused by name; the
+/// encoders kept only the low bits before.
+#[test]
+fn ephemeris_encoders_refuse_values_wider_than_their_fields() {
+    let check = |result: crate::error::Result<Vec<u8>>, needle: &str| {
+        let err = result.expect_err(needle);
+        assert!(
+            matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+            "expected {needle:?}, got {err}"
+        );
+    };
+    let mut gps = valid_gps_ephemeris();
+    gps.week_number = 1024;
+    check(gps.encode(), "week_number 1024");
+    let mut gps = valid_gps_ephemeris();
+    gps.idot = 1 << 13;
+    check(gps.encode(), "idot 8192");
+    let mut gps = valid_gps_ephemeris();
+    gps.m0 = 1 << 31;
+    check(gps.encode(), "m0 2147483648");
+    let mut gps = valid_gps_ephemeris();
+    gps.eccentricity = 1 << 32;
+    check(gps.encode(), "eccentricity 4294967296");
+
+    let mut glonass = valid_glonass_ephemeris();
+    glonass.xn = 1 << 26;
+    check(glonass.encode(), "xn 67108864");
+    let mut glonass = valid_glonass_ephemeris();
+    glonass.frequency_channel = 32;
+    check(glonass.encode(), "frequency_channel 32");
+    let mut glonass = valid_glonass_ephemeris();
+    glonass.tau_c = -(1 << 31);
+    check(glonass.encode(), "tau_c -2147483648");
+
+    let mut beidou = valid_beidou_ephemeris();
+    beidou.t_oc = 1 << 17;
+    check(beidou.encode(), "t_oc 131072");
+    let mut qzss = valid_qzss_ephemeris();
+    qzss.codes_on_l2 = 4;
+    check(qzss.encode(), "codes_on_l2 4");
+    let mut fnav = valid_galileo_fnav_ephemeris();
+    fnav.a_f0 = 1 << 30;
+    check(fnav.encode(), "a_f0 1073741824");
+    let mut inav = valid_galileo_inav_ephemeris();
+    inav.reserved = 4;
+    check(inav.encode(), "reserved 4");
+}
+
+/// Station coordinates are written in their own widths, and the antenna
+/// height with 1006 only.
+#[test]
+fn station_encode_refuses_what_it_would_truncate_drop_or_misplace() {
+    let refused = |station: StationCoordinates, needle: &str| {
+        let err = station.encode().expect_err(needle);
+        assert!(
+            matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+            "expected {needle:?}, got {err}"
+        );
+    };
+    refused(
+        sample_station(1005, Some(1)),
+        "1005 carries no antenna height",
+    );
+    refused(sample_station(1006, None), "1006 carries an antenna height");
+    refused(sample_station(1007, None), "is not station coordinates");
+    let mut s = sample_station(1005, None);
+    s.reference_station_id = 4096;
+    refused(s, "reference station ID 4096");
+    let mut s = sample_station(1005, None);
+    s.itrf_realization_year = 64;
+    refused(s, "ITRF realization year 64");
+    let mut s = sample_station(1005, None);
+    s.quarter_cycle_indicator = 4;
+    refused(s, "quarter-cycle indicator 4");
+    let mut s = sample_station(1005, None);
+    s.ecef_x = 1 << 37;
+    refused(s, "ECEF X 137438953472");
+    // The 38-bit extremes are written.
+    let mut s = sample_station(1005, None);
+    s.ecef_y = -(1 << 37);
+    s.ecef_z = (1 << 37) - 1;
+    assert_eq!(StationCoordinates::decode(&s.encode().unwrap()).unwrap(), s);
+}
+
+/// Descriptor strings are read one byte per character, `U+0000`..=`U+00FF`,
+/// and written back one byte per character. The encoder wrote UTF-8 before, so
+/// a byte above 0x7F came back as two bytes and a longer count.
+#[test]
+fn antenna_strings_round_trip_every_byte_value() {
+    let mut w = BitWriter::new();
+    w.push_u(1007, 12);
+    w.push_u(1, 12);
+    w.push_u(3, 8);
+    for byte in [b'A', 0xB0, b'Z'] {
+        w.push_u(u64::from(byte), 8);
+    }
+    w.push_u(0, 8);
+    let body = w.into_bytes();
+    let decoded = AntennaDescriptor::decode(&body).unwrap();
+    assert_eq!(decoded.antenna_descriptor, "A\u{B0}Z");
+    assert_eq!(decoded.encode().unwrap(), body);
+
+    let refused = |descriptor: AntennaDescriptor, needle: &str| {
+        let err = descriptor.encode().expect_err(needle);
+        assert!(
+            matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+            "expected {needle:?}, got {err}"
+        );
+    };
+    let mut wide = decoded.clone();
+    wide.antenna_descriptor = "A\u{263A}".to_string();
+    refused(wide, "is not an 8-bit character");
+    let mut long = decoded.clone();
+    long.antenna_descriptor = "A".repeat(256);
+    refused(long, "character count 256");
+    let mut serial = decoded.clone();
+    serial.antenna_serial_number = Some("X".to_string());
+    refused(serial, "1007 carries no antenna serial number");
+    let mut missing = decoded.clone();
+    missing.message_number = 1008;
+    refused(missing, "1008 carries the antenna serial number");
+    let mut receiver = decoded.clone();
+    receiver.message_number = 1033;
+    receiver.antenna_serial_number = Some(String::new());
+    refused(receiver, "1033 carries the receiver type");
+    let mut number = decoded.clone();
+    number.message_number = 1005;
+    refused(number, "is not an antenna descriptor");
+    let mut station = decoded;
+    station.reference_station_id = 4096;
+    refused(station, "reference station ID 4096");
+    let mut longest = AntennaDescriptor::decode(&body).unwrap();
+    longest.antenna_descriptor = "\u{FF}".repeat(255);
+    let body = longest.encode().unwrap();
+    assert_eq!(AntennaDescriptor::decode(&body).unwrap(), longest);
+}
+
+/// An unsupported message encodes only a body that decodes back to it.
+#[test]
+fn unsupported_encode_refuses_a_body_that_decodes_as_something_else() {
+    let frame = unsupported_1230_frame();
+    let body = decode_frame(&frame).unwrap().body.to_vec();
+    let ok = UnsupportedMessage {
+        message_number: 1230,
+        body: body.clone(),
+    };
+    assert_eq!(ok.encode().unwrap(), body);
+    let mismatched = UnsupportedMessage {
+        message_number: 1231,
+        body: body.clone(),
+    };
+    assert!(mismatched
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("carries message number 1230"));
+    let short = UnsupportedMessage {
+        message_number: 1230,
+        body: vec![0x4C],
+    };
+    assert!(short.encode().is_err());
+    let typed_body = sample_station(1005, None).encode().unwrap();
+    let typed = Message::Unsupported(UnsupportedMessage {
+        message_number: 1005,
+        body: typed_body,
+    });
+    assert!(typed
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("decoded into its typed variant"));
+}
+
+/// At the end of a stream the assembler reads past a byte that only looks like
+/// a preamble, whose declared frame runs past the data, to the whole frame
+/// behind it, and counts the bytes it passes over.
+#[test]
+fn assembler_finish_reads_past_an_unfinished_preamble() {
+    let frame = Message::StationCoordinates(sample_station(1005, None))
+        .to_frame()
+        .unwrap();
+    let mut bytes = vec![PREAMBLE, 0x03, 0xFF];
+    bytes.extend_from_slice(&frame);
+    let mut assembler = SsrStreamAssembler::new();
+    assert!(assembler.push(&bytes).is_empty());
+    assert_eq!(assembler.retained_len(), bytes.len());
+    let out = assembler.finish();
+    assert_eq!(out.len(), 1);
+    assert!(out[0].is_ok());
+    assert_eq!(assembler.retained_len(), 0);
+    assert_eq!(assembler.diagnostics().resync_bytes, 3);
+    assert_eq!(assembler.diagnostics().crc_failures, 0);
+
+    // A real partial frame at the end is counted as passed over.
+    let mut assembler = SsrStreamAssembler::new();
+    assert_eq!(assembler.push(&frame[..frame.len() - 1]).len(), 0);
+    assert!(assembler.finish().is_empty());
+    assert_eq!(assembler.diagnostics().resync_bytes, frame.len() - 1);
 }

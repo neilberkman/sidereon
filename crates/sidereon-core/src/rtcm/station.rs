@@ -13,14 +13,14 @@
 
 use crate::error::{Error, Result};
 
-use super::bits::{BitReader, BitWriter};
-use super::DecodeResult;
+use super::bits::{BitReader, FieldWriter};
+use super::{decode_body, write_trailing, DecodeContext, DecodeResult, RtcmDeparture, RtcmPolicy};
 
 /// ECEF reference-point scale: each integer step is 0.0001 m.
 const ECEF_SCALE_M: f64 = 0.0001;
 
 /// A decoded message 1005 or 1006 antenna reference point.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StationCoordinates {
     /// 1005 or 1006.
     pub message_number: u16,
@@ -51,6 +51,16 @@ pub struct StationCoordinates {
     /// Antenna height above the marker (DF028), raw integer of 0.0001 m steps.
     /// Present only for message 1006.
     pub antenna_height: Option<u16>,
+    /// Every body bit after the last field, the zeros that align the body to a
+    /// byte included, kept whenever those bits are anything other than fewer
+    /// than eight zeros: read under [`RtcmPolicy::Lenient`] and written back
+    /// after the last field by `encode_with_policy` under that policy, so the
+    /// body re-encodes byte for byte. Empty when the bits after the last field
+    /// are fewer than eight zeros, for every body read under
+    /// [`RtcmPolicy::Strict`], and for a message built by hand; `encode`
+    /// refuses a nonempty value. A tail set by hand is zero-padded to the byte
+    /// when written and reads back with that padding.
+    pub trailing_bits: Vec<bool>,
 }
 
 impl StationCoordinates {
@@ -74,13 +84,17 @@ impl StationCoordinates {
         self.antenna_height.map(|h| f64::from(h) * ECEF_SCALE_M)
     }
 
-    /// Decode a 1005 / 1006 body (without the transport frame).
+    /// Decode a 1005 / 1006 body (without the transport frame) under
+    /// [`RtcmPolicy::Strict`]: bits after the last field other than the zero
+    /// byte alignment are refused.
     pub fn decode(body: &[u8]) -> Result<Self> {
-        Self::decode_inner(body).map_err(Into::into)
+        decode_body(body, &mut DecodeContext::new(RtcmPolicy::Strict), |r, _| {
+            Self::read(r)
+        })
+        .map_err(Into::into)
     }
 
-    pub(crate) fn decode_inner(body: &[u8]) -> DecodeResult<Self> {
-        let mut r = BitReader::new(body);
+    pub(crate) fn read(r: &mut BitReader<'_>) -> DecodeResult<Self> {
         let message_number = r.u(12)? as u16;
         if message_number != 1005 && message_number != 1006 {
             return Err(Error::Parse(format!(
@@ -121,28 +135,86 @@ impl StationCoordinates {
             quarter_cycle_indicator,
             ecef_z,
             antenna_height,
+            trailing_bits: Vec::new(),
         })
     }
 
     /// Encode this station coordinate message body (without the transport frame).
-    pub fn encode(&self) -> Vec<u8> {
-        let mut w = BitWriter::new();
-        w.push_u(u64::from(self.message_number), 12);
-        w.push_u(u64::from(self.reference_station_id), 12);
-        w.push_u(u64::from(self.itrf_realization_year), 6);
-        w.push_flag(self.gps_indicator);
-        w.push_flag(self.glonass_indicator);
-        w.push_flag(self.galileo_indicator);
-        w.push_flag(self.reference_station_indicator);
-        w.push_i(self.ecef_x, 38);
-        w.push_flag(self.single_receiver_oscillator);
-        w.push_flag(self.reserved);
-        w.push_i(self.ecef_y, 38);
-        w.push_u(u64::from(self.quarter_cycle_indicator), 2);
-        w.push_i(self.ecef_z, 38);
-        if let Some(height) = self.antenna_height {
-            w.push_u(u64::from(height), 16);
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] naming the field when `message_number` is not
+    /// 1005 or 1006, when `antenna_height` is absent from a 1006 or present in
+    /// a 1005 (the height would be left out of the body, or written where the
+    /// decoder reads none), or when a value is wider than its field: the
+    /// 12-bit station ID, the 6-bit ITRF year, the 2-bit quarter-cycle
+    /// indicator, or an ECEF component outside the 38-bit two's-complement
+    /// range.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_policy(RtcmPolicy::Strict)
+            .map(|(body, _)| body)
+    }
+
+    /// Encode this body under `policy`. Under [`RtcmPolicy::Lenient`] nonempty
+    /// `trailing_bits` are written after the last field and reported as an
+    /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
+    /// under both policies.
+    pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
+        let number = self.message_number;
+        match (number, self.antenna_height) {
+            (1005, None) | (1006, Some(_)) => {}
+            (1005, Some(_)) => {
+                return Err(Error::InvalidInput(
+                    "RTCM 1005 carries no antenna height; a height is written as 1006".to_string(),
+                ))
+            }
+            (1006, None) => {
+                return Err(Error::InvalidInput(
+                    "RTCM 1006 carries an antenna height, and none is given".to_string(),
+                ))
+            }
+            _ => {
+                return Err(Error::InvalidInput(format!(
+                    "RTCM message number {number} is not station coordinates 1005/1006"
+                )))
+            }
         }
-        w.into_bytes()
+        let mut w = FieldWriter::new(number);
+        w.u("message number", u64::from(number), 12)?;
+        w.u(
+            "reference station ID",
+            u64::from(self.reference_station_id),
+            12,
+        )?;
+        w.u(
+            "ITRF realization year",
+            u64::from(self.itrf_realization_year),
+            6,
+        )?;
+        w.flag(self.gps_indicator);
+        w.flag(self.glonass_indicator);
+        w.flag(self.galileo_indicator);
+        w.flag(self.reference_station_indicator);
+        w.i("ECEF X", self.ecef_x, 38)?;
+        w.flag(self.single_receiver_oscillator);
+        w.flag(self.reserved);
+        w.i("ECEF Y", self.ecef_y, 38)?;
+        w.u(
+            "quarter-cycle indicator",
+            u64::from(self.quarter_cycle_indicator),
+            2,
+        )?;
+        w.i("ECEF Z", self.ecef_z, 38)?;
+        if let Some(height) = self.antenna_height {
+            w.u("antenna height", u64::from(height), 16)?;
+        }
+        let departures = write_trailing(&mut w, &self.trailing_bits, policy)?;
+        Ok((w.into_bytes(), departures))
+    }
+}
+
+impl super::TrailingBits for StationCoordinates {
+    fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.trailing_bits
     }
 }

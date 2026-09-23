@@ -13,10 +13,17 @@
 //! 24-bit CRC-24Q covers the preamble, the length word, and the body. The body
 //! itself is the input to [`crate::rtcm::Message::decode`].
 //!
+//! The reserved bits are read and kept in [`DecodedFrame::reserved`], as RTKLIB
+//! `input_rtcm3` reads past them, and [`encode_frame_with_reserved`] writes
+//! them back. Whether a nonzero value is refused or read is decided by the
+//! stream decoders' [`crate::rtcm::RtcmPolicy`].
+//!
 //! The scanner ([`FrameScanner`]) is forgiving in the sans-I/O sense: it slides
 //! over an arbitrary byte buffer, resynchronizes on the next `0xD3` whenever the
 //! length runs past the buffer or the CRC fails, and yields only frames whose
 //! CRC verifies. This is how a real receiver locks onto a noisy serial stream.
+//! It counts the bytes it passes over and the CRC failures it meets in
+//! [`FrameScanner::resync_bytes`] and [`FrameScanner::crc_failures`].
 
 use crate::error::{Error, Result};
 
@@ -29,6 +36,9 @@ pub const MAX_BODY_LEN: usize = 0x3FF;
 /// Overhead a frame adds around its body: 3 header bytes plus 3 CRC bytes.
 pub const FRAME_OVERHEAD: usize = 6;
 
+/// Widest value the six reserved header bits hold.
+const MAX_RESERVED: u8 = 0x3F;
+
 /// A single decoded frame: the borrowed message body plus the full frame size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DecodedFrame<'a> {
@@ -36,23 +46,42 @@ pub struct DecodedFrame<'a> {
     pub body: &'a [u8],
     /// Total length of the frame in bytes, including preamble, length, and CRC.
     pub frame_len: usize,
+    /// The six reserved bits between the preamble and the length, as read.
+    /// RTCM 3 transmits them as zero.
+    pub reserved: u8,
 }
 
 /// Wrap a message body in an RTCM 3 transport frame with a fresh CRC-24Q.
 ///
 /// Returns [`Error::InvalidInput`] if the body exceeds [`MAX_BODY_LEN`].
 pub fn encode_frame(body: &[u8]) -> Result<Vec<u8>> {
+    encode_frame_with_reserved(body, 0)
+}
+
+/// Wrap a message body in an RTCM 3 transport frame whose six reserved header
+/// bits hold `reserved`, with a fresh CRC-24Q.
+///
+/// This writes back a frame read with nonzero reserved bits
+/// ([`DecodedFrame::reserved`]) as it was read. Returns
+/// [`Error::InvalidInput`] if the body exceeds [`MAX_BODY_LEN`] or `reserved`
+/// does not fit six bits.
+pub fn encode_frame_with_reserved(body: &[u8], reserved: u8) -> Result<Vec<u8>> {
     if body.len() > MAX_BODY_LEN {
         return Err(Error::InvalidInput(format!(
             "RTCM body of {} bytes exceeds the 1023-byte frame limit",
             body.len()
         )));
     }
+    if reserved > MAX_RESERVED {
+        return Err(Error::InvalidInput(format!(
+            "RTCM frame reserved value {reserved} does not fit its 6-bit field (0..=63)"
+        )));
+    }
     let len = body.len() as u16;
     let mut out = Vec::with_capacity(body.len() + FRAME_OVERHEAD);
     out.push(PREAMBLE);
-    // Six reserved bits (zero) followed by the high two bits of the length.
-    out.push((len >> 8) as u8 & 0x03);
+    // Six reserved bits followed by the high two bits of the length.
+    out.push((reserved << 2) | ((len >> 8) as u8 & 0x03));
     out.push((len & 0xFF) as u8);
     out.extend_from_slice(body);
     let crc = crc24q(&out);
@@ -100,6 +129,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DecodedFrame<'_>> {
     Ok(DecodedFrame {
         body: &bytes[3..3 + len],
         frame_len: total,
+        reserved: bytes[1] >> 2,
     })
 }
 
@@ -107,16 +137,36 @@ pub fn decode_frame(bytes: &[u8]) -> Result<DecodedFrame<'_>> {
 ///
 /// Bytes that are not a valid frame start (a stray `0xD3`, a truncated tail, or
 /// a body whose CRC fails) are skipped one at a time, exactly as a hardware
-/// receiver resynchronizes on a serial stream.
+/// receiver resynchronizes on a serial stream. Every skipped byte is counted in
+/// [`Self::resync_bytes`], and every complete frame whose CRC-24Q fails in
+/// [`Self::crc_failures`].
 pub struct FrameScanner<'a> {
     bytes: &'a [u8],
     pos: usize,
+    resync_bytes: usize,
+    crc_failures: usize,
 }
 
 impl<'a> FrameScanner<'a> {
     /// Begin scanning `bytes` from the start.
     pub fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0 }
+        Self {
+            bytes,
+            pos: 0,
+            resync_bytes: 0,
+            crc_failures: 0,
+        }
+    }
+
+    /// Bytes passed over so far that did not belong to a yielded frame.
+    pub fn resync_bytes(&self) -> usize {
+        self.resync_bytes
+    }
+
+    /// Preambles passed over so far whose declared frame lay wholly within
+    /// the buffer but failed its CRC-24Q.
+    pub fn crc_failures(&self) -> usize {
+        self.crc_failures
     }
 }
 
@@ -127,6 +177,7 @@ impl<'a> Iterator for FrameScanner<'a> {
         while self.pos < self.bytes.len() {
             if self.bytes[self.pos] != PREAMBLE {
                 self.pos += 1;
+                self.resync_bytes += 1;
                 continue;
             }
             match decode_frame(&self.bytes[self.pos..]) {
@@ -136,10 +187,32 @@ impl<'a> Iterator for FrameScanner<'a> {
                 }
                 Err(_) => {
                     // Not a real frame here; slide past this 0xD3 and resync.
+                    if frame_fails_crc(&self.bytes[self.pos..]) {
+                        self.crc_failures += 1;
+                    }
                     self.pos += 1;
+                    self.resync_bytes += 1;
                 }
             }
         }
         None
     }
+}
+
+/// Whether `bytes` opens with a preamble whose declared frame lies wholly in
+/// `bytes` and fails its CRC-24Q.
+pub(crate) fn frame_fails_crc(bytes: &[u8]) -> bool {
+    if bytes.len() < FRAME_OVERHEAD || bytes[0] != PREAMBLE {
+        return false;
+    }
+    let len = ((usize::from(bytes[1] & 0x03)) << 8) | usize::from(bytes[2]);
+    let total = 3 + len + 3;
+    if bytes.len() < total {
+        return false;
+    }
+    let computed = crc24q(&bytes[..3 + len]);
+    let framed = (u32::from(bytes[3 + len]) << 16)
+        | (u32::from(bytes[3 + len + 1]) << 8)
+        | u32::from(bytes[3 + len + 2]);
+    computed != framed
 }
