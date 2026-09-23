@@ -174,36 +174,46 @@ fn non_finite_kvn_covariance_component_is_rejected() {
     );
 }
 
-#[test]
-fn negative_kvn_covariance_variance_is_rejected() {
-    let negative = EXAMPLE2.replace(
-        "CR_R                          = 4.142E+01 [m**2]",
-        "CR_R                          = -1.0 [m**2]",
-    );
-
+/// A covariance that is not positive semidefinite reads and writes back as
+/// stated, since producers print values to a few digits and a nearly singular
+/// matrix can fall short only through that rounding; the validated matrix is
+/// refused.
+fn assert_read_as_stated_and_refused_on_validation(cdm: cdm::CdmKvn) {
+    let not_positive = Err(CdmError::InvalidField {
+        field: "covariance_rtn",
+        kind: CdmInputErrorKind::NotPositive,
+    });
+    assert_eq!(cdm.object1.to_covariance_rtn(), not_positive);
     assert_eq!(
-        cdm::parse_kvn(&negative),
-        Err(CdmError::InvalidField {
-            field: "covariance_rtn",
-            kind: CdmInputErrorKind::NotPositive,
-        })
+        cdm::parse_kvn(&cdm::encode_kvn(&cdm).unwrap()).unwrap(),
+        cdm
+    );
+    assert_eq!(
+        cdm::parse_xml(&cdm::encode_xml(&cdm).unwrap()).unwrap(),
+        cdm
     );
 }
 
 #[test]
-fn indefinite_kvn_covariance_is_rejected() {
+fn negative_kvn_covariance_variance_is_read_as_stated() {
+    let negative = EXAMPLE2.replace(
+        "CR_R                          = 4.142E+01 [m**2]",
+        "CR_R                          = -1.0 [m**2]",
+    );
+    let cdm = cdm::parse_kvn(&negative).unwrap();
+    assert_eq!(cdm.object1.covariance_rtn[0], -1.0);
+    assert_read_as_stated_and_refused_on_validation(cdm);
+}
+
+#[test]
+fn indefinite_kvn_covariance_is_read_as_stated() {
     let indefinite = EXAMPLE2.replace(
         "CT_R                          = -8.579E+00 [m**2]",
         "CT_R                          = 1.0E+04 [m**2]",
     );
-
-    assert_eq!(
-        cdm::parse_kvn(&indefinite),
-        Err(CdmError::InvalidField {
-            field: "covariance_rtn",
-            kind: CdmInputErrorKind::NotPositive,
-        })
-    );
+    let cdm = cdm::parse_kvn(&indefinite).unwrap();
+    assert_eq!(cdm.object1.covariance_rtn[1], 1.0e4);
+    assert_read_as_stated_and_refused_on_validation(cdm);
 }
 
 #[test]
@@ -228,8 +238,8 @@ fn xml_parses_header_relative_metadata_and_objects() {
     assert_eq!(cdm.hard_body_radius_m, None);
 
     // The two segments yield the same state and covariance as the KVN fixture,
-    // proving the flat leaf-element extraction (the extra CRDOT_R element in the
-    // first covariance block is correctly ignored).
+    // proving the per-segment leaf-element extraction; the first segment carries
+    // the complete velocity covariance block of the KVN fixture.
     assert_eq!(cdm.object1.object_designator.as_deref(), Some("12345"));
     assert_eq!(cdm.object1.object_name.as_deref(), Some("SATELLITE A"));
     assert_eq!(cdm.object1.ref_frame.as_deref(), Some("EME2000"));
@@ -243,6 +253,13 @@ fn xml_parses_header_relative_metadata_and_objects() {
     assert_eq!(
         cdm.object1.covariance_rtn,
         [41.42, -8.579, 2533.0, -23.13, 13.36, 70.98]
+    );
+    assert_eq!(
+        cdm.object1.velocity_covariance_rtn,
+        cdm::parse_kvn(EXAMPLE2)
+            .unwrap()
+            .object1
+            .velocity_covariance_rtn
     );
 
     assert_eq!(cdm.object2.object_name.as_deref(), Some("FENGYUN 1C DEB"));
@@ -365,19 +382,14 @@ fn non_finite_xml_covariance_component_is_rejected() {
 }
 
 #[test]
-fn indefinite_xml_covariance_is_rejected() {
+fn indefinite_xml_covariance_is_read_as_stated() {
     let indefinite = EXAMPLE2_XML.replace(
         "          <CT_R units=\"m**2\">-8.579E+00</CT_R>",
         "          <CT_R units=\"m**2\">1.0E+04</CT_R>",
     );
-
-    assert_eq!(
-        cdm::parse_xml(&indefinite),
-        Err(CdmError::InvalidField {
-            field: "covariance_rtn",
-            kind: CdmInputErrorKind::NotPositive,
-        })
-    );
+    let cdm = cdm::parse_xml(&indefinite).unwrap();
+    assert_eq!(cdm.object1.covariance_rtn[1], 1.0e4);
+    assert_read_as_stated_and_refused_on_validation(cdm);
 }
 
 #[test]

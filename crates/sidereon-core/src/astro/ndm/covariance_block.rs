@@ -32,7 +32,7 @@ pub(crate) const COVARIANCE6_KEYS: [&str; 21] = [
 ];
 
 /// Matrix positions matching [`COVARIANCE6_KEYS`] row-major lower-triangle order.
-const COVARIANCE6_POSITIONS: [(usize, usize); 21] = [
+pub(crate) const COVARIANCE6_POSITIONS: [(usize, usize); 21] = [
     (0, 0),
     (1, 0),
     (1, 1),
@@ -58,24 +58,87 @@ const COVARIANCE6_POSITIONS: [(usize, usize); 21] = [
 
 /// Read a CCSDS 6x6 lower-triangle covariance block from KVN fields.
 pub(crate) fn read_covariance6(map: &FieldMap) -> Result<Covariance6, FieldError> {
-    let mut matrix: Mat6 = [[0.0_f64; 6]; 6];
-    for ((row, col), key) in COVARIANCE6_POSITIONS.into_iter().zip(COVARIANCE6_KEYS) {
+    let mut lower = [0.0_f64; 21];
+    for (slot, key) in lower.iter_mut().zip(COVARIANCE6_KEYS) {
         let raw = map.get(key).ok_or(FieldError::Missing { field: key })?;
-        let value = validate::strict_f64(raw, key)?;
+        *slot = validate::strict_f64(raw, key)?;
+    }
+    covariance6_from_lower_triangle(&lower)
+}
+
+/// Read the 21 lower-triangle values of a CCSDS 6x6 covariance block from KVN
+/// fields exactly as stated, in [`COVARIANCE6_KEYS`] order. Each must be a
+/// finite number; the matrix is not otherwise checked, since a matrix printed
+/// to a few digits can fall short of positive semidefinite only through that
+/// rounding.
+pub(crate) fn read_lower_triangle6(map: &FieldMap) -> Result<[f64; 21], FieldError> {
+    let mut lower = [0.0_f64; 21];
+    for (slot, key) in lower.iter_mut().zip(COVARIANCE6_KEYS) {
+        let raw = map.get(key).ok_or(FieldError::Missing { field: key })?;
+        *slot = validate::strict_f64(raw, key)?;
+    }
+    Ok(lower)
+}
+
+/// The symmetric 6x6 matrix whose lower triangle is `lower`, in
+/// [`COVARIANCE6_KEYS`] order.
+pub(crate) fn mirror_lower_triangle6(lower: &[f64; 21]) -> Mat6 {
+    let mut matrix: Mat6 = [[0.0_f64; 6]; 6];
+    for ((row, col), value) in COVARIANCE6_POSITIONS.into_iter().zip(lower.iter().copied()) {
         matrix[row][col] = value;
         matrix[col][row] = value;
     }
+    matrix
+}
 
+/// Build a validated [`Covariance6`] from its 21 lower-triangle values in
+/// [`COVARIANCE6_KEYS`] order, mirroring each value across the diagonal.
+pub(crate) fn covariance6_from_lower_triangle(
+    lower: &[f64; 21],
+) -> Result<Covariance6, FieldError> {
+    let mut matrix: Mat6 = [[0.0_f64; 6]; 6];
+    for ((row, col), value) in COVARIANCE6_POSITIONS.into_iter().zip(lower.iter().copied()) {
+        matrix[row][col] = value;
+        matrix[col][row] = value;
+    }
     Covariance6::try_from_matrix(matrix).map_err(map_covariance6_error)
+}
+
+/// The lower-triangle values of a [`Covariance6`] in [`COVARIANCE6_KEYS`] order.
+pub(crate) fn covariance6_lower_triangle(cov: &Covariance6) -> [f64; 21] {
+    let matrix = cov.as_matrix();
+    let mut lower = [0.0_f64; 21];
+    for (slot, (row, col)) in lower.iter_mut().zip(COVARIANCE6_POSITIONS) {
+        *slot = matrix[row][col];
+    }
+    lower
+}
+
+/// The unit CCSDS 502.0-B-3 tables 3-3, 4-3 and 8-7 give a 6x6 covariance
+/// keyword: `km**2` for two position components, `km**2/s` for one position
+/// and one velocity component, and `km**2/s**2` for two velocity components.
+/// `None` for a keyword that is not one of [`COVARIANCE6_KEYS`].
+pub(crate) fn covariance6_unit(key: &str) -> Option<&'static [&'static str]> {
+    const POSITION: &[&str] = &["km**2"];
+    const MIXED: &[&str] = &["km**2/s"];
+    const VELOCITY: &[&str] = &["km**2/s**2"];
+    let index = COVARIANCE6_KEYS
+        .iter()
+        .position(|candidate| *candidate == key)?;
+    let (row, col) = COVARIANCE6_POSITIONS[index];
+    Some(match (row >= 3, col >= 3) {
+        (false, _) => POSITION,
+        (true, false) => MIXED,
+        (true, true) => VELOCITY,
+    })
 }
 
 /// Write a CCSDS 6x6 lower-triangle covariance block as KVN lines.
 pub(crate) fn write_covariance6(cov: &Covariance6) -> Vec<String> {
-    let matrix = cov.as_matrix();
-    COVARIANCE6_POSITIONS
+    covariance6_lower_triangle(cov)
         .into_iter()
         .zip(COVARIANCE6_KEYS)
-        .map(|((row, col), key)| format!("{key} = {}", fmt_num(matrix[row][col])))
+        .map(|(value, key)| format!("{key} = {}", fmt_num(value)))
         .collect()
 }
 
@@ -123,6 +186,23 @@ mod tests {
         let recovered = read_covariance6(&map).expect("read covariance");
 
         assert_eq!(recovered.as_matrix(), covariance.as_matrix());
+    }
+
+    #[test]
+    fn covariance6_units_follow_the_component_kinds() {
+        assert_eq!(covariance6_unit("CZ_Y"), Some(&["km**2"][..]));
+        assert_eq!(covariance6_unit("CY_DOT_Z"), Some(&["km**2/s"][..]));
+        assert_eq!(covariance6_unit("CZ_DOT_Y_DOT"), Some(&["km**2/s**2"][..]));
+        assert_eq!(covariance6_unit("CR_R"), None);
+    }
+
+    #[test]
+    fn lower_triangle_round_trips_through_covariance6() {
+        let covariance = Covariance6::from_diagonal([1.0, 2.0, 3.0, 4.0e-6, 5.0e-6, 6.0e-6])
+            .expect("diagonal covariance");
+        let lower = covariance6_lower_triangle(&covariance);
+        let rebuilt = covariance6_from_lower_triangle(&lower).expect("rebuilt covariance");
+        assert_eq!(rebuilt.as_matrix(), covariance.as_matrix());
     }
 
     #[test]

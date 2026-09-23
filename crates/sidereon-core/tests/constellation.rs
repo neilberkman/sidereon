@@ -41,7 +41,11 @@ EOF
 
 fn celestrak_omms() -> Vec<Omm> {
     let parsed = omm::parse_json_array(GPS_OPS_JSON).expect("parse gps-ops OMM array");
-    assert_eq!(parsed.skipped, 0, "committed fixture must parse cleanly");
+    assert!(
+        parsed.skipped.is_empty(),
+        "committed fixture must parse cleanly: {:?}",
+        parsed.skipped
+    );
     parsed.omms
 }
 

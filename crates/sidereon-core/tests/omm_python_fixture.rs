@@ -92,7 +92,7 @@ fn omm_json(omm: &Omm) -> serde_json::Value {
         "time_system": omm.time_system,
         "mean_element_theory": omm.mean_element_theory,
         "epoch": epoch_json(&omm.epoch),
-        "mean_motion_hex": hex(omm.mean_motion),
+        "mean_motion_hex": omm.mean_motion.map(hex),
         "eccentricity_hex": hex(omm.eccentricity),
         "inclination_deg_hex": hex(omm.inclination_deg),
         "ra_of_asc_node_deg_hex": hex(omm.ra_of_asc_node_deg),
@@ -103,9 +103,9 @@ fn omm_json(omm: &Omm) -> serde_json::Value {
         "norad_cat_id": omm.norad_cat_id,
         "element_set_no": omm.element_set_no,
         "rev_at_epoch": omm.rev_at_epoch,
-        "bstar_hex": hex(omm.bstar),
-        "mean_motion_dot_hex": hex(omm.mean_motion_dot),
-        "mean_motion_ddot_hex": hex(omm.mean_motion_ddot),
+        "bstar_hex": omm.bstar.map(hex),
+        "mean_motion_dot_hex": omm.mean_motion_dot.map(hex),
+        "mean_motion_ddot_hex": omm.mean_motion_ddot.map(hex),
     })
 }
 
@@ -120,15 +120,15 @@ fn omm_python_reference_self_validates() {
             omm::parse_json(fixture.json).unwrap_or_else(|e| panic!("{} JSON: {e}", fixture.name));
 
         assert_eq!(
-            omm::parse_kvn(&omm::encode_kvn(&kvn)).expect("KVN reparse"),
+            omm::parse_kvn(&omm::encode_kvn(&kvn).expect("KVN encode")).expect("KVN reparse"),
             kvn
         );
         assert_eq!(
-            omm::parse_xml(&omm::encode_xml(&xml)).expect("XML reparse"),
+            omm::parse_xml(&omm::encode_xml(&xml).expect("XML encode")).expect("XML reparse"),
             xml
         );
         assert_eq!(
-            omm::parse_json(&omm::encode_json(&json)).expect("JSON reparse"),
+            omm::parse_json(&omm::encode_json(&json).expect("JSON encode")).expect("JSON reparse"),
             json
         );
     }
@@ -153,9 +153,9 @@ fn fixture_json(fixture: &Fixture) -> serde_json::Value {
         "from_kvn": omm_json(&kvn),
         "from_xml": omm_json(&xml),
         "from_json": omm_json(&json_omm),
-        "encoded_kvn": omm::encode_kvn(&kvn),
-        "encoded_xml": omm::encode_xml(&xml),
-        "encoded_json": omm::encode_json(&json_omm),
+        "encoded_kvn": omm::encode_kvn(&kvn).expect("KVN encode"),
+        "encoded_xml": omm::encode_xml(&xml).expect("XML encode"),
+        "encoded_json": omm::encode_json(&json_omm).expect("JSON encode"),
     })
 }
 

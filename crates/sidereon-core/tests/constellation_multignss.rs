@@ -42,7 +42,11 @@ const QZSS_JSON: &str = include_str!("fixtures/constellation/qzss_sample.json");
 
 fn omms(json: &str) -> Vec<Omm> {
     let parsed = omm::parse_json_array(json).expect("parse OMM array");
-    assert_eq!(parsed.skipped, 0, "committed fixture must parse cleanly");
+    assert!(
+        parsed.skipped.is_empty(),
+        "committed fixture must parse cleanly: {:?}",
+        parsed.skipped
+    );
     parsed.omms
 }
 

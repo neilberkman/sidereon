@@ -7,14 +7,14 @@ fuzz_target!(|data: &[u8]| {
     let text = String::from_utf8_lossy(data);
 
     if let Ok(original) = opm::parse_kvn(&text) {
-        let reparsed =
-            opm::parse_kvn(&opm::encode_kvn(&original)).expect("encoded OPM KVN must reparse");
+        let encoded = opm::encode_kvn(&original).expect("a parsed OPM must encode as KVN");
+        let reparsed = opm::parse_kvn(&encoded).expect("encoded OPM KVN must reparse");
         assert_eq!(reparsed, original);
     }
 
     if let Ok(original) = opm::parse_xml(&text) {
-        let reparsed =
-            opm::parse_xml(&opm::encode_xml(&original)).expect("encoded OPM XML must reparse");
+        let encoded = opm::encode_xml(&original).expect("a parsed OPM must encode as XML");
+        let reparsed = opm::parse_xml(&encoded).expect("encoded OPM XML must reparse");
         assert_eq!(reparsed, original);
     }
 });

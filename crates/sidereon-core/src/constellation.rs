@@ -90,6 +90,9 @@ pub enum ConstellationError {
     /// A CelesTrak `OBJECT_NAME` did not contain a parseable `(PRN nn)` block,
     /// or the OMM carried no object name at all. Holds the offending name.
     MissingPrn(Option<String>),
+    /// The OMM carried no `NORAD_CAT_ID`, which CCSDS 502.0-B-3 table 4-3
+    /// makes optional outside SGP/SGP4 messages. Holds the object name.
+    MissingNoradId(Option<String>),
     /// The NAVCEN status bytes were not valid UTF-8.
     NavcenNotUtf8,
     /// The NAVCEN status HTML contained no GPS constellation rows.
@@ -114,6 +117,9 @@ impl fmt::Display for ConstellationError {
             }
             ConstellationError::MissingPrn(None) => {
                 write!(f, "CelesTrak record has no OBJECT_NAME")
+            }
+            ConstellationError::MissingNoradId(name) => {
+                write!(f, "CelesTrak record {name:?} has no NORAD_CAT_ID")
             }
             ConstellationError::NavcenNotUtf8 => write!(f, "NAVCEN bytes are not valid UTF-8"),
             ConstellationError::NavcenNoRows => write!(f, "NAVCEN HTML has no GPS rows"),
@@ -367,8 +373,8 @@ struct Identity {
 pub struct SkippedOmm {
     /// The OMM `OBJECT_NAME`, when present.
     pub object_name: Option<String>,
-    /// The OMM `NORAD_CAT_ID`.
-    pub norad_id: u32,
+    /// The OMM `NORAD_CAT_ID`, when present.
+    pub norad_id: Option<u32>,
 }
 
 /// The result of a lenient constellation catalog build: the records that
@@ -452,7 +458,9 @@ fn record_from_omm(system: GnssSystem, omm: &Omm) -> Result<Record, Constellatio
         system,
         prn: identity.prn,
         svn: None,
-        norad_id: omm.norad_cat_id,
+        norad_id: omm
+            .norad_cat_id
+            .ok_or_else(|| ConstellationError::MissingNoradId(omm.object_name.clone()))?,
         sp3_id: gnss_sp3_id(system, identity.prn),
         fdma_channel: identity.fdma_channel,
         active: true,
@@ -1868,7 +1876,7 @@ mod tests {
     /// read (`OBJECT_NAME`, `NORAD_CAT_ID`); the orbital elements are unused here.
     fn omm_named(object_name: &str, norad_cat_id: u32) -> Omm {
         Omm {
-            ccsds_omm_vers: String::new(),
+            ccsds_omm_vers: None,
             creation_date: None,
             originator: None,
             object_name: Some(object_name.to_string()),
@@ -1887,20 +1895,31 @@ mod tests {
                 microsecond: 0,
                 femtosecond: 0,
             },
-            mean_motion: 0.0,
+            mean_motion: Some(0.0),
+            semi_major_axis_km: None,
             eccentricity: 0.0,
             inclination_deg: 0.0,
             ra_of_asc_node_deg: 0.0,
             arg_of_pericenter_deg: 0.0,
             mean_anomaly_deg: 0.0,
-            ephemeris_type: 0,
-            classification_type: String::new(),
-            norad_cat_id,
-            element_set_no: 0,
-            rev_at_epoch: 0,
-            bstar: 0.0,
-            mean_motion_dot: 0.0,
-            mean_motion_ddot: 0.0,
+            ephemeris_type: Some(0),
+            classification_type: Some(String::new()),
+            norad_cat_id: Some(norad_cat_id),
+            element_set_no: Some(0),
+            rev_at_epoch: Some(0),
+            bstar: Some(0.0),
+            bterm_m2_kg: None,
+            mean_motion_dot: Some(0.0),
+            mean_motion_ddot: Some(0.0),
+            agom_m2_kg: None,
+            classification: None,
+            message_id: None,
+            ref_frame_epoch: None,
+            gm_km3_s2: None,
+            spacecraft: None,
+            covariance: None,
+            user_defined: Vec::new(),
+            comments: crate::astro::omm::OmmComments::default(),
             exact_sgp4_epoch: None,
             quantize_tle_derived_fields: true,
         }
@@ -1939,11 +1958,11 @@ mod tests {
             vec![
                 SkippedOmm {
                     object_name: Some("QZS-2 (QZSS/PRN 194)".to_string()),
-                    norad_id: 42738,
+                    norad_id: Some(42738),
                 },
                 SkippedOmm {
                     object_name: Some("GPS WITHOUT PRN".to_string()),
-                    norad_id: 99999,
+                    norad_id: Some(99999),
                 },
             ]
         );

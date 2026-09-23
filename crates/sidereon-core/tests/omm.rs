@@ -49,6 +49,24 @@ const FIXTURES: &[Fixture] = &[
 
 type FrozenOmmCase = (&'static str, &'static str, fn(&Omm) -> String);
 
+/// `encode_kvn` refuses text that would not read back unchanged; the committed
+/// fixtures hold none, so their encoding is expected to succeed.
+fn encode_kvn_fixture(record: &Omm) -> String {
+    omm::encode_kvn(record).expect("fixture OMM encodes as KVN")
+}
+
+/// `encode_xml` refuses text the XML reader would not return unchanged; the
+/// committed fixtures hold none.
+fn encode_xml_fixture(record: &Omm) -> String {
+    omm::encode_xml(record).expect("fixture OMM encodes as XML")
+}
+
+/// `encode_json` refuses what the JSON reader would not return unchanged, such
+/// as a non-finite number; the committed fixtures hold none.
+fn encode_json_fixture(record: &Omm) -> String {
+    omm::encode_json(record).expect("fixture OMM encodes as JSON")
+}
+
 const ISS_CSV: &str = "OBJECT_NAME,OBJECT_ID,EPOCH,MEAN_MOTION,ECCENTRICITY,INCLINATION,RA_OF_ASC_NODE,ARG_OF_PERICENTER,MEAN_ANOMALY,EPHEMERIS_TYPE,CLASSIFICATION_TYPE,NORAD_CAT_ID,ELEMENT_SET_NO,REV_AT_EPOCH,BSTAR,MEAN_MOTION_DOT,MEAN_MOTION_DDOT\n\
 ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,300.0813,195.1146,164.9702,0,U,25544,999,57175,0.00017172,9.113e-5,0";
 
@@ -82,7 +100,7 @@ fn tle_lines(body: &str) -> (String, String) {
 /// is asserted on this canonical content, which must match exactly.
 fn canonical(omm: &Omm) -> Omm {
     Omm {
-        ccsds_omm_vers: String::new(),
+        ccsds_omm_vers: None,
         creation_date: None,
         originator: None,
         center_name: None,
@@ -184,16 +202,18 @@ fn omm_json_matches_other_encodings_and_drives_sgp4_to_0_ulp() {
 #[test]
 fn frozen_auto_parse_encode_output_hashes() {
     let cases: [FrozenOmmCase; 9] = [
-        ("25544.kvn", FIXTURES[0].kvn, omm::encode_kvn),
-        ("25544.xml", FIXTURES[0].xml, omm::encode_xml),
-        ("25544.json", FIXTURES[0].json, omm::encode_json),
-        ("24876.kvn", FIXTURES[1].kvn, omm::encode_kvn),
-        ("24876.xml", FIXTURES[1].xml, omm::encode_xml),
-        ("24876.json", FIXTURES[1].json, omm::encode_json),
-        ("28884.kvn", FIXTURES[2].kvn, omm::encode_kvn),
-        ("28884.xml", FIXTURES[2].xml, omm::encode_xml),
-        ("28884.json", FIXTURES[2].json, omm::encode_json),
+        ("25544.kvn", FIXTURES[0].kvn, encode_kvn_fixture),
+        ("25544.xml", FIXTURES[0].xml, encode_xml_fixture),
+        ("25544.json", FIXTURES[0].json, encode_json_fixture),
+        ("24876.kvn", FIXTURES[1].kvn, encode_kvn_fixture),
+        ("24876.xml", FIXTURES[1].xml, encode_xml_fixture),
+        ("24876.json", FIXTURES[1].json, encode_json_fixture),
+        ("28884.kvn", FIXTURES[2].kvn, encode_kvn_fixture),
+        ("28884.xml", FIXTURES[2].xml, encode_xml_fixture),
+        ("28884.json", FIXTURES[2].json, encode_json_fixture),
     ];
+    // The GP JSON records state no CCSDS_OMM_VERS, and the JSON writer states
+    // none for them.
     let expected = [
         (
             "25544.kvn",
@@ -205,7 +225,7 @@ fn frozen_auto_parse_encode_output_hashes() {
         ),
         (
             "25544.json",
-            "74d7f55c517507f16f1e06d1193582afeaeda9a1e11fa78436e64567860944bc",
+            "09d0fc2201d8939ca31d9a96009ebc56ecd0ab89c78d671c7fd912b216a928fa",
         ),
         (
             "24876.kvn",
@@ -217,7 +237,7 @@ fn frozen_auto_parse_encode_output_hashes() {
         ),
         (
             "24876.json",
-            "3ee9b047cf83f0b358d5a3ad550d6c905293fa7e4b8858d096cd33388cb92f80",
+            "a8f955c726d990dcf5df3be0e216dbac6aa63f01b8d5ee29d9c57682a2ab57df",
         ),
         (
             "28884.kvn",
@@ -229,7 +249,7 @@ fn frozen_auto_parse_encode_output_hashes() {
         ),
         (
             "28884.json",
-            "a41879ecb0ffdd4bc0aa673e708a9126d9d1671e4cf6a45325943a7136d311a7",
+            "34261b71d9c5183b37ef0b7a924018b9ecc58198477ed8924bc0622ee3996953",
         ),
     ];
 
@@ -281,7 +301,7 @@ fn gp_csv_matches_json_and_drives_sgp4_to_0_ulp() {
     assert_eq!(elements.mean_anomaly_deg, tle_elements.mean_anomaly_deg);
     assert_eq!(elements.bstar.to_bits(), tle_elements.bstar.to_bits());
     assert_eq!(
-        elements.mean_motion_double_dot.to_bits(),
-        tle_elements.mean_motion_double_dot.to_bits()
+        elements.mean_motion_double_dot.map(f64::to_bits),
+        tle_elements.mean_motion_double_dot.map(f64::to_bits)
     );
 }

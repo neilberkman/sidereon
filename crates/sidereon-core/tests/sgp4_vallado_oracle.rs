@@ -195,15 +195,15 @@ fn from_elements_matches_from_tle_bit_exact() {
         let elements = ElementSet {
             epoch,
             bstar,
-            mean_motion_dot,
-            mean_motion_double_dot,
+            mean_motion_dot: Some(mean_motion_dot),
+            mean_motion_double_dot: Some(mean_motion_double_dot),
             eccentricity,
             argument_of_perigee_deg,
             inclination_deg,
             mean_anomaly_deg,
             mean_motion_rev_per_day,
             right_ascension_deg,
-            catalog_number: 0,
+            catalog_number: None,
         };
 
         let from_elem = Satellite::from_elements(&elements).unwrap();

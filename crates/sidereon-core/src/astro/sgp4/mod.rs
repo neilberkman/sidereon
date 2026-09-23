@@ -57,8 +57,6 @@ pub use fit::{
     XScale,
 };
 
-const MAX_VALLADO_SATNUM: u32 = 99_999;
-
 // ── Error ────────────────────────────────────────────────────────────
 
 /// Validation failure category for public SGP4 inputs.
@@ -354,10 +352,15 @@ pub struct ElementSet {
     pub epoch: JulianDate,
     /// SGP4 drag term (Vallado B\*). Dimensionless TLE convention.
     pub bstar: f64,
-    /// First derivative of mean motion in rev/day². TLE "ndot".
-    pub mean_motion_dot: f64,
-    /// Second derivative of mean motion in rev/day³. TLE "nddot".
-    pub mean_motion_double_dot: f64,
+    /// First derivative of mean motion in rev/day², TLE "ndot", when the
+    /// source states it. SGP4 stores it with the element set but does not
+    /// propagate with it, so an absent value propagates as a stated zero does.
+    #[serde(default)]
+    pub mean_motion_dot: Option<f64>,
+    /// Second derivative of mean motion in rev/day³, TLE "nddot", when the
+    /// source states it; like `mean_motion_dot`, not used in propagation.
+    #[serde(default)]
+    pub mean_motion_double_dot: Option<f64>,
     /// Eccentricity, dimensionless, in [0, 1).
     pub eccentricity: f64,
     /// Argument of perigee, degrees.
@@ -370,10 +373,13 @@ pub struct ElementSet {
     pub mean_motion_rev_per_day: f64,
     /// Right ascension of ascending node (RAAN), degrees.
     pub right_ascension_deg: f64,
-    /// Catalog (NORAD) number for this object. Used only for diagnostic
-    /// reporting inside SGP4 - propagation results do not depend on it.
-    /// Pass `0` if unknown.
-    pub catalog_number: u32,
+    /// Catalog (NORAD) number for this object, when the source states it: up
+    /// to nine digits, as CCSDS 502.0-B-3 table 4-3 allows `NORAD_CAT_ID`.
+    /// Used only for diagnostic reporting inside SGP4 - propagation results
+    /// do not depend on it. A TLE states five characters (Alpha-5), which the
+    /// TLE writer checks when it writes one.
+    #[serde(default)]
+    pub catalog_number: Option<u32>,
 }
 
 // ── Satellite ────────────────────────────────────────────────────────
@@ -860,13 +866,19 @@ fn init_satrec_from_elements(
     let no_kozai = elements.mean_motion_rev_per_day / xpdotp;
     // ndot rev/day² → rad/min², nddot rev/day³ → rad/min³.
     // Matches the conversion in `vallado::twoline2rv_propagate`.
-    let ndot = elements.mean_motion_dot / (xpdotp * 1440.0);
-    let nddot = elements.mean_motion_double_dot / (xpdotp * 1440.0 * 1440.0);
+    // SGP4 stores the derivatives with the record but does not propagate with
+    // them, so an absent value is passed as zero.
+    let ndot = elements.mean_motion_dot.unwrap_or(0.0) / (xpdotp * 1440.0);
+    let nddot = elements.mean_motion_double_dot.unwrap_or(0.0) / (xpdotp * 1440.0 * 1440.0);
 
     let JulianDate(jd, jdfrac) = elements.epoch;
     let epoch_sgp4 = jd + jdfrac - 2433281.5;
 
-    let satnum_str = format!("{:>5}", elements.catalog_number);
+    // The record keeps five characters of the catalog number for diagnostics.
+    let satnum_str = elements
+        .catalog_number
+        .map(|number| format!("{number:>5}"))
+        .unwrap_or_default();
 
     let mut satrec = vallado::ElsetRec {
         jdsatepoch: jd,
@@ -899,18 +911,14 @@ fn init_satrec_from_elements(
 }
 
 fn validate_elements(elements: &ElementSet) -> Result<(), Error> {
-    if elements.catalog_number > MAX_VALLADO_SATNUM {
-        return Err(invalid_domain("element.catalog_number"));
-    }
     validate_epoch(elements.epoch)?;
     validate::finite(elements.bstar, "element.bstar").map_err(map_input_error)?;
-    validate::finite(elements.mean_motion_dot, "element.mean_motion_dot")
-        .map_err(map_input_error)?;
-    validate::finite(
-        elements.mean_motion_double_dot,
-        "element.mean_motion_double_dot",
-    )
-    .map_err(map_input_error)?;
+    if let Some(value) = elements.mean_motion_dot {
+        validate::finite(value, "element.mean_motion_dot").map_err(map_input_error)?;
+    }
+    if let Some(value) = elements.mean_motion_double_dot {
+        validate::finite(value, "element.mean_motion_double_dot").map_err(map_input_error)?;
+    }
     validate::finite_in_range_exclusive_upper(
         elements.eccentricity,
         0.0,
@@ -1306,14 +1314,36 @@ mod tests {
             "element.eccentricity",
             Sgp4InputErrorKind::OutOfRange,
         );
+    }
 
-        let mut elements = iss_elements();
-        elements.catalog_number = 100_000;
-        assert_invalid_input(
-            Satellite::from_elements(&elements),
-            "element.catalog_number",
-            Sgp4InputErrorKind::OutOfRange,
-        );
+    #[test]
+    fn from_elements_propagates_without_a_catalog_number_or_derivatives() {
+        // SGP4 propagates neither with the catalog number nor with ndot and
+        // nddot, so a nine-digit catalog number (CCSDS 502.0-B-3 table 4-3)
+        // or an absent value propagates as the TLE's elements do.
+        let base = iss_elements();
+        let expected = Satellite::from_elements(&base)
+            .unwrap()
+            .propagate(MinutesSinceEpoch(90.0))
+            .unwrap();
+        for elements in [
+            ElementSet {
+                catalog_number: Some(999_999_999),
+                ..base.clone()
+            },
+            ElementSet {
+                catalog_number: None,
+                mean_motion_dot: None,
+                mean_motion_double_dot: None,
+                ..base.clone()
+            },
+        ] {
+            let state = Satellite::from_elements(&elements)
+                .unwrap()
+                .propagate(MinutesSinceEpoch(90.0))
+                .unwrap();
+            assert_eq!(state, expected);
+        }
     }
 
     #[test]

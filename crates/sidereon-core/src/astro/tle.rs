@@ -193,15 +193,15 @@ impl TleElements {
         Ok(ElementSet {
             epoch: sgp4::sgp4_julian_date_from_day_of_year(self.epoch_year, self.epoch_day_of_year),
             bstar: self.bstar,
-            mean_motion_dot: self.mean_motion_dot,
-            mean_motion_double_dot: self.mean_motion_double_dot,
+            mean_motion_dot: Some(self.mean_motion_dot),
+            mean_motion_double_dot: Some(self.mean_motion_double_dot),
             eccentricity: self.eccentricity,
             argument_of_perigee_deg: self.arg_perigee_deg,
             inclination_deg: self.inclination_deg,
             mean_anomaly_deg: self.mean_anomaly_deg,
             mean_motion_rev_per_day: self.mean_motion,
             right_ascension_deg: self.raan_deg,
-            catalog_number: decode_catalog_number(&self.catalog_number)?,
+            catalog_number: Some(decode_catalog_number(&self.catalog_number)?),
         })
     }
 }
@@ -940,7 +940,7 @@ mod tests {
         assert_eq!(parsed.elements.catalog_number, "A0000");
         assert_eq!(
             parsed.elements.to_element_set().unwrap().catalog_number,
-            100_000
+            Some(100_000)
         );
     }
 

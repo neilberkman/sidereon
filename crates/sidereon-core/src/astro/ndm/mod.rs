@@ -1,9 +1,11 @@
 //! Shared CCSDS Navigation Data Message primitives.
 //!
-//! This crate-internal module holds header, epoch, and covariance-block helpers
-//! shared across the CCSDS NDM family. OEM and OPM readers/writers use
-//! `NdmHeader` for message headers and `read_covariance6`/
-//! `write_covariance6` for 6x6 state covariance blocks.
+//! This crate-internal module holds header, epoch, covariance-block, KVN line
+//! and unit, and scoped XML helpers shared across the CCSDS NDM family. OEM and
+//! OPM readers use `read_lower_triangle6` for 6x6 state covariance blocks,
+//! held exactly as read, and `mirror_lower_triangle6` to validate one; the
+//! OMM, OPM, OEM and CDM readers share the KVN line classifier, the unit check,
+//! and the scoped XML element access.
 
 #![allow(dead_code, unused_imports)]
 
@@ -13,17 +15,39 @@ pub(crate) mod covariance_block;
 pub(crate) mod epoch;
 /// Shared CCSDS NDM header helpers.
 pub(crate) mod header;
+/// Shared CCSDS KVN line classification and unit helpers.
+pub(crate) mod kvn;
+/// Shared writer text checks.
+pub(crate) mod text;
+/// Shared scoped NDM/XML element access.
+pub(crate) mod xml_tree;
+
+/// Why a CCSDS NDM writer refuses a text value.
+pub use text::TextIssue;
 
 /// Re-export XML text helpers shared by NDM encoders.
 pub(crate) use crate::astro::xml::{escape, escape_opt, first_illegal_xml_1_0_char};
 /// Re-export KVN tokenization and field lookup helpers for NDM callers.
-pub(crate) use crate::format::kvn::{tokenize, FieldMap};
+pub(crate) use crate::format::kvn::{tokenize, ConflictingField, FieldMap};
 /// Re-export the shared 6x6 covariance block reader and writer.
-pub(crate) use covariance_block::{read_covariance6, write_covariance6, COVARIANCE6_KEYS};
+pub(crate) use covariance_block::{
+    covariance6_from_lower_triangle, covariance6_lower_triangle, covariance6_unit,
+    mirror_lower_triangle6, read_covariance6, read_lower_triangle6, write_covariance6,
+    COVARIANCE6_KEYS,
+};
 /// Re-export the shared CCSDS NDM epoch value.
 pub(crate) use epoch::NdmEpoch;
 /// Re-export the shared CCSDS NDM header value.
 pub(crate) use header::NdmHeader;
+/// Re-export the shared KVN line classifier and unit helpers.
+pub(crate) use kvn::{
+    check_unit, classify, expected_unit_label, kvn_lines, split_unit, KvnLine, UnitMismatch,
+};
+/// Re-export the scoped NDM/XML element helpers.
+pub(crate) use xml_tree::{
+    carries_data, child_element, child_elements, comment_text, element_children, leaf_descendants,
+    leaf_text, message_elements, nested_element, units_attribute,
+};
 
 #[cfg(test)]
 mod tests {
