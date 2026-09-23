@@ -85,6 +85,7 @@ fn single_obs_clock_epoch(sat: GnssSatelliteId) -> FloatEpoch {
             freq1_hz: 0.0,
             freq2_hz: 0.0,
             glonass_channel: None,
+            signals: None,
         }],
     }
 }
@@ -327,6 +328,7 @@ fn ppp_elevation_cutoff_arc() -> (FakeSource, Vec<FloatEpoch>, FloatState, Vec<S
                     freq1_hz: 0.0,
                     freq2_hz: 0.0,
                     glonass_channel: None,
+                    signals: None,
                 }
             })
             .collect();
@@ -506,6 +508,7 @@ fn ppp_lookup_applies_real_glonass_osb_with_observation_fdma_channel() {
             freq1_hz,
             freq2_hz,
             glonass_channel: Some(channel),
+            signals: None,
         }],
     }];
     let lookup = build_ppp_lookup(
@@ -1145,6 +1148,7 @@ fn static_float_solver_recovers_synthetic_arc() {
                     freq1_hz: 0.0,
                     freq2_hz: 0.0,
                     glonass_channel: None,
+                    signals: None,
                 }
             })
             .collect();
@@ -1546,6 +1550,7 @@ fn static_float_solver_reports_unit_variance_factor_on_weighted_synthetic_noise(
                     freq1_hz: 0.0,
                     freq2_hz: 0.0,
                     glonass_channel: None,
+                    signals: None,
                 }
             })
             .collect();
@@ -1684,6 +1689,7 @@ fn static_float_solver_handles_multi_hundred_epoch_arc() {
                     freq1_hz: 0.0,
                     freq2_hz: 0.0,
                     glonass_channel: None,
+                    signals: None,
                 }
             })
             .collect();
@@ -2359,6 +2365,7 @@ fn tropo_gradient_synthetic_arc(
                 freq1_hz: 0.0,
                 freq2_hz: 0.0,
                 glonass_channel: None,
+                signals: None,
             };
             let pred = crate::observables::predict_transmit_geometry(
                 &source,
@@ -2682,19 +2689,30 @@ fn has_test_ingest(store: &mut SsrCorrectionStore, message: &HasMt1Message) {
         .expect("ingest HAS MT1");
 }
 
-fn gps_l1_l2_signal_pair() -> SsrPppBiasSignalPair {
-    SsrPppBiasSignalPair {
-        code1_signal: 0,
-        code2_signal: 9,
-        phase1_signal: 0,
-        phase2_signal: 9,
-        freq1_hz: F_L1_HZ,
-        freq2_hz: F_L2_HZ,
+fn signal_code(code: &str) -> crate::ssr::SignalCode {
+    crate::ssr::SignalCode::parse(code).expect("signal code")
+}
+
+fn gps_signal(code: &str) -> crate::ssr::GnssSignal {
+    crate::ssr::GnssSignal::new(GnssSystem::Gps, signal_code(code))
+}
+
+/// Tracking codes of an ionosphere-free observation formed from `code1`/`code2`
+/// pseudoranges and phases on the same signals.
+fn observation_signals(code1: &str, code2: &str) -> FloatObservationSignals {
+    FloatObservationSignals {
+        code1: signal_code(code1),
+        code2: signal_code(code2),
+        phase1: signal_code(code1),
+        phase2: signal_code(code2),
     }
 }
 
+/// Default bias options: each observation's biases are those of its own signals, here
+/// GPS L1 C/A and L2 P, HAS signals 0 and 9 (HAS SIS ICD Table 20), the signals
+/// [`has_test_message`] carries biases for and [`ssr_test_arc`] observes.
 fn gps_l1_l2_options() -> SsrPppBiasOptions {
-    SsrPppBiasOptions::new().with_system_signal_pair(GnssSystem::Gps, gps_l1_l2_signal_pair())
+    SsrPppBiasOptions::new()
 }
 
 /// One epoch of the row-trace arc with its first `n_obs` observations, received one
@@ -2702,6 +2720,9 @@ fn gps_l1_l2_options() -> SsrPppBiasOptions {
 fn ssr_test_arc(n_obs: usize) -> (FakeSource, Vec<FloatEpoch>, FloatState, Vec<AmbiguityId>) {
     let (source, mut epochs, mut state, _) = ppp_row_trace_arc();
     epochs[0].observations.truncate(n_obs);
+    for obs in &mut epochs[0].observations {
+        obs.signals = Some(observation_signals("1C", "2P"));
+    }
     epochs.truncate(1);
     epochs[0].t_rx_j2000_s = ssr_test_t0() + 1.0;
     state.clocks_m.truncate(1);
@@ -3047,20 +3068,19 @@ fn test_ppp_ssr_biases_unavailable_excludes_observations_and_retains_all_records
     assert_missing_correction(err, sat1, MissingCorrection::SsrCodeBias);
 }
 
-/// Bias application is requested by default. `SsrPppBiasOptions::default()` carries no
-/// signal pairs, so every observation is reported `NoSignalPairConfigured` and a solve
-/// leaves every observation out. Opting out explicitly runs without SSR biases.
+/// Bias application is requested by default, and each observation's biases are those of
+/// the signals it was formed from, so the default options apply them with no mapping
+/// configured. A store holding no biases for those signals reports them unavailable and a
+/// solve leaves every observation out. Opting out explicitly runs without SSR biases.
 #[test]
-fn test_ppp_ssr_biases_default_options_without_signal_pairs_exclude_every_observation() {
+fn test_ppp_ssr_biases_default_options_apply_the_observation_signals() {
     let (source, epochs, state, ambiguity_ids) = ssr_test_arc(2);
     let binding = super::rows::AmbiguityBinding::Estimated {
         ids: &ambiguity_ids,
         values: &state.ambiguities_m,
     };
-    // The store is never queried: resolution stops at the missing signal pair.
-    let store = SsrCorrectionStore::new();
+    let sats: Vec<_> = epochs[0].observations.iter().map(|obs| obs.sat).collect();
     let broadcast = ssr_test_broadcast();
-    let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
 
     let options = SsrPppBiasOptions::default();
     assert!(
@@ -3071,9 +3091,37 @@ fn test_ppp_ssr_biases_default_options_without_signal_pairs_exclude_every_observ
         options.apply_phase_biases,
         "phase biases are requested by default"
     );
-    assert!(options.per_satellite.is_empty());
-    assert!(options.per_system.is_empty());
 
+    let mut with_biases = SsrCorrectionStore::new();
+    has_test_ingest(
+        &mut with_biases,
+        &has_test_message(
+            &sats,
+            0,
+            1,
+            1,
+            Some(HAS_VI_60_S),
+            Some(HasTestBiases::usable([1.24, -0.76], [0.2, -0.3])),
+        ),
+    );
+    let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &with_biases);
+    let (_, applied) = PppCorrectionLookup::default().with_ssr_biases(
+        &ephemeris,
+        &epochs,
+        ssr_test_receiver(),
+        &options,
+    );
+    assert_eq!(applied.status, SsrPppAggregateStatus::AllApplied);
+    assert_eq!(applied.code_applied_count, 2);
+    assert_eq!(applied.phase_applied_count, 2);
+
+    // Orbit and clock corrections, but no biases for the observed signals.
+    let mut without_biases = SsrCorrectionStore::new();
+    has_test_ingest(
+        &mut without_biases,
+        &has_test_message(&sats, 0, 1, 1, Some(HAS_VI_60_S), None),
+    );
+    let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &without_biases);
     let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
         &ephemeris,
         &epochs,
@@ -3087,16 +3135,22 @@ fn test_ppp_ssr_biases_default_options_without_signal_pairs_exclude_every_observ
     for obs_rep in &report.observation_reports {
         assert_eq!(
             obs_rep.code_status,
-            SsrIfCombinationStatus::NoSignalPairConfigured
+            SsrIfCombinationStatus::SignalUnavailable
         );
         assert_eq!(
             obs_rep.phase_status,
-            SsrIfCombinationStatus::NoSignalPairConfigured
+            SsrIfCombinationStatus::SignalUnavailable
         );
-        assert!(obs_rep.code1_report.is_none());
-        assert!(obs_rep.code2_report.is_none());
-        assert!(obs_rep.phase1_report.is_none());
-        assert!(obs_rep.phase2_report.is_none());
+        for (report, signal) in [
+            (obs_rep.code1_report.as_ref().unwrap(), "1C"),
+            (obs_rep.code2_report.as_ref().unwrap(), "2P"),
+        ] {
+            assert_eq!(report.signal, gps_signal(signal));
+            assert_eq!(
+                report.query_result.status,
+                crate::ssr::SsrBiasStatus::Missing
+            );
+        }
     }
     assert!(lookup.ssr_code_bias_enabled);
     assert!(lookup.phase_bias_enabled);
@@ -3116,7 +3170,7 @@ fn test_ppp_ssr_biases_default_options_without_signal_pairs_exclude_every_observ
     for exclusion in &exclusions {
         assert_eq!(
             exclusion.application.as_ref().unwrap().code_status,
-            SsrIfCombinationStatus::NoSignalPairConfigured
+            SsrIfCombinationStatus::SignalUnavailable
         );
     }
 
@@ -3278,13 +3332,13 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
 
     // Tokens of the arc before the break.
     let pre_break_token0 = store
-        .query_phase_bias(sat, 0, t0, None)
+        .query_phase_bias(sat, gps_signal("1C"), t0, None)
         .continuity_token
-        .expect("token for the first arc, signal 0");
+        .expect("token for the first arc, signal 1C");
     let pre_break_token9 = store
-        .query_phase_bias(sat, 9, t0, None)
+        .query_phase_bias(sat, gps_signal("2P"), t0, None)
         .continuity_token
-        .expect("token for the first arc, signal 9");
+        .expect("token for the first arc, signal 2P");
 
     // A second message 60 s later with PDI 1 breaks the arc.
     let mut second = first.clone();
@@ -3296,7 +3350,7 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
 
     // A query without a token starts a new arc: not a reset, with the PDI change in the
     // details. Its token acknowledges the break.
-    let q_p1 = store.query_phase_bias(sat, 0, t0 + 60.0, None);
+    let q_p1 = store.query_phase_bias(sat, gps_signal("1C"), t0 + 60.0, None);
     assert_eq!(q_p1.status, crate::ssr::SsrBiasStatus::Available);
     assert_eq!(
         q_p1.discontinuity_details,
@@ -3307,21 +3361,21 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
     );
     let token_reset = q_p1
         .continuity_token
-        .expect("token for the new arc, signal 0");
-    let q_p2 = store.query_phase_bias(sat, 9, t0 + 60.0, None);
+        .expect("token for the new arc, signal 1C");
+    let q_p2 = store.query_phase_bias(sat, gps_signal("2P"), t0 + 60.0, None);
     assert_eq!(q_p2.status, crate::ssr::SsrBiasStatus::Available);
     let token_reset2 = q_p2
         .continuity_token
-        .expect("token for the new arc, signal 9");
+        .expect("token for the new arc, signal 2P");
 
     // G01#1 acknowledges the new arc; G01#2 still holds the tokens from before the break.
     let mut epochs_60 = epochs.clone();
     epochs_60[0].t_rx_j2000_s = t0 + 61.0;
     let options_ack = gps_l1_l2_options()
-        .with_phase_continuity_token("G01#1", 0, token_reset)
-        .with_phase_continuity_token("G01#1", 9, token_reset2)
-        .with_phase_continuity_token("G01#2", 0, pre_break_token0)
-        .with_phase_continuity_token("G01#2", 9, pre_break_token9);
+        .with_phase_continuity_token("G01#1", signal_code("1C"), token_reset)
+        .with_phase_continuity_token("G01#1", signal_code("2P"), token_reset2)
+        .with_phase_continuity_token("G01#2", signal_code("1C"), pre_break_token0)
+        .with_phase_continuity_token("G01#2", signal_code("2P"), pre_break_token9);
     let broadcast = ssr_test_broadcast();
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
 
@@ -3437,17 +3491,16 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
         SsrIfCombinationStatus::OptedOut
     );
 
-    // Equal carrier frequencies cannot form an ionosphere-free combination.
-    let options_bad_freq = SsrPppBiasOptions::default().with_system_signal_pair(
-        GnssSystem::Gps,
-        SsrPppBiasSignalPair {
-            freq2_hz: F_L1_HZ,
-            ..gps_l1_l2_signal_pair()
-        },
-    );
+    // Two signals of one band have equal carrier frequencies and cannot form an
+    // ionosphere-free combination.
+    let mut epochs_one_band = epochs_60.clone();
+    for obs in &mut epochs_one_band[0].observations {
+        obs.signals = Some(observation_signals("1C", "1W"));
+    }
+    let options_bad_freq = SsrPppBiasOptions::default();
     let (_lookup_bad_freq, report_bad_freq) = PppCorrectionLookup::default().with_ssr_biases(
         &ephemeris,
-        &epochs_60,
+        &epochs_one_band,
         ssr_test_receiver(),
         &options_bad_freq,
     );
@@ -3461,25 +3514,34 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
     );
 }
 
-/// The SSR code bias is held per ambiguity: with the signal pair's frequencies unset, each
-/// observation's own frequencies form the combination, so two ambiguities of one satellite
-/// in one epoch can differ. Here one has valid frequencies and the other equal ones; the
-/// valid one is applied and only the other is left out.
+/// SSR biases are matched to each ambiguity by the tracking codes its observation was
+/// formed from, and held per ambiguity. Three ambiguities of one satellite in one epoch
+/// carry HAS GPS L1 C/A and L2 P biases (HAS signals 0 and 9):
+///
+/// - G01#1 was formed from C1C/C2P and L1C/L2P, the biased signals, and gets both biases;
+/// - G01#2 was formed from C1C/C2W and L1C/L2W. C2W and L2W are the semi-codeless
+///   (Z-tracking) P(Y) measurements, a different signal from HAS L2 P on the same
+///   carrier; its own L2 signal has no bias, so neither IF bias is applied;
+/// - G01#3 carries no tracking codes, so its signals are unknown and nothing is applied.
+///
+/// Only G01#1 is kept by the exclusion pass.
 #[test]
-fn test_ppp_ssr_code_bias_is_held_per_ambiguity() {
+fn test_ppp_ssr_biases_match_tracking_codes_per_ambiguity() {
     let (_source, mut epochs, _state, _ambiguity_ids) = ssr_test_arc(1);
     let sat = epochs[0].observations[0].sat;
-    let mut valid = epochs[0].observations[0].clone();
-    valid.ambiguity_id = "G01#1".to_string();
-    valid.freq1_hz = F_L1_HZ;
-    valid.freq2_hz = F_L2_HZ;
-    let mut equal = epochs[0].observations[0].clone();
-    equal.ambiguity_id = "G01#2".to_string();
-    equal.freq1_hz = F_L1_HZ;
-    equal.freq2_hz = F_L1_HZ;
-    epochs[0].observations = vec![valid.clone(), equal.clone()];
+    let mut matched = epochs[0].observations[0].clone();
+    matched.ambiguity_id = "G01#1".to_string();
+    matched.signals = Some(observation_signals("1C", "2P"));
+    let mut semi_codeless = epochs[0].observations[0].clone();
+    semi_codeless.ambiguity_id = "G01#2".to_string();
+    semi_codeless.signals = Some(observation_signals("1C", "2W"));
+    let mut unknown = epochs[0].observations[0].clone();
+    unknown.ambiguity_id = "G01#3".to_string();
+    unknown.signals = None;
+    epochs[0].observations = vec![matched.clone(), semi_codeless.clone(), unknown.clone()];
 
     let code_m = [1.24, -0.76];
+    let phase_cycles = [0.2, -0.3];
     let mut store = SsrCorrectionStore::new();
     has_test_ingest(
         &mut store,
@@ -3489,51 +3551,115 @@ fn test_ppp_ssr_code_bias_is_held_per_ambiguity() {
             1,
             1,
             Some(HAS_VI_60_S),
-            Some(HasTestBiases::usable(code_m, [0.2, -0.3])),
+            Some(HasTestBiases::usable(code_m, phase_cycles)),
         ),
     );
+    // The store holds HAS signal 9 as GPS L2 P, not as any other L2 signal.
+    let t_query = ssr_test_t0() + 1.0;
+    assert_eq!(
+        store.query_code_bias(sat, gps_signal("2P"), t_query).status,
+        crate::ssr::SsrBiasStatus::Available
+    );
+    for other_l2 in ["2W", "2X", "2L", "2S", "2C", "2D"] {
+        assert_eq!(
+            store
+                .query_code_bias(sat, gps_signal(other_l2), t_query)
+                .status,
+            crate::ssr::SsrBiasStatus::Missing,
+            "{other_l2}"
+        );
+    }
     let broadcast = ssr_test_broadcast();
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
-    let options = SsrPppBiasOptions::new().with_system_signal_pair(
-        GnssSystem::Gps,
-        SsrPppBiasSignalPair {
-            freq1_hz: 0.0,
-            freq2_hz: 0.0,
-            ..gps_l1_l2_signal_pair()
-        },
-    );
     let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
         &ephemeris,
         &epochs,
         ssr_test_receiver(),
-        &options,
+        &gps_l1_l2_options(),
     );
 
+    let rows = &report.observation_reports;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].code_status, SsrIfCombinationStatus::Applied);
+    assert_eq!(rows[0].phase_status, SsrIfCombinationStatus::Applied);
     assert_eq!(
-        report.observation_reports[0].code_status,
-        SsrIfCombinationStatus::Applied
+        rows[0].code2_report.as_ref().unwrap().signal,
+        gps_signal("2P")
     );
     assert_eq!(
-        report.observation_reports[1].code_status,
-        SsrIfCombinationStatus::InvalidFrequencies
+        rows[0]
+            .code2_report
+            .as_ref()
+            .unwrap()
+            .query_result
+            .source_signal,
+        Some(crate::ssr::SsrRawSignal::galileo_has(GnssSystem::Gps, 9))
     );
-    let valid_key = (sat, 0, "G01#1".to_string());
-    let equal_key = (sat, 0, "G01#2".to_string());
+    // G01#2 is queried for its own L2 signal, 2W, which has no bias: the L2 P bias of
+    // the same carrier is not substituted.
+    let semi = &rows[1];
+    assert_eq!(semi.code_status, SsrIfCombinationStatus::SignalUnavailable);
+    assert_eq!(semi.phase_status, SsrIfCombinationStatus::SignalUnavailable);
+    for report in [
+        semi.code2_report.as_ref().unwrap().signal,
+        semi.phase2_report.as_ref().unwrap().signal,
+    ] {
+        assert_eq!(report, gps_signal("2W"));
+    }
+    assert_eq!(
+        semi.code2_report.as_ref().unwrap().query_result.status,
+        crate::ssr::SsrBiasStatus::Missing
+    );
+    assert_eq!(
+        semi.code1_report.as_ref().unwrap().query_result.status,
+        crate::ssr::SsrBiasStatus::Available
+    );
+    // G01#3 carries no codes, so nothing is queried for it.
+    let unknown_row = &rows[2];
+    for status in [unknown_row.code_status, unknown_row.phase_status] {
+        assert_eq!(status, SsrIfCombinationStatus::ObservationSignalsUnknown);
+    }
+    assert!(unknown_row.code1_report.is_none() && unknown_row.code2_report.is_none());
+    assert!(unknown_row.phase1_report.is_none() && unknown_row.phase2_report.is_none());
+    for row in [semi, unknown_row] {
+        assert!(row.applied_code_if_m.is_none() && row.applied_phase_if_m.is_none());
+    }
+    assert_eq!(
+        rows[1].observation_signals,
+        Some(observation_signals("1C", "2W"))
+    );
+    assert_eq!(rows[2].observation_signals, None);
+    assert_eq!(report.code_applied_count, 1);
+    assert_eq!(report.code_failed_count, 2);
+    assert_eq!(report.phase_applied_count, 1);
+    assert_eq!(report.phase_failed_count, 2);
+
+    let matched_key = (sat, 0, "G01#1".to_string());
     assert!(
-        (lookup.ssr_code_bias_m[&valid_key] + ionosphere_free(code_m[0], code_m[1])).abs() < 1.0e-8
+        (lookup.ssr_code_bias_m[&matched_key] + ionosphere_free(code_m[0], code_m[1])).abs()
+            < 1.0e-8
     );
-    assert!(!lookup.ssr_code_bias_m.contains_key(&equal_key));
+    let expected_phase_if = ionosphere_free(
+        phase_cycles[0] * (C_M_S / F_L1_HZ),
+        phase_cycles[1] * (C_M_S / F_L2_HZ),
+    );
+    assert!((lookup.phase_bias_m[&matched_key] - expected_phase_if).abs() < 1.0e-9);
+    for id in ["G01#2", "G01#3"] {
+        let key = (sat, 0, id.to_string());
+        assert!(!lookup.ssr_code_bias_m.contains_key(&key), "{id}");
+        assert!(!lookup.phase_bias_m.contains_key(&key), "{id}");
+    }
 
     let corrections = RangeCorrections {
         ppp: lookup.clone(),
         ..RangeCorrections::disabled()
     };
     assert_eq!(
-        super::model::ssr_code_bias_m(&valid, 0, &corrections.ppp).unwrap(),
-        lookup.ssr_code_bias_m[&valid_key]
+        super::model::ssr_code_bias_m(&matched, 0, &corrections.ppp).unwrap(),
+        lookup.ssr_code_bias_m[&matched_key]
     );
     assert_missing_correction(
-        super::model::ssr_code_bias_m(&equal, 0, &corrections.ppp).unwrap_err(),
+        super::model::ssr_code_bias_m(&semi_codeless, 0, &corrections.ppp).unwrap_err(),
         sat,
         MissingCorrection::SsrCodeBias,
     );
@@ -3548,10 +3674,101 @@ fn test_ppp_ssr_code_bias_is_held_per_ambiguity() {
         SsrBiasExclusionStage::BeforeSolve,
     )
     .expect("SSR bias exclusion pass");
-    assert_eq!(retained[0].observations, vec![valid]);
-    assert_eq!(exclusions.len(), 1);
-    assert_eq!(exclusions[0].ambiguity_id, "G01#2");
-    assert!(exclusions[0].code_bias_missing);
+    assert_eq!(retained[0].observations, vec![matched]);
+    let excluded: Vec<_> = exclusions.iter().map(|e| e.ambiguity_id.as_str()).collect();
+    assert_eq!(excluded, ["G01#2", "G01#3"]);
+    assert!(exclusions
+        .iter()
+        .all(|e| e.code_bias_missing && e.phase_bias_missing));
+}
+
+/// The ionosphere-free bias combination takes its carriers from the bands of the
+/// observation's signals: a GLONASS FDMA band at the observation's frequency channel, or
+/// at the channel its stated frequencies name, and none without either. A frequency the
+/// observation states has to be its band's carrier.
+#[test]
+fn ssr_bias_carriers_follow_the_observed_bands_and_glonass_channel() {
+    let (_source, epochs, _state, _ambiguity_ids) = ssr_test_arc(1);
+    let codes = Some([signal_code("1C"), signal_code("2P")]);
+    let g1 = 1_602_000_000.0 - 4.0 * 562_500.0;
+    let g2 = 1_246_000_000.0 - 4.0 * 437_500.0;
+
+    let mut obs = epochs[0].observations[0].clone();
+    obs.sat = GnssSatelliteId::new(GnssSystem::Glonass, 5).unwrap();
+    obs.freq1_hz = 0.0;
+    obs.freq2_hz = 0.0;
+    obs.glonass_channel = Some(-4);
+    let matched = super::types::matched_signals(&obs, codes).expect("codes known");
+    assert_eq!(
+        matched.signals.map(|signal| signal.system()),
+        [GnssSystem::Glonass; 2]
+    );
+    assert_eq!(matched.frequencies_hz, Ok((g1, g2)));
+    // Without a channel, the channel whose carriers the stated frequencies are.
+    obs.glonass_channel = None;
+    obs.freq1_hz = g1;
+    obs.freq2_hz = g2;
+    let matched = super::types::matched_signals(&obs, codes).expect("codes known");
+    assert_eq!(matched.frequencies_hz, Ok((g1, g2)));
+    // Each FDMA signal names the channel from its own band: G1 C/A with a CDMA G3 Q
+    // signal, whose frequency names no channel.
+    let g3 = 1_202_025_000.0;
+    let g1_g3 = Some([signal_code("1C"), signal_code("3Q")]);
+    obs.freq2_hz = g3;
+    let matched = super::types::matched_signals(&obs, g1_g3).expect("codes known");
+    assert_eq!(matched.frequencies_hz, Ok((g1, g3)));
+    // With G2 P first, the first frequency is the G2 carrier.
+    let g2_first = Some([signal_code("2P"), signal_code("1C")]);
+    obs.freq1_hz = g2;
+    obs.freq2_hz = g1;
+    let matched = super::types::matched_signals(&obs, g2_first).expect("codes known");
+    assert_eq!(matched.frequencies_hz, Ok((g2, g1)));
+    // One stated frequency is enough to name the channel.
+    obs.freq2_hz = 0.0;
+    let matched = super::types::matched_signals(&obs, g2_first).expect("codes known");
+    assert_eq!(matched.frequencies_hz, Ok((g2, g1)));
+    // Frequencies naming two different channels disagree.
+    obs.freq1_hz = g1;
+    obs.freq2_hz = 1_246_000_000.0 + 437_500.0;
+    let matched = super::types::matched_signals(&obs, codes).expect("codes known");
+    assert_eq!(
+        matched.frequencies_hz,
+        Err(SsrIfCombinationStatus::ObservationFrequencyMismatch)
+    );
+    // Neither a channel nor frequencies: the FDMA carrier is unresolved.
+    obs.freq1_hz = 0.0;
+    obs.freq2_hz = 0.0;
+    let matched = super::types::matched_signals(&obs, codes).expect("codes known");
+    assert_eq!(
+        matched.frequencies_hz,
+        Err(SsrIfCombinationStatus::CarrierUnresolved)
+    );
+
+    // A GPS observation takes the L1 and L2 carriers, and frequencies it states have to
+    // be those carriers.
+    let mut gps_obs = epochs[0].observations[0].clone();
+    gps_obs.freq1_hz = F_L1_HZ;
+    gps_obs.freq2_hz = F_L2_HZ;
+    let matched = super::types::matched_signals(&gps_obs, codes).expect("codes known");
+    assert_eq!(matched.frequencies_hz, Ok((F_L1_HZ, F_L2_HZ)));
+    gps_obs.freq1_hz = 1.0;
+    gps_obs.freq2_hz = 2.0;
+    let matched = super::types::matched_signals(&gps_obs, codes).expect("codes known");
+    assert_eq!(
+        matched.frequencies_hz,
+        Err(SsrIfCombinationStatus::ObservationFrequencyMismatch)
+    );
+    gps_obs.freq1_hz = F_L1_HZ;
+    gps_obs.freq2_hz = crate::constants::F_E5A_HZ;
+    let matched = super::types::matched_signals(&gps_obs, codes).expect("codes known");
+    assert_eq!(
+        matched.frequencies_hz,
+        Err(SsrIfCombinationStatus::ObservationFrequencyMismatch)
+    );
+    assert!(matches!(
+        super::types::matched_signals(&gps_obs, None),
+        Err(SsrIfCombinationStatus::ObservationSignalsUnknown)
+    ));
 }
 
 /// A bias is applied only against the orbit and clock corrections of its own SSR solution,
@@ -4302,6 +4519,7 @@ fn ssr_spread_epoch(
                 freq1_hz: 0.0,
                 freq2_hz: 0.0,
                 glonass_channel: None,
+                signals: Some(observation_signals("1C", "2P")),
             }
         })
         .collect();
@@ -5149,8 +5367,8 @@ fn test_ppp_ssr_biases_has_iod_set_change_keeps_ambiguity() {
     epochs_30[0].t_rx_j2000_s = ssr_test_t0() + 31.0;
     let options_ack = options
         .clone()
-        .with_phase_continuity_token(ambiguity_id.clone(), 0, token0)
-        .with_phase_continuity_token(ambiguity_id.clone(), 9, token9);
+        .with_phase_continuity_token(ambiguity_id.clone(), signal_code("1C"), token0)
+        .with_phase_continuity_token(ambiguity_id.clone(), signal_code("2P"), token9);
     let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
         &ephemeris,
         &epochs_30,
@@ -5682,6 +5900,7 @@ fn single_epoch_float_solver_recovers_synthetic_snapshot() {
                 freq1_hz: 0.0,
                 freq2_hz: 0.0,
                 glonass_channel: None,
+                signals: None,
             }
         })
         .collect::<Vec<_>>();
@@ -5824,6 +6043,7 @@ fn single_epoch_fixed_solver_uses_custom_ambiguity_ids() {
                 freq1_hz: 0.0,
                 freq2_hz: 0.0,
                 glonass_channel: None,
+                signals: None,
             }
         })
         .collect::<Vec<_>>();
@@ -5981,6 +6201,7 @@ fn fixed_synthetic_arc() -> (
                     freq1_hz: 0.0,
                     freq2_hz: 0.0,
                     glonass_channel: None,
+                    signals: None,
                 }
             })
             .collect();
@@ -6597,6 +6818,7 @@ fn ppp_row_trace_arc() -> (FakeSource, Vec<FloatEpoch>, FloatState, Vec<Ambiguit
                     freq1_hz: 0.0,
                     freq2_hz: 0.0,
                     glonass_channel: None,
+                    signals: None,
                 }
             })
             .collect();

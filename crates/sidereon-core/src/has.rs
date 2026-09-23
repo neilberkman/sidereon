@@ -7,7 +7,7 @@
 
 #![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use crate::constants::{C_M_S, F_E1_HZ, F_E5A_HZ, F_L1_HZ, F_L2_HZ};
+use crate::constants::C_M_S;
 use crate::error::{Error, Result};
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::rtcm::bits::{BitReader, BitWriter};
@@ -1899,26 +1899,19 @@ fn mask_from_indices(indices: impl IntoIterator<Item = u8>, width: usize) -> u64
     mask
 }
 
+/// Carrier frequency of a HAS signal index: the band frequency of the physical
+/// signal HAS SIS ICD Table 20 assigns the index. A reserved index has none.
 fn has_signal_frequency_hz(system: GnssSystem, signal_id: u8) -> Result<f64> {
-    match (system, signal_id) {
-        (GnssSystem::Gps, 0 | 3 | 4 | 5) => Ok(F_L1_HZ),
-        (GnssSystem::Gps, 6..=9) => Ok(F_L2_HZ),
-        (GnssSystem::Gps, 11..=13) => Ok(F_E5A_HZ),
-        (GnssSystem::Galileo, 0..=2) => Ok(F_E1_HZ),
-        (GnssSystem::Galileo, 3..=5) => Ok(F_E5A_HZ),
-        (GnssSystem::Galileo, 6..=8) => Ok(1_207_140_000.0),
-        (GnssSystem::Galileo, 9..=11) => Ok(1_191_795_000.0),
-        (GnssSystem::Galileo, 12..=14) => Ok(1_278_750_000.0),
-        _ => Err(Error::Parse(format!(
-            "unsupported HAS signal {signal_id} for {system:?}"
-        ))),
-    }
+    crate::ssr::has_signal(system, signal_id)
+        .and_then(|signal| signal.carrier_frequency_hz(None))
+        .ok_or_else(|| Error::Parse(format!("unsupported HAS signal {signal_id} for {system:?}")))
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::constants::F_L1_HZ;
 
     #[test]
     fn mt1_mask_orbit_clock_and_bias_blocks_roundtrip() {
@@ -6942,7 +6935,10 @@ mod tests {
         .unwrap();
         let mut store = crate::ssr::SsrCorrectionStore::new();
         store.ingest_has_mt1(&dec, reception).unwrap();
-        assert_eq!(store.phase_bias(sat, 0), Some(expected_m2));
+        assert_eq!(
+            store.phase_bias(sat, crate::ssr::SsrRawSignal::galileo_has(sat.system, 0)),
+            Some(expected_m2)
+        );
 
         // Step 5: Caller mutates cycles to None (unavailable sentinel)
         msg.phase_bias.as_mut().unwrap().records[0].bias_cycles = None;

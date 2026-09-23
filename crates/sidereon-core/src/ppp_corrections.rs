@@ -774,13 +774,15 @@ fn code_bias_correction_m(
     else {
         return Ok(BiasLookup::Absent);
     };
+    let glonass_channel =
+        observation_glonass_channel(observation, epoch_index, (&used.0, &used.1))?;
     validate_code_observable_frequency(
         observation,
         epoch_index,
         "used observable 1",
         &used.0,
         observation.freq1_hz,
-        observation_glonass_channel(observation),
+        glonass_channel,
     )?;
     validate_code_observable_frequency(
         observation,
@@ -788,7 +790,7 @@ fn code_bias_correction_m(
         "used observable 2",
         &used.1,
         observation.freq2_hz,
-        observation_glonass_channel(observation),
+        glonass_channel,
     )?;
     let reference = options
         .clock_reference
@@ -833,7 +835,7 @@ fn code_bias_correction_m(
         observation.sat,
         (&used.0, &used.1),
         (observation.freq1_hz, observation.freq2_hz),
-        observation_glonass_channel(observation),
+        glonass_channel,
         (&clock_pair.0, &clock_pair.1),
         epoch,
     ))
@@ -918,35 +920,28 @@ fn validate_code_observable_frequency(
     Ok(())
 }
 
-fn observation_glonass_channel(observation: &PppCorrectionObservation) -> Option<i8> {
-    observation.glonass_channel.or_else(|| {
-        infer_glonass_channel(observation.sat, observation.freq1_hz, observation.freq2_hz)
-    })
-}
-
-fn infer_glonass_channel(sat: GnssSatelliteId, freq1_hz: f64, freq2_hz: f64) -> Option<i8> {
-    if sat.system != GnssSystem::Glonass {
-        return None;
+/// The GLONASS FDMA channel of an observation: its stated channel, or else the one its
+/// frequencies name for the bands of its used observables, `freq1_hz` for the first and
+/// `freq2_hz` for the second ([`frequencies::infer_glonass_fdma_channel`]). Frequencies
+/// that name two different channels are refused as a frequency mismatch.
+fn observation_glonass_channel(
+    observation: &PppCorrectionObservation,
+    epoch_index: usize,
+    used: (&str, &str),
+) -> Result<Option<i8>, PppCorrectionsError> {
+    if observation.glonass_channel.is_some() || observation.sat.system != GnssSystem::Glonass {
+        return Ok(observation.glonass_channel);
     }
-    (-7..=6).find(|&channel| {
-        let g1 = frequencies::rinex_observation_frequency_hz(
-            GnssSystem::Glonass,
-            "C1C",
-            3.04,
-            Some(channel),
-        );
-        let g2 = frequencies::rinex_observation_frequency_hz(
-            GnssSystem::Glonass,
-            "C2C",
-            3.04,
-            Some(channel),
-        );
-        matches!(
-            (g1, g2),
-            (Some(expected1), Some(expected2))
-                if (expected1 - freq1_hz).abs() <= PPP_FREQUENCY_ABS_EPS_HZ
-                    && (expected2 - freq2_hz).abs() <= PPP_FREQUENCY_ABS_EPS_HZ
-        )
+    let band = |code: &str| code.chars().nth(1).unwrap_or('0');
+    frequencies::infer_glonass_fdma_channel(&[
+        (band(used.0), observation.freq1_hz),
+        (band(used.1), observation.freq2_hz),
+    ])
+    .map_err(|_| PppCorrectionsError::CodeBiasObservable {
+        epoch_index,
+        sat: observation.sat,
+        field: "used observables",
+        reason: "frequency mismatch",
     })
 }
 

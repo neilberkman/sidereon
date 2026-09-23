@@ -11,13 +11,14 @@ use sidereon_core::ppp_corrections::CivilDateTime;
 use sidereon_core::precise_positioning::{
     prepare_widelane_fixed_epochs, solve_fixed_from_float, solve_float_epochs, CycleSlipPolicy,
     DualFrequencyEpoch, DualFrequencyObservation, FixedAmbiguityOptions, FixedSolveConfig,
-    FloatEpoch, FloatObservation, FloatSolveConfig, FloatSolveOptions, FloatState, IntegerStatus,
-    MeasurementWeights, RangeCorrections, TroposphereOptions, WideLanePrepError,
-    WideLanePrepOptions,
+    FloatEpoch, FloatObservation, FloatObservationSignals, FloatSolveConfig, FloatSolveOptions,
+    FloatState, IntegerStatus, MeasurementWeights, RangeCorrections, TroposphereOptions,
+    WideLanePrepError, WideLanePrepOptions,
 };
 use sidereon_core::rinex::observations::{
     observation_values, ObsEpoch, ObsEpochTime, ObservationFilter, RinexObs,
 };
+use sidereon_core::ssr::SignalCode;
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -88,6 +89,20 @@ fn gps_l1_l2_filter() -> ObservationFilter {
     )])
 }
 
+/// Tracking codes of the C1C/C2W/L1C/L2W ionosphere-free observations, read as the
+/// file's RINEX version reads them.
+fn gps_l1_l2_signals(system: GnssSystem, rinex_version: f64) -> FloatObservationSignals {
+    let code = |name: &str| {
+        SignalCode::from_rinex(system, name, rinex_version).expect("RINEX 3 observation code")
+    };
+    FloatObservationSignals {
+        code1: code("C1C"),
+        code2: code("C2W"),
+        phase1: code("L1C"),
+        phase2: code("L2W"),
+    }
+}
+
 fn gps_float_epochs(obs: &RinexObs, count: usize, excluded: &[&str]) -> Vec<FloatEpoch> {
     let excluded = excluded.iter().copied().collect::<BTreeSet<_>>();
     obs.epochs()
@@ -147,6 +162,7 @@ fn float_observations(
                 freq1_hz: 0.0,
                 freq2_hz: 0.0,
                 glonass_channel: None,
+                signals: Some(gps_l1_l2_signals(sat.system, obs.header.version)),
             })
         })
         .collect::<Vec<_>>();
@@ -740,6 +756,8 @@ fn esbc_real_slipped_arcs_can_be_split_before_narrow_lane_search() {
                     freq1_hz: 0.0,
                     freq2_hz: 0.0,
                     glonass_channel: None,
+                    // The dual-frequency rows were read with the same filter.
+                    signals: Some(gps_l1_l2_signals(GnssSystem::Gps, obs.header.version)),
                 })
                 .collect();
             float_epoch(raw_epoch, observations)
