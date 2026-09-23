@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::f64::consts::PI;
 
 use crate::antenna;
-use crate::bias::{BiasError, BiasSet, ClockReferenceObservables};
+use crate::bias::{BiasError, BiasLookup, BiasSet, ClockReferenceObservables};
 use crate::constants::{
     C_M_S, F_L1_HZ, J2000_JD, MICROSECONDS_PER_SECOND, OMEGA_E_DOT_RAD_S, RAD_TO_DEG,
     SECONDS_PER_DAY, SECONDS_PER_HOUR,
@@ -88,8 +88,9 @@ pub struct PppCorrectionEpoch {
     /// Civil epoch used for Sun/Moon, station-displacement, and antenna-validity
     /// evaluation.
     pub epoch: CivilDateTime,
-    /// Receiver time in seconds from J2000, used for precise-orbit prediction and
-    /// converted with the bias set's time scale for code-bias evaluation.
+    /// Receiver time in seconds from J2000 on the SP3 product's time scale,
+    /// used for precise-orbit prediction and converted into the bias
+    /// product's time scale for code-bias evaluation.
     pub t_rx_j2000_s: f64,
     /// Visible observations traversed in input order for per-satellite correction
     /// generation.
@@ -522,23 +523,42 @@ pub fn build(
 
         if let Some(code_bias) = options.code_bias.as_ref() {
             for observation in &epoch_row.observations {
-                if let Some(value_m) =
-                    code_bias_correction_m(code_bias, observation, epoch_row, epoch_index)?
-                {
-                    corrections.code_bias_m.push(SatScalarCorrection {
-                        sat: observation.sat,
-                        epoch_index,
-                        value_m,
-                    });
-                } else {
-                    corrections
-                        .diagnostics
-                        .push_warning(crate::format::Warning {
-                            at: crate::format::RecordRef::at_record(epoch_index)
-                                .with_satellite(observation.sat.to_string()),
-                            kind: crate::format::WarningKind::MissingMetadata,
+                let lookup = code_bias_correction_m(
+                    code_bias,
+                    observation,
+                    epoch_row,
+                    epoch_index,
+                    sp3.header.time_scale,
+                )?;
+                let kind = match lookup {
+                    BiasLookup::Available { value, .. } => {
+                        corrections.code_bias_m.push(SatScalarCorrection {
+                            sat: observation.sat,
+                            epoch_index,
+                            value_m: value,
                         });
-                }
+                        continue;
+                    }
+                    // Conflicting bias records, and a receiver epoch that
+                    // cannot be put on the product's time scale, leave the
+                    // correction undetermined; the warning says so rather
+                    // than reporting missing metadata.
+                    BiasLookup::Ambiguous { .. }
+                    | BiasLookup::UnsupportedScale {
+                        product: Some(_), ..
+                    } => crate::format::WarningKind::Mismatch,
+                    // No correction: no used observables configured, no
+                    // record, no carrier for an observable, or a product
+                    // without a usable time system.
+                    _ => crate::format::WarningKind::MissingMetadata,
+                };
+                corrections
+                    .diagnostics
+                    .push_warning(crate::format::Warning {
+                        at: crate::format::RecordRef::at_record(epoch_index)
+                            .with_satellite(observation.sat.to_string()),
+                        kind,
+                    });
             }
         }
 
@@ -699,7 +719,8 @@ fn code_bias_correction_m(
     observation: &PppCorrectionObservation,
     epoch_row: &PppCorrectionEpoch,
     epoch_index: usize,
-) -> Result<Option<f64>, PppCorrectionsError> {
+    receiver_scale: TimeScale,
+) -> Result<BiasLookup, PppCorrectionsError> {
     let Some(used) = options
         .used_observables_per_sat
         .get(&observation.sat)
@@ -709,7 +730,7 @@ fn code_bias_correction_m(
                 .get(&observation.sat.system)
         })
     else {
-        return Ok(None);
+        return Ok(BiasLookup::Absent);
     };
     validate_code_observable_frequency(
         observation,
@@ -730,7 +751,7 @@ fn code_bias_correction_m(
     let reference = options
         .clock_reference
         .as_ref()
-        .unwrap_or(&options.bias_set.clock_reference);
+        .unwrap_or(options.bias_set.clock_reference());
     if reference.per_system.is_empty() {
         return Err(PppCorrectionsError::Bias {
             source: BiasError::MissingClockReference,
@@ -741,8 +762,31 @@ fn code_bias_correction_m(
             source: BiasError::MissingClockReference,
         });
     };
-    let epoch = code_bias_epoch(epoch_row.t_rx_j2000_s, options.bias_set.time_scale)
-        .map_err(|source| PppCorrectionsError::Bias { source })?;
+    // The used pair is the clock datum: the model is exactly zero, whatever
+    // the product's time system.
+    if used.0 == clock_pair.0 && used.1 == clock_pair.1 {
+        return Ok(BiasLookup::Available {
+            value: 0.0,
+            records: Vec::new(),
+            overridden: Vec::new(),
+        });
+    }
+    // A product without a usable TIME_SYSTEM gives no scale to read the
+    // receiver epoch on; that observation gets no correction and a warning.
+    let Some(product_scale) = options.bias_set.time_scale() else {
+        return Ok(BiasLookup::UnsupportedScale {
+            product: None,
+            query: receiver_scale,
+        });
+    };
+    let Some(epoch) = code_bias_epoch(epoch_row.t_rx_j2000_s, receiver_scale, product_scale)
+        .map_err(|source| PppCorrectionsError::Bias { source })?
+    else {
+        return Ok(BiasLookup::UnsupportedScale {
+            product: Some(product_scale),
+            query: receiver_scale,
+        });
+    };
     Ok(options.bias_set.code_bias_model_m(
         observation.sat,
         (&used.0, &used.1),
@@ -753,17 +797,46 @@ fn code_bias_correction_m(
     ))
 }
 
-fn code_bias_epoch(t_rx_j2000_s: f64, time_scale: TimeScale) -> Result<Instant, BiasError> {
+/// The receiver epoch, seconds from J2000 on `receiver_scale`, as an instant
+/// on the bias product's `product_scale`, converted through the crate's
+/// time-scale offsets (leap seconds included for UTC). `None` when the two
+/// scales have no modelled offset, such as TCG or TCB.
+fn code_bias_epoch(
+    t_rx_j2000_s: f64,
+    receiver_scale: TimeScale,
+    product_scale: TimeScale,
+) -> Result<Option<Instant>, BiasError> {
     validate::finite(t_rx_j2000_s, "t_rx_j2000_s").map_err(|error| BiasError::InvalidInput {
         field: error.field(),
         reason: error.reason(),
     })?;
-    let days_since_j2000 = t_rx_j2000_s / SECONDS_PER_DAY;
+    let t_product_s = if receiver_scale == product_scale {
+        t_rx_j2000_s
+    } else {
+        let Some(offset_s) = scale_offset_s(t_rx_j2000_s, receiver_scale, product_scale) else {
+            return Ok(None);
+        };
+        t_rx_j2000_s + offset_s
+    };
+    let days_since_j2000 = t_product_s / SECONDS_PER_DAY;
     let whole_days = days_since_j2000.floor();
     let fraction = days_since_j2000 - whole_days;
     let jd = JulianDateSplit::new(J2000_JD + whole_days, fraction)
         .map_err(|_| BiasError::InvalidEpoch)?;
-    Ok(Instant::from_julian_date(time_scale, jd))
+    Ok(Some(Instant::from_julian_date(product_scale, jd)))
+}
+
+/// `to` reading minus `from` reading, in seconds, at the instant `t_j2000_s`
+/// reads on `from`. The UTC Julian date that picks the leap-second count is
+/// refined once, so it is right on both sides of a leap second.
+fn scale_offset_s(t_j2000_s: f64, from: TimeScale, to: TimeScale) -> Option<f64> {
+    use crate::astro::time::scales::timescale_offset_at_s;
+    let jd_from = J2000_JD + t_j2000_s / SECONDS_PER_DAY;
+    let first = timescale_offset_at_s(from, TimeScale::Utc, jd_from).ok()?;
+    let utc_jd = jd_from + first / SECONDS_PER_DAY;
+    let refined = timescale_offset_at_s(from, TimeScale::Utc, utc_jd).ok()?;
+    let utc_jd = jd_from + refined / SECONDS_PER_DAY;
+    timescale_offset_at_s(from, to, utc_jd).ok()
 }
 
 fn validate_code_observable_frequency(
@@ -1597,7 +1670,7 @@ mod tests {
 
     fn code_bias_product() -> crate::bias::BiasSet {
         let text = "\
-%=BIA 1.00 TST
+%=BIA 1.00 TST 2020:176:00000 TST 2020:176:00000 2020:177:00000 A 00000003
 +FILE/REFERENCE
  DESCRIPTION TEST
 -FILE/REFERENCE
@@ -1606,11 +1679,12 @@ mod tests {
  TIME_SYSTEM G
  SATELLITE_CLOCK_REFERENCE_OBSERVABLES G C1W C2W
 -BIAS/DESCRIPTION
-+BIAS/SOLUTION 3
++BIAS/SOLUTION
  OSB  G021 G21           C1C       2020:176:00000 2020:177:00000 ns     -1.234567890000E+00 2.00000E-02
  OSB  G021 G21           C1W       2020:176:00000 2020:177:00000 ns      5.600000000000E-01 2.00000E-02
  OSB  G021 G21           C2W       2020:176:00000 2020:177:00000 ns     -3.000000000000E-01 2.00000E-02
 -BIAS/SOLUTION
+%=ENDBIA
 ";
         crate::bias::BiasSet::parse_bias_sinex(text.as_bytes())
             .expect("parse code-bias product")
@@ -1621,6 +1695,58 @@ mod tests {
         crate::bias::BiasSet::parse_bias_sinex(REAL_CODE_BIA)
             .expect("parse real CODE Bias-SINEX product")
             .value
+    }
+
+    /// A GPS satellite 21 OSB row at the Bias-SINEX 1.00 section 4.8
+    /// columns: OBS1 at 25, the interval at 35 and 50, the unit at 65, the
+    /// estimate right-aligned in 70..91 and its sigma in 92..103.
+    fn g21_osb_row(obs: &str, start: &str, end: &str, value: &str) -> String {
+        let row = format!(
+            " OSB  G021 G21           {obs:<4}      {start} {end} ns   {value:>21} {:>11}",
+            "2.00000E-02"
+        );
+        assert_eq!(row.len(), 103);
+        row
+    }
+
+    /// A strictly conformant product with the given `TIME_SYSTEM` label and
+    /// rows, read leniently when it has no label.
+    fn g21_product(time_system: Option<&str>, rows: &[String]) -> crate::bias::BiasSet {
+        let mut lines = vec![
+            format!(
+                "%=BIA 1.00 TST 2020:176:00000 TST 2020:176:00000 2020:177:00000 A {:08}",
+                rows.len()
+            ),
+            "+FILE/REFERENCE".to_string(),
+            " DESCRIPTION TEST".to_string(),
+            "-FILE/REFERENCE".to_string(),
+            "+BIAS/DESCRIPTION".to_string(),
+            " BIAS_MODE ABSOLUTE".to_string(),
+        ];
+        if let Some(label) = time_system {
+            lines.push(format!(" TIME_SYSTEM {label}"));
+        }
+        lines.push(" SATELLITE_CLOCK_REFERENCE_OBSERVABLES G C1W C2W".to_string());
+        lines.push("-BIAS/DESCRIPTION".to_string());
+        lines.push("+BIAS/SOLUTION".to_string());
+        lines.extend(rows.iter().cloned());
+        lines.push("-BIAS/SOLUTION".to_string());
+        lines.push("%=ENDBIA".to_string());
+        let text = lines.join("\n");
+        crate::bias::BiasSet::parse_bias_sinex_with_policy(
+            text.as_bytes(),
+            crate::bias::BiasReadPolicy::Lenient,
+        )
+        .expect("parse code-bias product")
+        .value
+    }
+
+    fn code_bias_warnings(got: &PppCorrections) -> Vec<crate::format::WarningKind> {
+        got.diagnostics
+            .warnings
+            .iter()
+            .map(|warning| warning.kind)
+            .collect()
     }
 
     fn code_bias_epoch(sat: GnssSatelliteId) -> Vec<PppCorrectionEpoch> {
@@ -1669,6 +1795,121 @@ mod tests {
 
         assert_eq!(got.code_bias_m.len(), 1);
         assert_eq!(got.code_bias_m[0].value_m.to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn code_bias_reads_the_receiver_epoch_on_the_product_time_scale() {
+        // The product is in UTC and the SP3 epochs in GPS time. 12:00:00 GPST
+        // on 2020-06-24 is 11:59:42 UTC (TAI-UTC 37 s, TAI-GPST 19 s), so the
+        // C1C record ending at 11:59:50 UTC applies, not the one after it.
+        let sp3 = sp3_fixture();
+        assert_eq!(sp3.header.time_scale, TimeScale::Gpst);
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 21).expect("valid satellite id");
+        let receiver = [3_512_900.0, 780_500.0, 5_248_700.0];
+        let rows = [
+            g21_osb_row("C1C", "2020:176:00000", "2020:176:43190", "-1.0"),
+            g21_osb_row("C1C", "2020:176:43190", "2020:177:00000", "5.0"),
+            g21_osb_row("C1W", "2020:176:00000", "2020:177:00000", "0.56"),
+            g21_osb_row("C2W", "2020:176:00000", "2020:177:00000", "-0.3"),
+        ];
+        let options = PppCorrectionsOptions {
+            solid_earth_tide: false,
+            pole_tide: None,
+            ocean_loading: None,
+            phase_windup: false,
+            satellite_antenna: None,
+            code_bias: Some(code_bias_options(
+                g21_product(Some("UTC"), &rows),
+                ("C1C", "C2W"),
+            )),
+        };
+
+        let got = build(&sp3, &code_bias_epoch(sat), receiver, &options).expect("build");
+        let alpha = F_L1_HZ * F_L1_HZ / (F_L1_HZ * F_L1_HZ - F_L2_HZ * F_L2_HZ);
+        let beta = -(F_L2_HZ * F_L2_HZ) / (F_L1_HZ * F_L1_HZ - F_L2_HZ * F_L2_HZ);
+        let used_if = alpha * -(1.0_f64 * 1.0e-9) + beta * (-0.3_f64 * 1.0e-9);
+        let ref_if = alpha * (0.56_f64 * 1.0e-9) + beta * (-0.3_f64 * 1.0e-9);
+        let expected = (used_if - ref_if) * C_M_S;
+        assert_eq!(got.code_bias_m.len(), 1);
+        assert_eq!(got.code_bias_m[0].value_m.to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn code_bias_without_a_time_system_warns_per_observation() {
+        let sp3 = sp3_fixture();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 21).expect("valid satellite id");
+        let receiver = [3_512_900.0, 780_500.0, 5_248_700.0];
+        let rows = [
+            g21_osb_row("C1C", "2020:176:00000", "2020:177:00000", "-1.0"),
+            g21_osb_row("C1W", "2020:176:00000", "2020:177:00000", "0.56"),
+            g21_osb_row("C2W", "2020:176:00000", "2020:177:00000", "-0.3"),
+        ];
+        let product = g21_product(None, &rows);
+        assert_eq!(product.time_scale(), None);
+        let options = |used: (&str, &str)| PppCorrectionsOptions {
+            solid_earth_tide: false,
+            pole_tide: None,
+            ocean_loading: None,
+            phase_windup: false,
+            satellite_antenna: None,
+            code_bias: Some(code_bias_options(product.clone(), used)),
+        };
+
+        // No scale to read the epoch on: no correction, a warning, no error.
+        let got = build(
+            &sp3,
+            &code_bias_epoch(sat),
+            receiver,
+            &options(("C1C", "C2W")),
+        )
+        .expect("build without a time system");
+        assert!(got.code_bias_m.is_empty());
+        assert_eq!(
+            code_bias_warnings(&got),
+            vec![crate::format::WarningKind::MissingMetadata]
+        );
+
+        // The clock datum itself is exactly zero whatever the time system.
+        let got = build(
+            &sp3,
+            &code_bias_epoch(sat),
+            receiver,
+            &options(("C1W", "C2W")),
+        )
+        .expect("matched datum");
+        assert_eq!(got.code_bias_m.len(), 1);
+        assert_eq!(got.code_bias_m[0].value_m.to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn ambiguous_code_bias_records_warn_as_a_mismatch() {
+        let sp3 = sp3_fixture();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 21).expect("valid satellite id");
+        let receiver = [3_512_900.0, 780_500.0, 5_248_700.0];
+        let rows = [
+            g21_osb_row("C1C", "2020:176:00000", "2020:177:00000", "-1.0"),
+            g21_osb_row("C1C", "2020:176:00000", "2020:177:00000", "-2.0"),
+            g21_osb_row("C1W", "2020:176:00000", "2020:177:00000", "0.56"),
+            g21_osb_row("C2W", "2020:176:00000", "2020:177:00000", "-0.3"),
+        ];
+        let options = PppCorrectionsOptions {
+            solid_earth_tide: false,
+            pole_tide: None,
+            ocean_loading: None,
+            phase_windup: false,
+            satellite_antenna: None,
+            code_bias: Some(code_bias_options(
+                g21_product(Some("G"), &rows),
+                ("C1C", "C2W"),
+            )),
+        };
+
+        let got = build(&sp3, &code_bias_epoch(sat), receiver, &options).expect("build");
+        assert!(got.code_bias_m.is_empty());
+        assert_eq!(
+            code_bias_warnings(&got),
+            vec![crate::format::WarningKind::Mismatch]
+        );
     }
 
     #[test]

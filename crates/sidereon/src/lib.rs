@@ -487,7 +487,9 @@ pub mod rinex_qc {
 }
 
 use sidereon_core::antex::{Antex, AntexError};
-use sidereon_core::bias::{BiasError, BiasSet, CodeDcbOptions, Parsed as BiasParsed};
+use sidereon_core::bias::{
+    BiasError, BiasReadPolicy, BiasSet, CodeDcbOptions, Parsed as BiasParsed,
+};
 use sidereon_core::ephemeris::{BroadcastEphemeris, Sp3};
 use sidereon_core::observables::ObservableEphemerisSource;
 use sidereon_core::positioning::{
@@ -1008,6 +1010,22 @@ pub fn parse_bias_sinex_lossy(bytes: &[u8]) -> Result<BiasParsed<BiasSet>> {
     BiasSet::parse_bias_sinex(bytes).map_err(Error::Bias)
 }
 
+/// Parse Bias-SINEX bytes under `policy` into an offline bias set.
+/// [`BiasReadPolicy::Lenient`] reads a file that departs from Bias-SINEX
+/// 1.00 and reports each departure in the set's notices.
+pub fn parse_bias_sinex_with_policy(bytes: &[u8], policy: BiasReadPolicy) -> Result<BiasSet> {
+    Ok(parse_bias_sinex_lossy_with_policy(bytes, policy)?.value)
+}
+
+/// Parse Bias-SINEX bytes under `policy` and return non-fatal diagnostics
+/// with the bias set.
+pub fn parse_bias_sinex_lossy_with_policy(
+    bytes: &[u8],
+    policy: BiasReadPolicy,
+) -> Result<BiasParsed<BiasSet>> {
+    BiasSet::parse_bias_sinex_with_policy(bytes, policy).map_err(Error::Bias)
+}
+
 /// Read and parse a Bias-SINEX product. Files ending in `.gz` are decompressed.
 ///
 /// Local input is bounded at 64 MiB compressed and 500 MiB decompressed.  For
@@ -1027,6 +1045,34 @@ pub fn load_bias_sinex(path: impl AsRef<Path>) -> Result<BiasSet> {
 pub fn load_bias_sinex_lossy(path: impl AsRef<Path>) -> Result<BiasParsed<BiasSet>> {
     let bytes = read_maybe_gzip(path)?;
     parse_bias_sinex_lossy(&bytes)
+}
+
+/// Read and parse a Bias-SINEX product under `policy`. Files ending in
+/// `.gz` are decompressed.
+///
+/// Local input is bounded at 64 MiB compressed and 500 MiB decompressed.  For
+/// different I/O policies, decode the bytes externally and call
+/// [`parse_bias_sinex_with_policy`].
+pub fn load_bias_sinex_with_policy(
+    path: impl AsRef<Path>,
+    policy: BiasReadPolicy,
+) -> Result<BiasSet> {
+    let bytes = read_maybe_gzip(path)?;
+    parse_bias_sinex_with_policy(&bytes, policy)
+}
+
+/// Read and parse a Bias-SINEX product under `policy`, retaining non-fatal
+/// diagnostics. Files ending in `.gz` are decompressed.
+///
+/// Local input is bounded at 64 MiB compressed and 500 MiB decompressed.  For
+/// different I/O policies, decode the bytes externally and call
+/// [`parse_bias_sinex_lossy_with_policy`].
+pub fn load_bias_sinex_lossy_with_policy(
+    path: impl AsRef<Path>,
+    policy: BiasReadPolicy,
+) -> Result<BiasParsed<BiasSet>> {
+    let bytes = read_maybe_gzip(path)?;
+    parse_bias_sinex_lossy_with_policy(&bytes, policy)
 }
 
 /// Parse CODE DCB bytes into an offline bias set.
@@ -1064,6 +1110,58 @@ pub fn load_code_dcb_lossy(
 ) -> Result<BiasParsed<BiasSet>> {
     let bytes = read_maybe_gzip(path)?;
     parse_code_dcb_lossy(&bytes, options)
+}
+
+/// Parse CODE DCB bytes under `policy` into an offline bias set.
+/// [`BiasReadPolicy::Lenient`] reads a generated title whose time-system
+/// label names no known scale, leaving the set without a time scale, and
+/// reports the departure in the set's notices.
+pub fn parse_code_dcb_with_policy(
+    bytes: &[u8],
+    options: Option<CodeDcbOptions>,
+    policy: BiasReadPolicy,
+) -> Result<BiasSet> {
+    Ok(parse_code_dcb_lossy_with_policy(bytes, options, policy)?.value)
+}
+
+/// Parse CODE DCB bytes under `policy` and return non-fatal diagnostics with
+/// the bias set.
+pub fn parse_code_dcb_lossy_with_policy(
+    bytes: &[u8],
+    options: Option<CodeDcbOptions>,
+    policy: BiasReadPolicy,
+) -> Result<BiasParsed<BiasSet>> {
+    BiasSet::parse_code_dcb_with_policy(bytes, options, policy).map_err(Error::Bias)
+}
+
+/// Read and parse a CODE DCB product under `policy`. Files ending in `.gz`
+/// are decompressed.
+///
+/// Local input is bounded at 64 MiB compressed and 500 MiB decompressed.  For
+/// different I/O policies, decode the bytes externally and call
+/// [`parse_code_dcb_with_policy`].
+pub fn load_code_dcb_with_policy(
+    path: impl AsRef<Path>,
+    options: Option<CodeDcbOptions>,
+    policy: BiasReadPolicy,
+) -> Result<BiasSet> {
+    let bytes = read_maybe_gzip(path)?;
+    parse_code_dcb_with_policy(&bytes, options, policy)
+}
+
+/// Read and parse a CODE DCB product under `policy`, retaining non-fatal
+/// diagnostics. Files ending in `.gz` are decompressed.
+///
+/// Local input is bounded at 64 MiB compressed and 500 MiB decompressed.  For
+/// different I/O policies, decode the bytes externally and call
+/// [`parse_code_dcb_lossy_with_policy`].
+pub fn load_code_dcb_lossy_with_policy(
+    path: impl AsRef<Path>,
+    options: Option<CodeDcbOptions>,
+    policy: BiasReadPolicy,
+) -> Result<BiasParsed<BiasSet>> {
+    let bytes = read_maybe_gzip(path)?;
+    parse_code_dcb_lossy_with_policy(&bytes, options, policy)
 }
 
 /// Decode Compact RINEX (Hatanaka) OBS text into plain RINEX OBS text.
@@ -1781,6 +1879,21 @@ mod tests {
         assert!(!loaded_bias.records().is_empty());
         let lossy_bias = parse_bias_sinex_lossy(BIAS_BYTES).expect("lossy Bias-SINEX parse");
         assert_eq!(lossy_bias.value.records().len(), bias.records().len());
+        for policy in [
+            sidereon_core::bias::BiasReadPolicy::Strict,
+            sidereon_core::bias::BiasReadPolicy::Lenient,
+        ] {
+            let parsed = parse_bias_sinex_lossy_with_policy(BIAS_BYTES, policy)
+                .expect("Bias-SINEX parse under a policy");
+            assert_eq!(parsed.value.records(), bias.records());
+            let loaded = load_bias_sinex_with_policy(fixture_path(&["bias", "CODE.BIA"]), policy)
+                .expect("load Bias-SINEX under a policy");
+            assert_eq!(loaded.records(), bias.records());
+            let loaded_lossy =
+                load_bias_sinex_lossy_with_policy(fixture_path(&["bias", "CODE.BIA"]), policy)
+                    .expect("load Bias-SINEX under a policy with diagnostics");
+            assert_eq!(loaded_lossy.value.records(), bias.records());
+        }
 
         let dcb = parse_code_dcb(DCB_BYTES, None).expect("parse CODE DCB fixture");
         assert_eq!(dcb.records().len(), 498);
@@ -1790,6 +1903,42 @@ mod tests {
         let lossy_dcb = load_code_dcb_lossy(fixture_path(&["bias", "P1C1_RINEX.DCB"]), None)
             .expect("load lossy CODE DCB");
         assert_eq!(lossy_dcb.value.records().len(), dcb.records().len());
+        for policy in [
+            sidereon_core::bias::BiasReadPolicy::Strict,
+            sidereon_core::bias::BiasReadPolicy::Lenient,
+        ] {
+            let parsed = parse_code_dcb_with_policy(DCB_BYTES, None, policy)
+                .expect("CODE DCB parse under a policy");
+            assert_eq!(parsed.records(), dcb.records());
+            let parsed_lossy = parse_code_dcb_lossy_with_policy(DCB_BYTES, None, policy)
+                .expect("CODE DCB parse under a policy with diagnostics");
+            assert_eq!(parsed_lossy.value.records(), dcb.records());
+            let loaded =
+                load_code_dcb_with_policy(fixture_path(&["bias", "P1C1_RINEX.DCB"]), None, policy)
+                    .expect("load CODE DCB under a policy");
+            assert_eq!(loaded.records(), dcb.records());
+            let loaded_lossy = load_code_dcb_lossy_with_policy(
+                fixture_path(&["bias", "P1C1_RINEX.DCB"]),
+                None,
+                policy,
+            )
+            .expect("load CODE DCB under a policy with diagnostics");
+            assert_eq!(loaded_lossy.value.records(), dcb.records());
+        }
+        // A generated title with an unknown time-system label: strict refuses,
+        // lenient reads the row with no time scale.
+        let unknown = b"# DCB P1-C1 2026-06 XYZ\nG01                           0.626       0.000\n";
+        assert!(parse_code_dcb_with_policy(
+            unknown,
+            None,
+            sidereon_core::bias::BiasReadPolicy::Strict
+        )
+        .is_err());
+        let lenient =
+            parse_code_dcb_with_policy(unknown, None, sidereon_core::bias::BiasReadPolicy::Lenient)
+                .expect("lenient CODE DCB parse");
+        assert_eq!(lenient.records().len(), 1);
+        assert_eq!(lenient.time_scale(), None);
 
         let decoded = decode_crinex(CRINEX_TEXT).expect("decode CRINEX fixture");
         assert!(decoded.contains("RINEX VERSION / TYPE"));
