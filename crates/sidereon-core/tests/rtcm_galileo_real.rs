@@ -63,9 +63,9 @@ fn real_galileo_1046_decodes_and_propagates_against_sp3() {
     let mut raw_messages = Vec::new();
 
     for frame in &frames {
-        let messages = decode_messages(frame);
+        let messages = decode_messages(frame).expect("fixture frame decodes in full");
         assert_eq!(messages.len(), 1, "each fixture frame carries one message");
-        let Message::GalileoInavEphemeris(eph) = messages[0] else {
+        let Message::GalileoInavEphemeris(eph) = &messages[0] else {
             panic!("expected Galileo I/NAV 1046");
         };
         assert_eq!(messages[0].to_frame().expect("re-frame 1046"), *frame);
@@ -73,7 +73,7 @@ fn real_galileo_1046_decodes_and_propagates_against_sp3() {
             eph.sqrt_a > 2_800_000_000 && eph.eccentricity > 0,
             "decoded orbital fields must be non-trivial"
         );
-        raw_messages.push(eph);
+        raw_messages.push(eph.clone());
         records.push(eph.to_broadcast_record().expect("1046 to broadcast record"));
     }
 
@@ -109,7 +109,7 @@ fn real_galileo_1046_decodes_and_propagates_against_sp3() {
         );
     }
 
-    let mut corrupted = raw_messages[0];
+    let mut corrupted = raw_messages[0].clone();
     corrupted.sqrt_a += 50_000_000;
     let bad_record = corrupted
         .to_broadcast_record()

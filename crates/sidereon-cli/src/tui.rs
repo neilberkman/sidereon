@@ -28,7 +28,7 @@ use sidereon::observables::{predict, ObservableEphemerisSource, PredictOptions};
 use sidereon::positioning::{RinexSppOptions, SolveInputs, SolvePolicy};
 use sidereon::rinex::observations::ObsEpochTime;
 use sidereon::rinex::observations::SignalPolicy;
-use sidereon::rtcm::{self, Message, MsmMessage, SsrStreamAssembler};
+use sidereon::rtcm::{self, Message, MsmMessage, RtcmPolicy, SsrStreamAssembler};
 use sidereon::GnssSystem;
 
 use sidereon::{metrics_from_position_covariance, vertical_radius_at};
@@ -114,10 +114,12 @@ pub(crate) fn run_tui(
         driver.is_paused(),
     );
     state.connection_status = driver.status_text();
+    state.stream_health = driver.stream_health_text();
 
     if let Some(frame) = driver.step_forward()? {
         state.apply_frame(&frame);
         state.connection_status = driver.status_text();
+        state.stream_health = driver.stream_health_text();
     }
 
     let mut terminal = TerminalSession::enter()?;
@@ -140,6 +142,7 @@ pub(crate) fn run_tui(
                         driver.toggle_pause();
                         state.set_paused(driver.is_paused());
                         state.connection_status = driver.status_text();
+                        state.stream_health = driver.stream_health_text();
                         last_tick = Instant::now();
                     }
                     KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -148,6 +151,7 @@ pub(crate) fn run_tui(
                         }
                         state.set_speed(driver.speed());
                         state.connection_status = driver.status_text();
+                        state.stream_health = driver.stream_health_text();
                     }
                     KeyCode::Char('-') => {
                         if let TuiDriver::Replay(driver) = &mut driver {
@@ -155,17 +159,20 @@ pub(crate) fn run_tui(
                         }
                         state.set_speed(driver.speed());
                         state.connection_status = driver.status_text();
+                        state.stream_health = driver.stream_health_text();
                     }
                     KeyCode::Right | KeyCode::Down if driver.is_paused() => {
                         if let Some(frame) = driver.step_forward()? {
                             state.apply_frame(&frame);
                             state.connection_status = driver.status_text();
+                            state.stream_health = driver.stream_health_text();
                         }
                     }
                     KeyCode::Left | KeyCode::Up if driver.is_paused() => {
                         if let Some(frame) = driver.step_backward()? {
                             state.apply_frame(&frame);
                             state.connection_status = driver.status_text();
+                            state.stream_health = driver.stream_health_text();
                         }
                     }
                     _ => {}
@@ -179,6 +186,7 @@ pub(crate) fn run_tui(
             for frame in driver.advance(elapsed)? {
                 state.apply_frame(&frame);
                 state.connection_status = driver.status_text();
+                state.stream_health = driver.stream_health_text();
             }
         }
     }
@@ -250,6 +258,13 @@ impl TuiDriver {
         match self {
             Self::Replay(driver) => driver.status_text(),
             Self::Live(driver) => driver.status_text(),
+        }
+    }
+
+    fn stream_health_text(&self) -> String {
+        match self {
+            Self::Replay(_) => String::new(),
+            Self::Live(driver) => driver.stream_health_text(),
         }
     }
 }
@@ -560,6 +575,11 @@ struct LiveDriver {
     reconnect_attempts: usize,
     pending_reconnect_at: Option<SystemTime>,
     total_frames: usize,
+    /// Frames the RTCM reader refused (truncated or malformed bodies, and
+    /// departures from the format), counted rather than dropped.
+    rtcm_errors: usize,
+    /// The most recent refusal, shown in the connection status.
+    last_rtcm_error: Option<String>,
     gga_lat: Option<f64>,
     gga_lon: Option<f64>,
     connect_started: Option<SystemTime>,
@@ -610,12 +630,14 @@ impl LiveDriver {
             source: LiveSourceConfig::Ntrip(input),
             stream: None,
             ntrip_machine: Some(machine),
-            assembler: SsrStreamAssembler::new(),
+            assembler: SsrStreamAssembler::with_policy(RtcmPolicy::Lenient),
             mapper,
             epoch_buffer: Vec::new(),
             reconnect_attempts: 0,
             pending_reconnect_at: None,
             total_frames: 0,
+            rtcm_errors: 0,
+            last_rtcm_error: None,
             gga_lat,
             gga_lon,
             connect_started: None,
@@ -636,12 +658,14 @@ impl LiveDriver {
             source: LiveSourceConfig::Tcp(input),
             stream: None,
             ntrip_machine: None,
-            assembler: SsrStreamAssembler::new(),
+            assembler: SsrStreamAssembler::with_policy(RtcmPolicy::Lenient),
             mapper,
             epoch_buffer: Vec::new(),
             reconnect_attempts: 0,
             pending_reconnect_at: None,
             total_frames: 0,
+            rtcm_errors: 0,
+            last_rtcm_error: None,
             gga_lat: None,
             gga_lon: None,
             connect_started: None,
@@ -666,6 +690,39 @@ impl LiveDriver {
 
     fn status_text(&self) -> String {
         self.status.clone()
+    }
+
+    /// The RTCM stream counters: frames refused, CRC-24Q failures and
+    /// departures from the format read under the lenient policy, with the
+    /// latest refusal. Empty while the stream reads cleanly.
+    fn stream_health_text(&self) -> String {
+        let diagnostics = self.assembler.diagnostics();
+        let crc_failures = diagnostics.crc_failures;
+        let departures = diagnostics.departures.len();
+        if self.rtcm_errors == 0 && crc_failures == 0 && departures == 0 {
+            return String::new();
+        }
+        let mut text = format!(
+            "rtcm errors {} | crc failures {crc_failures} | departures {departures}",
+            self.rtcm_errors
+        );
+        if let Some(error) = &self.last_rtcm_error {
+            text.push_str(&format!(" | last: {error}"));
+        }
+        text
+    }
+
+    /// Queue an MSM message for the epoch solve, or count and keep a refused
+    /// frame's error for the status line.
+    fn absorb_parsed(&mut self, parsed: sidereon_core::Result<Message>) {
+        match parsed {
+            Ok(Message::Msm(message)) => self.epoch_buffer.push(message),
+            Ok(_) => {}
+            Err(error) => {
+                self.rtcm_errors = self.rtcm_errors.saturating_add(1);
+                self.last_rtcm_error = Some(error.to_string());
+            }
+        }
     }
 
     fn maybe_reconnect(&mut self) -> Result<()> {
@@ -764,11 +821,7 @@ impl LiveDriver {
         let mut frames = Vec::new();
         for payload in events {
             for parsed in self.assembler.push(&payload) {
-                match parsed {
-                    Ok(Message::Msm(message)) => self.epoch_buffer.push(message),
-                    Ok(_) => {}
-                    Err(_) => {}
-                }
+                self.absorb_parsed(parsed);
             }
         }
 
@@ -916,9 +969,7 @@ impl LiveDriver {
 
         for payload in events {
             for parsed in self.assembler.push(&payload) {
-                if let Ok(Message::Msm(message)) = parsed {
-                    self.epoch_buffer.push(message)
-                }
+                self.absorb_parsed(parsed);
             }
         }
         let messages = core::mem::take(&mut self.epoch_buffer);
@@ -1056,6 +1107,9 @@ struct TuiState {
     epoch_time: String,
     status: String,
     connection_status: String,
+    /// RTCM stream counters and the latest refusal, empty while the stream
+    /// reads cleanly; rendered beside the connection status.
+    stream_health: String,
     speed: f64,
     paused: bool,
     lat_deg: Option<f64>,
@@ -1086,6 +1140,7 @@ impl TuiState {
             epoch_time: "n/a".to_string(),
             status: "ready".to_string(),
             connection_status: "ready".to_string(),
+            stream_health: String::new(),
             speed,
             paused,
             lat_deg: None,
@@ -1321,6 +1376,15 @@ fn render_solution(frame: &mut Frame, area: Rect, state: &TuiState) {
             Span::styled(
                 state.connection_status.clone(),
                 status_style(&state.connection_status),
+            ),
+            Span::raw(if state.stream_health.is_empty() {
+                ""
+            } else {
+                "  "
+            }),
+            Span::styled(
+                state.stream_health.clone(),
+                Style::default().fg(Color::Yellow),
             ),
         ]),
         Line::from(vec![
@@ -1689,6 +1753,59 @@ mod tests {
             "expected at least one live frame from fixture"
         );
         assert!(seen > 0);
+    }
+
+    /// A CRC-valid frame whose body the reader refuses is counted and shown
+    /// beside the connection status, not dropped; so is a frame whose CRC
+    /// fails, and a departure the lenient live reader reads. The connection
+    /// status itself is unchanged, so its styling is too.
+    #[test]
+    fn live_driver_counts_and_shows_refused_rtcm_frames() {
+        let nav = read_fixture(&["nav", "KMS300DNK_R_20221591000_01H_MN.rnx"]);
+        let mut driver = LiveDriver::from_tcp(
+            &nav,
+            1.0,
+            false,
+            TcpConfigInput {
+                host: "offline".to_string(),
+                port: 0,
+            },
+        )
+        .expect("driver");
+        assert_eq!(driver.stream_health_text(), "");
+        // A 1005 body that ends after its message number.
+        let truncated = rtcm::encode_frame(&[0x3E, 0xD0]).expect("frame");
+        let mut corrupted = rtcm::encode_frame(&[0x4C, 0xEA, 0xBC, 0xD0]).expect("frame");
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0x01;
+        // A 1230 frame with nonzero reserved header bits, read and reported.
+        let reserved =
+            rtcm::encode_frame_with_reserved(&[0x4C, 0xEA, 0xBC, 0xD0], 1).expect("frame");
+        let mut bytes = truncated.clone();
+        bytes.extend_from_slice(&corrupted);
+        bytes.extend_from_slice(&reserved);
+        bytes.extend_from_slice(&truncated);
+        let frames = driver
+            .poll_from_reader(&mut Cursor::new(bytes))
+            .expect("poll");
+        assert!(frames.is_empty());
+        assert_eq!(driver.rtcm_errors, 2);
+        assert_eq!(driver.status_text(), "disconnected");
+        let health = driver.stream_health_text();
+        assert!(health.contains("rtcm errors 2"), "{health}");
+        assert!(health.contains("crc failures 1"), "{health}");
+        assert!(health.contains("departures 1"), "{health}");
+        assert!(health.contains("truncated"), "{health}");
+
+        let mut state = TuiState::new("site.obs", "brdc.rnx", 2, 10.0, true);
+        state.connection_status = "streaming".to_string();
+        state.stream_health = health.clone();
+        let backend = TestBackend::new(200, 40);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        terminal.draw(|frame| render(frame, &state)).expect("draw");
+        let text = buffer_text(terminal.backend());
+        assert!(text.contains("streaming"), "{text}");
+        assert!(text.contains("rtcm errors 2"), "{text}");
     }
 
     struct ScriptedRead {

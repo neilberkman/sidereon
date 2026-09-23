@@ -483,44 +483,38 @@ where
             .map(String::as_str)
             .collect::<Vec<_>>();
 
-        let Some(message_kind) = group_indexes
-            .first()
-            .and_then(|index| messages.get(*index))
-            .map(|message| message.kind)
-        else {
-            continue;
-        };
-
-        let mut by_satellite = BTreeMap::<u8, Vec<&rtcm::MsmSignal>>::new();
-        let mut satellite_cache = BTreeMap::<u8, rtcm::MsmSatellite>::new();
+        // Each signal is read with the MSM type and satellite data of the
+        // message that carries it: an epoch may mix MSM4 and MSM7, whose fine
+        // pseudoranges have different scales and invalid values.
+        let mut by_satellite = BTreeMap::<u8, Vec<RtcmCell<'_>>>::new();
         for message in group_indexes
             .iter()
             .copied()
             .filter_map(|index| messages.get(index))
         {
-            for satellite in &message.satellites {
-                satellite_cache.insert(satellite.id, *satellite);
-            }
             for signal in &message.signals {
+                let Some(satellite) = message
+                    .satellites
+                    .iter()
+                    .find(|satellite| satellite.id == signal.satellite_id)
+                else {
+                    continue;
+                };
                 by_satellite
                     .entry(signal.satellite_id)
                     .or_default()
-                    .push(signal);
+                    .push(RtcmCell {
+                        kind: message.kind,
+                        satellite: *satellite,
+                        signal,
+                    });
             }
         }
 
         let mut observations = Vec::new();
-        for (satellite_id, signals) in by_satellite {
-            let Some(satellite) = satellite_cache.get(&satellite_id) else {
-                continue;
-            };
-            let Some(pseudorange_m) = rtcm_msm_pseudorange_m(
-                system,
-                message_kind,
-                *satellite,
-                &signals,
-                &preferred_codes,
-            ) else {
+        for (satellite_id, cells) in by_satellite {
+            let Some(pseudorange_m) = rtcm_msm_pseudorange_m(system, &cells, &preferred_codes)
+            else {
                 continue;
             };
             if let Some(satellite_id) = msm_satellite_id(system, satellite_id) {
@@ -571,49 +565,62 @@ where
     Ok(out)
 }
 
-fn rtcm_msm_pseudorange_m(
-    system: GnssSystem,
+/// One MSM signal cell with the MSM type and satellite data of its message.
+#[derive(Clone, Copy)]
+struct RtcmCell<'a> {
     kind: MsmKind,
     satellite: rtcm::MsmSatellite,
-    signals: &[&rtcm::MsmSignal],
+    signal: &'a rtcm::MsmSignal,
+}
+
+/// The pseudorange of the selected cell, or `None` when its rough range or its
+/// fine pseudorange is the field's invalid value (DF397 255; DF400 `-2^14` in
+/// MSM4, DF405 `-2^19` in MSM7), as RTKLIB `decode_msm4` and `decode_msm7`
+/// leave such a pseudorange unset. A whole-millisecond rough range of 0 also
+/// gives `None`: RTKLIB `decode_msm4`..`decode_msm7` leave the satellite range
+/// at zero, add no modulo-1-ms remainder to it, and `save_msm_obs` stores a
+/// pseudorange only when that range is nonzero.
+fn rtcm_msm_pseudorange_m(
+    system: GnssSystem,
+    cells: &[RtcmCell<'_>],
     preferred_codes: &[&str],
 ) -> Option<f64> {
-    if satellite.rough_range_ms == 255 {
+    let cell = select_rtcm_signal(system, cells, preferred_codes)?;
+    let satellite = cell.satellite;
+    if satellite.rough_range_ms == rtcm::MSM_ROUGH_RANGE_INVALID || satellite.rough_range_ms == 0 {
         return None;
     }
     let rough_ms =
         f64::from(satellite.rough_range_ms) + f64::from(satellite.rough_range_mod1) / 1024.0;
-
-    if let Some(signal) = select_rtcm_signal(system, signals, preferred_codes) {
-        let fine_ms = match kind {
-            MsmKind::Msm4 => {
-                if signal.fine_pseudorange == -16_384 {
-                    f64::NAN
-                } else {
-                    f64::from(signal.fine_pseudorange) / 2_f64.powi(24)
-                }
+    let fine = cell.signal.fine_pseudorange;
+    let fine_ms = match cell.kind {
+        MsmKind::Msm4 => {
+            if fine == rtcm::MSM4_FINE_PSEUDORANGE_INVALID {
+                return None;
             }
-            MsmKind::Msm7 => f64::from(signal.fine_pseudorange) / 2_f64.powi(29),
-        };
-        if fine_ms.is_finite() {
-            return Some((rough_ms + fine_ms) * 1.0e-3 * C_M_S);
+            f64::from(fine) / 2_f64.powi(24)
         }
-    }
-
-    None
+        MsmKind::Msm7 => {
+            if fine == rtcm::MSM7_FINE_PSEUDORANGE_INVALID {
+                return None;
+            }
+            f64::from(fine) / 2_f64.powi(29)
+        }
+    };
+    Some((rough_ms + fine_ms) * 1.0e-3 * C_M_S)
 }
 
 fn select_rtcm_signal<'a>(
     system: GnssSystem,
-    signals: &'a [&'a rtcm::MsmSignal],
-    preferred_codes: &[&'a str],
-) -> Option<&'a rtcm::MsmSignal> {
-    if signals.is_empty() {
+    cells: &[RtcmCell<'a>],
+    preferred_codes: &[&str],
+) -> Option<RtcmCell<'a>> {
+    if cells.is_empty() {
         return None;
     }
 
     if preferred_codes.is_empty() {
-        return signals.iter().copied().next();
+        return cells.first().copied();
     }
 
     preferred_codes
@@ -623,14 +630,14 @@ fn select_rtcm_signal<'a>(
                 .strip_prefix('C')
                 .or_else(|| requested.strip_prefix('L'))
                 .unwrap_or(requested);
-            signals.iter().copied().find(|signal| {
-                let Some(code) = rtcm::msm_signal_rinex_code(system, signal.signal_id) else {
+            cells.iter().copied().find(|cell| {
+                let Some(code) = rtcm::msm_signal_rinex_code(system, cell.signal.signal_id) else {
                     return false;
                 };
                 code == *requested || code == normalized
             })
         })
-        .or_else(|| signals.iter().copied().next())
+        .or_else(|| cells.first().copied())
 }
 
 /// Assemble every non-event RINEX observation epoch with at least one selected
@@ -857,6 +864,7 @@ mod tests {
                 divergence_free_smoothing: false,
                 smoothing_interval: 0,
             },
+            signal_mask: 0xC000_0000,
             satellites: vec![MsmSatellite {
                 id: 1,
                 rough_range_ms: 100,
@@ -886,6 +894,7 @@ mod tests {
                     fine_phase_range_rate: None,
                 },
             ],
+            trailing_bits: Vec::new(),
         }]
     }
 
@@ -917,6 +926,94 @@ mod tests {
             epoch.inputs.observations[0].pseudorange_m as i64,
             30_129_142
         );
+    }
+
+    fn single_signal_msm(kind: MsmKind, satellite_id: u8, fine_pseudorange: i32) -> MsmMessage {
+        let (message_number, extended_info, fine_phase_range_rate) = match kind {
+            MsmKind::Msm4 => (1074, None, None),
+            MsmKind::Msm7 => (1077, Some(0), Some(0)),
+        };
+        let mut message = synthetic_rtcm_messages().remove(0);
+        message.message_number = message_number;
+        message.kind = kind;
+        message.signal_mask = 1 << (32 - 2);
+        message.satellites[0].id = satellite_id;
+        message.satellites[0].extended_info = extended_info;
+        message.signals = vec![MsmSignal {
+            satellite_id,
+            signal_id: 2,
+            fine_pseudorange,
+            lock_time_indicator: 0,
+            half_cycle_ambiguity: false,
+            cnr: 0,
+            fine_phase_range: 0,
+            fine_phase_range_rate,
+        }];
+        message
+    }
+
+    fn solve_inputs(messages: &[MsmMessage]) -> Vec<RtcmSppEpochInputs> {
+        let options = RinexSppOptions::new(SignalPolicy::default_for(3.03).expect("policy"));
+        spp_inputs_from_rtcm_msm(messages, &NoCorrections, &options, |_system, _raw| {
+            Some((
+                1_234_567.0,
+                ObsEpochTime {
+                    year: 2026,
+                    month: 7,
+                    day: 7,
+                    hour: 0,
+                    minute: 0,
+                    second: 0.0,
+                },
+            ))
+        })
+        .expect("convert")
+    }
+
+    /// An MSM7 fine pseudorange of `-2^19` (DF405) is the invalid value, as
+    /// RTKLIB `decode_msm7` tests it, and yields no pseudorange. It was read as
+    /// a range about 293 km short of the rough range.
+    #[test]
+    fn msm7_invalid_fine_pseudorange_yields_no_observation() {
+        let invalid =
+            single_signal_msm(MsmKind::Msm7, 1, crate::rtcm::MSM7_FINE_PSEUDORANGE_INVALID);
+        assert!(solve_inputs(&[invalid]).is_empty());
+        let valid = single_signal_msm(MsmKind::Msm7, 1, 0);
+        assert_eq!(solve_inputs(&[valid])[0].inputs.observations.len(), 1);
+    }
+
+    /// A rough range of 0 whole milliseconds gives no pseudorange, as RTKLIB
+    /// `save_msm_obs` stores none while the satellite range is zero.
+    #[test]
+    fn msm_zero_rough_range_yields_no_observation() {
+        let mut zero = single_signal_msm(MsmKind::Msm7, 1, 0);
+        zero.satellites[0].rough_range_ms = 0;
+        assert!(solve_inputs(&[zero]).is_empty());
+    }
+
+    /// Each signal is scaled by the MSM type of the message that carries it.
+    /// An epoch whose first message was MSM4 read an MSM7 fine pseudorange at
+    /// the MSM4 scale, 2^5 times too large.
+    #[test]
+    fn mixed_msm4_and_msm7_epoch_scales_each_signal_by_its_own_message() {
+        // The same raw value, 2^13, is 2^-11 ms at the MSM4 scale (DF400,
+        // 2^-24 ms) and 2^-16 ms at the MSM7 scale (DF405, 2^-29 ms).
+        let msm4 = single_signal_msm(MsmKind::Msm4, 1, 1 << 13);
+        let msm7 = single_signal_msm(MsmKind::Msm7, 2, 1 << 13);
+        let inputs = solve_inputs(&[msm4, msm7]);
+        assert_eq!(inputs.len(), 1);
+        let observations = &inputs[0].inputs.observations;
+        assert_eq!(observations.len(), 2);
+        let rough_ms = 100.0 + 512.0 / 1024.0;
+        for (observation, fine_ms) in observations.iter().zip([2_f64.powi(-11), 2_f64.powi(-16)]) {
+            let expected = (rough_ms + fine_ms) * 1.0e-3 * C_M_S;
+            assert!(
+                (observation.pseudorange_m - expected).abs() < 1.0e-6,
+                "{} {} vs {expected}",
+                observation.satellite_id,
+                observation.pseudorange_m
+            );
+        }
     }
 
     /// SBAS MSM number `n` is broadcast PRN `119 + n` (RTKLIB `decode_msm7`),

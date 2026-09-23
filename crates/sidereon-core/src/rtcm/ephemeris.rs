@@ -23,8 +23,8 @@ use crate::rinex_nav::{
     BroadcastRecord, NavMessage, StatedNavFields,
 };
 
-use super::bits::{BitReader, BitWriter};
-use super::DecodeResult;
+use super::bits::{BitReader, FieldWriter};
+use super::{decode_body, write_trailing, DecodeContext, DecodeResult, RtcmDeparture, RtcmPolicy};
 
 const SEMICIRCLE_TO_RAD: f64 = core::f64::consts::PI;
 const GALILEO_WEEK_OFFSET_TO_GPS: u32 = 1024;
@@ -157,7 +157,7 @@ fn raw_health(healthy: bool) -> f64 {
 /// Angular quantities are in semicircles (scale noted per field), harmonic
 /// correction terms in radians, distances in meters, and clock terms in
 /// seconds, each recovered by multiplying the raw integer by its scale factor.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GpsEphemeris {
     /// GPS satellite PRN (DF009).
     pub satellite_id: u8,
@@ -219,6 +219,16 @@ pub struct GpsEphemeris {
     pub l2_p_data_flag: bool,
     /// Fit-interval flag (DF137).
     pub fit_interval: bool,
+    /// Every body bit after the last field, the zeros that align the body to a
+    /// byte included, kept whenever those bits are anything other than fewer
+    /// than eight zeros: read under [`RtcmPolicy::Lenient`] and written back
+    /// after the last field by `encode_with_policy` under that policy, so the
+    /// body re-encodes byte for byte. Empty when the bits after the last field
+    /// are fewer than eight zeros, for every body read under
+    /// [`RtcmPolicy::Strict`], and for a message built by hand; `encode`
+    /// refuses a nonempty value. A tail set by hand is zero-padded to the byte
+    /// when written and reads back with that padding.
+    pub trailing_bits: Vec<bool>,
 }
 
 impl GpsEphemeris {
@@ -247,11 +257,13 @@ impl GpsEphemeris {
 
     /// Decode a message 1019 body (without the transport frame).
     pub fn decode(body: &[u8]) -> Result<Self> {
-        Self::decode_inner(body).map_err(Into::into)
+        decode_body(body, &mut DecodeContext::new(RtcmPolicy::Strict), |r, _| {
+            Self::read(r)
+        })
+        .map_err(Into::into)
     }
 
-    pub(crate) fn decode_inner(body: &[u8]) -> DecodeResult<Self> {
-        let mut r = BitReader::new(body);
+    pub(crate) fn read(r: &mut BitReader<'_>) -> DecodeResult<Self> {
         let message_number = r.u(12)? as u16;
         if message_number != 1019 {
             return Err(Error::Parse(format!(
@@ -290,6 +302,7 @@ impl GpsEphemeris {
             sv_health: r.u(6)? as u8,
             l2_p_data_flag: r.flag()?,
             fit_interval: r.flag()?,
+            trailing_bits: Vec::new(),
         })
     }
 
@@ -299,42 +312,54 @@ impl GpsEphemeris {
     ///
     /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite.
+    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// other value is wider than its field: an unsigned field of `n` bits holds
+    /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_policy(RtcmPolicy::Strict)
+            .map(|(body, _)| body)
+    }
+
+    /// Encode this body under `policy`. Under [`RtcmPolicy::Lenient`] nonempty
+    /// `trailing_bits` are written after the last field and reported as an
+    /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
+    /// under both policies.
+    pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         raw_satellite_field(self.satellite_id, 6, "GPS PRN", "1019")?;
-        let mut w = BitWriter::new();
-        w.push_u(1019, 12);
-        w.push_u(u64::from(self.satellite_id), 6);
-        w.push_u(u64::from(self.week_number), 10);
-        w.push_u(u64::from(self.sv_accuracy), 4);
-        w.push_u(u64::from(self.code_on_l2), 2);
-        w.push_i(i64::from(self.idot), 14);
-        w.push_u(u64::from(self.iode), 8);
-        w.push_u(u64::from(self.t_oc), 16);
-        w.push_i(i64::from(self.a_f2), 8);
-        w.push_i(i64::from(self.a_f1), 16);
-        w.push_i(i64::from(self.a_f0), 22);
-        w.push_u(u64::from(self.iodc), 10);
-        w.push_i(i64::from(self.c_rs), 16);
-        w.push_i(i64::from(self.delta_n), 16);
-        w.push_i(self.m0, 32);
-        w.push_i(i64::from(self.c_uc), 16);
-        w.push_u(self.eccentricity, 32);
-        w.push_i(i64::from(self.c_us), 16);
-        w.push_u(self.sqrt_a, 32);
-        w.push_u(u64::from(self.t_oe), 16);
-        w.push_i(i64::from(self.c_ic), 16);
-        w.push_i(self.omega0, 32);
-        w.push_i(i64::from(self.c_is), 16);
-        w.push_i(self.i0, 32);
-        w.push_i(i64::from(self.c_rc), 16);
-        w.push_i(self.omega, 32);
-        w.push_i(i64::from(self.omega_dot), 24);
-        w.push_i(i64::from(self.t_gd), 8);
-        w.push_u(u64::from(self.sv_health), 6);
-        w.push_flag(self.l2_p_data_flag);
-        w.push_flag(self.fit_interval);
-        Ok(w.into_bytes())
+        let mut w = FieldWriter::new(1019);
+        w.u("message number", 1019, 12)?;
+        w.u("satellite_id", u64::from(self.satellite_id), 6)?;
+        w.u("week_number", u64::from(self.week_number), 10)?;
+        w.u("sv_accuracy", u64::from(self.sv_accuracy), 4)?;
+        w.u("code_on_l2", u64::from(self.code_on_l2), 2)?;
+        w.i("idot", i64::from(self.idot), 14)?;
+        w.u("iode", u64::from(self.iode), 8)?;
+        w.u("t_oc", u64::from(self.t_oc), 16)?;
+        w.i("a_f2", i64::from(self.a_f2), 8)?;
+        w.i("a_f1", i64::from(self.a_f1), 16)?;
+        w.i("a_f0", i64::from(self.a_f0), 22)?;
+        w.u("iodc", u64::from(self.iodc), 10)?;
+        w.i("c_rs", i64::from(self.c_rs), 16)?;
+        w.i("delta_n", i64::from(self.delta_n), 16)?;
+        w.i("m0", self.m0, 32)?;
+        w.i("c_uc", i64::from(self.c_uc), 16)?;
+        w.u("eccentricity", self.eccentricity, 32)?;
+        w.i("c_us", i64::from(self.c_us), 16)?;
+        w.u("sqrt_a", self.sqrt_a, 32)?;
+        w.u("t_oe", u64::from(self.t_oe), 16)?;
+        w.i("c_ic", i64::from(self.c_ic), 16)?;
+        w.i("omega0", self.omega0, 32)?;
+        w.i("c_is", i64::from(self.c_is), 16)?;
+        w.i("i0", self.i0, 32)?;
+        w.i("c_rc", i64::from(self.c_rc), 16)?;
+        w.i("omega", self.omega, 32)?;
+        w.i("omega_dot", i64::from(self.omega_dot), 24)?;
+        w.i("t_gd", i64::from(self.t_gd), 8)?;
+        w.u("sv_health", u64::from(self.sv_health), 6)?;
+        w.flag(self.l2_p_data_flag);
+        w.flag(self.fit_interval);
+        let departures = write_trailing(&mut w, &self.trailing_bits, policy)?;
+        Ok((w.into_bytes(), departures))
     }
 
     /// Convert this decoded RTCM ephemeris to the broadcast record consumed by
@@ -423,7 +448,7 @@ impl GpsEphemeris {
 }
 
 /// A decoded Galileo F/NAV broadcast ephemeris (message 1045).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GalileoFnavEphemeris {
     /// Galileo SVID, decoded from the six-bit satellite field. [`Self::satellite`]
     /// validates it against the Galileo PRN range before creating a
@@ -507,6 +532,16 @@ pub struct GalileoFnavEphemeris {
     /// Seven-bit reserved tail retained by [`Self::encode`] for exact body
     /// round trips; it is not used in broadcast conversion.
     pub reserved: u8,
+    /// Every body bit after the last field, the zeros that align the body to a
+    /// byte included, kept whenever those bits are anything other than fewer
+    /// than eight zeros: read under [`RtcmPolicy::Lenient`] and written back
+    /// after the last field by `encode_with_policy` under that policy, so the
+    /// body re-encodes byte for byte. Empty when the bits after the last field
+    /// are fewer than eight zeros, for every body read under
+    /// [`RtcmPolicy::Strict`], and for a message built by hand; `encode`
+    /// refuses a nonempty value. A tail set by hand is zero-padded to the byte
+    /// when written and reads back with that padding.
+    pub trailing_bits: Vec<bool>,
 }
 
 impl GalileoFnavEphemeris {
@@ -530,11 +565,13 @@ impl GalileoFnavEphemeris {
     /// is a parse error, and a body that ends before the fields are complete is
     /// reported as an input error.
     pub fn decode(body: &[u8]) -> Result<Self> {
-        Self::decode_inner(body).map_err(Into::into)
+        decode_body(body, &mut DecodeContext::new(RtcmPolicy::Strict), |r, _| {
+            Self::read(r)
+        })
+        .map_err(Into::into)
     }
 
-    pub(crate) fn decode_inner(body: &[u8]) -> DecodeResult<Self> {
-        let mut r = BitReader::new(body);
+    pub(crate) fn read(r: &mut BitReader<'_>) -> DecodeResult<Self> {
         let message_number = r.u(12)? as u16;
         if message_number != 1045 {
             return Err(Error::Parse(format!(
@@ -571,6 +608,7 @@ impl GalileoFnavEphemeris {
             e5a_signal_health: r.u(2)? as u8,
             e5a_data_validity: r.flag()?,
             reserved: r.u(7)? as u8,
+            trailing_bits: Vec::new(),
         })
     }
 
@@ -583,40 +621,52 @@ impl GalileoFnavEphemeris {
     ///
     /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite.
+    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// other value is wider than its field: an unsigned field of `n` bits holds
+    /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_policy(RtcmPolicy::Strict)
+            .map(|(body, _)| body)
+    }
+
+    /// Encode this body under `policy`. Under [`RtcmPolicy::Lenient`] nonempty
+    /// `trailing_bits` are written after the last field and reported as an
+    /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
+    /// under both policies.
+    pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         raw_satellite_field(self.satellite_id, 6, "Galileo SVID", "1045")?;
-        let mut w = BitWriter::new();
-        w.push_u(1045, 12);
-        w.push_u(u64::from(self.satellite_id), 6);
-        w.push_u(u64::from(self.week_number), 12);
-        w.push_u(u64::from(self.iod_nav), 10);
-        w.push_u(u64::from(self.sisa), 8);
-        w.push_i(i64::from(self.idot), 14);
-        w.push_u(u64::from(self.t_oc), 14);
-        w.push_i(i64::from(self.a_f2), 6);
-        w.push_i(i64::from(self.a_f1), 21);
-        w.push_i(self.a_f0, 31);
-        w.push_i(i64::from(self.c_rs), 16);
-        w.push_i(i64::from(self.delta_n), 16);
-        w.push_i(self.m0, 32);
-        w.push_i(i64::from(self.c_uc), 16);
-        w.push_u(self.eccentricity, 32);
-        w.push_i(i64::from(self.c_us), 16);
-        w.push_u(self.sqrt_a, 32);
-        w.push_u(u64::from(self.t_oe), 14);
-        w.push_i(i64::from(self.c_ic), 16);
-        w.push_i(self.omega0, 32);
-        w.push_i(i64::from(self.c_is), 16);
-        w.push_i(self.i0, 32);
-        w.push_i(i64::from(self.c_rc), 16);
-        w.push_i(self.omega, 32);
-        w.push_i(i64::from(self.omega_dot), 24);
-        w.push_i(i64::from(self.bgd_e5a_e1), 10);
-        w.push_u(u64::from(self.e5a_signal_health), 2);
-        w.push_flag(self.e5a_data_validity);
-        w.push_u(u64::from(self.reserved), 7);
-        Ok(w.into_bytes())
+        let mut w = FieldWriter::new(1045);
+        w.u("message number", 1045, 12)?;
+        w.u("satellite_id", u64::from(self.satellite_id), 6)?;
+        w.u("week_number", u64::from(self.week_number), 12)?;
+        w.u("iod_nav", u64::from(self.iod_nav), 10)?;
+        w.u("sisa", u64::from(self.sisa), 8)?;
+        w.i("idot", i64::from(self.idot), 14)?;
+        w.u("t_oc", u64::from(self.t_oc), 14)?;
+        w.i("a_f2", i64::from(self.a_f2), 6)?;
+        w.i("a_f1", i64::from(self.a_f1), 21)?;
+        w.i("a_f0", self.a_f0, 31)?;
+        w.i("c_rs", i64::from(self.c_rs), 16)?;
+        w.i("delta_n", i64::from(self.delta_n), 16)?;
+        w.i("m0", self.m0, 32)?;
+        w.i("c_uc", i64::from(self.c_uc), 16)?;
+        w.u("eccentricity", self.eccentricity, 32)?;
+        w.i("c_us", i64::from(self.c_us), 16)?;
+        w.u("sqrt_a", self.sqrt_a, 32)?;
+        w.u("t_oe", u64::from(self.t_oe), 14)?;
+        w.i("c_ic", i64::from(self.c_ic), 16)?;
+        w.i("omega0", self.omega0, 32)?;
+        w.i("c_is", i64::from(self.c_is), 16)?;
+        w.i("i0", self.i0, 32)?;
+        w.i("c_rc", i64::from(self.c_rc), 16)?;
+        w.i("omega", self.omega, 32)?;
+        w.i("omega_dot", i64::from(self.omega_dot), 24)?;
+        w.i("bgd_e5a_e1", i64::from(self.bgd_e5a_e1), 10)?;
+        w.u("e5a_signal_health", u64::from(self.e5a_signal_health), 2)?;
+        w.flag(self.e5a_data_validity);
+        w.u("reserved", u64::from(self.reserved), 7)?;
+        let departures = write_trailing(&mut w, &self.trailing_bits, policy)?;
+        Ok((w.into_bytes(), departures))
     }
 
     /// Convert this raw F/NAV message into the Galileo broadcast record used by
@@ -661,7 +711,7 @@ impl GalileoFnavEphemeris {
 }
 
 /// A decoded Galileo I/NAV broadcast ephemeris (message 1046).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GalileoInavEphemeris {
     /// Galileo SVID, decoded from the six-bit satellite field. [`Self::satellite`]
     /// validates it against the Galileo PRN range before creating a
@@ -754,6 +804,16 @@ pub struct GalileoInavEphemeris {
     /// Two-bit reserved tail retained by [`Self::encode`] for exact body round
     /// trips; it is not used in broadcast conversion.
     pub reserved: u8,
+    /// Every body bit after the last field, the zeros that align the body to a
+    /// byte included, kept whenever those bits are anything other than fewer
+    /// than eight zeros: read under [`RtcmPolicy::Lenient`] and written back
+    /// after the last field by `encode_with_policy` under that policy, so the
+    /// body re-encodes byte for byte. Empty when the bits after the last field
+    /// are fewer than eight zeros, for every body read under
+    /// [`RtcmPolicy::Strict`], and for a message built by hand; `encode`
+    /// refuses a nonempty value. A tail set by hand is zero-padded to the byte
+    /// when written and reads back with that padding.
+    pub trailing_bits: Vec<bool>,
 }
 
 impl GalileoInavEphemeris {
@@ -777,11 +837,13 @@ impl GalileoInavEphemeris {
     /// is a parse error, and a body that ends before the fields are complete is
     /// reported as an input error.
     pub fn decode(body: &[u8]) -> Result<Self> {
-        Self::decode_inner(body).map_err(Into::into)
+        decode_body(body, &mut DecodeContext::new(RtcmPolicy::Strict), |r, _| {
+            Self::read(r)
+        })
+        .map_err(Into::into)
     }
 
-    pub(crate) fn decode_inner(body: &[u8]) -> DecodeResult<Self> {
-        let mut r = BitReader::new(body);
+    pub(crate) fn read(r: &mut BitReader<'_>) -> DecodeResult<Self> {
         let message_number = r.u(12)? as u16;
         if message_number != 1046 {
             return Err(Error::Parse(format!(
@@ -821,6 +883,7 @@ impl GalileoInavEphemeris {
             e1b_signal_health: r.u(2)? as u8,
             e1b_data_validity: r.flag()?,
             reserved: r.u(2)? as u8,
+            trailing_bits: Vec::new(),
         })
     }
 
@@ -833,43 +896,55 @@ impl GalileoInavEphemeris {
     ///
     /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite.
+    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// other value is wider than its field: an unsigned field of `n` bits holds
+    /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_policy(RtcmPolicy::Strict)
+            .map(|(body, _)| body)
+    }
+
+    /// Encode this body under `policy`. Under [`RtcmPolicy::Lenient`] nonempty
+    /// `trailing_bits` are written after the last field and reported as an
+    /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
+    /// under both policies.
+    pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         raw_satellite_field(self.satellite_id, 6, "Galileo SVID", "1046")?;
-        let mut w = BitWriter::new();
-        w.push_u(1046, 12);
-        w.push_u(u64::from(self.satellite_id), 6);
-        w.push_u(u64::from(self.week_number), 12);
-        w.push_u(u64::from(self.iod_nav), 10);
-        w.push_u(u64::from(self.sisa_index), 8);
-        w.push_i(i64::from(self.idot), 14);
-        w.push_u(u64::from(self.t_oc), 14);
-        w.push_i(i64::from(self.a_f2), 6);
-        w.push_i(i64::from(self.a_f1), 21);
-        w.push_i(self.a_f0, 31);
-        w.push_i(i64::from(self.c_rs), 16);
-        w.push_i(i64::from(self.delta_n), 16);
-        w.push_i(self.m0, 32);
-        w.push_i(i64::from(self.c_uc), 16);
-        w.push_u(self.eccentricity, 32);
-        w.push_i(i64::from(self.c_us), 16);
-        w.push_u(self.sqrt_a, 32);
-        w.push_u(u64::from(self.t_oe), 14);
-        w.push_i(i64::from(self.c_ic), 16);
-        w.push_i(self.omega0, 32);
-        w.push_i(i64::from(self.c_is), 16);
-        w.push_i(self.i0, 32);
-        w.push_i(i64::from(self.c_rc), 16);
-        w.push_i(self.omega, 32);
-        w.push_i(i64::from(self.omega_dot), 24);
-        w.push_i(i64::from(self.bgd_e5a_e1), 10);
-        w.push_i(i64::from(self.bgd_e5b_e1), 10);
-        w.push_u(u64::from(self.e5b_signal_health), 2);
-        w.push_flag(self.e5b_data_validity);
-        w.push_u(u64::from(self.e1b_signal_health), 2);
-        w.push_flag(self.e1b_data_validity);
-        w.push_u(u64::from(self.reserved), 2);
-        Ok(w.into_bytes())
+        let mut w = FieldWriter::new(1046);
+        w.u("message number", 1046, 12)?;
+        w.u("satellite_id", u64::from(self.satellite_id), 6)?;
+        w.u("week_number", u64::from(self.week_number), 12)?;
+        w.u("iod_nav", u64::from(self.iod_nav), 10)?;
+        w.u("sisa_index", u64::from(self.sisa_index), 8)?;
+        w.i("idot", i64::from(self.idot), 14)?;
+        w.u("t_oc", u64::from(self.t_oc), 14)?;
+        w.i("a_f2", i64::from(self.a_f2), 6)?;
+        w.i("a_f1", i64::from(self.a_f1), 21)?;
+        w.i("a_f0", self.a_f0, 31)?;
+        w.i("c_rs", i64::from(self.c_rs), 16)?;
+        w.i("delta_n", i64::from(self.delta_n), 16)?;
+        w.i("m0", self.m0, 32)?;
+        w.i("c_uc", i64::from(self.c_uc), 16)?;
+        w.u("eccentricity", self.eccentricity, 32)?;
+        w.i("c_us", i64::from(self.c_us), 16)?;
+        w.u("sqrt_a", self.sqrt_a, 32)?;
+        w.u("t_oe", u64::from(self.t_oe), 14)?;
+        w.i("c_ic", i64::from(self.c_ic), 16)?;
+        w.i("omega0", self.omega0, 32)?;
+        w.i("c_is", i64::from(self.c_is), 16)?;
+        w.i("i0", self.i0, 32)?;
+        w.i("c_rc", i64::from(self.c_rc), 16)?;
+        w.i("omega", self.omega, 32)?;
+        w.i("omega_dot", i64::from(self.omega_dot), 24)?;
+        w.i("bgd_e5a_e1", i64::from(self.bgd_e5a_e1), 10)?;
+        w.i("bgd_e5b_e1", i64::from(self.bgd_e5b_e1), 10)?;
+        w.u("e5b_signal_health", u64::from(self.e5b_signal_health), 2)?;
+        w.flag(self.e5b_data_validity);
+        w.u("e1b_signal_health", u64::from(self.e1b_signal_health), 2)?;
+        w.flag(self.e1b_data_validity);
+        w.u("reserved", u64::from(self.reserved), 2)?;
+        let departures = write_trailing(&mut w, &self.trailing_bits, policy)?;
+        Ok((w.into_bytes(), departures))
     }
 
     /// Convert this raw I/NAV message into the Galileo broadcast record used by
@@ -1011,7 +1086,7 @@ fn galileo_to_record(
 }
 
 /// A decoded BeiDou broadcast ephemeris (message 1042).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BeidouEphemeris {
     /// BeiDou satellite number, decoded from the six-bit satellite field.
     /// [`Self::satellite`] validates it against the BeiDou PRN range before
@@ -1095,6 +1170,16 @@ pub struct BeidouEphemeris {
     /// BeiDou health flag; false becomes `0.0` and true becomes `1.0` in the
     /// broadcast record.
     pub sv_health: bool,
+    /// Every body bit after the last field, the zeros that align the body to a
+    /// byte included, kept whenever those bits are anything other than fewer
+    /// than eight zeros: read under [`RtcmPolicy::Lenient`] and written back
+    /// after the last field by `encode_with_policy` under that policy, so the
+    /// body re-encodes byte for byte. Empty when the bits after the last field
+    /// are fewer than eight zeros, for every body read under
+    /// [`RtcmPolicy::Strict`], and for a message built by hand; `encode`
+    /// refuses a nonempty value. A tail set by hand is zero-padded to the byte
+    /// when written and reads back with that padding.
+    pub trailing_bits: Vec<bool>,
 }
 
 impl BeidouEphemeris {
@@ -1121,11 +1206,13 @@ impl BeidouEphemeris {
     /// is a parse error, and a body that ends before the fields are complete is
     /// reported as an input error.
     pub fn decode(body: &[u8]) -> Result<Self> {
-        Self::decode_inner(body).map_err(Into::into)
+        decode_body(body, &mut DecodeContext::new(RtcmPolicy::Strict), |r, _| {
+            Self::read(r)
+        })
+        .map_err(Into::into)
     }
 
-    pub(crate) fn decode_inner(body: &[u8]) -> DecodeResult<Self> {
-        let mut r = BitReader::new(body);
+    pub(crate) fn read(r: &mut BitReader<'_>) -> DecodeResult<Self> {
         let message_number = r.u(12)? as u16;
         if message_number != 1042 {
             return Err(Error::Parse(format!(
@@ -1162,6 +1249,7 @@ impl BeidouEphemeris {
             t_gd1: r.i(10)? as i16,
             t_gd2: r.i(10)? as i16,
             sv_health: r.flag()?,
+            trailing_bits: Vec::new(),
         })
     }
 
@@ -1174,40 +1262,52 @@ impl BeidouEphemeris {
     ///
     /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite.
+    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// other value is wider than its field: an unsigned field of `n` bits holds
+    /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_policy(RtcmPolicy::Strict)
+            .map(|(body, _)| body)
+    }
+
+    /// Encode this body under `policy`. Under [`RtcmPolicy::Lenient`] nonempty
+    /// `trailing_bits` are written after the last field and reported as an
+    /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
+    /// under both policies.
+    pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         raw_satellite_field(self.satellite_id, 6, "BeiDou satellite ID", "1042")?;
-        let mut w = BitWriter::new();
-        w.push_u(1042, 12);
-        w.push_u(u64::from(self.satellite_id), 6);
-        w.push_u(u64::from(self.week_number), 13);
-        w.push_u(u64::from(self.sv_urai), 4);
-        w.push_i(i64::from(self.idot), 14);
-        w.push_u(u64::from(self.aode), 5);
-        w.push_u(u64::from(self.t_oc), 17);
-        w.push_i(i64::from(self.a_f2), 11);
-        w.push_i(i64::from(self.a_f1), 22);
-        w.push_i(i64::from(self.a_f0), 24);
-        w.push_u(u64::from(self.aodc), 5);
-        w.push_i(i64::from(self.c_rs), 18);
-        w.push_i(i64::from(self.delta_n), 16);
-        w.push_i(self.m0, 32);
-        w.push_i(i64::from(self.c_uc), 18);
-        w.push_u(self.eccentricity, 32);
-        w.push_i(i64::from(self.c_us), 18);
-        w.push_u(self.sqrt_a, 32);
-        w.push_u(u64::from(self.t_oe), 17);
-        w.push_i(i64::from(self.c_ic), 18);
-        w.push_i(self.omega0, 32);
-        w.push_i(i64::from(self.c_is), 18);
-        w.push_i(self.i0, 32);
-        w.push_i(i64::from(self.c_rc), 18);
-        w.push_i(self.omega, 32);
-        w.push_i(i64::from(self.omega_dot), 24);
-        w.push_i(i64::from(self.t_gd1), 10);
-        w.push_i(i64::from(self.t_gd2), 10);
-        w.push_flag(self.sv_health);
-        Ok(w.into_bytes())
+        let mut w = FieldWriter::new(1042);
+        w.u("message number", 1042, 12)?;
+        w.u("satellite_id", u64::from(self.satellite_id), 6)?;
+        w.u("week_number", u64::from(self.week_number), 13)?;
+        w.u("sv_urai", u64::from(self.sv_urai), 4)?;
+        w.i("idot", i64::from(self.idot), 14)?;
+        w.u("aode", u64::from(self.aode), 5)?;
+        w.u("t_oc", u64::from(self.t_oc), 17)?;
+        w.i("a_f2", i64::from(self.a_f2), 11)?;
+        w.i("a_f1", i64::from(self.a_f1), 22)?;
+        w.i("a_f0", i64::from(self.a_f0), 24)?;
+        w.u("aodc", u64::from(self.aodc), 5)?;
+        w.i("c_rs", i64::from(self.c_rs), 18)?;
+        w.i("delta_n", i64::from(self.delta_n), 16)?;
+        w.i("m0", self.m0, 32)?;
+        w.i("c_uc", i64::from(self.c_uc), 18)?;
+        w.u("eccentricity", self.eccentricity, 32)?;
+        w.i("c_us", i64::from(self.c_us), 18)?;
+        w.u("sqrt_a", self.sqrt_a, 32)?;
+        w.u("t_oe", u64::from(self.t_oe), 17)?;
+        w.i("c_ic", i64::from(self.c_ic), 18)?;
+        w.i("omega0", self.omega0, 32)?;
+        w.i("c_is", i64::from(self.c_is), 18)?;
+        w.i("i0", self.i0, 32)?;
+        w.i("c_rc", i64::from(self.c_rc), 18)?;
+        w.i("omega", self.omega, 32)?;
+        w.i("omega_dot", i64::from(self.omega_dot), 24)?;
+        w.i("t_gd1", i64::from(self.t_gd1), 10)?;
+        w.i("t_gd2", i64::from(self.t_gd2), 10)?;
+        w.flag(self.sv_health);
+        let departures = write_trailing(&mut w, &self.trailing_bits, policy)?;
+        Ok((w.into_bytes(), departures))
     }
 
     /// Convert this raw message into the BDT-tagged BeiDou broadcast record
@@ -1279,7 +1379,7 @@ impl BeidouEphemeris {
 }
 
 /// A decoded QZSS broadcast ephemeris (message 1044).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QzssEphemeris {
     /// QZSS satellite number, decoded from the four-bit satellite field.
     /// [`Self::satellite`] validates it against the QZSS PRN range before
@@ -1364,6 +1464,16 @@ pub struct QzssEphemeris {
     /// Fit-interval flag: false becomes two hours and true becomes six hours in
     /// `BroadcastRecord.fit_interval_s`.
     pub fit_interval: bool,
+    /// Every body bit after the last field, the zeros that align the body to a
+    /// byte included, kept whenever those bits are anything other than fewer
+    /// than eight zeros: read under [`RtcmPolicy::Lenient`] and written back
+    /// after the last field by `encode_with_policy` under that policy, so the
+    /// body re-encodes byte for byte. Empty when the bits after the last field
+    /// are fewer than eight zeros, for every body read under
+    /// [`RtcmPolicy::Strict`], and for a message built by hand; `encode`
+    /// refuses a nonempty value. A tail set by hand is zero-padded to the byte
+    /// when written and reads back with that padding.
+    pub trailing_bits: Vec<bool>,
 }
 
 impl QzssEphemeris {
@@ -1390,11 +1500,13 @@ impl QzssEphemeris {
     /// is a parse error, and a body that ends before the fields are complete is
     /// reported as an input error.
     pub fn decode(body: &[u8]) -> Result<Self> {
-        Self::decode_inner(body).map_err(Into::into)
+        decode_body(body, &mut DecodeContext::new(RtcmPolicy::Strict), |r, _| {
+            Self::read(r)
+        })
+        .map_err(Into::into)
     }
 
-    pub(crate) fn decode_inner(body: &[u8]) -> DecodeResult<Self> {
-        let mut r = BitReader::new(body);
+    pub(crate) fn read(r: &mut BitReader<'_>) -> DecodeResult<Self> {
         let message_number = r.u(12)? as u16;
         if message_number != 1044 {
             return Err(Error::Parse(format!(
@@ -1432,6 +1544,7 @@ impl QzssEphemeris {
             t_gd: r.i(8)? as i16,
             iodc: r.u(10)? as u16,
             fit_interval: r.flag()?,
+            trailing_bits: Vec::new(),
         })
     }
 
@@ -1444,41 +1557,53 @@ impl QzssEphemeris {
     ///
     /// [`Error::InvalidInput`] when `satellite_id` does not fit the 4-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite.
+    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// other value is wider than its field: an unsigned field of `n` bits holds
+    /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_policy(RtcmPolicy::Strict)
+            .map(|(body, _)| body)
+    }
+
+    /// Encode this body under `policy`. Under [`RtcmPolicy::Lenient`] nonempty
+    /// `trailing_bits` are written after the last field and reported as an
+    /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
+    /// under both policies.
+    pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         raw_satellite_field(self.satellite_id, 4, "QZSS satellite ID", "1044")?;
-        let mut w = BitWriter::new();
-        w.push_u(1044, 12);
-        w.push_u(u64::from(self.satellite_id), 4);
-        w.push_u(u64::from(self.t_oc), 16);
-        w.push_i(i64::from(self.a_f2), 8);
-        w.push_i(i64::from(self.a_f1), 16);
-        w.push_i(i64::from(self.a_f0), 22);
-        w.push_u(u64::from(self.iode), 8);
-        w.push_i(i64::from(self.c_rs), 16);
-        w.push_i(i64::from(self.delta_n), 16);
-        w.push_i(self.m0, 32);
-        w.push_i(i64::from(self.c_uc), 16);
-        w.push_u(self.eccentricity, 32);
-        w.push_i(i64::from(self.c_us), 16);
-        w.push_u(self.sqrt_a, 32);
-        w.push_u(u64::from(self.t_oe), 16);
-        w.push_i(i64::from(self.c_ic), 16);
-        w.push_i(self.omega0, 32);
-        w.push_i(i64::from(self.c_is), 16);
-        w.push_i(self.i0, 32);
-        w.push_i(i64::from(self.c_rc), 16);
-        w.push_i(self.omega, 32);
-        w.push_i(i64::from(self.omega_dot), 24);
-        w.push_i(i64::from(self.idot), 14);
-        w.push_u(u64::from(self.codes_on_l2), 2);
-        w.push_u(u64::from(self.week_number), 10);
-        w.push_u(u64::from(self.ura), 4);
-        w.push_u(u64::from(self.sv_health), 6);
-        w.push_i(i64::from(self.t_gd), 8);
-        w.push_u(u64::from(self.iodc), 10);
-        w.push_flag(self.fit_interval);
-        Ok(w.into_bytes())
+        let mut w = FieldWriter::new(1044);
+        w.u("message number", 1044, 12)?;
+        w.u("satellite_id", u64::from(self.satellite_id), 4)?;
+        w.u("t_oc", u64::from(self.t_oc), 16)?;
+        w.i("a_f2", i64::from(self.a_f2), 8)?;
+        w.i("a_f1", i64::from(self.a_f1), 16)?;
+        w.i("a_f0", i64::from(self.a_f0), 22)?;
+        w.u("iode", u64::from(self.iode), 8)?;
+        w.i("c_rs", i64::from(self.c_rs), 16)?;
+        w.i("delta_n", i64::from(self.delta_n), 16)?;
+        w.i("m0", self.m0, 32)?;
+        w.i("c_uc", i64::from(self.c_uc), 16)?;
+        w.u("eccentricity", self.eccentricity, 32)?;
+        w.i("c_us", i64::from(self.c_us), 16)?;
+        w.u("sqrt_a", self.sqrt_a, 32)?;
+        w.u("t_oe", u64::from(self.t_oe), 16)?;
+        w.i("c_ic", i64::from(self.c_ic), 16)?;
+        w.i("omega0", self.omega0, 32)?;
+        w.i("c_is", i64::from(self.c_is), 16)?;
+        w.i("i0", self.i0, 32)?;
+        w.i("c_rc", i64::from(self.c_rc), 16)?;
+        w.i("omega", self.omega, 32)?;
+        w.i("omega_dot", i64::from(self.omega_dot), 24)?;
+        w.i("idot", i64::from(self.idot), 14)?;
+        w.u("codes_on_l2", u64::from(self.codes_on_l2), 2)?;
+        w.u("week_number", u64::from(self.week_number), 10)?;
+        w.u("ura", u64::from(self.ura), 4)?;
+        w.u("sv_health", u64::from(self.sv_health), 6)?;
+        w.i("t_gd", i64::from(self.t_gd), 8)?;
+        w.u("iodc", u64::from(self.iodc), 10)?;
+        w.flag(self.fit_interval);
+        let departures = write_trailing(&mut w, &self.trailing_bits, policy)?;
+        Ok((w.into_bytes(), departures))
     }
 
     /// Convert this raw message into the GPST-tagged QZSS L/NAV broadcast record
@@ -1559,7 +1684,7 @@ impl QzssEphemeris {
 /// The orbit position / velocity / acceleration terms use sign-and-magnitude
 /// integers (DF111..DF119). Every field below is the raw transmitted integer;
 /// the noted scale factors recover km, km/s, km/s^2, and seconds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlonassEphemeris {
     /// GLONASS satellite slot number (DF038, 6 bits).
     pub satellite_id: u8,
@@ -1637,9 +1762,59 @@ pub struct GlonassEphemeris {
     pub m_l_n_fifth: bool,
     /// Reserved field DF001 (7 bits), preserved for exact round-trip.
     pub reserved: u8,
+    /// The sign-magnitude fields transmitted as negative zero: sign bit set,
+    /// magnitude zero. Each is read as `0`, as RTKLIB `getbitg` reads it, and
+    /// its bit here (one of the `NEGATIVE_ZERO_*` constants) keeps the sign so
+    /// the body re-encodes as transmitted. Zero for a message built by hand.
+    pub negative_zero: u16,
+    /// Every body bit after the last field, the zeros that align the body to a
+    /// byte included, kept whenever those bits are anything other than fewer
+    /// than eight zeros: read under [`RtcmPolicy::Lenient`] and written back
+    /// after the last field by `encode_with_policy` under that policy, so the
+    /// body re-encodes byte for byte. Empty when the bits after the last field
+    /// are fewer than eight zeros, for every body read under
+    /// [`RtcmPolicy::Strict`], and for a message built by hand; `encode`
+    /// refuses a nonempty value. A tail set by hand is zero-padded to the byte
+    /// when written and reads back with that padding.
+    pub trailing_bits: Vec<bool>,
 }
 
 impl GlonassEphemeris {
+    /// [`Self::negative_zero`] bit for `xn_dot` (DF111).
+    pub const NEGATIVE_ZERO_XN_DOT: u16 = 1 << 0;
+    /// [`Self::negative_zero`] bit for `xn` (DF112).
+    pub const NEGATIVE_ZERO_XN: u16 = 1 << 1;
+    /// [`Self::negative_zero`] bit for `xn_dot_dot` (DF113).
+    pub const NEGATIVE_ZERO_XN_DOT_DOT: u16 = 1 << 2;
+    /// [`Self::negative_zero`] bit for `yn_dot` (DF114).
+    pub const NEGATIVE_ZERO_YN_DOT: u16 = 1 << 3;
+    /// [`Self::negative_zero`] bit for `yn` (DF115).
+    pub const NEGATIVE_ZERO_YN: u16 = 1 << 4;
+    /// [`Self::negative_zero`] bit for `yn_dot_dot` (DF116).
+    pub const NEGATIVE_ZERO_YN_DOT_DOT: u16 = 1 << 5;
+    /// [`Self::negative_zero`] bit for `zn_dot` (DF117).
+    pub const NEGATIVE_ZERO_ZN_DOT: u16 = 1 << 6;
+    /// [`Self::negative_zero`] bit for `zn` (DF118).
+    pub const NEGATIVE_ZERO_ZN: u16 = 1 << 7;
+    /// [`Self::negative_zero`] bit for `zn_dot_dot` (DF119).
+    pub const NEGATIVE_ZERO_ZN_DOT_DOT: u16 = 1 << 8;
+    /// [`Self::negative_zero`] bit for `gamma_n` (DF121).
+    pub const NEGATIVE_ZERO_GAMMA_N: u16 = 1 << 9;
+    /// [`Self::negative_zero`] bit for `tau_n` (DF124).
+    pub const NEGATIVE_ZERO_TAU_N: u16 = 1 << 10;
+    /// [`Self::negative_zero`] bit for `delta_tau_n` (DF125).
+    pub const NEGATIVE_ZERO_DELTA_TAU_N: u16 = 1 << 11;
+    /// [`Self::negative_zero`] bit for `tau_c` (DF133).
+    pub const NEGATIVE_ZERO_TAU_C: u16 = 1 << 12;
+    /// [`Self::negative_zero`] bit for `m_tau_gps` (DF135).
+    pub const NEGATIVE_ZERO_M_TAU_GPS: u16 = 1 << 13;
+    /// Every defined [`Self::negative_zero`] bit.
+    const NEGATIVE_ZERO_FIELDS: u16 = (1 << 14) - 1;
+
+    fn is_negative_zero(&self, field: u16) -> bool {
+        self.negative_zero & field != 0
+    }
+
     /// The satellite identifier for this ephemeris.
     ///
     /// Refuses a slot number that does not fit the six-bit raw field or is not a
@@ -1658,11 +1833,13 @@ impl GlonassEphemeris {
 
     /// Decode a message 1020 body (without the transport frame).
     pub fn decode(body: &[u8]) -> Result<Self> {
-        Self::decode_inner(body).map_err(Into::into)
+        decode_body(body, &mut DecodeContext::new(RtcmPolicy::Strict), |r, _| {
+            Self::read(r)
+        })
+        .map_err(Into::into)
     }
 
-    pub(crate) fn decode_inner(body: &[u8]) -> DecodeResult<Self> {
-        let mut r = BitReader::new(body);
+    pub(crate) fn read(r: &mut BitReader<'_>) -> DecodeResult<Self> {
         let message_number = r.u(12)? as u16;
         if message_number != 1020 {
             return Err(Error::Parse(format!(
@@ -1670,7 +1847,15 @@ impl GlonassEphemeris {
             ))
             .into());
         }
-        Ok(Self {
+        let mut negative_zero = 0u16;
+        let mut ism = |r: &mut BitReader<'_>, bits: usize, field: u16| -> DecodeResult<i64> {
+            let (value, is_negative_zero) = r.ism_signed_zero(bits)?;
+            if is_negative_zero {
+                negative_zero |= field;
+            }
+            Ok(value)
+        };
+        let mut eph = Self {
             satellite_id: r.u(6)? as u8,
             frequency_channel: r.u(5)? as u8,
             almanac_health: r.flag()?,
@@ -1680,21 +1865,21 @@ impl GlonassEphemeris {
             b_n_msb: r.flag()?,
             p2: r.flag()?,
             t_b: r.u(7)? as u8,
-            xn_dot: r.ism(24)? as i32,
-            xn: r.ism(27)? as i32,
-            xn_dot_dot: r.ism(5)? as i8,
-            yn_dot: r.ism(24)? as i32,
-            yn: r.ism(27)? as i32,
-            yn_dot_dot: r.ism(5)? as i8,
-            zn_dot: r.ism(24)? as i32,
-            zn: r.ism(27)? as i32,
-            zn_dot_dot: r.ism(5)? as i8,
+            xn_dot: ism(r, 24, Self::NEGATIVE_ZERO_XN_DOT)? as i32,
+            xn: ism(r, 27, Self::NEGATIVE_ZERO_XN)? as i32,
+            xn_dot_dot: ism(r, 5, Self::NEGATIVE_ZERO_XN_DOT_DOT)? as i8,
+            yn_dot: ism(r, 24, Self::NEGATIVE_ZERO_YN_DOT)? as i32,
+            yn: ism(r, 27, Self::NEGATIVE_ZERO_YN)? as i32,
+            yn_dot_dot: ism(r, 5, Self::NEGATIVE_ZERO_YN_DOT_DOT)? as i8,
+            zn_dot: ism(r, 24, Self::NEGATIVE_ZERO_ZN_DOT)? as i32,
+            zn: ism(r, 27, Self::NEGATIVE_ZERO_ZN)? as i32,
+            zn_dot_dot: ism(r, 5, Self::NEGATIVE_ZERO_ZN_DOT_DOT)? as i8,
             p3: r.flag()?,
-            gamma_n: r.ism(11)? as i16,
+            gamma_n: ism(r, 11, Self::NEGATIVE_ZERO_GAMMA_N)? as i16,
             m_p: r.u(2)? as u8,
             m_l_n_third: r.flag()?,
-            tau_n: r.ism(22)? as i32,
-            delta_tau_n: r.ism(5)? as i8,
+            tau_n: ism(r, 22, Self::NEGATIVE_ZERO_TAU_N)? as i32,
+            delta_tau_n: ism(r, 5, Self::NEGATIVE_ZERO_DELTA_TAU_N)? as i8,
             e_n: r.u(5)? as u8,
             m_p4: r.flag()?,
             m_f_t: r.u(4)? as u8,
@@ -1702,12 +1887,16 @@ impl GlonassEphemeris {
             m_m: r.u(2)? as u8,
             additional_data_available: r.flag()?,
             n_a: r.u(11)? as u16,
-            tau_c: r.ism(32)?,
+            tau_c: ism(r, 32, Self::NEGATIVE_ZERO_TAU_C)?,
             m_n4: r.u(5)? as u8,
-            m_tau_gps: r.ism(22)? as i32,
+            m_tau_gps: ism(r, 22, Self::NEGATIVE_ZERO_M_TAU_GPS)? as i32,
             m_l_n_fifth: r.flag()?,
             reserved: r.u(7)? as u8,
-        })
+            negative_zero: 0,
+            trailing_bits: Vec::new(),
+        };
+        eph.negative_zero = negative_zero;
+        Ok(eph)
     }
 
     /// Encode this GLONASS ephemeris body (without the transport frame).
@@ -1716,47 +1905,173 @@ impl GlonassEphemeris {
     ///
     /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite.
+    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// other value is wider than its field (a sign-magnitude field holds
+    /// `-(2^(n-1) - 1)..=2^(n-1) - 1`), when [`Self::negative_zero`] marks a
+    /// field that holds a nonzero value, or when it sets a bit that names no
+    /// field.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_policy(RtcmPolicy::Strict)
+            .map(|(body, _)| body)
+    }
+
+    /// Encode this body under `policy`. Under [`RtcmPolicy::Lenient`] nonempty
+    /// `trailing_bits` are written after the last field and reported as an
+    /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
+    /// under both policies.
+    pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         raw_satellite_field(self.satellite_id, 6, "GLONASS slot", "1020")?;
-        let mut w = BitWriter::new();
-        w.push_u(1020, 12);
-        w.push_u(u64::from(self.satellite_id), 6);
-        w.push_u(u64::from(self.frequency_channel), 5);
-        w.push_flag(self.almanac_health);
-        w.push_flag(self.almanac_health_availability);
-        w.push_u(u64::from(self.p1), 2);
-        w.push_u(u64::from(self.t_k), 12);
-        w.push_flag(self.b_n_msb);
-        w.push_flag(self.p2);
-        w.push_u(u64::from(self.t_b), 7);
-        w.push_ism(i64::from(self.xn_dot), 24);
-        w.push_ism(i64::from(self.xn), 27);
-        w.push_ism(i64::from(self.xn_dot_dot), 5);
-        w.push_ism(i64::from(self.yn_dot), 24);
-        w.push_ism(i64::from(self.yn), 27);
-        w.push_ism(i64::from(self.yn_dot_dot), 5);
-        w.push_ism(i64::from(self.zn_dot), 24);
-        w.push_ism(i64::from(self.zn), 27);
-        w.push_ism(i64::from(self.zn_dot_dot), 5);
-        w.push_flag(self.p3);
-        w.push_ism(i64::from(self.gamma_n), 11);
-        w.push_u(u64::from(self.m_p), 2);
-        w.push_flag(self.m_l_n_third);
-        w.push_ism(i64::from(self.tau_n), 22);
-        w.push_ism(i64::from(self.delta_tau_n), 5);
-        w.push_u(u64::from(self.e_n), 5);
-        w.push_flag(self.m_p4);
-        w.push_u(u64::from(self.m_f_t), 4);
-        w.push_u(u64::from(self.m_n_t), 11);
-        w.push_u(u64::from(self.m_m), 2);
-        w.push_flag(self.additional_data_available);
-        w.push_u(u64::from(self.n_a), 11);
-        w.push_ism(self.tau_c, 32);
-        w.push_u(u64::from(self.m_n4), 5);
-        w.push_ism(i64::from(self.m_tau_gps), 22);
-        w.push_flag(self.m_l_n_fifth);
-        w.push_u(u64::from(self.reserved), 7);
-        Ok(w.into_bytes())
+        if self.negative_zero & !Self::NEGATIVE_ZERO_FIELDS != 0 {
+            return Err(Error::InvalidInput(format!(
+                "RTCM 1020 negative_zero {:#06x} sets bits that name no sign-magnitude field",
+                self.negative_zero
+            )));
+        }
+        let mut w = FieldWriter::new(1020);
+        w.u("message number", 1020, 12)?;
+        w.u("satellite_id", u64::from(self.satellite_id), 6)?;
+        w.u("frequency_channel", u64::from(self.frequency_channel), 5)?;
+        w.flag(self.almanac_health);
+        w.flag(self.almanac_health_availability);
+        w.u("p1", u64::from(self.p1), 2)?;
+        w.u("t_k", u64::from(self.t_k), 12)?;
+        w.flag(self.b_n_msb);
+        w.flag(self.p2);
+        w.u("t_b", u64::from(self.t_b), 7)?;
+        w.ism(
+            "xn_dot",
+            i64::from(self.xn_dot),
+            24,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_XN_DOT),
+        )?;
+        w.ism(
+            "xn",
+            i64::from(self.xn),
+            27,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_XN),
+        )?;
+        w.ism(
+            "xn_dot_dot",
+            i64::from(self.xn_dot_dot),
+            5,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_XN_DOT_DOT),
+        )?;
+        w.ism(
+            "yn_dot",
+            i64::from(self.yn_dot),
+            24,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_YN_DOT),
+        )?;
+        w.ism(
+            "yn",
+            i64::from(self.yn),
+            27,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_YN),
+        )?;
+        w.ism(
+            "yn_dot_dot",
+            i64::from(self.yn_dot_dot),
+            5,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_YN_DOT_DOT),
+        )?;
+        w.ism(
+            "zn_dot",
+            i64::from(self.zn_dot),
+            24,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_ZN_DOT),
+        )?;
+        w.ism(
+            "zn",
+            i64::from(self.zn),
+            27,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_ZN),
+        )?;
+        w.ism(
+            "zn_dot_dot",
+            i64::from(self.zn_dot_dot),
+            5,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_ZN_DOT_DOT),
+        )?;
+        w.flag(self.p3);
+        w.ism(
+            "gamma_n",
+            i64::from(self.gamma_n),
+            11,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_GAMMA_N),
+        )?;
+        w.u("m_p", u64::from(self.m_p), 2)?;
+        w.flag(self.m_l_n_third);
+        w.ism(
+            "tau_n",
+            i64::from(self.tau_n),
+            22,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_TAU_N),
+        )?;
+        w.ism(
+            "delta_tau_n",
+            i64::from(self.delta_tau_n),
+            5,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_DELTA_TAU_N),
+        )?;
+        w.u("e_n", u64::from(self.e_n), 5)?;
+        w.flag(self.m_p4);
+        w.u("m_f_t", u64::from(self.m_f_t), 4)?;
+        w.u("m_n_t", u64::from(self.m_n_t), 11)?;
+        w.u("m_m", u64::from(self.m_m), 2)?;
+        w.flag(self.additional_data_available);
+        w.u("n_a", u64::from(self.n_a), 11)?;
+        w.ism(
+            "tau_c",
+            self.tau_c,
+            32,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_TAU_C),
+        )?;
+        w.u("m_n4", u64::from(self.m_n4), 5)?;
+        w.ism(
+            "m_tau_gps",
+            i64::from(self.m_tau_gps),
+            22,
+            self.is_negative_zero(Self::NEGATIVE_ZERO_M_TAU_GPS),
+        )?;
+        w.flag(self.m_l_n_fifth);
+        w.u("reserved", u64::from(self.reserved), 7)?;
+        let departures = write_trailing(&mut w, &self.trailing_bits, policy)?;
+        Ok((w.into_bytes(), departures))
+    }
+}
+
+impl super::TrailingBits for GpsEphemeris {
+    fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.trailing_bits
+    }
+}
+
+impl super::TrailingBits for GalileoFnavEphemeris {
+    fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.trailing_bits
+    }
+}
+
+impl super::TrailingBits for GalileoInavEphemeris {
+    fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.trailing_bits
+    }
+}
+
+impl super::TrailingBits for BeidouEphemeris {
+    fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.trailing_bits
+    }
+}
+
+impl super::TrailingBits for QzssEphemeris {
+    fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.trailing_bits
+    }
+}
+
+impl super::TrailingBits for GlonassEphemeris {
+    fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.trailing_bits
     }
 }

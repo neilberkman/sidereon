@@ -942,16 +942,111 @@ pub fn load_rinex_nav(path: impl AsRef<Path>) -> Result<BroadcastEphemeris> {
     parse_rinex_nav(&text)
 }
 
-/// Build an SSR correction store from framed RTCM bytes.
+/// An SSR correction store built from every readable frame of an RTCM byte
+/// stream, with an account of everything that was not read or not applied.
+#[derive(Debug)]
+pub struct SsrRtcmIngest {
+    /// The store holding every correction that was read and applied.
+    pub store: sidereon_core::ssr::SsrCorrectionStore,
+    /// Bytes passed over while resynchronizing, CRC-24Q failures, frames whose
+    /// body did not decode (each with its offset, message number and reason)
+    /// and departures read under the lenient policy.
+    pub diagnostics: sidereon_core::rtcm::StreamDiagnostics,
+    /// Bytes from the last preamble whose declared frame ran past the end of
+    /// the input. They were then scanned as the end of the stream: any whole
+    /// frame among them was read, and every byte outside a frame is also
+    /// counted in `diagnostics.resync_bytes`.
+    pub trailing_partial_frame_len: usize,
+    /// Messages that decoded but that the store refused to ingest.
+    pub ingest_refusals: Vec<SsrIngestRefusal>,
+}
+
+impl SsrRtcmIngest {
+    /// True when every byte was read into a message that was applied, with no
+    /// departure from the format.
+    pub fn is_complete(&self) -> bool {
+        self.diagnostics.is_clean()
+            && self.trailing_partial_frame_len == 0
+            && self.ingest_refusals.is_empty()
+    }
+}
+
+/// A decoded RTCM message the SSR store refused to ingest.
+#[derive(Debug)]
+pub struct SsrIngestRefusal {
+    /// The RTCM message number.
+    pub message_number: u16,
+    /// Why the store refused it.
+    pub error: sidereon_core::Error,
+}
+
+/// Build an SSR correction store from every readable frame of framed RTCM
+/// bytes, reporting what was not read or not applied.
+///
+/// Frames are read under [`sidereon_core::rtcm::RtcmPolicy::Lenient`], so a
+/// frame that departs from the format is read and the departure recorded.
+/// Stray bytes, CRC-24Q failures, frames whose body does not decode, a trailing
+/// partial frame and messages the store refuses are recorded in the result
+/// rather than stopping the read. [`ssr_store_from_rtcm_strict`] refuses all
+/// of them instead.
 pub fn ssr_store_from_rtcm(
+    bytes: &[u8],
+    week: sidereon_core::astro::time::GnssWeekTow,
+) -> SsrRtcmIngest {
+    let mut store = sidereon_core::ssr::SsrCorrectionStore::new();
+    let mut assembler = sidereon_core::rtcm::SsrStreamAssembler::with_policy(
+        sidereon_core::rtcm::RtcmPolicy::Lenient,
+    );
+    let mut ingest_refusals = Vec::new();
+    // A frame that does not decode is recorded in the assembler's
+    // diagnostics as a skipped frame with its reason.
+    let mut decoded = assembler.push(bytes);
+    let trailing_partial_frame_len = assembler.retained_len();
+    decoded.extend(assembler.finish());
+    for message in decoded.into_iter().flatten() {
+        if let Err(error) = store.ingest(&message, week) {
+            ingest_refusals.push(SsrIngestRefusal {
+                message_number: message.message_number(),
+                error,
+            });
+        }
+    }
+    SsrRtcmIngest {
+        store,
+        diagnostics: assembler.diagnostics().clone(),
+        trailing_partial_frame_len,
+        ingest_refusals,
+    }
+}
+
+/// Build an SSR correction store from framed RTCM bytes, refusing anything it
+/// cannot read and apply in full.
+///
+/// Every byte must belong to a CRC-valid frame whose body decodes under
+/// [`sidereon_core::rtcm::RtcmPolicy::Strict`], and the store must ingest every
+/// message. The first frame that fails to decode or ingest is refused with
+/// [`Error::Ssr`], as are bytes outside a frame, a CRC-24Q failure and a
+/// trailing partial frame.
+pub fn ssr_store_from_rtcm_strict(
     bytes: &[u8],
     week: sidereon_core::astro::time::GnssWeekTow,
 ) -> Result<sidereon_core::ssr::SsrCorrectionStore> {
     let mut store = sidereon_core::ssr::SsrCorrectionStore::new();
     let mut assembler = sidereon_core::rtcm::SsrStreamAssembler::new();
-    for decoded in assembler.push(bytes) {
+    let mut decoded = assembler.push(bytes);
+    let trailing = assembler.retained_len();
+    decoded.extend(assembler.finish());
+    for decoded in decoded {
         let message = decoded.map_err(Error::Ssr)?;
         store.ingest(&message, week).map_err(Error::Ssr)?;
+    }
+    let diagnostics = assembler.diagnostics();
+    if diagnostics.resync_bytes > 0 {
+        return Err(Error::Ssr(sidereon_core::Error::Parse(format!(
+            "RTCM input has {} bytes outside CRC-valid frames ({} CRC-24Q failures, \
+             {trailing} bytes from an unfinished frame at the end)",
+            diagnostics.resync_bytes, diagnostics.crc_failures
+        ))));
     }
     Ok(store)
 }
@@ -1970,16 +2065,65 @@ mod tests {
             344_970.0,
         )
         .expect("valid week");
-        let store = ssr_store_from_rtcm(&hex_bytes(REAL_SSRA02IGS0_1060_FRAME_HEX), week)
-            .expect("ingest real SSR frame");
+        let bytes = hex_bytes(REAL_SSRA02IGS0_1060_FRAME_HEX);
+        let ingest = ssr_store_from_rtcm(&bytes, week);
+        assert!(ingest.is_complete(), "{ingest:?}");
+        let strict = ssr_store_from_rtcm_strict(&bytes, week).expect("ingest real SSR frame");
+        for store in [&ingest.store, &strict] {
+            let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).expect("valid satellite");
+            let orbit = store.orbit(sat).expect("G30 orbit correction");
+            let clock = store.clock(sat).expect("G30 clock correction");
+            assert_eq!(orbit.iode, 90);
+            assert!((orbit.radial_m + 0.0807).abs() < 1.0e-12);
+            assert!((orbit.along_m + 0.2484).abs() < 1.0e-12);
+            assert!((orbit.cross_m - 0.1396).abs() < 1.0e-12);
+            assert!((clock.c0_m - 0.0166).abs() < 1.0e-12);
+        }
+    }
+
+    /// The reading variant applies every readable frame and accounts for the
+    /// bytes it passed over; the strict variant refuses them.
+    #[test]
+    fn ssr_store_from_rtcm_reads_what_it_can_and_accounts_for_the_rest() {
+        let week = sidereon_core::astro::time::model::GnssWeekTow::new(
+            sidereon_core::astro::time::model::TimeScale::Gpst,
+            2425,
+            344_970.0,
+        )
+        .expect("valid week");
+        let frame = hex_bytes(REAL_SSRA02IGS0_1060_FRAME_HEX);
+        let mut corrupted = frame.clone();
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0x01;
+        // A 1060 frame whose body ends after its message number.
+        let truncated = sidereon_core::rtcm::encode_frame(&[0x42, 0x40]).expect("frame");
+
+        let mut bytes = vec![0x00];
+        bytes.extend_from_slice(&corrupted);
+        bytes.extend_from_slice(&truncated);
+        bytes.extend_from_slice(&frame);
+        bytes.extend_from_slice(&frame[..frame.len() - 1]);
+
+        let ingest = ssr_store_from_rtcm(&bytes, week);
         let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).expect("valid satellite");
-        let orbit = store.orbit(sat).expect("G30 orbit correction");
-        let clock = store.clock(sat).expect("G30 clock correction");
-        assert_eq!(orbit.iode, 90);
-        assert!((orbit.radial_m + 0.0807).abs() < 1.0e-12);
-        assert!((orbit.along_m + 0.2484).abs() < 1.0e-12);
-        assert!((orbit.cross_m - 0.1396).abs() < 1.0e-12);
-        assert!((clock.c0_m - 0.0166).abs() < 1.0e-12);
+        assert!(
+            ingest.store.orbit(sat).is_some(),
+            "the good frame is applied"
+        );
+        assert!(!ingest.is_complete());
+        assert!(ingest.diagnostics.crc_failures >= 1);
+        assert!(ingest.diagnostics.resync_bytes >= 1 + corrupted.len() + frame.len() - 1);
+        assert_eq!(ingest.diagnostics.skipped_frames.len(), 1);
+        assert_eq!(
+            ingest.diagnostics.skipped_frames[0].message_number,
+            Some(1060)
+        );
+        assert!(ingest.trailing_partial_frame_len >= frame.len() - 1);
+        assert!(ingest.ingest_refusals.is_empty());
+
+        for bytes in [bytes.clone(), frame[..frame.len() - 1].to_vec()] {
+            assert!(ssr_store_from_rtcm_strict(&bytes, week).is_err());
+        }
     }
 
     #[test]
