@@ -145,7 +145,7 @@ pub struct HasClockCorrection {
     ///
     /// `correction_m: Some(_), do_not_use: true` is contradictory: the encoder refuses it, and
     /// [`SsrCorrectionStore::ingest_has_mt1`](crate::ssr::SsrCorrectionStore::ingest_has_mt1)
-    /// reads it as do-not-use and removes the satellite's stored clock correction.
+    /// refuses the message by name, leaving the store unchanged.
     pub do_not_use: bool,
 }
 
