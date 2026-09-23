@@ -332,14 +332,29 @@ pub(crate) fn satellite_position_ecef_unchecked(
     t_sow_s: f64,
     is_geo: bool,
 ) -> OrbitState {
-    satellite_position_ecef_impl(elements, None, consts, t_sow_s, is_geo)
+    let tk = time_from_reference_s(t_sow_s, elements.toe_sow);
+    satellite_position_ecef_impl(elements, None, consts, tk, is_geo)
+}
+
+/// Broadcast orbit position at `tk_s` seconds from the record's reference epoch, the time
+/// argument the model uses. RTKLIB `ephpos` differences a record's positions at an epoch
+/// and 1 ms later with the step added to its exact time, so the step belongs on this
+/// reduced time, not on an absolute epoch.
+pub(crate) fn satellite_position_ecef_at_tk_unchecked(
+    elements: &KeplerianElements,
+    cnav_rates: Option<&CnavRates>,
+    consts: &ConstellationConstants,
+    tk_s: f64,
+    is_geo: bool,
+) -> OrbitState {
+    satellite_position_ecef_impl(elements, cnav_rates, consts, tk_s, is_geo)
 }
 
 fn satellite_position_ecef_impl(
     elements: &KeplerianElements,
     cnav_rates: Option<&CnavRates>,
     consts: &ConstellationConstants,
-    t_sow_s: f64,
+    tk: f64,
     is_geo: bool,
 ) -> OrbitState {
     let sqrt_a = elements.sqrt_a;
@@ -347,23 +362,21 @@ fn satellite_position_ecef_impl(
     let gm = consts.gm_m3_s2;
     let omega_e = consts.omega_e_rad_s;
 
-    let (a, n0, n, tk) = if let Some(rates) = cnav_rates {
+    let (a, n0, n) = if let Some(rates) = cnav_rates {
         let a0 = sqrt_a * sqrt_a;
         let n0 = (gm / (a0 * a0 * a0)).sqrt();
-        let tk = time_from_reference_s(t_sow_s, elements.toe_sow);
         let a = a0 + rates.adot_m_s * tk;
         let delta_n_a = elements.delta_n + 0.5 * rates.delta_n0_dot_rad_s2 * tk;
         let n = n0 + delta_n_a;
-        (a, n0, n, tk)
+        (a, n0, n)
     } else {
         // 1. Semi-major axis and mean motion. a^3 as an explicit multiply chain.
         let a = sqrt_a * sqrt_a;
         let n0 = (gm / (a * a * a)).sqrt();
         let n = n0 + elements.delta_n;
 
-        // 2. Time from ephemeris reference epoch (half-week folded).
-        let tk = time_from_reference_s(t_sow_s, elements.toe_sow);
-        (a, n0, n, tk)
+        // 2. The time from the ephemeris reference epoch (half-week folded) is `tk`.
+        (a, n0, n)
     };
 
     // 3. Mean anomaly and eccentric anomaly.
@@ -486,7 +499,8 @@ pub(crate) fn satellite_position_ecef_cnav_unchecked(
     consts: &ConstellationConstants,
     t_sow_s: f64,
 ) -> OrbitState {
-    satellite_position_ecef_impl(elements, Some(rates), consts, t_sow_s, false)
+    let tk = time_from_reference_s(t_sow_s, elements.toe_sow);
+    satellite_position_ecef_impl(elements, Some(rates), consts, tk, false)
 }
 
 /// Evaluate the broadcast satellite clock offset (seconds).

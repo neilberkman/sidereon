@@ -31,18 +31,22 @@ pub(super) fn temporal_position_covariance(
     )
 }
 
+/// `epochs` are the solved epochs and `epoch_indices` their input epoch indices, the
+/// indices the residuals carry. Residual arcs are grouped by ambiguity id and observable
+/// and break where an input epoch is missing.
 pub(super) fn estimate_temporal_correlation(
     residuals: &[FloatResidual],
     epochs: &[FloatEpoch],
+    epoch_indices: &[usize],
 ) -> TemporalCorrelationSummary {
-    let epoch_interval_s = regular_epoch_interval_s(epochs);
+    let epoch_interval_s = regular_epoch_interval_s(epochs, epoch_indices);
     let mut grouped: BTreeMap<(String, ObservableKind), Vec<(usize, f64)>> = BTreeMap::new();
     let mut nominal_sample_count = 0_usize;
     for residual in residuals {
         let code = residual.code_m * residual.code_weight;
         if code.is_finite() {
             grouped
-                .entry((residual.satellite_id.clone(), ObservableKind::Code))
+                .entry((residual.ambiguity_id.clone(), ObservableKind::Code))
                 .or_default()
                 .push((residual.epoch_index, code));
             nominal_sample_count += 1;
@@ -50,7 +54,7 @@ pub(super) fn estimate_temporal_correlation(
         let phase = residual.phase_m * residual.phase_weight;
         if phase.is_finite() {
             grouped
-                .entry((residual.satellite_id.clone(), ObservableKind::Phase))
+                .entry((residual.ambiguity_id.clone(), ObservableKind::Phase))
                 .or_default()
                 .push((residual.epoch_index, phase));
             nominal_sample_count += 1;
@@ -112,13 +116,19 @@ pub(super) fn estimate_temporal_correlation(
     }
 }
 
-fn regular_epoch_interval_s(epochs: &[FloatEpoch]) -> Option<f64> {
-    if epochs.len() < 2 {
+/// Interval between consecutive input epochs, when the solved epochs sit on one regular
+/// cadence: each pair's time difference divided by its input index difference, so an input
+/// epoch left out of the solve does not break the cadence.
+fn regular_epoch_interval_s(epochs: &[FloatEpoch], epoch_indices: &[usize]) -> Option<f64> {
+    if epochs.len() < 2 || epoch_indices.len() != epochs.len() {
         return None;
     }
     let mut deltas = Vec::with_capacity(epochs.len() - 1);
-    for pair in epochs.windows(2) {
-        let delta = pair[1].t_rx_j2000_s - pair[0].t_rx_j2000_s;
+    for (pair, index_pair) in epochs.windows(2).zip(epoch_indices.windows(2)) {
+        let index_step = index_pair[1]
+            .checked_sub(index_pair[0])
+            .filter(|step| *step > 0)?;
+        let delta = (pair[1].t_rx_j2000_s - pair[0].t_rx_j2000_s) / index_step as f64;
         if !(delta.is_finite() && delta > 0.0) {
             return None;
         }
@@ -232,7 +242,11 @@ mod tests {
         let residuals = synthetic_ar1_residuals(180, 8, rho, 0);
         let epochs = synthetic_epochs(180);
 
-        let estimate = estimate_temporal_correlation(&residuals, &epochs);
+        let estimate = estimate_temporal_correlation(
+            &residuals,
+            &epochs,
+            &(0..epochs.len()).collect::<Vec<_>>(),
+        );
 
         assert!(
             (0.78..=0.89).contains(&estimate.lag1_autocorrelation),
@@ -253,7 +267,11 @@ mod tests {
         let residuals = synthetic_ar1_residuals(180, 8, 0.0, 11);
         let epochs = synthetic_epochs(180);
 
-        let estimate = estimate_temporal_correlation(&residuals, &epochs);
+        let estimate = estimate_temporal_correlation(
+            &residuals,
+            &epochs,
+            &(0..epochs.len()).collect::<Vec<_>>(),
+        );
 
         assert!(
             estimate.lag1_autocorrelation <= 0.08,
@@ -278,7 +296,11 @@ mod tests {
         let epochs = synthetic_epochs(n);
         for trial in 0..trials {
             let residuals = synthetic_ar1_residuals(n, 1, rho, trial as u64 + 101);
-            let estimate = estimate_temporal_correlation(&residuals, &epochs);
+            let estimate = estimate_temporal_correlation(
+                &residuals,
+                &epochs,
+                &(0..epochs.len()).collect::<Vec<_>>(),
+            );
             let mean = residuals.iter().map(|r| r.code_m).sum::<f64>() / n as f64;
             let independent_sigma = 1.0 / (n as f64).sqrt();
             let inflated_sigma = (estimate.variance_inflation_factor / n as f64).sqrt();
@@ -344,6 +366,7 @@ mod tests {
                 residuals.push(FloatResidual {
                     epoch_index,
                     satellite_id: format!("G{:02}", sat_idx + 1),
+                    ambiguity_id: format!("G{:02}", sat_idx + 1),
                     code_m: code,
                     phase_m: phase,
                     code_weight: 1.0,

@@ -178,6 +178,34 @@ pub trait ObservableEphemerisSource {
         t_j2000_s: f64,
     ) -> Result<ObservableState, ObservablesError>;
 
+    /// The SSR orbit and clock corrections this source applies, when it applies any.
+    ///
+    /// `None` by default, for sources that apply no SSR corrections. The SSR-corrected
+    /// sources return themselves, so a precise positioning solve can check that an SSR
+    /// bias belongs to the solution of the orbit and clock it uses at each observation's
+    /// transmission time. A source that wraps an SSR-corrected source returns it here to
+    /// keep those biases usable.
+    fn ssr_corrections(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        None
+    }
+
+    /// Satellite ECEF velocity, metres per second, of the state this source returns at
+    /// `t_j2000_s`, when the source defines one.
+    ///
+    /// `None` by default: the predictors then difference the positions this source returns
+    /// half a second either side of `t_j2000_s`. A source whose state can change model
+    /// within that second, such as one that switches between broadcast records or applies
+    /// corrections from a reference epoch on, returns the velocity of the state it uses at
+    /// `t_j2000_s` here, so the velocity never blends two models and never needs a state
+    /// the source does not have.
+    fn velocity_at_j2000_s(
+        &self,
+        _sat: GnssSatelliteId,
+        _t_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        None
+    }
+
     /// ECEF states for parallel satellite and epoch arrays.
     ///
     /// `satellites[i]` is evaluated at `epochs_j2000_s[i]`. The output is
@@ -250,6 +278,14 @@ impl ObservableEphemerisSource for BroadcastEphemeris {
             position_ecef_m,
             clock_s: Some(clock_s),
         })
+    }
+
+    fn velocity_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        self.selected_record_velocity(sat, t_j2000_s).map(Ok)
     }
 }
 
@@ -1089,6 +1125,140 @@ fn emission_media_batch_at_j2000_s_with_receiver_unchecked(
     }
 }
 
+/// Light-time seed, seconds, for an observation whose pseudorange is `pseudorange_m`: the
+/// pseudorange over the speed of light, or [`NOMINAL_SIGNAL_FLIGHT_TIME_S`] when the
+/// pseudorange is not a positive finite distance. The seed only picks where the
+/// light-time iteration first queries the source.
+pub fn flight_time_seed_s(pseudorange_m: f64) -> f64 {
+    let tau = pseudorange_m / C_M_S;
+    if tau.is_finite() && tau > 0.0 {
+        tau
+    } else {
+        NOMINAL_SIGNAL_FLIGHT_TIME_S
+    }
+}
+
+/// Nominal GNSS signal flight time, seconds, used to seed the light-time iteration where no
+/// pseudorange is available: about the flight time from a MEO satellite at mid elevation.
+pub const NOMINAL_SIGNAL_FLIGHT_TIME_S: f64 = 0.075;
+
+/// Transmission epoch, seconds since J2000, of `sat`'s signal received at
+/// `t_rx_j2000_s` by a static receiver at `receiver_ecef_m`.
+///
+/// This is the light-time iteration of [`predict`] alone, started from `initial_tau_s`
+/// ([`flight_time_seed_s`]) so its first ephemeris query is near the transmission time. It
+/// evaluates the ephemeris only at the iterated transmission epochs, so it succeeds
+/// wherever `source` can place the satellite there.
+pub fn transmit_epoch_j2000_s(
+    source: &dyn ObservableEphemerisSource,
+    sat: GnssSatelliteId,
+    receiver_ecef_m: [f64; 3],
+    t_rx_j2000_s: f64,
+    options: TransmitTimeOptions,
+    initial_tau_s: f64,
+) -> Result<f64, ObservablesError> {
+    validate_transmit_time_inputs(receiver_ecef_m, t_rx_j2000_s)?;
+    let predict_options = PredictOptions {
+        carrier_hz: F_L1_HZ,
+        light_time: options.light_time,
+        sagnac: options.sagnac,
+    };
+    solve_transmit_time_from(
+        source,
+        sat,
+        receiver_ecef_m,
+        t_rx_j2000_s,
+        predict_options,
+        initial_tau_s,
+    )
+    .map(|solved| solved.transmit_time_j2000_s)
+}
+
+/// Transmit-time geometry of one observation, without the satellite velocity.
+///
+/// Every field equals the one of the same name in [`PredictedObservables`] for the same
+/// light-time seed. Range rate and Doppler are left out because they need the satellite
+/// velocity; [`transmit_velocity_m_s`] gives it where a caller needs it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TransmitGeometry {
+    /// Signal flight time, seconds.
+    pub signal_flight_time_s: f64,
+    /// Transmit offset from the reception epoch, whole microseconds.
+    pub transmit_offset_us: i64,
+    /// Transmission epoch, seconds since J2000.
+    pub transmit_time_j2000_s: f64,
+    /// Satellite clock offset at the transmission epoch, seconds, when the source has one.
+    pub sat_clock_s: Option<f64>,
+    /// Satellite ECEF position at the transmission epoch, rotated into the reception-epoch
+    /// frame when Sagnac correction is on, metres.
+    pub sat_pos_ecef_m: [f64; 3],
+    /// Geometric range, metres.
+    pub geometric_range_m: f64,
+    /// Receiver-to-satellite unit vector.
+    pub los_unit: [f64; 3],
+    /// Elevation, degrees.
+    pub elevation_deg: f64,
+    /// Azimuth, degrees.
+    pub azimuth_deg: f64,
+}
+
+/// Transmit-time geometry of `sat` for a static receiver, with the light-time iteration
+/// started from `initial_tau_s` ([`flight_time_seed_s`]).
+///
+/// Unlike [`predict`], it never evaluates the satellite velocity, so it needs `source`
+/// only at the iterated transmission epochs.
+pub fn predict_transmit_geometry(
+    source: &dyn ObservableEphemerisSource,
+    sat: GnssSatelliteId,
+    receiver_ecef_m: [f64; 3],
+    t_rx_j2000_s: f64,
+    options: PredictOptions,
+    initial_tau_s: f64,
+) -> Result<TransmitGeometry, ObservablesError> {
+    validate_predict_inputs(receiver_ecef_m, t_rx_j2000_s, options)?;
+    let solved = solve_transmit_time_from(
+        source,
+        sat,
+        receiver_ecef_m,
+        t_rx_j2000_s,
+        options,
+        initial_tau_s,
+    )?;
+    let dx = solved.sat_rot_ecef_m[0] - receiver_ecef_m[0];
+    let dy = solved.sat_rot_ecef_m[1] - receiver_ecef_m[1];
+    let dz = solved.sat_rot_ecef_m[2] - receiver_ecef_m[2];
+    let range = geometric_range_m([dx, dy, dz])?;
+    let los = [dx / range, dy / range, dz / range];
+    let topocentric = topocentric(receiver_ecef_m, [dx, dy, dz], range)?;
+    Ok(TransmitGeometry {
+        signal_flight_time_s: solved.tau_s,
+        transmit_offset_us: solved.transmit_offset_us,
+        transmit_time_j2000_s: solved.transmit_time_j2000_s,
+        sat_clock_s: solved.state.clock_s,
+        sat_pos_ecef_m: solved.sat_rot_ecef_m,
+        geometric_range_m: range,
+        los_unit: los,
+        elevation_deg: topocentric.elevation_deg,
+        azimuth_deg: topocentric.azimuth_deg,
+    })
+}
+
+/// Satellite ECEF velocity, metres per second, at the transmission epoch of `geometry`,
+/// rotated into the reception-epoch frame when `sagnac` is set, as [`predict`] forms it:
+/// the source's own velocity ([`ObservableEphemerisSource::velocity_at_j2000_s`]) or a
+/// difference of its positions half a second either side.
+pub fn transmit_velocity_m_s(
+    source: &dyn ObservableEphemerisSource,
+    sat: GnssSatelliteId,
+    geometry: &TransmitGeometry,
+    sagnac: bool,
+) -> Result<[f64; 3], ObservablesError> {
+    let velocity = satellite_velocity(source, sat, geometry.transmit_time_j2000_s)?;
+    let velocity_rot = sagnac_rotate(velocity, geometry.signal_flight_time_s, sagnac);
+    validate::finite_vec3(velocity_rot, "satellite velocity_m_s").map_err(map_input_error)?;
+    Ok(velocity_rot)
+}
+
 /// Evaluate a satellite's transmit-time ECEF state for one static receiver.
 ///
 /// This is the per-satellite primitive underneath observable prediction: it
@@ -1558,6 +1728,19 @@ fn solve_transmit_time(
     t_rx_j2000_s: f64,
     options: PredictOptions,
 ) -> Result<SolvedTransmitTime, ObservablesError> {
+    solve_transmit_time_from(source, sat, receiver_ecef_m, t_rx_j2000_s, options, 0.0)
+}
+
+/// The light-time iteration started from `initial_tau_s` instead of zero, so its first
+/// ephemeris query is at `t_rx - initial_tau_s` rather than at the reception time.
+fn solve_transmit_time_from(
+    source: &dyn ObservableEphemerisSource,
+    sat: GnssSatelliteId,
+    receiver_ecef_m: [f64; 3],
+    t_rx_j2000_s: f64,
+    options: PredictOptions,
+    initial_tau_s: f64,
+) -> Result<SolvedTransmitTime, ObservablesError> {
     if !options.light_time {
         let state = validated_state_at_j2000_s(source, sat, t_rx_j2000_s)?;
         let sat_rot = sagnac_rotate(state.position_ecef_m, 0.0, options.sagnac);
@@ -1571,7 +1754,7 @@ fn solve_transmit_time(
         });
     }
 
-    let mut tau = 0.0;
+    let mut tau = initial_tau_s;
     for iter in 0..OBSERVABLE_TRANSMIT_TIME_ITERATIONS {
         let transmit_offset_us = microseconds_from_tau(tau);
         let t_tx = t_rx_j2000_s - transmit_offset_us as f64 / MICROSECONDS_PER_SECOND;
@@ -1625,6 +1808,11 @@ fn satellite_velocity(
     sat: GnssSatelliteId,
     t_tx_j2000_s: f64,
 ) -> Result<[f64; 3], ObservablesError> {
+    if let Some(velocity) = source.velocity_at_j2000_s(sat, t_tx_j2000_s) {
+        let velocity = velocity?;
+        validate::finite_vec3(velocity, "satellite velocity_m_s").map_err(map_input_error)?;
+        return Ok(velocity);
+    }
     let plus = validated_state_at_j2000_s(source, sat, t_tx_j2000_s + FD_HALF_S)?;
     let minus = validated_state_at_j2000_s(source, sat, t_tx_j2000_s - FD_HALF_S)?;
     let denom = 2.0 * FD_HALF_S;

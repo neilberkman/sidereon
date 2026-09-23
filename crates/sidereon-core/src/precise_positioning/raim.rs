@@ -154,19 +154,17 @@
 
 use crate::astro::frames::transforms::itrs_to_geodetic_compute;
 use crate::astro::math::linear::{invert_matrix_last_tie, invert_symmetric_pd};
-use crate::constants::F_L1_HZ;
 use crate::estimation::substrate::parameters::{
     undifferenced_design_row, UndifferencedDesignOptions,
 };
 use crate::geometry::{dop, DopError, LineOfSight, Wgs84Geodetic};
-use crate::observables::{predict, ObservableEphemerisSource, PredictOptions};
+use crate::observables::ObservableEphemerisSource;
 use crate::quality::{chi2_inv, DEFAULT_P_FA};
 use crate::validate;
 
 use super::{
-    no_ephemeris, solve_float_epoch, state_from_solution, ztd_unknown_count, FloatEpoch,
-    FloatResidual, FloatSolution, FloatSolveConfig, FloatSolveError, FloatState,
-    TroposphereOptions,
+    solve_float_epoch, state_from_solution, ztd_unknown_count, FloatEpoch, FloatResidual,
+    FloatSolution, FloatSolveConfig, FloatSolveError, FloatState, TroposphereOptions,
 };
 
 const DEFAULT_MISSED_DETECTION_PROBABILITY: f64 = 1.0e-3;
@@ -640,11 +638,20 @@ pub fn fde_float_epoch(
                 status: RaimFdeStatus::IntegrityNotRestored,
             });
         };
-        if !has_positive_redundancy_after_exclusion(
-            next_epoch.observations.len(),
-            solve_config.tropo,
-        )
-        .map_err(RaimFdeError::Raim)?
+        // Observations the solve leaves out for an unresolved SSR/HAS bias add no rows, so
+        // only the others count towards the redundancy after this exclusion.
+        let solved_after = next_epoch
+            .observations
+            .iter()
+            .filter(|obs| {
+                !solution
+                    .ssr_bias_exclusions
+                    .iter()
+                    .any(|exclusion| exclusion.ambiguity_id == obs.ambiguity_id)
+            })
+            .count();
+        if !has_positive_redundancy_after_exclusion(solved_after, solve_config.tropo)
+            .map_err(RaimFdeError::Raim)?
         {
             return Ok(RaimFdeResult {
                 solution,
@@ -815,23 +822,13 @@ fn geometry_for_solution(
         let obs = epoch
             .observations
             .iter()
-            .find(|obs| obs.satellite_id == residual.satellite_id)
+            .find(|obs| obs.ambiguity_id == residual.ambiguity_id)
             .ok_or(FloatSolveError::InvalidInput {
-                field: "raim geometry satellite_id",
-                reason: "residual satellite missing from epoch",
+                field: "raim geometry ambiguity_id",
+                reason: "residual observation missing from epoch",
             })?;
-        let pred = predict(
-            source,
-            obs.sat,
-            solution.position_m,
-            epoch.t_rx_j2000_s,
-            PredictOptions {
-                carrier_hz: F_L1_HZ,
-                light_time: true,
-                sagnac: true,
-            },
-        )
-        .map_err(|error| no_ephemeris(obs, error))?;
+        let pred =
+            super::observation_geometry(source, obs, solution.position_m, epoch.t_rx_j2000_s)?;
         validate::finite_vec3(pred.los_unit, "raim geometry los_unit").map_err(|error| {
             FloatSolveError::InvalidInput {
                 field: error.field(),
@@ -1218,8 +1215,9 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
+    use crate::constants::F_L1_HZ;
     use crate::geometry::line_of_sight_from_az_el_deg;
-    use crate::observables::{ObservableState, ObservablesError};
+    use crate::observables::{predict, ObservableState, ObservablesError, PredictOptions};
     use crate::ppp_corrections::CivilDateTime;
     use crate::{GnssSatelliteId, GnssSystem};
 
@@ -1227,6 +1225,7 @@ mod tests {
         FloatResidual {
             epoch_index: 0,
             satellite_id: satellite_id.to_string(),
+            ambiguity_id: satellite_id.to_string(),
             code_m,
             phase_m,
             code_weight: 1.0,
@@ -1815,6 +1814,37 @@ mod tests {
         assert!(fde.raim.hpl_m.expect("HPL") > 0.0);
         assert!(fde.raim.vpl_m.expect("VPL") > 0.0);
         assert_position_close(fde.solution.position_m, clean.position_m, 1.0e-3);
+    }
+
+    /// An observation the solve leaves out for a missing SSR bias adds no rows, so it does
+    /// not count towards the redundancy left after an exclusion. With G06 left out, six
+    /// observations leave five solved, the same case as five satellites, and G05 cannot be
+    /// excluded.
+    #[test]
+    fn fde_redundancy_counts_only_observations_the_solve_keeps() {
+        let (source, epoch, state) = synthetic_case(6, Some("G05"));
+        let mut lookup = super::super::PppCorrectionLookup {
+            ssr_code_bias_enabled: true,
+            phase_bias_enabled: true,
+            ..Default::default()
+        };
+        for obs in &epoch.observations {
+            if obs.satellite_id != "G06" {
+                let key = (obs.sat, 0, obs.ambiguity_id.clone());
+                lookup.ssr_code_bias_m.insert(key.clone(), 0.0);
+                lookup.phase_bias_m.insert(key, 0.0);
+            }
+        }
+        let mut config = fde_config();
+        config.corrections.ppp = lookup;
+
+        let fde = fde_float_epoch(&source, epoch, state, config, fde_raim_config()).expect("FDE");
+
+        assert_eq!(fde.solution.ssr_bias_exclusions.len(), 1);
+        assert_eq!(fde.solution.ssr_bias_exclusions[0].satellite_id, "G06");
+        assert!(fde.raim.detected);
+        assert_eq!(fde.status, RaimFdeStatus::CannotExclude);
+        assert!(fde.excluded_sats.is_empty());
     }
 
     #[test]

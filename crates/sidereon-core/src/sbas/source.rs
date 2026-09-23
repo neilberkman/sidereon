@@ -24,6 +24,23 @@ pub trait IssueAwareBroadcast: EphemerisSource {
         iode: u8,
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64)>;
+
+    /// Velocity, metres per second, of the record with broadcast IODE `iode` at
+    /// `t_j2000_s`, when the source defines one. `None` by default.
+    fn velocity_by_iode_at(
+        &self,
+        _sat: GnssSatelliteId,
+        _iode: u8,
+        _t_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
+        None
+    }
+
+    /// Velocity, metres per second, of the record [`EphemerisSource::position_clock_at_j2000_s`]
+    /// uses at `t_j2000_s`, when the source defines one. `None` by default.
+    fn broadcast_velocity_at(&self, _sat: GnssSatelliteId, _t_j2000_s: f64) -> Option<[f64; 3]> {
+        None
+    }
 }
 
 /// Selects the branch used when no complete or permitted partial SBAS
@@ -151,6 +168,56 @@ impl<'a> SbasCorrectedEphemeris<'a> {
         }
     }
 
+    /// Velocity of the state [`Self::corrected_state`] returns, as RTKLIB `satpos_sbas`
+    /// takes it: the broadcast velocity of the record the state starts from (by the
+    /// long-term correction's IODE, or the one the broadcast state uses), with no
+    /// long-term velocity correction added, and for the GEO the difference of its
+    /// navigation state at `t_j2000_s` and 1 ms later. `None` inside the result when the
+    /// source returns no state; `None` outside it when the broadcast source defines no
+    /// record velocity.
+    fn corrected_velocity(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        const STEP_S: f64 = crate::rinex_nav::EPHPOS_STEP_S;
+        if self.store.is_disabled(self.geo, t_j2000_s) || self.store.is_withdrawn(self.geo, sat) {
+            return Some(Err(ObservablesError::NoEphemeris));
+        }
+        if sat == self.geo {
+            let Some(geo_state) = self.store.fresh_geo_nav(self.geo, t_j2000_s) else {
+                return Some(Err(ObservablesError::NoEphemeris));
+            };
+            // The step is added to the time from the navigation reference epoch, as
+            // RTKLIB `seph2pos` takes it from its exact `gtime_t`.
+            let dt = t_j2000_s - geo_state.t0_j2000_s;
+            let (start, _) = geo_state.state_after(dt);
+            let (end, _) = geo_state.state_after(dt + STEP_S);
+            return Some(Ok([
+                (end[0] - start[0]) / STEP_S,
+                (end[1] - start[1]) / STEP_S,
+                (end[2] - start[2]) / STEP_S,
+            ]));
+        }
+        if self.corrected_state(sat, t_j2000_s).is_none() {
+            return Some(Err(ObservablesError::NoEphemeris));
+        }
+        let fast = self.store.fresh_fast(self.geo, sat, t_j2000_s);
+        let long = (sat.system == GnssSystem::Gps)
+            .then(|| self.store.fresh_long_term(self.geo, sat, t_j2000_s))
+            .flatten();
+        let velocity = match (fast, long) {
+            (Some(_), Some(long)) => self
+                .broadcast
+                .velocity_by_iode_at(sat, long.iode, t_j2000_s),
+            (None, Some(long)) if self.store.allow_partial_corrections() => self
+                .broadcast
+                .velocity_by_iode_at(sat, long.iode, t_j2000_s),
+            _ => self.broadcast.broadcast_velocity_at(sat, t_j2000_s),
+        };
+        velocity.map(Ok)
+    }
+
     fn fast_clock_delta_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
         let fast = self.store.fresh_fast(self.geo, sat, t_j2000_s)?;
         Some((fast.prc_m + fast.rrc_m_s * (t_j2000_s - fast.t_of_j2000_s)) / C_M_S)
@@ -180,6 +247,14 @@ impl ObservableEphemerisSource for SbasCorrectedEphemeris<'_> {
             position_ecef_m,
             clock_s: Some(clock_s),
         })
+    }
+
+    fn velocity_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        self.corrected_velocity(sat, t_j2000_s)
     }
 }
 
@@ -248,6 +323,14 @@ impl ObservableEphemerisSource for SbasCorrectedEphemerisOwned {
     ) -> Result<ObservableState, ObservablesError> {
         self.borrowed().observable_state_at_j2000_s(sat, t_j2000_s)
     }
+
+    fn velocity_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        self.borrowed().velocity_at_j2000_s(sat, t_j2000_s)
+    }
 }
 
 impl IssueAwareBroadcast for crate::rinex_nav::BroadcastStore {
@@ -258,6 +341,19 @@ impl IssueAwareBroadcast for crate::rinex_nav::BroadcastStore {
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64)> {
         crate::rinex_nav::BroadcastStore::state_by_iode_at(self, sat, iode, t_j2000_s)
+    }
+
+    fn velocity_by_iode_at(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
+        self.iode_record_velocity(sat, iode, t_j2000_s)
+    }
+
+    fn broadcast_velocity_at(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<[f64; 3]> {
+        self.selected_record_velocity(sat, t_j2000_s)
     }
 }
 
@@ -326,6 +422,51 @@ mod tests {
                 .position_clock_at_j2000_s(sat, 0.0),
             None
         );
+    }
+
+    /// With no correction, the mixed-mode source returns the broadcast state, and its
+    /// velocity is RTKLIB `ephpos`'s for that record: the positions at `tk` and `tk` + 1 ms,
+    /// the step added to the reduced time. Added to the 2026 J2000 epoch instead, the step
+    /// would not even be 1 ms.
+    #[test]
+    fn catch_all_velocity_is_the_broadcast_record_ephpos_velocity() {
+        let nav = crate::rinex_nav::BroadcastStore::from_nav(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ssr/BRDC00WRD_S_20261820000_G30_G31.rnx"
+        )))
+        .expect("parse NAV fixture");
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 31).expect("valid GPS PRN");
+        let geo = sbas_prn_to_sat(120).unwrap();
+        let store = SbasCorrectionStore::new();
+        let source = SbasCorrectedEphemeris::new(&nav, &store, geo);
+        let t = 836_222_417.0;
+        assert_ne!((t + 1.0e-3) - t, 1.0e-3, "the absolute step is inexact");
+
+        let velocity = source
+            .velocity_at_j2000_s(sat, t)
+            .expect("the source defines its velocity")
+            .expect("broadcast velocity");
+        let record = nav.select_record_at(sat, t).expect("broadcast record");
+        let sow = (t + crate::constants::GPS_EPOCH_TO_J2000_S)
+            .rem_euclid(crate::constants::SECONDS_PER_WEEK);
+        let tk = sow - record.elements.toe_sow;
+        let position = |tk_s: f64| {
+            crate::broadcast::satellite_position_ecef_at_tk_unchecked(
+                &record.elements,
+                None,
+                &record.constants(),
+                tk_s,
+                false,
+            )
+            .position()
+            .expect("finite position")
+            .as_array()
+        };
+        let (start, end) = (position(tk), position(tk + 1.0e-3));
+        for axis in 0..3 {
+            let expected = (end[axis] - start[axis]) / 1.0e-3;
+            assert_eq!(velocity[axis].to_bits(), expected.to_bits(), "axis {axis}");
+        }
     }
 
     #[test]

@@ -1401,6 +1401,33 @@ impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
 }
 
 impl<E: ObservableEphemerisSource> ObservableEphemerisSource for SourceTranscript<'_, E> {
+    fn ssr_corrections(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        self.source.ssr_corrections()
+    }
+
+    fn velocity_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        let result = self.source.velocity_at_j2000_s(sat, t_j2000_s)?;
+        let mut hash = self.hash_query(0x5645_4c4f_4349_5459, sat, t_j2000_s);
+        match &result {
+            Ok(velocity) => {
+                hash_u64(&mut hash, 1);
+                for value in velocity {
+                    hash_f64(&mut hash, *value);
+                }
+            }
+            Err(error) => {
+                hash_u64(&mut hash, 0);
+                hash_u64(&mut hash, observables_error_code(error));
+            }
+        }
+        self.store_hash(hash);
+        Some(result)
+    }
+
     fn observable_state_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
@@ -2515,6 +2542,16 @@ fn satellite_hash(sat: GnssSatelliteId) -> u64 {
     ((sat.system.letter() as u64) << 8) | u64::from(sat.prn)
 }
 
+/// Stable code of an observable-prediction error variant for a transcript.
+fn observables_error_code(error: &ObservablesError) -> u64 {
+    match error {
+        ObservablesError::InvalidInput { .. } => 1,
+        ObservablesError::NoEphemeris => 2,
+        ObservablesError::Ephemeris(_) => 3,
+        ObservablesError::Media(_) => 4,
+    }
+}
+
 fn hash_u64(hash: &mut u64, value: u64) {
     *hash ^= value;
     *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
@@ -2551,6 +2588,57 @@ mod tests {
     use crate::clock_stability::{allan_deviation_power_law_slope, overlapping_adev, AllanSeries};
     use crate::positioning::{solve, SolveInputs};
     use crate::rinex::observations::{observation_values, ObservationFilter, ObservationKind};
+
+    /// The transcript forwards the SSR corrections and the velocity of the source it wraps,
+    /// so a PPP solve through it still checks SSR biases and never differences across a
+    /// correction boundary; a source without SSR corrections stays without them.
+    #[test]
+    fn source_transcript_forwards_ssr_corrections_and_velocity() {
+        let nav = crate::ephemeris::BroadcastEphemeris::from_nav(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ssr/BRDC00WRD_S_20261820000_G30_G31.rnx"
+        )))
+        .expect("parse NAV fixture");
+        let store = crate::ssr::SsrCorrectionStore::new();
+        let ssr = crate::ssr::SsrCorrectedEphemeris::new(&nav, &store);
+        let transcript = SourceTranscript::new(&ssr);
+        let forwarded = transcript
+            .ssr_corrections()
+            .expect("the transcript forwards the SSR corrections");
+        assert!(std::ptr::eq(forwarded.ssr_store(), &store));
+
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 31).expect("valid satellite");
+        let t = 836_222_400.0;
+        let before = transcript.digest();
+        assert_eq!(
+            transcript.velocity_at_j2000_s(sat, t),
+            Some(Err(ObservablesError::NoEphemeris)),
+            "no correction and no fallback: the source declines the satellite"
+        );
+        assert_ne!(transcript.digest(), before, "the refusal is transcribed");
+
+        // With a broadcast fallback the source has a state, and the transcript forwards its
+        // velocity bit for bit.
+        let fallback = crate::ssr::SsrCorrectedEphemeris::new(&nav, &store).with_fallback(
+            crate::ssr::SsrFallbackPolicy {
+                on_missing_correction: crate::ssr::MissingCorrectionAction::FallBackToBroadcast,
+                regional: crate::ssr::RegionalPolicy::DeclineRegional,
+            },
+        );
+        let fallback_transcript = SourceTranscript::new(&fallback);
+        let direct = fallback
+            .velocity_at_j2000_s(sat, t)
+            .expect("the source defines its velocity")
+            .expect("broadcast fallback velocity");
+        let forwarded = fallback_transcript
+            .velocity_at_j2000_s(sat, t)
+            .expect("the transcript forwards the velocity")
+            .expect("broadcast fallback velocity");
+        assert_eq!(forwarded.map(f64::to_bits), direct.map(f64::to_bits));
+
+        let broadcast_transcript = SourceTranscript::new(&nav);
+        assert!(broadcast_transcript.ssr_corrections().is_none());
+    }
 
     fn product(
         kind: ScenarioExternalProductKind,

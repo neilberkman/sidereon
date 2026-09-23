@@ -14,19 +14,24 @@ use crate::estimation::recipe::{EstimationRecipe, NormalRecipe};
 use crate::estimation::substrate::ambiguity::resolve_integer_lattice;
 use crate::observables::ObservableEphemerisSource;
 
+use super::float::{
+    next_pass, prepare_arc, screened_float_solution, solve_to_ssr_fixed_point, ssr_bias_holds_at,
+    ArcSettings, FixedPointStart, LeftOut, PreparedArc, StepError,
+};
 use super::normal::{
     ambiguity_covariance_from_normal, clock_eliminated_normal_equations, ppp_position_covariance,
     solve_normal_equations, PppNormalLayout,
 };
+use super::rows::exclude_unresolved_ssr_bias_observations;
 use super::rows::{build_rows, residual_rows, AmbiguityBinding, PppRowError};
 use super::temporal::{estimate_temporal_correlation, temporal_position_covariance};
 use super::{
-    apply_elevation_cutoff, estimates_tropo_gradients, estimates_ztd, max_abs,
-    residual_ionosphere_unknown_count, rms, state_from_solution, tropo_gradient_unknown_count,
-    validate_fixed_solve_boundary, weighted_rms, ztd_unknown_count, AmbiguitySearch,
-    FixedIntegerMetadata, FixedSolution, FixedSolveConfig, FixedSolveError, FloatEpoch,
-    FloatSolution, FloatSolveError, FloatSolveOptions, FloatState, FloatStatus, IntegerStatus,
-    ModelContext, TroposphereOptions,
+    estimates_tropo_gradients, estimates_ztd, max_abs, residual_ionosphere_unknown_count, rms,
+    state_from_solution, tropo_gradient_unknown_count, validate_fixed_solve_boundary, weighted_rms,
+    ztd_unknown_count, AmbiguitySearch, FixedIntegerMetadata, FixedSolution, FixedSolveConfig,
+    FixedSolveError, FloatEpoch, FloatSolution, FloatSolveError, FloatSolveOptions, FloatState,
+    FloatStatus, IntegerStatus, ModelContext, SsrBiasExclusion, SsrBiasExclusionStage,
+    TroposphereOptions,
 };
 
 /// Search integer ambiguities from an existing float PPP solution and re-solve
@@ -75,31 +80,270 @@ pub(crate) fn run_fixed_from_float(
     config: FixedSolveConfig,
 ) -> Result<FixedSolution, FixedSolveError> {
     validate_fixed_solve_boundary(epochs, &float_solution, &config)?;
-    let initial_state = fixed_state_from_float(&float_solution);
-    let filtered_epochs;
-    let solve_epochs = if let Some(cutoff_deg) = config.elevation_cutoff_deg {
-        filtered_epochs = apply_elevation_cutoff(
-            source,
-            epochs,
-            &initial_state,
-            cutoff_deg,
-            config.tropo,
-            config.estimate_residual_ionosphere,
-        )
-        .map_err(FixedSolveError::Float)?;
-        filtered_epochs.as_slice()
-    } else {
-        epochs
+    let arc = ArcSettings {
+        source,
+        weights: config.weights,
+        tropo: config.tropo,
+        corrections: &config.corrections,
+        normal: recipe.normal,
+        estimate_residual_ionosphere: config.estimate_residual_ionosphere,
+        elevation_cutoff_deg: config.elevation_cutoff_deg,
     };
+    let observation_count = epochs.iter().map(|e| e.observations.len()).sum::<usize>();
+    let mut float_solution = float_solution;
+    let mut pinned: Vec<(usize, String)> = Vec::new();
+    let mut readmitted_after_fix: Vec<(usize, String)> = Vec::new();
+    let mut solved_for_fixed_arc: BTreeSet<String> = BTreeSet::new();
+    loop {
+        debug_assert!(
+            readmitted_after_fix.len() <= observation_count,
+            "each observation is admitted again after a fix at most once"
+        );
+        let deferred = float_solution
+            .ssr_bias_readmissions
+            .iter()
+            .chain(&readmitted_after_fix)
+            .cloned()
+            .collect::<Vec<_>>();
+        let exclusion = match fix_once(&arc, recipe, epochs, &float_solution, &config, &deferred) {
+            Ok(solution) => {
+                // Every transmit-time exclusion was judged at a state other than the fixed
+                // position: check each at the fixed position and admit those that hold,
+                // once each after a fix.
+                let pass = next_pass(&float_solution, &solution.ssr_bias_exclusions)
+                    .map_err(FixedSolveError::Float)?;
+                let holding = solution
+                    .ssr_bias_exclusions
+                    .iter()
+                    .filter(|exclusion| exclusion.transmit_time_failure.is_some())
+                    .map(|exclusion| (exclusion.epoch_index, exclusion.ambiguity_id.clone()))
+                    .filter(|key| !readmitted_after_fix.contains(key))
+                    .filter(|key| ssr_bias_holds_at(&arc, epochs, key, solution.position_m, pass))
+                    .collect::<Vec<_>>();
+                if holding.is_empty() {
+                    return Ok(solution);
+                }
+                pinned.retain(|key| !holding.contains(key));
+                let mut exclusions = float_solution.ssr_bias_exclusions.clone();
+                exclusions.retain(|exclusion| {
+                    !holding.iter().any(|(epoch_index, ambiguity_id)| {
+                        *epoch_index == exclusion.epoch_index
+                            && *ambiguity_id == exclusion.ambiguity_id
+                    })
+                });
+                readmitted_after_fix.extend(holding);
+                float_solution = resolve_float(
+                    &arc,
+                    epochs,
+                    &float_solution,
+                    exclusions,
+                    &pinned,
+                    &readmitted_after_fix,
+                )?;
+                continue;
+            }
+            Err(FixedStep::Fixed(error)) => return Err(error),
+            Err(FixedStep::Unsolved(ids)) => {
+                // The fixed arc observes ambiguities the float solution never solved, such
+                // as a satellite the float solve's elevation cutoff removed and the fixed
+                // configuration keeps. Solve the float arc again over the fixed arc, once
+                // for each such ambiguity, and fix again.
+                if let Some(id) = ids.iter().find(|id| solved_for_fixed_arc.contains(*id)) {
+                    return Err(FixedSolveError::Float(FloatSolveError::MissingAmbiguity(
+                        id.clone(),
+                    )));
+                }
+                solved_for_fixed_arc.extend(ids);
+                let exclusions = float_solution.ssr_bias_exclusions.clone();
+                float_solution = resolve_float(
+                    &arc,
+                    epochs,
+                    &float_solution,
+                    exclusions,
+                    &pinned,
+                    &readmitted_after_fix,
+                )?;
+                continue;
+            }
+            Err(FixedStep::Exclude(exclusion)) => *exclusion,
+        };
+        // The fixed re-solve crossed a bias record boundary the float solve did not.
+        // Exclude that observation, solve the float arc again to its fixed point from the
+        // float state, and fix again.
+        pinned.push((exclusion.epoch_index, exclusion.ambiguity_id.clone()));
+        let mut exclusions = float_solution.ssr_bias_exclusions.clone();
+        exclusions.push(exclusion);
+        float_solution = resolve_float(
+            &arc,
+            epochs,
+            &float_solution,
+            exclusions,
+            &pinned,
+            &readmitted_after_fix,
+        )?;
+    }
+}
+
+/// Solve the float arc again to its fixed point from `float_solution`'s state, starting
+/// from `exclusions`, with the residual screen setting and options it was solved with.
+/// `pinned` observations are never admitted again; the float solution's own readmissions
+/// and `readmitted_after_fix` are judged only at convergence and not admitted again.
+fn resolve_float(
+    arc: &ArcSettings<'_>,
+    epochs: &[FloatEpoch],
+    float_solution: &FloatSolution,
+    exclusions: Vec<SsrBiasExclusion>,
+    pinned: &[(usize, String)],
+    readmitted_after_fix: &[(usize, String)],
+) -> Result<FloatSolution, FixedSolveError> {
+    let opts = float_solution.solve_options;
+    let residual_screen = float_solution.residual_screen;
+    let first_pass = next_pass(float_solution, &exclusions).map_err(FixedSolveError::Float)?;
+    let start = FixedPointStart {
+        exclusions,
+        pinned: pinned.to_vec(),
+        readmitted: float_solution
+            .ssr_bias_readmissions
+            .iter()
+            .chain(readmitted_after_fix)
+            .cloned()
+            .collect(),
+        judged_after_fix: readmitted_after_fix.to_vec(),
+        first_pass,
+    };
+    let mut solution = solve_to_ssr_fixed_point(
+        arc,
+        epochs,
+        input_float_state(float_solution, epochs),
+        start,
+        |ctx, solve_epochs, state| {
+            screened_float_solution(ctx, solve_epochs, state, opts, residual_screen)
+        },
+    )
+    .map_err(FixedSolveError::Float)?;
+    solution.residual_screen = residual_screen;
+    solution.solve_options = opts;
+    Ok(solution)
+}
+
+/// The float solution's state over all `n_epochs` input epochs: its position, troposphere,
+/// ambiguities and ionosphere, and a clock for every input epoch seeded as the fixed solve
+/// seeds it.
+fn input_float_state(float_solution: &FloatSolution, epochs: &[FloatEpoch]) -> FloatState {
+    let mut state = state_from_solution(float_solution, &FloatState::default_for_epochs(epochs));
+    state.clocks_m = fixed_seed_clocks(float_solution, &(0..epochs.len()).collect::<Vec<_>>());
+    state
+}
+
+/// A fixed solve step failure: SSR/HAS bias records that stopped holding during the fixed
+/// re-solve, ambiguities the fixed arc observes that the float solution did not solve, or
+/// any other error.
+enum FixedStep {
+    Exclude(Box<SsrBiasExclusion>),
+    Unsolved(Vec<String>),
+    Fixed(FixedSolveError),
+}
+
+impl From<FixedSolveError> for FixedStep {
+    fn from(error: FixedSolveError) -> Self {
+        Self::Fixed(error)
+    }
+}
+
+impl From<FloatSolveError> for FixedStep {
+    fn from(error: FloatSolveError) -> Self {
+        Self::Fixed(FixedSolveError::Float(error))
+    }
+}
+
+impl FixedStep {
+    fn from_rows(
+        error: PppRowError,
+        ctx: ModelContext,
+        epochs: &[FloatEpoch],
+        state: &FloatState,
+    ) -> Self {
+        match error {
+            flip @ PppRowError::SsrBiasFlip { .. } => {
+                match StepError::from_rows(flip, ctx, epochs, state) {
+                    StepError::Flip(flip) => Self::Exclude(Box::new(flip.exclusion)),
+                    StepError::Float(error) => Self::Fixed(FixedSolveError::Float(error)),
+                }
+            }
+            other => Self::Fixed(other.into_fixed()),
+        }
+    }
+}
+
+/// One integer search and fixed re-solve from `float_solution`, starting from its
+/// exclusions.
+fn fix_once(
+    arc: &ArcSettings<'_>,
+    recipe: &EstimationRecipe,
+    epochs: &[FloatEpoch],
+    float_solution: &FloatSolution,
+    config: &FixedSolveConfig,
+    deferred: &[(usize, String)],
+) -> Result<FixedSolution, FixedStep> {
+    let source = arc.source;
+    // Seed every input epoch's clock from the float solution, then prepare the arc as the
+    // float solve does, starting from the float solve's exclusions.
+    let mut input_state = fixed_state_from_float(float_solution);
+    input_state.clocks_m =
+        fixed_seed_clocks(float_solution, &(0..epochs.len()).collect::<Vec<_>>());
+    let float_exclusions = float_solution.ssr_bias_exclusions.clone();
+    let pass = next_pass(float_solution, &float_exclusions)?;
+    let (prepared, new_exclusions) = prepare_arc(
+        arc,
+        epochs,
+        &LeftOut {
+            excluded: &float_exclusions,
+            screened: &float_solution.residual_screen_removals,
+            deferred,
+            seed_ambiguities: &BTreeMap::new(),
+        },
+        &input_state,
+        pass,
+    )?;
+    let mut ssr_bias_exclusions = float_exclusions;
+    ssr_bias_exclusions.extend(new_exclusions);
+    let PreparedArc {
+        epochs: solved_epochs,
+        correction_epoch_indices,
+        state: initial_state,
+    } = prepared;
+    let solve_epochs = solved_epochs.as_slice();
+    let unsolved = active_ambiguity_ids(solve_epochs)
+        .into_iter()
+        .map(|id| id.as_str().to_string())
+        .filter(|id| !float_solution.used_sats.contains(id))
+        .collect::<Vec<_>>();
+    if !unsolved.is_empty() {
+        return Err(FixedStep::Unsolved(unsolved));
+    }
     let active_order;
-    let search_order = if config.elevation_cutoff_deg.is_some() {
+    let search_order = if config.elevation_cutoff_deg.is_some()
+        || !ssr_bias_exclusions.is_empty()
+        || !float_solution.residual_screen_removals.is_empty()
+    {
         active_order = active_ambiguity_ids(solve_epochs);
         Some(active_order.as_slice())
     } else {
         None
     };
-    let fixed_meta =
-        search_integer_ambiguities(source, solve_epochs, &float_solution, &config, search_order)?;
+    let fixed_meta = search_integer_ambiguities(
+        source,
+        solve_epochs,
+        &FixedArc {
+            correction_epoch_indices: &correction_epoch_indices,
+            seed_clocks_m: &initial_state.clocks_m,
+            deferred,
+            pass,
+        },
+        float_solution,
+        config,
+        search_order,
+    )?;
     let fixed_m = fixed_ambiguities_m(
         &fixed_meta.fixed_cycles,
         &config.ambiguity.wavelengths_m,
@@ -112,16 +356,52 @@ pub(crate) fn run_fixed_from_float(
         corrections: &config.corrections,
         normal: recipe.normal,
         estimate_residual_ionosphere: config.estimate_residual_ionosphere,
+        correction_epoch_indices: Some(&correction_epoch_indices),
+        ssr_bias_pass: pass,
+        ssr_bias_stage: SsrBiasExclusionStage::FixedResolve,
+        ssr_bias_deferred: deferred,
     };
     let resolve = iterate_fixed_multi(ctx, solve_epochs, &fixed_m, initial_state, config.opts, 1)?;
-    finalize_fixed_multi(
+    let mut solution = finalize_fixed_multi(
         ctx,
         solve_epochs,
         fixed_meta,
         fixed_m,
-        float_solution,
+        float_solution.clone(),
         resolve,
-    )
+    )?;
+    // The observations admitted again after an exclusion were not checked at intermediate
+    // states; the fixed position decides.
+    if let Some(exclusion) = deferred
+        .iter()
+        .filter(|key| {
+            solution
+                .residuals_m
+                .iter()
+                .any(|residual| residual.epoch_index == key.0 && residual.ambiguity_id == key.1)
+        })
+        .find_map(|key| {
+            let epoch = epochs.get(key.0)?;
+            let mut single = epoch.clone();
+            single.observations.retain(|obs| obs.ambiguity_id == key.1);
+            exclude_unresolved_ssr_bias_observations(
+                source,
+                std::slice::from_ref(&single),
+                key.0,
+                solution.position_m,
+                &config.corrections.ppp,
+                pass,
+                SsrBiasExclusionStage::AtConvergence,
+            )
+            .1
+            .into_iter()
+            .next()
+        })
+    {
+        return Err(FixedStep::Exclude(Box::new(exclusion)));
+    }
+    solution.ssr_bias_exclusions = ssr_bias_exclusions;
+    Ok(solution)
 }
 
 struct FixedSearchResult {
@@ -145,13 +425,43 @@ impl From<FloatSolveError> for FixedSolveError {
     }
 }
 
+/// Receiver clock seeds for the fixed re-solve: for each solved input epoch, the float
+/// solution's clock of that input epoch, or of the nearest input epoch the float solve
+/// solved when it left that one out.
+fn fixed_seed_clocks(
+    float_solution: &FloatSolution,
+    correction_epoch_indices: &[usize],
+) -> Vec<f64> {
+    correction_epoch_indices
+        .iter()
+        .map(|&epoch_index| {
+            float_solution
+                .solved_epoch_indices
+                .iter()
+                .zip(&float_solution.epoch_clocks_m)
+                .min_by_key(|(solved, _)| solved.abs_diff(epoch_index))
+                .map_or(0.0, |(_, clock_m)| *clock_m)
+        })
+        .collect()
+}
+
+/// The solved epochs of a fixed solve: the input index of each, the receiver clock seeds,
+/// the observations admitted again after an exclusion, and the pass number.
+struct FixedArc<'a> {
+    correction_epoch_indices: &'a [usize],
+    seed_clocks_m: &'a [f64],
+    deferred: &'a [(usize, String)],
+    pass: usize,
+}
+
 fn search_integer_ambiguities(
     source: &dyn ObservableEphemerisSource,
     epochs: &[FloatEpoch],
+    fixed_arc: &FixedArc<'_>,
     float_solution: &FloatSolution,
     config: &FixedSolveConfig,
     active_order: Option<&[AmbiguityId]>,
-) -> Result<FixedSearchResult, FixedSolveError> {
+) -> Result<FixedSearchResult, FixedStep> {
     let order: Vec<AmbiguityId> = active_order.map_or_else(
         || {
             float_solution
@@ -163,16 +473,20 @@ fn search_integer_ambiguities(
         |order| order.to_vec(),
     );
     let covariance_cycles =
-        ambiguity_covariance_cycles(source, epochs, &order, float_solution, config)?;
+        ambiguity_covariance_cycles(source, epochs, fixed_arc, &order, float_solution, config)?;
     let float_cycles = float_ambiguities_cycles(
         float_solution,
         &config.ambiguity.wavelengths_m,
         &config.ambiguity.offsets_m,
     )?;
-    let floats: Vec<f64> = order
+    let floats = order
         .iter()
-        .map(|id| float_cycles.get(id.as_str()).copied().unwrap())
-        .collect();
+        .map(|id| {
+            float_cycles.get(id.as_str()).copied().ok_or_else(|| {
+                FixedSolveError::Float(FloatSolveError::MissingAmbiguity(id.as_str().to_string()))
+            })
+        })
+        .collect::<Result<Vec<f64>, _>>()?;
     let result = resolve_integer_lattice(
         &floats,
         &covariance_cycles,
@@ -228,14 +542,15 @@ fn iterate_fixed_multi(
     state: FloatState,
     opts: FloatSolveOptions,
     iter: usize,
-) -> Result<FixedResolve, FixedSolveError> {
+) -> Result<FixedResolve, FixedStep> {
     let mut current = state;
     let mut iteration = iter;
     let max_iterations = opts.max_iterations;
 
     loop {
         let binding = AmbiguityBinding::Held { values: fixed_m };
-        let rows = build_rows(ctx, epochs, &binding, &current).map_err(PppRowError::into_fixed)?;
+        let rows = build_rows(ctx, epochs, &binding, &current)
+            .map_err(|error| FixedStep::from_rows(error, ctx, epochs, &current))?;
         let layout = PppNormalLayout::new(
             epochs.len(),
             ztd_unknown_count(ctx.tropo),
@@ -385,17 +700,23 @@ fn finalize_fixed_multi(
     fixed_m: BTreeMap<String, f64>,
     float_solution: FloatSolution,
     resolve: FixedResolve,
-) -> Result<FixedSolution, FixedSolveError> {
+) -> Result<FixedSolution, FixedStep> {
+    // A flip the rows find while the solution is assembled is found at convergence.
+    let ctx = ModelContext {
+        ssr_bias_stage: SsrBiasExclusionStage::AtConvergence,
+        ..ctx
+    };
     let FixedResolve {
         state,
         iterations,
         converged,
         status,
     } = resolve;
-    let residuals =
-        residual_rows(ctx, epochs, &fixed_m, &state).map_err(PppRowError::into_fixed)?;
+    let residuals = residual_rows(ctx, epochs, &fixed_m, &state)
+        .map_err(|error| FixedStep::from_rows(error, ctx, epochs, &state))?;
     let binding = AmbiguityBinding::Held { values: &fixed_m };
-    let rows = build_rows(ctx, epochs, &binding, &state).map_err(PppRowError::into_fixed)?;
+    let rows = build_rows(ctx, epochs, &binding, &state)
+        .map_err(|error| FixedStep::from_rows(error, ctx, epochs, &state))?;
     let covariance = ppp_position_covariance(
         &rows,
         PppNormalLayout::new(
@@ -409,7 +730,11 @@ fn finalize_fixed_multi(
     )?;
     let code: Vec<f64> = residuals.iter().map(|r| r.code_m).collect();
     let phase: Vec<f64> = residuals.iter().map(|r| r.phase_m).collect();
-    let temporal_correlation = estimate_temporal_correlation(&residuals, epochs);
+    let solved_epoch_indices: Vec<usize> = (0..epochs.len())
+        .map(|epoch_idx| ctx.correction_epoch_index(epoch_idx))
+        .collect();
+    let temporal_correlation =
+        estimate_temporal_correlation(&residuals, epochs, &solved_epoch_indices);
     let (temporal_position_covariance, temporal_position_covariance_scale_factor) =
         temporal_position_covariance(
             covariance.formal,
@@ -464,6 +789,8 @@ fn finalize_fixed_multi(
         phase_rms_m: rms(&phase),
         weighted_rms_m: weighted_rms(&residuals, ctx.weights),
         integer: search.integer,
+        ssr_bias_exclusions: Vec::new(),
+        solved_epoch_indices,
     })
 }
 
@@ -525,11 +852,13 @@ fn fixed_ambiguities_m(
 fn ambiguity_covariance_cycles(
     source: &dyn ObservableEphemerisSource,
     epochs: &[FloatEpoch],
+    fixed_arc: &FixedArc<'_>,
     ambiguity_ids: &[AmbiguityId],
     float_solution: &FloatSolution,
     config: &FixedSolveConfig,
-) -> Result<Vec<Vec<f64>>, FixedSolveError> {
-    let state = state_from_solution(float_solution, &FloatState::default_for_epochs(epochs));
+) -> Result<Vec<Vec<f64>>, FixedStep> {
+    let mut state = state_from_solution(float_solution, &FloatState::default_for_epochs(epochs));
+    state.clocks_m = fixed_arc.seed_clocks_m.to_vec();
     let layout = PppNormalLayout::new(
         epochs.len(),
         ztd_unknown_count(config.tropo),
@@ -547,13 +876,17 @@ fn ambiguity_covariance_cycles(
         // recipe field is the PPP reference and unused on this path.
         normal: NormalRecipe::PppDenseLastTie,
         estimate_residual_ionosphere: config.estimate_residual_ionosphere,
+        correction_epoch_indices: Some(fixed_arc.correction_epoch_indices),
+        ssr_bias_pass: fixed_arc.pass,
+        ssr_bias_stage: SsrBiasExclusionStage::FixedResolve,
+        ssr_bias_deferred: fixed_arc.deferred,
     };
     let binding = AmbiguityBinding::Estimated {
         ids: ambiguity_ids,
         values: &state.ambiguities_m,
     };
     let rows = build_rows(ctx, epochs, &binding, &state)
-        .map_err(|e| FixedSolveError::from(e.into_float()))?;
+        .map_err(|error| FixedStep::from_rows(error, ctx, epochs, &state))?;
     let (normal, _rhs) = clock_eliminated_normal_equations(&rows, layout)?;
     let covariance_m = ambiguity_covariance_from_normal(&normal, start, ambiguity_ids.len())?;
     let mut covariance_cycles = vec![vec![0.0; ambiguity_ids.len()]; ambiguity_ids.len()];
