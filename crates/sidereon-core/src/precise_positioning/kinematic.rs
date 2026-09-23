@@ -7,10 +7,12 @@ use crate::astro::math::linear::{invert_matrix_last_tie, matmul, matrix_sub, tra
 use crate::estimation::recipe::NormalRecipe;
 use crate::observables::ObservableEphemerisSource;
 
-use super::rows::{build_rows, AmbiguityBinding, PppRowError};
+use super::rows::{
+    build_rows, exclude_unresolved_ssr_bias_observations, AmbiguityBinding, PppRowError,
+};
 use super::{
     estimates_ztd, FloatEpoch, FloatSolveError, FloatState, MeasurementWeights, MissingCorrection,
-    NoEphemerisReason, RangeCorrections, TroposphereOptions,
+    NoEphemerisReason, RangeCorrections, SsrBiasExclusion, TroposphereOptions,
 };
 
 const BASE_STATE_DIMENSION: usize = 5;
@@ -152,6 +154,9 @@ pub struct KinematicUpdateSummary {
     pub innovation_rms_m: f64,
     /// Public satellite ids used by the measurement update.
     pub used_sats: Vec<String>,
+    /// Observations left out of the update because an SSR/HAS bias the corrections
+    /// require was not resolved for them.
+    pub ssr_bias_exclusions: Vec<SsrBiasExclusion>,
 }
 
 /// Per-epoch status returned by the kinematic PPP EKF driver.
@@ -159,6 +164,10 @@ pub struct KinematicUpdateSummary {
 pub enum KinematicEpochStatus {
     /// The epoch completed the EKF predict and measurement-update steps.
     Updated,
+    /// Every observation of the epoch was left out for a missing SSR/HAS bias, listed in
+    /// the epoch's `ssr_bias_exclusions`. The epoch carries the predicted state and
+    /// covariance without a measurement update, and the arc continues.
+    PredictedOnly,
 }
 
 /// One epoch returned by [`solve_kinematic_ppp`].
@@ -178,6 +187,9 @@ pub struct KinematicEpochSolution {
     pub used_sats: Vec<String>,
     /// Root-mean-square prefit innovation residual, in metres.
     pub innovation_rms_m: f64,
+    /// Observations of this epoch left out of the update because an SSR/HAS bias the
+    /// corrections require was not resolved for them.
+    pub ssr_bias_exclusions: Vec<SsrBiasExclusion>,
     /// Per-epoch filter status.
     pub status: KinematicEpochStatus,
 }
@@ -326,8 +338,19 @@ pub fn solve_kinematic_ppp(
             &active_ambiguity_ids,
             &config,
         )?;
-        let update =
-            correct_kinematic_state(source, epoch, &mut state, &mut covariance_m2, &config)?;
+        let update = correct_kinematic_state(
+            source,
+            epoch_idx,
+            epoch,
+            &mut state,
+            &mut covariance_m2,
+            &config,
+        )?;
+        let status = if update.used_sats.is_empty() {
+            KinematicEpochStatus::PredictedOnly
+        } else {
+            KinematicEpochStatus::Updated
+        };
         solutions.push(KinematicEpochSolution {
             position_m: state.position_m,
             clock_m: state.clock_m,
@@ -336,7 +359,8 @@ pub fn solve_kinematic_ppp(
             position_covariance_m2: position_covariance_block(&covariance_m2),
             used_sats: update.used_sats,
             innovation_rms_m: update.innovation_rms_m,
-            status: KinematicEpochStatus::Updated,
+            status,
+            ssr_bias_exclusions: update.ssr_bias_exclusions,
         });
         previous_t_rx_j2000_s = epoch.t_rx_j2000_s;
     }
@@ -349,8 +373,16 @@ pub fn solve_kinematic_ppp(
 /// This uses the same shared PPP model row builder as the static float solver,
 /// then applies an EKF measurement update with diagonal measurement covariance
 /// derived from those rows' inverse-sigma weights.
+///
+/// `epoch_index` is the epoch's index in the arc the corrections in `config` were
+/// computed for; every per-epoch correction is looked up under it. An observation
+/// whose required SSR/HAS bias is absent is left out of the update and listed in the
+/// summary's `ssr_bias_exclusions`; its ambiguity state is carried without a
+/// measurement. When every observation is left out, the state and covariance are
+/// returned unchanged, with no used satellites and a zero innovation RMS.
 pub fn correct_kinematic_state(
     source: &dyn ObservableEphemerisSource,
+    epoch_index: usize,
     epoch: &FloatEpoch,
     state: &mut KinematicState,
     covariance_m2: &mut Vec<Vec<f64>>,
@@ -361,6 +393,24 @@ pub fn correct_kinematic_state(
     validate_measurement_config(config)?;
     let float_state = float_state_from_kinematic(state);
     let corrections = &config.corrections;
+    let (retained, ssr_bias_exclusions) = exclude_unresolved_ssr_bias_observations(
+        source,
+        std::slice::from_ref(epoch),
+        epoch_index,
+        state.position_m,
+        &corrections.ppp,
+        0,
+        super::SsrBiasExclusionStage::BeforeSolve,
+    );
+    let epoch = &retained[0];
+    if epoch.observations.is_empty() {
+        return Ok(KinematicUpdateSummary {
+            innovation_rms_m: 0.0,
+            used_sats: Vec::new(),
+            ssr_bias_exclusions,
+        });
+    }
+    let correction_epoch_indices = [epoch_index];
     let ctx = super::ModelContext {
         source,
         weights: config.weights,
@@ -368,6 +418,10 @@ pub fn correct_kinematic_state(
         corrections,
         normal: NormalRecipe::PppDenseLastTie,
         estimate_residual_ionosphere: false,
+        correction_epoch_indices: Some(&correction_epoch_indices),
+        ssr_bias_pass: 0,
+        ssr_bias_stage: super::SsrBiasExclusionStage::BeforeSolve,
+        ssr_bias_deferred: &[],
     };
     let ambiguity_ids = state
         .ambiguities_m
@@ -397,6 +451,7 @@ pub fn correct_kinematic_state(
             .iter()
             .map(|obs| obs.satellite_id.clone())
             .collect(),
+        ssr_bias_exclusions,
     })
 }
 
@@ -699,7 +754,8 @@ fn kinematic_error_from_float(error: FloatSolveError) -> KinematicSolveError {
         FloatSolveError::InvalidInput { field, reason } => {
             KinematicSolveError::InvalidInput { field, reason }
         }
-        FloatSolveError::InsufficientObservationsAfterElevationCutoff { .. } => {
+        FloatSolveError::InsufficientObservationsAfterElevationCutoff { .. }
+        | FloatSolveError::InsufficientObservationsAfterSsrBiasExclusion { .. } => {
             KinematicSolveError::SingularGeometry
         }
         FloatSolveError::MissingCorrection {
@@ -1522,7 +1578,7 @@ mod tests {
         .expect("predict should succeed");
         let before = distance(state.position_m, static_solution.position_m);
         let update =
-            correct_kinematic_state(&source, &epoch, &mut state, &mut covariance_m2, &config)
+            correct_kinematic_state(&source, 0, &epoch, &mut state, &mut covariance_m2, &config)
                 .expect("measurement update should succeed");
         let after = distance(state.position_m, static_solution.position_m);
 
@@ -1538,7 +1594,7 @@ mod tests {
         let (source, epoch, mut state, config) = single_epoch_update_fixture();
         let mut covariance_m2 = config.initial_covariance_m2.clone();
 
-        correct_kinematic_state(&source, &epoch, &mut state, &mut covariance_m2, &config)
+        correct_kinematic_state(&source, 0, &epoch, &mut state, &mut covariance_m2, &config)
             .expect("measurement update should succeed");
 
         assert!(is_symmetric(&covariance_m2));
@@ -1552,8 +1608,9 @@ mod tests {
         config.weights.phase = f64::MIN_POSITIVE;
         let mut covariance_m2 = config.initial_covariance_m2.clone();
 
-        let err = correct_kinematic_state(&source, &epoch, &mut state, &mut covariance_m2, &config)
-            .expect_err("overflowed measurement variance must be rejected");
+        let err =
+            correct_kinematic_state(&source, 0, &epoch, &mut state, &mut covariance_m2, &config)
+                .expect_err("overflowed measurement variance must be rejected");
 
         assert_eq!(
             err,
@@ -1642,8 +1699,9 @@ mod tests {
         };
         let mut covariance_m2 = vec![vec![0.0; state.dimension()]; state.dimension()];
 
-        let err = correct_kinematic_state(&source, &epoch, &mut state, &mut covariance_m2, &config)
-            .expect_err("singular innovation covariance should error");
+        let err =
+            correct_kinematic_state(&source, 0, &epoch, &mut state, &mut covariance_m2, &config)
+                .expect_err("singular innovation covariance should error");
 
         assert_eq!(err, KinematicSolveError::SingularGeometry);
     }
@@ -1841,6 +1899,164 @@ mod tests {
             ..KinematicConfig::default()
         };
         (source, epoch, initial_state, config)
+    }
+
+    /// SSR biases are looked up under each epoch's own index, and an observation without
+    /// its required bias is left out of that epoch's update and reported. One run holds
+    /// epoch-varying biases that the observations carry; the other holds zero biases on
+    /// the unbiased observations. Both lack G03's biases at epoch 3. If any epoch read
+    /// another epoch's biases the two runs would differ by metres.
+    #[test]
+    fn driver_applies_each_epochs_ssr_biases_and_excludes_a_missing_one() {
+        let truth = [3_512_900.0, 780_500.0, 5_248_700.0];
+        let truths = vec![truth; 6];
+        let clocks = [12.5, -8.25, 4.0, 1.5, -2.0, 6.75];
+        let (source, epochs, ambiguities_m) = synthetic_kinematic_arc(&truths, &clocks);
+        let missing_epoch = 3;
+        let missing_sat = "G03";
+        let code_bias =
+            |epoch_idx: usize, prn: u8| 0.4 + 0.3 * epoch_idx as f64 + 0.01 * f64::from(prn);
+        let phase_bias =
+            |epoch_idx: usize, prn: u8| -0.05 * (epoch_idx as f64 + 1.0) + 0.002 * f64::from(prn);
+
+        let mut biased_epochs = epochs.clone();
+        let mut biased = super::super::PppCorrectionLookup {
+            ssr_code_bias_enabled: true,
+            phase_bias_enabled: true,
+            ..Default::default()
+        };
+        let mut zero = biased.clone();
+        for (epoch_idx, epoch) in biased_epochs.iter_mut().enumerate() {
+            for obs in &mut epoch.observations {
+                let code_m = code_bias(epoch_idx, obs.sat.prn);
+                let phase_m = phase_bias(epoch_idx, obs.sat.prn);
+                // The row model adds the code bias to the modelled code and the phase
+                // bias to the observed phase.
+                obs.code_m += code_m;
+                obs.phase_m -= phase_m;
+                if epoch_idx == missing_epoch && obs.satellite_id == missing_sat {
+                    continue;
+                }
+                let key = (obs.sat, epoch_idx, obs.ambiguity_id.clone());
+                biased.ssr_code_bias_m.insert(key.clone(), code_m);
+                biased.phase_bias_m.insert(key.clone(), phase_m);
+                zero.ssr_code_bias_m.insert(key.clone(), 0.0);
+                zero.phase_bias_m.insert(key, 0.0);
+            }
+        }
+        let initial_state = KinematicState {
+            position_m: [truth[0] + 5.0, truth[1] - 4.0, truth[2] + 3.0],
+            clock_m: -20.0,
+            ztd_residual_m: 0.0,
+            ambiguities_m,
+        };
+        let mut biased_config = driver_config(initial_state.clone());
+        biased_config.corrections.ppp = biased;
+        let mut zero_config = driver_config(initial_state);
+        zero_config.corrections.ppp = zero;
+
+        let with_biases = solve_kinematic_ppp(&source, &biased_epochs, biased_config)
+            .expect("kinematic solve with SSR biases should succeed");
+        let without_biases = solve_kinematic_ppp(&source, &epochs, zero_config)
+            .expect("kinematic solve with zero SSR biases should succeed");
+
+        assert_eq!(with_biases.len(), epochs.len());
+        for (epoch_idx, (biased, unbiased)) in with_biases.iter().zip(&without_biases).enumerate() {
+            assert!(
+                distance(biased.position_m, unbiased.position_m) < 1.0e-6,
+                "epoch {epoch_idx}"
+            );
+            assert!(
+                (biased.clock_m - unbiased.clock_m).abs() < 1.0e-6,
+                "epoch {epoch_idx}"
+            );
+            assert_eq!(biased.used_sats, unbiased.used_sats);
+            if epoch_idx == missing_epoch {
+                assert_eq!(biased.ssr_bias_exclusions.len(), 1);
+                let exclusion = &biased.ssr_bias_exclusions[0];
+                assert_eq!(exclusion.epoch_index, missing_epoch);
+                assert_eq!(exclusion.satellite_id, missing_sat);
+                assert!(exclusion.code_bias_missing);
+                assert!(exclusion.phase_bias_missing);
+                assert_eq!(exclusion.application, None);
+                assert!(!biased.used_sats.iter().any(|sat| sat == missing_sat));
+                assert_eq!(
+                    biased.used_sats.len(),
+                    epochs[epoch_idx].observations.len() - 1
+                );
+            } else {
+                assert!(biased.ssr_bias_exclusions.is_empty());
+                assert_eq!(biased.used_sats.len(), epochs[epoch_idx].observations.len());
+            }
+        }
+    }
+
+    /// An epoch whose every observation lacks its required SSR bias is not an error: the
+    /// driver carries the predicted state through it as `PredictedOnly`, lists the
+    /// exclusions, and updates again from the next epoch.
+    #[test]
+    fn driver_carries_prediction_through_an_epoch_with_every_bias_missing() {
+        let truth = [3_512_900.0, 780_500.0, 5_248_700.0];
+        let truths = vec![truth; 6];
+        let clocks = [12.5, -8.25, 4.0, 1.5, -2.0, 6.75];
+        let (source, epochs, ambiguities_m) = synthetic_kinematic_arc(&truths, &clocks);
+        let empty_epoch = 3;
+        let mut lookup = super::super::PppCorrectionLookup {
+            ssr_code_bias_enabled: true,
+            phase_bias_enabled: true,
+            ..Default::default()
+        };
+        for (epoch_idx, epoch) in epochs.iter().enumerate() {
+            if epoch_idx == empty_epoch {
+                continue;
+            }
+            for obs in &epoch.observations {
+                let key = (obs.sat, epoch_idx, obs.ambiguity_id.clone());
+                lookup.ssr_code_bias_m.insert(key.clone(), 0.0);
+                lookup.phase_bias_m.insert(key, 0.0);
+            }
+        }
+        let initial_state = KinematicState {
+            position_m: [truth[0] + 5.0, truth[1] - 4.0, truth[2] + 3.0],
+            clock_m: -20.0,
+            ztd_residual_m: 0.0,
+            ambiguities_m,
+        };
+        let mut config = driver_config(initial_state);
+        config.corrections.ppp = lookup;
+
+        let solutions = solve_kinematic_ppp(&source, &epochs, config)
+            .expect("an epoch with every bias missing does not end the arc");
+
+        assert_eq!(solutions.len(), epochs.len());
+        for (epoch_idx, solution) in solutions.iter().enumerate() {
+            if epoch_idx == empty_epoch {
+                assert_eq!(solution.status, KinematicEpochStatus::PredictedOnly);
+                assert!(solution.used_sats.is_empty());
+                assert_eq!(solution.innovation_rms_m, 0.0);
+                assert_eq!(
+                    solution.ssr_bias_exclusions.len(),
+                    epochs[epoch_idx].observations.len()
+                );
+                assert!(solution
+                    .ssr_bias_exclusions
+                    .iter()
+                    .all(|exclusion| exclusion.epoch_index == empty_epoch));
+                // Hold motion and zero process noise: the prediction is the previous
+                // epoch's state.
+                let previous = &solutions[epoch_idx - 1];
+                assert_eq!(solution.position_m, previous.position_m);
+                assert_eq!(
+                    solution.position_covariance_m2,
+                    previous.position_covariance_m2
+                );
+            } else {
+                assert_eq!(solution.status, KinematicEpochStatus::Updated);
+                assert!(solution.ssr_bias_exclusions.is_empty());
+            }
+        }
+        let last = solutions.last().expect("kinematic solution");
+        assert!(distance(last.position_m, truth) < 0.05);
     }
 
     fn synthetic_kinematic_arc(

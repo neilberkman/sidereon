@@ -43,7 +43,7 @@ const GLONASS_MINUS_UTC_S: f64 = 3.0 * SECONDS_PER_HOUR;
 const SECONDS_PER_DAY: f64 = 86_400.0;
 /// Julian date of the GPS epoch, 1980-01-06 00:00:00.
 const GPS_EPOCH_JD: f64 = 2_444_244.5;
-const FD_HALF_S: f64 = 0.5;
+use crate::rinex_nav::EPHPOS_STEP_S;
 /// RTCM 10403.x SSR radial orbit and clock C0 resolution, meters.
 const RTCM_SSR_RADIAL_CLOCK_SCALE_M: f64 = 1.0e-4;
 /// RTCM 10403.x SSR along-track and cross-track orbit resolution, meters.
@@ -2686,6 +2686,61 @@ impl Default for SsrFallbackPolicy {
     }
 }
 
+/// An ephemeris source that applies SSR orbit and clock corrections from a store, as seen
+/// by a positioning solve that has to know which SSR solution a satellite state came from.
+///
+/// [`ObservableEphemerisSource::ssr_corrections`] returns it for the SSR-corrected sources,
+/// so a solve can check, at each observation's transmission time, that the SSR biases it
+/// applies belong to the solution of the orbit and clock it uses.
+pub trait SsrCorrectionSource {
+    /// Store holding the SSR corrections the source applies.
+    fn ssr_store(&self) -> &SsrCorrectionStore;
+
+    /// Solution of the SSR orbit and clock corrections the source applies to `sat` at
+    /// `t_j2000_s`, or `None` when it declines the satellite or returns a state without
+    /// SSR corrections.
+    fn applied_orbit_clock_solution(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<SsrSolution>;
+}
+
+impl SsrCorrectionSource for SsrCorrectedEphemeris<'_> {
+    fn ssr_store(&self) -> &SsrCorrectionStore {
+        self.store
+    }
+
+    fn applied_orbit_clock_solution(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<SsrSolution> {
+        SsrCorrectedEphemeris::applied_orbit_clock_solution(self, sat, t_j2000_s)
+    }
+}
+
+impl SsrCorrectionSource for SsrCorrectedEphemerisOwned {
+    fn ssr_store(&self) -> &SsrCorrectionStore {
+        &self.store
+    }
+
+    fn applied_orbit_clock_solution(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<SsrSolution> {
+        SsrCorrectedEphemerisOwned::applied_orbit_clock_solution(self, sat, t_j2000_s)
+    }
+}
+
+/// Which state an SSR-corrected source returns for a satellite at an epoch.
+enum VelocitySource {
+    Ssr,
+    Broadcast,
+    None,
+}
+
 /// Broadcast ephemeris corrected by an SSR store.
 #[derive(Clone)]
 pub struct SsrCorrectedEphemeris<'a> {
@@ -2749,20 +2804,104 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         self
     }
 
+    /// SSR correction store this source reads.
+    pub fn store(&self) -> &'a SsrCorrectionStore {
+        self.store
+    }
+
     /// Corrected ECEF position and satellite clock at a J2000 epoch.
     pub fn corrected_state(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<([f64; 3], f64)> {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             return None;
         }
-        self.corrected_state_inner(sat, t_j2000_s)
+        self.ssr_corrected_state(sat, t_j2000_s)
+            .map(|(state, _)| state)
             .or_else(|| self.broadcast_fallback_after_failure(sat, t_j2000_s))
     }
 
-    fn corrected_state_inner(
+    /// Solution of the SSR orbit and clock corrections that [`Self::corrected_state`]
+    /// applies for `sat` at `t_j2000_s`.
+    ///
+    /// `None` when `corrected_state` would not return an SSR-corrected state: the satellite
+    /// is excluded by a HAS do-not-use indication, the orbit or clock correction is missing,
+    /// the two differ in solution or IOD SSR, either is not fresh at `t_j2000_s`, a regional
+    /// correction's provider is not allowed, no broadcast record matches the orbit's IODE,
+    /// or a centre-of-mass orbit cannot be moved to the antenna phase centre. In those cases
+    /// `corrected_state` declines the satellite or returns the plain broadcast state, so no
+    /// SSR solution's clock is in use. Both methods evaluate the same function.
+    pub fn applied_orbit_clock_solution(
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
-    ) -> Option<([f64; 3], f64)> {
+    ) -> Option<SsrSolution> {
+        self.applied_ssr(sat, t_j2000_s)
+    }
+
+    /// Satellite ECEF velocity, metres per second, of the state [`Self::corrected_state`]
+    /// returns at `t_j2000_s`, or `None` when it returns no state.
+    ///
+    /// For an SSR-corrected state this is the velocity RTKLIB `satpos_ssr` returns: the
+    /// velocity of the broadcast record selected by the orbit correction's IODE, formed by
+    /// `ephpos` as the difference of that record's positions at `t_j2000_s` and 1 ms later.
+    /// `satpos_ssr` adds no orbit-correction rate to it. For a broadcast fallback state it
+    /// is the velocity of the broadcast record the fallback uses. It never differences
+    /// across a correction reference epoch or between an SSR and a broadcast state.
+    pub fn corrected_velocity(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<[f64; 3]> {
+        match self.velocity_source(sat, t_j2000_s) {
+            VelocitySource::Ssr => self.ssr_broadcast_velocity(sat, t_j2000_s),
+            VelocitySource::Broadcast => self.broadcast.selected_record_velocity(sat, t_j2000_s),
+            VelocitySource::None => None,
+        }
+    }
+
+    /// Which state [`Self::corrected_state`] returns for `sat` at `t_j2000_s`.
+    fn velocity_source(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> VelocitySource {
+        if self.store.is_satellite_excluded(sat, t_j2000_s) {
+            VelocitySource::None
+        } else if self.ssr_corrected_state(sat, t_j2000_s).is_some() {
+            VelocitySource::Ssr
+        } else if self
+            .broadcast_fallback_after_failure(sat, t_j2000_s)
+            .is_some()
+        {
+            VelocitySource::Broadcast
+        } else {
+            VelocitySource::None
+        }
+    }
+
+    /// Velocity of the broadcast record selected by the SSR orbit correction's IODE, as
+    /// RTKLIB `ephpos` forms it: a 1 ms forward difference of that record's positions.
+    fn ssr_broadcast_velocity(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<[f64; 3]> {
+        let orbit = self.store.orbit(sat)?;
+        let nav_message = default_nav_message(sat.system)?;
+        let issue = BroadcastIssue {
+            issue: orbit.iode,
+            message: nav_message,
+        };
+        let record = self
+            .broadcast
+            .select_by_issue_at(sat, issue, nav_message, t_j2000_s)?;
+        let (_, is_geo) = continuous_time_for_sat(sat, t_j2000_s)?;
+        broadcast_velocity(record, sat, t_j2000_s, is_geo)
+    }
+
+    /// The SSR corrections [`Self::corrected_state`] applies for `sat` at `t_j2000_s`.
+    fn applied_ssr(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<SsrSolution> {
+        if self.store.is_satellite_excluded(sat, t_j2000_s) {
+            return None;
+        }
+        self.ssr_corrected_state(sat, t_j2000_s)
+            .map(|(_, solution)| solution)
+    }
+
+    /// SSR-corrected state and the solution of the orbit and clock corrections applied to
+    /// it, or `None` when the corrections cannot be applied at `t_j2000_s`.
+    fn ssr_corrected_state(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<(([f64; 3], f64), SsrSolution)> {
         let orbit = self.store.orbit(sat)?;
         let clock = self.store.clock(sat)?;
         if orbit.solution != clock.solution || orbit.iod_ssr != clock.iod_ssr {
@@ -2848,7 +2987,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             SsrSource::RtcmSsr => state.clock.dt_clock_total_s - dclock_m / C_M_S,
             SsrSource::GalileoHas => state.clock.dt_clock_total_s + dclock_m / C_M_S,
         };
-        Some((corrected_position, corrected_clock_s))
+        Some(((corrected_position, corrected_clock_s), clock.solution))
     }
 
     /// Whether a correction applies at `t_j2000_s`.
@@ -2967,6 +3106,30 @@ impl ObservableEphemerisSource for SsrCorrectedEphemeris<'_> {
             clock_s: Some(clock_s),
         })
     }
+
+    fn ssr_corrections(&self) -> Option<&dyn SsrCorrectionSource> {
+        Some(self)
+    }
+
+    fn velocity_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<std::result::Result<[f64; 3], ObservablesError>> {
+        match self.velocity_source(sat, t_j2000_s) {
+            VelocitySource::Ssr => Some(
+                self.ssr_broadcast_velocity(sat, t_j2000_s)
+                    .ok_or(ObservablesError::NoEphemeris),
+            ),
+            // The broadcast record the fallback state comes from; a system with no
+            // broadcast record model has no state here either way.
+            VelocitySource::Broadcast => self
+                .broadcast
+                .selected_record_velocity(sat, t_j2000_s)
+                .map(Ok),
+            VelocitySource::None => Some(Err(ObservablesError::NoEphemeris)),
+        }
+    }
 }
 
 /// Owned corrected ephemeris source.
@@ -3038,6 +3201,27 @@ impl SsrCorrectedEphemerisOwned {
         self.borrowed().corrected_state(sat, t_j2000_s)
     }
 
+    /// See [`SsrCorrectedEphemeris::corrected_velocity`].
+    pub fn corrected_velocity(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<[f64; 3]> {
+        self.borrowed().corrected_velocity(sat, t_j2000_s)
+    }
+
+    /// Solution of the SSR orbit and clock corrections that [`Self::corrected_state`]
+    /// applies; see [`SsrCorrectedEphemeris::applied_orbit_clock_solution`].
+    pub fn applied_orbit_clock_solution(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<SsrSolution> {
+        self.borrowed().applied_orbit_clock_solution(sat, t_j2000_s)
+    }
+
+    /// Borrowed source with the same store, broadcast data, antennas and policies, for
+    /// callers such as `PppCorrectionLookup::with_ssr_biases` that take one.
+    pub fn as_borrowed(&self) -> SsrCorrectedEphemeris<'_> {
+        self.borrowed()
+    }
+
     fn borrowed(&self) -> SsrCorrectedEphemeris<'_> {
         let source = SsrCorrectedEphemeris::new(&self.broadcast, &self.store)
             .with_staleness(self.staleness)
@@ -3068,6 +3252,18 @@ impl ObservableEphemerisSource for SsrCorrectedEphemerisOwned {
         t_j2000_s: f64,
     ) -> std::result::Result<ObservableState, ObservablesError> {
         self.borrowed().observable_state_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn ssr_corrections(&self) -> Option<&dyn SsrCorrectionSource> {
+        Some(self)
+    }
+
+    fn velocity_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<std::result::Result<[f64; 3], ObservablesError>> {
+        self.borrowed().velocity_at_j2000_s(sat, t_j2000_s)
     }
 }
 
@@ -3345,42 +3541,40 @@ fn continuous_time_for_sat(sat: GnssSatelliteId, t_j2000_s: f64) -> Option<(f64,
     }
 }
 
+/// Velocity of one broadcast record as RTKLIB `ephpos` forms it for `satpos_ssr`: the
+/// difference of the record's positions at `t_j2000_s` and [`EPHPOS_STEP_S`] later. Both
+/// the SSR-corrected state's velocity and its radial, along-track and cross-track basis
+/// use it, as `satpos_ssr` uses `rs+3` for both.
 fn broadcast_velocity(
     record: &crate::rinex_nav::BroadcastRecord,
     sat: GnssSatelliteId,
     t_j2000_s: f64,
     is_geo: bool,
 ) -> Option<[f64; 3]> {
-    let p_plus = broadcast_position_from_record(record, sat, t_j2000_s + FD_HALF_S, is_geo)?;
-    let p_minus = broadcast_position_from_record(record, sat, t_j2000_s - FD_HALF_S, is_geo)?;
-    let denom = 2.0 * FD_HALF_S;
-    Some([
-        (p_plus[0] - p_minus[0]) / denom,
-        (p_plus[1] - p_minus[1]) / denom,
-        (p_plus[2] - p_minus[2]) / denom,
-    ])
-}
-
-fn broadcast_position_from_record(
-    record: &crate::rinex_nav::BroadcastRecord,
-    sat: GnssSatelliteId,
-    t_j2000_s: f64,
-    is_geo: bool,
-) -> Option<[f64; 3]> {
+    // The step is added to the record's reduced time `tk`, as RTKLIB adds it to its exact
+    // `gtime_t`; added to the absolute J2000 epoch it would round at 1e-7 s.
     let (t_continuous_s, _) = continuous_time_for_sat(sat, t_j2000_s)?;
     let sow = t_continuous_s.rem_euclid(SECONDS_PER_WEEK);
-    satellite_state_unchecked(
-        &record.elements,
-        &record.clock,
-        &record.constants(),
-        sow,
-        record.broadcast_clock_group_delay_s(),
-        is_geo,
-    )
-    .orbit
-    .position()
-    .ok()
-    .map(|p| p.as_array())
+    let tk = crate::broadcast::time_from_reference_s(sow, record.elements.toe_sow);
+    let position = |tk_s: f64| -> Option<[f64; 3]> {
+        crate::broadcast::satellite_position_ecef_at_tk_unchecked(
+            &record.elements,
+            None,
+            &record.constants(),
+            tk_s,
+            is_geo,
+        )
+        .position()
+        .ok()
+        .map(|position| position.as_array())
+    };
+    let start = position(tk)?;
+    let end = position(tk + EPHPOS_STEP_S)?;
+    Some([
+        (end[0] - start[0]) / EPHPOS_STEP_S,
+        (end[1] - start[1]) / EPHPOS_STEP_S,
+        (end[2] - start[2]) / EPHPOS_STEP_S,
+    ])
 }
 
 fn velocity_aligned_basis(r: [f64; 3], v: [f64; 3]) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
@@ -5404,12 +5598,15 @@ mod tests {
         let (position, clock) = source
             .corrected_state(sat, ssr_j2000(REAL_SSR_EPOCH_TOW_S))
             .expect("corrected state");
+        // Sidereon's own output, pinned to catch any change. It is not RTKLIB's, which is
+        // checked to 1e-6 m below: our Kepler solver iterates to 1e-12 by fixed point where
+        // RTKLIB `eph2pos` uses Newton to 1e-13, so the two differ by a few to tens of ulp.
         assert_eq!(
             position.map(f64::to_bits),
             [
-                13_931_924_021_901_094_572,
-                4_714_745_314_434_008_008,
-                13_939_538_677_975_909_636,
+                13_931_924_021_901_094_555,
+                4_714_745_314_434_008_015,
+                13_939_538_677_975_909_640,
             ]
         );
         assert_eq!(clock.to_bits(), 4_553_802_228_904_002_216);
@@ -5540,19 +5737,10 @@ mod tests {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> [f64; 3] {
-        let p_plus = broadcast
-            .position_clock_at_j2000_s(sat, t_j2000_s + FD_HALF_S)
-            .expect("broadcast plus state")
-            .0;
-        let p_minus = broadcast
-            .position_clock_at_j2000_s(sat, t_j2000_s - FD_HALF_S)
-            .expect("broadcast minus state")
-            .0;
-        [
-            (p_plus[0] - p_minus[0]) / (2.0 * FD_HALF_S),
-            (p_plus[1] - p_minus[1]) / (2.0 * FD_HALF_S),
-            (p_plus[2] - p_minus[2]) / (2.0 * FD_HALF_S),
-        ]
+        // RTKLIB `ephpos`: the record's positions at `tk` and `tk` + 1 ms.
+        broadcast
+            .selected_record_velocity(sat, t_j2000_s)
+            .expect("broadcast record velocity")
     }
 
     fn analytic_velocity_aligned_basis(

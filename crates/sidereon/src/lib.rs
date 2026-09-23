@@ -567,8 +567,8 @@ impl fmt::Display for Error {
             Error::Velocity(e) => write!(f, "velocity solve failed: {e}"),
             Error::RtkFloat(e) => write!(f, "{e}"),
             Error::RtkFixed(e) => write!(f, "{e}"),
-            Error::PppFloat(e) => write!(f, "{e}"),
-            Error::PppFixed(e) => write!(f, "{e}"),
+            Error::PppFloat(e) => write!(f, "PPP float solve failed: {e}"),
+            Error::PppFixed(e) => write!(f, "PPP fixed solve failed: {e}"),
         }
     }
 }
@@ -1648,6 +1648,13 @@ mod tests {
             code_rms_m: 0.0,
             phase_rms_m: 0.0,
             weighted_rms_m: 0.0,
+            ssr_bias_exclusions: Vec::new(),
+            solved_epoch_indices: Vec::new(),
+            ssr_bias_readmissions: Vec::new(),
+            ssr_bias_last_pass: 0,
+            residual_screen: false,
+            solve_options: sidereon_core::precise_positioning::FloatSolveOptions::default(),
+            residual_screen_removals: Vec::new(),
         }
     }
 

@@ -68,6 +68,11 @@ pub(crate) const MAX_EPHEMERIS_AGE_S: f64 = 4.0 * SECONDS_PER_HOUR;
 /// epoch (the nominal half-hour upload cadence), so a query farther than this
 /// reports no ephemeris rather than extrapolating the RK4 integration.
 pub(crate) const GLONASS_MAX_AGE_S: f64 = 15.0 * 60.0;
+/// Step of RTKLIB `ephpos` (`tt = 1E-3`), seconds: a broadcast record's velocity is the
+/// difference of its positions at an epoch and this long after, both evaluated from the
+/// record's reduced time (time of week, or time from the reference epoch) as RTKLIB adds
+/// the step to its exact `gtime_t`.
+pub(crate) const EPHPOS_STEP_S: f64 = 1.0e-3;
 const GPS_NOMINAL_FIT_INTERVAL_S: f64 = 4.0 * SECONDS_PER_HOUR;
 /// Fit interval for legacy RINEX 3.00–3.02 GPS records when the fit-interval flag
 /// is 1 (extended fit). RINEX 3.02 Table A6 explicitly defines flag 1 as 6 hours

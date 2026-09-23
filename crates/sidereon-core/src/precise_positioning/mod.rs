@@ -249,7 +249,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::constants::F_L1_HZ;
 use crate::estimation::recipe::NormalRecipe;
-use crate::observables::{predict, ObservableEphemerisSource, ObservablesError, PredictOptions};
+use crate::observables::{ObservableEphemerisSource, ObservablesError, PredictOptions};
 use crate::ppp_corrections::{
     self, PppCorrectionEpoch, PppCorrectionObservation, PppCorrectionsError, PppCorrectionsOptions,
 };
@@ -315,6 +315,29 @@ struct ModelContext<'a> {
     corrections: &'a RangeCorrections,
     normal: NormalRecipe,
     estimate_residual_ionosphere: bool,
+    /// Caller epoch index of each epoch in the slice being solved, used to key the
+    /// per-epoch correction lookups. `None` when the slice is the caller's epochs in their
+    /// own positions. A slice that leaves epochs out, such as a residual screen that
+    /// removed every observation of an epoch or a single kinematic epoch, maps each
+    /// remaining epoch back to its own corrections.
+    correction_epoch_indices: Option<&'a [usize]>,
+    /// Solve pass reported with an SSR bias exclusion the row model finds.
+    ssr_bias_pass: usize,
+    /// Stage reported with an SSR bias exclusion the row model finds.
+    ssr_bias_stage: SsrBiasExclusionStage,
+    /// Observations, as (input epoch index, ambiguity id), whose SSR bias records the rows
+    /// do not check: observations admitted again after an exclusion, whose records are
+    /// judged only at a converged position.
+    ssr_bias_deferred: &'a [(usize, String)],
+}
+
+impl ModelContext<'_> {
+    /// Caller epoch index keying the corrections of the `epoch_idx`-th solved epoch.
+    fn correction_epoch_index(&self, epoch_idx: usize) -> usize {
+        self.correction_epoch_indices
+            .and_then(|indices| indices.get(epoch_idx).copied())
+            .unwrap_or(epoch_idx)
+    }
 }
 
 fn predict_default(
@@ -326,6 +349,31 @@ fn predict_default(
         light_time: true,
         sagnac: true,
     })
+}
+
+/// Transmit-time geometry of `obs` for a receiver at `receiver_m`, without the satellite
+/// velocity, which the PPP model needs only for the satellite clock relativity term.
+///
+/// The light-time iteration starts from the observation's pseudorange over the speed of
+/// light. The seed only picks where the source is first queried, near the transmission
+/// time instead of at the reception time; the iteration converges to the same
+/// transmission time from either.
+fn observation_geometry(
+    source: &dyn ObservableEphemerisSource,
+    obs: &FloatObservation,
+    receiver_m: [f64; 3],
+    t_rx_j2000_s: f64,
+) -> Result<crate::observables::TransmitGeometry, FloatSolveError> {
+    let options = predict_default(source, obs)?;
+    crate::observables::predict_transmit_geometry(
+        source,
+        obs.sat,
+        receiver_m,
+        t_rx_j2000_s,
+        options,
+        crate::observables::flight_time_seed_s(obs.code_m),
+    )
+    .map_err(|error| no_ephemeris(obs, error))
 }
 
 fn no_ephemeris(obs: &FloatObservation, error: ObservablesError) -> FloatSolveError {
@@ -403,7 +451,71 @@ pub(super) fn validate_fixed_solve_boundary(
 ) -> Result<(), FixedSolveError> {
     validate_epochs(epochs).map_err(FixedSolveError::Float)?;
     validate_float_solution(solution, epochs.len())?;
+    validate_float_solve_options(solution.solve_options).map_err(FixedSolveError::Float)?;
+    validate_float_solution_passes(solution).map_err(FixedSolveError::Float)?;
+    validate_float_solution_observation_keys(epochs, solution).map_err(FixedSolveError::Float)?;
     validate_fixed_config(config)
+}
+
+/// The SSR/HAS bias pass numbers a float solution carries fit in a `u32`, so a solve that
+/// continues the numbering from them stays in range.
+fn validate_float_solution_passes(solution: &FloatSolution) -> Result<(), FloatSolveError> {
+    let in_range = |pass: usize| u32::try_from(pass).is_ok();
+    if !in_range(solution.ssr_bias_last_pass) {
+        return Err(FloatSolveError::InvalidInput {
+            field: "ppp float_solution ssr_bias_last_pass",
+            reason: "exceeds u32::MAX",
+        });
+    }
+    if !solution
+        .ssr_bias_exclusions
+        .iter()
+        .all(|exclusion| in_range(exclusion.pass))
+    {
+        return Err(FloatSolveError::InvalidInput {
+            field: "ppp float_solution ssr_bias_exclusions pass",
+            reason: "exceeds u32::MAX",
+        });
+    }
+    Ok(())
+}
+
+/// The residual screen's removals and the SSR/HAS bias readmissions a float solution
+/// carries name observations of `epochs`: an input epoch index in range and an ambiguity id
+/// observed in that epoch.
+fn validate_float_solution_observation_keys(
+    epochs: &[FloatEpoch],
+    solution: &FloatSolution,
+) -> Result<(), FloatSolveError> {
+    let names_an_observation = |(epoch_index, ambiguity_id): &(usize, String)| {
+        epochs.get(*epoch_index).is_some_and(|epoch| {
+            epoch
+                .observations
+                .iter()
+                .any(|obs| obs.ambiguity_id == *ambiguity_id)
+        })
+    };
+    if !solution
+        .residual_screen_removals
+        .iter()
+        .all(names_an_observation)
+    {
+        return Err(FloatSolveError::InvalidInput {
+            field: "ppp float_solution residual_screen_removals",
+            reason: "must name observations of the input epochs",
+        });
+    }
+    if !solution
+        .ssr_bias_readmissions
+        .iter()
+        .all(names_an_observation)
+    {
+        return Err(FloatSolveError::InvalidInput {
+            field: "ppp float_solution ssr_bias_readmissions",
+            reason: "must name observations of the input epochs",
+        });
+    }
+    Ok(())
 }
 
 fn validate_epochs(epochs: &[FloatEpoch]) -> Result<(), FloatSolveError> {
@@ -978,17 +1090,34 @@ fn validate_state_clock_count(state: &FloatState, n_epochs: usize) -> Result<(),
     }
 }
 
+/// A float solution passed to the fixed solve holds one clock per solved epoch, and its
+/// solved epochs are distinct input epochs of the `n_epochs` given, in ascending order.
 fn validate_solution_clock_count(
     solution: &FloatSolution,
     n_epochs: usize,
 ) -> Result<(), FixedSolveError> {
-    if solution.epoch_clocks_m.len() == n_epochs {
+    if solution.epoch_clocks_m.len() != solution.solved_epoch_indices.len() {
+        return Err(FixedSolveError::Float(invalid_clock_count(
+            solution.solved_epoch_indices.len(),
+            solution.epoch_clocks_m.len(),
+        )));
+    }
+    validate_solved_epoch_indices(&solution.solved_epoch_indices, n_epochs)
+        .map_err(FixedSolveError::Float)
+}
+
+fn validate_solved_epoch_indices(
+    indices: &[usize],
+    n_epochs: usize,
+) -> Result<(), FloatSolveError> {
+    let ascending = indices.windows(2).all(|pair| pair[0] < pair[1]);
+    if ascending && indices.last().is_none_or(|&last| last < n_epochs) {
         Ok(())
     } else {
-        Err(FixedSolveError::Float(invalid_clock_count(
-            n_epochs,
-            solution.epoch_clocks_m.len(),
-        )))
+        Err(FloatSolveError::InvalidInput {
+            field: "ppp solution solved_epoch_indices",
+            reason: "must be ascending distinct input epoch indices",
+        })
     }
 }
 
@@ -996,11 +1125,16 @@ fn validate_float_solution_clock_count(
     solution: &FloatSolution,
     n_epochs: usize,
 ) -> Result<(), FloatSolveError> {
-    if solution.epoch_clocks_m.len() == n_epochs {
-        Ok(())
-    } else {
-        Err(invalid_clock_count(n_epochs, solution.epoch_clocks_m.len()))
+    if solution.epoch_clocks_m.len() != n_epochs {
+        return Err(invalid_clock_count(n_epochs, solution.epoch_clocks_m.len()));
     }
+    if solution.solved_epoch_indices.len() != n_epochs {
+        return Err(invalid_clock_count(
+            n_epochs,
+            solution.solved_epoch_indices.len(),
+        ));
+    }
+    Ok(())
 }
 
 fn state_from_solution(solution: &FloatSolution, prior: &FloatState) -> FloatState {
@@ -1050,15 +1184,7 @@ fn apply_elevation_cutoff(
     for (epoch_idx, epoch) in epochs.iter().enumerate() {
         let mut observations = Vec::with_capacity(epoch.observations.len());
         for obs in &epoch.observations {
-            let options = predict_default(source, obs)?;
-            let pred = predict(
-                source,
-                obs.sat,
-                state.position_m,
-                epoch.t_rx_j2000_s,
-                options,
-            )
-            .map_err(|e| no_ephemeris(obs, e))?;
+            let pred = observation_geometry(source, obs, state.position_m, epoch.t_rx_j2000_s)?;
             validate::finite(pred.elevation_deg, "ppp predicted elevation_deg")
                 .map_err(invalid_input)?;
             if pred.elevation_deg >= cutoff_deg {
@@ -1080,28 +1206,70 @@ fn validate_elevation_cutoff_retained(
     tropo: TroposphereOptions,
     estimate_residual_ionosphere: bool,
 ) -> Result<(), FloatSolveError> {
+    match observation_shortfall(epochs, tropo, estimate_residual_ionosphere) {
+        Some((retained_observations, required_observations)) => {
+            Err(insufficient_after_elevation_cutoff(
+                cutoff_deg,
+                retained_observations,
+                required_observations,
+            ))
+        }
+        None => Ok(()),
+    }
+}
+
+/// Refuse, naming SSR bias exclusion as the cause, an arc that the exclusion of
+/// `excluded_observations` observations left unable to support a static solve.
+fn validate_ssr_bias_exclusion_retained(
+    epochs: &[FloatEpoch],
+    excluded_observations: usize,
+    tropo: TroposphereOptions,
+    estimate_residual_ionosphere: bool,
+) -> Result<(), FloatSolveError> {
+    match observation_shortfall(epochs, tropo, estimate_residual_ionosphere) {
+        Some((retained_observations, required_observations)) => Err(
+            FloatSolveError::InsufficientObservationsAfterSsrBiasExclusion {
+                excluded_observations,
+                retained_observations,
+                required_observations,
+            },
+        ),
+        None => Ok(()),
+    }
+}
+
+/// Retained and required observation counts when `epochs` hold fewer observations than
+/// the static PPP parameters they carry, or fewer than four distinct satellites; `None`
+/// when they suffice. Only epochs with observations count, since an epoch without any is
+/// not solved and carries no receiver clock.
+fn observation_shortfall(
+    epochs: &[FloatEpoch],
+    tropo: TroposphereOptions,
+    estimate_residual_ionosphere: bool,
+) -> Option<(usize, usize)> {
     let retained_observations = epochs.iter().map(|e| e.observations.len()).sum::<usize>();
-    let active_sats = epochs
+    let solved_epochs = epochs.iter().filter(|e| !e.observations.is_empty()).count();
+    let active_ambiguities = epochs
         .iter()
         .flat_map(|e| e.observations.iter().map(|o| o.ambiguity_id.as_str()))
         .collect::<BTreeSet<_>>();
+    // Geometry needs four distinct satellites; two ambiguity arcs of one satellite add no
+    // direction.
+    let active_satellites = epochs
+        .iter()
+        .flat_map(|e| e.observations.iter().map(|o| o.sat))
+        .collect::<BTreeSet<_>>();
     let unknowns = crate::estimation::substrate::parameters::ParameterLayout::ppp(
-        epochs.len(),
+        solved_epochs,
         ztd_unknown_count(tropo),
         tropo_gradient_unknown_count(tropo),
-        residual_ionosphere_unknown_count(estimate_residual_ionosphere, active_sats.len()),
-        active_sats.len(),
+        residual_ionosphere_unknown_count(estimate_residual_ionosphere, active_ambiguities.len()),
+        active_ambiguities.len(),
     )
     .dim();
     let required_observations = unknowns.div_ceil(2).max(4);
-    if active_sats.len() < 4 || retained_observations < required_observations {
-        return Err(insufficient_after_elevation_cutoff(
-            cutoff_deg,
-            retained_observations,
-            required_observations,
-        ));
-    }
-    Ok(())
+    (active_satellites.len() < 4 || retained_observations < required_observations)
+        .then_some((retained_observations, required_observations))
 }
 
 fn tropo_gradient_unknown_count(tropo: TroposphereOptions) -> usize {

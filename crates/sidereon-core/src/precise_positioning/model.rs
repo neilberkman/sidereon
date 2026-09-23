@@ -17,7 +17,7 @@ use crate::astro::time::model::{Instant, JulianDateSplit, TimeModelError, TimeSc
 
 use crate::antenna;
 use crate::constants::{C_M_S, DEG_TO_RAD, GPS_EPOCH_TO_J2000_S, KM_TO_M};
-use crate::observables::PredictedObservables;
+use crate::observables::TransmitGeometry;
 use crate::tropo::{tropo_mapping_unchecked, tropo_slant_with_mapping_unchecked, MappingModel};
 use crate::{GnssSatelliteId, Wgs84Geodetic};
 
@@ -38,7 +38,7 @@ pub(super) struct TropoModelState {
 }
 
 pub(super) fn model_troposphere(
-    pred: &PredictedObservables,
+    pred: &TransmitGeometry,
     receiver_m: [f64; 3],
     epoch: &FloatEpoch,
     tropo: TroposphereOptions,
@@ -139,15 +139,33 @@ fn applied_troposphere_m(tropo_model: &TropoModelState, state: &FloatState) -> f
         + state.tropo_gradient_east_m * tropo_model.gradient_mapping[1]
 }
 
+/// One observation at one epoch, as the range corrections see it.
+pub(super) struct CorrectedObservation<'a> {
+    /// Transmit-time geometry of the observation.
+    pub(super) pred: &'a TransmitGeometry,
+    /// Satellite velocity, when the satellite clock relativity term needs it.
+    pub(super) sat_velocity_m_s: Option<[f64; 3]>,
+    /// Receiver position the geometry was formed from.
+    pub(super) rx_pos: [f64; 3],
+    /// Caller epoch index keying the per-epoch corrections.
+    pub(super) epoch_idx: usize,
+    /// The observation.
+    pub(super) obs: &'a FloatObservation,
+}
+
 pub(super) fn range_corrections_m(
-    pred: &PredictedObservables,
-    rx_pos: [f64; 3],
-    epoch_idx: usize,
-    obs: &FloatObservation,
+    observation: CorrectedObservation<'_>,
     tropo_model: &TropoModelState,
     state: &FloatState,
     corrections: &RangeCorrections,
 ) -> Result<f64, FloatSolveError> {
+    let CorrectedObservation {
+        pred,
+        sat_velocity_m_s,
+        rx_pos,
+        epoch_idx,
+        obs,
+    } = observation;
     let receiver_antenna_m =
         receiver_antenna_correction_m(pred, rx_pos, obs, corrections.receiver_antenna.as_ref())?;
     let satellite_clock_m =
@@ -160,7 +178,7 @@ pub(super) fn range_corrections_m(
     let code_bias_m = clock_datum_code_bias_m(obs, epoch_idx, &corrections.ppp)?;
     Ok(applied_troposphere_m(tropo_model, state)
         + receiver_antenna_m
-        + sat_clock_relativity_correction_m(pred, corrections.sat_clock_relativity)
+        + sat_clock_relativity_correction_m(pred, sat_velocity_m_s)
         + satellite_clock_m
         + tide_m
         + pole_tide_m
@@ -170,7 +188,7 @@ pub(super) fn range_corrections_m(
 }
 
 pub(super) fn satellite_clock_m(
-    pred: &PredictedObservables,
+    pred: &TransmitGeometry,
     obs: &FloatObservation,
     clock: Option<&SatelliteClockCorrections>,
 ) -> Result<f64, FloatSolveError> {
@@ -187,7 +205,7 @@ pub(super) fn satellite_clock_m(
 }
 
 fn solid_earth_tide_correction_m(
-    pred: &PredictedObservables,
+    pred: &TransmitGeometry,
     obs: &FloatObservation,
     epoch_idx: usize,
     corrections: &PppCorrectionLookup,
@@ -203,7 +221,7 @@ fn solid_earth_tide_correction_m(
 }
 
 fn pole_tide_correction_m(
-    pred: &PredictedObservables,
+    pred: &TransmitGeometry,
     obs: &FloatObservation,
     epoch_idx: usize,
     corrections: &PppCorrectionLookup,
@@ -219,7 +237,7 @@ fn pole_tide_correction_m(
 }
 
 fn ocean_loading_correction_m(
-    pred: &PredictedObservables,
+    pred: &TransmitGeometry,
     obs: &FloatObservation,
     epoch_idx: usize,
     corrections: &PppCorrectionLookup,
@@ -235,7 +253,7 @@ fn ocean_loading_correction_m(
 }
 
 fn satellite_antenna_correction_m(
-    pred: &PredictedObservables,
+    pred: &TransmitGeometry,
     obs: &FloatObservation,
     epoch_idx: usize,
     corrections: &PppCorrectionLookup,
@@ -281,7 +299,7 @@ pub(super) fn ssr_code_bias_m(
     }
     corrections
         .ssr_code_bias_m
-        .get(&(obs.sat, epoch_idx))
+        .get(&(obs.sat, epoch_idx, obs.ambiguity_id.clone()))
         .copied()
         .ok_or_else(|| missing_correction(obs, MissingCorrection::SsrCodeBias))
 }
@@ -313,13 +331,13 @@ pub(super) fn phase_bias_m(
     corrections
         .ppp
         .phase_bias_m
-        .get(&(obs.sat, epoch_idx))
+        .get(&(obs.sat, epoch_idx, obs.ambiguity_id.clone()))
         .copied()
         .ok_or_else(|| missing_correction(obs, MissingCorrection::PhaseBias))
 }
 
 fn satellite_clock_correction_m(
-    pred: &PredictedObservables,
+    pred: &TransmitGeometry,
     obs: &FloatObservation,
     clock: Option<&SatelliteClockCorrections>,
 ) -> Result<f64, FloatSolveError> {
@@ -400,7 +418,7 @@ fn clamped_extrapolation(edge: &(f64, f64), inner: Option<&(f64, f64)>, t: f64) 
 }
 
 fn receiver_antenna_correction_m(
-    pred: &PredictedObservables,
+    pred: &TransmitGeometry,
     rx_pos: [f64; 3],
     obs: &FloatObservation,
     receiver_antenna: Option<&ReceiverAntennaOptions>,
@@ -416,7 +434,7 @@ fn receiver_antenna_correction_m(
 }
 
 fn single_freq_receiver_antenna_m(
-    pred: &PredictedObservables,
+    pred: &TransmitGeometry,
     rx_pos: [f64; 3],
     obs: &FloatObservation,
     antenna: &ReceiverAntennaOptions,
@@ -503,11 +521,16 @@ fn interpolate_samples(mut samples: Vec<(f64, f64)>, zenith_deg: f64) -> Option<
     antenna::interpolate_zenith_sorted(&samples, zenith_deg)
 }
 
-fn sat_clock_relativity_correction_m(pred: &PredictedObservables, enabled: bool) -> f64 {
-    if !enabled {
-        return 0.0;
+/// Satellite clock relativity correction, metres, `2 r·v / c`, when the satellite velocity
+/// was formed because the correction is enabled.
+fn sat_clock_relativity_correction_m(
+    pred: &TransmitGeometry,
+    sat_velocity_m_s: Option<[f64; 3]>,
+) -> f64 {
+    match sat_velocity_m_s {
+        Some(velocity) => 2.0 * dot3(pred.sat_pos_ecef_m, velocity) / C_M_S,
+        None => 0.0,
     }
-    2.0 * dot3(pred.sat_pos_ecef_m, pred.sat_velocity_m_s) / C_M_S
 }
 
 pub(super) fn measurement_weight(

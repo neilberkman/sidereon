@@ -211,6 +211,7 @@ fn raim_residuals(epoch: &FloatEpoch, input: &Input) -> Vec<FloatResidual> {
         .map(|(idx, obs)| FloatResidual {
             epoch_index: 0,
             satellite_id: obs.satellite_id.clone(),
+            ambiguity_id: obs.ambiguity_id.clone(),
             code_m: input.values.get(idx).copied().unwrap_or(0.0),
             phase_m: input.values.get(idx + 1).copied().unwrap_or(0.0),
             code_weight: input.scalars[0],
@@ -385,6 +386,13 @@ fuzz_target!(|data: &[u8]| {
         code_rms_m: input.scalars[4],
         phase_rms_m: input.scalars[5],
         weighted_rms_m: input.scalars[6],
+        ssr_bias_exclusions: Vec::new(),
+        solved_epoch_indices: vec![0],
+        ssr_bias_readmissions: Vec::new(),
+        ssr_bias_last_pass: 0,
+        residual_screen: false,
+        solve_options: sidereon_core::precise_positioning::FloatSolveOptions::default(),
+        residual_screen_removals: Vec::new(),
         position_covariance: sidereon_core::dop::PositionCovariance {
             ecef_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
             enu_m2: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
@@ -495,6 +503,7 @@ fuzz_target!(|data: &[u8]| {
         "precise_positioning::correct_kinematic_state",
         precise_positioning::correct_kinematic_state(
             &source,
+            0,
             &epoch,
             &mut kin_state,
             &mut kin_cov,

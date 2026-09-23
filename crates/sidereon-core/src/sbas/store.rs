@@ -277,7 +277,11 @@ impl SbasGeoState {
     /// Position uses the stored velocity and half the stored acceleration times
     /// elapsed time squared; clock uses offset plus drift times elapsed time.
     pub fn state_at(&self, t_j2000_s: f64) -> ([f64; 3], f64) {
-        let dt = t_j2000_s - self.t0_j2000_s;
+        self.state_after(t_j2000_s - self.t0_j2000_s)
+    }
+
+    /// Propagate the ECEF position and clock `dt` seconds from the reference epoch.
+    pub(crate) fn state_after(&self, dt: f64) -> ([f64; 3], f64) {
         let dt2 = dt * dt;
         let position = [
             self.position_ecef_m[0]

@@ -29,7 +29,14 @@ use crate::tolerances::GLONASS_TIME_EPS_S;
 
 /// Pinned RK4 fixed step (seconds).
 pub const TSTEP_S: f64 = 60.0;
-const MAX_PROPAGATION_STEPS: usize = 15;
+/// Most RK4 steps one propagation takes: the 15 full steps of the 900 s broadcast age
+/// limit, plus one for the remainder when the 1 ms step of a record's velocity (RTKLIB
+/// `ephpos`) is added at that limit.
+const MAX_PROPAGATION_STEPS: usize = 16;
+const _: () = assert!(
+    MAX_PROPAGATION_STEPS as f64 * TSTEP_S
+        >= crate::rinex_nav::GLONASS_MAX_AGE_S + crate::rinex_nav::EPHPOS_STEP_S
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GlonassError {
@@ -168,6 +175,14 @@ mod unit_tests {
                 })
             );
         }
+    }
+
+    /// A record's velocity at the 900 s age limit propagates 1 ms past it, which takes a
+    /// sixteenth step.
+    #[test]
+    fn propagate_reaches_the_velocity_step_past_the_age_limit() {
+        let tk = crate::rinex_nav::GLONASS_MAX_AGE_S + crate::rinex_nav::EPHPOS_STEP_S;
+        assert!(propagate(state0(), [0.0, 0.0, 0.0], tk).is_ok());
     }
 
     #[test]

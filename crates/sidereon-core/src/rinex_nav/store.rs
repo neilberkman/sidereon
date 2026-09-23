@@ -1,8 +1,9 @@
 //! Broadcast-store selection and SPP source adapter.
 
 use crate::broadcast::{
-    satellite_state, satellite_state_cnav, satellite_state_cnav_unchecked,
-    satellite_state_unchecked, CnavRates, SatelliteState,
+    satellite_position_ecef_at_tk_unchecked, satellite_state, satellite_state_cnav,
+    satellite_state_cnav_unchecked, satellite_state_unchecked, time_from_reference_s, CnavRates,
+    SatelliteState,
 };
 use crate::constants::{
     BDS_EPOCH_MINUS_GPS_EPOCH_S, GPST_MINUS_BDT_S, GPS_EPOCH_TO_J2000_S, SECONDS_PER_WEEK,
@@ -15,8 +16,8 @@ use crate::spp::EphemerisSource;
 use super::{
     cnav_ura_nominal_m, is_beidou_geo, parse_glonass, parse_iono_corrections_checked,
     parse_leap_seconds_checked, parse_nav, BroadcastGroupDelays, BroadcastIssue, BroadcastRecord,
-    CnavParameters, GlonassRecord, IonoCorrections, NavMessage, NavParseError, GLONASS_MAX_AGE_S,
-    MAX_EPHEMERIS_AGE_S,
+    CnavParameters, GlonassRecord, IonoCorrections, NavMessage, NavParseError, EPHPOS_STEP_S,
+    GLONASS_MAX_AGE_S, MAX_EPHEMERIS_AGE_S,
 };
 
 /// Which navigation-message generation a store prefers when a GPS/QZSS
@@ -182,6 +183,59 @@ impl BroadcastStore {
     ) -> Option<&BroadcastRecord> {
         let (t_continuous_s, _) = query_continuous_time(sat, t_j2000_s)?;
         self.select(sat, t_continuous_s)
+    }
+
+    /// Velocity, metres per second, of the record selected for `sat` at `t_j2000_s`, as
+    /// RTKLIB `ephpos` forms it: the difference of that record's positions at the epoch and
+    /// [`EPHPOS_STEP_S`] later over the step, the step added to the record's reduced time
+    /// (`tk` for a Keplerian record, time from the reference epoch for GLONASS) as RTKLIB
+    /// adds it to its exact `gtime_t`. Differencing the source's positions instead would
+    /// select a record on each side and blend two records across a record change. `None`
+    /// where no record is selected or the system has no broadcast model here.
+    pub(crate) fn selected_record_velocity(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
+        if sat.system == GnssSystem::Glonass {
+            return self.glonass_record_velocity(sat, t_j2000_s);
+        }
+        let rec = self.select_record_at(sat, t_j2000_s)?;
+        keplerian_record_velocity(rec, sat, t_j2000_s)
+    }
+
+    /// Velocity of the GLONASS record selected at `t_j2000_s`: its propagated positions at
+    /// `t_j2000_s` and 1 ms later, differenced, as RTKLIB `ephpos` forms it with `geph2pos`.
+    fn glonass_record_velocity(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<[f64; 3]> {
+        let (rec, tk) = self.select_glonass(sat, t_j2000_s)?;
+        let state0 = [
+            rec.pos_m[0],
+            rec.pos_m[1],
+            rec.pos_m[2],
+            rec.vel_m_s[0],
+            rec.vel_m_s[1],
+            rec.vel_m_s[2],
+        ];
+        let start = glonass::propagate(state0, rec.acc_m_s2, tk).ok()?;
+        let end = glonass::propagate(state0, rec.acc_m_s2, tk + EPHPOS_STEP_S).ok()?;
+        Some([
+            (end[0] - start[0]) / EPHPOS_STEP_S,
+            (end[1] - start[1]) / EPHPOS_STEP_S,
+            (end[2] - start[2]) / EPHPOS_STEP_S,
+        ])
+    }
+
+    /// Velocity of the Keplerian GPS LNAV record with issue byte `iode` valid at
+    /// `t_j2000_s`: its positions at `t_j2000_s` and 1 ms later, differenced, as RTKLIB
+    /// `ephpos` forms it for an IODE-selected record.
+    pub(crate) fn iode_record_velocity(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
+        let rec = self.select_by_iode_at(sat, iode, t_j2000_s)?;
+        keplerian_record_velocity(rec, sat, t_j2000_s)
     }
 
     /// Select the valid record for `sat` with a matching GPS issue byte at `t`.
@@ -443,6 +497,40 @@ fn cnav_rates(params: CnavParameters) -> CnavRates {
         adot_m_s: params.adot_m_s,
         delta_n0_dot_rad_s2: params.delta_n0_dot_rad_s2,
     }
+}
+
+/// Velocity of Keplerian record `rec` at `t_j2000_s`: its positions at `tk` and
+/// `tk + EPHPOS_STEP_S` differenced over the step, as RTKLIB `ephpos` forms it.
+fn keplerian_record_velocity(
+    rec: &BroadcastRecord,
+    sat: GnssSatelliteId,
+    t_j2000_s: f64,
+) -> Option<[f64; 3]> {
+    let (t_continuous, is_geo) = query_continuous_time(sat, t_j2000_s)?;
+    let sow = t_continuous.rem_euclid(SECONDS_PER_WEEK);
+    let tk = time_from_reference_s(sow, rec.elements.toe_sow);
+    let rates = rec.cnav.map(cnav_rates);
+    // The CNAV model has no GEO branch.
+    let is_geo = is_geo && rates.is_none();
+    let position = |tk_s: f64| -> Option<[f64; 3]> {
+        satellite_position_ecef_at_tk_unchecked(
+            &rec.elements,
+            rates.as_ref(),
+            &rec.constants(),
+            tk_s,
+            is_geo,
+        )
+        .position()
+        .ok()
+        .map(|position| position.as_array())
+    };
+    let start = position(tk)?;
+    let end = position(tk + EPHPOS_STEP_S)?;
+    Some([
+        (end[0] - start[0]) / EPHPOS_STEP_S,
+        (end[1] - start[1]) / EPHPOS_STEP_S,
+        (end[2] - start[2]) / EPHPOS_STEP_S,
+    ])
 }
 
 fn evaluate_record_unchecked(rec: &BroadcastRecord, sow: f64, is_geo: bool) -> SatelliteState {
