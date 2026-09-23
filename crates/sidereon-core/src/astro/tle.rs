@@ -16,7 +16,7 @@
 
 use std::fmt;
 
-use libm::{floor, log10, pow};
+use libm::pow;
 
 use crate::astro::sgp4::{self, ElementSet};
 use crate::validate;
@@ -50,6 +50,10 @@ const NDOT_WIDTH: usize = 9;
 const ASSUMED_DECIMAL_MANTISSA_DECIMALS: usize = 5;
 /// Number of mantissa digits emitted in an assumed-decimal field.
 const ASSUMED_DECIMAL_MANTISSA_DIGITS: usize = 5;
+/// Smallest exponent the one exponent digit of an assumed-decimal field holds.
+const ASSUMED_DECIMAL_MIN_EXPONENT: i32 = -9;
+/// Largest exponent the one exponent digit of an assumed-decimal field holds.
+const ASSUMED_DECIMAL_MAX_EXPONENT: i32 = 9;
 /// Decimal places carried by the eccentricity field.
 const ECCENTRICITY_DECIMALS: usize = 7;
 /// Digits emitted for the (leading-decimal-stripped) eccentricity field.
@@ -566,21 +570,26 @@ pub fn decode_catalog_number(field: &str) -> Result<u32, TleError> {
 /// example four decimals for an angle), so a value read by [`parse`] is
 /// written back unchanged. An assumed-decimal field (B\*, second derivative)
 /// is written as its source text when that text still decodes to exactly the
-/// stored value. Otherwise it is written as the first spelling that decodes
-/// to the same `f64` bits, trying the normalized exponent `e` (or `-9`, the
-/// smallest single-digit exponent, when `e` is below it) and then the next
-/// four exponents with leading-zero mantissas, and at exponent zero both
-/// signs (`+0` first for a nonzero value, `-0` first for zero). The
-/// normalized spelling comes first, so it is written whenever it is exact; a
-/// leading-zero spelling is written only when the normalized one would change
-/// the value. For example `5e-11` is written `" 00500-8"`, because
-/// `0.05 × 10^-9` rounds one unit in the last place away from it and
-/// `0.005 × 10^-8` does not. A value with no exact spelling, such as a fitted
-/// B\*, is rounded to the normalized five-digit mantissa (at exponent `-9`
-/// for a magnitude below `1e-10`). A value that has no
-/// representation in its field is refused with [`TleError::InvalidField`]
-/// naming the field, never truncated, wrapped, or shifted into a neighbouring
-/// column:
+/// stored value. Otherwise it is written with the spelling python-sgp4's
+/// `export_tle` gives it, when that spelling decodes to the same `f64` bits:
+/// the five significant digits of `value * 10` in `{: 4.4e}` formatting (the
+/// normalized mantissa, correctly rounded, ties to even) with its exponent,
+/// which is `+0` or `-0` for zero and for exponent zero, as `export_tle`
+/// writes it for each field (`" 00000+0"` and `"-00000+0"` for a zero B\*,
+/// `" 00000-0"` and `"-00000-0"` for a zero second derivative). A magnitude
+/// below `1e-10`, which `export_tle` gives a two-digit exponent, is spelled
+/// at exponent `-9` with its correctly rounded digits there, and one whose
+/// digits there are `00000` as zero of its sign. When that spelling would
+/// change the value, the first leading-zero spelling that decodes to the same
+/// bits is written, trying its exponent and the next four: `5e-11` is written
+/// `" 00500-8"`, because `0.05 × 10^-9` rounds one unit in the last place away
+/// from it and `0.005 × 10^-8` does not. A value with no exact spelling, such
+/// as a fitted B\*, is written with the rounded spelling. The OMM bridge
+/// quantizes B\* and the second derivative with the same rounding, so an
+/// element set it builds is written here without further change unless a term
+/// is one this function refuses. A value that has no representation in its
+/// field is refused with [`TleError::InvalidField`] naming the field, never
+/// truncated, wrapped, or shifted into a neighbouring column:
 ///
 /// - `classification`: not exactly one printable ASCII character;
 /// - `international_designator`: longer than eight characters or not
@@ -769,16 +778,22 @@ struct AssumedDecimalField {
     /// Read blank mantissa digits and a blank exponent digit as `0`. Vallado's
     /// `twoline2rv` does this for the second mean-motion derivative only.
     blank_digits_are_zero: bool,
+    /// The exponent python-sgp4's `export_tle` writes for zero and for
+    /// exponent zero in this field: `+0` for B\*, `-0` for the second
+    /// derivative.
+    zero_exponent: &'static str,
 }
 
 const NDDOT_FIELD: AssumedDecimalField = AssumedDecimalField {
     name: "mean_motion_double_dot",
     blank_digits_are_zero: true,
+    zero_exponent: "-0",
 };
 
 const BSTAR_FIELD: AssumedDecimalField = AssumedDecimalField {
     name: "bstar",
     blank_digits_are_zero: false,
+    zero_exponent: "+0",
 };
 
 /// Read the two-digit epoch year. Vallado reads it with `%2d`, so a blank
@@ -824,7 +839,8 @@ fn decode_assumed_decimal_text(text: &str, field: &AssumedDecimalField) -> Resul
 }
 
 /// `sign * 0.<mantissa> * 10^exp`, decoded with `powi` (integer exponent),
-/// matching `decode_assumed_decimal_field` and the SGP4 element-set init: the
+/// as Vallado's `twoline2rv` forms the product and as the quantizers decode
+/// the rounded spelling: the
 /// value reaching SGP4 must be the exact `mantissa * 10^exp` product the
 /// golden path produces, so the canonical element set built from a parsed TLE
 /// drives SGP4 bit-identically.
@@ -978,34 +994,125 @@ fn encode_catalog_number_text(text: &str) -> Result<String, TleError> {
     }
 }
 
-/// Quantize a value onto the TLE "assumed decimal" grid (five significant
-/// mantissa digits and a power-of-ten exponent) and decode it back, yielding the
-/// exact `f64` SGP4 receives when the same quantity is carried through a TLE.
+/// B\* as a TLE carries it: the value [`parse`] reads back from the field
+/// [`encode`] writes for the rounded value.
 ///
-/// OMM encodes B\* and the second mean-motion derivative as plain decimals, but
-/// their canonical SGP4 representation is this five-digit assumed-decimal field;
-/// quantizing through it lets an OMM drive SGP4 bit-identically to the equivalent
-/// TLE. The decode mirrors the parse in `sgp4::init_satrec_from_tle`
-/// (`mantissa * 10f64.powi(exp)`), so a quantized OMM B\* equals the value the
-/// matching TLE produces to 0 ULP.
-pub(crate) fn assumed_decimal_quantize(value: f64) -> f64 {
-    if value == 0.0 {
-        return 0.0;
-    }
-    decode_assumed_decimal_field(&fmt_assumed_decimal(value))
+/// A TLE holds B\* in its assumed-decimal field (`±0.NNNNN × 10^±E`, one
+/// exponent digit). The value is rounded as python-sgp4's `export_tle` rounds
+/// it when the exponent is between `-9` and `9`: the normalized five-digit
+/// mantissa, the spelling catalog TLEs use. A magnitude below `1e-10` is
+/// rounded correctly at exponent `-9`, whose resolution is `1e-14`, and one
+/// whose digits there are `00000` (a magnitude up to about `5e-15`) becomes
+/// zero of the same sign. [`encode`] writes the rounded value with the same
+/// spelling and [`parse`] decodes it with the same `mantissa * 10^exp`
+/// product, so the result is exactly the B\* SGP4 receives from that TLE. The
+/// rounded spelling is used even when a leading-zero spelling holds the value
+/// exactly: `1.009e-5` is also `" 01009-3"`, but a catalog TLE writes it
+/// `" 10090-4"`, which decodes one unit in the last place away, and SGP4
+/// receives that value. A magnitude that rounds to `1e9` or more has no
+/// single-digit exponent and is refused with [`TleError::InvalidField`] for
+/// `bstar`, as [`encode`] refuses it.
+pub(crate) fn quantize_bstar(value: f64) -> Result<f64, TleError> {
+    quantize_assumed_decimal(value, &BSTAR_FIELD)
 }
 
-/// Decode the eight-or-more character assumed-decimal field emitted by
-/// [`fmt_assumed_decimal`] (`"[sign|space]MMMMM[exp-sign]E"`).
-fn decode_assumed_decimal_field(field: &str) -> f64 {
-    let sign = if field.starts_with('-') { -1.0 } else { 1.0 };
-    let body = &field[1..];
-    let mantissa_digits = &body[..ASSUMED_DECIMAL_MANTISSA_DIGITS];
-    let exp_field = &body[ASSUMED_DECIMAL_MANTISSA_DIGITS..];
-    let exp_field = exp_field.strip_prefix('+').unwrap_or(exp_field);
-    let mantissa: f64 = format!("0.{mantissa_digits}").parse().unwrap_or(0.0);
-    let exp: i32 = exp_field.parse().unwrap_or(0);
-    sign * mantissa * 10.0_f64.powi(exp)
+/// The second mean-motion derivative as a TLE carries it, on the same
+/// assumed-decimal grid as [`quantize_bstar`]. Refused with
+/// [`TleError::InvalidField`] for `mean_motion_double_dot` from `1e9`.
+pub(crate) fn quantize_mean_motion_double_dot(value: f64) -> Result<f64, TleError> {
+    quantize_assumed_decimal(value, &NDDOT_FIELD)
+}
+
+/// Decode the rounded spelling [`round_assumed_decimal`] gives, with the
+/// decoder [`parse`] uses for the field.
+fn quantize_assumed_decimal(value: f64, field: &AssumedDecimalField) -> Result<f64, TleError> {
+    let (text, _) = round_assumed_decimal(value, field)?;
+    decode_assumed_decimal_text(&text, field)
+}
+
+/// Round a value onto the assumed-decimal grid. This is the one rounding rule
+/// for the field: [`encode`] writes this spelling when no spelling holds the
+/// value exactly, and the quantizers decode it.
+///
+/// Returns the spelling and the exponent from which [`encode`] looks for an
+/// exact spelling:
+///
+/// - zero: the five zero digits with the field's zero exponent, signed as the
+///   value is (`" 00000+0"`, `"-00000+0"` for B\*), as python-sgp4's
+///   `export_tle` writes it;
+/// - otherwise the spelling `export_tle` writes, from its exponent `e`, when
+///   `e` is from `-9` to `9`: the digits of `value * 10` formatted `{:.4e}`,
+///   which is correctly rounded with ties to even, as Python's `{: 4.4e}` is;
+/// - `e` below `-9`, which `export_tle` writes with two exponent digits: the
+///   five digits of `value` at exponent `-9`, correctly rounded from its exact
+///   decimal expansion, from `-9`; when these are `00000`, zero with the
+///   value's sign, spelled as zero is;
+/// - `e` above `9`: refused with [`TleError::InvalidField`] naming the field.
+fn round_assumed_decimal(
+    value: f64,
+    field: &AssumedDecimalField,
+) -> Result<(String, i32), TleError> {
+    require_finite(value, field.name)?;
+    let sign = if value.is_sign_negative() { '-' } else { ' ' };
+    let zero = format!("{sign}00000{}", field.zero_exponent);
+    if value == 0.0 {
+        return Ok((zero, 0));
+    }
+    let too_large = || {
+        invalid_field(
+            field.name,
+            "magnitude must be below 1e9, the largest single-digit exponent",
+        )
+    };
+    // `{:.4e}` of `|value * 10|` is `d.dddde<exponent>`: the five digits
+    // `ddddd` and exponent of `0.ddddd × 10^exponent`.
+    let scaled = (value * 10.0).abs();
+    if !scaled.is_finite() {
+        return Err(too_large());
+    }
+    let formatted = format!("{scaled:.4e}");
+    let (mantissa, exponent) = formatted
+        .split_once('e')
+        .ok_or_else(|| TleError::Field(format!("unexpected mantissa {formatted:?}")))?;
+    let exponent: i32 = exponent
+        .parse()
+        .map_err(|_| TleError::Field(format!("unexpected exponent {formatted:?}")))?;
+    if exponent > ASSUMED_DECIMAL_MAX_EXPONENT {
+        return Err(too_large());
+    }
+    if exponent >= ASSUMED_DECIMAL_MIN_EXPONENT {
+        let digits = mantissa.replace('.', "");
+        return Ok((
+            format!(
+                "{sign}{digits}{}",
+                assumed_decimal_exponent(exponent, field)
+            ),
+            exponent,
+        ));
+    }
+    // Below 1e-10: fourteen decimals end at the fifth mantissa digit of
+    // exponent -9, and fixed-decimal formatting rounds the exact binary value.
+    let decimals = format!("{:.14}", value.abs());
+    let digits = &decimals[decimals.len() - ASSUMED_DECIMAL_MANTISSA_DIGITS..];
+    let text = if digits.bytes().all(|b| b == b'0') {
+        zero
+    } else {
+        format!(
+            "{sign}{digits}{}",
+            assumed_decimal_exponent(ASSUMED_DECIMAL_MIN_EXPONENT, field)
+        )
+    };
+    Ok((text, ASSUMED_DECIMAL_MIN_EXPONENT))
+}
+
+/// The two exponent characters of an assumed-decimal field: the field's zero
+/// exponent for zero, otherwise the sign and the digit.
+fn assumed_decimal_exponent(exponent: i32, field: &AssumedDecimalField) -> String {
+    match exponent {
+        0 => field.zero_exponent.to_string(),
+        e if e > 0 => format!("+{e}"),
+        e => format!("-{}", e.unsigned_abs()),
+    }
 }
 
 // -- Encoding internals --
@@ -1017,36 +1124,12 @@ fn fmt_epoch(year_two_digit: i32, day_of_year: f64) -> String {
 }
 
 fn fmt_ndot(val: f64) -> String {
-    let sign = if val < 0.0 { '-' } else { ' ' };
+    let sign = if val.is_sign_negative() { '-' } else { ' ' };
     let mut digits = fixed_decimals(val.abs(), NDOT_DECIMALS);
     if let Some(rest) = digits.strip_prefix('0') {
         digits = rest.to_string();
     }
     format!("{sign}{}", pad_leading(&digits, NDOT_WIDTH))
-}
-
-/// Format an "assumed decimal" field (`0.<mantissa> * 10^exp`) for the drag terms.
-fn fmt_assumed_decimal(val: f64) -> String {
-    if val == 0.0 {
-        return " 00000-0".to_string();
-    }
-    let sign = if val < 0.0 { '-' } else { ' ' };
-    let av = val.abs();
-    let raw_exp = floor(log10(av)) as i32;
-    let mut exp = raw_exp + 1;
-    let mantissa = av / pow(10.0, exp as f64);
-    let mut mant_full = fixed_decimals(mantissa, ASSUMED_DECIMAL_MANTISSA_DECIMALS);
-    if mant_full.starts_with("1.") {
-        exp += 1;
-        mant_full = fixed_decimals(mantissa / 10.0, ASSUMED_DECIMAL_MANTISSA_DECIMALS);
-    }
-    let mant_str: String = mant_full
-        .chars()
-        .skip(2)
-        .take(ASSUMED_DECIMAL_MANTISSA_DIGITS)
-        .collect();
-    let exp_sign = if exp >= 0 { '+' } else { '-' };
-    format!("{sign}{mant_str}{exp_sign}{}", exp.abs())
 }
 
 fn fmt_eccentricity(ecc: f64) -> String {
@@ -1130,70 +1213,48 @@ fn encode_ndot(value: f64) -> Result<String, TleError> {
     Ok(fmt_ndot(value))
 }
 
-/// Encode an assumed-decimal field. See [`encode`] for the spelling order.
-/// A value whose normalized exponent needs two digits is refused. A magnitude
-/// below `1e-10` is spelled from exponent `-9` upward; with no exact
-/// spelling it is rounded at exponent `-9`, whose resolution is `1e-14`.
+/// Encode an assumed-decimal field. See [`encode`] for the spelling order and
+/// [`round_assumed_decimal`] for the rounded spelling and what is refused.
 fn encode_assumed_decimal(
     value: f64,
     source: Option<&str>,
     field: AssumedDecimalField,
 ) -> Result<String, TleError> {
     require_finite(value, field.name)?;
+    let decodes_exactly = |text: &str| {
+        decode_assumed_decimal_text(text, &field)
+            .is_ok_and(|decoded| decoded.to_bits() == value.to_bits())
+    };
     if let Some(text) = source {
-        let restates = text.len() == 8
-            && text.is_ascii()
-            && decode_assumed_decimal_text(text, &field)
-                .is_ok_and(|decoded| decoded.to_bits() == value.to_bits());
-        if restates {
+        if text.len() == 8 && text.is_ascii() && decodes_exactly(text) {
             return Ok(text.to_string());
         }
     }
 
-    let normalized = fmt_assumed_decimal(value);
-    let exponent = normalized[1 + ASSUMED_DECIMAL_MANTISSA_DIGITS..]
-        .parse::<i32>()
-        .map_err(|_| TleError::Field(format!("invalid exponent in {normalized:?}")))?;
-    if exponent > 9 {
-        return Err(invalid_field(
-            field.name,
-            "magnitude must be below 1e9, the largest single-digit exponent",
-        ));
+    let (rounded, first) = round_assumed_decimal(value, &field)?;
+    if decodes_exactly(&rounded) {
+        return Ok(rounded);
     }
+    // A leading-zero mantissa at a larger exponent can hold the value when the
+    // rounded spelling does not. `value` is nonzero here: zero's rounded
+    // spelling is exact.
     let sign = if value.is_sign_negative() { '-' } else { ' ' };
-    let first = exponent.max(-9);
-    for exp in first..=(first + 4).min(9) {
+    for exp in first..=(first + 4).min(ASSUMED_DECIMAL_MAX_EXPONENT) {
         let Some(digits) = assumed_decimal_mantissa(value, exp) else {
             continue;
         };
-        let exponent_signs: &[char] = match (exp, value == 0.0) {
-            (0, true) => &['-', '+'],
-            (0, false) => &['+', '-'],
-            (e, _) if e > 0 => &['+'],
-            _ => &['-'],
-        };
-        for &exp_sign in exponent_signs {
-            let text = format!("{sign}{digits}{exp_sign}{}", exp.abs());
-            if decode_assumed_decimal_text(&text, &field)
-                .is_ok_and(|decoded| decoded.to_bits() == value.to_bits())
-            {
-                return Ok(text);
-            }
+        let text = format!("{sign}{digits}{}", assumed_decimal_exponent(exp, &field));
+        if decodes_exactly(&text) {
+            return Ok(text);
         }
     }
-
-    // No spelling decodes to these bits: round at the normalized exponent.
-    if exponent >= -9 {
-        return Ok(normalized);
-    }
-    match assumed_decimal_mantissa(value, -9) {
-        Some(digits) if !digits.bytes().all(|b| b == b'0') => Ok(format!("{sign}{digits}-9")),
-        _ => Ok(fmt_assumed_decimal(0.0)),
-    }
+    Ok(rounded)
 }
 
 /// The five mantissa digits of `|value| / 10^exp` rounded to five decimals,
-/// or `None` when the rounded mantissa reaches 1.
+/// or `None` when the rounded mantissa reaches 1. This gives candidates only:
+/// [`encode_assumed_decimal`] writes one only when it decodes to the value
+/// exactly, so the rounding here never decides a written value.
 fn assumed_decimal_mantissa(value: f64, exp: i32) -> Option<String> {
     let scaled = value.abs() / pow(10.0, f64::from(exp));
     let mantissa = fixed_decimals(scaled, ASSUMED_DECIMAL_MANTISSA_DECIMALS);
@@ -1650,10 +1711,12 @@ mod tests {
         assert_eq!((0.005 * 10.0_f64.powi(-8)).to_bits(), 5.0e-11_f64.to_bits());
         assert_eq!(slice_inclusive(&line1, 53, 60), " 00500-8");
         // -1e-15 is below the 1e-14 resolution at exponent -9 and has no
-        // exact spelling, so it rounds to zero.
-        assert_eq!(slice_inclusive(&line1, 44, 51), " 00000-0");
+        // exact spelling, so it rounds to zero, keeping its sign as `-0.00000`
+        // does in fixed-decimal formatting.
+        assert_eq!(slice_inclusive(&line1, 44, 51), "-00000-0");
         let back = parse(&line1, &line2).unwrap().elements;
         assert_eq!(back.bstar.to_bits(), el.bstar.to_bits());
+        assert_eq!(back.mean_motion_double_dot.to_bits(), (-0.0_f64).to_bits());
         assert_eq!(encode(&back).unwrap(), (line1, line2));
 
         // A value with no exact spelling below 1e-10 rounds at exponent -9.
@@ -1863,5 +1926,312 @@ mod tests {
             ChecksumWarningKind::Mismatch { expected: 0 }
         );
         assert_eq!(parsed.checksum_warnings[0].computed, 3);
+    }
+
+    /// Deterministic SplitMix64 stream for the sampled grid checks.
+    struct SplitMix64(u64);
+
+    impl SplitMix64 {
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = self.0;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+
+        /// Uniform in `[0, 1)`.
+        fn unit(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1_u64 << 53) as f64
+        }
+
+        /// A finite value of random sign with a magnitude log-uniform in
+        /// `[10^lo, 10^hi)`, rounded to a random number of significant digits
+        /// for a third of the samples, as catalog values are.
+        fn value(&mut self, lo: f64, hi: f64) -> f64 {
+            let magnitude = pow(10.0, lo + (hi - lo) * self.unit());
+            let signed = if self.next_u64() >> 63 == 0 {
+                magnitude
+            } else {
+                -magnitude
+            };
+            if self.next_u64().is_multiple_of(3) {
+                let digits = (self.next_u64() % 7) as usize;
+                format!("{signed:.digits$e}").parse().unwrap()
+            } else {
+                signed
+            }
+        }
+    }
+
+    /// One assumed-decimal field of line 1, its quantizer and its byte range.
+    struct GridField {
+        name: &'static str,
+        field: AssumedDecimalField,
+        quantize: fn(f64) -> Result<f64, TleError>,
+        set: fn(&mut TleElements, f64),
+        get: fn(&TleElements) -> f64,
+        columns: (usize, usize),
+    }
+
+    const GRID_FIELDS: [GridField; 2] = [
+        GridField {
+            name: "bstar",
+            field: BSTAR_FIELD,
+            quantize: quantize_bstar,
+            set: |el, value| {
+                el.bstar = value;
+                el.bstar_text = None;
+            },
+            get: |el| el.bstar,
+            columns: (53, 60),
+        },
+        GridField {
+            name: "mean_motion_double_dot",
+            field: NDDOT_FIELD,
+            quantize: quantize_mean_motion_double_dot,
+            set: |el, value| {
+                el.mean_motion_double_dot = value;
+                el.mean_motion_double_dot_text = None;
+            },
+            get: |el| el.mean_motion_double_dot,
+            columns: (44, 51),
+        },
+    ];
+
+    /// Write `value` into `field` of the ISS elements, returning the field text
+    /// and the value read back, or the writer's refusal.
+    fn write_and_read(field: &GridField, value: f64) -> Result<(String, f64), TleError> {
+        let mut el = iss_elements();
+        (field.set)(&mut el, value);
+        let (line1, line2) = encode(&el)?;
+        let text = slice_inclusive(&line1, field.columns.0, field.columns.1).to_string();
+        let back = parse_with_policy(&line1, &line2, TlePolicy::Strict)
+            .unwrap()
+            .elements;
+        Ok((text, (field.get)(&back)))
+    }
+
+    /// Check the quantizer of `field` against the writer and reader for one
+    /// value: both refuse, or the quantized value is written as the field's
+    /// rounded spelling and read back unchanged, and quantizing it again
+    /// changes nothing.
+    fn check_grid(field: &GridField, value: f64) {
+        let quantized = (field.quantize)(value);
+        let written = write_and_read(field, value);
+        let (quantized, (text, back)) = match (quantized, written) {
+            (Err(q), Err(w)) => {
+                assert!(
+                    refused(field.name)(q.clone()),
+                    "{} {value:e}: {q:?}",
+                    field.name
+                );
+                assert_eq!(q, w, "{} {value:e}", field.name);
+                return;
+            }
+            (Ok(q), Ok(w)) => (q, w),
+            (q, w) => panic!("{} {value:e}: quantizer {q:?}, writer {w:?}", field.name),
+        };
+        let label = format!("{} {value:e} -> {text:?}", field.name);
+        // The writer keeps a value one of the field's spellings holds exactly;
+        // otherwise it writes the rounded value the quantizer gives.
+        assert!(
+            back.to_bits() == value.to_bits() || back.to_bits() == quantized.to_bits(),
+            "{label}: read back {back:e}, quantized {quantized:e}"
+        );
+        // The quantized value is written as its own rounded spelling and reads
+        // back bit for bit: the element set the OMM bridge builds is a fixed
+        // point of TLE text.
+        let (requantized_text, requantized_back) = write_and_read(field, quantized).unwrap();
+        assert_eq!(
+            requantized_back.to_bits(),
+            quantized.to_bits(),
+            "{label}: {requantized_text:?}"
+        );
+        assert_eq!(
+            requantized_text,
+            round_assumed_decimal(value, &field.field).unwrap().0,
+            "{label}"
+        );
+        assert_eq!(
+            (field.quantize)(quantized).unwrap().to_bits(),
+            quantized.to_bits(),
+            "{label}"
+        );
+    }
+
+    #[test]
+    fn quantizers_give_what_the_tle_writer_writes_at_every_magnitude() {
+        let edges = [
+            0.0,
+            -0.0,
+            1.0e-10,
+            -1.0e-10,
+            9.999996e-11,
+            0.99999e-9,
+            0.999996e-9,
+            -2.3456789e-12,
+            4.0e-15,
+            -4.0e-15,
+            5.0e-15,
+            6.0e-15,
+            5.0e-11,
+            1.009e-5,
+            f64::MIN_POSITIVE,
+            -5.0e-324,
+            0.99999e9,
+            0.999994e9,
+            0.999995e9,
+            -0.999996e9,
+            1.0e9,
+            1.0e12,
+            3.21675e-9,
+            8233.15,
+            2.5e-14,
+            -2.5e-14,
+            0.5,
+            -0.5,
+        ];
+        for field in &GRID_FIELDS {
+            for value in edges {
+                check_grid(field, value);
+            }
+        }
+        let mut rng = SplitMix64(0x5EED_7E1E_0000_0001);
+        for _ in 0..20_000 {
+            let value = rng.value(-20.0, 12.0);
+            for field in &GRID_FIELDS {
+                check_grid(field, value);
+            }
+        }
+    }
+
+    #[test]
+    fn assumed_decimal_quantizing_rounds_as_the_writer_does_at_each_boundary() {
+        let bstar_text = |value: f64| {
+            let mut el = iss_elements();
+            el.bstar = value;
+            el.bstar_text = None;
+            let (line1, _) = encode(&el).unwrap();
+            slice_inclusive(&line1, 53, 60).to_string()
+        };
+
+        // Below 1e-10 the rounding is at exponent -9, not at the normalized
+        // exponent -11, which a TLE cannot write.
+        let q = quantize_bstar(-2.3456789e-12).unwrap();
+        assert_eq!(q.to_bits(), (-0.00235 * 10.0_f64.powi(-9)).to_bits());
+        assert_eq!(bstar_text(-2.3456789e-12), "-00235-9");
+        assert_eq!(bstar_text(q), "-00235-9");
+
+        // 1e-10 is the smallest normalized value at exponent -9.
+        let q = quantize_bstar(1.0e-10).unwrap();
+        assert_eq!(q.to_bits(), (0.1 * 10.0_f64.powi(-9)).to_bits());
+        assert_eq!(bstar_text(q), " 10000-9");
+
+        // Carries: 0.999996e-9 rounds to 0.10000e-8, and 9.999996e-11 to
+        // 0.10000e-9, while 0.99999e-9 stays at exponent -9.
+        assert_eq!(bstar_text(0.999996e-9), " 10000-8");
+        assert_eq!(
+            quantize_bstar(0.999996e-9).unwrap().to_bits(),
+            (0.1 * 10.0_f64.powi(-8)).to_bits()
+        );
+        assert_eq!(bstar_text(9.999996e-11), " 10000-9");
+        assert_eq!(bstar_text(0.99999e-9), " 99999-9");
+
+        // Values below the 1e-14 resolution round to zero of their sign.
+        assert_eq!(
+            quantize_bstar(4.0e-15).unwrap().to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(bstar_text(4.0e-15), " 00000+0");
+        assert_eq!(
+            quantize_bstar(-4.0e-15).unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(bstar_text(-4.0e-15), "-00000+0");
+        let q = quantize_bstar(6.0e-15).unwrap();
+        assert_eq!(q.to_bits(), (0.00001 * 10.0_f64.powi(-9)).to_bits());
+        assert_eq!(bstar_text(6.0e-15), " 00001-9");
+
+        // Negative zero keeps its sign.
+        assert_eq!(
+            quantize_bstar(-0.0).unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+        assert_eq!(
+            quantize_mean_motion_double_dot(-0.0).unwrap().to_bits(),
+            (-0.0_f64).to_bits()
+        );
+
+        // The largest exponent is 9; a magnitude that rounds to 1e9 is refused.
+        let q = quantize_bstar(0.999994e9).unwrap();
+        assert_eq!(q.to_bits(), (0.99999 * 10.0_f64.powi(9)).to_bits());
+        assert_eq!(bstar_text(q), " 99999+9");
+        for value in [0.999996e9, 1.0e9, -2.0e9] {
+            assert!(refused("bstar")(quantize_bstar(value).unwrap_err()));
+            assert!(refused("mean_motion_double_dot")(
+                quantize_mean_motion_double_dot(value).unwrap_err()
+            ));
+        }
+
+        // A catalog TLE writes 1.009e-5 as " 10090-4", which decodes one unit
+        // in the last place away from it; the quantized value is that one.
+        // The writer, given 1.009e-5 itself, keeps it with a leading-zero
+        // spelling.
+        let q = quantize_bstar(1.009e-5).unwrap();
+        assert_eq!(q.to_bits(), (0.1009 * 10.0_f64.powi(-4)).to_bits());
+        assert_ne!(q.to_bits(), 1.009e-5_f64.to_bits());
+        assert_eq!(bstar_text(q), " 10090-4");
+        let written = bstar_text(1.009e-5);
+        assert_eq!(
+            decode_assumed_decimal_text(&written, &BSTAR_FIELD)
+                .unwrap()
+                .to_bits(),
+            1.009e-5_f64.to_bits(),
+            "{written}"
+        );
+    }
+
+    #[test]
+    fn assumed_decimal_spelling_matches_the_python_sgp4_exporter() {
+        // Expectations from fixtures-generators/generate_tle_assumed_decimal.py:
+        // python-sgp4's `export_tle` spelling for exponents -9 to 9, including
+        // values whose `value * 10` is an exact tie between two five-digit
+        // mantissas; the correctly rounded exponent -9 spelling below 1e-10;
+        // null where the field holds no value.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/tle/assumed_decimal_sgp4_exporter.json"
+        ))
+        .unwrap();
+        let cases = fixture["cases"].as_array().unwrap();
+        assert!(cases.len() > 4000);
+        for case in cases {
+            let bits = case["value"].as_str().unwrap().trim_start_matches("0x");
+            let value = f64::from_bits(u64::from_str_radix(bits, 16).unwrap());
+            for grid in &GRID_FIELDS {
+                let rounded = round_assumed_decimal(value, &grid.field).map(|(text, _)| text);
+                match case[grid.name].as_str() {
+                    Some(expected) => {
+                        assert_eq!(rounded.as_deref(), Ok(expected), "{} {value:e}", grid.name)
+                    }
+                    None => assert!(
+                        refused(grid.name)(rounded.clone().unwrap_err()),
+                        "{} {value:e}: {rounded:?}",
+                        grid.name
+                    ),
+                }
+                check_grid(grid, value);
+            }
+        }
+    }
+
+    #[test]
+    fn negative_zero_first_derivative_is_written_with_its_sign() {
+        let mut el = iss_elements();
+        el.mean_motion_dot = -0.0;
+        let (line1, line2) = encode(&el).unwrap();
+        assert_eq!(slice_inclusive(&line1, 33, 42), "-.00000000");
+        let back = parse(&line1, &line2).unwrap().elements;
+        assert_eq!(back.mean_motion_dot.to_bits(), (-0.0_f64).to_bits());
     }
 }
