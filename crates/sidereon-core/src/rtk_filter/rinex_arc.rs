@@ -275,6 +275,10 @@ pub enum RtkRinexArcError {
     NoSignalPairs,
     /// No considered base epoch met the configured usable-satellite threshold.
     NoUsableEpochs,
+    /// The ephemeris source refused a satellite position because producing it
+    /// reads UT1 outside the UT1 table under a strict UT1 policy. The arc build
+    /// fails rather than leaving that satellite out.
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl core::fmt::Display for RtkRinexArcError {
@@ -294,6 +298,10 @@ impl core::fmt::Display for RtkRinexArcError {
             ),
             Self::NoSignalPairs => write!(f, "RTK RINEX arc requires at least one signal pair"),
             Self::NoUsableEpochs => write!(f, "RTK RINEX arc produced no usable epochs"),
+            Self::Ut1OutsideCoverage(reason) => write!(
+                f,
+                "the ephemeris source refused an RTK arc satellite position: {reason}"
+            ),
         }
     }
 }
@@ -1241,6 +1249,9 @@ fn ephemeris_error(
     epoch_j2000_s: f64,
     error: ObservablesError,
 ) -> RtkRinexArcError {
+    if let ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason)) = error {
+        return RtkRinexArcError::Ut1OutsideCoverage(reason);
+    }
     RtkRinexArcError::Ephemeris {
         satellite_id: satellite_id.to_string(),
         epoch_j2000_s,
@@ -1375,6 +1386,37 @@ mod tests {
                 clock_s: Some(0.0),
             })
         }
+    }
+
+    /// Refuses every state, as an SSR source does outside the UT1 table under
+    /// a strict UT1 policy.
+    struct Ut1RefusingSource;
+
+    impl ObservableEphemerisSource for Ut1RefusingSource {
+        fn observable_state_at_j2000_s(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+        ) -> Result<crate::observables::ObservableState, ObservablesError> {
+            Err(ObservablesError::Ephemeris(
+                crate::Error::Ut1OutsideCoverage(crate::astro::time::DegradeReason::AfterCoverage),
+            ))
+        }
+    }
+
+    #[test]
+    fn ephemeris_position_keeps_a_ut1_refusal_typed() {
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("G01");
+        assert_eq!(
+            ephemeris_position(&Ut1RefusingSource, sat, 0.0),
+            Err(RtkRinexArcError::Ut1OutsideCoverage(
+                crate::astro::time::DegradeReason::AfterCoverage
+            ))
+        );
+        assert_eq!(
+            ephemeris_position(&FixedSource, sat, 0.0),
+            Ok(Some([20_000_000.0, 10_000_000.0, 10_000_000.0]))
+        );
     }
 
     fn header_line(content: &str, label: &str) -> String {

@@ -64,6 +64,9 @@ pub enum Error {
     InvalidInput(String),
     /// An SBAS block holds a value the SBAS wire form cannot carry as held.
     SbasEncode(Box<crate::sbas::SbasEncodeError>),
+    /// The operation reads UT1 (Earth rotation) at an instant outside the UT1
+    /// table and was not asked to accept the long-term UT1 there.
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl fmt::Display for Error {
@@ -101,6 +104,7 @@ impl fmt::Display for Error {
             Error::EpochOutOfRange => write!(f, "epoch out of range"),
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Error::SbasEncode(error) => write!(f, "SBAS encode error: {error}"),
+            Error::Ut1OutsideCoverage(reason) => write!(f, "UT1 outside the table: {reason}"),
         }
     }
 }

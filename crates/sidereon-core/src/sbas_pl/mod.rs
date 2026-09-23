@@ -71,6 +71,10 @@ pub enum SbasPlError {
     /// The supplied error model is missing, non-finite, or outside its domain.
     #[error("invalid SBAS protection-level error model")]
     InvalidErrorModel,
+    /// A satellite position was refused because producing it reads UT1
+    /// outside the UT1 table under a strict UT1 policy.
+    #[error("SBAS protection-level satellite position refused: {0}")]
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 /// Compute DO-229 SBAS HPL and VPL from geometry and supplied range sigmas.
@@ -151,6 +155,7 @@ fn map_model_error(error: AraimError) -> SbasPlError {
         AraimError::UnmonitorableFaultMass | AraimError::NumericalFailure => {
             SbasPlError::NumericalFailure
         }
+        AraimError::Ut1OutsideCoverage(reason) => SbasPlError::Ut1OutsideCoverage(reason),
     }
 }
 
@@ -161,6 +166,7 @@ fn map_araim_error(error: AraimError) -> SbasPlError {
         AraimError::UnmonitorableFaultMass | AraimError::NumericalFailure => {
             SbasPlError::NumericalFailure
         }
+        AraimError::Ut1OutsideCoverage(reason) => SbasPlError::Ut1OutsideCoverage(reason),
     }
 }
 

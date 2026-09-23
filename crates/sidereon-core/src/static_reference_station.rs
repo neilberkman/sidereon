@@ -21,7 +21,7 @@ use crate::rtk_filter::{
     build_rinex_rtk_arc, IntegerStatus, RtkRinexArcOptions, RtkStaticArcConfig,
     RtkStaticArcSolution,
 };
-use crate::spp::{Corrections, Observation};
+use crate::spp::{Corrections, Observation, Ut1Tracked};
 use crate::validate;
 
 /// High-level solve mode selected for the reported station coordinate.
@@ -159,6 +159,10 @@ pub enum StaticReferenceModeError {
         /// Invalid satellite identifier text.
         satellite_id: String,
     },
+    /// The ephemeris source refused a satellite state the mode read, because
+    /// producing it reads UT1 outside the UT1 table under a strict UT1 policy.
+    /// The mode fails rather than dropping that satellite.
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl core::fmt::Display for StaticReferenceModeError {
@@ -189,6 +193,12 @@ impl core::fmt::Display for StaticReferenceModeError {
             Self::InvalidCorrectedSatelliteId { satellite_id } => {
                 write!(f, "invalid corrected satellite id {satellite_id}")
             }
+            Self::Ut1OutsideCoverage(reason) => {
+                write!(
+                    f,
+                    "the ephemeris source refused a satellite state: {reason}"
+                )
+            }
         }
     }
 }
@@ -212,6 +222,10 @@ pub struct StaticReferenceCodeSolution {
     pub baseline_m: f64,
     /// Per-epoch diagnostic rollups.
     pub diagnostics: Vec<StaticReferenceEpochDiagnostic>,
+    /// The first UT1 departure the ephemeris source accepted while producing
+    /// a satellite state for this mode, under a permissive UT1 policy. `None`
+    /// when every state was produced inside UT1 coverage or did not read UT1.
+    pub ut1_degraded: Option<crate::astro::time::DegradeReason>,
 }
 
 /// Carrier RTK static solve detail.
@@ -235,6 +249,10 @@ pub struct StaticReferenceCarrierSolution {
     pub rtk_solution: RtkStaticArcSolution,
     /// Per-epoch diagnostic rollups from the selected float/fixed residuals.
     pub diagnostics: Vec<StaticReferenceEpochDiagnostic>,
+    /// The first UT1 departure the ephemeris source accepted while producing
+    /// a satellite state for this mode, under a permissive UT1 policy. `None`
+    /// when every state was produced inside UT1 coverage or did not read UT1.
+    pub ut1_degraded: Option<crate::astro::time::DegradeReason>,
 }
 
 /// Final station solution returned by the RINEX wrapper.
@@ -262,6 +280,10 @@ pub struct StaticReferenceStationSolution {
     pub mode_reports: Vec<StaticReferenceModeReport>,
     /// Diagnostics for the selected mode.
     pub diagnostics: Vec<StaticReferenceEpochDiagnostic>,
+    /// The selected mode's `ut1_degraded`: the first UT1 departure the
+    /// ephemeris source accepted while producing a satellite state for the
+    /// reported coordinate, under a permissive UT1 policy.
+    pub ut1_degraded: Option<crate::astro::time::DegradeReason>,
 }
 
 /// Carrier RTK options for the RINEX station wrapper.
@@ -428,14 +450,21 @@ where
 
     let mut reports = Vec::new();
     let code = match &options.code_options {
-        Some(code_options) => match solve_code_dgnss_static(
-            source,
-            reference_obs,
-            rover_obs,
-            reference_position_m,
-            code_options,
-            options.with_geodetic,
-        ) {
+        Some(code_options) => match ut1_tracked_mode(source, |tracked| {
+            solve_code_dgnss_static(
+                tracked,
+                reference_obs,
+                rover_obs,
+                reference_position_m,
+                code_options,
+                options.with_geodetic,
+            )
+            .map(|solution| (solution, ()))
+        })
+        .map(|(mut solution, (), ut1_degraded)| {
+            solution.ut1_degraded = ut1_degraded;
+            solution
+        }) {
             Ok(solution) => {
                 reports.push(StaticReferenceModeReport {
                     mode: StaticReferenceStationMode::CodeDgnss,
@@ -460,14 +489,20 @@ where
     };
 
     let carrier = match &options.carrier_options {
-        Some(carrier_options) => match solve_carrier_static(
-            source,
-            reference_obs,
-            rover_obs,
-            reference_position_m,
-            carrier_options,
-            options.with_geodetic,
-        ) {
+        Some(carrier_options) => match ut1_tracked_mode(source, |tracked| {
+            solve_carrier_static(
+                tracked,
+                reference_obs,
+                rover_obs,
+                reference_position_m,
+                carrier_options,
+                options.with_geodetic,
+            )
+        })
+        .map(|(mut solution, skipped_epochs, ut1_degraded)| {
+            solution.ut1_degraded = ut1_degraded;
+            (solution, skipped_epochs)
+        }) {
             Ok((solution, skipped_epochs)) => {
                 reports.push(StaticReferenceModeReport {
                     mode: solution_mode_from_carrier(&solution),
@@ -492,6 +527,26 @@ where
 
     let selected = select_solution(reference_position_m, code, carrier, reports)?;
     Ok(selected)
+}
+
+/// Run one mode reading `source` through a [`Ut1Tracked`] view. A UT1 refusal
+/// anywhere in the mode fails it with [`StaticReferenceModeError::Ut1OutsideCoverage`],
+/// taking precedence over the error or the reduced solution the missing state
+/// led to; otherwise the mode's result is returned with the first accepted UT1
+/// departure.
+fn ut1_tracked_mode<S, T, U>(
+    source: &S,
+    mode: impl FnOnce(&Ut1Tracked<'_, S>) -> Result<(T, U), StaticReferenceModeError>,
+) -> Result<(T, U, Option<crate::astro::time::DegradeReason>), StaticReferenceModeError>
+where
+    S: ?Sized,
+{
+    let tracked = Ut1Tracked::new(source);
+    let result = mode(&tracked);
+    if let Some(reason) = tracked.refusal() {
+        return Err(StaticReferenceModeError::Ut1OutsideCoverage(reason));
+    }
+    result.map(|(solution, extra)| (solution, extra, tracked.departure()))
 }
 
 fn solve_code_dgnss_static<S>(
@@ -570,6 +625,7 @@ where
         baseline_vector_m,
         baseline_m,
         diagnostics,
+        ut1_degraded: None,
     })
 }
 
@@ -624,6 +680,7 @@ where
         baseline_vector_m: solution.baseline_vector_m,
         baseline_m: solution.baseline_m,
         diagnostics,
+        ut1_degraded: None,
     })
 }
 
@@ -706,6 +763,7 @@ where
             integer_ratio: fixed.search.integer_ratio,
             rtk_solution,
             diagnostics,
+            ut1_degraded: None,
         },
         arc.skipped_epoch_count,
     ))
@@ -723,42 +781,52 @@ fn select_solution(
         });
     }
 
-    let (mode, position, geodetic, covariance, baseline_vector_m, mut baseline_m, diagnostics) =
-        match (carrier.as_ref(), code.as_ref()) {
-            (Some(carrier), _)
-                if solution_mode_from_carrier(carrier)
-                    == StaticReferenceStationMode::CarrierFixed =>
-            {
-                (
-                    StaticReferenceStationMode::CarrierFixed,
-                    carrier.position,
-                    carrier.geodetic,
-                    carrier.covariance,
-                    carrier.baseline_vector_m,
-                    carrier.baseline_m,
-                    carrier.diagnostics.clone(),
-                )
-            }
-            (_, Some(code)) => (
-                StaticReferenceStationMode::CodeDgnss,
-                code.position,
-                code.geodetic,
-                code.covariance,
-                code.baseline_vector_m,
-                code.baseline_m,
-                code.diagnostics.clone(),
-            ),
-            (Some(carrier), None) => (
-                StaticReferenceStationMode::CarrierFloat,
+    let (
+        mode,
+        position,
+        geodetic,
+        covariance,
+        baseline_vector_m,
+        mut baseline_m,
+        diagnostics,
+        ut1_degraded,
+    ) = match (carrier.as_ref(), code.as_ref()) {
+        (Some(carrier), _)
+            if solution_mode_from_carrier(carrier) == StaticReferenceStationMode::CarrierFixed =>
+        {
+            (
+                StaticReferenceStationMode::CarrierFixed,
                 carrier.position,
                 carrier.geodetic,
                 carrier.covariance,
                 carrier.baseline_vector_m,
                 carrier.baseline_m,
                 carrier.diagnostics.clone(),
-            ),
-            (None, None) => unreachable!("handled above"),
-        };
+                carrier.ut1_degraded,
+            )
+        }
+        (_, Some(code)) => (
+            StaticReferenceStationMode::CodeDgnss,
+            code.position,
+            code.geodetic,
+            code.covariance,
+            code.baseline_vector_m,
+            code.baseline_m,
+            code.diagnostics.clone(),
+            code.ut1_degraded,
+        ),
+        (Some(carrier), None) => (
+            StaticReferenceStationMode::CarrierFloat,
+            carrier.position,
+            carrier.geodetic,
+            carrier.covariance,
+            carrier.baseline_vector_m,
+            carrier.baseline_m,
+            carrier.diagnostics.clone(),
+            carrier.ut1_degraded,
+        ),
+        (None, None) => unreachable!("handled above"),
+    };
     let baseline_vector_m = if baseline_vector_m.iter().all(|value| value.is_finite()) {
         baseline_vector_m
     } else {
@@ -779,6 +847,7 @@ fn select_solution(
         carrier_solution: carrier,
         mode_reports: reports,
         diagnostics,
+        ut1_degraded,
     })
 }
 

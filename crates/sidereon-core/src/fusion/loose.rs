@@ -599,6 +599,12 @@ pub struct FusionUpdate {
     pub rejected_rows: usize,
     /// Full correction report from the selected update primitive.
     pub ekf: EkfCorrectionReport,
+    /// The first UT1 departure the ephemeris source accepted while producing
+    /// a satellite state for a tight update, under a permissive UT1 policy
+    /// (for example an SSR source's centre-of-mass to antenna-phase-centre
+    /// conversion outside the UT1 table). `None` for loose updates and when
+    /// every state was produced inside UT1 coverage or did not read UT1.
+    pub ut1_degraded: Option<crate::astro::time::DegradeReason>,
 }
 
 impl FusionUpdate {
@@ -610,6 +616,7 @@ impl FusionUpdate {
             accepted_rows: report.accepted_rows,
             rejected_rows: report.rejected_rows,
             ekf: report,
+            ut1_degraded: None,
         }
     }
 }

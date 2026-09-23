@@ -426,3 +426,67 @@ fn finder_edge_cases() {
     .expect_err("SPK coverage error through eclipse path");
     assert!(matches!(eclipse_error, AlmanacError::Spk(_)));
 }
+
+#[test]
+fn meridian_transits_after_the_ut1_table_are_refused_or_reported() {
+    use crate::astro::time::{DegradeReason, ValidityMode};
+
+    let start = utc(2027, 9, 1, 0, 0, 0, 0);
+    let end = utc(2027, 9, 2, 0, 0, 0, 0);
+    let strict = meridian_transits(
+        EphemerisSource::Analytic,
+        TransitBody::Moon,
+        &greenwich(),
+        start,
+        end,
+        600.0,
+        1.0,
+    );
+    assert!(
+        matches!(
+            strict,
+            Err(AlmanacError::Ut1OutsideCoverage(
+                DegradeReason::AfterCoverage
+            ))
+        ),
+        "{strict:?}"
+    );
+
+    let permissive = meridian_transits_with_validity(
+        EphemerisSource::Analytic,
+        TransitBody::Moon,
+        &greenwich(),
+        start,
+        end,
+        600.0,
+        1.0,
+        ValidityMode::Permissive,
+    )
+    .expect("permissive transits");
+    assert_eq!(permissive.degraded, Some(DegradeReason::AfterCoverage));
+    assert!(
+        !permissive.value.is_empty(),
+        "the Moon crosses the meridian in a day"
+    );
+
+    // A window from inside the table to past its end is refused rather than
+    // returning the transits before the edge.
+    let straddle = meridian_transits(
+        EphemerisSource::Analytic,
+        TransitBody::Moon,
+        &greenwich(),
+        utc(2027, 7, 1, 0, 0, 0, 0),
+        utc(2027, 7, 6, 0, 0, 0, 0),
+        600.0,
+        1.0,
+    );
+    assert!(
+        matches!(
+            straddle,
+            Err(AlmanacError::Ut1OutsideCoverage(
+                DegradeReason::AfterCoverage
+            ))
+        ),
+        "{straddle:?}"
+    );
+}

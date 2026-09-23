@@ -12,10 +12,13 @@ use std::sync::Arc;
 
 use crate::antex::{Antex, AntexDateTime};
 use crate::astro::bodies::sun_moon_ecef;
+use crate::astro::frames::transforms::Ut1Gate;
 use crate::astro::math::vec3::add3;
 use crate::astro::time::civil::civil_from_j2000_seconds;
+use crate::astro::time::eop::Ut1DepartureRecord;
 use crate::astro::time::model::{GnssWeekTow, TimeScale};
 use crate::astro::time::scales::TimeScales;
+use crate::astro::time::{DegradeReason, Validated, ValidityMode};
 use crate::constants::{C_M_S, GPS_EPOCH_TO_J2000_S, SECONDS_PER_HOUR, SECONDS_PER_WEEK};
 use crate::ephemeris::{BroadcastEphemeris, BroadcastIssue, NavMessage};
 use crate::error::{Error, Result};
@@ -27,7 +30,7 @@ use crate::observables::{ObservableEphemerisSource, ObservableState, Observables
 use crate::ppp_corrections::satellite_body_pco_to_ecef;
 use crate::rinex_nav::is_beidou_geo;
 use crate::rtcm::{Message, SsrKind, SsrMessage};
-use crate::spp::EphemerisSource;
+use crate::spp::{EphemerisSource, PositionClock, PositionClockGroupDelay};
 use crate::staleness::StalenessPolicy;
 
 const DEFAULT_SSR_STALENESS_S: f64 = 90.0;
@@ -2747,6 +2750,18 @@ pub trait SsrCorrectionSource {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<SsrSolution>;
+
+    /// [`Self::applied_orbit_clock_solution`] with a UT1 refusal kept as
+    /// `Err(`[`Error::Ut1OutsideCoverage`]`)`: the source refused the
+    /// satellite's state under a strict UT1 policy, so no solution is known
+    /// to be in use. The default implementation never refuses.
+    fn try_applied_orbit_clock_solution(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<SsrSolution>> {
+        Ok(self.applied_orbit_clock_solution(sat, t_j2000_s))
+    }
 }
 
 impl SsrCorrectionSource for SsrCorrectedEphemeris<'_> {
@@ -2761,6 +2776,14 @@ impl SsrCorrectionSource for SsrCorrectedEphemeris<'_> {
     ) -> Option<SsrSolution> {
         SsrCorrectedEphemeris::applied_orbit_clock_solution(self, sat, t_j2000_s)
     }
+
+    fn try_applied_orbit_clock_solution(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<SsrSolution>> {
+        self.applied_orbit_clock_checked(sat, t_j2000_s)
+    }
 }
 
 impl SsrCorrectionSource for SsrCorrectedEphemerisOwned {
@@ -2774,6 +2797,14 @@ impl SsrCorrectionSource for SsrCorrectedEphemerisOwned {
         t_j2000_s: f64,
     ) -> Option<SsrSolution> {
         SsrCorrectedEphemerisOwned::applied_orbit_clock_solution(self, sat, t_j2000_s)
+    }
+
+    fn try_applied_orbit_clock_solution(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<SsrSolution>> {
+        self.borrowed().applied_orbit_clock_checked(sat, t_j2000_s)
     }
 }
 
@@ -2823,6 +2854,12 @@ pub enum SsrStateUnavailable {
     /// A centre-of-mass orbit cannot be moved to the antenna phase centre: no nominal
     /// attitude model, no ANTEX calibration for the satellite, or no Sun position.
     CenterOfMassUnresolved,
+    /// A centre-of-mass orbit's move to the antenna phase centre reads UT1 (for the Sun
+    /// direction) outside the UT1 table, and the source's UT1 policy is
+    /// [`ValidityMode::Strict`]. The satellite is not given a broadcast fallback state
+    /// instead: [`SsrCorrectedEphemeris::corrected_state_checked`] reports
+    /// [`Error::Ut1OutsideCoverage`].
+    Ut1OutsideCoverage(DegradeReason),
 }
 
 /// The broadcast state RTKLIB `satpos_ssr` starts from for one satellite and epoch.
@@ -2847,6 +2884,8 @@ struct SsrAppliedState {
     solution: SsrSolution,
     /// Single-frequency group delay of the broadcast record, seconds.
     group_delay_s: Option<f64>,
+    /// UT1 departure the CoM-to-APC conversion accepted under a permissive policy.
+    ut1_degraded: Option<DegradeReason>,
 }
 
 /// Which state an SSR-corrected source returns for a satellite at an epoch.
@@ -2854,6 +2893,8 @@ enum VelocitySource {
     Ssr,
     Broadcast,
     None,
+    /// The SSR state is refused for reading UT1 outside the table.
+    Ut1Refused(DegradeReason),
 }
 
 /// Broadcast ephemeris corrected by an SSR store.
@@ -2865,6 +2906,8 @@ pub struct SsrCorrectedEphemeris<'a> {
     attitude: SsrSatelliteAttitude,
     staleness: StalenessPolicy,
     fallback: SsrFallbackPolicy,
+    ut1_validity: ValidityMode,
+    ut1_departures: Ut1DepartureRecord,
 }
 
 impl<'a> SsrCorrectedEphemeris<'a> {
@@ -2877,7 +2920,36 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             attitude: SsrSatelliteAttitude::Unavailable,
             staleness: store.staleness(),
             fallback: SsrFallbackPolicy::default(),
+            ut1_validity: ValidityMode::Strict,
+            ut1_departures: Ut1DepartureRecord::default(),
         }
+    }
+
+    /// Set the UT1 policy for the Sun direction of the CoM-to-APC conversion.
+    ///
+    /// The nominal Sun-fixed attitude rotates the Sun into ECEF with UT1. The
+    /// default, [`ValidityMode::Strict`], refuses an epoch outside the UT1 table:
+    /// [`Self::corrected_state_checked`] and
+    /// [`ObservableEphemerisSource::observable_state_at_j2000_s`] return
+    /// [`Error::Ut1OutsideCoverage`], and the `Option` methods return `None`.
+    /// Under [`ValidityMode::Permissive`] the conversion uses the long-term UT1;
+    /// [`Self::corrected_state_checked`] reports the departure for that state
+    /// and [`Self::ut1_departure`] the first one this source and its clones
+    /// have used.
+    pub fn with_validity(mut self, validity: ValidityMode) -> Self {
+        self.ut1_validity = validity;
+        self
+    }
+
+    /// The first departure from the UT1 table this source or a clone of it
+    /// accepted under [`ValidityMode::Permissive`], or `None`.
+    pub fn ut1_departure(&self) -> Option<DegradeReason> {
+        self.ut1_departures.first()
+    }
+
+    fn with_departure_record(mut self, record: Ut1DepartureRecord) -> Self {
+        self.ut1_departures = record;
+        self
     }
 
     /// Attach satellite ANTEX calibrations for CoM-to-APC orbit conversion.
@@ -2939,24 +3011,70 @@ impl<'a> SsrCorrectedEphemeris<'a> {
     ///
     /// A broadcast fallback state keeps the broadcast clock of
     /// [`EphemerisSource::position_clock_at_j2000_s`].
+    ///
+    /// `None` also when the CoM-to-APC conversion is refused outside the UT1
+    /// table; [`Self::corrected_state_checked`] returns that reason.
     pub fn corrected_state(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<([f64; 3], f64)> {
         self.corrected_state_with_group_delay(sat, t_j2000_s)
             .map(|(position, clock, _)| (position, clock))
     }
 
+    /// [`Self::corrected_state`] with the UT1 policy's outcome.
+    ///
+    /// `Err(`[`Error::Ut1OutsideCoverage`]`)` when the CoM-to-APC conversion
+    /// reads UT1 outside the table under [`ValidityMode::Strict`]; the
+    /// satellite is not given the broadcast state instead. Otherwise the state
+    /// [`Self::corrected_state`] returns, with the departure accepted under
+    /// [`ValidityMode::Permissive`] in [`Validated::degraded`].
+    pub fn corrected_state_checked(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Validated<Option<PositionClock>>> {
+        let checked = self.corrected_state_with_group_delay_checked(sat, t_j2000_s)?;
+        Ok(Validated {
+            value: checked.value.map(|(position, clock, _)| (position, clock)),
+            degraded: checked.degraded,
+        })
+    }
+
     /// [`Self::corrected_state`] with its single-frequency group delay (see
     /// [`Self::single_frequency_group_delay_s`]), from one evaluation.
+    ///
+    /// `None` also when the CoM-to-APC conversion is refused outside the UT1
+    /// table; [`Self::corrected_state_with_group_delay_checked`] returns that
+    /// reason.
     pub fn corrected_state_with_group_delay(
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
-    ) -> Option<([f64; 3], f64, Option<f64>)> {
+    ) -> Option<PositionClockGroupDelay> {
+        self.corrected_state_with_group_delay_checked(sat, t_j2000_s)
+            .ok()
+            .and_then(|checked| checked.value)
+    }
+
+    /// [`Self::corrected_state_with_group_delay`] with the UT1 policy's outcome,
+    /// as [`Self::corrected_state_checked`] reports it.
+    pub fn corrected_state_with_group_delay_checked(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Validated<Option<PositionClockGroupDelay>>> {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
-            return None;
+            return Ok(Validated::ok(None));
         }
         match self.ssr_corrected_state(sat, t_j2000_s) {
-            Ok(state) => Some((state.position_m, state.clock_s, state.group_delay_s)),
-            Err(_) => self.broadcast_fallback_with_group_delay(sat, t_j2000_s),
+            Ok(state) => Ok(Validated {
+                value: Some((state.position_m, state.clock_s, state.group_delay_s)),
+                degraded: state.ut1_degraded,
+            }),
+            Err(SsrStateUnavailable::Ut1OutsideCoverage(reason)) => {
+                Err(Error::Ut1OutsideCoverage(reason))
+            }
+            Err(_) => Ok(Validated::ok(
+                self.broadcast_fallback_with_group_delay(sat, t_j2000_s),
+            )),
         }
     }
 
@@ -2987,6 +3105,22 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         }
         self.ssr_corrected_state(sat, t_j2000_s)
             .map(|state| state.solution)
+    }
+
+    /// [`Self::applied_orbit_clock_solution`] with a UT1 refusal returned as
+    /// [`Error::Ut1OutsideCoverage`].
+    fn applied_orbit_clock_checked(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<SsrSolution>> {
+        match self.applied_orbit_clock_status(sat, t_j2000_s) {
+            Ok(solution) => Ok(Some(solution)),
+            Err(SsrStateUnavailable::Ut1OutsideCoverage(reason)) => {
+                Err(Error::Ut1OutsideCoverage(reason))
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     /// Group delay, seconds, a single-frequency pseudorange model subtracts from the clock
@@ -3022,17 +3156,23 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         match self.velocity_source(sat, t_j2000_s) {
             VelocitySource::Ssr => self.ssr_broadcast_velocity(sat, t_j2000_s),
             VelocitySource::Broadcast => self.broadcast.selected_record_velocity(sat, t_j2000_s),
-            VelocitySource::None => None,
+            VelocitySource::None | VelocitySource::Ut1Refused(_) => None,
         }
     }
 
     /// Which state [`Self::corrected_state`] returns for `sat` at `t_j2000_s`.
     fn velocity_source(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> VelocitySource {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
-            VelocitySource::None
-        } else if self.ssr_corrected_state(sat, t_j2000_s).is_ok() {
-            VelocitySource::Ssr
-        } else if self
+            return VelocitySource::None;
+        }
+        match self.ssr_corrected_state(sat, t_j2000_s) {
+            Ok(_) => return VelocitySource::Ssr,
+            Err(SsrStateUnavailable::Ut1OutsideCoverage(reason)) => {
+                return VelocitySource::Ut1Refused(reason)
+            }
+            Err(_) => {}
+        }
+        if self
             .broadcast_fallback_after_failure(sat, t_j2000_s)
             .is_some()
         {
@@ -3125,12 +3265,17 @@ impl<'a> SsrCorrectedEphemeris<'a> {
     /// The statements follow RTKLIB `satpos_ssr`: the broadcast position and velocity of
     /// the IODE-selected record, the clock from that record's polynomial less `2 r·v / c²`,
     /// the orbit correction along the velocity-aligned axes, then the clock correction.
+    ///
+    /// A centre-of-mass orbit's move to the antenna phase centre reads UT1 under this
+    /// source's UT1 policy: a refusal is [`SsrStateUnavailable::Ut1OutsideCoverage`], and
+    /// an accepted departure is recorded on the source and carried in the state.
     fn ssr_corrected_state(
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> std::result::Result<SsrAppliedState, SsrStateUnavailable> {
         use SsrStateUnavailable as Unavailable;
+        let gate = Ut1Gate::new(self.ut1_validity);
         let orbit = self
             .store
             .orbit(sat)
@@ -3192,8 +3337,15 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         ];
         if orbit.reference_point == SsrReferencePoint::CenterOfMass {
             let pco_ecef_m = self
-                .satellite_pco_to_apc(sat, t_j2000_s, corrected_position)
-                .ok_or(Unavailable::CenterOfMassUnresolved)?;
+                .satellite_pco_to_apc(sat, t_j2000_s, corrected_position, &gate)
+                .ok_or_else(|| match gate.finish(()) {
+                    Err(
+                        crate::astro::frames::transforms::FrameTransformError::Ut1OutsideCoverage {
+                            reason,
+                        },
+                    ) => Unavailable::Ut1OutsideCoverage(reason),
+                    _ => Unavailable::CenterOfMassUnresolved,
+                })?;
             corrected_position = add3(corrected_position, pco_ecef_m);
         }
 
@@ -3217,11 +3369,20 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         // t_corr = t_sv - (dts(brdc) + dclk(ssr) / c): the correction adds to the clock
         // for RTCM SSR and Galileo HAS alike.
         clock_s += dclock_m / C_M_S;
+        let ut1_degraded = match gate.finish(()) {
+            Ok(validated) => validated.degraded,
+            Err(crate::astro::frames::transforms::FrameTransformError::Ut1OutsideCoverage {
+                reason,
+            }) => return Err(Unavailable::Ut1OutsideCoverage(reason)),
+            Err(crate::astro::frames::transforms::FrameTransformError::InvalidInput { .. }) => None,
+        };
+        self.ut1_departures.record(ut1_degraded);
         Ok(SsrAppliedState {
             position_m: corrected_position,
             clock_s,
             solution: clock.solution,
             group_delay_s,
+            ut1_degraded,
         })
     }
 
@@ -3312,6 +3473,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
         sat_position_ecef_m: [f64; 3],
+        gate: &Ut1Gate,
     ) -> Option<[f64; 3]> {
         if self.attitude != SsrSatelliteAttitude::NominalSunFixed {
             return None;
@@ -3322,6 +3484,9 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         let frequency = ssr_apc_frequency(sat.system)?;
         let pco_body_m = antenna.pco(frequency).ok()?;
         let ts = time_scales_from_j2000_gpst(t_j2000_s)?;
+        // A UT1 refusal is remembered by `gate` and returned by the caller as
+        // `SsrStateUnavailable::Ut1OutsideCoverage`, not as an unresolved offset.
+        let ts = gate.admit(ts).ok()?;
         let sun_ecef_m = sun_moon_ecef(&ts).ok()?.sun;
         satellite_body_pco_to_ecef(pco_body_m, sat_position_ecef_m, sun_ecef_m)
     }
@@ -3347,6 +3512,29 @@ impl EphemerisSource for SsrCorrectedEphemeris<'_> {
     ) -> Option<([f64; 3], f64, Option<f64>)> {
         self.corrected_state_with_group_delay(sat, t_j2000_s)
     }
+
+    /// [`Self::corrected_state_checked`]: `Err(`[`Error::Ut1OutsideCoverage`]`)`
+    /// when this source's UT1 policy refuses the CoM-to-APC conversion, and
+    /// the accepted departure on the state otherwise.
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClock>>> {
+        Ok(Validated::transpose(
+            self.corrected_state_checked(sat, t_j2000_s)?,
+        ))
+    }
+
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>> {
+        Ok(Validated::transpose(
+            self.corrected_state_with_group_delay_checked(sat, t_j2000_s)?,
+        ))
+    }
 }
 
 impl ObservableEphemerisSource for SsrCorrectedEphemeris<'_> {
@@ -3355,13 +3543,20 @@ impl ObservableEphemerisSource for SsrCorrectedEphemeris<'_> {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> std::result::Result<ObservableState, ObservablesError> {
-        let Some((position_ecef_m, clock_s)) = self.corrected_state(sat, t_j2000_s) else {
-            return Err(ObservablesError::NoEphemeris);
-        };
-        Ok(ObservableState {
-            position_ecef_m,
-            clock_s: Some(clock_s),
-        })
+        self.try_observable_state_at_j2000_s(sat, t_j2000_s)
+            .map(|state| state.value)
+    }
+
+    fn try_observable_state_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> std::result::Result<Validated<ObservableState>, ObservablesError> {
+        self.try_observable_state_group_delay_at_j2000_s(sat, t_j2000_s)
+            .map(|state| Validated {
+                value: state.value.0,
+                degraded: state.degraded,
+            })
     }
 
     fn ssr_corrections(&self) -> Option<&dyn SsrCorrectionSource> {
@@ -3384,16 +3579,30 @@ impl ObservableEphemerisSource for SsrCorrectedEphemeris<'_> {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> std::result::Result<(ObservableState, Option<f64>), ObservablesError> {
-        let (position_ecef_m, clock_s, group_delay) = self
-            .corrected_state_with_group_delay(sat, t_j2000_s)
-            .ok_or(ObservablesError::NoEphemeris)?;
-        Ok((
-            ObservableState {
-                position_ecef_m,
-                clock_s: Some(clock_s),
-            },
-            group_delay,
-        ))
+        self.try_observable_state_group_delay_at_j2000_s(sat, t_j2000_s)
+            .map(|state| state.value)
+    }
+
+    fn try_observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> std::result::Result<Validated<(ObservableState, Option<f64>)>, ObservablesError> {
+        let checked = self
+            .corrected_state_with_group_delay_checked(sat, t_j2000_s)
+            .map_err(ObservablesError::Ephemeris)?;
+        let (position_ecef_m, clock_s, group_delay) =
+            checked.value.ok_or(ObservablesError::NoEphemeris)?;
+        Ok(Validated {
+            value: (
+                ObservableState {
+                    position_ecef_m,
+                    clock_s: Some(clock_s),
+                },
+                group_delay,
+            ),
+            degraded: checked.degraded,
+        })
     }
 
     fn velocity_at_j2000_s(
@@ -3413,6 +3622,9 @@ impl ObservableEphemerisSource for SsrCorrectedEphemeris<'_> {
                 .selected_record_velocity(sat, t_j2000_s)
                 .map(Ok),
             VelocitySource::None => Some(Err(ObservablesError::NoEphemeris)),
+            VelocitySource::Ut1Refused(reason) => Some(Err(ObservablesError::Ephemeris(
+                Error::Ut1OutsideCoverage(reason),
+            ))),
         }
     }
 }
@@ -3426,6 +3638,8 @@ pub struct SsrCorrectedEphemerisOwned {
     attitude: SsrSatelliteAttitude,
     staleness: StalenessPolicy,
     fallback: SsrFallbackPolicy,
+    ut1_validity: ValidityMode,
+    ut1_departures: Ut1DepartureRecord,
 }
 
 impl SsrCorrectedEphemerisOwned {
@@ -3439,7 +3653,39 @@ impl SsrCorrectedEphemerisOwned {
             attitude: SsrSatelliteAttitude::Unavailable,
             staleness,
             fallback: SsrFallbackPolicy::default(),
+            ut1_validity: ValidityMode::Strict,
+            ut1_departures: Ut1DepartureRecord::default(),
         }
+    }
+
+    /// Set the UT1 policy; see [`SsrCorrectedEphemeris::with_validity`].
+    pub fn with_validity(mut self, validity: ValidityMode) -> Self {
+        self.ut1_validity = validity;
+        self
+    }
+
+    /// See [`SsrCorrectedEphemeris::ut1_departure`].
+    pub fn ut1_departure(&self) -> Option<DegradeReason> {
+        self.ut1_departures.first()
+    }
+
+    /// See [`SsrCorrectedEphemeris::corrected_state_checked`].
+    pub fn corrected_state_checked(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Validated<Option<PositionClock>>> {
+        self.borrowed().corrected_state_checked(sat, t_j2000_s)
+    }
+
+    /// See [`SsrCorrectedEphemeris::corrected_state_with_group_delay_checked`].
+    pub fn corrected_state_with_group_delay_checked(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Validated<Option<PositionClockGroupDelay>>> {
+        self.borrowed()
+            .corrected_state_with_group_delay_checked(sat, t_j2000_s)
     }
 
     /// Attach satellite ANTEX calibrations for CoM-to-APC orbit conversion.
@@ -3545,7 +3791,9 @@ impl SsrCorrectedEphemerisOwned {
         let source = SsrCorrectedEphemeris::new(&self.broadcast, &self.store)
             .with_staleness(self.staleness)
             .with_fallback(self.fallback.clone())
-            .with_satellite_attitude(self.attitude);
+            .with_satellite_attitude(self.attitude)
+            .with_validity(self.ut1_validity)
+            .with_departure_record(self.ut1_departures.clone());
         if let Some(antex) = &self.antex {
             source.with_satellite_antennas(antex)
         } else {
@@ -3575,6 +3823,24 @@ impl EphemerisSource for SsrCorrectedEphemerisOwned {
         self.borrowed()
             .corrected_state_with_group_delay(sat, t_j2000_s)
     }
+
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClock>>> {
+        self.borrowed()
+            .try_position_clock_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>> {
+        self.borrowed()
+            .try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+    }
 }
 
 impl ObservableEphemerisSource for SsrCorrectedEphemerisOwned {
@@ -3584,6 +3850,24 @@ impl ObservableEphemerisSource for SsrCorrectedEphemerisOwned {
         t_j2000_s: f64,
     ) -> std::result::Result<ObservableState, ObservablesError> {
         self.borrowed().observable_state_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn try_observable_state_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> std::result::Result<Validated<ObservableState>, ObservablesError> {
+        self.borrowed()
+            .try_observable_state_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn try_observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> std::result::Result<Validated<(ObservableState, Option<f64>)>, ObservablesError> {
+        self.borrowed()
+            .try_observable_state_group_delay_at_j2000_s(sat, t_j2000_s)
     }
 
     fn ssr_corrections(&self) -> Option<&dyn SsrCorrectionSource> {
@@ -3606,17 +3890,8 @@ impl ObservableEphemerisSource for SsrCorrectedEphemerisOwned {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> std::result::Result<(ObservableState, Option<f64>), ObservablesError> {
-        let (position_ecef_m, clock_s, group_delay) = self
-            .borrowed()
-            .corrected_state_with_group_delay(sat, t_j2000_s)
-            .ok_or(ObservablesError::NoEphemeris)?;
-        Ok((
-            ObservableState {
-                position_ecef_m,
-                clock_s: Some(clock_s),
-            },
-            group_delay,
-        ))
+        self.borrowed()
+            .observable_state_group_delay_at_j2000_s(sat, t_j2000_s)
     }
 
     fn velocity_at_j2000_s(
@@ -6113,6 +6388,68 @@ mod tests {
             .with_satellite_antennas(&antex)
             .with_satellite_attitude(SsrSatelliteAttitude::NominalSunFixed);
         assert!(nominal.corrected_state(sat, t).is_some());
+    }
+
+    #[test]
+    fn com_to_apc_after_the_ut1_table_is_refused_or_reported() {
+        let nav_text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ssr/BRDC00WRD_S_20261820000_G30_G31.rnx"
+        ))
+        .expect("read NAV fixture");
+        let broadcast = BroadcastEphemeris::from_nav(&nav_text).expect("parse NAV fixture");
+        let antex = Antex::parse(GPS_ANTEX_TEXT).expect("parse ANTEX fixture");
+        let store = real_gps_ssr_store_with_reference_point(SsrReferencePoint::CenterOfMass);
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let source = SsrCorrectedEphemeris::new(&broadcast, &store)
+            .with_staleness(StalenessPolicy::seconds(60.0))
+            .with_satellite_antennas(&antex)
+            .with_satellite_attitude(SsrSatelliteAttitude::NominalSunFixed);
+        let satellite_ecef_m = [15_000.0e3, 10_000.0e3, 18_000.0e3];
+        // 2027-09-01 00:00 GPST: JD 2461649.5 is 10104.5 days after J2000,
+        // MJD 61649, past the UT1 table (it ends at MJD 61589).
+        let after = 10_104.5 * 86_400.0;
+        let refused = crate::astro::frames::transforms::FrameTransformError::Ut1OutsideCoverage {
+            reason: DegradeReason::AfterCoverage,
+        };
+
+        // Strict: the conversion is refused and the refusal is kept, so the
+        // caller reports it rather than an unavailable satellite.
+        let strict = Ut1Gate::new(ValidityMode::Strict);
+        assert_eq!(
+            source.satellite_pco_to_apc(sat, after, satellite_ecef_m, &strict),
+            None
+        );
+        assert_eq!(strict.finish(()), Err(refused));
+        assert_eq!(
+            Error::Ut1OutsideCoverage(DegradeReason::AfterCoverage).to_string(),
+            "UT1 outside the table: instant follows the UT1 table coverage"
+        );
+
+        // Permissive: the offset is computed with the long-term UT1 and the
+        // departure is reported.
+        let permissive_source = source.clone().with_validity(ValidityMode::Permissive);
+        let permissive = Ut1Gate::new(ValidityMode::Permissive);
+        let offset = permissive_source
+            .satellite_pco_to_apc(sat, after, satellite_ecef_m, &permissive)
+            .expect("APC offset with the long-term UT1");
+        assert!(offset.iter().all(|value| value.is_finite()));
+        assert_eq!(
+            permissive.finish(()).map(|validated| validated.degraded),
+            Ok(Some(DegradeReason::AfterCoverage))
+        );
+
+        // Inside the table both modes give the same corrected state, with no
+        // departure, and the source records none.
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let strict_state = source.corrected_state_checked(sat, t).expect("in table");
+        let permissive_state = permissive_source
+            .corrected_state_checked(sat, t)
+            .expect("in table");
+        assert_eq!(strict_state, permissive_state);
+        assert_eq!(permissive_state.degraded, None);
+        assert!(permissive_state.value.is_some());
+        assert_eq!(permissive_source.ut1_departure(), None);
     }
 
     #[test]

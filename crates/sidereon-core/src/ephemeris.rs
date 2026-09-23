@@ -24,14 +24,22 @@ pub use crate::observables::{
 };
 use crate::observables::{ObservableState, ObservablesInputErrorKind};
 pub use crate::orbit_determination::{
-    fit_all_sp3_ecef_precise_orbits, fit_all_sp3_precise_orbits,
+    fit_all_sp3_ecef_precise_orbits, fit_all_sp3_ecef_precise_orbits_with_validity,
+    fit_all_sp3_precise_orbits, fit_all_sp3_precise_orbits_with_validity,
     fit_precise_ephemeris_sample_orbit, fit_precise_ephemeris_sample_orbit_with_initial_state,
-    fit_precise_ephemeris_sample_orbits, fit_precise_ephemeris_state_sample_orbit,
-    fit_precise_ephemeris_state_sample_orbits, fit_sp3_ecef_precise_orbit,
-    fit_sp3_ecef_precise_orbits, fit_sp3_precise_orbit, fit_sp3_precise_orbit_with_initial_state,
-    fit_sp3_precise_orbits, OrbitArcSpan, OrbitFitCovariance, OrbitFitError, OrbitFitOptions,
-    OrbitFitReport, OrbitFitSolution, OrbitResidualLedger, OrbitResidualStats,
-    OrientedPreciseEphemerisStateSample,
+    fit_precise_ephemeris_sample_orbit_with_initial_state_with_validity,
+    fit_precise_ephemeris_sample_orbit_with_validity, fit_precise_ephemeris_sample_orbits,
+    fit_precise_ephemeris_sample_orbits_with_validity, fit_precise_ephemeris_state_sample_orbit,
+    fit_precise_ephemeris_state_sample_orbit_with_validity,
+    fit_precise_ephemeris_state_sample_orbits,
+    fit_precise_ephemeris_state_sample_orbits_with_validity, fit_sp3_ecef_precise_orbit,
+    fit_sp3_ecef_precise_orbit_with_validity, fit_sp3_ecef_precise_orbits,
+    fit_sp3_ecef_precise_orbits_with_validity, fit_sp3_precise_orbit,
+    fit_sp3_precise_orbit_with_initial_state,
+    fit_sp3_precise_orbit_with_initial_state_with_validity, fit_sp3_precise_orbit_with_validity,
+    fit_sp3_precise_orbits, fit_sp3_precise_orbits_with_validity, OrbitArcSpan, OrbitFitCovariance,
+    OrbitFitError, OrbitFitOptions, OrbitFitReport, OrbitFitSolution, OrbitResidualLedger,
+    OrbitResidualStats, OrientedPreciseEphemerisStateSample, Ut1ProviderRole,
 };
 pub use crate::rinex_nav::{
     cnav_ura_ned_m, cnav_ura_nominal_m, is_beidou_geo, BroadcastGroupDelayTerm,
@@ -65,7 +73,7 @@ pub use crate::sp3::{
     TransitionReason,
 };
 pub use crate::sp3::{Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR};
-pub use crate::spp::EphemerisSource;
+pub use crate::spp::{EphemerisSource, PositionClock, PositionClockGroupDelay};
 use crate::{validate, GnssSatelliteId, GnssSystem};
 
 /// Broadcast navigation ephemeris store selected by satellite and query epoch.

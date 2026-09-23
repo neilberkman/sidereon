@@ -22,13 +22,14 @@ use crate::astro::events::{
 };
 use crate::astro::frames::transforms::{
     gcrs_to_topocentric_compute, geodetic_to_itrs, teme_to_gcrs_compute, FrameTransformError,
-    GeodeticStationKm, TemeStateKm,
+    GeodeticStationKm, TemeStateKm, Ut1Gate,
 };
 use crate::astro::sgp4::{
     ElementSet, Error as Sgp4Error, JulianDate, OpsMode, Prediction, Satellite,
 };
 use crate::astro::time::civil::civil_from_julian_day_number;
 use crate::astro::time::scales::{julian_day_number, TimeScales};
+use crate::astro::time::{Validated, ValidityMode};
 use crate::validate;
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -259,6 +260,10 @@ pub enum PassError {
         /// or `out of range`.
         reason: &'static str,
     },
+    #[error("pass search reads UT1 outside the table: {0}")]
+    /// The search evaluates an instant outside the UT1 table under
+    /// [`ValidityMode::Strict`].
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 /// Topocentric look angle from a ground station to a TLE satellite.
@@ -339,19 +344,39 @@ pub enum LookAngleError {
 }
 
 /// Propagate a pre-parsed SGP4 element set and compute its topocentric look angle.
+///
+/// Refuses an instant outside the UT1 table; see [`look_angle_with_validity`].
 pub fn look_angle(
     elements: &ElementSet,
     ground_station: GroundStation,
     datetime: UtcInstant,
 ) -> Result<LookAngle, LookAngleError> {
+    look_angle_with_validity(elements, ground_station, datetime, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`look_angle`] under an explicit UT1 [`ValidityMode`].
+///
+/// [`ValidityMode::Strict`] refuses an instant outside the UT1 table with
+/// [`FrameTransformError::Ut1OutsideCoverage`];
+/// [`ValidityMode::Permissive`] evaluates it with the long-term UT1 and
+/// reports the departure in [`Validated::degraded`].
+pub fn look_angle_with_validity(
+    elements: &ElementSet,
+    ground_station: GroundStation,
+    datetime: UtcInstant,
+    mode: ValidityMode,
+) -> Result<Validated<LookAngle>, LookAngleError> {
     validate_ground_station(ground_station).map_err(map_look_angle_input)?;
-    let ts = time_scales_for_look_angle(datetime)?;
+    let gate = Ut1Gate::new(mode);
+    let ts = time_scales_for_look_angle(datetime, &gate)?;
     let satellite = Satellite::from_elements_with_opsmode(elements, OpsMode::Afspc)
         .map_err(LookAngleError::Init)?;
     let pred = satellite
         .propagate_jd(datetime.sgp4_julian_date())
         .map_err(LookAngleError::Propagate)?;
-    look_angle_from_teme_prediction(&pred, &ts, ground_station)
+    let look = look_angle_from_teme_prediction(&pred, &ts, ground_station)?;
+    Ok(gate.finish(look)?)
 }
 
 /// Propagate one already-initialized SGP4 satellite to TEME position/velocity at
@@ -384,17 +409,32 @@ pub fn look_angle_arc(
     ground_station: GroundStation,
     datetimes: &[UtcInstant],
 ) -> Result<Vec<LookAngle>, LookAngleError> {
+    look_angle_arc_with_validity(satellite, ground_station, datetimes, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`look_angle_arc`] under an explicit UT1 [`ValidityMode`]: Strict refuses
+/// the arc if any instant lies outside the UT1 table; Permissive evaluates
+/// every instant and reports the first departure in [`Validated::degraded`].
+pub fn look_angle_arc_with_validity(
+    satellite: &Satellite,
+    ground_station: GroundStation,
+    datetimes: &[UtcInstant],
+    mode: ValidityMode,
+) -> Result<Validated<Vec<LookAngle>>, LookAngleError> {
     validate_ground_station(ground_station).map_err(map_look_angle_input)?;
-    datetimes
+    let gate = Ut1Gate::new(mode);
+    let looks = datetimes
         .iter()
         .map(|&datetime| {
-            let ts = time_scales_for_look_angle(datetime)?;
+            let ts = time_scales_for_look_angle(datetime, &gate)?;
             let pred = satellite
                 .propagate_jd(datetime.sgp4_julian_date())
                 .map_err(LookAngleError::Propagate)?;
             look_angle_from_teme_prediction(&pred, &ts, ground_station)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(gate.finish(looks)?)
 }
 
 /// Propagate many already-initialized SGP4 satellites over a shared epoch grid,
@@ -459,6 +499,20 @@ pub fn look_angle_batch_serial(
         .collect()
 }
 
+/// [`look_angle_batch_serial`] under an explicit UT1 [`ValidityMode`]; each
+/// element is [`look_angle_arc_with_validity`] for one satellite.
+pub fn look_angle_batch_serial_with_validity(
+    satellites: &[Satellite],
+    ground_station: GroundStation,
+    datetimes: &[UtcInstant],
+    mode: ValidityMode,
+) -> Vec<Result<Validated<Vec<LookAngle>>, LookAngleError>> {
+    satellites
+        .iter()
+        .map(|satellite| look_angle_arc_with_validity(satellite, ground_station, datetimes, mode))
+        .collect()
+}
+
 /// Topocentric look angles for many already-initialized SGP4 satellites over a
 /// shared epoch grid, fanned across a rayon thread pool.
 ///
@@ -479,6 +533,23 @@ pub fn look_angle_batch_parallel(
         .collect()
 }
 
+/// [`look_angle_batch_parallel`] under an explicit UT1 [`ValidityMode`]; each
+/// element is [`look_angle_arc_with_validity`] for one satellite.
+pub fn look_angle_batch_parallel_with_validity(
+    satellites: &[Satellite],
+    ground_station: GroundStation,
+    datetimes: &[UtcInstant],
+    mode: ValidityMode,
+) -> Vec<Result<Validated<Vec<LookAngle>>, LookAngleError>> {
+    #[cfg(feature = "parallel")]
+    let satellites = satellites.par_iter();
+    #[cfg(not(feature = "parallel"))]
+    let satellites = satellites.iter();
+    satellites
+        .map(|satellite| look_angle_arc_with_validity(satellite, ground_station, datetimes, mode))
+        .collect()
+}
+
 /// Sub-satellite (ground-track) geodetic points for one already-initialized
 /// satellite over a time grid.
 ///
@@ -494,13 +565,26 @@ pub fn ground_track(
     satellite: &Satellite,
     datetimes: &[UtcInstant],
 ) -> Result<Vec<crate::frame::Wgs84Geodetic>, LookAngleError> {
+    ground_track_with_validity(satellite, datetimes, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`ground_track`] under an explicit UT1 [`ValidityMode`]: Strict refuses the
+/// track if any instant lies outside the UT1 table; Permissive evaluates every
+/// instant and reports the first departure in [`Validated::degraded`].
+pub fn ground_track_with_validity(
+    satellite: &Satellite,
+    datetimes: &[UtcInstant],
+    mode: ValidityMode,
+) -> Result<Validated<Vec<crate::frame::Wgs84Geodetic>>, LookAngleError> {
     use crate::astro::frames::transforms::{gcrs_to_itrs_compute, itrs_to_geodetic_compute};
     use crate::frame::Wgs84Geodetic;
 
-    datetimes
+    let gate = Ut1Gate::new(mode);
+    let track = datetimes
         .iter()
         .map(|&datetime| {
-            let ts = time_scales_for_look_angle(datetime)?;
+            let ts = time_scales_for_look_angle(datetime, &gate)?;
             let pred = satellite
                 .propagate_jd(datetime.sgp4_julian_date())
                 .map_err(LookAngleError::Propagate)?;
@@ -523,7 +607,8 @@ pub fn ground_track(
             Wgs84Geodetic::new(lat_deg.to_radians(), lon_deg.to_radians(), alt_km * 1000.0)
                 .map_err(map_frame_value_to_look_angle)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(gate.finish(track)?)
 }
 
 fn map_frame_value_to_look_angle(error: crate::frame::FrameValueError) -> LookAngleError {
@@ -545,9 +630,30 @@ pub fn visible_from_constellation(
     datetime: UtcInstant,
     min_elevation_deg: f64,
 ) -> Result<Vec<VisibleSatellite>, PassError> {
+    visible_from_constellation_with_validity(
+        members,
+        ground_station,
+        datetime,
+        min_elevation_deg,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`visible_from_constellation`] under an explicit UT1 [`ValidityMode`]:
+/// Strict refuses an instant outside the UT1 table; Permissive evaluates it
+/// and reports the departure in [`Validated::degraded`].
+pub fn visible_from_constellation_with_validity(
+    members: &[ConstellationMember],
+    ground_station: GroundStation,
+    datetime: UtcInstant,
+    min_elevation_deg: f64,
+    mode: ValidityMode,
+) -> Result<Validated<Vec<VisibleSatellite>>, PassError> {
     validate_ground_station(ground_station).map_err(map_pass_input)?;
     validate_elevation_threshold(min_elevation_deg, "min_elevation_deg").map_err(map_pass_input)?;
-    let ts = time_scales_for_pass(datetime)?;
+    let gate = Ut1Gate::new(mode);
+    let ts = time_scales_for_pass(datetime, &gate)?;
 
     let mut visible = Vec::new();
 
@@ -582,7 +688,7 @@ pub fn visible_from_constellation(
             .partial_cmp(&a.elevation_deg)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    Ok(visible)
+    finish_pass(&gate, visible)
 }
 
 /// Find visible satellites above an elevation threshold at one instant, from
@@ -613,12 +719,35 @@ pub fn visible_from_satellites(
     datetime: UtcInstant,
     min_elevation_deg: f64,
 ) -> Result<Vec<VisibleSatellite>, PassError> {
+    visible_from_satellites_with_validity(
+        satellites,
+        ids,
+        ground_station,
+        datetime,
+        min_elevation_deg,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`visible_from_satellites`] under an explicit UT1 [`ValidityMode`]: Strict
+/// refuses an instant outside the UT1 table; Permissive evaluates it and
+/// reports the departure in [`Validated::degraded`].
+pub fn visible_from_satellites_with_validity(
+    satellites: &[Satellite],
+    ids: &[String],
+    ground_station: GroundStation,
+    datetime: UtcInstant,
+    min_elevation_deg: f64,
+    mode: ValidityMode,
+) -> Result<Validated<Vec<VisibleSatellite>>, PassError> {
     validate_ground_station(ground_station).map_err(map_pass_input)?;
     validate_elevation_threshold(min_elevation_deg, "min_elevation_deg").map_err(map_pass_input)?;
     if ids.len() != satellites.len() {
         return Err(invalid_pass_input("ids", "must have one id per satellite"));
     }
-    let ts = time_scales_for_pass(datetime)?;
+    let gate = Ut1Gate::new(mode);
+    let ts = time_scales_for_pass(datetime, &gate)?;
 
     let mut visible = Vec::new();
 
@@ -648,7 +777,7 @@ pub fn visible_from_satellites(
             .partial_cmp(&a.elevation_deg)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    Ok(visible)
+    finish_pass(&gate, visible)
 }
 
 /// Predict visible passes for a pre-parsed SGP4 element set.
@@ -688,13 +817,44 @@ pub fn predict_passes_with_opsmode(
     options: PassPredictionOptions,
     opsmode: OpsMode,
 ) -> Result<Vec<PredictedPass>, PassError> {
+    predict_passes_with_validity(
+        elements,
+        ground_station,
+        start_time,
+        end_time,
+        options,
+        opsmode,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`predict_passes_with_opsmode`] under an explicit UT1 [`ValidityMode`].
+///
+/// Every instant the prediction evaluates passes the UT1 policy, including
+/// refinement steps. [`ValidityMode::Strict`] refuses the whole prediction if
+/// any of them lies outside the UT1 table, so a window reaching past the table
+/// is refused rather than returning the passes before it.
+/// [`ValidityMode::Permissive`] evaluates them all with the long-term UT1 and
+/// reports the first departure in [`Validated::degraded`].
+pub fn predict_passes_with_validity(
+    elements: &ElementSet,
+    ground_station: GroundStation,
+    start_time: UtcInstant,
+    end_time: UtcInstant,
+    options: PassPredictionOptions,
+    opsmode: OpsMode,
+    mode: ValidityMode,
+) -> Result<Validated<Vec<PredictedPass>>, PassError> {
     validate_ground_station(ground_station).map_err(map_pass_input)?;
     let step_seconds = validate_pass_prediction_options(options)?;
     validate_pass_window(start_time, end_time)?;
+    let gate = Ut1Gate::new(mode);
+    admit_pass_window(start_time, end_time, &gate)?;
 
     let satellite = match Satellite::from_elements_with_opsmode(elements, opsmode) {
         Ok(satellite) => satellite,
-        Err(_) => return Ok(Vec::new()),
+        Err(_) => return finish_pass(&gate, Vec::new()),
     };
 
     let samples = coarse_scan(
@@ -703,12 +863,14 @@ pub fn predict_passes_with_opsmode(
         start_time,
         end_time,
         step_seconds,
+        &gate,
     );
 
-    Ok(extract_passes(&samples, &satellite, ground_station)
+    let passes = extract_passes(&samples, &satellite, ground_station, &gate)
         .into_iter()
         .filter(|pass| pass.max_elevation_deg >= options.min_elevation_deg)
-        .collect())
+        .collect();
+    finish_pass(&gate, passes)
 }
 
 fn coarse_scan(
@@ -717,6 +879,7 @@ fn coarse_scan(
     start_time: UtcInstant,
     end_time: UtcInstant,
     step_seconds: i64,
+    gate: &Ut1Gate,
 ) -> Vec<(UtcInstant, f64)> {
     let total_seconds = end_time.diff_seconds(start_time);
     let num_steps = (total_seconds / step_seconds).max(0);
@@ -724,13 +887,16 @@ fn coarse_scan(
     let mut samples: Vec<(UtcInstant, f64)> = (0..=num_steps)
         .map(|i| {
             let dt = start_time.add_microseconds(i * step_seconds * MICROSECONDS_PER_SECOND_I64);
-            (dt, elevation_at(satellite, dt, ground_station))
+            (dt, elevation_at(satellite, dt, ground_station, gate))
         })
         .collect();
 
     if let Some(&(last_dt, _)) = samples.last() {
         if end_time.diff_microseconds(last_dt) > 0 {
-            samples.push((end_time, elevation_at(satellite, end_time, ground_station)));
+            samples.push((
+                end_time,
+                elevation_at(satellite, end_time, ground_station, gate),
+            ));
         }
     }
 
@@ -741,6 +907,7 @@ fn extract_passes(
     samples: &[(UtcInstant, f64)],
     satellite: &Satellite,
     ground_station: GroundStation,
+    gate: &Ut1Gate,
 ) -> Vec<PredictedPass> {
     let mut rise_time = match samples.first() {
         Some((dt, el)) if *el >= 0.0 => Some(*dt),
@@ -753,11 +920,11 @@ fn extract_passes(
         let (dt_b, el_b) = pair[1];
 
         if rise_time.is_none() && el_a < 0.0 && el_b >= 0.0 {
-            rise_time = Some(bisect_crossing(satellite, ground_station, dt_a, dt_b));
+            rise_time = Some(bisect_crossing(satellite, ground_station, dt_a, dt_b, gate));
         } else if let Some(rise) = rise_time {
             if el_a >= 0.0 && el_b < 0.0 {
-                let set = bisect_crossing(satellite, ground_station, dt_a, dt_b);
-                passes.push(build_pass(satellite, ground_station, rise, set));
+                let set = bisect_crossing(satellite, ground_station, dt_a, dt_b, gate);
+                passes.push(build_pass(satellite, ground_station, rise, set, gate));
                 rise_time = None;
             }
         }
@@ -771,12 +938,13 @@ fn bisect_crossing(
     ground_station: GroundStation,
     dt_low: UtcInstant,
     dt_high: UtcInstant,
+    gate: &Ut1Gate,
 ) -> UtcInstant {
     bisect_crossing_by_iterations(
         dt_low,
         dt_high,
         BISECT_ITERATIONS,
-        |dt| elevation_at(satellite, dt, ground_station),
+        |dt| elevation_at(satellite, dt, ground_station, gate),
         midpoint_instant,
     )
     .unwrap_or(dt_low)
@@ -791,9 +959,10 @@ fn build_pass(
     ground_station: GroundStation,
     rise: UtcInstant,
     set: UtcInstant,
+    gate: &Ut1Gate,
 ) -> PredictedPass {
     let (max_elevation_deg, max_elevation_time) =
-        find_max_elevation(satellite, ground_station, rise, set);
+        find_max_elevation(satellite, ground_station, rise, set, gate);
 
     PredictedPass {
         rise,
@@ -808,6 +977,7 @@ fn find_max_elevation(
     ground_station: GroundStation,
     rise: UtcInstant,
     set: UtcInstant,
+    gate: &Ut1Gate,
 ) -> (f64, UtcInstant) {
     let total_us = set.diff_microseconds(rise);
     let mut a = 0_i64;
@@ -820,8 +990,8 @@ fn find_max_elevation(
 
         let dt1 = rise.add_microseconds(x1);
         let dt2 = rise.add_microseconds(x2);
-        let el1 = elevation_at(satellite, dt1, ground_station);
-        let el2 = elevation_at(satellite, dt2, ground_station);
+        let el1 = elevation_at(satellite, dt1, ground_station, gate);
+        let el2 = elevation_at(satellite, dt2, ground_station, gate);
 
         if el1 > el2 {
             b = x2;
@@ -832,16 +1002,24 @@ fn find_max_elevation(
 
     let best_us = (a + b) / 2;
     let best_dt = rise.add_microseconds(best_us);
-    let best_el = elevation_at(satellite, best_dt, ground_station);
+    let best_el = elevation_at(satellite, best_dt, ground_station, gate);
     (best_el, best_dt)
 }
 
-fn elevation_at(satellite: &Satellite, datetime: UtcInstant, ground_station: GroundStation) -> f64 {
+/// Elevation for the pass search, which treats an instant it cannot evaluate
+/// as below the horizon. A UT1 refusal is also remembered by `gate`, so the
+/// search fails in [`Ut1Gate::finish`] instead of returning a partial result.
+fn elevation_at(
+    satellite: &Satellite,
+    datetime: UtcInstant,
+    ground_station: GroundStation,
+    gate: &Ut1Gate,
+) -> f64 {
     let pred = match satellite.propagate_jd(datetime.sgp4_julian_date()) {
         Ok(pred) => pred,
         Err(_) => return -90.0,
     };
-    let ts = match time_scales_for_look_angle(datetime) {
+    let ts = match time_scales_for_look_angle(datetime, gate) {
         Ok(ts) => ts,
         Err(_) => return -90.0,
     };
@@ -987,24 +1165,58 @@ pub fn find_passes_with_opsmode(
     options: PassFinderOptions,
     opsmode: OpsMode,
 ) -> Result<Vec<SatellitePass>, PassError> {
+    find_passes_with_validity(
+        elements,
+        ground_station,
+        start_time,
+        end_time,
+        options,
+        opsmode,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`find_passes_with_opsmode`] under an explicit UT1 [`ValidityMode`].
+///
+/// Every instant the search evaluates passes the UT1 policy, including
+/// refinement and culmination steps. [`ValidityMode::Strict`] refuses the
+/// whole search if any of them lies outside the UT1 table, so a window
+/// reaching past the table is refused rather than returning the passes before
+/// it. [`ValidityMode::Permissive`] evaluates them all with the long-term UT1
+/// and reports the first departure in [`Validated::degraded`].
+pub fn find_passes_with_validity(
+    elements: &ElementSet,
+    ground_station: GroundStation,
+    start_time: UtcInstant,
+    end_time: UtcInstant,
+    options: PassFinderOptions,
+    opsmode: OpsMode,
+    mode: ValidityMode,
+) -> Result<Validated<Vec<SatellitePass>>, PassError> {
     validate_ground_station(ground_station).map_err(map_pass_input)?;
     let validated_options = validate_pass_finder_options(options)?;
-    // Validate the window before SGP4 init so an unrepresentable window is a typed
-    // error regardless of element validity, matching `predict_passes_with_opsmode`
-    // (an invalid element set otherwise short-circuits to Ok(empty) first).
+    // Validate the window before SGP4 init so an unrepresentable window, or
+    // one outside the UT1 table under Strict, is a typed error regardless of
+    // element validity, matching `predict_passes_with_validity` (an invalid
+    // element set otherwise short-circuits to Ok(empty) first).
     validate_pass_window(start_time, end_time)?;
+    let gate = Ut1Gate::new(mode);
+    admit_pass_window(start_time, end_time, &gate)?;
     let satellite = match Satellite::from_elements_with_opsmode(elements, opsmode) {
         Ok(satellite) => satellite,
-        Err(_) => return Ok(Vec::new()),
+        Err(_) => return finish_pass(&gate, Vec::new()),
     };
 
-    find_passes_for_satellite_validated(
+    let passes = find_passes_for_satellite_gated(
         &satellite,
         ground_station,
         start_time,
         end_time,
         validated_options,
-    )
+        &gate,
+    )?;
+    finish_pass(&gate, passes)
 }
 
 /// Find satellite passes for many pre-parsed SGP4 element sets, serially.
@@ -1045,6 +1257,29 @@ pub fn find_passes_batch_serial_with_opsmode(
     options: PassFinderOptions,
     opsmode: OpsMode,
 ) -> Vec<Result<Vec<SatellitePass>, PassError>> {
+    strict_batch(find_passes_batch(
+        elements,
+        ground_station,
+        start_time,
+        end_time,
+        options,
+        PassBatchMode::Serial,
+        opsmode,
+        ValidityMode::Strict,
+    ))
+}
+
+/// [`find_passes_batch_serial_with_opsmode`] under an explicit UT1
+/// [`ValidityMode`]; each element follows [`find_passes_with_validity`].
+pub fn find_passes_batch_serial_with_validity(
+    elements: &[ElementSet],
+    ground_station: GroundStation,
+    start_time: UtcInstant,
+    end_time: UtcInstant,
+    options: PassFinderOptions,
+    opsmode: OpsMode,
+    mode: ValidityMode,
+) -> Vec<Result<Validated<Vec<SatellitePass>>, PassError>> {
     find_passes_batch(
         elements,
         ground_station,
@@ -1053,6 +1288,7 @@ pub fn find_passes_batch_serial_with_opsmode(
         options,
         PassBatchMode::Serial,
         opsmode,
+        mode,
     )
 }
 
@@ -1089,6 +1325,29 @@ pub fn find_passes_batch_parallel_with_opsmode(
     options: PassFinderOptions,
     opsmode: OpsMode,
 ) -> Vec<Result<Vec<SatellitePass>, PassError>> {
+    strict_batch(find_passes_batch(
+        elements,
+        ground_station,
+        start_time,
+        end_time,
+        options,
+        PassBatchMode::Parallel,
+        opsmode,
+        ValidityMode::Strict,
+    ))
+}
+
+/// [`find_passes_batch_parallel_with_opsmode`] under an explicit UT1
+/// [`ValidityMode`]; each element follows [`find_passes_with_validity`].
+pub fn find_passes_batch_parallel_with_validity(
+    elements: &[ElementSet],
+    ground_station: GroundStation,
+    start_time: UtcInstant,
+    end_time: UtcInstant,
+    options: PassFinderOptions,
+    opsmode: OpsMode,
+    mode: ValidityMode,
+) -> Vec<Result<Validated<Vec<SatellitePass>>, PassError>> {
     find_passes_batch(
         elements,
         ground_station,
@@ -1097,7 +1356,15 @@ pub fn find_passes_batch_parallel_with_opsmode(
         options,
         PassBatchMode::Parallel,
         opsmode,
+        mode,
     )
+}
+
+fn strict_batch<T>(results: Vec<Result<Validated<T>, PassError>>) -> Vec<Result<T, PassError>> {
+    results
+        .into_iter()
+        .map(|result| result.map(|validated| validated.value))
+        .collect()
 }
 
 /// Find satellite passes for an already-initialized SGP4 satellite.
@@ -1113,6 +1380,27 @@ pub fn find_passes_for_satellite(
     end_time: UtcInstant,
     options: PassFinderOptions,
 ) -> Result<Vec<SatellitePass>, PassError> {
+    find_passes_for_satellite_with_validity(
+        satellite,
+        ground_station,
+        start_time,
+        end_time,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`find_passes_for_satellite`] under an explicit UT1 [`ValidityMode`], with
+/// the same UT1 policy as [`find_passes_with_validity`].
+pub fn find_passes_for_satellite_with_validity(
+    satellite: &Satellite,
+    ground_station: GroundStation,
+    start_time: UtcInstant,
+    end_time: UtcInstant,
+    options: PassFinderOptions,
+    mode: ValidityMode,
+) -> Result<Validated<Vec<SatellitePass>>, PassError> {
     validate_ground_station(ground_station).map_err(map_pass_input)?;
     let validated_options = validate_pass_finder_options(options)?;
     find_passes_for_satellite_validated(
@@ -1121,6 +1409,7 @@ pub fn find_passes_for_satellite(
         start_time,
         end_time,
         validated_options,
+        mode,
     )
 }
 
@@ -1130,11 +1419,33 @@ fn find_passes_for_satellite_validated(
     start_time: UtcInstant,
     end_time: UtcInstant,
     options: ValidatedPassFinderOptions,
+    mode: ValidityMode,
+) -> Result<Validated<Vec<SatellitePass>>, PassError> {
+    let gate = Ut1Gate::new(mode);
+    let passes = find_passes_for_satellite_gated(
+        satellite,
+        ground_station,
+        start_time,
+        end_time,
+        options,
+        &gate,
+    )?;
+    finish_pass(&gate, passes)
+}
+
+fn find_passes_for_satellite_gated(
+    satellite: &Satellite,
+    ground_station: GroundStation,
+    start_time: UtcInstant,
+    end_time: UtcInstant,
+    options: ValidatedPassFinderOptions,
+    gate: &Ut1Gate,
 ) -> Result<Vec<SatellitePass>, PassError> {
     if end_time <= start_time {
         return Ok(Vec::new());
     }
     validate_pass_window(start_time, end_time)?;
+    admit_pass_window(start_time, end_time, gate)?;
     let search_step_us = robust_crossing_step_us(
         satellite,
         ground_station,
@@ -1151,6 +1462,7 @@ fn find_passes_for_satellite_validated(
         step_us: search_step_us,
         tol_us: options.tol_us,
         mask: options.raw.elevation_mask_deg,
+        gate,
     };
 
     let crossings = find_mask_crossings(search, step_seconds, time_tolerance_seconds)?;
@@ -1488,6 +1800,7 @@ struct ValidatedPassFinderOptions {
     tol_us: i64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_passes_batch(
     elements: &[ElementSet],
     ground_station: GroundStation,
@@ -1496,7 +1809,8 @@ fn find_passes_batch(
     options: PassFinderOptions,
     mode: PassBatchMode,
     opsmode: OpsMode,
-) -> Vec<Result<Vec<SatellitePass>, PassError>> {
+    validity: ValidityMode,
+) -> Vec<Result<Validated<Vec<SatellitePass>>, PassError>> {
     if elements.is_empty() {
         return Vec::new();
     }
@@ -1513,8 +1827,16 @@ fn find_passes_batch(
     if let Err(error) = validate_pass_window(start_time, end_time) {
         return vec![Err(error); elements.len()];
     }
+    // The window's own UT1 departure, which an element set that does not
+    // initialize still reports; Strict refuses it for every element.
+    let window_gate = Ut1Gate::new(validity);
+    let empty = admit_pass_window(start_time, end_time, &window_gate)
+        .and_then(|()| finish_pass(&window_gate, Vec::new()));
+    if let Err(error) = &empty {
+        return vec![Err(*error); elements.len()];
+    }
 
-    let mut results = vec![Ok(Vec::new()); elements.len()];
+    let mut results = vec![empty; elements.len()];
     let mut valid_indices = Vec::new();
     let mut satellites = Vec::new();
     for (index, element_set) in elements.iter().enumerate() {
@@ -1534,6 +1856,7 @@ fn find_passes_batch(
         end_time,
         validated_options,
         mode,
+        validity,
     );
     for (index, result) in valid_indices.into_iter().zip(valid_results) {
         results[index] = result;
@@ -1549,11 +1872,8 @@ fn find_passes_batch_for_satellites_validated(
     end_time: UtcInstant,
     options: ValidatedPassFinderOptions,
     mode: PassBatchMode,
-) -> Vec<Result<Vec<SatellitePass>, PassError>> {
-    if end_time <= start_time {
-        return vec![Ok(Vec::new()); satellites.len()];
-    }
-
+    validity: ValidityMode,
+) -> Vec<Result<Validated<Vec<SatellitePass>>, PassError>> {
     match mode {
         PassBatchMode::Serial => satellites
             .iter()
@@ -1564,6 +1884,7 @@ fn find_passes_batch_for_satellites_validated(
                     start_time,
                     end_time,
                     options,
+                    validity,
                 )
             })
             .collect(),
@@ -1580,6 +1901,7 @@ fn find_passes_batch_for_satellites_validated(
                         start_time,
                         end_time,
                         options,
+                        validity,
                     )
                 })
                 .collect()
@@ -1616,6 +1938,8 @@ fn assemble_passes_from_crossings(
                         set,
                         search.step_us,
                         search.tol_us,
+                        (search.start_time, search.end_time),
+                        search.gate,
                     )?;
                     passes.push(SatellitePass {
                         aos: rise,
@@ -1866,18 +2190,23 @@ fn validate_elevation_threshold(
     Ok(())
 }
 
-fn time_scales_for_look_angle(datetime: UtcInstant) -> Result<TimeScales, LookAngleError> {
-    time_scales_from_instant(datetime).ok_or(LookAngleError::InvalidInput {
+fn time_scales_for_look_angle(
+    datetime: UtcInstant,
+    gate: &Ut1Gate,
+) -> Result<TimeScales, LookAngleError> {
+    let ts = time_scales_from_instant(datetime).ok_or(LookAngleError::InvalidInput {
         field: "datetime",
         reason: "invalid UTC instant",
-    })
+    })?;
+    Ok(gate.admit(ts)?)
 }
 
-fn time_scales_for_pass(datetime: UtcInstant) -> Result<TimeScales, PassError> {
-    time_scales_from_instant(datetime).ok_or(PassError::InvalidInput {
+fn time_scales_for_pass(datetime: UtcInstant, gate: &Ut1Gate) -> Result<TimeScales, PassError> {
+    let ts = time_scales_from_instant(datetime).ok_or(PassError::InvalidInput {
         field: "datetime",
         reason: "invalid UTC instant",
-    })
+    })?;
+    gate.admit(ts).map_err(pass_frame_error)
 }
 
 fn time_scales_from_instant(datetime: UtcInstant) -> Option<TimeScales> {
@@ -1933,11 +2262,42 @@ fn validate_pass_window(start_time: UtcInstant, end_time: UtcInstant) -> Result<
     Ok(())
 }
 
+/// Pass a window's two ends through the UT1 policy. The UT1 table's coverage
+/// is one interval, so under Strict this refuses, before any search, every
+/// window with an instant outside it. Steps the search takes just past the
+/// window (a central difference at an end, say) go through the same gate and
+/// are caught by [`Ut1Gate::finish`].
+fn admit_pass_window(
+    start_time: UtcInstant,
+    end_time: UtcInstant,
+    gate: &Ut1Gate,
+) -> Result<(), PassError> {
+    for instant in [start_time, end_time] {
+        if let Some(ts) = time_scales_from_instant(instant) {
+            gate.admit(ts).map_err(pass_frame_error)?;
+        }
+    }
+    Ok(())
+}
+
+/// A search result under the call's UT1 policy.
+fn finish_pass<T>(gate: &Ut1Gate, value: T) -> Result<Validated<T>, PassError> {
+    gate.finish(value).map_err(pass_frame_error)
+}
+
+fn pass_frame_error(error: FrameTransformError) -> PassError {
+    match error {
+        FrameTransformError::Ut1OutsideCoverage { reason } => PassError::Ut1OutsideCoverage(reason),
+        FrameTransformError::InvalidInput { field, reason } => invalid_pass_input(field, reason),
+    }
+}
+
 fn map_event_finder_input(error: EventFinderError) -> PassError {
     match error {
         EventFinderError::InvalidInput { field, reason } => {
             PassError::InvalidInput { field, reason }
         }
+        EventFinderError::Ut1OutsideCoverage(reason) => PassError::Ut1OutsideCoverage(reason),
     }
 }
 
@@ -1955,6 +2315,7 @@ struct PassSearch<'a> {
     step_us: i64,
     tol_us: i64,
     mask: f64,
+    gate: &'a Ut1Gate,
 }
 
 impl ScalarEventPredicate for PassSearch<'_> {
@@ -1979,7 +2340,7 @@ impl PassSearch<'_> {
     }
 
     fn masked_elevation_at(&self, datetime: UtcInstant) -> f64 {
-        elevation_at(self.satellite, datetime, self.ground_station) - self.mask
+        elevation_at(self.satellite, datetime, self.ground_station, self.gate) - self.mask
     }
 
     fn refine_event_mask_crossing_to_utc(&self, crossing_time_seconds: f64) -> UtcInstant {
@@ -2039,18 +2400,48 @@ impl PassSearch<'_> {
     }
 }
 
-/// Elevation rate (deg/s) at `dt` by central difference with half-step `h_us`.
-fn elevation_rate<F>(elevation_at_time: &F, dt: UtcInstant, h_us: i64) -> f64
+/// Elevation rate (deg/s) at `dt` with half-step `h_us`, never probing outside
+/// `window` (the search window).
+///
+/// A central difference where both probes lie in the window; a one-sided
+/// difference of step `h_us` at an edge where one probe would leave it; the
+/// secant across the window if both would. The search then never evaluates an
+/// instant the caller did not ask about, so a window inside the UT1 table is
+/// never refused for a probe just past its end.
+fn elevation_rate<F>(
+    elevation_at_time: &F,
+    dt: UtcInstant,
+    h_us: i64,
+    window: (UtcInstant, UtcInstant),
+) -> f64
 where
     F: Fn(UtcInstant) -> f64 + ?Sized,
 {
-    let plus = elevation_at_time(dt.add_microseconds(h_us));
-    let minus = elevation_at_time(dt.add_microseconds(-h_us));
-    (plus - minus) / (2.0 * h_us as f64 / MICROSECONDS_PER_SECOND_I64 as f64)
+    let (start, end) = window;
+    let plus_t = dt.add_microseconds(h_us);
+    let minus_t = dt.add_microseconds(-h_us);
+    let seconds = |us: i64| us as f64 / MICROSECONDS_PER_SECOND_I64 as f64;
+    match (minus_t < start, plus_t > end) {
+        (false, false) => {
+            let plus = elevation_at_time(plus_t);
+            let minus = elevation_at_time(minus_t);
+            (plus - minus) / (2.0 * seconds(h_us))
+        }
+        (true, false) => (elevation_at_time(plus_t) - elevation_at_time(dt)) / seconds(h_us),
+        (false, true) => (elevation_at_time(dt) - elevation_at_time(minus_t)) / seconds(h_us),
+        (true, true) => {
+            let span_us = end.diff_microseconds(start);
+            if span_us <= 0 {
+                return 0.0;
+            }
+            (elevation_at_time(end) - elevation_at_time(start)) / seconds(span_us)
+        }
+    }
 }
 
 /// Find the maximum elevation between AOS and LOS through the shared extrema
 /// finder. For a partial pass with no interior peak, return the higher endpoint.
+#[allow(clippy::too_many_arguments)]
 fn find_culmination(
     satellite: &Satellite,
     ground_station: GroundStation,
@@ -2058,17 +2449,22 @@ fn find_culmination(
     los: UtcInstant,
     step_us: i64,
     tol_us: i64,
+    window: (UtcInstant, UtcInstant),
+    gate: &Ut1Gate,
 ) -> Result<(UtcInstant, f64), PassError> {
-    find_culmination_with(aos, los, step_us, tol_us, |dt| {
-        elevation_at(satellite, dt, ground_station)
+    find_culmination_with(aos, los, step_us, tol_us, window, |dt| {
+        elevation_at(satellite, dt, ground_station, gate)
     })
 }
 
+/// The culmination between `aos` and `los`, evaluating elevation only inside
+/// `window` (the search window, which contains `[aos, los]`).
 fn find_culmination_with<F>(
     aos: UtcInstant,
     los: UtcInstant,
     step_us: i64,
     tol_us: i64,
+    window: (UtcInstant, UtcInstant),
     elevation_at_time: F,
 ) -> Result<(UtcInstant, f64), PassError>
 where
@@ -2114,12 +2510,16 @@ where
     }
 
     if let Some((low, high)) = selected_maximum_bracket {
-        if let Some(refined) = refine_culmination_rate_zero(&elevation_at_time, aos, los, tol_us) {
+        if let Some(refined) =
+            refine_culmination_rate_zero(&elevation_at_time, aos, los, tol_us, window)
+        {
             if low <= refined.0 && refined.0 <= high {
                 return Ok(refined);
             }
         }
-        if let Some(refined) = refine_culmination_rate_zero(&elevation_at_time, low, high, tol_us) {
+        if let Some(refined) =
+            refine_culmination_rate_zero(&elevation_at_time, low, high, tol_us, window)
+        {
             best = refined;
         }
     }
@@ -2161,6 +2561,7 @@ fn refine_culmination_rate_zero<F>(
     low: UtcInstant,
     high: UtcInstant,
     tol_us: i64,
+    window: (UtcInstant, UtcInstant),
 ) -> Option<(UtcInstant, f64)>
 where
     F: Fn(UtcInstant) -> f64 + ?Sized,
@@ -2171,8 +2572,8 @@ where
     }
 
     let h_us = CULMINATION_RATE_HALF_STEP_US.min((span / 4).max(1));
-    let rate_low = elevation_rate(elevation_at_time, low, h_us);
-    let rate_high = elevation_rate(elevation_at_time, high, h_us);
+    let rate_low = elevation_rate(elevation_at_time, low, h_us, window);
+    let rate_high = elevation_rate(elevation_at_time, high, h_us, window);
     if !(rate_low.is_finite() && rate_high.is_finite() && rate_low > 0.0 && rate_high < 0.0) {
         return None;
     }
@@ -2180,7 +2581,7 @@ where
     let culmination = bisect_crossing_until(
         low,
         high,
-        |dt| elevation_rate(elevation_at_time, dt, h_us),
+        |dt| elevation_rate(elevation_at_time, dt, h_us, window),
         midpoint_instant,
         |lo, hi| hi.diff_microseconds(lo) <= tol_us,
     )
@@ -2198,6 +2599,35 @@ mod tests {
     };
 
     use super::*;
+
+    /// [`elevation_at`] under the default Strict UT1 policy.
+    fn strict_elevation_at(
+        satellite: &Satellite,
+        datetime: UtcInstant,
+        ground_station: GroundStation,
+    ) -> f64 {
+        elevation_at(
+            satellite,
+            datetime,
+            ground_station,
+            &Ut1Gate::new(ValidityMode::Strict),
+        )
+    }
+
+    /// A probe window that never binds, for synthetic elevation functions
+    /// defined at every instant.
+    fn unbounded_window() -> (UtcInstant, UtcInstant) {
+        (
+            UtcInstant::from_unix_microseconds(i64::MIN / 2),
+            UtcInstant::from_unix_microseconds(i64::MAX / 2),
+        )
+    }
+
+    /// A Strict gate for a test's [`PassSearch`], leaked so the search can be
+    /// copied freely; every test instant is inside the UT1 table.
+    fn strict_gate() -> &'static Ut1Gate {
+        Box::leak(Box::new(Ut1Gate::new(ValidityMode::Strict)))
+    }
 
     fn iss_2024_12_19_elements() -> ElementSet {
         ElementSet {
@@ -2555,6 +2985,264 @@ mod tests {
     }
 
     #[test]
+    fn pass_search_outside_the_ut1_table_is_refused_not_empty() {
+        // The search scores an instant it cannot evaluate as below the horizon,
+        // so a window past the UT1 table used to return no passes silently.
+        let station = GroundStation {
+            latitude_deg: 51.5074,
+            longitude_deg: -0.1278,
+            altitude_m: 11.0,
+        };
+        let start = UtcInstant::from_utc(2100, 1, 1, 0, 0, 0, 0).unwrap();
+        let end = UtcInstant::from_utc(2100, 1, 1, 12, 0, 0, 0).unwrap();
+        let refused =
+            PassError::Ut1OutsideCoverage(crate::astro::time::DegradeReason::AfterCoverage);
+        let found = find_passes(
+            &iss_2024_12_19_elements(),
+            station,
+            start,
+            end,
+            PassFinderOptions::default(),
+        );
+        assert!(matches!(found, Err(error) if error == refused), "{found:?}");
+        let predicted = predict_passes(
+            &iss_2024_12_19_elements(),
+            station,
+            start,
+            end,
+            PassPredictionOptions::default(),
+        );
+        assert!(
+            matches!(predicted, Err(error) if error == refused),
+            "{predicted:?}"
+        );
+        let satellite =
+            Satellite::from_elements_with_opsmode(&iss_2024_12_19_elements(), OpsMode::Afspc)
+                .unwrap();
+        let visible =
+            visible_from_satellites(&[satellite], &["ISS".to_string()], station, start, 0.0);
+        assert!(
+            matches!(visible, Err(error) if error == refused),
+            "{visible:?}"
+        );
+    }
+
+    /// The 2024-12-19 ISS elements without drag, so SGP4 still propagates them
+    /// years after the UT1 table ends.
+    fn drag_free_iss_elements() -> ElementSet {
+        ElementSet {
+            bstar: 0.0,
+            mean_motion_dot: Some(0.0),
+            ..iss_2024_12_19_elements()
+        }
+    }
+
+    fn london() -> GroundStation {
+        GroundStation {
+            latitude_deg: 51.5074,
+            longitude_deg: -0.1278,
+            altitude_m: 11.0,
+        }
+    }
+
+    #[test]
+    fn permissive_pass_search_after_the_ut1_table_reports_the_departure() {
+        // 2027-09-01 is past the embedded UT1 table (it ends in 2027-07).
+        let elements = drag_free_iss_elements();
+        let start = UtcInstant::from_utc(2027, 9, 1, 0, 0, 0, 0).unwrap();
+        let end = UtcInstant::from_utc(2027, 9, 2, 0, 0, 0, 0).unwrap();
+        let after = Some(crate::astro::time::DegradeReason::AfterCoverage);
+
+        let found = find_passes_with_validity(
+            &elements,
+            london(),
+            start,
+            end,
+            PassFinderOptions::default(),
+            OpsMode::Afspc,
+            ValidityMode::Permissive,
+        )
+        .expect("permissive search");
+        assert_eq!(found.degraded, after);
+        assert!(!found.value.is_empty(), "a day over London has ISS passes");
+
+        let predicted = predict_passes_with_validity(
+            &elements,
+            london(),
+            start,
+            end,
+            PassPredictionOptions::default(),
+            OpsMode::Afspc,
+            ValidityMode::Permissive,
+        )
+        .expect("permissive prediction");
+        assert_eq!(predicted.degraded, after);
+        assert!(!predicted.value.is_empty());
+
+        let look = look_angle_with_validity(&elements, london(), start, ValidityMode::Permissive)
+            .expect("permissive look angle");
+        assert_eq!(look.degraded, after);
+        assert!(look.value.elevation_deg.is_finite());
+
+        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc).unwrap();
+        let visible = visible_from_satellites_with_validity(
+            std::slice::from_ref(&satellite),
+            &["ISS".to_string()],
+            london(),
+            start,
+            -90.0,
+            ValidityMode::Permissive,
+        )
+        .expect("permissive visibility");
+        assert_eq!(visible.degraded, after);
+        assert_eq!(visible.value.len(), 1);
+
+        let track = ground_track_with_validity(&satellite, &[start, end], ValidityMode::Permissive)
+            .expect("permissive ground track");
+        assert_eq!(track.degraded, after);
+        assert_eq!(track.value.len(), 2);
+
+        let batch = find_passes_batch_serial_with_validity(
+            std::slice::from_ref(&elements),
+            london(),
+            start,
+            end,
+            PassFinderOptions::default(),
+            OpsMode::Afspc,
+            ValidityMode::Permissive,
+        );
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].as_ref().expect("batch element").degraded, after);
+
+        // The default policy refuses the same calls.
+        assert!(find_passes(
+            &elements,
+            london(),
+            start,
+            end,
+            PassFinderOptions::default()
+        )
+        .is_err());
+        assert!(matches!(
+            look_angle(&elements, london(), start),
+            Err(LookAngleError::FrameTransform(
+                FrameTransformError::Ut1OutsideCoverage { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_window_straddling_the_ut1_table_end_is_refused_not_truncated() {
+        // The embedded table ends on 2027-07-03; the window runs from inside it
+        // to past it. Strict must refuse it rather than return the passes found
+        // before the edge.
+        let elements = drag_free_iss_elements();
+        let start = UtcInstant::from_utc(2027, 7, 1, 0, 0, 0, 0).unwrap();
+        let end = UtcInstant::from_utc(2027, 7, 6, 0, 0, 0, 0).unwrap();
+        let refused =
+            PassError::Ut1OutsideCoverage(crate::astro::time::DegradeReason::AfterCoverage);
+        let strict = find_passes(
+            &elements,
+            london(),
+            start,
+            end,
+            PassFinderOptions::default(),
+        );
+        assert!(
+            matches!(strict, Err(error) if error == refused),
+            "{strict:?}"
+        );
+        let batch = find_passes_batch_parallel(
+            std::slice::from_ref(&elements),
+            london(),
+            start,
+            end,
+            PassFinderOptions::default(),
+        );
+        assert!(matches!(batch[0], Err(error) if error == refused));
+
+        let permissive = find_passes_with_validity(
+            &elements,
+            london(),
+            start,
+            end,
+            PassFinderOptions::default(),
+            OpsMode::Afspc,
+            ValidityMode::Permissive,
+        )
+        .expect("permissive straddling window");
+        assert_eq!(
+            permissive.degraded,
+            Some(crate::astro::time::DegradeReason::AfterCoverage)
+        );
+    }
+
+    #[test]
+    fn a_window_ending_at_the_last_covered_instant_is_accepted_under_strict() {
+        // The embedded table's last row is MJD 61589, 2027-07-03 00:00 UTC,
+        // whose TT Julian date is exactly the table's last covered instant.
+        let start = UtcInstant::from_utc(2027, 7, 2, 0, 0, 0, 0).unwrap();
+        let end = UtcInstant::from_utc(2027, 7, 3, 0, 0, 0, 0).unwrap();
+        assert_eq!(end.time_scales().ut1_degraded, None);
+        let found = find_passes(
+            &drag_free_iss_elements(),
+            london(),
+            start,
+            end,
+            PassFinderOptions::default(),
+        );
+        assert!(found.is_ok(), "{found:?}");
+        let predicted = predict_passes(
+            &drag_free_iss_elements(),
+            london(),
+            start,
+            end,
+            PassPredictionOptions::default(),
+        );
+        assert!(predicted.is_ok(), "{predicted:?}");
+    }
+
+    #[test]
+    fn elevation_rate_probes_stay_inside_the_window() {
+        let start = UtcInstant::from_unix_microseconds(0);
+        let end = start.add_microseconds(10 * MICROSECONDS_PER_SECOND_I64);
+        let probes = std::cell::RefCell::new(Vec::new());
+        let linear = |t: UtcInstant| {
+            probes.borrow_mut().push(t);
+            t.diff_microseconds(start) as f64 / MICROSECONDS_PER_SECOND_I64 as f64
+        };
+        let h_us = MICROSECONDS_PER_SECOND_I64;
+        for dt in [start, start.add_microseconds(500_000), end] {
+            let rate = elevation_rate(&linear, dt, h_us, (start, end));
+            // A linear function has the same rate by every difference.
+            assert!((rate - 1.0).abs() < 1.0e-12, "{rate}");
+        }
+        assert!(probes.borrow().iter().all(|&t| start <= t && t <= end));
+    }
+
+    #[test]
+    fn a_strict_evaluation_past_the_table_fails_the_search_it_belongs_to() {
+        // The search scores an unevaluable instant as -90 deg; the gate still
+        // remembers a UT1 refusal there, so the search cannot finish with a
+        // partial result.
+        let satellite =
+            Satellite::from_elements_with_opsmode(&drag_free_iss_elements(), OpsMode::Afspc)
+                .unwrap();
+        let gate = Ut1Gate::new(ValidityMode::Strict);
+        let inside = UtcInstant::from_utc(2027, 6, 1, 0, 0, 0, 0).unwrap();
+        let past = UtcInstant::from_utc(2027, 9, 1, 0, 0, 0, 0).unwrap();
+        assert!(elevation_at(&satellite, inside, london(), &gate).is_finite());
+        assert!(gate.finish(()).is_ok());
+        assert_eq!(elevation_at(&satellite, past, london(), &gate), -90.0);
+        assert_eq!(
+            finish_pass(&gate, ()),
+            Err(PassError::Ut1OutsideCoverage(
+                crate::astro::time::DegradeReason::AfterCoverage
+            ))
+        );
+    }
+
+    #[test]
     fn find_passes_opsmode_is_threaded_and_consistent_across_paths() {
         // The element-based pass APIs default to OpsMode::Afspc (golden-pinned),
         // while the rest of the crate defaults to Improved. The _with_opsmode
@@ -2612,7 +3300,14 @@ mod tests {
             Satellite::from_elements_with_opsmode(&iss_2024_12_19_elements(), OpsMode::Afspc)
                 .unwrap();
 
-        let samples = coarse_scan(&satellite, station, start, end, 60);
+        let samples = coarse_scan(
+            &satellite,
+            station,
+            start,
+            end,
+            60,
+            &Ut1Gate::new(ValidityMode::Strict),
+        );
 
         assert_eq!(samples.len(), 11);
         assert_eq!(samples.last().expect("end sample").0, end);
@@ -2993,7 +3688,7 @@ mod tests {
         // One epoch matches a manual propagate -> TEME->GCRS -> GCRS->ITRS ->
         // geodetic composition bit-for-bit.
         let dt = epochs[3];
-        let ts = time_scales_for_look_angle(dt).unwrap();
+        let ts = time_scales_for_look_angle(dt, &Ut1Gate::new(ValidityMode::Strict)).unwrap();
         let pred = satellite.propagate_jd(dt.sgp4_julian_date()).unwrap();
         let (gcrs, _) = teme_to_gcrs_compute(
             &TemeStateKm {
@@ -3420,8 +4115,9 @@ mod tests {
             }
         );
 
-        let (culmination, max_elevation) = find_culmination_with(start, end, step_us, 1, elevation)
-            .expect("segmented long-window culmination succeeds");
+        let (culmination, max_elevation) =
+            find_culmination_with(start, end, step_us, 1, unbounded_window(), elevation)
+                .expect("segmented long-window culmination succeeds");
 
         assert!(
             (culmination.unix_microseconds() - peak_time.unix_microseconds()).abs() <= 1,
@@ -3596,7 +4292,7 @@ mod tests {
         let extrema = EventFinder::new(0.0, span_seconds, 10.0, 1.0e-4)
             .expect("valid event-finder window")
             .find_extrema(|offset_seconds| {
-                elevation_at(
+                strict_elevation_at(
                     &satellite,
                     instant_at_offset_seconds(actual.aos, offset_seconds),
                     station,
@@ -3619,7 +4315,7 @@ mod tests {
             "pass culmination follows the shared extrema finder"
         );
         assert!(
-            (actual.max_elevation_deg - elevation_at(&satellite, peak_time, station)).abs()
+            (actual.max_elevation_deg - strict_elevation_at(&satellite, peak_time, station)).abs()
                 < 1.0e-7,
             "pass max elevation follows the shared extrema finder"
         );
@@ -3722,6 +4418,7 @@ mod tests {
                     step_us: orbit_step_us,
                     tol_us: 1_000,
                     mask,
+                    gate: strict_gate(),
                 },
                 0.0,
             )
@@ -3774,12 +4471,23 @@ mod tests {
         let start = UtcInstant::from_unix_microseconds(0);
         let end = start.add_microseconds(10 * MICROSECONDS_PER_SECOND_I64);
 
-        let whole_window =
-            refine_culmination_rate_zero(&multi_stationary_elevation, start, end, 100)
-                .expect("whole-window rate signs bracket some stationary point");
-        let (culmination, max_elevation) =
-            find_culmination_with(start, end, 500_000, 100, multi_stationary_elevation)
-                .expect("synthetic pass culmination should resolve");
+        let whole_window = refine_culmination_rate_zero(
+            &multi_stationary_elevation,
+            start,
+            end,
+            100,
+            unbounded_window(),
+        )
+        .expect("whole-window rate signs bracket some stationary point");
+        let (culmination, max_elevation) = find_culmination_with(
+            start,
+            end,
+            500_000,
+            100,
+            unbounded_window(),
+            multi_stationary_elevation,
+        )
+        .expect("synthetic pass culmination should resolve");
 
         let whole_window_offset =
             whole_window.0.diff_microseconds(start) as f64 / MICROSECONDS_PER_SECOND_I64 as f64;
@@ -3834,7 +4542,7 @@ mod tests {
             .expect("valid event-finder window")
             .find_crossings(
                 |offset_seconds| {
-                    elevation_at(
+                    strict_elevation_at(
                         &satellite,
                         instant_at_offset_seconds(start, offset_seconds),
                         station,
@@ -3914,7 +4622,7 @@ mod tests {
         assert!(!reference.is_empty());
 
         let peak_time = reference[0].culmination;
-        let mask = elevation_at(&satellite, peak_time, station);
+        let mask = strict_elevation_at(&satellite, peak_time, station);
         let step_us = 10 * MICROSECONDS_PER_SECOND_I64;
         let start = peak_time.add_microseconds(-step_us);
         let end = peak_time.add_microseconds(step_us);
@@ -3926,6 +4634,7 @@ mod tests {
             step_us,
             tol_us: 1_000,
             mask,
+            gate: strict_gate(),
         };
         assert!(search.masked_elevation_at(start) < 0.0);
         assert_eq!(
@@ -3982,16 +4691,16 @@ mod tests {
             robust_crossing_step_us(&satellite, station, 0.0, 10 * MICROSECONDS_PER_SECOND_I64);
 
         let aos_at_window_start = reference[0].aos;
-        let aos_mask = elevation_at(&satellite, aos_at_window_start, station);
+        let aos_mask = strict_elevation_at(&satellite, aos_at_window_start, station);
         assert!(
-            elevation_at(
+            strict_elevation_at(
                 &satellite,
                 aos_at_window_start.add_microseconds(-MICROSECONDS_PER_SECOND_I64),
                 station,
             ) < aos_mask
         );
         assert!(
-            elevation_at(
+            strict_elevation_at(
                 &satellite,
                 aos_at_window_start.add_microseconds(MICROSECONDS_PER_SECOND_I64),
                 station,
@@ -4006,6 +4715,7 @@ mod tests {
             step_us: search_step_us,
             tol_us: 1_000,
             mask: aos_mask,
+            gate: strict_gate(),
         };
         let first_los_offset_seconds = reference[0].los.diff_microseconds(aos_at_window_start)
             as f64
@@ -4026,16 +4736,16 @@ mod tests {
         assert!(aos_found[0].los > aos_at_window_start);
 
         let los_at_window_start = reference[0].los;
-        let los_mask = elevation_at(&satellite, los_at_window_start, station);
+        let los_mask = strict_elevation_at(&satellite, los_at_window_start, station);
         assert!(
-            elevation_at(
+            strict_elevation_at(
                 &satellite,
                 los_at_window_start.add_microseconds(-MICROSECONDS_PER_SECOND_I64),
                 station,
             ) > los_mask
         );
         assert!(
-            elevation_at(
+            strict_elevation_at(
                 &satellite,
                 los_at_window_start.add_microseconds(MICROSECONDS_PER_SECOND_I64),
                 station,
@@ -4050,6 +4760,7 @@ mod tests {
             step_us: search_step_us,
             tol_us: 1_000,
             mask: los_mask,
+            gate: strict_gate(),
         };
         let next_aos_offset_seconds = reference[1].aos.diff_microseconds(los_at_window_start)
             as f64
@@ -4102,16 +4813,16 @@ mod tests {
             find_passes(&elements, station, start, end, options).expect("valid pass-finder step");
         assert!(reference.len() >= 2);
         let los_at_window_start = reference[0].los;
-        let mask = elevation_at(&satellite, los_at_window_start, station);
+        let mask = strict_elevation_at(&satellite, los_at_window_start, station);
         assert!(
-            elevation_at(
+            strict_elevation_at(
                 &satellite,
                 los_at_window_start.add_microseconds(-MICROSECONDS_PER_SECOND_I64),
                 station,
             ) > mask
         );
         assert!(
-            elevation_at(
+            strict_elevation_at(
                 &satellite,
                 los_at_window_start.add_microseconds(MICROSECONDS_PER_SECOND_I64),
                 station,
@@ -4159,7 +4870,7 @@ mod tests {
             .expect("valid event-finder window")
             .find_crossings(
                 |offset_seconds| {
-                    elevation_at(
+                    strict_elevation_at(
                         &satellite,
                         instant_at_offset_seconds(start, offset_seconds),
                         station,
@@ -4441,7 +5152,9 @@ mod tests {
         expected: &'static str,
         expected_reason: &'static str,
     ) {
-        let PassError::InvalidInput { field, reason } = error;
+        let PassError::InvalidInput { field, reason } = error else {
+            panic!("expected an invalid-input pass error, got {error:?}");
+        };
         assert_eq!(field, expected);
         assert_eq!(reason, expected_reason);
     }

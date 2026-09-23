@@ -246,6 +246,10 @@ pub enum KinematicSolveError {
         /// Missing correction class.
         correction: MissingCorrection,
     },
+    /// The ephemeris source refused a satellite state the update needs, because
+    /// producing it reads UT1 outside the UT1 table under a strict UT1 policy.
+    /// The update fails rather than dropping or excluding that satellite.
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl core::fmt::Display for KinematicSolveError {
@@ -271,6 +275,10 @@ impl core::fmt::Display for KinematicSolveError {
             } => write!(
                 f,
                 "missing kinematic PPP correction for satellite {satellite_id}: {correction}"
+            ),
+            Self::Ut1OutsideCoverage(reason) => write!(
+                f,
+                "the ephemeris source refused a kinematic PPP satellite state: {reason}"
             ),
         }
     }
@@ -401,7 +409,8 @@ pub fn correct_kinematic_state(
         &corrections.ppp,
         0,
         super::SsrBiasExclusionStage::BeforeSolve,
-    );
+    )
+    .map_err(kinematic_error_from_float)?;
     let epoch = &retained[0];
     if epoch.observations.is_empty() {
         return Ok(KinematicUpdateSummary {
@@ -773,6 +782,9 @@ fn kinematic_error_from_float(error: FloatSolveError) -> KinematicSolveError {
             field: "kinematic PPP ambiguity state",
             reason: "must include every active ambiguity",
         },
+        FloatSolveError::Ut1OutsideCoverage(reason) => {
+            KinematicSolveError::Ut1OutsideCoverage(reason)
+        }
     }
 }
 
@@ -1339,6 +1351,48 @@ mod tests {
 
         assert!(is_symmetric(&covariance_m2));
         assert!(is_psd(&covariance_m2));
+    }
+
+    /// Refuses one satellite's state, as an SSR source does outside the UT1 table
+    /// under a strict UT1 policy, and reads every other satellite from `inner`.
+    struct Ut1RefusingSource<'a> {
+        inner: &'a dyn ObservableEphemerisSource,
+        satellite: GnssSatelliteId,
+    }
+
+    impl ObservableEphemerisSource for Ut1RefusingSource<'_> {
+        fn observable_state_at_j2000_s(
+            &self,
+            sat: GnssSatelliteId,
+            t_j2000_s: f64,
+        ) -> Result<ObservableState, ObservablesError> {
+            if sat == self.satellite {
+                return Err(ObservablesError::Ephemeris(
+                    crate::Error::Ut1OutsideCoverage(
+                        crate::astro::time::DegradeReason::AfterCoverage,
+                    ),
+                ));
+            }
+            self.inner.observable_state_at_j2000_s(sat, t_j2000_s)
+        }
+    }
+
+    #[test]
+    fn kinematic_solve_fails_on_a_ut1_refusal_instead_of_dropping_the_satellite() {
+        let (source, epoch, _, config) = single_epoch_update_fixture();
+        let refused = epoch.observations[0].sat;
+        let refusing = Ut1RefusingSource {
+            inner: &source,
+            satellite: refused,
+        };
+        let err = solve_kinematic_ppp(&refusing, &[epoch], config)
+            .expect_err("a refused satellite fails the update");
+        assert_eq!(
+            err,
+            KinematicSolveError::Ut1OutsideCoverage(
+                crate::astro::time::DegradeReason::AfterCoverage
+            )
+        );
     }
 
     #[test]

@@ -8,6 +8,17 @@ use sidereon_core::astro::sgp4::{
     propagate_elements, ElementSet, JulianDate, MinutesSinceEpoch, OpsMode, Satellite,
 };
 use sidereon_core::astro::tle;
+use sidereon_core::astro::tle::TlePolicy;
+
+/// Read a verification-set TLE as Vallado's `twoline2rv` does. The set's
+/// element sets 33333, 33334 and 33335 carry checksum digits that disagree
+/// with their lines, which the reference reader ignores, so they are read
+/// under the lenient policy rather than the strict default.
+fn vallado_satellite(line1: &str, line2: &str, opsmode: OpsMode) -> Satellite {
+    Satellite::from_tle_with_policy(line1, line2, opsmode, TlePolicy::Lenient)
+        .expect("verification TLE initializes")
+        .0
+}
 
 fn hex_to_f64(s: &str) -> f64 {
     let (neg, rest) = if let Some(r) = s.strip_prefix("-0x") {
@@ -50,7 +61,7 @@ fn all_33_vallado_satellites_at_0_ulp() {
         let line2 = sat["line2"].as_str().unwrap();
         let norad = sat["norad"].as_str().unwrap();
 
-        let satellite = Satellite::from_tle(line1, line2).unwrap();
+        let satellite = vallado_satellite(line1, line2, OpsMode::Improved);
 
         for prop in sat["propagations"].as_array().unwrap() {
             // Skip rows the C++ reference flagged as errors (decay, etc.)
@@ -164,11 +175,13 @@ fn from_elements_matches_from_tle_bit_exact() {
         let line2 = sat["line2"].as_str().unwrap();
         let norad = sat["norad"].as_str().unwrap();
 
-        let from_tle = Satellite::from_tle(line1, line2).unwrap();
+        let from_tle = vallado_satellite(line1, line2, OpsMode::Improved);
 
         // Build the ElementSet by parsing the TLE the same way sidereon does
         // (Elixir-side string slicing into rev/day², rev/day³, deg, etc.).
-        let epoch = tle::parse(line1, line2)
+        // Lenient for the verification set's checksum mismatches (see
+        // `vallado_satellite`).
+        let epoch = tle::parse_with_policy(line1, line2, TlePolicy::Lenient)
             .unwrap()
             .elements
             .to_element_set()
@@ -273,8 +286,8 @@ fn opsmode_afspc_differs_from_improved_for_some_sats() {
     for sat in data["satellites"].as_array().unwrap() {
         let line1 = sat["line1"].as_str().unwrap();
         let line2 = sat["line2"].as_str().unwrap();
-        let imp = Satellite::from_tle_with_opsmode(line1, line2, OpsMode::Improved).unwrap();
-        let afspc = Satellite::from_tle_with_opsmode(line1, line2, OpsMode::Afspc).unwrap();
+        let imp = vallado_satellite(line1, line2, OpsMode::Improved);
+        let afspc = vallado_satellite(line1, line2, OpsMode::Afspc);
 
         for prop in sat["propagations"].as_array().unwrap() {
             if prop.get("error").is_some() {

@@ -5,6 +5,7 @@ use crate::astro::bodies::observe::{
     apparent_geocentric_analytic_true_of_date_m, apparent_geocentric_spk_true_of_date_m,
     observe_with_time_scales, ObserveError, ObserveOptions, Target,
 };
+use crate::astro::bodies::sun_moon::SunMoonError;
 use crate::astro::frames::transforms::{FrameTransformError, GeodeticStationKm};
 use crate::astro::time::scales::TimeScales;
 
@@ -86,12 +87,12 @@ pub fn topocentric_apparent(
 fn map_observe(error: ObserveError) -> AlmanacError {
     match error {
         ObserveError::Spk(error) => AlmanacError::Spk(error),
-        ObserveError::FrameTransform(FrameTransformError::InvalidInput { field, reason }) => {
-            AlmanacError::InvalidInput { field, reason }
-        }
+        ObserveError::FrameTransform(error)
+        | ObserveError::SunMoon(SunMoonError::FrameTransform(
+            error @ FrameTransformError::Ut1OutsideCoverage { .. },
+        )) => AlmanacError::from(error),
         ObserveError::SunMoon(_) => AlmanacError::Frame("sun_moon"),
         ObserveError::Angle(_) => AlmanacError::Frame("angle"),
-        ObserveError::UnsupportedSpkFrame { .. } => AlmanacError::Frame("spk_frame"),
         ObserveError::NonFinite => AlmanacError::InvalidInput {
             field: "geometry",
             reason: "must be finite",

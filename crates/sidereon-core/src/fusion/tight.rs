@@ -485,6 +485,12 @@ impl InertialFilter {
     ///
     /// GNSS epochs must be strictly increasing across the filter's stateful
     /// update surface. One satellite is a valid update.
+    ///
+    /// A satellite state the source refuses because producing it reads UT1
+    /// outside the UT1 table under a strict UT1 policy fails the update with
+    /// [`FusionError::Ut1OutsideCoverage`] and leaves the filter unchanged; a
+    /// departure accepted under a permissive policy is reported in
+    /// [`FusionUpdate::ut1_degraded`].
     pub fn update_tight(
         &mut self,
         source: &dyn ObservableEphemerisSource,
@@ -506,6 +512,27 @@ impl InertialFilter {
     }
 
     pub(super) fn update_tight_core(
+        &mut self,
+        source: &dyn ObservableEphemerisSource,
+        epoch: &TightGnssEpoch,
+    ) -> Result<FusionUpdate, FusionError> {
+        // Read the source through a tracker so a UT1 refusal fails the update
+        // even where a prediction path reads it as a missing state, and so an
+        // accepted departure reaches the caller. On a refusal the filter is
+        // restored, as for any other failed update.
+        let tracked = crate::spp::Ut1Tracked::new(source);
+        let before = (self.state.clone(), self.tight.clone());
+        let result = self.update_tight_tracked(&tracked, epoch);
+        if let Some(reason) = tracked.refusal() {
+            (self.state, self.tight) = before;
+            return Err(FusionError::Ut1OutsideCoverage(reason));
+        }
+        let mut update = result?;
+        update.ut1_degraded = tracked.departure();
+        Ok(update)
+    }
+
+    fn update_tight_tracked(
         &mut self,
         source: &dyn ObservableEphemerisSource,
         epoch: &TightGnssEpoch,
@@ -537,6 +564,7 @@ impl InertialFilter {
             accepted_rows: report.accepted_rows,
             rejected_rows: report.rejected_rows,
             ekf: report,
+            ut1_degraded: None,
         })
     }
 }
@@ -1009,10 +1037,11 @@ fn spp_code_satellite_prediction(
     sagnac: bool,
 ) -> Result<CodeSatellitePrediction, ObservablesError> {
     let source = ObservableClockSource { source };
+    let tracked = crate::spp::Ut1TrackedSource::new(&source);
     let glonass_channels = std::collections::BTreeMap::new();
     let met = SurfaceMet::default();
     let env = SatModelEnv {
-        eph: &source,
+        eph: &tracked,
         t_rx_j2000_s,
         t_rx_second_of_day_s: 0.0,
         day_of_year: 1.0,
@@ -1040,8 +1069,13 @@ fn spp_code_satellite_prediction(
             alpha: [0.0; 4],
             beta: [0.0; 4],
         }),
-    )
-    .ok_or(ObservablesError::NoEphemeris)?;
+    );
+    if let Some(reason) = tracked.refusal() {
+        return Err(ObservablesError::Ephemeris(
+            crate::Error::Ut1OutsideCoverage(reason),
+        ));
+    }
+    let model = model.ok_or(ObservablesError::NoEphemeris)?;
     let line_of_sight = sub3(model.sat_rot_ecef_m, receiver_ecef_m);
     let range = norm3(line_of_sight);
     if !range.is_finite() || range <= 0.0 {
@@ -1077,11 +1111,34 @@ impl EphemerisSource for ObservableClockSource<'_> {
         sat: crate::GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64)> {
-        let state = self
-            .source
-            .observable_state_at_j2000_s(sat, t_j2000_s)
-            .ok()?;
-        Some((state.position_ecef_m, state.clock_s?))
+        self.try_position_clock_at_j2000_s(sat, t_j2000_s)
+            .ok()
+            .flatten()
+            .map(|state| state.value)
+    }
+
+    /// A UT1 refusal from the observable source is kept as
+    /// [`crate::Error::Ut1OutsideCoverage`] rather than read as an
+    /// unavailable satellite; any other failure reads as unavailable.
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: crate::GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<crate::spp::PositionClock>>, crate::Error>
+    {
+        match self.source.try_observable_state_at_j2000_s(sat, t_j2000_s) {
+            Ok(state) => Ok(state
+                .value
+                .clock_s
+                .map(|clock_s| crate::astro::time::Validated {
+                    value: (state.value.position_ecef_m, clock_s),
+                    degraded: state.degraded,
+                })),
+            Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason))) => {
+                Err(crate::Error::Ut1OutsideCoverage(reason))
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     fn single_frequency_group_delay_s(
@@ -1105,11 +1162,40 @@ impl EphemerisSource for ObservableClockSource<'_> {
         sat: crate::GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64, Option<f64>)> {
-        let (state, group_delay) = self
+        self.try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+            .ok()
+            .flatten()
+            .map(|state| state.value)
+    }
+
+    /// As [`Self::try_position_clock_at_j2000_s`], with the group delay from the same
+    /// evaluation.
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: crate::GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        match self
             .source
-            .observable_state_group_delay_at_j2000_s(sat, t_j2000_s)
-            .ok()?;
-        Some((state.position_ecef_m, state.clock_s?, group_delay))
+            .try_observable_state_group_delay_at_j2000_s(sat, t_j2000_s)
+        {
+            Ok(state) => {
+                let (observable, group_delay) = state.value;
+                Ok(observable
+                    .clock_s
+                    .map(|clock_s| crate::astro::time::Validated {
+                        value: (observable.position_ecef_m, clock_s, group_delay),
+                        degraded: state.degraded,
+                    }))
+            }
+            Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason))) => {
+                Err(crate::Error::Ut1OutsideCoverage(reason))
+            }
+            Err(_) => Ok(None),
+        }
     }
 }
 
@@ -1204,6 +1290,9 @@ fn map_observables_error(error: ObservablesError) -> FusionError {
         ObservablesError::NoEphemeris => invalid_input("ephemeris", "no usable satellite state"),
         ObservablesError::InvalidInput { .. } => {
             invalid_input("observable_state", "must be finite and in range")
+        }
+        ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason)) => {
+            FusionError::Ut1OutsideCoverage(reason)
         }
         ObservablesError::Ephemeris(_) => invalid_input("ephemeris", "satellite state failed"),
         ObservablesError::Media(_) => invalid_input("media", "correction failed"),
@@ -2160,6 +2249,105 @@ mod tests {
             .position_ecef_m
             .iter()
             .all(|value| value.is_finite() && value.abs() < 1.0e8));
+    }
+
+    /// Like an SSR source outside the UT1 table: one satellite's state is
+    /// refused under `Strict` and accepted with a reported departure under
+    /// `Permissive`.
+    struct Ut1PolicySource {
+        inner: LinearSource,
+        satellite: GnssSatelliteId,
+        mode: crate::astro::time::ValidityMode,
+    }
+
+    impl ObservableEphemerisSource for Ut1PolicySource {
+        fn observable_state_at_j2000_s(
+            &self,
+            sat: GnssSatelliteId,
+            t_j2000_s: f64,
+        ) -> Result<ObservableState, ObservablesError> {
+            self.try_observable_state_at_j2000_s(sat, t_j2000_s)
+                .map(|state| state.value)
+        }
+
+        fn try_observable_state_at_j2000_s(
+            &self,
+            sat: GnssSatelliteId,
+            t_j2000_s: f64,
+        ) -> Result<crate::astro::time::Validated<ObservableState>, ObservablesError> {
+            use crate::astro::time::{DegradeReason, Validated, ValidityMode};
+            let state = self.inner.observable_state_at_j2000_s(sat, t_j2000_s)?;
+            if sat != self.satellite {
+                return Ok(Validated::ok(state));
+            }
+            match self.mode {
+                ValidityMode::Strict => Err(ObservablesError::Ephemeris(
+                    crate::Error::Ut1OutsideCoverage(DegradeReason::AfterCoverage),
+                )),
+                ValidityMode::Permissive => {
+                    Ok(Validated::degraded(state, DegradeReason::AfterCoverage))
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tight_update_fails_on_a_ut1_refusal_and_reports_a_departure() {
+        use crate::astro::time::{DegradeReason, ValidityMode};
+        let receiver = [WGS84_A_M, 0.0, 0.0];
+        let directions = [
+            [0.85, 0.20, 0.49],
+            [0.60, -0.62, 0.50],
+            [0.70, 0.62, -0.35],
+            [0.92, -0.15, -0.36],
+            [0.40, 0.10, 0.91],
+        ];
+        let source = source_from_directions(receiver, &directions);
+        let epoch = tight_epoch_from_source(&source, receiver, 0.0, 1.0);
+        let refused = source.states[0].0;
+        let policy = |mode| Ut1PolicySource {
+            inner: source_from_directions(receiver, &directions),
+            satellite: refused,
+            mode,
+        };
+        let nominal = NavState::new(T0, receiver, [0.0; 3], mat3_identity()).expect("nominal");
+        let diagonal = vec![1.0; ERROR_STATE_DIMENSION_15];
+
+        for light_time in [true, false] {
+            let config = TightCouplingConfig {
+                light_time,
+                ..tight_config_for_test()
+            };
+            let fresh = || filter_with_config(nominal, &diagonal, config);
+
+            // Strict: the refusal is its own error and the filter is unchanged.
+            let mut strict = fresh();
+            let before = strict.clone();
+            assert_eq!(
+                strict.update_tight(&policy(ValidityMode::Strict), &epoch),
+                Err(FusionError::Ut1OutsideCoverage(
+                    DegradeReason::AfterCoverage
+                ))
+            );
+            assert_eq!(strict, before);
+
+            // Permissive: the same update as in coverage, with the departure.
+            let mut plain = fresh();
+            let plain_update = plain
+                .update_tight(&source, &epoch)
+                .expect("in-table update");
+            assert_eq!(plain_update.ut1_degraded, None);
+            let mut permissive = fresh();
+            let permissive_update = permissive
+                .update_tight(&policy(ValidityMode::Permissive), &epoch)
+                .expect("permissive update");
+            assert_eq!(
+                permissive_update.ut1_degraded,
+                Some(DegradeReason::AfterCoverage)
+            );
+            assert_eq!(permissive_update.ekf, plain_update.ekf);
+            assert_eq!(permissive.state, plain.state);
+        }
     }
 
     #[test]

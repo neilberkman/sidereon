@@ -221,6 +221,27 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for RinexSppSource<'_, E> {
     ) -> Option<([f64; 3], f64, Option<f64>)> {
         EphemerisSource::position_clock_group_delay_at_j2000_s(self.ephemeris, sat, t_j2000_s)
     }
+
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<crate::spp::PositionClock>>, crate::Error>
+    {
+        self.ephemeris.try_position_clock_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        self.ephemeris
+            .try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+    }
 }
 
 impl<E: EphemerisSource + ?Sized> RinexSppAssemblySource for RinexSppSource<'_, E> {

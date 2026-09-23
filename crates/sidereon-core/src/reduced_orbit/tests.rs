@@ -385,6 +385,106 @@ fn too_few_samples_is_typed() {
 }
 
 #[test]
+fn fit_outside_the_ut1_table_is_a_typed_error_not_a_panic() {
+    // The ECEF-to-GCRS step reads UT1; outside the UT1 table it refuses, and
+    // the fit reports that instead of panicking on the transform result.
+    let (_p, samples) = synth_samples(26_560.0, 0.9599, 1.0, 0.0, 0.5, 4, 900.0);
+    let moved: Vec<EcefSample> = samples
+        .iter()
+        .map(|sample| {
+            let epoch = CalendarEpoch::new(
+                2100,
+                sample.epoch.month,
+                sample.epoch.day,
+                sample.epoch.hour,
+                sample.epoch.minute,
+                sample.epoch.second,
+            );
+            EcefSample::new(epoch, sample.x_m, sample.y_m, sample.z_m)
+        })
+        .collect();
+    for model in [Model::CircularSecular, Model::EccentricSecular] {
+        assert!(matches!(
+            fit_with_model(&moved, TimeScale::Utc, model),
+            Err(ReducedOrbitError::Ut1OutsideCoverage(
+                crate::astro::time::DegradeReason::AfterCoverage
+            ))
+        ));
+    }
+}
+
+#[test]
+fn permissive_fit_after_the_ut1_table_recovers_the_orbit_and_reports_it() {
+    // The synthetic orbit of `synth_samples`, generated at 2028-06-24, after the
+    // UT1 table, with the long-term UT1 the permissive fit will also use.
+    let base = CalendarEpoch::new(2028, 6, 24, 0, 0, 0.0);
+    let t0 = base.time_scales(TimeScale::Utc);
+    let a_km = 26_560.0;
+    let n = (MU_EARTH / (a_km * a_km * a_km)).sqrt();
+    let params = [a_km, 0.9599, 1.0, 0.0, 0.5, n];
+    let samples: Vec<EcefSample> = (0..8)
+        .map(|k| {
+            let ep = epoch_at(base, k as f64 * 900.0);
+            let ts = ep.time_scales(TimeScale::Utc);
+            let r_gcrs = eval_gcrs_km(&params, dt_seconds(&t0, &ts));
+            let mat = crate::astro::frames::transforms::with_ut1_validity(
+                &ts,
+                ValidityMode::Permissive,
+                gcrs_to_itrs_matrix,
+            )
+            .expect("long-term UT1 accepted")
+            .value;
+            let r_itrs = mat3_vec3_mul(&mat, &r_gcrs).expect("finite matrix-vector product");
+            EcefSample::new(
+                ep,
+                r_itrs[0] * M_PER_KM,
+                r_itrs[1] * M_PER_KM,
+                r_itrs[2] * M_PER_KM,
+            )
+        })
+        .collect();
+
+    let fitted = fit_with_validity(
+        &samples,
+        TimeScale::Utc,
+        Model::CircularSecular,
+        ValidityMode::Permissive,
+    )
+    .expect("permissive fit");
+    assert_eq!(
+        fitted.degraded,
+        Some(crate::astro::time::DegradeReason::AfterCoverage)
+    );
+    assert!((fitted.value.elements.a_m - a_km * M_PER_KM).abs() < 1.0);
+
+    let evaluated = position_with_validity(
+        &fitted.value.elements,
+        samples[3].epoch,
+        TimeScale::Utc,
+        Frame::Ecef,
+        ValidityMode::Permissive,
+    )
+    .expect("permissive ECEF position");
+    assert_eq!(evaluated.degraded, fitted.degraded);
+    assert!((evaluated.value[0] - samples[3].x_m).abs() < 1.0);
+
+    assert!(matches!(
+        fit(&samples, TimeScale::Utc),
+        Err(ReducedOrbitError::Ut1OutsideCoverage(
+            crate::astro::time::DegradeReason::AfterCoverage
+        ))
+    ));
+    // A GCRS evaluation does not read UT1, so the default accepts it.
+    assert!(position(
+        &fitted.value.elements,
+        samples[3].epoch,
+        TimeScale::Utc,
+        Frame::Gcrs
+    )
+    .is_ok());
+}
+
+#[test]
 fn fit_rejects_invalid_sample_epoch_without_panic() {
     let (_p, mut samples) = synth_samples(26_560.0, 0.9599, 1.0, 0.0, 0.5, 4, 900.0);
     samples[1].epoch = CalendarEpoch::new(2020, 2, 30, 0, 0, 0.0);

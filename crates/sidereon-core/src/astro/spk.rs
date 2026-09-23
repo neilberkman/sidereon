@@ -72,7 +72,7 @@
 //! assert_eq!(state.center, 0);
 //! assert_eq!(state.frame, 1);
 //! assert_eq!(state.position_km, [100.0, 10.0, 1.0]);
-//! assert_eq!(state.velocity_km_s, Some([1.0, 0.0, 0.1]));
+//! assert_eq!(state.velocity_km_s, [1.0, 0.0, 0.1]);
 //! # Ok::<(), sidereon_core::astro::spk::SpkError>(())
 //! ```
 
@@ -223,10 +223,14 @@ pub struct SpkState {
     pub position_km: [f64; 3],
     /// Velocity of the target relative to the requested center, in kilometers per second.
     ///
-    /// Type-3 segments provide velocity directly. Queries that use any type-2
-    /// segment return `None` because type 2 stores position only.
-    pub velocity_km_s: Option<[f64; 3]>,
-    /// NAIF reference-frame identifier shared by all segments in the resolved path.
+    /// Every supported segment type yields it. Types 3 and 21 store velocity;
+    /// for type 2 it is the time derivative of the position Chebyshev
+    /// expansion, as CSPICE `SPKE02` computes it.
+    pub velocity_km_s: [f64; 3],
+    /// NAIF reference-frame identifier of `position_km` and `velocity_km_s`:
+    /// the frame requested with `spk_state_in_frame`, or for `spk_state` the
+    /// frame of the first segment the query evaluated. A `target == center`
+    /// query evaluates no segment and reports the requested frame, or 0.
     pub frame: i32,
 }
 
@@ -306,14 +310,16 @@ pub enum SpkError {
         /// NAIF body identifier that was not present in any segment.
         body: i32,
     },
-    /// The kernel has both bodies but no segment chain connecting them.
+    /// The kernels name both bodies but no segments connect them at any time.
     NoSegmentPath {
         /// Requested target NAIF body identifier.
         target: i32,
         /// Requested center NAIF body identifier.
         center: i32,
     },
-    /// A segment chain exists, but no complete chain covers the requested ET.
+    /// Segments connect the two bodies, but the chains of highest-priority
+    /// segments covering the requested ET do not meet (CSPICE reports this as
+    /// insufficient ephemeris data).
     CoverageGap {
         /// Requested target NAIF body identifier.
         target: i32,
@@ -327,12 +333,16 @@ pub enum SpkError {
         /// SPK segment type found in the descriptor.
         data_type: i32,
     },
-    /// A chained query would combine states expressed in different frames.
-    FrameMismatch {
-        /// Frame identifier from the accumulated path.
-        first: i32,
-        /// Frame identifier from the next segment.
-        second: i32,
+    /// A query needed a rotation between two frames, at least one of which
+    /// is not one of the NAIF built-in inertial frames 1-21 whose constant
+    /// mutual rotations CSPICE `IRFROT` defines. CSPICE would call `FRMCHG`
+    /// with frame kernels and orientation data, which this reader does not
+    /// hold.
+    NonInertialFrameRotation {
+        /// Frame the state is expressed in.
+        from: i32,
+        /// Frame the state had to be rotated into.
+        to: i32,
     },
 }
 
@@ -393,9 +403,9 @@ impl fmt::Display for SpkError {
             SpkError::UnsupportedStateSegmentType { data_type } => {
                 write!(f, "unsupported SPK state segment type {data_type}")
             }
-            SpkError::FrameMismatch { first, second } => write!(
+            SpkError::NonInertialFrameRotation { from, to } => write!(
                 f,
-                "cannot chain SPK states across frame ids {first} and {second}"
+                "no constant rotation from SPK frame {from} to frame {to}: only NAIF inertial frames 1-{NAIF_INERTIAL_FRAMES} are rotated"
             ),
         }
     }
@@ -430,337 +440,806 @@ impl Spk {
     }
 
     /// Query the state of `target` relative to `center` at ET/TDB seconds past J2000.
+    ///
+    /// This is the one-kernel case of [`SpkKernels::spk_state`]; segment
+    /// selection and chain composition follow CSPICE `SPKSFS` and `SPKGEO`
+    /// exactly, as described there.
     pub fn spk_state(&self, target: i32, center: i32, et: f64) -> Result<SpkState, SpkError> {
-        if !et.is_finite() {
-            return Err(SpkError::InvalidDoubleField {
-                field: "ET",
-                value: et,
-            });
-        }
+        resolve_spk_state(core::slice::from_ref(self), target, center, et, None)
+    }
 
-        if !self.body_is_known(target) {
-            return Err(SpkError::UnknownBody { body: target });
-        }
-        if !self.body_is_known(center) {
-            return Err(SpkError::UnknownBody { body: center });
-        }
-        if target == center {
-            if !self.body_has_coverage_at(target, et) {
-                return Err(SpkError::CoverageGap { target, center, et });
-            }
-            return Ok(SpkState {
-                target,
-                center,
-                position_km: [0.0; 3],
-                velocity_km_s: Some([0.0; 3]),
-                frame: 0,
-            });
-        }
-        if !self.has_segment_path(target, center) {
-            return Err(SpkError::NoSegmentPath { target, center });
-        }
-
-        self.covering_state_path(target, center, et)
-            .ok_or(SpkError::CoverageGap { target, center, et })?
+    /// Query the state of `target` relative to `center` in the NAIF frame
+    /// `frame`. This is the one-kernel case of [`SpkKernels::spk_state_in_frame`].
+    pub fn spk_state_in_frame(
+        &self,
+        target: i32,
+        center: i32,
+        et: f64,
+        frame: i32,
+    ) -> Result<SpkState, SpkError> {
+        resolve_spk_state(core::slice::from_ref(self), target, center, et, Some(frame))
     }
 
     fn from_vec(bytes: Vec<u8>) -> Result<Self, SpkError> {
         let directory = parse_daf_spk(&bytes)?;
         Ok(Self { bytes, directory })
     }
+}
 
-    fn body_is_known(&self, body: i32) -> bool {
-        self.directory
-            .segments
-            .iter()
-            .any(|segment| segment.target == body || segment.center == body)
+/// SPK kernels in load order, queried with the NAIF segment-priority rules.
+///
+/// The SPK Required Reading gives the precedence: when segments for the same
+/// body overlap in time, a segment in a later-loaded file takes precedence over
+/// every segment in an earlier-loaded file, and within one file a segment later
+/// in the file takes precedence over an earlier one. [`SpkKernels::spk_state`]
+/// applies that order across every kernel held here, as CSPICE does across the
+/// files loaded with `FURNSH`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SpkKernels {
+    kernels: Vec<Spk>,
+}
+
+impl SpkKernels {
+    /// Create an empty kernel set.
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    fn body_has_coverage_at(&self, body: i32, et: f64) -> bool {
-        self.directory.segments.iter().any(|segment| {
-            (segment.target == body || segment.center == body)
-                && et >= segment.start_et
-                && et <= segment.stop_et
-        })
+    /// Add a parsed kernel. It takes precedence over every kernel added before it.
+    pub fn push(&mut self, kernel: Spk) {
+        self.kernels.push(kernel);
     }
 
-    fn has_segment_path(&self, target: i32, center: i32) -> bool {
-        let mut visited = Vec::new();
-        let mut queue = Vec::new();
-        visited.push(target);
-        queue.push(target);
-
-        let mut cursor = 0;
-        while cursor < queue.len() {
-            let body = queue[cursor];
-            cursor += 1;
-
-            if body == center {
-                return true;
-            }
-
-            for segment in self.directory.segments.iter().rev() {
-                let next = if segment.target == body {
-                    segment.center
-                } else if segment.center == body {
-                    segment.target
-                } else {
-                    continue;
-                };
-
-                if visited.contains(&next) {
-                    continue;
-                }
-                if next == center {
-                    return true;
-                }
-                visited.push(next);
-                queue.push(next);
-            }
-        }
-
-        false
+    /// Parse and add a kernel from bytes. It takes precedence over every kernel
+    /// added before it.
+    pub fn push_bytes(&mut self, bytes: &[u8]) -> Result<(), SpkError> {
+        self.kernels.push(Spk::from_bytes(bytes)?);
+        Ok(())
     }
 
-    fn covering_state_path(
+    /// Read, parse and add a kernel file. It takes precedence over every kernel
+    /// added before it.
+    pub fn load(&mut self, path: impl AsRef<std::path::Path>) -> Result<(), SpkError> {
+        self.kernels.push(Spk::load(path)?);
+        Ok(())
+    }
+
+    /// Return the kernels in load order (lowest precedence first).
+    pub fn kernels(&self) -> &[Spk] {
+        &self.kernels
+    }
+
+    /// Number of kernels held.
+    pub fn len(&self) -> usize {
+        self.kernels.len()
+    }
+
+    /// Whether no kernel is held.
+    pub fn is_empty(&self) -> bool {
+        self.kernels.is_empty()
+    }
+
+    /// Query the state of `target` relative to `center` at ET/TDB seconds past J2000.
+    ///
+    /// Segment selection follows CSPICE `SPKSFS`: for a body `B`, the one
+    /// segment used is the highest-priority segment whose target is `B` and
+    /// whose descriptor covers `et` inclusively, searching the last-loaded
+    /// kernel first and, within a kernel, the last segment first. A segment is
+    /// never used in the reverse direction, and a lower-priority segment is
+    /// never substituted when the selected one cannot be evaluated.
+    ///
+    /// Chain composition follows CSPICE `SPKGEO`. The target chain starts at
+    /// `target` and follows selected segments to their centers, keeping each
+    /// leg in its own segment's frame, until it reaches `center`, the solar
+    /// system barycenter (0), or a body with no covering segment. The chain
+    /// holds at most 20 bodies; once it is full, every further leg is folded
+    /// into the last entry, whose running sum is rotated into the new leg's
+    /// frame before the leg is added.
+    ///
+    /// The observer chain starts at `center` and follows selected segments
+    /// until it reaches a body in the target chain, or ends at the barycenter
+    /// or at a body with no covering segment; if it has not met the target
+    /// chain by then, the bodies are not joined at `et`. Its legs are summed
+    /// as it goes: the running sum is rotated into the frame of each new leg
+    /// whose frame differs, then the leg is added.
+    ///
+    /// The target-chain legs up to the common body are then summed the same
+    /// way, leg by leg in chain order, each running sum rotated into the next
+    /// leg's frame when the frames differ. The state is that sum minus the
+    /// observer-chain sum, rotated into one frame first when their frames
+    /// differ, and finally rotated into the output frame.
+    ///
+    /// `target == center` returns the zero state without consulting any
+    /// segment, as `SPKGEO` does; its `frame` is 0.
+    ///
+    /// Every rotation is the constant `IRFROT` rotation between NAIF inertial
+    /// frames (see [`inertial_frame_rotation`]). CSPICE takes the
+    /// output frame from its caller; this method returns the state in the frame
+    /// of the first segment evaluated (the target's own segment when it has
+    /// one, otherwise the observer's first segment), so a kernel whose
+    /// segments share one frame is returned in that frame without any
+    /// rotation. Use [`SpkKernels::spk_state_in_frame`] to name the frame. A
+    /// rotation that involves a frame outside NAIF inertial frames 1-21 returns
+    /// [`SpkError::NonInertialFrameRotation`]; legs that share a frame are
+    /// added without rotation whatever the frame.
+    pub fn spk_state(&self, target: i32, center: i32, et: f64) -> Result<SpkState, SpkError> {
+        resolve_spk_state(&self.kernels, target, center, et, None)
+    }
+
+    /// Query the state of `target` relative to `center` in the NAIF frame
+    /// `frame`, as CSPICE `SPKGEO` does with the reference frame `REF`: the
+    /// composed state is rotated into `frame` with the constant `IRFROT`
+    /// rotation when it is expressed in another frame. Segment selection and
+    /// chain composition are those of [`SpkKernels::spk_state`].
+    pub fn spk_state_in_frame(
         &self,
         target: i32,
         center: i32,
         et: f64,
-    ) -> Option<Result<SpkState, SpkError>> {
-        let root = StateSearchNode {
-            body: target,
-            state: AccumulatedSpkState {
-                position_km: [0.0; 3],
-                velocity_km_s: Some([0.0; 3]),
-                frame: None,
-            },
+        frame: i32,
+    ) -> Result<SpkState, SpkError> {
+        resolve_spk_state(&self.kernels, target, center, et, Some(frame))
+    }
+}
+
+impl FromIterator<Spk> for SpkKernels {
+    fn from_iter<I: IntoIterator<Item = Spk>>(iter: I) -> Self {
+        Self {
+            kernels: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl From<Vec<Spk>> for SpkKernels {
+    fn from(kernels: Vec<Spk>) -> Self {
+        Self { kernels }
+    }
+}
+
+/// Target-chain length `CHLEN` of CSPICE `SPKGEO`: the chain holds at most
+/// this many bodies, and further legs are folded into its last entry.
+const SPK_CHAIN_LENGTH: usize = 20;
+/// NAIF id of the solar system barycenter, where a chain ends.
+const NAIF_SSB: i32 = 0;
+
+/// One segment of one kernel.
+#[derive(Clone, Copy)]
+struct SegmentRef<'a> {
+    kernel: &'a Spk,
+    segment: &'a SpkSegmentDescriptor,
+}
+
+/// Every segment in precedence order: last-loaded kernel first, and within a
+/// kernel the last segment first.
+fn segments_by_priority(kernels: &[Spk]) -> impl Iterator<Item = SegmentRef<'_>> {
+    kernels.iter().rev().flat_map(|kernel| {
+        kernel
+            .directory
+            .segments
+            .iter()
+            .rev()
+            .map(move |segment| SegmentRef { kernel, segment })
+    })
+}
+
+/// CSPICE `SPKSFS`: the highest-priority segment for `body` covering `et`.
+fn select_segment(kernels: &[Spk], body: i32, et: f64) -> Option<SegmentRef<'_>> {
+    segments_by_priority(kernels).find(|candidate| {
+        candidate.segment.target == body
+            && et >= candidate.segment.start_et
+            && et <= candidate.segment.stop_et
+    })
+}
+
+/// A state vector in `SPKGEO` layout: position then velocity.
+type State6 = [f64; 6];
+
+/// One selected and evaluated segment: CSPICE `SPKPVN` output.
+struct EvaluatedLeg {
+    state: State6,
+    frame: i32,
+    center: i32,
+}
+
+fn evaluate_leg(leg: SegmentRef<'_>, et: f64) -> Result<EvaluatedLeg, SpkError> {
+    let state = evaluate_segment_state(leg.kernel, leg.segment, et)?;
+    Ok(EvaluatedLeg {
+        state: [
+            state.position_km[0],
+            state.position_km[1],
+            state.position_km[2],
+            state.velocity_km_s[0],
+            state.velocity_km_s[1],
+            state.velocity_km_s[2],
+        ],
+        frame: leg.segment.frame,
+        center: leg.segment.center,
+    })
+}
+
+/// `SPKGEO`'s `ISINRT`: both frames are among the built-in inertial frames.
+fn both_inertial(a: i32, b: i32) -> bool {
+    is_inertial_frame(a) && is_inertial_frame(b)
+}
+
+fn is_inertial_frame(frame: i32) -> bool {
+    frame > 0 && frame <= NAIF_INERTIAL_FRAMES as i32
+}
+
+/// Rotate a state from frame `from` into frame `to` with `IRFROT` and two
+/// `MXV` products, as `SPKGEO` does, refusing a non-inertial pair.
+fn rotate_state(state: &State6, from: i32, to: i32) -> Result<State6, SpkError> {
+    if !both_inertial(from, to) {
+        return Err(SpkError::NonInertialFrameRotation { from, to });
+    }
+    let rotation = irfrot(from, to);
+    let position = mxv(&rotation, [state[0], state[1], state[2]]);
+    let velocity = mxv(&rotation, [state[3], state[4], state[5]]);
+    Ok([
+        position[0],
+        position[1],
+        position[2],
+        velocity[0],
+        velocity[1],
+        velocity[2],
+    ])
+}
+
+fn add6(lhs: &State6, rhs: &State6) -> State6 {
+    let mut out = [0.0; 6];
+    for (index, value) in out.iter_mut().enumerate() {
+        *value = lhs[index] + rhs[index];
+    }
+    out
+}
+
+fn sub6(lhs: &State6, rhs: &State6) -> State6 {
+    let mut out = [0.0; 6];
+    for (index, value) in out.iter_mut().enumerate() {
+        *value = lhs[index] - rhs[index];
+    }
+    out
+}
+
+/// Total segment count: a chain longer than this has revisited a body.
+fn segment_count(kernels: &[Spk]) -> usize {
+    kernels
+        .iter()
+        .map(|kernel| kernel.directory.segments.len())
+        .sum()
+}
+
+/// CSPICE `SPKGEO`, statement for statement, without allocating. `refid` is
+/// the requested output frame; `None` takes the frame of the first segment
+/// evaluated.
+///
+/// `SPKGEO` loops without end when the chain of selected segments revisits a
+/// body before reaching the observer or the barycenter; such a chain is
+/// reported here as the error for a chain that does not join.
+fn resolve_spk_state(
+    kernels: &[Spk],
+    target: i32,
+    center: i32,
+    et: f64,
+    refid: Option<i32>,
+) -> Result<SpkState, SpkError> {
+    if !et.is_finite() {
+        return Err(SpkError::InvalidDoubleField {
+            field: "ET",
+            value: et,
+        });
+    }
+    if target == center {
+        return Ok(SpkState {
+            target,
+            center,
+            position_km: [0.0; 3],
+            velocity_km_s: [0.0; 3],
+            frame: refid.unwrap_or(0),
+        });
+    }
+    let unjoined = || missing_chain_error(kernels, target, center, et);
+    let max_legs = segment_count(kernels);
+
+    // Target chain. Index k holds CTARG(k + 1), TFRAME(k + 1) and STARG(k + 1):
+    // STARG(1) is zero and STARG(k + 1), k >= 1, is the state of CTARG(k)
+    // relative to CTARG(k + 1) in TFRAME(k + 1).
+    let mut ctarg = [0i32; SPK_CHAIN_LENGTH];
+    let mut tframe = [0i32; SPK_CHAIN_LENGTH];
+    let mut starg = [[0.0f64; 6]; SPK_CHAIN_LENGTH];
+    ctarg[0] = target;
+    let mut count = 1usize;
+    while count < SPK_CHAIN_LENGTH && ctarg[count - 1] != center && ctarg[count - 1] != NAIF_SSB {
+        let Some(segment) = select_segment(kernels, ctarg[count - 1], et) else {
+            break;
         };
+        let leg = evaluate_leg(segment, et)?;
+        if ctarg[..count].contains(&leg.center) {
+            return Err(unjoined());
+        }
+        ctarg[count] = leg.center;
+        tframe[count] = leg.frame;
+        starg[count] = leg.state;
+        count += 1;
+    }
+    if count > 1 {
+        tframe[0] = tframe[1];
+    }
+    let default_frame = (count > 1).then_some(tframe[1]);
 
-        let mut search = StatePathSearch::new(target);
+    if count == SPK_CHAIN_LENGTH {
+        // Fold every further leg into the last entry.
+        let last = SPK_CHAIN_LENGTH - 1;
+        let mut folded = 0usize;
+        while ctarg[last] != NAIF_SSB && ctarg[last] != center {
+            let Some(segment) = select_segment(kernels, ctarg[last], et) else {
+                break;
+            };
+            let leg = evaluate_leg(segment, et)?;
+            let vtemp = if tframe[last] == leg.frame {
+                starg[last]
+            } else {
+                rotate_state(&starg[last], tframe[last], leg.frame)?
+            };
+            starg[last] = add6(&vtemp, &leg.state);
+            tframe[last] = leg.frame;
+            ctarg[last] = leg.center;
+            folded += 1;
+            if folded > max_legs {
+                return Err(unjoined());
+            }
+        }
+    }
+    let nct = count;
 
-        self.covering_state_path_from(root, center, et, &mut search)
-            .or_else(|| search.fallback())
+    // Observer chain.
+    let mut cobs = center;
+    let mut sobs = [0.0f64; 6];
+    let mut ctpos = (ctarg[nct - 1] == cobs).then_some(nct - 1);
+    let mut cframe = tframe[nct - 1];
+    let mut observer_frame: Option<i32> = None;
+    let mut legs = 0usize;
+    while ctpos.is_none() && cobs != NAIF_SSB {
+        let Some(segment) = select_segment(kernels, cobs, et) else {
+            break;
+        };
+        let leg = evaluate_leg(segment, et)?;
+        if legs == 0 {
+            sobs = leg.state;
+        }
+        if observer_frame.is_none() {
+            observer_frame = Some(leg.frame);
+            cframe = leg.frame;
+        }
+        if cframe == leg.frame {
+            if legs > 0 {
+                sobs = add6(&sobs, &leg.state);
+            }
+        } else {
+            let vtemp = rotate_state(&sobs, cframe, leg.frame)?;
+            sobs = add6(&vtemp, &leg.state);
+            cframe = leg.frame;
+        }
+        legs += 1;
+        cobs = leg.center;
+        ctpos = ctarg[..nct].iter().position(|&body| body == cobs);
+        if legs > max_legs {
+            return Err(unjoined());
+        }
+    }
+    let Some(ctpos) = ctpos else {
+        return Err(unjoined());
+    };
+    let refid = refid.or(default_frame).or(observer_frame).unwrap_or(cframe);
+
+    if ctpos == 0 {
+        tframe[0] = cframe;
+    }
+    for index in 1..ctpos {
+        let next = if tframe[index] == tframe[index + 1] {
+            add6(&starg[index], &starg[index + 1])
+        } else {
+            let stemp = rotate_state(&starg[index], tframe[index], tframe[index + 1])?;
+            add6(&stemp, &starg[index + 1])
+        };
+        starg[index + 1] = next;
     }
 
-    fn covering_state_path_from(
-        &self,
-        node: StateSearchNode,
-        center: i32,
-        et: f64,
-        search: &mut StatePathSearch,
-    ) -> Option<Result<SpkState, SpkError>> {
-        for segment in self.directory.segments.iter().rev() {
-            let (next, sign) = if segment.target == node.body {
-                (segment.center, 1.0)
-            } else if segment.center == node.body {
-                (segment.target, -1.0)
+    let mut state = if tframe[ctpos] == cframe {
+        sub6(&starg[ctpos], &sobs)
+    } else if tframe[ctpos] == refid {
+        let stemp = rotate_state(&sobs, cframe, refid)?;
+        cframe = refid;
+        sub6(&starg[ctpos], &stemp)
+    } else {
+        let stemp = rotate_state(&starg[ctpos], tframe[ctpos], cframe)?;
+        sub6(&stemp, &sobs)
+    };
+    if cframe != refid {
+        state = rotate_state(&state, cframe, refid)?;
+    }
+
+    Ok(SpkState {
+        target,
+        center,
+        position_km: [state[0], state[1], state[2]],
+        velocity_km_s: [state[3], state[4], state[5]],
+        frame: refid,
+    })
+}
+
+/// Name the reason no chain joined `target` and `center` at `et`.
+fn missing_chain_error(kernels: &[Spk], target: i32, center: i32, et: f64) -> SpkError {
+    if !body_is_known(kernels, target) {
+        return SpkError::UnknownBody { body: target };
+    }
+    if !body_is_known(kernels, center) {
+        return SpkError::UnknownBody { body: center };
+    }
+    if !has_segment_path(kernels, target, center) {
+        return SpkError::NoSegmentPath { target, center };
+    }
+    SpkError::CoverageGap { target, center, et }
+}
+
+fn body_is_known(kernels: &[Spk], body: i32) -> bool {
+    segments_by_priority(kernels)
+        .any(|candidate| candidate.segment.target == body || candidate.segment.center == body)
+}
+
+/// Whether any segments, at any time and in either direction, connect the two bodies.
+fn has_segment_path(kernels: &[Spk], target: i32, center: i32) -> bool {
+    let mut visited = vec![target];
+    let mut cursor = 0;
+    while cursor < visited.len() {
+        let body = visited[cursor];
+        cursor += 1;
+        if body == center {
+            return true;
+        }
+        for candidate in segments_by_priority(kernels) {
+            let next = if candidate.segment.target == body {
+                candidate.segment.center
+            } else if candidate.segment.center == body {
+                candidate.segment.target
             } else {
                 continue;
             };
-
-            if et < segment.start_et || et > segment.stop_et {
-                continue;
+            if !visited.contains(&next) {
+                visited.push(next);
             }
+        }
+    }
+    false
+}
 
-            let leg = match self.evaluate_segment_state(segment, et) {
-                Ok(leg) => leg,
-                Err(SpkError::OutOfCoverage { .. }) => continue,
-                Err(error @ SpkError::UnsupportedStateSegmentType { .. }) => {
-                    if next == center && search.is_root() {
-                        return Some(Err(error));
-                    }
-                    if search.first_unsupported.is_none() {
-                        search.first_unsupported = Some(error);
-                    }
-                    continue;
-                }
-                Err(error) => return Some(Err(error)),
+/// Number of NAIF built-in inertial frames (CSPICE `NINERT`), ids 1 to 21.
+pub const NAIF_INERTIAL_FRAMES: usize = 21;
+
+/// CSPICE `CHGIRF` frame table: name, base frame, and the rotation from the
+/// base frame as `angle axis` pairs, angles in arcseconds, applied right to
+/// left. The strings are copied from `chgirf.f` (SPICELIB 4.5.0) and read
+/// with the same parser, so each angle has the value CSPICE computes.
+const IRF_DEFINITIONS: [(&str, &str, &str); NAIF_INERTIAL_FRAMES] = [
+    ("J2000", "J2000", "0.0  1"),
+    (
+        "B1950",
+        "J2000",
+        "1152.84248596724 3  -1002.26108439117  2  1153.04066200330  3",
+    ),
+    ("FK4", "B1950", "0.525  3"),
+    ("DE-118", "B1950", "0.53155  3"),
+    ("DE-96", "B1950", "0.4107  3"),
+    ("DE-102", "B1950", "0.1359  3"),
+    ("DE-108", "B1950", "0.4775  3"),
+    ("DE-111", "B1950", "0.5880  3"),
+    ("DE-114", "B1950", "0.5529  3"),
+    ("DE-122", "B1950", "0.5316  3"),
+    ("DE-125", "B1950", "0.5754  3"),
+    ("DE-130", "B1950", "0.5247  3"),
+    ("GALACTIC", "FK4", "1177200.0  3  225360.0  1  1016100.0  3"),
+    ("DE-200", "J2000", "0.0  3"),
+    ("DE-202", "J2000", "0.0  3"),
+    (
+        "MARSIAU",
+        "J2000",
+        "324000.0D0 3 133610.4D0 2 -152348.4D0 3",
+    ),
+    ("ECLIPJ2000", "J2000", "84381.448 1"),
+    ("ECLIPB1950", "B1950", "84404.836 1"),
+    (
+        "DE-140",
+        "J2000",
+        "1152.71013777252 3  -1002.25042010533  2  1153.75719544491  3",
+    ),
+    (
+        "DE-142",
+        "J2000",
+        "1152.72061453864 3  -1002.25052830351  2  1153.74663857521  3",
+    ),
+    (
+        "DE-143",
+        "J2000",
+        "1153.03919093833, 3, -1002.24822382286, 2, 1153.42900222357, 3",
+    ),
+];
+
+/// 3x3 matrix, `m[i][j]` is the Fortran element `M(i + 1, j + 1)`.
+type Mat3 = [[f64; 3]; 3];
+
+/// Name of NAIF built-in inertial frame `frame` (1-21), as `IRFNAM` gives it.
+pub fn inertial_frame_name(frame: i32) -> Option<&'static str> {
+    is_inertial_frame(frame).then(|| IRF_DEFINITIONS[(frame - 1) as usize].0)
+}
+
+/// CSPICE `IRFROT`: the constant rotation taking a vector expressed in NAIF
+/// inertial frame `from` to the same vector expressed in frame `to`, both
+/// within 1-21. The matrix is built as `CHGIRF` builds it, so each element
+/// has the value CSPICE computes with the same `sin`/`cos`.
+pub fn inertial_frame_rotation(from: i32, to: i32) -> Result<[[f64; 3]; 3], SpkError> {
+    if !both_inertial(from, to) {
+        return Err(SpkError::NonInertialFrameRotation { from, to });
+    }
+    Ok(irfrot(from, to))
+}
+
+fn irfrot(from: i32, to: i32) -> Mat3 {
+    if from == to {
+        return rotate(0.0, 1);
+    }
+    let trans = irf_root_rotations();
+    mxmt(&trans[(to - 1) as usize], &trans[(from - 1) as usize])
+}
+
+/// `CHGIRF`'s `TRANS`: the rotation from J2000 to each frame.
+fn irf_root_rotations() -> &'static [Mat3; NAIF_INERTIAL_FRAMES] {
+    static TRANS: std::sync::OnceLock<[Mat3; NAIF_INERTIAL_FRAMES]> = std::sync::OnceLock::new();
+    TRANS.get_or_init(|| {
+        let mut trans = [[[0.0; 3]; 3]; NAIF_INERTIAL_FRAMES];
+        for (index, &(_, base, definition)) in IRF_DEFINITIONS.iter().enumerate() {
+            let mut matrix = rotate(0.0, 1);
+            let words: Vec<&str> = definition.split_whitespace().collect();
+            let mut word = words.len();
+            while word >= 2 {
+                let axis = nparsd(words[word - 1]) as i32;
+                let angle = nparsd(words[word - 2]);
+                matrix = rotmat(&matrix, arcseconds_to_radians(angle), axis);
+                word -= 2;
+            }
+            let base_index = IRF_DEFINITIONS[..=index]
+                .iter()
+                .position(|(name, _, _)| *name == base)
+                .expect("each CHGIRF base frame precedes the frames defined on it");
+            let base_matrix = if base_index == index {
+                matrix
+            } else {
+                trans[base_index]
             };
-            let state = match node.state.extend(leg, sign) {
-                Ok(state) => state,
-                Err(error @ SpkError::FrameMismatch { .. }) => {
-                    if search.first_frame_mismatch.is_none() {
-                        search.first_frame_mismatch = Some(error);
+            trans[index] = mxm(&matrix, &base_matrix);
+        }
+        trans
+    })
+}
+
+/// `CONVRT(ANGLE, 'ARCSECONDS', 'RADIANS')`: `(x * (1/3600)) / DPR()`.
+fn arcseconds_to_radians(arcseconds: f64) -> f64 {
+    const DEGREES_PER_ARCSECOND: f64 = 1.0 / 3600.0;
+    let degrees_per_radian = 180.0 / libm::acos(-1.0);
+    (arcseconds * DEGREES_PER_ARCSECOND) / degrees_per_radian
+}
+
+/// SPICELIB `ROTATE`.
+fn rotate(angle: f64, axis: i32) -> Mat3 {
+    let s = libm::sin(angle);
+    let c = libm::cos(angle);
+    let (i1, i2, i3) = rotation_indices(axis);
+    let mut m = [[0.0; 3]; 3];
+    m[i1][i1] = 1.0;
+    m[i2][i1] = 0.0;
+    m[i3][i1] = 0.0;
+    m[i1][i2] = 0.0;
+    m[i2][i2] = c;
+    m[i3][i2] = -s;
+    m[i1][i3] = 0.0;
+    m[i2][i3] = s;
+    m[i3][i3] = c;
+    m
+}
+
+/// SPICELIB `ROTMAT`: `[angle]_axis * m1`.
+#[allow(clippy::needless_range_loop)] // transcribes the SPICELIB index loops
+fn rotmat(m1: &Mat3, angle: f64, axis: i32) -> Mat3 {
+    let s = libm::sin(angle);
+    let c = libm::cos(angle);
+    let (i1, i2, i3) = rotation_indices(axis);
+    let mut out = [[0.0; 3]; 3];
+    for i in 0..3 {
+        out[i1][i] = m1[i1][i];
+        out[i2][i] = c * m1[i2][i] + s * m1[i3][i];
+        out[i3][i] = -(s * m1[i2][i]) + c * m1[i3][i];
+    }
+    out
+}
+
+/// `ROTATE`/`ROTMAT` index selection: `INDEXS = (3, 1, 2, 3, 1)`, zero-based.
+fn rotation_indices(axis: i32) -> (usize, usize, usize) {
+    const INDEXS: [usize; 5] = [2, 0, 1, 2, 0];
+    let temp = axis.rem_euclid(3) as usize;
+    (INDEXS[temp], INDEXS[temp + 1], INDEXS[temp + 2])
+}
+
+/// SPICELIB `MXM`: `m1 * m2`.
+#[allow(clippy::needless_range_loop)] // transcribes the SPICELIB index loops
+fn mxm(m1: &Mat3, m2: &Mat3) -> Mat3 {
+    let mut out = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i][j] = m1[i][0] * m2[0][j] + m1[i][1] * m2[1][j] + m1[i][2] * m2[2][j];
+        }
+    }
+    out
+}
+
+/// SPICELIB `MXMT`: `m1 * transpose(m2)`.
+#[allow(clippy::needless_range_loop)] // transcribes the SPICELIB index loops
+fn mxmt(m1: &Mat3, m2: &Mat3) -> Mat3 {
+    let mut out = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i][j] = m1[i][0] * m2[j][0] + m1[i][1] * m2[j][1] + m1[i][2] * m2[j][2];
+        }
+    }
+    out
+}
+
+/// SPICELIB `MXV`.
+fn mxv(m: &Mat3, v: [f64; 3]) -> [f64; 3] {
+    let mut out = [0.0; 3];
+    for (i, value) in out.iter_mut().enumerate() {
+        *value = m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2];
+    }
+    out
+}
+
+/// SPICELIB `NPARSD` for the numerals in [`IRF_DEFINITIONS`]: an optional
+/// sign, digits with at most one decimal point, and an optional `D`/`E`
+/// exponent, with blanks and commas ignored. The value is accumulated as
+/// `NPARSD` accumulates it (integer part, then `DECVAL / DIVISR`, then the
+/// power of ten), which is not always the correctly rounded decimal.
+fn nparsd(text: &str) -> f64 {
+    const BASE: f64 = 10.0;
+    const LOOKUP: [f64; 11] = [
+        1.0,
+        10.0,
+        100.0,
+        1000.0,
+        10000.0,
+        100000.0,
+        1000000.0,
+        10000000.0,
+        100000000.0,
+        1000000000.0,
+        10000000000.0,
+    ];
+    // NPARSD's INTBND: the largest power of ten below which adding one is
+    // exact, divided by ten.
+    let mut intbnd = BASE;
+    let mut next = intbnd + 1.0;
+    while intbnd != next {
+        intbnd *= BASE;
+        next = intbnd + 1.0;
+    }
+    intbnd /= BASE;
+
+    let mut intval = 0.0;
+    let mut decval = 0.0;
+    let mut expval = 0.0;
+    let mut divisr = 1.0;
+    let mut factor = 1.0;
+    let mut ecount = 0.0;
+    let mut dpsign = [1.0, 1.0];
+    let mut signdx = 0usize;
+    let mut doint = true;
+    let mut dodec = false;
+    let mut doexp = false;
+    let mut zeroi = false;
+    let mut roundi = true;
+    let mut roundd = true;
+    for ch in text.chars() {
+        match ch {
+            '0'..='9' => {
+                let digit = f64::from(ch as u8 - b'0');
+                if doint {
+                    if intval < intbnd {
+                        intval = intval * BASE + digit;
+                    } else {
+                        ecount += 1.0;
+                        factor /= BASE;
+                        if roundi {
+                            roundi = false;
+                            if digit > 0.5 * BASE {
+                                intval += 1.0;
+                            }
+                        }
                     }
-                    continue;
+                } else if dodec {
+                    if zeroi {
+                        if decval < intbnd {
+                            decval = decval * BASE + digit;
+                            ecount -= 1.0;
+                        } else if roundd {
+                            roundd = false;
+                            if digit >= 0.5 * BASE {
+                                decval += 1.0;
+                            }
+                        }
+                    } else if divisr < intbnd {
+                        decval = decval * BASE + digit;
+                        divisr *= BASE;
+                    }
+                } else if doexp {
+                    expval = expval * BASE + dpsign[1] * digit;
                 }
-                Err(error) => return Some(Err(error)),
-            };
-
-            if next == center {
-                let state = state.into_state(search.target, center);
-                if state.velocity_km_s.is_some() || search.is_root() {
-                    return Some(Ok(state));
-                }
-                if search.first_position_only_state.is_none() {
-                    search.first_position_only_state = Some(state);
-                }
-                continue;
             }
-
-            if search.visited.contains(&next) {
-                continue;
+            '.' => {
+                doint = false;
+                dodec = true;
+                zeroi = intval == 0.0;
             }
-            search.visited.push(next);
-            if let Some(result) = self.covering_state_path_from(
-                StateSearchNode { body: next, state },
-                center,
-                et,
-                search,
-            ) {
-                return Some(result);
+            'D' | 'd' | 'E' | 'e' => {
+                doint = false;
+                dodec = false;
+                doexp = true;
+                signdx = 1;
             }
-            search.visited.pop();
-        }
-
-        None
-    }
-
-    fn evaluate_segment_state(
-        &self,
-        segment: &SpkSegmentDescriptor,
-        et: f64,
-    ) -> Result<SpkState, SpkError> {
-        match segment.data_type {
-            SPK_TYPE_2 => Ok(SpkState {
-                target: segment.target,
-                center: segment.center,
-                position_km: evaluate_type2_position(
-                    &self.bytes,
-                    self.directory.file_record.byte_order,
-                    segment,
-                    et,
-                )?,
-                velocity_km_s: None,
-                frame: segment.frame,
-            }),
-            SPK_TYPE_3 => {
-                let state = evaluate_type3_state(
-                    &self.bytes,
-                    self.directory.file_record.byte_order,
-                    segment,
-                    et,
-                )?;
-                Ok(SpkState {
-                    target: segment.target,
-                    center: segment.center,
-                    position_km: state.position_km,
-                    velocity_km_s: Some(state.velocity_km_s),
-                    frame: segment.frame,
-                })
-            }
-            SPK_TYPE_21 => {
-                let state = evaluate_type21_state(
-                    &self.bytes,
-                    self.directory.file_record.byte_order,
-                    segment,
-                    et,
-                )?;
-                Ok(SpkState {
-                    target: segment.target,
-                    center: segment.center,
-                    position_km: state.position_km,
-                    velocity_km_s: Some(state.velocity_km_s),
-                    frame: segment.frame,
-                })
-            }
-            data_type => Err(SpkError::UnsupportedStateSegmentType { data_type }),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct StateSearchNode {
-    body: i32,
-    state: AccumulatedSpkState,
-}
-
-#[derive(Debug)]
-struct StatePathSearch {
-    target: i32,
-    visited: Vec<i32>,
-    first_unsupported: Option<SpkError>,
-    first_frame_mismatch: Option<SpkError>,
-    first_position_only_state: Option<SpkState>,
-}
-
-impl StatePathSearch {
-    fn new(target: i32) -> Self {
-        Self {
-            target,
-            visited: vec![target],
-            first_unsupported: None,
-            first_frame_mismatch: None,
-            first_position_only_state: None,
+            '+' => dpsign[signdx] = 1.0,
+            '-' => dpsign[signdx] = -1.0,
+            _ => {}
         }
     }
 
-    fn fallback(self) -> Option<Result<SpkState, SpkError>> {
-        self.first_position_only_state.map(Ok).or_else(|| {
-            self.first_frame_mismatch
-                .map(Err)
-                .or_else(|| self.first_unsupported.map(Err))
-        })
-    }
-
-    fn is_root(&self) -> bool {
-        self.visited.len() == 1
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct AccumulatedSpkState {
-    position_km: [f64; 3],
-    velocity_km_s: Option<[f64; 3]>,
-    frame: Option<i32>,
-}
-
-impl AccumulatedSpkState {
-    fn extend(self, leg: SpkState, sign: f64) -> Result<Self, SpkError> {
-        let frame = match self.frame {
-            Some(frame) if frame != leg.frame => {
-                return Err(SpkError::FrameMismatch {
-                    first: frame,
-                    second: leg.frame,
-                });
-            }
-            Some(frame) => Some(frame),
-            None => Some(leg.frame),
-        };
-
-        Ok(Self {
-            position_km: add_scaled(self.position_km, leg.position_km, sign),
-            velocity_km_s: match (self.velocity_km_s, leg.velocity_km_s) {
-                (Some(accumulated), Some(leg)) => Some(add_scaled(accumulated, leg, sign)),
-                _ => None,
-            },
-            frame,
-        })
-    }
-
-    fn into_state(self, target: i32, center: i32) -> SpkState {
-        SpkState {
-            target,
-            center,
-            position_km: self.position_km,
-            velocity_km_s: self.velocity_km_s,
-            frame: self.frame.unwrap_or(0),
+    let mut value = intval + (decval / divisr) * factor;
+    expval += ecount;
+    if expval < 0.0 {
+        while expval < -BASE {
+            value /= LOOKUP[10];
+            expval += BASE;
         }
+        value /= LOOKUP[(-expval) as usize];
+    } else if expval > 0.0 {
+        while expval > BASE {
+            value *= LOOKUP[10];
+            expval -= BASE;
+        }
+        value *= LOOKUP[expval as usize];
     }
+    dpsign[0] * value
+}
+
+fn evaluate_segment_state(
+    kernel: &Spk,
+    segment: &SpkSegmentDescriptor,
+    et: f64,
+) -> Result<SpkState, SpkError> {
+    let byte_order = kernel.directory.file_record.byte_order;
+    let state = match segment.data_type {
+        SPK_TYPE_2 => evaluate_type2_state(&kernel.bytes, byte_order, segment, et)?,
+        SPK_TYPE_3 => evaluate_type3_state(&kernel.bytes, byte_order, segment, et)?,
+        SPK_TYPE_21 => evaluate_type21_state(&kernel.bytes, byte_order, segment, et)?,
+        data_type => return Err(SpkError::UnsupportedStateSegmentType { data_type }),
+    };
+    Ok(SpkState {
+        target: segment.target,
+        center: segment.center,
+        position_km: state.position_km,
+        velocity_km_s: state.velocity_km_s,
+        frame: segment.frame,
+    })
 }
 
 /// Query target state relative to center from a loaded SPK kernel.
 pub fn spk_state(spk: &Spk, target: i32, center: i32, et: f64) -> Result<SpkState, SpkError> {
     spk.spk_state(target, center, et)
-}
-
-fn add_scaled(lhs: [f64; 3], rhs: [f64; 3], sign: f64) -> [f64; 3] {
-    [
-        lhs[0] + sign * rhs[0],
-        lhs[1] + sign * rhs[1],
-        lhs[2] + sign * rhs[2],
-    ]
 }
 
 /// Parse the DAF/SPK directory from an in-memory kernel byte slice.
@@ -902,12 +1381,30 @@ pub fn parse_daf_spk(bytes: &[u8]) -> Result<DafSpk, SpkError> {
 }
 
 /// Evaluate a type-2 SPK segment and return position in kilometers.
+///
+/// This is the position half of [`evaluate_type2_state`].
 pub fn evaluate_type2_position(
     bytes: &[u8],
     byte_order: DafByteOrder,
     segment: &SpkSegmentDescriptor,
     et: f64,
 ) -> Result<[f64; 3], SpkError> {
+    evaluate_type2_state(bytes, byte_order, segment, et).map(|state| state.position_km)
+}
+
+/// Evaluate a type-2 SPK segment and return position and velocity.
+///
+/// Type 2 stores Chebyshev coefficients for position only. As in CSPICE
+/// `SPKR02`/`SPKE02`, the record is selected from the segment directory and
+/// each component is evaluated with the `CHBINT` recurrence, which returns the
+/// position and its derivative with respect to ET; the derivative is the
+/// velocity in km/s.
+pub fn evaluate_type2_state(
+    bytes: &[u8],
+    byte_order: DafByteOrder,
+    segment: &SpkSegmentDescriptor,
+    et: f64,
+) -> Result<SpkStateVector, SpkError> {
     if segment.data_type != SPK_TYPE_2 {
         return Err(SpkError::UnsupportedSegmentType {
             expected: SPK_TYPE_2,
@@ -916,49 +1413,38 @@ pub fn evaluate_type2_position(
     }
 
     let directory = read_type2_directory(bytes, byte_order, segment)?;
-    let record_index =
-        chebyshev_record_index(segment, directory.init, directory.intlen, directory.n, et)?;
-    let record_start = checked_address_add(
-        segment_start_address(segment)?,
-        record_index
-            .checked_mul(directory.rsize)
-            .ok_or(SpkError::InvalidSegmentLayout {
-                context: "record offset overflow",
-            })?,
-        "type-2 record address",
+    let record_start = chebyshev_record_start(segment, &directory, et, "type-2 record address")?;
+    let (mid, radius) = read_chebyshev_record_scale(
+        bytes,
+        byte_order,
+        record_start,
+        "type-2 record midpoint",
+        "type-2 record radius",
     )?;
 
-    let mid = read_daf_f64(bytes, byte_order, record_start, "type-2 record midpoint")?;
-    let radius = read_daf_f64(bytes, byte_order, record_start + 1, "type-2 record radius")?;
-    if !radius.is_finite() || radius <= 0.0 {
-        return Err(SpkError::InvalidDoubleField {
-            field: "type-2 record radius",
-            value: radius,
-        });
+    let coeff_count = (directory.rsize - 2) / 3;
+    let mut components = [(0.0, 0.0); 3];
+    for (axis, component) in components.iter_mut().enumerate() {
+        let coefficients = DafCoefficients {
+            bytes,
+            byte_order,
+            start: record_start + 2 + axis * coeff_count,
+            count: coeff_count,
+        };
+        *component = chbint(&coefficients, mid, radius, et)?;
     }
 
-    let tau = (et - mid) / radius;
-    let coeff_count = (directory.rsize - 2) / 3;
-    let coeff_start = record_start + 2;
-    let x = evaluate_chebyshev_component(bytes, byte_order, coeff_start, coeff_count, tau)?;
-    let y = evaluate_chebyshev_component(
-        bytes,
-        byte_order,
-        coeff_start + coeff_count,
-        coeff_count,
-        tau,
-    )?;
-    let z = evaluate_chebyshev_component(
-        bytes,
-        byte_order,
-        coeff_start + 2 * coeff_count,
-        coeff_count,
-        tau,
-    )?;
-    Ok([x, y, z])
+    Ok(SpkStateVector {
+        position_km: [components[0].0, components[1].0, components[2].0],
+        velocity_km_s: [components[0].1, components[1].1, components[2].1],
+    })
 }
 
 /// Evaluate a type-3 SPK segment and return position and velocity.
+///
+/// As in CSPICE `SPKR03`/`SPKE03`, the record is selected from the segment
+/// directory and each of the six components is evaluated with the `CHBVAL`
+/// recurrence.
 pub fn evaluate_type3_state(
     bytes: &[u8],
     byte_order: DafByteOrder,
@@ -973,70 +1459,30 @@ pub fn evaluate_type3_state(
     }
 
     let directory = read_type3_directory(bytes, byte_order, segment)?;
-    let record_index =
-        chebyshev_record_index(segment, directory.init, directory.intlen, directory.n, et)?;
-    let record_start = checked_address_add(
-        segment_start_address(segment)?,
-        record_index
-            .checked_mul(directory.rsize)
-            .ok_or(SpkError::InvalidSegmentLayout {
-                context: "record offset overflow",
-            })?,
-        "type-3 record address",
+    let record_start = chebyshev_record_start(segment, &directory, et, "type-3 record address")?;
+    let (mid, radius) = read_chebyshev_record_scale(
+        bytes,
+        byte_order,
+        record_start,
+        "type-3 record midpoint",
+        "type-3 record radius",
     )?;
 
-    let mid = read_daf_f64(bytes, byte_order, record_start, "type-3 record midpoint")?;
-    let radius = read_daf_f64(bytes, byte_order, record_start + 1, "type-3 record radius")?;
-    if !radius.is_finite() || radius <= 0.0 {
-        return Err(SpkError::InvalidDoubleField {
-            field: "type-3 record radius",
-            value: radius,
-        });
+    let coeff_count = (directory.rsize - 2) / 6;
+    let mut components = [0.0; 6];
+    for (index, component) in components.iter_mut().enumerate() {
+        let coefficients = DafCoefficients {
+            bytes,
+            byte_order,
+            start: record_start + 2 + index * coeff_count,
+            count: coeff_count,
+        };
+        *component = chbval(&coefficients, mid, radius, et)?;
     }
 
-    let tau = (et - mid) / radius;
-    let coeff_count = (directory.rsize - 2) / 6;
-    let coeff_start = record_start + 2;
-    let x = evaluate_chebyshev_component(bytes, byte_order, coeff_start, coeff_count, tau)?;
-    let y = evaluate_chebyshev_component(
-        bytes,
-        byte_order,
-        coeff_start + coeff_count,
-        coeff_count,
-        tau,
-    )?;
-    let z = evaluate_chebyshev_component(
-        bytes,
-        byte_order,
-        coeff_start + 2 * coeff_count,
-        coeff_count,
-        tau,
-    )?;
-    let vx = evaluate_chebyshev_component(
-        bytes,
-        byte_order,
-        coeff_start + 3 * coeff_count,
-        coeff_count,
-        tau,
-    )?;
-    let vy = evaluate_chebyshev_component(
-        bytes,
-        byte_order,
-        coeff_start + 4 * coeff_count,
-        coeff_count,
-        tau,
-    )?;
-    let vz = evaluate_chebyshev_component(
-        bytes,
-        byte_order,
-        coeff_start + 5 * coeff_count,
-        coeff_count,
-        tau,
-    )?;
-
     Ok(SpkStateVector {
-        position_km: [x, y, z],
-        velocity_km_s: [vx, vy, vz],
+        position_km: [components[0], components[1], components[2]],
+        velocity_km_s: [components[3], components[4], components[5]],
     })
 }
 
@@ -1558,6 +2004,13 @@ fn read_type3_directory(
     })
 }
 
+/// Select the record for `et` as CSPICE `SPKR02`/`SPKR03` do:
+/// `RECNO = INT((ET - INIT) / INTLEN) + 1`, then `RECNO = MIN(RECNO, NREC)`.
+///
+/// The segment descriptor's coverage is the gate, as in `SPKSFS`. Within it,
+/// an epoch past the last directory interval uses the last record, and an
+/// epoch less than one interval before `INIT` truncates to the first record.
+/// A record number below one has no record in the segment and is refused.
 fn chebyshev_record_index(
     segment: &SpkSegmentDescriptor,
     init: f64,
@@ -1573,67 +2026,146 @@ fn chebyshev_record_index(
         });
     }
 
-    let directory_stop = init + intlen * n as f64;
-    if et < init || et > directory_stop {
+    let truncated = ((et - init) / intlen).trunc();
+    if !truncated.is_finite() || truncated < 0.0 {
         return Err(SpkError::OutOfCoverage {
             et,
             start_et: init,
-            stop_et: directory_stop,
+            stop_et: init + intlen * n as f64,
         });
     }
-
-    let record = ((et - init) / intlen).floor();
-    if !record.is_finite() || record < 0.0 {
-        return Err(SpkError::OutOfCoverage {
-            et,
-            start_et: init,
-            stop_et: directory_stop,
-        });
-    }
-
-    let record = record as usize;
-    if record < n {
-        Ok(record)
-    } else if record == n && et <= directory_stop {
+    if truncated >= n as f64 {
         Ok(n - 1)
     } else {
-        Err(SpkError::OutOfCoverage {
-            et,
-            start_et: init,
-            stop_et: directory_stop,
-        })
+        Ok(truncated as usize)
     }
 }
 
-fn evaluate_chebyshev_component(
+fn chebyshev_record_start(
+    segment: &SpkSegmentDescriptor,
+    directory: &ChebyshevDirectory,
+    et: f64,
+    context: &'static str,
+) -> Result<usize, SpkError> {
+    let record_index =
+        chebyshev_record_index(segment, directory.init, directory.intlen, directory.n, et)?;
+    checked_address_add(
+        segment_start_address(segment)?,
+        record_index
+            .checked_mul(directory.rsize)
+            .ok_or(SpkError::InvalidSegmentLayout {
+                context: "record offset overflow",
+            })?,
+        context,
+    )
+}
+
+fn read_chebyshev_record_scale(
     bytes: &[u8],
     byte_order: DafByteOrder,
-    coeff_start: usize,
-    coeff_count: usize,
-    tau: f64,
-) -> Result<f64, SpkError> {
-    let mut sum = read_daf_f64(bytes, byte_order, coeff_start, "Chebyshev coefficient")?;
-    if coeff_count == 1 {
-        return Ok(sum);
+    record_start: usize,
+    mid_field: &'static str,
+    radius_field: &'static str,
+) -> Result<(f64, f64), SpkError> {
+    let mid = read_daf_f64(bytes, byte_order, record_start, mid_field)?;
+    let radius = read_daf_f64(bytes, byte_order, record_start + 1, radius_field)?;
+    if !radius.is_finite() || radius <= 0.0 {
+        return Err(SpkError::InvalidDoubleField {
+            field: radius_field,
+            value: radius,
+        });
+    }
+    Ok((mid, radius))
+}
+
+/// Chebyshev coefficients `CP(1..=len)` read by index, so the recurrences
+/// read them straight from the kernel bytes without copying.
+trait ChebyshevCoefficients {
+    /// Number of coefficients, `DEGP + 1`; at least one.
+    fn len(&self) -> usize;
+    /// Coefficient `CP(index + 1)`.
+    fn get(&self, index: usize) -> Result<f64, SpkError>;
+}
+
+impl ChebyshevCoefficients for [f64] {
+    fn len(&self) -> usize {
+        <[f64]>::len(self)
     }
 
-    let mut previous = 1.0;
-    let mut current = tau;
-    sum += read_daf_f64(bytes, byte_order, coeff_start + 1, "Chebyshev coefficient")? * current;
+    fn get(&self, index: usize) -> Result<f64, SpkError> {
+        Ok(self[index])
+    }
+}
 
-    for index in 2..coeff_count {
-        let next = 2.0 * tau * current - previous;
-        sum += read_daf_f64(
-            bytes,
-            byte_order,
-            coeff_start + index,
+/// Consecutive coefficients of one component in a DAF record.
+struct DafCoefficients<'a> {
+    bytes: &'a [u8],
+    byte_order: DafByteOrder,
+    start: usize,
+    count: usize,
+}
+
+impl ChebyshevCoefficients for DafCoefficients<'_> {
+    fn len(&self) -> usize {
+        self.count
+    }
+
+    fn get(&self, index: usize) -> Result<f64, SpkError> {
+        read_daf_f64(
+            self.bytes,
+            self.byte_order,
+            self.start + index,
             "Chebyshev coefficient",
-        )? * next;
-        previous = current;
-        current = next;
+        )
     }
+}
 
-    Ok(sum)
+/// CSPICE `CHBVAL`: value of the Chebyshev expansion `cp` at `x`, with the
+/// argument mapped to `s = (x - mid) / radius` and summed by the Clenshaw
+/// recurrence in the order CSPICE uses. `cp` holds at least one coefficient.
+fn chbval<C: ChebyshevCoefficients + ?Sized>(
+    cp: &C,
+    mid: f64,
+    radius: f64,
+    x: f64,
+) -> Result<f64, SpkError> {
+    let s = (x - mid) / radius;
+    let s2 = 2.0 * s;
+    let mut w = [0.0f64; 3];
+    for index in (1..cp.len()).rev() {
+        w[2] = w[1];
+        w[1] = w[0];
+        w[0] = cp.get(index)? + (s2 * w[1] - w[2]);
+    }
+    Ok((s * w[0] - w[1]) + cp.get(0)?)
+}
+
+/// CSPICE `CHBINT`: value and derivative with respect to `x` of the Chebyshev
+/// expansion `cp`, with the argument mapped to `s = (x - mid) / radius`. The
+/// derivative with respect to `s` is divided by `radius`, as CSPICE does.
+/// `cp` holds at least one coefficient.
+fn chbint<C: ChebyshevCoefficients + ?Sized>(
+    cp: &C,
+    mid: f64,
+    radius: f64,
+    x: f64,
+) -> Result<(f64, f64), SpkError> {
+    let s = (x - mid) / radius;
+    let s2 = 2.0 * s;
+    let mut w = [0.0f64; 3];
+    let mut dw = [0.0f64; 3];
+    for index in (1..cp.len()).rev() {
+        w[2] = w[1];
+        w[1] = w[0];
+        w[0] = cp.get(index)? + (s2 * w[1] - w[2]);
+
+        dw[2] = dw[1];
+        dw[1] = dw[0];
+        dw[0] = w[1] * 2.0 + dw[1] * s2 - dw[2];
+    }
+    let value = cp.get(0)? + (s * w[0] - w[1]);
+    let derivative = (w[0] + s * dw[0] - dw[1]) / radius;
+    Ok((value, derivative))
 }
 
 fn f64_to_usize(value: f64, field: &'static str) -> Result<usize, SpkError> {
@@ -2271,7 +2803,7 @@ mod tests {
         let mut max_velocity_error = 0.0f64;
         for &(et, expected) in REFERENCE {
             let state = spk.spk_state(20000433, 10, et).unwrap();
-            let velocity = state.velocity_km_s.expect("type-21 yields velocity");
+            let velocity = state.velocity_km_s;
             for axis in 0..3 {
                 max_position_error =
                     max_position_error.max((state.position_km[axis] - expected[axis]).abs());
@@ -2305,7 +2837,7 @@ mod tests {
         assert_eq!(spk.segments().len(), 4);
         assert_eq!(state.target, 301);
         assert_eq!(state.center, 3);
-        assert_query_state_close(state, [100.0, 200.0, 300.0], Some([1.0, 2.0, 3.0]), 1);
+        assert_query_state_close(state, [100.0, 200.0, 300.0], [1.0, 2.0, 3.0], 1);
     }
 
     #[test]
@@ -2317,7 +2849,7 @@ mod tests {
 
         assert_eq!(state.target, 399);
         assert_eq!(state.center, 3);
-        assert_query_state_close(state, [950.0, -5.0, 5.0], Some([9.5, -0.25, 0.5]), 1);
+        assert_query_state_close(state, [950.0, -5.0, 5.0], [9.5, -0.25, 0.5], 1);
     }
 
     #[test]
@@ -2329,19 +2861,21 @@ mod tests {
         let chained = spk.spk_state(399, 3, 5.0).unwrap();
 
         assert_eq!(spk.segments().len(), 5);
-        assert_query_state_close(direct, [900.0, 800.0, 700.0], Some([9.0, 8.0, 7.0]), 1);
-        assert_query_state_close(chained, [1950.0, 5.0, 25.0], Some([19.5, 0.25, 1.5]), 1);
+        assert_query_state_close(direct, [900.0, 800.0, 700.0], [9.0, 8.0, 7.0], 1);
+        assert_query_state_close(chained, [1950.0, 5.0, 25.0], [19.5, 0.25, 1.5], 1);
     }
 
     #[test]
-    fn spk_state_prefers_later_position_only_segment() {
+    fn spk_state_prefers_later_type2_segment() {
         let bytes = build_position_only_priority_spk();
         let spk = Spk::from_bytes(&bytes).unwrap();
 
         let state = spk.spk_state(301, 3, 5.0).unwrap();
 
+        // The later type-2 segment has one coefficient per axis, so its
+        // Chebyshev derivative, and the velocity SPKE02 returns, is zero.
         assert_eq!(spk.segments().len(), 2);
-        assert_query_state_close(state, [700.0, 800.0, 900.0], None, 1);
+        assert_query_state_close(state, [700.0, 800.0, 900.0], [0.0; 3], 1);
     }
 
     #[test]
@@ -2353,7 +2887,7 @@ mod tests {
         let supported = spk.spk_state(302, 3, 5.0).unwrap();
 
         assert_eq!(err, SpkError::UnsupportedStateSegmentType { data_type: 99 });
-        assert_query_state_close(supported, [400.0, 500.0, 600.0], Some([4.0, 5.0, 6.0]), 1);
+        assert_query_state_close(supported, [400.0, 500.0, 600.0], [4.0, 5.0, 6.0], 1);
     }
 
     #[test]
@@ -2364,64 +2898,228 @@ mod tests {
         let state = spk.spk_state(301, 3, 5.0).unwrap();
 
         assert_eq!(spk.segments().len(), 3);
-        assert_query_state_close(state, [1000.0, 80.0, 12.0], Some([100.0, 8.0, 1.2]), 1);
+        assert_query_state_close(state, [1000.0, 80.0, 12.0], [100.0, 8.0, 1.2], 1);
     }
 
     #[test]
-    fn spk_state_prefers_later_reversed_segment() {
+    fn spk_state_never_reverses_a_segment_to_break_a_priority_cycle() {
         let bytes = build_reversed_priority_spk();
         let spk = Spk::from_bytes(&bytes).unwrap();
 
-        let state = spk.spk_state(301, 3, 5.0).unwrap();
+        // Body 301 has one segment (301 wrt 20). Body 20's highest-priority
+        // segment is 20 wrt 301, so the SPKGEO target chain cycles
+        // 301, 20, 301, ... without reaching 3, and body 3 has no segment of
+        // its own. CSPICE reports insufficient data; it never evaluates the
+        // 20-wrt-301 segment backwards.
+        let err = spk.spk_state(301, 3, 5.0).unwrap_err();
 
         assert_eq!(spk.segments().len(), 3);
-        assert_query_state_close(state, [-800.0, -80.0, -2.0], Some([-80.0, -8.0, -0.2]), 1);
-    }
-
-    #[test]
-    fn spk_state_preserves_velocity_bearing_chain() {
-        let bytes = build_velocity_retention_spk();
-        let spk = Spk::from_bytes(&bytes).unwrap();
-
-        let state = spk.spk_state(800, 3, 5.0).unwrap();
-
-        assert_query_state_close(state, [120.0, 3.0, 4.0], Some([12.0, 0.3, 0.4]), 1);
-    }
-
-    #[test]
-    fn spk_state_tries_alternate_chain_after_frame_mismatch() {
-        let bytes = build_frame_mismatch_spk();
-        let spk = Spk::from_bytes(&bytes).unwrap();
-
-        let state = spk.spk_state(700, 3, 5.0).unwrap();
-
-        assert_query_state_close(state, [120.0, 3.0, 4.0], Some([12.0, 0.3, 0.4]), 1);
-    }
-
-    #[test]
-    fn spk_state_returns_frame_mismatch_when_no_chain_is_compatible() {
-        let bytes = build_frame_mismatch_spk();
-        let spk = Spk::from_bytes(&bytes).unwrap();
-
-        let err = spk.spk_state(701, 3, 5.0).unwrap_err();
-
         assert_eq!(
             err,
-            SpkError::FrameMismatch {
-                first: 1,
-                second: 2,
+            SpkError::CoverageGap {
+                target: 301,
+                center: 3,
+                et: 5.0,
             }
         );
     }
 
     #[test]
-    fn spk_state_returns_none_velocity_for_type2_segment() {
+    fn spk_state_chains_through_the_later_type2_segment() {
+        let bytes = build_velocity_retention_spk();
+        let spk = Spk::from_bytes(&bytes).unwrap();
+
+        // The later 800-wrt-20 segment is type 2; it takes precedence over the
+        // earlier type-3 segment, and its velocity is its Chebyshev derivative.
+        let state = spk.spk_state(800, 3, 5.0).unwrap();
+
+        assert_query_state_close(state, [920.0, 3.0, 4.0], [2.0, 0.3, 0.4], 1);
+    }
+
+    /// `SPKGEO` for a target chain `target -> body -> observer` whose legs are
+    /// in frames 1 and 2, with no observer leg: the first leg is rotated into
+    /// frame 2 and added to the second, and the sum is rotated into the
+    /// output frame 1.
+    fn two_frame_chain(first: [f64; 6], second: [f64; 6]) -> [f64; 6] {
+        let r12 = inertial_frame_rotation(1, 2).unwrap();
+        let r21 = inertial_frame_rotation(2, 1).unwrap();
+        let rotated = rotate6(&r12, &first);
+        let sum = add6(&rotated, &second);
+        let state = sub6(&sum, &[0.0; 6]);
+        rotate6(&r21, &state)
+    }
+
+    fn rotate6(m: &[[f64; 3]; 3], v: &[f64; 6]) -> [f64; 6] {
+        let p = mxv(m, [v[0], v[1], v[2]]);
+        let w = mxv(m, [v[3], v[4], v[5]]);
+        [p[0], p[1], p[2], w[0], w[1], w[2]]
+    }
+
+    fn assert_state6(actual: SpkState, expected: [f64; 6], frame: i32) {
+        assert_eq!(actual.position_km, [expected[0], expected[1], expected[2]]);
+        assert_eq!(
+            actual.velocity_km_s,
+            [expected[3], expected[4], expected[5]]
+        );
+        assert_eq!(actual.frame, frame);
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn spk_state_rotates_legs_in_other_inertial_frames_instead_of_falling_back() {
+        let bytes = build_frame_mismatch_spk();
+        let spk = Spk::from_bytes(&bytes).unwrap();
+
+        // Body 700's highest-priority segment is 700 wrt 10 (frame 1), and
+        // 10 wrt 3 is in frame 2 (B1950). SPKGEO rotates the first leg into
+        // B1950 with IRFROT, adds the second, and rotates the sum into the
+        // output frame; the earlier 700-wrt-20 chain is never used.
+        let state = spk.spk_state(700, 3, 5.0).unwrap();
+        let expected = two_frame_chain(
+            [1.0, 0.0, 0.0, 0.1, 0.0, 0.0],
+            [900.0, 0.0, 0.0, 90.0, 0.0, 0.0],
+        );
+        assert_state6(state, expected, 1);
+
+        // To within rounding, the result is the first leg plus the second leg
+        // rotated from B1950 to J2000.
+        let r21 = inertial_frame_rotation(2, 1).unwrap();
+        let second = mxv(&r21, [900.0, 0.0, 0.0]);
+        for axis in 0..3 {
+            let approx = [1.0, 0.0, 0.0][axis] + second[axis];
+            assert!((state.position_km[axis] - approx).abs() < 1e-9);
+        }
+
+        // The same query in B1950 is the rotated sum before the final rotation.
+        let in_b1950 = spk.spk_state_in_frame(700, 3, 5.0, 2).unwrap();
+        let r12 = inertial_frame_rotation(1, 2).unwrap();
+        let sum = add6(
+            &rotate6(&r12, &[1.0, 0.0, 0.0, 0.1, 0.0, 0.0]),
+            &[900.0, 0.0, 0.0, 90.0, 0.0, 0.0],
+        );
+        assert_state6(in_b1950, sub6(&sum, &[0.0; 6]), 2);
+    }
+
+    #[test]
+    fn spk_state_rotates_every_chain_with_mixed_inertial_frames() {
+        let bytes = build_frame_mismatch_spk();
+        let spk = Spk::from_bytes(&bytes).unwrap();
+
+        let state = spk.spk_state(701, 3, 5.0).unwrap();
+        let expected = two_frame_chain(
+            [701.0, 0.0, 0.0, 70.1, 0.0, 0.0],
+            [30.0, 0.0, 0.0, 3.0, 0.0, 0.0],
+        );
+        assert_state6(state, expected, 1);
+    }
+
+    #[test]
+    fn spk_state_refuses_a_rotation_involving_a_non_inertial_frame() {
+        let mut body_fixed = TestSegment::type3(3, 0, [50.0, 5.0, -5.0], [0.5, 0.25, -0.5]);
+        body_fixed.frame = 10013;
+        let spk = Spk::from_bytes(&build_test_spk(
+            "NON INERTIAL SPK",
+            &[
+                body_fixed,
+                TestSegment::type3(399, 3, [1000.0, 0.0, 0.0], [10.0, 0.0, 0.0]),
+            ],
+        ))
+        .unwrap();
+
+        assert_eq!(
+            spk.spk_state(399, 0, 5.0).unwrap_err(),
+            SpkError::NonInertialFrameRotation { from: 1, to: 10013 }
+        );
+        // A leg in a non-inertial frame is used as is when nothing needs rotating.
+        let direct = spk.spk_state(3, 0, 5.0).unwrap();
+        assert_eq!(direct.position_km, [50.0, 5.0, -5.0]);
+        assert_eq!(direct.frame, 10013);
+        // Naming an unknown output frame is refused only when a rotation is needed.
+        assert_eq!(
+            spk.spk_state_in_frame(399, 3, 5.0, 22).unwrap_err(),
+            SpkError::NonInertialFrameRotation { from: 1, to: 22 }
+        );
+        assert_eq!(
+            inertial_frame_rotation(1, 0).unwrap_err(),
+            SpkError::NonInertialFrameRotation { from: 1, to: 0 }
+        );
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn eclipj2000_rotation_is_the_j2000_obliquity_about_x() {
+        // CHGIRF defines ECLIPJ2000 from J2000 as [84381.448"] about X.
+        let eps = (84381.448 * (1.0 / 3600.0)) / (180.0 / libm::acos(-1.0));
+        let (s, c) = (libm::sin(eps), libm::cos(eps));
+        let to_ecliptic = inertial_frame_rotation(1, 17).unwrap();
+        let expected = [[1.0, 0.0, 0.0], [0.0, c, s], [0.0, -s, c]];
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (to_ecliptic[i][j] - expected[i][j]).abs() <= 1e-16,
+                    "[{i}][{j}] {} vs {}",
+                    to_ecliptic[i][j],
+                    expected[i][j]
+                );
+            }
+        }
+        // A vector on the J2000 pole has ecliptic latitude 90 - obliquity.
+        let pole = mxv(&to_ecliptic, [0.0, 0.0, 1.0]);
+        assert!((pole[1] - s).abs() <= 1e-16 && (pole[2] - c).abs() <= 1e-16);
+        assert_eq!(inertial_frame_name(17), Some("ECLIPJ2000"));
+        assert_eq!(inertial_frame_name(22), None);
+    }
+
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn inertial_frame_rotations_are_orthonormal_and_invert_each_other() {
+        for (a, b) in [(3, 2), (2, 3), (1, 3), (13, 1), (16, 18), (21, 4)] {
+            let forward = inertial_frame_rotation(a, b).unwrap();
+            let backward = inertial_frame_rotation(b, a).unwrap();
+            let product = mxm(&forward, &backward);
+            let gram = mxmt(&forward, &forward);
+            for i in 0..3 {
+                for j in 0..3 {
+                    let identity = if i == j { 1.0 } else { 0.0 };
+                    assert!((product[i][j] - identity).abs() < 1e-15, "{a}->{b}->{a}");
+                    assert!((gram[i][j] - identity).abs() < 1e-15, "{a}->{b}");
+                }
+            }
+        }
+        // FK4 is B1950 turned 0.525" about Z (Fricke's equinox offset).
+        let fk4_from_b1950 = inertial_frame_rotation(2, 3).unwrap();
+        let angle = (0.525 * (1.0 / 3600.0)) / (180.0 / libm::acos(-1.0));
+        assert!((fk4_from_b1950[0][1] - libm::sin(angle)).abs() < 1e-15);
+        assert!((fk4_from_b1950[2][2] - 1.0).abs() < 1e-15);
+        // DE-200 and DE-202 are J2000 turned by zero.
+        assert_eq!(
+            inertial_frame_rotation(1, 14).unwrap(),
+            inertial_frame_rotation(1, 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn nparsd_reads_the_chgirf_numerals_as_spicelib_does() {
+        assert_eq!(nparsd("0.525"), 525.0 / 1000.0);
+        assert_eq!(nparsd("84381.448"), 84381.0 + 448.0 / 1000.0);
+        assert_eq!(
+            nparsd("-1002.26108439117"),
+            -(1002.0 + 26108439117.0 / 100000000000.0)
+        );
+        assert_eq!(nparsd("324000.0D0"), 324000.0);
+        assert_eq!(nparsd("-152348.4D0"), -(152348.0 + 4.0 / 10.0));
+        assert_eq!(nparsd("3,"), 3.0);
+        assert_eq!(nparsd("0.0"), 0.0);
+    }
+
+    #[test]
+    fn spk_state_returns_derivative_velocity_for_type2_segment() {
         let bytes = build_query_spk();
         let spk = Spk::from_bytes(&bytes).unwrap();
 
         let state = spk.spk_state(302, 3, 5.0).unwrap();
 
-        assert_query_state_close(state, [7.0, 8.0, 9.0], None, 1);
+        assert_query_state_close(state, [7.0, 8.0, 9.0], [0.0; 3], 1);
     }
 
     #[test]
@@ -2431,34 +3129,21 @@ mod tests {
 
         let state = spk.spk_state(301, 301, 5.0).unwrap();
 
-        assert_query_state_close(state, [0.0; 3], Some([0.0; 3]), 0);
+        assert_query_state_close(state, [0.0; 3], [0.0; 3], 0);
     }
 
     #[test]
-    fn spk_state_unknown_self_query_returns_typed_error() {
+    fn spk_state_self_query_is_zero_without_consulting_segments() {
         let bytes = build_query_spk();
         let spk = Spk::from_bytes(&bytes).unwrap();
 
-        let err = spk.spk_state(999, 999, 5.0).unwrap_err();
+        // SPKGEO returns the zero state for TARG == OBS before any segment
+        // search: a body's state relative to itself needs no ephemeris data.
+        let unknown = spk.spk_state(999, 999, 5.0).unwrap();
+        let uncovered = spk.spk_state(301, 301, 20.0).unwrap();
 
-        assert_eq!(err, SpkError::UnknownBody { body: 999 });
-    }
-
-    #[test]
-    fn spk_state_self_query_out_of_coverage_returns_typed_error() {
-        let bytes = build_query_spk();
-        let spk = Spk::from_bytes(&bytes).unwrap();
-
-        let err = spk.spk_state(301, 301, 20.0).unwrap_err();
-
-        assert_eq!(
-            err,
-            SpkError::CoverageGap {
-                target: 301,
-                center: 301,
-                et: 20.0,
-            }
-        );
+        assert_query_state_close(unknown, [0.0; 3], [0.0; 3], 0);
+        assert_query_state_close(uncovered, [0.0; 3], [0.0; 3], 0);
     }
 
     #[test]
@@ -2507,7 +3192,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
 
         let state = spk.spk_state(301, 3, 5.0).unwrap();
-        assert_query_state_close(state, [100.0, 200.0, 300.0], Some([1.0, 2.0, 3.0]), 1);
+        assert_query_state_close(state, [100.0, 200.0, 300.0], [1.0, 2.0, 3.0], 1);
 
         let err = Spk::load(&path).unwrap_err();
         match err {
@@ -2520,6 +3205,178 @@ mod tests {
             }
             other => panic!("expected IO error from missing SPK path, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn spk_state_uses_target_segment_not_later_reverse_segment() {
+        let bytes = build_test_spk(
+            "REVERSE PRIORITY SPK",
+            &[
+                TestSegment::type3(3, 0, [50.0, 5.0, -5.0], [0.5, 0.25, -0.5]),
+                TestSegment::type3(399, 3, [1000.0, 0.0, 0.0], [10.0, 0.0, 0.0]),
+                TestSegment::type3(301, 3, [100.0, 200.0, 300.0], [1.0, 2.0, 3.0]),
+                TestSegment::type3(301, 399, [7.0, 8.0, 9.0], [0.7, 0.8, 0.9]),
+            ],
+        );
+        let spk = Spk::from_bytes(&bytes).unwrap();
+
+        // Body 399's only segment with target 399 is 399 wrt 3. The later
+        // 301-wrt-399 segment names 399 as its center and is not used to leave
+        // 399: the chain is 399 -> 3 -> 0.
+        let earth = spk.spk_state(399, 0, 5.0).unwrap();
+        assert_eq!(earth.position_km, [1050.0, 5.0, -5.0]);
+        assert_eq!(earth.velocity_km_s, [10.5, 0.25, -0.5]);
+
+        // Observer 301's highest-priority segment is 301 wrt 399, which reaches
+        // the target chain at its first body, so the state is 0 - (301 wrt 399).
+        let reversed = spk.spk_state(399, 301, 5.0).unwrap();
+        assert_eq!(reversed.position_km, [-7.0, -8.0, -9.0]);
+        assert_eq!(reversed.velocity_km_s, [-0.7, -0.8, -0.9]);
+        assert_eq!(reversed.frame, 1);
+    }
+
+    #[test]
+    fn spk_kernels_later_loaded_kernel_takes_precedence() {
+        let base = Spk::from_bytes(&build_test_spk(
+            "BASE SPK",
+            &[
+                TestSegment::type3(3, 0, [50.0, 5.0, -5.0], [0.5, 0.25, -0.5]),
+                TestSegment::type3(399, 3, [1000.0, 0.0, 0.0], [10.0, 0.0, 0.0]),
+            ],
+        ))
+        .unwrap();
+        let update = Spk::from_bytes(&build_test_spk(
+            "UPDATE SPK",
+            &[TestSegment::type3(399, 3, [2000.0, 0.0, 0.0], [20.0, 0.0, 0.0]).covering(0.0, 4.0)],
+        ))
+        .unwrap();
+
+        let mut kernels = SpkKernels::new();
+        kernels.push(base.clone());
+        kernels.push(update.clone());
+        assert_eq!(kernels.len(), 2);
+
+        // Inside the later kernel's coverage its segment wins; outside it the
+        // earlier kernel's segment is used.
+        assert_eq!(
+            kernels.spk_state(399, 3, 2.0).unwrap().position_km,
+            [2000.0, 0.0, 0.0]
+        );
+        assert_eq!(
+            kernels.spk_state(399, 3, 5.0).unwrap().position_km,
+            [1000.0, 0.0, 0.0]
+        );
+        // A chain mixes kernels: 399 -> 3 from the update, 3 -> 0 from the base.
+        assert_eq!(
+            kernels.spk_state(399, 0, 4.0).unwrap().position_km,
+            [2050.0, 5.0, -5.0]
+        );
+
+        // Reversing the load order reverses the precedence.
+        let reversed: SpkKernels = vec![update, base].into_iter().collect();
+        assert_eq!(
+            reversed.spk_state(399, 3, 2.0).unwrap().position_km,
+            [1000.0, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn spk_kernels_unsupported_highest_priority_segment_is_an_error() {
+        let base = Spk::from_bytes(&build_test_spk(
+            "BASE SPK",
+            &[TestSegment::type3(301, 3, [1.0, 2.0, 3.0], [0.1, 0.2, 0.3])],
+        ))
+        .unwrap();
+        let update = Spk::from_bytes(&build_test_spk(
+            "UNSUPPORTED UPDATE SPK",
+            &[TestSegment::type3(301, 3, [9.0, 9.0, 9.0], [0.9, 0.9, 0.9]).with_data_type(99)],
+        ))
+        .unwrap();
+        let kernels = SpkKernels::from(vec![base, update]);
+
+        assert_eq!(
+            kernels.spk_state(301, 3, 5.0).unwrap_err(),
+            SpkError::UnsupportedStateSegmentType { data_type: 99 }
+        );
+    }
+
+    #[test]
+    fn spk_kernels_empty_set_reports_unknown_body() {
+        let kernels = SpkKernels::new();
+        assert!(kernels.is_empty());
+        assert_eq!(
+            kernels.spk_state(399, 0, 0.0).unwrap_err(),
+            SpkError::UnknownBody { body: 399 }
+        );
+    }
+
+    #[test]
+    fn chebyshev_recurrences_match_hand_computed_values() {
+        // Degree-3 expansion 0.5 T0 - 1.25 T1 + 2 T2 + 0.75 T3 at s = 0.25.
+        // Every intermediate value is a short dyadic fraction, so the
+        // recurrences are exact and the expected values are exact.
+        let cp = [0.5, -1.25, 2.0, 0.75];
+        assert_eq!(chbval(&cp[..], 0.0, 4.0, 1.0).unwrap(), -2.078125);
+        let (value, derivative) = chbint(&cp[..], 0.0, 4.0, 1.0).unwrap();
+        assert_eq!(value, -2.078125);
+        // d/ds = -0.9375, divided by the radius 4.
+        assert_eq!(derivative, -0.234375);
+
+        // One coefficient: the value is the coefficient and the derivative zero.
+        assert_eq!(chbval(&[7.0][..], 5.0, 5.0, 3.0).unwrap(), 7.0);
+        assert_eq!(chbint(&[7.0][..], 5.0, 5.0, 3.0).unwrap(), (7.0, 0.0));
+    }
+
+    #[test]
+    fn type2_state_velocity_is_the_chebyshev_derivative() {
+        let (bytes, segment) = build_type2_segment(DafByteOrder::LittleEndian);
+
+        // Record 1 has midpoint 5 and radius 5, so ET 7.5 is s = 0.5.
+        // x = 1 + 2 T1 + 3 T2: value 0.5, dx/dt = (2 + 12 s) / 5 = 1.6.
+        // y = -4 + 0.5 T1 - T2: value -3.25, dy/dt = (0.5 - 4 s) / 5 = -0.3.
+        // z = 7: value 7, derivative 0.
+        let state =
+            evaluate_type2_state(&bytes, DafByteOrder::LittleEndian, &segment, 7.5).unwrap();
+        assert_eq!(state.position_km, [0.5, -3.25, 7.0]);
+        assert_eq!(state.velocity_km_s, [1.6, -0.3, 0.0]);
+        assert_eq!(
+            evaluate_type2_position(&bytes, DafByteOrder::LittleEndian, &segment, 7.5).unwrap(),
+            state.position_km
+        );
+    }
+
+    #[test]
+    fn chebyshev_record_selection_truncates_and_clamps_like_spkr02() {
+        let (bytes, mut segment) = build_type2_segment(DafByteOrder::LittleEndian);
+        // The directory covers [0, 20] in two 10-second records; widen the
+        // descriptor on both sides.
+        segment.start_et = -15.0;
+        segment.stop_et = 25.0;
+
+        // Past the last interval: MIN(RECNO, NREC) selects the last record
+        // (midpoint 15, radius 5, s = 1.4), x = 10 - T1.
+        let late =
+            evaluate_type2_state(&bytes, DafByteOrder::LittleEndian, &segment, 22.0).unwrap();
+        assert_eq!(late.position_km[0], 10.0 + (-1.4 - 0.0));
+
+        // Less than one interval before INIT: INT(-0.3) = 0 selects record 1
+        // (midpoint 5, radius 5, s = -1.6), x = 1 + 2 T1 + 3 T2.
+        let early =
+            evaluate_type2_state(&bytes, DafByteOrder::LittleEndian, &segment, -3.0).unwrap();
+        let s: f64 = -1.6;
+        let expected = chbval(&[1.0, 2.0, 3.0][..], 5.0, 5.0, -3.0).unwrap();
+        assert_eq!(early.position_km[0], expected);
+        assert!((expected - (1.0 + 2.0 * s + 3.0 * (2.0 * s * s - 1.0))).abs() < 1e-12);
+
+        // A full interval or more before INIT gives RECNO < 1: no record.
+        assert_eq!(
+            evaluate_type2_state(&bytes, DafByteOrder::LittleEndian, &segment, -12.0).unwrap_err(),
+            SpkError::OutOfCoverage {
+                et: -12.0,
+                start_et: 0.0,
+                stop_et: 20.0,
+            }
+        );
     }
 
     fn expected_segments() -> Vec<SpkSegmentDescriptor> {
@@ -3902,19 +4759,116 @@ mod tests {
     fn assert_query_state_close(
         actual: SpkState,
         expected_position: [f64; 3],
-        expected_velocity: Option<[f64; 3]>,
+        expected_velocity: [f64; 3],
         expected_frame: i32,
     ) {
         assert_position_close(actual.position_km, expected_position);
-        match (actual.velocity_km_s, expected_velocity) {
-            (Some(actual), Some(expected)) => assert_position_close(actual, expected),
-            (None, None) => {}
-            _ => panic!(
-                "velocity mismatch: actual {:?}, expected {:?}",
-                actual.velocity_km_s, expected_velocity
-            ),
-        }
+        assert_position_close(actual.velocity_km_s, expected_velocity);
         assert_eq!(actual.frame, expected_frame);
+    }
+
+    /// A synthetic single-record segment for [`build_test_spk`].
+    struct TestSegment {
+        target: i32,
+        center: i32,
+        frame: i32,
+        data_type: i32,
+        start_et: f64,
+        stop_et: f64,
+        position_km: [f64; 3],
+        velocity_km_s: [f64; 3],
+    }
+
+    impl TestSegment {
+        /// A constant type-3 segment covering [0, 10] in frame 1.
+        fn type3(target: i32, center: i32, position_km: [f64; 3], velocity_km_s: [f64; 3]) -> Self {
+            Self {
+                target,
+                center,
+                frame: 1,
+                data_type: SPK_TYPE_3,
+                start_et: 0.0,
+                stop_et: 10.0,
+                position_km,
+                velocity_km_s,
+            }
+        }
+
+        fn covering(mut self, start_et: f64, stop_et: f64) -> Self {
+            self.start_et = start_et;
+            self.stop_et = stop_et;
+            self
+        }
+
+        /// Keep the type-3 data words but declare another data type.
+        fn with_data_type(mut self, data_type: i32) -> Self {
+            self.data_type = data_type;
+            self
+        }
+    }
+
+    /// Build a little-endian SPK with one summary record, one name record, and
+    /// one constant type-3 data block per segment, in the order given.
+    fn build_test_spk(name: &str, segments: &[TestSegment]) -> Vec<u8> {
+        let byte_order = DafByteOrder::LittleEndian;
+        let words_per_segment = 12usize;
+        let first_address = 513usize;
+        let end_address = first_address + segments.len() * words_per_segment - 1;
+        let mut bytes = vec![0u8; end_address.max(first_address) * 8];
+
+        bytes[0..8].copy_from_slice(b"DAF/SPK ");
+        write_i32(byte_order, &mut bytes, 8, 2);
+        write_i32(byte_order, &mut bytes, 12, 6);
+        write_ascii(&mut bytes, 16, DAF_INTERNAL_NAME_BYTES, name);
+        write_i32(byte_order, &mut bytes, 76, 3);
+        write_i32(byte_order, &mut bytes, 80, 3);
+        write_i32(byte_order, &mut bytes, 84, (end_address + 1) as i32);
+        bytes[DAF_BINARY_FORMAT_OFFSET..DAF_BINARY_FORMAT_OFFSET + 8].copy_from_slice(b"LTL-IEEE");
+
+        let summary_offset = DAF_RECORD_BYTES * 2;
+        let name_offset = DAF_RECORD_BYTES * 3;
+        write_f64(byte_order, &mut bytes, summary_offset, 0.0);
+        write_f64(byte_order, &mut bytes, summary_offset + 8, 0.0);
+        write_f64(
+            byte_order,
+            &mut bytes,
+            summary_offset + 16,
+            segments.len() as f64,
+        );
+
+        for (index, segment) in segments.iter().enumerate() {
+            let start = first_address + index * words_per_segment;
+            write_summary(
+                byte_order,
+                &mut bytes,
+                summary_offset + 24 + index * 40,
+                segment.start_et,
+                segment.stop_et,
+                [
+                    segment.target,
+                    segment.center,
+                    segment.frame,
+                    segment.data_type,
+                    start as i32,
+                    (start + words_per_segment - 1) as i32,
+                ],
+            );
+            write_ascii(
+                &mut bytes,
+                name_offset + index * 40,
+                40,
+                &format!("BODY {} TO {}", segment.target, segment.center),
+            );
+            write_type3_constant_segment(
+                byte_order,
+                &mut bytes,
+                start,
+                segment.position_km,
+                segment.velocity_km_s,
+            );
+        }
+
+        bytes
     }
 
     fn write_summary(

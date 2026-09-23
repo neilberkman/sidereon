@@ -200,7 +200,8 @@ pub use sidereon_core::astro::forces::{
 };
 pub use sidereon_core::astro::frames::transforms::{
     gcrs_to_topocentric_compute, geodetic_from_ecef_proj, geodetic_to_itrs,
-    itrs_to_geodetic_compute, itrs_to_topocentric, FrameTransformError, GeodeticStationKm,
+    itrs_to_geodetic_compute, itrs_to_topocentric, with_ut1_validity, FrameTransformError,
+    GeodeticStationKm,
 };
 pub use sidereon_core::astro::frames::{
     EarthOrientation, EarthOrientationProvider, TdbEarthOrientationProvider,
@@ -360,10 +361,11 @@ pub mod geoid {
 /// Astronomical almanac events re-exported from the core crate.
 pub mod almanac {
     pub use sidereon_core::astro::almanac::{
-        geocentric_ecliptic, lunar_solar_eclipses, meridian_transits, moon_phase_deg, moon_phases,
-        planetary_events, seasons, AlmanacError, CulminationEvent, CulminationKind, EclipseEvent,
-        EclipseKind, EclipticLonLat, EphemerisSource, MoonPhaseEvent, MoonPhaseKind, Planet,
-        PlanetaryEvent, PlanetaryEventKind, SeasonEvent, SeasonKind, TransitBody,
+        geocentric_ecliptic, lunar_solar_eclipses, meridian_transits,
+        meridian_transits_with_validity, moon_phase_deg, moon_phases, planetary_events, seasons,
+        AlmanacError, CulminationEvent, CulminationKind, EclipseEvent, EclipseKind, EclipticLonLat,
+        EphemerisSource, MoonPhaseEvent, MoonPhaseKind, Planet, PlanetaryEvent, PlanetaryEventKind,
+        SeasonEvent, SeasonKind, TransitBody,
     };
 }
 
@@ -399,20 +401,26 @@ pub use sidereon_core::astro::anomaly::{
     solve_kepler, true_to_eccentric, true_to_mean, AnomalyError, KeplerSolution,
 };
 pub use sidereon_core::astro::bodies::{
-    find_moon_elevation_crossings, find_moon_transits, find_sun_elevation_crossings, moon_az_el,
-    moon_elevation_deg, moon_illumination, observe, observe_spk_body, sun_az_el, sun_elevation_deg,
-    BodyAzEl, BodyObservationError, Ecliptic, Equatorial, Horizontal, MoonElevationCrossing,
-    MoonElevationCrossingKind, MoonElevationOptions, MoonIllumination, MoonTransit,
-    MoonTransitKind, Observation, ObserveOptions, Refraction, SunElevationCrossing,
-    SunElevationCrossingKind, SunElevationOptions, Target,
+    find_moon_elevation_crossings, find_moon_elevation_crossings_with_validity, find_moon_transits,
+    find_moon_transits_with_validity, find_sun_elevation_crossings,
+    find_sun_elevation_crossings_with_validity, moon_az_el, moon_az_el_with_validity,
+    moon_elevation_deg, moon_elevation_deg_with_validity, moon_illumination,
+    moon_illumination_with_validity, observe, observe_spk_body, observe_spk_body_with_validity,
+    observe_with_validity, sun_az_el, sun_az_el_with_validity, sun_elevation_deg,
+    sun_elevation_deg_with_validity, BodyAzEl, BodyObservationError, Ecliptic, Equatorial,
+    Horizontal, MoonElevationCrossing, MoonElevationCrossingKind, MoonElevationOptions,
+    MoonIllumination, MoonTransit, MoonTransitKind, Observation, ObserveOptions, Refraction,
+    SunElevationCrossing, SunElevationCrossingKind, SunElevationOptions, Target,
 };
 pub use sidereon_core::astro::doppler::{
     doppler_shift, range_rate_and_ratio, DopplerError, DopplerShift,
 };
 pub use sidereon_core::astro::passes::{
-    ground_track, look_angle, look_angle_arc, look_angle_batch_parallel, look_angle_batch_serial,
-    GroundStation, LookAngle, LookAngleError, PassError, PassPredictionOptions, PredictedPass,
-    UtcInstant, VisibleSatellite,
+    ground_track, ground_track_with_validity, look_angle, look_angle_arc,
+    look_angle_arc_with_validity, look_angle_batch_parallel,
+    look_angle_batch_parallel_with_validity, look_angle_batch_serial,
+    look_angle_batch_serial_with_validity, look_angle_with_validity, GroundStation, LookAngle,
+    LookAngleError, PassError, PassPredictionOptions, PredictedPass, UtcInstant, VisibleSatellite,
 };
 pub mod covariance {
     pub use sidereon_core::astro::covariance::{
@@ -429,8 +437,9 @@ pub use sidereon_core::astro::frames::transforms::{
 };
 pub use sidereon_core::astro::sgp4::{DecayLatch, DecayLatchedError, Loss, XScale};
 pub use sidereon_core::astro::space_weather::{
-    ObservationClass, SpaceWeatherPolicy, SpaceWeatherSample, SpaceWeatherTable,
+    ApHistorySample, ObservationClass, SpaceWeatherPolicy, SpaceWeatherSample, SpaceWeatherTable,
 };
+pub use sidereon_core::astro::time::{DegradeReason, Validated, ValidityMode};
 pub use sidereon_core::astro::{
     omm, passes, propagator, sgp4, space_weather, state, tca, tdm, tle,
 };

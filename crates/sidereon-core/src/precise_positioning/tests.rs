@@ -1373,6 +1373,49 @@ fn elevation_cutoff_removes_low_satellites_before_solve() {
     assert_eq!(cutoff.status, FloatStatus::StateTolerance);
 }
 
+/// Refuses one satellite's state, as an SSR source does outside the UT1 table under a
+/// strict UT1 policy, and reads every other satellite from `inner`.
+struct Ut1RefusingSource<'a> {
+    inner: &'a dyn ObservableEphemerisSource,
+    satellite: GnssSatelliteId,
+}
+
+impl ObservableEphemerisSource for Ut1RefusingSource<'_> {
+    fn observable_state_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<ObservableState, ObservablesError> {
+        if sat == self.satellite {
+            return Err(ObservablesError::Ephemeris(
+                crate::Error::Ut1OutsideCoverage(crate::astro::time::DegradeReason::AfterCoverage),
+            ));
+        }
+        self.inner.observable_state_at_j2000_s(sat, t_j2000_s)
+    }
+}
+
+#[test]
+fn float_solve_fails_on_a_ut1_refusal_instead_of_dropping_the_satellite() {
+    let (source, epochs, initial, _) = ppp_elevation_cutoff_arc();
+    let refusing = Ut1RefusingSource {
+        inner: &source,
+        satellite: GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap(),
+    };
+    for cutoff_deg in [None, Some(15.0)] {
+        assert_eq!(
+            solve_float_epochs(
+                &refusing,
+                &epochs,
+                initial.clone(),
+                ppp_cutoff_config(cutoff_deg)
+            )
+            .expect_err("a refused satellite fails the solve"),
+            FloatSolveError::Ut1OutsideCoverage(crate::astro::time::DegradeReason::AfterCoverage)
+        );
+    }
+}
+
 #[test]
 fn aggressive_elevation_cutoff_returns_typed_error() {
     let (source, epochs, initial, _) = ppp_elevation_cutoff_arc();
@@ -2948,7 +2991,8 @@ fn test_ppp_ssr_biases_unavailable_excludes_observations_and_retains_all_records
         &lookup,
         0,
         SsrBiasExclusionStage::BeforeSolve,
-    );
+    )
+    .expect("SSR bias exclusion pass");
     assert_eq!(retained.len(), 1, "the epoch keeps its position");
     assert!(retained[0].observations.is_empty());
     assert_eq!(exclusions.len(), 2);
@@ -2960,6 +3004,31 @@ fn test_ppp_ssr_biases_unavailable_excludes_observations_and_retains_all_records
         assert!(exclusion.phase_bias_missing);
         assert_eq!(exclusion.application.as_ref(), Some(row));
     }
+
+    // A UT1 refusal the lookup build met is not a missing bias: the pass fails with it.
+    let mut refused = lookup.clone();
+    refused
+        .ssr_bias_report
+        .as_mut()
+        .expect("application report")
+        .observation_reports[0]
+        .code_status = SsrIfCombinationStatus::Ut1OutsideCoverage(
+        crate::astro::time::DegradeReason::AfterCoverage,
+    );
+    assert!(matches!(
+        super::rows::exclude_unresolved_ssr_bias_observations(
+            &ephemeris,
+            &epochs,
+            0,
+            ssr_test_receiver(),
+            &refused,
+            0,
+            SsrBiasExclusionStage::BeforeSolve,
+        ),
+        Err(FloatSolveError::Ut1OutsideCoverage(
+            crate::astro::time::DegradeReason::AfterCoverage
+        ))
+    ));
 
     // Row assembly on observations that were not filtered still refuses a missing
     // required bias rather than treating it as zero.
@@ -3040,7 +3109,8 @@ fn test_ppp_ssr_biases_default_options_without_signal_pairs_exclude_every_observ
         &lookup,
         0,
         SsrBiasExclusionStage::BeforeSolve,
-    );
+    )
+    .expect("SSR bias exclusion pass");
     assert!(retained[0].observations.is_empty());
     assert_eq!(exclusions.len(), 2);
     for exclusion in &exclusions {
@@ -3077,7 +3147,8 @@ fn test_ppp_ssr_biases_default_options_without_signal_pairs_exclude_every_observ
         &opted_lookup,
         0,
         SsrBiasExclusionStage::BeforeSolve,
-    );
+    )
+    .expect("SSR bias exclusion pass");
     assert!(opted_exclusions.is_empty());
     assert_eq!(opted_retained, epochs);
     let opted_corrections = RangeCorrections {
@@ -3170,7 +3241,8 @@ fn test_ppp_ssr_biases_partial_survival_and_unrelated_records() {
         &lookup,
         0,
         SsrBiasExclusionStage::BeforeSolve,
-    );
+    )
+    .expect("SSR bias exclusion pass");
     assert_eq!(retained[0].observations, epochs[0].observations[..1]);
     assert_eq!(exclusions.len(), 1);
     assert_eq!(exclusions[0].satellite_id, sat2.to_string());
@@ -3312,7 +3384,8 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
             &lookup,
             0,
             SsrBiasExclusionStage::BeforeSolve,
-        );
+        )
+        .expect("SSR bias exclusion pass");
         assert_eq!(retained[0].observations, vec![obs1.clone()]);
         assert_eq!(exclusions.len(), 1);
         assert_eq!(exclusions[0].ambiguity_id, "G01#2");
@@ -3473,7 +3546,8 @@ fn test_ppp_ssr_code_bias_is_held_per_ambiguity() {
         &lookup,
         0,
         SsrBiasExclusionStage::BeforeSolve,
-    );
+    )
+    .expect("SSR bias exclusion pass");
     assert_eq!(retained[0].observations, vec![valid]);
     assert_eq!(exclusions.len(), 1);
     assert_eq!(exclusions[0].ambiguity_id, "G01#2");
@@ -3574,7 +3648,8 @@ fn test_ppp_ssr_biases_refuse_bias_from_other_solution_than_orbit_clock() {
         &lookup,
         0,
         SsrBiasExclusionStage::BeforeSolve,
-    );
+    )
+    .expect("SSR bias exclusion pass");
     assert_eq!(retained[0].observations, epochs[0].observations[..1]);
     assert_eq!(exclusions.len(), 1);
     assert_eq!(exclusions[0].satellite_id, sat2.to_string());
@@ -3890,7 +3965,8 @@ fn test_ppp_ssr_biases_accept_meo_epoch_transmitted_after_toh() {
         &lookup,
         0,
         SsrBiasExclusionStage::BeforeSolve,
-    );
+    )
+    .expect("SSR bias exclusion pass");
     assert!(exclusions.is_empty());
     assert_eq!(retained, epochs);
     assert_eq!(
@@ -3901,7 +3977,7 @@ fn test_ppp_ssr_biases_accept_meo_epoch_transmitted_after_toh() {
             &lookup,
             Some(t_tx),
         ),
-        Ok(())
+        Ok(Ok(()))
     );
     // The rows need the source only at the transmission time, not half a second before
     // it, before the TOH, where this source declines the satellite.
@@ -4003,7 +4079,8 @@ fn test_ppp_ssr_biases_left_out_of_a_solve_on_a_source_without_ssr() {
         &lookup,
         0,
         SsrBiasExclusionStage::BeforeSolve,
-    );
+    )
+    .expect("SSR bias exclusion pass");
     assert!(retained[0].observations.is_empty());
     assert_eq!(exclusions.len(), 1);
     assert!(!exclusions[0].code_bias_missing);
@@ -4030,6 +4107,103 @@ fn test_ppp_ssr_biases_left_out_of_a_solve_on_a_source_without_ssr() {
     .unwrap_err()
     .into_float();
     assert_missing_correction(err, sat, MissingCorrection::SsrCodeBias);
+}
+
+/// An SSR source whose applied-solution query fails with an error the bias check has no
+/// specific case for: the error reaches the exclusion typed, never read as "no solution".
+#[test]
+fn test_ppp_ssr_bias_check_keeps_an_unexpected_source_error_typed() {
+    struct FailingSsr<'a>(&'a crate::ssr::SsrCorrectedEphemeris<'a>);
+
+    impl crate::ssr::SsrCorrectionSource for FailingSsr<'_> {
+        fn ssr_store(&self) -> &SsrCorrectionStore {
+            crate::ssr::SsrCorrectionSource::ssr_store(self.0)
+        }
+
+        fn applied_orbit_clock_solution(
+            &self,
+            sat: GnssSatelliteId,
+            t_j2000_s: f64,
+        ) -> Option<crate::ssr::SsrSolution> {
+            crate::ssr::SsrCorrectionSource::applied_orbit_clock_solution(self.0, sat, t_j2000_s)
+        }
+
+        fn try_applied_orbit_clock_solution(
+            &self,
+            _sat: GnssSatelliteId,
+            _t_j2000_s: f64,
+        ) -> crate::Result<Option<crate::ssr::SsrSolution>> {
+            Err(crate::Error::Parse("unexpected source failure".into()))
+        }
+    }
+
+    struct Wrapped<'a> {
+        ephemeris: &'a crate::ssr::SsrCorrectedEphemeris<'a>,
+        failing: FailingSsr<'a>,
+    }
+
+    impl ObservableEphemerisSource for Wrapped<'_> {
+        fn observable_state_at_j2000_s(
+            &self,
+            sat: GnssSatelliteId,
+            t_j2000_s: f64,
+        ) -> Result<ObservableState, ObservablesError> {
+            self.ephemeris.observable_state_at_j2000_s(sat, t_j2000_s)
+        }
+
+        fn ssr_corrections(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+            Some(&self.failing)
+        }
+    }
+
+    let (_, epochs, _, _) = ssr_test_arc(1);
+    let sat = epochs[0].observations[0].sat;
+    let mut store = SsrCorrectionStore::new();
+    has_test_ingest(
+        &mut store,
+        &has_test_message(
+            &[sat],
+            0,
+            1,
+            1,
+            Some(HAS_VI_60_S),
+            Some(HasTestBiases::usable([1.24, -0.76], [0.2, -0.3])),
+        ),
+    );
+    let broadcast = ssr_test_broadcast();
+    let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
+    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
+        &ephemeris,
+        &epochs,
+        ssr_test_receiver(),
+        &gps_l1_l2_options(),
+    );
+    assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
+    let wrapped = Wrapped {
+        ephemeris: &ephemeris,
+        failing: FailingSsr(&ephemeris),
+    };
+
+    let (_, exclusions) = super::rows::exclude_unresolved_ssr_bias_observations(
+        &wrapped,
+        &epochs,
+        0,
+        ssr_test_receiver(),
+        &lookup,
+        0,
+        SsrBiasExclusionStage::BeforeSolve,
+    )
+    .expect("SSR bias exclusion pass");
+    assert_eq!(exclusions.len(), 1);
+    match &exclusions[0].transmit_time_failure {
+        Some(SsrTransmitTimeFailure::Source { error, .. }) => {
+            assert_eq!(
+                error,
+                &crate::Error::Parse("unexpected source failure".into())
+            );
+        }
+        other => panic!("expected the typed source error, got {other:?}"),
+    }
 }
 
 /// Broadcast ephemeris with `prns` spread over distinct orbits: the fixture's G31 record,

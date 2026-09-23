@@ -15,7 +15,7 @@ use sidereon_core::astro::propagator::{
 };
 use sidereon_core::astro::space_weather::{
     encode_csv, encode_txt, parse_csv, parse_txt, ObservationClass, SpaceWeatherDay,
-    SpaceWeatherTable,
+    SpaceWeatherError, SpaceWeatherPolicy, SpaceWeatherTable,
 };
 use sidereon_core::astro::state::CartesianState;
 use sidereon_core::astro::time::civil::j2000_seconds;
@@ -143,9 +143,18 @@ fn hand_verified_space_weather_lookups_match_real_fixture_rows() {
 
     // Source row:
     // 2026-09-01,2632,27,,,,,,,,,,,,,,,,,,,,,87,118.9,121.1,PRM,128.7,142.6,131.0,146.9
-    // Monthly-predicted rows have blank AP_AVG, so Ap defaults to 4.0.
+    // Monthly-predicted rows have blank AP_AVG. The default policy refuses the
+    // lookup; the lenient policy substitutes the quiet Ap of 4.0 and says so.
+    let monthly_epoch = j2000_seconds(2026, 9, 15, 12, 0, 0.0);
+    assert!(matches!(
+        table.sample_at(monthly_epoch),
+        Err(SpaceWeatherError::RejectedByPolicy {
+            class: ObservationClass::MonthlyPredicted,
+            ..
+        })
+    ));
     let monthly = table
-        .sample_at(j2000_seconds(2026, 9, 15, 12, 0, 0.0))
+        .sample_at_with_policy(monthly_epoch, SpaceWeatherPolicy::lenient())
         .expect("monthly predicted lookup");
     assert_space_weather_bits(
         monthly.space_weather,

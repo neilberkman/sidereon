@@ -9,6 +9,8 @@ use clap::{ArgGroup, Parser, Subcommand};
 use serde::Serialize;
 use serde_json::Value;
 use sidereon::antex::AntennaKind;
+use sidereon::astro::sgp4::{parse_tle_file_with_policy, OpsMode, TleFile};
+use sidereon::astro::tle::TlePolicy;
 use sidereon::ephemeris::{
     check_continuity, BroadcastEphemeris, ContinuityOptions, EpochWindow, OrbitClass, Sp3,
     StencilExtent,
@@ -18,10 +20,10 @@ use sidereon::qc_obs::{observation_qc, render_text as render_obs_qc_text};
 use sidereon::rinex::qc::{FindingRef, LintReport, Severity};
 use sidereon::rinex::ObservationFile;
 use sidereon::{
-    horizontal_radius_at, load_rinex_nav, load_rinex_obs, load_sp3, metrics_from_enu_covariance_m2,
-    metrics_from_position_covariance, parse_antex, parse_rinex_nav, parse_rinex_obs,
-    spherical_radius_at, spp_inputs_from_rinex_obs, vertical_radius_at, PercentileRadius,
-    PositionErrorMetrics, RinexSppEpochInputs, RinexSppOptions, RinexSppSource,
+    decode_crinex, horizontal_radius_at, load_rinex_nav, load_rinex_obs, load_sp3,
+    metrics_from_enu_covariance_m2, metrics_from_position_covariance, parse_antex, parse_rinex_nav,
+    parse_rinex_obs, spherical_radius_at, spp_inputs_from_rinex_obs, vertical_radius_at,
+    PercentileRadius, PositionErrorMetrics, RinexSppEpochInputs, RinexSppOptions, RinexSppSource,
 };
 
 mod mcp;
@@ -84,7 +86,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Detect a file type by trying the real parsers.
+    /// Recognize a file's format from its header or layout and read it with that parser.
     Inspect {
         /// File to inspect.
         file: PathBuf,
@@ -725,48 +727,185 @@ fn print_metrics_human(
     );
 }
 
+/// A file format recognized from its own identifying text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DetectedFormat {
+    /// `RINEX VERSION / TYPE` header with file type `O`.
+    RinexObs,
+    /// `CRINEX VERS   / TYPE` header (Hatanaka-compressed observations).
+    Crinex,
+    /// `RINEX VERSION / TYPE` header with a navigation file type.
+    RinexNav,
+    /// `RINEX VERSION / TYPE` header with a file type inspect does not read.
+    RinexOther(char),
+    /// `ANTEX VERSION / SYST` header.
+    Antex,
+    /// SP3 first line: `#` followed by the lower-case version letter.
+    Sp3,
+    /// A `1 ` line followed by a `2 ` line.
+    Tle,
+}
+
+impl DetectedFormat {
+    pub(crate) fn label(self) -> String {
+        match self {
+            DetectedFormat::RinexObs => "RINEX OBS".to_string(),
+            DetectedFormat::Crinex => "CRINEX".to_string(),
+            DetectedFormat::RinexNav => "RINEX NAV".to_string(),
+            DetectedFormat::RinexOther(kind) => format!("RINEX file type {kind:?}"),
+            DetectedFormat::Antex => "ANTEX".to_string(),
+            DetectedFormat::Sp3 => "SP3".to_string(),
+            DetectedFormat::Tle => "TLE".to_string(),
+        }
+    }
+}
+
+/// Recognize a format from the text that identifies it: the header label in
+/// columns 61-80 of the first line for RINEX, CRINEX and ANTEX, the `#`
+/// version line for SP3, and a line 1 / line 2 pair for TLE. The parser for
+/// that format then decides whether the file is well formed, so a malformed
+/// file is reported with its own parse error rather than tried against other
+/// formats.
+pub(crate) fn detect_format(text: &str) -> Option<DetectedFormat> {
+    let first = text.lines().find(|line| !line.trim().is_empty())?;
+    let label = first.get(60..).unwrap_or("").trim_end();
+    if label.starts_with("CRINEX VERS") {
+        return Some(DetectedFormat::Crinex);
+    }
+    if label.starts_with("RINEX VERSION / TYPE") {
+        let kind = first.chars().nth(20).unwrap_or(' ');
+        return Some(match kind {
+            'O' => DetectedFormat::RinexObs,
+            // N: GPS or mixed (version 3/4), G: GLONASS, H: SBAS, L: Galileo
+            // (version 2 navigation file types).
+            'N' | 'G' | 'H' | 'L' => DetectedFormat::RinexNav,
+            other => DetectedFormat::RinexOther(other),
+        });
+    }
+    if label.starts_with("ANTEX VERSION / SYST") {
+        return Some(DetectedFormat::Antex);
+    }
+    let bytes = first.as_bytes();
+    if bytes.first() == Some(&b'#') && bytes.get(1).is_some_and(u8::is_ascii_lowercase) {
+        return Some(DetectedFormat::Sp3);
+    }
+    if has_tle_pair(text) {
+        return Some(DetectedFormat::Tle);
+    }
+    None
+}
+
+fn has_tle_pair(text: &str) -> bool {
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines
+        .windows(2)
+        .any(|pair| pair[0].starts_with("1 ") && pair[1].starts_with("2 "))
+}
+
 fn inspect_command(path: &Path, window: Option<&[f64]>) -> Result<()> {
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let text = std::str::from_utf8(&bytes).ok();
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        bail!(
+            "unrecognized file type: {} is not UTF-8 text",
+            path.display()
+        );
+    };
+    let Some(format) = detect_format(text) else {
+        bail!("unrecognized file type: {}", path.display());
+    };
+    let parse_context = || format!("parse {} {}", format.label(), path.display());
 
     if let Some(endpoints) = window {
         let [from_j2000_s, through_j2000_s] = endpoints else {
             bail!("--window requires exactly FROM THROUGH");
         };
-        let sp3 = load_sp3(&bytes).context("--window is available only for SP3 products")?;
+        if format != DetectedFormat::Sp3 {
+            bail!(
+                "--window is available only for SP3 products; {} is {}",
+                path.display(),
+                format.label()
+            );
+        }
+        let sp3 = load_sp3(&bytes).with_context(parse_context)?;
         print_inspect(InspectReport::sp3(path, &sp3));
         print_window_continuity(&sp3, *from_j2000_s, *through_j2000_s)?;
         return Ok(());
     }
 
-    if let Some(text) = text {
-        if let Ok(obs) = parse_rinex_obs(text) {
-            print_inspect(InspectReport::obs(path, &obs));
-            return Ok(());
+    match format {
+        DetectedFormat::RinexObs => {
+            let obs = parse_rinex_obs(text).with_context(parse_context)?;
+            print_inspect(InspectReport::obs(path, &obs, "RINEX OBS"));
         }
-        if let Ok(nav) = parse_rinex_nav(text) {
+        DetectedFormat::Crinex => {
+            let decoded = decode_crinex(text).with_context(parse_context)?;
+            let obs = parse_rinex_obs(&decoded).with_context(parse_context)?;
+            print_inspect(InspectReport::obs(path, &obs, "RINEX OBS (CRINEX)"));
+        }
+        DetectedFormat::RinexNav => {
+            let nav = parse_rinex_nav(text).with_context(parse_context)?;
             print_inspect(InspectReport::nav(path, &nav));
-            return Ok(());
         }
-    }
-    if let Ok(sp3) = load_sp3(&bytes) {
-        print_inspect(InspectReport::sp3(path, &sp3));
-        return Ok(());
-    }
-    if let Some(text) = text {
-        if let Some(report) = InspectReport::tle(path, text) {
+        DetectedFormat::RinexOther(kind) => {
+            bail!(
+                "unsupported file type: {} is RINEX file type {kind:?}, which inspect does not read",
+                path.display()
+            );
+        }
+        DetectedFormat::Antex => {
+            let antex = parse_antex(text).with_context(parse_context)?;
+            print_inspect(InspectReport::antex(path, &antex));
+        }
+        DetectedFormat::Sp3 => {
+            let sp3 = load_sp3(&bytes).with_context(parse_context)?;
+            print_inspect(InspectReport::sp3(path, &sp3));
+        }
+        DetectedFormat::Tle => {
+            let file = parse_tle_file_with_policy(text, OpsMode::Improved, TlePolicy::Lenient);
+            let report = InspectReport::tle(path, &file);
+            let rejected = tle_rejection_lines(&file);
+            if file.satellites.is_empty() {
+                bail!(
+                    "{}: no element set parsed\n{}",
+                    parse_context(),
+                    rejected.join("\n")
+                );
+            }
             print_inspect(report);
-            return Ok(());
-        }
-        if let Ok(antex) = parse_antex(text) {
-            if !antex.antennas.is_empty() {
-                print_inspect(InspectReport::antex(path, &antex));
-                return Ok(());
+            for line in rejected {
+                println!("{line}");
             }
         }
     }
+    Ok(())
+}
 
-    bail!("unrecognized file type: {}", path.display())
+pub(crate) fn tle_rejection_lines(file: &TleFile) -> Vec<String> {
+    let mut lines = Vec::new();
+    for satellite in &file.satellites {
+        for warning in &satellite.checksum_warnings {
+            lines.push(format!(
+                "checksum_warning: record at line {}: {warning}",
+                satellite.line_number
+            ));
+        }
+    }
+    for rejected in &file.rejected {
+        let name = if rejected.name.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", rejected.name)
+        };
+        lines.push(format!(
+            "rejected: line {}{name}: {}",
+            rejected.line_number, rejected.issue
+        ));
+    }
+    lines
 }
 
 fn print_window_continuity(sp3: &Sp3, from_j2000_s: f64, through_j2000_s: f64) -> Result<()> {
@@ -831,7 +970,7 @@ struct InspectReport {
 }
 
 impl InspectReport {
-    fn obs(path: &Path, obs: &ObservationFile) -> Self {
+    fn obs(path: &Path, obs: &ObservationFile, file_type: &'static str) -> Self {
         let mut satellites = BTreeSet::new();
         let mut systems = BTreeSet::new();
         for epoch in obs.epochs() {
@@ -844,7 +983,7 @@ impl InspectReport {
         let event_records = obs.epochs().iter().filter(|epoch| epoch.flag > 1).count();
         Self {
             path: path.display().to_string(),
-            file_type: "RINEX OBS",
+            file_type,
             span: obs_span(obs),
             counts: vec![
                 ("version", format!("{:.2}", obs.header().version)),
@@ -937,47 +1076,36 @@ impl InspectReport {
         }
     }
 
-    fn tle(path: &Path, text: &str) -> Option<Self> {
-        let lines: Vec<_> = text
-            .lines()
-            .map(str::trim_end)
-            .filter(|line| !line.trim().is_empty())
-            .collect();
-        let mut catalogs = Vec::new();
-        let mut checksum_warnings = 0usize;
-        let mut index = 0usize;
-        while index + 1 < lines.len() {
-            let (line1, line2) =
-                if lines[index].starts_with('1') && lines[index + 1].starts_with('2') {
-                    (lines[index], lines[index + 1])
-                } else if index + 2 < lines.len()
-                    && lines[index + 1].starts_with('1')
-                    && lines[index + 2].starts_with('2')
-                {
-                    index += 1;
-                    (lines[index], lines[index + 1])
-                } else {
-                    return None;
-                };
-            let parsed = sidereon::tle::parse(line1, line2).ok()?;
-            checksum_warnings += parsed.checksum_warnings.len();
-            catalogs.push(parsed.elements.catalog_number);
-            index += 2;
-        }
-        if catalogs.is_empty() {
-            return None;
-        }
-        Some(Self {
+    fn tle(path: &Path, file: &TleFile) -> Self {
+        let checksum_warnings: usize = file
+            .satellites
+            .iter()
+            .map(|satellite| satellite.checksum_warnings.len())
+            .sum();
+        Self {
             path: path.display().to_string(),
             file_type: "TLE",
             span: None,
             counts: vec![
-                ("tle_pairs", catalogs.len().to_string()),
+                ("tle_pairs", file.satellites.len().to_string()),
                 ("checksum_warnings", checksum_warnings.to_string()),
+                ("rejected_records", file.rejected.len().to_string()),
             ],
             systems: Vec::new(),
-            satellites: catalogs,
-        })
+            satellites: file
+                .satellites
+                .iter()
+                .map(|satellite| {
+                    satellite
+                        .satellite
+                        .line1()
+                        .get(2..7)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                })
+                .collect(),
+        }
     }
 }
 

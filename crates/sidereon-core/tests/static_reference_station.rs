@@ -3,13 +3,15 @@ use std::path::PathBuf;
 
 use nalgebra::{Matrix3, Vector3};
 use sidereon_core::dgnss::{solve_position, CodeObservation};
+use sidereon_core::ephemeris::EphemerisSource;
 use sidereon_core::ephemeris::Sp3;
 use sidereon_core::fusion::GnssFixStatus;
+use sidereon_core::observables::ObservableEphemerisSource;
 use sidereon_core::positioning::{
-    solve_static_reference_station_rinex, spp_inputs_from_rinex_obs, RinexSppOptions,
-    StaticReferenceCarrierRinexOptions, StaticReferenceFixStatus, StaticReferenceModeError,
-    StaticReferenceModeReport, StaticReferenceModeStatus, StaticReferenceStationError,
-    StaticReferenceStationMode, StaticReferenceStationRinexOptions,
+    solve_static_reference_station_rinex, spp_inputs_from_rinex_obs, RinexSppAssemblySource,
+    RinexSppOptions, StaticReferenceCarrierRinexOptions, StaticReferenceFixStatus,
+    StaticReferenceModeError, StaticReferenceModeReport, StaticReferenceModeStatus,
+    StaticReferenceStationError, StaticReferenceStationMode, StaticReferenceStationRinexOptions,
 };
 use sidereon_core::rinex::observations::RinexObs;
 use sidereon_core::rtk::BaselineReferenceSelection;
@@ -437,4 +439,164 @@ fn three_sigma_along(error_m: [f64; 3], covariance_m2: [[f64; 3]; 3]) -> f64 {
     ]);
     let unit = Vector3::new(error_m[0], error_m[1], error_m[2]) / error_norm_m;
     3.0 * unit.dot(&(matrix * unit)).sqrt()
+}
+
+/// Like an SSR source outside the UT1 table: every GPS state is refused under
+/// `Strict` and accepted with a reported departure under `Permissive`.
+struct Ut1PolicySource<'a> {
+    inner: &'a Sp3,
+    mode: sidereon_core::astro::time::ValidityMode,
+}
+
+impl Ut1PolicySource<'_> {
+    fn gate<T>(
+        &self,
+        sat: sidereon_core::GnssSatelliteId,
+        value: T,
+    ) -> Result<sidereon_core::astro::time::Validated<T>, sidereon_core::Error> {
+        use sidereon_core::astro::time::{DegradeReason, Validated, ValidityMode};
+        if sat.system != sidereon_core::GnssSystem::Gps {
+            return Ok(Validated::ok(value));
+        }
+        match self.mode {
+            ValidityMode::Strict => Err(sidereon_core::Error::Ut1OutsideCoverage(
+                DegradeReason::AfterCoverage,
+            )),
+            ValidityMode::Permissive => {
+                Ok(Validated::degraded(value, DegradeReason::AfterCoverage))
+            }
+        }
+    }
+}
+
+impl EphemerisSource for Ut1PolicySource<'_> {
+    fn position_clock_at_j2000_s(
+        &self,
+        sat: sidereon_core::GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64)> {
+        self.try_position_clock_at_j2000_s(sat, t_j2000_s)
+            .ok()
+            .flatten()
+            .map(|state| state.value)
+    }
+
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: sidereon_core::GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<
+        Option<sidereon_core::astro::time::Validated<sidereon_core::ephemeris::PositionClock>>,
+        sidereon_core::Error,
+    > {
+        match self.inner.position_clock_at_j2000_s(sat, t_j2000_s) {
+            Some(state) => self.gate(sat, state).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
+impl ObservableEphemerisSource for Ut1PolicySource<'_> {
+    fn observable_state_at_j2000_s(
+        &self,
+        sat: sidereon_core::GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<
+        sidereon_core::observables::ObservableState,
+        sidereon_core::observables::ObservablesError,
+    > {
+        self.try_observable_state_at_j2000_s(sat, t_j2000_s)
+            .map(|state| state.value)
+    }
+
+    fn try_observable_state_at_j2000_s(
+        &self,
+        sat: sidereon_core::GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<
+        sidereon_core::astro::time::Validated<sidereon_core::observables::ObservableState>,
+        sidereon_core::observables::ObservablesError,
+    > {
+        let state = self.inner.observable_state_at_j2000_s(sat, t_j2000_s)?;
+        self.gate(sat, state)
+            .map_err(sidereon_core::observables::ObservablesError::Ephemeris)
+    }
+}
+
+impl RinexSppAssemblySource for Ut1PolicySource<'_> {
+    fn rinex_spp_broadcast_corrections(
+        &self,
+    ) -> sidereon_core::positioning::RinexSppBroadcastCorrections {
+        self.inner.rinex_spp_broadcast_corrections()
+    }
+}
+
+#[test]
+fn reference_station_modes_keep_a_ut1_refusal_typed_and_report_a_departure() {
+    use sidereon_core::astro::time::{DegradeReason, ValidityMode};
+
+    let sp3 = load_sp3();
+    let (mut reference_obs, mut rover_obs) = load_wettzell_obs();
+    reference_obs.epochs.truncate(24);
+    rover_obs.epochs.truncate(24);
+    let reference_arp_m = arp_position(WTZR_MARKER_M, &reference_obs);
+    let code_options = RinexSppOptions::default_for(&rover_obs).expect("default signal policy");
+    let options = StaticReferenceStationRinexOptions::code_and_carrier(
+        code_options,
+        carrier_options(reference_arp_m, 24),
+        true,
+    );
+    let solve = |mode| {
+        solve_static_reference_station_rinex(
+            &Ut1PolicySource { inner: &sp3, mode },
+            &reference_obs,
+            &rover_obs,
+            reference_arp_m,
+            &options,
+        )
+    };
+
+    // Strict: every mode fails with the typed refusal, not a string reason
+    // and not a solution without the refused satellites.
+    match solve(ValidityMode::Strict) {
+        Err(StaticReferenceStationError::AllModesFailed { mode_reports }) => {
+            assert_eq!(mode_reports.len(), 2);
+            for report in mode_reports {
+                assert_eq!(
+                    report.error,
+                    Some(StaticReferenceModeError::Ut1OutsideCoverage(
+                        DegradeReason::AfterCoverage
+                    ))
+                );
+            }
+        }
+        other => panic!("expected every mode to be refused, got {other:?}"),
+    }
+
+    // In coverage: no departure.
+    let plain = solve_static_reference_station_rinex(
+        &sp3,
+        &reference_obs,
+        &rover_obs,
+        reference_arp_m,
+        &options,
+    )
+    .expect("in-table station solve");
+    assert_eq!(plain.ut1_degraded, None);
+
+    // Permissive: the same coordinate, with the departure on the result and
+    // on each solved mode.
+    let permissive = solve(ValidityMode::Permissive).expect("permissive station solve");
+    assert_eq!(permissive.ut1_degraded, Some(DegradeReason::AfterCoverage));
+    assert_eq!(permissive.mode, plain.mode);
+    assert_eq!(
+        permissive.position.as_array().map(f64::to_bits),
+        plain.position.as_array().map(f64::to_bits)
+    );
+    if let Some(code) = &permissive.code_solution {
+        assert_eq!(code.ut1_degraded, Some(DegradeReason::AfterCoverage));
+    }
+    if let Some(carrier) = &permissive.carrier_solution {
+        assert_eq!(carrier.ut1_degraded, Some(DegradeReason::AfterCoverage));
+    }
 }

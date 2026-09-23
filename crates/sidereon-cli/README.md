@@ -134,10 +134,15 @@ sidereon metrics --json-file covariance.json --probability 0.99
 sidereon metrics --enu-cov "4,0,0,0,9,0,0,0,16" --json
 ```
 
-Inspect a GNSS file by trying the supported parsers:
+Inspect a GNSS file. The format is recognized from its own identifying text
+(the RINEX, CRINEX or ANTEX header label, the SP3 `#` version line, or a TLE
+line 1 / line 2 pair) and read with that format's parser, so a malformed file
+fails with that parser's error. A TLE file keeps every readable element set and
+lists each rejected record and checksum mismatch with its line number:
 
 ```sh
 sidereon inspect data/site.obs
+sidereon inspect data/site.crx
 sidereon inspect data/brdc.rnx
 sidereon inspect data/orbits.sp3
 sidereon inspect data/antennas.atx

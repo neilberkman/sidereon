@@ -69,6 +69,11 @@ pub enum FusionError {
     /// A nominal inertial state failed validation.
     #[error("invalid nominal inertial state")]
     NominalState,
+    /// The ephemeris source refused a satellite state because producing it
+    /// reads UT1 outside the UT1 table under a strict UT1 policy. The update
+    /// fails rather than dropping that satellite.
+    #[error("fusion satellite state refused: {0}")]
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl From<crate::inertial::InertialError> for FusionError {

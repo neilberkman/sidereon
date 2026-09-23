@@ -592,6 +592,8 @@ impl StatePropagator {
         validate_epoch_finite(t_end_tdb_seconds, "t_end_tdb_seconds")?;
         validate_initial_state(initial)?;
 
+        // The integrators record this run's UT1 departure in the result and
+        // pass it back to `ctx`.
         match self.integrator {
             IntegratorKind::Rk4 => {
                 RK4.propagate(initial, t_end_tdb_seconds, dynamics, ctx, &self.options)

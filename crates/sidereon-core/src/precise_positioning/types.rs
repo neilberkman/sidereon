@@ -649,6 +649,11 @@ pub enum SsrIfCombinationStatus {
     /// A caller continuity token supplied for this ambiguity and signal does not continue the
     /// current phase-bias arc, so the caller has to reset that ambiguity.
     PhaseDiscontinuityNeedsReset,
+    /// The ephemeris source refused the satellite's state at the transmission time
+    /// because producing it reads UT1 outside the UT1 table under a strict UT1
+    /// policy, so no orbit and clock solution is known to be in use and the biases
+    /// are not applied.
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 /// Detailed bias query result for a single signal in an observation epoch.
@@ -751,7 +756,7 @@ pub struct SsrBiasRecord {
 
 /// Why SSR/HAS biases recorded in a [`PppCorrectionLookup`] do not hold at an
 /// observation's transmission time in a solve.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum SsrTransmitTimeFailure {
     /// The solve's ephemeris source applies no SSR corrections
@@ -777,6 +782,14 @@ pub enum SsrTransmitTimeFailure {
         /// Status of the query for that signal at the transmission time. `Available` means
         /// another record, of a different solution, IOD SSR or reference epoch, is.
         status: SsrBiasStatus,
+    },
+    /// The ephemeris source failed to say which orbit and clock solution it applies at
+    /// the transmission time, with an error this check has no specific case for.
+    Source {
+        /// Transmission time, seconds since J2000.
+        transmit_time_j2000_s: f64,
+        /// The source's error.
+        error: crate::Error,
     },
 }
 
@@ -1105,10 +1118,37 @@ impl PppCorrectionLookup {
                 self.phase_bias_m.remove(&key);
                 self.ssr_code_bias_records.remove(&key);
                 self.phase_bias_records.remove(&key);
-                let transmit_time_j2000_s =
-                    transmit_time_j2000_s(ephemeris, obs, receiver_position_m, epoch.t_rx_j2000_s);
-                let applied_orbit_clock_solution = transmit_time_j2000_s
-                    .and_then(|t_tx| ephemeris.applied_orbit_clock_solution(obs.sat, t_tx));
+                // A UT1 refusal of the satellite's state is kept as its own status
+                // instead of reading as an unpredictable transmission time or a
+                // missing orbit and clock solution.
+                let mut ut1_refusal = None;
+                let transmit_time_j2000_s = match transmit_time_j2000_s(
+                    ephemeris,
+                    obs,
+                    receiver_position_m,
+                    epoch.t_rx_j2000_s,
+                ) {
+                    Ok(t_tx) => t_tx,
+                    Err(reason) => {
+                        ut1_refusal = Some(reason);
+                        None
+                    }
+                };
+                let applied_orbit_clock_solution = match transmit_time_j2000_s {
+                    Some(t_tx) => {
+                        match crate::ssr::SsrCorrectionSource::try_applied_orbit_clock_solution(
+                            ephemeris, obs.sat, t_tx,
+                        ) {
+                            Ok(solution) => solution,
+                            Err(crate::Error::Ut1OutsideCoverage(reason)) => {
+                                ut1_refusal = Some(reason);
+                                None
+                            }
+                            Err(_) => None,
+                        }
+                    }
+                    None => None,
+                };
                 let signals = options.signal_pair(obs.sat);
 
                 let (code_outcome, code1_report, code2_report) =
@@ -1190,6 +1230,18 @@ impl PppCorrectionLookup {
                             )
                         }
                     };
+
+                // A UT1 refusal of the satellite's state is reported for every requested
+                // bias, in place of the status its queries would give, so a solve fails
+                // with the refusal instead of reading the bias as missing.
+                let refused = |requested: bool, outcome| match ut1_refusal {
+                    Some(reason) if requested => {
+                        Err(SsrIfCombinationStatus::Ut1OutsideCoverage(reason))
+                    }
+                    _ => outcome,
+                };
+                let code_outcome = refused(options.apply_code_biases, code_outcome);
+                let phase_outcome = refused(options.apply_phase_biases, phase_outcome);
 
                 // Code biases are stored with the model-side sign: the row model adds them
                 // to the modelled code, the equivalent of adding the transmitted bias to the
@@ -1362,16 +1414,19 @@ fn transmit_time_unavailable_status(views: &[BiasQueryView; 2]) -> SsrIfCombinat
 }
 
 /// Transmission time of `obs` predicted the way the solve predicts it, from the reception
-/// time and an approximate receiver position, or `None` when the source cannot place the
-/// satellite.
+/// time and an approximate receiver position: `Ok(None)` when the source cannot place the
+/// satellite, and `Err` with the reason when the source refused the satellite's state
+/// outside the UT1 table.
 fn transmit_time_j2000_s(
     ephemeris: &SsrCorrectedEphemeris<'_>,
     obs: &FloatObservation,
     receiver_position_m: [f64; 3],
     t_rx_j2000_s: f64,
-) -> Option<f64> {
-    let options = super::predict_default(ephemeris, obs).ok()?;
-    let t_tx = crate::observables::transmit_epoch_j2000_s(
+) -> Result<Option<f64>, crate::astro::time::DegradeReason> {
+    let Ok(options) = super::predict_default(ephemeris, obs) else {
+        return Ok(None);
+    };
+    match crate::observables::transmit_epoch_j2000_s(
         ephemeris,
         obs.sat,
         receiver_position_m,
@@ -1381,9 +1436,13 @@ fn transmit_time_j2000_s(
             sagnac: options.sagnac,
         },
         crate::observables::flight_time_seed_s(obs.code_m),
-    )
-    .ok()?;
-    t_tx.is_finite().then_some(t_tx)
+    ) {
+        Ok(t_tx) => Ok(t_tx.is_finite().then_some(t_tx)),
+        Err(crate::observables::ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(
+            reason,
+        ))) => Err(reason),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Carrier frequencies for the ionosphere-free combination: the signal pair's, or the
@@ -1722,6 +1781,14 @@ pub enum FloatSolveError {
         /// Correction or receiver-antenna datum that was absent.
         correction: MissingCorrection,
     },
+    /// The ephemeris source refused a satellite state the solve needs, because
+    /// producing it reads UT1 outside the UT1 table under a strict UT1 policy:
+    /// in the observable prediction, in the SSR/HAS bias lookup
+    /// ([`PppCorrectionLookup::with_ssr_biases`], reported there as
+    /// [`SsrIfCombinationStatus::Ut1OutsideCoverage`]) or in the SSR bias
+    /// exclusion pass. The solve fails rather than dropping or excluding that
+    /// satellite.
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl core::fmt::Display for FloatSolveError {
@@ -1769,6 +1836,9 @@ impl core::fmt::Display for FloatSolveError {
                 f,
                 "missing PPP correction for satellite {satellite_id}: {correction}"
             ),
+            Self::Ut1OutsideCoverage(reason) => {
+                write!(f, "the ephemeris source refused a PPP satellite state: {reason}")
+            }
         }
     }
 }

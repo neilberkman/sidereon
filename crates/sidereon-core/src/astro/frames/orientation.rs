@@ -9,12 +9,13 @@
 use crate::astro::constants::earth::OMEGA_E_DOT_RAD_S;
 use crate::astro::frames::transforms::{
     gcrs_to_itrs_matrix_with_polar_motion, mat3_vec3_mul, polar_motion_matrix, FrameTransformError,
-    PolarMotion,
+    PolarMotion, Ut1Gate,
 };
 use crate::astro::math::mat3::{inline_rxr, inline_tr, Mat3};
 use crate::astro::time::civil::{civil_from_j2000_seconds, j2000_seconds_from_split};
 use crate::astro::time::model::{Instant, InstantRepr, TimeScale};
 use crate::astro::time::scales::TimeScales;
+use crate::astro::time::{DegradeReason, Validated, ValidityMode};
 
 /// A single evaluated Earth-orientation state for one epoch.
 ///
@@ -40,9 +41,41 @@ impl EarthOrientation {
 
     /// Evaluate the full GCRF to ITRF rotation with caller-supplied polar
     /// motion.
+    ///
+    /// Refuses time scales outside the UT1 table; see
+    /// [`EarthOrientation::from_time_scales_with_validity`].
     pub fn from_time_scales_with_polar_motion(
         ts: &TimeScales,
         polar_motion: PolarMotion,
+    ) -> Result<Self, FrameTransformError> {
+        Self::from_time_scales_with_validity(ts, polar_motion, ValidityMode::Strict)
+            .map(|validated| validated.value)
+    }
+
+    /// [`EarthOrientation::from_time_scales_with_polar_motion`] under an
+    /// explicit UT1 [`ValidityMode`].
+    ///
+    /// [`ValidityMode::Strict`] refuses time scales outside the UT1 table with
+    /// [`FrameTransformError::Ut1OutsideCoverage`].
+    /// [`ValidityMode::Permissive`] evaluates the rotation with the long-term
+    /// UT1 and reports the departure both in [`Validated::degraded`] and in the
+    /// orientation itself ([`EarthOrientation::ut1_degraded`]), so it stays
+    /// with the orientation wherever it is passed.
+    pub fn from_time_scales_with_validity(
+        ts: &TimeScales,
+        polar_motion: PolarMotion,
+        mode: ValidityMode,
+    ) -> Result<Validated<Self>, FrameTransformError> {
+        let gate = Ut1Gate::new(mode);
+        let admitted = gate.admit(*ts)?;
+        let orientation = Self::from_admitted_time_scales(&admitted, polar_motion, *ts)?;
+        gate.finish(orientation)
+    }
+
+    fn from_admitted_time_scales(
+        ts: &TimeScales,
+        polar_motion: PolarMotion,
+        stored: TimeScales,
     ) -> Result<Self, FrameTransformError> {
         let gcrf_to_itrf = gcrs_to_itrs_matrix_with_polar_motion(ts, polar_motion)?;
         let itrf_to_gcrf = inline_tr(&gcrf_to_itrf);
@@ -50,7 +83,7 @@ impl EarthOrientation {
         let earth_rotation_vector_itrf_rad_s =
             mat3_vec3_mul(&polar, &[0.0, 0.0, OMEGA_E_DOT_RAD_S])?;
         Ok(Self {
-            time_scales: *ts,
+            time_scales: stored,
             polar_motion,
             gcrf_to_itrf,
             itrf_to_gcrf,
@@ -82,9 +115,35 @@ impl EarthOrientation {
         second: f64,
         polar_motion: PolarMotion,
     ) -> Result<Self, FrameTransformError> {
+        Self::from_utc_with_validity(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            polar_motion,
+            ValidityMode::Strict,
+        )
+        .map(|validated| validated.value)
+    }
+
+    /// [`EarthOrientation::from_utc_with_polar_motion`] under an explicit UT1
+    /// [`ValidityMode`], as [`EarthOrientation::from_time_scales_with_validity`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_utc_with_validity(
+        year: i32,
+        month: i32,
+        day: i32,
+        hour: i32,
+        minute: i32,
+        second: f64,
+        polar_motion: PolarMotion,
+        mode: ValidityMode,
+    ) -> Result<Validated<Self>, FrameTransformError> {
         let ts = TimeScales::from_utc(year, month, day, hour, minute, second)
             .map_err(|_| invalid_input("utc", "time-scale conversion failed"))?;
-        Self::from_time_scales_with_polar_motion(&ts, polar_motion)
+        Self::from_time_scales_with_validity(&ts, polar_motion, mode)
     }
 
     /// Evaluate the full GCRF to ITRF rotation from a scale-tagged instant with
@@ -99,13 +158,38 @@ impl EarthOrientation {
         epoch: Instant,
         polar_motion: PolarMotion,
     ) -> Result<Self, FrameTransformError> {
+        Self::from_instant_with_validity(epoch, polar_motion, ValidityMode::Strict)
+            .map(|validated| validated.value)
+    }
+
+    /// [`EarthOrientation::from_instant_with_polar_motion`] under an explicit
+    /// UT1 [`ValidityMode`], as
+    /// [`EarthOrientation::from_time_scales_with_validity`].
+    pub fn from_instant_with_validity(
+        epoch: Instant,
+        polar_motion: PolarMotion,
+        mode: ValidityMode,
+    ) -> Result<Validated<Self>, FrameTransformError> {
         let ts = time_scales_from_instant(epoch)?;
-        Self::from_time_scales_with_polar_motion(&ts, polar_motion)
+        Self::from_time_scales_with_validity(&ts, polar_motion, mode)
     }
 
     /// Time scales used to evaluate this orientation.
+    ///
+    /// They keep their [`TimeScales::ut1_degraded`] flag. For an orientation
+    /// accepted outside the UT1 table under [`ValidityMode::Permissive`] the
+    /// transforms that read UT1 refuse them as they stand; a consumer that has
+    /// accepted the orientation runs them under
+    /// [`crate::astro::frames::transforms::with_ut1_validity`] with
+    /// [`ValidityMode::Permissive`].
     pub fn time_scales(&self) -> TimeScales {
         self.time_scales
+    }
+
+    /// `Some` when this orientation was accepted outside the UT1 table under
+    /// [`ValidityMode::Permissive`], with the side of the table it lies on.
+    pub fn ut1_degraded(&self) -> Option<DegradeReason> {
+        self.time_scales.ut1_degraded
     }
 
     /// Polar-motion coordinates used to evaluate this orientation.
@@ -207,6 +291,15 @@ pub trait EarthOrientationProvider: Send + Sync {
         &self,
         epoch_tdb_seconds: f64,
     ) -> Result<EarthOrientation, FrameTransformError>;
+
+    /// The UT1 policy this provider applies to an epoch outside the UT1 table.
+    ///
+    /// The default is [`ValidityMode::Strict`]; a provider that can accept
+    /// such an epoch reports [`ValidityMode::Permissive`] when configured to,
+    /// so a consumer with its own UT1 policy can refuse a mismatch up front.
+    fn ut1_validity(&self) -> ValidityMode {
+        ValidityMode::Strict
+    }
 }
 
 /// Earth-orientation provider for propagator epochs expressed as TDB seconds
@@ -214,6 +307,7 @@ pub trait EarthOrientationProvider: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TdbEarthOrientationProvider {
     polar_motion: PolarMotion,
+    validity: ValidityMode,
 }
 
 /// One polar-motion series sample for [`PolarMotionSeriesEarthOrientationProvider`].
@@ -266,6 +360,7 @@ impl PolarMotionSample {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PolarMotionSeriesEarthOrientationProvider {
     samples: Box<[PolarMotionSample]>,
+    validity: ValidityMode,
 }
 
 impl PolarMotionSeriesEarthOrientationProvider {
@@ -287,7 +382,15 @@ impl PolarMotionSeriesEarthOrientationProvider {
         }
         Ok(Self {
             samples: samples.into_boxed_slice(),
+            validity: ValidityMode::Strict,
         })
+    }
+
+    /// This provider under an explicit UT1 [`ValidityMode`], as
+    /// [`TdbEarthOrientationProvider::with_validity`].
+    pub fn with_validity(mut self, validity: ValidityMode) -> Self {
+        self.validity = validity;
+        self
     }
 
     /// Interpolate polar motion at a TDB epoch.
@@ -336,12 +439,28 @@ impl TdbEarthOrientationProvider {
     pub const fn new() -> Self {
         Self {
             polar_motion: PolarMotion::ZERO,
+            validity: ValidityMode::Strict,
         }
     }
 
     /// Build a provider with fixed polar motion applied at every epoch.
     pub const fn with_polar_motion(polar_motion: PolarMotion) -> Self {
-        Self { polar_motion }
+        Self {
+            polar_motion,
+            validity: ValidityMode::Strict,
+        }
+    }
+
+    /// This provider under an explicit UT1 [`ValidityMode`].
+    ///
+    /// The default, [`ValidityMode::Strict`], refuses an epoch outside the UT1
+    /// table, which fails the propagation step that asked for it. Under
+    /// [`ValidityMode::Permissive`] the provider evaluates such an epoch with
+    /// the long-term UT1 and every orientation it returns reports the departure
+    /// in [`EarthOrientation::ut1_degraded`].
+    pub const fn with_validity(mut self, validity: ValidityMode) -> Self {
+        self.validity = validity;
+        self
     }
 
     /// Polar-motion coordinates used by this provider.
@@ -362,7 +481,12 @@ impl EarthOrientationProvider for TdbEarthOrientationProvider {
         epoch_tdb_seconds: f64,
     ) -> Result<EarthOrientation, FrameTransformError> {
         let ts = time_scales_from_scale_j2000_seconds(TimeScale::Tdb, epoch_tdb_seconds)?;
-        EarthOrientation::from_time_scales_with_polar_motion(&ts, self.polar_motion)
+        EarthOrientation::from_time_scales_with_validity(&ts, self.polar_motion, self.validity)
+            .map(|validated| validated.value)
+    }
+
+    fn ut1_validity(&self) -> ValidityMode {
+        self.validity
     }
 }
 
@@ -373,7 +497,12 @@ impl EarthOrientationProvider for PolarMotionSeriesEarthOrientationProvider {
     ) -> Result<EarthOrientation, FrameTransformError> {
         let ts = time_scales_from_scale_j2000_seconds(TimeScale::Tdb, epoch_tdb_seconds)?;
         let polar_motion = self.polar_motion_at_tdb_seconds(epoch_tdb_seconds)?;
-        EarthOrientation::from_time_scales_with_polar_motion(&ts, polar_motion)
+        EarthOrientation::from_time_scales_with_validity(&ts, polar_motion, self.validity)
+            .map(|validated| validated.value)
+    }
+
+    fn ut1_validity(&self) -> ValidityMode {
+        self.validity
     }
 }
 
@@ -462,6 +591,35 @@ fn neg_skew_matrix(omega: [f64; 3]) -> Mat3 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_accepted_orientation_keeps_its_ut1_flag_on_its_time_scales() {
+        let ts = TimeScales::from_utc(2100, 1, 1, 0, 0, 0.0).expect("valid UTC");
+        assert!(EarthOrientation::from_time_scales(&ts).is_err());
+        let accepted = EarthOrientation::from_time_scales_with_validity(
+            &ts,
+            PolarMotion::ZERO,
+            ValidityMode::Permissive,
+        )
+        .expect("permissive orientation");
+        assert_eq!(accepted.degraded, Some(DegradeReason::AfterCoverage));
+        assert_eq!(
+            accepted.value.ut1_degraded(),
+            Some(DegradeReason::AfterCoverage)
+        );
+        assert_eq!(accepted.value.time_scales(), ts);
+        // The provider reports its own mode.
+        assert_eq!(
+            TdbEarthOrientationProvider::new().ut1_validity(),
+            ValidityMode::Strict
+        );
+        assert_eq!(
+            TdbEarthOrientationProvider::new()
+                .with_validity(ValidityMode::Permissive)
+                .ut1_validity(),
+            ValidityMode::Permissive
+        );
+    }
 
     #[test]
     fn polar_motion_series_interpolates_and_builds_orientation() {

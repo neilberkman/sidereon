@@ -2,10 +2,9 @@
 //! Authoritative TLE round-trip gate, ported from the sidereon Elixir suite.
 //!
 //! Parsing then re-encoding every CelesTrak stations TLE must reproduce the
-//! original lines character-for-character. Line 2 is exact; line 1 differs only
-//! in the sign of a zero-valued assumed-decimal field (`+0` vs `-0`), which the
-//! reference test normalizes away. This proves the Rust format codec is
-//! byte-identical to the historical Elixir implementation.
+//! original lines character-for-character, checksums included. The writer
+//! restates each assumed-decimal field's source spelling, so a zero written
+//! `+0` stays `+0`.
 
 use sidereon_core::astro::tle;
 
@@ -58,13 +57,8 @@ fn all_stations_round_trip() {
             "line 2 mismatch for {}",
             parsed.elements.catalog_number
         );
-
-        // Line 1: allow +0 vs -0 for the zero-valued exponent fields (nddot, bstar).
-        let l1_norm = l1.replace("+0 ", "-0 ");
-        let l1_norm: String = l1_norm.chars().take(68).collect();
-        let gen_l1_norm: String = gen_l1.chars().take(68).collect();
         assert_eq!(
-            gen_l1_norm, l1_norm,
+            gen_l1, l1,
             "line 1 mismatch for {}",
             parsed.elements.catalog_number
         );

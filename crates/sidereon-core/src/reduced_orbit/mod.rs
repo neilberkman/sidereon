@@ -98,7 +98,7 @@ use crate::astro::constants::time::{SECONDS_PER_DAY, SECONDS_PER_HOUR, SECONDS_P
 use crate::astro::constants::{J2_EARTH, MU_EARTH, RE_EARTH};
 use crate::astro::frames::transforms::{
     gcrs_to_itrs_compute, gcrs_to_itrs_matrix, itrs_to_gcrs_compute, mat3_vec3_mul_unchecked,
-    teme_to_gcrs_compute, TemeStateKm,
+    teme_to_gcrs_compute, FrameTransformError, TemeStateKm, Ut1Gate,
 };
 use crate::astro::math::least_squares::{
     self, solve_trf, LeastSquaresProblem, SolveOptions, Status,
@@ -108,6 +108,7 @@ use crate::astro::sgp4::{JulianDate, Satellite};
 use crate::astro::time::civil::{civil_from_julian_day_number, split_julian_date};
 use crate::astro::time::model::{Instant, JulianDateSplit, TimeScale};
 use crate::astro::time::scales::{julian_day_number, TimeScales};
+use crate::astro::time::{Validated, ValidityMode};
 use nalgebra::DVector;
 
 use crate::constants::{M_PER_KM, OMEGA_E_DOT_RAD_S};
@@ -507,6 +508,9 @@ pub enum ReducedOrbitError {
         /// Human-readable validation failure.
         reason: &'static str,
     },
+    /// Converting or evaluating in ECEF read UT1 at an instant outside the UT1
+    /// table under [`ValidityMode::Strict`].
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl core::fmt::Display for ReducedOrbitError {
@@ -533,6 +537,9 @@ impl core::fmt::Display for ReducedOrbitError {
             }
             ReducedOrbitError::InvalidInput { field, reason } => {
                 write!(f, "invalid reduced-orbit input {field}: {reason}")
+            }
+            ReducedOrbitError::Ut1OutsideCoverage(reason) => {
+                write!(f, "reduced orbit reads UT1 outside the table: {reason}")
             }
         }
     }
@@ -894,15 +901,42 @@ pub fn fit_with_model(
     scale: TimeScale,
     model: Model,
 ) -> Result<ReducedOrbit, ReducedOrbitError> {
+    fit_with_validity(samples, scale, model, ValidityMode::Strict).map(|validated| validated.value)
+}
+
+/// [`fit_with_model`] under an explicit UT1 [`ValidityMode`].
+///
+/// Converting each sample from ECEF to GCRS reads UT1.
+/// [`ValidityMode::Strict`] refuses the fit if any sample lies outside the UT1
+/// table; [`ValidityMode::Permissive`] converts them all with the long-term
+/// UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_with_validity(
+    samples: &[EcefSample],
+    scale: TimeScale,
+    model: Model,
+    mode: ValidityMode,
+) -> Result<Validated<ReducedOrbit>, ReducedOrbitError> {
+    let gate = Ut1Gate::new(mode);
+    let orbit = fit_with_model_gated(samples, scale, model, &gate)?;
+    finish_reduced(&gate, orbit)
+}
+
+fn fit_with_model_gated(
+    samples: &[EcefSample],
+    scale: TimeScale,
+    model: Model,
+    gate: &Ut1Gate,
+) -> Result<ReducedOrbit, ReducedOrbitError> {
     match model {
-        Model::CircularSecular => fit_circular(samples, scale),
-        Model::EccentricSecular => fit_eccentric(samples, scale),
+        Model::CircularSecular => fit_circular(samples, scale, gate),
+        Model::EccentricSecular => fit_eccentric(samples, scale, gate),
     }
 }
 
 fn fit_circular(
     samples: &[EcefSample],
     scale: TimeScale,
+    gate: &Ut1Gate,
 ) -> Result<ReducedOrbit, ReducedOrbitError> {
     if samples.len() < MIN_SAMPLES {
         return Err(ReducedOrbitError::TooFewSamples {
@@ -928,9 +962,14 @@ fn fit_circular(
     // Convert every ECEF sample to GCRS km at its own epoch.
     let mut gcrs: Vec<GcrsSample> = Vec::with_capacity(samples.len());
     for (ts, s) in &ordered {
-        let (x, y, z) =
-            itrs_to_gcrs_compute(s.x_m / M_PER_KM, s.y_m / M_PER_KM, s.z_m / M_PER_KM, ts)
-                .expect("valid frame transform");
+        let admitted = gate.admit(*ts).map_err(frame_input)?;
+        let (x, y, z) = itrs_to_gcrs_compute(
+            s.x_m / M_PER_KM,
+            s.y_m / M_PER_KM,
+            s.z_m / M_PER_KM,
+            &admitted,
+        )
+        .map_err(frame_input)?;
         let dt = dt_seconds(&t0_ts, ts);
         gcrs.push(GcrsSample {
             dt,
@@ -1050,6 +1089,7 @@ fn fit_circular(
 fn to_gcrs_samples(
     samples: &[EcefSample],
     scale: TimeScale,
+    gate: &Ut1Gate,
 ) -> Result<(CalendarEpoch, Vec<GcrsSample>, f64), ReducedOrbitError> {
     if samples.len() < MIN_SAMPLES {
         return Err(ReducedOrbitError::TooFewSamples {
@@ -1072,9 +1112,14 @@ fn to_gcrs_samples(
 
     let mut gcrs: Vec<GcrsSample> = Vec::with_capacity(samples.len());
     for (ts, s) in &ordered {
-        let (x, y, z) =
-            itrs_to_gcrs_compute(s.x_m / M_PER_KM, s.y_m / M_PER_KM, s.z_m / M_PER_KM, ts)
-                .expect("valid frame transform");
+        let admitted = gate.admit(*ts).map_err(frame_input)?;
+        let (x, y, z) = itrs_to_gcrs_compute(
+            s.x_m / M_PER_KM,
+            s.y_m / M_PER_KM,
+            s.z_m / M_PER_KM,
+            &admitted,
+        )
+        .map_err(frame_input)?;
         let dt = dt_seconds(&t0_ts, ts);
         gcrs.push(GcrsSample {
             dt,
@@ -1097,8 +1142,9 @@ fn to_gcrs_samples(
 fn fit_eccentric(
     samples: &[EcefSample],
     scale: TimeScale,
+    gate: &Ut1Gate,
 ) -> Result<ReducedOrbit, ReducedOrbitError> {
-    let (t0_cal, gcrs, dt_span) = to_gcrs_samples(samples, scale)?;
+    let (t0_cal, gcrs, dt_span) = to_gcrs_samples(samples, scale, gate)?;
 
     // The circular seed supplies a, i, raan0, raan_rate, arg_lat0 (=L0), n.
     let seed_c = seed_params(&gcrs)?;
@@ -1260,6 +1306,33 @@ pub fn position(
     scale: TimeScale,
     frame: Frame,
 ) -> Result<[f64; 3], ReducedOrbitError> {
+    position_with_validity(elements, epoch, scale, frame, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`position`] under an explicit UT1 [`ValidityMode`]. Only
+/// [`Frame::Ecef`] reads UT1: [`ValidityMode::Strict`] refuses an ECEF epoch
+/// outside the UT1 table; [`ValidityMode::Permissive`] evaluates it with the
+/// long-term UT1 and reports the departure in [`Validated::degraded`].
+pub fn position_with_validity(
+    elements: &Elements,
+    epoch: CalendarEpoch,
+    scale: TimeScale,
+    frame: Frame,
+    mode: ValidityMode,
+) -> Result<Validated<[f64; 3]>, ReducedOrbitError> {
+    let gate = Ut1Gate::new(mode);
+    let r = position_gated(elements, epoch, scale, frame, &gate)?;
+    finish_reduced(&gate, r)
+}
+
+fn position_gated(
+    elements: &Elements,
+    epoch: CalendarEpoch,
+    scale: TimeScale,
+    frame: Frame,
+    gate: &Ut1Gate,
+) -> Result<[f64; 3], ReducedOrbitError> {
     validate_elements_for_evaluation(elements, scale)?;
     validate_calendar_epoch(epoch, scale, "epoch")?;
     let t0_ts = elements.epoch.time_scales(scale);
@@ -1274,8 +1347,8 @@ pub fn position(
             r_gcrs_km[2] * M_PER_KM,
         ],
         Frame::Ecef => {
-            let mat = gcrs_to_itrs_matrix(&ts)
-                .map_err(|_| invalid_input("epoch", "invalid frame transform"))?;
+            let ts = gate.admit(ts).map_err(frame_input)?;
+            let mat = gcrs_to_itrs_matrix(&ts).map_err(frame_transform_input)?;
             let r = mat3_vec3_mul_unchecked(&mat, &r_gcrs_km);
             [r[0] * M_PER_KM, r[1] * M_PER_KM, r[2] * M_PER_KM]
         }
@@ -1292,6 +1365,35 @@ pub fn position_velocity(
     epoch: CalendarEpoch,
     scale: TimeScale,
     frame: Frame,
+) -> Result<([f64; 3], [f64; 3]), ReducedOrbitError> {
+    position_velocity_with_validity(elements, epoch, scale, frame, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// A position and velocity, in the frame and units the returning function
+/// states.
+pub type PositionVelocity = ([f64; 3], [f64; 3]);
+
+/// [`position_velocity`] under an explicit UT1 [`ValidityMode`], as
+/// [`position_with_validity`].
+pub fn position_velocity_with_validity(
+    elements: &Elements,
+    epoch: CalendarEpoch,
+    scale: TimeScale,
+    frame: Frame,
+    mode: ValidityMode,
+) -> Result<Validated<PositionVelocity>, ReducedOrbitError> {
+    let gate = Ut1Gate::new(mode);
+    let state = position_velocity_gated(elements, epoch, scale, frame, &gate)?;
+    finish_reduced(&gate, state)
+}
+
+fn position_velocity_gated(
+    elements: &Elements,
+    epoch: CalendarEpoch,
+    scale: TimeScale,
+    frame: Frame,
+    gate: &Ut1Gate,
 ) -> Result<([f64; 3], [f64; 3]), ReducedOrbitError> {
     validate_elements_for_evaluation(elements, scale)?;
     validate_calendar_epoch(epoch, scale, "epoch")?;
@@ -1317,8 +1419,8 @@ pub fn position_velocity(
             (r, v)
         }
         Frame::Ecef => {
-            let mat = gcrs_to_itrs_matrix(&ts)
-                .map_err(|_| invalid_input("epoch", "invalid frame transform"))?;
+            let ts = gate.admit(ts).map_err(frame_input)?;
+            let mat = gcrs_to_itrs_matrix(&ts).map_err(frame_transform_input)?;
             let r_itrs_km = mat3_vec3_mul_unchecked(&mat, &r_gcrs_km);
             let v_rot_km_s = mat3_vec3_mul_unchecked(&mat, &v_gcrs_km_s);
             // Transport term: v_itrs = R v_gcrs - omega x r_itrs.
@@ -1454,6 +1556,33 @@ fn invalid_input(field: &'static str, reason: &'static str) -> ReducedOrbitError
     ReducedOrbitError::InvalidInput { field, reason }
 }
 
+/// A frame-transform failure as a reduced-orbit error: a UT1 refusal keeps its
+/// type, any other failure keeps its field and reason.
+fn frame_input(error: FrameTransformError) -> ReducedOrbitError {
+    match error {
+        FrameTransformError::Ut1OutsideCoverage { reason } => {
+            ReducedOrbitError::Ut1OutsideCoverage(reason)
+        }
+        FrameTransformError::InvalidInput { field, reason } => invalid_input(field, reason),
+    }
+}
+
+/// A result under the call's UT1 policy.
+fn finish_reduced<T>(gate: &Ut1Gate, value: T) -> Result<Validated<T>, ReducedOrbitError> {
+    gate.finish(value).map_err(frame_input)
+}
+
+/// An evaluation-epoch frame-transform failure: a UT1 outside the UT1 table
+/// keeps its type, and any other failure is reported against the epoch.
+fn frame_transform_input(error: FrameTransformError) -> ReducedOrbitError {
+    match error {
+        FrameTransformError::Ut1OutsideCoverage { .. } => frame_input(error),
+        FrameTransformError::InvalidInput { .. } => {
+            invalid_input("epoch", "invalid frame transform")
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Drift.
 // ---------------------------------------------------------------------------
@@ -1470,6 +1599,33 @@ pub fn drift(
     scale: TimeScale,
     threshold_m: f64,
 ) -> Result<DriftReport, ReducedOrbitError> {
+    drift_with_validity(elements, truth, scale, threshold_m, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`drift`] under an explicit UT1 [`ValidityMode`]: every truth epoch is
+/// evaluated in ECEF, so Strict refuses the report if any lies outside the UT1
+/// table and Permissive reports the first departure in
+/// [`Validated::degraded`].
+pub fn drift_with_validity(
+    elements: &Elements,
+    truth: &[EcefSample],
+    scale: TimeScale,
+    threshold_m: f64,
+    mode: ValidityMode,
+) -> Result<Validated<DriftReport>, ReducedOrbitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = drift_gated(elements, truth, scale, threshold_m, &gate)?;
+    finish_reduced(&gate, report)
+}
+
+fn drift_gated(
+    elements: &Elements,
+    truth: &[EcefSample],
+    scale: TimeScale,
+    threshold_m: f64,
+    gate: &Ut1Gate,
+) -> Result<DriftReport, ReducedOrbitError> {
     validate_elements_for_evaluation(elements, scale)?;
     validate_finite(threshold_m, "threshold_m")?;
     let mut per_epoch = Vec::with_capacity(truth.len());
@@ -1480,7 +1636,7 @@ pub fn drift(
 
     for s in truth {
         validate_truth_sample(s, scale)?;
-        let model = position(elements, s.epoch, scale, Frame::Ecef)?;
+        let model = position_gated(elements, s.epoch, scale, Frame::Ecef, gate)?;
         let dx = model[0] - s.x_m;
         let dy = model[1] - s.y_m;
         let dz = model[2] - s.z_m;
@@ -1523,13 +1679,29 @@ pub fn fit_reduced_orbit_source(
     source: ReducedOrbitSource<'_>,
     options: ReducedOrbitSourceFitOptions,
 ) -> Result<ReducedOrbitSourceFit, ReducedOrbitSourceError> {
-    let sampled = sample_reduced_orbit_source(source, options.sampling)?;
-    let orbit = fit_with_model(&sampled.samples, sampled.scale, options.model)
+    fit_reduced_orbit_source_with_validity(source, options, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`fit_reduced_orbit_source`] under an explicit UT1 [`ValidityMode`]: the
+/// SGP4 source's TEME-to-ECEF sampling and the fit's ECEF-to-GCRS conversion
+/// read UT1, with the policy of [`fit_with_validity`].
+pub fn fit_reduced_orbit_source_with_validity(
+    source: ReducedOrbitSource<'_>,
+    options: ReducedOrbitSourceFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<ReducedOrbitSourceFit>, ReducedOrbitSourceError> {
+    let gate = Ut1Gate::new(mode);
+    let sampled = sample_reduced_orbit_source(source, options.sampling, &gate)?;
+    let orbit = fit_with_model_gated(&sampled.samples, sampled.scale, options.model, &gate)
         .map_err(ReducedOrbitSourceError::Reduced)?;
-    Ok(ReducedOrbitSourceFit {
-        orbit,
-        requested_samples: sampled.requested,
-    })
+    finish_source(
+        &gate,
+        ReducedOrbitSourceFit {
+            orbit,
+            requested_samples: sampled.requested,
+        },
+    )
 }
 
 /// Sample an SP3 or SGP4 source and evaluate drift against those truth samples.
@@ -1538,24 +1710,41 @@ pub fn drift_reduced_orbit_source(
     source: ReducedOrbitSource<'_>,
     options: ReducedOrbitSourceDriftOptions,
 ) -> Result<ReducedOrbitSourceDrift, ReducedOrbitSourceError> {
-    let sampled = sample_reduced_orbit_source(source, options.sampling)?;
+    drift_reduced_orbit_source_with_validity(elements, source, options, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`drift_reduced_orbit_source`] under an explicit UT1 [`ValidityMode`], as
+/// [`fit_reduced_orbit_source_with_validity`].
+pub fn drift_reduced_orbit_source_with_validity(
+    elements: &Elements,
+    source: ReducedOrbitSource<'_>,
+    options: ReducedOrbitSourceDriftOptions,
+    mode: ValidityMode,
+) -> Result<Validated<ReducedOrbitSourceDrift>, ReducedOrbitSourceError> {
+    let gate = Ut1Gate::new(mode);
+    let sampled = sample_reduced_orbit_source(source, options.sampling, &gate)?;
     if sampled.samples.is_empty() {
         return Err(ReducedOrbitSourceError::TooFewSamples {
             got: 0,
             required: 1,
         });
     }
-    let report = drift(
+    let report = drift_gated(
         elements,
         &sampled.samples,
         sampled.scale,
         options.threshold_m,
+        &gate,
     )
     .map_err(ReducedOrbitSourceError::Reduced)?;
-    Ok(ReducedOrbitSourceDrift {
-        report,
-        requested_samples: sampled.requested,
-    })
+    finish_source(
+        &gate,
+        ReducedOrbitSourceDrift {
+            report,
+            requested_samples: sampled.requested,
+        },
+    )
 }
 
 /// Sample an SP3 or SGP4 source and fit a piecewise reduced orbit.
@@ -1563,21 +1752,37 @@ pub fn fit_piecewise_reduced_orbit_source(
     source: ReducedOrbitSource<'_>,
     options: PiecewiseOrbitSourceFitOptions,
 ) -> Result<PiecewiseOrbitSourceFit, ReducedOrbitSourceError> {
-    let sampled = sample_reduced_orbit_source(source, options.sampling)?;
+    fit_piecewise_reduced_orbit_source_with_validity(source, options, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`fit_piecewise_reduced_orbit_source`] under an explicit UT1
+/// [`ValidityMode`], as [`fit_reduced_orbit_source_with_validity`].
+pub fn fit_piecewise_reduced_orbit_source_with_validity(
+    source: ReducedOrbitSource<'_>,
+    options: PiecewiseOrbitSourceFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<PiecewiseOrbitSourceFit>, ReducedOrbitSourceError> {
+    let gate = Ut1Gate::new(mode);
+    let sampled = sample_reduced_orbit_source(source, options.sampling, &gate)?;
     let segment_s = rounded_segment_s(options.segment_s)?;
-    let orbit = fit_piecewise(
+    let orbit = fit_piecewise_gated(
         &sampled.samples,
         sampled.scale,
         options.model,
         options.sampling.t0,
         options.sampling.t1,
         segment_s,
+        &gate,
     )
     .map_err(ReducedOrbitSourceError::Piecewise)?;
-    Ok(PiecewiseOrbitSourceFit {
-        orbit,
-        requested_samples: sampled.requested,
-    })
+    finish_source(
+        &gate,
+        PiecewiseOrbitSourceFit {
+            orbit,
+            requested_samples: sampled.requested,
+        },
+    )
 }
 
 /// Sample an SP3 or SGP4 source and evaluate a piecewise model's drift.
@@ -1586,24 +1791,51 @@ pub fn drift_piecewise_reduced_orbit_source(
     source: ReducedOrbitSource<'_>,
     options: ReducedOrbitSourceDriftOptions,
 ) -> Result<ReducedOrbitSourceDrift, ReducedOrbitSourceError> {
-    let sampled = sample_reduced_orbit_source(source, options.sampling)?;
+    drift_piecewise_reduced_orbit_source_with_validity(
+        piecewise,
+        source,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`drift_piecewise_reduced_orbit_source`] under an explicit UT1
+/// [`ValidityMode`], as [`fit_reduced_orbit_source_with_validity`].
+pub fn drift_piecewise_reduced_orbit_source_with_validity(
+    piecewise: &PiecewiseOrbit,
+    source: ReducedOrbitSource<'_>,
+    options: ReducedOrbitSourceDriftOptions,
+    mode: ValidityMode,
+) -> Result<Validated<ReducedOrbitSourceDrift>, ReducedOrbitSourceError> {
+    let gate = Ut1Gate::new(mode);
+    let sampled = sample_reduced_orbit_source(source, options.sampling, &gate)?;
     if sampled.samples.is_empty() {
         return Err(ReducedOrbitSourceError::TooFewSamples {
             got: 0,
             required: 1,
         });
     }
-    let report = piecewise_drift(
+    let report = piecewise_drift_gated(
         piecewise,
         &sampled.samples,
         sampled.scale,
         options.threshold_m,
+        &gate,
     )
     .map_err(ReducedOrbitSourceError::Piecewise)?;
-    Ok(ReducedOrbitSourceDrift {
-        report,
-        requested_samples: sampled.requested,
-    })
+    finish_source(
+        &gate,
+        ReducedOrbitSourceDrift {
+            report,
+            requested_samples: sampled.requested,
+        },
+    )
+}
+
+fn finish_source<T>(gate: &Ut1Gate, value: T) -> Result<Validated<T>, ReducedOrbitSourceError> {
+    gate.finish(value)
+        .map_err(|error| ReducedOrbitSourceError::Reduced(frame_input(error)))
 }
 
 #[derive(Debug)]
@@ -1616,6 +1848,7 @@ struct SourceSamples {
 fn sample_reduced_orbit_source(
     source: ReducedOrbitSource<'_>,
     sampling: ReducedOrbitSourceSampling,
+    gate: &Ut1Gate,
 ) -> Result<SourceSamples, ReducedOrbitSourceError> {
     let scale = match source {
         ReducedOrbitSource::Sp3 { product, .. } => product.header.time_scale,
@@ -1629,8 +1862,9 @@ fn sample_reduced_orbit_source(
             .collect(),
         ReducedOrbitSource::Sgp4 { satellite } => steps
             .iter()
-            .filter_map(|epoch| sample_sgp4_epoch(satellite, *epoch))
-            .collect(),
+            .filter_map(|epoch| sample_sgp4_epoch(satellite, *epoch, gate).transpose())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| ReducedOrbitSourceError::Reduced(frame_input(error)))?,
     };
     Ok(SourceSamples {
         samples,
@@ -1679,27 +1913,40 @@ fn sample_sp3_epoch(
     ))
 }
 
-fn sample_sgp4_epoch(satellite: &Satellite, epoch: CalendarEpoch) -> Option<EcefSample> {
-    let prediction = satellite
-        .propagate_jd(julian_date_from_calendar(epoch))
-        .ok()?;
-    let ts = epoch.time_scales(TimeScale::Utc);
-    let (gcrs, _) = teme_to_gcrs_compute(
+/// One SGP4 sample in ECEF. `Ok(None)` skips an epoch SGP4 cannot propagate
+/// or whose TEME state is not finite, as the sampler counts requested
+/// against usable epochs; a UT1 outside the UT1 table is an error, since
+/// every later epoch would be refused the same way.
+fn sample_sgp4_epoch(
+    satellite: &Satellite,
+    epoch: CalendarEpoch,
+    gate: &Ut1Gate,
+) -> Result<Option<EcefSample>, FrameTransformError> {
+    let Ok(prediction) = satellite.propagate_jd(julian_date_from_calendar(epoch)) else {
+        return Ok(None);
+    };
+    let ts = gate.admit(epoch.time_scales(TimeScale::Utc))?;
+    let Ok((gcrs, _)) = teme_to_gcrs_compute(
         &TemeStateKm {
             position_km: prediction.position,
             velocity_km_s: prediction.velocity,
         },
         &ts,
         false,
-    )
-    .ok()?;
-    let (x_km, y_km, z_km) = gcrs_to_itrs_compute(gcrs.0, gcrs.1, gcrs.2, &ts, false).ok()?;
-    Some(EcefSample::new(
+    ) else {
+        return Ok(None);
+    };
+    let (x_km, y_km, z_km) = match gcrs_to_itrs_compute(gcrs.0, gcrs.1, gcrs.2, &ts, false) {
+        Ok(itrs) => itrs,
+        Err(error @ FrameTransformError::Ut1OutsideCoverage { .. }) => return Err(error),
+        Err(FrameTransformError::InvalidInput { .. }) => return Ok(None),
+    };
+    Ok(Some(EcefSample::new(
         epoch,
         x_km * M_PER_KM,
         y_km * M_PER_KM,
         z_km * M_PER_KM,
-    ))
+    )))
 }
 
 fn instant_from_calendar(
@@ -1839,6 +2086,50 @@ pub fn fit_piecewise(
     t1: CalendarEpoch,
     segment_s: i64,
 ) -> Result<PiecewiseOrbit, PiecewiseOrbitError> {
+    fit_piecewise_with_validity(
+        samples,
+        scale,
+        model,
+        t0,
+        t1,
+        segment_s,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`fit_piecewise`] under an explicit UT1 [`ValidityMode`], with the policy
+/// of [`fit_with_validity`] across every segment.
+#[allow(clippy::too_many_arguments)]
+pub fn fit_piecewise_with_validity(
+    samples: &[EcefSample],
+    scale: TimeScale,
+    model: Model,
+    t0: CalendarEpoch,
+    t1: CalendarEpoch,
+    segment_s: i64,
+    mode: ValidityMode,
+) -> Result<Validated<PiecewiseOrbit>, PiecewiseOrbitError> {
+    let gate = Ut1Gate::new(mode);
+    let orbit = fit_piecewise_gated(samples, scale, model, t0, t1, segment_s, &gate)?;
+    finish_piecewise(&gate, orbit)
+}
+
+fn finish_piecewise<T>(gate: &Ut1Gate, value: T) -> Result<Validated<T>, PiecewiseOrbitError> {
+    gate.finish(value)
+        .map_err(|error| PiecewiseOrbitError::Reduced(frame_input(error)))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fit_piecewise_gated(
+    samples: &[EcefSample],
+    scale: TimeScale,
+    model: Model,
+    t0: CalendarEpoch,
+    t1: CalendarEpoch,
+    segment_s: i64,
+    gate: &Ut1Gate,
+) -> Result<PiecewiseOrbit, PiecewiseOrbitError> {
     let bounds = segment_bounds(t0, t1, segment_s)?;
     let last_index = bounds.len().saturating_sub(1);
     let mut segments = Vec::new();
@@ -1850,7 +2141,7 @@ pub fn fit_piecewise(
             .filter(|s| sample_in_bounds(s.epoch, seg_t0, seg_t1))
             .collect();
 
-        match fit_with_model(&subset, scale, model) {
+        match fit_with_model_gated(&subset, scale, model, gate) {
             Ok(orbit) => segments.push(PiecewiseSegment {
                 t0: seg_t0,
                 t1: seg_t1,
@@ -1947,9 +2238,35 @@ pub fn piecewise_position(
     scale: TimeScale,
     frame: Frame,
 ) -> Result<[f64; 3], PiecewiseOrbitError> {
+    piecewise_position_with_validity(piecewise, epoch, scale, frame, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`piecewise_position`] under an explicit UT1 [`ValidityMode`], as
+/// [`position_with_validity`].
+pub fn piecewise_position_with_validity(
+    piecewise: &PiecewiseOrbit,
+    epoch: CalendarEpoch,
+    scale: TimeScale,
+    frame: Frame,
+    mode: ValidityMode,
+) -> Result<Validated<[f64; 3]>, PiecewiseOrbitError> {
+    let gate = Ut1Gate::new(mode);
+    let r = piecewise_position_gated(piecewise, epoch, scale, frame, &gate)?;
+    finish_piecewise(&gate, r)
+}
+
+fn piecewise_position_gated(
+    piecewise: &PiecewiseOrbit,
+    epoch: CalendarEpoch,
+    scale: TimeScale,
+    frame: Frame,
+    gate: &Ut1Gate,
+) -> Result<[f64; 3], PiecewiseOrbitError> {
     validate_calendar_epoch(epoch, scale, "epoch").map_err(PiecewiseOrbitError::Reduced)?;
     let seg = select_piecewise_segment(piecewise, epoch)?;
-    position(&seg.orbit.elements, epoch, scale, frame).map_err(PiecewiseOrbitError::Reduced)
+    position_gated(&seg.orbit.elements, epoch, scale, frame, gate)
+        .map_err(PiecewiseOrbitError::Reduced)
 }
 
 /// Evaluate piecewise reduced-orbit position and velocity at `epoch`.
@@ -1959,10 +2276,25 @@ pub fn piecewise_position_velocity(
     scale: TimeScale,
     frame: Frame,
 ) -> Result<([f64; 3], [f64; 3]), PiecewiseOrbitError> {
+    piecewise_position_velocity_with_validity(piecewise, epoch, scale, frame, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`piecewise_position_velocity`] under an explicit UT1 [`ValidityMode`], as
+/// [`position_with_validity`].
+pub fn piecewise_position_velocity_with_validity(
+    piecewise: &PiecewiseOrbit,
+    epoch: CalendarEpoch,
+    scale: TimeScale,
+    frame: Frame,
+    mode: ValidityMode,
+) -> Result<Validated<PositionVelocity>, PiecewiseOrbitError> {
     validate_calendar_epoch(epoch, scale, "epoch").map_err(PiecewiseOrbitError::Reduced)?;
     let seg = select_piecewise_segment(piecewise, epoch)?;
-    position_velocity(&seg.orbit.elements, epoch, scale, frame)
-        .map_err(PiecewiseOrbitError::Reduced)
+    let gate = Ut1Gate::new(mode);
+    let state = position_velocity_gated(&seg.orbit.elements, epoch, scale, frame, &gate)
+        .map_err(PiecewiseOrbitError::Reduced)?;
+    finish_piecewise(&gate, state)
 }
 
 /// Evaluate a piecewise model against truth ECEF samples.
@@ -1974,6 +2306,31 @@ pub fn piecewise_drift(
     truth: &[EcefSample],
     scale: TimeScale,
     threshold_m: f64,
+) -> Result<DriftReport, PiecewiseOrbitError> {
+    piecewise_drift_with_validity(piecewise, truth, scale, threshold_m, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`piecewise_drift`] under an explicit UT1 [`ValidityMode`], as
+/// [`drift_with_validity`].
+pub fn piecewise_drift_with_validity(
+    piecewise: &PiecewiseOrbit,
+    truth: &[EcefSample],
+    scale: TimeScale,
+    threshold_m: f64,
+    mode: ValidityMode,
+) -> Result<Validated<DriftReport>, PiecewiseOrbitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = piecewise_drift_gated(piecewise, truth, scale, threshold_m, &gate)?;
+    finish_piecewise(&gate, report)
+}
+
+fn piecewise_drift_gated(
+    piecewise: &PiecewiseOrbit,
+    truth: &[EcefSample],
+    scale: TimeScale,
+    threshold_m: f64,
+    gate: &Ut1Gate,
 ) -> Result<DriftReport, PiecewiseOrbitError> {
     validate_finite(threshold_m, "threshold_m").map_err(PiecewiseOrbitError::Reduced)?;
     if truth.is_empty() {
@@ -1994,8 +2351,12 @@ pub fn piecewise_drift(
 
     for s in truth {
         validate_truth_sample(s, scale).map_err(PiecewiseOrbitError::Reduced)?;
-        let Ok(model) = piecewise_position(piecewise, s.epoch, scale, Frame::Ecef) else {
-            continue;
+        // A truth epoch outside the piecewise model's coverage is skipped;
+        // any other failure, a UT1 refusal included, fails the report.
+        let model = match piecewise_position_gated(piecewise, s.epoch, scale, Frame::Ecef, gate) {
+            Ok(model) => model,
+            Err(PiecewiseOrbitError::OutOfRange) => continue,
+            Err(error) => return Err(error),
         };
         let dx = model[0] - s.x_m;
         let dy = model[1] - s.y_m;

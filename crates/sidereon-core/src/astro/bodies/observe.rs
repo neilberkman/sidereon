@@ -31,12 +31,13 @@ use crate::astro::frames::transforms::{
     geodetic_to_itrs, greenwich_apparent_sidereal_time_radians, itrs_to_gcrs_compute,
     itrs_to_gcrs_compute_with_polar_motion, itrs_to_gcrs_matrix,
     itrs_to_gcrs_matrix_with_polar_motion, itrs_to_topocentric, mat3_vec3_mul_unchecked,
-    FrameTransformError, GeodeticStationKm, PolarMotion,
+    with_ut1_validity, FrameTransformError, GeodeticStationKm, PolarMotion,
 };
 use crate::astro::math::vec3::{add3, dot3, norm3, scale3, sub3, unit3};
 use crate::astro::passes::UtcInstant;
 use crate::astro::spk::{Spk, SpkError, SpkState};
 use crate::astro::time::scales::TimeScales;
+use crate::astro::time::{Validated, ValidityMode};
 
 const C_KM_S: f64 = SPEED_OF_LIGHT_M_S / M_PER_KM;
 const LIGHT_TIME_TOLERANCE_S: f64 = 1.0e-9;
@@ -220,12 +221,6 @@ pub enum ObserveError {
     /// Angle geometry failed.
     #[error("angle geometry failed: {0}")]
     Angle(#[from] AngleError),
-    /// SPK state used a reference frame this reduction does not support.
-    #[error("unsupported SPK reference frame {frame}")]
-    UnsupportedSpkFrame {
-        /// NAIF reference-frame identifier returned by the SPK state.
-        frame: i32,
-    },
     /// A public input or computed intermediate was not finite.
     #[error("non-finite observation input or intermediate")]
     NonFinite,
@@ -235,13 +230,35 @@ pub enum ObserveError {
 }
 
 /// General topocentric observation.
+///
+/// Refuses an instant outside the UT1 table; see [`observe_with_validity`].
 pub fn observe(
     station: &GeodeticStationKm,
     time: UtcInstant,
     target: Target<'_>,
     options: ObserveOptions,
 ) -> Result<Observation, ObserveError> {
-    observe_with_time_scales(station, &time.time_scales(), target, options)
+    observe_with_validity(station, time, target, options, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`observe`] under an explicit UT1 [`ValidityMode`].
+///
+/// [`ValidityMode::Strict`] refuses an instant outside the UT1 table with
+/// [`FrameTransformError::Ut1OutsideCoverage`];
+/// [`ValidityMode::Permissive`] observes it with the long-term UT1 and reports
+/// the departure in [`Validated::degraded`]. With caller-supplied time scales,
+/// use [`with_ut1_validity`] around [`observe_with_time_scales`].
+pub fn observe_with_validity(
+    station: &GeodeticStationKm,
+    time: UtcInstant,
+    target: Target<'_>,
+    options: ObserveOptions,
+    mode: ValidityMode,
+) -> Result<Validated<Observation>, ObserveError> {
+    with_ut1_validity(&time.time_scales(), mode, |ts| {
+        observe_with_time_scales(station, ts, target, options)
+    })
 }
 
 /// Convenience wrapper for observing an SPK body with default options.
@@ -251,11 +268,25 @@ pub fn observe_spk_body(
     kernel: &Spk,
     naif_id: i32,
 ) -> Result<Observation, ObserveError> {
-    observe(
+    observe_spk_body_with_validity(station, time, kernel, naif_id, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`observe_spk_body`] under an explicit UT1 [`ValidityMode`], as
+/// [`observe_with_validity`].
+pub fn observe_spk_body_with_validity(
+    station: &GeodeticStationKm,
+    time: UtcInstant,
+    kernel: &Spk,
+    naif_id: i32,
+    mode: ValidityMode,
+) -> Result<Validated<Observation>, ObserveError> {
+    observe_with_validity(
         station,
         time,
         Target::Spk { kernel, naif_id },
         ObserveOptions::default(),
+        mode,
     )
 }
 
@@ -270,7 +301,7 @@ pub(crate) fn apparent_geocentric_spk_true_of_date_m(
     ensure_finite(et)?;
 
     let earth = spk_state_j2000(kernel, NAIF_EARTH, NAIF_SSB, et)?;
-    let v_earth_km_s = spk_velocity_j2000(kernel, NAIF_EARTH, NAIF_SSB, et, earth)?;
+    let v_earth_km_s = earth.velocity_km_s;
     let light_time = solve_spk_light_time(kernel, target_naif, et, earth.position_km)?;
     let u_astro = unit_checked(light_time.rho_vec_km)?;
     let u_deflected = if target_naif == NAIF_SUN {
@@ -350,8 +381,20 @@ pub fn sun_az_el(
     station: &GeodeticStationKm,
     time: UtcInstant,
 ) -> Result<BodyAzEl, BodyObservationError> {
-    let sun_ecef_m = sun_moon_ecef(&time.time_scales())?.sun;
-    body_az_el(station, sun_ecef_m)
+    sun_az_el_with_validity(station, time, ValidityMode::Strict).map(|validated| validated.value)
+}
+
+/// [`sun_az_el`] under an explicit UT1 [`ValidityMode`]: Strict refuses an
+/// instant outside the UT1 table; Permissive evaluates it and reports the
+/// departure in [`Validated::degraded`].
+pub fn sun_az_el_with_validity(
+    station: &GeodeticStationKm,
+    time: UtcInstant,
+    mode: ValidityMode,
+) -> Result<Validated<BodyAzEl>, BodyObservationError> {
+    with_ut1_validity(&time.time_scales(), mode, |ts| {
+        body_az_el(station, sun_moon_ecef(ts)?.sun)
+    })
 }
 
 /// Topocentric azimuth/elevation/range of the Moon from a ground site at an
@@ -364,11 +407,22 @@ pub fn moon_az_el(
     station: &GeodeticStationKm,
     time: UtcInstant,
 ) -> Result<BodyAzEl, BodyObservationError> {
-    let moon_ecef_m = sun_moon_ecef(&time.time_scales())?.moon;
-    body_az_el(station, moon_ecef_m)
+    moon_az_el_with_validity(station, time, ValidityMode::Strict).map(|validated| validated.value)
 }
 
-fn body_az_el(
+/// [`moon_az_el`] under an explicit UT1 [`ValidityMode`], as
+/// [`sun_az_el_with_validity`].
+pub fn moon_az_el_with_validity(
+    station: &GeodeticStationKm,
+    time: UtcInstant,
+    mode: ValidityMode,
+) -> Result<Validated<BodyAzEl>, BodyObservationError> {
+    with_ut1_validity(&time.time_scales(), mode, |ts| {
+        body_az_el(station, sun_moon_ecef(ts)?.moon)
+    })
+}
+
+pub(crate) fn body_az_el(
     station: &GeodeticStationKm,
     body_ecef_m: [f64; 3],
 ) -> Result<BodyAzEl, BodyObservationError> {
@@ -398,7 +452,27 @@ pub fn moon_illumination(
     station: &GeodeticStationKm,
     time: UtcInstant,
 ) -> Result<MoonIllumination, BodyObservationError> {
-    let sun_moon = sun_moon_ecef(&time.time_scales())?;
+    moon_illumination_with_validity(station, time, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`moon_illumination`] under an explicit UT1 [`ValidityMode`], as
+/// [`sun_az_el_with_validity`].
+pub fn moon_illumination_with_validity(
+    station: &GeodeticStationKm,
+    time: UtcInstant,
+    mode: ValidityMode,
+) -> Result<Validated<MoonIllumination>, BodyObservationError> {
+    with_ut1_validity(&time.time_scales(), mode, |ts| {
+        moon_illumination_at(station, ts)
+    })
+}
+
+fn moon_illumination_at(
+    station: &GeodeticStationKm,
+    ts: &TimeScales,
+) -> Result<MoonIllumination, BodyObservationError> {
+    let sun_moon = sun_moon_ecef(ts)?;
     let sun_km = scale_m_to_km(sun_moon.sun);
     let moon_km = scale_m_to_km(sun_moon.moon);
     let (stn_x, stn_y, stn_z) = geodetic_to_itrs(
@@ -620,7 +694,7 @@ fn observer_barycentric(
     validate_vec3(v_geo_km_s)?;
 
     let earth = spk_state_j2000(kernel, NAIF_EARTH, NAIF_SSB, et)?;
-    let v_earth_km_s = spk_velocity_j2000(kernel, NAIF_EARTH, NAIF_SSB, et, earth)?;
+    let v_earth_km_s = earth.velocity_km_s;
     Ok(ObserverBarycentric {
         r_geo_km,
         r_bary_km: add3(earth.position_km, r_geo_km),
@@ -737,45 +811,18 @@ fn solve_supplied_state_light_time(
     })
 }
 
+/// The SPK state in the J2000 frame (NAIF frame 1): legs in other NAIF
+/// inertial frames are rotated into it as CSPICE `SPKGEO` rotates them.
 fn spk_state_j2000(
     kernel: &Spk,
     target: i32,
     center: i32,
     et: f64,
 ) -> Result<SpkState, ObserveError> {
-    let state = kernel.spk_state(target, center, et)?;
-    if state.frame != SPK_FRAME_J2000 {
-        return Err(ObserveError::UnsupportedSpkFrame { frame: state.frame });
-    }
+    let state = kernel.spk_state_in_frame(target, center, et, SPK_FRAME_J2000)?;
     validate_vec3(state.position_km)?;
-    if let Some(velocity) = state.velocity_km_s {
-        validate_vec3(velocity)?;
-    }
+    validate_vec3(state.velocity_km_s)?;
     Ok(state)
-}
-
-fn spk_velocity_j2000(
-    kernel: &Spk,
-    target: i32,
-    center: i32,
-    et: f64,
-    state: SpkState,
-) -> Result<[f64; 3], ObserveError> {
-    if let Some(velocity) = state.velocity_km_s {
-        return Ok(velocity);
-    }
-
-    let dt = 1.0;
-    let before = spk_state_j2000(kernel, target, center, et - dt);
-    let after = spk_state_j2000(kernel, target, center, et + dt);
-    let velocity = match (before, after) {
-        (Ok(before), Ok(after)) => scale3(sub3(after.position_km, before.position_km), 0.5 / dt),
-        (Ok(before), Err(_)) => scale3(sub3(state.position_km, before.position_km), 1.0 / dt),
-        (Err(_), Ok(after)) => scale3(sub3(after.position_km, state.position_km), 1.0 / dt),
-        (Err(error), Err(_)) => return Err(error),
-    };
-    validate_vec3(velocity)?;
-    Ok(velocity)
 }
 
 fn apply_solar_deflection(
@@ -999,6 +1046,52 @@ mod tests {
             "../../../tests/fixtures/bodies/observe_de.bsp"
         ))
         .expect("fixture SPK")
+    }
+
+    #[test]
+    fn observation_after_the_ut1_table_is_refused_or_reported() {
+        // 2027-09-01 is past the embedded UT1 table, which ends in 2027-07.
+        let time = UtcInstant::from_utc(2027, 9, 1, 12, 0, 0, 0).expect("valid UTC");
+        let after = Some(crate::astro::time::DegradeReason::AfterCoverage);
+        let refused = FrameTransformError::Ut1OutsideCoverage {
+            reason: crate::astro::time::DegradeReason::AfterCoverage,
+        };
+
+        assert!(matches!(
+            observe(&greenwich(), time, Target::Sun, ObserveOptions::default()),
+            Err(ObserveError::FrameTransform(error)) if error == refused
+        ));
+        let observed = observe_with_validity(
+            &greenwich(),
+            time,
+            Target::Sun,
+            ObserveOptions::default(),
+            ValidityMode::Permissive,
+        )
+        .expect("permissive observation");
+        assert_eq!(observed.degraded, after);
+        assert!(observed.value.horizontal.elevation_deg.is_finite());
+
+        assert_eq!(
+            sun_az_el(&greenwich(), time),
+            Err(BodyObservationError::FrameTransform(refused))
+        );
+        let sun = sun_az_el_with_validity(&greenwich(), time, ValidityMode::Permissive)
+            .expect("permissive Sun");
+        assert_eq!(sun.degraded, after);
+        // Near noon at Greenwich in September the Sun is well up.
+        assert!(sun.value.elevation_deg > 30.0);
+        let moon = moon_illumination_with_validity(&greenwich(), time, ValidityMode::Permissive)
+            .expect("permissive Moon illumination");
+        assert_eq!(moon.degraded, after);
+
+        // Inside the table both modes agree bit for bit.
+        let inside = UtcInstant::from_utc(2024, 6, 20, 12, 1, 42, 0).expect("valid UTC");
+        let strict = sun_az_el(&greenwich(), inside).expect("in table");
+        let permissive = sun_az_el_with_validity(&greenwich(), inside, ValidityMode::Permissive)
+            .expect("in table");
+        assert_eq!(permissive.degraded, None);
+        assert_eq!(permissive.value, strict);
     }
 
     #[test]

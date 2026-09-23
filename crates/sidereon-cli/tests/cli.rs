@@ -143,6 +143,155 @@ fn inspect_empty_and_garbage_text_are_unrecognized() {
     }
 }
 
+const ISS_L1: &str = "1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993";
+const ISS_L2: &str = "2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106";
+
+fn first_lines(path: &PathBuf, count: usize) -> String {
+    let text = fs::read_to_string(path).expect("read fixture");
+    let mut out: String = text.lines().take(count).collect::<Vec<_>>().join("\n");
+    out.push('\n');
+    out
+}
+
+fn assert_parse_error_for(name: &str, text: &str, format: &str, detail: &str) {
+    let path = temp_text_file(name, text);
+    let output = run(&["inspect", path.to_str().expect("temp path utf8")]);
+    let _ = fs::remove_file(&path);
+    let stderr = stderr(&output);
+    assert!(
+        !output.status.success(),
+        "{name} should not inspect successfully\nstdout:\n{}",
+        stdout(&output)
+    );
+    assert!(
+        stderr.contains(&format!("parse {format}")),
+        "{name} stderr:\n{stderr}"
+    );
+    assert!(stderr.contains(detail), "{name} stderr:\n{stderr}");
+    assert!(
+        !stderr.contains("unrecognized file type"),
+        "{name} stderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn inspect_malformed_nav_reports_the_nav_parse_error() {
+    let nav = fixture(&["nav", "ESBC00DNK_R_20201770000_01D_MN.rnx"]);
+    assert_parse_error_for(
+        "header-only.rnx",
+        &first_lines(&nav, 2),
+        "RINEX NAV",
+        "END OF HEADER",
+    );
+}
+
+#[test]
+fn inspect_malformed_sp3_reports_the_sp3_parse_error() {
+    let sp3 = fixture(&["sp3", "COD0MGXFIN_20201770000_01D_05M_ORB.SP3"]);
+    assert_parse_error_for(
+        "line-one-only.sp3",
+        &first_lines(&sp3, 1),
+        "SP3",
+        "header line 2",
+    );
+}
+
+#[test]
+fn inspect_malformed_obs_reports_the_obs_parse_error() {
+    let obs = fixture(&["obs", "ESBC00DNK_R_20201770000_01D_30S_MO_trim.rnx"]);
+    assert_parse_error_for(
+        "header-only.obs",
+        &first_lines(&obs, 2),
+        "RINEX OBS",
+        "END OF HEADER",
+    );
+}
+
+#[test]
+fn inspect_window_on_a_non_sp3_file_names_the_detected_format() {
+    let nav = fixture(&["nav", "ESBC00DNK_R_20201770000_01D_MN.rnx"]);
+    let output = run(&[
+        "inspect",
+        nav.to_str().expect("fixture path utf8"),
+        "--window",
+        "0",
+        "1",
+    ]);
+    assert!(!output.status.success());
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("--window is available only for SP3 products"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("RINEX NAV"), "{stderr}");
+}
+
+#[test]
+fn inspect_crinex_is_decoded_and_read_as_observations() {
+    let crx = fixture(&["obs", "ESBC00DNK_R_20201770000_01D_30S_MO_trim.crx"]);
+    let output = run(&["inspect", crx.to_str().expect("fixture path utf8")]);
+    assert!(
+        output.status.success(),
+        "status {:?}\nstderr:\n{}",
+        output.status.code(),
+        stderr(&output)
+    );
+    let stdout = stdout(&output);
+    assert!(stdout.contains("type: RINEX OBS (CRINEX)"), "{stdout}");
+    assert!(stdout.contains("G05"), "{stdout}");
+}
+
+#[test]
+fn inspect_tle_keeps_good_records_and_reports_bad_ones_by_line() {
+    let text = format!(
+        "ISS (ZARYA)\n{ISS_L1}\n{ISS_L2}\nBROKEN\n1 25544U not a real line\n2 25544 not a real line\n"
+    );
+    let path = temp_text_file("mixed.tle", &text);
+    let output = run(&["inspect", path.to_str().expect("temp path utf8")]);
+    let _ = fs::remove_file(&path);
+    assert!(
+        output.status.success(),
+        "status {:?}\nstderr:\n{}",
+        output.status.code(),
+        stderr(&output)
+    );
+    let stdout = stdout(&output);
+    assert!(stdout.contains("type: TLE"), "{stdout}");
+    assert!(stdout.contains("tle_pairs: 1"), "{stdout}");
+    assert!(stdout.contains("rejected_records: 1"), "{stdout}");
+    assert!(stdout.contains("rejected: line 4 (BROKEN): "), "{stdout}");
+}
+
+#[test]
+fn inspect_tle_reports_checksum_mismatches_with_their_record() {
+    let bad_l1 = format!("{}0", &ISS_L1[..68]);
+    let text = format!("ISS (ZARYA)\n{bad_l1}\n{ISS_L2}\n");
+    let path = temp_text_file("checksum.tle", &text);
+    let output = run(&["inspect", path.to_str().expect("temp path utf8")]);
+    let _ = fs::remove_file(&path);
+    assert!(output.status.success(), "stderr:\n{}", stderr(&output));
+    let stdout = stdout(&output);
+    assert!(stdout.contains("tle_pairs: 1"), "{stdout}");
+    assert!(stdout.contains("checksum_warnings: 1"), "{stdout}");
+    assert!(
+        stdout.contains("checksum_warning: record at line 2: line 1 checksum digit 0"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn inspect_tle_with_no_readable_record_fails_with_each_reason() {
+    let text = "BROKEN\n1 25544U not a real line\n2 25544 not a real line\n";
+    let path = temp_text_file("broken.tle", text);
+    let output = run(&["inspect", path.to_str().expect("temp path utf8")]);
+    let _ = fs::remove_file(&path);
+    assert!(!output.status.success(), "stdout:\n{}", stdout(&output));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("parse TLE"), "{stderr}");
+    assert!(stderr.contains("no element set parsed"), "{stderr}");
+    assert!(stderr.contains("rejected: line 1 (BROKEN): "), "{stderr}");
+}
+
 #[test]
 fn inspect_nav_reports_compatible_time_bases_separately() {
     let nav = fixture(&["nav", "ESBC00DNK_R_20201770000_01D_MN.rnx"]);

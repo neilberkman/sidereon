@@ -215,7 +215,7 @@ pub(super) fn prepare_arc(
         &arc.corrections.ppp,
         pass,
         SsrBiasExclusionStage::BeforeSolve,
-    );
+    )?;
     let new_keys = new_exclusions
         .iter()
         .map(|exclusion| (exclusion.epoch_index, exclusion.ambiguity_id.clone()))
@@ -458,7 +458,7 @@ where
 
         // Re-check the observations the solution kept at the converged position,
         // including those the rows did not check because they were admitted again.
-        let late = kept_ssr_bias_failures(arc, &prepared, &solution, pass)
+        let late = kept_ssr_bias_failures(arc, &prepared, &solution, pass)?
             .into_iter()
             .filter(|exclusion| {
                 !judged_after_fix.iter().any(|(epoch_index, ambiguity_id)| {
@@ -474,21 +474,21 @@ where
 
         // Admit again, once each, the transmit-time exclusions that hold at convergence.
         let before = exclusions.len();
-        exclusions.retain(|exclusion| {
+        let mut still_excluded = Vec::with_capacity(before);
+        for exclusion in exclusions.drain(..) {
             let key = (exclusion.epoch_index, exclusion.ambiguity_id.clone());
             if exclusion.transmit_time_failure.is_none()
                 || pinned.contains(&key)
                 || readmitted.contains(&key)
             {
-                return true;
-            }
-            if ssr_bias_holds_at(arc, epochs, &key, solution.position_m, pass) {
+                still_excluded.push(exclusion);
+            } else if ssr_bias_holds_at(arc, epochs, &key, solution.position_m, pass)? {
                 readmitted.push(key);
-                false
             } else {
-                true
+                still_excluded.push(exclusion);
             }
-        });
+        }
+        exclusions = still_excluded;
         if exclusions.len() < before {
             state = solved_state;
             continue;
@@ -507,17 +507,17 @@ fn kept_ssr_bias_failures(
     prepared: &PreparedArc,
     solution: &FloatSolution,
     pass: usize,
-) -> Vec<SsrBiasExclusion> {
+) -> Result<Vec<SsrBiasExclusion>, FloatSolveError> {
     let kept = solution
         .residuals_m
         .iter()
         .map(|residual| (residual.epoch_index, residual.ambiguity_id.as_str()))
         .collect::<BTreeSet<_>>();
-    prepared
+    let failures = prepared
         .epochs
         .iter()
         .zip(&prepared.correction_epoch_indices)
-        .flat_map(|(epoch, &epoch_index)| {
+        .map(|(epoch, &epoch_index)| {
             let mut kept_epoch = epoch.clone();
             kept_epoch
                 .observations
@@ -531,27 +531,28 @@ fn kept_ssr_bias_failures(
                 pass,
                 SsrBiasExclusionStage::AtConvergence,
             )
-            .1
+            .map(|(_, exclusions)| exclusions)
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(failures.into_iter().flatten().collect())
 }
 
 /// Whether the SSR/HAS bias records of the observation `key` names in `epochs` hold at the
-/// transmission time from `position_m`.
+/// transmission time from `position_m`, or the UT1 refusal met checking them.
 pub(super) fn ssr_bias_holds_at(
     arc: &ArcSettings<'_>,
     epochs: &[FloatEpoch],
     key: &(usize, String),
     position_m: [f64; 3],
     pass: usize,
-) -> bool {
+) -> Result<bool, FloatSolveError> {
     let Some(epoch) = epochs.get(key.0) else {
-        return false;
+        return Ok(false);
     };
     let mut single = epoch.clone();
     single.observations.retain(|obs| obs.ambiguity_id == key.1);
     if single.observations.is_empty() {
-        return false;
+        return Ok(false);
     }
     let (_, failures) = exclude_unresolved_ssr_bias_observations(
         arc.source,
@@ -561,8 +562,8 @@ pub(super) fn ssr_bias_holds_at(
         &arc.corrections.ppp,
         pass,
         SsrBiasExclusionStage::AtConvergence,
-    );
-    failures.is_empty()
+    )?;
+    Ok(failures.is_empty())
 }
 
 /// The pass a solve continuing from `float_solution` and `exclusions` numbers first: one

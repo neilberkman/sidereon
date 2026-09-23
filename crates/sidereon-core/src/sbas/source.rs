@@ -307,6 +307,18 @@ impl EphemerisSource for SbasCorrectedEphemeris<'_> {
     ) -> Option<([f64; 3], f64, Option<f64>)> {
         self.corrected_state_with_group_delay(sat, t_j2000_s)
     }
+
+    /// The one-evaluation read above; an SBAS-corrected source never refuses a state.
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        Ok(self
+            .position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+            .map(crate::astro::time::Validated::ok))
+    }
 }
 
 impl ObservableEphemerisSource for SbasCorrectedEphemeris<'_> {
@@ -358,6 +370,17 @@ impl ObservableEphemerisSource for SbasCorrectedEphemeris<'_> {
             },
             group_delay,
         ))
+    }
+
+    /// The one-evaluation read above; an SBAS-corrected source never refuses a state.
+    fn try_observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<(ObservableState, Option<f64>)>, ObservablesError>
+    {
+        ObservableEphemerisSource::observable_state_group_delay_at_j2000_s(self, sat, t_j2000_s)
+            .map(crate::astro::time::Validated::ok)
     }
 }
 
@@ -430,6 +453,18 @@ impl EphemerisSource for SbasCorrectedEphemerisOwned {
         self.borrowed()
             .corrected_state_with_group_delay(sat, t_j2000_s)
     }
+
+    /// The one-evaluation read above; an SBAS-corrected source never refuses a state.
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        Ok(self
+            .position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+            .map(crate::astro::time::Validated::ok))
+    }
 }
 
 impl ObservableEphemerisSource for SbasCorrectedEphemerisOwned {
@@ -468,6 +503,17 @@ impl ObservableEphemerisSource for SbasCorrectedEphemerisOwned {
             sat,
             t_j2000_s,
         )
+    }
+
+    /// The one-evaluation read above; an SBAS-corrected source never refuses a state.
+    fn try_observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<(ObservableState, Option<f64>)>, ObservablesError>
+    {
+        ObservableEphemerisSource::observable_state_group_delay_at_j2000_s(self, sat, t_j2000_s)
+            .map(crate::astro::time::Validated::ok)
     }
 }
 

@@ -22,6 +22,7 @@ use crate::astro::frames::precession::{
     build_icrs_to_j2000, compute_skyfield_precession_matrix_unchecked,
 };
 use crate::astro::math::mat3::{inline_mxmxm, inline_rxr, inline_tr, Mat3};
+use crate::astro::time::eop::{DegradeReason, Validated, ValidityMode};
 use crate::astro::time::{civil, scales::TimeScales};
 use crate::astro::{
     constants::astro::AU_KM,
@@ -48,6 +49,161 @@ pub enum FrameTransformError {
         /// Static explanation paired with `field` for the failure.
         reason: &'static str,
     },
+    /// The transform reads UT1 (Earth rotation), and the instant lies outside
+    /// the UT1 table, so [`TimeScales::ut1_degraded`] is set and UT1 comes from
+    /// the long-term delta-T curve rather than the table. Use
+    /// [`with_ut1_validity`] with [`ValidityMode::Permissive`] to accept it.
+    #[error("frame transform reads UT1, but the {reason}")]
+    Ut1OutsideCoverage {
+        /// Which side of the UT1 table the instant lies on.
+        reason: DegradeReason,
+    },
+}
+
+/// Refuse time scales whose UT1 lies outside the UT1 table.
+fn require_table_ut1(ts: &TimeScales) -> Result<(), FrameTransformError> {
+    match ts.ut1_degraded {
+        Some(reason) => Err(FrameTransformError::Ut1OutsideCoverage { reason }),
+        None => Ok(()),
+    }
+}
+
+/// Validate time scales for a transform that reads UT1 (Earth rotation).
+fn validate_ut1_time_scales(ts: &TimeScales) -> Result<(), FrameTransformError> {
+    validate_time_scales(ts)?;
+    require_table_ut1(ts)
+}
+
+/// Run a computation that reads UT1 under an explicit [`ValidityMode`].
+///
+/// The transforms that read UT1 (the sidereal times, GCRS/ITRS in either
+/// direction, the mean-of-date to ITRS rotation, and GCRS topocentric) refuse
+/// time scales whose [`TimeScales::ut1_degraded`] is set, with
+/// [`FrameTransformError::Ut1OutsideCoverage`], and so does every entry point
+/// built on them. This is the permissive route for any of them that takes
+/// caller-supplied time scales (for example
+/// [`crate::astro::bodies::observe::observe_with_time_scales`],
+/// [`crate::astro::bodies::sun_moon::sun_moon_ecef`] or
+/// [`crate::astro::frames::EarthOrientation::from_time_scales`]); entry points
+/// that build their own time scales have a `_with_validity` variant instead.
+///
+/// - [`ValidityMode::Strict`] refuses such time scales before running
+///   `compute`, as the transform itself would.
+/// - [`ValidityMode::Permissive`] runs `compute` with the long-term UT1
+///   accepted and returns the result with the departure in
+///   [`Validated::degraded`].
+///
+/// Inside the table both modes return the result with `degraded == None`.
+///
+/// ```
+/// use sidereon_core::astro::frames::transforms::{
+///     gcrs_to_itrs_matrix, with_ut1_validity, FrameTransformError,
+/// };
+/// use sidereon_core::astro::time::{DegradeReason, TimeScales, ValidityMode};
+///
+/// let ts = TimeScales::from_utc(2100, 1, 1, 0, 0, 0.0).unwrap();
+/// assert_eq!(
+///     gcrs_to_itrs_matrix(&ts),
+///     Err(FrameTransformError::Ut1OutsideCoverage {
+///         reason: DegradeReason::AfterCoverage
+///     })
+/// );
+/// let accepted = with_ut1_validity(&ts, ValidityMode::Permissive, gcrs_to_itrs_matrix).unwrap();
+/// assert_eq!(accepted.degraded, Some(DegradeReason::AfterCoverage));
+/// ```
+pub fn with_ut1_validity<T, E>(
+    ts: &TimeScales,
+    mode: ValidityMode,
+    compute: impl FnOnce(&TimeScales) -> Result<T, E>,
+) -> Result<Validated<T>, E>
+where
+    E: From<FrameTransformError>,
+{
+    let gate = Ut1Gate::new(mode);
+    let accepted = gate.admit(*ts)?;
+    let value = compute(&accepted)?;
+    Ok(gate.finish(value)?)
+}
+
+/// The UT1 policy of one call to an entry point that reads UT1, possibly at
+/// many instants.
+///
+/// Every time scales the call evaluates pass through [`Ut1Gate::admit`]. Under
+/// [`ValidityMode::Strict`] an instant outside the UT1 table is refused and the
+/// refusal is also remembered, so a search that scores an instant it cannot
+/// evaluate (as below the horizon, say) still fails in [`Ut1Gate::finish`]
+/// instead of returning a partial result. Under [`ValidityMode::Permissive`]
+/// the instant is accepted and the departure is remembered for the result.
+/// When a call departs on both sides of the table, the first departure is the
+/// one reported.
+#[derive(Debug)]
+pub(crate) struct Ut1Gate {
+    mode: ValidityMode,
+    departure: core::cell::Cell<Option<DegradeReason>>,
+    refused: core::cell::Cell<Option<DegradeReason>>,
+}
+
+impl Ut1Gate {
+    pub(crate) fn new(mode: ValidityMode) -> Self {
+        Self {
+            mode,
+            departure: core::cell::Cell::new(None),
+            refused: core::cell::Cell::new(None),
+        }
+    }
+
+    /// The mode this gate applies.
+    pub(crate) fn mode(&self) -> ValidityMode {
+        self.mode
+    }
+
+    /// Admit `ts` under the gate's mode: unchanged inside the table; outside
+    /// it refused (Strict) or returned with `ut1_degraded` cleared so the
+    /// transforms accept it (Permissive).
+    pub(crate) fn admit(&self, ts: TimeScales) -> Result<TimeScales, FrameTransformError> {
+        self.note(ts.ut1_degraded)?;
+        Ok(TimeScales {
+            ut1_degraded: None,
+            ..ts
+        })
+    }
+
+    /// Pass a departure through the gate's policy: refused under Strict,
+    /// remembered under Permissive. [`Ut1Gate::admit`] uses it for time
+    /// scales; it also takes a departure that arrives inside a value the
+    /// caller built under [`ValidityMode::Permissive`] (an
+    /// [`crate::astro::frames::EarthOrientation`], say).
+    pub(crate) fn note(&self, departure: Option<DegradeReason>) -> Result<(), FrameTransformError> {
+        let Some(reason) = departure else {
+            return Ok(());
+        };
+        match self.mode {
+            ValidityMode::Strict => {
+                if self.refused.get().is_none() {
+                    self.refused.set(Some(reason));
+                }
+                Err(FrameTransformError::Ut1OutsideCoverage { reason })
+            }
+            ValidityMode::Permissive => {
+                if self.departure.get().is_none() {
+                    self.departure.set(Some(reason));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The call's result: refused if any admitted instant was refused,
+    /// otherwise `value` with the first accepted departure.
+    pub(crate) fn finish<T>(&self, value: T) -> Result<Validated<T>, FrameTransformError> {
+        if let Some(reason) = self.refused.get() {
+            return Err(FrameTransformError::Ut1OutsideCoverage { reason });
+        }
+        Ok(Validated {
+            value,
+            degraded: self.departure.get(),
+        })
+    }
 }
 
 fn invalid_input(field: &'static str, reason: &'static str) -> FrameTransformError {
@@ -319,7 +475,7 @@ fn gast_radians(ts: &TimeScales, dpsi: f64) -> f64 {
 /// computation: it adds no new numerics, so the value is bit-identical to the
 /// quantity the transforms consume.
 pub fn greenwich_mean_sidereal_time_radians(ts: &TimeScales) -> Result<f64, FrameTransformError> {
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     let radians = greenwich_mean_sidereal_time_radians_unchecked(ts);
     validate_finite("gmst_radians", radians)?;
     Ok(radians)
@@ -357,7 +513,7 @@ pub fn greenwich_mean_sidereal_time_radians_from_j2000_seconds(
 pub fn greenwich_apparent_sidereal_time_radians(
     ts: &TimeScales,
 ) -> Result<f64, FrameTransformError> {
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     let radians = greenwich_apparent_sidereal_time_radians_unchecked(ts);
     validate_finite("gast_radians", radians)?;
     Ok(radians)
@@ -569,7 +725,7 @@ fn gcrs_to_true_of_date_matrix_parts_unchecked(ts: &TimeScales) -> (Mat3, f64) {
 /// [`gcrs_to_itrs_matrix_with_polar_motion`] when `xp`/`yp` pole coordinates are
 /// available.
 pub fn gcrs_to_itrs_matrix(ts: &TimeScales) -> Result<Mat3, FrameTransformError> {
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_mat3("gcrs_to_itrs_matrix", gcrs_to_itrs_matrix_unchecked(ts))
 }
 
@@ -593,7 +749,7 @@ pub fn gcrs_to_itrs_matrix_with_polar_motion(
     ts: &TimeScales,
     pole: PolarMotion,
 ) -> Result<Mat3, FrameTransformError> {
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_polar_motion(pole)?;
     validate_mat3(
         "gcrs_to_itrs_matrix",
@@ -617,7 +773,7 @@ fn gcrs_to_itrs_matrix_with_polar_motion_unchecked(ts: &TimeScales, pole: PolarM
 /// `eci2ecef` (GMST/GAST + nutation) rotation those series are designed to be
 /// consumed with, but uses the crate's IAU 2000A nutation and GAST.
 pub fn mean_of_date_to_itrs_matrix(ts: &TimeScales) -> Result<Mat3, FrameTransformError> {
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_mat3(
         "mean_of_date_to_itrs_matrix",
         mean_of_date_to_itrs_matrix_unchecked(ts),
@@ -642,7 +798,7 @@ pub fn mean_of_date_to_itrs_matrix_with_polar_motion(
     ts: &TimeScales,
     pole: PolarMotion,
 ) -> Result<Mat3, FrameTransformError> {
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_polar_motion(pole)?;
     validate_mat3(
         "mean_of_date_to_itrs_matrix",
@@ -666,7 +822,7 @@ pub fn gcrs_to_itrs_compute(
     skyfield_compat: bool,
 ) -> Result<(f64, f64, f64), FrameTransformError> {
     validate_vec3("gcrs_position_km", &[x, y, z])?;
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_tuple3(
         "itrs_position_km",
         gcrs_to_itrs_compute_unchecked(x, y, z, ts, skyfield_compat),
@@ -707,7 +863,7 @@ pub fn gcrs_to_itrs_compute_with_polar_motion(
     pole: PolarMotion,
 ) -> Result<(f64, f64, f64), FrameTransformError> {
     validate_vec3("gcrs_position_km", &[x, y, z])?;
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_polar_motion(pole)?;
     validate_tuple3(
         "itrs_position_km",
@@ -745,7 +901,7 @@ fn gcrs_to_itrs_compute_with_polar_motion_unchecked(
 /// This is the transpose of [`gcrs_to_itrs_matrix`]: the same precession,
 /// nutation, frame-bias, and Earth-rotation pipeline, taken the other way.
 pub fn itrs_to_gcrs_matrix(ts: &TimeScales) -> Result<Mat3, FrameTransformError> {
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_mat3("itrs_to_gcrs_matrix", itrs_to_gcrs_matrix_unchecked(ts))
 }
 
@@ -758,7 +914,7 @@ pub fn itrs_to_gcrs_matrix_with_polar_motion(
     ts: &TimeScales,
     pole: PolarMotion,
 ) -> Result<Mat3, FrameTransformError> {
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_polar_motion(pole)?;
     validate_mat3(
         "itrs_to_gcrs_matrix",
@@ -783,7 +939,7 @@ pub fn itrs_to_gcrs_compute(
     ts: &TimeScales,
 ) -> Result<(f64, f64, f64), FrameTransformError> {
     validate_vec3("itrs_position_km", &[x, y, z])?;
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_tuple3(
         "gcrs_position_km",
         itrs_to_gcrs_compute_unchecked(x, y, z, ts),
@@ -805,7 +961,7 @@ pub fn itrs_to_gcrs_compute_with_polar_motion(
     pole: PolarMotion,
 ) -> Result<(f64, f64, f64), FrameTransformError> {
     validate_vec3("itrs_position_km", &[x, y, z])?;
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_polar_motion(pole)?;
     validate_tuple3(
         "gcrs_position_km",
@@ -1056,7 +1212,7 @@ pub fn gcrs_to_topocentric_compute(
         station.longitude_deg,
         station.altitude_km,
     )?;
-    validate_time_scales(ts)?;
+    validate_ut1_time_scales(ts)?;
     validate_tuple3(
         "topocentric",
         gcrs_to_topocentric_compute_unchecked(sat_gcrs_km, station, ts, skyfield_compat),
@@ -1238,6 +1394,108 @@ mod tests {
     use super::*;
     use crate::astro::time::scales::TimeScales;
 
+    fn outside_ut1_table() -> TimeScales {
+        let ts = TimeScales::from_utc(2100, 1, 1, 0, 0, 0.0).expect("valid UTC");
+        assert_eq!(ts.ut1_degraded, Some(DegradeReason::AfterCoverage));
+        ts
+    }
+
+    #[test]
+    fn transforms_that_read_ut1_refuse_it_outside_the_table() {
+        let ts = outside_ut1_table();
+        let refused = Err::<(), _>(FrameTransformError::Ut1OutsideCoverage {
+            reason: DegradeReason::AfterCoverage,
+        });
+        let pole = PolarMotion::ZERO;
+        let station = GeodeticStationKm {
+            latitude_deg: 10.0,
+            longitude_deg: 20.0,
+            altitude_km: 0.1,
+        };
+        assert_eq!(
+            greenwich_mean_sidereal_time_radians(&ts).map(|_| ()),
+            refused
+        );
+        assert_eq!(
+            greenwich_apparent_sidereal_time_radians(&ts).map(|_| ()),
+            refused
+        );
+        assert_eq!(gcrs_to_itrs_matrix(&ts).map(|_| ()), refused);
+        assert_eq!(
+            gcrs_to_itrs_matrix_with_polar_motion(&ts, pole).map(|_| ()),
+            refused
+        );
+        assert_eq!(mean_of_date_to_itrs_matrix(&ts).map(|_| ()), refused);
+        assert_eq!(
+            mean_of_date_to_itrs_matrix_with_polar_motion(&ts, pole).map(|_| ()),
+            refused
+        );
+        assert_eq!(
+            gcrs_to_itrs_compute(7000.0, 0.0, 0.0, &ts, false).map(|_| ()),
+            refused
+        );
+        assert_eq!(
+            gcrs_to_itrs_compute_with_polar_motion(7000.0, 0.0, 0.0, &ts, false, pole).map(|_| ()),
+            refused
+        );
+        assert_eq!(itrs_to_gcrs_matrix(&ts).map(|_| ()), refused);
+        assert_eq!(
+            itrs_to_gcrs_matrix_with_polar_motion(&ts, pole).map(|_| ()),
+            refused
+        );
+        assert_eq!(
+            itrs_to_gcrs_compute(7000.0, 0.0, 0.0, &ts).map(|_| ()),
+            refused
+        );
+        assert_eq!(
+            itrs_to_gcrs_compute_with_polar_motion(7000.0, 0.0, 0.0, &ts, pole).map(|_| ()),
+            refused
+        );
+        assert_eq!(
+            gcrs_to_topocentric_compute([7000.0, 0.0, 0.0], &station, &ts, false).map(|_| ()),
+            refused
+        );
+    }
+
+    #[test]
+    fn transforms_that_do_not_read_ut1_accept_it_outside_the_table() {
+        // Precession-nutation reads TT and TDB only. TEME<->GCRS reads UT1
+        // only through GMST1982 - GAST, whose change is below 1e-11 rad per
+        // second of UT1 error, so a long-term UT1 does not change it.
+        let ts = outside_ut1_table();
+        assert!(gcrs_to_true_of_date_matrix(&ts).is_ok());
+        let teme = TemeStateKm {
+            position_km: [7000.0, 0.0, 0.0],
+            velocity_km_s: [0.0, 7.5, 0.0],
+        };
+        assert!(teme_to_gcrs_compute(&teme, &ts, false).is_ok());
+    }
+
+    #[test]
+    fn with_ut1_validity_accepts_and_reports_or_refuses() {
+        let ts = outside_ut1_table();
+        let accepted = with_ut1_validity(&ts, ValidityMode::Permissive, gcrs_to_itrs_matrix)
+            .expect("permissive accepts the long-term UT1");
+        assert_eq!(accepted.degraded, Some(DegradeReason::AfterCoverage));
+        assert_mat3_bits_eq(&accepted.value, &gcrs_to_itrs_matrix_unchecked(&ts));
+        assert_eq!(
+            with_ut1_validity(&ts, ValidityMode::Strict, gcrs_to_itrs_matrix).map(|_| ()),
+            Err(FrameTransformError::Ut1OutsideCoverage {
+                reason: DegradeReason::AfterCoverage
+            })
+        );
+
+        let inside = TimeScales::from_utc(2020, 1, 1, 0, 0, 0.0).expect("valid UTC");
+        for mode in [ValidityMode::Strict, ValidityMode::Permissive] {
+            let result = with_ut1_validity(&inside, mode, gcrs_to_itrs_matrix).expect("in table");
+            assert_eq!(result.degraded, None);
+            assert_mat3_bits_eq(
+                &result.value,
+                &gcrs_to_itrs_matrix(&inside).expect("in table"),
+            );
+        }
+    }
+
     fn assert_mat3_bits_eq(actual: &Mat3, expected: &Mat3) {
         for i in 0..3 {
             for j in 0..3 {
@@ -1262,6 +1520,17 @@ mod tests {
                 expected[i]
             );
         }
+    }
+
+    #[test]
+    fn ut1_refusal_reports_its_side() {
+        let before = FrameTransformError::Ut1OutsideCoverage {
+            reason: DegradeReason::BeforeCoverage,
+        };
+        assert_eq!(
+            before.to_string(),
+            "frame transform reads UT1, but the instant precedes the UT1 table coverage"
+        );
     }
 
     #[test]

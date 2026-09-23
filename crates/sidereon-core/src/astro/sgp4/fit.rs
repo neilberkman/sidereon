@@ -1000,16 +1000,18 @@ fn tle_elements_from_fit(
         ),
         mean_motion_dot: 0.0,
         mean_motion_double_dot: 0.0,
+        mean_motion_double_dot_text: None,
         bstar: elements.bstar,
-        ephemeris_type: 0,
-        elset_number: metadata.element_set_number,
+        bstar_text: None,
+        ephemeris_type: Some(0),
+        elset_number: Some(metadata.element_set_number),
         inclination_deg: elements.inclination_deg,
         raan_deg: elements.right_ascension_deg,
         eccentricity: elements.eccentricity,
         arg_perigee_deg: elements.argument_of_perigee_deg,
         mean_anomaly_deg: elements.mean_anomaly_deg,
         mean_motion: elements.mean_motion_rev_per_day,
-        rev_number,
+        rev_number: Some(rev_number),
     })
 }
 
@@ -1263,7 +1265,7 @@ mod tests {
     const GEO_L2: &str = "2 28884   3.5359  77.2731 0014354 137.8081 105.3728  0.98943614 75438";
     const DECAY_L1: &str = "1 28872U 05037B   05333.02012661  .25992681  00000-0  24476-3 0  1534";
     const DECAY_L2: &str = "2 28872  96.4736 157.9986 0303955 244.0492 110.6523 16.46015938 10708";
-    const SSO_L1: &str = "1 28057U 03049A   06177.78615833  .00000060  00000-0  35970-4 0  1836";
+    const SSO_L1: &str = "1 28057U 03049A   06177.78615833  .00000060  00000-0  35970-4 0  1839";
     const SSO_L2: &str = "2 28057  98.4283 247.6961 0000884  88.1964 271.9322 14.35478080140550";
 
     fn arc_from_tle(line1: &str, line2: &str, offsets_min: &[f64]) -> Vec<FitSample> {
@@ -1307,8 +1309,14 @@ mod tests {
             catalog_number: parsed.catalog_number.parse().unwrap(),
             classification: parsed.classification,
             international_designator: parsed.international_designator,
-            element_set_number: parsed.elset_number,
-            rev_at_epoch: parsed.rev_number as i64,
+            element_set_number: parsed
+                .elset_number
+                .expect("fixture states an element set number"),
+            rev_at_epoch: i64::from(
+                parsed
+                    .rev_number
+                    .expect("fixture states a revolution number"),
+            ),
             object_name: String::new(),
         }
     }

@@ -55,6 +55,10 @@ pub enum EventFinderError {
         /// Stable reason string.
         reason: &'static str,
     },
+    /// The predicate reads UT1 at an instant outside the UT1 table under
+    /// [`crate::astro::time::ValidityMode::Strict`].
+    #[error("event predicate reads UT1 outside the table: {0}")]
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 /// Direction of a threshold crossing.
@@ -1435,7 +1439,9 @@ mod tests {
         expected_field: &'static str,
         expected_reason: &'static str,
     ) {
-        let EventFinderError::InvalidInput { field, reason } = error;
+        let EventFinderError::InvalidInput { field, reason } = error else {
+            panic!("expected an invalid-input event-finder error, got {error:?}");
+        };
         assert_eq!(field, expected_field);
         assert_eq!(reason, expected_reason);
     }

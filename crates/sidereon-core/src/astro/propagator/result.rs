@@ -66,6 +66,15 @@ pub struct PropagationResult {
     /// it `None`. A zero-duration DP54 request has an empty interpolant when
     /// dense output is enabled.
     pub dense: Option<DenseOutput>,
+    /// First departure from the UT1 table among the Earth orientations the
+    /// force models used in this run: `Some` only when a body-fixed frame
+    /// provider built under [`crate::astro::time::ValidityMode::Permissive`]
+    /// accepted an epoch outside the table. The built-in RK4 and DP54
+    /// integrators fill it from a departure record of their own for the run
+    /// and pass it back to the caller's
+    /// [`crate::astro::propagator::PropagationContext`], also when the run
+    /// fails.
+    pub ut1_degraded: Option<crate::astro::time::DegradeReason>,
 }
 
 pub(crate) fn validate_propagation_result(

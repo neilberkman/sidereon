@@ -22,15 +22,19 @@ pub mod rise_set;
 pub mod sun_moon;
 
 pub use observe::{
-    moon_az_el, moon_illumination, observe, observe_spk_body, observe_with_time_scales, sun_az_el,
-    BodyAzEl, BodyObservationError, Ecliptic, Equatorial, Horizontal, MoonIllumination,
-    Observation, ObserveError, ObserveOptions, Refraction, Target,
+    moon_az_el, moon_az_el_with_validity, moon_illumination, moon_illumination_with_validity,
+    observe, observe_spk_body, observe_spk_body_with_validity, observe_with_time_scales,
+    observe_with_validity, sun_az_el, sun_az_el_with_validity, BodyAzEl, BodyObservationError,
+    Ecliptic, Equatorial, Horizontal, MoonIllumination, Observation, ObserveError, ObserveOptions,
+    Refraction, Target,
 };
 pub use rise_set::{
-    find_moon_elevation_crossings, find_moon_transits, find_sun_elevation_crossings,
-    moon_elevation_deg, sun_elevation_deg, MoonElevationCrossing, MoonElevationCrossingKind,
-    MoonElevationOptions, MoonTransit, MoonTransitKind, SunElevationCrossing,
-    SunElevationCrossingKind, SunElevationOptions,
+    find_moon_elevation_crossings, find_moon_elevation_crossings_with_validity, find_moon_transits,
+    find_moon_transits_with_validity, find_sun_elevation_crossings,
+    find_sun_elevation_crossings_with_validity, moon_elevation_deg,
+    moon_elevation_deg_with_validity, sun_elevation_deg, sun_elevation_deg_with_validity,
+    MoonElevationCrossing, MoonElevationCrossingKind, MoonElevationOptions, MoonTransit,
+    MoonTransitKind, SunElevationCrossing, SunElevationCrossingKind, SunElevationOptions,
 };
 pub use sun_moon::{
     sun_moon_ecef, sun_moon_ecef_with_polar_motion, sun_moon_eci, sun_moon_eci_at, SunMoon,

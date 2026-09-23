@@ -77,6 +77,15 @@ pub enum ScenarioError {
         /// Satellite whose state was unavailable.
         satellite: GnssSatelliteId,
     },
+    /// The ephemeris source refused the satellite's state because producing
+    /// it reads UT1 outside the UT1 table under a strict UT1 policy.
+    #[error("ephemeris state for {satellite} refused: {reason}")]
+    Ut1OutsideCoverage {
+        /// Satellite whose state was refused.
+        satellite: GnssSatelliteId,
+        /// Which side of the UT1 table the refused instant falls on.
+        reason: crate::astro::time::DegradeReason,
+    },
     /// Observable prediction failed while forming Doppler or geometry metadata.
     #[error("observable prediction failed: {0}")]
     Observable(ObservablesError),
@@ -1360,6 +1369,27 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for DeclaredScenarioSource<'_,
     ) -> crate::spp::ClockRelativity {
         EphemerisSource::clock_relativity_for_state_s(self.source, sat, t_j2000_s, position_m)
     }
+
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<crate::spp::PositionClock>>, crate::Error>
+    {
+        self.source.try_position_clock_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        self.source
+            .try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+    }
 }
 
 impl<E: ObservableEphemerisSource + ?Sized> ObservableEphemerisSource
@@ -1399,6 +1429,57 @@ impl<E: ObservableEphemerisSource + ?Sized> ObservableEphemerisSource
         t_j2000_s: f64,
     ) -> crate::spp::ClockRelativity {
         ObservableEphemerisSource::clock_relativity_s(self.source, sat, t_j2000_s)
+    }
+
+    fn try_observable_state_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<ObservableState>, ObservablesError> {
+        self.source.try_observable_state_at_j2000_s(sat, t_j2000_s)
+    }
+
+    // The declared identity does not change what the source computes, so every
+    // method it may override is forwarded: its SSR corrections (which SSR bias
+    // application reads), its own velocity, and its batch evaluation.
+    fn ssr_corrections(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        self.source.ssr_corrections()
+    }
+
+    fn velocity_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        self.source.velocity_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn observable_states_at_j2000_s(
+        &self,
+        satellites: &[GnssSatelliteId],
+        epochs_j2000_s: &[f64],
+    ) -> Result<crate::observables::ObservableStateBatch, ObservablesError> {
+        self.source
+            .observable_states_at_j2000_s(satellites, epochs_j2000_s)
+    }
+
+    fn observable_states_at_shared_j2000_s(
+        &self,
+        satellites: &[GnssSatelliteId],
+        epoch_j2000_s: f64,
+    ) -> crate::observables::ObservableStateBatch {
+        self.source
+            .observable_states_at_shared_j2000_s(satellites, epoch_j2000_s)
+    }
+
+    fn try_observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<(ObservableState, Option<f64>)>, ObservablesError>
+    {
+        self.source
+            .try_observable_state_group_delay_at_j2000_s(sat, t_j2000_s)
     }
 }
 
@@ -1502,6 +1583,55 @@ impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
         self.transcribe_optional(0x5245_4c41_5449_5654, sat, t_j2000_s, value);
         result
     }
+
+    /// The wrapped source's fallible read, hashed as
+    /// [`Self::position_clock_at_j2000_s`] hashes it, with a refusal hashed
+    /// as an unavailable state.
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<crate::spp::PositionClock>>, crate::Error>
+    {
+        let result = self.source.try_position_clock_at_j2000_s(sat, t_j2000_s);
+        let mut hash = self.hash_query(0x4550_4845_4d45_5249, sat, t_j2000_s);
+        match &result {
+            Ok(Some(state)) => {
+                let (position, clock) = state.value;
+                hash_u64(&mut hash, 1);
+                for value in position {
+                    hash_f64(&mut hash, value);
+                }
+                hash_f64(&mut hash, clock);
+            }
+            Ok(None) | Err(_) => hash_u64(&mut hash, 0),
+        }
+        self.store_hash(hash);
+        result
+    }
+
+    /// The fallible read of [`Self::try_position_clock_at_j2000_s`] and the group delay
+    /// of [`Self::single_frequency_group_delay_s`], each transcribed as those methods
+    /// transcribe it, so the digest is the one the default
+    /// [`EphemerisSource::position_clock_group_delay_at_j2000_s`] gives.
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        let Some(state) = self.try_position_clock_at_j2000_s(sat, t_j2000_s)? else {
+            return Ok(None);
+        };
+        let group_delay = EphemerisSource::single_frequency_group_delay_s(self, sat, t_j2000_s);
+        let (position, clock) = state.value;
+        Ok(Some(crate::astro::time::Validated {
+            value: (position, clock, group_delay),
+            degraded: state.degraded,
+        }))
+    }
 }
 
 impl<E: ObservableEphemerisSource> ObservableEphemerisSource for SourceTranscript<'_, E> {
@@ -1566,10 +1696,21 @@ impl<E: ObservableEphemerisSource> ObservableEphemerisSource for SourceTranscrip
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Result<ObservableState, ObservablesError> {
-        let result = self.source.observable_state_at_j2000_s(sat, t_j2000_s);
+        self.try_observable_state_at_j2000_s(sat, t_j2000_s)
+            .map(|state| state.value)
+    }
+
+    /// The wrapped source's read with its UT1 departure, hashed as
+    /// [`Self::observable_state_at_j2000_s`] hashes it.
+    fn try_observable_state_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<ObservableState>, ObservablesError> {
+        let result = self.source.try_observable_state_at_j2000_s(sat, t_j2000_s);
         let mut hash = self.hash_query(0x4f42_5345_5256_4552, sat, t_j2000_s);
         match &result {
-            Ok(state) => {
+            Ok(crate::astro::time::Validated { value: state, .. }) => {
                 hash_u64(&mut hash, 1);
                 for value in state.position_ecef_m {
                     hash_f64(&mut hash, value);
@@ -1586,6 +1727,25 @@ impl<E: ObservableEphemerisSource> ObservableEphemerisSource for SourceTranscrip
         }
         self.store_hash(hash);
         result
+    }
+
+    /// The fallible read of [`Self::try_observable_state_at_j2000_s`] and the group
+    /// delay of [`Self::single_frequency_group_delay_s`], each transcribed as those
+    /// methods transcribe it, so the digest is the one the default
+    /// [`ObservableEphemerisSource::observable_state_group_delay_at_j2000_s`] gives.
+    fn try_observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<(ObservableState, Option<f64>)>, ObservablesError>
+    {
+        let state = self.try_observable_state_at_j2000_s(sat, t_j2000_s)?;
+        let group_delay =
+            ObservableEphemerisSource::single_frequency_group_delay_s(self, sat, t_j2000_s);
+        Ok(crate::astro::time::Validated {
+            value: (state.value, group_delay),
+            degraded: state.degraded,
+        })
     }
 }
 
@@ -2067,8 +2227,9 @@ where
     E: EphemerisSource,
 {
     let glonass_channels = BTreeMap::new();
+    let tracked = crate::spp::Ut1TrackedSource::new(source);
     let env = SatModelEnv {
-        eph: source,
+        eph: &tracked,
         t_rx_j2000_s: receiver.t_rx_j2000_s,
         t_rx_second_of_day_s: epoch_context.t_rx_second_of_day_s,
         day_of_year: epoch_context.day_of_year,
@@ -2093,15 +2254,41 @@ where
             })
         }
     };
-    sat_model(
+    let model = sat_model(
         &env,
         sat,
         receiver.position_ecef_m,
         receiver.clock_m,
         p_meas_m,
         ionosphere,
-    )
-    .ok_or(ScenarioError::NoEphemeris { satellite: sat })
+    );
+    if let Some(reason) = tracked.refusal() {
+        return Err(ScenarioError::Ut1OutsideCoverage {
+            satellite: sat,
+            reason,
+        });
+    }
+    model.ok_or(ScenarioError::NoEphemeris { satellite: sat })
+}
+
+/// The source's state for `sat`, with a UT1 refusal kept as its own error.
+fn scenario_position_clock<E>(
+    source: &E,
+    sat: GnssSatelliteId,
+    t_j2000_s: f64,
+) -> Result<([f64; 3], f64), ScenarioError>
+where
+    E: EphemerisSource,
+{
+    match source.try_position_clock_at_j2000_s(sat, t_j2000_s) {
+        Ok(Some(state)) => Ok(state.value),
+        Ok(None) => Err(ScenarioError::NoEphemeris { satellite: sat }),
+        Err(crate::Error::Ut1OutsideCoverage(reason)) => Err(ScenarioError::Ut1OutsideCoverage {
+            satellite: sat,
+            reason,
+        }),
+        Err(_) => Err(ScenarioError::NoEphemeris { satellite: sat }),
+    }
 }
 
 fn rough_range<E>(
@@ -2113,9 +2300,7 @@ fn rough_range<E>(
 where
     E: EphemerisSource,
 {
-    let (sat_pos, sat_clock_s) = source
-        .position_clock_at_j2000_s(sat, t_rx_j2000_s)
-        .ok_or(ScenarioError::NoEphemeris { satellite: sat })?;
+    let (sat_pos, sat_clock_s) = scenario_position_clock(source, sat, t_rx_j2000_s)?;
     Ok(norm3(sub3(sat_pos, receiver_ecef_m)) - C_M_S * sat_clock_s)
 }
 
@@ -2127,12 +2312,8 @@ fn source_clock_rate_s_s<E>(
 where
     E: EphemerisSource,
 {
-    let (_, plus) = source
-        .position_clock_at_j2000_s(sat, t_j2000_s + 0.5)
-        .ok_or(ScenarioError::NoEphemeris { satellite: sat })?;
-    let (_, minus) = source
-        .position_clock_at_j2000_s(sat, t_j2000_s - 0.5)
-        .ok_or(ScenarioError::NoEphemeris { satellite: sat })?;
+    let (_, plus) = scenario_position_clock(source, sat, t_j2000_s + 0.5)?;
+    let (_, minus) = scenario_position_clock(source, sat, t_j2000_s - 0.5)?;
     Ok((plus - minus) / 1.0)
 }
 
@@ -2778,6 +2959,67 @@ mod tests {
         // source it wraps does, so a PPP solve through it adds no second term.
         assert!(transcript.clock_includes_relativity());
         assert!(broadcast_transcript.clock_includes_relativity());
+    }
+
+    /// A scenario source declared over an SSR-corrected source keeps the SSR corrections
+    /// that SSR bias application reads and the source's own velocity; over a broadcast
+    /// source it stays without SSR corrections.
+    #[test]
+    fn declared_scenario_source_forwards_ssr_corrections_and_velocity() {
+        use crate::ssr::SsrCorrectionSource;
+
+        let nav = crate::ephemeris::BroadcastEphemeris::from_nav(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ssr/BRDC00WRD_S_20261820000_G30_G31.rnx"
+        )))
+        .expect("parse NAV fixture");
+        let store = crate::ssr::SsrCorrectionStore::new();
+        let ssr = crate::ssr::SsrCorrectedEphemeris::new(&nav, &store).with_fallback(
+            crate::ssr::SsrFallbackPolicy {
+                on_missing_correction: crate::ssr::MissingCorrectionAction::FallBackToBroadcast,
+                regional: crate::ssr::RegionalPolicy::DeclineRegional,
+            },
+        );
+        let identity = product(ScenarioExternalProductKind::Broadcast, "ssr", "digest");
+        let declared = DeclaredScenarioSource::new(&ssr, identity.clone());
+
+        let forwarded = declared
+            .ssr_corrections()
+            .expect("the declared source forwards the SSR corrections");
+        assert!(std::ptr::eq(forwarded.ssr_store(), &store));
+
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 31).expect("valid satellite");
+        let t = 836_222_400.0;
+        let direct_solution = ssr.try_applied_orbit_clock_solution(sat, t);
+        assert_eq!(
+            forwarded.try_applied_orbit_clock_solution(sat, t),
+            direct_solution,
+            "bias checks see the solution the wrapped source applies"
+        );
+
+        let direct = ssr
+            .velocity_at_j2000_s(sat, t)
+            .expect("the source defines its velocity")
+            .expect("broadcast fallback velocity");
+        let through = declared
+            .velocity_at_j2000_s(sat, t)
+            .expect("the declared source forwards the velocity")
+            .expect("broadcast fallback velocity");
+        assert_eq!(through.map(f64::to_bits), direct.map(f64::to_bits));
+
+        let sats = [sat, sat];
+        let epochs = [t, t + 30.0];
+        assert_eq!(
+            declared.observable_states_at_j2000_s(&sats, &epochs),
+            ssr.observable_states_at_j2000_s(&sats, &epochs)
+        );
+        assert_eq!(
+            declared.observable_states_at_shared_j2000_s(&sats, t),
+            ssr.observable_states_at_shared_j2000_s(&sats, t)
+        );
+
+        let broadcast = DeclaredScenarioSource::new(&nav, identity);
+        assert!(broadcast.ssr_corrections().is_none());
     }
 
     fn product(

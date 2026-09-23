@@ -1,5 +1,7 @@
 use crate::astro::error::PropagationError;
-use crate::astro::frames::orientation::EarthOrientationProvider;
+use crate::astro::frames::orientation::{EarthOrientation, EarthOrientationProvider};
+use crate::astro::time::eop::Ut1DepartureRecord;
+use crate::astro::time::DegradeReason;
 use crate::constants::SECONDS_PER_HOUR;
 use std::sync::Arc;
 
@@ -9,9 +11,18 @@ use std::sync::Arc;
 /// force to use the precise Earth-fixed frame can attach an
 /// [`EarthOrientationProvider`], while existing force models and default
 /// propagation remain bit-identical.
+///
+/// A provider built under [`crate::astro::time::ValidityMode::Permissive`]
+/// (for example [`crate::astro::frames::TdbEarthOrientationProvider::with_validity`])
+/// evaluates epochs outside the UT1 table with the long-term UT1. Every such
+/// orientation a force model uses is recorded here:
+/// [`PropagationContext::ut1_departure`] returns the first departure recorded
+/// through this context or any clone of it, and each propagation also returns
+/// its own in [`crate::astro::propagator::PropagationResult::ut1_degraded`].
 #[derive(Clone, Default)]
 pub struct PropagationContext {
     body_fixed_frame_provider: Option<Arc<dyn EarthOrientationProvider>>,
+    ut1_departures: Ut1DepartureRecord,
 }
 
 impl core::fmt::Debug for PropagationContext {
@@ -21,6 +32,7 @@ impl core::fmt::Debug for PropagationContext {
                 "body_fixed_frame_provider",
                 &self.body_fixed_frame_provider.is_some(),
             )
+            .field("ut1_departure", &self.ut1_departure())
             .finish()
     }
 }
@@ -41,10 +53,46 @@ impl PropagationContext {
     }
 
     /// Return the body-fixed frame provider, if one was attached.
+    ///
+    /// A force model that takes an orientation from it passes the result
+    /// through [`PropagationContext::record_orientation`], so a departure from
+    /// the UT1 table is reported.
     pub fn body_fixed_frame_provider(&self) -> Option<&dyn EarthOrientationProvider> {
         self.body_fixed_frame_provider
             .as_deref()
             .map(|provider| provider as &dyn EarthOrientationProvider)
+    }
+
+    /// Record the UT1 departure an orientation carries, if any, and return it.
+    ///
+    /// Custom force models that query [`PropagationContext::body_fixed_frame_provider`]
+    /// call this on every orientation they use.
+    pub fn record_orientation(&self, orientation: EarthOrientation) -> EarthOrientation {
+        self.ut1_departures.record(orientation.ut1_degraded());
+        orientation
+    }
+
+    /// The first UT1 departure recorded through this context or a clone of it,
+    /// that is, the first epoch a force model evaluated outside the UT1 table
+    /// with an orientation a permissive provider accepted. `None` when every
+    /// orientation used came from inside the table.
+    pub fn ut1_departure(&self) -> Option<DegradeReason> {
+        self.ut1_departures.first()
+    }
+
+    /// This context with its own, empty departure record, for one run whose
+    /// departure is reported separately; [`PropagationContext::merge_departure`]
+    /// passes it back.
+    pub(crate) fn with_fresh_departure_record(&self) -> Self {
+        Self {
+            body_fixed_frame_provider: self.body_fixed_frame_provider.clone(),
+            ut1_departures: Ut1DepartureRecord::default(),
+        }
+    }
+
+    /// Record a departure found by a run on a fresh-record copy.
+    pub(crate) fn merge_departure(&self, departure: Option<DegradeReason>) {
+        self.ut1_departures.record(departure);
     }
 }
 

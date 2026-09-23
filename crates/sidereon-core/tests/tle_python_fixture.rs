@@ -11,15 +11,17 @@
 
 use std::path::PathBuf;
 
-use sidereon_core::astro::tle::{encode, parse};
+use sidereon_core::astro::tle::{
+    encode, parse, parse_with_policy, ChecksumWarning, ChecksumWarningKind, TlePolicy,
+};
 
 // Canonical ISS TLE (epoch 2018-184.80969102). Real, committed, and validated:
 // the same two lines appear in the `tle` and `sgp4` module doctests/tests.
 const ISS_L1: &str = "1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993";
 const ISS_L2: &str = "2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106";
 
-// Line 1 with the column-69 checksum digit flipped (9993 -> 9990). The grammar
-// reports the discrepancy as advisory rather than rejecting the line.
+// Line 1 with the column-69 checksum digit flipped (9993 -> 9990). The strict
+// default refuses it; the lenient policy reads it and reports the mismatch.
 const ISS_L1_BAD_CHECKSUM: &str =
     "1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9990";
 
@@ -33,12 +35,19 @@ fn iss_round_trip_fixture_self_validates() {
     assert_eq!(l2, ISS_L2);
     assert!(parsed.checksum_warnings.is_empty());
 
-    // Advisory checksum: a flipped digit is reported, not rejected.
-    let bad = parse(ISS_L1_BAD_CHECKSUM, ISS_L2).expect("checksum mismatch is not rejected");
-    assert_eq!(bad.checksum_warnings.len(), 1);
-    assert_eq!(bad.checksum_warnings[0].line_label, "line 1");
-    assert_eq!(bad.checksum_warnings[0].expected, 0);
-    assert_eq!(bad.checksum_warnings[0].computed, 3);
+    // A flipped digit is refused by default and reported under the lenient
+    // policy.
+    assert!(parse(ISS_L1_BAD_CHECKSUM, ISS_L2).is_err());
+    let bad = parse_with_policy(ISS_L1_BAD_CHECKSUM, ISS_L2, TlePolicy::Lenient)
+        .expect("lenient read accepts the mismatch");
+    assert_eq!(
+        bad.checksum_warnings,
+        vec![ChecksumWarning {
+            line_label: "line 1",
+            kind: ChecksumWarningKind::Mismatch { expected: 0 },
+            computed: 3,
+        }]
+    );
 
     if std::env::var("SIDEREON_DUMP_FIXTURES").is_ok() {
         dump_fixture();
@@ -54,15 +63,20 @@ fn dump_fixture() {
     let parsed = parse(ISS_L1, ISS_L2).expect("dump: ISS TLE parses");
     let el = &parsed.elements;
     let (l1, l2) = encode(el).expect("dump: ISS TLE encodes");
-    let bad = parse(ISS_L1_BAD_CHECKSUM, ISS_L2).expect("dump: bad-checksum TLE parses");
+    let bad = parse_with_policy(ISS_L1_BAD_CHECKSUM, ISS_L2, TlePolicy::Lenient)
+        .expect("dump: bad-checksum TLE parses leniently");
 
     let warnings: Vec<_> = bad
         .checksum_warnings
         .iter()
         .map(|w| {
+            let expected = match w.kind {
+                ChecksumWarningKind::Mismatch { expected } => Some(expected),
+                _ => None,
+            };
             json!({
                 "line_label": w.line_label,
-                "expected": w.expected,
+                "expected": expected,
                 "computed": w.computed,
             })
         })

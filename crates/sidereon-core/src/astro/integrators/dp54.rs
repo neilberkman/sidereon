@@ -1,6 +1,6 @@
 use crate::astro::error::PropagationError;
 use crate::astro::integrators::tableau::DP54Tableau;
-use crate::astro::integrators::{DynamicsModel, Integrator};
+use crate::astro::integrators::{with_ut1_departure_record, DynamicsModel, Integrator};
 use crate::astro::propagator::api::{
     validate_adaptive_integrator_options, validate_integrator_epoch, IntegratorOptions,
     PropagationContext,
@@ -25,6 +25,21 @@ pub struct DP54;
 
 impl Integrator for DP54 {
     fn propagate(
+        &self,
+        initial: CartesianState,
+        t_end_seconds: f64,
+        rhs: &dyn DynamicsModel,
+        ctx: &PropagationContext,
+        opts: &IntegratorOptions,
+    ) -> Result<PropagationResult, PropagationError> {
+        with_ut1_departure_record(ctx, |ctx| {
+            self.integrate(initial, t_end_seconds, rhs, ctx, opts)
+        })
+    }
+}
+
+impl DP54 {
+    fn integrate(
         &self,
         initial: CartesianState,
         t_end_seconds: f64,
@@ -66,6 +81,7 @@ impl Integrator for DP54 {
                     evaluations: 0,
                 },
                 dense,
+                ut1_degraded: None,
             });
         }
 
@@ -215,6 +231,7 @@ impl Integrator for DP54 {
                 evaluations: evals,
             },
             dense,
+            ut1_degraded: None,
         })
     }
 }

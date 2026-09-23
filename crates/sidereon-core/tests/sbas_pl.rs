@@ -271,6 +271,7 @@ fn geometry_from_az_el(az_el_deg: &[(f64, f64)]) -> ProtectionGeometry {
         rows,
         receiver,
         clock_systems: vec![GnssSystem::Gps],
+        ut1_degraded: None,
     }
 }
 

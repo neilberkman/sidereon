@@ -17,7 +17,7 @@ use crate::astro::error::PropagationError;
 use crate::astro::forces::{DragParameters, SpaceWeatherSource};
 use crate::astro::frames::orientation::{EarthOrientation, EarthOrientationProvider};
 use crate::astro::frames::transforms::{
-    gcrs_to_itrs_compute, itrs_to_gcrs_compute, FrameTransformError,
+    gcrs_to_itrs_compute, itrs_to_gcrs_compute, FrameTransformError, Ut1Gate,
 };
 use crate::astro::iod;
 use crate::astro::math::least_squares::{
@@ -32,6 +32,7 @@ use crate::astro::state::CartesianState;
 use crate::astro::time::civil::{civil_from_j2000_seconds, j2000_seconds_from_split};
 use crate::astro::time::model::{Instant, TimeScale};
 use crate::astro::time::scales::TimeScales;
+use crate::astro::time::{Validated, ValidityMode};
 use crate::constants::{M_PER_KM, SECONDS_PER_DAY};
 use crate::geometry_quality::{classify, GeometryQuality, GeometryQualityThresholds};
 use crate::sp3::{sp3_ecef_state_to_eci, PreciseEphemerisSample, PreciseEphemerisStateSample, Sp3};
@@ -171,6 +172,15 @@ pub struct OrbitResidualLedger {
     pub arc_span: OrbitArcSpan,
 }
 
+/// A provider whose UT1 policy an orbit fit checks against its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ut1ProviderRole {
+    /// The Earth-orientation provider that rotates ECEF samples to GCRF.
+    Orientation,
+    /// The body-fixed frame provider in [`OrbitFitOptions::propagation_context`].
+    Propagation,
+}
+
 /// Batch orbit-fit report for one or more satellites.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrbitFitReport {
@@ -293,6 +303,24 @@ pub enum OrbitFitError {
         /// Accepted iterations before termination.
         iterations: usize,
     },
+    /// A fit read UT1 at an epoch outside the UT1 table, directly or through
+    /// an orientation or propagation provider, under the fit's
+    /// [`ValidityMode::Strict`].
+    #[error("orbit fit reads UT1 outside the table: {0}")]
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
+    /// The fit's UT1 [`ValidityMode`] differs from a provider's, so the fit and
+    /// the provider would treat an epoch outside the UT1 table differently.
+    #[error(
+        "orbit fit UT1 mode {fit:?} differs from the {provider:?} provider's {provider_mode:?}"
+    )]
+    Ut1ValidityMismatch {
+        /// The mode the fit was asked to run under.
+        fit: ValidityMode,
+        /// Which provider disagrees.
+        provider: Ut1ProviderRole,
+        /// That provider's mode.
+        provider_mode: ValidityMode,
+    },
     /// The RTN frame was undefined for a propagated state.
     #[error("satellite {satellite} RTN frame failed: {reason:?}")]
     RtnFrame {
@@ -309,7 +337,35 @@ pub fn fit_sp3_precise_orbit(
     satellite: GnssSatelliteId,
     options: &OrbitFitOptions,
 ) -> Result<OrbitFitReport, OrbitFitError> {
-    fit_sp3_precise_orbits(product, &[satellite], options)
+    fit_sp3_precise_orbit_with_validity(product, satellite, options, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`fit_sp3_precise_orbit`] under an explicit UT1 [`ValidityMode`]. Converting
+/// each sample between ECEF and GCRS reads UT1: [`ValidityMode::Strict`]
+/// refuses a sample epoch outside the UT1 table, or an orientation accepted
+/// outside it; [`ValidityMode::Permissive`] fits with the long-term UT1 and
+/// reports the first departure in [`Validated::degraded`].
+pub fn fit_sp3_precise_orbit_with_validity(
+    product: &Sp3,
+    satellite: GnssSatelliteId,
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_sp3_precise_orbit_gated(product, satellite, options, &gate)
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_sp3_precise_orbit_gated(
+    product: &Sp3,
+    satellite: GnssSatelliteId,
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_sp3_precise_orbits_gated(product, &[satellite], options, gate)
 }
 
 /// Fit one satellite from a parsed SP3 product with a caller-supplied arc-start
@@ -320,12 +376,55 @@ pub fn fit_sp3_precise_orbit_with_initial_state(
     initial_state: CartesianState,
     options: &OrbitFitOptions,
 ) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_sp3_precise_orbit_with_initial_state_with_validity(
+        product,
+        satellite,
+        initial_state,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`fit_sp3_precise_orbit_with_initial_state`] under an explicit UT1
+/// [`ValidityMode`]. Converting each sample between ECEF and GCRS reads UT1:
+/// [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table, or an
+/// orientation accepted outside it; [`ValidityMode::Permissive`] fits with the
+/// long-term UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_sp3_precise_orbit_with_initial_state_with_validity(
+    product: &Sp3,
+    satellite: GnssSatelliteId,
+    initial_state: CartesianState,
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_sp3_precise_orbit_with_initial_state_gated(
+            product,
+            satellite,
+            initial_state,
+            options,
+            &gate,
+        )
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_sp3_precise_orbit_with_initial_state_gated(
+    product: &Sp3,
+    satellite: GnssSatelliteId,
+    initial_state: CartesianState,
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+) -> Result<OrbitFitReport, OrbitFitError> {
     let samples = product.precise_ephemeris_samples();
-    fit_precise_ephemeris_sample_orbit_with_initial_state(
+    fit_precise_ephemeris_sample_orbit_with_initial_state_gated(
         &samples,
         satellite,
         initial_state,
         options,
+        gate,
     )
 }
 
@@ -335,8 +434,36 @@ pub fn fit_sp3_precise_orbits(
     satellites: &[GnssSatelliteId],
     options: &OrbitFitOptions,
 ) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_sp3_precise_orbits_with_validity(product, satellites, options, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`fit_sp3_precise_orbits`] under an explicit UT1 [`ValidityMode`].
+/// Converting each sample between ECEF and GCRS reads UT1:
+/// [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table, or an
+/// orientation accepted outside it; [`ValidityMode::Permissive`] fits with the
+/// long-term UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_sp3_precise_orbits_with_validity(
+    product: &Sp3,
+    satellites: &[GnssSatelliteId],
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_sp3_precise_orbits_gated(product, satellites, options, &gate)
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_sp3_precise_orbits_gated(
+    product: &Sp3,
+    satellites: &[GnssSatelliteId],
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+) -> Result<OrbitFitReport, OrbitFitError> {
     let samples = product.precise_ephemeris_samples();
-    fit_precise_ephemeris_sample_orbits(&samples, satellites, options)
+    fit_precise_ephemeris_sample_orbits_gated(&samples, satellites, options, gate)
 }
 
 /// Fit every satellite declared in a parsed SP3 product.
@@ -344,7 +471,33 @@ pub fn fit_all_sp3_precise_orbits(
     product: &Sp3,
     options: &OrbitFitOptions,
 ) -> Result<OrbitFitReport, OrbitFitError> {
-    fit_sp3_precise_orbits(product, product.satellites(), options)
+    fit_all_sp3_precise_orbits_with_validity(product, options, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`fit_all_sp3_precise_orbits`] under an explicit UT1 [`ValidityMode`].
+/// Converting each sample between ECEF and GCRS reads UT1:
+/// [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table, or an
+/// orientation accepted outside it; [`ValidityMode::Permissive`] fits with the
+/// long-term UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_all_sp3_precise_orbits_with_validity(
+    product: &Sp3,
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_all_sp3_precise_orbits_gated(product, options, &gate)
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_all_sp3_precise_orbits_gated(
+    product: &Sp3,
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_sp3_precise_orbits_gated(product, product.satellites(), options, gate)
 }
 
 /// Fit one satellite from a parsed ECEF SP3 product using an Earth-orientation
@@ -361,7 +514,44 @@ pub fn fit_sp3_ecef_precise_orbit(
     orientation_provider: &dyn EarthOrientationProvider,
     options: &OrbitFitOptions,
 ) -> Result<OrbitFitReport, OrbitFitError> {
-    fit_sp3_ecef_precise_orbits(product, &[satellite], orientation_provider, options)
+    fit_sp3_ecef_precise_orbit_with_validity(
+        product,
+        satellite,
+        orientation_provider,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`fit_sp3_ecef_precise_orbit`] under an explicit UT1 [`ValidityMode`].
+/// Converting each sample between ECEF and GCRS reads UT1:
+/// [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table, or an
+/// orientation accepted outside it; [`ValidityMode::Permissive`] fits with the
+/// long-term UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_sp3_ecef_precise_orbit_with_validity(
+    product: &Sp3,
+    satellite: GnssSatelliteId,
+    orientation_provider: &dyn EarthOrientationProvider,
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    check_provider_validity(mode, Ut1ProviderRole::Orientation, orientation_provider)?;
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_sp3_ecef_precise_orbit_gated(product, satellite, orientation_provider, options, &gate)
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_sp3_ecef_precise_orbit_gated(
+    product: &Sp3,
+    satellite: GnssSatelliteId,
+    orientation_provider: &dyn EarthOrientationProvider,
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_sp3_ecef_precise_orbits_gated(product, &[satellite], orientation_provider, options, gate)
 }
 
 /// Fit selected satellites from a parsed ECEF SP3 product using an
@@ -377,6 +567,43 @@ pub fn fit_sp3_ecef_precise_orbits(
     satellites: &[GnssSatelliteId],
     orientation_provider: &dyn EarthOrientationProvider,
     options: &OrbitFitOptions,
+) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_sp3_ecef_precise_orbits_with_validity(
+        product,
+        satellites,
+        orientation_provider,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`fit_sp3_ecef_precise_orbits`] under an explicit UT1 [`ValidityMode`].
+/// Converting each sample between ECEF and GCRS reads UT1:
+/// [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table, or an
+/// orientation accepted outside it; [`ValidityMode::Permissive`] fits with the
+/// long-term UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_sp3_ecef_precise_orbits_with_validity(
+    product: &Sp3,
+    satellites: &[GnssSatelliteId],
+    orientation_provider: &dyn EarthOrientationProvider,
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    check_provider_validity(mode, Ut1ProviderRole::Orientation, orientation_provider)?;
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_sp3_ecef_precise_orbits_gated(product, satellites, orientation_provider, options, &gate)
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_sp3_ecef_precise_orbits_gated(
+    product: &Sp3,
+    satellites: &[GnssSatelliteId],
+    orientation_provider: &dyn EarthOrientationProvider,
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
 ) -> Result<OrbitFitReport, OrbitFitError> {
     validate_options(options)?;
     if satellites.is_empty() {
@@ -395,6 +622,7 @@ pub fn fit_sp3_ecef_precise_orbits(
             satellite,
             orientation_provider,
             options,
+            gate,
         )?;
         for residual in &work.residuals {
             match time_scale {
@@ -422,7 +650,47 @@ pub fn fit_all_sp3_ecef_precise_orbits(
     orientation_provider: &dyn EarthOrientationProvider,
     options: &OrbitFitOptions,
 ) -> Result<OrbitFitReport, OrbitFitError> {
-    fit_sp3_ecef_precise_orbits(product, product.satellites(), orientation_provider, options)
+    fit_all_sp3_ecef_precise_orbits_with_validity(
+        product,
+        orientation_provider,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`fit_all_sp3_ecef_precise_orbits`] under an explicit UT1 [`ValidityMode`].
+/// Converting each sample between ECEF and GCRS reads UT1:
+/// [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table, or an
+/// orientation accepted outside it; [`ValidityMode::Permissive`] fits with the
+/// long-term UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_all_sp3_ecef_precise_orbits_with_validity(
+    product: &Sp3,
+    orientation_provider: &dyn EarthOrientationProvider,
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    check_provider_validity(mode, Ut1ProviderRole::Orientation, orientation_provider)?;
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_all_sp3_ecef_precise_orbits_gated(product, orientation_provider, options, &gate)
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_all_sp3_ecef_precise_orbits_gated(
+    product: &Sp3,
+    orientation_provider: &dyn EarthOrientationProvider,
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_sp3_ecef_precise_orbits_gated(
+        product,
+        product.satellites(),
+        orientation_provider,
+        options,
+        gate,
+    )
 }
 
 /// Fit one satellite from precise ephemeris samples.
@@ -431,7 +699,40 @@ pub fn fit_precise_ephemeris_sample_orbit(
     satellite: GnssSatelliteId,
     options: &OrbitFitOptions,
 ) -> Result<OrbitFitReport, OrbitFitError> {
-    fit_precise_ephemeris_sample_orbits(samples, &[satellite], options)
+    fit_precise_ephemeris_sample_orbit_with_validity(
+        samples,
+        satellite,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`fit_precise_ephemeris_sample_orbit`] under an explicit UT1
+/// [`ValidityMode`]. Converting each sample between ECEF and GCRS reads UT1:
+/// [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table, or an
+/// orientation accepted outside it; [`ValidityMode::Permissive`] fits with the
+/// long-term UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_precise_ephemeris_sample_orbit_with_validity(
+    samples: &[PreciseEphemerisSample],
+    satellite: GnssSatelliteId,
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_precise_ephemeris_sample_orbit_gated(samples, satellite, options, &gate)
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_precise_ephemeris_sample_orbit_gated(
+    samples: &[PreciseEphemerisSample],
+    satellite: GnssSatelliteId,
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_precise_ephemeris_sample_orbits_gated(samples, &[satellite], options, gate)
 }
 
 /// Fit one satellite from precise ephemeris samples with a caller-supplied
@@ -442,8 +743,51 @@ pub fn fit_precise_ephemeris_sample_orbit_with_initial_state(
     initial_state: CartesianState,
     options: &OrbitFitOptions,
 ) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_precise_ephemeris_sample_orbit_with_initial_state_with_validity(
+        samples,
+        satellite,
+        initial_state,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`fit_precise_ephemeris_sample_orbit_with_initial_state`] under an explicit
+/// UT1 [`ValidityMode`]. Converting each sample between ECEF and GCRS reads
+/// UT1: [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table,
+/// or an orientation accepted outside it; [`ValidityMode::Permissive`] fits
+/// with the long-term UT1 and reports the first departure in
+/// [`Validated::degraded`].
+pub fn fit_precise_ephemeris_sample_orbit_with_initial_state_with_validity(
+    samples: &[PreciseEphemerisSample],
+    satellite: GnssSatelliteId,
+    initial_state: CartesianState,
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_precise_ephemeris_sample_orbit_with_initial_state_gated(
+            samples,
+            satellite,
+            initial_state,
+            options,
+            &gate,
+        )
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_precise_ephemeris_sample_orbit_with_initial_state_gated(
+    samples: &[PreciseEphemerisSample],
+    satellite: GnssSatelliteId,
+    initial_state: CartesianState,
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+) -> Result<OrbitFitReport, OrbitFitError> {
     validate_options(options)?;
-    let work = fit_one_sample_arc(samples, satellite, options, Some(initial_state))?;
+    let work = fit_one_sample_arc(samples, satellite, options, Some(initial_state), gate)?;
     let time_scale = work
         .residuals
         .first()
@@ -465,7 +809,40 @@ pub fn fit_precise_ephemeris_state_sample_orbit(
     satellite: GnssSatelliteId,
     options: &OrbitFitOptions,
 ) -> Result<OrbitFitReport, OrbitFitError> {
-    fit_precise_ephemeris_state_sample_orbits(samples, &[satellite], options)
+    fit_precise_ephemeris_state_sample_orbit_with_validity(
+        samples,
+        satellite,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`fit_precise_ephemeris_state_sample_orbit`] under an explicit UT1
+/// [`ValidityMode`]. Converting each sample between ECEF and GCRS reads UT1:
+/// [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table, or an
+/// orientation accepted outside it; [`ValidityMode::Permissive`] fits with the
+/// long-term UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_precise_ephemeris_state_sample_orbit_with_validity(
+    samples: &[OrientedPreciseEphemerisStateSample],
+    satellite: GnssSatelliteId,
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_precise_ephemeris_state_sample_orbit_gated(samples, satellite, options, &gate)
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_precise_ephemeris_state_sample_orbit_gated(
+    samples: &[OrientedPreciseEphemerisStateSample],
+    satellite: GnssSatelliteId,
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_precise_ephemeris_state_sample_orbits_gated(samples, &[satellite], options, gate)
 }
 
 /// Fit selected satellites from ECEF state samples paired with Earth
@@ -474,6 +851,39 @@ pub fn fit_precise_ephemeris_state_sample_orbits(
     samples: &[OrientedPreciseEphemerisStateSample],
     satellites: &[GnssSatelliteId],
     options: &OrbitFitOptions,
+) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_precise_ephemeris_state_sample_orbits_with_validity(
+        samples,
+        satellites,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`fit_precise_ephemeris_state_sample_orbits`] under an explicit UT1
+/// [`ValidityMode`]. Converting each sample between ECEF and GCRS reads UT1:
+/// [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table, or an
+/// orientation accepted outside it; [`ValidityMode::Permissive`] fits with the
+/// long-term UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_precise_ephemeris_state_sample_orbits_with_validity(
+    samples: &[OrientedPreciseEphemerisStateSample],
+    satellites: &[GnssSatelliteId],
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_precise_ephemeris_state_sample_orbits_gated(samples, satellites, options, &gate)
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_precise_ephemeris_state_sample_orbits_gated(
+    samples: &[OrientedPreciseEphemerisStateSample],
+    satellites: &[GnssSatelliteId],
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
 ) -> Result<OrbitFitReport, OrbitFitError> {
     validate_options(options)?;
     if satellites.is_empty() {
@@ -484,7 +894,7 @@ pub fn fit_precise_ephemeris_state_sample_orbits(
     let mut residuals = Vec::new();
     let mut time_scale = None;
     for &satellite in satellites {
-        let work = fit_one_state_sample_arc(samples, satellite, options)?;
+        let work = fit_one_state_sample_arc(samples, satellite, options, gate)?;
         for residual in &work.residuals {
             match time_scale {
                 None => time_scale = Some(residual.time_scale),
@@ -510,6 +920,39 @@ pub fn fit_precise_ephemeris_sample_orbits(
     satellites: &[GnssSatelliteId],
     options: &OrbitFitOptions,
 ) -> Result<OrbitFitReport, OrbitFitError> {
+    fit_precise_ephemeris_sample_orbits_with_validity(
+        samples,
+        satellites,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`fit_precise_ephemeris_sample_orbits`] under an explicit UT1
+/// [`ValidityMode`]. Converting each sample between ECEF and GCRS reads UT1:
+/// [`ValidityMode::Strict`] refuses a sample epoch outside the UT1 table, or an
+/// orientation accepted outside it; [`ValidityMode::Permissive`] fits with the
+/// long-term UT1 and reports the first departure in [`Validated::degraded`].
+pub fn fit_precise_ephemeris_sample_orbits_with_validity(
+    samples: &[PreciseEphemerisSample],
+    satellites: &[GnssSatelliteId],
+    options: &OrbitFitOptions,
+    mode: ValidityMode,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    let gate = Ut1Gate::new(mode);
+    let report = with_fit_ut1_record(options, &gate, |options| {
+        fit_precise_ephemeris_sample_orbits_gated(samples, satellites, options, &gate)
+    })?;
+    finish_fit(&gate, report)
+}
+
+fn fit_precise_ephemeris_sample_orbits_gated(
+    samples: &[PreciseEphemerisSample],
+    satellites: &[GnssSatelliteId],
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+) -> Result<OrbitFitReport, OrbitFitError> {
     validate_options(options)?;
     if satellites.is_empty() {
         return Err(OrbitFitError::EmptySelection);
@@ -519,7 +962,7 @@ pub fn fit_precise_ephemeris_sample_orbits(
     let mut residuals = Vec::new();
     let mut time_scale = None;
     for &satellite in satellites {
-        let work = fit_one_sample_arc(samples, satellite, options, None)?;
+        let work = fit_one_sample_arc(samples, satellite, options, None, gate)?;
         for residual in &work.residuals {
             match time_scale {
                 None => time_scale = Some(residual.time_scale),
@@ -537,6 +980,70 @@ pub fn fit_precise_ephemeris_sample_orbits(
         options.min_ledger_samples,
     )?;
     Ok(OrbitFitReport { fits, ledger })
+}
+
+/// Run a fit with its own departure record on the propagation context, so a
+/// permissive body-fixed frame provider used by the force models is reported
+/// by this fit alone, then pass that departure through the fit's UT1 policy
+/// and back to the caller's context.
+fn with_fit_ut1_record(
+    options: &OrbitFitOptions,
+    gate: &Ut1Gate,
+    fit: impl FnOnce(&OrbitFitOptions) -> Result<OrbitFitReport, OrbitFitError>,
+) -> Result<OrbitFitReport, OrbitFitError> {
+    if let Some(provider) = options.propagation_context.body_fixed_frame_provider() {
+        check_provider_validity(gate.mode(), Ut1ProviderRole::Propagation, provider)?;
+    }
+    let run_options = OrbitFitOptions {
+        propagation_context: options.propagation_context.with_fresh_departure_record(),
+        ..options.clone()
+    };
+    // The caller's context receives the departure even when the fit fails.
+    let result = fit(&run_options);
+    let departure = run_options.propagation_context.ut1_departure();
+    options.propagation_context.merge_departure(departure);
+    let report = result?;
+    gate.note(departure).map_err(fit_frame_error)?;
+    Ok(report)
+}
+
+/// A fit report under the call's UT1 policy. Every refusal is returned where
+/// it happens, with its satellite, so this only attaches the departure.
+fn finish_fit(
+    gate: &Ut1Gate,
+    report: OrbitFitReport,
+) -> Result<Validated<OrbitFitReport>, OrbitFitError> {
+    gate.finish(report).map_err(fit_frame_error)
+}
+
+/// Refuse a provider whose UT1 policy differs from the fit's.
+fn check_provider_validity(
+    fit: ValidityMode,
+    role: Ut1ProviderRole,
+    provider: &dyn EarthOrientationProvider,
+) -> Result<(), OrbitFitError> {
+    let provider_mode = provider.ut1_validity();
+    if provider_mode == fit {
+        Ok(())
+    } else {
+        Err(OrbitFitError::Ut1ValidityMismatch {
+            fit,
+            provider: role,
+            provider_mode,
+        })
+    }
+}
+
+/// A gate refusal that has no satellite to attach it to.
+fn fit_frame_error(error: FrameTransformError) -> OrbitFitError {
+    match error {
+        FrameTransformError::Ut1OutsideCoverage { reason } => {
+            OrbitFitError::Ut1OutsideCoverage(reason)
+        }
+        FrameTransformError::InvalidInput { field, reason } => {
+            OrbitFitError::InvalidOption { field, reason }
+        }
+    }
 }
 
 fn validate_options(options: &OrbitFitOptions) -> Result<(), OrbitFitError> {
@@ -559,8 +1066,9 @@ fn fit_one_sample_arc(
     satellite: GnssSatelliteId,
     options: &OrbitFitOptions,
     initial_seed: Option<CartesianState>,
+    gate: &Ut1Gate,
 ) -> Result<FitWork, OrbitFitError> {
-    let observations = collect_observations(samples, satellite)?;
+    let observations = collect_observations(samples, satellite, gate)?;
     fit_one_observation_arc(satellite, observations, options, initial_seed)
 }
 
@@ -568,8 +1076,9 @@ fn fit_one_state_sample_arc(
     samples: &[OrientedPreciseEphemerisStateSample],
     satellite: GnssSatelliteId,
     options: &OrbitFitOptions,
+    gate: &Ut1Gate,
 ) -> Result<FitWork, OrbitFitError> {
-    let observations = collect_state_observations(samples, satellite)?;
+    let observations = collect_state_observations(samples, satellite, gate)?;
     fit_one_observation_arc(satellite, observations, options, None)
 }
 
@@ -579,12 +1088,14 @@ fn fit_one_sp3_ecef_arc(
     satellite: GnssSatelliteId,
     orientation_provider: &dyn EarthOrientationProvider,
     options: &OrbitFitOptions,
+    gate: &Ut1Gate,
 ) -> Result<FitWork, OrbitFitError> {
     let observations = collect_provider_sp3_observations(
         position_samples,
         state_samples,
         satellite,
         orientation_provider,
+        gate,
     )?;
     fit_one_observation_arc(satellite, observations, options, None)
 }
@@ -725,12 +1236,16 @@ struct OrbitObservation {
 fn collect_observations(
     samples: &[PreciseEphemerisSample],
     satellite: GnssSatelliteId,
+    gate: &Ut1Gate,
 ) -> Result<Vec<OrbitObservation>, OrbitFitError> {
     let mut observations = Vec::new();
     for sample in samples.iter().filter(|sample| sample.sat == satellite) {
         validate_position(sample.position_ecef_m, satellite)?;
         let epoch_j2000_s = instant_j2000_seconds(sample.epoch, satellite)?;
         let ts = time_scales_from_instant(sample.epoch, epoch_j2000_s, satellite)?;
+        let ts = gate
+            .admit(ts)
+            .map_err(|source| OrbitFitError::Frame { satellite, source })?;
         let [x_m, y_m, z_m] = sample.position_ecef_m;
         let (x, y, z) = itrs_to_gcrs_compute(x_m / M_PER_KM, y_m / M_PER_KM, z_m / M_PER_KM, &ts)
             .map_err(|source| OrbitFitError::Frame { satellite, source })?;
@@ -750,6 +1265,7 @@ fn collect_observations(
 fn collect_state_observations(
     samples: &[OrientedPreciseEphemerisStateSample],
     satellite: GnssSatelliteId,
+    gate: &Ut1Gate,
 ) -> Result<Vec<OrbitObservation>, OrbitFitError> {
     let mut observations = Vec::new();
     for oriented in samples
@@ -758,6 +1274,8 @@ fn collect_state_observations(
     {
         validate_position(oriented.sample.position_ecef_m, satellite)?;
         validate_velocity(oriented.sample.velocity_ecef_m_s, satellite)?;
+        gate.note(oriented.orientation.ut1_degraded())
+            .map_err(|source| OrbitFitError::Frame { satellite, source })?;
         let inertial = sp3_ecef_state_to_eci(&oriented.sample, &oriented.orientation)
             .map_err(|source| OrbitFitError::Frame { satellite, source })?;
         let [x_m, y_m, z_m] = oriented.sample.position_ecef_m;
@@ -779,6 +1297,7 @@ fn collect_provider_sp3_observations(
     state_samples: &[PreciseEphemerisStateSample],
     satellite: GnssSatelliteId,
     orientation_provider: &dyn EarthOrientationProvider,
+    gate: &Ut1Gate,
 ) -> Result<Vec<OrbitObservation>, OrbitFitError> {
     let mut observations = Vec::new();
     for sample in samples.iter().filter(|sample| sample.sat == satellite) {
@@ -786,6 +1305,8 @@ fn collect_provider_sp3_observations(
         let epoch_tdb_s = tdb_seconds_from_instant(sample.epoch, satellite)?;
         let orientation = orientation_provider
             .orientation_at_tdb_seconds(epoch_tdb_s)
+            .map_err(|source| OrbitFitError::Frame { satellite, source })?;
+        gate.note(orientation.ut1_degraded())
             .map_err(|source| OrbitFitError::Frame { satellite, source })?;
         let [x_m, y_m, z_m] = sample.position_ecef_m;
         let position_itrf_km = [x_m / M_PER_KM, y_m / M_PER_KM, z_m / M_PER_KM];
@@ -1382,4 +1903,102 @@ fn build_ledger(
             duration_s: end - start,
         },
     })
+}
+
+#[cfg(test)]
+mod ut1_policy_tests {
+    use super::*;
+    use crate::astro::frames::TdbEarthOrientationProvider;
+    use crate::astro::time::DegradeReason;
+    use std::sync::Arc;
+
+    fn options_with_provider(mode: ValidityMode) -> OrbitFitOptions {
+        OrbitFitOptions {
+            propagation_context: PropagationContext::new().with_body_fixed_frame_provider(
+                Arc::new(TdbEarthOrientationProvider::new().with_validity(mode)),
+            ),
+            ..OrbitFitOptions::default()
+        }
+    }
+
+    #[test]
+    fn a_fit_refuses_a_propagation_provider_with_another_ut1_mode_up_front() {
+        let satellite = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite");
+        let permissive = options_with_provider(ValidityMode::Permissive);
+        let error = fit_precise_ephemeris_sample_orbits(&[], &[satellite], &permissive)
+            .expect_err("a strict fit with a permissive provider");
+        assert!(matches!(
+            error,
+            OrbitFitError::Ut1ValidityMismatch {
+                fit: ValidityMode::Strict,
+                provider: Ut1ProviderRole::Propagation,
+                provider_mode: ValidityMode::Permissive,
+            }
+        ));
+        let error = fit_precise_ephemeris_sample_orbits_with_validity(
+            &[],
+            &[satellite],
+            &options_with_provider(ValidityMode::Strict),
+            ValidityMode::Permissive,
+        )
+        .expect_err("a permissive fit with a strict provider");
+        assert!(matches!(
+            error,
+            OrbitFitError::Ut1ValidityMismatch {
+                fit: ValidityMode::Permissive,
+                provider: Ut1ProviderRole::Propagation,
+                provider_mode: ValidityMode::Strict,
+            }
+        ));
+        // Matching modes pass the check and reach the fit's own validation.
+        let error = fit_precise_ephemeris_sample_orbits_with_validity(
+            &[],
+            &[satellite],
+            &permissive,
+            ValidityMode::Permissive,
+        )
+        .expect_err("no samples");
+        assert!(!matches!(error, OrbitFitError::Ut1ValidityMismatch { .. }));
+    }
+
+    #[test]
+    fn the_orientation_provider_mode_is_checked_against_the_fit() {
+        let permissive = TdbEarthOrientationProvider::new().with_validity(ValidityMode::Permissive);
+        assert!(matches!(
+            check_provider_validity(
+                ValidityMode::Strict,
+                Ut1ProviderRole::Orientation,
+                &permissive
+            ),
+            Err(OrbitFitError::Ut1ValidityMismatch {
+                provider: Ut1ProviderRole::Orientation,
+                ..
+            })
+        ));
+        assert!(check_provider_validity(
+            ValidityMode::Permissive,
+            Ut1ProviderRole::Orientation,
+            &permissive
+        )
+        .is_ok());
+        assert!(check_provider_validity(
+            ValidityMode::Strict,
+            Ut1ProviderRole::Orientation,
+            &TdbEarthOrientationProvider::new()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_departure_without_a_satellite_is_a_typed_fit_error() {
+        let gate = Ut1Gate::new(ValidityMode::Strict);
+        let error = gate
+            .note(Some(DegradeReason::AfterCoverage))
+            .map_err(fit_frame_error)
+            .expect_err("strict refusal");
+        assert!(matches!(
+            error,
+            OrbitFitError::Ut1OutsideCoverage(DegradeReason::AfterCoverage)
+        ));
+    }
 }
