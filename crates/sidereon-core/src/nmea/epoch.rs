@@ -112,11 +112,13 @@ impl EpochSnapshot {
     }
 
     /// Converts the stored date and time to a UTC [`crate::astro::time::Instant`].
-    /// Nanoseconds are added to the whole seconds, and `None` is returned when either field is absent or the civil-time conversion rejects the values.
+    /// The second is the `f64` nearest to the whole seconds plus nanoseconds, and `None` is returned when either field is absent or the civil-time conversion rejects the values.
     pub fn instant_utc(&self) -> Option<crate::astro::time::Instant> {
         let date = self.date?;
         let time = self.time_of_day?;
-        let second = f64::from(time.second) + f64::from(time.nanos) * 1.0e-9;
+        let second = crate::astro::time::civil::seconds_from_femtoseconds(
+            i128::from(time.second) * 1_000_000_000_000_000 + i128::from(time.nanos) * 1_000_000,
+        );
         crate::astro::time::Instant::from_utc_civil(
             i32::from(date.year),
             i32::from(date.month),

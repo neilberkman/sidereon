@@ -3142,8 +3142,16 @@ impl Omm {
     /// Convert the canonical OMM elements into the SGP4 [`ElementSet`] consumed
     /// by [`Satellite::from_elements`].
     ///
-    /// The epoch is converted directly from the OMM calendar timestamp into
-    /// SGP4's split Julian date, preserving years outside the TLE pivot range.
+    /// The epoch is converted from the OMM calendar timestamp into SGP4's
+    /// split Julian date, preserving years outside the TLE pivot range. An
+    /// epoch python-sgp4 reads (one to six fractional second digits, a second
+    /// below 60, years 1 through 9999) takes python-sgp4 2.22's split bit for
+    /// bit, as Skyfield's `EarthSatellite.from_omm` does; any other epoch takes
+    /// Vallado `jday` of the nearest double to the stated second. The split is
+    /// python-sgp4's; the epoch SGP4 is initialised with is formed from it as
+    /// for a TLE, `(jd + fraction) - 2433281.5`, where python-sgp4 passes the
+    /// OMM's day count directly, so deep-space terms and the sidereal angle at
+    /// epoch can differ from python-sgp4 in the last place.
     ///
     /// With [`Omm::quantize_tle_derived_fields`] set (the default for a parsed
     /// OMM), B\* and the second mean-motion derivative are rounded to the
@@ -3376,18 +3384,42 @@ impl OmmEpoch {
         })
     }
 
-    /// Convert directly to the SGP4 split Julian date from the full OMM
-    /// calendar timestamp.
+    /// The SGP4 split Julian date of the epoch.
+    ///
+    /// An epoch python-sgp4 reads (`sgp4.omm.initialize`, which Skyfield's
+    /// `EarthSatellite.from_omm` uses) takes python-sgp4's arithmetic bit for
+    /// bit: at most six fractional second digits, a second below 60, years 1
+    /// through 9999. See [`python_sgp4_julian_date`]. Any other epoch, which
+    /// python-sgp4 refuses, goes through Vallado `jday` with the `f64` nearest
+    /// to the stated second, every digit counted in whole femtoseconds and
+    /// rounded once.
     fn sgp4_julian_date(&self) -> sgp4::JulianDate {
+        if self.femtosecond == 0 && self.second < 60 && (1..=9999).contains(&self.year) {
+            let days_since_1949_12_31 =
+                crate::astro::time::scales::julian_day_number(
+                    self.year,
+                    self.month as i32,
+                    self.day as i32,
+                ) - crate::astro::time::scales::julian_day_number(1949, 12, 31);
+            let microseconds = (i128::from(days_since_1949_12_31) * 86_400
+                + i128::from(self.hour) * 3_600
+                + i128::from(self.minute) * 60
+                + i128::from(self.second))
+                * 1_000_000
+                + i128::from(self.microsecond);
+            return python_sgp4_julian_date(microseconds);
+        }
         sgp4::sgp4_julian_date_from_calendar(
             self.year,
             self.month as i32,
             self.day as i32,
             self.hour as i32,
             self.minute as i32,
-            self.second as f64
-                + self.microsecond as f64 / 1_000_000.0
-                + self.femtosecond as f64 / 1_000_000_000_000_000.0,
+            crate::astro::time::civil::seconds_from_femtoseconds(
+                i128::from(self.second) * FEMTOSECONDS_PER_SECOND
+                    + i128::from(self.microsecond) * 1_000_000_000
+                    + i128::from(self.femtosecond),
+            ),
         )
     }
 
@@ -3443,6 +3475,30 @@ impl OmmEpoch {
 }
 
 const FEMTOSECONDS_PER_SECOND: i128 = 1_000_000_000_000_000;
+
+/// The SGP4 split Julian date python-sgp4 2.22 gives an OMM epoch
+/// `microseconds` after 1949-12-31 00:00:00, bit for bit.
+///
+/// `sgp4.omm.initialize` computes `epoch = (datetime - datetime(1949, 12,
+/// 31)).total_seconds() / 86400.0`; CPython's `timedelta.total_seconds`
+/// divides the integer microsecond count by `10**6` as a correctly rounded
+/// integer true division. The compiled `Satrec.sgp4init` that
+/// `sgp4.api.Satrec` and Skyfield use then splits `epoch` with C `modf`,
+/// and when `epoch * 1e8` is a whole number (C `round`, half away from zero)
+/// replaces the fraction with `round(fraction * 1e8) / 1e8`, keeping
+/// `jdsatepoch = whole + 2433281.5` and `jdsatepochF = fraction`.
+fn python_sgp4_julian_date(microseconds: i128) -> JulianDate {
+    let total_seconds =
+        crate::astro::time::civil::seconds_from_femtoseconds(microseconds * 1_000_000_000);
+    let epoch = total_seconds / 86_400.0;
+    let whole = epoch.trunc();
+    let mut fraction = epoch - whole;
+    let epoch8 = epoch * 1.0e8;
+    if epoch8.round() == epoch8 {
+        fraction = (fraction * 1.0e8).round() / 1.0e8;
+    }
+    JulianDate(whole + 2_433_281.5, fraction)
+}
 const FEMTOSECONDS_PER_MICROSECOND: i128 = 1_000_000_000;
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -5880,5 +5936,44 @@ AGOM = 0.001 [m**2/kg]
                 expected: Some("m**2/kg"),
             })
         );
+    }
+    #[test]
+    fn epochs_take_python_sgp4_split_julian_date() {
+        // `fixtures/omm/python_sgp4_epochs.json`, from
+        // `gen_python_sgp4_epochs.py`: python-sgp4 2.22's `jdsatepoch` and
+        // `jdsatepochF` for the three CelesTrak fixtures and 5000 random
+        // epochs with one to six fractional second digits.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/omm/python_sgp4_epochs.json"
+        ))
+        .expect("fixture JSON");
+        let bits = |value: &serde_json::Value| {
+            u64::from_str_radix(value.as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
+        };
+        let rows = fixture["epochs"].as_array().unwrap();
+        assert_eq!(rows.len(), 5_003);
+        for row in rows {
+            let text = row[0].as_str().unwrap();
+            let (date, time) = text.split_once('T').unwrap();
+            let date: Vec<&str> = date.split('-').collect();
+            let (clock, fraction) = time.split_once('.').unwrap();
+            let clock: Vec<u32> = clock.split(':').map(|v| v.parse().unwrap()).collect();
+            let epoch = OmmEpoch {
+                year: date[0].parse().unwrap(),
+                month: date[1].parse().unwrap(),
+                day: date[2].parse().unwrap(),
+                hour: clock[0],
+                minute: clock[1],
+                second: clock[2],
+                microsecond: format!("{fraction:0<6}").parse().unwrap(),
+                femtosecond: 0,
+            };
+            let JulianDate(jd, jdfrac) = epoch.sgp4_julian_date();
+            assert_eq!(
+                (jd.to_bits(), jdfrac.to_bits()),
+                (bits(&row[1]), bits(&row[2])),
+                "{text}"
+            );
+        }
     }
 }

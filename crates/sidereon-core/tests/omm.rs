@@ -1,15 +1,19 @@
 #![cfg(sidereon_repo_tests)]
-//! Authoritative OMM gate: an OMM must drive SGP4 bit-identically to the
-//! matching TLE for the same object/epoch, and the encodings must agree.
+//! Authoritative OMM gate: an OMM's SGP4 epoch is python-sgp4's for the same
+//! EPOCH, the encodings agree, and where python-sgp4 gives the OMM and the
+//! matching TLE one epoch, the OMM drives SGP4 bit-identically to the TLE.
 //!
-//! OMM and TLE encode the same SGP4 mean elements, so propagating from an OMM
-//! (parsed and bridged through `Satellite::from_omm`) must agree with the TLE
-//! (`Satellite::from_tle`) to 0 ULP on every position/velocity component, across
-//! near-Earth (SGP4) and deep-space (SDP4) objects. Each encoding (KVN, XML)
-//! must parse to the same orbital content (cross-encoding identity). The
+//! OMM and TLE encode the same SGP4 mean elements. The TLE states its epoch as
+//! a day of year with eight decimals; the OMM states it to the microsecond, and
+//! python-sgp4 (`sgp4.omm.initialize`, which Skyfield uses) keeps the OMM's
+//! own day fraction unless its day count has at most eight decimals. For the
+//! ISS fixture the two agree and propagation from the OMM (`Satellite::from_omm`)
+//! must match the TLE (`Satellite::from_tle`) to 0 ULP on every
+//! position/velocity component; for NAVSTAR 43 and GALAXY 15 python-sgp4's OMM
+//! epoch is 0.36 microseconds before and 0.23 microseconds after the TLE's.
+//! Each encoding (KVN, XML, JSON) must parse to the same orbital content. The
 //! committed fixtures are real CelesTrak GP data: each object's OMM in every
-//! encoding plus its TLE, captured in one query so they share an epoch. The TLE
-//! is the correctness anchor; no invented truth.
+//! encoding plus its TLE, captured in one query so they share an epoch.
 
 use sha2::{Digest, Sha256};
 use sidereon_core::astro::omm::{self, Omm};
@@ -21,6 +25,11 @@ struct Fixture {
     xml: &'static str,
     json: &'static str,
     tle: &'static str,
+    /// python-sgp4 2.22 `jdsatepoch` and `jdsatepochF` for the OMM's EPOCH
+    /// (`fixtures/omm/python_sgp4_epochs.json`).
+    python_epoch: (u64, u64),
+    /// Whether python-sgp4 gives the TLE the same epoch.
+    tle_epoch_matches: bool,
 }
 
 const FIXTURES: &[Fixture] = &[
@@ -30,6 +39,8 @@ const FIXTURES: &[Fixture] = &[
         xml: include_str!("fixtures/omm/25544.xml"),
         json: include_str!("fixtures/omm/25544.json"),
         tle: include_str!("fixtures/omm/25544.tle"),
+        python_epoch: (0x4142_c70c_4000_0000, 0x3fc8_4145_2f34_2018),
+        tle_epoch_matches: true,
     },
     Fixture {
         name: "NAVSTAR 43 - deep-space SDP4 (12 h)",
@@ -37,6 +48,8 @@ const FIXTURES: &[Fixture] = &[
         xml: include_str!("fixtures/omm/24876.xml"),
         json: include_str!("fixtures/omm/24876.json"),
         tle: include_str!("fixtures/omm/24876.tle"),
+        python_epoch: (0x4142_c70b_c000_0000, 0x3fca_2b0c_32bc_0000),
+        tle_epoch_matches: false,
     },
     Fixture {
         name: "GALAXY 15 - deep-space SDP4 (geosynchronous)",
@@ -44,6 +57,8 @@ const FIXTURES: &[Fixture] = &[
         xml: include_str!("fixtures/omm/28884.xml"),
         json: include_str!("fixtures/omm/28884.json"),
         tle: include_str!("fixtures/omm/28884.tle"),
+        python_epoch: (0x4142_c70b_c000_0000, 0x3fe6_ea19_fa27_8000),
+        tle_epoch_matches: false,
     },
 ];
 
@@ -115,10 +130,22 @@ fn canonical(omm: &Omm) -> Omm {
 /// span so both the SGP4 and SDP4 branches are exercised away from epoch.
 const TSINCE_MINUTES: &[f64] = &[0.0, 10.0, 100.0, 720.0, 1440.0, 4320.0];
 
-/// Assert that a `Satellite` built from an OMM propagates bit-identically to one
-/// built from the matching TLE, including a bit-equal cached epoch.
-fn assert_bit_identical(label: &str, from_omm: &Satellite, from_tle: &Satellite) {
+/// Assert that a `Satellite` built from an OMM has python-sgp4's epoch for it,
+/// and, where python-sgp4 gives the matching TLE the same epoch, propagates
+/// bit-identically to the `Satellite` built from that TLE.
+fn assert_bit_identical(label: &str, fix: &Fixture, from_omm: &Satellite, from_tle: &Satellite) {
     let e_omm = from_omm.epoch_jd();
+    assert_eq!(
+        (e_omm.0.to_bits(), e_omm.1.to_bits()),
+        fix.python_epoch,
+        "{label}: epoch JD differs from python-sgp4 ({:?})",
+        (e_omm.0, e_omm.1),
+    );
+    if !fix.tle_epoch_matches {
+        let e_tle = from_tle.epoch_jd();
+        assert_ne!(e_omm.1.to_bits(), e_tle.1.to_bits(), "{label}");
+        return;
+    }
     let e_tle = from_tle.epoch_jd();
     assert_eq!(
         (e_omm.0.to_bits(), e_omm.1.to_bits()),
@@ -172,7 +199,7 @@ fn omm_drives_sgp4_bit_identically_to_matching_tle() {
         for (enc, parsed) in [("KVN", &kvn), ("XML", &xml)] {
             let from_omm =
                 Satellite::from_omm(parsed).unwrap_or_else(|e| panic!("{} {enc}: {e}", fix.name));
-            assert_bit_identical(&format!("{} [{enc}]", fix.name), &from_omm, &from_tle);
+            assert_bit_identical(&format!("{} [{enc}]", fix.name), fix, &from_omm, &from_tle);
         }
     }
 }
@@ -195,7 +222,7 @@ fn omm_json_matches_other_encodings_and_drives_sgp4_to_0_ulp() {
             Satellite::from_tle(&l1, &l2).unwrap_or_else(|e| panic!("{}: {e}", fix.name));
         let from_omm =
             Satellite::from_omm(&json).unwrap_or_else(|e| panic!("{} JSON: {e}", fix.name));
-        assert_bit_identical(&format!("{} [JSON]", fix.name), &from_omm, &from_tle);
+        assert_bit_identical(&format!("{} [JSON]", fix.name), fix, &from_omm, &from_tle);
     }
 }
 
@@ -275,7 +302,7 @@ fn gp_csv_matches_json_and_drives_sgp4_to_0_ulp() {
     let (l1, l2) = tle_lines(fix.tle);
     let from_tle = Satellite::from_tle(&l1, &l2).expect("ISS TLE initializes");
     let from_csv = Satellite::from_omm(&csv).expect("ISS GP CSV initializes");
-    assert_bit_identical("ISS (ZARYA) [CSV]", &from_csv, &from_tle);
+    assert_bit_identical("ISS (ZARYA) [CSV]", fix, &from_csv, &from_tle);
 
     let elements = csv.to_element_set().expect("CSV converts to element set");
     let tle_elements = sidereon_core::astro::tle::parse(&l1, &l2)
