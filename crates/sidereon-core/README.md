@@ -4,7 +4,7 @@ The complete engine behind [`sidereon`](https://crates.io/crates/sidereon): sate
 propagation and observation plus GNSS positioning, in one pure-Rust crate. It is the fold
 of the propagation and GNSS layers. The GNSS layer is always present in this
 single complete crate. The published crate excludes `tests/fixtures`, so `cargo test` on a
-crates.io tarball runs a subset; 42 tests are gated on `cfg(sidereon_repo_tests)`, and the full
+crates.io tarball runs a subset; 44 tests are gated on `cfg(sidereon_repo_tests)`, and the full
 suite requires the repository.
 
 ## Propagation and observation

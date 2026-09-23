@@ -13,7 +13,9 @@ use crate::estimation::recipe::{FrameRecipe, RangeRecipe, SagnacRecipe};
 use crate::inertial::state::{skew, validate_dcm_orthonormal};
 use crate::inertial::{validate_finite, validate_vec3};
 use crate::observables::{
-    transmit_time_satellite_state, ObservableEphemerisSource, ObservablesError, TransmitTimeOptions,
+    pseudorange_transmit_epoch_j2000_s, pseudorange_transmit_satellite_state,
+    transmit_time_satellite_state, ObservableEphemerisSource, ObservablesError,
+    TransmitTimeOptions,
 };
 use crate::precise_positioning::{
     predict_range_rate_m_s, ReceiverVelocityState, VelocityObservation,
@@ -193,10 +195,12 @@ impl TightGnssEpoch {
 pub struct TightCouplingConfig {
     /// Body-frame vector from IMU origin to GNSS antenna phase center, in meters.
     pub lever_arm_body_m: [f64; 3],
-    /// Apply the SPP measured-pseudorange transmit-time light-time correction to
-    /// code and carrier-phase rows.
+    /// Place each satellite at its signal's transmission epoch, from the measured
+    /// pseudorange as RTKLIB `satposs` places it, for the code, carrier-phase and
+    /// range-rate rows. Off, every row reads the satellite at the reception epoch.
     pub light_time: bool,
-    /// Apply Earth-rotation Sagnac correction.
+    /// Apply Earth-rotation Sagnac correction: RTKLIB's first-order `geodist` term
+    /// where the rows place the satellite at its transmission epoch.
     pub sagnac: bool,
     /// Initial receiver-clock bias variance in square meters.
     pub initial_clock_bias_variance_m2: f64,
@@ -650,11 +654,12 @@ pub(super) fn tight_coupling_correction(
         }
 
         if let Some(range_rate) = observation.range_rate {
-            let satellite = transmit_time_satellite_state(
+            let satellite = tight_range_rate_satellite(
                 source,
                 observation.satellite_id,
                 kinematics.antenna_position_ecef_m,
                 epoch.t_j2000_s,
+                observation.pseudorange_m,
                 options,
             )
             .map_err(map_observables_error)?;
@@ -673,6 +678,8 @@ pub(super) fn tight_coupling_correction(
             };
             let prediction = predict_range_rate_m_s(&velocity_observation, receiver)
                 .ok_or_else(|| invalid_input("range_rate", "line of sight must be nonzero"))?;
+            let predicted_range_rate_m_s = prediction.range_rate_m_s
+                + tight_sagnac_range_rate_m_s(&satellite, receiver, options);
             let row = range_rate_design_row(
                 aug_dim,
                 clock_drift,
@@ -680,7 +687,7 @@ pub(super) fn tight_coupling_correction(
                 kinematics.lever_velocity_ecef_mps,
                 kinematics.gyro_bias_velocity_block,
             );
-            innovation.push(range_rate.measured_range_rate_m_s - prediction.range_rate_m_s);
+            innovation.push(range_rate.measured_range_rate_m_s - predicted_range_rate_m_s);
             design.push(row);
             variances.push(range_rate.sigma_m_s * range_rate.sigma_m_s);
         }
@@ -951,11 +958,12 @@ fn tight_measurement_predictions(
         }
 
         if let Some(range_rate) = observation.range_rate {
-            let satellite = transmit_time_satellite_state(
+            let satellite = tight_range_rate_satellite(
                 source,
                 observation.satellite_id,
                 kinematics.antenna_position_ecef_m,
                 epoch.t_j2000_s,
+                observation.pseudorange_m,
                 options,
             )
             .map_err(map_observables_error)?;
@@ -974,11 +982,62 @@ fn tight_measurement_predictions(
             };
             let prediction = predict_range_rate_m_s(&velocity_observation, receiver)
                 .ok_or_else(|| invalid_input("range_rate", "line of sight must be nonzero"))?;
-            predictions.push(prediction.range_rate_m_s);
+            predictions.push(
+                prediction.range_rate_m_s
+                    + tight_sagnac_range_rate_m_s(&satellite, receiver, options),
+            );
         }
     }
     validate_finite_slice(&predictions, "tight_prediction")?;
     Ok(predictions)
+}
+
+/// Satellite state for a range-rate row, at the transmission epoch of the same
+/// satellite's pseudorange, as the code row places it: RTKLIB `satposs` placement from
+/// the pseudorange, position and velocity unrotated. With light time off, the state at
+/// the reception epoch.
+fn tight_range_rate_satellite(
+    source: &dyn ObservableEphemerisSource,
+    sat: crate::GnssSatelliteId,
+    receiver_ecef_m: [f64; 3],
+    t_rx_j2000_s: f64,
+    pseudorange_m: f64,
+    options: TransmitTimeOptions,
+) -> Result<crate::observables::TransmitTimeSatelliteState, ObservablesError> {
+    if !options.light_time {
+        return transmit_time_satellite_state(source, sat, receiver_ecef_m, t_rx_j2000_s, options);
+    }
+    let t_tx = pseudorange_transmit_epoch_j2000_s(source, sat, t_rx_j2000_s, pseudorange_m)?;
+    pseudorange_transmit_satellite_state(
+        source,
+        sat,
+        receiver_ecef_m,
+        t_rx_j2000_s,
+        t_tx,
+        options.sagnac,
+    )
+}
+
+/// First-order Sagnac term of a range-rate row, m/s, where `options.sagnac` is on: the
+/// rate of the Sagnac term the code row's range carries
+/// ([`crate::geometry::range::sagnac_range_rate_first_order`]), from the placed satellite
+/// position and velocity and the receiver position and velocity.
+fn tight_sagnac_range_rate_m_s(
+    satellite: &crate::observables::TransmitTimeSatelliteState,
+    receiver: ReceiverVelocityState,
+    options: TransmitTimeOptions,
+) -> f64 {
+    if !options.sagnac {
+        return 0.0;
+    }
+    crate::geometry::range::sagnac_range_rate_first_order(
+        satellite.position_ecef_m,
+        satellite.velocity_m_s,
+        receiver.position_m,
+        receiver.velocity_m_s,
+        crate::constants::OMEGA_E_DOT_RAD_S,
+        crate::constants::C_M_S,
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1049,15 +1108,16 @@ fn spp_code_satellite_prediction(
         met: &met,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe {
-            range: RangeRecipe::SppMeasuredPseudorangeFixedIter,
+            range: RangeRecipe::RtklibSatpossPseudorange,
             sagnac: if sagnac {
-                SagnacRecipe::ClosedFormZRotation
+                SagnacRecipe::RtklibFirstOrderScalar
             } else {
                 SagnacRecipe::Off
             },
             frame: FrameRecipe::SppSkyfieldAuThreeIter,
         },
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
     };
     let model = sat_model(
         &env,
@@ -1191,6 +1251,57 @@ impl EphemerisSource for ObservableClockSource<'_> {
                         degraded: state.degraded,
                     }))
             }
+            Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason))) => {
+                Err(crate::Error::Ut1OutsideCoverage(reason))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// The observable source's selected read, with a UT1 refusal kept as
+    /// [`crate::Error::Ut1OutsideCoverage`] and any other failure read as no state.
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: crate::GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        match self
+            .source
+            .try_observable_state_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
+        {
+            Ok(state) => {
+                let (observable, group_delay) = state.value;
+                Ok(observable
+                    .clock_s
+                    .map(|clock_s| crate::astro::time::Validated {
+                        value: (observable.position_ecef_m, clock_s, group_delay),
+                        degraded: state.degraded,
+                    }))
+            }
+            Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason))) => {
+                Err(crate::Error::Ut1OutsideCoverage(reason))
+            }
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// The observable source's transmit-epoch clock, with a UT1 refusal kept as
+    /// [`crate::Error::Ut1OutsideCoverage`] and any other failure read as no clock.
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: crate::GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<f64>>, crate::Error> {
+        match self
+            .source
+            .try_observable_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
+        {
+            Ok(clock) => Ok(clock.transpose()),
             Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason))) => {
                 Err(crate::Error::Ut1OutsideCoverage(reason))
             }
@@ -1726,14 +1837,22 @@ mod tests {
                 0.0,
             )],
         );
-        let sat_state = transmit_time_satellite_state(
+        // The rows read the satellite at the transmission epoch of its pseudorange, placed
+        // as RTKLIB `satposs` places it, unrotated.
+        let pseudorange_m = transmit_time_satellite_state(
             &source,
             satellite_id,
             receiver,
             T0,
             TransmitTimeOptions::default(),
         )
-        .expect("satellite state");
+        .expect("satellite state")
+        .geometric_range_m;
+        let t_tx = pseudorange_transmit_epoch_j2000_s(&source, satellite_id, T0, pseudorange_m)
+            .expect("placed transmission epoch");
+        let sat_state =
+            pseudorange_transmit_satellite_state(&source, satellite_id, receiver, T0, t_tx, true)
+                .expect("placed satellite state");
         let measured_receiver = ReceiverVelocityState {
             position_m: receiver,
             velocity_m_s: [5.0, -2.0, 1.0],
@@ -1752,7 +1871,7 @@ mod tests {
             .range_rate_m_s;
         let observation = TightGnssObservation {
             satellite_id,
-            pseudorange_m: sat_state.geometric_range_m,
+            pseudorange_m,
             pseudorange_sigma_m: 2.0,
             range_rate: Some(TightRangeRateObservation {
                 measured_range_rate_m_s: measured,
@@ -1804,9 +1923,16 @@ mod tests {
             doppler_row[clock_drift_index(filter.state.dimension())].to_bits(),
             1.0_f64.to_bits()
         );
+        // The row adds the rate of the code row's first-order Sagnac term, worked here by
+        // hand for the nominal receiver, which does not move:
+        // omega / c * (vs_x rr_y - vs_y rr_x).
+        let sv = sat_state.velocity_m_s;
+        let sagnac_rate_m_s = crate::constants::OMEGA_E_DOT_RAD_S / crate::constants::C_M_S
+            * (sv[0] * receiver[1] - sv[1] * receiver[0]);
+        assert!(sagnac_rate_m_s.abs() > 1.0e-6, "{sagnac_rate_m_s}");
         assert_eq!(
             correction.innovation[1].to_bits(),
-            (measured - predicted_at_nominal.range_rate_m_s).to_bits()
+            (measured - (predicted_at_nominal.range_rate_m_s + sagnac_rate_m_s)).to_bits()
         );
     }
 
@@ -1898,6 +2024,7 @@ mod tests {
                 glonass_channels: &glonass_channels,
                 model: SppModelRecipe::reference(),
                 pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+                placement_pseudoranges_m: None,
             };
             let model = sat_model(
                 &env,

@@ -127,7 +127,10 @@ pub struct RtkArcPreprocessing {
     /// [`crate::rtk::hatch_smooth_baseline_code_epochs`]. `None` skips smoothing.
     pub hatch_window_cap: Option<usize>,
     /// Elevation mask (degrees) applied at the base receiver via
-    /// [`crate::rtk::apply_elevation_mask`]. `None` skips masking.
+    /// [`crate::rtk::apply_elevation_mask`], to the base's transmit-time satellite
+    /// positions ([`RtkArcEpoch::base_satellite_positions_m`], or the shared ones where
+    /// none are given), as RTKLIB `selsat` masks by the base elevation. `None` skips
+    /// masking.
     pub elevation_mask_deg: Option<f64>,
 }
 
@@ -1343,10 +1346,13 @@ fn preprocess_arc(
     }
 
     if let Some(mask_deg) = pre.elevation_mask_deg {
+        // The mask reads the elevation at the base station of each satellite placed at the
+        // transmission epoch of the base's own pseudorange, as RTKLIB `selsat` masks by
+        // the base elevation `zdres` forms from the base's `satposs` states.
         let mask_epochs: Vec<ElevationMaskEpoch> = work
             .iter()
             .map(|epoch| ElevationMaskEpoch {
-                satellite_positions_m: epoch.satellite_positions_m.clone(),
+                satellite_positions_m: base_positions(epoch).clone(),
             })
             .collect();
         let result = apply_elevation_mask(config.base_m, &mask_epochs, mask_deg)
@@ -1912,6 +1918,15 @@ fn to_dual_observation(observation: &RtkDualFrequencyObservation) -> DualObserva
         phi2_cycles: observation.phi2_cycles,
         f1_hz: observation.f1_hz,
         f2_hz: observation.f2_hz,
+    }
+}
+
+/// The base's transmit-time satellite positions, or the shared ones where none are given.
+fn base_positions(epoch: &RtkArcEpoch) -> &BTreeMap<String, [f64; 3]> {
+    if epoch.base_satellite_positions_m.is_empty() {
+        &epoch.satellite_positions_m
+    } else {
+        &epoch.base_satellite_positions_m
     }
 }
 
@@ -3256,7 +3271,11 @@ mod tests {
             let mask_epochs: Vec<ElevationMaskEpoch> = work
                 .iter()
                 .map(|e| ElevationMaskEpoch {
-                    satellite_positions_m: e.satellite_positions_m.clone(),
+                    satellite_positions_m: if e.base_satellite_positions_m.is_empty() {
+                        e.satellite_positions_m.clone()
+                    } else {
+                        e.base_satellite_positions_m.clone()
+                    },
                 })
                 .collect();
             let result =

@@ -5,6 +5,13 @@
 //! They own parsing, signal selection, shared-epoch matching, transmit-time
 //! satellite lookup, and deterministic ordering only. Double-difference
 //! reference selection and numeric solving stay in the existing RTK arc drivers.
+//!
+//! Each receiver's transmit-time satellite positions are placed from its own
+//! pseudoranges as RTKLIB `rtkpos` places them (`satposs`): the transmission
+//! epoch is `t_rx - P / c` less the satellite clock read there, and the clock and
+//! the position both come from the record the source selects at the reception
+//! epoch. A satellite with no clock there, or with a pseudorange that is not a
+//! positive distance, is skipped for that epoch, as RTKLIB places none for it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -428,14 +435,22 @@ pub fn build_rinex_rtk_arc(
             let Some(position) = ephemeris_position(ephemeris, sat, epoch_j2000_s)? else {
                 continue;
             };
-            let base_tx_epoch_s =
-                transmit_epoch_j2000_s(epoch_j2000_s, base_values[&satellite_id].code_m);
-            let rover_tx_epoch_s =
-                transmit_epoch_j2000_s(epoch_j2000_s, rover_values[&satellite_id].code_m);
-            let Some(base_tx) = ephemeris_position(ephemeris, sat, base_tx_epoch_s)? else {
+            let Some(base_tx) = placed_position(
+                ephemeris,
+                sat,
+                epoch_j2000_s,
+                base_values[&satellite_id].code_m,
+            )?
+            else {
                 continue;
             };
-            let Some(rover_tx) = ephemeris_position(ephemeris, sat, rover_tx_epoch_s)? else {
+            let Some(rover_tx) = placed_position(
+                ephemeris,
+                sat,
+                epoch_j2000_s,
+                rover_values[&satellite_id].code_m,
+            )?
+            else {
                 continue;
             };
             satellite_positions_m.insert(satellite_id.clone(), position);
@@ -624,12 +639,10 @@ pub fn build_dual_frequency_rinex_rtk_arc(
             let Some(position) = ephemeris_position(ephemeris, sat, epoch_j2000_s)? else {
                 continue;
             };
-            let base_tx_epoch_s = transmit_epoch_j2000_s(epoch_j2000_s, base.p1_m);
-            let rover_tx_epoch_s = transmit_epoch_j2000_s(epoch_j2000_s, rover.p1_m);
-            let Some(base_tx) = ephemeris_position(ephemeris, sat, base_tx_epoch_s)? else {
+            let Some(base_tx) = placed_position(ephemeris, sat, epoch_j2000_s, base.p1_m)? else {
                 continue;
             };
-            let Some(rover_tx) = ephemeris_position(ephemeris, sat, rover_tx_epoch_s)? else {
+            let Some(rover_tx) = placed_position(ephemeris, sat, epoch_j2000_s, rover.p1_m)? else {
                 continue;
             };
             satellite_positions_m.insert(satellite_id.clone(), position);
@@ -1227,9 +1240,42 @@ fn carrier_frequency_hz(
         .map_err(RtkRinexArcError::from)
 }
 
-fn transmit_epoch_j2000_s(receive_epoch_j2000_s: f64, code_m: f64) -> f64 {
-    let transmit_offset_us = (code_m / C_M_S * 1_000_000.0).round();
-    receive_epoch_j2000_s - transmit_offset_us / 1_000_000.0
+/// Satellite ECEF position at the transmission epoch of one receiver's pseudorange
+/// `code_m`, received at `receive_epoch_j2000_s`, as RTKLIB `rtkpos` forms it for each
+/// receiver from its own pseudoranges (`satposs`): the epoch `t_rx - P / c` less the
+/// satellite clock read there, and the state there, both from the record selected at the
+/// reception epoch. `None` where the source cannot place the satellite: no ephemeris or no
+/// clock there, or a pseudorange that is not a positive distance, which RTKLIB reads as
+/// none and places no satellite for.
+fn placed_position(
+    ephemeris: &dyn ObservableEphemerisSource,
+    satellite_id: GnssSatelliteId,
+    receive_epoch_j2000_s: f64,
+    code_m: f64,
+) -> Result<Option<[f64; 3]>, RtkRinexArcError> {
+    let transmit_epoch_j2000_s = match crate::observables::pseudorange_transmit_epoch_j2000_s(
+        ephemeris,
+        satellite_id,
+        receive_epoch_j2000_s,
+        code_m,
+    ) {
+        Ok(epoch) => epoch,
+        Err(ObservablesError::InvalidInput {
+            field: "pseudorange_m",
+            ..
+        }) => return Ok(None),
+        Err(error) if is_observable_state_gap(&error) => return Ok(None),
+        Err(error) => return Err(ephemeris_error(satellite_id, receive_epoch_j2000_s, error)),
+    };
+    match ephemeris.try_observable_state_group_delay_selected_at_j2000_s(
+        satellite_id,
+        transmit_epoch_j2000_s,
+        receive_epoch_j2000_s,
+    ) {
+        Ok(state) => Ok(Some(state.value.0.position_ecef_m)),
+        Err(error) if is_observable_state_gap(&error) => Ok(None),
+        Err(error) => Err(ephemeris_error(satellite_id, transmit_epoch_j2000_s, error)),
+    }
 }
 
 fn ephemeris_position(
@@ -1416,6 +1462,95 @@ mod tests {
         assert_eq!(
             ephemeris_position(&FixedSource, sat, 0.0),
             Ok(Some([20_000_000.0, 10_000_000.0, 10_000_000.0]))
+        );
+    }
+
+    /// A satellite whose position records the epoch it was read at and the epoch the
+    /// record was selected at, with the clock `clock_s`.
+    struct RecordingSource {
+        clock_s: Option<f64>,
+        reads: std::cell::RefCell<Vec<(f64, f64)>>,
+    }
+
+    impl ObservableEphemerisSource for RecordingSource {
+        fn observable_state_at_j2000_s(
+            &self,
+            sat: GnssSatelliteId,
+            t_j2000_s: f64,
+        ) -> Result<crate::observables::ObservableState, ObservablesError> {
+            Ok(self
+                .try_observable_state_group_delay_selected_at_j2000_s(sat, t_j2000_s, t_j2000_s)?
+                .value
+                .0)
+        }
+
+        fn try_observable_state_group_delay_selected_at_j2000_s(
+            &self,
+            _sat: GnssSatelliteId,
+            t_j2000_s: f64,
+            selection_j2000_s: f64,
+        ) -> Result<crate::astro::time::Validated<(ObservableState, Option<f64>)>, ObservablesError>
+        {
+            self.reads.borrow_mut().push((t_j2000_s, selection_j2000_s));
+            Ok(crate::astro::time::Validated {
+                value: (
+                    ObservableState {
+                        position_ecef_m: [t_j2000_s, selection_j2000_s, 1.0],
+                        clock_s: self.clock_s,
+                    },
+                    None,
+                ),
+                degraded: None,
+            })
+        }
+    }
+
+    #[test]
+    fn placed_position_is_rtklib_satposs_per_receiver() {
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("G01");
+        let t_rx = 646_315_200.0;
+        let code_m = 21_000_000.0;
+        let clock_s = 1.5e-4;
+        let source = RecordingSource {
+            clock_s: Some(clock_s),
+            reads: std::cell::RefCell::new(Vec::new()),
+        };
+        let clock_epoch = t_rx - code_m / C_M_S;
+        let transmit_epoch = clock_epoch - clock_s;
+        // The clock is read at t_rx - P/c and the state at that epoch less the clock,
+        // both from the record selected at the reception epoch; nothing is rounded to
+        // a whole microsecond.
+        assert_eq!(
+            placed_position(&source, sat, t_rx, code_m),
+            Ok(Some([transmit_epoch, t_rx, 1.0]))
+        );
+        assert!(source
+            .reads
+            .borrow()
+            .iter()
+            .all(|(_, selection)| selection.to_bits() == t_rx.to_bits()));
+        assert!(source
+            .reads
+            .borrow()
+            .iter()
+            .any(|(t, _)| t.to_bits() == clock_epoch.to_bits()));
+
+        // No satellite clock, or a pseudorange that is not a positive distance,
+        // places no satellite, as RTKLIB `satposs` places none.
+        let clockless = RecordingSource {
+            clock_s: None,
+            reads: std::cell::RefCell::new(Vec::new()),
+        };
+        assert_eq!(placed_position(&clockless, sat, t_rx, code_m), Ok(None));
+        assert_eq!(placed_position(&source, sat, t_rx, 0.0), Ok(None));
+        assert_eq!(placed_position(&source, sat, t_rx, -1.0), Ok(None));
+        assert_eq!(placed_position(&source, sat, t_rx, f64::NAN), Ok(None));
+
+        assert_eq!(
+            placed_position(&Ut1RefusingSource, sat, t_rx, code_m),
+            Err(RtkRinexArcError::Ut1OutsideCoverage(
+                crate::astro::time::DegradeReason::AfterCoverage
+            ))
         );
     }
 

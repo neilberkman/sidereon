@@ -305,18 +305,10 @@ fn ppp_elevation_cutoff_arc() -> (FakeSource, Vec<FloatEpoch>, FloatState, Vec<S
         let observations = ids
             .iter()
             .map(|id| {
-                let pred = predict(
-                    &source,
-                    *id,
-                    truth,
-                    t_rx_j2000_s,
-                    PredictOptions {
-                        carrier_hz: F_L1_HZ,
-                        light_time: true,
-                        sagnac: true,
-                    },
-                )
-                .unwrap();
+                let (_, pred) =
+                    super::synthetic_placed_code(&source, *id, truth, t_rx_j2000_s, |geometry| {
+                        geometry.geometric_range_m + clock
+                    });
                 let code_m = pred.geometric_range_m + clock;
                 let ambiguity_m = ambiguities[id.to_string().as_str()];
                 FloatObservation {
@@ -427,9 +419,8 @@ fn float_solution_output_validation_rejects_nonfinite_values() {
         phase_rms_m: 0.0,
         weighted_rms_m: 0.0,
         ssr_bias_exclusions: Vec::new(),
+        unplaced_observations: Vec::new(),
         solved_epoch_indices: vec![0],
-        ssr_bias_readmissions: Vec::new(),
-        ssr_bias_last_pass: 0,
         residual_screen: false,
         solve_options: FloatSolveOptions::default(),
         residual_screen_removals: Vec::new(),
@@ -1125,18 +1116,13 @@ fn static_float_solver_recovers_synthetic_arc() {
         let observations = ids
             .iter()
             .map(|id| {
-                let pred = predict(
+                let (_, pred) = super::synthetic_placed_code(
                     &source,
                     *id,
                     truth,
                     epoch_idx as f64 * 900.0,
-                    PredictOptions {
-                        carrier_hz: F_L1_HZ,
-                        light_time: true,
-                        sagnac: true,
-                    },
-                )
-                .unwrap();
+                    |geometry| geometry.geometric_range_m + clock,
+                );
                 let code = pred.geometric_range_m + clock;
                 let ambiguity = ambiguities.get(&id.to_string()).copied().unwrap();
                 FloatObservation {
@@ -1228,6 +1214,34 @@ fn static_float_solver_recovers_synthetic_arc() {
     assert!(solution.converged);
 }
 
+/// An observation whose code is zero or negative places no transmission epoch; the solve
+/// leaves it out before it solves and reports it with its reason, and solves the rest.
+#[test]
+fn a_code_that_is_not_positive_is_left_out_before_the_solve() {
+    for code_m in [0.0, -1.0] {
+        let (source, mut epochs, initial, _) = ppp_elevation_cutoff_arc();
+        let left_out = epochs[0].observations[0].clone();
+        epochs[0].observations[0].code_m = code_m;
+        let solution = solve_float_epochs(&source, &epochs, initial, ppp_cutoff_config(None))
+            .expect("the rest of the arc solves");
+        assert_eq!(
+            solution.unplaced_observations,
+            vec![UnplacedObservation {
+                epoch_index: 0,
+                satellite_id: left_out.satellite_id.clone(),
+                ambiguity_id: left_out.ambiguity_id.clone(),
+                reason: UnplacedObservationReason::CodeNotPositive,
+            }],
+            "code {code_m}"
+        );
+        assert!(solution
+            .residuals_m
+            .iter()
+            .all(|r| !(r.epoch_index == 0 && r.ambiguity_id == left_out.ambiguity_id)));
+        assert!(solution.ssr_bias_exclusions.is_empty());
+    }
+}
+
 #[test]
 fn elevation_cutoff_none_preserves_static_float_fixture_bits() {
     let (source, epochs, initial, _) = ppp_elevation_cutoff_arc();
@@ -1242,93 +1256,96 @@ fn elevation_cutoff_none_preserves_static_float_fixture_bits() {
     assert_eq!(solution.tropo_gradient_east_m, None);
     assert_eq!(solution.tropo_gradient_covariance_m2, None);
     assert_eq!(solution.formal_tropo_gradient_covariance_m2, None);
+    // Re-frozen when the rows moved to RTKLIB `satposs` placement and `geodist`: the
+    // elevations are those of the unrotated line of sight, exactly the fixture's designed
+    // angles (sin 60 deg, sin 55 deg, ...) where the rotated one had them off by about 5e-6.
     assert_eq!(
         ppp_float_solution_bits(&solution),
         vec![
             4708606483430899711,
-            4452733082576154772,
-            4453493932956835639,
-            4623226492472189013,
-            13844205992025595820,
-            4616189618053415252,
-            4598175219544437634,
-            4599976659423301089,
-            4601778099233554315,
-            4603129179142392862,
-            4604029899052293746,
-            4604930618990457261,
+            4447637569080788515,
+            4451127459468294031,
+            4623226492472303440,
+            13844205992025481391,
+            4616189618053872964,
+            4598175219544748775,
+            4599976659423104215,
+            4601778099233568123,
+            4603129179142346841,
+            4604029899050595869,
+            4604930618989092006,
             0,
             0,
-            4605975682916587671,
-            4635794528945706806,
+            4605975682916830377,
+            4635794528945896420,
             0,
             0,
-            4605553524466321826,
-            4635464717656436615,
+            4605553485228115782,
+            4635464687001588143,
             0,
             0,
-            4605075134482219749,
-            4635090975481356867,
+            4605075134482436153,
+            4635090975481525933,
             0,
             0,
-            4604544223951464880,
-            4634676201629204626,
+            4604544271217802188,
+            4634676238556030647,
             0,
             0,
-            4595424520664219441,
-            4625581108599069534,
+            4595424355236410251,
+            4625580979358593605,
             0,
             0,
-            4590944325920908238,
-            4621095794037370361,
+            4590944653792149763,
+            4621096050186777802,
             0,
             0,
-            4605975682916587671,
-            4635794528945706806,
+            4605975682916830377,
+            4635794528945896420,
             0,
             0,
-            4605553524466321826,
-            4635464717656436615,
+            4605553485228115782,
+            4635464687001588143,
             0,
             0,
-            4605075134482219749,
-            4635090975481356867,
+            4605075134482436153,
+            4635090975481525933,
             0,
             0,
-            4604544223951464880,
-            4634676201629204626,
+            4604544271217802188,
+            4634676238556030647,
             0,
             0,
-            4595424520664219441,
-            4625581108599069534,
+            4595424355236410251,
+            4625580979358593605,
             0,
             0,
-            4590944325920908238,
-            4621095794037370361,
+            4590944653792149763,
+            4621096050186777802,
             0,
             0,
-            4605975682916587671,
-            4635794528945706806,
+            4605975682916830377,
+            4635794528945896420,
             0,
             0,
-            4605553524466321826,
-            4635464717656436615,
+            4605553485228115782,
+            4635464687001588143,
             0,
             0,
-            4605075134482219749,
-            4635090975481356867,
+            4605075134482436153,
+            4635090975481525933,
             0,
             0,
-            4604544223951464880,
-            4634676201629204626,
+            4604544271217802188,
+            4634676238556030647,
             0,
             0,
-            4595424520664219441,
-            4625581108599069534,
+            4595424355236410251,
+            4625580979358593605,
             0,
             0,
-            4590944325920908238,
-            4621095794037370361,
+            4590944653792149763,
+            4621096050186777802,
             0,
             0,
             0,
@@ -1524,18 +1541,10 @@ fn static_float_solver_reports_unit_variance_factor_on_weighted_synthetic_noise(
         let observations = ids
             .iter()
             .map(|id| {
-                let pred = predict(
-                    &source,
-                    *id,
-                    truth,
-                    t_rx_j2000_s,
-                    PredictOptions {
-                        carrier_hz: F_L1_HZ,
-                        light_time: true,
-                        sagnac: true,
-                    },
-                )
-                .unwrap();
+                let (_, pred) =
+                    super::synthetic_placed_code(&source, *id, truth, t_rx_j2000_s, |geometry| {
+                        geometry.geometric_range_m + clock
+                    });
                 let code_noise_m = deterministic_unit_noise(sample_idx);
                 let phase_noise_m = deterministic_unit_noise(sample_idx + 17) / 100.0;
                 sample_idx += 1;
@@ -1666,18 +1675,10 @@ fn static_float_solver_handles_multi_hundred_epoch_arc() {
         let observations = ids
             .iter()
             .map(|id| {
-                let pred = predict(
-                    &source,
-                    *id,
-                    truth,
-                    t_rx_j2000_s,
-                    PredictOptions {
-                        carrier_hz: F_L1_HZ,
-                        light_time: true,
-                        sagnac: true,
-                    },
-                )
-                .unwrap();
+                let (_, pred) =
+                    super::synthetic_placed_code(&source, *id, truth, t_rx_j2000_s, |geometry| {
+                        geometry.geometric_range_m + clock
+                    });
                 let code = pred.geometric_range_m + clock;
                 let ambiguity = ambiguities.get(&id.to_string()).copied().unwrap();
                 FloatObservation {
@@ -2127,9 +2128,6 @@ fn static_float_design_rows_keep_enabled_ztd_estimation_column() {
         normal: crate::estimation::recipe::NormalRecipe::PppDenseLastTie,
         estimate_residual_ionosphere: false,
         correction_epoch_indices: None,
-        ssr_bias_pass: 0,
-        ssr_bias_stage: SsrBiasExclusionStage::BeforeSolve,
-        ssr_bias_deferred: &[],
     };
     let binding = super::rows::AmbiguityBinding::Estimated {
         ids: &ambiguity_ids,
@@ -2181,9 +2179,6 @@ fn static_float_solver_recovers_injected_tropo_gradients_and_partials() {
         normal: crate::estimation::recipe::NormalRecipe::PppDenseLastTie,
         estimate_residual_ionosphere: false,
         correction_epoch_indices: None,
-        ssr_bias_pass: 0,
-        ssr_bias_stage: SsrBiasExclusionStage::BeforeSolve,
-        ssr_bias_deferred: &[],
     };
     let binding = super::rows::AmbiguityBinding::Estimated {
         ids: &ambiguity_ids,
@@ -2367,22 +2362,20 @@ fn tropo_gradient_synthetic_arc(
                 glonass_channel: None,
                 signals: None,
             };
-            let pred = crate::observables::predict_transmit_geometry(
-                &source,
-                *id,
-                truth,
-                t_rx_j2000_s,
-                PredictOptions {
-                    carrier_hz: F_L1_HZ,
-                    light_time: true,
-                    sagnac: true,
-                },
-                crate::observables::NOMINAL_SIGNAL_FLIGHT_TIME_S,
-            )
-            .expect("synthetic prediction");
+            // The source does not move, so the placed geometry does not depend on the code
+            // and the corrections below, formed at it, are those the rows form.
+            let (_, pred) =
+                super::synthetic_placed_code(&source, *id, truth, t_rx_j2000_s, |geometry| {
+                    geometry.geometric_range_m + clock_m
+                });
             let sat_velocity_m_s = corrections.sat_clock_relativity.then(|| {
-                crate::observables::transmit_velocity_m_s(&source, *id, &pred, true)
-                    .expect("synthetic velocity")
+                crate::observables::pseudorange_transmit_velocity_m_s(
+                    &source,
+                    *id,
+                    t_rx_j2000_s,
+                    pred.transmit_time_j2000_s,
+                )
+                .expect("synthetic velocity")
             });
             let tropo_model = super::model::model_troposphere(&pred, truth, &epoch, tropo)
                 .expect("synthetic tropo model");
@@ -2517,10 +2510,6 @@ const HAS_VI_60_S: u8 = 5;
 const HAS_VI_5_S: u8 = 0;
 
 /// Receiver position of the row-trace arc, used to place transmission times.
-fn ssr_test_receiver() -> [f64; 3] {
-    [3_512_900.0, 780_500.0, 5_248_700.0]
-}
-
 fn ssr_test_t0() -> f64 {
     f64::from(SSR_TEST_WEEK) * crate::constants::SECONDS_PER_WEEK + SSR_TEST_TOW_S
         - crate::constants::GPS_EPOCH_TO_J2000_S
@@ -2760,9 +2749,6 @@ fn row_trace_ctx<'a>(
         normal: crate::estimation::recipe::NormalRecipe::PppDenseLastTie,
         estimate_residual_ionosphere: false,
         correction_epoch_indices: None,
-        ssr_bias_pass: 0,
-        ssr_bias_stage: SsrBiasExclusionStage::BeforeSolve,
-        ssr_bias_deferred: &[],
     }
 }
 
@@ -2799,12 +2785,8 @@ fn static_float_rows_apply_ssr_code_and_phase_biases_with_expected_signs() {
         &state,
     )
     .unwrap();
-    let (biased_lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (biased_lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
     assert_eq!(report.code_applied_count, 1);
     assert_eq!(report.phase_applied_count, 1);
@@ -2962,12 +2944,8 @@ fn test_ppp_ssr_biases_unavailable_excludes_observations_and_retains_all_records
     );
     let broadcast = ssr_test_broadcast();
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
 
     assert_eq!(report.status, SsrPppAggregateStatus::NoneApplied);
     assert_eq!(report.code_applied_count, 0);
@@ -3004,16 +2982,9 @@ fn test_ppp_ssr_biases_unavailable_excludes_observations_and_retains_all_records
     assert_eq!(epochs[0].observations.len(), 2);
 
     // The solves leave both observations out, each with its report row as the reason.
-    let (retained, exclusions) = super::rows::exclude_unresolved_ssr_bias_observations(
-        &ephemeris,
-        &epochs,
-        0,
-        ssr_test_receiver(),
-        &lookup,
-        0,
-        SsrBiasExclusionStage::BeforeSolve,
-    )
-    .expect("SSR bias exclusion pass");
+    let (retained, exclusions) =
+        super::rows::exclude_unresolved_ssr_bias_observations(&ephemeris, &epochs, 0, &lookup)
+            .expect("SSR bias exclusion pass");
     assert_eq!(retained.len(), 1, "the epoch keeps its position");
     assert!(retained[0].observations.is_empty());
     assert_eq!(exclusions.len(), 2);
@@ -3037,15 +3008,7 @@ fn test_ppp_ssr_biases_unavailable_excludes_observations_and_retains_all_records
         crate::astro::time::DegradeReason::AfterCoverage,
     );
     assert!(matches!(
-        super::rows::exclude_unresolved_ssr_bias_observations(
-            &ephemeris,
-            &epochs,
-            0,
-            ssr_test_receiver(),
-            &refused,
-            0,
-            SsrBiasExclusionStage::BeforeSolve,
-        ),
+        super::rows::exclude_unresolved_ssr_bias_observations(&ephemeris, &epochs, 0, &refused,),
         Err(FloatSolveError::Ut1OutsideCoverage(
             crate::astro::time::DegradeReason::AfterCoverage
         ))
@@ -3105,12 +3068,8 @@ fn test_ppp_ssr_biases_default_options_apply_the_observation_signals() {
         ),
     );
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &with_biases);
-    let (_, applied) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &options,
-    );
+    let (_, applied) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &options);
     assert_eq!(applied.status, SsrPppAggregateStatus::AllApplied);
     assert_eq!(applied.code_applied_count, 2);
     assert_eq!(applied.phase_applied_count, 2);
@@ -3122,12 +3081,8 @@ fn test_ppp_ssr_biases_default_options_apply_the_observation_signals() {
         &has_test_message(&sats, 0, 1, 1, Some(HAS_VI_60_S), None),
     );
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &without_biases);
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &options,
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &options);
     assert_eq!(report.status, SsrPppAggregateStatus::NoneApplied);
     assert_eq!(report.code_failed_count, 2);
     assert_eq!(report.phase_failed_count, 2);
@@ -3155,16 +3110,9 @@ fn test_ppp_ssr_biases_default_options_apply_the_observation_signals() {
     assert!(lookup.ssr_code_bias_enabled);
     assert!(lookup.phase_bias_enabled);
 
-    let (retained, exclusions) = super::rows::exclude_unresolved_ssr_bias_observations(
-        &ephemeris,
-        &epochs,
-        0,
-        ssr_test_receiver(),
-        &lookup,
-        0,
-        SsrBiasExclusionStage::BeforeSolve,
-    )
-    .expect("SSR bias exclusion pass");
+    let (retained, exclusions) =
+        super::rows::exclude_unresolved_ssr_bias_observations(&ephemeris, &epochs, 0, &lookup)
+            .expect("SSR bias exclusion pass");
     assert!(retained[0].observations.is_empty());
     assert_eq!(exclusions.len(), 2);
     for exclusion in &exclusions {
@@ -3177,12 +3125,8 @@ fn test_ppp_ssr_biases_default_options_apply_the_observation_signals() {
     let opted_out = SsrPppBiasOptions::default()
         .with_apply_code_biases(false)
         .with_apply_phase_biases(false);
-    let (opted_lookup, opted_report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &opted_out,
-    );
+    let (opted_lookup, opted_report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &opted_out);
     assert_eq!(opted_report.status, SsrPppAggregateStatus::EmptyOrOptedOut);
     assert_eq!(opted_report.code_failed_count, 0);
     assert_eq!(opted_report.phase_failed_count, 0);
@@ -3197,10 +3141,7 @@ fn test_ppp_ssr_biases_default_options_apply_the_observation_signals() {
         &ephemeris,
         &epochs,
         0,
-        ssr_test_receiver(),
         &opted_lookup,
-        0,
-        SsrBiasExclusionStage::BeforeSolve,
     )
     .expect("SSR bias exclusion pass");
     assert!(opted_exclusions.is_empty());
@@ -3244,12 +3185,8 @@ fn test_ppp_ssr_biases_partial_survival_and_unrelated_records() {
     has_test_ingest(&mut store, &message);
     let broadcast = ssr_test_broadcast();
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
 
     assert_eq!(report.status, SsrPppAggregateStatus::PartiallyApplied);
     assert_eq!(report.code_applied_count, 1);
@@ -3287,16 +3224,9 @@ fn test_ppp_ssr_biases_partial_survival_and_unrelated_records() {
     assert!((actual_code + ionosphere_free(code_m[0], code_m[1])).abs() < 1.0e-8);
 
     // Only sat2 is left out, for its code bias alone.
-    let (retained, exclusions) = super::rows::exclude_unresolved_ssr_bias_observations(
-        &ephemeris,
-        &epochs,
-        0,
-        ssr_test_receiver(),
-        &lookup,
-        0,
-        SsrBiasExclusionStage::BeforeSolve,
-    )
-    .expect("SSR bias exclusion pass");
+    let (retained, exclusions) =
+        super::rows::exclude_unresolved_ssr_bias_observations(&ephemeris, &epochs, 0, &lookup)
+            .expect("SSR bias exclusion pass");
     assert_eq!(retained[0].observations, epochs[0].observations[..1]);
     assert_eq!(exclusions.len(), 1);
     assert_eq!(exclusions[0].satellite_id, sat2.to_string());
@@ -3388,12 +3318,8 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
     for order in [[&obs1, &obs2], [&obs2, &obs1]] {
         let mut ordered = epochs_60.clone();
         ordered[0].observations = order.iter().map(|obs| (*obs).clone()).collect();
-        let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-            &ephemeris,
-            &ordered,
-            ssr_test_receiver(),
-            &options_ack,
-        );
+        let (lookup, report) =
+            PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &ordered, &options_ack);
         assert_eq!(report.phase_discontinuity_resets_needed, 1);
         for row in &report.observation_reports {
             let expected = if row.ambiguity_id == "G01#1" {
@@ -3430,16 +3356,9 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
         );
 
         // A solve leaves G01#2 out and keeps G01#1, whichever comes first.
-        let (retained, exclusions) = super::rows::exclude_unresolved_ssr_bias_observations(
-            &ephemeris,
-            &ordered,
-            0,
-            ssr_test_receiver(),
-            &lookup,
-            0,
-            SsrBiasExclusionStage::BeforeSolve,
-        )
-        .expect("SSR bias exclusion pass");
+        let (retained, exclusions) =
+            super::rows::exclude_unresolved_ssr_bias_observations(&ephemeris, &ordered, 0, &lookup)
+                .expect("SSR bias exclusion pass");
         assert_eq!(retained[0].observations, vec![obs1.clone()]);
         assert_eq!(exclusions.len(), 1);
         assert_eq!(exclusions[0].ambiguity_id, "G01#2");
@@ -3465,12 +3384,8 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
     }
 
     let options_code_only = options_ack.clone().with_apply_phase_biases(false);
-    let (lookup_code_only, report_code_only) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs_60,
-        ssr_test_receiver(),
-        &options_code_only,
-    );
+    let (lookup_code_only, report_code_only) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs_60, &options_code_only);
     assert!(lookup_code_only.ssr_code_bias_enabled);
     assert!(!lookup_code_only.phase_bias_enabled);
     for row in &report_code_only.observation_reports {
@@ -3478,12 +3393,8 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
     }
 
     let options_phase_only = options_ack.clone().with_apply_code_biases(false);
-    let (lookup_phase_only, report_phase_only) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs_60,
-        ssr_test_receiver(),
-        &options_phase_only,
-    );
+    let (lookup_phase_only, report_phase_only) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs_60, &options_phase_only);
     assert!(!lookup_phase_only.ssr_code_bias_enabled);
     assert!(lookup_phase_only.phase_bias_enabled);
     assert_eq!(
@@ -3501,7 +3412,6 @@ fn test_ppp_ssr_biases_opt_out_incompatible_pairs_and_independent_ambiguities() 
     let (_lookup_bad_freq, report_bad_freq) = PppCorrectionLookup::default().with_ssr_biases(
         &ephemeris,
         &epochs_one_band,
-        ssr_test_receiver(),
         &options_bad_freq,
     );
     assert_eq!(
@@ -3571,12 +3481,8 @@ fn test_ppp_ssr_biases_match_tracking_codes_per_ambiguity() {
     }
     let broadcast = ssr_test_broadcast();
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
 
     let rows = &report.observation_reports;
     assert_eq!(rows.len(), 3);
@@ -3664,16 +3570,9 @@ fn test_ppp_ssr_biases_match_tracking_codes_per_ambiguity() {
         MissingCorrection::SsrCodeBias,
     );
 
-    let (retained, exclusions) = super::rows::exclude_unresolved_ssr_bias_observations(
-        &ephemeris,
-        &epochs,
-        0,
-        ssr_test_receiver(),
-        &lookup,
-        0,
-        SsrBiasExclusionStage::BeforeSolve,
-    )
-    .expect("SSR bias exclusion pass");
+    let (retained, exclusions) =
+        super::rows::exclude_unresolved_ssr_bias_observations(&ephemeris, &epochs, 0, &lookup)
+            .expect("SSR bias exclusion pass");
     assert_eq!(retained[0].observations, vec![matched]);
     let excluded: Vec<_> = exclusions.iter().map(|e| e.ambiguity_id.as_str()).collect();
     assert_eq!(excluded, ["G01#2", "G01#3"]);
@@ -3808,12 +3707,8 @@ fn test_ppp_ssr_biases_refuse_bias_from_other_solution_than_orbit_clock() {
         Some(has_solution(2, 2))
     );
 
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     assert_eq!(report.status, SsrPppAggregateStatus::PartiallyApplied);
     assert_eq!(report.code_applied_count, 1);
     assert_eq!(report.code_failed_count, 1);
@@ -3857,16 +3752,9 @@ fn test_ppp_ssr_biases_refuse_bias_from_other_solution_than_orbit_clock() {
         assert_eq!(query.solution, Some(has_solution(1, 1)));
     }
 
-    let (retained, exclusions) = super::rows::exclude_unresolved_ssr_bias_observations(
-        &ephemeris,
-        &epochs,
-        0,
-        ssr_test_receiver(),
-        &lookup,
-        0,
-        SsrBiasExclusionStage::BeforeSolve,
-    )
-    .expect("SSR bias exclusion pass");
+    let (retained, exclusions) =
+        super::rows::exclude_unresolved_ssr_bias_observations(&ephemeris, &epochs, 0, &lookup)
+            .expect("SSR bias exclusion pass");
     assert_eq!(retained[0].observations, epochs[0].observations[..1]);
     assert_eq!(exclusions.len(), 1);
     assert_eq!(exclusions[0].satellite_id, sat2.to_string());
@@ -3884,7 +3772,6 @@ fn test_ppp_ssr_biases_refuse_bias_from_other_solution_than_orbit_clock() {
     let (bias_only_lookup, bias_only_report) = PppCorrectionLookup::default().with_ssr_biases(
         &bias_only_ephemeris,
         &epochs,
-        ssr_test_receiver(),
         &gps_l1_l2_options(),
     );
     assert_eq!(bias_only_report.status, SsrPppAggregateStatus::NoneApplied);
@@ -3905,12 +3792,8 @@ fn test_ppp_ssr_biases_refuse_bias_from_other_solution_than_orbit_clock() {
     // A source that declines satellites without SSR orbit and clock cannot place them at
     // all, so their transmission time is unavailable.
     let declining = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &bias_only);
-    let (_, declined_report) = PppCorrectionLookup::default().with_ssr_biases(
-        &declining,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (_, declined_report) =
+        PppCorrectionLookup::default().with_ssr_biases(&declining, &epochs, &gps_l1_l2_options());
     for row in &declined_report.observation_reports {
         assert_eq!(row.transmit_time_j2000_s, None);
         assert_eq!(
@@ -3963,12 +3846,8 @@ fn test_ppp_ssr_biases_refuse_fresh_bias_over_expired_orbit_clock_with_broadcast
         "within the orbit and clock validity the SSR solution applies"
     );
 
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     let row = &report.observation_reports[0];
     assert_eq!(row.applied_orbit_clock_solution, None);
     assert_eq!(
@@ -4029,12 +3908,8 @@ fn test_ppp_ssr_biases_refuse_epoch_on_the_toh_under_broadcast_fallback() {
         "the signal left before the TOH, when the source returns the broadcast state"
     );
 
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     let row = &report.observation_reports[0];
     assert!(row.transmit_time_j2000_s.is_some_and(|t| t < t0));
     assert_eq!(row.applied_orbit_clock_solution, None);
@@ -4044,12 +3919,8 @@ fn test_ppp_ssr_biases_refuse_epoch_on_the_toh_under_broadcast_fallback() {
     assert!(lookup.phase_bias_m.is_empty());
 
     epochs[0].t_rx_j2000_s = t0 + 1.0;
-    let (_, later) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (_, later) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     assert_eq!(later.status, SsrPppAggregateStatus::AllApplied);
     assert_eq!(
         later.observation_reports[0].applied_orbit_clock_solution,
@@ -4064,22 +3935,15 @@ fn broadcast_fallback() -> crate::ssr::SsrFallbackPolicy {
     }
 }
 
-/// Transmission time of `obs` for reception at `t_rx`, predicted as the solve predicts it:
-/// seeded from its pseudorange.
+/// Transmission time of `obs` for reception at `t_rx`, placed as the solve places it: from
+/// its pseudorange, as RTKLIB `satposs` places it.
 fn ssr_test_transmit_time(
     ephemeris: &crate::ssr::SsrCorrectedEphemeris<'_>,
     obs: &FloatObservation,
     t_rx: f64,
 ) -> f64 {
-    crate::observables::transmit_epoch_j2000_s(
-        ephemeris,
-        obs.sat,
-        ssr_test_receiver(),
-        t_rx,
-        crate::observables::TransmitTimeOptions::default(),
-        crate::observables::flight_time_seed_s(obs.code_m),
-    )
-    .expect("transmission time")
+    crate::observables::pseudorange_transmit_epoch_j2000_s(ephemeris, obs.sat, t_rx, obs.code_m)
+        .expect("transmission time")
 }
 
 /// A bias whose TOH falls between the transmission and the reception of a signal is not
@@ -4109,12 +3973,8 @@ fn test_ppp_ssr_biases_refuse_toh_between_transmission_and_reception() {
     let t_tx = ssr_test_transmit_time(&ephemeris, &epochs[0].observations[0], t_rx);
     assert!(t_tx < t0 && t0 < t_rx, "t_tx {t_tx}, t0 {t0}, t_rx {t_rx}");
 
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     let row = &report.observation_reports[0];
     assert_eq!(row.transmit_time_j2000_s, Some(t_tx));
     assert_eq!(row.applied_orbit_clock_solution, None);
@@ -4162,28 +4022,17 @@ fn test_ppp_ssr_biases_accept_meo_epoch_transmitted_after_toh() {
         "t_tx {t_tx}, t0 {t0}, t_rx {t_rx}"
     );
 
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
     assert_eq!(
         report.observation_reports[0].transmit_time_j2000_s,
         Some(t_tx)
     );
 
-    let (retained, exclusions) = super::rows::exclude_unresolved_ssr_bias_observations(
-        &ephemeris,
-        &epochs,
-        0,
-        ssr_test_receiver(),
-        &lookup,
-        0,
-        SsrBiasExclusionStage::BeforeSolve,
-    )
-    .expect("SSR bias exclusion pass");
+    let (retained, exclusions) =
+        super::rows::exclude_unresolved_ssr_bias_observations(&ephemeris, &epochs, 0, &lookup)
+            .expect("SSR bias exclusion pass");
     assert!(exclusions.is_empty());
     assert_eq!(retained, epochs);
     assert_eq!(
@@ -4240,12 +4089,8 @@ fn test_ppp_ssr_biases_report_do_not_use_as_satellite_excluded() {
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store)
         .with_fallback(broadcast_fallback());
 
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     let row = &report.observation_reports[0];
     assert_eq!(row.transmit_time_j2000_s, None);
     assert_eq!(row.code_status, SsrIfCombinationStatus::SatelliteExcluded);
@@ -4280,24 +4125,13 @@ fn test_ppp_ssr_biases_left_out_of_a_solve_on_a_source_without_ssr() {
     );
     let broadcast = ssr_test_broadcast();
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
 
-    let (retained, exclusions) = super::rows::exclude_unresolved_ssr_bias_observations(
-        &source,
-        &epochs,
-        0,
-        ssr_test_receiver(),
-        &lookup,
-        0,
-        SsrBiasExclusionStage::BeforeSolve,
-    )
-    .expect("SSR bias exclusion pass");
+    let (retained, exclusions) =
+        super::rows::exclude_unresolved_ssr_bias_observations(&source, &epochs, 0, &lookup)
+            .expect("SSR bias exclusion pass");
     assert!(retained[0].observations.is_empty());
     assert_eq!(exclusions.len(), 1);
     assert!(!exclusions[0].code_bias_missing);
@@ -4389,28 +4223,17 @@ fn test_ppp_ssr_bias_check_keeps_an_unexpected_source_error_typed() {
     );
     let broadcast = ssr_test_broadcast();
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
     let wrapped = Wrapped {
         ephemeris: &ephemeris,
         failing: FailingSsr(&ephemeris),
     };
 
-    let (_, exclusions) = super::rows::exclude_unresolved_ssr_bias_observations(
-        &wrapped,
-        &epochs,
-        0,
-        ssr_test_receiver(),
-        &lookup,
-        0,
-        SsrBiasExclusionStage::BeforeSolve,
-    )
-    .expect("SSR bias exclusion pass");
+    let (_, exclusions) =
+        super::rows::exclude_unresolved_ssr_bias_observations(&wrapped, &epochs, 0, &lookup)
+            .expect("SSR bias exclusion pass");
     assert_eq!(exclusions.len(), 1);
     match &exclusions[0].transmit_time_failure {
         Some(SsrTransmitTimeFailure::Source { error, .. }) => {
@@ -4495,21 +4318,12 @@ fn ssr_spread_epoch(
         .enumerate()
         .map(|(index, prn)| {
             let sat = gps(*prn);
-            let geometry = crate::observables::predict_transmit_geometry(
-                source,
-                sat,
-                receiver,
-                t_rx,
-                PredictOptions {
-                    carrier_hz: F_L1_HZ,
-                    light_time: true,
-                    sagnac: true,
-                },
-                crate::observables::NOMINAL_SIGNAL_FLIGHT_TIME_S,
-            )
-            .expect("transmit geometry");
-            let code = geometry.geometric_range_m + clock_m
-                - C_M_S * geometry.sat_clock_s.expect("satellite clock");
+            // The code the rows reproduce: they place the transmission epoch from the code
+            // itself, so it is the fixed point of range + clock - c·satellite clock there.
+            let (code, _) = super::synthetic_placed_code(source, sat, receiver, t_rx, |geometry| {
+                geometry.geometric_range_m + clock_m
+                    - C_M_S * geometry.sat_clock_s.expect("satellite clock")
+            });
             FloatObservation {
                 sat,
                 satellite_id: sat.to_string(),
@@ -4720,7 +4534,6 @@ fn ssr_declined_satellite_is_excluded_before_the_elevation_cutoff() {
     let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
         &ephemeris,
         std::slice::from_ref(&epoch),
-        start,
         &gps_l1_l2_options(),
     );
     assert_eq!(
@@ -4744,17 +4557,55 @@ fn ssr_declined_satellite_is_excluded_before_the_elevation_cutoff() {
     assert_eq!(solution.used_sats, ["G01", "G02", "G03", "G04", "G05"]);
     assert_eq!(solution.ssr_bias_exclusions.len(), 1);
     assert_eq!(solution.ssr_bias_exclusions[0].satellite_id, "G06");
-    assert_eq!(solution.ssr_bias_exclusions[0].pass, 0);
     let error = norm3(sub3(solution.position_m, truth));
     assert!(error < 1.0e-3, "position error {error}");
 }
 
-/// A record boundary that the transmission time crosses while the solve iterates: at the
-/// starting position G06's signal left after its new corrections' TOH, at the true
-/// position just before it. The solve excludes G06 on the pass that crossed, starts
-/// again from the state it reached, and converges on the other satellites.
+/// Reception epoch at which the pseudorange of `flip`, modelled as [`ssr_spread_epoch`]
+/// models it with receiver clock `clock_m`, places its transmission epoch `offset_s` after
+/// `toh`, with that epoch. The placed epoch moves with the reception epoch at a rate of
+/// `1 - rdot / c`, so three steps settle it.
+fn t_rx_placing(
+    ephemeris: &dyn ObservableEphemerisSource,
+    prns: &[u8],
+    truth: [f64; 3],
+    flip: GnssSatelliteId,
+    toh: f64,
+    offset_s: f64,
+    clock_m: f64,
+) -> (f64, f64) {
+    let placed = |t_rx: f64| {
+        let epoch = ssr_spread_epoch(ephemeris, prns, truth, t_rx, clock_m);
+        let obs = epoch
+            .observations
+            .iter()
+            .find(|obs| obs.sat == flip)
+            .expect("the satellite is observed");
+        crate::observables::pseudorange_transmit_epoch_j2000_s(ephemeris, flip, t_rx, obs.code_m)
+            .expect("placed transmission epoch")
+    };
+    let mut t_rx = toh + 0.07;
+    for _ in 0..3 {
+        t_rx += (toh + offset_s) - placed(t_rx);
+    }
+    let t_tx = placed(t_rx);
+    assert!(
+        (t_tx - (toh + offset_s)).abs() <= 1.0e-6,
+        "{flip} placed at {t_tx}, TOH {toh}"
+    );
+    (t_rx, t_tx)
+}
+
+/// The SSR bias records of an observation are judged at the transmission epoch its
+/// pseudorange places, as RTKLIB `satposs` places it, and no receiver state enters that
+/// epoch. G06's signal leaves 5 µs before its new corrections' TOH, and then 5 µs after.
+/// Before the TOH the new records are not yet valid, so G06's biases are not applied and
+/// G06 is left out before the solve; after it they are applied and G06 is used. A solve
+/// from 3 km towards G06, and one from 3 km away from it, reach the same verdict for G06.
+/// Under a geometric light time from the solve's position, those starting points had
+/// moved G06's transmission epoch by about 10 µs, across the TOH.
 #[test]
-fn ssr_bias_flip_during_the_iteration_excludes_and_restarts() {
+fn ssr_bias_records_are_judged_at_the_placed_transmission_epoch_from_any_start() {
     let prns = [1, 2, 3, 4, 5, 6];
     let sats = prns.map(gps);
     let flip = gps(6);
@@ -4777,72 +4628,72 @@ fn ssr_bias_flip_during_the_iteration_excludes_and_restarts() {
     let (flip_position, _) =
         crate::spp::EphemerisSource::position_clock_at_j2000_s(&broadcast, flip, toh)
             .expect("broadcast state");
-    // 3 km towards G06 shortens its signal flight by about 10 µs.
-    let start = add3(
-        truth,
-        scale3(
-            unit3(sub3(flip_position, truth)).expect("direction"),
-            3_000.0,
-        ),
-    );
-    let flight = |position: [f64; 3], t_rx: f64| {
-        t_rx - crate::observables::transmit_epoch_j2000_s(
+    let towards = unit3(sub3(flip_position, truth)).expect("direction");
+    let starts = [
+        add3(truth, scale3(towards, 3_000.0)),
+        sub3(truth, scale3(towards, 3_000.0)),
+    ];
+    for offset_s in [-5.0e-6, 5.0e-6] {
+        let (t_rx, t_tx) = t_rx_placing(&ephemeris, &prns, truth, flip, toh, offset_s, 12.5);
+        let epoch = ssr_spread_epoch(&ephemeris, &prns, truth, t_rx, 12.5);
+        let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
             &ephemeris,
-            flip,
-            position,
-            t_rx,
-            crate::observables::TransmitTimeOptions::default(),
-            crate::observables::NOMINAL_SIGNAL_FLIGHT_TIME_S,
-        )
-        .expect("transmission time")
-    };
-    let guess = toh + 0.07;
-    let t_rx = toh + 0.5 * (flight(start, guess) + flight(truth, guess));
-    assert!(
-        t_rx - flight(start, t_rx) >= toh,
-        "at the start G06 left after the TOH"
-    );
-    assert!(
-        t_rx - flight(truth, t_rx) < toh,
-        "at the truth G06 left before the TOH"
-    );
-
-    let epoch = ssr_spread_epoch(&ephemeris, &prns, truth, t_rx, 12.5);
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        std::slice::from_ref(&epoch),
-        start,
-        &gps_l1_l2_options(),
-    );
-    assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
-    let state = ssr_spread_state(&epoch, start);
-    let solution = solve_float_epoch(
-        &ephemeris,
-        epoch,
-        state,
-        ssr_spread_config(
-            RangeCorrections {
-                ppp: lookup,
-                ..RangeCorrections::disabled()
-            },
-            None,
-        ),
-    )
-    .expect("the flip is excluded and the solve restarts");
-    assert_eq!(solution.used_sats, ["G01", "G02", "G03", "G04", "G05"]);
-    assert_eq!(solution.ssr_bias_exclusions.len(), 1);
-    let exclusion = &solution.ssr_bias_exclusions[0];
-    assert_eq!(exclusion.satellite_id, "G06");
-    assert_eq!(exclusion.pass, 1);
-    // The first Gauss-Newton step moves to the truth, where G06's biases no longer hold:
-    // the exclusion comes from the iteration, not from the check at convergence.
-    assert_eq!(exclusion.stage, SsrBiasExclusionStage::DuringIteration);
-    assert!(matches!(
-        exclusion.transmit_time_failure,
-        Some(SsrTransmitTimeFailure::OrbitClockSolution { applied: None, .. })
-    ));
-    let error = norm3(sub3(solution.position_m, truth));
-    assert!(error < 1.0e-3, "position error {error}");
+            std::slice::from_ref(&epoch),
+            &gps_l1_l2_options(),
+        );
+        let after_toh = offset_s > 0.0;
+        let row = report
+            .observation_reports
+            .iter()
+            .find(|row| row.sat == flip)
+            .expect("G06 report row");
+        assert_eq!(row.transmit_time_j2000_s, Some(t_tx));
+        if after_toh {
+            assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
+        } else {
+            assert_eq!(report.status, SsrPppAggregateStatus::PartiallyApplied);
+            assert_ne!(row.code_status, SsrIfCombinationStatus::Applied);
+            assert_ne!(row.phase_status, SsrIfCombinationStatus::Applied);
+            for other in report.observation_reports.iter().filter(|r| r.sat != flip) {
+                assert_eq!(other.code_status, SsrIfCombinationStatus::Applied);
+                assert_eq!(other.phase_status, SsrIfCombinationStatus::Applied);
+            }
+        }
+        for start in starts {
+            let state = ssr_spread_state(&epoch, start);
+            let solution = solve_float_epoch(
+                &ephemeris,
+                epoch.clone(),
+                state,
+                ssr_spread_config(
+                    RangeCorrections {
+                        ppp: lookup.clone(),
+                        ..RangeCorrections::disabled()
+                    },
+                    None,
+                ),
+            )
+            .expect("the solve");
+            if after_toh {
+                assert_eq!(
+                    solution.used_sats,
+                    ["G01", "G02", "G03", "G04", "G05", "G06"],
+                    "offset {offset_s} s"
+                );
+                assert!(solution.ssr_bias_exclusions.is_empty());
+            } else {
+                assert_eq!(
+                    solution.used_sats,
+                    ["G01", "G02", "G03", "G04", "G05"],
+                    "offset {offset_s} s"
+                );
+                assert_eq!(solution.ssr_bias_exclusions.len(), 1);
+                assert_eq!(solution.ssr_bias_exclusions[0].satellite_id, "G06");
+            }
+            let error = norm3(sub3(solution.position_m, truth));
+            assert!(error < 1.0e-3, "position error {error}");
+        }
+    }
 }
 
 /// The light-time iteration starts from the pseudorange, so the first ephemeris query is
@@ -4883,12 +4734,8 @@ fn ssr_do_not_use_onset_at_reception_leaves_the_signal_on_broadcast() {
         "excluded at reception"
     );
 
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        ssr_test_receiver(),
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     let row = &report.observation_reports[0];
     let t_tx = row
         .transmit_time_j2000_s
@@ -4911,37 +4758,22 @@ fn ssr_do_not_use_onset_at_reception_leaves_the_signal_on_broadcast() {
     assert!(lookup.ssr_code_bias_m.is_empty());
 }
 
-/// Signal flight time of `sat` to `position` for reception at `t_rx`, from `source`.
-fn flight_time(
-    source: &dyn ObservableEphemerisSource,
-    sat: GnssSatelliteId,
-    position: [f64; 3],
-    t_rx: f64,
-) -> f64 {
-    t_rx - crate::observables::transmit_epoch_j2000_s(
-        source,
-        sat,
-        position,
-        t_rx,
-        crate::observables::TransmitTimeOptions::default(),
-        crate::observables::NOMINAL_SIGNAL_FLIGHT_TIME_S,
-    )
-    .expect("transmission time")
-}
-
-/// An exclusion made from a starting position several kilometres off, where G06's signal
-/// left before its corrections' TOH, is checked again at the converged position. There the
-/// signal left after the TOH, so G06 is admitted again and kept.
+/// The residual screen removes a 50 km code outlier and solves again from where the
+/// outlier had taken the solution, kilometres off. The SSR bias records of the other
+/// observations are judged at the epochs their pseudoranges place, which that move leaves
+/// alone: G06, whose signal left 5 µs after its new corrections' TOH, keeps the records
+/// valid then, and nothing is excluded for its biases. Under a geometric light time from
+/// the solve's position, the move had carried G06's transmission epoch across the TOH.
 #[test]
-fn ssr_bias_exclusion_from_an_unconverged_position_is_admitted_again() {
+fn residual_screen_leaves_the_bias_records_of_the_placed_epochs_alone() {
     let prns = [1, 2, 3, 4, 5, 6];
     let sats = prns.map(gps);
     let flip = gps(6);
     let t0 = ssr_test_t0();
     let toh = t0 + 30.0;
     let broadcast = ssr_spread_broadcast(&prns);
-    let mut store = SsrCorrectionStore::new();
     let zero = Some(HasTestBiases::usable([0.0, 0.0], [0.0, 0.0]));
+    let mut store = SsrCorrectionStore::new();
     has_test_ingest(
         &mut store,
         &has_test_message(&sats, 0, 1, 1, Some(HAS_VI_60_S), zero),
@@ -4953,148 +4785,15 @@ fn ssr_bias_exclusion_from_an_unconverged_position_is_admitted_again() {
     let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store)
         .with_fallback(broadcast_fallback());
     let truth = receiver_under(&broadcast, &prns, toh);
-    let (flip_position, _) =
-        crate::spp::EphemerisSource::position_clock_at_j2000_s(&broadcast, flip, toh)
-            .expect("broadcast state");
-    // 3 km away from G06 lengthens its signal flight by about 10 µs.
-    let seed = sub3(
-        truth,
-        scale3(
-            unit3(sub3(flip_position, truth)).expect("direction"),
-            3_000.0,
-        ),
-    );
-    let guess = toh + 0.07;
-    let t_rx = toh
-        + 0.5
-            * (flight_time(&ephemeris, flip, seed, guess)
-                + flight_time(&ephemeris, flip, truth, guess));
-    assert!(t_rx - flight_time(&ephemeris, flip, seed, t_rx) < toh);
-    assert!(t_rx - flight_time(&ephemeris, flip, truth, t_rx) >= toh);
-
-    // Two epochs; G06 is observed only in the first, so while it is excluded no kept
-    // observation carries its ambiguity.
+    let (t_rx, _) = t_rx_placing(&ephemeris, &prns, truth, flip, toh, 5.0e-6, 12.5);
     let mut epochs = vec![
         ssr_spread_epoch(&ephemeris, &prns, truth, t_rx, 12.5),
-        ssr_spread_epoch(&ephemeris, &prns[..5], truth, t_rx + 1.0, -8.25),
+        ssr_spread_epoch(&ephemeris, &prns, truth, t_rx + 1.0, -8.25),
     ];
     epochs[1].epoch.second = 1.0;
-    // The biases are resolved at the true position, where they hold.
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        truth,
-        &gps_l1_l2_options(),
-    );
-    assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
-    let solution = solve_float_epochs(
-        &ephemeris,
-        &epochs,
-        FloatState {
-            clocks_m: vec![0.0; 2],
-            ..ssr_spread_state(&epochs[0], seed)
-        },
-        ssr_spread_config(
-            RangeCorrections {
-                ppp: lookup,
-                ..RangeCorrections::disabled()
-            },
-            None,
-        ),
-    )
-    .expect("the solve converges with G06 admitted again");
-    assert_eq!(
-        solution.ssr_bias_readmissions,
-        [(0, "G06".to_string())],
-        "G06 was excluded from the seed and admitted again"
-    );
-    assert!(solution.ssr_bias_exclusions.is_empty());
-    assert_eq!(
-        solution.used_sats,
-        ["G01", "G02", "G03", "G04", "G05", "G06"]
-    );
-    let error = norm3(sub3(solution.position_m, truth));
-    assert!(error < 1.0e-3, "position error {error}");
-}
-
-/// A flip inside the residual screen's re-solve: with a 50 km code outlier the unscreened
-/// solution sits kilometres from the truth, where one satellite's first-epoch signal left
-/// after its new corrections' TOH; the screen removes the outlier and re-solves towards
-/// the truth, where that signal left before the TOH. The fixed-point solve excludes that
-/// observation and starts again instead of refusing the solve.
-#[test]
-fn ssr_bias_flip_inside_the_residual_screen_excludes_and_restarts() {
-    let prns = [1, 2, 3, 4, 5, 6];
-    let sats = prns.map(gps);
-    let t0 = ssr_test_t0();
-    let toh = t0 + 30.0;
-    let broadcast = ssr_spread_broadcast(&prns);
-    let zero = Some(HasTestBiases::usable([0.0, 0.0], [0.0, 0.0]));
-    let mut first_store = SsrCorrectionStore::new();
-    has_test_ingest(
-        &mut first_store,
-        &has_test_message(&sats, 0, 1, 1, Some(HAS_VI_60_S), zero),
-    );
-    let first = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &first_store)
-        .with_fallback(broadcast_fallback());
-    let truth = receiver_under(&broadcast, &prns, toh);
-    let arc = |source: &dyn ObservableEphemerisSource, t_rx: f64| {
-        let mut epochs = vec![
-            ssr_spread_epoch(source, &prns, truth, t_rx, 12.5),
-            ssr_spread_epoch(source, &prns, truth, t_rx + 1.0, -8.25),
-        ];
-        epochs[1].epoch.second = 1.0;
-        epochs[0].observations[0].code_m += 50_000.0;
-        epochs
-    };
-
-    // Where the unscreened solve lands with the outlier.
-    let guess = toh + 0.07;
-    let biased_epochs = arc(&first, guess);
-    let biased = solve_float_epochs(
-        &first,
-        &biased_epochs,
-        FloatState {
-            clocks_m: vec![0.0; 2],
-            ..ssr_spread_state(&biased_epochs[0], truth)
-        },
-        ssr_spread_config(RangeCorrections::disabled(), None),
-    )
-    .expect("unscreened solve with the outlier")
-    .position_m;
-    let flip = sats[1..]
-        .iter()
-        .copied()
-        .max_by(|a, b| {
-            let gain = |sat| {
-                flight_time(&first, sat, truth, guess) - flight_time(&first, sat, biased, guess)
-            };
-            gain(*a).total_cmp(&gain(*b))
-        })
-        .expect("a satellite");
-    assert!(
-        flight_time(&first, flip, truth, guess) - flight_time(&first, flip, biased, guess) > 3.0e-6,
-        "the outlier moves the solution kilometres towards {flip}"
-    );
-
-    let mut store = first_store.clone();
-    has_test_ingest(
-        &mut store,
-        &has_test_message(&[flip], 30, 2, 2, Some(HAS_VI_60_S), zero),
-    );
-    let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store)
-        .with_fallback(broadcast_fallback());
-    let t_rx = toh
-        + 0.5
-            * (flight_time(&ephemeris, flip, biased, guess)
-                + flight_time(&ephemeris, flip, truth, guess));
-    let epochs = arc(&ephemeris, t_rx);
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        biased,
-        &gps_l1_l2_options(),
-    );
+    epochs[0].observations[0].code_m += 50_000.0;
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
     let mut config = ssr_spread_config(
         RangeCorrections {
@@ -5109,26 +4808,31 @@ fn ssr_bias_flip_inside_the_residual_screen_excludes_and_restarts() {
         &epochs,
         FloatState {
             clocks_m: vec![0.0; 2],
-            ..ssr_spread_state(&epochs[0], biased)
+            ..ssr_spread_state(&epochs[0], truth)
         },
         config,
     )
-    .expect("the flip in the screen is excluded and the solve restarts");
-    assert_eq!(solution.ssr_bias_exclusions.len(), 1);
-    let exclusion = &solution.ssr_bias_exclusions[0];
-    assert_eq!(exclusion.satellite_id, flip.to_string());
-    assert_eq!(exclusion.epoch_index, 0);
-    assert_eq!(exclusion.stage, SsrBiasExclusionStage::DuringIteration);
+    .expect("the screen removes the outlier");
+    assert!(
+        solution
+            .residual_screen_removals
+            .contains(&(0, "G01".to_string())),
+        "removals {:?}",
+        solution.residual_screen_removals
+    );
+    assert!(solution.ssr_bias_exclusions.is_empty());
     let error = norm3(sub3(solution.position_m, truth));
     assert!(error < 1.0e-3, "position error {error}");
 }
 
-/// A flip inside the fixed re-solve: the float solution handed to it sits 3 km towards
-/// G06, where G06's signal left after its new corrections' TOH, and the fixed re-solve
-/// moves to the truth, where it left before. The fixed solve excludes G06, solves the
-/// float arc again from the float state, and fixes again.
+/// The fixed re-solve starts from a float solution 3 km towards G06 and moves to the
+/// truth. G06's signal left 5 µs after its new corrections' TOH, at the epoch its
+/// pseudorange places whatever the position, so its biases hold on the records valid then
+/// throughout the re-solve: nothing is excluded, and G06 is fixed with the others. Under a
+/// geometric light time from the solve's position, that move had carried G06's
+/// transmission epoch across the TOH.
 #[test]
-fn ssr_bias_flip_inside_the_fixed_solve_resolves_the_float_arc_again() {
+fn fixed_resolve_keeps_the_bias_records_of_the_placed_epoch() {
     let prns = [1, 2, 3, 4, 5, 6];
     let sats = prns.map(gps);
     let flip = gps(6);
@@ -5158,11 +4862,7 @@ fn ssr_bias_flip_inside_the_fixed_solve_resolves_the_float_arc_again() {
             3_000.0,
         ),
     );
-    let guess = toh + 0.07;
-    let t_rx = toh
-        + 0.5
-            * (flight_time(&ephemeris, flip, float_position, guess)
-                + flight_time(&ephemeris, flip, truth, guess));
+    let (t_rx, _) = t_rx_placing(&ephemeris, &prns, truth, flip, toh, 5.0e-6, 12.5);
     let wavelength = C_M_S / F_L1_HZ;
     let mut epoch = ssr_spread_epoch(&ephemeris, &prns, truth, t_rx, 12.5);
     let mut ambiguities_m = BTreeMap::new();
@@ -5176,12 +4876,8 @@ fn ssr_bias_flip_inside_the_fixed_solve_resolves_the_float_arc_again() {
         offsets_m.insert(obs.ambiguity_id.clone(), 0.0);
     }
     let epochs = vec![epoch];
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs,
-        float_position,
-        &gps_l1_l2_options(),
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &gps_l1_l2_options());
     assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
     let corrections = RangeCorrections {
         ppp: lookup,
@@ -5213,9 +4909,8 @@ fn ssr_bias_flip_inside_the_fixed_solve_resolves_the_float_arc_again() {
         phase_rms_m: 0.0,
         weighted_rms_m: 0.0,
         ssr_bias_exclusions: Vec::new(),
+        unplaced_observations: Vec::new(),
         solved_epoch_indices: vec![0],
-        ssr_bias_readmissions: Vec::new(),
-        ssr_bias_last_pass: 0,
         residual_screen: false,
         solve_options: FloatSolveOptions::default(),
         residual_screen_removals: Vec::new(),
@@ -5239,18 +4934,9 @@ fn ssr_bias_flip_inside_the_fixed_solve_resolves_the_float_arc_again() {
             estimate_residual_ionosphere: false,
         },
     )
-    .expect("the flip is excluded and the arc fixed again");
-    assert_eq!(solution.ssr_bias_exclusions.len(), 1);
-    let exclusion = &solution.ssr_bias_exclusions[0];
-    assert_eq!(exclusion.satellite_id, "G06");
-    // Found in the fixed re-solve, on the pass after the float solve's.
-    assert_eq!(exclusion.stage, SsrBiasExclusionStage::FixedResolve);
-    assert_eq!(exclusion.pass, 1);
-    assert!(!solution.fixed_ambiguities_cycles.contains_key("G06"));
-    assert_eq!(
-        solution.float_solution.ssr_bias_exclusions, solution.ssr_bias_exclusions,
-        "the float solution is the arc solved again without G06"
-    );
+    .expect("the arc is fixed with G06");
+    assert!(solution.ssr_bias_exclusions.is_empty());
+    assert!(solution.fixed_ambiguities_cycles.contains_key("G06"));
     let error = norm3(sub3(solution.position_m, truth));
     assert!(error < 1.0e-3, "position error {error}");
 }
@@ -5281,11 +4967,9 @@ fn prepared_arc_seeds_a_missing_ambiguity_from_phase_minus_code() {
         &super::float::LeftOut {
             excluded: &[],
             screened: &[],
-            deferred: &[],
             seed_ambiguities: &BTreeMap::new(),
         },
         &state,
-        0,
     )
     .expect("prepared arc");
     assert!(exclusions.is_empty());
@@ -5329,12 +5013,8 @@ fn test_ppp_ssr_biases_has_iod_set_change_keeps_ambiguity() {
     let options = gps_l1_l2_options();
     let (token0, token9) = {
         let ephemeris = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
-        let (_, first) = PppCorrectionLookup::default().with_ssr_biases(
-            &ephemeris,
-            &epochs,
-            ssr_test_receiver(),
-            &options,
-        );
+        let (_, first) =
+            PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs, &options);
         assert_eq!(first.status, SsrPppAggregateStatus::AllApplied);
         let first_row = &first.observation_reports[0];
         let phase1 = &first_row.phase1_report.as_ref().unwrap().query_result;
@@ -5369,12 +5049,8 @@ fn test_ppp_ssr_biases_has_iod_set_change_keeps_ambiguity() {
         .clone()
         .with_phase_continuity_token(ambiguity_id.clone(), signal_code("1C"), token0)
         .with_phase_continuity_token(ambiguity_id.clone(), signal_code("2P"), token9);
-    let (lookup, report) = PppCorrectionLookup::default().with_ssr_biases(
-        &ephemeris,
-        &epochs_30,
-        ssr_test_receiver(),
-        &options_ack,
-    );
+    let (lookup, report) =
+        PppCorrectionLookup::default().with_ssr_biases(&ephemeris, &epochs_30, &options_ack);
 
     assert_eq!(report.status, SsrPppAggregateStatus::AllApplied);
     assert_eq!(report.phase_discontinuity_resets_needed, 0);
@@ -5734,9 +5410,6 @@ fn static_float_design_rows_handle_antimeridian_tropo_receiver() {
         normal: crate::estimation::recipe::NormalRecipe::PppDenseLastTie,
         estimate_residual_ionosphere: false,
         correction_epoch_indices: None,
-        ssr_bias_pass: 0,
-        ssr_bias_stage: SsrBiasExclusionStage::BeforeSolve,
-        ssr_bias_deferred: &[],
     };
     let binding = super::rows::AmbiguityBinding::Estimated {
         ids: &ambiguity_ids,
@@ -5772,9 +5445,6 @@ fn static_float_design_rows_reject_invalid_tropo_julian_split_without_panic() {
         normal: crate::estimation::recipe::NormalRecipe::PppDenseLastTie,
         estimate_residual_ionosphere: false,
         correction_epoch_indices: None,
-        ssr_bias_pass: 0,
-        ssr_bias_stage: SsrBiasExclusionStage::BeforeSolve,
-        ssr_bias_deferred: &[],
     };
     let binding = super::rows::AmbiguityBinding::Estimated {
         ids: &ambiguity_ids,
@@ -5877,18 +5547,9 @@ fn single_epoch_float_solver_recovers_synthetic_snapshot() {
     let observations = ids
         .iter()
         .map(|id| {
-            let pred = predict(
-                &source,
-                *id,
-                truth,
-                0.0,
-                PredictOptions {
-                    carrier_hz: F_L1_HZ,
-                    light_time: true,
-                    sagnac: true,
-                },
-            )
-            .unwrap();
+            let (_, pred) = super::synthetic_placed_code(&source, *id, truth, 0.0, |geometry| {
+                geometry.geometric_range_m + clock
+            });
             let code = pred.geometric_range_m + clock;
             let ambiguity = ambiguities.get(&id.to_string()).copied().unwrap();
             FloatObservation {
@@ -6020,18 +5681,9 @@ fn single_epoch_fixed_solver_uses_custom_ambiguity_ids() {
         .iter()
         .zip(ambiguity_ids.iter())
         .map(|(id, ambiguity_id)| {
-            let pred = predict(
-                &source,
-                *id,
-                truth,
-                0.0,
-                PredictOptions {
-                    carrier_hz: F_L1_HZ,
-                    light_time: true,
-                    sagnac: true,
-                },
-            )
-            .unwrap();
+            let (_, pred) = super::synthetic_placed_code(&source, *id, truth, 0.0, |geometry| {
+                geometry.geometric_range_m + clock
+            });
             let code = pred.geometric_range_m + clock;
             let ambiguity = fixed_cycles[ambiguity_id] as f64 * wavelength;
             FloatObservation {
@@ -6178,18 +5830,13 @@ fn fixed_synthetic_arc() -> (
         let observations = ids
             .iter()
             .map(|id| {
-                let pred = predict(
+                let (_, pred) = super::synthetic_placed_code(
                     &source,
                     *id,
                     truth,
                     epoch_idx as f64 * 900.0,
-                    PredictOptions {
-                        carrier_hz: F_L1_HZ,
-                        light_time: true,
-                        sagnac: true,
-                    },
-                )
-                .unwrap();
+                    |geometry| geometry.geometric_range_m + clock,
+                );
                 let code = pred.geometric_range_m + clock;
                 let ambiguity = fixed_cycles[&id.to_string()] as f64 * wavelength;
                 FloatObservation {
@@ -6441,9 +6088,8 @@ fn static_fixed_solver_rejects_short_float_solution_clock_vector() {
         phase_rms_m: 0.0,
         weighted_rms_m: 0.0,
         ssr_bias_exclusions: Vec::new(),
+        unplaced_observations: Vec::new(),
         solved_epoch_indices: (0..epochs.len()).collect(),
-        ssr_bias_readmissions: Vec::new(),
-        ssr_bias_last_pass: 0,
         residual_screen: false,
         solve_options: FloatSolveOptions::default(),
         residual_screen_removals: Vec::new(),
@@ -6518,9 +6164,8 @@ fn static_fixed_solver_rejects_nan_tolerance() {
         phase_rms_m: 0.0,
         weighted_rms_m: 0.0,
         ssr_bias_exclusions: Vec::new(),
+        unplaced_observations: Vec::new(),
         solved_epoch_indices: (0..epochs.len()).collect(),
-        ssr_bias_readmissions: Vec::new(),
-        ssr_bias_last_pass: 0,
         residual_screen: false,
         solve_options: FloatSolveOptions::default(),
         residual_screen_removals: Vec::new(),
@@ -6597,9 +6242,8 @@ fn static_fixed_solver_rejects_nan_wavelength() {
         phase_rms_m: 0.0,
         weighted_rms_m: 0.0,
         ssr_bias_exclusions: Vec::new(),
+        unplaced_observations: Vec::new(),
         solved_epoch_indices: (0..epochs.len()).collect(),
-        ssr_bias_readmissions: Vec::new(),
-        ssr_bias_last_pass: 0,
         residual_screen: false,
         solve_options: FloatSolveOptions::default(),
         residual_screen_removals: Vec::new(),
@@ -6642,7 +6286,7 @@ fn static_fixed_solver_rejects_nan_wavelength() {
 
 /// The fixed solve re-solves the float arc with the float solution's own options and
 /// leaves out the observations it names, so it refuses options the float solve would
-/// refuse and a removal or readmission that names no observation of the input epochs.
+/// refuse and a residual-screen removal that names no observation of the input epochs.
 #[test]
 fn static_fixed_solver_rejects_float_solution_options_and_keys_it_cannot_apply() {
     let (source, epochs, state, _ambiguity_ids) = ppp_row_trace_arc();
@@ -6673,9 +6317,8 @@ fn static_fixed_solver_rejects_float_solution_options_and_keys_it_cannot_apply()
         phase_rms_m: 0.0,
         weighted_rms_m: 0.0,
         ssr_bias_exclusions: Vec::new(),
+        unplaced_observations: Vec::new(),
         solved_epoch_indices: (0..epochs.len()).collect(),
-        ssr_bias_readmissions: Vec::new(),
-        ssr_bias_last_pass: 0,
         residual_screen: false,
         solve_options: FloatSolveOptions::default(),
         residual_screen_removals: Vec::new(),
@@ -6722,34 +6365,6 @@ fn static_fixed_solver_rejects_float_solution_options_and_keys_it_cannot_apply()
         .residual_screen_removals
         .push((0, "G99".to_string()));
     assert_eq!(refuse(removal_of_no_observation), removal_error);
-
-    let readmission_error = FixedSolveError::Float(FloatSolveError::InvalidInput {
-        field: "ppp float_solution ssr_bias_readmissions",
-        reason: "must name observations of the input epochs",
-    });
-    let mut readmission_past_the_arc = float_solution.clone();
-    readmission_past_the_arc
-        .ssr_bias_readmissions
-        .push((epochs.len(), used_sats[0].clone()));
-    assert_eq!(refuse(readmission_past_the_arc), readmission_error);
-    let mut readmission_of_no_observation = float_solution.clone();
-    readmission_of_no_observation
-        .ssr_bias_readmissions
-        .push((1, "G99".to_string()));
-    assert_eq!(refuse(readmission_of_no_observation), readmission_error);
-
-    // A pass number past u32::MAX exists only where usize is wider than 32 bits.
-    if let Ok(pass) = usize::try_from(u64::from(u32::MAX) + 1) {
-        let mut pass_past_u32 = float_solution;
-        pass_past_u32.ssr_bias_last_pass = pass;
-        assert_eq!(
-            refuse(pass_past_u32),
-            FixedSolveError::Float(FloatSolveError::InvalidInput {
-                field: "ppp float_solution ssr_bias_last_pass",
-                reason: "exceeds u32::MAX",
-            })
-        );
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6795,18 +6410,13 @@ fn ppp_row_trace_arc() -> (FakeSource, Vec<FloatEpoch>, FloatState, Vec<Ambiguit
         let observations = ids
             .iter()
             .map(|id| {
-                let pred = predict(
+                let (_, pred) = super::synthetic_placed_code(
                     &source,
                     *id,
                     truth,
                     epoch_idx as f64 * 900.0,
-                    PredictOptions {
-                        carrier_hz: F_L1_HZ,
-                        light_time: true,
-                        sagnac: true,
-                    },
-                )
-                .unwrap();
+                    |geometry| geometry.geometric_range_m + clock,
+                );
                 let code = pred.geometric_range_m + clock;
                 let ambiguity = ambiguities.get(&id.to_string()).copied().unwrap();
                 FloatObservation {
@@ -6905,9 +6515,6 @@ fn float_design_rows_have_frozen_bits_golden() {
         normal: crate::estimation::recipe::NormalRecipe::PppDenseLastTie,
         estimate_residual_ionosphere: false,
         correction_epoch_indices: None,
-        ssr_bias_pass: 0,
-        ssr_bias_stage: SsrBiasExclusionStage::BeforeSolve,
-        ssr_bias_deferred: &[],
     };
 
     let binding = super::rows::AmbiguityBinding::Estimated {
@@ -6935,9 +6542,6 @@ fn fixed_design_rows_have_frozen_bits_golden() {
         normal: crate::estimation::recipe::NormalRecipe::PppDenseLastTie,
         estimate_residual_ionosphere: false,
         correction_epoch_indices: None,
-        ssr_bias_pass: 0,
-        ssr_bias_stage: SsrBiasExclusionStage::BeforeSolve,
-        ssr_bias_deferred: &[],
     };
     // The fixed solver holds every ambiguity; here at its truth value.
     let fixed_m: BTreeMap<String, f64> = state.ambiguities_m.clone();
@@ -6954,212 +6558,215 @@ fn fixed_design_rows_have_frozen_bits_golden() {
 
 // Generated by running each test once and freezing the observed bits; see the
 // module comment. Regenerate only with a deliberate, reviewed behavior change.
+// Re-frozen when the rows moved to RTKLIB `satposs` placement and `geodist`: the line
+// of sight is now the unrotated transmission-epoch vector, so the direction cosines
+// moved by the Earth's rotation over the flight time, about 5e-6.
 const PPP_FLOAT_DESIGN_ROW_GOLDEN: &[u64] = &[
-    13827261380611783850,
-    13825412640259596458,
-    13827112186925804208,
+    13827261350549439943,
+    13825412726456871796,
+    13827112185386286677,
     4607182418800017408,
     0,
     0,
     0,
     0,
-    4644851261086957568,
+    4644851261087088640,
     4607182418800017408,
-    13827261380611783850,
-    13825412640259596458,
-    13827112186925804208,
-    4607182418800017408,
-    0,
+    13827261350549439943,
+    13825412726456871796,
+    13827112185386286677,
     4607182418800017408,
     0,
+    4607182418800017408,
     0,
-    4644851261086957568,
+    0,
+    4644851261087088640,
     4636737291354636288,
-    4605096716435247059,
-    13824697895126236484,
-    13825663558865739684,
+    4605096744680954219,
+    13824697797898765690,
+    13825663554478869331,
     4607182418800017408,
     0,
     0,
     0,
     0,
-    13868731662273609728,
+    13868731662273871872,
     4607182418800017408,
-    4605096716435247059,
-    13824697895126236484,
-    13825663558865739684,
-    4607182418800017408,
-    0,
-    0,
+    4605096744680954219,
+    13824697797898765690,
+    13825663554478869331,
     4607182418800017408,
     0,
-    13868731662273609728,
+    0,
+    4607182418800017408,
+    0,
+    13868731662273871872,
     4636737291354636288,
-    13824228316578245539,
-    4605177694311148212,
-    13825804969787867149,
+    13824228418295285887,
+    4605177666191909098,
+    13825804976271820217,
     4607182418800017408,
     0,
     0,
     0,
     0,
-    4649269908014563328,
+    4649269908014661632,
     4607182418800017408,
-    13824228316578245539,
-    4605177694311148212,
-    13825804969787867149,
+    13824228418295285887,
+    4605177666191909098,
+    13825804976271820217,
     4607182418800017408,
     0,
     0,
     0,
     4607182418800017408,
-    4649269908014563328,
+    4649269908014661632,
     4636737291354636288,
-    13827261380611783850,
-    13825412640259596458,
-    13827112186925804208,
+    13827261350549439943,
+    13825412726456871796,
+    13827112185386286677,
     0,
     4607182418800017408,
     0,
     0,
     0,
-    4644486223226535936,
+    4644486223226667008,
     4607182418800017408,
-    13827261380611783850,
-    13825412640259596458,
-    13827112186925804208,
+    13827261350549439943,
+    13825412726456871796,
+    13827112185386286677,
     0,
     4607182418800017408,
     4607182418800017408,
     0,
     0,
-    4644486223226535936,
+    4644486223226667008,
     4636737291354636288,
-    4605096716435247059,
-    13824697895126236484,
-    13825663558865739684,
+    4605096744680954219,
+    13824697797898765690,
+    13825663554478869331,
     0,
     4607182418800017408,
     0,
     0,
     0,
-    13869096700134031360,
+    13869096700134293504,
     4607182418800017408,
-    4605096716435247059,
-    13824697895126236484,
-    13825663558865739684,
+    4605096744680954219,
+    13824697797898765690,
+    13825663554478869331,
     0,
     4607182418800017408,
     0,
     4607182418800017408,
     0,
-    13869096700134031360,
+    13869096700134293504,
     4636737291354636288,
-    13824228316578245539,
-    4605177694311148212,
-    13825804969787867149,
+    13824228418295285887,
+    4605177666191909098,
+    13825804976271820217,
     0,
     4607182418800017408,
     0,
     0,
     0,
-    4649087389084352512,
+    4649087389084450816,
     4607182418800017408,
-    13824228316578245539,
-    4605177694311148212,
-    13825804969787867149,
+    13824228418295285887,
+    4605177666191909098,
+    13825804976271820217,
     0,
     4607182418800017408,
     0,
     0,
     4607182418800017408,
-    4649087389084352512,
+    4649087389084450816,
     4636737291354636288,
 ];
 const PPP_FIXED_DESIGN_ROW_GOLDEN: &[u64] = &[
-    13827261380611783850,
-    13825412640259596458,
-    13827112186925804208,
+    13827261350549439943,
+    13825412726456871796,
+    13827112185386286677,
     4607182418800017408,
     0,
-    4644851261086957568,
+    4644851261087088640,
     4607182418800017408,
-    13827261380611783850,
-    13825412640259596458,
-    13827112186925804208,
+    13827261350549439943,
+    13825412726456871796,
+    13827112185386286677,
     4607182418800017408,
     0,
-    4644851261086957568,
+    4644851261087088640,
     4636737291354636288,
-    4605096716435247059,
-    13824697895126236484,
-    13825663558865739684,
+    4605096744680954219,
+    13824697797898765690,
+    13825663554478869331,
     4607182418800017408,
     0,
-    13868731662273609728,
+    13868731662273871872,
     4607182418800017408,
-    4605096716435247059,
-    13824697895126236484,
-    13825663558865739684,
+    4605096744680954219,
+    13824697797898765690,
+    13825663554478869331,
     4607182418800017408,
     0,
-    13868731662273609728,
+    13868731662273871872,
     4636737291354636288,
-    13824228316578245539,
-    4605177694311148212,
-    13825804969787867149,
+    13824228418295285887,
+    4605177666191909098,
+    13825804976271820217,
     4607182418800017408,
     0,
-    4649269908014563328,
+    4649269908014661632,
     4607182418800017408,
-    13824228316578245539,
-    4605177694311148212,
-    13825804969787867149,
+    13824228418295285887,
+    4605177666191909098,
+    13825804976271820217,
     4607182418800017408,
     0,
-    4649269908014563328,
+    4649269908014661632,
     4636737291354636288,
-    13827261380611783850,
-    13825412640259596458,
-    13827112186925804208,
+    13827261350549439943,
+    13825412726456871796,
+    13827112185386286677,
     0,
     4607182418800017408,
-    4644486223226535936,
+    4644486223226667008,
     4607182418800017408,
-    13827261380611783850,
-    13825412640259596458,
-    13827112186925804208,
+    13827261350549439943,
+    13825412726456871796,
+    13827112185386286677,
     0,
     4607182418800017408,
-    4644486223226535936,
+    4644486223226667008,
     4636737291354636288,
-    4605096716435247059,
-    13824697895126236484,
-    13825663558865739684,
+    4605096744680954219,
+    13824697797898765690,
+    13825663554478869331,
     0,
     4607182418800017408,
-    13869096700134031360,
+    13869096700134293504,
     4607182418800017408,
-    4605096716435247059,
-    13824697895126236484,
-    13825663558865739684,
+    4605096744680954219,
+    13824697797898765690,
+    13825663554478869331,
     0,
     4607182418800017408,
-    13869096700134031360,
+    13869096700134293504,
     4636737291354636288,
-    13824228316578245539,
-    4605177694311148212,
-    13825804969787867149,
+    13824228418295285887,
+    4605177666191909098,
+    13825804976271820217,
     0,
     4607182418800017408,
-    4649087389084352512,
+    4649087389084450816,
     4607182418800017408,
-    13824228316578245539,
-    4605177694311148212,
-    13825804969787867149,
+    13824228418295285887,
+    4605177666191909098,
+    13825804976271820217,
     0,
     4607182418800017408,
-    4649087389084352512,
+    4649087389084450816,
     4636737291354636288,
 ];
 

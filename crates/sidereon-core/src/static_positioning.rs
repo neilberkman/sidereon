@@ -476,12 +476,41 @@ pub fn solve_static(
     epochs: &[StaticEpoch],
     options: StaticSolveOptions,
 ) -> Result<StaticSolution, StaticSolveError> {
+    solve_static_with_model(eph, epochs, options, SppModelRecipe::reference())
+}
+
+/// [`solve_static`] with the geometric light-time measurement model the external
+/// references (the Go fixture) were computed with: the transmission epoch iterated
+/// from the receiver's time tag, which misses the receiver clock offset, where
+/// [`solve_static`] places it from the pseudorange as RTKLIB `satposs` does. Only the
+/// repository's replay of those references calls it.
+#[cfg(feature = "test-replays")]
+#[doc(hidden)]
+pub fn solve_static_geometric_light_time_replay(
+    eph: &dyn EphemerisSource,
+    epochs: &[StaticEpoch],
+    options: StaticSolveOptions,
+) -> Result<StaticSolution, StaticSolveError> {
+    solve_static_with_model(
+        eph,
+        epochs,
+        options,
+        SppModelRecipe::geometric_light_time_replay(),
+    )
+}
+
+fn solve_static_with_model(
+    eph: &dyn EphemerisSource,
+    epochs: &[StaticEpoch],
+    options: StaticSolveOptions,
+    model: SppModelRecipe,
+) -> Result<StaticSolution, StaticSolveError> {
     let tracked = Ut1TrackedSource::new(eph);
-    let core = solve_static_core(&tracked, epochs, options);
+    let core = solve_static_core(&tracked, epochs, options, model);
     ut1_refusal(&tracked)?;
     let core = core?;
     let (per_epoch_influence, per_satellite_influence, per_satellite_batch_influence) =
-        build_influence(&tracked, epochs, options, &core);
+        build_influence(&tracked, epochs, options, &core, model);
     ut1_refusal(&tracked)?;
     let mut solution = core.into_public(
         per_epoch_influence,
@@ -498,7 +527,7 @@ pub(crate) fn solve_static_without_influence(
     options: StaticSolveOptions,
 ) -> Result<StaticSolution, StaticSolveError> {
     let tracked = Ut1TrackedSource::new(eph);
-    let core = solve_static_core(&tracked, epochs, options);
+    let core = solve_static_core(&tracked, epochs, options, SppModelRecipe::reference());
     ut1_refusal(&tracked)?;
     let mut solution = core?.into_public(Vec::new(), Vec::new(), Vec::new());
     solution.metadata.ut1_degraded = tracked.departure();
@@ -582,12 +611,12 @@ fn solve_static_core(
     eph: &dyn EphemerisSource,
     epochs: &[StaticEpoch],
     options: StaticSolveOptions,
+    model: SppModelRecipe,
 ) -> Result<CoreStaticSolution, StaticSolveError> {
     validate_static_options(options)?;
     if epochs.is_empty() {
         return Err(StaticSolveError::EmptyEpochs);
     }
-    let model = SppModelRecipe::reference();
     let prepared = prepare_static(eph, epochs, options, model)?;
 
     let lost = Cell::new(None::<(usize, GnssSatelliteId)>);
@@ -1060,6 +1089,7 @@ fn build_influence(
     epochs: &[StaticEpoch],
     options: StaticSolveOptions,
     full: &CoreStaticSolution,
+    model: SppModelRecipe,
 ) -> (
     Vec<StaticEpochInfluence>,
     Vec<StaticSatelliteInfluence>,
@@ -1070,7 +1100,7 @@ fn build_influence(
             let mut subset = epochs.to_vec();
             let omitted_measurements = subset[epoch_index].measurements.len();
             subset.remove(epoch_index);
-            let result = solve_static_core(eph, &subset, options);
+            let result = solve_static_core(eph, &subset, options, model);
             let (status, position_delta_m, position_delta_norm_m, residual_rms_m) =
                 influence_result(full.position.as_array(), result);
             StaticEpochInfluence {
@@ -1094,7 +1124,7 @@ fn build_influence(
         .into_iter()
         .map(|satellite_id| {
             let subset = omit_satellite_all_epochs(epochs, satellite_id);
-            let result = solve_static_core(eph, &subset, options);
+            let result = solve_static_core(eph, &subset, options, model);
             let (status, position_delta_m, position_delta_norm_m, residual_rms_m) =
                 influence_result(full.position.as_array(), result);
             StaticSatelliteBatchInfluence {
@@ -1118,7 +1148,7 @@ fn build_influence(
         .iter()
         .map(|row| {
             let subset = omit_satellite(epochs, row.epoch_index, row.satellite_id);
-            let result = solve_static_core(eph, &subset, options);
+            let result = solve_static_core(eph, &subset, options, model);
             let (status, position_delta_m, position_delta_norm_m, residual_rms_m) =
                 influence_result(full.position.as_array(), result);
             StaticSatelliteInfluence {

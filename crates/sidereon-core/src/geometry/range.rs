@@ -37,6 +37,30 @@ pub(crate) fn sagnac_range_first_order(
     norm3(sub3(sat, recv)) + omega_rad_s * (sat[0] * recv[1] - sat[1] * recv[0]) / c_m_s
 }
 
+/// First-order Sagnac term of the range rate, m/s: the time derivative of the
+/// [`sagnac_range_first_order`] term, `omega / c · (vs_x·rr_y + rs_x·vr_y − vs_y·rr_x −
+/// rs_y·vr_x)`, with the satellite position `sat` and velocity `sat_vel` in the
+/// transmission-epoch frame, unrotated, and the receiver position `recv` and velocity
+/// `recv_vel`, so a range-rate row predicts the rate of the range the code row predicts.
+///
+/// RTKLIB `resdop` adds `OMGE/CLIGHT·(vs_y·rr_x + rs_y·vr_x − vs_x·rr_y − rs_x·vr_y)`,
+/// the same magnitude with the opposite sign, which is not the derivative of the
+/// `geodist` term its code rows use; this follows `geodist`.
+#[inline]
+pub(crate) fn sagnac_range_rate_first_order(
+    sat: [f64; 3],
+    sat_vel: [f64; 3],
+    recv: [f64; 3],
+    recv_vel: [f64; 3],
+    omega_rad_s: f64,
+    c_m_s: f64,
+) -> f64 {
+    omega_rad_s / c_m_s
+        * (sat_vel[0] * recv[1] + sat[0] * recv_vel[1]
+            - sat_vel[1] * recv[0]
+            - sat[1] * recv_vel[0])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +93,31 @@ mod tests {
         let want = r + OMEGA * (SAT[0] * RECV[1] - SAT[1] * RECV[0]) / C;
         let got = sagnac_range_first_order(SAT, RECV, OMEGA, C);
         assert_eq!(got.to_bits(), want.to_bits());
+    }
+
+    /// The Sagnac rate term against a value worked by hand, and against the numerical
+    /// derivative of the Sagnac range term it differentiates.
+    #[test]
+    fn sagnac_range_rate_first_order_matches_a_hand_computed_value() {
+        let sat = [15_600_000.0, -20_400_000.0, 9_800_000.0];
+        let sat_vel = [1_200.0, 900.0, -2_800.0];
+        let recv = [4_075_580.0, 931_854.0, 4_801_568.0];
+        let recv_vel = [10.0, -20.0, 5.0];
+        // vs_x rr_y + rs_x vr_y - vs_y rr_x - rs_y vr_x
+        //   = 1200 * 931854 + 15600000 * (-20) - 900 * 4075580 - (-20400000) * 10
+        //   = 1118224800 - 312000000 - 3668022000 + 204000000 = -2657797200 m^2/s,
+        // times 7.2921151467e-5 / 299792458 = -6.46479e-4 m/s.
+        let got = sagnac_range_rate_first_order(sat, sat_vel, recv, recv_vel, OMEGA, C);
+        let hand = -2_657_797_200.0 * (OMEGA / C);
+        assert!((got - hand).abs() <= 1.0e-18, "{got} vs {hand}");
+        assert!((got + 6.464_79e-4).abs() < 1.0e-9, "{got}");
+
+        let term = |t: f64| {
+            let s = [0, 1, 2].map(|i| sat[i] + sat_vel[i] * t);
+            let r = [0, 1, 2].map(|i| recv[i] + recv_vel[i] * t);
+            OMEGA * (s[0] * r[1] - s[1] * r[0]) / C
+        };
+        let numeric = term(0.5) - term(-0.5);
+        assert!((got - numeric).abs() < 1.0e-12, "{got} vs {numeric}");
     }
 }

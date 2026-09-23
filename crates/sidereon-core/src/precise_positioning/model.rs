@@ -360,7 +360,7 @@ impl SatelliteClockCorrections {
     /// `GPS_EPOCH_TO_J2000_S`, which is exact for a node on the grid of doubles near
     /// 1.4e9 s. Adding it to the query instead would round the query to that grid's
     /// 2.4e-7 s spacing and drop the last bit of a fractional transmission time.
-    fn clock_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+    pub(super) fn clock_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
         let records = self.series.get(&sat)?;
         interpolate_clock(records, GPS_EPOCH_TO_J2000_S, t_j2000_s)
     }

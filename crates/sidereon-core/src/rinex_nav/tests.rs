@@ -296,13 +296,13 @@ fn spp_solves_from_broadcast_glonass() {
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
-        if let Some(m) = test_support::sat_model_for_test(
+        if let Some(m) = test_support::self_consistent_model_for_test(
             &env,
             sat,
             [x_true[0], x_true[1], x_true[2]],
             x_true[3],
-            20_000_000.0,
             &kl,
         ) {
             if m.el_rad >= ELEVATION_MASK_RAD {
@@ -400,9 +400,9 @@ fn beidou_uses_its_own_klobuchar_coefficients() {
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
-        if let Some(m) =
-            test_support::sat_model_for_test(&env, sat, x_true, 0.0, 22_000_000.0, &bds)
+        if let Some(m) = test_support::self_consistent_model_for_test(&env, sat, x_true, 0.0, &bds)
         {
             if m.el_rad >= ELEVATION_MASK_RAD {
                 observations.push(Observation {
@@ -978,13 +978,13 @@ fn spp_solves_from_broadcast_gps() {
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
-        if let Some(m) = test_support::sat_model_for_test(
+        if let Some(m) = test_support::self_consistent_model_for_test(
             &env,
             sat,
             [x_true[0], x_true[1], x_true[2]],
             x_true[3],
-            22_000_000.0,
             &kl,
         ) {
             if m.el_rad >= ELEVATION_MASK_RAD {
@@ -1401,13 +1401,13 @@ fn synthetic_spp_inputs(store: &BroadcastStore) -> crate::spp::SolveInputs {
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
-        if let Some(model) = test_support::sat_model_for_test(
+        if let Some(model) = test_support::self_consistent_model_for_test(
             &env,
             sat,
             [x_true[0], x_true[1], x_true[2]],
             x_true[3],
-            22_000_000.0,
             &klobuchar,
         ) {
             if model.el_rad >= ELEVATION_MASK_RAD {
@@ -3998,9 +3998,9 @@ fn mixed_constellation_solve_recovers_the_receiver() {
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
-        if let Some(m) = test_support::sat_model_for_test(&env, sat, x_true, 0.0, 22_000_000.0, &kl)
-        {
+        if let Some(m) = test_support::self_consistent_model_for_test(&env, sat, x_true, 0.0, &kl) {
             if m.el_rad >= ELEVATION_MASK_RAD {
                 observations.push(Observation {
                     satellite_id: sat,
@@ -4157,8 +4157,9 @@ fn mixed_constellation_solve_recovers_a_nonzero_inter_system_bias() {
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
-        if let Some(m) = test_support::sat_model_for_test(&env, sat, x_true, b, 22_000_000.0, &kl) {
+        if let Some(m) = test_support::self_consistent_model_for_test(&env, sat, x_true, b, &kl) {
             if m.el_rad >= ELEVATION_MASK_RAD {
                 observations.push(Observation {
                     satellite_id: sat,
@@ -4273,15 +4274,11 @@ fn mixed_solve_recovers_with_gps_galileo_and_beidou() {
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
-        if let Some(m) = test_support::sat_model_for_test(
-            &env,
-            sat,
-            x_true,
-            bias_m(sat.system),
-            22_000_000.0,
-            &kl,
-        ) {
+        if let Some(m) =
+            test_support::self_consistent_model_for_test(&env, sat, x_true, bias_m(sat.system), &kl)
+        {
             if m.el_rad >= ELEVATION_MASK_RAD {
                 observations.push(Observation {
                     satellite_id: sat,
@@ -4397,9 +4394,9 @@ fn ionosphere_correction_is_applied_to_beidou_b1i() {
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            placement_pseudoranges_m: None,
         };
-        if let Some(m) = test_support::sat_model_for_test(&env, sat, x_true, 0.0, 22_000_000.0, &kl)
-        {
+        if let Some(m) = test_support::self_consistent_model_for_test(&env, sat, x_true, 0.0, &kl) {
             if m.el_rad >= ELEVATION_MASK_RAD {
                 saw_beidou |= sat.system == GnssSystem::BeiDou;
                 observations.push(Observation {
@@ -7091,4 +7088,101 @@ fn rinex_2_prn_extensions() {
     let recs = parse_sbas(&text).expect("parse H file");
     assert_eq!(recs[0].satellite_id.to_string(), "S20");
     assert_eq!(recs[0].pos_m[0], 4.063093080000e+04 * 1000.0);
+}
+
+/// RTKLIB `satposs` selects the broadcast record by the observation (reception) epoch
+/// (`seleph(teph, ...)`) and evaluates it at the transmission epoch. Across the midpoint
+/// between two records' `toe`, a signal received just after the midpoint was sent just
+/// before it: the record of the reception epoch places and evaluates it, not the record
+/// the transmission epoch alone would select.
+#[test]
+fn placement_reads_the_record_selected_at_the_reception_epoch() {
+    use crate::spp::EphemerisSource;
+
+    let store = BroadcastStore::from_nav(&fixture_text()).expect("parse ESBC NAV");
+    let mut gps = records()
+        .into_iter()
+        .filter(|r| r.satellite_id.system == GnssSystem::Gps && r.message == NavMessage::GpsLnav)
+        .collect::<Vec<_>>();
+    gps.sort_by(|a, b| {
+        (a.satellite_id, toe_native_j2000_s(a))
+            .partial_cmp(&(b.satellite_id, toe_native_j2000_s(b)))
+            .expect("finite toe")
+    });
+    let (sat, earlier, later, t_rx, t_tx) = gps
+        .windows(2)
+        .filter(|pair| {
+            pair[0].satellite_id == pair[1].satellite_id
+                && toe_native_j2000_s(&pair[0]) < toe_native_j2000_s(&pair[1])
+        })
+        .find_map(|pair| {
+            let sat = pair[0].satellite_id;
+            let midpoint = 0.5 * (toe_native_j2000_s(&pair[0]) + toe_native_j2000_s(&pair[1]));
+            // About 70 ms of flight time straddling the midpoint.
+            let t_rx = midpoint + 0.03;
+            let t_tx = t_rx - 0.07;
+            let at_rx = *store.select_record_at(sat, t_rx)?;
+            let at_tx = *store.select_record_at(sat, t_tx)?;
+            (at_rx == pair[1] && at_tx == pair[0]).then_some((sat, pair[0], pair[1], t_rx, t_tx))
+        })
+        .expect("a GPS satellite with two records either side of a midpoint");
+    assert_ne!(earlier, later);
+
+    let only = |record: BroadcastRecord| BroadcastStore::new(vec![record]).expect("one record");
+    let later_alone = only(later);
+    let earlier_alone = only(earlier);
+
+    // ephclk: the clock at the transmission epoch from the record of the reception epoch.
+    let placed_clock = store
+        .transmit_epoch_clock_s(sat, t_tx, t_rx)
+        .expect("clock of the reception-epoch record");
+    let later_clock = later_alone
+        .transmit_epoch_clock_s(sat, t_tx, t_tx)
+        .expect("later record's clock at the transmission epoch");
+    let earlier_clock = earlier_alone
+        .transmit_epoch_clock_s(sat, t_tx, t_tx)
+        .expect("earlier record's clock at the transmission epoch");
+    assert_eq!(placed_clock.to_bits(), later_clock.to_bits());
+    assert_ne!(later_clock.to_bits(), earlier_clock.to_bits());
+    assert_eq!(
+        store
+            .transmit_epoch_clock_s(sat, t_tx, t_tx)
+            .map(f64::to_bits),
+        Some(earlier_clock.to_bits()),
+        "selected at the transmission epoch the store reads the earlier record"
+    );
+
+    // satpos: the state at the transmission epoch from the same record.
+    let placed = EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
+        &store, sat, t_tx, t_rx,
+    )
+    .expect("broadcast state")
+    .expect("state of the reception-epoch record")
+    .value;
+    let later_state = later_alone
+        .position_clock_group_delay_at_j2000_s(sat, t_tx)
+        .expect("later record's state at the transmission epoch");
+    let earlier_state = earlier_alone
+        .position_clock_group_delay_at_j2000_s(sat, t_tx)
+        .expect("earlier record's state at the transmission epoch");
+    assert_eq!(placed.0.map(f64::to_bits), later_state.0.map(f64::to_bits));
+    assert_eq!(placed.1.to_bits(), later_state.1.to_bits());
+    assert_ne!(
+        later_state.0.map(f64::to_bits),
+        earlier_state.0.map(f64::to_bits)
+    );
+
+    // The placed transmission epoch uses that clock.
+    let pseudorange_m = 0.07 * C_M_S;
+    let clock_epoch = crate::observables::pseudorange_clock_epoch_j2000_s(t_rx, pseudorange_m);
+    let placed_epoch =
+        crate::observables::pseudorange_transmit_epoch_j2000_s(&store, sat, t_rx, pseudorange_m)
+            .expect("placed transmission epoch");
+    let expected_clock = store
+        .transmit_epoch_clock_s(sat, clock_epoch, t_rx)
+        .expect("clock of the reception-epoch record");
+    assert_eq!(
+        placed_epoch.to_bits(),
+        (clock_epoch - expected_clock).to_bits()
+    );
 }

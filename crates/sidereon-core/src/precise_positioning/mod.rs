@@ -345,14 +345,6 @@ struct ModelContext<'a> {
     /// removed every observation of an epoch or a single kinematic epoch, maps each
     /// remaining epoch back to its own corrections.
     correction_epoch_indices: Option<&'a [usize]>,
-    /// Solve pass reported with an SSR bias exclusion the row model finds.
-    ssr_bias_pass: usize,
-    /// Stage reported with an SSR bias exclusion the row model finds.
-    ssr_bias_stage: SsrBiasExclusionStage,
-    /// Observations, as (input epoch index, ambiguity id), whose SSR bias records the rows
-    /// do not check: observations admitted again after an exclusion, whose records are
-    /// judged only at a converged position.
-    ssr_bias_deferred: &'a [(usize, String)],
 }
 
 impl ModelContext<'_> {
@@ -378,26 +370,164 @@ fn predict_default(
 /// Transmit-time geometry of `obs` for a receiver at `receiver_m`, without the satellite
 /// velocity, which the PPP model needs only for the satellite clock relativity term.
 ///
-/// The light-time iteration starts from the observation's pseudorange over the speed of
-/// light. The seed only picks where the source is first queried, near the transmission
-/// time instead of at the reception time; the iteration converges to the same
-/// transmission time from either.
+/// The transmission epoch is placed from the observation's code pseudorange
+/// ([`observation_transmit_epoch_j2000_s`]) and the state there is ranged with RTKLIB
+/// `geodist`, the unrotated position with the first-order Sagnac term, as RTKLIB
+/// `ppp_res` ranges the `satposs` state. Neither depends on the receiver clock estimate.
 fn observation_geometry(
     source: &dyn ObservableEphemerisSource,
     obs: &FloatObservation,
     receiver_m: [f64; 3],
     t_rx_j2000_s: f64,
+    satellite_clock: Option<&SatelliteClockCorrections>,
 ) -> Result<crate::observables::TransmitGeometry, FloatSolveError> {
     let options = predict_default(source, obs)?;
-    crate::observables::predict_transmit_geometry(
+    let t_tx = observation_transmit_epoch_j2000_s(source, obs, t_rx_j2000_s, satellite_clock)?;
+    crate::observables::pseudorange_transmit_geometry(
         source,
         obs.sat,
         receiver_m,
         t_rx_j2000_s,
-        options,
-        crate::observables::flight_time_seed_s(obs.code_m),
+        t_tx,
+        options.sagnac,
     )
     .map_err(|error| no_ephemeris(obs, error))
+}
+
+/// Transmission epoch of `obs` received at `t_rx_j2000_s`, placed from its code
+/// pseudorange `P` as RTKLIB `satposs` places it: `t_rx - P / c`, less the satellite
+/// clock read there.
+///
+/// The clock is the one the source gives for placing a transmission epoch
+/// ([`ObservableEphemerisSource::try_observable_transmit_epoch_clock_s`]), from the record
+/// selected at the reception epoch as RTKLIB `seleph(teph, ...)` selects it; where the
+/// source's state carries no clock, it is the `satellite_clock` series' clock there, the
+/// one the rows then use. RTKLIB reads the broadcast clock (`ephclk`) even for a precise
+/// ephemeris; the two clocks differ by nanoseconds, which move the satellite by
+/// micrometres. The code has to be a positive distance: RTKLIB reads a zero pseudorange
+/// as none and places no satellite for it, and the solves leave such an observation out
+/// before they solve ([`rows::leave_out_unplaced_observations`]).
+///
+/// The code is the observation's, the ionosphere-free combination where the rows solve
+/// one, where RTKLIB `satposs` places from the first frequency's raw code. The two differ
+/// by the first frequency's ionosphere delay times the combination's amplification, up
+/// to a few tens of metres, which moves the transmission epoch by about 1e-7 s, the
+/// satellite by a few tenths of a millimetre along its track and the range by at most
+/// about 0.1 mm.
+fn observation_transmit_epoch_j2000_s(
+    source: &dyn ObservableEphemerisSource,
+    obs: &FloatObservation,
+    t_rx_j2000_s: f64,
+    satellite_clock: Option<&SatelliteClockCorrections>,
+) -> Result<f64, FloatSolveError> {
+    validate::finite_positive(obs.code_m, "ppp observation code_m").map_err(invalid_input)?;
+    let clock_epoch_j2000_s =
+        crate::observables::pseudorange_clock_epoch_j2000_s(t_rx_j2000_s, obs.code_m);
+    let source_clock_s = source
+        .try_observable_transmit_epoch_clock_s(obs.sat, clock_epoch_j2000_s, t_rx_j2000_s)
+        .map_err(|error| no_ephemeris(obs, error))?
+        .value;
+    let clock_s = match source_clock_s {
+        Some(clock_s) => clock_s,
+        None => satellite_clock
+            .and_then(|series| series.clock_s(obs.sat, clock_epoch_j2000_s))
+            .ok_or_else(|| missing_satellite_clock(obs))?,
+    };
+    validate::finite(clock_s, "ppp transmit epoch clock_s").map_err(invalid_input)?;
+    Ok(
+        crate::observables::pseudorange_transmit_epoch_from_clock_j2000_s(
+            t_rx_j2000_s,
+            obs.code_m,
+            clock_s,
+        ),
+    )
+}
+
+/// [`observation_transmit_epoch_j2000_s`] where `source` also places the satellite there,
+/// from the record selected at the reception epoch, and `None` where it does not.
+///
+/// The clock that places the epoch can come from a store the source falls back on while
+/// the source itself declines the satellite, as an SSR-corrected source reads the
+/// broadcast clock (RTKLIB `ephclk`) for a satellite it has no corrections for. RTKLIB then
+/// has a transmission epoch but no satellite position (`satpos` fails) and uses no
+/// measurement of the satellite; the rows fail the same way. A UT1 refusal of the clock or
+/// the state is kept as [`FloatSolveError::Ut1OutsideCoverage`].
+pub(super) fn observation_placed_transmit_epoch_j2000_s(
+    source: &dyn ObservableEphemerisSource,
+    obs: &FloatObservation,
+    t_rx_j2000_s: f64,
+    satellite_clock: Option<&SatelliteClockCorrections>,
+) -> Result<Option<f64>, FloatSolveError> {
+    let t_tx = match observation_transmit_epoch_j2000_s(source, obs, t_rx_j2000_s, satellite_clock)
+    {
+        Ok(t_tx) if t_tx.is_finite() => t_tx,
+        Ok(_) => return Ok(None),
+        Err(FloatSolveError::Ut1OutsideCoverage(reason)) => {
+            return Err(FloatSolveError::Ut1OutsideCoverage(reason))
+        }
+        Err(_) => return Ok(None),
+    };
+    match source.try_observable_state_group_delay_selected_at_j2000_s(obs.sat, t_tx, t_rx_j2000_s) {
+        Ok(_) => Ok(Some(t_tx)),
+        Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason))) => {
+            Err(FloatSolveError::Ut1OutsideCoverage(reason))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// A synthetic code pseudorange the PPP rows reproduce for `sat` seen from `receiver_m` at
+/// `t_rx_j2000_s`, with the geometry the rows form for it.
+///
+/// `code_from_geometry` gives the code for a geometry: its range plus the clocks and any
+/// other terms the test models. The rows place the transmission epoch from the code
+/// itself ([`observation_transmit_epoch_j2000_s`]), so the code is the fixed point of
+/// `P = code_from_geometry(geometry(P))`, found from the geometric prediction. Each step
+/// moves the epoch by the change in `P / c`, which moves the range by `rdot / c` of that
+/// change, a few parts in a million, so four steps settle it; for a source whose state
+/// does not move, the first step is the fixed point.
+#[cfg(test)]
+pub(crate) fn synthetic_placed_code(
+    source: &dyn ObservableEphemerisSource,
+    sat: crate::GnssSatelliteId,
+    receiver_m: [f64; 3],
+    t_rx_j2000_s: f64,
+    code_from_geometry: impl Fn(&crate::observables::TransmitGeometry) -> f64,
+) -> (f64, crate::observables::TransmitGeometry) {
+    let mut geometry = crate::observables::predict_transmit_geometry(
+        source,
+        sat,
+        receiver_m,
+        t_rx_j2000_s,
+        PredictOptions {
+            carrier_hz: F_L1_HZ,
+            light_time: true,
+            sagnac: true,
+        },
+        crate::observables::NOMINAL_SIGNAL_FLIGHT_TIME_S,
+    )
+    .expect("synthetic geometric prediction");
+    let mut code_m = code_from_geometry(&geometry);
+    for _ in 0..4 {
+        let t_tx = crate::observables::pseudorange_transmit_epoch_j2000_s(
+            source,
+            sat,
+            t_rx_j2000_s,
+            code_m,
+        )
+        .expect("synthetic transmission epoch");
+        geometry = crate::observables::pseudorange_transmit_geometry(
+            source,
+            sat,
+            receiver_m,
+            t_rx_j2000_s,
+            t_tx,
+            true,
+        )
+        .expect("synthetic placed geometry");
+        code_m = code_from_geometry(&geometry);
+    }
+    (code_m, geometry)
 }
 
 /// The solve error for a failed observable prediction of `obs`: a UT1 refusal keeps its
@@ -481,37 +611,12 @@ pub(super) fn validate_fixed_solve_boundary(
     validate_epochs(epochs).map_err(FixedSolveError::Float)?;
     validate_float_solution(solution, epochs.len())?;
     validate_float_solve_options(solution.solve_options).map_err(FixedSolveError::Float)?;
-    validate_float_solution_passes(solution).map_err(FixedSolveError::Float)?;
     validate_float_solution_observation_keys(epochs, solution).map_err(FixedSolveError::Float)?;
     validate_fixed_config(config)
 }
 
-/// The SSR/HAS bias pass numbers a float solution carries fit in a `u32`, so a solve that
-/// continues the numbering from them stays in range.
-fn validate_float_solution_passes(solution: &FloatSolution) -> Result<(), FloatSolveError> {
-    let in_range = |pass: usize| u32::try_from(pass).is_ok();
-    if !in_range(solution.ssr_bias_last_pass) {
-        return Err(FloatSolveError::InvalidInput {
-            field: "ppp float_solution ssr_bias_last_pass",
-            reason: "exceeds u32::MAX",
-        });
-    }
-    if !solution
-        .ssr_bias_exclusions
-        .iter()
-        .all(|exclusion| in_range(exclusion.pass))
-    {
-        return Err(FloatSolveError::InvalidInput {
-            field: "ppp float_solution ssr_bias_exclusions pass",
-            reason: "exceeds u32::MAX",
-        });
-    }
-    Ok(())
-}
-
-/// The residual screen's removals and the SSR/HAS bias readmissions a float solution
-/// carries name observations of `epochs`: an input epoch index in range and an ambiguity id
-/// observed in that epoch.
+/// The residual screen's removals a float solution carries name observations of `epochs`:
+/// an input epoch index in range and an ambiguity id observed in that epoch.
 fn validate_float_solution_observation_keys(
     epochs: &[FloatEpoch],
     solution: &FloatSolution,
@@ -531,16 +636,6 @@ fn validate_float_solution_observation_keys(
     {
         return Err(FloatSolveError::InvalidInput {
             field: "ppp float_solution residual_screen_removals",
-            reason: "must name observations of the input epochs",
-        });
-    }
-    if !solution
-        .ssr_bias_readmissions
-        .iter()
-        .all(names_an_observation)
-    {
-        return Err(FloatSolveError::InvalidInput {
-            field: "ppp float_solution ssr_bias_readmissions",
             reason: "must name observations of the input epochs",
         });
     }
@@ -1208,12 +1303,19 @@ fn apply_elevation_cutoff(
     cutoff_deg: f64,
     tropo: TroposphereOptions,
     estimate_residual_ionosphere: bool,
+    satellite_clock: Option<&SatelliteClockCorrections>,
 ) -> Result<Vec<FloatEpoch>, FloatSolveError> {
     let mut retained = Vec::with_capacity(epochs.len());
     for (epoch_idx, epoch) in epochs.iter().enumerate() {
         let mut observations = Vec::with_capacity(epoch.observations.len());
         for obs in &epoch.observations {
-            let pred = observation_geometry(source, obs, state.position_m, epoch.t_rx_j2000_s)?;
+            let pred = observation_geometry(
+                source,
+                obs,
+                state.position_m,
+                epoch.t_rx_j2000_s,
+                satellite_clock,
+            )?;
             validate::finite(pred.elevation_deg, "ppp predicted elevation_deg")
                 .map_err(invalid_input)?;
             if pred.elevation_deg >= cutoff_deg {

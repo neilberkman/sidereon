@@ -459,7 +459,7 @@ pub fn build_with_validity(
     mode: ValidityMode,
 ) -> Result<Validated<PppCorrections>, PppCorrectionsError> {
     let gate = Ut1Gate::new(mode);
-    let corrections = build_gated(sp3, epochs, receiver_ecef_m, options, &gate)?;
+    let corrections = build_gated(sp3, epochs, receiver_ecef_m, options, &gate, predict)?;
     Ok(Validated {
         value: corrections,
         degraded: gate
@@ -469,12 +469,44 @@ pub fn build_with_validity(
     })
 }
 
+/// The observable predictor the wind-up and satellite antenna corrections read the
+/// satellite geometry from: [`predict`], or in this repository's tests the replay of the
+/// external reference's microsecond-rounded transmission epoch.
+type Predictor = fn(
+    &dyn crate::observables::ObservableEphemerisSource,
+    GnssSatelliteId,
+    [f64; 3],
+    f64,
+    PredictOptions,
+) -> Result<PredictedObservables, ObservablesError>;
+
+/// [`build`] with the transmission epoch rounded to whole microseconds, as the external
+/// reference fixture computed it.
+#[cfg(all(test, feature = "test-replays"))]
+fn build_rounded_microsecond_replay(
+    sp3: &Sp3,
+    epochs: &[PppCorrectionEpoch],
+    receiver_ecef_m: [f64; 3],
+    options: &PppCorrectionsOptions,
+) -> Result<PppCorrections, PppCorrectionsError> {
+    let gate = Ut1Gate::new(ValidityMode::Strict);
+    build_gated(
+        sp3,
+        epochs,
+        receiver_ecef_m,
+        options,
+        &gate,
+        crate::observables::rounded_microsecond_replay::predict,
+    )
+}
+
 fn build_gated(
     sp3: &Sp3,
     epochs: &[PppCorrectionEpoch],
     receiver_ecef_m: [f64; 3],
     options: &PppCorrectionsOptions,
     gate: &Ut1Gate,
+    predictor: Predictor,
 ) -> Result<PppCorrections, PppCorrectionsError> {
     validate_receiver_state(receiver_ecef_m)?;
 
@@ -610,7 +642,7 @@ fn build_gated(
         let sun_moon = sun_moon.expect("Sun/Moon computed when the observation loop runs");
 
         for observation in &epoch_row.observations {
-            let obs = match predict(
+            let obs = match predictor(
                 sp3,
                 observation.sat,
                 receiver_ecef_m,
@@ -1412,6 +1444,12 @@ mod tests {
         }
     }
 
+    /// The reference fixture was computed with the transmission epoch rounded to whole
+    /// microseconds. Replayed through that rounding it agrees to the bit; the live build,
+    /// which keeps every bit of the flight time, differs from it only through the
+    /// transmission epoch: the station tide not at all, and the wind-up and satellite
+    /// antenna terms by at most what the satellite's turn over that epoch difference moves
+    /// them.
     #[test]
     fn ppp_corrections_match_elixir_reference_fixture() {
         let sp3 = sp3_fixture();
@@ -1439,7 +1477,8 @@ mod tests {
             code_bias: None,
         };
 
-        let got = build(&sp3, &epochs, receiver, &options).expect("valid PPP corrections");
+        let got = build_rounded_microsecond_replay(&sp3, &epochs, receiver, &options)
+            .expect("valid PPP corrections");
 
         assert_eq!(got.tide.len(), 1);
         assert_eq!(
@@ -1455,6 +1494,66 @@ mod tests {
         );
         assert_eq!(got.sat_pcv_m.len(), 1);
         assert_eq!(got.sat_pcv_m[0].value_m.to_bits(), 0x3F77617E95BD232C);
+
+        let live = build(&sp3, &epochs, receiver, &options).expect("valid PPP corrections");
+        assert_eq!(
+            live.tide[0].vector_m.map(f64::to_bits),
+            got.tide[0].vector_m.map(f64::to_bits),
+            "the station tide does not read the satellite"
+        );
+        let options_l1 = PredictOptions {
+            carrier_hz: F_L1_HZ,
+            light_time: true,
+            sagnac: true,
+        };
+        let t_rx = epochs[0].t_rx_j2000_s;
+        let exact = crate::observables::predict(&sp3, sat, receiver, t_rx, options_l1)
+            .expect("live prediction");
+        let rounded = crate::observables::rounded_microsecond_replay::predict(
+            &sp3, sat, receiver, t_rx, options_l1,
+        )
+        .expect("rounded prediction");
+        let dt = exact.transmit_time_j2000_s - rounded.transmit_time_j2000_s;
+        assert!(
+            dt.abs() <= 0.5e-6 + 1.0e-12,
+            "the epochs differ by the rounding alone: {dt} s"
+        );
+        // The satellite turns, as seen from the receiver and in its own body frame, by at
+        // most its speed over the range and over its orbit radius, plus the Earth's
+        // rotation, each over the epoch difference; twice that bounds the angle.
+        let position = |t: f64| {
+            sp3.position_at_j2000_seconds(sat, t)
+                .expect("SP3 state")
+                .position
+                .as_array()
+        };
+        let (plus, minus, at) = (
+            position(exact.transmit_time_j2000_s + 0.5),
+            position(exact.transmit_time_j2000_s - 0.5),
+            position(exact.transmit_time_j2000_s),
+        );
+        let speed = norm3([plus[0] - minus[0], plus[1] - minus[1], plus[2] - minus[2]]);
+        let turn_rad = 2.0
+            * dt.abs()
+            * (speed / exact.geometric_range_m
+                + speed / norm3(at)
+                + crate::constants::OMEGA_E_DOT_RAD_S);
+        // Metres per radian of turn, above each term's scale here: the wind-up's
+        // ionosphere-free wavelength over 2 pi (about 0.017 m), the ionosphere-free
+        // offset's length (about 3.5 m) and the variation's slope (about 0.1 m).
+        let metres_per_rad = 10.0;
+        let bound_m = metres_per_rad * turn_rad + 1.0e-15;
+        let windup_moved = live.windup_m[0].value_m - got.windup_m[0].value_m;
+        assert!(
+            windup_moved.abs() <= bound_m,
+            "wind-up moved {windup_moved} m"
+        );
+        for axis in 0..3 {
+            let moved = live.sat_pco_ecef[0].vector_m[axis] - got.sat_pco_ecef[0].vector_m[axis];
+            assert!(moved.abs() <= bound_m, "PCO axis {axis} moved {moved} m");
+        }
+        let pcv_moved = live.sat_pcv_m[0].value_m - got.sat_pcv_m[0].value_m;
+        assert!(pcv_moved.abs() <= bound_m, "PCV moved {pcv_moved} m");
     }
 
     #[test]

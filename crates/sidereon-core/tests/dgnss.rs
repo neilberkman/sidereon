@@ -7,7 +7,9 @@ use sidereon_core::dgnss::{
 };
 use sidereon_core::ephemeris::{BroadcastEphemeris, Sp3};
 use sidereon_core::observables::{
-    predict, ObservableEphemerisSource, ObservableState, ObservablesError, PredictOptions,
+    predict, pseudorange_transmit_epoch_j2000_s, pseudorange_transmit_geometry,
+    rounded_microsecond_replay, ObservableEphemerisSource, ObservableState, ObservablesError,
+    PredictOptions,
 };
 use sidereon_core::positioning::{
     solve, Corrections, KlobucharCoeffs, Observation, SolveInputs, SurfaceMet,
@@ -164,26 +166,88 @@ fn visible_gps(sp3: &Sp3, station: [f64; 3]) -> Vec<GnssSatelliteId> {
         .collect()
 }
 
+/// The base model of the DGNSS corrections for pseudorange `pseudorange_m`, formed as
+/// `pseudorange_corrections` forms it: the transmission epoch placed from the pseudorange
+/// as RTKLIB `satposs` places it, the `geodist` range there, and `c` times the satellite
+/// clock with the `peph2pos` term and less the single-frequency group delay, all of the
+/// record selected at the reception epoch.
+fn placed_base_model_m(
+    source: &dyn ObservableEphemerisSource,
+    sat: GnssSatelliteId,
+    station: [f64; 3],
+    t_rx_j2000_s: f64,
+    pseudorange_m: f64,
+) -> f64 {
+    let t_tx = pseudorange_transmit_epoch_j2000_s(source, sat, t_rx_j2000_s, pseudorange_m)
+        .expect("placed transmission epoch");
+    let geometry = pseudorange_transmit_geometry(source, sat, station, t_rx_j2000_s, t_tx, true)
+        .expect("placed geometry");
+    let sat_clock_s = geometry.sat_clock_s.expect("satellite clock");
+    let sat_clock_s = match source.clock_relativity_s(sat, t_tx) {
+        sidereon_core::positioning::ClockRelativity::NotApplicable => sat_clock_s,
+        sidereon_core::positioning::ClockRelativity::Term(relativity_s) => {
+            sat_clock_s + relativity_s
+        }
+        sidereon_core::positioning::ClockRelativity::Unavailable => {
+            panic!("{sat}: no peph2pos term")
+        }
+    };
+    let group_delay = source
+        .try_observable_state_group_delay_selected_at_j2000_s(sat, t_tx, t_rx_j2000_s)
+        .expect("placed state")
+        .value
+        .1;
+    let sat_clock_s = match group_delay {
+        Some(group_delay_s) => sat_clock_s - group_delay_s,
+        None => sat_clock_s,
+    };
+    geometry.geometric_range_m - C_M_S * sat_clock_s
+}
+
+/// A pseudorange the positioning models reproduce: the fixed point of
+/// `P = model(P) + c · rx_clock_s + extra_m`, with the model placing the transmission
+/// epoch from `P` itself ([`placed_base_model_m`]). Each step moves the epoch by the
+/// change in `P / c`, which moves the range by `rdot / c` of that change, so four steps
+/// from the geometric prediction settle it.
+fn synth_placed(
+    source: &dyn ObservableEphemerisSource,
+    sat: GnssSatelliteId,
+    station: [f64; 3],
+    t_rx_j2000_s: f64,
+    rx_clock_s: f64,
+    extra_m: f64,
+) -> f64 {
+    let seed = predict(
+        source,
+        sat,
+        station,
+        t_rx_j2000_s,
+        PredictOptions::default(),
+    )
+    .expect("predict visible satellite");
+    let mut pseudorange_m = seed.geometric_range_m + C_M_S * rx_clock_s + extra_m;
+    for _ in 0..4 {
+        pseudorange_m = placed_base_model_m(source, sat, station, t_rx_j2000_s, pseudorange_m)
+            + C_M_S * rx_clock_s
+            + extra_m;
+    }
+    pseudorange_m
+}
+
 fn synth(
     sp3: &Sp3,
     sats: &[GnssSatelliteId],
     station: [f64; 3],
     rx_clock_s: f64,
 ) -> Vec<CodeObservation> {
+    // The synthetic pseudorange carries the satellite clock the positioning models use,
+    // the SP3 clock with the relativistic term RTKLIB `peph2pos` applies, and places its
+    // transmission epoch as they place it.
     sats.iter()
         .map(|sat| {
-            let obs = predict(sp3, *sat, station, T_RX_J2000_S, PredictOptions::default())
-                .expect("predict visible satellite");
-            // The synthetic pseudorange carries the satellite clock the positioning models
-            // use: the SP3 clock with the relativistic term RTKLIB `peph2pos` applies.
-            let relativity_s =
-                ObservableEphemerisSource::clock_relativity_s(sp3, *sat, obs.transmit_time_j2000_s)
-                    .term()
-                    .expect("peph2pos relativistic term");
-            let sat_clock_s = obs.sat_clock_s.expect("visible satellite clock") + relativity_s;
             CodeObservation::new(
                 sat.to_string(),
-                obs.geometric_range_m + C_M_S * (rx_clock_s - sat_clock_s),
+                synth_placed(sp3, *sat, station, T_RX_J2000_S, rx_clock_s, 0.0),
             )
         })
         .collect()
@@ -215,12 +279,18 @@ fn dgnss_corrections_and_apply_match_application_oracle_bits() {
 
     let corrections = pseudorange_corrections(&sp3, base, &base_obs, T_RX_J2000_S)
         .expect("compute DGNSS corrections");
-    // The oracle's base model uses the SP3 clock as written, with no relativistic term.
-    // The positioning models apply the term RTKLIB `peph2pos` applies to a precise clock
-    // (see `zim2_sp3_spp_with_the_peph2pos_relativity_term_is_closer_to_truth`), so each
-    // correction is the oracle's plus `c` times that term. The oracle still certifies the
-    // rest of the model bit for bit: its correction is `P - (rho - c·clk)` from this
-    // crate's prediction, and ours is `P - (rho - c·(clk + term))` from the same one.
+    // The oracle's base model uses the SP3 clock as written, with no relativistic term,
+    // and the geometric light time from the reception epoch with the transmission epoch
+    // rounded to whole microseconds. The positioning models apply the term RTKLIB
+    // `peph2pos` applies to a precise clock (see
+    // `zim2_sp3_spp_with_the_peph2pos_relativity_term_is_closer_to_truth`), and place the
+    // transmission epoch from the base pseudorange as RTKLIB `satposs` places it, with
+    // the `geodist` range there. The oracle still certifies the rest of the model bit for
+    // bit: its correction is `P - (rho - c·clk)` from this crate's prediction replayed
+    // with the rounded epoch. Ours is `P - (rho' - c·(clk' + term'))` at the placed epoch,
+    // and differs from the oracle's with the term by the range rate times the difference
+    // of the two epochs, within 0.5 mm: for a GPS orbit RTKLIB's first-order Sagnac term
+    // and the closed-form rotation differ by about 0.1 mm.
     let base_pseudorange = base_obs
         .iter()
         .map(|o| (o.satellite_id.clone(), o.pseudorange_m))
@@ -242,8 +312,14 @@ fn dgnss_corrections_and_apply_match_application_oracle_bits() {
         .collect::<std::collections::BTreeMap<_, _>>();
     for (token, expected) in golden["corrections_m"].as_object().unwrap() {
         let sat = sat_from_token(token);
-        let prediction = predict(&sp3, sat, base, T_RX_J2000_S, PredictOptions::default())
-            .expect("predict base satellite");
+        let prediction = rounded_microsecond_replay::predict(
+            &sp3,
+            sat,
+            base,
+            T_RX_J2000_S,
+            PredictOptions::default(),
+        )
+        .expect("predict base satellite");
         let clock_s = prediction.sat_clock_s.expect("SP3 clock");
         let relativity_s = ObservableEphemerisSource::clock_relativity_s(
             &sp3,
@@ -262,9 +338,23 @@ fn dgnss_corrections_and_apply_match_application_oracle_bits() {
         let got = corrections
             .get(token)
             .unwrap_or_else(|| panic!("missing correction {token}"));
+        let placed_m =
+            pseudorange_m - placed_base_model_m(&sp3, sat, base, T_RX_J2000_S, pseudorange_m);
+        assert_eq!(got.to_bits(), placed_m.to_bits(), "{token}: correction");
         let with_term_m =
             pseudorange_m - (prediction.geometric_range_m - C_M_S * (clock_s + relativity_s));
-        assert_eq!(got.to_bits(), with_term_m.to_bits(), "{token}: correction");
+        let placed_epoch_s =
+            pseudorange_transmit_epoch_j2000_s(&sp3, sat, T_RX_J2000_S, pseudorange_m)
+                .expect("placed transmission epoch");
+        let epoch_shift_s = placed_epoch_s - prediction.transmit_time_j2000_s;
+        let moved_m = (got - with_term_m) + prediction.range_rate_m_s * epoch_shift_s;
+        assert!(
+            moved_m.abs() <= 5.0e-4,
+            "{token}: the correction moved {} m where the epoch shift of {epoch_shift_s} s \
+             moves the range by {} m",
+            got - with_term_m,
+            prediction.range_rate_m_s * epoch_shift_s
+        );
         assert_eq!(
             (rover_pseudorange[token] - hexf(expected)).to_bits(),
             expected_rover[token.as_str()].to_bits(),
@@ -310,7 +400,6 @@ fn dgnss_corrections_on_a_broadcast_source_keep_the_group_delay() {
         if prediction.elevation_deg < 10.0 {
             continue;
         }
-        let clock_s = prediction.sat_clock_s.expect("broadcast clock");
         let group_delay_s = ObservableEphemerisSource::single_frequency_group_delay_s(
             &store,
             sat,
@@ -319,8 +408,8 @@ fn dgnss_corrections_on_a_broadcast_source_keep_the_group_delay() {
         .expect("GPS TGD");
         largest_group_delay_m = largest_group_delay_m.max((C_M_S * group_delay_s).abs());
         let injected_m = 3.0 + f64::from(prn) * 0.25;
-        let modeled_m = prediction.geometric_range_m - C_M_S * (clock_s - group_delay_s);
-        let pseudorange_m = modeled_m + injected_m;
+        let pseudorange_m = synth_placed(&store, sat, base, t_rx, 0.0, injected_m);
+        let modeled_m = placed_base_model_m(&store, sat, base, t_rx, pseudorange_m);
         base_obs.push(CodeObservation::new(sat.to_string(), pseudorange_m));
         expected.insert(sat.to_string(), (pseudorange_m - modeled_m, injected_m));
     }
@@ -482,35 +571,22 @@ fn dgnss_common_mode_error_cancels_in_position_solve() {
                 .collect::<Vec<_>>(),
         ),
     ];
-    // Re-frozen when the base and rover models began applying the `peph2pos` relativistic
-    // term to the SP3 clock: it cancels between base and rover only up to their geometry
-    // differences, so the clean solution moved below a millimetre.
+    // Re-frozen when the base and rover models moved to RTKLIB `satposs` placement: each
+    // satellite sits at t_rx - P / c - dts, the rover's placed from its raw pseudoranges.
+    // The clean solve is then exact to rounding: every residual is zero and the baseline
+    // is its designed (2000, 1000, 1500) m to within a few ulps.
     let frozen_bits: [(&str, Vec<u64>); 5] = [
         (
             "position",
-            vec![0x414ad10a00081c95, 0x4127d9780005da05, 0x41540725fffa8c59],
+            vec![0x414ad10a00000000, 0x4127d977fffffffa, 0x4154072600000001],
         ),
-        ("rx_clock", vec![0xbec92a737b6ce6c6]),
+        ("rx_clock", vec![0xbec92a737110dee3]),
         (
             "baseline_vector",
-            vec![0x409f400040e4a800, 0x408f400017681400, 0x40976fffa8c59000],
+            vec![0x409f400000000000, 0x408f3fffffffe800, 0x4097700000001000],
         ),
-        ("baseline", vec![0x40a5092a32c70b3e]),
-        (
-            "residuals",
-            vec![
-                0xbf2f970000000000,
-                0xbef03a0000000000,
-                0xbed2580000000000,
-                0xbf209ee000000000,
-                0x3e99c00000000000,
-                0x3ef41c0000000000,
-                0x3f101b8000000000,
-                0xbf0c3d0000000000,
-                0xbf02450000000000,
-                0x3f12bf8000000000,
-            ],
-        ),
+        ("baseline", vec![0x40a5092a30cce712]),
+        ("residuals", vec![0x0; 10]),
     ];
     assert_eq!(
         clean_bits
@@ -605,5 +681,55 @@ fn dgnss_covariance_is_exactly_twice_the_spp_covariance_for_the_same_geometry() 
     assert!(
         (dgnss_cov.enu_m2[0][0] - spp_cov.enu_m2[0][0]).abs() > 0.4 * spp_cov.enu_m2[0][0],
         "scaled and unscaled covariance are indistinguishable; the pin is vacuous"
+    );
+}
+
+/// The rover's satellites are placed from its raw pseudoranges, as RTKLIB `rtkpos` calls
+/// `satposs` with the rover's own observations; the corrected pseudoranges form only the
+/// residuals. A 1 µs base receiver clock shifts every correction by the same 300 m, which
+/// the rover clock absorbs, and leaves each rover transmission epoch where it was: the
+/// rover position does not move. Placed from the corrected code instead, each rover
+/// satellite would move by 1 µs of its motion, about 4 mm, and the position by a
+/// fraction of a millimetre, well above the 1 µm this test allows.
+#[test]
+fn dgnss_places_the_rover_from_its_raw_pseudoranges() {
+    let sp3 = sp3_fixture();
+    let base = [3_512_900.0, 780_500.0, 5_248_700.0];
+    let rover = [base[0] + 2_000.0, base[1] + 1_000.0, base[2] + 1_500.0];
+    let base_visible = visible_gps(&sp3, base);
+    let mut sats: Vec<GnssSatelliteId> = visible_gps(&sp3, rover)
+        .into_iter()
+        .filter(|sat| base_visible.contains(sat))
+        .collect();
+    sats.sort_unstable();
+    assert!(sats.len() >= 5);
+
+    let rover_obs = synth(&sp3, &sats, rover, -2.0e-6);
+    let solve_with_base_clock = |base_clock_s: f64| {
+        solve_position(
+            &sp3,
+            base,
+            &synth(&sp3, &sats, base, base_clock_s),
+            &rover_obs,
+            solve_inputs(Vec::new(), [rover[0], rover[1], rover[2], 0.0]),
+            false,
+        )
+        .expect("DGNSS solve")
+    };
+    let steered = solve_with_base_clock(0.0);
+    let offset = solve_with_base_clock(1.0e-6);
+
+    let moved = dist(
+        offset.solution.position.as_array(),
+        steered.solution.position.as_array(),
+    );
+    assert!(
+        moved < 1.0e-6,
+        "the base clock moved the rover by {moved} m"
+    );
+    let clock_moved = offset.solution.rx_clock_s - steered.solution.rx_clock_s;
+    assert!(
+        (clock_moved + 1.0e-6).abs() < 1.0e-12,
+        "the rover clock absorbs the base clock: moved {clock_moved} s"
     );
 }

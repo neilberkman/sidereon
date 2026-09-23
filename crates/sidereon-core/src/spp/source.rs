@@ -180,6 +180,57 @@ pub trait EphemerisSource {
             degraded: state.degraded,
         }))
     }
+
+    /// [`Self::try_position_clock_group_delay_at_j2000_s`] at `t_j2000_s` of the record
+    /// the source selects at `selection_j2000_s`.
+    ///
+    /// RTKLIB `satposs` selects each satellite's broadcast record by the observation epoch
+    /// (`seleph(teph, ...)`, `teph` the reception epoch) and evaluates it at the
+    /// transmission epoch; the positioning models pass the reception epoch here. A source
+    /// that chooses among records by epoch, as a broadcast store does, chooses at
+    /// `selection_j2000_s`, and the SSR- and SBAS-corrected sources choose their broadcast
+    /// records there. A continuous product, such as SP3 or a precise interpolant, has no
+    /// record to choose, and the default reads the state at `t_j2000_s`.
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        _selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        self.try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+    }
+
+    /// Satellite clock offset, seconds, that places the transmission epoch of a
+    /// pseudorange received at `t_rx`: RTKLIB `satposs` reads the clock with `ephclk` at
+    /// `t_j2000_s = t_rx - P / c`, from the record selected at the reception epoch
+    /// `selection_j2000_s`, and the transmission epoch is that epoch less the clock
+    /// ([`crate::observables::pseudorange_transmit_epoch_j2000_s`]).
+    ///
+    /// `Ok(None)` where the source has no clock for `sat` at `t_j2000_s`, and `Err` for a
+    /// refusal, as [`Self::try_position_clock_at_j2000_s`] reports them. The default is
+    /// the clock [`Self::try_position_clock_group_delay_selected_at_j2000_s`] returns
+    /// there: a precise product's clock as written, without the `peph2pos` relativistic
+    /// term, which RTKLIB reads only for the state at the transmission epoch. A broadcast
+    /// store returns its clock polynomial alone, as `ephclk` does (`eph2clk`, `geph2clk`),
+    /// and the SSR- and SBAS-corrected sources return that of the broadcast store they
+    /// correct, as `satposs` calls `ephclk` whatever the ephemeris option. RTKLIB reads
+    /// the broadcast clock for a precise ephemeris too; a precise source here has no
+    /// broadcast store, and its own clock is the one it has. The two differ by
+    /// nanoseconds, which move the transmission epoch by as much and the satellite by
+    /// micrometres.
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        Ok(self
+            .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)?
+            .map(|state| Validated {
+                value: state.value.1,
+                degraded: state.degraded,
+            }))
+    }
 }
 
 /// A view of an ephemeris source that reads it through its fallible methods
@@ -310,6 +361,32 @@ impl<S: EphemerisSource + ?Sized> EphemerisSource for Ut1Tracked<'_, S> {
         self.note(&result);
         result
     }
+
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let result = self
+            .inner
+            .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s);
+        self.note(&result);
+        result
+    }
+
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        let result = self
+            .inner
+            .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s);
+        self.note(&result);
+        result
+    }
 }
 
 impl<S: ObservableEphemerisSource + ?Sized> ObservableEphemerisSource for Ut1Tracked<'_, S> {
@@ -381,6 +458,57 @@ impl<S: ObservableEphemerisSource + ?Sized> ObservableEphemerisSource for Ut1Tra
         t_j2000_s: f64,
     ) -> Option<Result<[f64; 3], ObservablesError>> {
         let result = self.inner.velocity_at_j2000_s(sat, t_j2000_s);
+        if let Some(Err(error)) = &result {
+            self.note_observables_error(error);
+        }
+        result
+    }
+
+    fn try_observable_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Validated<Option<f64>>, ObservablesError> {
+        let result =
+            self.inner
+                .try_observable_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s);
+        match &result {
+            Ok(clock) => self.note_departure(clock.degraded),
+            Err(error) => self.note_observables_error(error),
+        }
+        result
+    }
+
+    fn try_observable_state_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Validated<(ObservableState, Option<f64>)>, ObservablesError> {
+        let result = self
+            .inner
+            .try_observable_state_group_delay_selected_at_j2000_s(
+                sat,
+                t_j2000_s,
+                selection_j2000_s,
+            );
+        match &result {
+            Ok(state) => self.note_departure(state.degraded),
+            Err(error) => self.note_observables_error(error),
+        }
+        result
+    }
+
+    fn velocity_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        let result = self
+            .inner
+            .velocity_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s);
         if let Some(Err(error)) = &result {
             self.note_observables_error(error);
         }
@@ -503,23 +631,28 @@ impl EphemerisSource for MmapPreciseEphemerisInterpolant<'_> {
     }
 }
 
-/// Epochs remembered per satellite by [`TransmitStateMemo`]: the transmit-time
-/// iteration's seed epoch, the epoch at the current receiver state, and one for each of
-/// the three position probes of a finite-difference Jacobian, so the state at the
-/// current epoch is still held when the receiver-clock probe asks for it again; one
-/// more is spare.
+/// Entries remembered per satellite by [`TransmitStateMemo`], each keyed by a query epoch
+/// and the epoch the record is selected at. The RTKLIB placement asks for three per
+/// satellite whatever the receiver state: the clock at `t_rx - P / c` and the state at the
+/// transmission epoch, both from the record selected at `t_rx`, and the relativistic term
+/// of that state. The geometric light-time recipes ask for the seed
+/// epoch, the epoch at the current receiver state, and one for each of the three
+/// position probes of a finite-difference Jacobian, so the state at the current epoch is
+/// still held when the receiver-clock probe asks for it again; one more is spare.
 const MEMO_EPOCHS_PER_SATELLITE: usize = 6;
 
 /// Memo of the transmit-epoch states one SPP solve asks its source for.
 ///
 /// A solve evaluates each satellite's model at many receiver states: in selection, at
 /// every residual and finite-difference probe of the trust-region solve, and for the
-/// final residuals and geometry. The transmit-time iteration's first step is at
-/// `t_rx - P / c` every time, and a probe of a receiver clock leaves the transmit epoch
-/// unchanged. The memo answers a repeated
-/// [`EphemerisSource::position_clock_group_delay_at_j2000_s`] or
+/// final residuals and geometry. The RTKLIB placement reads the clock at `t_rx - P / c`
+/// and the state at the transmission epoch it gives, both fixed by the pseudorange and
+/// selected at `t_rx`, so every evaluation after the first asks the same epochs. The memo
+/// answers a repeated [`EphemerisSource::position_clock_group_delay_at_j2000_s`],
+/// [`EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s`],
+/// [`EphemerisSource::try_transmit_epoch_clock_s`] or
 /// [`EphemerisSource::clock_relativity_for_state_s`] query, keyed by the satellite and
-/// the bits of the epoch, with the answer the source gave before, which is the answer it
+/// the bits of the query and selection epochs, with the answer the source gave before, which is the answer it
 /// gives again: an ephemeris source's answers are functions of their arguments. Every
 /// other query goes to the source.
 pub(crate) struct TransmitStateMemo<'a> {
@@ -535,7 +668,11 @@ type MemoState = Option<Validated<PositionClockGroupDelay>>;
 #[derive(Clone, Copy)]
 struct MemoEntry {
     t_bits: u64,
+    /// Bits of the epoch the source selected its record at: the query epoch itself for a
+    /// read that selects nothing apart.
+    selection_bits: u64,
     state: Option<MemoState>,
+    transmit_epoch_clock: Option<Option<Validated<f64>>>,
     relativity: Option<ClockRelativity>,
 }
 
@@ -554,12 +691,14 @@ impl<'a> TransmitStateMemo<'a> {
         }
     }
 
-    /// Run `f` on the entry for `sat` at `t_j2000_s`, made empty if absent (replacing
-    /// the least recently used), and mark it most recently used.
+    /// Run `f` on the entry for `sat` at `t_j2000_s` with the record selected at
+    /// `selection_j2000_s`, made empty if absent (replacing the least recently used), and
+    /// mark it most recently used.
     fn with_entry<R>(
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
+        selection_j2000_s: f64,
         f: impl FnOnce(&mut MemoEntry) -> R,
     ) -> R {
         let mut satellites = self.satellites.borrow_mut();
@@ -575,16 +714,20 @@ impl<'a> TransmitStateMemo<'a> {
         };
         let entries = &mut satellites[index].entries;
         let t_bits = t_j2000_s.to_bits();
-        let slot = match entries
-            .iter()
-            .position(|entry| entry.is_some_and(|entry| entry.t_bits == t_bits))
-        {
+        let selection_bits = selection_j2000_s.to_bits();
+        let slot = match entries.iter().position(|entry| {
+            entry.is_some_and(|entry| {
+                entry.t_bits == t_bits && entry.selection_bits == selection_bits
+            })
+        }) {
             Some(slot) => slot,
             None => {
                 let slot = MEMO_EPOCHS_PER_SATELLITE - 1;
                 entries[slot] = Some(MemoEntry {
                     t_bits,
+                    selection_bits,
                     state: None,
+                    transmit_epoch_clock: None,
                     relativity: None,
                 });
                 slot
@@ -631,7 +774,7 @@ impl EphemerisSource for TransmitStateMemo<'_> {
         t_j2000_s: f64,
         position_m: [f64; 3],
     ) -> ClockRelativity {
-        self.with_entry(sat, t_j2000_s, |entry| {
+        self.with_entry(sat, t_j2000_s, t_j2000_s, |entry| {
             *entry.relativity.get_or_insert_with(|| {
                 self.source
                     .clock_relativity_for_state_s(sat, t_j2000_s, position_m)
@@ -657,15 +800,76 @@ impl EphemerisSource for TransmitStateMemo<'_> {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
-        if let Some(state) = self.with_entry(sat, t_j2000_s, |entry| entry.state) {
-            return Ok(state);
+        self.remembered_state(sat, t_j2000_s, t_j2000_s, || {
+            self.source
+                .try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+        })
+    }
+
+    /// The source's selected read, remembered as [`Self::try_position_clock_group_delay_at_j2000_s`]
+    /// remembers its read, keyed by both epochs.
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        self.remembered_state(sat, t_j2000_s, selection_j2000_s, || {
+            self.source
+                .try_position_clock_group_delay_selected_at_j2000_s(
+                    sat,
+                    t_j2000_s,
+                    selection_j2000_s,
+                )
+        })
+    }
+
+    /// The source's clock, remembered when it gives one or none; a refusal is asked for
+    /// again, so every caller receives it.
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>, crate::Error> {
+        if let Some(clock) = self.with_entry(sat, t_j2000_s, selection_j2000_s, |entry| {
+            entry.transmit_epoch_clock
+        }) {
+            return Ok(clock);
         }
         let result = self
             .source
-            .try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s);
+            .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s);
+        if let Ok(clock) = &result {
+            let clock = *clock;
+            self.with_entry(sat, t_j2000_s, selection_j2000_s, |entry| {
+                entry.transmit_epoch_clock = Some(clock)
+            });
+        }
+        result
+    }
+}
+
+impl TransmitStateMemo<'_> {
+    /// The state remembered for `sat` at `t_j2000_s` with the record selected at
+    /// `selection_j2000_s`, or `read`'s answer, remembered when it gives a state or none.
+    fn remembered_state(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+        read: impl FnOnce() -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error>,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        if let Some(state) = self.with_entry(sat, t_j2000_s, selection_j2000_s, |entry| entry.state)
+        {
+            return Ok(state);
+        }
+        let result = read();
         if let Ok(state) = &result {
             let state = *state;
-            self.with_entry(sat, t_j2000_s, |entry| entry.state = Some(state));
+            self.with_entry(sat, t_j2000_s, selection_j2000_s, |entry| {
+                entry.state = Some(state)
+            });
         }
         result
     }

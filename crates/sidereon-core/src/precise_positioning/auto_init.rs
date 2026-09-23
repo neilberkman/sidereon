@@ -426,7 +426,7 @@ mod tests {
     use crate::estimation::strategies::{
         estimate as estimate_with_strategy, EstimateInput, EstimateOptions, EstimateOutput,
     };
-    use crate::observables::{predict, ObservableState, ObservablesError, PredictOptions};
+    use crate::observables::{ObservableState, ObservablesError};
     use crate::ppp_corrections::CivilDateTime;
     use crate::precise_positioning::{
         FixedAmbiguityOptions, FixedSolveConfig, FloatObservation, FloatSolution,
@@ -509,18 +509,13 @@ mod tests {
         let observations = ids
             .iter()
             .map(|id| {
-                let prediction = predict(
+                let (_, prediction) = crate::precise_positioning::synthetic_placed_code(
                     source,
                     *id,
                     truth,
                     t_rx_j2000_s,
-                    PredictOptions {
-                        carrier_hz: F_L1_HZ,
-                        light_time: true,
-                        sagnac: true,
-                    },
-                )
-                .expect("prediction");
+                    |geometry| geometry.geometric_range_m + clock_m,
+                );
                 let code_m = prediction.geometric_range_m + clock_m;
                 let ambiguity_m = ambiguities_m[&id.to_string()];
                 FloatObservation {

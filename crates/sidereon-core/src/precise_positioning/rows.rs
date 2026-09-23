@@ -24,8 +24,7 @@ use crate::estimation::substrate::parameters::{
     undifferenced_design_row, UndifferencedDesignOptions,
 };
 use crate::observables::{
-    flight_time_seed_s, transmit_epoch_j2000_s, transmit_velocity_m_s, ObservableEphemerisSource,
-    ObservablesError, TransmitGeometry, TransmitTimeOptions,
+    pseudorange_transmit_velocity_m_s, ObservableEphemerisSource, TransmitGeometry,
 };
 use crate::ssr::{SsrBiasStatus, SsrSolution};
 use crate::validate::{self, FieldError};
@@ -37,10 +36,11 @@ use super::model::{
 use super::normal::Row;
 use super::{
     estimates_tropo_gradients, estimates_ztd, invalid_clock_count, invalid_input, no_ephemeris,
-    observation_geometry, predict_default, validate_state_clock_count, FixedSolveError, FloatEpoch,
-    FloatObservation, FloatResidual, FloatSolveError, FloatState, MissingCorrection, ModelContext,
-    PppCorrectionLookup, RangeCorrections, SsrBiasExclusion, SsrBiasExclusionStage, SsrBiasRecord,
-    SsrIfCombinationStatus, SsrTransmitTimeFailure,
+    observation_geometry, observation_placed_transmit_epoch_j2000_s, validate_state_clock_count,
+    FixedSolveError, FloatEpoch, FloatObservation, FloatResidual, FloatSolveError, FloatState,
+    MissingCorrection, ModelContext, PppCorrectionLookup, RangeCorrections,
+    SatelliteClockCorrections, SsrBiasExclusion, SsrBiasRecord, SsrIfCombinationStatus,
+    SsrTransmitTimeFailure, UnplacedObservation, UnplacedObservationReason,
 };
 
 /// Drop every epoch with no observations left, returning the remaining epochs and, for
@@ -64,29 +64,79 @@ pub(super) fn drop_empty_epochs(epochs: Vec<FloatEpoch>) -> (Vec<FloatEpoch>, Ve
 /// ([`ssr_bias_records_hold`]), returning the retained epochs and one
 /// [`SsrBiasExclusion`] per observation left out. `epochs[i]` is the caller's epoch
 /// `first_epoch_index + i`, the index that keys its corrections and is reported in the
-/// exclusion. The transmission time is predicted from `source` and
-/// `receiver_position_m`, the solve's starting position.
+/// exclusion. The transmission time is the one the rows place from the observation's
+/// pseudorange, as RTKLIB `satposs` places it, which no receiver state enters.
 ///
 /// Epochs keep their positions, even when all their observations are left out, because
 /// the correction lookups are keyed by the caller's epoch index. The retained observations
 /// are solved as if the excluded ones had not been supplied. [`build_rows`] and
-/// [`residual_rows`] still refuse an observation whose required bias is absent or no
-/// longer holds at the transmission time of the iteration, so a caller that skips this
-/// step fails closed instead of solving without the bias.
+/// [`residual_rows`] still refuse an observation whose required bias is absent or does
+/// not hold at its transmission time, so a caller that skips this step fails closed
+/// instead of solving without the bias.
 ///
 /// A satellite state the source refuses because producing it reads UT1 outside the UT1
-/// table under a strict UT1 policy is not an exclusion: the pass returns
+/// table under a strict UT1 policy is not an exclusion: the call returns
 /// [`FloatSolveError::Ut1OutsideCoverage`], whether the refusal was met here, predicting
 /// the transmission time or checking the recorded biases, or when `lookup` was built
 /// ([`SsrIfCombinationStatus::Ut1OutsideCoverage`] in its application report).
+/// Leave out, before the solve, every observation of `epochs` (caller epoch indices from
+/// `first_epoch_index`) whose code places no transmission epoch: a code that is zero or
+/// negative, which RTKLIB reads as no pseudorange and places no satellite for. A code
+/// that is not finite is malformed input and is refused by the input checks instead.
+pub(super) fn leave_out_unplaced_observations(
+    epochs: &[FloatEpoch],
+    first_epoch_index: usize,
+) -> (Vec<FloatEpoch>, Vec<UnplacedObservation>) {
+    let mut unplaced = Vec::new();
+    let retained = epochs
+        .iter()
+        .enumerate()
+        .map(|(offset, epoch)| {
+            let mut epoch_out = epoch.clone();
+            epoch_out.observations.retain(|obs| {
+                let placeable = !(obs.code_m.is_finite() && obs.code_m <= 0.0);
+                if !placeable {
+                    unplaced.push(UnplacedObservation {
+                        epoch_index: first_epoch_index + offset,
+                        satellite_id: obs.satellite_id.clone(),
+                        ambiguity_id: obs.ambiguity_id.clone(),
+                        reason: UnplacedObservationReason::CodeNotPositive,
+                    });
+                }
+                placeable
+            });
+            epoch_out
+        })
+        .collect();
+    (retained, unplaced)
+}
+
+#[cfg(test)]
 pub(super) fn exclude_unresolved_ssr_bias_observations(
     source: &dyn ObservableEphemerisSource,
     epochs: &[FloatEpoch],
     first_epoch_index: usize,
-    receiver_position_m: [f64; 3],
     lookup: &PppCorrectionLookup,
-    pass: usize,
-    stage: SsrBiasExclusionStage,
+) -> Result<(Vec<FloatEpoch>, Vec<SsrBiasExclusion>), FloatSolveError> {
+    exclude_unresolved_ssr_bias_observations_with_clock(
+        source,
+        epochs,
+        first_epoch_index,
+        lookup,
+        None,
+    )
+}
+
+/// [`exclude_unresolved_ssr_bias_observations`] placing each observation with the
+/// satellite clock the rows place it with: the source's, or the `satellite_clock`
+/// series' where the source's state carries none, so the exclusion and the rows judge
+/// the same transmission epoch.
+pub(super) fn exclude_unresolved_ssr_bias_observations_with_clock(
+    source: &dyn ObservableEphemerisSource,
+    epochs: &[FloatEpoch],
+    first_epoch_index: usize,
+    lookup: &PppCorrectionLookup,
+    satellite_clock: Option<&SatelliteClockCorrections>,
 ) -> Result<(Vec<FloatEpoch>, Vec<SsrBiasExclusion>), FloatSolveError> {
     let mut exclusions = Vec::new();
     let mut refusal = None;
@@ -109,27 +159,19 @@ pub(super) fn exclude_unresolved_ssr_bias_observations(
                 let transmit_time_failure = if code_bias_missing || phase_bias_missing {
                     None
                 } else {
-                    let transmit_time = match predict_default(source, obs) {
-                        Ok(options) => match transmit_epoch_j2000_s(
-                            source,
-                            obs.sat,
-                            receiver_position_m,
-                            epoch.t_rx_j2000_s,
-                            TransmitTimeOptions {
-                                light_time: options.light_time,
-                                sagnac: options.sagnac,
-                            },
-                            flight_time_seed_s(obs.code_m),
-                        ) {
-                            Ok(t_tx) => Some(t_tx),
-                            Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(
-                                reason,
-                            ))) => {
-                                refusal = refusal.or(Some(reason));
-                                return true;
-                            }
-                            Err(_) => None,
-                        },
+                    // The transmission epoch the rows place for this observation, where
+                    // the source places the satellite.
+                    let transmit_time = match observation_placed_transmit_epoch_j2000_s(
+                        source,
+                        obs,
+                        epoch.t_rx_j2000_s,
+                        satellite_clock,
+                    ) {
+                        Ok(t_tx) => t_tx,
+                        Err(FloatSolveError::Ut1OutsideCoverage(reason)) => {
+                            refusal = refusal.or(Some(reason));
+                            return true;
+                        }
                         Err(_) => None,
                     };
                     match ssr_bias_records_hold(source, obs, epoch_index, lookup, transmit_time) {
@@ -153,8 +195,6 @@ pub(super) fn exclude_unresolved_ssr_bias_observations(
                         phase_bias_missing,
                         transmit_time_failure,
                     },
-                    pass,
-                    stage,
                 ));
                 false
             });
@@ -201,14 +241,12 @@ pub(super) struct SsrBiasShortfall {
 }
 
 /// The exclusion of `obs` in caller epoch `epoch_index`, with the application report row
-/// `lookup` holds for it, found on solve pass `pass`.
+/// `lookup` holds for it.
 pub(super) fn ssr_bias_exclusion(
     lookup: &PppCorrectionLookup,
     obs: &FloatObservation,
     epoch_index: usize,
     shortfall: SsrBiasShortfall,
-    pass: usize,
-    stage: SsrBiasExclusionStage,
 ) -> SsrBiasExclusion {
     let application = lookup.ssr_bias_report.as_ref().and_then(|report| {
         report
@@ -228,8 +266,6 @@ pub(super) fn ssr_bias_exclusion(
         code_bias_missing: shortfall.code_bias_missing,
         phase_bias_missing: shortfall.phase_bias_missing,
         transmit_time_failure: shortfall.transmit_time_failure,
-        pass,
-        stage,
         application,
     }
 }
@@ -489,13 +525,6 @@ fn bound_ambiguity(
 pub(super) enum PppRowError {
     Model(FloatSolveError),
     MissingAmbiguity(String),
-    /// SSR/HAS bias records the lookup holds for an observation do not hold at the
-    /// transmission time of the state the rows were built at. A solve that iterates to a
-    /// fixed point turns this into an exclusion; elsewhere it is the missing correction.
-    SsrBiasFlip {
-        exclusion: Box<SsrBiasExclusion>,
-        missing: MissingCorrection,
-    },
 }
 
 fn row_invalid(error: FieldError) -> PppRowError {
@@ -508,10 +537,6 @@ impl PppRowError {
         match self {
             Self::Model(error) => error,
             Self::MissingAmbiguity(id) => FloatSolveError::MissingAmbiguity(id),
-            Self::SsrBiasFlip { exclusion, missing } => FloatSolveError::MissingCorrection {
-                satellite_id: exclusion.satellite_id,
-                correction: missing,
-            },
         }
     }
 
@@ -521,7 +546,6 @@ impl PppRowError {
         match self {
             Self::Model(error) => FixedSolveError::Float(error),
             Self::MissingAmbiguity(id) => FixedSolveError::MissingFixedAmbiguity(id),
-            flip @ Self::SsrBiasFlip { .. } => FixedSolveError::Float(flip.into_float()),
         }
     }
 }
@@ -548,14 +572,26 @@ fn undifferenced_model(
     state: &FloatState,
     ambiguity_m: f64,
 ) -> Result<UndiffModel, PppRowError> {
-    let pred = observation_geometry(ctx.source, obs, state.position_m, epoch.t_rx_j2000_s)
-        .map_err(PppRowError::Model)?;
+    let pred = observation_geometry(
+        ctx.source,
+        obs,
+        state.position_m,
+        epoch.t_rx_j2000_s,
+        ctx.corrections.satellite_clock.as_ref(),
+    )
+    .map_err(PppRowError::Model)?;
     validate_transmit_geometry(&pred)?;
-    // Only the satellite clock relativity term uses the satellite velocity.
+    // Only the satellite clock relativity term uses the satellite velocity. The
+    // geometry leaves the satellite in the transmission-epoch frame, so the velocity is
+    // taken there too, unrotated, from the same record, as RTKLIB `satposs` returns it.
     let sat_velocity_m_s = if adds_sat_clock_relativity(ctx.source, ctx.corrections) {
-        let options = predict_default(ctx.source, obs).map_err(PppRowError::Model)?;
-        let velocity = transmit_velocity_m_s(ctx.source, obs.sat, &pred, options.sagnac)
-            .map_err(|e| PppRowError::Model(no_ephemeris(obs, e)))?;
+        let velocity = pseudorange_transmit_velocity_m_s(
+            ctx.source,
+            obs.sat,
+            epoch.t_rx_j2000_s,
+            pred.transmit_time_j2000_s,
+        )
+        .map_err(|e| PppRowError::Model(no_ephemeris(obs, e)))?;
         validate::finite_vec3(velocity, "ppp predicted sat_velocity_m_s").map_err(row_invalid)?;
         Some(velocity)
     } else {
@@ -597,44 +633,22 @@ fn undifferenced_model(
     let phase_bias_m =
         phase_bias_m(obs, correction_idx, ctx.corrections).map_err(PppRowError::Model)?;
     validate::finite(phase_bias_m, "ppp row phase_bias_m").map_err(row_invalid)?;
-    // A recorded SSR bias that does not hold at this iteration's transmission time is
-    // missing here rather than applied to other clocks. An observation admitted again
-    // after an exclusion is judged only at a converged position, by the solve.
-    let deferred = ctx
-        .ssr_bias_deferred
-        .iter()
-        .any(|(epoch_index, ambiguity_id)| {
-            *epoch_index == correction_idx && *ambiguity_id == obs.ambiguity_id
-        });
-    let records_hold = if deferred {
-        Ok(())
-    } else {
-        ssr_bias_records_hold(
-            ctx.source,
-            obs,
-            correction_idx,
-            &ctx.corrections.ppp,
-            Some(pred.transmit_time_j2000_s),
-        )
-        .map_err(PppRowError::Model)?
-    };
+    // A recorded SSR bias that does not hold at the observation's transmission time is
+    // missing here rather than applied to other clocks. The solve leaves such an
+    // observation out before it solves, so only a caller that skips that step meets this.
+    let records_hold = ssr_bias_records_hold(
+        ctx.source,
+        obs,
+        correction_idx,
+        &ctx.corrections.ppp,
+        Some(pred.transmit_time_j2000_s),
+    )
+    .map_err(PppRowError::Model)?;
     if let Err(failure) = records_hold {
-        let missing = failed_ssr_bias(&failure, obs, correction_idx, &ctx.corrections.ppp);
-        return Err(PppRowError::SsrBiasFlip {
-            exclusion: Box::new(ssr_bias_exclusion(
-                &ctx.corrections.ppp,
-                obs,
-                correction_idx,
-                SsrBiasShortfall {
-                    code_bias_missing: false,
-                    phase_bias_missing: false,
-                    transmit_time_failure: Some(failure),
-                },
-                ctx.ssr_bias_pass,
-                ctx.ssr_bias_stage,
-            )),
-            missing,
-        });
+        return Err(PppRowError::Model(FloatSolveError::MissingCorrection {
+            satellite_id: obs.satellite_id.clone(),
+            correction: failed_ssr_bias(&failure, obs, correction_idx, &ctx.corrections.ppp),
+        }));
     }
     let residual_ionosphere_m = residual_ionosphere_m(state, obs, ctx.estimate_residual_ionosphere);
     validate::finite(residual_ionosphere_m, "ppp row residual_ionosphere_m")

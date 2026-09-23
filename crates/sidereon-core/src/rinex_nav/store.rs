@@ -294,6 +294,43 @@ impl BroadcastStore {
         }
     }
 
+    /// Satellite clock offset, seconds, that RTKLIB `satposs` places a pseudorange's
+    /// transmission epoch with (`ephclk`): the clock at satellite clock time `t_j2000_s` of
+    /// the record selected for `sat` at `selection_j2000_s`, the observation epoch RTKLIB
+    /// selects by (`seleph(teph, ...)`, `selgeph`, `selseph`), as `eph2clk` forms it for a
+    /// Keplerian record ([`crate::ephemeris::satellite_clock_bias_s`]), `geph2clk` for
+    /// GLONASS ([`GlonassRecord::clock_bias_s`]) and `seph2clk` for SBAS, without the
+    /// relativistic term or a group delay. `None` where no record is selected.
+    pub fn transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<f64> {
+        match sat.system {
+            GnssSystem::Glonass => {
+                let (rec, _) = self.glonass_selected(sat, t_j2000_s, selection_j2000_s)?;
+                Some(rec.clock_bias_s(t_j2000_s))
+            }
+            GnssSystem::Sbas => {
+                // seph2clk: t=ts=timediff(time,seph->t0); for (i=0;i<2;i++)
+                // t=ts-(seph->af0+seph->af1*t); return seph->af0+seph->af1*t;
+                let (rec, ts) = self.sbas_selected(sat, t_j2000_s, selection_j2000_s)?;
+                let mut t = ts;
+                for _ in 0..2 {
+                    t = ts - (rec.af0_s + rec.af1_s_s * t);
+                }
+                Some(rec.af0_s + rec.af1_s_s * t)
+            }
+            _ => {
+                let (rec, sow, _) = self.keplerian_selected(sat, t_j2000_s, selection_j2000_s)?;
+                Some(crate::broadcast::satellite_clock_bias_s_unchecked(
+                    &rec.clock, sow,
+                ))
+            }
+        }
+    }
+
     /// Velocity, metres per second, of the record selected for `sat` at `t_j2000_s`, as
     /// RTKLIB `ephpos` forms it: the difference of that record's positions at the epoch and
     /// [`EPHPOS_STEP_S`] later over the step, the step added to the record's reduced time
@@ -306,32 +343,33 @@ impl BroadcastStore {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<[f64; 3]> {
+        self.selected_record_velocity_at(sat, t_j2000_s, t_j2000_s)
+    }
+
+    /// [`Self::selected_record_velocity`] of the record selected at `selection_j2000_s`,
+    /// evaluated at `t_j2000_s`, as RTKLIB `satposs` selects it by the observation epoch.
+    pub(crate) fn selected_record_velocity_at(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
         match sat.system {
-            GnssSystem::Glonass => self.glonass_record_velocity(sat, t_j2000_s),
+            GnssSystem::Glonass => {
+                let (rec, tk) = self.glonass_selected(sat, t_j2000_s, selection_j2000_s)?;
+                glonass_record_velocity(rec, tk)
+            }
             GnssSystem::Sbas => {
-                let (rec, t) = self.select_sbas(sat, t_j2000_s)?;
+                let (rec, t) = self.sbas_selected(sat, t_j2000_s, selection_j2000_s)?;
                 let start = rec.position_at(t);
                 let end = rec.position_at(ephpos_stepped_tk(t));
                 Some(difference_velocity(start, end))
             }
             _ => {
-                let rec = self.select_record_at(sat, t_j2000_s)?;
+                let (rec, _, _) = self.keplerian_selected(sat, t_j2000_s, selection_j2000_s)?;
                 keplerian_record_velocity(rec, sat, t_j2000_s)
             }
         }
-    }
-
-    /// Velocity of the GLONASS record selected at `t_j2000_s`: its propagated positions at
-    /// `t_j2000_s` and 1 ms later, differenced, as RTKLIB `ephpos` forms it with `geph2pos`.
-    fn glonass_record_velocity(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<[f64; 3]> {
-        let (rec, tk) = self.select_glonass(sat, t_j2000_s)?;
-        let state0 = glonass_state0(rec);
-        let start = glonass::propagate(state0, rec.acc_m_s2, tk).ok()?;
-        let end = glonass::propagate(state0, rec.acc_m_s2, ephpos_stepped_tk(tk)).ok()?;
-        Some(difference_velocity(
-            [start[0], start[1], start[2]],
-            [end[0], end[1], end[2]],
-        ))
     }
 
     /// Velocity of the Keplerian GPS LNAV record with issue byte `iode` valid at
@@ -343,7 +381,18 @@ impl BroadcastStore {
         iode: u8,
         t_j2000_s: f64,
     ) -> Option<[f64; 3]> {
-        let rec = self.select_by_iode_at(sat, iode, t_j2000_s)?;
+        self.iode_record_velocity_at(sat, iode, t_j2000_s, t_j2000_s)
+    }
+
+    /// [`Self::iode_record_velocity`] of the record selected at `selection_j2000_s`.
+    pub(crate) fn iode_record_velocity_at(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
+        let rec = self.select_by_iode_at(sat, iode, selection_j2000_s)?;
         keplerian_record_velocity(rec, sat, t_j2000_s)
     }
 
@@ -388,8 +437,20 @@ impl BroadcastStore {
         iode: u8,
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.state_group_delay_by_iode_selected_at(sat, iode, t_j2000_s, t_j2000_s)
+    }
+
+    /// [`Self::state_group_delay_by_iode_at`] at `t_j2000_s` of the record selected at
+    /// `selection_j2000_s`, as RTKLIB `satpos_sbas` selects it by the observation epoch.
+    pub(crate) fn state_group_delay_by_iode_selected_at(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
         let (_, sow, is_geo) = query_native_time(sat, t_j2000_s)?;
-        let rec = self.select_by_iode_at(sat, iode, t_j2000_s)?;
+        let rec = self.select_by_iode_at(sat, iode, selection_j2000_s)?;
         let state = evaluate_record_unchecked(rec, sow, is_geo);
         let position = state.orbit.position().ok()?;
         Some((
@@ -425,14 +486,15 @@ impl BroadcastStore {
     /// forms a GLONASS record's IODE as `tb`), then `geph2pos` at `t_j2000_s` and 1 ms
     /// later. The clock is `geph2pos`'s, `-TauN + GammaN·tk` with `tk` not iterated, and
     /// carries no relativistic term, which RTKLIB adds none of for GLONASS. The record's
-    /// reference epoch lies within [`GLONASS_MAX_AGE_S`] of the query, and among records
-    /// of that `tb` the first in selection order is taken, as `selgeph` returns for an
-    /// issue.
+    /// reference epoch lies within [`GLONASS_MAX_AGE_S`] of `selection_j2000_s`, the epoch
+    /// `selgeph` selects at (`teph`), and among records of that `tb` the first in selection
+    /// order is taken, as `selgeph` returns for an issue.
     pub(crate) fn glonass_ssr_state(
         &self,
         sat: GnssSatelliteId,
         iode: u32,
         t_j2000_s: f64,
+        selection_j2000_s: f64,
     ) -> Option<([f64; 3], [f64; 3], f64)> {
         let rec = self
             .glonass_selection
@@ -441,7 +503,7 @@ impl BroadcastStore {
             .find(|r| {
                 r.satellite_id == sat
                     && glonass_tb(r) == Some(iode)
-                    && (t_j2000_s - r.toe_gpst_j2000_s()).abs() <= GLONASS_MAX_AGE_S
+                    && (selection_j2000_s - r.toe_gpst_j2000_s()).abs() <= GLONASS_MAX_AGE_S
             })?;
         if self.exclude_unusable && !rec.is_healthy() {
             return None;
@@ -1028,6 +1090,19 @@ fn cnav_rates(params: CnavParameters) -> CnavRates {
     }
 }
 
+/// Velocity of GLONASS record `rec` at `tk` from its reference epoch: its propagated
+/// positions at `tk` and 1 ms later, differenced, as RTKLIB `ephpos` forms it with
+/// `geph2pos`.
+fn glonass_record_velocity(rec: &GlonassRecord, tk: f64) -> Option<[f64; 3]> {
+    let state0 = glonass_state0(rec);
+    let start = glonass::propagate(state0, rec.acc_m_s2, tk).ok()?;
+    let end = glonass::propagate(state0, rec.acc_m_s2, ephpos_stepped_tk(tk)).ok()?;
+    Some(difference_velocity(
+        [start[0], start[1], start[2]],
+        [end[0], end[1], end[2]],
+    ))
+}
+
 /// Velocity of Keplerian record `rec` at `t_j2000_s`: its positions at `tk` and
 /// `tk + EPHPOS_STEP_S` differenced over the step, as RTKLIB `ephpos` forms it.
 fn keplerian_record_velocity(
@@ -1114,12 +1189,25 @@ impl BroadcastStore {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.state_with_group_delay_selected(sat, t_j2000_s, t_j2000_s)
+    }
+
+    /// [`Self::state_with_group_delay`] of the record selected at `selection_j2000_s`,
+    /// evaluated at `t_j2000_s`: RTKLIB `satposs` selects the record by the observation
+    /// epoch (`seleph(teph, ...)`, `selgeph`, `selseph`) and evaluates it at the
+    /// transmission epoch.
+    fn state_with_group_delay_selected(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
         match sat.system {
             // GLONASS is not Keplerian: integrate its broadcast state vector with the RK4
             // propagator. The clock is `geph2pos`'s, `-TauN + GammaN·tk` with `tk` not
             // iterated, as RTKLIB `satposs` returns it.
             GnssSystem::Glonass => {
-                let (rec, tk) = self.select_glonass(sat, t_j2000_s)?;
+                let (rec, tk) = self.glonass_selected(sat, t_j2000_s, selection_j2000_s)?;
                 let state = glonass::propagate(glonass_state0(rec), rec.acc_m_s2, tk).ok()?;
                 let clock = glonass::position_clock_offset_s(rec.clk_bias, rec.gamma_n, tk);
                 Some((
@@ -1130,7 +1218,7 @@ impl BroadcastStore {
             }
             // SBAS: `seph2pos`, a constant-acceleration state and a first-order clock.
             GnssSystem::Sbas => {
-                let (rec, _) = self.select_sbas(sat, t_j2000_s)?;
+                let (rec, _) = self.sbas_selected(sat, t_j2000_s, selection_j2000_s)?;
                 let (position, clock) = rec.position_clock_at_j2000_s(t_j2000_s);
                 Some((position, clock, None))
             }
@@ -1138,8 +1226,8 @@ impl BroadcastStore {
             // satellite system's own scale and seconds of week: BeiDou runs on BDT (= GPST
             // - 14 s), and its geostationary satellites take the GEO orbit branch.
             _ => {
-                let (t_native_s, sow, is_geo) = query_native_time(sat, t_j2000_s)?;
-                let rec = self.select(sat, t_native_s)?;
+                let (rec, sow, is_geo) =
+                    self.keplerian_selected(sat, t_j2000_s, selection_j2000_s)?;
                 let state = evaluate_record_unchecked(rec, sow, is_geo);
                 let position = state.orbit.position().ok()?;
                 Some((
@@ -1149,6 +1237,44 @@ impl BroadcastStore {
                 ))
             }
         }
+    }
+
+    /// The Keplerian record for `sat` selected at `selection_j2000_s`, with the seconds of
+    /// week and the GEO flag of `t_j2000_s`, the epoch it is evaluated at.
+    fn keplerian_selected(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<(&BroadcastRecord, f64, bool)> {
+        let (selection_native_s, _, _) = query_native_time(sat, selection_j2000_s)?;
+        let rec = self.select(sat, selection_native_s)?;
+        let (_, sow, is_geo) = query_native_time(sat, t_j2000_s)?;
+        Some((rec, sow, is_geo))
+    }
+
+    /// The GLONASS record for `sat` RTKLIB `selgeph` selects at `selection_j2000_s`, with
+    /// `tk`, the time of `t_j2000_s` from its reference epoch in GPS time.
+    fn glonass_selected(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<(&GlonassRecord, f64)> {
+        let (rec, _) = self.select_glonass(sat, selection_j2000_s)?;
+        Some((rec, t_j2000_s - rec.toe_gpst_j2000_s()))
+    }
+
+    /// The SBAS record for `sat` RTKLIB `selseph` selects at `selection_j2000_s`, with the
+    /// time of `t_j2000_s` from its reference epoch `t0`.
+    fn sbas_selected(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<(&SbasRecord, f64)> {
+        let (rec, _) = self.select_sbas(sat, selection_j2000_s)?;
+        Some((rec, t_j2000_s - rec.t0_j2000_s()))
     }
 }
 
@@ -1188,6 +1314,34 @@ impl EphemerisSource for BroadcastStore {
         Ok(self
             .state_with_group_delay(sat, t_j2000_s)
             .map(crate::astro::time::Validated::ok))
+    }
+
+    /// The record selected at `selection_j2000_s`, evaluated at `t_j2000_s`, as RTKLIB
+    /// `satposs` selects it by the observation epoch.
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        Ok(self
+            .state_with_group_delay_selected(sat, t_j2000_s, selection_j2000_s)
+            .map(crate::astro::time::Validated::ok))
+    }
+
+    /// [`BroadcastStore::transmit_epoch_clock_s`]: the clock polynomial alone, as RTKLIB
+    /// `ephclk` reads it.
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<f64>>> {
+        Ok(
+            BroadcastStore::transmit_epoch_clock_s(self, sat, t_j2000_s, selection_j2000_s)
+                .map(crate::astro::time::Validated::ok),
+        )
     }
 }
 

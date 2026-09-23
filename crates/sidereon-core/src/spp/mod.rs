@@ -23,19 +23,22 @@
 //! `rx_clock_s = clk_0 / c` (the reference system) and the per-system clocks are
 //! reported only at the API boundary.
 //!
-//! The per-satellite predicted pseudorange is built in a pinned operation order:
-//! a fixed-count transmit-time iteration (receive time minus geometric range
-//! over `c`) locates the satellite ephemeris at transmission, an Earth-rotation
-//! (Sagnac) closed-form rotation brings the satellite into the receive-time
-//! frame, the geometric range and the line-of-sight azimuth/elevation follow,
-//! then the ionosphere and troposphere delays are added to the predicted range
-//! left-to-right. The residual the solver sees is `sqrt(w) * (P_meas - P_hat)`
-//! with an elevation-based weight evaluated once at the frozen initial-guess
-//! geometry.
+//! The per-satellite predicted pseudorange is built in a pinned operation order,
+//! as RTKLIB `pntpos` builds it: the transmission epoch is placed from the
+//! measured pseudorange as RTKLIB `satposs` places it (`t_rx - P / c`, less the
+//! satellite clock read there), the satellite ephemeris is read at that epoch,
+//! the geometric range is RTKLIB `geodist` (the Euclidean range from the
+//! unrotated position plus the first-order Sagnac term), the line-of-sight
+//! azimuth/elevation follow, then the ionosphere and troposphere delays are added
+//! to the predicted range left-to-right. The residual the solver sees is
+//! `sqrt(w) * (P_meas - P_hat)` with an elevation-based weight evaluated once at
+//! the frozen initial-guess geometry.
 //!
 //! The geometric/clock/correction substrate and its 2-point finite-difference
 //! Jacobian are arithmetic over the libm-bound model functions and are a
-//! bit-exact (0-ULP) parity target against the reference recipe. The converged
+//! bit-exact (0-ULP) parity target against the reference recipe, replayed with the
+//! geometric light-time model that recipe places its transmission epochs with. The
+//! converged
 //! position is produced by the trust-region least-squares solver in the
 //! `sidereon-core` solver core, whose linear-algebra step is not bit-reproducible
 //! across BLAS builds; the converged solution is therefore a sub-micron
@@ -781,13 +784,13 @@ impl std::error::Error for SolvePolicyError {
 }
 
 /// The SPP measurement-model operation-order selections, resolved from a
-/// strategy's [`EstimationRecipe`]: the transmit-time light-time range recipe,
-/// the Sagnac rotation recipe, and the receiver-frame (geodetic / az-el) recipe.
+/// strategy's [`EstimationRecipe`]: the transmit-time range recipe, the Sagnac
+/// recipe, and the receiver-frame (geodetic / az-el) recipe.
 ///
 /// Threading these into [`sat_model`] is what makes SPP consume its
 /// `recipe.range` / `recipe.sagnac` / `recipe.frame` rather than hard-coding a
-/// single op-order. [`Self::reference`] is the SPP Skyfield reference selection,
-/// so the legacy entry points reproduce the current behavior bit-for-bit.
+/// single op-order. [`Self::reference`] is the SPP reference selection: the RTKLIB
+/// transmit-time placement and range with the Skyfield geodetic frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct SppModelRecipe {
     pub range: RangeRecipe,
@@ -805,15 +808,31 @@ impl SppModelRecipe {
         }
     }
 
-    /// The SPP Skyfield reference model selections (the
-    /// [`EstimationRecipe::spp`] range/sagnac/frame stages).
+    /// The SPP reference model selections (the [`EstimationRecipe::spp`]
+    /// range/sagnac/frame stages).
     pub(crate) const fn reference() -> Self {
         Self::from_recipe(&EstimationRecipe::spp())
     }
+
+    /// The geometric light-time model the external SPP references (the Python trace
+    /// recipe, the Go fixture) were computed with: the transmission epoch iterated a
+    /// fixed number of times from the receiver's time tag, and the closed-form Sagnac
+    /// rotation. It misses the receiver clock offset. Only the repository's replay of
+    /// those references selects it.
+    #[cfg(feature = "test-replays")]
+    pub(crate) const fn geometric_light_time_replay() -> Self {
+        Self {
+            range: RangeRecipe::SppMeasuredPseudorangeFixedIter,
+            sagnac: SagnacRecipe::ClosedFormZRotation,
+            frame: FrameRecipe::SppSkyfieldAuThreeIter,
+        }
+    }
 }
 
-/// Per-satellite model used by the solve path: the Sagnac-rotated satellite
-/// position, the topocentric az/el, and the predicted pseudorange.
+/// Per-satellite model used by the solve path: the satellite position the range
+/// is formed from (in the transmission-epoch frame under RTKLIB's first-order
+/// Sagnac term, rotated into the reception-epoch frame under the closed-form
+/// rotation), the topocentric az/el, and the predicted pseudorange.
 ///
 /// The scenario simulator also reads the range, satellite-clock, ionosphere,
 /// and troposphere intermediates to build its ground-truth term ledger. Test
@@ -899,6 +918,12 @@ pub(crate) struct SatModelEnv<'a> {
     pub model: SppModelRecipe,
     /// Which code the pseudoranges are; the group delay applies to single-frequency code.
     pub pseudorange_code: PseudorangeCode,
+    /// Pseudorange, metres, that places each listed satellite's transmission epoch, where it
+    /// differs from the one the residual is formed from; `None`, or a satellite not listed,
+    /// places from the residual's pseudorange. A differential rover's satellites are placed
+    /// from its raw code while the residual uses the corrected code, as RTKLIB `rtkpos`
+    /// calls `satposs` with the rover's own observations.
+    pub placement_pseudoranges_m: Option<&'a BTreeMap<GnssSatelliteId, f64>>,
 }
 
 /// Build the per-satellite predicted pseudorange in the SPP operation order
@@ -906,18 +931,21 @@ pub(crate) struct SatModelEnv<'a> {
 /// parity-sensitive range and frame substrate with the other strategies.
 ///
 /// The three model stages are read from the recipe rather than hard-coded:
-/// - **range** (`env.model.range`): the transmit-time light-time iteration.
-///   [`RangeRecipe::SppMeasuredPseudorangeFixedIter`] (the SPP reference) seeds
-///   `tau` from the measured pseudorange and runs a fixed iteration count (no
-///   convergence test). [`RangeRecipe::CanonicalLightTimeClosedFormSagnac`] (the
-///   canonical strategy) seeds the same way but iterates the light-time loop to
-///   convergence (the IERS-rigorous op-order). These are the two light-time
-///   recipes the SPP measurement model implements; the observable
-///   rounded-microsecond and RTK provided-transmit recipes are other strategies'
-///   range models and never reach here.
-/// - **sagnac** (`env.model.sagnac`): the closed-form Sagnac Z-rotation and the
-///   pre/post-rotation geometric range route through
-///   [`crate::estimation::substrate::range`] under the selected recipe.
+/// - **range** (`env.model.range`): the transmission epoch.
+///   [`RangeRecipe::RtklibSatpossPseudorange`] (the SPP reference) places it from
+///   the measured pseudorange as RTKLIB `satposs` does, with no iteration.
+///   [`RangeRecipe::CanonicalLightTimeClosedFormSagnac`] (the canonical strategy)
+///   iterates the geometric light time to convergence from the reception epoch
+///   corrected by the state's receiver clock (the IERS-rigorous op-order).
+///   [`RangeRecipe::SppMeasuredPseudorangeFixedIter`] is the geometric light time
+///   from the receiver's time tag that the external references were computed
+///   with, which only their replay selects. The observable rounded-microsecond and
+///   RTK provided-transmit recipes are other strategies' range models and never
+///   reach here.
+/// - **sagnac** (`env.model.sagnac`): RTKLIB's first-order scalar Sagnac term (the
+///   reference), or the closed-form Z-rotation and the pre/post-rotation geometric
+///   range, route through [`crate::estimation::substrate::range`] under the
+///   selected recipe.
 /// - **frame** (`env.model.frame`): the receiver geodetic conversion and the
 ///   geodetic ENU azimuth/elevation route through
 ///   [`crate::estimation::substrate::frames`] under the selected recipe (the SPP
@@ -942,11 +970,56 @@ pub(crate) fn sat_model(
     let sagnac = env.model.sagnac;
     let frame = env.model.frame;
 
-    // Transmit-time light-time iteration, selected by the range recipe.
-    let (sat_pos, dt_sat, tau, group_delay, t_state) = match env.model.range {
+    // Transmission epoch, selected by the range recipe.
+    // `_t_tx` is read only by the test-build trace fields below.
+    let (sat_pos, dt_sat, tau, group_delay, t_state, _t_tx) = match env.model.range {
+        RangeRecipe::RtklibSatpossPseudorange => {
+            // RTKLIB `satposs`: the clock read at `t_rx - P / c` (`ephclk`) places the
+            // transmission epoch `t_rx - P / c - dts`, and the state is read there. No
+            // light-time iteration: the pseudorange carries the flight time and the
+            // receiver clock offset, so the epoch does not depend on the receiver state
+            // and every evaluation of a solve reads the same two epochs. RTKLIB reads a
+            // zero pseudorange as none and places no satellite for it.
+            let p_place_m = env
+                .placement_pseudoranges_m
+                .and_then(|placement| placement.get(&sat).copied())
+                .unwrap_or(p_meas_m);
+            if !p_place_m.is_finite() || p_place_m <= 0.0 {
+                return None;
+            }
+            let clock_epoch =
+                crate::observables::pseudorange_clock_epoch_j2000_s(env.t_rx_j2000_s, p_place_m);
+            // RTKLIB selects each broadcast record by the observation epoch (`teph`), the
+            // reception epoch, for the clock and for the state alike.
+            let placement_clock_s = env
+                .eph
+                .try_transmit_epoch_clock_s(sat, clock_epoch, env.t_rx_j2000_s)
+                .ok()
+                .flatten()?
+                .value;
+            let t_tx = crate::observables::pseudorange_transmit_epoch_from_clock_j2000_s(
+                env.t_rx_j2000_s,
+                p_place_m,
+                placement_clock_s,
+            );
+            let (pos, clk, gd) = env
+                .eph
+                .try_position_clock_group_delay_selected_at_j2000_s(sat, t_tx, env.t_rx_j2000_s)
+                .ok()
+                .flatten()?
+                .value;
+            // The flight time a closed-form rotation turns the satellite through, when a
+            // recipe pairs one with this placement: the geometric range over `c`. RTKLIB
+            // `geodist` rotates nothing and takes the first-order Sagnac term instead.
+            let tau = geometric_range(SagnacRecipe::Off, pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S)
+                / C_M_S;
+            (pos, clk, tau, gd, t_tx, t_tx)
+        }
         RangeRecipe::SppMeasuredPseudorangeFixedIter => {
-            // Fixed iteration count, no inner convergence test; seed tau from the
-            // measured pseudorange.
+            // Geometric light time from the receiver's time tag: fixed iteration count,
+            // no inner convergence test; seed tau from the measured pseudorange. The
+            // external SPP references were computed this way; it misses the receiver
+            // clock offset.
             let mut tau = p_meas_m / C_M_S;
             let mut t_tx = env.t_rx_j2000_s - tau;
             let mut sat_pos = [0.0f64; 3];
@@ -965,19 +1038,21 @@ pub(crate) fn sat_model(
                 tau = rho0 / C_M_S;
                 t_tx = env.t_rx_j2000_s - tau;
             }
-            (sat_pos, dt_sat, tau, group_delay, t_state)
+            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx)
         }
         RangeRecipe::CanonicalLightTimeClosedFormSagnac => {
             // Full iterative light-time (the IERS-rigorous op-order): iterate the
             // transmit epoch until the signal travel time stops changing, rather
-            // than the reference recipe's fixed two-iteration truncation. Seeded,
-            // like the reference, from the measured pseudorange; the iteration
-            // converges to the geometric light-time fixed point
-            // `t_tx = t_rx - rho(t_tx)/c` with the closed-form Sagnac range (never
-            // a first-order scalar Sagnac). The satellite clock's relativistic
-            // periodic term is applied once, after the iteration: a broadcast clock
-            // carries it (`F*e*sqrt(A)*sin(E)`), and a precise product clock takes
-            // the `peph2pos` term the source returns.
+            // than a fixed truncation. The reception epoch is the receiver's time tag
+            // less the receiver clock offset of the state, `b / c`, so the fixed point
+            // `t_tx = (t_rx - b / c) - rho(t_tx) / c` is the true transmission epoch;
+            // the receiver's time tag alone would move each satellite by `v · b / c`.
+            // Seeded, like the reference, from the measured pseudorange; the range is
+            // the closed-form Sagnac range (never a first-order scalar Sagnac). The
+            // satellite clock's relativistic periodic term is applied once, after the
+            // iteration: a broadcast clock carries it (`F*e*sqrt(A)*sin(E)`), and a
+            // precise product clock takes the `peph2pos` term the source returns.
+            let t_rx_true = env.t_rx_j2000_s - b_m / C_M_S;
             let mut tau = p_meas_m / C_M_S;
             let mut t_tx = env.t_rx_j2000_s - tau;
             let mut sat_pos = [0.0f64; 3];
@@ -993,17 +1068,17 @@ pub(crate) fn sat_model(
                 t_state = t_tx;
                 let rho0 = geometric_range(sagnac, sat_pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S);
                 tau = rho0 / C_M_S;
-                t_tx = env.t_rx_j2000_s - tau;
+                t_tx = t_rx_true - tau;
                 if (tau - prev_tau).abs() <= CANONICAL_LIGHT_TIME_TOL_S {
                     break;
                 }
                 prev_tau = tau;
             }
-            (sat_pos, dt_sat, tau, group_delay, t_state)
+            (sat_pos, dt_sat, tau, group_delay, t_state, t_tx)
         }
         RangeRecipe::ObservableRoundedMicrosecondFixedIter
         | RangeRecipe::RtkProvidedTxFirstOrderSagnac => unreachable!(
-            "the SPP measurement model runs only the measured-pseudorange or canonical light-time recipe"
+            "the SPP measurement model runs only the RTKLIB placement or a geometric light-time recipe"
         ),
     };
 
@@ -1033,14 +1108,18 @@ pub(crate) fn sat_model(
         None => dt_sat,
     };
 
-    // Sagnac / Earth-rotation rotation over the flight time, selected by recipe.
+    // Sagnac / Earth-rotation correction, selected by recipe: the closed-form rotation
+    // over the flight time turns the satellite into the reception-epoch frame, and
+    // RTKLIB's first-order term leaves it in the transmission-epoch frame.
     let sat_rot = rotate_transmit_satellite(sagnac, sat_pos, tau, OMEGA_E_DOT_RAD_S);
 
-    // Geometric range (post-Sagnac) through the shared substrate.
+    // Geometric range through the shared substrate: RTKLIB `geodist` under the
+    // first-order term, the Euclidean range from the rotated position otherwise.
     let rho = geometric_range(sagnac, sat_rot, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S);
 
-    // Geometry for corrections: az/el from rx and the Sagnac-rotated satellite,
-    // through the recipe-selected frame substrate.
+    // Geometry for corrections: az/el from rx and that satellite position, as RTKLIB
+    // `satazel` takes it from the `geodist` line of sight, through the
+    // recipe-selected frame substrate.
     let g = az_el_from_ecef(frame, rx_ecef_m, sat_rot);
 
     let mut iono_m = 0.0;
@@ -1116,9 +1195,10 @@ pub(crate) fn sat_model(
         az_rad: g.az_rad,
         #[cfg(all(test, sidereon_repo_tests))]
         tau_s: tau,
-        // Bit-identical to the loop's final `t_tx = t_rx - tau` (same operands).
+        // The RTKLIB placement's transmission epoch, or a light-time loop's final
+        // `t_tx = t_rx - tau` (the geometric reference) or `t_rx - b / c - tau` (canonical).
         #[cfg(all(test, sidereon_repo_tests))]
-        t_tx_j2000_s: env.t_rx_j2000_s - tau,
+        t_tx_j2000_s: _t_tx,
         #[cfg(all(test, sidereon_repo_tests))]
         sat_ecef_m: sat_pos,
         #[cfg(all(test, sidereon_repo_tests))]
@@ -1142,6 +1222,17 @@ pub(crate) fn select_sats(
     eph: &dyn EphemerisSource,
     inputs: &SolveInputs,
     model: SppModelRecipe,
+) -> Selection {
+    select_sats_placed(eph, inputs, model, None)
+}
+
+/// [`select_sats`] with the satellites of `placement` placed from its pseudoranges
+/// ([`SatModelEnv::placement_pseudoranges_m`]).
+fn select_sats_placed(
+    eph: &dyn EphemerisSource,
+    inputs: &SolveInputs,
+    model: SppModelRecipe,
+    placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
 ) -> Selection {
     let rx0 = [
         inputs.initial_guess[0],
@@ -1168,6 +1259,7 @@ pub(crate) fn select_sats(
         glonass_channels: &inputs.glonass_channels,
         model,
         pseudorange_code: inputs.pseudorange_code,
+        placement_pseudoranges_m: placement,
     };
     for ob in obs {
         let sat = ob.satellite_id;
@@ -1281,6 +1373,20 @@ pub(crate) fn residual_unweighted(
     inputs: &SolveInputs,
     model: SppModelRecipe,
 ) -> Result<Vec<f64>, GnssSatelliteId> {
+    residual_unweighted_placed(eph, used, obs_by_id, x, inputs, model, None)
+}
+
+/// [`residual_unweighted`] with the satellites of `placement` placed from its
+/// pseudoranges ([`SatModelEnv::placement_pseudoranges_m`]).
+fn residual_unweighted_placed(
+    eph: &dyn EphemerisSource,
+    used: &[GnssSatelliteId],
+    obs_by_id: &[(GnssSatelliteId, f64)],
+    x: &[f64],
+    inputs: &SolveInputs,
+    model: SppModelRecipe,
+    placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
+) -> Result<Vec<f64>, GnssSatelliteId> {
     let rx = [x[0], x[1], x[2]];
     let systems = clock_systems(used);
     let env = SatModelEnv {
@@ -1293,6 +1399,7 @@ pub(crate) fn residual_unweighted(
         glonass_channels: &inputs.glonass_channels,
         model,
         pseudorange_code: inputs.pseudorange_code,
+        placement_pseudoranges_m: placement,
     };
     let mut out = Vec::with_capacity(used.len());
     for &sat in used {
@@ -1346,8 +1453,33 @@ pub fn solve(
     )
 }
 
+/// [`solve`] with the satellites of `placement` placed from its pseudoranges while the
+/// residuals use the observations' ([`SatModelEnv::placement_pseudoranges_m`]): a
+/// differential rover is placed from its raw code and solved from its corrected code.
+pub(crate) fn solve_placed(
+    eph: &dyn EphemerisSource,
+    inputs: &SolveInputs,
+    placement: &BTreeMap<GnssSatelliteId, f64>,
+    with_geodetic: bool,
+) -> Result<ReceiverSolution, SppError> {
+    validate_solve_inputs(inputs)?;
+    solve_inner_placed(
+        eph,
+        inputs,
+        with_geodetic,
+        SppModelRecipe::reference(),
+        TrustRegionSolve::NalgebraLu,
+        Some(placement),
+    )
+}
+
 /// Solve receiver ECEF velocity and clock drift from Doppler rows using SPP
 /// position geometry.
+///
+/// With no pseudoranges to place the satellites by, each satellite is read from the
+/// geometric light-time prediction at the reception epoch ([`velocity::solve`]), a
+/// prediction from a known position. [`solve_with_doppler_velocity`] places them from
+/// the epoch's pseudoranges instead.
 pub fn solve_doppler_velocity(
     source: &dyn ObservableEphemerisSource,
     inputs: &DopplerVelocityInputs,
@@ -1378,6 +1510,12 @@ pub fn solve_doppler_velocity(
 /// Solve SPP position and attach a Doppler velocity/clock-drift estimate when
 /// the Doppler rows are usable.
 ///
+/// Each Doppler satellite is read at the transmission epoch of its pseudorange in
+/// `inputs`, placed as RTKLIB `satposs` places it, the state the position solve used, and
+/// the rows carry the rate of the first-order Sagnac term the code rows' ranges carry. A
+/// Doppler satellite with no pseudorange has no transmission epoch and no row, as RTKLIB
+/// places no satellite without one.
+///
 /// A pseudorange-only or underdetermined Doppler epoch still returns the
 /// receiver position; in that case `receiver.rx_clock_drift_s_s` and `velocity`
 /// are `None`, with the velocity failure retained in `velocity_error`.
@@ -1404,7 +1542,36 @@ where
         doppler_observations.to_vec(),
         inputs.t_rx_j2000_s,
     );
-    match solve_doppler_velocity(eph, &velocity_inputs) {
+    // Each Doppler satellite is read at the transmission epoch its pseudorange places, the
+    // state the position solve used, as RTKLIB `estvel` reads the `satposs` states.
+    let pseudoranges_m: BTreeMap<GnssSatelliteId, f64> = inputs
+        .observations
+        .iter()
+        .map(|obs| (obs.satellite_id, obs.pseudorange_m))
+        .collect();
+    let velocity_observations: Vec<_> = velocity_inputs
+        .observations
+        .iter()
+        .map(|obs| VelocityObservation {
+            satellite_id: obs.satellite_id,
+            value: obs.doppler_hz,
+            carrier_hz: obs.carrier_hz,
+            sat_clock_drift_s_s: obs.sat_clock_drift_s_s,
+        })
+        .collect();
+    let placed = velocity::solve_placed(
+        eph,
+        &velocity_observations,
+        velocity_inputs.receiver_ecef_m,
+        velocity_inputs.t_rx_j2000_s,
+        VelocitySolveOptions {
+            observable: VelocityObservable::Doppler,
+            light_time: velocity_inputs.light_time,
+            sagnac: velocity_inputs.sagnac,
+        },
+        &pseudoranges_m,
+    );
+    match placed {
         Ok(velocity) => {
             receiver.rx_clock_drift_s_s = Some(velocity.clock_drift_s_s);
             Ok(SppDopplerSolution {
@@ -1474,8 +1641,28 @@ fn solve_inner(
     model: SppModelRecipe,
     linear_solve: TrustRegionSolve,
 ) -> Result<ReceiverSolution, SppError> {
+    solve_inner_placed(eph, inputs, with_geodetic, model, linear_solve, None)
+}
+
+/// [`solve_inner`] with the satellites of `placement` placed from its pseudoranges
+/// ([`SatModelEnv::placement_pseudoranges_m`]).
+fn solve_inner_placed(
+    eph: &dyn EphemerisSource,
+    inputs: &SolveInputs,
+    with_geodetic: bool,
+    model: SppModelRecipe,
+    linear_solve: TrustRegionSolve,
+    placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
+) -> Result<ReceiverSolution, SppError> {
     let tracked = Ut1TrackedSource::new(eph);
-    let result = solve_tracked(&tracked, inputs, with_geodetic, model, linear_solve);
+    let result = solve_tracked(
+        &tracked,
+        inputs,
+        with_geodetic,
+        model,
+        linear_solve,
+        placement,
+    );
     if let Some(reason) = tracked.refusal() {
         return Err(SppError::Ut1OutsideCoverage(reason));
     }
@@ -1490,6 +1677,7 @@ fn solve_tracked(
     with_geodetic: bool,
     model: SppModelRecipe,
     linear_solve: TrustRegionSolve,
+    placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
 ) -> Result<ReceiverSolution, SppError> {
     // One pseudorange per satellite. Reject duplicates deterministically (by
     // the smallest repeated id) so the result can never depend on observation
@@ -1507,7 +1695,7 @@ fn solve_tracked(
     // epoch is solved.
     let memo = TransmitStateMemo::new(eph, inputs.observations.len());
     let eph: &dyn EphemerisSource = &memo;
-    let sel = select_sats(eph, inputs, model);
+    let sel = select_sats_placed(eph, inputs, model, placement);
 
     // One receiver-clock parameter per distinct GNSS (a reference clock plus an
     // inter-system bias for each additional system), so the state has
@@ -1537,6 +1725,7 @@ fn solve_tracked(
     let inputs_ref = inputs.clone();
     let obs_ref = obs_by_id.clone();
     let eph_ref = eph;
+    let placement_ref = placement.cloned();
     let n_used = used.len();
 
     // The least-squares solver's residual closure cannot return an error, so an
@@ -1545,7 +1734,15 @@ fn solve_tracked(
     let lost = std::rc::Rc::new(std::cell::Cell::new(None::<GnssSatelliteId>));
     let lost_in = lost.clone();
     let residual = move |x: &DVector<f64>| -> DVector<f64> {
-        match residual_unweighted(eph_ref, &used, &obs_ref, x.as_slice(), &inputs_ref, model) {
+        match residual_unweighted_placed(
+            eph_ref,
+            &used,
+            &obs_ref,
+            x.as_slice(),
+            &inputs_ref,
+            model,
+            placement_ref.as_ref(),
+        ) {
             Ok(r) => DVector::from_vec(r),
             Err(sat) => {
                 lost_in.set(Some(sat));
@@ -1606,13 +1803,14 @@ fn solve_tracked(
                 break;
             }
             // Unweighted post-fit residuals at the current state, in used order.
-            let post = match residual_unweighted(
+            let post = match residual_unweighted_placed(
                 eph,
                 &sel.used,
                 &obs_by_id,
                 report.x.as_slice(),
                 inputs,
                 model,
+                placement,
             ) {
                 Ok(r) => r,
                 Err(satellite) => return Err(SppError::EphemerisLost { satellite }),
@@ -1664,11 +1862,19 @@ fn solve_tracked(
     };
 
     // Post-fit unweighted residuals in used order.
-    let residuals_m = residual_unweighted(eph, &sel.used, &obs_by_id, xs.as_slice(), inputs, model)
-        .map_err(|satellite| SppError::EphemerisLost { satellite })?;
+    let residuals_m = residual_unweighted_placed(
+        eph,
+        &sel.used,
+        &obs_by_id,
+        xs.as_slice(),
+        inputs,
+        model,
+        placement,
+    )
+    .map_err(|satellite| SppError::EphemerisLost { satellite })?;
 
     // DOP from the converged geometry: line-of-sight unit vectors to the
-    // Sagnac-rotated satellite positions, with the final solve weights. A
+    // satellite positions the ranges were formed from, with the final solve weights. A
     // single-system solve uses the 0-ULP four-state cofactor inverse; a
     // multi-system solve uses the general (3 + n_systems) inverse with one clock
     // column per GNSS (a deterministic geometry diagnostic, not a 0-ULP target).
@@ -1688,6 +1894,7 @@ fn solve_tracked(
         glonass_channels: &inputs.glonass_channels,
         model,
         pseudorange_code: inputs.pseudorange_code,
+        placement_pseudoranges_m: placement,
     };
     for &sat in &sel.used {
         let p_meas = obs_by_id
@@ -2194,6 +2401,216 @@ pub(crate) mod test_support {
             p_meas,
             SppIonosphere::Klobuchar(*klobuchar),
         )
+    }
+
+    /// The model of the pseudorange a receiver at `rx` with clock `b_m` measures from `sat`:
+    /// the fixed point `P = p_hat(P)`. The reference model places the transmission epoch
+    /// from the pseudorange itself (`t_rx - P / c - dts`, RTKLIB `satposs`), so a synthetic
+    /// observation is self-consistent only where the pseudorange that places the satellite
+    /// is the one the model predicts. Each pass changes `P` by the range rate over `c`
+    /// times the previous change, about `1e-5`, so a few passes reach it; a model whose
+    /// transmission epoch does not depend on `P` returns after one.
+    pub fn self_consistent_model_for_test(
+        env: &SatModelEnv,
+        sat: GnssSatelliteId,
+        rx: [f64; 3],
+        b_m: f64,
+        klobuchar: &KlobucharCoeffs,
+    ) -> Option<SatModel> {
+        let ionosphere = SppIonosphere::Klobuchar(*klobuchar);
+        let mut p_meas = 22_000_000.0 + b_m;
+        let mut model = sat_model(env, sat, rx, b_m, p_meas, ionosphere)?;
+        for _ in 0..8 {
+            if model.p_hat_m.to_bits() == p_meas.to_bits() {
+                break;
+            }
+            p_meas = model.p_hat_m;
+            model = sat_model(env, sat, rx, b_m, p_meas, ionosphere)?;
+        }
+        assert!(
+            (model.p_hat_m - p_meas).abs() < 1.0e-6,
+            "{sat}: synthetic pseudorange did not settle: {} m from its own placement",
+            model.p_hat_m - p_meas
+        );
+        Some(model)
+    }
+
+    /// [`solve`] with the measurement model `model` in place of the reference one.
+    pub fn solve_with_model_for_test(
+        eph: &dyn EphemerisSource,
+        inputs: &SolveInputs,
+        with_geodetic: bool,
+        model: SppModelRecipe,
+    ) -> Result<ReceiverSolution, SppError> {
+        validate_solve_inputs(inputs)?;
+        solve_inner(
+            eph,
+            inputs,
+            with_geodetic,
+            model,
+            TrustRegionSolve::NalgebraLu,
+        )
+    }
+
+    /// At one state, the SPP model, which places the transmission epoch from the pseudorange
+    /// as RTKLIB `satposs` does and ranges it with `geodist`, differs from the geometric
+    /// light-time model the reference recipe was computed with (`replay_env`) only through
+    /// the transmission epoch:
+    ///
+    /// - its epoch is `satposs`'s, `(t_rx - P / c) - dts` with `dts` the source's clock at
+    ///   `t_rx - P / c`, bit for bit, and its state and clock are read there;
+    /// - its satellite position is the source's at that epoch, not rotated, and its range is
+    ///   `geodist` of it, `|r_s - r_r| + ω (x_s y_r - y_s x_r) / c`, bit for bit;
+    /// - the geometric model read its state at `t_rx - |r_s - r_r| / c`, so the RTKLIB epoch
+    ///   is that one moved by `(|r_s - r_r| - P) / c - dts`: the receiver clock, the media
+    ///   delays and the Sagnac range the geometric light time leaves out. The two epochs are
+    ///   doubles near 6.5e8 s, whose step is 2^-23 s, and the geometric iteration's first
+    ///   step carries a further `rdot · b / c²`; three steps bound both;
+    /// - the range moves by the range rate times the epoch difference, within 0.5 mm: for a
+    ///   GPS orbit RTKLIB's first-order Sagnac term and the closed-form rotation differ by
+    ///   about 0.1 mm;
+    /// - the clock moves by its drift over that time, far below a millimetre;
+    /// - the line of sight turns by at most the Earth's rotation over the flight time
+    ///   applied to the satellite (the replay rotates the satellite into the reception
+    ///   frame, RTKLIB takes elevation and azimuth from the unrotated vector) plus the
+    ///   satellite's motion over the epoch difference, about 6 µrad, and the media delays
+    ///   move with it, within 5 mm down to a few degrees of elevation.
+    // The state is the model's own argument list plus a label.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assert_only_the_transmit_epoch_differs(
+        source: &dyn EphemerisSource,
+        replay_env: &SatModelEnv<'_>,
+        sat: GnssSatelliteId,
+        rx: [f64; 3],
+        b: f64,
+        p_meas: f64,
+        klobuchar: &KlobucharCoeffs,
+        label: &str,
+    ) {
+        let rtklib_env = SatModelEnv {
+            model: SppModelRecipe::reference(),
+            ..*replay_env
+        };
+        let g = sat_model_for_test(replay_env, sat, rx, b, p_meas, klobuchar)
+            .expect("geometric light-time model");
+        let r = sat_model_for_test(&rtklib_env, sat, rx, b, p_meas, klobuchar)
+            .expect("RTKLIB placement model");
+
+        let t_rx = replay_env.t_rx_j2000_s;
+        let clock_epoch = t_rx - p_meas / C_M_S;
+        let dts = EphemerisSource::try_transmit_epoch_clock_s(source, sat, clock_epoch, t_rx)
+            .expect("no refusal")
+            .expect("a clock at t_rx - P / c")
+            .value;
+        let t_tx = clock_epoch - dts;
+        assert_eq!(
+            r.t_tx_j2000_s.to_bits(),
+            t_tx.to_bits(),
+            "{label}: satposs epoch"
+        );
+        assert_eq!(
+            r.clock_epoch_j2000_s.to_bits(),
+            t_tx.to_bits(),
+            "{label}: state epoch"
+        );
+        let pos = EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
+            source, sat, t_tx, t_rx,
+        )
+        .expect("no refusal")
+        .expect("state at the transmission epoch")
+        .value
+        .0;
+        assert_eq!(
+            r.sat_ecef_m.map(f64::to_bits),
+            pos.map(f64::to_bits),
+            "{label}: position"
+        );
+        assert_eq!(
+            r.sat_rot_ecef_m.map(f64::to_bits),
+            pos.map(f64::to_bits),
+            "{label}: not rotated"
+        );
+        let d = [pos[0] - rx[0], pos[1] - rx[1], pos[2] - rx[2]];
+        let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+        let geodist = distance + OMEGA_E_DOT_RAD_S * (pos[0] * rx[1] - pos[1] * rx[0]) / C_M_S;
+        assert_eq!(r.rho_m.to_bits(), geodist.to_bits(), "{label}: geodist");
+
+        let g_d = [
+            g.sat_ecef_m[0] - rx[0],
+            g.sat_ecef_m[1] - rx[1],
+            g.sat_ecef_m[2] - rx[2],
+        ];
+        let g_distance = (g_d[0] * g_d[0] + g_d[1] * g_d[1] + g_d[2] * g_d[2]).sqrt();
+        let dt = r.clock_epoch_j2000_s - g.clock_epoch_j2000_s;
+        let expected_dt = (g_distance - p_meas) / C_M_S - dts;
+        let epoch_step = 2.0_f64.powi(-23);
+        assert!(
+            (dt - expected_dt).abs() <= 3.0 * epoch_step,
+            "{label}: epochs {dt} s apart where the pseudorange puts them {expected_dt} s apart"
+        );
+
+        let selected_position = |t: f64| {
+            EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
+                source, sat, t, t_rx,
+            )
+            .expect("no refusal")
+            .expect("state near the transmission epoch")
+            .value
+            .0
+        };
+        let plus = selected_position(t_tx + 0.5);
+        let minus = selected_position(t_tx - 0.5);
+        let velocity = [plus[0] - minus[0], plus[1] - minus[1], plus[2] - minus[2]];
+        let range_rate = (d[0] * velocity[0] + d[1] * velocity[1] + d[2] * velocity[2]) / distance;
+        let moved = (r.rho_m - g.rho_m) - range_rate * dt;
+        assert!(
+            moved.abs() <= 5.0e-4,
+            "{label}: range moved {} m beyond rdot·dt = {} m",
+            moved,
+            range_rate * dt
+        );
+        assert!(
+            (C_M_S * (r.dt_sat_s - g.dt_sat_s)).abs() <= 1.0e-5,
+            "{label}: clock"
+        );
+        let speed =
+            (velocity[0] * velocity[0] + velocity[1] * velocity[1] + velocity[2] * velocity[2])
+                .sqrt();
+        let tau = g_distance / C_M_S;
+        let turn_rad = (OMEGA_E_DOT_RAD_S * tau * libm::hypot(pos[0], pos[1]) + speed * dt.abs())
+            / distance
+            * 1.01
+            + 1.0e-9;
+        assert!(
+            (r.el_rad - g.el_rad).abs() <= turn_rad,
+            "{label}: elevation moved {} rad beyond the {turn_rad} rad the line of sight turns",
+            r.el_rad - g.el_rad
+        );
+        let az_diff = (r.az_rad - g.az_rad + std::f64::consts::PI)
+            .rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI;
+        assert!(
+            (az_diff * libm::cos(g.el_rad)).abs() <= turn_rad,
+            "{label}: azimuth moved {az_diff} rad beyond the {turn_rad} rad the line of sight turns"
+        );
+        let media_tolerance_m = 5.0e-3;
+        assert!(
+            (r.iono_m - g.iono_m).abs() <= media_tolerance_m,
+            "{label}: iono moved {} m",
+            r.iono_m - g.iono_m
+        );
+        assert!(
+            (r.tropo_m - g.tropo_m).abs() <= media_tolerance_m,
+            "{label}: tropo moved {} m",
+            r.tropo_m - g.tropo_m
+        );
+        let p_hat_moved = (r.p_hat_m - g.p_hat_m) - range_rate * dt;
+        let media_moved = (r.iono_m - g.iono_m) + (r.tropo_m - g.tropo_m);
+        assert!(
+            (p_hat_moved - media_moved).abs() <= 6.0e-4,
+            "{label}: p_hat moved {} m beyond rdot·dt and the media delays",
+            p_hat_moved - media_moved
+        );
     }
 
     pub fn sat_model_with_ionosphere_for_test(

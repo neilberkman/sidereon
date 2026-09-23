@@ -66,6 +66,9 @@ workspace = true
 cc = "1"
 
 [dev-dependencies]
+# The crate's own tests build it with the test-only replay copies of the old
+# measurement models (see the `test-replays` feature).
+sidereon-core = { path = ".", features = ["test-replays"] }
 approx = "0.5"
 # Reads the hex-float golden vectors for the bit-exact parity tests.
 serde_json = { version = "1", features = ["preserve_order"] }
@@ -94,3 +97,8 @@ sgp4-debug-oracle = []
 # installed library never reacts to the integration suite's environment
 # variables.
 exact-cache-test-failpoints = []
+# Test-only replay copies of the measurement models the external reference
+# fixtures were computed with (geometric light time, whole-microsecond transmit
+# epochs). The crate's own tests enable it through the dev-dependency on itself;
+# a build that depends on the crate never compiles them. Off by default.
+test-replays = []

@@ -10,7 +10,8 @@ use crate::astro::math::vec3;
 use crate::constants::C_M_S;
 use crate::id::GnssSatelliteId;
 use crate::observables::{
-    predict, ObservableEphemerisSource, ObservablesError, ObservablesInputErrorKind, PredictOptions,
+    pseudorange_transmit_epoch_j2000_s, pseudorange_transmit_geometry, ObservableEphemerisSource,
+    ObservablesError, ObservablesInputErrorKind, TransmitGeometry,
 };
 use crate::spp::{self, EphemerisSource, Observation, ReceiverSolution, SolveInputs, SppError};
 use crate::validate;
@@ -110,9 +111,11 @@ impl From<SppError> for DgnssError {
 /// Compute per-satellite pseudorange corrections from a surveyed base station.
 ///
 /// The correction is `PRC = pr_base - (range_base - c * sat_clock)`, with the
-/// range and satellite clock coming from the same light-time/Sagnac observable
-/// predictor used by the SPP pipeline, and the satellite clock less the source's
-/// single-frequency group delay, as the SPP model forms it. Observations with malformed satellite
+/// range and satellite clock formed as the SPP model forms them and as RTKLIB
+/// `zdres` forms them for a base station: the transmission epoch placed from the
+/// base pseudorange as RTKLIB `satposs` places it, the `geodist` range with the
+/// Sagnac term, and the satellite clock at that epoch less the source's
+/// single-frequency group delay. Observations with malformed satellite
 /// tokens or unavailable orbit/clock data are skipped, matching Sidereon'
 /// historical "cannot correct this satellite" behavior. A state the source
 /// refuses because producing it reads UT1 outside the UT1 table under a strict
@@ -167,22 +170,21 @@ fn tracked_pseudorange_corrections(
         let Some(sat) = sat_from_token(&obs.satellite_id) else {
             continue;
         };
-        let pred = match predict(
-            source,
-            sat,
-            base_position_m,
-            t_rx_j2000_s,
-            PredictOptions::default(),
-        ) {
-            Ok(pred) => pred,
-            Err(ObservablesError::InvalidInput { field, kind }) => {
-                return Err(invalid_observable_input(field, kind));
-            }
-            Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason))) => {
-                return Err(DgnssError::Ut1OutsideCoverage(reason));
-            }
-            Err(_) => continue,
-        };
+        // The base pseudorange places its transmission epoch as RTKLIB `satposs` places
+        // it, and the state there is ranged with `geodist`, as RTKLIB `zdres` models a
+        // base station.
+        let (pred, group_delay) =
+            match base_transmit_geometry(source, sat, base_position_m, t_rx_j2000_s, pseudorange_m)
+            {
+                Ok(placed) => placed,
+                Err(ObservablesError::InvalidInput { field, kind }) => {
+                    return Err(invalid_observable_input(field, kind));
+                }
+                Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason))) => {
+                    return Err(DgnssError::Ut1OutsideCoverage(reason));
+                }
+                Err(_) => continue,
+            };
         let Some(sat_clock_s) = pred.sat_clock_s else {
             continue;
         };
@@ -204,11 +206,10 @@ fn tracked_pseudorange_corrections(
             crate::spp::ClockRelativity::Term(relativity_s) => sat_clock_s + relativity_s,
             crate::spp::ClockRelativity::Unavailable => continue,
         };
-        let sat_clock_s =
-            match source.single_frequency_group_delay_s(sat, pred.transmit_time_j2000_s) {
-                Some(group_delay_s) => sat_clock_s - group_delay_s,
-                None => sat_clock_s,
-            };
+        let sat_clock_s = match group_delay {
+            Some(group_delay_s) => sat_clock_s - group_delay_s,
+            None => sat_clock_s,
+        };
         let modeled_base_m =
             validate::finite(geometric_range_m - C_M_S * sat_clock_s, "modeled_base_m")
                 .map_err(dgnss_invalid_input)?;
@@ -218,6 +219,28 @@ fn tracked_pseudorange_corrections(
         corrections.insert(obs.satellite_id.clone(), correction_m);
     }
     Ok(corrections)
+}
+
+/// Transmit-time geometry of a base pseudorange, with the single-frequency group delay of
+/// the record it comes from: the transmission epoch placed from the pseudorange
+/// ([`pseudorange_transmit_epoch_j2000_s`]) and the `geodist` range there with the Sagnac
+/// term ([`pseudorange_transmit_geometry`]), the record selected at the reception epoch as
+/// RTKLIB `satposs` selects it.
+fn base_transmit_geometry(
+    source: &dyn ObservableEphemerisSource,
+    sat: GnssSatelliteId,
+    base_position_m: [f64; 3],
+    t_rx_j2000_s: f64,
+    pseudorange_m: f64,
+) -> Result<(TransmitGeometry, Option<f64>), ObservablesError> {
+    let t_tx = pseudorange_transmit_epoch_j2000_s(source, sat, t_rx_j2000_s, pseudorange_m)?;
+    let geometry =
+        pseudorange_transmit_geometry(source, sat, base_position_m, t_rx_j2000_s, t_tx, true)?;
+    let group_delay = source
+        .try_observable_state_group_delay_selected_at_j2000_s(sat, t_tx, t_rx_j2000_s)?
+        .value
+        .1;
+    Ok((geometry, group_delay))
 }
 
 /// Apply base pseudorange corrections to rover observations by satellite token.
@@ -263,6 +286,12 @@ pub fn apply_corrections(
 /// rover pseudoranges with ionosphere/troposphere disabled because the
 /// differential already removed common path delays.
 ///
+/// Each rover satellite's transmission epoch is placed from the rover's raw
+/// pseudorange, as RTKLIB `rtkpos` calls `satposs` with the rover's own
+/// observations; the corrected pseudorange forms only the residual. The correction
+/// carries the base receiver clock, so placing from the corrected code would put each
+/// satellite that clock's worth of its motion away from where the rover's signal left it.
+///
 /// A UT1 refusal fails the solve: [`DgnssError::Ut1OutsideCoverage`] for a
 /// base satellite, [`SppError::Ut1OutsideCoverage`] for a rover satellite. A
 /// departure accepted under a permissive UT1 policy, on either side, is
@@ -297,8 +326,14 @@ where
         })
         .collect();
     solve_inputs.corrections = spp::Corrections::NONE;
+    let placement: BTreeMap<GnssSatelliteId, f64> = rover_observations
+        .iter()
+        .filter_map(|obs| {
+            sat_from_token(&obs.satellite_id).map(|satellite_id| (satellite_id, obs.pseudorange_m))
+        })
+        .collect();
 
-    let mut solution = spp::solve(source, &solve_inputs, with_geodetic)?;
+    let mut solution = spp::solve_placed(source, &solve_inputs, &placement, with_geodetic)?;
     // The rover solve reports its own departure; a base-correction departure
     // also shaped this position.
     solution.metadata.ut1_degraded = solution.metadata.ut1_degraded.or(corrections.degraded);

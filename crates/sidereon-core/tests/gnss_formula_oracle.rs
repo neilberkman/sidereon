@@ -5,7 +5,9 @@ use sidereon_core::astro::time::model::JulianDateSplit;
 use sidereon_core::astro::time::split_julian_date;
 use sidereon_core::constants::F_L1_HZ;
 use sidereon_core::ephemeris::Sp3;
-use sidereon_core::observables::{j2000_seconds_from_split, predict, PredictOptions};
+use sidereon_core::observables::{
+    j2000_seconds_from_split, predict, rounded_microsecond_replay, PredictOptions,
+};
 use sidereon_core::quality::{
     chi2_inv, pseudorange_variance, sigmas, weight_vector, PseudorangeVarianceModel,
     PseudorangeVarianceOptions, WeightEntry,
@@ -326,8 +328,26 @@ fn observable_formula_cases_match_golden_bits() {
         options.sagnac = case["sagnac"].as_bool().expect("sagnac");
         options.carrier_hz = F_L1_HZ;
 
-        let predicted = predict(&sp3, sat, receiver_ecef_m, t_rx_j2000_s, options)
+        // The oracle rounded the transmission epoch to whole microseconds; the replay
+        // does too. The public predictor keeps every bit of the flight time, and differs
+        // from the replay by the range rate times the difference of the two epochs, which
+        // is under half a microsecond.
+        let predicted =
+            rounded_microsecond_replay::predict(&sp3, sat, receiver_ecef_m, t_rx_j2000_s, options)
+                .unwrap_or_else(|err| panic!("observable case {index} {sat}: {err}"));
+        let exact = predict(&sp3, sat, receiver_ecef_m, t_rx_j2000_s, options)
             .unwrap_or_else(|err| panic!("observable case {index} {sat}: {err}"));
+        let epoch_shift_s = exact.transmit_time_j2000_s - predicted.transmit_time_j2000_s;
+        assert!(
+            epoch_shift_s.abs() <= 0.5e-6 + 2.0_f64.powi(-23),
+            "observable case {index}: epochs {epoch_shift_s} s apart"
+        );
+        let moved_m = (exact.geometric_range_m - predicted.geometric_range_m)
+            - predicted.range_rate_m_s * epoch_shift_s;
+        assert!(
+            moved_m.abs() <= 1.0e-6,
+            "observable case {index}: range moved {moved_m} m beyond the epoch shift"
+        );
 
         assert_bits(
             predicted.geometric_range_m,

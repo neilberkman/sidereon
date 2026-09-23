@@ -1390,6 +1390,29 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for DeclaredScenarioSource<'_,
         self.source
             .try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
     }
+
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        self.source
+            .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<f64>>, crate::Error> {
+        self.source
+            .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
+    }
 }
 
 impl<E: ObservableEphemerisSource + ?Sized> ObservableEphemerisSource
@@ -1437,6 +1460,37 @@ impl<E: ObservableEphemerisSource + ?Sized> ObservableEphemerisSource
         t_j2000_s: f64,
     ) -> Result<crate::astro::time::Validated<ObservableState>, ObservablesError> {
         self.source.try_observable_state_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn try_observable_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<Option<f64>>, ObservablesError> {
+        self.source
+            .try_observable_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn try_observable_state_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<(ObservableState, Option<f64>)>, ObservablesError>
+    {
+        self.source
+            .try_observable_state_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn velocity_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        self.source
+            .velocity_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
     }
 
     // The declared identity does not change what the source computes, so every
@@ -1516,6 +1570,38 @@ impl<'a, E> SourceTranscript<'a, E> {
     /// Fold one single-frequency group-delay query and its answer into the digest.
     fn transcribe_group_delay(&self, sat: GnssSatelliteId, t_j2000_s: f64, result: Option<f64>) {
         self.transcribe_optional(0x4752_4f55_5044_4c59, sat, t_j2000_s, result);
+    }
+
+    /// Fold one query at `t_j2000_s` with the record selected at `selection_j2000_s`,
+    /// under `tag`, and its answer (position, clock and group delay, or none) into the
+    /// digest.
+    fn transcribe_selected(
+        &self,
+        tag: u64,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+        answer: Option<(&[f64], Option<f64>)>,
+    ) {
+        let mut hash = self.hash_query(tag, sat, t_j2000_s);
+        hash_f64(&mut hash, selection_j2000_s);
+        match answer {
+            Some((values, optional)) => {
+                hash_u64(&mut hash, 1);
+                for value in values {
+                    hash_f64(&mut hash, *value);
+                }
+                match optional {
+                    Some(value) => {
+                        hash_u64(&mut hash, 1);
+                        hash_f64(&mut hash, value);
+                    }
+                    None => hash_u64(&mut hash, 0),
+                }
+            }
+            None => hash_u64(&mut hash, 0),
+        }
+        self.store_hash(hash);
     }
 
     /// Fold one optional-value query, under `tag`, and its answer into the digest.
@@ -1632,7 +1718,76 @@ impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
             degraded: state.degraded,
         }))
     }
+
+    /// Transcribed with its own tag and the selection epoch, a refusal as no state.
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<
+        Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>,
+        crate::Error,
+    > {
+        let result = self
+            .source
+            .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s);
+        match &result {
+            Ok(Some(state)) => {
+                let (position, clock, group_delay) = state.value;
+                let values = [position[0], position[1], position[2], clock];
+                self.transcribe_selected(
+                    SELECTED_STATE_TAG,
+                    sat,
+                    t_j2000_s,
+                    selection_j2000_s,
+                    Some((&values, group_delay)),
+                );
+            }
+            Ok(None) | Err(_) => self.transcribe_selected(
+                SELECTED_STATE_TAG,
+                sat,
+                t_j2000_s,
+                selection_j2000_s,
+                None,
+            ),
+        }
+        result
+    }
+
+    /// Transcribed with its own tag and the selection epoch, a refusal as no clock.
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<f64>>, crate::Error> {
+        let result = self
+            .source
+            .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s);
+        let value = match &result {
+            Ok(Some(clock)) => Some(clock.value),
+            Ok(None) | Err(_) => None,
+        };
+        self.transcribe_selected(
+            TRANSMIT_EPOCH_CLOCK_TAG,
+            sat,
+            t_j2000_s,
+            selection_j2000_s,
+            value
+                .as_ref()
+                .map(|clock| (std::slice::from_ref(clock), None)),
+        );
+        result
+    }
 }
+
+/// Transcript tag of a transmit-epoch clock query.
+const TRANSMIT_EPOCH_CLOCK_TAG: u64 = 0x5458_434c_4f43_4b53;
+/// Transcript tag of a state query with the record selected at another epoch.
+const SELECTED_STATE_TAG: u64 = 0x5345_4c53_5441_5445;
+/// Transcript tag of a velocity query with the record selected at another epoch.
+const SELECTED_VELOCITY_TAG: u64 = 0x5345_4c56_454c_4f43;
 
 impl<E: ObservableEphemerisSource> ObservableEphemerisSource for SourceTranscript<'_, E> {
     fn ssr_corrections(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
@@ -1688,6 +1843,99 @@ impl<E: ObservableEphemerisSource> ObservableEphemerisSource for SourceTranscrip
             }
         }
         self.store_hash(hash);
+        Some(result)
+    }
+
+    /// Transcribed with the tag of [`EphemerisSource::try_transmit_epoch_clock_s`] and the
+    /// selection epoch, a failure as no clock.
+    fn try_observable_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<Option<f64>>, ObservablesError> {
+        let result =
+            self.source
+                .try_observable_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s);
+        let value = match &result {
+            Ok(clock) => clock.value,
+            Err(_) => None,
+        };
+        self.transcribe_selected(
+            TRANSMIT_EPOCH_CLOCK_TAG,
+            sat,
+            t_j2000_s,
+            selection_j2000_s,
+            value
+                .as_ref()
+                .map(|clock| (std::slice::from_ref(clock), None)),
+        );
+        result
+    }
+
+    /// Transcribed with the tag of
+    /// [`EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s`] and the
+    /// selection epoch, a failure as no state and an absent clock as NaN.
+    fn try_observable_state_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<(ObservableState, Option<f64>)>, ObservablesError>
+    {
+        let result = self
+            .source
+            .try_observable_state_group_delay_selected_at_j2000_s(
+                sat,
+                t_j2000_s,
+                selection_j2000_s,
+            );
+        match &result {
+            Ok(state) => {
+                let (observable, group_delay) = state.value;
+                let values = [
+                    observable.position_ecef_m[0],
+                    observable.position_ecef_m[1],
+                    observable.position_ecef_m[2],
+                    observable.clock_s.unwrap_or(f64::NAN),
+                ];
+                self.transcribe_selected(
+                    SELECTED_STATE_TAG,
+                    sat,
+                    t_j2000_s,
+                    selection_j2000_s,
+                    Some((&values, group_delay)),
+                );
+            }
+            Err(_) => self.transcribe_selected(
+                SELECTED_STATE_TAG,
+                sat,
+                t_j2000_s,
+                selection_j2000_s,
+                None,
+            ),
+        }
+        result
+    }
+
+    /// Transcribed with its own tag and the selection epoch, a failure as no velocity.
+    fn velocity_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        let result = self
+            .source
+            .velocity_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)?;
+        let answer = result.as_ref().ok();
+        self.transcribe_selected(
+            SELECTED_VELOCITY_TAG,
+            sat,
+            t_j2000_s,
+            selection_j2000_s,
+            answer.map(|velocity| (velocity.as_slice(), None)),
+        );
         Some(result)
     }
 
@@ -2238,6 +2486,7 @@ where
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
     };
     let ionosphere = match &scenario.error_budget.ionosphere {
         ScenarioIonosphereModel::Off => SppIonosphere::Klobuchar(KlobucharCoeffs {

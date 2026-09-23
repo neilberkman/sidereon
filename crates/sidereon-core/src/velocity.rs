@@ -5,8 +5,16 @@
 //! pseudorange-rate or Doppler observations; the core builds the deterministic
 //! normal equations and returns receiver velocity, clock drift, residuals, and
 //! used-satellite ordering.
+//!
+//! [`solve`] reads each satellite from the geometric light-time prediction at the
+//! reception epoch ([`crate::observables::predict`]): it serves range rates with no
+//! pseudorange to place the satellite by, as a prediction from a known position. The SPP
+//! solve with Doppler ([`crate::spp::solve_with_doppler_velocity`]) places each Doppler
+//! satellite at the transmission epoch of its pseudorange instead, as RTKLIB `satposs`
+//! places it and as the position solve read it, with the first-order Sagnac rate term,
+//! as RTKLIB `estvel` forms its rows from the same satellite states.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::astro::math::linear::{
     dot4, invert_4x4_cofactor, mat4_vec4, normal_matrix_4_unweighted_row_outer,
@@ -194,7 +202,52 @@ pub fn solve(
     validate_receiver_state(receiver_ecef_m, t_rx_j2000_s)?;
     ensure_no_duplicates(observations)?;
     validate_observations(observations)?;
-    let rows = build_rows(source, observations, receiver_ecef_m, t_rx_j2000_s, options)?;
+    let rows = build_rows(
+        source,
+        observations,
+        receiver_ecef_m,
+        t_rx_j2000_s,
+        options,
+        None,
+    )?;
+    solve_rows(rows)
+}
+
+/// [`solve`] with each satellite placed at the transmission epoch of its pseudorange in
+/// `pseudoranges_m`, as RTKLIB `satposs` places it
+/// ([`crate::observables::pseudorange_transmit_satellite_state`]), where
+/// `options.light_time` is on. The row predicts the rate of the range the SPP code row
+/// predicts: the line-of-sight rate of the unrotated state, with the rate of the
+/// first-order Sagnac term where `options.sagnac` is on, whose receiver-velocity part
+/// enters the design row. A satellite with no pseudorange there has no transmission epoch
+/// and no row, as RTKLIB `satposs` places no satellite without one.
+pub(crate) fn solve_placed(
+    source: &dyn ObservableEphemerisSource,
+    observations: &[VelocityObservation],
+    receiver_ecef_m: [f64; 3],
+    t_rx_j2000_s: f64,
+    options: VelocitySolveOptions,
+    pseudoranges_m: &BTreeMap<GnssSatelliteId, f64>,
+) -> Result<VelocitySolution, VelocityError> {
+    if observations.is_empty() {
+        return Err(VelocityError::NoObservations);
+    }
+
+    validate_receiver_state(receiver_ecef_m, t_rx_j2000_s)?;
+    ensure_no_duplicates(observations)?;
+    validate_observations(observations)?;
+    let rows = build_rows(
+        source,
+        observations,
+        receiver_ecef_m,
+        t_rx_j2000_s,
+        options,
+        options.light_time.then_some(pseudoranges_m),
+    )?;
+    solve_rows(rows)
+}
+
+fn solve_rows(rows: Vec<Row>) -> Result<VelocitySolution, VelocityError> {
     if rows.len() < 4 {
         return Err(VelocityError::TooFewSatellites {
             used: rows.len(),
@@ -280,6 +333,7 @@ fn build_rows(
     receiver_ecef_m: [f64; 3],
     t_rx_j2000_s: f64,
     options: VelocitySolveOptions,
+    pseudoranges_m: Option<&BTreeMap<GnssSatelliteId, f64>>,
 ) -> Result<Vec<Row>, VelocityError> {
     let predict_options = PredictOptions {
         carrier_hz: F_L1_HZ,
@@ -311,19 +365,37 @@ fn build_rows(
             }
         };
 
-        let Ok(predicted) = predict(
-            source,
-            obs.satellite_id,
-            receiver_ecef_m,
-            t_rx_j2000_s,
-            predict_options,
-        ) else {
-            continue;
+        let (los_unit, predicted_range_rate_m_s, sagnac_design) = match pseudoranges_m {
+            None => {
+                let Ok(predicted) = predict(
+                    source,
+                    obs.satellite_id,
+                    receiver_ecef_m,
+                    t_rx_j2000_s,
+                    predict_options,
+                ) else {
+                    continue;
+                };
+                (predicted.los_unit, predicted.range_rate_m_s, [0.0; 2])
+            }
+            Some(pseudoranges_m) => {
+                let Some(placed) = placed_satellite(
+                    source,
+                    obs.satellite_id,
+                    receiver_ecef_m,
+                    t_rx_j2000_s,
+                    options.sagnac,
+                    pseudoranges_m,
+                ) else {
+                    continue;
+                };
+                placed
+            }
         };
 
-        let [ex, ey, ez] = predicted.los_unit;
-        let y = rho_dot_m_s - predicted.range_rate_m_s + C_M_S * obs.sat_clock_drift_s_s;
-        if ![ex, ey, ez, predicted.range_rate_m_s, y]
+        let [ex, ey, ez] = los_unit;
+        let y = rho_dot_m_s - predicted_range_rate_m_s + C_M_S * obs.sat_clock_drift_s_s;
+        if ![ex, ey, ez, predicted_range_rate_m_s, y]
             .iter()
             .all(|value| value.is_finite())
         {
@@ -334,12 +406,62 @@ fn build_rows(
         }
         rows.push(Row {
             sat: obs.satellite_id,
-            h: [-ex, -ey, -ez, 1.0],
+            h: [-ex + sagnac_design[0], -ey + sagnac_design[1], -ez, 1.0],
             y,
         });
     }
 
     Ok(rows)
+}
+
+/// Line of sight, predicted range rate at zero receiver velocity, and the Sagnac rate
+/// term's receiver-velocity coefficients `omega / c · (-rs_y, rs_x)` for `sat` placed at
+/// the transmission epoch of its pseudorange; `None` where it has no pseudorange or the
+/// source cannot place it.
+fn placed_satellite(
+    source: &dyn ObservableEphemerisSource,
+    sat: GnssSatelliteId,
+    receiver_ecef_m: [f64; 3],
+    t_rx_j2000_s: f64,
+    sagnac: bool,
+    pseudoranges_m: &BTreeMap<GnssSatelliteId, f64>,
+) -> Option<([f64; 3], f64, [f64; 2])> {
+    let pseudorange_m = *pseudoranges_m.get(&sat)?;
+    let t_tx = crate::observables::pseudorange_transmit_epoch_j2000_s(
+        source,
+        sat,
+        t_rx_j2000_s,
+        pseudorange_m,
+    )
+    .ok()?;
+    let state = crate::observables::pseudorange_transmit_satellite_state(
+        source,
+        sat,
+        receiver_ecef_m,
+        t_rx_j2000_s,
+        t_tx,
+        sagnac,
+    )
+    .ok()?;
+    let los_rate = vec3::dot3(state.los_unit, state.velocity_m_s);
+    if !sagnac {
+        return Some((state.los_unit, los_rate, [0.0; 2]));
+    }
+    let omega_over_c = crate::constants::OMEGA_E_DOT_RAD_S / C_M_S;
+    let sagnac_rate = crate::geometry::range::sagnac_range_rate_first_order(
+        state.position_ecef_m,
+        state.velocity_m_s,
+        receiver_ecef_m,
+        [0.0; 3],
+        crate::constants::OMEGA_E_DOT_RAD_S,
+        C_M_S,
+    );
+    let rs = state.position_ecef_m;
+    Some((
+        state.los_unit,
+        los_rate + sagnac_rate,
+        [-omega_over_c * rs[1], omega_over_c * rs[0]],
+    ))
 }
 
 // Index loops pin the normal-equation accumulation order.
@@ -528,12 +650,39 @@ mod tests {
         )
         .expect("solve velocity");
 
+        // Re-frozen when prediction stopped rounding the transmission epoch to whole
+        // microseconds: the synthetic range rates moved in their last bits, and the solved
+        // velocity with them, by about 2e-14 m/s. One array is compared, so a mismatch
+        // prints every value.
+        let bits = solution
+            .velocity_m_s
+            .iter()
+            .chain([solution.speed_m_s, solution.clock_drift_s_s].iter())
+            .copied()
+            .chain(solution.residuals_m_s.iter().map(|(_, residual)| *residual))
+            .map(f64::to_bits)
+            .collect::<Vec<_>>();
         assert_eq!(
-            solution.velocity_m_s.map(f64::to_bits),
-            [0x4028000000000000, 0xc01c000000000016, 0x4007ffffffffff00]
+            bits,
+            [
+                0x4027ffffffffffec,
+                0xc01bffffffffffe4,
+                0x4007ffffffffff20,
+                0x402c6ce322982a1c,
+                0x3e112e0be826d27b,
+                0x3d0a000000000000,
+                0x0000000000000000,
+                0xbd24800000000000,
+                0xbd23000000000000,
+                0xbd04000000000000,
+                0x3d26800000000000,
+                0xbd10000000000000,
+                0x3d28000000000000,
+                0xbd00000000000000,
+            ],
+            "velocity, speed, clock drift, residual bits: {:#x?}",
+            bits
         );
-        assert_eq!(solution.speed_m_s.to_bits(), 0x402c6ce322982a37);
-        assert_eq!(solution.clock_drift_s_s.to_bits(), 0x3e112e0be826d2ee);
         assert_eq!(
             solution
                 .used_sats
@@ -541,24 +690,6 @@ mod tests {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
             ["G07", "G08", "G10", "G16", "G18", "G20", "G21", "G26", "G27"]
-        );
-        assert_eq!(
-            solution
-                .residuals_m_s
-                .iter()
-                .map(|(_, residual)| residual.to_bits())
-                .collect::<Vec<_>>(),
-            [
-                0xbd01000000000000,
-                0xbd24000000000000,
-                0x3cfc000000000000,
-                0xbd16000000000000,
-                0xbd1a800000000000,
-                0x3cf0000000000000,
-                0xbd14000000000000,
-                0x3d31800000000000,
-                0x3d18000000000000,
-            ]
         );
     }
 
@@ -606,31 +737,39 @@ mod tests {
 
         assert_eq!(
             range_rate.velocity_m_s.map(f64::to_bits),
-            [0x4028000000000000, 0xc01c000000000016, 0x4007ffffffffff00]
+            [0x4027ffffffffffec, 0xc01bffffffffffe4, 0x4007ffffffffff20]
         );
+        // Re-frozen when prediction stopped rounding the transmission epoch to whole
+        // microseconds: the synthetic Doppler moved in its last bits, and the solve with it.
+        // One array is compared, so a mismatch prints every value.
+        let doppler_bits = doppler
+            .velocity_m_s
+            .iter()
+            .chain([doppler.speed_m_s, doppler.clock_drift_s_s].iter())
+            .copied()
+            .chain(doppler.residuals_m_s.iter().map(|(_, residual)| *residual))
+            .map(f64::to_bits)
+            .collect::<Vec<_>>();
         assert_eq!(
-            doppler.velocity_m_s.map(f64::to_bits),
-            [0x402800000000000c, 0xc01c00000000000f, 0x4007ffffffffff60]
-        );
-        assert_eq!(doppler.speed_m_s.to_bits(), 0x402c6ce322982a44);
-        assert_eq!(doppler.clock_drift_s_s.to_bits(), 0x3e112e0be826d4b8);
-        assert_eq!(
-            doppler
-                .residuals_m_s
-                .iter()
-                .map(|(_, residual)| residual.to_bits())
-                .collect::<Vec<_>>(),
+            doppler_bits,
             [
-                0x3d24c00000000000,
-                0xbd2b000000000000,
-                0xbd00000000000000,
-                0xbd00000000000000,
-                0xbd0b000000000000,
-                0x3d06000000000000,
-                0x0000000000000000,
-                0x3d40c00000000000,
-                0x3d22000000000000,
-            ]
+                0x4027fffffffffff8,
+                0xc01bffffffffffe8,
+                0x4007ffffffffff40,
+                0x402c6ce322982a29,
+                0x3e112e0be826d445,
+                0x3d27800000000000,
+                0xbd14000000000000,
+                0xbd2c800000000000,
+                0xbd26000000000000,
+                0xbd1c800000000000,
+                0x3d30200000000000,
+                0xbd16000000000000,
+                0x3d3a800000000000,
+                0xbd10000000000000,
+            ],
+            "Doppler velocity, speed, clock drift, residual bits: {:#x?}",
+            doppler_bits
         );
     }
 

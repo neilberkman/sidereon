@@ -3169,10 +3169,24 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Result<Validated<Option<PositionClockGroupDelay>>> {
+        self.corrected_state_with_group_delay_checked_selected(sat, t_j2000_s, t_j2000_s)
+    }
+
+    /// [`Self::corrected_state_with_group_delay_checked`] with the broadcast record selected
+    /// at `selection_j2000_s`, the observation epoch RTKLIB `satpos_ssr` selects at
+    /// (`seleph(teph, ...)`): the record the orbit correction's IODE names nearest that
+    /// epoch, or for a broadcast fallback the record the broadcast store selects there.
+    /// The corrections themselves are applied at `t_j2000_s`.
+    pub fn corrected_state_with_group_delay_checked_selected(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Validated<Option<PositionClockGroupDelay>>> {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             return Ok(Validated::ok(None));
         }
-        match self.ssr_corrected_state(sat, t_j2000_s) {
+        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s) {
             Ok(state) => Ok(Validated {
                 value: Some((state.position_m, state.clock_s, state.group_delay_s)),
                 degraded: state.ut1_degraded,
@@ -3180,9 +3194,11 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             Err(SsrStateUnavailable::Ut1OutsideCoverage(reason)) => {
                 Err(Error::Ut1OutsideCoverage(reason))
             }
-            Err(_) => Ok(Validated::ok(
-                self.broadcast_fallback_with_group_delay(sat, t_j2000_s),
-            )),
+            Err(_) => Ok(Validated::ok(self.broadcast_fallback_with_group_delay(
+                sat,
+                t_j2000_s,
+                selection_j2000_s,
+            ))),
         }
     }
 
@@ -3211,7 +3227,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             return Err(SsrStateUnavailable::ExcludedByHas);
         }
-        self.ssr_corrected_state(sat, t_j2000_s)
+        self.ssr_corrected_state(sat, t_j2000_s, t_j2000_s)
             .map(|state| state.solution)
     }
 
@@ -3261,19 +3277,40 @@ impl<'a> SsrCorrectedEphemeris<'a> {
     /// is the velocity of the broadcast record the fallback uses. It never differences
     /// across a correction reference epoch or between an SSR and a broadcast state.
     pub fn corrected_velocity(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<[f64; 3]> {
-        match self.velocity_source(sat, t_j2000_s) {
-            VelocitySource::Ssr => self.ssr_broadcast_velocity(sat, t_j2000_s),
-            VelocitySource::Broadcast => self.broadcast.selected_record_velocity(sat, t_j2000_s),
+        self.corrected_velocity_selected(sat, t_j2000_s, t_j2000_s)
+    }
+
+    /// [`Self::corrected_velocity`] with the broadcast record selected at
+    /// `selection_j2000_s`, as [`Self::corrected_state_with_group_delay_checked_selected`]
+    /// selects it.
+    fn corrected_velocity_selected(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
+        match self.velocity_source(sat, t_j2000_s, selection_j2000_s) {
+            VelocitySource::Ssr => self.ssr_broadcast_velocity(sat, t_j2000_s, selection_j2000_s),
+            VelocitySource::Broadcast => {
+                self.broadcast
+                    .selected_record_velocity_at(sat, t_j2000_s, selection_j2000_s)
+            }
             VelocitySource::None | VelocitySource::Ut1Refused(_) => None,
         }
     }
 
-    /// Which state [`Self::corrected_state`] returns for `sat` at `t_j2000_s`.
-    fn velocity_source(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> VelocitySource {
+    /// Which state [`Self::corrected_state`] returns for `sat` at `t_j2000_s`, with the
+    /// broadcast record selected at `selection_j2000_s`.
+    fn velocity_source(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> VelocitySource {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             return VelocitySource::None;
         }
-        match self.ssr_corrected_state(sat, t_j2000_s) {
+        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s) {
             Ok(_) => return VelocitySource::Ssr,
             Err(SsrStateUnavailable::Ut1OutsideCoverage(reason)) => {
                 return VelocitySource::Ut1Refused(reason)
@@ -3281,7 +3318,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             Err(_) => {}
         }
         if self
-            .broadcast_fallback_after_failure(sat, t_j2000_s)
+            .broadcast_fallback_with_group_delay(sat, t_j2000_s, selection_j2000_s)
             .is_some()
         {
             VelocitySource::Broadcast
@@ -3292,9 +3329,14 @@ impl<'a> SsrCorrectedEphemeris<'a> {
 
     /// Velocity of the broadcast record selected by the SSR orbit correction's IODE, as
     /// RTKLIB `ephpos` forms it: a 1 ms forward difference of that record's positions.
-    fn ssr_broadcast_velocity(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<[f64; 3]> {
+    fn ssr_broadcast_velocity(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<[f64; 3]> {
         let orbit = self.store.orbit(sat)?;
-        self.ssr_broadcast_state(sat, orbit, t_j2000_s)
+        self.ssr_broadcast_state(sat, orbit, t_j2000_s, selection_j2000_s)
             .ok()
             .map(|state| state.velocity_m_s)
     }
@@ -3315,12 +3357,13 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         sat: GnssSatelliteId,
         orbit: &SsrOrbitCorrection,
         t_j2000_s: f64,
+        selection_j2000_s: f64,
     ) -> std::result::Result<SsrBroadcastState, SsrStateUnavailable> {
         use SsrStateUnavailable as Unavailable;
         if sat.system == GnssSystem::Glonass {
             let (r, v, clock_s) = self
                 .broadcast
-                .glonass_ssr_state(sat, orbit.iode, t_j2000_s)
+                .glonass_ssr_state(sat, orbit.iode, t_j2000_s, selection_j2000_s)
                 .ok_or(Unavailable::NoMatchingBroadcastRecord { iode: orbit.iode })?;
             return Ok(SsrBroadcastState {
                 position_m: r,
@@ -3337,7 +3380,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
                 sat,
                 orbit.iode & 0xFF,
                 nav_message,
-                t_j2000_s,
+                selection_j2000_s,
             )
         } else {
             let issue = BroadcastIssue {
@@ -3345,7 +3388,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
                 message: nav_message,
             };
             self.broadcast
-                .select_by_issue_at(sat, issue, nav_message, t_j2000_s)
+                .select_by_issue_at(sat, issue, nav_message, selection_j2000_s)
         }
         .ok_or(Unavailable::NoMatchingBroadcastRecord { iode: orbit.iode })?;
         let (r, v) = broadcast_position_velocity(record, sow, is_geo)
@@ -3381,6 +3424,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
+        selection_j2000_s: f64,
     ) -> std::result::Result<SsrAppliedState, SsrStateUnavailable> {
         use SsrStateUnavailable as Unavailable;
         let gate = Ut1Gate::new(self.ut1_validity);
@@ -3431,7 +3475,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             velocity_m_s: v,
             mut clock_s,
             group_delay_s,
-        } = self.ssr_broadcast_state(sat, orbit, t_j2000_s)?;
+        } = self.ssr_broadcast_state(sat, orbit, t_j2000_s, selection_j2000_s)?;
 
         let (er, ea, ec) = velocity_aligned_basis(r, v).ok_or(Unavailable::DegenerateOrbitFrame)?;
         let dt_orbit = t_j2000_s - orbit.ref_epoch_j2000_s;
@@ -3551,19 +3595,11 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         }
     }
 
-    fn broadcast_fallback_after_failure(
-        &self,
-        sat: GnssSatelliteId,
-        t_j2000_s: f64,
-    ) -> Option<([f64; 3], f64)> {
-        self.broadcast_fallback_with_group_delay(sat, t_j2000_s)
-            .map(|(position, clock, _)| (position, clock))
-    }
-
     fn broadcast_fallback_with_group_delay(
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
+        selection_j2000_s: f64,
     ) -> Option<([f64; 3], f64, Option<f64>)> {
         if self
             .store
@@ -3573,8 +3609,15 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             return None;
         }
         if self.fallback.on_missing_correction == MissingCorrectionAction::FallBackToBroadcast {
-            self.broadcast
-                .position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+            EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
+                self.broadcast,
+                sat,
+                t_j2000_s,
+                selection_j2000_s,
+            )
+            .ok()
+            .flatten()
+            .map(|state| state.value)
         } else {
             None
         }
@@ -3647,6 +3690,37 @@ impl EphemerisSource for SsrCorrectedEphemeris<'_> {
             self.corrected_state_with_group_delay_checked(sat, t_j2000_s)?,
         ))
     }
+
+    /// [`SsrCorrectedEphemeris::corrected_state_with_group_delay_checked_selected`].
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>> {
+        Ok(Validated::transpose(
+            self.corrected_state_with_group_delay_checked_selected(
+                sat,
+                t_j2000_s,
+                selection_j2000_s,
+            )?,
+        ))
+    }
+
+    /// The broadcast clock polynomial of the store this source corrects: RTKLIB
+    /// `satposs` places the transmission epoch with `ephclk` for the SSR ephemeris
+    /// options too.
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>> {
+        Ok(self
+            .broadcast
+            .transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
+            .map(Validated::ok))
+    }
 }
 
 impl ObservableEphemerisSource for SsrCorrectedEphemeris<'_> {
@@ -3717,21 +3791,68 @@ impl ObservableEphemerisSource for SsrCorrectedEphemeris<'_> {
         })
     }
 
+    /// The broadcast clock polynomial of the store this source corrects, as
+    /// [`EphemerisSource::try_transmit_epoch_clock_s`] gives it.
+    fn try_observable_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> std::result::Result<Validated<Option<f64>>, ObservablesError> {
+        self.broadcast
+            .transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
+            .map(|clock_s| Validated::ok(Some(clock_s)))
+            .ok_or(ObservablesError::NoEphemeris)
+    }
+
+    /// [`SsrCorrectedEphemeris::corrected_state_with_group_delay_checked_selected`].
+    fn try_observable_state_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> std::result::Result<Validated<(ObservableState, Option<f64>)>, ObservablesError> {
+        let checked = self
+            .corrected_state_with_group_delay_checked_selected(sat, t_j2000_s, selection_j2000_s)
+            .map_err(ObservablesError::Ephemeris)?;
+        let (position_ecef_m, clock_s, group_delay) =
+            checked.value.ok_or(ObservablesError::NoEphemeris)?;
+        Ok(Validated {
+            value: (
+                ObservableState {
+                    position_ecef_m,
+                    clock_s: Some(clock_s),
+                },
+                group_delay,
+            ),
+            degraded: checked.degraded,
+        })
+    }
+
     fn velocity_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<std::result::Result<[f64; 3], ObservablesError>> {
-        match self.velocity_source(sat, t_j2000_s) {
+        self.velocity_selected_at_j2000_s(sat, t_j2000_s, t_j2000_s)
+    }
+
+    fn velocity_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<std::result::Result<[f64; 3], ObservablesError>> {
+        match self.velocity_source(sat, t_j2000_s, selection_j2000_s) {
             VelocitySource::Ssr => Some(
-                self.ssr_broadcast_velocity(sat, t_j2000_s)
+                self.ssr_broadcast_velocity(sat, t_j2000_s, selection_j2000_s)
                     .ok_or(ObservablesError::NoEphemeris),
             ),
             // The broadcast record the fallback state comes from; a system with no
             // broadcast record model has no state here either way.
             VelocitySource::Broadcast => self
                 .broadcast
-                .selected_record_velocity(sat, t_j2000_s)
+                .selected_record_velocity_at(sat, t_j2000_s, selection_j2000_s)
                 .map(Ok),
             VelocitySource::None => Some(Err(ObservablesError::NoEphemeris)),
             VelocitySource::Ut1Refused(reason) => Some(Err(ObservablesError::Ephemeris(
@@ -3953,6 +4074,26 @@ impl EphemerisSource for SsrCorrectedEphemerisOwned {
         self.borrowed()
             .try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
     }
+
+    fn try_position_clock_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>> {
+        self.borrowed()
+            .try_position_clock_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn try_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Result<Option<Validated<f64>>> {
+        self.borrowed()
+            .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
+    }
 }
 
 impl ObservableEphemerisSource for SsrCorrectedEphemerisOwned {
@@ -4004,6 +4145,36 @@ impl ObservableEphemerisSource for SsrCorrectedEphemerisOwned {
     ) -> std::result::Result<(ObservableState, Option<f64>), ObservablesError> {
         self.borrowed()
             .observable_state_group_delay_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn try_observable_transmit_epoch_clock_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> std::result::Result<Validated<Option<f64>>, ObservablesError> {
+        self.borrowed()
+            .try_observable_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn try_observable_state_group_delay_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> std::result::Result<Validated<(ObservableState, Option<f64>)>, ObservablesError> {
+        self.borrowed()
+            .try_observable_state_group_delay_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
+    }
+
+    fn velocity_selected_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<std::result::Result<[f64; 3], ObservablesError>> {
+        self.borrowed()
+            .velocity_selected_at_j2000_s(sat, t_j2000_s, selection_j2000_s)
     }
 
     fn velocity_at_j2000_s(
