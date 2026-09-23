@@ -138,7 +138,7 @@ fn facade_reexports_publication_resilience_apis() {
     let candidates = predicted_ionex_line_candidates(map_date, None).expect("candidates");
     assert_eq!(candidates.len(), 2);
 
-    let listing = "CODE/IONO/P2/2026/COD0OPSPRD_20262170000_01D_01H_GIM.INX.gz;1;\
+    let listing = "CODE/IONO/PRD/COD0OPSP1D_20262170000_01D_01H_GIM.INX.gz;1;\
 2026-08-04T06:51:15Z;00";
     let objects = parse_archive_listing(listing).expect("recognized listing");
     assert_eq!(
