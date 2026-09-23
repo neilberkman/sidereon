@@ -19,7 +19,11 @@
 //! page. Neither came from the reader under test.
 
 use sidereon_core::astro::time::{GnssWeekTow, TimeScale};
-use sidereon_core::sbas::{parse_ems_lines, SbasWireForm};
+use sidereon_core::sbas::{
+    parse_ems_lines, parse_ems_log, SbasBlock, SbasDeparture, SbasLineDeparture, SbasLogOptions,
+    SbasPolicy, SbasWireForm,
+};
+use sidereon_core::Error;
 
 const GLAB_EXAMPLE: &str = include_str!("fixtures/sbas_ems/glab_ems_format_example.ems");
 
@@ -42,6 +46,11 @@ const RECORD_2: [u8; 32] = [
 /// The three records cross midnight and the GPS week rollover from Saturday
 /// 2018-03-31 into Sunday 2018-04-01, so week 1994 seconds 604798 and 604799
 /// are followed by week 1995 second 0.
+///
+/// Every record's message-type field reads 4, while the messages carry types
+/// 4, 7 and 2 at message bits 9 to 14, from which the EMS User Interface
+/// Document derives that field. The strict reader refuses the second record by
+/// line; the lenient reader keeps all three and reports both mismatches.
 #[test]
 fn glab_example_records_parse_across_the_gps_week_boundary() {
     let expected: [(u32, f64, &[u8]); 3] = [
@@ -50,7 +59,39 @@ fn glab_example_records_parse_across_the_gps_week_boundary() {
         (1995, 0.0, &RECORD_2),
     ];
 
-    let parsed = parse_ems_lines(GLAB_EXAMPLE).expect("gLAB EMS format example parses");
+    let err = parse_ems_lines(GLAB_EXAMPLE).unwrap_err();
+    assert!(
+        matches!(err, Error::Parse(ref msg) if msg.contains("line 2")),
+        "expected the strict reader to name line 2, got {err:?}"
+    );
+
+    let log = parse_ems_log(
+        GLAB_EXAMPLE,
+        SbasLogOptions::default().with_policy(SbasPolicy::Lenient),
+    )
+    .expect("gLAB EMS format example parses leniently");
+    assert!(log.skipped_lines.is_empty());
+    assert!(log.refused_lines.is_empty());
+    assert_eq!(
+        log.departures,
+        vec![
+            SbasLineDeparture {
+                line: 2,
+                departure: SbasDeparture::DeclaredMessageType {
+                    declared: 4,
+                    carried: 7,
+                },
+            },
+            SbasLineDeparture {
+                line: 3,
+                departure: SbasDeparture::DeclaredMessageType {
+                    declared: 4,
+                    carried: 2,
+                },
+            },
+        ]
+    );
+    let parsed = log.blocks;
     assert_eq!(
         parsed.len(),
         expected.len(),
@@ -64,5 +105,38 @@ fn glab_example_records_parse_across_the_gps_week_boundary() {
         assert_eq!(block.form, SbasWireForm::Framed250);
         assert_eq!(block.bytes.len(), 32);
         assert_eq!(block.bytes, bytes);
+        assert_eq!(block.declared_message_type, Some(4));
+    }
+}
+
+/// Each framed record has a valid CRC and decodes; the second carries the
+/// preamble 0xA9, none of the three SBAS values, so it decodes only under the
+/// lenient policy, which reports it. Every block encodes back to the 32 bytes
+/// it was read from.
+#[test]
+fn glab_example_blocks_decode_and_restate_byte_for_byte() {
+    let log = parse_ems_log(
+        GLAB_EXAMPLE,
+        SbasLogOptions::default().with_policy(SbasPolicy::Lenient),
+    )
+    .expect("lenient read");
+    for (index, block) in log.blocks.iter().enumerate() {
+        let (decoded, departures) =
+            SbasBlock::decode_with_policy(&block.bytes, block.form, SbasPolicy::Lenient)
+                .expect("CRC-valid block decodes");
+        assert_eq!(Some(decoded.message.message_type()), block.message_type());
+        if index == 1 {
+            assert_eq!(
+                departures,
+                vec![SbasDeparture::UnrecognizedPreamble { preamble: 0xA9 }]
+            );
+            assert!(SbasBlock::decode(&block.bytes, block.form).is_err());
+        } else {
+            assert!(departures.is_empty());
+        }
+        let (encoded, _) = decoded
+            .encode_with_policy(SbasPolicy::Lenient)
+            .expect("decoded block encodes");
+        assert_eq!(encoded, block.bytes, "record {index}");
     }
 }

@@ -16,8 +16,14 @@ use super::message::{
 
 const FAST_PRC_SCALE_M: f64 = 0.125;
 const IONO_DELAY_SCALE_M: f64 = 0.125;
+/// The all-ones nine-bit IGP vertical delay, which DO-229 defines as "do not
+/// use".
+const IGP_DELAY_DO_NOT_USE: u16 = 511;
+/// The GIVEI value DO-229 defines as "not monitored".
+const GIVEI_NOT_MONITORED: u8 = 15;
 const LONG_POS_SCALE_M: f64 = 0.125;
-const LONG_RATE_SCALE_M_S: f64 = 0.000625;
+/// RTKLIB `decode_longcorr1` scales the long-term velocity deltas by `P2_11`.
+const LONG_RATE_SCALE_M_S: f64 = 1.0 / 2048.0;
 const LONG_AF0_SCALE_S: f64 = 1.0 / 2_147_483_648.0;
 const LONG_AF1_SCALE_S_S: f64 = 1.0 / 549_755_813_888.0;
 const GEO_XY_POS_SCALE_M: f64 = 0.08;
@@ -92,7 +98,7 @@ pub struct SbasLongTermCorrection {
     /// from the signed record coordinates multiplied by 0.125.
     pub delta_ecef_m: [f64; 3],
     /// ECEF position-delta rate in meters per second, from signed record rates
-    /// multiplied by 0.000625.
+    /// multiplied by 2^-11.
     pub delta_ecef_rate_m_s: [f64; 3],
     /// Clock offset delta at the reference epoch, in seconds, from the signed
     /// record value multiplied by 1/2^31.
@@ -108,7 +114,8 @@ pub struct SbasLongTermCorrection {
 /// One accepted SBAS ionospheric grid point.
 ///
 /// [`SbasCorrectionStore::ingest`] obtains the coordinates from the DO-229
-/// band table and omits entries whose GIVEI is 15.
+/// band table. Entries whose vertical delay is 511 or whose GIVEI is 15 are
+/// not grid points; they are listed by [`SbasIonoGrid::unavailable_igps`].
 pub struct SbasIgp {
     /// Grid latitude in degrees from the DO-229 band table, matched with the
     /// IGP coordinate tolerance during interpolation.
@@ -129,19 +136,59 @@ pub struct SbasIgp {
 /// the returned slice preserves the grid's update order.
 pub struct SbasIonoGrid {
     igps: Vec<SbasIgp>,
+    unavailable: Vec<SbasUnavailableIgp>,
     /// IODI associated with the stored IGP records.
     pub iodi: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Why the latest ionospheric delay entry for a grid point makes it unusable.
+pub enum SbasIgpUnavailableReason {
+    /// The nine-bit vertical delay is 511, which DO-229 defines as "do not
+    /// use". RTKLIB `decode_sbstype26` reads it as a zero delay instead.
+    DoNotUse,
+    /// The GIVEI is 15, which DO-229 defines as "not monitored".
+    NotMonitored,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+/// A grid point whose latest delay entry makes it unusable, with the entry's
+/// raw values.
+pub struct SbasUnavailableIgp {
+    /// Grid latitude in degrees from the DO-229 band table.
+    pub lat_deg: f64,
+    /// Grid longitude in degrees from the DO-229 band table.
+    pub lon_deg: f64,
+    /// The nine-bit vertical delay as broadcast.
+    pub vertical_delay: u16,
+    /// The four-bit GIVEI as broadcast.
+    pub givei: u8,
+    /// Why the point is unusable. A delay of 511 is reported as
+    /// [`SbasIgpUnavailableReason::DoNotUse`] whatever its GIVEI.
+    pub reason: SbasIgpUnavailableReason,
+}
+
 impl SbasIonoGrid {
-    /// Construct an ionospheric grid from IGP records and the IODI value.
+    /// Construct an ionospheric grid from IGP records and the IODI value,
+    /// with no unavailable points.
     pub fn new(igps: Vec<SbasIgp>, iodi: u8) -> Self {
-        Self { igps, iodi }
+        Self {
+            igps,
+            unavailable: Vec::new(),
+            iodi,
+        }
     }
 
     /// Ionospheric grid points in storage order.
     pub fn igps(&self) -> &[SbasIgp] {
         &self.igps
+    }
+
+    /// Grid points whose latest delay entry makes them unusable, in update
+    /// order. Interpolation never uses them; a later usable entry for the same
+    /// point moves it back to [`SbasIonoGrid::igps`].
+    pub fn unavailable_igps(&self) -> &[SbasUnavailableIgp] {
+        &self.unavailable
     }
 
     /// Interpolate the L1 slant ionospheric delay at a receiver look direction.
@@ -331,9 +378,16 @@ impl SbasCorrectionStore {
 
     /// Ingest one decoded [`SbasMessage`] for a source GEO at a GNSS epoch.
     ///
-    /// A non-SBAS `geo` returns [`Error::InvalidInput`]. Supported messages
-    /// update their corresponding masks, corrections, navigation, ionosphere,
-    /// disable interval, or withdrawal state; unsupported variants are ignored.
+    /// A non-SBAS `geo` returns [`Error::InvalidInput`]. A message the wire
+    /// form cannot carry as held returns [`Error::SbasEncode`] and changes
+    /// nothing: ingest applies [`SbasMessage::validate`], the validation the
+    /// encoder applies, so a hand-built message cannot address a mask block
+    /// no message type names, supply a long-term half with a record count its
+    /// velocity code does not carry, or give a non-velocity record a rate,
+    /// clock drift or time of day that no message could deliver. The decoder
+    /// only produces messages that pass. Supported messages update their
+    /// corresponding masks, corrections, navigation, ionosphere, disable
+    /// interval, or withdrawal state; unsupported variants are ignored.
     pub fn ingest(
         &mut self,
         message: &SbasMessage,
@@ -345,6 +399,7 @@ impl SbasCorrectionStore {
                 "SBAS source GEO must be an SBAS id".to_string(),
             ));
         }
+        message.validate()?;
         let epoch_j2000_s = epoch_to_j2000_s(epoch);
         let partition = self.partitions.entry(geo).or_default();
         partition.last_update_j2000_s = epoch_j2000_s;
@@ -631,10 +686,8 @@ fn ingest_fast(
     if Some(iodp) != partition.active_iodp {
         return;
     }
-    let start = match message_type {
-        2..=5 => usize::from(message_type - 2) * 13,
-        _ => 0,
-    };
+    // `ingest` validates the message type, 2 through 5, before this point.
+    let start = usize::from(message_type.saturating_sub(2)) * 13;
     for (i, (&prc_raw, &udrei)) in prc.iter().zip(udrei.iter()).enumerate() {
         let Some(sat) = monitored_sat(partition, iodp, start + i) else {
             continue;
@@ -703,7 +756,7 @@ fn ingest_mixed(
 ) {
     ingest_fast(
         partition,
-        2 + mixed.fast.block_id.min(3),
+        2 + mixed.fast.block_id,
         mixed.fast.iodf,
         mixed.fast.iodp,
         &mixed.fast.prc,
@@ -760,40 +813,64 @@ fn ingest_iono(partition: &mut GeoPartition, delays: &SbasIonoDelays, epoch_j200
         .filter_map(|(idx, active)| active.then_some(idx))
         .collect();
     let start = usize::from(delays.block_id) * delays.entries.len();
-    let mut igps = partition
+    let (mut igps, mut unavailable) = partition
         .iono_grid
         .as_ref()
         .filter(|grid| grid.value.iodi == delays.iodi)
-        .map(|grid| grid.value.igps.clone())
+        .map(|grid| (grid.value.igps.clone(), grid.value.unavailable.clone()))
         .unwrap_or_default();
     for (slot, entry) in delays.entries.iter().enumerate() {
-        if entry.givei == 15 {
-            continue;
-        }
         let Some(&position) = active_positions.get(start + slot) else {
             continue;
         };
         let Some((lat_deg, lon_deg)) = igp_location(delays.band_number, position) else {
             continue;
         };
+        let same_point = |point_lat_deg: f64, point_lon_deg: f64| {
+            (point_lat_deg - lat_deg).abs() < SBAS_IGP_COORD_EPS_DEG
+                && (normalize_lon(point_lon_deg) - normalize_lon(lon_deg)).abs()
+                    < SBAS_IGP_COORD_EPS_DEG
+        };
+        unavailable.retain(|p| !same_point(p.lat_deg, p.lon_deg));
+        let reason = if entry.vertical_delay == IGP_DELAY_DO_NOT_USE {
+            Some(SbasIgpUnavailableReason::DoNotUse)
+        } else if entry.givei == GIVEI_NOT_MONITORED {
+            Some(SbasIgpUnavailableReason::NotMonitored)
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            // An earlier delay for this point no longer holds. For GIVEI 15
+            // RTKLIB `decode_sbstype26` agrees, setting the GIVE to 0, which
+            // `searchigp` skips.
+            igps.retain(|p| !same_point(p.lat_deg, p.lon_deg));
+            unavailable.push(SbasUnavailableIgp {
+                lat_deg,
+                lon_deg,
+                vertical_delay: entry.vertical_delay,
+                givei: entry.givei,
+                reason,
+            });
+            continue;
+        }
         let point = SbasIgp {
             lat_deg,
             lon_deg,
             vertical_delay_m: f64::from(entry.vertical_delay) * IONO_DELAY_SCALE_M,
             give_variance_m2: give_variance_m2_for_givei(entry.givei),
         };
-        if let Some(existing) = igps.iter_mut().find(|p| {
-            (p.lat_deg - lat_deg).abs() < SBAS_IGP_COORD_EPS_DEG
-                && (normalize_lon(p.lon_deg) - normalize_lon(lon_deg)).abs()
-                    < SBAS_IGP_COORD_EPS_DEG
-        }) {
+        if let Some(existing) = igps.iter_mut().find(|p| same_point(p.lat_deg, p.lon_deg)) {
             *existing = point;
         } else {
             igps.push(point);
         }
     }
     partition.iono_grid = Some(Timed {
-        value: SbasIonoGrid::new(igps, delays.iodi),
+        value: SbasIonoGrid {
+            igps,
+            unavailable,
+            iodi: delays.iodi,
+        },
         epoch_j2000_s,
     });
 }
@@ -970,19 +1047,26 @@ fn epoch_to_j2000_s(epoch: GnssWeekTow) -> f64 {
     f64::from(epoch.week) * crate::constants::SECONDS_PER_WEEK + epoch.tow_s - GPS_EPOCH_TO_J2000_S
 }
 
+/// Place a message time of day in time, as RTKLIB `decode_sbstype9` and
+/// `decode_longcorr1` place it. RTKLIB `readmsgs` rounds the message time of
+/// week to a whole second, `(int)(tow+0.5)`; the decoders form
+/// `t = tod - tow % 86400`, move `t` into (-43200, 43200] by a day, and add it
+/// to the rounded time of week.
+/// The day is decided on that rounded second, and the result is the start of
+/// the chosen day plus the time of day, exactly. A time of day exactly half a
+/// day from the rounded epoch falls half a day after it.
 fn lift_time_of_day(epoch: GnssWeekTow, time_of_day_s: f64) -> f64 {
-    let continuous = f64::from(epoch.week) * crate::constants::SECONDS_PER_WEEK + epoch.tow_s;
-    let day_start = (continuous / SECONDS_PER_DAY).floor() * SECONDS_PER_DAY;
-    let candidates = [
-        day_start - SECONDS_PER_DAY + time_of_day_s,
-        day_start + time_of_day_s,
-        day_start + SECONDS_PER_DAY + time_of_day_s,
-    ];
-    let best = candidates
-        .into_iter()
-        .min_by(|a, b| f64_total_cmp(&(a - continuous).abs(), &(b - continuous).abs()))
-        .unwrap_or(day_start + time_of_day_s);
-    best - GPS_EPOCH_TO_J2000_S
+    let half_day = SECONDS_PER_DAY / 2.0;
+    let rounded_tow_s = (epoch.tow_s + 0.5).floor();
+    let second_of_day_s = rounded_tow_s.rem_euclid(SECONDS_PER_DAY);
+    let mut offset = time_of_day_s - second_of_day_s;
+    if offset <= -half_day {
+        offset += SECONDS_PER_DAY;
+    } else if offset > half_day {
+        offset -= SECONDS_PER_DAY;
+    }
+    f64::from(epoch.week) * crate::constants::SECONDS_PER_WEEK + rounded_tow_s + offset
+        - GPS_EPOCH_TO_J2000_S
 }
 
 #[derive(Clone, Copy)]
@@ -1659,8 +1743,8 @@ mod tests {
     use super::*;
     use crate::astro::time::model::TimeScale;
     use crate::sbas::message::{
-        SbasFastCorrections, SbasIgpDelay, SbasIgpMask, SbasIonoDelays, SbasLongTermCorrections,
-        SbasPrnMask, SpareBits,
+        SbasFastCorrections, SbasGeoNav, SbasIgpDelay, SbasIgpMask, SbasIonoDelays,
+        SbasLongTermCorrections, SbasMixedFastCorrections, SbasPrnMask, SpareBits,
     };
 
     fn epoch(tow_s: f64) -> GnssWeekTow {
@@ -1884,7 +1968,7 @@ mod tests {
             velocity_code: false,
             iodp: 1,
             records,
-            reserved: SpareBits::new(),
+            reserved: SpareBits(vec![(0, 1)]),
         };
         store
             .ingest(
@@ -1969,7 +2053,7 @@ mod tests {
             band_number: 0,
             iodi: 2,
             mask,
-            reserved: SpareBits::new(),
+            reserved: SpareBits(vec![(0, 4), (0, 1)]),
         });
         store.ingest(&igp_mask, geo(), epoch(0.0)).unwrap();
         let mut entries: [SbasIgpDelay; 15] = core::array::from_fn(|_| SbasIgpDelay::default());
@@ -1987,7 +2071,7 @@ mod tests {
             block_id: 0,
             iodi: 2,
             entries,
-            reserved: SpareBits::new(),
+            reserved: SpareBits(vec![(0, 7)]),
         });
         store.ingest(&delays, geo(), epoch(1.0)).unwrap();
         assert_eq!(store.iono_grid(geo()).unwrap().igps().len(), 1);
@@ -2053,5 +2137,359 @@ mod tests {
         );
         let vertical = grid.vertical_delay_at_ipp(2.5, 2.5).unwrap();
         assert_eq!(vertical.to_bits(), 2.5_f64.to_bits());
+    }
+
+    /// RTKLIB `decode_longcorr1` scales the velocity deltas by `P2_11` and the
+    /// clock drift by `P2_39`, and places the 13-bit time of day in 16 s units
+    /// on the message day.
+    #[test]
+    fn velocity_code_long_term_record_uses_rtklib_scales() {
+        let mut store = SbasCorrectionStore::new();
+        store.ingest(&mask_message(), geo(), epoch(10.0)).unwrap();
+        let record = SbasLongTermRecord {
+            monitored_index: 1,
+            iode: 7,
+            delta_x: 8,
+            delta_y: -8,
+            delta_z: 0,
+            delta_x_rate: 1,
+            delta_y_rate: -128,
+            delta_z_rate: 127,
+            delta_a_f0: 1,
+            delta_a_f1: -1,
+            time_of_day_s: Some(2),
+        };
+        let half = SbasLongTermHalf {
+            velocity_code: true,
+            iodp: 1,
+            records: vec![record],
+            reserved: SpareBits::new(),
+        };
+        store
+            .ingest(
+                &SbasMessage::LongTermCorrections(SbasLongTermCorrections {
+                    preamble: 0x53,
+                    halves: [half.clone(), half],
+                }),
+                geo(),
+                epoch(40.0),
+            )
+            .unwrap();
+        let long = store.long_term(geo(), gps(1)).expect("G01 long-term");
+        let p2_11 = 1.0 / 2048.0;
+        assert_eq!(
+            long.delta_ecef_rate_m_s.map(f64::to_bits),
+            [p2_11, -128.0 * p2_11, 127.0 * p2_11].map(f64::to_bits)
+        );
+        assert_eq!(long.delta_ecef_m, [1.0, -1.0, 0.0]);
+        assert_eq!(
+            long.delta_af0_s.to_bits(),
+            (1.0 / 2_147_483_648.0_f64).to_bits()
+        );
+        assert_eq!(
+            long.delta_af1_s_s.to_bits(),
+            (-1.0 / 549_755_813_888.0_f64).to_bits()
+        );
+        assert_eq!(long.t0_j2000_s, epoch_to_j2000_s(epoch(32.0)));
+    }
+
+    /// RTKLIB moves `t = tod - tow % 86400` into (-43200, 43200]: a time of
+    /// day exactly half a day before the epoch is placed half a day after it.
+    #[test]
+    fn geo_time_of_day_half_a_day_away_falls_after_the_epoch() {
+        let mut store = SbasCorrectionStore::new();
+        let nav = |time_of_day_s| {
+            SbasMessage::GeoNav(SbasGeoNav {
+                preamble: 0x9A,
+                time_of_day_s,
+                ura: 0,
+                x_m: 0,
+                y_m: 0,
+                z_m: 0,
+                x_rate_m_s: 0,
+                y_rate_m_s: 0,
+                z_rate_m_s: 0,
+                x_accel_m_s2: 0,
+                y_accel_m_s2: 0,
+                z_accel_m_s2: 0,
+                a_gf0_s: 0,
+                a_gf1_s_s: 0,
+                reserved: SpareBits(vec![(0, 8)]),
+            })
+        };
+        // Noon of the week's first day; time of day 0 is midnight before and
+        // after, both half a day away.
+        let noon = epoch(43_200.0);
+        store.ingest(&nav(0), geo(), noon).unwrap();
+        let t0 = store.geo_nav(geo()).expect("GEO nav").t0_j2000_s;
+        assert_eq!(t0, epoch_to_j2000_s(noon) + 43_200.0);
+
+        // 16 s units: 2700 * 16 = 43200, noon itself.
+        store.ingest(&nav(2700), geo(), noon).unwrap();
+        let t0 = store.geo_nav(geo()).expect("GEO nav").t0_j2000_s;
+        assert_eq!(t0, epoch_to_j2000_s(noon));
+
+        // RTKLIB rounds the time of week first: 11:59:59.6 is decided as
+        // noon, so time of day 0 falls at the next midnight, exactly, where
+        // the unrounded epoch would have kept it at the midnight before.
+        let almost_noon = epoch(43_199.6);
+        store.ingest(&nav(0), geo(), almost_noon).unwrap();
+        let t0 = store.geo_nav(geo()).expect("GEO nav").t0_j2000_s;
+        assert_eq!(t0, epoch_to_j2000_s(epoch(86_400.0)));
+
+        // 23:59:44 read one second after midnight is the day before.
+        let after_midnight = epoch(86_401.0);
+        store.ingest(&nav(5399), geo(), after_midnight).unwrap();
+        let t0 = store.geo_nav(geo()).expect("GEO nav").t0_j2000_s;
+        assert_eq!(t0, epoch_to_j2000_s(after_midnight) - 17.0);
+    }
+
+    #[test]
+    fn igp_givei_15_withdraws_an_earlier_delay_for_the_point() {
+        let mut store = SbasCorrectionStore::new();
+        let mut mask = [false; 201];
+        mask[0] = true;
+        mask[1] = true;
+        store
+            .ingest(
+                &SbasMessage::IgpMask(SbasIgpMask {
+                    preamble: 0x53,
+                    band_number: 0,
+                    iodi: 2,
+                    mask,
+                    reserved: SpareBits(vec![(0, 4), (0, 1)]),
+                }),
+                geo(),
+                epoch(0.0),
+            )
+            .unwrap();
+        let delays = |givei: u8| {
+            let mut entries: [SbasIgpDelay; 15] = core::array::from_fn(|_| SbasIgpDelay::default());
+            entries[0] = SbasIgpDelay {
+                vertical_delay: 8,
+                givei: 0,
+            };
+            entries[1] = SbasIgpDelay {
+                vertical_delay: 16,
+                givei,
+            };
+            SbasMessage::IonoDelays(SbasIonoDelays {
+                preamble: 0x53,
+                band_number: 0,
+                block_id: 0,
+                iodi: 2,
+                entries,
+                reserved: SpareBits(vec![(0, 7)]),
+            })
+        };
+        store.ingest(&delays(3), geo(), epoch(1.0)).unwrap();
+        assert_eq!(store.iono_grid(geo()).unwrap().igps().len(), 2);
+        store.ingest(&delays(15), geo(), epoch(2.0)).unwrap();
+        let grid = store.iono_grid(geo()).unwrap();
+        assert_eq!(grid.igps().len(), 1);
+        assert_eq!(grid.igps()[0].vertical_delay_m, 1.0);
+    }
+
+    #[test]
+    fn corrections_addressing_no_mask_block_are_refused() {
+        let mut store = SbasCorrectionStore::new();
+        store.ingest(&mask_message(), geo(), epoch(10.0)).unwrap();
+        for message_type in [0, 1, 6, 63] {
+            let fast = SbasMessage::FastCorrections(SbasFastCorrections {
+                preamble: 0x53,
+                message_type,
+                iodf: 1,
+                iodp: 1,
+                prc: [8; 13],
+                udrei: [0; 13],
+                reserved: SpareBits::new(),
+            });
+            assert!(matches!(
+                store.ingest(&fast, geo(), epoch(20.0)),
+                Err(Error::SbasEncode(_))
+            ));
+        }
+        assert!(store.fast(geo(), gps(1)).is_none());
+
+        let mixed = SbasMessage::MixedCorrections(SbasMixedCorrections {
+            preamble: 0x53,
+            fast: SbasMixedFastCorrections {
+                iodf: 1,
+                iodp: 1,
+                block_id: 4,
+                prc: [8; 6],
+                udrei: [0; 6],
+                reserved: SpareBits(vec![(0, 4)]),
+            },
+            long_term: SbasLongTermHalf {
+                velocity_code: false,
+                iodp: 1,
+                records: Vec::new(),
+                reserved: SpareBits(vec![(0, 1)]),
+            },
+        });
+        assert!(matches!(
+            store.ingest(&mixed, geo(), epoch(20.0)),
+            Err(Error::SbasEncode(_))
+        ));
+        assert!(store.fast(geo(), gps(1)).is_none());
+    }
+
+    /// DO-229 defines a vertical delay of 511 as "do not use": the point is
+    /// not stored as 63.875 m, an earlier delay for it is withdrawn, the raw
+    /// entry is kept with its reason, and a later usable entry restores it.
+    #[test]
+    fn igp_vertical_delay_511_is_do_not_use() {
+        let mut store = SbasCorrectionStore::new();
+        let mut mask = [false; 201];
+        mask[0] = true;
+        mask[1] = true;
+        store
+            .ingest(
+                &SbasMessage::IgpMask(SbasIgpMask {
+                    preamble: 0x53,
+                    band_number: 0,
+                    iodi: 2,
+                    mask,
+                    reserved: SpareBits(vec![(0, 4), (0, 1)]),
+                }),
+                geo(),
+                epoch(0.0),
+            )
+            .unwrap();
+        let delays = |second: SbasIgpDelay| {
+            let mut entries: [SbasIgpDelay; 15] = core::array::from_fn(|_| SbasIgpDelay::default());
+            entries[0] = SbasIgpDelay {
+                vertical_delay: 8,
+                givei: 0,
+            };
+            entries[1] = second;
+            SbasMessage::IonoDelays(SbasIonoDelays {
+                preamble: 0x53,
+                band_number: 0,
+                block_id: 0,
+                iodi: 2,
+                entries,
+                reserved: SpareBits(vec![(0, 7)]),
+            })
+        };
+        let usable = SbasIgpDelay {
+            vertical_delay: 16,
+            givei: 3,
+        };
+        store
+            .ingest(&delays(usable.clone()), geo(), epoch(1.0))
+            .unwrap();
+        assert_eq!(store.iono_grid(geo()).unwrap().igps().len(), 2);
+
+        for (entry, reason) in [
+            (
+                SbasIgpDelay {
+                    vertical_delay: 511,
+                    givei: 3,
+                },
+                SbasIgpUnavailableReason::DoNotUse,
+            ),
+            (
+                SbasIgpDelay {
+                    vertical_delay: 511,
+                    givei: 15,
+                },
+                SbasIgpUnavailableReason::DoNotUse,
+            ),
+            (
+                SbasIgpDelay {
+                    vertical_delay: 16,
+                    givei: 15,
+                },
+                SbasIgpUnavailableReason::NotMonitored,
+            ),
+        ] {
+            store
+                .ingest(&delays(usable.clone()), geo(), epoch(1.0))
+                .unwrap();
+            store
+                .ingest(&delays(entry.clone()), geo(), epoch(2.0))
+                .unwrap();
+            let grid = store.iono_grid(geo()).unwrap();
+            assert_eq!(grid.igps().len(), 1);
+            assert_eq!(grid.igps()[0].vertical_delay_m, 1.0);
+            assert!(grid.igps().iter().all(|p| p.vertical_delay_m != 63.875));
+            let unavailable = grid.unavailable_igps();
+            assert_eq!(unavailable.len(), 1);
+            assert_eq!(unavailable[0].vertical_delay, entry.vertical_delay);
+            assert_eq!(unavailable[0].givei, entry.givei);
+            assert_eq!(unavailable[0].reason, reason);
+        }
+
+        store.ingest(&delays(usable), geo(), epoch(3.0)).unwrap();
+        let grid = store.iono_grid(geo()).unwrap();
+        assert_eq!(grid.igps().len(), 2);
+        assert!(grid.unavailable_igps().is_empty());
+    }
+
+    /// Ingest applies the encoder's validation, so a hand-built long-term
+    /// half the wire cannot carry changes nothing: no rate, clock drift or
+    /// time of day from a record without the velocity code, no invented
+    /// reference time for a velocity record without one, and no record count
+    /// the velocity code does not carry.
+    #[test]
+    fn long_term_halves_the_wire_cannot_carry_are_refused() {
+        let record = |monitored_index| SbasLongTermRecord {
+            monitored_index,
+            iode: 7,
+            delta_x: 8,
+            delta_y: 0,
+            delta_z: 0,
+            delta_x_rate: 0,
+            delta_y_rate: 0,
+            delta_z_rate: 0,
+            delta_a_f0: 0,
+            delta_a_f1: 0,
+            time_of_day_s: None,
+        };
+        let half = |velocity_code, records| SbasLongTermHalf {
+            velocity_code,
+            iodp: 1,
+            records,
+            reserved: if velocity_code {
+                SpareBits::new()
+            } else {
+                SpareBits(vec![(0, 1)])
+            },
+        };
+        let good = || half(false, vec![record(0), record(0)]);
+
+        let mut with_rate = record(1);
+        with_rate.delta_x_rate = 4;
+        let mut with_drift = record(1);
+        with_drift.delta_a_f1 = 1;
+        let mut with_time = record(1);
+        with_time.time_of_day_s = Some(2);
+        let refused = [
+            half(false, vec![with_rate, record(0)]),
+            half(false, vec![with_drift, record(0)]),
+            half(false, vec![with_time, record(0)]),
+            half(true, vec![record(1)]),
+            half(false, vec![record(1)]),
+            half(false, vec![record(1), record(0), record(0)]),
+            half(true, Vec::new()),
+        ];
+        for bad in refused {
+            let mut store = SbasCorrectionStore::new();
+            store.ingest(&mask_message(), geo(), epoch(10.0)).unwrap();
+            let message = SbasMessage::LongTermCorrections(SbasLongTermCorrections {
+                preamble: 0x53,
+                halves: [bad.clone(), good()],
+            });
+            assert!(
+                matches!(
+                    store.ingest(&message, geo(), epoch(20.0)),
+                    Err(Error::SbasEncode(_))
+                ),
+                "expected {bad:?} to be refused"
+            );
+            assert!(store.long_term(geo(), gps(1)).is_none());
+        }
     }
 }

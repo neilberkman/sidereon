@@ -26,7 +26,8 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    let encoded = decoded.encode();
+    let encoded = decoded.encode().expect("decoded SBAS block encodes");
+    assert_eq!(encoded, body, "decoded SBAS block restates its bytes");
     let reparsed = SbasBlock::decode(&encoded, decoded.form).expect("encoded SBAS block decodes");
     assert_eq!(reparsed, decoded);
 });

@@ -149,3 +149,20 @@ fn captured_mt26_iono_delays_match_rtklib_offsets() {
     assert_eq!(iono.entries[2].vertical_delay, 47);
     assert_eq!(iono.entries[2].givei, 15);
 }
+
+/// Every captured body re-encodes to the 29 bytes it was decoded from,
+/// velocity-code long-term halves and reserved bits included.
+#[test]
+fn captured_bodies_restate_byte_for_byte() {
+    for hex in [
+        "5308DFFC010005FFC00DFFC009FFDFFC001FFDFFDFFFBABBBBBB9BBB80",
+        "9A25C80C8D3F574632853C69A015EEBFF2D7DF580018FE3FCFF79C38C0",
+        "5348DF0000000000FC0000FFC0007FF0003FFC001FFC0007FF8003FF80",
+        "5366819010029EE7ED83018202819BBE1A08BF8008FFA00000004066C0",
+        "9A680053E21F17F897C000000000000000000000000000000000006000",
+    ] {
+        let bytes = body(hex);
+        let block = SbasBlock::decode(&bytes, SbasWireForm::Body226).expect("decode");
+        assert_eq!(block.encode().expect("re-encode"), bytes, "{hex}");
+    }
+}

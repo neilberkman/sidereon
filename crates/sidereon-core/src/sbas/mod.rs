@@ -1,19 +1,21 @@
 #![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-/// Parse EMS and RTKLIB SBAS log lines into [`SbasLogBlock`] records.
+/// Parse EMS, RTKLIB and NovAtel SBAS log lines into [`SbasLogBlock`] records.
 ///
 /// EMS calendar components are converted to GPST, while RTKLIB lines provide
 /// GPST week and seconds-of-week directly. Recognized records retain input
-/// order and classify 29-byte bodies or 32-byte framed blocks; unrecognized
-/// lines are skipped, while invalid recognized epochs or block lengths return
-/// errors.
+/// order, their stated message type, and classify 29-byte bodies or 32-byte
+/// framed blocks. Lines holding no record are listed with their line numbers
+/// in [`SbasLog`], and invalid recognized records return errors.
 pub mod format;
 
 /// Decode and encode SBAS body and CRC-framed wire blocks.
 ///
 /// The decoder maps phase-A message IDs to typed [`SbasMessage`] records and
 /// retains other six-bit IDs as raw unsupported payloads. [`SbasBlock`] keeps
-/// the selected [`SbasWireForm`] so encoding can reproduce either form.
+/// the selected [`SbasWireForm`] and the pad bits, so an unedited decoded
+/// block encodes to the bytes it was read from; the encoder refuses a value it
+/// would otherwise truncate, fill or drop, with an [`SbasEncodeError`].
 pub mod message;
 
 /// Apply stored SBAS corrections through broadcast ephemeris source adapters.
@@ -34,19 +36,24 @@ pub mod source;
 /// through 58.
 pub mod store;
 
-pub use format::{parse_ems_lines, parse_rtklib_lines, SbasLogBlock};
+pub use format::{
+    parse_ems_lines, parse_ems_log, parse_rtklib_lines, parse_rtklib_log, SbasLineDeparture,
+    SbasLineRefusal, SbasLog, SbasLogBlock, SbasLogOptions, SbasRefusedLine, SbasSkippedLine,
+    SbasSkippedLineKind,
+};
 pub use message::{
-    SbasBlock, SbasDoNotUse, SbasFastCorrections, SbasFastDegradation, SbasGeoAlmanac, SbasGeoNav,
-    SbasIgpDelay, SbasIgpMask, SbasIntegrity, SbasIonoDelays, SbasLongTermCorrections,
-    SbasLongTermHalf, SbasLongTermRecord, SbasMessage, SbasMessageType, SbasMixedCorrections,
-    SbasMixedFastCorrections, SbasNetworkTime, SbasPrnMask, SbasUnsupported, SbasWireForm,
-    SpareBits,
+    SbasBlock, SbasDeparture, SbasDoNotUse, SbasEncodeError, SbasFastCorrections,
+    SbasFastDegradation, SbasGeoAlmanac, SbasGeoNav, SbasIgpDelay, SbasIgpMask, SbasIntegrity,
+    SbasIonoDelays, SbasLongTermCorrections, SbasLongTermHalf, SbasLongTermRecord, SbasMessage,
+    SbasMessageType, SbasMixedCorrections, SbasMixedFastCorrections, SbasNetworkTime, SbasPolicy,
+    SbasPrnMask, SbasUnsupported, SbasWireForm, SpareBits,
 };
 pub use source::{
     IssueAwareBroadcast, SbasCorrectedEphemeris, SbasCorrectedEphemerisOwned, SbasSolveMode,
 };
 pub use store::{
     give_variance_m2_for_givei, sat_to_sbas_prn, sbas_prn_to_sat, udre_variance_m2_for_udrei,
-    SbasCorrectionStore, SbasFastCorrection, SbasGeoState, SbasIgp, SbasIonoGrid,
-    SbasLongTermCorrection, SBAS_GIVE_VARIANCE_M2, SBAS_UDRE_VARIANCE_M2,
+    SbasCorrectionStore, SbasFastCorrection, SbasGeoState, SbasIgp, SbasIgpUnavailableReason,
+    SbasIonoGrid, SbasLongTermCorrection, SbasUnavailableIgp, SBAS_GIVE_VARIANCE_M2,
+    SBAS_UDRE_VARIANCE_M2,
 };
