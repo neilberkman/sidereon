@@ -31,14 +31,15 @@
 //! `nav/ESBC00DNK_R_20201770000_01D_RN.rnx`. The committed RN file is genuine RINEX
 //! 3.05 with the five-physical-line layout (epoch + 4 orbit lines); its orbit-4 ΔτN
 //! field is gfzrnx's "unavailable" sentinel `.999999999999e+09`. sidereon's
-//! `parse_glonass` consumes only the epoch + first three orbit lines, never reading
-//! ΔτN (correct for an L1-only single-freq user); locked by
+//! `parse_glonass` reads the fourth orbit line and takes the sentinel as no stated
+//! ΔτN (`GlonassRecord::l1_l2_group_delay_s` is `None`), so no GLONASS group delay
+//! enters the solve; locked by
 //! `committed_rn_fixture_is_rinex_305_five_line_layout_parsed_correctly` in
 //! `src/rinex_nav/tests.rs`. Reference-generation workaround (the committed file is
-//! NEVER modified): RTKLIB EX 2.5.1 parses ΔτN from a 3.05 header and the sentinel
+//! NEVER modified): RTKLIB EX 2.5.1 reads the sentinel as a ΔτN of 1e9 s, which
 //! corrupts the GLONASS pseudorange, so the `.pos` was generated against a throwaway
 //! copy with only its header version edited 3.05 -> 3.04 (`sed '1 s/^     3.05/
-//! 3.04/'`), leaving ΔτN=0 as sidereon uses. Config `glo_spp.conf`:
+//! 3.04/'`), leaving ΔτN=0, the same zero group delay sidereon applies. Config `glo_spp.conf`:
 //! `pos1-posmode=single`, `pos1-frequency=l1`, `pos1-navsys=5` (GPS+GLONASS),
 //! `pos1-elmask=10`, `pos1-ionoopt=brdc`, `pos1-tropopt=off`, `pos1-sateph=brdc`,
 //! `pos2-armode=off`, `out-solformat=xyz` (tropo off isolates the GLONASS

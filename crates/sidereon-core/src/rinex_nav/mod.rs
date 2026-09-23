@@ -1,27 +1,32 @@
-//! RINEX 3.x and 4.xx navigation-message parsing (GPS LNAV/CNAV/CNAV-2, QZSS
-//! CNAV/CNAV-2, Galileo I/NAV and F/NAV, BeiDou D1/D2).
+//! RINEX 2.xx, 3.xx and 4.xx navigation-message reading and writing.
 //!
-//! Version 4 wraps each record in a `> EPH|STO|EOP|ION SVNN MSG` frame marker but
-//! keeps the same fixed-column broadcast-orbit layout for legacy messages, so
-//! those versions share the block parser; only the record grouping differs.
-//! GPS/QZSS CNAV and CNAV-2 use a separate RINEX 4 roster and are parsed into a
-//! CNAV extension. BeiDou CNV1/CNV2/CNV3, QZSS LNAV, NavIC, SBAS, and RINEX 4
-//! GLONASS FDMA frames are recognized as frame boundaries and skipped.
-
+//! Records read: GPS LNAV, CNAV and CNAV-2; QZSS LNAV, CNAV and CNAV-2; Galileo
+//! I/NAV and F/NAV; BeiDou D1/D2; NavIC LNAV (all Keplerian, [`BroadcastRecord`]);
+//! GLONASS FDMA ([`GlonassRecord`]); SBAS ([`SbasRecord`]); and the RINEX 4 system
+//! time offset, Earth orientation and ionosphere frames. BeiDou CNAV-1/2/3 and NavIC
+//! L1 frames are recognized and reported as not decoded, and [`parse_nav_file`]
+//! keeps their text.
 //!
-//! Reads broadcast ephemeris records out of a RINEX navigation file into the
-//! typed [`BroadcastRecord`]s the [`crate::broadcast`] evaluator consumes. This
-//! is deterministic byte-to-record parsing of a fixed-column text format, not a
-//! float recipe: there is no 0-ULP claim here, and a small in-house parser is
+//! Version 4 wraps each record in a `> EPH|STO|EOP|ION SVNN MSG` frame marker and
+//! keeps the version 3 fixed-column layout for the legacy messages; GPS/QZSS CNAV
+//! and CNAV-2 use their own roster. Version 2 files hold one system each (`N` GPS,
+//! `G` GLONASS, `H` SBAS), with a two-digit PRN, a two-digit year and three
+//! columns of indentation; QZSS and Galileo version 2 extensions carry a system
+//! letter as version 3 does.
+//!
+//! This is deterministic byte-to-record parsing of a fixed-column text format, not
+//! a float recipe: there is no 0-ULP claim here, and a small in-house parser is
 //! used in preference to a heavyweight RINEX dependency (the published `rinex`
 //! crate pulls ~90 transitive crates, including computational-geometry stacks,
 //! for what is a fixed-width text read).
 //!
-//! Scope: the GPS, QZSS, Galileo, and BeiDou Keplerian record layouts, plus the
-//! GLONASS four-line state-vector layout (parsed by [`parse_glonass`] and
-//! evaluated by the [`crate::glonass`] RK4 propagator, not the Keplerian path).
-//! Unsupported constellations and message rosters are skipped so a mixed file
-//! parses without error while yielding only the supported systems.
+//! [`parse_nav_file`] reads a whole file into a [`NavFile`] that keeps every
+//! header record and every block, decoded or not, with its text, and
+//! [`encode_nav_file`] writes it back: a file read and written unchanged comes
+//! back byte for byte. The strict readers ([`parse_nav`], [`parse_glonass`],
+//! [`parse_sbas`]) refuse the first block of their kind that departs from the
+//! format; the lenient readers keep every readable record and report each
+//! departure and each block they could not read with its line number and reason.
 
 #![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
@@ -29,7 +34,19 @@ mod store;
 pub use store::{BroadcastStore, NavMessagePreference};
 
 mod write;
-pub use write::encode_nav;
+pub use write::{encode_nav, encode_nav_file, NavWriteError};
+
+mod header;
+pub use header::{HeaderIonoRow, NavHeader, TimeSystemCorrection};
+
+mod body;
+pub use body::{NavEntry, NavEntryKind, NavFile, NavItem, UndecodedBlock, UndecodedReason};
+
+mod frames;
+pub use frames::{EarthOrientation, IonosphereFrame, IonosphereModel, SystemTimeOffset};
+
+mod geo;
+pub use geo::SbasRecord;
 
 use crate::astro::time::model::{GnssWeekTow, TimeScale};
 use crate::astro::time::{civil, gnss};
@@ -55,19 +72,25 @@ fn parse_f64(line: &str, start: usize, end: usize) -> Option<f64> {
     write::d19_12_representable(value).then_some(value)
 }
 
-/// Fallback half-window (seconds, either side of `toe`) for a record that does
-/// not carry a fit interval (Galileo, BeiDou, QZSS, or GPS records where the
-/// fit-interval field is absent or zero). This is a coarse safety window and
-/// computation fallback to reject stale or wrong-week products rather than
-/// silently extrapolating; it is not reported broadcast metadata. Records
-/// carrying an explicit fit interval ([`BroadcastRecord::fit_interval_s`]) use
-/// half of that interval instead.
-pub(crate) const MAX_EPHEMERIS_AGE_S: f64 = 4.0 * SECONDS_PER_HOUR;
+/// Largest distance, seconds, between a query and the `toe` of the Keplerian
+/// record selected for it, as RTKLIB `seleph` bounds it (`rtklib.h`): GPS, QZSS
+/// and NavIC `MAXDTOE + 1` = 7201 s, Galileo `MAXDTOE_GAL` = 14400 s, BeiDou
+/// `MAXDTOE_CMP + 1` = 21601 s. The broadcast fit interval does not enter the
+/// selection; it stays on the record as metadata.
+pub(crate) fn keplerian_max_dtoe_s(system: GnssSystem) -> f64 {
+    match system {
+        GnssSystem::Galileo => 14_400.0,
+        GnssSystem::BeiDou => 21_601.0,
+        _ => 7_201.0,
+    }
+}
 
-/// GLONASS broadcast records are valid +/-15 minutes around their reference
-/// epoch (the nominal half-hour upload cadence), so a query farther than this
-/// reports no ephemeris rather than extrapolating the RK4 integration.
-pub(crate) const GLONASS_MAX_AGE_S: f64 = 15.0 * 60.0;
+/// Largest distance, seconds, between a query and the reference epoch of the
+/// GLONASS record selected for it: RTKLIB `MAXDTOE_GLO`.
+pub(crate) const GLONASS_MAX_AGE_S: f64 = 1800.0;
+/// Largest distance, seconds, between a query and the reference epoch of the SBAS
+/// record selected for it: RTKLIB `MAXDTOE_SBS`.
+pub(crate) const SBAS_MAX_AGE_S: f64 = 360.0;
 /// Step of RTKLIB `ephpos` (`tt = 1E-3`), seconds: a broadcast record's velocity is the
 /// difference of its positions at an epoch and this long after, both evaluated from the
 /// record's reduced time (time of week, or time from the reference epoch) as RTKLIB adds
@@ -82,10 +105,10 @@ const _: () = assert!(
 );
 
 /// A query epoch as a Keplerian broadcast record of `sat` reads it: seconds since J2000
-/// in the record's own time scale (GPS time for GPS, Galileo and QZSS, BDT for BeiDou),
-/// seconds of week in that scale, and whether `sat` takes the BeiDou geostationary
-/// orbit branch. `None` for a system without a Keplerian broadcast model here, or a
-/// non-finite epoch.
+/// in the record's own time scale (GPS time for GPS, Galileo, QZSS and NavIC, BDT for
+/// BeiDou), seconds of week in that scale, and whether `sat` takes the BeiDou
+/// geostationary orbit branch. `None` for a system without a Keplerian broadcast model
+/// here, or a non-finite epoch.
 ///
 /// The seconds of week are formed as RTKLIB's `gtime_t` holds an instant, whole seconds
 /// and a fraction apart: the whole-second part of `t_j2000_s` is placed in its week with
@@ -95,8 +118,9 @@ const _: () = assert!(
 /// after mid-January 2000 or before mid-December 1999): there the fraction is a multiple
 /// of 2^-32 s, which doubles below one week (2^-33 s spacing) resolve. Adding
 /// `GPS_EPOCH_TO_J2000_S` to the J2000 seconds first would instead round to the 2.4e-7 s
-/// spacing of doubles near 1.4e9 s and drop the last bit of a fractional epoch. The BDT seconds since J2000, `t_j2000_s - 14`,
-/// are likewise rounded once.
+/// spacing of doubles near 1.4e9 s and drop the last bit of a fractional epoch. The BDT
+/// seconds since J2000, `t_j2000_s - 14`, are likewise rounded once. NavIC week and
+/// seconds of week are read on the GPS week, as RTKLIB reads the RINEX `IRN week`.
 pub(crate) fn query_native_time(sat: GnssSatelliteId, t_j2000_s: f64) -> Option<(f64, f64, bool)> {
     if !t_j2000_s.is_finite() {
         return None;
@@ -116,7 +140,7 @@ pub(crate) fn query_native_time(sat: GnssSatelliteId, t_j2000_s: f64) -> Option<
         }
     };
     match sat.system {
-        GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::Qzss => {
+        GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::Qzss | GnssSystem::Navic => {
             Some((t_j2000_s, seconds_of_week(gps_whole_sow_s), false))
         }
         // BDT runs GPST - 14 s; its week epoch is a whole number of GPS weeks later.
@@ -131,17 +155,23 @@ pub(crate) fn query_native_time(sat: GnssSatelliteId, t_j2000_s: f64) -> Option<
     }
 }
 
-/// A record's `toe` in seconds since J2000 in the record's own time scale, the scale
-/// [`query_native_time`] returns. The whole weeks and the epoch offsets are whole
-/// seconds and are summed first, so a fractional `toe` keeps every bit.
-pub(crate) fn toe_native_j2000_s(record: &BroadcastRecord) -> f64 {
-    let epoch_offset_s = match record.satellite_id.system {
-        GnssSystem::BeiDou => crate::constants::BDS_EPOCH_MINUS_GPS_EPOCH_S,
+/// A week/TOW pair in its own scale as continuous seconds since J2000 in that scale:
+/// the whole weeks and the epoch offsets are whole seconds and are summed first, so a
+/// fractional TOW keeps every bit.
+pub(crate) fn week_tow_native_j2000_s(week_tow: GnssWeekTow) -> f64 {
+    let epoch_offset_s = match week_tow.system {
+        TimeScale::Bdt => crate::constants::BDS_EPOCH_MINUS_GPS_EPOCH_S,
         _ => 0.0,
     };
-    (f64::from(record.toe.week) * SECONDS_PER_WEEK + epoch_offset_s
+    (f64::from(week_tow.week) * SECONDS_PER_WEEK + epoch_offset_s
         - crate::constants::GPS_EPOCH_TO_J2000_S)
-        + record.toe.tow_s
+        + week_tow.tow_s
+}
+
+/// A record's `toe` in seconds since J2000 in the record's own time scale, the scale
+/// [`query_native_time`] returns.
+pub(crate) fn toe_native_j2000_s(record: &BroadcastRecord) -> f64 {
+    week_tow_native_j2000_s(record.toe)
 }
 
 /// A record's reduced time `tk` one [`EPHPOS_STEP_S`] later, rounded as RTKLIB forms it.
@@ -162,8 +192,22 @@ const GPS_NOMINAL_FIT_INTERVAL_S: f64 = 4.0 * SECONDS_PER_HOUR;
 /// (21600.0 s). The old constant was an inherited defect now independently
 /// verified against primary text.
 const GPS_LEGACY_EXTENDED_FIT_INTERVAL_S: f64 = 6.0 * SECONDS_PER_HOUR;
+/// QZSS fit interval for fit flag 0, two hours (IS-QZSS-PNT), as RTKLIB reads it.
+const QZSS_SHORT_FIT_INTERVAL_S: f64 = 2.0 * SECONDS_PER_HOUR;
+/// QZSS fit interval for fit flag 1, "more than two hours" in IS-QZSS-PNT, which RTKLIB
+/// `decode_eph` reads as four hours.
+const QZSS_LONG_FIT_INTERVAL_S: f64 = 4.0 * SECONDS_PER_HOUR;
 const GLONASS_FREQ_CHANNEL_MIN: i32 = -7;
 const GLONASS_FREQ_CHANNEL_MAX: i32 = 6;
+/// GLONASS G1 and G2 FDMA base frequencies (Hz), RTKLIB `FREQ1_GLO` and `FREQ2_GLO`.
+const GLONASS_G1_BASE_HZ: f64 = 1.602e9;
+const GLONASS_G2_BASE_HZ: f64 = 1.246e9;
+/// The RINEX 3.05/4.00 value of a GLONASS L1/L2 group delay difference that is not
+/// known, `.999999999999E+09`.
+const GLONASS_DELAY_UNKNOWN_S: f64 = 0.999_999_999_999e9;
+/// The RINEX 3.05/4.00 value of GLONASS status or health flags that are not known,
+/// `999999999999`.
+const GLONASS_FLAGS_UNKNOWN: f64 = 999_999_999_999.0;
 
 /// Whether a GLONASS frequency channel lies in the `-7..=6` FDMA allocation,
 /// the channels a carrier frequency is resolved for. The readers keep a stated
@@ -172,15 +216,35 @@ pub(crate) fn valid_glonass_frequency_channel(channel: i32) -> bool {
     (GLONASS_FREQ_CHANNEL_MIN..=GLONASS_FREQ_CHANNEL_MAX).contains(&channel)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RinexVersion {
-    major: u8,
-    minor: u8,
+/// A RINEX version number as the `RINEX VERSION / TYPE` record states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct NavVersion {
+    /// Major version, 2, 3 or 4.
+    pub major: u8,
+    /// Minor version, the digits after the point (`3.05` is minor 5).
+    pub minor: u8,
 }
 
-impl RinexVersion {
+impl NavVersion {
+    /// Build a version.
+    pub const fn new(major: u8, minor: u8) -> Self {
+        Self { major, minor }
+    }
+
     fn gps_fit_interval_uses_legacy_flag(self) -> bool {
         self.major == 3 && self.minor <= 2
+    }
+
+    /// Whether a GLONASS record carries the fourth broadcast-orbit line (status flags,
+    /// L1/L2 group delay difference, URAI and health flags), added in RINEX 3.05.
+    pub(crate) fn glonass_has_fourth_orbit_line(self) -> bool {
+        self.major >= 4 || (self.major == 3 && self.minor >= 5)
+    }
+}
+
+impl core::fmt::Display for NavVersion {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}.{:02}", self.major, self.minor)
     }
 }
 
@@ -203,10 +267,16 @@ pub enum NavMessage {
     GalileoInav,
     /// Galileo F/NAV message (E5a).
     GalileoFnav,
+    /// A Galileo record whose data-source word names neither I/NAV nor F/NAV alone:
+    /// no source bit, or both the I/NAV bits (0 or 2) and the F/NAV bit (1). The
+    /// word is kept on the record ([`BroadcastRecord::galileo_data_sources`]).
+    GalileoUnclassified,
     /// BeiDou D1 message (MEO/IGSO satellites).
     BeidouD1,
     /// BeiDou D2 message (geostationary satellites).
     BeidouD2,
+    /// NavIC (IRNSS) legacy navigation message, RINEX 4 token `LNAV`.
+    NavicLnav,
 }
 
 impl NavMessage {
@@ -222,16 +292,25 @@ impl NavMessage {
 /// Broadcast issue-of-data plus the navigation message identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BroadcastIssue {
-    /// The native issue value: IODE for GPS, IODnav for Galileo.
+    /// The native issue value: IODE for GPS and QZSS, IODnav for Galileo, AODE for
+    /// BeiDou, IODEC for NavIC.
     pub issue: u32,
     /// The navigation message carrying the issue value.
     pub message: NavMessage,
 }
 
+/// NavIC S-band carrier, Hz (RTKLIB `FREQs`).
+const NAVIC_S_HZ: f64 = 2.492028e9;
+/// NavIC L5 carrier, Hz (RTKLIB `FREQL5`).
+const NAVIC_L5_HZ: f64 = 1.17645e9;
+/// The factor on the NavIC TGD for the L5 single-frequency user, `(f_S / f_L5)²`,
+/// formed as RTKLIB `SQR(FREQs/FREQL5)` forms it.
+const NAVIC_L5_TGD_FACTOR: f64 = (NAVIC_S_HZ / NAVIC_L5_HZ) * (NAVIC_S_HZ / NAVIC_L5_HZ);
+
 /// A broadcast group-delay term carried by a RINEX NAV record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BroadcastGroupDelayTerm {
-    /// GPS/QZSS LNAV TGD.
+    /// GPS/QZSS LNAV TGD (also the NavIC TGD).
     GpsTgd,
     /// Galileo BGD E5a/E1.
     GalileoBgdE5aE1,
@@ -275,7 +354,7 @@ pub enum CnavSignal {
 /// Per-signal broadcast group delays preserved from one NAV record.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct BroadcastGroupDelays {
-    /// GPS/QZSS LNAV TGD, seconds.
+    /// GPS/QZSS LNAV TGD (and the NavIC TGD), seconds.
     pub gps_tgd_s: Option<f64>,
     /// Galileo BGD E5a/E1, seconds.
     pub galileo_bgd_e5a_e1_s: Option<f64>,
@@ -429,18 +508,26 @@ impl BroadcastGroupDelays {
     ///
     /// BeiDou has no signal choice at this store level, so it keeps the previous
     /// TGD1 behavior. CNAV-family clock evaluation keeps the record-level
-    /// default of treating a missing TGD or L1 C/A ISC as zero. Callers that know
-    /// their signal should use [`Self::get`] or
+    /// default of treating a missing TGD or L1 C/A ISC as zero. A Galileo record whose
+    /// message is unclassified uses the BGD E5b/E1, as RTKLIB's default Galileo
+    /// selection does. NavIC LNAV is the L5 single-frequency user's term: the IRNSS SPS
+    /// ICD 1.1 section 6.2.1.5 states `(Δt_SV)L5 = Δt_SV - γ·TGD` with
+    /// `γ = (f_S / f_L5)²`, which RTKLIB `prange` applies as `SQR(FREQs/FREQL5)·TGD`.
+    /// Callers that know their signal should use [`Self::get`] or
     /// [`Self::cnav_single_frequency_correction_s`].
     pub const fn for_message(self, system: GnssSystem, message: NavMessage) -> Option<f64> {
         match (system, message) {
             (GnssSystem::Gps, NavMessage::GpsLnav) | (GnssSystem::Qzss, NavMessage::QzssLnav) => {
                 self.get(BroadcastGroupDelayTerm::GpsTgd)
             }
+            (GnssSystem::Navic, NavMessage::NavicLnav) => match self.gps_tgd_s {
+                Some(tgd) => Some(NAVIC_L5_TGD_FACTOR * tgd),
+                None => None,
+            },
             (GnssSystem::Galileo, NavMessage::GalileoFnav) => {
                 self.get(BroadcastGroupDelayTerm::GalileoBgdE5aE1)
             }
-            (GnssSystem::Galileo, NavMessage::GalileoInav) => {
+            (GnssSystem::Galileo, NavMessage::GalileoInav | NavMessage::GalileoUnclassified) => {
                 self.get(BroadcastGroupDelayTerm::GalileoBgdE5bE1)
             }
             (GnssSystem::BeiDou, NavMessage::BeidouD1 | NavMessage::BeidouD2) => {
@@ -528,8 +615,8 @@ pub fn is_beidou_geo(sat: GnssSatelliteId) -> bool {
 }
 
 /// A Klobuchar-8 broadcast ionosphere coefficient set (the eight alpha/beta
-/// values transmitted by GPS and BeiDou; the same model serves both, evaluated
-/// per carrier - see [`crate::ionex::klobuchar_native`]).
+/// values transmitted by GPS, QZSS, BeiDou and NavIC; the same model serves each,
+/// evaluated per carrier - see [`crate::ionex::klobuchar_native`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KlobucharAlphaBeta {
     /// Cosine-amplitude polynomial coefficients (a0..a3).
@@ -539,11 +626,14 @@ pub struct KlobucharAlphaBeta {
 }
 
 /// Broadcast ionosphere-correction coefficients from a RINEX header's
-/// `IONOSPHERIC CORR` lines or RINEX 4 body `> ION` frames.
+/// `IONOSPHERIC CORR` (or version 2 `ION ALPHA`/`ION BETA`) records or RINEX 4
+/// body `> ION` frames.
 ///
-/// Captures the Klobuchar-8 sets used by GPS (`GPSA`/`GPSB`) and BeiDou
-/// (`BDSA`/`BDSB`), plus Galileo's three NeQuick-G effective-ionisation
-/// coefficients (`GAL`). QZSS and NavIC Klobuchar sets are not retained.
+/// Captures the Klobuchar-8 sets of GPS (`GPSA`/`GPSB`, `LNAV`), QZSS
+/// (`QZSA`/`QZSB`, `LNAV`), BeiDou (`BDSA`/`BDSB`, `D1D2`) and NavIC
+/// (`IRNA`/`IRNB`, `LNAV`), Galileo's three NeQuick-G effective-ionisation
+/// coefficients and disturbance flags (`GAL`, `IFNV`), and the nine BeiDou BDGIM
+/// coefficients of a RINEX 4 `CNVX` frame.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct IonoCorrections {
     /// GPS broadcast Klobuchar coefficients (`GPSA`/`GPSB`), if present.
@@ -552,6 +642,15 @@ pub struct IonoCorrections {
     pub beidou: Option<KlobucharAlphaBeta>,
     /// Galileo broadcast NeQuick-G coefficients (`GAL`), if present.
     pub galileo: Option<GalileoNequickCoeffs>,
+    /// Galileo ionospheric disturbance flags (the fourth `GAL` value), as stated.
+    pub galileo_disturbance_flags: Option<f64>,
+    /// QZSS broadcast Klobuchar coefficients (`QZSA`/`QZSB`), if present.
+    pub qzss: Option<KlobucharAlphaBeta>,
+    /// NavIC broadcast Klobuchar coefficients (`IRNA`/`IRNB`), if present.
+    pub navic: Option<KlobucharAlphaBeta>,
+    /// BeiDou global ionospheric model (BDGIM) coefficients `alpha1..alpha9` from a
+    /// RINEX 4 `CNVX` ionosphere frame, if present.
+    pub beidou_bdgim: Option<[f64; 9]>,
 }
 
 /// One parsed GLONASS broadcast record: a PZ-90.11 ECEF state vector and the
@@ -561,9 +660,13 @@ pub struct IonoCorrections {
 pub struct GlonassRecord {
     /// The transmitting satellite.
     pub satellite_id: GnssSatelliteId,
-    /// Reference epoch as seconds past J2000 in **UTC** (leap-second-independent;
-    /// the store adds the GPS−UTC offset to compare with the GPST-aligned query).
+    /// Reference epoch `tb` as seconds past J2000 in **UTC**: the record's epoch
+    /// rounded to the 15-minute grid, as RTKLIB `decode_geph` rounds it (`tb` is a
+    /// count of 15-minute intervals, GLONASS ICD). [`Self::toe_gpst_j2000_s`] places it
+    /// on the GPS timeline.
     pub toe_utc_j2000_s: f64,
+    /// The epoch as the record states it, seconds past J2000 in UTC.
+    pub epoch_utc_j2000_s: f64,
     /// PZ-90.11 ECEF position at the reference epoch (meters).
     pub pos_m: [f64; 3],
     /// PZ-90.11 ECEF velocity at the reference epoch (meters/second).
@@ -574,10 +677,138 @@ pub struct GlonassRecord {
     pub clk_bias: f64,
     /// Relative frequency offset (+GammaN, dimensionless).
     pub gamma_n: f64,
-    /// Satellite health (0 is healthy).
+    /// Satellite health, BROADCAST ORBIT-1 field 4 (0 is healthy).
     pub sv_health: f64,
-    /// FDMA frequency-channel number.
+    /// FDMA frequency-channel number. A stated value above 128 is a receiver's
+    /// unsigned spelling of a negative channel and is read as that value less 256,
+    /// as RTKLIB `decode_geph` reads it.
     pub freq_channel: i32,
+    /// The frequency channel field (BROADCAST ORBIT-2 field 4) as stated, before a value
+    /// above 128 is folded into [`Self::freq_channel`]. The writer states it again while
+    /// it folds to `freq_channel`.
+    pub stated_freq_channel: i32,
+    /// Message frame time (line 0 field 3) as stated: seconds of the UTC week in
+    /// RINEX 3 and 4, seconds of the UTC day in RINEX 2. `None` when blank.
+    pub message_frame_time_s: Option<f64>,
+    /// Age of operational information `E_n` (days), BROADCAST ORBIT-3 field 4.
+    pub age_days: Option<f64>,
+    /// Status flags (RINEX 3.05/4.00 BROADCAST ORBIT-4 field 1) as stated.
+    pub status_flags: Option<f64>,
+    /// L1/L2 group delay difference field `ΔτN` (seconds, BROADCAST ORBIT-4 field 2)
+    /// as stated, including the `.999999999999E+09` value for an unknown delay; see
+    /// [`Self::l1_l2_group_delay_s`].
+    pub l1_l2_group_delay_field_s: Option<f64>,
+    /// Raw accuracy index URAI `F_T` (BROADCAST ORBIT-4 field 3) as stated.
+    pub urai: Option<f64>,
+    /// Health flags (BROADCAST ORBIT-4 field 4) as stated.
+    pub health_flags: Option<f64>,
+}
+
+impl GlonassRecord {
+    /// The reference epoch in GPS time, seconds since J2000: `tb` in UTC plus GPS - UTC
+    /// from the leap-second table at that UTC instant, as RTKLIB `utc2gpst` converts it.
+    /// The header `LEAP SECONDS` count does not enter it.
+    pub fn toe_gpst_j2000_s(&self) -> f64 {
+        self.toe_utc_j2000_s + gps_minus_utc_at_utc_j2000_s(self.toe_utc_j2000_s)
+    }
+
+    /// The L1/L2 group delay difference `ΔτN` in seconds, or `None` when the record has
+    /// no fourth orbit line, leaves the field blank, or states it as not known
+    /// (`.999999999999E+09`).
+    pub fn l1_l2_group_delay_s(&self) -> Option<f64> {
+        self.l1_l2_group_delay_field_s
+            .filter(|value| *value != GLONASS_DELAY_UNKNOWN_S)
+    }
+
+    /// The status flags as a word: the stated value converted to the nearest integer, as
+    /// RINEX 3.05 section 6.9 reads a bitwise field. `None` when blank, not known
+    /// (`999999999999`), or not a non-negative value that fits `u32`.
+    pub fn status_flags_word(&self) -> Option<u32> {
+        glonass_flags_word(self.status_flags)
+    }
+
+    /// The health flags as a word, read as [`Self::status_flags_word`] reads the status
+    /// flags.
+    pub fn health_flags_word(&self) -> Option<u32> {
+        glonass_flags_word(self.health_flags)
+    }
+
+    /// Whether the record reports the satellite healthy, by the RINEX 3.05 Table A10
+    /// (4.01 Table A15) health fields:
+    ///
+    /// - health, the MSB of `Bn`, is 0 (1 is unhealthy);
+    /// - where the health flags are stated with `AC` (bit 1) set, the almanac health `C`
+    ///   (bit 0) is 1 (healthy); `C` is ignored when `AC` is 0;
+    /// - where the health flags are stated, `l(3)` (bit 2, the health bit of string 3)
+    ///   is 0. The tables give `l(3)` for GLONASS-M/K only, valid when the status flags'
+    ///   type indicator `M` (bits 7-8) is `01`, so a record whose status flags state
+    ///   another type does not use it; where the status flags are not stated, `l(3)` is
+    ///   used, as RTKLIB demo5 uses it.
+    ///
+    /// RTKLIB demo5 forms `svh = Bn | flags << 1` and excludes a satellite with
+    /// `(svh & 9) != 0 || (svh & 6) == 4`, which is the same rule without the type
+    /// condition on `l(3)`.
+    pub fn is_healthy(&self) -> bool {
+        if self.sv_health != 0.0 {
+            return false;
+        }
+        let Some(flags) = self.health_flags_word() else {
+            return true;
+        };
+        let almanac_reported = flags & 0b010 != 0;
+        let almanac_healthy = flags & 0b001 != 0;
+        if almanac_reported && !almanac_healthy {
+            return false;
+        }
+        let string3_unhealthy = flags & 0b100 != 0;
+        let l3_valid = self
+            .status_flags_word()
+            .is_none_or(|status| (status >> 7) & 0b11 == 0b01);
+        !(string3_unhealthy && l3_valid)
+    }
+
+    /// Satellite clock bias, seconds, at satellite clock time `t_sv_gpst_j2000_s` (GPS
+    /// time scale, seconds past J2000): RTKLIB `geph2clk`, the GLONASS counterpart of
+    /// [`crate::ephemeris::satellite_clock_bias_s`]. The time from the reference epoch
+    /// is refined twice to remove the satellite clock from a time read on that clock;
+    /// subtracting the returned bias from the satellite clock time gives system time,
+    /// the epoch the orbit and its clock are evaluated at.
+    pub fn clock_bias_s(&self, t_sv_gpst_j2000_s: f64) -> f64 {
+        crate::glonass::clock_offset_s(
+            self.clk_bias,
+            self.gamma_n,
+            t_sv_gpst_j2000_s - self.toe_gpst_j2000_s(),
+        )
+    }
+
+    /// Single-frequency (G1) group delay, seconds, as RTKLIB `prange` applies the
+    /// broadcast `ΔτN` to a G1 pseudorange: `-ΔτN / (γ - 1)` with
+    /// `γ = (f_G1 / f_G2)²`, subtracted from the satellite clock as the other systems'
+    /// TGD is. `None` where [`Self::l1_l2_group_delay_s`] is `None`.
+    pub fn single_frequency_group_delay_s(&self) -> Option<f64> {
+        let dtaun = self.l1_l2_group_delay_s()?;
+        let ratio = GLONASS_G1_BASE_HZ / GLONASS_G2_BASE_HZ;
+        let gamma = ratio * ratio;
+        Some(-dtaun / (gamma - 1.0))
+    }
+}
+
+fn glonass_flags_word(value: Option<f64>) -> Option<u32> {
+    let value = value?;
+    if value == GLONASS_FLAGS_UNKNOWN || !value.is_finite() {
+        return None;
+    }
+    let word = value.round();
+    if word < 0.0 || word > f64::from(u32::MAX) {
+        return None;
+    }
+    Some(word as u32)
+}
+
+/// GPS - UTC, seconds, at a UTC instant given as seconds past J2000, from the crate's
+/// leap-second table.
+pub(crate) fn gps_minus_utc_at_utc_j2000_s(utc_j2000_s: f64) -> f64 {
+    crate::astro::time::scales::gps_utc_offset_s(2_451_545.0 + utc_j2000_s / 86_400.0)
 }
 
 /// A GLONASS record skipped by [`parse_glonass_lenient`] because its slot token
@@ -590,10 +821,13 @@ pub struct GlonassRecord {
 pub struct SkippedGlonass {
     /// The 3-character satellite token as it appeared in the file (`R00`).
     pub token: String,
+    /// 1-based line number of the record's first line.
+    pub line: usize,
 }
 
-/// The result of a lenient GLONASS parse: the representable records plus the
-/// slot tokens that were skipped.
+/// The result of a lenient GLONASS parse: the readable records, the slot tokens
+/// that were skipped, the records that could not be read, and the departures read
+/// through.
 ///
 /// Mirrors the partial-success reporting used elsewhere for unrepresentable
 /// input (`RinexObs::skipped_records`, [`crate::constellation::Catalog`]): a
@@ -605,6 +839,36 @@ pub struct GlonassParse {
     pub records: Vec<GlonassRecord>,
     /// Slots that could not be represented and were skipped, in file order.
     pub skipped: Vec<SkippedGlonass>,
+    /// Records of representable slots that could not be read, with the reason.
+    pub invalid: Vec<SkippedNavBlock>,
+    /// Records kept although they depart from the format, with the departure.
+    pub departures: Vec<NavDiagnostic>,
+}
+
+/// Fields of a legacy broadcast record that the orbit and clock models do not read,
+/// as the record states them. `None` for a blank field or one the source does not
+/// carry. The writer restates each one in the column it was read from.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StatedNavFields {
+    /// BROADCAST ORBIT-5 field 2: GPS/QZSS codes on L2, the Galileo data-source word
+    /// (see [`BroadcastRecord::galileo_data_sources`]), spare for BeiDou and NavIC.
+    pub orbit5_field2: Option<f64>,
+    /// BROADCAST ORBIT-5 field 4: GPS/QZSS L2 P data flag, spare elsewhere.
+    pub orbit5_field4: Option<f64>,
+    /// BROADCAST ORBIT-6 field 4: GPS/QZSS IODC, NavIC spare. Galileo's BGD E5b/E1 and
+    /// BeiDou's TGD2 in this column are group delays and are held in
+    /// [`BroadcastRecord::group_delays`].
+    pub orbit6_field4: Option<f64>,
+    /// BROADCAST ORBIT-7 field 1: transmission time of message, seconds of week, as
+    /// stated (including a `.9999E+09` "not known" value).
+    pub transmission_time_sow: Option<f64>,
+    /// BROADCAST ORBIT-7 field 2: the GPS fit interval, the QZSS fit flag, the BeiDou
+    /// AODC, spare for Galileo and NavIC, as stated.
+    pub orbit7_field2: Option<f64>,
+    /// BROADCAST ORBIT-7 field 3 (spare).
+    pub orbit7_field3: Option<f64>,
+    /// BROADCAST ORBIT-7 field 4 (spare).
+    pub orbit7_field4: Option<f64>,
 }
 
 /// One parsed broadcast navigation record.
@@ -614,11 +878,14 @@ pub struct BroadcastRecord {
     pub satellite_id: GnssSatelliteId,
     /// The navigation message the record carries.
     pub message: NavMessage,
-    /// Broadcast issue-of-data for issue-matched correction products.
-    pub issue_of_data: BroadcastIssue,
-    /// Native broadcast week number (from the broadcast record).
+    /// Broadcast issue-of-data for issue-matched correction products. `None` for the
+    /// GPS/QZSS CNAV family, whose RINEX 4 record carries no issue of data.
+    pub issue_of_data: Option<BroadcastIssue>,
+    /// Native broadcast week number as the record states it.
     pub week: u32,
-    /// Scale-tagged ephemeris reference time (`toe`).
+    /// Scale-tagged ephemeris reference time (`toe`). Its week is the stated week
+    /// moved by a whole week where that places `toe` within half a week of `toc`, as
+    /// RTKLIB `adjweek` does; [`Self::week`] keeps the stated week.
     pub toe: GnssWeekTow,
     /// Scale-tagged clock reference time (`toc`).
     pub toc: GnssWeekTow,
@@ -632,15 +899,19 @@ pub struct BroadcastRecord {
     pub cnav: Option<CnavParameters>,
     /// Satellite health word (0 is healthy for the GPS/Galileo nominal case).
     pub sv_health: f64,
-    /// Signal-in-space accuracy: GPS URA (m) / Galileo SISA (m).
-    pub sv_accuracy_m: f64,
-    /// GPS curve-fit interval in seconds, centered on `toe` (IS-GPS-200): when
-    /// present, the record is valid for `toe ± fit_interval_s / 2`. `None` when
-    /// absent or unknown (including Galileo, BeiDou, QZSS, and GPS records
-    /// where the fit-interval field is blank or zero); orbit selection falls
-    /// back to [`MAX_EPHEMERIS_AGE_S`] as a computational safety window rather
-    /// than reported broadcast metadata.
+    /// Signal-in-space accuracy (m): the stated GPS/QZSS/NavIC URA, Galileo SISA or
+    /// BeiDou URA, or the nominal value of the CNAV URA_ED index. `None` for the CNAV
+    /// indices 15 and -16, which carry no accuracy prediction.
+    pub sv_accuracy_m: Option<f64>,
+    /// Curve-fit interval in seconds, centered on `toe`, as the record states it:
+    /// GPS ORBIT-7 field 2 (hours in RINEX 2 and 3.03+, the 0/1 flag of RINEX
+    /// 3.00-3.02), the QZSS fit flag read as RTKLIB reads it (0 two hours, 1 four
+    /// hours). `None` when absent or unknown, and for Galileo, BeiDou, NavIC and the
+    /// CNAV family, whose records state none. Broadcast record selection does not use
+    /// it (see [`BroadcastStore`]).
     pub fit_interval_s: Option<f64>,
+    /// Fields the record states that the orbit and clock models do not read.
+    pub stated: StatedNavFields,
 }
 
 impl BroadcastRecord {
@@ -654,14 +925,14 @@ impl BroadcastRecord {
         match self.satellite_id.system {
             GnssSystem::Galileo => ConstellationConstants::GALILEO,
             GnssSystem::BeiDou => ConstellationConstants::BEIDOU,
-            // GPS (and any other Keplerian system) use the GPS constants.
+            // GPS, QZSS and NavIC use the GPS constants, as RTKLIB `eph2pos` does.
             _ => ConstellationConstants::GPS,
         }
     }
 
-    /// Single-frequency group delay of this message, seconds: GPS and QZSS LNAV TGD,
-    /// Galileo I/NAV BGD E5b/E1, Galileo F/NAV BGD E5a/E1, BeiDou TGD1, CNAV TGD less
-    /// ISC L1C/A. [`crate::broadcast::satellite_state`] subtracts it in
+    /// Single-frequency group delay of this message, seconds: GPS, QZSS and NavIC LNAV
+    /// TGD, Galileo I/NAV BGD E5b/E1, Galileo F/NAV BGD E5a/E1, BeiDou TGD1, CNAV TGD
+    /// less ISC L1C/A. [`crate::broadcast::satellite_state`] subtracts it in
     /// `dt_clock_total_s`; the store's clock leaves it out, as RTKLIB `satposs` does, and
     /// returns it separately through `single_frequency_group_delay_s` for the
     /// single-frequency pseudorange model, as RTKLIB `pntpos` applies it.
@@ -669,6 +940,68 @@ impl BroadcastRecord {
         self.group_delays
             .for_message(self.satellite_id.system, self.message)
             .unwrap_or(0.0)
+    }
+
+    /// GPS/QZSS IODC (BROADCAST ORBIT-6 field 4), as stated.
+    pub fn iodc(&self) -> Option<f64> {
+        if matches!(self.satellite_id.system, GnssSystem::Gps | GnssSystem::Qzss) {
+            self.stated.orbit6_field4
+        } else {
+            None
+        }
+    }
+
+    /// GPS/QZSS codes on L2 (BROADCAST ORBIT-5 field 2), as stated.
+    pub fn l2_codes(&self) -> Option<f64> {
+        if matches!(self.satellite_id.system, GnssSystem::Gps | GnssSystem::Qzss) {
+            self.stated.orbit5_field2
+        } else {
+            None
+        }
+    }
+
+    /// GPS/QZSS L2 P data flag (BROADCAST ORBIT-5 field 4), as stated.
+    pub fn l2p_data_flag(&self) -> Option<f64> {
+        if matches!(self.satellite_id.system, GnssSystem::Gps | GnssSystem::Qzss) {
+            self.stated.orbit5_field4
+        } else {
+            None
+        }
+    }
+
+    /// The Galileo data-source word (BROADCAST ORBIT-5 field 2): bit 0 I/NAV E1-B, bit 1
+    /// F/NAV E5a-I, bit 2 I/NAV E5b-I, bit 8 clock for E5a/E1, bit 9 clock for E5b/E1.
+    /// The stated value is converted to the nearest integer, as RINEX 3.05 section 6.9
+    /// reads a bitwise field. `None` for another system, a blank field, or a value
+    /// outside `u32`.
+    pub fn galileo_data_sources(&self) -> Option<u32> {
+        if self.satellite_id.system != GnssSystem::Galileo {
+            return None;
+        }
+        let value = self.stated.orbit5_field2?.round();
+        if !(0.0..=f64::from(u32::MAX)).contains(&value) {
+            None
+        } else {
+            Some(value as u32)
+        }
+    }
+
+    /// BeiDou AODC (BROADCAST ORBIT-7 field 2), as stated.
+    pub fn beidou_aodc(&self) -> Option<f64> {
+        if self.satellite_id.system == GnssSystem::BeiDou {
+            self.stated.orbit7_field2
+        } else {
+            None
+        }
+    }
+
+    /// Transmission time of message, seconds of week: the CNAV `t_tm`, or the legacy
+    /// BROADCAST ORBIT-7 field 1 as stated.
+    pub fn transmission_time_sow(&self) -> Option<f64> {
+        match self.cnav {
+            Some(cnav) => Some(cnav.transmission_time_sow),
+            None => self.stated.transmission_time_sow,
+        }
     }
 
     /// Build a GPS LNAV record from decoded navigation-message subframes.
@@ -702,6 +1035,8 @@ impl BroadcastRecord {
     /// - The 4-bit URA index maps to its IS-GPS-200N 20.3.3.3.1.3 meters value;
     ///   index 15 (no accuracy prediction / not to be used) carries no usable
     ///   bound and is rejected with [`LnavRecordError::NoUraPrediction`].
+    /// - The IODC is kept in [`StatedNavFields::orbit6_field4`] as a RINEX record
+    ///   states it; the fit interval is written in hours.
     ///
     /// LNAV is the GPS L1 C/A message, so a non-GPS `satellite_id` is rejected.
     pub fn from_lnav(
@@ -768,10 +1103,10 @@ impl BroadcastRecord {
         Ok(BroadcastRecord {
             satellite_id,
             message: NavMessage::GpsLnav,
-            issue_of_data: BroadcastIssue {
+            issue_of_data: Some(BroadcastIssue {
                 issue: decoded.iode as u32,
                 message: NavMessage::GpsLnav,
-            },
+            }),
             week: full_week,
             toe,
             toc,
@@ -780,8 +1115,13 @@ impl BroadcastRecord {
             group_delays: BroadcastGroupDelays::gps_lnav(decoded.tgd),
             cnav: None,
             sv_health: decoded.sv_health as f64,
-            sv_accuracy_m,
+            sv_accuracy_m: Some(sv_accuracy_m),
             fit_interval_s: Some(fit_interval_s),
+            stated: StatedNavFields {
+                orbit6_field4: Some(decoded.iodc as f64),
+                orbit7_field2: Some(fit_interval_s / SECONDS_PER_HOUR),
+                ..StatedNavFields::default()
+            },
         })
     }
 }
@@ -934,7 +1274,8 @@ fn broadcast_time_scale(system: GnssSystem) -> TimeScale {
     }
 }
 
-/// Why a RINEX NAV file could not be parsed.
+/// Why a RINEX NAV file, or one block of it, could not be read as the format lays it
+/// out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NavParseError {
     /// The header did not declare a supported RINEX navigation file.
@@ -955,6 +1296,16 @@ pub enum NavParseError {
         /// Which header field failed.
         field: &'static str,
     },
+    /// A non-blank body line that belongs to no record.
+    UnexpectedLine {
+        /// 1-based line number.
+        line: usize,
+    },
+    /// A record followed by non-blank lines beyond its layout.
+    ExtraRecordLines {
+        /// The satellite whose record the lines follow.
+        satellite: String,
+    },
 }
 
 impl core::fmt::Display for NavParseError {
@@ -969,333 +1320,230 @@ impl core::fmt::Display for NavParseError {
             NavParseError::BadHeaderField { field } => {
                 write!(f, "bad/missing {field} field in navigation header")
             }
+            NavParseError::UnexpectedLine { line } => {
+                write!(f, "line {line} belongs to no navigation record")
+            }
+            NavParseError::ExtraRecordLines { satellite } => write!(
+                f,
+                "navigation record for {satellite} is followed by lines beyond its layout"
+            ),
         }
     }
 }
 
 impl std::error::Error for NavParseError {}
 
-/// Diagnostic for a supported navigation block that lenient parsing could not decode or validate.
-/// The lenient parsers retain the block's satellite token and the [`NavParseError`] display text
-/// in [`Self::satellite`] and [`Self::message`].
+/// Diagnostic for a navigation block that lenient parsing could not decode or validate.
+/// The lenient parsers retain the block's satellite token, its first line number, and the
+/// [`NavParseError`] display text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkippedNavBlock {
-    /// Satellite token associated with the failed supported block: v3 trims columns 0..3
-    /// of its first line, while v4 copies the SV token from the frame marker.
+    /// Satellite token associated with the failed block: v2/v3 trim the record's
+    /// satellite field, while v4 copies the SV token from the frame marker.
     pub satellite: String,
     /// Display text of the [`NavParseError`] returned while parsing or validating the block.
     pub message: String,
+    /// 1-based line number of the block's first line (the frame marker in RINEX 4).
+    pub line: usize,
+}
+
+/// A departure from the format that a lenient reader read through: the record or
+/// header value it concerns is kept, and the strict reader refuses it with
+/// [`Self::error`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavDiagnostic {
+    /// 1-based line number of the record (or header line) concerned.
+    pub line: usize,
+    /// Satellite token of the record concerned; empty for a header line.
+    pub satellite: String,
+    /// The departure, as the strict reader reports it.
+    pub error: NavParseError,
+}
+
+/// What a block that [`parse_nav_lenient`] read but does not return in
+/// [`NavParse::records`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OtherNavBlockKind {
+    /// A GLONASS record, read by [`parse_glonass`].
+    Glonass,
+    /// An SBAS record, read by [`parse_sbas`].
+    Sbas,
+    /// A RINEX 4 system time offset frame (`> STO`), read by [`parse_nav_file`].
+    SystemTimeOffset,
+    /// A RINEX 4 Earth orientation frame (`> EOP`), read by [`parse_nav_file`].
+    EarthOrientation,
+    /// A RINEX 4 ionosphere frame (`> ION`), read by [`parse_iono_corrections`] and
+    /// [`parse_nav_file`].
+    Ionosphere,
+    /// A message this crate recognizes and does not decode (BeiDou CNAV-1/2/3, NavIC
+    /// L1); [`parse_nav_file`] keeps its text.
+    NotDecoded,
+}
+
+/// A block that [`parse_nav_lenient`] read but does not return as a
+/// [`BroadcastRecord`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtherNavBlock {
+    /// 1-based line number of the block's first line.
+    pub line: usize,
+    /// Satellite token of the block.
+    pub satellite: String,
+    /// The RINEX 4 message token, where the block has one.
+    pub message_token: Option<String>,
+    /// What the block holds.
+    pub kind: OtherNavBlockKind,
 }
 
 /// Result of lenient RINEX navigation parsing.
-/// It keeps successfully parsed supported records and diagnostics for supported blocks that
-/// failed; header failures remain errors and unsupported systems or message rosters follow the
-/// parsers' skip policy.
+/// It keeps the successfully parsed Keplerian records, diagnostics for the blocks that
+/// failed, the departures read through, and every other block of the file, so a caller
+/// can tell a clean parse from one that left records out.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NavParse {
-    /// Successfully parsed supported records, in input order. A malformed supported block is
+    /// Successfully parsed Keplerian records, in input order. A malformed block is
     /// omitted here and reported in [`Self::skipped`].
     pub records: Vec<BroadcastRecord>,
-    /// Diagnostics for supported blocks whose parsing or marker validation returned a
-    /// [`NavParseError`]. Unsupported systems and explicitly skipped version-4 rosters do not add
-    /// entries.
+    /// Diagnostics for Keplerian blocks, and blocks of no known system, whose parsing
+    /// or marker validation returned a [`NavParseError`], and for body lines that
+    /// belong to no record.
     pub skipped: Vec<SkippedNavBlock>,
+    /// Departures from the format in the Keplerian records kept in [`Self::records`],
+    /// and in the header.
+    pub departures: Vec<NavDiagnostic>,
+    /// Every other block of the file: GLONASS, SBAS and RINEX 4 non-ephemeris frames,
+    /// and messages not decoded.
+    pub other: Vec<OtherNavBlock>,
 }
 
-/// Parse a RINEX 3.x or 4.xx navigation file into the supported GPS, QZSS,
-/// Galileo, and BeiDou Keplerian records.
+/// Parse a RINEX 2.xx, 3.xx or 4.xx navigation file into its Keplerian records:
+/// GPS, QZSS, Galileo, BeiDou and NavIC.
 ///
-/// Unsupported RINEX 4 message rosters, including BeiDou CNV1/CNV2/CNV3 and
-/// QZSS LNAV, are skipped rather than fed through the wrong layout. The records
-/// are returned in file order; selection by epoch, health, and message type is
-/// the caller's job.
+/// A malformed Keplerian block, a departure from the format in one, or a non-blank
+/// line that belongs to no record is an error; GLONASS, SBAS, RINEX 4 non-ephemeris
+/// frames and messages not decoded are left to the other readers. The records are
+/// returned in file order; selection by epoch, health, and message type is the
+/// caller's job.
 pub fn parse_nav(text: &str) -> Result<Vec<BroadcastRecord>, NavParseError> {
-    let mut lines = text.lines();
-    let version = verify_and_skip_header(&mut lines)?;
-    if version.major >= 4 {
-        parse_nav_v4(lines, version)
-    } else {
-        parse_nav_v3(lines, version)
+    let file = parse_nav_file(text)?;
+    if let Some(error) = file.first_error(body::StrictScope::Keplerian) {
+        return Err(error);
     }
+    Ok(file.keplerian_records().collect())
 }
 
-/// Parse supported NAV records while dropping malformed supported body blocks.
+/// Parse the Keplerian records, keeping every readable one.
 ///
 /// Header failures remain fatal because no record boundaries are trustworthy
-/// before the file type and version are known. Unsupported constellations and
-/// unsupported version-4 messages follow the strict parser's existing skip policy.
+/// before the file type and version are known; a malformed optional header record
+/// is reported in [`NavParse::departures`] instead. A malformed block is reported
+/// in [`NavParse::skipped`] with its line number and reason.
 pub fn parse_nav_lenient(text: &str) -> Result<NavParse, NavParseError> {
-    let mut lines = text.lines();
-    let version = verify_and_skip_header(&mut lines)?;
-    let (records, skipped) = if version.major >= 4 {
-        parse_nav_v4_lenient(lines, version)
-    } else {
-        parse_nav_v3_lenient(lines, version)
-    };
-    Ok(NavParse { records, skipped })
+    Ok(parse_nav_file(text)?.nav_parse())
 }
 
-/// Version-3 body: a record starts at a line whose first three columns are a
-/// system letter followed by two digits; continuation lines are column-indented.
-fn parse_nav_v3<'a, I>(
-    lines: I,
-    version: RinexVersion,
-) -> Result<Vec<BroadcastRecord>, NavParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    let mut blocks: Vec<Vec<&str>> = Vec::new();
-    for line in lines {
-        if is_record_start(line) {
-            blocks.push(vec![line]);
-        } else if let Some(last) = blocks.last_mut() {
-            last.push(line);
-        }
-    }
-
-    let mut records = Vec::new();
-    for block in &blocks {
-        let letter = block[0].as_bytes()[0] as char;
-        match GnssSystem::from_letter(letter) {
-            Some(GnssSystem::Gps)
-            | Some(GnssSystem::Galileo)
-            | Some(GnssSystem::BeiDou)
-            | Some(GnssSystem::Qzss) => records.push(parse_keplerian_block(block, None, version)?),
-            Some(GnssSystem::Glonass) | Some(GnssSystem::Sbas) | Some(GnssSystem::Navic) => {
-                // Recognized boundary, unsupported model (GLONASS state-vector, SBAS, NavIC): skip.
-            }
-            None => {
-                return Err(NavParseError::BadField {
-                    satellite: nav_block_satellite(block),
-                    field: "system",
-                });
-            }
-        }
-    }
-    Ok(records)
+/// Parse a whole RINEX navigation file, keeping every header record and every
+/// block with its text: decoded records, frames, messages this crate does not
+/// decode, blocks that could not be read, and lines that belong to no record.
+///
+/// Header failures (no supported `RINEX VERSION / TYPE`, no `END OF HEADER`) are
+/// errors. Everything after the header is read leniently: each entry carries the
+/// departures read through, and a block that could not be read is kept as
+/// [`NavItem::Undecoded`] with the reason. [`encode_nav_file`] writes the file back
+/// byte for byte.
+pub fn parse_nav_file(text: &str) -> Result<NavFile, NavParseError> {
+    body::read_nav_file(text)
 }
 
-fn parse_nav_v3_lenient<'a, I>(
-    lines: I,
-    version: RinexVersion,
-) -> (Vec<BroadcastRecord>, Vec<SkippedNavBlock>)
-where
-    I: Iterator<Item = &'a str>,
-{
-    let mut blocks: Vec<Vec<&str>> = Vec::new();
-    for line in lines {
-        if is_record_start(line) {
-            blocks.push(vec![line]);
-        } else if let Some(last) = blocks.last_mut() {
-            last.push(line);
-        }
+/// Parse the broadcast ionosphere coefficients from a RINEX header's
+/// `IONOSPHERIC CORR` (version 2 `ION ALPHA`/`ION BETA`) records and the RINEX 4
+/// body `> ION` frames: each header set is replaced by the frame of its system and model
+/// transmitted latest, the rule [`BroadcastStore::iono_corrections`] applies, and
+/// [`BroadcastStore::iono_corrections_at`] applies at an epoch.
+///
+/// A complete header label pair or body frame yields the coefficient set; a
+/// missing label or frame yields `None` for that system. A malformed header row or
+/// body frame is an error.
+pub fn parse_iono_corrections(text: &str) -> Result<IonoCorrections, NavParseError> {
+    let lines: Vec<&str> = text.lines().collect();
+    let read = header::scan_header(&lines);
+    if let Some(issue) = read
+        .issues
+        .iter()
+        .find(|issue| issue.field == header::HeaderField::Ionosphere)
+    {
+        return Err(issue.error.clone());
     }
-
-    let mut records = Vec::new();
-    let mut skipped = Vec::new();
-    for block in &blocks {
-        let letter = block[0].as_bytes()[0] as char;
-        match GnssSystem::from_letter(letter) {
-            Some(GnssSystem::Gps)
-            | Some(GnssSystem::Galileo)
-            | Some(GnssSystem::BeiDou)
-            | Some(GnssSystem::Qzss) => match parse_keplerian_block(block, None, version) {
-                Ok(record) => records.push(record),
-                Err(error) => skipped.push(SkippedNavBlock {
-                    satellite: nav_block_satellite(block),
-                    message: error.to_string(),
-                }),
-            },
-            Some(GnssSystem::Glonass) | Some(GnssSystem::Sbas) | Some(GnssSystem::Navic) => {}
-            None => {
-                skipped.push(SkippedNavBlock {
-                    satellite: nav_block_satellite(block),
-                    message: NavParseError::BadField {
-                        satellite: nav_block_satellite(block),
-                        field: "system",
-                    }
-                    .to_string(),
-                });
-            }
-        }
-    }
-    (records, skipped)
+    let mut frames = body::body_ionosphere_frames(&lines[read.body_start..])?;
+    frames::sort_by_transmission(&mut frames);
+    Ok(frames::ionosphere_in_effect(
+        read.header.iono,
+        &frames,
+        None,
+    ))
 }
 
-/// Version-4 body: each record is introduced by a `> EPH|STO|EOP|ION SVNN MSG`
-/// frame marker. `EPH` frames carrying a supported legacy Keplerian message use
-/// [`parse_keplerian_block`]; GPS/QZSS CNAV-family messages use
-/// [`parse_cnav_block`]. The message type is taken from the marker token (so
-/// I/NAV vs F/NAV, D1 vs D2, and GPS/QZSS CNV2 vs BeiDou CNV2 are explicit)
-/// after the marker SV and message family are cross-checked against the body
-/// line. STO/EOP/ION frames and unsupported message rosters are skipped.
-fn parse_nav_v4<'a, I>(
-    lines: I,
-    version: RinexVersion,
-) -> Result<Vec<BroadcastRecord>, NavParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    // Group by marker line: each frame is its marker plus the body lines up to
-    // the next marker.
-    let frames = v4_frames(lines);
-    let mut records = Vec::new();
-    for (marker, body) in &frames {
-        let (sv, msg_token) = match parse_v4_eph_marker(marker, body)? {
-            V4MarkerHeader::Eph { sv, msg_token } => (sv, msg_token),
-            V4MarkerHeader::RecognizedNonEph => continue,
-        };
-        let letter = sv.as_bytes().first().copied().map_or(' ', char::from);
-        let Some(system) = GnssSystem::from_letter(letter) else {
-            return Err(NavParseError::BadField {
-                satellite: sv.to_string(),
-                field: "system",
-            });
-        };
-        let supported = matches!(
-            system,
-            GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::BeiDou | GnssSystem::Qzss
-        );
-        if !supported {
-            continue; // GLONASS/SBAS/NavIC: not a supported Keplerian system here.
-        }
-        if sv.parse::<GnssSatelliteId>().is_err() {
-            return Err(NavParseError::BadField {
-                satellite: sv.to_string(),
-                field: "prn",
-            });
-        }
-        if let Some(body_sv) = body
-            .first()
-            .and_then(|line| line.get(0..3))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if !satellites_match(sv, body_sv) {
-                return Err(NavParseError::BadField {
-                    satellite: sv.to_string(),
-                    field: "frame marker",
-                });
-            }
-        }
-        if let Some(message) = nav_message_from_v4_token(msg_token, system) {
-            validate_v4_ephemeris_marker(sv, message, body)?;
-            if message.is_cnav_family() {
-                records.push(parse_cnav_block(body, message)?);
-            } else {
-                records.push(parse_keplerian_block(body, Some(message), version)?);
-            }
-        } else if !explicitly_skipped_v4_message(msg_token, system) {
-            return Err(NavParseError::BadField {
-                satellite: sv.to_string(),
-                field: "message",
-            });
-        }
+/// The leap-second count (GPS − UTC) from the header's `LEAP SECONDS` record; `None`
+/// if the record is absent. A malformed record is an error. The header is read up to
+/// `END OF HEADER` (or to the end of the text when there is none).
+///
+/// The value is metadata: [`GlonassRecord::toe_gpst_j2000_s`] converts GLONASS epochs
+/// with the leap-second table at each epoch, as RTKLIB does, and does not read it.
+pub fn parse_leap_seconds(text: &str) -> Result<Option<f64>, NavParseError> {
+    let lines: Vec<&str> = text.lines().collect();
+    let read = header::scan_header(&lines);
+    if let Some(issue) = read
+        .issues
+        .iter()
+        .find(|issue| issue.field == header::HeaderField::LeapSeconds)
+    {
+        return Err(issue.error.clone());
     }
-    Ok(records)
+    Ok(read
+        .header
+        .leap_seconds
+        .as_ref()
+        .map(|leap| leap.current as f64))
 }
 
-fn parse_nav_v4_lenient<'a, I>(
-    lines: I,
-    version: RinexVersion,
-) -> (Vec<BroadcastRecord>, Vec<SkippedNavBlock>)
-where
-    I: Iterator<Item = &'a str>,
-{
-    let frames = v4_frames(lines);
-    let mut records = Vec::new();
-    let mut skipped = Vec::new();
-    for (marker, body) in &frames {
-        let (sv, msg_token) = match parse_v4_eph_marker(marker, body) {
-            Ok(V4MarkerHeader::Eph { sv, msg_token }) => (sv, msg_token),
-            Ok(V4MarkerHeader::RecognizedNonEph) => continue,
-            Err(error) => {
-                let satellite = match &error {
-                    NavParseError::BadField { satellite, .. } => satellite.clone(),
-                    _ => nav_block_satellite(body),
-                };
-                skipped.push(SkippedNavBlock {
-                    satellite,
-                    message: error.to_string(),
-                });
-                continue;
-            }
-        };
-        let letter = sv.as_bytes().first().copied().map_or(' ', char::from);
-        let Some(system) = GnssSystem::from_letter(letter) else {
-            skipped.push(SkippedNavBlock {
-                satellite: sv.to_string(),
-                message: NavParseError::BadField {
-                    satellite: sv.to_string(),
-                    field: "system",
-                }
-                .to_string(),
-            });
-            continue;
-        };
-        let supported = matches!(
-            system,
-            GnssSystem::Gps | GnssSystem::Qzss | GnssSystem::Galileo | GnssSystem::BeiDou
-        );
-        if !supported {
-            continue;
-        }
-        if sv.parse::<GnssSatelliteId>().is_err() {
-            skipped.push(SkippedNavBlock {
-                satellite: sv.to_string(),
-                message: NavParseError::BadField {
-                    satellite: sv.to_string(),
-                    field: "prn",
-                }
-                .to_string(),
-            });
-            continue;
-        }
-        if let Some(body_sv) = body
-            .first()
-            .and_then(|line| line.get(0..3))
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            if !satellites_match(sv, body_sv) {
-                skipped.push(SkippedNavBlock {
-                    satellite: sv.to_string(),
-                    message: NavParseError::BadField {
-                        satellite: sv.to_string(),
-                        field: "frame marker",
-                    }
-                    .to_string(),
-                });
-                continue;
-            }
-        }
-        if let Some(message) = nav_message_from_v4_token(msg_token, system) {
-            let parsed = validate_v4_ephemeris_marker(sv, message, body).and_then(|()| {
-                if message.is_cnav_family() {
-                    parse_cnav_block(body, message)
-                } else {
-                    parse_keplerian_block(body, Some(message), version)
-                }
-            });
-            match parsed {
-                Ok(record) => records.push(record),
-                Err(error) => skipped.push(SkippedNavBlock {
-                    satellite: sv.to_string(),
-                    message: error.to_string(),
-                }),
-            }
-        } else if !explicitly_skipped_v4_message(msg_token, system) {
-            skipped.push(SkippedNavBlock {
-                satellite: sv.to_string(),
-                message: NavParseError::BadField {
-                    satellite: sv.to_string(),
-                    field: "message",
-                }
-                .to_string(),
-            });
-        }
+/// Parse all GLONASS (`R`) records from a RINEX 2 (`G` file), 3 or 4 navigation file,
+/// in file order; selection is the caller's job. A malformed record of a
+/// representable slot, or a departure from the format in one, is a
+/// [`NavParseError`], but a record whose slot token is not a representable satellite
+/// id (`R00`, or a malformed slot field) is skipped rather than rejecting the whole
+/// file.
+pub fn parse_glonass(text: &str) -> Result<Vec<GlonassRecord>, NavParseError> {
+    let file = parse_nav_file(text)?;
+    if let Some(error) = file.first_error(body::StrictScope::Glonass) {
+        return Err(error);
     }
-    (records, skipped)
+    Ok(file.glonass_parse().records)
+}
+
+/// Like [`parse_glonass`], but keeps every readable record and reports the rest:
+/// slots whose token is not representable as a [`GnssSatelliteId`] (`R00`, or a
+/// malformed slot field) in [`GlonassParse::skipped`], records that could not be read
+/// in [`GlonassParse::invalid`], and records kept through a departure from the format
+/// in [`GlonassParse::departures`], each with its line number.
+pub fn parse_glonass_lenient(text: &str) -> Result<GlonassParse, NavParseError> {
+    Ok(parse_nav_file(text)?.glonass_parse())
+}
+
+/// Parse all SBAS (`S`) records from a RINEX 2 (`H` file), 3 or 4 navigation file, in
+/// file order. A malformed SBAS record, or a departure from the format in one, is an
+/// error.
+pub fn parse_sbas(text: &str) -> Result<Vec<SbasRecord>, NavParseError> {
+    let file = parse_nav_file(text)?;
+    if let Some(error) = file.first_error(body::StrictScope::Sbas) {
+        return Err(error);
+    }
+    Ok(file
+        .entries
+        .iter()
+        .filter_map(|entry| match &entry.item {
+            NavItem::Sbas(record) => Some(*record),
+            _ => None,
+        })
+        .collect())
 }
 
 fn nav_block_satellite(block: &[&str]) -> String {
@@ -1307,32 +1555,12 @@ fn nav_block_satellite(block: &[&str]) -> String {
         .to_string()
 }
 
-fn v4_frames<'a, I>(lines: I) -> Vec<(&'a str, Vec<&'a str>)>
-where
-    I: Iterator<Item = &'a str>,
-{
-    let mut frames: Vec<(&str, Vec<&str>)> = Vec::new();
-    for line in lines {
-        if is_v4_frame_marker(line) {
-            frames.push((line, Vec::new()));
-        } else if let Some((_, body)) = frames.last_mut() {
-            body.push(line);
-        }
-    }
-    frames
-}
-
-/// Whether a version-4 line is a frame marker (`> ...`).
-fn is_v4_frame_marker(line: &str) -> bool {
-    line.starts_with("> ")
-}
-
-enum V4MarkerHeader<'a> {
+pub(crate) enum V4MarkerHeader<'a> {
     Eph { sv: &'a str, msg_token: &'a str },
     RecognizedNonEph,
 }
 
-fn parse_v4_eph_marker<'a>(
+pub(crate) fn parse_v4_eph_marker<'a>(
     marker: &'a str,
     body: &[&str],
 ) -> Result<V4MarkerHeader<'a>, NavParseError> {
@@ -1435,7 +1663,7 @@ fn parse_v4_eph_marker<'a>(
 /// Split a version-4 frame marker `> EPH G01 LNAV` into (frame type, SV, message
 /// token), or `None` if it is malformed. Mirrors the RINEX-4 marker layout:
 /// `>` then the 4-column frame class, the SV, and the message-type token.
-fn parse_v4_marker(line: &str) -> Option<(&str, &str, &str)> {
+pub(crate) fn parse_v4_marker(line: &str) -> Option<(&str, &str, &str)> {
     let rest = line.strip_prefix('>')?;
     let mut fields = rest.split_whitespace();
     let frame_type = fields.next()?;
@@ -1467,10 +1695,10 @@ fn parse_v4_marker(line: &str) -> Option<(&str, &str, &str)> {
     Some((frame_type, sv, msg_token))
 }
 
-/// Map a version-4 EPH message token to the [`NavMessage`] for the supported
-/// Keplerian messages. `CNV2` is system-overloaded: GPS/QZSS CNV2 is supported
-/// as CNAV-2, while BeiDou CNV2 is a different roster and remains skipped.
-fn nav_message_from_v4_token(token: &str, system: GnssSystem) -> Option<NavMessage> {
+/// Map a version-4 EPH message token to the [`NavMessage`] for the decoded
+/// Keplerian messages. `CNV2` is system-overloaded: GPS/QZSS CNV2 is decoded
+/// as CNAV-2, while BeiDou CNV2 is a different roster and is not decoded.
+pub(crate) fn nav_message_from_v4_token(token: &str, system: GnssSystem) -> Option<NavMessage> {
     match (token, system) {
         ("LNAV", GnssSystem::Gps) => Some(NavMessage::GpsLnav),
         ("CNAV", GnssSystem::Gps) => Some(NavMessage::GpsCnav),
@@ -1482,18 +1710,12 @@ fn nav_message_from_v4_token(token: &str, system: GnssSystem) -> Option<NavMessa
         ("FNAV", GnssSystem::Galileo) => Some(NavMessage::GalileoFnav),
         ("D1", GnssSystem::BeiDou) => Some(NavMessage::BeidouD1),
         ("D2", GnssSystem::BeiDou) => Some(NavMessage::BeidouD2),
+        ("LNAV", GnssSystem::Navic) => Some(NavMessage::NavicLnav),
         _ => None,
     }
 }
 
-fn explicitly_skipped_v4_message(token: &str, system: GnssSystem) -> bool {
-    matches!(
-        (token, system),
-        ("CNV1" | "CNV2" | "CNV3", GnssSystem::BeiDou)
-    )
-}
-
-fn satellites_match(marker_sv: &str, body_sv: &str) -> bool {
+pub(crate) fn satellites_match(marker_sv: &str, body_sv: &str) -> bool {
     match (
         marker_sv.parse::<GnssSatelliteId>(),
         body_sv.parse::<GnssSatelliteId>(),
@@ -1503,7 +1725,7 @@ fn satellites_match(marker_sv: &str, body_sv: &str) -> bool {
     }
 }
 
-fn validate_v4_ephemeris_marker(
+pub(crate) fn validate_v4_ephemeris_marker(
     marker_sv: &str,
     message: NavMessage,
     body: &[&str],
@@ -1560,361 +1782,15 @@ fn nav_message_matches_system(message: NavMessage, system: GnssSystem) -> bool {
                 NavMessage::BeidouD1 | NavMessage::BeidouD2,
                 GnssSystem::BeiDou,
             )
+            | (NavMessage::NavicLnav, GnssSystem::Navic)
     )
 }
 
-/// Parse the broadcast ionosphere coefficients from a RINEX header's
-/// `IONOSPHERIC CORR` lines or RINEX 4 body `> ION` frames (GPS
-/// `GPSA`/`GPSB`, BeiDou `BDSA`/`BDSB`, and Galileo `GAL`).
-///
-/// A complete header label pair or body frame yields the coefficient set; a
-/// missing label or frame yields `None` for that system. Parsing is
-/// deterministic text, not a 0-ULP target.
-pub fn parse_iono_corrections(text: &str) -> Result<IonoCorrections, NavParseError> {
-    parse_iono_corrections_checked(text)
-}
-
-fn parse_iono_corrections_checked(text: &str) -> Result<IonoCorrections, NavParseError> {
-    // The IONOSPHERIC CORR line is `A4,1X,4(D12.4)`: a 4-char label, a space,
-    // then up to four coefficients in 12-wide columns.
-    //
-    // GPS/BeiDou are Klobuchar models with four coefficients per row
-    // (alpha0..alpha3 / beta0..beta3); all four columns are required and a
-    // truncated row is a malformed header, not a tolerable short line.
-    let klobuchar_row = |line: &str| -> Result<[f64; 4], NavParseError> {
-        Ok([
-            strict_header_f64(line, 5, 17, "ionospheric correction")?,
-            strict_header_f64(line, 17, 29, "ionospheric correction")?,
-            strict_header_f64(line, 29, 41, "ionospheric correction")?,
-            strict_header_f64(line, 41, 53, "ionospheric correction")?,
-        ])
-    };
-    // Galileo is NeQuick-G with three coefficients (ai0,ai1,ai2). The fourth
-    // column is the disturbance flag, which real/merged headers frequently leave
-    // blank; only the three coefficients are read, so the row parses whether or
-    // not that flag is present.
-    let nequick_row = |line: &str| -> Result<[f64; 3], NavParseError> {
-        Ok([
-            strict_header_f64(line, 5, 17, "ionospheric correction")?,
-            strict_header_f64(line, 17, 29, "ionospheric correction")?,
-            strict_header_f64(line, 29, 41, "ionospheric correction")?,
-        ])
-    };
-    let (mut gpsa, mut gpsb, mut bdsa, mut bdsb, mut gal) = (None, None, None, None, None);
-    for line in text.lines() {
-        if line.contains("END OF HEADER") {
-            break;
-        }
-        if !line.contains("IONOSPHERIC CORR") {
-            continue;
-        }
-        match line.get(0..4).map(str::trim) {
-            Some("GPSA") => gpsa = Some(klobuchar_row(line)?),
-            Some("GPSB") => gpsb = Some(klobuchar_row(line)?),
-            Some("BDSA") => bdsa = Some(klobuchar_row(line)?),
-            Some("BDSB") => bdsb = Some(klobuchar_row(line)?),
-            Some("GAL") => {
-                let row = nequick_row(line)?;
-                gal = Some(GalileoNequickCoeffs {
-                    ai0: row[0],
-                    ai1: row[1],
-                    ai2: row[2],
-                });
-            }
-            _ => {}
-        }
-    }
-    let pair = |a: Option<[f64; 4]>, b: Option<[f64; 4]>| match (a, b) {
-        (Some(alpha), Some(beta)) => Some(KlobucharAlphaBeta { alpha, beta }),
-        _ => None,
-    };
-    let mut iono = IonoCorrections {
-        gps: pair(gpsa, gpsb),
-        beidou: pair(bdsa, bdsb),
-        galileo: gal,
-    };
-    parse_v4_body_iono_corrections(text, &mut iono)?;
-    Ok(iono)
-}
-
-fn parse_v4_body_iono_corrections(
-    text: &str,
-    iono: &mut IonoCorrections,
-) -> Result<(), NavParseError> {
-    let mut lines = text.lines();
-    for line in lines.by_ref() {
-        if line.contains("END OF HEADER") {
-            break;
-        }
-    }
-
-    for (marker, body) in v4_frames(lines) {
-        let Some((frame_type, sv, _msg_token)) = parse_v4_marker(marker) else {
-            continue;
-        };
-        if frame_type != "ION" {
-            continue;
-        }
-        let values = parse_v4_iono_values(sv, &body)?;
-        match sv
-            .as_bytes()
-            .first()
-            .and_then(|b| GnssSystem::from_letter(*b as char))
-        {
-            Some(GnssSystem::Gps) => {
-                iono.gps = Some(KlobucharAlphaBeta {
-                    alpha: iono_values_4(&values, 0, sv)?,
-                    beta: iono_values_4(&values, 4, sv)?,
-                });
-            }
-            Some(GnssSystem::BeiDou) => {
-                iono.beidou = Some(KlobucharAlphaBeta {
-                    alpha: iono_values_4(&values, 0, sv)?,
-                    beta: iono_values_4(&values, 4, sv)?,
-                });
-            }
-            Some(GnssSystem::Galileo) => {
-                let coeffs = iono_values_3(&values, 0, sv)?;
-                iono.galileo = Some(GalileoNequickCoeffs {
-                    ai0: coeffs[0],
-                    ai1: coeffs[1],
-                    ai2: coeffs[2],
-                });
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-fn parse_v4_iono_values(sv: &str, body: &[&str]) -> Result<Vec<f64>, NavParseError> {
-    if body.is_empty() {
-        return Err(NavParseError::BadField {
-            satellite: sv.to_string(),
-            field: "ionospheric correction",
-        });
-    }
-
-    let mut values = Vec::new();
-    for (idx, line) in body.iter().enumerate() {
-        let ranges: &[(usize, usize)] = if idx == 0 {
-            &[(23, 42), (42, 61), (61, 80)]
-        } else {
-            &[(4, 23), (23, 42), (42, 61), (61, 80)]
-        };
-        for &(start, end) in ranges {
-            let raw = raw_field(line, start, end);
-            if raw.trim().is_empty() {
-                continue;
-            }
-            values.push(
-                validate::strict_f64(raw, "ionospheric correction")
-                    .map_err(|error| map_record_field_error(error, sv))?,
-            );
-        }
-    }
-    Ok(values)
-}
-
-fn iono_values_4(values: &[f64], start: usize, sv: &str) -> Result<[f64; 4], NavParseError> {
-    let Some(slice) = values.get(start..start + 4) else {
-        return Err(NavParseError::BadField {
-            satellite: sv.to_string(),
-            field: "ionospheric correction",
-        });
-    };
-    Ok([slice[0], slice[1], slice[2], slice[3]])
-}
-
-fn iono_values_3(values: &[f64], start: usize, sv: &str) -> Result<[f64; 3], NavParseError> {
-    let Some(slice) = values.get(start..start + 3) else {
-        return Err(NavParseError::BadField {
-            satellite: sv.to_string(),
-            field: "ionospheric correction",
-        });
-    };
-    Ok([slice[0], slice[1], slice[2]])
-}
-
-/// The leap-second count (GPS − UTC) from the header's `LEAP SECONDS` line, used
-/// to map a GLONASS (UTC) reference epoch onto the GPST-aligned query time. The
-/// value is the first field; `None` if the line is absent.
-pub fn parse_leap_seconds(text: &str) -> Result<Option<f64>, NavParseError> {
-    parse_leap_seconds_checked(text)
-}
-
-fn parse_leap_seconds_checked(text: &str) -> Result<Option<f64>, NavParseError> {
-    for line in text.lines() {
-        if line.contains("END OF HEADER") {
-            break;
-        }
-        if line.contains("LEAP SECONDS") {
-            return strict_header_integer_f64(line, 0, 6, "leap seconds").map(Some);
-        }
-    }
-    Ok(None)
-}
-
-/// Seconds from the J2000 epoch (2000-01-01 12:00) to a UTC calendar instant,
-/// via the canonical no-leap civil conversion. Bit-identical to the previous
-/// day-count arithmetic (the Julian Day Number is offset-equal to the Hinnant
-/// day count, and the whole-second clock fields sum exactly in `f64`).
-fn j2000_seconds_utc(y: i64, mo: i64, d: i64, h: i64, mi: i64, s: i64) -> f64 {
-    civil::j2000_seconds(y as i32, mo as i32, d as i32, h as i32, mi as i32, s as f64)
-}
-
-/// Parse the GLONASS epoch line (`Rnn YYYY MM DD HH MM SS`) to a UTC second past
-/// J2000.
-fn parse_glonass_epoch(l0: &str, sat: &str) -> Result<f64, NavParseError> {
-    let year = strict_record_int::<i64>(l0, 4, 8, "epoch", sat)?;
-    let month = strict_record_int::<i64>(l0, 9, 11, "epoch", sat)?;
-    let day = strict_record_int::<i64>(l0, 12, 14, "epoch", sat)?;
-    let hour = strict_record_int::<i64>(l0, 15, 17, "epoch", sat)?;
-    let minute = strict_record_int::<i64>(l0, 18, 20, "epoch", sat)?;
-    let second = strict_record_int::<i64>(l0, 21, 23, "epoch", sat)?;
-    let civil = validate::civil_datetime_with_second_policy(
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second as f64,
-        validate::CivilSecondPolicy::UtcLike,
-    )
-    .map_err(|_| NavParseError::BadField {
-        satellite: sat.to_string(),
-        field: "epoch",
-    })?;
-    Ok(j2000_seconds_utc(
-        civil.year,
-        i64::from(civil.month),
-        i64::from(civil.day),
-        i64::from(civil.hour),
-        i64::from(civil.minute),
-        civil.second as i64,
-    ))
-}
-
-/// Parse a 4-line RINEX 3 GLONASS record block into a [`GlonassRecord`]
-/// (km/(km/s)/(km/s^2) state converted to SI). A missing or unparseable field is
-/// a [`NavParseError`], not a silently dropped record.
-fn parse_glonass_block(block: &[&str]) -> Result<GlonassRecord, NavParseError> {
-    let l0 = block[0];
-    let sat = l0.get(0..3).unwrap_or("").trim().to_string();
-    if block.len() < 4 {
-        return Err(NavParseError::TruncatedRecord(sat));
-    }
-    let bad = |what: &'static str| NavParseError::BadField {
-        satellite: sat.clone(),
-        field: what,
-    };
-    let satellite_id: GnssSatelliteId = sat.parse().map_err(|_| bad("prn"))?;
-    let toe_utc_j2000_s = parse_glonass_epoch(l0, &sat)?;
-    let clk_bias = parse_f64(l0, 23, 42).ok_or_else(|| bad("clock bias"))?;
-    let gamma_n = parse_f64(l0, 42, 61).ok_or_else(|| bad("gamma_n"))?;
-    let o1 = orbit_row(block[1]);
-    let o2 = orbit_row(block[2]);
-    let o3 = orbit_row(block[3]);
-    let km = |v: Option<f64>, what: &'static str| v.map(|x| x * KM_TO_M).ok_or_else(|| bad(what));
-    let g = |v: Option<f64>, what: &'static str| v.ok_or_else(|| bad(what));
-    Ok(GlonassRecord {
-        satellite_id,
-        toe_utc_j2000_s,
-        pos_m: [km(o1[0], "x")?, km(o2[0], "y")?, km(o3[0], "z")?],
-        vel_m_s: [km(o1[1], "vx")?, km(o2[1], "vy")?, km(o3[1], "vz")?],
-        acc_m_s2: [km(o1[2], "ax")?, km(o2[2], "ay")?, km(o3[2], "az")?],
-        clk_bias,
-        gamma_n,
-        sv_health: g(o1[3], "health")?,
-        freq_channel: glonass_frequency_channel(g(o2[3], "frequency channel")?, &sat)?,
-    })
-}
-
-/// Parse all GLONASS (`R`) records from a RINEX 3.x navigation file, in file
-/// order; selection is the caller's job. A malformed *supported* record is a
-/// [`NavParseError`] rather than a silently dropped one, but a record whose slot
-/// token is not a representable satellite id (`R00`, or a malformed slot field)
-/// is skipped rather than rejecting the whole
-/// file - the same treatment unsupported constellations get in
-/// `parse_nav_v3`. (Version-4 GLONASS frames are not yet parsed.)
-pub fn parse_glonass(text: &str) -> Result<Vec<GlonassRecord>, NavParseError> {
-    Ok(parse_glonass_lenient(text)?.records)
-}
-
-/// Like [`parse_glonass`], but also returns the slots that were skipped because
-/// their token is not representable as a [`GnssSatelliteId`] (`R00`, or a
-/// malformed slot field).
-///
-/// [`parse_glonass`] drops that list silently; use this when a caller needs to
-/// surface how many / which records were skipped, consistent with the
-/// lenient-skip reporting elsewhere in the crate. A malformed *representable*
-/// record is still a [`NavParseError`], not a skip.
-pub fn parse_glonass_lenient(text: &str) -> Result<GlonassParse, NavParseError> {
-    let mut lines = text.lines();
-    verify_and_skip_header(&mut lines)?;
-    let mut blocks: Vec<Vec<&str>> = Vec::new();
-    for line in lines {
-        if is_record_start(line) {
-            blocks.push(vec![line]);
-        } else if let Some(last) = blocks.last_mut() {
-            last.push(line);
-        }
-    }
-    let mut out = GlonassParse::default();
-    for block in blocks.iter().filter(|b| b[0].starts_with('R')) {
-        // A slot token that is not a representable `GnssSatelliteId` (`R00`, a
-        // malformed field) is skipped (one such record must not
-        // discard every other satellite's ephemeris) instead of erroring, but
-        // record its identity so it is not lost silently; a representable slot
-        // with a malformed numeric field still errors.
-        let sat = block[0].get(0..3).unwrap_or("").trim();
-        if sat.parse::<GnssSatelliteId>().is_err() {
-            out.skipped.push(SkippedGlonass {
-                token: sat.to_string(),
-            });
-            continue;
-        }
-        out.records.push(parse_glonass_block(block)?);
-    }
-    Ok(out)
-}
-
-/// Skip the header, returning the RINEX version. Major versions 3 and 4 share
-/// the fixed-column orbit layout; version 4 wraps each record in a frame marker
-/// line (see [`parse_v4_marker`]), which is why `parse_nav` dispatches on it.
-fn verify_and_skip_header<'a, I>(lines: &mut I) -> Result<RinexVersion, NavParseError>
-where
-    I: Iterator<Item = &'a str>,
-{
-    let mut version_seen: Option<RinexVersion> = None;
-    for line in lines.by_ref() {
-        if line.contains("RINEX VERSION / TYPE") {
-            // Column 0-8 holds the version; column 20 the file type ('N' = NAV).
-            let version = line.get(0..9).unwrap_or("").trim();
-            let detected = parse_rinex_version(version);
-            let is_nav = line.get(20..21) == Some("N");
-            match (detected, is_nav) {
-                (Some(v), true) => version_seen = Some(v),
-                _ => {
-                    return Err(NavParseError::UnsupportedHeader(
-                        line.trim_end().to_string(),
-                    ))
-                }
-            }
-        }
-        if line.contains("END OF HEADER") {
-            return version_seen.ok_or_else(|| {
-                NavParseError::UnsupportedHeader("no RINEX VERSION / TYPE".to_string())
-            });
-        }
-    }
-    Err(NavParseError::MissingHeaderEnd)
-}
-
-fn parse_rinex_version(version: &str) -> Option<RinexVersion> {
+/// Parse a RINEX version field (`F9.2`, columns 1-9), majors 2, 3 and 4.
+fn parse_rinex_version(version: &str) -> Option<NavVersion> {
     let (major, minor) = version.split_once('.')?;
     let major = major.trim().parse::<u8>().ok()?;
-    if !matches!(major, 3 | 4) {
+    if !matches!(major, 2..=4) {
         return None;
     }
     let minor_digits = minor
@@ -1925,129 +1801,418 @@ fn parse_rinex_version(version: &str) -> Option<RinexVersion> {
         return None;
     }
     let minor = minor_digits.parse::<u8>().ok()?;
-    Some(RinexVersion { major, minor })
+    Some(NavVersion { major, minor })
 }
 
+/// Whether a line starts a RINEX 3 (or lettered RINEX 2) record: a system letter, then
+/// a PRN of one or two digits in columns 2-3, the one-digit form written `G 1` with a
+/// space in column 2, as RTKLIB's `satid2no` reads it.
 fn is_record_start(line: &str) -> bool {
     let Some(token) = line.as_bytes().get(..3) else {
         return false;
     };
-    let prn = &token[1..];
     token[0].is_ascii_alphabetic()
-        && (1..=2).contains(&prn.len())
-        && prn.iter().all(u8::is_ascii_digit)
+        && (token[1].is_ascii_digit() || token[1] == b' ')
+        && token[2].is_ascii_digit()
+}
+
+/// Whether a line starts a RINEX 2 record with a numeric `I2` PRN: a PRN in columns
+/// 1-2, a blank column 3, and a two-digit year in columns 4-5.
+fn is_v2_numeric_record_start(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    bytes.len() >= 5
+        && (bytes[0] == b' ' || bytes[0].is_ascii_digit())
+        && bytes[1].is_ascii_digit()
+        && bytes[2] == b' '
+        && (bytes[3] == b' ' || bytes[3].is_ascii_digit())
+        && bytes[4].is_ascii_digit()
 }
 
 #[cfg(test)]
 mod panic_regression_tests {
-    use super::is_record_start;
+    use super::{is_record_start, is_v2_numeric_record_start};
 
     #[test]
     fn malformed_utf8_replacement_does_not_panic_record_probe() {
         assert!(!is_record_start("G\u{FFFD}"));
+        assert!(!is_v2_numeric_record_start("1\u{FFFD}"));
     }
 }
 
-/// The four broadcast-orbit values of a continuation line (columns 4/23/42/61).
-fn orbit_row(line: &str) -> [Option<f64>; 4] {
-    [
-        parse_f64(line, 4, 23),
-        parse_f64(line, 23, 42),
-        parse_f64(line, 42, 61),
-        parse_f64(line, 61, 80),
-    ]
+/// Column layout of a record's lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Layout {
+    /// RINEX 3 and 4, and lettered RINEX 2 extensions: a four-column prefix, the epoch
+    /// in columns 5-23, fields of 19 columns from column 24 on the first line and from
+    /// column 5 on the others.
+    V3,
+    /// RINEX 2 with a numeric PRN: a three-column prefix, the epoch in columns 4-22
+    /// with a two-digit year and `F5.1` seconds, fields from column 23 on the first
+    /// line and from column 4 on the others.
+    V2,
+    /// Lettered RINEX 2 extension records: the version 3 columns with the epoch read
+    /// as six numbers, as RTKLIB `str2time` reads it, a two-digit year allowed.
+    V2Lettered,
 }
 
-fn raw_orbit_field(line: &str, field_index: usize) -> &str {
-    const RANGES: [(usize, usize); 4] = [(4, 23), (23, 42), (42, 61), (61, 80)];
-    let (start, end) = RANGES[field_index];
-    raw_field(line, start, end)
+impl Layout {
+    const fn first_line_fields(self) -> [(usize, usize); 3] {
+        match self {
+            Layout::V2 => [(22, 41), (41, 60), (60, 79)],
+            Layout::V3 | Layout::V2Lettered => [(23, 42), (42, 61), (61, 80)],
+        }
+    }
+
+    const fn orbit_fields(self) -> [(usize, usize); 4] {
+        match self {
+            Layout::V2 => [(3, 22), (22, 41), (41, 60), (60, 79)],
+            Layout::V3 | Layout::V2Lettered => [(4, 23), (23, 42), (42, 61), (61, 80)],
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ClockReferenceEpoch {
-    week: u32,
-    sow: f64,
+/// A calendar epoch as a navigation record or frame states it, in the time scale of its
+/// system (GPS, Galileo, QZSS and NavIC time; BDT; UTC for GLONASS).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NavEpoch {
+    /// Year (four digits; a two-digit RINEX 2 year is read with the 1980 pivot).
+    pub year: i32,
+    /// Month, 1-12.
+    pub month: u8,
+    /// Day of month.
+    pub day: u8,
+    /// Hour.
+    pub hour: u8,
+    /// Minute.
+    pub minute: u8,
+    /// Seconds, with any fraction the record states.
+    pub second: f64,
 }
 
-fn parse_keplerian_block(
-    block: &[&str],
+impl NavEpoch {
+    /// Seconds since J2000 in the epoch's own scale.
+    pub fn j2000_s(&self) -> f64 {
+        civil::j2000_seconds(
+            self.year,
+            i32::from(self.month),
+            i32::from(self.day),
+            i32::from(self.hour),
+            i32::from(self.minute),
+            self.second,
+        )
+    }
+
+    /// The calendar epoch of `j2000_s` seconds since J2000 (whole days and seconds of
+    /// day computed exactly, the fraction kept).
+    pub(crate) fn from_j2000_s(j2000_s: f64) -> Self {
+        // J2000 is 2000-01-01 12:00, so midnight-based seconds are `j2000_s + 43200`.
+        let from_midnight = j2000_s + 43_200.0;
+        let days = (from_midnight / 86_400.0).floor();
+        let second_of_day = from_midnight - days * 86_400.0;
+        let jdn = 2_451_545_i64 + days as i64;
+        let (year, month, day) = civil::civil_from_julian_day_number(jdn);
+        let whole = second_of_day.floor();
+        let fraction = second_of_day - whole;
+        let whole = whole as i64;
+        Self {
+            year: year as i32,
+            month: month as u8,
+            day: day as u8,
+            hour: (whole / 3600) as u8,
+            minute: ((whole % 3600) / 60) as u8,
+            second: (whole % 60) as f64 + fraction,
+        }
+    }
+}
+
+/// Read the epoch of a record's first line in `layout`.
+fn parse_record_epoch(
+    l0: &str,
+    layout: Layout,
+    sat: &str,
+    field_name: &'static str,
+    policy: validate::CivilSecondPolicy,
+) -> Result<NavEpoch, NavParseError> {
+    let bad = || NavParseError::BadField {
+        satellite: sat.to_string(),
+        field: field_name,
+    };
+    let (year, month, day, hour, minute, second) = match layout {
+        Layout::V3 => (
+            strict_record_int::<i64>(l0, 4, 8, field_name, sat)?,
+            strict_record_int::<i64>(l0, 9, 11, field_name, sat)?,
+            strict_record_int::<i64>(l0, 12, 14, field_name, sat)?,
+            strict_record_int::<i64>(l0, 15, 17, field_name, sat)?,
+            strict_record_int::<i64>(l0, 18, 20, field_name, sat)?,
+            strict_record_int::<i64>(l0, 21, 23, field_name, sat)? as f64,
+        ),
+        Layout::V2 => (
+            two_digit_year(strict_record_int::<i64>(l0, 3, 5, field_name, sat)?),
+            strict_record_int::<i64>(l0, 6, 8, field_name, sat)?,
+            strict_record_int::<i64>(l0, 9, 11, field_name, sat)?,
+            strict_record_int::<i64>(l0, 12, 14, field_name, sat)?,
+            strict_record_int::<i64>(l0, 15, 17, field_name, sat)?,
+            validate::strict_f64(raw_field(l0, 17, 22), field_name)
+                .map_err(|error| map_record_field_error(error, sat))?,
+        ),
+        Layout::V2Lettered => {
+            let tokens: Vec<&str> = raw_field(l0, 4, 23).split_whitespace().collect();
+            if tokens.len() != 6 {
+                return Err(bad());
+            }
+            let int = |token: &str| token.parse::<i64>().map_err(|_| bad());
+            let year = int(tokens[0])?;
+            (
+                if year < 100 {
+                    two_digit_year(year)
+                } else {
+                    year
+                },
+                int(tokens[1])?,
+                int(tokens[2])?,
+                int(tokens[3])?,
+                int(tokens[4])?,
+                validate::strict_f64(tokens[5], field_name)
+                    .map_err(|error| map_record_field_error(error, sat))?,
+            )
+        }
+    };
+    let civil =
+        validate::civil_datetime_with_second_policy(year, month, day, hour, minute, second, policy)
+            .map_err(|_| bad())?;
+    Ok(NavEpoch {
+        year: i32::try_from(civil.year).map_err(|_| bad())?,
+        month: civil.month as u8,
+        day: civil.day as u8,
+        hour: civil.hour as u8,
+        minute: civil.minute as u8,
+        second: civil.second,
+    })
+}
+
+/// A two-digit RINEX 2 year with RTKLIB `str2time`'s pivot: below 80 is 20xx.
+fn two_digit_year(year: i64) -> i64 {
+    if year < 80 {
+        year + 2000
+    } else {
+        year + 1900
+    }
+}
+
+/// The clock reference epoch of a record's first line as week and seconds of week in
+/// the record's broadcast time scale.
+fn epoch_week_tow(
+    epoch: &NavEpoch,
+    time_scale: TimeScale,
+    sat: &str,
+    field_name: &'static str,
+) -> Result<(u32, f64), NavParseError> {
+    let bad = || NavParseError::BadField {
+        satellite: sat.to_string(),
+        field: field_name,
+    };
+    let year = i64::from(epoch.year);
+    let month = i64::from(epoch.month);
+    let day = i64::from(epoch.day);
+    let week = gnss::week_from_calendar(time_scale, year, month, day).ok_or_else(bad)?;
+    let whole_second = epoch.second.floor();
+    let sow = gnss::seconds_of_week_from_calendar(
+        year,
+        month,
+        day,
+        i64::from(epoch.hour),
+        i64::from(epoch.minute),
+        whole_second as i64,
+    )
+    .ok_or_else(bad)?;
+    Ok((week, sow + (epoch.second - whole_second)))
+}
+
+/// The numeric fields of a record's lines in RTKLIB's `data[]` order: three from the
+/// first line, then four from each following line, `None` for a blank or unreadable
+/// field.
+fn record_fields(lines: &[&str], layout: Layout) -> Vec<Option<f64>> {
+    let mut data = Vec::with_capacity(3 + 4 * lines.len().saturating_sub(1));
+    if let Some(l0) = lines.first() {
+        for (start, end) in layout.first_line_fields() {
+            data.push(parse_f64(l0, start, end));
+        }
+    }
+    for line in lines.iter().skip(1) {
+        for (start, end) in layout.orbit_fields() {
+            data.push(parse_f64(line, start, end));
+        }
+    }
+    data
+}
+
+/// The raw text of field `index` in RTKLIB's `data[]` order.
+fn raw_record_field<'a>(lines: &[&'a str], layout: Layout, index: usize) -> &'a str {
+    if index < 3 {
+        let (start, end) = layout.first_line_fields()[index];
+        return lines.first().map_or("", |line| raw_field(line, start, end));
+    }
+    let line_index = 1 + (index - 3) / 4;
+    let (start, end) = layout.orbit_fields()[(index - 3) % 4];
+    lines
+        .get(line_index)
+        .map_or("", |line| raw_field(line, start, end))
+}
+
+/// A record decoded from its lines, with the departures from the format read through.
+pub(crate) struct Decoded<T> {
+    pub(crate) value: T,
+    pub(crate) departures: Vec<NavParseError>,
+}
+
+/// Read an optional field the models do not use: blank is `None`; a value that does not
+/// read, or cannot be written back in the `D19.12` field, is `None` with a departure.
+fn stated_field(
+    raw: &str,
+    field: &'static str,
+    sat: &str,
+    departures: &mut Vec<NavParseError>,
+) -> Option<f64> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    match validate::strict_f64(raw, field) {
+        Ok(value) if write::d19_12_representable(value) => Some(value),
+        _ => {
+            departures.push(NavParseError::BadField {
+                satellite: sat.to_string(),
+                field,
+            });
+            None
+        }
+    }
+}
+
+/// Lines past `expected` in a block: a non-blank one is a departure.
+fn check_extra_lines(
+    lines: &[&str],
+    expected: usize,
+    sat: &str,
+    departures: &mut Vec<NavParseError>,
+) {
+    if lines
+        .iter()
+        .skip(expected)
+        .any(|line| !line.trim().is_empty())
+    {
+        departures.push(NavParseError::ExtraRecordLines {
+            satellite: sat.to_string(),
+        });
+    }
+}
+
+/// Move `toe`'s week so it lies within half a week of `toc`, as RTKLIB `adjweek`
+/// places `toe` relative to `toc`.
+fn adjust_week_to(week: u32, tow_s: f64, toc: GnssWeekTow) -> u32 {
+    let dt = (f64::from(week) - f64::from(toc.week)) * SECONDS_PER_WEEK + (tow_s - toc.tow_s);
+    if dt < -crate::constants::HALF_WEEK_S {
+        week.saturating_add(1)
+    } else if dt > crate::constants::HALF_WEEK_S {
+        week.saturating_sub(1)
+    } else {
+        week
+    }
+}
+
+/// Decode a legacy Keplerian record (GPS/QZSS LNAV, Galileo I/NAV and F/NAV, BeiDou
+/// D1/D2, NavIC LNAV) from its eight lines.
+pub(crate) fn parse_keplerian_block(
+    lines: &[&str],
+    satellite_id: GnssSatelliteId,
+    sat: &str,
     message_override: Option<NavMessage>,
-    version: RinexVersion,
-) -> Result<BroadcastRecord, NavParseError> {
-    let l0 = block.first().copied().unwrap_or("");
-    let sat = l0.get(0..3).unwrap_or("").trim().to_string();
-    if block.len() < 8 {
-        return Err(NavParseError::TruncatedRecord(sat));
+    version: NavVersion,
+    layout: Layout,
+) -> Result<Decoded<BroadcastRecord>, NavParseError> {
+    if lines.len() < 8 {
+        return Err(NavParseError::TruncatedRecord(sat.to_string()));
     }
     let bad = |what: &'static str| NavParseError::BadField {
-        satellite: sat.clone(),
+        satellite: sat.to_string(),
         field: what,
     };
-
-    let letter = l0
-        .as_bytes()
-        .first()
-        .copied()
-        .map(|b| b as char)
-        .ok_or_else(|| bad("system"))?;
-    let system = GnssSystem::from_letter(letter).ok_or_else(|| bad("system"))?;
-    let satellite_id: GnssSatelliteId = sat.parse().map_err(|_| bad("prn"))?;
+    let mut departures = Vec::new();
+    check_extra_lines(lines, 8, sat, &mut departures);
+    let system = satellite_id.system;
+    let l0 = lines[0];
 
     // Clock line: epoch (-> toc) and the af0/af1/af2 polynomial.
     let time_scale = broadcast_time_scale(system);
-    let toc_epoch = parse_toc(l0, &sat, time_scale)?;
-    let toc_sow = toc_epoch.sow;
-    let af0 = parse_f64(l0, 23, 42).ok_or_else(|| bad("af0"))?;
-    let af1 = parse_f64(l0, 42, 61).ok_or_else(|| bad("af1"))?;
-    let af2 = parse_f64(l0, 61, 80).ok_or_else(|| bad("af2"))?;
-
-    let o1 = orbit_row(block[1]);
-    let o2 = orbit_row(block[2]);
-    let o3 = orbit_row(block[3]);
-    let o4 = orbit_row(block[4]);
-    let o5 = orbit_row(block[5]);
-    let o6 = orbit_row(block[6]);
-
-    let g = |v: Option<f64>, what: &'static str| v.ok_or_else(|| bad(what));
+    let epoch = parse_record_epoch(
+        l0,
+        layout,
+        sat,
+        "toc epoch",
+        validate::CivilSecondPolicy::Continuous,
+    )?;
+    let (toc_week, toc_sow) = epoch_week_tow(&epoch, time_scale, sat, "toc epoch")?;
+    let data = record_fields(&lines[..8], layout);
+    let g = |index: usize, what: &'static str| data[index].ok_or_else(|| bad(what));
 
     let elements = KeplerianElements {
-        crs: g(o1[1], "crs")?,
-        delta_n: g(o1[2], "deltaN")?,
-        m0: g(o1[3], "m0")?,
-        cuc: g(o2[0], "cuc")?,
-        e: g(o2[1], "e")?,
-        cus: g(o2[2], "cus")?,
-        sqrt_a: g(o2[3], "sqrtA")?,
-        toe_sow: g(o3[0], "toe")?,
-        cic: g(o3[1], "cic")?,
-        omega0: g(o3[2], "omega0")?,
-        cis: g(o3[3], "cis")?,
-        i0: g(o4[0], "i0")?,
-        crc: g(o4[1], "crc")?,
-        omega: g(o4[2], "omega")?,
-        omega_dot: g(o4[3], "omegaDot")?,
-        idot: g(o5[0], "idot")?,
+        crs: g(4, "crs")?,
+        delta_n: g(5, "deltaN")?,
+        m0: g(6, "m0")?,
+        cuc: g(7, "cuc")?,
+        e: g(8, "e")?,
+        cus: g(9, "cus")?,
+        sqrt_a: g(10, "sqrtA")?,
+        toe_sow: g(11, "toe")?,
+        cic: g(12, "cic")?,
+        omega0: g(13, "omega0")?,
+        cis: g(14, "cis")?,
+        i0: g(15, "i0")?,
+        crc: g(16, "crc")?,
+        omega: g(17, "omega")?,
+        omega_dot: g(18, "omegaDot")?,
+        idot: g(19, "idot")?,
     };
     let clock = ClockPolynomial {
-        af0,
-        af1,
-        af2,
+        af0: g(0, "af0")?,
+        af1: g(1, "af1")?,
+        af2: g(2, "af2")?,
         toc_sow,
     };
 
-    let week = finite_integral_u32(g(o5[2], "week")?, "week", &sat)?;
-    let toe = GnssWeekTow::new(time_scale, week, elements.toe_sow)
-        .and_then(GnssWeekTow::normalized)
-        .map_err(|_| bad("toe"))?;
-    let toc = GnssWeekTow::new(time_scale, toc_epoch.week, clock.toc_sow)
+    let week = finite_integral_u32(g(21, "week")?, "week", sat)?;
+    let toc = GnssWeekTow::new(time_scale, toc_week, clock.toc_sow)
         .and_then(GnssWeekTow::normalized)
         .map_err(|_| bad("toc"))?;
-    let message = if let Some(message) = message_override {
-        message
-    } else {
-        match system {
-            GnssSystem::Galileo => galileo_message(g(o5[1], "data sources")?, &sat)?,
+    let toe_unadjusted = GnssWeekTow::new(time_scale, week, elements.toe_sow)
+        .and_then(GnssWeekTow::normalized)
+        .map_err(|_| bad("toe"))?;
+    let toe = GnssWeekTow {
+        week: adjust_week_to(toe_unadjusted.week, toe_unadjusted.tow_s, toc),
+        ..toe_unadjusted
+    };
+
+    let raw = |index: usize| raw_record_field(lines, layout, index);
+    let mut stated = StatedNavFields {
+        orbit5_field2: stated_field(raw(20), "orbit-5 field 2", sat, &mut departures),
+        orbit5_field4: stated_field(raw(22), "orbit-5 field 4", sat, &mut departures),
+        orbit6_field4: None,
+        transmission_time_sow: stated_field(raw(27), "transmission time", sat, &mut departures),
+        orbit7_field2: None,
+        orbit7_field3: stated_field(raw(29), "orbit-7 field 3", sat, &mut departures),
+        orbit7_field4: stated_field(raw(30), "orbit-7 field 4", sat, &mut departures),
+    };
+
+    let message = match message_override {
+        Some(message) => message,
+        None => match system {
+            GnssSystem::Galileo => {
+                let word = stated.orbit5_field2.ok_or_else(|| bad("data sources"))?;
+                let (message, forbidden) = galileo_message(word, sat)?;
+                if forbidden {
+                    departures.push(bad("data sources"));
+                }
+                message
+            }
             GnssSystem::BeiDou => {
                 if is_beidou_geo(satellite_id) {
                     NavMessage::BeidouD2
@@ -2056,89 +2221,132 @@ fn parse_keplerian_block(
                 }
             }
             GnssSystem::Qzss => NavMessage::QzssLnav,
+            GnssSystem::Navic => NavMessage::NavicLnav,
             _ => NavMessage::GpsLnav,
-        }
+        },
     };
-    let issue_of_data = BroadcastIssue {
-        issue: finite_integral_u32(g(o1[0], "issue of data")?, "issue of data", &sat)?,
+    let issue_of_data = Some(BroadcastIssue {
+        issue: finite_integral_u32(g(3, "issue of data")?, "issue of data", sat)?,
         message,
-    };
+    });
 
-    let sv_accuracy_m = g(o6[0], "accuracy")?;
-    let sv_health = g(o6[1], "health")?;
+    // A blank or unreadable accuracy is not known: the record keeps its orbit and clock,
+    // and the departure is reported.
+    let sv_accuracy_m = data[23];
+    if sv_accuracy_m.is_none() {
+        departures.push(bad("accuracy"));
+    }
+    let sv_health = g(24, "health")?;
     let group_delays = match system {
-        GnssSystem::Gps => BroadcastGroupDelays::gps_lnav_opt(optional_keplerian_delay(
-            raw_orbit_field(block[6], 2),
-            "gps tgd",
-            &sat,
-        )?),
-        GnssSystem::Qzss => BroadcastGroupDelays::gps_lnav_opt(optional_keplerian_delay(
-            raw_orbit_field(block[6], 2),
-            "qzss tgd",
-            &sat,
-        )?),
+        GnssSystem::Gps => {
+            BroadcastGroupDelays::gps_lnav_opt(optional_keplerian_delay(raw(25), "gps tgd", sat)?)
+        }
+        GnssSystem::Qzss => {
+            BroadcastGroupDelays::gps_lnav_opt(optional_keplerian_delay(raw(25), "qzss tgd", sat)?)
+        }
+        GnssSystem::Navic => {
+            BroadcastGroupDelays::gps_lnav_opt(optional_keplerian_delay(raw(25), "navic tgd", sat)?)
+        }
         // RINEX Galileo ORBIT-6 carries BGD E5a/E1 in field 3 and BGD E5b/E1 in
         // field 4; both are part of the message representation regardless of
         // which one a clock consumer later selects.
         GnssSystem::Galileo => BroadcastGroupDelays::galileo_opt(
-            optional_keplerian_delay(raw_orbit_field(block[6], 2), "bgd e5a/e1", &sat)?,
-            optional_keplerian_delay(raw_orbit_field(block[6], 3), "bgd e5b/e1", &sat)?,
+            optional_keplerian_delay(raw(25), "bgd e5a/e1", sat)?,
+            optional_keplerian_delay(raw(26), "bgd e5b/e1", sat)?,
         ),
         GnssSystem::BeiDou => BroadcastGroupDelays::beidou_opt(
-            optional_keplerian_delay(raw_orbit_field(block[6], 2), "beidou tgd1", &sat)?,
-            optional_keplerian_delay(raw_orbit_field(block[6], 3), "beidou tgd2", &sat)?,
+            optional_keplerian_delay(raw(25), "beidou tgd1", sat)?,
+            optional_keplerian_delay(raw(26), "beidou tgd2", sat)?,
         ),
         _ => BroadcastGroupDelays::default(),
     };
+    if matches!(
+        system,
+        GnssSystem::Gps | GnssSystem::Qzss | GnssSystem::Navic
+    ) {
+        stated.orbit6_field4 = stated_field(raw(26), "iodc", sat, &mut departures);
+    }
 
-    // Only GPS LNAV broadcasts a curve-fit interval (ORBIT-7 field 2); other
-    // constellations (Galileo, BeiDou, QZSS) leave that column blank or spare.
+    // ORBIT-7 field 2: the GPS fit interval, the QZSS fit flag, the BeiDou AODC.
     let fit_interval_s = match system {
         GnssSystem::Gps => {
-            gps_fit_interval_s(block[7], version).map_err(|()| bad("fit interval"))?
+            let (start, end) = layout.orbit_fields()[1];
+            stated.orbit7_field2 = parse_f64(lines[7], start, end);
+            // An unreadable or negative fit field states no fit interval; the record
+            // keeps its orbit and clock, and the departure is reported.
+            gps_fit_interval_s(lines[7], layout, version).unwrap_or_else(|()| {
+                departures.push(bad("fit interval"));
+                None
+            })
         }
-        _ => None,
+        GnssSystem::Qzss => {
+            stated.orbit7_field2 = stated_field(raw(28), "fit interval", sat, &mut departures);
+            stated.orbit7_field2.map(qzss_fit_interval_s)
+        }
+        _ => {
+            stated.orbit7_field2 = stated_field(raw(28), "orbit-7 field 2", sat, &mut departures);
+            None
+        }
     };
 
-    Ok(BroadcastRecord {
-        satellite_id,
-        message,
-        issue_of_data,
-        week,
-        toe,
-        toc,
-        elements,
-        clock,
-        group_delays,
-        cnav: None,
-        sv_health,
-        sv_accuracy_m,
-        fit_interval_s,
+    Ok(Decoded {
+        value: BroadcastRecord {
+            satellite_id,
+            message,
+            issue_of_data,
+            week,
+            toe,
+            toc,
+            elements,
+            clock,
+            group_delays,
+            cnav: None,
+            sv_health,
+            sv_accuracy_m,
+            fit_interval_s,
+            stated,
+        },
+        departures,
     })
 }
 
-fn parse_cnav_block(block: &[&str], message: NavMessage) -> Result<BroadcastRecord, NavParseError> {
-    let l0 = block.first().copied().unwrap_or("");
-    let sat = l0.get(0..3).unwrap_or("").trim().to_string();
+/// The QZSS fit interval of a fit flag, as RTKLIB `decode_eph` reads it: 0 is two
+/// hours, anything else four.
+pub(crate) fn qzss_fit_interval_s(flag: f64) -> f64 {
+    if flag == 0.0 {
+        QZSS_SHORT_FIT_INTERVAL_S
+    } else {
+        QZSS_LONG_FIT_INTERVAL_S
+    }
+}
+
+/// Decode a GPS/QZSS CNAV (9 lines) or CNAV-2 (10 lines) RINEX 4 record.
+pub(crate) fn parse_cnav_block(
+    block: &[&str],
+    satellite_id: GnssSatelliteId,
+    sat: &str,
+    message: NavMessage,
+) -> Result<Decoded<BroadcastRecord>, NavParseError> {
     let is_cnav2 = matches!(message, NavMessage::GpsCnav2 | NavMessage::QzssCnav2);
     let required_lines = if is_cnav2 { 10 } else { 9 };
     if block.len() < required_lines {
-        return Err(NavParseError::TruncatedRecord(sat));
+        return Err(NavParseError::TruncatedRecord(sat.to_string()));
     }
     let bad = |what: &'static str| NavParseError::BadField {
-        satellite: sat.clone(),
+        satellite: sat.to_string(),
         field: what,
     };
-
-    let letter = l0
-        .as_bytes()
-        .first()
-        .copied()
-        .map(|b| b as char)
-        .ok_or_else(|| bad("system"))?;
-    GnssSystem::from_letter(letter).ok_or_else(|| bad("system"))?;
-    let satellite_id: GnssSatelliteId = sat.parse().map_err(|_| bad("prn"))?;
-    let toc_epoch = parse_toc(l0, &sat, TimeScale::Gpst)?;
+    let mut departures = Vec::new();
+    check_extra_lines(block, required_lines, sat, &mut departures);
+    let l0 = block[0];
+    let epoch = parse_record_epoch(
+        l0,
+        Layout::V3,
+        sat,
+        "toc epoch",
+        validate::CivilSecondPolicy::Continuous,
+    )?;
+    let (toc_week, toc_sow) = epoch_week_tow(&epoch, TimeScale::Gpst, sat, "toc epoch")?;
     let af0 = parse_f64(l0, 23, 42).ok_or_else(|| bad("af0"))?;
     let af1 = parse_f64(l0, 42, 61).ok_or_else(|| bad("af1"))?;
     let af2 = parse_f64(l0, 61, 80).ok_or_else(|| bad("af2"))?;
@@ -2166,7 +2374,7 @@ fn parse_cnav_block(block: &[&str], message: NavMessage) -> Result<BroadcastReco
         e: g(o2[1], "e")?,
         cus: g(o2[2], "cus")?,
         sqrt_a: g(o2[3], "sqrtA0")?,
-        toe_sow: toc_epoch.sow,
+        toe_sow: toc_sow,
         cic: g(o3[1], "cic")?,
         omega0: g(o3[2], "omega0")?,
         cis: g(o3[3], "cis")?,
@@ -2180,10 +2388,10 @@ fn parse_cnav_block(block: &[&str], message: NavMessage) -> Result<BroadcastReco
         af0,
         af1,
         af2,
-        toc_sow: toc_epoch.sow,
+        toc_sow,
     };
 
-    let week = toc_epoch.week;
+    let week = toc_week;
     let toe = GnssWeekTow::new(TimeScale::Gpst, week, elements.toe_sow)
         .and_then(GnssWeekTow::normalized)
         .map_err(|_| bad("toe"))?;
@@ -2193,23 +2401,23 @@ fn parse_cnav_block(block: &[&str], message: NavMessage) -> Result<BroadcastReco
     let wn_op = finite_integral_u32(
         g(if is_cnav2 { cnav2_fields[1] } else { o8[1] }, "wn_op")?,
         "wn_op",
-        &sat,
+        sat,
     )?;
     let top_sow = g(o3[0], "top")?;
     let top = GnssWeekTow::new(TimeScale::Gpst, wn_op, top_sow)
         .and_then(GnssWeekTow::normalized)
         .map_err(|_| bad("top"))?;
-    let ura_ed_index = finite_integral_i8(g(o6[0], "ura_ed")?, "ura_ed", -16, 15, &sat)?;
-    let ura_ned0_index = finite_integral_i8(g(o5[2], "ura_ned0")?, "ura_ned0", -16, 15, &sat)?;
-    let ura_ned1_index = finite_integral_u8(g(o5[3], "ura_ned1")?, "ura_ned1", 0, 7, &sat)?;
-    let ura_ned2_index = finite_integral_u8(g(o6[3], "ura_ned2")?, "ura_ned2", 0, 7, &sat)?;
+    let ura_ed_index = finite_integral_i8(g(o6[0], "ura_ed")?, "ura_ed", -16, 15, sat)?;
+    let ura_ned0_index = finite_integral_i8(g(o5[2], "ura_ned0")?, "ura_ned0", -16, 15, sat)?;
+    let ura_ned1_index = finite_integral_u8(g(o5[3], "ura_ned1")?, "ura_ned1", 0, 7, sat)?;
+    let ura_ned2_index = finite_integral_u8(g(o6[3], "ura_ned2")?, "ura_ned2", 0, 7, sat)?;
     let health_max = if is_cnav2 { 1 } else { 7 };
     let sv_health = f64::from(finite_integral_u8(
         g(o6[1], "health")?,
         "health",
         0,
         health_max,
-        &sat,
+        sat,
     )?);
     let transmission_time_sow = g(if is_cnav2 { cnav2_fields[0] } else { o8[0] }, "t_tm")?;
     let flags = optional_integral_u32(
@@ -2219,18 +2427,18 @@ fn parse_cnav_block(block: &[&str], message: NavMessage) -> Result<BroadcastReco
             raw_orbit_field(block[8], 2)
         },
         "flags",
-        &sat,
+        sat,
     )?;
 
-    let tgd = optional_cnav_delay(raw_orbit_field(block[6], 2), "tgd", &sat)?;
-    let isc_l1ca = optional_cnav_delay(raw_orbit_field(block[7], 0), "isc_l1ca", &sat)?;
-    let isc_l2c = optional_cnav_delay(raw_orbit_field(block[7], 1), "isc_l2c", &sat)?;
-    let isc_l5i5 = optional_cnav_delay(raw_orbit_field(block[7], 2), "isc_l5i5", &sat)?;
-    let isc_l5q5 = optional_cnav_delay(raw_orbit_field(block[7], 3), "isc_l5q5", &sat)?;
+    let tgd = optional_cnav_delay(raw_orbit_field(block[6], 2), "tgd", sat)?;
+    let isc_l1ca = optional_cnav_delay(raw_orbit_field(block[7], 0), "isc_l1ca", sat)?;
+    let isc_l2c = optional_cnav_delay(raw_orbit_field(block[7], 1), "isc_l2c", sat)?;
+    let isc_l5i5 = optional_cnav_delay(raw_orbit_field(block[7], 2), "isc_l5i5", sat)?;
+    let isc_l5q5 = optional_cnav_delay(raw_orbit_field(block[7], 3), "isc_l5q5", sat)?;
     let (isc_l1cd, isc_l1cp) = if is_cnav2 {
         (
-            optional_cnav_delay(raw_orbit_field(block[8], 0), "isc_l1cd", &sat)?,
-            optional_cnav_delay(raw_orbit_field(block[8], 1), "isc_l1cp", &sat)?,
+            optional_cnav_delay(raw_orbit_field(block[8], 0), "isc_l1cd", sat)?,
+            optional_cnav_delay(raw_orbit_field(block[8], 1), "isc_l1cp", sat)?,
         )
     } else {
         (None, None)
@@ -2247,85 +2455,230 @@ fn parse_cnav_block(block: &[&str], message: NavMessage) -> Result<BroadcastReco
         transmission_time_sow,
         flags,
     };
-    let sv_accuracy_m = cnav_ura_nominal_m(ura_ed_index).unwrap_or(8192.0);
-    let issue = (elements.toe_sow / 300.0).round() as u32;
 
-    Ok(BroadcastRecord {
-        satellite_id,
-        message,
-        issue_of_data: BroadcastIssue { issue, message },
-        week,
-        toe,
-        toc,
-        elements,
-        clock,
-        group_delays: BroadcastGroupDelays::cnav(
-            tgd, isc_l1ca, isc_l2c, isc_l5i5, isc_l5q5, isc_l1cd, isc_l1cp,
-        ),
-        cnav: Some(cnav),
-        sv_health,
-        sv_accuracy_m,
-        fit_interval_s: Some(3.0 * SECONDS_PER_HOUR),
+    Ok(Decoded {
+        value: BroadcastRecord {
+            satellite_id,
+            message,
+            // The RINEX 4 CNAV and CNAV-2 records carry no issue of data.
+            issue_of_data: None,
+            week,
+            toe,
+            toc,
+            elements,
+            clock,
+            group_delays: BroadcastGroupDelays::cnav(
+                tgd, isc_l1ca, isc_l2c, isc_l5i5, isc_l5q5, isc_l1cd, isc_l1cp,
+            ),
+            cnav: Some(cnav),
+            sv_health,
+            sv_accuracy_m: cnav_ura_nominal_m(ura_ed_index),
+            // The RINEX 4 CNAV and CNAV-2 records state no fit interval.
+            fit_interval_s: None,
+            stated: StatedNavFields::default(),
+        },
+        departures,
     })
 }
 
 /// The GPS curve-fit interval in seconds from the ORBIT-7 fit-interval field.
 ///
-/// RINEX 3.03 Table A6 specifies ORBIT-7 field 2 in hours. Per Section 6.6,
-/// unknown or unmodeled fields are blank. A blank or absent field indicates an
-/// unknown or unprovided fit interval and decodes as `Ok(None)`.
+/// RINEX 2 and RINEX 3.03 Table A6 specify ORBIT-7 field 2 in hours, RINEX 2.11
+/// with zero for an unknown interval. Per RINEX 3.03 Section 6.6, unknown or
+/// unmodeled fields are blank. A blank or absent field indicates an unknown or
+/// unprovided fit interval and decodes as `Ok(None)`.
 ///
-/// In modern headers, numeric zero (`0.0`) follows the standard missing-value
-/// convention for unpopulated fields (rather than representing a physical
-/// zero-length interval or an unsourced 4-hour broadcast interval). To preserve
-/// readable files without rejecting zero and without fabricating metadata, a
-/// modern zero decodes as `Ok(None)`. If `None` reaches orbit selection,
-/// downstream logic retains [`MAX_EPHEMERIS_AGE_S`] as a computational safety
-/// fallback rather than reported broadcast metadata. Explicit positive values
-/// in modern headers decode as hours (`value * SECONDS_PER_HOUR`).
+/// Numeric zero (`0.0`) follows the missing-value convention for unpopulated
+/// fields (rather than representing a physical zero-length interval or an
+/// unsourced 4-hour broadcast interval) and decodes as `Ok(None)`. Explicit
+/// positive values decode as hours (`value * SECONDS_PER_HOUR`).
 ///
-/// For legacy files (RINEX 3.02 and older), RINEX 3.02 Table A6 explicitly defines
-/// flag values `0 = 4 hours` and `1 = 6 hours` (extended fit). This established
-/// legacy compatibility is preserved: `0.0` decodes as nominal 4 hours
+/// For RINEX 3.00-3.02 the field is read as the flag `0 = 4 hours`, `1 = 6 hours`
+/// (extended fit): `0.0` decodes as nominal 4 hours
 /// ([`GPS_NOMINAL_FIT_INTERVAL_S`]), and `1.0` decodes as extended fit
-/// ([`GPS_LEGACY_EXTENDED_FIT_INTERVAL_S`]). The old constant of 8.0 hours was an
-/// inherited defect now independently verified against primary text.
+/// ([`GPS_LEGACY_EXTENDED_FIT_INTERVAL_S`]).
 ///
 /// A present but non-numeric, negative, or unrepresentable field is an error (`Err(())`).
-fn gps_fit_interval_s(orbit7: &str, version: RinexVersion) -> Result<Option<f64>, ()> {
-    if field(orbit7, 23, 42).is_none() {
+fn gps_fit_interval_s(
+    orbit7: &str,
+    layout: Layout,
+    version: NavVersion,
+) -> Result<Option<f64>, ()> {
+    let (start, end) = layout.orbit_fields()[1];
+    if field(orbit7, start, end).is_none() {
         return Ok(None);
     }
-    let value = parse_f64(orbit7, 23, 42).ok_or(())?;
+    let value = parse_f64(orbit7, start, end).ok_or(())?;
     if value < 0.0 {
         return Err(());
     }
+    Ok(gps_fit_interval_from_value(value, version))
+}
+
+/// The GPS fit interval a non-negative ORBIT-7 field 2 value states in `version`
+/// (see [`gps_fit_interval_s`]).
+pub(crate) fn gps_fit_interval_from_value(value: f64, version: NavVersion) -> Option<f64> {
     if value == 0.0 {
         if version.gps_fit_interval_uses_legacy_flag() {
-            Ok(Some(GPS_NOMINAL_FIT_INTERVAL_S))
+            Some(GPS_NOMINAL_FIT_INTERVAL_S)
         } else {
-            Ok(None)
+            None
         }
     } else if version.gps_fit_interval_uses_legacy_flag() && value == 1.0 {
-        Ok(Some(GPS_LEGACY_EXTENDED_FIT_INTERVAL_S))
+        Some(GPS_LEGACY_EXTENDED_FIT_INTERVAL_S)
     } else {
-        Ok(Some(value * SECONDS_PER_HOUR))
+        Some(value * SECONDS_PER_HOUR)
     }
 }
 
-/// Classify a Galileo record from its data-source word (orbit-5 field 1): source
-/// bit 1 is F/NAV, source bits 0/2 are I/NAV. Bits 8/9 describe the clock-pair
-/// frequency and do not determine the navigation message type.
-fn galileo_message(data_sources: f64, sat: &str) -> Result<NavMessage, NavParseError> {
-    let word = finite_integral_u32(data_sources, "data sources", sat)?;
-    if word & 0b010 != 0 {
-        Ok(NavMessage::GalileoFnav)
-    } else if word & 0b101 != 0 {
-        Ok(NavMessage::GalileoInav)
-    } else {
-        // No source bit set: default to I/NAV (the operational E1 message).
-        Ok(NavMessage::GalileoInav)
+/// Classify a Galileo record from its data-source word (orbit-5 field 2), converted
+/// to the nearest integer as RINEX 3.05 section 6.9 reads a bitwise field, by RINEX 3.05
+/// Table A8:
+///
+/// - the source bits decide where they name one message: bit 1 (F/NAV E5a-I) is F/NAV,
+///   bits 0 and 2 (I/NAV E1-B, E5b-I) are I/NAV;
+/// - otherwise (no source bit, or I/NAV and F/NAV bits together) the clock bits decide:
+///   bit 9 (clock for E5b,E1) is I/NAV, bit 8 (clock for E5a,E1) is F/NAV;
+/// - otherwise the word names no message and the record is
+///   [`NavMessage::GalileoUnclassified`], which is used as RTKLIB's default Galileo
+///   selection (`sel = 0`) uses a record: with the BGD E5b/E1.
+///
+/// The second value is whether the word has a pattern the table forbids: bits 0-2 all
+/// set, or bits 8 and 9 both set.
+fn galileo_message(data_sources: f64, sat: &str) -> Result<(NavMessage, bool), NavParseError> {
+    let bad = || NavParseError::BadField {
+        satellite: sat.to_string(),
+        field: "data sources",
+    };
+    if !data_sources.is_finite() {
+        return Err(bad());
     }
+    let rounded = data_sources.round();
+    if rounded < 0.0 || rounded > f64::from(u32::MAX) {
+        return Err(bad());
+    }
+    let word = rounded as u32;
+    let fnav_source = word & 0b010 != 0;
+    let inav_source = word & 0b101 != 0;
+    let e5a_clock = word & (1 << 8) != 0;
+    let e5b_clock = word & (1 << 9) != 0;
+    let forbidden = word & 0b111 == 0b111 || (e5a_clock && e5b_clock);
+    let message = match (inav_source, fnav_source, e5b_clock, e5a_clock) {
+        (true, false, _, _) => NavMessage::GalileoInav,
+        (false, true, _, _) => NavMessage::GalileoFnav,
+        (_, _, true, false) => NavMessage::GalileoInav,
+        (_, _, false, true) => NavMessage::GalileoFnav,
+        _ => NavMessage::GalileoUnclassified,
+    };
+    Ok((message, forbidden))
+}
+
+/// Decode a GLONASS FDMA record: four lines, or five from RINEX 3.05 on.
+pub(crate) fn parse_glonass_block(
+    lines: &[&str],
+    satellite_id: GnssSatelliteId,
+    sat: &str,
+    version: NavVersion,
+    layout: Layout,
+) -> Result<Decoded<GlonassRecord>, NavParseError> {
+    if lines.len() < 4 {
+        return Err(NavParseError::TruncatedRecord(sat.to_string()));
+    }
+    let bad = |what: &'static str| NavParseError::BadField {
+        satellite: sat.to_string(),
+        field: what,
+    };
+    let mut departures = Vec::new();
+    let has_fourth_orbit_line = version.glonass_has_fourth_orbit_line();
+    let expected = if has_fourth_orbit_line { 5 } else { 4 };
+    if lines.len() < expected {
+        // A RINEX 3.05+ record without its fourth orbit line: the state vector and
+        // clock are all there; the 3.05 fields read as absent.
+        departures.push(NavParseError::TruncatedRecord(sat.to_string()));
+    }
+    check_extra_lines(lines, expected, sat, &mut departures);
+    let epoch = parse_record_epoch(
+        lines[0],
+        layout,
+        sat,
+        "epoch",
+        validate::CivilSecondPolicy::UtcLike,
+    )?;
+    let epoch_utc_j2000_s = epoch.j2000_s();
+    if !epoch_utc_j2000_s.is_finite() {
+        return Err(bad("epoch"));
+    }
+    // RTKLIB `decode_geph`: toc=gpst2time(week,floor((tow+450.0)/900.0)*900). The week
+    // starts and J2000 (12:00) both lie on the 15-minute grid.
+    let toe_utc_j2000_s = ((epoch_utc_j2000_s + 450.0) / 900.0).floor() * 900.0;
+    let data = record_fields(&lines[..expected.min(lines.len())], layout);
+    let get = |index: usize| data.get(index).copied().flatten();
+    let raw = |index: usize| raw_record_field(lines, layout, index);
+    let km =
+        |index: usize, what: &'static str| get(index).map(|x| x * KM_TO_M).ok_or_else(|| bad(what));
+    let g = |index: usize, what: &'static str| get(index).ok_or_else(|| bad(what));
+
+    let clk_bias = g(0, "clock bias")?;
+    let gamma_n = g(1, "gamma_n")?;
+    let message_frame_time_s = stated_field(raw(2), "message frame time", sat, &mut departures);
+    let pos_m = [km(3, "x")?, km(7, "y")?, km(11, "z")?];
+    let vel_m_s = [km(4, "vx")?, km(8, "vy")?, km(12, "vz")?];
+    let acc_m_s2 = [km(5, "ax")?, km(9, "ay")?, km(13, "az")?];
+    let sv_health = g(6, "health")?;
+    let (freq_channel, stated_freq_channel) =
+        glonass_frequency_channel(g(10, "frequency channel")?, sat)?;
+    let age_days = stated_field(raw(14), "age of operation", sat, &mut departures);
+    let (status_flags, l1_l2_group_delay_field_s, urai, health_flags) =
+        if has_fourth_orbit_line && lines.len() >= 5 {
+            (
+                stated_field(raw(15), "status flags", sat, &mut departures),
+                stated_field(raw(16), "l1/l2 group delay", sat, &mut departures),
+                stated_field(raw(17), "urai", sat, &mut departures),
+                stated_field(raw(18), "health flags", sat, &mut departures),
+            )
+        } else {
+            (None, None, None, None)
+        };
+
+    Ok(Decoded {
+        value: GlonassRecord {
+            satellite_id,
+            toe_utc_j2000_s,
+            epoch_utc_j2000_s,
+            pos_m,
+            vel_m_s,
+            acc_m_s2,
+            clk_bias,
+            gamma_n,
+            sv_health,
+            freq_channel,
+            stated_freq_channel,
+            message_frame_time_s,
+            age_days,
+            status_flags,
+            l1_l2_group_delay_field_s,
+            urai,
+            health_flags,
+        },
+        departures,
+    })
+}
+
+/// The four broadcast-orbit values of a version 3/4 continuation line (columns
+/// 4/23/42/61).
+fn orbit_row(line: &str) -> [Option<f64>; 4] {
+    [
+        parse_f64(line, 4, 23),
+        parse_f64(line, 23, 42),
+        parse_f64(line, 42, 61),
+        parse_f64(line, 61, 80),
+    ]
+}
+
+fn raw_orbit_field(line: &str, field_index: usize) -> &str {
+    const RANGES: [(usize, usize); 4] = [(4, 23), (23, 42), (42, 61), (61, 80)];
+    let (start, end) = RANGES[field_index];
+    raw_field(line, start, end)
 }
 
 fn finite_integral_u32(value: f64, field: &'static str, sat: &str) -> Result<u32, NavParseError> {
@@ -2432,7 +2785,9 @@ fn optional_keplerian_delay(
     Ok(Some(value))
 }
 
-/// Read the GLONASS frequency channel field as the integer it states.
+/// Read the GLONASS frequency channel field as the integer it states, with a value
+/// above 128 read as that value less 256, as RTKLIB `decode_geph` reads it ("some
+/// receiver output >128 for minus frequency number").
 ///
 /// The field must hold a whole number that fits [`GlonassRecord::freq_channel`];
 /// it is not held to the `-7..=6` FDMA allocation. RTKLIB keeps a record whose
@@ -2441,7 +2796,7 @@ fn optional_keplerian_delay(
 /// lose a broadcast ephemeris the file states plainly. Consumers that need a
 /// carrier check the allocation themselves with
 /// [`valid_glonass_frequency_channel`].
-fn glonass_frequency_channel(value: f64, sat: &str) -> Result<i32, NavParseError> {
+fn glonass_frequency_channel(value: f64, sat: &str) -> Result<(i32, i32), NavParseError> {
     const FIELD: &str = "frequency channel";
     validate::finite(value, FIELD).map_err(|error| map_record_field_error(error, sat))?;
     if value.trunc() != value || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
@@ -2450,29 +2805,17 @@ fn glonass_frequency_channel(value: f64, sat: &str) -> Result<i32, NavParseError
             field: FIELD,
         });
     }
-    Ok(value as i32)
+    let channel = value as i32;
+    Ok((fold_glonass_channel(channel), channel))
 }
 
-fn strict_header_f64(
-    line: &str,
-    start: usize,
-    end: usize,
-    field: &'static str,
-) -> Result<f64, NavParseError> {
-    validate::strict_f64(raw_field(line, start, end), field).map_err(map_header_field_error)
-}
-
-fn strict_header_integer_f64(
-    line: &str,
-    start: usize,
-    end: usize,
-    field: &'static str,
-) -> Result<f64, NavParseError> {
-    let value = strict_header_f64(line, start, end, field)?;
-    if value.trunc() != value {
-        return Err(NavParseError::BadHeaderField { field });
+/// A stated GLONASS channel as RTKLIB `decode_geph` reads it: above 128, less 256.
+pub(crate) fn fold_glonass_channel(channel: i32) -> i32 {
+    if channel > 128 {
+        channel - 256
+    } else {
+        channel
     }
-    Ok(value)
 }
 
 fn strict_record_int<T>(
@@ -2494,61 +2837,6 @@ fn map_record_field_error(error: FieldError, satellite: &str) -> NavParseError {
         satellite: satellite.to_string(),
         field: error.field(),
     }
-}
-
-fn map_header_field_error(error: FieldError) -> NavParseError {
-    NavParseError::BadHeaderField {
-        field: error.field(),
-    }
-}
-
-/// Parse the clock reference epoch from the SV/epoch line into week and seconds
-/// of week in the record's broadcast time scale.
-fn parse_toc(
-    l0: &str,
-    sat: &str,
-    time_scale: TimeScale,
-) -> Result<ClockReferenceEpoch, NavParseError> {
-    let year = strict_record_int::<i64>(l0, 4, 8, "toc epoch", sat)?;
-    let month = strict_record_int::<i64>(l0, 9, 11, "toc epoch", sat)?;
-    let day = strict_record_int::<i64>(l0, 12, 14, "toc epoch", sat)?;
-    let hour = strict_record_int::<i64>(l0, 15, 17, "toc epoch", sat)?;
-    let minute = strict_record_int::<i64>(l0, 18, 20, "toc epoch", sat)?;
-    let second = strict_record_int::<i64>(l0, 21, 23, "toc epoch", sat)?;
-    let civil = validate::civil_datetime_with_second_policy(
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second as f64,
-        validate::CivilSecondPolicy::Continuous,
-    )
-    .map_err(|_| NavParseError::BadField {
-        satellite: sat.to_string(),
-        field: "toc epoch",
-    })?;
-    let month = i64::from(civil.month);
-    let day = i64::from(civil.day);
-    let week = gnss::week_from_calendar(time_scale, civil.year, month, day).ok_or_else(|| {
-        NavParseError::BadField {
-            satellite: sat.to_string(),
-            field: "toc epoch",
-        }
-    })?;
-    let sow = gnss::seconds_of_week_from_calendar(
-        civil.year,
-        month,
-        day,
-        i64::from(civil.hour),
-        i64::from(civil.minute),
-        civil.second as i64,
-    )
-    .ok_or_else(|| NavParseError::BadField {
-        satellite: sat.to_string(),
-        field: "toc epoch",
-    })?;
-    Ok(ClockReferenceEpoch { week, sow })
 }
 
 #[cfg(all(test, sidereon_repo_tests))]

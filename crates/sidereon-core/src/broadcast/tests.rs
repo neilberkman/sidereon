@@ -6,10 +6,11 @@
 //! its bits and the Rust evaluation is asserted bit-for-bit (ULP distance 0), so
 //! a miss localizes to a single operation rather than the final coordinate.
 //!
-//! The fixture's canonical evaluator is the portable Rust `libm` crate. The
-//! mpmath implementation in `fixtures-generators/broadcast_eval_portable.py`
-//! is retained as an independent high-precision audit, not as the engine
-//! oracle; its one-ULP disagreements with `libm` are intentional audit data.
+//! The fixture's canonical evaluator is the portable Rust `libm` crate, with
+//! RTKLIB `eph2pos`'s statement order. The mpmath implementation in
+//! `fixtures-generators/broadcast_eval_portable.py` is retained as an
+//! independent high-precision audit, not as the engine oracle; its one-ULP
+//! disagreements with `libm` are intentional audit data.
 
 use super::*;
 use serde_json::Value;
@@ -110,7 +111,9 @@ fn consts_for(system: &str) -> ConstellationConstants {
     }
 }
 
-fn legacy_satellite_position_ecef_reference(
+/// RTKLIB `eph2pos` transcribed statement for statement, with `libm` for the
+/// transcendental functions.
+fn rtklib_eph2pos_reference(
     elements: &KeplerianElements,
     consts: &ConstellationConstants,
     t_sow_s: f64,
@@ -127,9 +130,19 @@ fn legacy_satellite_position_ecef_reference(
 
     let tk = time_from_reference_s(t_sow_s, elements.toe_sow);
 
+    // M=eph->M0+(sqrt(mu/(eph->A*eph->A*eph->A))+eph->deln)*tk;
     let mk = elements.m0 + n * tk;
-    let kepler = eccentric_anomaly_unchecked(mk, e);
-    let ecc_anom = kepler.value;
+    // for (n=0,E=M,Ek=0.0;fabs(E-Ek)>RTOL_KEPLER&&n<MAX_ITER_KEPLER;n++) {
+    //     Ek=E; E-=(E-eph->e*sin(E)-M)/(1.0-eph->e*cos(E));
+    // }
+    let mut ecc_anom = mk;
+    let mut ek = 0.0_f64;
+    let mut kepler_iterations = 0usize;
+    while (ecc_anom - ek).abs() > 1e-13 && kepler_iterations < 30 {
+        ek = ecc_anom;
+        ecc_anom -= (ecc_anom - e * libm::sin(ecc_anom) - mk) / (1.0 - e * libm::cos(ecc_anom));
+        kepler_iterations += 1;
+    }
     let sin_e = libm::sin(ecc_anom);
     let cos_e = libm::cos(ecc_anom);
 
@@ -146,7 +159,8 @@ fn legacy_satellite_position_ecef_reference(
 
     let u = phi + du;
     let r = a * (1.0 - e * cos_e) + dr;
-    let i = elements.i0 + di + elements.idot * tk;
+    // i=eph->i0+eph->idot*tk; ... i+=eph->cis*sin2u+eph->cic*cos2u;
+    let i = elements.i0 + elements.idot * tk + di;
 
     let xp = r * libm::cos(u);
     let yp = r * libm::sin(u);
@@ -166,15 +180,15 @@ fn legacy_satellite_position_ecef_reference(
     let zg = yp * sin_i;
 
     let (x, y, z) = if is_geo {
-        let deg5 = 5.0_f64.to_radians();
-        let cos_phi = libm::cos(deg5);
-        let sin_phi = -libm::sin(deg5);
-        let z_ang = omega_e * tk;
-        let cos_z = libm::cos(z_ang);
-        let sin_z = libm::sin(z_ang);
-        let yr = yg * cos_phi + zg * sin_phi;
-        let zr = -yg * sin_phi + zg * cos_phi;
-        (xg * cos_z + yr * sin_z, -xg * sin_z + yr * cos_z, zr)
+        const SIN_5: f64 = -0.0871557427476582;
+        const COS_5: f64 = 0.996_194_698_091_745_5; // RTKLIB `0.9961946980917456`, the same f64
+        let sino = libm::sin(omega_e * tk);
+        let coso = libm::cos(omega_e * tk);
+        (
+            xg * coso + yg * sino * COS_5 + zg * sino * SIN_5,
+            -xg * sino + yg * coso * COS_5 + zg * coso * SIN_5,
+            -yg * SIN_5 + zg * COS_5,
+        )
     } else {
         (xg, yg, zg)
     };
@@ -186,7 +200,7 @@ fn legacy_satellite_position_ecef_reference(
         tk,
         mk,
         eccentric_anomaly: ecc_anom,
-        kepler_iterations: kepler.iterations,
+        kepler_iterations,
         sin_e,
         cos_e,
         nu,
@@ -267,7 +281,7 @@ fn pinned_constants_match_the_recipe() {
 }
 
 #[test]
-fn lnav_position_refactor_preserves_legacy_bits() {
+fn lnav_position_matches_rtklib_eph2pos_transcription() {
     let doc = read_fixture("broadcast_golden.json");
     let cases = doc["cases"].as_array().expect("cases array");
     assert!(!cases.is_empty(), "fixture has no cases");
@@ -280,9 +294,12 @@ fn lnav_position_refactor_preserves_legacy_bits() {
         let t_sow = bits(case["t_sow_hex"].as_str().unwrap());
         let is_geo = case["is_geo"].as_bool().unwrap_or(false);
 
-        let before = legacy_satellite_position_ecef_reference(&elems, &consts, t_sow, is_geo);
-        let after = satellite_position_ecef_unchecked(&elems, &consts, t_sow, is_geo);
-        assert_eq!(after, before, "{name}: refactored legacy orbit changed");
+        let rtklib = rtklib_eph2pos_reference(&elems, &consts, t_sow, is_geo);
+        let got = satellite_position_ecef_unchecked(&elems, &consts, t_sow, is_geo);
+        assert_eq!(
+            got, rtklib,
+            "{name}: orbit departs from the eph2pos transcription"
+        );
     }
 }
 

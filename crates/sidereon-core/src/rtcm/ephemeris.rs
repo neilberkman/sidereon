@@ -20,7 +20,7 @@ use crate::error::{Error, Result};
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::rinex_nav::{
     gps_fit_interval_from_flag, gps_ura_index_to_meters, BroadcastGroupDelays, BroadcastIssue,
-    BroadcastRecord, NavMessage,
+    BroadcastRecord, NavMessage, StatedNavFields,
 };
 
 use super::bits::{BitReader, BitWriter};
@@ -375,10 +375,10 @@ impl GpsEphemeris {
         Ok(BroadcastRecord {
             satellite_id,
             message: NavMessage::GpsLnav,
-            issue_of_data: BroadcastIssue {
+            issue_of_data: Some(BroadcastIssue {
                 issue: u32::from(self.iode),
                 message: NavMessage::GpsLnav,
-            },
+            }),
             week: full_week,
             toe,
             toc,
@@ -409,8 +409,15 @@ impl GpsEphemeris {
             group_delays: BroadcastGroupDelays::gps_lnav(scaled_i(self.t_gd, -31)),
             cnav: None,
             sv_health: f64::from(self.sv_health),
-            sv_accuracy_m: gps_ura_to_meters(self.sv_accuracy, "GPS")?,
+            sv_accuracy_m: Some(gps_ura_to_meters(self.sv_accuracy, "GPS")?),
             fit_interval_s: Some(fit_interval_s),
+            stated: StatedNavFields {
+                orbit5_field2: Some(f64::from(self.code_on_l2)),
+                orbit5_field4: Some(f64::from(u8::from(self.l2_p_data_flag))),
+                orbit6_field4: Some(f64::from(self.iodc)),
+                orbit7_field2: Some(fit_interval_s / SECONDS_PER_HOUR),
+                ..StatedNavFields::default()
+            },
         })
     }
 }
@@ -952,10 +959,10 @@ fn galileo_to_record(
     Ok(BroadcastRecord {
         satellite_id,
         message,
-        issue_of_data: BroadcastIssue {
+        issue_of_data: Some(BroadcastIssue {
             issue: u32::from(iod_nav),
             message,
-        },
+        }),
         week: gps_aligned_week,
         toe,
         toc,
@@ -989,8 +996,17 @@ fn galileo_to_record(
         ),
         cnav: None,
         sv_health,
-        sv_accuracy_m: galileo_sisa_m(sisa)?,
+        sv_accuracy_m: Some(galileo_sisa_m(sisa)?),
         fit_interval_s: None,
+        // The data-source word RTKLIB's RTCM decoder states for each message: I/NAV E1-B
+        // and E5b-I with the E5b,E1 clock (517), F/NAV E5a-I with the E5a,E1 clock (258).
+        stated: StatedNavFields {
+            orbit5_field2: Some(match message {
+                NavMessage::GalileoFnav => f64::from(0b10 | (1 << 8)),
+                _ => f64::from(0b101 | (1 << 9)),
+            }),
+            ..StatedNavFields::default()
+        },
     })
 }
 
@@ -1215,10 +1231,10 @@ impl BeidouEphemeris {
         Ok(BroadcastRecord {
             satellite_id,
             message,
-            issue_of_data: BroadcastIssue {
+            issue_of_data: Some(BroadcastIssue {
                 issue: u32::from(self.aode),
                 message,
-            },
+            }),
             week,
             toe,
             toc,
@@ -1252,8 +1268,12 @@ impl BeidouEphemeris {
             ),
             cnav: None,
             sv_health: f64::from(u8::from(self.sv_health)),
-            sv_accuracy_m: gps_ura_to_meters(self.sv_urai, "BeiDou")?,
+            sv_accuracy_m: Some(gps_ura_to_meters(self.sv_urai, "BeiDou")?),
             fit_interval_s: None,
+            stated: StatedNavFields {
+                orbit7_field2: Some(f64::from(self.aodc)),
+                ..StatedNavFields::default()
+            },
         })
     }
 }
@@ -1483,10 +1503,10 @@ impl QzssEphemeris {
         Ok(BroadcastRecord {
             satellite_id,
             message: NavMessage::QzssLnav,
-            issue_of_data: BroadcastIssue {
+            issue_of_data: Some(BroadcastIssue {
                 issue: u32::from(self.iode),
                 message: NavMessage::QzssLnav,
-            },
+            }),
             week: full_week,
             toe,
             toc,
@@ -1517,12 +1537,19 @@ impl QzssEphemeris {
             group_delays: BroadcastGroupDelays::gps_lnav(scaled_i(self.t_gd, -31)),
             cnav: None,
             sv_health: f64::from(self.sv_health),
-            sv_accuracy_m: gps_ura_to_meters(self.ura, "QZSS")?,
-            fit_interval_s: Some(if self.fit_interval {
-                6.0 * SECONDS_PER_HOUR
-            } else {
-                2.0 * SECONDS_PER_HOUR
-            }),
+            sv_accuracy_m: Some(gps_ura_to_meters(self.ura, "QZSS")?),
+            // IS-QZSS-PNT: flag 0 is a two-hour fit, 1 more than two hours; RTKLIB
+            // `decode_type1044` and `decode_eph` both read 1 as four hours, so a record
+            // from RTCM and the same record from RINEX agree.
+            fit_interval_s: Some(crate::rinex_nav::qzss_fit_interval_s(f64::from(u8::from(
+                self.fit_interval,
+            )))),
+            stated: StatedNavFields {
+                orbit5_field2: Some(f64::from(self.codes_on_l2)),
+                orbit6_field4: Some(f64::from(self.iodc)),
+                orbit7_field2: Some(f64::from(u8::from(self.fit_interval))),
+                ..StatedNavFields::default()
+            },
         })
     }
 }

@@ -26,8 +26,8 @@
 //!   * `KMS300DNK_R_20221591000_01H_MN.rnx`: RINEX 4.00 MIXED nav, 1 hour (2022 DOY
 //!     159), committed verbatim (decompressed) from nav-solutions/data NAV/V4
 //!     (gz sha256 2bae4217cb71ad4a2b9c0067bd1c5b56915e42d2007a94e91eb408468cc4763f).
-//!     Tests version-4 frame-marker parsing; 174 supported Keplerian records parsed,
-//!     GLONASS/SBAS/STO/ION skipped.
+//!     Tests version-4 frame-marker parsing; `parse_nav` returns its 174 Keplerian
+//!     records and reports its GLONASS, SBAS, STO and ION frames in `NavParse::other`.
 //!   * `BRD400DLR_S_20261800000_01H_MN_trim.rnx`: RINEX 4.02 mixed broadcast
 //!     product from
 //!     `https://igs.bkg.bund.de/root_ftp/IGS/BRDC/2026/180/BRD400DLR_S_20261800000_01D_MN.rnx.gz`
@@ -153,8 +153,7 @@ fn parses_and_evaluates_glonass_records() {
     );
 
     // A query far outside the product's coverage (a day before any record) has
-    // no record within the +/-15 min validity window, so no ephemeris. (A query
-    // an hour later would instead be served by the next half-hourly record.)
+    // no record within the 1800 s limit (RTKLIB `MAXDTOE_GLO`), so no ephemeris.
     assert!(
         store
             .position_clock_at_j2000_s(r0.satellite_id, t_toe_gpst - SECONDS_PER_DAY)
@@ -171,11 +170,9 @@ fn parses_and_evaluates_glonass_records() {
 /// field as the "unavailable" sentinel `.999999999999e+09`.
 ///
 /// This locks the provenance: the file is NOT a three-line 3.04 layout, the
-/// fourth orbit line IS present, and sidereon parses the file correctly because
-/// `parse_glonass` delimits records by record-start lines and consumes only the
-/// epoch + first three orbit lines, IGNORING the fourth orbit line entirely.
-/// Ignoring dtaun is correct for an L1-only single-frequency user (no L1/L2
-/// inter-frequency group delay is applied).
+/// fourth orbit line IS present, and `parse_glonass` reads it as the RINEX 3.05
+/// table lays it out (status flags, `ΔτN`, URAI, health flags), with the
+/// `.999999999999e+09` value read as a delay that is not known.
 #[test]
 fn committed_rn_fixture_is_rinex_305_five_line_layout_parsed_correctly() {
     let text = glonass_fixture_text();
@@ -226,8 +223,8 @@ fn committed_rn_fixture_is_rinex_305_five_line_layout_parsed_correctly() {
         first_glonass[4]
     );
 
-    // The fourth orbit line is genuinely IGNORED: parsing still yields the
-    // correct R01 broadcast state from the first three orbit lines.
+    // The fourth orbit line is read: gfzrnx left the status and health flags
+    // blank, wrote the unknown-delay value and URAI 15.
     let recs = parse_glonass(&text).expect("parse GLONASS records");
     let r01 = recs
         .iter()
@@ -240,6 +237,15 @@ fn committed_rn_fixture_is_rinex_305_five_line_layout_parsed_correctly() {
         r01.toe_utc_j2000_s.is_finite(),
         "R01 epoch parsed (4th orbit line did not corrupt the record stream)"
     );
+    assert_eq!(r01.message_frame_time_s, Some(342_000.0));
+    assert_eq!(r01.age_days, Some(0.0));
+    assert_eq!(r01.status_flags, None);
+    assert_eq!(r01.l1_l2_group_delay_field_s, Some(999_999_999.999));
+    assert_eq!(r01.l1_l2_group_delay_s(), None);
+    assert_eq!(r01.single_frequency_group_delay_s(), None);
+    assert_eq!(r01.urai, Some(15.0));
+    assert_eq!(r01.health_flags, None);
+    assert!(r01.is_healthy());
 }
 
 #[test]
@@ -778,15 +784,16 @@ fn galileo_inav_uses_e5b_e1_bgd_for_clock() {
 
     let store = BroadcastStore::from_nav(&text).expect("default Galileo store");
     let rec = &store.records()[0];
-    let t = toe_as_j2000_s(rec);
+    // A minute after toe: RTKLIB `seleph` uses a Galileo record only after its toe.
+    let t = toe_as_j2000_s(rec) + 60.0;
     let (_, clock_s) = store
         .position_clock_at_j2000_s(rec.satellite_id, t)
-        .expect("I/NAV record evaluates at toe");
+        .expect("I/NAV record evaluates after toe");
     let inav_state = satellite_state(
         &rec.elements,
         &rec.clock,
         &rec.constants(),
-        rec.elements.toe_sow,
+        rec.elements.toe_sow + 60.0,
         BGD_E5B_E1_S,
         false,
     )
@@ -1026,8 +1033,15 @@ fn spp_solves_from_broadcast_gps() {
 
 #[test]
 fn rejects_a_non_navigation_header() {
-    let bogus = "     3.05           OBSERVATION DATA   M                   RINEX VERSION / TYPE\n\
-                 END OF HEADER\n";
+    // Header labels are read from columns 61-80, where the RINEX tables place them.
+    let bogus = &format!(
+        "{}{}",
+        header_record(
+            "     3.05           OBSERVATION DATA    M",
+            "RINEX VERSION / TYPE"
+        ),
+        header_record("", "END OF HEADER")
+    );
     assert!(matches!(
         parse_nav(bogus),
         Err(NavParseError::UnsupportedHeader(_))
@@ -1043,8 +1057,14 @@ fn reports_missing_header_end() {
 
 #[test]
 fn parse_glonass_rejects_a_non_navigation_header() {
-    let bogus = "     3.05           OBSERVATION DATA   M                   RINEX VERSION / TYPE\n\
-                 END OF HEADER\n";
+    let bogus = &format!(
+        "{}{}",
+        header_record(
+            "     3.05           OBSERVATION DATA    M",
+            "RINEX VERSION / TYPE"
+        ),
+        header_record("", "END OF HEADER")
+    );
     assert!(matches!(
         parse_glonass(bogus),
         Err(NavParseError::UnsupportedHeader(_))
@@ -1127,13 +1147,12 @@ fn gps_nav_text_with_month(month: &str) -> String {
     gps_nav_text_with_epoch_field(9, 11, month)
 }
 
+/// A RINEX 3.04 file of GLONASS records in the four-line layout of `R01_GLONASS_LINES`.
+/// These tests once used a 3.05 header; RINEX 3.05 added a fourth broadcast-orbit line to
+/// the GLONASS record, which these records do not carry, and the strict reader refuses a
+/// 3.05 record without it.
 fn glonass_text(lines: &[String]) -> String {
-    let mut text = String::from(V3_NAV_HEADER);
-    for line in lines {
-        text.push_str(line);
-        text.push('\n');
-    }
-    text
+    nav_text_with_version("3.04", lines)
 }
 
 fn r01_glonass_lines() -> Vec<String> {
@@ -1311,7 +1330,9 @@ fn cnav_record_from_legacy(
 ) -> BroadcastRecord {
     record.satellite_id = GnssSatelliteId::new(system, prn).expect("valid satellite id");
     record.message = message;
-    record.issue_of_data.message = message;
+    // A RINEX 4 CNAV record carries no issue of data and no fit interval.
+    record.issue_of_data = None;
+    record.stated = StatedNavFields::default();
     record.group_delays = BroadcastGroupDelays::cnav(
         record.group_delays.gps_tgd_s,
         Some(0.0),
@@ -1332,8 +1353,8 @@ fn cnav_record_from_legacy(
         transmission_time_sow: record.elements.toe_sow,
         flags: None,
     });
-    record.sv_accuracy_m = cnav_ura_nominal_m(0).expect("CNAV URA index 0");
-    record.fit_interval_s = Some(3.0 * SECONDS_PER_HOUR);
+    record.sv_accuracy_m = cnav_ura_nominal_m(0);
+    record.fit_interval_s = None;
     record
 }
 
@@ -1841,28 +1862,35 @@ fn rejects_malformed_galileo_data_source_word() {
     }
 }
 
+/// A malformed optional header record says nothing about the ephemeris records, so
+/// `from_nav` keeps them, reports the record with its line, and holds no coefficient set
+/// for it. This test once required `from_nav` to refuse the whole file, which lost every
+/// correct record in it.
 #[test]
-fn from_nav_rejects_malformed_header_ionosphere_coefficients() {
+fn from_nav_reports_malformed_header_ionosphere_coefficients_and_keeps_the_records() {
     let text = nav_text_with_header_line(
-        "GPSA not-a-float                                             IONOSPHERIC CORR",
+        "GPSA not-a-float                                            IONOSPHERIC CORR",
     );
 
-    let err = match BroadcastStore::from_nav(&text) {
-        Ok(_) => panic!("malformed IONOSPHERIC CORR field must be an error"),
-        Err(err) => err,
-    };
+    let store = BroadcastStore::from_nav(&text).expect("the records survive a bad header row");
+    assert_eq!(store.records().len(), 1);
+    assert_eq!(store.iono_corrections().gps, None);
     assert_eq!(
-        err,
-        NavParseError::BadHeaderField {
-            field: "ionospheric correction",
-        }
+        store.departures(),
+        &[NavDiagnostic {
+            line: 2,
+            satellite: String::new(),
+            error: NavParseError::BadHeaderField {
+                field: "ionospheric correction",
+            },
+        }]
     );
 }
 
 #[test]
 fn public_helper_rejects_malformed_header_ionosphere_coefficients() {
     let text = nav_text_with_header_line(
-        "GPSA not-a-float                                             IONOSPHERIC CORR",
+        "GPSA not-a-float                                            IONOSPHERIC CORR",
     );
 
     let err = parse_iono_corrections(&text)
@@ -1875,28 +1903,33 @@ fn public_helper_rejects_malformed_header_ionosphere_coefficients() {
     );
 }
 
+/// A malformed `LEAP SECONDS` record is reported and the records are kept (see the
+/// ionosphere case above). This test once required `from_nav` to refuse the file.
 #[test]
-fn from_nav_rejects_malformed_leap_seconds() {
+fn from_nav_reports_malformed_leap_seconds_and_keeps_the_records() {
     let text = nav_text_with_header_line(
-        "bad                                                        LEAP SECONDS",
+        "bad                                                         LEAP SECONDS",
     );
 
-    let err = match BroadcastStore::from_nav(&text) {
-        Ok(_) => panic!("malformed LEAP SECONDS field must be an error"),
-        Err(err) => err,
-    };
+    let store = BroadcastStore::from_nav(&text).expect("the records survive a bad header row");
+    assert_eq!(store.records().len(), 1);
+    assert_eq!(store.header().and_then(|h| h.leap_seconds.clone()), None);
     assert_eq!(
-        err,
-        NavParseError::BadHeaderField {
-            field: "leap seconds",
-        }
+        store.departures(),
+        &[NavDiagnostic {
+            line: 2,
+            satellite: String::new(),
+            error: NavParseError::BadHeaderField {
+                field: "leap seconds",
+            },
+        }]
     );
 }
 
 #[test]
 fn public_helper_rejects_malformed_leap_seconds() {
     let text = nav_text_with_header_line(
-        "bad                                                        LEAP SECONDS",
+        "bad                                                         LEAP SECONDS",
     );
 
     let err = parse_leap_seconds(&text).expect_err("malformed LEAP SECONDS field must be an error");
@@ -1961,9 +1994,12 @@ fn parses_rinex_v4_gps_qzss_cnav_and_cnv2_records() {
     assert_eq!(g03.toe, g03.toc);
     assert_eq!(g03.elements.toe_sow, 360_000.0);
     assert_eq!(g03.clock.toc_sow, 360_000.0);
-    assert_eq!(g03.issue_of_data.issue, 1200);
-    assert_eq!(g03.fit_interval_s, Some(3.0 * SECONDS_PER_HOUR));
-    assert_eq!(g03.sv_accuracy_m, cnav_ura_nominal_m(1).unwrap());
+    // The RINEX 4 CNAV record states no issue of data and no fit interval. These
+    // assertions once required `toe / 300` (1200) and three hours, values the reader
+    // made up.
+    assert_eq!(g03.issue_of_data, None);
+    assert_eq!(g03.fit_interval_s, None);
+    assert_eq!(g03.sv_accuracy_m, cnav_ura_nominal_m(1));
     assert_eq!(
         g03.broadcast_clock_group_delay_s().to_bits(),
         (5.122274160385e-9_f64 - 1.0e-9_f64).to_bits()
@@ -2278,7 +2314,9 @@ fn cnav_isc_all_six_signals_and_dual_frequency_numeric() {
 }
 
 #[test]
-fn cnav_no_prediction_ura_records_drop_from_default_store_but_manual_store_keeps_them() {
+fn cnav_no_prediction_ura_records_yield_no_state_from_default_store_but_manual_store_serves_them() {
+    use crate::spp::EphemerisSource;
+
     let mut text = String::from(V4_NAV_HEADER);
     for (sat, ura) in [
         ("G03", "1.500000000000e+01"),
@@ -2304,10 +2342,18 @@ fn cnav_no_prediction_ura_records_drop_from_default_store_but_manual_store_keeps
     assert_eq!(manual.records().len(), 2);
 
     let default = BroadcastStore::from_nav(&text).expect("default store parses no-prediction CNAV");
-    assert!(
-        default.records().is_empty(),
-        "from_nav must drop CNAV records with URA index 15 or -16"
-    );
+    assert_eq!(default.records().len(), 2, "the records are held");
+    for record in default.records() {
+        let t = toe_as_j2000_s(record);
+        assert_eq!(
+            default.position_clock_at_j2000_s(record.satellite_id, t),
+            None,
+            "a selected CNAV record with URA index 15 or -16 yields no state"
+        );
+        assert!(manual
+            .position_clock_at_j2000_s(record.satellite_id, t)
+            .is_some());
+    }
 }
 
 #[test]
@@ -2316,12 +2362,16 @@ fn select_by_iode_ignores_cnav_issue_collisions() {
         .expect("parse LNAV")
         .remove(0);
     let mut cnav = cnav_record_from_legacy(lnav, GnssSystem::Gps, 1, NavMessage::GpsCnav);
-    cnav.issue_of_data.issue = lnav.issue_of_data.issue;
+    let lnav_issue = lnav.issue_of_data.expect("LNAV issue").issue;
+    cnav.issue_of_data = Some(BroadcastIssue {
+        issue: lnav_issue,
+        message: NavMessage::GpsCnav,
+    });
     cnav.clock.af0 = lnav.clock.af0 + 1.0e-3;
 
     let store = BroadcastStore::new(vec![cnav, lnav]).expect("manual IODE collision store");
     let query = toe_as_j2000_s(&lnav);
-    let iode = u8::try_from(lnav.issue_of_data.issue).expect("LNAV IODE fits u8");
+    let iode = u8::try_from(lnav_issue).expect("LNAV IODE fits u8");
     let selected = store
         .select_by_iode_at(lnav.satellite_id, iode, query)
         .expect("select LNAV by IODE");
@@ -2648,10 +2698,10 @@ fn cnav_top_borrowing_a_week_reaches_a_stable_encoding() {
         cnav.top.tow_s
     );
 
-    let encoded = encode_nav(&records);
+    let encoded = encode_nav(&records).expect("encode NAV");
     let reparsed = parse_nav(&encoded).expect("reparse encoded CNAV record");
     assert_eq!(
-        encode_nav(&reparsed),
+        encode_nav(&reparsed).expect("encode NAV"),
         encoded,
         "encoding must be a fixed point across the week boundary"
     );
@@ -2677,10 +2727,10 @@ fn cnav_top_set_outside_the_week_still_reaches_a_stable_encoding() {
             .as_mut()
             .expect("CNAV record carries cnav data");
         cnav.top = GnssWeekTow::new(TimeScale::Gpst, week, tow_s).expect("finite TOW");
-        let encoded = encode_nav(&records);
+        let encoded = encode_nav(&records).expect("encode NAV");
         let reparsed = parse_nav(&encoded).expect("reparse encoded CNAV record");
         assert_eq!(
-            encode_nav(&reparsed),
+            encode_nav(&reparsed).expect("encode NAV"),
             encoded,
             "top ({week}, {tow_s:?}) must encode to a fixed point"
         );
@@ -2703,7 +2753,7 @@ fn cnav_records_round_trip_through_rinex4_writer() {
     push_owned_lines(&mut text, &cnv2_lines("G04"));
 
     let recs = parse_nav(&text).expect("parse CNAV records");
-    let encoded = encode_nav(&recs);
+    let encoded = encode_nav(&recs).expect("encode NAV");
     assert!(
         encoded
             .lines()
@@ -2807,6 +2857,7 @@ fn real_brdc4_truncated_cnav_reports_strict_and_lenient_diagnostic() {
         vec![SkippedNavBlock {
             satellite: "G01".to_string(),
             message: expected.to_string(),
+            line: 10,
         }]
     );
 }
@@ -2819,13 +2870,8 @@ fn real_brdc4_cnav_field_decode_assertions() {
     assert_eq!(g01.week, 2425);
     assert_eq!(g01.toe, broadcast_time(GnssSystem::Gps, 2425, 91_800.0));
     assert_eq!(g01.toc, g01.toe);
-    assert_eq!(
-        g01.issue_of_data,
-        BroadcastIssue {
-            issue: 306,
-            message: NavMessage::GpsCnav,
-        }
-    );
+    // The CNAV record states no issue of data; this once required `toe / 300`.
+    assert_eq!(g01.issue_of_data, None);
     assert_eq!(
         g01.elements,
         KeplerianElements {
@@ -2873,8 +2919,9 @@ fn real_brdc4_cnav_field_decode_assertions() {
         (-8.847564458847e-09_f64 - -2.910383045673e-10_f64).to_bits()
     );
     assert_eq!(g01.sv_health, 1.0);
-    assert_eq!(g01.sv_accuracy_m, cnav_ura_nominal_m(0).unwrap());
-    assert_eq!(g01.fit_interval_s, Some(3.0 * SECONDS_PER_HOUR));
+    assert_eq!(g01.sv_accuracy_m, cnav_ura_nominal_m(0));
+    // The CNAV record states no fit interval; this once required three hours.
+    assert_eq!(g01.fit_interval_s, None);
     assert_eq!(
         g01.cnav.expect("CNAV extension"),
         CnavParameters {
@@ -2922,13 +2969,7 @@ fn real_brdc4_cnav_field_decode_assertions() {
         broadcast_time(GnssSystem::Qzss, 2425, 86_400.0)
     );
     assert_eq!(j02_cnav.toc, j02_cnav.toe);
-    assert_eq!(
-        j02_cnav.issue_of_data,
-        BroadcastIssue {
-            issue: 288,
-            message: NavMessage::QzssCnav,
-        }
-    );
+    assert_eq!(j02_cnav.issue_of_data, None);
     assert_eq!(j02_cnav.elements, j02_elements);
     assert_eq!(j02_cnav.clock, j02_clock);
     assert_eq!(
@@ -2944,8 +2985,8 @@ fn real_brdc4_cnav_field_decode_assertions() {
         )
     );
     assert_eq!(j02_cnav.sv_health, 0.0);
-    assert_eq!(j02_cnav.sv_accuracy_m, cnav_ura_nominal_m(-8).unwrap());
-    assert_eq!(j02_cnav.fit_interval_s, Some(3.0 * SECONDS_PER_HOUR));
+    assert_eq!(j02_cnav.sv_accuracy_m, cnav_ura_nominal_m(-8));
+    assert_eq!(j02_cnav.fit_interval_s, None);
     assert_eq!(
         j02_cnav.cnav.expect("CNAV extension"),
         CnavParameters {
@@ -3079,15 +3120,34 @@ fn real_brdc4_store_selects_qzss_cnav_and_keeps_legacy_preference() {
     let text = cnav_fixture_text();
     let recs = parse_nav(&text).expect("parse real CNAV fixture");
     let store = BroadcastStore::from_nav(&text).expect("build default store");
-    assert_eq!(
-        store
-            .records()
-            .iter()
-            .filter(|record| record.message == NavMessage::GpsCnav)
-            .count(),
-        0,
-        "real GPS CNAV records in this trim have nonzero health"
-    );
+    // The trim's GPS CNAV records state nonzero health. The store holds them and never
+    // selects them for a state: RTKLIB `satexclude` excludes the selected record, so a
+    // query at their epochs yields the legacy record under the legacy preference and no
+    // record under the modern one, whose selection is the excluded CNAV record.
+    let gps_cnav: Vec<&BroadcastRecord> = store
+        .records()
+        .iter()
+        .filter(|record| record.message == NavMessage::GpsCnav)
+        .collect();
+    assert_eq!(gps_cnav.len(), 2, "the GPS CNAV records are held");
+    assert!(gps_cnav.iter().all(|record| record.sv_health != 0.0));
+    let mut modern = BroadcastStore::from_nav(&text).expect("build modern store");
+    modern.set_message_preference(NavMessagePreference::PreferModern);
+    for record in &gps_cnav {
+        let t = toe_as_j2000_s(record);
+        assert_eq!(
+            store
+                .select_record_at(record.satellite_id, t)
+                .expect("legacy record")
+                .message,
+            NavMessage::GpsLnav
+        );
+        assert_eq!(modern.select_record_at(record.satellite_id, t), None);
+        assert_eq!(
+            modern.position_clock_at_j2000_s(record.satellite_id, t),
+            None
+        );
+    }
     assert_eq!(
         store
             .records()
@@ -3105,11 +3165,47 @@ fn real_brdc4_store_selects_qzss_cnav_and_keeps_legacy_preference() {
         1
     );
 
+    // J02 LNAV states health 1, bit 0, which RTKLIB `satexclude` masks for QZSS
+    // (`svh &= 0xFE`), so the legacy preference selects and evaluates the LNAV record.
+    let qzss_lnav = find_record(&recs, GnssSystem::Qzss, 2, NavMessage::QzssLnav);
+    assert_eq!(qzss_lnav.sv_health, 1.0);
+    let lnav_query = toe_as_j2000_s(qzss_lnav);
+    assert_eq!(
+        store
+            .select_record_at(qzss_lnav.satellite_id, lnav_query)
+            .map(|record| record.message),
+        Some(NavMessage::QzssLnav)
+    );
+    let (lnav_position, _) = store
+        .position_clock_at_j2000_s(qzss_lnav.satellite_id, lnav_query)
+        .expect("default store evaluates QZSS LNAV");
+    let lnav_expected = satellite_state(
+        &qzss_lnav.elements,
+        &qzss_lnav.clock,
+        &qzss_lnav.constants(),
+        qzss_lnav.elements.toe_sow,
+        qzss_lnav.broadcast_clock_group_delay_s(),
+        false,
+    )
+    .expect("QZSS LNAV state");
+    assert_eq!(
+        lnav_position.map(f64::to_bits),
+        lnav_expected
+            .orbit
+            .position()
+            .expect("QZSS LNAV position")
+            .as_array()
+            .map(f64::to_bits)
+    );
+
+    // A store from the same file with the modern preference evaluates the QZSS CNAV record.
+    let mut store = BroadcastStore::from_nav(&text).expect("build modern store");
+    store.set_message_preference(NavMessagePreference::PreferModern);
     let qzss = find_record(&recs, GnssSystem::Qzss, 2, NavMessage::QzssCnav);
     let query = toe_as_j2000_s(qzss);
     let (position, _) = store
         .position_clock_at_j2000_s(qzss.satellite_id, query)
-        .expect("default store evaluates QZSS CNAV");
+        .expect("modern store evaluates QZSS CNAV");
     let clock = single_frequency_clock_s(&store, qzss.satellite_id, query);
     let expected = satellite_state_cnav(
         &qzss.elements,
@@ -3259,10 +3355,11 @@ fn glonass_utc_epoch_accepts_leap_second_label() {
 
     let recs = parse_glonass(&glonass_text(&lines)).expect("GLONASS leap-second epoch");
     assert_eq!(recs.len(), 1);
-    assert_eq!(
-        recs[0].toe_utc_j2000_s,
-        j2000_seconds_utc(2016, 12, 31, 23, 59, 60)
-    );
+    let stated = crate::astro::time::civil::j2000_seconds(2016, 12, 31, 23, 59, 60.0);
+    assert_eq!(recs[0].epoch_utc_j2000_s, stated);
+    // 23:59:60 is 2017-01-01 00:00:00 on the seconds count, already on the 15-minute
+    // grid, so the reference epoch is the stated one.
+    assert_eq!(recs[0].toe_utc_j2000_s, stated);
 }
 
 #[test]
@@ -3365,8 +3462,14 @@ fn accepts_v4_nav_header_rejects_v4_non_nav() {
     assert_eq!(parse_nav(&ok).expect("v4 NAV header accepted").len(), 1);
 
     // A 4.00 header that is not a navigation file (column 20 != 'N') is rejected.
-    let bogus = "     4.00           OBSERVATION DATA   M                   RINEX VERSION / TYPE\n\
-                 END OF HEADER\n";
+    let bogus = &format!(
+        "{}{}",
+        header_record(
+            "     4.00           OBSERVATION DATA    M",
+            "RINEX VERSION / TYPE"
+        ),
+        header_record("", "END OF HEADER")
+    );
     assert!(matches!(
         parse_nav(bogus),
         Err(NavParseError::UnsupportedHeader(_))
@@ -3374,17 +3477,14 @@ fn accepts_v4_nav_header_rejects_v4_non_nav() {
 }
 
 #[test]
-fn from_nav_keeps_only_healthy_supported_messages() {
+fn from_nav_keeps_supported_messages_and_excludes_unhealthy_selections() {
+    use crate::spp::EphemerisSource;
+
     let store = BroadcastStore::from_nav(&fixture_text()).expect("parse NAV");
     let recs = store.records();
     assert!(!recs.is_empty());
-    // Every kept record is healthy and a supported single-frequency message:
-    // GPS/QZSS LNAV, Galileo I/NAV, or BeiDou D1/D2. Galileo F/NAV and
-    // unhealthy satellites are dropped.
-    assert!(
-        recs.iter().all(|r| r.sv_health == 0.0),
-        "unhealthy record kept"
-    );
+    // Every kept record is a supported single-frequency message: GPS/QZSS LNAV,
+    // Galileo I/NAV, or BeiDou D1/D2. Galileo F/NAV is left out.
     assert!(
         recs.iter().all(|r| matches!(
             r.message,
@@ -3413,6 +3513,18 @@ fn from_nav_keeps_only_healthy_supported_messages() {
             && r.message == NavMessage::BeidouD2),
         "expected the geostationary C05 (D2) record"
     );
+    // Unhealthy records (the fixture's E14 and E18 state health 48 and 390) are held;
+    // a query that selects one has no state, as RTKLIB `satexclude` excludes it.
+    let unhealthy: Vec<&BroadcastRecord> = recs.iter().filter(|r| r.sv_health != 0.0).collect();
+    assert!(!unhealthy.is_empty(), "the fixture holds unhealthy records");
+    for record in unhealthy {
+        let t = toe_as_j2000_s(record) + 1.0;
+        assert_eq!(store.select_record_at(record.satellite_id, t), None);
+        assert_eq!(
+            store.position_clock_at_j2000_s(record.satellite_id, t),
+            None
+        );
+    }
 }
 
 #[test]
@@ -3499,64 +3611,6 @@ fn broadcast_store_evaluates_beidou_including_geo() {
 }
 
 #[test]
-fn broadcast_store_rejects_unsupported_systems() {
-    use crate::broadcast::{ClockPolynomial, KeplerianElements};
-    use crate::spp::EphemerisSource;
-
-    // `BroadcastStore::new` accepts arbitrary records; a GLONASS satellite (a
-    // non-Keplerian state-vector model) must report no ephemeris rather than be
-    // evaluated with the wrong model.
-    let sat = GnssSatelliteId::new(GnssSystem::Glonass, 1).expect("valid satellite id");
-    let rec = BroadcastRecord {
-        satellite_id: sat,
-        message: NavMessage::GpsLnav,
-        issue_of_data: BroadcastIssue {
-            issue: 0,
-            message: NavMessage::GpsLnav,
-        },
-        week: 2111,
-        toe: broadcast_time(sat.system, 2111, 0.0),
-        toc: broadcast_time(sat.system, 2111, 0.0),
-        elements: KeplerianElements {
-            sqrt_a: 5153.0,
-            e: 0.001,
-            m0: 0.0,
-            delta_n: 0.0,
-            omega0: 0.0,
-            i0: 0.9,
-            omega: 0.0,
-            omega_dot: 0.0,
-            idot: 0.0,
-            cuc: 0.0,
-            cus: 0.0,
-            crc: 0.0,
-            crs: 0.0,
-            cic: 0.0,
-            cis: 0.0,
-            toe_sow: 0.0,
-        },
-        clock: ClockPolynomial {
-            af0: 0.0,
-            af1: 0.0,
-            af2: 0.0,
-            toc_sow: 0.0,
-        },
-        group_delays: BroadcastGroupDelays::default(),
-        cnav: None,
-        sv_health: 0.0,
-        sv_accuracy_m: 0.0,
-        fit_interval_s: None,
-    };
-    let store = BroadcastStore::new(vec![rec]).expect("valid unsupported-system manual store");
-    assert!(
-        store
-            .position_clock_at_j2000_s(sat, 646_358_400.0)
-            .is_none(),
-        "an unsupported system must report no ephemeris"
-    );
-}
-
-#[test]
 fn broadcast_store_rejects_invalid_manual_ephemerides() {
     let mut rec = records()[0];
 
@@ -3593,23 +3647,24 @@ fn broadcast_store_rejects_invalid_manual_ephemerides() {
     );
 }
 
-#[test]
-fn gps_fit_interval_bounds_record_validity() {
+/// A minimal evaluable record of `system` with its `toe` and `toc` at `toe_sow` of week
+/// 2111; only the system, reference times and issue matter to selection.
+fn selection_record(system: GnssSystem, toe_sow: f64, issue: u32) -> BroadcastRecord {
     use crate::broadcast::{ClockPolynomial, KeplerianElements};
-    use crate::spp::EphemerisSource;
-
-    // A minimal but evaluable record; only the system and fit interval matter to
-    // selection (the orbit values just have to produce a finite state).
-    let make = |system, fit_interval_s| BroadcastRecord {
-        satellite_id: GnssSatelliteId::new(system, 1).expect("valid satellite id"),
-        message: NavMessage::GpsLnav,
-        issue_of_data: BroadcastIssue {
-            issue: 0,
-            message: NavMessage::GpsLnav,
-        },
+    let message = match system {
+        GnssSystem::Galileo => NavMessage::GalileoInav,
+        GnssSystem::BeiDou => NavMessage::BeidouD1,
+        GnssSystem::Qzss => NavMessage::QzssLnav,
+        GnssSystem::Navic => NavMessage::NavicLnav,
+        _ => NavMessage::GpsLnav,
+    };
+    BroadcastRecord {
+        satellite_id: GnssSatelliteId::new(system, 30).expect("valid satellite id"),
+        message,
+        issue_of_data: Some(BroadcastIssue { issue, message }),
         week: 2111,
-        toe: broadcast_time(system, 2111, 0.0),
-        toc: broadcast_time(system, 2111, 0.0),
+        toe: broadcast_time(system, 2111, toe_sow),
+        toc: broadcast_time(system, 2111, toe_sow),
         elements: KeplerianElements {
             sqrt_a: 5153.0,
             e: 0.001,
@@ -3626,85 +3681,8 @@ fn gps_fit_interval_bounds_record_validity() {
             crs: 0.0,
             cic: 0.0,
             cis: 0.0,
-            toe_sow: 0.0,
+            toe_sow,
         },
-        clock: ClockPolynomial {
-            af0: 0.0,
-            af1: 0.0,
-            af2: 0.0,
-            toc_sow: 0.0,
-        },
-        group_delays: BroadcastGroupDelays::default(),
-        cnav: None,
-        sv_health: 0.0,
-        sv_accuracy_m: 0.0,
-        fit_interval_s,
-    };
-
-    // `toe` at GPS week 2111, second-of-week 0, expressed as a J2000 second.
-    let toe_j2000 = 2111.0 * SECONDS_PER_WEEK - 630_763_200.0;
-
-    // GPS with a four-hour fit interval is valid within +/-2 h of toe only.
-    let g = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id");
-    let gps = BroadcastStore::new(vec![make(GnssSystem::Gps, Some(4.0 * SECONDS_PER_HOUR))])
-        .expect("valid manual GPS fit store");
-    assert!(
-        gps.position_clock_at_j2000_s(g, toe_j2000 + SECONDS_PER_HOUR)
-            .is_some(),
-        "1 h after toe is inside the 4 h fit interval"
-    );
-    assert!(
-        gps.position_clock_at_j2000_s(g, toe_j2000 + 3.0 * SECONDS_PER_HOUR)
-            .is_none(),
-        "3 h after toe is outside the 4 h fit interval"
-    );
-
-    // A record with no broadcast fit interval (Galileo/BeiDou) falls back to the
-    // coarse age bound, so the same 3 h offset is still accepted.
-    let e = GnssSatelliteId::new(GnssSystem::Galileo, 1).expect("valid satellite id");
-    let gal = BroadcastStore::new(vec![make(GnssSystem::Galileo, None)])
-        .expect("valid manual Galileo fit store");
-    assert!(
-        gal.position_clock_at_j2000_s(e, toe_j2000 + 3.0 * SECONDS_PER_HOUR)
-            .is_some(),
-        "without a fit interval the coarse 4 h bound applies"
-    );
-}
-
-#[test]
-fn select_prefers_a_valid_farther_record_over_an_expired_nearer_one() {
-    use crate::broadcast::{ClockPolynomial, KeplerianElements};
-    use crate::spp::EphemerisSource;
-
-    let elements = |toe_sow| KeplerianElements {
-        sqrt_a: 5153.0,
-        e: 0.001,
-        m0: 0.0,
-        delta_n: 0.0,
-        omega0: 0.0,
-        i0: 0.9,
-        omega: 0.0,
-        omega_dot: 0.0,
-        idot: 0.0,
-        cuc: 0.0,
-        cus: 0.0,
-        crc: 0.0,
-        crs: 0.0,
-        cic: 0.0,
-        cis: 0.0,
-        toe_sow,
-    };
-    let rec = |toe_sow, fit_interval_s| BroadcastRecord {
-        satellite_id: GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id"),
-        message: NavMessage::GpsLnav,
-        issue_of_data: BroadcastIssue {
-            issue: 0,
-            message: NavMessage::GpsLnav,
-        },
-        week: 2111,
-        toe: broadcast_time(GnssSystem::Gps, 2111, toe_sow),
-        toc: broadcast_time(GnssSystem::Gps, 2111, toe_sow),
-        elements: elements(toe_sow),
         clock: ClockPolynomial {
             af0: 0.0,
             af1: 0.0,
@@ -3714,33 +3692,129 @@ fn select_prefers_a_valid_farther_record_over_an_expired_nearer_one() {
         group_delays: BroadcastGroupDelays::default(),
         cnav: None,
         sv_health: 0.0,
-        sv_accuracy_m: 0.0,
-        fit_interval_s,
-    };
+        sv_accuracy_m: Some(2.0),
+        fit_interval_s: None,
+        stated: StatedNavFields::default(),
+    }
+}
 
-    // Two records for one satellite: a nearer one with the nominal 4 h fit
-    // (valid +/-2 h) and a farther one (toe 3 h earlier) with an extended 26 h
-    // fit (valid +/-13 h).
-    let near = rec(10_800.0, Some(4.0 * SECONDS_PER_HOUR));
-    let far = rec(0.0, Some(26.0 * SECONDS_PER_HOUR));
-    let store = BroadcastStore::new(vec![near, far]).expect("valid manual nearest-store records");
+/// RTKLIB `seleph` bounds the distance from a query to `toe` per system (`rtklib.h`):
+/// GPS, QZSS and NavIC `MAXDTOE + 1` = 7201 s, Galileo `MAXDTOE_GAL` = 14400 s, BeiDou
+/// `MAXDTOE_CMP + 1` = 21601 s, the limit itself included. The fit interval does not
+/// enter: a GPS record stating a 4-hour fit is served 7201 s from its `toe`, not 7200 s.
+#[test]
+fn keplerian_selection_limits_are_rtklib_seleph_per_system() {
+    use crate::spp::EphemerisSource;
 
-    let g = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid satellite id");
-    // 3 h after the nearer record's toe: outside its +/-2 h window, but inside
-    // the farther record's +/-13 h window. Selecting nearest-then-checking would
-    // wrongly reject this; filtering by validity first serves it from the farther
-    // record.
-    let near_toe_j2000 = 2111.0 * SECONDS_PER_WEEK + 10_800.0 - 630_763_200.0;
-    let q = near_toe_j2000 + 3.0 * SECONDS_PER_HOUR;
+    for (system, limit) in [
+        (GnssSystem::Gps, 7_201.0),
+        (GnssSystem::Qzss, 7_201.0),
+        (GnssSystem::Navic, 7_201.0),
+        (GnssSystem::Galileo, 14_400.0),
+        (GnssSystem::BeiDou, 21_601.0),
+    ] {
+        let mut record = selection_record(system, 0.0, 7);
+        record.fit_interval_s = Some(4.0 * SECONDS_PER_HOUR);
+        let sat = record.satellite_id;
+        let toe = toe_as_j2000_s(&record);
+        let store = BroadcastStore::new(vec![record]).expect("valid manual store");
+        assert!(
+            store.position_clock_at_j2000_s(sat, toe + limit).is_some(),
+            "{system:?}: {limit} s after toe is inside the limit"
+        );
+        assert!(
+            store
+                .position_clock_at_j2000_s(sat, toe + limit + 1.0e-3)
+                .is_none(),
+            "{system:?}: past {limit} s after toe is outside the limit"
+        );
+        if system == GnssSystem::Galileo {
+            // RTKLIB `seleph` skips a Galileo record whose toe is not before the query
+            // ("AOD<=0").
+            assert!(store.position_clock_at_j2000_s(sat, toe).is_none());
+            assert!(store.position_clock_at_j2000_s(sat, toe - 60.0).is_none());
+        } else {
+            assert!(store.position_clock_at_j2000_s(sat, toe - limit).is_some());
+            assert!(store
+                .position_clock_at_j2000_s(sat, toe - limit - 1.0e-3)
+                .is_none());
+        }
+    }
+}
+
+/// A Galileo query five minutes before a new IODnav's `toe` is served by the earlier
+/// record, as RTKLIB `seleph` serves it; the nearer, later record is not used before its
+/// `toe`.
+#[test]
+fn galileo_selection_waits_for_the_new_toe() {
+    let old = selection_record(GnssSystem::Galileo, 3_600.0, 10);
+    let new = selection_record(GnssSystem::Galileo, 7_200.0, 11);
+    let sat = old.satellite_id;
+    let query = toe_as_j2000_s(&new) - 300.0;
+    let store = BroadcastStore::new(vec![old, new]).expect("valid manual store");
+    let selected = store
+        .select_record_at(sat, query)
+        .expect("a Galileo record");
+    assert_eq!(selected.issue_of_data.expect("issue").issue, 10);
+}
+
+/// Two records the same distance from a query: RTKLIB `seleph` keeps the later
+/// candidate (`t<=tmin`). The candidates are in transmission-time order, then `toe`
+/// order, so here the one with the later `toe` is selected.
+#[test]
+fn equidistant_records_select_the_later_candidate() {
+    let early = selection_record(GnssSystem::Gps, 0.0, 1);
+    let late = selection_record(GnssSystem::Gps, 7_200.0, 2);
+    let sat = early.satellite_id;
+    let query = toe_as_j2000_s(&early) + 3_600.0;
+    for records in [vec![early, late], vec![late, early]] {
+        let store = BroadcastStore::new(records).expect("valid manual store");
+        let selected = store.select_record_at(sat, query).expect("a record");
+        assert_eq!(selected.issue_of_data.expect("issue").issue, 2);
+    }
+}
+
+/// RTKLIB `uniqeph` sorts the records by transmission time and drops one that repeats
+/// the satellite, `toe` and issue of the record kept before it. Of two copies of a data
+/// set, the one transmitted first is the one selected, whichever comes first in the file.
+#[test]
+fn repeated_data_sets_keep_the_first_transmitted() {
+    let mut first = selection_record(GnssSystem::Gps, 0.0, 5);
+    first.stated.transmission_time_sow = Some(-600.0 + SECONDS_PER_WEEK);
+    first.clock.af0 = 1.0e-6;
+    let mut second = selection_record(GnssSystem::Gps, 0.0, 5);
+    second.stated.transmission_time_sow = Some(0.0);
+    second.clock.af0 = 2.0e-6;
+    let sat = first.satellite_id;
+    let query = toe_as_j2000_s(&first) + 60.0;
+    for records in [vec![first, second], vec![second, first]] {
+        let store = BroadcastStore::new(records).expect("valid manual store");
+        let selected = store.select_record_at(sat, query).expect("a record");
+        assert_eq!(selected.clock.af0, 1.0e-6);
+    }
+}
+
+#[test]
+fn broadcast_store_rejects_unsupported_systems() {
+    use crate::spp::EphemerisSource;
+
+    // `BroadcastStore::new` accepts arbitrary records; a GLONASS satellite (a
+    // non-Keplerian state-vector model) must report no ephemeris rather than be
+    // evaluated with the wrong model.
+    let mut rec = selection_record(GnssSystem::Gps, 0.0, 0);
+    let sat = GnssSatelliteId::new(GnssSystem::Glonass, 1).expect("valid satellite id");
+    rec.satellite_id = sat;
+    let store = BroadcastStore::new(vec![rec]).expect("valid unsupported-system manual store");
     assert!(
-        store.position_clock_at_j2000_s(g, q).is_some(),
-        "a query past the nearest record's fit interval must fall back to a \
-         farther record whose own window still covers it"
+        store
+            .position_clock_at_j2000_s(sat, 646_358_400.0)
+            .is_none(),
+        "an unsupported system must report no ephemeris"
     );
 }
 
 #[test]
-fn rinex_302_gps_fit_interval_flag_one_keeps_extended_validity() {
+fn rinex_302_gps_fit_interval_flag_one_reads_as_six_hours() {
     use crate::spp::EphemerisSource;
 
     let mut lines = g01_lines();
@@ -3757,64 +3831,33 @@ fn rinex_302_gps_fit_interval_flag_one_keeps_extended_validity() {
         "legacy flag 1 must decode as literal six hours (21600 s) per RINEX 3.02 Table A6"
     );
     assert_eq!(fit, GPS_LEGACY_EXTENDED_FIT_INTERVAL_S);
+    assert_eq!(rec.stated.orbit7_field2, Some(1.0), "the flag as stated");
 
+    // The fit interval is metadata: selection keeps RTKLIB's 7201 s limit. This test
+    // once required the record to serve queries up to 3 h from toe (half the fit).
     let sat = rec.satellite_id;
     let toe = toe_as_j2000_s(&rec);
     let store = BroadcastStore::new(recs).expect("valid manual fit-boundary records");
-
-    // Inside +/- 3h validity window: queries within 3 hours of toe must be served.
-    assert!(
-        store
-            .position_clock_at_j2000_s(sat, toe + 2.5 * SECONDS_PER_HOUR)
-            .is_some(),
-        "query within +3h of toe must be valid"
-    );
-    assert!(
-        store
-            .position_clock_at_j2000_s(sat, toe - 2.5 * SECONDS_PER_HOUR)
-            .is_some(),
-        "query within -3h of toe must be valid"
-    );
-
-    // Outside +/- 3h validity window: queries beyond 3 hours of toe must be rejected.
-    // Using the wrong 8-hour shared constant would give a ±4h half-window and wrongly accept these.
-    assert!(
-        store
-            .position_clock_at_j2000_s(sat, toe + 3.5 * SECONDS_PER_HOUR)
-            .is_none(),
-        "query outside +3h of toe must be rejected"
-    );
-    assert!(
-        store
-            .position_clock_at_j2000_s(sat, toe - 3.5 * SECONDS_PER_HOUR)
-            .is_none(),
-        "query outside -3h of toe must be rejected"
-    );
+    assert!(store
+        .position_clock_at_j2000_s(sat, toe + 7_201.0)
+        .is_some());
+    assert!(store
+        .position_clock_at_j2000_s(sat, toe + 2.5 * SECONDS_PER_HOUR)
+        .is_none());
 }
 
 #[test]
 fn modern_gps_fit_interval_field_remains_hours_valued() {
-    use crate::spp::EphemerisSource;
-
     let mut lines = g01_lines();
     lines[7] = replace_orbit_field(&lines[7], 1, "6.000000000000e+00");
     let text = nav_text_with_version("3.05", &lines);
 
     let recs = parse_nav(&text).expect("parse modern GPS record");
     assert_eq!(recs.len(), 1);
-    let rec = recs[0];
     assert_eq!(
-        rec.fit_interval_s,
+        recs[0].fit_interval_s,
         Some(6.0 * SECONDS_PER_HOUR),
         "modern fit interval is hours"
-    );
-
-    let sat = rec.satellite_id;
-    let query = toe_as_j2000_s(&rec) + 2.5 * SECONDS_PER_HOUR;
-    let store = BroadcastStore::new(recs).expect("valid manual fallback-boundary records");
-    assert!(
-        store.position_clock_at_j2000_s(sat, query).is_some(),
-        "a 6 h modern fit interval is valid +/-3 h from toe"
     );
 }
 
@@ -3823,58 +3866,57 @@ fn gps_fit_interval_field_distinguishes_blank_zero_value_and_malformed() {
     // Place a value in ORBIT-7 field 2 (columns 23..42): 23 leading blanks then
     // the field, so `field(line, 23, 42)` reads exactly the value.
     let with_field2 = |val: &str| format!("{:23}{:<19}", "", val);
-    let legacy = RinexVersion { major: 3, minor: 2 };
-    let modern = RinexVersion { major: 3, minor: 5 };
+    let legacy = NavVersion::new(3, 2);
+    let modern = NavVersion::new(3, 5);
+    let v2 = NavVersion::new(2, 11);
+    let read = |line: &str, version| gps_fit_interval_s(line, Layout::V3, version);
 
     // Blank/absent -> None across both modern and legacy headers per RINEX Section 6.6.
-    assert_eq!(gps_fit_interval_s(&with_field2(""), modern), Ok(None));
-    assert_eq!(gps_fit_interval_s(&with_field2(""), legacy), Ok(None));
+    assert_eq!(read(&with_field2(""), modern), Ok(None));
+    assert_eq!(read(&with_field2(""), legacy), Ok(None));
 
-    // Modern numeric zero represents missing/unpopulated field -> None.
-    assert_eq!(
-        gps_fit_interval_s(&with_field2("0.000000000000e+00"), modern),
-        Ok(None)
-    );
+    // Modern numeric zero represents missing/unpopulated field -> None, as RINEX 2.11
+    // states for its hours field ("zero if not known").
+    assert_eq!(read(&with_field2("0.000000000000e+00"), modern), Ok(None));
+    assert_eq!(read(&with_field2("0.000000000000e+00"), v2), Ok(None));
 
     // Legacy RINEX 3.02 Table A6 explicitly defines flag 0 = 4 hours.
     assert_eq!(
-        gps_fit_interval_s(&with_field2("0.000000000000e+00"), legacy),
+        read(&with_field2("0.000000000000e+00"), legacy),
         Ok(Some(GPS_NOMINAL_FIT_INTERVAL_S))
     );
 
     // Legacy RINEX 3.02 Table A6 explicitly defines flag 1 = 6 hours (extended fit).
     assert_eq!(
-        gps_fit_interval_s(&with_field2("1.000000000000e+00"), legacy),
-        Ok(Some(6.0 * SECONDS_PER_HOUR))
-    );
-    assert_eq!(
-        gps_fit_interval_s(&with_field2("1.000000000000e+00"), legacy),
+        read(&with_field2("1.000000000000e+00"), legacy),
         Ok(Some(GPS_LEGACY_EXTENDED_FIT_INTERVAL_S))
     );
 
-    // Modern RINEX keeps the numeric field hours-valued: 1.0 h = 3600 s.
+    // Modern RINEX and RINEX 2 keep the numeric field hours-valued: 1.0 h = 3600 s.
     assert_eq!(
-        gps_fit_interval_s(&with_field2("1.000000000000e+00"), modern),
+        read(&with_field2("1.000000000000e+00"), modern),
         Ok(Some(SECONDS_PER_HOUR))
+    );
+    assert_eq!(
+        read(&with_field2("4.000000000000e+00"), v2),
+        Ok(Some(4.0 * SECONDS_PER_HOUR))
     );
 
     // A nonzero interval is taken verbatim (hours -> seconds): 6.0 h = 21600 s.
     assert_eq!(
-        gps_fit_interval_s(&with_field2("6.000000000000e+00"), modern),
+        read(&with_field2("6.000000000000e+00"), modern),
         Ok(Some(6.0 * SECONDS_PER_HOUR))
     );
 
     // Present but non-numeric -> an error, not a silent substitution.
-    assert!(gps_fit_interval_s(&with_field2("garbage"), modern).is_err());
+    assert!(read(&with_field2("garbage"), modern).is_err());
 
     // Negative interval -> an error.
-    assert!(gps_fit_interval_s(&with_field2("-1.000000000000e+00"), modern).is_err());
+    assert!(read(&with_field2("-1.000000000000e+00"), modern).is_err());
 }
 
 #[test]
-fn gps_fit_interval_modern_zero_and_blank_preserve_fallback_window() {
-    use crate::spp::EphemerisSource;
-
+fn gps_fit_interval_modern_zero_and_blank_read_as_unknown() {
     // 1. Modern header with blank field 2
     let mut lines = g01_lines();
     lines[7] = blank_orbit_field(&lines[7], 1);
@@ -3885,14 +3927,7 @@ fn gps_fit_interval_modern_zero_and_blank_preserve_fallback_window() {
         recs[0].fit_interval_s, None,
         "blank fit interval decodes to None"
     );
-
-    let sat = recs[0].satellite_id;
-    let query = toe_as_j2000_s(&recs[0]) + 2.5 * SECONDS_PER_HOUR;
-    let store = BroadcastStore::new(recs).expect("store with None fit interval");
-    assert!(
-        store.position_clock_at_j2000_s(sat, query).is_some(),
-        "None fit interval retains MAX_EPHEMERIS_AGE_S (+/-4h) coarse fallback window"
-    );
+    assert_eq!(recs[0].stated.orbit7_field2, None);
 
     // 2. Modern header with 0.0 field 2
     let mut lines = g01_lines();
@@ -3904,11 +3939,10 @@ fn gps_fit_interval_modern_zero_and_blank_preserve_fallback_window() {
         recs[0].fit_interval_s, None,
         "modern zero fit interval decodes to None under missing-value rule"
     );
-
-    let store = BroadcastStore::new(recs).expect("store with None fit interval");
-    assert!(
-        store.position_clock_at_j2000_s(sat, query).is_some(),
-        "modern zero retains MAX_EPHEMERIS_AGE_S coarse fallback window"
+    assert_eq!(
+        recs[0].stated.orbit7_field2,
+        Some(0.0),
+        "the zero as stated"
     );
 
     // 3. Legacy header with flag 0
@@ -4545,7 +4579,8 @@ fn from_lnav_scales_semicircles_to_radians_and_passes_radian_terms_through() {
     assert_eq!(record.toe.week, 2110);
     assert_eq!(record.message, NavMessage::GpsLnav);
     assert_eq!(record.sv_health, 0.0);
-    assert_eq!(record.sv_accuracy_m, 2.4); // URA index 0 (IS-GPS-200N 20.3.3.3.1.3)
+    assert_eq!(record.sv_accuracy_m, Some(2.4)); // URA index 0 (IS-GPS-200N 20.3.3.3.1.3)
+    assert_eq!(record.iodc(), Some(decoded.iodc as f64));
     assert_eq!(record.fit_interval_s, Some(4.0 * SECONDS_PER_HOUR));
     assert_eq!(
         record.group_delays.gps_tgd_s.map(f64::to_bits),
@@ -4799,10 +4834,13 @@ fn parse_glonass_lenient_surfaces_only_unrepresentable_slots() {
     assert_eq!(
         parsed.skipped,
         vec![SkippedGlonass {
-            token: "R00".to_string()
+            token: "R00".to_string(),
+            line: 11,
         }],
         "only the unrepresentable token is surfaced"
     );
+    assert!(parsed.invalid.is_empty());
+    assert!(parsed.departures.is_empty());
 }
 
 #[test]
@@ -4903,7 +4941,7 @@ fn encode_nav_round_trips_through_parse() {
         original.len() > 2000,
         "fixture should carry the full multi-GNSS record set"
     );
-    let encoded = encode_nav(&original);
+    let encoded = encode_nav(&original).expect("encode NAV");
     let reparsed = parse_nav(&encoded).expect("re-parse encoded NAV");
     assert_eq!(
         reparsed, original,
@@ -4911,7 +4949,7 @@ fn encode_nav_round_trips_through_parse() {
     );
 
     // Deterministic: the same records always serialize byte-identically.
-    assert_eq!(encode_nav(&original), encoded);
+    assert_eq!(encode_nav(&original).expect("encode NAV"), encoded);
 }
 
 #[test]
@@ -4957,31 +4995,39 @@ fn parse_nav_v4_refuses_unknown_ephemeris_message_token() {
     assert_eq!(lenient.skipped[0].satellite, "G01");
 }
 
+/// The writer restates every field the record states, the transmission time of
+/// message included, in the column it was read from, and leaves a field the record
+/// does not state blank rather than inventing 0.0. This test once required ORBIT-7
+/// field 1 to be blank for every record, when the reader dropped the transmission
+/// time.
 #[test]
-fn encode_nav_emits_spaces_for_unmodeled_and_absent_fields() {
+fn encode_nav_restates_stated_fields_and_blanks_absent_ones() {
     let original = records();
-    let encoded = encode_nav(&original);
-
-    // ORBIT-7 line (8th line of each Keplerian body block) starts with 4 spaces indent
-    // followed by 19 spaces for the unmodeled transmission time (23 spaces total), rather
-    // than 0.000000000000e+00.
+    let encoded = encode_nav(&original).expect("encode NAV");
     let lines: Vec<&str> = encoded.lines().collect();
-    let mut saw_orbit7 = false;
-    for i in 0..lines.len() {
-        if lines[i].len() >= 3 && is_record_start(lines[i]) && i + 7 < lines.len() {
-            let orbit7 = lines[i + 7];
-            assert!(
-                orbit7.starts_with("                       "),
-                "ORBIT-7 field 1 must be blank (unmodeled transmission time): {orbit7:?}"
-            );
-            assert!(
-                !orbit7[4..23].contains("0.000000000000e+00"),
-                "ORBIT-7 field 1 must not invent 0.0: {orbit7:?}"
-            );
-            saw_orbit7 = true;
-        }
+    let starts: Vec<usize> = (0..lines.len())
+        .filter(|&i| is_record_start(lines[i]))
+        .collect();
+    assert_eq!(starts.len(), original.len());
+    for (record, start) in original.iter().zip(starts) {
+        let orbit7 = lines[start + 7];
+        let t_tm = record
+            .stated
+            .transmission_time_sow
+            .expect("the fixture states every transmission time");
+        assert_eq!(orbit7[4..23].trim().parse::<f64>(), Ok(t_tm), "{orbit7:?}");
     }
-    assert!(saw_orbit7, "must verify at least one ORBIT-7 line");
+
+    let mut blank = original[0];
+    blank.stated.transmission_time_sow = None;
+    let encoded = encode_nav(&[blank]).expect("encode NAV");
+    let orbit7 = encoded.lines().nth(10).expect("ORBIT-7 line");
+    assert!(
+        orbit7.starts_with("                       "),
+        "an absent transmission time is written blank: {orbit7:?}"
+    );
+    let reparsed = parse_nav(&encoded).expect("reparse");
+    assert_eq!(reparsed, vec![blank]);
 }
 
 #[test]
@@ -4994,7 +5040,7 @@ fn keplerian_group_delay_round_trip_invariance() {
     // 1. GPS
     for delay in [None, Some(0.0), Some(5.122274160385e-09)] {
         base_gps.group_delays = BroadcastGroupDelays::gps_lnav_opt(delay);
-        let encoded = encode_nav(&[base_gps]);
+        let encoded = encode_nav(&[base_gps]).expect("encode NAV");
         let reparsed = parse_nav(&encoded).expect("parse encoded GPS record");
         assert_eq!(reparsed.len(), 1);
         assert_eq!(reparsed[0].group_delays.gps_tgd_s, delay);
@@ -5007,7 +5053,7 @@ fn keplerian_group_delay_round_trip_invariance() {
     base_qzss.fit_interval_s = None;
     for delay in [None, Some(0.0), Some(3.25e-09)] {
         base_qzss.group_delays = BroadcastGroupDelays::gps_lnav_opt(delay);
-        let encoded = encode_nav(&[base_qzss]);
+        let encoded = encode_nav(&[base_qzss]).expect("encode NAV");
         let reparsed = parse_nav(&encoded).expect("parse encoded QZSS record");
         assert_eq!(reparsed.len(), 1);
         assert_eq!(reparsed[0].group_delays.gps_tgd_s, delay);
@@ -5027,7 +5073,7 @@ fn keplerian_group_delay_round_trip_invariance() {
     ];
     for (bgd_a, bgd_b) in gal_cases {
         base_gal.group_delays = BroadcastGroupDelays::galileo_opt(bgd_a, bgd_b);
-        let encoded = encode_nav(&[base_gal]);
+        let encoded = encode_nav(&[base_gal]).expect("encode NAV");
         let reparsed = parse_nav(&encoded).expect("parse encoded Galileo record");
         assert_eq!(reparsed.len(), 1);
         assert_eq!(reparsed[0].group_delays.galileo_bgd_e5a_e1_s, bgd_a);
@@ -5048,7 +5094,7 @@ fn keplerian_group_delay_round_trip_invariance() {
     ];
     for (tgd1, tgd2) in bds_cases {
         base_bds.group_delays = BroadcastGroupDelays::beidou_opt(tgd1, tgd2);
-        let encoded = encode_nav(&[base_bds]);
+        let encoded = encode_nav(&[base_bds]).expect("encode NAV");
         let reparsed = parse_nav(&encoded).expect("parse encoded BeiDou record");
         assert_eq!(reparsed.len(), 1);
         assert_eq!(reparsed[0].group_delays.beidou_tgd1_s, tgd1);
@@ -5326,23 +5372,11 @@ fn parse_nav_v4_eph_marker_validation_strict_and_lenient() {
     assert_eq!(lenient.skipped[0].satellite, "G01");
     assert!(lenient.skipped[0].message.contains("frame marker"));
 
-    // 11. Recognized non-EPH grammars (ION, STO, EOP) must not be treated as malformed EPH
+    // 11. Recognized non-EPH grammars (ION, STO, EOP) must not be treated as malformed EPH.
+    // The frames follow the RINEX 4 layouts; the test once used lines that do not (no
+    // epoch), which passed only while these frames went unread.
     let mut mixed = String::from(V4_NAV_HEADER);
-    mixed.push_str("> ION G29 LNAV\n");
-    mixed.push_str(
-        "   1.024454832077e-08 0.000000000000e+00 0.000000000000e+00-1.192092895508e-07\n",
-    );
-    mixed.push_str(
-        "   9.625600000000e+04 0.000000000000e+00 0.000000000000e+00-5.898240000000e+05\n",
-    );
-    mixed.push_str("> STO G01 UTC\n");
-    mixed.push_str(
-        "   0.000000000000e+00 0.000000000000e+00 0.000000000000e+00 0.000000000000e+00\n",
-    );
-    mixed.push_str("> EOP G01\n");
-    mixed.push_str(
-        "   0.000000000000e+00 0.000000000000e+00 0.000000000000e+00 0.000000000000e+00\n",
-    );
+    mixed.push_str(&v4_data_frames());
     mixed.push_str("> EPH G01 LNAV\n");
     for line in &g01_lines() {
         mixed.push_str(line);
@@ -5360,6 +5394,100 @@ fn parse_nav_v4_eph_marker_validation_strict_and_lenient() {
         lenient.skipped.is_empty(),
         "recognized non-EPH frames produce no skips"
     );
+    assert_eq!(
+        lenient.other.iter().map(|b| b.kind).collect::<Vec<_>>(),
+        vec![
+            OtherNavBlockKind::Ionosphere,
+            OtherNavBlockKind::SystemTimeOffset,
+            OtherNavBlockKind::EarthOrientation,
+        ]
+    );
+}
+
+/// An ION, an STO and an EOP frame in the RINEX 4.00 layouts.
+fn v4_data_frames() -> String {
+    let mut text = String::new();
+    text.push_str("> ION G29 LNAV\n");
+    text.push_str(
+        "    2020 06 25 00 00 00 1.024454832077e-08 0.000000000000e+00 0.000000000000e+00\n",
+    );
+    text.push_str(
+        "    -1.192092895508e-07 9.625600000000e+04 0.000000000000e+00 0.000000000000e+00\n",
+    );
+    text.push_str("    -5.898240000000e+05\n");
+    text.push_str("> STO G01 LNAV\n");
+    text.push_str(&format!(
+        "    2020 06 25 00 00 00 {:<18} {:<18} {:<18}\n",
+        "GPUT", "", "UTC(USNO)"
+    ));
+    text.push_str(
+        "     3.456000000000e+05 9.313225746155e-10 2.664535259100e-15 0.000000000000e+00\n",
+    );
+    text.push_str("> EOP G01 CNVX\n");
+    text.push_str(
+        "    2020 06 25 00 00 00 1.000000000000e-01 2.000000000000e-03 0.000000000000e+00\n",
+    );
+    text.push_str(
+        "                        3.000000000000e-01-4.000000000000e-03 0.000000000000e+00\n",
+    );
+    text.push_str(
+        "     3.456000000000e+05-2.000000000000e-01 5.000000000000e-04 0.000000000000e+00\n",
+    );
+    text
+}
+
+/// RINEX 4 STO, EOP and ION frames are read; a malformed one is reported by the
+/// lenient reader and leaves the strict Keplerian reader alone, since it reads no such
+/// frame.
+#[test]
+fn rinex_v4_data_frames_are_read_and_a_malformed_one_is_reported() {
+    let text = format!("{V4_NAV_HEADER}{}", v4_data_frames());
+    let file = parse_nav_file(&text).expect("parse v4 data frames");
+    let items: Vec<&NavItem> = file.entries.iter().map(|entry| &entry.item).collect();
+    assert_eq!(items.len(), 3);
+    let NavItem::Ionosphere(ion) = items[0] else {
+        panic!("an ION frame, got {:?}", items[0]);
+    };
+    assert_eq!(ion.message_token, "LNAV");
+    assert_eq!(
+        ion.model,
+        IonosphereModel::Klobuchar {
+            coefficients: KlobucharAlphaBeta {
+                alpha: [1.024454832077e-08, 0.0, 0.0, -1.192092895508e-07],
+                beta: [9.6256e04, 0.0, 0.0, -5.89824e05],
+            },
+            region_code: None,
+        }
+    );
+    let NavItem::SystemTimeOffset(sto) = items[1] else {
+        panic!("an STO frame, got {:?}", items[1]);
+    };
+    assert_eq!(sto.offset_code, "GPUT");
+    assert_eq!(sto.sbas_id, None);
+    assert_eq!(sto.utc_id.as_deref(), Some("UTC(USNO)"));
+    assert_eq!(sto.transmission_time_sow, 345_600.0);
+    assert_eq!(sto.a0_s, 9.313225746155e-10);
+    assert_eq!(sto.a1_s_s, Some(2.664535259100e-15));
+    let NavItem::EarthOrientation(eop) = items[2] else {
+        panic!("an EOP frame, got {:?}", items[2]);
+    };
+    assert_eq!(eop.xp, [Some(0.1), Some(2.0e-3), Some(0.0)]);
+    assert_eq!(eop.yp, [Some(0.3), Some(-4.0e-3), Some(0.0)]);
+    assert_eq!(eop.transmission_time_sow, 345_600.0);
+    assert_eq!(eop.dut1, [Some(-0.2), Some(5.0e-4), Some(0.0)]);
+    assert_eq!(encode_nav_file(&file).expect("encode"), text);
+
+    // A frame without its epoch cannot be read.
+    let bad = format!(
+        "{V4_NAV_HEADER}> ION G29 LNAV\n   1.024454832077e-08 0.000000000000e+00\n> EPH G01 LNAV\n{}",
+        join(G01_LINES)
+    );
+    assert_eq!(parse_nav(&bad).expect("strict Keplerian parse").len(), 1);
+    let lenient = parse_nav_lenient(&bad).expect("lenient parse");
+    assert_eq!(lenient.skipped.len(), 1);
+    assert_eq!(lenient.skipped[0].line, 3);
+    assert_eq!(lenient.skipped[0].satellite, "G29");
+    assert!(parse_iono_corrections(&bad).is_err());
 }
 
 /// `parse_nav` reads the Keplerian navigation messages only, so a version-4
@@ -5445,7 +5573,7 @@ fn fit_interval_round_trip_preserves_none_and_explicit_hours() {
     // written as blank spaces. On re-parse, blank fields decode to None,
     // preserving exact absence across round trips without fabricating an interval.
     base_gps.fit_interval_s = None;
-    let encoded = encode_nav(&[base_gps]);
+    let encoded = encode_nav(&[base_gps]).expect("encode NAV");
     let reparsed = parse_nav(&encoded).expect("parse encoded GPS record without fit interval");
     assert_eq!(reparsed.len(), 1);
     assert_eq!(
@@ -5455,7 +5583,7 @@ fn fit_interval_round_trip_preserves_none_and_explicit_hours() {
 
     // When serialized with an explicit value (e.g. 6 hours), it round-trips exactly.
     base_gps.fit_interval_s = Some(6.0 * SECONDS_PER_HOUR);
-    let encoded = encode_nav(&[base_gps]);
+    let encoded = encode_nav(&[base_gps]).expect("encode NAV");
     let reparsed = parse_nav(&encoded).expect("parse encoded GPS record with 6h fit interval");
     assert_eq!(reparsed.len(), 1);
     assert_eq!(
@@ -5464,12 +5592,13 @@ fn fit_interval_round_trip_preserves_none_and_explicit_hours() {
         "explicit 6 h fit interval round-trips exactly"
     );
 
-    // QZSS, Galileo, and BeiDou carry no fit interval in ORBIT-7 and round-trip as None.
+    // QZSS states a fit flag in ORBIT-7; with the record's fit interval absent the flag
+    // is written blank and reads back absent. Galileo and BeiDou state no fit interval.
     let mut base_qzss = base_gps;
     base_qzss.satellite_id = GnssSatelliteId::new(GnssSystem::Qzss, 1).unwrap();
     base_qzss.message = NavMessage::QzssLnav;
     base_qzss.fit_interval_s = None;
-    let encoded_qzss = encode_nav(&[base_qzss]);
+    let encoded_qzss = encode_nav(&[base_qzss]).expect("encode NAV");
     let reparsed_qzss = parse_nav(&encoded_qzss).expect("parse encoded QZSS record");
     assert_eq!(reparsed_qzss.len(), 1);
     assert_eq!(reparsed_qzss[0].satellite_id.system, GnssSystem::Qzss);
@@ -5481,7 +5610,7 @@ fn fit_interval_round_trip_preserves_none_and_explicit_hours() {
         .find(|r| r.satellite_id.system == GnssSystem::Galileo)
         .expect("Galileo record");
     base_gal.fit_interval_s = None;
-    let encoded_gal = encode_nav(&[base_gal]);
+    let encoded_gal = encode_nav(&[base_gal]).expect("encode NAV");
     let reparsed_gal = parse_nav(&encoded_gal).expect("parse encoded Galileo record");
     assert_eq!(reparsed_gal[0].fit_interval_s, None);
 
@@ -5490,7 +5619,7 @@ fn fit_interval_round_trip_preserves_none_and_explicit_hours() {
         .find(|r| r.satellite_id.system == GnssSystem::BeiDou)
         .expect("BeiDou record");
     base_bds.fit_interval_s = None;
-    let encoded_bds = encode_nav(&[base_bds]);
+    let encoded_bds = encode_nav(&[base_bds]).expect("encode NAV");
     let reparsed_bds = parse_nav(&encoded_bds).expect("parse encoded BeiDou record");
     assert_eq!(reparsed_bds[0].fit_interval_s, None);
 }
@@ -5607,10 +5736,13 @@ fn glonass_store_state_keeps_every_bit_of_the_epoch() {
         position.map(f64::to_bits),
         [expected[0], expected[1], expected[2]].map(f64::to_bits)
     );
+    // The clock is RTKLIB `geph2pos`'s, `-TauN + GammaN·tk` with `tk` not iterated, as
+    // `satposs` returns it. This test once required the refined `geph2clk` form.
     assert_eq!(
         clock.to_bits(),
-        crate::glonass::clock_offset_s(r0.clk_bias, r0.gamma_n, tk).to_bits()
+        crate::glonass::position_clock_offset_s(r0.clk_bias, r0.gamma_n, tk).to_bits()
     );
+    assert_eq!(clock.to_bits(), (r0.clk_bias + r0.gamma_n * tk).to_bits());
 
     let end = crate::glonass::propagate(state0, r0.acc_m_s2, ephpos_stepped_tk(tk))
         .expect("propagate 1 ms later");
@@ -5626,4 +5758,1337 @@ fn glonass_store_state_keeps_every_bit_of_the_epoch() {
         ]
         .map(f64::to_bits)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Format-correctness coverage: each test names the audit item it pins.
+// ---------------------------------------------------------------------------
+
+fn all_nav_fixture_paths() -> Vec<&'static str> {
+    vec![
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_RN.rnx"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nav/KMS300DNK_R_20221591000_01H_MN.rnx"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nav/BRD400DLR_S_20261800000_01H_MN_trim.rnx"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nav/BRDC00GOP_R_20210010000_01D_MN.rnx"
+        ),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ssr/BRDC00WRD_S_20261820000_G30_G31.rnx"
+        ),
+    ]
+}
+
+/// A file read and written unchanged comes back byte for byte, header and
+/// every block, for every committed navigation fixture (RINEX 3.04, 3.05, 4.00, 4.02).
+#[test]
+fn committed_nav_fixtures_round_trip_byte_for_byte() {
+    for path in all_nav_fixture_paths() {
+        let text = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+        let file = parse_nav_file(&text).unwrap_or_else(|e| panic!("parse {path}: {e}"));
+        assert!(
+            file.departures().is_empty(),
+            "{path}: {:?}",
+            file.departures()
+        );
+        let written = encode_nav_file(&file).unwrap_or_else(|e| panic!("encode {path}: {e}"));
+        assert!(written == text, "{path} does not round-trip byte for byte");
+    }
+}
+
+/// An entry is restated from its text only when that text reads, in the file's
+/// version, with no departure the entry did not already have. A RINEX 3.04 GLONASS
+/// record carried into a file relabelled 3.05 lacks the fourth orbit line 3.05 requires,
+/// so it is formatted with that line, and the output reads strictly.
+#[test]
+fn an_entry_is_restated_only_when_it_reads_without_new_departures() {
+    let text = glonass_text(&r01_glonass_lines());
+    let mut file = parse_nav_file(&text).expect("read 3.04");
+    assert_eq!(encode_nav_file(&file).expect("restate"), text);
+    let record = parse_glonass(&text).expect("parse 3.04")[0];
+
+    file.header.version = NavVersion::new(3, 5);
+    let written = encode_nav_file(&file).expect("write 3.05");
+    let reread = parse_glonass(&written).expect("the 3.05 output reads strictly");
+    assert_eq!(reread.len(), 1);
+    assert_eq!(reread[0].pos_m, record.pos_m);
+    assert_eq!(reread[0].status_flags, None);
+    let block_lines = written
+        .lines()
+        .skip_while(|line| !line.contains("END OF HEADER"))
+        .skip(1)
+        .count();
+    assert_eq!(block_lines, 5, "{written}");
+}
+
+/// A CNAV-family record built without its CNAV parameters cannot be written; the writer
+/// reports it rather than panicking.
+#[test]
+fn encode_nav_refuses_a_cnav_record_without_cnav_parameters() {
+    let mut text = String::from(V4_NAV_HEADER);
+    text.push_str("> EPH G03 CNAV\n");
+    push_owned_lines(&mut text, &cnav_lines("G03"));
+    let mut record = parse_nav(&text).expect("parse CNAV")[0];
+    record.cnav = None;
+    assert!(matches!(
+        encode_nav(&[record]),
+        Err(NavWriteError::NotRepresentable { .. })
+    ));
+}
+
+/// A GPS record whose fit field is negative or unreadable, or whose accuracy is blank,
+/// keeps its orbit and clock: the field reads as not known and the departure is
+/// reported with the record's line. The strict reader refuses it. The file restates the
+/// fields as written.
+#[test]
+fn a_bad_fit_field_or_blank_accuracy_costs_only_that_field() {
+    for (line, field, value) in [
+        (7, 1, "-1.000000000000e+00"),
+        (7, 1, "not-a-number"),
+        (6, 0, ""),
+    ] {
+        let mut lines = g01_lines();
+        lines[line] = replace_orbit_field(&lines[line], field, value);
+        let text = nav_text(&lines);
+        assert!(parse_nav(&text).is_err(), "{value:?}");
+        let lenient = parse_nav_lenient(&text).expect("lenient");
+        assert_eq!(lenient.records.len(), 1, "{value:?}");
+        assert_eq!(lenient.departures.len(), 1, "{value:?}");
+        assert_eq!(lenient.departures[0].line, 3, "{value:?}");
+        let record = lenient.records[0];
+        if line == 7 {
+            assert_eq!(record.fit_interval_s, None);
+        } else {
+            assert_eq!(record.sv_accuracy_m, None);
+        }
+        let store = BroadcastStore::from_nav(&text).expect("store");
+        assert_eq!(store.records().len(), 1);
+        let file = parse_nav_file(&text).expect("file");
+        assert_eq!(encode_nav_file(&file).expect("restate"), text);
+    }
+}
+
+/// The committed goldens against RTKLIB's own functions: `tests/fixtures/
+/// rtklib_ephemeris_oracle.json` holds the outputs of RTKLIB demo5 `eph2pos`, `eph2clk`,
+/// `geph2pos`, `geph2clk` and `seph2pos` (built against the Rust `libm` crate, no fused
+/// multiply-add; `fixtures-generators/rtklib_oracle/`) on the goldens' inputs. Every
+/// golden position and clock, and this crate's `eph2clk` and SBAS evaluations, equal
+/// RTKLIB's bits.
+#[test]
+fn goldens_equal_the_rtklib_ephemeris_oracle() {
+    let read = |name: &str| -> serde_json::Value {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name);
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {name}: {e}"));
+        serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse {name}: {e}"))
+    };
+    let bits = |text: &str| -> u64 {
+        u64::from_str_radix(text.trim_start_matches("0x"), 16).expect("bit pattern")
+    };
+    let oracle_doc = read("rtklib_ephemeris_oracle.json");
+    let oracle: std::collections::BTreeMap<String, serde_json::Value> = oracle_doc["cases"]
+        .as_array()
+        .expect("oracle cases")
+        .iter()
+        .map(|case| {
+            (
+                case["name"].as_str().expect("name").to_string(),
+                case["outputs"].clone(),
+            )
+        })
+        .collect();
+    let rtklib = |case: &str, key: &str| -> u64 {
+        bits(
+            oracle[case][key]["rtklib"]
+                .as_str()
+                .unwrap_or_else(|| panic!("oracle {case}.{key}")),
+        )
+    };
+    let mut checked = 0;
+
+    // Keplerian: position and `eph2pos` clock from the golden, `eph2clk` from this crate.
+    let broadcast = read("broadcast_golden.json");
+    for case in broadcast["cases"].as_array().expect("cases") {
+        let name = case["name"].as_str().expect("name");
+        let exp = &case["expect_hex"];
+        let golden = |key: &str| bits(exp[key].as_str().expect("golden value"));
+        for key in ["x_m", "y_m", "z_m"] {
+            assert_eq!(golden(key), rtklib(name, key), "{name}.{key}");
+        }
+        let clock = f64::from_bits(golden("dt_clock_poly_s")) + f64::from_bits(golden("dt_rel_s"));
+        assert_eq!(
+            clock.to_bits(),
+            rtklib(name, "eph2pos_dts"),
+            "{name} eph2pos clock"
+        );
+        let ck = &case["clock_hex"];
+        let hexf = |key: &str| f64::from_bits(bits(ck[key].as_str().expect("clock term")));
+        let polynomial = ClockPolynomial {
+            af0: hexf("af0"),
+            af1: hexf("af1"),
+            af2: hexf("af2"),
+            toc_sow: hexf("toc_sow"),
+        };
+        let t_sow = f64::from_bits(bits(case["t_sow_hex"].as_str().expect("t")));
+        let bias = crate::broadcast::satellite_clock_bias_s(&polynomial, t_sow).expect("eph2clk");
+        assert_eq!(
+            bias.to_bits(),
+            rtklib(name, "eph2clk_dts"),
+            "{name} eph2clk"
+        );
+        checked += 5;
+    }
+
+    // GLONASS: the golden's final state and both clocks.
+    let glonass = read("glonass_golden.json");
+    for case in glonass["cases"].as_array().expect("cases") {
+        let name = case["name"].as_str().expect("name");
+        let exp = &case["expect"];
+        let hex_float = |value: &serde_json::Value| -> u64 {
+            let text = value.as_str().expect("hex float");
+            let (sign, rest) = match text.strip_prefix('-') {
+                Some(rest) => (-1.0, rest),
+                None => (1.0, text),
+            };
+            let rest = rest.strip_prefix("0x").expect("0x");
+            let (mantissa, exponent) = rest.split_once('p').expect("p");
+            let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+            let digits = format!("{whole}{fraction}");
+            let value = u64::from_str_radix(&digits, 16).expect("hex digits") as f64;
+            let exponent: i32 = exponent.parse().expect("exponent");
+            let scale = exponent - 4 * i32::try_from(fraction.len()).expect("length");
+            (sign * value * 2f64.powi(scale)).to_bits()
+        };
+        let state = exp["final_state"].as_array().expect("final state");
+        for (index, key) in ["x_m", "y_m", "z_m"].iter().enumerate() {
+            assert_eq!(hex_float(&state[index]), rtklib(name, key), "{name}.{key}");
+        }
+        assert_eq!(
+            hex_float(&exp["position_clock_offset_s"]),
+            rtklib(name, "geph2pos_dts"),
+            "{name} geph2pos clock"
+        );
+        assert_eq!(
+            hex_float(&exp["clock_offset_s"]),
+            rtklib(name, "geph2clk_dts"),
+            "{name} geph2clk"
+        );
+        checked += 5;
+    }
+
+    // SBAS: the first record of the RINEX 4 fixture, evaluated by this crate.
+    let sbas = parse_nav_file(&v4_fixture_text())
+        .expect("read KMS300")
+        .sbas_records()
+        .next()
+        .expect("an SBAS record");
+    for offset in [0.0, 60.0, 360.0] {
+        let name = format!(
+            "{}_t0_plus_{offset:.0}s",
+            sbas.satellite_id.to_string().to_lowercase()
+        );
+        let (position, clock) = sbas.position_clock_at_j2000_s(sbas.t0_j2000_s() + offset);
+        for (index, key) in ["x_m", "y_m", "z_m"].iter().enumerate() {
+            assert_eq!(
+                position[index].to_bits(),
+                rtklib(&name, key),
+                "{name}.{key}"
+            );
+        }
+        assert_eq!(
+            clock.to_bits(),
+            rtklib(&name, "seph2pos_dts"),
+            "{name} clock"
+        );
+        checked += 4;
+    }
+
+    assert_eq!(
+        checked,
+        oracle_doc["cases"]
+            .as_array()
+            .expect("cases")
+            .iter()
+            .map(|case| {
+                case["outputs"]
+                    .as_object()
+                    .expect("outputs")
+                    .keys()
+                    .filter(|key| key.as_str() != "seph2clk_dts")
+                    .count()
+            })
+            .sum::<usize>(),
+        "every RTKLIB output but seph2clk, which this crate has no counterpart of, is compared"
+    );
+}
+
+/// A changed record is formatted from its fields, and every field the record
+/// states survives: GPS IODC, codes on L2, L2 P flag and transmission time; the Galileo
+/// data-source words 258 (F/NAV, E5a clock) and 513, 516, 517 (I/NAV, E5b clock) with
+/// their clock bits; the BeiDou AODC.
+#[test]
+fn stated_fields_survive_a_formatted_record() {
+    let original = records();
+    let g01 = original
+        .iter()
+        .find(|r| r.satellite_id == GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap())
+        .expect("G01");
+    // G01's first record: codes on L2 1, L2 P flag 0, IODC 58, t_tm 356106, fit 4 h.
+    assert_eq!(g01.l2_codes(), Some(1.0));
+    assert_eq!(g01.l2p_data_flag(), Some(0.0));
+    assert_eq!(g01.iodc(), Some(58.0));
+    assert_eq!(g01.transmission_time_sow(), Some(356_106.0));
+    assert_eq!(g01.stated.orbit7_field2, Some(4.0));
+
+    let words: std::collections::BTreeSet<u32> = original
+        .iter()
+        .filter_map(BroadcastRecord::galileo_data_sources)
+        .collect();
+    assert_eq!(words, [258, 517].into_iter().collect());
+    assert!(original
+        .iter()
+        .filter(|r| r.satellite_id.system == GnssSystem::BeiDou)
+        .all(|r| r.beidou_aodc().is_some()));
+
+    // Every record, formatted from its fields, reads back identical.
+    let encoded = encode_nav(&original).expect("encode NAV");
+    let reparsed = parse_nav(&encoded).expect("reparse");
+    assert_eq!(reparsed, original);
+    let reparsed_words: std::collections::BTreeSet<u32> = reparsed
+        .iter()
+        .filter_map(BroadcastRecord::galileo_data_sources)
+        .collect();
+    assert_eq!(reparsed_words, words);
+
+    // I/NAV words 513 (E1-B, E5b clock) and 516 (E5b-I, E5b clock) keep their bits.
+    for word in [513_u32, 516] {
+        let mut lines = e01_lines();
+        lines[5] = replace_orbit_field(&lines[5], 1, &d19_12(f64::from(word)));
+        let recs = parse_nav(&nav_text(&lines)).expect("parse Galileo word");
+        assert_eq!(recs[0].message, NavMessage::GalileoInav);
+        let encoded = encode_nav(&recs).expect("encode");
+        let reparsed = parse_nav(&encoded).expect("reparse");
+        assert_eq!(reparsed[0].galileo_data_sources(), Some(word));
+    }
+
+    // A record that states no word is written with its message's source bits and the
+    // clock bit they imply, as RTKLIB's RTCM decoder states them: 517 and 258.
+    let e01 = parse_nav(&nav_text(&e01_lines())).expect("parse E01")[0];
+    for (message, word) in [
+        (NavMessage::GalileoInav, 517_u32),
+        (NavMessage::GalileoFnav, 258),
+    ] {
+        let mut record = e01;
+        record.message = message;
+        record.issue_of_data = record
+            .issue_of_data
+            .map(|issue| BroadcastIssue { message, ..issue });
+        record.stated.orbit5_field2 = None;
+        let encoded = encode_nav(&[record]).expect("encode");
+        let reparsed = parse_nav(&encoded).expect("reparse")[0];
+        assert_eq!(reparsed.galileo_data_sources(), Some(word));
+        assert_eq!(reparsed.message, message);
+    }
+}
+
+/// One header record: `content` in columns 1-60 and `label` from column 61.
+fn header_record(content: &str, label: &str) -> String {
+    format!("{content:<60}{label}\n")
+}
+
+/// Every written header carries `PGM / RUN BY / DATE` with its label in columns
+/// 61-80; a header built in code writes its ionosphere, time system correction and leap
+/// second records, which read back; a RINEX 4 file of legacy records is written as RINEX
+/// 4 frames.
+#[test]
+fn written_headers_carry_program_iono_time_and_leap_records() {
+    let encoded = encode_nav(&records()[..1]).expect("encode NAV");
+    let pgm = encoded
+        .lines()
+        .find(|line| line.get(60..).map(str::trim) == Some("PGM / RUN BY / DATE"))
+        .expect("a PGM / RUN BY / DATE record");
+    assert!(pgm.starts_with("sidereon"));
+
+    let esbc = parse_nav_file(&fixture_text()).expect("parse ESBC");
+    let mut header = esbc.header.clone();
+    header.text.clear();
+    let mut file = NavFile::new(header);
+    file.entries = esbc
+        .entries
+        .iter()
+        .take(3)
+        .map(|entry| NavEntry::new(entry.item.clone()))
+        .collect();
+    let written = encode_nav_file(&file).expect("encode built header");
+    let reread = parse_nav_file(&written).expect("reparse built header");
+    assert_eq!(reread.header.without_text(), esbc.header.without_text());
+    assert_eq!(reread.header.iono, esbc.header.iono);
+    assert_eq!(
+        reread.header.time_system_corrections.len(),
+        3,
+        "GAGP, GAUT and GPUT"
+    );
+    assert_eq!(
+        reread.header.leap_seconds.as_ref().map(|l| l.current),
+        Some(18)
+    );
+
+    // A RINEX 4 header over legacy records writes RINEX 4 frames.
+    let mut v4 = NavFile::new(NavHeader::new(NavVersion::new(4, 0)));
+    v4.entries = file.entries.clone();
+    let written = encode_nav_file(&v4).expect("encode v4 legacy records");
+    assert!(written.contains("> EPH "));
+    let reread = parse_nav(&written).expect("reparse v4");
+    assert_eq!(reread, file.keplerian_records().collect::<Vec<_>>());
+}
+
+/// The merged header's QZSS and NavIC Klobuchar sets and its time system
+/// corrections are read; so are the RINEX 4 STO frames.
+#[test]
+fn header_qzss_navic_sets_and_time_system_corrections_are_read() {
+    let gop = parse_nav_file(&brdc_gop_text()).expect("parse GOP");
+    let iono = gop.header.iono;
+    let qzss = iono.qzss.expect("QZSA/QZSB");
+    assert_eq!(qzss.alpha[0], 8.3819e-09);
+    assert_eq!(qzss.beta[3], 4.1288e06);
+    let navic = iono.navic.expect("IRNA/IRNB");
+    assert_eq!(navic.alpha[2], -7.5102e-06);
+    assert_eq!(navic.beta[0], 1.2698e05);
+    assert_eq!(iono.galileo_disturbance_flags, Some(0.0));
+    let codes: Vec<&str> = gop
+        .header
+        .time_system_corrections
+        .iter()
+        .map(|c| c.code.as_str())
+        .collect();
+    assert_eq!(
+        codes,
+        vec!["XXXX", "GAUT", "GPUT", "GLUT", "GAGP", "GLGP", "QZUT", "BDUT", "IRUT", "IRGP"]
+    );
+    let gpst = &gop.header.time_system_corrections[2];
+    assert_eq!(gpst.a0_s, -3.7252902985e-09);
+    assert_eq!(gpst.a1_s_s, Some(-1.065814104e-14));
+    assert_eq!(gpst.reference_time_s, Some(61_440.0));
+    assert_eq!(gpst.reference_week, Some(2139.0));
+
+    let kms = parse_nav_file(&v4_fixture_text()).expect("parse KMS");
+    let sto: Vec<&SystemTimeOffset> = kms
+        .entries
+        .iter()
+        .filter_map(|e| match &e.item {
+            NavItem::SystemTimeOffset(sto) => Some(sto),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sto.len(), 3);
+    assert_eq!(sto[0].offset_code, "GPUT");
+    assert_eq!(sto[0].utc_id.as_deref(), Some("UTC(USNO)"));
+    assert_eq!(sto[0].transmission_time_sow, 295_284.0);
+    assert_eq!(sto[2].offset_code, "GAGP");
+    assert_eq!(sto[2].utc_id, None);
+}
+
+/// The lenient reader reports every block it does not return: on the RINEX 4.00
+/// fixture 24 GLONASS and 158 SBAS records, three STO and three ION frames; on the 4.02
+/// trim, a BeiDou CNV2 frame that is not decoded.
+#[test]
+fn lenient_parse_reports_the_blocks_it_does_not_return() {
+    let kms = parse_nav_lenient(&v4_fixture_text()).expect("parse KMS");
+    assert!(kms.skipped.is_empty());
+    let count = |kind| kms.other.iter().filter(|b| b.kind == kind).count();
+    assert_eq!(count(OtherNavBlockKind::Glonass), 24);
+    assert_eq!(count(OtherNavBlockKind::Sbas), 158);
+    assert_eq!(count(OtherNavBlockKind::SystemTimeOffset), 3);
+    assert_eq!(count(OtherNavBlockKind::Ionosphere), 3);
+    assert_eq!(count(OtherNavBlockKind::NotDecoded), 0);
+
+    let brd = parse_nav_lenient(&cnav_fixture_text()).expect("parse BRD400");
+    let not_decoded: Vec<_> = brd
+        .other
+        .iter()
+        .filter(|b| b.kind == OtherNavBlockKind::NotDecoded)
+        .collect();
+    assert_eq!(not_decoded.len(), 1);
+    assert_eq!(not_decoded[0].satellite, "C19");
+    assert_eq!(not_decoded[0].message_token.as_deref(), Some("CNV2"));
+}
+
+/// `parse_glonass` reads RINEX 4 FDMA frames.
+#[test]
+fn parse_glonass_reads_rinex_4_fdma_frames() {
+    let recs = parse_glonass(&v4_fixture_text()).expect("parse v4 GLONASS");
+    assert_eq!(recs.len(), 24);
+    let r03 = recs
+        .iter()
+        .find(|r| r.satellite_id == GnssSatelliteId::new(GnssSystem::Glonass, 3).unwrap())
+        .expect("R03");
+    // R03's fourth orbit line: status flags 183, dTauN -2.793967723846e-09 s, URAI 3,
+    // health flags 0.
+    assert_eq!(r03.status_flags_word(), Some(183));
+    assert_eq!(r03.l1_l2_group_delay_s(), Some(-2.793967723846e-09));
+    assert_eq!(r03.urai, Some(3.0));
+    assert_eq!(r03.health_flags_word(), Some(0));
+    assert_eq!(r03.freq_channel, 5);
+}
+
+/// A RINEX 3 record whose satellite field is written `G 1` starts a record, as
+/// RTKLIB's `satid2no` reads it, instead of joining the record before it; a record
+/// followed by non-blank lines beyond its layout is a departure.
+#[test]
+fn space_padded_record_start_is_a_record() {
+    let mut lines = satellite_lines(G01_LINES, "G02");
+    lines.extend(satellite_lines(G01_LINES, "G 1"));
+    let recs = parse_nav(&nav_text(&lines)).expect("parse G02 then G 1");
+    assert_eq!(
+        recs.iter().map(|r| r.satellite_id.prn).collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+
+    let mut lines = g01_lines();
+    lines.push("     1.000000000000e+00".to_string());
+    let text = nav_text(&lines);
+    assert_eq!(
+        parse_nav(&text),
+        Err(NavParseError::ExtraRecordLines {
+            satellite: "G01".to_string()
+        })
+    );
+    let lenient = parse_nav_lenient(&text).expect("lenient");
+    assert_eq!(lenient.records.len(), 1);
+    assert_eq!(lenient.departures.len(), 1);
+    assert_eq!(lenient.departures[0].line, 3);
+
+    // A blank line after a record is not a departure.
+    let mut lines = g01_lines();
+    lines.push(String::new());
+    assert_eq!(parse_nav(&nav_text(&lines)).expect("blank line").len(), 1);
+
+    // A non-blank line before the first record belongs to no record.
+    let text = format!("{V3_NAV_HEADER}stray text\n{}", join(G01_LINES));
+    assert_eq!(
+        parse_nav(&text),
+        Err(NavParseError::UnexpectedLine { line: 3 })
+    );
+    assert_eq!(parse_nav_lenient(&text).expect("lenient").records.len(), 1);
+}
+
+/// Header labels are matched in columns 61-80 exactly. A comment that mentions `LEAP
+/// SECONDS` or `END OF HEADER` is a comment; a label that starts in column 62 is not the
+/// label, and text past column 80 is not part of it.
+#[test]
+fn header_labels_are_matched_in_their_columns() {
+    let text = format!(
+        "{}{}{}{}{}{}",
+        header_record(
+            "     3.05           NAVIGATION DATA     M",
+            "RINEX VERSION / TYPE"
+        ),
+        header_record("LEAP SECONDS WILL CHANGE 2016-12-31", "COMMENT"),
+        header_record("END OF HEADER is the last header line", "COMMENT"),
+        header_record("    18", "LEAP SECONDS"),
+        header_record("", "END OF HEADER"),
+        join(G01_LINES)
+    );
+    assert_eq!(parse_leap_seconds(&text), Ok(Some(18.0)));
+    let store = BroadcastStore::from_nav(&text).expect("comments do not end the header");
+    assert_eq!(store.records().len(), 1);
+    let header = store.header().expect("header");
+    assert_eq!(header.comments.len(), 2);
+    assert!(store.departures().is_empty());
+
+    let shifted = format!(
+        "{}{}{}",
+        header_record(
+            "     3.05           NAVIGATION DATA     M",
+            "RINEX VERSION / TYPE"
+        ),
+        header_record("    17", " LEAP SECONDS"),
+        header_record("", "END OF HEADER")
+    );
+    assert_eq!(parse_leap_seconds(&shifted), Ok(None));
+    let trailing = format!(
+        "{}{}{}",
+        header_record(
+            "     3.05           NAVIGATION DATA     M",
+            "RINEX VERSION / TYPE"
+        ),
+        header_record("    18", "LEAP SECONDS        extra"),
+        header_record("", "END OF HEADER")
+    );
+    assert_eq!(parse_leap_seconds(&trailing), Ok(Some(18.0)));
+}
+
+/// One record that cannot be read costs only itself. A file with a corrupt record of
+/// each system keeps every other record, and each corrupt one is reported with its line
+/// and reason.
+#[test]
+fn from_nav_keeps_every_readable_record_and_reports_the_rest() {
+    let mut lines = g01_lines();
+    let mut bad_gps = satellite_lines(G01_LINES, "G02");
+    bad_gps[2] = replace_orbit_field(&bad_gps[2], 1, "not-a-number");
+    lines.extend(bad_gps);
+    let mut galileo = e01_lines();
+    galileo[5] = replace_orbit_field(&galileo[5], 1, "5.170000000000e+02");
+    lines.extend(galileo.clone());
+    let mut bad_galileo = satellite_lines(
+        &galileo.iter().map(String::as_str).collect::<Vec<_>>(),
+        "E02",
+    );
+    bad_galileo[1] = replace_orbit_field(&bad_galileo[1], 1, "");
+    lines.extend(bad_galileo);
+    lines.extend(r01_glonass_lines());
+    let mut bad_glonass = satellite_lines(R01_GLONASS_LINES, "R02");
+    bad_glonass[1] = replace_fourth_orbit_field(&bad_glonass[1], "");
+    lines.extend(bad_glonass);
+    let text = nav_text_with_version("3.04", &lines);
+
+    assert!(parse_nav(&text).is_err());
+    let store = BroadcastStore::from_nav(&text).expect("one bad record per system");
+    assert_eq!(store.records().len(), 2, "G01 and E01");
+    assert_eq!(store.glonass_records().len(), 1, "R01");
+    let skipped: Vec<(usize, &str)> = store
+        .skipped()
+        .iter()
+        .map(|s| (s.line, s.satellite.as_str()))
+        .collect();
+    assert_eq!(skipped, vec![(11, "G02"), (27, "E02"), (39, "R02")]);
+    assert!(store.skipped()[0].message.contains("e field"));
+}
+
+/// A record written with the week of transmission rather than the week of `toe`,
+/// e.g. `toc` Sunday 2022-06-12 00:00 (week 2214) with `toe` 0 and week 2213, has its
+/// `toe` moved to week 2214, as RTKLIB `adjweek` places it within half a week of `toc`;
+/// the stated week is kept and written back.
+#[test]
+fn toe_week_is_adjusted_to_toc_and_the_stated_week_kept() {
+    use crate::spp::EphemerisSource;
+
+    let mut lines = g01_lines();
+    lines[0].replace_range(4..23, "2022 06 12 00 00 00");
+    lines[3] = replace_orbit_field(&lines[3], 0, "0.000000000000e+00");
+    lines[5] = replace_orbit_field(&lines[5], 2, "2.213000000000e+03");
+    let recs = parse_nav(&nav_text(&lines)).expect("parse");
+    let rec = recs[0];
+    assert_eq!(rec.week, 2213);
+    assert_eq!((rec.toe.week, rec.toe.tow_s), (2214, 0.0));
+    assert_eq!((rec.toc.week, rec.toc.tow_s), (2214, 0.0));
+
+    let store = BroadcastStore::new(recs.clone()).expect("store");
+    let t = 2214.0 * SECONDS_PER_WEEK + 1_800.0 - 630_763_200.0;
+    assert!(store
+        .position_clock_at_j2000_s(rec.satellite_id, t)
+        .is_some());
+
+    let encoded = encode_nav(&recs).expect("encode");
+    assert!(encoded.contains(" 2.213000000000e+03"));
+    assert_eq!(parse_nav(&encoded).expect("reparse"), recs);
+}
+
+/// The QZSS fit flag is read as RTKLIB `decode_eph` reads it (0 two hours, 1 four)
+/// and written back.
+#[test]
+fn qzss_fit_flag_is_read_and_restated() {
+    for (flag, fit) in [
+        ("0.000000000000e+00", 7_200.0),
+        ("1.000000000000e+00", 14_400.0),
+    ] {
+        let mut lines = satellite_lines(G01_LINES, "J01");
+        lines[7] = replace_orbit_field(&lines[7], 1, flag);
+        let recs = parse_nav(&nav_text(&lines)).expect("parse QZSS");
+        assert_eq!(recs[0].message, NavMessage::QzssLnav);
+        assert_eq!(recs[0].fit_interval_s, Some(fit));
+        let encoded = encode_nav(&recs).expect("encode");
+        assert!(encoded.contains(&format!(" {flag}")));
+        assert_eq!(parse_nav(&encoded).expect("reparse"), recs);
+    }
+}
+
+/// The Galileo message is read from the data-source word by RINEX 3.05 Table A8: the
+/// source bits where they name one message, else the clock bits 8/9, else no message,
+/// which is used with the BGD E5b/E1 as RTKLIB's default selection uses it and kept by
+/// the default store. Only the patterns the table forbids (bits 0-2 all set, bits 8 and
+/// 9 both set) are departures, which the strict reader refuses.
+#[test]
+fn galileo_data_source_word_classification() {
+    use crate::spp::EphemerisSource;
+
+    let cases: &[(&str, NavMessage, bool)] = &[
+        ("5.170000000000e+02", NavMessage::GalileoInav, false),
+        ("2.580000000000e+02", NavMessage::GalileoFnav, false),
+        ("5.000000000000e+00", NavMessage::GalileoInav, false),
+        ("5.120000000000e+02", NavMessage::GalileoInav, false),
+        ("2.560000000000e+02", NavMessage::GalileoFnav, false),
+        ("5.150000000000e+02", NavMessage::GalileoInav, false),
+        ("2.590000000000e+02", NavMessage::GalileoFnav, false),
+        ("0.000000000000e+00", NavMessage::GalileoUnclassified, false),
+        ("3.000000000000e+00", NavMessage::GalileoUnclassified, false),
+        ("7.000000000000e+00", NavMessage::GalileoUnclassified, true),
+        ("5.190000000000e+02", NavMessage::GalileoInav, true),
+        ("7.680000000000e+02", NavMessage::GalileoUnclassified, true),
+        ("7.690000000000e+02", NavMessage::GalileoInav, true),
+    ];
+    for &(word, message, forbidden) in cases {
+        let mut lines = e01_lines();
+        lines[5] = replace_orbit_field(&lines[5], 1, word);
+        let text = nav_text(&lines);
+        let lenient = parse_nav_lenient(&text).expect("lenient");
+        assert_eq!(lenient.records.len(), 1, "{word}");
+        let record = lenient.records[0];
+        assert_eq!(record.message, message, "{word}");
+        assert_eq!(lenient.departures.len(), usize::from(forbidden), "{word}");
+        if forbidden {
+            assert_eq!(
+                parse_nav(&text),
+                Err(NavParseError::BadField {
+                    satellite: "E01".to_string(),
+                    field: "data sources",
+                }),
+                "{word}"
+            );
+        } else {
+            assert_eq!(parse_nav(&text).expect("strict").len(), 1, "{word}");
+        }
+    }
+
+    // An unclassified record takes the BGD E5b/E1 and the default store serves it.
+    let mut lines = e01_lines();
+    lines[5] = replace_orbit_field(&lines[5], 1, "0.000000000000e+00");
+    let text = nav_text(&lines);
+    let record = parse_nav(&text).expect("parse")[0];
+    assert_eq!(
+        Some(record.broadcast_clock_group_delay_s()),
+        record.group_delays.galileo_bgd_e5b_e1_s
+    );
+    let store = BroadcastStore::from_nav(&text).expect("store");
+    assert_eq!(store.records().len(), 1);
+    assert!(store
+        .position_clock_at_j2000_s(record.satellite_id, toe_as_j2000_s(&record) + 60.0)
+        .is_some());
+}
+
+/// A CNAV record whose URA_ED index predicts no accuracy (15) has no accuracy, not
+/// 8192 m.
+#[test]
+fn cnav_no_prediction_ura_has_no_accuracy() {
+    let mut lines = cnav_lines("G03");
+    lines[6] = replace_orbit_field(&lines[6], 0, "1.500000000000e+01");
+    let mut text = String::from(V4_NAV_HEADER);
+    text.push_str("> EPH G03 CNAV\n");
+    push_owned_lines(&mut text, &lines);
+    let recs = parse_nav(&text).expect("parse");
+    assert_eq!(recs[0].sv_accuracy_m, None);
+    assert_eq!(recs[0].issue_of_data, None);
+}
+
+/// RINEX 4 ionosphere frames are read by system and message, and selected by
+/// transmission time. A BeiDou BDGIM (`CNVX`) frame fills the BDGIM set and leaves the
+/// Klobuchar set alone; of two GPS frames, a query takes the latest transmitted at or
+/// before it, and `parse_iono_corrections` the latest transmitted.
+#[test]
+fn ionosphere_frames_are_read_by_message_and_selected_by_time() {
+    let frame = |sv: &str, token: &str, epoch: &str, values: &[f64]| {
+        let mut text = format!("> ION {sv} {token}\n    {epoch}");
+        for value in values.iter().take(3) {
+            text.push_str(&d19_12(*value));
+        }
+        text.push('\n');
+        for chunk in values[3.min(values.len())..].chunks(4) {
+            text.push_str("    ");
+            for value in chunk {
+                text.push_str(&d19_12(*value));
+            }
+            text.push('\n');
+        }
+        text
+    };
+    let klobuchar = |a0: f64| [a0, 0.0, 0.0, 0.0, 9.0e4, 0.0, 0.0, 0.0, 0.0];
+    let mut text = String::from(V4_NAV_HEADER);
+    text.push_str(&frame(
+        "C08",
+        "D1D2",
+        "2022 06 08 08 00 00",
+        &klobuchar(2.0e-8),
+    ));
+    text.push_str(&frame(
+        "C19",
+        "CNVX",
+        "2022 06 08 08 00 00",
+        &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+    ));
+    text.push_str(&frame(
+        "G29",
+        "LNAV",
+        "2022 06 08 08 00 00",
+        &klobuchar(1.0e-8),
+    ));
+    text.push_str(&frame(
+        "G30",
+        "LNAV",
+        "2022 06 08 10 00 00",
+        &klobuchar(3.0e-8),
+    ));
+
+    let iono = parse_iono_corrections(&text).expect("parse ION frames");
+    assert_eq!(iono.beidou.expect("D1D2 Klobuchar").alpha[0], 2.0e-8);
+    assert_eq!(
+        iono.beidou_bdgim,
+        Some([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0])
+    );
+
+    let store = BroadcastStore::from_nav(&text).expect("store");
+    let at = |h: i32, m: i32| crate::astro::time::civil::j2000_seconds(2022, 6, 8, h, m, 0.0);
+    let gps_a0 = |t: f64| store.iono_corrections_at(t).gps.expect("GPS set").alpha[0];
+    assert_eq!(gps_a0(at(9, 0)), 1.0e-8);
+    assert_eq!(gps_a0(at(10, 0)), 3.0e-8);
+    assert_eq!(gps_a0(at(11, 0)), 3.0e-8);
+    // Before any GPS frame is transmitted, and with no GPS set in the header, there is
+    // no GPS set.
+    assert_eq!(store.iono_corrections_at(at(7, 0)).gps, None);
+    // The whole-file reading is the latest transmitted, whichever reader takes it.
+    assert_eq!(iono.gps.expect("GPS").alpha[0], 3.0e-8);
+    // BDT is GPS time less 14 s: the BeiDou frame at 08:00:00 BDT is 08:00:14 GPST.
+    let file = parse_nav_file(&text).expect("file");
+    let bds = file
+        .ionosphere_frames()
+        .find(|f| f.satellite_id.system == GnssSystem::BeiDou)
+        .expect("BeiDou frame");
+    assert_eq!(bds.transmission_gpst_j2000_s(), at(8, 0) + 14.0);
+    assert_eq!(store.iono_corrections().gps.expect("GPS").alpha[0], 3.0e-8);
+}
+
+/// A RINEX 3 NavIC LNAV record: the GPS layout, IODEC, the IRN week (the GPS week),
+/// TGD; evaluated with the GPS constants as RTKLIB `eph2pos` evaluates it.
+#[test]
+fn navic_lnav_records_are_read_and_evaluated() {
+    use crate::spp::EphemerisSource;
+
+    let lines = satellite_lines(G01_LINES, "I05");
+    let recs = parse_nav(&nav_text(&lines)).expect("parse NavIC");
+    let rec = recs[0];
+    assert_eq!(rec.message, NavMessage::NavicLnav);
+    assert_eq!(rec.time_scale(), TimeScale::Gpst);
+    assert_eq!(
+        rec.constants(),
+        crate::broadcast::ConstellationConstants::GPS
+    );
+    // The L5 user's TGD term, (f_S / f_L5)² TGD (IRNSS SPS ICD 1.1 section 6.2.1.5,
+    // RTKLIB `prange`).
+    let ratio: f64 = 2.492028e9 / 1.17645e9;
+    assert_eq!(
+        rec.broadcast_clock_group_delay_s().to_bits(),
+        (ratio * ratio * 5.122274160385e-09).to_bits()
+    );
+    assert_eq!(rec.fit_interval_s, None);
+
+    let store = BroadcastStore::from_nav(&nav_text(&lines)).expect("store");
+    let t = toe_as_j2000_s(&rec) + 60.0;
+    let (position, clock) = store
+        .position_clock_at_j2000_s(rec.satellite_id, t)
+        .expect("NavIC state");
+    let expected = satellite_state(
+        &rec.elements,
+        &rec.clock,
+        &rec.constants(),
+        rec.elements.toe_sow + 60.0,
+        0.0,
+        false,
+    )
+    .expect("state");
+    assert_eq!(
+        position.map(f64::to_bits),
+        expected
+            .orbit
+            .position()
+            .expect("position")
+            .as_array()
+            .map(f64::to_bits)
+    );
+    assert_eq!(clock.to_bits(), expected.clock.dt_clock_total_s.to_bits());
+    let encoded = encode_nav(&recs).expect("encode");
+    assert_eq!(parse_nav(&encoded).expect("reparse"), recs);
+}
+
+const S20_LINES: &[&str] = &[
+    "S20 2020 06 25 00 01 36 1.117587089539e-08 0.000000000000e+00 3.456960000000e+05",
+    "     4.063093080000e+04 1.200000000000e-03 1.000000000000e-07 0.000000000000e+00",
+    "    -1.126480640000e+04-2.400000000000e-03 0.000000000000e+00 4.000000000000e+00",
+    "     2.000000000000e+01 1.000000000000e-04 0.000000000000e+00 2.200000000000e+01",
+];
+
+/// An SBAS record is read (`aGf0`, `aGf1`, transmission time, position, velocity
+/// and acceleration in km, health, accuracy code, IODN) and evaluated as RTKLIB
+/// `seph2pos` evaluates it, within `MAXDTOE_SBS` = 360 s.
+#[test]
+fn sbas_records_are_read_and_evaluated_as_seph2pos() {
+    use crate::spp::EphemerisSource;
+
+    let lines: Vec<String> = S20_LINES.iter().map(ToString::to_string).collect();
+    let text = nav_text(&lines);
+    let recs = parse_sbas(&text).expect("parse SBAS");
+    assert_eq!(recs.len(), 1);
+    let rec = recs[0];
+    assert_eq!(rec.satellite_id.to_string(), "S20");
+    assert_eq!(rec.af0_s, 1.117587089539e-08);
+    assert_eq!(rec.message_frame_time_s, Some(345_696.0));
+    assert_eq!(
+        rec.pos_m,
+        [
+            4.063093080000e+04 * 1000.0,
+            -1.126480640000e+04 * 1000.0,
+            2.0e+01 * 1000.0
+        ]
+    );
+    assert_eq!(
+        rec.vel_m_s,
+        [1.2e-03 * 1000.0, -2.4e-03 * 1000.0, 1.0e-04 * 1000.0]
+    );
+    assert_eq!(rec.acc_m_s2, [1.0e-07 * 1000.0, 0.0, 0.0]);
+    assert_eq!(rec.ura_m, Some(4.0));
+    assert_eq!(rec.iodn, Some(22.0));
+
+    let store = BroadcastStore::from_nav(&text).expect("store");
+    let t0 = rec.t0_j2000_s();
+    let t = t0 + 120.0;
+    let (position, clock) = store
+        .position_clock_at_j2000_s(rec.satellite_id, t)
+        .expect("SBAS state");
+    let dt = 120.0;
+    for axis in 0..3 {
+        let expected =
+            rec.pos_m[axis] + rec.vel_m_s[axis] * dt + rec.acc_m_s2[axis] * dt * dt / 2.0;
+        assert_eq!(position[axis].to_bits(), expected.to_bits());
+    }
+    assert_eq!(clock.to_bits(), (rec.af0_s + rec.af1_s_s * dt).to_bits());
+    assert!(store
+        .position_clock_at_j2000_s(rec.satellite_id, t0 + 360.0)
+        .is_some());
+    assert!(store
+        .position_clock_at_j2000_s(rec.satellite_id, t0 + 360.001)
+        .is_none());
+    assert_eq!(parse_nav(&text).expect("no Keplerian records").len(), 0);
+}
+
+/// A GLONASS epoch is placed on the GPS timeline with the leap-second table at that
+/// UTC instant, as RTKLIB `utc2gpst` places it: a file without `LEAP SECONDS` still
+/// serves positions, and a record at 2017-01-01 00:15 UTC maps with 18 s whatever the
+/// header states.
+#[test]
+fn glonass_epochs_use_the_leap_second_table() {
+    use crate::spp::EphemerisSource;
+
+    let mut lines = r01_glonass_lines();
+    lines[0].replace_range(4..23, "2017 01 01 00 15 00");
+    let no_leap = glonass_text(&lines);
+    let with_17 = format!(
+        "{}{}{}{}",
+        header_record(
+            "     3.04           NAVIGATION DATA     M",
+            "RINEX VERSION / TYPE"
+        ),
+        header_record("    17", "LEAP SECONDS"),
+        header_record("", "END OF HEADER"),
+        lines.iter().map(|l| format!("{l}\n")).collect::<String>()
+    );
+    for text in [no_leap, with_17] {
+        let store = BroadcastStore::from_nav(&text).expect("store");
+        let rec = store.glonass_records()[0];
+        let utc = crate::astro::time::civil::j2000_seconds(2017, 1, 1, 0, 15, 0.0);
+        assert_eq!(rec.toe_utc_j2000_s, utc);
+        assert_eq!(rec.toe_gpst_j2000_s(), utc + 18.0);
+        let (position, _) = store
+            .position_clock_at_j2000_s(rec.satellite_id, utc + 18.0)
+            .expect("GLONASS state at its reference epoch");
+        assert_eq!(position, rec.pos_m);
+    }
+}
+
+/// GLONASS records serve queries within RTKLIB `MAXDTOE_GLO` = 1800 s of their
+/// reference epoch, and of two records equidistant from a query the later candidate is
+/// selected (`selgeph`: `t<=tmin`).
+#[test]
+fn glonass_selection_is_rtklib_selgeph() {
+    use crate::spp::EphemerisSource;
+
+    let text = glonass_fixture_text();
+    let store = BroadcastStore::from_nav(&text).expect("store");
+    let first = store.glonass_records()[0];
+    let second = store.glonass_records()[1];
+    assert_eq!(first.satellite_id, second.satellite_id);
+    assert_eq!(second.toe_utc_j2000_s - first.toe_utc_j2000_s, 1_800.0);
+
+    let sat = first.satellite_id;
+    let toe = first.toe_gpst_j2000_s();
+    assert!(store
+        .position_clock_at_j2000_s(sat, toe - 1_799.0)
+        .is_some());
+    assert!(store
+        .position_clock_at_j2000_s(sat, toe - 1_800.0)
+        .is_some());
+    assert!(store
+        .position_clock_at_j2000_s(sat, toe - 1_801.0)
+        .is_none());
+
+    // Midway between the two: the later record is selected.
+    let (position, clock) = store
+        .position_clock_at_j2000_s(sat, toe + 900.0)
+        .expect("midway state");
+    let state0 = [
+        second.pos_m[0],
+        second.pos_m[1],
+        second.pos_m[2],
+        second.vel_m_s[0],
+        second.vel_m_s[1],
+        second.vel_m_s[2],
+    ];
+    let expected = crate::glonass::propagate(state0, second.acc_m_s2, -900.0).expect("propagate");
+    assert_eq!(position, [expected[0], expected[1], expected[2]]);
+    assert_eq!(clock, second.clk_bias + second.gamma_n * -900.0);
+}
+
+/// `GlonassRecord::clock_bias_s` is RTKLIB `geph2clk` at the time from the record's
+/// reference epoch in GPS time: `t = ts - (-taun + gamn*t)` twice from `ts`, then
+/// `-taun + gamn*t`, bit for bit.
+#[test]
+fn glonass_clock_bias_is_rtklib_geph2clk() {
+    let recs = parse_glonass(&glonass_text(&r01_glonass_lines())).expect("parse GLONASS");
+    let rec = GlonassRecord {
+        clk_bias: -1.0e-3,
+        gamma_n: -2.7e-12,
+        ..recs[0]
+    };
+    for tk in [-1800.0_f64, -0.5, 0.0, 900.0] {
+        let t_sv = rec.toe_gpst_j2000_s() + tk;
+        let ts = t_sv - rec.toe_gpst_j2000_s();
+        let mut t = ts;
+        for _ in 0..2 {
+            t = ts - (rec.clk_bias + rec.gamma_n * t);
+        }
+        let expected = rec.clk_bias + rec.gamma_n * t;
+        assert_eq!(
+            rec.clock_bias_s(t_sv).to_bits(),
+            expected.to_bits(),
+            "tk {tk}"
+        );
+    }
+}
+
+/// The RINEX 3.05 fourth orbit line is read; its health flags count toward health as
+/// RINEX 3.05 Table A10 defines them, and a stated `ΔτN`
+/// becomes the single-frequency group delay `-ΔτN / (γ - 1)` the SPP model applies, as
+/// RTKLIB `prange` applies it to a G1 pseudorange. The frame time and age are kept.
+#[test]
+fn glonass_fourth_orbit_line_health_and_group_delay() {
+    use crate::spp::EphemerisSource;
+    let fourth = |status: &str, dtaun: &str, urai: &str, flags: &str| {
+        format!("    {status:>19}{dtaun:>19}{urai:>19}{flags:>19}")
+    };
+    let mut lines = r01_glonass_lines();
+    lines.push(fourth(
+        "1.830000000000e+02",
+        "-2.793967723846e-09",
+        "3.000000000000e+00",
+        "0.000000000000e+00",
+    ));
+    let healthy = nav_text(&lines);
+    let recs = parse_glonass(&healthy).expect("parse 3.05 GLONASS");
+    let rec = recs[0];
+    assert_eq!(rec.message_frame_time_s, Some(342_000.0));
+    assert_eq!(rec.age_days, Some(0.0));
+    assert_eq!(rec.status_flags_word(), Some(183));
+    assert_eq!(rec.urai, Some(3.0));
+    assert!(rec.is_healthy());
+    let ratio: f64 = 1.602e9 / 1.246e9;
+    let gamma = ratio * ratio;
+    let expected_delay = -(-2.793967723846e-09) / (gamma - 1.0);
+    assert_eq!(
+        rec.single_frequency_group_delay_s().map(f64::to_bits),
+        Some(expected_delay.to_bits())
+    );
+    let store = BroadcastStore::from_nav(&healthy).expect("store");
+    let t = rec.toe_gpst_j2000_s();
+    assert_eq!(
+        store.single_frequency_group_delay_s(rec.satellite_id, t),
+        Some(expected_delay)
+    );
+    assert_eq!(
+        store
+            .position_clock_group_delay_at_j2000_s(rec.satellite_id, t)
+            .and_then(|(_, _, delay)| delay),
+        Some(expected_delay)
+    );
+    // The unknown-delay value reads as no delay.
+    let mut lines = r01_glonass_lines();
+    lines.push(fourth("", ".999999999999e+09", "1.500000000000e+01", ""));
+    let unknown = parse_glonass(&nav_text(&lines)).expect("parse")[0];
+    assert_eq!(unknown.l1_l2_group_delay_s(), None);
+    assert_eq!(unknown.single_frequency_group_delay_s(), None);
+
+    // Health by RINEX 3.05 Table A10: `Bn` MSB; almanac health `C` (bit 0) only where
+    // `AC` (bit 1) is set; `l(3)` (bit 2) only for a GLONASS-M/K record (status bits 7-8
+    // `01`, as 183 states) or where the status flags are not stated.
+    let health = |status: &str, flags: &str| {
+        let mut lines = r01_glonass_lines();
+        lines.push(fourth(
+            status,
+            "0.000000000000e+00",
+            "3.000000000000e+00",
+            flags,
+        ));
+        parse_glonass(&nav_text(&lines)).expect("parse")[0].is_healthy()
+    };
+    let glo_m = "1.830000000000e+02";
+    let glo = "3.000000000000e+00";
+    assert!(health(glo_m, "0.000000000000e+00"));
+    assert!(
+        health(glo_m, "1.000000000000e+00"),
+        "C is ignored when AC is 0"
+    );
+    assert!(!health(glo_m, "2.000000000000e+00"), "AC set, C unhealthy");
+    assert!(health(glo_m, "3.000000000000e+00"), "AC set, C healthy");
+    assert!(
+        !health(glo_m, "4.000000000000e+00"),
+        "l(3) of a GLONASS-M/K record"
+    );
+    assert!(
+        health(glo, "4.000000000000e+00"),
+        "l(3) of a GLONASS record"
+    );
+    assert!(
+        !health("", "4.000000000000e+00"),
+        "l(3) with no status flags"
+    );
+    assert!(health(glo_m, ""), "no health flags");
+
+    // An unhealthy record is held and selected, and the selection yields no state, as
+    // RTKLIB `satexclude` excludes the record `seleph` selects.
+    let mut lines = r01_glonass_lines();
+    lines.push(fourth(
+        glo_m,
+        "0.000000000000e+00",
+        "3.000000000000e+00",
+        "2.000000000000e+00",
+    ));
+    let flagged = nav_text(&lines);
+    let rec = parse_glonass(&flagged).expect("parse")[0];
+    assert_eq!(rec.sv_health, 0.0);
+    assert_eq!(rec.health_flags_word(), Some(2));
+    assert!(!rec.is_healthy());
+    let store = BroadcastStore::from_nav(&flagged).expect("store");
+    assert_eq!(store.glonass_records().len(), 1);
+    assert_eq!(
+        store.position_clock_at_j2000_s(rec.satellite_id, rec.toe_gpst_j2000_s()),
+        None
+    );
+
+    // A 3.05 record without its fourth line departs from the layout: the strict reader
+    // refuses it, the lenient one keeps it with the fields absent.
+    let short = nav_text(&r01_glonass_lines());
+    assert_eq!(
+        parse_glonass(&short),
+        Err(NavParseError::TruncatedRecord("R01".to_string()))
+    );
+    let lenient = parse_glonass_lenient(&short).expect("lenient");
+    assert_eq!(lenient.records.len(), 1);
+    assert_eq!(lenient.departures.len(), 1);
+    assert_eq!(lenient.records[0].status_flags, None);
+}
+
+/// The GLONASS reference epoch is the stated epoch rounded to the 15-minute grid,
+/// as RTKLIB `decode_geph` rounds it; the stated epoch is kept and written back.
+#[test]
+fn glonass_reference_epoch_is_on_the_15_minute_grid() {
+    use crate::spp::EphemerisSource;
+
+    let on_grid = r01_glonass_lines();
+    let mut off_grid = r01_glonass_lines();
+    off_grid[0].replace_range(4..23, "2020 06 24 23 14 58");
+    let a = BroadcastStore::from_nav(&glonass_text(&on_grid)).expect("on grid");
+    let b = BroadcastStore::from_nav(&glonass_text(&off_grid)).expect("off grid");
+    let (ra, rb) = (a.glonass_records()[0], b.glonass_records()[0]);
+    assert_eq!(ra.toe_utc_j2000_s, rb.toe_utc_j2000_s);
+    assert_eq!(rb.epoch_utc_j2000_s, rb.toe_utc_j2000_s - 2.0);
+    let t = ra.toe_gpst_j2000_s() + 300.0;
+    assert_eq!(
+        a.position_clock_at_j2000_s(ra.satellite_id, t),
+        b.position_clock_at_j2000_s(rb.satellite_id, t)
+    );
+    let file = parse_nav_file(&glonass_text(&off_grid)).expect("parse");
+    let mut entry = file.entries[0].clone();
+    entry.text.clear();
+    let mut rebuilt = NavFile::new(file.header.clone());
+    rebuilt.entries.push(entry);
+    let written = encode_nav_file(&rebuilt).expect("encode");
+    assert!(written.contains("R01 2020 06 24 23 14 58"));
+}
+
+/// A frequency channel above 128 is a receiver's unsigned spelling of a negative
+/// channel and reads as that value less 256, as RTKLIB `decode_geph` reads it.
+#[test]
+fn glonass_channel_above_128_reads_as_negative() {
+    let mut lines = r01_glonass_lines();
+    lines[2] = replace_fourth_orbit_field(&lines[2], "2.500000000000e+02");
+    let text = glonass_text(&lines);
+    let record = parse_glonass(&text).expect("parse")[0];
+    assert_eq!(record.freq_channel, -6);
+    assert_eq!(record.stated_freq_channel, 250);
+    let store = BroadcastStore::from_nav(&text).expect("store");
+    assert_eq!(
+        store.glonass_frequency_channels().get(&1).copied(),
+        Some(-6)
+    );
+
+    // The stated value is written back, byte for byte from the file and from fields.
+    let file = parse_nav_file(&text).expect("read");
+    assert_eq!(encode_nav_file(&file).expect("restate"), text);
+    let mut edited = file.clone();
+    for entry in &mut edited.entries {
+        entry.text.clear();
+    }
+    let written = encode_nav_file(&edited).expect("write");
+    assert!(written.contains("2.500000000000e+02"), "{written}");
+    assert_eq!(parse_glonass(&written).expect("reread")[0], record);
+}
+
+/// RINEX 2.11 GPS (`N`) and GLONASS (`G`) files, laid out as the 2.11 tables give
+/// them: `I2` PRN, two-digit year, `F5.1` seconds, three columns of indentation, `D`
+/// exponents. The records match the same data read from RINEX 3, and the files
+/// round-trip byte for byte.
+#[test]
+fn rinex_2_gps_and_glonass_files_are_read() {
+    let v2_line = |line: &str, first: bool| -> String {
+        if first {
+            // `I2,1X,I2.2,1X,I2,1X,I2,1X,I2,1X,I2,F5.1,3D19.12` from the v3 epoch.
+            let prn: u8 = line[1..3].parse().expect("prn");
+            let year: u16 = line[4..8].parse().expect("year");
+            let field = |a: usize, b: usize| line[a..b].parse::<u8>().expect("epoch field");
+            format!(
+                "{prn:>2} {:02} {:>2} {:>2} {:>2} {:>2}{:>5.1}{}",
+                year % 100,
+                field(9, 11),
+                field(12, 14),
+                field(15, 17),
+                field(18, 20),
+                f64::from(field(21, 23)),
+                line[23..].replace('e', "D")
+            )
+        } else {
+            format!("   {}", line[4..].replace('e', "D"))
+        }
+    };
+    let header = |file_type: &str| {
+        format!(
+            "{}{}{}",
+            header_record(
+                &format!("     2.11           {file_type}"),
+                "RINEX VERSION / TYPE"
+            ),
+            header_record("    18", "LEAP SECONDS"),
+            header_record("", "END OF HEADER")
+        )
+    };
+    let gps_text = format!(
+        "{}{}",
+        header("N: GPS NAV DATA"),
+        G01_LINES
+            .iter()
+            .enumerate()
+            .map(|(i, l)| format!("{}\n", v2_line(l, i == 0)))
+            .collect::<String>()
+    );
+    assert!(gps_text.contains(" 1 20  6 25  4  0  0.0 1.604342833161D-05"));
+    let v2 = parse_nav(&gps_text).expect("parse RINEX 2 GPS");
+    let v3 = parse_nav(&nav_text_with_version("3.04", &g01_lines())).expect("parse RINEX 3");
+    assert_eq!(v2.len(), 1);
+    assert_eq!(v2[0].satellite_id, v3[0].satellite_id);
+    assert_eq!(v2[0].elements, v3[0].elements);
+    assert_eq!(v2[0].clock, v3[0].clock);
+    assert_eq!(v2[0].toe, v3[0].toe);
+    assert_eq!(v2[0].stated, v3[0].stated);
+    assert_eq!(v2[0].fit_interval_s, Some(4.0 * SECONDS_PER_HOUR));
+    let file = parse_nav_file(&gps_text).expect("file");
+    assert_eq!(encode_nav_file(&file).expect("encode"), gps_text);
+
+    let glonass_text_v2 = format!(
+        "{}{}",
+        header("G: GLONASS NAV DATA"),
+        R01_GLONASS_LINES
+            .iter()
+            .enumerate()
+            .map(|(i, l)| format!("{}\n", v2_line(l, i == 0)))
+            .collect::<String>()
+    );
+    let v2 = parse_glonass(&glonass_text_v2).expect("parse RINEX 2 GLONASS");
+    let v3 = parse_glonass(&glonass_text(&r01_glonass_lines())).expect("parse RINEX 3");
+    assert_eq!(v2.len(), 1);
+    assert_eq!(v2[0].satellite_id, v3[0].satellite_id);
+    assert_eq!(v2[0].toe_utc_j2000_s, v3[0].toe_utc_j2000_s);
+    assert_eq!(v2[0].pos_m, v3[0].pos_m);
+    assert_eq!(v2[0].freq_channel, v3[0].freq_channel);
+    let file = parse_nav_file(&glonass_text_v2).expect("file");
+    assert_eq!(encode_nav_file(&file).expect("encode"), glonass_text_v2);
+
+    // A record built in code is written in the RINEX 2 layout and reads back.
+    let mut rebuilt = NavFile::new(file.header.clone());
+    rebuilt.entries.push(NavEntry::new(NavItem::Glonass(v2[0])));
+    let written = encode_nav_file(&rebuilt).expect("encode built");
+    assert!(written.contains("\n 1 20  6 24 23 15  0.0"));
+    assert_eq!(parse_glonass(&written).expect("reparse"), v2);
+}
+
+/// A RINEX 2 `N` file's PRN 93-97 are QZSS 193-197 (`J01`..`J05`), as RTKLIB reads
+/// them; an `H` file's PRN is the SBAS PRN less 100.
+#[test]
+fn rinex_2_prn_extensions() {
+    let header = |file_type: &str| {
+        format!(
+            "{}{}",
+            header_record(
+                &format!("     2.11           {file_type}"),
+                "RINEX VERSION / TYPE"
+            ),
+            header_record("", "END OF HEADER")
+        )
+    };
+    let mut lines: Vec<String> = G01_LINES
+        .iter()
+        .map(|l| format!("   {}", &l[4..]))
+        .collect();
+    lines[0] = format!("93 20  6 25  4  0  0.0{}", &G01_LINES[0][23..]);
+    let text = format!(
+        "{}{}",
+        header("N: GPS NAV DATA"),
+        lines.iter().map(|l| format!("{l}\n")).collect::<String>()
+    );
+    let recs = parse_nav(&text).expect("parse");
+    assert_eq!(recs[0].satellite_id.to_string(), "J01");
+    assert_eq!(recs[0].message, NavMessage::QzssLnav);
+
+    let mut lines: Vec<String> = S20_LINES
+        .iter()
+        .map(|l| format!("   {}", &l[4..]))
+        .collect();
+    lines[0] = format!("20 20  6 25  0  1 36.0{}", &S20_LINES[0][23..]);
+    let text = format!(
+        "{}{}",
+        header("H: GEO NAV MSG DATA"),
+        lines.iter().map(|l| format!("{l}\n")).collect::<String>()
+    );
+    let recs = parse_sbas(&text).expect("parse H file");
+    assert_eq!(recs[0].satellite_id.to_string(), "S20");
+    assert_eq!(recs[0].pos_m[0], 4.063093080000e+04 * 1000.0);
 }

@@ -394,6 +394,14 @@ impl<S: crate::positioning::RinexSppAssemblySource + ?Sized>
     fn rinex_spp_broadcast_corrections(&self) -> crate::positioning::RinexSppBroadcastCorrections {
         self.inner.rinex_spp_broadcast_corrections()
     }
+
+    fn rinex_spp_ionosphere_at(
+        &self,
+        t_j2000_s: f64,
+        corrections: &mut crate::positioning::RinexSppBroadcastCorrections,
+    ) {
+        self.inner.rinex_spp_ionosphere_at(t_j2000_s, corrections);
+    }
 }
 
 impl EphemerisSource for Sp3 {

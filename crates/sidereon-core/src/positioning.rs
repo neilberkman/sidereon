@@ -116,19 +116,51 @@ impl Default for RinexSppBroadcastCorrections {
 pub trait RinexSppAssemblySource {
     /// Broadcast correction metadata available to RINEX SPP assembly.
     fn rinex_spp_broadcast_corrections(&self) -> RinexSppBroadcastCorrections;
+
+    /// Replace the ionosphere coefficients of `corrections` with those in effect at
+    /// `t_j2000_s` (GPS time), for a source whose coefficients change through the product
+    /// (RINEX 4 `> ION` frames). The GLONASS channels are left as they are. The default
+    /// leaves `corrections` unchanged.
+    fn rinex_spp_ionosphere_at(
+        &self,
+        _t_j2000_s: f64,
+        _corrections: &mut RinexSppBroadcastCorrections,
+    ) {
+    }
 }
 
 impl RinexSppAssemblySource for BroadcastEphemeris {
     fn rinex_spp_broadcast_corrections(&self) -> RinexSppBroadcastCorrections {
-        let iono = self.iono_corrections();
-        let gps = iono.gps.map(klobuchar_from_alpha_beta);
-        RinexSppBroadcastCorrections {
-            klobuchar: gps.unwrap_or_else(zero_klobuchar),
-            beidou_klobuchar: iono.beidou.map(klobuchar_from_alpha_beta),
-            galileo_nequick: iono.galileo,
+        let mut corrections = RinexSppBroadcastCorrections {
             glonass_channels: self.glonass_frequency_channels(),
-        }
+            ..RinexSppBroadcastCorrections::default()
+        };
+        set_ionosphere(&mut corrections, self.iono_corrections());
+        corrections
     }
+
+    /// The ionosphere coefficients [`BroadcastEphemeris::iono_corrections_at`] selects for
+    /// the epoch.
+    fn rinex_spp_ionosphere_at(
+        &self,
+        t_j2000_s: f64,
+        corrections: &mut RinexSppBroadcastCorrections,
+    ) {
+        set_ionosphere(corrections, self.iono_corrections_at(t_j2000_s));
+    }
+}
+
+/// Put a NAV product's ionosphere coefficients in `corrections`.
+fn set_ionosphere(
+    corrections: &mut RinexSppBroadcastCorrections,
+    iono: crate::ephemeris::IonoCorrections,
+) {
+    corrections.klobuchar = iono
+        .gps
+        .map(klobuchar_from_alpha_beta)
+        .unwrap_or_else(zero_klobuchar);
+    corrections.beidou_klobuchar = iono.beidou.map(klobuchar_from_alpha_beta);
+    corrections.galileo_nequick = iono.galileo;
 }
 
 impl RinexSppAssemblySource for Sp3 {
@@ -249,6 +281,16 @@ impl<E: EphemerisSource + ?Sized> RinexSppAssemblySource for RinexSppSource<'_, 
         self.broadcast
             .map(RinexSppAssemblySource::rinex_spp_broadcast_corrections)
             .unwrap_or_default()
+    }
+
+    fn rinex_spp_ionosphere_at(
+        &self,
+        t_j2000_s: f64,
+        corrections: &mut RinexSppBroadcastCorrections,
+    ) {
+        if let Some(broadcast) = self.broadcast {
+            broadcast.rinex_spp_ionosphere_at(t_j2000_s, corrections);
+        }
     }
 }
 
@@ -406,7 +448,6 @@ where
     }
 
     let initial_guess = options.initial_guess.unwrap_or([0.0; 4]);
-    let base_corrections = merged_broadcast_corrections_from_source(source);
     let mut groups = Vec::<(GnssSystem, u32, Vec<usize>)>::new();
     let mut group_index = BTreeMap::<(GnssSystem, u32), usize>::new();
 
@@ -423,11 +464,17 @@ where
         groups[slot].2.push(index);
     }
 
+    // The source's corrections, GLONASS channels included, are built once; only the
+    // ionosphere coefficients are selected per epoch.
+    let source_corrections = source.rinex_spp_broadcast_corrections();
     let mut out = Vec::new();
     for (epoch_index, (system, epoch_time, group_indexes)) in groups.into_iter().enumerate() {
         let Some((t_rx_j2000_s, epoch)) = map_epoch(system, epoch_time) else {
             continue;
         };
+        // The broadcast ionosphere coefficients in effect at the epoch.
+        let mut epoch_iono = ionosphere_only(&source_corrections);
+        source.rinex_spp_ionosphere_at(t_rx_j2000_s, &mut epoch_iono);
         let Some(preferred_codes) = options.signal_policy.codes.get(&system) else {
             continue;
         };
@@ -509,11 +556,11 @@ where
                 day_of_year,
                 initial_guess,
                 corrections: options.corrections,
-                klobuchar: base_corrections.klobuchar,
-                beidou_klobuchar: base_corrections.beidou_klobuchar,
-                galileo_nequick: base_corrections.galileo_nequick,
+                klobuchar: epoch_iono.klobuchar,
+                beidou_klobuchar: epoch_iono.beidou_klobuchar,
+                galileo_nequick: epoch_iono.galileo_nequick,
                 sbas_iono: None,
-                glonass_channels: base_corrections.glonass_channels.clone(),
+                glonass_channels: source_corrections.glonass_channels.clone(),
                 met: options.met,
                 robust: options.robust,
                 pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -610,6 +657,8 @@ where
     // A position, an antenna or a GLONASS channel an event declares applies to
     // the epochs after it.
     let timeline = obs.header_timeline()?;
+    // The source's corrections, merged with the GLONASS channels of each header segment,
+    // are built once; only the ionosphere coefficients are selected per epoch.
     let source_corrections = source.rinex_spp_broadcast_corrections();
     let segment_corrections: Vec<RinexSppBroadcastCorrections> = timeline
         .segments()
@@ -624,10 +673,6 @@ where
             continue;
         };
         let header = timeline.at(epoch_index);
-        let Some(base_corrections) = segment_corrections.get(timeline.segment_index(epoch_index))
-        else {
-            continue;
-        };
         let initial_guess = initial_guess(header, options)?;
         let mut selected = pseudoranges(obs, epoch, &options.signal_policy)?;
         if let Some(allowed) = &options.satellites {
@@ -638,6 +683,14 @@ where
         }
 
         let epoch_context = epoch_time_context(epoch_time);
+        // The corrections of the header segment in effect at the epoch, with the
+        // broadcast ionosphere coefficients in effect at it.
+        let Some(base_corrections) = segment_corrections.get(timeline.segment_index(epoch_index))
+        else {
+            continue;
+        };
+        let mut epoch_iono = ionosphere_only(base_corrections);
+        source.rinex_spp_ionosphere_at(epoch_context.t_rx_j2000_s, &mut epoch_iono);
         let observations = selected
             .into_iter()
             .map(|(satellite_id, pseudorange_m)| Observation {
@@ -656,9 +709,9 @@ where
                 day_of_year: epoch_context.day_of_year,
                 initial_guess,
                 corrections: options.corrections,
-                klobuchar: base_corrections.klobuchar,
-                beidou_klobuchar: base_corrections.beidou_klobuchar,
-                galileo_nequick: base_corrections.galileo_nequick,
+                klobuchar: epoch_iono.klobuchar,
+                beidou_klobuchar: epoch_iono.beidou_klobuchar,
+                galileo_nequick: epoch_iono.galileo_nequick,
                 sbas_iono: None,
                 glonass_channels: base_corrections.glonass_channels.clone(),
                 met: options.met,
@@ -730,6 +783,16 @@ fn initial_guess(
     Ok([approx[0], approx[1], approx[2], 0.0])
 }
 
+/// The ionosphere coefficients of `corrections`, without its GLONASS channels.
+fn ionosphere_only(corrections: &RinexSppBroadcastCorrections) -> RinexSppBroadcastCorrections {
+    RinexSppBroadcastCorrections {
+        klobuchar: corrections.klobuchar,
+        beidou_klobuchar: corrections.beidou_klobuchar,
+        galileo_nequick: corrections.galileo_nequick,
+        glonass_channels: BTreeMap::new(),
+    }
+}
+
 fn merged_broadcast_corrections(
     header: &crate::rinex::observations::ObsHeader,
     source_corrections: &RinexSppBroadcastCorrections,
@@ -742,13 +805,6 @@ fn merged_broadcast_corrections(
             .map(|(&slot, &channel)| (slot, channel)),
     );
     corrections
-}
-
-fn merged_broadcast_corrections_from_source<S>(source: &S) -> RinexSppBroadcastCorrections
-where
-    S: RinexSppAssemblySource + ?Sized,
-{
-    source.rinex_spp_broadcast_corrections()
 }
 
 struct EpochTimeContext {

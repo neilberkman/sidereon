@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::{clock_offset_s, deq, glorbit, propagate};
+use super::{clock_offset_s, deq, glorbit, position_clock_offset_s, propagate};
 
 fn parse_hex_float(s: &str) -> f64 {
     let s = s.trim();
@@ -169,9 +169,15 @@ fn glonass_propagation_zero_ulp() {
             check(format!("{name}.final.s{k}"), final_got[k], final_want[k]);
         }
 
-        // The clock offset.
+        // The clock offsets: `geph2clk`'s refined one and `geph2pos`'s.
         let clk = clock_offset_s(hexf(inp, "clk_bias"), hexf(inp, "gamma_n"), tk);
         check(format!("{name}.clock"), clk, hexf(exp, "clock_offset_s"));
+        let position_clk = position_clock_offset_s(hexf(inp, "clk_bias"), hexf(inp, "gamma_n"), tk);
+        check(
+            format!("{name}.position_clock"),
+            position_clk,
+            hexf(exp, "position_clock_offset_s"),
+        );
     }
 
     assert!(checks > 0, "no components checked - fixture empty?");

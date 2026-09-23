@@ -1299,6 +1299,25 @@ fn build_qzss_ephemeris_from_scratch_round_trips_and_evaluates() {
     assert_eq!(decoded.encode().unwrap(), body);
     assert_round_trips(Message::QzssEphemeris(eph));
     assert_broadcast_record_is_nontrivial(decoded.to_broadcast_record(2434).unwrap());
+
+    // The fit flag reads as RTKLIB reads it from RTCM and from RINEX (0: 2 h, 1: 4 h), so
+    // the record written to RINEX reads back with the same flag and fit interval.
+    for (flag, hours) in [(false, 2.0), (true, 4.0)] {
+        let record = QzssEphemeris {
+            fit_interval: flag,
+            ..eph
+        }
+        .to_broadcast_record(2434)
+        .unwrap();
+        assert_eq!(record.fit_interval_s, Some(hours * 3600.0));
+        let encoded = crate::rinex_nav::encode_nav(&[record]).expect("encode QZSS record");
+        let reparsed = crate::rinex_nav::parse_nav(&encoded).expect("reparse QZSS record");
+        assert_eq!(reparsed[0].fit_interval_s, record.fit_interval_s);
+        assert_eq!(
+            reparsed[0].stated.orbit7_field2,
+            record.stated.orbit7_field2
+        );
+    }
 }
 
 fn assert_broadcast_record_is_nontrivial(record: crate::rinex_nav::BroadcastRecord) {
@@ -1314,13 +1333,17 @@ fn assert_broadcast_record_is_nontrivial(record: crate::rinex_nav::BroadcastReco
             + crate::constants::GPST_MINUS_BDT_S
             + crate::constants::BDS_EPOCH_MINUS_GPS_EPOCH_S
             - crate::constants::GPS_EPOCH_TO_J2000_S
+    } else if record.satellite_id.system == crate::id::GnssSystem::Galileo {
+        // A Galileo record is served only after its `toe` (RTKLIB `seleph`'s
+        // age-of-data rule), so it is evaluated one second later.
+        toe_continuous - crate::constants::GPS_EPOCH_TO_J2000_S + 1.0
     } else {
         toe_continuous - crate::constants::GPS_EPOCH_TO_J2000_S
     };
     let store = crate::rinex_nav::BroadcastStore::new(vec![record]).unwrap();
     let (position, clock) = store
         .position_clock_at_j2000_s(record.satellite_id, query)
-        .expect("converted RTCM broadcast record evaluates at toe");
+        .expect("converted RTCM broadcast record evaluates at its toe");
     assert!(position.iter().all(|value| value.is_finite()));
     assert!(clock.is_finite());
     let radius =
@@ -1960,12 +1983,20 @@ fn broadcast_conversion_refuses_ura_absence_and_range_for_gps_beidou_qzss() {
     let mut gps_eph = valid_gps_ephemeris();
     gps_eph.sv_accuracy = 0;
     assert_eq!(
-        gps_eph.to_broadcast_record(2434).unwrap().sv_accuracy_m,
+        gps_eph
+            .to_broadcast_record(2434)
+            .unwrap()
+            .sv_accuracy_m
+            .unwrap(),
         2.4
     );
     gps_eph.sv_accuracy = 14;
     assert_eq!(
-        gps_eph.to_broadcast_record(2434).unwrap().sv_accuracy_m,
+        gps_eph
+            .to_broadcast_record(2434)
+            .unwrap()
+            .sv_accuracy_m
+            .unwrap(),
         6144.0
     );
     gps_eph.sv_accuracy = 15;
@@ -1990,9 +2021,23 @@ fn broadcast_conversion_refuses_ura_absence_and_range_for_gps_beidou_qzss() {
     // BeiDou (message 1042)
     let mut bds_eph = valid_beidou_ephemeris();
     bds_eph.sv_urai = 0;
-    assert_eq!(bds_eph.to_broadcast_record().unwrap().sv_accuracy_m, 2.4);
+    assert_eq!(
+        bds_eph
+            .to_broadcast_record()
+            .unwrap()
+            .sv_accuracy_m
+            .unwrap(),
+        2.4
+    );
     bds_eph.sv_urai = 14;
-    assert_eq!(bds_eph.to_broadcast_record().unwrap().sv_accuracy_m, 6144.0);
+    assert_eq!(
+        bds_eph
+            .to_broadcast_record()
+            .unwrap()
+            .sv_accuracy_m
+            .unwrap(),
+        6144.0
+    );
     bds_eph.sv_urai = 15;
     match bds_eph.to_broadcast_record() {
         Err(Error::InvalidInput(msg)) => {
@@ -2016,12 +2061,20 @@ fn broadcast_conversion_refuses_ura_absence_and_range_for_gps_beidou_qzss() {
     let mut qzss_eph = valid_qzss_ephemeris();
     qzss_eph.ura = 0;
     assert_eq!(
-        qzss_eph.to_broadcast_record(2434).unwrap().sv_accuracy_m,
+        qzss_eph
+            .to_broadcast_record(2434)
+            .unwrap()
+            .sv_accuracy_m
+            .unwrap(),
         2.4
     );
     qzss_eph.ura = 14;
     assert_eq!(
-        qzss_eph.to_broadcast_record(2434).unwrap().sv_accuracy_m,
+        qzss_eph
+            .to_broadcast_record(2434)
+            .unwrap()
+            .sv_accuracy_m
+            .unwrap(),
         6144.0
     );
     qzss_eph.ura = 15;
@@ -2053,12 +2106,12 @@ fn broadcast_conversion_refuses_galileo_sisa_spare_and_napa_and_accepts_valid_in
     for (sisa, expected_m) in [(0, 0.0), (15, 0.15), (125, 6.00)] {
         fnav.sisa = sisa;
         assert_eq!(
-            fnav.to_broadcast_record().unwrap().sv_accuracy_m,
+            fnav.to_broadcast_record().unwrap().sv_accuracy_m.unwrap(),
             expected_m
         );
         inav.sisa_index = sisa;
         assert_eq!(
-            inav.to_broadcast_record().unwrap().sv_accuracy_m,
+            inav.to_broadcast_record().unwrap().sv_accuracy_m.unwrap(),
             expected_m
         );
     }
@@ -2127,16 +2180,16 @@ fn galileo_sisa_piecewise_boundaries_map_accurately() {
         fnav.sisa = sisa;
         let fnav_rec = fnav.to_broadcast_record().unwrap();
         assert!(
-            (fnav_rec.sv_accuracy_m - expected_m).abs() < 1e-12,
+            (fnav_rec.sv_accuracy_m.unwrap() - expected_m).abs() < 1e-12,
             "F/NAV SISA index {sisa} mapped to {}, expected {expected_m}",
-            fnav_rec.sv_accuracy_m
+            fnav_rec.sv_accuracy_m.unwrap()
         );
         inav.sisa_index = sisa;
         let inav_rec = inav.to_broadcast_record().unwrap();
         assert!(
-            (inav_rec.sv_accuracy_m - expected_m).abs() < 1e-12,
+            (inav_rec.sv_accuracy_m.unwrap() - expected_m).abs() < 1e-12,
             "I/NAV SISA index {sisa} mapped to {}, expected {expected_m}",
-            inav_rec.sv_accuracy_m
+            inav_rec.sv_accuracy_m.unwrap()
         );
     }
 }

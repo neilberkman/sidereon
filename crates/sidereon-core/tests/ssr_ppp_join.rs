@@ -299,7 +299,7 @@ fn synthetic_ssr_store(
         let cross = dot(delta, ec);
         orbit.push(SsrOrbitRecord {
             satellite_id: obs.sat.prn,
-            iode: record.issue_of_data.issue,
+            iode: record.issue_of_data.expect("broadcast issue").issue,
             delta_radial: raw_rtcm_orbit(-radial, 1.0e-4),
             delta_along: raw_rtcm_orbit(-along, 4.0e-4),
             delta_cross: raw_rtcm_orbit(-cross, 4.0e-4),
@@ -614,7 +614,10 @@ fn real_igs_ssr_corrected_gps_states_move_toward_ultra_rapid_sp3() {
                 .unwrap_or_else(|| {
                     panic!("IODE-matched LNAV record for {sat} issue {}", orbit.iode)
                 });
-            assert_eq!(record.issue_of_data.issue, orbit.iode);
+            assert_eq!(
+                record.issue_of_data.expect("broadcast issue").issue,
+                orbit.iode
+            );
             matched_iodes += 1;
 
             let (broadcast_position, broadcast_clock_s) = broadcast

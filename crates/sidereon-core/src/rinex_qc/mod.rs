@@ -2476,12 +2476,12 @@ fn same_epoch_time(a: ObsEpochTime, b: ObsEpochTime) -> bool {
 
 fn nav_identity(record: &BroadcastRecord) -> String {
     format!(
-        "{}:{:?}:{}:{:016x}:{}",
+        "{}:{:?}:{}:{:016x}:{:?}",
         record.satellite_id,
         record.message,
         record.toc.week,
         record.toc.tow_s.to_bits(),
-        record.issue_of_data.issue
+        record.issue_of_data.map(|issue| issue.issue)
     )
 }
 
@@ -2505,8 +2505,10 @@ const fn nav_message_rank(message: NavMessage) -> u8 {
         NavMessage::QzssCnav2 => 5,
         NavMessage::GalileoInav => 6,
         NavMessage::GalileoFnav => 7,
-        NavMessage::BeidouD1 => 8,
-        NavMessage::BeidouD2 => 9,
+        NavMessage::GalileoUnclassified => 8,
+        NavMessage::BeidouD1 => 9,
+        NavMessage::BeidouD2 => 10,
+        NavMessage::NavicLnav => 11,
     }
 }
 

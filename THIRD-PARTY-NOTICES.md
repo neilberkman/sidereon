@@ -33,7 +33,13 @@ tests measure, so the bytes are kept as published rather than cleaned up.
 ## RTKLIB (BSD 2-Clause)
 
 The integer least-squares (MLAMBDA/LAMBDA) routine is a Rust port of RTKLIB's
-`lambda.c`.
+`lambda.c`. The broadcast ephemeris evaluators follow RTKLIB's `ephemeris.c`
+(`eph2pos`, `eph2clk`, `geph2pos`, `geph2clk`, `seph2pos`, `deq`, `glorbit`) and its
+ephemeris selection (`seleph`, `selgeph`, `selseph`, `satexclude`, `uniqnav`), and
+`crates/sidereon-core/fixtures-generators/rtklib_oracle/rtklib_ephemeris_oracle.c`
+contains those functions and `rtkcmn.c` time helpers copied from RTKLIB demo5 to
+check the evaluators against RTKLIB. The full licence text is in
+`crates/sidereon-core/RTKLIB-LICENSE.txt`.
 
   Copyright (c) 2007-2020, T. Takasu, All rights reserved.
 

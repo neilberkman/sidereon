@@ -1,0 +1,976 @@
+{
+  "rtklib": "demo5 75a2e56275485b21a67bd35bc94bbeb8936e1a74, Rust libm 0.2.16, -ffp-contract=off",
+  "cases": [
+    {
+      "name": "gps_at_toe",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc16ac6cc20480f88",
+          "sidereon": "0xc16ac6cc20480f88",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x415372a2cbfd0a14",
+          "sidereon": "0x415372a2cbfd0a14",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4174b30d9d3f514f",
+          "sidereon": "0x4174b30d9d3f514f",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3ef0cef3bac44ed9",
+          "sidereon": "0x3ef0cef3bac44ed9",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3ef0d29fffff798b"
+        }
+      }
+    },
+    {
+      "name": "gps_plus_2h",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc172ee2ae5b1af59",
+          "sidereon": "0xc172ee2ae5b1af59",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc1665f48418cd202",
+          "sidereon": "0xc1665f48418cd202",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x416946c296b93d63",
+          "sidereon": "0x416946c296b93d63",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3ef0da2567506559",
+          "sidereon": "0x3ef0da2567506559",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3ef0e03f7fff7921"
+        }
+      }
+    },
+    {
+      "name": "gps_minus_1h",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc16a38bc1d90a584",
+          "sidereon": "0xc16a38bc1d90a584",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x416b71c0e448999e",
+          "sidereon": "0x416b71c0e448999e",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4170649779a30265",
+          "sidereon": "0x4170649779a30265",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3ef0cb2316c69b86",
+          "sidereon": "0x3ef0cb2316c69b86",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3ef0cbd03fff79c0"
+        }
+      }
+    },
+    {
+      "name": "gps_week_fold",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc16ad96beabc9fea",
+          "sidereon": "0xc16ad96beabc9fea",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x4152629ad97447a7",
+          "sidereon": "0x4152629ad97447a7",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4174bd3f67a5d68d",
+          "sidereon": "0x4174bd3f67a5d68d",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3ef0cf11b5656bfa",
+          "sidereon": "0x3ef0cf11b5656bfa",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3ef0d2d06fff7989"
+        }
+      }
+    },
+    {
+      "name": "gal_at_toe",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc15be34c3ae559e0",
+          "sidereon": "0xc15be34c3ae559e0",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x416c7075c027662c",
+          "sidereon": "0x416c7075c027662c",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x41775e643c65e119",
+          "sidereon": "0x41775e643c65e119",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0xbf4cfd58041fd07e",
+          "sidereon": "0xbf4cfd58041fd07e",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0xbf4cfd588000ff09"
+        }
+      }
+    },
+    {
+      "name": "gal_plus_2h",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc174ce4cee640a09",
+          "sidereon": "0xc174ce4cee640a09",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x416c449d6cba9109",
+          "sidereon": "0x416c449d6cba9109",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x41699f5b3fbd9fcd",
+          "sidereon": "0x41699f5b3fbd9fcd",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0xbf4cfdd35cb5deef",
+          "sidereon": "0xbf4cfdd35cb5deef",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0xbf4cfdd3c440ff0d"
+        }
+      }
+    },
+    {
+      "name": "gal_minus_1h",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x412529636b114578",
+          "sidereon": "0x412529636b114578",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x41718bf194e0b12a",
+          "sidereon": "0x41718bf194e0b12a",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x41761af43d5d42b9",
+          "sidereon": "0x41761af43d5d42b9",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0xbf4cfd1a7c725447",
+          "sidereon": "0xbf4cfd1a7c725447",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0xbf4cfd1adde0ff07"
+        }
+      }
+    },
+    {
+      "name": "gal_week_fold",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc15ccae58d598e60",
+          "sidereon": "0xc15ccae58d598e60",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x416c50ee76f6e62a",
+          "sidereon": "0x416c50ee76f6e62a",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x41775664b77a5db4",
+          "sidereon": "0x41775664b77a5db4",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0xbf4cfd59ba0100ef",
+          "sidereon": "0xbf4cfd59ba0100ef",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0xbf4cfd5a3648ff09"
+        }
+      }
+    },
+    {
+      "name": "gps_high_ecc_at_toe",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc1701385dc87b2ad",
+          "sidereon": "0xc1701385dc87b2ad",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc152585a2094c600",
+          "sidereon": "0xc152585a2094c600",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4173b1a01383fd5e",
+          "sidereon": "0x4173b1a01383fd5e",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3ef07aa00bf94695",
+          "sidereon": "0x3ef07aa00bf94695",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3ef0833fffffa7c4"
+        }
+      }
+    },
+    {
+      "name": "gps_high_ecc_plus_2h",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc1593131d7745516",
+          "sidereon": "0xc1593131d7745516",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc1728dc4aa962758",
+          "sidereon": "0xc1728dc4aa962758",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4170f0c1995684c8",
+          "sidereon": "0x4170f0c1995684c8",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3ef091ee2aa1326d",
+          "sidereon": "0x3ef091ee2aa1326d",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3ef08c423fffa796"
+        }
+      }
+    },
+    {
+      "name": "gps_high_ecc_minus_1h",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc175ca4eead68324",
+          "sidereon": "0xc175ca4eead68324",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc0ef6b6061bf0d00",
+          "sidereon": "0xc0ef6b6061bf0d00",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x416ad9136e3db36f",
+          "sidereon": "0x416ad9136e3db36f",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3ef071633797310b",
+          "sidereon": "0x3ef071633797310b",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3ef07ebedfffa7dc"
+        }
+      }
+    },
+    {
+      "name": "gps_high_ecc_week_fold",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc16fcf747be43b52",
+          "sidereon": "0xc16fcf747be43b52",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc152fe7b8d4b1f94",
+          "sidereon": "0xc152fe7b8d4b1f94",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4173ccf4e9f2f2cb",
+          "sidereon": "0x4173ccf4e9f2f2cb",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3ef07aebb2c83ab6",
+          "sidereon": "0x3ef07aebb2c83ab6",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3ef0836007ffa7c4"
+        }
+      }
+    },
+    {
+      "name": "gps_toc_offset",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc16ac6cc20480f88",
+          "sidereon": "0xc16ac6cc20480f88",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x415372a2cbfd0a14",
+          "sidereon": "0x415372a2cbfd0a14",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4174b30d9d3f514f",
+          "sidereon": "0x4174b30d9d3f514f",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3ef0cee532c44ed9",
+          "sidereon": "0x3ef0cee532c44ed9",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3ef0d29177ff798b"
+        }
+      }
+    },
+    {
+      "name": "bds_geo_at_toe",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x4174e5ef43375cca",
+          "sidereon": "0x4174e5ef43375cca",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x41812ab4a0bd757b",
+          "sidereon": "0x41812ab4a0bd757b",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0xc12c0866b4fd2500",
+          "sidereon": "0xc12c0866b4fd2500",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0xbf40e3fde20fd1ce",
+          "sidereon": "0xbf40e3fde20fd1ce",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0xbf40e4000004de97"
+        }
+      }
+    },
+    {
+      "name": "bds_geo_plus_2h",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x4174e0cc872f0bda",
+          "sidereon": "0x4174e0cc872f0bda",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x41812abdce941dcf",
+          "sidereon": "0x41812abdce941dcf",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0xc130ecdc34709a20",
+          "sidereon": "0xc130ecdc34709a20",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0xbf40e80be9444262",
+          "sidereon": "0xbf40e80be9444262",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0xbf40e80d34a0dfc1"
+        }
+      }
+    },
+    {
+      "name": "bds_geo_week_fold",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x4174e5dfd23f30d2",
+          "sidereon": "0x4174e5dfd23f30d2",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x41812ab1c81e7d05",
+          "sidereon": "0x41812ab1c81e7d05",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0xc12c2bf0f42a7ec4",
+          "sidereon": "0xc12c2bf0f42a7ec4",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0xbf40e40c4beb53ff",
+          "sidereon": "0xbf40e40c4beb53ff",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0xbf40e40e67dc5e9b"
+        }
+      }
+    },
+    {
+      "name": "bds_igso_at_toe",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc16e7a6bb8cc245f",
+          "sidereon": "0xc16e7a6bb8cc245f",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x41824d04f8f370fa",
+          "sidereon": "0x41824d04f8f370fa",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4160a206767d7d20",
+          "sidereon": "0x4160a206767d7d20",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3f490186ce3357b4",
+          "sidereon": "0x3f490186ce3357b4",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3f4901acfffef343"
+        }
+      }
+    },
+    {
+      "name": "bds_igso_plus_2h",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc15f4fa4e29c9d10",
+          "sidereon": "0xc15f4fa4e29c9d10",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x418047989e0f4577",
+          "sidereon": "0x418047989e0f4577",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4176f254c49969ab",
+          "sidereon": "0x4176f254c49969ab",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3f49023a8aa3613e",
+          "sidereon": "0x3f49023a8aa3613e",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3f490245097af33d"
+        }
+      }
+    },
+    {
+      "name": "bds_igso_week_fold",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc16e3b1b278eba0c",
+          "sidereon": "0xc16e3b1b278eba0c",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x41824d1b66ef7171",
+          "sidereon": "0x41824d1b66ef7171",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x416116e43766c66a",
+          "sidereon": "0x416116e43766c66a",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3f4901893f638b14",
+          "sidereon": "0x3f4901893f638b14",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3f4901af1c927343"
+        }
+      }
+    },
+    {
+      "name": "bds_meo_at_toe",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc1448aebd94cc1bc",
+          "sidereon": "0xc1448aebd94cc1bc",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc179665e14705b14",
+          "sidereon": "0xc179665e14705b14",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x415e07dee80e5892",
+          "sidereon": "0x415e07dee80e5892",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3f3dca8bb3a12f0c",
+          "sidereon": "0x3f3dca8bb3a12f0c",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3f3dca957ffe7f9f"
+        }
+      }
+    },
+    {
+      "name": "bds_meo_plus_2h",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x4154916272afe173",
+          "sidereon": "0x4154916272afe173",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc16e81f731336f3e",
+          "sidereon": "0xc16e81f731336f3e",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x417537c0d6b66b35",
+          "sidereon": "0x417537c0d6b66b35",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3f3dcbfcfc1de437",
+          "sidereon": "0x3f3dcbfcfc1de437",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3f3dcc036d567f8c"
+        }
+      }
+    },
+    {
+      "name": "bds_meo_week_fold",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0xc1443f3adc12bd98",
+          "sidereon": "0xc1443f3adc12bd98",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc17951feaefa5929",
+          "sidereon": "0xc17951feaefa5929",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x415f23fee0f3a5ac",
+          "sidereon": "0x415f23fee0f3a5ac",
+          "ulp": 0
+        },
+        "eph2pos_dts": {
+          "rtklib": "0x3f3dca90c4fc8cfd",
+          "sidereon": "0x3f3dca90c4fc8cfd",
+          "ulp": 0
+        },
+        "eph2clk_dts": {
+          "rtklib": "0x3f3dca9a95117f9f"
+        }
+      }
+    },
+    {
+      "name": "at_toe",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x4164cea1cc3ffac2",
+          "sidereon": "0x4164cea1cc3ffac2",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc146042f09800219",
+          "sidereon": "0xc146042f09800219",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4175d2cd38cffeb0",
+          "sidereon": "0x4175d2cd38cffeb0",
+          "ulp": 0
+        },
+        "geph2pos_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        },
+        "geph2clk_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        }
+      }
+    },
+    {
+      "name": "one_step",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x4164f80e09a69acc",
+          "sidereon": "0x4164f80e09a69acc",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc144bd1522085544",
+          "sidereon": "0xc144bd1522085544",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4175cdeab880130c",
+          "sidereon": "0x4175cdeab880130c",
+          "ulp": 0
+        },
+        "geph2pos_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        },
+        "geph2clk_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        }
+      }
+    },
+    {
+      "name": "part_step",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x4164edaa70fcde21",
+          "sidereon": "0x4164edaa70fcde21",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc1450ec19264f7af",
+          "sidereon": "0xc1450ec19264f7af",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4175cf2eec425f18",
+          "sidereon": "0x4175cf2eec425f18",
+          "ulp": 0
+        },
+        "geph2pos_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        },
+        "geph2clk_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        }
+      }
+    },
+    {
+      "name": "multi_step",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x4165a4cf7b3ddba5",
+          "sidereon": "0x4165a4cf7b3ddba5",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc13f22619b4ebdcd",
+          "sidereon": "0xc13f22619b4ebdcd",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4175b4f8bba6759e",
+          "sidereon": "0x4175b4f8bba6759e",
+          "ulp": 0
+        },
+        "geph2pos_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        },
+        "geph2clk_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        }
+      }
+    },
+    {
+      "name": "backward",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x416468a7b9914c7e",
+          "sidereon": "0x416468a7b9914c7e",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc1493a84d87a31a6",
+          "sidereon": "0xc1493a84d87a31a6",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4175dce6bcf0de45",
+          "sidereon": "0x4175dce6bcf0de45",
+          "ulp": 0
+        },
+        "geph2pos_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        },
+        "geph2clk_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        }
+      }
+    },
+    {
+      "name": "quarter_hour",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x41675e937271132e",
+          "sidereon": "0x41675e937271132e",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc11ae224887ef96b",
+          "sidereon": "0xc11ae224887ef96b",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4175572b8f4fbd2a",
+          "sidereon": "0x4175572b8f4fbd2a",
+          "ulp": 0
+        },
+        "geph2pos_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        },
+        "geph2clk_dts": {
+          "rtklib": "0x3f10a96000000098",
+          "sidereon": "0x3f10a96000000098",
+          "ulp": 0
+        }
+      }
+    },
+    {
+      "name": "gamma_forward_age_limit",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x416a2b421ee5e4e5",
+          "sidereon": "0x416a2b421ee5e4e5",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x413bdf9d7b9f550c",
+          "sidereon": "0x413bdf9d7b9f550c",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x41747189b357f137",
+          "sidereon": "0x41747189b357f137",
+          "ulp": 0
+        },
+        "geph2pos_dts": {
+          "rtklib": "0xbf50624c10f1a9fc",
+          "sidereon": "0xbf50624c10f1a9fc",
+          "ulp": 0
+        },
+        "geph2clk_dts": {
+          "rtklib": "0xbf50624c10f1999a",
+          "sidereon": "0xbf50624c10f1999a",
+          "ulp": 0
+        }
+      }
+    },
+    {
+      "name": "gamma_backward_partial",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x416278f5b287923f",
+          "sidereon": "0x416278f5b287923f",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc155377ab7083f78",
+          "sidereon": "0xc155377ab7083f78",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x4175e04a2845a4c4",
+          "sidereon": "0x4175e04a2845a4c4",
+          "ulp": 0
+        },
+        "geph2pos_dts": {
+          "rtklib": "0x3f0e68f7cc6605d5",
+          "sidereon": "0x3f0e68f7cc6605d5",
+          "ulp": 0
+        },
+        "geph2clk_dts": {
+          "rtklib": "0x3f0e68f7cc66601c",
+          "sidereon": "0x3f0e68f7cc66601c",
+          "ulp": 0
+        }
+      }
+    },
+    {
+      "name": "gamma_velocity_step",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x416a2b4254bde8f4",
+          "sidereon": "0x416a2b4254bde8f4",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0x413bdf9fe273ad67",
+          "sidereon": "0x413bdf9fe273ad67",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0x417471899edbe918",
+          "sidereon": "0x417471899edbe918",
+          "ulp": 0
+        },
+        "geph2pos_dts": {
+          "rtklib": "0x3f11b97840020da6",
+          "sidereon": "0x3f11b97840020da6",
+          "ulp": 0
+        },
+        "geph2clk_dts": {
+          "rtklib": "0x3f11b9784001ea33",
+          "sidereon": "0x3f11b9784001ea33",
+          "ulp": 0
+        }
+      }
+    },
+    {
+      "name": "s48_t0_plus_0s",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x417d0fffc3d70a3d",
+          "sidereon": "0x417d0fffc3d70a3d",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc17bc9bc3999999a",
+          "sidereon": "0xc17bc9bc3999999a",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0xc0a92c0000000000",
+          "sidereon": "0xc0a92c0000000000",
+          "ulp": 0
+        },
+        "seph2pos_dts": {
+          "rtklib": "0x0000000000000000",
+          "sidereon": "0x0000000000000000",
+          "ulp": 0
+        },
+        "seph2clk_dts": {
+          "rtklib": "0x0000000000000000"
+        }
+      }
+    },
+    {
+      "name": "s48_t0_plus_60s",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x417d0ffe120a3d70",
+          "sidereon": "0x417d0ffe120a3d70",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc17bc9b941666667",
+          "sidereon": "0xc17bc9b941666667",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0xc0a99f3333333333",
+          "sidereon": "0xc0a99f3333333333",
+          "ulp": 0
+        },
+        "seph2pos_dts": {
+          "rtklib": "0x0000000000000000",
+          "sidereon": "0x0000000000000000",
+          "ulp": 0
+        },
+        "seph2clk_dts": {
+          "rtklib": "0x0000000000000000"
+        }
+      }
+    },
+    {
+      "name": "s48_t0_plus_360s",
+      "outputs": {
+        "x_m": {
+          "rtklib": "0x417d0ff5990a3d70",
+          "sidereon": "0x417d0ff5990a3d70",
+          "ulp": 0
+        },
+        "y_m": {
+          "rtklib": "0xc17bc9aa68666667",
+          "sidereon": "0xc17bc9aa68666667",
+          "ulp": 0
+        },
+        "z_m": {
+          "rtklib": "0xc0abdf3333333333",
+          "sidereon": "0xc0abdf3333333333",
+          "ulp": 0
+        },
+        "seph2pos_dts": {
+          "rtklib": "0x0000000000000000",
+          "sidereon": "0x0000000000000000",
+          "ulp": 0
+        },
+        "seph2clk_dts": {
+          "rtklib": "0x0000000000000000"
+        }
+      }
+    }
+  ],
+  "mismatches": 0
+}

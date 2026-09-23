@@ -1991,15 +1991,19 @@ mod tests {
         assert!(matches!(err, Error::RinexNav(_)));
         assert!(std::error::Error::source(&err).is_some());
 
-        let err = match parse_rinex_nav(
+        // A frame that cannot be read costs only itself: the store keeps the file's other
+        // records and reports the frame with its line.
+        let nav = match parse_rinex_nav(
             "     4.00           NAVIGATION DATA     M                   RINEX VERSION / TYPE\n\
              XXX                                                         END OF HEADER\n\
              > EPH G01 LNAV\n",
         ) {
-            Ok(_) => panic!("empty v4 EPH frame unexpectedly parsed"),
-            Err(err) => err,
+            Ok(nav) => nav,
+            Err(err) => panic!("one unreadable frame must not fail the file: {err}"),
         };
-        assert!(matches!(err, Error::RinexNav(_)));
+        assert!(nav.records().is_empty());
+        assert_eq!(nav.skipped().len(), 1);
+        assert_eq!(nav.skipped()[0].line, 3);
 
         let err = parse_rinex_obs("not a RINEX OBS file").unwrap_err();
         assert!(matches!(err, Error::RinexObs(_)));

@@ -23,13 +23,14 @@ from portable_math import add, atan2, cos, div, mul, sin, sqrt, sub
 SECONDS_PER_WEEK = 604800.0
 HALF_WEEK_S = 302400.0
 SECONDS_PER_HOUR = 3600.0
-KEPLER_TOL = 1.0e-12
+KEPLER_TOL = 1.0e-13
 KEPLER_MAX_ITER = 30
 CLOCK_MAX_ITER = 2
 
 GPS_GM_M3_S2 = 3.9860050e14
 GPS_OMEGA_E_RAD_S = 7.2921151467e-5
 GPS_DTR_F = -0.000000000444280763339306
+SPEED_OF_LIGHT = 299792458.0
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_NAV = ROOT / "tests/fixtures/nav/BRD400DLR_S_20261800000_01H_MN_trim.rnx"
@@ -74,14 +75,18 @@ def time_from_reference_s(t_sow_s: float, reference_sow_s: float) -> float:
 
 
 def eccentric_anomaly(mean_anomaly: float, eccentricity: float) -> tuple[float, int]:
+    """Newton's method as RTKLIB eph2pos writes it."""
     value = mean_anomaly
+    previous = 0.0
     iterations = 0
-    while iterations < KEPLER_MAX_ITER:
+    while abs(sub(value, previous)) > KEPLER_TOL and iterations < KEPLER_MAX_ITER:
         previous = value
-        value = add(mean_anomaly, mul(eccentricity, sin(previous)))
+        step = div(
+            sub(sub(value, mul(eccentricity, sin(value))), mean_anomaly),
+            sub(1.0, mul(eccentricity, cos(value))),
+        )
+        value = sub(value, step)
         iterations += 1
-        if abs(sub(value, previous)) <= KEPLER_TOL:
-            break
     return value, iterations
 
 
@@ -89,12 +94,15 @@ def clock_offset(clock: dict[str, float], elements: dict[str, float], sin_e: flo
     af0 = clock["af0"]
     af1 = clock["af1"]
     af2 = clock["af2"]
-    dt0 = time_from_reference_s(t_sow_s, clock["toc_sow"])
-    arg = dt0
-    for _ in range(CLOCK_MAX_ITER):
-        arg = sub(dt0, add(add(af0, mul(af1, arg)), mul(af2, mul(arg, arg))))
-    dt_poly = add(add(af0, mul(af1, arg)), mul(af2, mul(arg, arg)))
-    dt_rel = mul(mul(mul(GPS_DTR_F, elements["e"]), elements["sqrt_a"]), sin_e)
+    # The polynomial at t - toc, not iterated, and the relativistic term as
+    # RTKLIB eph2pos forms it, with A0 = sqrtA^2.
+    arg = time_from_reference_s(t_sow_s, clock["toc_sow"])
+    dt_poly = add(add(af0, mul(af1, arg)), mul(mul(af2, arg), arg))
+    a0 = mul(elements["sqrt_a"], elements["sqrt_a"])
+    dt_rel = -div(
+        mul(mul(mul(2.0, sqrt(mul(GPS_GM_M3_S2, a0))), elements["e"]), sin_e),
+        mul(SPEED_OF_LIGHT, SPEED_OF_LIGHT),
+    )
     return {
         "dt_clock_poly_s": dt_poly,
         "dt_rel_s": dt_rel,
@@ -127,7 +135,7 @@ def orbit_state(elements: dict[str, float], rates: dict[str, float], t_sow_s: fl
     di = add(mul(elements["cis"], s2), mul(elements["cic"], c2))
     u = add(phi, du)
     r = add(mul(a, sub(1.0, mul(e, cos_e))), dr)
-    i = add(add(elements["i0"], di), mul(elements["idot"], tk))
+    i = add(add(elements["i0"], mul(elements["idot"], tk)), di)
     xp = mul(r, cos(u))
     yp = mul(r, sin(u))
     omega_k = sub(
@@ -312,7 +320,7 @@ def main() -> None:
         "source_nav": "BRD400DLR_S_20261800000_01H_MN_trim.rnx",
         "source_url": "https://igs.bkg.bund.de/root_ftp/IGS/BRDC/2026/180/BRD400DLR_S_20261800000_01D_MN.rnx.gz",
         "trim": "Header plus selected G01/G03 LNAV+CNAV, J02 LNAV+CNAV+CNV2, and C19 CNV2 frames.",
-        "recipe": "IS-GPS-200/705/800 CNAV audit: mpmath high-precision reference rounded to binary64 after every operation; no FMA; explicit-multiply powers; fixed-point Kepler E=M+e*sin(E), tol 1e-12 cap 30; two clock time-argument refinements; relativistic term uses sqrt(A0).",
+        "recipe": "IS-GPS-200/705/800 CNAV audit: mpmath high-precision reference rounded to binary64 after every operation; no FMA; explicit-multiply powers; Kepler by Newton as RTKLIB eph2pos (seeded E=M, Ek=0; while |E-Ek|>1e-13 and n<30); i=(i0+idot*tk)+di; clock polynomial at t-toc without refinement; relativistic -2*sqrt(mu*A0)*e*sinE/(c*c) with A0=sqrtA^2.",
         "mpmath_audit": {
             "library": "mpmath",
             "version": str(__import__("mpmath").__version__),

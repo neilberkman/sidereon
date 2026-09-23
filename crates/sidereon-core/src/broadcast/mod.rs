@@ -11,22 +11,27 @@
 //! (the `is_geo` path of [`satellite_position_ecef`]); GPS, Galileo, and BeiDou
 //! MEO/IGSO satellites use the direct rotation.
 //!
-//! This is a 0-ULP parity target for the legacy evaluator: the operation order
-//! reproduces the canonical portable Rust `libm` reference bit-for-bit. The
-//! CNAV evaluator is pinned separately by
-//! `fixtures-generators/broadcast_eval_cnav.py`, with the same operation order
-//! and Rust `libm` contract. The Python generators use high-precision mpmath as
-//! an independent audit; they are not substituted for the engine's `libm`
-//! evaluator because the two can differ by one ULP. Separate `libm::sin` and
-//! `libm::cos` calls are used deliberately (never
-//! `sin_cos`, whose fused evaluation can differ in the last bit). Integer
-//! powers are explicit repeated multiplies and there is no fused multiply-add
-//! (Rust does not auto-contract `a * b + c`).
+//! The legacy evaluator is RTKLIB `eph2pos` statement for statement: Newton's
+//! method for Kepler's equation to `1e-13` in at most 30 steps, the inclination
+//! formed as `(i0 + IDOT·tk) + δi`, the BeiDou geostationary rotation with
+//! RTKLIB's `SIN_5`/`COS_5` literals and association, the polynomial clock
+//! evaluated at `t - toc` without iteration, and the relativistic term
+//! `2·√(μA)·e·sin E / c²`. With the same `sin`/`cos` results it gives RTKLIB's
+//! bits. The committed goldens pin that recipe with the portable Rust `libm`
+//! crate as the transcendental library; the CNAV evaluator shares the recipe
+//! and is pinned by `fixtures-generators/broadcast_eval_cnav.py`. The Python
+//! generators use high-precision mpmath as an independent audit; they are not
+//! substituted for the engine's `libm` evaluator because the two can differ by
+//! one ULP. Separate `libm::sin` and `libm::cos` calls are used deliberately
+//! (never `sin_cos`, whose fused evaluation can differ in the last bit).
+//! Integer powers are explicit repeated multiplies and there is no fused
+//! multiply-add (Rust does not auto-contract `a * b + c`).
 
 use crate::astro::constants::models::broadcast::{
     BEIDOU_OMEGA_E_RAD_S, GALILEO_BEIDOU_DTR_F, GALILEO_GM_M3_S2, GPS_DTR_F,
     GPS_GALILEO_OMEGA_E_RAD_S, GPS_GM_M3_S2,
 };
+use crate::astro::constants::physics::SPEED_OF_LIGHT_M_S;
 use crate::error::{Error, Result};
 use crate::frame::{FrameValueError, ItrfPositionM};
 
@@ -35,12 +40,21 @@ pub use crate::constants::HALF_WEEK_S;
 /// Seconds in one GPS/Galileo week.
 pub use crate::constants::SECONDS_PER_WEEK;
 
-/// Eccentric-anomaly fixed-point convergence threshold (radians).
-pub const KEPLER_TOL: f64 = 1.0e-12;
-/// Maximum eccentric-anomaly fixed-point iterations.
+/// Eccentric-anomaly Newton convergence threshold (radians): RTKLIB `RTOL_KEPLER`.
+pub const KEPLER_TOL: f64 = 1.0e-13;
+/// Maximum eccentric-anomaly Newton iterations: RTKLIB `MAX_ITER_KEPLER`.
 pub const KEPLER_MAX_ITER: usize = 30;
-/// Satellite-clock time-argument refinement count (RTKLIB `eph2clk` convention).
+/// Satellite-clock time-argument refinement count of [`satellite_clock_bias_s`]
+/// (RTKLIB `eph2clk`).
 pub const CLOCK_MAX_ITER: usize = 2;
+
+/// `sin(-5°)` as RTKLIB `eph2pos` writes it (`SIN_5`), for the BeiDou
+/// geostationary rotation.
+pub const BEIDOU_GEO_SIN_5: f64 = -0.0871557427476582;
+/// `cos(-5°)` as RTKLIB `eph2pos` writes it (`COS_5`), for the BeiDou
+/// geostationary rotation. RTKLIB spells it `0.9961946980917456`; that literal and
+/// this one, its shortest spelling, read as the same `f64`.
+pub const BEIDOU_GEO_COS_5: f64 = 0.996_194_698_091_745_5;
 
 /// Per-constellation physical constants used by the broadcast evaluation.
 ///
@@ -52,7 +66,9 @@ pub struct ConstellationConstants {
     pub gm_m3_s2: f64,
     /// Earth rotation rate used by the longitude-of-node (Sagnac) term (rad/s).
     pub omega_e_rad_s: f64,
-    /// Relativistic clock constant `F = -2 * sqrt(GM) / c^2` (s / sqrt(m)).
+    /// Relativistic clock constant `F = -2 * sqrt(GM) / c^2` (s / sqrt(m)), for
+    /// [`relativistic_clock_correction_s`]. The record evaluator forms the same
+    /// term from `gm_m3_s2` as RTKLIB does and does not read this value.
     pub dtr_f: f64,
 }
 
@@ -142,7 +158,7 @@ pub struct CnavRates {
 pub struct EccentricAnomaly {
     /// Eccentric anomaly (rad).
     pub value: f64,
-    /// Fixed-point iterations performed.
+    /// Newton iterations performed.
     pub iterations: usize,
 }
 
@@ -188,7 +204,7 @@ pub struct OrbitState {
     pub u: f64,
     /// Corrected radius (m).
     pub r: f64,
-    /// Corrected inclination (rad).
+    /// Corrected inclination (rad), `(i0 + IDOT·tk) + di`.
     pub i: f64,
     /// Orbital-plane x (m).
     pub xp: f64,
@@ -214,9 +230,9 @@ impl OrbitState {
 /// The satellite clock offset, split into its components.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ClockOffset {
-    /// Polynomial term (s).
+    /// Polynomial term `af0 + af1·dt + af2·dt²` at `dt = t - toc`, not iterated (s).
     pub dt_clock_poly_s: f64,
-    /// Relativistic eccentricity term (s).
+    /// Relativistic eccentricity term `-2·√(μA)·e·sin E / c²` (s).
     pub dt_rel_s: f64,
     /// Group delay subtracted for the single-frequency user (s).
     pub tgd_s: f64,
@@ -228,8 +244,10 @@ pub struct ClockOffset {
 ///
 /// Evaluates the periodic eccentric-orbit term
 /// `F * e * sqrt(A) * sin(E)` from IS-GPS-200 and the equivalent Galileo/BeiDou
-/// broadcast-clock models. Use [`ConstellationConstants::dtr_f`] for `F` when
-/// evaluating a full broadcast record.
+/// broadcast-clock models, with [`ConstellationConstants::dtr_f`] for `F`. The
+/// record evaluator ([`satellite_clock_offset_s`]) forms the same term as RTKLIB
+/// `eph2pos` does, `-2·√(μA)·e·sin E / c²`, which can differ from this one in
+/// the last bit.
 pub fn relativistic_clock_correction_s(
     dtr_f_s_sqrt_m: f64,
     eccentricity: f64,
@@ -275,8 +293,10 @@ pub fn time_from_reference_s(t_sow_s: f64, t_ref_sow_s: f64) -> f64 {
     dt
 }
 
-/// Solve Kepler's equation by fixed-point iteration `E = M + e*sin(E)`, seeded
-/// at `E = M`; stops on `|dE| <= KEPLER_TOL` or after `KEPLER_MAX_ITER` steps.
+/// Solve Kepler's equation `M = E - e·sin E` by Newton's method as RTKLIB
+/// `eph2pos` does: seeded at `E = M` with a previous value of `0`, each step is
+/// `E -= (E - e·sin E - M) / (1 - e·cos E)`, repeated while `|E - E_prev|`
+/// exceeds [`KEPLER_TOL`] and fewer than [`KEPLER_MAX_ITER`] steps have run.
 pub fn eccentric_anomaly(mean_anomaly_rad: f64, eccentricity: f64) -> Result<EccentricAnomaly> {
     validate_finite(mean_anomaly_rad, "mean_anomaly_rad")?;
     validate_eccentricity(eccentricity)?;
@@ -288,16 +308,18 @@ pub(crate) fn eccentric_anomaly_unchecked(
     mean_anomaly_rad: f64,
     eccentricity: f64,
 ) -> EccentricAnomaly {
+    // RTKLIB `eph2pos`:
+    // for (n=0,E=M,Ek=0.0;fabs(E-Ek)>RTOL_KEPLER&&n<MAX_ITER_KEPLER;n++) {
+    //     Ek=E; E-=(E-eph->e*sin(E)-M)/(1.0-eph->e*cos(E));
+    // }
     let mut e_k = mean_anomaly_rad;
+    let mut e_prev = 0.0_f64;
     let mut iterations = 0usize;
-    while iterations < KEPLER_MAX_ITER {
-        let e_prev = e_k;
-        e_k = mean_anomaly_rad + eccentricity * libm::sin(e_prev);
+    while (e_k - e_prev).abs() > KEPLER_TOL && iterations < KEPLER_MAX_ITER {
+        e_prev = e_k;
+        e_k -= (e_k - eccentricity * libm::sin(e_k) - mean_anomaly_rad)
+            / (1.0 - eccentricity * libm::cos(e_k));
         iterations += 1;
-        let delta = (e_k - e_prev).abs();
-        if delta <= KEPLER_TOL {
-            break;
-        }
     }
     EccentricAnomaly {
         value: e_k,
@@ -310,7 +332,7 @@ pub(crate) fn eccentric_anomaly_unchecked(
 /// `is_geo` selects the BeiDou geostationary path (the node omits the
 /// Earth-rotation-during-`tk` term and the position is rotated to ECEF by
 /// `Rz(omega_e*tk) . Rx(-5deg)`); GPS, Galileo, and BeiDou MEO/IGSO use `false`.
-/// The statement order reproduces `broadcast_eval.satellite_position_ecef`.
+/// The statement order is RTKLIB `eph2pos`'s.
 pub fn satellite_position_ecef(
     elements: &KeplerianElements,
     consts: &ConstellationConstants,
@@ -399,10 +421,11 @@ fn satellite_position_ecef_impl(
     let dr = elements.crs * s2 + elements.crc * c2;
     let di = elements.cis * s2 + elements.cic * c2;
 
-    // 6. Corrected argument of latitude, radius, inclination.
+    // 6. Corrected argument of latitude, radius, inclination. RTKLIB `eph2pos` forms
+    // `i = i0 + idot*tk` and then adds the harmonic correction.
     let u = phi + du;
     let r = a * (1.0 - e * cos_e) + dr;
-    let i = elements.i0 + di + elements.idot * tk;
+    let i = elements.i0 + elements.idot * tk + di;
 
     // 7. Position in the orbital plane.
     let xp = r * libm::cos(u);
@@ -426,17 +449,19 @@ fn satellite_position_ecef_impl(
     let zg = yp * sin_i;
 
     // 10. Earth-fixed coordinates. The standard path is the identity; the BeiDou
-    // GEO path applies Rz(omega_e*tk) . Rx(-5deg) (BDS-SIS-ICD).
+    // GEO path applies Rz(omega_e*tk) . Rx(-5deg) (BDS-SIS-ICD), written as RTKLIB
+    // `eph2pos` writes it, with its `SIN_5`/`COS_5` literals:
+    // rs[0]= xg*coso+yg*sino*COS_5+zg*sino*SIN_5;
+    // rs[1]=-xg*sino+yg*coso*COS_5+zg*coso*SIN_5;
+    // rs[2]=-yg*SIN_5+zg*COS_5;
     let (x, y, z) = if is_geo {
-        let deg5 = 5.0_f64.to_radians();
-        let cos_phi = libm::cos(deg5);
-        let sin_phi = -libm::sin(deg5);
-        let z_ang = omega_e * tk;
-        let cos_z = libm::cos(z_ang);
-        let sin_z = libm::sin(z_ang);
-        let yr = yg * cos_phi + zg * sin_phi;
-        let zr = -yg * sin_phi + zg * cos_phi;
-        (xg * cos_z + yr * sin_z, -xg * sin_z + yr * cos_z, zr)
+        let sino = libm::sin(omega_e * tk);
+        let coso = libm::cos(omega_e * tk);
+        (
+            xg * coso + yg * sino * BEIDOU_GEO_COS_5 + zg * sino * BEIDOU_GEO_SIN_5,
+            -xg * sino + yg * coso * BEIDOU_GEO_COS_5 + zg * coso * BEIDOU_GEO_SIN_5,
+            -yg * BEIDOU_GEO_SIN_5 + zg * BEIDOU_GEO_COS_5,
+        )
     } else {
         (xg, yg, zg)
     };
@@ -503,11 +528,16 @@ pub(crate) fn satellite_position_ecef_cnav_unchecked(
     satellite_position_ecef_impl(elements, Some(rates), consts, tk, false)
 }
 
-/// Evaluate the broadcast satellite clock offset (seconds).
+/// Evaluate the broadcast satellite clock offset (seconds) at GPS-scale time
+/// `t_sow_s`, as RTKLIB `eph2pos` does.
 ///
-/// `sin_e` is the eccentric-anomaly sine from the position evaluation at the
-/// same instant; `tgd_s` is the single-frequency group delay. The statement
-/// order reproduces `broadcast_eval.satellite_clock_offset_s`.
+/// The polynomial is evaluated at `dt = t - toc` without iteration, and the
+/// relativistic term is `-2·√(μA)·e·sin E / c²`; `t_sow_s` is system time, not
+/// satellite clock time. [`satellite_clock_bias_s`] is RTKLIB `eph2clk`, which
+/// takes satellite clock time and iterates `dt` to remove the clock from it, for
+/// forming a transmission time. `sin_e` is the eccentric-anomaly sine from the
+/// position evaluation at the same instant; `tgd_s` is the single-frequency
+/// group delay, subtracted in `dt_clock_total_s`.
 pub fn satellite_clock_offset_s(
     clock: &ClockPolynomial,
     consts: &ConstellationConstants,
@@ -540,19 +570,15 @@ pub(crate) fn satellite_clock_offset_s_unchecked(
     let af1 = clock.af1;
     let af2 = clock.af2;
 
-    // Time from clock reference, folded; then refine out the SV clock itself.
-    let dt0 = time_from_reference_s(t_sow_s, clock.toc_sow);
-    let mut dt = dt0;
-    let mut refine = 0usize;
-    while refine < CLOCK_MAX_ITER {
-        dt = dt0 - (af0 + af1 * dt + af2 * dt * dt);
-        refine += 1;
-    }
+    // RTKLIB `eph2pos`: tk=timediff(time,eph->toc); *dts=eph->f0+eph->f1*tk+eph->f2*tk*tk;
+    let dt = time_from_reference_s(t_sow_s, clock.toc_sow);
     let dt_poly = af0 + af1 * dt + af2 * dt * dt;
 
-    // Relativistic eccentricity term (sqrt_a is the broadcast sqrt(A)).
-    let dt_rel =
-        relativistic_clock_correction_s_unchecked(consts.dtr_f, elements.e, elements.sqrt_a, sin_e);
+    // *dts-=2.0*sqrt(mu*eph->A)*eph->e*sinE/SQR(CLIGHT); with A = SQR(sqrtA). Adding the
+    // negated term to the polynomial is the same IEEE operation as subtracting it.
+    let a = elements.sqrt_a * elements.sqrt_a;
+    let dt_rel = -(2.0 * (consts.gm_m3_s2 * a).sqrt() * elements.e * sin_e
+        / (SPEED_OF_LIGHT_M_S * SPEED_OF_LIGHT_M_S));
 
     let dt_total = dt_poly + dt_rel - tgd_s;
 
@@ -562,6 +588,38 @@ pub(crate) fn satellite_clock_offset_s_unchecked(
         tgd_s,
         dt_clock_total_s: dt_total,
     }
+}
+
+/// Broadcast satellite clock bias (seconds) at satellite clock time `t_sv_sow_s`,
+/// without the relativistic term or a group delay: RTKLIB `eph2clk`.
+///
+/// `dt = t - toc` is refined [`CLOCK_MAX_ITER`] times as
+/// `dt = ts - (af0 + af1·dt + af2·dt²)` with `ts` the first difference, which
+/// removes the satellite clock from a time read on that clock, and the polynomial
+/// is evaluated at the result. Subtracting the returned bias from the satellite
+/// clock time gives system time, the epoch [`satellite_clock_offset_s`] and the
+/// orbit are evaluated at.
+pub fn satellite_clock_bias_s(clock: &ClockPolynomial, t_sv_sow_s: f64) -> Result<f64> {
+    validate_clock(clock)?;
+    validate_finite(t_sv_sow_s, "t_sv_sow_s")?;
+    let bias = satellite_clock_bias_s_unchecked(clock, t_sv_sow_s);
+    validate_finite(bias, "satellite_clock_bias_s")?;
+    Ok(bias)
+}
+
+pub(crate) fn satellite_clock_bias_s_unchecked(clock: &ClockPolynomial, t_sv_sow_s: f64) -> f64 {
+    // RTKLIB `eph2clk`:
+    // t=ts=timediff(time,eph->toc);
+    // for (i=0;i<2;i++) t=ts-(eph->f0+eph->f1*t+eph->f2*t*t);
+    // return eph->f0+eph->f1*t+eph->f2*t*t;
+    let ts = time_from_reference_s(t_sv_sow_s, clock.toc_sow);
+    let mut t = ts;
+    let mut refine = 0usize;
+    while refine < CLOCK_MAX_ITER {
+        t = ts - (clock.af0 + clock.af1 * t + clock.af2 * t * t);
+        refine += 1;
+    }
+    clock.af0 + clock.af1 * t + clock.af2 * t * t
 }
 
 /// A satellite's broadcast orbit and clock evaluated together at one instant.
@@ -776,14 +834,7 @@ mod public_api_tests {
         assert_eq!(got.to_bits(), want.to_bits());
     }
 
-    /// RTKLIB `eph2clk`: `t = ts = timediff(time, toc)`, then twice
-    /// `t = ts - (f0 + f1*t + f2*t*t)`, and `f0 + f1*t + f2*t*t`. The broadcast
-    /// clock polynomial is that, bit for bit. Record: G30 LNAV of 2026-07-02 00:00:00
-    /// GPST (toc 345600 s, af0 2.801017835736e-04 s, af1 1.364242052659e-11 s/s,
-    /// af2 0) at 344970 s, so `ts = -630 s`; the two refinements give
-    /// `t = -630.0002800931888 s` and the polynomial 2.8009318884484707e-04 s.
-    #[test]
-    fn broadcast_clock_polynomial_matches_rtklib_eph2clk() {
+    fn g30_clock_and_elements() -> (ClockPolynomial, KeplerianElements) {
         let clock = ClockPolynomial {
             af0: 2.801_017_835_736e-4,
             af1: 1.364_242_052_659e-11,
@@ -808,16 +859,20 @@ mod public_api_tests {
             cis: 7.450_580_596_924e-8,
             toe_sow: 345_600.0,
         };
+        (clock, elements)
+    }
+
+    /// RTKLIB `eph2clk`: `t = ts = timediff(time, toc)`, then twice
+    /// `t = ts - (f0 + f1*t + f2*t*t)`, and `f0 + f1*t + f2*t*t`. Record: G30 LNAV of
+    /// 2026-07-02 00:00:00 GPST (toc 345600 s, af0 2.801017835736e-04 s, af1
+    /// 1.364242052659e-11 s/s, af2 0) at 344970 s, so `ts = -630 s`; the two
+    /// refinements give `t = -630.0002800931888 s` and the bias
+    /// 2.8009318884484707e-04 s.
+    #[test]
+    fn satellite_clock_bias_matches_rtklib_eph2clk() {
+        let (clock, _) = g30_clock_and_elements();
         let t_sow = 344_970.0;
-        let offset = satellite_clock_offset_s(
-            &clock,
-            &ConstellationConstants::GPS,
-            &elements,
-            0.5,
-            t_sow,
-            0.0,
-        )
-        .expect("valid clock");
+        let bias = satellite_clock_bias_s(&clock, t_sow).expect("valid clock");
 
         let ts = t_sow - clock.toc_sow;
         let mut t = ts;
@@ -825,8 +880,73 @@ mod public_api_tests {
             t = ts - (clock.af0 + clock.af1 * t + clock.af2 * t * t);
         }
         let eph2clk = clock.af0 + clock.af1 * t + clock.af2 * t * t;
-        assert_eq!(offset.dt_clock_poly_s.to_bits(), eph2clk.to_bits());
-        assert_eq!(offset.dt_clock_poly_s.to_bits(), 4_553_802_431_015_611_053);
+        assert_eq!(bias.to_bits(), eph2clk.to_bits());
+        assert_eq!(bias.to_bits(), 4_553_802_431_015_611_053);
+    }
+
+    /// RTKLIB `eph2pos` evaluates the clock polynomial at `tk = t - toc` with no
+    /// iteration: for the same G30 record at 344970 s, `tk = -630 s` and
+    /// `f0 + f1*tk + f2*tk*tk = 2.8009318884866823e-04 s`, which is not the
+    /// `eph2clk` value above. The relativistic term is
+    /// `-2*sqrt(mu*A)*e*sinE/(c*c)` with `A = sqrtA*sqrtA`.
+    #[test]
+    fn broadcast_clock_offset_matches_rtklib_eph2pos() {
+        let (clock, elements) = g30_clock_and_elements();
+        let t_sow = 344_970.0;
+        let sin_e = 0.5;
+        let offset = satellite_clock_offset_s(
+            &clock,
+            &ConstellationConstants::GPS,
+            &elements,
+            sin_e,
+            t_sow,
+            0.0,
+        )
+        .expect("valid clock");
+
+        let tk = t_sow - clock.toc_sow;
+        let poly = clock.af0 + clock.af1 * tk + clock.af2 * tk * tk;
+        assert_eq!(offset.dt_clock_poly_s.to_bits(), poly.to_bits());
+        assert_eq!(offset.dt_clock_poly_s.to_bits(), 4_553_802_431_015_681_541);
+
+        let a = elements.sqrt_a * elements.sqrt_a;
+        let c = crate::astro::constants::physics::SPEED_OF_LIGHT_M_S;
+        let mut dts = poly;
+        dts -=
+            2.0 * (ConstellationConstants::GPS.gm_m3_s2 * a).sqrt() * elements.e * sin_e / (c * c);
+        assert_eq!(
+            (offset.dt_clock_poly_s + offset.dt_rel_s).to_bits(),
+            dts.to_bits()
+        );
+        assert_eq!(offset.dt_clock_total_s.to_bits(), dts.to_bits());
+    }
+
+    /// Newton's method as RTKLIB `eph2pos` writes it, over a grid of mean
+    /// anomalies and eccentricities.
+    #[test]
+    fn eccentric_anomaly_is_rtklib_newton() {
+        fn rtklib_kepler(m: f64, e: f64) -> (f64, usize) {
+            let mut big_e = m;
+            let mut ek = 0.0_f64;
+            let mut n = 0usize;
+            while (big_e - ek).abs() > 1e-13 && n < 30 {
+                ek = big_e;
+                big_e -= (big_e - e * libm::sin(big_e) - m) / (1.0 - e * libm::cos(big_e));
+                n += 1;
+            }
+            (big_e, n)
+        }
+        for step in -12..=12 {
+            let m = f64::from(step) * core::f64::consts::PI / 12.0;
+            for e in [0.0, 1.0e-3, 0.02, 0.2, 0.7] {
+                let got = eccentric_anomaly(m, e).expect("valid Kepler input");
+                let (want, n) = rtklib_kepler(m, e);
+                assert_eq!(got.value.to_bits(), want.to_bits(), "M={m} e={e}");
+                assert_eq!(got.iterations, n, "M={m} e={e}");
+            }
+        }
+        // A zero mean anomaly takes no step: `|E - Ek|` starts at 0.
+        assert_eq!(eccentric_anomaly(0.0, 0.1).expect("valid").iterations, 0);
     }
 
     #[test]

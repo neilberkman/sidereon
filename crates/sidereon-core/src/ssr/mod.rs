@@ -3330,10 +3330,14 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         let radial = orbit.radial_m + orbit.radial_rate_m_s * dt_orbit;
         let along = orbit.along_m + orbit.along_rate_m_s * dt_orbit;
         let cross = orbit.cross_m + orbit.cross_rate_m_s * dt_orbit;
+        // RTKLIB `satpos_ssr`: rs[i]+=-(er[i]*deph[0]+ea[i]*deph[1]+ec[i]*deph[2])+dant[i];
+        // `radial`, `along` and `cross` are the negated `deph`, and negation is exact, so
+        // the sum of the products is `satpos_ssr`'s negated term bit for bit and is added
+        // to the broadcast position as one term.
         let mut corrected_position = [
-            r[0] + radial * er[0] + along * ea[0] + cross * ec[0],
-            r[1] + radial * er[1] + along * ea[1] + cross * ec[1],
-            r[2] + radial * er[2] + along * ea[2] + cross * ec[2],
+            r[0] + (radial * er[0] + along * ea[0] + cross * ec[0]),
+            r[1] + (radial * er[1] + along * ea[1] + cross * ec[1]),
+            r[2] + (radial * er[2] + along * ea[2] + cross * ec[2]),
         ];
         if orbit.reference_point == SsrReferencePoint::CenterOfMass {
             let pco_ecef_m = self
@@ -5153,6 +5157,7 @@ mod tests {
             .select_record_at(sat, t)
             .expect("broadcast record at SSR epoch")
             .issue_of_data
+            .expect("broadcast issue")
             .issue;
         let week = GnssWeekTow::new(TimeScale::Gpst, REAL_SSR_WEEK, REAL_SSR_EPOCH_TOW_S)
             .expect("valid SSR week");
@@ -5368,7 +5373,7 @@ mod tests {
         let record = broadcast
             .select_record_at(sat, t)
             .expect("broadcast record at SSR epoch");
-        let iode = record.issue_of_data.issue;
+        let iode = record.issue_of_data.expect("broadcast issue").issue;
 
         let wanted_rac_m = [2.0, -4.0, 1.2];
         let clock_correction_m = 0.5;
@@ -5473,7 +5478,7 @@ mod tests {
         let record = broadcast
             .select_record_at(sat, t)
             .expect("broadcast record at SSR epoch");
-        let stale_iode = (record.issue_of_data.issue + 1) & 0xff;
+        let stale_iode = (record.issue_of_data.expect("broadcast issue").issue + 1) & 0xff;
         let message = Message::Ssr(SsrMessage {
             message_number: 1060,
             system: GnssSystem::Gps,
@@ -5573,7 +5578,7 @@ mod tests {
             },
             orbit: vec![SsrOrbitRecord {
                 satellite_id: sat.prn,
-                iode: record.issue_of_data.issue,
+                iode: record.issue_of_data.expect("broadcast issue").issue,
                 delta_radial: 0,
                 delta_along: 0,
                 delta_cross: 0,
@@ -6127,7 +6132,7 @@ mod tests {
                 records: vec![HasOrbitCorrection {
                     sat,
                     nav_message: 0,
-                    iode: record.issue_of_data.issue,
+                    iode: record.issue_of_data.expect("broadcast issue").issue,
                     radial_m: Some(1.25),
                     along_m: Some(-2.0),
                     cross_m: Some(3.0),
@@ -6196,10 +6201,13 @@ mod tests {
             .expect("broadcast state");
         let velocity = finite_difference_broadcast_velocity(&broadcast, sat, t);
         let (er, ea, ec) = analytic_velocity_aligned_basis(broadcast_position, velocity);
+        // The RAC correction is summed first and added to the broadcast position as one
+        // term, as RTKLIB `satpos_ssr` adds it; summing term by term onto the position
+        // rounds differently by up to an ulp of the coordinate (3.7e-9 m here).
         let expected_position = [
-            broadcast_position[0] + 1.25 * er[0] - 2.0 * ea[0] + 3.0 * ec[0],
-            broadcast_position[1] + 1.25 * er[1] - 2.0 * ea[1] + 3.0 * ec[1],
-            broadcast_position[2] + 1.25 * er[2] - 2.0 * ea[2] + 3.0 * ec[2],
+            broadcast_position[0] + (1.25 * er[0] - 2.0 * ea[0] + 3.0 * ec[0]),
+            broadcast_position[1] + (1.25 * er[1] - 2.0 * ea[1] + 3.0 * ec[1]),
+            broadcast_position[2] + (1.25 * er[2] - 2.0 * ea[2] + 3.0 * ec[2]),
         ];
         assert_vector_close(position, expected_position, 2.0e-9);
         // HAS SIS ICD Eq. 23 and 24: the broadcast clock polynomial, less `2 r·v / c²`,
@@ -6284,6 +6292,109 @@ mod tests {
         assert!(clock_rms_ns < 22.0, "{clock_rms_ns}");
     }
 
+    /// RTKLIB `eph2pos`, `ephpos` and the position half of `satpos_ssr` for one GPS record,
+    /// written out statement for statement with `libm` for `sin`, `cos` and `atan2`. With
+    /// `fused_node` the node longitude `O=eph->OMG0+(eph->OMGd-omge)*tk-omge*eph->toes` is
+    /// formed with two fused multiply-adds, as a C compiler that contracts floating-point
+    /// expressions forms it (clang does by default on arm64); without it, each operation is
+    /// rounded as the C source writes it.
+    fn rtklib_satpos_ssr_position(
+        record: &crate::rinex_nav::BroadcastRecord,
+        tk: f64,
+        deph: [f64; 3],
+        fused_node: bool,
+    ) -> [f64; 3] {
+        let e = &record.elements;
+        let eph2pos = |tk: f64| -> [f64; 3] {
+            const MU_GPS: f64 = 3.9860050e14;
+            const OMGE: f64 = 7.2921151467e-5;
+            let a = e.sqrt_a * e.sqrt_a;
+            let m = e.m0 + ((MU_GPS / (a * a * a)).sqrt() + e.delta_n) * tk;
+            let (mut big_e, mut ek, mut n) = (m, 0.0_f64, 0);
+            while (big_e - ek).abs() > 1e-13 && n < 30 {
+                ek = big_e;
+                big_e -= (big_e - e.e * libm::sin(big_e) - m) / (1.0 - e.e * libm::cos(big_e));
+                n += 1;
+            }
+            let (sin_e, cos_e) = (libm::sin(big_e), libm::cos(big_e));
+            let mut u = libm::atan2((1.0 - e.e * e.e).sqrt() * sin_e, cos_e - e.e) + e.omega;
+            let mut r = a * (1.0 - e.e * cos_e);
+            let mut i = e.i0 + e.idot * tk;
+            let (sin2u, cos2u) = (libm::sin(2.0 * u), libm::cos(2.0 * u));
+            u += e.cus * sin2u + e.cuc * cos2u;
+            r += e.crs * sin2u + e.crc * cos2u;
+            i += e.cis * sin2u + e.cic * cos2u;
+            let (x, y, cosi) = (r * libm::cos(u), r * libm::sin(u), libm::cos(i));
+            let o = if fused_node {
+                libm::fma(
+                    -OMGE,
+                    e.toe_sow,
+                    libm::fma(e.omega_dot - OMGE, tk, e.omega0),
+                )
+            } else {
+                e.omega0 + (e.omega_dot - OMGE) * tk - OMGE * e.toe_sow
+            };
+            let (sin_o, cos_o) = (libm::sin(o), libm::cos(o));
+            [
+                x * cos_o - y * cosi * sin_o,
+                x * sin_o + y * cosi * cos_o,
+                y * libm::sin(i),
+            ]
+        };
+        let rs = eph2pos(tk);
+        let rst = eph2pos(crate::rinex_nav::ephpos_stepped_tk(tk));
+        let v = [
+            (rst[0] - rs[0]) / 1e-3,
+            (rst[1] - rs[1]) / 1e-3,
+            (rst[2] - rs[2]) / 1e-3,
+        ];
+        let normv = |a: [f64; 3]| {
+            let r = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
+            [a[0] / r, a[1] / r, a[2] / r]
+        };
+        let cross3 = |a: [f64; 3], b: [f64; 3]| {
+            [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ]
+        };
+        let ea = normv(v);
+        let ec = normv(cross3(rs, v));
+        let er = cross3(ea, ec);
+        let mut out = rs;
+        for axis in 0..3 {
+            out[axis] += -(er[axis] * deph[0] + ea[axis] * deph[1] + ec[axis] * deph[2]) + 0.0;
+        }
+        out
+    }
+
+    /// The corrected G30 state is RTKLIB `satpos_ssr`'s, bit for bit.
+    ///
+    /// Record: G30 LNAV of `BRDC00WRD_S_20261820000_G30_G31.rnx` (toe and toc 345600 s of
+    /// week 2425). Correction: the SSRA02IGS0 1060 frame, IODE 90, epoch 344970 s with a
+    /// 10 s update interval, so `t1 = -5 s` and `deph = (0.0807 + 3e-5·t1, 0.2484 -
+    /// 4e-5·t1, -0.1396 - 3.2e-5·t1)` m, C0 0.0166 m. At 344970 s, `tk = -630 s`.
+    ///
+    /// Position. The broadcast position is `eph2pos`'s: Newton's method for Kepler's
+    /// equation to 1e-13, `i = (i0 + IDOT·tk) + δi`. The velocity is the 1 ms forward
+    /// difference `ephpos` forms, and the correction is added as
+    /// `rs[i] += -(er[i]·deph[0] + ea[i]·deph[1] + ec[i]·deph[2])`. Replayed in IEEE double
+    /// with each operation rounded as the C source writes it, this gives
+    /// (-6327381.424159685, 15802129.789888276, -20121898.098271403) m, the bits pinned
+    /// here. RTKLIB built with floating-point contraction (clang's default on arm64) forms
+    /// the node longitude with fused multiply-adds and gives (-6327381.424159626,
+    /// 15802129.789888298, -20121898.098271403) m instead, 64 and 12 ulp away in x and y;
+    /// the second replay below reproduces those bits, so the difference is that
+    /// contraction alone. Before this change the fixed-point Kepler solver (to 1e-12) and
+    /// the `(i0 + δi) + IDOT·tk` inclination gave bits 13931924021901094555,
+    /// 4714745314434008015 and 13939538677975909640.
+    ///
+    /// Clock. `f0 + f1·tk + f2·tk² = 2.8009318884866823e-04 s` (af0 2.801017835736e-04 s,
+    /// af1 1.364242052659e-11 s/s, af2 0), less `2 r·v / c / c` from the position and
+    /// velocity above, plus `0.0166 / c`: 2.800865527753679e-04 s. There is no TGD
+    /// (4.190951585770e-09 s) in it. Before this change it was 4553802308601788245
+    /// (2.8008655277821554e-04 s), from the fixed-point broadcast position.
     #[test]
     fn corrected_state_matches_rtklib_satpos_ssr_oracle_for_one_epoch() {
         let nav_text = std::fs::read_to_string(concat!(
@@ -6296,33 +6407,18 @@ mod tests {
         let source = SsrCorrectedEphemeris::new(&broadcast, &store)
             .with_staleness(StalenessPolicy::seconds(60.0));
         let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
-        let (position, clock) = source
-            .corrected_state(sat, ssr_j2000(REAL_SSR_EPOCH_TOW_S))
-            .expect("corrected state");
-        // Sidereon's own output, pinned to catch any change. It is not RTKLIB's, which is
-        // checked to 1e-6 m below: our Kepler solver iterates to 1e-12 by fixed point where
-        // RTKLIB `eph2pos` uses Newton to 1e-13, so the two differ by a few to tens of ulp.
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let (position, clock) = source.corrected_state(sat, t).expect("corrected state");
         assert_eq!(
             position.map(f64::to_bits),
             [
-                13_931_924_021_901_094_555,
-                4_714_745_314_434_008_015,
-                13_939_538_677_975_909_640,
+                13_931_924_021_901_094_570,
+                4_714_745_314_434_008_007,
+                13_939_538_677_975_909_641,
             ]
         );
-        // The clock as RTKLIB `satpos_ssr` forms it, by hand from the fixture: G30's LNAV
-        // record (toc 345600 s of week 2425, af0 2.801017835736e-04 s, af1
-        // 1.364242052659e-11 s/s, af2 0) at 344970 s gives tk = -630 s and
-        // af0 + af1·tk + af2·tk² = 2.8009318884866823e-04 s. The broadcast position r and
-        // the 1 ms forward-difference velocity v give 2 r·v / c / c = 6.691442092505122e-09 s.
-        // The 1060 frame's C0 for G30 is 166 × 1e-4 m, C1 and C2 are zero, so
-        // dclk / c = 0.0166 / c = 5.537163980289324e-11 s. The clock is
-        // 2.8009318884866823e-04 - 6.691442092505122e-09 + 5.537163980289324e-11
-        // = 2.8008655277821554e-04 s. There is no TGD (4.190951585770e-09 s) in it.
-        // Before the clock followed `satpos_ssr` it was
-        // 4_553_802_228_904_002_216 (2.8008223e-04 s): the TGD and the `F·e·√A·sin E`
-        // term in, and C0 subtracted.
-        assert_eq!(clock.to_bits(), 4_553_802_308_601_788_245);
+        assert_eq!(clock.to_bits(), 2.800_865_527_753_679e-4_f64.to_bits());
+        assert_eq!(clock.to_bits(), 4_553_802_308_601_735_715);
         assert_eq!(
             clock.to_bits(),
             satpos_ssr_clock_s(
@@ -6333,27 +6429,32 @@ mod tests {
             )
             .to_bits()
         );
-        // RTKLIB's own statements replayed in IEEE double, with its Newton Kepler solver
-        // (1e-13) and operation order, give 2.800865527753679e-04 s. The two differ by
-        // 2.8e-15 s: the Kepler solvers leave the two broadcast positions 1 ulp
-        // (3.7e-9 m) apart, and the 1 ms difference turns that into 3.7e-6 m/s of
-        // velocity, 2.8e-15 s of `2 r·v / c²`. 1e-14 s is 3 µm of range.
-        let rtklib_clock_s = 2.800_865_527_753_679e-4;
-        assert!(
-            (clock - rtklib_clock_s).abs() < 1.0e-14,
-            "{clock} vs RTKLIB {rtklib_clock_s}"
+
+        let record = broadcast
+            .select_record_at(sat, t)
+            .expect("broadcast record");
+        let orbit = store.orbit(sat).expect("stored orbit");
+        let dt = t - orbit.ref_epoch_j2000_s;
+        assert_eq!(dt, -5.0);
+        let deph = [
+            -(orbit.radial_m + orbit.radial_rate_m_s * dt),
+            -(orbit.along_m + orbit.along_rate_m_s * dt),
+            -(orbit.cross_m + orbit.cross_rate_m_s * dt),
+        ];
+        let tk = REAL_SSR_EPOCH_TOW_S - record.elements.toe_sow;
+        assert_eq!(
+            rtklib_satpos_ssr_position(record, tk, deph, false).map(f64::to_bits),
+            position.map(f64::to_bits)
         );
-        let rtklib_position = [
+        let contracted = [
             -6_327_381.424_159_626,
             15_802_129.789_888_298,
             -20_121_898.098_271_403,
         ];
-        let position_error_m = norm([
-            position[0] - rtklib_position[0],
-            position[1] - rtklib_position[1],
-            position[2] - rtklib_position[2],
-        ]);
-        assert!(position_error_m < 1.0e-6, "{position_error_m}");
+        assert_eq!(
+            rtklib_satpos_ssr_position(record, tk, deph, true).map(f64::to_bits),
+            contracted.map(f64::to_bits)
+        );
     }
 
     #[test]
@@ -6761,6 +6862,7 @@ mod tests {
             .select_record_at(sat, t0)
             .expect("broadcast record at SSR epoch")
             .issue_of_data
+            .expect("broadcast issue")
             .issue;
         let reception =
             |tow: f64| GnssWeekTow::new(TimeScale::Gst, REAL_SSR_WEEK, tow).expect("GST reception");
@@ -6962,7 +7064,7 @@ mod tests {
                 records: vec![HasOrbitCorrection {
                     sat,
                     nav_message: 0,
-                    iode: record.issue_of_data.issue,
+                    iode: record.issue_of_data.expect("broadcast issue").issue,
                     radial_m: Some(1.0),
                     along_m: Some(0.0),
                     cross_m: Some(0.0),
@@ -7312,7 +7414,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat1,
                         nav_message: 0,
-                        iode: record1.issue_of_data.issue,
+                        iode: record1.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -7320,7 +7422,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat2,
                         nav_message: 0,
-                        iode: record2.issue_of_data.issue,
+                        iode: record2.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -7521,7 +7623,7 @@ mod tests {
                 records: vec![HasOrbitCorrection {
                     sat: sat1,
                     nav_message: 0,
-                    iode: record1.issue_of_data.issue,
+                    iode: record1.issue_of_data.expect("broadcast issue").issue,
                     radial_m: Some(1.0),
                     along_m: Some(0.0),
                     cross_m: Some(0.0),
@@ -7719,7 +7821,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat1,
                         nav_message: 0,
-                        iode: record1.issue_of_data.issue,
+                        iode: record1.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -7727,7 +7829,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat2,
                         nav_message: 0,
-                        iode: record2.issue_of_data.issue,
+                        iode: record2.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -7995,7 +8097,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat1,
                         nav_message: 0,
-                        iode: record1.issue_of_data.issue,
+                        iode: record1.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -8003,7 +8105,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat2,
                         nav_message: 0,
-                        iode: record2.issue_of_data.issue,
+                        iode: record2.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -8169,7 +8271,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat1,
                         nav_message: 0,
-                        iode: record1.issue_of_data.issue,
+                        iode: record1.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -8177,7 +8279,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat2,
                         nav_message: 0,
-                        iode: record2.issue_of_data.issue,
+                        iode: record2.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -8400,7 +8502,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat1,
                         nav_message: 0,
-                        iode: record1.issue_of_data.issue,
+                        iode: record1.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -8408,7 +8510,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat2,
                         nav_message: 0,
-                        iode: record2.issue_of_data.issue,
+                        iode: record2.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -8809,7 +8911,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat1,
                         nav_message: 0,
-                        iode: record1.issue_of_data.issue,
+                        iode: record1.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -8817,7 +8919,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat2,
                         nav_message: 0,
-                        iode: record2.issue_of_data.issue,
+                        iode: record2.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(2.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -8885,7 +8987,7 @@ mod tests {
                 records: vec![HasOrbitCorrection {
                     sat: sat1,
                     nav_message: 0,
-                    iode: record1.issue_of_data.issue,
+                    iode: record1.issue_of_data.expect("broadcast issue").issue,
                     radial_m: Some(99.0),
                     along_m: Some(0.0),
                     cross_m: Some(0.0),
@@ -9570,7 +9672,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat1,
                         nav_message: 0,
-                        iode: record1.issue_of_data.issue,
+                        iode: record1.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -9578,7 +9680,7 @@ mod tests {
                     HasOrbitCorrection {
                         sat: sat2,
                         nav_message: 0,
-                        iode: record2.issue_of_data.issue,
+                        iode: record2.issue_of_data.expect("broadcast issue").issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
                         cross_m: Some(0.0),
@@ -10307,6 +10409,7 @@ mod tests {
             .select_record_at(sat, t_ref)
             .expect("broadcast record at SSR epoch")
             .issue_of_data
+            .expect("broadcast issue")
             .issue;
 
         // RTCM reception week; only the week number is consulted for SSR epoch resolution.
@@ -12038,7 +12141,7 @@ mod tests {
                 records: vec![HasOrbitCorrection {
                     sat,
                     nav_message: 0,
-                    iode: record.issue_of_data.issue,
+                    iode: record.issue_of_data.expect("broadcast issue").issue,
                     radial_m: Some(0.1),
                     along_m: Some(0.2),
                     cross_m: Some(0.3),
@@ -14668,6 +14771,7 @@ mod tests {
             .select_record_at(sat, t)
             .expect("broadcast record")
             .issue_of_data
+            .expect("broadcast issue")
             .issue;
         let zero = rtcm_g30_store(iode, 0);
         let positive = rtcm_g30_store(iode, 5_000);
@@ -14733,7 +14837,7 @@ mod tests {
 
         let reception = GnssWeekTow::new(TimeScale::Gst, REAL_SSR_WEEK, REAL_SSR_EPOCH_TOW_S)
             .expect("GST reception");
-        let iode = record.issue_of_data.issue;
+        let iode = record.issue_of_data.expect("broadcast issue").issue;
         let stores = [
             ("RTCM SSR", real_gps_ssr_store()),
             ("RTCM SSR zero C0", rtcm_g30_store(iode, 0)),
@@ -14825,8 +14929,13 @@ mod tests {
 
         let reception = GnssWeekTow::new(TimeScale::Gst, week, tow_s).expect("GST reception");
         for clock_m in [0.0, 0.5] {
-            let store =
-                has_orbit_clock_store(sat, record.issue_of_data.issue, 0, clock_m, reception);
+            let store = has_orbit_clock_store(
+                sat,
+                record.issue_of_data.expect("broadcast issue").issue,
+                0,
+                clock_m,
+                reception,
+            );
             let clock = SsrCorrectedEphemeris::new(&broadcast, &store)
                 .corrected_state(sat, t)
                 .expect("HAS corrected state")
@@ -14864,6 +14973,7 @@ mod tests {
             .select_record_at(sat, t)
             .expect("broadcast record")
             .issue_of_data
+            .expect("broadcast issue")
             .issue;
         let reception = GnssWeekTow::new(TimeScale::Gst, REAL_SSR_WEEK, REAL_SSR_EPOCH_TOW_S)
             .expect("GST reception");
@@ -15181,10 +15291,11 @@ mod tests {
         ];
         let (er, ea, ec) = velocity_aligned_basis(r, v).expect("RAC axes");
         let (radial, along, cross) = (orbit.radial_m, orbit.along_m, orbit.cross_m);
+        // RTKLIB `satpos_ssr` adds the summed RAC correction to the position as one term.
         let expected_position = [
-            r[0] + radial * er[0] + along * ea[0] + cross * ec[0],
-            r[1] + radial * er[1] + along * ea[1] + cross * ec[1],
-            r[2] + radial * er[2] + along * ea[2] + cross * ec[2],
+            r[0] + (radial * er[0] + along * ea[0] + cross * ec[0]),
+            r[1] + (radial * er[1] + along * ea[1] + cross * ec[1]),
+            r[2] + (radial * er[2] + along * ea[2] + cross * ec[2]),
         ];
         assert_eq!(
             position.map(f64::to_bits),
@@ -15244,12 +15355,12 @@ mod tests {
         assert!(broadcast
             .select_by_beidou_ssr_iod_at(sat, (iod + 1) % 240, NavMessage::BeidouD1, t)
             .is_none());
-        if record.issue_of_data.issue != iod {
+        if record.issue_of_data.expect("broadcast issue").issue != iod {
             // The AODE is not the SSR IOD: selecting by it finds nothing.
             assert!(broadcast
                 .select_by_beidou_ssr_iod_at(
                     sat,
-                    record.issue_of_data.issue,
+                    record.issue_of_data.expect("broadcast issue").issue,
                     NavMessage::BeidouD1,
                     t
                 )

@@ -43,6 +43,12 @@ fn toe_j2000_s(record: &BroadcastRecord) -> f64 {
     f64::from(record.week) * SECONDS_PER_WEEK + record.elements.toe_sow - GPS_EPOCH_TO_J2000_S
 }
 
+/// The comparison epoch: one second after `toe`. The store serves a Galileo record only
+/// after its `toe`, as RTKLIB `seleph` skips a record whose age of data is not positive.
+fn query_j2000_s(record: &BroadcastRecord) -> f64 {
+    toe_j2000_s(record) + 1.0
+}
+
 fn position_error_m(a: [f64; 3], b: [f64; 3]) -> f64 {
     let dx = a[0] - b[0];
     let dy = a[1] - b[1];
@@ -87,13 +93,13 @@ fn real_galileo_1046_decodes_and_propagates_against_sp3() {
 
     let mut max_error_m = 0.0_f64;
     for record in &records {
-        let query = toe_j2000_s(record);
+        let query = query_j2000_s(record);
         let (broadcast_position, _) = broadcast
             .position_clock_at_j2000_s(record.satellite_id, query)
-            .expect("broadcast state at Galileo toe");
+            .expect("broadcast state after Galileo toe");
         let precise = sp3
             .position_at_j2000_seconds(record.satellite_id, query)
-            .expect("SP3 state at Galileo toe");
+            .expect("SP3 state after Galileo toe");
         let error_m = position_error_m(broadcast_position, precise.position.as_array());
         max_error_m = max_error_m.max(error_m);
         assert!(
@@ -109,10 +115,10 @@ fn real_galileo_1046_decodes_and_propagates_against_sp3() {
         .to_broadcast_record()
         .expect("corrupted 1046 still maps to a record");
     let bad_broadcast = BroadcastEphemeris::new(vec![bad_record]).expect("build corrupted store");
-    let query = toe_j2000_s(&bad_record);
+    let query = query_j2000_s(&bad_record);
     let (bad_position, _) = bad_broadcast
         .position_clock_at_j2000_s(bad_record.satellite_id, query)
-        .expect("corrupted broadcast state at toe");
+        .expect("corrupted broadcast state after toe");
     let precise = sp3
         .position_at_j2000_seconds(bad_record.satellite_id, query)
         .expect("SP3 state for corrupted comparison");

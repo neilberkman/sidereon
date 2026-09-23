@@ -12,10 +12,10 @@
 
 pub use crate::artifact_bytes::DigestProvenance;
 pub use crate::broadcast::{
-    eccentric_anomaly, relativistic_clock_correction_s, satellite_clock_offset_s,
-    satellite_position_ecef, satellite_position_ecef_cnav, satellite_state, satellite_state_cnav,
-    ClockOffset, ClockPolynomial, CnavRates, ConstellationConstants, EccentricAnomaly,
-    KeplerianElements, OrbitState, SatelliteState,
+    eccentric_anomaly, relativistic_clock_correction_s, satellite_clock_bias_s,
+    satellite_clock_offset_s, satellite_position_ecef, satellite_position_ecef_cnav,
+    satellite_state, satellite_state_cnav, ClockOffset, ClockPolynomial, CnavRates,
+    ConstellationConstants, EccentricAnomaly, KeplerianElements, OrbitState, SatelliteState,
 };
 pub use crate::observables::{
     is_observable_state_gap, observable_states_at_j2000_s, observable_states_at_shared_j2000_s,
@@ -45,7 +45,7 @@ pub use crate::rinex_nav::{
     cnav_ura_ned_m, cnav_ura_nominal_m, is_beidou_geo, BroadcastGroupDelayTerm,
     BroadcastGroupDelays, BroadcastIssue, BroadcastRecord, CnavParameters, CnavSignal,
     GlonassRecord, IonoCorrections, KlobucharAlphaBeta, LnavRecordError, NavMessage,
-    NavMessagePreference,
+    NavMessagePreference, SbasRecord, StatedNavFields,
 };
 pub use crate::sp3::{
     align_clock_reference, clock_reference_offset, compare_position_series, merge, parse_exact_sp3,
@@ -328,10 +328,10 @@ mod tests {
             satellite_id: crate::GnssSatelliteId::new(GnssSystem::Galileo, 1)
                 .expect("valid satellite"),
             message: NavMessage::GalileoInav,
-            issue_of_data: BroadcastIssue {
+            issue_of_data: Some(BroadcastIssue {
                 issue: 0,
                 message: NavMessage::GalileoInav,
-            },
+            }),
             week: 2_400,
             toe: crate::astro::time::model::GnssWeekTow::new(
                 crate::astro::time::model::TimeScale::Gst,
@@ -372,8 +372,9 @@ mod tests {
             group_delays: BroadcastGroupDelays::galileo(1.0e-9, 2.5e-9),
             cnav: None,
             sv_health: 0.0,
-            sv_accuracy_m: 1.0,
+            sv_accuracy_m: Some(1.0),
             fit_interval_s: None,
+            stated: crate::rinex_nav::StatedNavFields::default(),
         };
 
         assert_eq!(
