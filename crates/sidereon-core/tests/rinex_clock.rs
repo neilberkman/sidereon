@@ -648,11 +648,11 @@ AS G16       1994 07 14 20 59  0.000000  6   -0.123456789012E+00  -0.12345678901
 fn public_validation_and_refusal_for_additional_values() {
     let epoch = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 0.0).unwrap();
 
-    let too_many = ClockPoint {
+    let too_many = ClockPoint::new(
         epoch,
-        bias_s: 1.0e-4,
-        additional_values: vec![1.0e-5, 2.0e-6, 3.0e-7, 4.0e-8, 5.0e-9, 6.0e-10],
-    };
+        1.0e-4,
+        vec![1.0e-5, 2.0e-6, 3.0e-7, 4.0e-8, 5.0e-9, 6.0e-10],
+    );
     assert_eq!(
         too_many.validate(),
         Err(RinexClockError::InvalidInput {
@@ -661,11 +661,7 @@ fn public_validation_and_refusal_for_additional_values() {
         })
     );
 
-    let nan_val = ClockPoint {
-        epoch,
-        bias_s: 1.0e-4,
-        additional_values: vec![1.0e-5, f64::NAN],
-    };
+    let nan_val = ClockPoint::new(epoch, 1.0e-4, vec![1.0e-5, f64::NAN]);
     assert_eq!(
         nan_val.validate(),
         Err(RinexClockError::InvalidInput {
@@ -676,11 +672,7 @@ fn public_validation_and_refusal_for_additional_values() {
 
     // A sigma that no 19-column field states exactly is held by the product
     // and refused by name when written.
-    let unrep = ClockPoint {
-        epoch,
-        bias_s: 1.0e-4,
-        additional_values: vec![1.23456789012345e-4],
-    };
+    let unrep = ClockPoint::new(epoch, 1.0e-4, vec![1.23456789012345e-4]);
     let bad_series = RinexClock::from_clock_points(
         TimeScale::Gpst,
         vec![("G01".to_string(), vec![unrep.clone()])],
@@ -1393,11 +1385,7 @@ fn negative_13digit_3digit_exponent_and_signed_zero_serialize_and_roundtrip() {
 fn negative_14digit_shifted_exponent_serialize_and_roundtrip() {
     let epoch = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 0.0).unwrap();
     let val_14d = -1.2345678901234e100;
-    let point = ClockPoint {
-        epoch,
-        bias_s: val_14d,
-        additional_values: vec![val_14d, 2.761547232975e-4, -0.0],
-    };
+    let point = ClockPoint::new(epoch, val_14d, vec![val_14d, 2.761547232975e-4, -0.0]);
     let clock_with_additional =
         RinexClock::from_clock_points(TimeScale::Gpst, vec![("G01".to_string(), vec![point])])
             .expect("valid clock points");
@@ -1478,11 +1466,7 @@ fn unrepresentable_precision_exceeding_candidate_budget_refused() {
         TimeScale::Gpst,
         vec![(
             "G01".to_string(),
-            vec![ClockPoint {
-                epoch,
-                bias_s: 1.0e-4,
-                additional_values: vec![neg_val],
-            }],
+            vec![ClockPoint::new(epoch, 1.0e-4, vec![neg_val])],
         )],
     )
     .expect("valid clock points");

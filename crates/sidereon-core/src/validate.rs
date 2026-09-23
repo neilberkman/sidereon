@@ -838,34 +838,6 @@ pub(crate) fn civil_datetime_with_femtosecond_policy(
     )
 }
 
-pub(crate) fn civil_datetime_with_fractional_second_policy(
-    year: i64,
-    month: i64,
-    day: i64,
-    hour: i64,
-    minute: i64,
-    second: f64,
-    second_policy: CivilSecondPolicy,
-) -> Result<ValidCivilMicrosecond, FieldError> {
-    let civil =
-        civil_datetime_with_second_policy(year, month, day, hour, minute, second, second_policy)?;
-
-    let whole_second = civil.second.trunc() as i64;
-    let microsecond = ((civil.second - whole_second as f64) * 1_000_000.0).round() as i64;
-    civil_datetime_with_whole_microsecond_policy(
-        CivilMinute {
-            year: civil.year,
-            month: i64::from(civil.month),
-            day: i64::from(civil.day),
-            hour: i64::from(civil.hour),
-            minute: i64::from(civil.minute),
-        },
-        whole_second,
-        microsecond,
-        second_policy,
-    )
-}
-
 fn civil_datetime_with_whole_microsecond_policy(
     minute_parts: CivilMinute,
     whole_second: i64,

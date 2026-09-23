@@ -31,7 +31,7 @@ pub use record::{ClockRecord, ClockRecordReading, ClockRecordType, ClockSurplusV
 use derived::{Derived, DerivedBuilder};
 use epoch::{
     civil_second_policy_for_time_scale, civil_to_instant, epoch_cmp, gps_seconds_to_instant,
-    instant_to_gps_seconds, interpolate, validate_instant, Civil,
+    interpolate, point_gps_seconds, sample_at_gps_seconds, validate_instant, Civil, EpochSource,
 };
 use header::{
     constructed_layout, identify_label, is_end_of_header, label_rank, read_header,
@@ -44,7 +44,13 @@ use record::{
 };
 
 /// One satellite clock-bias sample.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// A sample read from a record or built from GPS seconds also keeps the civil
+/// tag or GPS seconds its epoch was built from, which fixes
+/// [`ClockPoint::gps_seconds`] exactly; see there. Samples compare equal when
+/// their epoch, bias and additional values are equal.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ClockPoint {
     /// Scale-tagged epoch from the RINEX clock file's declared time system.
     pub epoch: Instant,
@@ -56,14 +62,56 @@ pub struct ClockPoint {
     /// (s^-1). Values a record carries beyond its declared count are not
     /// included; [`ClockRecord::surplus_values`] reports them.
     pub additional_values: Vec<f64>,
+    /// What `epoch` was built from, when known.
+    source: EpochSource,
+}
+
+impl PartialEq for ClockPoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.epoch == other.epoch
+            && self.bias_s == other.bias_s
+            && self.additional_values == other.additional_values
+    }
 }
 
 impl ClockPoint {
+    /// A sample at a scale-tagged instant, with the additional declared
+    /// values after the bias in standard order.
+    pub fn new(epoch: Instant, bias_s: f64, additional_values: Vec<f64>) -> Self {
+        Self::with_source(epoch, bias_s, additional_values, EpochSource::Instant)
+    }
+
+    pub(crate) fn with_source(
+        epoch: Instant,
+        bias_s: f64,
+        additional_values: Vec<f64>,
+        source: EpochSource,
+    ) -> Self {
+        Self {
+            epoch,
+            bias_s,
+            additional_values,
+            source,
+        }
+    }
+
     /// This sample's epoch as GPS seconds, when the sample is on the GPST
     /// timeline. GPST and QZSST samples project (QZSST shares the TAI - 19 s
     /// alignment of GPST); every other scale returns `None`.
+    ///
+    /// A sample read from a record, or built from a civil tag through
+    /// [`ClockRecord::new`], gives the `f64` nearest to the GPS second count
+    /// its tag states, the value [`civil_to_gps_seconds`] gives for that tag.
+    /// A sample built from GPS seconds ([`RinexClock::from_series_rows`])
+    /// gives those GPS seconds. Either holds while `epoch` is the instant the
+    /// sample was built with. A sample built from an instant alone
+    /// ([`ClockPoint::new`], [`RinexClock::from_instant_series_rows`]), or
+    /// whose `epoch` has been replaced, gives the GPS seconds of the civil tag
+    /// with at most ten fractional second digits whose reading is `epoch`,
+    /// when there is one, and otherwise the `f64` nearest to the exact time
+    /// `epoch` holds.
     pub fn gps_seconds(&self) -> Option<f64> {
-        instant_to_gps_seconds(&self.epoch)
+        point_gps_seconds(&self.epoch, self.source)
     }
 
     /// Validate that this clock point has a valid epoch instant, finite bias,
@@ -492,13 +540,18 @@ impl RinexClock {
                     .into_iter()
                     .map(|(gps_seconds, bias_s)| {
                         validate_finite(bias_s, "bias_s")?;
-                        Ok((gps_seconds_to_instant(gps_seconds)?, bias_s))
+                        Ok(ClockPoint::with_source(
+                            gps_seconds_to_instant(gps_seconds)?,
+                            bias_s,
+                            Vec::new(),
+                            EpochSource::GpsSeconds(gps_seconds),
+                        ))
                     })
                     .collect::<Result<Vec<_>, RinexClockError>>()?;
                 Ok((sat, points))
             })
             .collect::<Result<Vec<_>, RinexClockError>>()?;
-        Self::from_instant_series_rows(TimeScale::Gpst, rows)
+        Self::from_clock_points(TimeScale::Gpst, rows)
     }
 
     /// Build a product from scale-tagged instant rows.
@@ -512,11 +565,7 @@ impl RinexClock {
                 .map(|(sat, points)| {
                     let points = points
                         .into_iter()
-                        .map(|(epoch, bias_s)| ClockPoint {
-                            epoch,
-                            bias_s,
-                            additional_values: Vec::new(),
-                        })
+                        .map(|(epoch, bias_s)| ClockPoint::new(epoch, bias_s, Vec::new()))
                         .collect();
                     (sat, points)
                 })
@@ -561,7 +610,10 @@ impl RinexClock {
                     BodyEntry::Typed(Box::new(TypedRecord {
                         record_type: ClockRecordType::As,
                         name: sat.clone(),
-                        epoch: TypedEpoch::Instant(point.epoch),
+                        epoch: TypedEpoch::Instant {
+                            instant: point.epoch,
+                            source: point.source,
+                        },
                         values: std::iter::once(point.bias_s)
                             .chain(point.additional_values)
                             .collect(),
@@ -765,12 +817,28 @@ impl RinexClock {
     /// Interpolate one satellite clock bias at GPS seconds. GPST and QZSST
     /// series answer; GPS seconds outside the civil years 1 through 9999 are
     /// refused with [`RinexClockError::InvalidInput`].
+    ///
+    /// A sample whose GPS seconds ([`ClockPoint::gps_seconds`], as
+    /// [`RinexClock::series_rows`] exports them) equal the query answers with
+    /// its own bias, so every exported row is answered at its own GPS seconds.
+    /// GPS seconds resolve time more coarsely than a sample's epoch (about
+    /// 0.24 microseconds in 2026), so the query's instant can fall just beside
+    /// that sample; when two samples share the query's GPS seconds, the bias
+    /// is interpolated at the query's instant.
     pub fn clock_s_at_gps_seconds(
         &self,
         satellite_id: &str,
         gps_seconds: f64,
     ) -> Result<Option<f64>, RinexClockError> {
-        self.clock_s_at_instant(satellite_id, gps_seconds_to_instant(gps_seconds)?)
+        let epoch = gps_seconds_to_instant(gps_seconds)?;
+        if let Some(bias_s) = self
+            .series()
+            .get(satellite_id)
+            .and_then(|records| sample_at_gps_seconds(records, &epoch, gps_seconds))
+        {
+            return Ok(Some(bias_s));
+        }
+        self.clock_s_at_instant(satellite_id, epoch)
     }
 
     /// Write the product as RINEX clock text.
@@ -785,12 +853,13 @@ impl RinexClock {
     /// [`RinexClockError::InvalidInput`]. An epoch is written only when its
     /// microsecond text states it exactly: an edited record restates its source
     /// seconds text, and an instant is written when it is, bit for bit, the
-    /// split the reader, the GPS-seconds constructor (from the seconds
-    /// `series_rows` exports or from the correctly rounded double of the GPS
-    /// seconds the text states) or the whole-J2000-second constructor builds
-    /// from that text; any other epoch is refused rather
-    /// than rounded ([`RinexClock::to_rinex_string_with_policy`] can allow the
-    /// nearest microsecond and report it). A product built from rows is written
+    /// split the reader, the GPS-seconds constructor (from the correctly
+    /// rounded double of the GPS seconds the text states, which is what
+    /// `series_rows` exports for a record read from that text) or the
+    /// whole-J2000-second constructor builds from that text; any other epoch
+    /// is refused rather than rounded
+    /// ([`RinexClock::to_rinex_string_with_policy`] can allow the nearest
+    /// microsecond and report it). A product built from rows is written
     /// with a header stating its version, satellite system, time system and
     /// data types; a time scale no RINEX clock time system names is refused
     /// with [`RinexClockError::UnsupportedTimeScale`].
@@ -1027,10 +1096,11 @@ impl RinexClock {
         let ctx = epoch_context(&self.context.time);
         check_civil_in_context(record.civil, &ctx)?;
         let epoch = match self.constructed {
-            Some(scale) => TypedEpoch::Instant(
-                civil_to_instant(scale, record.civil)
+            Some(scale) => TypedEpoch::Instant {
+                instant: civil_to_instant(scale, record.civil)
                     .map_err(|_| invalid_input("epoch", "invalid civil clock epoch"))?,
-            ),
+                source: EpochSource::Civil(record.civil),
+            },
             None => TypedEpoch::Civil {
                 civil: record.civil,
                 second_text: record.second_text.clone(),
@@ -1568,6 +1638,7 @@ fn read_record_at(
         civil: parent.civil,
         second_text: Some(parent.second_text),
         epoch: parent.epoch,
+        epoch_source: EpochSource::Civil(parent.civil),
         values: parent.values,
         surplus: parent.surplus,
         line: Some(line_number),
