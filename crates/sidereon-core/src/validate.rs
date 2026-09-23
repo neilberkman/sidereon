@@ -9,6 +9,7 @@
 
 use core::str::FromStr;
 
+use crate::astro::time::civil::seconds_from_femtoseconds;
 use crate::id::GnssSatelliteId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -873,7 +874,9 @@ fn civil_datetime_with_whole_femtosecond_policy(
             field: FIELD,
             hour: minute_parts.hour,
             minute: minute_parts.minute,
-            second: whole_second as f64 + femtosecond as f64 / FEMTOSECONDS_PER_SECOND as f64,
+            second: seconds_from_femtoseconds(
+                i128::from(whole_second) * FEMTOSECONDS_PER_SECOND + femtosecond,
+            ),
         });
     }
 
@@ -938,10 +941,11 @@ fn civil_datetime_with_whole_femtosecond_policy(
         field: FIELD,
         hour: minute_parts.hour,
         minute: minute_parts.minute,
-        second: rounded_second as f64
-            + (i128::from(microsecond) * FEMTOSECONDS_PER_MICROSECOND + i128::from(femtosecond))
-                as f64
-                / FEMTOSECONDS_PER_SECOND as f64,
+        second: seconds_from_femtoseconds(
+            i128::from(rounded_second) * FEMTOSECONDS_PER_SECOND
+                + i128::from(microsecond) * FEMTOSECONDS_PER_MICROSECOND
+                + i128::from(femtosecond),
+        ),
     })
 }
 

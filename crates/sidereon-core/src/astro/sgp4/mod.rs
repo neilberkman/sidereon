@@ -347,8 +347,8 @@ pub struct ElementSet {
     /// This is format-agnostic and loss-free for the SGP4 initializer: TLE
     /// conversion stores the exact split JD produced by Vallado's
     /// `days2mdhms`/`jday` path with the legacy 8-decimal fraction rounding,
-    /// while OMM conversion stores the split JD from its full calendar
-    /// timestamp directly.
+    /// while OMM conversion stores the split python-sgp4 (`sgp4.omm.initialize`)
+    /// gives the OMM's `EPOCH` (see [`crate::astro::omm::Omm::to_element_set`]).
     pub epoch: JulianDate,
     /// SGP4 drag term (Vallado B\*). Dimensionless TLE convention.
     pub bstar: f64,
