@@ -1089,7 +1089,9 @@ pub struct SolutionValidationOptions {
     pub min_plausible_radius_m: f64,
     /// Maximum plausible geocentric radius, meters.
     pub max_plausible_radius_m: f64,
-    /// Maximum plausible RMS for a solution flagged converged, meters.
+    /// Maximum plausible post-fit residual RMS, meters, checked on every
+    /// solution whether or not its solve converged (the name is kept from when
+    /// only converged solutions were checked).
     pub max_converged_residual_rms_m: f64,
 }
 
@@ -1120,9 +1122,9 @@ pub enum SolutionValidationError {
     DegenerateGeometryPdop(f64),
     /// Position geocentric radius was outside the physical receiver band.
     ImplausiblePosition(f64),
-    /// Converged solution residuals were non-finite or produced non-finite RMS.
+    /// Solution residuals were non-finite or produced non-finite RMS.
     InvalidResiduals,
-    /// Converged solution had physically implausible post-fit residual RMS.
+    /// The solution had physically implausible post-fit residual RMS.
     NoConvergence(f64),
 }
 
@@ -1146,12 +1148,11 @@ impl core::fmt::Display for SolutionValidationError {
                 "receiver geocentric radius {radius_m} m is outside the plausible range"
             ),
             Self::InvalidResiduals => {
-                write!(f, "converged solution residuals must be finite")
+                write!(f, "solution residuals must be finite")
             }
-            Self::NoConvergence(rms_m) => write!(
-                f,
-                "converged solution residual RMS {rms_m} m is implausibly large"
-            ),
+            Self::NoConvergence(rms_m) => {
+                write!(f, "solution residual RMS {rms_m} m is implausibly large")
+            }
         }
     }
 }
@@ -1181,17 +1182,17 @@ pub fn validate_receiver_solution(
         return Err(SolutionValidationError::ImplausiblePosition(radius_m));
     }
 
-    if solution.metadata.converged {
-        if validate::finite_slice(&solution.residuals_m, "solution residuals").is_err() {
-            return Err(SolutionValidationError::InvalidResiduals);
-        }
-        let rms = residual_rms(&solution.residuals_m);
-        if !rms.is_finite() {
-            return Err(SolutionValidationError::InvalidResiduals);
-        }
-        if rms > options.max_converged_residual_rms_m {
-            return Err(SolutionValidationError::NoConvergence(rms));
-        }
+    // The residuals are checked whether or not the solve converged: a solve that
+    // did not is no more plausible for it.
+    if validate::finite_slice(&solution.residuals_m, "solution residuals").is_err() {
+        return Err(SolutionValidationError::InvalidResiduals);
+    }
+    let rms = residual_rms(&solution.residuals_m);
+    if !rms.is_finite() {
+        return Err(SolutionValidationError::InvalidResiduals);
+    }
+    if rms > options.max_converged_residual_rms_m {
+        return Err(SolutionValidationError::NoConvergence(rms));
     }
 
     Ok(())

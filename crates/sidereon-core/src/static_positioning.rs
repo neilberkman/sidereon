@@ -35,22 +35,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use nalgebra::{DMatrix, DVector};
 
 use crate::astro::math::least_squares::{
-    self, normal_covariance, singular_value_diagnostics, solve_trf_with, LeastSquaresProblem,
-    SolveOptions, Status, TrustRegionSolve,
+    self, normal_covariance, singular_value_diagnostics, LeastSquaresProblem, SolveOptions, Status,
+    TrustRegionSolve,
 };
 use crate::astro::math::portable;
 use crate::astro::math::robust::{huber_weight, mad_scale, RobustError};
-use crate::dop::rotate_covariance_ecef_to_enu_m2;
+use crate::dop::{rotate_covariance_ecef_to_enu_m2, LineOfSight};
 use crate::estimation::substrate::frames::geodetic_from_ecef;
 use crate::frame::{ItrfPositionM, Wgs84Geodetic};
 use crate::geometry_quality::{classify, GeometryQuality, GeometryQualityThresholds};
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::sbas::SbasIonoGrid;
 use crate::spp::{
-    clock_systems, residual_unweighted, select_sats, validate_solve_inputs, Corrections,
-    EphemerisSource, GalileoNequickCoeffs, KlobucharCoeffs, Observation, PseudorangeCode,
-    RejectedSat, RobustConfig, SolveInputs, SppError, SppInputErrorKind, SppModelRecipe,
-    SurfaceMet, Ut1TrackedSource, C_M_S,
+    clock_system, clock_systems, ionosphere_for, line_of_sight, lost_grid_coverage, model_env,
+    residual_unweighted, rtklib_step, rtklib_step_norm, sat_model, select_at, solve_converged,
+    validate_solve_inputs, weighted_design, Corrections, EphemerisSource, GalileoNequickCoeffs,
+    IterateState, KlobucharCoeffs, Observation, PseudorangeCode, RejectedSat, RobustConfig,
+    SolveInputs, SppError, SppInputErrorKind, SppModelRecipe, SurfaceMet, Ut1TrackedSource, C_M_S,
+    MAX_SELECTION_PASSES, SELECTION_STEP_TOL_M,
 };
 use crate::validate;
 
@@ -299,11 +301,13 @@ pub struct StaticSatelliteBatchInfluence {
 /// Metadata describing the static solve.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StaticSolutionMetadata {
-    /// Number of accepted trust-region iterations in the final inner solve.
+    /// Number of accepted iterations: the trust-region iterations of every solve
+    /// the selection passes and the robust reweighting ran, plus one for each
+    /// least-squares step taken between them.
     pub iterations: usize,
-    /// Whether the final inner solve reached a convergence criterion.
+    /// Whether the solve converged, as [`crate::spp::SolutionMetadata::converged`].
     pub converged: bool,
-    /// The final inner solver termination status.
+    /// How the solve ended, as [`crate::spp::SolutionMetadata::status`].
     pub status: Status,
     /// Number of robust outer iterations performed.
     pub outer_iterations: usize,
@@ -405,6 +409,13 @@ pub enum StaticSolveError {
     },
     /// The stacked design is rank deficient.
     Singular(least_squares::SolveError),
+    /// The per-epoch satellite selection did not settle within
+    /// [`MAX_SELECTION_PASSES`] passes, as the single-epoch SPP solve fails with
+    /// [`SppError::SelectionUnsettled`].
+    SelectionUnsettled {
+        /// The number of passes run.
+        passes: usize,
+    },
     /// The ephemeris source refused a satellite state because producing it
     /// reads UT1 outside the UT1 table under a strict UT1 policy. The solve
     /// fails rather than dropping that satellite.
@@ -441,6 +452,10 @@ impl core::fmt::Display for StaticSolveError {
                 "static epoch {epoch_index} satellite {satellite} lost ephemeris during the solve"
             ),
             Self::Singular(error) => write!(f, "static geometry is singular: {error}"),
+            Self::SelectionUnsettled { passes } => write!(
+                f,
+                "the static satellite selection did not settle in {passes} passes"
+            ),
             Self::Ut1OutsideCoverage(reason) => {
                 write!(
                     f,
@@ -566,8 +581,35 @@ struct PreparedStatic {
     epochs: Vec<PreparedEpoch>,
     rows: Vec<RowRef>,
     base_weights: Vec<f64>,
+    /// Per row: the line of sight at the state the rows were selected at.
+    lines_of_sight: Vec<LineOfSight>,
+    /// Per row: the state column of the row's clock.
+    clock_columns: Vec<usize>,
+    /// Per row: the residual at the state the rows were selected at.
+    selection_residuals_m: Vec<f64>,
+    /// The state the rows were selected at, in the stacked layout.
     x0: DVector<f64>,
     n_params: usize,
+}
+
+impl PreparedStatic {
+    /// Each epoch's first clock column and clock systems.
+    fn clock_groups(&self) -> Vec<(usize, &[GnssSystem])> {
+        self.epochs
+            .iter()
+            .map(|epoch| (epoch.clock_offset, epoch.systems.as_slice()))
+            .collect()
+    }
+
+    /// Whether every epoch uses the satellites it uses in `other`.
+    fn same_sets(&self, other: &Self) -> bool {
+        self.epochs.len() == other.epochs.len()
+            && self
+                .epochs
+                .iter()
+                .zip(&other.epochs)
+                .all(|(a, b)| a.used == b.used)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -617,18 +659,7 @@ fn solve_static_core(
     if epochs.is_empty() {
         return Err(StaticSolveError::EmptyEpochs);
     }
-    let prepared = prepare_static(eph, epochs, options, model)?;
-
-    let lost = Cell::new(None::<(usize, GnssSatelliteId)>);
-    let residual = |x: &DVector<f64>| -> DVector<f64> {
-        match residual_static_unweighted(eph, &prepared, x.as_slice(), model) {
-            Ok(values) => DVector::from_vec(values),
-            Err((epoch_index, satellite)) => {
-                lost.set(Some((epoch_index, satellite)));
-                DVector::from_vec(vec![0.0; prepared.rows.len()])
-            }
-        }
-    };
+    let epoch_inputs = validated_epoch_inputs(epochs, options)?;
 
     let opts = SolveOptions {
         gtol: STATIC_SOLVER_GTOL,
@@ -636,11 +667,452 @@ fn solve_static_core(
         xtol: STATIC_SOLVER_XTOL,
         max_nfev: STATIC_SOLVER_MAX_NFEV,
     };
-    let base_weights = DVector::from_row_slice(&prepared.base_weights);
     // Preserve the existing one-epoch SPP-equivalent path. The absolute
     // position floor is needed for the shared-position columns introduced by
     // stacked epochs; one epoch remains the established SPP compatibility path.
-    let fd_min_steps = if epochs.len() > 1 {
+    let stacked = epochs.len() > 1;
+
+    // Each epoch is selected, masked and weighted at the current iterate, as the
+    // single-epoch SPP solve is ([`crate::spp`]): an iterate whose selection is new
+    // in any epoch runs the trust-region solve over the stacked rows, and an
+    // iterate whose selection holds in every epoch takes RTKLIB's least-squares
+    // step over the stacked design `[-e, 1]`. The solve stops after the first step
+    // below `SELECTION_STEP_TOL_M`, which it keeps. One epoch is the SPP solve pass
+    // for pass.
+    let mut state = StaticState::new(epochs, options);
+    let mut iterations = 0usize;
+    let mut passes = 0usize;
+    // The rows of the last pass, when its selection can end the solve.
+    let mut last: Option<PreparedStatic> = None;
+    let mut prepared = loop {
+        let prepared = prepare_static(eph, epochs, &epoch_inputs, model, &state)?;
+        if last
+            .as_ref()
+            .is_some_and(|last_prepared| prepared.same_sets(last_prepared))
+        {
+            // The selection holds in every epoch: the step RTKLIB takes here over
+            // the stacked design, from this iterate's residuals and weights.
+            let dx = rtklib_step(
+                &prepared.lines_of_sight,
+                &prepared.clock_columns,
+                prepared.n_params,
+                &prepared.base_weights,
+                &prepared.selection_residuals_m,
+            )
+            .ok_or(StaticSolveError::Singular(
+                least_squares::SolveError::SingularJacobian,
+            ))?;
+            if passes == MAX_SELECTION_PASSES {
+                return Err(StaticSolveError::SelectionUnsettled { passes });
+            }
+            let x = &prepared.x0 + DVector::from_row_slice(&dx);
+            state.update(&prepared, &x);
+            passes += 1;
+            iterations += 1;
+            if rtklib_step_norm(&dx, &prepared.clock_groups()) < SELECTION_STEP_TOL_M {
+                // The rows at the position reached when every epoch keeps its
+                // selection there, else the rows stepped with, evaluated there.
+                let post = prepare_static(eph, epochs, &epoch_inputs, model, &state)?;
+                if post.same_sets(&prepared) {
+                    break post;
+                }
+                match residual_static_unweighted(eph, &prepared, x.as_slice(), model) {
+                    Ok(_) => break prepared,
+                    Err((epoch_index, satellite))
+                        if static_coverage_lost(
+                            eph,
+                            &prepared,
+                            model,
+                            epoch_index,
+                            satellite,
+                            x.as_slice(),
+                        ) =>
+                    {
+                        // A satellite left the augmentation grid with the last
+                        // step: the selection changed.
+                        last = None;
+                        continue;
+                    }
+                    Err((epoch_index, satellite)) => {
+                        return Err(StaticSolveError::EphemerisLost {
+                            epoch_index,
+                            satellite,
+                        })
+                    }
+                }
+            }
+            last = Some(prepared);
+            continue;
+        }
+        if passes == MAX_SELECTION_PASSES {
+            return Err(StaticSolveError::SelectionUnsettled { passes });
+        }
+        // A new selection: the trust-region solve over it, from this iterate. Its
+        // pass cannot end the solve; the next iterate is selected again.
+        let weights = prepared.base_weights.clone();
+        let end = solve_prepared(eph, &prepared, model, &opts, stacked, &weights)?;
+        passes += 1;
+        match end {
+            StaticPassEnd::Solved(report) => {
+                iterations += report.iterations;
+                state.update(&prepared, &report.x);
+                last = Some(prepared);
+            }
+            StaticPassEnd::CoverageLost(x) => {
+                // The last accepted iterate: its selection, if the same, is stepped
+                // from rather than solved again.
+                state.update(&prepared, &x);
+                last = Some(prepared);
+            }
+        }
+    };
+
+    let mut status = Status::SelectionSettled;
+    let mut final_weights = prepared.base_weights.clone();
+    let mut outer_iterations = 0usize;
+    let mut final_robust_scale_m = None;
+
+    // Huber reweighting from the settled solve: each iteration weights the
+    // selection at the current state by `huber(r / s)` and re-solves; it settles
+    // when the position moves less than `outer_tol_m` and the selection at the new
+    // state is the one solved with, and a solve whose budget runs out first ends
+    // with `Status::OuterBudgetExhausted`. The reported rows are the ones the last
+    // solve used, at the state it reached.
+    if let Some(robust) = options.robust {
+        let mut current = prepare_static(eph, epochs, &epoch_inputs, model, &state)?;
+        let mut settled = false;
+        // How the last solve ended; a least-squares step ends at its own target.
+        let mut last_inner = Status::SelectionSettled;
+        // After a coverage loss the rows at the last accepted iterate, when every
+        // epoch keeps the selection solved over, are stepped from rather than
+        // solved again.
+        let mut step_next = false;
+        for _ in 0..robust.max_outer.saturating_sub(1) {
+            let post = &current.selection_residuals_m;
+            let scale = mad_scale(post, robust.scale_floor_m).map_err(map_robust_error)?;
+            let effective: Vec<f64> = post
+                .iter()
+                .zip(current.base_weights.iter())
+                .map(|(&r, &base)| base * huber_weight(r / scale, robust.huber_k))
+                .collect();
+            let x_prev = state.position_m();
+            outer_iterations += 1;
+            if step_next {
+                step_next = false;
+                let dx = rtklib_step(
+                    &current.lines_of_sight,
+                    &current.clock_columns,
+                    current.n_params,
+                    &effective,
+                    &current.selection_residuals_m,
+                )
+                .ok_or(StaticSolveError::Singular(
+                    least_squares::SolveError::SingularJacobian,
+                ))?;
+                let x = &current.x0 + DVector::from_row_slice(&dx);
+                state.update(&current, &x);
+                iterations += 1;
+                last_inner = Status::SelectionSettled;
+            } else {
+                match solve_prepared(eph, &current, model, &opts, stacked, &effective)? {
+                    StaticPassEnd::Solved(report) => {
+                        iterations += report.iterations;
+                        last_inner = report.status;
+                        state.update(&current, &report.x);
+                    }
+                    StaticPassEnd::CoverageLost(x) => {
+                        // The last accepted iterate, reported with the rows and
+                        // elevation weights there until a reweighted solve or step
+                        // replaces them.
+                        state.update(&current, &x);
+                        let next = prepare_static(eph, epochs, &epoch_inputs, model, &state)?;
+                        step_next = next.same_sets(&current);
+                        current = next;
+                        prepared = current.clone();
+                        final_weights = prepared.base_weights.clone();
+                        final_robust_scale_m = None;
+                        continue;
+                    }
+                }
+            }
+            final_weights = effective;
+            final_robust_scale_m = Some(scale);
+            let x_now = state.position_m();
+            let dx = x_now[0] - x_prev[0];
+            let dy = x_now[1] - x_prev[1];
+            let dz = x_now[2] - x_prev[2];
+            let dpos = (dx * dx + dy * dy + dz * dz).sqrt();
+            let next = prepare_static(eph, epochs, &epoch_inputs, model, &state)?;
+            let same_sets = next.same_sets(&current);
+            prepared = std::mem::replace(&mut current, next);
+            if !same_sets {
+                let x_now = state.parameters(&prepared);
+                if let Err((epoch_index, satellite)) =
+                    residual_static_unweighted(eph, &prepared, x_now.as_slice(), model)
+                {
+                    if !static_coverage_lost(
+                        eph,
+                        &prepared,
+                        model,
+                        epoch_index,
+                        satellite,
+                        x_now.as_slice(),
+                    ) {
+                        return Err(StaticSolveError::EphemerisLost {
+                            epoch_index,
+                            satellite,
+                        });
+                    }
+                    // A satellite left the augmentation grid: report the rows and
+                    // elevation weights at the state reached.
+                    prepared = current.clone();
+                    final_weights = prepared.base_weights.clone();
+                    final_robust_scale_m = None;
+                }
+            }
+            if dpos < robust.outer_tol_m && same_sets {
+                settled = true;
+                break;
+            }
+        }
+        status = if outer_iterations == 0 {
+            Status::SelectionSettled
+        } else if !solve_converged(last_inner) {
+            last_inner
+        } else if settled {
+            Status::SelectionSettled
+        } else {
+            Status::OuterBudgetExhausted
+        };
+    }
+
+    // The covariance and geometry diagnostics are the design at the reported
+    // state, with the reported weights.
+    let x = state.parameters(&prepared);
+    let jacobian = static_jacobian(eph, &prepared, model, stacked, &x, &final_weights)?;
+    finish_static(FinishStaticInput {
+        eph,
+        prepared: &prepared,
+        options,
+        model,
+        x: x.as_slice(),
+        jacobian: &jacobian,
+        iterations,
+        status,
+        outer_iterations,
+        final_robust_scale_m,
+        final_weights: &final_weights,
+    })
+}
+
+/// The line of sight of each row of `prepared` at the stacked state `x`.
+fn static_lines_of_sight(
+    eph: &dyn EphemerisSource,
+    prepared: &PreparedStatic,
+    x: &[f64],
+    model: SppModelRecipe,
+) -> Result<Vec<LineOfSight>, StaticSolveError> {
+    let rx = [x[0], x[1], x[2]];
+    let mut out = Vec::with_capacity(prepared.rows.len());
+    for epoch in &prepared.epochs {
+        let env = model_env(eph, &epoch.inputs, model, None);
+        for &sat in &epoch.used {
+            let lost = StaticSolveError::EphemerisLost {
+                epoch_index: epoch.input_index,
+                satellite: sat,
+            };
+            let p_meas = epoch
+                .obs_by_id
+                .iter()
+                .find(|(id, _)| *id == sat)
+                .map(|(_, p)| *p)
+                .ok_or(lost.clone())?;
+            let column = epoch.clock_offset
+                + epoch
+                    .systems
+                    .iter()
+                    .position(|s| *s == clock_system(sat.system))
+                    .unwrap_or(0);
+            let m = sat_model(
+                &env,
+                sat,
+                rx,
+                x[column],
+                p_meas,
+                ionosphere_for(sat.system, &epoch.inputs),
+            )
+            .ok_or(lost)?;
+            out.push(line_of_sight(m.sat_rot_ecef_m, rx));
+        }
+    }
+    Ok(out)
+}
+
+/// How one trust-region pass over the stacked rows ended.
+enum StaticPassEnd {
+    /// The solve over the rows ran to its end.
+    Solved(least_squares::LeastSquaresReport),
+    /// A satellite's line of sight left the augmentation ionosphere grid at a
+    /// state the solve evaluated; the pass ends at the last accepted iterate, the
+    /// given stacked state, as the SPP pass does.
+    CoverageLost(DVector<f64>),
+}
+
+/// Whether `satellite` of epoch `epoch_index`, which has no model at the stacked
+/// state `x`, has one there with the augmentation grid set aside.
+fn static_coverage_lost(
+    eph: &dyn EphemerisSource,
+    prepared: &PreparedStatic,
+    model: SppModelRecipe,
+    epoch_index: usize,
+    satellite: GnssSatelliteId,
+    x: &[f64],
+) -> bool {
+    let Some(epoch) = prepared
+        .epochs
+        .iter()
+        .find(|epoch| epoch.input_index == epoch_index)
+    else {
+        return false;
+    };
+    let Some(p_meas) = epoch
+        .obs_by_id
+        .iter()
+        .find(|(id, _)| *id == satellite)
+        .map(|(_, p)| *p)
+    else {
+        return false;
+    };
+    let column = epoch.clock_offset
+        + epoch
+            .systems
+            .iter()
+            .position(|s| *s == clock_system(satellite.system))
+            .unwrap_or(0);
+    let env = model_env(eph, &epoch.inputs, model, None);
+    lost_grid_coverage(
+        &env,
+        &epoch.inputs,
+        satellite,
+        [x[0], x[1], x[2]],
+        x[column],
+        p_meas,
+    )
+}
+
+/// The iterate of a static solve: the shared position and each epoch's clocks.
+struct StaticState {
+    epochs: Vec<IterateState>,
+}
+
+impl StaticState {
+    fn new(epochs: &[StaticEpoch], options: StaticSolveOptions) -> Self {
+        let p = options.initial_position_m;
+        Self {
+            epochs: epochs
+                .iter()
+                .map(|epoch| {
+                    IterateState::from_initial_guess([p[0], p[1], p[2], epoch.clock_initial_m])
+                })
+                .collect(),
+        }
+    }
+
+    fn position_m(&self) -> [f64; 3] {
+        self.epochs
+            .first()
+            .map_or([0.0; 3], |epoch| epoch.rx_ecef_m)
+    }
+
+    /// The state in the stacked layout of `prepared`: the position, then each
+    /// epoch's clocks for the systems it has columns for.
+    fn parameters(&self, prepared: &PreparedStatic) -> DVector<f64> {
+        let mut x = self.position_m().to_vec();
+        for (state, epoch) in self.epochs.iter().zip(&prepared.epochs) {
+            x.extend(epoch.systems.iter().map(|&system| state.clock_m(system)));
+        }
+        DVector::from_vec(x)
+    }
+
+    /// Take the position and each epoch's clocks from the solution `x` of the
+    /// stacked layout `prepared`. An epoch with no clock column keeps its clocks.
+    fn update(&mut self, prepared: &PreparedStatic, x: &DVector<f64>) {
+        for (state, epoch) in self.epochs.iter_mut().zip(&prepared.epochs) {
+            let mut local = vec![x[0], x[1], x[2]];
+            local.extend((0..epoch.systems.len()).map(|i| x[epoch.clock_offset + i]));
+            if epoch.systems.is_empty() {
+                state.rx_ecef_m = [x[0], x[1], x[2]];
+            } else {
+                state.update(&epoch.systems, &DVector::from_vec(local));
+            }
+        }
+    }
+}
+
+/// The weighted-residual Jacobian of the stacked rows of `prepared` at `x`, by the
+/// forward difference the trust-region solve takes.
+fn static_jacobian(
+    eph: &dyn EphemerisSource,
+    prepared: &PreparedStatic,
+    model: SppModelRecipe,
+    stacked: bool,
+    x: &DVector<f64>,
+    weights: &[f64],
+) -> Result<DMatrix<f64>, StaticSolveError> {
+    let lost = Cell::new(None::<(usize, GnssSatelliteId)>);
+    let sqrt_weights = DVector::from_row_slice(weights).map(f64::sqrt);
+    let residual = |state: &DVector<f64>| -> DVector<f64> {
+        match residual_static_unweighted(eph, prepared, state.as_slice(), model) {
+            Ok(values) => DVector::from_vec(values).component_mul(&sqrt_weights),
+            Err((epoch_index, satellite)) => {
+                lost.set(Some((epoch_index, satellite)));
+                DVector::zeros(prepared.rows.len())
+            }
+        }
+    };
+    let min_steps = if stacked {
+        static_fd_min_steps(prepared.n_params)
+    } else {
+        DVector::zeros(prepared.n_params)
+    };
+    let f0 = residual(x);
+    let jacobian = least_squares::jacobian_2point_with_min_steps(residual, x, &f0, &min_steps);
+    if let Some((epoch_index, satellite)) = lost.get() {
+        return Err(StaticSolveError::EphemerisLost {
+            epoch_index,
+            satellite,
+        });
+    }
+    jacobian.map_err(StaticSolveError::Singular)
+}
+
+/// One trust-region solve over the stacked rows of `prepared` with `weights`, from
+/// the state `prepared` was made at.
+fn solve_prepared(
+    eph: &dyn EphemerisSource,
+    prepared: &PreparedStatic,
+    model: SppModelRecipe,
+    opts: &SolveOptions,
+    stacked: bool,
+    weights: &[f64],
+) -> Result<StaticPassEnd, StaticSolveError> {
+    // The first measurement that has no model, and the state it had none at, are
+    // recorded, and the closure returns a non-finite residual, which stops the
+    // solve at once.
+    let lost = std::cell::RefCell::new(None::<(usize, GnssSatelliteId, DVector<f64>)>);
+    let residual = |x: &DVector<f64>| -> DVector<f64> {
+        match residual_static_unweighted(eph, prepared, x.as_slice(), model) {
+            Ok(values) => DVector::from_vec(values),
+            Err((epoch_index, satellite)) => {
+                let mut lost = lost.borrow_mut();
+                if lost.is_none() {
+                    *lost = Some((epoch_index, satellite, x.clone()));
+                }
+                DVector::from_element(prepared.rows.len(), f64::NAN)
+            }
+        }
+    };
+    let fd_min_steps = if stacked {
         static_fd_min_steps(prepared.n_params)
     } else {
         DVector::zeros(prepared.n_params)
@@ -648,77 +1120,28 @@ fn solve_static_core(
     let problem = LeastSquaresProblem::with_weights_and_fd_min_steps(
         &residual,
         prepared.x0.clone(),
-        base_weights,
-        fd_min_steps.clone(),
+        DVector::from_row_slice(weights),
+        fd_min_steps,
     );
-    let report_result = solve_trf_with(&problem, &opts, TrustRegionSolve::NalgebraLu);
-    if let Some((epoch_index, satellite)) = lost.get() {
+    let mut last_accepted: Option<DVector<f64>> = None;
+    let result =
+        least_squares::solve_trf_observed(&problem, opts, TrustRegionSolve::NalgebraLu, &mut |x| {
+            last_accepted = Some(x.clone())
+        });
+    if let Some((epoch_index, satellite, x)) = lost.into_inner() {
+        if static_coverage_lost(eph, prepared, model, epoch_index, satellite, x.as_slice()) {
+            if let Some(accepted) = last_accepted {
+                return Ok(StaticPassEnd::CoverageLost(accepted));
+            }
+        }
         return Err(StaticSolveError::EphemerisLost {
             epoch_index,
             satellite,
         });
     }
-    let mut report = report_result.map_err(StaticSolveError::Singular)?;
-
-    let mut final_weights = prepared.base_weights.clone();
-    let mut outer_iterations = 0usize;
-    let mut final_robust_scale_m = None;
-
-    if let Some(robust) = options.robust {
-        for _ in 0..robust.max_outer.saturating_sub(1) {
-            let post = residual_static_unweighted(eph, &prepared, report.x.as_slice(), model)
-                .map_err(|(epoch_index, satellite)| StaticSolveError::EphemerisLost {
-                    epoch_index,
-                    satellite,
-                })?;
-            let scale = mad_scale(&post, robust.scale_floor_m).map_err(map_robust_error)?;
-            let effective: Vec<f64> = post
-                .iter()
-                .zip(prepared.base_weights.iter())
-                .map(|(&r, &base)| base * huber_weight(r / scale, robust.huber_k))
-                .collect();
-            let weights = DVector::from_row_slice(&effective);
-            let x_prev = report.x.clone();
-            let problem = LeastSquaresProblem::with_weights_and_fd_min_steps(
-                &residual,
-                x_prev.clone(),
-                weights,
-                fd_min_steps.clone(),
-            );
-            let next = solve_trf_with(&problem, &opts, TrustRegionSolve::NalgebraLu);
-            if let Some((epoch_index, satellite)) = lost.get() {
-                return Err(StaticSolveError::EphemerisLost {
-                    epoch_index,
-                    satellite,
-                });
-            }
-            report = next.map_err(StaticSolveError::Singular)?;
-            final_weights = effective;
-            outer_iterations += 1;
-            final_robust_scale_m = Some(scale);
-            let dx = report.x[0] - x_prev[0];
-            let dy = report.x[1] - x_prev[1];
-            let dz = report.x[2] - x_prev[2];
-            let dpos = (dx * dx + dy * dy + dz * dz).sqrt();
-            if dpos < robust.outer_tol_m {
-                break;
-            }
-        }
-    }
-
-    finish_static(FinishStaticInput {
-        eph,
-        prepared: &prepared,
-        options,
-        model,
-        x: report.x.as_slice(),
-        jacobian: &report.jacobian,
-        iterations: report.iterations,
-        status: report.status,
-        outer_iterations,
-        final_robust_scale_m,
-        final_weights: &final_weights,
-    })
+    result
+        .map(StaticPassEnd::Solved)
+        .map_err(StaticSolveError::Singular)
 }
 
 fn static_fd_min_steps(n_params: usize) -> DVector<f64> {
@@ -734,40 +1157,60 @@ fn static_fd_min_steps(n_params: usize) -> DVector<f64> {
     )
 }
 
+/// Each epoch's SPP inputs, validated once for every pass.
+fn validated_epoch_inputs(
+    epochs: &[StaticEpoch],
+    options: StaticSolveOptions,
+) -> Result<Vec<SolveInputs>, StaticSolveError> {
+    epochs
+        .iter()
+        .enumerate()
+        .map(|(epoch_index, epoch)| {
+            validate_epoch_weights(epoch)?;
+            if let Some(satellite) = duplicate_satellite(&epoch.measurements) {
+                return Err(StaticSolveError::DuplicateObservation {
+                    epoch_index,
+                    satellite,
+                });
+            }
+            let inputs = solve_inputs_for_epoch(epoch, options);
+            validate_solve_inputs(&inputs).map_err(|source| StaticSolveError::EpochInput {
+                epoch_index,
+                source,
+            })?;
+            Ok(inputs)
+        })
+        .collect()
+}
+
+/// The stacked rows at `state`: each epoch's selection at the shared position
+/// and that epoch's clocks.
 fn prepare_static(
     eph: &dyn EphemerisSource,
     epochs: &[StaticEpoch],
-    options: StaticSolveOptions,
+    epoch_inputs: &[SolveInputs],
     model: SppModelRecipe,
+    state: &StaticState,
 ) -> Result<PreparedStatic, StaticSolveError> {
     let mut prepared_epochs = Vec::with_capacity(epochs.len());
     let mut rows = Vec::new();
     let mut base_weights = Vec::new();
-    let mut x0 = vec![
-        options.initial_position_m[0],
-        options.initial_position_m[1],
-        options.initial_position_m[2],
-    ];
+    let mut lines_of_sight = Vec::new();
+    let mut clock_columns = Vec::new();
+    let mut selection_residuals_m = Vec::new();
+    let position = state.position_m();
+    let mut x0 = position.to_vec();
     let mut clock_offset = 3usize;
 
-    for (epoch_index, epoch) in epochs.iter().enumerate() {
-        validate_epoch_weights(epoch)?;
-        if let Some(satellite) = duplicate_satellite(&epoch.measurements) {
-            return Err(StaticSolveError::DuplicateObservation {
-                epoch_index,
-                satellite,
-            });
-        }
+    for (epoch_index, (epoch, inputs)) in epochs.iter().zip(epoch_inputs).enumerate() {
         // A satellite whose carrier an ionosphere-corrected epoch cannot scale
-        // to is excluded by `select_sats`, reported in `rejected_sats` with
+        // to is excluded by the selection, reported in `rejected_sats` with
         // `RejectionReason::IonosphereCarrierUnresolved`, and the epoch keeps
         // its other satellites.
-        let inputs = solve_inputs_for_epoch(epoch, options);
-        validate_solve_inputs(&inputs).map_err(|source| StaticSolveError::EpochInput {
-            epoch_index,
-            source,
-        })?;
-        let selection = select_sats(eph, &inputs, model);
+        let epoch_state = &state.epochs[epoch_index];
+        let selection = select_at(eph, inputs, model, None, position, &|system| {
+            epoch_state.clock_m(system)
+        });
         let systems = clock_systems(&selection.used);
         let weight_by_sat = measurement_weight_map(epoch);
         let obs_by_id: Vec<(GnssSatelliteId, f64)> = inputs
@@ -785,16 +1228,20 @@ fn prepare_static(
                 base_weight,
             });
             base_weights.push(base_weight);
+            lines_of_sight.push(selection.lines_of_sight[row_idx]);
+            selection_residuals_m.push(selection.residuals_m[row_idx]);
+            let system_index = systems
+                .iter()
+                .position(|s| *s == clock_system(satellite_id.system))
+                .unwrap_or(0);
+            clock_columns.push(clock_offset + system_index);
         }
 
-        if !systems.is_empty() {
-            x0.push(epoch.clock_initial_m);
-            x0.extend(std::iter::repeat_n(0.0, systems.len().saturating_sub(1)));
-        }
+        x0.extend(systems.iter().map(|&system| epoch_state.clock_m(system)));
 
         prepared_epochs.push(PreparedEpoch {
             input_index: epoch_index,
-            inputs,
+            inputs: inputs.clone(),
             used: selection.used,
             rejected: selection.rejected,
             systems,
@@ -820,6 +1267,9 @@ fn prepare_static(
         epochs: prepared_epochs,
         rows,
         base_weights,
+        lines_of_sight,
+        clock_columns,
+        selection_residuals_m,
         x0: DVector::from_vec(x0),
         n_params,
     })
@@ -907,10 +1357,24 @@ fn finish_static(input: FinishStaticInput<'_>) -> Result<CoreStaticSolution, Sta
 
     let covariance_matrix = normal_covariance(jacobian, 1.0).map_err(StaticSolveError::Singular)?;
     let covariance = static_covariance(&covariance_matrix, receiver_geodetic)?;
-    let svd = portable::svd(jacobian, false, false);
+    // The rank, singular values and condition number are those of the design
+    // RTKLIB solves with, `sqrt(W) [-e, 1]` at the reported state with the reported
+    // weights, as SPP reports them. The covariance keeps the finite-difference
+    // design of the solve's own model, which carries the atmospheric and Sagnac
+    // derivatives.
+    let lines_of_sight = static_lines_of_sight(eph, prepared, x, model)?;
+    let design = weighted_design(
+        &lines_of_sight,
+        &prepared.clock_columns,
+        prepared.n_params,
+        final_weights,
+    )
+    .ok_or(StaticSolveError::Singular(
+        least_squares::SolveError::SingularJacobian,
+    ))?;
+    let svd = portable::svd(&design, false, false);
     let singular_values: Vec<f64> = svd.singular_values.iter().map(|value| value.0).collect();
-    let diagnostics =
-        singular_value_diagnostics(&singular_values, jacobian.nrows(), jacobian.ncols());
+    let diagnostics = singular_value_diagnostics(&singular_values, design.nrows(), design.ncols());
     if diagnostics.rank < prepared.n_params {
         return Err(StaticSolveError::Singular(
             least_squares::SolveError::SingularJacobian,
@@ -927,10 +1391,7 @@ fn finish_static(input: FinishStaticInput<'_>) -> Result<CoreStaticSolution, Sta
         false,
         GeometryQualityThresholds::default(),
     );
-    let converged = matches!(
-        status,
-        Status::GradientTolerance | Status::CostTolerance | Status::StepTolerance
-    );
+    let converged = solve_converged(status);
 
     Ok(CoreStaticSolution {
         position,
@@ -1260,6 +1721,7 @@ fn influence_status(error: &StaticSolveError) -> StaticInfluenceStatus {
         StaticSolveError::EphemerisLost { .. } | StaticSolveError::Ut1OutsideCoverage(_) => {
             StaticInfluenceStatus::EphemerisUnavailable
         }
+        StaticSolveError::SelectionUnsettled { .. } => StaticInfluenceStatus::SolveFailed,
     }
 }
 

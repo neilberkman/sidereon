@@ -642,8 +642,10 @@ fn field_mode_defaults_keep_existing_loose_fixture_bits() {
     // Re-frozen when the GNSS positions and Doppler velocities feeding the loose coupling
     // moved to RTKLIB `satposs` placement of each pseudorange's transmission epoch (the
     // velocity rows read the same placed states, with the rate of the first-order Sagnac
-    // term), and the tightly coupled range-rate rows added that Sagnac rate.
-    const EXPECTED_DEFAULT_HASH: u64 = 0x1629_0fa0_5b21_b877;
+    // term), and the tightly coupled range-rate rows added that Sagnac rate. Re-frozen
+    // again when the SPP fixes feeding it took their selection, elevation mask and
+    // weights at the current iterate and ended with RTKLIB's least-squares step.
+    const EXPECTED_DEFAULT_HASH: u64 = 0x7d19_8582_6044_5077;
     let scenario = field_scenario();
     let simulated = simulate_scenario(&scenario).expect("simulate scenario");
     let source = source_from_scenario(&scenario);

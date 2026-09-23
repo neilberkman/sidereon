@@ -31,18 +31,33 @@
 //! unrotated position plus the first-order Sagnac term), the line-of-sight
 //! azimuth/elevation follow, then the ionosphere and troposphere delays are added
 //! to the predicted range left-to-right. The residual the solver sees is
-//! `sqrt(w) * (P_meas - P_hat)` with an elevation-based weight evaluated once at
-//! the frozen initial-guess geometry.
+//! `sqrt(w) * (P_meas - P_hat)` with the elevation weight `w = sin^2(el) / sigma0^2`.
+//!
+//! The satellite selection, the elevation mask and the weights are evaluated at
+//! the current iterate, as RTKLIB `estpos` re-runs `rescode` at every iteration,
+//! and the ionosphere and troposphere delays at every state the solve reaches.
+//! An iterate with a new selection runs the trust-region solve over that
+//! selection with those weights; an iterate whose selection is the last one
+//! takes the step RTKLIB `estpos` takes, `dx = (H^T W H)^-1 H^T W v` over the
+//! design `H = [-e, 1]` with that iterate's weights and residuals. The solve ends
+//! with the first step below [`SELECTION_STEP_TOL_M`], RTKLIB's
+//! `norm(dx) < 1E-4`, and keeps it, so the position is a fixed point of the
+//! RTKLIB iteration; one that has not ended after [`MAX_SELECTION_PASSES`]
+//! solves and steps fails with [`SppError::SelectionUnsettled`]. The reported
+//! satellites, rejections and weights are those of the last selection, and the
+//! residuals, DOP and covariance are evaluated for them at the reported position.
+//! A receiver RTKLIB places at the geocentre sees every satellite at the zenith,
+//! so a solve from an all-zero initial guess keeps every satellite with an
+//! ephemeris on its first pass and masks them from the second.
 //!
 //! The geometric/clock/correction substrate and its 2-point finite-difference
 //! Jacobian are arithmetic over the libm-bound model functions and are a
 //! bit-exact (0-ULP) parity target against the reference recipe, replayed with the
 //! geometric light-time model that recipe places its transmission epochs with. The
-//! converged
-//! position is produced by the trust-region least-squares solver in the
+//! converged position is produced by the trust-region least-squares solver in the
 //! `sidereon-core` solver core, whose linear-algebra step is not bit-reproducible
-//! across BLAS builds; the converged solution is therefore a sub-micron
-//! solver-agreement result, not a 0-ULP claim.
+//! across BLAS builds, and the Gauss-Newton steps above; the converged solution is
+//! therefore a sub-micron solver-agreement result, not a 0-ULP claim.
 //!
 //! The bit-exact claim depends on the fused-multiply-add policy matching the
 //! reference exactly. The substrate uses no contracted `a*b+c` anywhere the
@@ -55,13 +70,12 @@
 
 use crate::astro::angles::rad_to_deg_ref;
 use crate::astro::math::least_squares::{
-    self, singular_value_diagnostics, solve_trf_with, LeastSquaresProblem, SolveOptions, Status,
-    TrustRegionSolve,
+    self, singular_value_diagnostics, LeastSquaresProblem, SolveOptions, Status, TrustRegionSolve,
 };
 use crate::astro::math::linear::invert_symmetric_pd;
 use crate::astro::math::portable;
 use crate::geometry_quality::{classify, GeometryQuality, GeometryQualityThresholds};
-use nalgebra::DVector;
+use nalgebra::{DMatrix, DVector};
 use std::collections::BTreeMap;
 
 mod config;
@@ -70,7 +84,8 @@ mod source;
 use crate::astro::math::robust::{huber_weight, mad_scale, RobustError};
 pub use config::{
     DEFAULT_HUBER_K, DEFAULT_ROBUST_MAX_OUTER, DEFAULT_ROBUST_OUTER_TOL_M,
-    DEFAULT_ROBUST_SCALE_FLOOR_M, ELEVATION_MASK_RAD, SIGMA0_M, TRANSMIT_TIME_ITERATIONS,
+    DEFAULT_ROBUST_SCALE_FLOOR_M, ELEVATION_MASK_RAD, MAX_SELECTION_PASSES, SELECTION_STEP_TOL_M,
+    SIGMA0_M, TRANSMIT_TIME_ITERATIONS,
 };
 pub use fallback::{
     solve_broadcast, solve_with_fallback, BroadcastReason, FallbackError, FixSource,
@@ -154,7 +169,7 @@ pub(crate) fn spp_iono_frequency_hz(
         _ => carrier_frequency_hz(sat.system),
     }
 }
-use crate::constants::MEAN_EARTH_RADIUS_M;
+use crate::constants::{MEAN_EARTH_RADIUS_M, WGS84_A_M, WGS84_F};
 const PI: f64 = std::f64::consts::PI;
 
 // Agreement-track stopping thresholds for the independent SPP least-squares
@@ -209,7 +224,8 @@ pub enum RejectionReason {
     /// The SP3 product has no usable position or clock for the satellite at the
     /// transmit epoch.
     NoEphemeris,
-    /// The satellite is below the elevation mask at the frozen geometry.
+    /// The satellite is below the elevation mask at the state the reported
+    /// selection was made at.
     LowElevation,
     /// The bound augmentation source withdrew the satellite.
     SbasWithdrawn,
@@ -239,12 +255,19 @@ pub struct RejectedSat {
 /// Models and convergence detail describing how a solution was produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SolutionMetadata {
-    /// Number of accepted solver iterations.
+    /// Number of accepted iterations: the trust-region iterations of every solve
+    /// the selection passes and the robust reweighting ran, plus one for each
+    /// RTKLIB least-squares step taken between them.
     pub iterations: usize,
-    /// Whether the solver reached a convergence stopping criterion (as opposed
-    /// to exhausting its evaluation budget).
+    /// Whether the solve converged: it ended with [`Status::SelectionSettled`],
+    /// not with a robust budget spent ([`Status::OuterBudgetExhausted`]) or a
+    /// robust solve whose last trust-region solve spent its evaluations.
     pub converged: bool,
-    /// The solver's termination status.
+    /// How the solve ended: [`Status::SelectionSettled`] when its last
+    /// least-squares step fell below [`SELECTION_STEP_TOL_M`] at a selection that
+    /// held (and, on the robust path, its position and selection then settled);
+    /// [`Status::OuterBudgetExhausted`] when the robust budget ran out first; the
+    /// last trust-region solve's own status when that solve spent its evaluations.
     pub status: Status,
     /// Whether the ionosphere correction was applied.
     pub ionosphere_applied: bool,
@@ -462,10 +485,13 @@ impl Default for SurfaceMet {
 ///
 /// When a [`SolveInputs::robust`] is `Some(_)`, the solve runs an outer
 /// iteratively-reweighted least-squares loop on top of the static elevation
-/// weighting: a warm-start solve at the base elevation weights (bit-identical to
-/// the static path), then re-solves that rebuild the weight vector each outer
-/// iteration as `base_elevation_weight * huber(r_i / s)`, where `r_i` is the
-/// current unweighted post-fit residual and `s` is a floored MAD scale. With
+/// weighting: a warm start from the settled static solve (identical to the
+/// static path), then re-solves that each take the selection at the current
+/// state and weight it as `elevation_weight * huber(r_i / s)`, where `r_i` is the
+/// unweighted residual at that state and `s` is a floored MAD scale. The loop
+/// settles when the position moves less than `outer_tol_m` and the selection at
+/// the new state is the one solved with; after `max_outer` total solves without
+/// settling it ends with [`Status::OuterBudgetExhausted`] and has not converged. With
 /// `robust = None` the solve is byte-identical to the static elevation-weighted
 /// solve. `Default` matches the `DEFAULT_*` config constants.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -675,12 +701,22 @@ pub enum SppError {
         /// The satellite that was observed more than once.
         satellite: GnssSatelliteId,
     },
-    /// A satellite that survived the frozen selection had no usable SP3
-    /// position/clock at a transmit epoch reached during the solve. Returned
-    /// instead of panicking; normally precluded by the selection step.
+    /// A selected satellite had no usable position/clock at a state reached
+    /// during the solve. Returned instead of panicking; normally precluded by the
+    /// selection step.
     EphemerisLost {
         /// The satellite whose ephemeris became unavailable during the solve.
         satellite: GnssSatelliteId,
+    },
+    /// The satellite selection did not settle: after
+    /// [`MAX_SELECTION_PASSES`] passes, each trust-region solve over a new
+    /// selection and each least-squares step counting as one, no step at a
+    /// selection that held had fallen below [`SELECTION_STEP_TOL_M`]. RTKLIB `estpos` fails the epoch the same way
+    /// after `MAXITR` iterations. A satellite that each solve moves back across
+    /// the elevation mask never settles.
+    SelectionUnsettled {
+        /// The number of passes run.
+        passes: usize,
     },
     /// The ephemeris source refused a satellite state because producing it
     /// reads UT1 outside the UT1 table under a strict UT1 policy. The solve
@@ -705,6 +741,12 @@ impl core::fmt::Display for SppError {
             }
             SppError::EphemerisLost { satellite } => {
                 write!(f, "satellite {satellite} lost ephemeris during the solve")
+            }
+            SppError::SelectionUnsettled { passes } => {
+                write!(
+                    f,
+                    "the satellite selection did not settle in {passes} passes"
+                )
             }
             SppError::Ut1OutsideCoverage(reason) => {
                 write!(
@@ -926,6 +968,43 @@ pub(crate) struct SatModelEnv<'a> {
     pub placement_pseudoranges_m: Option<&'a BTreeMap<GnssSatelliteId, f64>>,
 }
 
+/// Whether RTKLIB `satazel` puts every satellite at the zenith for a receiver at
+/// `rx_ecef_m`: it does where the RTKLIB `ecef2pos` height is at or below
+/// `-RE_WGS84`, taking azimuth `0` and elevation `pi / 2`, so a solve started from
+/// the all-zero initial guess keeps every satellite through the elevation mask on
+/// its first pass.
+///
+/// That height reaches `-RE_WGS84` only at the geocentre itself. Where
+/// `|z| < 1e-4 m` the `ecef2pos` loop does not run, `v` stays `RE_WGS84` and the
+/// height is `sqrt(x^2 + y^2 + z^2) - RE_WGS84`, which rounds to `-RE_WGS84` only
+/// for a distance below half an ulp of `RE_WGS84`, about `4.7e-10 m`. Where
+/// `|z| >= 1e-4 m` near the geocentre the loop runs to `sin(lat) = +-1`,
+/// `v = RE_WGS84 / sqrt(1 - e2)` and `|z| = |z_0| + v e2`, a height of about
+/// `|z_0| - b`, near `-6_356_752 m`. Any position more than 1 m from the geocentre
+/// is therefore outside, and within 1 m the `ecef2pos` arithmetic is run as
+/// written.
+fn rtklib_sees_every_satellite_overhead(rx_ecef_m: [f64; 3]) -> bool {
+    let r2 = rx_ecef_m[0] * rx_ecef_m[0] + rx_ecef_m[1] * rx_ecef_m[1];
+    if r2 + rx_ecef_m[2] * rx_ecef_m[2] > 1.0 {
+        return false;
+    }
+    // RTKLIB `ecef2pos`, height only, in its operation order.
+    let e2 = WGS84_F * (2.0 - WGS84_F);
+    let mut z = rx_ecef_m[2];
+    let mut zk = 0.0_f64;
+    let mut v = WGS84_A_M;
+    while (z - zk).abs() >= 1.0e-4 {
+        zk = z;
+        let sinp = z / (r2 + z * z).sqrt();
+        v = WGS84_A_M / (1.0 - e2 * sinp * sinp).sqrt();
+        z = rx_ecef_m[2] + v * e2 * sinp;
+    }
+    let height_m = (r2 + z * z).sqrt() - v;
+    // RTKLIB `satazel` computes the angles only where `pos[2] > -RE_WGS84`, which
+    // a NaN height fails as well.
+    height_m.is_nan() || height_m <= -WGS84_A_M
+}
+
 /// Build the per-satellite predicted pseudorange in the SPP operation order
 /// SELECTED BY THE RECIPE on [`SatModelEnv::model`], sharing the
 /// parity-sensitive range and frame substrate with the other strategies.
@@ -1119,12 +1198,28 @@ pub(crate) fn sat_model(
 
     // Geometry for corrections: az/el from rx and that satellite position, as RTKLIB
     // `satazel` takes it from the `geodist` line of sight, through the
-    // recipe-selected frame substrate.
-    let g = az_el_from_ecef(frame, rx_ecef_m, sat_rot);
+    // recipe-selected frame substrate. A receiver RTKLIB places at or below the
+    // geocentre sees every satellite overhead (`satazel`).
+    let mut g = az_el_from_ecef(frame, rx_ecef_m, sat_rot);
+    if rtklib_sees_every_satellite_overhead(rx_ecef_m) {
+        g.az_rad = 0.0;
+        g.el_rad = PI / 2.0;
+    }
 
     let mut iono_m = 0.0;
     let mut tropo_m = 0.0;
-    if env.corrections.ionosphere {
+    // RTKLIB evaluates no broadcast ionosphere delay for a receiver more than 1 km
+    // below the ellipsoid or a satellite at or below its horizon (`ionmodel`), and
+    // no augmentation-grid delay more than 100 m below it or at or below the
+    // horizon (`sbsioncorr`); the delay there is zero. The troposphere model gates
+    // the same way itself.
+    let ionosphere_gated = match ionosphere {
+        SppIonosphere::SbasGrid(_) => g.geodetic.height_m < -100.0 || g.el_rad <= 0.0,
+        SppIonosphere::Klobuchar(_) | SppIonosphere::GalileoNequick(_) => {
+            g.geodetic.height_m < -1.0e3 || g.el_rad <= 0.0
+        }
+    };
+    if env.corrections.ionosphere && !ionosphere_gated {
         // The SPP 0-ULP trace oracle pins this multiply-then-divide order, which
         // `rad_to_deg_ref` implements (`rad * 180 / PI`).
         let lat_deg = rad_to_deg_ref(g.geodetic.lat_rad);
@@ -1208,39 +1303,46 @@ pub(crate) fn sat_model(
     })
 }
 
-/// The frozen-geometry selection: used satellites (ascending id), rejected
-/// satellites with reason, and the per-used-sat weight from the elevation at
-/// the initial-guess geometry.
+/// The satellite selection at one receiver state, as RTKLIB `rescode` makes it:
+/// used satellites (ascending id), rejected satellites with reason, and for each
+/// used satellite its elevation weight, line of sight and residual at that state.
 pub(crate) struct Selection {
     pub used: Vec<GnssSatelliteId>,
     pub rejected: Vec<RejectedSat>,
-    /// `weight` per used satellite, index-aligned to `used`.
+    /// `weight` per used satellite, index-aligned to `used`: `sin^2(el) / sigma0^2`
+    /// at the state the selection was made at.
     pub weights: Vec<f64>,
+    /// Unit line of sight from the receiver to the satellite position the range
+    /// is formed from, per used satellite, index-aligned to `used`.
+    pub lines_of_sight: Vec<LineOfSight>,
+    /// `P_meas - P_hat` per used satellite, index-aligned to `used`, each with the
+    /// clock of its own system.
+    pub residuals_m: Vec<f64>,
 }
 
-pub(crate) fn select_sats(
-    eph: &dyn EphemerisSource,
-    inputs: &SolveInputs,
-    model: SppModelRecipe,
-) -> Selection {
-    select_sats_placed(eph, inputs, model, None)
+/// The clock a satellite's residual takes: SBAS ranges on the GPS clock.
+pub(crate) const fn clock_system(system: GnssSystem) -> GnssSystem {
+    match system {
+        GnssSystem::Sbas => GnssSystem::Gps,
+        system => system,
+    }
 }
 
-/// [`select_sats`] with the satellites of `placement` placed from its pseudoranges
+/// The selection at the receiver state `rx_ecef_m` with the clock `clock_m` gives
+/// each system, the satellites of `placement` placed from its pseudoranges
 /// ([`SatModelEnv::placement_pseudoranges_m`]).
-fn select_sats_placed(
+///
+/// Reasons are tested in RTKLIB `rescode` order and the first that applies is
+/// reported: no ephemeris, the elevation mask, augmentation-grid coverage, then
+/// the carrier the ionosphere delay is scaled to.
+pub(crate) fn select_at(
     eph: &dyn EphemerisSource,
     inputs: &SolveInputs,
     model: SppModelRecipe,
     placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
+    rx_ecef_m: [f64; 3],
+    clock_m: &dyn Fn(GnssSystem) -> f64,
 ) -> Selection {
-    let rx0 = [
-        inputs.initial_guess[0],
-        inputs.initial_guess[1],
-        inputs.initial_guess[2],
-    ];
-    let b0 = inputs.initial_guess[3];
-
     // Ascending satellite-id order, never observation order.
     let mut obs: Vec<&Observation> = inputs.observations.iter().collect();
     obs.sort_by_key(|o| o.satellite_id);
@@ -1248,6 +1350,8 @@ fn select_sats_placed(
     let mut used = Vec::new();
     let mut rejected = Vec::new();
     let mut weights = Vec::new();
+    let mut lines_of_sight = Vec::new();
+    let mut residuals_m = Vec::new();
 
     let env = SatModelEnv {
         eph,
@@ -1263,10 +1367,9 @@ fn select_sats_placed(
     };
     for ob in obs {
         let sat = ob.satellite_id;
+        let b = clock_m(clock_system(sat.system));
         let ionosphere = ionosphere_for(sat.system, inputs);
-        // Reasons are tested in RTKLIB `rescode` order: ephemeris, elevation
-        // mask, ionosphere coverage, then the carrier the delay is scaled to.
-        let Some(model) = sat_model(&env, sat, rx0, b0, ob.pseudorange_m, ionosphere) else {
+        let Some(model) = sat_model(&env, sat, rx_ecef_m, b, ob.pseudorange_m, ionosphere) else {
             // With an augmentation grid bound, a line of sight the grid does
             // not cover leaves no model either. The grid-free model tells an
             // ephemeris gap from that, and gives the elevation, which is
@@ -1277,7 +1380,7 @@ fn select_sats_placed(
                         alpha: [0.0; 4],
                         beta: [0.0; 4],
                     });
-                    match sat_model(&env, sat, rx0, b0, ob.pseudorange_m, grid_free) {
+                    match sat_model(&env, sat, rx_ecef_m, b, ob.pseudorange_m, grid_free) {
                         None => RejectionReason::NoEphemeris,
                         Some(geometry) if geometry.el_rad < ELEVATION_MASK_RAD => {
                             RejectionReason::LowElevation
@@ -1300,16 +1403,20 @@ fn select_sats_placed(
             });
             continue;
         }
-        // The ionosphere delay is computed on L1 and scaled to each satellite's
-        // carrier by `(f_L1 / f)^2`. GPS, QZSS and SBAS L1, Galileo E1, BeiDou
-        // B1I and NavIC L5 are fixed carriers; GLONASS is FDMA, so its carrier
-        // is resolved per satellite from `glonass_channels`. A satellite whose
-        // carrier cannot be resolved (a GLONASS observation with no channel in
-        // the map, or a channel outside the `-7..=6` FDMA allocation) cannot
-        // take the correction, so it is excluded and reported, and the other
-        // satellites are solved without it, as RTKLIB `rescode` skips a
-        // satellite whose `sat2freq` is zero. Its model above was evaluated with
-        // the L1 fallback only to classify it, and is discarded.
+        // The ionosphere delay is the one term of the model that reads the
+        // carrier: it is computed on L1 and scaled to each satellite's carrier by
+        // `(f_L1 / f)^2` (the group delay and every other term are taken as the
+        // source gives them). GPS, QZSS and SBAS L1, Galileo E1, BeiDou B1I and
+        // NavIC L5 are fixed carriers; GLONASS is FDMA, so its carrier is resolved
+        // per satellite from `glonass_channels`. A satellite whose carrier cannot
+        // be resolved (a GLONASS observation with no channel in the map, or a
+        // channel outside the `-7..=6` FDMA allocation) cannot take the
+        // correction, so with it applied it is excluded and reported, and the
+        // other satellites are solved without it, as RTKLIB `rescode` skips a
+        // satellite whose `sat2freq` is zero. Without the correction nothing in
+        // the model reads the carrier and the satellite is used, where `rescode`
+        // skips it whatever the ionosphere option. Its model above was evaluated
+        // with the L1 fallback only to classify it, and is discarded.
         if inputs.corrections.ionosphere
             && spp_iono_frequency_hz(sat, &inputs.glonass_channels).is_none()
         {
@@ -1323,13 +1430,27 @@ fn select_sats_placed(
         let weight = (sin_el * sin_el) / (SIGMA0_M * SIGMA0_M);
         used.push(sat);
         weights.push(weight);
+        lines_of_sight.push(line_of_sight(model.sat_rot_ecef_m, rx_ecef_m));
+        residuals_m.push(ob.pseudorange_m - model.p_hat_m);
     }
 
     Selection {
         used,
         rejected,
         weights,
+        lines_of_sight,
+        residuals_m,
     }
+}
+
+/// The unit vector from the receiver to the satellite position a range is formed
+/// from.
+pub(crate) fn line_of_sight(sat_ecef_m: [f64; 3], rx_ecef_m: [f64; 3]) -> LineOfSight {
+    let dx = sat_ecef_m[0] - rx_ecef_m[0];
+    let dy = sat_ecef_m[1] - rx_ecef_m[1];
+    let dz = sat_ecef_m[2] - rx_ecef_m[2];
+    let n = (dx * dx + dy * dy + dz * dz).sqrt();
+    LineOfSight::new(dx / n, dy / n, dz / n)
 }
 
 /// The distinct GNSS present in `used`, in ascending system order.
@@ -1340,13 +1461,7 @@ fn select_sats_placed(
 /// reference. For a single-system solve this is one element and the state is the
 /// classic `[x, y, z, b]`.
 pub(crate) fn clock_systems(used: &[GnssSatelliteId]) -> Vec<GnssSystem> {
-    let mut systems: Vec<GnssSystem> = used
-        .iter()
-        .map(|s| match s.system {
-            GnssSystem::Sbas => GnssSystem::Gps,
-            system => system,
-        })
-        .collect();
+    let mut systems: Vec<GnssSystem> = used.iter().map(|s| clock_system(s.system)).collect();
     systems.sort_unstable();
     systems.dedup();
     systems
@@ -1362,7 +1477,7 @@ pub(crate) fn clock_systems(used: &[GnssSatelliteId]) -> Vec<GnssSystem> {
 /// `[x, y, z, b]` and `clk_0 = x[3]`.
 ///
 /// Returns `Err(satellite)` if a used satellite has no observation or no usable
-/// ephemeris at `x` (the frozen used set is fixed, but a finite-difference probe
+/// ephemeris at `x` (the used set is fixed for one solve, but a finite-difference probe
 /// could in principle reach an epoch off the ephemeris coverage). The caller
 /// turns that into an [`SppError`] rather than panicking.
 pub(crate) fn residual_unweighted(
@@ -1409,13 +1524,9 @@ fn residual_unweighted_placed(
             .map(|(_, p)| *p)
             .ok_or(sat)?;
         // The clock for this satellite's system (index 0 = reference clock).
-        let sat_clock_system = match sat.system {
-            GnssSystem::Sbas => GnssSystem::Gps,
-            system => system,
-        };
         let sys_idx = systems
             .iter()
-            .position(|s| *s == sat_clock_system)
+            .position(|s| *s == clock_system(sat.system))
             .unwrap_or(0);
         let b = x[3 + sys_idx];
         let m =
@@ -1671,6 +1782,424 @@ fn solve_inner_placed(
     Ok(solution)
 }
 
+/// The receiver state an SPP solve iterates on: the position and one absolute
+/// clock per system the last pass solved for.
+pub(crate) struct IterateState {
+    pub(crate) rx_ecef_m: [f64; 3],
+    clocks_m: Vec<(GnssSystem, f64)>,
+    /// The clock a system with no estimate yet starts from: the reference clock of
+    /// the last pass, or the initial guess's clock before the first. A system
+    /// joins at zero inter-system bias, as RTKLIB starts its offsets at zero.
+    reference_clock_m: f64,
+}
+
+impl IterateState {
+    pub(crate) fn from_initial_guess(initial_guess: [f64; 4]) -> Self {
+        Self {
+            rx_ecef_m: [initial_guess[0], initial_guess[1], initial_guess[2]],
+            clocks_m: Vec::new(),
+            reference_clock_m: initial_guess[3],
+        }
+    }
+
+    pub(crate) fn clock_m(&self, system: GnssSystem) -> f64 {
+        self.clocks_m
+            .iter()
+            .find(|(s, _)| *s == system)
+            .map_or(self.reference_clock_m, |&(_, clock)| clock)
+    }
+
+    /// The parameter vector `[x, y, z, clk_0, clk_1, ...]` for `systems`.
+    pub(crate) fn parameters(&self, systems: &[GnssSystem]) -> DVector<f64> {
+        let mut x = self.rx_ecef_m.to_vec();
+        x.extend(systems.iter().map(|&system| self.clock_m(system)));
+        DVector::from_vec(x)
+    }
+
+    pub(crate) fn update(&mut self, systems: &[GnssSystem], x: &DVector<f64>) {
+        self.rx_ecef_m = [x[0], x[1], x[2]];
+        self.clocks_m = systems
+            .iter()
+            .enumerate()
+            .map(|(i, &system)| (system, x[3 + i]))
+            .collect();
+        self.reference_clock_m = x[3];
+    }
+}
+
+/// The selection at `state`, refused with [`SppError::TooFewSatellites`] when it
+/// keeps fewer satellites than the solve has parameters, as RTKLIB `estpos` stops
+/// when `rescode` returns fewer rows than unknowns.
+fn select_at_state(
+    eph: &dyn EphemerisSource,
+    inputs: &SolveInputs,
+    model: SppModelRecipe,
+    placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
+    state: &IterateState,
+) -> Result<(Selection, Vec<GnssSystem>), SppError> {
+    let sel = select_at(eph, inputs, model, placement, state.rx_ecef_m, &|system| {
+        state.clock_m(system)
+    });
+    // One receiver-clock parameter per distinct GNSS (a reference clock plus an
+    // inter-system bias for each additional system), so the state has
+    // `3 + n_systems` parameters and needs at least that many usable satellites.
+    // Floor the clock count at one: the minimum solve is the four-parameter
+    // single-system form even when no satellite survives selection.
+    let systems = clock_systems(&sel.used);
+    // SPP's weighted-residual rows feed the trust-region solver, which owns the
+    // normal-equation factorization (NormalRecipe::SppWeightedResidualFiniteDifference
+    // via SolverRecipe::NalgebraTrfLegacy); only the parameter stack is named here.
+    let n_params = ParameterLayout::spp(systems.len().max(1)).dim();
+    if sel.used.len() < n_params {
+        return Err(SppError::TooFewSatellites {
+            used: sel.used.len(),
+            required: n_params,
+        });
+    }
+    Ok((sel, systems))
+}
+
+/// The state column of each used satellite's clock: `3 +` the index of its clock
+/// system in `systems`.
+fn clock_columns(used: &[GnssSatelliteId], systems: &[GnssSystem]) -> Vec<usize> {
+    used.iter()
+        .map(|sat| {
+            3 + systems
+                .iter()
+                .position(|s| *s == clock_system(sat.system))
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// The weighted normal matrix `H^T W H` of a pseudorange design whose row `k` is
+/// `[-e_k, 0, .., 1, .., 0]` with the one in state column `clock_columns[k]`, over
+/// `n_params` state parameters. `None` when the rows do not form a design with at
+/// least as many rows as parameters.
+pub(crate) fn weighted_normal_matrix(
+    los: &[LineOfSight],
+    clock_columns: &[usize],
+    n_params: usize,
+    weights: &[f64],
+) -> Option<Vec<Vec<f64>>> {
+    if los.len() != clock_columns.len() || los.len() != weights.len() || n_params <= 3 {
+        return None;
+    }
+    if los.len() < n_params {
+        return None;
+    }
+    let mut normal = vec![vec![0.0_f64; n_params]; n_params];
+    for k in 0..los.len() {
+        let row = design_row(los[k], clock_columns[k], n_params)?;
+        let weight = weights[k];
+        for i in 0..n_params {
+            for j in 0..n_params {
+                normal[i][j] += row[i] * weight * row[j];
+            }
+        }
+    }
+    Some(normal)
+}
+
+/// One design row `[-e_x, -e_y, -e_z, 0, .., 1, .., 0]`, the one in state column
+/// `clock_column`.
+fn design_row(los: LineOfSight, clock_column: usize, n_params: usize) -> Option<Vec<f64>> {
+    if clock_column < 3 || clock_column >= n_params {
+        return None;
+    }
+    let mut row = vec![0.0_f64; n_params];
+    row[0] = -los.e_x;
+    row[1] = -los.e_y;
+    row[2] = -los.e_z;
+    row[clock_column] = 1.0;
+    Some(row)
+}
+
+/// The step RTKLIB `estpos` takes from a state: the weighted least-squares
+/// `dx = (H^T W H)^-1 H^T W v` over the design `H` of [`weighted_normal_matrix`]
+/// (`[-e, 1]` in the satellite's clock column, the partials of the predicted
+/// range that RTKLIB `rescode` forms), the residuals `v = P_meas - P_hat` and the
+/// weights `W` at that state. `None` when the design is singular.
+pub(crate) fn rtklib_step(
+    los: &[LineOfSight],
+    clock_columns: &[usize],
+    n_params: usize,
+    weights: &[f64],
+    residuals_m: &[f64],
+) -> Option<Vec<f64>> {
+    if residuals_m.len() != los.len() {
+        return None;
+    }
+    let normal = weighted_normal_matrix(los, clock_columns, n_params, weights)?;
+    let q = invert_symmetric_pd(&normal)?;
+    let mut rhs = vec![0.0_f64; n_params];
+    for k in 0..los.len() {
+        let row = design_row(los[k], clock_columns[k], n_params)?;
+        for i in 0..n_params {
+            rhs[i] += row[i] * weights[k] * residuals_m[k];
+        }
+    }
+    let dx: Vec<f64> = q
+        .iter()
+        .map(|q_row| {
+            let mut sum = 0.0_f64;
+            for j in 0..n_params {
+                sum += q_row[j] * rhs[j];
+            }
+            sum
+        })
+        .collect();
+    dx.iter().all(|v| v.is_finite()).then_some(dx)
+}
+
+/// `norm(dx)` as RTKLIB `estpos` takes it, over its own parameters: the position,
+/// the GPS receiver clock and one inter-system bias per other system, each the
+/// system's clock less the GPS clock. `clock_groups` gives, for each receiver
+/// (one for SPP, one per epoch for the static solve), the state column of its
+/// first clock and its clock systems in column order; each absolute clock step
+/// `d_s` is taken to RTKLIB's parameters as `d_GPS` and `d_s - d_GPS`. The step
+/// is the same step in either parametrization, so the solve stops on the iterate
+/// `estpos` stops on. Without a GPS clock RTKLIB holds its GPS clock parameter by
+/// a pseudo-observation, and its step there is taken as zero.
+pub(crate) fn rtklib_step_norm(dx: &[f64], clock_groups: &[(usize, &[GnssSystem])]) -> f64 {
+    let mut norm2 = dx[0] * dx[0] + dx[1] * dx[1] + dx[2] * dx[2];
+    for &(offset, systems) in clock_groups {
+        let gps = systems.iter().position(|&s| s == GnssSystem::Gps);
+        let d_gps = gps.map_or(0.0, |i| dx[offset + i]);
+        if gps.is_some() {
+            norm2 += d_gps * d_gps;
+        }
+        for (i, _) in systems.iter().enumerate() {
+            if Some(i) == gps {
+                continue;
+            }
+            let bias = dx[offset + i] - d_gps;
+            norm2 += bias * bias;
+        }
+    }
+    norm2.sqrt()
+}
+
+/// Whether a positioning solve that ended with `status` converged: a
+/// trust-region convergence criterion, or a settled selection.
+pub(crate) const fn solve_converged(status: Status) -> bool {
+    matches!(
+        status,
+        Status::GradientTolerance
+            | Status::CostTolerance
+            | Status::StepTolerance
+            | Status::SelectionSettled
+    )
+}
+
+/// How one trust-region pass over a selection ended.
+pub(crate) enum PassEnd {
+    /// The solve over the selection ran to its end.
+    Solved(least_squares::LeastSquaresReport),
+    /// A satellite's line of sight left the augmentation ionosphere grid at a
+    /// state the solve evaluated, a finite-difference probe or a trial point
+    /// perhaps. The pass ends at the last iterate the solve accepted, the given
+    /// state; the next pass selects there, and when the selection there is the
+    /// same, takes RTKLIB's step, which evaluates no probe, so the next selection
+    /// finds the crossing where `rescode` would.
+    CoverageLost(DVector<f64>),
+}
+
+/// Whether `sat`, which has no model at `rx_ecef_m`, has one there with the
+/// augmentation grid set aside: its line of sight left the grid, not its
+/// ephemeris.
+pub(crate) fn lost_grid_coverage(
+    env: &SatModelEnv,
+    inputs: &SolveInputs,
+    sat: GnssSatelliteId,
+    rx_ecef_m: [f64; 3],
+    b_m: f64,
+    p_meas_m: f64,
+) -> bool {
+    if !matches!(
+        ionosphere_for(sat.system, inputs),
+        SppIonosphere::SbasGrid(_)
+    ) {
+        return false;
+    }
+    let grid_free = SppIonosphere::Klobuchar(KlobucharCoeffs {
+        alpha: [0.0; 4],
+        beta: [0.0; 4],
+    });
+    sat_model(env, sat, rx_ecef_m, b_m, p_meas_m, grid_free).is_some()
+}
+
+/// The environment the SPP model reads for `inputs`.
+pub(crate) fn model_env<'a>(
+    eph: &'a dyn EphemerisSource,
+    inputs: &'a SolveInputs,
+    model: SppModelRecipe,
+    placement: Option<&'a BTreeMap<GnssSatelliteId, f64>>,
+) -> SatModelEnv<'a> {
+    SatModelEnv {
+        eph,
+        t_rx_j2000_s: inputs.t_rx_j2000_s,
+        t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
+        day_of_year: inputs.day_of_year,
+        corrections: inputs.corrections,
+        met: &inputs.met,
+        glonass_channels: &inputs.glonass_channels,
+        model,
+        pseudorange_code: inputs.pseudorange_code,
+        placement_pseudoranges_m: placement,
+    }
+}
+
+/// One trust-region solve over the satellites `used` with the fixed `weights`,
+/// from `x0`. A used satellite whose line of sight leaves the augmentation grid
+/// at a state the solve reaches ends the pass there; a used satellite whose
+/// ephemeris is lost fails the solve.
+#[allow(clippy::too_many_arguments)]
+fn solve_selected(
+    eph: &dyn EphemerisSource,
+    inputs: &SolveInputs,
+    model: SppModelRecipe,
+    placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
+    linear_solve: TrustRegionSolve,
+    obs_by_id: &[(GnssSatelliteId, f64)],
+    used: &[GnssSatelliteId],
+    systems: &[GnssSystem],
+    x0: DVector<f64>,
+    weights: &[f64],
+) -> Result<PassEnd, SppError> {
+    // Agreement-track stopping thresholds (see the SPP_SOLVER_* constants).
+    let opts = SolveOptions {
+        gtol: SPP_SOLVER_GTOL,
+        ftol: SPP_SOLVER_FTOL,
+        xtol: SPP_SOLVER_XTOL,
+        max_nfev: SPP_SOLVER_MAX_NFEV,
+    };
+    let n_used = used.len();
+    // The least-squares solver's residual closure cannot return an error, so the
+    // first satellite that has no model, and the state it had none at, are
+    // recorded here, and the closure returns a non-finite residual, which stops
+    // the solve at once.
+    let lost = std::cell::RefCell::new(None::<(GnssSatelliteId, DVector<f64>)>);
+    let residual = |x: &DVector<f64>| -> DVector<f64> {
+        match residual_unweighted_placed(
+            eph,
+            used,
+            obs_by_id,
+            x.as_slice(),
+            inputs,
+            model,
+            placement,
+        ) {
+            Ok(r) => DVector::from_vec(r),
+            Err(sat) => {
+                let mut lost = lost.borrow_mut();
+                if lost.is_none() {
+                    *lost = Some((sat, x.clone()));
+                }
+                DVector::from_element(n_used, f64::NAN)
+            }
+        }
+    };
+    let problem =
+        LeastSquaresProblem::with_weights(&residual, x0, DVector::from_row_slice(weights));
+    let mut last_accepted: Option<DVector<f64>> = None;
+    let result = least_squares::solve_trf_observed(&problem, &opts, linear_solve, &mut |x| {
+        last_accepted = Some(x.clone());
+    });
+    // The recorded loss is the cause of the error the non-finite residual raised.
+    if let Some((satellite, x)) = lost.into_inner() {
+        let p_meas = obs_by_id
+            .iter()
+            .find(|(id, _)| *id == satellite)
+            .map(|(_, p)| *p)
+            .ok_or(SppError::EphemerisLost { satellite })?;
+        let column = 3 + systems
+            .iter()
+            .position(|s| *s == clock_system(satellite.system))
+            .unwrap_or(0);
+        let env = model_env(eph, inputs, model, placement);
+        let rx = [x[0], x[1], x[2]];
+        if lost_grid_coverage(&env, inputs, satellite, rx, x[column], p_meas) {
+            if let Some(accepted) = last_accepted {
+                return Ok(PassEnd::CoverageLost(accepted));
+            }
+        }
+        return Err(SppError::EphemerisLost { satellite });
+    }
+    Ok(PassEnd::Solved(result?))
+}
+
+/// The weighted design `sqrt(W) H` of [`weighted_normal_matrix`], whose rank,
+/// singular values and condition number are the geometry diagnostics of a
+/// solution: the design RTKLIB `estpos` solves with, and the one the DOP and
+/// covariance are formed from.
+pub(crate) fn weighted_design(
+    los: &[LineOfSight],
+    clock_columns: &[usize],
+    n_params: usize,
+    weights: &[f64],
+) -> Option<DMatrix<f64>> {
+    if los.len() != clock_columns.len() || los.len() != weights.len() {
+        return None;
+    }
+    let mut design = DMatrix::zeros(los.len(), n_params);
+    for k in 0..los.len() {
+        let row = design_row(los[k], clock_columns[k], n_params)?;
+        let sqrt_weight = weights[k].sqrt();
+        for (j, value) in row.iter().enumerate() {
+            design[(k, j)] = sqrt_weight * value;
+        }
+    }
+    Some(design)
+}
+
+/// Lines of sight and residuals, index-aligned to a set of used satellites.
+type UsedGeometry = (Vec<LineOfSight>, Vec<f64>);
+
+/// The lines of sight and residuals of the satellites `used` at `state`, for a
+/// set the selection at `state` was not made for. `None` when a satellite's line
+/// of sight has left the augmentation grid there.
+fn evaluate_used(
+    eph: &dyn EphemerisSource,
+    inputs: &SolveInputs,
+    model: SppModelRecipe,
+    placement: Option<&BTreeMap<GnssSatelliteId, f64>>,
+    used: &[GnssSatelliteId],
+    state: &IterateState,
+) -> Result<Option<UsedGeometry>, SppError> {
+    let env = model_env(eph, inputs, model, placement);
+    let mut los = Vec::with_capacity(used.len());
+    let mut residuals_m = Vec::with_capacity(used.len());
+    for &sat in used {
+        let p_meas = inputs
+            .observations
+            .iter()
+            .find(|o| o.satellite_id == sat)
+            .map(|o| o.pseudorange_m)
+            .ok_or(SppError::EphemerisLost { satellite: sat })?;
+        let b = state.clock_m(clock_system(sat.system));
+        let ionosphere = ionosphere_for(sat.system, inputs);
+        let Some(m) = sat_model(&env, sat, state.rx_ecef_m, b, p_meas, ionosphere) else {
+            if lost_grid_coverage(&env, inputs, sat, state.rx_ecef_m, b, p_meas) {
+                return Ok(None);
+            }
+            return Err(SppError::EphemerisLost { satellite: sat });
+        };
+        los.push(line_of_sight(m.sat_rot_ecef_m, state.rx_ecef_m));
+        residuals_m.push(p_meas - m.p_hat_m);
+    }
+    Ok(Some((los, residuals_m)))
+}
+
+/// The satellite set a solution reports and the geometry it reports it with.
+struct FinalSet {
+    used: Vec<GnssSatelliteId>,
+    rejected: Vec<RejectedSat>,
+    weights: Vec<f64>,
+    lines_of_sight: Vec<LineOfSight>,
+    residuals_m: Vec<f64>,
+}
+
 fn solve_tracked(
     eph: &dyn EphemerisSource,
     inputs: &SolveInputs,
@@ -1681,8 +2210,8 @@ fn solve_tracked(
 ) -> Result<ReceiverSolution, SppError> {
     // One pseudorange per satellite. Reject duplicates deterministically (by
     // the smallest repeated id) so the result can never depend on observation
-    // order and the parameter-count check below (`sel.used.len() < n_params`,
-    // where `n_params = 3 + n_clocks`) counts distinct satellites.
+    // order and the parameter-count check (`used < n_params`, where
+    // `n_params = 3 + n_clocks`) counts distinct satellites.
     let mut ids: Vec<GnssSatelliteId> =
         inputs.observations.iter().map(|o| o.satellite_id).collect();
     ids.sort_unstable();
@@ -1690,162 +2219,267 @@ fn solve_tracked(
         return Err(SppError::DuplicateObservation { satellite: w[0] });
     }
 
-    // A satellite whose carrier the ionosphere correction cannot be scaled to
-    // is excluded by `select_sats` with its own reason, and the rest of the
-    // epoch is solved.
     let memo = TransmitStateMemo::new(eph, inputs.observations.len());
     let eph: &dyn EphemerisSource = &memo;
-    let sel = select_sats_placed(eph, inputs, model, placement);
-
-    // One receiver-clock parameter per distinct GNSS (a reference clock plus an
-    // inter-system bias for each additional system), so the state has
-    // `3 + n_systems` parameters and needs at least that many usable satellites.
-    // Floor the clock count at one: the minimum solve is the four-parameter
-    // single-system form even when no satellite survives selection.
-    let systems = clock_systems(&sel.used);
-    let n_clocks = systems.len();
-    // SPP's weighted-residual rows feed the trust-region solver, which owns the
-    // normal-equation factorization (NormalRecipe::SppWeightedResidualFiniteDifference
-    // via SolverRecipe::NalgebraTrfLegacy); only the parameter stack is named here.
-    let n_params = ParameterLayout::spp(n_clocks.max(1)).dim();
-    if sel.used.len() < n_params {
-        return Err(SppError::TooFewSatellites {
-            used: sel.used.len(),
-            required: n_params,
-        });
-    }
-
     let obs_by_id: Vec<(GnssSatelliteId, f64)> = inputs
         .observations
         .iter()
         .map(|o| (o.satellite_id, o.pseudorange_m))
         .collect();
 
-    let used = sel.used.clone();
-    let inputs_ref = inputs.clone();
-    let obs_ref = obs_by_id.clone();
-    let eph_ref = eph;
-    let placement_ref = placement.cloned();
-    let n_used = used.len();
-
-    // The least-squares solver's residual closure cannot return an error, so an
-    // ephemeris loss during a probe is recorded here and surfaced as an
-    // SppError after the solve (rather than panicking inside the closure).
-    let lost = std::rc::Rc::new(std::cell::Cell::new(None::<GnssSatelliteId>));
-    let lost_in = lost.clone();
-    let residual = move |x: &DVector<f64>| -> DVector<f64> {
-        match residual_unweighted_placed(
-            eph_ref,
-            &used,
-            &obs_ref,
-            x.as_slice(),
-            &inputs_ref,
+    // RTKLIB `estpos` iterates `rescode` and a least-squares step: at each iterate
+    // `rescode` selects the satellites (ephemeris, elevation mask, ionosphere
+    // coverage, carrier), evaluates the corrections and the elevation variances,
+    // and `estpos` takes the weighted least-squares step over the design
+    // `[-e, 1]`, stopping once the step is below 1e-4 m and failing after `MAXITR`
+    // iterations. Here every iterate is selected and weighted the same way. An
+    // iterate whose selection is new runs the trust-region solve over it to that
+    // selection's optimum, which brings a far or cold start close; an iterate whose
+    // selection is the last one takes RTKLIB's step. The solve stops after the
+    // first step below 1e-4 m, which it keeps, as `estpos` does.
+    let mut state = IterateState::from_initial_guess(inputs.initial_guess);
+    let mut iterations = 0usize;
+    let mut passes = 0usize;
+    // The satellites of the last pass, when its selection can end the solve.
+    let mut last_used: Option<Vec<GnssSatelliteId>> = None;
+    let settled = loop {
+        let (sel, systems) = select_at_state(eph, inputs, model, placement, &state)?;
+        if last_used.as_ref() == Some(&sel.used) {
+            // The selection holds: the step RTKLIB takes here, from this
+            // iterate's residuals and weights.
+            let columns = clock_columns(&sel.used, &systems);
+            let dx = rtklib_step(
+                &sel.lines_of_sight,
+                &columns,
+                3 + systems.len(),
+                &sel.weights,
+                &sel.residuals_m,
+            )
+            .ok_or(SppError::Singular(
+                least_squares::SolveError::SingularJacobian,
+            ))?;
+            if passes == MAX_SELECTION_PASSES {
+                return Err(SppError::SelectionUnsettled { passes });
+            }
+            let x = state.parameters(&systems) + DVector::from_row_slice(&dx);
+            state.update(&systems, &x);
+            passes += 1;
+            iterations += 1;
+            if rtklib_step_norm(&dx, &[(3, &systems)]) < SELECTION_STEP_TOL_M {
+                // `estpos` ends here and reports the selection it stepped with.
+                // The reported geometry is taken at the position reached: the
+                // selection there when it is the same one, else that selection's
+                // satellites evaluated there.
+                let post = select_at(eph, inputs, model, placement, state.rx_ecef_m, &|system| {
+                    state.clock_m(system)
+                });
+                if post.used == sel.used {
+                    break post;
+                }
+                if let Some((lines_of_sight, residuals_m)) =
+                    evaluate_used(eph, inputs, model, placement, &sel.used, &state)?
+                {
+                    break Selection {
+                        lines_of_sight,
+                        residuals_m,
+                        ..sel
+                    };
+                }
+                // A satellite left the augmentation grid with the last step: the
+                // selection changed.
+                last_used = None;
+                continue;
+            }
+            last_used = Some(sel.used);
+            continue;
+        }
+        if passes == MAX_SELECTION_PASSES {
+            return Err(SppError::SelectionUnsettled { passes });
+        }
+        // A new selection: the trust-region solve over it, from this iterate. Its
+        // pass cannot end the solve; the next iterate is selected again.
+        let end = solve_selected(
+            eph,
+            inputs,
             model,
-            placement_ref.as_ref(),
-        ) {
-            Ok(r) => DVector::from_vec(r),
-            Err(sat) => {
-                lost_in.set(Some(sat));
-                DVector::from_vec(vec![0.0; n_used])
+            placement,
+            linear_solve,
+            &obs_by_id,
+            &sel.used,
+            &systems,
+            state.parameters(&systems),
+            &sel.weights,
+        )?;
+        passes += 1;
+        match end {
+            PassEnd::Solved(report) => {
+                iterations += report.iterations;
+                state.update(&systems, &report.x);
+                last_used = Some(sel.used);
+            }
+            PassEnd::CoverageLost(x) => {
+                // The last accepted iterate: its selection, if the same, is stepped
+                // from rather than solved again.
+                state.update(&systems, &x);
+                last_used = Some(sel.used);
             }
         }
     };
 
-    // Extend the 4-element initial guess `[x, y, z, b_ref]` with a zero starting
-    // value for each additional system's inter-system bias.
-    let mut x0v = inputs.initial_guess.to_vec();
-    x0v.extend(std::iter::repeat_n(0.0, n_clocks - 1));
-    let x0 = DVector::from_vec(x0v);
-    // Agreement-track stopping thresholds (see the SPP_SOLVER_* constants).
-    let opts = SolveOptions {
-        gtol: SPP_SOLVER_GTOL,
-        ftol: SPP_SOLVER_FTOL,
-        xtol: SPP_SOLVER_XTOL,
-        max_nfev: SPP_SOLVER_MAX_NFEV,
-    };
-
-    // The static elevation weights (base weights), index-aligned to `sel.used`.
-    let base_weights = DVector::from_row_slice(&sel.weights);
-
-    // The warm-start solve uses the base elevation weights exactly. On the
-    // static path (`robust == None`) this is the literal current sequence: a
-    // single `with_weights(residual, x0, base_weights)` solve and nothing else,
-    // so the byte output is unchanged. On the robust path it seeds the outer
-    // loop.
-    //
-    // Check for an ephemeris loss recorded by the residual closure BEFORE
-    // propagating a solver error: a lost satellite zeroes its residual row,
-    // which can itself make the Jacobian singular, and EphemerisLost is the
-    // more specific, actionable cause.
-    let problem = LeastSquaresProblem::with_weights(&residual, x0, base_weights);
-    let report_result = solve_trf_with(&problem, &opts, linear_solve);
-    if let Some(satellite) = lost.get() {
-        return Err(SppError::EphemerisLost { satellite });
-    }
-    let mut report = report_result?;
-
+    let mut status = Status::SelectionSettled;
     let mut outer_iterations = 0usize;
     let mut final_robust_scale_m: Option<f64> = None;
-    let mut final_weights = sel.weights.clone();
+    let mut final_set = FinalSet {
+        used: settled.used,
+        rejected: settled.rejected,
+        weights: settled.weights,
+        lines_of_sight: settled.lines_of_sight,
+        residuals_m: settled.residuals_m,
+    };
 
-    // Outer Huber/IRLS reweighting loop, ONLY on the robust path. Each iteration
-    // recomputes the unweighted post-fit residuals at the current converged
-    // state, derives a floored MAD scale, builds the effective weight vector
-    // `base_elevation_weight * huber(r_i / s)` index-aligned to `sel.used`,
-    // rebuilds the problem warm-started at the previous state, and re-solves. It
-    // stops when the position step drops below `outer_tol_m` or the reweighted
-    // solve budget left after the warm start is hit (recording
-    // `converged = false` if the inner solve itself did not converge on the
-    // final pass).
+    // Outer Huber/IRLS reweighting loop, ONLY on the robust path, warm-started
+    // from the settled solve above. Each iteration takes the selection at the
+    // current state, derives a floored MAD scale from its residuals, builds the
+    // effective weight vector `elevation_weight * huber(r_i / s)` index-aligned
+    // to that selection, and re-solves from the current state. It settles when the
+    // position step drops below `outer_tol_m` and the selection at the new state
+    // is the one solved with; a solve whose budget runs out first ends with
+    // [`Status::OuterBudgetExhausted`] and has not converged. The reported set is
+    // the one the last solve used, at the state it reached, with its effective
+    // weights.
     if let Some(rc) = inputs.robust {
+        let (mut sel, mut systems) = select_at_state(eph, inputs, model, placement, &state)?;
+        let mut settled = false;
+        // How the last solve ended; a least-squares step ends at its own target.
+        let mut last_inner = Status::SelectionSettled;
+        // After a coverage loss the selection at the last accepted iterate, when it
+        // is the one solved over, is stepped from rather than solved again.
+        let mut step_next = false;
         for _ in 0..rc.max_outer.saturating_sub(1) {
-            if lost.get().is_some() {
-                break;
-            }
-            // Unweighted post-fit residuals at the current state, in used order.
-            let post = match residual_unweighted_placed(
-                eph,
-                &sel.used,
-                &obs_by_id,
-                report.x.as_slice(),
-                inputs,
-                model,
-                placement,
-            ) {
-                Ok(r) => r,
-                Err(satellite) => return Err(SppError::EphemerisLost { satellite }),
-            };
-            let scale = mad_scale(&post, rc.scale_floor_m).map_err(map_robust_error)?;
-            // Effective weight per used sat: base elevation weight times the
-            // Huber multiplier of the scaled residual.
-            let eff: Vec<f64> = post
+            let scale = mad_scale(&sel.residuals_m, rc.scale_floor_m).map_err(map_robust_error)?;
+            let eff: Vec<f64> = sel
+                .residuals_m
                 .iter()
                 .zip(sel.weights.iter())
                 .map(|(&r, &bw)| bw * huber_weight(r / scale, rc.huber_k))
                 .collect();
-            let eff_w = DVector::from_row_slice(&eff);
-            let x_prev = report.x.clone();
-            let problem = LeastSquaresProblem::with_weights(&residual, x_prev.clone(), eff_w);
-            let next = solve_trf_with(&problem, &opts, linear_solve);
-            if let Some(satellite) = lost.get() {
-                return Err(SppError::EphemerisLost { satellite });
-            }
-            report = next?;
-            final_weights = eff;
+            let prev_rx = state.rx_ecef_m;
             outer_iterations += 1;
-            final_robust_scale_m = Some(scale);
+            if step_next {
+                step_next = false;
+                let columns = clock_columns(&sel.used, &systems);
+                let dx = rtklib_step(
+                    &sel.lines_of_sight,
+                    &columns,
+                    3 + systems.len(),
+                    &eff,
+                    &sel.residuals_m,
+                )
+                .ok_or(SppError::Singular(
+                    least_squares::SolveError::SingularJacobian,
+                ))?;
+                let x = state.parameters(&systems) + DVector::from_row_slice(&dx);
+                state.update(&systems, &x);
+                iterations += 1;
+                last_inner = Status::SelectionSettled;
+            } else {
+                match solve_selected(
+                    eph,
+                    inputs,
+                    model,
+                    placement,
+                    linear_solve,
+                    &obs_by_id,
+                    &sel.used,
+                    &systems,
+                    state.parameters(&systems),
+                    &eff,
+                )? {
+                    PassEnd::Solved(report) => {
+                        iterations += report.iterations;
+                        last_inner = report.status;
+                        state.update(&systems, &report.x);
+                    }
+                    PassEnd::CoverageLost(x) => {
+                        // The last accepted iterate, reported with the selection and
+                        // elevation weights there until a reweighted solve or step
+                        // replaces them.
+                        state.update(&systems, &x);
+                        let (next, next_systems) =
+                            select_at_state(eph, inputs, model, placement, &state)?;
+                        step_next = next.used == sel.used;
+                        final_set = FinalSet {
+                            used: next.used.clone(),
+                            rejected: next.rejected.clone(),
+                            weights: next.weights.clone(),
+                            lines_of_sight: next.lines_of_sight.clone(),
+                            residuals_m: next.residuals_m.clone(),
+                        };
+                        final_robust_scale_m = None;
+                        sel = next;
+                        systems = next_systems;
+                        continue;
+                    }
+                }
+            }
             // Position L2 step between successive outer solves.
-            let dx = report.x[0] - x_prev[0];
-            let dy = report.x[1] - x_prev[1];
-            let dz = report.x[2] - x_prev[2];
+            let dx = state.rx_ecef_m[0] - prev_rx[0];
+            let dy = state.rx_ecef_m[1] - prev_rx[1];
+            let dz = state.rx_ecef_m[2] - prev_rx[2];
             let dpos = (dx * dx + dy * dy + dz * dz).sqrt();
-            if dpos < rc.outer_tol_m {
+            let (next, next_systems) = select_at_state(eph, inputs, model, placement, &state)?;
+            let same_set = next.used == sel.used;
+            let solved_geometry = if same_set {
+                Some((next.lines_of_sight.clone(), next.residuals_m.clone()))
+            } else {
+                evaluate_used(eph, inputs, model, placement, &sel.used, &state)?
+            };
+            (final_set, final_robust_scale_m) = match solved_geometry {
+                Some((lines_of_sight, residuals_m)) => (
+                    FinalSet {
+                        used: sel.used,
+                        rejected: sel.rejected,
+                        weights: eff,
+                        lines_of_sight,
+                        residuals_m,
+                    },
+                    Some(scale),
+                ),
+                // A satellite left the augmentation grid: report the selection and
+                // elevation weights at the state reached.
+                None => (
+                    FinalSet {
+                        used: next.used.clone(),
+                        rejected: next.rejected.clone(),
+                        weights: next.weights.clone(),
+                        lines_of_sight: next.lines_of_sight.clone(),
+                        residuals_m: next.residuals_m.clone(),
+                    },
+                    None,
+                ),
+            };
+            sel = next;
+            systems = next_systems;
+            if dpos < rc.outer_tol_m && same_set {
+                settled = true;
                 break;
             }
         }
+        status = if outer_iterations == 0 {
+            Status::SelectionSettled
+        } else if !solve_converged(last_inner) {
+            last_inner
+        } else if settled {
+            Status::SelectionSettled
+        } else {
+            Status::OuterBudgetExhausted
+        };
     }
 
-    let xs = &report.x;
+    // The clock columns of the reported set: the systems it was solved with.
+    let systems = clock_systems(&final_set.used);
+    let n_clocks = systems.len();
+    let xs = state.parameters(&systems);
     let position = ItrfPositionM::new(xs[0], xs[1], xs[2]).expect("valid ITRF position");
     let rx_clock_s = xs[3] / C_M_S;
     // One receiver clock (seconds) per system, in the same order as the state's
@@ -1861,90 +2495,52 @@ fn solve_tracked(
         None
     };
 
-    // Post-fit unweighted residuals in used order.
-    let residuals_m = residual_unweighted_placed(
-        eph,
-        &sel.used,
-        &obs_by_id,
-        xs.as_slice(),
-        inputs,
-        model,
-        placement,
-    )
-    .map_err(|satellite| SppError::EphemerisLost { satellite })?;
-
-    // DOP from the converged geometry: line-of-sight unit vectors to the
-    // satellite positions the ranges were formed from, with the final solve weights. A
-    // single-system solve uses the 0-ULP four-state cofactor inverse; a
-    // multi-system solve uses the general (3 + n_systems) inverse with one clock
-    // column per GNSS (a deterministic geometry diagnostic, not a 0-ULP target).
-    // The receiver-clock argument does not affect the line of sight, so the
-    // reference clock is passed for every satellite.
-    let rx_ecef = [xs[0], xs[1], xs[2]];
+    // DOP and covariance from the reported geometry: the line-of-sight unit
+    // vectors to the satellite positions the ranges were formed from, with the
+    // reported weights. A single-system solve uses the 0-ULP four-state cofactor
+    // inverse; a multi-system solve uses the general (3 + n_systems) inverse with
+    // one clock column per GNSS (a deterministic geometry diagnostic, not a 0-ULP
+    // target).
     let geo = geodetic_from_ecef(model.frame, [xs[0], xs[1], xs[2]]);
-    let mut los = Vec::with_capacity(sel.used.len());
-    let mut clock_index = Vec::with_capacity(sel.used.len());
-    let env = SatModelEnv {
-        eph,
-        t_rx_j2000_s: inputs.t_rx_j2000_s,
-        t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
-        day_of_year: inputs.day_of_year,
-        corrections: inputs.corrections,
-        met: &inputs.met,
-        glonass_channels: &inputs.glonass_channels,
-        model,
-        pseudorange_code: inputs.pseudorange_code,
-        placement_pseudoranges_m: placement,
-    };
-    for &sat in &sel.used {
-        let p_meas = obs_by_id
-            .iter()
-            .find(|(id, _)| *id == sat)
-            .map(|(_, p)| *p)
-            .ok_or(SppError::EphemerisLost { satellite: sat })?;
-        let m = sat_model(
-            &env,
-            sat,
-            rx_ecef,
-            xs[3],
-            p_meas,
-            ionosphere_for(sat.system, inputs),
-        )
-        .ok_or(SppError::EphemerisLost { satellite: sat })?;
-        let dx = m.sat_rot_ecef_m[0] - rx_ecef[0];
-        let dy = m.sat_rot_ecef_m[1] - rx_ecef[1];
-        let dz = m.sat_rot_ecef_m[2] - rx_ecef[2];
-        let n = (dx * dx + dy * dy + dz * dz).sqrt();
-        los.push(LineOfSight::new(dx / n, dy / n, dz / n));
-        let idx = systems.iter().position(|s| *s == sat.system).unwrap_or(0);
-        clock_index.push(idx);
-    }
+    let columns = clock_columns(&final_set.used, &systems);
+    let clock_index: Vec<usize> = columns.iter().map(|column| column - 3).collect();
+    let los = &final_set.lines_of_sight;
     // `systems` is the clock-column ordering: `clock_index[k] ==
-    // systems.position(sat.system)`, so `systems[c]` owns clock column `c` (the
-    // same ordering `system_clocks_s` uses). The multi-system path is handed
-    // that mapping and returns `Dop::system_tdops` already GNSS-tagged; the
+    // systems.position(clock system of sat k)`, so `systems[c]` owns clock column
+    // `c` (the same ordering `system_clocks_s` uses). The multi-system path is
+    // handed that mapping and returns `Dop::system_tdops` already GNSS-tagged; the
     // single-system 0-ULP `dop` carries no constellation identity, so tag its
     // lone clock here with the one system in the solve.
     let dop_result = if n_clocks == 1 {
-        dop(&los, &final_weights, geo).ok().map(|mut d| {
+        dop(los, &final_set.weights, geo).ok().map(|mut d| {
             d.system_tdops = vec![(systems[0], d.tdop)];
             d
         })
     } else {
-        dop_multi(&los, &clock_index, &systems, n_clocks, &final_weights, geo).ok()
+        dop_multi(
+            los,
+            &clock_index,
+            &systems,
+            n_clocks,
+            &final_set.weights,
+            geo,
+        )
+        .ok()
     };
     let n_params = xs.len();
-    let jacobian_svd = portable::svd(&report.jacobian, false, false);
+    // The geometry diagnostics of the reported design, `sqrt(W) [-e, 1]` at the
+    // reported position with the reported weights.
+    let jacobian = weighted_design(los, &columns, n_params, &final_set.weights).ok_or(
+        SppError::Singular(least_squares::SolveError::SingularJacobian),
+    )?;
+    let jacobian_svd = portable::svd(&jacobian, false, false);
     let singular_values: Vec<f64> = jacobian_svd
         .singular_values
         .iter()
         .map(|value| value.0)
         .collect();
-    let diagnostics = singular_value_diagnostics(
-        &singular_values,
-        report.jacobian.nrows(),
-        report.jacobian.ncols(),
-    );
+    let diagnostics =
+        singular_value_diagnostics(&singular_values, jacobian.nrows(), jacobian.ncols());
     if diagnostics.rank < n_params || dop_result.is_none() {
         return Err(SppError::Singular(
             least_squares::SolveError::SingularJacobian,
@@ -1961,15 +2557,12 @@ fn solve_tracked(
         .map(|d| d.system_tdops.clone())
         .unwrap_or_default();
     let position_covariance =
-        spp_position_covariance(&los, &clock_index, n_clocks, &final_weights, geo).ok_or(
+        spp_position_covariance(los, &columns, n_params, &final_set.weights, geo).ok_or(
             SppError::Singular(least_squares::SolveError::SingularJacobian),
         )?;
 
-    let converged = matches!(
-        report.status,
-        Status::GradientTolerance | Status::CostTolerance | Status::StepTolerance
-    );
-    let metadata_used_count = sel.used.len();
+    let converged = solve_converged(status);
+    let metadata_used_count = final_set.used.len();
     let metadata_redundancy = redundancy(&systems, metadata_used_count);
     let geometry_quality = classify(
         diagnostics.rank,
@@ -1990,14 +2583,14 @@ fn solve_tracked(
         dop: dop_result,
         system_tdops,
         position_covariance,
-        residuals_m,
-        used_sats: sel.used,
-        rejected_sats: sel.rejected,
+        residuals_m: final_set.residuals_m,
+        used_sats: final_set.used,
+        rejected_sats: final_set.rejected,
         geometry_quality,
         metadata: SolutionMetadata {
-            iterations: report.iterations,
+            iterations,
             converged,
-            status: report.status,
+            status,
             ionosphere_applied: inputs.corrections.ionosphere,
             troposphere_applied: inputs.corrections.troposphere,
             outer_iterations,
@@ -2013,36 +2606,12 @@ fn solve_tracked(
 
 fn spp_position_covariance(
     los: &[LineOfSight],
-    clock_index: &[usize],
-    n_clocks: usize,
+    clock_columns: &[usize],
+    n_params: usize,
     weights: &[f64],
     receiver: Wgs84Geodetic,
 ) -> Option<PositionCovariance> {
-    if los.len() != clock_index.len() || los.len() != weights.len() || n_clocks == 0 {
-        return None;
-    }
-    let p = 3 + n_clocks;
-    if los.len() < p {
-        return None;
-    }
-
-    let mut normal = vec![vec![0.0_f64; p]; p];
-    for k in 0..los.len() {
-        if clock_index[k] >= n_clocks {
-            return None;
-        }
-        let mut row = vec![0.0_f64; p];
-        row[0] = -los[k].e_x;
-        row[1] = -los[k].e_y;
-        row[2] = -los[k].e_z;
-        row[3 + clock_index[k]] = 1.0;
-        let weight = weights[k];
-        for i in 0..p {
-            for j in 0..p {
-                normal[i][j] += row[i] * weight * row[j];
-            }
-        }
-    }
+    let normal = weighted_normal_matrix(los, clock_columns, n_params, weights)?;
     let q = invert_symmetric_pd(&normal)?;
     let ecef_m2 = [
         [q[0][0], q[0][1], q[0][2]],
@@ -2252,10 +2821,23 @@ fn coarse_seeds(n: usize) -> Vec<[f64; 4]> {
         .collect()
 }
 
+/// A seed's solution is a candidate when its solve converged, or when it is a
+/// robust solve whose reweighting spent its budget: the reweighting starts only
+/// from a settled solve, which converged, so the seed reached the solution's
+/// basin, and the position is where the reweighting left it. Every seed shares the
+/// robust configuration, so refusing these would leave a robust coarse search
+/// with no candidate where the plain solve returns one.
+fn coarse_candidate_ended_well(status: Status) -> bool {
+    solve_converged(status) || status == Status::OuterBudgetExhausted
+}
+
 fn select_coarse_candidate(candidates: &[ReceiverSolution]) -> Option<&ReceiverSolution> {
     candidates
         .iter()
-        .filter(|solution| solution.metadata.converged && solution.metadata.redundancy >= 1)
+        .filter(|solution| {
+            coarse_candidate_ended_well(solution.metadata.status)
+                && solution.metadata.redundancy >= 1
+        })
         .min_by(|a, b| compare_coarse_candidates(a, b))
 }
 
@@ -2383,6 +2965,34 @@ pub(crate) mod test_support {
 
     pub fn geodetic_from_ecef_m_for_test(x_m: f64, y_m: f64, z_m: f64) -> Wgs84Geodetic {
         geodetic_from_ecef(FrameRecipe::SppSkyfieldAuThreeIter, [x_m, y_m, z_m])
+    }
+
+    /// The selection at the position and clocks of `solution`, the one it reports.
+    pub fn selection_at_solution_for_test(
+        eph: &dyn EphemerisSource,
+        inputs: &SolveInputs,
+        solution: &ReceiverSolution,
+        model: SppModelRecipe,
+    ) -> Selection {
+        let clocks: Vec<(GnssSystem, f64)> = solution
+            .system_clocks_s
+            .iter()
+            .map(|&(system, clock_s)| (system, clock_s * C_M_S))
+            .collect();
+        let reference = clocks[0].1;
+        select_at(
+            eph,
+            inputs,
+            model,
+            None,
+            solution.position.as_array(),
+            &|system| {
+                clocks
+                    .iter()
+                    .find(|(s, _)| *s == system)
+                    .map_or(reference, |&(_, clock)| clock)
+            },
+        )
     }
 
     pub fn sat_model_for_test(

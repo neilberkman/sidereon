@@ -182,7 +182,6 @@ where
 ///
 /// This crate-private variant lets callers that use the same cancellation
 /// protection as the solver derive an exactly matching covariance matrix.
-#[cfg(test)]
 pub(crate) fn jacobian_2point_with_min_steps<F>(
     residual: F,
     x0: &DVector<f64>,
@@ -228,8 +227,12 @@ where
     Ok(jac)
 }
 
-/// Termination state of a [`solve_trf`] run, mirroring the scipy
-/// `least_squares` status codes for the conditions this solver detects.
+/// How a solve ended. The first four variants are the termination state of a
+/// [`solve_trf`] run, mirroring the scipy `least_squares` status codes for the
+/// conditions this solver detects; [`Self::SelectionSettled`] and
+/// [`Self::OuterBudgetExhausted`] describe how a positioning solve (SPP, the
+/// static solve), which runs several trust-region solves and least-squares steps,
+/// ended as a whole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     /// `||J^T r||_inf` fell below `gtol` (first-order optimality).
@@ -240,6 +243,18 @@ pub enum Status {
     StepTolerance,
     /// The maximum number of residual evaluations was reached.
     MaxEvaluations,
+    /// A positioning solve (SPP, the static solve) ended with a least-squares
+    /// step below its tolerance at a satellite selection that held, RTKLIB
+    /// `estpos`'s `norm(dx) < 1E-4`; a robust-reweighted one whose position and
+    /// selection then settled. The solve converged.
+    SelectionSettled,
+    /// A robust-reweighted positioning solve spent its outer solve budget before
+    /// its position and selection settled. The position is where the last
+    /// reweighted solve or step ended (the solve's optimum, or its last accepted
+    /// iterate when a satellite's augmentation-grid coverage changed in it), not a
+    /// fixed point of the reweighting; a last solve that spent its evaluations
+    /// reports its own status instead. The solve did not converge.
+    OuterBudgetExhausted,
 }
 
 /// Stopping tolerances and evaluation budget for [`solve_trf`].
@@ -723,6 +738,21 @@ pub fn solve_trf_with<F>(
 where
     F: Fn(&DVector<f64>) -> DVector<f64>,
 {
+    solve_trf_observed(problem, opts, linear_solve, &mut |_| {})
+}
+
+/// [`solve_trf_with`], handing `on_accept` the initial parameters and then each
+/// iterate the solve accepts, never a finite-difference probe or a rejected
+/// trial point. The arithmetic is the same.
+pub(crate) fn solve_trf_observed<F>(
+    problem: &LeastSquaresProblem<F>,
+    opts: &SolveOptions,
+    linear_solve: TrustRegionSolve,
+    on_accept: &mut dyn FnMut(&DVector<f64>),
+) -> Result<LeastSquaresReport, SolveError>
+where
+    F: Fn(&DVector<f64>) -> DVector<f64>,
+{
     validate_options(opts)?;
     let n = problem.x0.len();
 
@@ -730,6 +760,7 @@ where
     validate_nonempty_vector(&x, "initial parameters")?;
     validate_vector(&x, "initial parameters")?;
     let mut r = problem.weighted_residual(&x)?;
+    on_accept(&x);
     let mut f0 = r.clone();
     let mut jac = problem.jacobian(&x, &f0)?;
     let mut nfev = 1usize; // the f0 above
@@ -848,6 +879,7 @@ where
                 let rel_step = step_norm / x_norm.max(f64::MIN_POSITIVE);
 
                 x = x_trial;
+                on_accept(&x);
                 r = r_trial;
                 cur_cost = cost_trial;
                 f0 = r.clone();
