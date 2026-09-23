@@ -830,7 +830,7 @@ fn exact_product_set_rejects_duplicates_and_undeclared_products() {
 }
 
 #[test]
-fn exact_product_set_compares_prediction_metadata_not_only_filenames() {
+fn exact_product_set_distinguishes_the_predicted_lines_for_one_map_date() {
     let predicted_one_day = predicted_ionex(AnalysisCenter::CodPrd1, date(2026, 7, 15), None)
         .expect("one-day prediction")
         .identity()
@@ -839,9 +839,14 @@ fn exact_product_set_compares_prediction_metadata_not_only_filenames() {
         .expect("two-day prediction")
         .identity()
         .expect("two-day identity");
+    assert_eq!(predicted_one_day.date, predicted_two_day.date);
     assert_eq!(
         predicted_one_day.official_filename,
-        predicted_two_day.official_filename
+        "COD0OPSP0D_20261960000_01D_01H_GIM.INX"
+    );
+    assert_eq!(
+        predicted_two_day.official_filename,
+        "COD0OPSP1D_20261960000_01D_01H_GIM.INX"
     );
 
     assert_eq!(
@@ -1042,73 +1047,75 @@ fn predicted_ionex_aliases_apply_the_existing_date_offset() {
     let prd1 = predicted_ionex(AnalysisCenter::CodPrd1, date(2026, 6, 14), None).expect("prd1");
     assert_eq!(
         prd1.canonical_filename().expect("filename"),
-        "COD0OPSPRD_20261650000_01D_01H_GIM.INX"
+        "COD0OPSP0D_20261650000_01D_01H_GIM.INX"
     );
 
     let prd2 = predicted_ionex(AnalysisCenter::CodPrd2, date(2026, 6, 14), None).expect("prd2");
     assert_eq!(
         prd2.canonical_filename().expect("filename"),
-        "COD0OPSPRD_20261660000_01D_01H_GIM.INX"
+        "COD0OPSP1D_20261660000_01D_01H_GIM.INX"
     );
 
-    let same_file_prd1 =
+    let same_map_prd1 =
         predicted_ionex(AnalysisCenter::CodPrd1, date(2026, 6, 15), None).expect("prd1");
+    assert_eq!(same_map_prd1.date, prd2.date);
     assert_eq!(
-        same_file_prd1.canonical_filename().expect("filename"),
-        prd2.canonical_filename().expect("filename")
+        same_map_prd1.canonical_filename().expect("filename"),
+        "COD0OPSP0D_20261660000_01D_01H_GIM.INX"
     );
     assert_ne!(
-        same_file_prd1.identity().expect("identity").key(),
+        same_map_prd1.identity().expect("identity").key(),
         prd2.identity().expect("identity").key(),
         "prediction horizon must remain part of the normalized cache identity"
     );
     assert_ne!(
-        same_file_prd1
+        same_map_prd1
             .identity()
-            .expect("P1 identity")
+            .expect("one-day identity")
             .cache_relpath(DistributionSource::Direct)
-            .expect("P1 cache path"),
+            .expect("one-day cache path"),
         prd2.identity()
-            .expect("P2 identity")
+            .expect("two-day identity")
             .cache_relpath(DistributionSource::Direct)
-            .expect("P2 cache path"),
-        "P1 and P2 must not collide even when their official filenames match"
+            .expect("two-day cache path"),
+        "the two predicted lines must not collide for one map date"
     );
 }
 
+/// CODE archives both predicted lines under `CODE/IONO/PRD/`, one filename
+/// token per prediction lead, with no year directory (recorded in
+/// `fixtures/listings/aiub-iono-prd-20260923.csv`).
 #[test]
-fn predicted_ionex_direct_urls_use_exact_aiub_tier_and_identity_year() {
-    let p1 = predicted_ionex(AnalysisCenter::CodPrd1, date(2026, 7, 15), None)
-        .expect("P1 predicted IONEX");
+fn predicted_ionex_direct_urls_use_the_aiub_prd_archive() {
+    let one_day = predicted_ionex(AnalysisCenter::CodPrd1, date(2026, 7, 15), None)
+        .expect("one-day predicted IONEX");
     assert_eq!(
-        p1.archive_url().expect("P1 direct URL"),
-        "https://www.aiub.unibe.ch/download/CODE/IONO/P1/2026/\
-COD0OPSPRD_20261960000_01D_01H_GIM.INX.gz"
+        one_day.archive_url().expect("one-day direct URL"),
+        "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
+COD0OPSP0D_20261960000_01D_01H_GIM.INX.gz"
     );
 
-    let p2 = predicted_ionex(AnalysisCenter::CodPrd2, date(2026, 7, 15), None)
-        .expect("P2 predicted IONEX");
+    let two_day = predicted_ionex(AnalysisCenter::CodPrd2, date(2026, 7, 15), None)
+        .expect("two-day predicted IONEX");
     assert_eq!(
-        p2.archive_url().expect("P2 direct URL"),
-        "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2026/\
-COD0OPSPRD_20261970000_01D_01H_GIM.INX.gz"
+        two_day.archive_url().expect("two-day direct URL"),
+        "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
+COD0OPSP1D_20261970000_01D_01H_GIM.INX.gz"
     );
 
     let boundary = predicted_ionex(AnalysisCenter::CodPrd2, date(2026, 12, 31), None)
-        .expect("year-boundary P2 predicted IONEX");
+        .expect("year-boundary two-day predicted IONEX");
     assert_eq!(boundary.date, date(2027, 1, 1));
     assert_eq!(
-        boundary.archive_url().expect("year-boundary P2 URL"),
-        "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2027/\
-COD0OPSPRD_20270010000_01D_01H_GIM.INX.gz"
+        boundary.archive_url().expect("year-boundary two-day URL"),
+        "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
+COD0OPSP1D_20270010000_01D_01H_GIM.INX.gz"
     );
 }
 
 /// Cross-line predicted-IONEX walk: both candidates cover the SAME map date
-/// (2026 day 217 - the archive state recorded on 2026-08-04, when the P1
-/// object for day 217 was unpublished while the P2 object already existed),
-/// share the official filename, and keep the distinct line identities that
-/// name which artifact was actually served.
+/// (2026 day 217), carry their own line's filename token, and keep the
+/// distinct line identities that name which artifact was actually served.
 #[test]
 fn predicted_ionex_line_candidates_share_map_date_and_name_their_line() {
     let map_date = date(2026, 8, 5); // 2026 day-of-year 217
@@ -1123,19 +1130,24 @@ fn predicted_ionex_line_candidates_share_map_date_and_name_their_line() {
     assert_eq!(one_day.date, map_date);
     assert_eq!(two_day.date, map_date);
 
-    // Same official filename, different archive line and different identity.
-    let filename = "COD0OPSPRD_20262170000_01D_01H_GIM.INX";
-    assert_eq!(one_day.canonical_filename().expect("P1 filename"), filename);
-    assert_eq!(two_day.canonical_filename().expect("P2 filename"), filename);
+    // Same map date and archive directory, one filename token per line.
     assert_eq!(
-        one_day.archive_url().expect("P1 URL"),
-        "https://www.aiub.unibe.ch/download/CODE/IONO/P1/2026/\
-COD0OPSPRD_20262170000_01D_01H_GIM.INX.gz"
+        one_day.canonical_filename().expect("one-day filename"),
+        "COD0OPSP0D_20262170000_01D_01H_GIM.INX"
     );
     assert_eq!(
-        two_day.archive_url().expect("P2 URL"),
-        "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2026/\
-COD0OPSPRD_20262170000_01D_01H_GIM.INX.gz"
+        two_day.canonical_filename().expect("two-day filename"),
+        "COD0OPSP1D_20262170000_01D_01H_GIM.INX"
+    );
+    assert_eq!(
+        one_day.archive_url().expect("one-day URL"),
+        "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
+COD0OPSP0D_20262170000_01D_01H_GIM.INX.gz"
+    );
+    assert_eq!(
+        two_day.archive_url().expect("two-day URL"),
+        "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
+COD0OPSP1D_20262170000_01D_01H_GIM.INX.gz"
     );
 
     let one_day_identity = one_day.identity().expect("P1 identity");
@@ -1382,7 +1394,7 @@ fn publication_status_walks_back_one_week_for_the_recorded_bkg_state() {
 /// never matches a product filename.
 #[test]
 fn aiub_csv_rows_with_spaces_are_objects_not_grammar_violations() {
-    let objects = parse_archive_listing(&listing_fixture("aiub-iono-p1p2-20260804.csv"))
+    let objects = parse_archive_listing(&listing_fixture("aiub-iono-prd-20260923.csv"))
         .expect("recognized listing");
     assert!(objects
         .iter()
@@ -1392,7 +1404,7 @@ fn aiub_csv_rows_with_spaces_are_objects_not_grammar_violations() {
     let newest = newest_published_product(AnalysisCenter::CodPrd2, ProductType::Ionex, &objects)
         .expect("supported line")
         .expect("published objects exist");
-    assert_eq!(newest.date, date(2026, 8, 5));
+    assert_eq!(newest.date, date(2026, 9, 23));
 }
 
 /// Dialect detection is closed: a body that fits no recognized listing
@@ -1429,8 +1441,8 @@ fn parse_archive_listing_refuses_unrecognized_bodies() {
     // A row violating its recognized dialect's grammar is also refused:
     // truncation or corruption must not shrink to a shorter listing.
     let truncated_csv =
-        "CODE/IONO/P1/2026/COD0OPSPRD_20262160000_01D_01H_GIM.INX.gz;1;2026-08-04T06:51:14Z;00\n\
-CODE/IONO/P2/2026/COD0OPSPRD_2026";
+        "CODE/IONO/PRD/COD0OPSP0D_20262650000_01D_01H_GIM.INX.gz;1;2026-09-22T10:00:02Z;00\n\
+CODE/IONO/PRD/COD0OPSP1D_2026";
     assert!(matches!(
         parse_archive_listing(truncated_csv),
         Err(DataCatalogError::UnrecognizedArchiveListing { .. })
@@ -1465,24 +1477,45 @@ fn publication_status_parses_the_whu_ftp_listing() {
 }
 
 /// The AIUB whole-tree CSV attributes objects to the correct predicted line
-/// even though `P1` and `P2` share every filename: in the recorded state the
-/// one-day line's newest map is day 216 while the two-day line's is day 217.
+/// by filename token within `CODE/IONO/PRD/`: in the state recorded on
+/// 2026-09-23 the one-day line's newest map is day 265 while the two-day
+/// line's is day 266. The rolling copies CODE keeps at the tree root and the
+/// four-day `COD0OPSP4D` maps in the same directory belong to neither line.
 #[test]
 fn publication_status_separates_the_aiub_predicted_lines() {
-    let objects = parse_archive_listing(&listing_fixture("aiub-iono-p1p2-20260804.csv"))
+    let objects = parse_archive_listing(&listing_fixture("aiub-iono-prd-20260923.csv"))
         .expect("recognized listing");
 
     let one_day = newest_published_product(AnalysisCenter::CodPrd1, ProductType::Ionex, &objects)
         .expect("supported line")
         .expect("published objects exist");
-    assert_eq!(one_day.date, date(2026, 8, 4));
-    assert_eq!(one_day.observed_at.as_deref(), Some("2026-08-04T06:51:14Z"));
+    assert_eq!(one_day.date, date(2026, 9, 22));
+    assert_eq!(one_day.filename, "COD0OPSP0D_20262650000_01D_01H_GIM.INX");
+    assert_eq!(one_day.observed_at.as_deref(), Some("2026-09-22T10:00:02Z"));
 
     let two_day = newest_published_product(AnalysisCenter::CodPrd2, ProductType::Ionex, &objects)
         .expect("supported line")
         .expect("published objects exist");
-    assert_eq!(two_day.date, date(2026, 8, 5));
-    assert_eq!(two_day.filename, "COD0OPSPRD_20262170000_01D_01H_GIM.INX");
+    assert_eq!(two_day.date, date(2026, 9, 23));
+    assert_eq!(two_day.filename, "COD0OPSP1D_20262660000_01D_01H_GIM.INX");
+    assert_eq!(two_day.observed_at.as_deref(), Some("2026-09-22T10:00:02Z"));
+
+    let root_copies_only: Vec<_> = objects
+        .iter()
+        .filter(|object| !object.path.starts_with("CODE/IONO/"))
+        .cloned()
+        .collect();
+    assert!(root_copies_only
+        .iter()
+        .any(|object| object.path == "CODE/COD0OPSP1D_20262660000_01D_01H_GIM.INX.gz"));
+    for center in [AnalysisCenter::CodPrd1, AnalysisCenter::CodPrd2] {
+        assert_eq!(
+            newest_published_product(center, ProductType::Ionex, &root_copies_only)
+                .expect("supported line"),
+            None,
+            "a rolling root copy is not the archived object"
+        );
+    }
 
     assert_eq!(
         publication_listing_urls(
@@ -1495,37 +1528,38 @@ fn publication_status_separates_the_aiub_predicted_lines() {
     );
 }
 
-/// Acceptance scenario, recorded 2026-08-04: a predicted-IONEX request for
-/// map date 217, whose `P1` object was unpublished while the `P2` object
-/// existed, resolves through the cross-line walk to the two-day artifact,
-/// and the resolved identity names the `P2` line. For map date 216 both
-/// lines were published and the walk keeps its `P1` preference.
+/// Acceptance scenario, recorded 2026-09-23: a predicted-IONEX request for
+/// map date 266, whose one-day object was not yet published while the
+/// two-day object existed, resolves through the cross-line walk to the
+/// two-day artifact, and the resolved identity names the two-day line. For
+/// map date 265 both lines were published and the walk keeps its one-day
+/// preference.
 #[test]
-fn cross_line_walk_resolves_the_recorded_p1_gap_to_p2() {
-    let objects = parse_archive_listing(&listing_fixture("aiub-iono-p1p2-20260804.csv"))
+fn cross_line_walk_resolves_the_recorded_one_day_gap_to_two_day() {
+    let objects = parse_archive_listing(&listing_fixture("aiub-iono-prd-20260923.csv"))
         .expect("recognized listing");
 
     let gap_candidates =
-        predicted_ionex_line_candidates(date(2026, 8, 5), None).expect("candidates");
+        predicted_ionex_line_candidates(date(2026, 9, 23), None).expect("candidates");
     let resolved = resolve_first_published(&gap_candidates, &objects)
         .expect("resolvable")
         .expect("one line is published");
-    assert_eq!(resolved, 1, "P1 unpublished, P2 published");
+    assert_eq!(resolved, 1, "one-day unpublished, two-day published");
     let identity = gap_candidates[resolved].identity().expect("identity");
     assert_eq!(identity.analysis_center, AnalysisCenter::CodPrd2);
     assert_eq!(identity.prediction_horizon_days, Some(2));
     assert_eq!(
         identity.date,
-        date(2026, 8, 5),
+        date(2026, 9, 23),
         "the map date is never substituted"
     );
 
     let full_candidates =
-        predicted_ionex_line_candidates(date(2026, 8, 4), None).expect("candidates");
+        predicted_ionex_line_candidates(date(2026, 9, 22), None).expect("candidates");
     assert_eq!(
         resolve_first_published(&full_candidates, &objects).expect("resolvable"),
         Some(0),
-        "when P1 is published the walk prefers it"
+        "when the one-day map is published the walk prefers it"
     );
 }
 
@@ -1540,9 +1574,9 @@ fn predicted_ionex_line_candidates_cross_the_year_boundary() {
     assert_eq!(candidates.len(), 2);
     assert!(candidates.iter().all(|spec| spec.date == map_date));
     assert_eq!(
-        candidates[1].archive_url().expect("P2 URL"),
-        "https://www.aiub.unibe.ch/download/CODE/IONO/P2/2027/\
-COD0OPSPRD_20270010000_01D_01H_GIM.INX.gz"
+        candidates[1].archive_url().expect("two-day URL"),
+        "https://www.aiub.unibe.ch/download/CODE/IONO/PRD/\
+COD0OPSP1D_20270010000_01D_01H_GIM.INX.gz"
     );
 }
 
