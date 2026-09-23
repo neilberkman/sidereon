@@ -130,13 +130,22 @@ modeled explicitly, `AnalysisCenter::Cod` rejects SP3, clock, and IONEX dates
 before GPS week 2238 with `UnsupportedProductEra`; it never fabricates a
 current long filename for a historical request.
 
-CODE P1 and P2 predicted maps use separate AIUB tiers. Direct locations resolve
-the exact product identity to:
+CODE's predicted maps are archived in one AIUB directory with one filename
+token per prediction lead: `COD0OPSP0D` for the one-day line (`cod_prd1`, the
+map produced on its own date) and `COD0OPSP1D` for the two-day line
+(`cod_prd2`, the map produced the day before). Direct locations resolve the
+exact product identity to:
 
 ```text
-https://www.aiub.unibe.ch/download/CODE/IONO/P1/<identity-year>/<official-filename>.gz
-https://www.aiub.unibe.ch/download/CODE/IONO/P2/<identity-year>/<official-filename>.gz
+https://www.aiub.unibe.ch/download/CODE/IONO/PRD/<official-filename>.gz
 ```
+
+The earlier `CODE/IONO/P1/<year>/COD0OPSPRD_*` and
+`CODE/IONO/P2/<year>/COD0OPSPRD_*` trees received their last issue on
+2026-09-21 and are no longer served; for the dates both layouts carried, the
+`PRD` objects decompress to the same bytes. CODE also keeps rolling copies of
+the newest maps at `CODE/`; publication status attributes only the archived
+`CODE/IONO/PRD/` objects to a line.
 
 The HTTPS redirect chain is restricted to AIUB's download host and public
 object-store host. A missing exact URL remains a not-published result; direct
@@ -545,7 +554,7 @@ mirrored by every distributor.
 | AIUB identifies its current product service and CODE product series. | [AIUB services](https://www.aiub.unibe.ch/services/index_eng.html), [CODE Analysis Center](https://www.aiub.unibe.ch/research/code___analysis_center/index_eng.html) | 2026-07-20 |
 | AIUB documents operational, rapid, ultra-rapid, predicted, final, MGEX, clock, SP3, and IONEX names and directories. | [AIUB_AFTP.TXT](https://www.aiub.unibe.ch/download/AIUB_AFTP.TXT) | 2026-07-20 |
 | Current AIUB listings confirm MGEX final SP3/clock under `CODE_MGEX/CODE/<year>`, final products under `CODE/<year>`, and rapid/ultra-rapid products at `CODE`. | [MGEX 2026 listing](https://code.aiub.unibe.ch/s3_script/aiub_s3_bucket_listing.php?path=CODE_MGEX%2FCODE%2F2026), [CODE 2026 listing](https://code.aiub.unibe.ch/s3_script/aiub_s3_bucket_listing.php?path=CODE%2F2026), [CODE current listing](https://code.aiub.unibe.ch/s3_script/aiub_s3_bucket_listing.php?path=CODE) | 2026-07-20 |
-| AIUB's P1 and P2 predicted IONEX tiers are separate paths. | [P1 2026 listing](https://code.aiub.unibe.ch/s3_script/aiub_s3_bucket_listing.php?path=CODE%2FIONO%2FP1%2F2026), [P2 2026 listing](https://code.aiub.unibe.ch/s3_script/aiub_s3_bucket_listing.php?path=CODE%2FIONO%2FP2%2F2026) | 2026-07-20 |
+| AIUB archives CODE's predicted IONEX lines under `CODE/IONO/PRD/` as `COD0OPSP0D`, `COD0OPSP1D` and `COD0OPSP4D`; the `CODE/IONO/P1` and `CODE/IONO/P2` trees are empty. | [PRD listing](https://code.aiub.unibe.ch/s3_script/aiub_s3_bucket_listing.php?path=CODE%2FIONO%2FPRD), [whole-tree listing](https://www.aiub.unibe.ch/download/full_listing.csv) | 2026-09-23 |
 | GFZ rapid SP3 used `15M` through 2021 day 137 and `05M` from day 138 within GPS week 2158; its current rapid series remains `05M`. The current day-200 `05M` object returned HTTP 200 while the corresponding `15M` URL returned 404. | [GFZ week-2158 listing](https://isdc-data.gfz.de/gnss/products/rapid/w2158/), [GFZ current week-2428 listing](https://isdc-data.gfz.de/gnss/products/rapid/w2428/), [current 05M object](https://isdc-data.gfz.de/gnss/products/rapid/w2428/GFZ0OPSRAP_20262000000_01D_05M_ORB.SP3.gz), [absent 15M path](https://isdc-data.gfz.de/gnss/products/rapid/w2428/GFZ0OPSRAP_20262000000_01D_15M_ORB.SP3.gz) | 2026-07-20 |
 | ESA's MGEX final SP3 and clock archive begins on 2014-01-05; the preceding week has no corresponding final-orbit or clock object. | [preceding week 1773](https://navigation-office.esa.int/products/gnss-products/1773/), [first week 1774 listing](https://navigation-office.esa.int/products/gnss-products/1774/), [first SP3 object](https://navigation-office.esa.int/products/gnss-products/1774/ESA0MGNFIN_20140050000_01D_05M_ORB.SP3.gz), [first clock object](https://navigation-office.esa.int/products/gnss-products/1774/ESA0MGNFIN_20140050000_01D_30S_CLK.CLK.gz) | 2026-07-20 |
 | GFZ's rapid SP3 and clock listing begins on 2020-05-13 (2020 day 134). | [GFZ week-2105 listing](https://isdc-data.gfz.de/gnss/products/rapid/w2105/), [first rapid SP3 object](https://isdc-data.gfz.de/gnss/products/rapid/w2105/GFZ0OPSRAP_20201340000_01D_15M_ORB.SP3.gz), [first rapid clock object](https://isdc-data.gfz.de/gnss/products/rapid/w2105/GFZ0OPSRAP_20201340000_01D_30S_CLK.CLK.gz) | 2026-07-20 |

@@ -629,9 +629,26 @@ const COD_RAP_PRODUCTS: [CenterProductConvention; 1] = [CenterProductConvention 
     compression: ArchiveCompression::Gzip,
 }];
 
-const COD_PRD_PRODUCTS: [CenterProductConvention; 1] = [CenterProductConvention {
+// CODE's predicted global ionosphere maps, one filename token per prediction
+// lead: `COD0OPSP0D` is the map CODE produces on the map date itself (the
+// one-day line, formerly `CODE/IONO/P1/<year>/COD0OPSPRD_*`) and `COD0OPSP1D`
+// the map it produces the day before (the two-day line, formerly
+// `CODE/IONO/P2/<year>/COD0OPSPRD_*`). Both are archived under `CODE/IONO/PRD/`.
+// The old `P1`/`P2` trees stopped receiving issues after 2026-09-21 and are no
+// longer served; the `PRD` objects for dates both trees carried decompress to
+// the same bytes.
+const COD_PRD1_PRODUCTS: [CenterProductConvention; 1] = [CenterProductConvention {
     product_type: ProductType::Ionex,
-    token: "COD0OPSPRD",
+    token: "COD0OPSP0D",
+    layout: ArchiveLayout::AiubCodeRoot,
+    span: "01D",
+    default_sample: "01H",
+    compression: ArchiveCompression::Gzip,
+}];
+
+const COD_PRD2_PRODUCTS: [CenterProductConvention; 1] = [CenterProductConvention {
+    product_type: ProductType::Ionex,
+    token: "COD0OPSP1D",
     layout: ArchiveLayout::AiubCodeRoot,
     span: "01D",
     default_sample: "01H",
@@ -1063,7 +1080,7 @@ const CATALOG: [CenterCatalogEntry; 12] = [
         protocol: ArchiveProtocol::Https,
         host: "www.aiub.unibe.ch",
         root_url: "https://www.aiub.unibe.ch/download",
-        products: &COD_PRD_PRODUCTS,
+        products: &COD_PRD1_PRODUCTS,
         issues: &[],
     },
     CenterCatalogEntry {
@@ -1072,7 +1089,7 @@ const CATALOG: [CenterCatalogEntry; 12] = [
         protocol: ArchiveProtocol::Https,
         host: "www.aiub.unibe.ch",
         root_url: "https://www.aiub.unibe.ch/download",
-        products: &COD_PRD_PRODUCTS,
+        products: &COD_PRD2_PRODUCTS,
         issues: &[],
     },
     CenterCatalogEntry {
@@ -1902,9 +1919,8 @@ impl ProductIdentity {
         } else {
             match descriptor.kind {
                 ProductFilenameKind::Sampled => {
-                    let solution_token = self.solution.filename_token().ok_or(
-                        DataCatalogError::InconsistentProductIdentity { field: "solution" },
-                    )?;
+                    let solution_token =
+                        sampled_solution_token(self.solution, self.prediction_horizon_days)?;
                     format!(
                         "{}{}{}{}_{}_{}_{}_{}.{}",
                         self.publisher.code(),
@@ -3266,16 +3282,16 @@ pub fn latest_ultra_issue(
 /// Ordered cross-line candidates for one predicted IONEX map date.
 ///
 /// CODE publishes two predicted global ionosphere lines for every map date:
-/// the one-day prediction under `CODE/IONO/P1/` and the two-day prediction
-/// under `CODE/IONO/P2/`. Both files carry the same official filename (the
-/// filename date is the map date in both lines) but are distinct artifacts
-/// with distinct exact identities and cache paths. Because the two-day line
-/// for map date `M` is produced a day earlier than the one-day line, `P2/M`
-/// is routinely published while `P1/M` is still absent whenever CODE runs
+/// the one-day prediction `CODE/IONO/PRD/COD0OPSP0D_*` and the two-day
+/// prediction `CODE/IONO/PRD/COD0OPSP1D_*`. The filename date is the map date
+/// in both lines; they are distinct artifacts with distinct exact identities
+/// and cache paths. Because the two-day line for map date `M` is produced a
+/// day earlier than the one-day line, the two-day map for `M` is routinely
+/// published while the one-day map for `M` is still absent whenever CODE runs
 /// behind schedule.
 ///
 /// This walk mirrors [`ultra_issue_candidates`]: it enumerates genuine
-/// artifacts, ordered by preference (`P1` first, `P2` second), and the caller
+/// artifacts, ordered by preference (one-day first, two-day second), and the caller
 /// acquires the first available one, cache-first. Hard rules:
 ///
 /// - Every candidate is for the SAME map date. The walk never substitutes a
@@ -3283,8 +3299,8 @@ pub fn latest_ultra_issue(
 ///   decision via [`gim_date_candidates`].
 /// - Each candidate keeps its own exact identity ([`AnalysisCenter::CodPrd1`]
 ///   or [`AnalysisCenter::CodPrd2`] with its prediction horizon), so resolved
-///   provenance names the line actually served and a cached `P2` artifact is
-///   never re-labelled as `P1`.
+///   provenance names the line actually served and a cached two-day artifact
+///   is never re-labelled as one-day.
 /// - The walk is opt-in. A single-line request through [`predicted_ionex`]
 ///   keeps its fail-closed behavior.
 ///
@@ -3605,20 +3621,19 @@ fn find_listing_datetime(rest: &str) -> Option<&str> {
     None
 }
 
-/// Archive path marker that attributes a listed object to one catalog line
-/// when several lines share an official filename convention.
+/// Archive path marker a listed object must carry to be attributed to a
+/// catalog line whose filenames also appear elsewhere in the same tree.
 const fn center_path_marker(center: AnalysisCenter) -> Option<&'static str> {
     match center {
-        AnalysisCenter::CodPrd1 => Some("/IONO/P1/"),
-        AnalysisCenter::CodPrd2 => Some("/IONO/P2/"),
+        AnalysisCenter::CodPrd1 | AnalysisCenter::CodPrd2 => Some("/IONO/PRD/"),
         _ => None,
     }
 }
 
 fn object_matches_center(center: AnalysisCenter, path: &str) -> bool {
     match center_path_marker(center) {
-        // Whole-tree paths must carry the line's directory; a bare filename
-        // cannot be attributed to either line and is never accepted.
+        // Whole-tree paths must carry the line's archive directory; a bare
+        // filename or a rolling root copy is never accepted.
         Some(marker) => {
             let slashed = format!("/{path}");
             slashed.contains(marker)
@@ -3631,9 +3646,10 @@ fn object_matches_center(center: AnalysisCenter, path: &str) -> bool {
 ///
 /// An object counts only when its name is exactly the line's official
 /// filename convention (token, span, catalog-supported sample, content code,
-/// extension, and the line's archive-compression suffix) and, for lines that
-/// share a filename convention (the CODE predicted `P1`/`P2` ionosphere
-/// lines), when its listed path carries the line's directory. The newest
+/// extension, and the line's archive-compression suffix) and, for the CODE
+/// predicted ionosphere lines, when its listed path carries their archive
+/// directory `CODE/IONO/PRD/` (CODE also keeps rolling copies of the newest
+/// maps at the tree root, which are not the archived objects). The newest
 /// object is selected by filename date and issue time; the archive-reported
 /// modification text rides along verbatim.
 ///
@@ -4587,14 +4603,37 @@ fn dir_path(layout: ArchiveLayout, date: ProductDate) -> Result<String, DataCata
     })
 }
 
+/// Solution token of a sampled long filename.
+///
+/// CODE names each predicted ionosphere line by its lead in whole days before
+/// the map date (`P0D` for the one-day line, `P1D` for the two-day line), so a
+/// predicted identity with a prediction horizon takes its token from that
+/// horizon. Every other solution class uses its fixed IGS token.
+fn sampled_solution_token(
+    solution: SolutionClass,
+    prediction_horizon_days: Option<u8>,
+) -> Result<String, DataCatalogError> {
+    match (solution, prediction_horizon_days) {
+        (SolutionClass::Predicted, Some(horizon)) => match horizon.checked_sub(1) {
+            Some(lead) => Ok(format!("P{lead}D")),
+            None => Err(DataCatalogError::InconsistentProductIdentity {
+                field: "prediction_horizon_days",
+            }),
+        },
+        (solution, _) => solution
+            .filename_token()
+            .map(str::to_string)
+            .ok_or(DataCatalogError::InconsistentProductIdentity { field: "solution" }),
+    }
+}
+
 fn product_dir_path(
     center: AnalysisCenter,
     layout: ArchiveLayout,
     date: ProductDate,
 ) -> Result<String, DataCatalogError> {
     match center {
-        AnalysisCenter::CodPrd1 => Ok(format!("CODE/IONO/P1/{}", date.year)),
-        AnalysisCenter::CodPrd2 => Ok(format!("CODE/IONO/P2/{}", date.year)),
+        AnalysisCenter::CodPrd1 | AnalysisCenter::CodPrd2 => Ok("CODE/IONO/PRD".to_string()),
         _ => dir_path(layout, date),
     }
 }
