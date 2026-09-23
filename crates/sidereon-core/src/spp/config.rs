@@ -28,3 +28,16 @@ pub const DEFAULT_ROBUST_MAX_OUTER: usize = 5;
 /// when the L2 norm of the position change between successive reweighted solves
 /// drops below this.
 pub const DEFAULT_ROBUST_OUTER_TOL_M: f64 = 1e-4;
+
+/// Maximum number of passes one SPP solve runs, RTKLIB `estpos` `MAXITR`. Each
+/// pass selects the satellites and weights at the current iterate and then either
+/// runs the trust-region solve over a new selection or takes RTKLIB's
+/// least-squares step for the one it holds; a solve that has not ended after this
+/// many passes fails with [`crate::spp::SppError::SelectionUnsettled`], as
+/// `estpos` fails after `MAXITR` iterations.
+pub const MAX_SELECTION_PASSES: usize = 10;
+
+/// The step (m) that ends an SPP solve, RTKLIB `estpos`'s `norm(dx) < 1E-4`: the
+/// norm of the whole least-squares step, receiver position and clocks, at the
+/// iterate's own selection and weights.
+pub const SELECTION_STEP_TOL_M: f64 = 1e-4;

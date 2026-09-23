@@ -50,11 +50,11 @@ use serde_json::Value;
 use super::test_support;
 use super::{
     clock_systems, solve, solve_spp_batch_parallel, solve_spp_batch_serial, solve_with_policy,
-    Corrections, KlobucharCoeffs, Observation, RejectionReason, RobustConfig, SatModelEnv,
-    SolveInputs, SolvePolicy, SolvePolicyError, SppError, SppInputErrorKind, SppIonosphere,
-    SppModelRecipe, SurfaceMet, C_M_S,
+    Corrections, KlobucharCoeffs, Observation, RejectedSat, RejectionReason, RobustConfig,
+    SatModelEnv, SolveInputs, SolvePolicy, SolvePolicyError, SppError, SppInputErrorKind,
+    SppIonosphere, SppModelRecipe, SurfaceMet, C_M_S,
 };
-use crate::astro::math::least_squares::{jacobian_2point, FD_REL_STEP_2POINT};
+use crate::astro::math::least_squares::{jacobian_2point, Status, FD_REL_STEP_2POINT};
 use crate::astro::math::robust::{huber_weight, mad_scale};
 use crate::dop::{LineOfSight, PositionCovariance};
 use crate::geometry_quality::ObservabilityTier;
@@ -1354,7 +1354,7 @@ fn dop_from_converged_geometry_agrees() {
             SppModelRecipe::geometric_light_time_replay(),
         )
         .expect("solve");
-        let dop = sol.dop.expect("dop present");
+        let dop = sol.dop.clone().expect("dop present");
         // With the term the solve lands elsewhere, so its DOP differs, but only through
         // the term: at one used satellite of this solution the two models differ by it.
         {
@@ -1388,21 +1388,58 @@ fn dop_from_converged_geometry_agrees() {
                 &format!("{level}.dop.{}", observation.satellite_id),
             );
         }
+        // The recipe weighted every satellite at the initial guess for the whole solve;
+        // the solve weights it at the solution. The DOP arithmetic at the converged
+        // geometry reproduces the recipe's with the recipe's weights, and the solution
+        // reports it with its own.
+        let at_solution = test_support::selection_at_solution_for_test(
+            &NoRelativityTerm(&sp3),
+            &solve_inputs(&inputs),
+            &sol,
+            SppModelRecipe::geometric_light_time_replay(),
+        );
+        assert_eq!(
+            at_solution.used, sol.used_sats,
+            "{level}: selection at the solution"
+        );
+        let geo = super::geodetic_from_ecef(
+            SppModelRecipe::geometric_light_time_replay().frame,
+            sol.position.as_array(),
+        );
+        let geometry = &doc["fixture"]["used_sat_geometry"];
+        let recipe_weights: Vec<f64> = sol
+            .used_sats
+            .iter()
+            .map(|id| bits(geometry[id.to_string()]["weight"].as_str().unwrap()))
+            .collect();
+        let recipe_dop = crate::dop::dop(&at_solution.lines_of_sight, &recipe_weights, geo)
+            .expect("DOP with the recipe weights");
+        let own_dop = crate::dop::dop(&at_solution.lines_of_sight, &at_solution.weights, geo)
+            .expect("DOP with the weights at the solution");
         let want = &doc["fixture"]["dop"];
-        for (label, got) in [
-            ("gdop", dop.gdop),
-            ("pdop", dop.pdop),
-            ("hdop", dop.hdop),
-            ("vdop", dop.vdop),
-            ("tdop", dop.tdop),
+        for (label, recipe, own, got) in [
+            ("gdop", recipe_dop.gdop, own_dop.gdop, dop.gdop),
+            ("pdop", recipe_dop.pdop, own_dop.pdop, dop.pdop),
+            ("hdop", recipe_dop.hdop, own_dop.hdop, dop.hdop),
+            ("vdop", recipe_dop.vdop, own_dop.vdop, dop.vdop),
+            ("tdop", recipe_dop.tdop, own_dop.tdop, dop.tdop),
         ] {
             let w = bits(want[label].as_str().unwrap());
-            let rel = (got - w).abs() / w.max(1.0);
+            let rel = (recipe - w).abs() / w.max(1.0);
             assert!(
                 rel <= 1e-9,
-                "{level}: {label} disagrees: rust={got} ref={w} (rel {rel})"
+                "{level}: {label} with the recipe weights: rust={recipe} ref={w} (rel {rel})"
+            );
+            let rel = (got - own).abs() / own.max(1.0);
+            assert!(
+                rel <= 1e-9,
+                "{level}: {label} reported {got}, with the weights at the solution {own}"
             );
         }
+        assert!(
+            (dop.gdop - recipe_dop.gdop).abs() > 1e-6,
+            "{level}: weights at the solution moved no DOP"
+        );
     }
 }
 
@@ -1746,7 +1783,15 @@ fn normalized(v: [f64; 3]) -> [f64; 3] {
 }
 
 fn synthetic_spp_case(directions: &[[f64; 3]]) -> (SyntheticEphemeris, SolveInputs) {
-    let receiver = [6_378_137.0, 0.0, 0.0];
+    synthetic_spp_case_at([6_378_137.0, 0.0, 0.0], directions)
+}
+
+/// [`synthetic_spp_case`] for a receiver at `receiver`, the satellites in the ECEF
+/// `directions` from it.
+fn synthetic_spp_case_at(
+    receiver: [f64; 3],
+    directions: &[[f64; 3]],
+) -> (SyntheticEphemeris, SolveInputs) {
     let range_m = 22_000_000.0;
     let positions = directions
         .iter()
@@ -2453,11 +2498,11 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     };
 
     let sol = solve_with_policy(&store, &inputs, true, policy).expect("coarse search solves");
-    // Re-frozen when the transmission epoch moved to RTKLIB `satposs` placement,
-    // t_rx - P / c - dts: the ESBC receiver clock is 0.48 ms, which the geometric light
-    // time from the time tag had left out, so every satellite moved by its range rate over
-    // that time. The solution moved by about 0.33 m and the clock by about 7e-10 s; the
-    // whole array is printed on a mismatch.
+    // Re-frozen when the selection, elevation mask and weights moved to the current
+    // iterate, as RTKLIB `estpos` re-runs `rescode`. The geocentre seed had kept every
+    // satellite through the mask for its whole solve, so the search preferred it for
+    // its satellite count; it now settles on the solution every seed reaches, 0.88 m
+    // and 2.3e-9 s from the one frozen before. The whole array is printed on a mismatch.
     let sol_bits = [
         sol.position.x_m.to_bits(),
         sol.position.y_m.to_bits(),
@@ -2467,10 +2512,10 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     assert_eq!(
         sol_bits,
         [
-            0x414b544d26d7d5ba,
-            0x412040dbb3aa3cc0,
-            0x4153f61df1646959,
-            0x3f3f84f2c4f7952f
+            0x414b544cc998d851,
+            0x412040dba20b6ef1,
+            0x4153f61dd16a1a14,
+            0x3f3f84e902b3457d
         ],
         "x, y, z, clock bits: {:#x?}",
         sol_bits
@@ -2599,11 +2644,9 @@ fn owned_deterministic_solver_frozen_bits() {
     // Owned deterministic kernel: its own frozen-bits golden.
     let owned = solve_with_solver(&store, &inputs, true, SolverRecipe::OwnedDeterministicTrf)
         .expect("owned deterministic solve");
-    // Re-frozen when the transmission epoch moved to RTKLIB `satposs` placement,
-    // t_rx - P / c - dts: the ESBC receiver clock is 0.48 ms, which the geometric light
-    // time from the time tag had left out, so every satellite moved by its range rate over
-    // that time. The solution moved by about 0.33 m and the clock by about 7e-10 s; the
-    // whole array is printed on a mismatch.
+    // Re-frozen when the weights moved from the initial guess to the current iterate and
+    // the solve ended with RTKLIB's least-squares step: the solution moved by 1e-5 m and
+    // the clock by 2.5e-14 s. The whole array is printed on a mismatch.
     let owned_bits = [
         owned.position.x_m.to_bits(),
         owned.position.y_m.to_bits(),
@@ -2613,10 +2656,10 @@ fn owned_deterministic_solver_frozen_bits() {
     assert_eq!(
         owned_bits,
         [
-            0x414b544cc998eeea,
-            0x412040dba20b1951,
-            0x4153f61dd16a414b,
-            0x3f3f84e902ba2aa0
+            0x414b544cc998d850,
+            0x412040dba20b6edb,
+            0x4153f61dd16a1a12,
+            0x3f3f84e902b344fe
         ],
         "x, y, z, clock bits: {:#x?}",
         owned_bits
@@ -2814,7 +2857,7 @@ fn covariance_at_solution(
         placement_pseudoranges_m: None,
     };
     let mut los = Vec::with_capacity(solution.used_sats.len());
-    let mut clock_index = Vec::with_capacity(solution.used_sats.len());
+    let mut clock_columns = Vec::with_capacity(solution.used_sats.len());
     for &sat in &solution.used_sats {
         let p_meas = inputs
             .observations
@@ -2844,10 +2887,10 @@ fn covariance_at_solution(
         let dz = model_row.sat_rot_ecef_m[2] - rx_ecef[2];
         let n = (dx * dx + dy * dy + dz * dz).sqrt();
         los.push(LineOfSight::new(dx / n, dy / n, dz / n));
-        clock_index.push(idx);
+        clock_columns.push(3 + idx);
     }
     let receiver = super::geodetic_from_ecef(model.frame, rx_ecef);
-    super::spp_position_covariance(&los, &clock_index, systems.len(), weights, receiver)
+    super::spp_position_covariance(&los, &clock_columns, 3 + systems.len(), weights, receiver)
         .expect("full-rank covariance")
 }
 
@@ -2885,7 +2928,13 @@ fn robust_position_covariance_uses_final_irls_weights() {
         outer_tol_m: f64::MIN_POSITIVE,
     };
     let static_corrupt = solve(&sp3, &corrupt, false).expect("corrupt static solve");
-    let selected = super::select_sats(&sp3, &corrupt, SppModelRecipe::reference());
+    // The robust loop starts from the settled solve, weighted at its position.
+    let selected = test_support::selection_at_solution_for_test(
+        &sp3,
+        &corrupt,
+        &static_corrupt,
+        SppModelRecipe::reference(),
+    );
     assert_eq!(selected.used, static_corrupt.used_sats);
     let scale = mad_scale(&static_corrupt.residuals_m, robust_config.scale_floor_m)
         .expect("valid robust residual scale");
@@ -3076,7 +3125,7 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
 
     // The bounded-tolerance bar only compares like with like: canonical and the
     // reference must select the same satellites (the geodetic basis difference is
-    // far from the elevation-mask boundary, so the frozen selection is identical).
+    // far from the elevation-mask boundary, so the selection is identical).
     assert_eq!(
         canonical.used_sats, reference.used_sats,
         "canonical and reference SPP must select the same satellites on the shared case"
@@ -3102,11 +3151,9 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     );
 
     // BAR 1: frozen-bits determinism golden (this build's reproducible output).
-    // Re-frozen when the transmission epoch moved to RTKLIB `satposs` placement,
-    // t_rx - P / c - dts: the ESBC receiver clock is 0.48 ms, which the geometric light
-    // time from the time tag had left out, so every satellite moved by its range rate over
-    // that time. The solution moved by about 0.33 m and the clock by about 7e-10 s; the
-    // whole array is printed on a mismatch.
+    // Re-frozen when the weights moved from the initial guess to the current iterate and
+    // the solve ended with RTKLIB's least-squares step: the solution moved by 1e-5 m and
+    // the clock by 2.5e-14 s. The whole array is printed on a mismatch.
     let canonical_bits = [
         canonical.position.x_m.to_bits(),
         canonical.position.y_m.to_bits(),
@@ -3116,10 +3163,10 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     assert_eq!(
         canonical_bits,
         [
-            0x414b544cc99b6f8a,
-            0x412040dba208b690,
-            0x4153f61dd16a80bc,
-            0x3f3f84e902c5c1b3
+            0x414b544cc99b589c,
+            0x412040dba20910ee,
+            0x4153f61dd16a57f8,
+            0x3f3f84e902be9ffe
         ],
         "x, y, z, clock bits: {:#x?}",
         canonical_bits
@@ -3609,8 +3656,9 @@ fn a_missing_carrier_is_reported_after_ephemeris_and_elevation() {
     }
 }
 
-/// Without the ionosphere correction no carrier is needed, so a GLONASS
-/// satellite with no channel is not excluded for it.
+/// Without the ionosphere correction no term of the model reads the carrier, so a
+/// GLONASS satellite with no channel is used, not excluded for it. RTKLIB `rescode`
+/// skips it whatever the ionosphere option; SPP reads the measurement it can.
 #[test]
 fn missing_carrier_excludes_nothing_when_the_ionosphere_is_off() {
     let (_rx, eph) = fdma_geometry();
@@ -3748,4 +3796,427 @@ fn spp_declines_a_satellite_whose_relativity_term_is_unavailable() {
     };
     assert!(model_with(&no_term));
     assert!(!model_with(&unavailable));
+}
+
+/// The ESBC first epoch solved from the geocentre, the all-zero cold start, settles on
+/// the solution a start from the header position reaches, with the same satellites.
+/// RTKLIB `satazel` puts every satellite at the zenith for a receiver at the geocentre,
+/// so the first pass keeps every satellite with an ephemeris at unit weight; the
+/// elevation mask applies from the next iterate on. Before the selection followed the
+/// iterate, the mask and weights stayed at the geocentre for the whole solve, and the
+/// cold solve kept satellites below the mask at the solution.
+#[test]
+fn cold_start_from_the_geocentre_settles_on_the_warm_start_solution() {
+    let store = esbc_broadcast_store();
+    let (cold_inputs, approx) = esbc_first_epoch_inputs([0.0; 4]);
+    let (warm_inputs, _) = esbc_first_epoch_inputs([approx[0], approx[1], approx[2], 0.0]);
+
+    let first = super::select_at(
+        &store,
+        &cold_inputs,
+        SppModelRecipe::reference(),
+        None,
+        [0.0; 3],
+        &|_| 0.0,
+    );
+    assert!(
+        first
+            .rejected
+            .iter()
+            .all(|rejected| rejected.reason == RejectionReason::NoEphemeris),
+        "the geocentre masks nothing: {:?}",
+        first.rejected
+    );
+    assert!(first.weights.iter().all(|&weight| weight == 1.0));
+
+    let cold = solve(&store, &cold_inputs, false).expect("cold start solves");
+    let warm = solve(&store, &warm_inputs, false).expect("warm start solves");
+    assert_eq!(cold.used_sats, warm.used_sats);
+    assert_eq!(cold.rejected_sats, warm.rejected_sats);
+    assert!(
+        cold.rejected_sats
+            .iter()
+            .any(|rejected| rejected.reason == RejectionReason::LowElevation),
+        "the solution masks satellites the geocentre kept"
+    );
+    assert!(cold.used_sats.len() < first.used.len());
+    eprintln!(
+        "the geocentre kept {} satellites, the solution uses {}",
+        first.used.len(),
+        cold.used_sats.len()
+    );
+    let apart_m = {
+        let c = cold.position.as_array();
+        let w = warm.position.as_array();
+        ((c[0] - w[0]).powi(2) + (c[1] - w[1]).powi(2) + (c[2] - w[2]).powi(2)).sqrt()
+    };
+    assert!(
+        apart_m < super::SELECTION_STEP_TOL_M,
+        "cold and warm solutions are {apart_m} m apart"
+    );
+    assert!(((cold.rx_clock_s - warm.rx_clock_s) * C_M_S).abs() < super::SELECTION_STEP_TOL_M);
+
+    // The coarse search, which prefers the candidate with the most satellites, lands on
+    // the same solution.
+    let coarse = solve_with_policy(
+        &store,
+        &cold_inputs,
+        false,
+        SolvePolicy {
+            coarse_search_seeds: Some(24),
+            ..SolvePolicy::default()
+        },
+    )
+    .expect("coarse search solves");
+    assert_eq!(coarse.used_sats, warm.used_sats);
+    let coarse_apart_m = {
+        let c = coarse.position.as_array();
+        let w = warm.position.as_array();
+        ((c[0] - w[0]).powi(2) + (c[1] - w[1]).powi(2) + (c[2] - w[2]).powi(2)).sqrt()
+    };
+    assert!(
+        coarse_apart_m < super::SELECTION_STEP_TOL_M,
+        "coarse and warm solutions are {coarse_apart_m} m apart"
+    );
+    eprintln!("cold and warm {apart_m:.3e} m apart, coarse and warm {coarse_apart_m:.3e} m");
+}
+
+/// A direction `el` above the horizon and `az` east of north, from the synthetic
+/// receiver at `[RE, 0, 0]`, where up is `+x`, east `+y` and north `+z`.
+fn direction_el_az(el_rad: f64, az_rad: f64) -> [f64; 3] {
+    [
+        libm::sin(el_rad),
+        libm::cos(el_rad) * libm::sin(az_rad),
+        libm::cos(el_rad) * libm::cos(az_rad),
+    ]
+}
+
+/// From the geocentre every satellite is overhead and no augmentation-grid delay
+/// applies more than 100 m below the ellipsoid, so the first pass keeps a satellite
+/// whose line of sight the grid does not cover. When the solve reaches a state where
+/// that line of sight leaves the grid, the pass ends there and the next selection
+/// rejects the satellite with `SbasIonoUncovered`, as the solve from the receiver
+/// does, instead of failing as a lost ephemeris.
+#[test]
+fn sbas_coverage_lost_inside_a_pass_changes_the_selection() {
+    use crate::sbas::{SbasIgp, SbasIonoGrid};
+    let deg = std::f64::consts::PI / 180.0;
+    // Five high satellites pierce the shell within 3 degrees of the receiver; the
+    // low northern one pierces it about 7 degrees north, outside the grid.
+    let directions = [
+        direction_el_az(70.0 * deg, 0.0),
+        direction_el_az(50.0 * deg, 90.0 * deg),
+        direction_el_az(50.0 * deg, 180.0 * deg),
+        direction_el_az(50.0 * deg, 270.0 * deg),
+        direction_el_az(80.0 * deg, 45.0 * deg),
+        direction_el_az(55.0 * deg, 135.0 * deg),
+        direction_el_az(20.0 * deg, 0.0),
+    ];
+    let (eph, mut warm) = synthetic_spp_case(&directions);
+    let uncovered = GnssSatelliteId::new(GnssSystem::Gps, 7).expect("valid id");
+    let mut points = Vec::new();
+    for lat in [-5.0, 0.0, 5.0] {
+        for lon in [-5.0, 0.0, 5.0] {
+            points.push(SbasIgp {
+                lat_deg: lat,
+                lon_deg: lon,
+                vertical_delay_m: 2.0,
+                give_variance_m2: None,
+            });
+        }
+    }
+    warm.corrections = Corrections::IONO;
+    warm.sbas_iono = Some(SbasIonoGrid::new(points, 0));
+    let mut cold = warm.clone();
+    cold.initial_guess = [0.0; 4];
+
+    let first = super::select_at(
+        &eph,
+        &cold,
+        SppModelRecipe::reference(),
+        None,
+        [0.0; 3],
+        &|_| 0.0,
+    );
+    assert!(
+        first.used.contains(&uncovered),
+        "the geocentre keeps {uncovered}"
+    );
+
+    let warm_solution = solve(&eph, &warm, false).expect("warm solve");
+    let cold_solution = solve(&eph, &cold, false).expect("cold solve");
+    let expected = RejectedSat {
+        satellite_id: uncovered,
+        reason: RejectionReason::SbasIonoUncovered,
+    };
+    assert_eq!(warm_solution.rejected_sats, vec![expected]);
+    assert_eq!(cold_solution.rejected_sats, vec![expected]);
+    assert_eq!(cold_solution.used_sats, warm_solution.used_sats);
+    let apart_m = position_error_m(&cold_solution, warm_solution.position.as_array());
+    assert!(apart_m < super::SELECTION_STEP_TOL_M, "{apart_m} m apart");
+    assert!(cold_solution.metadata.converged);
+    assert_eq!(cold_solution.metadata.status, Status::SelectionSettled);
+}
+
+/// The step that ends a solve is measured as RTKLIB `estpos` measures it, over the
+/// GPS clock and the inter-system biases: a GPS+Galileo step of 3 m on the GPS clock
+/// and 7 m on the Galileo clock is a 4 m step of the Galileo bias. Without a GPS
+/// clock RTKLIB's GPS clock parameter is held, and each system's clock step is its
+/// bias step.
+#[test]
+fn step_norm_is_rtklib_estpos_norm_over_clock_and_inter_system_biases() {
+    let gps_galileo = [GnssSystem::Gps, GnssSystem::Galileo];
+    let dx = [1.0, 2.0, 2.0, 3.0, 7.0];
+    let norm = super::rtklib_step_norm(&dx, &[(3, &gps_galileo)]);
+    assert_eq!(
+        norm.to_bits(),
+        (1.0_f64 + 4.0 + 4.0 + 9.0 + 16.0).sqrt().to_bits()
+    );
+    let absolute = dx.iter().map(|v| v * v).sum::<f64>().sqrt();
+    assert!(norm < absolute);
+
+    let glonass_galileo = [GnssSystem::Glonass, GnssSystem::Galileo];
+    let norm = super::rtklib_step_norm(&[0.0, 0.0, 0.0, 3.0, 7.0], &[(3, &glonass_galileo)]);
+    assert_eq!(norm.to_bits(), (9.0_f64 + 49.0).sqrt().to_bits());
+
+    // Two static epochs, each measured against its own GPS clock.
+    let norm = super::rtklib_step_norm(
+        &[0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 5.0],
+        &[(3, &gps_galileo), (5, &gps_galileo)],
+    );
+    assert_eq!(norm.to_bits(), (1.0_f64 + 0.0 + 4.0 + 9.0).sqrt().to_bits());
+}
+
+/// A GPS+Galileo epoch with a 30 km inter-system bias settles from a start that
+/// takes no bias, and the solution recovers the bias and the receiver.
+#[test]
+fn gps_galileo_solve_settles_with_an_inter_system_bias() {
+    let deg = std::f64::consts::PI / 180.0;
+    let directions = [
+        direction_el_az(70.0 * deg, 0.0),
+        direction_el_az(50.0 * deg, 90.0 * deg),
+        direction_el_az(50.0 * deg, 180.0 * deg),
+        direction_el_az(50.0 * deg, 270.0 * deg),
+        direction_el_az(60.0 * deg, 45.0 * deg),
+        direction_el_az(40.0 * deg, 225.0 * deg),
+        direction_el_az(35.0 * deg, 315.0 * deg),
+    ];
+    let (gps_eph, mut inputs) = synthetic_spp_case(&directions);
+    // The last three satellites become Galileo, their pseudoranges 30 km longer.
+    let bias_m = 30_000.0;
+    let mut positions = Vec::new();
+    for (index, (sat, position)) in gps_eph.positions.iter().enumerate() {
+        let id = if index >= 4 {
+            GnssSatelliteId::new(GnssSystem::Galileo, sat.prn).expect("valid id")
+        } else {
+            *sat
+        };
+        positions.push((id, *position));
+        if index >= 4 {
+            inputs.observations[index].satellite_id = id;
+            inputs.observations[index].pseudorange_m += bias_m;
+        }
+    }
+    let eph = SyntheticEphemeris { positions };
+    let solution = solve(&eph, &inputs, false).expect("GPS+Galileo solve");
+    assert_eq!(solution.metadata.status, Status::SelectionSettled);
+    assert!(solution.metadata.converged);
+    assert_eq!(
+        solution.metadata.systems,
+        vec![GnssSystem::Gps, GnssSystem::Galileo]
+    );
+    let isb_m = (solution.system_clocks_s[1].1 - solution.system_clocks_s[0].1) * C_M_S;
+    assert!((isb_m - bias_m).abs() < 1.0e-3, "bias {isb_m} m");
+    assert!(position_error_m(&solution, [6_378_137.0, 0.0, 0.0]) < 1.0e-3);
+}
+
+/// The synthetic receiver's inputs with one northern satellite just above the
+/// elevation mask whose pseudorange is 500 m long. With it the solution moves
+/// south, which takes it below the mask; without it the solution returns to the
+/// receiver, where it is above the mask again.
+fn oscillating_mask_case() -> (SyntheticEphemeris, SolveInputs, GnssSatelliteId) {
+    let deg = std::f64::consts::PI / 180.0;
+    let directions = [
+        direction_el_az(70.0 * deg, 0.0),
+        direction_el_az(50.0 * deg, 90.0 * deg),
+        direction_el_az(50.0 * deg, 180.0 * deg),
+        direction_el_az(50.0 * deg, 270.0 * deg),
+        direction_el_az(80.0 * deg, 45.0 * deg),
+        direction_el_az(super::ELEVATION_MASK_RAD + 1.0e-8, 0.0),
+    ];
+    let (eph, mut inputs) = synthetic_spp_case(&directions);
+    let boundary = GnssSatelliteId::new(GnssSystem::Gps, 6).expect("valid id");
+    let index = inputs
+        .observations
+        .iter()
+        .position(|o| o.satellite_id == boundary)
+        .expect("boundary satellite observed");
+    inputs.observations[index].pseudorange_m += 500.0;
+    (eph, inputs, boundary)
+}
+
+/// A satellite that each solve moves across the elevation mask keeps the selection
+/// from settling: every pass is a new selection, and after `MAX_SELECTION_PASSES`
+/// the solve fails, as RTKLIB `estpos` fails after `MAXITR` iterations.
+#[test]
+fn a_satellite_oscillating_across_the_mask_leaves_the_selection_unsettled() {
+    let (eph, inputs, boundary) = oscillating_mask_case();
+    let at_receiver = super::select_at(
+        &eph,
+        &inputs,
+        SppModelRecipe::reference(),
+        None,
+        [6_378_137.0, 0.0, 0.0],
+        &|_| 0.0,
+    );
+    assert!(
+        at_receiver.used.contains(&boundary),
+        "above the mask at the receiver"
+    );
+    match solve(&eph, &inputs, false) {
+        Err(SppError::SelectionUnsettled { passes }) => {
+            assert_eq!(passes, super::MAX_SELECTION_PASSES)
+        }
+        other => panic!("expected an unsettled selection, got {other:?}"),
+    }
+
+    let options = crate::static_positioning::StaticSolveOptions::from_solve_inputs(&inputs, false);
+    let epoch = crate::static_positioning::StaticEpoch::from_solve_inputs(inputs);
+    match crate::static_positioning::solve_static(&eph, &[epoch.clone(), epoch], options) {
+        Err(crate::static_positioning::StaticSolveError::SelectionUnsettled { passes }) => {
+            assert_eq!(passes, super::MAX_SELECTION_PASSES)
+        }
+        other => panic!("expected an unsettled static selection, got {other:?}"),
+    }
+}
+
+/// A pierce point one finite-difference probe inside the grid edge: the trust-region
+/// solve's Jacobian probe moves the line of sight out of the grid, but no iterate
+/// does. The pass ends at the last accepted iterate, the start, where the selection
+/// is the same, so the next pass takes RTKLIB's step, which evaluates no probe, and
+/// the solve settles with the satellite used. Ending the pass at the probe instead
+/// dropped the satellite there, took it back at the solution, and lost it again at
+/// the next probe, until the selection never settled.
+#[test]
+fn a_pierce_point_one_probe_inside_the_grid_edge_settles() {
+    use crate::astro::math::least_squares::FD_REL_STEP_2POINT;
+    use crate::sbas::{SbasIgp, SbasIonoGrid};
+    let deg = std::f64::consts::PI / 180.0;
+    // A receiver on the ellipsoid at 45 N 45 E, where the finite-difference steps of
+    // all three coordinates are centimetres and move it across the ground.
+    let (lat, lon) = (45.0 * deg, 45.0 * deg);
+    let e2 = crate::constants::WGS84_E2;
+    let a = crate::constants::WGS84_A_M;
+    let n = a / (1.0 - e2 * libm::sin(lat) * libm::sin(lat)).sqrt();
+    let receiver = [
+        n * libm::cos(lat) * libm::cos(lon),
+        n * libm::cos(lat) * libm::sin(lon),
+        n * (1.0 - e2) * libm::sin(lat),
+    ];
+    let up = [
+        libm::cos(lat) * libm::cos(lon),
+        libm::cos(lat) * libm::sin(lon),
+        libm::sin(lat),
+    ];
+    let east = [-libm::sin(lon), libm::cos(lon), 0.0];
+    let north = [
+        -libm::sin(lat) * libm::cos(lon),
+        -libm::sin(lat) * libm::sin(lon),
+        libm::cos(lat),
+    ];
+    let direction = |el: f64, az: f64| -> [f64; 3] {
+        let (se, ce) = (libm::sin(el * deg), libm::cos(el * deg));
+        let (sa, ca) = (libm::sin(az * deg), libm::cos(az * deg));
+        [0, 1, 2].map(|i| se * up[i] + ce * (sa * east[i] + ca * north[i]))
+    };
+    let directions = [
+        direction(70.0, 0.0),
+        direction(50.0, 90.0),
+        direction(50.0, 180.0),
+        direction(50.0, 270.0),
+        direction(80.0, 45.0),
+        direction(55.0, 135.0),
+        direction(20.0, 0.0),
+    ];
+    let (eph, mut inputs) = synthetic_spp_case_at(receiver, &directions);
+    let edge_sat = GnssSatelliteId::new(GnssSystem::Gps, 7).expect("valid id");
+    let p_meas = inputs
+        .observations
+        .iter()
+        .find(|o| o.satellite_id == edge_sat)
+        .expect("observed")
+        .pseudorange_m;
+
+    // The pierce-point latitude of the edge satellite at the receiver and at each
+    // forward-difference probe of the first Jacobian.
+    let env = SatModelEnv {
+        eph: &eph,
+        t_rx_j2000_s: inputs.t_rx_j2000_s,
+        t_rx_second_of_day_s: inputs.t_rx_second_of_day_s,
+        day_of_year: inputs.day_of_year,
+        corrections: Corrections::NONE,
+        met: &inputs.met,
+        glonass_channels: &inputs.glonass_channels,
+        model: SppModelRecipe::reference(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        placement_pseudoranges_m: None,
+    };
+    let pierce_lat_deg = |rx: [f64; 3]| -> f64 {
+        let m = test_support::sat_model_for_test(
+            &env,
+            edge_sat,
+            rx,
+            0.0,
+            p_meas,
+            &KlobucharCoeffs {
+                alpha: [0.0; 4],
+                beta: [0.0; 4],
+            },
+        )
+        .expect("modeled");
+        let g = test_support::geodetic_from_ecef_m_for_test(rx[0], rx[1], rx[2]);
+        crate::ionex::pierce_point(
+            g.lat_rad,
+            g.lon_rad,
+            m.az_rad,
+            m.el_rad,
+            crate::constants::MEAN_EARTH_RADIUS_KM,
+            350.0,
+        )
+        .phi_ipp_deg
+    };
+    let at_receiver = pierce_lat_deg(receiver);
+    let probed = (0..3)
+        .map(|axis| {
+            let mut rx = receiver;
+            let h = FD_REL_STEP_2POINT * rx[axis].abs().max(1.0) * rx[axis].signum();
+            rx[axis] += h;
+            pierce_lat_deg(rx)
+        })
+        .fold(f64::NEG_INFINITY, f64::max);
+    assert!(
+        probed > at_receiver,
+        "a probe moves the pierce point north: {probed} against {at_receiver}"
+    );
+    let edge_deg = 0.5 * (at_receiver + probed);
+
+    let mut points = Vec::new();
+    for lat_deg in [35.0, 45.0, edge_deg] {
+        for lon_deg in [35.0, 45.0, 55.0] {
+            points.push(SbasIgp {
+                lat_deg,
+                lon_deg,
+                vertical_delay_m: 0.0,
+                give_variance_m2: None,
+            });
+        }
+    }
+    inputs.corrections = Corrections::IONO;
+    inputs.sbas_iono = Some(SbasIonoGrid::new(points, 0));
+
+    let solution = solve(&eph, &inputs, false).expect("the solve settles");
+    assert!(solution.used_sats.contains(&edge_sat), "{edge_sat} is used");
+    assert!(solution.rejected_sats.is_empty());
+    assert_eq!(solution.metadata.status, Status::SelectionSettled);
+    assert!(position_error_m(&solution, receiver) < 1.0e-6);
 }

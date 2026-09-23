@@ -569,8 +569,15 @@ fn independent_jacobian_covariance(
     epochs: &[StaticEpoch],
     solution: &StaticSolution,
 ) -> DMatrix<f64> {
-    let prepared =
-        prepare_static(eph, epochs, options(), SppModelRecipe::reference()).expect("prepared");
+    let epoch_inputs = super::validated_epoch_inputs(epochs, options()).expect("epoch inputs");
+    let prepared = prepare_static(
+        eph,
+        epochs,
+        &epoch_inputs,
+        SppModelRecipe::reference(),
+        &super::StaticState::new(epochs, options()),
+    )
+    .expect("prepared");
     let x = solution_state(solution);
     let weights = solution
         .residuals_m

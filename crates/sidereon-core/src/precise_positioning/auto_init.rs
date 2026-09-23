@@ -374,7 +374,13 @@ fn spp_seed_inputs(epoch: &FloatEpoch, options: PppAutoInitOptions) -> spp::Solv
         beidou_klobuchar: None,
         galileo_nequick: None,
         sbas_iono: None,
-        glonass_channels: BTreeMap::new(),
+        // Each GLONASS observation's FDMA channel, where the float epoch carries it.
+        glonass_channels: epoch
+            .observations
+            .iter()
+            .filter(|obs| obs.sat.system == crate::id::GnssSystem::Glonass)
+            .filter_map(|obs| obs.glonass_channel.map(|channel| (obs.sat.prn, channel)))
+            .collect(),
         met: options.spp_met,
         robust: None,
         // The float epochs carry ionosphere-free code, so no single-frequency
@@ -545,6 +551,41 @@ mod tests {
             t_rx_j2000_s,
             observations,
         }
+    }
+
+    /// The SPP seed of an epoch takes each GLONASS observation's FDMA channel from
+    /// the float epoch; other systems add none.
+    #[test]
+    fn spp_seed_inputs_carry_the_glonass_channels() {
+        let glonass = GnssSatelliteId::new(crate::id::GnssSystem::Glonass, 9).expect("valid id");
+        let gps = GnssSatelliteId::new(crate::id::GnssSystem::Gps, 5).expect("valid id");
+        let observation = |sat: GnssSatelliteId, channel: Option<i8>| FloatObservation {
+            sat,
+            satellite_id: sat.to_string(),
+            ambiguity_id: sat.to_string(),
+            code_m: 21_000_000.0,
+            phase_m: 21_000_000.0,
+            freq1_hz: 0.0,
+            freq2_hz: 0.0,
+            glonass_channel: channel,
+            signals: None,
+        };
+        let epoch = FloatEpoch {
+            epoch: CivilDateTime {
+                year: 2020,
+                month: 6,
+                day: 24,
+                hour: 12,
+                minute: 0,
+                second: 0.0,
+            },
+            jd_whole: 2_459_024.5,
+            jd_fraction: 0.5,
+            t_rx_j2000_s: 646_272_000.0,
+            observations: vec![observation(glonass, Some(-2)), observation(gps, None)],
+        };
+        let inputs = super::spp_seed_inputs(&epoch, PppAutoInitOptions::default());
+        assert_eq!(inputs.glonass_channels, BTreeMap::from([(9, -2)]));
     }
 
     fn float_config() -> FloatSolveConfig {
