@@ -439,6 +439,15 @@ pub struct RangeCorrections {
     pub receiver_antenna: Option<ReceiverAntennaOptions>,
     /// Enables the relativistic satellite range term
     /// `2 * dot(position, velocity) / c`; false contributes zero.
+    ///
+    /// It contributes zero as well where the satellite clock in use already
+    /// includes the term: with no external CLK series, a source whose
+    /// [`ObservableEphemerisSource::clock_includes_relativity`] is true, such as a
+    /// broadcast or SSR-corrected source. An SP3 or precise-interpolant source's clock
+    /// leaves the term to the user, and the rows add it; so do they with a CLK series,
+    /// which replaces the source's clock.
+    ///
+    /// [`ObservableEphemerisSource::clock_includes_relativity`]: crate::observables::ObservableEphemerisSource::clock_includes_relativity
     pub sat_clock_relativity: bool,
     /// Optional external CLK series used when an observable prediction has no
     /// satellite clock; a missing series or time gap reports a clock error.

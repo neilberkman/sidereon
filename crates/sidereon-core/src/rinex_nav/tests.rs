@@ -289,6 +289,7 @@ fn spp_solves_from_broadcast_glonass() {
             met: &met,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         };
         if let Some(m) = test_support::sat_model_for_test(
             &env,
@@ -331,6 +332,7 @@ fn spp_solves_from_broadcast_glonass() {
         glonass_channels: std::collections::BTreeMap::new(),
         met,
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
 
     let sol = solve(&store, &inputs, true).expect("GLONASS broadcast SPP solve");
@@ -391,6 +393,7 @@ fn beidou_uses_its_own_klobuchar_coefficients() {
             met: &met,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         };
         if let Some(m) =
             test_support::sat_model_for_test(&env, sat, x_true, 0.0, 22_000_000.0, &bds)
@@ -433,6 +436,7 @@ fn beidou_uses_its_own_klobuchar_coefficients() {
         glonass_channels: std::collections::BTreeMap::new(),
         met,
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
 
     // With the BeiDou coefficients supplied, BeiDou uses them and the truth is
@@ -774,10 +778,11 @@ fn galileo_inav_uses_e5b_e1_bgd_for_clock() {
 
     let store = BroadcastStore::from_nav(&text).expect("default Galileo store");
     let rec = &store.records()[0];
+    let t = toe_as_j2000_s(rec);
     let (_, clock_s) = store
-        .position_clock_at_j2000_s(rec.satellite_id, toe_as_j2000_s(rec))
+        .position_clock_at_j2000_s(rec.satellite_id, t)
         .expect("I/NAV record evaluates at toe");
-    let expected_inav_clock_s = satellite_state(
+    let inav_state = satellite_state(
         &rec.elements,
         &rec.clock,
         &rec.constants(),
@@ -785,27 +790,34 @@ fn galileo_inav_uses_e5b_e1_bgd_for_clock() {
         BGD_E5B_E1_S,
         false,
     )
-    .expect("valid Galileo I/NAV broadcast state")
-    .clock
-    .dt_clock_total_s;
-    let fnav_bgd_clock_s = satellite_state(
-        &rec.elements,
-        &rec.clock,
-        &rec.constants(),
-        rec.elements.toe_sow,
-        BGD_E5A_E1_S,
-        false,
-    )
-    .expect("valid Galileo F/NAV broadcast state")
-    .clock
-    .dt_clock_total_s;
-    assert!(
-        (clock_s - expected_inav_clock_s).abs() < 1.0e-18,
-        "store clock must use the I/NAV BGD"
+    .expect("valid Galileo I/NAV broadcast state");
+    // The store's clock is the one RTKLIB `satposs` returns, polynomial plus relativity
+    // and no BGD (`eph2pos`: "without code bias (tgd or bgd)"). This test once required
+    // the BGD in it; the I/NAV BGD choice now lives in the single-frequency group delay,
+    // and the clock less that delay is the single-frequency `dt_clock_total_s` bit for
+    // bit.
+    assert_eq!(
+        clock_s.to_bits(),
+        (inav_state.clock.dt_clock_poly_s + inav_state.clock.dt_rel_s).to_bits(),
+        "store clock is the satposs clock, without BGD"
     );
-    assert!(
-        (clock_s - fnav_bgd_clock_s).abs() > 1.0e-9,
-        "using the F/NAV BGD would leave a visible clock bias"
+    let group_delay_s = store
+        .single_frequency_group_delay_s(rec.satellite_id, t)
+        .expect("I/NAV group delay");
+    assert_eq!(
+        group_delay_s.to_bits(),
+        BGD_E5B_E1_S.to_bits(),
+        "store group delay must be the I/NAV BGD"
+    );
+    assert_ne!(
+        group_delay_s.to_bits(),
+        BGD_E5A_E1_S.to_bits(),
+        "the F/NAV BGD is not the I/NAV user's"
+    );
+    assert_eq!(
+        (clock_s - group_delay_s).to_bits(),
+        inav_state.clock.dt_clock_total_s.to_bits(),
+        "clock less the group delay is the I/NAV single-frequency clock"
     );
 }
 
@@ -958,6 +970,7 @@ fn spp_solves_from_broadcast_gps() {
             met: &met,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         };
         if let Some(m) = test_support::sat_model_for_test(
             &env,
@@ -1000,6 +1013,7 @@ fn spp_solves_from_broadcast_gps() {
         glonass_channels: std::collections::BTreeMap::new(),
         met,
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
 
     let sol = solve(&store, &inputs, true).expect("broadcast SPP solve");
@@ -1365,6 +1379,7 @@ fn synthetic_spp_inputs(store: &BroadcastStore) -> crate::spp::SolveInputs {
             met: &met,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         };
         if let Some(model) = test_support::sat_model_for_test(
             &env,
@@ -1407,6 +1422,7 @@ fn synthetic_spp_inputs(store: &BroadcastStore) -> crate::spp::SolveInputs {
         glonass_channels: std::collections::BTreeMap::new(),
         met,
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     }
 }
 
@@ -2328,13 +2344,15 @@ fn select_by_iode_ignores_cnav_issue_collisions() {
         position.map(f64::to_bits),
         expected_position.map(f64::to_bits)
     );
-    assert_eq!(clock.to_bits(), expected.clock.dt_clock_total_s.to_bits());
+    // `state_by_iode_at` returns the RTKLIB `satposs` clock, without the TGD.
+    assert_eq!(
+        clock.to_bits(),
+        (expected.clock.dt_clock_poly_s + expected.clock.dt_rel_s).to_bits()
+    );
 }
 
 #[test]
 fn equal_toe_cnav_tie_break_prefers_cnav_over_cnv2() {
-    use crate::spp::EphemerisSource;
-
     let recs = cnav_fixture_records();
     let cnav = *find_record(&recs, GnssSystem::Qzss, 2, NavMessage::QzssCnav);
     let cnv2 = *find_record(&recs, GnssSystem::Qzss, 2, NavMessage::QzssCnav2);
@@ -2343,9 +2361,7 @@ fn equal_toe_cnav_tie_break_prefers_cnav_over_cnv2() {
     let mut store = BroadcastStore::new(recs).expect("manual CNAV/CNV2 store");
     store.set_message_preference(NavMessagePreference::PreferModern);
     let query = toe_as_j2000_s(&cnav);
-    let (_, clock) = store
-        .position_clock_at_j2000_s(cnav.satellite_id, query)
-        .expect("QZSS state at tied toe");
+    let clock = single_frequency_clock_s(&store, cnav.satellite_id, query);
 
     let cnav_expected = satellite_state_cnav(
         &cnav.elements,
@@ -2479,10 +2495,18 @@ fn qzss_cnav_observable_source_feeds_end_to_end_spp() {
             Err(_) => continue,
         };
         if prediction.elevation_deg >= 15.0 {
+            // A single-frequency L1C/A pseudorange: the predicted clock is RTKLIB's
+            // `satposs` clock, without the group delay, and the L1C/A user's clock is that
+            // clock less TGD - ISC_L1CA (IS-GPS-200 30.3.3.3.1.1.1), the delay the SPP
+            // model subtracts. The observation was once formed from the predicted clock
+            // alone, when that clock carried the delay; the two forms are equal bit for bit.
+            let group_delay_s = observable_source
+                .single_frequency_group_delay_s(sat, prediction.transmit_time_j2000_s)
+                .expect("QZSS CNAV group delay");
             observations.push(Observation {
                 satellite_id: sat,
                 pseudorange_m: prediction.geometric_range_m
-                    - C_M_S * prediction.sat_clock_s.expect("broadcast clock"),
+                    - C_M_S * (prediction.sat_clock_s.expect("broadcast clock") - group_delay_s),
             });
         }
     }
@@ -2518,6 +2542,7 @@ fn qzss_cnav_observable_source_feeds_end_to_end_spp() {
             relative_humidity: 0.5,
         },
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
 
     let solution = solve(&store, &inputs, true).expect("QZSS CNAV SPP solve");
@@ -2527,8 +2552,6 @@ fn qzss_cnav_observable_source_feeds_end_to_end_spp() {
 
 #[test]
 fn broadcast_store_prefers_legacy_by_default_and_can_select_cnav() {
-    use crate::spp::EphemerisSource;
-
     let mut text = String::from(V4_NAV_HEADER);
     text.push_str("> EPH G01 LNAV\n");
     text.push_str(&join(G01_LINES));
@@ -2552,9 +2575,7 @@ fn broadcast_store_prefers_legacy_by_default_and_can_select_cnav() {
         .find(|r| r.message == NavMessage::GpsCnav)
         .expect("CNAV record");
     let query = toe_as_j2000_s(&lnav);
-    let (_, legacy_clock) = store
-        .position_clock_at_j2000_s(sat, query)
-        .expect("default store evaluates LNAV");
+    let legacy_clock = single_frequency_clock_s(&store, sat, query);
     let legacy_expected = satellite_state(
         &lnav.elements,
         &lnav.clock,
@@ -2570,9 +2591,7 @@ fn broadcast_store_prefers_legacy_by_default_and_can_select_cnav() {
     );
 
     store.set_message_preference(NavMessagePreference::PreferModern);
-    let (_, modern_clock) = store
-        .position_clock_at_j2000_s(sat, query)
-        .expect("modern store evaluates CNAV");
+    let modern_clock = single_frequency_clock_s(&store, sat, query);
     let cnav_params = cnav.cnav.expect("CNAV extension");
     let cnav_expected = satellite_state_cnav(
         &cnav.elements,
@@ -3088,9 +3107,10 @@ fn real_brdc4_store_selects_qzss_cnav_and_keeps_legacy_preference() {
 
     let qzss = find_record(&recs, GnssSystem::Qzss, 2, NavMessage::QzssCnav);
     let query = toe_as_j2000_s(qzss);
-    let (position, clock) = store
+    let (position, _) = store
         .position_clock_at_j2000_s(qzss.satellite_id, query)
         .expect("default store evaluates QZSS CNAV");
+    let clock = single_frequency_clock_s(&store, qzss.satellite_id, query);
     let expected = satellite_state_cnav(
         &qzss.elements,
         &cnav_rates_from_record(qzss),
@@ -3110,9 +3130,7 @@ fn real_brdc4_store_selects_qzss_cnav_and_keeps_legacy_preference() {
     let mut all_store = BroadcastStore::new(recs.clone()).expect("manual mixed-message store");
     let gps = find_record(&recs, GnssSystem::Gps, 1, NavMessage::GpsCnav);
     let gps_query = toe_as_j2000_s(gps);
-    let (_, legacy_clock) = all_store
-        .position_clock_at_j2000_s(gps.satellite_id, gps_query)
-        .expect("legacy-preferred store evaluates GPS");
+    let legacy_clock = single_frequency_clock_s(&all_store, gps.satellite_id, gps_query);
     let lnav = find_record(&recs, GnssSystem::Gps, 1, NavMessage::GpsLnav);
     let lnav_expected = satellite_state(
         &lnav.elements,
@@ -3129,9 +3147,7 @@ fn real_brdc4_store_selects_qzss_cnav_and_keeps_legacy_preference() {
     );
 
     all_store.set_message_preference(NavMessagePreference::PreferModern);
-    let (_, modern_clock) = all_store
-        .position_clock_at_j2000_s(gps.satellite_id, gps_query)
-        .expect("modern-preferred store evaluates GPS CNAV");
+    let modern_clock = single_frequency_clock_s(&all_store, gps.satellite_id, gps_query);
     let cnav_expected = satellite_state_cnav(
         &gps.elements,
         &cnav_rates_from_record(gps),
@@ -3947,6 +3963,7 @@ fn mixed_constellation_solve_recovers_the_receiver() {
             met: &met,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         };
         if let Some(m) = test_support::sat_model_for_test(&env, sat, x_true, 0.0, 22_000_000.0, &kl)
         {
@@ -3984,6 +4001,7 @@ fn mixed_constellation_solve_recovers_the_receiver() {
         glonass_channels: std::collections::BTreeMap::new(),
         met,
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
 
     // The combined GPS+Galileo solve carries a per-system clock (a reference
@@ -4104,6 +4122,7 @@ fn mixed_constellation_solve_recovers_a_nonzero_inter_system_bias() {
             met: &met,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         };
         if let Some(m) = test_support::sat_model_for_test(&env, sat, x_true, b, 22_000_000.0, &kl) {
             if m.el_rad >= ELEVATION_MASK_RAD {
@@ -4140,6 +4159,7 @@ fn mixed_constellation_solve_recovers_a_nonzero_inter_system_bias() {
         glonass_channels: std::collections::BTreeMap::new(),
         met,
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
 
     let sol = solve(&store, &inputs, false).expect("mixed solve with inter-system bias");
@@ -4218,6 +4238,7 @@ fn mixed_solve_recovers_with_gps_galileo_and_beidou() {
             met: &met,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         };
         if let Some(m) = test_support::sat_model_for_test(
             &env,
@@ -4262,6 +4283,7 @@ fn mixed_solve_recovers_with_gps_galileo_and_beidou() {
         glonass_channels: std::collections::BTreeMap::new(),
         met,
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
 
     let sol = solve(&store, &inputs, false).expect("three-constellation solve");
@@ -4340,6 +4362,7 @@ fn ionosphere_correction_is_applied_to_beidou_b1i() {
             met: &met,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
+            pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
         };
         if let Some(m) = test_support::sat_model_for_test(&env, sat, x_true, 0.0, 22_000_000.0, &kl)
         {
@@ -4376,6 +4399,7 @@ fn ionosphere_correction_is_applied_to_beidou_b1i() {
         glonass_channels: std::collections::BTreeMap::new(),
         met,
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
 
     let sol = solve(&store, &inputs, false).expect("BeiDou-bearing iono-corrected solve");
@@ -5469,4 +5493,137 @@ fn fit_interval_round_trip_preserves_none_and_explicit_hours() {
     let encoded_bds = encode_nav(&[base_bds]);
     let reparsed_bds = parse_nav(&encoded_bds).expect("parse encoded BeiDou record");
     assert_eq!(reparsed_bds[0].fit_interval_s, None);
+}
+
+/// The single-frequency clock of the record the store selects for `sat` at `t_j2000_s`:
+/// the store's clock, which is RTKLIB's `satposs` clock without the group delay, less
+/// that record's group delay. It equals the record's `dt_clock_total_s` bit for bit, so
+/// comparing it identifies the selected record by its group delay as well.
+fn single_frequency_clock_s(store: &BroadcastStore, sat: GnssSatelliteId, t_j2000_s: f64) -> f64 {
+    use crate::spp::EphemerisSource;
+    let (_, clock_s) = store
+        .position_clock_at_j2000_s(sat, t_j2000_s)
+        .expect("broadcast state");
+    clock_s
+        - store
+            .single_frequency_group_delay_s(sat, t_j2000_s)
+            .expect("broadcast group delay")
+}
+
+/// The store evaluates a Keplerian record at every bit of the query epoch. One ulp
+/// (2^-23 s) past a whole second near 6.5e8 s J2000 is lost when `GPS_EPOCH_TO_J2000_S`
+/// is added first: the sum, near 1.28e9 s, has 2^-22 s spacing and rounds the half-way
+/// case to the whole second. The state is the record evaluated at the exact seconds of
+/// week, and the clock is the RTKLIB `satposs` clock (polynomial plus relativity).
+#[test]
+fn keplerian_store_state_keeps_every_bit_of_the_epoch() {
+    use crate::spp::EphemerisSource;
+
+    let store = BroadcastStore::from_nav(&fixture_text()).expect("parse NAV fixture");
+    let first = *store
+        .records()
+        .iter()
+        .find(|r| r.satellite_id.system == GnssSystem::Gps)
+        .expect("GPS record");
+    let whole = toe_as_j2000_s(&first) + 60.0;
+    let t = f64::from_bits(whole.to_bits() + 1);
+    let ulp = t - whole;
+    assert_eq!(ulp.to_bits(), 2.0_f64.powi(-23).to_bits());
+    let rounded_sow = (t + crate::constants::GPS_EPOCH_TO_J2000_S).rem_euclid(SECONDS_PER_WEEK);
+    assert_eq!(
+        rounded_sow.to_bits(),
+        (first.elements.toe_sow + 60.0).to_bits(),
+        "the rounded epoch drops the last bit"
+    );
+
+    let rec = *store
+        .select_record_at(first.satellite_id, t)
+        .expect("record at the epoch");
+    // `t - toe` is exact (both near 6.5e8 s on the 2^-23 s grid), and so is its sum with
+    // the whole-second `toe_sow`.
+    let sow = rec.elements.toe_sow + (t - toe_as_j2000_s(&rec));
+    assert_ne!(sow.to_bits(), rounded_sow.to_bits());
+    let expected = satellite_state(
+        &rec.elements,
+        &rec.clock,
+        &rec.constants(),
+        sow,
+        rec.broadcast_clock_group_delay_s(),
+        false,
+    )
+    .expect("state at the exact seconds of week");
+    let (position, clock) = store
+        .position_clock_at_j2000_s(rec.satellite_id, t)
+        .expect("state");
+    assert_eq!(
+        position.map(f64::to_bits),
+        expected
+            .orbit
+            .position()
+            .expect("position")
+            .as_array()
+            .map(f64::to_bits)
+    );
+    assert_eq!(
+        clock.to_bits(),
+        (expected.clock.dt_clock_poly_s + expected.clock.dt_rel_s).to_bits()
+    );
+}
+
+/// The GLONASS time from the reference epoch keeps every bit of the query epoch: the
+/// reference epoch is a whole second, so `t - toe` is exact, and the state and clock
+/// are the record propagated over exactly that `tk`. The velocity's 1 ms step is added
+/// to the fraction of `tk`'s second, as RTKLIB `timeadd` adds it.
+#[test]
+fn glonass_store_state_keeps_every_bit_of_the_epoch() {
+    use crate::spp::EphemerisSource;
+
+    let store = BroadcastStore::from_nav(&glonass_fixture_text()).expect("parse GLONASS NAV");
+    let r0 = store.glonass_records()[0];
+    let toe_gpst = r0.toe_utc_j2000_s + 18.0; // leap seconds for 2020
+    let whole = toe_gpst + 60.0;
+    let t = f64::from_bits(whole.to_bits() + 1);
+    let tk = t - toe_gpst;
+    assert_eq!(
+        (tk - 60.0).to_bits(),
+        (t - whole).to_bits(),
+        "tk keeps the last bit"
+    );
+    assert!(tk > 60.0);
+
+    let state0 = [
+        r0.pos_m[0],
+        r0.pos_m[1],
+        r0.pos_m[2],
+        r0.vel_m_s[0],
+        r0.vel_m_s[1],
+        r0.vel_m_s[2],
+    ];
+    let expected = crate::glonass::propagate(state0, r0.acc_m_s2, tk).expect("propagate");
+    let (position, clock) = store
+        .position_clock_at_j2000_s(r0.satellite_id, t)
+        .expect("GLONASS state");
+    assert_eq!(
+        position.map(f64::to_bits),
+        [expected[0], expected[1], expected[2]].map(f64::to_bits)
+    );
+    assert_eq!(
+        clock.to_bits(),
+        crate::glonass::clock_offset_s(r0.clk_bias, r0.gamma_n, tk).to_bits()
+    );
+
+    let end = crate::glonass::propagate(state0, r0.acc_m_s2, ephpos_stepped_tk(tk))
+        .expect("propagate 1 ms later");
+    let velocity = store
+        .selected_record_velocity(r0.satellite_id, t)
+        .expect("GLONASS velocity");
+    assert_eq!(
+        velocity.map(f64::to_bits),
+        [
+            (end[0] - expected[0]) / EPHPOS_STEP_S,
+            (end[1] - expected[1]) / EPHPOS_STEP_S,
+            (end[2] - expected[2]) / EPHPOS_STEP_S,
+        ]
+        .map(f64::to_bits)
+    );
 }

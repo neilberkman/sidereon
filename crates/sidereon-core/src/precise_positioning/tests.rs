@@ -2568,6 +2568,7 @@ fn has_test_message(
                 .iter()
                 .map(|sat| HasOrbitCorrection {
                     sat: *sat,
+                    nav_message: 0,
                     iode: SSR_TEST_IODE,
                     radial_m: Some(1.25),
                     along_m: Some(-2.0),
@@ -2585,6 +2586,7 @@ fn has_test_message(
                 .iter()
                 .map(|sat| HasClockCorrection {
                     sat: *sat,
+                    nav_message: 0,
                     correction_m: Some(-0.75),
                     do_not_use: false,
                 })
@@ -2773,6 +2775,100 @@ fn static_float_rows_apply_ssr_code_and_phase_biases_with_expected_signs() {
         (phase_delta - expected_phase_if).abs() < 1.0e-8,
         "phase delta {phase_delta}, expected {expected_phase_if}"
     );
+}
+
+/// The broadcast states of a store, served as if their clock were a precise clock that
+/// leaves the relativistic term to the user.
+struct PreciseClockView<'a>(&'a crate::ephemeris::BroadcastEphemeris);
+
+impl ObservableEphemerisSource for PreciseClockView<'_> {
+    fn observable_state_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<ObservableState, ObservablesError> {
+        self.0.observable_state_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn velocity_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        self.0.velocity_at_j2000_s(sat, t_j2000_s)
+    }
+}
+
+/// An SSR-corrected clock carries `-2 r·v / c²` (RTKLIB `satpos_ssr`, HAS SIS ICD Eq. 24)
+/// and a broadcast clock carries the broadcast relativistic term (RTKLIB `eph2pos`), so
+/// with the satellite clock relativity correction enabled the rows add no second term for
+/// either: the rows are bit for bit those with it disabled. The term is added for a source
+/// whose clock leaves it out, and whenever a CLK series replaces the source's clock.
+#[test]
+fn rows_add_no_second_satellite_clock_relativity_term() {
+    let (fake, epochs, state, ambiguity_ids) = ssr_test_arc(1);
+    let sat = epochs[0].observations[0].sat;
+    let binding = super::rows::AmbiguityBinding::Estimated {
+        ids: &ambiguity_ids,
+        values: &state.ambiguities_m,
+    };
+    let mut store = SsrCorrectionStore::new();
+    has_test_ingest(
+        &mut store,
+        &has_test_message(&[sat], 0, 1, 1, Some(HAS_VI_60_S), None),
+    );
+    let broadcast = ssr_test_broadcast();
+    let ssr = crate::ssr::SsrCorrectedEphemeris::new(&broadcast, &store);
+    let precise_view = PreciseClockView(&broadcast);
+    let off = RangeCorrections::disabled();
+    let on = RangeCorrections {
+        sat_clock_relativity: true,
+        ..RangeCorrections::disabled()
+    };
+    let with_clk = RangeCorrections {
+        sat_clock_relativity: true,
+        satellite_clock: Some(SatelliteClockCorrections::default()),
+        ..RangeCorrections::disabled()
+    };
+
+    assert!(ssr.clock_includes_relativity());
+    assert!(broadcast.clock_includes_relativity());
+    assert!(!precise_view.clock_includes_relativity());
+    assert!(!fake.clock_includes_relativity());
+    let adds = super::rows::adds_sat_clock_relativity;
+    assert!(!adds(&ssr, &off));
+    assert!(!adds(&ssr, &on));
+    assert!(!adds(&broadcast, &on));
+    assert!(adds(&precise_view, &on));
+    assert!(adds(&fake, &on));
+    assert!(adds(&ssr, &with_clk));
+    assert!(adds(&broadcast, &with_clk));
+
+    let rows = |source: &dyn ObservableEphemerisSource, corrections: &RangeCorrections| {
+        super::rows::build_rows(
+            row_trace_ctx(source, corrections),
+            &epochs,
+            &binding,
+            &state,
+        )
+        .expect("rows")
+    };
+    let sources: [(&str, &dyn ObservableEphemerisSource); 2] =
+        [("SSR-corrected", &ssr), ("broadcast", &broadcast)];
+    for (label, source) in sources {
+        let disabled = rows(source, &off);
+        let enabled = rows(source, &on);
+        assert_eq!(disabled.len(), enabled.len(), "{label}");
+        for (a, b) in disabled.iter().zip(&enabled) {
+            assert_eq!(a.y.to_bits(), b.y.to_bits(), "{label}");
+        }
+    }
+    // Control: the same broadcast states from a source whose clock leaves the term out
+    // take it, so the rows move.
+    let disabled = rows(&precise_view, &off);
+    let enabled = rows(&precise_view, &on);
+    let delta = enabled[0].y - disabled[0].y;
+    assert!(delta.is_finite() && delta != 0.0, "{delta}");
 }
 
 /// Biases transmitted as unavailable are reported per observation, the requirement flags

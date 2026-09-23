@@ -396,6 +396,7 @@ fn sbas_corrected_spp_with_geo_ranging_beats_uncorrected() {
         glonass_channels: BTreeMap::new(),
         met: SurfaceMet::default(),
         robust: None,
+        pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
     };
 
     let uncorrected = StaticBroadcast {

@@ -319,7 +319,7 @@
         "omega_e_dot_rad_s": "0x3f131da7d7cb8d5b",
         "form": "closed-form +theta Z-rotation; theta = OMEGA_E_DOT*tau; sat_rot.x= cos*sx+sin*sy, sat_rot.y=-sin*sx+cos*sy, sat_rot.z=sz"
       },
-      "relativistic_convention": "none added; SP3 clock used as-is",
+      "relativistic_convention": "none added; SP3 clock used as-is. The recipe omits the RTKLIB peph2pos term -2 r.v / c^2, which SP3 clocks leave to the user; the tests replay this no-term model, and positioning applies the term",
       "max_nfev": 400,
       "constants": {
         "c": "0x41b1de784a000000",

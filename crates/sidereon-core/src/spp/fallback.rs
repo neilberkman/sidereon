@@ -50,20 +50,24 @@
 //! range error (SISRE): the broadcast orbit and clock are a least-squares fit and
 //! a polynomial extrapolation, where the precise product is a post-processed
 //! estimate. For healthy GPS the broadcast orbit error is roughly 1-2 m RMS (3D),
-//! dominated by the along-track and radial components, and the broadcast satellite
-//! clock adds a comparable error (see [`crate::broadcast_comparison`], which
-//! measures exactly this on a committed reference arc). A common per-epoch clock
-//! offset absorbs into the estimated receiver clock, but the per-satellite orbit
-//! error and clock scatter do not, and on an L1-only solve the broadcast clock
-//! (which subtracts TGD for the single-frequency user) differs from the precise
-//! ionosphere-free SP3 clock (no TGD) by a further per-satellite amount. Mapped
-//! through the geometry, the *position* difference between a broadcast-only and a
-//! precise SPP fix on the same pseudoranges is therefore at the ~10 m level at a
-//! single epoch (not merely the orbit RMS). The reference-arc integration test
-//! `broadcast_spp_fallback_arc` measures ~13 m and asserts agreement within a
-//! labeled 20 m bound; that bound is the documented accuracy delta, not a
-//! bit-exact claim (two orbit/clock sources legitimately differ at the meter
-//! level).
+//! dominated by the along-track and radial components, and the broadcast clock
+//! differs from the precise clock by 0.69 m RMS (0.64 m with each epoch's common
+//! datum removed) on the committed reference day (see
+//! [`crate::broadcast_comparison`], which measures exactly this). A common
+//! per-epoch clock offset absorbs into the estimated receiver clock, but the
+//! per-satellite orbit error and clock scatter do not. The remaining difference
+//! between the two sources is the group delay: on single-frequency code the model
+//! subtracts the broadcast TGD from the broadcast clock (RTKLIB `pntpos`), and a
+//! precise source, whose clock is the ionosphere-free clock, carries no delay to
+//! subtract, a further per-satellite amount. Both models apply the relativistic
+//! clock term, the broadcast one within its clock and the precise one as RTKLIB
+//! `peph2pos` adds it. Mapped through the geometry, the *position* difference
+//! between a broadcast-only and a precise SPP fix on the same pseudoranges is a
+//! few metres at a single epoch. The reference-arc integration test
+//! `broadcast_spp_fallback_arc` measures 5.66 m and 5.73 m at the arc's two
+//! epochs and asserts agreement within a labeled 8 m bound, 40% above the larger;
+//! that bound is the documented accuracy delta, not a bit-exact claim (two
+//! orbit/clock sources legitimately differ at the metre level).
 //!
 //! # Network
 //!

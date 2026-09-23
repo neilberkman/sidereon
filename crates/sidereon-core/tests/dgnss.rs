@@ -5,7 +5,7 @@ use sidereon_core::constants::C_M_S;
 use sidereon_core::dgnss::{
     apply_corrections, pseudorange_corrections, solve_position, CodeObservation, DgnssError,
 };
-use sidereon_core::ephemeris::Sp3;
+use sidereon_core::ephemeris::{BroadcastEphemeris, Sp3};
 use sidereon_core::observables::{
     predict, ObservableEphemerisSource, ObservableState, ObservablesError, PredictOptions,
 };
@@ -118,6 +118,7 @@ fn solve_inputs(observations: Vec<Observation>, initial_guess: [f64; 4]) -> Solv
             relative_humidity: 0.5,
         },
         robust: None,
+        pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
     }
 }
 
@@ -173,10 +174,16 @@ fn synth(
         .map(|sat| {
             let obs = predict(sp3, *sat, station, T_RX_J2000_S, PredictOptions::default())
                 .expect("predict visible satellite");
+            // The synthetic pseudorange carries the satellite clock the positioning models
+            // use: the SP3 clock with the relativistic term RTKLIB `peph2pos` applies.
+            let relativity_s =
+                ObservableEphemerisSource::clock_relativity_s(sp3, *sat, obs.transmit_time_j2000_s)
+                    .term()
+                    .expect("peph2pos relativistic term");
+            let sat_clock_s = obs.sat_clock_s.expect("visible satellite clock") + relativity_s;
             CodeObservation::new(
                 sat.to_string(),
-                obs.geometric_range_m
-                    + C_M_S * (rx_clock_s - obs.sat_clock_s.expect("visible satellite clock")),
+                obs.geometric_range_m + C_M_S * (rx_clock_s - sat_clock_s),
             )
         })
         .collect()
@@ -208,28 +215,127 @@ fn dgnss_corrections_and_apply_match_application_oracle_bits() {
 
     let corrections = pseudorange_corrections(&sp3, base, &base_obs, T_RX_J2000_S)
         .expect("compute DGNSS corrections");
-    for (sat, expected) in golden["corrections_m"].as_object().unwrap() {
+    // The oracle's base model uses the SP3 clock as written, with no relativistic term.
+    // The positioning models apply the term RTKLIB `peph2pos` applies to a precise clock
+    // (see `zim2_sp3_spp_with_the_peph2pos_relativity_term_is_closer_to_truth`), so each
+    // correction is the oracle's plus `c` times that term. The oracle still certifies the
+    // rest of the model bit for bit: its correction is `P - (rho - c·clk)` from this
+    // crate's prediction, and ours is `P - (rho - c·(clk + term))` from the same one.
+    let base_pseudorange = base_obs
+        .iter()
+        .map(|o| (o.satellite_id.clone(), o.pseudorange_m))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let rover_pseudorange = rover_obs
+        .iter()
+        .map(|o| (o.satellite_id.clone(), o.pseudorange_m))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected_rover = golden["corrected_rover"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            (
+                row["sat"].as_str().unwrap().to_string(),
+                hexf(&row["pseudorange_m"]),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for (token, expected) in golden["corrections_m"].as_object().unwrap() {
+        let sat = sat_from_token(token);
+        let prediction = predict(&sp3, sat, base, T_RX_J2000_S, PredictOptions::default())
+            .expect("predict base satellite");
+        let clock_s = prediction.sat_clock_s.expect("SP3 clock");
+        let relativity_s = ObservableEphemerisSource::clock_relativity_s(
+            &sp3,
+            sat,
+            prediction.transmit_time_j2000_s,
+        )
+        .term()
+        .expect("peph2pos relativistic term");
+        let pseudorange_m = base_pseudorange[token];
+        let oracle_model_m = pseudorange_m - (prediction.geometric_range_m - C_M_S * clock_s);
+        assert_eq!(
+            oracle_model_m.to_bits(),
+            hexf(expected).to_bits(),
+            "{token}: oracle correction"
+        );
         let got = corrections
-            .get(sat)
-            .unwrap_or_else(|| panic!("missing correction {sat}"));
-        assert_eq!(got.to_bits(), hexf(expected).to_bits(), "{sat} correction");
+            .get(token)
+            .unwrap_or_else(|| panic!("missing correction {token}"));
+        let with_term_m =
+            pseudorange_m - (prediction.geometric_range_m - C_M_S * (clock_s + relativity_s));
+        assert_eq!(got.to_bits(), with_term_m.to_bits(), "{token}: correction");
+        assert_eq!(
+            (rover_pseudorange[token] - hexf(expected)).to_bits(),
+            expected_rover[token.as_str()].to_bits(),
+            "{token}: oracle corrected rover pseudorange"
+        );
     }
 
     let applied = apply_corrections(&rover_obs, &corrections).expect("apply DGNSS corrections");
     assert!(applied.dropped.is_empty());
-
-    let expected = golden["corrected_rover"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|row| (row["sat"].as_str().unwrap(), hexf(&row["pseudorange_m"])))
-        .collect::<std::collections::BTreeMap<_, _>>();
     for obs in applied.corrected {
         assert_eq!(
             obs.pseudorange_m.to_bits(),
-            expected[obs.satellite_id.as_str()].to_bits(),
+            (rover_pseudorange[&obs.satellite_id] - corrections[&obs.satellite_id]).to_bits(),
             "{} corrected rover pseudorange",
             obs.satellite_id
+        );
+    }
+}
+
+/// On a broadcast source the DGNSS corrections are what they were before the broadcast
+/// clock left the TGD out: the base model subtracts the source's single-frequency group
+/// delay from the `satposs` clock, which is the former TGD-inclusive clock bit for bit.
+/// Each correction therefore recovers the error injected into the base pseudorange, and
+/// the TGD-free clock alone would miss it by `c·TGD`.
+#[test]
+fn dgnss_corrections_on_a_broadcast_source_keep_the_group_delay() {
+    let nav = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx"
+    ))
+    .expect("read NAV fixture");
+    let store = BroadcastEphemeris::from_nav(&nav).expect("parse NAV fixture");
+    let t_rx = 646_358_400.0;
+    let base = [3_512_900.0, 780_500.0, 5_248_700.0];
+    let mut base_obs = Vec::new();
+    let mut expected = std::collections::BTreeMap::new();
+    let mut largest_group_delay_m = 0.0_f64;
+    for prn in 1..=32_u8 {
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, prn).expect("valid satellite id");
+        let Ok(prediction) = predict(&store, sat, base, t_rx, PredictOptions::default()) else {
+            continue;
+        };
+        if prediction.elevation_deg < 10.0 {
+            continue;
+        }
+        let clock_s = prediction.sat_clock_s.expect("broadcast clock");
+        let group_delay_s = ObservableEphemerisSource::single_frequency_group_delay_s(
+            &store,
+            sat,
+            prediction.transmit_time_j2000_s,
+        )
+        .expect("GPS TGD");
+        largest_group_delay_m = largest_group_delay_m.max((C_M_S * group_delay_s).abs());
+        let injected_m = 3.0 + f64::from(prn) * 0.25;
+        let modeled_m = prediction.geometric_range_m - C_M_S * (clock_s - group_delay_s);
+        let pseudorange_m = modeled_m + injected_m;
+        base_obs.push(CodeObservation::new(sat.to_string(), pseudorange_m));
+        expected.insert(sat.to_string(), (pseudorange_m - modeled_m, injected_m));
+    }
+    assert!(base_obs.len() >= 5, "need visible GPS satellites");
+    assert!(largest_group_delay_m > 0.1, "{largest_group_delay_m} m");
+
+    let corrections =
+        pseudorange_corrections(&store, base, &base_obs, t_rx).expect("compute DGNSS corrections");
+    assert_eq!(corrections.len(), expected.len());
+    for (sat, (bits_expected, injected_m)) in &expected {
+        let got = corrections[sat];
+        assert_eq!(got.to_bits(), bits_expected.to_bits(), "{sat}");
+        assert!(
+            (got - injected_m).abs() < 1.0e-6,
+            "{sat}: {got} vs {injected_m}"
         );
     }
 }
@@ -346,46 +452,76 @@ fn dgnss_common_mode_error_cancels_in_position_solve() {
     .expect("clean DGNSS solve");
     let clean_error = dist(clean.solution.position.as_array(), rover);
 
+    // Frozen bits of the clean DGNSS solve, all compared at once and printed together
+    // on a mismatch. The synthetic pseudoranges carry the `peph2pos` relativistic term
+    // the base and rover models apply; it cancels in the correction, so the solve
+    // recovers the rover to well under a millimetre.
+    let clean_bits = [
+        (
+            "position",
+            clean
+                .solution
+                .position
+                .as_array()
+                .map(f64::to_bits)
+                .to_vec(),
+        ),
+        ("rx_clock", vec![clean.solution.rx_clock_s.to_bits()]),
+        (
+            "baseline_vector",
+            clean.baseline_vector_m.map(f64::to_bits).to_vec(),
+        ),
+        ("baseline", vec![clean.baseline_m.to_bits()]),
+        (
+            "residuals",
+            clean
+                .solution
+                .residuals_m
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+        ),
+    ];
+    // Re-frozen when the base and rover models began applying the `peph2pos` relativistic
+    // term to the SP3 clock: it cancels between base and rover only up to their geometry
+    // differences, so the clean solution moved below a millimetre.
+    let frozen_bits: [(&str, Vec<u64>); 5] = [
+        (
+            "position",
+            vec![0x414ad10a00081c95, 0x4127d9780005da05, 0x41540725fffa8c59],
+        ),
+        ("rx_clock", vec![0xbec92a737b6ce6c6]),
+        (
+            "baseline_vector",
+            vec![0x409f400040e4a800, 0x408f400017681400, 0x40976fffa8c59000],
+        ),
+        ("baseline", vec![0x40a5092a32c70b3e]),
+        (
+            "residuals",
+            vec![
+                0xbf2f970000000000,
+                0xbef03a0000000000,
+                0xbed2580000000000,
+                0xbf209ee000000000,
+                0x3e99c00000000000,
+                0x3ef41c0000000000,
+                0x3f101b8000000000,
+                0xbf0c3d0000000000,
+                0xbf02450000000000,
+                0x3f12bf8000000000,
+            ],
+        ),
+    ];
     assert_eq!(
-        clean.solution.position.as_array().map(f64::to_bits),
-        [0x414ad10a000812ad, 0x4127d9780005c95e, 0x41540725fffa9093],
-        "clean DGNSS position frozen bits"
-    );
-    assert_eq!(
-        clean.solution.rx_clock_s.to_bits(),
-        0xbec92a737b8703b3,
-        "clean DGNSS receiver clock frozen bits"
-    );
-    assert_eq!(
-        clean.baseline_vector_m.map(f64::to_bits),
-        [0x409f400040956800, 0x408f400017257800, 0x40976fffa9093000],
-        "clean DGNSS baseline vector frozen bits"
-    );
-    assert_eq!(
-        clean.baseline_m.to_bits(),
-        0x40a5092a32b6435d,
-        "clean DGNSS baseline length frozen bits"
-    );
-    assert_eq!(
-        clean
-            .solution
-            .residuals_m
+        clean_bits
             .iter()
-            .map(|v| v.to_bits())
+            .map(|(label, bits)| format!("{label}: {bits:#x?}"))
             .collect::<Vec<_>>(),
-        vec![
-            0xbf2f8d6000000000,
-            0xbef1420000000000,
-            0xbedb2c0000000000,
-            0xbf208bc000000000,
-            0xbea0000000000000,
-            0x3ef3ee0000000000,
-            0x3f10330000000000,
-            0xbf0c2e8000000000,
-            0xbf01a68000000000,
-            0x3f12edc000000000,
-        ],
-        "clean DGNSS residual frozen bits"
+        frozen_bits
+            .iter()
+            .map(|(label, bits)| format!("{label}: {bits:#x?}"))
+            .collect::<Vec<_>>(),
+        "clean DGNSS frozen bits"
     );
 
     assert!(absolute_error > 5.0);

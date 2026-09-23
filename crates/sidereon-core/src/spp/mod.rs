@@ -73,7 +73,8 @@ pub use fallback::{
     solve_broadcast, solve_with_fallback, BroadcastReason, FallbackError, FixSource,
     SourcedSolution,
 };
-pub use source::EphemerisSource;
+use source::TransmitStateMemo;
+pub use source::{ClockRelativity, EphemerisSource};
 
 pub use crate::constants::{C_M_S, F_L1_HZ, OMEGA_E_DOT_RAD_S};
 use crate::dop::{dop, dop_multi, Dop, LineOfSight, PositionCovariance};
@@ -536,6 +537,22 @@ pub struct SolveInputs {
     /// runs the static elevation-weighted solve byte-identically; `Some(_)`
     /// adds the outer reweighting loop described on [`RobustConfig`].
     pub robust: Option<RobustConfig>,
+    /// Which code the pseudoranges are: single-frequency, which takes the broadcast
+    /// group delay, or ionosphere-free, which takes none.
+    pub pseudorange_code: PseudorangeCode,
+}
+
+/// Which code an SPP solve's pseudoranges are, which decides whether the broadcast
+/// single-frequency group delay (TGD, BGD) applies. RTKLIB `pntpos` `prange` subtracts it
+/// from a single-frequency pseudorange and applies none to the ionosphere-free
+/// combination (`IONOOPT_IFLC`), whose clock the broadcast `satposs` clock already is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PseudorangeCode {
+    /// A single-frequency code (L1 C/A, E1, B1I): the group delay applies.
+    #[default]
+    SingleFrequency,
+    /// The ionosphere-free combination: no group delay applies.
+    IonosphereFree,
 }
 
 impl Default for SolveInputs {
@@ -557,6 +574,7 @@ impl Default for SolveInputs {
             glonass_channels: BTreeMap::new(),
             met: SurfaceMet::default(),
             robust: None,
+            pseudorange_code: PseudorangeCode::SingleFrequency,
         }
     }
 }
@@ -803,6 +821,9 @@ pub(crate) struct SatModel {
     pub sat_ecef_m: [f64; 3],
     #[cfg(all(test, sidereon_repo_tests))]
     pub theta_rad: f64,
+    /// Epoch the final satellite clock was evaluated at.
+    #[cfg(all(test, sidereon_repo_tests))]
+    pub clock_epoch_j2000_s: f64,
 }
 
 /// The broadcast ionosphere correction a satellite's system uses.
@@ -859,6 +880,8 @@ pub(crate) struct SatModelEnv<'a> {
     /// The range/sagnac/frame operation-order selections [`sat_model`] consumes,
     /// resolved from the strategy's recipe.
     pub model: SppModelRecipe,
+    /// Which code the pseudoranges are; the group delay applies to single-frequency code.
+    pub pseudorange_code: PseudorangeCode,
 }
 
 /// Build the per-satellite predicted pseudorange in the SPP operation order
@@ -903,7 +926,7 @@ pub(crate) fn sat_model(
     let frame = env.model.frame;
 
     // Transmit-time light-time iteration, selected by the range recipe.
-    let (sat_pos, dt_sat, tau) = match env.model.range {
+    let (sat_pos, dt_sat, tau, group_delay, t_state) = match env.model.range {
         RangeRecipe::SppMeasuredPseudorangeFixedIter => {
             // Fixed iteration count, no inner convergence test; seed tau from the
             // measured pseudorange.
@@ -911,17 +934,21 @@ pub(crate) fn sat_model(
             let mut t_tx = env.t_rx_j2000_s - tau;
             let mut sat_pos = [0.0f64; 3];
             let mut dt_sat = 0.0f64;
+            let mut group_delay = None;
+            let mut t_state = t_tx;
             for _ in 0..TRANSMIT_TIME_ITERATIONS {
-                let (pos, clk) = env.eph.position_clock_at_j2000_s(sat, t_tx)?;
+                let (pos, clk, gd) = env.eph.position_clock_group_delay_at_j2000_s(sat, t_tx)?;
                 sat_pos = pos;
                 dt_sat = clk;
+                group_delay = gd;
+                t_state = t_tx;
                 // Pre-rotation geometric range through the shared substrate (the
                 // closed-form recipe = plain `norm3(sub3(sat, recv))`).
                 let rho0 = geometric_range(sagnac, sat_pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S);
                 tau = rho0 / C_M_S;
                 t_tx = env.t_rx_j2000_s - tau;
             }
-            (sat_pos, dt_sat, tau)
+            (sat_pos, dt_sat, tau, group_delay, t_state)
         }
         RangeRecipe::CanonicalLightTimeClosedFormSagnac => {
             // Full iterative light-time (the IERS-rigorous op-order): iterate the
@@ -930,21 +957,23 @@ pub(crate) fn sat_model(
             // like the reference, from the measured pseudorange; the iteration
             // converges to the geometric light-time fixed point
             // `t_tx = t_rx - rho(t_tx)/c` with the closed-form Sagnac range (never
-            // a first-order scalar Sagnac). The satellite clock `dt_sat` returned
-            // by the ephemeris already carries the relativistic periodic term
-            // (the broadcast Keplerian evaluation applies `F*e*sqrt(A)*sin(E)`;
-            // SP3 precise clocks include it, the SPP L3 no-op), so the canonical
-            // relativistically-correct range consumes it directly with no
-            // double-counting term.
+            // a first-order scalar Sagnac). The satellite clock's relativistic
+            // periodic term is applied once, after the iteration: a broadcast clock
+            // carries it (`F*e*sqrt(A)*sin(E)`), and a precise product clock takes
+            // the `peph2pos` term the source returns.
             let mut tau = p_meas_m / C_M_S;
             let mut t_tx = env.t_rx_j2000_s - tau;
             let mut sat_pos = [0.0f64; 3];
             let mut dt_sat = 0.0f64;
+            let mut group_delay = None;
+            let mut t_state = t_tx;
             let mut prev_tau = f64::INFINITY;
             for _ in 0..CANONICAL_LIGHT_TIME_MAX_ITERS {
-                let (pos, clk) = env.eph.position_clock_at_j2000_s(sat, t_tx)?;
+                let (pos, clk, gd) = env.eph.position_clock_group_delay_at_j2000_s(sat, t_tx)?;
                 sat_pos = pos;
                 dt_sat = clk;
+                group_delay = gd;
+                t_state = t_tx;
                 let rho0 = geometric_range(sagnac, sat_pos, rx_ecef_m, OMEGA_E_DOT_RAD_S, C_M_S);
                 tau = rho0 / C_M_S;
                 t_tx = env.t_rx_j2000_s - tau;
@@ -953,12 +982,38 @@ pub(crate) fn sat_model(
                 }
                 prev_tau = tau;
             }
-            (sat_pos, dt_sat, tau)
+            (sat_pos, dt_sat, tau, group_delay, t_state)
         }
         RangeRecipe::ObservableRoundedMicrosecondFixedIter
         | RangeRecipe::RtkProvidedTxFirstOrderSagnac => unreachable!(
             "the SPP measurement model runs only the measured-pseudorange or canonical light-time recipe"
         ),
+    };
+
+    // Single-frequency group delay. The source's clock is the one RTKLIB `satposs`
+    // returns, without TGD or BGD; RTKLIB `pntpos` applies the delay to the
+    // single-frequency pseudorange (`prange`: `P1 - TGD`). It is taken here from the
+    // clock, for the record the clock came from, as the final transmit-time step returns
+    // it: `(poly + rel) - TGD`, which is the broadcast `dt_clock_total_s` bit for bit.
+    // Relativistic clock term for a product clock that leaves it to the user (SP3 and
+    // RINEX CLK), as RTKLIB `peph2pos` applies it for positioning: `dts - 2 r·v / c²`,
+    // at the epoch the clock came from. A broadcast, SSR- or SBAS-corrected clock carries
+    // its own term and the source returns none. The source is handed the position it
+    // returned at that epoch, so a precise source interpolates only the position 1 ms
+    // later.
+    let dt_sat = match env.eph.clock_relativity_for_state_s(sat, t_state, sat_pos) {
+        ClockRelativity::NotApplicable => dt_sat,
+        ClockRelativity::Term(relativity_s) => dt_sat + relativity_s,
+        ClockRelativity::Unavailable => return None,
+    };
+
+    let group_delay = match env.pseudorange_code {
+        PseudorangeCode::SingleFrequency => group_delay,
+        PseudorangeCode::IonosphereFree => None,
+    };
+    let dt_sat = match group_delay {
+        Some(group_delay_s) => dt_sat - group_delay_s,
+        None => dt_sat,
     };
 
     // Sagnac / Earth-rotation rotation over the flight time, selected by recipe.
@@ -1051,6 +1106,8 @@ pub(crate) fn sat_model(
         sat_ecef_m: sat_pos,
         #[cfg(all(test, sidereon_repo_tests))]
         theta_rad: OMEGA_E_DOT_RAD_S * tau,
+        #[cfg(all(test, sidereon_repo_tests))]
+        clock_epoch_j2000_s: t_state,
     })
 }
 
@@ -1093,6 +1150,7 @@ pub(crate) fn select_sats(
         met: &inputs.met,
         glonass_channels: &inputs.glonass_channels,
         model,
+        pseudorange_code: inputs.pseudorange_code,
     };
     for ob in obs {
         let sat = ob.satellite_id;
@@ -1217,6 +1275,7 @@ pub(crate) fn residual_unweighted(
         met: &inputs.met,
         glonass_channels: &inputs.glonass_channels,
         model,
+        pseudorange_code: inputs.pseudorange_code,
     };
     let mut out = Vec::with_capacity(used.len());
     for &sat in used {
@@ -1407,6 +1466,8 @@ fn solve_inner(
     // A satellite whose carrier the ionosphere correction cannot be scaled to
     // is excluded by `select_sats` with its own reason, and the rest of the
     // epoch is solved.
+    let memo = TransmitStateMemo::new(eph, inputs.observations.len());
+    let eph: &dyn EphemerisSource = &memo;
     let sel = select_sats(eph, inputs, model);
 
     // One receiver-clock parameter per distinct GNSS (a reference clock plus an
@@ -1587,6 +1648,7 @@ fn solve_inner(
         met: &inputs.met,
         glonass_channels: &inputs.glonass_channels,
         model,
+        pseudorange_code: inputs.pseudorange_code,
     };
     for &sat in &sel.used {
         let p_meas = obs_by_id

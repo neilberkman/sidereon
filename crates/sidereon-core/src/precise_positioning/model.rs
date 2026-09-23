@@ -354,16 +354,26 @@ fn satellite_clock_correction_m(
 }
 
 impl SatelliteClockCorrections {
+    /// The series clock at `t_j2000_s`, interpolated in J2000 seconds.
+    ///
+    /// Each node's GPS seconds are moved to J2000 by subtracting the whole-second
+    /// `GPS_EPOCH_TO_J2000_S`, which is exact for a node on the grid of doubles near
+    /// 1.4e9 s. Adding it to the query instead would round the query to that grid's
+    /// 2.4e-7 s spacing and drop the last bit of a fractional transmission time.
     fn clock_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
-        let gps_s = t_j2000_s + GPS_EPOCH_TO_J2000_S;
         let records = self.series.get(&sat)?;
-        interpolate_clock(records, gps_s)
+        interpolate_clock(records, GPS_EPOCH_TO_J2000_S, t_j2000_s)
     }
 }
 
-fn interpolate_clock(records: &[(f64, f64)], t: f64) -> Option<f64> {
-    let &(t_first, _) = records.first()?;
-    let &(t_last, _) = records.last()?;
+/// Clock at `t` from `records`, whose node times are `node_offset_s` ahead of `t`'s
+/// scale: node `(ti, bi)` sits at `ti - node_offset_s`.
+fn interpolate_clock(records: &[(f64, f64)], node_offset_s: f64, t: f64) -> Option<f64> {
+    let node = |&(ti, bi): &(f64, f64)| (ti - node_offset_s, bi);
+    let first = records.first().map(node)?;
+    let last = records.last().map(node)?;
+    let (t_first, _) = first;
+    let (t_last, _) = last;
 
     // Clamped endpoint extrapolation at the arc boundaries. A transmit time can
     // land just outside the CLK node span: signal travel time pushes the first
@@ -372,15 +382,19 @@ fn interpolate_clock(records: &[(f64, f64)], t: f64) -> Option<f64> {
     // returns `None` at the very first/last epoch of a 30 s-CLK arc and the
     // whole solve fails with "satellite clock unavailable".
     if t < t_first {
-        return clamped_extrapolation(records.first()?, records.get(1), t);
+        return clamped_extrapolation(&first, records.get(1).map(node).as_ref(), t);
     }
     if t > t_last {
-        let inner = records.len().checked_sub(2).and_then(|i| records.get(i));
-        return clamped_extrapolation(records.last()?, inner, t);
+        let inner = records
+            .len()
+            .checked_sub(2)
+            .and_then(|i| records.get(i))
+            .map(node);
+        return clamped_extrapolation(&last, inner.as_ref(), t);
     }
 
     let mut prev: Option<(f64, f64)> = None;
-    for &(ti, bi) in records {
+    for (ti, bi) in records.iter().map(node) {
         if ti == t {
             return Some(bi);
         }
@@ -586,24 +600,26 @@ fn los_zenith_azimuth_deg(
 
 #[cfg(test)]
 mod clock_boundary_tests {
-    use super::{clamped_extrapolation, interpolate_clock};
+    use super::{clamped_extrapolation, interpolate_clock, lerp_ratio, SatelliteClockCorrections};
+    use crate::constants::{GPS_EPOCH_TO_J2000_S, SECONDS_PER_WEEK};
+    use crate::{GnssSatelliteId, GnssSystem};
 
     // A 30 s CLK arc: three nodes at 0/30/60 s with a linear ramp.
     const RECORDS: &[(f64, f64)] = &[(0.0, 1.0e-6), (30.0, 1.3e-6), (60.0, 1.5e-6)];
 
     #[test]
     fn interior_query_is_unchanged_linear_interpolation() {
-        let got = interpolate_clock(RECORDS, 15.0).expect("interior resolves");
+        let got = interpolate_clock(RECORDS, 0.0, 15.0).expect("interior resolves");
         assert!((got - 1.15e-6).abs() < 1.0e-18, "got {got}");
         // Exact node hit returns the node value.
-        assert_eq!(interpolate_clock(RECORDS, 30.0), Some(1.3e-6));
+        assert_eq!(interpolate_clock(RECORDS, 0.0, 30.0), Some(1.3e-6));
     }
 
     #[test]
     fn transmit_time_just_before_first_node_resolves() {
         // ~0.07 s before the first node (the signal-travel-time case that used to
         // return None and fail the whole first-epoch solve).
-        let got = interpolate_clock(RECORDS, -0.07).expect("pre-first-node resolves");
+        let got = interpolate_clock(RECORDS, 0.0, -0.07).expect("pre-first-node resolves");
         let slope = (1.3e-6 - 1.0e-6) / 30.0;
         assert!(
             (got - (1.0e-6 + slope * -0.07)).abs() < 1.0e-18,
@@ -613,7 +629,7 @@ mod clock_boundary_tests {
 
     #[test]
     fn transmit_time_just_after_last_node_resolves() {
-        let got = interpolate_clock(RECORDS, 60.05).expect("post-last-node resolves");
+        let got = interpolate_clock(RECORDS, 0.0, 60.05).expect("post-last-node resolves");
         let slope = (1.5e-6 - 1.3e-6) / 30.0;
         assert!((got - (1.5e-6 + slope * 0.05)).abs() < 1.0e-18, "got {got}");
     }
@@ -621,8 +637,8 @@ mod clock_boundary_tests {
     #[test]
     fn extrapolation_beyond_one_node_interval_is_unavailable() {
         // More than one 30 s interval before/after the edge is genuinely missing.
-        assert_eq!(interpolate_clock(RECORDS, -31.0), None);
-        assert_eq!(interpolate_clock(RECORDS, 91.0), None);
+        assert_eq!(interpolate_clock(RECORDS, 0.0, -31.0), None);
+        assert_eq!(interpolate_clock(RECORDS, 0.0, 91.0), None);
     }
 
     #[test]
@@ -631,15 +647,49 @@ mod clock_boundary_tests {
         // available only AT the node; any other time is unavailable rather than a
         // silently held stale value.
         let single = [(10.0, 4.2e-6)];
-        assert_eq!(interpolate_clock(&single, 10.0), Some(4.2e-6));
-        assert_eq!(interpolate_clock(&single, 9.0), None);
-        assert_eq!(interpolate_clock(&single, 11.0), None);
+        assert_eq!(interpolate_clock(&single, 0.0, 10.0), Some(4.2e-6));
+        assert_eq!(interpolate_clock(&single, 0.0, 9.0), None);
+        assert_eq!(interpolate_clock(&single, 0.0, 11.0), None);
         assert_eq!(clamped_extrapolation(&single[0], None, 9.0), None);
         assert_eq!(clamped_extrapolation(&single[0], None, 10.0), Some(4.2e-6));
     }
 
     #[test]
     fn empty_series_is_unavailable() {
-        assert_eq!(interpolate_clock(&[], 0.0), None);
+        assert_eq!(interpolate_clock(&[], 0.0, 0.0), None);
+    }
+
+    /// The CLK series is interpolated at every bit of a fractional transmission time.
+    /// Nodes at GPS seconds `g` and `g + 30` near 1.47e9 s, and a query one ulp (2^-23 s)
+    /// past the first node's J2000 instant: the query lies 2^-23 s into the segment.
+    /// Adding `GPS_EPOCH_TO_J2000_S` to the query would round it onto the node, whose
+    /// 2^-22 s grid has no point between, and return the node's value.
+    #[test]
+    fn clock_series_keeps_every_bit_of_the_query() {
+        let first_node_j2000_s =
+            f64::from(2425_u32) * SECONDS_PER_WEEK + 344_970.0 - GPS_EPOCH_TO_J2000_S;
+        let first_node_gps_s = first_node_j2000_s + GPS_EPOCH_TO_J2000_S;
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).expect("valid satellite id");
+        let (b0, b1) = (2.8e-4, 2.8e-4 + 3.0e-9);
+        let mut series = std::collections::BTreeMap::new();
+        series.insert(
+            sat,
+            vec![(first_node_gps_s, b0), (first_node_gps_s + 30.0, b1)],
+        );
+        let clock = SatelliteClockCorrections { series };
+        let t = f64::from_bits(first_node_j2000_s.to_bits() + 1);
+        let into_segment_s = t - first_node_j2000_s;
+        assert_eq!(into_segment_s.to_bits(), 2.0_f64.powi(-23).to_bits());
+        assert_eq!(
+            (t + GPS_EPOCH_TO_J2000_S).to_bits(),
+            first_node_gps_s.to_bits(),
+            "the rounded query lands on the node"
+        );
+        let got = clock.clock_s(sat, t).expect("interior clock");
+        assert_eq!(
+            got.to_bits(),
+            lerp_ratio(b0, b1, into_segment_s, 30.0).to_bits()
+        );
+        assert_ne!(got.to_bits(), b0.to_bits());
     }
 }

@@ -48,8 +48,9 @@ use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::sbas::SbasIonoGrid;
 use crate::spp::{
     clock_systems, residual_unweighted, select_sats, validate_solve_inputs, Corrections,
-    EphemerisSource, GalileoNequickCoeffs, KlobucharCoeffs, Observation, RejectedSat, RobustConfig,
-    SolveInputs, SppError, SppInputErrorKind, SppModelRecipe, SurfaceMet, C_M_S,
+    EphemerisSource, GalileoNequickCoeffs, KlobucharCoeffs, Observation, PseudorangeCode,
+    RejectedSat, RobustConfig, SolveInputs, SppError, SppInputErrorKind, SppModelRecipe,
+    SurfaceMet, C_M_S,
 };
 use crate::validate;
 
@@ -100,6 +101,8 @@ pub struct StaticEpoch {
     pub glonass_channels: BTreeMap<u8, i8>,
     /// Surface meteorology used when troposphere correction is on.
     pub met: SurfaceMet,
+    /// Which code the pseudoranges are; see [`PseudorangeCode`].
+    pub pseudorange_code: PseudorangeCode,
 }
 
 impl StaticEpoch {
@@ -125,6 +128,7 @@ impl StaticEpoch {
             sbas_iono: inputs.sbas_iono,
             glonass_channels: inputs.glonass_channels,
             met: inputs.met,
+            pseudorange_code: inputs.pseudorange_code,
         }
     }
 }
@@ -774,6 +778,7 @@ fn solve_inputs_for_epoch(epoch: &StaticEpoch, options: StaticSolveOptions) -> S
         glonass_channels: epoch.glonass_channels.clone(),
         met: epoch.met,
         robust: None,
+        pseudorange_code: epoch.pseudorange_code,
     }
 }
 

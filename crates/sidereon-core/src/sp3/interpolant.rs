@@ -9,8 +9,9 @@ use crate::observables::{
 };
 use crate::sp3::interp::{
     fit_clock_spline_arcs, gather_sp3_precise_series, instant_to_j2000_seconds,
-    interpolate_precise_state, interpolate_precise_state_with_clock_arcs, ClockSplineArc,
-    PreciseSatSeries, Sp3InterpolationOptions,
+    interpolate_precise_position, interpolate_precise_state,
+    interpolate_precise_state_with_clock_arcs, ClockSplineArc, PreciseQuery, PreciseSatSeries,
+    Sp3InterpolationOptions,
 };
 use crate::sp3::{
     PreciseEphemerisSample, PreciseEphemerisSamples, PreciseSamplesError, Sp3, Sp3State,
@@ -178,6 +179,26 @@ impl PreciseEphemerisInterpolant {
         }
     }
 
+    /// Position of `sat` 1 ms after `t_j2000_s`, the second position RTKLIB `peph2pos`
+    /// interpolates to form the satellite velocity.
+    pub(crate) fn position_after_ephpos_step(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<[f64; 3]> {
+        let fitted = self.nodes.get(&sat).ok_or(Error::UnknownSatellite(sat))?;
+        interpolate_precise_position(
+            sat,
+            &fitted.series.x,
+            &fitted.series.kx,
+            &fitted.series.ky,
+            &fitted.series.kz,
+            PreciseQuery::at(t_j2000_s).ephpos_step(),
+            self.interpolation.gap_threshold_factor(),
+        )
+        .map(|(x, y, z)| [x, y, z])
+    }
+
     /// Interpolate the state of `sat` at an arbitrary [`Instant`].
     ///
     /// The query instant must use the same time scale as the source used to
@@ -240,5 +261,17 @@ impl ObservableEphemerisSource for PreciseEphemerisInterpolant {
             position_ecef_m: state.position.as_array(),
             clock_s: state.clock_s,
         })
+    }
+
+    /// The `peph2pos` relativistic term for the product clock this source returns.
+    fn clock_relativity_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        crate::sp3::peph2pos_clock_relativity(
+            self.position_at_j2000_seconds(sat, t_j2000_s),
+            || self.position_after_ephpos_step(sat, t_j2000_s),
+        )
     }
 }

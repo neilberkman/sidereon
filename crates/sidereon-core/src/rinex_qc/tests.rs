@@ -1361,6 +1361,7 @@ fn solve_esbc_first_epoch(
             relative_humidity: 0.5,
         },
         robust: None,
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     crate::spp::solve(broadcast, &inputs, false).expect("solve SPP")
 }

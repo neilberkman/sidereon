@@ -25,6 +25,24 @@ pub trait IssueAwareBroadcast: EphemerisSource {
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64)>;
 
+    /// [`Self::state_by_iode_at`] with the single-frequency group delay of the same
+    /// record (see [`EphemerisSource::single_frequency_group_delay_s`]). The default takes
+    /// the delay of the record the source selects by time at `t_j2000_s`, which is the IODE
+    /// record wherever the two coincide; a source that can select by IODE overrides it.
+    fn state_group_delay_by_iode_at(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        let (position, clock) = self.state_by_iode_at(sat, iode, t_j2000_s)?;
+        Some((
+            position,
+            clock,
+            self.single_frequency_group_delay_s(sat, t_j2000_s),
+        ))
+    }
+
     /// Velocity, metres per second, of the record with broadcast IODE `iode` at
     /// `t_j2000_s`, when the source defines one. `None` by default.
     fn velocity_by_iode_at(
@@ -118,6 +136,20 @@ impl<'a> SbasCorrectedEphemeris<'a> {
     }
 
     fn corrected_state(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<([f64; 3], f64)> {
+        self.corrected_state_with_group_delay(sat, t_j2000_s)
+            .map(|(position, clock, _)| (position, clock))
+    }
+
+    /// [`Self::corrected_state`] with the single-frequency group delay of the broadcast
+    /// record the state starts from: the record the long-term correction's IODE selects,
+    /// or the one the broadcast state uses. RTKLIB `pntpos` applies that record's TGD to an
+    /// SBAS-corrected solution, as `satpos_sbas` builds on `ephpos`, whose clock has none.
+    /// `None` for the SBAS GEO, whose navigation clock carries no group delay.
+    fn corrected_state_with_group_delay(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
         if self.store.is_disabled(self.geo, t_j2000_s) || self.store.is_withdrawn(self.geo, sat) {
             return None;
         }
@@ -127,11 +159,12 @@ impl<'a> SbasCorrectedEphemeris<'a> {
             let (position, clock) = geo_state.state_at(t_j2000_s);
             // Without a fresh fast correction the GEO's own navigation state
             // is its broadcast state, used or refused as the mode says, like
-            // any other satellite without a correction.
+            // any other satellite without a correction. Its navigation clock
+            // carries no group delay.
             return match self.fast_clock_delta_s(sat, t_j2000_s) {
-                Some(delta_s) => Some((position, clock + delta_s)),
+                Some(delta_s) => Some((position, clock + delta_s, None)),
                 None => match self.mode {
-                    SbasSolveMode::MixedAugmentation => Some((position, clock)),
+                    SbasSolveMode::MixedAugmentation => Some((position, clock, None)),
                     SbasSolveMode::SbasOnly => None,
                 },
             };
@@ -144,36 +177,39 @@ impl<'a> SbasCorrectedEphemeris<'a> {
 
         match (fast, long) {
             (Some(fast), Some(long)) => {
-                let (mut position, mut clock) =
-                    self.broadcast.state_by_iode_at(sat, long.iode, t_j2000_s)?;
+                let (mut position, mut clock, group_delay) = self
+                    .broadcast
+                    .state_group_delay_by_iode_at(sat, long.iode, t_j2000_s)?;
                 let dt = t_j2000_s - long.t0_j2000_s;
                 for (i, component) in position.iter_mut().enumerate() {
                     *component += long.delta_ecef_m[i] + long.delta_ecef_rate_m_s[i] * dt;
                 }
                 clock += long.delta_af0_s + long.delta_af1_s_s * dt;
                 clock += (fast.prc_m + fast.rrc_m_s * (t_j2000_s - fast.t_of_j2000_s)) / C_M_S;
-                Some((position, clock))
+                Some((position, clock, group_delay))
             }
             (Some(fast), None) if self.store.allow_partial_corrections() => {
-                let (position, mut clock) =
-                    self.broadcast.position_clock_at_j2000_s(sat, t_j2000_s)?;
+                let (position, mut clock, group_delay) = self
+                    .broadcast
+                    .position_clock_group_delay_at_j2000_s(sat, t_j2000_s)?;
                 clock += (fast.prc_m + fast.rrc_m_s * (t_j2000_s - fast.t_of_j2000_s)) / C_M_S;
-                Some((position, clock))
+                Some((position, clock, group_delay))
             }
             (None, Some(long)) if self.store.allow_partial_corrections() => {
-                let (mut position, mut clock) =
-                    self.broadcast.state_by_iode_at(sat, long.iode, t_j2000_s)?;
+                let (mut position, mut clock, group_delay) = self
+                    .broadcast
+                    .state_group_delay_by_iode_at(sat, long.iode, t_j2000_s)?;
                 let dt = t_j2000_s - long.t0_j2000_s;
                 for (i, component) in position.iter_mut().enumerate() {
                     *component += long.delta_ecef_m[i] + long.delta_ecef_rate_m_s[i] * dt;
                 }
                 clock += long.delta_af0_s + long.delta_af1_s_s * dt;
-                Some((position, clock))
+                Some((position, clock, group_delay))
             }
             _ => match self.mode {
-                SbasSolveMode::MixedAugmentation => {
-                    self.broadcast.position_clock_at_j2000_s(sat, t_j2000_s)
-                }
+                SbasSolveMode::MixedAugmentation => self
+                    .broadcast
+                    .position_clock_group_delay_at_j2000_s(sat, t_j2000_s),
                 SbasSolveMode::SbasOnly => None,
             },
         }
@@ -233,6 +269,18 @@ impl<'a> SbasCorrectedEphemeris<'a> {
         velocity.map(Ok)
     }
 
+    /// Group delay a single-frequency model subtracts from the clock of the state
+    /// [`EphemerisSource::position_clock_at_j2000_s`] returns: the broadcast group delay
+    /// of the record that state starts from. `None` for the SBAS GEO and where no state is
+    /// returned.
+    pub fn single_frequency_group_delay_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<f64> {
+        self.corrected_state_with_group_delay(sat, t_j2000_s)?.2
+    }
+
     fn fast_clock_delta_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
         let fast = self.store.fresh_fast(self.geo, sat, t_j2000_s)?;
         Some((fast.prc_m + fast.rrc_m_s * (t_j2000_s - fast.t_of_j2000_s)) / C_M_S)
@@ -246,6 +294,18 @@ impl EphemerisSource for SbasCorrectedEphemeris<'_> {
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64)> {
         self.corrected_state(sat, t_j2000_s)
+    }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        SbasCorrectedEphemeris::single_frequency_group_delay_s(self, sat, t_j2000_s)
+    }
+
+    fn position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.corrected_state_with_group_delay(sat, t_j2000_s)
     }
 }
 
@@ -270,6 +330,34 @@ impl ObservableEphemerisSource for SbasCorrectedEphemeris<'_> {
         t_j2000_s: f64,
     ) -> Option<Result<[f64; 3], ObservablesError>> {
         self.corrected_velocity(sat, t_j2000_s)
+    }
+
+    /// True: an SBAS-corrected clock is the broadcast clock, which carries the broadcast
+    /// relativistic term, plus the SBAS clock corrections, as RTKLIB `satpos_sbas` builds
+    /// it on `ephpos`.
+    fn clock_includes_relativity(&self) -> bool {
+        true
+    }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        SbasCorrectedEphemeris::single_frequency_group_delay_s(self, sat, t_j2000_s)
+    }
+
+    fn observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<(ObservableState, Option<f64>), ObservablesError> {
+        let (position_ecef_m, clock_s, group_delay) = self
+            .corrected_state_with_group_delay(sat, t_j2000_s)
+            .ok_or(ObservablesError::NoEphemeris)?;
+        Ok((
+            ObservableState {
+                position_ecef_m,
+                clock_s: Some(clock_s),
+            },
+            group_delay,
+        ))
     }
 }
 
@@ -328,6 +416,20 @@ impl EphemerisSource for SbasCorrectedEphemerisOwned {
     ) -> Option<([f64; 3], f64)> {
         self.borrowed().position_clock_at_j2000_s(sat, t_j2000_s)
     }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        self.borrowed()
+            .single_frequency_group_delay_s(sat, t_j2000_s)
+    }
+
+    fn position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.borrowed()
+            .corrected_state_with_group_delay(sat, t_j2000_s)
+    }
 }
 
 impl ObservableEphemerisSource for SbasCorrectedEphemerisOwned {
@@ -346,6 +448,27 @@ impl ObservableEphemerisSource for SbasCorrectedEphemerisOwned {
     ) -> Option<Result<[f64; 3], ObservablesError>> {
         self.borrowed().velocity_at_j2000_s(sat, t_j2000_s)
     }
+
+    fn clock_includes_relativity(&self) -> bool {
+        self.borrowed().clock_includes_relativity()
+    }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        self.borrowed()
+            .single_frequency_group_delay_s(sat, t_j2000_s)
+    }
+
+    fn observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<(ObservableState, Option<f64>), ObservablesError> {
+        ObservableEphemerisSource::observable_state_group_delay_at_j2000_s(
+            &self.borrowed(),
+            sat,
+            t_j2000_s,
+        )
+    }
 }
 
 impl IssueAwareBroadcast for crate::rinex_nav::BroadcastStore {
@@ -356,6 +479,15 @@ impl IssueAwareBroadcast for crate::rinex_nav::BroadcastStore {
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64)> {
         crate::rinex_nav::BroadcastStore::state_by_iode_at(self, sat, iode, t_j2000_s)
+    }
+
+    fn state_group_delay_by_iode_at(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        crate::rinex_nav::BroadcastStore::state_group_delay_by_iode_at(self, sat, iode, t_j2000_s)
     }
 
     fn velocity_by_iode_at(

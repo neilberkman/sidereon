@@ -78,6 +78,52 @@ use crate::tolerances::WHOLE_SECOND_EPS_S;
 use crate::validate;
 use crate::{Error, Result};
 
+/// A position query instant held as whole seconds plus a fraction of a second, as RTKLIB's
+/// `gtime_t` holds it, so a node offset `node - query` is formed exactly as RTKLIB
+/// `pephpos` forms `timediff(node, time)`.
+///
+/// For a query made from one J2000 double the offsets equal `node - query` bit for bit,
+/// since a whole-second node minus that double is exact. [`Self::ephpos_step`] moves the
+/// instant 1 ms later as RTKLIB `timeadd` does, adding the step to the fraction and
+/// carrying the whole second, which one J2000 double near 8e8 s could only hold to 2^-23 s.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PreciseQuery {
+    whole_s: f64,
+    fraction_s: f64,
+}
+
+impl PreciseQuery {
+    /// The instant `t_j2000_s`.
+    pub(crate) fn at(t_j2000_s: f64) -> Self {
+        let whole_s = t_j2000_s.floor();
+        Self {
+            whole_s,
+            fraction_s: t_j2000_s - whole_s,
+        }
+    }
+
+    /// The instant 1 ms ([`crate::rinex_nav::EPHPOS_STEP_S`]) later, as RTKLIB `peph2pos`
+    /// forms `timeadd(time, 1E-3)`.
+    pub(crate) fn ephpos_step(self) -> Self {
+        let fraction_s = self.fraction_s + crate::rinex_nav::EPHPOS_STEP_S;
+        let carry_s = fraction_s.floor();
+        Self {
+            whole_s: self.whole_s + carry_s,
+            fraction_s: fraction_s - carry_s,
+        }
+    }
+
+    /// The instant as one J2000 double, for node selection and coverage checks.
+    pub(crate) fn j2000_s(self) -> f64 {
+        self.whole_s + self.fraction_s
+    }
+
+    /// `node - query`, whole seconds first, as RTKLIB `timediff` forms it.
+    pub(crate) fn offset_from(self, node_s: f64) -> f64 {
+        (node_s - self.whole_s) - self.fraction_s
+    }
+}
+
 /// Per-satellite precise node series in native fit units.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PreciseSatSeries {
@@ -218,6 +264,102 @@ impl Sp3 {
             self.interpolation.gap_threshold_factor(),
         )
     }
+}
+
+impl Sp3 {
+    /// Position of `sat` 1 ms after `t_j2000_s`, the second position RTKLIB `peph2pos`
+    /// interpolates to form the satellite velocity; see [`PreciseQuery::ephpos_step`].
+    pub(crate) fn position_after_ephpos_step(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<[f64; 3]> {
+        let series = gather_sp3_precise_series(self, sat);
+        interpolate_precise_position(
+            sat,
+            &series.x,
+            &series.kx,
+            &series.ky,
+            &series.kz,
+            PreciseQuery::at(t_j2000_s).ephpos_step(),
+            self.interpolation.gap_threshold_factor(),
+        )
+        .map(|(x, y, z)| [x, y, z])
+    }
+}
+
+impl Sp3 {
+    /// The relativistic term a positioning model applies to this product's clock of `sat`
+    /// at `epoch` (see `peph2pos_clock_relativity`).
+    pub(crate) fn clock_relativity_at(
+        &self,
+        sat: GnssSatelliteId,
+        epoch: Instant,
+    ) -> crate::spp::ClockRelativity {
+        let Some(t_j2000_s) = instant_to_j2000_seconds(&epoch) else {
+            return crate::spp::ClockRelativity::Unavailable;
+        };
+        peph2pos_clock_relativity(self.position_at_j2000_seconds(sat, t_j2000_s), || {
+            self.position_after_ephpos_step(sat, t_j2000_s)
+        })
+    }
+}
+
+/// The relativistic clock term RTKLIB `peph2pos` applies to a precise product's clock,
+/// `-2 r·v / c / c`, with no satellite antenna offset (`peph2pos` with `opt = 0`, or with
+/// no ANTEX loaded, where the offset is zero), `r` the interpolated position and `v` the
+/// difference of the positions at the epoch and 1 ms later over 1 ms (`preceph.c`:
+/// "relativistic effect correction", `dts[0]=dtss[0]-2.0*dot3(rs,rs+3)/CLIGHT/CLIGHT`). SP3 and RINEX CLK
+/// clocks leave the periodic relativistic term to the user. Adding the returned term to
+/// the product clock gives `peph2pos`'s clock bit for bit.
+///
+/// `None` when the position 1 ms later cannot be interpolated (the epoch is within 1 ms
+/// of the end of coverage), where `peph2pos` returns no state.
+pub(crate) fn peph2pos_relativity_s(
+    position_m: [f64; 3],
+    position_after_step_m: impl FnOnce() -> Result<[f64; 3]>,
+) -> Option<f64> {
+    let end = position_after_step_m().ok()?;
+    let step = crate::rinex_nav::EPHPOS_STEP_S;
+    let velocity = [
+        (end[0] - position_m[0]) / step,
+        (end[1] - position_m[1]) / step,
+        (end[2] - position_m[2]) / step,
+    ];
+    let r_dot_v =
+        position_m[0] * velocity[0] + position_m[1] * velocity[1] + position_m[2] * velocity[2];
+    Some(-(2.0 * r_dot_v / crate::constants::C_M_S / crate::constants::C_M_S))
+}
+
+/// The relativistic term a positioning model applies to a precise source's clock at one
+/// epoch, from the source's state there and its position 1 ms later: `Term` with the
+/// `peph2pos` term, or `Unavailable` where either is missing (no state, no product clock,
+/// or no position 1 ms later), where `peph2pos` returns no state.
+pub(crate) fn peph2pos_clock_relativity(
+    state: Result<Sp3State>,
+    position_after_step_m: impl FnOnce() -> Result<[f64; 3]>,
+) -> crate::spp::ClockRelativity {
+    let Ok(state) = state else {
+        return crate::spp::ClockRelativity::Unavailable;
+    };
+    if state.clock_s.is_none() {
+        return crate::spp::ClockRelativity::Unavailable;
+    }
+    peph2pos_state_clock_relativity(state.position.as_array(), position_after_step_m)
+}
+
+/// [`peph2pos_clock_relativity`] for a state the source has already interpolated, with a
+/// product clock: `position_m` is its position. Only the position 1 ms later is
+/// interpolated; the term is the one `peph2pos_clock_relativity` returns for that state,
+/// bit for bit.
+pub(crate) fn peph2pos_state_clock_relativity(
+    position_m: [f64; 3],
+    position_after_step_m: impl FnOnce() -> Result<[f64; 3]>,
+) -> crate::spp::ClockRelativity {
+    peph2pos_relativity_s(position_m, position_after_step_m).map_or(
+        crate::spp::ClockRelativity::Unavailable,
+        crate::spp::ClockRelativity::Term,
+    )
 }
 
 /// Gather one satellite's SP3-native node series in ascending epoch order.
@@ -373,7 +515,7 @@ pub(super) fn interpolate_precise_state(
         pos_kx,
         pos_ky,
         pos_kz,
-        query,
+        PreciseQuery::at(query),
         gap_threshold_factor,
     )?;
     let clock_s = interpolate_clock(clk_nodes, query);
@@ -408,7 +550,7 @@ pub(super) fn interpolate_precise_state_with_clock_arcs(
         pos_kx,
         pos_ky,
         pos_kz,
-        query,
+        PreciseQuery::at(query),
         gap_threshold_factor,
     )?;
     let clock_s = interpolate_fitted_clock(clock_arcs, query);
@@ -422,16 +564,17 @@ pub(super) fn interpolate_precise_state_with_clock_arcs(
     })
 }
 
-fn interpolate_precise_position(
+pub(super) fn interpolate_precise_position(
     sat: GnssSatelliteId,
     pos_x: &[f64],
     pos_kx: &[f64],
     pos_ky: &[f64],
     pos_kz: &[f64],
-    query: f64,
+    precise_query: PreciseQuery,
     gap_threshold_factor: f64,
 ) -> Result<(f64, f64, f64)> {
-    let query = validate::finite(query, "query_j2000_s").map_err(map_query_input)?;
+    let query =
+        validate::finite(precise_query.j2000_s(), "query_j2000_s").map_err(map_query_input)?;
 
     if pos_x.is_empty() {
         return Err(Error::UnknownSatellite(sat));
@@ -475,8 +618,14 @@ fn interpolate_precise_position(
         }
     }
 
-    let (x_m, y_m, z_m) =
-        interpolate_position_neville(pos_x, pos_kx, pos_ky, pos_kz, query, gap_threshold_factor);
+    let (x_m, y_m, z_m) = interpolate_position_neville(
+        pos_x,
+        pos_kx,
+        pos_ky,
+        pos_kz,
+        precise_query,
+        gap_threshold_factor,
+    );
     if !(x_m.is_finite() && y_m.is_finite() && z_m.is_finite()) {
         // Neville divides by node-minus-node offsets measured from the query;
         // nodes admitted far from the query can coincide at its precision.
@@ -772,9 +921,10 @@ fn interpolate_position_neville(
     kx: &[f64],
     ky: &[f64],
     kz: &[f64],
-    query: f64,
+    precise_query: PreciseQuery,
     gap_threshold_factor: f64,
 ) -> (f64, f64, f64) {
+    let query = precise_query.j2000_s();
     let n = x.len();
 
     // Nominal node spacing = smallest positive consecutive gap (robust to one
@@ -827,7 +977,7 @@ fn interpolate_position_neville(
     let mut pz = [0.0f64; NEVILLE_POINTS];
     for j in 0..win {
         let k = start + j;
-        let tj = x[k] - query;
+        let tj = precise_query.offset_from(x[k]);
         let theta = OMEGA_E_DOT_RAD_S * tj;
         let s = libm::sin(theta);
         let c = libm::cos(theta);

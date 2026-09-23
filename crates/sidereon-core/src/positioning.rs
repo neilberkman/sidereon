@@ -15,12 +15,13 @@ use crate::rtcm::{self, MsmKind};
 pub use crate::spp::{
     residual_rms, solve, solve_broadcast, solve_doppler_velocity, solve_spp_batch_parallel,
     solve_spp_batch_serial, solve_with_doppler_velocity, solve_with_fallback, solve_with_policy,
-    solve_with_solver, BroadcastReason, Corrections, DopplerObservation, DopplerVelocityInputs,
-    EphemerisSource, FallbackError, FixSource, GalileoNequickCoeffs, KlobucharCoeffs, Observation,
-    ReceiverSolution, RejectedSat, RejectionReason, RobustConfig, SolutionMetadata, SolveInputs,
-    SolvePolicy, SolvePolicyError, SourcedSolution, SppDopplerSolution, SppError, SurfaceMet,
-    DEFAULT_HUBER_K, DEFAULT_ROBUST_MAX_OUTER, DEFAULT_ROBUST_OUTER_TOL_M,
-    DEFAULT_ROBUST_SCALE_FLOOR_M, ELEVATION_MASK_RAD, SIGMA0_M, TRANSMIT_TIME_ITERATIONS,
+    solve_with_solver, BroadcastReason, ClockRelativity, Corrections, DopplerObservation,
+    DopplerVelocityInputs, EphemerisSource, FallbackError, FixSource, GalileoNequickCoeffs,
+    KlobucharCoeffs, Observation, PseudorangeCode, ReceiverSolution, RejectedSat, RejectionReason,
+    RobustConfig, SolutionMetadata, SolveInputs, SolvePolicy, SolvePolicyError, SourcedSolution,
+    SppDopplerSolution, SppError, SurfaceMet, DEFAULT_HUBER_K, DEFAULT_ROBUST_MAX_OUTER,
+    DEFAULT_ROBUST_OUTER_TOL_M, DEFAULT_ROBUST_SCALE_FLOOR_M, ELEVATION_MASK_RAD, SIGMA0_M,
+    TRANSMIT_TIME_ITERATIONS,
 };
 pub use crate::static_positioning::{
     solve_static, StaticClockBias, StaticCovariance, StaticEpoch, StaticEpochInfluence,
@@ -190,6 +191,35 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for RinexSppSource<'_, E> {
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64)> {
         self.ephemeris.position_clock_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        EphemerisSource::single_frequency_group_delay_s(self.ephemeris, sat, t_j2000_s)
+    }
+
+    fn clock_relativity_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        EphemerisSource::clock_relativity_s(self.ephemeris, sat, t_j2000_s)
+    }
+
+    fn clock_relativity_for_state_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        position_m: [f64; 3],
+    ) -> crate::spp::ClockRelativity {
+        EphemerisSource::clock_relativity_for_state_s(self.ephemeris, sat, t_j2000_s, position_m)
+    }
+
+    fn position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        EphemerisSource::position_clock_group_delay_at_j2000_s(self.ephemeris, sat, t_j2000_s)
     }
 }
 
@@ -465,6 +495,7 @@ where
                 glonass_channels: base_corrections.glonass_channels.clone(),
                 met: options.met,
                 robust: options.robust,
+                pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
             },
         });
     }
@@ -611,6 +642,7 @@ where
                 glonass_channels: base_corrections.glonass_channels.clone(),
                 met: options.met,
                 robust: options.robust,
+                pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
             },
         });
     }

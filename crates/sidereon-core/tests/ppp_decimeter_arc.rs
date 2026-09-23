@@ -821,8 +821,17 @@ fn zim2_ppp_static_with_code_bias_matches_no_bias_on_matched_datum() {
 
     assert_eq!(residual.satellite_id, "G05");
     assert_eq!(residual.epoch_index, 0);
-    assert_eq!(residual.code_m.to_bits(), 0x40040fce03800000);
-    assert_eq!(residual.phase_m.to_bits(), 0xbfa1ac9000000000);
+    // Re-frozen when the CLK series began to be interpolated at every bit of the
+    // transmission time: the query had been rounded onto the 2^-22 s grid near 1.4e9 s
+    // GPS seconds, up to 1.2e-7 s off, which moves the interpolated clock by the clock
+    // rate over that time. The code residual moved by -3.7e-9 m and the phase residual in
+    // its last bits; both are printed on a mismatch.
+    let residual_bits = [residual.code_m.to_bits(), residual.phase_m.to_bits()];
+    assert_eq!(
+        residual_bits,
+        [0x40040fce03000000, 0xbfa1ac9040000000],
+        "code, phase residual bits: {residual_bits:#x?}"
+    );
     assert!(truth_err < DECIMETER_TRUTH_BOUND_M);
 }
 
@@ -959,5 +968,126 @@ fn zim2_correction_stack_progressively_approaches_truth() {
     assert!(
         e_full < DECIMETER_TRUTH_BOUND_M,
         "full stack must reach decimeter ({e_full} m)"
+    );
+}
+
+/// The ZIM2 arc solved by SPP on the ionosphere-free C1C/C2W code with the IGS final SP3,
+/// once with the relativistic clock term RTKLIB `peph2pos` applies to a precise clock for
+/// positioning, and once with the SP3 clock as written. The SP3 and RINEX CLK conventions
+/// leave the periodic term `-2 r·v / c²` to the user; it reaches several metres of range
+/// for an eccentric orbit and differs per satellite, so it moves the position as well as
+/// the receiver clock. Measured over the 120 epochs: 1.3145 m RMS from the published
+/// ITRF2020 truth with the term (0.89 to 2.72 m per epoch), 18.9014 m without it (18.5
+/// to 22.5 m). The bounds hold the term's result to that level, with margin for the
+/// code noise, and keep it well clear of the result without it.
+#[test]
+fn zim2_sp3_spp_with_the_peph2pos_relativity_term_is_closer_to_truth() {
+    use sidereon_core::positioning::{
+        solve, Corrections, EphemerisSource, KlobucharCoeffs, Observation, SolveInputs, SurfaceMet,
+    };
+
+    /// The SP3 source with its clock as written and no relativistic term.
+    struct ProductClockOnly<'a>(&'a Sp3);
+
+    impl EphemerisSource for ProductClockOnly<'_> {
+        fn position_clock_at_j2000_s(
+            &self,
+            sat: GnssSatelliteId,
+            t_j2000_s: f64,
+        ) -> Option<([f64; 3], f64)> {
+            EphemerisSource::position_clock_at_j2000_s(self.0, sat, t_j2000_s)
+        }
+    }
+
+    fn day_of_year(time: &CivilDateTime) -> f64 {
+        const DAYS_BEFORE: [u16; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+        let leap = time.year % 4 == 0 && (time.year % 100 != 0 || time.year % 400 == 0);
+        let month = usize::from(time.month) - 1;
+        let day = f64::from(DAYS_BEFORE[month]) + f64::from(time.day);
+        let day = if leap && month >= 2 { day + 1.0 } else { day };
+        day + (f64::from(time.hour) * 3600.0 + f64::from(time.minute) * 60.0 + time.second)
+            / SECONDS_PER_DAY
+    }
+
+    let sp3 = load_sp3();
+    let obs = load_obs();
+    let approx = obs
+        .header()
+        .approx_position_m
+        .expect("ZIM2 approx position");
+    let epochs = gps_float_epochs(&sp3, &obs, approx);
+    let product_clock = ProductClockOnly(&sp3);
+
+    let mut sum_with_m2 = 0.0;
+    let mut sum_without_m2 = 0.0;
+    let mut worst_with_m = 0.0_f64;
+    for epoch in &epochs {
+        let seconds_of_day = f64::from(epoch.epoch.hour) * 3600.0
+            + f64::from(epoch.epoch.minute) * 60.0
+            + epoch.epoch.second;
+        let inputs = SolveInputs {
+            observations: epoch
+                .observations
+                .iter()
+                .map(|o| Observation {
+                    satellite_id: o.sat,
+                    pseudorange_m: o.code_m,
+                })
+                .collect(),
+            t_rx_j2000_s: epoch.t_rx_j2000_s,
+            t_rx_second_of_day_s: seconds_of_day,
+            day_of_year: day_of_year(&epoch.epoch),
+            initial_guess: [approx[0], approx[1], approx[2], 0.0],
+            corrections: Corrections {
+                ionosphere: false,
+                troposphere: true,
+            },
+            klobuchar: KlobucharCoeffs {
+                alpha: [0.0; 4],
+                beta: [0.0; 4],
+            },
+            beidou_klobuchar: None,
+            galileo_nequick: None,
+            sbas_iono: None,
+            glonass_channels: BTreeMap::new(),
+            met: SurfaceMet {
+                pressure_hpa: 1013.25,
+                temperature_k: 288.15,
+                relative_humidity: 0.5,
+            },
+            robust: None,
+            pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
+        };
+        let with_term = solve(&sp3, &inputs, false).expect("SPP with the peph2pos term");
+        let without_term =
+            solve(&product_clock, &inputs, false).expect("SPP with the SP3 clock as written");
+        let error_with = position_error_m(with_term.position.as_array(), ZIM2_TRUTH_ECEF_M);
+        let error_without = position_error_m(without_term.position.as_array(), ZIM2_TRUTH_ECEF_M);
+        eprintln!(
+            "zim2 sp3 spp t={} error_with_term_m={error_with:.4} error_without_term_m={error_without:.4}",
+            epoch.t_rx_j2000_s
+        );
+        worst_with_m = worst_with_m.max(error_with);
+        sum_with_m2 += error_with * error_with;
+        sum_without_m2 += error_without * error_without;
+    }
+    let count = epochs.len() as f64;
+    let rms_with_m = (sum_with_m2 / count).sqrt();
+    let rms_without_m = (sum_without_m2 / count).sqrt();
+    eprintln!(
+        "zim2 sp3 spp epochs={} rms_with_term_m={rms_with_m:.4} rms_without_term_m={rms_without_m:.4}",
+        epochs.len()
+    );
+    assert!(
+        rms_with_m < 2.0,
+        "SPP with the peph2pos term is {rms_with_m} m RMS from truth"
+    );
+    assert!(
+        worst_with_m < 3.5,
+        "SPP with the peph2pos term reaches {worst_with_m} m from truth at one epoch"
+    );
+    assert!(
+        rms_without_m > 5.0 * rms_with_m,
+        "with the peph2pos term {rms_with_m} m, without {rms_without_m} m"
     );
 }

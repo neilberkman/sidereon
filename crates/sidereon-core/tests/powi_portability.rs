@@ -6,7 +6,7 @@
 /// crates/trust-region-least-squares/src`, plus the runtime exponent interval
 /// used by the format and force-model paths.
 const USED_EXPONENTS: &[i32] = &[
-    -52, -35, -28, -26, -14, -3, -2, -1, 0, 2, 3, 4, 5, 6, 7, 8, 24, 29, 53,
+    -52, -35, -28, -26, -23, -14, -3, -2, -1, 0, 2, 3, 4, 5, 6, 7, 8, 24, 29, 53,
 ];
 
 fn repeated_square(base: f64, exponent: i32) -> f64 {

@@ -5,9 +5,6 @@ use crate::broadcast::{
     satellite_state_cnav_unchecked, satellite_state_unchecked, time_from_reference_s, CnavRates,
     SatelliteState,
 };
-use crate::constants::{
-    BDS_EPOCH_MINUS_GPS_EPOCH_S, GPST_MINUS_BDT_S, GPS_EPOCH_TO_J2000_S, SECONDS_PER_WEEK,
-};
 use crate::error::{Error, Result as CoreResult};
 use crate::glonass;
 use crate::id::{GnssSatelliteId, GnssSystem};
@@ -19,6 +16,7 @@ use super::{
     CnavParameters, GlonassRecord, IonoCorrections, NavMessage, NavParseError, EPHPOS_STEP_S,
     GLONASS_MAX_AGE_S, MAX_EPHEMERIS_AGE_S,
 };
+use super::{ephpos_stepped_tk, query_native_time, toe_native_j2000_s};
 
 /// Which navigation-message generation a store prefers when a GPS/QZSS
 /// satellite has both legacy and CNAV-family records.
@@ -181,8 +179,25 @@ impl BroadcastStore {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<&BroadcastRecord> {
-        let (t_continuous_s, _) = query_continuous_time(sat, t_j2000_s)?;
-        self.select(sat, t_continuous_s)
+        let (t_native_s, _, _) = query_native_time(sat, t_j2000_s)?;
+        self.select(sat, t_native_s)
+    }
+
+    /// Broadcast group delay, seconds, of the record selected for `sat` at `t_j2000_s`,
+    /// the one [`EphemerisSource::position_clock_at_j2000_s`] evaluates, for the
+    /// single-frequency user of its message: GPS and QZSS LNAV TGD, Galileo I/NAV BGD
+    /// E5b/E1, Galileo F/NAV BGD E5a/E1, BeiDou TGD1, CNAV TGD less ISC L1C/A. The clock
+    /// this store returns does not include it, as RTKLIB `satposs` returns none; a
+    /// single-frequency pseudorange model subtracts it from that clock, as RTKLIB
+    /// `pntpos` subtracts it from the pseudorange. `None` where no record is selected and
+    /// for GLONASS.
+    pub fn single_frequency_group_delay_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<f64> {
+        self.select_record_at(sat, t_j2000_s)
+            .map(BroadcastRecord::broadcast_clock_group_delay_s)
     }
 
     /// Velocity, metres per second, of the record selected for `sat` at `t_j2000_s`, as
@@ -217,7 +232,7 @@ impl BroadcastStore {
             rec.vel_m_s[2],
         ];
         let start = glonass::propagate(state0, rec.acc_m_s2, tk).ok()?;
-        let end = glonass::propagate(state0, rec.acc_m_s2, tk + EPHPOS_STEP_S).ok()?;
+        let end = glonass::propagate(state0, rec.acc_m_s2, ephpos_stepped_tk(tk)).ok()?;
         Some([
             (end[0] - start[0]) / EPHPOS_STEP_S,
             (end[1] - start[1]) / EPHPOS_STEP_S,
@@ -245,16 +260,16 @@ impl BroadcastStore {
         iode: u8,
         t_j2000_s: f64,
     ) -> Option<&BroadcastRecord> {
-        let (t_continuous, _) = query_continuous_time(sat, t_j2000_s)?;
+        let (t_native_s, _, _) = query_native_time(sat, t_j2000_s)?;
         self.records
             .iter()
             .filter(|r| r.satellite_id == sat)
             .filter(|r| r.issue_of_data.message == NavMessage::GpsLnav)
             .filter(|r| r.issue_of_data.issue == u32::from(iode))
-            .filter(|r| (t_continuous - Self::toe_continuous_s(r)).abs() <= Self::half_window_s(r))
+            .filter(|r| (t_native_s - toe_native_j2000_s(r)).abs() <= Self::half_window_s(r))
             .min_by(|a, b| {
-                let da = (t_continuous - Self::toe_continuous_s(a)).abs();
-                let db = (t_continuous - Self::toe_continuous_s(b)).abs();
+                let da = (t_native_s - toe_native_j2000_s(a)).abs();
+                let db = (t_native_s - toe_native_j2000_s(b)).abs();
                 da.partial_cmp(&db).unwrap_or(core::cmp::Ordering::Equal)
             })
     }
@@ -266,24 +281,116 @@ impl BroadcastStore {
         iode: u8,
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64)> {
-        let (t_continuous, is_geo) = query_continuous_time(sat, t_j2000_s)?;
+        let (_, sow, is_geo) = query_native_time(sat, t_j2000_s)?;
         let rec = self.select_by_iode_at(sat, iode, t_j2000_s)?;
-        let sow = t_continuous.rem_euclid(SECONDS_PER_WEEK);
         let state = evaluate_record_unchecked(rec, sow, is_geo);
         let position = state.orbit.position().ok()?;
-        Some((position.as_array(), state.clock.dt_clock_total_s))
+        Some((position.as_array(), satposs_clock_s(&state)))
+    }
+
+    /// [`Self::state_by_iode_at`] with the single-frequency group delay of the same
+    /// record.
+    pub(crate) fn state_group_delay_by_iode_at(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u8,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        let (_, sow, is_geo) = query_native_time(sat, t_j2000_s)?;
+        let rec = self.select_by_iode_at(sat, iode, t_j2000_s)?;
+        let state = evaluate_record_unchecked(rec, sow, is_geo);
+        let position = state.orbit.position().ok()?;
+        Some((
+            position.as_array(),
+            satposs_clock_s(&state),
+            Some(rec.broadcast_clock_group_delay_s()),
+        ))
+    }
+
+    /// Select the valid BeiDou record for `sat` of message `nav_message` whose IOD, as
+    /// IGS SSR v1.00 (IDF012) defines it for BDS, `mod(toe/720, 240)` with `toe` the BDT
+    /// seconds of week, equals `iod`, nearest `t_j2000_s`. SSR orbit corrections name a
+    /// BeiDou record by this IOD, not by its AODE.
+    pub(crate) fn select_by_beidou_ssr_iod_at(
+        &self,
+        sat: GnssSatelliteId,
+        iod: u32,
+        nav_message: NavMessage,
+        t_j2000_s: f64,
+    ) -> Option<&BroadcastRecord> {
+        if sat.system != GnssSystem::BeiDou {
+            return None;
+        }
+        let (t_native_s, _, _) = query_native_time(sat, t_j2000_s)?;
+        self.records
+            .iter()
+            .filter(|r| {
+                r.satellite_id == sat
+                    && r.message == nav_message
+                    && beidou_ssr_iod(r) == Some(iod)
+                    && (t_native_s - toe_native_j2000_s(r)).abs() <= Self::half_window_s(r)
+            })
+            .min_by(|a, b| {
+                let da = (t_native_s - toe_native_j2000_s(a)).abs();
+                let db = (t_native_s - toe_native_j2000_s(b)).abs();
+                da.partial_cmp(&db).unwrap_or(core::cmp::Ordering::Equal)
+            })
+    }
+
+    /// Position, velocity and clock of the GLONASS record for `sat` whose `tb`, the 15-min
+    /// index of its reference epoch in UTC + 3 h, equals `iode`, as RTKLIB `satpos_ssr`
+    /// forms them for a GLONASS SSR correction: `selgeph` by that issue (RTKLIB `readrnx`
+    /// forms a GLONASS record's IODE as `tb`), then `geph2pos` at `t_j2000_s` and 1 ms
+    /// later. The clock is `geph2pos`'s, `-TauN + GammaN·tk` with `tk` not iterated, and
+    /// carries no relativistic term, which RTKLIB adds none of for GLONASS. The record's
+    /// reference epoch lies within [`GLONASS_SSR_MAX_AGE_S`] of the query, as `selgeph`
+    /// bounds it. `None` without a
+    /// leap-second offset, which places a GLONASS epoch on the GPS timeline.
+    pub(crate) fn glonass_ssr_state(
+        &self,
+        sat: GnssSatelliteId,
+        iode: u32,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], [f64; 3], f64)> {
+        let leap = self.leap_seconds?;
+        let toe_gpst = |r: &GlonassRecord| r.toe_utc_j2000_s + leap;
+        let rec = self
+            .glonass
+            .iter()
+            .filter(|r| {
+                r.satellite_id == sat
+                    && glonass_tb(r) == Some(iode)
+                    && (t_j2000_s - toe_gpst(r)).abs() <= GLONASS_SSR_MAX_AGE_S
+            })
+            .min_by(|a, b| {
+                let da = (t_j2000_s - toe_gpst(a)).abs();
+                let db = (t_j2000_s - toe_gpst(b)).abs();
+                da.partial_cmp(&db).unwrap_or(core::cmp::Ordering::Equal)
+            })?;
+        let tk = t_j2000_s - toe_gpst(rec);
+        let state0 = [
+            rec.pos_m[0],
+            rec.pos_m[1],
+            rec.pos_m[2],
+            rec.vel_m_s[0],
+            rec.vel_m_s[1],
+            rec.vel_m_s[2],
+        ];
+        let start = glonass::propagate(state0, rec.acc_m_s2, tk).ok()?;
+        let end = glonass::propagate(state0, rec.acc_m_s2, ephpos_stepped_tk(tk)).ok()?;
+        let velocity = [
+            (end[0] - start[0]) / EPHPOS_STEP_S,
+            (end[1] - start[1]) / EPHPOS_STEP_S,
+            (end[2] - start[2]) / EPHPOS_STEP_S,
+        ];
+        let clock = rec.clk_bias + rec.gamma_n * tk;
+        Some(([start[0], start[1], start[2]], velocity, clock))
     }
 
     /// Keep only the records matching a predicate (e.g. a custom message/health
     /// policy on a store built with [`new`](BroadcastStore::new)).
     pub fn retain(&mut self, keep: impl FnMut(&BroadcastRecord) -> bool) {
         self.records.retain(keep);
-    }
-
-    /// Continuous native broadcast time of a record's `toe`
-    /// (`week * 604800 + tow` in the record's own scale).
-    fn toe_continuous_s(rec: &BroadcastRecord) -> f64 {
-        f64::from(rec.toe.week) * SECONDS_PER_WEEK + rec.toe.tow_s
     }
 
     /// The half-validity window (seconds either side of `toe`) for a record: half
@@ -297,23 +404,22 @@ impl BroadcastStore {
     }
 
     /// The record for `sat` whose native-system `toe` is nearest
-    /// `t_continuous_s` **among those whose validity window covers the
+    /// `t_native_s` **among those whose validity window covers the
     /// query** (see [`half_window_s`](Self::half_window_s)). Filtering by
     /// validity before choosing the nearest means a query just past one record's
     /// fit interval can still be served by a farther record whose own window is
     /// wide enough, rather than being rejected outright.
-    fn select(&self, sat: GnssSatelliteId, t_continuous_s: f64) -> Option<&BroadcastRecord> {
+    fn select(&self, sat: GnssSatelliteId, t_native_s: f64) -> Option<&BroadcastRecord> {
         let mut preferred = None;
         let mut fallback = None;
         for record in self.records.iter().filter(|r| r.satellite_id == sat) {
-            if (t_continuous_s - Self::toe_continuous_s(record)).abs() > Self::half_window_s(record)
-            {
+            if (t_native_s - toe_native_j2000_s(record)).abs() > Self::half_window_s(record) {
                 continue;
             }
             if self.is_preferred_family(record) {
-                select_better_candidate(&mut preferred, record, t_continuous_s);
+                select_better_candidate(&mut preferred, record, t_native_s);
             } else {
-                select_better_candidate(&mut fallback, record, t_continuous_s);
+                select_better_candidate(&mut fallback, record, t_native_s);
             }
         }
         preferred.or(fallback)
@@ -344,18 +450,18 @@ impl BroadcastStore {
         if issue.message != nav_message {
             return None;
         }
-        let (t_continuous_s, _) = query_continuous_time(sat, t_j2000_s)?;
+        let (t_native_s, _, _) = query_native_time(sat, t_j2000_s)?;
         self.records
             .iter()
             .filter(|r| {
                 r.satellite_id == sat
                     && r.message == nav_message
                     && r.issue_of_data == issue
-                    && (t_continuous_s - Self::toe_continuous_s(r)).abs() <= Self::half_window_s(r)
+                    && (t_native_s - toe_native_j2000_s(r)).abs() <= Self::half_window_s(r)
             })
             .min_by(|a, b| {
-                let da = (t_continuous_s - Self::toe_continuous_s(a)).abs();
-                let db = (t_continuous_s - Self::toe_continuous_s(b)).abs();
+                let da = (t_native_s - toe_native_j2000_s(a)).abs();
+                let db = (t_native_s - toe_native_j2000_s(b)).abs();
                 da.partial_cmp(&db).unwrap_or(core::cmp::Ordering::Equal)
             })
     }
@@ -506,8 +612,7 @@ fn keplerian_record_velocity(
     sat: GnssSatelliteId,
     t_j2000_s: f64,
 ) -> Option<[f64; 3]> {
-    let (t_continuous, is_geo) = query_continuous_time(sat, t_j2000_s)?;
-    let sow = t_continuous.rem_euclid(SECONDS_PER_WEEK);
+    let (_, sow, is_geo) = query_native_time(sat, t_j2000_s)?;
     let tk = time_from_reference_s(sow, rec.elements.toe_sow);
     let rates = rec.cnav.map(cnav_rates);
     // The CNAV model has no GEO branch.
@@ -525,7 +630,7 @@ fn keplerian_record_velocity(
         .map(|position| position.as_array())
     };
     let start = position(tk)?;
-    let end = position(tk + EPHPOS_STEP_S)?;
+    let end = position(ephpos_stepped_tk(tk))?;
     Some([
         (end[0] - start[0]) / EPHPOS_STEP_S,
         (end[1] - start[1]) / EPHPOS_STEP_S,
@@ -558,13 +663,13 @@ fn evaluate_record_unchecked(rec: &BroadcastRecord, sow: f64, is_geo: bool) -> S
 fn select_better_candidate<'a>(
     best: &mut Option<&'a BroadcastRecord>,
     candidate: &'a BroadcastRecord,
-    t_continuous_s: f64,
+    t_native_s: f64,
 ) {
     let Some(current) = *best else {
         *best = Some(candidate);
         return;
     };
-    if candidate_is_better(candidate, current, t_continuous_s) {
+    if candidate_is_better(candidate, current, t_native_s) {
         *best = Some(candidate);
     }
 }
@@ -572,10 +677,10 @@ fn select_better_candidate<'a>(
 fn candidate_is_better(
     candidate: &BroadcastRecord,
     current: &BroadcastRecord,
-    t_continuous_s: f64,
+    t_native_s: f64,
 ) -> bool {
-    let da = (t_continuous_s - BroadcastStore::toe_continuous_s(candidate)).abs();
-    let db = (t_continuous_s - BroadcastStore::toe_continuous_s(current)).abs();
+    let da = (t_native_s - toe_native_j2000_s(candidate)).abs();
+    let db = (t_native_s - toe_native_j2000_s(current)).abs();
     match da.partial_cmp(&db).unwrap_or(core::cmp::Ordering::Equal) {
         core::cmp::Ordering::Less => true,
         core::cmp::Ordering::Greater => false,
@@ -614,12 +719,14 @@ impl core::str::FromStr for BroadcastStore {
     }
 }
 
-impl EphemerisSource for BroadcastStore {
-    fn position_clock_at_j2000_s(
+impl BroadcastStore {
+    /// Position, `satposs` clock and single-frequency group delay of the record selected
+    /// for `sat` at `t_j2000_s`, from one selection. The group delay is `None` for GLONASS.
+    fn state_with_group_delay(
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
-    ) -> Option<([f64; 3], f64)> {
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
         // GLONASS is not Keplerian: integrate its broadcast state vector with the
         // RK4 propagator. Its reference epoch is UTC, mapped onto the GPST-aligned
         // query via the parsed leap-second offset.
@@ -635,42 +742,87 @@ impl EphemerisSource for BroadcastStore {
             ];
             let state = glonass::propagate(state0, rec.acc_m_s2, tk).ok()?;
             let clock = glonass::clock_offset_s(rec.clk_bias, rec.gamma_n, tk);
-            return Some(([state[0], state[1], state[2]], clock));
+            return Some(([state[0], state[1], state[2]], clock, None));
         }
 
         // Supported Keplerian systems only; a record from any other system (for
         // example SBAS or NavIC) reports no ephemeris rather than being evaluated
         // with the wrong model. (`from_nav` already restricts records, but `new`
-        // accepts arbitrary ones.)
-        // Map the receive instant (J2000, GPST-aligned) onto the satellite
-        // system's continuous time and seconds of week. BeiDou runs on BDT
-        // (= GPST - 14 s) with its week epoch 1356 weeks after the GPS epoch, and
-        // its geostationary satellites take the GEO orbit branch.
-        // `query_continuous_time` returns None for non-Keplerian systems.
-        let (t_continuous, is_geo) = query_continuous_time(sat, t_j2000_s)?;
-
-        let rec = self.select(sat, t_continuous)?;
-        let sow = t_continuous.rem_euclid(SECONDS_PER_WEEK);
+        // accepts arbitrary ones.) The query instant (J2000, GPST-aligned) is read in
+        // the satellite system's own scale and seconds of week: BeiDou runs on BDT
+        // (= GPST - 14 s), and its geostationary satellites take the GEO orbit branch.
+        let (t_native_s, sow, is_geo) = query_native_time(sat, t_j2000_s)?;
+        let rec = self.select(sat, t_native_s)?;
         let state = evaluate_record_unchecked(rec, sow, is_geo);
         let position = state.orbit.position().ok()?;
-        Some((position.as_array(), state.clock.dt_clock_total_s))
+        Some((
+            position.as_array(),
+            satposs_clock_s(&state),
+            Some(rec.broadcast_clock_group_delay_s()),
+        ))
     }
 }
 
-fn query_continuous_time(sat: GnssSatelliteId, t_j2000_s: f64) -> Option<(f64, bool)> {
-    if !matches!(
-        sat.system,
-        GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::BeiDou | GnssSystem::Qzss
-    ) {
+impl EphemerisSource for BroadcastStore {
+    fn position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64)> {
+        self.state_with_group_delay(sat, t_j2000_s)
+            .map(|(position, clock, _)| (position, clock))
+    }
+
+    /// The broadcast group delay of the record [`Self::position_clock_at_j2000_s`] uses:
+    /// GPS and QZSS TGD, Galileo BGD E5b/E1 for I/NAV and E5a/E1 for F/NAV, BeiDou TGD1,
+    /// or TGD less ISC L1C/A for CNAV. `None` for GLONASS, whose broadcast clock this
+    /// store applies without a group delay.
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        BroadcastStore::single_frequency_group_delay_s(self, sat, t_j2000_s)
+    }
+
+    fn position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.state_with_group_delay(sat, t_j2000_s)
+    }
+}
+
+/// Largest distance, seconds, between a query and the reference epoch of the GLONASS
+/// record an SSR correction's `tb` names: RTKLIB `selgeph`'s `MAXDTOE_GLO`.
+const GLONASS_SSR_MAX_AGE_S: f64 = 1800.0;
+
+/// BeiDou SSR IOD of a record, `mod(toe/720, 240)` with `toe` the BDT seconds of week of
+/// the ephemeris reference time (IGS SSR v1.00, IDF012). `None` for a record whose `toe`
+/// is not a whole number of seconds within the week.
+fn beidou_ssr_iod(record: &BroadcastRecord) -> Option<u32> {
+    let toe_s = record.elements.toe_sow;
+    if !(0.0..crate::constants::SECONDS_PER_WEEK).contains(&toe_s) || toe_s.fract() != 0.0 {
         return None;
     }
-    let gpst_continuous = t_j2000_s + GPS_EPOCH_TO_J2000_S;
-    if sat.system == GnssSystem::BeiDou {
-        Some((
-            gpst_continuous - GPST_MINUS_BDT_S - BDS_EPOCH_MINUS_GPS_EPOCH_S,
-            is_beidou_geo(sat),
-        ))
-    } else {
-        Some((gpst_continuous, false))
+    Some(((toe_s as u32) / 720) % 240)
+}
+
+/// GLONASS `tb` of a record as RTKLIB `readrnx` forms its IODE: the index of the 15-min
+/// interval of the day, in UTC + 3 h, of the reference epoch,
+/// `(int)(fmod(tow + 10800, 86400) / 900 + 0.5)`. The record's reference epoch is UTC
+/// seconds since J2000, an epoch at 12:00, so its UTC time of day is that plus 43200 s.
+fn glonass_tb(record: &GlonassRecord) -> Option<u32> {
+    let toe_s = record.toe_utc_j2000_s;
+    if !toe_s.is_finite() {
+        return None;
     }
+    let tod_s = (toe_s + 43_200.0).rem_euclid(86_400.0);
+    Some(((tod_s + 10_800.0).rem_euclid(86_400.0) / 900.0 + 0.5) as u32)
+}
+
+/// The satellite clock RTKLIB `satposs` returns for a Keplerian broadcast record: the
+/// polynomial and the relativistic term, without the group delay (`eph2pos`: "satellite
+/// clock includes relativity correction without code bias (tgd or bgd)"). It is formed
+/// as `dt_clock_total_s` forms its first two terms, so subtracting the group delay from
+/// it gives `dt_clock_total_s` bit for bit.
+fn satposs_clock_s(state: &SatelliteState) -> f64 {
+    state.clock.dt_clock_poly_s + state.clock.dt_rel_s
 }

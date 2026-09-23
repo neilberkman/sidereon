@@ -358,6 +358,23 @@ impl EphemerisSource for Sp3Selection<'_> {
     ) -> Option<([f64; 3], f64)> {
         self.sp3.position_clock_at_j2000_s(sat, t_j2000_s)
     }
+
+    fn clock_relativity_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        EphemerisSource::clock_relativity_s(self.sp3, sat, t_j2000_s)
+    }
+
+    fn clock_relativity_for_state_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        position_m: [f64; 3],
+    ) -> crate::spp::ClockRelativity {
+        EphemerisSource::clock_relativity_for_state_s(self.sp3, sat, t_j2000_s, position_m)
+    }
 }
 
 /// Select an IONEX product usable at `requested_epoch_j2000_s`, degrading to a

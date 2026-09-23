@@ -39,7 +39,7 @@ use super::{
     estimates_tropo_gradients, estimates_ztd, invalid_clock_count, invalid_input, no_ephemeris,
     observation_geometry, predict_default, validate_state_clock_count, FixedSolveError, FloatEpoch,
     FloatObservation, FloatResidual, FloatSolveError, FloatState, MissingCorrection, ModelContext,
-    PppCorrectionLookup, SsrBiasExclusion, SsrBiasExclusionStage, SsrBiasRecord,
+    PppCorrectionLookup, RangeCorrections, SsrBiasExclusion, SsrBiasExclusionStage, SsrBiasRecord,
     SsrTransmitTimeFailure,
 };
 
@@ -359,6 +359,22 @@ impl<'a> AmbiguityBinding<'a> {
     }
 }
 
+/// Whether the rows add the satellite clock relativity term `2 r·v / c`.
+///
+/// Only when it is enabled and the satellite clock in use lacks it. With an external CLK
+/// series the rows use the series' clock, which lacks it whatever the source. Without
+/// one they use the source's clock, which already carries it when the source says so
+/// ([`ObservableEphemerisSource::clock_includes_relativity`]): adding it again would
+/// count it twice. RTKLIB `satposs` likewise returns one clock per ephemeris option,
+/// with the relativistic term in it, and `ppp.c` adds none.
+pub(super) fn adds_sat_clock_relativity(
+    source: &dyn ObservableEphemerisSource,
+    corrections: &RangeCorrections,
+) -> bool {
+    corrections.sat_clock_relativity
+        && (corrections.satellite_clock.is_some() || !source.clock_includes_relativity())
+}
+
 fn residual_ionosphere_m(state: &FloatState, obs: &FloatObservation, enabled: bool) -> f64 {
     if enabled {
         state
@@ -452,7 +468,7 @@ fn undifferenced_model(
         .map_err(PppRowError::Model)?;
     validate_transmit_geometry(&pred)?;
     // Only the satellite clock relativity term uses the satellite velocity.
-    let sat_velocity_m_s = if ctx.corrections.sat_clock_relativity {
+    let sat_velocity_m_s = if adds_sat_clock_relativity(ctx.source, ctx.corrections) {
         let options = predict_default(ctx.source, obs).map_err(PppRowError::Model)?;
         let velocity = transmit_velocity_m_s(ctx.source, obs.sat, &pred, options.sagnac)
             .map_err(|e| PppRowError::Model(no_ephemeris(obs, e)))?;

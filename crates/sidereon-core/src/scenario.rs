@@ -1332,6 +1332,34 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for DeclaredScenarioSource<'_,
     ) -> Option<([f64; 3], f64)> {
         self.source.position_clock_at_j2000_s(sat, t_j2000_s)
     }
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        EphemerisSource::single_frequency_group_delay_s(self.source, sat, t_j2000_s)
+    }
+
+    fn position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        EphemerisSource::position_clock_group_delay_at_j2000_s(self.source, sat, t_j2000_s)
+    }
+
+    fn clock_relativity_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        EphemerisSource::clock_relativity_s(self.source, sat, t_j2000_s)
+    }
+
+    fn clock_relativity_for_state_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        position_m: [f64; 3],
+    ) -> crate::spp::ClockRelativity {
+        EphemerisSource::clock_relativity_for_state_s(self.source, sat, t_j2000_s, position_m)
+    }
 }
 
 impl<E: ObservableEphemerisSource + ?Sized> ObservableEphemerisSource
@@ -1343,6 +1371,34 @@ impl<E: ObservableEphemerisSource + ?Sized> ObservableEphemerisSource
         t_j2000_s: f64,
     ) -> Result<ObservableState, ObservablesError> {
         self.source.observable_state_at_j2000_s(sat, t_j2000_s)
+    }
+
+    fn clock_includes_relativity(&self) -> bool {
+        self.source.clock_includes_relativity()
+    }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        ObservableEphemerisSource::single_frequency_group_delay_s(self.source, sat, t_j2000_s)
+    }
+
+    fn observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<(ObservableState, Option<f64>), ObservablesError> {
+        ObservableEphemerisSource::observable_state_group_delay_at_j2000_s(
+            self.source,
+            sat,
+            t_j2000_s,
+        )
+    }
+
+    fn clock_relativity_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        ObservableEphemerisSource::clock_relativity_s(self.source, sat, t_j2000_s)
     }
 }
 
@@ -1375,6 +1431,30 @@ impl<'a, E> SourceTranscript<'a, E> {
     fn store_hash(&self, hash: u64) {
         self.hash.set(hash);
     }
+
+    /// Fold one single-frequency group-delay query and its answer into the digest.
+    fn transcribe_group_delay(&self, sat: GnssSatelliteId, t_j2000_s: f64, result: Option<f64>) {
+        self.transcribe_optional(0x4752_4f55_5044_4c59, sat, t_j2000_s, result);
+    }
+
+    /// Fold one optional-value query, under `tag`, and its answer into the digest.
+    fn transcribe_optional(
+        &self,
+        tag: u64,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        result: Option<f64>,
+    ) {
+        let mut hash = self.hash_query(tag, sat, t_j2000_s);
+        match result {
+            Some(group_delay_s) => {
+                hash_u64(&mut hash, 1);
+                hash_f64(&mut hash, group_delay_s);
+            }
+            None => hash_u64(&mut hash, 0),
+        }
+        self.store_hash(hash);
+    }
 }
 
 impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
@@ -1398,11 +1478,64 @@ impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
         self.store_hash(hash);
         result
     }
+
+    /// Transcribed with its own tag, so the group delay a single-frequency model
+    /// applies is part of the digest.
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        let result = EphemerisSource::single_frequency_group_delay_s(self.source, sat, t_j2000_s);
+        self.transcribe_group_delay(sat, t_j2000_s, result);
+        result
+    }
+
+    /// Transcribed with its own tag.
+    fn clock_relativity_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        let result = EphemerisSource::clock_relativity_s(self.source, sat, t_j2000_s);
+        let value = match result {
+            crate::spp::ClockRelativity::Term(term_s) => Some(term_s),
+            crate::spp::ClockRelativity::NotApplicable => None,
+            crate::spp::ClockRelativity::Unavailable => Some(f64::NAN),
+        };
+        self.transcribe_optional(0x5245_4c41_5449_5654, sat, t_j2000_s, value);
+        result
+    }
 }
 
 impl<E: ObservableEphemerisSource> ObservableEphemerisSource for SourceTranscript<'_, E> {
     fn ssr_corrections(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
         self.source.ssr_corrections()
+    }
+
+    fn clock_includes_relativity(&self) -> bool {
+        self.source.clock_includes_relativity()
+    }
+
+    /// Transcribed with its own tag, so the group delay a single-frequency model
+    /// applies is part of the digest.
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        let result =
+            ObservableEphemerisSource::single_frequency_group_delay_s(self.source, sat, t_j2000_s);
+        self.transcribe_group_delay(sat, t_j2000_s, result);
+        result
+    }
+
+    /// Transcribed with its own tag.
+    fn clock_relativity_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::spp::ClockRelativity {
+        let result = ObservableEphemerisSource::clock_relativity_s(self.source, sat, t_j2000_s);
+        let value = match result {
+            crate::spp::ClockRelativity::Term(term_s) => Some(term_s),
+            crate::spp::ClockRelativity::NotApplicable => None,
+            crate::spp::ClockRelativity::Unavailable => Some(f64::NAN),
+        };
+        self.transcribe_optional(0x5245_4c41_5449_5654, sat, t_j2000_s, value);
+        result
     }
 
     fn velocity_at_j2000_s(
@@ -1943,6 +2076,7 @@ where
         met: &epoch_context.met,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::reference(),
+        pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
     };
     let ionosphere = match &scenario.error_budget.ionosphere {
         ScenarioIonosphereModel::Off => SppIonosphere::Klobuchar(KlobucharCoeffs {
@@ -2589,9 +2723,10 @@ mod tests {
     use crate::positioning::{solve, SolveInputs};
     use crate::rinex::observations::{observation_values, ObservationFilter, ObservationKind};
 
-    /// The transcript forwards the SSR corrections and the velocity of the source it wraps,
-    /// so a PPP solve through it still checks SSR biases and never differences across a
-    /// correction boundary; a source without SSR corrections stays without them.
+    /// The transcript forwards the SSR corrections, the velocity and the clock's relativity
+    /// declaration of the source it wraps, so a PPP solve through it still checks SSR
+    /// biases, never differences across a correction boundary and adds no second
+    /// relativistic term; a source without SSR corrections stays without them.
     #[test]
     fn source_transcript_forwards_ssr_corrections_and_velocity() {
         let nav = crate::ephemeris::BroadcastEphemeris::from_nav(include_str!(concat!(
@@ -2638,6 +2773,11 @@ mod tests {
 
         let broadcast_transcript = SourceTranscript::new(&nav);
         assert!(broadcast_transcript.ssr_corrections().is_none());
+
+        // The transcript answers whether the clock carries the relativistic term as the
+        // source it wraps does, so a PPP solve through it adds no second term.
+        assert!(transcript.clock_includes_relativity());
+        assert!(broadcast_transcript.clock_includes_relativity());
     }
 
     fn product(

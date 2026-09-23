@@ -12,8 +12,8 @@ use sidereon_core::{
     dgnss::{self, CodeObservation},
     observables::{ObservableEphemerisSource, ObservableState, ObservablesError},
     positioning::{
-        Corrections, EphemerisSource, KlobucharCoeffs, Observation as SppObservation, SolveInputs,
-        SurfaceMet,
+        Corrections, EphemerisSource, KlobucharCoeffs, Observation as SppObservation,
+        PseudorangeCode, SolveInputs, SurfaceMet,
     },
     precise_positioning::CycleSlipPolicy,
     rtk::{
@@ -466,6 +466,11 @@ fuzz_target!(|data: &[u8]| {
             relative_humidity: input.scalars[4],
         },
         robust: None,
+        pseudorange_code: if input.bits[7] & 1 == 0 {
+            PseudorangeCode::SingleFrequency
+        } else {
+            PseudorangeCode::IonosphereFree
+        },
     };
     assert_ok_finite_or_err(
         "dgnss::solve_position",

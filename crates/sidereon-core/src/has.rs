@@ -99,6 +99,10 @@ pub struct HasOrbitBlock {
 pub struct HasOrbitCorrection {
     /// Corrected satellite.
     pub sat: GnssSatelliteId,
+    /// Navigation-message index NM the mask states for the satellite's GNSS, as
+    /// transmitted (HAS SIS ICD 5.2.1.6, Table 21): 0 is GPS LNAV or Galileo I/NAV,
+    /// 1..=7 are reserved. The correction refers to that message.
+    pub nav_message: u8,
     /// Reference navigation issue.
     pub iode: u32,
     /// Delta radial, meters, additive per HAS ICD, or None if unavailable.
@@ -134,6 +138,10 @@ pub struct HasClockBlock {
 pub struct HasClockCorrection {
     /// Corrected satellite.
     pub sat: GnssSatelliteId,
+    /// Navigation-message index NM the mask states for the satellite's GNSS, as
+    /// transmitted (HAS SIS ICD 5.2.1.6, Table 21): 0 is GPS LNAV or Galileo I/NAV,
+    /// 1..=7 are reserved. The correction refers to that message.
+    pub nav_message: u8,
     /// Delta clock in meters, additive per HAS ICD, or None if unavailable or satellite shall not be used.
     pub correction_m: Option<f64>,
     /// Whether the satellite shall not be used (Galileo HAS SIS ICD Table 31 / Table 34 sentinel +4095).
@@ -546,7 +554,9 @@ impl HasMt1Message {
     ///   twice, names a system the mask does not, or uses a reserved
     ///   multiplier index, or a clock record that carries a correction while
     ///   marked do-not-use. Full-set metadata may be held in any order; each
-    ///   entry is written at its system's mask position.
+    ///   entry is written at its system's mask position;
+    /// - an orbit or clock record whose navigation-message index is not the
+    ///   one its GNSS mask states.
     ///
     /// Each of those would otherwise be written as a frame that decodes to a
     /// different message, or to none.
@@ -1096,7 +1106,7 @@ fn read_orbit_block(r: &mut BitReader<'_>, mask: &HasMaskBlock) -> Result<HasOrb
         return Err(Error::Parse("HAS orbit VI is reserved".to_string()));
     }
     let mut records = Vec::new();
-    for sat in mask_satellites(mask)? {
+    for (sat, nav_message) in mask_satellites_with_nav_message(mask)? {
         let iode = r.u(iode_bits(sat.system))? as u32;
         let radial = r.i(13)? as i16;
         let along = r.i(12)? as i16;
@@ -1109,6 +1119,7 @@ fn read_orbit_block(r: &mut BitReader<'_>, mask: &HasMaskBlock) -> Result<HasOrb
             .then_some(f64::from(cross) * HAS_ORBIT_ALONG_CROSS_SCALE_M);
         records.push(HasOrbitCorrection {
             sat,
+            nav_message,
             iode,
             radial_m,
             along_m,
@@ -1136,6 +1147,9 @@ fn write_orbit_block(w: &mut BitWriter, mask: &HasMaskBlock, orbit: &HasOrbitBlo
         |rec| rec.sat,
         describe_satellite,
     )?;
+    for rec in &records {
+        check_record_nav_message("orbit", mask, rec.sat, rec.nav_message)?;
+    }
     w.push_u(u64::from(orbit.validity_interval), 4);
     for rec in records {
         let max_iode = match rec.sat.system {
@@ -1243,6 +1257,7 @@ fn read_clock_full_set_block(r: &mut BitReader<'_>, mask: &HasMaskBlock) -> Resu
             let (correction_m, do_not_use) = has_clock_value_m(dcc, multiplier);
             records.push(HasClockCorrection {
                 sat: has_satellite(system_mask.system, prn)?,
+                nav_message: system_mask.nav_message,
                 correction_m,
                 do_not_use,
             });
@@ -1335,6 +1350,9 @@ fn write_clock_full_set_block(
         |rec| rec.sat,
         describe_satellite,
     )?;
+    for rec in &records {
+        check_record_nav_message("clock", mask, rec.sat, rec.nav_message)?;
+    }
     w.push_u(u64::from(clock.validity_interval), 4);
     for meta in &systems {
         w.push_u(u64::from(meta.multiplier_index), 2);
@@ -1418,6 +1436,7 @@ fn read_clock_subset_block(r: &mut BitReader<'_>, mask: &HasMaskBlock) -> Result
             let (correction_m, do_not_use) = has_clock_value_m(dcc, multiplier);
             records.push(HasClockCorrection {
                 sat: has_satellite(system, prn)?,
+                nav_message: system_mask.nav_message,
                 correction_m,
                 do_not_use,
             });
@@ -1521,6 +1540,7 @@ fn write_clock_subset_block(
                 rec.sat
             )));
         }
+        check_record_nav_message("clock subset", mask, rec.sat, rec.nav_message)?;
     }
 
     w.push_u(u64::from(clock.validity_interval), 4);
@@ -1750,6 +1770,42 @@ struct HasCell {
     signal_id: u8,
 }
 
+/// Every mask satellite in mask order, with the navigation-message index its
+/// GNSS mask states.
+fn mask_satellites_with_nav_message(mask: &HasMaskBlock) -> Result<Vec<(GnssSatelliteId, u8)>> {
+    let mut out = Vec::new();
+    for system in &mask.systems {
+        for &prn in &system.satellites {
+            out.push((has_satellite(system.system, prn)?, system.nav_message));
+        }
+    }
+    Ok(out)
+}
+
+/// Refuse an orbit or clock record whose navigation-message index is not the one
+/// its GNSS mask states. NM is a mask field (HAS SIS ICD Table 15), so such a
+/// record would be written as a frame that decodes with the mask's index instead.
+fn check_record_nav_message(
+    block_name: &str,
+    mask: &HasMaskBlock,
+    sat: GnssSatelliteId,
+    nav_message: u8,
+) -> Result<()> {
+    let stated = mask
+        .systems
+        .iter()
+        .find(|m| m.system == sat.system)
+        .map(|m| m.nav_message);
+    if stated == Some(nav_message) {
+        return Ok(());
+    }
+    Err(Error::InvalidInput(format!(
+        "HAS {block_name} record for {sat} holds navigation message index {nav_message}, \
+         but its mask states {}",
+        stated.map_or_else(|| "none".to_string(), |nm| nm.to_string())
+    )))
+}
+
 fn mask_satellites(mask: &HasMaskBlock) -> Result<Vec<GnssSatelliteId>> {
     let mut out = Vec::new();
     for system in &mask.systems {
@@ -1894,6 +1950,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: 42,
                     radial_m: Some(1.25),
                     along_m: Some(-2.0),
@@ -1908,6 +1965,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: Some(-0.75),
                     do_not_use: false,
                 }],
@@ -2101,6 +2159,7 @@ mod tests {
                 validity_interval: 0,
                 records: vec![HasOrbitCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     iode: 10,
                     radial_m: Some(0.05),
                     along_m: Some(0.08),
@@ -2158,6 +2217,7 @@ mod tests {
                 records: vec![
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: 20,
                         radial_m: Some(0.10),
                         along_m: Some(0.16),
@@ -2165,6 +2225,7 @@ mod tests {
                     },
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: 10,
                         radial_m: Some(0.05),
                         along_m: Some(0.08),
@@ -2236,6 +2297,7 @@ mod tests {
                     .into_iter()
                     .map(|(sat, iode)| HasOrbitCorrection {
                         sat,
+                        nav_message: 0,
                         iode,
                         radial_m: Some(f64::from(iode) * HAS_ORBIT_RADIAL_SCALE_M),
                         along_m: None,
@@ -2252,11 +2314,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: g01,
+                        nav_message: 0,
                         correction_m: Some(7.0 * HAS_CLOCK_SCALE_M * 2.0),
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: g02,
+                        nav_message: 0,
                         correction_m: None,
                         do_not_use: true,
                     },
@@ -2365,6 +2429,7 @@ mod tests {
                     let records = &mut m.orbit.as_mut().unwrap().records;
                     records.push(HasOrbitCorrection {
                         sat: GnssSatelliteId::new(GnssSystem::Gps, 3).unwrap(),
+                        nav_message: 0,
                         ..records[0]
                     });
                 }),
@@ -2455,6 +2520,7 @@ mod tests {
                 records: vec![
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: 42,
                         radial_m: Some(1.25),
                         along_m: Some(-2.0),
@@ -2462,6 +2528,7 @@ mod tests {
                     },
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: 100,
                         radial_m: Some(-0.5),
                         along_m: Some(1.6),
@@ -2521,6 +2588,7 @@ mod tests {
                     // sat1: unavailable correction
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: 11,
                         radial_m: None,
                         along_m: None,
@@ -2529,6 +2597,7 @@ mod tests {
                     // sat2: present non-zero correction
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: 22,
                         radial_m: Some(1.25),
                         along_m: Some(-2.0),
@@ -2537,6 +2606,7 @@ mod tests {
                     // sat3: genuine zero correction
                     HasOrbitCorrection {
                         sat: sat3,
+                        nav_message: 0,
                         iode: 33,
                         radial_m: Some(0.0),
                         along_m: Some(0.0),
@@ -2629,16 +2699,19 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         correction_m: None,
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         correction_m: Some(0.5),
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: sat3,
+                        nav_message: 0,
                         correction_m: Some(0.0),
                         do_not_use: false,
                     },
@@ -2764,6 +2837,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(0.5),
                     do_not_use: false,
                 }],
@@ -2889,11 +2963,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         correction_m: Some(15.0),
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         correction_m: Some(-7.5),
                         do_not_use: false,
                     },
@@ -2961,6 +3037,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat2,
+                    nav_message: 0,
                     correction_m: Some(12.5),
                     do_not_use: false,
                 }],
@@ -3023,6 +3100,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(15.0),
                     do_not_use: false,
                 }],
@@ -3087,6 +3165,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat2,
+                    nav_message: 0,
                     correction_m: Some(-25.0),
                     do_not_use: false,
                 }],
@@ -3147,6 +3226,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: Some(0.0),
                     do_not_use: false,
                 }],
@@ -3574,11 +3654,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat_gps,
+                        nav_message: 0,
                         correction_m: Some(15.0),
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: sat_gal,
+                        nav_message: 0,
                         correction_m: Some(15.0),
                         do_not_use: false,
                     },
@@ -3660,11 +3742,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat_gps,
+                        nav_message: 0,
                         correction_m: Some(10.2350),
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: sat_gal,
+                        nav_message: 0,
                         correction_m: Some(-20.4750),
                         do_not_use: false,
                     },
@@ -3737,11 +3821,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat_gps,
+                        nav_message: 0,
                         correction_m: Some(0.0),
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: sat_gal,
+                        nav_message: 0,
                         correction_m: Some(0.0),
                         do_not_use: false,
                     },
@@ -3777,6 +3863,7 @@ mod tests {
             ],
             records: vec![HasClockCorrection {
                 sat: sat_gps,
+                nav_message: 0,
                 correction_m: Some(0.0),
                 do_not_use: false,
             }],
@@ -3805,11 +3892,13 @@ mod tests {
             records: vec![
                 HasClockCorrection {
                     sat: sat_gps,
+                    nav_message: 0,
                     correction_m: Some(0.0),
                     do_not_use: false,
                 },
                 HasClockCorrection {
                     sat: sat_gal,
+                    nav_message: 0,
                     correction_m: Some(0.0),
                     do_not_use: false,
                 },
@@ -3840,11 +3929,13 @@ mod tests {
             records: vec![
                 HasClockCorrection {
                     sat: sat_gps,
+                    nav_message: 0,
                     correction_m: Some(10.0 * HAS_CLOCK_SCALE_M * 2.0),
                     do_not_use: false,
                 },
                 HasClockCorrection {
                     sat: sat_gal,
+                    nav_message: 0,
                     correction_m: Some(-10.0 * HAS_CLOCK_SCALE_M * 3.0),
                     do_not_use: false,
                 },
@@ -3878,11 +3969,13 @@ mod tests {
             records: vec![
                 HasClockCorrection {
                     sat: sat_gps,
+                    nav_message: 0,
                     correction_m: Some(0.0),
                     do_not_use: false,
                 },
                 HasClockCorrection {
                     sat: sat_gal,
+                    nav_message: 0,
                     correction_m: Some(0.0),
                     do_not_use: false,
                 },
@@ -3971,6 +4064,7 @@ mod tests {
             systems: Vec::new(),
             records: vec![HasClockCorrection {
                 sat: sat_gps1,
+                nav_message: 0,
                 correction_m: Some(0.0),
                 do_not_use: false,
             }],
@@ -4068,6 +4162,7 @@ mod tests {
             }],
             records: vec![HasClockCorrection {
                 sat: sat_gal1,
+                nav_message: 0,
                 correction_m: Some(0.0),
                 do_not_use: false,
             }],
@@ -4089,11 +4184,13 @@ mod tests {
             records: vec![
                 HasClockCorrection {
                     sat: sat_gps1,
+                    nav_message: 0,
                     correction_m: Some(0.0),
                     do_not_use: false,
                 },
                 HasClockCorrection {
                     sat: sat_gps1,
+                    nav_message: 0,
                     correction_m: Some(1.0),
                     do_not_use: false,
                 },
@@ -4117,11 +4214,13 @@ mod tests {
             records: vec![
                 HasClockCorrection {
                     sat: sat_gps2,
+                    nav_message: 0,
                     correction_m: Some(0.0),
                     do_not_use: false,
                 },
                 HasClockCorrection {
                     sat: sat_gps1,
+                    nav_message: 0,
                     correction_m: Some(1.0),
                     do_not_use: false,
                 },
@@ -4148,11 +4247,13 @@ mod tests {
             records: vec![
                 HasClockCorrection {
                     sat: sat_gps1,
+                    nav_message: 0,
                     correction_m: Some(0.0),
                     do_not_use: false,
                 },
                 HasClockCorrection {
                     sat: sat_gal1,
+                    nav_message: 0,
                     correction_m: Some(1.0),
                     do_not_use: false,
                 },
@@ -4178,6 +4279,7 @@ mod tests {
             }],
             records: vec![HasClockCorrection {
                 sat: GnssSatelliteId::new(GnssSystem::Gps, 3).unwrap(),
+                nav_message: 0,
                 correction_m: Some(0.0),
                 do_not_use: false,
             }],
@@ -4552,6 +4654,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(1.0),
                     do_not_use: true,
                 }],
@@ -4597,6 +4700,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(1.0),
                     do_not_use: true,
                 }],
@@ -5522,6 +5626,7 @@ mod tests {
             .records
             .push(HasClockCorrection {
                 sat: GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap(),
+                nav_message: 0,
                 correction_m: Some(0.0),
                 do_not_use: false,
             });
@@ -5983,6 +6088,7 @@ mod tests {
                 validity_interval: 14, // max VI (3600s)
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: 255, // max 8-bit GPS IODE
                     radial_m: Some(4095.0 * HAS_ORBIT_RADIAL_SCALE_M),
                     along_m: Some(2047.0 * HAS_ORBIT_ALONG_CROSS_SCALE_M),
@@ -6053,6 +6159,7 @@ mod tests {
                 validity_interval: 0,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: 0,
                     radial_m: Some(-4095.0 * HAS_ORBIT_RADIAL_SCALE_M),
                     along_m: Some(-2047.0 * HAS_ORBIT_ALONG_CROSS_SCALE_M),
@@ -6122,6 +6229,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: 1,
                     radial_m: Some(val),
                     along_m: Some(0.0),
@@ -6161,6 +6269,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: 1,
                     radial_m: Some(0.0),
                     along_m: Some(val),
@@ -6258,6 +6367,7 @@ mod tests {
             validity_interval: 5,
             records: vec![HasOrbitCorrection {
                 sat: gps_sat,
+                nav_message: 0,
                 iode: 256,
                 radial_m: Some(0.0),
                 along_m: Some(0.0),
@@ -6273,6 +6383,7 @@ mod tests {
             validity_interval: 5,
             records: vec![HasOrbitCorrection {
                 sat: gal_sat,
+                nav_message: 0,
                 iode: 1024,
                 radial_m: Some(0.0),
                 along_m: Some(0.0),
@@ -6743,6 +6854,7 @@ mod tests {
                 systems: vec![],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: Some(0.1),
                     do_not_use: false,
                 }],

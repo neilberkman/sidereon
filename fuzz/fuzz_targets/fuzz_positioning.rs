@@ -270,6 +270,11 @@ fuzz_target!(|data: &[u8]| {
             relative_humidity: input.scalars[4],
         },
         robust: Some(robust_cfg),
+        pseudorange_code: if input.bits[6] & 2 == 0 {
+            positioning::PseudorangeCode::SingleFrequency
+        } else {
+            positioning::PseudorangeCode::IonosphereFree
+        },
     };
     assert_ok_finite_or_err(
         "positioning::solve",

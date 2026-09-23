@@ -16,7 +16,6 @@ use crate::astro::math::vec3::add3;
 use crate::astro::time::civil::civil_from_j2000_seconds;
 use crate::astro::time::model::{GnssWeekTow, TimeScale};
 use crate::astro::time::scales::TimeScales;
-use crate::broadcast::satellite_state_unchecked;
 use crate::constants::{C_M_S, GPS_EPOCH_TO_J2000_S, SECONDS_PER_HOUR, SECONDS_PER_WEEK};
 use crate::ephemeris::{BroadcastEphemeris, BroadcastIssue, NavMessage};
 use crate::error::{Error, Result};
@@ -43,7 +42,7 @@ const GLONASS_MINUS_UTC_S: f64 = 3.0 * SECONDS_PER_HOUR;
 const SECONDS_PER_DAY: f64 = 86_400.0;
 /// Julian date of the GPS epoch, 1980-01-06 00:00:00.
 const GPS_EPOCH_JD: f64 = 2_444_244.5;
-use crate::rinex_nav::EPHPOS_STEP_S;
+use crate::rinex_nav::{ephpos_stepped_tk, EPHPOS_STEP_S};
 /// RTCM 10403.x SSR radial orbit and clock C0 resolution, meters.
 const RTCM_SSR_RADIAL_CLOCK_SCALE_M: f64 = 1.0e-4;
 /// RTCM 10403.x SSR along-track and cross-track orbit resolution, meters.
@@ -152,11 +151,41 @@ pub struct SsrSolution {
     pub solution_id: u8,
 }
 
+/// Broadcast navigation message an SSR orbit or clock correction refers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SsrNavigationMessage {
+    /// An RTCM SSR correction. It refers to the broadcast record of the
+    /// satellite's own navigation message that its issue names, as RTKLIB
+    /// `satpos_ssr` selects it: GPS and QZSS LNAV and Galileo I/NAV by IODE,
+    /// BeiDou D1 (D2 for a geostationary satellite) by the IOD
+    /// `mod(toe/720, 240)` (IGS SSR v1.00, IDF012), GLONASS by `tb`.
+    Rtcm,
+    /// A Galileo HAS correction, with the navigation-message index NM its mask
+    /// states, as transmitted (HAS SIS ICD 5.2.1.6, Table 21). Index 0 is GPS
+    /// LNAV or Galileo I/NAV. Indices 1..=7 are reserved: the correction is
+    /// kept, and [`SsrCorrectedEphemeris`] does not apply it, reporting
+    /// [`SsrStateUnavailable::ReservedNavigationMessage`].
+    Has(u8),
+}
+
+impl SsrNavigationMessage {
+    /// The reserved HAS navigation-message index this correction refers to, if
+    /// it refers to one.
+    pub const fn reserved_has_index(self) -> Option<u8> {
+        match self {
+            Self::Has(index) if index != 0 => Some(index),
+            _ => None,
+        }
+    }
+}
+
 /// Orbit correction for one satellite.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SsrOrbitCorrection {
     /// Provider and solution identity.
     pub solution: SsrSolution,
+    /// Broadcast navigation message the correction refers to.
+    pub nav_message: SsrNavigationMessage,
     /// Referenced broadcast issue.
     pub iode: u32,
     /// IOD SSR.
@@ -212,13 +241,20 @@ pub struct SsrHighRateClock {
 }
 
 /// Clock correction for one satellite.
+///
+/// A corrected satellite clock is the broadcast clock polynomial, less the
+/// relativistic term `2 r·v / c²`, plus the correction polynomial over `c`
+/// (RTKLIB `satpos_ssr`; HAS SIS ICD 7.3, Eq. 23 and 24). The correction adds to
+/// the clock for both sources.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SsrClockCorrection {
     /// Provider and solution identity.
     pub solution: SsrSolution,
+    /// Broadcast navigation message the correction refers to.
+    pub nav_message: SsrNavigationMessage,
     /// IOD SSR.
     pub iod_ssr: u8,
-    /// C0 term, meters.
+    /// C0 term, meters, added to the satellite clock as `C0 / c`.
     pub c0_m: f64,
     /// C1 term, meters per second.
     pub c1_m_s: f64,
@@ -915,6 +951,7 @@ impl SsrCorrectionStore {
                     let entry = staged.entry(sat).or_default();
                     let mut clock = SsrClockCorrection {
                         solution,
+                        nav_message: SsrNavigationMessage::Rtcm,
                         iod_ssr: message.header.iod_ssr,
                         c0_m: f64::from(record.c0) * RTCM_SSR_RADIAL_CLOCK_SCALE_M,
                         c1_m_s: f64::from(record.c1) * RTCM_SSR_RADIAL_CLOCK_RATE_SCALE_M_S,
@@ -974,6 +1011,7 @@ impl SsrCorrectionStore {
                     entry.orbit = Some(orbit);
                     let mut clock = SsrClockCorrection {
                         solution,
+                        nav_message: SsrNavigationMessage::Rtcm,
                         iod_ssr: message.header.iod_ssr,
                         c0_m: f64::from(clock_record.c0) * RTCM_SSR_RADIAL_CLOCK_SCALE_M,
                         c1_m_s: f64::from(clock_record.c1) * RTCM_SSR_RADIAL_CLOCK_RATE_SCALE_M_S,
@@ -1186,6 +1224,7 @@ impl SsrCorrectionStore {
                         record.sat
                     )));
                 }
+                check_has_record_nav_message(message, "orbit", record.sat, record.nav_message)?;
                 for (name, val) in [
                     ("radial", record.radial_m),
                     ("along", record.along_m),
@@ -1220,6 +1259,7 @@ impl SsrCorrectionStore {
                         record.sat
                     )));
                 }
+                check_has_record_nav_message(message, "clock", record.sat, record.nav_message)?;
                 if record.correction_m.is_some() && record.do_not_use {
                     return Err(Error::InvalidInput(format!(
                         "contradictory HAS clock correction for {}: correction is Some while do_not_use is true",
@@ -1331,6 +1371,7 @@ impl SsrCorrectionStore {
                     entry.has_orbit_superseded_epoch_j2000_s = None;
                     entry.orbit = Some(SsrOrbitCorrection {
                         solution,
+                        nav_message: SsrNavigationMessage::Has(record.nav_message),
                         iode: record.iode,
                         iod_ssr: message.header.iod_set_id,
                         basis: OrbitBasis::VelocityAligned,
@@ -1488,6 +1529,7 @@ impl SsrCorrectionStore {
                     entry.has_clock_superseded_epoch_j2000_s = None;
                     entry.clock = Some(SsrClockCorrection {
                         solution,
+                        nav_message: SsrNavigationMessage::Has(record.nav_message),
                         iod_ssr: message.header.iod_set_id,
                         c0_m,
                         c1_m_s: 0.0,
@@ -2624,6 +2666,7 @@ fn orbit_from_rtcm(
 ) -> SsrOrbitCorrection {
     SsrOrbitCorrection {
         solution,
+        nav_message: SsrNavigationMessage::Rtcm,
         iode: record.iode,
         iod_ssr: message.header.iod_ssr,
         basis: OrbitBasis::VelocityAligned,
@@ -2734,6 +2777,78 @@ impl SsrCorrectionSource for SsrCorrectedEphemerisOwned {
     }
 }
 
+/// Why an SSR-corrected source applies no SSR orbit and clock corrections to a satellite
+/// at an epoch.
+///
+/// [`SsrCorrectedEphemeris::applied_orbit_clock_status`] returns it. Where a broadcast
+/// fallback is allowed, the source then returns the broadcast state instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum SsrStateUnavailable {
+    /// A Galileo HAS do-not-use indication excludes the satellite at the epoch.
+    ExcludedByHas,
+    /// The store holds no orbit correction for the satellite.
+    NoOrbitCorrection,
+    /// The store holds no clock correction for the satellite.
+    NoClockCorrection,
+    /// The orbit and clock corrections belong to different solutions or IOD SSR values.
+    OrbitClockMismatch,
+    /// The orbit or clock correction refers to a Galileo HAS navigation-message index
+    /// that HAS SIS ICD Table 21 reserves (1..=7). The correction is kept in the store,
+    /// with the index as transmitted, and is not applied to any broadcast record.
+    ReservedNavigationMessage {
+        /// The navigation-message index the mask states.
+        index: u8,
+    },
+    /// The orbit correction does not apply at the epoch.
+    OrbitNotFresh,
+    /// The clock correction does not apply at the epoch.
+    ClockNotFresh,
+    /// The orbit correction is regional and its provider is not allowed.
+    RegionalProviderNotAllowed,
+    /// The satellite's system has no broadcast model SSR corrections are applied to here
+    /// (GPS, GLONASS, Galileo, QZSS and BeiDou have one).
+    NoBroadcastModel,
+    /// No broadcast record valid at the epoch has the issue the orbit correction names
+    /// (its IODE; for BeiDou the IOD `mod(toe/720, 240)`; for GLONASS `tb`).
+    NoMatchingBroadcastRecord {
+        /// The IODE the orbit correction refers to.
+        iode: u32,
+    },
+    /// The broadcast record gives no finite position at the epoch or 1 ms later.
+    InvalidBroadcastState,
+    /// The broadcast position and velocity give no radial, along-track and cross-track
+    /// axes.
+    DegenerateOrbitFrame,
+    /// A centre-of-mass orbit cannot be moved to the antenna phase centre: no nominal
+    /// attitude model, no ANTEX calibration for the satellite, or no Sun position.
+    CenterOfMassUnresolved,
+}
+
+/// The broadcast state RTKLIB `satpos_ssr` starts from for one satellite and epoch.
+struct SsrBroadcastState {
+    /// Broadcast position, metres.
+    position_m: [f64; 3],
+    /// 1 ms forward-difference velocity, metres per second.
+    velocity_m_s: [f64; 3],
+    /// Satellite clock before the SSR clock correction, seconds.
+    clock_s: f64,
+    /// Single-frequency group delay of the record, seconds.
+    group_delay_s: Option<f64>,
+}
+
+/// An SSR-corrected state and the solution of the corrections applied to it.
+struct SsrAppliedState {
+    /// Corrected position, metres.
+    position_m: [f64; 3],
+    /// Corrected satellite clock, seconds.
+    clock_s: f64,
+    /// Solution of the applied orbit and clock corrections.
+    solution: SsrSolution,
+    /// Single-frequency group delay of the broadcast record, seconds.
+    group_delay_s: Option<f64>,
+}
+
 /// Which state an SSR-corrected source returns for a satellite at an epoch.
 enum VelocitySource {
     Ssr,
@@ -2810,31 +2925,88 @@ impl<'a> SsrCorrectedEphemeris<'a> {
     }
 
     /// Corrected ECEF position and satellite clock at a J2000 epoch.
+    ///
+    /// The clock is built as RTKLIB `satpos_ssr` builds it: the broadcast clock
+    /// polynomial `af0 + af1·tk + af2·tk²` of the record the orbit correction's
+    /// IODE selects, with `tk` the time from its `toc`, less `2 r·v / c²` for the
+    /// broadcast position `r` and the 1 ms forward-difference velocity `v` of that
+    /// record, plus the clock correction over `c`. The broadcast group delay (GPS
+    /// TGD, Galileo BGD, BeiDou TGD) is not in it, and the relativistic term is
+    /// the `r·v` one, not the broadcast `F·e·√A·sin E` one. For Galileo HAS this
+    /// is HAS SIS ICD 7.3, Eq. 23 and 24; the HAS code biases take the place of
+    /// the group delays (HAS SIS ICD 7.4). For RTCM SSR the correction adds to
+    /// the clock as it does in RTKLIB and IGS SSR.
+    ///
+    /// A broadcast fallback state keeps the broadcast clock of
+    /// [`EphemerisSource::position_clock_at_j2000_s`].
     pub fn corrected_state(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<([f64; 3], f64)> {
+        self.corrected_state_with_group_delay(sat, t_j2000_s)
+            .map(|(position, clock, _)| (position, clock))
+    }
+
+    /// [`Self::corrected_state`] with its single-frequency group delay (see
+    /// [`Self::single_frequency_group_delay_s`]), from one evaluation.
+    pub fn corrected_state_with_group_delay(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             return None;
         }
-        self.ssr_corrected_state(sat, t_j2000_s)
-            .map(|(state, _)| state)
-            .or_else(|| self.broadcast_fallback_after_failure(sat, t_j2000_s))
+        match self.ssr_corrected_state(sat, t_j2000_s) {
+            Ok(state) => Some((state.position_m, state.clock_s, state.group_delay_s)),
+            Err(_) => self.broadcast_fallback_with_group_delay(sat, t_j2000_s),
+        }
     }
 
     /// Solution of the SSR orbit and clock corrections that [`Self::corrected_state`]
     /// applies for `sat` at `t_j2000_s`.
     ///
-    /// `None` when `corrected_state` would not return an SSR-corrected state: the satellite
-    /// is excluded by a HAS do-not-use indication, the orbit or clock correction is missing,
-    /// the two differ in solution or IOD SSR, either is not fresh at `t_j2000_s`, a regional
-    /// correction's provider is not allowed, no broadcast record matches the orbit's IODE,
-    /// or a centre-of-mass orbit cannot be moved to the antenna phase centre. In those cases
-    /// `corrected_state` declines the satellite or returns the plain broadcast state, so no
-    /// SSR solution's clock is in use. Both methods evaluate the same function.
+    /// `None` when `corrected_state` would not return an SSR-corrected state; the reason is
+    /// [`Self::applied_orbit_clock_status`]. In those cases `corrected_state` declines the
+    /// satellite or returns the plain broadcast state, so no SSR solution's clock is in use.
+    /// Both methods evaluate the same function.
     pub fn applied_orbit_clock_solution(
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<SsrSolution> {
-        self.applied_ssr(sat, t_j2000_s)
+        self.applied_orbit_clock_status(sat, t_j2000_s).ok()
+    }
+
+    /// Solution of the SSR orbit and clock corrections that [`Self::corrected_state`]
+    /// applies for `sat` at `t_j2000_s`, or why it applies none.
+    pub fn applied_orbit_clock_status(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> std::result::Result<SsrSolution, SsrStateUnavailable> {
+        if self.store.is_satellite_excluded(sat, t_j2000_s) {
+            return Err(SsrStateUnavailable::ExcludedByHas);
+        }
+        self.ssr_corrected_state(sat, t_j2000_s)
+            .map(|state| state.solution)
+    }
+
+    /// Group delay, seconds, a single-frequency pseudorange model subtracts from the clock
+    /// of the state [`Self::corrected_state`] returns for `sat` at `t_j2000_s`.
+    ///
+    /// - An SSR-corrected state, RTCM SSR or Galileo HAS: the broadcast group delay of the
+    ///   record the orbit correction's IODE selects. The SSR clock, as `satpos_ssr` builds
+    ///   it, has none, and RTKLIB `pntpos` applies the broadcast TGD or BGD to a
+    ///   single-frequency pseudorange whatever the ephemeris option. HAS SIS ICD 7.4 has
+    ///   the HAS code biases replace the group delays; the SPP, DGNSS and tightly coupled
+    ///   code models here apply no SSR code bias, so the broadcast delay is the
+    ///   single-frequency term they have.
+    /// - A broadcast fallback state: the broadcast group delay of the record it uses.
+    /// - No state: `None`.
+    pub fn single_frequency_group_delay_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<f64> {
+        self.corrected_state_with_group_delay(sat, t_j2000_s)?.2
     }
 
     /// Satellite ECEF velocity, metres per second, of the state [`Self::corrected_state`]
@@ -2858,7 +3030,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
     fn velocity_source(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> VelocitySource {
         if self.store.is_satellite_excluded(sat, t_j2000_s) {
             VelocitySource::None
-        } else if self.ssr_corrected_state(sat, t_j2000_s).is_some() {
+        } else if self.ssr_corrected_state(sat, t_j2000_s).is_ok() {
             VelocitySource::Ssr
         } else if self
             .broadcast_fallback_after_failure(sat, t_j2000_s)
@@ -2874,38 +3046,108 @@ impl<'a> SsrCorrectedEphemeris<'a> {
     /// RTKLIB `ephpos` forms it: a 1 ms forward difference of that record's positions.
     fn ssr_broadcast_velocity(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<[f64; 3]> {
         let orbit = self.store.orbit(sat)?;
-        let nav_message = default_nav_message(sat.system)?;
-        let issue = BroadcastIssue {
-            issue: orbit.iode,
-            message: nav_message,
-        };
-        let record = self
-            .broadcast
-            .select_by_issue_at(sat, issue, nav_message, t_j2000_s)?;
-        let (_, is_geo) = continuous_time_for_sat(sat, t_j2000_s)?;
-        broadcast_velocity(record, sat, t_j2000_s, is_geo)
+        self.ssr_broadcast_state(sat, orbit, t_j2000_s)
+            .ok()
+            .map(|state| state.velocity_m_s)
     }
 
-    /// The SSR corrections [`Self::corrected_state`] applies for `sat` at `t_j2000_s`.
-    fn applied_ssr(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<SsrSolution> {
-        if self.store.is_satellite_excluded(sat, t_j2000_s) {
-            return None;
+    /// The broadcast state `satpos_ssr` starts from for `sat` at `t_j2000_s`: the position
+    /// and the 1 ms forward-difference velocity of the record the orbit correction names,
+    /// the satellite clock before the SSR correction, and the record's single-frequency
+    /// group delay.
+    ///
+    /// - GPS, Galileo, QZSS, BeiDou: the record by IODE (BeiDou: by the IOD
+    ///   `mod(toe/720, 240)`, IGS SSR v1.00 IDF012, in the low eight bits of the
+    ///   transmitted issue); the clock is `af0 + af1·tk + af2·tk²` with `tk` from `toc`,
+    ///   not iterated, less `2 r·v / c / c` (RTKLIB `satpos_ssr`; HAS SIS ICD Eq. 24).
+    /// - GLONASS: the record whose `tb` is the IODE; the clock is `geph2pos`'s,
+    ///   `-TauN + GammaN·tk`, with no relativistic term, as `satpos_ssr` leaves it.
+    fn ssr_broadcast_state(
+        &self,
+        sat: GnssSatelliteId,
+        orbit: &SsrOrbitCorrection,
+        t_j2000_s: f64,
+    ) -> std::result::Result<SsrBroadcastState, SsrStateUnavailable> {
+        use SsrStateUnavailable as Unavailable;
+        if sat.system == GnssSystem::Glonass {
+            let (r, v, clock_s) = self
+                .broadcast
+                .glonass_ssr_state(sat, orbit.iode, t_j2000_s)
+                .ok_or(Unavailable::NoMatchingBroadcastRecord { iode: orbit.iode })?;
+            return Ok(SsrBroadcastState {
+                position_m: r,
+                velocity_m_s: v,
+                clock_s,
+                group_delay_s: None,
+            });
         }
-        self.ssr_corrected_state(sat, t_j2000_s)
-            .map(|(_, solution)| solution)
+        let nav_message = ssr_nav_message(sat).ok_or(Unavailable::NoBroadcastModel)?;
+        let (sow, is_geo) =
+            ssr_seconds_of_week(sat, t_j2000_s).ok_or(Unavailable::NoBroadcastModel)?;
+        let record = if sat.system == GnssSystem::BeiDou {
+            self.broadcast.select_by_beidou_ssr_iod_at(
+                sat,
+                orbit.iode & 0xFF,
+                nav_message,
+                t_j2000_s,
+            )
+        } else {
+            let issue = BroadcastIssue {
+                issue: orbit.iode,
+                message: nav_message,
+            };
+            self.broadcast
+                .select_by_issue_at(sat, issue, nav_message, t_j2000_s)
+        }
+        .ok_or(Unavailable::NoMatchingBroadcastRecord { iode: orbit.iode })?;
+        let (r, v) = broadcast_position_velocity(record, sow, is_geo)
+            .ok_or(Unavailable::InvalidBroadcastState)?;
+
+        // Satellite clock by the clock parameters, then the relativity correction
+        // (RTKLIB `satpos_ssr`; HAS SIS ICD Eq. 24). `tk` is not iterated, as
+        // `satpos_ssr` evaluates it.
+        let tk_clock_s = crate::broadcast::time_from_reference_s(sow, record.clock.toc_sow);
+        let mut clock_s = record.clock.af0
+            + record.clock.af1 * tk_clock_s
+            + record.clock.af2 * tk_clock_s * tk_clock_s;
+        clock_s -= 2.0 * (r[0] * v[0] + r[1] * v[1] + r[2] * v[2]) / C_M_S / C_M_S;
+        Ok(SsrBroadcastState {
+            position_m: r,
+            velocity_m_s: v,
+            clock_s,
+            group_delay_s: Some(record.broadcast_clock_group_delay_s()),
+        })
     }
 
     /// SSR-corrected state and the solution of the orbit and clock corrections applied to
-    /// it, or `None` when the corrections cannot be applied at `t_j2000_s`.
+    /// it, or why the corrections cannot be applied at `t_j2000_s`.
+    ///
+    /// The statements follow RTKLIB `satpos_ssr`: the broadcast position and velocity of
+    /// the IODE-selected record, the clock from that record's polynomial less `2 r·v / c²`,
+    /// the orbit correction along the velocity-aligned axes, then the clock correction.
     fn ssr_corrected_state(
         &self,
         sat: GnssSatelliteId,
         t_j2000_s: f64,
-    ) -> Option<(([f64; 3], f64), SsrSolution)> {
-        let orbit = self.store.orbit(sat)?;
-        let clock = self.store.clock(sat)?;
+    ) -> std::result::Result<SsrAppliedState, SsrStateUnavailable> {
+        use SsrStateUnavailable as Unavailable;
+        let orbit = self
+            .store
+            .orbit(sat)
+            .ok_or(Unavailable::NoOrbitCorrection)?;
+        let clock = self
+            .store
+            .clock(sat)
+            .ok_or(Unavailable::NoClockCorrection)?;
         if orbit.solution != clock.solution || orbit.iod_ssr != clock.iod_ssr {
-            return None;
+            return Err(Unavailable::OrbitClockMismatch);
+        }
+        if let Some(index) = orbit
+            .nav_message
+            .reserved_has_index()
+            .or_else(|| clock.nav_message.reserved_has_index())
+        {
+            return Err(Unavailable::ReservedNavigationMessage { index });
         }
         if !self.correction_fresh(
             orbit.solution.source,
@@ -2915,7 +3157,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             orbit.update_interval_s,
             RtcmAgeLimit::OrbitClock,
         ) {
-            return None;
+            return Err(Unavailable::OrbitNotFresh);
         }
         if !self.correction_fresh(
             clock.solution.source,
@@ -2925,33 +3167,20 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             clock.update_interval_s,
             RtcmAgeLimit::OrbitClock,
         ) {
-            return None;
+            return Err(Unavailable::ClockNotFresh);
         }
         if orbit.crs_regional && !self.regional_allowed(orbit.solution.provider_id) {
-            return None;
+            return Err(Unavailable::RegionalProviderNotAllowed);
         }
 
-        let nav_message = default_nav_message(sat.system)?;
-        let issue = BroadcastIssue {
-            issue: orbit.iode,
-            message: nav_message,
-        };
-        let record = self
-            .broadcast
-            .select_by_issue_at(sat, issue, nav_message, t_j2000_s)?;
-        let (t_continuous_s, is_geo) = continuous_time_for_sat(sat, t_j2000_s)?;
-        let sow = t_continuous_s.rem_euclid(SECONDS_PER_WEEK);
-        let state = satellite_state_unchecked(
-            &record.elements,
-            &record.clock,
-            &record.constants(),
-            sow,
-            record.broadcast_clock_group_delay_s(),
-            is_geo,
-        );
-        let r = state.orbit.position().ok()?.as_array();
-        let v = broadcast_velocity(record, sat, t_j2000_s, is_geo)?;
-        let (er, ea, ec) = velocity_aligned_basis(r, v)?;
+        let SsrBroadcastState {
+            position_m: r,
+            velocity_m_s: v,
+            mut clock_s,
+            group_delay_s,
+        } = self.ssr_broadcast_state(sat, orbit, t_j2000_s)?;
+
+        let (er, ea, ec) = velocity_aligned_basis(r, v).ok_or(Unavailable::DegenerateOrbitFrame)?;
         let dt_orbit = t_j2000_s - orbit.ref_epoch_j2000_s;
         let radial = orbit.radial_m + orbit.radial_rate_m_s * dt_orbit;
         let along = orbit.along_m + orbit.along_rate_m_s * dt_orbit;
@@ -2962,7 +3191,9 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             r[2] + radial * er[2] + along * ea[2] + cross * ec[2],
         ];
         if orbit.reference_point == SsrReferencePoint::CenterOfMass {
-            let pco_ecef_m = self.satellite_pco_to_apc(sat, t_j2000_s, corrected_position)?;
+            let pco_ecef_m = self
+                .satellite_pco_to_apc(sat, t_j2000_s, corrected_position)
+                .ok_or(Unavailable::CenterOfMassUnresolved)?;
             corrected_position = add3(corrected_position, pco_ecef_m);
         }
 
@@ -2983,11 +3214,15 @@ impl<'a> SsrCorrectedEphemeris<'a> {
                 dclock_m += high_rate.c0_m;
             }
         }
-        let corrected_clock_s = match clock.solution.source {
-            SsrSource::RtcmSsr => state.clock.dt_clock_total_s - dclock_m / C_M_S,
-            SsrSource::GalileoHas => state.clock.dt_clock_total_s + dclock_m / C_M_S,
-        };
-        Some(((corrected_position, corrected_clock_s), clock.solution))
+        // t_corr = t_sv - (dts(brdc) + dclk(ssr) / c): the correction adds to the clock
+        // for RTCM SSR and Galileo HAS alike.
+        clock_s += dclock_m / C_M_S;
+        Ok(SsrAppliedState {
+            position_m: corrected_position,
+            clock_s,
+            solution: clock.solution,
+            group_delay_s,
+        })
     }
 
     /// Whether a correction applies at `t_j2000_s`.
@@ -3048,6 +3283,15 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64)> {
+        self.broadcast_fallback_with_group_delay(sat, t_j2000_s)
+            .map(|(position, clock, _)| (position, clock))
+    }
+
+    fn broadcast_fallback_with_group_delay(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
         if self
             .store
             .orbit(sat)
@@ -3056,7 +3300,8 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             return None;
         }
         if self.fallback.on_missing_correction == MissingCorrectionAction::FallBackToBroadcast {
-            self.broadcast.position_clock_at_j2000_s(sat, t_j2000_s)
+            self.broadcast
+                .position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
         } else {
             None
         }
@@ -3090,6 +3335,18 @@ impl EphemerisSource for SsrCorrectedEphemeris<'_> {
     ) -> Option<([f64; 3], f64)> {
         self.corrected_state(sat, t_j2000_s)
     }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        SsrCorrectedEphemeris::single_frequency_group_delay_s(self, sat, t_j2000_s)
+    }
+
+    fn position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.corrected_state_with_group_delay(sat, t_j2000_s)
+    }
 }
 
 impl ObservableEphemerisSource for SsrCorrectedEphemeris<'_> {
@@ -3109,6 +3366,34 @@ impl ObservableEphemerisSource for SsrCorrectedEphemeris<'_> {
 
     fn ssr_corrections(&self) -> Option<&dyn SsrCorrectionSource> {
         Some(self)
+    }
+
+    /// True: an SSR-corrected clock carries `-2 r·v / c²` (RTKLIB `satpos_ssr`, HAS SIS
+    /// ICD Eq. 24), and a broadcast fallback clock carries the broadcast relativistic
+    /// term.
+    fn clock_includes_relativity(&self) -> bool {
+        true
+    }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        SsrCorrectedEphemeris::single_frequency_group_delay_s(self, sat, t_j2000_s)
+    }
+
+    fn observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> std::result::Result<(ObservableState, Option<f64>), ObservablesError> {
+        let (position_ecef_m, clock_s, group_delay) = self
+            .corrected_state_with_group_delay(sat, t_j2000_s)
+            .ok_or(ObservablesError::NoEphemeris)?;
+        Ok((
+            ObservableState {
+                position_ecef_m,
+                clock_s: Some(clock_s),
+            },
+            group_delay,
+        ))
     }
 
     fn velocity_at_j2000_s(
@@ -3196,7 +3481,8 @@ impl SsrCorrectedEphemerisOwned {
         self
     }
 
-    /// Corrected ECEF position and satellite clock at a J2000 epoch.
+    /// Corrected ECEF position and satellite clock at a J2000 epoch; see
+    /// [`SsrCorrectedEphemeris::corrected_state`].
     pub fn corrected_state(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<([f64; 3], f64)> {
         self.borrowed().corrected_state(sat, t_j2000_s)
     }
@@ -3214,6 +3500,39 @@ impl SsrCorrectedEphemerisOwned {
         t_j2000_s: f64,
     ) -> Option<SsrSolution> {
         self.borrowed().applied_orbit_clock_solution(sat, t_j2000_s)
+    }
+
+    /// [`Self::corrected_state`] with its single-frequency group delay; see
+    /// [`SsrCorrectedEphemeris::corrected_state_with_group_delay`].
+    pub fn corrected_state_with_group_delay(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.borrowed()
+            .corrected_state_with_group_delay(sat, t_j2000_s)
+    }
+
+    /// Single-frequency group delay of the state [`Self::corrected_state`] returns; see
+    /// [`SsrCorrectedEphemeris::single_frequency_group_delay_s`].
+    pub fn single_frequency_group_delay_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<f64> {
+        self.borrowed()
+            .single_frequency_group_delay_s(sat, t_j2000_s)
+    }
+
+    /// Solution of the SSR orbit and clock corrections that [`Self::corrected_state`]
+    /// applies, or why it applies none; see
+    /// [`SsrCorrectedEphemeris::applied_orbit_clock_status`].
+    pub fn applied_orbit_clock_status(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> std::result::Result<SsrSolution, SsrStateUnavailable> {
+        self.borrowed().applied_orbit_clock_status(sat, t_j2000_s)
     }
 
     /// Borrowed source with the same store, broadcast data, antennas and policies, for
@@ -3243,6 +3562,19 @@ impl EphemerisSource for SsrCorrectedEphemerisOwned {
     ) -> Option<([f64; 3], f64)> {
         self.borrowed().position_clock_at_j2000_s(sat, t_j2000_s)
     }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        SsrCorrectedEphemerisOwned::single_frequency_group_delay_s(self, sat, t_j2000_s)
+    }
+
+    fn position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64, Option<f64>)> {
+        self.borrowed()
+            .corrected_state_with_group_delay(sat, t_j2000_s)
+    }
 }
 
 impl ObservableEphemerisSource for SsrCorrectedEphemerisOwned {
@@ -3256,6 +3588,35 @@ impl ObservableEphemerisSource for SsrCorrectedEphemerisOwned {
 
     fn ssr_corrections(&self) -> Option<&dyn SsrCorrectionSource> {
         Some(self)
+    }
+
+    /// True: an SSR-corrected clock carries `-2 r·v / c²` (RTKLIB `satpos_ssr`, HAS SIS
+    /// ICD Eq. 24), and a broadcast fallback clock carries the broadcast relativistic
+    /// term.
+    fn clock_includes_relativity(&self) -> bool {
+        true
+    }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        SsrCorrectedEphemerisOwned::single_frequency_group_delay_s(self, sat, t_j2000_s)
+    }
+
+    fn observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> std::result::Result<(ObservableState, Option<f64>), ObservablesError> {
+        let (position_ecef_m, clock_s, group_delay) = self
+            .borrowed()
+            .corrected_state_with_group_delay(sat, t_j2000_s)
+            .ok_or(ObservablesError::NoEphemeris)?;
+        Ok((
+            ObservableState {
+                position_ecef_m,
+                clock_s: Some(clock_s),
+            },
+            group_delay,
+        ))
     }
 
     fn velocity_at_j2000_s(
@@ -3457,14 +3818,48 @@ fn ssr_satellite(message: &SsrMessage, satellite_id: u8) -> Result<GnssSatellite
         .map_err(|e| Error::Parse(format!("invalid SSR satellite id {satellite_id}: {e}")))
 }
 
+/// Refuse a HAS orbit or clock record whose navigation-message index cannot have
+/// been transmitted: wider than the 3-bit NM field, or, in a message carrying its
+/// mask, not the index that mask states for the record's GNSS. A reserved index
+/// (1..=7) is kept; the corrected source declines to apply it.
+fn check_has_record_nav_message(
+    message: &HasMt1Message,
+    block_name: &str,
+    sat: GnssSatelliteId,
+    nav_message: u8,
+) -> Result<()> {
+    if nav_message > 7 {
+        return Err(Error::InvalidInput(format!(
+            "HAS {block_name} record for {sat} holds navigation message index \
+             {nav_message}, wider than the 3-bit NM field (0..=7)"
+        )));
+    }
+    let Some(mask) = &message.mask else {
+        return Ok(());
+    };
+    match mask.systems.iter().find(|m| m.system == sat.system) {
+        Some(system) if system.nav_message != nav_message => Err(Error::InvalidInput(format!(
+            "HAS {block_name} record for {sat} holds navigation message index \
+             {nav_message}, but the message's mask states {}",
+            system.nav_message
+        ))),
+        _ => Ok(()),
+    }
+}
+
 fn high_rate_matches(clock: &SsrClockCorrection, high_rate: &SsrHighRateClock) -> bool {
     clock.solution == high_rate.solution && clock.iod_ssr == high_rate.iod_ssr
 }
 
-fn default_nav_message(system: GnssSystem) -> Option<NavMessage> {
-    match system {
+/// Navigation message whose records an SSR orbit and clock correction for `sat` refers
+/// to: the one RTKLIB `satpos_ssr` selects by IODE for GPS, Galileo, QZSS and BeiDou.
+/// BeiDou geostationary satellites broadcast D2, the others D1.
+fn ssr_nav_message(sat: GnssSatelliteId) -> Option<NavMessage> {
+    match sat.system {
         GnssSystem::Gps => Some(NavMessage::GpsLnav),
+        GnssSystem::Qzss => Some(NavMessage::QzssLnav),
         GnssSystem::Galileo => Some(NavMessage::GalileoInav),
+        GnssSystem::BeiDou if is_beidou_geo(sat) => Some(NavMessage::BeidouD2),
         GnssSystem::BeiDou => Some(NavMessage::BeidouD1),
         _ => None,
     }
@@ -3521,40 +3916,25 @@ fn civil_fields_from_j2000_gpst(t_j2000_s: f64) -> Option<(i32, u8, u8, u8, u8, 
     ))
 }
 
-fn continuous_time_for_sat(sat: GnssSatelliteId, t_j2000_s: f64) -> Option<(f64, bool)> {
-    if !matches!(
-        sat.system,
-        GnssSystem::Gps | GnssSystem::Galileo | GnssSystem::BeiDou
-    ) {
-        return None;
-    }
-    let gpst_continuous = t_j2000_s + GPS_EPOCH_TO_J2000_S;
-    if sat.system == GnssSystem::BeiDou {
-        Some((
-            gpst_continuous
-                - crate::constants::GPST_MINUS_BDT_S
-                - crate::constants::BDS_EPOCH_MINUS_GPS_EPOCH_S,
-            is_beidou_geo(sat),
-        ))
-    } else {
-        Some((gpst_continuous, false))
-    }
+/// Seconds of week of `t_j2000_s` in the time scale of `sat`'s broadcast records (GPS
+/// time for GPS, Galileo and QZSS, BDT for BeiDou), and whether `sat` takes the BeiDou
+/// geostationary orbit branch; `None` for a system without an SSR broadcast model here.
+/// They are `t_j2000_s`'s seconds of week rounded once, exact for every epoch after
+/// mid-January 2000 (see `crate::rinex_nav::query_native_time`).
+fn ssr_seconds_of_week(sat: GnssSatelliteId, t_j2000_s: f64) -> Option<(f64, bool)> {
+    crate::rinex_nav::query_native_time(sat, t_j2000_s).map(|(_, sow, is_geo)| (sow, is_geo))
 }
 
-/// Velocity of one broadcast record as RTKLIB `ephpos` forms it for `satpos_ssr`: the
-/// difference of the record's positions at `t_j2000_s` and [`EPHPOS_STEP_S`] later. Both
-/// the SSR-corrected state's velocity and its radial, along-track and cross-track basis
-/// use it, as `satpos_ssr` uses `rs+3` for both.
-fn broadcast_velocity(
+/// Position and velocity of one broadcast record as RTKLIB `ephpos` forms them for
+/// `satpos_ssr`, at seconds of week `sow` in the record's time scale: the position at
+/// `tk`, and the difference of the positions at `tk` and [`EPHPOS_STEP_S`] later over
+/// the step. The SSR-corrected state uses both for its clock's relativistic term and
+/// its radial, along-track and cross-track basis, as `satpos_ssr` uses `rs` and `rs+3`.
+fn broadcast_position_velocity(
     record: &crate::rinex_nav::BroadcastRecord,
-    sat: GnssSatelliteId,
-    t_j2000_s: f64,
+    sow: f64,
     is_geo: bool,
-) -> Option<[f64; 3]> {
-    // The step is added to the record's reduced time `tk`, as RTKLIB adds it to its exact
-    // `gtime_t`; added to the absolute J2000 epoch it would round at 1e-7 s.
-    let (t_continuous_s, _) = continuous_time_for_sat(sat, t_j2000_s)?;
-    let sow = t_continuous_s.rem_euclid(SECONDS_PER_WEEK);
+) -> Option<([f64; 3], [f64; 3])> {
     let tk = crate::broadcast::time_from_reference_s(sow, record.elements.toe_sow);
     let position = |tk_s: f64| -> Option<[f64; 3]> {
         crate::broadcast::satellite_position_ecef_at_tk_unchecked(
@@ -3569,12 +3949,15 @@ fn broadcast_velocity(
         .map(|position| position.as_array())
     };
     let start = position(tk)?;
-    let end = position(tk + EPHPOS_STEP_S)?;
-    Some([
-        (end[0] - start[0]) / EPHPOS_STEP_S,
-        (end[1] - start[1]) / EPHPOS_STEP_S,
-        (end[2] - start[2]) / EPHPOS_STEP_S,
-    ])
+    let end = position(ephpos_stepped_tk(tk))?;
+    Some((
+        start,
+        [
+            (end[0] - start[0]) / EPHPOS_STEP_S,
+            (end[1] - start[1]) / EPHPOS_STEP_S,
+            (end[2] - start[2]) / EPHPOS_STEP_S,
+        ],
+    ))
 }
 
 fn velocity_aligned_basis(r: [f64; 3], v: [f64; 3]) -> Option<([f64; 3], [f64; 3], [f64; 3])> {
@@ -4278,6 +4661,7 @@ mod tests {
             let mut message = has_message(
                 vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: 7,
                     radial_m,
                     along_m: Some(0.25),
@@ -4285,6 +4669,7 @@ mod tests {
                 }],
                 vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: clock_m,
                     do_not_use,
                 }],
@@ -4521,8 +4906,10 @@ mod tests {
                 .expect("fresh RTCM correction")
                 .1
         };
+        // The high-rate clock adds to the clock correction, and the correction adds to
+        // the clock (RTKLIB `satpos_ssr`: `dclk += hrclk`, `dts += dclk / CLIGHT`).
         let applied = clock_at(&with_high_rate, 9.5) - clock_at(&plain, 9.5);
-        assert!((applied + 0.05 / C_M_S).abs() < 1.0e-18, "{applied}");
+        assert!((applied - 0.05 / C_M_S).abs() < 1.0e-18, "{applied}");
         assert_eq!(
             clock_at(&with_high_rate, 10.0).to_bits(),
             clock_at(&plain, 10.0).to_bits(),
@@ -4760,7 +5147,7 @@ mod tests {
         let source = SsrCorrectedEphemeris::new(&broadcast, &store);
         let (corrected_position, corrected_clock) =
             source.corrected_state(sat, t).expect("corrected state");
-        let (broadcast_position, broadcast_clock) = broadcast
+        let (broadcast_position, _) = broadcast
             .position_clock_at_j2000_s(sat, t)
             .expect("broadcast state");
         let velocity = finite_difference_broadcast_velocity(&broadcast, sat, t);
@@ -4780,7 +5167,22 @@ mod tests {
                 + wanted_rac_m[2] * ec[2],
         ];
         assert_vector_close(corrected_position, expected_position, 2.0e-9);
-        assert!((corrected_clock - (broadcast_clock - clock_correction_m / C_M_S)).abs() < 1.0e-18);
+        // The clock correction adds to the clock, as RTKLIB `satpos_ssr` and IGS SSR add
+        // it. This test once asserted the broadcast clock minus C0 / c: the subtraction was
+        // the wrong sign, and that broadcast clock carried the broadcast group delay and
+        // carries the `F·e·√A·sin E` relativistic term, where the SSR-corrected clock has
+        // neither and has `-2 r·v / c²` instead.
+        let dclock_m = store.clock(sat).expect("stored clock").c0_m;
+        assert_eq!(dclock_m.to_bits(), (5_000.0_f64 * 1.0e-4).to_bits());
+        assert_eq!(
+            corrected_clock.to_bits(),
+            satpos_ssr_clock_s(&broadcast, sat, REAL_SSR_EPOCH_TOW_S, dclock_m).to_bits()
+        );
+        let uncorrected = satpos_ssr_clock_s(&broadcast, sat, REAL_SSR_EPOCH_TOW_S, 0.0);
+        assert!(
+            (corrected_clock - (uncorrected + clock_correction_m / C_M_S)).abs() < 1.0e-18,
+            "a positive C0 makes the satellite clock later"
+        );
     }
 
     #[test]
@@ -5102,6 +5504,7 @@ mod tests {
         for sat in [g01, g02] {
             orbit.push(HasOrbitCorrection {
                 sat,
+                nav_message: 0,
                 iode: 7,
                 radial_m: Some(0.5),
                 along_m: Some(-0.25),
@@ -5109,6 +5512,7 @@ mod tests {
             });
             clock.push(HasClockCorrection {
                 sat,
+                nav_message: 0,
                 correction_m: Some(-0.75),
                 do_not_use: false,
             });
@@ -5168,6 +5572,7 @@ mod tests {
         let (later, later_reception) = has_later(has_message(
             vec![HasOrbitCorrection {
                 sat: g01,
+                nav_message: 0,
                 iode: 8,
                 radial_m: Some(0.5),
                 along_m: None,
@@ -5175,6 +5580,7 @@ mod tests {
             }],
             vec![HasClockCorrection {
                 sat: g01,
+                nav_message: 0,
                 correction_m: None,
                 do_not_use: true,
             }],
@@ -5225,6 +5631,7 @@ mod tests {
         let (unavailable_only, reception) = has_later(has_message(
             vec![HasOrbitCorrection {
                 sat: g03,
+                nav_message: 0,
                 iode: 1,
                 radial_m: None,
                 along_m: None,
@@ -5232,6 +5639,7 @@ mod tests {
             }],
             vec![HasClockCorrection {
                 sat: g03,
+                nav_message: 0,
                 correction_m: None,
                 do_not_use: true,
             }],
@@ -5248,6 +5656,7 @@ mod tests {
         let same_epoch = has_message(
             vec![HasOrbitCorrection {
                 sat: g02,
+                nav_message: 0,
                 iode: 7,
                 radial_m: None,
                 along_m: None,
@@ -5278,11 +5687,13 @@ mod tests {
             vec![
                 HasClockCorrection {
                     sat: g01,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: false,
                 },
                 HasClockCorrection {
                     sat: g02,
+                    nav_message: 0,
                     correction_m: Some(0.5),
                     do_not_use: true,
                 },
@@ -5307,6 +5718,7 @@ mod tests {
             Vec::new(),
             vec![HasClockCorrection {
                 sat: g01,
+                nav_message: 0,
                 correction_m: None,
                 do_not_use: false,
             }],
@@ -5378,6 +5790,7 @@ mod tests {
         let mut message = has_message(
             vec![HasOrbitCorrection {
                 sat: g01,
+                nav_message: 0,
                 iode: 9,
                 radial_m: None,
                 along_m: Some(0.0),
@@ -5438,6 +5851,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: record.issue_of_data.issue,
                     radial_m: Some(1.25),
                     along_m: Some(-2.0),
@@ -5452,6 +5866,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: Some(-0.75),
                     do_not_use: false,
                 }],
@@ -5501,7 +5916,7 @@ mod tests {
             .expect("ingest HAS MT1");
         let source = SsrCorrectedEphemeris::new(&broadcast, &store);
         let (position, clock) = source.corrected_state(sat, t).expect("HAS corrected state");
-        let (broadcast_position, broadcast_clock) = broadcast
+        let (broadcast_position, _) = broadcast
             .position_clock_at_j2000_s(sat, t)
             .expect("broadcast state");
         let velocity = finite_difference_broadcast_velocity(&broadcast, sat, t);
@@ -5512,7 +5927,18 @@ mod tests {
             broadcast_position[2] + 1.25 * er[2] - 2.0 * ea[2] + 3.0 * ec[2],
         ];
         assert_vector_close(position, expected_position, 2.0e-9);
-        assert!((clock - (broadcast_clock - 0.75 / C_M_S)).abs() < 1.0e-18);
+        // HAS SIS ICD Eq. 23 and 24: the broadcast clock polynomial, less `2 r·v / c²`,
+        // plus the delta clock correction (-0.75 m) over c, with no TGD (HAS SIS ICD 7.4).
+        // This test once asserted the broadcast clock minus 0.75 / c, but that broadcast
+        // clock subtracted the LNAV TGD (4.190951585770e-09 s for G30), and it uses the
+        // `F·e·√A·sin E` relativistic term, which Eq. 23 and 24 replace.
+        let dclock_m = store.clock(sat).expect("stored HAS clock").c0_m;
+        assert_eq!(
+            clock.to_bits(),
+            satpos_ssr_clock_s(&broadcast, sat, REAL_SSR_EPOCH_TOW_S, dclock_m).to_bits()
+        );
+        assert!((dclock_m + 0.75).abs() < 1.0e-12, "{dclock_m}");
+
         assert_eq!(
             store.code_bias(sat, 0).unwrap().to_bits(),
             0.24_f64.to_bits()
@@ -5584,7 +6010,7 @@ mod tests {
     }
 
     #[test]
-    fn corrected_position_matches_rtklib_satpos_ssr_oracle_for_one_epoch() {
+    fn corrected_state_matches_rtklib_satpos_ssr_oracle_for_one_epoch() {
         let nav_text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/ssr/BRDC00WRD_S_20261820000_G30_G31.rnx"
@@ -5609,7 +6035,39 @@ mod tests {
                 13_939_538_677_975_909_640,
             ]
         );
-        assert_eq!(clock.to_bits(), 4_553_802_228_904_002_216);
+        // The clock as RTKLIB `satpos_ssr` forms it, by hand from the fixture: G30's LNAV
+        // record (toc 345600 s of week 2425, af0 2.801017835736e-04 s, af1
+        // 1.364242052659e-11 s/s, af2 0) at 344970 s gives tk = -630 s and
+        // af0 + af1·tk + af2·tk² = 2.8009318884866823e-04 s. The broadcast position r and
+        // the 1 ms forward-difference velocity v give 2 r·v / c / c = 6.691442092505122e-09 s.
+        // The 1060 frame's C0 for G30 is 166 × 1e-4 m, C1 and C2 are zero, so
+        // dclk / c = 0.0166 / c = 5.537163980289324e-11 s. The clock is
+        // 2.8009318884866823e-04 - 6.691442092505122e-09 + 5.537163980289324e-11
+        // = 2.8008655277821554e-04 s. There is no TGD (4.190951585770e-09 s) in it.
+        // Before the clock followed `satpos_ssr` it was
+        // 4_553_802_228_904_002_216 (2.8008223e-04 s): the TGD and the `F·e·√A·sin E`
+        // term in, and C0 subtracted.
+        assert_eq!(clock.to_bits(), 4_553_802_308_601_788_245);
+        assert_eq!(
+            clock.to_bits(),
+            satpos_ssr_clock_s(
+                &broadcast,
+                sat,
+                REAL_SSR_EPOCH_TOW_S,
+                store.clock(sat).expect("stored clock").c0_m,
+            )
+            .to_bits()
+        );
+        // RTKLIB's own statements replayed in IEEE double, with its Newton Kepler solver
+        // (1e-13) and operation order, give 2.800865527753679e-04 s. The two differ by
+        // 2.8e-15 s: the Kepler solvers leave the two broadcast positions 1 ulp
+        // (3.7e-9 m) apart, and the 1 ms difference turns that into 3.7e-6 m/s of
+        // velocity, 2.8e-15 s of `2 r·v / c²`. 1e-14 s is 3 µm of range.
+        let rtklib_clock_s = 2.800_865_527_753_679e-4;
+        assert!(
+            (clock - rtklib_clock_s).abs() < 1.0e-14,
+            "{clock} vs RTKLIB {rtklib_clock_s}"
+        );
         let rtklib_position = [
             -6_327_381.424_159_626,
             15_802_129.789_888_298,
@@ -5732,6 +6190,31 @@ mod tests {
             .collect()
     }
 
+    /// The satellite clock RTKLIB `satpos_ssr` forms for a GPS satellite at `tow_s` of
+    /// `REAL_SSR_WEEK`, written as `satpos_ssr` writes it: `f0 + f1·tk + f2·tk²` of the
+    /// broadcast record with `tk = t - toc`, less `2 r·v / c / c` for the record's
+    /// position and its 1 ms forward-difference velocity, plus `dclk / c`.
+    fn satpos_ssr_clock_s(
+        broadcast: &BroadcastEphemeris,
+        sat: GnssSatelliteId,
+        tow_s: f64,
+        dclock_m: f64,
+    ) -> f64 {
+        let t = ssr_j2000(tow_s);
+        let record = broadcast
+            .select_record_at(sat, t)
+            .expect("broadcast record");
+        let tk = tow_s - record.clock.toc_sow;
+        let mut dts = record.clock.af0 + record.clock.af1 * tk + record.clock.af2 * tk * tk;
+        let (r, _) = broadcast
+            .position_clock_at_j2000_s(sat, t)
+            .expect("broadcast state");
+        let v = finite_difference_broadcast_velocity(broadcast, sat, t);
+        dts -= 2.0 * dot3(r, v) / C_M_S / C_M_S;
+        dts += dclock_m / C_M_S;
+        dts
+    }
+
     fn finite_difference_broadcast_velocity(
         broadcast: &BroadcastEphemeris,
         sat: GnssSatelliteId,
@@ -5821,6 +6304,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: 10,
                     radial_m: Some(1.0),
                     along_m: Some(2.0),
@@ -5835,6 +6319,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: Some(1.25),
                     do_not_use: true,
                 }],
@@ -5896,6 +6381,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: Some(-0.5),
                     do_not_use: true,
                 }],
@@ -5975,6 +6461,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode,
                     radial_m,
                     along_m,
@@ -5989,6 +6476,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m,
                     do_not_use: false,
                 }],
@@ -6136,6 +6624,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: record.issue_of_data.issue,
                     radial_m: Some(1.0),
                     along_m: Some(0.0),
@@ -6150,6 +6639,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: Some(-0.5),
                     do_not_use: false,
                 }],
@@ -6205,6 +6695,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -6286,6 +6777,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: false,
                 }],
@@ -6349,6 +6841,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -6481,6 +6974,7 @@ mod tests {
                 records: vec![
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: record1.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -6488,6 +6982,7 @@ mod tests {
                     },
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: record2.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -6504,11 +6999,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         correction_m: None,
                         do_not_use: true,
                     },
                     HasClockCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         correction_m: Some(-0.5),
                         do_not_use: false,
                     },
@@ -6572,6 +7069,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(0.75),
                     do_not_use: false,
                 }],
@@ -6636,6 +7134,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(-0.25),
                     do_not_use: false,
                 }],
@@ -6684,6 +7183,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     iode: record1.issue_of_data.issue,
                     radial_m: Some(1.0),
                     along_m: Some(0.0),
@@ -6698,6 +7198,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(-0.35),
                     do_not_use: false,
                 }],
@@ -6784,6 +7285,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -6879,6 +7381,7 @@ mod tests {
                 records: vec![
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: record1.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -6886,6 +7389,7 @@ mod tests {
                     },
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: record2.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -6902,11 +7406,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         correction_m: Some(0.75),
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         correction_m: Some(-0.50),
                         do_not_use: false,
                     },
@@ -6991,11 +7497,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         correction_m: None,
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         correction_m: Some(-0.60),
                         do_not_use: false,
                     },
@@ -7093,6 +7601,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(1.20),
                     do_not_use: false,
                 }],
@@ -7148,6 +7657,7 @@ mod tests {
                 records: vec![
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: record1.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -7155,6 +7665,7 @@ mod tests {
                     },
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: record2.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -7171,11 +7682,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         correction_m: Some(-0.45),
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         correction_m: Some(-0.70),
                         do_not_use: false,
                     },
@@ -7239,6 +7752,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: false,
                 }],
@@ -7317,6 +7831,7 @@ mod tests {
                 records: vec![
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: record1.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -7324,6 +7839,7 @@ mod tests {
                     },
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: record2.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -7340,11 +7856,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         correction_m: None,
                         do_not_use: true,
                     },
                     HasClockCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         correction_m: Some(-0.50),
                         do_not_use: false,
                     },
@@ -7412,6 +7930,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: false,
                 }],
@@ -7494,6 +8013,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(0.80),
                     do_not_use: false,
                 }],
@@ -7542,6 +8062,7 @@ mod tests {
                 records: vec![
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: record1.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -7549,6 +8070,7 @@ mod tests {
                     },
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: record2.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -7565,6 +8087,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(0.35),
                     do_not_use: false,
                 }],
@@ -7680,11 +8203,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         correction_m: None,
                         do_not_use: true,
                     },
                     HasClockCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         correction_m: Some(-0.50),
                         do_not_use: false,
                     },
@@ -7698,6 +8223,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -7788,6 +8314,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -7822,6 +8349,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -7943,6 +8471,7 @@ mod tests {
                 records: vec![
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: record1.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -7950,6 +8479,7 @@ mod tests {
                     },
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: record2.issue_of_data.issue,
                         radial_m: Some(2.0),
                         along_m: Some(0.0),
@@ -7966,11 +8496,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         correction_m: Some(-0.50),
                         do_not_use: false,
                     },
                     HasClockCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         correction_m: Some(0.25),
                         do_not_use: false,
                     },
@@ -8015,6 +8547,7 @@ mod tests {
                 validity_interval: 5, // valid orbit VI
                 records: vec![HasOrbitCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     iode: record1.issue_of_data.issue,
                     radial_m: Some(99.0),
                     along_m: Some(0.0),
@@ -8029,6 +8562,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(99.0),
                     do_not_use: false,
                 }],
@@ -8080,6 +8614,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(88.0),
                     do_not_use: false,
                 }],
@@ -8092,6 +8627,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(77.0),
                     do_not_use: false,
                 }],
@@ -8152,6 +8688,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(-0.50),
                     do_not_use: false,
                 }],
@@ -8209,6 +8746,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(-0.75),
                     do_not_use: false,
                 }],
@@ -8268,6 +8806,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(-0.90),
                     do_not_use: false,
                 }],
@@ -8327,6 +8866,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(1.20),
                     do_not_use: false,
                 }],
@@ -8395,6 +8935,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(-0.50),
                     do_not_use: false,
                 }],
@@ -8429,6 +8970,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: false,
                 }],
@@ -8519,6 +9061,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: false,
                 }],
@@ -8586,6 +9129,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -8688,6 +9232,7 @@ mod tests {
                 records: vec![
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: record1.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -8695,6 +9240,7 @@ mod tests {
                     },
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: record2.issue_of_data.issue,
                         radial_m: Some(1.0),
                         along_m: Some(0.0),
@@ -8711,11 +9257,13 @@ mod tests {
                 records: vec![
                     HasClockCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         correction_m: None,
                         do_not_use: true,
                     },
                     HasClockCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         correction_m: Some(-0.50),
                         do_not_use: false,
                     },
@@ -8754,6 +9302,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: false,
                 }],
@@ -8789,6 +9338,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(0.80),
                     do_not_use: false,
                 }],
@@ -8824,6 +9374,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(-0.30),
                     do_not_use: false,
                 }],
@@ -9052,6 +9603,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -9123,6 +9675,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: false,
                 }],
@@ -9283,6 +9836,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: Some(-0.40),
                     do_not_use: false,
                 }],
@@ -9358,6 +9912,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -9531,6 +10086,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -9819,6 +10375,7 @@ mod tests {
                 records: vec![
                     HasOrbitCorrection {
                         sat: sat1,
+                        nav_message: 0,
                         iode: 10,
                         radial_m: Some(0.10), // 40 * 0.0025
                         along_m: Some(0.20),  // 25 * 0.0080
@@ -9826,6 +10383,7 @@ mod tests {
                     },
                     HasOrbitCorrection {
                         sat: sat2,
+                        nav_message: 0,
                         iode: 20,
                         radial_m: Some(0.40), // 160 * 0.0025
                         along_m: Some(0.48),  // 60 * 0.0080
@@ -9866,6 +10424,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     iode: 11,
                     radial_m: Some(0.15),
                     along_m: None, // partial -> vector unavailable!
@@ -9934,6 +10493,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     iode: 12,
                     radial_m: Some(0.20), // 80 * 0.0025
                     along_m: Some(0.24),  // 30 * 0.0080
@@ -9999,6 +10559,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat: sat1,
+                    nav_message: 0,
                     iode: 11,
                     radial_m: Some(0.15),
                     along_m: Some(0.24),
@@ -10836,6 +11397,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: 10,
                     radial_m: Some(0.1),
                     along_m: Some(0.2),
@@ -10850,6 +11412,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: Some(-0.4),
                     do_not_use: false,
                 }],
@@ -10896,6 +11459,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: 11,
                     radial_m: Some(0.5),
                     along_m: Some(0.6),
@@ -11060,6 +11624,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: None,
                     do_not_use: true,
                 }],
@@ -11135,6 +11700,7 @@ mod tests {
                 validity_interval: 5,
                 records: vec![HasOrbitCorrection {
                     sat,
+                    nav_message: 0,
                     iode: record.issue_of_data.issue,
                     radial_m: Some(0.1),
                     along_m: Some(0.2),
@@ -11149,6 +11715,7 @@ mod tests {
                 }],
                 records: vec![HasClockCorrection {
                     sat,
+                    nav_message: 0,
                     correction_m: Some(-0.4),
                     do_not_use: false,
                 }],
@@ -13593,5 +14160,763 @@ mod tests {
             store_a.query_code_bias(sat, 0, t_ref - 5.0).status,
             SsrBiasStatus::NotYetValid
         );
+    }
+
+    fn g30_g31_broadcast() -> BroadcastEphemeris {
+        let nav_text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ssr/BRDC00WRD_S_20261820000_G30_G31.rnx"
+        ))
+        .expect("read NAV fixture");
+        BroadcastEphemeris::from_nav(&nav_text).expect("parse NAV fixture")
+    }
+
+    /// The same records with every GPS TGD and Galileo BGD of `sat` moved by `shift_s`.
+    fn with_group_delay_shift(
+        broadcast: &BroadcastEphemeris,
+        sat: GnssSatelliteId,
+        shift_s: f64,
+    ) -> BroadcastEphemeris {
+        let records = broadcast
+            .records()
+            .iter()
+            .map(|record| {
+                let mut record = *record;
+                if record.satellite_id == sat {
+                    let delays = &mut record.group_delays;
+                    for value in [
+                        &mut delays.gps_tgd_s,
+                        &mut delays.galileo_bgd_e5a_e1_s,
+                        &mut delays.galileo_bgd_e5b_e1_s,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    {
+                        *value += shift_s;
+                    }
+                }
+                record
+            })
+            .collect();
+        BroadcastEphemeris::new(records).expect("records with shifted group delays")
+    }
+
+    /// A HAS MT1 message with a one-satellite mask stating `nav_message`, an orbit
+    /// correction against `iode` and a clock correction of `clock_m`, ingested at
+    /// `reception` (GST) with the TOH of that instant.
+    fn has_orbit_clock_store(
+        sat: GnssSatelliteId,
+        iode: u32,
+        nav_message: u8,
+        clock_m: f64,
+        reception: GnssWeekTow,
+    ) -> SsrCorrectionStore {
+        let message = HasMt1Message {
+            header: HasMt1Header {
+                toh_s: (reception.tow_s as u32 % 3600) as u16,
+                mask: true,
+                orbit: true,
+                clock_full_set: true,
+                clock_subset: false,
+                code_bias: false,
+                phase_bias: false,
+                reserved: 0,
+                mask_id: 2,
+                iod_set_id: 5,
+            },
+            mask: Some(HasMaskBlock {
+                systems: vec![HasGnssMask {
+                    system: sat.system,
+                    satellites: vec![sat.prn],
+                    signals: vec![0],
+                    cell_mask: None,
+                    nav_message,
+                }],
+                reserved: 0,
+            }),
+            orbit: Some(HasOrbitBlock {
+                validity_interval: 5,
+                records: vec![HasOrbitCorrection {
+                    sat,
+                    nav_message,
+                    iode,
+                    radial_m: Some(1.25),
+                    along_m: Some(-2.0),
+                    cross_m: Some(3.0),
+                }],
+            }),
+            clock_full_set: Some(HasClockBlock {
+                validity_interval: 5,
+                systems: vec![HasClockSystem {
+                    system: sat.system,
+                    multiplier_index: 0,
+                }],
+                records: vec![HasClockCorrection {
+                    sat,
+                    nav_message,
+                    correction_m: Some(clock_m),
+                    do_not_use: false,
+                }],
+            }),
+            clock_subset: None,
+            code_bias: None,
+            phase_bias: None,
+            padding_bits: Vec::new(),
+        };
+        let decoded = HasMt1Message::decode(&message.encode().expect("encode HAS MT1"))
+            .expect("decode HAS MT1");
+        let mut store = SsrCorrectionStore::new();
+        store
+            .ingest_has_mt1(&decoded, reception)
+            .expect("ingest HAS MT1");
+        store
+    }
+
+    /// An RTCM 1060 message for G30 against `iode` with clock C0 `c0` (0.1 mm units),
+    /// update interval index 0, ingested at the fixture epoch.
+    fn rtcm_g30_store(iode: u32, c0: i32) -> SsrCorrectionStore {
+        let message = SsrMessage {
+            message_number: 1060,
+            system: GnssSystem::Gps,
+            kind: SsrKind::CombinedOrbitClock,
+            header: SsrHeader {
+                epoch_time_s: REAL_SSR_EPOCH_TOW_S as u32,
+                update_interval: 0,
+                multiple_message: false,
+                iod_ssr: 3,
+                provider_id: 9,
+                solution_id: 1,
+                satellite_reference_datum: Some(false),
+                dispersive_bias_consistency: None,
+                mw_consistency: None,
+                satellite_count: 1,
+            },
+            orbit: vec![SsrOrbitRecord {
+                satellite_id: 30,
+                iode,
+                delta_radial: -20_000,
+                delta_along: 10_000,
+                delta_cross: -3_000,
+                dot_delta_radial: 0,
+                dot_delta_along: 0,
+                dot_delta_cross: 0,
+            }],
+            clock: vec![SsrClockRecord {
+                satellite_id: 30,
+                c0,
+                c1: 0,
+                c2: 0,
+            }],
+            code_bias: Vec::new(),
+            phase_bias: Vec::<SsrPhaseBiasRecord>::new(),
+            ura: Vec::new(),
+            padding_bits: Vec::new(),
+        };
+        let week = GnssWeekTow::new(TimeScale::Gpst, REAL_SSR_WEEK, REAL_SSR_EPOCH_TOW_S)
+            .expect("valid SSR week");
+        let mut store = SsrCorrectionStore::new();
+        store.ingest_ssr(&message, week).expect("ingest RTCM SSR");
+        store
+    }
+
+    /// RTCM SSR and IGS SSR define the clock correction as added to the broadcast clock,
+    /// and RTKLIB `satpos_ssr` adds `dclk / CLIGHT`. A positive C0 makes the corrected
+    /// satellite clock later by exactly C0 / c.
+    #[test]
+    fn rtcm_clock_correction_adds_to_the_satellite_clock() {
+        let broadcast = g30_g31_broadcast();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let iode = broadcast
+            .select_record_at(sat, t)
+            .expect("broadcast record")
+            .issue_of_data
+            .issue;
+        let zero = rtcm_g30_store(iode, 0);
+        let positive = rtcm_g30_store(iode, 5_000);
+        let negative = rtcm_g30_store(iode, -5_000);
+        let clock = |store: &SsrCorrectionStore| {
+            SsrCorrectedEphemeris::new(&broadcast, store)
+                .corrected_state(sat, t)
+                .expect("RTCM corrected state")
+                .1
+        };
+        let c0_m = positive.clock(sat).expect("stored clock").c0_m;
+        assert!(c0_m > 0.0);
+        assert!(clock(&positive) > clock(&zero));
+        assert!(clock(&negative) < clock(&zero));
+        assert!(((clock(&positive) - clock(&zero)) - c0_m / C_M_S).abs() < 1.0e-18);
+        assert!(((clock(&zero) - clock(&negative)) - c0_m / C_M_S).abs() < 1.0e-18);
+    }
+
+    /// Metamorphic check of the SSR clock against the broadcast group delay, for RTCM SSR
+    /// and Galileo HAS on a GPS LNAV record. RTKLIB `satpos_ssr` builds the clock from the
+    /// polynomial and `2 r·v / c²` only (its `satpos` notes: the clock "does not include
+    /// code bias correction (tgd or bgd)"), and HAS SIS ICD 7.4 has the HAS code biases
+    /// replace the TGD. Moving the TGD therefore leaves the corrected clock bit for bit,
+    /// with the HAS correction zero and non-zero. The broadcast single-frequency group
+    /// delay, which moves by the shift, is the control.
+    #[test]
+    fn ssr_corrected_gps_clock_is_independent_of_lnav_tgd() {
+        let broadcast = g30_g31_broadcast();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let shift_s = 2.5e-8;
+        let shifted = with_group_delay_shift(&broadcast, sat, shift_s);
+        let record = broadcast
+            .select_record_at(sat, t)
+            .expect("broadcast record");
+        let shifted_record = shifted.select_record_at(sat, t).expect("shifted record");
+        assert_eq!(
+            record.broadcast_clock_group_delay_s().to_bits(),
+            4.190_951_585_770e-9_f64.to_bits()
+        );
+        assert!(
+            (shifted_record.broadcast_clock_group_delay_s()
+                - record.broadcast_clock_group_delay_s()
+                - shift_s)
+                .abs()
+                < 1.0e-18
+        );
+        // Control: the shift reaches the single-frequency group delay, and the broadcast
+        // state clock, which is RTKLIB's `satposs` clock without it, stays as it was.
+        let plain = broadcast
+            .position_clock_at_j2000_s(sat, t)
+            .expect("state")
+            .1;
+        let plain_shifted = shifted.position_clock_at_j2000_s(sat, t).expect("state").1;
+        assert_eq!(plain.to_bits(), plain_shifted.to_bits());
+        let group_delay = broadcast
+            .single_frequency_group_delay_s(sat, t)
+            .expect("group delay");
+        let group_delay_shifted = shifted
+            .single_frequency_group_delay_s(sat, t)
+            .expect("group delay");
+        assert!(((group_delay_shifted - group_delay) - shift_s).abs() < 1.0e-18);
+
+        let reception = GnssWeekTow::new(TimeScale::Gst, REAL_SSR_WEEK, REAL_SSR_EPOCH_TOW_S)
+            .expect("GST reception");
+        let iode = record.issue_of_data.issue;
+        let stores = [
+            ("RTCM SSR", real_gps_ssr_store()),
+            ("RTCM SSR zero C0", rtcm_g30_store(iode, 0)),
+            (
+                "HAS zero DCC",
+                has_orbit_clock_store(sat, iode, 0, 0.0, reception),
+            ),
+            (
+                "HAS DCC",
+                has_orbit_clock_store(sat, iode, 0, -0.75, reception),
+            ),
+        ];
+        for (label, store) in &stores {
+            let clock = SsrCorrectedEphemeris::new(&broadcast, store)
+                .corrected_state(sat, t)
+                .unwrap_or_else(|| panic!("{label} corrected state"))
+                .1;
+            let clock_shifted = SsrCorrectedEphemeris::new(&shifted, store)
+                .corrected_state(sat, t)
+                .unwrap_or_else(|| panic!("{label} corrected state, shifted TGD"))
+                .1;
+            assert_eq!(clock.to_bits(), clock_shifted.to_bits(), "{label}");
+            let dclock_m = store.clock(sat).expect("stored clock").c0_m;
+            assert_eq!(
+                clock.to_bits(),
+                satpos_ssr_clock_s(&broadcast, sat, REAL_SSR_EPOCH_TOW_S, dclock_m).to_bits(),
+                "{label}"
+            );
+            // The single-frequency group delay, RTCM SSR and HAS alike, is the TGD of the
+            // record the orbit correction's IODE selects, as RTKLIB `pntpos` applies it,
+            // returned with the state from one evaluation.
+            let source = SsrCorrectedEphemeris::new(&shifted, store);
+            let (_, combined_clock, combined_delay) = source
+                .corrected_state_with_group_delay(sat, t)
+                .expect("state with group delay");
+            assert_eq!(combined_clock.to_bits(), clock_shifted.to_bits(), "{label}");
+            assert_eq!(
+                combined_delay.map(f64::to_bits),
+                Some(shifted_record.broadcast_clock_group_delay_s().to_bits()),
+                "{label}"
+            );
+            assert_eq!(
+                source
+                    .single_frequency_group_delay_s(sat, t)
+                    .map(f64::to_bits),
+                combined_delay.map(f64::to_bits),
+                "{label}"
+            );
+        }
+    }
+
+    /// The metamorphic check for Galileo HAS on an I/NAV record: moving both BGDs leaves
+    /// the HAS-corrected clock bit for bit, and it is HAS SIS ICD Eq. 23 and 24 as RTKLIB
+    /// `satpos_ssr` forms them, with no BGD. The I/NAV single-frequency group delay, BGD
+    /// E5b/E1, moves by the shift.
+    #[test]
+    fn has_corrected_galileo_clock_is_independent_of_inav_bgd() {
+        let nav_text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx"
+        ))
+        .expect("read NAV fixture");
+        let broadcast = BroadcastEphemeris::from_nav(&nav_text).expect("parse NAV fixture");
+        let sat = GnssSatelliteId::new(GnssSystem::Galileo, 1).unwrap();
+        // 2020-06-25 12:01:00 GST: one minute after the I/NAV record's toe (388800 s).
+        let week = 2111_u32;
+        let tow_s = 388_860.0;
+        let t = f64::from(week) * SECONDS_PER_WEEK + tow_s - GPS_EPOCH_TO_J2000_S;
+        let record = broadcast.select_record_at(sat, t).expect("I/NAV record");
+        assert_eq!(record.message, NavMessage::GalileoInav);
+        assert_eq!(record.clock.toc_sow.to_bits(), 388_800.0_f64.to_bits());
+        let shift_s = -3.0e-9;
+        let shifted = with_group_delay_shift(&broadcast, sat, shift_s);
+        // Control: the shift reaches the single-frequency group delay, and the broadcast
+        // state clock, which is RTKLIB's `satposs` clock without it, stays as it was.
+        let plain = broadcast
+            .position_clock_at_j2000_s(sat, t)
+            .expect("state")
+            .1;
+        let plain_shifted = shifted.position_clock_at_j2000_s(sat, t).expect("state").1;
+        assert_eq!(plain.to_bits(), plain_shifted.to_bits());
+        let group_delay = broadcast
+            .single_frequency_group_delay_s(sat, t)
+            .expect("group delay");
+        let group_delay_shifted = shifted
+            .single_frequency_group_delay_s(sat, t)
+            .expect("group delay");
+        assert!(((group_delay_shifted - group_delay) - shift_s).abs() < 1.0e-18);
+
+        let reception = GnssWeekTow::new(TimeScale::Gst, week, tow_s).expect("GST reception");
+        for clock_m in [0.0, 0.5] {
+            let store =
+                has_orbit_clock_store(sat, record.issue_of_data.issue, 0, clock_m, reception);
+            let clock = SsrCorrectedEphemeris::new(&broadcast, &store)
+                .corrected_state(sat, t)
+                .expect("HAS corrected state")
+                .1;
+            let clock_shifted = SsrCorrectedEphemeris::new(&shifted, &store)
+                .corrected_state(sat, t)
+                .expect("HAS corrected state, shifted BGD")
+                .1;
+            assert_eq!(clock.to_bits(), clock_shifted.to_bits(), "DCC {clock_m} m");
+
+            let tk = tow_s - record.clock.toc_sow;
+            let mut expected =
+                record.clock.af0 + record.clock.af1 * tk + record.clock.af2 * tk * tk;
+            let r = broadcast
+                .position_clock_at_j2000_s(sat, t)
+                .expect("state")
+                .0;
+            let v = finite_difference_broadcast_velocity(&broadcast, sat, t);
+            expected -= 2.0 * dot3(r, v) / C_M_S / C_M_S;
+            expected += store.clock(sat).expect("stored HAS clock").c0_m / C_M_S;
+            assert_eq!(clock.to_bits(), expected.to_bits(), "DCC {clock_m} m");
+        }
+    }
+
+    /// HAS SIS ICD Table 21 reserves navigation-message indices 1..=7. A correction
+    /// for one is decoded, kept with its index and stored, and the corrected source does
+    /// not apply it to the LNAV record: it reports the reserved index and, where
+    /// allowed, falls back to the broadcast state as for a missing correction.
+    #[test]
+    fn has_reserved_navigation_message_is_kept_and_not_applied() {
+        let broadcast = g30_g31_broadcast();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let iode = broadcast
+            .select_record_at(sat, t)
+            .expect("broadcast record")
+            .issue_of_data
+            .issue;
+        let reception = GnssWeekTow::new(TimeScale::Gst, REAL_SSR_WEEK, REAL_SSR_EPOCH_TOW_S)
+            .expect("GST reception");
+
+        let usable = has_orbit_clock_store(sat, iode, 0, -0.75, reception);
+        assert_eq!(
+            usable.orbit(sat).expect("orbit").nav_message,
+            SsrNavigationMessage::Has(0)
+        );
+        assert!(SsrCorrectedEphemeris::new(&broadcast, &usable)
+            .applied_orbit_clock_status(sat, t)
+            .is_ok());
+
+        for index in 1..=7_u8 {
+            let store = has_orbit_clock_store(sat, iode, index, -0.75, reception);
+            let orbit = store.orbit(sat).expect("reserved-index orbit is stored");
+            let clock = store.clock(sat).expect("reserved-index clock is stored");
+            assert_eq!(orbit.nav_message, SsrNavigationMessage::Has(index));
+            assert_eq!(clock.nav_message, SsrNavigationMessage::Has(index));
+            assert_eq!(orbit.nav_message.reserved_has_index(), Some(index));
+            assert_eq!(orbit.iode, iode);
+            assert!((clock.c0_m + 0.75).abs() < 1.0e-12);
+
+            let declining = SsrCorrectedEphemeris::new(&broadcast, &store);
+            assert_eq!(
+                declining.applied_orbit_clock_status(sat, t),
+                Err(SsrStateUnavailable::ReservedNavigationMessage { index })
+            );
+            assert_eq!(declining.applied_orbit_clock_solution(sat, t), None);
+            assert_eq!(declining.corrected_state(sat, t), None);
+            assert_eq!(declining.corrected_velocity(sat, t), None);
+
+            let fallback =
+                SsrCorrectedEphemeris::new(&broadcast, &store).with_fallback(SsrFallbackPolicy {
+                    on_missing_correction: MissingCorrectionAction::FallBackToBroadcast,
+                    regional: RegionalPolicy::DeclineRegional,
+                });
+            let (position, clock_s) = fallback.corrected_state(sat, t).expect("fallback");
+            let (broadcast_position, broadcast_clock) = broadcast
+                .position_clock_at_j2000_s(sat, t)
+                .expect("broadcast state");
+            assert_eq!(
+                position.map(f64::to_bits),
+                broadcast_position.map(f64::to_bits)
+            );
+            assert_eq!(clock_s.to_bits(), broadcast_clock.to_bits());
+        }
+    }
+
+    /// The navigation-message index is a mask field. A record holding an index its
+    /// mask does not state, or one wider than the 3-bit field, cannot be transmitted:
+    /// the encoder and the HAS ingest refuse it by name and leave the store unchanged.
+    #[test]
+    fn has_record_navigation_message_must_be_the_mask_index() {
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let reception = GnssWeekTow::new(TimeScale::Gst, REAL_SSR_WEEK, REAL_SSR_EPOCH_TOW_S)
+            .expect("GST reception");
+        let store = has_orbit_clock_store(sat, 90, 0, -0.75, reception);
+        let good = HasMt1Message::decode(
+            &HasMt1Message {
+                header: HasMt1Header {
+                    toh_s: (REAL_SSR_EPOCH_TOW_S as u32 % 3600) as u16,
+                    mask: true,
+                    orbit: true,
+                    clock_full_set: false,
+                    clock_subset: false,
+                    code_bias: false,
+                    phase_bias: false,
+                    reserved: 0,
+                    mask_id: 2,
+                    iod_set_id: 6,
+                },
+                mask: Some(HasMaskBlock {
+                    systems: vec![HasGnssMask {
+                        system: GnssSystem::Gps,
+                        satellites: vec![sat.prn],
+                        signals: vec![0],
+                        cell_mask: None,
+                        nav_message: 0,
+                    }],
+                    reserved: 0,
+                }),
+                orbit: Some(HasOrbitBlock {
+                    validity_interval: 5,
+                    records: vec![HasOrbitCorrection {
+                        sat,
+                        nav_message: 0,
+                        iode: 90,
+                        radial_m: Some(0.5),
+                        along_m: Some(0.5),
+                        cross_m: Some(0.5),
+                    }],
+                }),
+                clock_full_set: None,
+                clock_subset: None,
+                code_bias: None,
+                phase_bias: None,
+                padding_bits: Vec::new(),
+            }
+            .encode()
+            .expect("encode HAS MT1"),
+        )
+        .expect("decode HAS MT1");
+
+        let mut mismatched = good.clone();
+        mismatched.orbit.as_mut().expect("orbit block").records[0].nav_message = 2;
+        let error = mismatched
+            .encode()
+            .expect_err("record index differs from mask");
+        assert!(
+            error.to_string().contains("navigation message index 2"),
+            "{error}"
+        );
+        let mut refused = store.clone();
+        let error = refused
+            .ingest_has_mt1(&mismatched, reception)
+            .expect_err("record index differs from mask");
+        assert!(error.to_string().contains("mask states 0"), "{error}");
+        assert_eq!(refused, store);
+
+        let mut too_wide = good;
+        too_wide.mask = None;
+        too_wide.header.mask = false;
+        too_wide.orbit.as_mut().expect("orbit block").records[0].nav_message = 8;
+        let mut refused = store.clone();
+        let error = refused
+            .ingest_has_mt1(&too_wide, reception)
+            .expect_err("index wider than NM");
+        assert!(error.to_string().contains("3-bit NM field"), "{error}");
+        assert_eq!(refused, store);
+    }
+
+    /// The seconds of week an SSR state is evaluated at hold every bit of the J2000
+    /// epoch. One ulp past a whole second (2^-23 s near 8.3e8 s) is lost when
+    /// `GPS_EPOCH_TO_J2000_S` is added first: the sum, near 1.47e9 s, has 2^-22 s
+    /// spacing and rounds the half-way case to the whole second.
+    #[test]
+    fn ssr_seconds_of_week_keep_every_bit_of_the_epoch() {
+        let whole = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let t = f64::from_bits(whole.to_bits() + 1);
+        let ulp = t - whole;
+        assert_eq!(ulp.to_bits(), 2.0_f64.powi(-23).to_bits());
+        let gps = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let (sow, is_geo) = ssr_seconds_of_week(gps, t).expect("GPS seconds of week");
+        assert!(!is_geo);
+        assert_eq!(sow.to_bits(), (REAL_SSR_EPOCH_TOW_S + ulp).to_bits());
+        let rounded = (t + GPS_EPOCH_TO_J2000_S).rem_euclid(SECONDS_PER_WEEK);
+        assert_eq!(rounded.to_bits(), REAL_SSR_EPOCH_TOW_S.to_bits());
+
+        let qzss = GnssSatelliteId::new(GnssSystem::Qzss, 2).unwrap();
+        assert_eq!(ssr_seconds_of_week(qzss, t), Some((sow, false)));
+        let beidou = GnssSatelliteId::new(GnssSystem::BeiDou, 30).unwrap();
+        let (bdt_sow, _) = ssr_seconds_of_week(beidou, t).expect("BDT seconds of week");
+        assert_eq!(
+            bdt_sow.to_bits(),
+            (REAL_SSR_EPOCH_TOW_S - 14.0 + ulp).to_bits()
+        );
+        let beidou_geo = GnssSatelliteId::new(GnssSystem::BeiDou, 3).unwrap();
+        assert_eq!(
+            ssr_seconds_of_week(beidou_geo, t).map(|(_, geo)| geo),
+            Some(true)
+        );
+        let glonass = GnssSatelliteId::new(GnssSystem::Glonass, 3).unwrap();
+        assert_eq!(ssr_seconds_of_week(glonass, t), None);
+
+        // Week wrap: 1 s before the J2000 epoch's week ends.
+        let end_of_week = SECONDS_PER_WEEK - crate::rinex_nav::J2000_GPS_SECONDS_OF_WEEK - 1.0;
+        assert_eq!(
+            ssr_seconds_of_week(gps, end_of_week),
+            Some((SECONDS_PER_WEEK - 1.0, false))
+        );
+        assert_eq!(
+            ssr_seconds_of_week(gps, end_of_week + 1.0),
+            Some((0.0, false))
+        );
+        assert_eq!(
+            ssr_seconds_of_week(beidou, end_of_week + 1.0),
+            Some((SECONDS_PER_WEEK - 14.0, false))
+        );
+    }
+
+    /// RTKLIB `ephpos` moves its `gtime_t` 1 ms with `timeadd`, which adds the step to
+    /// the fraction of a second, and `eph2pos` takes `tk` as the whole seconds plus that
+    /// fraction. For `tk = 1.6245591041273448 s` that rounds to 1.625559104127345 s,
+    /// where adding 1 ms to `tk` itself rounds to 1.6255591041273447 s.
+    #[test]
+    fn ephpos_step_rounds_as_rtklib_timeadd() {
+        let tk = 1.624_559_104_127_344_8;
+        assert_eq!(
+            ephpos_stepped_tk(tk).to_bits(),
+            1.625_559_104_127_345_f64.to_bits()
+        );
+        assert_ne!(
+            ephpos_stepped_tk(tk).to_bits(),
+            (tk + EPHPOS_STEP_S).to_bits()
+        );
+        // A whole-second `tk` rounds once either way.
+        assert_eq!(
+            ephpos_stepped_tk(-630.0).to_bits(),
+            (-630.0 + EPHPOS_STEP_S).to_bits()
+        );
+        // A fraction that carries into the next second: -0.0005 s is -1 s plus
+        // 0.9995 s, the step makes the fraction 1.0005 s, `timeadd` carries the whole
+        // second, and 0.0005 s is left as 1.0005 - 1 rounded.
+        assert_eq!(
+            ephpos_stepped_tk(-0.0005).to_bits(),
+            0.000_499_999_999_999_944_9_f64.to_bits()
+        );
+    }
+
+    /// GLONASS SSR corrections apply as RTKLIB `satpos_ssr` applies them: to the record
+    /// whose `tb` the correction's IODE names (`selgeph`), with that record's `geph2pos`
+    /// position, its 1 ms forward-difference velocity for the radial, along-track and
+    /// cross-track axes, and its clock `-TauN + GammaN·tk` with no relativistic term, plus
+    /// the clock correction over c. A correction naming a `tb` 12 h away matches no record.
+    #[test]
+    fn glonass_ssr_applies_to_the_tb_record_as_satpos_ssr() {
+        let nav_text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_RN.rnx"
+        ))
+        .expect("read GLONASS NAV fixture");
+        let broadcast = BroadcastEphemeris::from_nav(&nav_text).expect("parse GLONASS NAV");
+        let rec = broadcast.glonass_records()[0];
+        let sat = rec.satellite_id;
+        let leap_s = 18.0; // GPS - UTC in 2020, as the fixture header states
+        let toe_gpst = rec.toe_utc_j2000_s + leap_s;
+        let t = toe_gpst + 60.0;
+        let tk = t - toe_gpst;
+        // tb: the 15-min index of the reference epoch in UTC + 3 h (RTKLIB `readrnx`).
+        let toe_utc_tod = (rec.toe_utc_j2000_s + 43_200.0).rem_euclid(86_400.0);
+        let tb = ((toe_utc_tod + 10_800.0).rem_euclid(86_400.0) / 900.0 + 0.5) as u32;
+
+        let t_gps = t + GPS_EPOCH_TO_J2000_S;
+        let week = (t_gps / SECONDS_PER_WEEK).floor();
+        let receiver = GnssWeekTow::new(
+            TimeScale::Gpst,
+            week as u32,
+            t_gps - week * SECONDS_PER_WEEK,
+        )
+        .expect("receiver week");
+        let glonass_tod =
+            ((t - leap_s + 43_200.0).rem_euclid(86_400.0) + 10_800.0).rem_euclid(86_400.0) as u32;
+        let store_for = |iode: u32| {
+            let message = SsrMessage {
+                message_number: 1066,
+                system: GnssSystem::Glonass,
+                kind: SsrKind::CombinedOrbitClock,
+                header: SsrHeader {
+                    epoch_time_s: glonass_tod,
+                    update_interval: 0,
+                    multiple_message: false,
+                    iod_ssr: 2,
+                    provider_id: 7,
+                    solution_id: 1,
+                    satellite_reference_datum: Some(false),
+                    dispersive_bias_consistency: None,
+                    mw_consistency: None,
+                    satellite_count: 1,
+                },
+                orbit: vec![SsrOrbitRecord {
+                    satellite_id: sat.prn,
+                    iode,
+                    delta_radial: -20_000,
+                    delta_along: 10_000,
+                    delta_cross: -3_000,
+                    dot_delta_radial: 0,
+                    dot_delta_along: 0,
+                    dot_delta_cross: 0,
+                }],
+                clock: vec![SsrClockRecord {
+                    satellite_id: sat.prn,
+                    c0: 5_000,
+                    c1: 0,
+                    c2: 0,
+                }],
+                code_bias: Vec::new(),
+                phase_bias: Vec::<SsrPhaseBiasRecord>::new(),
+                ura: Vec::new(),
+                padding_bits: Vec::new(),
+            };
+            let mut store = SsrCorrectionStore::new();
+            store
+                .ingest_ssr(&message, receiver)
+                .expect("ingest GLONASS SSR");
+            store
+        };
+
+        let store = store_for(tb);
+        let orbit = store.orbit(sat).expect("GLONASS orbit correction");
+        assert_eq!(orbit.transmitted_epoch_j2000_s.to_bits(), t.to_bits());
+        let source = SsrCorrectedEphemeris::new(&broadcast, &store);
+        assert!(source.applied_orbit_clock_status(sat, t).is_ok());
+        let (position, clock, group_delay) = source
+            .corrected_state_with_group_delay(sat, t)
+            .expect("GLONASS SSR state");
+        assert_eq!(group_delay, None);
+
+        let state0 = [
+            rec.pos_m[0],
+            rec.pos_m[1],
+            rec.pos_m[2],
+            rec.vel_m_s[0],
+            rec.vel_m_s[1],
+            rec.vel_m_s[2],
+        ];
+        let start = crate::glonass::propagate(state0, rec.acc_m_s2, tk).expect("propagate");
+        let end = crate::glonass::propagate(state0, rec.acc_m_s2, ephpos_stepped_tk(tk))
+            .expect("propagate 1 ms later");
+        let r = [start[0], start[1], start[2]];
+        let v = [
+            (end[0] - start[0]) / EPHPOS_STEP_S,
+            (end[1] - start[1]) / EPHPOS_STEP_S,
+            (end[2] - start[2]) / EPHPOS_STEP_S,
+        ];
+        let (er, ea, ec) = velocity_aligned_basis(r, v).expect("RAC axes");
+        let (radial, along, cross) = (orbit.radial_m, orbit.along_m, orbit.cross_m);
+        let expected_position = [
+            r[0] + radial * er[0] + along * ea[0] + cross * ec[0],
+            r[1] + radial * er[1] + along * ea[1] + cross * ec[1],
+            r[2] + radial * er[2] + along * ea[2] + cross * ec[2],
+        ];
+        assert_eq!(
+            position.map(f64::to_bits),
+            expected_position.map(f64::to_bits)
+        );
+        let c0_m = store.clock(sat).expect("GLONASS clock correction").c0_m;
+        let mut expected_clock = rec.clk_bias + rec.gamma_n * tk;
+        expected_clock += c0_m / C_M_S;
+        assert_eq!(clock.to_bits(), expected_clock.to_bits());
+
+        let other = store_for((tb + 48) % 96);
+        assert_eq!(
+            SsrCorrectedEphemeris::new(&broadcast, &other).applied_orbit_clock_status(sat, t),
+            Err(SsrStateUnavailable::NoMatchingBroadcastRecord {
+                iode: (tb + 48) % 96
+            })
+        );
+    }
+
+    /// A BeiDou SSR orbit correction names its record by the IOD `mod(toe/720, 240)` of IGS
+    /// SSR v1.00 (IDF012), in the low eight bits of the transmitted issue; real SSRA03IGS0
+    /// 1261 frames stamped 223656 s carry 70 for every satellite, `mod(223200/720, 240)`
+    /// for the hourly BDT `toe` 223200 s, and 0 in the upper ten bits. The record's AODE
+    /// does not name it.
+    #[test]
+    fn beidou_ssr_matches_the_record_by_toe_iod() {
+        let recs = crate::rinex_nav::parse_nav(
+            &std::fs::read_to_string(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/nav/ESBC00DNK_R_20201770000_01D_MN.rnx"
+            ))
+            .expect("read NAV fixture"),
+        )
+        .expect("parse NAV fixture");
+        let record = *recs
+            .iter()
+            .find(|r| {
+                r.satellite_id.system == GnssSystem::BeiDou
+                    && !is_beidou_geo(r.satellite_id)
+                    && r.message == NavMessage::BeidouD1
+                    && r.elements.toe_sow.fract() == 0.0
+            })
+            .expect("BeiDou D1 record");
+        let broadcast = BroadcastEphemeris::new(vec![record]).expect("store");
+        let sat = record.satellite_id;
+        let iod = (record.elements.toe_sow as u32 / 720) % 240;
+        let t = f64::from(record.toe.week) * SECONDS_PER_WEEK
+            + record.toe.tow_s
+            + crate::constants::BDS_EPOCH_MINUS_GPS_EPOCH_S
+            + crate::constants::GPST_MINUS_BDT_S
+            - GPS_EPOCH_TO_J2000_S
+            + 30.0;
+        let found = broadcast
+            .select_by_beidou_ssr_iod_at(sat, iod, NavMessage::BeidouD1, t)
+            .expect("record by toe IOD");
+        assert_eq!(found.issue_of_data, record.issue_of_data);
+        assert!(broadcast
+            .select_by_beidou_ssr_iod_at(sat, (iod + 1) % 240, NavMessage::BeidouD1, t)
+            .is_none());
+        if record.issue_of_data.issue != iod {
+            // The AODE is not the SSR IOD: selecting by it finds nothing.
+            assert!(broadcast
+                .select_by_beidou_ssr_iod_at(
+                    sat,
+                    record.issue_of_data.issue,
+                    NavMessage::BeidouD1,
+                    t
+                )
+                .is_none());
+        }
     }
 }

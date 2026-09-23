@@ -186,6 +186,7 @@ fn pseudorange_inputs(
         glonass_channels: Default::default(),
         met: SurfaceMet::default(),
         robust: None,
+        pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
     }
 }
 
@@ -399,6 +400,7 @@ fn esbc_solve_inputs(obs: &RinexObs, epoch: &ObsEpoch) -> SolveInputs {
         glonass_channels: Default::default(),
         met: SurfaceMet::default(),
         robust: None,
+        pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
     }
 }
 
