@@ -62,6 +62,8 @@ pub enum Error {
     /// products to merge, or products on mismatched time scales, epoch grids, or
     /// coordinate-system labels).
     InvalidInput(String),
+    /// An SBAS block holds a value the SBAS wire form cannot carry as held.
+    SbasEncode(Box<crate::sbas::SbasEncodeError>),
 }
 
 impl fmt::Display for Error {
@@ -98,6 +100,7 @@ impl fmt::Display for Error {
             }
             Error::EpochOutOfRange => write!(f, "epoch out of range"),
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
+            Error::SbasEncode(error) => write!(f, "SBAS encode error: {error}"),
         }
     }
 }

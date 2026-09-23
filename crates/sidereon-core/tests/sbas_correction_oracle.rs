@@ -86,20 +86,23 @@ fn fast_and_long_term_corrections_apply_with_expected_signs() {
     let half = SbasLongTermHalf {
         velocity_code: false,
         iodp: 1,
-        records: vec![SbasLongTermRecord {
-            monitored_index: 1,
-            iode: 7,
-            delta_x: 8,
-            delta_y: 16,
-            delta_z: 24,
-            delta_x_rate: 0,
-            delta_y_rate: 0,
-            delta_z_rate: 0,
-            delta_a_f0: 0,
-            delta_a_f1: 0,
-            time_of_day_s: None,
-        }],
-        reserved: SpareBits::new(),
+        records: vec![
+            SbasLongTermRecord {
+                monitored_index: 1,
+                iode: 7,
+                delta_x: 8,
+                delta_y: 16,
+                delta_z: 24,
+                delta_x_rate: 0,
+                delta_y_rate: 0,
+                delta_z_rate: 0,
+                delta_a_f0: 0,
+                delta_a_f1: 0,
+                time_of_day_s: None,
+            },
+            unused_record(),
+        ],
+        reserved: SpareBits(vec![(0, 1)]),
     };
     store
         .ingest(
@@ -110,8 +113,8 @@ fn fast_and_long_term_corrections_apply_with_expected_signs() {
                     SbasLongTermHalf {
                         velocity_code: false,
                         iodp: 0,
-                        records: Vec::new(),
-                        reserved: SpareBits::new(),
+                        records: vec![unused_record(), unused_record()],
+                        reserved: SpareBits(vec![(0, 1)]),
                     },
                 ],
             }),
@@ -131,4 +134,22 @@ fn fast_and_long_term_corrections_apply_with_expected_signs() {
         .expect("corrected state");
     assert_eq!(position, [11.0, 22.0, 33.0]);
     assert!((clock - (0.25 + 1.0 / C_M_S)).abs() < 1.0e-15);
+}
+
+/// A record slot a half without the velocity code leaves unused: mask index 0,
+/// every other field zero, as the wire carries it.
+fn unused_record() -> SbasLongTermRecord {
+    SbasLongTermRecord {
+        monitored_index: 0,
+        iode: 0,
+        delta_x: 0,
+        delta_y: 0,
+        delta_z: 0,
+        delta_x_rate: 0,
+        delta_y_rate: 0,
+        delta_z_rate: 0,
+        delta_a_f0: 0,
+        delta_a_f1: 0,
+        time_of_day_s: None,
+    }
 }

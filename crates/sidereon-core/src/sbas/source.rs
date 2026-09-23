@@ -60,8 +60,11 @@ pub enum SbasSolveMode {
 /// `corrected_state` rejects a disabled source GEO or withdrawn satellite. GPS
 /// states use fast and long-term corrections when both are fresh, or one
 /// correction when the store permits partial use. The selected GEO uses fresh
-/// GEO navigation plus its fast clock delta; other unresolved queries follow
-/// [`SbasSolveMode`].
+/// GEO navigation plus its fast clock delta; without a fresh fast correction
+/// it, like every other unresolved query, follows [`SbasSolveMode`]: the
+/// uncorrected navigation state under
+/// [`SbasSolveMode::MixedAugmentation`], no state under
+/// [`SbasSolveMode::SbasOnly`].
 pub struct SbasCorrectedEphemeris<'a> {
     broadcast: &'a dyn IssueAwareBroadcast,
     store: &'a SbasCorrectionStore,
@@ -122,8 +125,16 @@ impl<'a> SbasCorrectedEphemeris<'a> {
         if sat == self.geo {
             let geo_state = self.store.fresh_geo_nav(self.geo, t_j2000_s)?;
             let (position, clock) = geo_state.state_at(t_j2000_s);
-            let clock = clock + self.fast_clock_delta_s(sat, t_j2000_s).unwrap_or(0.0);
-            return Some((position, clock));
+            // Without a fresh fast correction the GEO's own navigation state
+            // is its broadcast state, used or refused as the mode says, like
+            // any other satellite without a correction.
+            return match self.fast_clock_delta_s(sat, t_j2000_s) {
+                Some(delta_s) => Some((position, clock + delta_s)),
+                None => match self.mode {
+                    SbasSolveMode::MixedAugmentation => Some((position, clock)),
+                    SbasSolveMode::SbasOnly => None,
+                },
+            };
         }
 
         let fast = self.store.fresh_fast(self.geo, sat, t_j2000_s);
@@ -185,7 +196,11 @@ impl<'a> SbasCorrectedEphemeris<'a> {
             return Some(Err(ObservablesError::NoEphemeris));
         }
         if sat == self.geo {
-            let Some(geo_state) = self.store.fresh_geo_nav(self.geo, t_j2000_s) else {
+            let Some(geo_state) = self
+                .store
+                .fresh_geo_nav(self.geo, t_j2000_s)
+                .filter(|_| self.corrected_state(sat, t_j2000_s).is_some())
+            else {
                 return Some(Err(ObservablesError::NoEphemeris));
             };
             // The step is added to the time from the navigation reference epoch, as
@@ -363,8 +378,8 @@ mod tests {
     use super::*;
     use crate::astro::time::model::{GnssWeekTow, TimeScale};
     use crate::sbas::message::{
-        SbasDoNotUse, SbasFastCorrections, SbasIgpDelay, SbasIgpMask, SbasIonoDelays, SbasMessage,
-        SbasPrnMask, SpareBits,
+        SbasDoNotUse, SbasFastCorrections, SbasGeoNav, SbasIgpDelay, SbasIgpMask, SbasIonoDelays,
+        SbasMessage, SbasPrnMask, SpareBits,
     };
     use crate::sbas::store::{sbas_prn_to_sat, SbasLongTermCorrection};
 
@@ -594,7 +609,7 @@ mod tests {
                     band_number: 0,
                     iodi: 1,
                     mask,
-                    reserved: SpareBits::new(),
+                    reserved: SpareBits(vec![(0, 4), (0, 1)]),
                 }),
                 geo,
                 epoch(1.0),
@@ -613,7 +628,7 @@ mod tests {
                     block_id: 0,
                     iodi: 1,
                     entries,
-                    reserved: SpareBits::new(),
+                    reserved: SpareBits(vec![(0, 7)]),
                 }),
                 geo,
                 epoch(2.0),
@@ -626,7 +641,7 @@ mod tests {
             .ingest(
                 &SbasMessage::DoNotUse(SbasDoNotUse {
                     preamble: 0x53,
-                    data: Vec::new(),
+                    data: vec![0; 27],
                 }),
                 geo,
                 epoch(3.0),
@@ -634,6 +649,54 @@ mod tests {
             .unwrap();
         let source = SbasCorrectedEphemeris::new(&broadcast, &store, geo);
         assert!(source.iono_grid().is_none());
+    }
+
+    /// A GEO without a fresh fast correction has only its broadcast
+    /// navigation state, which the mode decides on as for any other satellite,
+    /// rather than that state with a zero fast correction added.
+    #[test]
+    fn geo_without_fast_correction_follows_the_mode() {
+        let geo = sbas_prn_to_sat(120).unwrap();
+        let other = GnssSatelliteId::new(GnssSystem::Gps, 1).expect("valid GPS PRN");
+        let broadcast = StaticBroadcast {
+            sat: other,
+            state: ([1.0, 2.0, 3.0], 4.0),
+            iode: 7,
+        };
+        let mut store = SbasCorrectionStore::new();
+        store
+            .ingest(
+                &SbasMessage::GeoNav(SbasGeoNav {
+                    preamble: 0x9A,
+                    time_of_day_s: 1,
+                    ura: 0,
+                    x_m: 100,
+                    y_m: 200,
+                    z_m: 300,
+                    x_rate_m_s: 0,
+                    y_rate_m_s: 0,
+                    z_rate_m_s: 0,
+                    x_accel_m_s2: 0,
+                    y_accel_m_s2: 0,
+                    z_accel_m_s2: 0,
+                    a_gf0_s: 64,
+                    a_gf1_s_s: 0,
+                    reserved: SpareBits(vec![(0, 8)]),
+                }),
+                geo,
+                epoch(16.0),
+            )
+            .unwrap();
+        let t = epoch_to_j2000_s_for_test(epoch(16.0));
+        let expected = store.geo_nav(geo).expect("GEO nav").state_at(t);
+        let source = SbasCorrectedEphemeris::new(&broadcast, &store, geo);
+        assert_eq!(source.position_clock_at_j2000_s(geo, t), Some(expected));
+        let sbas_only = source.with_mode(SbasSolveMode::SbasOnly);
+        assert_eq!(sbas_only.position_clock_at_j2000_s(geo, t), None);
+        assert!(matches!(
+            sbas_only.velocity_at_j2000_s(geo, t),
+            Some(Err(ObservablesError::NoEphemeris))
+        ));
     }
 
     fn epoch_to_j2000_s_for_test(epoch: GnssWeekTow) -> f64 {

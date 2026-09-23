@@ -179,12 +179,12 @@ fn long_half(records: Vec<SbasLongTermRecord>) -> SbasLongTermHalf {
         velocity_code: false,
         iodp: 1,
         records,
-        reserved: SpareBits::new(),
+        reserved: SpareBits(vec![(0, 1)]),
     }
 }
 
 fn empty_long_half() -> SbasLongTermHalf {
-    long_half(Vec::new())
+    long_half(vec![long_record(0, [0; 3]), long_record(0, [0; 3])])
 }
 
 fn iono_grid(lon_deg: f64) -> SbasIonoGrid {
@@ -344,7 +344,8 @@ fn sbas_corrected_spp_with_geo_ranging_beats_uncorrected() {
             &SbasMessage::LongTermCorrections(SbasLongTermCorrections {
                 preamble: 0x9A,
                 halves: [
-                    long_half(vec![long_record(5, delta_raw[4])]),
+                    // Mask index 0 fills the unused record slot.
+                    long_half(vec![long_record(5, delta_raw[4]), long_record(0, [0; 3])]),
                     empty_long_half(),
                 ],
             }),
