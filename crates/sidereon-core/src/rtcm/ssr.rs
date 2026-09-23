@@ -316,7 +316,34 @@ impl SsrMessage {
     /// message's satellite field width: five bits for GLONASS, four for the
     /// native QZSS messages (1246..1251, 1268), six otherwise. Writing it would
     /// keep only its low bits and name another satellite.
+    ///
+    /// [`Error::InvalidInput`] when a combined orbit/clock message's orbit and
+    /// clock lists differ in length, or a clock record names a different
+    /// satellite from the orbit record at the same position. The frame writes
+    /// each clock right after its orbit under the orbit's satellite field, so
+    /// writing by position would drop the unpaired records or put one
+    /// satellite's clock on another's orbit.
     pub fn encode(&self) -> Result<Vec<u8>> {
+        if self.kind == SsrKind::CombinedOrbitClock {
+            if self.orbit.len() != self.clock.len() {
+                return Err(Error::InvalidInput(format!(
+                    "RTCM SSR {} combined orbit/clock message carries {} orbit records \
+                     and {} clock records; each satellite needs one of each",
+                    self.message_number,
+                    self.orbit.len(),
+                    self.clock.len()
+                )));
+            }
+            for (index, (orbit, clock)) in self.orbit.iter().zip(&self.clock).enumerate() {
+                if orbit.satellite_id != clock.satellite_id {
+                    return Err(Error::InvalidInput(format!(
+                        "RTCM SSR {} combined orbit/clock record {index} names satellite \
+                         id {} for its orbit and {} for its clock",
+                        self.message_number, orbit.satellite_id, clock.satellite_id
+                    )));
+                }
+            }
+        }
         let sat_bits = satellite_id_bits(self.system, self.message_number);
         let widest = (1u64 << sat_bits) - 1;
         if let Some(satellite_id) = self
@@ -1055,5 +1082,56 @@ mod tests {
             message.encode().unwrap()
         );
         assert_eq!(encode_frame(&message.encode().unwrap()).unwrap(), frame);
+    }
+
+    /// A combined orbit/clock frame writes each clock right after its orbit
+    /// under the orbit's satellite field. A clock naming another satellite,
+    /// or lists of different lengths, are refused by name rather than written
+    /// under the wrong satellite or dropped.
+    #[test]
+    fn combined_orbit_clock_encode_refuses_unpaired_records() {
+        let paired = message(1060, GnssSystem::Gps, SsrKind::CombinedOrbitClock);
+        paired.encode().expect("matched pair encodes");
+
+        let mut mismatched = paired.clone();
+        mismatched.clock[0].satellite_id = 4;
+        let err = mismatched
+            .encode()
+            .expect_err("clock satellite differs from orbit satellite");
+        assert!(matches!(err, Error::InvalidInput(_)), "{err}");
+        assert!(
+            err.to_string()
+                .contains("record 0 names satellite id 3 for its orbit and 4 for its clock"),
+            "{err}"
+        );
+
+        let mut extra_orbit = paired.clone();
+        extra_orbit.orbit.push(SsrOrbitRecord {
+            satellite_id: 5,
+            ..orbit_record(GnssSystem::Gps)
+        });
+        extra_orbit.header.satellite_count = 2;
+        let err = extra_orbit
+            .encode()
+            .expect_err("unequal orbit and clock record counts");
+        assert!(
+            err.to_string()
+                .contains("2 orbit records and 1 clock records"),
+            "{err}"
+        );
+
+        let mut extra_clock = paired;
+        extra_clock.clock.push(SsrClockRecord {
+            satellite_id: 5,
+            ..clock_record()
+        });
+        let err = extra_clock
+            .encode()
+            .expect_err("unequal orbit and clock record counts");
+        assert!(
+            err.to_string()
+                .contains("1 orbit records and 2 clock records"),
+            "{err}"
+        );
     }
 }
