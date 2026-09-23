@@ -231,6 +231,7 @@ mod tests {
             let v = TimeScales::from_utc_validated(2000, 1, 1, 12, 0, 0.0, mode)
                 .expect("in-coverage instant must not error in either mode");
             assert_eq!(v.degraded, None, "in-coverage must not be degraded");
+            assert_eq!(v.value.ut1_degraded, None);
             // The numerics must be the EXACT same bits as the parity path.
             assert_eq!(
                 v.value, plain,
@@ -261,7 +262,7 @@ mod tests {
     #[test]
     fn from_utc_validated_strict_errors_after_coverage() {
         let prov = scales::ut1_coverage();
-        // The UT1 table ends at MJD 61239 (~2026); pick an instant safely after.
+        // The UT1 table ends at MJD 61589 (2027-07); pick an instant safely after.
         let (y, m, d) = (2100, 1, 1);
         let plain = TimeScales::from_utc(y, m, d, 0, 0, 0.0).expect("valid UTC instant");
         assert!(
@@ -278,21 +279,56 @@ mod tests {
     }
 
     #[test]
-    fn from_utc_validated_permissive_clamps_and_marks_degraded() {
-        // Before coverage: permissive returns the clamped value, marked degraded,
-        // and the clamped numerics equal the parity path exactly.
+    fn from_utc_validated_permissive_returns_the_long_term_value_and_marks_it() {
+        // Before coverage: permissive returns the long-term delta-T value,
+        // marked degraded, and the numerics equal the plain path exactly.
         let plain_before = TimeScales::from_utc(1960, 1, 1, 0, 0, 0.0).expect("valid UTC instant");
         let before =
             TimeScales::from_utc_validated(1960, 1, 1, 0, 0, 0.0, ValidityMode::Permissive)
                 .expect("permissive must not error");
         assert_eq!(before.degraded, Some(DegradeReason::BeforeCoverage));
+        assert_eq!(
+            before.value.ut1_degraded,
+            Some(DegradeReason::BeforeCoverage)
+        );
         assert_eq!(before.value, plain_before);
 
-        // After coverage: permissive returns the clamped value, marked degraded.
+        // After coverage: permissive returns the long-term value, marked degraded.
         let plain_after = TimeScales::from_utc(2100, 1, 1, 0, 0, 0.0).expect("valid UTC instant");
         let after = TimeScales::from_utc_validated(2100, 1, 1, 0, 0, 0.0, ValidityMode::Permissive)
             .expect("permissive must not error");
         assert_eq!(after.degraded, Some(DegradeReason::AfterCoverage));
+        assert_eq!(after.value.ut1_degraded, Some(DegradeReason::AfterCoverage));
         assert_eq!(after.value, plain_after);
+    }
+
+    #[test]
+    fn embedded_from_utc_reports_ut1_outside_the_table() {
+        let inside = TimeScales::from_utc(2000, 1, 1, 12, 0, 0.0).expect("valid UTC instant");
+        assert_eq!(inside.ut1_degraded, None);
+
+        let before = TimeScales::from_utc(1960, 1, 1, 0, 0, 0.0).expect("valid UTC instant");
+        assert_eq!(before.ut1_degraded, Some(DegradeReason::BeforeCoverage));
+
+        let after = TimeScales::from_utc(2100, 1, 1, 0, 0, 0.0).expect("valid UTC instant");
+        assert_eq!(after.ut1_degraded, Some(DegradeReason::AfterCoverage));
+
+        let after_gps =
+            TimeScales::from_scale(TimeScale::Gpst, 2100, 1, 1, 0, 0, 0.0).expect("valid GPST");
+        assert_eq!(after_gps.ut1_degraded, Some(DegradeReason::AfterCoverage));
+    }
+
+    #[test]
+    fn validated_default_mode_refuses_outside_ut1_coverage() {
+        let err = TimeScales::from_utc_validated(2100, 1, 1, 0, 0, 0.0, ValidityMode::default())
+            .expect_err("the default validity mode must refuse UT1 outside the table");
+        assert_eq!(
+            err,
+            CoverageError::OutsideCoverage(DegradeReason::AfterCoverage)
+        );
+        let inside =
+            TimeScales::from_utc_validated(2000, 1, 1, 12, 0, 0.0, ValidityMode::default())
+                .expect("in-coverage instant");
+        assert_eq!(inside.degraded, None);
     }
 }

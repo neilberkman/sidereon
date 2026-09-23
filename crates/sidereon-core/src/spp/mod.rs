@@ -74,7 +74,8 @@ pub use fallback::{
     SourcedSolution,
 };
 use source::TransmitStateMemo;
-pub use source::{ClockRelativity, EphemerisSource};
+pub use source::{ClockRelativity, EphemerisSource, PositionClock, PositionClockGroupDelay};
+pub(crate) use source::{Ut1Tracked, Ut1TrackedSource};
 
 pub use crate::constants::{C_M_S, F_L1_HZ, OMEGA_E_DOT_RAD_S};
 use crate::dop::{dop, dop_multi, Dop, LineOfSight, PositionCovariance};
@@ -261,6 +262,12 @@ pub struct SolutionMetadata {
     pub redundancy: isize,
     /// Whether residual-based RAIM can test the final solve (`redundancy >= 1`).
     pub raim_checkable: bool,
+    /// The first UT1 departure the ephemeris source accepted while producing
+    /// a satellite state for this solve, under a permissive UT1 policy (for
+    /// example an SSR source's centre-of-mass to antenna-phase-centre
+    /// conversion outside the UT1 table). `None` when every state was
+    /// produced inside UT1 coverage or did not read UT1.
+    pub ut1_degraded: Option<crate::astro::time::DegradeReason>,
 }
 
 /// A receiver position/clock solution with its geometry diagnostics.
@@ -672,6 +679,10 @@ pub enum SppError {
         /// The satellite whose ephemeris became unavailable during the solve.
         satellite: GnssSatelliteId,
     },
+    /// The ephemeris source refused a satellite state because producing it
+    /// reads UT1 outside the UT1 table under a strict UT1 policy. The solve
+    /// fails rather than dropping that satellite.
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl core::fmt::Display for SppError {
@@ -691,6 +702,12 @@ impl core::fmt::Display for SppError {
             }
             SppError::EphemerisLost { satellite } => {
                 write!(f, "satellite {satellite} lost ephemeris during the solve")
+            }
+            SppError::Ut1OutsideCoverage(reason) => {
+                write!(
+                    f,
+                    "the ephemeris source refused a satellite state: {reason}"
+                )
             }
         }
     }
@@ -1445,7 +1462,29 @@ pub fn solve_with_solver(
     )
 }
 
+/// [`solve_tracked`] reading `eph` through a [`Ut1TrackedSource`]: a UT1
+/// refusal anywhere in the solve fails it with [`SppError::Ut1OutsideCoverage`]
+/// (taking precedence over the error or the reduced solution the missing state
+/// led to), and an accepted departure is reported in
+/// [`SolutionMetadata::ut1_degraded`].
 fn solve_inner(
+    eph: &dyn EphemerisSource,
+    inputs: &SolveInputs,
+    with_geodetic: bool,
+    model: SppModelRecipe,
+    linear_solve: TrustRegionSolve,
+) -> Result<ReceiverSolution, SppError> {
+    let tracked = Ut1TrackedSource::new(eph);
+    let result = solve_tracked(&tracked, inputs, with_geodetic, model, linear_solve);
+    if let Some(reason) = tracked.refusal() {
+        return Err(SppError::Ut1OutsideCoverage(reason));
+    }
+    let mut solution = result?;
+    solution.metadata.ut1_degraded = tracked.departure();
+    Ok(solution)
+}
+
+fn solve_tracked(
     eph: &dyn EphemerisSource,
     inputs: &SolveInputs,
     with_geodetic: bool,
@@ -1760,6 +1799,7 @@ fn solve_inner(
             systems,
             redundancy: metadata_redundancy,
             raim_checkable: metadata_redundancy >= 1,
+            ut1_degraded: None,
         },
     })
 }
@@ -1974,6 +2014,11 @@ fn solve_coarse(
             solver,
         ) {
             Ok(solution) => candidates.push(solution),
+            // A UT1 refusal is a property of the ephemeris source at this
+            // epoch, not of the seed, so no other seed can avoid it.
+            Err(error @ SolvePolicyError::Solve(SppError::Ut1OutsideCoverage(_))) => {
+                return Err(error)
+            }
             Err(error) => last_error = error,
         }
     }

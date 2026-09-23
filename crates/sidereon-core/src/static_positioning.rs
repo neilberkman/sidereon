@@ -50,7 +50,7 @@ use crate::spp::{
     clock_systems, residual_unweighted, select_sats, validate_solve_inputs, Corrections,
     EphemerisSource, GalileoNequickCoeffs, KlobucharCoeffs, Observation, PseudorangeCode,
     RejectedSat, RobustConfig, SolveInputs, SppError, SppInputErrorKind, SppModelRecipe,
-    SurfaceMet, C_M_S,
+    SurfaceMet, Ut1TrackedSource, C_M_S,
 };
 use crate::validate;
 
@@ -315,6 +315,10 @@ pub struct StaticSolutionMetadata {
     pub n_parameters: usize,
     /// Degrees of freedom, `used_measurements - n_parameters`.
     pub redundancy: isize,
+    /// The first UT1 departure the ephemeris source accepted while producing
+    /// a satellite state for this solve, under a permissive UT1 policy. `None`
+    /// when every state was produced inside UT1 coverage or did not read UT1.
+    pub ut1_degraded: Option<crate::astro::time::DegradeReason>,
 }
 
 /// Multi-epoch static receiver solution.
@@ -401,6 +405,10 @@ pub enum StaticSolveError {
     },
     /// The stacked design is rank deficient.
     Singular(least_squares::SolveError),
+    /// The ephemeris source refused a satellite state because producing it
+    /// reads UT1 outside the UT1 table under a strict UT1 policy. The solve
+    /// fails rather than dropping that satellite.
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl core::fmt::Display for StaticSolveError {
@@ -433,6 +441,12 @@ impl core::fmt::Display for StaticSolveError {
                 "static epoch {epoch_index} satellite {satellite} lost ephemeris during the solve"
             ),
             Self::Singular(error) => write!(f, "static geometry is singular: {error}"),
+            Self::Ut1OutsideCoverage(reason) => {
+                write!(
+                    f,
+                    "the ephemeris source refused a satellite state: {reason}"
+                )
+            }
         }
     }
 }
@@ -452,19 +466,30 @@ impl std::error::Error for StaticSolveError {
 /// The stacked state has one shared ECEF position and epoch-local receiver
 /// clocks. If an epoch contains several GNSS clock systems, that epoch gets one
 /// clock column per system, matching the single-epoch SPP clock model.
+///
+/// A satellite state the ephemeris source refuses because producing it reads
+/// UT1 outside the UT1 table under a strict UT1 policy fails the solve with
+/// [`StaticSolveError::Ut1OutsideCoverage`]; a departure accepted under a
+/// permissive policy is reported in [`StaticSolutionMetadata::ut1_degraded`].
 pub fn solve_static(
     eph: &dyn EphemerisSource,
     epochs: &[StaticEpoch],
     options: StaticSolveOptions,
 ) -> Result<StaticSolution, StaticSolveError> {
-    let core = solve_static_core(eph, epochs, options)?;
+    let tracked = Ut1TrackedSource::new(eph);
+    let core = solve_static_core(&tracked, epochs, options);
+    ut1_refusal(&tracked)?;
+    let core = core?;
     let (per_epoch_influence, per_satellite_influence, per_satellite_batch_influence) =
-        build_influence(eph, epochs, options, &core);
-    Ok(core.into_public(
+        build_influence(&tracked, epochs, options, &core);
+    ut1_refusal(&tracked)?;
+    let mut solution = core.into_public(
         per_epoch_influence,
         per_satellite_influence,
         per_satellite_batch_influence,
-    ))
+    );
+    solution.metadata.ut1_degraded = tracked.departure();
+    Ok(solution)
 }
 
 pub(crate) fn solve_static_without_influence(
@@ -472,8 +497,21 @@ pub(crate) fn solve_static_without_influence(
     epochs: &[StaticEpoch],
     options: StaticSolveOptions,
 ) -> Result<StaticSolution, StaticSolveError> {
-    let core = solve_static_core(eph, epochs, options)?;
-    Ok(core.into_public(Vec::new(), Vec::new(), Vec::new()))
+    let tracked = Ut1TrackedSource::new(eph);
+    let core = solve_static_core(&tracked, epochs, options);
+    ut1_refusal(&tracked)?;
+    let mut solution = core?.into_public(Vec::new(), Vec::new(), Vec::new());
+    solution.metadata.ut1_degraded = tracked.departure();
+    Ok(solution)
+}
+
+/// A UT1 refusal seen by `tracked` fails the solve, taking precedence over the
+/// error or the reduced solution the missing state led to.
+fn ut1_refusal(tracked: &Ut1TrackedSource<'_>) -> Result<(), StaticSolveError> {
+    match tracked.refusal() {
+        Some(reason) => Err(StaticSolveError::Ut1OutsideCoverage(reason)),
+        None => Ok(()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -891,6 +929,7 @@ fn finish_static(input: FinishStaticInput<'_>) -> Result<CoreStaticSolution, Sta
             used_measurements: prepared.rows.len(),
             n_parameters: prepared.n_params,
             redundancy,
+            ut1_degraded: None,
         },
     })
 }
@@ -1188,7 +1227,9 @@ fn influence_status(error: &StaticSolveError) -> StaticInfluenceStatus {
         StaticSolveError::InvalidInput { .. }
         | StaticSolveError::EpochInput { .. }
         | StaticSolveError::DuplicateObservation { .. } => StaticInfluenceStatus::InvalidInput,
-        StaticSolveError::EphemerisLost { .. } => StaticInfluenceStatus::EphemerisUnavailable,
+        StaticSolveError::EphemerisLost { .. } | StaticSolveError::Ut1OutsideCoverage(_) => {
+            StaticInfluenceStatus::EphemerisUnavailable
+        }
     }
 }
 

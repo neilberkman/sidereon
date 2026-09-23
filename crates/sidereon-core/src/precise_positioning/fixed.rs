@@ -112,14 +112,20 @@ pub(crate) fn run_fixed_from_float(
                 // once each after a fix.
                 let pass = next_pass(&float_solution, &solution.ssr_bias_exclusions)
                     .map_err(FixedSolveError::Float)?;
-                let holding = solution
+                let mut holding = Vec::new();
+                for key in solution
                     .ssr_bias_exclusions
                     .iter()
                     .filter(|exclusion| exclusion.transmit_time_failure.is_some())
                     .map(|exclusion| (exclusion.epoch_index, exclusion.ambiguity_id.clone()))
                     .filter(|key| !readmitted_after_fix.contains(key))
-                    .filter(|key| ssr_bias_holds_at(&arc, epochs, key, solution.position_m, pass))
-                    .collect::<Vec<_>>();
+                {
+                    if ssr_bias_holds_at(&arc, epochs, &key, solution.position_m, pass)
+                        .map_err(FixedSolveError::Float)?
+                    {
+                        holding.push(key);
+                    }
+                }
                 if holding.is_empty() {
                     return Ok(solution);
                 }
@@ -372,33 +378,29 @@ fn fix_once(
     )?;
     // The observations admitted again after an exclusion were not checked at intermediate
     // states; the fixed position decides.
-    if let Some(exclusion) = deferred
-        .iter()
-        .filter(|key| {
-            solution
-                .residuals_m
-                .iter()
-                .any(|residual| residual.epoch_index == key.0 && residual.ambiguity_id == key.1)
-        })
-        .find_map(|key| {
-            let epoch = epochs.get(key.0)?;
-            let mut single = epoch.clone();
-            single.observations.retain(|obs| obs.ambiguity_id == key.1);
-            exclude_unresolved_ssr_bias_observations(
-                source,
-                std::slice::from_ref(&single),
-                key.0,
-                solution.position_m,
-                &config.corrections.ppp,
-                pass,
-                SsrBiasExclusionStage::AtConvergence,
-            )
-            .1
-            .into_iter()
-            .next()
-        })
-    {
-        return Err(FixedStep::Exclude(Box::new(exclusion)));
+    for key in deferred.iter().filter(|key| {
+        solution
+            .residuals_m
+            .iter()
+            .any(|residual| residual.epoch_index == key.0 && residual.ambiguity_id == key.1)
+    }) {
+        let Some(epoch) = epochs.get(key.0) else {
+            continue;
+        };
+        let mut single = epoch.clone();
+        single.observations.retain(|obs| obs.ambiguity_id == key.1);
+        let (_, exclusions) = exclude_unresolved_ssr_bias_observations(
+            source,
+            std::slice::from_ref(&single),
+            key.0,
+            solution.position_m,
+            &config.corrections.ppp,
+            pass,
+            SsrBiasExclusionStage::AtConvergence,
+        )?;
+        if let Some(exclusion) = exclusions.into_iter().next() {
+            return Err(FixedStep::Exclude(Box::new(exclusion)));
+        }
     }
     solution.ssr_bias_exclusions = ssr_bias_exclusions;
     Ok(solution)

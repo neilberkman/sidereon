@@ -1779,6 +1779,102 @@ fn synthetic_spp_case(directions: &[[f64; 3]]) -> (SyntheticEphemeris, SolveInpu
     )
 }
 
+/// Like an SSR source outside the UT1 table: one satellite's state is refused
+/// under `Strict` and accepted with a reported departure under `Permissive`.
+struct Ut1PolicyEphemeris {
+    inner: SyntheticEphemeris,
+    satellite: GnssSatelliteId,
+    mode: crate::astro::time::ValidityMode,
+}
+
+impl super::EphemerisSource for Ut1PolicyEphemeris {
+    fn position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64)> {
+        self.try_position_clock_at_j2000_s(sat, t_j2000_s)
+            .ok()
+            .flatten()
+            .map(|state| state.value)
+    }
+
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<super::PositionClock>>, crate::Error> {
+        use crate::astro::time::{DegradeReason, Validated, ValidityMode};
+        let state = self.inner.position_clock_at_j2000_s(sat, t_j2000_s);
+        if sat != self.satellite {
+            return Ok(state.map(Validated::ok));
+        }
+        match self.mode {
+            ValidityMode::Strict => Err(crate::Error::Ut1OutsideCoverage(
+                DegradeReason::AfterCoverage,
+            )),
+            ValidityMode::Permissive => {
+                Ok(state.map(|state| Validated::degraded(state, DegradeReason::AfterCoverage)))
+            }
+        }
+    }
+}
+
+#[test]
+fn spp_fails_on_a_ut1_refusal_instead_of_dropping_the_satellite() {
+    use crate::astro::time::{DegradeReason, ValidityMode};
+    // Six satellites: without the refused one the other five still solve, so
+    // a solve that dropped it would return a solution.
+    let directions = [
+        [0.85, 0.20, 0.49],
+        [0.60, -0.62, 0.50],
+        [0.70, 0.62, -0.35],
+        [0.92, -0.15, -0.36],
+        [0.40, 0.10, 0.91],
+        [0.55, 0.80, 0.24],
+    ];
+    let (eph, inputs) = synthetic_spp_case(&directions);
+    let refused = eph.positions[0].0;
+    let source = |mode| Ut1PolicyEphemeris {
+        inner: eph.clone(),
+        satellite: refused,
+        mode,
+    };
+
+    let strict = source(ValidityMode::Strict);
+    assert!(matches!(
+        solve(&strict, &inputs, false),
+        Err(SppError::Ut1OutsideCoverage(DegradeReason::AfterCoverage))
+    ));
+    let coarse = super::SolvePolicy {
+        coarse_search_seeds: Some(4),
+        ..super::SolvePolicy::default()
+    };
+    assert!(matches!(
+        super::solve_with_policy(&strict, &inputs, false, coarse),
+        Err(super::SolvePolicyError::Solve(
+            SppError::Ut1OutsideCoverage(DegradeReason::AfterCoverage)
+        ))
+    ));
+
+    let plain = solve(&eph, &inputs, false).expect("in-table SPP solves");
+    assert_eq!(plain.metadata.ut1_degraded, None);
+
+    let permissive =
+        solve(&source(ValidityMode::Permissive), &inputs, false).expect("permissive SPP solves");
+    assert!(permissive.used_sats.contains(&refused));
+    assert_eq!(
+        permissive.metadata.ut1_degraded,
+        Some(DegradeReason::AfterCoverage)
+    );
+    // The accepted state is the same state, so the solution is unchanged.
+    assert_eq!(
+        permissive.position.as_array().map(f64::to_bits),
+        plain.position.as_array().map(f64::to_bits)
+    );
+    assert_eq!(permissive.used_sats, plain.used_sats);
+}
+
 #[test]
 fn geometry_quality_zero_redundancy_spp_emits_unvalidated_point() {
     //! Clean-room synthetic SPP geometry: four full-rank pseudorange equations

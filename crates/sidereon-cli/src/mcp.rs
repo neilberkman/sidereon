@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use sidereon::astro::passes::{GroundStation, PassPredictionOptions, UtcInstant};
 use sidereon::astro::sgp4;
 use sidereon::{
-    horizontal_radius_at, load_rinex_nav, load_rinex_obs, load_sp3,
+    decode_crinex, horizontal_radius_at, load_rinex_nav, load_rinex_obs, load_sp3,
     metrics_from_position_covariance, parse_antex, parse_rinex_nav, parse_rinex_obs, passes,
     solve_spp, spherical_radius_at, spp_inputs_from_rinex_obs, vertical_radius_at,
 };
@@ -21,6 +21,7 @@ use sidereon_core::{
 
 use crate::qc_log_report;
 use crate::solve_rinex_report;
+use crate::{detect_format, tle_rejection_lines, DetectedFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Profile {
@@ -955,39 +956,102 @@ fn inspect_file_invocation(raw: Value) -> Result<Value> {
     let params: InspectFileParams = serde_json::from_value(raw)?;
     let path = Path::new(&params.path);
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    let text = std::str::from_utf8(&bytes).ok();
-
-    if let Some(text) = text {
-        if let Ok(_obs) = parse_rinex_obs(text) {
-            return Ok(json!({"path": path.display().to_string(), "type": "RINEX OBS"}));
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        bail!(
+            "unrecognized file type: {} is not UTF-8 text",
+            path.display()
+        );
+    };
+    // The format is recognized from its own identifying text, then only that
+    // format's parser runs, so a malformed file reports its parse error.
+    let Some(format) = detect_format(text) else {
+        bail!("unrecognized file type: {}", path.display());
+    };
+    let parse_context = || format!("parse {} {}", format.label(), path.display());
+    let path_text = path.display().to_string();
+    match format {
+        DetectedFormat::RinexObs => {
+            parse_rinex_obs(text).with_context(parse_context)?;
+            Ok(json!({"path": path_text, "type": "RINEX OBS"}))
         }
-        if let Ok(_nav) = parse_rinex_nav(text) {
-            return Ok(json!({"path": path.display().to_string(), "type": "RINEX NAV"}));
+        DetectedFormat::Crinex => {
+            let decoded = decode_crinex(text).with_context(parse_context)?;
+            parse_rinex_obs(&decoded).with_context(parse_context)?;
+            Ok(json!({"path": path_text, "type": "RINEX OBS (CRINEX)"}))
         }
-        if let Ok(antex) = parse_antex(text) {
-            if !antex.antennas.is_empty() {
-                return Ok(json!({
-                    "path": path.display().to_string(),
-                    "type": "ANTEX",
-                    "antennas": antex.antennas.len()
-                }));
+        DetectedFormat::RinexNav => {
+            parse_rinex_nav(text).with_context(parse_context)?;
+            Ok(json!({"path": path_text, "type": "RINEX NAV"}))
+        }
+        DetectedFormat::RinexOther(kind) => bail!(
+            "unsupported file type: {} is RINEX file type {kind:?}, which inspect does not read",
+            path.display()
+        ),
+        DetectedFormat::Antex => {
+            let antex = parse_antex(text).with_context(parse_context)?;
+            Ok(json!({
+                "path": path_text,
+                "type": "ANTEX",
+                "antennas": antex.antennas.len()
+            }))
+        }
+        DetectedFormat::Sp3 => {
+            let sp3 = load_sp3(&bytes).with_context(parse_context)?;
+            Ok(json!({
+                "path": path_text,
+                "type": "SP3",
+                "epoch_count": sp3.epoch_count(),
+                "satellite_count": sp3.satellites().len(),
+            }))
+        }
+        DetectedFormat::Tle => {
+            let file = sgp4::parse_tle_file_with_policy(
+                text,
+                sgp4::OpsMode::Improved,
+                sidereon::astro::tle::TlePolicy::Lenient,
+            );
+            let findings = tle_rejection_lines(&file);
+            if file.satellites.is_empty() {
+                bail!(
+                    "{}: no element set parsed\n{}",
+                    parse_context(),
+                    findings.join("\n")
+                );
             }
-        }
-        if let Some(info) = inspect_tle_text(text) {
-            return Ok(json!({"path": path.display().to_string(), "type": "TLE", "info": info}));
+            let entries: Vec<Value> = file
+                .satellites
+                .iter()
+                .map(|satellite| {
+                    json!({
+                        "catalog": satellite.satellite.line1().get(2..7).unwrap_or("").trim(),
+                        "line": satellite.line_number,
+                    })
+                })
+                .collect();
+            let rejected: Vec<Value> = file
+                .rejected
+                .iter()
+                .map(|rejected| {
+                    json!({
+                        "line": rejected.line_number,
+                        "name": rejected.name,
+                        "reason": rejected.issue.to_string(),
+                    })
+                })
+                .collect();
+            Ok(json!({
+                "path": path_text,
+                "type": "TLE",
+                "info": {
+                    "pairs": file.satellites.len(),
+                    "skipped": file.rejected.len(),
+                    "entries": entries,
+                    "rejected": rejected,
+                    "findings": findings,
+                }
+            }))
         }
     }
-
-    if let Ok(sp3) = load_sp3(&bytes) {
-        return Ok(json!({
-            "path": path.display().to_string(),
-            "type": "SP3",
-            "epoch_count": sp3.epoch_count(),
-            "satellite_count": sp3.satellites().len(),
-        }));
-    }
-
-    bail!("unrecognized file type: {}", path.display())
 }
 
 fn inspect_file_schema() -> Value {
@@ -998,27 +1062,6 @@ fn inspect_file_schema() -> Value {
             "path": {"type": "string"}
         }
     })
-}
-
-fn inspect_tle_text(text: &str) -> Option<Value> {
-    let mut satellites = Vec::new();
-    let mut skipped = 0usize;
-
-    for pair in tle_pairs_from_text(text) {
-        match sidereon::tle::parse(pair.0, pair.1) {
-            Ok(parsed) => {
-                let catalog = parsed.elements.catalog_number;
-                satellites.push(json!({"catalog": catalog}));
-            }
-            Err(_) => skipped += 1,
-        }
-    }
-
-    if satellites.is_empty() && skipped == 0 {
-        None
-    } else {
-        Some(json!({"pairs": satellites.len(), "skipped": skipped, "entries": satellites}))
-    }
 }
 
 #[derive(Debug, Deserialize)]

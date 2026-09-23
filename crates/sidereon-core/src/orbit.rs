@@ -11,8 +11,8 @@ pub use crate::reduced_orbit::{
     piecewise_position, piecewise_position_velocity, position, position_velocity,
     select_piecewise_segment, CalendarEpoch, DriftEntry, DriftReport, EcefSample, Elements,
     FitStats, Frame, Model, PiecewiseOrbit, PiecewiseOrbitError, PiecewiseOrbitSourceFit,
-    PiecewiseOrbitSourceFitOptions, PiecewiseSegment, ReducedOrbit, ReducedOrbitError,
-    ReducedOrbitSource, ReducedOrbitSourceDrift, ReducedOrbitSourceDriftOptions,
+    PiecewiseOrbitSourceFitOptions, PiecewiseSegment, PositionVelocity, ReducedOrbit,
+    ReducedOrbitError, ReducedOrbitSource, ReducedOrbitSourceDrift, ReducedOrbitSourceDriftOptions,
     ReducedOrbitSourceError, ReducedOrbitSourceFit, ReducedOrbitSourceFitOptions,
     ReducedOrbitSourceSampling, MIN_SAMPLES,
 };

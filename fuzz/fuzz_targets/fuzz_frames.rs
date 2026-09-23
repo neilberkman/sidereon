@@ -34,6 +34,7 @@ fn time_scales(raw: [f64; 7]) -> TimeScales {
         jd_ut1: raw[4],
         jd_tt: raw[5],
         jd_tdb: raw[6],
+        ut1_degraded: None,
     }
 }
 

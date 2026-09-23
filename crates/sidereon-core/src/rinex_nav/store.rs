@@ -788,6 +788,18 @@ impl EphemerisSource for BroadcastStore {
     ) -> Option<([f64; 3], f64, Option<f64>)> {
         self.state_with_group_delay(sat, t_j2000_s)
     }
+
+    /// The one-evaluation read above; a broadcast store never refuses a state.
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> crate::Result<Option<crate::astro::time::Validated<crate::spp::PositionClockGroupDelay>>>
+    {
+        Ok(self
+            .state_with_group_delay(sat, t_j2000_s)
+            .map(crate::astro::time::Validated::ok))
+    }
 }
 
 /// Largest distance, seconds, between a query and the reference epoch of the GLONASS

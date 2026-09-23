@@ -771,6 +771,7 @@ mod tests {
             rows,
             receiver,
             clock_systems: vec![GnssSystem::Gps],
+            ut1_degraded: None,
         }
     }
 

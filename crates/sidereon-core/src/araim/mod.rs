@@ -68,6 +68,10 @@ pub struct AraimGeometry {
     pub receiver: Wgs84Geodetic,
     /// Receiver-clock columns, in the same order as the SPP state.
     pub clock_systems: Vec<GnssSystem>,
+    /// The first UT1 departure the ephemeris source accepted while producing
+    /// a row's satellite position, under a permissive UT1 policy. `None` when
+    /// every position was produced inside UT1 coverage or did not read UT1.
+    pub ut1_degraded: Option<crate::astro::time::DegradeReason>,
 }
 
 impl AraimGeometry {
@@ -95,10 +99,20 @@ impl AraimGeometry {
         let rx_ecef_m = solution.position.as_array();
         let enu = ecef_to_enu_rotation(receiver.lat_rad, receiver.lon_rad);
         let mut rows = Vec::with_capacity(solution.used_sats.len());
+        let mut ut1_degraded = None;
         for &id in &solution.used_sats {
-            let (sat_ecef_m, _) = eph
-                .position_clock_at_j2000_s(id, t_j2000_s)
-                .ok_or(AraimError::InsufficientGeometry)?;
+            // A UT1 refusal is returned as its own error rather than as a
+            // missing row: the satellite has a state the policy declined.
+            let state = match eph.try_position_clock_at_j2000_s(id, t_j2000_s) {
+                Ok(Some(state)) => state,
+                Ok(None) => return Err(AraimError::InsufficientGeometry),
+                Err(crate::Error::Ut1OutsideCoverage(reason)) => {
+                    return Err(AraimError::Ut1OutsideCoverage(reason))
+                }
+                Err(_) => return Err(AraimError::InsufficientGeometry),
+            };
+            ut1_degraded = ut1_degraded.or(state.degraded);
+            let (sat_ecef_m, _) = state.value;
             let dx = sat_ecef_m[0] - rx_ecef_m[0];
             let dy = sat_ecef_m[1] - rx_ecef_m[1];
             let dz = sat_ecef_m[2] - rx_ecef_m[2];
@@ -128,6 +142,7 @@ impl AraimGeometry {
             rows,
             receiver,
             clock_systems,
+            ut1_degraded,
         })
     }
 }
@@ -222,6 +237,10 @@ pub enum AraimError {
     /// The integrity allocation is missing, non-finite, or outside its domain.
     #[error("invalid ARAIM allocation")]
     InvalidAllocation,
+    /// The ephemeris source refused a satellite position because producing
+    /// it reads UT1 outside the UT1 table under a strict UT1 policy.
+    #[error("ARAIM satellite position refused: {0}")]
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 pub(crate) fn clock_system_for_row(system: GnssSystem) -> GnssSystem {

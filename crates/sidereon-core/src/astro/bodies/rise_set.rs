@@ -8,17 +8,22 @@
 //! almanac work belongs behind a higher-precision ephemeris source.
 
 use crate::astro::almanac::{
-    meridian_transits, AlmanacError, CulminationKind, EphemerisSource, TransitBody,
+    meridian_transits_with_validity, AlmanacError, CulminationKind, EphemerisSource, TransitBody,
 };
-use crate::astro::bodies::observe::moon_az_el;
-use crate::astro::bodies::sun_moon::sun_moon_ecef;
+use crate::astro::bodies::observe::{body_az_el, BodyObservationError};
+use crate::astro::bodies::sun_moon::{sun_moon_ecef, SunMoonError};
 use crate::astro::constants::units::{MICROSECONDS_PER_SECOND, M_PER_KM};
 use crate::astro::events::{
     CrossingDirection, CrossingEvent, EventFinder, EventFinderError, ScalarEventPredicate,
 };
-use crate::astro::frames::transforms::{geodetic_to_itrs, FrameTransformError, GeodeticStationKm};
+use crate::astro::frames::transforms::{
+    geodetic_to_itrs, with_ut1_validity, FrameTransformError, GeodeticStationKm, Ut1Gate,
+};
 use crate::astro::passes::UtcInstant;
+use crate::astro::time::scales::TimeScales;
+use crate::astro::time::{Validated, ValidityMode};
 use crate::validate;
+use core::cell::Cell;
 
 /// Options for Sun elevation threshold crossings.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -75,17 +80,43 @@ pub fn find_sun_elevation_crossings(
     end_time: UtcInstant,
     options: SunElevationOptions,
 ) -> Result<Vec<SunElevationCrossing>, EventFinderError> {
+    find_sun_elevation_crossings_with_validity(
+        station,
+        start_time,
+        end_time,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`find_sun_elevation_crossings`] under an explicit UT1 [`ValidityMode`].
+///
+/// Every instant the search evaluates passes the UT1 policy.
+/// [`ValidityMode::Strict`] refuses the search if any of them lies outside the
+/// UT1 table, so a window reaching past the table is refused rather than
+/// returning the crossings before it. [`ValidityMode::Permissive`] evaluates
+/// them all with the long-term UT1 and reports the first departure in
+/// [`Validated::degraded`].
+pub fn find_sun_elevation_crossings_with_validity(
+    station: &GeodeticStationKm,
+    start_time: UtcInstant,
+    end_time: UtcInstant,
+    options: SunElevationOptions,
+    mode: ValidityMode,
+) -> Result<Validated<Vec<SunElevationCrossing>>, EventFinderError> {
     validate_station(station)?;
+    let search = ElevationSearch::new(station, Body::Sun, mode);
     let crossings = elevation_crossings(
         start_time,
         end_time,
         options.elevation_threshold_deg,
         options.step_seconds,
         options.time_tolerance_seconds,
-        |time| sun_elevation_deg(station, time),
-    )?;
-
-    Ok(crossings
+        |time| search.elevation_deg(time),
+    );
+    search.check()?;
+    let crossings = crossings?
         .into_iter()
         .map(|crossing| {
             let time = instant_at_offset_seconds(start_time, crossing.time_seconds);
@@ -95,23 +126,49 @@ pub fn find_sun_elevation_crossings(
                     CrossingDirection::Rising => SunElevationCrossingKind::Rising,
                     CrossingDirection::Falling => SunElevationCrossingKind::Setting,
                 },
-                elevation_deg: sun_elevation_deg(station, time),
+                elevation_deg: search.elevation_deg(time),
             }
         })
-        .collect())
+        .collect();
+    search.finish(crossings)
 }
 
 /// Topocentric geometric Sun elevation at a station and UTC instant, degrees.
-pub fn sun_elevation_deg(station: &GeodeticStationKm, time: UtcInstant) -> f64 {
-    let sun = sun_moon_ecef(&time.time_scales())
-        .expect("UtcInstant time scales produce finite Sun/Moon geometry")
-        .sun;
+///
+/// Returns an error for an invalid station or an instant outside the UT1
+/// table (see [`sun_elevation_deg_with_validity`]); it previously panicked on
+/// both.
+pub fn sun_elevation_deg(
+    station: &GeodeticStationKm,
+    time: UtcInstant,
+) -> Result<f64, BodyObservationError> {
+    sun_elevation_deg_with_validity(station, time, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`sun_elevation_deg`] under an explicit UT1 [`ValidityMode`]: Strict
+/// refuses an instant outside the UT1 table; Permissive evaluates it and
+/// reports the departure in [`Validated::degraded`].
+pub fn sun_elevation_deg_with_validity(
+    station: &GeodeticStationKm,
+    time: UtcInstant,
+    mode: ValidityMode,
+) -> Result<Validated<f64>, BodyObservationError> {
+    with_ut1_validity(&time.time_scales(), mode, |ts| {
+        body_elevation_deg(station, ts, Body::Sun)
+    })
+}
+
+fn sun_elevation_at(
+    station: &GeodeticStationKm,
+    ts: &TimeScales,
+) -> Result<f64, BodyObservationError> {
+    let sun = sun_moon_ecef(ts)?.sun;
     let (station_x_km, station_y_km, station_z_km) = geodetic_to_itrs(
         station.latitude_deg,
         station.longitude_deg,
         station.altitude_km,
-    )
-    .expect("valid geodetic station for Sun elevation");
+    )?;
     let dx = sun[0] / M_PER_KM - station_x_km;
     let dy = sun[1] / M_PER_KM - station_y_km;
     let dz = sun[2] / M_PER_KM - station_z_km;
@@ -125,7 +182,7 @@ pub fn sun_elevation_deg(station: &GeodeticStationKm, time: UtcInstant) -> f64 {
         libm::sin(lat),
     ];
     let sin_elevation = ((up[0] * dx + up[1] * dy + up[2] * dz) / range).clamp(-1.0, 1.0);
-    libm::asin(sin_elevation).to_degrees()
+    Ok(libm::asin(sin_elevation).to_degrees())
 }
 
 /// Options for Moon elevation threshold crossings (moonrise / moonset).
@@ -201,11 +258,26 @@ pub struct MoonTransit {
 /// Sibling of [`sun_elevation_deg`]. Unlike that low-precision geocentric-up
 /// helper, this routes through the full station-to-target ENU reduction
 /// ([`crate::astro::bodies::observe::moon_az_el`]), so it includes the
-/// topocentric (diurnal) parallax that matters for the nearby Moon.
-pub fn moon_elevation_deg(station: &GeodeticStationKm, time: UtcInstant) -> f64 {
-    moon_az_el(station, time)
-        .expect("UtcInstant time scales produce finite Moon geometry")
-        .elevation_deg
+/// topocentric (diurnal) parallax that matters for the nearby Moon. Errors
+/// as [`sun_elevation_deg`] does.
+pub fn moon_elevation_deg(
+    station: &GeodeticStationKm,
+    time: UtcInstant,
+) -> Result<f64, BodyObservationError> {
+    moon_elevation_deg_with_validity(station, time, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`moon_elevation_deg`] under an explicit UT1 [`ValidityMode`], as
+/// [`sun_elevation_deg_with_validity`].
+pub fn moon_elevation_deg_with_validity(
+    station: &GeodeticStationKm,
+    time: UtcInstant,
+    mode: ValidityMode,
+) -> Result<Validated<f64>, BodyObservationError> {
+    with_ut1_validity(&time.time_scales(), mode, |ts| {
+        body_elevation_deg(station, ts, Body::Moon)
+    })
 }
 
 /// Find Moon elevation threshold crossings (moonrise / moonset) for a station
@@ -220,17 +292,37 @@ pub fn find_moon_elevation_crossings(
     end_time: UtcInstant,
     options: MoonElevationOptions,
 ) -> Result<Vec<MoonElevationCrossing>, EventFinderError> {
+    find_moon_elevation_crossings_with_validity(
+        station,
+        start_time,
+        end_time,
+        options,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`find_moon_elevation_crossings`] under an explicit UT1 [`ValidityMode`],
+/// with the same UT1 policy as [`find_sun_elevation_crossings_with_validity`].
+pub fn find_moon_elevation_crossings_with_validity(
+    station: &GeodeticStationKm,
+    start_time: UtcInstant,
+    end_time: UtcInstant,
+    options: MoonElevationOptions,
+    mode: ValidityMode,
+) -> Result<Validated<Vec<MoonElevationCrossing>>, EventFinderError> {
     validate_station(station)?;
+    let search = ElevationSearch::new(station, Body::Moon, mode);
     let crossings = elevation_crossings(
         start_time,
         end_time,
         options.elevation_threshold_deg,
         options.step_seconds,
         options.time_tolerance_seconds,
-        |time| moon_elevation_deg(station, time),
-    )?;
-
-    Ok(crossings
+        |time| search.elevation_deg(time),
+    );
+    search.check()?;
+    let crossings = crossings?
         .into_iter()
         .map(|crossing| {
             let time = instant_at_offset_seconds(start_time, crossing.time_seconds);
@@ -240,10 +332,11 @@ pub fn find_moon_elevation_crossings(
                     CrossingDirection::Rising => MoonElevationCrossingKind::Rising,
                     CrossingDirection::Falling => MoonElevationCrossingKind::Setting,
                 },
-                elevation_deg: moon_elevation_deg(station, time),
+                elevation_deg: search.elevation_deg(time),
             }
         })
-        .collect())
+        .collect();
+    search.finish(crossings)
 }
 
 /// Find Moon meridian transits (upper and lower culminations) for a station and
@@ -255,10 +348,34 @@ pub fn find_moon_transits(
     step_seconds: f64,
     time_tolerance_seconds: f64,
 ) -> Result<Vec<MoonTransit>, EventFinderError> {
+    find_moon_transits_with_validity(
+        station,
+        start_time,
+        end_time,
+        step_seconds,
+        time_tolerance_seconds,
+        ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`find_moon_transits`] under an explicit UT1 [`ValidityMode`], with the UT1
+/// policy of [`crate::astro::almanac::meridian_transits_with_validity`].
+pub fn find_moon_transits_with_validity(
+    station: &GeodeticStationKm,
+    start_time: UtcInstant,
+    end_time: UtcInstant,
+    step_seconds: f64,
+    time_tolerance_seconds: f64,
+    mode: ValidityMode,
+) -> Result<Validated<Vec<MoonTransit>>, EventFinderError> {
     if end_time <= start_time {
-        return Ok(Vec::new());
+        return Ok(Validated {
+            value: Vec::new(),
+            degraded: None,
+        });
     }
-    let transits = meridian_transits(
+    let transits = meridian_transits_with_validity(
         EphemerisSource::Analytic,
         TransitBody::Moon,
         station,
@@ -266,20 +383,110 @@ pub fn find_moon_transits(
         end_time,
         step_seconds,
         time_tolerance_seconds,
+        mode,
     )
     .map_err(map_almanac_error)?;
 
-    Ok(transits
-        .into_iter()
-        .map(|transit| MoonTransit {
-            time: transit.time,
-            kind: match transit.kind {
-                CulminationKind::Upper => MoonTransitKind::Upper,
-                CulminationKind::Lower => MoonTransitKind::Lower,
-            },
-            elevation_deg: transit.altitude_deg,
-        })
-        .collect())
+    Ok(Validated {
+        value: transits
+            .value
+            .into_iter()
+            .map(|transit| MoonTransit {
+                time: transit.time,
+                kind: match transit.kind {
+                    CulminationKind::Upper => MoonTransitKind::Upper,
+                    CulminationKind::Lower => MoonTransitKind::Lower,
+                },
+                elevation_deg: transit.altitude_deg,
+            })
+            .collect(),
+        degraded: transits.degraded,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Body {
+    Sun,
+    Moon,
+}
+
+fn body_elevation_deg(
+    station: &GeodeticStationKm,
+    ts: &TimeScales,
+    body: Body,
+) -> Result<f64, BodyObservationError> {
+    match body {
+        Body::Sun => sun_elevation_at(station, ts),
+        Body::Moon => Ok(body_az_el(station, sun_moon_ecef(ts)?.moon)?.elevation_deg),
+    }
+}
+
+/// A body's elevation for an event search under one UT1 policy.
+///
+/// The event finder takes a plain `f64`, so an instant that cannot be
+/// evaluated yields NaN there; the first such failure is remembered and
+/// returned by [`ElevationSearch::check`] instead of a result built around it.
+struct ElevationSearch<'a> {
+    station: &'a GeodeticStationKm,
+    body: Body,
+    gate: Ut1Gate,
+    failure: Cell<Option<BodyObservationError>>,
+}
+
+impl<'a> ElevationSearch<'a> {
+    fn new(station: &'a GeodeticStationKm, body: Body, mode: ValidityMode) -> Self {
+        Self {
+            station,
+            body,
+            gate: Ut1Gate::new(mode),
+            failure: Cell::new(None),
+        }
+    }
+
+    fn elevation_deg(&self, time: UtcInstant) -> f64 {
+        let evaluated = self
+            .gate
+            .admit(time.time_scales())
+            .map_err(BodyObservationError::from)
+            .and_then(|ts| body_elevation_deg(self.station, &ts, self.body));
+        match evaluated {
+            Ok(elevation_deg) => elevation_deg,
+            Err(error) => {
+                if self.failure.get().is_none() {
+                    self.failure.set(Some(error));
+                }
+                f64::NAN
+            }
+        }
+    }
+
+    fn check(&self) -> Result<(), EventFinderError> {
+        match self.failure.get() {
+            Some(error) => Err(map_body_error(error)),
+            None => Ok(()),
+        }
+    }
+
+    fn finish<T>(&self, value: T) -> Result<Validated<T>, EventFinderError> {
+        self.check()?;
+        self.gate.finish(value).map_err(map_frame_input)
+    }
+}
+
+fn map_body_error(error: BodyObservationError) -> EventFinderError {
+    match error {
+        BodyObservationError::FrameTransform(error)
+        | BodyObservationError::Ephemeris(SunMoonError::FrameTransform(error)) => {
+            map_frame_input(error)
+        }
+        BodyObservationError::Ephemeris(SunMoonError::InvalidInput { field, reason }) => {
+            EventFinderError::InvalidInput { field, reason }
+        }
+        BodyObservationError::Angle(_) => EventFinderError::InvalidInput {
+            field: "body_geometry",
+            reason: "degenerate",
+        },
+    }
 }
 
 /// Run the event finder's threshold-crossing search over a topocentric elevation
@@ -369,8 +576,14 @@ fn validate_station(station: &GeodeticStationKm) -> Result<(), EventFinderError>
 }
 
 fn map_frame_input(error: FrameTransformError) -> EventFinderError {
-    let FrameTransformError::InvalidInput { field, reason } = error;
-    EventFinderError::InvalidInput { field, reason }
+    match error {
+        FrameTransformError::Ut1OutsideCoverage { reason } => {
+            EventFinderError::Ut1OutsideCoverage(reason)
+        }
+        FrameTransformError::InvalidInput { field, reason } => {
+            EventFinderError::InvalidInput { field, reason }
+        }
+    }
 }
 
 fn map_event_input(error: validate::FieldError) -> EventFinderError {
@@ -383,6 +596,7 @@ fn map_event_input(error: validate::FieldError) -> EventFinderError {
 fn map_almanac_error(error: AlmanacError) -> EventFinderError {
     match error {
         AlmanacError::Finder(error) => error,
+        AlmanacError::Ut1OutsideCoverage(reason) => EventFinderError::Ut1OutsideCoverage(reason),
         AlmanacError::InvalidInput { field, reason } => {
             EventFinderError::InvalidInput { field, reason }
         }
@@ -419,6 +633,50 @@ mod tests {
 
     fn day_start() -> UtcInstant {
         UtcInstant::from_utc(2024, 3, 20, 0, 0, 0, 0).expect("valid UTC")
+    }
+
+    #[test]
+    fn sun_crossings_after_the_ut1_table_are_refused_or_reported() {
+        let station = greenwich();
+        let start = UtcInstant::from_utc(2027, 9, 1, 0, 0, 0, 0).expect("valid UTC");
+        let end = UtcInstant::from_utc(2027, 9, 2, 0, 0, 0, 0).expect("valid UTC");
+        let refused =
+            EventFinderError::Ut1OutsideCoverage(crate::astro::time::DegradeReason::AfterCoverage);
+        assert_eq!(
+            find_sun_elevation_crossings(&station, start, end, SunElevationOptions::default()),
+            Err(refused)
+        );
+        let permissive = find_sun_elevation_crossings_with_validity(
+            &station,
+            start,
+            end,
+            SunElevationOptions::default(),
+            ValidityMode::Permissive,
+        )
+        .expect("permissive search");
+        assert_eq!(
+            permissive.degraded,
+            Some(crate::astro::time::DegradeReason::AfterCoverage)
+        );
+        assert_eq!(permissive.value.len(), 2, "a sunrise and a sunset");
+
+        // A window from inside the table to past its end is refused, not cut
+        // short at the edge.
+        let straddle_start = UtcInstant::from_utc(2027, 7, 1, 0, 0, 0, 0).expect("valid UTC");
+        let straddle_end = UtcInstant::from_utc(2027, 7, 6, 0, 0, 0, 0).expect("valid UTC");
+        assert_eq!(
+            find_moon_elevation_crossings(
+                &station,
+                straddle_start,
+                straddle_end,
+                MoonElevationOptions::default()
+            ),
+            Err(refused)
+        );
+
+        // The single-instant helpers return the refusal instead of panicking.
+        assert!(sun_elevation_deg(&station, start).is_err());
+        assert!(moon_elevation_deg(&station, start).is_err());
     }
 
     #[test]
@@ -662,7 +920,9 @@ mod tests {
         expected_field: &'static str,
         expected_reason: &'static str,
     ) {
-        let EventFinderError::InvalidInput { field, reason } = error;
+        let EventFinderError::InvalidInput { field, reason } = error else {
+            panic!("expected an invalid-input event-finder error, got {error:?}");
+        };
         assert_eq!(field, expected_field);
         assert_eq!(reason, expected_reason);
     }

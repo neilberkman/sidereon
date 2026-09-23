@@ -32,7 +32,7 @@ pub use ecliptic::{geocentric_ecliptic, EclipticLonLat};
 pub use phases::{moon_phase_deg, moon_phases};
 pub use planets::planetary_events;
 pub use seasons::seasons;
-pub use transits::meridian_transits;
+pub use transits::{meridian_transits, meridian_transits_with_validity};
 
 pub(crate) const NAIF_SUN: i32 = 10;
 pub(crate) const NAIF_MOON: i32 = 301;
@@ -235,6 +235,9 @@ pub enum AlmanacError {
         /// Static explanation supplied by validation, such as `not finite`, `exceeds maximum`, `degenerate`, or `components must be finite`.
         reason: &'static str,
     },
+    /// The search reads UT1 at an instant outside the UT1 table under
+    /// [`crate::astro::time::ValidityMode::Strict`].
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl fmt::Display for AlmanacError {
@@ -250,11 +253,27 @@ impl fmt::Display for AlmanacError {
             Self::InvalidInput { field, reason } => {
                 write!(f, "invalid almanac input {field}: {reason}")
             }
+            Self::Ut1OutsideCoverage(reason) => {
+                write!(f, "almanac search reads UT1 outside the table: {reason}")
+            }
         }
     }
 }
 
 impl std::error::Error for AlmanacError {}
+
+/// A frame-transform failure as an almanac error: a UT1 refusal keeps its type,
+/// any other failure is an invalid input.
+impl From<FrameTransformError> for AlmanacError {
+    fn from(error: FrameTransformError) -> Self {
+        match error {
+            FrameTransformError::Ut1OutsideCoverage { reason } => Self::Ut1OutsideCoverage(reason),
+            FrameTransformError::InvalidInput { field, reason } => {
+                Self::InvalidInput { field, reason }
+            }
+        }
+    }
+}
 
 pub(crate) fn validate_scan_controls(
     step_seconds: f64,
@@ -484,6 +503,5 @@ pub(crate) fn map_field_error(error: validate::FieldError) -> AlmanacError {
 }
 
 fn map_frame_input(error: FrameTransformError) -> AlmanacError {
-    let FrameTransformError::InvalidInput { field, reason } = error;
-    AlmanacError::InvalidInput { field, reason }
+    AlmanacError::from(error)
 }

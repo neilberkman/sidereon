@@ -55,9 +55,11 @@ use crate::astro::constants::time::{
     DAYS_PER_JULIAN_CENTURY, J2000_JD, SECONDS_PER_DAY, TT_MINUS_TAI_S,
 };
 use crate::astro::constants::units::{ARCSEC_TO_RAD, DEG_TO_RAD, KM_TO_M};
-use crate::astro::frames::transforms::{FrameTransformError, PolarMotion};
+use crate::astro::frames::transforms::{FrameTransformError, PolarMotion, Ut1Gate};
 use crate::astro::math::vec3::{dot3_ref as dot, norm3_ref as norm8};
-use crate::astro::time::{CoverageError, TimeScaleInputErrorKind, TimeScales};
+use crate::astro::time::{
+    CoverageError, TimeScaleInputErrorKind, TimeScales, Validated, ValidityMode,
+};
 use crate::frame::{geodetic_to_itrf, ItrfPositionM, Wgs84Geodetic};
 use crate::validate::{self, FieldError};
 
@@ -630,18 +632,39 @@ impl StationDisplacement {
 /// positions are generated through the same Earth-fixed analytic ephemeris path
 /// used by the tide-force lane, including caller-supplied polar motion when the
 /// epoch carries it.
+///
+/// The solid Earth tide rotates the Sun and Moon into ITRF with UT1, so it
+/// refuses an epoch outside the UT1 table; see
+/// [`station_displacement_ecef_m_with_validity`].
 pub fn station_displacement_ecef_m(
     position: StationDisplacementPosition,
     epoch: StationDisplacementEpoch,
     options: StationDisplacementOptions<'_>,
 ) -> Result<StationDisplacement, TideError> {
+    station_displacement_ecef_m_with_validity(position, epoch, options, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`station_displacement_ecef_m`] under an explicit UT1 [`ValidityMode`].
+///
+/// Only the solid Earth tide reads UT1. [`ValidityMode::Strict`] refuses an
+/// epoch outside the UT1 table when it is enabled;
+/// [`ValidityMode::Permissive`] evaluates it with the long-term UT1 and
+/// reports the departure in [`Validated::degraded`].
+pub fn station_displacement_ecef_m_with_validity(
+    position: StationDisplacementPosition,
+    epoch: StationDisplacementEpoch,
+    options: StationDisplacementOptions<'_>,
+    mode: ValidityMode,
+) -> Result<Validated<StationDisplacement>, TideError> {
     let receiver_ecef_m = position.ecef_m()?;
     epoch.validate_utc()?;
     let fhr = epoch.fractional_hour();
     let mut displacement = StationDisplacement::zero();
+    let gate = Ut1Gate::new(mode);
 
     if options.solid_earth_tide {
-        let ts = epoch.time_scales()?;
+        let ts = gate.admit(epoch.time_scales()?)?;
         let polar_motion = epoch
             .polar_motion
             .map(StationPolarMotion::polar_motion)
@@ -691,7 +714,7 @@ pub fn station_displacement_ecef_m(
         displacement.ocean_loading_ecef_m = Some(ocean);
     }
 
-    Ok(displacement)
+    Ok(gate.finish(displacement)?)
 }
 
 /// Evaluate station displacement for many epochs. Each element is equivalent to
@@ -705,6 +728,20 @@ pub fn station_displacement_ecef_m_batch(
     epochs
         .iter()
         .map(|&epoch| station_displacement_ecef_m(position, epoch, options))
+        .collect()
+}
+
+/// [`station_displacement_ecef_m_batch`] under an explicit UT1
+/// [`ValidityMode`]; each row is [`station_displacement_ecef_m_with_validity`].
+pub fn station_displacement_ecef_m_batch_with_validity(
+    position: StationDisplacementPosition,
+    epochs: &[StationDisplacementEpoch],
+    options: StationDisplacementOptions<'_>,
+    mode: ValidityMode,
+) -> Vec<Result<Validated<StationDisplacement>, TideError>> {
+    epochs
+        .iter()
+        .map(|&epoch| station_displacement_ecef_m_with_validity(position, epoch, options, mode))
         .collect()
 }
 

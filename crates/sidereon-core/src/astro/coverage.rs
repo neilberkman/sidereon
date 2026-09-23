@@ -4,34 +4,68 @@
 //! wrapping the scalar look-angle kernel. Every cell equals the corresponding
 //! per-pair [`crate::astro::passes::look_angle_arc`] result.
 
-use crate::astro::passes::{look_angle_arc, GroundStation, LookAngle, LookAngleError, UtcInstant};
+use crate::astro::passes::{
+    look_angle_arc_with_validity, GroundStation, LookAngle, LookAngleError, UtcInstant,
+};
 use crate::astro::sgp4::Satellite;
+use crate::astro::time::{Validated, ValidityMode};
 
 /// Row-major look-angle grid indexed as `[satellite][station]`.
 pub type LookAngleGrid = Vec<Vec<Result<LookAngle, LookAngleError>>>;
 
 /// Compute topocentric look angles for all satellite/station pairs at one epoch.
 ///
-/// Each cell is produced by calling [`look_angle_arc`] for exactly that
-/// satellite/station pair with a one-element epoch slice, so the cell is
-/// element-wise identical to the scalar kernel.
+/// Each cell is produced by calling [`crate::astro::passes::look_angle_arc`]
+/// for exactly that satellite/station pair with a one-element epoch slice, so
+/// the cell is element-wise identical to the scalar kernel.
+///
+/// An epoch outside the UT1 table puts the refusal in every cell; see
+/// [`look_angles_batch_with_validity`].
 pub fn look_angles_batch(
     satellites: &[Satellite],
     stations: &[GroundStation],
     datetime: UtcInstant,
 ) -> LookAngleGrid {
-    satellites
+    look_angles_batch_with_validity(satellites, stations, datetime, ValidityMode::Strict).value
+}
+
+/// [`look_angles_batch`] under an explicit UT1 [`ValidityMode`].
+///
+/// Under [`ValidityMode::Strict`] an epoch outside the UT1 table puts the
+/// refusal in every cell and `degraded` is `None`. Under
+/// [`ValidityMode::Permissive`] the cells are evaluated with the long-term UT1
+/// and `degraded` reports the epoch's departure for the whole grid.
+pub fn look_angles_batch_with_validity(
+    satellites: &[Satellite],
+    stations: &[GroundStation],
+    datetime: UtcInstant,
+    mode: ValidityMode,
+) -> Validated<LookAngleGrid> {
+    let grid = satellites
         .iter()
         .map(|satellite| {
             stations
                 .iter()
                 .map(|&station| {
-                    look_angle_arc(satellite, station, std::slice::from_ref(&datetime))
-                        .map(|arc| arc[0])
+                    look_angle_arc_with_validity(
+                        satellite,
+                        station,
+                        std::slice::from_ref(&datetime),
+                        mode,
+                    )
+                    .map(|arc| arc.value[0])
                 })
                 .collect()
         })
-        .collect()
+        .collect();
+    let degraded = match mode {
+        ValidityMode::Strict => None,
+        ValidityMode::Permissive => datetime.time_scales().ut1_degraded,
+    };
+    Validated {
+        value: grid,
+        degraded,
+    }
 }
 
 /// Return true for every successful look angle at or above `min_elevation_deg`.
@@ -97,6 +131,7 @@ pub fn max_elevation(grid: &[Vec<Result<LookAngle, LookAngleError>>]) -> Vec<Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::astro::passes::look_angle_arc;
 
     const ISS_L1: &str = "1 25544U 98067A   24001.50000000  .00016717  00000-0  10270-3 0  9009";
     const ISS_L2: &str = "2 25544  51.6400 208.8657 0002644 250.3037 109.7782 15.49560812999990";

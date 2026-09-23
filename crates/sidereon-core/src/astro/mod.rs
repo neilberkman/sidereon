@@ -64,8 +64,8 @@ pub mod tolerances;
 pub mod xml;
 
 pub use spk::{
-    DafByteOrder, DafFileRecord, DafSpk, Spk, SpkError, SpkSegmentDescriptor, SpkState,
-    SpkStateVector,
+    inertial_frame_name, inertial_frame_rotation, DafByteOrder, DafFileRecord, DafSpk, Spk,
+    SpkError, SpkKernels, SpkSegmentDescriptor, SpkState, SpkStateVector,
 };
 
 #[cfg(all(feature = "sgp4-debug-oracle", sgp4_oracle_built))]

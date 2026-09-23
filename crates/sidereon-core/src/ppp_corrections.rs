@@ -7,9 +7,12 @@
 
 use crate::astro::angles::beta_angle_from_cos_rad;
 use crate::astro::bodies::{sun_moon_ecef, SunMoon};
+use crate::astro::frames::transforms::{FrameTransformError, Ut1Gate};
 use crate::astro::math::vec3::{add3, cross3, dot3, neg3, norm3, scale3, sub3, unit3};
 use crate::astro::time::model::{Instant, JulianDateSplit, TimeScale};
-use crate::astro::time::{CoverageError, TimeScaleInputErrorKind, TimeScales, ValidityMode};
+use crate::astro::time::{
+    CoverageError, TimeScaleInputErrorKind, TimeScales, Validated, ValidityMode,
+};
 use crate::validate;
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
@@ -428,11 +431,50 @@ pub enum PppCorrectionsError {
 }
 
 /// Build static PPP correction tables for a precise-orbit arc.
+///
+/// The Sun and Moon behind the solid Earth tide, phase wind-up and satellite
+/// antenna corrections are rotated into ITRF with UT1, so an epoch outside the
+/// UT1 table is refused when any of those is enabled; see
+/// [`build_with_validity`].
 pub fn build(
     sp3: &Sp3,
     epochs: &[PppCorrectionEpoch],
     receiver_ecef_m: [f64; 3],
     options: &PppCorrectionsOptions,
+) -> Result<PppCorrections, PppCorrectionsError> {
+    build_with_validity(sp3, epochs, receiver_ecef_m, options, ValidityMode::Strict)
+        .map(|validated| validated.value)
+}
+
+/// [`build`] under an explicit UT1 [`ValidityMode`]: [`ValidityMode::Strict`]
+/// refuses an epoch outside the UT1 table with
+/// [`CoverageError::OutsideCoverage`]; [`ValidityMode::Permissive`] evaluates
+/// the Sun and Moon there with the long-term UT1 and reports the first
+/// departure in [`Validated::degraded`].
+pub fn build_with_validity(
+    sp3: &Sp3,
+    epochs: &[PppCorrectionEpoch],
+    receiver_ecef_m: [f64; 3],
+    options: &PppCorrectionsOptions,
+    mode: ValidityMode,
+) -> Result<Validated<PppCorrections>, PppCorrectionsError> {
+    let gate = Ut1Gate::new(mode);
+    let corrections = build_gated(sp3, epochs, receiver_ecef_m, options, &gate)?;
+    Ok(Validated {
+        value: corrections,
+        degraded: gate
+            .finish(())
+            .expect("every UT1 refusal is returned where it happens")
+            .degraded,
+    })
+}
+
+fn build_gated(
+    sp3: &Sp3,
+    epochs: &[PppCorrectionEpoch],
+    receiver_ecef_m: [f64; 3],
+    options: &PppCorrectionsOptions,
+    gate: &Ut1Gate,
 ) -> Result<PppCorrections, PppCorrectionsError> {
     validate_receiver_state(receiver_ecef_m)?;
 
@@ -467,12 +509,12 @@ pub fn build(
 
     for (epoch_index, epoch_row) in epochs.iter().enumerate() {
         let sun_moon = if need_sun_moon {
-            Some(
-                sun_moon_at(epoch_row.epoch).map_err(|source| PppCorrectionsError::Epoch {
+            Some(sun_moon_at(epoch_row.epoch, gate).map_err(|source| {
+                PppCorrectionsError::Epoch {
                     epoch_index,
                     source,
-                })?,
-            )
+                }
+            })?)
         } else {
             None
         };
@@ -948,8 +990,18 @@ fn validate_frequency_pair(
     }
 }
 
-fn sun_moon_at(epoch: CivilDateTime) -> Result<SunMoon, CoverageError> {
-    let ts = time_scales_at(epoch)?;
+fn sun_moon_at(epoch: CivilDateTime, gate: &Ut1Gate) -> Result<SunMoon, CoverageError> {
+    let ts = gate
+        .admit(time_scales_at(epoch)?)
+        .map_err(|error| match error {
+            FrameTransformError::Ut1OutsideCoverage { reason } => {
+                CoverageError::OutsideCoverage(reason)
+            }
+            FrameTransformError::InvalidInput { field, .. } => CoverageError::InvalidInput {
+                field,
+                kind: TimeScaleInputErrorKind::NonFinite,
+            },
+        })?;
     Ok(sun_moon_ecef(&ts).expect("validated time scales produce Sun/Moon vectors"))
 }
 
@@ -968,6 +1020,8 @@ fn time_scales_at(epoch: CivilDateTime) -> Result<TimeScales, CoverageError> {
         kind: TimeScaleInputErrorKind::from(&error),
     })?;
 
+    // Permissive here only builds the value; the caller's `Ut1Gate` applies
+    // the policy to its `ut1_degraded`.
     TimeScales::from_utc_validated(
         civil.year as i32,
         civil.month as i32,
@@ -975,7 +1029,7 @@ fn time_scales_at(epoch: CivilDateTime) -> Result<TimeScales, CoverageError> {
         civil.hour as i32,
         civil.minute as i32,
         civil.second,
-        ValidityMode::Strict,
+        ValidityMode::Permissive,
     )
     .map(|validated| validated.value)
 }

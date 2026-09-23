@@ -111,29 +111,45 @@ pub struct TleElements {
     /// [`TleElements::to_element_set`] converts it through Vallado `days2mdhms`
     /// and split-Julian-date math; [`encode`] emits eight decimal places.
     pub epoch_day_of_year: f64,
-    /// First mean-motion derivative (`ndot`) in rev/day², read from line 1 byte
-    /// indices 33..=42. [`encode`] removes its leading zero, and
-    /// [`TleElements::to_element_set`] passes it to SGP4 for conversion to
-    /// radians per minute squared.
+    /// Line 1 byte indices 33..=42, in rev/day². The two-line format defines
+    /// this field as half the first time derivative of mean motion (ṅ/2), and
+    /// the value here is the field as written, not ṅ. [`encode`] writes it as
+    /// a signed `.NNNNNNNN` value and refuses a magnitude that rounds to 1 or
+    /// more. [`TleElements::to_element_set`] passes it unchanged to SGP4, as
+    /// Vallado's `twoline2rv` does; SGP4 does not propagate with it.
     pub mean_motion_dot: f64,
-    /// Second mean-motion derivative (`nddot`) in rev/day³, read from line 1
-    /// byte indices 44..=51 as a signed assumed-decimal value. The parser and
-    /// encoder use the five-digit mantissa codec, and the element bridge passes
-    /// it to SGP4 for conversion to radians per minute cubed.
+    /// Line 1 byte indices 44..=51, in rev/day³, as a signed assumed-decimal
+    /// value (`±NNNNN±E` meaning `±0.NNNNN × 10^±E`). The format defines this
+    /// field as one sixth of the second time derivative of mean motion (n̈/6),
+    /// and the value here is the field as written. Blank mantissa digits and
+    /// a blank exponent digit read as `0`, as in Vallado's `twoline2rv`.
     pub mean_motion_double_dot: f64,
+    /// The eight characters of the second-derivative field as read, or `None`
+    /// for elements not read from text. [`encode`] writes this text back
+    /// unchanged while it decodes to exactly `mean_motion_double_dot`, so a
+    /// spelling such as `" 00000+0"` or `" 01234-4"` survives a round trip.
+    pub mean_motion_double_dot_text: Option<String>,
     /// Vallado B* drag term in the dimensionless 1/earth-radii TLE convention,
     /// decoded from line 1 byte indices 53..=60 with the assumed-decimal codec.
     /// [`TleElements::to_element_set`] passes it unchanged to SGP4.
     pub bstar: f64,
+    /// The eight characters of the B\* field as read, or `None` for elements
+    /// not read from text. [`encode`] writes this text back unchanged while it
+    /// decodes to exactly `bstar`.
+    pub bstar_text: Option<String>,
     /// Integer ephemeris-type field at line 1 byte index 62 (column 63).
-    /// [`parse`] maps a blank field to zero, fitted TLE records emit zero, and
-    /// [`TleElements::to_element_set`] omits this bookkeeping value from
-    /// [`ElementSet`].
-    pub ephemeris_type: i32,
+    /// A blank field reads as `None` and [`encode`] writes `None` as a blank
+    /// column. Vallado's `twoline2rv` replaces a blank column 63 with `0`
+    /// before reading; the value only selects the propagator, and SGP4 runs
+    /// the same way for `None` as for `0`, so
+    /// [`TleElements::to_element_set`] treats `None` as `0`, as `twoline2rv`
+    /// does, and leaves this bookkeeping value out of [`ElementSet`]. Fitted
+    /// TLE records write `0`.
+    pub ephemeris_type: Option<i32>,
     /// Element-set number from line 1 byte indices 64..=67 (columns 65-68).
-    /// A blank field parses as zero, and [`encode`] writes the value in a
+    /// A blank field reads as `None` and [`encode`] writes `None` as a blank
     /// four-character field.
-    pub elset_number: i32,
+    pub elset_number: Option<i32>,
     /// Inclination in degrees from line 2 byte indices 8..=15, formatted with
     /// four decimal places. [`TleElements::to_element_set`] preserves the degree
     /// value in [`ElementSet`], whose SGP4 initializer converts it to radians.
@@ -163,9 +179,9 @@ pub struct TleElements {
     /// and SGP4 converts it to radians per minute.
     pub mean_motion: f64,
     /// Revolution number at the TLE epoch from line 2 byte indices 63..=67.
-    /// A blank field parses as zero, and [`encode`] writes the value in a
-    /// five-character field for the fit metadata's `rev_at_epoch` value.
-    pub rev_number: i32,
+    /// A blank field reads as `None` and [`encode`] writes `None` as a blank
+    /// five-character field.
+    pub rev_number: Option<i32>,
 }
 
 impl TleElements {
@@ -206,16 +222,52 @@ impl TleElements {
     }
 }
 
-/// A reported checksum discrepancy. The format grammar does not reject a line on
-/// a bad checksum (it is advisory), so this is surfaced for the host to log.
+/// What column 69 of a line held, when it did not confirm the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChecksumWarningKind {
+    /// A digit that differs from the computed checksum.
+    Mismatch {
+        /// Checksum digit found in column 69.
+        expected: u8,
+    },
+    /// A character other than a digit.
+    NotDigit {
+        /// The character found in column 69.
+        found: char,
+    },
+    /// The line ends before column 69, so it carries no checksum.
+    Missing,
+}
+
+/// A line whose column 69 did not confirm its checksum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChecksumWarning {
     /// Human label for the offending line (`"line 1"` / `"line 2"`).
     pub line_label: &'static str,
-    /// Checksum digit found in column 69.
-    pub expected: u8,
-    /// Checksum computed from columns 1-68.
+    /// What column 69 held.
+    pub kind: ChecksumWarningKind,
+    /// Checksum computed from columns 1-68 (or as many as the line has).
     pub computed: u8,
+}
+
+impl fmt::Display for ChecksumWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (label, computed) = (self.line_label, self.computed);
+        match self.kind {
+            ChecksumWarningKind::Mismatch { expected } => write!(
+                f,
+                "{label} checksum digit {expected} does not match the computed checksum {computed}"
+            ),
+            ChecksumWarningKind::NotDigit { found } => write!(
+                f,
+                "{label} column 69 holds {found:?}, not the checksum digit {computed}"
+            ),
+            ChecksumWarningKind::Missing => write!(
+                f,
+                "{label} ends before column 69 and carries no checksum (computed {computed})"
+            ),
+        }
+    }
 }
 
 /// The result of [`parse`]: the elements plus any advisory checksum warnings.
@@ -225,10 +277,30 @@ pub struct ParsedTle {
     /// This is the value passed to [`encode`] for round trips or to
     /// [`TleElements::to_element_set`] for SGP4 initialization.
     pub elements: TleElements,
-    /// Advisory checksum discrepancies, ordered by line 1 then line 2. A
-    /// warning is added only when a full-width line has a numeric column-69
-    /// digit that differs from the modulo-10 checksum of columns 1-68.
+    /// Checksum findings accepted by the policy, ordered by line 1 then
+    /// line 2: a line with no column 69 under either policy, and under
+    /// [`TlePolicy::Lenient`] also a mismatching digit or a non-digit.
     pub checksum_warnings: Vec<ChecksumWarning>,
+}
+
+/// How [`parse_with_policy`] treats column 69, the modulo-10 checksum of
+/// columns 1-68.
+///
+/// Under both policies a line that ends before column 69 is read and
+/// reported with [`ChecksumWarningKind::Missing`]: it carries no checksum, so
+/// nothing in it contradicts the data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TlePolicy {
+    /// Refuse a digit that disagrees ([`TleError::ChecksumMismatch`]) and a
+    /// character that is not a digit ([`TleError::ChecksumNotDigit`]). Either
+    /// is evidence that the line was altered after it was written.
+    #[default]
+    Strict,
+    /// Accept both and report each in [`ParsedTle::checksum_warnings`]. This
+    /// is how Vallado's `twoline2rv` reads, which ignores the checksum; its
+    /// verification set carries element sets (catalog numbers 33333, 33334,
+    /// 33335) whose checksums disagree.
+    Lenient,
 }
 
 /// Failure modes of [`parse`]. Messages mirror the historical reference strings.
@@ -261,6 +333,26 @@ pub enum TleError {
     },
     /// A scalar field could not be parsed.
     Field(String),
+    /// A full-width line's column-69 checksum digit disagreed with the
+    /// checksum of columns 1-68, under [`TlePolicy::Strict`].
+    ChecksumMismatch {
+        /// `"line 1"` or `"line 2"`.
+        line_label: &'static str,
+        /// Checksum digit found in column 69.
+        expected: u8,
+        /// Checksum computed from columns 1-68.
+        computed: u8,
+    },
+    /// A full-width line's column 69 held a character that is not a digit,
+    /// under [`TlePolicy::Strict`].
+    ChecksumNotDigit {
+        /// `"line 1"` or `"line 2"`.
+        line_label: &'static str,
+        /// The character found in column 69.
+        found: char,
+        /// Checksum computed from columns 1-68.
+        computed: u8,
+    },
 }
 
 impl fmt::Display for TleError {
@@ -285,6 +377,22 @@ impl fmt::Display for TleError {
                 write!(f, "TLE invalid field {field}: {reason}")
             }
             TleError::Field(msg) => write!(f, "TLE parse error: {msg}"),
+            TleError::ChecksumMismatch {
+                line_label,
+                expected,
+                computed,
+            } => write!(
+                f,
+                "TLE {line_label} checksum digit {expected} does not match the computed checksum {computed}"
+            ),
+            TleError::ChecksumNotDigit {
+                line_label,
+                found,
+                computed,
+            } => write!(
+                f,
+                "TLE {line_label} column 69 holds {found:?}, not the checksum digit {computed}"
+            ),
         }
     }
 }
@@ -314,12 +422,27 @@ fn map_tle_field(error: validate::FieldError) -> TleError {
     }
 }
 
-/// Parse a two-line element set into [`TleElements`].
+/// Parse a two-line element set into [`TleElements`] under
+/// [`TlePolicy::Strict`].
 ///
-/// The parser is liberal: trailing content past column 69 is trimmed, leading-dot
-/// floats are normalized, and an invalid checksum is reported (via
-/// [`ParsedTle::checksum_warnings`]) rather than rejected.
+/// Trailing content past column 69 is trimmed and leading-dot floats are
+/// normalized, as Vallado's `twoline2rv` reads them. A checksum digit that
+/// disagrees, or a column 69 that is not a digit, is refused; use
+/// [`parse_with_policy`] with [`TlePolicy::Lenient`] to read such a line and
+/// have the finding reported instead.
 pub fn parse(line1: &str, line2: &str) -> Result<ParsedTle, TleError> {
+    parse_with_policy(line1, line2, TlePolicy::Strict)
+}
+
+/// Parse a two-line element set into [`TleElements`] under `policy`.
+///
+/// The field grammar is the same under both policies. They differ only in how
+/// a checksum mismatch is treated; see [`TlePolicy`].
+pub fn parse_with_policy(
+    line1: &str,
+    line2: &str,
+    policy: TlePolicy,
+) -> Result<ParsedTle, TleError> {
     if !is_ascii(line1) || !is_ascii(line2) {
         return Err(TleError::NonAscii);
     }
@@ -330,6 +453,27 @@ pub fn parse(line1: &str, line2: &str) -> Result<ParsedTle, TleError> {
     validate_format(&line1, &line2)?;
     let elements = extract_fields(&line1, &line2)?;
     let checksum_warnings = checksum_warnings(&line1, &line2);
+    if policy == TlePolicy::Strict {
+        for warning in &checksum_warnings {
+            match warning.kind {
+                ChecksumWarningKind::Mismatch { expected } => {
+                    return Err(TleError::ChecksumMismatch {
+                        line_label: warning.line_label,
+                        expected,
+                        computed: warning.computed,
+                    })
+                }
+                ChecksumWarningKind::NotDigit { found } => {
+                    return Err(TleError::ChecksumNotDigit {
+                        line_label: warning.line_label,
+                        found,
+                        computed: warning.computed,
+                    })
+                }
+                ChecksumWarningKind::Missing => {}
+            }
+        }
+    }
 
     Ok(ParsedTle {
         elements,
@@ -418,38 +562,91 @@ pub fn decode_catalog_number(field: &str) -> Result<u32, TleError> {
 
 /// Encode [`TleElements`] as the two 69-character TLE lines (with checksums).
 ///
-/// The caller is responsible for supplying normalized field values (defaults
-/// applied, widths validated); this function performs the fixed-width formatting,
-/// assumed-decimal encoding, and checksum generation.
+/// Each field is written at the precision the format fixes for it (for
+/// example four decimals for an angle), so a value read by [`parse`] is
+/// written back unchanged. An assumed-decimal field (B\*, second derivative)
+/// is written as its source text when that text still decodes to exactly the
+/// stored value. Otherwise it is written as the first spelling that decodes
+/// to the same `f64` bits, trying the normalized exponent `e` (or `-9`, the
+/// smallest single-digit exponent, when `e` is below it) and then the next
+/// four exponents with leading-zero mantissas, and at exponent zero both
+/// signs (`+0` first for a nonzero value, `-0` first for zero). The
+/// normalized spelling comes first, so it is written whenever it is exact; a
+/// leading-zero spelling is written only when the normalized one would change
+/// the value. For example `5e-11` is written `" 00500-8"`, because
+/// `0.05 × 10^-9` rounds one unit in the last place away from it and
+/// `0.005 × 10^-8` does not. A value with no exact spelling, such as a fitted
+/// B\*, is rounded to the normalized five-digit mantissa (at exponent `-9`
+/// for a magnitude below `1e-10`). A value that has no
+/// representation in its field is refused with [`TleError::InvalidField`]
+/// naming the field, never truncated, wrapped, or shifted into a neighbouring
+/// column:
+///
+/// - `classification`: not exactly one printable ASCII character;
+/// - `international_designator`: longer than eight characters or not
+///   printable ASCII;
+/// - `epoch_year`: outside 1957-2056, the years the two-digit field and its
+///   57 pivot can name;
+/// - `epoch_day_of_year`: negative or at least 1000 after rounding to eight
+///   decimals;
+/// - `mean_motion_dot`: magnitude at least 1 after rounding to eight decimals;
+/// - `mean_motion_double_dot`, `bstar`: magnitude at least 1e9, which needs a
+///   two-digit exponent;
+/// - `ephemeris_type`, `elset_number`, `rev_number`: more characters than the
+///   1-, 4- and 5-column fields hold;
+/// - angles and `mean_motion`: wider than their 8- and 11-column fields;
+/// - `eccentricity`: outside `[0, 1)` after rounding to seven decimals;
+/// - any non-finite value.
+///
+/// The catalog number is checked by [`encode_catalog_number`].
 pub fn encode(el: &TleElements) -> Result<(String, String), TleError> {
     let cat = encode_catalog_number_text(&el.catalog_number)?;
-    let cls = &el.classification;
-    let intl = pad_trailing(&el.international_designator, INTL_DESIGNATOR_WIDTH);
+    let cls = encode_classification(&el.classification)?;
+    let intl = encode_international_designator(&el.international_designator)?;
+    let epoch = encode_epoch(el.epoch_year, el.epoch_day_of_year)?;
+    let ndot = encode_ndot(el.mean_motion_dot)?;
+    let nddot = encode_assumed_decimal(
+        el.mean_motion_double_dot,
+        el.mean_motion_double_dot_text.as_deref(),
+        NDDOT_FIELD,
+    )?;
+    let bstar = encode_assumed_decimal(el.bstar, el.bstar_text.as_deref(), BSTAR_FIELD)?;
+    let ephtype = encode_optional_integer(el.ephemeris_type, 1, "ephemeris_type")?;
+    let elnum = encode_optional_integer(el.elset_number, ELSET_WIDTH, "elset_number")?;
 
-    let epoch_two_digit = el.epoch_year.rem_euclid(100);
+    let l1_body = format!("1 {cat}{cls} {intl} {epoch} {ndot} {nddot} {bstar} {ephtype} {elnum}");
+    let line1 = checksummed_line(&l1_body)?;
 
-    let l1_body = format!(
-        "1 {cat}{cls} {intl} {epoch} {ndot} {nddot} {bstar} {ephtype} {elnum}",
-        epoch = fmt_epoch(epoch_two_digit, el.epoch_day_of_year),
-        ndot = fmt_ndot(el.mean_motion_dot),
-        nddot = fmt_assumed_decimal(el.mean_motion_double_dot),
-        bstar = fmt_assumed_decimal(el.bstar),
-        ephtype = el.ephemeris_type,
-        elnum = pad_leading(&el.elset_number.to_string(), ELSET_WIDTH),
-    );
-    let line1 = pad_and_checksum(&l1_body);
+    let inclo = encode_fixed(
+        el.inclination_deg,
+        ANGLE_DECIMALS,
+        ANGLE_WIDTH,
+        "inclination_deg",
+    )?;
+    let raan = encode_fixed(el.raan_deg, ANGLE_DECIMALS, ANGLE_WIDTH, "raan_deg")?;
+    let ecc = encode_eccentricity(el.eccentricity)?;
+    let argp = encode_fixed(
+        el.arg_perigee_deg,
+        ANGLE_DECIMALS,
+        ANGLE_WIDTH,
+        "arg_perigee_deg",
+    )?;
+    let mo = encode_fixed(
+        el.mean_anomaly_deg,
+        ANGLE_DECIMALS,
+        ANGLE_WIDTH,
+        "mean_anomaly_deg",
+    )?;
+    let mm = encode_fixed(
+        el.mean_motion,
+        MEAN_MOTION_DECIMALS,
+        MEAN_MOTION_WIDTH,
+        "mean_motion",
+    )?;
+    let revnum = encode_optional_integer(el.rev_number, REV_WIDTH, "rev_number")?;
 
-    let l2_body = format!(
-        "2 {cat} {inclo} {raan} {ecc} {argp} {mo} {mm}{revnum}",
-        inclo = fmt_angle(el.inclination_deg),
-        raan = fmt_angle(el.raan_deg),
-        ecc = fmt_eccentricity(el.eccentricity),
-        argp = fmt_angle(el.arg_perigee_deg),
-        mo = fmt_angle(el.mean_anomaly_deg),
-        mm = fmt_mean_motion(el.mean_motion),
-        revnum = pad_leading(&el.rev_number.to_string(), REV_WIDTH),
-    );
-    let line2 = pad_and_checksum(&l2_body);
+    let l2_body = format!("2 {cat} {inclo} {raan} {ecc} {argp} {mo} {mm}{revnum}");
+    let line2 = checksummed_line(&l2_body)?;
 
     Ok((line1, line2))
 }
@@ -534,7 +731,9 @@ fn extract_fields(line1: &str, line2: &str) -> Result<TleElements, TleError> {
     let catalog_number = slice_inclusive(line1, 2, 6).trim().to_string();
     decode_catalog_number(&catalog_number)?;
 
-    let two_digit_year = parse_int(slice_inclusive(line1, 18, 19).trim())?;
+    let two_digit_year = parse_epoch_year(slice_inclusive(line1, 18, 19))?;
+    let nddot_text = slice_inclusive(line1, 44, 51);
+    let bstar_text = slice_inclusive(line1, 53, 60);
     let epoch_year = if two_digit_year < YEAR_PIVOT {
         2000 + two_digit_year
     } else {
@@ -548,49 +747,89 @@ fn extract_fields(line1: &str, line2: &str) -> Result<TleElements, TleError> {
         epoch_year,
         epoch_day_of_year: parse_float(slice_inclusive(line1, 20, 31))?,
         mean_motion_dot: parse_float(slice_inclusive(line1, 33, 42))?,
-        mean_motion_double_dot: parse_assumed_decimal(line1, 44, 45, 49, 50, 51)?,
-        bstar: parse_assumed_decimal(line1, 53, 54, 58, 59, 60)?,
-        ephemeris_type: parse_int_or_default(
-            char_at(line1, 62)
-                .map(|c| c.to_string())
-                .unwrap_or_default()
-                .trim(),
-            0,
-        )?,
-        elset_number: parse_int_or_default(slice_inclusive(line1, 64, 67).trim(), 0)?,
+        mean_motion_double_dot: decode_assumed_decimal_text(nddot_text, &NDDOT_FIELD)?,
+        mean_motion_double_dot_text: Some(nddot_text.to_string()),
+        bstar: decode_assumed_decimal_text(bstar_text, &BSTAR_FIELD)?,
+        bstar_text: Some(bstar_text.to_string()),
+        ephemeris_type: parse_optional_int(slice_inclusive(line1, 62, 62).trim())?,
+        elset_number: parse_optional_int(slice_inclusive(line1, 64, 67).trim())?,
         inclination_deg: parse_float(slice_inclusive(line2, 8, 15))?,
         raan_deg: parse_float(slice_inclusive(line2, 17, 24))?,
         eccentricity: parse_eccentricity(slice_inclusive(line2, 26, 32))?,
         arg_perigee_deg: parse_float(slice_inclusive(line2, 34, 41))?,
         mean_anomaly_deg: parse_float(slice_inclusive(line2, 43, 50))?,
         mean_motion: parse_float(slice_inclusive(line2, 52, 62))?,
-        rev_number: parse_int_or_default(slice_inclusive(line2, 63, 67).trim(), 0)?,
+        rev_number: parse_optional_int(slice_inclusive(line2, 63, 67).trim())?,
     })
 }
 
-/// Parse an "assumed decimal" exponent field: `[sign][mantissa][exp_sign][exp]`,
-/// representing `0.<mantissa> * 10^exp`.
-fn parse_assumed_decimal(
-    line: &str,
-    sign_pos: usize,
-    mant_start: usize,
-    mant_end: usize,
-    exp_start: usize,
-    exp_end: usize,
-) -> Result<f64, TleError> {
-    let sign = if char_at(line, sign_pos) == Some('-') {
-        -1.0
-    } else {
-        1.0
+/// How one "assumed decimal" field is read.
+struct AssumedDecimalField {
+    name: &'static str,
+    /// Read blank mantissa digits and a blank exponent digit as `0`. Vallado's
+    /// `twoline2rv` does this for the second mean-motion derivative only.
+    blank_digits_are_zero: bool,
+}
+
+const NDDOT_FIELD: AssumedDecimalField = AssumedDecimalField {
+    name: "mean_motion_double_dot",
+    blank_digits_are_zero: true,
+};
+
+const BSTAR_FIELD: AssumedDecimalField = AssumedDecimalField {
+    name: "bstar",
+    blank_digits_are_zero: false,
+};
+
+/// Read the two-digit epoch year. Vallado reads it with `%2d`, so a blank
+/// tens digit reads as a one-digit year; a sign or any other character is not
+/// a year.
+fn parse_epoch_year(field: &str) -> Result<i32, TleError> {
+    let digits = field.trim();
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(TleError::InvalidField {
+            field: "epoch_year",
+            reason: "must be two digits",
+        });
+    }
+    parse_int(digits)
+}
+
+/// Decode the eight characters of an "assumed decimal" field,
+/// `[sign][mantissa][exp_sign][exp]`, representing `0.<mantissa> * 10^exp`.
+fn decode_assumed_decimal_text(text: &str, field: &AssumedDecimalField) -> Result<f64, TleError> {
+    let sign = match char_at(text, 0) {
+        Some('-') => -1.0,
+        Some(' ') | Some('+') | None => 1.0,
+        Some(_) => {
+            return Err(TleError::InvalidField {
+                field: field.name,
+                reason: "sign column must be blank, '+' or '-'",
+            })
+        }
     };
-    let mantissa_field = format!("0.{}", slice_inclusive(line, mant_start, mant_end));
+    let mantissa_digits = slice_inclusive(text, 1, 5);
+    let mut exponent_text = slice_inclusive(text, 6, 7).to_string();
+    let mantissa_field = if field.blank_digits_are_zero {
+        if exponent_text.ends_with(' ') || exponent_text.len() < 2 {
+            exponent_text = format!("{}0", exponent_text.trim_end());
+        }
+        format!("0.{}", mantissa_digits.replace(' ', "0"))
+    } else {
+        format!("0.{mantissa_digits}")
+    };
     let mantissa = parse_float_raw(mantissa_field.trim())?;
-    let exp = parse_int(slice_inclusive(line, exp_start, exp_end).trim())?;
-    // Decode with `powi` (integer exponent), matching `decode_assumed_decimal_field`
-    // and the SGP4 element-set init: the value reaching SGP4 must be the exact
-    // `mantissa * 10^exp` product the golden path produces, so the canonical
-    // element set built from a parsed TLE drives SGP4 bit-identically.
-    Ok(sign * mantissa * 10.0_f64.powi(exp))
+    let exp = parse_int(exponent_text.trim())?;
+    Ok(assumed_decimal_value(sign, mantissa, exp))
+}
+
+/// `sign * 0.<mantissa> * 10^exp`, decoded with `powi` (integer exponent),
+/// matching `decode_assumed_decimal_field` and the SGP4 element-set init: the
+/// value reaching SGP4 must be the exact `mantissa * 10^exp` product the
+/// golden path produces, so the canonical element set built from a parsed TLE
+/// drives SGP4 bit-identically.
+fn assumed_decimal_value(sign: f64, mantissa: f64, exp: i32) -> f64 {
+    sign * mantissa * 10.0_f64.powi(exp)
 }
 
 /// Parse the implicit-leading-`0.` eccentricity field (spaces read as `0`).
@@ -634,14 +873,13 @@ fn parse_int(text: &str) -> Result<i32, TleError> {
 }
 
 /// Parse an integer field that is optional in practice: a blank (all-spaces)
-/// field falls back to `default`. The element-set and revolution numbers are
-/// bookkeeping fields some generators leave empty; they do not affect SGP4
-/// propagation, so a blank one is a cosmetic absence rather than corruption.
-fn parse_int_or_default(text: &str, default: i32) -> Result<i32, TleError> {
+/// field is `None`. The element-set and revolution numbers are bookkeeping
+/// fields some generators leave empty; they do not affect SGP4 propagation.
+fn parse_optional_int(text: &str) -> Result<Option<i32>, TleError> {
     if text.is_empty() {
-        Ok(default)
+        Ok(None)
     } else {
-        parse_int(text)
+        parse_int(text).map(Some)
     }
 }
 
@@ -653,22 +891,28 @@ fn checksum_warnings(line1: &str, line2: &str) -> Vec<ChecksumWarning> {
 }
 
 fn check_one(label: &'static str, line: &str) -> Option<ChecksumWarning> {
-    if line.chars().count() < MAX_LINE_LEN {
-        return None;
-    }
-    let expected = char_at(line, CHECKSUM_COL)
-        .and_then(|c| c.to_digit(10))
-        .map(|d| d as u8)?;
     let computed = compute_checksum(line);
-    if expected == computed {
-        None
-    } else {
-        Some(ChecksumWarning {
-            line_label: label,
-            expected,
-            computed,
-        })
-    }
+    let kind = match char_at(line, CHECKSUM_COL) {
+        None => ChecksumWarningKind::Missing,
+        Some(found) => match found.to_digit(10) {
+            Some(digit) if digit as u8 == computed => return None,
+            Some(digit) => ChecksumWarningKind::Mismatch {
+                expected: digit as u8,
+            },
+            None => ChecksumWarningKind::NotDigit { found },
+        },
+    };
+    Some(ChecksumWarning {
+        line_label: label,
+        kind,
+        computed,
+    })
+}
+
+/// The modulo-10 checksum of a TLE line's columns 1-68: digits add their
+/// value, `-` adds 1, and every other character adds 0.
+pub fn line_checksum(line: &str) -> u8 {
+    compute_checksum(line)
 }
 
 /// Modulo-10 checksum over columns 1-68: digits add their value, `-` adds 1, all
@@ -811,22 +1055,194 @@ fn fmt_eccentricity(ecc: f64) -> String {
     pad_leading_zeros(digits, ECCENTRICITY_DIGITS)
 }
 
-fn fmt_angle(val: f64) -> String {
-    pad_leading(&fixed_decimals(val, ANGLE_DECIMALS), ANGLE_WIDTH)
+/// Append the checksum to a 68-column body. Every field encoder has already
+/// refused a value wider than its field, so a body of any other width is a
+/// layout fault and is refused rather than truncated.
+fn checksummed_line(body: &str) -> Result<String, TleError> {
+    if body.len() != BODY_LEN {
+        return Err(TleError::Format);
+    }
+    let checksum = compute_checksum(body);
+    Ok(format!("{body}{checksum}"))
 }
 
-fn fmt_mean_motion(val: f64) -> String {
-    pad_leading(
-        &fixed_decimals(val, MEAN_MOTION_DECIMALS),
-        MEAN_MOTION_WIDTH,
-    )
+fn invalid_field(field: &'static str, reason: &'static str) -> TleError {
+    TleError::InvalidField { field, reason }
 }
 
-fn pad_and_checksum(body: &str) -> String {
-    let clamped: String = body.chars().take(BODY_LEN).collect();
-    let padded = pad_trailing(&clamped, BODY_LEN);
-    let checksum = compute_checksum(&padded);
-    format!("{padded}{checksum}")
+fn require_finite(value: f64, field: &'static str) -> Result<(), TleError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(invalid_field(field, "not finite"))
+    }
+}
+
+fn encode_classification(classification: &str) -> Result<char, TleError> {
+    let mut chars = classification.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if (' '..='~').contains(&c) => Ok(c),
+        _ => Err(invalid_field(
+            "classification",
+            "must be exactly one printable ASCII character",
+        )),
+    }
+}
+
+fn encode_international_designator(designator: &str) -> Result<String, TleError> {
+    if designator.len() > INTL_DESIGNATOR_WIDTH
+        || !designator.chars().all(|c| (' '..='~').contains(&c))
+    {
+        return Err(invalid_field(
+            "international_designator",
+            "must be at most eight printable ASCII characters",
+        ));
+    }
+    Ok(pad_trailing(designator, INTL_DESIGNATOR_WIDTH))
+}
+
+fn encode_epoch(year: i32, day_of_year: f64) -> Result<String, TleError> {
+    if !(1900 + YEAR_PIVOT..2000 + YEAR_PIVOT).contains(&year) {
+        return Err(invalid_field(
+            "epoch_year",
+            "outside 1957-2056, the years a two-digit TLE epoch year can name",
+        ));
+    }
+    require_finite(day_of_year, "epoch_day_of_year")?;
+    let days = fixed_decimals(day_of_year, EPOCH_DAY_DECIMALS);
+    if days.starts_with('-') || days.len() > EPOCH_DAY_WIDTH {
+        return Err(invalid_field(
+            "epoch_day_of_year",
+            "must round into [0, 1000) with eight decimals",
+        ));
+    }
+    Ok(fmt_epoch(year.rem_euclid(100), day_of_year))
+}
+
+fn encode_ndot(value: f64) -> Result<String, TleError> {
+    require_finite(value, "mean_motion_dot")?;
+    if !fixed_decimals(value.abs(), NDOT_DECIMALS).starts_with("0.") {
+        return Err(invalid_field(
+            "mean_motion_dot",
+            "magnitude must round below 1 with eight decimals",
+        ));
+    }
+    Ok(fmt_ndot(value))
+}
+
+/// Encode an assumed-decimal field. See [`encode`] for the spelling order.
+/// A value whose normalized exponent needs two digits is refused. A magnitude
+/// below `1e-10` is spelled from exponent `-9` upward; with no exact
+/// spelling it is rounded at exponent `-9`, whose resolution is `1e-14`.
+fn encode_assumed_decimal(
+    value: f64,
+    source: Option<&str>,
+    field: AssumedDecimalField,
+) -> Result<String, TleError> {
+    require_finite(value, field.name)?;
+    if let Some(text) = source {
+        let restates = text.len() == 8
+            && text.is_ascii()
+            && decode_assumed_decimal_text(text, &field)
+                .is_ok_and(|decoded| decoded.to_bits() == value.to_bits());
+        if restates {
+            return Ok(text.to_string());
+        }
+    }
+
+    let normalized = fmt_assumed_decimal(value);
+    let exponent = normalized[1 + ASSUMED_DECIMAL_MANTISSA_DIGITS..]
+        .parse::<i32>()
+        .map_err(|_| TleError::Field(format!("invalid exponent in {normalized:?}")))?;
+    if exponent > 9 {
+        return Err(invalid_field(
+            field.name,
+            "magnitude must be below 1e9, the largest single-digit exponent",
+        ));
+    }
+    let sign = if value.is_sign_negative() { '-' } else { ' ' };
+    let first = exponent.max(-9);
+    for exp in first..=(first + 4).min(9) {
+        let Some(digits) = assumed_decimal_mantissa(value, exp) else {
+            continue;
+        };
+        let exponent_signs: &[char] = match (exp, value == 0.0) {
+            (0, true) => &['-', '+'],
+            (0, false) => &['+', '-'],
+            (e, _) if e > 0 => &['+'],
+            _ => &['-'],
+        };
+        for &exp_sign in exponent_signs {
+            let text = format!("{sign}{digits}{exp_sign}{}", exp.abs());
+            if decode_assumed_decimal_text(&text, &field)
+                .is_ok_and(|decoded| decoded.to_bits() == value.to_bits())
+            {
+                return Ok(text);
+            }
+        }
+    }
+
+    // No spelling decodes to these bits: round at the normalized exponent.
+    if exponent >= -9 {
+        return Ok(normalized);
+    }
+    match assumed_decimal_mantissa(value, -9) {
+        Some(digits) if !digits.bytes().all(|b| b == b'0') => Ok(format!("{sign}{digits}-9")),
+        _ => Ok(fmt_assumed_decimal(0.0)),
+    }
+}
+
+/// The five mantissa digits of `|value| / 10^exp` rounded to five decimals,
+/// or `None` when the rounded mantissa reaches 1.
+fn assumed_decimal_mantissa(value: f64, exp: i32) -> Option<String> {
+    let scaled = value.abs() / pow(10.0, f64::from(exp));
+    let mantissa = fixed_decimals(scaled, ASSUMED_DECIMAL_MANTISSA_DECIMALS);
+    let digits = mantissa.strip_prefix("0.")?;
+    Some(digits.to_string())
+}
+
+fn encode_optional_integer(
+    value: Option<i32>,
+    width: usize,
+    field: &'static str,
+) -> Result<String, TleError> {
+    match value {
+        Some(value) => encode_integer(value, width, field),
+        None => Ok(" ".repeat(width)),
+    }
+}
+
+fn encode_integer(value: i32, width: usize, field: &'static str) -> Result<String, TleError> {
+    let text = value.to_string();
+    if text.len() > width {
+        return Err(invalid_field(field, "wider than its fixed-width TLE field"));
+    }
+    Ok(pad_leading(&text, width))
+}
+
+fn encode_fixed(
+    value: f64,
+    decimals: usize,
+    width: usize,
+    field: &'static str,
+) -> Result<String, TleError> {
+    require_finite(value, field)?;
+    let text = fixed_decimals(value, decimals);
+    if text.len() > width {
+        return Err(invalid_field(field, "wider than its fixed-width TLE field"));
+    }
+    Ok(pad_leading(&text, width))
+}
+
+fn encode_eccentricity(value: f64) -> Result<String, TleError> {
+    require_finite(value, "eccentricity")?;
+    if !fixed_decimals(value, ECCENTRICITY_DECIMALS).starts_with("0.") {
+        return Err(invalid_field(
+            "eccentricity",
+            "must round into [0, 1) with seven decimals",
+        ));
+    }
+    Ok(fmt_eccentricity(value))
 }
 
 /// Fixed-decimal formatting matching Erlang `float_to_binary/2` `{decimals, n}`
@@ -884,7 +1300,10 @@ mod tests {
         assert_eq!(el.inclination_deg, 51.6414);
         assert_eq!(el.eccentricity, 0.0003435);
         assert_eq!(el.mean_motion, 15.54005638);
-        assert_eq!(el.rev_number, 12110);
+        assert_eq!(el.rev_number, Some(12110));
+        assert_eq!(el.elset_number, Some(999));
+        assert_eq!(el.bstar_text.as_deref(), Some(" 31745-4"));
+        assert_eq!(el.mean_motion_double_dot_text.as_deref(), Some(" 00000-0"));
         assert!(parsed.checksum_warnings.is_empty());
     }
 
@@ -1049,14 +1468,400 @@ mod tests {
         assert_eq!(round_trip_line2, line2);
     }
 
+    /// Replace columns and write the checksum the new line carries.
+    fn with_columns(line: &str, start: usize, text: &str) -> String {
+        let mut out = with_raw_columns(line, start, text);
+        let checksum = line_checksum(&out);
+        out.replace_range(68..69, &checksum.to_string());
+        out
+    }
+
+    /// Replace columns and leave column 69 as it was.
+    fn with_raw_columns(line: &str, start: usize, text: &str) -> String {
+        let mut out = line.to_string();
+        out.replace_range(start..start + text.len(), text);
+        out
+    }
+
+    fn iss_elements() -> TleElements {
+        parse(ISS_L1, ISS_L2).unwrap().elements
+    }
+
+    fn encode_error(mutate: impl FnOnce(&mut TleElements)) -> TleError {
+        let mut el = iss_elements();
+        mutate(&mut el);
+        encode(&el).expect_err("value has no representation in its field")
+    }
+
+    type Mutation = Box<dyn FnOnce(&mut TleElements)>;
+
+    fn mutation(f: impl FnOnce(&mut TleElements) + 'static) -> Mutation {
+        Box::new(f)
+    }
+
+    fn refused(field: &'static str) -> impl Fn(TleError) -> bool {
+        move |error| matches!(error, TleError::InvalidField { field: f, .. } if f == field)
+    }
+
+    #[test]
+    fn encode_refuses_each_value_its_field_cannot_hold_by_name() {
+        let cases: Vec<(&'static str, Mutation)> = vec![
+            (
+                "classification",
+                mutation(|el: &mut TleElements| el.classification = String::new()),
+            ),
+            (
+                "classification",
+                mutation(|el: &mut TleElements| el.classification = "UU".into()),
+            ),
+            (
+                "international_designator",
+                mutation(|el: &mut TleElements| el.international_designator = "98067ABCD".into()),
+            ),
+            (
+                "epoch_year",
+                mutation(|el: &mut TleElements| el.epoch_year = 2057),
+            ),
+            (
+                "epoch_year",
+                mutation(|el: &mut TleElements| el.epoch_year = 1956),
+            ),
+            (
+                "epoch_day_of_year",
+                mutation(|el: &mut TleElements| el.epoch_day_of_year = 1000.0),
+            ),
+            (
+                "epoch_day_of_year",
+                mutation(|el: &mut TleElements| el.epoch_day_of_year = -1.0),
+            ),
+            (
+                "mean_motion_dot",
+                mutation(|el: &mut TleElements| el.mean_motion_dot = 1.0),
+            ),
+            (
+                "mean_motion_dot",
+                mutation(|el: &mut TleElements| el.mean_motion_dot = f64::NAN),
+            ),
+            (
+                "mean_motion_double_dot",
+                mutation(|el: &mut TleElements| el.mean_motion_double_dot = 2.0e9),
+            ),
+            (
+                "bstar",
+                mutation(|el: &mut TleElements| el.bstar = f64::INFINITY),
+            ),
+            (
+                "ephemeris_type",
+                mutation(|el: &mut TleElements| el.ephemeris_type = Some(10)),
+            ),
+            (
+                "elset_number",
+                mutation(|el: &mut TleElements| el.elset_number = Some(10_000)),
+            ),
+            (
+                "rev_number",
+                mutation(|el: &mut TleElements| el.rev_number = Some(100_000)),
+            ),
+            (
+                "inclination_deg",
+                mutation(|el: &mut TleElements| el.inclination_deg = 1000.0),
+            ),
+            (
+                "raan_deg",
+                mutation(|el: &mut TleElements| el.raan_deg = -100.0),
+            ),
+            (
+                "arg_perigee_deg",
+                mutation(|el: &mut TleElements| el.arg_perigee_deg = 1234.5),
+            ),
+            (
+                "mean_anomaly_deg",
+                mutation(|el: &mut TleElements| el.mean_anomaly_deg = f64::NAN),
+            ),
+            (
+                "mean_motion",
+                mutation(|el: &mut TleElements| el.mean_motion = 100.0),
+            ),
+            (
+                "eccentricity",
+                mutation(|el: &mut TleElements| el.eccentricity = 1.0),
+            ),
+            (
+                "eccentricity",
+                mutation(|el: &mut TleElements| el.eccentricity = 0.99999996),
+            ),
+            (
+                "eccentricity",
+                mutation(|el: &mut TleElements| el.eccentricity = -0.1),
+            ),
+        ];
+        for (field, mutate) in cases {
+            let error = encode_error(mutate);
+            assert!(refused(field)(error.clone()), "{field}: {error:?}");
+        }
+    }
+
+    #[test]
+    fn encode_writes_the_widest_values_each_field_holds() {
+        let mut el = iss_elements();
+        el.epoch_year = 2056;
+        el.epoch_day_of_year = 999.5;
+        el.elset_number = Some(9999);
+        el.rev_number = Some(99_999);
+        el.ephemeris_type = Some(9);
+        el.mean_motion = 99.99999999;
+        el.inclination_deg = 999.9999;
+        el.raan_deg = -99.9999;
+        el.eccentricity = 0.9999999;
+        el.mean_motion_dot = -0.99999999;
+        let (line1, line2) = encode(&el).unwrap();
+        assert_eq!(line1.len(), 69);
+        assert_eq!(line2.len(), 69);
+        let back = parse_with_policy(&line1, &line2, TlePolicy::Strict)
+            .unwrap()
+            .elements;
+        assert_eq!(back, el);
+    }
+
+    #[test]
+    fn epoch_year_outside_the_pivot_window_is_not_wrapped() {
+        // 2060 would be written as "60" and read back as 1960.
+        let error = encode_error(|el| el.epoch_year = 2060);
+        assert!(refused("epoch_year")(error));
+        for year in [1957, 1999, 2000, 2056] {
+            let mut el = iss_elements();
+            el.epoch_year = year;
+            let (line1, line2) = encode(&el).unwrap();
+            assert_eq!(parse(&line1, &line2).unwrap().elements.epoch_year, year);
+        }
+    }
+
+    #[test]
+    fn tiny_assumed_decimal_values_are_spelled_from_the_smallest_exponent() {
+        let mut el = iss_elements();
+        el.bstar = 5.0e-11;
+        el.mean_motion_double_dot = -1.0e-15;
+        let (line1, line2) = encode(&el).unwrap();
+        // 5e-11 needs exponent -10 when normalized, so the spelling starts
+        // at -9. " 05000-9" decodes to 0.05 * 10^-9, one unit in the last
+        // place above 5e-11; " 00500-8" decodes to 0.005 * 10^-8, which is
+        // 5e-11 exactly, so it is the first exact spelling.
+        assert_ne!((0.05 * 10.0_f64.powi(-9)).to_bits(), 5.0e-11_f64.to_bits());
+        assert_eq!((0.005 * 10.0_f64.powi(-8)).to_bits(), 5.0e-11_f64.to_bits());
+        assert_eq!(slice_inclusive(&line1, 53, 60), " 00500-8");
+        // -1e-15 is below the 1e-14 resolution at exponent -9 and has no
+        // exact spelling, so it rounds to zero.
+        assert_eq!(slice_inclusive(&line1, 44, 51), " 00000-0");
+        let back = parse(&line1, &line2).unwrap().elements;
+        assert_eq!(back.bstar.to_bits(), el.bstar.to_bits());
+        assert_eq!(encode(&back).unwrap(), (line1, line2));
+
+        // A value with no exact spelling below 1e-10 rounds at exponent -9.
+        let mut rounded = iss_elements();
+        rounded.bstar = 1.23456789e-11;
+        let (line1, _) = encode(&rounded).unwrap();
+        assert_eq!(slice_inclusive(&line1, 53, 60), " 01235-9");
+    }
+
+    #[test]
+    fn epoch_year_must_be_digits() {
+        let line1 = with_columns(ISS_L1, 18, "-1");
+        assert!(matches!(
+            parse(&line1, ISS_L2),
+            Err(TleError::InvalidField {
+                field: "epoch_year",
+                ..
+            })
+        ));
+        // Vallado reads the field with %2d, so a blank tens digit is a
+        // one-digit year.
+        let line1 = with_columns(ISS_L1, 18, " 8");
+        assert_eq!(parse(&line1, ISS_L2).unwrap().elements.epoch_year, 2008);
+    }
+
+    #[test]
+    fn assumed_decimal_sign_column_must_be_a_sign() {
+        let line1 = with_columns(ISS_L1, 53, "5");
+        assert!(matches!(
+            parse(&line1, ISS_L2),
+            Err(TleError::InvalidField { field: "bstar", .. })
+        ));
+        let blank_sign = parse(ISS_L1, ISS_L2).unwrap().elements.bstar;
+        let line1 = with_columns(ISS_L1, 53, "+");
+        assert_eq!(parse(&line1, ISS_L2).unwrap().elements.bstar, blank_sign);
+        let line1 = with_columns(ISS_L1, 53, "-");
+        assert_eq!(parse(&line1, ISS_L2).unwrap().elements.bstar, -blank_sign);
+    }
+
+    #[test]
+    fn second_derivative_blank_digits_read_as_zero_like_vallado() {
+        let line1 = with_columns(ISS_L1, 44, "        ");
+        assert_eq!(
+            parse(&line1, ISS_L2)
+                .unwrap()
+                .elements
+                .mean_motion_double_dot,
+            0.0
+        );
+        let line1 = with_columns(ISS_L1, 44, "- 1234- ");
+        assert_eq!(
+            parse(&line1, ISS_L2)
+                .unwrap()
+                .elements
+                .mean_motion_double_dot,
+            -0.01234
+        );
+        // B* keeps the plain grammar: Vallado does not zero-fill it either.
+        let line1 = with_columns(ISS_L1, 53, "        ");
+        assert!(parse(&line1, ISS_L2).is_err());
+    }
+
+    #[test]
+    fn strict_policy_refuses_a_checksum_mismatch() {
+        let bad_l2 = with_raw_columns(ISS_L2, 68, "0");
+        assert_eq!(
+            parse_with_policy(ISS_L1, &bad_l2, TlePolicy::Strict),
+            Err(TleError::ChecksumMismatch {
+                line_label: "line 2",
+                expected: 0,
+                computed: 6,
+            })
+        );
+        assert_eq!(TlePolicy::default(), TlePolicy::Strict);
+        assert_eq!(
+            parse(ISS_L1, &bad_l2),
+            parse_with_policy(ISS_L1, &bad_l2, TlePolicy::Strict),
+            "parse is strict"
+        );
+        let lenient = parse_with_policy(ISS_L1, &bad_l2, TlePolicy::Lenient).unwrap();
+        assert_eq!(
+            lenient.checksum_warnings,
+            vec![ChecksumWarning {
+                line_label: "line 2",
+                kind: ChecksumWarningKind::Mismatch { expected: 0 },
+                computed: 6,
+            }]
+        );
+        assert!(parse_with_policy(ISS_L1, ISS_L2, TlePolicy::Strict).is_ok());
+    }
+
+    #[test]
+    fn a_non_digit_checksum_column_is_refused_strictly_and_reported_leniently() {
+        let bad_l1 = with_raw_columns(ISS_L1, 68, "X");
+        assert_eq!(
+            parse(&bad_l1, ISS_L2),
+            Err(TleError::ChecksumNotDigit {
+                line_label: "line 1",
+                found: 'X',
+                computed: 3,
+            })
+        );
+        let lenient = parse_with_policy(&bad_l1, ISS_L2, TlePolicy::Lenient).unwrap();
+        assert_eq!(
+            lenient.checksum_warnings,
+            vec![ChecksumWarning {
+                line_label: "line 1",
+                kind: ChecksumWarningKind::NotDigit { found: 'X' },
+                computed: 3,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_line_without_a_checksum_is_read_and_reported_under_both_policies() {
+        let short_l1 = &ISS_L1[..68];
+        for policy in [TlePolicy::Strict, TlePolicy::Lenient] {
+            let parsed = parse_with_policy(short_l1, ISS_L2, policy).unwrap();
+            assert_eq!(parsed.elements, iss_elements());
+            assert_eq!(
+                parsed.checksum_warnings,
+                vec![ChecksumWarning {
+                    line_label: "line 1",
+                    kind: ChecksumWarningKind::Missing,
+                    computed: 3,
+                }]
+            );
+        }
+    }
+
+    #[test]
+    fn assumed_decimal_source_spelling_is_restated() {
+        // A leading-zero mantissa and a `+0` zero exponent are both legal
+        // spellings; the writer restates them rather than normalizing.
+        let line1 = with_columns(&with_columns(ISS_L1, 44, " 00000+0"), 53, " 01234-4");
+        let parsed = parse(&line1, ISS_L2).unwrap().elements;
+        assert_eq!(parsed.mean_motion_double_dot, 0.0);
+        assert_eq!(parsed.bstar, 0.01234 * 10.0_f64.powi(-4));
+        assert_eq!(parsed.bstar_text.as_deref(), Some(" 01234-4"));
+        let (out1, out2) = encode(&parsed).unwrap();
+        assert_eq!(out1, line1);
+        assert_eq!(out2, ISS_L2);
+    }
+
+    #[test]
+    fn assumed_decimal_without_source_text_takes_the_first_exact_spelling() {
+        let mut el = iss_elements();
+        el.bstar_text = None;
+        el.mean_motion_double_dot_text = None;
+        el.mean_motion_double_dot = 0.0;
+        // 0.01234e-4 need not equal 0.1234e-5 in binary; the writer takes the
+        // first spelling from the normalized exponent upward that decodes to
+        // the same bits.
+        el.bstar = 0.01234 * 10.0_f64.powi(-4);
+        let (line1, _) = encode(&el).unwrap();
+        let written = slice_inclusive(&line1, 53, 60).to_string();
+        let back = parse(&line1, ISS_L2).unwrap().elements;
+        assert_eq!(back.bstar.to_bits(), el.bstar.to_bits(), "{written}");
+        assert_eq!(slice_inclusive(&line1, 44, 51), " 00000-0");
+
+        // A stale source text (the value was changed) is not restated.
+        let mut changed = iss_elements();
+        changed.bstar = 0.5e-4;
+        let (line1, _) = encode(&changed).unwrap();
+        assert_eq!(slice_inclusive(&line1, 53, 60), " 50000-4");
+
+        // Negative zero keeps its sign.
+        let mut negative_zero = iss_elements();
+        negative_zero.mean_motion_double_dot = -0.0;
+        let (line1, _) = encode(&negative_zero).unwrap();
+        assert_eq!(slice_inclusive(&line1, 44, 51), "-00000-0");
+    }
+
+    #[test]
+    fn blank_elset_and_revolution_numbers_read_as_none_and_write_back_blank() {
+        let line1 = with_columns(ISS_L1, 64, "    ");
+        let line2 = with_columns(ISS_L2, 63, "     ");
+        let parsed = parse(&line1, &line2).unwrap().elements;
+        assert_eq!(parsed.elset_number, None);
+        assert_eq!(parsed.rev_number, None);
+        assert_eq!(encode(&parsed).unwrap(), (line1, line2));
+
+        // A blank ephemeris type reads as None and writes back blank; the
+        // element set is the one a stated 0 gives, as in twoline2rv.
+        let line1 = with_columns(ISS_L1, 62, " ");
+        let parsed = parse(&line1, ISS_L2).unwrap().elements;
+        assert_eq!(parsed.ephemeris_type, None);
+        let (written, _) = encode(&parsed).unwrap();
+        assert_eq!(written, line1);
+        assert_eq!(
+            parsed.to_element_set().unwrap(),
+            iss_elements().to_element_set().unwrap()
+        );
+    }
+
     #[test]
     fn checksum_mismatch_is_reported_not_rejected() {
-        // Flip the final checksum digit of line 1 (9993 -> 9990).
+        // Flip the final checksum digit of line 1 (9993 -> 9990). Lenient is
+        // the policy Vallado's twoline2rv reads with, which its verification
+        // set (catalog numbers 33333-33335) depends on.
         let bad_l1 = "1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9990";
-        let parsed = parse(bad_l1, ISS_L2).unwrap();
+        let parsed = parse_with_policy(bad_l1, ISS_L2, TlePolicy::Lenient).unwrap();
         assert_eq!(parsed.checksum_warnings.len(), 1);
         assert_eq!(parsed.checksum_warnings[0].line_label, "line 1");
-        assert_eq!(parsed.checksum_warnings[0].expected, 0);
+        assert_eq!(
+            parsed.checksum_warnings[0].kind,
+            ChecksumWarningKind::Mismatch { expected: 0 }
+        );
         assert_eq!(parsed.checksum_warnings[0].computed, 3);
     }
 }

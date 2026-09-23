@@ -29,4 +29,25 @@ pub enum PropagationError {
     /// preserves contextual text added by the calling force implementation.
     #[error("Force model failure: {0}")]
     ForceModelFailure(String),
+
+    /// A force model read UT1 (through the body-fixed frame provider) at an
+    /// epoch outside the UT1 table, and the provider did not accept it.
+    #[error("Force model reads UT1 outside the table: {0}")]
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
+}
+
+impl PropagationError {
+    /// A body-fixed frame failure: a UT1 refusal keeps its type, any other
+    /// failure is described under `context`.
+    pub(crate) fn from_frame(
+        context: &str,
+        error: crate::astro::frames::transforms::FrameTransformError,
+    ) -> Self {
+        match error {
+            crate::astro::frames::transforms::FrameTransformError::Ut1OutsideCoverage {
+                reason,
+            } => Self::Ut1OutsideCoverage(reason),
+            error => Self::ForceModelFailure(format!("{context}: {error}")),
+        }
+    }
 }

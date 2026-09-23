@@ -1400,6 +1400,243 @@ All notable changes to `sidereon-core` are documented here.
 - **Breaking.** `SbasCorrectionStore::ingest` applies the new `SbasMessage::validate`, the validation `SbasBlock::encode` applies, and refuses with `Error::SbasEncode` a message the wire form cannot carry as held, changing nothing: among others, reserved segments that do not match the message layout and field values wider than their wire field, which it stored as held. It applied fast corrections whose message type is outside 2 through 5 to the first mask block, clamped a type 24 block ID above 3 to 3, applied a rate, clock drift or time of day held by a record of a half without the velocity code, took the message epoch as the reference time of a velocity-code record without a time of day, and applied any number of records in a half. The decoder produces only messages that pass.
 - The SBAS log readers read NovAtel OEM4 `#RAWWAASFRAMEA` and OEM3 `$FRMA` lines as RTKLIB `readmsgs` reads them, in both `parse_ems_log` and `parse_rtklib_log`: GPS week and seconds, PRN, and for OEM4 the message ID, kept as the declared message type, and the frame. Both readers skipped these lines. An OEM4 line's NovAtel CRC-32 and an OEM3 line's XOR checksum are checked when written; a line whose checksum differs, or is not written as one, is listed in `SbasLog::refused_lines` as `SbasLineRefusal::ChecksumMismatch` and the rest of the log is read. An OEM3 week below 1024 is a 10-bit week, resolved to the full week closest to `SbasLogOptions::reference_week`; RTKLIB adds 1024, which names the right week only from 1999 to 2019. Without a reference week the line is listed in `SbasLog::refused_lines` as `SbasLineRefusal::AmbiguousWeek` and the rest of the log is read.
 - A GEO without a fresh fast correction follows `SbasSolveMode` in `SbasCorrectedEphemeris` and `SbasCorrectedEphemerisOwned`: under `SbasOnly` it has no state and no velocity, where its navigation state was returned with a zero fast correction added. Under `MixedAugmentation` the uncorrected navigation state is returned, as before.
+- **Breaking.** `parse_tle_file` keeps every element set that reads and reports
+  every other non-blank line: `TleFile::skipped` becomes the `rejected` list of
+  `RejectedTleRecord`s, each with its one-based line number, its name line, and
+  a `TleRecordIssue` (`Invalid` with the parse or SGP4 error, `MissingLine2`,
+  `OrphanLine2`, `OrphanName`); `skipped()` counts them. A stray line 1 or line
+  2 and a name line with no element set after it were dropped without a report.
+  `NamedSatellite` gains `line_number` and `checksum_warnings`.
+- **Breaking.** TLE reading follows a `TlePolicy`, `Strict` by default in
+  `tle::parse`, `Satellite::from_tle` and `parse_tle_file`: a column-69 digit
+  that disagrees with the checksum (`TleError::ChecksumMismatch`) or a column 69
+  that is not a digit (`TleError::ChecksumNotDigit`) is refused. These were
+  accepted before. `TlePolicy::Lenient`, through `tle::parse_with_policy`,
+  `Satellite::from_tle_with_policy` and `parse_tle_file_with_policy`, reads them
+  and reports each one, as Vallado's `twoline2rv` reads; its verification set
+  carries element sets 33333, 33334 and 33335 with mismatched checksums. A line
+  that ends before column 69 is read and reported under both policies.
+  `ChecksumWarning` replaces `expected` with `kind` (`Mismatch`, `NotDigit`,
+  `Missing`). `tle::line_checksum` computes the checksum. A `Satellite` restored
+  from its serialized lines is read leniently, so every satellite the crate
+  serializes reads back.
+- **Breaking.** `tle::encode` restates what `tle::parse` read. `TleElements`
+  keeps each assumed-decimal field's source text in `bstar_text` and
+  `mean_motion_double_dot_text` and writes it back while it decodes to exactly
+  the stored value, so `" 00000+0"` no longer becomes `" 00000-0"` and
+  `" 01234-4"` no longer becomes `" 12340-5"`, which could decode one unit in
+  the last place away. Without the text the
+  writer takes the first spelling that decodes to the same bits, from the
+  normalized exponent up four places, and rounds only a value with no exact
+  spelling. `elset_number`, `rev_number` and `ephemeris_type` are `Option<i32>`:
+  a blank field reads as `None` and is written blank, where it read as 0 and was
+  written as 0. `to_element_set` treats a blank ephemeris type as 0, as
+  `twoline2rv` does.
+- **Breaking.** `tle::encode` refuses by name, with `TleError::InvalidField`,
+  every value its field cannot hold: an epoch year outside 1957-2056 (it was
+  written modulo 100 and read back a century away), a classification that is not
+  one printable character, an international designator over eight characters, an
+  epoch day, first derivative, angle, eccentricity, mean motion, ephemeris type,
+  element set number or revolution number wider than its column, a B\* or second
+  derivative of magnitude 1e9 or more, and any non-finite value. Such values
+  were written wider than their field, which shifted the later columns, and the
+  line was then cut at column 68, which dropped the end of the revolution or
+  element set number. A B\* or second derivative below 1e-10 is spelled from
+  exponent `-9` upward, where it previously took a two-digit exponent. `fit_tle`
+  reports these through `TleFitError::TleEncode`.
+- The TLE reader refuses an epoch year that is not digits (`-1` read as 1999)
+  and an assumed-decimal sign column holding anything but blank, `+` or `-` (a
+  digit there was dropped). It reads blank digits of the second-derivative field
+  as `0`, as `twoline2rv` does, where it refused them. The documentation of
+  `TleElements` and `ElementSet` states that the first- and second-derivative
+  fields hold the TLE values ṅ/2 and n̈/6 as written.
+- **Breaking.** SPK queries follow CSPICE `SPKSFS` and `SPKGEO` statement for
+  statement. For each body the one segment used is the highest-priority segment
+  whose target is that body and whose coverage includes the epoch: the
+  last-loaded kernel first, and within a kernel the last segment first. The
+  target and observer chains are joined at their first common body. The previous
+  search walked segments in either direction, so a later segment naming the body
+  as its center could win over the body's own segment, and it fell back to
+  lower-priority segments on an unsupported type, a frame mismatch or a
+  position-only leg. An unsupported type is now an error, and a query whose
+  target equals its center returns the zero state, as `SPKGEO` does.
+- **Breaking.** Legs in different NAIF inertial frames (1-21) are rotated with
+  the constant `CHGIRF` rotations, built as SPICELIB's `IRFROT` builds them,
+  where they were refused. `SpkError::FrameMismatch` is replaced by
+  `SpkError::NonInertialFrameRotation`, returned only for a rotation involving
+  another frame. `spk_state_in_frame` names the output frame; `spk_state`
+  returns the frame of the first segment evaluated, which `SpkState::frame`
+  states. `inertial_frame_rotation`, `inertial_frame_name` and
+  `NAIF_INERTIAL_FRAMES` expose the table. `SpkKernels` holds several kernels in
+  load order, a later-loaded kernel taking precedence.
+- **Breaking.** `SpkState::velocity_km_s` is `[f64; 3]`. Type 2 segments return
+  velocity, the derivative of the Chebyshev expansion divided by the record
+  radius, as CSPICE `SPKE02` does through `CHBINT`; the velocity was `None`, and
+  `observe` replaced it with a one-second finite difference, which is removed
+  with `ObserveError::UnsupportedSpkFrame`. `evaluate_type2_state` returns
+  position and velocity. Type 2 and 3 values are evaluated with the `CHBINT` and
+  `CHBVAL` recurrences read straight from the kernel bytes, so they can change
+  in the last bits. An epoch inside a segment's coverage but past `INIT + N *
+  INTLEN` is evaluated with the last record, as `SPKR02` and `SPKR03` do, where
+  it was refused.
+- **Breaking.** `ValidityMode::default()` is `Strict`, so `from_utc_validated`
+  refuses an instant outside UT1 coverage unless the caller asks for
+  `Permissive`. `TimeScales` gains `ut1_degraded`, set by every constructor.
+  Outside the UT1 table delta-T follows the curve Skyfield 1.54 `build_delta_t`
+  splices around its table: Table S15 (2020) of Morrison, Stephenson, Hohenkerk
+  and Zawilski before the table, a cubic from the table's last value and
+  last-year slope to the Stephenson, Morrison and Hohenkerk (2016) parabola
+  after it, and that parabola beyond. It previously held TT-UT1 at the table
+  edge. `from_utc` and `from_scale` still return such a value, because TT and
+  TDB do not depend on UT1, and mark it. A caller UT1 table is spliced relative
+  to its own ends. The embedded table documentation gives its actual end, MJD
+  61589, and notes that its last rows are IERS predictions.
+- **Breaking.** The frame transforms that read UT1 (the sidereal times,
+  GCRS/ITRS in either direction, mean-of-date to ITRS, GCRS topocentric) refuse
+  a UT1 outside the table with `FrameTransformError::Ut1OutsideCoverage`, and so
+  do the pass search, orientation providers and everything built on them;
+  `with_ut1_validity` with `ValidityMode::Permissive` accepts it and reports the
+  departure. The pass search scored a failed look angle as -90 degrees and
+  returned no passes, and the reduced-orbit fit panicked; both return the typed
+  error.
+- **Breaking.** Every entry point that reads UT1 refuses an instant outside the
+  UT1 table by default and has a permissive route that returns the result with
+  the departure in a `Validated`: a `_with_validity(.., ValidityMode)` variant
+  where the entry point builds its own time scales (passes, look angles, ground
+  track, visibility, observe, Sun/Moon az/el and illumination, rise/set and
+  meridian transits, coverage grids, `EarthOrientation`, station displacement,
+  reduced orbits, precise-orbit fits, PPP corrections), `with_ut1_validity`
+  where it takes caller time scales, and `with_validity` on the
+  Earth-orientation providers. A search checks every instant it evaluates, so
+  under `Strict` a window reaching past the table is refused rather than cut
+  short. `sun_elevation_deg` and `moon_elevation_deg` return a `Result` instead
+  of panicking, and `piecewise_drift` skips only an out-of-range epoch, where it
+  dropped every failing epoch.
+- **Breaking.** SSR-corrected ephemerides take a UT1 `ValidityMode`
+  (`with_validity`, default `Strict`). A centre-of-mass orbit's antenna-offset
+  conversion outside the UT1 table returns `Error::Ut1OutsideCoverage` (through
+  `corrected_state_checked` and `ObservablesError::Ephemeris`) instead of making
+  the satellite unavailable without a reason; under `Permissive` it uses the
+  long-term UT1 and reports the departure (`corrected_state_checked`,
+  `ut1_departure`). The `Option`-returning SSR and SPP entry points still return
+  `None` for a refusal. Propagation reports a departure accepted by a permissive
+  body-fixed frame provider in the new `PropagationResult::ut1_degraded` field
+  and in `PropagationContext::ut1_departure`, and precise-orbit fits pass it
+  through their UT1 policy: refused by default, reported in
+  `Validated::degraded` under `Permissive`.
+- **Breaking.** A UT1 refusal is a typed `Ut1OutsideCoverage(DegradeReason)`
+  variant in `PassError`, `EventFinderError`, `AlmanacError`,
+  `ReducedOrbitError`, `OrbitFitError` and `PropagationError`, where it was
+  `InvalidInput` with the field `ut1`, `InvalidOption` or `ForceModelFailure`;
+  `DegradeReason` implements `Display`. The built-in RK4 and DP54 integrators
+  record the UT1 departure a permissive body-fixed frame provider accepted in
+  `PropagationResult::ut1_degraded` and pass it back to the `PropagationContext`
+  even when the run fails. An `EarthOrientation` accepted outside the UT1 table
+  keeps the flag on its `time_scales()`.
+  `EarthOrientationProvider::ut1_validity` reports a provider's policy, and a
+  precise-orbit fit refuses up front, with `OrbitFitError::Ut1ValidityMismatch`,
+  an orientation or propagation provider whose `ValidityMode` differs from its
+  own. Pass searches never probe outside their window when refining a
+  culmination, so a window ending exactly at the last covered UT1 instant is
+  accepted under `Strict`.
+- **Breaking.** `EphemerisSource` gains `try_position_clock_at_j2000_s`, which
+  the SSR-corrected sources override, and every solve that reads a source
+  through it returns a UT1 refusal as a typed `Ut1OutsideCoverage` error instead
+  of dropping the satellite: SPP (`SppError`, also through DGNSS, PPP auto-init
+  and FDE), the static solve (`StaticSolveError`), scenario synthesis
+  (`ScenarioError`), ARAIM geometry (`AraimError`, and `SbasPlError` from it),
+  the float and kinematic PPP solves (`FloatSolveError`, `KinematicSolveError`,
+  and `FixedSolveError::Float`), and the RTK RINEX arc (`RtkRinexArcError`). The
+  PPP solves fail with the typed error when a refusal meets the SSR/HAS bias
+  lookup or the bias exclusion pass, where it became a missing bias or an
+  unavailable transmission time; the lookup report marks such an observation
+  `SsrIfCombinationStatus::Ut1OutsideCoverage`. A departure accepted under a
+  permissive UT1 policy is reported in `SolutionMetadata::ut1_degraded`,
+  `StaticSolutionMetadata::ut1_degraded` or `AraimGeometry::ut1_degraded`.
+  `SppError`, `StaticSolveError`, `ScenarioError`, `FloatSolveError`,
+  `KinematicSolveError` and `RtkRinexArcError` are not `non_exhaustive`, so a
+  match on them outside the crate needs the new variant. The `Option`-returning
+  `position_clock_at_j2000_s`, `corrected_state` and
+  `applied_orbit_clock_solution` still return `None` for a refusal.
+- New public type aliases: `ephemeris::PositionClock` (`([f64; 3], f64)`),
+  `ephemeris::PositionClockGroupDelay` (`([f64; 3], f64, Option<f64>)`) and
+  `orbit::PositionVelocity` (`([f64; 3], [f64; 3])`).
+- `SsrCorrectionSource` gains `try_applied_orbit_clock_solution`, with a default
+  that wraps `applied_orbit_clock_solution` and never refuses; the SSR-corrected
+  sources override it to return a UT1 refusal as `Error::Ut1OutsideCoverage`.
+  `DegradeReason` derives `Hash`. `spp::PositionClock` and
+  `spp::PositionClockGroupDelay` are also re-exported as
+  `ephemeris::PositionClock` and `ephemeris::PositionClockGroupDelay`.
+- The fallible reads cover the single-frequency group-delay reads the SPP, DGNSS
+  and tight GNSS/INS models use:
+  `EphemerisSource::try_position_clock_group_delay_at_j2000_s` and
+  `ObservableEphemerisSource::try_observable_state_group_delay_at_j2000_s` keep
+  a UT1 refusal typed and carry a departure. Their defaults read through
+  `try_position_clock_at_j2000_s` and `try_observable_state_at_j2000_s`, so a
+  source that states its refusals there keeps them here; the SSR-corrected
+  sources and every forwarding source override them, the broadcast store and the
+  SBAS-corrected sources keep their one-evaluation reads, and the per-solve
+  transmit-state memo remembers a state or its absence but never a refusal.
+  `SsrCorrectedEphemeris::corrected_state_with_group_delay_checked` and its
+  owned counterpart are new, `applied_orbit_clock_status` reports a refused
+  centre-of-mass state as the new `SsrStateUnavailable::Ut1OutsideCoverage`
+  (never falling back to the broadcast state), and `Validated::transpose` turns
+  a `Validated<Option<T>>` into an `Option<Validated<T>>`.
+- **Breaking.** The static reference-station solve, DGNSS and the tight GNSS/INS
+  update return a UT1 refusal from the ephemeris source as a typed
+  `Ut1OutsideCoverage` error (`StaticReferenceModeError`, `DgnssError`,
+  `FusionError`) instead of a string reason, a skipped base satellite or a
+  generic ephemeris error, and a tight update refused this way leaves the filter
+  unchanged. A departure accepted under a permissive UT1 policy is reported in
+  `ut1_degraded` on `StaticReferenceStationSolution` and its per-mode solutions
+  and on `FusionUpdate`, and in the DGNSS solution's metadata.
+  `ObservableEphemerisSource` gains `try_observable_state_at_j2000_s`, and
+  `dgnss::pseudorange_corrections_validated` is new.
+- `DeclaredScenarioSource` forwards every method the source it wraps may
+  override: its SSR corrections, which SSR bias application reads, its own
+  satellite velocity, and its batch state evaluation, as well as the fallible
+  reads. A scenario built on an SSR-corrected source reported no SSR
+  corrections, so a PPP solve through it refused its SSR biases, and its
+  velocity was differenced from positions half a second either side, across any
+  correction boundary.
+- **Breaking.** The PPP SSR bias check reports an ephemeris-source error it has
+  no specific case for as `SsrTransmitTimeFailure::Source`, carrying the error,
+  where it read the error as "no orbit and clock solution applied".
+  `SsrTransmitTimeFailure` is no longer `Copy`.
+- **Breaking.** `SpaceWeatherPolicy::default()` refuses Ap values the file does
+  not state: the quiet Ap of 4 in the monthly-predicted region, and a blank
+  three-hour Ap bin filled from the daily average. `space_weather_at`,
+  `ap_array_at` and `SpaceWeatherSource::Table` used to insert those values
+  without a report. `SpaceWeatherPolicy::lenient()` allows both and reports each
+  substitution; `ap_history_at_with_policy` returns an `ApHistorySample` with
+  the least-trusted row class read, `ap_defaulted`, and the count of filled
+  bins; `SpaceWeatherSource::TableWithPolicy` carries a policy into drag.
+- **Breaking.** A CelesTrak fixed-width space-weather row takes its class from
+  the F10.7 flux qualifier: `Q` 2 (interpolated or extrapolated) and `Q` 4 (CSSI
+  interpolation) read as `Interpolated`, and `Q` 3 (no observation) reads as the
+  new `ObservationClass::NotObserved`, which `SpaceWeatherPolicy::default()`
+  refuses unless `allow_not_observed` is set; `Q` 2 and 3 read as `Observed`
+  before. The CSV encoding writes `INT` only for the CSSI interpolation and
+  `OBS` for every other observed day, as CelesTrak does, and the text encoding
+  states a CSV `INT` row as `Q` 4, so it reads back as `Interpolated`.
+- Space weather readers keep an out-of-order row, sort it into place, and report
+  it as a warning, where they dropped it. Every row dated before the latest date
+  already read in its class list is reported, not only one earlier than the row
+  before it, and daily- and monthly-predicted rows are ordered separately, so a
+  monthly row dated before the last daily row is kept. A duplicate date keeps
+  the first row in file order and reports the rest. Cp must be exact tenths
+  within 0-25.5, where other values were rounded or saturated. A text-format
+  line outside any section and an unreadable `NUM_*_POINTS` count are reported.
+- The `sidereon` command line `inspect` and the MCP `inspect_file` tool
+  recognize a format from its own identifying text (the RINEX, CRINEX or ANTEX
+  header label, the SP3 version line, a TLE line pair) and read the file with
+  that format's parser. A malformed NAV, SP3, OBS or ANTEX file now fails with
+  that parser's error, where every parser was tried in turn and the file was
+  reported as an unrecognized type or, in the MCP tool, as whatever parser
+  happened to accept it. CRINEX files are decoded and read. A TLE file keeps its
+  readable element sets and lists each rejected record and checksum finding with
+  its line number, where one bad record made the whole file unrecognized.
+  `--window` names the detected format when the file is not SP3.
 
 ### Fixed
 

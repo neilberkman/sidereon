@@ -265,6 +265,25 @@ pub fn build_ppp_lookup(
     receiver_ecef_m: [f64; 3],
     options: &PppCorrectionsOptions,
 ) -> Result<PppCorrectionLookup, PppCorrectionsError> {
+    build_ppp_lookup_with_validity(
+        sp3,
+        epochs,
+        receiver_ecef_m,
+        options,
+        crate::astro::time::ValidityMode::Strict,
+    )
+    .map(|validated| validated.value)
+}
+
+/// [`build_ppp_lookup`] under an explicit UT1 [`crate::astro::time::ValidityMode`],
+/// with the policy of [`ppp_corrections::build_with_validity`].
+pub fn build_ppp_lookup_with_validity(
+    sp3: &Sp3,
+    epochs: &[FloatEpoch],
+    receiver_ecef_m: [f64; 3],
+    options: &PppCorrectionsOptions,
+    mode: crate::astro::time::ValidityMode,
+) -> Result<crate::astro::time::Validated<PppCorrectionLookup>, PppCorrectionsError> {
     let ppp_epochs: Vec<PppCorrectionEpoch> = epochs
         .iter()
         .map(|epoch| PppCorrectionEpoch {
@@ -282,8 +301,12 @@ pub fn build_ppp_lookup(
                 .collect(),
         })
         .collect();
-    let corrections = ppp_corrections::build(sp3, &ppp_epochs, receiver_ecef_m, options)?;
-    Ok(PppCorrectionLookup::from_options(corrections, options))
+    let corrections =
+        ppp_corrections::build_with_validity(sp3, &ppp_epochs, receiver_ecef_m, options, mode)?;
+    Ok(crate::astro::time::Validated {
+        value: PppCorrectionLookup::from_options(corrections.value, options),
+        degraded: corrections.degraded,
+    })
 }
 
 impl FloatState {
@@ -376,7 +399,12 @@ fn observation_geometry(
     .map_err(|error| no_ephemeris(obs, error))
 }
 
+/// The solve error for a failed observable prediction of `obs`: a UT1 refusal keeps its
+/// own variant, every other failure is a missing ephemeris.
 fn no_ephemeris(obs: &FloatObservation, error: ObservablesError) -> FloatSolveError {
+    if let ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason)) = error {
+        return FloatSolveError::Ut1OutsideCoverage(reason);
+    }
     FloatSolveError::NoEphemeris {
         satellite_id: obs.satellite_id.clone(),
         reason: match error {

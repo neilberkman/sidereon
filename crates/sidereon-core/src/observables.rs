@@ -178,6 +178,26 @@ pub trait ObservableEphemerisSource {
         t_j2000_s: f64,
     ) -> Result<ObservableState, ObservablesError>;
 
+    /// [`Self::observable_state_at_j2000_s`] with the UT1 departure the source
+    /// accepted to produce the state.
+    ///
+    /// A source whose state reads UT1 under a UT1 policy, such as an SSR source
+    /// converting a centre-of-mass orbit to the antenna phase centre, returns
+    /// `Err(`[`ObservablesError::Ephemeris`]`(`[`crate::Error::Ut1OutsideCoverage`]`))`
+    /// for a refusal under [`crate::astro::time::ValidityMode::Strict`], and the
+    /// state with the departure in [`crate::astro::time::Validated::degraded`]
+    /// under [`crate::astro::time::ValidityMode::Permissive`]. The default
+    /// implementation wraps [`Self::observable_state_at_j2000_s`] and reports no
+    /// departure; sources with such a policy override it.
+    fn try_observable_state_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<ObservableState>, ObservablesError> {
+        self.observable_state_at_j2000_s(sat, t_j2000_s)
+            .map(crate::astro::time::Validated::ok)
+    }
+
     /// The SSR orbit and clock corrections this source applies, when it applies any.
     ///
     /// `None` by default, for sources that apply no SSR corrections. The SSR-corrected
@@ -243,6 +263,10 @@ pub trait ObservableEphemerisSource {
     /// [`Self::observable_state_at_j2000_s`] and [`Self::single_frequency_group_delay_s`]
     /// from one evaluation. The default calls the two methods; a source that forms a
     /// corrected state overrides it to do that once.
+    ///
+    /// The solves read through [`Self::try_observable_state_group_delay_at_j2000_s`], so
+    /// a source that overrides this read overrides that one too: a source that never
+    /// refuses wraps this read in it, as the SBAS-corrected sources do.
     fn observable_state_group_delay_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
@@ -250,6 +274,32 @@ pub trait ObservableEphemerisSource {
     ) -> Result<(ObservableState, Option<f64>), ObservablesError> {
         let state = self.observable_state_at_j2000_s(sat, t_j2000_s)?;
         Ok((state, self.single_frequency_group_delay_s(sat, t_j2000_s)))
+    }
+
+    /// [`Self::observable_state_group_delay_at_j2000_s`] with the UT1 departure the
+    /// source accepted to produce the state, or its refusal, as
+    /// [`Self::try_observable_state_at_j2000_s`] reports them. The solves read every state
+    /// through it.
+    ///
+    /// The default calls [`Self::try_observable_state_at_j2000_s`] and
+    /// [`Self::single_frequency_group_delay_s`], so a source that states its refusals and
+    /// departures through [`Self::try_observable_state_at_j2000_s`] keeps them here too.
+    /// A source that never refuses and forms the state and delay in one evaluation
+    /// overrides it to wrap [`Self::observable_state_group_delay_at_j2000_s`].
+    fn try_observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<crate::astro::time::Validated<(ObservableState, Option<f64>)>, ObservablesError>
+    {
+        let state = self.try_observable_state_at_j2000_s(sat, t_j2000_s)?;
+        Ok(crate::astro::time::Validated {
+            value: (
+                state.value,
+                self.single_frequency_group_delay_s(sat, t_j2000_s),
+            ),
+            degraded: state.degraded,
+        })
     }
 
     /// Satellite ECEF velocity, metres per second, of the state this source returns at

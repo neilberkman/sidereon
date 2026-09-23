@@ -1,5 +1,5 @@
 use crate::astro::error::PropagationError;
-use crate::astro::integrators::{DynamicsModel, Integrator};
+use crate::astro::integrators::{with_ut1_departure_record, DynamicsModel, Integrator};
 use crate::astro::propagator::api::{
     validate_integrator_epoch, validate_integrator_options, IntegratorOptions, PropagationContext,
 };
@@ -20,6 +20,21 @@ pub struct RK4;
 
 impl Integrator for RK4 {
     fn propagate(
+        &self,
+        initial: CartesianState,
+        t_end_seconds: f64,
+        rhs: &dyn DynamicsModel,
+        ctx: &PropagationContext,
+        opts: &IntegratorOptions,
+    ) -> Result<PropagationResult, PropagationError> {
+        with_ut1_departure_record(ctx, |ctx| {
+            self.integrate(initial, t_end_seconds, rhs, ctx, opts)
+        })
+    }
+}
+
+impl RK4 {
+    fn integrate(
         &self,
         initial: CartesianState,
         t_end_seconds: f64,
@@ -89,6 +104,7 @@ impl Integrator for RK4 {
                 evaluations: steps * 4,
             },
             dense: None,
+            ut1_degraded: None,
         })
     }
 }

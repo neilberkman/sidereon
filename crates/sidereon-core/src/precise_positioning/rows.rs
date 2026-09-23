@@ -25,7 +25,7 @@ use crate::estimation::substrate::parameters::{
 };
 use crate::observables::{
     flight_time_seed_s, transmit_epoch_j2000_s, transmit_velocity_m_s, ObservableEphemerisSource,
-    TransmitGeometry, TransmitTimeOptions,
+    ObservablesError, TransmitGeometry, TransmitTimeOptions,
 };
 use crate::ssr::{SsrBiasStatus, SsrSolution};
 use crate::validate::{self, FieldError};
@@ -40,7 +40,7 @@ use super::{
     observation_geometry, predict_default, validate_state_clock_count, FixedSolveError, FloatEpoch,
     FloatObservation, FloatResidual, FloatSolveError, FloatState, MissingCorrection, ModelContext,
     PppCorrectionLookup, RangeCorrections, SsrBiasExclusion, SsrBiasExclusionStage, SsrBiasRecord,
-    SsrTransmitTimeFailure,
+    SsrIfCombinationStatus, SsrTransmitTimeFailure,
 };
 
 /// Drop every epoch with no observations left, returning the remaining epochs and, for
@@ -73,6 +73,12 @@ pub(super) fn drop_empty_epochs(epochs: Vec<FloatEpoch>) -> (Vec<FloatEpoch>, Ve
 /// [`residual_rows`] still refuse an observation whose required bias is absent or no
 /// longer holds at the transmission time of the iteration, so a caller that skips this
 /// step fails closed instead of solving without the bias.
+///
+/// A satellite state the source refuses because producing it reads UT1 outside the UT1
+/// table under a strict UT1 policy is not an exclusion: the pass returns
+/// [`FloatSolveError::Ut1OutsideCoverage`], whether the refusal was met here, predicting
+/// the transmission time or checking the recorded biases, or when `lookup` was built
+/// ([`SsrIfCombinationStatus::Ut1OutsideCoverage`] in its application report).
 pub(super) fn exclude_unresolved_ssr_bias_observations(
     source: &dyn ObservableEphemerisSource,
     epochs: &[FloatEpoch],
@@ -81,8 +87,9 @@ pub(super) fn exclude_unresolved_ssr_bias_observations(
     lookup: &PppCorrectionLookup,
     pass: usize,
     stage: SsrBiasExclusionStage,
-) -> (Vec<FloatEpoch>, Vec<SsrBiasExclusion>) {
+) -> Result<(Vec<FloatEpoch>, Vec<SsrBiasExclusion>), FloatSolveError> {
     let mut exclusions = Vec::new();
+    let mut refusal = None;
     let retained = epochs
         .iter()
         .enumerate()
@@ -95,11 +102,15 @@ pub(super) fn exclude_unresolved_ssr_bias_observations(
                     lookup.ssr_code_bias_enabled && !lookup.ssr_code_bias_m.contains_key(&key);
                 let phase_bias_missing =
                     lookup.phase_bias_enabled && !lookup.phase_bias_m.contains_key(&key);
+                if let Some(reason) = lookup_ut1_refusal(lookup, obs, epoch_index) {
+                    refusal = refusal.or(Some(reason));
+                    return true;
+                }
                 let transmit_time_failure = if code_bias_missing || phase_bias_missing {
                     None
                 } else {
-                    let transmit_time = predict_default(source, obs).ok().and_then(|options| {
-                        transmit_epoch_j2000_s(
+                    let transmit_time = match predict_default(source, obs) {
+                        Ok(options) => match transmit_epoch_j2000_s(
                             source,
                             obs.sat,
                             receiver_position_m,
@@ -109,10 +120,26 @@ pub(super) fn exclude_unresolved_ssr_bias_observations(
                                 sagnac: options.sagnac,
                             },
                             flight_time_seed_s(obs.code_m),
-                        )
-                        .ok()
-                    });
-                    ssr_bias_records_hold(source, obs, epoch_index, lookup, transmit_time).err()
+                        ) {
+                            Ok(t_tx) => Some(t_tx),
+                            Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(
+                                reason,
+                            ))) => {
+                                refusal = refusal.or(Some(reason));
+                                return true;
+                            }
+                            Err(_) => None,
+                        },
+                        Err(_) => None,
+                    };
+                    match ssr_bias_records_hold(source, obs, epoch_index, lookup, transmit_time) {
+                        Ok(held) => held.err(),
+                        Err(FloatSolveError::Ut1OutsideCoverage(reason)) => {
+                            refusal = refusal.or(Some(reason));
+                            return true;
+                        }
+                        Err(_) => None,
+                    }
                 };
                 if !code_bias_missing && !phase_bias_missing && transmit_time_failure.is_none() {
                     return true;
@@ -134,7 +161,36 @@ pub(super) fn exclude_unresolved_ssr_bias_observations(
             epoch_out
         })
         .collect();
-    (retained, exclusions)
+    match refusal {
+        Some(reason) => Err(FloatSolveError::Ut1OutsideCoverage(reason)),
+        None => Ok((retained, exclusions)),
+    }
+}
+
+/// The UT1 refusal the application report of `lookup` records for `obs` in caller epoch
+/// `epoch_index`, when [`PppCorrectionLookup::with_ssr_biases`] met one building it.
+fn lookup_ut1_refusal(
+    lookup: &PppCorrectionLookup,
+    obs: &FloatObservation,
+    epoch_index: usize,
+) -> Option<crate::astro::time::DegradeReason> {
+    let report = lookup.ssr_bias_report.as_ref()?;
+    report
+        .observation_reports
+        .iter()
+        .filter(|row| {
+            row.epoch_index == epoch_index
+                && row.sat == obs.sat
+                && row.ambiguity_id == obs.ambiguity_id
+        })
+        .find_map(|row| {
+            [row.code_status, row.phase_status]
+                .into_iter()
+                .find_map(|status| match status {
+                    SsrIfCombinationStatus::Ut1OutsideCoverage(reason) => Some(reason),
+                    _ => None,
+                })
+        })
 }
 
 /// Why an observation's required SSR/HAS biases do not hold.
@@ -186,13 +242,30 @@ pub(super) fn ssr_bias_exclusion(
 /// has to be the one its store holds available there, with the same solution, IOD SSR and
 /// reference epoch. A bias without records, as in a lookup filled directly, is not
 /// checked.
+///
+/// The outer `Err` is a solve failure rather than a failure of the records:
+/// [`FloatSolveError::Ut1OutsideCoverage`] when the source refuses to say which solution
+/// it applies because producing the state reads UT1 outside the UT1 table.
 pub(super) fn ssr_bias_records_hold(
     source: &dyn ObservableEphemerisSource,
     obs: &FloatObservation,
     epoch_index: usize,
     lookup: &PppCorrectionLookup,
     transmit_time_j2000_s: Option<f64>,
-) -> Result<(), SsrTransmitTimeFailure> {
+) -> Result<Result<(), SsrTransmitTimeFailure>, FloatSolveError> {
+    match lookup_ut1_refusal(lookup, obs, epoch_index) {
+        Some(reason) => Err(FloatSolveError::Ut1OutsideCoverage(reason)),
+        None => records_hold(source, obs, epoch_index, lookup, transmit_time_j2000_s),
+    }
+}
+
+fn records_hold(
+    source: &dyn ObservableEphemerisSource,
+    obs: &FloatObservation,
+    epoch_index: usize,
+    lookup: &PppCorrectionLookup,
+    transmit_time_j2000_s: Option<f64>,
+) -> Result<Result<(), SsrTransmitTimeFailure>, FloatSolveError> {
     let key = (obs.sat, epoch_index, obs.ambiguity_id.clone());
     let code_records = lookup
         .ssr_code_bias_enabled
@@ -203,15 +276,26 @@ pub(super) fn ssr_bias_records_hold(
         .then(|| lookup.phase_bias_records.get(&key))
         .flatten();
     if code_records.is_none() && phase_records.is_none() {
-        return Ok(());
+        return Ok(Ok(()));
     }
     let Some(ssr) = source.ssr_corrections() else {
-        return Err(SsrTransmitTimeFailure::SourceWithoutSsrCorrections);
+        return Ok(Err(SsrTransmitTimeFailure::SourceWithoutSsrCorrections));
     };
     let Some(t_tx) = transmit_time_j2000_s.filter(|t| t.is_finite()) else {
-        return Err(SsrTransmitTimeFailure::TransmitTimeUnavailable);
+        return Ok(Err(SsrTransmitTimeFailure::TransmitTimeUnavailable));
     };
-    let applied = ssr.applied_orbit_clock_solution(obs.sat, t_tx);
+    let applied = match ssr.try_applied_orbit_clock_solution(obs.sat, t_tx) {
+        Ok(applied) => applied,
+        Err(crate::Error::Ut1OutsideCoverage(reason)) => {
+            return Err(FloatSolveError::Ut1OutsideCoverage(reason))
+        }
+        Err(error) => {
+            return Ok(Err(SsrTransmitTimeFailure::Source {
+                transmit_time_j2000_s: t_tx,
+                error,
+            }))
+        }
+    };
     let store = ssr.ssr_store();
     let holds = |record: &SsrBiasRecord,
                  status: SsrBiasStatus,
@@ -225,10 +309,10 @@ pub(super) fn ssr_bias_records_hold(
     };
     for record in code_records.into_iter().chain(phase_records).flatten() {
         if applied != Some(record.solution) {
-            return Err(SsrTransmitTimeFailure::OrbitClockSolution {
+            return Ok(Err(SsrTransmitTimeFailure::OrbitClockSolution {
                 transmit_time_j2000_s: t_tx,
                 applied,
-            });
+            }));
         }
     }
     for record in code_records.into_iter().flatten() {
@@ -240,11 +324,11 @@ pub(super) fn ssr_bias_records_hold(
             query.iod_ssr,
             query.ref_epoch_j2000_s,
         ) {
-            return Err(SsrTransmitTimeFailure::BiasRecord {
+            return Ok(Err(SsrTransmitTimeFailure::BiasRecord {
                 transmit_time_j2000_s: t_tx,
                 signal: record.signal,
                 status: query.status,
-            });
+            }));
         }
     }
     for record in phase_records.into_iter().flatten() {
@@ -258,21 +342,21 @@ pub(super) fn ssr_bias_records_hold(
             query.iod_ssr,
             query.ref_epoch_j2000_s,
         ) {
-            return Err(SsrTransmitTimeFailure::BiasRecord {
+            return Ok(Err(SsrTransmitTimeFailure::BiasRecord {
                 transmit_time_j2000_s: t_tx,
                 signal: record.signal,
                 status: query.status,
-            });
+            }));
         }
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Missing correction to report when the recorded biases fail at the transmission time:
 /// the phase bias for a record failure on a signal only the phase records hold, otherwise
 /// the code bias, which the row model reads first.
 fn failed_ssr_bias(
-    failure: SsrTransmitTimeFailure,
+    failure: &SsrTransmitTimeFailure,
     obs: &FloatObservation,
     epoch_index: usize,
     lookup: &PppCorrectionLookup,
@@ -286,7 +370,7 @@ fn failed_ssr_bias(
                 .is_some_and(|records| signal.is_none_or(|s| records.iter().any(|r| r.signal == s)))
     };
     let signal = match failure {
-        SsrTransmitTimeFailure::BiasRecord { signal, .. } => Some(signal),
+        SsrTransmitTimeFailure::BiasRecord { signal, .. } => Some(*signal),
         _ => None,
     };
     if code_has(signal) {
@@ -532,9 +616,10 @@ fn undifferenced_model(
             &ctx.corrections.ppp,
             Some(pred.transmit_time_j2000_s),
         )
+        .map_err(PppRowError::Model)?
     };
     if let Err(failure) = records_hold {
-        let missing = failed_ssr_bias(failure, obs, correction_idx, &ctx.corrections.ppp);
+        let missing = failed_ssr_bias(&failure, obs, correction_idx, &ctx.corrections.ppp);
         return Err(PppRowError::SsrBiasFlip {
             exclusion: Box::new(ssr_bias_exclusion(
                 &ctx.corrections.ppp,

@@ -10,7 +10,10 @@ pub struct Ut1Entry {
     pub ut1_utc: f64,
 }
 
-/// Daily UT1 minus UTC entries from IERS `finals2000A.all` spanning MJD 41684 to MJD 61239.
+/// Daily UT1 minus UTC entries from IERS `finals2000A.all` spanning MJD 41684 to MJD 61589.
+///
+/// The final rows of `finals2000A.all` are IERS Bulletin A predictions, not
+/// measurements; this table does not record where the predictions begin.
 ///
 /// Used by [`TimeTables::embedded`](crate::astro::time::TimeTables::embedded)
 /// for Delta-T interpolation and UT1 time-scale conversions.

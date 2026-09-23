@@ -439,10 +439,9 @@ impl ForceModel for SphericalHarmonicGravity {
             Some(provider) => Some(
                 provider
                     .orientation_at_tdb_seconds(state.epoch_tdb_seconds)
+                    .map(|orientation| ctx.record_orientation(orientation))
                     .map_err(|error| {
-                        PropagationError::ForceModelFailure(format!(
-                            "body-fixed frame evaluation failed: {error}"
-                        ))
+                        PropagationError::from_frame("body-fixed frame evaluation failed", error)
                     })?,
             ),
             None => {
@@ -1072,6 +1071,92 @@ gfc 3 0 0.957161207093D-06 0.000000000000D+00 0.0 0.0
         assert!(n8_final.position_km.norm() > RE_EARTH + 450.0);
         assert!(diff > 1.0e-3, "diff={diff}");
         assert!(diff < 5.0, "diff={diff}");
+    }
+
+    #[test]
+    fn permissive_provider_departure_is_reported_by_the_propagation() {
+        // 2028-07-01 00:00 TDB is JD 2461953.5, 10408.5 days after J2000 and
+        // past the UT1 table.
+        let epoch = 10_408.5 * 86_400.0;
+        let propagator_at = |epoch: f64| StatePropagator {
+            initial: CartesianState::new(epoch, [7000.0, -1210.0, 1300.0], [1.0, 7.2, 0.5]),
+            force_model: ForceModelKind::earth_phase_b(4, 4, None).expect("phase B"),
+            integrator: IntegratorKind::Rk4,
+            options: IntegratorOptions {
+                initial_step: 30.0,
+                ..IntegratorOptions::default()
+            },
+            drag: None,
+            space_weather: None,
+        };
+        let propagator = propagator_at(epoch);
+
+        let strict = PropagationContext::new()
+            .with_body_fixed_frame_provider(Arc::new(TdbEarthOrientationProvider::new()));
+        assert!(propagator
+            .propagate_to_with_context(epoch + 120.0, &strict)
+            .is_err());
+        assert_eq!(strict.ut1_departure(), None);
+
+        let permissive = PropagationContext::new().with_body_fixed_frame_provider(Arc::new(
+            TdbEarthOrientationProvider::new()
+                .with_validity(crate::astro::time::ValidityMode::Permissive),
+        ));
+        let result = propagator
+            .propagate_to_with_context(epoch + 120.0, &permissive)
+            .expect("permissive propagation");
+        assert_eq!(
+            result.ut1_degraded,
+            Some(crate::astro::time::DegradeReason::AfterCoverage)
+        );
+        assert_eq!(permissive.ut1_departure(), result.ut1_degraded);
+        let states = propagator
+            .ephemeris_with_context(&[epoch + 60.0], &permissive)
+            .expect("permissive ephemeris");
+        assert_eq!(states.len(), 1);
+
+        // A run that fails after a force model accepted UT1 outside the table
+        // still passes the departure back to the context.
+        let failing = StatePropagator {
+            options: IntegratorOptions {
+                initial_step: 30.0,
+                max_steps: 1,
+                ..IntegratorOptions::default()
+            },
+            ..propagator_at(epoch)
+        };
+        let fresh_failure = PropagationContext::new().with_body_fixed_frame_provider(Arc::new(
+            TdbEarthOrientationProvider::new()
+                .with_validity(crate::astro::time::ValidityMode::Permissive),
+        ));
+        assert!(matches!(
+            failing.propagate_to_with_context(epoch + 120.0, &fresh_failure),
+            Err(PropagationError::MaxStepsExceeded)
+        ));
+        assert_eq!(
+            fresh_failure.ut1_departure(),
+            Some(crate::astro::time::DegradeReason::AfterCoverage)
+        );
+
+        // A strict provider's refusal is typed.
+        assert!(matches!(
+            propagator.propagate_to_with_context(epoch + 120.0, &strict),
+            Err(PropagationError::Ut1OutsideCoverage(
+                crate::astro::time::DegradeReason::AfterCoverage
+            ))
+        ));
+
+        // Inside the table a permissive provider reports nothing.
+        let inside = propagator_at(0.0);
+        let fresh = PropagationContext::new().with_body_fixed_frame_provider(Arc::new(
+            TdbEarthOrientationProvider::new()
+                .with_validity(crate::astro::time::ValidityMode::Permissive),
+        ));
+        let inside_result = inside
+            .propagate_to_with_context(120.0, &fresh)
+            .expect("in-table propagation");
+        assert_eq!(inside_result.ut1_degraded, None);
+        assert_eq!(fresh.ut1_departure(), None);
     }
 
     #[test]

@@ -69,6 +69,10 @@ pub enum DgnssError {
     },
     /// Corrected-observation SPP solve failed.
     Spp(SppError),
+    /// The ephemeris source refused a base satellite's state because producing
+    /// it reads UT1 outside the UT1 table under a strict UT1 policy. The
+    /// corrections fail rather than skipping that satellite.
+    Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
 impl core::fmt::Display for DgnssError {
@@ -78,6 +82,12 @@ impl core::fmt::Display for DgnssError {
                 write!(f, "invalid DGNSS input {field}: {reason}")
             }
             Self::Spp(err) => write!(f, "{err}"),
+            Self::Ut1OutsideCoverage(reason) => {
+                write!(
+                    f,
+                    "the ephemeris source refused a base satellite state: {reason}"
+                )
+            }
         }
     }
 }
@@ -86,7 +96,7 @@ impl std::error::Error for DgnssError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Spp(err) => Some(err),
-            Self::InvalidInput { .. } => None,
+            Self::InvalidInput { .. } | Self::Ut1OutsideCoverage(_) => None,
         }
     }
 }
@@ -104,8 +114,43 @@ impl From<SppError> for DgnssError {
 /// predictor used by the SPP pipeline, and the satellite clock less the source's
 /// single-frequency group delay, as the SPP model forms it. Observations with malformed satellite
 /// tokens or unavailable orbit/clock data are skipped, matching Sidereon'
-/// historical "cannot correct this satellite" behavior.
+/// historical "cannot correct this satellite" behavior. A state the source
+/// refuses because producing it reads UT1 outside the UT1 table under a strict
+/// UT1 policy is not skipped: it fails with [`DgnssError::Ut1OutsideCoverage`].
+/// [`pseudorange_corrections_validated`] also reports a departure accepted
+/// under a permissive policy.
 pub fn pseudorange_corrections(
+    source: &dyn ObservableEphemerisSource,
+    base_position_m: [f64; 3],
+    base_observations: &[CodeObservation],
+    t_rx_j2000_s: f64,
+) -> Result<BTreeMap<String, f64>, DgnssError> {
+    pseudorange_corrections_validated(source, base_position_m, base_observations, t_rx_j2000_s)
+        .map(|corrections| corrections.value)
+}
+
+/// [`pseudorange_corrections`] with the first UT1 departure the source
+/// accepted, under a permissive UT1 policy, while producing a base satellite
+/// state, in [`Validated::degraded`](crate::astro::time::Validated::degraded).
+pub fn pseudorange_corrections_validated(
+    source: &dyn ObservableEphemerisSource,
+    base_position_m: [f64; 3],
+    base_observations: &[CodeObservation],
+    t_rx_j2000_s: f64,
+) -> Result<crate::astro::time::Validated<BTreeMap<String, f64>>, DgnssError> {
+    let tracked = spp::Ut1Tracked::new(source);
+    let corrections =
+        tracked_pseudorange_corrections(&tracked, base_position_m, base_observations, t_rx_j2000_s);
+    if let Some(reason) = tracked.refusal() {
+        return Err(DgnssError::Ut1OutsideCoverage(reason));
+    }
+    Ok(crate::astro::time::Validated {
+        value: corrections?,
+        degraded: tracked.departure(),
+    })
+}
+
+fn tracked_pseudorange_corrections(
     source: &dyn ObservableEphemerisSource,
     base_position_m: [f64; 3],
     base_observations: &[CodeObservation],
@@ -132,6 +177,9 @@ pub fn pseudorange_corrections(
             Ok(pred) => pred,
             Err(ObservablesError::InvalidInput { field, kind }) => {
                 return Err(invalid_observable_input(field, kind));
+            }
+            Err(ObservablesError::Ephemeris(crate::Error::Ut1OutsideCoverage(reason))) => {
+                return Err(DgnssError::Ut1OutsideCoverage(reason));
             }
             Err(_) => continue,
         };
@@ -214,6 +262,12 @@ pub fn apply_corrections(
 /// and atmospheric-correction flags are replaced: DGNSS solves the corrected
 /// rover pseudoranges with ionosphere/troposphere disabled because the
 /// differential already removed common path delays.
+///
+/// A UT1 refusal fails the solve: [`DgnssError::Ut1OutsideCoverage`] for a
+/// base satellite, [`SppError::Ut1OutsideCoverage`] for a rover satellite. A
+/// departure accepted under a permissive UT1 policy, on either side, is
+/// reported in the solution's
+/// [`SolutionMetadata::ut1_degraded`](crate::spp::SolutionMetadata::ut1_degraded).
 pub fn solve_position<S>(
     source: &S,
     base_position_m: [f64; 3],
@@ -225,13 +279,13 @@ pub fn solve_position<S>(
 where
     S: ObservableEphemerisSource + EphemerisSource,
 {
-    let corrections = pseudorange_corrections(
+    let corrections = pseudorange_corrections_validated(
         source,
         base_position_m,
         base_observations,
         solve_inputs.t_rx_j2000_s,
     )?;
-    let applied = apply_corrections(rover_observations, &corrections)?;
+    let applied = apply_corrections(rover_observations, &corrections.value)?;
     solve_inputs.observations = applied
         .corrected
         .iter()
@@ -245,6 +299,9 @@ where
     solve_inputs.corrections = spp::Corrections::NONE;
 
     let mut solution = spp::solve(source, &solve_inputs, with_geodetic)?;
+    // The rover solve reports its own departure; a base-correction departure
+    // also shaped this position.
+    solution.metadata.ut1_degraded = solution.metadata.ut1_degraded.or(corrections.degraded);
     scale_position_covariance(&mut solution.position_covariance, 2.0);
     let pos = solution.position.as_array();
     let baseline_vector_m = vec3::sub3(pos, base_position_m);

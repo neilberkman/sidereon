@@ -1,8 +1,10 @@
 //! Ephemeris-source abstraction for SPP.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
+use crate::astro::time::{DegradeReason, Validated};
 use crate::id::GnssSatelliteId;
+use crate::observables::{ObservableEphemerisSource, ObservableState, ObservablesError};
 use crate::sp3::{MmapPreciseEphemerisInterpolant, PreciseEphemerisInterpolant, Sp3};
 
 /// The relativistic clock term a positioning model applies to a source's satellite clock.
@@ -29,6 +31,13 @@ impl ClockRelativity {
         }
     }
 }
+
+/// ECEF position (m) and satellite clock offset (s) at one transmit epoch.
+pub type PositionClock = ([f64; 3], f64);
+
+/// ECEF position (m), satellite clock offset (s) and single-frequency group delay (s,
+/// `None` for none) at one transmit epoch, from one evaluation.
+pub type PositionClockGroupDelay = ([f64; 3], f64, Option<f64>);
 
 /// A source of satellite position and clock at a transmit epoch.
 ///
@@ -98,10 +107,13 @@ pub trait EphemerisSource {
 
     /// [`Self::position_clock_at_j2000_s`] and [`Self::single_frequency_group_delay_s`]
     /// from one evaluation: the position, the clock and the group delay of the record
-    /// they come from. The SPP transmit-time iteration calls this once per step.
+    /// they come from.
     ///
     /// The default calls the two methods; a source that selects a record or forms a
-    /// corrected state overrides it to do that once.
+    /// corrected state overrides it to do that once. The solves read through
+    /// [`Self::try_position_clock_group_delay_at_j2000_s`], so a source that overrides
+    /// this read overrides that one too: a source that never refuses wraps this read
+    /// in it, as the broadcast store and the SBAS-corrected sources do.
     fn position_clock_group_delay_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
@@ -113,6 +125,274 @@ pub trait EphemerisSource {
             clock,
             self.single_frequency_group_delay_s(sat, t_j2000_s),
         ))
+    }
+
+    /// [`Self::position_clock_at_j2000_s`] with the reason a source refused
+    /// a state it could otherwise produce.
+    ///
+    /// `Ok(None)` means the source has no usable ephemeris, exactly as `None`
+    /// from [`Self::position_clock_at_j2000_s`]. `Err` means the source
+    /// refused the state under a policy, such as
+    /// [`crate::Error::Ut1OutsideCoverage`] from an SSR source whose
+    /// centre-of-mass to antenna-phase-centre conversion reads UT1 outside
+    /// the table under [`crate::astro::time::ValidityMode::Strict`]; a solve
+    /// reports that refusal instead of dropping the satellite. A state
+    /// produced under a permissive policy carries its departure in
+    /// [`Validated::degraded`].
+    ///
+    /// The default implementation wraps [`Self::position_clock_at_j2000_s`]
+    /// and never refuses; sources with such a policy override it.
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClock>>, crate::Error> {
+        Ok(self
+            .position_clock_at_j2000_s(sat, t_j2000_s)
+            .map(Validated::ok))
+    }
+
+    /// [`Self::position_clock_group_delay_at_j2000_s`] with the reason a source refused
+    /// a state it could otherwise produce, as [`Self::try_position_clock_at_j2000_s`]
+    /// reports it. The SPP transmit-time iteration calls this once per step, and the
+    /// solves read every state through it.
+    ///
+    /// The default calls [`Self::try_position_clock_at_j2000_s`] and
+    /// [`Self::single_frequency_group_delay_s`], so a source that states its refusals
+    /// through [`Self::try_position_clock_at_j2000_s`] keeps them here too. A source
+    /// that never refuses and forms the state and delay in one evaluation overrides it
+    /// to wrap [`Self::position_clock_group_delay_at_j2000_s`].
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let Some(state) = self.try_position_clock_at_j2000_s(sat, t_j2000_s)? else {
+            return Ok(None);
+        };
+        let (position, clock) = state.value;
+        Ok(Some(Validated {
+            value: (
+                position,
+                clock,
+                self.single_frequency_group_delay_s(sat, t_j2000_s),
+            ),
+            degraded: state.degraded,
+        }))
+    }
+}
+
+/// A view of an ephemeris source that reads it through its fallible methods
+/// ([`EphemerisSource::try_position_clock_at_j2000_s`],
+/// [`ObservableEphemerisSource::try_observable_state_at_j2000_s`]) and
+/// remembers what it saw: the first UT1 refusal, which a solve returns as its
+/// error, and the first accepted UT1 departure, which a solve reports on its
+/// result. A refused satellite still reads as unavailable inside the solve, so
+/// the solve never uses a state that was not produced, and the caller never
+/// receives a result that silently lacks it.
+pub(crate) struct Ut1Tracked<'a, S: ?Sized> {
+    inner: &'a S,
+    refusal: Cell<Option<DegradeReason>>,
+    departure: Cell<Option<DegradeReason>>,
+}
+
+/// [`Ut1Tracked`] over a type-erased [`EphemerisSource`].
+pub(crate) type Ut1TrackedSource<'a> = Ut1Tracked<'a, dyn EphemerisSource + 'a>;
+
+impl<'a, S: ?Sized> Ut1Tracked<'a, S> {
+    pub(crate) fn new(inner: &'a S) -> Self {
+        Self {
+            inner,
+            refusal: Cell::new(None),
+            departure: Cell::new(None),
+        }
+    }
+
+    /// The first UT1 refusal seen, if any.
+    pub(crate) fn refusal(&self) -> Option<DegradeReason> {
+        self.refusal.get()
+    }
+
+    /// The first accepted UT1 departure seen, if any.
+    pub(crate) fn departure(&self) -> Option<DegradeReason> {
+        self.departure.get()
+    }
+
+    fn note_departure(&self, degraded: Option<DegradeReason>) {
+        if self.departure.get().is_none() {
+            self.departure.set(degraded);
+        }
+    }
+
+    fn note_error(&self, error: &crate::Error) {
+        if let crate::Error::Ut1OutsideCoverage(reason) = error {
+            if self.refusal.get().is_none() {
+                self.refusal.set(Some(*reason));
+            }
+        }
+    }
+
+    fn note_observables_error(&self, error: &ObservablesError) {
+        if let ObservablesError::Ephemeris(error) = error {
+            self.note_error(error);
+        }
+    }
+}
+
+impl<S: ?Sized> Ut1Tracked<'_, S> {
+    fn note<T>(&self, result: &Result<Option<Validated<T>>, crate::Error>) {
+        match result {
+            Ok(Some(state)) => self.note_departure(state.degraded),
+            Ok(None) => {}
+            Err(error) => self.note_error(error),
+        }
+    }
+}
+
+impl<S: EphemerisSource + ?Sized> EphemerisSource for Ut1Tracked<'_, S> {
+    fn position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64)> {
+        let result = self.inner.try_position_clock_at_j2000_s(sat, t_j2000_s);
+        self.note(&result);
+        result.ok().flatten().map(|state| state.value)
+    }
+
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClock>>, crate::Error> {
+        let result = self.inner.try_position_clock_at_j2000_s(sat, t_j2000_s);
+        self.note(&result);
+        result
+    }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        self.inner.single_frequency_group_delay_s(sat, t_j2000_s)
+    }
+
+    fn clock_relativity_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> ClockRelativity {
+        self.inner.clock_relativity_s(sat, t_j2000_s)
+    }
+
+    fn clock_relativity_for_state_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        position_m: [f64; 3],
+    ) -> ClockRelativity {
+        self.inner
+            .clock_relativity_for_state_s(sat, t_j2000_s, position_m)
+    }
+
+    fn position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<PositionClockGroupDelay> {
+        self.try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+            .ok()
+            .flatten()
+            .map(|state| state.value)
+    }
+
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        let result = self
+            .inner
+            .try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s);
+        self.note(&result);
+        result
+    }
+}
+
+impl<S: ObservableEphemerisSource + ?Sized> ObservableEphemerisSource for Ut1Tracked<'_, S> {
+    fn observable_state_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<ObservableState, ObservablesError> {
+        self.try_observable_state_at_j2000_s(sat, t_j2000_s)
+            .map(|state| state.value)
+    }
+
+    fn try_observable_state_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Validated<ObservableState>, ObservablesError> {
+        let result = self.inner.try_observable_state_at_j2000_s(sat, t_j2000_s);
+        match &result {
+            Ok(state) => self.note_departure(state.degraded),
+            Err(error) => self.note_observables_error(error),
+        }
+        result
+    }
+
+    fn ssr_corrections(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        self.inner.ssr_corrections()
+    }
+
+    fn clock_includes_relativity(&self) -> bool {
+        self.inner.clock_includes_relativity()
+    }
+
+    fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
+        ObservableEphemerisSource::single_frequency_group_delay_s(self.inner, sat, t_j2000_s)
+    }
+
+    fn clock_relativity_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> ClockRelativity {
+        ObservableEphemerisSource::clock_relativity_s(self.inner, sat, t_j2000_s)
+    }
+
+    fn observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<(ObservableState, Option<f64>), ObservablesError> {
+        self.try_observable_state_group_delay_at_j2000_s(sat, t_j2000_s)
+            .map(|state| state.value)
+    }
+
+    fn try_observable_state_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Validated<(ObservableState, Option<f64>)>, ObservablesError> {
+        let result = self
+            .inner
+            .try_observable_state_group_delay_at_j2000_s(sat, t_j2000_s);
+        match &result {
+            Ok(state) => self.note_departure(state.degraded),
+            Err(error) => self.note_observables_error(error),
+        }
+        result
+    }
+
+    fn velocity_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<Result<[f64; 3], ObservablesError>> {
+        let result = self.inner.velocity_at_j2000_s(sat, t_j2000_s);
+        if let Some(Err(error)) = &result {
+            self.note_observables_error(error);
+        }
+        result
+    }
+}
+
+impl<S: crate::positioning::RinexSppAssemblySource + ?Sized>
+    crate::positioning::RinexSppAssemblySource for Ut1Tracked<'_, S>
+{
+    fn rinex_spp_broadcast_corrections(&self) -> crate::positioning::RinexSppBroadcastCorrections {
+        self.inner.rinex_spp_broadcast_corrections()
     }
 }
 
@@ -239,8 +519,10 @@ pub(crate) struct TransmitStateMemo<'a> {
     satellites: RefCell<Vec<SatelliteMemo>>,
 }
 
-/// State of one satellite at one epoch, as the source returned it.
-type MemoState = Option<([f64; 3], f64, Option<f64>)>;
+/// State of one satellite at one epoch, as the source returned it, with the UT1
+/// departure it was produced under. A refusal is not held: it is asked for again, so
+/// it reaches the caller as the error every time.
+type MemoState = Option<Validated<PositionClockGroupDelay>>;
 
 #[derive(Clone, Copy)]
 struct MemoEntry {
@@ -317,6 +599,14 @@ impl EphemerisSource for TransmitStateMemo<'_> {
         self.source.position_clock_at_j2000_s(sat, t_j2000_s)
     }
 
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClock>>, crate::Error> {
+        self.source.try_position_clock_at_j2000_s(sat, t_j2000_s)
+    }
+
     fn single_frequency_group_delay_s(&self, sat: GnssSatelliteId, t_j2000_s: f64) -> Option<f64> {
         self.source.single_frequency_group_delay_s(sat, t_j2000_s)
     }
@@ -346,11 +636,29 @@ impl EphemerisSource for TransmitStateMemo<'_> {
         sat: GnssSatelliteId,
         t_j2000_s: f64,
     ) -> Option<([f64; 3], f64, Option<f64>)> {
-        self.with_entry(sat, t_j2000_s, |entry| {
-            *entry.state.get_or_insert_with(|| {
-                self.source
-                    .position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
-            })
-        })
+        self.try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s)
+            .ok()
+            .flatten()
+            .map(|state| state.value)
+    }
+
+    /// The source's fallible read, remembered when it gives a state or none; a
+    /// refusal is asked for again, so every caller receives it.
+    fn try_position_clock_group_delay_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<Validated<PositionClockGroupDelay>>, crate::Error> {
+        if let Some(state) = self.with_entry(sat, t_j2000_s, |entry| entry.state) {
+            return Ok(state);
+        }
+        let result = self
+            .source
+            .try_position_clock_group_delay_at_j2000_s(sat, t_j2000_s);
+        if let Ok(state) = &result {
+            let state = *state;
+            self.with_entry(sat, t_j2000_s, |entry| entry.state = Some(state));
+        }
+        result
     }
 }

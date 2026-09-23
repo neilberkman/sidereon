@@ -58,3 +58,21 @@ pub trait Integrator: Send + Sync {
         opts: &IntegratorOptions,
     ) -> Result<PropagationResult, PropagationError>;
 }
+
+/// Run one integration with its own UT1 departure record: the result's
+/// [`PropagationResult::ut1_degraded`] is the first departure a force model
+/// recorded during it, and the departure is passed back to `ctx` whether the
+/// integration succeeds or fails.
+pub(crate) fn with_ut1_departure_record(
+    ctx: &PropagationContext,
+    integrate: impl FnOnce(&PropagationContext) -> Result<PropagationResult, PropagationError>,
+) -> Result<PropagationResult, PropagationError> {
+    let run_ctx = ctx.with_fresh_departure_record();
+    let result = integrate(&run_ctx);
+    let departure = run_ctx.ut1_departure();
+    ctx.merge_departure(departure);
+    result.map(|mut result| {
+        result.ut1_degraded = departure;
+        result
+    })
+}

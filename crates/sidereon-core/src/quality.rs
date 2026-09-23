@@ -1732,6 +1732,7 @@ mod tests {
                 systems: vec![GnssSystem::Gps],
                 redundancy: 1,
                 raim_checkable: true,
+                ut1_degraded: None,
             },
         }
     }

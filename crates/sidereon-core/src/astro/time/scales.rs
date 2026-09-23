@@ -18,8 +18,8 @@ use crate::astro::constants::time::{
 use crate::astro::data::iers::{Ut1Entry, UT1_DATA};
 use crate::astro::time::civil;
 use crate::astro::time::eop::{
-    check_ut1_coverage, CoverageError, LeapSecondTable, TimeScaleInputErrorKind, Ut1Provenance,
-    Validated, ValidityMode,
+    check_ut1_coverage, ut1_coverage_departure, CoverageError, DegradeReason, LeapSecondTable,
+    TimeScaleInputErrorKind, Ut1Provenance, Validated, ValidityMode,
 };
 use crate::astro::time::model::TimeScale;
 use crate::validate::{self, FieldError};
@@ -66,6 +66,18 @@ pub struct TimeScales {
     pub jd_tt: f64,
     /// Full TDB Julian date.
     pub jd_tdb: f64,
+    /// Whether `ut1_fraction` and `jd_ut1` come from outside the UT1 table.
+    ///
+    /// `None` when the TT instant lies inside the UT1 table's coverage
+    /// interval, so UT1 is interpolated from the table. `Some` when it lies
+    /// before or after the table: TT-UT1 then comes from the long-term delta-T
+    /// curve Skyfield splices around the table (see
+    /// [`crate::astro::time::eop`]), which is a model, not a measured or
+    /// predicted value. Every constructor sets this; TT and TDB are exact
+    /// either way. The frame transforms that read UT1 refuse a value marked
+    /// here unless the caller accepts it through a `_with_validity` entry
+    /// point or [`crate::astro::frames::transforms::with_ut1_validity`].
+    pub ut1_degraded: Option<DegradeReason>,
 }
 
 /// One post-1972 TAI-UTC step keyed by UTC Modified Julian Date.
@@ -346,6 +358,12 @@ impl TimeScales {
     /// Resolve the split-Julian-date time scales for a UTC calendar instant.
     ///
     /// Validates the public boundary, then runs the exact Skyfield `_utc()` path.
+    ///
+    /// TT and TDB are exact for any instant the leap-second table labels, so
+    /// this constructor does not refuse an instant outside the embedded UT1
+    /// table. For such an instant TT-UT1 comes from Skyfield's long-term
+    /// delta-T curve and [`TimeScales::ut1_degraded`] reports it. Use
+    /// [`TimeScales::from_utc_validated`] to refuse it instead.
     pub fn from_utc(
         year: i32,
         month: i32,
@@ -362,6 +380,13 @@ impl TimeScales {
 
     /// Resolve time scales for a UTC calendar instant using caller-supplied
     /// leap-second and UT1-UTC tables.
+    ///
+    /// Refuses an instant outside the caller's UT1 table with
+    /// [`CoverageError::OutsideCoverage`], so a value returned here always has
+    /// [`TimeScales::ut1_degraded`] equal to `None`. Use
+    /// [`TimeScales::from_utc_validated_with_tables`] with
+    /// [`ValidityMode::Permissive`] to accept the long-term delta-T curve
+    /// outside it.
     pub fn from_utc_with_tables(
         year: i32,
         month: i32,
@@ -441,6 +466,7 @@ impl TimeScales {
             jd_ut1,
             jd_tt,
             jd_tdb,
+            ut1_degraded: ut1_coverage_departure(&embedded_ut1_coverage(), jd_tt),
         }
     }
 
@@ -504,24 +530,25 @@ impl TimeScales {
             jd_ut1,
             jd_tt,
             jd_tdb,
+            ut1_degraded: ut1_coverage_departure(&tables.ut1_coverage(), jd_tt),
         })
     }
 
     /// Coverage-policy-enforced variant of [`TimeScales::from_utc`].
     ///
-    /// The numerics are produced by [`TimeScales::from_utc`] **unchanged** (the
-    /// delta-T / UT1-UTC lookups still clamp at the embedded table edges exactly
-    /// as before, preserving Skyfield 0-ULP parity). The only addition is that
-    /// the resulting TT instant is classified against the embedded UT1/EOP
-    /// coverage interval under the requested [`ValidityMode`]:
+    /// The numerics are produced by [`TimeScales::from_utc`] unchanged: the
+    /// table inside its coverage, and outside it the long-term delta-T curve
+    /// Skyfield 1.54 splices around the table. The resulting TT instant is
+    /// classified against the embedded UT1/EOP coverage interval under the
+    /// requested [`ValidityMode`]:
     ///
-    /// - [`ValidityMode::Strict`]: an instant outside `[first_jd_tt, last_jd_tt]`
-    ///   (where the delta-T table would have silently clamped/extrapolated)
-    ///   returns [`CoverageError::OutsideCoverage`]. Nothing degraded is ever
-    ///   returned.
-    /// - [`ValidityMode::Permissive`]: the clamped value is returned, paired with
-    ///   a [`crate::astro::time::eop::DegradeReason`] when the instant fell outside
-    ///   coverage. This is the historical (parity) behaviour, now made explicit.
+    /// - [`ValidityMode::Strict`] (the default mode): an instant outside
+    ///   `[first_jd_tt, last_jd_tt]` returns [`CoverageError::OutsideCoverage`].
+    ///   Nothing outside the table is ever returned.
+    /// - [`ValidityMode::Permissive`]: the long-term value is returned, paired
+    ///   with a [`crate::astro::time::eop::DegradeReason`] when the instant fell
+    ///   outside coverage. The same reason is in the value's
+    ///   [`TimeScales::ut1_degraded`].
     ///
     /// In-coverage results are bit-identical to [`TimeScales::from_utc`] and are
     /// flagged not-degraded.
@@ -536,9 +563,9 @@ impl TimeScales {
     ) -> Result<Validated<Self>, CoverageError> {
         // Numerics first, exactly as the parity path produces them.
         let scales = Self::from_utc(year, month, day, hour, minute, second)?;
-        // Classify the (already-clamped) instant against UT1 coverage. We
-        // classify at jd_tt because the delta-T table axis is in TT (see
-        // `ut1_coverage`), and jd_tt is independent of the clamped delta-T.
+        // Classify the instant against UT1 coverage. We classify at jd_tt
+        // because the delta-T table axis is in TT (see `ut1_coverage`), and
+        // jd_tt does not depend on delta-T.
         let prov = ut1_coverage();
         let degraded = check_ut1_coverage(&prov, scales.jd_tt, mode)?;
         Ok(Validated {
@@ -579,6 +606,9 @@ impl TimeScales {
     /// the scale's leap-second gap, then routed through [`Self::from_utc`]. This
     /// is the single home for the system-time-to-UTC inverse that the
     /// reduced-orbit bridge previously reimplemented.
+    ///
+    /// Like [`Self::from_utc`], it does not refuse an instant outside the
+    /// embedded UT1 table; [`TimeScales::ut1_degraded`] reports the departure.
     pub fn from_scale(
         scale: TimeScale,
         year: i32,
@@ -1668,42 +1698,71 @@ fn leap_second_table_for(
     }
 }
 
-fn interpolate_delta_t(jd_tt: f64) -> f64 {
-    // Build delta-T table on first call (matching C++ lazy static pattern).
-    use std::sync::LazyLock;
+/// One row of a delta-T table: the TT Julian date of a UT1-UTC sample and
+/// TT-UT1 there, rounded to 1e-7 s as Skyfield rounds its table.
+struct DeltaTRow {
+    jd_tt: f64,
+    delta_t: f64,
+}
 
-    struct DeltaTRow {
-        jd_tt: f64,
-        delta_t: f64,
+fn delta_t_row(jd_utc: f64, leap_seconds: f64, ut1_utc: f64) -> DeltaTRow {
+    let tt_minus_utc = leap_seconds + TT_MINUS_TAI_S;
+    let delta_t = ((tt_minus_utc - ut1_utc) * ROUND_1E7).round() / ROUND_1E7;
+    DeltaTRow {
+        jd_tt: jd_utc + tt_minus_utc / SECONDS_PER_DAY,
+        delta_t,
     }
+}
+
+/// Delta-T from a table, with Skyfield's long-term splice outside it.
+///
+/// Inside `[first, last]` the table is interpolated linearly. Outside it,
+/// delta-T is the long-term curve that Skyfield 1.54 `build_delta_t` builds
+/// around the table ([`LongTermDeltaT`]), evaluated at `(jd_tt - 1721045) /
+/// 365.25`, as Skyfield's `DeltaT.__call__` does.
+fn table_delta_t(
+    table: &[DeltaTRow],
+    jd_tt: f64,
+    long_term: impl FnOnce() -> Result<f64, CoverageError>,
+) -> Result<f64, CoverageError> {
+    match table.binary_search_by(|row| row.jd_tt.partial_cmp(&jd_tt).unwrap()) {
+        Ok(i) => Ok(table[i].delta_t),
+        Err(0) => long_term(),
+        Err(i) if i >= table.len() => long_term(),
+        Err(i) => {
+            let p1 = &table[i - 1];
+            let p2 = &table[i];
+            Ok(p1.delta_t + (jd_tt - p1.jd_tt) * (p2.delta_t - p1.delta_t) / (p2.jd_tt - p1.jd_tt))
+        }
+    }
+}
+
+/// Skyfield's `DeltaT` argument for its long-term curve: TT expressed as a
+/// Julian year number.
+fn long_term_year(jd_tt: f64) -> f64 {
+    (jd_tt - 1721045.0) / 365.25
+}
+
+fn interpolate_delta_t(jd_tt: f64) -> f64 {
+    use std::sync::LazyLock;
 
     static TABLE: LazyLock<Vec<DeltaTRow>> = LazyLock::new(|| {
         UT1_DATA
             .iter()
             .map(|entry| {
                 let jd_utc = entry.mjd as f64 + 2400000.5;
-                let leap_seconds = find_leap_seconds(jd_utc);
-                let tt_minus_utc = leap_seconds + TT_MINUS_TAI_S;
-                let delta_t = ((tt_minus_utc - entry.ut1_utc) * ROUND_1E7).round() / ROUND_1E7;
-                DeltaTRow {
-                    jd_tt: jd_utc + tt_minus_utc / SECONDS_PER_DAY,
-                    delta_t,
-                }
+                delta_t_row(jd_utc, find_leap_seconds(jd_utc), entry.ut1_utc)
             })
             .collect()
     });
+    static LONG_TERM: LazyLock<LongTermDeltaT> = LazyLock::new(|| {
+        LongTermDeltaT::around(&TABLE).expect("the embedded table starts after year -720")
+    });
 
-    // Binary search for the bracketing entries.
-    match TABLE.binary_search_by(|row| row.jd_tt.partial_cmp(&jd_tt).unwrap()) {
-        Ok(i) => TABLE[i].delta_t,
-        Err(0) => TABLE[0].delta_t,
-        Err(i) if i >= TABLE.len() => TABLE.last().unwrap().delta_t,
-        Err(i) => {
-            let p1 = &TABLE[i - 1];
-            let p2 = &TABLE[i];
-            p1.delta_t + (jd_tt - p1.jd_tt) * (p2.delta_t - p1.delta_t) / (p2.jd_tt - p1.jd_tt)
-        }
-    }
+    table_delta_t(&TABLE, jd_tt, || {
+        Ok(LONG_TERM.evaluate(long_term_year(jd_tt)))
+    })
+    .expect("the embedded long-term curve is infallible")
 }
 
 fn interpolate_delta_t_with_table(
@@ -1711,50 +1770,376 @@ fn interpolate_delta_t_with_table(
     ut1_utc: &[Ut1Entry],
     leap_seconds: &[LeapSecondEntry],
 ) -> Result<f64, CoverageError> {
-    struct DeltaTRow {
-        jd_tt: f64,
-        delta_t: f64,
-    }
-
     let table: Vec<DeltaTRow> = effective_ut1_utc_rows(ut1_utc, leap_seconds)
         .iter()
         .map(|entry| {
             let jd_utc = entry.mjd as f64 + 2400000.5;
-            let leap_seconds = find_leap_seconds_in_table_checked(jd_utc, leap_seconds)?;
-            let tt_minus_utc = leap_seconds + TT_MINUS_TAI_S;
-            let delta_t = ((tt_minus_utc - entry.ut1_utc) * ROUND_1E7).round() / ROUND_1E7;
-            Ok(DeltaTRow {
-                jd_tt: jd_utc + tt_minus_utc / SECONDS_PER_DAY,
-                delta_t,
-            })
+            let leap = find_leap_seconds_in_table_checked(jd_utc, leap_seconds)?;
+            Ok(delta_t_row(jd_utc, leap, entry.ut1_utc))
         })
         .collect::<Result<_, CoverageError>>()?;
 
-    let delta_t = match table.binary_search_by(|row| row.jd_tt.partial_cmp(&jd_tt).unwrap()) {
-        Ok(i) => table[i].delta_t,
-        Err(0) => table[0].delta_t,
-        Err(i) if i >= table.len() => table.last().unwrap().delta_t,
-        Err(i) => {
-            let p1 = &table[i - 1];
-            let p2 = &table[i];
-            p1.delta_t + (jd_tt - p1.jd_tt) * (p2.delta_t - p1.delta_t) / (p2.jd_tt - p1.jd_tt)
+    table_delta_t(&table, jd_tt, || {
+        LongTermDeltaT::around(&table).map(|curve| curve.evaluate(long_term_year(jd_tt)))
+    })
+}
+
+/// One segment of a Skyfield `curvelib.Splines` table: a polynomial in
+/// `t = (x - lower) / (upper - lower)` with coefficients from the highest
+/// power down, evaluated by Horner's rule.
+#[derive(Debug, Clone, PartialEq)]
+struct SplineSegment {
+    lower: f64,
+    upper: f64,
+    coefficients: Vec<f64>,
+}
+
+impl SplineSegment {
+    fn width(&self) -> f64 {
+        self.upper - self.lower
+    }
+}
+
+/// Skyfield `curvelib.Splines`: piecewise polynomials selected by
+/// `numpy.interp(x, lower, arange(n))` truncated to an integer, so an
+/// argument before the first segment or past the last one extrapolates that
+/// segment's polynomial.
+#[derive(Debug, Clone, PartialEq)]
+struct Splines {
+    segments: Vec<SplineSegment>,
+}
+
+impl Splines {
+    fn evaluate(&self, x: f64) -> f64 {
+        let segment = &self.segments[self.segment_index(x)];
+        let t = (x - segment.lower) / segment.width();
+        let mut value = segment.coefficients[0];
+        for &coefficient in &segment.coefficients[1..] {
+            value *= t;
+            value += coefficient;
         }
-    };
-    Ok(delta_t)
+        value
+    }
+
+    /// `numpy.interp(x, lower, arange(n)).astype(int)`, following NumPy's
+    /// `arr_interp`: `fp[0]` below the first knot, `fp[n - 1]` above the last,
+    /// `fp[j]` on a knot, and otherwise `slope * (x - xp[j]) + fp[j]` with
+    /// `slope = (fp[j + 1] - fp[j]) / (xp[j + 1] - xp[j])`.
+    fn segment_index(&self, x: f64) -> usize {
+        let n = self.segments.len();
+        if n == 1 || x < self.segments[0].lower {
+            return 0;
+        }
+        if x > self.segments[n - 1].lower {
+            return n - 1;
+        }
+        let j = self
+            .segments
+            .partition_point(|segment| segment.lower <= x)
+            .saturating_sub(1);
+        if j == n - 1 || self.segments[j].lower == x {
+            return j;
+        }
+        let slope =
+            ((j + 1) as f64 - j as f64) / (self.segments[j + 1].lower - self.segments[j].lower);
+        let index = slope * (x - self.segments[j].lower) + j as f64;
+        index as usize
+    }
+
+    /// Skyfield `Splines.derivative`: each coefficient but the constant
+    /// becomes `n * c / width`, `n` its power.
+    fn derivative(&self) -> Splines {
+        Splines {
+            segments: self
+                .segments
+                .iter()
+                .map(|segment| {
+                    let width = segment.width();
+                    let powered = &segment.coefficients[..segment.coefficients.len() - 1];
+                    SplineSegment {
+                        lower: segment.lower,
+                        upper: segment.upper,
+                        coefficients: powered
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &c)| (powered.len() - i) as f64 * c / width)
+                            .collect(),
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+/// Skyfield `curvelib.build_spline_given_ends`: the cubic on `[x0, x1]` with
+/// value and slope `y0`, `slope0` at `x0` and `y1`, `slope1` at `x1`.
+fn spline_given_ends(
+    x0: f64,
+    y0: f64,
+    slope0: f64,
+    x1: f64,
+    y1: f64,
+    slope1: f64,
+) -> SplineSegment {
+    let width = x1 - x0;
+    let slope0 = slope0 * width;
+    let slope1 = slope1 * width;
+    let a0 = y0;
+    let a1 = slope0;
+    let a2 = -2.0 * slope0 - slope1 - 3.0 * y0 + 3.0 * y1;
+    let a3 = slope0 + slope1 + 2.0 * y0 - 2.0 * y1;
+    SplineSegment {
+        lower: x0,
+        upper: x1,
+        coefficients: vec![a3, a2, a1, a0],
+    }
+}
+
+/// The long-term parabola of Stephenson, Morrison and Hohenkerk (2016),
+/// `-320 + 32.5 ((year - 1825) / 100)^2` seconds, as Skyfield's
+/// `delta_t_parabola_stephenson_morrison_hohenkerk_2016` spline.
+fn smh2016_parabola() -> Splines {
+    Splines {
+        segments: vec![SplineSegment {
+            lower: 1825.0,
+            upper: 1925.0,
+            coefficients: vec![0.0, 32.5, 0.0, -320.0],
+        }],
+    }
+}
+
+/// Knot years of Table S15 (2020 update) of Morrison, Stephenson, Hohenkerk
+/// and Zawilski, the cubic delta-T splines for 720 BC to AD 2019 that Skyfield
+/// bundles as `delta_t.npz` `Table-S15.2020.txt`. Segment `k` runs from
+/// `S15_KNOTS[k]` to `S15_KNOTS[k + 1]`.
+const S15_KNOTS: [f64; 59] = [
+    -720.0, -100.0, 400.0, 1000.0, 1150.0, 1300.0, 1500.0, 1600.0, 1650.0, 1720.0, 1800.0, 1810.0,
+    1820.0, 1830.0, 1840.0, 1850.0, 1855.0, 1860.0, 1865.0, 1870.0, 1875.0, 1880.0, 1885.0, 1890.0,
+    1895.0, 1900.0, 1905.0, 1910.0, 1915.0, 1920.0, 1925.0, 1930.0, 1935.0, 1940.0, 1945.0, 1950.0,
+    1953.0, 1956.0, 1959.0, 1962.0, 1965.0, 1968.0, 1971.0, 1974.0, 1977.0, 1980.0, 1983.0, 1986.0,
+    1989.0, 1992.0, 1995.0, 1998.0, 2001.0, 2004.0, 2007.0, 2010.0, 2013.0, 2016.0, 2019.0,
+];
+
+/// Table S15 cubic coefficients `[a3, a2, a1, a0]` per segment, in the
+/// variable `t = (year - lower) / (upper - lower)`.
+const S15_COEFFICIENTS: [[f64; 4]; 58] = [
+    [409.16, 776.247, -9999.586, 20371.848],
+    [-503.433, 1303.151, -5822.27, 11557.668],
+    [1085.087, -298.291, -5671.519, 6535.116],
+    [-25.346, 184.811, -753.21, 1650.393],
+    [-24.641, 108.771, -459.628, 1056.647],
+    [-29.414, 61.953, -421.345, 681.149],
+    [16.197, -6.572, -192.841, 292.343],
+    [3.018, 10.505, -78.697, 109.127],
+    [-2.127, 38.333, -68.089, 43.952],
+    [-37.939, 41.731, 2.507, 12.068],
+    [1.918, -1.126, -3.481, 18.367],
+    [-3.812, 4.629, 0.021, 15.678],
+    [3.25, -6.806, -2.157, 16.516],
+    [-0.096, 2.944, -6.018, 10.804],
+    [-0.539, 2.658, -0.416, 7.634],
+    [-0.883, 0.261, 1.642, 9.338],
+    [1.558, -2.389, -0.486, 10.357],
+    [-2.477, 2.284, -0.591, 9.04],
+    [2.72, -5.148, -3.456, 8.255],
+    [-0.914, 3.011, -5.593, 2.371],
+    [-0.039, 0.269, -2.314, -1.126],
+    [0.563, 0.152, -1.893, -3.21],
+    [-1.438, 1.842, 0.101, -4.388],
+    [1.871, -2.474, -0.531, -3.884],
+    [-0.232, 3.138, 0.134, -5.017],
+    [-1.257, 2.443, 5.715, -1.977],
+    [0.72, -1.329, 6.828, 4.923],
+    [-0.825, 0.831, 6.33, 11.142],
+    [0.262, -1.643, 5.518, 17.479],
+    [0.008, -0.856, 3.02, 21.617],
+    [0.127, -0.831, 1.333, 23.789],
+    [0.142, -0.449, 0.052, 24.418],
+    [0.702, -0.022, -0.419, 24.164],
+    [-1.106, 2.086, 1.645, 24.426],
+    [0.614, -1.232, 2.499, 27.05],
+    [-0.277, 0.22, 1.127, 28.932],
+    [0.631, -0.61, 0.737, 30.002],
+    [-0.799, 1.282, 1.409, 30.76],
+    [0.507, -1.115, 1.577, 32.652],
+    [0.199, 0.406, 0.868, 33.621],
+    [-0.414, 1.002, 2.275, 35.093],
+    [0.202, -0.242, 3.035, 37.956],
+    [-0.229, 0.364, 3.157, 40.951],
+    [0.172, -0.323, 3.199, 44.244],
+    [-0.192, 0.193, 3.069, 47.291],
+    [0.081, -0.384, 2.878, 50.361],
+    [-0.165, -0.14, 2.354, 52.936],
+    [0.448, -0.637, 1.577, 54.984],
+    [-0.276, 0.708, 1.648, 56.373],
+    [0.11, -0.121, 2.235, 58.453],
+    [-0.313, 0.21, 2.324, 60.678],
+    [0.109, -0.729, 1.804, 62.898],
+    [0.199, -0.402, 0.674, 64.083],
+    [-0.017, 0.194, 0.466, 64.553],
+    [-0.084, 0.144, 0.804, 65.197],
+    [0.128, -0.109, 0.839, 66.061],
+    [-0.095, 0.277, 1.007, 66.92],
+    [-0.139, -0.007, 1.277, 68.109],
+];
+
+fn s15_splines() -> Splines {
+    Splines {
+        segments: S15_COEFFICIENTS
+            .iter()
+            .enumerate()
+            .map(|(k, coefficients)| SplineSegment {
+                lower: S15_KNOTS[k],
+                upper: S15_KNOTS[k + 1],
+                coefficients: coefficients.to_vec(),
+            })
+            .collect(),
+    }
+}
+
+/// Python's float `//` (CPython `float_floor_div`): `fmod`-based, then floored.
+fn python_floor_div(a: f64, b: f64) -> f64 {
+    let modulo = a % b;
+    let mut div = (a - modulo) / b;
+    if modulo != 0.0 && ((b < 0.0) != (modulo < 0.0)) {
+        div -= 1.0;
+    }
+    if div == 0.0 {
+        return 0.0_f64.copysign(a / b);
+    }
+    let floor = div.floor();
+    if div - floor > 0.5 {
+        floor + 1.0
+    } else {
+        floor
+    }
+}
+
+/// The long-term delta-T curve Skyfield 1.54 `timelib.build_delta_t` splices
+/// around a delta-T table, as a function of the Julian year number:
+///
+/// - the SMH2016 parabola far outside;
+/// - an 800-year cubic joining the parabola to the start of Table S15 at
+///   year -720;
+/// - Table S15, truncated where the table starts, with the linear term of its
+///   last segment adjusted so the curve meets the table's first value there;
+/// - a cubic from the table's last value, with the slope of its last year,
+///   to the parabola at the largest multiple of 100 not after `x0 + 800`,
+///   where `x0` is the table's last year.
+struct LongTermDeltaT {
+    curve: Splines,
+}
+
+impl LongTermDeltaT {
+    /// Width of the connecting splines, years (Skyfield `patch_width`).
+    const PATCH_WIDTH: f64 = 800.0;
+
+    /// Build the curve around `table`, which holds at least two rows. Refuses
+    /// a table starting at or before year -720, where Skyfield's truncation of
+    /// Table S15 leaves no segment.
+    fn around(table: &[DeltaTRow]) -> Result<Self, CoverageError> {
+        let p = smh2016_parabola();
+        let pd = p.derivative();
+        let s = s15_splines();
+        let sd = s.derivative();
+        let parabola_width = p.segments[0].upper - p.segments[0].lower;
+
+        let x1 = s.segments[0].lower;
+        let x0 = x1 - Self::PATCH_WIDTH;
+        let left = spline_given_ends(
+            x0,
+            p.evaluate(x0),
+            pd.evaluate(x0),
+            x1,
+            s.evaluate(x1),
+            sd.evaluate(x1),
+        );
+
+        let x1 = x0;
+        let x0 = x1 - parabola_width;
+        let far_left = spline_given_ends(
+            x0,
+            p.evaluate(x0),
+            pd.evaluate(x0),
+            x1,
+            p.evaluate(x1),
+            pd.evaluate(x1),
+        );
+
+        let first = &table[0];
+        let last = &table[table.len() - 1];
+
+        // numpy.searchsorted(lower, x): the first segment starting at or after x.
+        let x = long_term_year(first.jd_tt);
+        let kept = s.segments.partition_point(|segment| segment.lower < x);
+        if kept == 0 {
+            return Err(table_error("ut1_utc", TimeScaleInputErrorKind::OutOfRange));
+        }
+        let mut s15 = s.segments[..kept].to_vec();
+        let desired_y = first.delta_t;
+        let current_y = s.evaluate(x);
+        let joining = &mut s15[kept - 1];
+        let t = (x - joining.lower) / (joining.upper - joining.lower);
+        joining.coefficients[2] += (desired_y - current_y) / t;
+
+        let x0 = long_term_year(last.jd_tt);
+        let x1 = python_floor_div(x0 + Self::PATCH_WIDTH, 100.0) * 100.0;
+        let y0 = last.delta_t;
+        let lookback = table.len().min(366);
+        let slope =
+            (last.delta_t - table[table.len() - lookback].delta_t) * lookback as f64 / 365.0;
+        let right = spline_given_ends(x0, y0, slope, x1, p.evaluate(x1), pd.evaluate(x1));
+
+        let x0 = x1;
+        let x1 = x0 + parabola_width;
+        let far_right = spline_given_ends(
+            x0,
+            p.evaluate(x0),
+            pd.evaluate(x0),
+            x1,
+            p.evaluate(x1),
+            pd.evaluate(x1),
+        );
+
+        let mut segments = Vec::with_capacity(s15.len() + 4);
+        segments.push(far_left);
+        segments.push(left);
+        segments.extend(s15);
+        segments.push(right);
+        segments.push(far_right);
+        Ok(Self {
+            curve: Splines { segments },
+        })
+    }
+
+    /// Delta-T, seconds, at Julian year number `year`.
+    fn evaluate(&self, year: f64) -> f64 {
+        self.curve.evaluate(year)
+    }
 }
 
 /// UT1 coverage interval for the embedded EOP table, in TT Julian dates.
 ///
-/// Outside this interval the delta-T interpolation clamps to the nearest table
-/// edge (parity-preserving Skyfield behaviour). Strict-mode callers should treat
-/// instants outside `[first_jd_tt, last_jd_tt]` as degraded; see
+/// Outside this interval delta-T comes from the long-term curve Skyfield
+/// splices around the table. Every [`TimeScales`] built outside it carries
+/// [`TimeScales::ut1_degraded`]; strict-mode constructors refuse it. See
 /// [`crate::astro::time::eop`].
 pub fn ut1_coverage() -> Ut1Provenance {
-    ut1_coverage_for(
-        &UT1_DATA,
-        LEAP_SECONDS,
-        "IERS Earth Orientation Parameters (UT1-UTC), bundled",
-    )
+    embedded_ut1_coverage()
+}
+
+/// The embedded table's coverage, computed once.
+fn embedded_ut1_coverage() -> Ut1Provenance {
+    use std::sync::LazyLock;
+
+    static COVERAGE: LazyLock<Ut1Provenance> = LazyLock::new(|| {
+        ut1_coverage_for(
+            &UT1_DATA,
+            LEAP_SECONDS,
+            "IERS Earth Orientation Parameters (UT1-UTC), bundled",
+        )
+    });
+    *COVERAGE
 }
 
 fn ut1_coverage_for(
@@ -2078,6 +2463,10 @@ mod tests {
             permissive.degraded,
             Some(crate::astro::time::eop::DegradeReason::BeforeCoverage)
         );
+        assert_eq!(
+            permissive.value.ut1_degraded,
+            Some(crate::astro::time::eop::DegradeReason::BeforeCoverage)
+        );
 
         let strict_after = TimeScales::from_utc_validated_with_tables(
             2026,
@@ -2094,6 +2483,233 @@ mod tests {
             strict_after,
             CoverageError::OutsideCoverage(crate::astro::time::eop::DegradeReason::AfterCoverage)
         );
+    }
+
+    #[test]
+    fn out_of_table_ut1_leaves_tt_and_tdb_bits_unchanged() {
+        // 2100-01-01 is MJD 88069, past the embedded UT1 table. A caller table
+        // that covers it must give the same TT and TDB bits as the embedded
+        // path, which takes UT1 from the long-term delta-T curve there: TT and
+        // TDB do not depend on UT1.
+        let ut1_utc = [
+            Ut1Entry {
+                mjd: 88068,
+                ut1_utc: 0.0,
+            },
+            Ut1Entry {
+                mjd: 88070,
+                ut1_utc: 0.0,
+            },
+        ];
+        let tables = TimeTables::new(LEAP_SECONDS, &ut1_utc).expect("valid covering table");
+
+        let held = TimeScales::from_utc(2100, 1, 1, 0, 0, 0.0).expect("embedded conversion");
+        let covered = TimeScales::from_utc_with_tables(2100, 1, 1, 0, 0, 0.0, tables)
+            .expect("covered conversion");
+
+        assert_eq!(
+            held.ut1_degraded,
+            Some(crate::astro::time::eop::DegradeReason::AfterCoverage)
+        );
+        assert_eq!(covered.ut1_degraded, None);
+        assert_eq!(held.jd_whole.to_bits(), covered.jd_whole.to_bits());
+        assert_eq!(held.tt_fraction.to_bits(), covered.tt_fraction.to_bits());
+        assert_eq!(held.jd_tt.to_bits(), covered.jd_tt.to_bits());
+        assert_eq!(held.tdb_fraction.to_bits(), covered.tdb_fraction.to_bits());
+        assert_eq!(held.jd_tdb.to_bits(), covered.jd_tdb.to_bits());
+    }
+
+    fn embedded_long_term() -> &'static LongTermDeltaT {
+        use std::sync::LazyLock;
+        static CURVE: LazyLock<LongTermDeltaT> = LazyLock::new(|| {
+            let table: Vec<DeltaTRow> = UT1_DATA
+                .iter()
+                .map(|entry| {
+                    let jd_utc = entry.mjd as f64 + 2400000.5;
+                    delta_t_row(jd_utc, find_leap_seconds(jd_utc), entry.ut1_utc)
+                })
+                .collect();
+            LongTermDeltaT::around(&table).expect("embedded curve")
+        });
+        &CURVE
+    }
+
+    fn assert_close(actual: f64, expected: f64, tolerance: f64, label: &str) {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "{label}: {actual} vs {expected}"
+        );
+    }
+
+    #[test]
+    fn long_term_curve_is_the_smh2016_parabola_far_from_the_table() {
+        // p(y) = -320 + 32.5 u^2 with u = (y - 1825) / 100.
+        // y = -2000: u = -38.25, u^2 = 1463.0625, 32.5 u^2 = 47549.53125,
+        //            p = 47229.53125 (extrapolation of the far-left segment).
+        // y = -1570: u = -33.95, u^2 = 1152.6025, p = 37139.58125.
+        // y = 2850:  u = 10.25, u^2 = 105.0625, p = 3094.53125.
+        // y = 3000:  u = 11.75, u^2 = 138.0625, p = 4167.03125
+        //            (extrapolation of the far-right segment).
+        let curve = embedded_long_term();
+        for (year, expected) in [
+            (-2000.0, 47229.53125),
+            (-1570.0, 37139.58125),
+            (2850.0, 3094.53125),
+            (3000.0, 4167.03125),
+        ] {
+            assert_close(curve.evaluate(year), expected, 1.0e-9, "parabola");
+        }
+    }
+
+    #[test]
+    fn long_term_curve_reads_table_s15_between_its_knots() {
+        let curve = embedded_long_term();
+        // At a knot t = 0, so Horner's rule leaves the constant term a0.
+        assert_eq!(curve.evaluate(1950.0), 28.932);
+        assert_eq!(curve.evaluate(-720.0), 20371.848);
+        // Segment 1950..1953: a3 = -0.277, a2 = 0.22, a1 = 1.127, a0 = 28.932.
+        // At 1952.5, t = 2.5 / 3 = 0.8333...:
+        // ((-0.277 t + 0.22) t + 1.127) t + 28.932 = 29.863643518518...
+        assert_close(
+            curve.evaluate(1952.5),
+            29.863_643_518_518_52,
+            1.0e-12,
+            "S15 1952.5",
+        );
+    }
+
+    #[test]
+    fn long_term_curve_meets_the_table_and_its_own_segments() {
+        let curve = embedded_long_term();
+        let table = &UT1_DATA[..];
+        let first_jd_utc = table[0].mjd as f64 + 2400000.5;
+        let last_jd_utc = table[table.len() - 1].mjd as f64 + 2400000.5;
+        let first = delta_t_row(
+            first_jd_utc,
+            find_leap_seconds(first_jd_utc),
+            table[0].ut1_utc,
+        );
+        let last = delta_t_row(
+            last_jd_utc,
+            find_leap_seconds(last_jd_utc),
+            table[table.len() - 1].ut1_utc,
+        );
+        // The right cubic starts at the table's last value (t = 0 there), and
+        // the adjusted S15 segment reaches the table's first value.
+        assert_eq!(curve.evaluate(long_term_year(last.jd_tt)), last.delta_t);
+        assert_close(
+            curve.evaluate(long_term_year(first.jd_tt)),
+            first.delta_t,
+            1.0e-9,
+            "table start",
+        );
+        assert_eq!(interpolate_delta_t(last.jd_tt), last.delta_t);
+        assert_eq!(interpolate_delta_t(first.jd_tt), first.delta_t);
+        // The connecting cubics meet their neighbours: S15 at year -720, the
+        // far-left parabola segment at -1520, the far-right one at 2800.
+        for (year, value) in [
+            (-720.0, 20371.848),
+            (-1520.0, 36044.33125),
+            (2800.0, 2769.53125),
+        ] {
+            assert_close(curve.evaluate(year - 1.0e-9), value, 1.0e-4, "join");
+        }
+    }
+
+    #[test]
+    fn out_of_table_delta_t_follows_the_skyfield_splice() {
+        // 2100-01-01 00:00 UTC: jd_tt = 2488069.500800741, year
+        // (jd_tt - 1721045) / 365.25 = 2099.9986332669155, in the right cubic
+        // from year x0 = 2027.5003444236575 (the table's last row, delta-T
+        // y0 = 69.2099116) to x1 = 2800. Its slope is the table's last-year
+        // change (69.2099116 - 69.1689553) * 366 / 365 = 0.0410685090411 s per
+        // year; at x1 it meets p(2800) = 2769.53125 with slope
+        // 0.65 * 9.75 = 6.3375. With width 772.4996555763425 its coefficients
+        // are a3 = -473.2007004956449, a2 = 3141.79662980636,
+        // a1 = 31.72540908928423, a0 = 69.2099116, and at
+        // t = (2099.9986332669155 - x0) / width = 0.0938489594...
+        // delta-T = 99.46794026607563 s.
+        let after = TimeScales::from_utc(2100, 1, 1, 0, 0, 0.0).expect("embedded conversion");
+        assert_eq!(
+            after.ut1_degraded,
+            Some(crate::astro::time::eop::DegradeReason::AfterCoverage)
+        );
+        assert_close(
+            interpolate_delta_t(after.jd_tt),
+            99.467_940_266_075_63,
+            1.0e-9,
+            "2100",
+        );
+        let tt_minus_ut1 = (after.tt_fraction - after.ut1_fraction) * SECONDS_PER_DAY;
+        assert_close(tt_minus_ut1, 99.467_940_266_075_63, 1.0e-4, "2100 TT-UT1");
+
+        // 1972-12-01 00:00 UTC precedes the table (which starts 1973-01-02):
+        // year 1972.9158124567139, in the S15 segment 1971..1974 whose linear
+        // term was raised by (43.3755822 - 43.15340078057444) / 0.66780790453
+        // so the curve meets the table's first value. The segment gives
+        // 43.26834427265643 s there.
+        let before = TimeScales::from_utc(1972, 12, 1, 0, 0, 0.0).expect("embedded conversion");
+        assert_eq!(
+            before.ut1_degraded,
+            Some(crate::astro::time::eop::DegradeReason::BeforeCoverage)
+        );
+        assert_close(
+            interpolate_delta_t(before.jd_tt),
+            43.268_344_272_656_43,
+            1.0e-9,
+            "1972",
+        );
+    }
+
+    #[test]
+    fn in_table_delta_t_is_the_linear_interpolation() {
+        // Inside the table the long-term curve is never consulted.
+        let rows: Vec<DeltaTRow> = UT1_DATA[100..102]
+            .iter()
+            .map(|entry| {
+                let jd_utc = entry.mjd as f64 + 2400000.5;
+                delta_t_row(jd_utc, find_leap_seconds(jd_utc), entry.ut1_utc)
+            })
+            .collect();
+        let mid = 0.5 * (rows[0].jd_tt + rows[1].jd_tt);
+        let expected = rows[0].delta_t
+            + (mid - rows[0].jd_tt) * (rows[1].delta_t - rows[0].delta_t)
+                / (rows[1].jd_tt - rows[0].jd_tt);
+        assert_eq!(interpolate_delta_t(mid).to_bits(), expected.to_bits());
+    }
+
+    #[test]
+    fn caller_table_splices_relative_to_its_own_ends() {
+        // A two-row caller table: lookback is 2 rows, so the right cubic's
+        // slope is (d1 - d0) * 2 / 365; the curve starts at its last row.
+        let ut1_utc = [
+            Ut1Entry {
+                mjd: 60000,
+                ut1_utc: -0.01,
+            },
+            Ut1Entry {
+                mjd: 60001,
+                ut1_utc: -0.02,
+            },
+        ];
+        let last_jd_utc = 60001.0 + 2400000.5;
+        let last = delta_t_row(last_jd_utc, find_leap_seconds(last_jd_utc), -0.02);
+        assert_eq!(
+            interpolate_delta_t_with_table(last.jd_tt, &ut1_utc, LEAP_SECONDS).expect("in table"),
+            last.delta_t
+        );
+        let after = interpolate_delta_t_with_table(last.jd_tt + 30.0, &ut1_utc, LEAP_SECONDS)
+            .expect("long-term");
+        let embedded_after = interpolate_delta_t(last.jd_tt + 30.0);
+        assert!(after.is_finite());
+        assert_ne!(
+            after, embedded_after,
+            "spliced to the caller table, not the embedded one"
+        );
+        // 69.184 - (-0.02) = 69.204 s at the last row; the curve leaves it
+        // with slope (69.204 - 69.194) * 2 / 365 s per year plus the pull of
+        // the parabola, so 30 days later delta-T is within a few ms of 69.204.
+        assert_close(after, 69.204, 0.01, "caller splice");
     }
 
     #[test]

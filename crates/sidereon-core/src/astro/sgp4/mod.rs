@@ -352,13 +352,17 @@ pub struct ElementSet {
     pub epoch: JulianDate,
     /// SGP4 drag term (Vallado B\*). Dimensionless TLE convention.
     pub bstar: f64,
-    /// First derivative of mean motion in rev/day², TLE "ndot", when the
-    /// source states it. SGP4 stores it with the element set but does not
+    /// The TLE line-1 first-derivative field in rev/day², when the source
+    /// states it. The two-line format defines that field as half the first
+    /// time derivative of mean motion (ṅ/2); CelesTrak and Space-Track OMM
+    /// `MEAN_MOTION_DOT` values carry the same number. This holds the value
+    /// as written. SGP4 stores it with the element set but does not
     /// propagate with it, so an absent value propagates as a stated zero does.
     #[serde(default)]
     pub mean_motion_dot: Option<f64>,
-    /// Second derivative of mean motion in rev/day³, TLE "nddot", when the
-    /// source states it; like `mean_motion_dot`, not used in propagation.
+    /// The TLE line-1 second-derivative field in rev/day³, when the source
+    /// states it: one sixth of the second time derivative of mean motion
+    /// (n̈/6), as written. Like `mean_motion_dot`, not used in propagation.
     #[serde(default)]
     pub mean_motion_double_dot: Option<f64>,
     /// Eccentricity, dimensionless, in [0, 1).
@@ -434,33 +438,53 @@ impl Satellite {
     /// forgiving [`crate::astro::tle`] grammar into [`crate::astro::tle::TleElements`],
     /// converted to an [`ElementSet`], and initialized through the single
     /// [`Satellite::from_elements`] path - the same path OMM and any other input
-    /// format use. There is no separate TLE-direct initialization. The parse is
-    /// lenient on cosmetics (trailing content past column 69, leading-dot and
-    /// assumed-decimal field forms, an advisory checksum) but still rejects
-    /// genuinely corrupt input (non-ASCII, wrong line structure, mismatched
-    /// satellite numbers).
+    /// format use. There is no separate TLE-direct initialization. The parse
+    /// reads under [`tle::TlePolicy::Strict`]: it accepts cosmetic variants
+    /// (trailing content past column 69, leading-dot and assumed-decimal field
+    /// forms, a line with no checksum column) and refuses a checksum that
+    /// disagrees, as well as non-ASCII text, wrong line structure and
+    /// mismatched satellite numbers. Use [`Satellite::from_tle_with_policy`]
+    /// with [`tle::TlePolicy::Lenient`] to read as Vallado's `twoline2rv` does.
     pub fn from_tle_with_opsmode(
         line1: &str,
         line2: &str,
         opsmode: OpsMode,
     ) -> Result<Self, Error> {
+        Self::from_tle_with_policy(line1, line2, opsmode, tle::TlePolicy::Strict)
+            .map(|(satellite, _)| satellite)
+    }
+
+    /// Parse a two-line element set under an explicit checksum policy and
+    /// return the checksum findings the policy accepted: a line with no
+    /// checksum column under either policy, and under
+    /// [`tle::TlePolicy::Lenient`] also a mismatching or non-digit column 69.
+    pub fn from_tle_with_policy(
+        line1: &str,
+        line2: &str,
+        opsmode: OpsMode,
+        policy: tle::TlePolicy,
+    ) -> Result<(Self, Vec<tle::ChecksumWarning>), Error> {
         let l1 = line1.trim();
         let l2 = line2.trim();
 
-        let parsed = tle::parse(l1, l2).map_err(|e| Error::InvalidTle(e.to_string()))?;
+        let parsed =
+            tle::parse_with_policy(l1, l2, policy).map_err(|e| Error::InvalidTle(e.to_string()))?;
         let elements = parsed
             .elements
             .to_element_set()
             .map_err(map_tle_bridge_error)?;
         let satrec = init_satrec_from_elements(&elements, opsmode)?;
 
-        Ok(Satellite {
-            line1: l1.to_string(),
-            line2: l2.to_string(),
-            elements,
-            opsmode,
-            satrec: Box::new(satrec),
-        })
+        Ok((
+            Satellite {
+                line1: l1.to_string(),
+                line2: l2.to_string(),
+                elements,
+                opsmode,
+                satrec: Box::new(satrec),
+            },
+            parsed.checksum_warnings,
+        ))
     }
 
     /// Parse a satellite from a TLE block that may carry a leading name line.
@@ -783,7 +807,12 @@ impl<'de> serde::Deserialize<'de> for Satellite {
                     "Satellite wire format requires non-empty line1/line2 or elements",
                 ))
             } else {
-                Satellite::from_tle_with_opsmode(&line1, &line2, opsmode)
+                // The lines restore a satellite that was already built from
+                // them, possibly under the lenient policy, so they are read
+                // leniently: a strict read could refuse a satellite this
+                // crate serialized.
+                Satellite::from_tle_with_policy(&line1, &line2, opsmode, tle::TlePolicy::Lenient)
+                    .map(|(satellite, _)| satellite)
                     .map_err(serde::de::Error::custom)
             }
         } else {
@@ -1003,40 +1032,122 @@ pub struct NamedSatellite {
     pub name: String,
     /// The initialized satellite.
     pub satellite: Satellite,
+    /// One-based line number of the record's line 1 in the file text.
+    pub line_number: usize,
+    /// Checksum findings the policy accepted: a line with no checksum column
+    /// under either policy, and under [`tle::TlePolicy::Lenient`] also a
+    /// mismatching or non-digit column 69, which
+    /// [`tle::TlePolicy::Strict`] rejects.
+    pub checksum_warnings: Vec<tle::ChecksumWarning>,
+}
+
+/// Why a stretch of a TLE file did not become a [`NamedSatellite`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum TleRecordIssue {
+    /// A line 1 followed by a line 2 whose element set was refused by the TLE
+    /// grammar, the checksum policy, or SGP4 initialization.
+    Invalid(Error),
+    /// A line 1 with no line 2 after it.
+    MissingLine2,
+    /// A line 2 with no line 1 before it.
+    OrphanLine2,
+    /// A name line not followed by an element set.
+    OrphanName,
+}
+
+impl std::fmt::Display for TleRecordIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TleRecordIssue::Invalid(error) => write!(f, "{error}"),
+            TleRecordIssue::MissingLine2 => write!(f, "line 1 is not followed by a line 2"),
+            TleRecordIssue::OrphanLine2 => write!(f, "line 2 is not preceded by a line 1"),
+            TleRecordIssue::OrphanName => {
+                write!(f, "name line is not followed by an element set")
+            }
+        }
+    }
+}
+
+/// A stretch of a TLE file that the reader did not turn into a satellite.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RejectedTleRecord {
+    /// One-based line number of the first rejected line: the name line when
+    /// the record had one, otherwise its line 1 or line 2.
+    pub line_number: usize,
+    /// The name line belonging to the rejected lines, with a leading
+    /// CelesTrak `0 ` marker stripped. Empty when there was none.
+    pub name: String,
+    /// Why the lines were rejected.
+    pub issue: TleRecordIssue,
 }
 
 /// The result of parsing a multi-record TLE file: the satellites that parsed,
-/// plus a count of records that were skipped.
+/// and every other non-blank line with the reason it did not.
 #[derive(Debug)]
 pub struct TleFile {
     /// The successfully parsed satellites, in file order.
     pub satellites: Vec<NamedSatellite>,
-    /// How many complete `(line 1, line 2)` records were found but skipped
-    /// because their element set failed SGP4 initialization. Lets callers tell
-    /// an empty file (`satellites` empty, `skipped == 0`) apart from a fully
-    /// corrupt one (`skipped > 0`), without aborting the whole parse on one bad
-    /// entry. Use [`Satellite::from_tle`] per record when you need the error.
-    pub skipped: usize,
+    /// Every rejected record, stray line, and orphan name line, in file
+    /// order. One bad record never discards the others; a file with no
+    /// satellites and no rejections was empty.
+    pub rejected: Vec<RejectedTleRecord>,
+}
+
+impl TleFile {
+    /// Number of rejected entries in [`TleFile::rejected`].
+    pub fn skipped(&self) -> usize {
+        self.rejected.len()
+    }
 }
 
 /// Parse a multi-record TLE file (CelesTrak / Space-Track style) into satellites
-/// with their names. Uses the default `Improved` opsmode.
+/// with their names, using the default `Improved` opsmode and
+/// [`tle::TlePolicy::Strict`].
 ///
 /// Handles, in a single pass, the common variants: bare 2-line element sets,
 /// 3-line sets (a name line followed by lines 1 and 2), and CelesTrak `0 NAME`
 /// name lines. Blank lines, CRLF endings, and surrounding whitespace are
-/// tolerated. A record whose element set fails SGP4 initialization is skipped
-/// and counted in [`TleFile::skipped`] rather than aborting the whole file.
+/// tolerated. A record that fails is kept out of [`TleFile::satellites`] and
+/// listed in [`TleFile::rejected`] with its line number and reason; the rest of
+/// the file is still read.
 pub fn parse_tle_file(text: &str) -> TleFile {
-    parse_tle_file_with_opsmode(text, OpsMode::Improved)
+    parse_tle_file_with_policy(text, OpsMode::Improved, tle::TlePolicy::Strict)
 }
 
 /// [`parse_tle_file`] with an explicit [`OpsMode`].
 pub fn parse_tle_file_with_opsmode(text: &str, opsmode: OpsMode) -> TleFile {
+    parse_tle_file_with_policy(text, opsmode, tle::TlePolicy::Strict)
+}
+
+/// Record `issue` against the pending name line when there is one (which the
+/// rejected lines belong to), otherwise against the line at `index`.
+fn reject_tle_lines(
+    rejected: &mut Vec<RejectedTleRecord>,
+    pending_name: &mut Option<(usize, String)>,
+    index: usize,
+    issue: TleRecordIssue,
+) {
+    let (line_index, name) = pending_name.take().unwrap_or((index, String::new()));
+    rejected.push(RejectedTleRecord {
+        line_number: line_index + 1,
+        name,
+        issue,
+    });
+}
+
+/// [`parse_tle_file`] with an explicit [`OpsMode`] and checksum policy.
+///
+/// Under [`tle::TlePolicy::Strict`] a record whose checksum digit disagrees,
+/// or whose column 69 is not a digit, is rejected. Under
+/// [`tle::TlePolicy::Lenient`] it is kept, and each finding is reported in
+/// [`NamedSatellite::checksum_warnings`]. A line with no column 69 is kept and
+/// reported under both.
+pub fn parse_tle_file_with_policy(text: &str, opsmode: OpsMode, policy: tle::TlePolicy) -> TleFile {
     let lines: Vec<&str> = text.lines().map(str::trim).collect();
     let mut satellites = Vec::new();
-    let mut skipped = 0usize;
-    let mut pending_name = String::new();
+    let mut rejected = Vec::new();
+    // The pending name line and its zero-based index.
+    let mut pending_name: Option<(usize, String)> = None;
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
@@ -1051,47 +1162,83 @@ pub fn parse_tle_file_with_opsmode(text: &str, opsmode: OpsMode) -> TleFile {
                 j += 1;
             }
             if j < lines.len() && lines[j].starts_with("2 ") {
-                if let Ok(satellite) = Satellite::from_tle_with_opsmode(line, lines[j], opsmode) {
-                    satellites.push(NamedSatellite {
-                        name: std::mem::take(&mut pending_name),
-                        satellite,
-                    });
-                } else {
-                    skipped += 1;
-                    pending_name.clear();
+                match Satellite::from_tle_with_policy(line, lines[j], opsmode, policy) {
+                    Ok((satellite, checksum_warnings)) => {
+                        let name = pending_name
+                            .take()
+                            .map(|(_, name)| name)
+                            .unwrap_or_default();
+                        satellites.push(NamedSatellite {
+                            name,
+                            satellite,
+                            line_number: i + 1,
+                            checksum_warnings,
+                        });
+                    }
+                    Err(error) => reject_tle_lines(
+                        &mut rejected,
+                        &mut pending_name,
+                        i,
+                        TleRecordIssue::Invalid(error),
+                    ),
                 }
                 i = j + 1;
                 continue;
             }
-            // Stray line 1 with no following line 2: drop the pending name, resync.
-            pending_name.clear();
+            reject_tle_lines(
+                &mut rejected,
+                &mut pending_name,
+                i,
+                TleRecordIssue::MissingLine2,
+            );
             i += 1;
             continue;
         }
         if line.starts_with("2 ") {
-            // Stray line 2 with no preceding line 1: skip it and drop any pending
-            // name so it can't attach to a later record.
-            pending_name.clear();
+            reject_tle_lines(
+                &mut rejected,
+                &mut pending_name,
+                i,
+                TleRecordIssue::OrphanLine2,
+            );
             i += 1;
             continue;
         }
         // Any other non-empty line is a name line (3LE name or CelesTrak "0 NAME").
-        pending_name = line.strip_prefix("0 ").unwrap_or(line).trim().to_string();
+        if let Some((name_index, name)) = pending_name.take() {
+            rejected.push(RejectedTleRecord {
+                line_number: name_index + 1,
+                name,
+                issue: TleRecordIssue::OrphanName,
+            });
+        }
+        pending_name = Some((
+            i,
+            line.strip_prefix("0 ").unwrap_or(line).trim().to_string(),
+        ));
         i += 1;
+    }
+    if let Some((name_index, name)) = pending_name {
+        rejected.push(RejectedTleRecord {
+            line_number: name_index + 1,
+            name,
+            issue: TleRecordIssue::OrphanName,
+        });
     }
     TleFile {
         satellites,
-        skipped,
+        rejected,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_tle_file, propagate_batch, propagate_batch_parallel, propagate_elements, DecayLatch,
-        DecayLatchedError, ElementSet, Error, JulianDate, MinutesSinceEpoch, Satellite,
-        Sgp4InputErrorKind, MAX_MINUTES_SINCE_EPOCH,
+        parse_tle_file, parse_tle_file_with_policy, propagate_batch, propagate_batch_parallel,
+        propagate_elements, DecayLatch, DecayLatchedError, ElementSet, Error, JulianDate,
+        MinutesSinceEpoch, Satellite, Sgp4InputErrorKind, TleRecordIssue, MAX_MINUTES_SINCE_EPOCH,
     };
+    use crate::astro::tle::TlePolicy;
 
     /// A TLE carrying a multibyte character inside a fixed-width column must
     /// return a typed [`Error::InvalidTle`] rather than panicking. The field
@@ -1135,7 +1282,7 @@ mod tests {
         let text = format!("ISS (ZARYA)\n{ISS_L1}\n{ISS_L2}\nSECOND SAT\n{ISS_L1}\n{ISS_L2}\n");
         let f = parse_tle_file(&text);
         assert_eq!(f.satellites.len(), 2);
-        assert_eq!(f.skipped, 0);
+        assert_eq!(f.skipped(), 0);
         assert_eq!(f.satellites[0].name, "ISS (ZARYA)");
         assert_eq!(f.satellites[1].name, "SECOND SAT");
         assert_eq!(f.satellites[0].satellite.line1(), ISS_L1);
@@ -1179,9 +1326,99 @@ mod tests {
             2,
             "the malformed record must be skipped"
         );
-        assert_eq!(f.skipped, 1, "the skipped record must be counted");
+        assert_eq!(f.skipped(), 1, "the skipped record must be counted");
         assert_eq!(f.satellites[0].name, "GOOD ONE");
         assert_eq!(f.satellites[1].name, "GOOD TWO");
+        assert_eq!(f.satellites[0].line_number, 2);
+        assert_eq!(f.satellites[1].line_number, 8);
+        assert_eq!(f.rejected[0].line_number, 4, "reported at its name line");
+        assert_eq!(f.rejected[0].name, "BAD ONE");
+        assert!(matches!(
+            f.rejected[0].issue,
+            TleRecordIssue::Invalid(Error::InvalidTle(_))
+        ));
+    }
+
+    #[test]
+    fn parse_tle_file_reports_stray_lines_and_orphan_names_by_line() {
+        let text = format!(
+            "LONE NAME\nNAME A\n{ISS_L1}\n\nNAME B\n{ISS_L2}\n{ISS_L1}\n{ISS_L2}\nTRAILING NAME\n"
+        );
+        let f = parse_tle_file(&text);
+        assert_eq!(f.satellites.len(), 1);
+        assert_eq!(f.satellites[0].name, "");
+        assert_eq!(f.satellites[0].line_number, 7);
+        let summary: Vec<_> = f
+            .rejected
+            .iter()
+            .map(|r| (r.line_number, r.name.as_str(), r.issue.clone()))
+            .collect();
+        assert_eq!(
+            summary,
+            vec![
+                (1, "LONE NAME", TleRecordIssue::OrphanName),
+                (2, "NAME A", TleRecordIssue::MissingLine2),
+                (5, "NAME B", TleRecordIssue::OrphanLine2),
+                (9, "TRAILING NAME", TleRecordIssue::OrphanName),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_tle_file_strict_rejects_checksum_mismatch_and_lenient_reports_it() {
+        // Line 1 checksum digit changed from 3 to 0.
+        let bad_l1 = "1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9990";
+        let text = format!("ISS\n{bad_l1}\n{ISS_L2}\nISS AGAIN\n{ISS_L1}\n{ISS_L2}\n");
+
+        let strict = parse_tle_file(&text);
+        assert_eq!(strict.satellites.len(), 1);
+        assert_eq!(strict.satellites[0].name, "ISS AGAIN");
+        assert_eq!(strict.rejected.len(), 1);
+        assert_eq!(strict.rejected[0].line_number, 1);
+        assert_eq!(strict.rejected[0].name, "ISS");
+        match &strict.rejected[0].issue {
+            TleRecordIssue::Invalid(Error::InvalidTle(message)) => {
+                assert!(message.contains("checksum"), "{message}")
+            }
+            other => panic!("unexpected issue {other:?}"),
+        }
+
+        let lenient =
+            parse_tle_file_with_policy(&text, super::OpsMode::Improved, TlePolicy::Lenient);
+        assert_eq!(lenient.satellites.len(), 2);
+        assert!(lenient.rejected.is_empty());
+        assert_eq!(lenient.satellites[0].checksum_warnings.len(), 1);
+        assert_eq!(
+            lenient.satellites[0].checksum_warnings[0].line_label,
+            "line 1"
+        );
+        assert_eq!(
+            lenient.satellites[0].checksum_warnings[0].kind,
+            crate::astro::tle::ChecksumWarningKind::Mismatch { expected: 0 }
+        );
+        assert_eq!(lenient.satellites[0].checksum_warnings[0].computed, 3);
+        assert!(lenient.satellites[1].checksum_warnings.is_empty());
+    }
+
+    #[test]
+    fn from_tle_is_strict_and_reads_leniently_on_request() {
+        let bad_l1 = "1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9990";
+        assert!(matches!(
+            Satellite::from_tle(bad_l1, ISS_L2),
+            Err(Error::InvalidTle(_))
+        ));
+        let (satellite, warnings) = Satellite::from_tle_with_policy(
+            bad_l1,
+            ISS_L2,
+            super::OpsMode::Improved,
+            TlePolicy::Lenient,
+        )
+        .expect("lenient read accepts the mismatch");
+        assert_eq!(warnings.len(), 1);
+        // A satellite read leniently survives its own wire format.
+        let wire = serde_json::to_string(&satellite).expect("serialize");
+        let restored: Satellite = serde_json::from_str(&wire).expect("deserialize");
+        assert_eq!(restored.line1(), bad_l1);
     }
 
     #[test]
@@ -1192,6 +1429,10 @@ mod tests {
         let f = parse_tle_file(&text);
         assert_eq!(f.satellites.len(), 1);
         assert_eq!(f.satellites[0].name, "", "stray name must not leak forward");
+        assert_eq!(f.rejected.len(), 1);
+        assert_eq!(f.rejected[0].line_number, 1);
+        assert_eq!(f.rejected[0].name, "ORPHAN NAME");
+        assert_eq!(f.rejected[0].issue, TleRecordIssue::OrphanLine2);
     }
 
     fn iss_elements() -> ElementSet {
@@ -1376,6 +1617,8 @@ mod tests {
     fn from_tle_accepts_epoch_after_parser_conversion_to_full_jd() {
         let mut line1 = ISS_L1.to_string();
         line1.replace_range(18..32, "19366.00000000");
+        let checksum = crate::astro::tle::line_checksum(&line1);
+        line1.replace_range(68..69, &checksum.to_string());
 
         Satellite::from_tle(&line1, ISS_L2).expect("TLE epoch is converted to full JD");
     }
@@ -1488,6 +1731,12 @@ mod tests {
             .char_indices()
             .map(|(i, c)| if (63..=67).contains(&i) { ' ' } else { c })
             .collect();
+        // Restate each line's checksum for its blanked columns.
+        let with_checksum = |line: String| {
+            let checksum = crate::astro::tle::line_checksum(&line);
+            format!("{}{checksum}", &line[..68])
+        };
+        let (l1, l2) = (with_checksum(l1), with_checksum(l2));
         // Same orbital elements as the clean TLE → bit-identical propagation
         // (the blanked fields do not feed SGP4).
         let clean = Satellite::from_tle(ISS_L1, ISS_L2).unwrap();
@@ -1518,8 +1767,8 @@ mod tests {
 
     // A second, distinct clean LEO TLE (Tiangong / CSS) so the batch carries
     // more than one well-behaved satellite.
-    const CSS_L1: &str = "1 48274U 21035A   24001.50000000  .00015000  00000-0  18000-3 0  9990";
-    const CSS_L2: &str = "2 48274  41.4700 100.0000 0006000  90.0000 270.0000 15.61000000 10000";
+    const CSS_L1: &str = "1 48274U 21035A   24001.50000000  .00015000  00000-0  18000-3 0  9996";
+    const CSS_L2: &str = "2 48274  41.4700 100.0000 0006000  90.0000 270.0000 15.61000000 10002";
 
     // NORAD 28872 from the Vallado verification set: a fast-decaying object that
     // propagates cleanly at small tsince but returns SGP4 error code 6 (decayed)

@@ -747,19 +747,8 @@ fn aberration_estimate_arcsec(
 }
 
 fn spk_velocity(kernel: &Spk, target: i32, center: i32, et: f64) -> [f64; 3] {
-    let state = kernel
-        .spk_state(target, center, et)
-        .expect("SPK state for velocity");
-    if let Some(velocity) = state.velocity_km_s {
-        return velocity;
-    }
-    let before = kernel
-        .spk_state(target, center, et - 1.0)
-        .expect("SPK state before")
-        .position_km;
-    let after = kernel
-        .spk_state(target, center, et + 1.0)
-        .expect("SPK state after")
-        .position_km;
-    scale3(sub3(after, before), 0.5)
+    kernel
+        .spk_state_in_frame(target, center, et, 1)
+        .expect("SPK state for velocity")
+        .velocity_km_s
 }

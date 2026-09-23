@@ -26,7 +26,7 @@ use crate::astro::frames::transforms::{
     FrameTransformError,
 };
 use crate::astro::propagator::api::PropagationContext;
-use crate::astro::space_weather::{SpaceWeatherError, SpaceWeatherTable};
+use crate::astro::space_weather::{SpaceWeatherError, SpaceWeatherPolicy, SpaceWeatherTable};
 use crate::astro::state::CartesianState;
 use crate::astro::time::civil::{civil_from_j2000_seconds, day_of_year_int, second_of_day};
 use nalgebra::Vector3;
@@ -61,8 +61,14 @@ impl Default for SpaceWeather {
 pub enum SpaceWeatherSource {
     /// Constant values for every epoch.
     Fixed(SpaceWeather),
-    /// Per-epoch values from a parsed CelesTrak table.
+    /// Per-epoch values from a parsed CelesTrak table under the default
+    /// (strict) [`SpaceWeatherPolicy`]: an epoch whose rows leave the daily Ap
+    /// blank, such as the monthly predicted region, is refused.
     Table(Arc<SpaceWeatherTable>),
+    /// Per-epoch values from a parsed CelesTrak table under an explicit
+    /// policy, for example [`SpaceWeatherPolicy::lenient`] to accept the quiet
+    /// default Ap in the monthly predicted region.
+    TableWithPolicy(Arc<SpaceWeatherTable>, SpaceWeatherPolicy),
 }
 
 impl SpaceWeatherSource {
@@ -71,6 +77,9 @@ impl SpaceWeatherSource {
         match self {
             Self::Fixed(space_weather) => Ok(*space_weather),
             Self::Table(table) => table.space_weather_at(epoch_j2000_s),
+            Self::TableWithPolicy(table, policy) => table
+                .sample_at_with_policy(epoch_j2000_s, *policy)
+                .map(|sample| sample.space_weather),
         }
     }
 }

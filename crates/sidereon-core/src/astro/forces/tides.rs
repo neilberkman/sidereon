@@ -28,10 +28,11 @@ use crate::astro::forces::geopotential::{
 };
 use crate::astro::forces::r#trait::ForceModel;
 use crate::astro::frames::orientation::EarthOrientation;
-use crate::astro::frames::transforms::PolarMotion;
+use crate::astro::frames::transforms::{with_ut1_validity, PolarMotion};
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
 use crate::astro::time::scales::TimeScales;
+use crate::astro::time::ValidityMode;
 use nalgebra::Vector3;
 
 const SOLID_TIDE_MAX_DEGREE: u16 = 4;
@@ -344,17 +345,23 @@ fn orientation_at_state(
     })?;
     provider
         .orientation_at_tdb_seconds(epoch_tdb_seconds)
+        .map(|orientation| ctx.record_orientation(orientation))
         .map_err(|error| {
-            PropagationError::ForceModelFailure(format!(
-                "solid Earth tide body-fixed frame evaluation failed: {error}"
-            ))
+            PropagationError::from_frame(
+                "solid Earth tide body-fixed frame evaluation failed",
+                error,
+            )
         })
 }
 
 fn sun_moon_itrf_km(orientation: &EarthOrientation) -> Result<SunMoonItrfKm, PropagationError> {
-    let ts = orientation.time_scales();
-    let bodies = sun_moon_ecef_with_polar_motion(&ts, orientation.polar_motion())
-        .map_err(|error| PropagationError::ForceModelFailure(format!("Sun/Moon: {error}")))?;
+    // The orientation's provider already applied the UT1 policy and the
+    // context recorded any departure, so its time scales are accepted as is.
+    let bodies = with_ut1_validity(&orientation.time_scales(), ValidityMode::Permissive, |ts| {
+        sun_moon_ecef_with_polar_motion(ts, orientation.polar_motion())
+    })
+    .map(|validated| validated.value)
+    .map_err(|error| PropagationError::ForceModelFailure(format!("Sun/Moon: {error}")))?;
     Ok(SunMoonItrfKm {
         sun_itrf_km: meters_to_km(bodies.sun),
         moon_itrf_km: meters_to_km(bodies.moon),
@@ -764,6 +771,7 @@ mod tests {
             jd_ut1: row.jd_tt.expect("jd_tt"),
             jd_tt: row.jd_tt.expect("jd_tt"),
             jd_tdb: row.jd_tt.expect("jd_tt"),
+            ut1_degraded: None,
         };
         let pole =
             PolarMotion::from_arcseconds(row.xp_arcsec.expect("xp"), row.yp_arcsec.expect("yp"))
@@ -789,6 +797,7 @@ mod tests {
             jd_ut1: J2000_JD + 10.0 * 365.25,
             jd_tt: J2000_JD + 10.0 * 365.25,
             jd_tdb: J2000_JD + 10.0 * 365.25,
+            ut1_degraded: None,
         };
         let after_2010 = TimeScales {
             jd_whole: J2000_JD + 11.0 * 365.25,
@@ -798,6 +807,7 @@ mod tests {
             jd_ut1: J2000_JD + 11.0 * 365.25,
             jd_tt: J2000_JD + 11.0 * 365.25,
             jd_tdb: J2000_JD + 11.0 * 365.25,
+            ut1_degraded: None,
         };
 
         let (x_2010, y_2010) = conventional_mean_pole_arcsec(at_2010).expect("mean pole");

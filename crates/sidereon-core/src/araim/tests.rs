@@ -159,6 +159,7 @@ fn weight_zeroed_gain_matches_row_deleted_wls() {
         rows: geometry.rows[1..].to_vec(),
         receiver: geometry.receiver,
         clock_systems: geometry.clock_systems.clone(),
+        ut1_degraded: None,
     };
     let deleted_weights = vec![1.0; deleted_geometry.rows.len()];
     let gain_deleted = gain_matrix_enu(&deleted_geometry, &deleted_weights).expect("deleted gain");
@@ -504,6 +505,109 @@ fn receiver_solution_adapter_rebuilds_geometry() {
     }
 }
 
+/// Like an SSR source outside the UT1 table: one satellite's state is refused
+/// under `Strict` and accepted with a reported departure under `Permissive`.
+struct Ut1PolicyEphemeris {
+    inner: StaticEphemeris,
+    satellite: GnssSatelliteId,
+    mode: crate::astro::time::ValidityMode,
+}
+
+impl EphemerisSource for Ut1PolicyEphemeris {
+    fn position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Option<([f64; 3], f64)> {
+        self.try_position_clock_at_j2000_s(sat, t_j2000_s)
+            .ok()
+            .flatten()
+            .map(|state| state.value)
+    }
+
+    fn try_position_clock_at_j2000_s(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+    ) -> Result<Option<crate::astro::time::Validated<crate::spp::PositionClock>>, crate::Error>
+    {
+        use crate::astro::time::{DegradeReason, Validated, ValidityMode};
+        let state = self.inner.position_clock_at_j2000_s(sat, t_j2000_s);
+        if sat != self.satellite {
+            return Ok(state.map(Validated::ok));
+        }
+        match self.mode {
+            ValidityMode::Strict => Err(crate::Error::Ut1OutsideCoverage(
+                DegradeReason::AfterCoverage,
+            )),
+            ValidityMode::Permissive => {
+                Ok(state.map(|state| Validated::degraded(state, DegradeReason::AfterCoverage)))
+            }
+        }
+    }
+}
+
+#[test]
+fn araim_geometry_keeps_a_ut1_refusal_typed_and_reports_a_departure() {
+    use crate::astro::time::{DegradeReason, ValidityMode};
+    let source_geometry = gps_geometry_with_extra_row();
+    let receiver_ecef = [6_378_137.0, 0.0, 0.0];
+    let positions: Vec<_> = source_geometry
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.id,
+                [
+                    receiver_ecef[0] + 20_200_000.0 * row.line_of_sight.e_x,
+                    receiver_ecef[1] + 20_200_000.0 * row.line_of_sight.e_y,
+                    receiver_ecef[2] + 20_200_000.0 * row.line_of_sight.e_z,
+                ],
+            )
+        })
+        .collect();
+    let solution = receiver_solution(
+        source_geometry.rows.iter().map(|row| row.id).collect(),
+        vec![GnssSystem::Gps],
+    );
+    let refused = source_geometry.rows[0].id;
+    let source = |mode| Ut1PolicyEphemeris {
+        inner: StaticEphemeris {
+            positions: positions.clone(),
+        },
+        satellite: refused,
+        mode,
+    };
+
+    // Strict: the refusal is its own error, not insufficient geometry.
+    assert_eq!(
+        AraimGeometry::from_receiver_solution(&solution, &source(ValidityMode::Strict), 12_345.0),
+        Err(AraimError::Ut1OutsideCoverage(DegradeReason::AfterCoverage))
+    );
+
+    // Permissive: every row is built, and the departure is reported.
+    let permissive = AraimGeometry::from_receiver_solution(
+        &solution,
+        &source(ValidityMode::Permissive),
+        12_345.0,
+    )
+    .expect("permissive geometry");
+    assert_eq!(permissive.rows.len(), source_geometry.rows.len());
+    assert_eq!(permissive.ut1_degraded, Some(DegradeReason::AfterCoverage));
+
+    // In coverage nothing changes.
+    let plain = AraimGeometry::from_receiver_solution(
+        &solution,
+        &StaticEphemeris {
+            positions: positions.clone(),
+        },
+        12_345.0,
+    )
+    .expect("in-table geometry");
+    assert_eq!(plain.ut1_degraded, None);
+    assert_eq!(plain.rows, permissive.rows);
+}
+
 fn gps_geometry() -> AraimGeometry {
     AraimGeometry {
         rows: vec![
@@ -514,6 +618,7 @@ fn gps_geometry() -> AraimGeometry {
         ],
         receiver: receiver(),
         clock_systems: vec![GnssSystem::Gps],
+        ut1_degraded: None,
     }
 }
 
@@ -538,6 +643,7 @@ fn mixed_geometry_for_enumeration() -> AraimGeometry {
         ],
         receiver: receiver(),
         clock_systems: vec![GnssSystem::Gps, GnssSystem::Galileo],
+        ut1_degraded: None,
     }
 }
 
@@ -553,6 +659,7 @@ fn reference_gps_geometry() -> AraimGeometry {
         ],
         receiver: receiver(),
         clock_systems: vec![GnssSystem::Gps],
+        ut1_degraded: None,
     }
 }
 
@@ -577,6 +684,7 @@ fn wg_c_add_v3_numerical_example_geometry() -> AraimGeometry {
             .collect(),
         receiver: receiver(),
         clock_systems: vec![GnssSystem::Gps, GnssSystem::Galileo],
+        ut1_degraded: None,
     }
 }
 
@@ -774,6 +882,7 @@ fn receiver_solution(
             systems,
             redundancy,
             raim_checkable: redundancy >= 1,
+            ut1_degraded: None,
         },
     }
 }
