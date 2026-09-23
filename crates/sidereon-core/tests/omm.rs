@@ -1,19 +1,17 @@
 #![cfg(sidereon_repo_tests)]
-//! Authoritative OMM gate: an OMM's SGP4 epoch is python-sgp4's for the same
-//! EPOCH, the encodings agree, and where python-sgp4 gives the OMM and the
-//! matching TLE one epoch, the OMM drives SGP4 bit-identically to the TLE.
+//! Authoritative OMM gate: every encoding of an OMM parses to the same
+//! orbital content and drives SGP4 identically, bridged as python-sgp4 2.22's
+//! `sgp4.omm.initialize` bridges it (the path Skyfield's
+//! `EarthSatellite.from_omm` takes).
 //!
-//! OMM and TLE encode the same SGP4 mean elements. The TLE states its epoch as
-//! a day of year with eight decimals; the OMM states it to the microsecond, and
-//! python-sgp4 (`sgp4.omm.initialize`, which Skyfield uses) keeps the OMM's
-//! own day fraction unless its day count has at most eight decimals. For the
-//! ISS fixture the two agree and propagation from the OMM (`Satellite::from_omm`)
-//! must match the TLE (`Satellite::from_tle`) to 0 ULP on every
-//! position/velocity component; for NAVSTAR 43 and GALAXY 15 python-sgp4's OMM
-//! epoch is 0.36 microseconds before and 0.23 microseconds after the TLE's.
-//! Each encoding (KVN, XML, JSON) must parse to the same orbital content. The
-//! committed fixtures are real CelesTrak GP data: each object's OMM in every
-//! encoding plus its TLE, captured in one query so they share an epoch.
+//! The initialisation itself is checked against python-sgp4 in the unit test
+//! `omms_initialise_sgp4_as_python_sgp4_does`, over the three CelesTrak
+//! fixtures and 200 generated OMMs, and the SGP4 kernel against the reference
+//! build in `sgp4_verification.json`. The TLE of each fixture, captured in the
+//! same query, states the same elements; its epoch has eight decimals of a day
+//! and its B* is quantized, so a TLE-built `Satellite` is not expected to match
+//! the OMM bit for bit (python-sgp4 gives NAVSTAR 43 an OMM epoch 0.36
+//! microseconds before its TLE's and GALAXY 15 one 0.23 microseconds after).
 
 use sha2::{Digest, Sha256};
 use sidereon_core::astro::omm::{self, Omm};
@@ -25,11 +23,6 @@ struct Fixture {
     xml: &'static str,
     json: &'static str,
     tle: &'static str,
-    /// python-sgp4 2.22 `jdsatepoch` and `jdsatepochF` for the OMM's EPOCH
-    /// (`fixtures/omm/python_sgp4_epochs.json`).
-    python_epoch: (u64, u64),
-    /// Whether python-sgp4 gives the TLE the same epoch.
-    tle_epoch_matches: bool,
 }
 
 const FIXTURES: &[Fixture] = &[
@@ -39,8 +32,6 @@ const FIXTURES: &[Fixture] = &[
         xml: include_str!("fixtures/omm/25544.xml"),
         json: include_str!("fixtures/omm/25544.json"),
         tle: include_str!("fixtures/omm/25544.tle"),
-        python_epoch: (0x4142_c70c_4000_0000, 0x3fc8_4145_2f34_2018),
-        tle_epoch_matches: true,
     },
     Fixture {
         name: "NAVSTAR 43 - deep-space SDP4 (12 h)",
@@ -48,8 +39,6 @@ const FIXTURES: &[Fixture] = &[
         xml: include_str!("fixtures/omm/24876.xml"),
         json: include_str!("fixtures/omm/24876.json"),
         tle: include_str!("fixtures/omm/24876.tle"),
-        python_epoch: (0x4142_c70b_c000_0000, 0x3fca_2b0c_32bc_0000),
-        tle_epoch_matches: false,
     },
     Fixture {
         name: "GALAXY 15 - deep-space SDP4 (geosynchronous)",
@@ -57,8 +46,6 @@ const FIXTURES: &[Fixture] = &[
         xml: include_str!("fixtures/omm/28884.xml"),
         json: include_str!("fixtures/omm/28884.json"),
         tle: include_str!("fixtures/omm/28884.tle"),
-        python_epoch: (0x4142_c70b_c000_0000, 0x3fe6_ea19_fa27_8000),
-        tle_epoch_matches: false,
     },
 ];
 
@@ -128,57 +115,46 @@ fn canonical(omm: &Omm) -> Omm {
 
 /// Propagation offsets (minutes since epoch), including 0 and a deep-space-sized
 /// span so both the SGP4 and SDP4 branches are exercised away from epoch.
-const TSINCE_MINUTES: &[f64] = &[0.0, 10.0, 100.0, 720.0, 1440.0, 4320.0];
+const TSINCE_MINUTES: &[f64] = &[-1440.0, 0.0, 10.0, 100.0, 720.0, 1440.0, 4320.0];
 
-/// Assert that a `Satellite` built from an OMM has python-sgp4's epoch for it,
-/// and, where python-sgp4 gives the matching TLE the same epoch, propagates
-/// bit-identically to the `Satellite` built from that TLE.
-fn assert_bit_identical(label: &str, fix: &Fixture, from_omm: &Satellite, from_tle: &Satellite) {
-    let e_omm = from_omm.epoch_jd();
+/// Assert that `satellite` has the epoch split and, at every offset, the
+/// position and velocity of `reference` bit for bit.
+fn assert_same_propagation(label: &str, satellite: &Satellite, reference: &Satellite) {
+    let (a, b) = (satellite.epoch_jd(), reference.epoch_jd());
     assert_eq!(
-        (e_omm.0.to_bits(), e_omm.1.to_bits()),
-        fix.python_epoch,
-        "{label}: epoch JD differs from python-sgp4 ({:?})",
-        (e_omm.0, e_omm.1),
+        (a.0.to_bits(), a.1.to_bits()),
+        (b.0.to_bits(), b.1.to_bits()),
+        "{label}: epoch split"
     );
-    if !fix.tle_epoch_matches {
-        let e_tle = from_tle.epoch_jd();
-        assert_ne!(e_omm.1.to_bits(), e_tle.1.to_bits(), "{label}");
-        return;
-    }
-    let e_tle = from_tle.epoch_jd();
-    assert_eq!(
-        (e_omm.0.to_bits(), e_omm.1.to_bits()),
-        (e_tle.0.to_bits(), e_tle.1.to_bits()),
-        "{label}: epoch JD differs (OMM {:?} vs TLE {:?})",
-        (e_omm.0, e_omm.1),
-        (e_tle.0, e_tle.1),
-    );
-
     for &t in TSINCE_MINUTES {
-        let p_omm = from_omm.propagate(MinutesSinceEpoch(t)).unwrap();
-        let p_tle = from_tle.propagate(MinutesSinceEpoch(t)).unwrap();
+        let got = satellite.propagate(MinutesSinceEpoch(t)).unwrap();
+        let want = reference.propagate(MinutesSinceEpoch(t)).unwrap();
         for axis in 0..3 {
             assert_eq!(
-                p_omm.position[axis].to_bits(),
-                p_tle.position[axis].to_bits(),
-                "{label}: position[{axis}] differs at t={t} min (OMM {} vs TLE {})",
-                p_omm.position[axis],
-                p_tle.position[axis],
+                got.position[axis].to_bits(),
+                want.position[axis].to_bits(),
+                "{label}: position[{axis}] at t={t} min"
             );
             assert_eq!(
-                p_omm.velocity[axis].to_bits(),
-                p_tle.velocity[axis].to_bits(),
-                "{label}: velocity[{axis}] differs at t={t} min (OMM {} vs TLE {})",
-                p_omm.velocity[axis],
-                p_tle.velocity[axis],
+                got.velocity[axis].to_bits(),
+                want.velocity[axis].to_bits(),
+                "{label}: velocity[{axis}] at t={t} min"
             );
         }
     }
 }
 
+/// The `Satellite` the fixture's KVN encoding bridges to, as python-sgp4
+/// bridges it.
+fn kvn_satellite(fix: &Fixture) -> Satellite {
+    let kvn = omm::parse_kvn(fix.kvn).unwrap_or_else(|e| panic!("{}: {e}", fix.name));
+    let elements = kvn.to_element_set().unwrap();
+    assert!(elements.omm_epoch_days.is_some(), "{}", fix.name);
+    Satellite::from_omm(&kvn).unwrap_or_else(|e| panic!("{}: {e}", fix.name))
+}
+
 #[test]
-fn omm_drives_sgp4_bit_identically_to_matching_tle() {
+fn omm_encodings_drive_sgp4_bit_identically() {
     for fix in FIXTURES {
         let kvn = omm::parse_kvn(fix.kvn).unwrap_or_else(|e| panic!("{}: {e}", fix.name));
         let xml = omm::parse_xml(fix.xml).unwrap_or_else(|e| panic!("{}: {e}", fix.name));
@@ -192,15 +168,10 @@ fn omm_drives_sgp4_bit_identically_to_matching_tle() {
             fix.name,
         );
 
-        let (l1, l2) = tle_lines(fix.tle);
-        let from_tle =
-            Satellite::from_tle(&l1, &l2).unwrap_or_else(|e| panic!("{}: {e}", fix.name));
-
-        for (enc, parsed) in [("KVN", &kvn), ("XML", &xml)] {
-            let from_omm =
-                Satellite::from_omm(parsed).unwrap_or_else(|e| panic!("{} {enc}: {e}", fix.name));
-            assert_bit_identical(&format!("{} [{enc}]", fix.name), fix, &from_omm, &from_tle);
-        }
+        let reference = kvn_satellite(fix);
+        let from_xml =
+            Satellite::from_omm(&xml).unwrap_or_else(|e| panic!("{} XML: {e}", fix.name));
+        assert_same_propagation(&format!("{} [XML]", fix.name), &from_xml, &reference);
     }
 }
 
@@ -217,12 +188,13 @@ fn omm_json_matches_other_encodings_and_drives_sgp4_to_0_ulp() {
             fix.name,
         );
 
-        let (l1, l2) = tle_lines(fix.tle);
-        let from_tle =
-            Satellite::from_tle(&l1, &l2).unwrap_or_else(|e| panic!("{}: {e}", fix.name));
         let from_omm =
             Satellite::from_omm(&json).unwrap_or_else(|e| panic!("{} JSON: {e}", fix.name));
-        assert_bit_identical(&format!("{} [JSON]", fix.name), fix, &from_omm, &from_tle);
+        assert_same_propagation(
+            &format!("{} [JSON]", fix.name),
+            &from_omm,
+            &kvn_satellite(fix),
+        );
     }
 }
 
@@ -299,10 +271,13 @@ fn gp_csv_matches_json_and_drives_sgp4_to_0_ulp() {
         "CSV and JSON disagree on orbital content",
     );
 
-    let (l1, l2) = tle_lines(fix.tle);
-    let from_tle = Satellite::from_tle(&l1, &l2).expect("ISS TLE initializes");
     let from_csv = Satellite::from_omm(&csv).expect("ISS GP CSV initializes");
-    assert_bit_identical("ISS (ZARYA) [CSV]", fix, &from_csv, &from_tle);
+    assert_same_propagation("ISS (ZARYA) [CSV]", &from_csv, &kvn_satellite(fix));
+
+    // The element set carries the TLE's elements, with B* as the OMM states
+    // it (.17172E-3), as python-sgp4 takes it; the TLE's assumed-decimal
+    // field, a mantissa scaled by a power of ten, decodes to another double.
+    let (l1, l2) = tle_lines(fix.tle);
 
     let elements = csv.to_element_set().expect("CSV converts to element set");
     let tle_elements = sidereon_core::astro::tle::parse(&l1, &l2)
@@ -326,7 +301,8 @@ fn gp_csv_matches_json_and_drives_sgp4_to_0_ulp() {
         tle_elements.argument_of_perigee_deg
     );
     assert_eq!(elements.mean_anomaly_deg, tle_elements.mean_anomaly_deg);
-    assert_eq!(elements.bstar.to_bits(), tle_elements.bstar.to_bits());
+    assert_eq!(elements.bstar.to_bits(), 0.17172e-3_f64.to_bits());
+    assert_ne!(tle_elements.bstar.to_bits(), elements.bstar.to_bits());
     assert_eq!(
         elements.mean_motion_double_dot.map(f64::to_bits),
         tle_elements.mean_motion_double_dot.map(f64::to_bits)

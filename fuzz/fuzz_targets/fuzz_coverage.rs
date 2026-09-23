@@ -31,6 +31,7 @@ fn element_set(raw: &([f64; 11], i64, u32)) -> ElementSet {
         mean_motion_rev_per_day: doubles[7],
         right_ascension_deg: doubles[8],
         catalog_number: Some(*catalog),
+        omm_epoch_days: None,
     }
 }
 

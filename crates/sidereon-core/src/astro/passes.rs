@@ -166,16 +166,59 @@ impl UtcInstant {
         .expect("UtcInstant components produce a finite UTC second")
     }
 
+    /// The split Julian date Skyfield 1.54 propagates SGP4 at for this
+    /// instant, bit for bit: `ts.from_datetime` builds the TAI seconds from
+    /// the UTC midnight, TAI - UTC at that midnight and the clock fields
+    /// (`Timescale._utc`, with the second `dt.second + dt.microsecond / 1e6`),
+    /// and `EarthSatellite._position_and_velocity_TEME_km` calls
+    /// `sgp4(t.whole, t.tai_fraction - leap / 86400)`. `t.whole` is a noon
+    /// boundary, and the fraction can be negative when TAI has passed noon and
+    /// UTC has not. Skyfield takes TAI - UTC as 10 s before 1972-07-01.
     pub(crate) fn sgp4_julian_date(self) -> JulianDate {
         let c = self.components();
+        let second = c.second as f64 + c.microsecond as f64 / 1_000_000.0;
         let jdn = julian_day_number(c.year, c.month, c.day);
-        let jd_midnight = jdn as f64 - 0.5;
-        let frac = (c.hour as f64) / 24.0
-            + (c.minute as f64) / 1440.0
-            + (c.second as f64) / SECONDS_PER_DAY
-            + (c.microsecond as f64) / MICROSECONDS_PER_DAY_I64 as f64;
-        JulianDate(jd_midnight, frac)
+        let leap = skyfield_tai_minus_utc(jdn);
+        let mut seconds = (jdn as f64 - 0.5) * SECONDS_PER_DAY + leap;
+        let more = c.hour as f64 * 3600.0 + c.minute as f64 * 60.0 + second;
+        let (more_whole, more_fraction) = python_divmod(more, 1.0);
+        seconds += more_whole;
+        let (whole, day_seconds) = python_divmod(seconds, SECONDS_PER_DAY);
+        let tai_fraction = (day_seconds + more_fraction) / SECONDS_PER_DAY;
+        JulianDate(whole, tai_fraction - leap / SECONDS_PER_DAY)
     }
+}
+
+/// Python's float `divmod(x, y)` (CPython `float_divmod`) for finite `x` and
+/// positive `y`: the remainder from C `fmod` moved into `[0, y)`, and the
+/// quotient `(x - fmod) / y` adjusted to match and rounded to a whole number.
+fn python_divmod(x: f64, y: f64) -> (f64, f64) {
+    let mut remainder = x % y;
+    let mut quotient = (x - remainder) / y;
+    if remainder < 0.0 {
+        remainder += y;
+        quotient -= 1.0;
+    } else if remainder == 0.0 {
+        remainder = 0.0;
+    }
+    let floor = quotient.floor();
+    let quotient = if quotient - floor > 0.5 {
+        floor + 1.0
+    } else {
+        floor
+    };
+    (quotient, remainder)
+}
+
+/// TAI - UTC at the UTC midnight of Julian day number `jdn` as Skyfield's
+/// built-in table gives it: the IERS integer table from 1972-07-01, and 10 s
+/// before (Skyfield clamps its table rather than apply the pre-1972 rates).
+fn skyfield_tai_minus_utc(jdn: i64) -> f64 {
+    const FIRST_LEAP_JDN: i64 = 2_441_500; // 1972-07-01
+    if jdn < FIRST_LEAP_JDN {
+        return 10.0;
+    }
+    crate::astro::time::scales::find_leap_seconds(jdn as f64 - 0.5)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -385,8 +428,9 @@ pub fn look_angle_with_validity(
 /// The satellite (its `satrec`) is built once by the caller, so this steps the
 /// pure propagation kernel over the epoch grid without re-running `sgp4init` per
 /// epoch. Each [`Prediction`] is TEME position (km) and velocity (km/s), bit-for-bit
-/// identical to calling [`Satellite::propagate_jd`] at the same instant. The first
-/// propagation error aborts the arc.
+/// identical to calling [`Satellite::propagate_jd`] at
+/// [`JulianDate::from_unix_microseconds`] of the same instant, Skyfield's split
+/// for it. The first propagation error aborts the arc.
 pub fn propagate_teme_arc(
     satellite: &Satellite,
     datetimes: &[UtcInstant],
@@ -554,12 +598,13 @@ pub fn look_angle_batch_parallel_with_validity(
 /// satellite over a time grid.
 ///
 /// For each instant this composes the existing core transforms - propagate to
-/// TEME ([`Satellite::propagate_jd`]), TEME->GCRS ([`teme_to_gcrs_compute`]),
-/// GCRS->ITRS/ECEF (`gcrs_to_itrs_compute`), then ECEF->geodetic
-/// (`itrs_to_geodetic_compute`) - and returns the WGS84 sub-point (geodetic
-/// latitude/longitude and ellipsoidal height). No geometry is reinvented; the
-/// same TEME->GCRS path [`look_angle`] uses feeds an ECEF step and the shared
-/// geodetic reduction. Like [`look_angle_arc`], the first propagation or frame
+/// TEME ([`Satellite::propagate_jd`] at Skyfield's split Julian date for the
+/// instant, [`JulianDate::from_unix_microseconds`]), TEME->GCRS
+/// ([`teme_to_gcrs_compute`]), GCRS->ITRS/ECEF (`gcrs_to_itrs_compute`), then
+/// ECEF->geodetic (`itrs_to_geodetic_compute`) - and returns the WGS84
+/// sub-point (geodetic latitude/longitude and ellipsoidal height). No geometry
+/// is reinvented; the same TEME->GCRS path [`look_angle`] uses feeds an ECEF
+/// step and the shared geodetic reduction. Like [`look_angle_arc`], the first propagation or frame
 /// error aborts the whole arc.
 pub fn ground_track(
     satellite: &Satellite,
@@ -2642,6 +2687,7 @@ mod tests {
             mean_motion_rev_per_day: 15.49970085,
             right_ascension_deg: 213.2584,
             catalog_number: None,
+            omm_epoch_days: None,
         }
     }
 
@@ -2658,6 +2704,7 @@ mod tests {
             mean_motion_rev_per_day: 15.49560812,
             right_ascension_deg: 208.8657,
             catalog_number: Some(25_544),
+            omm_epoch_days: None,
         }
     }
 
@@ -2674,6 +2721,7 @@ mod tests {
             mean_motion_rev_per_day: 15.4878698,
             right_ascension_deg: 299.5432,
             catalog_number: Some(25_544),
+            omm_epoch_days: None,
         }
     }
 
@@ -2690,6 +2738,7 @@ mod tests {
             mean_motion_rev_per_day: 15.6194274,
             right_ascension_deg: 45.9319,
             catalog_number: Some(48_274),
+            omm_epoch_days: None,
         }
     }
 
@@ -2706,6 +2755,7 @@ mod tests {
             mean_motion_rev_per_day: 12.40936816,
             right_ascension_deg: 220.2066,
             catalog_number: Some(49_271),
+            omm_epoch_days: None,
         }
     }
 
@@ -2722,6 +2772,7 @@ mod tests {
             mean_motion_rev_per_day: 1.002_7,
             right_ascension_deg: 0.0,
             catalog_number: Some(99_001),
+            omm_epoch_days: None,
         }
     }
 
@@ -5157,5 +5208,35 @@ mod tests {
         };
         assert_eq!(field, expected);
         assert_eq!(reason, expected_reason);
+    }
+    #[test]
+    fn sgp4_times_are_skyfields_split_bit_for_bit() {
+        // `tests/fixtures/skyfield_sgp4/skyfield_sgp4_times.json`, from
+        // `gen_skyfield_sgp4_times.py`: for each Unix-microsecond instant,
+        // the `(t.whole, t.tai_fraction - leap / 86400)` Skyfield 1.54 passes
+        // to SGP4.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/skyfield_sgp4/skyfield_sgp4_times.json"
+        ))
+        .expect("fixture JSON");
+        let bits = |value: &serde_json::Value| {
+            u64::from_str_radix(value.as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
+        };
+        let rows = fixture["instants"].as_array().unwrap();
+        assert_eq!(rows.len(), 3_306);
+        let mut negative_fractions = 0;
+        for row in rows {
+            let micros = row[0].as_i64().unwrap();
+            let split = UtcInstant::from_unix_microseconds(micros).sgp4_julian_date();
+            assert_eq!(
+                (split.0.to_bits(), split.1.to_bits()),
+                (bits(&row[1]), bits(&row[2])),
+                "{micros}"
+            );
+            if split.1 < 0.0 {
+                negative_fractions += 1;
+            }
+        }
+        assert_eq!(negative_fractions, 74);
     }
 }

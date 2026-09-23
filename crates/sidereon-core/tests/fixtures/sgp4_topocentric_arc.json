@@ -1,0 +1,305 @@
+{
+  "source": "iss_arc_matches_frozen_bits",
+  "opsmode": "afspc",
+  "tle": {
+    "line1": "1 25544U 98067A   18184.80969102  .00001614  00000-0  31745-4 0  9993",
+    "line2": "2 25544  51.6414 295.8524 0003435 262.6267 204.2868 15.54005638121106"
+  },
+  "station": {
+    "latitude_deg": 51.5074,
+    "longitude_deg": -0.1278,
+    "altitude_m": 80.0
+  },
+  "epochs": [
+    {
+      "unix_microseconds": 1530646200000000,
+      "position_km": [
+        1594.5272399676878,
+        4837.337327805319,
+        4474.08177564368
+      ],
+      "velocity_km_s": [
+        -5.123585621126541,
+        4.6945657500829325,
+        -3.2437583197689577
+      ],
+      "position_km_hex": [
+        "0x4098ea1be4cb4974",
+        "0x40b2e5565b1d73e0",
+        "0x40b17a14ef3fa337"
+      ],
+      "velocity_km_s_hex": [
+        "0xc0147e8d3aa3fa34",
+        "0x4012c73c3e761c93",
+        "0xc009f3378fdc48e0"
+      ],
+      "azimuth_deg": 332.47014917972115,
+      "elevation_deg": -38.63169266449541,
+      "range_km": 8608.946530167726,
+      "azimuth_deg_hex": "0x4074c785bb25724c",
+      "elevation_deg_hex": "0xc04350db4e2390c1",
+      "range_km_hex": "0x40c0d07927e68988"
+    },
+    {
+      "unix_microseconds": 1530646260000000,
+      "position_km": [
+        1283.683499044211,
+        5107.6788562701995,
+        4269.294908437382
+      ],
+      "velocity_km_s": [
+        -5.233912416681037,
+        4.3133540715755885,
+        -3.579872629005385
+      ],
+      "position_km_hex": [
+        "0x40940ebbe72c66ef",
+        "0x40b3f3adc9864731",
+        "0x40b0ad4b7f1e8ddf"
+      ],
+      "velocity_km_s_hex": [
+        "0xc014ef86bc8f17f1",
+        "0x401140dfe3c5f140",
+        "0xc00ca39442cb63ad"
+      ],
+      "azimuth_deg": 328.81700608289043,
+      "elevation_deg": -39.110067944128375,
+      "range_km": 8685.317830727943,
+      "azimuth_deg_hex": "0x40748d1274f86a5c",
+      "elevation_deg_hex": "0xc0438e16b4d62f46",
+      "range_km_hex": "0x40c0f6a8aead6317"
+    },
+    {
+      "unix_microseconds": 1530646320000000,
+      "position_km": [
+        966.9390742888794,
+        5354.541937945297,
+        4044.8269931500586
+      ],
+      "velocity_km_s": [
+        -5.320197440139162,
+        3.912247539726863,
+        -3.899540571289521
+      ],
+      "position_km_hex": [
+        "0x408e378339617a03",
+        "0x40b4ea8abc71f783",
+        "0x40af99a76ba56b09"
+      ],
+      "velocity_km_s_hex": [
+        "0xc01547e1d676a479",
+        "0x400f4c487027dde0",
+        "0xc00f324253b8e8c1"
+      ],
+      "azimuth_deg": 325.1837564909968,
+      "elevation_deg": -39.61536075209701,
+      "range_km": 8765.484346144849,
+      "azimuth_deg_hex": "0x407452f0aaa57425",
+      "elevation_deg_hex": "0xc043cec42420bfd3",
+      "range_km_hex": "0x40c11ebdff0df209"
+    },
+    {
+      "unix_microseconds": 1530646380000000,
+      "position_km": [
+        645.7491754434893,
+        5576.787530536697,
+        3801.709572157179
+      ],
+      "velocity_km_s": [
+        -5.382035724677695,
+        3.4930830288207777,
+        -4.201282798270892
+      ],
+      "position_km_hex": [
+        "0x40842dfe4fb1e606",
+        "0x40b5c8c99b99ebb7",
+        "0x40adb36b4d0ab279"
+      ],
+      "velocity_km_s_hex": [
+        "0xc01587345f7d93d3",
+        "0x400bf1d583d7fba1",
+        "0xc010ce1d13ef488c"
+      ],
+      "azimuth_deg": 321.5690569193205,
+      "elevation_deg": -40.14475061660679,
+      "range_km": 8848.913532328137,
+      "azimuth_deg_hex": "0x4074191adb6da0b4",
+      "elevation_deg_hex": "0xc0441287302e3375",
+      "range_km_hex": "0x40c14874eea09898"
+    },
+    {
+      "unix_microseconds": 1530646440000000,
+      "position_km": [
+        321.589962875546,
+        5773.389416349368,
+        3541.0605650127127
+      ],
+      "velocity_km_s": [
+        -5.419134280933762,
+        3.0577831266242548,
+        -4.483700655031477
+      ],
+      "position_km_hex": [
+        "0x407419707ce98530",
+        "0x40b68d63b0ca3510",
+        "0x40abaa1f026099c4"
+      ],
+      "velocity_km_s_hex": [
+        "0xc015ad318974f8d1",
+        "0x40087656fff8e4f8",
+        "0xc011ef4f3979a7e8"
+      ],
+      "azimuth_deg": 317.97115148495385,
+      "elevation_deg": -40.6953310416548,
+      "range_km": 8935.06426269217,
+      "azimuth_deg_hex": "0x4073df89d623b56b",
+      "elevation_deg_hex": "0xc04459009b89e687",
+      "range_km_hex": "0x40c1738839c2889d"
+    },
+    {
+      "unix_microseconds": 1530646500000000,
+      "position_km": [
+        -4.048228651518893,
+        5943.439092406097,
+        3264.0792204107215
+      ],
+      "velocity_km_s": [
+        -5.431313926346987,
+        2.6083476036453934,
+        -4.745483009132752
+      ],
+      "position_km_hex": [
+        "0xc0103162da0403eb",
+        "0x40b73770685c241c",
+        "0x40a980288f93e273"
+      ],
+      "velocity_km_s_hex": [
+        "0xc015b9aa5b9fe0ef",
+        "0x4004dde559320e34",
+        "0xc012fb5fe5dfcb9c"
+      ],
+      "azimuth_deg": 314.3879111346581,
+      "elevation_deg": -41.26412495634283,
+      "range_km": 9023.391379372182,
+      "azimuth_deg_hex": "0x4073a634e24e51c6",
+      "elevation_deg_hex": "0xc044a1ced8b8c663",
+      "range_km_hex": "0x40c19fb218b821ed"
+    },
+    {
+      "unix_microseconds": 1530646560000000,
+      "position_km": [
+        -329.66776066905373,
+        6086.150134081251,
+        2972.040667756332
+      ],
+      "velocity_km_s": [
+        -5.418510597771069,
+        2.1468444007508376,
+        -4.985412753343668
+      ],
+      "position_km_hex": [
+        "0xc0749aaf25cfb241",
+        "0x40b7c6266f2fe8fd",
+        "0x40a73814d26776e5"
+      ],
+      "velocity_km_s_hex": [
+        "0xc015ac8e0ac9d319",
+        "0x40012cbcc1d69ac2",
+        "0xc013f1100a72b081"
+      ],
+      "azimuth_deg": 310.81687761823736,
+      "elevation_deg": -41.84809777994528,
+      "range_km": 9113.349819683082,
+      "azimuth_deg_hex": "0x40736d11ee43f29f",
+      "elevation_deg_hex": "0xc044ec8e77d2566c",
+      "range_km_hex": "0x40c1ccacc6e4312b"
+    },
+    {
+      "unix_microseconds": 1530646620000000,
+      "position_km": [
+        -653.7706242833789,
+        6200.862004196742,
+        2666.2900894338213
+      ],
+      "velocity_km_s": [
+        -5.380776119477279,
+        1.6754001664129112,
+        -5.202372932711269
+      ],
+      "position_km_hex": [
+        "0xc0846e2a3d1074ed",
+        "0x40b838dcac4e9a06",
+        "0x40a4d494869a2e5b"
+      ],
+      "velocity_km_s_hex": [
+        "0xc01585ea2cd102c4",
+        "0x3fface7067a74d76",
+        "0xc014cf3ad99e5cae"
+      ],
+      "azimuth_deg": 307.25531116331126,
+      "elevation_deg": -42.44416825117543,
+      "range_km": 9204.398305655302,
+      "azimuth_deg_hex": "0x40733415c1288b9c",
+      "elevation_deg_hex": "0xc04538da81585c28",
+      "range_km_hex": "0x40c1fa32fbae01ab"
+    },
+    {
+      "unix_microseconds": 1530646680000000,
+      "position_km": [
+        -974.8654025838847,
+        6287.043281651301,
+        2348.236537868281
+      ],
+      "velocity_km_s": [
+        -5.318278401619225,
+        1.196190382743273,
+        -5.395352445683338
+      ],
+      "position_km_hex": [
+        "0xc08e76ec58309d45",
+        "0x40b88f0b14819cdb",
+        "0x40a258791b7dd111"
+      ],
+      "velocity_km_s_hex": [
+        "0xc01545eac5f7e931",
+        "0x3ff3239886dac0d7",
+        "0xc01594d745826a0a"
+      ],
+      "azimuth_deg": 303.70024104892656,
+      "elevation_deg": -43.04921726760757,
+      "range_km": 9296.002599971735,
+      "azimuth_deg_hex": "0x4072fb342ff5474d",
+      "elevation_deg_hex": "0xc045864cc05d62f1",
+      "range_km_hex": "0x40c22800553224c9"
+    },
+    {
+      "unix_microseconds": 1530646740000000,
+      "position_km": [
+        -1291.474227338629,
+        6344.294286257019,
+        2019.3464245026269
+      ],
+      "velocity_km_s": [
+        -5.231301048206728,
+        0.7114291273964598,
+        -5.563451269198983
+      ],
+      "position_km_hex": [
+        "0xc0942de59bd9f91f",
+        "0x40b8c84b5658198f",
+        "0x409f8d62bd1ad543"
+      ],
+      "velocity_km_s_hex": [
+        "0xc014ecda2e96504c",
+        "0x3fe6c4070472de1b",
+        "0xc01640f95e9865b5"
+      ],
+      "azimuth_deg": 300.1485185135978,
+      "elevation_deg": -43.66009505872916,
+      "range_km": 9387.638343675075,
+      "azimuth_deg_hex": "0x4072c26054f2ec0d",
+      "elevation_deg_hex": "0xc045d47dfeb0bf19",
+      "range_km_hex": "0x40c255d1b53edc07"
+    }
+  ]
+}

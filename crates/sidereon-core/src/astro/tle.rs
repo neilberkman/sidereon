@@ -222,6 +222,7 @@ impl TleElements {
             mean_motion_rev_per_day: self.mean_motion,
             right_ascension_deg: self.raan_deg,
             catalog_number: Some(decode_catalog_number(&self.catalog_number)?),
+            omm_epoch_days: None,
         })
     }
 }

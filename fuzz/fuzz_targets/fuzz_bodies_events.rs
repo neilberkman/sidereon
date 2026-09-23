@@ -66,6 +66,7 @@ fn element_set(input: &Input) -> ElementSet {
         mean_motion_rev_per_day: input.sgp4[7],
         right_ascension_deg: input.sgp4[8],
         catalog_number: Some(input.ints[1] as u32),
+        omm_epoch_days: None,
     }
 }
 

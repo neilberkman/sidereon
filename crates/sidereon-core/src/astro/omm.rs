@@ -54,23 +54,44 @@
 //! elements SGP4 propagates with, `MEAN_MOTION` and `BSTAR`, and carries
 //! `NORAD_CAT_ID` and the mean-motion derivatives when stated.
 //!
-//! ## TLE-derived field quantization
+//! ## SGP4 initialisation
 //!
-//! An OMM carries a full UTC calendar `EPOCH`, which is converted directly to
-//! SGP4's split Julian date. B\* and the second mean-motion derivative are
-//! still TLE-derived GP parameters:
+//! An OMM whose `EPOCH` is a whole number of microseconds, with a second
+//! below 60 and a year from 1 through 9999, is bridged to SGP4 as python-sgp4
+//! 2.22's `sgp4.omm.initialize` bridges the same instant, which Skyfield's
+//! `EarthSatellite.from_omm` uses: the same day count since 1949-12-31, split
+//! and passed to `sgp4init` as its compiled `Satrec` does, the mean motion
+//! converted as `n / 720 * pi`, and B\* and the second mean-motion derivative
+//! taken as stated, as `float()` reads them. The route is by value: any
+//! spelling this reader accepts qualifies, including those python-sgp4's
+//! `strptime('%Y-%m-%dT%H:%M:%S.%f')` refuses (no fraction, a trailing `Z`,
+//! the day-of-year form, more than six fractional digits ending in zeros),
+//! and each takes the value python-sgp4 gives the instant spelled as it reads
+//! it. SGP4 then starts from the element record python-sgp4 builds, input for
+//! input; the propagated states agree as far as the transcendental functions
+//! do, since this crate's kernel evaluates them with a portable libm.
+//!
+//! Any other OMM, and one given an exact SGP4 epoch (a fitted OMM, or one
+//! given its TLE's epoch), is bridged as a TLE. B\* and the second
+//! mean-motion derivative are TLE-derived GP parameters:
 //!
 //! - **B\* and the second mean-motion derivative.** A TLE stores these in its
 //!   "assumed decimal" field (five significant mantissa digits and a
 //!   single-digit power-of-ten exponent), and that quantized value is what SGP4
 //!   actually receives. OMM prints the same quantities as plain decimals, so
-//!   the bridge re-quantizes them with the rounding the TLE writer in
+//!   the TLE bridge re-quantizes them with the rounding the TLE writer in
 //!   [`crate::astro::tle`] uses.
 //!
 //! The quantized values are ones a TLE carries: writing them as a TLE and
 //! reading that back gives the same values. The first mean-motion derivative
 //! is carried as stated; SGP4 does not propagate with it, and a catalog OMM
 //! states the same value as its TLE.
+//!
+//! The two bridges differ for a catalog OMM as python-sgp4's own two readers
+//! do: its TLE reader decodes B\* `17172-3` as `0.17172 * 10^-3`, its OMM
+//! reader reads `.17172E-3` as the nearest double to 1.7172e-4, one unit in
+//! the last place apart, and the OMM reader keeps the OMM's own epoch where
+//! the TLE rounds it to eight decimals of a day.
 
 use crate::astro::ndm::{
     self, check_unit, covariance6_unit, split_unit, FieldMap, KvnLine, UnitMismatch,
@@ -361,6 +382,10 @@ pub struct Omm {
     /// `false`: their elements were estimated directly and never lived on the
     /// TLE grid, so snapping would discard converged precision for no
     /// compatibility gain; `to_element_set` then passes them through losslessly.
+    /// It applies to an OMM bridged as a TLE; an OMM whose epoch is a whole
+    /// number of microseconds and that has no [`Omm::exact_sgp4_epoch`] is
+    /// bridged as python-sgp4 bridges it, with the values as stated, whatever
+    /// this says (see [`Omm::to_element_set`]).
     #[serde(default = "default_quantize_tle_derived_fields", skip_serializing)]
     pub quantize_tle_derived_fields: bool,
 }
@@ -3143,30 +3168,40 @@ impl Omm {
     /// by [`Satellite::from_elements`].
     ///
     /// The epoch is converted from the OMM calendar timestamp into SGP4's
-    /// split Julian date, preserving years outside the TLE pivot range. An
-    /// epoch python-sgp4 reads (one to six fractional second digits, a second
-    /// below 60, years 1 through 9999) takes python-sgp4 2.22's split bit for
-    /// bit, as Skyfield's `EarthSatellite.from_omm` does; any other epoch takes
-    /// Vallado `jday` of the nearest double to the stated second. The split is
-    /// python-sgp4's; the epoch SGP4 is initialised with is formed from it as
-    /// for a TLE, `(jd + fraction) - 2433281.5`, where python-sgp4 passes the
-    /// OMM's day count directly, so deep-space terms and the sidereal angle at
-    /// epoch can differ from python-sgp4 in the last place.
+    /// split Julian date, preserving years outside the TLE pivot range.
     ///
-    /// With [`Omm::quantize_tle_derived_fields`] set (the default for a parsed
-    /// OMM), B\* and the second mean-motion derivative are rounded to the
-    /// values a TLE carries for them, because those GP parameters originate in
-    /// the TLE field format: the assumed-decimal field's five mantissa digits
-    /// and single-digit exponent, rounded as python-sgp4's `export_tle` rounds
-    /// them, and at exponent `-9` below `1e-10`. The rounding is the TLE
-    /// writer's, so these values written as a TLE read back unchanged, and a
-    /// catalog OMM gives exactly the values of its catalog TLE. A value no TLE
-    /// field holds (a magnitude that rounds to `1e9` or more) has no TLE value
-    /// to match and passes through unquantized: SGP4 propagates any finite B\*
-    /// and does not propagate with the derivatives, so such an element set
-    /// still propagates correctly. Only [`tle::encode`] refuses it. The first
-    /// mean-motion derivative passes through as stated. With the flag clear, as
-    /// for a fitted OMM, every value passes through unchanged.
+    /// An OMM whose epoch is a whole number of microseconds, with a second
+    /// below 60 and a year from 1 through 9999, in any spelling the reader
+    /// accepts, and that carries no [`Omm::exact_sgp4_epoch`], is initialised
+    /// as python-sgp4 2.22's `sgp4.omm.initialize` initialises the same
+    /// instant, which Skyfield's `EarthSatellite.from_omm` uses: the epoch is
+    /// python-sgp4's split, [`ElementSet::omm_epoch_days`] carries its day
+    /// count to `sgp4init`, the mean motion is converted as `n / 720 * pi`,
+    /// and B\* and the second mean-motion derivative are taken as stated,
+    /// whatever [`Omm::quantize_tle_derived_fields`] says, since python-sgp4
+    /// does not quantize them. `sgp4init` then receives exactly the inputs
+    /// python-sgp4 gives it; the propagated states agree as far as the
+    /// transcendental functions do, since this crate's kernel evaluates them
+    /// with a portable libm.
+    ///
+    /// Any other OMM is initialised as a TLE: the epoch is
+    /// [`Omm::exact_sgp4_epoch`] when set, or Vallado `jday` of the nearest
+    /// double to the stated second. With [`Omm::quantize_tle_derived_fields`]
+    /// set (the default for a parsed OMM), B\* and the second mean-motion
+    /// derivative are rounded to the values a TLE carries for them, because
+    /// those GP parameters originate in the TLE field format: the
+    /// assumed-decimal field's five mantissa digits and single-digit exponent,
+    /// rounded as python-sgp4's `export_tle` rounds them, and at exponent `-9`
+    /// below `1e-10`. The rounding is the TLE writer's, so these values
+    /// written as a TLE read back unchanged, and an OMM given its catalog
+    /// TLE's epoch as [`Omm::exact_sgp4_epoch`] propagates exactly as that TLE
+    /// does. A value no TLE field holds (a magnitude that rounds to `1e9` or
+    /// more) has no TLE value to match and passes through unquantized: SGP4
+    /// propagates any finite B\* and does not propagate with the derivatives,
+    /// so such an element set still propagates correctly. Only
+    /// [`tle::encode`] refuses it. The first mean-motion derivative passes
+    /// through as stated. With the flag clear, as for a fitted OMM, every
+    /// value passes through unchanged.
     ///
     /// An explicitly stated `MEAN_ELEMENT_THEORY` other than `SGP4`,
     /// `SGP/SGP4` or `SDP4` (any letter case), `CENTER_NAME` other than
@@ -3187,11 +3222,18 @@ impl Omm {
     /// refused with [`OmmError::InvalidField`] for `epoch`.
     pub fn to_element_set(&self) -> Result<ElementSet, OmmError> {
         let inputs = validate_omm_bridge(self)?;
+        // An epoch of whole microseconds is initialised as
+        // `sgp4.omm.initialize` initialises the same instant, which takes B*
+        // and the second derivative as stated.
+        let omm_epoch_days = match self.exact_sgp4_epoch {
+            Some(_) => None,
+            None => self.epoch.python_sgp4_epoch_days(),
+        };
         // `validate_omm_bridge` has refused a non-finite value, so a
         // quantizer refuses only a magnitude its TLE field cannot hold. That
         // value has no TLE to match and SGP4 propagates it as it is.
         let quantize = |value: f64, round: fn(f64) -> Result<f64, tle::TleError>| {
-            if self.quantize_tle_derived_fields {
+            if self.quantize_tle_derived_fields && omm_epoch_days.is_none() {
                 round(value).unwrap_or(value)
             } else {
                 value
@@ -3215,6 +3257,7 @@ impl Omm {
             mean_motion_rev_per_day: inputs.mean_motion,
             right_ascension_deg: self.ra_of_asc_node_deg,
             catalog_number: self.norad_cat_id,
+            omm_epoch_days,
         })
     }
 }
@@ -3384,30 +3427,44 @@ impl OmmEpoch {
         })
     }
 
+    /// The day count since 1949-12-31 00:00 python-sgp4's
+    /// `sgp4.omm.initialize` computes for this epoch written as it reads
+    /// `EPOCH` (`%Y-%m-%dT%H:%M:%S.%f`), when the epoch is a whole number of
+    /// microseconds, with a second below 60 and a year from 1 through 9999
+    /// (`datetime` holds no others). The epoch's own spelling does not
+    /// matter: an epoch python-sgp4 would refuse as written takes the value
+    /// of the same instant in the form it reads.
+    pub(crate) fn python_sgp4_epoch_days(&self) -> Option<f64> {
+        if self.femtosecond != 0 || self.second >= 60 || !(1..=9999).contains(&self.year) {
+            return None;
+        }
+        let days_since_1949_12_31 = crate::astro::time::scales::julian_day_number(
+            self.year,
+            self.month as i32,
+            self.day as i32,
+        ) - crate::astro::time::scales::julian_day_number(1949, 12, 31);
+        let microseconds = (i128::from(days_since_1949_12_31) * 86_400
+            + i128::from(self.hour) * 3_600
+            + i128::from(self.minute) * 60
+            + i128::from(self.second))
+            * 1_000_000
+            + i128::from(self.microsecond);
+        Some(python_sgp4_epoch_days(microseconds))
+    }
+
     /// The SGP4 split Julian date of the epoch.
     ///
-    /// An epoch python-sgp4 reads (`sgp4.omm.initialize`, which Skyfield's
-    /// `EarthSatellite.from_omm` uses) takes python-sgp4's arithmetic bit for
-    /// bit: at most six fractional second digits, a second below 60, years 1
-    /// through 9999. See [`python_sgp4_julian_date`]. Any other epoch, which
-    /// python-sgp4 refuses, goes through Vallado `jday` with the `f64` nearest
-    /// to the stated second, every digit counted in whole femtoseconds and
-    /// rounded once.
+    /// An epoch that is a whole number of microseconds, with a second below 60
+    /// and a year from 1 through 9999, takes python-sgp4's arithmetic
+    /// (`sgp4.omm.initialize`, which Skyfield's `EarthSatellite.from_omm`
+    /// uses) bit for bit: the split the compiled `Satrec.sgp4init` makes of
+    /// [`OmmEpoch::python_sgp4_epoch_days`]. Any other epoch, which no
+    /// spelling python-sgp4 reads can state, goes through Vallado `jday` with
+    /// the `f64` nearest to the stated second, every digit counted in whole
+    /// femtoseconds and rounded once.
     fn sgp4_julian_date(&self) -> sgp4::JulianDate {
-        if self.femtosecond == 0 && self.second < 60 && (1..=9999).contains(&self.year) {
-            let days_since_1949_12_31 =
-                crate::astro::time::scales::julian_day_number(
-                    self.year,
-                    self.month as i32,
-                    self.day as i32,
-                ) - crate::astro::time::scales::julian_day_number(1949, 12, 31);
-            let microseconds = (i128::from(days_since_1949_12_31) * 86_400
-                + i128::from(self.hour) * 3_600
-                + i128::from(self.minute) * 60
-                + i128::from(self.second))
-                * 1_000_000
-                + i128::from(self.microsecond);
-            return python_sgp4_julian_date(microseconds);
+        if let Some(days) = self.python_sgp4_epoch_days() {
+            return sgp4::sgp4_julian_date_from_epoch_days(days);
         }
         sgp4::sgp4_julian_date_from_calendar(
             self.year,
@@ -3476,28 +3533,13 @@ impl OmmEpoch {
 
 const FEMTOSECONDS_PER_SECOND: i128 = 1_000_000_000_000_000;
 
-/// The SGP4 split Julian date python-sgp4 2.22 gives an OMM epoch
-/// `microseconds` after 1949-12-31 00:00:00, bit for bit.
-///
-/// `sgp4.omm.initialize` computes `epoch = (datetime - datetime(1949, 12,
-/// 31)).total_seconds() / 86400.0`; CPython's `timedelta.total_seconds`
-/// divides the integer microsecond count by `10**6` as a correctly rounded
-/// integer true division. The compiled `Satrec.sgp4init` that
-/// `sgp4.api.Satrec` and Skyfield use then splits `epoch` with C `modf`,
-/// and when `epoch * 1e8` is a whole number (C `round`, half away from zero)
-/// replaces the fraction with `round(fraction * 1e8) / 1e8`, keeping
-/// `jdsatepoch = whole + 2433281.5` and `jdsatepochF = fraction`.
-fn python_sgp4_julian_date(microseconds: i128) -> JulianDate {
-    let total_seconds =
-        crate::astro::time::civil::seconds_from_femtoseconds(microseconds * 1_000_000_000);
-    let epoch = total_seconds / 86_400.0;
-    let whole = epoch.trunc();
-    let mut fraction = epoch - whole;
-    let epoch8 = epoch * 1.0e8;
-    if epoch8.round() == epoch8 {
-        fraction = (fraction * 1.0e8).round() / 1.0e8;
-    }
-    JulianDate(whole + 2_433_281.5, fraction)
+/// The day count python-sgp4 2.22 gives an OMM epoch `microseconds` after
+/// 1949-12-31 00:00:00, bit for bit: `sgp4.omm.initialize` computes
+/// `(datetime - datetime(1949, 12, 31)).total_seconds() / 86400.0`, and
+/// CPython's `timedelta.total_seconds` divides the integer microsecond count
+/// by `10**6` as a correctly rounded integer true division.
+fn python_sgp4_epoch_days(microseconds: i128) -> f64 {
+    crate::astro::time::civil::seconds_from_femtoseconds(microseconds * 1_000_000_000) / 86_400.0
 }
 const FEMTOSECONDS_PER_MICROSECOND: i128 = 1_000_000_000;
 
@@ -4155,11 +4197,20 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
     }
 
     #[test]
-    fn bstar_quantizes_onto_assumed_decimal_grid() {
-        // OMM B* is the plain-decimal 0.00017172; the SGP4 element set must carry
-        // the assumed-decimal value 0.17172e-3 the TLE actually feeds SGP4.
+    fn bstar_is_quantized_only_on_the_tle_bridge() {
+        // OMM B* is the plain-decimal .17172E-3. Bridged as python-sgp4's OMM
+        // reader bridges it, the element set carries that value as stated.
         let omm = parse_kvn(ISS_KVN).unwrap();
         let es = omm.to_element_set().expect("valid OMM bridge");
+        assert!(es.omm_epoch_days.is_some());
+        assert_eq!(Some(es.bstar), omm.bstar);
+        assert_eq!(es.bstar.to_bits(), 1.7172e-4_f64.to_bits());
+        // Given its TLE's epoch, the OMM is bridged as that TLE, and B*
+        // carries the assumed-decimal value 0.17172e-3 the TLE feeds SGP4.
+        let es = tle_bridged_iss()
+            .to_element_set()
+            .expect("valid OMM bridge");
+        assert_eq!(es.omm_epoch_days, None);
         assert_eq!(es.bstar, 0.17172 * 10.0_f64.powi(-3));
         assert_ne!(Some(es.bstar), omm.bstar);
     }
@@ -4174,10 +4225,18 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
         tle::parse(line1, line2).unwrap().elements
     }
 
+    /// The ISS OMM given its catalog TLE's epoch as the exact SGP4 epoch, so it
+    /// is bridged as that TLE is.
+    fn tle_bridged_iss() -> Omm {
+        let mut omm = parse_kvn(ISS_KVN).unwrap();
+        omm.exact_sgp4_epoch = Some(iss_tle_elements().to_element_set().unwrap().epoch);
+        omm
+    }
+
     /// Bridge an ISS OMM carrying the given B\* and second derivative, write
     /// the resulting element set as a TLE, and read that back.
     fn omm_tle_round_trip(bstar: f64, nddot: f64) -> (ElementSet, ElementSet, String) {
-        let mut omm = parse_kvn(ISS_KVN).unwrap();
+        let mut omm = tle_bridged_iss();
         omm.bstar = Some(bstar);
         omm.mean_motion_ddot = Some(nddot);
         let from_omm = omm.to_element_set().expect("TLE-holdable terms bridge");
@@ -4260,7 +4319,7 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
             (1.009e-5, 1.0e-10),
             (4.0e-15, -4.0e-15),
         ] {
-            let mut omm = parse_kvn(ISS_KVN).unwrap();
+            let mut omm = tle_bridged_iss();
             omm.bstar = Some(bstar);
             omm.mean_motion_ddot = Some(nddot);
             let from_omm = Satellite::from_omm(&omm).unwrap();
@@ -4298,13 +4357,13 @@ ISS (ZARYA),1998-067A,2026-06-17T04:32:52.099296,15.49273435,0.0004737,51.6332,3
 
     #[test]
     fn terms_no_tle_field_holds_pass_through_unquantized() {
-        let iss = parse_kvn(ISS_KVN).unwrap().to_element_set().unwrap();
+        let iss = tle_bridged_iss().to_element_set().unwrap();
         for (bstar, nddot) in [
             (1.0e9, None),
             (-0.999996e9, None),
             (1.7172e-4, Some(2.0e12)),
         ] {
-            let mut omm = parse_kvn(ISS_KVN).unwrap();
+            let mut omm = tle_bridged_iss();
             omm.bstar = Some(bstar);
             if nddot.is_some() {
                 omm.mean_motion_ddot = nddot;
@@ -5975,5 +6034,90 @@ AGOM = 0.001 [m**2/kg]
                 "{text}"
             );
         }
+    }
+    #[test]
+    fn omms_initialise_sgp4_as_python_sgp4_does() {
+        // `fixtures/omm/python_sgp4_omm_init.json`, from
+        // `gen_python_sgp4_init.py`: for the three CelesTrak OMMs and 200
+        // generated ones, near-Earth and deep-space, the day count
+        // python-sgp4 2.22's `omm.initialize` passes to `sgp4init` and the
+        // element record fields it initialises.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/omm/python_sgp4_omm_init.json"
+        ))
+        .expect("fixture JSON");
+        let bits = |value: &serde_json::Value| {
+            u64::from_str_radix(value.as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
+        };
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 203);
+        for (index, case) in cases.iter().enumerate() {
+            let omm = parse_kvn(case[0].as_str().unwrap())
+                .unwrap_or_else(|error| panic!("case {index}: {error}"));
+            let elements = omm.to_element_set().unwrap();
+            assert_eq!(
+                elements.omm_epoch_days.map(f64::to_bits),
+                Some(bits(&case[1])),
+                "case {index}: day count"
+            );
+            let satellite =
+                Satellite::from_omm(&omm).unwrap_or_else(|error| panic!("case {index}: {error}"));
+            let satrec = satellite.satrec();
+            let got = [
+                satrec.jdsatepoch,
+                satrec.jdsatepochF,
+                satrec.no_kozai,
+                satrec.bstar,
+                satrec.ndot,
+                satrec.nddot,
+                satrec.ecco,
+                satrec.argpo,
+                satrec.inclo,
+                satrec.mo,
+                satrec.nodeo,
+            ]
+            .map(f64::to_bits);
+            let want: Vec<u64> = case.as_array().unwrap()[2..13].iter().map(bits).collect();
+            assert_eq!(got.to_vec(), want, "case {index}");
+        }
+    }
+
+    #[test]
+    fn the_python_sgp4_bridge_is_chosen_by_value_whatever_the_spelling() {
+        // python-sgp4 2.22 reads `EPOCH` only as `%Y-%m-%dT%H:%M:%S.%f`. Each
+        // spelling here names an instant it can read in that form, and takes
+        // the day count `omm.initialize` computes for that form:
+        // 27927.18949189 for 04:32:52.099296, 27927.18949074074 for
+        // 04:32:52.0.
+        const WITH_FRACTION: u64 = 0x40db_45cc_20a2_979a;
+        const WHOLE_SECOND: u64 = 0x40db_45cc_209d_c598;
+        for (spelling, days) in [
+            ("2026-06-17T04:32:52.099296", WITH_FRACTION),
+            ("2026-06-17T04:32:52.099296Z", WITH_FRACTION),
+            ("2026-168T04:32:52.099296", WITH_FRACTION),
+            ("2026-06-17T04:32:52.0992960", WITH_FRACTION),
+            ("2026-06-17T04:32:52.099296000000", WITH_FRACTION),
+            ("2026-06-17T04:32:52", WHOLE_SECOND),
+            ("2026-06-17T04:32:52Z", WHOLE_SECOND),
+            ("2026-168T04:32:52.0", WHOLE_SECOND),
+        ] {
+            let omm = parse_kvn(&kvn_with_field("EPOCH", spelling))
+                .unwrap_or_else(|error| panic!("{spelling}: {error}"));
+            let elements = omm.to_element_set().unwrap();
+            assert_eq!(
+                elements.omm_epoch_days.map(f64::to_bits),
+                Some(days),
+                "{spelling}"
+            );
+            assert_eq!(
+                elements.epoch,
+                sgp4::sgp4_julian_date_from_epoch_days(f64::from_bits(days)),
+                "{spelling}"
+            );
+        }
+        // A tenth of a microsecond is no instant python-sgp4 can read: the
+        // OMM is bridged as a TLE.
+        let omm = parse_kvn(&kvn_with_field("EPOCH", "2026-06-17T04:32:52.0992961")).unwrap();
+        assert_eq!(omm.to_element_set().unwrap().omm_epoch_days, None);
     }
 }
