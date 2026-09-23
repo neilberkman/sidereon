@@ -1,8 +1,15 @@
 //! Vallado SGP4 verification suite - 33 satellites, 198 propagation points,
-//! 1098 component checks. Reference values captured from the Python `sgp4` C
-//! extension (v2.25), which compiles Vallado's C++ (v2020-07-13) with WGS72,
-//! opsmode 'i'. The pure-Rust port in `sidereon_core::astro::sgp4` must match
-//! bit-for-bit (0 ULP) on every component.
+//! 1098 component checks, WGS72, opsmode 'i'. The file's states were first
+//! captured from the Python `sgp4` C extension, which compiles Vallado's C++
+//! (v2020-07-13); 70 of the 183 error-free states were later replaced by this
+//! crate's own results with its portable libm (the file's `reference` field
+//! says so). The compiled extension's states depend on the build: on arm64
+//! macOS, sgp4 2.22 reproduces 180 of the 183 originally captured states and
+//! the sgp4 2.25 wheel 17, and neither the pure-Python model nor either build
+//! reproduces the current file. The pure-Rust port in
+//! `sidereon_core::astro::sgp4` must match the file bit-for-bit (0 ULP) on every
+//! component: a regression lock on the kernel with portable transcendental
+//! functions, not a match to any one python-sgp4 build.
 
 use sidereon_core::astro::sgp4::{
     propagate_elements, ElementSet, JulianDate, MinutesSinceEpoch, OpsMode, Satellite,
@@ -217,6 +224,7 @@ fn from_elements_matches_from_tle_bit_exact() {
             mean_motion_rev_per_day,
             right_ascension_deg,
             catalog_number: None,
+            omm_epoch_days: None,
         };
 
         let from_elem = Satellite::from_elements(&elements).unwrap();

@@ -951,6 +951,7 @@ fn chart_to_elements(
         mean_motion_rev_per_day: n_rev_day,
         right_ascension_deg: normalize_degrees(rad_to_deg(raan)),
         catalog_number: Some(catalog_number),
+        omm_epoch_days: None,
     })
 }
 
@@ -1542,6 +1543,7 @@ mod tests {
                 mean_motion_rev_per_day: 1.0027,
                 right_ascension_deg: 0.0,
                 catalog_number: Some(1),
+                omm_epoch_days: None,
             },
             tle::parse(ISS_L1, ISS_L2)
                 .unwrap()
@@ -1789,6 +1791,7 @@ mod tests {
             mean_motion_rev_per_day: 2.006_1,
             right_ascension_deg: 90.16,
             catalog_number: Some(28163),
+            omm_epoch_days: None,
         };
         let molniya_offsets: Vec<f64> = (-12..=12).map(|i| i as f64 * 120.0).collect();
         let molniya_samples = arc_from_elements(&molniya, &molniya_offsets);
@@ -1818,6 +1821,7 @@ mod tests {
             mean_motion_rev_per_day: 1.0027,
             right_ascension_deg: 77.3,
             catalog_number: Some(39000),
+            omm_epoch_days: None,
         };
         let offsets: Vec<f64> = (-12..=12).map(|i| i as f64 * 120.0).collect();
         let samples = arc_from_elements(&truth, &offsets);

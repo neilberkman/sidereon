@@ -190,13 +190,17 @@ pub struct Prediction {
 
 /// Julian date split as `(whole, fraction)` for high-precision time input.
 ///
-/// `whole` is the Julian-date day boundary used by the Vallado SGP4 path
-/// (the integer Julian Day Number minus `0.5`), and `fraction` is the
-/// non-negative within-day fraction in `[0, 1)`. Their sum is the Julian Date;
-/// keeping the two terms separate avoids losing sub-day precision when a large
-/// day number is converted to binary64. For example, the civil midnight
-/// 2018-07-04 is represented as `JulianDate(2458303.5, 0.0)` by the SGP4
-/// calendar path.
+/// The instant is `whole + fraction` days. The Vallado calendar path puts
+/// `whole` on the civil-midnight day boundary (the integer Julian Day Number
+/// minus `0.5`) with `fraction` in `[0, 1)`: the civil midnight 2018-07-04 is
+/// `JulianDate(2458303.5, 0.0)` there. Skyfield's split, which
+/// [`JulianDate::from_unix_microseconds`] gives, puts `whole` on a noon
+/// boundary and can carry a small negative `fraction`. SGP4 takes minutes
+/// since epoch from the two parts, `(whole - jdsatepoch) * 1440 +
+/// (fraction - jdsatepochF) * 1440`, as python-sgp4's `Satrec.sgp4(jd, fr)`
+/// does, so any finite split is accepted. Keeping the two terms separate
+/// avoids losing sub-day precision when a large day number is converted to
+/// binary64.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct JulianDate(pub f64, pub f64);
 
@@ -205,7 +209,7 @@ impl JulianDate {
     /// fraction.
     ///
     /// This constructor does not validate the values. SGP4 entry points reject
-    /// non-finite dates and fractions outside `[0, 1)` with [`Error::InvalidInput`].
+    /// a non-finite part with [`Error::InvalidInput`].
     pub const fn new(whole: f64, fraction: f64) -> Self {
         Self(whole, fraction)
     }
@@ -215,17 +219,17 @@ impl JulianDate {
         self.0
     }
 
-    /// Returns the non-negative within-day fraction of this split Julian date.
+    /// Returns the fraction component of this split Julian date.
     pub const fn fraction(self) -> f64 {
         self.1
     }
 
-    /// Converts a POSIX-like Unix timestamp in microseconds to a split Julian
-    /// date using the same floor-and-remainder arithmetic as pass prediction.
-    ///
-    /// Negative timestamps are split into a preceding civil day plus a
-    /// non-negative remainder, so values immediately before the Unix epoch and
-    /// exact day boundaries retain the same bits as [`crate::astro::passes::UtcInstant`].
+    /// Converts a POSIX-like Unix timestamp in microseconds to the split
+    /// Julian date Skyfield 1.54 propagates SGP4 at for that UTC instant, the
+    /// one pass prediction uses: `t.whole` on a noon boundary and
+    /// `t.tai_fraction - leap / 86400`, which is negative for the TAI - UTC
+    /// seconds before each UTC noon (37 since 2017), while TAI has passed noon
+    /// and UTC has not.
     pub fn from_unix_microseconds(unix_microseconds: i64) -> Self {
         crate::astro::passes::UtcInstant::from_unix_microseconds(unix_microseconds)
             .sgp4_julian_date()
@@ -384,6 +388,40 @@ pub struct ElementSet {
     /// TLE writer checks when it writes one.
     #[serde(default)]
     pub catalog_number: Option<u32>,
+    /// Days since 1949-12-31 00:00 UTC of an OMM epoch, when the element set is
+    /// initialised as python-sgp4's `sgp4.omm.initialize` initialises an OMM
+    /// (see [`crate::astro::omm::Omm::to_element_set`]); `None` initialises it
+    /// as a TLE is initialised.
+    ///
+    /// When set, and while `epoch` is the split python-sgp4's compiled
+    /// `Satrec.sgp4init` makes of it ([`sgp4_julian_date_from_epoch_days`]),
+    /// `sgp4init` receives this day count, and the mean motion and its
+    /// derivatives are converted to radians per minute as `omm.initialize`
+    /// converts them: `n / 720 * pi`, `ndot / (1036800 / pi)` and
+    /// `nddot / (2985984000 / 2 / pi)`. Otherwise `sgp4init` receives
+    /// `(jd + fraction) - 2433281.5` and `n / (1440 / (2 pi))`, as
+    /// `twoline2rv` passes them.
+    ///
+    /// Element sets compare equal only when this matches too, so an
+    /// OMM-bridged and a TLE-bridged set with identical elements and epoch
+    /// compare unequal: they initialise SGP4 differently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omm_epoch_days: Option<f64>,
+}
+
+/// The split Julian date python-sgp4's compiled `Satrec.sgp4init` makes of
+/// an epoch given as days since 1949-12-31 00:00: C `modf` separates the whole
+/// days, and when `epoch_days * 1e8` is a whole number under C `round` (half
+/// away from zero) the fraction is replaced by `round(fraction * 1e8) / 1e8`;
+/// `jdsatepoch = whole + 2433281.5`, `jdsatepochF = fraction`.
+pub(crate) fn sgp4_julian_date_from_epoch_days(epoch_days: f64) -> JulianDate {
+    let whole = epoch_days.trunc();
+    let mut fraction = epoch_days - whole;
+    let scaled = epoch_days * 1.0e8;
+    if scaled.round() == scaled {
+        fraction = (fraction * 1.0e8).round() / 1.0e8;
+    }
+    JulianDate(whole + 2_433_281.5, fraction)
 }
 
 // ── Satellite ────────────────────────────────────────────────────────
@@ -594,6 +632,10 @@ impl Satellite {
     /// ```text
     /// tsince = (jd - jdsatepoch) * 1440 + (fr - jdsatepochF) * 1440
     /// ```
+    ///
+    /// Any finite split is accepted, as python-sgp4's `Satrec.sgp4(jd, fr)`
+    /// accepts it, including a negative or above-one fraction such as
+    /// Skyfield's split gives just before UTC noon.
     pub fn propagate_jd(&self, jd: JulianDate) -> Result<Prediction, Error> {
         self.propagate(minutes_since_epoch_from_jd(&self.satrec, jd)?)
     }
@@ -610,6 +652,13 @@ impl Satellite {
     ) -> Result<Prediction, DecayLatchedError> {
         let t = minutes_since_epoch_from_jd(&self.satrec, jd)?;
         self.propagate_with_decay_latch(t, latch)
+    }
+
+    /// The initialised element record, for tests that compare it with a
+    /// reference implementation's.
+    #[cfg(test)]
+    pub(crate) fn satrec(&self) -> &vallado::ElsetRec {
+        &self.satrec
     }
 
     pub(crate) fn mean_motion_rad_per_min(&self) -> f64 {
@@ -852,15 +901,17 @@ fn validate_minutes_since_epoch(t: MinutesSinceEpoch) -> Result<(), Error> {
     Ok(())
 }
 
+fn split_minutes_since_epoch(satrec: &vallado::ElsetRec, jd: JulianDate) -> f64 {
+    (jd.0 - satrec.jdsatepoch) * 1440.0 + (jd.1 - satrec.jdsatepochF) * 1440.0
+}
+
 fn minutes_since_epoch_from_jd(
     satrec: &vallado::ElsetRec,
     jd: JulianDate,
 ) -> Result<MinutesSinceEpoch, Error> {
     validate::finite(jd.0, "julian_date.whole").map_err(map_input_error)?;
-    validate::finite_in_range_exclusive_upper(jd.1, 0.0, 1.0, "julian_date.fraction")
-        .map_err(map_input_error)?;
-    let tsince = (jd.0 - satrec.jdsatepoch) * 1440.0 + (jd.1 - satrec.jdsatepochF) * 1440.0;
-    let t = MinutesSinceEpoch(tsince);
+    validate::finite(jd.1, "julian_date.fraction").map_err(map_input_error)?;
+    let t = MinutesSinceEpoch(split_minutes_since_epoch(satrec, jd));
     validate_minutes_since_epoch(t)?;
     Ok(t)
 }
@@ -892,16 +943,35 @@ fn init_satrec_from_elements(
     let nodeo = elements.right_ascension_deg * deg2rad;
     let argpo = elements.argument_of_perigee_deg * deg2rad;
     let mo = elements.mean_anomaly_deg * deg2rad;
-    let no_kozai = elements.mean_motion_rev_per_day / xpdotp;
-    // ndot rev/day² → rad/min², nddot rev/day³ → rad/min³.
-    // Matches the conversion in `vallado::twoline2rv_propagate`.
+    let JulianDate(jd, jdfrac) = elements.epoch;
     // SGP4 stores the derivatives with the record but does not propagate with
     // them, so an absent value is passed as zero.
-    let ndot = elements.mean_motion_dot.unwrap_or(0.0) / (xpdotp * 1440.0);
-    let nddot = elements.mean_motion_double_dot.unwrap_or(0.0) / (xpdotp * 1440.0 * 1440.0);
-
-    let JulianDate(jd, jdfrac) = elements.epoch;
-    let epoch_sgp4 = jd + jdfrac - 2433281.5;
+    let ndot_rev = elements.mean_motion_dot.unwrap_or(0.0);
+    let nddot_rev = elements.mean_motion_double_dot.unwrap_or(0.0);
+    let omm_epoch_days = elements.omm_epoch_days.filter(|&days| {
+        let JulianDate(whole, fraction) = sgp4_julian_date_from_epoch_days(days);
+        whole.to_bits() == jd.to_bits() && fraction.to_bits() == jdfrac.to_bits()
+    });
+    let (epoch_sgp4, no_kozai, ndot, nddot) = match omm_epoch_days {
+        // `sgp4.omm.initialize` (python-sgp4 2.22), term for term.
+        Some(days) => {
+            let pi = std::f64::consts::PI;
+            (
+                days,
+                elements.mean_motion_rev_per_day / 720.0 * pi,
+                ndot_rev / (1_036_800.0 / pi),
+                nddot_rev / (2_985_984_000.0 / 2.0 / pi),
+            )
+        }
+        // ndot rev/day² → rad/min², nddot rev/day³ → rad/min³, matching the
+        // conversion in `vallado::twoline2rv_propagate`.
+        None => (
+            jd + jdfrac - 2433281.5,
+            elements.mean_motion_rev_per_day / xpdotp,
+            ndot_rev / (xpdotp * 1440.0),
+            nddot_rev / (xpdotp * 1440.0 * 1440.0),
+        ),
+    };
 
     // The record keeps five characters of the catalog number for diagnostics.
     let satnum_str = elements
@@ -1654,10 +1724,90 @@ mod tests {
             Sgp4InputErrorKind::OutOfRange,
         );
         assert_invalid_input(
-            sat.propagate_jd(JulianDate(2_458_304.0, 1.0)),
+            sat.propagate_jd(JulianDate(2_458_304.0, f64::NAN)),
             "julian_date.fraction",
-            Sgp4InputErrorKind::OutOfRange,
+            Sgp4InputErrorKind::NonFinite,
         );
+    }
+
+    #[test]
+    fn a_split_outside_the_unit_fraction_is_propagated() {
+        // The same instant as `(2458304.0, 0.25)`, with the day moved into the
+        // fraction either way; python-sgp4's `Satrec.sgp4(jd, fr)` takes both.
+        let sat = Satellite::from_tle(ISS_L1, ISS_L2).unwrap();
+        let base = sat.propagate_jd(JulianDate(2_458_304.0, 0.25)).unwrap();
+        for split in [
+            JulianDate(2_458_303.0, 1.25),
+            JulianDate(2_458_305.0, -0.75),
+        ] {
+            let state = sat.propagate_jd(split).unwrap();
+            for axis in 0..3 {
+                assert!((state.position[axis] - base.position[axis]).abs() < 1.0e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn minutes_since_epoch_are_python_sgp4s_for_skyfields_splits() {
+        // `tests/fixtures/skyfield_sgp4/sgp4_tsince.json`, from
+        // `gen_sgp4_tsince.py`: Skyfield 1.54's split for each instant and
+        // the minutes since epoch python-sgp4 2.22's `Satrec.sgp4(jd, fr)`
+        // forms from it for the ISS TLE fixture, including 145 splits with a
+        // negative fraction just before UTC noon.
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/skyfield_sgp4/sgp4_tsince.json"
+        ))
+        .expect("fixture JSON");
+        let bits = |value: &serde_json::Value| {
+            u64::from_str_radix(value.as_str().unwrap().trim_start_matches("0x"), 16).unwrap()
+        };
+        let tle = include_str!("../../../tests/fixtures/omm/25544.tle");
+        let lines: Vec<&str> = tle
+            .lines()
+            .filter(|line| line.starts_with("1 ") || line.starts_with("2 "))
+            .collect();
+        let sat = Satellite::from_tle(lines[0], lines[1]).unwrap();
+        let epoch = sat.epoch_jd();
+        assert_eq!(
+            (epoch.0.to_bits(), epoch.1.to_bits()),
+            (bits(&fixture["jdsatepoch"]), bits(&fixture["jdsatepochF"]))
+        );
+        let rows = fixture["instants"].as_array().unwrap();
+        assert_eq!(rows.len(), 655);
+        for row in rows {
+            let micros = row[0].as_i64().unwrap();
+            let split = JulianDate::from_unix_microseconds(micros);
+            assert_eq!(
+                (split.0.to_bits(), split.1.to_bits()),
+                (bits(&row[1]), bits(&row[2])),
+                "{micros}"
+            );
+            let tsince = super::split_minutes_since_epoch(&sat.satrec, split);
+            assert_eq!(tsince.to_bits(), bits(&row[3]), "{micros}");
+            assert_eq!(
+                sat.propagate_jd(split),
+                sat.propagate(MinutesSinceEpoch(tsince)),
+                "{micros}"
+            );
+        }
+    }
+
+    #[test]
+    fn instants_just_before_utc_noon_propagate() {
+        // From 11:59:23 to 12:00:00 UTC in 2018 (TAI - UTC = 37 s) TAI has
+        // passed noon, and Skyfield's split carries a negative fraction.
+        let sat = Satellite::from_tle(ISS_L1, ISS_L2).unwrap();
+        let noon = 1_530_619_200_000_000_i64; // 2018-07-03 12:00:00 UTC
+        let mut negative = 0;
+        for offset_s in [-38_i64, -37, -36, -20, -1, 0, 1] {
+            let jd = JulianDate::from_unix_microseconds(noon + offset_s * 1_000_000);
+            if jd.fraction() < 0.0 {
+                negative += 1;
+            }
+            sat.propagate_jd(jd)
+                .unwrap_or_else(|error| panic!("{offset_s} s: {error}"));
+        }
+        assert_eq!(negative, 4);
     }
 
     #[test]

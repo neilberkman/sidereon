@@ -52,27 +52,61 @@ fn iss_arc_matches_frozen_bits() {
     assert_eq!(positions.len(), 10);
     assert_eq!(looks.len(), 10);
 
-    // First-epoch frozen regression lock (full fixture cross-checked Python-side).
-    assert_eq!(positions[0].position[0].to_bits(), 0x4098_ea1b_e4cb_4974);
-    assert_eq!(positions[0].position[1].to_bits(), 0x40b2_e556_5b1d_73e0);
-    assert_eq!(positions[0].position[2].to_bits(), 0x40b1_7a14_ef3f_a337);
-    assert_eq!(positions[0].velocity[0].to_bits(), 0xc014_7e8d_3aa3_fa34);
-    assert_eq!(positions[0].velocity[1].to_bits(), 0x4012_c73c_3e76_1c93);
-    assert_eq!(positions[0].velocity[2].to_bits(), 0xc009_f337_8fdc_48e0);
-    assert_eq!(looks[0].azimuth_deg.to_bits(), 0x4074_c785_bb25_724c);
-    assert_eq!(looks[0].elevation_deg.to_bits(), 0xc043_50db_4e23_90c1);
-    assert_eq!(looks[0].range_km.to_bits(), 0x40c0_d079_27e6_8988);
-
     if std::env::var("SIDEREON_DUMP_FIXTURES").is_ok() {
         dump_fixture(&epochs, &positions, &looks);
+    }
+
+    // Frozen regression lock on every epoch: `fixtures/sgp4_topocentric_arc.json`,
+    // written by `dump_fixture` below (full fixture cross-checked Python-side).
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/sgp4_topocentric_arc.json"))
+            .expect("frozen arc fixture");
+    let frozen = fixture["epochs"].as_array().expect("epochs");
+    assert_eq!(frozen.len(), 10);
+    let hex = |v: f64| format!("0x{:016x}", v.to_bits());
+    for (index, ((dt, pos), look)) in epochs.iter().zip(&positions).zip(&looks).enumerate() {
+        let want = &frozen[index];
+        assert_eq!(
+            want["unix_microseconds"].as_i64(),
+            Some(dt.unix_microseconds()),
+            "{index}"
+        );
+        for axis in 0..3 {
+            assert_eq!(
+                want["position_km_hex"][axis].as_str(),
+                Some(hex(pos.position[axis]).as_str()),
+                "{index} position[{axis}]"
+            );
+            assert_eq!(
+                want["velocity_km_s_hex"][axis].as_str(),
+                Some(hex(pos.velocity[axis]).as_str()),
+                "{index} velocity[{axis}]"
+            );
+        }
+        assert_eq!(
+            want["azimuth_deg_hex"].as_str(),
+            Some(hex(look.azimuth_deg).as_str()),
+            "{index} azimuth"
+        );
+        assert_eq!(
+            want["elevation_deg_hex"].as_str(),
+            Some(hex(look.elevation_deg).as_str()),
+            "{index} elevation"
+        );
+        assert_eq!(
+            want["range_km_hex"].as_str(),
+            Some(hex(look.range_km).as_str()),
+            "{index} range"
+        );
     }
 }
 
 /// Env-gated emitter (`SIDEREON_DUMP_FIXTURES=1`) that serializes the committed
 /// TLE, station, epoch grid, and the engine's reference TEME states and
-/// topocentric look angles (raw f64 plus IEEE-754 hex bits) to the JSON fixture
-/// consumed by the Python binding's pytest. Reuses this validated harness
-/// verbatim; changes no assertion and never runs in a normal `cargo test`.
+/// topocentric look angles (raw f64 plus IEEE-754 hex bits) to this crate's
+/// frozen fixture (`tests/fixtures/sgp4_topocentric_arc.json`) and to the JSON
+/// fixture consumed by the Python binding's pytest. It runs before the frozen
+/// comparison and never runs in a normal `cargo test`.
 fn dump_fixture(
     epochs: &[UtcInstant],
     positions: &[sidereon_core::astro::sgp4::Prediction],
@@ -116,9 +150,14 @@ fn dump_fixture(
         "epochs": epochs_json,
     });
 
-    let out = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../bindings/python/tests/fixtures/sgp4_topocentric.json");
-    std::fs::create_dir_all(out.parent().unwrap()).expect("dump: create fixture dir");
-    std::fs::write(&out, serde_json::to_string_pretty(&doc).unwrap()).expect("dump: write fixture");
-    eprintln!("dumped SGP4 topocentric fixture to {out:?}");
+    let text = serde_json::to_string_pretty(&doc).unwrap() + "\n";
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for out in [
+        manifest.join("tests/fixtures/sgp4_topocentric_arc.json"),
+        manifest.join("../../bindings/python/tests/fixtures/sgp4_topocentric.json"),
+    ] {
+        std::fs::create_dir_all(out.parent().unwrap()).expect("dump: create fixture dir");
+        std::fs::write(&out, &text).expect("dump: write fixture");
+        eprintln!("dumped SGP4 topocentric fixture to {out:?}");
+    }
 }

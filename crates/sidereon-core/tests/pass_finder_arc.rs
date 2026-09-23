@@ -124,12 +124,14 @@ fn find_passes_agrees_with_reference_and_keeps_what_coarse_drops() {
     }
 
     // Frozen-bits regression lock on the first pass (full set cross-checked
-    // Python-side against the dumped fixture).
+    // Python-side against the dumped fixture). SGP4 is propagated at
+    // Skyfield's split Julian date for each instant, which moved the maximum
+    // elevation by 8 units in the last place from its civil-midnight split.
     let first = mine[0];
     assert_eq!(first.aos.unix_microseconds(), 1_530_672_731_076_964);
     assert_eq!(first.los.unix_microseconds(), 1_530_673_217_359_923);
     assert_eq!(first.culmination.unix_microseconds(), 1_530_672_973_724_542);
-    assert_eq!(first.max_elevation_deg.to_bits(), 0x4021_3c92_daf7_062a);
+    assert_eq!(first.max_elevation_deg.to_bits(), 0x4021_3c92_daf7_0622);
 
     if std::env::var("SIDEREON_DUMP_FIXTURES").is_ok() {
         dump_fixture(&mine);
