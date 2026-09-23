@@ -119,9 +119,9 @@ const CORE_BITS: &[CoreBits] = &[
     CoreBits {
         name: "ppp_arc16",
         lambda: SearchBits {
-            best: 4_621_277_653_433_667_077,
-            second: 4_621_288_762_916_491_697,
-            ratio: 4_607_192_252_195_224_650,
+            best: 4_621_277_653_433_667_084,
+            second: 4_621_288_762_916_491_706,
+            ratio: 4_607_192_252_195_224_652,
             status: false,
             candidates: 2,
         },
@@ -235,19 +235,41 @@ fn assert_close(actual: f64, expected: f64, tolerance: f64, label: &str) {
     );
 }
 
-fn assert_search_bits(result: &sidereon_core::ils::IlsResult, expected: SearchBits) {
-    assert_eq!(result.best_score.to_bits(), expected.best, "best score");
-    assert_eq!(
-        result.second_best_score.expect("runner-up score").to_bits(),
-        expected.second,
-        "runner-up score"
+fn search_bits(result: &sidereon_core::ils::IlsResult) -> SearchBits {
+    SearchBits {
+        best: result.best_score.to_bits(),
+        second: result.second_best_score.expect("runner-up score").to_bits(),
+        ratio: result.ratio.to_bits(),
+        status: result.fixed_status,
+        candidates: result.candidates_evaluated,
+    }
+}
+
+/// The `CORE_BITS` entry a run produced, spelled as the table spells it, so a
+/// deliberate change of the frozen outputs can be copied back from the failure.
+fn core_bits_source(name: &str, lambda: SearchBits, bounded: Option<SearchBits>) -> String {
+    fn search(bits: SearchBits) -> String {
+        format!(
+            "SearchBits {{ best: {}, second: {}, ratio: {}, status: {}, candidates: {} }}",
+            bits.best, bits.second, bits.ratio, bits.status, bits.candidates
+        )
+    }
+    let bounded = bounded.map_or_else(
+        || "None".to_owned(),
+        |bits| format!("Some({})", search(bits)),
     );
-    assert_eq!(result.ratio.to_bits(), expected.ratio, "ratio");
-    assert_eq!(result.fixed_status, expected.status, "ratio status");
-    assert_eq!(
-        result.candidates_evaluated, expected.candidates,
-        "candidate count"
-    );
+    format!(
+        "CoreBits {{ name: {name:?}, lambda: {}, bounded: {bounded} }},",
+        search(lambda)
+    )
+}
+
+fn same_bits(actual: SearchBits, expected: SearchBits) -> bool {
+    actual.best == expected.best
+        && actual.second == expected.second
+        && actual.ratio == expected.ratio
+        && actual.status == expected.status
+        && actual.candidates == expected.candidates
 }
 
 #[test]
@@ -366,20 +388,38 @@ fn bounded_search_cannot_reach_the_strongly_correlated_rtklib_optimum() {
 fn core_solver_outputs_are_frozen_to_exact_bits() {
     let doc = golden();
 
+    // Every case is evaluated before anything is asserted, so a change of the
+    // frozen outputs reports the whole regenerated table rather than the first
+    // differing value.
+    let mut regenerated = Vec::new();
+    let mut differing = Vec::new();
     for case in cases(&doc) {
         let name = case_name(case);
         let a = floats(&case["a"]);
         let q = matrix(&case["Q"]);
         let expected = core_bits_for(name);
 
-        let lambda = lambda_ils_search(&a, &q, RATIO_THRESHOLD).unwrap();
-        assert_search_bits(&lambda, expected.lambda);
-
-        if let Some(expected_bounded) = expected.bounded {
-            let bounded =
-                bounded_ils_search(&a, &q, RADIUS_CYCLES, CANDIDATE_LIMIT, RATIO_THRESHOLD)
-                    .unwrap();
-            assert_search_bits(&bounded, expected_bounded);
+        let lambda = search_bits(&lambda_ils_search(&a, &q, RATIO_THRESHOLD).unwrap());
+        let bounded = expected.bounded.map(|_| {
+            search_bits(
+                &bounded_ils_search(&a, &q, RADIUS_CYCLES, CANDIDATE_LIMIT, RATIO_THRESHOLD)
+                    .unwrap(),
+            )
+        });
+        let matches = same_bits(lambda, expected.lambda)
+            && match (bounded, expected.bounded) {
+                (Some(actual), Some(frozen)) => same_bits(actual, frozen),
+                (None, None) => true,
+                _ => false,
+            };
+        if !matches {
+            differing.push(name.to_owned());
         }
+        regenerated.push(core_bits_source(name, lambda, bounded));
     }
+    assert!(
+        differing.is_empty(),
+        "frozen core bits differ for {differing:?}; the table this run produced:\n{}",
+        regenerated.join("\n")
+    );
 }

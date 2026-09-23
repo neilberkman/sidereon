@@ -40,7 +40,13 @@ num-traits = "0.2"
 thiserror = "1.0"
 libm = "=0.2.16"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1" }
+# `float_roundtrip` parses a decimal number to the nearest double. Without it
+# serde_json's default parser can land one unit in the last place away, so a
+# GP JSON value written by the shortest round-tripping form read back as a
+# different number. `preserve_order` keeps object members in insertion order,
+# so the GP JSON writer states keywords, and `USER_DEFINED_*` parameters, in
+# the order it inserts them rather than sorted.
+serde_json = { version = "1", features = ["float_roundtrip", "preserve_order"] }
 roxmltree = "0.21"
 sha2 = "0.10"
 # Data-parallel batch propagation is enabled by the default `parallel` feature.

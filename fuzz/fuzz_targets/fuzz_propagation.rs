@@ -54,15 +54,15 @@ fn elements(input: &Input) -> ElementSet {
     ElementSet {
         epoch: JulianDate(input.year as f64, input.day),
         bstar: input.sgp4[0],
-        mean_motion_dot: input.sgp4[1],
-        mean_motion_double_dot: input.sgp4[2],
+        mean_motion_dot: Some(input.sgp4[1]),
+        mean_motion_double_dot: Some(input.sgp4[2]),
         eccentricity: input.sgp4[3],
         argument_of_perigee_deg: input.sgp4[4],
         inclination_deg: input.sgp4[5],
         mean_anomaly_deg: input.sgp4[6],
         mean_motion_rev_per_day: input.sgp4[7],
         right_ascension_deg: input.sgp4[8],
-        catalog_number: input.catalog,
+        catalog_number: Some(input.catalog),
     }
 }
 
@@ -171,10 +171,7 @@ fuzz_target!(|data: &[u8]| {
     let elset = elements(&input);
     assert_ok_finite_or_err(
         "sgp4::propagate_elements",
-        sidereon_core::astro::sgp4::propagate_elements(
-            &elset,
-            MinutesSinceEpoch(input.t_end),
-        ),
+        sidereon_core::astro::sgp4::propagate_elements(&elset, MinutesSinceEpoch(input.t_end)),
     );
     assert_ok_finite_or_err(
         "sgp4::propagate_elements_with_opsmode",

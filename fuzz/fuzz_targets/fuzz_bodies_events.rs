@@ -56,15 +56,15 @@ fn element_set(input: &Input) -> ElementSet {
     ElementSet {
         epoch: sidereon_core::astro::sgp4::JulianDate(input.ints[0] as f64, input.scalars[0]),
         bstar: input.sgp4[0],
-        mean_motion_dot: input.sgp4[1],
-        mean_motion_double_dot: input.sgp4[2],
+        mean_motion_dot: Some(input.sgp4[1]),
+        mean_motion_double_dot: Some(input.sgp4[2]),
         eccentricity: input.sgp4[3],
         argument_of_perigee_deg: input.sgp4[4],
         inclination_deg: input.sgp4[5],
         mean_anomaly_deg: input.sgp4[6],
         mean_motion_rev_per_day: input.sgp4[7],
         right_ascension_deg: input.sgp4[8],
-        catalog_number: input.ints[1] as u32,
+        catalog_number: Some(input.ints[1] as u32),
     }
 }
 

@@ -2203,15 +2203,15 @@ mod tests {
         ElementSet {
             epoch: crate::astro::sgp4::sgp4_julian_date_from_day_of_year(2024, 354.52609954),
             bstar: 0.000_370_420_000_000_000_05,
-            mean_motion_dot: 0.00020888,
-            mean_motion_double_dot: 0.0,
+            mean_motion_dot: Some(0.00020888),
+            mean_motion_double_dot: Some(0.0),
             eccentricity: 0.0006955,
             argument_of_perigee_deg: 37.7614,
             inclination_deg: 51.6393,
             mean_anomaly_deg: 87.9783,
             mean_motion_rev_per_day: 15.49970085,
             right_ascension_deg: 213.2584,
-            catalog_number: 0,
+            catalog_number: None,
         }
     }
 
@@ -2219,15 +2219,15 @@ mod tests {
         ElementSet {
             epoch: crate::astro::sgp4::sgp4_julian_date_from_day_of_year(2024, 1.5),
             bstar: 0.000_102_70,
-            mean_motion_dot: 0.000_167_17,
-            mean_motion_double_dot: 0.0,
+            mean_motion_dot: Some(0.000_167_17),
+            mean_motion_double_dot: Some(0.0),
             eccentricity: 0.000_264_4,
             argument_of_perigee_deg: 250.3037,
             inclination_deg: 51.6400,
             mean_anomaly_deg: 109.7782,
             mean_motion_rev_per_day: 15.49560812,
             right_ascension_deg: 208.8657,
-            catalog_number: 25_544,
+            catalog_number: Some(25_544),
         }
     }
 
@@ -2235,15 +2235,15 @@ mod tests {
         ElementSet {
             epoch: crate::astro::sgp4::sgp4_julian_date_from_day_of_year(2026, 95.55331950),
             bstar: 0.000_164_20,
-            mean_motion_dot: 0.000_085_43,
-            mean_motion_double_dot: 0.0,
+            mean_motion_dot: Some(0.000_085_43),
+            mean_motion_double_dot: Some(0.0),
             eccentricity: 0.000_635_1,
             argument_of_perigee_deg: 274.8255,
             inclination_deg: 51.6328,
             mean_anomaly_deg: 85.2008,
             mean_motion_rev_per_day: 15.4878698,
             right_ascension_deg: 299.5432,
-            catalog_number: 25_544,
+            catalog_number: Some(25_544),
         }
     }
 
@@ -2251,15 +2251,15 @@ mod tests {
         ElementSet {
             epoch: crate::astro::sgp4::sgp4_julian_date_from_day_of_year(2026, 95.32454765),
             bstar: 0.000_372_23,
-            mean_motion_dot: 0.000_331_73,
-            mean_motion_double_dot: 0.0,
+            mean_motion_dot: Some(0.000_331_73),
+            mean_motion_double_dot: Some(0.0),
             eccentricity: 0.000_355_7,
             argument_of_perigee_deg: 129.2727,
             inclination_deg: 41.4682,
             mean_anomaly_deg: 230.8429,
             mean_motion_rev_per_day: 15.6194274,
             right_ascension_deg: 45.9319,
-            catalog_number: 48_274,
+            catalog_number: Some(48_274),
         }
     }
 
@@ -2267,15 +2267,15 @@ mod tests {
         ElementSet {
             epoch: crate::astro::sgp4::sgp4_julian_date_from_day_of_year(2026, 95.51225242),
             bstar: 0.012_423,
-            mean_motion_dot: 0.000_085_41,
-            mean_motion_double_dot: 0.0,
+            mean_motion_dot: Some(0.000_085_41),
+            mean_motion_double_dot: Some(0.0),
             eccentricity: 0.095_504_7,
             argument_of_perigee_deg: 120.8974,
             inclination_deg: 51.6426,
             mean_anomaly_deg: 248.9327,
             mean_motion_rev_per_day: 12.40936816,
             right_ascension_deg: 220.2066,
-            catalog_number: 49_271,
+            catalog_number: Some(49_271),
         }
     }
 
@@ -2283,15 +2283,15 @@ mod tests {
         ElementSet {
             epoch: crate::astro::sgp4::sgp4_julian_date_from_day_of_year(2026, 95.0),
             bstar: 0.0,
-            mean_motion_dot: 0.0,
-            mean_motion_double_dot: 0.0,
+            mean_motion_dot: Some(0.0),
+            mean_motion_double_dot: Some(0.0),
             eccentricity: 0.000_1,
             argument_of_perigee_deg: 0.0,
             inclination_deg: 0.1,
             mean_anomaly_deg: 0.0,
             mean_motion_rev_per_day: 1.002_7,
             right_ascension_deg: 0.0,
-            catalog_number: 99_001,
+            catalog_number: Some(99_001),
         }
     }
 

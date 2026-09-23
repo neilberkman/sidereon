@@ -22,15 +22,15 @@ fn element_set(raw: &([f64; 11], i64, u32)) -> ElementSet {
     ElementSet {
         epoch: JulianDate(*year as f64, doubles[10]),
         bstar: doubles[0],
-        mean_motion_dot: doubles[1],
-        mean_motion_double_dot: doubles[2],
+        mean_motion_dot: Some(doubles[1]),
+        mean_motion_double_dot: Some(doubles[2]),
         eccentricity: doubles[3],
         argument_of_perigee_deg: doubles[4],
         inclination_deg: doubles[5],
         mean_anomaly_deg: doubles[6],
         mean_motion_rev_per_day: doubles[7],
         right_ascension_deg: doubles[8],
-        catalog_number: *catalog,
+        catalog_number: Some(*catalog),
     }
 }
 

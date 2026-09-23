@@ -986,6 +986,362 @@ All notable changes to `sidereon-core` are documented here.
   refused instead of being filtered or ignored. A header between coefficient
   rows of a block sets the order of the rows after it and is retained at that
   position.
+- **Breaking.** `Omm::to_element_set` and `Satellite::from_omm` refuse an OMM
+  whose stated `CENTER_NAME`, `REF_FRAME`, `TIME_SYSTEM` or
+  `MEAN_ELEMENT_THEORY` is not `EARTH`, `TEME`, `UTC`, or one of `SGP4`,
+  `SGP/SGP4` and `SDP4` in either letter case (CCSDS 502.0-B-3 4.2.4.6, table
+  4-2), with `OmmError::IncompatibleMetadata` naming the keyword and value;
+  `Satellite::from_omm` reports it as `Sgp4Error::InvalidInput` for that
+  keyword with `OutOfRange`. `SGP`, `SGP4-XP`, `PPT3`, `DSST` and `USM` name
+  other theories. The theory is checked first, then the center, frame and time
+  system, so an element set of another theory is refused naming the theory
+  whatever its frame. An absent or blank value, as CelesTrak GP JSON and CSV omit
+  these fields, does not block propagation, and parsing an OMM with any other
+  center, frame, time system or theory is unchanged. The bridge also validates
+  the epoch calendar, so a mutated `OmmEpoch` that names no civil instant is
+  refused as `InvalidField` for `epoch`.
+- **Breaking.** `Omm` retains the CCSDS 502.0-B-3 table 4-1 to 4-3 items it
+  previously dropped: `classification`, `message_id`, `ref_frame_epoch`,
+  `gm_km3_s2`, `spacecraft` (`OmmSpacecraft`), `covariance` (`OmmCovariance`,
+  the 21 lower-triangle values as read), `user_defined` (`OmmUserDefined`,
+  verbatim text in source order) and `comments` (`OmmComments`; spacecraft and
+  covariance comments live in their blocks). The KVN, XML and JSON readers fill
+  them and the writers write them back. A KVN comment belongs to the block of
+  the keyword after it (7.8.8). GP JSON and CSV carry no comments.
+  `omm::encode_csv` writes the compact GP column set followed by a column for
+  every other keyword a record holds, including each `USER_DEFINED_*`
+  parameter, so those items also survive a CSV round trip. The new fields
+  serialize only when present.
+- **Breaking.** An OMM of any mean-element theory of 502.0-B-3 table 4-2 reads
+  and writes back in KVN, XML, JSON and CSV. `Omm::mean_motion` is an
+  `Option<f64>`, and the new `semi_major_axis_km` holds `SEMI_MAJOR_AXIS` (km),
+  its table 4-3 alternative, which DSST and the other non-SGP theories use. A
+  message must give at least one of the two
+  (`OmmError::MissingField("SEMI_MAJOR_AXIS or MEAN_MOTION")`), and one that
+  gives both keeps both. The new `bterm_m2_kg` and `agom_m2_kg` hold the SGP4-XP
+  `BTERM` and `AGOM` (`m**2/kg`), which table 4-3 pairs with `BSTAR` and
+  `MEAN_MOTION_DDOT`. The TLE related parameters `ephemeris_type`,
+  `classification_type`, `norad_cat_id`, `element_set_no`, `rev_at_epoch`,
+  `bstar`, `mean_motion_dot` and `mean_motion_ddot` are options, since table
+  4-3 requires them only for SGP/SGP4. The readers previously refused a message
+  without `MEAN_MOTION`, `NORAD_CAT_ID`, `BSTAR` or a mean-motion derivative,
+  and filled an absent `EPHEMERIS_TYPE`, `CLASSIFICATION_TYPE`,
+  `ELEMENT_SET_NO` or `REV_AT_EPOCH` with 0, `U`, 999 or 0, which the writers
+  then wrote as if the message had stated it. The new keywords' units are
+  checked against table 4-3 like every other numeric keyword. Only
+  `Omm::to_element_set` and `Satellite::from_omm` refuse such a message: a
+  stated theory other than `SGP4`, `SGP/SGP4` or `SDP4` with
+  `IncompatibleMetadata` naming it, and a message stating one of those theories,
+  or none, without `MEAN_MOTION` or `BSTAR`, which SGP4 propagates with, with
+  `MissingField` naming it, which `Satellite::from_omm` reports as
+  `Sgp4Error::InvalidInput` with `Missing`. Table 4-3 requires the TLE related
+  parameters of an SGP/SGP4 element set; the readers keep such a message as it
+  states itself rather than refuse content they can hold exactly.
+- **Breaking.** `ElementSet::catalog_number` is an `Option<u32>`, and
+  `ElementSet::mean_motion_dot` and `mean_motion_double_dot` are `Option<f64>`,
+  each `None` when the source does not state it; serialized element sets
+  without them read as `None`. SGP4 stores them with the element set but
+  propagates with none of them, so an absent value propagates as a stated
+  zero does, bit for bit. `Omm::to_element_set` no longer refuses an OMM
+  without `NORAD_CAT_ID`, `MEAN_MOTION_DOT` or `MEAN_MOTION_DDOT`, and
+  `Satellite::from_elements` takes a catalog number of up to nine digits, as
+  502.0-B-3 table 4-3 allows `NORAD_CAT_ID`, where it refused one above 99999.
+  A TLE carries five characters: `fit_tle` checks its catalog number against
+  the five-digit and Alpha-5 forms (at most 339999) the TLE writer states,
+  where it refused any above 99999, and writes an Alpha-5 number in Alpha-5.
+- **Breaking.** The OMM KVN and XML readers refuse a keyword or element that
+  tables 4-1 to 4-3 do not define at its position (`OmmError::UnknownField`,
+  4.2.2.2, 4.2.3.2, 4.2.4.2), and a KVN line that is not blank, a comment or an
+  assignment (`MalformedLine`, 7.3.1), instead of ignoring them. GP JSON and
+  CSV members that are not OMM keywords are still not read.
+- **Breaking.** A keyword repeated with a different value is refused by name
+  with `DuplicateField`: in an OMM in every encoding, including a repeated JSON
+  member name that the JSON reader now sees instead of keeping the last; in an
+  OPM block; in the OEM header, a metadata block or a covariance matrix; and in
+  a CDM across the header and relative metadata or within an object block. An
+  exact repeat carries nothing new and is read once. The OMM, OPM and OEM
+  readers previously kept the first occurrence, even a blank one, and the CDM
+  reader the last.
+- **Breaking.** `omm::parse_xml` reads each value from the element that owns
+  it (the header, the segment metadata, or its data block, 502.0-B-3 table
+  8-5), refuses a document without an `omm` element, and refuses one holding
+  more than one OMM with `OmmError::MultipleMessages`. The new
+  `omm::parse_xml_all` reads every OMM of a single message or of an NDM
+  combined instantiation (505.0-B-3 4.11) into an `OmmArray`, skipping a
+  message it cannot read and reporting it in `OmmArray::skipped` with its
+  position and reason, as `parse_json_array` and `parse_csv_array` report a
+  bad record. A multi-OMM document previously yielded the first message with
+  fields filled in from later ones. The OPM, OEM and CDM XML readers also
+  refuse more than one message of their type; the OPM reader refuses a
+  repeated segment or block, and the CDM readers refuse more than two objects
+  with `CdmError::UnexpectedObjectCount` instead of reading a third block into
+  the second object.
+- **Breaking.** `omm::parse_json` and `omm::parse_csv` read one record and
+  refuse a document holding several with `OmmError::MultipleMessages`, as
+  `omm::parse_xml` does, instead of returning the first record, or the first
+  valid CSV row, and dropping the rest; `omm::parse` inherits this for GP JSON
+  and CSV. A JSON array holding one object is still read, and a lone CSV
+  record that `parse_csv_array` would skip is refused with its reason.
+  `OmmError::InRecord` now names only a record `encode_json_array` or
+  `encode_csv` refuses.
+- **Breaking.** `Omm::ccsds_omm_vers` is an `Option<String>`: the version the
+  message states, or `None`, as CelesTrak GP JSON and CSV state none. The
+  readers filled an absent version with `2.0`, which every writer then stated
+  as if the message had; each writer now states it only when present, an
+  empty one being refused as before.
+- **Breaking.** `omm::encode_kvn` returns `Result<String, OmmError>` and refuses
+  text that would not read back unchanged with `OmmError::UnwritableText` and a
+  `TextIssue` (re-exported as `omm::TextIssue` and shared with the OPM, OEM and
+  CDM writers): a line break, whitespace the reader trims, an XML-illegal
+  character, an empty `CCSDS_OMM_VERS`, a user-defined parameter name
+  containing `=` or given more than once, or user-defined comments with no
+  parameter to precede. A non-finite number, and an `OmmEpoch` that names no
+  instant the reader accepts under the message's `TIME_SYSTEM` (a month 13, or
+  a `60` second that is not a UTC leap second), are refused with
+  `InvalidField`. A blank or absent optional text value is still written blank
+  and reads back absent.
+- **Breaking.** `omm::encode_xml` returns `Result<String, OmmError>` and refuses
+  what the XML reader would not return unchanged, where it previously wrote it:
+  a value or `CCSDS_OMM_VERS` with surrounding whitespace, which the reader
+  trims; an empty `CCSDS_OMM_VERS`, which reads back as `2.0`; a comment with
+  trailing whitespace; a user-defined parameter given more than once; and a
+  character XML 1.0 cannot carry, each with `UnwritableText`; and a non-finite
+  number or an epoch the reader would refuse, with `InvalidField`. A line break
+  inside a value or comment reads back unchanged from XML and is still written,
+  a carriage return as a character reference.
+- **Breaking.** `omm::encode_json` and `omm::encode_json_array` return
+  `Result<String, OmmError>`. A non-finite number, which JSON cannot hold, was
+  written as `null` and read back as absent or failed as missing; it is now
+  refused with `InvalidField`, as is an epoch the reader would refuse. A
+  character XML 1.0 cannot carry, which every OMM reader refuses, an empty
+  `CCSDS_OMM_VERS`, which reads back as `2.0`, and a user-defined parameter
+  given more than once are refused with `UnwritableText`. `encode_json_array`
+  names the refused record with `OmmError::InRecord`. The JSON reader keeps a
+  string verbatim, so line breaks and surrounding whitespace are written.
+- GP JSON numbers are read as the double nearest the decimal the member
+  states. The JSON parser rounded by a fast approximation that could land one
+  unit in the last place away, so a covariance value of figure G-10 written in
+  its shortest round-tripping form read back as a different number;
+  `serde_json` is now built with `float_roundtrip`, which also rounds exactly
+  for the crate's other JSON readers. It is also built with `preserve_order`,
+  which only the tests enabled before: a shipped build wrote GP JSON members,
+  `USER_DEFINED_*` parameters included, sorted by name, so a record read
+  back with its parameters reordered; it now writes them in the order it
+  inserts them, which the tests pinned.
+- **Breaking.** GP JSON and GP CSV carry one comment, the `COMMENT` member or
+  column Space-Track writes (`GENERATED VIA SPACE-TRACK.ORG API`, the text its
+  KVN gives as a header comment). The JSON and CSV readers read it as the
+  header comment, where they ignored it, and refuse a repeat that differs with
+  `DuplicateField`; the writers write a single header comment back there.
+  `omm::encode_json` and `omm::encode_json_array` refuse a record holding any
+  other comment, which they dropped, with `UnwritableText` and the new
+  `TextIssue::CommentNotCarried`. The new
+  `omm::encode_json_discarding_comments` and
+  `omm::encode_json_array_discarding_comments` write the records without the
+  comments GP JSON cannot carry for a caller that accepts that loss; a
+  spacecraft-parameters block that held only comments is still written, as
+  `"MASS": null`.
+- **Breaking.** `omm::encode_csv` returns `Result<String, OmmError>` and refuses
+  a record `omm::parse_csv_array` would not return unchanged, naming its
+  position with `OmmError::InRecord`. GP CSV has a column for a single header
+  comment and none for any other comment, which the writer dropped; such a
+  comment is now refused with `UnwritableText` and the new
+  `TextIssue::CommentNotCarried`, and the new
+  `omm::encode_csv_discarding_comments` writes the records without those
+  comments, and without a spacecraft-parameters block that held nothing else,
+  for a caller that accepts that loss. The `USER_DEFINED_*` columns follow an
+  order that keeps every record's own parameter order, which the reader
+  restores; they followed first appearance across the records, so a later
+  record could read back reordered. A record ordering two parameters opposite
+  to an earlier record is refused with the new `OmmError::CsvColumnOrder`. A
+  spacecraft-parameters block holding no value, which an empty cell cannot
+  state and which read back absent, is refused with the new
+  `OmmError::CsvEmptyBlock`. Text with surrounding whitespace, which the reader
+  trims from every cell and header name, a character XML 1.0 cannot carry, an
+  empty `CCSDS_OMM_VERS` or header comment, which reads back as absent, an
+  empty `USER_DEFINED_*` value, which reads back as no parameter,
+  and a `USER_DEFINED_*` parameter given more than once, of which the writer
+  kept the first, are refused with `UnwritableText`. A non-finite number, which
+  was written as `NaN` or `inf` and read back as a skipped record, and an epoch
+  the reader would refuse are refused with `InvalidField`.
+- **Breaking.** `Opm` retains the CCSDS 502.0-B-3 table 3-1 to 3-3 items it
+  previously dropped: `classification`, `message_id`, `metadata.ref_frame_epoch`,
+  the `USER_DEFINED_*` parameters (`user_defined`, `OpmUserDefined`, verbatim
+  text in source order) with their comments (`user_defined_comments`), the
+  header `comments`, and the `comments` of `OpmMetadata`, `OpmState`,
+  `OpmKeplerian`, `OpmSpacecraft`, `OpmCovariance` and each `OpmManeuver`. The
+  KVN and XML readers fill them and the writers write them back. A KVN comment
+  belongs to the block of the keyword after it and is written at the start of
+  that block (7.8.7); comments after the last keyword belong to its block.
+- **Breaking.** `Oem` retains `classification`, `message_id`,
+  `metadata.ref_frame_epoch`, the header `comments`, the `comments` of each
+  `OemMetadata`, and each segment's ephemeris and covariance comments at their
+  positions among the state lines and covariance matrices
+  (`OemSegment::data_comments` and `covariance_comments`, `OemComment`), which
+  the readers previously dropped. The writers write them back where they were.
+- **Breaking.** `OpmCovariance` and `OemCovariance` hold the 21 lower-triangle
+  values exactly as read (`lower_triangle`, as `OmmCovariance` does) in place
+  of a validated `Covariance6` (`matrix`), and the writers write them back.
+  Reading built a `Covariance6`, which refuses a matrix that is not positive
+  semidefinite within its tolerance, so a matrix that falls short only through
+  the digits it is printed to, as a matrix of the standard's own example can,
+  was refused. `to_covariance6` validates the matrix for a consumer that needs
+  a covariance.
+- **Breaking.** A CDM object's RTN covariance is held and written as stated:
+  the readers and writers refused a position covariance that is not positive
+  semidefinite within the covariance tolerance, although producers print its
+  values to about four significant digits, as the standard's own example does,
+  so a nearly singular in-track covariance can fall short only through that
+  rounding while every value reads correctly. The values must still be finite.
+  The new `CdmObject::to_covariance_rtn` returns the symmetric matrix of the
+  rows the object holds, 3x3 to 9x9, validated positive semidefinite, for a
+  consumer that needs a covariance, refusing it with `InvalidField` for
+  `covariance_rtn` with `NotPositive`, and refusing a row given while an
+  earlier row is absent with `Missing`, since its values have no place in the
+  matrix (508.0-B-1 5.2.8).
+- **Breaking.** The OPM, OEM and CDM errors gain the variants this work refuses
+  with: `OpmError` and `OemError` `DuplicateField`, `UnitMismatch`,
+  `MultipleMessages`, `UnknownField`, `MalformedLine` and `UnwritableText`; and
+  `CdmError` `UnknownField`, `MalformedLine`, `UnknownObject`,
+  `RepeatedObject`, `UnwritableText` and `HardBodyRadiusComment`. A match on
+  any of these enums needs the new arms.
+- **Breaking.** The OPM and OEM KVN and XML readers refuse a keyword or element
+  that CCSDS 502.0-B-3 tables 3-1 to 3-3 or 5-2 to 5-4 do not define at its
+  position when it carries a value (`OpmError::UnknownField`,
+  `OemError::UnknownField`; 3.2.2.2, 3.2.3.1, 3.2.4.2, 5.2.2.2, 5.2.3.2), and a
+  KVN line of the OPM, or of an OEM header or metadata block, that is not
+  blank, a comment or an assignment (`MalformedLine`, 7.3.1), instead of
+  ignoring them. A malformed OEM ephemeris data line is still skipped and
+  reported in `Oem::skipped_states`; a `keyword = value` line among the
+  ephemeris lines, which was skipped as one, is refused by name, since a data
+  line holds no `=` (5.2.4.1). An element inside a `COMMENT` or
+  `USER_DEFINED` element is refused by name, as the OMM and CDM readers refuse
+  it, where the OPM and OEM readers kept only the text around it.
+- **Breaking.** `opm::encode_kvn`, `opm::encode_xml`, `oem::encode_kvn` and
+  `oem::encode_xml` return `Result<String, _>` and refuse what their reader
+  would not return unchanged with `UnwritableText` and a `TextIssue`: a line
+  break in KVN, whitespace the reader trims, an empty required value, a
+  character XML 1.0 cannot carry in XML, a comment with trailing whitespace,
+  comments with no keyword of their block to precede, an OPM `USER_DEFINED_*`
+  name containing `=` or given more than once, an OEM ephemeris epoch holding
+  whitespace, and an OEM comment positioned past the end of its list or out of
+  order. A non-finite number is refused with `InvalidField`.
+- **Breaking.** `CdmKvn` and `CdmObject` retain every item of CCSDS 508.0-B-1
+  tables 3-1 to 3-4 and every comment, which the readers previously dropped:
+  `ccsds_cdm_vers`, `message_for`, the header `comments` and
+  `relative_comments`, the relative state vector (`relative_position_rtn_m`,
+  `relative_velocity_rtn_m_s`), the screening period, volume frame, shape and
+  size (`screen_volume_m`) and entry and exit times, and for each object its
+  `metadata_comments`, OD parameters (`od_parameters`, `CdmOdParameters`) and
+  additional parameters (`additional_parameters`, `CdmAdditionalParameters`)
+  with their comments, `state_comments`, `covariance_comments`, and rows 7 to 9
+  of the 9x9 covariance (`drag_covariance_rtn`, `srp_covariance_rtn`,
+  `thrust_covariance_rtn`). The KVN and XML readers fill them and the writers
+  write them back. A KVN comment belongs to the block of the keyword after it
+  (6.2.5.2), and an XML comment directly in `<data>` to the logical block after
+  it, so the standard's KVN and XML examples read to the same comments. A row
+  of the 9x9 covariance with some but not all of its terms is refused naming
+  the first missing term (5.2.8). The OD observation and track counts are read
+  as non-negative integers (table 3-4). A blank numeric or count value in KVN
+  reads as absent, as the ODM readers take it, where it refused the message;
+  a blank text value still reads as empty text. An element inside a `COMMENT`
+  is refused by name. The writers wrote
+  `CCSDS_CDM_VERS = 1.0` whatever the message stated, and now write the stated
+  version or none.
+- **Breaking.** The CDM KVN reader refuses a line that is not blank, a comment
+  or an assignment with the new `CdmError::MalformedLine` (6.3.1.1), and a
+  keyword tables 3-1 to 3-4 do not define that carries a value, or an object
+  keyword before the first `OBJECT` line, with the new `CdmError::UnknownField`;
+  it previously skipped both. A line starting with `COMMENT` but not followed
+  by a blank, such as `COMMENTS = x`, was dropped as a comment and is now read
+  as a keyword, and a lowercase `comment` line, which 6.3.1.5 does not make a
+  comment, is refused by name; one following the `HBR =` convention previously
+  supplied the hard-body radius.
+  The optional-keyword example of 508.0-B-1 3.6.3 prints `TRACKS USED` for
+  `TRACKS_USED`, and that line is refused by name. The XML reader reads each
+  value from the element that owns it (4.3, tables 4-1 and 4-2) and refuses an
+  element the tables do not define at its position when it holds a value. An
+  object block is assigned by its `OBJECT` value, so blocks given as
+  `OBJECT2` then `OBJECT1` are read as they state rather than swapped, and a
+  value other than `OBJECT1` or `OBJECT2`, or two blocks for one object, is
+  refused with the new `CdmError::UnknownObject` or `CdmError::RepeatedObject`.
+- **Breaking.** `cdm::encode_kvn` and `cdm::encode_xml` refuse what their
+  reader would not return unchanged with the new `CdmError::UnwritableText` and
+  a `TextIssue` (re-exported as `cdm::TextIssue`): a line break in KVN,
+  whitespace the reader trims, an empty XML value or version, which reads back
+  absent, a character XML 1.0 cannot carry in XML, a comment with trailing
+  whitespace, and header comments with no header keyword to precede. Comments
+  of the relative metadata/data, OD parameters or additional parameters with
+  no value of their block after them are written in KVN before a blank
+  `MISS_DISTANCE`, `RECOMMENDED_OD_SPAN` or `AREA_PC`, which reads back as
+  absent, so they read back in their block. Text was previously written
+  unchecked. The XML writer states the version only
+  in the `version` attribute (4.3.3.9) rather than also as a header element
+  that 4.3.4.3 does not list, which the reader still accepts, and writes no
+  element for an absent value.
+- **Breaking.** A CDM comment follows the `HBR = <value>` convention only when
+  its text after `=` is empty or one finite number alone or followed by `m` or
+  `[m]`. Any other text, such as `HBR = 0.02 km`, which was read as 0.02 m, or
+  `HBR = TBD`, which refused the message, is an ordinary comment, neither read
+  as a radius nor refused. A convention comment stays among the comments where
+  it was, unless it reads exactly as the writers state a radius (`HBR = ` and
+  the shortest round-tripping decimal), which the readers take as the radius
+  alone. The radius is read from the first such
+  comment in writing order in both encodings, where the XML reader looked only
+  outside the segments, and from an `HBR` keyword, which the KVN reader
+  ignored, or element of the relative metadata/data; an `HBR` keyword or
+  element and the first convention comment that disagree are refused with
+  `DuplicateField`. The writers state a radius the retained comments do not by
+  adding the comment before the relative metadata/data comments, or before the
+  header comments when one of them follows the convention, and refuse a
+  retained comment that would read back as a radius when the message holds none
+  with the new `CdmError::HardBodyRadiusComment`.
+- **Breaking.** The constellation catalog builders read the `Option`
+  `Omm::norad_cat_id`: `SkippedOmm::norad_id` is an `Option<u32>`, and a
+  record without `NORAD_CAT_ID` is refused with the new
+  `ConstellationError::MissingNoradId`, naming its object, where a catalog
+  number was always present.
+- **Breaking.** `OmmArray::skipped` is a `Vec<OmmSkippedRecord>` giving each
+  skipped GP JSON array element or GP CSV data record's zero-based `index` and
+  the `OmmError` `reason` it was not read, instead of a count; `skipped.len()`
+  is the former count. A CSV row whose field count differs from the header's is
+  reported with `OmmError::CsvColumnCount`.
+- **Breaking.** The OMM, OPM and CDM KVN readers read a numeric keyword's unit
+  in brackets and the XML readers a `units` attribute, including the two
+  `BSTAR` spellings `1/[Earth radii]` and `1/ER` of 502.0-B-3 tables 4-3 and
+  8-4. A unit that contradicts the table, and any unit on a dimensionless or
+  text keyword such as `[n/a]` (502.0-B-3 7.7.1.3, 508.0-B-1 6.2.4.2), is
+  refused with `UnitMismatch` instead of being stripped or ignored. CDM XML
+  units are those of the KVN tables (508.0-B-1 4.3.10), so a `MISS_DISTANCE`
+  tagged `km` is refused rather than read as metres and rewritten with `m`.
+  Text values keep trailing bracketed text: the OPM, OEM and CDM readers
+  previously stripped it from every value, so an object name ending in
+  brackets lost that text.
+- **Breaking.** `Oem::skipped_states` is a `Vec<OemSkippedState>` giving each
+  skipped KVN ephemeris line's number, segment, text and `OemStateLineError`
+  reason, instead of a count. The OEM KVN header is read only from the lines
+  before the first `META_START`, so a header keyword inside a metadata block no
+  longer fills the header.
+- **Breaking.** OEM KVN covariance sections are read in the form of 502.0-B-3
+  5.2.5 and 7.4.1.3: one or more matrices, each an `EPOCH`, an optional
+  `COV_REF_FRAME`, and six rows of one to six lower-triangle values. The
+  standard's own covariance example previously failed to parse. The keyword form
+  (`CX_X = ...`) that earlier versions wrote is still read. The writer emits the
+  row form, with all of a segment's matrices in one section (5.2.5.1).
+- **Breaking.** A CDM velocity covariance block that gives some but not all of
+  its 15 terms is refused naming the first missing term, since 508.0-B-1 table
+  3-4 makes every term of the 6x6 position/velocity submatrix obligatory; it was
+  previously dropped. A block with none of the terms still reads as a
+  position-only covariance.
+- CDM KVN writing omits an absent header or relative-metadata value instead of
+  writing a blank line that read back as empty text, or failed as a missing
+  number. CDM XML writing states the hard-body radius as an `HBR = <value>`
+  relative-metadata comment, which the XML reader recovers as it does an `HBR`
+  element, so the radius survives an XML round trip.
+- CCSDS NDM epochs accept the day-of-year form `YYYY-DDDThh:mm:ss` of
+  502.0-B-3 7.5.10, which the standard's OMM examples use, and the CCSDS KVN
+  readers end lines at CR, LF, CR LF and LF CR (7.3.7). A carriage return
+  inside an OMM KVN value now ends the line.
 
 ### Fixed
 

@@ -553,10 +553,12 @@ fn validate_and_resolve(
             reason: "must be positive",
         });
     }
-    if config.metadata.catalog_number > 99_999 {
+    // The fit writes a TLE, whose catalog field holds five characters: five
+    // digits, or Alpha-5 up to 339999.
+    if tle::encode_catalog_number(config.metadata.catalog_number).is_err() {
         return Err(TleFitError::InvalidInput {
             field: "metadata.catalog_number",
-            reason: "must be <= 99999",
+            reason: "must fit the five-character TLE catalog field (Alpha-5, at most 339999)",
         });
     }
     if !matches!(config.metadata.classification.as_str(), "U" | "C" | "S") {
@@ -940,15 +942,15 @@ fn chart_to_elements(
     Some(ElementSet {
         epoch,
         bstar,
-        mean_motion_dot: 0.0,
-        mean_motion_double_dot: 0.0,
+        mean_motion_dot: Some(0.0),
+        mean_motion_double_dot: Some(0.0),
         eccentricity: ecc,
         argument_of_perigee_deg: normalize_degrees(rad_to_deg(argp)),
         inclination_deg: rad_to_deg(incl),
         mean_anomaly_deg: normalize_degrees(rad_to_deg(mean)),
         mean_motion_rev_per_day: n_rev_day,
         right_ascension_deg: normalize_degrees(rad_to_deg(raan)),
-        catalog_number,
+        catalog_number: Some(catalog_number),
     })
 }
 
@@ -979,7 +981,12 @@ fn tle_elements_from_fit(
             reason: "must fit i32",
         })?;
     Ok(TleElements {
-        catalog_number: format!("{:05}", metadata.catalog_number),
+        catalog_number: tle::encode_catalog_number(metadata.catalog_number).map_err(|_| {
+            TleFitError::InvalidInput {
+                field: "metadata.catalog_number",
+                reason: "must fit the five-character TLE catalog field (Alpha-5, at most 339999)",
+            }
+        })?,
         classification: metadata.classification.clone(),
         international_designator: metadata.international_designator.clone(),
         epoch_year: year as i32,
@@ -1008,7 +1015,7 @@ fn tle_elements_from_fit(
 
 fn omm_from_fit(elements: &ElementSet, metadata: &TleMetadata) -> Result<Omm, TleFitError> {
     Ok(Omm {
-        ccsds_omm_vers: "2.0".to_string(),
+        ccsds_omm_vers: Some("2.0".to_string()),
         creation_date: None,
         originator: None,
         object_name: Some(metadata.object_name.clone()),
@@ -1018,20 +1025,31 @@ fn omm_from_fit(elements: &ElementSet, metadata: &TleMetadata) -> Result<Omm, Tl
         time_system: Some("UTC".to_string()),
         mean_element_theory: Some("SGP4".to_string()),
         epoch: crate::astro::omm::OmmEpoch::from_sgp4_julian_date(elements.epoch),
-        mean_motion: elements.mean_motion_rev_per_day,
+        mean_motion: Some(elements.mean_motion_rev_per_day),
+        semi_major_axis_km: None,
         eccentricity: elements.eccentricity,
         inclination_deg: elements.inclination_deg,
         ra_of_asc_node_deg: elements.right_ascension_deg,
         arg_of_pericenter_deg: elements.argument_of_perigee_deg,
         mean_anomaly_deg: elements.mean_anomaly_deg,
-        ephemeris_type: 0,
-        classification_type: metadata.classification.clone(),
-        norad_cat_id: metadata.catalog_number,
-        element_set_no: metadata.element_set_number,
-        rev_at_epoch: metadata.rev_at_epoch,
-        bstar: elements.bstar,
-        mean_motion_dot: 0.0,
-        mean_motion_ddot: 0.0,
+        ephemeris_type: Some(0),
+        classification_type: Some(metadata.classification.clone()),
+        norad_cat_id: Some(metadata.catalog_number),
+        element_set_no: Some(metadata.element_set_number),
+        rev_at_epoch: Some(metadata.rev_at_epoch),
+        bstar: Some(elements.bstar),
+        bterm_m2_kg: None,
+        mean_motion_dot: Some(0.0),
+        mean_motion_ddot: Some(0.0),
+        agom_m2_kg: None,
+        classification: None,
+        message_id: None,
+        ref_frame_epoch: None,
+        gm_km3_s2: None,
+        spacecraft: None,
+        covariance: None,
+        user_defined: Vec::new(),
+        comments: crate::astro::omm::OmmComments::default(),
         exact_sgp4_epoch: Some(elements.epoch),
         quantize_tle_derived_fields: false,
     })
@@ -1324,13 +1342,13 @@ mod tests {
         assert_eq!(a.epoch.1.to_bits(), b.epoch.1.to_bits(), "epoch frac");
         assert_eq!(a.bstar.to_bits(), b.bstar.to_bits(), "bstar");
         assert_eq!(
-            a.mean_motion_dot.to_bits(),
-            b.mean_motion_dot.to_bits(),
+            a.mean_motion_dot.map(f64::to_bits),
+            b.mean_motion_dot.map(f64::to_bits),
             "mean motion dot"
         );
         assert_eq!(
-            a.mean_motion_double_dot.to_bits(),
-            b.mean_motion_double_dot.to_bits(),
+            a.mean_motion_double_dot.map(f64::to_bits),
+            b.mean_motion_double_dot.map(f64::to_bits),
             "mean motion ddot"
         );
         assert_eq!(a.eccentricity.to_bits(), b.eccentricity.to_bits(), "ecc");
@@ -1443,7 +1461,7 @@ mod tests {
         let config = FitConfig {
             epoch: FitEpoch::Jd(truth.epoch),
             fit_bstar: false,
-            metadata: metadata_for_catalog(truth.catalog_number),
+            metadata: metadata_for_catalog(truth.catalog_number.expect("catalog number")),
             max_nfev: Some(120),
             ..FitConfig::default()
         };
@@ -1507,15 +1525,15 @@ mod tests {
             ElementSet {
                 epoch: JulianDate(2_460_000.5, 0.0),
                 bstar: 0.0,
-                mean_motion_dot: 0.0,
-                mean_motion_double_dot: 0.0,
+                mean_motion_dot: Some(0.0),
+                mean_motion_double_dot: Some(0.0),
                 eccentricity: 0.0,
                 argument_of_perigee_deg: 0.0,
                 inclination_deg: 0.0,
                 mean_anomaly_deg: 42.0,
                 mean_motion_rev_per_day: 1.0027,
                 right_ascension_deg: 0.0,
-                catalog_number: 1,
+                catalog_number: Some(1),
             },
             tle::parse(ISS_L1, ISS_L2)
                 .unwrap()
@@ -1531,9 +1549,14 @@ mod tests {
 
         for elements in cases {
             let chart = MeanChart::from_elements(&elements).to_vec(true, elements.bstar);
-            let round =
-                chart_to_elements(&chart, elements.epoch, true, 0.0, elements.catalog_number)
-                    .expect("chart domain");
+            let round = chart_to_elements(
+                &chart,
+                elements.epoch,
+                true,
+                0.0,
+                elements.catalog_number.expect("catalog number"),
+            )
+            .expect("chart domain");
             let delta = chart_delta(&elements, &round);
             for value in delta {
                 assert!(value.abs() <= 1.0e-12, "delta {value}");
@@ -1594,10 +1617,10 @@ mod tests {
         }
         assert!(delta[5].abs() <= 1.0e-6, "lam {}", delta[5]);
         assert!(fit.stats.tle_rms_position_km <= 0.1);
-        assert_eq!(fit.elements.mean_motion_dot, 0.0);
-        assert_eq!(fit.elements.mean_motion_double_dot, 0.0);
-        assert_eq!(fit.omm.mean_motion_dot, 0.0);
-        assert_eq!(fit.omm.mean_motion_ddot, 0.0);
+        assert_eq!(fit.elements.mean_motion_dot, Some(0.0));
+        assert_eq!(fit.elements.mean_motion_double_dot, Some(0.0));
+        assert_eq!(fit.omm.mean_motion_dot, Some(0.0));
+        assert_eq!(fit.omm.mean_motion_ddot, Some(0.0));
 
         let omm_elements = fit.omm.to_element_set().expect("fitted OMM bridge");
         assert_element_sets_bit_identical(&omm_elements, &fit.elements);
@@ -1606,7 +1629,7 @@ mod tests {
             Satellite::from_elements(&fit.elements).expect("fitted element satellite");
         assert_satellites_bit_identical(&from_omm, &from_elements);
 
-        let encoded_omm = encode_kvn(&fit.omm);
+        let encoded_omm = encode_kvn(&fit.omm).expect("fitted OMM encodes");
         let reparsed_omm = parse_kvn(&encoded_omm).expect("encoded fitted OMM reparses");
         let _ = reparsed_omm
             .to_element_set()
@@ -1673,7 +1696,8 @@ mod tests {
         // femtosecond epoch text carries the full split JD, so a text round
         // trip rebuilds it bit-identically and propagation matches exactly.
         let omm = omm_from_fit(&truth, &metadata).expect("fitted OMM");
-        let mut reparsed = parse_kvn(&encode_kvn(&omm)).expect("fitted OMM reparses");
+        let mut reparsed =
+            parse_kvn(&encode_kvn(&omm).expect("fitted OMM encodes")).expect("fitted OMM reparses");
         assert_eq!(reparsed.epoch, omm.epoch);
         assert_eq!(reparsed.exact_sgp4_epoch, None);
         // The quantize flag is in-memory fit state, not carried by the text.
@@ -1710,7 +1734,8 @@ mod tests {
         assert_eq!(in_memory.0.to_bits(), shifted.0.to_bits());
         assert_eq!(in_memory.1.to_bits(), shifted.1.to_bits());
 
-        let mut reparsed2 = parse_kvn(&encode_kvn(&omm2)).expect("shifted OMM reparses");
+        let mut reparsed2 = parse_kvn(&encode_kvn(&omm2).expect("fitted OMM encodes"))
+            .expect("shifted OMM reparses");
         reparsed2.quantize_tle_derived_fields = false;
         let rebuilt2 = reparsed2.to_element_set().expect("shifted bridge").epoch;
         assert_eq!(rebuilt2.0.to_bits(), whole.to_bits());
@@ -1747,15 +1772,15 @@ mod tests {
         let molniya = ElementSet {
             epoch: JulianDate(2_461_208.5, 0.317_123_456_789_012),
             bstar: 0.0,
-            mean_motion_dot: 0.0,
-            mean_motion_double_dot: 0.0,
+            mean_motion_dot: Some(0.0),
+            mean_motion_double_dot: Some(0.0),
             eccentricity: 0.742_8,
             argument_of_perigee_deg: 270.5,
             inclination_deg: 63.4,
             mean_anomaly_deg: 15.8,
             mean_motion_rev_per_day: 2.006_1,
             right_ascension_deg: 90.16,
-            catalog_number: 28163,
+            catalog_number: Some(28163),
         };
         let molniya_offsets: Vec<f64> = (-12..=12).map(|i| i as f64 * 120.0).collect();
         let molniya_samples = arc_from_elements(&molniya, &molniya_offsets);
@@ -1776,15 +1801,15 @@ mod tests {
         let truth = ElementSet {
             epoch: JulianDate(2_461_208.5, 0.625_987_654_321_098),
             bstar: 0.0,
-            mean_motion_dot: 0.0,
-            mean_motion_double_dot: 0.0,
+            mean_motion_dot: Some(0.0),
+            mean_motion_double_dot: Some(0.0),
             eccentricity: 0.0012,
             argument_of_perigee_deg: 137.8,
             inclination_deg: 0.05,
             mean_anomaly_deg: 105.4,
             mean_motion_rev_per_day: 1.0027,
             right_ascension_deg: 77.3,
-            catalog_number: 39000,
+            catalog_number: Some(39000),
         };
         let offsets: Vec<f64> = (-12..=12).map(|i| i as f64 * 120.0).collect();
         let samples = arc_from_elements(&truth, &offsets);

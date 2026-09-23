@@ -31,9 +31,11 @@ pub(crate) struct NdmEpoch {
 impl NdmEpoch {
     /// Parse a CCSDS NDM epoch value using the supplied civil-second policy.
     ///
-    /// Accepts `YYYY-MM-DDThh:mm:ss[.f...][Z]` with up to 15 fractional-second
-    /// digits, preserved as whole microseconds plus a femtosecond remainder
-    /// without rounding across the microsecond boundary.
+    /// Accepts `YYYY-MM-DDThh:mm:ss[.f...][Z]` and the day-of-year form
+    /// `YYYY-DDDThh:mm:ss[.f...][Z]` (CCSDS 502.0-B-3 7.5.10) with up to 15
+    /// fractional-second digits, preserved as whole microseconds plus a
+    /// femtosecond remainder without rounding across the microsecond boundary.
+    /// A day-of-year epoch is held as its month and day.
     pub(crate) fn parse(
         text: &str,
         second_policy: CivilSecondPolicy,
@@ -46,8 +48,19 @@ impl NdmEpoch {
 
         let mut date_parts = date.split('-');
         let year: i32 = epoch_int(date_parts.next())?;
-        let month: u32 = epoch_int(date_parts.next())?;
-        let day: u32 = epoch_int(date_parts.next())?;
+        let second_part = date_parts.next();
+        let (month, day) = match second_part {
+            // `YYYY-DDD`: the three-digit day-of-year form of 502.0-B-3 7.5.10
+            // and 508.0-B-1 6.3.2.6, which the standards' own examples use.
+            Some(day_of_year) if day_of_year.len() == 3 && date_parts.clone().next().is_none() => {
+                month_day_from_day_of_year(year, epoch_int(Some(day_of_year))?)?
+            }
+            _ => {
+                let month: u32 = epoch_int(second_part)?;
+                let day: u32 = epoch_int(date_parts.next())?;
+                (month, day)
+            }
+        };
         if let Some(extra) = date_parts.next() {
             return Err(FieldError::IntParse {
                 field: "epoch",
@@ -106,6 +119,27 @@ impl NdmEpoch {
             self.year, self.month, self.day, self.hour, self.minute, self.second, fractional
         )
     }
+}
+
+/// Convert a day of year to its month and day of month. A day outside the
+/// year is reported with month 0 and the day-of-year value.
+fn month_day_from_day_of_year(year: i32, day_of_year: u32) -> Result<(u32, u32), FieldError> {
+    let mut remaining = i64::from(day_of_year);
+    if remaining >= 1 {
+        for month in 1..=12_i64 {
+            let days = crate::astro::time::civil::days_in_month(i64::from(year), month);
+            if remaining <= days {
+                return Ok((month as u32, remaining as u32));
+            }
+            remaining -= days;
+        }
+    }
+    Err(FieldError::InvalidCivilDate {
+        field: "civil datetime",
+        year: i64::from(year),
+        month: 0,
+        day: i64::from(day_of_year),
+    })
 }
 
 /// Parse an epoch integer component, reporting missing or invalid fields.
@@ -257,6 +291,25 @@ mod tests {
             NdmEpoch::parse("2026-06-17 04:32:52.099296Z", CivilSecondPolicy::UtcLike),
             Err(FieldError::Missing { field: "epoch" })
         );
+    }
+
+    #[test]
+    fn day_of_year_form_parses_to_month_and_day() {
+        // 502.0-B-3 annex G figure G-7 states EPOCH = 2020-064T10:34:41.4264;
+        // day 64 of the leap year 2020 is 4 March.
+        let epoch = NdmEpoch::parse("2020-064T10:34:41.4264", CivilSecondPolicy::UtcLike).unwrap();
+        assert_eq!((epoch.year, epoch.month, epoch.day), (2020, 3, 4));
+        assert_eq!((epoch.hour, epoch.minute, epoch.second), (10, 34, 41));
+        assert_eq!(epoch.microsecond, 426_400);
+        assert_eq!(
+            NdmEpoch::parse("2021-365T00:00:00", CivilSecondPolicy::UtcLike)
+                .map(|e| (e.month, e.day)),
+            Ok((12, 31))
+        );
+        assert!(NdmEpoch::parse("2021-366T00:00:00", CivilSecondPolicy::UtcLike).is_err());
+        assert!(NdmEpoch::parse("2021-000T00:00:00", CivilSecondPolicy::UtcLike).is_err());
+        // A two-digit second field is a month, which needs a day after it.
+        assert!(NdmEpoch::parse("2021-06T00:00:00", CivilSecondPolicy::UtcLike).is_err());
     }
 
     #[test]
