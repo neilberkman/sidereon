@@ -33,6 +33,9 @@ use crate::rtcm::{Message, SsrKind, SsrMessage};
 use crate::spp::{EphemerisSource, PositionClock, PositionClockGroupDelay};
 use crate::staleness::StalenessPolicy;
 
+mod signal;
+pub use signal::{has_signal, rtcm_ssr_signal, GnssSignal, SignalCode, SsrRawSignal, SsrSignalKey};
+
 const DEFAULT_SSR_STALENESS_S: f64 = 90.0;
 /// Largest age of an RTCM SSR orbit or clock correction, measured from its
 /// transmitted epoch, that is applied: RTKLIB `MAXAGESSR`.
@@ -342,7 +345,7 @@ impl PhaseDiscontinuityIndicator {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PhaseContinuityToken {
     sat: GnssSatelliteId,
-    signal: u8,
+    signal: SsrSignalKey,
     source: SsrSource,
     provider_id: u16,
     solution_id: u8,
@@ -357,8 +360,9 @@ impl PhaseContinuityToken {
         self.sat
     }
 
-    /// Corrected signal identifier.
-    pub const fn signal(&self) -> u8 {
+    /// Key of the corrected signal: its physical signal, or the raw
+    /// source-qualified index when the source's table assigns none.
+    pub const fn signal(&self) -> SsrSignalKey {
         self.signal
     }
 
@@ -413,6 +417,13 @@ pub enum SsrBiasStatus {
     InvalidEpoch,
     /// Phase discontinuity detected or token mismatch; caller must reset ambiguity arc.
     PhaseDiscontinuityNeedsReset,
+    /// The record's signal index is one its source's table leaves reserved or
+    /// unassigned, so it names no physical signal and applies to no observation.
+    /// The record is kept, and the query reports its transmitted value: `bias_m`
+    /// where the record has metres (RTCM SSR code and phase, HAS code), and for
+    /// phase `bias_cycles` where it has cycles (HAS). The status, not the value,
+    /// is what keeps it from being applied.
+    UnknownSignal,
 }
 
 /// Details of phase continuity evaluation for a phase-bias query.
@@ -489,6 +500,8 @@ pub enum SsrBiasResolutionDetails {
     InvalidEpoch,
     /// Phase discontinuity encountered.
     PhaseDiscontinuity(SsrDiscontinuityDetails),
+    /// The record's raw signal index names no physical signal in its source's table.
+    UnknownSignal(SsrRawSignal),
 }
 
 /// Query result for a code-bias correction at a specific reception epoch.
@@ -496,8 +509,12 @@ pub enum SsrBiasResolutionDetails {
 pub struct SsrCodeBiasQueryResult {
     /// Corrected satellite identifier.
     pub sat: GnssSatelliteId,
-    /// Raw signal identifier index.
-    pub signal: u8,
+    /// Key of the queried signal. A raw signal whose source table assigns it a
+    /// physical signal is queried, and reported, as that physical signal.
+    pub signal: SsrSignalKey,
+    /// Raw signal index, as its source transmitted it, of the record found, if any.
+    /// A physical signal's record may come from either source.
+    pub source_signal: Option<SsrRawSignal>,
     /// Validity and availability status at the query epoch.
     pub status: SsrBiasStatus,
     /// Code bias correction value in meters, if available.
@@ -519,8 +536,12 @@ pub struct SsrCodeBiasQueryResult {
 pub struct SsrPhaseBiasQueryResult {
     /// Corrected satellite identifier.
     pub sat: GnssSatelliteId,
-    /// Raw signal identifier index.
-    pub signal: u8,
+    /// Key of the queried signal. A raw signal whose source table assigns it a
+    /// physical signal is queried, and reported, as that physical signal.
+    pub signal: SsrSignalKey,
+    /// Raw signal index, as its source transmitted it, of the record found, if any.
+    /// A physical signal's record may come from either source.
+    pub source_signal: Option<SsrRawSignal>,
     /// Validity and availability status at the query epoch.
     pub status: SsrBiasStatus,
     /// Phase bias correction value in meters, if available.
@@ -655,8 +676,11 @@ pub enum ActiveProvenanceStatus {
 pub struct HasCodeBiasIngestionRecord {
     /// Corrected satellite identifier.
     pub sat: GnssSatelliteId,
-    /// Raw signal identifier index.
-    pub signal: u8,
+    /// HAS signal index as transmitted.
+    pub signal: SsrRawSignal,
+    /// Key the record is stored under: the physical signal HAS SIS ICD Table 20
+    /// assigns the index, or the raw index for a reserved one.
+    pub key: SsrSignalKey,
     /// Correction stream source format.
     pub source: SsrSource,
     /// Solution stream identity and provider metadata.
@@ -676,8 +700,11 @@ pub struct HasCodeBiasIngestionRecord {
 pub struct HasPhaseBiasIngestionRecord {
     /// Corrected satellite identifier.
     pub sat: GnssSatelliteId,
-    /// Raw signal identifier index.
-    pub signal: u8,
+    /// HAS signal index as transmitted.
+    pub signal: SsrRawSignal,
+    /// Key the record is stored under: the physical signal HAS SIS ICD Table 20
+    /// assigns the index, or the raw index for a reserved one.
+    pub key: SsrSignalKey,
     /// Correction stream source format.
     pub source: SsrSource,
     /// Solution stream identity and provider metadata.
@@ -715,6 +742,8 @@ impl HasIngestionReport {
 
 #[derive(Clone, Debug, PartialEq)]
 struct CodeBiasSignalRecord {
+    /// Signal index as the record's source transmitted it.
+    signal: SsrRawSignal,
     value_m: Option<f64>,
     solution: SsrSolution,
     iod_ssr: u8,
@@ -733,14 +762,17 @@ struct CodeBiasSignalEntry {
     last_has_epoch_j2000_s: Option<f64>,
 }
 
-/// SSR code-bias corrections keyed by raw signal identifier.
+/// SSR code-bias corrections keyed by signal: the physical signal where the
+/// source's table assigns one, the raw source-qualified index otherwise.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SsrCodeBias {
-    signals: BTreeMap<u8, CodeBiasSignalEntry>,
+    signals: BTreeMap<SsrSignalKey, CodeBiasSignalEntry>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct PhaseBiasSignalRecord {
+    /// Signal index as the record's source transmitted it.
+    signal: SsrRawSignal,
     value_m: Option<f64>,
     value_cycles: Option<f64>,
     solution: SsrSolution,
@@ -766,10 +798,11 @@ struct PhaseBiasSignalEntry {
     prior_rtcm_continuity: Option<(u8, u64)>,
 }
 
-/// SSR phase-bias corrections keyed by raw signal identifier.
+/// SSR phase-bias corrections keyed by signal: the physical signal where the
+/// source's table assigns one, the raw source-qualified index otherwise.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SsrPhaseBias {
-    signals: BTreeMap<u8, PhaseBiasSignalEntry>,
+    signals: BTreeMap<SsrSignalKey, PhaseBiasSignalEntry>,
 }
 
 /// Validity-bounded exclusion marker for an active Galileo HAS satellite do-not-use indication.
@@ -1050,16 +1083,21 @@ impl SsrCorrectionStore {
                         last.insert((sat, signal), bias);
                     }
                 }
-                for ((sat, signal), bias) in last {
+                for ((sat, index), bias) in last {
                     let bias_m = f64::from(bias) * RTCM_SSR_CODE_BIAS_SCALE_M;
+                    // Keyed by the physical signal the RTCM table assigns the index,
+                    // so a HAS record of the same signal shares the entry and one of
+                    // another signal with the same index does not.
+                    let signal = SsrRawSignal::rtcm_ssr(message.system, index);
                     let sig_entry = staged
                         .entry(sat)
                         .or_default()
                         .code_bias
                         .signals
-                        .entry(signal)
+                        .entry(signal.key())
                         .or_default();
                     sig_entry.active = Some(CodeBiasSignalRecord {
+                        signal,
                         value_m: Some(bias_m),
                         solution,
                         iod_ssr: message.header.iod_ssr,
@@ -1105,11 +1143,9 @@ impl SsrCorrectionStore {
                 for ((sat, _), bias) in last {
                     let sat_entry = staged.entry(sat).or_default();
                     let bias_m = f64::from(bias.bias) * RTCM_SSR_PHASE_BIAS_SCALE_M;
-                    let sig_entry = sat_entry
-                        .phase_bias
-                        .signals
-                        .entry(bias.signal_id)
-                        .or_default();
+                    let signal = SsrRawSignal::rtcm_ssr(message.system, bias.signal_id);
+                    let key = signal.key();
+                    let sig_entry = sat_entry.phase_bias.signals.entry(key).or_default();
                     let continuity_ref_epoch_bits = match &sig_entry.active {
                         None => {
                             sig_entry.prior_break = None;
@@ -1172,7 +1208,7 @@ impl SsrCorrectionStore {
                     };
                     let token = PhaseContinuityToken {
                         sat,
-                        signal: bias.signal_id,
+                        signal: key,
                         source: SsrSource::RtcmSsr,
                         provider_id: solution.provider_id,
                         solution_id: solution.solution_id,
@@ -1181,6 +1217,7 @@ impl SsrCorrectionStore {
                         generation: sig_entry.arc_generation,
                     };
                     sig_entry.active = Some(PhaseBiasSignalRecord {
+                        signal,
                         value_m: Some(bias_m),
                         value_cycles: None,
                         solution,
@@ -1586,12 +1623,10 @@ impl SsrCorrectionStore {
                 .ok_or_else(|| Error::Parse("HAS code bias VI is reserved".to_string()))?;
             let lifetime = SsrLifetime::GalileoHasValidityInterval(update_interval_s);
             for record in &code_bias.records {
+                let signal = SsrRawSignal::galileo_has(record.sat.system, record.signal_id);
+                let key = signal.key();
                 let sat_entry = staged.entry(record.sat).or_default();
-                let sig_entry = sat_entry
-                    .code_bias
-                    .signals
-                    .entry(record.signal_id)
-                    .or_default();
+                let sig_entry = sat_entry.code_bias.signals.entry(key).or_default();
                 let incoming_status = if record.bias_m.is_some() {
                     HasWatermarkStatus::Usable
                 } else {
@@ -1687,6 +1722,7 @@ impl SsrCorrectionStore {
                         HasWatermarkStatus::Usable => {
                             sig_entry.has_superseded_epoch_j2000_s = None;
                             sig_entry.active = Some(CodeBiasSignalRecord {
+                                signal,
                                 value_m: record.bias_m,
                                 solution,
                                 iod_ssr: message.header.iod_set_id,
@@ -1702,6 +1738,7 @@ impl SsrCorrectionStore {
                             } else {
                                 sig_entry.has_superseded_epoch_j2000_s = Some(ref_epoch_j2000_s);
                                 sig_entry.active = Some(CodeBiasSignalRecord {
+                                    signal,
                                     value_m: None,
                                     solution,
                                     iod_ssr: message.header.iod_set_id,
@@ -1717,7 +1754,8 @@ impl SsrCorrectionStore {
 
                 report.code_records.push(HasCodeBiasIngestionRecord {
                     sat: record.sat,
-                    signal: record.signal_id,
+                    signal,
+                    key,
                     source: SsrSource::GalileoHas,
                     solution,
                     ref_epoch_j2000_s,
@@ -1732,12 +1770,10 @@ impl SsrCorrectionStore {
                 .ok_or_else(|| Error::Parse("HAS phase bias VI is reserved".to_string()))?;
             let lifetime = SsrLifetime::GalileoHasValidityInterval(update_interval_s);
             for record in &phase_bias.records {
+                let signal = SsrRawSignal::galileo_has(record.sat.system, record.signal_id);
+                let key = signal.key();
                 let sat_entry = staged.entry(record.sat).or_default();
-                let sig_entry = sat_entry
-                    .phase_bias
-                    .signals
-                    .entry(record.signal_id)
-                    .or_default();
+                let sig_entry = sat_entry.phase_bias.signals.entry(key).or_default();
                 let incoming_status = if record.bias_cycles.is_some() {
                     HasWatermarkStatus::Usable
                 } else {
@@ -1833,7 +1869,8 @@ impl SsrCorrectionStore {
                     };
                     report.phase_records.push(HasPhaseBiasIngestionRecord {
                         sat: record.sat,
-                        signal: record.signal_id,
+                        signal,
+                        key,
                         source: SsrSource::GalileoHas,
                         solution,
                         ref_epoch_j2000_s,
@@ -1858,7 +1895,8 @@ impl SsrCorrectionStore {
                     let token = sig_entry.active.as_ref().map(|r| r.token);
                     report.phase_records.push(HasPhaseBiasIngestionRecord {
                         sat: record.sat,
-                        signal: record.signal_id,
+                        signal,
+                        key,
                         source: SsrSource::GalileoHas,
                         solution,
                         ref_epoch_j2000_s,
@@ -1933,7 +1971,7 @@ impl SsrCorrectionStore {
 
                 let token = PhaseContinuityToken {
                     sat: record.sat,
-                    signal: record.signal_id,
+                    signal: key,
                     source: SsrSource::GalileoHas,
                     provider_id: solution.provider_id,
                     solution_id: solution.solution_id,
@@ -1946,6 +1984,7 @@ impl SsrCorrectionStore {
                     HasWatermarkStatus::Usable => {
                         sig_entry.has_superseded_epoch_j2000_s = None;
                         sig_entry.active = Some(PhaseBiasSignalRecord {
+                            signal,
                             value_m: record.bias_m(),
                             value_cycles: record.bias_cycles,
                             solution,
@@ -1963,6 +2002,7 @@ impl SsrCorrectionStore {
                     HasWatermarkStatus::Unavailable => {
                         sig_entry.has_superseded_epoch_j2000_s = Some(ref_epoch_j2000_s);
                         sig_entry.active = Some(PhaseBiasSignalRecord {
+                            signal,
                             value_m: None,
                             value_cycles: None,
                             solution,
@@ -1981,7 +2021,8 @@ impl SsrCorrectionStore {
 
                 report.phase_records.push(HasPhaseBiasIngestionRecord {
                     sat: record.sat,
-                    signal: record.signal_id,
+                    signal,
+                    key,
                     source: SsrSource::GalileoHas,
                     solution,
                     ref_epoch_j2000_s,
@@ -2024,16 +2065,25 @@ impl SsrCorrectionStore {
     }
 
     /// Query code bias for a satellite, signal, and reception epoch.
+    ///
+    /// `signal` is looked up by its canonical key ([`SsrSignalKey::canonical`]): a
+    /// raw signal whose source table assigns it a physical signal is that physical
+    /// signal, whichever source's record the store holds for it. A record on an
+    /// index its source's table leaves unassigned is reported
+    /// [`SsrBiasStatus::UnknownSignal`] within its lifetime, with its value, and never as
+    /// available.
     pub fn query_code_bias(
         &self,
         sat: GnssSatelliteId,
-        signal: u8,
+        signal: impl Into<SsrSignalKey>,
         t_j2000_s: f64,
     ) -> SsrCodeBiasQueryResult {
+        let signal = signal.into().canonical();
         if !t_j2000_s.is_finite() {
             return SsrCodeBiasQueryResult {
                 sat,
                 signal,
+                source_signal: None,
                 status: SsrBiasStatus::InvalidEpoch,
                 bias_m: None,
                 solution: None,
@@ -2051,6 +2101,7 @@ impl SsrCorrectionStore {
             return SsrCodeBiasQueryResult {
                 sat,
                 signal,
+                source_signal: None,
                 status: SsrBiasStatus::Excluded,
                 bias_m: None,
                 solution: None,
@@ -2067,6 +2118,7 @@ impl SsrCorrectionStore {
             return SsrCodeBiasQueryResult {
                 sat,
                 signal,
+                source_signal: None,
                 status: SsrBiasStatus::Missing,
                 bias_m: None,
                 solution: None,
@@ -2080,6 +2132,7 @@ impl SsrCorrectionStore {
             return SsrCodeBiasQueryResult {
                 sat,
                 signal,
+                source_signal: None,
                 status: SsrBiasStatus::Missing,
                 bias_m: None,
                 solution: None,
@@ -2093,6 +2146,7 @@ impl SsrCorrectionStore {
             return SsrCodeBiasQueryResult {
                 sat,
                 signal,
+                source_signal: None,
                 status: SsrBiasStatus::Missing,
                 bias_m: None,
                 solution: None,
@@ -2153,6 +2207,7 @@ impl SsrCorrectionStore {
             return SsrCodeBiasQueryResult {
                 sat,
                 signal,
+                source_signal: Some(record.signal),
                 status,
                 bias_m: None,
                 solution: Some(record.solution),
@@ -2163,10 +2218,26 @@ impl SsrCorrectionStore {
             };
         }
 
+        if let SsrSignalKey::Unknown(raw) = signal {
+            return SsrCodeBiasQueryResult {
+                sat,
+                signal,
+                source_signal: Some(record.signal),
+                status: SsrBiasStatus::UnknownSignal,
+                bias_m: record.value_m,
+                solution: Some(record.solution),
+                iod_ssr: Some(record.iod_ssr),
+                ref_epoch_j2000_s: Some(ref_epoch),
+                lifetime: Some(record.lifetime),
+                details: SsrBiasResolutionDetails::UnknownSignal(raw),
+            };
+        }
+
         let Some(bias_m) = record.value_m else {
             return SsrCodeBiasQueryResult {
                 sat,
                 signal,
+                source_signal: Some(record.signal),
                 status: SsrBiasStatus::Unavailable,
                 bias_m: None,
                 solution: Some(record.solution),
@@ -2180,6 +2251,7 @@ impl SsrCorrectionStore {
         SsrCodeBiasQueryResult {
             sat,
             signal,
+            source_signal: Some(record.signal),
             status: SsrBiasStatus::Available,
             bias_m: Some(bias_m),
             solution: Some(record.solution),
@@ -2196,17 +2268,24 @@ impl SsrCorrectionStore {
     /// arc yields `PhaseDiscontinuityNeedsReset`. With `None` the caller starts a
     /// new arc from the returned token: the status is not a reset, and any break
     /// recorded since the previous arc is reported in `discontinuity_details`.
+    ///
+    /// `signal` is looked up by its canonical key, as in [`Self::query_code_bias`]. A
+    /// record on an index its source's table leaves unassigned is reported
+    /// [`SsrBiasStatus::UnknownSignal`] within its lifetime, with its transmitted value
+    /// and continuity, and never as available.
     pub fn query_phase_bias(
         &self,
         sat: GnssSatelliteId,
-        signal: u8,
+        signal: impl Into<SsrSignalKey>,
         t_j2000_s: f64,
         acknowledged_token: Option<PhaseContinuityToken>,
     ) -> SsrPhaseBiasQueryResult {
+        let signal = signal.into().canonical();
         if !t_j2000_s.is_finite() {
             return SsrPhaseBiasQueryResult {
                 sat,
                 signal,
+                source_signal: None,
                 status: SsrBiasStatus::InvalidEpoch,
                 bias_m: None,
                 bias_cycles: None,
@@ -2228,6 +2307,7 @@ impl SsrCorrectionStore {
             return SsrPhaseBiasQueryResult {
                 sat,
                 signal,
+                source_signal: None,
                 status: SsrBiasStatus::Excluded,
                 bias_m: None,
                 bias_cycles: None,
@@ -2248,6 +2328,7 @@ impl SsrCorrectionStore {
             return SsrPhaseBiasQueryResult {
                 sat,
                 signal,
+                source_signal: None,
                 status: SsrBiasStatus::Missing,
                 bias_m: None,
                 bias_cycles: None,
@@ -2265,6 +2346,7 @@ impl SsrCorrectionStore {
             return SsrPhaseBiasQueryResult {
                 sat,
                 signal,
+                source_signal: None,
                 status: SsrBiasStatus::Missing,
                 bias_m: None,
                 bias_cycles: None,
@@ -2282,6 +2364,7 @@ impl SsrCorrectionStore {
             return SsrPhaseBiasQueryResult {
                 sat,
                 signal,
+                source_signal: None,
                 status: SsrBiasStatus::Missing,
                 bias_m: None,
                 bias_cycles: None,
@@ -2358,6 +2441,7 @@ impl SsrCorrectionStore {
             return SsrPhaseBiasQueryResult {
                 sat,
                 signal,
+                source_signal: Some(record.signal),
                 status,
                 bias_m: None,
                 bias_cycles: record.value_cycles,
@@ -2372,7 +2456,28 @@ impl SsrCorrectionStore {
             };
         }
 
-        // Wire unavailable sentinel and unknown-signal conversion keep their primary
+        // A signal its source's table does not assign names no observation to apply
+        // the bias to; the record keeps its native value and continuity.
+        if let SsrSignalKey::Unknown(raw) = signal {
+            return SsrPhaseBiasQueryResult {
+                sat,
+                signal,
+                source_signal: Some(record.signal),
+                status: SsrBiasStatus::UnknownSignal,
+                bias_m: record.value_m,
+                bias_cycles: record.value_cycles,
+                solution: Some(record.solution),
+                iod_ssr: Some(record.iod_ssr),
+                ref_epoch_j2000_s: Some(ref_epoch),
+                lifetime: Some(record.lifetime),
+                continuity_token: Some(current_token),
+                discontinuity_indicator: Some(record.discontinuity),
+                discontinuity_details: Some(continuity),
+                details: SsrBiasResolutionDetails::UnknownSignal(raw),
+            };
+        }
+
+        // Wire unavailable sentinel and a failed metre conversion keep their primary
         // status and raw native values; only the continuity diagnostic is added.
         if record.value_m.is_none() {
             let details = if record.value_cycles.is_some() {
@@ -2383,6 +2488,7 @@ impl SsrCorrectionStore {
             return SsrPhaseBiasQueryResult {
                 sat,
                 signal,
+                source_signal: Some(record.signal),
                 status: SsrBiasStatus::Unavailable,
                 bias_m: None,
                 bias_cycles: record.value_cycles,
@@ -2404,6 +2510,7 @@ impl SsrCorrectionStore {
             return SsrPhaseBiasQueryResult {
                 sat,
                 signal,
+                source_signal: Some(record.signal),
                 status: SsrBiasStatus::PhaseDiscontinuityNeedsReset,
                 bias_m: None,
                 bias_cycles: record.value_cycles,
@@ -2421,6 +2528,7 @@ impl SsrCorrectionStore {
         SsrPhaseBiasQueryResult {
             sat,
             signal,
+            source_signal: Some(record.signal),
             status: SsrBiasStatus::Available,
             bias_m: record.value_m,
             bias_cycles: record.value_cycles,
@@ -2435,19 +2543,19 @@ impl SsrCorrectionStore {
         }
     }
 
-    /// Code bias in meters for a satellite and raw signal id.
+    /// Code bias in meters for a satellite and signal.
     ///
     /// Untimed raw latest-value inspector retained for compatibility. It ignores
     /// the correction's lifetime and staleness, any HAS do-not-use exclusion of
-    /// the satellite and phase continuity: it returns the latest stored value
-    /// whether or not it applies now. Positioning callers must use
-    /// [`Self::query_code_bias`].
-    pub fn code_bias(&self, sat: GnssSatelliteId, signal: u8) -> Option<f64> {
+    /// the satellite, phase continuity and whether the signal is one its source's
+    /// table assigns: it returns the latest stored value whether or not it applies
+    /// now. Positioning callers must use [`Self::query_code_bias`].
+    pub fn code_bias(&self, sat: GnssSatelliteId, signal: impl Into<SsrSignalKey>) -> Option<f64> {
         self.corrections
             .get(&sat)?
             .code_bias
             .signals
-            .get(&signal)?
+            .get(&signal.into().canonical())?
             .active
             .as_ref()?
             .value_m
@@ -2457,15 +2565,15 @@ impl SsrCorrectionStore {
     ///
     /// Untimed raw latest-value inspector retained for compatibility. It ignores
     /// the correction's lifetime and staleness, any HAS do-not-use exclusion of
-    /// the satellite and phase continuity: it returns the latest stored value
-    /// whether or not it applies now. Positioning callers must use
-    /// [`Self::query_phase_bias`].
-    pub fn phase_bias(&self, sat: GnssSatelliteId, signal: u8) -> Option<f64> {
+    /// the satellite, phase continuity and whether the signal is one its source's
+    /// table assigns: it returns the latest stored value whether or not it applies
+    /// now. Positioning callers must use [`Self::query_phase_bias`].
+    pub fn phase_bias(&self, sat: GnssSatelliteId, signal: impl Into<SsrSignalKey>) -> Option<f64> {
         self.corrections
             .get(&sat)?
             .phase_bias
             .signals
-            .get(&signal)?
+            .get(&signal.into().canonical())?
             .active
             .as_ref()?
             .value_m
@@ -2512,13 +2620,13 @@ impl SsrCorrectionStore {
     pub(crate) fn has_code_bias_superseded_epoch(
         &self,
         sat: GnssSatelliteId,
-        signal: u8,
+        signal: impl Into<SsrSignalKey>,
     ) -> Option<f64> {
         self.corrections
             .get(&sat)?
             .code_bias
             .signals
-            .get(&signal)?
+            .get(&signal.into().canonical())?
             .has_superseded_epoch_j2000_s
     }
 
@@ -2527,13 +2635,13 @@ impl SsrCorrectionStore {
     pub(crate) fn has_phase_bias_superseded_epoch(
         &self,
         sat: GnssSatelliteId,
-        signal: u8,
+        signal: impl Into<SsrSignalKey>,
     ) -> Option<f64> {
         self.corrections
             .get(&sat)?
             .phase_bias
             .signals
-            .get(&signal)?
+            .get(&signal.into().canonical())?
             .has_superseded_epoch_j2000_s
     }
 }
@@ -2556,7 +2664,7 @@ impl SsrCorrectionStore {
 /// recorded since the previous arc is reported as the details.
 fn evaluate_phase_continuity(
     sat: GnssSatelliteId,
-    signal: u8,
+    signal: SsrSignalKey,
     current_token: PhaseContinuityToken,
     prior_break: Option<SsrDiscontinuityDetails>,
     acknowledged_token: Option<PhaseContinuityToken>,
@@ -4268,6 +4376,16 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// Store key of Galileo HAS signal `index` of `sat`'s system.
+    fn has_sig(sat: GnssSatelliteId, index: u8) -> SsrSignalKey {
+        SsrRawSignal::galileo_has(sat.system, index).key()
+    }
+
+    /// Store key of RTCM SSR signal `index` of `sat`'s system.
+    fn rtcm_sig(sat: GnssSatelliteId, index: u8) -> SsrSignalKey {
+        SsrRawSignal::rtcm_ssr(sat.system, index).key()
+    }
     use crate::astro::math::vec3::dot3;
     use crate::constants::{F_L1_HZ, F_L2_HZ};
     use crate::has::{
@@ -4894,14 +5012,14 @@ mod tests {
             store.ingest_ssr(&code, ssr_week()).unwrap();
             store.ingest_ssr(&phase, ssr_week()).unwrap();
             for dt in [0.0, 1.0, 90.0, -90.0] {
-                let code_q = store.query_code_bias(sat, 0, t0 + dt);
+                let code_q = store.query_code_bias(sat, rtcm_sig(sat, 0), t0 + dt);
                 assert_eq!(
                     code_q.status,
                     SsrBiasStatus::Available,
                     "index {index}, {dt} s"
                 );
                 assert_eq!(code_q.ref_epoch_j2000_s, Some(t0));
-                let phase_q = store.query_phase_bias(sat, 0, t0 + dt, None);
+                let phase_q = store.query_phase_bias(sat, rtcm_sig(sat, 0), t0 + dt, None);
                 assert_eq!(
                     phase_q.status,
                     SsrBiasStatus::Available,
@@ -4909,15 +5027,21 @@ mod tests {
                 );
             }
             assert_eq!(
-                store.query_code_bias(sat, 0, t0 + 90.5).status,
+                store
+                    .query_code_bias(sat, rtcm_sig(sat, 0), t0 + 90.5)
+                    .status,
                 SsrBiasStatus::Expired
             );
             assert_eq!(
-                store.query_phase_bias(sat, 0, t0 + 90.5, None).status,
+                store
+                    .query_phase_bias(sat, rtcm_sig(sat, 0), t0 + 90.5, None)
+                    .status,
                 SsrBiasStatus::Expired
             );
             assert_eq!(
-                store.query_code_bias(sat, 0, t0 - 90.5).status,
+                store
+                    .query_code_bias(sat, rtcm_sig(sat, 0), t0 - 90.5)
+                    .status,
                 SsrBiasStatus::NotYetValid
             );
         }
@@ -5041,12 +5165,12 @@ mod tests {
         let mut store = SsrCorrectionStore::new();
         store.ingest_has_mt1(&phase(0, 1, 1, 0), at(0)).unwrap();
         let token0 = store
-            .query_phase_bias(sat, 0, epoch(0), None)
+            .query_phase_bias(sat, has_sig(sat, 0), epoch(0), None)
             .continuity_token
             .unwrap();
 
         store.ingest_has_mt1(&phase(30, 2, 5, 0), at(30)).unwrap();
-        let q30 = store.query_phase_bias(sat, 0, epoch(30), Some(token0));
+        let q30 = store.query_phase_bias(sat, has_sig(sat, 0), epoch(30), Some(token0));
         assert_eq!(q30.status, SsrBiasStatus::Available);
         assert_eq!(
             q30.discontinuity_details,
@@ -5057,7 +5181,7 @@ mod tests {
         assert_eq!((token30.provider_id(), token30.solution_id()), (2, 5));
 
         store.ingest_has_mt1(&phase(60, 2, 6, 1), at(60)).unwrap();
-        let q60 = store.query_phase_bias(sat, 0, epoch(60), Some(token0));
+        let q60 = store.query_phase_bias(sat, has_sig(sat, 0), epoch(60), Some(token0));
         assert_eq!(q60.status, SsrBiasStatus::PhaseDiscontinuityNeedsReset);
         assert_eq!(
             q60.discontinuity_details,
@@ -5116,19 +5240,19 @@ mod tests {
         store.ingest_ssr(&code, ssr_week()).unwrap();
         store.ingest_ssr(&phase, ssr_week()).unwrap();
         assert_eq!(
-            store.code_bias(sat, 0),
+            store.code_bias(sat, rtcm_sig(sat, 0)),
             Some(f64::from(200) * RTCM_SSR_CODE_BIAS_SCALE_M)
         );
         assert_eq!(
-            store.code_bias(sat, 9),
+            store.code_bias(sat, rtcm_sig(sat, 9)),
             Some(f64::from(300) * RTCM_SSR_CODE_BIAS_SCALE_M)
         );
         assert_eq!(
-            store.phase_bias(sat, 0),
+            store.phase_bias(sat, rtcm_sig(sat, 0)),
             Some(f64::from(2000) * RTCM_SSR_PHASE_BIAS_SCALE_M)
         );
         let transmitted = ssr_epoch_j2000_s(GnssSystem::Gps, 1059, ssr_week(), 100_000).unwrap();
-        let q = store.query_phase_bias(sat, 0, transmitted, None);
+        let q = store.query_phase_bias(sat, rtcm_sig(sat, 0), transmitted, None);
         assert_eq!(q.status, SsrBiasStatus::Available);
         assert_eq!(
             q.discontinuity_details,
@@ -5711,11 +5835,11 @@ mod tests {
         }
 
         assert_eq!(
-            store.phase_bias(sat, 0).unwrap().to_bits(),
+            store.phase_bias(sat, rtcm_sig(sat, 0)).unwrap().to_bits(),
             0.125_f64.to_bits()
         );
         assert_eq!(
-            store.phase_bias(sat, 9).unwrap().to_bits(),
+            store.phase_bias(sat, rtcm_sig(sat, 9)).unwrap().to_bits(),
             (-0.25_f64).to_bits()
         );
     }
@@ -5820,8 +5944,8 @@ mod tests {
         for sat in [g01, g02] {
             assert!(store.orbit(sat).is_some() && store.clock(sat).is_some());
             for signal in [0, 9] {
-                assert!(store.code_bias(sat, signal).is_some());
-                assert!(store.phase_bias(sat, signal).is_some());
+                assert!(store.code_bias(sat, has_sig(sat, signal)).is_some());
+                assert!(store.phase_bias(sat, has_sig(sat, signal)).is_some());
             }
         }
         store
@@ -5888,18 +6012,22 @@ mod tests {
         assert!(store.clock(g01).is_none(), "do-not-use removes G01's clock");
         assert!(store.is_satellite_excluded(g01, later_epoch));
         assert_eq!(
-            store.code_bias(g01, 0),
+            store.code_bias(g01, has_sig(g01, 0)),
             None,
             "unavailable code bias removed"
         );
-        assert_eq!(store.code_bias(g01, 9), Some(0.24), "other signal kept");
         assert_eq!(
-            store.phase_bias(g01, 9),
+            store.code_bias(g01, has_sig(g01, 9)),
+            Some(0.24),
+            "other signal kept"
+        );
+        assert_eq!(
+            store.phase_bias(g01, has_sig(g01, 9)),
             None,
             "unavailable phase bias removed"
         );
         assert_eq!(
-            store.phase_bias(g01, 0).map(f64::to_bits),
+            store.phase_bias(g01, has_sig(g01, 0)).map(f64::to_bits),
             Some((1.25 * (C_M_S / F_L1_HZ)).to_bits()),
             "other signal kept"
         );
@@ -6013,10 +6141,9 @@ mod tests {
         assert!(store.orbit(g01).is_some() && store.orbit(g02).is_some());
     }
 
-    /// A phase bias on a signal with no assigned carrier keeps its cycles and
-    /// has no metres: no wavelength is assumed for it, the typed query reports
-    /// it unavailable for want of a conversion, and the signals that have a
-    /// carrier apply.
+    /// A phase bias on a signal index the HAS table reserves keeps its cycles and
+    /// has no metres: no signal or wavelength is assumed for it, the typed query
+    /// reports it as an unknown signal, and the signals the table assigns apply.
     #[test]
     fn has_phase_bias_on_unassigned_signal_keeps_cycles_without_metres() {
         let g01 = GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap();
@@ -6044,17 +6171,30 @@ mod tests {
             .ingest_has_mt1(&message, has_reception())
             .expect("ingest phase biases");
         let epoch = has_mt1_reference_j2000_s(has_reception(), 10).unwrap();
-        assert_eq!(store.phase_bias(g01, 10), None);
-        let unassigned = store.query_phase_bias(g01, 10, epoch, None);
-        assert_eq!(unassigned.status, SsrBiasStatus::Unavailable);
+        assert_eq!(store.phase_bias(g01, has_sig(g01, 10)), None);
+        // HAS SIS ICD Table 20 reserves GPS index 10: the record is kept under its
+        // raw source-qualified signal and reported as naming no known signal.
+        let raw = SsrRawSignal::galileo_has(GnssSystem::Gps, 10);
+        assert_eq!(has_sig(g01, 10), SsrSignalKey::Unknown(raw));
+        let unassigned = store.query_phase_bias(g01, raw, epoch, None);
+        assert_eq!(unassigned.status, SsrBiasStatus::UnknownSignal);
+        assert_eq!(unassigned.signal, SsrSignalKey::Unknown(raw));
+        assert_eq!(unassigned.source_signal, Some(raw));
         assert_eq!(unassigned.bias_m, None);
         assert_eq!(unassigned.bias_cycles, Some(1.0));
         assert_eq!(
             unassigned.details,
-            SsrBiasResolutionDetails::ConversionUnavailable
+            SsrBiasResolutionDetails::UnknownSignal(raw)
+        );
+        // RTCM SSR GPS index 10 is L2 P, a different signal with its own key.
+        assert_eq!(
+            store
+                .query_phase_bias(g01, rtcm_sig(g01, 10), epoch, None)
+                .status,
+            SsrBiasStatus::Missing
         );
         assert_eq!(
-            store.phase_bias(g01, 0).map(f64::to_bits),
+            store.phase_bias(g01, has_sig(g01, 0)).map(f64::to_bits),
             Some((C_M_S / F_L1_HZ).to_bits())
         );
     }
@@ -6223,19 +6363,19 @@ mod tests {
         assert!((dclock_m + 0.75).abs() < 1.0e-12, "{dclock_m}");
 
         assert_eq!(
-            store.code_bias(sat, 0).unwrap().to_bits(),
+            store.code_bias(sat, has_sig(sat, 0)).unwrap().to_bits(),
             0.24_f64.to_bits()
         );
         assert_eq!(
-            store.code_bias(sat, 9).unwrap().to_bits(),
+            store.code_bias(sat, has_sig(sat, 9)).unwrap().to_bits(),
             (-0.46_f64).to_bits()
         );
         assert_eq!(
-            store.phase_bias(sat, 0).unwrap().to_bits(),
+            store.phase_bias(sat, has_sig(sat, 0)).unwrap().to_bits(),
             (1.25 * (C_M_S / F_L1_HZ)).to_bits()
         );
         assert_eq!(
-            store.phase_bias(sat, 9).unwrap().to_bits(),
+            store.phase_bias(sat, has_sig(sat, 9)).unwrap().to_bits(),
             (-2.5 * (C_M_S / F_L2_HZ)).to_bits()
         );
     }
@@ -6962,8 +7102,14 @@ mod tests {
             .corrected_state(sat, t1)
             .expect("older HAS orbit and clock cover t1");
         assert_ne!(older_state, broadcast_state);
-        assert_eq!(seeded.query_code_bias(sat, 0, t1).bias_m, Some(0.25));
-        assert!(seeded.query_phase_bias(sat, 0, t1, None).bias_m.is_some());
+        assert_eq!(
+            seeded.query_code_bias(sat, has_sig(sat, 0), t1).bias_m,
+            Some(0.25)
+        );
+        assert!(seeded
+            .query_phase_bias(sat, has_sig(sat, 0), t1, None)
+            .bias_m
+            .is_some());
 
         let newer_orbit_unavailable = build(
             30,
@@ -6989,12 +7135,20 @@ mod tests {
             for pass in ["after the newer message", "after a delayed older copy"] {
                 if name.starts_with("orbit") {
                     assert!(store.orbit(sat).is_none(), "{name}, {pass}");
-                    assert_eq!(store.code_bias(sat, 0), None, "{name}, {pass}");
-                    assert_eq!(store.phase_bias(sat, 0), None, "{name}, {pass}");
-                    let code = store.query_code_bias(sat, 0, t1);
+                    assert_eq!(
+                        store.code_bias(sat, has_sig(sat, 0)),
+                        None,
+                        "{name}, {pass}"
+                    );
+                    assert_eq!(
+                        store.phase_bias(sat, has_sig(sat, 0)),
+                        None,
+                        "{name}, {pass}"
+                    );
+                    let code = store.query_code_bias(sat, has_sig(sat, 0), t1);
                     assert_eq!(code.status, SsrBiasStatus::Unavailable, "{name}, {pass}");
                     assert_eq!(code.bias_m, None, "{name}, {pass}");
-                    let phase = store.query_phase_bias(sat, 0, t1, None);
+                    let phase = store.query_phase_bias(sat, has_sig(sat, 0), t1, None);
                     assert_eq!(phase.status, SsrBiasStatus::Unavailable, "{name}, {pass}");
                     assert_eq!(phase.bias_m, None, "{name}, {pass}");
                 } else {
@@ -11207,13 +11361,22 @@ mod tests {
 
         let mut store = SsrCorrectionStore::new();
         store.ingest_has_mt1(&has_t0, reception_t0).unwrap();
-        assert_eq!(store.code_bias(sat1, 0), Some(0.5));
-        assert_eq!(store.code_bias(sat1, 9), Some(-0.3));
-        assert_eq!(store.code_bias(sat2, 0), Some(0.0));
-        assert_eq!(store.phase_bias(sat1, 0), Some(pb_sat1_sig0_m));
-        assert_eq!(store.phase_bias(sat1, 9), Some(pb_sat1_sig9_m));
-        assert_eq!(store.phase_bias(sat2, 0), Some(0.0));
-        assert_eq!(store.phase_bias(sat2, 9), Some(pb_sat2_sig9_m));
+        assert_eq!(store.code_bias(sat1, has_sig(sat1, 0)), Some(0.5));
+        assert_eq!(store.code_bias(sat1, has_sig(sat1, 9)), Some(-0.3));
+        assert_eq!(store.code_bias(sat2, has_sig(sat2, 0)), Some(0.0));
+        assert_eq!(
+            store.phase_bias(sat1, has_sig(sat1, 0)),
+            Some(pb_sat1_sig0_m)
+        );
+        assert_eq!(
+            store.phase_bias(sat1, has_sig(sat1, 9)),
+            Some(pb_sat1_sig9_m)
+        );
+        assert_eq!(store.phase_bias(sat2, has_sig(sat2, 0)), Some(0.0));
+        assert_eq!(
+            store.phase_bias(sat2, has_sig(sat2, 9)),
+            Some(pb_sat2_sig9_m)
+        );
 
         // T30: sat1 sig 0 has bias_cycles: None (unavailable sentinel).
         // Uses smaller inline mask for sat1 sig 0 with mask_id: 2 to form a valid wire case
@@ -11259,44 +11422,47 @@ mod tests {
             .ingest_has_mt1(&has_t30_unavail, reception_t30)
             .unwrap();
         // Cleared strictly superseded numeric correction for sat1 sig 0
-        assert_eq!(store.code_bias(sat1, 0), None);
-        assert_eq!(store.phase_bias(sat1, 0), None);
+        assert_eq!(store.code_bias(sat1, has_sig(sat1, 0)), None);
+        assert_eq!(store.phase_bias(sat1, has_sig(sat1, 0)), None);
         // Unrelated signals/satellites preserved
-        assert_eq!(store.code_bias(sat1, 9), Some(-0.3));
-        assert_eq!(store.code_bias(sat2, 0), Some(0.0));
-        assert_eq!(store.code_bias(sat2, 9), Some(0.8));
+        assert_eq!(store.code_bias(sat1, has_sig(sat1, 9)), Some(-0.3));
+        assert_eq!(store.code_bias(sat2, has_sig(sat2, 0)), Some(0.0));
+        assert_eq!(store.code_bias(sat2, has_sig(sat2, 9)), Some(0.8));
         // The unavailable sentinel arms a per-signal supersession watermark at its own epoch.
         assert_eq!(
-            store.has_code_bias_superseded_epoch(sat1, 0),
+            store.has_code_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
             Some(epoch_at(t0_tow + 30.0)),
             "code bias watermark armed at the sentinel epoch"
         );
         assert_eq!(
-            store.has_phase_bias_superseded_epoch(sat1, 0),
+            store.has_phase_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
             Some(epoch_at(t0_tow + 30.0)),
             "phase bias watermark armed at the sentinel epoch"
         );
         assert_eq!(
-            store.has_code_bias_superseded_epoch(sat1, 9),
+            store.has_code_bias_superseded_epoch(sat1, has_sig(sat1, 9)),
             None,
             "watermarks are per signal and must not leak to sig 9"
         );
-        assert_eq!(store.has_phase_bias_superseded_epoch(sat2, 0), None);
+        assert_eq!(
+            store.has_phase_bias_superseded_epoch(sat2, has_sig(sat2, 0)),
+            None
+        );
 
         // Stale usable at T0 arrives again: refused by watermark, cannot resurrect
         store.ingest_has_mt1(&has_t0, reception_t0).unwrap();
         assert_eq!(
-            store.code_bias(sat1, 0),
+            store.code_bias(sat1, has_sig(sat1, 0)),
             None,
             "stale usable at T0 cannot resurrect sat1 sig 0"
         );
         assert_eq!(
-            store.has_code_bias_superseded_epoch(sat1, 0),
+            store.has_code_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
             Some(epoch_at(t0_tow + 30.0)),
             "a refused stale record leaves the code bias watermark in place"
         );
         assert_eq!(
-            store.has_phase_bias_superseded_epoch(sat1, 0),
+            store.has_phase_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
             Some(epoch_at(t0_tow + 30.0)),
             "a refused stale record leaves the phase bias watermark in place"
         );
@@ -11345,15 +11511,18 @@ mod tests {
         store
             .ingest_has_mt1(&has_t60_usable, reception_t60)
             .unwrap();
-        assert_eq!(store.code_bias(sat1, 0), Some(0.60));
-        assert_eq!(store.phase_bias(sat1, 0), Some(pb_sat1_t60_m));
+        assert_eq!(store.code_bias(sat1, has_sig(sat1, 0)), Some(0.60));
         assert_eq!(
-            store.has_code_bias_superseded_epoch(sat1, 0),
+            store.phase_bias(sat1, has_sig(sat1, 0)),
+            Some(pb_sat1_t60_m)
+        );
+        assert_eq!(
+            store.has_code_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
             None,
             "a newer usable code bias clears the watermark"
         );
         assert_eq!(
-            store.has_phase_bias_superseded_epoch(sat1, 0),
+            store.has_phase_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
             None,
             "a newer usable phase bias clears the watermark"
         );
@@ -11363,17 +11532,17 @@ mod tests {
             .ingest_has_mt1(&has_t30_unavail, reception_t30)
             .unwrap();
         assert_eq!(
-            store.code_bias(sat1, 0),
+            store.code_bias(sat1, has_sig(sat1, 0)),
             Some(0.60),
             "older unavailable cannot clear newer usable bias"
         );
         assert_eq!(
-            store.has_code_bias_superseded_epoch(sat1, 0),
+            store.has_code_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
             None,
             "a refused older sentinel must not re-arm the code bias watermark"
         );
         assert_eq!(
-            store.has_phase_bias_superseded_epoch(sat1, 0),
+            store.has_phase_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
             None,
             "a refused older sentinel must not re-arm the phase bias watermark"
         );
@@ -11426,17 +11595,23 @@ mod tests {
             .ingest_has_mt1(&has_t30_usable, reception_t30)
             .unwrap();
         assert_eq!(
-            store_eq1.code_bias(sat1, 0),
+            store_eq1.code_bias(sat1, has_sig(sat1, 0)),
             Some(0.52),
             "usable wins over unavail in order 1"
         );
         assert_eq!(
-            store_eq1.phase_bias(sat1, 0),
+            store_eq1.phase_bias(sat1, has_sig(sat1, 0)),
             Some(pb_sat1_t30_m),
             "usable phase wins over unavail in order 1"
         );
-        assert_eq!(store_eq1.has_code_bias_superseded_epoch(sat1, 0), None);
-        assert_eq!(store_eq1.has_phase_bias_superseded_epoch(sat1, 0), None);
+        assert_eq!(
+            store_eq1.has_code_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
+            None
+        );
+        assert_eq!(
+            store_eq1.has_phase_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
+            None
+        );
 
         let mut store_eq2 = SsrCorrectionStore::new();
         store_eq2
@@ -11446,17 +11621,23 @@ mod tests {
             .ingest_has_mt1(&has_t30_unavail, reception_t30)
             .unwrap();
         assert_eq!(
-            store_eq2.code_bias(sat1, 0),
+            store_eq2.code_bias(sat1, has_sig(sat1, 0)),
             Some(0.52),
             "usable wins over unavail in order 2"
         );
         assert_eq!(
-            store_eq2.phase_bias(sat1, 0),
+            store_eq2.phase_bias(sat1, has_sig(sat1, 0)),
             Some(pb_sat1_t30_m),
             "usable phase wins over unavail in order 2"
         );
-        assert_eq!(store_eq2.has_code_bias_superseded_epoch(sat1, 0), None);
-        assert_eq!(store_eq2.has_phase_bias_superseded_epoch(sat1, 0), None);
+        assert_eq!(
+            store_eq2.has_code_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
+            None
+        );
+        assert_eq!(
+            store_eq2.has_phase_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
+            None
+        );
 
         // Mixed RTCM/HAS provenance: RTCM overwrites active value, HAS watermark persists privately
         let mut store_mix = SsrCorrectionStore::new();
@@ -11478,16 +11659,17 @@ mod tests {
             ura: Vec::new(),
             padding_bits: Vec::new(),
         };
-        let watermark_before_rtcm = store_mix.has_code_bias_superseded_epoch(sat1, 0);
+        let watermark_before_rtcm =
+            store_mix.has_code_bias_superseded_epoch(sat1, has_sig(sat1, 0));
         assert_eq!(
             watermark_before_rtcm,
             Some(epoch_at(t0_tow + 30.0)),
             "the sentinel arms the code bias watermark before RTCM arrives"
         );
         store_mix.ingest_ssr(&rtcm_code_msg, reception_t30).unwrap();
-        assert_eq!(store_mix.code_bias(sat1, 0), Some(0.25));
+        assert_eq!(store_mix.code_bias(sat1, has_sig(sat1, 0)), Some(0.25));
         assert_eq!(
-            store_mix.has_code_bias_superseded_epoch(sat1, 0),
+            store_mix.has_code_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
             watermark_before_rtcm,
             "RTCM replaces the active value but leaves the HAS watermark untouched"
         );
@@ -11495,12 +11677,12 @@ mod tests {
         // Stale HAS at T0 arriving now cannot overwrite RTCM due to persistent watermark
         store_mix.ingest_has_mt1(&has_t0, reception_t0).unwrap();
         assert_eq!(
-            store_mix.code_bias(sat1, 0),
+            store_mix.code_bias(sat1, has_sig(sat1, 0)),
             Some(0.25),
             "stale HAS cannot overwrite RTCM across watermark"
         );
         assert_eq!(
-            store_mix.has_code_bias_superseded_epoch(sat1, 0),
+            store_mix.has_code_bias_superseded_epoch(sat1, has_sig(sat1, 0)),
             watermark_before_rtcm,
             "the persistent watermark is what refuses the stale HAS record"
         );
@@ -11536,7 +11718,9 @@ mod tests {
             reserved: 0,
         });
 
-        // 1. Unknown carrier signal: cycles present but carrier unknown -> ConversionUnavailable detail
+        // 1. HAS SIS ICD Table 20 reserves GPS index 1: the record keeps its cycles under
+        // its raw source-qualified signal and is reported as an unknown signal.
+        let raw = SsrRawSignal::galileo_has(GnssSystem::Gps, 1);
         let has_unknown_carrier = HasMt1Message {
             header: HasMt1Header {
                 toh_s: (t0_tow as u32 % 3600) as u16,
@@ -11573,16 +11757,17 @@ mod tests {
             .ingest_has_mt1(&has_unknown_carrier, reception_t0)
             .unwrap();
         assert_eq!(
-            store.phase_bias(sat, 1),
+            store.phase_bias(sat, has_sig(sat, 1)),
             None,
             "cycles without metres must not return f64 value"
         );
-        let q_cycles = store.query_phase_bias(sat, 1, t0_j2000, None);
-        assert_eq!(q_cycles.status, SsrBiasStatus::Unavailable);
+        let q_cycles = store.query_phase_bias(sat, has_sig(sat, 1), t0_j2000, None);
+        assert_eq!(q_cycles.status, SsrBiasStatus::UnknownSignal);
         assert_eq!(
             q_cycles.details,
-            SsrBiasResolutionDetails::ConversionUnavailable
+            SsrBiasResolutionDetails::UnknownSignal(raw)
         );
+        assert_eq!(q_cycles.source_signal, Some(raw));
         assert_eq!(q_cycles.bias_cycles, Some(0.25));
         assert_eq!(q_cycles.bias_m, None);
         assert_eq!(
@@ -11591,9 +11776,10 @@ mod tests {
         );
         let cycles_token = q_cycles
             .continuity_token
-            .expect("conversion-unavailable record carries a token");
+            .expect("unknown-signal record carries a token");
+        assert_eq!(cycles_token.signal(), SsrSignalKey::Unknown(raw));
 
-        // An unknown-carrier record keeps its ConversionUnavailable status while still
+        // An unknown-signal record keeps its UnknownSignal status while still
         // evaluating a supplied acknowledgement, so a token from another arc is not lost.
         let mut later_store = SsrCorrectionStore::new();
         let mut has_unknown_carrier_later = has_unknown_carrier.clone();
@@ -11606,15 +11792,16 @@ mod tests {
             .ingest_has_mt1(&has_unknown_carrier_later, reception_cycles_t30)
             .unwrap();
         let later_cycles_token = later_store
-            .query_phase_bias(sat, 1, t_cycles_t30, None)
+            .query_phase_bias(sat, has_sig(sat, 1), t_cycles_t30, None)
             .continuity_token
             .unwrap();
 
-        let q_cycles_stale = later_store.query_phase_bias(sat, 1, t_cycles_t30, Some(cycles_token));
-        assert_eq!(q_cycles_stale.status, SsrBiasStatus::Unavailable);
+        let q_cycles_stale =
+            later_store.query_phase_bias(sat, has_sig(sat, 1), t_cycles_t30, Some(cycles_token));
+        assert_eq!(q_cycles_stale.status, SsrBiasStatus::UnknownSignal);
         assert_eq!(
             q_cycles_stale.details,
-            SsrBiasResolutionDetails::ConversionUnavailable
+            SsrBiasResolutionDetails::UnknownSignal(raw)
         );
         assert_eq!(q_cycles_stale.bias_cycles, Some(0.25));
         assert_eq!(
@@ -11622,14 +11809,15 @@ mod tests {
             Some(SsrDiscontinuityDetails::StaleToken)
         );
 
-        let q_cycles_future = store.query_phase_bias(sat, 1, t0_j2000, Some(later_cycles_token));
-        assert_eq!(q_cycles_future.status, SsrBiasStatus::Unavailable);
+        let q_cycles_future =
+            store.query_phase_bias(sat, has_sig(sat, 1), t0_j2000, Some(later_cycles_token));
+        assert_eq!(q_cycles_future.status, SsrBiasStatus::UnknownSignal);
         assert_eq!(
             q_cycles_future.discontinuity_details,
             Some(SsrDiscontinuityDetails::FutureToken)
         );
 
-        // A token minted for another satellite on the same unknown carrier is a
+        // A token minted for another satellite on the same unknown signal is a
         // mismatch, not a position on this arc's timeline.
         let other_sat = GnssSatelliteId::new(GnssSystem::Gps, 2).unwrap();
         let mut other_sat_msg = has_unknown_carrier.clone();
@@ -11653,23 +11841,25 @@ mod tests {
             .ingest_has_mt1(&other_sat_msg, reception_t0)
             .unwrap();
         let other_sat_token = other_sat_store
-            .query_phase_bias(other_sat, 1, t0_j2000, None)
+            .query_phase_bias(other_sat, has_sig(other_sat, 1), t0_j2000, None)
             .continuity_token
             .unwrap();
 
-        let q_cycles_mismatch = store.query_phase_bias(sat, 1, t0_j2000, Some(other_sat_token));
-        assert_eq!(q_cycles_mismatch.status, SsrBiasStatus::Unavailable);
+        let q_cycles_mismatch =
+            store.query_phase_bias(sat, has_sig(sat, 1), t0_j2000, Some(other_sat_token));
+        assert_eq!(q_cycles_mismatch.status, SsrBiasStatus::UnknownSignal);
         assert_eq!(
             q_cycles_mismatch.discontinuity_details,
             Some(SsrDiscontinuityDetails::MismatchedToken)
         );
 
-        let q_cycles_exact = store.query_phase_bias(sat, 1, t0_j2000, Some(cycles_token));
-        assert_eq!(q_cycles_exact.status, SsrBiasStatus::Unavailable);
+        let q_cycles_exact =
+            store.query_phase_bias(sat, has_sig(sat, 1), t0_j2000, Some(cycles_token));
+        assert_eq!(q_cycles_exact.status, SsrBiasStatus::UnknownSignal);
         assert_eq!(
             q_cycles_exact.discontinuity_details,
             Some(SsrDiscontinuityDetails::Continuous),
-            "an exact acknowledgement is continuous even though the value is unavailable"
+            "an exact acknowledgement is continuous even though the signal is unknown"
         );
 
         // 2. Continuous updates, discontinuity, reset, wrap, and rejection
@@ -11709,7 +11899,7 @@ mod tests {
         // Message 0: PDI = 0 at T0
         let msg0 = make_phase_msg(0, 0);
         store2.ingest_has_mt1(&msg0, reception_t0).unwrap();
-        let q0 = store2.query_phase_bias(sat, 0, t0_j2000, None);
+        let q0 = store2.query_phase_bias(sat, has_sig(sat, 0), t0_j2000, None);
         assert_eq!(q0.status, SsrBiasStatus::Available);
         assert_eq!(q0.details, SsrBiasResolutionDetails::Available);
         assert_eq!(
@@ -11722,7 +11912,7 @@ mod tests {
         let reception_t30 = GnssWeekTow::new(TimeScale::Gst, 1042, t0_tow + 30.0).unwrap();
         let msg1 = make_phase_msg(30, 0);
         store2.ingest_has_mt1(&msg1, reception_t30).unwrap();
-        let q1 = store2.query_phase_bias(sat, 0, t0_j2000 + 30.0, Some(token0));
+        let q1 = store2.query_phase_bias(sat, has_sig(sat, 0), t0_j2000 + 30.0, Some(token0));
         assert_eq!(q1.status, SsrBiasStatus::Available);
         assert_eq!(q1.details, SsrBiasResolutionDetails::Available);
         assert_eq!(
@@ -11734,7 +11924,7 @@ mod tests {
         let reception_t60 = GnssWeekTow::new(TimeScale::Gst, 1042, t0_tow + 60.0).unwrap();
         let msg2 = make_phase_msg(60, 1);
         store2.ingest_has_mt1(&msg2, reception_t60).unwrap();
-        let q2_disc = store2.query_phase_bias(sat, 0, t0_j2000 + 60.0, Some(token0));
+        let q2_disc = store2.query_phase_bias(sat, has_sig(sat, 0), t0_j2000 + 60.0, Some(token0));
         assert_eq!(q2_disc.status, SsrBiasStatus::PhaseDiscontinuityNeedsReset);
         assert_eq!(
             q2_disc.discontinuity_indicator,
@@ -11752,7 +11942,7 @@ mod tests {
             .expect("new token provided with reset request");
 
         // Caller resets ambiguity and resumes query with new token
-        let q2_ack = store2.query_phase_bias(sat, 0, t0_j2000 + 60.0, Some(token1));
+        let q2_ack = store2.query_phase_bias(sat, has_sig(sat, 0), t0_j2000 + 60.0, Some(token1));
         assert_eq!(q2_ack.status, SsrBiasStatus::Available);
         assert_eq!(q2_ack.details, SsrBiasResolutionDetails::Available);
         assert_eq!(
@@ -11775,7 +11965,7 @@ mod tests {
             .unwrap();
 
         // Stale token0 from the original PDI=0 arc must be REJECTED despite PDI numerically wrapping to 0
-        let q_wrap = store2.query_phase_bias(sat, 0, t0_j2000 + 150.0, Some(token0));
+        let q_wrap = store2.query_phase_bias(sat, has_sig(sat, 0), t0_j2000 + 150.0, Some(token0));
         assert_eq!(
             q_wrap.status,
             SsrBiasStatus::PhaseDiscontinuityNeedsReset,
@@ -11787,9 +11977,10 @@ mod tests {
         );
 
         // Mismatched signal token rejection: obtain token for signal 1 from actual store query
-        let q_other = store.query_phase_bias(sat, 1, t0_j2000, None);
+        let q_other = store.query_phase_bias(sat, has_sig(sat, 1), t0_j2000, None);
         let bad_token = q_other.continuity_token.expect("token for signal 1");
-        let q_mismatch = store2.query_phase_bias(sat, 0, t0_j2000 + 150.0, Some(bad_token));
+        let q_mismatch =
+            store2.query_phase_bias(sat, has_sig(sat, 0), t0_j2000 + 150.0, Some(bad_token));
         assert_eq!(
             q_mismatch.status,
             SsrBiasStatus::PhaseDiscontinuityNeedsReset
@@ -12001,41 +12192,45 @@ mod tests {
         store.ingest_has_mt1(&msg, reception).unwrap();
 
         // 1. Before reference: NotYetValid
-        let q_before = store.query_code_bias(sat, 0, t_ref - 0.001);
+        let q_before = store.query_code_bias(sat, has_sig(sat, 0), t_ref - 0.001);
         assert_eq!(q_before.status, SsrBiasStatus::NotYetValid);
         assert_eq!(q_before.bias_m, None);
 
         // 2. Exact reference: Available
-        let q_exact = store.query_code_bias(sat, 0, t_ref);
+        let q_exact = store.query_code_bias(sat, has_sig(sat, 0), t_ref);
         assert_eq!(q_exact.status, SsrBiasStatus::Available);
         assert_eq!(q_exact.bias_m, Some(1.5));
 
         // 3. Middle of VI: Available
-        let q_mid = store.query_code_bias(sat, 0, t_ref + 150.0);
+        let q_mid = store.query_code_bias(sat, has_sig(sat, 0), t_ref + 150.0);
         assert_eq!(q_mid.status, SsrBiasStatus::Available);
         assert_eq!(q_mid.bias_m, Some(1.5));
 
         // 4. Exact VI end: Available
-        let q_end = store.query_code_bias(sat, 0, t_ref + 300.0);
+        let q_end = store.query_code_bias(sat, has_sig(sat, 0), t_ref + 300.0);
         assert_eq!(q_end.status, SsrBiasStatus::Available);
         assert_eq!(q_end.bias_m, Some(1.5));
 
         // 5. After VI end: Expired
-        let q_after = store.query_code_bias(sat, 0, t_ref + 300.001);
+        let q_after = store.query_code_bias(sat, has_sig(sat, 0), t_ref + 300.001);
         assert_eq!(q_after.status, SsrBiasStatus::Expired);
         assert_eq!(q_after.bias_m, None);
 
         // 6. Non-finite epochs: InvalidEpoch
         assert_eq!(
-            store.query_code_bias(sat, 0, f64::NAN).status,
+            store.query_code_bias(sat, has_sig(sat, 0), f64::NAN).status,
             SsrBiasStatus::InvalidEpoch
         );
         assert_eq!(
-            store.query_code_bias(sat, 0, f64::INFINITY).status,
+            store
+                .query_code_bias(sat, has_sig(sat, 0), f64::INFINITY)
+                .status,
             SsrBiasStatus::InvalidEpoch
         );
         assert_eq!(
-            store.query_code_bias(sat, 0, f64::NEG_INFINITY).status,
+            store
+                .query_code_bias(sat, has_sig(sat, 0), f64::NEG_INFINITY)
+                .status,
             SsrBiasStatus::InvalidEpoch
         );
 
@@ -12077,18 +12272,25 @@ mod tests {
         store.ingest_has_mt1(&dnu_msg, reception).unwrap();
         // Inside DNU [t_ref, t_ref + 60]: Excluded
         assert_eq!(
-            store.query_code_bias(sat, 0, t_ref + 30.0).status,
+            store
+                .query_code_bias(sat, has_sig(sat, 0), t_ref + 30.0)
+                .status,
             SsrBiasStatus::Excluded
         );
         // Outside DNU (after 60s, but still within bias VI of 300s): Available!
         assert_eq!(
-            store.query_code_bias(sat, 0, t_ref + 100.0).status,
+            store
+                .query_code_bias(sat, has_sig(sat, 0), t_ref + 100.0)
+                .status,
             SsrBiasStatus::Available
         );
 
         // 8. Raw untimed inspector returns numeric value regardless of epoch
-        assert_eq!(store.code_bias(sat, 0), Some(1.5));
-        assert_eq!(store.phase_bias(sat, 0), Some(expected_phase_m));
+        assert_eq!(store.code_bias(sat, has_sig(sat, 0)), Some(1.5));
+        assert_eq!(
+            store.phase_bias(sat, has_sig(sat, 0)),
+            Some(expected_phase_m)
+        );
     }
 
     #[test]
@@ -12300,13 +12502,13 @@ mod tests {
         );
 
         // Raw inspector returns None for both signals
-        assert_eq!(store.code_bias(sat, 0), None);
-        assert_eq!(store.code_bias(sat, 9), None);
-        assert_eq!(store.phase_bias(sat, 0), None);
-        assert_eq!(store.phase_bias(sat, 9), None);
+        assert_eq!(store.code_bias(sat, has_sig(sat, 0)), None);
+        assert_eq!(store.code_bias(sat, has_sig(sat, 9)), None);
+        assert_eq!(store.phase_bias(sat, has_sig(sat, 0)), None);
+        assert_eq!(store.phase_bias(sat, has_sig(sat, 9)), None);
 
         // Time-aware query before reference: NotYetValid (lifetime check applies before availability resolution)
-        let q_before_c = store.query_code_bias(sat, 0, t_ref - 1.0);
+        let q_before_c = store.query_code_bias(sat, has_sig(sat, 0), t_ref - 1.0);
         assert_eq!(q_before_c.status, SsrBiasStatus::NotYetValid);
         assert_eq!(
             q_before_c.details,
@@ -12316,11 +12518,11 @@ mod tests {
             }
         );
 
-        let q_before_p = store.query_phase_bias(sat, 0, t_ref - 1.0, None);
+        let q_before_p = store.query_phase_bias(sat, has_sig(sat, 0), t_ref - 1.0, None);
         assert_eq!(q_before_p.status, SsrBiasStatus::NotYetValid);
 
         // Time-aware query inside forward VI: Unavailable with full metadata, token, and PDI
-        let q_inside_c = store.query_code_bias(sat, 0, t_ref + 10.0);
+        let q_inside_c = store.query_code_bias(sat, has_sig(sat, 0), t_ref + 10.0);
         assert_eq!(q_inside_c.status, SsrBiasStatus::Unavailable);
         assert_eq!(
             q_inside_c.details,
@@ -12333,7 +12535,7 @@ mod tests {
             Some(SsrLifetime::GalileoHasValidityInterval(60.0))
         );
 
-        let q_inside_p0 = store.query_phase_bias(sat, 0, t_ref + 10.0, None);
+        let q_inside_p0 = store.query_phase_bias(sat, has_sig(sat, 0), t_ref + 10.0, None);
         assert_eq!(q_inside_p0.status, SsrBiasStatus::Unavailable);
         assert_eq!(
             q_inside_p0.details,
@@ -12347,7 +12549,7 @@ mod tests {
         );
         assert!(q_inside_p0.continuity_token.is_some());
 
-        let q_inside_p9 = store.query_phase_bias(sat, 9, t_ref + 10.0, None);
+        let q_inside_p9 = store.query_phase_bias(sat, has_sig(sat, 9), t_ref + 10.0, None);
         assert_eq!(q_inside_p9.status, SsrBiasStatus::Unavailable);
         assert_eq!(
             q_inside_p9.discontinuity_indicator,
@@ -12355,9 +12557,9 @@ mod tests {
         );
 
         // Time-aware query after VI: Expired
-        let q_after_c = store.query_code_bias(sat, 0, t_ref + 61.0);
+        let q_after_c = store.query_code_bias(sat, has_sig(sat, 0), t_ref + 61.0);
         assert_eq!(q_after_c.status, SsrBiasStatus::Expired);
-        let q_after_p = store.query_phase_bias(sat, 0, t_ref + 61.0, None);
+        let q_after_p = store.query_phase_bias(sat, has_sig(sat, 0), t_ref + 61.0, None);
         assert_eq!(q_after_p.status, SsrBiasStatus::Expired);
     }
 
@@ -12425,10 +12627,10 @@ mod tests {
             .ingest_has_mt1_with_report(&has_t20, reception_t20)
             .unwrap();
         assert!(!rep20.has_refusals());
-        assert_eq!(store.code_bias(sat, 0), Some(0.50));
+        assert_eq!(store.code_bias(sat, has_sig(sat, 0)), Some(0.50));
         let t_ref20 =
             has_mt1_reference_j2000_s(reception_t20, ((t0_tow as u32 % 3600) + 20) as u16).unwrap();
-        let q_has20 = store.query_phase_bias(sat, 0, t_ref20, None);
+        let q_has20 = store.query_phase_bias(sat, has_sig(sat, 0), t_ref20, None);
         let token_has20 = q_has20.continuity_token.unwrap();
         assert_eq!(token_has20.source(), SsrSource::GalileoHas);
 
@@ -12486,14 +12688,14 @@ mod tests {
         let rtcm_code_bias_m = 70.0 * RTCM_SSR_CODE_BIAS_SCALE_M;
         let rtcm_phase_bias_m = 3500.0 * RTCM_SSR_PHASE_BIAS_SCALE_M;
         assert_eq!(
-            store.code_bias(sat, 0).unwrap().to_bits(),
+            store.code_bias(sat, has_sig(sat, 0)).unwrap().to_bits(),
             rtcm_code_bias_m.to_bits()
         );
         assert_eq!(
-            store.phase_bias(sat, 0).unwrap().to_bits(),
+            store.phase_bias(sat, has_sig(sat, 0)).unwrap().to_bits(),
             rtcm_phase_bias_m.to_bits()
         );
-        let q_rtcm = store.query_phase_bias(sat, 0, t_ref20 + 5.0, None);
+        let q_rtcm = store.query_phase_bias(sat, has_sig(sat, 0), t_ref20 + 5.0, None);
         let token_rtcm = q_rtcm.continuity_token.unwrap();
         assert_eq!(token_rtcm.source(), SsrSource::RtcmSsr);
 
@@ -12560,14 +12762,15 @@ mod tests {
 
         // Active RTCM value and continuity are still preserved, bit for bit
         assert_eq!(
-            store.code_bias(sat, 0).unwrap().to_bits(),
+            store.code_bias(sat, has_sig(sat, 0)).unwrap().to_bits(),
             rtcm_code_bias_m.to_bits()
         );
         assert_eq!(
-            store.phase_bias(sat, 0).unwrap().to_bits(),
+            store.phase_bias(sat, has_sig(sat, 0)).unwrap().to_bits(),
             rtcm_phase_bias_m.to_bits()
         );
-        let q_rtcm_cont = store.query_phase_bias(sat, 0, t_ref20 + 5.0, Some(token_rtcm));
+        let q_rtcm_cont =
+            store.query_phase_bias(sat, has_sig(sat, 0), t_ref20 + 5.0, Some(token_rtcm));
         assert_eq!(q_rtcm_cont.status, SsrBiasStatus::Available);
         assert_eq!(
             q_rtcm_cont.discontinuity_details,
@@ -12625,11 +12828,11 @@ mod tests {
             rep30.phase_records[0].reason,
             IngestionActionReason::AcceptedNewerRecord
         );
-        assert_eq!(store.code_bias(sat, 0), Some(0.60));
+        assert_eq!(store.code_bias(sat, has_sig(sat, 0)), Some(0.60));
 
         let t_ref30 =
             has_mt1_reference_j2000_s(reception_t30, ((t0_tow as u32 % 3600) + 30) as u16).unwrap();
-        let q_has30 = store.query_phase_bias(sat, 0, t_ref30, None);
+        let q_has30 = store.query_phase_bias(sat, has_sig(sat, 0), t_ref30, None);
         let token_has30 = q_has30.continuity_token.unwrap();
         assert_eq!(token_has30.source(), SsrSource::GalileoHas);
         assert_ne!(
@@ -12784,12 +12987,12 @@ mod tests {
         store_a
             .ingest_has_mt1_with_report(&has_t30_unavail, reception_t30)
             .unwrap();
-        assert_eq!(store_a.code_bias(sat, 0), None);
+        assert_eq!(store_a.code_bias(sat, has_sig(sat, 0)), None);
 
         store_a.ingest_ssr(&rtcm_code, reception_t30).unwrap();
         store_a.ingest_ssr(&rtcm_phase, reception_t30).unwrap();
-        assert_eq!(store_a.code_bias(sat, 0), Some(0.30));
-        assert_eq!(store_a.phase_bias(sat, 0), Some(0.15));
+        assert_eq!(store_a.code_bias(sat, has_sig(sat, 0)), Some(0.30));
+        assert_eq!(store_a.phase_bias(sat, has_sig(sat, 0)), Some(0.15));
 
         let rep_a = store_a
             .ingest_has_mt1_with_report(&has_t30_usable, reception_t30)
@@ -12799,7 +13002,7 @@ mod tests {
             IngestionActionReason::AcceptedUsableOverUnavailable
         );
         assert_eq!(
-            store_a.code_bias(sat, 0),
+            store_a.code_bias(sat, has_sig(sat, 0)),
             Some(0.50),
             "usable HAS wins over unavail at equal epoch"
         );
@@ -12818,20 +13021,20 @@ mod tests {
         assert_eq!(rep_a.phase_records[0].pdi, 1);
         // The equal-epoch usable record displaces the intervening RTCM phase bias.
         let has_phase_m = 0.20 * (C_M_S / F_L1_HZ);
-        assert_eq!(store_a.phase_bias(sat, 0), Some(has_phase_m));
+        assert_eq!(store_a.phase_bias(sat, has_sig(sat, 0)), Some(has_phase_m));
 
         // Order B: HAS usable -> RTCM -> HAS unavail (unavail loses to usable at equal epoch, RTCM preserved)
         let mut store_b = SsrCorrectionStore::new();
         store_b
             .ingest_has_mt1_with_report(&has_t30_usable, reception_t30)
             .unwrap();
-        assert_eq!(store_b.code_bias(sat, 0), Some(0.50));
+        assert_eq!(store_b.code_bias(sat, has_sig(sat, 0)), Some(0.50));
 
         store_b.ingest_ssr(&rtcm_code, reception_t30).unwrap();
         store_b.ingest_ssr(&rtcm_phase, reception_t30).unwrap();
-        assert_eq!(store_b.code_bias(sat, 0), Some(0.30));
+        assert_eq!(store_b.code_bias(sat, has_sig(sat, 0)), Some(0.30));
         let rtcm_phase_token = store_b
-            .query_phase_bias(sat, 0, t_ref30, None)
+            .query_phase_bias(sat, has_sig(sat, 0), t_ref30, None)
             .continuity_token
             .unwrap();
         assert_eq!(rtcm_phase_token.source(), SsrSource::RtcmSsr);
@@ -12844,7 +13047,7 @@ mod tests {
             IngestionActionReason::RefusedEqualEpochUnavailableUnderUsable
         );
         assert_eq!(
-            store_b.code_bias(sat, 0),
+            store_b.code_bias(sat, has_sig(sat, 0)),
             Some(0.30),
             "equal epoch unavail loses to prior usable, preserving active RTCM"
         );
@@ -12865,8 +13068,8 @@ mod tests {
         );
         // The refused equal-epoch unavailable record left the intervening RTCM phase
         // bias and its acknowledgement exactly as they were.
-        assert_eq!(store_b.phase_bias(sat, 0), Some(0.15));
-        let q_b = store_b.query_phase_bias(sat, 0, t_ref30, Some(rtcm_phase_token));
+        assert_eq!(store_b.phase_bias(sat, has_sig(sat, 0)), Some(0.15));
+        let q_b = store_b.query_phase_bias(sat, has_sig(sat, 0), t_ref30, Some(rtcm_phase_token));
         assert_eq!(q_b.status, SsrBiasStatus::Available);
         assert_eq!(q_b.bias_m, Some(0.15));
         assert_eq!(
@@ -12882,7 +13085,7 @@ mod tests {
             .unwrap()
             .phase_bias
             .signals
-            .get(&0)
+            .get(&has_sig(sat, 0))
             .unwrap();
         assert_eq!(
             entry_b.has_watermark,
@@ -12933,7 +13136,7 @@ mod tests {
         };
         let mut store = SsrCorrectionStore::new();
         store.ingest_ssr(&rtcm_code, reception_t50).unwrap();
-        assert_eq!(store.code_bias(sat, 0), Some(0.25));
+        assert_eq!(store.code_bias(sat, has_sig(sat, 0)), Some(0.25));
 
         // 2. HAS unavailable arrives at T=60 (with PDI = 2)
         let has_t60_unavail = HasMt1Message {
@@ -12984,7 +13187,7 @@ mod tests {
             ActiveProvenanceStatus::ActiveRtcmUsable
         );
         // Active RTCM numeric value remains preserved!
-        assert_eq!(store.code_bias(sat, 0), Some(0.25));
+        assert_eq!(store.code_bias(sat, has_sig(sat, 0)), Some(0.25));
 
         // 3. Older HAS at T=55 arrives: refused because HAS watermark is at T=60!
         let has_t55 = HasMt1Message {
@@ -13031,7 +13234,7 @@ mod tests {
             IngestionActionReason::RefusedOlderThanWatermark
         );
         assert_eq!(
-            store.code_bias(sat, 0),
+            store.code_bias(sat, has_sig(sat, 0)),
             Some(0.25),
             "older HAS at T55 cannot overwrite RTCM protected by T60 watermark"
         );
@@ -13096,7 +13299,7 @@ mod tests {
         store
             .ingest_has_mt1_with_report(&make_msg(0), reception_t0)
             .unwrap();
-        let q0 = store.query_phase_bias(sat, 0, t_ref, None);
+        let q0 = store.query_phase_bias(sat, has_sig(sat, 0), t_ref, None);
         assert_eq!(q0.status, SsrBiasStatus::Available);
         assert_eq!(
             q0.discontinuity_details,
@@ -13115,7 +13318,7 @@ mod tests {
             IngestionActionReason::AcceptedUpdatedRecord
         );
 
-        let q1 = store.query_phase_bias(sat, 0, t_ref, Some(token_pdi0));
+        let q1 = store.query_phase_bias(sat, has_sig(sat, 0), t_ref, Some(token_pdi0));
         assert_eq!(q1.status, SsrBiasStatus::PhaseDiscontinuityNeedsReset);
         assert_eq!(
             q1.discontinuity_details,
@@ -13129,7 +13332,7 @@ mod tests {
         assert_eq!(token_pdi1.generation(), 1);
 
         // Acking with token_pdi1 succeeds
-        let q1_ack = store.query_phase_bias(sat, 0, t_ref, Some(token_pdi1));
+        let q1_ack = store.query_phase_bias(sat, has_sig(sat, 0), t_ref, Some(token_pdi1));
         assert_eq!(q1_ack.status, SsrBiasStatus::Available);
         assert_eq!(
             q1_ack.discontinuity_details,
@@ -13149,13 +13352,13 @@ mod tests {
             .ingest_has_mt1_with_report(&make_msg(0), reception_t0)
             .unwrap();
 
-        let q_curr = store.query_phase_bias(sat, 0, t_ref, None);
+        let q_curr = store.query_phase_bias(sat, has_sig(sat, 0), t_ref, None);
         let token_wrap0 = q_curr.continuity_token.unwrap();
         assert_eq!(token_wrap0.raw_indicator(), 0);
         assert_eq!(token_wrap0.generation(), 4);
 
         // Stale token_pdi0 from generation 0 MUST NOT be accepted or report false HasPdiChanged{0, 0}
-        let q_stale = store.query_phase_bias(sat, 0, t_ref, Some(token_pdi0));
+        let q_stale = store.query_phase_bias(sat, has_sig(sat, 0), t_ref, Some(token_pdi0));
         assert_eq!(q_stale.status, SsrBiasStatus::PhaseDiscontinuityNeedsReset);
         assert_eq!(
             q_stale.discontinuity_details,
@@ -13220,7 +13423,7 @@ mod tests {
         store
             .ingest_has_mt1_with_report(&has_t10, reception_t10)
             .unwrap();
-        let q1 = store.query_phase_bias(sat, 0, t_ref10, None);
+        let q1 = store.query_phase_bias(sat, has_sig(sat, 0), t_ref10, None);
         let token_has1 = q1.continuity_token.unwrap();
         assert_eq!(token_has1.source(), SsrSource::GalileoHas);
 
@@ -13251,7 +13454,7 @@ mod tests {
             padding_bits: Vec::new(),
         };
         store.ingest_ssr(&rtcm_phase, reception_t20).unwrap();
-        let q2 = store.query_phase_bias(sat, 0, t_ref10 + 10.0, None);
+        let q2 = store.query_phase_bias(sat, has_sig(sat, 0), t_ref10 + 10.0, None);
         let token_rtcm = q2.continuity_token.unwrap();
         assert_eq!(token_rtcm.source(), SsrSource::RtcmSsr);
 
@@ -13290,7 +13493,7 @@ mod tests {
             .unwrap();
 
         // HAS -> RTCM -> HAS must NOT revive the old token from step 1
-        let q3 = store.query_phase_bias(sat, 0, t_ref30, Some(token_has1));
+        let q3 = store.query_phase_bias(sat, has_sig(sat, 0), t_ref30, Some(token_has1));
         assert_eq!(q3.status, SsrBiasStatus::PhaseDiscontinuityNeedsReset);
         assert_eq!(
             q3.discontinuity_details,
@@ -13299,7 +13502,7 @@ mod tests {
 
         // The RTCM token is also rejected at step 3, and because it names the other
         // stream the diagnostic identifies the solution change rather than mere staleness.
-        let q4 = store.query_phase_bias(sat, 0, t_ref30, Some(token_rtcm));
+        let q4 = store.query_phase_bias(sat, has_sig(sat, 0), t_ref30, Some(token_rtcm));
         assert_eq!(q4.status, SsrBiasStatus::PhaseDiscontinuityNeedsReset);
         assert_eq!(
             q4.discontinuity_details,
@@ -13395,20 +13598,21 @@ mod tests {
         store.ingest_has_mt1_with_report(&msg, reception).unwrap();
 
         let token_sat1_sig0 = store
-            .query_phase_bias(sat1, 0, t_ref, None)
+            .query_phase_bias(sat1, has_sig(sat1, 0), t_ref, None)
             .continuity_token
             .unwrap();
         let token_sat1_sig9 = store
-            .query_phase_bias(sat1, 9, t_ref, None)
+            .query_phase_bias(sat1, has_sig(sat1, 9), t_ref, None)
             .continuity_token
             .unwrap();
         let token_sat2_sig0 = store
-            .query_phase_bias(sat2, 0, t_ref, None)
+            .query_phase_bias(sat2, has_sig(sat2, 0), t_ref, None)
             .continuity_token
             .unwrap();
 
         // Query sat1 sig0 with token from sat1 sig9 (mismatched signal)
-        let q_sig_mismatch = store.query_phase_bias(sat1, 0, t_ref, Some(token_sat1_sig9));
+        let q_sig_mismatch =
+            store.query_phase_bias(sat1, has_sig(sat1, 0), t_ref, Some(token_sat1_sig9));
         assert_eq!(
             q_sig_mismatch.status,
             SsrBiasStatus::PhaseDiscontinuityNeedsReset
@@ -13419,7 +13623,8 @@ mod tests {
         );
 
         // Query sat1 sig0 with token from sat2 sig0 (mismatched satellite)
-        let q_sat_mismatch = store.query_phase_bias(sat1, 0, t_ref, Some(token_sat2_sig0));
+        let q_sat_mismatch =
+            store.query_phase_bias(sat1, has_sig(sat1, 0), t_ref, Some(token_sat2_sig0));
         assert_eq!(
             q_sat_mismatch.status,
             SsrBiasStatus::PhaseDiscontinuityNeedsReset
@@ -13447,7 +13652,7 @@ mod tests {
                 .unwrap();
         }
         let ahead_token = ahead_store
-            .query_phase_bias(sat1, 0, t_ref, None)
+            .query_phase_bias(sat1, has_sig(sat1, 0), t_ref, None)
             .continuity_token
             .unwrap();
         assert!(ahead_token.generation() > token_sat1_sig0.generation());
@@ -13457,7 +13662,7 @@ mod tests {
             "both stores began this arc at the same reference epoch"
         );
 
-        let q_future = store.query_phase_bias(sat1, 0, t_ref, Some(ahead_token));
+        let q_future = store.query_phase_bias(sat1, has_sig(sat1, 0), t_ref, Some(ahead_token));
         assert_eq!(q_future.status, SsrBiasStatus::PhaseDiscontinuityNeedsReset);
         assert_eq!(
             q_future.discontinuity_details,
@@ -13465,7 +13670,7 @@ mod tests {
         );
 
         // Exactly the current token still succeeds.
-        let q_exact = store.query_phase_bias(sat1, 0, t_ref, Some(token_sat1_sig0));
+        let q_exact = store.query_phase_bias(sat1, has_sig(sat1, 0), t_ref, Some(token_sat1_sig0));
         assert_eq!(q_exact.status, SsrBiasStatus::Available);
         assert_eq!(
             q_exact.discontinuity_details,
@@ -13596,10 +13801,10 @@ mod tests {
         store
             .ingest_has_mt1_with_report(&has_msg(20, 2, Some(0.50), Some(0.20), 1), reception_t20)
             .unwrap();
-        assert_eq!(store.code_bias(sat, 0), Some(0.50));
+        assert_eq!(store.code_bias(sat, has_sig(sat, 0)), Some(0.50));
         assert_eq!(
             store
-                .query_phase_bias(sat, 0, t_ref20, None)
+                .query_phase_bias(sat, has_sig(sat, 0), t_ref20, None)
                 .continuity_token
                 .unwrap()
                 .source(),
@@ -13609,9 +13814,9 @@ mod tests {
         // 2. RTCM code and phase take over the active correction for this signal.
         store.ingest_ssr(&rtcm_code, reception_t20).unwrap();
         store.ingest_ssr(&rtcm_phase, reception_t20).unwrap();
-        assert_eq!(store.code_bias(sat, 0), Some(0.30));
+        assert_eq!(store.code_bias(sat, has_sig(sat, 0)), Some(0.30));
 
-        let q_after_rtcm = store.query_phase_bias(sat, 0, t_ref30, None);
+        let q_after_rtcm = store.query_phase_bias(sat, has_sig(sat, 0), t_ref30, None);
         assert_eq!(
             q_after_rtcm.status,
             SsrBiasStatus::Available,
@@ -13629,7 +13834,7 @@ mod tests {
         assert_eq!(rtcm_token.raw_indicator(), 7);
         let rtcm_generation = rtcm_token.generation();
 
-        let q_acked = store.query_phase_bias(sat, 0, t_ref30, Some(rtcm_token));
+        let q_acked = store.query_phase_bias(sat, has_sig(sat, 0), t_ref30, Some(rtcm_token));
         assert_eq!(q_acked.status, SsrBiasStatus::Available);
         assert_eq!(q_acked.bias_m, Some(0.2));
         assert_eq!(
@@ -13649,7 +13854,7 @@ mod tests {
             .unwrap()
             .phase_bias
             .signals
-            .get(&0)
+            .get(&has_sig(sat, 0))
             .unwrap()
             .clone();
         let active_code_before = store
@@ -13658,7 +13863,7 @@ mod tests {
             .unwrap()
             .code_bias
             .signals
-            .get(&0)
+            .get(&has_sig(sat, 0))
             .unwrap()
             .active
             .clone();
@@ -13714,7 +13919,7 @@ mod tests {
                 .unwrap()
                 .phase_bias
                 .signals
-                .get(&0)
+                .get(&has_sig(sat, 0))
                 .unwrap();
             assert_eq!(entry.active, active_before.active);
             assert_eq!(entry.arc_generation, active_before.arc_generation);
@@ -13730,12 +13935,12 @@ mod tests {
                     .unwrap()
                     .code_bias
                     .signals
-                    .get(&0)
+                    .get(&has_sig(sat, 0))
                     .unwrap()
                     .active,
                 active_code_before
             );
-            assert_eq!(store.code_bias(sat, 0), Some(0.30));
+            assert_eq!(store.code_bias(sat, has_sig(sat, 0)), Some(0.30));
 
             // The HAS watermark still advanced, carrying the incoming epoch and PDI.
             assert_eq!(
@@ -13749,14 +13954,14 @@ mod tests {
 
             // Queries with no acknowledgement and with the current RTCM
             // acknowledgement both behave exactly as before the retained input.
-            let q_none = store.query_phase_bias(sat, 0, t_ref30, None);
+            let q_none = store.query_phase_bias(sat, has_sig(sat, 0), t_ref30, None);
             assert_eq!(q_none.status, SsrBiasStatus::Available);
             assert!(matches!(
                 q_none.discontinuity_details,
                 Some(SsrDiscontinuityDetails::SolutionChanged { .. })
             ));
             assert_eq!(q_none.continuity_token, Some(rtcm_token));
-            let q_ack = store.query_phase_bias(sat, 0, t_ref30, Some(rtcm_token));
+            let q_ack = store.query_phase_bias(sat, has_sig(sat, 0), t_ref30, Some(rtcm_token));
             assert_eq!(q_ack.status, SsrBiasStatus::Available);
             assert_eq!(q_ack.bias_m, Some(0.2));
             assert_eq!(
@@ -13786,14 +13991,14 @@ mod tests {
             report25.phase_records[0].resulting_status,
             ActiveProvenanceStatus::ActiveRtcmUsable
         );
-        assert_eq!(store.code_bias(sat, 0), Some(0.30));
+        assert_eq!(store.code_bias(sat, has_sig(sat, 0)), Some(0.30));
         let entry_after_refusal = store
             .corrections
             .get(&sat)
             .unwrap()
             .phase_bias
             .signals
-            .get(&0)
+            .get(&has_sig(sat, 0))
             .unwrap();
         assert_eq!(entry_after_refusal.active, active_before.active);
         assert_eq!(
@@ -13827,7 +14032,7 @@ mod tests {
             report40.phase_records[0].resulting_status,
             ActiveProvenanceStatus::ActiveHasUsable
         );
-        assert_eq!(store.code_bias(sat, 0), Some(0.77));
+        assert_eq!(store.code_bias(sat, has_sig(sat, 0)), Some(0.77));
 
         let has40_token = report40.phase_records[0].continuity_token.unwrap();
         assert_ne!(has40_token, rtcm_token);
@@ -13835,7 +14040,7 @@ mod tests {
         assert!(has40_token.generation() > rtcm_generation);
 
         // The stale RTCM acknowledgement is refused against the new HAS arc.
-        let q_stale_rtcm = store.query_phase_bias(sat, 0, t_ref40, Some(rtcm_token));
+        let q_stale_rtcm = store.query_phase_bias(sat, has_sig(sat, 0), t_ref40, Some(rtcm_token));
         assert_eq!(
             q_stale_rtcm.status,
             SsrBiasStatus::PhaseDiscontinuityNeedsReset
@@ -13845,7 +14050,7 @@ mod tests {
             Some(SsrDiscontinuityDetails::SolutionChanged { .. })
         ));
         // Acknowledging the new token restores a continuous arc.
-        let q_new = store.query_phase_bias(sat, 0, t_ref40, Some(has40_token));
+        let q_new = store.query_phase_bias(sat, has_sig(sat, 0), t_ref40, Some(has40_token));
         assert_eq!(q_new.status, SsrBiasStatus::Available);
         assert_eq!(
             q_new.discontinuity_details,
@@ -13963,7 +14168,8 @@ mod tests {
         let iod_token = revised_iod.phase_records[0].continuity_token.unwrap();
         assert_eq!(iod_token.solution_id(), 2);
         assert_eq!(iod_token.generation(), established_token.generation());
-        let across_iod = store.query_phase_bias(sat, 0, t_ref, Some(established_token));
+        let across_iod =
+            store.query_phase_bias(sat, has_sig(sat, 0), t_ref, Some(established_token));
         assert_eq!(
             across_iod.discontinuity_details,
             Some(SsrDiscontinuityDetails::Continuous),
@@ -14010,13 +14216,16 @@ mod tests {
         assert_ne!(store, before_lifetime);
         assert_eq!(
             store
-                .query_phase_bias(sat, 0, t_ref, None)
+                .query_phase_bias(sat, has_sig(sat, 0), t_ref, None)
                 .lifetime
                 .unwrap(),
             SsrLifetime::GalileoHasValidityInterval(has_validity_interval_s(6).unwrap())
         );
         assert_eq!(
-            store.query_code_bias(sat, 0, t_ref).lifetime.unwrap(),
+            store
+                .query_code_bias(sat, has_sig(sat, 0), t_ref)
+                .lifetime
+                .unwrap(),
             SsrLifetime::GalileoHasValidityInterval(has_validity_interval_s(6).unwrap())
         );
     }
@@ -14101,11 +14310,11 @@ mod tests {
             .unwrap();
 
         let early_token = early_store
-            .query_phase_bias(sat, 0, t_early, None)
+            .query_phase_bias(sat, has_sig(sat, 0), t_early, None)
             .continuity_token
             .unwrap();
         let late_token = late_store
-            .query_phase_bias(sat, 0, t_late, None)
+            .query_phase_bias(sat, has_sig(sat, 0), t_late, None)
             .continuity_token
             .unwrap();
 
@@ -14125,7 +14334,7 @@ mod tests {
         assert_ne!(early_token, late_token);
 
         // The earlier token is stale against the later store.
-        let stale = late_store.query_phase_bias(sat, 0, t_late, Some(early_token));
+        let stale = late_store.query_phase_bias(sat, has_sig(sat, 0), t_late, Some(early_token));
         assert_eq!(stale.status, SsrBiasStatus::PhaseDiscontinuityNeedsReset);
         assert_eq!(
             stale.discontinuity_details,
@@ -14133,7 +14342,7 @@ mod tests {
         );
 
         // The later token is ahead of the earlier store.
-        let future = early_store.query_phase_bias(sat, 0, t_early, Some(late_token));
+        let future = early_store.query_phase_bias(sat, has_sig(sat, 0), t_early, Some(late_token));
         assert_eq!(future.status, SsrBiasStatus::PhaseDiscontinuityNeedsReset);
         assert_eq!(
             future.discontinuity_details,
@@ -14141,13 +14350,14 @@ mod tests {
         );
 
         // Each store still accepts exactly its own current token.
-        let ok_late = late_store.query_phase_bias(sat, 0, t_late, Some(late_token));
+        let ok_late = late_store.query_phase_bias(sat, has_sig(sat, 0), t_late, Some(late_token));
         assert_eq!(ok_late.status, SsrBiasStatus::Available);
         assert_eq!(
             ok_late.discontinuity_details,
             Some(SsrDiscontinuityDetails::Continuous)
         );
-        let ok_early = early_store.query_phase_bias(sat, 0, t_early, Some(early_token));
+        let ok_early =
+            early_store.query_phase_bias(sat, has_sig(sat, 0), t_early, Some(early_token));
         assert_eq!(ok_early.status, SsrBiasStatus::Available);
         assert_eq!(
             ok_early.discontinuity_details,
@@ -14156,19 +14366,21 @@ mod tests {
 
         // Tokens for another signal or satellite are mismatched, not merely stale.
         let other_signal_token = late_store
-            .query_phase_bias(sat, 9, t_late, None)
+            .query_phase_bias(sat, has_sig(sat, 9), t_late, None)
             .continuity_token
             .unwrap();
-        let mismatch_signal = late_store.query_phase_bias(sat, 0, t_late, Some(other_signal_token));
+        let mismatch_signal =
+            late_store.query_phase_bias(sat, has_sig(sat, 0), t_late, Some(other_signal_token));
         assert_eq!(
             mismatch_signal.discontinuity_details,
             Some(SsrDiscontinuityDetails::MismatchedToken)
         );
         let other_sat_token = late_store
-            .query_phase_bias(other_sat, 0, t_late, None)
+            .query_phase_bias(other_sat, has_sig(other_sat, 0), t_late, None)
             .continuity_token
             .unwrap();
-        let mismatch_sat = late_store.query_phase_bias(sat, 0, t_late, Some(other_sat_token));
+        let mismatch_sat =
+            late_store.query_phase_bias(sat, has_sig(sat, 0), t_late, Some(other_sat_token));
         assert_eq!(
             mismatch_sat.discontinuity_details,
             Some(SsrDiscontinuityDetails::MismatchedToken)
@@ -14214,7 +14426,8 @@ mod tests {
             .ingest_has_mt1_with_report(&unavailable_msg, reception_unavail)
             .unwrap();
 
-        let q_unavail = late_store.query_phase_bias(sat, 0, t_unavail, Some(early_token));
+        let q_unavail =
+            late_store.query_phase_bias(sat, has_sig(sat, 0), t_unavail, Some(early_token));
         assert_eq!(q_unavail.status, SsrBiasStatus::Unavailable);
         assert_eq!(
             q_unavail.details,
@@ -14236,7 +14449,8 @@ mod tests {
         );
 
         // An out-of-validity query keeps its time status and still evaluates the token.
-        let q_expired = late_store.query_phase_bias(sat, 0, t_unavail - 1.0, Some(early_token));
+        let q_expired =
+            late_store.query_phase_bias(sat, has_sig(sat, 0), t_unavail - 1.0, Some(early_token));
         assert_eq!(q_expired.status, SsrBiasStatus::NotYetValid);
         assert!(matches!(
             q_expired.details,
@@ -14336,7 +14550,7 @@ mod tests {
                 .unwrap()
                 .phase_bias
                 .signals
-                .get_mut(&9)
+                .get_mut(&has_sig(sat, 9))
                 .unwrap();
             sig_entry.arc_generation = u32::MAX;
             // The active record's token has to carry the same generation, otherwise the
@@ -14392,7 +14606,9 @@ mod tests {
         assert_eq!(store, before, "a refused record mutates nothing");
 
         // RTCM ingestion is transactional across records for the same reason: the
-        // first signal would transition, the second overflows.
+        // first signal would transition, the second overflows. RTCM SSR GPS index 10 is
+        // L2 P, the signal of HAS index 9 whose arc is at the limit; RTCM index 9 is
+        // L2C(M+L), a signal of its own.
         let mut rtcm_hdr = header(SsrKind::PhaseBias);
         rtcm_hdr.update_interval = 5;
         rtcm_hdr.epoch_time_s = (t0_tow + 15.0) as u32;
@@ -14417,7 +14633,7 @@ mod tests {
                         bias: 1000,
                     },
                     SsrPhaseBiasSignal {
-                        signal_id: 9,
+                        signal_id: 10,
                         integer_indicator: 0,
                         wide_lane_integer_indicator: 0,
                         discontinuity_counter: 1,
@@ -14514,12 +14730,16 @@ mod tests {
 
         // 5s into interval: valid
         assert_eq!(
-            store_a.query_code_bias(sat, 0, t_ref + 5.0).status,
+            store_a
+                .query_code_bias(sat, has_sig(sat, 0), t_ref + 5.0)
+                .status,
             SsrBiasStatus::Available
         );
         // 15s into interval: expired because HAS VI is 10s, even though receiver cap is 100s!
         assert_eq!(
-            store_a.query_code_bias(sat, 0, t_ref + 15.0).status,
+            store_a
+                .query_code_bias(sat, has_sig(sat, 0), t_ref + 15.0)
+                .status,
             SsrBiasStatus::Expired
         );
 
@@ -14560,12 +14780,16 @@ mod tests {
 
         // 10s into interval: valid
         assert_eq!(
-            store_b.query_code_bias(sat, 0, t_ref + 10.0).status,
+            store_b
+                .query_code_bias(sat, has_sig(sat, 0), t_ref + 10.0)
+                .status,
             SsrBiasStatus::Available
         );
         // 30s into interval: expired because receiver cap (20s) clips the 300s wire interval!
         assert_eq!(
-            store_b.query_code_bias(sat, 0, t_ref + 30.0).status,
+            store_b
+                .query_code_bias(sat, has_sig(sat, 0), t_ref + 30.0)
+                .status,
             SsrBiasStatus::Expired
         );
 
@@ -14592,12 +14816,14 @@ mod tests {
         store_c.ingest_ssr(&rtcm_msg, reception).unwrap();
 
         // RTCM centered window |t - ref| <= effective_limit allows t_ref - 5.0
-        let q_rtcm_before = store_c.query_code_bias(sat, 0, t_ref - 5.0);
+        let q_rtcm_before = store_c.query_code_bias(sat, has_sig(sat, 0), t_ref - 5.0);
         assert_eq!(q_rtcm_before.status, SsrBiasStatus::Available);
 
         // But HAS at t_ref - 5.0 is NotYetValid due to forward-only validity
         assert_eq!(
-            store_a.query_code_bias(sat, 0, t_ref - 5.0).status,
+            store_a
+                .query_code_bias(sat, has_sig(sat, 0), t_ref - 5.0)
+                .status,
             SsrBiasStatus::NotYetValid
         );
     }
@@ -15366,5 +15592,346 @@ mod tests {
                 )
                 .is_none());
         }
+    }
+
+    /// Galileo HAS and RTCM SSR bias records that carry the same raw signal index for
+    /// different physical signals never share an entry, whichever arrives first. GPS
+    /// index 9 is L2 P in HAS SIS ICD Table 20 and L2C(M+L) in RTCM SSR; Galileo index 0
+    /// is E1-B in HAS and E1-A in RTCM SSR. Each record is accepted as the first on its
+    /// own signal, keeps its value, solution and raw index, and starts its own phase arc.
+    /// A record of the same physical signal from the other source (RTCM GPS index 10,
+    /// L2 P) still shares the HAS entry and is arbitrated by arrival.
+    #[test]
+    fn has_and_rtcm_records_of_different_signals_stay_apart_in_both_orders() {
+        let gps = GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap();
+        let gal = GnssSatelliteId::new(GnssSystem::Galileo, 1).unwrap();
+        let tow = 100_000.0;
+        let toh = ((tow as u32 % 3600) + 20) as u16;
+        let reception = GnssWeekTow::new(TimeScale::Gst, 1042, tow + 20.0).unwrap();
+        let t = has_mt1_reference_j2000_s(reception, toh).unwrap() + 1.0;
+
+        let has = HasMt1Message {
+            header: HasMt1Header {
+                toh_s: toh,
+                mask: true,
+                orbit: false,
+                clock_full_set: false,
+                clock_subset: false,
+                code_bias: true,
+                phase_bias: true,
+                reserved: 0,
+                mask_id: 1,
+                iod_set_id: 1,
+            },
+            mask: Some(HasMaskBlock {
+                systems: vec![
+                    HasGnssMask {
+                        system: GnssSystem::Gps,
+                        satellites: vec![gps.prn],
+                        signals: vec![9],
+                        cell_mask: None,
+                        nav_message: 0,
+                    },
+                    HasGnssMask {
+                        system: GnssSystem::Galileo,
+                        satellites: vec![gal.prn],
+                        signals: vec![0],
+                        cell_mask: None,
+                        nav_message: 0,
+                    },
+                ],
+                reserved: 0,
+            }),
+            orbit: None,
+            clock_full_set: None,
+            clock_subset: None,
+            code_bias: Some(HasCodeBiasBlock {
+                validity_interval: 5,
+                records: vec![
+                    HasCodeBias {
+                        sat: gps,
+                        signal_id: 9,
+                        bias_m: Some(0.50),
+                    },
+                    HasCodeBias {
+                        sat: gal,
+                        signal_id: 0,
+                        bias_m: Some(0.60),
+                    },
+                ],
+            }),
+            phase_bias: Some(HasPhaseBiasBlock {
+                validity_interval: 5,
+                records: vec![
+                    HasPhaseBias {
+                        sat: gps,
+                        signal_id: 9,
+                        bias_cycles: Some(0.20),
+                        discontinuity_indicator: 0,
+                    },
+                    HasPhaseBias {
+                        sat: gal,
+                        signal_id: 0,
+                        bias_cycles: Some(0.30),
+                        discontinuity_indicator: 0,
+                    },
+                ],
+            }),
+            padding_bits: Vec::new(),
+        };
+        assert!(has.encode().is_ok());
+
+        let rtcm = |message_number: u16, system: GnssSystem, kind: SsrKind, index: u8| {
+            let mut header = header(kind);
+            header.epoch_time_s = (tow + 20.0) as u32;
+            let mut message = SsrMessage {
+                message_number,
+                system,
+                kind,
+                header,
+                orbit: Vec::new(),
+                clock: Vec::new(),
+                code_bias: Vec::new(),
+                phase_bias: Vec::new(),
+                ura: Vec::new(),
+                padding_bits: Vec::new(),
+            };
+            match kind {
+                SsrKind::CodeBias => {
+                    message.code_bias = vec![crate::rtcm::SsrCodeBiasRecord {
+                        satellite_id: 1,
+                        biases: vec![(index, 70)],
+                    }];
+                }
+                _ => {
+                    message.phase_bias = vec![SsrPhaseBiasRecord {
+                        satellite_id: 1,
+                        yaw_angle: 0,
+                        yaw_rate: 0,
+                        biases: vec![SsrPhaseBiasSignal {
+                            signal_id: index,
+                            integer_indicator: 0,
+                            wide_lane_integer_indicator: 0,
+                            discontinuity_counter: 10,
+                            bias: 3500,
+                        }],
+                    }];
+                }
+            }
+            message
+        };
+        let rtcm_messages = [
+            rtcm(1059, GnssSystem::Gps, SsrKind::CodeBias, 9),
+            rtcm(1265, GnssSystem::Gps, SsrKind::PhaseBias, 9),
+            rtcm(1242, GnssSystem::Galileo, SsrKind::CodeBias, 0),
+            rtcm(1267, GnssSystem::Galileo, SsrKind::PhaseBias, 0),
+        ];
+        let rtcm_code_m = 70.0 * RTCM_SSR_CODE_BIAS_SCALE_M;
+        let rtcm_phase_m = 3500.0 * RTCM_SSR_PHASE_BIAS_SCALE_M;
+        let code = |band: char, attribute: char| SignalCode::new(band, attribute).unwrap();
+
+        for has_first in [true, false] {
+            let mut store = SsrCorrectionStore::new();
+            let ingest_rtcm = |store: &mut SsrCorrectionStore| {
+                for message in &rtcm_messages {
+                    store.ingest_ssr(message, reception).unwrap();
+                }
+            };
+            if !has_first {
+                ingest_rtcm(&mut store);
+            }
+            let report = store.ingest_has_mt1_with_report(&has, reception).unwrap();
+            if has_first {
+                ingest_rtcm(&mut store);
+            }
+
+            // Whichever arrived first, each HAS record found no RTCM record on its signal.
+            for (reason, status) in report
+                .code_records
+                .iter()
+                .map(|r| (r.reason, r.resulting_status))
+                .chain(
+                    report
+                        .phase_records
+                        .iter()
+                        .map(|r| (r.reason, r.resulting_status)),
+                )
+            {
+                assert_eq!(reason, IngestionActionReason::AcceptedInitialRecord);
+                assert_eq!(status, ActiveProvenanceStatus::ActiveHasUsable);
+            }
+            assert_eq!(
+                report.code_records[0].signal,
+                SsrRawSignal::galileo_has(GnssSystem::Gps, 9)
+            );
+            assert_eq!(
+                report.code_records[0].key,
+                SsrSignalKey::Physical(GnssSignal::new(GnssSystem::Gps, code('2', 'P')))
+            );
+            assert_eq!(
+                report.phase_records[1].key,
+                SsrSignalKey::Physical(GnssSignal::new(GnssSystem::Galileo, code('1', 'B')))
+            );
+
+            for (sat, index, has_code_m, has_cycles, rtcm_code) in [
+                (gps, 9, 0.50, 0.20, code('2', 'X')),
+                (gal, 0, 0.60, 0.30, code('1', 'A')),
+            ] {
+                let has_raw = SsrRawSignal::galileo_has(sat.system, index);
+                let rtcm_raw = SsrRawSignal::rtcm_ssr(sat.system, index);
+                assert_ne!(has_raw.key(), rtcm_raw.key());
+                assert_eq!(
+                    rtcm_raw.key(),
+                    SsrSignalKey::Physical(GnssSignal::new(sat.system, rtcm_code))
+                );
+
+                let has_q = store.query_code_bias(sat, has_raw, t);
+                assert_eq!(has_q.status, SsrBiasStatus::Available, "{sat} {has_first}");
+                assert_eq!(has_q.bias_m, Some(has_code_m));
+                assert_eq!(has_q.source_signal, Some(has_raw));
+                assert_eq!(has_q.solution.unwrap().source, SsrSource::GalileoHas);
+                let rtcm_q = store.query_code_bias(sat, rtcm_raw, t);
+                assert_eq!(rtcm_q.status, SsrBiasStatus::Available, "{sat} {has_first}");
+                assert_eq!(rtcm_q.bias_m.map(f64::to_bits), Some(rtcm_code_m.to_bits()));
+                assert_eq!(rtcm_q.source_signal, Some(rtcm_raw));
+                assert_eq!(rtcm_q.solution.unwrap().source, SsrSource::RtcmSsr);
+
+                let has_p = store.query_phase_bias(sat, has_raw, t, None);
+                assert_eq!(has_p.status, SsrBiasStatus::Available);
+                assert_eq!(has_p.bias_cycles, Some(has_cycles));
+                assert_eq!(has_p.source_signal, Some(has_raw));
+                assert_eq!(
+                    has_p.discontinuity_details,
+                    Some(SsrDiscontinuityDetails::InitialTokenEstablished)
+                );
+                let has_token = has_p.continuity_token.unwrap();
+                assert_eq!(has_token.source(), SsrSource::GalileoHas);
+                assert_eq!(has_token.signal(), has_raw.key());
+                assert_eq!(has_token.generation(), 0);
+                let rtcm_p = store.query_phase_bias(sat, rtcm_raw, t, None);
+                assert_eq!(rtcm_p.status, SsrBiasStatus::Available);
+                assert_eq!(
+                    rtcm_p.bias_m.map(f64::to_bits),
+                    Some(rtcm_phase_m.to_bits())
+                );
+                assert_eq!(
+                    rtcm_p.discontinuity_details,
+                    Some(SsrDiscontinuityDetails::InitialTokenEstablished)
+                );
+                let rtcm_token = rtcm_p.continuity_token.unwrap();
+                assert_eq!(rtcm_token.source(), SsrSource::RtcmSsr);
+                assert_eq!(rtcm_token.generation(), 0);
+                // Each token belongs to its own signal only.
+                assert_eq!(
+                    store
+                        .query_phase_bias(sat, has_raw, t, Some(rtcm_token))
+                        .discontinuity_details,
+                    Some(SsrDiscontinuityDetails::MismatchedToken)
+                );
+            }
+
+            // RTCM GPS index 10 is L2 P, the physical signal of HAS index 9: it shares
+            // that entry, replaces the active record by arrival and breaks the phase arc.
+            store
+                .ingest_ssr(
+                    &rtcm(1059, GnssSystem::Gps, SsrKind::CodeBias, 10),
+                    reception,
+                )
+                .unwrap();
+            store
+                .ingest_ssr(
+                    &rtcm(1265, GnssSystem::Gps, SsrKind::PhaseBias, 10),
+                    reception,
+                )
+                .unwrap();
+            let has_raw = SsrRawSignal::galileo_has(GnssSystem::Gps, 9);
+            let shared = store.query_code_bias(gps, has_raw, t);
+            assert_eq!(shared.status, SsrBiasStatus::Available);
+            assert_eq!(
+                shared.source_signal,
+                Some(SsrRawSignal::rtcm_ssr(GnssSystem::Gps, 10))
+            );
+            assert_eq!(shared.solution.unwrap().source, SsrSource::RtcmSsr);
+            let shared_p = store.query_phase_bias(gps, has_raw, t, None);
+            assert!(matches!(
+                shared_p.discontinuity_details,
+                Some(SsrDiscontinuityDetails::SolutionChanged { .. })
+            ));
+            assert_eq!(shared_p.continuity_token.unwrap().generation(), 1);
+            // The L2C(M+L) record at RTCM index 9 is untouched.
+            let l2x =
+                store.query_phase_bias(gps, SsrRawSignal::rtcm_ssr(GnssSystem::Gps, 9), t, None);
+            assert_eq!(l2x.continuity_token.unwrap().generation(), 0);
+            assert_eq!(
+                l2x.source_signal,
+                Some(SsrRawSignal::rtcm_ssr(GnssSystem::Gps, 9))
+            );
+        }
+    }
+
+    /// A bias on an index its source's table leaves unassigned is stored under its raw
+    /// source-qualified signal, kept, reported as an unknown signal by the typed query
+    /// once in its lifetime, and never collides with the other source's same index.
+    #[test]
+    fn unassigned_rtcm_and_has_indices_are_kept_apart_as_unknown_signals() {
+        let gps = GnssSatelliteId::new(GnssSystem::Gps, 1).unwrap();
+        let tow = 100_000.0;
+        let reception = GnssWeekTow::new(TimeScale::Gst, 1042, tow + 20.0).unwrap();
+        let mut header = header(SsrKind::CodeBias);
+        header.epoch_time_s = (tow + 20.0) as u32;
+        // RTCM SSR GPS index 12 is unassigned in RTKLIB `ssr_sig_gps`.
+        let message = SsrMessage {
+            message_number: 1059,
+            system: GnssSystem::Gps,
+            kind: SsrKind::CodeBias,
+            header,
+            orbit: Vec::new(),
+            clock: Vec::new(),
+            code_bias: vec![crate::rtcm::SsrCodeBiasRecord {
+                satellite_id: 1,
+                biases: vec![(12, 70), (0, 30)],
+            }],
+            phase_bias: Vec::new(),
+            ura: Vec::new(),
+            padding_bits: Vec::new(),
+        };
+        let mut store = SsrCorrectionStore::new();
+        store.ingest_ssr(&message, reception).unwrap();
+        let t = ssr_epoch_j2000_s(GnssSystem::Gps, 1059, reception, (tow + 20.0) as u32).unwrap();
+
+        let raw = SsrRawSignal::rtcm_ssr(GnssSystem::Gps, 12);
+        let q = store.query_code_bias(gps, raw, t);
+        assert_eq!(q.status, SsrBiasStatus::UnknownSignal);
+        assert_eq!(q.signal, SsrSignalKey::Unknown(raw));
+        assert_eq!(q.source_signal, Some(raw));
+        assert_eq!(q.details, SsrBiasResolutionDetails::UnknownSignal(raw));
+        // The transmitted value is reported; the status keeps it from being applied.
+        assert_eq!(
+            q.bias_m.map(f64::to_bits),
+            Some((70.0 * RTCM_SSR_CODE_BIAS_SCALE_M).to_bits())
+        );
+        assert_eq!(q.solution.unwrap().source, SsrSource::RtcmSsr);
+        // The value is kept, and the untimed inspector returns it.
+        assert_eq!(
+            store.code_bias(gps, raw).map(f64::to_bits),
+            Some((70.0 * RTCM_SSR_CODE_BIAS_SCALE_M).to_bits())
+        );
+        // HAS GPS index 12 is L5 Q, a different, assigned signal with no record here.
+        assert_eq!(
+            store
+                .query_code_bias(gps, SsrRawSignal::galileo_has(GnssSystem::Gps, 12), t)
+                .status,
+            SsrBiasStatus::Missing
+        );
+        // Past its lifetime the record is expired, like any other.
+        assert_eq!(
+            store.query_code_bias(gps, raw, t + 1000.0).status,
+            SsrBiasStatus::Expired
+        );
+        // The assigned signal of the same message applies.
+        assert_eq!(
+            store.query_code_bias(gps, rtcm_sig(gps, 0), t).status,
+            SsrBiasStatus::Available
+        );
     }
 }

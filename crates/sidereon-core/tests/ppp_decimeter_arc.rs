@@ -53,15 +53,16 @@ use sidereon_core::ppp_corrections::{
     PppCorrectionsOptions, SatelliteAntenna, SatelliteAntennaFrequency, SatelliteAntennaOptions,
 };
 use sidereon_core::precise_positioning::{
-    solve_float_epochs, FloatEpoch, FloatObservation, FloatSolveConfig, FloatSolveOptions,
-    FloatState, MeasurementWeights, PcvSample, PppCorrectionLookup, RangeCorrections,
-    ReceiverAntennaFrequency, ReceiverAntennaOptions, SatelliteClockCorrections, TropoMapping,
-    TroposphereOptions, VmfSiteSample, VmfSiteSeries,
+    solve_float_epochs, FloatEpoch, FloatObservation, FloatObservationSignals, FloatSolveConfig,
+    FloatSolveOptions, FloatState, MeasurementWeights, PcvSample, PppCorrectionLookup,
+    RangeCorrections, ReceiverAntennaFrequency, ReceiverAntennaOptions, SatelliteClockCorrections,
+    TropoMapping, TroposphereOptions, VmfSiteSample, VmfSiteSeries,
 };
 use sidereon_core::rinex::clock::RinexClock;
 use sidereon_core::rinex::observations::{
     observation_values, ObsEpoch, ObsEpochTime, ObservationFilter, RinexObs,
 };
+use sidereon_core::ssr::{has_signal, rtcm_ssr_signal, GnssSignal, SignalCode};
 use sidereon_core::tides::OceanLoadingBlq;
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 use std::collections::{BTreeMap, BTreeSet};
@@ -212,6 +213,20 @@ fn gps_l1_l2_filter() -> ObservationFilter {
     )])
 }
 
+/// Tracking codes of the C1C/C2W/L1C/L2W ionosphere-free observations, read as the
+/// file's RINEX version reads them.
+fn gps_l1_l2_signals(system: GnssSystem, rinex_version: f64) -> FloatObservationSignals {
+    let code = |name: &str| {
+        SignalCode::from_rinex(system, name, rinex_version).expect("RINEX 3 observation code")
+    };
+    FloatObservationSignals {
+        code1: code("C1C"),
+        code2: code("C2W"),
+        phase1: code("L1C"),
+        phase2: code("L2W"),
+    }
+}
+
 fn float_observations(epoch: &ObsEpoch, obs: &RinexObs) -> Vec<FloatObservation> {
     let mut out = observation_values(obs, epoch, &gps_l1_l2_filter())
         .expect("valid observation values")
@@ -245,6 +260,7 @@ fn float_observations(epoch: &ObsEpoch, obs: &RinexObs) -> Vec<FloatObservation>
                 freq1_hz: F_L1_HZ,
                 freq2_hz: F_L2_HZ,
                 glonass_channel: None,
+                signals: Some(gps_l1_l2_signals(sat.system, obs.header.version)),
             })
         })
         .collect::<Vec<_>>();
@@ -717,6 +733,27 @@ fn zim2_vmf1_series() -> VmfSiteSeries {
         },
     ])
     .expect("valid ZIM2 VMF1 site series")
+}
+
+/// An SSR bias applies only to the physical signal it names. The ZIM2 arc is formed
+/// from C1C/C2W and L1C/L2W, whose L2 signal is the semi-codeless P(Y) measurement:
+/// RTCM SSR GPS signal 11 (L2 Z-tracking) names it, and Galileo HAS GPS signal 9 (L2 P)
+/// does not. The fixtures carry no SSR or HAS bias stream, so the solves below apply
+/// none.
+#[test]
+fn zim2_l2_codes_map_to_rtcm_ssr_l2w_and_not_to_has_l2p() {
+    let l2w = GnssSignal::new(
+        GnssSystem::Gps,
+        SignalCode::from_rinex(GnssSystem::Gps, "C2W", load_obs().header.version)
+            .expect("RINEX 3 code"),
+    );
+    assert_eq!(rtcm_ssr_signal(GnssSystem::Gps, 11), Some(l2w));
+    let has_l2p = has_signal(GnssSystem::Gps, 9).expect("HAS GPS signal 9");
+    assert_eq!(
+        has_l2p.code(),
+        SignalCode::parse("2P").expect("signal code")
+    );
+    assert_ne!(has_l2p, l2w);
 }
 
 /// THE HEADLINE: full correction stack ON reaches decimeter truth and matches

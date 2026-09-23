@@ -13,8 +13,8 @@ use crate::dop::PositionCovariance;
 use crate::ils::IlsError;
 use crate::ppp_corrections::{CivilDateTime, PppCorrections, PppCorrectionsOptions};
 use crate::ssr::{
-    PhaseContinuityToken, SsrBiasStatus, SsrCodeBiasQueryResult, SsrCorrectedEphemeris,
-    SsrPhaseBiasQueryResult, SsrSolution,
+    GnssSignal, PhaseContinuityToken, SignalCode, SsrBiasStatus, SsrCodeBiasQueryResult,
+    SsrCorrectedEphemeris, SsrPhaseBiasQueryResult, SsrSignalKey, SsrSolution,
 };
 use crate::tropo::Met;
 use crate::{GnssSatelliteId, GnssSystem};
@@ -43,6 +43,31 @@ pub struct FloatObservation {
     pub freq2_hz: f64,
     /// GLONASS FDMA frequency-channel number for this satellite, when known.
     pub glonass_channel: Option<i8>,
+    /// Tracking codes of the two pseudoranges and two carrier phases the
+    /// ionosphere-free code and phase were formed from, when known. SSR/HAS
+    /// biases are queried for exactly these signals, and an observation without
+    /// them takes none ([`PppCorrectionLookup::with_ssr_biases`]).
+    pub signals: Option<FloatObservationSignals>,
+}
+
+/// Tracking codes of the measurements an ionosphere-free [`FloatObservation`] was
+/// formed from, in the RINEX 3 band and attribute convention of [`SignalCode`]
+/// (`1C` for `C1C` and `L1C`). The system is the observation satellite's.
+///
+/// The library does not fill them. A caller building observations from RINEX sets
+/// them from the observation codes it read ([`SignalCode::from_rinex`]), and one
+/// building them from RTCM MSM from the cells' signal ids
+/// ([`SignalCode::from_msm_signal`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatObservationSignals {
+    /// Signal of the first pseudorange.
+    pub code1: SignalCode,
+    /// Signal of the second pseudorange.
+    pub code2: SignalCode,
+    /// Signal of the first carrier phase.
+    pub phase1: SignalCode,
+    /// Signal of the second carrier phase.
+    pub phase2: SignalCode,
 }
 
 /// One static PPP epoch.
@@ -587,24 +612,6 @@ pub struct PppCorrectionLookup {
     pub ssr_bias_report: Option<SsrPppBiasApplicationReport>,
 }
 
-/// SSR/HAS signal ids used to apply parsed per-signal biases to an IF PPP row.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct SsrPppBiasSignalPair {
-    /// Signal id queried for the first code bias in the correction store.
-    pub code1_signal: u8,
-    /// Signal id queried for the second code bias in the correction store.
-    pub code2_signal: u8,
-    /// Signal id queried for the first phase bias in the correction store.
-    pub phase1_signal: u8,
-    /// Signal id queried for the second phase bias in the correction store.
-    pub phase2_signal: u8,
-    /// First carrier frequency used for the ionosphere-free bias combination.
-    pub freq1_hz: f64,
-    /// Second carrier frequency paired with [`Self::freq1_hz`] for the
-    /// ionosphere-free bias combination.
-    pub freq2_hz: f64,
-}
-
 /// Status of an ionosphere-free bias combination for an observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -613,14 +620,26 @@ pub enum SsrIfCombinationStatus {
     Applied,
     /// Bias application was explicitly opted out by caller options.
     OptedOut,
-    /// No signal pair was configured for this satellite / system.
-    NoSignalPairConfigured,
     /// One or both requested signals were not available in the store at the transmission
     /// time: missing, transmitted as unavailable, not yet valid or expired. Each signal
     /// report's query result states which.
     SignalUnavailable,
-    /// Carrier frequencies are invalid (non-finite, non-positive, or equal).
+    /// Carrier frequencies are invalid (non-finite, non-positive, or equal), as for
+    /// two signals of one band.
     InvalidFrequencies,
+    /// The observation carries no tracking codes ([`FloatObservation::signals`] is
+    /// `None`), so which physical signals it was formed from is not known and no bias
+    /// can be matched to it.
+    ObservationSignalsUnknown,
+    /// The carrier frequency of a signal's band cannot be resolved: a GLONASS G1 or G2
+    /// FDMA signal of an observation whose frequency channel is neither given nor
+    /// inferable from its frequencies, or a band with no defined carrier for the system.
+    CarrierUnresolved,
+    /// A carrier frequency the observation states ([`FloatObservation::freq1_hz`],
+    /// [`FloatObservation::freq2_hz`]) is not the carrier of the band of its tracking
+    /// code within the PPP frequency tolerance, so the codes and the frequencies the
+    /// observation was combined with disagree.
+    ObservationFrequencyMismatch,
     /// Provider source or solution differs between the two signals.
     IncompatibleSourceOrSolution,
     /// IOD SSR differs between the two signals.
@@ -665,8 +684,8 @@ pub struct SsrObsSignalReport<Q> {
     pub sat: GnssSatelliteId,
     /// Ambiguity ID from the observation.
     pub ambiguity_id: String,
-    /// Requested signal ID.
-    pub signal_id: u8,
+    /// Requested physical signal.
+    pub signal: GnssSignal,
     /// The full query result returned by the correction store.
     pub query_result: Q,
 }
@@ -688,6 +707,8 @@ pub struct SsrObsApplicationReport {
     /// Solution of the SSR orbit and clock corrections the ephemeris source applies to the
     /// satellite at the transmission time, if any.
     pub applied_orbit_clock_solution: Option<SsrSolution>,
+    /// Tracking codes the observation carries, whose biases were queried.
+    pub observation_signals: Option<FloatObservationSignals>,
     /// Code IF combination status.
     pub code_status: SsrIfCombinationStatus,
     /// Applied code IF bias in meters (opposite sign convention, added to modeled code range).
@@ -743,8 +764,8 @@ pub struct SsrPppBiasApplicationReport {
 /// Identity of one SSR/HAS bias record an applied ionosphere-free bias was formed from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SsrBiasRecord {
-    /// Signal identifier.
-    pub signal: u8,
+    /// Signal of the record.
+    pub signal: SsrSignalKey,
     /// Source, provider and solution of the record, which is also the solution of the
     /// orbit and clock corrections it was applied with.
     pub solution: SsrSolution,
@@ -778,7 +799,7 @@ pub enum SsrTransmitTimeFailure {
         /// Transmission time, seconds since J2000.
         transmit_time_j2000_s: f64,
         /// Signal of the record.
-        signal: u8,
+        signal: SsrSignalKey,
         /// Status of the query for that signal at the transmission time. `Available` means
         /// another record, of a different solution, IOD SSR or reference epoch, is.
         status: SsrBiasStatus,
@@ -845,21 +866,15 @@ pub struct SsrBiasExclusion {
     pub application: Option<SsrObsApplicationReport>,
 }
 
-/// Per-satellite and per-system default signal mapping for SSR/HAS PPP biases.
+/// Options for applying SSR/HAS PPP biases.
 ///
-/// Both application flags default to `true`, so the default value *requests* code and phase
-/// biases for every observation while configuring no signal pairs to resolve them from.
-/// Because requested biases fail closed, passing the default value straight to
-/// [`PppCorrectionLookup::with_ssr_biases`] makes every observation unresolvable rather than
-/// a no-op; see that method for the full behaviour and for how to opt out explicitly.
+/// Both application flags default to `true`, so the default value requests code and phase
+/// biases for every observation. Each observation's biases are those of the signals it was
+/// formed from ([`FloatObservation::signals`]); no signal mapping is configured. See
+/// [`PppCorrectionLookup::with_ssr_biases`] for the full behaviour and for how to opt out.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct SsrPppBiasOptions {
-    /// Satellite-specific signal pairs checked first for each observation.
-    pub per_satellite: BTreeMap<GnssSatelliteId, SsrPppBiasSignalPair>,
-    /// Fallback signal pairs selected by the observation satellite's GNSS
-    /// system when no satellite-specific pair exists.
-    pub per_system: BTreeMap<GnssSystem, SsrPppBiasSignalPair>,
     /// Whether code biases are requested (defaults to `true`).
     ///
     /// When `true`, an observation whose code bias cannot be resolved fails closed rather
@@ -870,15 +885,14 @@ pub struct SsrPppBiasOptions {
     /// When `true`, an observation whose phase bias cannot be resolved fails closed rather
     /// than being omitted. Set it to `false` to opt out.
     pub apply_phase_biases: bool,
-    /// Per-(ambiguity_id, signal_id) phase continuity acknowledgement tokens.
-    pub phase_continuity_tokens: BTreeMap<(String, u8), PhaseContinuityToken>,
+    /// Phase continuity acknowledgement tokens keyed by ambiguity id and the signal
+    /// code of the phase bias, whose system is the ambiguity's satellite's.
+    pub phase_continuity_tokens: BTreeMap<(String, SignalCode), PhaseContinuityToken>,
 }
 
 impl Default for SsrPppBiasOptions {
     fn default() -> Self {
         Self {
-            per_satellite: BTreeMap::new(),
-            per_system: BTreeMap::new(),
             apply_code_biases: true,
             apply_phase_biases: true,
             phase_continuity_tokens: BTreeMap::new(),
@@ -890,15 +904,6 @@ impl SsrPppBiasOptions {
     /// Create new bias options with both code and phase biases enabled by default.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Return the satellite-specific pair, or the pair configured for its GNSS
-    /// system when no satellite-specific entry exists.
-    pub fn signal_pair(&self, sat: GnssSatelliteId) -> Option<SsrPppBiasSignalPair> {
-        self.per_satellite
-            .get(&sat)
-            .copied()
-            .or_else(|| self.per_system.get(&sat.system).copied())
     }
 
     /// Builder method to configure code bias application opt-in/opt-out.
@@ -917,31 +922,11 @@ impl SsrPppBiasOptions {
     pub fn with_phase_continuity_token(
         mut self,
         ambiguity_id: impl Into<String>,
-        signal: u8,
+        signal: SignalCode,
         token: PhaseContinuityToken,
     ) -> Self {
         self.phase_continuity_tokens
             .insert((ambiguity_id.into(), signal), token);
-        self
-    }
-
-    /// Builder method to register a fallback signal pair for a GNSS system.
-    pub fn with_system_signal_pair(
-        mut self,
-        system: GnssSystem,
-        pair: SsrPppBiasSignalPair,
-    ) -> Self {
-        self.per_system.insert(system, pair);
-        self
-    }
-
-    /// Builder method to register a satellite-specific signal pair.
-    pub fn with_satellite_signal_pair(
-        mut self,
-        sat: GnssSatelliteId,
-        pair: SsrPppBiasSignalPair,
-    ) -> Self {
-        self.per_satellite.insert(sat, pair);
         self
     }
 }
@@ -1044,16 +1029,36 @@ impl PppCorrectionLookup {
     /// [`Self::phase_bias_records`]), and the row model checks them again at the
     /// transmission time of every solve iteration.
     ///
+    /// # Signals are matched by tracking code
+    ///
+    /// Each observation's biases are queried for exactly the signals it was formed from:
+    /// the code biases for its two pseudorange codes and the phase biases for its two
+    /// carrier-phase codes ([`FloatObservation::signals`]), with the satellite's system.
+    /// An observation without codes is reported
+    /// [`SsrIfCombinationStatus::ObservationSignalsUnknown`], and a signal with no bias is
+    /// reported unavailable; no bias of another signal on the same carrier is substituted,
+    /// so a `C2W` observation takes no `C2P` bias. The biases are looked up by physical
+    /// signal ([`crate::ssr::GnssSignal`]), so a Galileo HAS and an RTCM SSR record of one
+    /// signal are the same bias, and a record the store keeps under a raw index its
+    /// source's table does not assign never matches.
+    ///
     /// Ionosphere-free combination requires the satellite not to be excluded by a HAS
     /// do-not-use indication, valid finite unequal carrier frequencies, both signals
     /// available from one solution with matching IOD SSR, and no phase continuity break
-    /// against a caller token. The frequencies are the signal pair's, or the observation's
-    /// when either configured value is not positive. It also requires `ephemeris` to apply
-    /// SSR orbit and clock corrections to the satellite at the transmission time
-    /// ([`SsrCorrectedEphemeris::applied_orbit_clock_solution`]) and the biases to come
-    /// from that same source, provider and solution. A bias from any other solution is
-    /// reported as [`SsrIfCombinationStatus::OrbitClockSolutionMismatch`] and not applied;
-    /// where `ephemeris` declines the satellite or falls back to the broadcast state it is
+    /// against a caller token. The frequencies are those of the signals' bands, a GLONASS
+    /// FDMA band's at the observation's frequency channel
+    /// ([`FloatObservation::glonass_channel`], or else the channel whose G1 and G2
+    /// carriers its `freq1_hz` and `freq2_hz` are); a band whose carrier cannot be
+    /// resolved is reported [`SsrIfCombinationStatus::CarrierUnresolved`]. A non-zero
+    /// frequency the observation states has to be its band's carrier within the PPP
+    /// frequency tolerance, or the bias is reported
+    /// [`SsrIfCombinationStatus::ObservationFrequencyMismatch`]. It also requires
+    /// `ephemeris` to apply SSR orbit and clock corrections to the satellite at the
+    /// transmission time ([`SsrCorrectedEphemeris::applied_orbit_clock_solution`]) and
+    /// the biases to come from that same source, provider and solution. A bias from any
+    /// other solution is reported as
+    /// [`SsrIfCombinationStatus::OrbitClockSolutionMismatch`] and not applied; where
+    /// `ephemeris` declines the satellite or falls back to the broadcast state it is
     /// reported as [`SsrIfCombinationStatus::OrbitClockSolutionUnavailable`].
     ///
     /// The solve has to be given this same `ephemeris` as its source: the row model reads
@@ -1066,7 +1071,7 @@ impl PppCorrectionLookup {
     ///
     /// A phase bias is queried with the token stored in
     /// [`SsrPppBiasOptions::phase_continuity_tokens`] under the observation's ambiguity id
-    /// and the signal. A token that does not continue the current arc yields
+    /// and the signal code. A token that does not continue the current arc yields
     /// [`SsrIfCombinationStatus::PhaseDiscontinuityNeedsReset`] for that ambiguity only.
     /// Without a token the caller holds no arc for that ambiguity, so the bias is applied and
     /// any break recorded since the previous arc is reported in the signal report's
@@ -1087,12 +1092,6 @@ impl PppCorrectionLookup {
     /// report's row for it. A static solve fails only when the observations that remain
     /// cannot support it, with
     /// [`FloatSolveError::InsufficientObservationsAfterSsrBiasExclusion`].
-    ///
-    /// This includes the case where nothing was configured to resolve. Default options carry
-    /// no `per_satellite` or `per_system` signal pairs, so
-    /// `with_ssr_biases(&ephemeris, &epochs, position, &SsrPppBiasOptions::default())`
-    /// reports every observation as [`SsrIfCombinationStatus::NoSignalPairConfigured`], and a
-    /// solve on the result excludes every observation.
     ///
     /// To run without SSR/HAS biases, opt out explicitly with
     /// [`SsrPppBiasOptions::with_apply_code_biases`] and
@@ -1149,26 +1148,23 @@ impl PppCorrectionLookup {
                     }
                     None => None,
                 };
-                let signals = options.signal_pair(obs.sat);
+                let observed = obs.signals;
 
-                let (code_outcome, code1_report, code2_report) =
-                    match (signals, transmit_time_j2000_s) {
-                        _ if !options.apply_code_biases => {
-                            (Err(SsrIfCombinationStatus::OptedOut), None, None)
-                        }
-                        (None, _) => (
-                            Err(SsrIfCombinationStatus::NoSignalPairConfigured),
-                            None,
-                            None,
-                        ),
-                        (Some(signals), transmit_time) => {
+                let (code_outcome, code1_report, code2_report) = if !options.apply_code_biases {
+                    (Err(SsrIfCombinationStatus::OptedOut), None, None)
+                } else {
+                    let transmit_time = transmit_time_j2000_s;
+                    match matched_signals(obs, observed.map(|o| [o.code1, o.code2])) {
+                        Err(status) => (Err(status), None, None),
+                        Ok(matched) => {
                             let t_query = transmit_time.unwrap_or(epoch.t_rx_j2000_s);
-                            let q1 = store.query_code_bias(obs.sat, signals.code1_signal, t_query);
-                            let q2 = store.query_code_bias(obs.sat, signals.code2_signal, t_query);
+                            let [s1, s2] = matched.signals;
+                            let q1 = store.query_code_bias(obs.sat, s1, t_query);
+                            let q2 = store.query_code_bias(obs.sat, s2, t_query);
                             let views = [BiasQueryView::code(&q1), BiasQueryView::code(&q2)];
                             let outcome = match transmit_time {
                                 Some(_) => ionosphere_free_ssr_bias_m(
-                                    combination_frequencies(&signals, obs),
+                                    matched.frequencies_hz,
                                     applied_orbit_clock_solution,
                                     views[0],
                                     views[1],
@@ -1177,46 +1173,34 @@ impl PppCorrectionLookup {
                             };
                             (
                                 outcome,
-                                Some(signal_report(epoch_index, obs, signals.code1_signal, q1)),
-                                Some(signal_report(epoch_index, obs, signals.code2_signal, q2)),
+                                Some(signal_report(epoch_index, obs, s1, q1)),
+                                Some(signal_report(epoch_index, obs, s2, q2)),
                             )
                         }
-                    };
+                    }
+                };
 
-                let (phase_outcome, phase1_report, phase2_report) =
-                    match (signals, transmit_time_j2000_s) {
-                        _ if !options.apply_phase_biases => {
-                            (Err(SsrIfCombinationStatus::OptedOut), None, None)
-                        }
-                        (None, _) => (
-                            Err(SsrIfCombinationStatus::NoSignalPairConfigured),
-                            None,
-                            None,
-                        ),
-                        (Some(signals), transmit_time) => {
+                let (phase_outcome, phase1_report, phase2_report) = if !options.apply_phase_biases {
+                    (Err(SsrIfCombinationStatus::OptedOut), None, None)
+                } else {
+                    let transmit_time = transmit_time_j2000_s;
+                    match matched_signals(obs, observed.map(|o| [o.phase1, o.phase2])) {
+                        Err(status) => (Err(status), None, None),
+                        Ok(matched) => {
                             let t_query = transmit_time.unwrap_or(epoch.t_rx_j2000_s);
-                            let token = |signal: u8| {
+                            let token = |signal: GnssSignal| {
                                 options
                                     .phase_continuity_tokens
-                                    .get(&(obs.ambiguity_id.clone(), signal))
+                                    .get(&(obs.ambiguity_id.clone(), signal.code()))
                                     .copied()
                             };
-                            let q1 = store.query_phase_bias(
-                                obs.sat,
-                                signals.phase1_signal,
-                                t_query,
-                                token(signals.phase1_signal),
-                            );
-                            let q2 = store.query_phase_bias(
-                                obs.sat,
-                                signals.phase2_signal,
-                                t_query,
-                                token(signals.phase2_signal),
-                            );
+                            let [s1, s2] = matched.signals;
+                            let q1 = store.query_phase_bias(obs.sat, s1, t_query, token(s1));
+                            let q2 = store.query_phase_bias(obs.sat, s2, t_query, token(s2));
                             let views = [BiasQueryView::phase(&q1), BiasQueryView::phase(&q2)];
                             let outcome = match transmit_time {
                                 Some(_) => ionosphere_free_ssr_bias_m(
-                                    combination_frequencies(&signals, obs),
+                                    matched.frequencies_hz,
                                     applied_orbit_clock_solution,
                                     views[0],
                                     views[1],
@@ -1225,11 +1209,12 @@ impl PppCorrectionLookup {
                             };
                             (
                                 outcome,
-                                Some(signal_report(epoch_index, obs, signals.phase1_signal, q1)),
-                                Some(signal_report(epoch_index, obs, signals.phase2_signal, q2)),
+                                Some(signal_report(epoch_index, obs, s1, q1)),
+                                Some(signal_report(epoch_index, obs, s2, q2)),
                             )
                         }
-                    };
+                    }
+                };
 
                 // A UT1 refusal of the satellite's state is reported for every requested
                 // bias, in place of the status its queries would give, so a solve fails
@@ -1268,6 +1253,7 @@ impl PppCorrectionLookup {
                     ambiguity_id: obs.ambiguity_id.clone(),
                     transmit_time_j2000_s,
                     applied_orbit_clock_solution,
+                    observation_signals: obs.signals,
                     code_status,
                     applied_code_if_m,
                     code1_report,
@@ -1342,22 +1328,92 @@ impl SsrPppBiasApplicationReport {
 fn signal_report<Q>(
     epoch_index: usize,
     obs: &FloatObservation,
-    signal_id: u8,
+    signal: GnssSignal,
     query_result: Q,
 ) -> SsrObsSignalReport<Q> {
     SsrObsSignalReport {
         epoch_index,
         sat: obs.sat,
         ambiguity_id: obs.ambiguity_id.clone(),
-        signal_id,
+        signal,
         query_result,
     }
+}
+
+/// Physical signals of one ionosphere-free bias pair, the signals an observation was
+/// formed from, and their band carrier frequencies.
+pub(super) struct MatchedSignals {
+    pub(super) signals: [GnssSignal; 2],
+    /// The two band carriers, or the typed reason they cannot be used.
+    pub(super) frequencies_hz: Result<(f64, f64), SsrIfCombinationStatus>,
+}
+
+/// The physical signals of the observation's two tracking codes, in the order the
+/// observation was combined, with their carriers. Identity is exact, band and tracking
+/// attribute both, so no bias of another signal on the same carrier is applied.
+///
+/// A GLONASS FDMA band takes the observation's frequency channel, or else the channel
+/// its stated frequencies name, each for the band of its own signal
+/// ([`crate::frequencies::infer_glonass_fdma_channel`]); frequencies naming two
+/// channels are an [`SsrIfCombinationStatus::ObservationFrequencyMismatch`], and no
+/// channel named leaves the FDMA carrier unresolved. A frequency the observation states
+/// (non-zero) has to be its band's carrier within the PPP frequency tolerance; a zero
+/// frequency is unset.
+pub(super) fn matched_signals(
+    obs: &FloatObservation,
+    observed: Option<[SignalCode; 2]>,
+) -> Result<MatchedSignals, SsrIfCombinationStatus> {
+    let Some(observed) = observed else {
+        return Err(SsrIfCombinationStatus::ObservationSignalsUnknown);
+    };
+    let signals = observed.map(|code| GnssSignal::new(obs.sat.system, code));
+    let channel = match obs.glonass_channel {
+        Some(channel) => Some(channel),
+        None if obs.sat.system == GnssSystem::Glonass => {
+            match crate::frequencies::infer_glonass_fdma_channel(&[
+                (observed[0].band(), obs.freq1_hz),
+                (observed[1].band(), obs.freq2_hz),
+            ]) {
+                Ok(channel) => channel,
+                Err(_) => {
+                    return Ok(MatchedSignals {
+                        signals,
+                        frequencies_hz: Err(SsrIfCombinationStatus::ObservationFrequencyMismatch),
+                    })
+                }
+            }
+        }
+        None => None,
+    };
+    let [f1, f2] = signals.map(|signal| signal.carrier_frequency_hz(channel));
+    let frequencies_hz = match (f1, f2) {
+        (Some(f1), Some(f2)) => {
+            if stated_frequency_matches(obs.freq1_hz, f1)
+                && stated_frequency_matches(obs.freq2_hz, f2)
+            {
+                Ok((f1, f2))
+            } else {
+                Err(SsrIfCombinationStatus::ObservationFrequencyMismatch)
+            }
+        }
+        _ => Err(SsrIfCombinationStatus::CarrierUnresolved),
+    };
+    Ok(MatchedSignals {
+        signals,
+        frequencies_hz,
+    })
+}
+
+/// Whether a frequency an observation states is the band carrier `band_hz`, within the
+/// PPP frequency tolerance the code-bias observable check uses. Zero states nothing.
+fn stated_frequency_matches(stated_hz: f64, band_hz: f64) -> bool {
+    stated_hz == 0.0 || crate::frequencies::ppp_frequency_matches(stated_hz, band_hz)
 }
 
 /// The fields of a code- or phase-bias query result that the combination reads.
 #[derive(Clone, Copy)]
 struct BiasQueryView {
-    signal: u8,
+    signal: SsrSignalKey,
     status: SsrBiasStatus,
     bias_m: Option<f64>,
     solution: Option<SsrSolution>,
@@ -1445,26 +1501,14 @@ fn transmit_time_j2000_s(
     }
 }
 
-/// Carrier frequencies for the ionosphere-free combination: the signal pair's, or the
-/// observation's when either configured value is not positive and both of the
-/// observation's are.
-fn combination_frequencies(signals: &SsrPppBiasSignalPair, obs: &FloatObservation) -> (f64, f64) {
-    if signals.freq1_hz > 0.0 && signals.freq2_hz > 0.0 {
-        (signals.freq1_hz, signals.freq2_hz)
-    } else if obs.freq1_hz > 0.0 && obs.freq2_hz > 0.0 {
-        (obs.freq1_hz, obs.freq2_hz)
-    } else {
-        (signals.freq1_hz, signals.freq2_hz)
-    }
-}
-
 /// Ionosphere-free SSR bias in metres with the store's sign and the two records it was
 /// formed from, or the typed reason it cannot be formed. The checks run in the order the
 /// statuses are reported: a continuity reset, a do-not-use exclusion, frequencies,
 /// availability, agreement of the two signals, then agreement with the orbit and clock
-/// solution the ephemeris source applies.
+/// solution the ephemeris source applies. `frequencies_hz` carries the reason when the
+/// band carriers cannot be used.
 fn ionosphere_free_ssr_bias_m(
-    (f1, f2): (f64, f64),
+    frequencies_hz: Result<(f64, f64), SsrIfCombinationStatus>,
     applied_orbit_clock_solution: Option<SsrSolution>,
     first: BiasQueryView,
     second: BiasQueryView,
@@ -1476,6 +1520,7 @@ fn ionosphere_free_ssr_bias_m(
     if statuses.contains(&SsrBiasStatus::Excluded) {
         return Err(SsrIfCombinationStatus::SatelliteExcluded);
     }
+    let (f1, f2) = frequencies_hz?;
     if !(f1.is_finite() && f2.is_finite() && f1 > 0.0 && f2 > 0.0 && f1 != f2) {
         return Err(SsrIfCombinationStatus::InvalidFrequencies);
     }

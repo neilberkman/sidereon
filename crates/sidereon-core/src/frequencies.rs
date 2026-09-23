@@ -439,11 +439,9 @@ fn rinex_beidou_band(
     rinex_version: Option<f64>,
 ) -> Option<CarrierBand> {
     match band {
-        '1' if matches!(tracking, Some('I' | 'Q' | 'X'))
-            && rinex_version.is_some_and(is_rinex_302) =>
-        {
-            Some(CarrierBand::B1i)
-        }
+        // A RINEX 3.02 file writes B1I as band 1; RTKLIB `decode_obsh` reads every
+        // band-1 BeiDou code of a 3.02 file as band 2 (B1I).
+        '1' if rinex_version.is_some_and(is_rinex_302) => Some(CarrierBand::B1i),
         '1' if tracking.is_none() && rinex_version.is_some_and(is_rinex_2) => {
             Some(CarrierBand::B1i)
         }
@@ -461,8 +459,55 @@ fn is_rinex_2(version: f64) -> bool {
     (2.0..3.0).contains(&version)
 }
 
-fn is_rinex_302(version: f64) -> bool {
-    (3.015..3.025).contains(&version)
+/// Whether a RINEX version is 3.02, as RTKLIB `decode_obsh` tests it
+/// (`fabs(ver - 3.02) < 1e-3`).
+pub(crate) fn is_rinex_302(version: f64) -> bool {
+    (version - 3.02).abs() < 1e-3
+}
+
+/// Whether a stated frequency is the carrier `carrier_hz` within the PPP frequency
+/// tolerance: [`crate::tolerances::PPP_FREQUENCY_REL_EPS`] of the larger of the two,
+/// and at least [`crate::tolerances::PPP_FREQUENCY_ABS_EPS_HZ`]. A non-finite stated
+/// frequency matches no carrier.
+pub(crate) fn ppp_frequency_matches(stated_hz: f64, carrier_hz: f64) -> bool {
+    let tol_hz = (carrier_hz.abs().max(stated_hz.abs()) * crate::tolerances::PPP_FREQUENCY_REL_EPS)
+        .max(crate::tolerances::PPP_FREQUENCY_ABS_EPS_HZ);
+    stated_hz.is_finite() && (carrier_hz - stated_hz).abs() <= tol_hz
+}
+
+/// Stated GLONASS signal frequencies name different FDMA channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GlonassChannelConflict;
+
+/// GLONASS FDMA channel inferred from stated signal frequencies, each paired with the
+/// RINEX band digit of its signal.
+///
+/// Each G1 (band `1`) or G2 (band `2`) signal with a non-zero stated frequency names the
+/// channel in `-7..=6` whose carrier of that band it is, within
+/// [`ppp_frequency_matches`]. Other bands (the CDMA G3, G1a and G2a) and zero
+/// frequencies name none. Every channel named has to be the same one: `Ok(Some(k))`
+/// when one is named, `Ok(None)` when none is, and `Err` when two differ.
+pub(crate) fn infer_glonass_fdma_channel(
+    stated: &[(char, f64)],
+) -> Result<Option<i8>, GlonassChannelConflict> {
+    let mut inferred = None;
+    for &(band, stated_hz) in stated {
+        if !matches!(band, '1' | '2') || stated_hz == 0.0 {
+            continue;
+        }
+        let Some(channel) = (-7..=6).find(|&channel| {
+            rinex_band_frequency_hz(GnssSystem::Glonass, band, Some(channel))
+                .is_some_and(|carrier_hz| ppp_frequency_matches(stated_hz, carrier_hz))
+        }) else {
+            continue;
+        };
+        match inferred {
+            None => inferred = Some(channel),
+            Some(previous) if previous == channel => {}
+            Some(_) => return Err(GlonassChannelConflict),
+        }
+    }
+    Ok(inferred)
 }
 
 /// RINEX observation band wavelength in meters for a system and band digit.
@@ -703,8 +748,41 @@ mod tests {
     }
 
     #[test]
+    fn glonass_fdma_channel_is_inferred_per_band_and_must_agree() {
+        let g1 = |k: i8| rinex_band_frequency_hz(GnssSystem::Glonass, '1', Some(k)).unwrap();
+        let g2 = |k: i8| rinex_band_frequency_hz(GnssSystem::Glonass, '2', Some(k)).unwrap();
+        let g3 = rinex_band_frequency_hz(GnssSystem::Glonass, '3', None).unwrap();
+        // G1 C/A with a CDMA G3 signal: only G1 names a channel.
+        assert_eq!(
+            infer_glonass_fdma_channel(&[('1', g1(-4)), ('3', g3)]),
+            Ok(Some(-4))
+        );
+        // G2 first: each frequency is read against its own band.
+        assert_eq!(
+            infer_glonass_fdma_channel(&[('2', g2(5)), ('1', g1(5))]),
+            Ok(Some(5))
+        );
+        // The same frequencies against the other bands name no channel.
+        assert_eq!(
+            infer_glonass_fdma_channel(&[('1', g2(5)), ('2', g1(5))]),
+            Ok(None)
+        );
+        assert_eq!(
+            infer_glonass_fdma_channel(&[('1', 0.0), ('2', 0.0)]),
+            Ok(None)
+        );
+        assert_eq!(
+            infer_glonass_fdma_channel(&[('1', g1(-4)), ('2', g2(1))]),
+            Err(GlonassChannelConflict)
+        );
+    }
+
+    #[test]
     fn rinex_observation_code_resolves_beidou_302_b1i() {
-        for code in ["C1I", "L1I", "C1Q", "L1Q", "C1X", "L1X"] {
+        // Every band-1 code of a 3.02 file, as RTKLIB reads it.
+        for code in [
+            "C1I", "L1I", "C1Q", "L1Q", "C1X", "L1X", "C1P", "C1D", "C1A",
+        ] {
             assert_eq!(
                 rinex_observation_frequency_hz(GnssSystem::BeiDou, code, 3.02, None)
                     .map(f64::to_bits),

@@ -132,6 +132,7 @@ fn float_observations(input: &Input) -> Vec<FloatObservation> {
                 freq1_hz: input.scalars[6],
                 freq2_hz: input.scalars[7],
                 glonass_channel: None,
+                signals: None,
             })
         })
         .collect()

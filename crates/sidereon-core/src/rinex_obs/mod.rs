@@ -691,7 +691,7 @@ impl SignalPolicy {
         // 3.02, then reverted to C2I in 3.03 and later. Only the narrow 3.02
         // window prefers C1I; every other version prefers C2I. Offer both, with
         // the version-appropriate one first.
-        let beidou = if (3.015..3.025).contains(&version) {
+        let beidou = if crate::frequencies::is_rinex_302(version) {
             vec!["C1I".to_string(), "C2I".to_string()]
         } else {
             vec!["C2I".to_string(), "C1I".to_string()]

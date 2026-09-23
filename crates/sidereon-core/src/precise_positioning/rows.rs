@@ -362,7 +362,7 @@ fn failed_ssr_bias(
     lookup: &PppCorrectionLookup,
 ) -> MissingCorrection {
     let key = (obs.sat, epoch_index, obs.ambiguity_id.clone());
-    let code_has = |signal: Option<u8>| {
+    let code_has = |signal: Option<crate::ssr::SsrSignalKey>| {
         lookup.ssr_code_bias_enabled
             && lookup
                 .ssr_code_bias_records

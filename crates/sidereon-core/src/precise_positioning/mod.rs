@@ -94,6 +94,7 @@
 //! #             freq1_hz: 0.0,
 //! #             freq2_hz: 0.0,
 //! #             glonass_channel: None,
+//! #             signals: None,
 //! #         })
 //! #     })
 //! #     .collect::<Result<Vec<_>, ObservablesError>>()?;

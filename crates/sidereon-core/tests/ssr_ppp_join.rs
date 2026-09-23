@@ -8,8 +8,8 @@ use sidereon_core::ephemeris::{
 use sidereon_core::observables::{j2000_seconds_from_split, predict, PredictOptions};
 use sidereon_core::ppp_corrections::CivilDateTime;
 use sidereon_core::precise_positioning::{
-    solve_float_epochs, FloatEpoch, FloatObservation, FloatSolveConfig, FloatSolveOptions,
-    FloatState, MeasurementWeights, RangeCorrections, TroposphereOptions,
+    solve_float_epochs, FloatEpoch, FloatObservation, FloatObservationSignals, FloatSolveConfig,
+    FloatSolveOptions, FloatState, MeasurementWeights, RangeCorrections, TroposphereOptions,
 };
 use sidereon_core::rinex::observations::{
     observation_values, ObsEpoch, ObsEpochTime, ObservationFilter, RinexObs,
@@ -17,7 +17,7 @@ use sidereon_core::rinex::observations::{
 use sidereon_core::rtcm::{
     Message, SsrClockRecord, SsrHeader, SsrKind, SsrMessage, SsrOrbitRecord, SsrStreamAssembler,
 };
-use sidereon_core::ssr::SsrCorrectionStore;
+use sidereon_core::ssr::{SignalCode, SsrCorrectionStore};
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -96,6 +96,20 @@ fn gps_l1_l2_filter() -> ObservationFilter {
     )])
 }
 
+/// Tracking codes of the C1C/C2W/L1C/L2W ionosphere-free observations, read as the
+/// file's RINEX version reads them.
+fn gps_l1_l2_signals(system: GnssSystem, rinex_version: f64) -> FloatObservationSignals {
+    let code = |name: &str| {
+        SignalCode::from_rinex(system, name, rinex_version).expect("RINEX 3 observation code")
+    };
+    FloatObservationSignals {
+        code1: code("C1C"),
+        code2: code("C2W"),
+        phase1: code("L1C"),
+        phase2: code("L2W"),
+    }
+}
+
 fn civil_to_julian_split(epoch: ObsEpochTime) -> JulianDateSplit {
     let (jd_whole, fraction) = split_julian_date(
         epoch.year,
@@ -152,6 +166,7 @@ fn float_observations(epoch: &ObsEpoch, obs: &RinexObs) -> Vec<FloatObservation>
                 freq1_hz: F_L1_HZ,
                 freq2_hz: F_L2_HZ,
                 glonass_channel: None,
+                signals: Some(gps_l1_l2_signals(sat.system, obs.header.version)),
             })
         })
         .collect::<Vec<_>>();
