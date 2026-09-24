@@ -84,14 +84,35 @@ pub fn skyfield_fundamental_arguments(t: f64) -> Result<[f64; 5], NutationError>
     )
 }
 
-fn skyfield_fundamental_arguments_unchecked(t: f64) -> [f64; 5] {
-    const FA0: [f64; 5] = [
+pub(crate) fn iers_2010_solid_tide_arguments(t: f64) -> Result<[f64; 5], NutationError> {
+    validate_finite("t", t)?;
+    let zero_terms = [
         485868.249036,
-        1287104.79305,
+        1287104.793048,
         335779.526232,
-        1072260.70369,
+        1072260.703692,
         450160.398036,
     ];
+    validate_finite_values(
+        "fundamental_arguments",
+        fundamental_arguments_unchecked_with_zero_terms(t, zero_terms),
+    )
+}
+
+fn skyfield_fundamental_arguments_unchecked(t: f64) -> [f64; 5] {
+    fundamental_arguments_unchecked_with_zero_terms(
+        t,
+        [
+            485868.249036,
+            1287104.79305,
+            335779.526232,
+            1072260.70369,
+            450160.398036,
+        ],
+    )
+}
+
+fn fundamental_arguments_unchecked_with_zero_terms(t: f64, fa0: [f64; 5]) -> [f64; 5] {
     const FA1: [f64; 5] = [
         1717915923.2178,
         129596581.0481,
@@ -118,7 +139,7 @@ fn skyfield_fundamental_arguments_unchecked(t: f64) -> [f64; 5] {
         value *= t;
         value += FA1[i];
         value *= t;
-        value += FA0[i];
+        value += fa0[i];
         value %= ASEC360;
         args[i] = value * ARCSEC_TO_RAD;
     }

@@ -30,6 +30,17 @@ portable upper bounds. The oracle comparisons exercise trig in the full
 calculation but do not isolate trig error against an independent
 high-precision reference.
 
+The Step 2 argument path uses the IERS 2010 Eq. 5.43 constant pair
+`l′₀ = 357.52910918°` and `D₀ = 297.85019547°`, as does the Orekit IERS 2010
+oracle. Their arcsecond forms are `1287104.793048` and `1072260.703692`.
+These differ by 2 microarcseconds from the rounded IAU 2000A/SOFA constants
+used by the shared Skyfield nutation kernel; the other three Delaunay zero
+terms are identical. The tide-specific path selects the IERS pair without
+changing that shared kernel or its callers. The producer operation count and
+the comparison tolerance are unchanged. The authoritative expressions and
+the note distinguishing the rounded IAU 2000A values are in [IERS Technical
+Note 36, Eq. 5.43](https://iers-conventions.obspm.fr/conventions/content/tn36.pdf).
+
 When each program derives its own arguments, the fixture is restricted to
 one Julian century around J2000. The absolute coefficient sum of any
 Delaunay polynomial is bounded by `10 + 8500 |t|` radians on that interval:
