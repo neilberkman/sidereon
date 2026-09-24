@@ -30,7 +30,7 @@ use super::slant::{slant_delay_components, PierceLineOfSight, SlantComponents, V
 use super::{
     galileo_nequick_g_native, ionex_slant_delay_results, ionex_slant_delay_with_policy,
     ionex_slant_delays, ionosphere_delay, GalileoNequickCoeffs, GalileoNequickEval,
-    IonexAssumedMapping, IonexCoverageError, IonexCoveragePolicy, IonexHeader,
+    IonexAssumedMapping, IonexCoverageError, IonexCoveragePolicy, IonexEpochError, IonexHeader,
     IonexMappingDeclaration, IonexMappingFunction, IonexMappingPolicy, IonexMissingNodePolicy,
     IonexMissingNodes, IonexNodeGap, IonexSlantDelayStatus, IonexSlantPolicy, IonexSlantRefusal,
     IonexSlantRequest, IonexWarning, IonoModel, TecGridSamples, TecSample, TecSamplesError,
@@ -447,6 +447,11 @@ fn synthetic_ionex() -> Ionex {
     Ionex::parse(&bytes).expect("parse synthetic IONEX product")
 }
 
+/// The UTC instant `seconds` from J2000, the form the reader gives a map epoch.
+fn utc(seconds: i64) -> Instant {
+    super::ionex_epoch_from_j2000_seconds(seconds)
+}
+
 fn valid_tec_grid_samples() -> TecGridSamples {
     TecGridSamples {
         map_epochs: vec![super::ionex_epoch_from_j2000_seconds(0)],
@@ -555,7 +560,12 @@ fn ionex_from_samples_rejects_epoch_not_representable() {
     let mut samples = valid_tec_grid_samples();
     samples.map_epochs = vec![Instant::from_nanos(TimeScale::Utc, 1)];
     let err = Ionex::from_samples(samples).expect_err("fractional-second epoch must fail");
-    assert_eq!(err, TecSamplesError::EpochNotRepresentable);
+    assert_eq!(
+        err,
+        TecSamplesError::EpochNotRepresentable(IonexEpochError::NotWholeSecond {
+            scale: TimeScale::Utc
+        })
+    );
 }
 
 #[test]
@@ -740,7 +750,7 @@ fn ionex_slant_delays_batch_matches_scalar_bits() {
             .expect("valid receiver"),
             elevation_rad: 45.0_f64.to_radians(),
             azimuth_rad: 90.0_f64.to_radians(),
-            epoch_j2000_s: epochs[0],
+            epoch: utc(epochs[0]),
             frequency_hz: f_l1,
         },
         IonexSlantRequest {
@@ -752,7 +762,7 @@ fn ionex_slant_delays_batch_matches_scalar_bits() {
             .expect("valid receiver"),
             elevation_rad: 20.0_f64.to_radians(),
             azimuth_rad: 250.0_f64.to_radians(),
-            epoch_j2000_s: (epochs[0] + epochs[1]) / 2,
+            epoch: utc((epochs[0] + epochs[1]) / 2),
             frequency_hz: f_l2,
         },
         IonexSlantRequest {
@@ -764,7 +774,7 @@ fn ionex_slant_delays_batch_matches_scalar_bits() {
             .expect("valid receiver"),
             elevation_rad: 90.0_f64.to_radians(),
             azimuth_rad: 0.0_f64.to_radians(),
-            epoch_j2000_s: epochs[1],
+            epoch: utc(epochs[1]),
             frequency_hz: f_l1,
         },
     ];
@@ -787,7 +797,7 @@ fn ionex_slant_delays_batch_matches_scalar_bits() {
                 request.receiver,
                 request.elevation_rad,
                 request.azimuth_rad,
-                request.epoch_j2000_s,
+                request.epoch,
                 request.frequency_hz,
             )
             .expect("valid scalar");
@@ -834,7 +844,7 @@ fn ionex_slant_delays_batch_matches_scalar_bits() {
             bad_request.receiver,
             bad_request.elevation_rad,
             bad_request.azimuth_rad,
-            bad_request.epoch_j2000_s,
+            bad_request.epoch,
             bad_request.frequency_hz,
         )
         .expect_err("bad scalar request must fail");
@@ -868,7 +878,7 @@ fn coverage_request(lat_deg: f64, lon_deg: f64, epoch_j2000_s: i64) -> IonexSlan
             .expect("valid receiver"),
         elevation_rad: core::f64::consts::FRAC_PI_2,
         azimuth_rad: 0.0,
-        epoch_j2000_s,
+        epoch: utc(epoch_j2000_s),
         frequency_hz: 1_575_420_000.0,
     }
 }
@@ -897,7 +907,7 @@ fn ionex_strict_rejects_epoch_outside_coverage_and_hold_marks_status() {
             request.receiver,
             request.elevation_rad,
             request.azimuth_rad,
-            request.epoch_j2000_s,
+            request.epoch,
             request.frequency_hz,
             IonexCoveragePolicy::Strict.into(),
         )
@@ -908,7 +918,7 @@ fn ionex_strict_rejects_epoch_outside_coverage_and_hold_marks_status() {
             request.receiver,
             request.elevation_rad,
             request.azimuth_rad,
-            request.epoch_j2000_s,
+            request.epoch,
             request.frequency_hz,
         )
         .expect("strict scalar boundary epoch is covered");
@@ -921,7 +931,7 @@ fn ionex_strict_rejects_epoch_outside_coverage_and_hold_marks_status() {
             before.receiver,
             before.elevation_rad,
             before.azimuth_rad,
-            before.epoch_j2000_s,
+            before.epoch,
             before.frequency_hz,
         ),
         IonexCoverageError::EpochBeforeFirstMap,
@@ -932,7 +942,7 @@ fn ionex_strict_rejects_epoch_outside_coverage_and_hold_marks_status() {
             after.receiver,
             after.elevation_rad,
             after.azimuth_rad,
-            after.epoch_j2000_s,
+            after.epoch,
             after.frequency_hz,
         ),
         IonexCoverageError::EpochAfterLastMap,
@@ -943,7 +953,7 @@ fn ionex_strict_rejects_epoch_outside_coverage_and_hold_marks_status() {
         before.receiver,
         before.elevation_rad,
         before.azimuth_rad,
-        before.epoch_j2000_s,
+        before.epoch,
         before.frequency_hz,
         IonexCoveragePolicy::Hold.into(),
     )
@@ -962,7 +972,7 @@ fn ionex_strict_rejects_epoch_outside_coverage_and_hold_marks_status() {
         after.receiver,
         after.elevation_rad,
         after.azimuth_rad,
-        after.epoch_j2000_s,
+        after.epoch,
         after.frequency_hz,
         IonexCoveragePolicy::Hold.into(),
     )
@@ -986,7 +996,7 @@ fn ionex_strict_rejects_spatial_outside_coverage_and_includes_boundaries() {
             request.receiver,
             request.elevation_rad,
             request.azimuth_rad,
-            request.epoch_j2000_s,
+            request.epoch,
             request.frequency_hz,
             IonexCoveragePolicy::Strict.into(),
         )
@@ -1006,7 +1016,7 @@ fn ionex_strict_rejects_spatial_outside_coverage_and_includes_boundaries() {
                 request.receiver,
                 request.elevation_rad,
                 request.azimuth_rad,
-                request.epoch_j2000_s,
+                request.epoch,
                 request.frequency_hz,
             ),
             IonexCoverageError::LatitudeOutOfRange,
@@ -1019,7 +1029,7 @@ fn ionex_strict_rejects_spatial_outside_coverage_and_includes_boundaries() {
                 request.receiver,
                 request.elevation_rad,
                 request.azimuth_rad,
-                request.epoch_j2000_s,
+                request.epoch,
                 request.frequency_hz,
             ),
             IonexCoverageError::LongitudeOutOfRange,
@@ -1031,7 +1041,7 @@ fn ionex_strict_rejects_spatial_outside_coverage_and_includes_boundaries() {
         east.receiver,
         east.elevation_rad,
         east.azimuth_rad,
-        east.epoch_j2000_s,
+        east.epoch,
         east.frequency_hz,
         IonexCoveragePolicy::Hold.into(),
     )
@@ -1416,7 +1426,7 @@ fn ionosphere_native_helpers_reject_invalid_domains() {
         receiver,
         30.0_f64.to_radians(),
         0.0,
-        ionex.map_epochs_s()[0],
+        utc(ionex.map_epochs_s()[0]),
         1_575_420_000.0,
     )
     .expect("west antimeridian receiver is valid");
@@ -1431,7 +1441,7 @@ fn ionosphere_native_helpers_reject_invalid_domains() {
         bad_receiver,
         30.0_f64.to_radians(),
         0.0,
-        ionex.map_epochs_s()[0],
+        utc(ionex.map_epochs_s()[0]),
         1_575_420_000.0,
     ));
 }
@@ -1490,8 +1500,8 @@ fn ionex_single_map_does_not_panic_and_holds_the_map() {
     let epoch0 = one.map_epochs_s()[0];
 
     // Must not panic, and must be a finite positive delay.
-    let d_one =
-        super::ionex_slant_delay(&one, receiver, el, az, epoch0, f_l1).expect("valid IONEX delay");
+    let d_one = super::ionex_slant_delay(&one, receiver, el, az, utc(epoch0), f_l1)
+        .expect("valid IONEX delay");
     assert!(
         d_one.is_finite() && d_one > 0.0,
         "single-map delay not finite/positive: {d_one}"
@@ -1499,7 +1509,7 @@ fn ionex_single_map_does_not_panic_and_holds_the_map() {
 
     // At its first epoch the two-map product weights the first map only (w == 0),
     // so the single-map hold must reproduce it bit-for-bit.
-    let d_two = super::ionex_slant_delay(&two, receiver, el, az, epoch0, f_l1)
+    let d_two = super::ionex_slant_delay(&two, receiver, el, az, utc(epoch0), f_l1)
         .expect("valid two-map IONEX delay");
     assert_eq!(
         d_one.to_bits(),
@@ -3282,7 +3292,7 @@ fn zenith_delay(
         request.receiver,
         request.elevation_rad,
         request.azimuth_rad,
-        request.epoch_j2000_s,
+        request.epoch,
         request.frequency_hz,
     )
 }
@@ -3442,7 +3452,7 @@ fn delay_with(
         request.receiver,
         request.elevation_rad,
         request.azimuth_rad,
-        request.epoch_j2000_s,
+        request.epoch,
         request.frequency_hz,
         policy,
     )
@@ -3669,7 +3679,7 @@ fn ionex_slant_delay_uses_the_one_height_height_maps_give_and_refuses_others() {
             .expect("receiver"),
         45.0_f64.to_radians(),
         90.0_f64.to_radians(),
-        parsed.map_epochs_s()[0],
+        parsed.map_epochs()[0],
         1_575_420_000.0,
     );
     let with_heights = |heights: Vec<Vec<Vec<Option<f64>>>>, shell_height_km: f64| {
@@ -4032,7 +4042,7 @@ fn ionex_pierce_point_through_a_pole_gives_a_value() {
         crate::frame::Wgs84Geodetic::new(core::f64::consts::FRAC_PI_2, 0.0, 0.0).expect("pole"),
         core::f64::consts::FRAC_PI_2,
         0.0,
-        ionex.map_epochs_s()[0],
+        utc(ionex.map_epochs_s()[0]),
         1_575_420_000.0,
         IonexSlantPolicy::from(IonexCoveragePolicy::Hold),
     )
@@ -4933,7 +4943,9 @@ fn ionex_from_samples_refuses_a_fractional_map_epoch() {
     samples.map_epochs = vec![split_epoch(noon_boundary(0), 0.5 / SECONDS_PER_DAY)];
     assert_eq!(
         Ionex::from_samples(samples).expect_err("a fractional map epoch must be refused"),
-        TecSamplesError::EpochNotRepresentable
+        TecSamplesError::EpochNotRepresentable(IonexEpochError::NotWholeSecond {
+            scale: TimeScale::Utc
+        })
     );
 }
 
@@ -4967,7 +4979,9 @@ fn ionex_from_node_samples_refuses_a_fractional_map_epoch() {
             IonexHeader::new(IonexMappingFunction::CosZ),
         )
         .expect_err("a fractional node-sample epoch must be refused"),
-        TecSamplesError::EpochNotRepresentable
+        TecSamplesError::EpochNotRepresentable(IonexEpochError::NotWholeSecond {
+            scale: TimeScale::Utc
+        })
     );
 }
 
@@ -4977,8 +4991,187 @@ fn ionex_from_samples_refuses_a_non_whole_nanosecond_map_epoch() {
     samples.map_epochs = vec![nanos_epoch(500_000_000)];
     assert_eq!(
         Ionex::from_samples(samples).expect_err("a sub-second nanosecond epoch must be refused"),
-        TecSamplesError::EpochNotRepresentable
+        TecSamplesError::EpochNotRepresentable(IonexEpochError::NotWholeSecond {
+            scale: TimeScale::Utc
+        })
     );
+}
+
+/// 2017-01-01 00:00:00 UTC in J2000 seconds, the first second after the
+/// leap second 2016-12-31 23:59:60 (TAI - UTC 36 s before it, 37 s from it).
+fn utc_2017_s() -> i64 {
+    crate::astro::time::civil::j2000_seconds(2017, 1, 1, 0, 0, 0.0) as i64
+}
+
+fn scale_nanos_epoch(scale: TimeScale, nanos: i128) -> Instant {
+    Instant::from_nanos(scale, nanos)
+}
+
+fn samples_at(epoch: Instant) -> TecGridSamples {
+    let mut samples = valid_tec_grid_samples();
+    samples.map_epochs = vec![epoch];
+    samples
+}
+
+#[test]
+fn ionex_map_epochs_in_gpst_are_carried_onto_utc_exactly() {
+    // GPST runs 18 s ahead of UTC from 2017-01-01. A GPST epoch of
+    // 00:00:18 is the map at 00:00:00 UTC; the writer had labelled it 00:00:18.
+    let utc = utc_2017_s();
+    for epoch in [
+        scale_nanos_epoch(TimeScale::Gpst, i128::from(utc + 18) * 1_000_000_000),
+        super::instant_from_j2000_seconds(TimeScale::Gpst, utc + 18),
+    ] {
+        let ionex = Ionex::from_samples(samples_at(epoch)).expect("an exact GPST epoch");
+        assert_eq!(ionex.map_epochs_s(), vec![utc]);
+        assert_eq!(ionex.map_epochs()[0].scale, TimeScale::Utc);
+        assert_eq!(
+            ionex.map_epochs()[0],
+            super::ionex_epoch_from_j2000_seconds(utc)
+        );
+        let encoded = ionex.to_ionex_string().expect("writable IONEX");
+        assert!(
+            encoded.contains("  2017     1     1     0     0     0"),
+            "the record states the UTC label:\n{encoded}"
+        );
+        assert!(!encoded.contains("  2017     1     1     0     0    18"));
+        let reparsed = Ionex::parse_str(&encoded).expect("the written product reparses");
+        assert_eq!(reparsed.map_epochs(), ionex.map_epochs());
+        assert_eq!(reparsed.tec_maps(), ionex.tec_maps());
+    }
+    // The second before the leap second: GPST 00:00:16 is 23:59:59 UTC.
+    let before = Ionex::from_samples(samples_at(scale_nanos_epoch(
+        TimeScale::Gpst,
+        i128::from(utc + 16) * 1_000_000_000,
+    )))
+    .expect("the second before the leap second");
+    assert_eq!(before.map_epochs_s(), vec![utc - 1]);
+    // GST and QZSST share GPST's offset, BDT is 14 s behind GPST, GLONASST is
+    // UTC + 3 h and TAI is 37 s ahead of UTC here.
+    for (scale, own_s) in [
+        (TimeScale::Gst, utc + 18),
+        (TimeScale::Qzsst, utc + 18),
+        (TimeScale::Bdt, utc + 4),
+        (TimeScale::Glonasst, utc + 3 * 3_600),
+        (TimeScale::Tai, utc + 37),
+    ] {
+        let ionex = Ionex::from_samples(samples_at(scale_nanos_epoch(
+            scale,
+            i128::from(own_s) * 1_000_000_000,
+        )))
+        .unwrap_or_else(|error| panic!("{scale:?}: {error}"));
+        assert_eq!(ionex.map_epochs_s(), vec![utc], "{scale:?}");
+    }
+}
+
+#[test]
+fn ionex_map_epochs_in_utc_are_kept_as_given() {
+    let epoch = scale_nanos_epoch(TimeScale::Utc, i128::from(utc_2017_s()) * 1_000_000_000);
+    let ionex = Ionex::from_samples(samples_at(epoch)).expect("a whole UTC second");
+    assert_eq!(ionex.map_epochs(), &[epoch]);
+    let reparsed = Ionex::parse_str(&ionex.to_ionex_string().expect("writable")).expect("reparses");
+    assert_eq!(reparsed.map_epochs_s(), vec![utc_2017_s()]);
+}
+
+#[test]
+fn ionex_map_epochs_in_tt_are_carried_onto_utc_or_refused_by_cause() {
+    // TT - UTC is 69.184 s in 2017, so a whole TT second is no whole UTC
+    // second (TT 00:01:10 is UTC 00:00:00.816; TT 00:01:09 would fall in the
+    // leap second before it), and the TT instant 69.184 s past a UTC second
+    // is that second.
+    let utc = utc_2017_s();
+    let whole_tt = scale_nanos_epoch(TimeScale::Tt, i128::from(utc + 70) * 1_000_000_000);
+    assert_eq!(
+        Ionex::from_samples(samples_at(whole_tt)).expect_err("a whole TT second"),
+        TecSamplesError::EpochNotRepresentable(IonexEpochError::FractionalUtcSecond {
+            scale: TimeScale::Tt
+        })
+    );
+    let exact_tt = scale_nanos_epoch(
+        TimeScale::Tt,
+        i128::from(utc) * 1_000_000_000 + 69_184_000_000,
+    );
+    let ionex = Ionex::from_samples(samples_at(exact_tt)).expect("TT on a whole UTC second");
+    assert_eq!(ionex.map_epochs_s(), vec![utc]);
+    let reparsed = Ionex::parse_str(&ionex.to_ionex_string().expect("writable")).expect("reparses");
+    assert_eq!(reparsed.map_epochs(), ionex.map_epochs());
+}
+
+#[test]
+fn ionex_map_epochs_without_an_exact_utc_second_are_refused_by_cause() {
+    let utc = utc_2017_s();
+    let refused = |epoch: Instant| {
+        Ionex::from_samples(samples_at(epoch)).expect_err("no exact whole UTC second")
+    };
+    // GPST 00:00:17 is 2016-12-31 23:59:60 UTC, which no epoch record holds.
+    assert_eq!(
+        refused(scale_nanos_epoch(
+            TimeScale::Gpst,
+            i128::from(utc + 17) * 1_000_000_000
+        )),
+        TecSamplesError::EpochNotRepresentable(IonexEpochError::InsertedLeapSecond {
+            scale: TimeScale::Gpst
+        })
+    );
+    assert_eq!(
+        refused(scale_nanos_epoch(
+            TimeScale::Tdb,
+            i128::from(utc) * 1_000_000_000
+        )),
+        TecSamplesError::EpochNotRepresentable(IonexEpochError::NoExactUtcOffset {
+            scale: TimeScale::Tdb
+        })
+    );
+    // 1970, before TAI - UTC became a whole number of seconds.
+    let seconds_1970 = crate::astro::time::civil::j2000_seconds(1970, 1, 1, 0, 0, 0.0) as i64;
+    assert_eq!(
+        refused(scale_nanos_epoch(
+            TimeScale::Gpst,
+            i128::from(seconds_1970) * 1_000_000_000
+        )),
+        TecSamplesError::EpochNotRepresentable(IonexEpochError::BeforeIntegerLeapSeconds {
+            scale: TimeScale::Gpst
+        })
+    );
+    assert_eq!(
+        refused(scale_nanos_epoch(
+            TimeScale::Gpst,
+            i128::from(utc + 18) * 1_000_000_000 + 1
+        )),
+        TecSamplesError::EpochNotRepresentable(IonexEpochError::FractionalUtcSecond {
+            scale: TimeScale::Gpst
+        })
+    );
+}
+
+#[test]
+fn ionex_node_samples_in_two_scales_naming_one_utc_second_are_one_map() {
+    let utc = utc_2017_s();
+    let sample = |epoch: Instant, lat_deg: f64, lon_deg: f64| TecSample {
+        epoch,
+        lat_deg,
+        lon_deg,
+        vtec_tecu: Some(10.0),
+        rms_tecu: None,
+        height_offset_km: None,
+    };
+    let in_utc = scale_nanos_epoch(TimeScale::Utc, i128::from(utc) * 1_000_000_000);
+    let in_gpst = scale_nanos_epoch(TimeScale::Gpst, i128::from(utc + 18) * 1_000_000_000);
+    let ionex = Ionex::from_node_samples(
+        [
+            sample(in_utc, 1.0, 0.0),
+            sample(in_gpst, 1.0, 1.0),
+            sample(in_gpst, 0.0, 0.0),
+            sample(in_utc, 0.0, 1.0),
+        ],
+        450.0,
+        6371.0,
+        0,
+        IonexHeader::new(IonexMappingFunction::CosZ),
+    )
+    .expect("one map at one UTC second");
+    assert_eq!(ionex.map_epochs_s(), vec![utc]);
+    assert_eq!(ionex.map_epochs()[0].scale, TimeScale::Utc);
 }
 
 // ---------------------------------------------------------------------------
@@ -5161,7 +5354,7 @@ fn ionex_slant_delay_interpolates_across_map_times_past_the_f64_integers() {
     )
     .expect("canonical GPS L1 carrier exists");
     let delay_at = |epoch_s: i64| {
-        super::ionex_slant_delay(&ionex, receiver, el, az, epoch_s, f_l1)
+        super::ionex_slant_delay(&ionex, receiver, el, az, utc(epoch_s), f_l1)
             .expect("a whole-second epoch on a valid product evaluates")
     };
 
@@ -5178,7 +5371,7 @@ fn ionex_slant_delay_interpolates_across_map_times_past_the_f64_integers() {
     let held = IonexSlantPolicy::default().with_coverage(IonexCoveragePolicy::Hold);
     let held_delay_at = |epoch_s: i64, want: IonexCoverageError| {
         let evaluation =
-            ionex_slant_delay_with_policy(&ionex, receiver, el, az, epoch_s, f_l1, held)
+            ionex_slant_delay_with_policy(&ionex, receiver, el, az, utc(epoch_s), f_l1, held)
                 .expect("a held query outside coverage still evaluates");
         assert_eq!(evaluation.status.held, Some(want));
         evaluation.delay_m
@@ -5203,10 +5396,115 @@ fn ionex_slant_delay_interpolates_across_map_times_past_the_f64_integers() {
         [10.0, 30.0],
     ))
     .expect("adjacent map times build a product");
-    let first = super::ionex_slant_delay(&adjacent, receiver, el, az, two_pow_53, f_l1)
+    let first = super::ionex_slant_delay(&adjacent, receiver, el, az, utc(two_pow_53), f_l1)
         .expect("the first map time evaluates");
-    let second = super::ionex_slant_delay(&adjacent, receiver, el, az, two_pow_53 + 1, f_l1)
+    let second = super::ionex_slant_delay(&adjacent, receiver, el, az, utc(two_pow_53 + 1), f_l1)
         .expect("the second map time evaluates");
     assert!(first.is_finite() && second.is_finite());
     assert!(first < second, "{first} {second}");
+}
+
+// ---------------------------------------------------------------------------
+// Slant queries in any time scale
+// ---------------------------------------------------------------------------
+
+/// Delay at the zenith of the middle of the two-map test grid, maps at UTC
+/// `utc_2017_s()` and one hour later holding 10 and 30 TECU.
+fn two_map_delay(epoch: Instant) -> crate::Result<f64> {
+    let t0 = utc_2017_s();
+    let ionex = Ionex::from_samples(two_map_samples_at([t0, t0 + 3_600], [10.0, 30.0]))
+        .expect("two-map product");
+    let receiver =
+        crate::frame::Wgs84Geodetic::new(0.5_f64.to_radians(), 0.5_f64.to_radians(), 0.0)
+            .expect("valid WGS84 geodetic position");
+    super::ionex_slant_delay(
+        &ionex,
+        receiver,
+        90.0_f64.to_radians(),
+        0.0,
+        epoch,
+        1_575_420_000.0,
+    )
+}
+
+#[test]
+fn a_slant_query_is_carried_onto_utc_before_it_meets_the_maps() {
+    let t0 = utc_2017_s();
+    let nanos = |seconds: i64| i128::from(seconds) * 1_000_000_000;
+    // GPST runs 18 s ahead of UTC in 2017: the GPST query with the first map's
+    // count lies 18 s before that map, and the one 18 s later is the map.
+    let at_first_map = two_map_delay(utc(t0)).expect("UTC query on the first map");
+    assert_eq!(
+        two_map_delay(scale_nanos_epoch(TimeScale::Gpst, nanos(t0 + 18)))
+            .expect("GPST query on the first map")
+            .to_bits(),
+        at_first_map.to_bits()
+    );
+    assert_eq!(
+        two_map_delay(super::instant_from_j2000_seconds(TimeScale::Gpst, t0 + 18))
+            .expect("GPST split on the first map")
+            .to_bits(),
+        at_first_map.to_bits()
+    );
+    assert_eq!(
+        two_map_delay(scale_nanos_epoch(TimeScale::Gpst, nanos(t0))),
+        Err(crate::Error::IonexOutOfCoverage(
+            IonexCoverageError::EpochBeforeFirstMap
+        ))
+    );
+}
+
+#[test]
+fn a_fractional_slant_query_blends_the_maps_at_its_instant() {
+    let t0 = utc_2017_s();
+    let nanos = |seconds: i64| i128::from(seconds) * 1_000_000_000;
+    let half_past = |scale: TimeScale, own_s: i64| {
+        two_map_delay(scale_nanos_epoch(scale, nanos(own_s) + 500_000_000))
+            .expect("a query inside the bracket")
+    };
+    // 1800.5 s into the hour, in UTC and in GPST: the same instant.
+    let from_utc = half_past(TimeScale::Utc, t0 + 1_800);
+    let from_gpst = half_past(TimeScale::Gpst, t0 + 1_818);
+    assert_eq!(from_utc.to_bits(), from_gpst.to_bits());
+    let whole = two_map_delay(utc(t0 + 1_800)).expect("whole second");
+    let next = two_map_delay(utc(t0 + 1_801)).expect("next second");
+    assert!(
+        whole < from_utc && from_utc < next,
+        "{whole} {from_utc} {next}"
+    );
+    // A fraction past the last map is past it.
+    let past_last = two_map_delay(scale_nanos_epoch(TimeScale::Utc, nanos(t0 + 3_600) + 1));
+    assert_eq!(
+        past_last,
+        Err(crate::Error::IonexOutOfCoverage(
+            IonexCoverageError::EpochAfterLastMap
+        ))
+    );
+}
+
+#[test]
+fn a_slant_query_without_a_utc_reading_is_refused_by_cause() {
+    let t0 = utc_2017_s();
+    // GPST 00:00:17 and a nanosecond is 2016-12-31 23:59:60 and a nanosecond
+    // UTC.
+    let in_leap = scale_nanos_epoch(TimeScale::Gpst, i128::from(t0 + 17) * 1_000_000_000 + 1);
+    assert_eq!(
+        two_map_delay(in_leap),
+        Err(crate::Error::IonexEpoch(
+            IonexEpochError::InsertedLeapSecond {
+                scale: TimeScale::Gpst
+            }
+        ))
+    );
+    assert_eq!(
+        two_map_delay(scale_nanos_epoch(
+            TimeScale::Tdb,
+            i128::from(t0) * 1_000_000_000
+        )),
+        Err(crate::Error::IonexEpoch(
+            IonexEpochError::NoExactUtcOffset {
+                scale: TimeScale::Tdb
+            }
+        ))
+    );
 }

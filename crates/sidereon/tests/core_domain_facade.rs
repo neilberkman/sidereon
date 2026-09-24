@@ -88,7 +88,7 @@ fn core_domain_modules_are_reachable_through_facade() {
             .expect("facade receiver"),
         45.0_f64.to_radians(),
         90.0_f64.to_radians(),
-        ionex.map_epochs_s()[0],
+        ionex.map_epochs()[0],
         frequency_hz,
     );
     let mut batch = [f64::NAN];
@@ -100,7 +100,7 @@ fn core_domain_modules_are_reachable_through_facade() {
         request.receiver,
         request.elevation_rad,
         request.azimuth_rad,
-        request.epoch_j2000_s,
+        request.epoch,
         request.frequency_hz,
     )
     .expect("facade IONEX scalar");

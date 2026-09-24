@@ -2607,13 +2607,15 @@ where
     )
     .map_err(ScenarioError::Observable)?;
     let receiver_geodetic = receiver_geodetic(receiver.position_ecef_m)?;
-    let epoch_j2000_s = rounded_j2000_seconds(receiver.t_rx_j2000_s)?;
+    validate::finite(receiver.t_rx_j2000_s, "t_rx_j2000_s").map_err(map_field)?;
+    let epoch = crate::ionex::gpst_query_instant(receiver.t_rx_j2000_s)
+        .ok_or_else(|| invalid("t_rx_j2000_s", "must lie within the i64 seconds"))?;
     ionex_slant_delay(
         ionex.product(),
         receiver_geodetic,
         prediction.elevation_deg.to_radians(),
         prediction.azimuth_deg.to_radians(),
-        epoch_j2000_s,
+        epoch,
         signal.carrier_hz,
     )
     .map_err(|error| ScenarioError::Ionosphere(error.to_string()))
@@ -3044,15 +3046,6 @@ fn receiver_geodetic(position_ecef_m: [f64; 3]) -> Result<Wgs84Geodetic, Scenari
     itrf_to_geodetic(position).map_err(|error| ScenarioError::Frame(error.to_string()))
 }
 
-fn rounded_j2000_seconds(t_rx_j2000_s: f64) -> Result<i64, ScenarioError> {
-    validate::finite(t_rx_j2000_s, "t_rx_j2000_s").map_err(map_field)?;
-    let rounded = t_rx_j2000_s.round();
-    if !rounded.is_finite() || rounded < i64::MIN as f64 || rounded > i64::MAX as f64 {
-        return Err(invalid("t_rx_j2000_s", "must round to i64 seconds"));
-    }
-    Ok(rounded as i64)
-}
-
 fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -3283,20 +3276,23 @@ mod tests {
         }
     }
 
-    fn instant_from_j2000(seconds: i64) -> crate::astro::time::model::Instant {
-        let (jd_whole, fraction) =
-            crate::astro::time::civil::split_julian_date_from_j2000_seconds(seconds);
-        crate::astro::time::model::Instant::from_julian_date(
-            TimeScale::Gpst,
-            crate::astro::time::model::JulianDateSplit::new(jd_whole, fraction)
-                .expect("valid split Julian date"),
-        )
+    fn constant_ionex(epoch_j2000_s: i64, tecu: f64) -> Ionex {
+        constant_ionex_in(TimeScale::Gpst, epoch_j2000_s, tecu)
     }
 
-    fn constant_ionex(epoch_j2000_s: i64, tecu: f64) -> Ionex {
+    /// A one-map constant product whose map epoch is `epoch_j2000_s` read in
+    /// `scale`.
+    fn constant_ionex_in(scale: TimeScale, epoch_j2000_s: i64, tecu: f64) -> Ionex {
         let map = vec![vec![Some(tecu); 3]; 3];
+        let (jd_whole, fraction) =
+            crate::astro::time::civil::split_julian_date_from_j2000_seconds(epoch_j2000_s);
+        let map_epoch = crate::astro::time::model::Instant::from_julian_date(
+            scale,
+            crate::astro::time::model::JulianDateSplit::new(jd_whole, fraction)
+                .expect("valid split Julian date"),
+        );
         Ionex::from_samples(TecGridSamples {
-            map_epochs: vec![instant_from_j2000(epoch_j2000_s)],
+            map_epochs: vec![map_epoch],
             lat_nodes_deg: vec![90.0, 0.0, -90.0],
             lon_nodes_deg: vec![-180.0, 0.0, 180.0],
             dlat_deg: -90.0,
@@ -3686,6 +3682,20 @@ mod tests {
         };
         let err = simulate_scenario_with_media(&scenario, &wrong_media).expect_err("mismatch");
         assert!(matches!(err, ScenarioError::ExternalSourceMismatch { .. }));
+
+        // The map built at the same physical instant in UTC, 18 s earlier by
+        // the clock in 2026, is the same product and gives the same terms.
+        let utc_ionex = constant_ionex_in(TimeScale::Utc, epoch_s - 18, 12.0);
+        assert_eq!(utc_ionex, ionex);
+        let utc_media = ScenarioMediaSources {
+            ionex: Some(DeclaredIonexSource::new(&utc_ionex, &identity)),
+        };
+        let utc_set =
+            simulate_scenario_with_media(&scenario, &utc_media).expect("simulate with UTC map");
+        assert_eq!(
+            utc_set.truth_terms.ionosphere_m[0].to_bits(),
+            set.truth_terms.ionosphere_m[0].to_bits()
+        );
     }
 
     #[test]

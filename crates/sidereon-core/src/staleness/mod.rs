@@ -38,6 +38,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use crate::astro::constants::time::{SECONDS_PER_DAY, SECONDS_PER_DAY_I64};
+use crate::astro::time::model::Instant;
 use crate::atmosphere::Ionex;
 use crate::ephemeris::{EphemerisSource, Sp3, Sp3State};
 use crate::frame::Wgs84Geodetic;
@@ -205,6 +206,10 @@ pub enum SelectionError {
         /// Which computation overflowed.
         context: &'static str,
     },
+    /// A requested IONEX epoch has no reading on the UTC axis the map epochs
+    /// share (an instant inside an inserted leap second, before 1972 in a GNSS
+    /// scale, or in TCG, TDB or TCB).
+    IonexEpoch(crate::ionex::IonexEpochError),
 }
 
 impl fmt::Display for SelectionError {
@@ -242,6 +247,7 @@ impl fmt::Display for SelectionError {
             SelectionError::Overflow { context } => {
                 write!(f, "epoch arithmetic overflow: {context}")
             }
+            SelectionError::IonexEpoch(error) => write!(f, "{error}"),
         }
     }
 }
@@ -299,7 +305,7 @@ impl IonexSelection<'_> {
         receiver: Wgs84Geodetic,
         elevation_rad: f64,
         azimuth_rad: f64,
-        epoch_j2000_s: i64,
+        epoch: Instant,
         frequency_hz: f64,
     ) -> crate::Result<f64> {
         ionex_slant_delay(
@@ -307,7 +313,7 @@ impl IonexSelection<'_> {
             receiver,
             elevation_rad,
             azimuth_rad,
-            epoch_j2000_s,
+            epoch,
             frequency_hz,
         )
     }
@@ -377,24 +383,27 @@ impl EphemerisSource for Sp3Selection<'_> {
     }
 }
 
-/// Select an IONEX product usable at `requested_epoch_j2000_s`, degrading to a
+/// Select an IONEX product usable at `requested`, degrading to a
 /// diurnal-shifted prior product within `policy` when the exact day is absent.
 ///
 /// See [`select_ionex_over_range`]; this is the single-epoch case.
 pub fn select_ionex(
     products: &[Ionex],
-    requested_epoch_j2000_s: i64,
+    requested: Instant,
     policy: StalenessPolicy,
 ) -> Result<IonexSelection<'_>, SelectionError> {
-    select_ionex_over_range(
-        products,
-        requested_epoch_j2000_s,
-        requested_epoch_j2000_s,
-        policy,
-    )
+    select_ionex_over_range(products, requested, requested, policy)
 }
 
-/// Select an IONEX product usable across `[start, end]` (J2000 seconds).
+/// Select an IONEX product usable across `[start, end]`.
+///
+/// `start` and `end` are instants in any time scale. They are carried onto
+/// the UTC axis of the map epochs exactly, as the slant-delay query is (see
+/// [`crate::atmosphere::ionex_slant_delay`]), so a GPST request of 00:00:10 on
+/// a day is the UTC instant 23:59:52 of the day before (in 2017) and is served
+/// by the product covering that instant. An instant the conversion refuses is
+/// [`SelectionError::IonexEpoch`]. The epochs the metadata and errors report
+/// are UTC J2000 seconds.
 ///
 /// Resolution order:
 /// 1. If a product covers the whole range, it is returned unchanged
@@ -414,20 +423,38 @@ pub fn select_ionex(
 ///    [`SelectionError`] is returned.
 pub fn select_ionex_over_range(
     products: &[Ionex],
-    start_epoch_j2000_s: i64,
-    end_epoch_j2000_s: i64,
+    start: Instant,
+    end: Instant,
     policy: StalenessPolicy,
 ) -> Result<IonexSelection<'_>, SelectionError> {
     validate_policy(policy)?;
     if products.is_empty() {
         return Err(SelectionError::EmptyProductSet);
     }
-    if end_epoch_j2000_s < start_epoch_j2000_s {
+    let start = crate::ionex::utc_query_time(start).map_err(SelectionError::IonexEpoch)?;
+    let end = crate::ionex::utc_query_time(end).map_err(SelectionError::IonexEpoch)?;
+    let reported = |t: crate::ionex::UtcQueryTime| t.seconds as f64 + t.fraction;
+    if (end.seconds, end.fraction) < (start.seconds, start.fraction) {
         return Err(SelectionError::InvalidRange {
-            start_epoch_j2000_s: start_epoch_j2000_s as f64,
-            end_epoch_j2000_s: end_epoch_j2000_s as f64,
+            start_epoch_j2000_s: reported(start),
+            end_epoch_j2000_s: reported(end),
         });
     }
+    // Map epochs are whole seconds, so each comparison with a fractional
+    // instant is exact against a whole second: `lo <= start` holds when
+    // `lo <= floor(start)`, `hi < start` when `hi < ceil(start)`, and
+    // `end <= hi` when `ceil(end) <= hi`.
+    let ceil = |t: crate::ionex::UtcQueryTime| {
+        t.seconds
+            .checked_add(i64::from(t.fraction > 0.0))
+            .ok_or(SelectionError::Overflow {
+                context: "ceil of a fractional epoch",
+            })
+    };
+    let start_epoch_j2000_s = start.seconds;
+    let start_ceil_j2000_s = ceil(start)?;
+    let end_epoch_j2000_s = ceil(end)?;
+    let requested_epoch_j2000_s = reported(end);
 
     // 1. Exact coverage of the whole range, with a deterministic tie-break:
     //    latest start (freshest), then smallest last epoch (tightest span).
@@ -447,7 +474,7 @@ pub fn select_ionex_over_range(
     if let Some((product, _, _)) = exact {
         return Ok(IonexSelection {
             ionex: Cow::Borrowed(product),
-            metadata: StalenessMetadata::exact(end_epoch_j2000_s as f64),
+            metadata: StalenessMetadata::exact(requested_epoch_j2000_s),
         });
     }
 
@@ -459,14 +486,14 @@ pub fn select_ionex_over_range(
     let mut priors: Vec<(&Ionex, i64, i64)> = products
         .iter()
         .filter_map(|product| match ionex_span(product) {
-            Ok((lo, hi)) if hi < start_epoch_j2000_s => Some(Ok((product, lo, hi))),
+            Ok((lo, hi)) if hi < start_ceil_j2000_s => Some(Ok((product, lo, hi))),
             Ok(_) => None,
             Err(error) => Some(Err(error)),
         })
         .collect::<Result<_, _>>()?;
     if priors.is_empty() {
         return Err(SelectionError::NoPriorProduct {
-            requested_epoch_j2000_s: end_epoch_j2000_s as f64,
+            requested_epoch_j2000_s,
         });
     }
     // Freshest (largest last epoch) first; ties broken by the widest span
@@ -530,7 +557,7 @@ pub fn select_ionex_over_range(
                 ionex: Cow::Owned(shifted),
                 metadata: StalenessMetadata {
                     kind: DegradationKind::DiurnalShift,
-                    requested_epoch_j2000_s: end_epoch_j2000_s as f64,
+                    requested_epoch_j2000_s,
                     source_epoch_j2000_s: source_epoch_j2000_s as f64,
                     staleness_s: staleness_s as f64,
                     staleness_days: days as f64,
@@ -541,7 +568,7 @@ pub fn select_ionex_over_range(
 
     if let Some((source_epoch_j2000_s, staleness_s)) = beyond_cap {
         return Err(SelectionError::BeyondStalenessCap {
-            requested_epoch_j2000_s: end_epoch_j2000_s as f64,
+            requested_epoch_j2000_s,
             source_epoch_j2000_s: source_epoch_j2000_s as f64,
             staleness_s: staleness_s as f64,
             max_staleness_s: policy.max_staleness_s,

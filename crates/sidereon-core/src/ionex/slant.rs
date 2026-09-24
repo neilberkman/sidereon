@@ -30,7 +30,7 @@
 
 use super::{
     exact_j2000_second, IonexCoverageError, IonexCoveragePolicy, IonexMissingNodePolicy,
-    IonexMissingNodes, IonexNodeGap, IonexSlantPolicy,
+    IonexMissingNodes, IonexNodeGap, IonexSlantPolicy, UtcQueryTime,
 };
 use crate::astro::time::model::Instant;
 
@@ -492,7 +492,10 @@ pub(crate) fn slant_delay_components(
         frequency_hz,
         re_km,
         h_km,
-        epoch_s,
+        UtcQueryTime {
+            seconds: epoch_s,
+            fraction: 0.0,
+        },
         grid,
         IonexMissingNodePolicy::Strict,
     )
@@ -508,7 +511,7 @@ pub(crate) fn slant_delay_components_with_policy(
     frequency_hz: f64,
     re_km: f64,
     h_km: f64,
-    epoch_s: i64,
+    epoch: UtcQueryTime,
     grid: VtecGridView,
     policy: IonexSlantPolicy,
 ) -> Result<
@@ -524,7 +527,7 @@ pub(crate) fn slant_delay_components_with_policy(
         frequency_hz,
         re_km,
         h_km,
-        epoch_s,
+        epoch,
         grid,
         policy.missing_nodes,
     );
@@ -544,7 +547,7 @@ fn slant_delay_components_with_coverage(
     frequency_hz: f64,
     re_km: f64,
     h_km: f64,
-    epoch_s: i64,
+    epoch: UtcQueryTime,
     grid: VtecGridView,
     missing_nodes: IonexMissingNodePolicy,
 ) -> (NodeEvaluation, Option<IonexCoverageError>) {
@@ -583,9 +586,15 @@ fn slant_delay_components_with_coverage(
     let nmaps = map_epochs.len();
     let first_epoch_s = map_epoch_j2000_s(map_epochs, 0);
     let last_epoch_s = map_epoch_j2000_s(map_epochs, nmaps - 1);
+    // Map epochs are whole seconds, so the query's fraction decides only
+    // against the last map, and only when it sits on that map's second.
+    let UtcQueryTime {
+        seconds: epoch_s,
+        fraction: epoch_fraction,
+    } = epoch;
     let time_coverage = if epoch_s < first_epoch_s {
         Some(IonexCoverageError::EpochBeforeFirstMap)
-    } else if epoch_s > last_epoch_s {
+    } else if epoch_s > last_epoch_s || (epoch_s == last_epoch_s && epoch_fraction > 0.0) {
         Some(IonexCoverageError::EpochAfterLastMap)
     } else {
         None
@@ -613,7 +622,14 @@ fn slant_delay_components_with_coverage(
         // weights.
         let span_s = i128::from(t1) - i128::from(t0);
         let offset_s = i128::from(epoch_s) - i128::from(t0);
-        let mut w = offset_s as f64 / span_s as f64;
+        // A query on a whole second divides the exact integers as before; a
+        // fraction is added to the whole-second offset, which is exact for
+        // any offset of the 53-bit integers, and rounded with it once.
+        let mut w = if epoch_fraction == 0.0 {
+            offset_s as f64 / span_s as f64
+        } else {
+            (offset_s as f64 + epoch_fraction) / span_s as f64
+        };
         // Two explicit comparisons, not a clamp call: this reproduces the
         // reference recipe's operation order and NaN handling exactly so the
         // result is bit-stable.

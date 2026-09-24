@@ -56,6 +56,9 @@ pub enum Error {
     IonexNodesNotAvailable(Box<crate::ionex::IonexNodeGap>),
     /// An IONEX product gives no slant delay under the requested policy.
     IonexSlantUnavailable(crate::ionex::IonexSlantRefusal),
+    /// An IONEX map epoch has no exact whole UTC second an epoch record can
+    /// state.
+    IonexEpoch(crate::ionex::IonexEpochError),
     /// A requested epoch lies outside the sampled / valid span.
     EpochOutOfRange,
     /// An operation received inputs it cannot combine (e.g. an empty set of
@@ -101,6 +104,7 @@ impl fmt::Display for Error {
             Error::IonexSlantUnavailable(refusal) => {
                 write!(f, "IONEX slant delay unavailable: {refusal}")
             }
+            Error::IonexEpoch(error) => write!(f, "invalid input: {error}"),
             Error::EpochOutOfRange => write!(f, "epoch out of range"),
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Error::SbasEncode(error) => write!(f, "SBAS encode error: {error}"),
