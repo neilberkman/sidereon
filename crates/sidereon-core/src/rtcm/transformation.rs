@@ -12,7 +12,10 @@
 use crate::error::{Error, Result};
 
 use super::bits::{BitReader, FieldWriter};
-use super::{decode_body, write_trailing, DecodeContext, DecodeResult, RtcmDeparture, RtcmPolicy};
+use super::{
+    decode_body, write_trailing, DecodeContext, DecodeResult, RtcmDeparture, RtcmEncodeError,
+    RtcmPolicy, RtcmRecordKind,
+};
 
 /// The rotation point of a Molodenski-Badekas transformation (1022).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -114,10 +117,10 @@ fn write_name(w: &mut FieldWriter, field: &str, name: &str, count_bits: usize) -
     let mut bytes = Vec::with_capacity(name.len());
     for c in name.chars() {
         let byte = u8::try_from(u32::from(c)).map_err(|_| {
-            Error::InvalidInput(format!(
-                "RTCM {field} character {c:?} (U+{:04X}) is not an 8-bit character",
-                u32::from(c)
-            ))
+            Error::from(RtcmEncodeError::NonLatin1Character {
+                field: field.to_string(),
+                character: c,
+            })
         })?;
         bytes.push(byte);
     }
@@ -217,7 +220,7 @@ impl HelmertTransformation {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming what the message cannot state: a message
+    /// [`Error::RtcmEncode`] naming what the message cannot state: a message
     /// number other than 1021 and 1022, a rotation point absent from a 1022 or
     /// present in a 1021, a name with a character above `U+00FF` or more than
     /// 31 characters, nonempty `trailing_bits`, or a value wider than its
@@ -234,21 +237,35 @@ impl HelmertTransformation {
         match (number, self.rotation_point.is_some()) {
             (1021, false) | (1022, true) => {}
             (1021, true) => {
-                return Err(Error::InvalidInput(
-                    "RTCM 1021 carries no rotation point; a rotation point is written as 1022"
-                        .to_string(),
-                ))
+                return Err(RtcmEncodeError::FieldPresence {
+                    message_number: number,
+                    record: RtcmRecordKind::Transformation {
+                        family: "Helmert transformation message 1021/1022",
+                    },
+                    field: "rotation point",
+                    carried: false,
+                }
+                .into());
             }
             (1022, false) => {
-                return Err(Error::InvalidInput(
-                    "RTCM 1022 carries a rotation point, and none is given".to_string(),
-                ))
+                return Err(RtcmEncodeError::FieldPresence {
+                    message_number: number,
+                    record: RtcmRecordKind::Transformation {
+                        family: "Helmert transformation message 1021/1022",
+                    },
+                    field: "rotation point",
+                    carried: true,
+                }
+                .into());
             }
             _ => {
-                return Err(Error::InvalidInput(format!(
-                    "RTCM message number {number} is not a Helmert transformation message \
-                     1021/1022"
-                )))
+                return Err(RtcmEncodeError::MessageNumber {
+                    message_number: number,
+                    record: RtcmRecordKind::Transformation {
+                        family: "Helmert transformation message 1021/1022",
+                    },
+                }
+                .into());
             }
         }
         let mut w = FieldWriter::new(number);
@@ -470,7 +487,7 @@ impl ResidualGrid {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming what the message cannot state: a message
+    /// [`Error::RtcmEncode`] naming what the message cannot state: a message
     /// number other than 1023 and 1024, nonempty `trailing_bits`, or a value
     /// wider than its field (for 1024 a negative easting, which DF203 does not
     /// hold).
@@ -483,10 +500,11 @@ impl ResidualGrid {
     /// `trailing_bits` are written after the last field and reported.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         let number = self.message_number;
-        let layout = GridLayout::of(number).ok_or_else(|| {
-            Error::InvalidInput(format!(
-                "RTCM message number {number} is not a residual grid message 1023/1024"
-            ))
+        let layout = GridLayout::of(number).ok_or(RtcmEncodeError::MessageNumber {
+            message_number: number,
+            record: RtcmRecordKind::Transformation {
+                family: "residual grid message 1023/1024",
+            },
         })?;
         let mut w = FieldWriter::new(number);
         w.u("message number", u64::from(number), 12)?;
@@ -498,10 +516,13 @@ impl ResidualGrid {
             w.i("grid origin 2", i64::from(self.origin_2), layout.origin_2)?;
         } else {
             let easting = u64::try_from(self.origin_2).map_err(|_| {
-                Error::InvalidInput(format!(
-                    "RTCM {number} grid origin 2 {} is negative; DF203 is unsigned",
-                    self.origin_2
-                ))
+                Error::from(RtcmEncodeError::FieldOutOfRange {
+                    message_number: number,
+                    field: "grid origin 2".to_string(),
+                    value: i128::from(self.origin_2),
+                    width: layout.origin_2 as u8,
+                    encoding: super::RtcmFieldEncoding::Unsigned,
+                })
             })?;
             w.u("grid origin 2", easting, layout.origin_2)?;
         }
@@ -698,7 +719,7 @@ impl Projection {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming the field when a value is wider than its
+    /// [`Error::RtcmEncode`] naming the field when a value is wider than its
     /// field, or for nonempty `trailing_bits`.
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.encode_with_policy(RtcmPolicy::Strict)

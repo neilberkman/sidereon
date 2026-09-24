@@ -101,7 +101,7 @@ impl SystemParameters {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming what the message cannot state: a header
+    /// [`Error::RtcmEncode`] naming what the message cannot state: a header
     /// count other than the number of announcements, nonempty
     /// `trailing_bits`, or a value wider than its field.
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -220,7 +220,7 @@ impl TextMessage {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming the field when a value is wider than its
+    /// [`Error::RtcmEncode`] naming the field when a value is wider than its
     /// field (more than 255 code units, a character count above 127), or for
     /// nonempty `trailing_bits`.
     pub fn encode(&self) -> Result<Vec<u8>> {

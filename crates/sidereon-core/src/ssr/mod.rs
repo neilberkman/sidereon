@@ -5391,13 +5391,30 @@ mod tests {
             "/tests/fixtures/nav/KMS300DNK_R_20221591000_01H_MN.rnx"
         ))
         .expect("read SBAS broadcast fixture");
-        let broadcast = BroadcastEphemeris::from_nav(&nav_text).expect("parse SBAS broadcast");
-        let record = *broadcast
+        let unhealthy_broadcast =
+            BroadcastEphemeris::from_nav(&nav_text).expect("parse SBAS broadcast");
+        let record = *unhealthy_broadcast
             .sbas_records()
             .iter()
             .find(|record| record.iodn.is_some())
             .expect("fixture SBAS record with IODN");
         let sat = record.satellite_id;
+        assert_ne!(record.health, 0.0, "source fixture record is unhealthy");
+        let satellite_prefix = format!("{sat} ");
+        let mut healthy_lines: Vec<String> = nav_text.lines().map(str::to_owned).collect();
+        let record_line = healthy_lines
+            .iter()
+            .position(|line| line.starts_with(&satellite_prefix))
+            .expect("source SBAS record");
+        healthy_lines[record_line + 1].replace_range(61..80, " 0.000000000000E+00");
+        let broadcast = BroadcastEphemeris::from_nav(&healthy_lines.join("\n"))
+            .expect("parse synthetic healthy variant of SBAS record");
+        let healthy_record = broadcast
+            .sbas_records()
+            .iter()
+            .find(|candidate| candidate.satellite_id == sat && candidate.epoch == record.epoch)
+            .expect("same SBAS record in healthy variant");
+        assert_eq!(healthy_record.health, 0.0);
         let gps_epoch_s = record.t0_j2000_s() + GPS_EPOCH_TO_J2000_S;
         let week = (gps_epoch_s / SECONDS_PER_WEEK).floor() as u32;
         let tow_s = gps_epoch_s.rem_euclid(SECONDS_PER_WEEK);
@@ -5447,8 +5464,8 @@ mod tests {
             message.igs_ssr_version = igs.then_some(1);
             message.header.epoch_time_s = tow_s.floor() as u32;
             message.header.update_interval = 0;
-            message.orbit[0].satellite_id = sat.prn - 119;
-            message.clock[0].satellite_id = sat.prn - 119;
+            message.orbit[0].satellite_id = sat.prn - 19;
+            message.clock[0].satellite_id = sat.prn - 19;
             message.orbit[0].iode = if igs {
                 record.iodn.expect("IODN") as u32
             } else {
@@ -5467,10 +5484,15 @@ mod tests {
                 corrections.orbit(sat).and_then(|orbit| orbit.iod_crc),
                 (!igs).then_some(0x654321)
             );
+            assert!(matches!(
+                SsrCorrectedEphemeris::new(&unhealthy_broadcast, &corrections)
+                    .applied_orbit_clock_status(sat, query_j2000_s),
+                Err(SsrStateUnavailable::NoMatchingBroadcastRecord { .. })
+            ));
             let source = SsrCorrectedEphemeris::new(&broadcast, &corrections);
-            assert!(source
+            source
                 .applied_orbit_clock_status(sat, query_j2000_s)
-                .is_ok());
+                .expect("healthy SBAS record with matching issue applies corrections");
             let corrected = source
                 .corrected_state(sat, query_j2000_s)
                 .expect("matching SBAS issue applies corrections");
@@ -5489,7 +5511,7 @@ mod tests {
                 "SBAS SSR clock delta"
             );
 
-            let mut wrong_message = message;
+            let mut wrong_message = message.clone();
             wrong_message.orbit[0].iode = if igs {
                 (wrong_message.orbit[0].iode + 128) % 256
             } else {
@@ -5504,6 +5526,49 @@ mod tests {
                     .applied_orbit_clock_status(sat, query_j2000_s),
                 Err(SsrStateUnavailable::NoMatchingBroadcastRecord { .. })
             ));
+
+            for (radial, c0, orbit_over_limit, clock_over_limit) in [
+                (100_001, 100, true, false),
+                (10_000, 2_997_925, false, true),
+            ] {
+                let mut oversized_message = message.clone();
+                oversized_message.orbit[0].delta_radial = radial;
+                oversized_message.orbit[0].delta_along = 0;
+                oversized_message.orbit[0].delta_cross = 0;
+                oversized_message.clock[0].c0 = c0;
+                let mut oversized_store = SsrCorrectionStore::new();
+                oversized_store
+                    .ingest_ssr(&oversized_message, query_time)
+                    .expect("ingest oversized SBAS SSR correction");
+
+                let strict = SsrCorrectedEphemeris::new(&broadcast, &oversized_store);
+                let Err(SsrStateUnavailable::CorrectionExceedsLimit(size)) =
+                    strict.applied_orbit_clock_status(sat, query_j2000_s)
+                else {
+                    panic!("oversized SBAS correction was not refused");
+                };
+                assert_eq!(size.orbit_exceeds_limit(), orbit_over_limit);
+                assert_eq!(size.clock_exceeds_limit(), clock_over_limit);
+                assert_eq!(strict.corrected_state(sat, query_j2000_s), None);
+                assert!(strict.oversized_corrections().is_empty());
+
+                let lenient = strict.with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
+                lenient
+                    .corrected_state(sat, query_j2000_s)
+                    .expect("lenient SBAS correction is applied");
+                let reported = lenient.oversized_corrections();
+                assert_eq!(reported.len(), 1);
+                assert_eq!(reported[0].sat, sat);
+                assert_eq!(
+                    reported[0].solution,
+                    oversized_store
+                        .orbit(sat)
+                        .expect("stored SBAS orbit")
+                        .solution
+                );
+                assert_eq!(reported[0].t_j2000_s.to_bits(), query_j2000_s.to_bits());
+                assert_eq!(reported[0].size, size);
+            }
         }
     }
 
@@ -5877,6 +5942,9 @@ mod tests {
         message.header.epoch_time_s = epoch_time_s;
         message.header.update_interval = 0;
         message.orbit[0].iode = iodnav & 0xFF;
+        message.orbit[0].delta_radial = 0;
+        message.orbit[0].delta_along = 0;
+        message.orbit[0].delta_cross = 0;
         let t = ssr_epoch_j2000_s(GnssSystem::Galileo, 4076, week, epoch_time_s).unwrap();
         let state = |message: &SsrMessage| {
             let mut store = SsrCorrectionStore::new();
@@ -16263,12 +16331,14 @@ mod tests {
     ) -> SsrCorrectionStore {
         let combined = SsrMessage {
             message_number: 1060,
+            igs_ssr_version: None,
             system: GnssSystem::Gps,
             kind: SsrKind::CombinedOrbitClock,
             header: g30_size_header(),
             orbit: vec![SsrOrbitRecord {
                 satellite_id: 30,
                 iode,
+                iod_crc: None,
                 delta_radial: orbit[0],
                 delta_along: orbit[1],
                 delta_cross: orbit[2],
@@ -16294,6 +16364,7 @@ mod tests {
         if let Some(high_rate_c0) = high_rate_c0 {
             let high_rate = SsrMessage {
                 message_number: 1062,
+                igs_ssr_version: None,
                 system: GnssSystem::Gps,
                 kind: SsrKind::HighRateClock,
                 header: SsrHeader {

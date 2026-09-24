@@ -1,4 +1,4 @@
-//! Typed refusals of the RTCM encoders and of the ephemeris conversions.
+//! Typed refusals of the RTCM encoders, ephemeris conversions, and VTEC evaluation.
 
 use core::fmt;
 
@@ -42,6 +42,29 @@ pub enum RtcmRecordKind {
         system: GnssSystem,
         /// The SSR kind the record holds.
         kind: SsrKind,
+    },
+    /// Legacy GPS or GLONASS observations, 1001..1004 or 1009..1012.
+    LegacyObservations,
+    /// System parameters, 1013.
+    SystemParameters,
+    /// Unicode text, 1029.
+    Text,
+    /// Network RTK message identified by its message number.
+    Network {
+        /// Name of the network message family.
+        family: &'static str,
+    },
+    /// Coordinate transformation message identified by its message number.
+    Transformation {
+        /// Name of the coordinate transformation family.
+        family: &'static str,
+    },
+    /// GLONASS code-phase biases, 1230.
+    GlonassCodePhaseBiases,
+    /// SSR VTEC message identified by its message number, 1264 or 4076.
+    SsrVtec {
+        /// RTCM message number held.
+        message_number: u16,
     },
 }
 
@@ -169,6 +192,44 @@ pub enum RtcmEncodeError {
         field: &'static str,
         /// Whether the message carries the field.
         carried: bool,
+    },
+    /// An optional value for a particular satellite record is missing, or one
+    /// the message does not carry is given.
+    SatelliteFieldPresence {
+        /// Message number being encoded.
+        message_number: u16,
+        /// Record family being encoded.
+        record: RtcmRecordKind,
+        /// Satellite id of the record.
+        satellite: u8,
+        /// The field.
+        field: &'static str,
+        /// Whether the message carries the field.
+        carried: bool,
+    },
+    /// A counted collection does not match its declared or required length.
+    CountMismatch {
+        /// Message number being encoded.
+        message_number: u16,
+        /// The count field or collection.
+        field: &'static str,
+        /// Count declared or required.
+        expected: usize,
+        /// Number of values held.
+        actual: usize,
+    },
+    /// A semantic integer value is outside the format's allowed domain.
+    ValueOutOfRange {
+        /// Message number being encoded.
+        message_number: u16,
+        /// The field.
+        field: String,
+        /// The value held.
+        value: i128,
+        /// Inclusive minimum.
+        minimum: i128,
+        /// Inclusive maximum.
+        maximum: i128,
     },
     /// A string character above `U+00FF`, which no 8-bit character states.
     NonLatin1Character {
@@ -391,6 +452,23 @@ impl fmt::Display for RtcmEncodeError {
                     RtcmRecordKind::Ssr { system, kind } => {
                         write!(f, "the {system:?} {kind:?} SSR message this record holds")
                     }
+                    RtcmRecordKind::LegacyObservations => {
+                        write!(f, "a legacy observation message 1001-1004/1009-1012")
+                    }
+                    RtcmRecordKind::SystemParameters => write!(f, "system parameters 1013"),
+                    RtcmRecordKind::Text => write!(f, "a text message 1029"),
+                    RtcmRecordKind::Network { family } => {
+                        write!(f, "{family}")
+                    }
+                    RtcmRecordKind::Transformation { family } => {
+                        write!(f, "{family}")
+                    }
+                    RtcmRecordKind::GlonassCodePhaseBiases => {
+                        write!(f, "GLONASS code-phase biases 1230")
+                    }
+                    RtcmRecordKind::SsrVtec { message_number } => {
+                        write!(f, "an SSR VTEC message 1264/4076 (got {message_number})")
+                    }
                 }
             }
             Self::FieldPresence {
@@ -423,6 +501,60 @@ impl fmt::Display for RtcmEncodeError {
                     ),
                 }
             }
+            Self::SatelliteFieldPresence {
+                message_number,
+                record,
+                satellite,
+                field,
+                carried,
+            } => {
+                let family = match record {
+                    RtcmRecordKind::LegacyObservations => "legacy observation",
+                    RtcmRecordKind::Network { family } => family,
+                    RtcmRecordKind::Ssr { system, kind } => {
+                        return match carried {
+                            true => write!(
+                                f,
+                                "RTCM SSR {message_number} {system:?} {kind:?} satellite {satellite} {field} is not given, and the layout carries it"
+                            ),
+                            false => write!(
+                                f,
+                                "RTCM SSR {message_number} {system:?} {kind:?} satellite {satellite} {field} is given, and the layout does not carry it"
+                            ),
+                        }
+                    }
+                    _ => "satellite record",
+                };
+                match carried {
+                    true => write!(
+                        f,
+                        "RTCM {message_number} {family} satellite {satellite} {field} is not given, and {message_number} carries it"
+                    ),
+                    false => write!(
+                        f,
+                        "RTCM {message_number} {family} satellite {satellite} {field} is given, and {message_number} does not carry it"
+                    ),
+                }
+            }
+            Self::CountMismatch {
+                message_number,
+                field,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "RTCM {message_number} {field} count {actual} differs from the required {expected}"
+            ),
+            Self::ValueOutOfRange {
+                message_number,
+                field,
+                value,
+                minimum,
+                maximum,
+            } => write!(
+                f,
+                "RTCM {message_number} {field} {value} is outside {minimum}..={maximum}"
+            ),
             Self::NonLatin1Character { field, character } => write!(
                 f,
                 "RTCM {field} character {character:?} (U+{:04X}) is not an 8-bit character",
@@ -612,11 +744,12 @@ impl From<RtcmEncodeError> for crate::Error {
     }
 }
 
-/// Why a decoded RTCM ephemeris has no satellite or no broadcast record.
+/// Why an RTCM conversion or VTEC evaluation cannot produce its result.
 ///
 /// Returned by the ephemeris `satellite` accessors and `to_broadcast_record`
-/// conversions. The raw message keeps every field it held; these say why it
-/// names no satellite, or why the solver's record cannot be built from it.
+/// conversions, or by [`super::SsrVtecMessage::evaluate`]. The raw message
+/// keeps every field it held; these identify why a satellite, broadcast
+/// record, or VTEC result cannot be produced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum RtcmConversionError {
@@ -667,6 +800,13 @@ pub enum RtcmConversionError {
         /// The 10-bit week the message holds.
         week: u16,
     },
+    /// The NavIC week does not reduce to the RTCM 1041 ten-bit week.
+    NavicWeekMismatch {
+        /// The caller's full GPS week.
+        full_week: u32,
+        /// The ten-bit week held by the message.
+        week: u16,
+    },
     /// A week and time of week that name no representable instant.
     TimeNotRepresentable {
         /// The time, for example `"GPS toe"`.
@@ -697,6 +837,86 @@ pub enum RtcmConversionError {
     },
     /// The GPS fit-interval flag, IODE and IODC name no curve-fit interval.
     FitInterval(LnavRecordError),
+    /// A VTEC model or geometry cannot be evaluated under the IGS model.
+    VtecEvaluation(VtecEvaluationProblem),
+}
+
+/// Why an SSR VTEC evaluation cannot produce a physically defined result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum VtecEvaluationProblem {
+    /// Computation time is not finite GPS seconds in `[0, 86400)`.
+    ComputationTime,
+    /// Frequency is not finite and positive.
+    Frequency,
+    /// An input ECEF coordinate is not finite.
+    NonFiniteCoordinates,
+    /// Message number and IGS SSR version do not identify a VTEC message.
+    MessageIdentity {
+        /// RTCM message number held.
+        message_number: u16,
+    },
+    /// Layer count is outside `1..=4`.
+    LayerCount {
+        /// Number of layers held.
+        layers: usize,
+    },
+    /// Receiver or satellite position is zero, non-finite in derived geometry,
+    /// or they coincide.
+    InvalidGeometry,
+    /// Satellite is below the local horizon.
+    BelowHorizon,
+    /// A layer has an invalid degree/order relation.
+    LayerDegreeOrder {
+        /// Zero-based layer index.
+        layer_index: usize,
+        /// Spherical-harmonics degree.
+        degree: u8,
+        /// Spherical-harmonics order.
+        order: u8,
+    },
+    /// Coefficient counts do not match the layer's degree and order.
+    CoefficientCounts {
+        /// Zero-based layer index.
+        layer_index: usize,
+        /// Expected cosine coefficient count.
+        cosine_expected: usize,
+        /// Actual cosine coefficient count.
+        cosine_actual: usize,
+        /// Expected sine coefficient count.
+        sine_expected: usize,
+        /// Actual sine coefficient count.
+        sine_actual: usize,
+    },
+    /// A coefficient contains the reserved unavailable sentinel -32768.
+    UnavailableCoefficient {
+        /// Zero-based layer index.
+        layer_index: usize,
+    },
+    /// The thin-shell layer is at or below the receiver radius.
+    ShellNotAboveReceiver {
+        /// Zero-based layer index.
+        layer_index: usize,
+    },
+    /// A required coefficient is missing during harmonic evaluation.
+    MissingCoefficient {
+        /// Zero-based layer index.
+        layer_index: usize,
+        /// Cosine or sine coefficient list.
+        field: &'static str,
+        /// Coefficient index requested.
+        index: usize,
+    },
+    /// The thin-shell mapping denominator is not positive.
+    InvalidMappingFactor {
+        /// Zero-based layer index.
+        layer_index: usize,
+    },
+    /// A derived physical result is non-finite or nonzero but unrepresentable.
+    PhysicalResultOutOfRange {
+        /// The derived result, such as `"STEC"` or `"pseudorange delay"`.
+        field: &'static str,
+    },
 }
 
 fn system_label(system: GnssSystem) -> &'static str {
@@ -758,6 +978,10 @@ impl fmt::Display for RtcmConversionError {
                     "{system} full week {full_week} disagrees with 10-bit RTCM week {week}"
                 )
             }
+            Self::NavicWeekMismatch { full_week, week } => write!(
+                f,
+                "NavIC full week {full_week} disagrees with 10-bit RTCM week {week}"
+            ),
             Self::TimeNotRepresentable { field } => {
                 write!(f, "RTCM broadcast {field} is not representable")
             }
@@ -782,6 +1006,82 @@ impl fmt::Display for RtcmConversionError {
                 system_label(*system)
             ),
             Self::FitInterval(error) => write!(f, "{error}"),
+            Self::VtecEvaluation(problem) => {
+                write!(f, "RTCM SSR VTEC evaluation cannot proceed: ")?;
+                match problem {
+                    VtecEvaluationProblem::ComputationTime => {
+                        write!(
+                            f,
+                            "computation time is not finite GPS seconds in [0, 86400)"
+                        )
+                    }
+                    VtecEvaluationProblem::Frequency => {
+                        write!(f, "frequency is not finite and positive")
+                    }
+                    VtecEvaluationProblem::NonFiniteCoordinates => {
+                        write!(f, "receiver or satellite coordinates are not finite")
+                    }
+                    VtecEvaluationProblem::MessageIdentity { message_number } => {
+                        write!(
+                            f,
+                            "message {message_number} and its IGS version do not identify VTEC"
+                        )
+                    }
+                    VtecEvaluationProblem::LayerCount { layers } => {
+                        write!(f, "layer count {layers} is outside 1..=4")
+                    }
+                    VtecEvaluationProblem::InvalidGeometry => {
+                        write!(
+                            f,
+                            "receiver and satellite positions do not define a valid path"
+                        )
+                    }
+                    VtecEvaluationProblem::BelowHorizon => {
+                        write!(f, "satellite is below the local horizon")
+                    }
+                    VtecEvaluationProblem::LayerDegreeOrder {
+                        layer_index,
+                        degree,
+                        order,
+                    } => write!(
+                        f,
+                        "layer {layer_index} degree/order {degree}/{order} violates 1 <= M <= N <= 16"
+                    ),
+                    VtecEvaluationProblem::CoefficientCounts {
+                        layer_index,
+                        cosine_expected,
+                        cosine_actual,
+                        sine_expected,
+                        sine_actual,
+                    } => write!(
+                        f,
+                        "layer {layer_index} has {cosine_actual}/{cosine_expected} cosine and {sine_actual}/{sine_expected} sine coefficients"
+                    ),
+                    VtecEvaluationProblem::UnavailableCoefficient { layer_index } => write!(
+                        f,
+                        "layer {layer_index} contains reserved unavailable coefficient -32768"
+                    ),
+                    VtecEvaluationProblem::ShellNotAboveReceiver { layer_index } => {
+                        write!(f, "layer {layer_index} shell is not above the receiver")
+                    }
+                    VtecEvaluationProblem::MissingCoefficient {
+                        layer_index,
+                        field,
+                        index,
+                    } => write!(
+                        f,
+                        "layer {layer_index} {field} coefficient {index} is missing"
+                    ),
+                    VtecEvaluationProblem::InvalidMappingFactor { layer_index } => write!(
+                        f,
+                        "layer {layer_index} has a nonpositive thin-shell mapping denominator"
+                    ),
+                    VtecEvaluationProblem::PhysicalResultOutOfRange { field } => write!(
+                        f,
+                        "derived {field} is non-finite or not representable as an f64"
+                    ),
+                }
+            }
         }
     }
 }

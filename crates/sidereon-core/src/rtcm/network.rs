@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use super::bits::{BitReader, FieldWriter, OutOfInput};
 use super::{
     decode_body, is_departing_tail, write_trailing, DecodeContext, DecodeError, DecodeResult,
-    RtcmDeparture, RtcmPolicy,
+    RtcmDeparture, RtcmEncodeError, RtcmPolicy, RtcmRecordKind,
 };
 
 /// Read up to `declared` records with `read`, then what follows them: under
@@ -85,10 +85,13 @@ pub(super) fn check_count(
         return Ok(true);
     }
     if declared != records {
-        return Err(Error::InvalidInput(format!(
-            "RTCM {message_number} header record count {declared} differs from the {records} \
-             records the message writes"
-        )));
+        return Err(RtcmEncodeError::CountMismatch {
+            message_number,
+            field: "header record",
+            expected: declared,
+            actual: records,
+        }
+        .into());
     }
     Ok(false)
 }
@@ -173,7 +176,7 @@ impl NetworkAuxiliaryStation {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming the field when a value is wider than its
+    /// [`Error::RtcmEncode`] naming the field when a value is wider than its
     /// field, or for nonempty `trailing_bits`
     /// ([`RtcmDeparture::TrailingBits`]).
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -365,7 +368,7 @@ impl NetworkCorrectionDifferences {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming what the message cannot state: a message
+    /// [`Error::RtcmEncode`] naming what the message cannot state: a message
     /// number outside 1015..=1017 and 1037..=1039, a difference or IOD the
     /// number carries held as `None` or one it does not carry held as
     /// `Some`, a header count other than the number of records, nonempty
@@ -381,11 +384,11 @@ impl NetworkCorrectionDifferences {
     /// under both policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         let number = self.message_number;
-        let layout = DifferenceLayout::of(number).ok_or_else(|| {
-            Error::InvalidInput(format!(
-                "RTCM message number {number} is not a correction-difference message \
-                 1015-1017/1037-1039"
-            ))
+        let layout = DifferenceLayout::of(number).ok_or(RtcmEncodeError::MessageNumber {
+            message_number: number,
+            record: RtcmRecordKind::Network {
+                family: "network correction-difference message 1015-1017/1037-1039",
+            },
         })?;
         for s in &self.satellites {
             for (what, present, carried) in [
@@ -402,16 +405,16 @@ impl NetworkCorrectionDifferences {
                 ),
             ] {
                 if present != carried {
-                    return Err(Error::InvalidInput(format!(
-                        "RTCM {number} satellite {} {what} is {}, and {number} {}",
-                        s.satellite_id,
-                        if present { "given" } else { "not given" },
-                        if carried {
-                            "carries it"
-                        } else {
-                            "does not carry it"
-                        }
-                    )));
+                    return Err(RtcmEncodeError::SatelliteFieldPresence {
+                        message_number: number,
+                        record: RtcmRecordKind::Network {
+                            family: "network correction-difference message",
+                        },
+                        satellite: s.satellite_id,
+                        field: what,
+                        carried,
+                    }
+                    .into());
                 }
             }
         }
@@ -547,7 +550,7 @@ impl NetworkResiduals {
                 return Err(Error::Parse(format!(
                     "message {message_number} is not a network RTK residual message 1030/1031"
                 ))
-                .into())
+                .into());
             }
         };
         let epoch_time = r.u(epoch_bits)? as u32;
@@ -586,7 +589,7 @@ impl NetworkResiduals {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming what the message cannot state: a message
+    /// [`Error::RtcmEncode`] naming what the message cannot state: a message
     /// number other than 1030 and 1031, a header count other than the number
     /// of records, nonempty `trailing_bits`, or a value wider than its field.
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -602,9 +605,13 @@ impl NetworkResiduals {
             1030 => 20,
             1031 => 17,
             _ => {
-                return Err(Error::InvalidInput(format!(
-                    "RTCM message number {number} is not a network RTK residual message 1030/1031"
-                )))
+                return Err(RtcmEncodeError::MessageNumber {
+                    message_number: number,
+                    record: RtcmRecordKind::Network {
+                        family: "network RTK residual message 1030/1031",
+                    },
+                }
+                .into());
             }
         };
         let mut departures = Vec::new();
@@ -697,7 +704,7 @@ impl PhysicalReferenceStation {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming the field when a value is wider than its
+    /// [`Error::RtcmEncode`] naming the field when a value is wider than its
     /// field, or for nonempty `trailing_bits`.
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.encode_with_policy(RtcmPolicy::Strict)
@@ -797,7 +804,7 @@ impl FkpGradients {
                 return Err(Error::Parse(format!(
                     "message {message_number} is not an FKP gradient message 1034/1035"
                 ))
-                .into())
+                .into());
             }
         };
         let reference_station_id = r.u(12)? as u16;
@@ -834,7 +841,7 @@ impl FkpGradients {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming what the message cannot state: a message
+    /// [`Error::RtcmEncode`] naming what the message cannot state: a message
     /// number other than 1034 and 1035, a header count other than the number
     /// of records, nonempty `trailing_bits`, or a value wider than its field.
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -850,9 +857,13 @@ impl FkpGradients {
             1034 => 20,
             1035 => 17,
             _ => {
-                return Err(Error::InvalidInput(format!(
-                    "RTCM message number {number} is not an FKP gradient message 1034/1035"
-                )))
+                return Err(RtcmEncodeError::MessageNumber {
+                    message_number: number,
+                    record: RtcmRecordKind::Network {
+                        family: "FKP gradient message 1034/1035",
+                    },
+                }
+                .into());
             }
         };
         let mut departures = Vec::new();
