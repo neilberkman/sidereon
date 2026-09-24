@@ -991,7 +991,7 @@ pub(crate) struct SatModelEnv<'a> {
 /// `|z_0| - b`, near `-6_356_752 m`. Any position more than 1 m from the geocentre
 /// is therefore outside, and within 1 m the `ecef2pos` arithmetic is run as
 /// written.
-fn rtklib_sees_every_satellite_overhead(rx_ecef_m: [f64; 3]) -> bool {
+pub(crate) fn rtklib_sees_every_satellite_overhead(rx_ecef_m: [f64; 3]) -> bool {
     let r2 = rx_ecef_m[0] * rx_ecef_m[0] + rx_ecef_m[1] * rx_ecef_m[1];
     if r2 + rx_ecef_m[2] * rx_ecef_m[2] > 1.0 {
         return false;

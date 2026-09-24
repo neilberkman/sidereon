@@ -950,9 +950,13 @@ fn validate_rtk_satellite_geometry(
 
 /// Apply an RTK elevation mask at the base receiver.
 ///
-/// A satellite is kept in an epoch when the sine of its geocentric-up elevation
-/// is at least `sin(mask_deg)`. The caller owns receiver observation maps and
-/// uses the returned keep lists to thin each epoch consistently.
+/// A satellite is kept in an epoch when its elevation at the base is at least
+/// `mask_deg`, as RTKLIB `selsat` keeps it: the elevation is `satazel`'s, of the
+/// line of sight from the base to the satellite position given, above the
+/// geodetic (WGS84 ellipsoid-normal) horizon of the base, and a base RTKLIB
+/// `satazel` places at the geocentre sees every satellite at the zenith. The
+/// caller owns receiver observation maps and uses the returned keep lists to
+/// thin each epoch consistently.
 pub fn apply_elevation_mask(
     base_m: [f64; 3],
     epochs: &[ElevationMaskEpoch],
@@ -961,15 +965,15 @@ pub fn apply_elevation_mask(
     validate_rtk_receiver_position(base_m)?;
     let mask_deg = validate::finite_in_range(mask_deg, -90.0, 90.0, "rtk elevation mask_deg")
         .map_err(double_difference_invalid_input)?;
-    let min_sin = libm::sin(mask_deg * DEG_TO_RAD);
-    let up = local_up(base_m);
+    let mask_rad = mask_deg * DEG_TO_RAD;
+    let base_at_zenith = crate::spp::rtklib_sees_every_satellite_overhead(base_m);
     let mut masked = BTreeSet::new();
     let mut results = Vec::with_capacity(epochs.len());
 
     for epoch in epochs {
         let mut kept = Vec::new();
         for (sat, sat_pos) in &epoch.satellite_positions_m {
-            if elevation_score_with_up(base_m, up, *sat_pos)? >= min_sin {
+            if base_elevation_rad(base_m, *sat_pos, base_at_zenith)? >= mask_rad {
                 kept.push(sat.clone());
             } else {
                 masked.insert(sat.clone());
@@ -984,6 +988,26 @@ pub fn apply_elevation_mask(
         epochs: results,
         masked_satellite_ids: masked.into_iter().collect(),
     })
+}
+
+/// RTKLIB `satazel` elevation of `sat_pos_m` seen from the base, through the
+/// geodetic ENU frame the SPP selection uses.
+fn base_elevation_rad(
+    base_m: [f64; 3],
+    sat_pos_m: [f64; 3],
+    base_at_zenith: bool,
+) -> Result<f64, DoubleDifferenceError> {
+    rtk_line_of_sight(base_m, sat_pos_m)?;
+    if base_at_zenith {
+        return Ok(core::f64::consts::FRAC_PI_2);
+    }
+    let el_rad = crate::estimation::substrate::frames::az_el_from_ecef(
+        crate::estimation::recipe::FrameRecipe::SppSkyfieldAuThreeIter,
+        base_m,
+        sat_pos_m,
+    )
+    .el_rad;
+    validate::finite(el_rad, "rtk satellite elevation").map_err(double_difference_invalid_input)
 }
 
 /// Estimate arc-level double-difference wide-lane integers from dual-frequency
@@ -3461,6 +3485,62 @@ mod tests {
                 "G02".to_string()
             ))
         );
+    }
+
+    /// The mask measures elevation above the ellipsoid-normal horizon, as RTKLIB
+    /// `satazel` does. At 49 deg latitude the geocentric vertical leans 0.19 deg
+    /// towards the equator, so a satellite due north 0.1 deg above a 10 deg mask
+    /// sits below it measured from the geocentric vertical, and one due south
+    /// 0.1 deg below the mask sits above it. Both are classified by their
+    /// geodetic elevation.
+    #[test]
+    fn elevation_mask_measures_elevation_from_the_geodetic_horizon() {
+        let a = 6_378_137.0_f64;
+        let f = 1.0 / 298.257_223_563;
+        let e2 = f * (2.0 - f);
+        let (lat, lon) = (49.0_f64.to_radians(), 12.9_f64.to_radians());
+        let n = a / (1.0 - e2 * libm::sin(lat) * libm::sin(lat)).sqrt();
+        let base = [
+            n * libm::cos(lat) * libm::cos(lon),
+            n * libm::cos(lat) * libm::sin(lon),
+            n * (1.0 - e2) * libm::sin(lat),
+        ];
+        let up = [
+            libm::cos(lat) * libm::cos(lon),
+            libm::cos(lat) * libm::sin(lon),
+            libm::sin(lat),
+        ];
+        let north = [
+            -libm::sin(lat) * libm::cos(lon),
+            -libm::sin(lat) * libm::sin(lon),
+            libm::cos(lat),
+        ];
+        let at = |elevation_deg: f64, towards_north: f64| {
+            let el = elevation_deg.to_radians();
+            let range = 2.0e7;
+            std::array::from_fn::<f64, 3, _>(|i| {
+                base[i] + range * (libm::sin(el) * up[i] + towards_north * libm::cos(el) * north[i])
+            })
+        };
+        let epochs = vec![ElevationMaskEpoch {
+            satellite_positions_m: BTreeMap::from([
+                ("G01".to_string(), at(10.1, 1.0)),
+                ("G02".to_string(), at(9.9, -1.0)),
+            ]),
+        }];
+        let geocentric_up = local_up(base);
+        let sin_mask = libm::sin(10.0_f64.to_radians());
+        assert!(elevation_score_with_up(base, geocentric_up, at(10.1, 1.0)).unwrap() < sin_mask);
+        assert!(elevation_score_with_up(base, geocentric_up, at(9.9, -1.0)).unwrap() > sin_mask);
+
+        let result = apply_elevation_mask(base, &epochs, 10.0).unwrap();
+        assert_eq!(
+            result.epochs,
+            vec![ElevationMaskEpochResult {
+                kept_satellite_ids: vec!["G01".to_string()],
+            }]
+        );
+        assert_eq!(result.masked_satellite_ids, vec!["G02".to_string()]);
     }
 
     #[test]
