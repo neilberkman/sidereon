@@ -18,7 +18,7 @@ use serde::Serialize;
 use sidereon_core::astro::frames::transforms::FrameTransformError;
 use sidereon_core::astro::propagator::ForceModelKind;
 use sidereon_core::astro::time::civil::civil_from_j2000_seconds;
-use sidereon_core::constants::{J2000_JD, SECONDS_PER_DAY};
+use sidereon_core::astro::time::civil::j2000_seconds_from_split;
 use sidereon_core::data::{
     newest_published_product, next_issue_due, parse_archive_listing, publication_listing_urls,
     published_issue_age_minutes, AnalysisCenter, DataCatalogError, NominalIssue, ProductDate,
@@ -1520,7 +1520,10 @@ fn orient_state_samples(
         .iter()
         .map(|sample| {
             let seed = EarthOrientation::from_instant(sample.epoch)?;
-            let tdb_seconds = (seed.time_scales().jd_tdb - J2000_JD) * SECONDS_PER_DAY;
+            let tdb_seconds = j2000_seconds_from_split(
+                seed.time_scales().jd_whole,
+                seed.time_scales().tdb_fraction,
+            );
             let orientation = provider.orientation_at_tdb_seconds(tdb_seconds)?;
             Ok(OrientedPreciseEphemerisStateSample::new(
                 *sample,
