@@ -94,7 +94,9 @@ pub struct ForceModelComponents {
     pub spherical_harmonic: Option<SphericalHarmonicGravityConfig>,
     /// Optional Sun and Moon third-body perturbation.
     pub third_body: Option<ThirdBodyGravity>,
-    /// Optional solid Earth tide geopotential perturbation.
+    /// Optional solid Earth tide geopotential perturbation. Its
+    /// [`SolidEarthTideGravity::tide_system`] must be the tide system of the
+    /// zonal or spherical-harmonic field when one is selected.
     pub solid_earth_tide: Option<SolidEarthTideGravity>,
     /// Optional solid Earth pole tide geopotential perturbation.
     pub solid_earth_pole_tide: Option<SolidEarthPoleTideGravity>,
@@ -294,6 +296,24 @@ impl ForceModelKind {
                     return Err(PropagationError::InvalidInput(
                         "zonal and spherical harmonic gravity cannot both be selected".to_string(),
                     ));
+                }
+                // The tide force's Step 3 removes the permanent tide the field's
+                // C20 holds; told another tide system, it would count that part
+                // twice or not at all.
+                let field_tide_system = components
+                    .zonal
+                    .map(|zonal| zonal.coefficients.tide_system)
+                    .or(components
+                        .spherical_harmonic
+                        .map(|gravity| gravity.tide_system()));
+                if let (Some(tide), Some(field)) = (components.solid_earth_tide, field_tide_system)
+                {
+                    if tide.tide_system != field {
+                        return Err(PropagationError::InvalidInput(format!(
+                            "solid Earth tide is set for a {:?} geopotential but the selected field is {:?}",
+                            tide.tide_system, field
+                        )));
+                    }
                 }
                 let mut composite = CompositeForceModel::new();
                 if let Some(mu_km3_s2) = components.two_body_mu_km3_s2 {
@@ -930,6 +950,56 @@ mod tests {
         .expect("composite two-body ephemeris");
 
         assert_states_bit_for_bit(&legacy, &composite);
+    }
+
+    #[test]
+    fn solid_earth_tide_must_share_the_field_tide_system() {
+        use crate::astro::forces::TideSystem;
+
+        let tide_free = SolidEarthTideGravity::default();
+        let zero_tide = SolidEarthTideGravity {
+            tide_system: TideSystem::ZeroTide,
+            ..tide_free
+        };
+        let zonal = ForceModelComponents::earth_phase_a(None);
+        let harmonic = ForceModelComponents::earth_phase_b(4, 4, None).expect("phase B");
+
+        // The default zonal coefficients and the embedded EGM96 table are
+        // tide-free, as is the default tide force.
+        for components in [zonal, harmonic] {
+            ForceModelKind::composite(components.with_solid_earth_tide(tide_free))
+                .build()
+                .expect("matching tide systems");
+            let error = ForceModelKind::composite(components.with_solid_earth_tide(zero_tide))
+                .build()
+                .err()
+                .expect("mismatched tide systems are refused");
+            assert!(
+                format!("{error}")
+                    .contains("ZeroTide geopotential but the selected field is TideFree"),
+                "{error}"
+            );
+        }
+
+        // A zero-tide zonal field takes a zero-tide tide force.
+        let mut zero_tide_zonal = ZonalGravity::earth_j2_through_j6();
+        zero_tide_zonal.coefficients.tide_system = TideSystem::ZeroTide;
+        let components = ForceModelComponents::earth_two_body().with_zonal(zero_tide_zonal);
+        ForceModelKind::composite(components.with_solid_earth_tide(zero_tide))
+            .build()
+            .expect("matching zero-tide systems");
+        ForceModelKind::composite(components.with_solid_earth_tide(tide_free))
+            .build()
+            .err()
+            .expect("a tide-free tide force on a zero-tide field is refused");
+
+        // Without a zonal or spherical-harmonic field the tide force's own
+        // setting stands.
+        ForceModelKind::composite(
+            ForceModelComponents::earth_two_body().with_solid_earth_tide(zero_tide),
+        )
+        .build()
+        .expect("no field to disagree with");
     }
 
     #[test]

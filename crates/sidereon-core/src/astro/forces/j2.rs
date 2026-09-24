@@ -29,7 +29,10 @@ pub struct J2Gravity {
     /// Dimensionless degree-2 zonal harmonic coefficient. `Default::default`
     /// sets this to [`crate::astro::constants::J2_EARTH`], `ForceModelKind::build`
     /// copies `TwoBodyJ2::j2` here, and `acceleration` uses it to scale the
-    /// perturbation.
+    /// perturbation. [`crate::astro::constants::J2_EARTH`] is EGM96's
+    /// tide-free value; a solid Earth tide force added beside this model has
+    /// to be told the tide system of `j2` through
+    /// [`crate::astro::forces::SolidEarthTideGravity::tide_system`].
     pub j2: f64,
 }
 

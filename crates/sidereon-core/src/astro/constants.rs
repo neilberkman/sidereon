@@ -105,7 +105,8 @@ pub mod earth {
     pub const WGS84_E2: f64 = 2.0 * WGS84_F - WGS84_F * WGS84_F;
     /// WGS84 Earth rotation rate used by GNSS Sagnac/transport terms (rad/s).
     pub const OMEGA_E_DOT_RAD_S: f64 = 7.292_115_146_7e-5;
-    /// Earth's J2 coefficient used by the core force models.
+    /// Earth's J2 coefficient used by the core force models: EGM96's
+    /// tide-free `-sqrt(5) C20` to nine significant digits.
     pub const J2_EARTH: f64 = 1.082_626_68e-3;
     /// Earth's J3 unnormalized zonal coefficient from EGM96.
     pub const J3_EARTH: f64 = -2.532_656_485_332_235_5e-6;
