@@ -11,6 +11,11 @@
 //! is vendored, not the Fortran routine; the IERS Conventions Software License
 //! grants free use including commercial use and distribution of derived work
 //! with attribution to the IERS origin.
+//!
+//! `tests/fixtures/tides/dehanttideinel_oracle.json` holds the output of
+//! `DEHANTTIDEINEL` itself, compiled from the IERS source by
+//! `fixtures-generators/dehanttideinel_oracle/generate.sh`, for the four header
+//! cases and a grid of eight stations over thirteen UTC dates from 1958 to 2040.
 
 use std::path::PathBuf;
 
@@ -64,12 +69,11 @@ fn solid_earth_tide_matches_iers_dehant_golden() {
             }),
             "{id} must cite its source row"
         );
-        // case_4 is a known fixture transcription artifact: its `expected`
-        // displacement is a verbatim copy of case_3's (the DEHANTTIDEINEL.F
-        // header repeats case 3's output in the case-4 comment block), while its
-        // `xsun` input (~0.06 AU) is not a physical Sun distance. It is excluded
-        // from the bit-exact oracle (see the module-level provenance note); cases
-        // 1-3 are the trustworthy degree-2/3 + step-2 reference.
+        // The DEHANTTIDEINEL.F header prints case 3's output again under case
+        // 4, whose `xsun` input (~0.06 AU) is not a physical Sun distance. The
+        // routine built from source returns a different displacement for those
+        // inputs; `solid_earth_tide_matches_dehanttideinel_built_from_source`
+        // checks case 4 against that output instead.
         if id == "case_4_2017_01_15" {
             continue;
         }
@@ -105,6 +109,81 @@ fn solid_earth_tide_matches_iers_dehant_golden() {
         "solid-earth tide golden mismatch (max dev {max_dev:.3e} m):\n{}",
         failures.join("\n")
     );
+}
+
+#[test]
+fn solid_earth_tide_matches_dehanttideinel_built_from_source() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/tides/dehanttideinel_oracle.json");
+    let raw = std::fs::read_to_string(&path).expect("read dehanttideinel_oracle.json");
+    let doc: Value = serde_json::from_str(&raw).expect("parse dehanttideinel_oracle.json");
+    let cases = doc["cases"].as_array().expect("cases array");
+    assert_eq!(cases.len(), 108, "4 header cases and 8 stations x 13 dates");
+
+    let array3 = |v: &Value| -> [f64; 3] {
+        let a = v.as_array().expect("3-vector");
+        assert_eq!(a.len(), 3);
+        [
+            a[0].as_f64().unwrap(),
+            a[1].as_f64().unwrap(),
+            a[2].as_f64().unwrap(),
+        ]
+    };
+
+    let mut failures = Vec::new();
+    let mut max_dev = 0.0_f64;
+    for case in cases {
+        let id = case["id"].as_str().expect("case id");
+        let xsta = array3(&case["xsta_m"]);
+        let xsun = array3(&case["xsun_m"]);
+        let xmon = array3(&case["xmon_m"]);
+        let year = case["year"].as_i64().unwrap() as i32;
+        let month = case["month"].as_i64().unwrap() as i32;
+        let day = case["day"].as_i64().unwrap() as i32;
+        let fhr = case["fhr_hours"].as_f64().unwrap();
+        let expected = array3(&case["dxtide_m"]);
+
+        let got =
+            solid_earth_tide(&xsta, year, month, day, fhr, &xsun, &xmon).expect("valid tide input");
+        for k in 0..3 {
+            // The two sides differ only by the last-bit rounding of the
+            // platform trigonometric functions and of a few regrouped
+            // products, far below 1e-15 m for displacements of 0.1 m. Header
+            // case 4, with its Sun at 0.06 AU, displaces the station by tens of
+            // metres, so the bound also scales with the value.
+            let tolerance = 1.0e-15_f64.max(8.0 * f64::EPSILON * expected[k].abs());
+            let dev = (got[k] - expected[k]).abs();
+            max_dev = max_dev.max(dev);
+            if dev > tolerance {
+                failures.push(format!(
+                    "{id} component {k}: got {:.17e}, DEHANTTIDEINEL {:.17e}, dev {dev:.3e} m",
+                    got[k], expected[k]
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "DEHANTTIDEINEL mismatch (max dev {max_dev:.3e} m):\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn the_tide_delta_at_follows_sofa_dat_before_1972() {
+    // SOFA DAT as distributed with DEHANTTIDEINEL: 0 before 1960, then the
+    // 1960-1971 offsets plus drift from the reference MJD. 1965-03-10 is MJD
+    // 38829, so 3.6401300 + (38829 + 0.5 - 38761) * 0.001296 at noon.
+    assert_eq!(tai_minus_utc_seconds(1959, 12, 31, 0.5), 0.0);
+    assert_eq!(
+        tai_minus_utc_seconds(1965, 3, 10, 0.5),
+        3.6401300 + (38829.0 + 0.5 - 38761.0) * 0.001296
+    );
+    assert_eq!(
+        tai_minus_utc_seconds(1971, 12, 31, 0.0),
+        4.2131700 + (41316.0 - 39126.0) * 0.002592
+    );
+    assert_eq!(tai_minus_utc_seconds(1972, 1, 1, 0.0), 10.0);
 }
 
 fn assert_invalid_input(
@@ -211,7 +290,7 @@ fn the_tide_leap_second_table_equals_the_main_table_month_by_month() {
                     as f64
                     - 0.5;
                 assert_eq!(
-                    tai_minus_utc_seconds(year, month, day as i32),
+                    tai_minus_utc_seconds(year, month, day as i32, 0.0),
                     crate::astro::time::scales::find_leap_seconds(jd),
                     "{year}-{month:02}-{day:02}"
                 );
