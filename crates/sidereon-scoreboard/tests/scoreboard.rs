@@ -12,13 +12,13 @@ use sidereon_core::astro::propagator::{
     ForceModelKind, IntegratorKind, IntegratorOptions, StatePropagator,
 };
 use sidereon_core::astro::state::CartesianState;
+use sidereon_core::astro::time::civil::j2000_seconds_from_split;
 use sidereon_core::astro::time::civil::{
     civil_from_j2000_seconds, j2000_seconds, split_julian_date,
     split_julian_date_from_j2000_seconds, MJD_JD_OFFSET,
 };
 use sidereon_core::astro::time::gnss::{seconds_of_week_from_calendar, week_from_calendar};
 use sidereon_core::astro::time::model::{Instant, JulianDateSplit, TimeScale};
-use sidereon_core::constants::{J2000_JD, SECONDS_PER_DAY};
 use sidereon_core::data::{AnalysisCenter, ProductDate, ProductDateTime, ProductType};
 use sidereon_core::ephemeris::{ExactSp3ValidationError, Sp3};
 use sidereon_core::{
@@ -924,7 +924,8 @@ fn synthetic_sp3(initial: CartesianState, epochs_j2000_s: &[i64]) -> String {
         ));
         let instant = instant_at(TimeScale::Gpst, epoch);
         let seed = EarthOrientation::from_instant(instant).expect("seed orientation");
-        let tdb_seconds = (seed.time_scales().jd_tdb - J2000_JD) * SECONDS_PER_DAY;
+        let tdb_seconds =
+            j2000_seconds_from_split(seed.time_scales().jd_whole, seed.time_scales().tdb_fraction);
         let orientation = provider
             .orientation_at_tdb_seconds(tdb_seconds)
             .expect("orientation");

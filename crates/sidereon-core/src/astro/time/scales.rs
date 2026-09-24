@@ -741,6 +741,60 @@ pub(crate) fn label_tai_minus_utc(
     ))
 }
 
+/// TT minus a TCG, TDB or TCB calendar label, in seconds; `None` for any
+/// other scale.
+///
+/// Each offset is formed in seconds from the label's Julian date: TCG from
+/// IAU 2000 Resolution B1.9, `-L_G * (JD_TCG - T0) * 86400`; TCB from IAU
+/// 2006 Resolution B3, `-L_B * (JD_TCB - T0) * 86400 + TDB0`, plus the TDB
+/// term; TDB by the TDB - TT series at the TT the label names. `JD - T0` is
+/// an exact subtraction, so an offset carries only the rate times the
+/// Julian date's own rounding, under a picosecond. Taken instead as the
+/// difference of two full Julian dates, whose last place is 40 microseconds
+/// near a modern date, the offsets were good to about 40 microseconds.
+fn coordinate_label_tt_minus_scale_seconds(scale: TimeScale, cal: ScaleCal) -> f64 {
+    let label_jd = continuous_calendar_jd(cal);
+    match scale {
+        TimeScale::Tcg => -TT_TCG_RATE_L_G * (label_jd - TCG_TCB_REFERENCE_JD) * SECONDS_PER_DAY,
+        TimeScale::Tdb => -tdb_minus_tt_seconds_at_tt_jd(tdb_to_tt_jd_for_tdb_input(label_jd)),
+        TimeScale::Tcb => {
+            let tdb_minus_tcb_s =
+                -TDB_TCB_RATE_L_B * (label_jd - TCG_TCB_REFERENCE_JD) * SECONDS_PER_DAY
+                    + TDB_TCB_OFFSET_TDB0_S;
+            let tt_jd = tdb_to_tt_jd_for_tdb_input(tcb_to_tdb_jd(label_jd));
+            tdb_minus_tcb_s - tdb_minus_tt_seconds_at_tt_jd(tt_jd)
+        }
+        _ => 0.0,
+    }
+}
+
+/// TT minus a calendar label in `scale`, in seconds, for a TCG, TDB or TCB
+/// label ([`coordinate_label_tt_minus_scale_seconds`]); `None` for any other
+/// scale.
+pub(crate) fn label_tt_minus_coordinate_seconds(
+    scale: TimeScale,
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32,
+    minute: i32,
+    second: f64,
+) -> Option<f64> {
+    matches!(scale, TimeScale::Tcg | TimeScale::Tdb | TimeScale::Tcb).then(|| {
+        coordinate_label_tt_minus_scale_seconds(
+            scale,
+            ScaleCal {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+            },
+        )
+    })
+}
+
 /// A mutable civil calendar instant used by the scale-to-UTC inverse.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ScaleCal {
@@ -767,30 +821,12 @@ fn scale_calendar_to_utc(
     match scale {
         TimeScale::Utc => cal,
         TimeScale::Glonasst => normalize_calendar_seconds(cal, cal.second - GLONASST_MINUS_UTC_S),
-        TimeScale::Tcg => {
-            let tcg_jd = continuous_calendar_jd(cal);
-            coordinate_calendar_to_utc(
-                cal,
-                tcg_to_tt_jd(tcg_jd) - tcg_jd,
-                TimeScale::Tt,
-                leap_seconds,
-            )
-        }
-        TimeScale::Tdb => {
-            let tdb_jd = continuous_calendar_jd(cal);
-            coordinate_calendar_to_utc(
-                cal,
-                tdb_to_tt_jd_for_tdb_input(tdb_jd) - tdb_jd,
-                TimeScale::Tt,
-                leap_seconds,
-            )
-        }
-        TimeScale::Tcb => {
-            let tcb_jd = continuous_calendar_jd(cal);
-            let tdb_jd = tcb_to_tdb_jd(tcb_jd);
-            let tt_jd = tdb_to_tt_jd_for_tdb_input(tdb_jd);
-            coordinate_calendar_to_utc(cal, tt_jd - tcb_jd, TimeScale::Tt, leap_seconds)
-        }
+        TimeScale::Tcg | TimeScale::Tdb | TimeScale::Tcb => coordinate_calendar_to_utc(
+            cal,
+            coordinate_label_tt_minus_scale_seconds(scale, cal),
+            TimeScale::Tt,
+            leap_seconds,
+        ),
         _ => {
             let tai = normalize_calendar_seconds(cal, cal.second + tai_minus_scale_seconds(scale));
             tai_calendar_to_utc(tai, leap_seconds)
@@ -809,30 +845,12 @@ fn scale_calendar_to_utc_with_table(
             cal,
             cal.second - GLONASST_MINUS_UTC_S,
         )),
-        TimeScale::Tcg => {
-            let tcg_jd = continuous_calendar_jd(cal);
-            coordinate_calendar_to_utc_with_table(
-                cal,
-                tcg_to_tt_jd(tcg_jd) - tcg_jd,
-                TimeScale::Tt,
-                leap_seconds,
-            )
-        }
-        TimeScale::Tdb => {
-            let tdb_jd = continuous_calendar_jd(cal);
-            coordinate_calendar_to_utc_with_table(
-                cal,
-                tdb_to_tt_jd_for_tdb_input(tdb_jd) - tdb_jd,
-                TimeScale::Tt,
-                leap_seconds,
-            )
-        }
-        TimeScale::Tcb => {
-            let tcb_jd = continuous_calendar_jd(cal);
-            let tdb_jd = tcb_to_tdb_jd(tcb_jd);
-            let tt_jd = tdb_to_tt_jd_for_tdb_input(tdb_jd);
-            coordinate_calendar_to_utc_with_table(cal, tt_jd - tcb_jd, TimeScale::Tt, leap_seconds)
-        }
+        TimeScale::Tcg | TimeScale::Tdb | TimeScale::Tcb => coordinate_calendar_to_utc_with_table(
+            cal,
+            coordinate_label_tt_minus_scale_seconds(scale, cal),
+            TimeScale::Tt,
+            leap_seconds,
+        ),
         _ => {
             let tai = normalize_calendar_seconds(cal, cal.second + tai_minus_scale_seconds(scale));
             tai_calendar_to_utc_with_table(tai, leap_seconds)
@@ -842,12 +860,11 @@ fn scale_calendar_to_utc_with_table(
 
 fn coordinate_calendar_to_utc(
     cal: ScaleCal,
-    target_minus_source_days: f64,
+    target_minus_source_s: f64,
     target_scale: TimeScale,
     leap_seconds: &[LeapSecondEntry],
 ) -> ScaleCal {
-    let target =
-        normalize_calendar_seconds(cal, cal.second + target_minus_source_days * SECONDS_PER_DAY);
+    let target = normalize_calendar_seconds(cal, cal.second + target_minus_source_s);
     let tai = normalize_calendar_seconds(
         target,
         target.second + tai_minus_scale_seconds(target_scale),
@@ -857,12 +874,11 @@ fn coordinate_calendar_to_utc(
 
 fn coordinate_calendar_to_utc_with_table(
     cal: ScaleCal,
-    target_minus_source_days: f64,
+    target_minus_source_s: f64,
     target_scale: TimeScale,
     leap_seconds: &[LeapSecondEntry],
 ) -> Result<ScaleCal, CoverageError> {
-    let target =
-        normalize_calendar_seconds(cal, cal.second + target_minus_source_days * SECONDS_PER_DAY);
+    let target = normalize_calendar_seconds(cal, cal.second + target_minus_source_s);
     let tai = normalize_calendar_seconds(
         target,
         target.second + tai_minus_scale_seconds(target_scale),

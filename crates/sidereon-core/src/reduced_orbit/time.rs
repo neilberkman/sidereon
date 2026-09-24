@@ -3,7 +3,9 @@
 use crate::astro::time::civil;
 use crate::astro::time::exact::{ExactEpoch, ExactSeconds};
 use crate::astro::time::model::TimeScale;
-use crate::astro::time::scales::{label_tai_minus_utc, TimeScales};
+use crate::astro::time::scales::{
+    label_tai_minus_utc, label_tt_minus_coordinate_seconds, TimeScales,
+};
 
 /// A UTC calendar instant `(year, month, day, hour, minute, second)`, the form
 /// the core [`TimeScales::from_utc`] consumes. The Elixir layer produces these
@@ -66,8 +68,9 @@ impl CalendarEpoch {
 /// so the label itself, read exactly ([`ExactEpoch::from_civil`]), is used. A
 /// UTC or GLONASST label adds the TAI - UTC that [`TimeScales::from_scale`]
 /// applies to it, so an interval across a leap second counts the leap second.
-/// A TCG, TDB or TCB label, whose offset from TT varies, takes the exact TT
-/// that `ts`, its [`TimeScales`], holds.
+/// A TCG, TDB or TCB label, whose offset from TT varies, adds that offset in
+/// seconds ([`label_tt_minus_coordinate_seconds`], good to under a
+/// picosecond) to the exact label.
 pub(crate) fn exact_tt_seconds(
     epoch: CalendarEpoch,
     ts: &TimeScales,
@@ -88,7 +91,22 @@ pub(crate) fn exact_tt_seconds(
         )
     };
     match scale {
-        TimeScale::Tcg | TimeScale::Tdb | TimeScale::Tcb => split_tt(),
+        TimeScale::Tcg | TimeScale::Tdb | TimeScale::Tcb => {
+            let offset = label_tt_minus_coordinate_seconds(
+                scale,
+                epoch.year,
+                epoch.month,
+                epoch.day,
+                epoch.hour,
+                epoch.minute,
+                epoch.second,
+            )
+            .and_then(ExactSeconds::from_f64);
+            match (label(), offset) {
+                (Some(label), Some(offset)) => label.exact_seconds().add(&offset),
+                _ => split_tt(),
+            }
+        }
         TimeScale::Utc | TimeScale::Glonasst => {
             let leap = label_tai_minus_utc(
                 scale,
@@ -187,22 +205,36 @@ mod tests {
             ),
             2.0
         );
-        // A TDB label takes the exact difference of its TT splits.
-        let t0 = CalendarEpoch::new(2020, 6, 24, 0, 0, 0.0).time_scales(TimeScale::Tdb);
-        let t1 = CalendarEpoch::new(2020, 6, 24, 1, 0, 0.0).time_scales(TimeScale::Tdb);
-        let exact = civil::exact_seconds_of_split_parts(t1.jd_whole, t1.tt_fraction)
-            .unwrap()
-            .sub(&civil::exact_seconds_of_split_parts(t0.jd_whole, t0.tt_fraction).unwrap())
-            .to_f64();
-        assert_eq!(
-            dt(
-                CalendarEpoch::new(2020, 6, 24, 0, 0, 0.0),
-                CalendarEpoch::new(2020, 6, 24, 1, 0, 0.0),
-                TimeScale::Tdb
-            ),
-            exact
-        );
-        assert!((exact - 3_600.0).abs() < 1.0e-6);
+        // TCG, TDB and TCB labels an hour apart: the label difference plus
+        // the change in the offset to TT, formed in seconds. The TT split of
+        // each label's TimeScales now agrees to well under a nanosecond; its
+        // offset taken as a difference of two full Julian dates was good to
+        // about 40 microseconds.
+        let offset = |scale: TimeScale, hour: i32| {
+            label_tt_minus_coordinate_seconds(scale, 2020, 6, 24, hour, 0, 0.0).unwrap()
+        };
+        for scale in [TimeScale::Tcg, TimeScale::Tdb, TimeScale::Tcb] {
+            let t0 = CalendarEpoch::new(2020, 6, 24, 0, 0, 0.0);
+            let t1 = CalendarEpoch::new(2020, 6, 24, 1, 0, 0.0);
+            let got = dt(t0, t1, scale);
+            let change = offset(scale, 1) - offset(scale, 0);
+            assert!(
+                (got - (3_600.0 + change)).abs() < 1.0e-12,
+                "{scale:?} {got}"
+            );
+            let (ts0, ts1) = (t0.time_scales(scale), t1.time_scales(scale));
+            let split_dt = civil::exact_seconds_of_split_parts(ts1.jd_whole, ts1.tt_fraction)
+                .unwrap()
+                .sub(&civil::exact_seconds_of_split_parts(ts0.jd_whole, ts0.tt_fraction).unwrap())
+                .to_f64();
+            assert!(
+                (split_dt - got).abs() < 1.0e-9,
+                "{scale:?} {split_dt} {got}"
+            );
+        }
+        // TCG runs faster than TT by L_G = 6.969290134e-10.
+        let tcg_change = offset(TimeScale::Tcg, 1) - offset(TimeScale::Tcg, 0);
+        assert!((tcg_change + 6.969_290_134e-10 * 3_600.0).abs() < 1.0e-13);
     }
 
     /// GLONASST = UTC(SU) + 3 h: a GLONASST calendar instant resolves to the
