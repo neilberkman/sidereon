@@ -2346,3 +2346,44 @@ fn a_query_between_a_samples_reading_and_its_tag_is_bracketed_by_time() {
         crate::astro::math::interp::lerp_ratio(1.0e-4, 2.0e-4, 90.0, 90.0)
     );
 }
+
+#[test]
+fn a_tag_in_the_last_microsecond_of_a_leap_day_takes_that_days_count() {
+    // 2016-12-31 23:59:59.999999 UTC: one recombined f64 Julian date of its
+    // split rounds onto 2017-01-01 and took that day's TAI - UTC, so the
+    // interval to 2017-01-01 00:00:00 lost the leap second.
+    let text = " 3.00           C                                       RINEX VERSION / TYPE\n\
+                UTC                                                     TIME SYSTEM ID\n\
+                                                                    END OF HEADER\n\
+                AS G05  2016 12 31 23 59 59.999999  1   1.0e-04\n\
+                AS G05  2017 01 01 00 00  0.000000  1   2.0e-04\n\
+                AS G05  2017 01 01 00 00  1.000000  1   3.0e-04\n";
+    let clock = RinexClock::parse(text).expect("UTC RINEX clock");
+    let records = &clock.series()["G05"];
+    let (p0, p1, p2) = (&records[0], &records[1], &records[2]);
+    let split = p0.epoch.julian_date().unwrap();
+    assert_eq!(split.jd_whole + split.fraction, 2_457_754.5);
+    assert_eq!(
+        super::epoch::seconds_between((&p1.epoch, p1.source), (&p0.epoch, p0.source)),
+        Some(1.000_001)
+    );
+    assert_eq!(
+        super::epoch::seconds_between((&p2.epoch, p2.source), (&p0.epoch, p0.source)),
+        Some(2.000_001)
+    );
+    // Interpolation at the leap second's middle measures across it.
+    let leap = ClockEpoch {
+        year: 2016,
+        month: 12,
+        day: 31,
+        hour: 23,
+        minute: 59,
+        second: 60.5,
+    };
+    assert_eq!(
+        clock.clock_s("G05", leap).unwrap(),
+        Some(crate::astro::math::interp::lerp_ratio(
+            1.0e-4, 2.0e-4, 0.500_001, 1.000_001
+        ))
+    );
+}

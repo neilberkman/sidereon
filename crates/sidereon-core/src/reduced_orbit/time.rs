@@ -169,6 +169,15 @@ mod tests {
             ),
             1.0
         );
+        // The last 10 microseconds of the leap day take that day's count.
+        assert_eq!(
+            dt(
+                CalendarEpoch::new(2016, 12, 31, 23, 59, 59.999_99),
+                CalendarEpoch::new(2017, 1, 1, 0, 0, 0.0),
+                TimeScale::Utc
+            ),
+            1.000_01
+        );
         // GLONASST is UTC three hours ahead: the same leap second, at 03:00.
         assert_eq!(
             dt(

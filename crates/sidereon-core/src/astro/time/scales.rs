@@ -476,14 +476,9 @@ impl TimeScales {
         let jd1 = jd_day as f64 - 0.5;
         let utc_seconds_of_day =
             hour as f64 * SECONDS_PER_HOUR + minute as f64 * SECONDS_PER_MINUTE + second;
-        let leap_lookup_second = if second >= 60.0 { 59.0 } else { second };
-        let jd2 = (leap_lookup_second
-            + minute as f64 * SECONDS_PER_MINUTE
-            + hour as f64 * SECONDS_PER_HOUR)
-            / SECONDS_PER_DAY;
-        let jd_utc_total = jd1 + jd2;
-
-        let leap_seconds = find_leap_seconds_in_table_checked(jd_utc_total, tables.leap_seconds)?;
+        // The count in force on the label's civil day, read at its midnight
+        // as Skyfield `Timescale._utc` reads it.
+        let leap_seconds = find_leap_seconds_in_table_checked(jd1, tables.leap_seconds)?;
         let utc_seconds_at_midnight = jd1 * SECONDS_PER_DAY;
 
         let utc_whole_seconds = utc_seconds_of_day.trunc();
@@ -680,15 +675,36 @@ impl TimeScales {
 }
 
 /// TAI - UTC, in seconds, that [`TimeScales::from_utc`] applies to a UTC
-/// label on the day whose midnight is `jd1`: the leap-second table read at the
-/// label, with a `:60` leap-second label read at `:59` so it takes the count
-/// before the leap.
+/// label on the day whose midnight is `jd1` ([`tai_minus_utc_on_day`]); a
+/// `:60` leap-second label is timed at `:59` for the pre-1972 drift.
 fn utc_label_tai_minus_utc(jd1: f64, hour: i32, minute: i32, second: f64) -> f64 {
     let leap_lookup_second = if second >= 60.0 { 59.0 } else { second };
     let jd2 =
         (leap_lookup_second + minute as f64 * SECONDS_PER_MINUTE + hour as f64 * SECONDS_PER_HOUR)
             / SECONDS_PER_DAY;
-    find_leap_seconds(jd1 + jd2)
+    tai_minus_utc_on_day(jd1, jd1 + jd2)
+}
+
+/// TAI - UTC, in seconds, for a UTC label on the civil day whose midnight is
+/// the Julian date `midnight_jd`, timed at `label_jd`.
+///
+/// From 1972 the leap-second table is read at the day's midnight, as Skyfield
+/// `Timescale._utc` reads it: every label of a day takes the count in force
+/// on that day, its `23:59:60` label and its last microseconds included.
+/// Reading the table at the label's own Julian date instead would take the
+/// next day's count for the last 20 microseconds or so of a day that ends
+/// with a leap second, where one `f64` Julian date rounds onto the next
+/// midnight. Before 1972 the rubber-second offset of the day's segment is
+/// taken at `label_jd`, since it drifts within the day.
+pub(crate) fn tai_minus_utc_on_day(midnight_jd: f64, label_jd: f64) -> f64 {
+    let midnight_mjd = midnight_jd - 2400000.5;
+    if !midnight_mjd.is_finite() || !label_jd.is_finite() {
+        return f64::NAN;
+    }
+    if midnight_mjd >= f64::from(LEAP_SECONDS[0].mjd) {
+        return find_leap_seconds(midnight_jd);
+    }
+    rubber_segment_tai_minus_utc(midnight_mjd, label_jd - 2400000.5)
 }
 
 /// TAI - UTC, in seconds, that [`TimeScales::from_scale`] applies to a
@@ -1552,17 +1568,23 @@ pub fn gps_utc_offset_s(jd_utc: f64) -> f64 {
 /// term. Non-finite inputs return `NaN`.
 fn rubber_tai_minus_utc(jd_utc: f64) -> f64 {
     let mjd = jd_utc - 2400000.5;
+    rubber_segment_tai_minus_utc(mjd, mjd)
+}
+
+/// The rubber-second TAI - UTC of the segment in force at `segment_mjd`,
+/// evaluated at `mjd`.
+fn rubber_segment_tai_minus_utc(segment_mjd: f64, mjd: f64) -> f64 {
     let first = &RUBBER_SECONDS[0];
-    if !mjd.is_finite() {
+    if !mjd.is_finite() || !segment_mjd.is_finite() {
         return f64::NAN;
     }
     // Pre-1961 input clamps to the first segment's constant.
-    if mjd < first.start_mjd as f64 {
+    if segment_mjd < first.start_mjd as f64 {
         return first.base;
     }
     let mut selected = first;
     for entry in RUBBER_SECONDS {
-        if mjd >= entry.start_mjd as f64 {
+        if segment_mjd >= entry.start_mjd as f64 {
             selected = entry;
         } else {
             break;
@@ -2212,6 +2234,26 @@ fn ut1_coverage_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_label_takes_the_leap_count_of_its_civil_day() {
+        // The last 10 microseconds of 2016-12-31, a day that ends with a leap
+        // second: one f64 Julian date of the label rounds onto 2017-01-01,
+        // but the label takes the day's count, as Skyfield 1.54 `ts.utc`
+        // does. Skyfield: tt_fraction 0.5007891665509259 and
+        // 0.5008007407407408, (b - a) * 86400 = 1.0000100000073786 s.
+        let a = TimeScales::from_utc(2016, 12, 31, 23, 59, 59.999_99).unwrap();
+        let b = TimeScales::from_utc(2017, 1, 1, 0, 0, 0.0).unwrap();
+        assert_eq!((a.jd_whole, b.jd_whole), (2_457_754.0, 2_457_754.0));
+        assert_eq!(a.tt_fraction, 0.500_789_166_550_925_9);
+        assert_eq!(b.tt_fraction, 0.500_800_740_740_740_8);
+        assert_eq!(
+            ((b.jd_whole - a.jd_whole) + (b.tt_fraction - a.tt_fraction)) * SECONDS_PER_DAY,
+            1.000_010_000_007_378_6
+        );
+        assert_eq!(tai_minus_utc_on_day(2_457_753.5, 2_457_754.5), 36.0);
+        assert_eq!(tai_minus_utc_on_day(2_457_754.5, 2_457_754.5), 37.0);
+    }
 
     #[test]
     fn julian_day_number_widens_extreme_inputs_before_arithmetic() {

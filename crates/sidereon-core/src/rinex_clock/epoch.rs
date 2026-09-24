@@ -5,13 +5,13 @@ use std::cmp::Ordering;
 use crate::astro::constants::time::SECONDS_PER_DAY_I64;
 use crate::astro::math::interp::lerp_ratio;
 use crate::astro::time::civil::{
-    civil_from_julian_day_number, j2000_seconds_from_split, seconds_from_femtoseconds,
-    seconds_from_split_exact, split_julian_date_from_j2000_seconds, J2000_JULIAN_DAY_NUMBER,
-    J2000_NOON_OFFSET_S,
+    civil_from_julian_day_number, exact_seconds_of_split_parts, j2000_seconds_from_split,
+    seconds_from_femtoseconds, seconds_from_split_exact, split_julian_date_from_j2000_seconds,
+    J2000_JULIAN_DAY_NUMBER, J2000_NOON_OFFSET_S,
 };
 use crate::astro::time::exact::{nearest_ratio, ExactSeconds};
 use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale};
-use crate::astro::time::scales::{find_leap_seconds, julian_day_number};
+use crate::astro::time::scales::{julian_day_number, tai_minus_utc_on_day};
 use crate::constants::{
     GPS_EPOCH_TO_J2000_S, J2000_JD, MICROSECONDS_PER_SECOND, SECONDS_PER_DAY, SECONDS_PER_HOUR,
 };
@@ -954,8 +954,46 @@ pub(super) fn seconds_between(
     seconds.is_finite().then_some(seconds)
 }
 
+/// TAI - UTC for a UTC clock instant, the count in force on its civil day
+/// ([`tai_minus_utc_on_day`]). A split on a midnight boundary, the reader's
+/// own, takes that day, so a `23:59:60.x` label held on the next day's
+/// boundary takes the count after the leap and `23:59:59.999999` the count
+/// before it; any other split takes the day its exact instant falls in.
+/// Reading the table at one recombined `f64` Julian date took the next day's
+/// count for the last 20 microseconds or so of a leap day.
 fn utc_leap_count(split: JulianDateSplit) -> f64 {
-    find_leap_seconds(split.jd_whole + split.fraction.max(0.0))
+    let label_jd = split.jd_whole + split.fraction;
+    let midnight = if (split.jd_whole + 0.5).fract() == 0.0 {
+        split.jd_whole
+    } else {
+        civil_midnight_at_or_before(split).unwrap_or(f64::NAN)
+    };
+    tai_minus_utc_on_day(midnight, label_jd)
+}
+
+/// The Julian date of the civil midnight at or before the exact instant a
+/// split holds; `None` for a non-finite part.
+fn civil_midnight_at_or_before(split: JulianDateSplit) -> Option<f64> {
+    let exact = exact_seconds_of_split_parts(split.jd_whole, split.fraction)?;
+    let mut midnight = (split.jd_whole + split.fraction + 0.5).floor() - 0.5;
+    // The recombined sum can round across a midnight; step by whole days until
+    // the exact instant lies in `[midnight, midnight + 1)`.
+    for _ in 0..2 {
+        if exact
+            .sub(&exact_seconds_of_split_parts(midnight, 0.0)?)
+            .sign()
+            == Ordering::Less
+        {
+            midnight -= 1.0;
+        } else if exact
+            .sub(&exact_seconds_of_split_parts(midnight + 1.0, 0.0)?)
+            .sign()
+            != Ordering::Less
+        {
+            midnight += 1.0;
+        }
+    }
+    Some(midnight)
 }
 
 fn time_scale_rank(scale: TimeScale) -> u8 {
