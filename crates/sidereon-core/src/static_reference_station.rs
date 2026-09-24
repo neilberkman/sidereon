@@ -18,8 +18,8 @@ use crate::positioning::{
 };
 use crate::rinex::observations::{ObsEpochTime, RinexObs};
 use crate::rtk_filter::{
-    build_rinex_rtk_arc, IntegerStatus, RtkRinexArcOptions, RtkStaticArcConfig,
-    RtkStaticArcSolution,
+    build_rinex_rtk_arc, IntegerStatus, RtkRinexArcOptions, RtkRinexUnresolvedCarrier,
+    RtkStaticArcConfig, RtkStaticArcSolution,
 };
 use crate::spp::{Corrections, Observation, Ut1Tracked};
 use crate::validate;
@@ -102,12 +102,21 @@ pub struct StaticReferenceModeReport {
     pub status: StaticReferenceModeStatus,
     /// Solved epoch count or zero on failure.
     pub used_epochs: usize,
-    /// Number of raw RINEX epochs skipped by the mode builder.
+    /// Number of raw RINEX epochs skipped by the mode builder. A carrier mode
+    /// whose arc was built reports its count even when the solve then failed.
     pub skipped_epochs: usize,
     /// Measurement rows used by the final solve, when known.
     pub used_measurements: usize,
     /// Failure detail, when the mode failed.
     pub error: Option<StaticReferenceModeError>,
+    /// Carrier-phase measurements the carrier mode's RINEX arc left out of an
+    /// epoch because their phase observable has no carrier frequency in the
+    /// file's context, each naming the receiver, epoch, satellite and
+    /// observable; see [`RtkRinexUnresolvedCarrier`]. A carrier mode whose arc
+    /// was built reports them even when the solve then failed. Empty for the
+    /// code-DGNSS mode, whose solve applies no carrier-dependent correction,
+    /// and for a carrier mode whose arc could not be built.
+    pub unresolved_carriers: Vec<RtkRinexUnresolvedCarrier>,
 }
 
 /// Typed failure detail for one attempted static reference-station mode.
@@ -477,6 +486,7 @@ where
                         .map(|row| row.used_satellites.len())
                         .sum(),
                     error: None,
+                    unresolved_carriers: Vec::new(),
                 });
                 Some(solution)
             }
@@ -489,39 +499,47 @@ where
     };
 
     let carrier = match &options.carrier_options {
-        Some(carrier_options) => match ut1_tracked_mode(source, |tracked| {
-            solve_carrier_static(
-                tracked,
-                reference_obs,
-                rover_obs,
-                reference_position_m,
-                carrier_options,
-                options.with_geodetic,
-            )
-        })
-        .map(|(mut solution, skipped_epochs, ut1_degraded)| {
-            solution.ut1_degraded = ut1_degraded;
-            (solution, skipped_epochs)
-        }) {
-            Ok((solution, skipped_epochs)) => {
-                reports.push(StaticReferenceModeReport {
-                    mode: solution_mode_from_carrier(&solution),
-                    status: StaticReferenceModeStatus::Solved,
-                    used_epochs: solution.diagnostics.len(),
-                    skipped_epochs,
-                    used_measurements: carrier_used_measurements(&solution),
-                    error: None,
-                });
-                Some(solution)
+        Some(carrier_options) => {
+            // What the arc builder left out, kept whether or not the solve that
+            // follows succeeds.
+            let mut arc_report = CarrierArcReport::default();
+            match ut1_tracked_mode(source, |tracked| {
+                solve_carrier_static(
+                    tracked,
+                    reference_obs,
+                    rover_obs,
+                    reference_position_m,
+                    carrier_options,
+                    options.with_geodetic,
+                    &mut arc_report,
+                )
+                .map(|solution| (solution, ()))
+            })
+            .map(|(mut solution, (), ut1_degraded)| {
+                solution.ut1_degraded = ut1_degraded;
+                solution
+            }) {
+                Ok(solution) => {
+                    reports.push(StaticReferenceModeReport {
+                        mode: solution_mode_from_carrier(&solution),
+                        status: StaticReferenceModeStatus::Solved,
+                        used_epochs: solution.diagnostics.len(),
+                        skipped_epochs: arc_report.skipped_epochs,
+                        used_measurements: carrier_used_measurements(&solution),
+                        error: None,
+                        unresolved_carriers: arc_report.unresolved_carriers,
+                    });
+                    Some(solution)
+                }
+                Err(error) => {
+                    let mut report = failed_report(StaticReferenceStationMode::CarrierFixed, error);
+                    report.skipped_epochs = arc_report.skipped_epochs;
+                    report.unresolved_carriers = arc_report.unresolved_carriers;
+                    reports.push(report);
+                    None
+                }
             }
-            Err(error) => {
-                reports.push(failed_report(
-                    StaticReferenceStationMode::CarrierFixed,
-                    error,
-                ));
-                None
-            }
-        },
+        }
         None => None,
     };
 
@@ -691,7 +709,8 @@ fn solve_carrier_static<S>(
     reference_position_m: [f64; 3],
     carrier_options: &StaticReferenceCarrierRinexOptions,
     with_geodetic: bool,
-) -> Result<(StaticReferenceCarrierSolution, usize), StaticReferenceModeError>
+    arc_report: &mut CarrierArcReport,
+) -> Result<StaticReferenceCarrierSolution, StaticReferenceModeError>
 where
     S: ObservableEphemerisSource,
 {
@@ -704,6 +723,8 @@ where
     .map_err(|error| StaticReferenceModeError::CarrierArc {
         reason: error.to_string(),
     })?;
+    arc_report.skipped_epochs = arc.skipped_epoch_count;
+    arc_report.unresolved_carriers = arc.unresolved_carriers.clone();
     let mut config = carrier_options.static_config.clone();
     config.arc.base_m = reference_position_m;
     config.arc.wavelengths_m = arc.wavelengths_m.clone();
@@ -752,21 +773,27 @@ where
         None
     };
 
-    Ok((
-        StaticReferenceCarrierSolution {
-            position,
-            geodetic,
-            covariance,
-            baseline_vector_m,
-            baseline_m: vec3::norm3(baseline_vector_m),
-            integer_status: fixed.search.integer_status,
-            integer_ratio: fixed.search.integer_ratio,
-            rtk_solution,
-            diagnostics,
-            ut1_degraded: None,
-        },
-        arc.skipped_epoch_count,
-    ))
+    Ok(StaticReferenceCarrierSolution {
+        position,
+        geodetic,
+        covariance,
+        baseline_vector_m,
+        baseline_m: vec3::norm3(baseline_vector_m),
+        integer_status: fixed.search.integer_status,
+        integer_ratio: fixed.search.integer_ratio,
+        rtk_solution,
+        diagnostics,
+        ut1_degraded: None,
+    })
+}
+
+/// What the carrier mode's RINEX arc builder left out: the epochs it skipped
+/// and the measurements whose carrier it could not resolve. The mode report
+/// carries both, whether the solve that follows succeeds or fails.
+#[derive(Default)]
+struct CarrierArcReport {
+    skipped_epochs: usize,
+    unresolved_carriers: Vec<RtkRinexUnresolvedCarrier>,
 }
 
 fn select_solution(
@@ -1074,6 +1101,7 @@ fn failed_report(
         skipped_epochs: 0,
         used_measurements: 0,
         error: Some(error),
+        unresolved_carriers: Vec::new(),
     }
 }
 

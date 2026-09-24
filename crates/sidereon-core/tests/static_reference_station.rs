@@ -13,14 +13,16 @@ use sidereon_core::positioning::{
     StaticReferenceModeError, StaticReferenceModeReport, StaticReferenceModeStatus,
     StaticReferenceStationError, StaticReferenceStationMode, StaticReferenceStationRinexOptions,
 };
-use sidereon_core::rinex::observations::RinexObs;
+use sidereon_core::rinex::observations::{observation_values, ObservationFilter, RinexObs};
 use sidereon_core::rtk::BaselineReferenceSelection;
 use sidereon_core::rtk_filter::{CycleSlipPolicy, IntegerStatus};
 use sidereon_core::rtk_filter::{
     DynamicsModel, FixedSolveOpts, FloatSolveOpts, MeasModel, ResidualValidationOpts, RtkArcConfig,
-    RtkArcPreprocessing, RtkRinexArcOptions, RtkStaticArcConfig, SearchOpts, StochasticModel,
-    UpdateOpts, ValidatedFixedSolveOpts,
+    RtkArcPreprocessing, RtkRinexArcOptions, RtkRinexReceiver, RtkRinexSignalPair,
+    RtkRinexUnresolvedCarrier, RtkStaticArcConfig, SearchOpts, StochasticModel, UpdateOpts,
+    ValidatedFixedSolveOpts,
 };
+use sidereon_core::GnssSystem;
 
 const WTZR_MARKER_M: [f64; 3] = [4075580.3111, 931854.0543, 4801568.2808];
 const WTZZ_MARKER_M: [f64; 3] = [4075579.1913, 931853.3696, 4801569.1897];
@@ -309,6 +311,72 @@ fn code_solution_outprioritizes_unfixed_carrier_float() {
         && report.status == StaticReferenceModeStatus::Solved));
 }
 
+/// A carrier measurement the RINEX arc leaves out for want of a carrier
+/// frequency reaches the carrier mode's report, as the arc builder reports it.
+/// The rover file here states R10 on channel 7, outside the `-7..=6` FDMA
+/// allocation, as real IGS headers state R28.
+#[test]
+fn carrier_mode_reports_the_measurements_its_arc_leaves_out_for_an_unresolved_carrier() {
+    let sp3 = load_sp3();
+    let (mut reference_obs, mut rover_obs) = load_wettzell_obs();
+    reference_obs.epochs.truncate(24);
+    rover_obs.epochs.truncate(24);
+    assert_eq!(rover_obs.header.glonass_slots.insert(10, 7), Some(-7));
+    let reference_arp_m = arp_position(WTZR_MARKER_M, &reference_obs);
+    let mut carrier = carrier_options(reference_arp_m, 24);
+    carrier.arc_options.signal_pairs.push(RtkRinexSignalPair {
+        system: GnssSystem::Glonass,
+        code_observable: "C1C".to_string(),
+        phase_observable: "L1C".to_string(),
+    });
+    let options = StaticReferenceStationRinexOptions::carrier_only(carrier, false);
+
+    // Every rover epoch holding both R10 L1 values reports R10's L1C once.
+    let filter = ObservationFilter::from_entries([(
+        GnssSystem::Glonass,
+        vec!["C1C".to_string(), "L1C".to_string()],
+    )]);
+    let expected: Vec<RtkRinexUnresolvedCarrier> = rover_obs
+        .epochs()
+        .iter()
+        .enumerate()
+        .filter(|(_, epoch)| {
+            observation_values(&rover_obs, epoch, &filter)
+                .expect("observation values")
+                .into_iter()
+                .any(|(sat, rows)| {
+                    sat.to_string() == "R10"
+                        && ["C1C", "L1C"].iter().all(|code| {
+                            rows.iter()
+                                .any(|row| row.code == *code && row.value.is_some())
+                        })
+                })
+        })
+        .map(|(epoch_index, _)| RtkRinexUnresolvedCarrier {
+            receiver: RtkRinexReceiver::Rover,
+            epoch_index,
+            satellite_id: "R10".to_string(),
+            observable_code: "L1C".to_string(),
+        })
+        .collect();
+    assert!(!expected.is_empty(), "R10 is observed in the fixture");
+
+    // The report carries them whether the carrier solve then succeeds or fails.
+    let mode_reports = match solve_static_reference_station_rinex(
+        &sp3,
+        &reference_obs,
+        &rover_obs,
+        reference_arp_m,
+        &options,
+    ) {
+        Ok(solution) => solution.mode_reports,
+        Err(StaticReferenceStationError::AllModesFailed { mode_reports }) => mode_reports,
+        Err(error) => panic!("unexpected station error {error}"),
+    };
+    assert_eq!(mode_reports.len(), 1);
+    assert_eq!(mode_reports[0].unresolved_carriers, expected);
+}
+
 #[test]
 fn all_modes_failed_display_lists_mode_errors_without_debug_dump() {
     let error = StaticReferenceStationError::AllModesFailed {
@@ -320,6 +388,7 @@ fn all_modes_failed_display_lists_mode_errors_without_debug_dump() {
                 skipped_epochs: 0,
                 used_measurements: 0,
                 error: Some(StaticReferenceModeError::NoMatchedCodeEpochs),
+                unresolved_carriers: Vec::new(),
             },
             StaticReferenceModeReport {
                 mode: StaticReferenceStationMode::CarrierFixed,
@@ -330,6 +399,7 @@ fn all_modes_failed_display_lists_mode_errors_without_debug_dump() {
                 error: Some(StaticReferenceModeError::CarrierSolve {
                     reason: "singular geometry".to_string(),
                 }),
+                unresolved_carriers: Vec::new(),
             },
         ],
     };
