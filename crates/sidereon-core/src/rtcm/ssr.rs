@@ -552,7 +552,15 @@ impl SsrMessage {
         match self.kind {
             SsrKind::Orbit => {
                 for rec in &self.orbit {
-                    write_orbit_record(&mut w, layout, rec)?;
+                    write_orbit_record(
+                        &mut w,
+                        layout,
+                        RtcmRecordKind::Ssr {
+                            system: self.system,
+                            kind: self.kind,
+                        },
+                        rec,
+                    )?;
                 }
             }
             SsrKind::Clock => {
@@ -562,7 +570,15 @@ impl SsrMessage {
             }
             SsrKind::CombinedOrbitClock => {
                 for (orbit, clock) in self.orbit.iter().zip(&self.clock) {
-                    write_orbit_record(&mut w, layout, orbit)?;
+                    write_orbit_record(
+                        &mut w,
+                        layout,
+                        RtcmRecordKind::Ssr {
+                            system: self.system,
+                            kind: self.kind,
+                        },
+                        orbit,
+                    )?;
                     write_clock_terms(&mut w, clock)?;
                 }
             }
@@ -609,7 +625,7 @@ impl SsrMessage {
             };
             match policy {
                 RtcmPolicy::Strict => {
-                    return Err(RtcmEncodeError::StrictDeparture(departure).into())
+                    return Err(RtcmEncodeError::StrictDeparture(departure).into());
                 }
                 RtcmPolicy::Lenient => departures.push(departure),
             }
@@ -951,7 +967,12 @@ fn read_orbit_record(r: &mut BitReader<'_>, layout: Layout) -> DecodeResult<SsrO
     })
 }
 
-fn write_orbit_record(w: &mut FieldWriter, layout: Layout, rec: &SsrOrbitRecord) -> Result<()> {
+fn write_orbit_record(
+    w: &mut FieldWriter,
+    layout: Layout,
+    record: RtcmRecordKind,
+    rec: &SsrOrbitRecord,
+) -> Result<()> {
     let id = rec.satellite_id;
     w.u("satellite id", u64::from(id), layout.satellite_bits)?;
     w.u(
@@ -963,18 +984,24 @@ fn write_orbit_record(w: &mut FieldWriter, layout: Layout, rec: &SsrOrbitRecord)
         (true, Some(crc)) => w.u(format_args!("satellite {id} IOD CRC"), u64::from(crc), 24)?,
         (false, None) => {}
         (true, None) => {
-            return Err(Error::InvalidInput(format!(
-                "RTCM SSR {} satellite {id} IOD CRC is not given, and the SBAS orbit layout \
-                 carries it",
-                w.message_number()
-            )))
+            return Err(RtcmEncodeError::SatelliteFieldPresence {
+                message_number: w.message_number(),
+                record,
+                satellite: id,
+                field: "IOD CRC",
+                carried: true,
+            }
+            .into());
         }
         (false, Some(_)) => {
-            return Err(Error::InvalidInput(format!(
-                "RTCM SSR {} satellite {id} IOD CRC is given, and only the RTCM SBAS orbit \
-                 layout carries one",
-                w.message_number()
-            )))
+            return Err(RtcmEncodeError::SatelliteFieldPresence {
+                message_number: w.message_number(),
+                record,
+                satellite: id,
+                field: "IOD CRC",
+                carried: false,
+            }
+            .into());
         }
     }
     w.i(
@@ -1914,11 +1941,36 @@ mod tests {
         }
         let mut m = message(1252, GnssSystem::Sbas, SsrKind::Orbit);
         m.orbit[0].iod_crc = None;
-        assert!(m
-            .encode()
-            .unwrap_err()
-            .to_string()
-            .contains("IOD CRC is not given"));
+        assert!(matches!(
+            m.encode(),
+            Err(Error::RtcmEncode(ref error))
+                if matches!(**error, RtcmEncodeError::SatelliteFieldPresence {
+                    message_number: 1252,
+                    record: RtcmRecordKind::Ssr {
+                        system: GnssSystem::Sbas,
+                        kind: SsrKind::Orbit,
+                    },
+                    satellite: 3,
+                    field: "IOD CRC",
+                    carried: true,
+                })
+        ));
+        let mut m = message(1057, GnssSystem::Gps, SsrKind::Orbit);
+        m.orbit[0].iod_crc = Some(1);
+        assert!(matches!(
+            m.encode(),
+            Err(Error::RtcmEncode(ref error))
+                if matches!(**error, RtcmEncodeError::SatelliteFieldPresence {
+                    message_number: 1057,
+                    record: RtcmRecordKind::Ssr {
+                        system: GnssSystem::Gps,
+                        kind: SsrKind::Orbit,
+                    },
+                    satellite: 3,
+                    field: "IOD CRC",
+                    carried: false,
+                })
+        ));
         m = message(1057, GnssSystem::Gps, SsrKind::Orbit);
         m.orbit[0].iod_crc = Some(1);
         assert!(m

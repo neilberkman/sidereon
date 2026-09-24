@@ -2175,7 +2175,7 @@ impl NavicEphemeris {
     /// Refuses a `satellite_id` that does not fit the six-bit DF516 field or is
     /// not a spellable satellite token; see `raw_satellite`.
     pub fn satellite(&self) -> Result<GnssSatelliteId> {
-        raw_satellite(GnssSystem::Navic, self.satellite_id, 6, "NavIC PRN", "1041")
+        raw_satellite(GnssSystem::Navic, self.satellite_id, 6, "NavIC PRN", 1041)
     }
 
     /// The health word RTKLIB `decode_type1041` stores: the L5 flag in bit 1
@@ -2239,9 +2239,9 @@ impl NavicEphemeris {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// [`Error::RtcmEncode`] when `satellite_id` does not fit the 6-bit
     /// satellite field; writing it would keep only its low bits and name
-    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// another satellite. [`Error::RtcmEncode`] naming the field when any
     /// other value is wider than its field: an unsigned field of `n` bits holds
     /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
     pub fn encode(&self) -> Result<Vec<u8>> {
@@ -2254,7 +2254,7 @@ impl NavicEphemeris {
     /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
     /// under both policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
-        raw_satellite_field(self.satellite_id, 6, "NavIC PRN", "1041")?;
+        raw_satellite_field(self.satellite_id, 6, "NavIC PRN", 1041)?;
         let mut w = FieldWriter::new(1041);
         w.u("message number", 1041, 12)?;
         w.u("satellite_id", u64::from(self.satellite_id), 6)?;
@@ -2299,13 +2299,14 @@ impl NavicEphemeris {
     /// [`Self::week_number`]. Mismatched weeks, invalid satellite IDs,
     /// unrepresentable times, or URA indices lacking a defined numerical
     /// accuracy prediction (index 15) are rejected with
-    /// [`Error::InvalidInput`].
+    /// [`Error::RtcmConversion`].
     pub fn to_broadcast_record(&self, full_week: u32) -> Result<BroadcastRecord> {
         if full_week % 1024 != u32::from(self.week_number) {
-            return Err(Error::InvalidInput(format!(
-                "NavIC full week {full_week} disagrees with 10-bit RTCM week {}",
-                self.week_number
-            )));
+            return Err(RtcmConversionError::NavicWeekMismatch {
+                full_week,
+                week: self.week_number,
+            }
+            .into());
         }
         let satellite_id = self.satellite()?;
         let toe_sow = f64::from(self.t_oe) * 16.0;
@@ -2349,7 +2350,7 @@ impl NavicEphemeris {
             group_delays: BroadcastGroupDelays::gps_lnav(scaled_i(self.t_gd, -31)),
             cnav: None,
             sv_health: f64::from(self.health()),
-            sv_accuracy_m: Some(gps_ura_to_meters(self.ura, "NavIC")?),
+            sv_accuracy_m: Some(gps_ura_to_meters(self.ura, GnssSystem::Navic)?),
             fit_interval_s: None,
             stated: StatedNavFields::default(),
         })

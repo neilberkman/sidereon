@@ -121,7 +121,7 @@ impl GlonassCodePhaseBiases {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming the field when a value is wider than its
+    /// [`Error::RtcmEncode`] naming the field when a value is wider than its
     /// field: the 12-bit station ID or the 3-bit reserved field.
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.encode_with_policy(RtcmPolicy::Strict)

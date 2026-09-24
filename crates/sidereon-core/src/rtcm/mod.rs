@@ -132,7 +132,7 @@ pub use antenna::AntennaDescriptor;
 pub use code_phase_bias::{GlonassCodePhaseBiases, GLONASS_CODE_PHASE_BIAS_INVALID};
 pub use encode_error::{
     MsmMaskProblem, MsmOptionalField, MsmOptionalProblem, RtcmConversionError, RtcmEncodeError,
-    RtcmFieldEncoding, RtcmRecordKind,
+    RtcmFieldEncoding, RtcmRecordKind, VtecEvaluationProblem,
 };
 pub use ephemeris::{
     BeidouEphemeris, GalileoFnavEphemeris, GalileoInavEphemeris, GlonassEphemeris, GpsEphemeris,

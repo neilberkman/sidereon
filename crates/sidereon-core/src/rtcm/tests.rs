@@ -2732,55 +2732,168 @@ fn msm_cell_mask_over_64_bits_is_a_departure() {
 /// fill or drop, and a message number that names another layout.
 #[test]
 fn msm_encode_refuses_values_it_would_truncate_fill_or_drop() {
+    use crate::id::GnssSystem;
+
     let base = msm4(vec![msm4_satellite(3)], vec![msm4_signal(3, 2)]);
     base.encode().expect("the base message encodes");
-    let refused = |edit: &dyn Fn(&mut MsmMessage), needle: &str| {
+    let refused = |edit: &dyn Fn(&mut MsmMessage), expected: RtcmEncodeError| {
         let mut m = base.clone();
         edit(&mut m);
-        let err = m.encode().expect_err(needle);
-        assert!(
-            matches!(err, Error::RtcmEncode(ref e) if e.to_string().contains(needle)),
-            "expected {needle:?}, got {err}"
-        );
+        let err = m.encode().expect_err("invalid MSM must be refused");
+        let Error::RtcmEncode(actual) = err else {
+            panic!("expected a typed RTCM encode refusal, got {err}");
+        };
+        assert_eq!(*actual, expected);
     };
-    refused(&|m| m.message_number = 1077, "is not the");
-    refused(&|m| m.kind = MsmKind::Msm7, "is not the");
+    refused(
+        &|m| m.message_number = 1077,
+        RtcmEncodeError::MessageNumber {
+            message_number: 1077,
+            record: RtcmRecordKind::Msm {
+                system: GnssSystem::Gps,
+                kind: MsmKind::Msm4,
+            },
+        },
+    );
+    refused(
+        &|m| m.kind = MsmKind::Msm7,
+        RtcmEncodeError::MessageNumber {
+            message_number: 1074,
+            record: RtcmRecordKind::Msm {
+                system: GnssSystem::Gps,
+                kind: MsmKind::Msm7,
+            },
+        },
+    );
     refused(
         &|m| m.header.reference_station_id = 4096,
-        "reference station ID 4096",
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1074,
+            field: "reference station ID".into(),
+            value: 4096,
+            width: 12,
+            encoding: RtcmFieldEncoding::Unsigned,
+        },
     );
-    refused(&|m| m.header.epoch_time = 1 << 30, "epoch time 1073741824");
-    refused(&|m| m.header.iods = 8, "IODS 8");
-    refused(&|m| m.header.smoothing_interval = 8, "smoothing interval 8");
+    refused(
+        &|m| m.header.epoch_time = 1 << 30,
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1074,
+            field: "epoch time".into(),
+            value: 1 << 30,
+            width: 30,
+            encoding: RtcmFieldEncoding::Unsigned,
+        },
+    );
+    refused(
+        &|m| m.header.iods = 8,
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1074,
+            field: "IODS".into(),
+            value: 8,
+            width: 3,
+            encoding: RtcmFieldEncoding::Unsigned,
+        },
+    );
+    refused(
+        &|m| m.header.smoothing_interval = 8,
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1074,
+            field: "smoothing interval".into(),
+            value: 8,
+            width: 3,
+            encoding: RtcmFieldEncoding::Unsigned,
+        },
+    );
     refused(
         &|m| m.satellites[0].rough_range_mod1 = 1024,
-        "rough range modulo 1 ms 1024",
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1074,
+            field: "satellite 3 rough range modulo 1 ms".into(),
+            value: 1024,
+            width: 10,
+            encoding: RtcmFieldEncoding::Unsigned,
+        },
     );
-    refused(
-        &|m| m.satellites[0].extended_info = Some(1),
-        "extended info is given, and MSM4 does not carry it",
-    );
+    let mut extended = base.clone();
+    extended.satellites[0].extended_info = Some(1);
+    assert!(matches!(
+        extended.encode(),
+        Err(Error::RtcmEncode(error))
+            if matches!(
+                *error,
+                RtcmEncodeError::MsmOptional {
+                    message_number: 1074,
+                    kind: MsmKind::Msm4,
+                    satellite: 3,
+                    signal: None,
+                    field: MsmOptionalField::ExtendedInfo,
+                    problem: MsmOptionalProblem::NotCarried,
+                }
+            )
+    ));
     refused(
         &|m| m.satellites[0].rough_phase_range_rate_m_s = Some(1),
-        "rough phase-range rate is given, and MSM4 does not carry it",
+        RtcmEncodeError::MsmOptional {
+            message_number: 1074,
+            kind: MsmKind::Msm4,
+            satellite: 3,
+            signal: None,
+            field: MsmOptionalField::RoughPhaseRangeRate,
+            problem: MsmOptionalProblem::NotCarried,
+        },
     );
     refused(
         &|m| m.signals[0].fine_phase_range_rate = Some(1),
-        "fine phase-range rate is given, and MSM4 does not carry it",
+        RtcmEncodeError::MsmOptional {
+            message_number: 1074,
+            kind: MsmKind::Msm4,
+            satellite: 3,
+            signal: Some(2),
+            field: MsmOptionalField::FinePhaseRangeRate,
+            problem: MsmOptionalProblem::NotCarried,
+        },
     );
     refused(
         &|m| m.signals[0].fine_pseudorange = Some(1 << 14),
-        "fine pseudorange 16384",
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1074,
+            field: "satellite 3 signal 2 fine pseudorange".into(),
+            value: 1 << 14,
+            width: 15,
+            encoding: RtcmFieldEncoding::TwosComplement,
+        },
     );
     refused(
         &|m| m.signals[0].fine_phase_range = Some(-(1 << 21) - 1),
-        "fine phase range",
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1074,
+            field: "satellite 3 signal 2 fine phase range".into(),
+            value: -(1 << 21) - 1,
+            width: 22,
+            encoding: RtcmFieldEncoding::TwosComplement,
+        },
     );
     refused(
         &|m| m.signals[0].lock_time_indicator = Some(16),
-        "lock-time indicator 16",
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1074,
+            field: "satellite 3 signal 2 lock-time indicator".into(),
+            value: 16,
+            width: 4,
+            encoding: RtcmFieldEncoding::Unsigned,
+        },
     );
-    refused(&|m| m.signals[0].cnr = Some(64), "CNR 64");
+    refused(
+        &|m| m.signals[0].cnr = Some(64),
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1074,
+            field: "satellite 3 signal 2 CNR".into(),
+            value: 64,
+            width: 6,
+            encoding: RtcmFieldEncoding::Unsigned,
+        },
+    );
 
     // MSM7: extended info is carried and must be given; `Some` of an invalid
     // value is the spelling of `None` and is refused.
@@ -2791,42 +2904,103 @@ fn msm_encode_refuses_values_it_would_truncate_fill_or_drop() {
     msm7.encode().expect("a well-formed MSM7 encodes");
     let mut missing = msm7.clone();
     missing.satellites[0].extended_info = None;
-    assert!(missing
-        .encode()
-        .unwrap_err()
-        .to_string()
-        .contains("extended info is not given, and MSM7 carries it"));
+    assert!(matches!(
+        missing.encode(),
+        Err(Error::RtcmEncode(error))
+            if matches!(
+                *error,
+                RtcmEncodeError::MsmOptional {
+                    message_number: 1077,
+                    kind: MsmKind::Msm7,
+                    satellite: 3,
+                    signal: None,
+                    field: MsmOptionalField::ExtendedInfo,
+                    problem: MsmOptionalProblem::Missing,
+                }
+            )
+    ));
     let mut wide = msm7.clone();
     wide.satellites[0].extended_info = Some(16);
-    assert!(wide
-        .encode()
-        .unwrap_err()
-        .to_string()
-        .contains("extended info 16"));
+    assert!(matches!(
+        wide.encode(),
+        Err(Error::RtcmEncode(error))
+            if matches!(
+                *error,
+                RtcmEncodeError::FieldOutOfRange {
+                    message_number: 1077,
+                    ref field,
+                    value: 16,
+                    width: 4,
+                    encoding: RtcmFieldEncoding::Unsigned,
+                } if field == "satellite 3 extended info"
+            )
+    ));
     let mut rough = msm7.clone();
     rough.satellites[0].rough_phase_range_rate_m_s = Some(MSM_ROUGH_PHASE_RANGE_RATE_INVALID);
-    assert!(rough
-        .encode()
-        .unwrap_err()
-        .to_string()
-        .contains("invalid value"));
+    assert!(matches!(
+        rough.encode(),
+        Err(Error::RtcmEncode(error))
+            if matches!(
+                *error,
+                RtcmEncodeError::MsmOptional {
+                    message_number: 1077,
+                    kind: MsmKind::Msm7,
+                    satellite: 3,
+                    signal: None,
+                    field: MsmOptionalField::RoughPhaseRangeRate,
+                    problem: MsmOptionalProblem::InvalidValue(value),
+                } if value == i64::from(MSM_ROUGH_PHASE_RANGE_RATE_INVALID)
+            )
+    ));
     let mut fine = msm7.clone();
     fine.signals[0].fine_phase_range_rate = Some(MSM_FINE_PHASE_RANGE_RATE_INVALID);
-    assert!(fine
-        .encode()
-        .unwrap_err()
-        .to_string()
-        .contains("invalid value"));
+    assert!(matches!(
+        fine.encode(),
+        Err(Error::RtcmEncode(error))
+            if matches!(
+                *error,
+                RtcmEncodeError::MsmOptional {
+                    message_number: 1077,
+                    kind: MsmKind::Msm7,
+                    satellite: 3,
+                    signal: Some(2),
+                    field: MsmOptionalField::FinePhaseRangeRate,
+                    problem: MsmOptionalProblem::InvalidValue(value),
+                } if value == i64::from(MSM_FINE_PHASE_RANGE_RATE_INVALID)
+            )
+    ));
     let mut cnr = msm7.clone();
     cnr.signals[0].cnr = Some(1024);
-    assert!(cnr.encode().unwrap_err().to_string().contains("CNR 1024"));
+    assert!(matches!(
+        cnr.encode(),
+        Err(Error::RtcmEncode(error))
+            if matches!(
+                *error,
+                RtcmEncodeError::FieldOutOfRange {
+                    message_number: 1077,
+                    ref field,
+                    value: 1024,
+                    width: 10,
+                    encoding: RtcmFieldEncoding::Unsigned,
+                } if field == "satellite 3 signal 2 CNR"
+            )
+    ));
     let mut prr = msm7;
     prr.signals[0].fine_phase_range_rate = Some(i16::MAX);
-    assert!(prr
-        .encode()
-        .unwrap_err()
-        .to_string()
-        .contains("fine phase-range rate 32767"));
+    assert!(matches!(
+        prr.encode(),
+        Err(Error::RtcmEncode(error))
+            if matches!(
+                *error,
+                RtcmEncodeError::FieldOutOfRange {
+                    message_number: 1077,
+                    ref field,
+                    value: 32767,
+                    width: 15,
+                    encoding: RtcmFieldEncoding::TwosComplement,
+                } if field == "satellite 3 signal 2 fine phase-range rate"
+            )
+    ));
 }
 
 /// The MSM invalid values decode as transmitted and are exported by name.
@@ -3265,6 +3439,140 @@ fn ephemeris_conversion_refusals_are_typed() {
         refusal(spare.to_broadcast_record()),
         RtcmConversionError::SisaNoPrediction
     );
+
+    let navic = navic_ephemeris();
+    let full_week = u32::from(navic.week_number) + 1;
+    assert_eq!(
+        refusal(navic.to_broadcast_record(full_week)),
+        RtcmConversionError::NavicWeekMismatch {
+            full_week,
+            week: navic.week_number,
+        }
+    );
+}
+
+#[test]
+fn new_family_encoder_refusals_are_typed() {
+    let refusal = |result: crate::error::Result<Vec<u8>>| match result {
+        Err(Error::RtcmEncode(refusal)) => *refusal,
+        other => panic!("expected an RTCM encode refusal, got {other:?}"),
+    };
+
+    let mut legacy = legacy_message(1004);
+    legacy.satellite_count = 1;
+    assert_eq!(
+        refusal(legacy.encode()),
+        RtcmEncodeError::CountMismatch {
+            message_number: 1004,
+            field: "satellite record",
+            expected: 1,
+            actual: 2,
+        }
+    );
+    let mut legacy = legacy_message(1001);
+    legacy.satellites[0].l2 = legacy_message(1003).satellites[0].l2;
+    assert_eq!(
+        refusal(legacy.encode()),
+        RtcmEncodeError::SatelliteFieldPresence {
+            message_number: 1001,
+            record: RtcmRecordKind::LegacyObservations,
+            satellite: 5,
+            field: "L2 observables",
+            carried: false,
+        }
+    );
+
+    let parameters = SystemParameters {
+        reference_station_id: 1,
+        mjd: 60_000,
+        seconds_of_day: 1,
+        announcement_count: 1,
+        leap_seconds: 18,
+        announcements: Vec::new(),
+        trailing_bits: Vec::new(),
+    };
+    assert_eq!(
+        refusal(parameters.encode()),
+        RtcmEncodeError::CountMismatch {
+            message_number: 1013,
+            field: "header record",
+            expected: 1,
+            actual: 0,
+        }
+    );
+
+    let biases = GlonassCodePhaseBiases {
+        reference_station_id: 1,
+        aligned: true,
+        reserved: 8,
+        l1_ca: None,
+        l1_p: None,
+        l2_ca: None,
+        l2_p: None,
+        trailing_bits: Vec::new(),
+    };
+    assert_eq!(
+        refusal(biases.encode()),
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1230,
+            field: "reserved".into(),
+            value: 8,
+            width: 3,
+            encoding: RtcmFieldEncoding::Unsigned,
+        }
+    );
+    let text = TextMessage {
+        reference_station_id: 1,
+        mjd: 60_000,
+        seconds_of_day: 1,
+        character_count: 0,
+        code_units: vec![b'x'; 256],
+        trailing_bits: Vec::new(),
+    };
+    assert!(matches!(
+        refusal(text.encode()),
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1029,
+            ..
+        }
+    ));
+    let mut network = correction_differences(1015);
+    network.satellites[0].geometric = Some(1);
+    assert!(matches!(
+        refusal(network.encode()),
+        RtcmEncodeError::SatelliteFieldPresence {
+            message_number: 1015,
+            record: RtcmRecordKind::Network {
+                family: "network correction-difference message",
+            },
+            satellite: 5,
+            field: "geometric difference",
+            carried: false,
+        }
+    ));
+
+    let mut transformation = helmert(1021);
+    transformation.source_name = "A\u{263a}".to_string();
+    assert!(matches!(
+        refusal(transformation.encode()),
+        RtcmEncodeError::NonLatin1Character {
+            field,
+            character: '\u{263a}',
+        } if field == "source name"
+    ));
+
+    let mut vtec = vtec_message(1264);
+    vtec.layers[0].degree = 0;
+    assert!(matches!(
+        refusal(vtec.encode()),
+        RtcmEncodeError::ValueOutOfRange {
+            message_number: 1264,
+            value: 0,
+            minimum: 1,
+            maximum: 16,
+            ..
+        }
+    ));
 }
 
 /// An MSM message of `kind` for `system` with two satellites and two signals,
@@ -3609,11 +3917,19 @@ fn short_legacy_body_is_refused_strictly_and_read_leniently() {
     assert_eq!(read.satellite_count, 2);
     assert_eq!(read.satellites, full.satellites[..1].to_vec());
     assert_eq!(read.trailing_bits.len(), 30 * 8 - 189);
-    assert!(read
-        .encode()
-        .unwrap_err()
-        .to_string()
-        .contains("header satellite count 2 differs from the 1 records"));
+    assert!(matches!(
+        read.encode(),
+        Err(Error::RtcmEncode(error))
+            if matches!(
+                *error,
+                RtcmEncodeError::CountMismatch {
+                    message_number: 1004,
+                    field: "satellite record",
+                    expected: 2,
+                    actual: 1,
+                }
+            )
+    ));
     let (written, departures) = read.encode_with_policy(RtcmPolicy::Lenient).unwrap();
     assert_eq!(written, short);
     assert_eq!(departures, vec![departure]);
@@ -3639,40 +3955,120 @@ fn short_legacy_body_is_refused_strictly_and_read_leniently() {
 /// fields.
 #[test]
 fn legacy_encoder_refuses_what_its_layout_cannot_state() {
-    let refused = |message: LegacyObservations, needle: &str| {
-        let err = message.encode().expect_err(needle).to_string();
-        assert!(err.contains(needle), "expected {needle:?}, got {err}");
+    let refused = |message: LegacyObservations, expected: RtcmEncodeError| {
+        let actual = match message.encode() {
+            Err(Error::RtcmEncode(error)) => *error,
+            other => panic!("expected {expected:?}, got {other:?}"),
+        };
+        assert_eq!(actual, expected);
     };
     let mut m = legacy_message(1001);
     m.satellites[0].l2 = legacy_message(1003).satellites[0].l2;
-    refused(m, "L2 observables is given, and 1001 does not carry it");
+    refused(
+        m,
+        RtcmEncodeError::SatelliteFieldPresence {
+            message_number: 1001,
+            record: RtcmRecordKind::LegacyObservations,
+            satellite: 5,
+            field: "L2 observables",
+            carried: false,
+        },
+    );
     let mut m = legacy_message(1012);
     m.satellites[1].frequency_channel = None;
-    refused(m, "frequency channel is not given, and 1012 carries it");
+    refused(
+        m,
+        RtcmEncodeError::SatelliteFieldPresence {
+            message_number: 1012,
+            record: RtcmRecordKind::LegacyObservations,
+            satellite: 24,
+            field: "GLONASS frequency channel",
+            carried: true,
+        },
+    );
     let mut m = legacy_message(1004);
     m.satellites[0].frequency_channel = Some(7);
-    refused(m, "frequency channel is given, and 1004 does not carry it");
+    refused(
+        m,
+        RtcmEncodeError::SatelliteFieldPresence {
+            message_number: 1004,
+            record: RtcmRecordKind::LegacyObservations,
+            satellite: 5,
+            field: "GLONASS frequency channel",
+            carried: false,
+        },
+    );
     let mut m = legacy_message(1002);
     m.satellites[0].l1.cnr = None;
-    refused(m, "L1 CNR is not given, and 1002 carries it");
+    refused(
+        m,
+        RtcmEncodeError::SatelliteFieldPresence {
+            message_number: 1002,
+            record: RtcmRecordKind::LegacyObservations,
+            satellite: 5,
+            field: "L1 CNR",
+            carried: true,
+        },
+    );
     let mut m = legacy_message(1003);
     m.satellites[0].l2.as_mut().unwrap().cnr = Some(1);
-    refused(m, "L2 CNR is given, and 1003 does not carry it");
+    refused(
+        m,
+        RtcmEncodeError::SatelliteFieldPresence {
+            message_number: 1003,
+            record: RtcmRecordKind::LegacyObservations,
+            satellite: 5,
+            field: "L2 CNR",
+            carried: false,
+        },
+    );
     let mut m = legacy_message(1004);
     m.satellite_count = 1;
-    refused(m, "header satellite count 1 differs from the 2 records");
+    refused(
+        m,
+        RtcmEncodeError::CountMismatch {
+            message_number: 1004,
+            field: "satellite record",
+            expected: 1,
+            actual: 2,
+        },
+    );
     let mut m = legacy_message(1004);
     m.satellites[0].l1.pseudorange = 1 << 24;
-    refused(m, "L1 pseudorange 16777216");
+    refused(
+        m,
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1004,
+            field: "satellite 5 L1 pseudorange".to_string(),
+            value: 1 << 24,
+            width: 24,
+            encoding: RtcmFieldEncoding::Unsigned,
+        },
+    );
     // GLONASS DF041 is one bit wider, DF044 one bit narrower.
     let mut m = legacy_message(1012);
     m.satellites[0].l1.pseudorange = 1 << 24;
     m.encode().expect("DF041 is 25 bits");
     m.satellites[0].l1.pseudorange_modulus_ambiguity = Some(128);
-    refused(m, "L1 pseudorange modulus ambiguity 128");
+    refused(
+        m,
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1012,
+            field: "satellite 5 L1 pseudorange modulus ambiguity".to_string(),
+            value: 128,
+            width: 7,
+            encoding: RtcmFieldEncoding::Unsigned,
+        },
+    );
     let mut m = legacy_message(1004);
     m.message_number = 1005;
-    refused(m, "is not a legacy observation message");
+    refused(
+        m,
+        RtcmEncodeError::MessageNumber {
+            message_number: 1005,
+            record: RtcmRecordKind::LegacyObservations,
+        },
+    );
 }
 
 fn navic_ephemeris() -> NavicEphemeris {
@@ -3950,32 +4346,70 @@ fn igs_ssr_messages_round_trip_with_their_field_widths() {
 #[test]
 fn igs_ssr_layout_refusals_and_unsupported_subtypes() {
     use crate::id::GnssSystem::*;
+    let refusal = |message: SsrMessage| match message.encode() {
+        Err(Error::RtcmEncode(error)) => *error,
+        other => panic!("expected an SSR encode refusal, got {other:?}"),
+    };
     let mut m = igs_message(Gps, SsrKind::Orbit);
     m.igs_ssr_version = None;
-    assert!(m
-        .encode()
-        .unwrap_err()
-        .to_string()
-        .contains("IGS SSR version"));
+    assert_eq!(
+        refusal(m),
+        RtcmEncodeError::FieldPresence {
+            message_number: 4076,
+            record: RtcmRecordKind::Ssr {
+                system: Gps,
+                kind: SsrKind::Orbit,
+            },
+            field: "IGS SSR version",
+            carried: true,
+        }
+    );
     let mut m = igs_message(Gps, SsrKind::Orbit);
     m.message_number = 1057;
-    assert!(m
-        .encode()
-        .unwrap_err()
-        .to_string()
-        .contains("carries no IGS SSR version"));
+    assert_eq!(
+        refusal(m),
+        RtcmEncodeError::FieldPresence {
+            message_number: 1057,
+            record: RtcmRecordKind::Ssr {
+                system: Gps,
+                kind: SsrKind::Orbit,
+            },
+            field: "IGS SSR version",
+            carried: false,
+        }
+    );
     let m = igs_message(Navic, SsrKind::Orbit);
-    assert!(m
-        .encode()
-        .unwrap_err()
-        .to_string()
-        .contains("IGS SSR has no"));
+    assert_eq!(
+        refusal(m),
+        RtcmEncodeError::MessageNumber {
+            message_number: 4076,
+            record: RtcmRecordKind::Ssr {
+                system: Navic,
+                kind: SsrKind::Orbit,
+            },
+        }
+    );
     let mut m = igs_message(Galileo, SsrKind::Orbit);
     m.orbit[0].iode = 0x1A5;
-    assert!(m.encode().unwrap_err().to_string().contains("IODE 421"));
+    assert!(matches!(
+        refusal(m),
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 4076,
+            value: 0x1A5,
+            width: 8,
+            ..
+        }
+    ));
     let mut m = igs_message(Glonass, SsrKind::Clock);
     m.clock[0].satellite_id = 64;
-    assert!(m.encode().unwrap_err().to_string().contains("6-bit"));
+    assert_eq!(
+        refusal(m),
+        RtcmEncodeError::SsrSatelliteIdOutOfRange {
+            message_number: 4076,
+            value: 64,
+            width: 6,
+        }
+    );
 
     for subtype in [0u8, 28, 140, 200, 255] {
         let mut w = BitWriter::new();
@@ -3996,11 +4430,16 @@ fn igs_ssr_layout_refusals_and_unsupported_subtypes() {
         message_number: 4076,
         body,
     };
-    assert!(held
-        .encode()
-        .unwrap_err()
-        .to_string()
-        .contains("decoded into its typed variant"));
+    assert!(matches!(
+        held.encode(),
+        Err(Error::RtcmEncode(error))
+            if matches!(
+                *error,
+                RtcmEncodeError::UnsupportedDecodedNumber {
+                    message_number: 4076,
+                }
+            )
+    ));
 }
 
 fn vtec_message(message_number: u16) -> SsrVtecMessage {
@@ -4025,7 +4464,7 @@ fn vtec_message(message_number: u16) -> SsrVtecMessage {
             SsrVtecLayer {
                 height: 100,
                 degree: 1,
-                order: 3,
+                order: 1,
                 cosine: vec![i16::MIN, 1, i16::MAX],
                 sine: vec![-1],
             },
@@ -4073,25 +4512,75 @@ fn vtec_messages_round_trip_with_their_field_widths() {
         );
         assert_eq!(Message::SsrVtec(message).message_number(), number);
     }
-    let refused = |message: SsrVtecMessage, needle: &str| {
-        let err = message.encode().expect_err(needle).to_string();
-        assert!(err.contains(needle), "expected {needle:?}, got {err}");
+    let refused = |message: SsrVtecMessage, expected: RtcmEncodeError| {
+        let err = message
+            .encode()
+            .expect_err("invalid VTEC message must be refused");
+        let Error::RtcmEncode(actual) = err else {
+            panic!("expected a typed RTCM encode refusal, got {err}");
+        };
+        assert_eq!(*actual, expected);
     };
     let mut m = vtec_message(4076);
     m.layers[0].sine.pop();
-    refused(m, "holds 4 sine coefficients; degree 3 and order 2 carry 5");
+    refused(
+        m,
+        RtcmEncodeError::CountMismatch {
+            message_number: 4076,
+            field: "VTEC sine coefficient",
+            expected: 5,
+            actual: 4,
+        },
+    );
     let mut m = vtec_message(1264);
     m.layers[1].degree = 17;
-    refused(m, "degree 17 is outside 1..=16");
+    refused(
+        m,
+        RtcmEncodeError::ValueOutOfRange {
+            message_number: 1264,
+            field: "VTEC layer 1 degree".into(),
+            value: 17,
+            minimum: 1,
+            maximum: 16,
+        },
+    );
     let mut m = vtec_message(1264);
     m.layers.clear();
-    refused(m, "holds 0 layers");
+    refused(
+        m,
+        RtcmEncodeError::ValueOutOfRange {
+            message_number: 1264,
+            field: "VTEC layer count".into(),
+            value: 0,
+            minimum: 1,
+            maximum: 4,
+        },
+    );
     let mut m = vtec_message(1264);
     m.igs_ssr_version = Some(1);
-    refused(m, "RTCM 1264 carries no IGS SSR version");
+    refused(
+        m,
+        RtcmEncodeError::FieldPresence {
+            message_number: 1264,
+            record: RtcmRecordKind::SsrVtec {
+                message_number: 1264,
+            },
+            field: "IGS SSR version",
+            carried: false,
+        },
+    );
     let mut m = vtec_message(4076);
     m.quality_indicator = 512;
-    refused(m, "VTEC quality indicator 512");
+    refused(
+        m,
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 4076,
+            field: "VTEC quality indicator".into(),
+            value: 512,
+            width: 9,
+            encoding: RtcmFieldEncoding::Unsigned,
+        },
+    );
 }
 
 fn correction_differences(number: u16) -> NetworkCorrectionDifferences {

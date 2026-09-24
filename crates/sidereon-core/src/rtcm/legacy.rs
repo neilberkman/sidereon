@@ -22,7 +22,7 @@ use crate::id::GnssSystem;
 use super::bits::{BitReader, FieldWriter, OutOfInput};
 use super::{
     is_departing_tail, write_trailing, DecodeContext, DecodeError, DecodeResult, RtcmDeparture,
-    RtcmPolicy,
+    RtcmEncodeError, RtcmPolicy, RtcmRecordKind,
 };
 
 /// DF012 / DF018 / DF042 / DF048 phase-range-minus-pseudorange invalid
@@ -287,7 +287,7 @@ impl LegacyObservations {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming what cannot be written as the message's
+    /// [`Error::RtcmEncode`] naming what cannot be written as the message's
     /// wire form states it:
     ///
     /// * a message number outside 1001..=1004 and 1009..=1012;
@@ -312,11 +312,9 @@ impl LegacyObservations {
     /// refusal of [`Self::encode`] applies under both policies.
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         let number = self.message_number;
-        let layout = Layout::of(number).ok_or_else(|| {
-            Error::InvalidInput(format!(
-                "RTCM message number {number} is not a legacy observation message \
-                 1001-1004/1009-1012"
-            ))
+        let layout = Layout::of(number).ok_or(RtcmEncodeError::MessageNumber {
+            message_number: number,
+            record: RtcmRecordKind::LegacyObservations,
         })?;
         self.check_parts(layout)?;
 
@@ -331,10 +329,13 @@ impl LegacyObservations {
                 read: records,
             });
         } else if declared != records {
-            return Err(Error::InvalidInput(format!(
-                "RTCM {number} header satellite count {declared} differs from the {records} \
-                 records the message writes"
-            )));
+            return Err(RtcmEncodeError::CountMismatch {
+                message_number: number,
+                field: "satellite record",
+                expected: declared,
+                actual: records,
+            }
+            .into());
         }
 
         let mut w = FieldWriter::new(number);
@@ -371,40 +372,42 @@ impl LegacyObservations {
     /// carry held as `Some`.
     fn check_parts(&self, layout: Layout) -> Result<()> {
         let number = self.message_number;
-        let check = |satellite_id: u8, what: &str, present: bool, carried: bool| {
-            if present == carried {
-                return Ok(());
-            }
-            Err(Error::InvalidInput(if carried {
-                format!(
-                    "RTCM {number} satellite {satellite_id} {what} is not given, and \
-                     {number} carries it"
-                )
-            } else {
-                format!(
-                    "RTCM {number} satellite {satellite_id} {what} is given, and {number} \
-                     does not carry it"
-                )
-            }))
-        };
+        let check =
+            |satellite: u8, field: &'static str, present: bool, carried: bool| -> Result<()> {
+                if present == carried {
+                    return Ok(());
+                }
+                Err(RtcmEncodeError::SatelliteFieldPresence {
+                    message_number: number,
+                    record: RtcmRecordKind::LegacyObservations,
+                    satellite,
+                    field,
+                    carried,
+                }
+                .into())
+            };
         for s in &self.satellites {
-            let id = s.satellite_id;
             check(
-                id,
-                "frequency channel",
+                s.satellite_id,
+                "GLONASS frequency channel",
                 s.frequency_channel.is_some(),
                 layout.glonass(),
             )?;
             check(
-                id,
+                s.satellite_id,
                 "L1 pseudorange modulus ambiguity",
                 s.l1.pseudorange_modulus_ambiguity.is_some(),
                 layout.extended,
             )?;
-            check(id, "L1 CNR", s.l1.cnr.is_some(), layout.extended)?;
-            check(id, "L2 observables", s.l2.is_some(), layout.l2)?;
+            check(
+                s.satellite_id,
+                "L1 CNR",
+                s.l1.cnr.is_some(),
+                layout.extended,
+            )?;
+            check(s.satellite_id, "L2 observables", s.l2.is_some(), layout.l2)?;
             if let Some(l2) = &s.l2 {
-                check(id, "L2 CNR", l2.cnr.is_some(), layout.extended)?;
+                check(s.satellite_id, "L2 CNR", l2.cnr.is_some(), layout.extended)?;
             }
         }
         Ok(())
