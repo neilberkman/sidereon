@@ -788,3 +788,56 @@ fn ionex_selection_reads_a_gpst_request_on_the_utc_day_of_its_instant() {
         })
     );
 }
+
+#[test]
+fn ionex_fractional_request_metadata_keeps_the_utc_fraction_after_a_day_shift() {
+    use crate::astro::time::model::{Instant, TimeScale};
+
+    let request_whole_s = crate::astro::time::civil::j2000_seconds(2024, 3, 11, 5, 0, 0.0) as i64;
+    let expected_request_s = request_whole_s as f64 + 0.5;
+    let expected_source_s = crate::astro::time::civil::j2000_seconds(2024, 3, 10, 5, 0, 0.0) + 0.5;
+    let request = Instant::from_nanos(
+        TimeScale::Utc,
+        i128::from(request_whole_s) * 1_000_000_000 + 500_000_000,
+    );
+    let prior = make_ionex(2024, 3, 10, 50);
+    let products = [prior];
+
+    let selection = select_ionex(&products, request, StalenessPolicy::default())
+        .expect("the prior maps cover after a one-day shift");
+    assert_eq!(
+        selection.metadata().requested_epoch_j2000_s,
+        expected_request_s
+    );
+    assert_eq!(selection.metadata().source_epoch_j2000_s, expected_source_s);
+    assert_eq!(selection.metadata().staleness_s, SECONDS_PER_DAY);
+}
+
+#[test]
+fn ionex_fractional_request_beyond_cap_keeps_the_utc_fraction_in_its_error() {
+    use crate::astro::time::model::{Instant, TimeScale};
+
+    let request_whole_s = crate::astro::time::civil::j2000_seconds(2024, 3, 11, 5, 0, 0.0) as i64;
+    let expected_request_s = request_whole_s as f64 + 0.5;
+    let expected_source_s = crate::astro::time::civil::j2000_seconds(2024, 3, 10, 5, 0, 0.0) + 0.5;
+    let request = Instant::from_nanos(
+        TimeScale::Utc,
+        i128::from(request_whole_s) * 1_000_000_000 + 500_000_000,
+    );
+    let prior = make_ionex(2024, 3, 10, 50);
+
+    assert_eq!(
+        select_ionex(
+            &[prior],
+            request,
+            StalenessPolicy::seconds(SECONDS_PER_DAY - 1.0)
+        )
+        .expect_err("a one-day shift exceeds the cap"),
+        SelectionError::BeyondStalenessCap {
+            requested_epoch_j2000_s: expected_request_s,
+            source_epoch_j2000_s: expected_source_s,
+            staleness_s: SECONDS_PER_DAY,
+            max_staleness_s: SECONDS_PER_DAY - 1.0,
+        }
+    );
+}
