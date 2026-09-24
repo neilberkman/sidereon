@@ -22,9 +22,9 @@
 //! on both sides. Serializing through text is exact too: the writer refuses a
 //! value it cannot write exactly rather than rounding it.
 
-use super::exact_j2000_second;
 use super::grid::{Grid, Ionex, IonexParts};
 use super::header::IonexHeader;
+use super::{utc_j2000_second, utc_map_epoch, IonexEpochError};
 use crate::astro::time::model::Instant;
 
 const IONEX_AXIS_DEG_LIMIT: f64 = 360.0;
@@ -32,8 +32,9 @@ const IONEX_AXIS_DEG_LIMIT: f64 = 360.0;
 /// One vertical-TEC sample at one grid node.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TecSample {
-    /// Map epoch, which must name an exact whole J2000 second; samples sharing
-    /// a second are one map.
+    /// Map epoch, in any time scale that names an exact whole UTC second (see
+    /// [`IonexEpochError`]); samples naming the same UTC second are one map,
+    /// held as that UTC instant.
     pub epoch: Instant,
     /// Latitude node in degrees.
     pub lat_deg: f64,
@@ -55,7 +56,10 @@ pub struct TecSample {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TecGridSamples {
     /// Map epochs as instants, strictly increasing, each naming an exact whole
-    /// J2000 second.
+    /// UTC second. IONEX epochs are UT, so an epoch in another time scale is
+    /// carried onto UTC exactly (GPST 2017-01-01 00:00:18 is map epoch
+    /// 2017-01-01 00:00:00 UTC) and the product holds the UTC instant; an
+    /// epoch with no exact whole UTC second is refused with the cause.
     pub map_epochs: Vec<Instant>,
     /// Latitude node values in degrees, monotonic in the direction `dlat_deg`
     /// gives.
@@ -104,16 +108,17 @@ pub enum TecSamplesError {
     NonMonotonicLon,
     /// Map epochs are not strictly increasing.
     NonMonotonicEpochs,
-    /// A map epoch names no exact whole J2000 second.
+    /// A map epoch names no exact whole UTC second.
     ///
-    /// The IONEX epoch axis is an axis of whole seconds, so an epoch is taken
-    /// only where it states one exactly: an integer-nanosecond instant whose
-    /// count is a whole number of seconds within `i64`, or a split Julian date
-    /// whose two parts either sum to a whole second or encode one as a day
-    /// boundary that names a second and an integer residual within the day. A
-    /// fractional epoch is refused here rather than accepted as the nearest
-    /// whole second.
-    EpochNotRepresentable,
+    /// The IONEX epoch axis is an axis of whole UT seconds, so an epoch is
+    /// taken only where it states one exactly: an integer-nanosecond instant
+    /// whose UTC reading is a whole number of seconds within `i64`, or a split
+    /// Julian date whose two parts either sum to a whole second of its scale
+    /// or encode one as a day boundary that names a second and an integer
+    /// residual within the day, carried onto UTC exactly. A fractional epoch is
+    /// refused here rather than accepted as the nearest whole second; the
+    /// cause says why.
+    EpochNotRepresentable(IonexEpochError),
     /// Grid dimensions do not match the epoch or node axes.
     ShapeMismatch,
     /// RMS map count or node coverage does not match the TEC maps.
@@ -146,9 +151,7 @@ impl core::fmt::Display for TecSamplesError {
             Self::NonMonotonicEpochs => {
                 write!(f, "IONEX map epochs must be strictly increasing")
             }
-            Self::EpochNotRepresentable => {
-                write!(f, "IONEX map epoch is not an exact integer J2000 second")
-            }
+            Self::EpochNotRepresentable(cause) => write!(f, "{cause}"),
             Self::ShapeMismatch => {
                 write!(f, "IONEX TEC grid dimensions do not match the axes")
             }
@@ -172,8 +175,19 @@ impl Ionex {
     /// parsed product: a stack with no value at any node stays present and is
     /// distinct from an empty one, which says the product declares no map of
     /// that kind.
-    pub fn from_samples(samples: TecGridSamples) -> core::result::Result<Self, TecSamplesError> {
+    ///
+    /// Map epochs are held as UTC, the time system of an IONEX epoch record.
+    /// A UTC epoch is stored as given; an epoch in another time scale is
+    /// stored as the UTC instant of the same whole second, carried over
+    /// exactly, and one with no exact whole UTC second is refused with
+    /// [`TecSamplesError::EpochNotRepresentable`] and its cause.
+    pub fn from_samples(
+        mut samples: TecGridSamples,
+    ) -> core::result::Result<Self, TecSamplesError> {
         validate_grid_samples(&samples)?;
+        for epoch in &mut samples.map_epochs {
+            *epoch = utc_map_epoch(*epoch).map_err(TecSamplesError::EpochNotRepresentable)?;
+        }
         Self::from_parts(IonexParts {
             header: samples.header,
             lat_nodes_deg: samples.lat_nodes_deg,
@@ -230,7 +244,7 @@ impl Ionex {
             {
                 validate_finite(value)?;
             }
-            exact_j2000_second(sample.epoch).ok_or(TecSamplesError::EpochNotRepresentable)?;
+            utc_j2000_second(sample.epoch).map_err(TecSamplesError::EpochNotRepresentable)?;
         }
 
         let mut map_epochs = Vec::new();
@@ -238,10 +252,10 @@ impl Ionex {
         let mut lon_nodes_deg = Vec::new();
         for sample in &samples {
             let epoch_s =
-                exact_j2000_second(sample.epoch).ok_or(TecSamplesError::EpochNotRepresentable)?;
+                utc_j2000_second(sample.epoch).map_err(TecSamplesError::EpochNotRepresentable)?;
             if !map_epochs
                 .iter()
-                .any(|&epoch| exact_j2000_second(epoch) == Some(epoch_s))
+                .any(|&epoch| utc_j2000_second(epoch) == Ok(epoch_s))
             {
                 map_epochs.push(sample.epoch);
             }
@@ -250,7 +264,7 @@ impl Ionex {
         }
 
         map_epochs.sort_by_key(|epoch| {
-            exact_j2000_second(*epoch).expect("sample epochs were already validated")
+            utc_j2000_second(*epoch).expect("sample epochs were already validated")
         });
         lat_nodes_deg.sort_by(|a, b| b.total_cmp(a));
         lon_nodes_deg.sort_by(f64::total_cmp);
@@ -284,7 +298,7 @@ impl Ionex {
         for sample in samples {
             let map_index = map_epochs
                 .iter()
-                .position(|&epoch| exact_j2000_second(epoch) == exact_j2000_second(sample.epoch))
+                .position(|&epoch| utc_j2000_second(epoch) == utc_j2000_second(sample.epoch))
                 .expect("sample epoch exists in the map axis");
             let lat_index = find_bits(&lat_nodes_deg, sample.lat_deg)
                 .expect("sample latitude exists in the latitude axis");
@@ -452,7 +466,7 @@ fn validate_axis(
 fn validate_epochs(map_epochs: &[Instant]) -> core::result::Result<(), TecSamplesError> {
     let mut previous_s = None;
     for &epoch in map_epochs {
-        let seconds = exact_j2000_second(epoch).ok_or(TecSamplesError::EpochNotRepresentable)?;
+        let seconds = utc_j2000_second(epoch).map_err(TecSamplesError::EpochNotRepresentable)?;
         if previous_s.is_some_and(|previous| seconds <= previous) {
             return Err(TecSamplesError::NonMonotonicEpochs);
         }

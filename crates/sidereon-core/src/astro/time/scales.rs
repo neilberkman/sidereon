@@ -1103,6 +1103,58 @@ fn normalize_calendar_seconds(mut cal: ScaleCal, second: f64) -> ScaleCal {
     cal
 }
 
+/// Where a TAI instant falls on the UTC label axis, read exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaiOnUtcAxis {
+    /// The UTC reading, in nanoseconds from J2000 on the UTC label axis (the
+    /// axis a UTC [`crate::astro::time::model::InstantRepr::Nanos`] count and
+    /// a UTC civil label share, on which no inserted leap second has a place).
+    Utc(i128),
+    /// The instant falls inside an inserted leap second, whose `23:59:60`
+    /// label the UTC label axis has no place for.
+    InsertedLeapSecond,
+    /// The instant is before 1972-01-01 UTC, where TAI - UTC was not a whole
+    /// number of seconds and the integer leap-second table does not apply.
+    BeforeIntegerLeapSeconds,
+}
+
+/// Seconds from J2000 on the UTC label axis to 00:00:00 UTC of Modified
+/// Julian Date `mjd`. J2000 is MJD 51544.5.
+fn utc_label_seconds_at_mjd(mjd: i32) -> i128 {
+    (i128::from(mjd) - 51_544) * 86_400 - 43_200
+}
+
+/// The UTC label reading of the TAI instant `tai_ns` nanoseconds from J2000
+/// on TAI's own axis, in integer arithmetic.
+///
+/// A leap-second entry says TAI - UTC is `tai_utc` from 00:00:00 UTC of its
+/// MJD, so it governs every TAI instant from that label plus `tai_utc`
+/// onward. The TAI instants between that label plus the previous entry's
+/// count and that label plus the new count are the inserted second
+/// `23:59:60` of the day before. Every entry of the table from 1972 holds a
+/// whole number of seconds, so no step here rounds.
+pub(crate) fn tai_nanos_on_utc_axis(tai_ns: i128) -> TaiOnUtcAxis {
+    const NANOS: i128 = 1_000_000_000;
+    let count = |entry: &LeapSecondEntry| entry.tai_utc as i128;
+    let mut later: Option<&LeapSecondEntry> = None;
+    for entry in LEAP_SECONDS.iter().rev() {
+        debug_assert!(entry.tai_utc.fract() == 0.0);
+        if let Some(next) = later {
+            let label_ns = utc_label_seconds_at_mjd(next.mjd) * NANOS;
+            if tai_ns >= label_ns + count(entry) * NANOS {
+                // Between the two counts: an inserted second before `next`.
+                return TaiOnUtcAxis::InsertedLeapSecond;
+            }
+        }
+        let label_ns = utc_label_seconds_at_mjd(entry.mjd) * NANOS;
+        if tai_ns >= label_ns + count(entry) * NANOS {
+            return TaiOnUtcAxis::Utc(tai_ns - count(entry) * NANOS);
+        }
+        later = Some(entry);
+    }
+    TaiOnUtcAxis::BeforeIntegerLeapSeconds
+}
+
 pub(crate) fn is_positive_leap_second_label(
     year: i32,
     month: i32,

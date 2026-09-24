@@ -51,7 +51,6 @@
 
 use core::fmt::Write as _;
 
-use super::exact_j2000_second;
 use super::grid::{
     node_axis, pow10, scale_value, Grid, Ionex, BAND, BASE_RADIUS, COMMENT, DEFAULT_EXPONENT,
     DESCRIPTION, ELEVATION_CUTOFF, END_OF_FILE, END_OF_HEADER, END_OF_HEIGHT_MAP, END_OF_RMS_MAP,
@@ -61,6 +60,7 @@ use super::grid::{
     START_OF_RMS_MAP, START_OF_TEC_MAP, STATIONS, VERSION_TYPE,
 };
 use super::header::IonexMappingFunction;
+use super::{utc_j2000_second, IonexEpochError};
 use crate::astro::time::civil::civil_from_j2000_seconds;
 use crate::astro::time::model::Instant;
 use crate::error::{Error, Result};
@@ -669,24 +669,31 @@ const EPOCH_SECONDS_I6_LIMIT: i64 = 100_000_000_000_000;
 
 /// The `6I6` data of an epoch record, the inverse of the parser's epoch read.
 ///
-/// The epoch is taken only where it names an exact whole J2000 second, so the
-/// record written is the epoch the product retains and never a rounded
-/// neighbour. A whole second whose civil year is too wide for the `I6` field is
-/// a separate refusal: the second is exact, the record simply cannot state it.
-/// That refusal is reached by name for every such second, including the ones
-/// whose civil decomposition could not be formed at all.
+/// IONEX epochs are UT, which the reader takes as UTC, so the record states
+/// the epoch's UTC second: an epoch in another time scale is carried onto UTC
+/// exactly by [`utc_j2000_second`], and one with no exact whole UTC second is
+/// refused with its cause rather than written under a label off by the
+/// scale's offset. The epoch is taken only where it names an exact whole
+/// second, so the record written is the epoch the product retains and never a
+/// rounded neighbour. A whole second whose civil year is too wide for the `I6`
+/// field is a separate refusal: the second is exact, the record simply cannot
+/// state it. That refusal is reached by name for every such second, including
+/// the ones whose civil decomposition could not be formed at all.
 fn epoch_data(epoch: Instant) -> Result<String> {
-    let seconds = exact_j2000_second(epoch)
-        .ok_or_else(|| Error::InvalidInput("IONEX map epoch is not a whole J2000 second".into()))?;
+    let seconds = utc_j2000_second(epoch).map_err(Error::IonexEpoch)?;
     if !(-EPOCH_SECONDS_I6_LIMIT..=EPOCH_SECONDS_I6_LIMIT).contains(&seconds) {
-        return Err(Error::InvalidInput(format!(
-            "IONEX {EPOCH_OF_CURRENT_MAP} epoch {seconds} s from J2000 has a civil year \
-             that does not fit I6"
-        )));
+        return Err(Error::IonexEpoch(IonexEpochError::YearOutOfField {
+            utc_j2000_s: seconds,
+        }));
     }
     let (year, month, day, hour, minute, second) = civil_from_j2000_seconds(seconds);
-    let mut data = String::new();
-    for field in [year, month, day, hour, minute, second] {
+    // The year is the one field of a whole second that can outgrow `I6`.
+    let mut data = integer_field(year, 6, EPOCH_OF_CURRENT_MAP).map_err(|_| {
+        Error::IonexEpoch(IonexEpochError::YearOutOfField {
+            utc_j2000_s: seconds,
+        })
+    })?;
+    for field in [month, day, hour, minute, second] {
         data.push_str(&integer_field(field, 6, EPOCH_OF_CURRENT_MAP)?);
     }
     Ok(data)
@@ -696,7 +703,8 @@ fn epoch_data(epoch: Instant) -> Result<String> {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::ionex::ionex_epoch_from_j2000_seconds;
+    use crate::astro::time::model::TimeScale;
+    use crate::ionex::{exact_j2000_second, ionex_epoch_from_j2000_seconds};
 
     #[test]
     fn epoch_data_refuses_a_fractional_epoch_rather_than_rounding_it() {
@@ -713,8 +721,12 @@ mod tests {
         );
         let error = epoch_data(fractional).expect_err("a fractional epoch cannot be written");
         assert!(
-            matches!(&error, Error::InvalidInput(message)
-                if message.contains("not a whole J2000 second")),
+            matches!(
+                error,
+                Error::IonexEpoch(IonexEpochError::NotWholeSecond {
+                    scale: TimeScale::Utc
+                })
+            ),
             "{error:?}"
         );
 
@@ -727,6 +739,29 @@ mod tests {
     }
 
     #[test]
+    fn epoch_data_states_the_utc_label_of_an_epoch_in_another_scale() {
+        // 2020-06-25 00:00:18 GPST is 00:00:00 UTC; the record had stated the
+        // GPST label as UT, 18 s late.
+        let gpst = crate::ionex::instant_from_j2000_seconds(TimeScale::Gpst, 646_315_218);
+        assert_eq!(
+            epoch_data(gpst).expect("an exact GPST second writes"),
+            "  2020     6    25     0     0     0"
+        );
+        let tt = Instant::from_nanos(TimeScale::Tt, 646_315_269_184_000_000);
+        assert_eq!(
+            epoch_data(tt).expect("TT on a whole UTC second writes"),
+            "  2020     6    25     0     0     0"
+        );
+        let whole_tt = crate::ionex::instant_from_j2000_seconds(TimeScale::Tt, 646_315_269);
+        assert_eq!(
+            epoch_data(whole_tt).expect_err("a whole TT second is no whole UTC second"),
+            Error::IonexEpoch(IonexEpochError::FractionalUtcSecond {
+                scale: TimeScale::Tt
+            })
+        );
+    }
+
+    #[test]
     fn epoch_data_separates_an_unprintable_year_from_an_inexact_epoch() {
         // A second the converter states exactly can still have a civil year no
         // `I6` field holds. That refusal is about the record, not the epoch:
@@ -734,10 +769,11 @@ mod tests {
         let far = ionex_epoch_from_j2000_seconds(9_007_199_254_740_993);
         assert_eq!(exact_j2000_second(far), Some(9_007_199_254_740_993));
         let error = epoch_data(far).expect_err("the civil year does not fit I6");
-        assert!(
-            matches!(&error, Error::InvalidInput(message)
-                if message.contains("does not fit I6")),
-            "{error:?}"
+        assert_eq!(
+            error,
+            Error::IonexEpoch(IonexEpochError::YearOutOfField {
+                utc_j2000_s: 9_007_199_254_740_993
+            })
         );
     }
 
@@ -754,10 +790,12 @@ mod tests {
             let epoch = ionex_epoch_from_j2000_seconds(seconds);
             assert_eq!(exact_j2000_second(epoch), Some(seconds));
             let error = epoch_data(epoch).expect_err("an unprintable civil year is refused");
-            assert!(
-                matches!(&error, Error::InvalidInput(message)
-                    if message.contains("does not fit I6")),
-                "{seconds}: {error:?}"
+            assert_eq!(
+                error,
+                Error::IonexEpoch(IonexEpochError::YearOutOfField {
+                    utc_j2000_s: seconds
+                }),
+                "{seconds}"
             );
         }
     }
@@ -776,10 +814,12 @@ mod tests {
         ] {
             let error = epoch_data(ionex_epoch_from_j2000_seconds(seconds))
                 .expect_err("a year over six columns is refused");
-            assert!(
-                matches!(&error, Error::InvalidInput(message)
-                    if message.contains("does not fit I6")),
-                "{seconds}: {error:?}"
+            assert_eq!(
+                error,
+                Error::IonexEpoch(IonexEpochError::YearOutOfField {
+                    utc_j2000_s: seconds
+                }),
+                "{seconds}"
             );
         }
     }

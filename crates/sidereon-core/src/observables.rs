@@ -1072,8 +1072,8 @@ pub fn observable_media_corrections(
     } else {
         None
     };
-    let ionex_epoch_j2000_s = if options.needs_ionex_epoch() {
-        Some(rounded_j2000_seconds(t_rx_j2000_s)?)
+    let ionex_epoch = if options.needs_ionex_epoch() {
+        Some(ionex_query_instant(t_rx_j2000_s)?)
     } else {
         None
     };
@@ -1108,14 +1108,13 @@ pub fn observable_media_corrections(
             delay_m
         }
         Some(ObservableIonosphereCorrection::Ionex(ionex)) => {
-            let ionex_epoch_j2000_s =
-                ionex_epoch_j2000_s.expect("IONEX media requires an integer epoch");
+            let ionex_epoch = ionex_epoch.expect("IONEX media requires an epoch");
             let delay_m = ionex_slant_delay(
                 ionex,
                 receiver,
                 elevation_rad,
                 azimuth_rad,
-                ionex_epoch_j2000_s,
+                ionex_epoch,
                 carrier_hz,
             )
             .map_err(map_media_error)?;
@@ -1123,14 +1122,13 @@ pub fn observable_media_corrections(
             delay_m
         }
         Some(ObservableIonosphereCorrection::IonexWithPolicy(ionex, policy)) => {
-            let ionex_epoch_j2000_s =
-                ionex_epoch_j2000_s.expect("IONEX media requires an integer epoch");
+            let ionex_epoch = ionex_epoch.expect("IONEX media requires an epoch");
             let delay_m = ionex_slant_delay_with_policy(
                 ionex,
                 receiver,
                 elevation_rad,
                 azimuth_rad,
-                ionex_epoch_j2000_s,
+                ionex_epoch,
                 carrier_hz,
                 policy,
             )
@@ -2607,16 +2605,13 @@ fn media_instant(t_rx_j2000_s: f64) -> Result<Instant, ObservablesError> {
     Ok(Instant::from_julian_date(TimeScale::Gpst, split))
 }
 
-fn rounded_j2000_seconds(t_rx_j2000_s: f64) -> Result<i64, ObservablesError> {
+/// The IONEX query instant for a GPST receive time in J2000 seconds (see
+/// [`crate::ionex::gpst_query_instant`]).
+fn ionex_query_instant(t_rx_j2000_s: f64) -> Result<Instant, ObservablesError> {
     validate::finite(t_rx_j2000_s, "t_rx_j2000_s").map_err(map_input_error)?;
-    let rounded = t_rx_j2000_s.round();
-    if !rounded.is_finite() || rounded < i64::MIN as f64 || rounded > i64::MAX as f64 {
-        return Err(invalid_observable_input(
-            "t_rx_j2000_s",
-            ObservablesInputErrorKind::OutOfRange,
-        ));
-    }
-    Ok(rounded as i64)
+    crate::ionex::gpst_query_instant(t_rx_j2000_s).ok_or_else(|| {
+        invalid_observable_input("t_rx_j2000_s", ObservablesInputErrorKind::OutOfRange)
+    })
 }
 
 fn map_media_error(error: Error) -> ObservablesError {
@@ -3302,9 +3297,14 @@ mod media_validation_tests {
     }
 
     fn ionex() -> Ionex {
+        ionex_at(epoch())
+    }
+
+    /// A one-map constant product whose map epoch is `map_epoch`.
+    fn ionex_at(map_epoch: Instant) -> Ionex {
         let map = vec![vec![Some(12.0); 3]; 3];
         Ionex::from_samples(TecGridSamples {
-            map_epochs: vec![epoch()],
+            map_epochs: vec![map_epoch],
             lat_nodes_deg: vec![90.0, 0.0, -90.0],
             lon_nodes_deg: vec![-180.0, 0.0, 180.0],
             dlat_deg: -90.0,
@@ -3456,13 +3456,29 @@ mod media_validation_tests {
                 receiver(),
                 elevation_rad,
                 azimuth_rad,
-                T_RX_J2000_I64,
+                epoch(),
                 F_L1_HZ,
             )
             .expect("direct IONEX");
 
             assert_bits_eq("IONEX", got.ionosphere_m, expected);
             assert_bits_eq("IONEX total", got.total_m, expected);
+
+            // The same map built at the same physical instant in UTC, 18 s
+            // earlier by the clock in 2020, gives the same delay.
+            let utc_map = ionex_at(crate::ionex::ionex_epoch_from_j2000_seconds(
+                T_RX_J2000_I64 - 18,
+            ));
+            let from_utc_map = ionex_slant_delay(
+                &utc_map,
+                receiver(),
+                elevation_rad,
+                azimuth_rad,
+                epoch(),
+                F_L1_HZ,
+            )
+            .expect("UTC-built map");
+            assert_bits_eq("IONEX from a UTC map", from_utc_map, expected);
         }
     }
 

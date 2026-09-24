@@ -396,6 +396,286 @@ pub(crate) fn instant_from_j2000_seconds(scale: TimeScale, seconds: i64) -> Inst
     )
 }
 
+/// Why a map epoch, or a slant-delay query, has no place on the IONEX epoch
+/// axis.
+///
+/// IONEX states every epoch as six whole fields in UT (IONEX 1, Table 1:
+/// "Epoch of first TEC map (UT)"), and a map is a function of "universal
+/// time"; this crate reads the fields as UTC, as the IGS analysis centres
+/// produce them. An epoch in another time scale is carried onto UTC exactly
+/// where its offset to UTC is fixed or a whole number of leap seconds, and is
+/// refused, by one of these causes, where no exact whole UTC second
+/// corresponds to it. No epoch is moved to a neighbouring second. A slant-delay
+/// query is carried onto UTC the same way and may fall between seconds, so
+/// only the causes that concern the scale, the leap seconds and the range
+/// apply to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IonexEpochError {
+    /// The epoch names no exact whole second of its own scale: a
+    /// fractional-second instant, or a split Julian date whose parts state no
+    /// whole second (see [`Ionex::map_epochs_s`]).
+    NotWholeSecond {
+        /// The epoch's time scale.
+        scale: TimeScale,
+    },
+    /// The epoch is exact, but the UTC instant it names is not a whole
+    /// second, as for every whole second of TT, which runs 32.184 s from TAI.
+    FractionalUtcSecond {
+        /// The epoch's time scale.
+        scale: TimeScale,
+    },
+    /// The scale has no fixed offset to TAI (TCG, TDB, TCB), so no UTC second
+    /// corresponds to the epoch exactly.
+    NoExactUtcOffset {
+        /// The epoch's time scale.
+        scale: TimeScale,
+    },
+    /// The epoch falls inside an inserted UTC leap second. Its UTC label is
+    /// `23:59:60`, which an IONEX epoch record does not hold: the reader
+    /// refuses a seconds field of 60.
+    InsertedLeapSecond {
+        /// The epoch's time scale.
+        scale: TimeScale,
+    },
+    /// The epoch is before 1972-01-01 UTC, where TAI - UTC was not a whole
+    /// number of seconds.
+    BeforeIntegerLeapSeconds {
+        /// The epoch's time scale.
+        scale: TimeScale,
+    },
+    /// The UTC second lies outside the `i64` seconds of the epoch axis.
+    OutOfRange {
+        /// The epoch's time scale.
+        scale: TimeScale,
+    },
+    /// The UTC second is exact, but its civil year does not fit the `I6`
+    /// year field of an epoch record. Only the writer refuses this.
+    YearOutOfField {
+        /// The UTC second, from J2000.
+        utc_j2000_s: i64,
+    },
+}
+
+impl core::fmt::Display for IonexEpochError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotWholeSecond { scale } => write!(
+                f,
+                "IONEX map epoch in {} is not a whole J2000 second",
+                scale.abbrev()
+            ),
+            Self::FractionalUtcSecond { scale } => write!(
+                f,
+                "IONEX map epoch in {} is not a whole UTC second",
+                scale.abbrev()
+            ),
+            Self::NoExactUtcOffset { scale } => write!(
+                f,
+                "IONEX map epoch in {} has no exact offset to UTC",
+                scale.abbrev()
+            ),
+            Self::InsertedLeapSecond { scale } => write!(
+                f,
+                "IONEX map epoch in {} falls inside an inserted UTC leap second",
+                scale.abbrev()
+            ),
+            Self::BeforeIntegerLeapSeconds { scale } => write!(
+                f,
+                "IONEX map epoch in {} is before 1972, where TAI - UTC is not whole seconds",
+                scale.abbrev()
+            ),
+            Self::OutOfRange { scale } => write!(
+                f,
+                "IONEX map epoch in {} is outside the i64 J2000 seconds",
+                scale.abbrev()
+            ),
+            Self::YearOutOfField { utc_j2000_s } => write!(
+                f,
+                "IONEX epoch {utc_j2000_s} s from J2000 has a civil year that does not fit I6"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for IonexEpochError {}
+
+/// The whole UTC J2000 second of a map epoch in any time scale, exactly.
+///
+/// A UTC epoch is read by [`exact_j2000_second`]. An epoch in another scale is
+/// read the same way as a whole second of its own scale, or, held as integer
+/// nanoseconds, as its exact count, and carried onto UTC in integer
+/// arithmetic: GLONASST is UTC + 3 h; TAI, TT (TAI + 32.184 s), GPST, GST and
+/// QZSST (TAI - 19 s) and BDT (TAI - 33 s) reach UTC through the whole-second
+/// leap-second count in force at that instant. The UTC reading must then be a
+/// whole second. Every refusal names its cause.
+pub(crate) fn utc_j2000_second(epoch: Instant) -> core::result::Result<i64, IonexEpochError> {
+    let scale = epoch.scale;
+    if scale == TimeScale::Utc {
+        return exact_j2000_second(epoch).ok_or(IonexEpochError::NotWholeSecond { scale });
+    }
+    let own_ns = match epoch.repr {
+        InstantRepr::Nanos(nanos) => nanos,
+        InstantRepr::JulianDate(_) => {
+            let seconds =
+                exact_j2000_second(epoch).ok_or(IonexEpochError::NotWholeSecond { scale })?;
+            i128::from(seconds) * NANOS_PER_SECOND_I128
+        }
+    };
+    let utc_ns = utc_nanos(scale, own_ns)?;
+    if utc_ns.rem_euclid(NANOS_PER_SECOND_I128) != 0 {
+        return Err(IonexEpochError::FractionalUtcSecond { scale });
+    }
+    i64::try_from(utc_ns.div_euclid(NANOS_PER_SECOND_I128))
+        .map_err(|_| IonexEpochError::OutOfRange { scale })
+}
+
+/// The UTC label reading, in nanoseconds from J2000, of `own_ns` nanoseconds
+/// from J2000 in `scale`, in integer arithmetic.
+///
+/// GLONASST is UTC + 3 h; TAI, TT (TAI + 32.184 s), GPST, GST and QZSST
+/// (TAI - 19 s) and BDT (TAI - 33 s) reach UTC through the whole-second
+/// leap-second count in force at that instant. TCG, TDB and TCB have no fixed
+/// offset to TAI and are refused, as is an instant inside an inserted leap
+/// second or before 1972.
+fn utc_nanos(scale: TimeScale, own_ns: i128) -> core::result::Result<i128, IonexEpochError> {
+    use crate::astro::time::scales::{tai_nanos_on_utc_axis, TaiOnUtcAxis};
+    const GLONASST_MINUS_UTC_NS: i128 = 3 * 3_600 * NANOS_PER_SECOND_I128;
+    const TT_MINUS_TAI_NS: i128 = 32_184_000_000;
+    const TAI_MINUS_GPST_NS: i128 = 19 * NANOS_PER_SECOND_I128;
+    const TAI_MINUS_BDT_NS: i128 = 33 * NANOS_PER_SECOND_I128;
+
+    let out_of_range = IonexEpochError::OutOfRange { scale };
+    let tai_ns = match scale {
+        TimeScale::Utc => return Ok(own_ns),
+        // GLONASST carries UTC's leap seconds 3 h ahead.
+        TimeScale::Glonasst => {
+            return own_ns
+                .checked_sub(GLONASST_MINUS_UTC_NS)
+                .ok_or(out_of_range);
+        }
+        TimeScale::Tai => Some(own_ns),
+        TimeScale::Tt => own_ns.checked_sub(TT_MINUS_TAI_NS),
+        TimeScale::Gpst | TimeScale::Gst | TimeScale::Qzsst => {
+            own_ns.checked_add(TAI_MINUS_GPST_NS)
+        }
+        TimeScale::Bdt => own_ns.checked_add(TAI_MINUS_BDT_NS),
+        TimeScale::Tcg | TimeScale::Tdb | TimeScale::Tcb => {
+            return Err(IonexEpochError::NoExactUtcOffset { scale });
+        }
+    }
+    .ok_or(out_of_range)?;
+    match tai_nanos_on_utc_axis(tai_ns) {
+        TaiOnUtcAxis::Utc(utc_ns) => Ok(utc_ns),
+        TaiOnUtcAxis::InsertedLeapSecond => Err(IonexEpochError::InsertedLeapSecond { scale }),
+        TaiOnUtcAxis::BeforeIntegerLeapSeconds => {
+            Err(IonexEpochError::BeforeIntegerLeapSeconds { scale })
+        }
+    }
+}
+
+/// A slant-delay query time on the UTC label axis of the map epochs: a whole
+/// J2000 second and the fraction of a second past it, in `[0, 1)`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct UtcQueryTime {
+    /// The whole UTC second, from J2000.
+    pub(crate) seconds: i64,
+    /// The fraction of a second past `seconds`.
+    pub(crate) fraction: f64,
+}
+
+/// A query instant in any scale with a fixed or leap-second offset to UTC, on
+/// the UTC label axis the map epochs share.
+///
+/// The instant is carried onto UTC as [`utc_nanos`] does, in integer
+/// nanoseconds. An integer-nanosecond instant is exact to the nanosecond, and
+/// so is a split Julian date that names a whole second of its scale. Any other
+/// split is read as the double nearest its exact value in seconds, whose whole
+/// second and whole nanoseconds are kept exactly and whose remaining fraction
+/// of a nanosecond is carried as a double: every leap-second boundary is a
+/// whole second, so the fraction cannot move the instant across one. An
+/// instant inside an inserted leap second is refused, since its `23:59:60`
+/// label lies on no map's axis; so is an instant before 1972 in a scale other
+/// than UTC and GLONASST, and one in TCG, TDB or TCB.
+pub(crate) fn utc_query_time(
+    epoch: Instant,
+) -> core::result::Result<UtcQueryTime, IonexEpochError> {
+    let scale = epoch.scale;
+    let out_of_range = IonexEpochError::OutOfRange { scale };
+    let (own_ns, sub_ns) = match epoch.repr {
+        InstantRepr::Nanos(nanos) => (nanos, 0.0),
+        InstantRepr::JulianDate(split) => match exact_j2000_second(epoch) {
+            Some(seconds) => (i128::from(seconds) * NANOS_PER_SECOND_I128, 0.0),
+            None => {
+                let seconds = crate::astro::time::civil::seconds_from_split_exact(
+                    split.jd_whole,
+                    split.fraction,
+                    J2000_JULIAN_DAY_NUMBER * 86_400,
+                )
+                .ok_or(out_of_range)?;
+                let whole = seconds.floor();
+                if !whole.is_finite() || whole.abs() >= 9.0e18 {
+                    return Err(out_of_range);
+                }
+                // Exact wherever the floor is within a factor of two of the
+                // value (Sterbenz), which is every value of one second or more
+                // in magnitude.
+                let fraction_ns = (seconds - whole) * 1.0e9;
+                let whole_ns = fraction_ns.floor();
+                (
+                    i128::from(whole as i64) * NANOS_PER_SECOND_I128 + whole_ns as i128,
+                    fraction_ns - whole_ns,
+                )
+            }
+        },
+    };
+    let utc_ns = utc_nanos(scale, own_ns)?;
+    let seconds =
+        i64::try_from(utc_ns.div_euclid(NANOS_PER_SECOND_I128)).map_err(|_| out_of_range)?;
+    let nanos = utc_ns.rem_euclid(NANOS_PER_SECOND_I128);
+    let fraction = (nanos as f64 + sub_ns) / 1.0e9;
+    if fraction >= 1.0 {
+        // Within a rounding of the next second: the nearest reading is it.
+        let seconds = seconds.checked_add(1).ok_or(out_of_range)?;
+        return Ok(UtcQueryTime {
+            seconds,
+            fraction: 0.0,
+        });
+    }
+    Ok(UtcQueryTime { seconds, fraction })
+}
+
+/// A GPST instant for a receive time given as J2000 seconds: the whole second
+/// exactly and the fraction to the nearest nanosecond. `None` for a
+/// non-finite time or one outside the `i64` seconds.
+pub(crate) fn gpst_query_instant(t_j2000_s: f64) -> Option<Instant> {
+    let whole = t_j2000_s.floor();
+    if !whole.is_finite() || whole < i64::MIN as f64 || whole >= i64::MAX as f64 {
+        return None;
+    }
+    // `t - floor(t)` is exact for every |t| of one second or more (Sterbenz);
+    // the product by 1e9 rounds once.
+    let nanos = ((t_j2000_s - whole) * 1.0e9).round() as i128;
+    Some(Instant::from_nanos(
+        TimeScale::Gpst,
+        i128::from(whole as i64) * NANOS_PER_SECOND_I128 + nanos,
+    ))
+}
+
+/// A map epoch as the UTC instant the product stores.
+///
+/// A UTC epoch is kept exactly as given, so a product rebuilt from its own
+/// samples is equal to it; an epoch in another scale becomes the UTC instant
+/// of the same second, in the form the reader builds.
+pub(crate) fn utc_map_epoch(epoch: Instant) -> core::result::Result<Instant, IonexEpochError> {
+    let seconds = utc_j2000_second(epoch)?;
+    Ok(if epoch.scale == TimeScale::Utc {
+        epoch
+    } else {
+        ionex_epoch_from_j2000_seconds(seconds)
+    })
+}
+
 /// Nanoseconds per second, for the integer-nanosecond instant representation.
 const NANOS_PER_SECOND_I128: i128 = 1_000_000_000;
 
@@ -426,13 +706,16 @@ const JD_SUM_LIMIT: f64 = 140_737_488_355_328.0;
 ///
 /// An IONEX file states every map epoch as six whole civil fields, so the epoch
 /// axis is an axis of whole seconds. Every place that reads a second off a
-/// stored [`Instant`] - sample validation and grouping, the
-/// strictly-increasing check, the whole-day diurnal shift, the
-/// [`Ionex::map_epochs_s`] compatibility view, slant map-time evaluation and
-/// the writer's epoch record - goes through this one contract, so no two of
-/// them can disagree about which second an epoch is, and none of them can
-/// silently move an epoch onto a different second. The instant is read as it
-/// stands: its scale tag is not consulted and no time system is shifted.
+/// stored [`Instant`] - the strictly-increasing check, the whole-day diurnal
+/// shift, the [`Ionex::map_epochs_s`] compatibility view, slant map-time
+/// evaluation and the writer's epoch record - goes through this one contract,
+/// so no two of them can disagree about which second an epoch is, and none of
+/// them can silently move an epoch onto a different second. The instant is
+/// read as it stands: its scale tag is not consulted and no time system is
+/// shifted. Every stored epoch is UTC: sample validation and grouping read a
+/// caller's epoch through [`utc_j2000_second`], which carries an epoch in
+/// another scale onto UTC exactly and reads a UTC epoch through this
+/// function.
 ///
 /// [`InstantRepr::Nanos`] counts nanoseconds from the J2000 origin in the
 /// instant's own scale, the convention
@@ -894,16 +1177,25 @@ fn single_layer_mapping(el_deg: f64) -> f64 {
 /// Maps the parsed [`Ionex`] vertical-TEC grid to the line of sight in the
 /// single-layer-model convention: a single-layer pierce point at the product's
 /// shell height, an explicit four-term bilinear VTEC per map, a linear-in-time
-/// blend between the two maps bracketing `epoch_j2000_s`, the
+/// blend between the two maps bracketing `epoch`, the
 /// `1/sqrt(1 - s^2)` obliquity factor, and the
 /// dispersive `40.3e16 / f^2` frequency scaling.
 ///
 /// The receiver geodetic latitude/longitude come from `receiver` (height is
 /// unused: the pierce point rides on the IONEX shell, not the antenna height).
-/// The epoch is taken as integer J2000 seconds so it lands exactly on the
-/// product's own epoch axis, with no float-rounded time entering the temporal
-/// bracket. `frequency_hz` is the carrier on which the delay is reported. The
-/// returned value is positive meters that increase the pseudorange. This
+/// `epoch` is an instant in its own time scale. IONEX map epochs are UT, which
+/// the reader takes as UTC, so the query is carried onto UTC exactly before it
+/// is compared with them: a GPST query of 2017-01-01 00:00:18 is the map at
+/// 00:00:00 UTC. RTKLIB `readionex` reads the map epochs with `epoch2time` and
+/// no `utc2gpst`, and `iontec` compares them with a GPST time, so RTKLIB
+/// applies each map at the GPST instant that has its UTC label's count, 18 s
+/// (in 2017) before the instant the map states. The UT time system is part of
+/// the format, so this evaluator departs from RTKLIB here and applies each map
+/// at the instant the product states. A query on a whole UTC second lands
+/// exactly on the product's own epoch axis, with no float-rounded time entering
+/// the temporal bracket; a fraction of a second is carried with it (see
+/// [`IonexEpochError`] for the instants refused). `frequency_hz` is the carrier
+/// on which the delay is reported. The returned value is positive meters that increase the pseudorange. This
 /// default entry uses [`IonexSlantPolicy::default`]: it refuses a query outside
 /// the product's coverage, one whose interpolation weights a non-available node,
 /// and a product whose height maps do not give every node one height. It maps
@@ -916,7 +1208,7 @@ pub fn ionex_slant_delay(
     receiver: Wgs84Geodetic,
     elevation_rad: f64,
     azimuth_rad: f64,
-    epoch_j2000_s: i64,
+    epoch: Instant,
     frequency_hz: f64,
 ) -> Result<f64> {
     Ok(ionex_slant_delay_with_policy(
@@ -924,7 +1216,7 @@ pub fn ionex_slant_delay(
         receiver,
         elevation_rad,
         azimuth_rad,
-        epoch_j2000_s,
+        epoch,
         frequency_hz,
         IonexSlantPolicy::default(),
     )?
@@ -937,7 +1229,7 @@ pub fn ionex_slant_delay_with_policy(
     receiver: Wgs84Geodetic,
     elevation_rad: f64,
     azimuth_rad: f64,
-    epoch_j2000_s: i64,
+    epoch: Instant,
     frequency_hz: f64,
     policy: IonexSlantPolicy,
 ) -> Result<IonexSlantDelayEvaluation> {
@@ -949,7 +1241,7 @@ pub fn ionex_slant_delay_with_policy(
             receiver,
             elevation_rad,
             azimuth_rad,
-            epoch_j2000_s,
+            epoch,
             frequency_hz,
         },
         ionex_vtec_grid_view(ionex),
@@ -970,8 +1262,9 @@ pub struct IonexSlantRequest {
     pub elevation_rad: f64,
     /// Satellite azimuth, radians.
     pub azimuth_rad: f64,
-    /// Query epoch, integer seconds since J2000.
-    pub epoch_j2000_s: i64,
+    /// Query epoch, in any time scale the query can be carried onto UTC from
+    /// exactly (see [`ionex_slant_delay`]).
+    pub epoch: Instant,
     /// Carrier frequency on which to report the delay, hertz.
     pub frequency_hz: f64,
 }
@@ -984,14 +1277,14 @@ impl IonexSlantRequest {
         receiver: Wgs84Geodetic,
         elevation_rad: f64,
         azimuth_rad: f64,
-        epoch_j2000_s: i64,
+        epoch: Instant,
         frequency_hz: f64,
     ) -> Self {
         Self {
             receiver,
             elevation_rad,
             azimuth_rad,
-            epoch_j2000_s,
+            epoch,
             frequency_hz,
         }
     }
@@ -1124,7 +1417,7 @@ fn ionex_slant_delay_unchecked_with_policy(
         request.frequency_hz,
         ionex.base_radius_km(),
         shell.height_km,
-        request.epoch_j2000_s,
+        utc_query_time(request.epoch).map_err(Error::IonexEpoch)?,
         grid,
         policy,
     )

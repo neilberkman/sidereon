@@ -17,7 +17,7 @@ use super::*;
 use crate::constants::SECONDS_PER_DAY;
 use crate::frame::Wgs84Geodetic;
 use crate::id::{GnssSatelliteId, GnssSystem};
-use crate::ionex::ionex_slant_delay;
+use crate::ionex::{ionex_epoch_from_j2000_seconds as utc, ionex_slant_delay};
 
 const L1_HZ: f64 = 1_575_420_000.0;
 
@@ -175,14 +175,14 @@ fn ionex_present_path_is_byte_identical() {
     let span = day.map_epochs_s();
     let requested = span[0] + 3_600; // 01:00, inside the 00:00..06:00 span
 
-    let direct = ionex_slant_delay(&day, receiver(), 0.5, 0.3, requested, L1_HZ)
+    let direct = ionex_slant_delay(&day, receiver(), 0.5, 0.3, utc(requested), L1_HZ)
         .expect("direct slant delay");
 
     let set = [day.clone()];
     let selection =
-        select_ionex(&set, requested, StalenessPolicy::default()).expect("exact selection");
+        select_ionex(&set, utc(requested), StalenessPolicy::default()).expect("exact selection");
     let via_layer = selection
-        .slant_delay(receiver(), 0.5, 0.3, requested, L1_HZ)
+        .slant_delay(receiver(), 0.5, 0.3, utc(requested), L1_HZ)
         .expect("layered slant delay");
 
     assert_eq!(selection.metadata().kind, DegradationKind::Exact);
@@ -203,13 +203,15 @@ fn ionex_present_path_byte_identical_when_chosen_from_a_set() {
     let span = day.map_epochs_s();
     let requested = span[0] + 7_200; // 02:00, inside `day`
 
-    let direct = ionex_slant_delay(&day, receiver(), 0.4, 0.2, requested, L1_HZ).expect("direct");
+    let direct =
+        ionex_slant_delay(&day, receiver(), 0.4, 0.2, utc(requested), L1_HZ).expect("direct");
 
     let set = [later, day.clone()];
-    let selection = select_ionex(&set, requested, StalenessPolicy::default()).expect("selection");
+    let selection =
+        select_ionex(&set, utc(requested), StalenessPolicy::default()).expect("selection");
     assert_eq!(selection.metadata().kind, DegradationKind::Exact);
     let via_layer = selection
-        .slant_delay(receiver(), 0.4, 0.2, requested, L1_HZ)
+        .slant_delay(receiver(), 0.4, 0.2, utc(requested), L1_HZ)
         .expect("layer");
     assert_eq!(via_layer.to_bits(), direct.to_bits());
 }
@@ -229,7 +231,7 @@ fn ionex_missing_day_uses_diurnal_shift_of_prior_day() {
 
     let set = [day2, day0.clone()];
     let selection =
-        select_ionex(&set, requested, StalenessPolicy::default()).expect("diurnal selection");
+        select_ionex(&set, utc(requested), StalenessPolicy::default()).expect("diurnal selection");
     let meta = selection.metadata();
 
     assert_eq!(meta.kind, DegradationKind::DiurnalShift);
@@ -257,10 +259,11 @@ fn ionex_missing_day_uses_diurnal_shift_of_prior_day() {
     // The slant delay at the requested epoch equals the prior day's delay at the
     // same time-of-day, bit-for-bit (diurnal persistence is near-lossless here).
     let via_layer = selection
-        .slant_delay(receiver(), 0.5, 0.3, requested, L1_HZ)
+        .slant_delay(receiver(), 0.5, 0.3, utc(requested), L1_HZ)
         .expect("shifted slant delay");
-    let prior_same_tod = ionex_slant_delay(&day0, receiver(), 0.5, 0.3, requested - one_day, L1_HZ)
-        .expect("prior-day slant delay");
+    let prior_same_tod =
+        ionex_slant_delay(&day0, receiver(), 0.5, 0.3, utc(requested - one_day), L1_HZ)
+            .expect("prior-day slant delay");
     assert_eq!(via_layer.to_bits(), prior_same_tod.to_bits());
 }
 
@@ -271,7 +274,7 @@ fn ionex_beyond_cap_is_a_typed_error() {
     let requested = span[1] + 10 * 86_400; // 10 days past the only product
 
     let set = [day0];
-    let err = select_ionex(&set, requested, StalenessPolicy::default())
+    let err = select_ionex(&set, utc(requested), StalenessPolicy::default())
         .expect_err("must exceed the 3-day cap");
     match err {
         SelectionError::BeyondStalenessCap {
@@ -293,13 +296,14 @@ fn ionex_no_prior_product_is_a_typed_error() {
     let requested = span[0] - 86_400; // before the only product
 
     let set = [day0];
-    let err = select_ionex(&set, requested, StalenessPolicy::default()).expect_err("nothing prior");
+    let err =
+        select_ionex(&set, utc(requested), StalenessPolicy::default()).expect_err("nothing prior");
     assert!(matches!(err, SelectionError::NoPriorProduct { .. }));
 }
 
 #[test]
 fn ionex_empty_set_is_a_typed_error() {
-    let err = select_ionex(&[], 0, StalenessPolicy::default()).expect_err("empty set");
+    let err = select_ionex(&[], utc(0), StalenessPolicy::default()).expect_err("empty set");
     assert_eq!(err, SelectionError::EmptyProductSet);
 }
 
@@ -313,7 +317,7 @@ fn ionex_range_diurnal_shift_covers_the_whole_window() {
     let end = d0_span[0] + one_day + 5 * 3_600; // D+1 05:00
 
     let set = [day2, day0.clone()];
-    let selection = select_ionex_over_range(&set, start, end, StalenessPolicy::default())
+    let selection = select_ionex_over_range(&set, utc(start), utc(end), StalenessPolicy::default())
         .expect("range selection");
     assert_eq!(selection.metadata().kind, DegradationKind::DiurnalShift);
     assert_eq!(selection.metadata().staleness_days, 1.0);
@@ -494,8 +498,13 @@ fn ionex_partial_freshest_prior_does_not_mask_an_older_covering_prior() {
 
     // The narrow prior alone cannot cover the range once shifted.
     let only_partial = [fresh_partial.clone()];
-    let err = select_ionex_over_range(&only_partial, start, end, StalenessPolicy::default())
-        .expect_err("narrow prior cannot cover");
+    let err = select_ionex_over_range(
+        &only_partial,
+        utc(start),
+        utc(end),
+        StalenessPolicy::default(),
+    )
+    .expect_err("narrow prior cannot cover");
     assert!(matches!(err, SelectionError::InvalidProduct(_)));
 
     // With the wide prior also present, it is selected regardless of slice order.
@@ -503,8 +512,9 @@ fn ionex_partial_freshest_prior_does_not_mask_an_older_covering_prior() {
         [fresh_partial.clone(), old_wide.clone()],
         [old_wide.clone(), fresh_partial.clone()],
     ] {
-        let selection = select_ionex_over_range(&set, start, end, StalenessPolicy::default())
-            .expect("older wide prior covers after the shift");
+        let selection =
+            select_ionex_over_range(&set, utc(start), utc(end), StalenessPolicy::default())
+                .expect("older wide prior covers after the shift");
         assert_eq!(selection.metadata().kind, DegradationKind::DiurnalShift);
         assert_eq!(selection.metadata().staleness_days, 1.0);
         assert_eq!(
@@ -528,7 +538,7 @@ fn ionex_shifted_product_that_fails_to_cover_is_a_typed_error() {
     let end = span[0] + one_day + 8 * 3_600; // D+1 08:00, past 06:00
 
     let set = [prior];
-    let err = select_ionex_over_range(&set, start, end, StalenessPolicy::default())
+    let err = select_ionex_over_range(&set, utc(start), utc(end), StalenessPolicy::default())
         .expect_err("shifted grid does not cover the range");
     match err {
         SelectionError::InvalidProduct(msg) => {
@@ -552,7 +562,7 @@ fn ionex_non_finite_or_negative_cap_is_a_typed_error() {
     let set = [day0];
 
     for cap in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
-        let err = select_ionex(&set, requested, StalenessPolicy::seconds(cap))
+        let err = select_ionex(&set, utc(requested), StalenessPolicy::seconds(cap))
             .expect_err("non-finite/negative cap must be rejected");
         match err {
             SelectionError::InvalidPolicy { max_staleness_s } => {
@@ -590,8 +600,13 @@ fn ionex_extreme_epoch_overflow_is_a_typed_error() {
         "prior must have a negative last epoch"
     );
     let set = [prior];
-    let err = select_ionex_over_range(&set, i64::MAX, i64::MAX, StalenessPolicy::default())
-        .expect_err("epoch arithmetic overflows");
+    let err = select_ionex_over_range(
+        &set,
+        utc(i64::MAX),
+        utc(i64::MAX),
+        StalenessPolicy::default(),
+    )
+    .expect_err("epoch arithmetic overflows");
     assert!(matches!(err, SelectionError::Overflow { .. }));
 }
 
@@ -609,8 +624,9 @@ fn ionex_exact_tie_break_is_deterministic() {
         [earlier_start.clone(), later_start.clone()],
         [later_start.clone(), earlier_start.clone()],
     ] {
-        let selection = select_ionex_over_range(&set, start, end, StalenessPolicy::default())
-            .expect("both products cover the range");
+        let selection =
+            select_ionex_over_range(&set, utc(start), utc(end), StalenessPolicy::default())
+                .expect("both products cover the range");
         assert_eq!(selection.metadata().kind, DegradationKind::Exact);
         assert_eq!(
             selection.ionex().tec_maps(),
@@ -623,8 +639,9 @@ fn ionex_exact_tie_break_is_deterministic() {
     let wide = make_ionex_days(2024, 3, &[(11, 0), (11, 12)], 80); // hi = D11 12:00
     let tight = make_ionex_days(2024, 3, &[(11, 0), (11, 6)], 90); // hi = D11 06:00
     for set in [[wide.clone(), tight.clone()], [tight.clone(), wide.clone()]] {
-        let selection = select_ionex_over_range(&set, start, end, StalenessPolicy::default())
-            .expect("both cover the range");
+        let selection =
+            select_ionex_over_range(&set, utc(start), utc(end), StalenessPolicy::default())
+                .expect("both cover the range");
         assert_eq!(selection.ionex().tec_maps(), tight.tec_maps());
     }
 }
@@ -716,7 +733,7 @@ fn ionex_shift_overflow_of_freshest_prior_does_not_mask_an_older_covering_prior(
         [fresher_overflow.clone(), covering.clone()],
         [covering.clone(), fresher_overflow.clone()],
     ] {
-        let selection = select_ionex_over_range(&set, i64::MAX, i64::MAX, policy)
+        let selection = select_ionex_over_range(&set, utc(i64::MAX), utc(i64::MAX), policy)
             .expect("older prior shifts exactly onto the request");
         assert_eq!(selection.metadata().kind, DegradationKind::DiurnalShift);
         assert_eq!(
@@ -726,4 +743,48 @@ fn ionex_shift_overflow_of_freshest_prior_does_not_mask_an_older_covering_prior(
         );
         assert_eq!(selection.metadata().source_epoch_j2000_s, 55_807.0);
     }
+}
+
+#[test]
+fn ionex_selection_reads_a_gpst_request_on_the_utc_day_of_its_instant() {
+    // GPST runs 18 s ahead of UTC in 2024. One product holds a map at
+    // 2024-03-10 23:59:52 UTC and one at 2024-03-11 00:00:10 UTC; the GPST
+    // request of 2024-03-11 00:00:10 is 23:59:52 UTC on the day before.
+    let before_midnight = make_ionex_at(2024, 3, 10, 23, 59, 52, 50);
+    let after_midnight = make_ionex_at(2024, 3, 11, 0, 0, 10, 70);
+    let before_s = before_midnight.map_epochs_s()[0];
+    let after_s = after_midnight.map_epochs_s()[0];
+    assert_eq!(after_s - before_s, 18);
+    let set = [after_midnight.clone(), before_midnight.clone()];
+
+    let gpst = crate::astro::time::model::Instant::from_nanos(
+        crate::astro::time::model::TimeScale::Gpst,
+        i128::from(after_s) * 1_000_000_000,
+    );
+    let selection = select_ionex(&set, gpst, StalenessPolicy::default()).expect("GPST request");
+    assert_eq!(selection.metadata().kind, DegradationKind::Exact);
+    assert_eq!(selection.ionex(), &before_midnight);
+    assert_eq!(
+        selection.metadata().requested_epoch_j2000_s,
+        before_s as f64
+    );
+
+    // The UTC request with the same count is the later product's map.
+    let selection =
+        select_ionex(&set, utc(after_s), StalenessPolicy::default()).expect("UTC request");
+    assert_eq!(selection.ionex(), &after_midnight);
+
+    // A GPST request inside the leap second at the end of 2016 has no UTC
+    // reading and is refused by cause.
+    let end_2016 = crate::astro::time::civil::j2000_seconds(2017, 1, 1, 0, 0, 0.0) as i64;
+    let in_leap = crate::astro::time::model::Instant::from_nanos(
+        crate::astro::time::model::TimeScale::Gpst,
+        i128::from(end_2016 + 17) * 1_000_000_000,
+    );
+    assert_eq!(
+        select_ionex(&set, in_leap, StalenessPolicy::default()).expect_err("leap second"),
+        SelectionError::IonexEpoch(crate::ionex::IonexEpochError::InsertedLeapSecond {
+            scale: crate::astro::time::model::TimeScale::Gpst,
+        })
+    );
 }
