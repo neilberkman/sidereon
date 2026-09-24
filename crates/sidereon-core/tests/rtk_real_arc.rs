@@ -2088,12 +2088,13 @@ fn wettzell_kinematic_rtk_filter_tracks_rtklib_truth_class() {
     assert_eq!(
         kinematic_baseline_m.map(f64::to_bits),
         [
-            // Re-frozen when the arcs moved to RTKLIB `satposs` placement of each
-            // receiver's transmission epochs. The truth-class quality assertions
-            // above remain the primary gate for this process-noise-enabled solve.
-            0xbfef_72c7_7827_ff83,
-            0xbfe4_e7c2_c28a_6a03,
-            0x3ff1_11aa_f42f_3847,
+            // Re-frozen when the elevation mask moved to the geodetic horizon RTKLIB
+            // `selsat` masks by, which admits G18 and G08 at RTKLIB's epochs. The
+            // truth-class quality assertions above remain the primary gate for
+            // this process-noise-enabled solve.
+            0xbfef_72c7_7740_6c58,
+            0xbfe4_e7c2_c263_33de,
+            0x3ff1_11aa_f411_3ffa,
         ]
     );
 
@@ -2175,14 +2176,14 @@ fn pasa_scoa_receiver_antenna_corrections_are_core_validated() {
     assert_eq!(updates.len(), epoch_count);
     let final_baseline_m = updates.last().unwrap().reported_baseline_m;
     assert!(distance(final_baseline_m, truth_baseline_m) < 1.0);
-    // Re-frozen when the arcs moved to RTKLIB `satposs` placement of each receiver's transmission epochs
-    // (t_rx - P / c - dts, no whole-microsecond rounding).
+    // Re-frozen when the elevation mask moved to the geodetic horizon RTKLIB
+    // `selsat` masks by, which moves the epochs satellites cross the mask at.
     assert_eq!(
         final_baseline_m.map(f64::to_bits),
         [
-            0x40b3_681d_945c_3b75,
-            0xc0d3_f0dd_73c2_7a54,
-            0xc0b7_2944_96a2_0bb4,
+            0x40b3_681c_0685_e014,
+            0xc0d3_f0dd_089d_652c,
+            0xc0b7_2945_1023_918a,
         ]
     );
 }
@@ -2237,9 +2238,11 @@ fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
             .reported_baseline_m
             .map(f64::to_bits),
         [
-            0x40b3_689a_0dbc_d198,
-            0xc0d3_f107_fc06_fb93,
-            0xc0b7_294b_bcdf_d59f,
+            // Re-frozen when the elevation mask moved to the geodetic horizon
+            // RTKLIB `selsat` masks by.
+            0x40b3_6899_d2a2_3264,
+            0xc0d3_f107_ff03_9785,
+            0xc0b7_294b_e245_49b4,
         ]
     );
 
@@ -2281,9 +2284,11 @@ fn pasa_scoa_ar_arming_and_single_system_gauge_protect_real_arc() {
             .reported_baseline_m
             .map(f64::to_bits),
         [
-            0x40b3_689a_0dbc_d9a4,
-            0xc0d3_f107_fc07_59a6,
-            0xc0b7_294b_bcdf_63d6,
+            // Re-frozen when the elevation mask moved to the geodetic horizon
+            // RTKLIB `selsat` masks by.
+            0x40b3_6899_d2a2_2aaa,
+            0xc0d3_f107_ff03_f69d,
+            0xc0b7_294b_e244_d379,
         ]
     );
 }
@@ -2354,15 +2359,15 @@ fn multignss_static_rtk_filter_reproduces_track_b_truth_gate() {
     assert!(fixed_errors.len() >= 20);
     let fixed_median_m = median(&mut fixed_errors);
     assert!(fixed_median_m <= 2.0 * oracle["reference"]["mean_truth_error_m"].as_f64().unwrap());
-    // Re-frozen when the arcs moved to RTKLIB `satposs` placement of each receiver's transmission epochs
-    // (t_rx - P / c - dts, no whole-microsecond rounding). It follows the truth-class
-    // checks, so a pin change never hides them.
+    // Re-frozen when the elevation mask moved to the geodetic horizon RTKLIB
+    // `selsat` masks by. It follows the truth-class checks, so a pin change never
+    // hides them.
     assert_eq!(
         final_baseline_m.map(f64::to_bits),
         [
-            0xbfef_90d2_19cf_f47d,
-            0xbfe4_e43b_efb3_5c9e,
-            0x3ff1_1580_6599_5c19,
+            0xbfef_90c4_195b_5408,
+            0xbfe4_e43d_dbc8_9d1a,
+            0x3ff1_1586_6286_300d,
         ]
     );
 
