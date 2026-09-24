@@ -334,8 +334,9 @@ pub struct ConstellationMember {
     /// Identifier copied into [`VisibleSatellite::catalog_number`] when this
     /// member is emitted by [`visible_from_constellation`].
     pub catalog_number: String,
-    /// Element set passed to SGP4 initialization with [`OpsMode::Afspc`]; a
-    /// member whose initialization fails is skipped by the visibility search.
+    /// Element set passed to SGP4 initialization with [`OpsMode::Improved`],
+    /// as Skyfield's `EarthSatellite` initializes it; a member whose
+    /// initialization fails is skipped by the visibility search.
     pub elements: ElementSet,
 }
 
@@ -413,7 +414,7 @@ pub fn look_angle_with_validity(
     validate_ground_station(ground_station).map_err(map_look_angle_input)?;
     let gate = Ut1Gate::new(mode);
     let ts = time_scales_for_look_angle(datetime, &gate)?;
-    let satellite = Satellite::from_elements_with_opsmode(elements, OpsMode::Afspc)
+    let satellite = Satellite::from_elements_with_opsmode(elements, OpsMode::Improved)
         .map_err(LookAngleError::Init)?;
     let pred = satellite
         .propagate_jd(datetime.sgp4_julian_date())
@@ -704,7 +705,7 @@ pub fn visible_from_constellation_with_validity(
 
     for member in members {
         let satellite =
-            match Satellite::from_elements_with_opsmode(&member.elements, OpsMode::Afspc) {
+            match Satellite::from_elements_with_opsmode(&member.elements, OpsMode::Improved) {
                 Ok(satellite) => satellite,
                 Err(_) => continue,
             };
@@ -739,8 +740,8 @@ pub fn visible_from_constellation_with_validity(
 /// Find visible satellites above an elevation threshold at one instant, from
 /// already-initialized [`Satellite`]s.
 ///
-/// Unlike [`visible_from_constellation`], which rebuilds each satellite with a
-/// hardcoded [`OpsMode::Afspc`] from raw element sets, this variant operates on
+/// Unlike [`visible_from_constellation`], which rebuilds each satellite with
+/// [`OpsMode::Improved`] from raw element sets, this variant operates on
 /// satellites the caller built (e.g. via [`crate::astro::sgp4::parse_tle_file`]),
 /// so each satellite's own opsmode is honored end-to-end: the result for a
 /// deep-space / opsmode-sensitive object differs between an `Afspc`-built and an
@@ -842,18 +843,17 @@ pub fn predict_passes(
         start_time,
         end_time,
         options,
-        OpsMode::Afspc,
+        OpsMode::Improved,
     )
 }
 
 /// [`predict_passes`] with an explicit SGP4 [`OpsMode`].
 ///
-/// [`predict_passes`] initializes SGP4 with [`OpsMode::Afspc`] (its established
-/// default, which the committed pass goldens are pinned to). The rest of the
-/// crate (`parse_tle_file`, [`Satellite::from_elements`], `propagate_elements`)
-/// defaults to [`OpsMode::Improved`], so the same TLE can otherwise yield a
-/// different trajectory by path. Pass [`OpsMode::Improved`] here to make a pass
-/// prediction consistent with those paths.
+/// [`predict_passes`] initializes SGP4 with [`OpsMode::Improved`], as
+/// Skyfield's `EarthSatellite` does and as the rest of the crate
+/// (`parse_tle_file`, [`Satellite::from_elements`], `propagate_elements`)
+/// does. Pass [`OpsMode::Afspc`] here to reproduce a prediction made in AFSPC
+/// compatibility mode.
 pub fn predict_passes_with_opsmode(
     elements: &ElementSet,
     ground_station: GroundStation,
@@ -1190,18 +1190,17 @@ pub fn find_passes(
         start_time,
         end_time,
         options,
-        OpsMode::Afspc,
+        OpsMode::Improved,
     )
 }
 
 /// [`find_passes`] with an explicit SGP4 [`OpsMode`].
 ///
-/// [`find_passes`] initializes SGP4 with [`OpsMode::Afspc`] (the established
-/// default the committed pass goldens are pinned to); the rest of the crate
-/// defaults to [`OpsMode::Improved`]. Pass [`OpsMode::Improved`] here to make a
-/// pass search consistent with `parse_tle_file` /
-/// [`Satellite::from_elements`]. To reuse an already-initialized satellite (any
-/// opsmode), use [`find_passes_for_satellite`].
+/// [`find_passes`] initializes SGP4 with [`OpsMode::Improved`], as Skyfield's
+/// `EarthSatellite` does and as the rest of the crate does. Pass
+/// [`OpsMode::Afspc`] here to search in AFSPC compatibility mode. To reuse an
+/// already-initialized satellite (any opsmode), use
+/// [`find_passes_for_satellite`].
 pub fn find_passes_with_opsmode(
     elements: &ElementSet,
     ground_station: GroundStation,
@@ -1285,13 +1284,12 @@ pub fn find_passes_batch_serial(
         start_time,
         end_time,
         options,
-        OpsMode::Afspc,
+        OpsMode::Improved,
     )
 }
 
-/// [`find_passes_batch_serial`] with an explicit SGP4 [`OpsMode`] (see
-/// [`find_passes_with_opsmode`] for why the bare function uses
-/// [`OpsMode::Afspc`]).
+/// [`find_passes_batch_serial`] with an explicit SGP4 [`OpsMode`] (the bare
+/// function uses [`OpsMode::Improved`], as [`find_passes`] does).
 /// When `parallel` is disabled, the parallel entry point is equivalent to this
 /// serial implementation.
 pub fn find_passes_batch_serial_with_opsmode(
@@ -1355,13 +1353,12 @@ pub fn find_passes_batch_parallel(
         start_time,
         end_time,
         options,
-        OpsMode::Afspc,
+        OpsMode::Improved,
     )
 }
 
-/// [`find_passes_batch_parallel`] with an explicit SGP4 [`OpsMode`] (see
-/// [`find_passes_with_opsmode`] for why the bare function uses
-/// [`OpsMode::Afspc`]).
+/// [`find_passes_batch_parallel`] with an explicit SGP4 [`OpsMode`] (the bare
+/// function uses [`OpsMode::Improved`], as [`find_passes`] does).
 pub fn find_passes_batch_parallel_with_opsmode(
     elements: &[ElementSet],
     ground_station: GroundStation,
@@ -2886,7 +2883,8 @@ mod tests {
     }
 
     // Cross-validated against Skyfield 1.54 (sgp4 2.25, WGS72, AFSPC opsmode
-    // 'a', skyfield load.timescale(builtin=False) = current IERS
+    // 'a', which gives this near-Earth element set the same state as the 'i'
+    // the pass APIs use; skyfield load.timescale(builtin=False) = current IERS
     // finals2000A.all). The same ISS element set this fixture builds is fed to
     // sgp4.Satrec.sgp4init and wrapped in skyfield EarthSatellite.from_satrec;
     // the pass events come from
@@ -3068,7 +3066,7 @@ mod tests {
             "{predicted:?}"
         );
         let satellite =
-            Satellite::from_elements_with_opsmode(&iss_2024_12_19_elements(), OpsMode::Afspc)
+            Satellite::from_elements_with_opsmode(&iss_2024_12_19_elements(), OpsMode::Improved)
                 .unwrap();
         let visible =
             visible_from_satellites(&[satellite], &["ISS".to_string()], station, start, 0.0);
@@ -3110,7 +3108,7 @@ mod tests {
             start,
             end,
             PassFinderOptions::default(),
-            OpsMode::Afspc,
+            OpsMode::Improved,
             ValidityMode::Permissive,
         )
         .expect("permissive search");
@@ -3123,7 +3121,7 @@ mod tests {
             start,
             end,
             PassPredictionOptions::default(),
-            OpsMode::Afspc,
+            OpsMode::Improved,
             ValidityMode::Permissive,
         )
         .expect("permissive prediction");
@@ -3135,7 +3133,8 @@ mod tests {
         assert_eq!(look.degraded, after);
         assert!(look.value.elevation_deg.is_finite());
 
-        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc).unwrap();
+        let satellite =
+            Satellite::from_elements_with_opsmode(&elements, OpsMode::Improved).unwrap();
         let visible = visible_from_satellites_with_validity(
             std::slice::from_ref(&satellite),
             &["ISS".to_string()],
@@ -3159,7 +3158,7 @@ mod tests {
             start,
             end,
             PassFinderOptions::default(),
-            OpsMode::Afspc,
+            OpsMode::Improved,
             ValidityMode::Permissive,
         );
         assert_eq!(batch.len(), 1);
@@ -3218,7 +3217,7 @@ mod tests {
             start,
             end,
             PassFinderOptions::default(),
-            OpsMode::Afspc,
+            OpsMode::Improved,
             ValidityMode::Permissive,
         )
         .expect("permissive straddling window");
@@ -3277,7 +3276,7 @@ mod tests {
         // remembers a UT1 refusal there, so the search cannot finish with a
         // partial result.
         let satellite =
-            Satellite::from_elements_with_opsmode(&drag_free_iss_elements(), OpsMode::Afspc)
+            Satellite::from_elements_with_opsmode(&drag_free_iss_elements(), OpsMode::Improved)
                 .unwrap();
         let gate = Ut1Gate::new(ValidityMode::Strict);
         let inside = UtcInstant::from_utc(2027, 6, 1, 0, 0, 0, 0).unwrap();
@@ -3295,10 +3294,9 @@ mod tests {
 
     #[test]
     fn find_passes_opsmode_is_threaded_and_consistent_across_paths() {
-        // The element-based pass APIs default to OpsMode::Afspc (golden-pinned),
-        // while the rest of the crate defaults to Improved. The _with_opsmode
-        // variants thread the choice through so the same TLE no longer yields a
-        // different trajectory by path.
+        // The element-based pass APIs initialize SGP4 with OpsMode::Improved,
+        // as Skyfield's EarthSatellite and the rest of the crate do. The
+        // _with_opsmode variants thread an explicit choice through.
         let elements = iss_2024_12_19_elements();
         let station = GroundStation {
             latitude_deg: 51.5074,
@@ -3309,16 +3307,13 @@ mod tests {
         let end = UtcInstant::from_utc(2024, 12, 19, 12, 0, 0, 0).unwrap();
         let opts = PassFinderOptions::default();
 
-        // The bare function and the explicit-Afspc variant are identical.
+        // The bare function and the explicit-Improved variant are identical.
         let bare = find_passes(&elements, station, start, end, opts).unwrap();
-        let afspc =
-            find_passes_with_opsmode(&elements, station, start, end, opts, OpsMode::Afspc).unwrap();
-        assert_eq!(bare.len(), afspc.len());
+        let explicit =
+            find_passes_with_opsmode(&elements, station, start, end, opts, OpsMode::Improved)
+                .unwrap();
+        assert_eq!(bare, explicit);
         assert!(!bare.is_empty(), "expected at least one pass in the window");
-        for (a, b) in bare.iter().zip(&afspc) {
-            assert_eq!(a.aos.unix_microseconds(), b.aos.unix_microseconds());
-            assert_eq!(a.los.unix_microseconds(), b.los.unix_microseconds());
-        }
 
         // The Improved variant matches the caller-owns-init path built with the
         // crate-default (Improved) opsmode - the consistency #5 is about.
@@ -3348,7 +3343,7 @@ mod tests {
             altitude_m: 11.0,
         };
         let satellite =
-            Satellite::from_elements_with_opsmode(&iss_2024_12_19_elements(), OpsMode::Afspc)
+            Satellite::from_elements_with_opsmode(&iss_2024_12_19_elements(), OpsMode::Improved)
                 .unwrap();
 
         let samples = coarse_scan(
@@ -3366,9 +3361,10 @@ mod tests {
     }
 
     // Cross-validated against Skyfield 1.54 (sgp4 2.25, WGS72, AFSPC opsmode
-    // 'a', current IERS finals2000A.all). The ISS element set is fed to
-    // sgp4.Satrec.sgp4init, wrapped in skyfield EarthSatellite.from_satrec, and
-    // the look angle is (sat - wgs84.latlon(51.5, -0.1, 11)).at(t).altaz() at
+    // 'a', which gives this near-Earth element set the same state as the 'i'
+    // the look-angle APIs use; current IERS finals2000A.all). The ISS element
+    // set is fed to sgp4.Satrec.sgp4init, wrapped in skyfield
+    // EarthSatellite.from_satrec, and the look angle is (sat - wgs84.latlon(51.5, -0.1, 11)).at(t).altaz() at
     // 2024-01-01T12:00:00Z. Skyfield reference: az = 255.645831085991 deg,
     // el = -37.079388752166 deg, range = 8348.734510155984 km. Measured
     // sidereon-vs-Skyfield residuals: az and el below 1e-12 deg, range
@@ -3448,7 +3444,8 @@ mod tests {
             "not finite",
         );
 
-        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc).unwrap();
+        let satellite =
+            Satellite::from_elements_with_opsmode(&elements, OpsMode::Improved).unwrap();
         assert_invalid_look_angle_field(
             look_angle_arc(&satellite, station, &[datetime]).unwrap_err(),
             "ground_station.latitude_deg",
@@ -3504,8 +3501,10 @@ mod tests {
     }
 
     // Cross-validated against Skyfield 1.54 (sgp4 2.25, WGS72, AFSPC opsmode
-    // 'a', current IERS finals2000A.all) at 2026-04-05T13:16:46.804800Z from
-    // London (51.5074, -0.1278, 11 m). Each element set is fed to
+    // 'a', which gives these near-Earth element sets the same states as the
+    // 'i' the visibility APIs use; current IERS finals2000A.all) at
+    // 2026-04-05T13:16:46.804800Z from London (51.5074, -0.1278, 11 m). Each
+    // element set is fed to
     // sgp4.Satrec.sgp4init and wrapped in skyfield EarthSatellite.from_satrec;
     // az/el/range come from (sat - station).at(t).altaz(); the TEME position
     // comes from sgp4.Satrec.sgp4 at the matching UTC Julian date (the frame
@@ -3631,14 +3630,14 @@ mod tests {
             vis_improved[0]
         );
 
-        // The Afspc satellite path reproduces the element-based (Afspc-hardcoded)
-        // path bit-for-bit.
+        // The Improved satellite path reproduces the element-based path, which
+        // initializes with Improved, bit-for-bit.
         let members = vec![ConstellationMember {
             catalog_number: "99001".to_string(),
             elements: elements.clone(),
         }];
         let element_based = visible_from_constellation(&members, station, datetime, -90.0).unwrap();
-        assert_eq!(vis_afspc, element_based);
+        assert_eq!(vis_improved, element_based);
     }
 
     #[test]
@@ -3650,9 +3649,11 @@ mod tests {
             altitude_m: 11.0,
         };
         let sats = vec![
-            Satellite::from_elements_with_opsmode(&iss_fixture_elements(), OpsMode::Afspc).unwrap(),
-            Satellite::from_elements_with_opsmode(&css_fixture_elements(), OpsMode::Afspc).unwrap(),
-            Satellite::from_elements_with_opsmode(&fregat_fixture_elements(), OpsMode::Afspc)
+            Satellite::from_elements_with_opsmode(&iss_fixture_elements(), OpsMode::Improved)
+                .unwrap(),
+            Satellite::from_elements_with_opsmode(&css_fixture_elements(), OpsMode::Improved)
+                .unwrap(),
+            Satellite::from_elements_with_opsmode(&fregat_fixture_elements(), OpsMode::Improved)
                 .unwrap(),
         ];
         let ids = vec![
@@ -3758,10 +3759,11 @@ mod tests {
     }
 
     #[test]
-    fn look_angle_arc_reproduces_single_london_golden_bits() {
-        // The arc walker, fed the same AFSPC satellite the single-shot
-        // `look_angle` builds internally, must reproduce the frozen London golden
-        // bit-for-bit at the matching instant.
+    fn look_angle_arc_reproduces_the_single_shot_look_angle_bits() {
+        // The arc walker, fed the satellite the single-shot `look_angle` builds
+        // internally (Improved), reproduces its result bit-for-bit;
+        // `iss_london_look_angle_matches_skyfield` checks that result against
+        // Skyfield.
         let datetime = UtcInstant::from_utc(2024, 1, 1, 12, 0, 0, 0).unwrap();
         let station = GroundStation {
             latitude_deg: 51.5,
@@ -3769,15 +3771,19 @@ mod tests {
             altitude_m: 11.0,
         };
         let satellite =
-            Satellite::from_elements_with_opsmode(&iss_2024_01_01_elements(), OpsMode::Afspc)
+            Satellite::from_elements_with_opsmode(&iss_2024_01_01_elements(), OpsMode::Improved)
                 .unwrap();
 
         let arc = look_angle_arc(&satellite, station, &[datetime]).unwrap();
+        let single = look_angle(&iss_2024_01_01_elements(), station, datetime).unwrap();
 
         assert_eq!(arc.len(), 1);
-        assert_eq!(arc[0].azimuth_deg.to_bits(), 0x406f_f4aa_a5f4_2254);
-        assert_eq!(arc[0].elevation_deg.to_bits(), 0xc042_8a29_691f_1ca2);
-        assert_eq!(arc[0].range_km.to_bits(), 0x40c0_4e5e_046d_c53b);
+        assert_eq!(arc[0].azimuth_deg.to_bits(), single.azimuth_deg.to_bits());
+        assert_eq!(
+            arc[0].elevation_deg.to_bits(),
+            single.elevation_deg.to_bits()
+        );
+        assert_eq!(arc[0].range_km.to_bits(), single.range_km.to_bits());
     }
 
     #[test]
@@ -3790,7 +3796,8 @@ mod tests {
             altitude_m: 11.0,
         };
         let elements = iss_2024_01_01_elements();
-        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc).unwrap();
+        let satellite =
+            Satellite::from_elements_with_opsmode(&elements, OpsMode::Improved).unwrap();
         let epochs: Vec<UtcInstant> = (0..6)
             .map(|i| UtcInstant::from_utc(2024, 1, 1, 12, 10 * i, 0, 0).unwrap())
             .collect();
@@ -3847,7 +3854,7 @@ mod tests {
         ];
         let satellites: Vec<Satellite> = element_sets
             .iter()
-            .map(|e| Satellite::from_elements_with_opsmode(e, OpsMode::Afspc).unwrap())
+            .map(|e| Satellite::from_elements_with_opsmode(e, OpsMode::Improved).unwrap())
             .collect();
         // 145 epochs spaced 10 minutes apart (a full day) so the parallel pool
         // has many independent arcs to interleave.
@@ -4337,7 +4344,8 @@ mod tests {
             "max elevation within 1e-7 deg of legacy peak"
         );
 
-        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc).unwrap();
+        let satellite =
+            Satellite::from_elements_with_opsmode(&elements, OpsMode::Improved).unwrap();
         let span_seconds =
             actual.los.diff_microseconds(actual.aos) as f64 / MICROSECONDS_PER_SECOND_I64 as f64;
         let extrema = EventFinder::new(0.0, span_seconds, 10.0, 1.0e-4)
@@ -4380,7 +4388,7 @@ mod tests {
             altitude_m: 11.0,
         };
         let satellite =
-            Satellite::from_elements_with_opsmode(&geo_like_fixture_elements(), OpsMode::Afspc)
+            Satellite::from_elements_with_opsmode(&geo_like_fixture_elements(), OpsMode::Improved)
                 .expect("GEO-like fixture initializes");
         let requested_step_us = 900 * MICROSECONDS_PER_SECOND_I64;
         let orbit_step_us = fastest_orbit_fraction_step_us(&satellite)
@@ -4401,7 +4409,7 @@ mod tests {
             altitude_m: 11.0,
         };
         let satellite =
-            Satellite::from_elements_with_opsmode(&iss_2024_12_19_elements(), OpsMode::Afspc)
+            Satellite::from_elements_with_opsmode(&iss_2024_12_19_elements(), OpsMode::Improved)
                 .expect("ISS fixture initializes");
         let requested_step_us = 900 * MICROSECONDS_PER_SECOND_I64;
         let orbit_step_us =
@@ -4417,7 +4425,7 @@ mod tests {
     #[test]
     fn find_passes_geometry_step_finds_high_mask_pass_period_step_skips() {
         let elements = iss_2024_12_19_elements();
-        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc)
+        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Improved)
             .expect("ISS fixture initializes");
         let peak_seed = UtcInstant::from_utc(2024, 12, 19, 12, 37, 35, 0).unwrap();
         let station = station_under_satellite(&satellite, peak_seed);
@@ -4573,7 +4581,8 @@ mod tests {
             altitude_m: 11.0,
         };
         let elements = iss_2024_12_19_elements();
-        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc).unwrap();
+        let satellite =
+            Satellite::from_elements_with_opsmode(&elements, OpsMode::Improved).unwrap();
 
         let reference = predict_passes(
             &elements,
@@ -4657,7 +4666,8 @@ mod tests {
             altitude_m: 11.0,
         };
         let elements = iss_2024_12_19_elements();
-        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc).unwrap();
+        let satellite =
+            Satellite::from_elements_with_opsmode(&elements, OpsMode::Improved).unwrap();
         let reference = find_passes(
             &elements,
             station,
@@ -4728,7 +4738,8 @@ mod tests {
             altitude_m: 11.0,
         };
         let elements = iss_2024_12_19_elements();
-        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc).unwrap();
+        let satellite =
+            Satellite::from_elements_with_opsmode(&elements, OpsMode::Improved).unwrap();
         let options = PassFinderOptions {
             elevation_mask_deg: 0.0,
             coarse_step_seconds: 10.0,
@@ -4853,7 +4864,8 @@ mod tests {
             altitude_m: 11.0,
         };
         let elements = iss_2024_12_19_elements();
-        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc).unwrap();
+        let satellite =
+            Satellite::from_elements_with_opsmode(&elements, OpsMode::Improved).unwrap();
         let options = PassFinderOptions {
             elevation_mask_deg: 0.0,
             coarse_step_seconds: 10.0,
@@ -4913,7 +4925,8 @@ mod tests {
             altitude_m: 11.0,
         };
         let elements = iss_2024_12_19_elements();
-        let satellite = Satellite::from_elements_with_opsmode(&elements, OpsMode::Afspc).unwrap();
+        let satellite =
+            Satellite::from_elements_with_opsmode(&elements, OpsMode::Improved).unwrap();
         let mask = 12.0;
         let span_seconds = end.diff_microseconds(start) as f64 / MICROSECONDS_PER_SECOND_I64 as f64;
 
