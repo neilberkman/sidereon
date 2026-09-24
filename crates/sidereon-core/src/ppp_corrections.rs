@@ -1481,9 +1481,12 @@ mod tests {
             .expect("valid PPP corrections");
 
         assert_eq!(got.tide.len(), 1);
+        // The reference had the Step 2 tide angles reduced into [0, 360); the
+        // IERS routine reduces them with DMOD, which keeps a negative angle
+        // negative, and that moves the last bit of the z component.
         assert_eq!(
             got.tide[0].vector_m.map(f64::to_bits),
-            [0x3FB8BC98E788ED00, 0x3FAA54D8C1097507, 0x3FB03498C46B3B50]
+            [0x3FB8BC98E788ED00, 0x3FAA54D8C1097507, 0x3FB03498C46B3B4F]
         );
         assert_eq!(got.windup_m.len(), 1);
         assert_eq!(got.windup_m[0].value_m.to_bits(), 0xBF808DE79DBD2C16);

@@ -14,9 +14,19 @@
 //!   step-2 diurnal/long-period band corrections (`STEP2DIU`, `STEP2LON`),
 //!   evaluating the identical Love/Shida numbers, Doodson/argument tables, and
 //!   leap-second table.
-//! * It keeps the permanent (mean) tide deformation: the original routine's
-//!   commented-out "Step 3" permanent-tide removal is left disabled, matching
-//!   the ITRF/IGS conform-to-mean-tide convention.
+//! * It applies the permanent part of the displacement: the routine's
+//!   commented-out "Step 3" permanent-tide removal stays out, so coordinates
+//!   corrected with it are "conventional tide free", the system of the ITRF
+//!   (IERS Conventions (2010), Section 7.1.1.2).
+//! * The K1 out-of-phase radial amplitude is the routine's -0.80 mm. Table 7.3a
+//!   prints -0.78 mm in the 2010 edition and in the chapter update of
+//!   1 February 2018, the value Equation (7.12c) gives from the K1 row of
+//!   Table 7.2 (h(0)I = 0.0030 against the nominal hI = -0.0025, with
+//!   Hf = 0.36870 m: -0.783 mm). Chapter 7 names DEHANTTIDEINEL.F as the
+//!   program for Steps 1 and 2, its revision of 19 December 2016 still uses
+//!   -0.80, RTKLIB's translation uses -0.80, and the Conventions' version notes
+//!   list no correction to either, so the program's value is kept. The two
+//!   differ by 0.02 mm in amplitude.
 //! * The routine names are changed from the IERS originals (per the IERS
 //!   Conventions Software License), and the Fortran subroutine structure is
 //!   inlined into private helpers.
@@ -624,11 +634,12 @@ impl StationDisplacement {
 /// metre components.
 ///
 /// The solid Earth tide path uses IERS Conventions (2010), Chapter 7 station
-/// displacement with the permanent tide retained. The low-level
+/// displacement with its permanent part applied. The low-level
 /// [`solid_earth_tide`] routine ships the in-phase degree-2 and degree-3
 /// displacement, the step-1 out-of-phase and latitude-dependence corrections,
 /// and the step-2 diurnal/long-period frequency corrections; it leaves the
-/// optional step-3 permanent-tide removal disabled for ITRF/IGS use. Sun/Moon
+/// optional step-3 permanent-tide removal out, so corrected coordinates are
+/// conventional tide free, as the ITRF is. Sun/Moon
 /// positions are generated through the same Earth-fixed analytic ephemeris path
 /// used by the tide-force lane, including caller-supplied polar motion when the
 /// epoch carries it.
@@ -754,8 +765,9 @@ pub fn station_displacement_ecef_m_batch_with_validity(
 /// * `xsun` - geocentric Sun position (m, ECEF).
 /// * `xmon` - geocentric Moon position (m, ECEF).
 ///
-/// Returns the displacement vector `dxtide` (m, geocentric ITRF). The permanent
-/// (mean) tide deformation is retained (ITRF/IGS convention).
+/// Returns the displacement vector `dxtide` (m, geocentric ITRF), permanent
+/// part included, so corrected coordinates are conventional tide free, as the
+/// ITRF is.
 ///
 /// Returns [`TideError`] when inputs are non-finite or geometrically
 /// degenerate: the station vector must be non-zero and non-polar, and Sun/Moon
@@ -893,7 +905,7 @@ fn solid_earth_tide_unchecked(
     let (jjm0, jjm1) = gregorian_to_two_part_julian_date(year, month, day);
     let fhrd = fhr / 24.0;
     let mut t = ((jjm0 - J2000_JD) + jjm1 + fhrd) / DAYS_PER_JULIAN_CENTURY;
-    let dtt = tai_minus_utc_seconds(year, month, day) + TT_MINUS_TAI_S;
+    let dtt = tai_minus_utc_seconds(year, month, day, fhrd) + TT_MINUS_TAI_S;
     t += dtt / (SECONDS_PER_DAY * DAYS_PER_JULIAN_CENTURY);
 
     let c = frequency_dependent_diurnal_correction(xsta, fhr, t);
@@ -906,8 +918,8 @@ fn solid_earth_tide_unchecked(
     }
 
     // Step 3 of the IERS routine, the permanent (zero-frequency) tide removal,
-    // is intentionally not applied, so the permanent (mean) tide deformation is
-    // retained (the ITRF/IGS conform-to-mean-tide convention; see module docs).
+    // stays out as it does in the routine, so the displacement includes its
+    // permanent part and corrected coordinates are conventional tide free.
     dxtide
 }
 
@@ -1120,7 +1132,11 @@ fn latitude_dependence_correction(
 /// In-phase / out-of-phase frequency-dependent corrections, diurnal band
 /// (STEP2DIU). `fhr` is UTC fractional hour, `t` is Julian centuries (TT).
 fn frequency_dependent_diurnal_correction(xsta: &[f64; 3], fhr: f64, t: f64) -> [f64; 3] {
-    // DATDI(9,31): {l, l', F, D, Omega(Ps), Adr, Adi, Anr, Ani} per wave.
+    // DATDI(9,31): multipliers of s, h, p, N', ps (tau's is 1), then the
+    // radial in-phase and out-of-phase and the transverse in-phase and
+    // out-of-phase amplitudes in mm. The K1 row keeps the routine's -0.80 mm
+    // out-of-phase radial amplitude where Table 7.3a prints -0.78 mm; see the
+    // module documentation.
     #[rustfmt::skip]
     const DATDI: [[f64; 9]; 31] = [
         [-3.0, 0.0, 2.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
@@ -1171,12 +1187,12 @@ fn frequency_dependent_diurnal_correction(xsta: &[f64; 3], fhr: f64, t: f64) -> 
     let mut ps = 282.93734098
         + (1.71945766667 + (0.00045688889 + (-0.00000001778 + -0.00000000334 * t) * t) * t) * t;
 
-    s = s.rem_euclid(360.0);
-    tau = tau.rem_euclid(360.0);
-    h = h.rem_euclid(360.0);
-    p = p.rem_euclid(360.0);
-    zns = zns.rem_euclid(360.0);
-    ps = ps.rem_euclid(360.0);
+    s %= 360.0;
+    tau %= 360.0;
+    h %= 360.0;
+    p %= 360.0;
+    zns %= 360.0;
+    ps %= 360.0;
 
     let rsta = (xsta[0] * xsta[0] + xsta[1] * xsta[1] + xsta[2] * xsta[2]).sqrt();
     let sinphi = xsta[2] / rsta;
@@ -1210,6 +1226,11 @@ fn frequency_dependent_diurnal_correction(xsta: &[f64; 3], fhr: f64, t: f64) -> 
 /// In-phase / out-of-phase frequency-dependent corrections, long-period band
 /// (STEP2LON). `t` is Julian centuries (TT).
 fn frequency_dependent_long_period_correction(xsta: &[f64; 3], t: f64) -> [f64; 3] {
+    // DATDI(9,5): multipliers of s, h, p, N', ps, then the radial in-phase,
+    // transverse in-phase, radial out-of-phase and transverse out-of-phase
+    // amplitudes in mm (Table 7.3b lists the same values in the order radial
+    // in-phase, radial out-of-phase, transverse in-phase, transverse
+    // out-of-phase).
     #[rustfmt::skip]
     const DATDI: [[f64; 9]; 5] = [
         [0.0, 0.0, 0.0, 1.0, 0.0, 0.47, 0.23, 0.16, 0.07],
@@ -1236,11 +1257,11 @@ fn frequency_dependent_long_period_correction(xsta: &[f64; 3], t: f64) -> [f64; 
     let cosla = xsta[0] / cosphi / rsta;
     let sinla = xsta[1] / cosphi / rsta;
 
-    s = s.rem_euclid(360.0);
-    h = h.rem_euclid(360.0);
-    p = p.rem_euclid(360.0);
-    zns = zns.rem_euclid(360.0);
-    ps = ps.rem_euclid(360.0);
+    s %= 360.0;
+    h %= 360.0;
+    p %= 360.0;
+    zns %= 360.0;
+    ps %= 360.0;
 
     let mut xcorsta = [0.0_f64; 3];
     for w in &DATDI {
@@ -1283,10 +1304,30 @@ fn gregorian_to_two_part_julian_date(iy: i32, im: i32, id: i32) -> (f64, f64) {
     (djm0, djm)
 }
 
-/// TAI-UTC (Delta(AT)) in seconds for the given date (SOFA DAT, post-1972
-/// leap-second table only). The four golden dates are all post-1972; SOFA's
-/// pre-1972 drift terms are not implemented here.
-fn tai_minus_utc_seconds(iy: i32, im: i32, _id: i32) -> f64 {
+/// TAI-UTC (Delta(AT)) in seconds for the given UTC date and fraction of day
+/// `fd`, as the SOFA `DAT` routine distributed with DEHANTTIDEINEL returns it:
+/// 0 before 1960 (the routine's "pre-UTC year" warning path, whose result
+/// DEHANTTIDEINEL uses as is), the 1960-1971 offsets with their drift terms,
+/// and the leap-second table from 1972. Dates after the last entry keep its
+/// value.
+fn tai_minus_utc_seconds(iy: i32, im: i32, id: i32, fd: f64) -> f64 {
+    // 1960-1971: (year, month, Delta(AT) seconds, reference MJD, drift s/day).
+    const DRIFT: [(i32, i32, f64, f64, f64); 14] = [
+        (1960, 1, 1.4178180, 37300.0, 0.001296),
+        (1961, 1, 1.4228180, 37300.0, 0.001296),
+        (1961, 8, 1.3728180, 37300.0, 0.001296),
+        (1962, 1, 1.8458580, 37665.0, 0.0011232),
+        (1963, 11, 1.9458580, 37665.0, 0.0011232),
+        (1964, 1, 3.2401300, 38761.0, 0.001296),
+        (1964, 4, 3.3401300, 38761.0, 0.001296),
+        (1964, 9, 3.4401300, 38761.0, 0.001296),
+        (1965, 1, 3.5401300, 38761.0, 0.001296),
+        (1965, 3, 3.6401300, 38761.0, 0.001296),
+        (1965, 7, 3.7401300, 38761.0, 0.001296),
+        (1965, 9, 3.8401300, 38761.0, 0.001296),
+        (1966, 1, 4.3131700, 39126.0, 0.002592),
+        (1968, 2, 4.2131700, 39126.0, 0.002592),
+    ];
     // Post-1972 leap-second table: (year, month, Delta(AT) seconds).
     const IDAT: [(i32, i32, f64); 28] = [
         (1972, 1, 10.0),
@@ -1318,12 +1359,26 @@ fn tai_minus_utc_seconds(iy: i32, im: i32, _id: i32) -> f64 {
         (2015, 7, 36.0),
         (2017, 1, 37.0),
     ];
+    if iy < DRIFT[0].0 {
+        return 0.0;
+    }
     let m = 12 * iy + im;
-    let mut da = IDAT[0].2;
+    let mut leap = None;
     for &(y, mo, d) in &IDAT {
         if m >= 12 * y + mo {
-            da = d;
+            leap = Some(d);
         }
     }
-    da
+    if let Some(da) = leap {
+        return da;
+    }
+    let mut era = DRIFT[0];
+    for entry in DRIFT {
+        if m >= 12 * entry.0 + entry.1 {
+            era = entry;
+        }
+    }
+    let (_, djm) = gregorian_to_two_part_julian_date(iy, im, id);
+    let (_, _, da, reference_mjd, rate) = era;
+    da + (djm + fd - reference_mjd) * rate
 }
