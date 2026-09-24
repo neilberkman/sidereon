@@ -3821,6 +3821,7 @@ fn igs_message(system: crate::id::GnssSystem, kind: SsrKind) -> SsrMessage {
     let orbit = SsrOrbitRecord {
         satellite_id: 36,
         iode: 0xA5,
+        iod_crc: None,
         delta_radial: -12_345,
         delta_along: 23_456,
         delta_cross: -34_567,

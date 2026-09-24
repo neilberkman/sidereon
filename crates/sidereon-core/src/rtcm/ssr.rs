@@ -82,8 +82,13 @@ pub struct SsrOrbitRecord {
     /// of issue then the eight-bit IOD (`mod(toe/720, 240)`) held together.
     /// IGS SSR (4076): the eight-bit GNSS IOD (IDF012) for every system; for
     /// Galileo it is the eight least significant bits of IODnav, for GLONASS
-    /// `tb` in its low seven bits, for BeiDou `mod(toe/720, 240)`.
+    /// `tb` in its low seven bits, for BeiDou `mod(toe/720, 240)`, for SBAS the
+    /// IODN. RTCM SBAS (1252, 1255): the nine-bit SBAS `t0` modulo (DF468,
+    /// scale 16 s), with the IOD CRC in [`Self::iod_crc`].
     pub iode: u32,
+    /// The 24-bit SBAS IOD CRC (DF469) of an RTCM SBAS orbit or combined
+    /// record (1252, 1255); `None` for every other layout, which carries none.
+    pub iod_crc: Option<u32>,
     /// Radial delta, int22, scale 0.1 mm.
     pub delta_radial: i32,
     /// Along-track delta, int20, scale 0.4 mm.
@@ -222,6 +227,14 @@ pub(crate) fn ssr_kind(message_number: u16) -> Option<(GnssSystem, SsrKind)> {
         1262 => Some((GnssSystem::BeiDou, SsrKind::Ura)),
         1263 => Some((GnssSystem::BeiDou, SsrKind::HighRateClock)),
         1270 => Some((GnssSystem::BeiDou, SsrKind::PhaseBias)),
+        1266 => Some((GnssSystem::Glonass, SsrKind::PhaseBias)),
+        1252 => Some((GnssSystem::Sbas, SsrKind::Orbit)),
+        1253 => Some((GnssSystem::Sbas, SsrKind::Clock)),
+        1254 => Some((GnssSystem::Sbas, SsrKind::CodeBias)),
+        1255 => Some((GnssSystem::Sbas, SsrKind::CombinedOrbitClock)),
+        1256 => Some((GnssSystem::Sbas, SsrKind::Ura)),
+        1257 => Some((GnssSystem::Sbas, SsrKind::HighRateClock)),
+        1269 => Some((GnssSystem::Sbas, SsrKind::PhaseBias)),
         _ => None,
     }
 }
@@ -778,6 +791,8 @@ struct Layout {
     satellite_bits: usize,
     /// Width of the orbit record's issue field.
     iode_bits: usize,
+    /// Whether the orbit record carries the SBAS IOD CRC (DF469).
+    iod_crc: bool,
 }
 
 impl Layout {
@@ -788,6 +803,7 @@ impl Layout {
                 epoch_bits: 20,
                 satellite_bits: 6,
                 iode_bits: 8,
+                iod_crc: false,
             };
         }
         Self {
@@ -795,6 +811,7 @@ impl Layout {
             epoch_bits: epoch_time_bits(system),
             satellite_bits: satellite_id_bits(system, message_number),
             iode_bits: iode_bits(system),
+            iod_crc: system == GnssSystem::Sbas,
         }
     }
 }
@@ -920,6 +937,11 @@ fn read_orbit_record(r: &mut BitReader<'_>, layout: Layout) -> DecodeResult<SsrO
     Ok(SsrOrbitRecord {
         satellite_id: r.u(layout.satellite_bits)? as u8,
         iode: r.u(layout.iode_bits)? as u32,
+        iod_crc: if layout.iod_crc {
+            Some(r.u(24)? as u32)
+        } else {
+            None
+        },
         delta_radial: r.i(22)? as i32,
         delta_along: r.i(20)? as i32,
         delta_cross: r.i(20)? as i32,
@@ -937,6 +959,24 @@ fn write_orbit_record(w: &mut FieldWriter, layout: Layout, rec: &SsrOrbitRecord)
         u64::from(rec.iode),
         layout.iode_bits,
     )?;
+    match (layout.iod_crc, rec.iod_crc) {
+        (true, Some(crc)) => w.u(format_args!("satellite {id} IOD CRC"), u64::from(crc), 24)?,
+        (false, None) => {}
+        (true, None) => {
+            return Err(Error::InvalidInput(format!(
+                "RTCM SSR {} satellite {id} IOD CRC is not given, and the SBAS orbit layout \
+                 carries it",
+                w.message_number()
+            )))
+        }
+        (false, Some(_)) => {
+            return Err(Error::InvalidInput(format!(
+                "RTCM SSR {} satellite {id} IOD CRC is given, and only the RTCM SBAS orbit \
+                 layout carries one",
+                w.message_number()
+            )))
+        }
+    }
     w.i(
         format_args!("satellite {id} radial delta"),
         i64::from(rec.delta_radial),
@@ -1161,6 +1201,8 @@ fn iode_bits(system: GnssSystem) -> usize {
     match system {
         GnssSystem::Galileo => 10,
         GnssSystem::BeiDou => 18,
+        // DF468, the SBAS t0 modulo; the IOD CRC follows it.
+        GnssSystem::Sbas => 9,
         _ => 8,
     }
 }
@@ -1176,10 +1218,7 @@ fn epoch_time_bits(system: GnssSystem) -> usize {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::rtcm::bits::BitWriter;
-    use crate::rtcm::{
-        decode_frame, encode_frame, Message, SsrStreamAssembler, UnsupportedMessage,
-    };
+    use crate::rtcm::{decode_frame, encode_frame, Message, SsrStreamAssembler};
 
     const REAL_SSRA02IGS0_1243_FRAME_HEX: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1254,6 +1293,7 @@ mod tests {
                 GnssSystem::BeiDou => 123_456,
                 _ => 42,
             },
+            iod_crc: (system == GnssSystem::Sbas).then_some(0x123456),
             delta_radial: -12_345,
             delta_along: 23_456,
             delta_cross: -34_567,
@@ -1782,19 +1822,91 @@ mod tests {
         assert!(matches!(err, Error::Parse(_)));
     }
 
+    /// The GLONASS (1266) and SBAS (1269) phase biases have the phase-bias
+    /// layout of 1265 with the GLONASS 17-bit epoch and 5-bit satellite field
+    /// and the SBAS 20-bit epoch and 6-bit satellite field; the SBAS orbit
+    /// records (1252, 1255) carry the nine-bit t0 modulo (DF468) and the 24-bit
+    /// IOD CRC (DF469), and the encoder refuses an IOD CRC held against the
+    /// layout.
     #[test]
-    fn unsupported_ssr_bias_message_stays_unsupported() {
-        let mut w = BitWriter::new();
-        w.push_u(1266, 12);
-        let body = w.into_bytes();
-        let decoded = Message::decode(&body).unwrap();
-        assert_eq!(
-            decoded,
-            Message::Unsupported(UnsupportedMessage {
-                message_number: 1266,
-                body
-            })
-        );
+    fn glonass_and_sbas_messages_round_trip_with_their_widths() {
+        for (number, system, kind, bits) in [
+            (
+                1266u16,
+                GnssSystem::Glonass,
+                SsrKind::PhaseBias,
+                17 + 4 + 1 + 4 + 16 + 4 + 2 + 6 + 5 + 5 + 9 + 8 + 2 * 32,
+            ),
+            (
+                1269,
+                GnssSystem::Sbas,
+                SsrKind::PhaseBias,
+                20 + 4 + 1 + 4 + 16 + 4 + 2 + 6 + 6 + 5 + 9 + 8 + 2 * 32,
+            ),
+            (
+                1252,
+                GnssSystem::Sbas,
+                SsrKind::Orbit,
+                20 + 4 + 1 + 1 + 4 + 16 + 4 + 6 + 6 + 9 + 24 + 121,
+            ),
+            (
+                1255,
+                GnssSystem::Sbas,
+                SsrKind::CombinedOrbitClock,
+                20 + 4 + 1 + 1 + 4 + 16 + 4 + 6 + 6 + 9 + 24 + 121 + 70,
+            ),
+            (
+                1253,
+                GnssSystem::Sbas,
+                SsrKind::Clock,
+                20 + 4 + 1 + 4 + 16 + 4 + 6 + 6 + 70,
+            ),
+            (
+                1254,
+                GnssSystem::Sbas,
+                SsrKind::CodeBias,
+                20 + 4 + 1 + 4 + 16 + 4 + 6 + 6 + 5 + 2 * 19,
+            ),
+            (
+                1256,
+                GnssSystem::Sbas,
+                SsrKind::Ura,
+                20 + 4 + 1 + 4 + 16 + 4 + 6 + 6 + 6,
+            ),
+            (
+                1257,
+                GnssSystem::Sbas,
+                SsrKind::HighRateClock,
+                20 + 4 + 1 + 4 + 16 + 4 + 6 + 6 + 22,
+            ),
+        ] {
+            let mut m = message(number, system, kind);
+            if system == GnssSystem::Sbas {
+                for orbit in &mut m.orbit {
+                    orbit.iode = 511;
+                    orbit.iod_crc = Some(0xABCDEF);
+                }
+            }
+            let body = m.encode().unwrap_or_else(|err| panic!("{number}: {err}"));
+            assert_eq!(body.len(), (12 + bits as usize).div_ceil(8), "{number}");
+            let mut decoded = SsrMessage::decode(&body).unwrap();
+            decoded.padding_bits.clear();
+            assert_eq!(decoded, m, "{number}");
+        }
+        let mut m = message(1252, GnssSystem::Sbas, SsrKind::Orbit);
+        m.orbit[0].iod_crc = None;
+        assert!(m
+            .encode()
+            .unwrap_err()
+            .to_string()
+            .contains("IOD CRC is not given"));
+        m = message(1057, GnssSystem::Gps, SsrKind::Orbit);
+        m.orbit[0].iod_crc = Some(1);
+        assert!(m
+            .encode()
+            .unwrap_err()
+            .to_string()
+            .contains("IOD CRC is given"));
     }
 
     #[test]

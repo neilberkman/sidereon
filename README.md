@@ -116,6 +116,7 @@ Every numerical routine is cross-checked against the reference implementation or
 | RINEX observation QC - multipath (MP1/MP2) | teqc `+qc` on a real captured stream, to sub-micrometer | teqc |
 | RTCM MSM lock-time to RINEX LLI | RTKLIB `convbin` decode of a real MSM stream | RTKLIB |
 | RTCM 3 MSM1..MSM7, legacy 1001..1004 / 1009..1012, NavIC 1041, GLONASS 1230 and IGS SSR 4076 decoding | RTKLIB `decode_rtcm3` of real multi-constellation streams and RTKLIB-encoded streams, bit for bit | RTKLIB |
+| RTCM 3 SSR 1057..1270 and IGS SSR 4076 (every subtype, VTEC included) decoding | BNC SSR decoder on BNC-encoded, RTKLIB-encoded and real IGS SSR streams, bit for bit | BKG NTRIP Client (BNC) |
 | RTCM 3 network RTK and transformation messages (1014-1017, 1021-1027, 1030-1032, 1034, 1035, 1037-1039) | pyrtcm message layouts, field for field | pyrtcm |
 
 The per-crate test suites document the exact references, fixtures, and tolerances.
