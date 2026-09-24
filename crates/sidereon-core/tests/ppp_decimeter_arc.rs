@@ -63,7 +63,7 @@ use sidereon_core::rinex::observations::{
     observation_values, ObsEpoch, ObsEpochTime, ObservationFilter, RinexObs,
 };
 use sidereon_core::ssr::{has_signal, rtcm_ssr_signal, GnssSignal, SignalCode};
-use sidereon_core::tides::OceanLoadingBlq;
+use sidereon_core::tides::{OceanLoadingBlq, StationTideConstants};
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -613,6 +613,26 @@ fn full_corrections_with_code_bias(
     receiver_ecef_m: [f64; 3],
     code_bias: Option<CodeBiasOptions>,
 ) -> RangeCorrections {
+    full_corrections_with_code_bias_and_tide_constants(
+        sp3,
+        antex,
+        clock,
+        epochs,
+        receiver_ecef_m,
+        code_bias,
+        StationTideConstants::Conventions,
+    )
+}
+
+fn full_corrections_with_code_bias_and_tide_constants(
+    sp3: &Sp3,
+    antex: &Antex,
+    clock: &RinexClock,
+    epochs: &[FloatEpoch],
+    receiver_ecef_m: [f64; 3],
+    code_bias: Option<CodeBiasOptions>,
+    tide_constants: StationTideConstants,
+) -> RangeCorrections {
     let prns = observed_prns(epochs);
     // Pole tide intentionally off: this arc validates the cm/dm-dominant
     // stack; pole tide is a sub-cm refinement out of scope here.
@@ -626,13 +646,16 @@ fn full_corrections_with_code_bias(
     options.phase_windup = true;
     options.satellite_antenna = Some(satellite_antenna_options(antex, &prns));
     options.code_bias = code_bias;
-    let precomputed = ppp_corrections::build(
+    let precomputed = ppp_corrections::build_with_validity_and_tide_constants(
         sp3,
         &ppp_correction_epochs(epochs),
         receiver_ecef_m,
         &options,
+        sidereon_core::astro::time::ValidityMode::Strict,
+        tide_constants,
     )
-    .expect("build full PPP correction tables");
+    .expect("build full PPP correction tables")
+    .value;
     RangeCorrections {
         receiver_antenna: Some(receiver_antenna_options(antex)),
         sat_clock_relativity: true,
@@ -834,8 +857,15 @@ fn zim2_ppp_static_with_code_bias_matches_no_bias_on_matched_datum() {
 
     let solve =
         |code_bias: Option<CodeBiasOptions>| -> sidereon_core::precise_positioning::FloatSolution {
-            let corrections =
-                full_corrections_with_code_bias(&sp3, &antex, &clock, &epochs, approx, code_bias);
+            let corrections = full_corrections_with_code_bias_and_tide_constants(
+                &sp3,
+                &antex,
+                &clock,
+                &epochs,
+                approx,
+                code_bias,
+                StationTideConstants::IersRoutine,
+            );
             solve_float_epochs(
                 &sp3,
                 &epochs,

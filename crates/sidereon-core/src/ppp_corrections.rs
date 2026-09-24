@@ -28,7 +28,10 @@ use crate::frequencies;
 use crate::observables::{
     predict, ObservablesError, ObservablesInputErrorKind, PredictOptions, PredictedObservables,
 };
-use crate::tides::{ocean_tide_loading, solid_earth_pole_tide, solid_earth_tide, TideError};
+use crate::tides::{
+    ocean_tide_loading, solid_earth_pole_tide, solid_earth_tide_with_constants,
+    StationTideConstants, TideError,
+};
 
 // The ocean-loading types live in `tides` (the displacement math owns them), but
 // `PppCorrectionsOptions::ocean_loading` is the public entry point that consumes
@@ -458,8 +461,38 @@ pub fn build_with_validity(
     options: &PppCorrectionsOptions,
     mode: ValidityMode,
 ) -> Result<Validated<PppCorrections>, PppCorrectionsError> {
+    build_with_validity_and_tide_constants(
+        sp3,
+        epochs,
+        receiver_ecef_m,
+        options,
+        mode,
+        StationTideConstants::Conventions,
+    )
+}
+
+/// [`build_with_validity`] with an explicit Chapter 7 station-tide constant
+/// table. [`StationTideConstants::Conventions`] is the default used by
+/// [`build`] and [`build_with_validity`]; [`StationTideConstants::IersRoutine`]
+/// reproduces the distributed IERS routine for comparisons with its outputs.
+pub fn build_with_validity_and_tide_constants(
+    sp3: &Sp3,
+    epochs: &[PppCorrectionEpoch],
+    receiver_ecef_m: [f64; 3],
+    options: &PppCorrectionsOptions,
+    mode: ValidityMode,
+    tide_constants: StationTideConstants,
+) -> Result<Validated<PppCorrections>, PppCorrectionsError> {
     let gate = Ut1Gate::new(mode);
-    let corrections = build_gated(sp3, epochs, receiver_ecef_m, options, &gate, predict)?;
+    let corrections = build_gated(
+        sp3,
+        epochs,
+        receiver_ecef_m,
+        options,
+        &gate,
+        tide_constants,
+        predict,
+    )?;
     Ok(Validated {
         value: corrections,
         degraded: gate
@@ -480,14 +513,13 @@ type Predictor = fn(
     PredictOptions,
 ) -> Result<PredictedObservables, ObservablesError>;
 
-/// [`build`] with the transmission epoch rounded to whole microseconds, as the external
-/// reference fixture computed it.
 #[cfg(all(test, feature = "test-replays"))]
-fn build_rounded_microsecond_replay(
+fn build_rounded_microsecond_replay_with_tide_constants(
     sp3: &Sp3,
     epochs: &[PppCorrectionEpoch],
     receiver_ecef_m: [f64; 3],
     options: &PppCorrectionsOptions,
+    tide_constants: StationTideConstants,
 ) -> Result<PppCorrections, PppCorrectionsError> {
     let gate = Ut1Gate::new(ValidityMode::Strict);
     build_gated(
@@ -496,6 +528,7 @@ fn build_rounded_microsecond_replay(
         receiver_ecef_m,
         options,
         &gate,
+        tide_constants,
         crate::observables::rounded_microsecond_replay::predict,
     )
 }
@@ -506,6 +539,7 @@ fn build_gated(
     receiver_ecef_m: [f64; 3],
     options: &PppCorrectionsOptions,
     gate: &Ut1Gate,
+    tide_constants: StationTideConstants,
     predictor: Predictor,
 ) -> Result<PppCorrections, PppCorrectionsError> {
     validate_receiver_state(receiver_ecef_m)?;
@@ -558,6 +592,7 @@ fn build_gated(
                 epoch_row.epoch,
                 sun_moon.sun,
                 sun_moon.moon,
+                tide_constants,
             )
             .map_err(|source| PppCorrectionsError::Tide {
                 epoch_index,
@@ -1066,9 +1101,10 @@ fn tide_at(
     epoch: CivilDateTime,
     sun_ecef_m: [f64; 3],
     moon_ecef_m: [f64; 3],
+    constants: StationTideConstants,
 ) -> Result<[f64; 3], TideError> {
     let fhr = epoch.hour as f64 + epoch.minute as f64 / 60.0 + epoch.second / SECONDS_PER_HOUR;
-    solid_earth_tide(
+    solid_earth_tide_with_constants(
         &receiver_ecef_m,
         epoch.year,
         epoch.month as i32,
@@ -1076,6 +1112,7 @@ fn tide_at(
         fhr,
         &sun_ecef_m,
         &moon_ecef_m,
+        constants,
     )
 }
 
@@ -1477,13 +1514,16 @@ mod tests {
             code_bias: None,
         };
 
-        let got = build_rounded_microsecond_replay(&sp3, &epochs, receiver, &options)
-            .expect("valid PPP corrections");
+        let got = build_rounded_microsecond_replay_with_tide_constants(
+            &sp3,
+            &epochs,
+            receiver,
+            &options,
+            StationTideConstants::IersRoutine,
+        )
+        .expect("valid PPP corrections");
 
         assert_eq!(got.tide.len(), 1);
-        // The reference had the Step 2 tide angles reduced into [0, 360); the
-        // IERS routine reduces them with DMOD, which keeps a negative angle
-        // negative, and that moves the last bit of the z component.
         assert_eq!(
             got.tide[0].vector_m.map(f64::to_bits),
             [0x3FB8BC98E788ED00, 0x3FAA54D8C1097507, 0x3FB03498C46B3B4F]
@@ -1498,7 +1538,39 @@ mod tests {
         assert_eq!(got.sat_pcv_m.len(), 1);
         assert_eq!(got.sat_pcv_m[0].value_m.to_bits(), 0x3F77617E95BD232C);
 
-        let live = build(&sp3, &epochs, receiver, &options).expect("valid PPP corrections");
+        let conventions_replay = build_rounded_microsecond_replay_with_tide_constants(
+            &sp3,
+            &epochs,
+            receiver,
+            &options,
+            StationTideConstants::Conventions,
+        )
+        .expect("valid Conventions PPP corrections");
+        let default = build(&sp3, &epochs, receiver, &options).expect("valid PPP corrections");
+        assert_eq!(
+            default.tide[0].vector_m.map(f64::to_bits),
+            conventions_replay.tide[0].vector_m.map(f64::to_bits)
+        );
+        assert_ne!(
+            default.tide[0].vector_m.map(f64::to_bits),
+            got.tide[0].vector_m.map(f64::to_bits)
+        );
+        assert!(default.tide[0]
+            .vector_m
+            .into_iter()
+            .zip(got.tide[0].vector_m)
+            .all(|(conventions, routine)| (conventions - routine).abs() <= 0.18e-3));
+
+        let live = build_with_validity_and_tide_constants(
+            &sp3,
+            &epochs,
+            receiver,
+            &options,
+            ValidityMode::Strict,
+            StationTideConstants::IersRoutine,
+        )
+        .expect("valid PPP corrections")
+        .value;
         assert_eq!(
             live.tide[0].vector_m.map(f64::to_bits),
             got.tide[0].vector_m.map(f64::to_bits),

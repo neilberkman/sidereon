@@ -12,21 +12,33 @@
 //!   displacement, the out-of-phase corrections (`ST1IDIU`, `ST1ISEM`), the
 //!   latitude-dependence correction (`ST1L1`), and the frequency-dependent
 //!   step-2 diurnal/long-period band corrections (`STEP2DIU`, `STEP2LON`),
-//!   evaluating the identical Love/Shida numbers, Doodson/argument tables, and
+//!   evaluating the identical Love/Shida numbers, long-period table and
 //!   leap-second table.
+//! * Its diurnal (Step 2) table has two variants, [`StationTideConstants`].
+//!   [`StationTideConstants::IersRoutine`] is the routine's `DATDI` array as
+//!   distributed. [`StationTideConstants::Conventions`], the default, corrects
+//!   three rows of it to the Conventions text and the physics it states:
+//!   - K1 out-of-phase radial amplitude -0.78 mm, as Table 7.3a prints it in
+//!     the 2010 edition and in the chapter update of 1 February 2018, and as
+//!     Equation (7.12c) gives it from the K1 row of Table 7.2 (h(0)I = 0.0030
+//!     against the nominal hI = -0.0025, with the Cartwright-Tayler-Edden
+//!     amplitude Hf = 0.368645 m of the IERS routine `ADMINT.F`: -0.783 mm).
+//!     The routine (revision of 19 December 2016) and RTKLIB use -0.80 mm.
+//!   - P1 out-of-phase radial amplitude +0.07 mm. Table 7.3a and the routine
+//!     both have -0.07 mm, but Equation (7.12c) with Table 7.2 (P1
+//!     h(0)I = -0.0011, Hf = -0.121995 m) gives +0.066 mm; the sign error was
+//!     identified by H. Krásná and is corrected in Orekit's copy of Table 7.3a.
+//!   - The 25th row is tide 166,564 (s multiplier 1), the tide Tables 6.5a and
+//!     7.2 list between psi1 and 167,355; the routine's s multiplier 0 names
+//!     156,564, out of the table's frequency order and in no Conventions table.
+//!
+//!   The Conventions' version notes (v1.0.0 to v1.3.0) list no correction to
+//!   either source. The two variants differ by at most the sum of the three
+//!   changes, 0.02 + 0.14 + 0.02 mm, in the displacement.
 //! * It applies the permanent part of the displacement: the routine's
 //!   commented-out "Step 3" permanent-tide removal stays out, so coordinates
 //!   corrected with it are "conventional tide free", the system of the ITRF
 //!   (IERS Conventions (2010), Section 7.1.1.2).
-//! * The K1 out-of-phase radial amplitude is the routine's -0.80 mm. Table 7.3a
-//!   prints -0.78 mm in the 2010 edition and in the chapter update of
-//!   1 February 2018, the value Equation (7.12c) gives from the K1 row of
-//!   Table 7.2 (h(0)I = 0.0030 against the nominal hI = -0.0025, with
-//!   Hf = 0.36870 m: -0.783 mm). Chapter 7 names DEHANTTIDEINEL.F as the
-//!   program for Steps 1 and 2, its revision of 19 December 2016 still uses
-//!   -0.80, RTKLIB's translation uses -0.80, and the Conventions' version notes
-//!   list no correction to either, so the program's value is kept. The two
-//!   differ by 0.02 mm in amplitude.
 //! * The routine names are changed from the IERS originals (per the IERS
 //!   Conventions Software License), and the Fortran subroutine structure is
 //!   inlined into private helpers.
@@ -588,6 +600,9 @@ pub struct StationDisplacementOptions<'a> {
     pub pole_tide: bool,
     /// Optional ocean-loading BLQ coefficients supplied by the caller.
     pub ocean_loading: Option<&'a OceanLoadingBlq>,
+    /// Diurnal Step 2 constants of the solid Earth tide;
+    /// [`StationTideConstants::Conventions`] by default.
+    pub solid_earth_tide_constants: StationTideConstants,
 }
 
 impl Default for StationDisplacementOptions<'_> {
@@ -596,6 +611,7 @@ impl Default for StationDisplacementOptions<'_> {
             solid_earth_tide: true,
             pole_tide: false,
             ocean_loading: None,
+            solid_earth_tide_constants: StationTideConstants::Conventions,
         }
     }
 }
@@ -682,7 +698,7 @@ pub fn station_displacement_ecef_m_with_validity(
             .transpose()?
             .unwrap_or_default();
         let sun_moon = sun_moon_ecef_with_polar_motion(&ts, polar_motion)?;
-        let solid = solid_earth_tide(
+        let solid = solid_earth_tide_with_constants(
             &receiver_ecef_m,
             epoch.year,
             i32::from(epoch.month),
@@ -690,6 +706,7 @@ pub fn station_displacement_ecef_m_with_validity(
             fhr,
             &sun_moon.sun,
             &sun_moon.moon,
+            options.solid_earth_tide_constants,
         )?;
         StationDisplacement::add_component(&mut displacement.ecef_m, solid);
         displacement.solid_earth_tide_ecef_m = Some(solid);
@@ -769,6 +786,9 @@ pub fn station_displacement_ecef_m_batch_with_validity(
 /// part included, so corrected coordinates are conventional tide free, as the
 /// ITRF is.
 ///
+/// The diurnal Step 2 constants are [`StationTideConstants::Conventions`];
+/// [`solid_earth_tide_with_constants`] chooses them.
+///
 /// Returns [`TideError`] when inputs are non-finite or geometrically
 /// degenerate: the station vector must be non-zero and non-polar, and Sun/Moon
 /// vectors must be non-zero.
@@ -781,9 +801,35 @@ pub fn solid_earth_tide(
     xsun: &[f64; 3],
     xmon: &[f64; 3],
 ) -> Result<[f64; 3], TideError> {
+    solid_earth_tide_with_constants(
+        xsta,
+        year,
+        month,
+        day,
+        fhr,
+        xsun,
+        xmon,
+        StationTideConstants::Conventions,
+    )
+}
+
+/// [`solid_earth_tide`] with the diurnal Step 2 constants `constants`.
+/// [`StationTideConstants::IersRoutine`] reproduces `DEHANTTIDEINEL.F` and
+/// RTKLIB `tidedisp`.
+#[allow(clippy::too_many_arguments)]
+pub fn solid_earth_tide_with_constants(
+    xsta: &[f64; 3],
+    year: i32,
+    month: i32,
+    day: i32,
+    fhr: f64,
+    xsun: &[f64; 3],
+    xmon: &[f64; 3],
+    constants: StationTideConstants,
+) -> Result<[f64; 3], TideError> {
     validate_tide_domain(xsta, year, month, day, fhr, xsun, xmon)?;
     Ok(solid_earth_tide_unchecked(
-        xsta, year, month, day, fhr, xsun, xmon,
+        xsta, year, month, day, fhr, xsun, xmon, constants,
     ))
 }
 
@@ -822,6 +868,7 @@ fn validate_tide_domain(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn solid_earth_tide_unchecked(
     xsta: &[f64; 3],
     year: i32,
@@ -830,6 +877,7 @@ fn solid_earth_tide_unchecked(
     fhr: f64,
     xsun: &[f64; 3],
     xmon: &[f64; 3],
+    constants: StationTideConstants,
 ) -> [f64; 3] {
     // Nominal second- and third-degree Love and Shida numbers.
     const H20: f64 = 0.6078;
@@ -908,7 +956,7 @@ fn solid_earth_tide_unchecked(
     let dtt = tai_minus_utc_seconds(year, month, day, fhrd) + TT_MINUS_TAI_S;
     t += dtt / (SECONDS_PER_DAY * DAYS_PER_JULIAN_CENTURY);
 
-    let c = frequency_dependent_diurnal_correction(xsta, fhr, t);
+    let c = frequency_dependent_diurnal_correction(xsta, fhr, t, constants.diurnal_table());
     for i in 0..3 {
         dxtide[i] += c[i];
     }
@@ -1129,48 +1177,117 @@ fn latitude_dependence_correction(
     xcorsta
 }
 
+/// Constants of the diurnal-band frequency-dependent (Step 2) station tide.
+///
+/// See the module documentation for the three rows in which the variants
+/// differ and the sources for each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum StationTideConstants {
+    /// The IERS Conventions (2010) Chapter 7 text: Table 7.3a with the P1
+    /// sign it misprints corrected, and tide 166,564 as Tables 6.5a and 7.2
+    /// list it.
+    #[default]
+    Conventions,
+    /// The `DATDI` array of the IERS routine `DEHANTTIDEINEL.F` (`STEP2DIU`)
+    /// as distributed, which RTKLIB also uses.
+    IersRoutine,
+}
+
+impl StationTideConstants {
+    fn diurnal_table(self) -> &'static [[f64; 9]; 31] {
+        match self {
+            Self::Conventions => &DIURNAL_BAND_CONVENTIONS,
+            Self::IersRoutine => &DIURNAL_BAND_IERS_ROUTINE,
+        }
+    }
+}
+
+// Diurnal-band tables, 31 rows: multipliers of s, h, p, N', ps (tau's is 1),
+// then the radial in-phase, radial out-of-phase, transverse in-phase and
+// transverse out-of-phase amplitudes in mm, the columns of Table 7.3a.
+
+/// `DATDI` of `STEP2DIU.F` as distributed.
+#[rustfmt::skip]
+const DIURNAL_BAND_IERS_ROUTINE: [[f64; 9]; 31] = [
+    [-3.0, 0.0, 2.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
+    [-3.0, 2.0, 0.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
+    [-2.0, 0.0, 1.0, -1.0, 0.0, -0.02, 0.0, 0.0, 0.0],
+    [-2.0, 0.0, 1.0, 0.0, 0.0, -0.08, 0.0, -0.01, 0.01],
+    [-2.0, 2.0, -1.0, 0.0, 0.0, -0.02, 0.0, 0.0, 0.0],
+    [-1.0, 0.0, 0.0, -1.0, 0.0, -0.10, 0.0, 0.0, 0.0],
+    [-1.0, 0.0, 0.0, 0.0, 0.0, -0.51, 0.0, -0.02, 0.03],
+    [-1.0, 2.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+    [0.0, -2.0, 1.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+    [0.0, 0.0, -1.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0, 0.0, 0.06, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 1.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+    [0.0, 2.0, -1.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+    [1.0, -3.0, 0.0, 0.0, 1.0, -0.06, 0.0, 0.0, 0.0],
+    [1.0, -2.0, 0.0, -1.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+    [1.0, -2.0, 0.0, 0.0, 0.0, -1.23, -0.07, 0.06, 0.01],
+    [1.0, -1.0, 0.0, 0.0, -1.0, 0.02, 0.0, 0.0, 0.0],
+    [1.0, -1.0, 0.0, 0.0, 1.0, 0.04, 0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0, -1.0, 0.0, -0.22, 0.01, 0.01, 0.0],
+    [1.0, 0.0, 0.0, 0.0, 0.0, 12.00, -0.80, -0.67, -0.03],
+    [1.0, 0.0, 0.0, 1.0, 0.0, 1.73, -0.12, -0.10, 0.0],
+    [1.0, 0.0, 0.0, 2.0, 0.0, -0.04, 0.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0, 0.0, -1.0, -0.50, -0.01, 0.03, 0.0],
+    [1.0, 1.0, 0.0, 0.0, 1.0, 0.01, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 1.0, -1.0, -0.01, 0.0, 0.0, 0.0],
+    [1.0, 2.0, -2.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
+    [1.0, 2.0, 0.0, 0.0, 0.0, -0.11, 0.01, 0.01, 0.0],
+    [2.0, -2.0, 1.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
+    [2.0, 0.0, -1.0, 0.0, 0.0, -0.02, 0.0, 0.0, 0.0],
+    [3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [3.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+];
+
+/// `DATDI` with three rows corrected to the Conventions text: row 16 (P1)
+/// out-of-phase radial +0.07, row 20 (K1) out-of-phase radial -0.78, and
+/// row 25 tide 166,564 (s multiplier 1).
+#[rustfmt::skip]
+const DIURNAL_BAND_CONVENTIONS: [[f64; 9]; 31] = [
+    [-3.0, 0.0, 2.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
+    [-3.0, 2.0, 0.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
+    [-2.0, 0.0, 1.0, -1.0, 0.0, -0.02, 0.0, 0.0, 0.0],
+    [-2.0, 0.0, 1.0, 0.0, 0.0, -0.08, 0.0, -0.01, 0.01],
+    [-2.0, 2.0, -1.0, 0.0, 0.0, -0.02, 0.0, 0.0, 0.0],
+    [-1.0, 0.0, 0.0, -1.0, 0.0, -0.10, 0.0, 0.0, 0.0],
+    [-1.0, 0.0, 0.0, 0.0, 0.0, -0.51, 0.0, -0.02, 0.03],
+    [-1.0, 2.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+    [0.0, -2.0, 1.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+    [0.0, 0.0, -1.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0, 0.0, 0.06, 0.0, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 1.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+    [0.0, 2.0, -1.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+    [1.0, -3.0, 0.0, 0.0, 1.0, -0.06, 0.0, 0.0, 0.0],
+    [1.0, -2.0, 0.0, -1.0, 0.0, 0.01, 0.0, 0.0, 0.0],
+    [1.0, -2.0, 0.0, 0.0, 0.0, -1.23, 0.07, 0.06, 0.01],
+    [1.0, -1.0, 0.0, 0.0, -1.0, 0.02, 0.0, 0.0, 0.0],
+    [1.0, -1.0, 0.0, 0.0, 1.0, 0.04, 0.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0, -1.0, 0.0, -0.22, 0.01, 0.01, 0.0],
+    [1.0, 0.0, 0.0, 0.0, 0.0, 12.00, -0.78, -0.67, -0.03],
+    [1.0, 0.0, 0.0, 1.0, 0.0, 1.73, -0.12, -0.10, 0.0],
+    [1.0, 0.0, 0.0, 2.0, 0.0, -0.04, 0.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0, 0.0, -1.0, -0.50, -0.01, 0.03, 0.0],
+    [1.0, 1.0, 0.0, 0.0, 1.0, 0.01, 0.0, 0.0, 0.0],
+    [1.0, 1.0, 0.0, 1.0, -1.0, -0.01, 0.0, 0.0, 0.0],
+    [1.0, 2.0, -2.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
+    [1.0, 2.0, 0.0, 0.0, 0.0, -0.11, 0.01, 0.01, 0.0],
+    [2.0, -2.0, 1.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
+    [2.0, 0.0, -1.0, 0.0, 0.0, -0.02, 0.0, 0.0, 0.0],
+    [3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [3.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+];
+
 /// In-phase / out-of-phase frequency-dependent corrections, diurnal band
 /// (STEP2DIU). `fhr` is UTC fractional hour, `t` is Julian centuries (TT).
-fn frequency_dependent_diurnal_correction(xsta: &[f64; 3], fhr: f64, t: f64) -> [f64; 3] {
-    // DATDI(9,31): multipliers of s, h, p, N', ps (tau's is 1), then the
-    // radial in-phase and out-of-phase and the transverse in-phase and
-    // out-of-phase amplitudes in mm. The K1 row keeps the routine's -0.80 mm
-    // out-of-phase radial amplitude where Table 7.3a prints -0.78 mm; see the
-    // module documentation.
-    #[rustfmt::skip]
-    const DATDI: [[f64; 9]; 31] = [
-        [-3.0, 0.0, 2.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
-        [-3.0, 2.0, 0.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
-        [-2.0, 0.0, 1.0, -1.0, 0.0, -0.02, 0.0, 0.0, 0.0],
-        [-2.0, 0.0, 1.0, 0.0, 0.0, -0.08, 0.0, -0.01, 0.01],
-        [-2.0, 2.0, -1.0, 0.0, 0.0, -0.02, 0.0, 0.0, 0.0],
-        [-1.0, 0.0, 0.0, -1.0, 0.0, -0.10, 0.0, 0.0, 0.0],
-        [-1.0, 0.0, 0.0, 0.0, 0.0, -0.51, 0.0, -0.02, 0.03],
-        [-1.0, 2.0, 0.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
-        [0.0, -2.0, 1.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
-        [0.0, 0.0, -1.0, 0.0, 0.0, 0.02, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 0.0, 0.0, 0.06, 0.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0, 1.0, 0.0, 0.01, 0.0, 0.0, 0.0],
-        [0.0, 2.0, -1.0, 0.0, 0.0, 0.01, 0.0, 0.0, 0.0],
-        [1.0, -3.0, 0.0, 0.0, 1.0, -0.06, 0.0, 0.0, 0.0],
-        [1.0, -2.0, 0.0, -1.0, 0.0, 0.01, 0.0, 0.0, 0.0],
-        [1.0, -2.0, 0.0, 0.0, 0.0, -1.23, -0.07, 0.06, 0.01],
-        [1.0, -1.0, 0.0, 0.0, -1.0, 0.02, 0.0, 0.0, 0.0],
-        [1.0, -1.0, 0.0, 0.0, 1.0, 0.04, 0.0, 0.0, 0.0],
-        [1.0, 0.0, 0.0, -1.0, 0.0, -0.22, 0.01, 0.01, 0.0],
-        [1.0, 0.0, 0.0, 0.0, 0.0, 12.00, -0.80, -0.67, -0.03],
-        [1.0, 0.0, 0.0, 1.0, 0.0, 1.73, -0.12, -0.10, 0.0],
-        [1.0, 0.0, 0.0, 2.0, 0.0, -0.04, 0.0, 0.0, 0.0],
-        [1.0, 1.0, 0.0, 0.0, -1.0, -0.50, -0.01, 0.03, 0.0],
-        [1.0, 1.0, 0.0, 0.0, 1.0, 0.01, 0.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0, 1.0, -1.0, -0.01, 0.0, 0.0, 0.0],
-        [1.0, 2.0, -2.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
-        [1.0, 2.0, 0.0, 0.0, 0.0, -0.11, 0.01, 0.01, 0.0],
-        [2.0, -2.0, 1.0, 0.0, 0.0, -0.01, 0.0, 0.0, 0.0],
-        [2.0, 0.0, -1.0, 0.0, 0.0, -0.02, 0.0, 0.0, 0.0],
-        [3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        [3.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    ];
+fn frequency_dependent_diurnal_correction(
+    xsta: &[f64; 3],
+    fhr: f64,
+    t: f64,
+    datdi: &[[f64; 9]; 31],
+) -> [f64; 3] {
     let mut s = 218.31664563 + (481267.88194 + (-0.0014663889 + 0.00000185139 * t) * t) * t;
     let mut tau = fhr * 15.0
         + 280.4606184
@@ -1202,7 +1319,7 @@ fn frequency_dependent_diurnal_correction(xsta: &[f64; 3], fhr: f64, t: f64) -> 
     let zla = libm::atan2(xsta[1], xsta[0]);
 
     let mut xcorsta = [0.0_f64; 3];
-    for w in &DATDI {
+    for w in datdi {
         let thetaf = (tau + w[0] * s + w[1] * h + w[2] * p + w[3] * zns + w[4] * ps) * DEG_TO_RAD;
         let angle = thetaf + zla;
         let sin_angle = libm::sin(angle);

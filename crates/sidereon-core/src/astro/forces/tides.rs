@@ -252,6 +252,14 @@ impl SolidEarthTideGravity {
             }
         }
         corrections[0].c -= permanent_tide_c20(self.tide_system);
+        if corrections
+            .iter()
+            .any(|coefficient| !coefficient.c.is_finite() || !coefficient.s.is_finite())
+        {
+            return Err(PropagationError::NumericalFailure(
+                "solid Earth tide coefficient is not representable".to_string(),
+            ));
+        }
         Ok(corrections)
     }
 
@@ -414,7 +422,9 @@ struct SunMoonItrfKm {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct BodyGeometry {
-    radius_km: f64,
+    radius_ratio: f64,
+    radius_ratio_fraction: f64,
+    radius_ratio_exponent: i32,
     cos_m: [f64; 4],
     sin_m: [f64; 4],
     p2: [f64; 3],
@@ -534,10 +544,14 @@ fn empty_solid_tide_coefficients() -> [SphericalHarmonicCoefficient; 10] {
 /// The time average of the Step 1 `C20` correction is the permanent
 /// deformation `A0 H0 k20` of Equation (6.14). A zero-tide `C20` holds it,
 /// so Equation (6.13) subtracts it. A mean-tide `C20` also holds the permanent
-/// part of the tide-generating potential, `A0 H0` (Chapter 1, Section 1.1);
-/// the Sun and Moon third-body attraction already applies the whole
-/// tide-generating potential, its permanent part included, so that part is
-/// subtracted as well. A tide-free `C20` holds neither. The products are formed
+/// part of the tide-generating potential, `A0 H0` (Chapter 1, Section 1.1).
+/// That part is not the Earth's own field: the tide-generating potential of
+/// an external body grows with distance from the geocentre as `r^2`, while a
+/// `C20` term of the geopotential falls as `r^-3`, so folded into `C20` it is
+/// right only at the reference radius and wrong everywhere a satellite flies.
+/// It is subtracted as well, whether or not a third-body force supplies the
+/// external potential with its own `r^2` dependence. A tide-free `C20` holds
+/// neither part. The products are formed
 /// as Orekit forms its IERS 2010 permanent tide, `(A0 * H0) * k20`.
 fn permanent_tide_c20(tide_system: TideSystem) -> f64 {
     let potential = SOLID_EARTH_TIDE_A0_PER_M * PERMANENT_TIDE_H0_M;
@@ -684,6 +698,22 @@ const K22_TERMS: [FrequencyDependentTerm; 2] = [
 fn frequency_dependent_corrections_at(
     time_scales: &TimeScales,
 ) -> Result<[SphericalHarmonicCoefficient; 3], PropagationError> {
+    let arguments = frequency_dependent_arguments_at(time_scales)?;
+    Ok(frequency_dependent_corrections(
+        arguments[0],
+        [
+            arguments[1],
+            arguments[2],
+            arguments[3],
+            arguments[4],
+            arguments[5],
+        ],
+    ))
+}
+
+fn frequency_dependent_arguments_at(
+    time_scales: &TimeScales,
+) -> Result<[f64; 6], PropagationError> {
     let gmst_rad = with_ut1_validity(
         time_scales,
         ValidityMode::Permissive,
@@ -697,7 +727,14 @@ fn frequency_dependent_corrections_at(
             "solid Earth tide fundamental arguments: {error}"
         ))
     })?;
-    Ok(frequency_dependent_corrections(gmst_rad + PI, delaunay_rad))
+    Ok([
+        gmst_rad + PI,
+        delaunay_rad[0],
+        delaunay_rad[1],
+        delaunay_rad[2],
+        delaunay_rad[3],
+        delaunay_rad[4],
+    ])
 }
 
 /// Step 2 corrections to normalized `C20`, `C21`/`S21` and `C22`/`S22`, in
@@ -782,27 +819,75 @@ fn add_body_tide_coefficients(
     body_itrf_km: [f64; 3],
     corrections: &mut [SphericalHarmonicCoefficient; 10],
 ) -> Result<(), PropagationError> {
-    let geometry = body_geometry(body_itrf_km)?;
+    let geometry = body_geometry(body_itrf_km, model.reference_radius_km)?;
     let gm_ratio = gm_body_km3_s2 / model.mu_earth_km3_s2;
 
     for order in 0..=2 {
         let love = DEGREE2_LOVE[order as usize];
-        let base = gm_ratio
-            * (model.reference_radius_km / geometry.radius_km).powi(3)
-            * geometry.p2[order as usize]
-            / 5.0;
-        let (dc, ds) = coefficient_delta(
-            base,
-            love.primary,
-            geometry.cos_m[order as usize],
-            geometry.sin_m[order as usize],
-        );
+        let radius_power = geometry.radius_ratio.powi(3);
+        let gm_power = gm_ratio * radius_power;
+        let base = gm_power * geometry.p2[order as usize] / 5.0;
+        let ordinary_range = gm_ratio.is_normal()
+            && geometry.radius_ratio.is_normal()
+            && radius_power.is_normal()
+            && gm_power.is_normal()
+            && base.is_normal();
+        let cosine = geometry.cos_m[order as usize];
+        let sine = geometry.sin_m[order as usize];
+        let (dc, ds) = if ordinary_range {
+            coefficient_delta(base, love.primary, cosine, sine)
+        } else {
+            (
+                scaled_body_product(
+                    gm_body_km3_s2,
+                    model.mu_earth_km3_s2,
+                    &geometry,
+                    3,
+                    &[
+                        geometry.p2[order as usize],
+                        1.0 / 5.0,
+                        love.primary.real * cosine + love.primary.imag * sine,
+                    ],
+                ),
+                scaled_body_product(
+                    gm_body_km3_s2,
+                    model.mu_earth_km3_s2,
+                    &geometry,
+                    3,
+                    &[
+                        geometry.p2[order as usize],
+                        1.0 / 5.0,
+                        love.primary.real * sine - love.primary.imag * cosine,
+                    ],
+                ),
+            )
+        };
         let idx = order as usize;
         corrections[idx].c += dc;
         corrections[idx].s += ds;
 
-        let dc4 = base * love.plus * geometry.cos_m[order as usize];
-        let ds4 = base * love.plus * geometry.sin_m[order as usize];
+        let dc4 = if ordinary_range {
+            base * love.plus * cosine
+        } else {
+            scaled_body_product(
+                gm_body_km3_s2,
+                model.mu_earth_km3_s2,
+                &geometry,
+                3,
+                &[geometry.p2[order as usize], 1.0 / 5.0, love.plus, cosine],
+            )
+        };
+        let ds4 = if ordinary_range {
+            base * love.plus * sine
+        } else {
+            scaled_body_product(
+                gm_body_km3_s2,
+                model.mu_earth_km3_s2,
+                &geometry,
+                3,
+                &[geometry.p2[order as usize], 1.0 / 5.0, love.plus, sine],
+            )
+        };
         let idx4 = 7 + order as usize;
         corrections[idx4].c += dc4;
         corrections[idx4].s += ds4;
@@ -810,16 +895,44 @@ fn add_body_tide_coefficients(
 
     for order in 0..=3 {
         let love = DEGREE3_LOVE[order as usize];
-        let base = gm_ratio
-            * (model.reference_radius_km / geometry.radius_km).powi(4)
-            * geometry.p3[order as usize]
-            / 7.0;
-        let (dc, ds) = coefficient_delta(
-            base,
-            love,
-            geometry.cos_m[order as usize],
-            geometry.sin_m[order as usize],
-        );
+        let radius_power = geometry.radius_ratio.powi(4);
+        let gm_power = gm_ratio * radius_power;
+        let base = gm_power * geometry.p3[order as usize] / 7.0;
+        let ordinary_range = gm_ratio.is_normal()
+            && geometry.radius_ratio.is_normal()
+            && radius_power.is_normal()
+            && gm_power.is_normal()
+            && base.is_normal();
+        let cosine = geometry.cos_m[order as usize];
+        let sine = geometry.sin_m[order as usize];
+        let (dc, ds) = if ordinary_range {
+            coefficient_delta(base, love, cosine, sine)
+        } else {
+            (
+                scaled_body_product(
+                    gm_body_km3_s2,
+                    model.mu_earth_km3_s2,
+                    &geometry,
+                    4,
+                    &[
+                        geometry.p3[order as usize],
+                        1.0 / 7.0,
+                        love.real * cosine + love.imag * sine,
+                    ],
+                ),
+                scaled_body_product(
+                    gm_body_km3_s2,
+                    model.mu_earth_km3_s2,
+                    &geometry,
+                    4,
+                    &[
+                        geometry.p3[order as usize],
+                        1.0 / 7.0,
+                        love.real * sine - love.imag * cosine,
+                    ],
+                ),
+            )
+        };
         let idx = 3 + order as usize;
         corrections[idx].c += dc;
         corrections[idx].s += ds;
@@ -840,32 +953,91 @@ fn coefficient_delta(
     )
 }
 
-fn body_geometry(position_km: [f64; 3]) -> Result<BodyGeometry, PropagationError> {
+fn body_geometry(
+    position_km: [f64; 3],
+    reference_radius_km: f64,
+) -> Result<BodyGeometry, PropagationError> {
     validate_vec3(position_km, "body position")?;
-    let x = position_km[0];
-    let y = position_km[1];
-    let z = position_km[2];
-    let rho2 = x * x + y * y;
-    let radius2 = rho2 + z * z;
-    if radius2 == 0.0 {
+    let scale = position_km
+        .into_iter()
+        .map(f64::abs)
+        .fold(0.0_f64, f64::max);
+    if scale == 0.0 {
         return Err(PropagationError::NumericalFailure(
             "zero tide-raising body position magnitude".to_string(),
         ));
     }
-    let radius_km = radius2.sqrt();
-    let rho = rho2.sqrt();
-    let sin_lat = z / radius_km;
-    let cos_lat = rho / radius_km;
-    let (cos_m, sin_m) = longitude_trig(x, y, rho);
+    let x = position_km[0] / scale;
+    let y = position_km[1] / scale;
+    let z = position_km[2] / scale;
+    let rho_scaled = (x * x + y * y).sqrt();
+    let radius_scaled = (rho_scaled * rho_scaled + z * z).sqrt();
+    let quotient = reference_radius_km / scale;
+    let staged_ratio = quotient / radius_scaled;
+    let radius_ratio = if staged_ratio.is_finite() {
+        staged_ratio
+    } else {
+        let scaled_radius = scale * radius_scaled;
+        if scaled_radius.is_finite() {
+            reference_radius_km / scaled_radius
+        } else {
+            staged_ratio
+        }
+    };
+    let (reference_fraction, reference_exponent) = libm::frexp(reference_radius_km);
+    let (scale_fraction, scale_exponent) = libm::frexp(scale);
+    let (radius_fraction, radius_exponent) = libm::frexp(radius_scaled);
+    let (radius_ratio_fraction, radius_ratio_adjustment) =
+        libm::frexp((reference_fraction / scale_fraction) / radius_fraction);
+    let radius_ratio_exponent =
+        reference_exponent - scale_exponent - radius_exponent + radius_ratio_adjustment;
+    let sin_lat = z / radius_scaled;
+    let cos_lat = rho_scaled / radius_scaled;
+    let (cos_m, sin_m) = longitude_trig(x, y, rho_scaled);
     let p2 = degree2_legendre(sin_lat, cos_lat);
     let p3 = degree3_legendre(sin_lat, cos_lat);
     Ok(BodyGeometry {
-        radius_km,
+        radius_ratio,
+        radius_ratio_fraction,
+        radius_ratio_exponent,
         cos_m,
         sin_m,
         p2,
         p3,
     })
+}
+
+fn scaled_body_product(
+    gm_body_km3_s2: f64,
+    mu_earth_km3_s2: f64,
+    geometry: &BodyGeometry,
+    degree: i32,
+    factors: &[f64],
+) -> f64 {
+    let sign = factors
+        .iter()
+        .filter(|factor| factor.is_sign_negative())
+        .count();
+    if factors.contains(&0.0) {
+        return if sign % 2 == 0 { 0.0 } else { -0.0 };
+    }
+
+    let (gm_fraction, gm_exponent) = libm::frexp(gm_body_km3_s2);
+    let (mu_fraction, mu_exponent) = libm::frexp(mu_earth_km3_s2);
+    let mut fraction = (gm_fraction / mu_fraction) * geometry.radius_ratio_fraction.powi(degree);
+    let mut exponent = gm_exponent - mu_exponent + degree * geometry.radius_ratio_exponent;
+    for factor in factors {
+        let (factor_fraction, factor_exponent) = libm::frexp(factor.abs());
+        fraction *= factor_fraction;
+        exponent += factor_exponent;
+    }
+    let (fraction, adjustment) = libm::frexp(fraction);
+    let product = libm::scalbn(fraction, exponent + adjustment);
+    if sign % 2 == 0 {
+        product
+    } else {
+        -product
+    }
 }
 
 fn longitude_trig(x: f64, y: f64, rho: f64) -> ([f64; 4], [f64; 4]) {
@@ -1095,6 +1267,98 @@ mod tests {
     }
 
     #[test]
+    fn body_geometry_handles_extreme_finite_and_independent_normal_inputs() {
+        let extreme = [f64::MAX, -f64::MAX, f64::MAX];
+        let defaults = SolidEarthTideGravity::default();
+        let geometry = body_geometry(extreme, defaults.reference_radius_km)
+            .expect("finite extreme coordinates have representable ratios");
+        assert!(geometry.radius_ratio.is_finite());
+        assert!(geometry.p2.into_iter().all(f64::is_finite));
+        assert!(geometry.p3.into_iter().all(f64::is_finite));
+
+        let extreme_corrections = defaults
+            .coefficient_corrections_for_body_fixed_bodies(extreme, [384_400.0, 0.0, 0.0])
+            .expect("finite extreme body coordinates");
+        assert!(extreme_corrections
+            .iter()
+            .all(|coefficient| coefficient.c.is_finite() && coefficient.s.is_finite()));
+
+        let quotient_overflow = body_geometry([0.75, 0.75, 0.75], f64::MAX)
+            .expect("representable radius ratio despite quotient overflow");
+        assert!(quotient_overflow.radius_ratio.is_finite());
+
+        let scaled_model = SolidEarthTideGravity::new(1.0e300, 1.0e150, 1.0, 1.0);
+        let scaled = scaled_model
+            .coefficient_corrections_for_body_fixed_bodies([0.0, 0.0, 1.0], [0.0, 0.0, 1.0])
+            .expect("finite analytically representable extreme coefficients");
+        let expected_c20 = 2.0e150 * 5.0_f64.sqrt() / 5.0 * SOLID_EARTH_TIDE_K20_REAL;
+        let expected_c30 = 2.0e300 * 7.0_f64.sqrt() / 7.0 * SOLID_EARTH_TIDE_K30_REAL;
+        assert_close(
+            scaled[0].c,
+            expected_c20,
+            roundoff_gamma(32) * expected_c20.abs(),
+        );
+        assert_close(
+            scaled[3].c,
+            expected_c30,
+            roundoff_gamma(32) * expected_c30.abs(),
+        );
+
+        let oracle: FieldOracle =
+            serde_json::from_str(FIELD_ORACLE_FIXTURE).expect("parse SolidTidesField fixture");
+        let epoch = oracle.epochs.first().expect("independent field epoch");
+        let model = SolidEarthTideGravity::default();
+        let step2 = frequency_dependent_corrections(
+            epoch.gamma,
+            [epoch.l, epoch.l_prime, epoch.f, epoch.d, epoch.omega],
+        );
+        let actual = model
+            .corrections(epoch.sun_km, epoch.moon_km, Some(step2))
+            .expect("normal independent body inputs");
+        let tolerance = field_roundoff_bound(&model, epoch);
+        for expected in &epoch.tide_free {
+            let (c, s) = actual
+                .iter()
+                .find(|value| value.degree == expected.degree && value.order == expected.order)
+                .map_or((0.0, 0.0), |value| (value.c, value.s));
+            assert_close(c, expected.c, tolerance);
+            assert_close(s, expected.s, tolerance);
+        }
+    }
+
+    #[test]
+    fn subnormal_radius_power_is_combined_with_large_gm_before_rounding() {
+        let model = SolidEarthTideGravity::new(1.0, 1.0, 1.0e300, 1.0e300);
+        let geometry = body_geometry([0.0, 0.0, 1.0e80], model.reference_radius_km)
+            .expect("finite extreme body geometry");
+        let gm_ratio = model.gm_sun_km3_s2 / model.mu_earth_km3_s2;
+        let radius_power = geometry.radius_ratio.powi(4);
+        let gm_power = gm_ratio * radius_power;
+        let base = gm_power * geometry.p3[0] / 7.0;
+        assert!(geometry.radius_ratio.is_normal());
+        assert!(gm_ratio.is_normal());
+        assert!(radius_power > 0.0 && !radius_power.is_normal());
+        assert!(gm_power.is_normal());
+        assert!(base.is_normal());
+        let corrections = model
+            .coefficient_corrections_for_body_fixed_bodies([0.0, 0.0, 1.0e80], [0.0, 0.0, 1.0e80])
+            .expect("finite degree-two and degree-three corrections");
+
+        let expected_c20 = 2.0e60 * 5.0_f64.sqrt() / 5.0 * SOLID_EARTH_TIDE_K20_REAL;
+        let expected_c30 = 2.0e-20 * 7.0_f64.sqrt() / 7.0 * SOLID_EARTH_TIDE_K30_REAL;
+        assert_close(
+            corrections[0].c,
+            expected_c20,
+            roundoff_gamma(32) * expected_c20.abs(),
+        );
+        assert_close(
+            corrections[3].c,
+            expected_c30,
+            roundoff_gamma(32) * expected_c30.abs(),
+        );
+    }
+
+    #[test]
     fn pole_tide_coefficients_match_iers_chapter_6_equation() {
         let row = fixture_row("solid_earth_pole_tide_j2000_unit_wobble");
         assert!(row.source.contains("Table 7.7"));
@@ -1214,8 +1478,9 @@ mod tests {
     fn assert_step2_matches(
         actual: &[SphericalHarmonicCoefficient; 3],
         epoch: &Step2OracleEpoch,
-        tolerance: f64,
-    ) {
+        arguments: [f64; 6],
+        argument_error: [f64; 6],
+    ) -> f64 {
         assert_eq!(
             [
                 (actual[0].degree, actual[0].order),
@@ -1225,11 +1490,116 @@ mod tests {
             [(2, 0), (2, 1), (2, 2)]
         );
         assert_eq!(actual[0].s, 0.0);
-        assert_close(actual[0].c, epoch.c20, tolerance);
-        assert_close(actual[1].c, epoch.c21, tolerance);
-        assert_close(actual[1].s, epoch.s21, tolerance);
-        assert_close(actual[2].c, epoch.c22, tolerance);
-        assert_close(actual[2].s, epoch.s22, tolerance);
+        let reference_arguments = [
+            epoch.gamma,
+            epoch.l,
+            epoch.l_prime,
+            epoch.f,
+            epoch.d,
+            epoch.omega,
+        ];
+        let mut maximum = 0.0_f64;
+        for (index, terms) in [&K20_TERMS[..], &K21_TERMS[..], &K22_TERMS[..]]
+            .into_iter()
+            .enumerate()
+        {
+            let tolerance =
+                step2_roundoff_bound(terms, arguments, reference_arguments, argument_error);
+            let expected = [
+                (epoch.c20, 0.0),
+                (epoch.c21, epoch.s21),
+                (epoch.c22, epoch.s22),
+            ][index];
+            for (computed, reference) in
+                [(actual[index].c, expected.0), (actual[index].s, expected.1)]
+            {
+                let error = (computed - reference).abs();
+                assert!(
+                    error <= tolerance,
+                    "order {index}: error {error:e}, bound {tolerance:e}"
+                );
+                maximum = maximum.max(error);
+            }
+        }
+        maximum
+    }
+
+    fn roundoff_gamma(operations: usize) -> f64 {
+        let accumulated = operations as f64 * (f64::EPSILON / 2.0);
+        accumulated / (1.0 - accumulated)
+    }
+
+    fn angular_difference_bounds(left: f64, right: f64) -> (f64, f64) {
+        let tau = 2.0 * PI;
+        let turns = ((left - right).abs() / tau).ceil();
+        let difference = (left - right).abs() % tau;
+        let difference = difference.min(tau - difference);
+        let reduction_error = roundoff_gamma(4) * (left.abs() + right.abs() + turns * tau);
+        let lower = (difference - reduction_error).max(0.0);
+        let lower = if lower == 0.0 {
+            0.0
+        } else {
+            f64::from_bits(lower.to_bits() - 1)
+        };
+        let upper = difference + reduction_error;
+        let upper = if upper == 0.0 {
+            0.0
+        } else {
+            f64::from_bits(upper.to_bits() + 1)
+        };
+        (lower, upper)
+    }
+
+    #[test]
+    fn circular_argument_guard_accounts_for_its_own_roundoff() {
+        let full_turns = 1024.0 * 2.0 * PI;
+        let (equivalent_lower, equivalent_upper) = angular_difference_bounds(0.0, full_turns);
+        assert_eq!(equivalent_lower, 0.0);
+        assert!(equivalent_upper > 0.0);
+        let (shifted_lower, shifted_upper) = angular_difference_bounds(0.125, full_turns);
+        assert!(shifted_lower > 0.12);
+        assert!(shifted_upper < 0.13);
+    }
+
+    fn step2_roundoff_bound(
+        terms: &[FrequencyDependentTerm],
+        arguments: [f64; 6],
+        reference_arguments: [f64; 6],
+        argument_error: [f64; 6],
+    ) -> f64 {
+        terms
+            .iter()
+            .map(|term| {
+                let multipliers = [
+                    term.doodson[0],
+                    term.delaunay[0],
+                    term.delaunay[1],
+                    term.delaunay[2],
+                    term.delaunay[3],
+                    term.delaunay[4],
+                ];
+                let mut phase_magnitude = 0.0;
+                let mut phase_error = 0.0;
+                for ((multiplier, argument), error) in
+                    multipliers.into_iter().zip(arguments).zip(argument_error)
+                {
+                    phase_magnitude += f64::from(multiplier).abs() * argument.abs();
+                    phase_error += f64::from(multiplier).abs() * error;
+                }
+                let reference_phase_magnitude = multipliers
+                    .into_iter()
+                    .zip(reference_arguments)
+                    .map(|(multiplier, argument)| f64::from(multiplier).abs() * argument.abs())
+                    .sum::<f64>();
+                phase_magnitude = phase_magnitude.max(reference_phase_magnitude);
+                let amplitude = (term.in_phase.abs() + term.out_of_phase.abs()) * TABLE_6_5_UNIT;
+                amplitude
+                    * (phase_error
+                        + 2.0 * roundoff_gamma(11) * phase_magnitude
+                        + 2.0 * roundoff_gamma(terms.len() + 8)
+                        + 4.0 * f64::EPSILON)
+            })
+            .sum()
     }
 
     #[test]
@@ -1293,24 +1663,32 @@ mod tests {
     #[test]
     fn step2_matches_orekit_for_the_same_arguments() {
         // The fixture's arguments are fed in as Orekit formed them, so the two
-        // sides differ only in trigonometric rounding and summation order:
-        // below 1e-20 for sums of terms up to 5e-10, while the smallest table
-        // entry is 1e-13.
+        // sides differ only in trigonometric rounding and summation order,
+        // for sums of terms up to 5e-10; the smallest table entry is 1e-13.
+        let mut max_dev = 0.0_f64;
         for epoch in step2_oracle() {
+            let arguments = [
+                epoch.gamma,
+                epoch.l,
+                epoch.l_prime,
+                epoch.f,
+                epoch.d,
+                epoch.omega,
+            ];
             let actual = frequency_dependent_corrections(
                 epoch.gamma,
                 [epoch.l, epoch.l_prime, epoch.f, epoch.d, epoch.omega],
             );
-            assert_step2_matches(&actual, &epoch, 1.0e-20);
+            max_dev = max_dev.max(assert_step2_matches(&actual, &epoch, arguments, [0.0; 6]));
         }
+        println!("Step 2, Orekit's arguments: max deviation {max_dev:.3e}");
     }
 
     #[test]
     fn step2_at_epoch_matches_orekit() {
         // The same instants through this crate's own sidereal time and
         // Delaunay arguments. Orekit took TAI as UT1, so UT1 = TT - 32.184 s.
-        // The arguments agree to about 1e-12 rad, which moves the corrections
-        // by less than 1e-20.
+        let mut max_dev = 0.0_f64;
         for epoch in step2_oracle() {
             let ut1_fraction = epoch.tt_fraction - 32.184 / 86_400.0;
             let time_scales = TimeScales {
@@ -1323,9 +1701,53 @@ mod tests {
                 jd_tdb: epoch.jd_whole + epoch.tt_fraction,
                 ut1_degraded: None,
             };
-            let actual = frequency_dependent_corrections_at(&time_scales).expect("Step 2");
-            assert_step2_matches(&actual, &epoch, 1.0e-18);
+            let arguments =
+                frequency_dependent_arguments_at(&time_scales).expect("Step 2 arguments");
+            let actual = frequency_dependent_corrections(
+                arguments[0],
+                [
+                    arguments[1],
+                    arguments[2],
+                    arguments[3],
+                    arguments[4],
+                    arguments[5],
+                ],
+            );
+            let days = (epoch.jd_whole - J2000_JD).abs() + epoch.tt_fraction.abs();
+            let centuries = days / DAYS_PER_JULIAN_CENTURY;
+            assert!(centuries <= 1.0, "the polynomial bound covers one century");
+            let delaunay_error =
+                (roundoff_gamma(13) + roundoff_gamma(27)) * (10.0 + 8500.0 * centuries);
+            let gmst_error =
+                (roundoff_gamma(31) + roundoff_gamma(45)) * (20.0 + 2.0 * PI * 1.003 * days);
+            let mut argument_error = [delaunay_error; 6];
+            argument_error[0] = gmst_error;
+            let reference_arguments = [
+                epoch.gamma,
+                epoch.l,
+                epoch.l_prime,
+                epoch.f,
+                epoch.d,
+                epoch.omega,
+            ];
+            for index in 0..6 {
+                let producer_bound = argument_error[index];
+                let (difference_lower, difference_upper) =
+                    angular_difference_bounds(arguments[index], reference_arguments[index]);
+                assert!(
+                    difference_lower <= producer_bound,
+                    "argument {index}: circular difference interval [{difference_lower:e}, {difference_upper:e}], producer bound {producer_bound:e}"
+                );
+                argument_error[index] = difference_upper;
+            }
+            max_dev = max_dev.max(assert_step2_matches(
+                &actual,
+                &epoch,
+                arguments,
+                argument_error,
+            ));
         }
+        println!("Step 2, this crate's arguments: max deviation {max_dev:.3e}");
     }
 
     #[test]
@@ -1464,6 +1886,7 @@ mod tests {
                 let actual = model
                     .corrections(epoch.sun_km, epoch.moon_km, Some(step2))
                     .expect("Steps 1 to 3");
+                let tolerance = field_roundoff_bound(&model, epoch);
                 assert_eq!(expected.len(), 12, "degrees 2 to 4, orders 0 to n");
                 for row in expected.iter() {
                     let (c, s) = actual
@@ -1471,21 +1894,45 @@ mod tests {
                         .find(|value| value.degree == row.degree && value.order == row.order)
                         .map_or((0.0, 0.0), |value| (value.c, value.s));
                     max_dev = max_dev.max((c - row.c).abs()).max((s - row.s).abs());
+                    assert_close(c, row.c, tolerance);
+                    assert_close(s, row.s, tolerance);
                 }
             }
         }
         println!("max deviation from SolidTidesField: {max_dev:.3e}");
-        assert!(
-            max_dev <= STEPS_1_TO_3_ORACLE_TOLERANCE,
-            "max deviation from SolidTidesField {max_dev:.3e}"
-        );
     }
 
-    /// Largest difference from Orekit's SolidTidesField allowed for any
-    /// coefficient of degree 2 to 4 over the 48 epochs of the fixture. The
-    /// measured largest difference is 4.963e-24, a few units in the last place
-    /// of degree-2 corrections near 1e-8; the bound is four times that.
-    const STEPS_1_TO_3_ORACLE_TOLERANCE: f64 = 2.0e-23;
+    fn field_roundoff_bound(model: &SolidEarthTideGravity, epoch: &FieldOracleEpoch) -> f64 {
+        let mut magnitude = permanent_tide_c20(model.tide_system).abs();
+        for (position, gravitational_parameter) in [
+            (epoch.sun_km, model.gm_sun_km3_s2),
+            (epoch.moon_km, model.gm_moon_km3_s2),
+        ] {
+            let radius = position
+                .into_iter()
+                .map(|component| component * component)
+                .sum::<f64>()
+                .sqrt();
+            let radius_ratio = model.reference_radius_km / radius;
+            let mass_ratio = gravitational_parameter / model.mu_earth_km3_s2;
+            magnitude += mass_ratio
+                * (radius_ratio.powi(3) * 0.31 * 5.0_f64.sqrt() / 5.0
+                    + radius_ratio.powi(4) * 0.094 * 7.0_f64.sqrt() / 7.0);
+        }
+        let arguments = [
+            epoch.gamma,
+            epoch.l,
+            epoch.l_prime,
+            epoch.f,
+            epoch.d,
+            epoch.omega,
+        ];
+        let step2_error = [&K20_TERMS[..], &K21_TERMS[..], &K22_TERMS[..]]
+            .into_iter()
+            .map(|terms| step2_roundoff_bound(terms, arguments, arguments, [0.0; 6]))
+            .fold(0.0, f64::max);
+        2.0 * roundoff_gamma(128) * magnitude + step2_error
+    }
 
     #[test]
     fn for_geopotential_takes_the_field_constants_and_tide_system() {
