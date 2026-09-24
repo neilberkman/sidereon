@@ -1435,16 +1435,21 @@ fn tcb_fraction_from_tdb_split(jd_whole: f64, tdb_fraction: f64) -> f64 {
 }
 
 /// Civil calendar -> Julian day number (Fliegel-style, integer arithmetic).
+///
+/// Proleptic Gregorian for every year: the divisions round toward negative
+/// infinity, so years before -4716, where the shifted year goes negative,
+/// are counted as the later ones are. (Rounding toward zero there put them a
+/// day or more off.)
 pub fn julian_day_number(year: i32, month: i32, day: i32) -> i64 {
     let year = i64::from(year);
     let month = i64::from(month);
     let day = i64::from(day);
     let janfeb = month <= 2;
     let g = year + 4716 - if janfeb { 1 } else { 0 };
-    let f = (month + 9) % 12;
-    let e = 1461 * g / 4 + day - 1402;
-    let j = e + (153 * f + 2) / 5;
-    j + 38 - ((g + 184) / 100) * 3 / 4
+    let f = (month + 9).rem_euclid(12);
+    let e = (1461 * g).div_euclid(4) + day - 1402;
+    let j = e + (153 * f + 2).div_euclid(5);
+    j + 38 - ((g + 184).div_euclid(100) * 3).div_euclid(4)
 }
 
 /// TAI-UTC (cumulative leap seconds) for a UTC Julian date.
@@ -2250,6 +2255,60 @@ fn ut1_coverage_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn julian_day_number_is_proleptic_gregorian_for_every_year() {
+        // Howard Hinnant's days_from_civil, an independent count, shifted
+        // to the Julian Day Number of 1970-01-01.
+        fn reference(year: i64, month: i64, day: i64) -> i64 {
+            let year = year - i64::from(month <= 2);
+            let era = year.div_euclid(400);
+            let year_of_era = year - era * 400;
+            let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+            let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+            era * 146_097 + day_of_era - 719_468 + 2_440_588
+        }
+        let mut state = 0x243f_6a88_85a3_08d3_u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..200_000 {
+            let year = (next() % 200_001) as i64 - 100_000;
+            let month = (next() % 12) as i64 + 1;
+            let day = (next() % 28) as i64 + 1;
+            assert_eq!(
+                julian_day_number(year as i32, month as i32, day as i32),
+                reference(year, month, day),
+                "{year}-{month}-{day}"
+            );
+        }
+        for year in [
+            -100_000_i64,
+            -4_800,
+            -4_717,
+            -4_716,
+            -4_713,
+            -1,
+            0,
+            1,
+            1600,
+            2000,
+            2400,
+        ] {
+            if crate::astro::time::civil::is_leap_year(year) {
+                assert_eq!(
+                    julian_day_number(year as i32, 2, 29),
+                    reference(year, 2, 29)
+                );
+            }
+        }
+        // Julian Day 0 is -4713-11-24 in the proleptic Gregorian calendar.
+        assert_eq!(julian_day_number(-4713, 11, 24), 0);
+        assert_eq!(julian_day_number(2000, 1, 1), 2_451_545);
+    }
 
     #[test]
     fn a_label_takes_the_leap_count_of_its_civil_day() {

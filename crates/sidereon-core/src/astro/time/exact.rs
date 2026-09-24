@@ -17,6 +17,7 @@
 
 use std::cmp::Ordering;
 
+use super::civil::days_in_month;
 use super::scales::julian_day_number;
 
 /// Attoseconds in one second.
@@ -131,11 +132,13 @@ impl ExactEpoch {
     /// field states it, and every digit of it is kept: digits below the
     /// attosecond, which only a second below 0.1 written with more than
     /// eighteen fractional digits carries, are held in the remainder
-    /// ([`Self::sub_attosecond`]). The clock fields are not range-checked: an
-    /// hour of 24 is the next midnight, as in [`super::civil::j2000_seconds`].
-    /// `None` for a non-finite second, which states no epoch, and for an epoch
-    /// whose whole seconds since J2000 do not fit an `i64` (beyond about 2.9e11
-    /// years), which this type cannot hold.
+    /// ([`Self::sub_attosecond`]). The date is proleptic Gregorian for every
+    /// year. The clock fields are not range-checked: an hour of 24 is the next
+    /// midnight, as in [`super::civil::j2000_seconds`]. `None` for a date that
+    /// does not exist (a month outside 1 through 12, or a day outside the
+    /// month), for a non-finite second, which states no epoch, and for an
+    /// epoch whose whole seconds since J2000 do not fit an `i64` (beyond about
+    /// 2.9e11 years), which this type cannot hold.
     #[must_use]
     pub fn from_civil(
         year: i32,
@@ -145,6 +148,11 @@ impl ExactEpoch {
         minute: i32,
         second: f64,
     ) -> Option<Self> {
+        if !(1..=12).contains(&month)
+            || !(1..=days_in_month(i64::from(year), i64::from(month))).contains(&i64::from(day))
+        {
+            return None;
+        }
         let (second, residue) = attoseconds_of_shortest_decimal(second)?;
         let days = julian_day_number(year, month, day) - J2000_JULIAN_DAY_NUMBER;
         let clock_seconds = i128::from(days) * i128::from(SECONDS_PER_DAY)
@@ -1092,7 +1100,23 @@ mod tests {
             (before.whole_seconds(), before.attoseconds()),
             (-1, 750_000_000_000_000_000)
         );
-        // Only a non-finite second and whole seconds past an i64 are refused.
+        // A date that does not exist is refused, and every year is counted
+        // on the proleptic Gregorian calendar.
+        assert!(ExactEpoch::from_civil(2026, 13, 1, 0, 0, 0.0).is_none());
+        assert!(ExactEpoch::from_civil(2026, 0, 1, 0, 0, 0.0).is_none());
+        assert!(ExactEpoch::from_civil(2026, 2, 29, 0, 0, 0.0).is_none());
+        assert!(ExactEpoch::from_civil(2024, 2, 29, 0, 0, 0.0).is_some());
+        assert!(ExactEpoch::from_civil(2024, 4, 31, 0, 0, 0.0).is_none());
+        // -5000-01-01 12:00 is 2,556,697 days before J2000 (Julian Day
+        // -105152), a count the truncating division put a day off.
+        assert_eq!(
+            ExactEpoch::from_civil(-5000, 1, 1, 12, 0, 0.0)
+                .unwrap()
+                .whole_seconds(),
+            -2_556_697 * 86_400
+        );
+        // Only a non-finite second and whole seconds past an i64 are refused
+        // otherwise.
         assert!(ExactEpoch::from_civil(2000, 1, 1, 12, 0, f64::NAN).is_none());
         assert!(ExactEpoch::from_civil(2000, 1, 1, 12, 0, 1.0e300).is_none());
         assert!(ExactEpoch::from_civil(2000, 1, 1, 12, 0, 1.0e18).is_some());
