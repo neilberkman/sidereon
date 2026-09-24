@@ -120,7 +120,8 @@ impl Sp3 {
     /// record at all, and so is every satellite with a record that the header
     /// does not declare. Coverage is stated on the product's own epoch list:
     /// indices are into [`Sp3::epochs`]. Epochs are placed on the exact
-    /// 10-nanosecond tick axis, and the grid ([`Sp3EpochGrid`]) is a uniform product's own step whatever its
+    /// 10-nanosecond tick axis, and the grid is the one rule the merge also
+    /// applies ([`Sp3EpochGrid`]): a uniform product's own step whatever its
     /// header says, or the header interval when the product skips epochs of
     /// it. A span ends at an epoch that does not carry the channel, at a step
     /// longer than one grid step (the product has no epoch there), at an epoch
