@@ -41,15 +41,14 @@
 //! | QZSS ephemeris     | 1044                                     | [`QzssEphemeris`] |
 //! | Galileo ephemeris  | 1045 / 1046                              | [`GalileoFnavEphemeris`] / [`GalileoInavEphemeris`] |
 //! | GLONASS code-phase biases | 1230                              | [`GlonassCodePhaseBiases`] |
-//! | SSR corrections    | GPS 1057-1062, 1265; GLONASS 1063-1068; Galileo 1240-1245, 1267; QZSS 1246-1251, 1268; BeiDou 1258-1263, 1270 | [`SsrMessage`] |
+//! | SSR corrections    | GPS 1057-1062, 1265; GLONASS 1063-1068, 1266; Galileo 1240-1245, 1267; QZSS 1246-1251, 1268; SBAS 1252-1257, 1269; BeiDou 1258-1263, 1270 | [`SsrMessage`] |
 //! | IGS SSR corrections | 4076 subtypes 21-27 GPS, 41-47 GLONASS, 61-67 Galileo, 81-87 QZSS, 101-107 BeiDou, 121-127 SBAS | [`SsrMessage`] |
 //! | SSR ionosphere VTEC | 1264; 4076 subtype 201                  | [`SsrVtecMessage`] |
 //!
 //! Any other message number is preserved losslessly as [`Message::Unsupported`]
 //! (its raw body is kept so the frame still round-trips), and so is a 4076
-//! message whose IGS SSR message number is none of the above. Message types
-//! kept this way include the SSR messages not listed above and proprietary
-//! messages. They decode as
+//! message whose IGS SSR message number is none of the above: proprietary
+//! messages, for one. They decode as
 //! `Unsupported` rather than erroring.
 //!
 //! ## Departures and policy

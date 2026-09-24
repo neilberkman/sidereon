@@ -4672,8 +4672,8 @@ fn glonass_ssr_epoch_gps_s(receiver_gps_s: f64, tod_s: u32) -> f64 {
 ///   bias), six bits otherwise (the IGS SSR layout). In both the broadcast PRN
 ///   is the field plus 192, which is the `Jnn` slot the field states.
 ///
-/// An RTCM SSR SBAS field is refused: no native SBAS SSR layout (1252..1257,
-/// whose records carry an IOD CRC these records do not hold) is read here.
+/// An RTCM SSR SBAS field (1252..1257, 1269) is refused: the store applies no
+/// native SBAS correction.
 /// NavIC is refused because no SSR layout for it is read here. An IGS SSR
 /// (4076) message reads its six-bit field by the IGS SSR table instead, SBAS
 /// included; see `igs_ssr_satellite`.
@@ -4973,6 +4973,7 @@ mod tests {
             orbit: vec![SsrOrbitRecord {
                 satellite_id: 1,
                 iode: 42,
+                iod_crc: None,
                 delta_radial: 10_000,
                 delta_along: -20_000,
                 delta_cross: 30_000,
@@ -5032,6 +5033,7 @@ mod tests {
             orbit: vec![SsrOrbitRecord {
                 satellite_id,
                 iode: 42,
+                iod_crc: None,
                 delta_radial: 10_000,
                 delta_along: -20_000,
                 delta_cross: 30_000,
@@ -6006,6 +6008,7 @@ mod tests {
             orbit: vec![SsrOrbitRecord {
                 satellite_id: 1,
                 iode: 42,
+                iod_crc: None,
                 delta_radial: 0,
                 delta_along: 0,
                 delta_cross: 0,
@@ -6190,6 +6193,7 @@ mod tests {
             orbit: vec![SsrOrbitRecord {
                 satellite_id: sat.prn,
                 iode,
+                iod_crc: None,
                 delta_radial: -20_000,
                 delta_along: 10_000,
                 delta_cross: -3_000,
@@ -6293,6 +6297,7 @@ mod tests {
             orbit: vec![SsrOrbitRecord {
                 satellite_id: sat.prn,
                 iode: stale_iode,
+                iod_crc: None,
                 delta_radial: -20_000,
                 delta_along: 0,
                 delta_cross: 0,
@@ -6375,6 +6380,7 @@ mod tests {
             orbit: vec![SsrOrbitRecord {
                 satellite_id: sat.prn,
                 iode: record.issue_of_data.expect("broadcast issue").issue,
+                iod_crc: None,
                 delta_radial: 0,
                 delta_along: 0,
                 delta_cross: 0,
@@ -11271,6 +11277,7 @@ mod tests {
             orbit: vec![SsrOrbitRecord {
                 satellite_id: sat.prn,
                 iode,
+                iod_crc: None,
                 delta_radial: -20_000,
                 delta_along: 10_000,
                 delta_cross: -3_000,
@@ -11885,6 +11892,7 @@ mod tests {
             orbit: vec![SsrOrbitRecord {
                 satellite_id: 1,
                 iode: 42,
+                iod_crc: None,
                 delta_radial: 100,
                 delta_along: 200,
                 delta_cross: 300,
@@ -15670,6 +15678,7 @@ mod tests {
             orbit: vec![SsrOrbitRecord {
                 satellite_id: 30,
                 iode,
+                iod_crc: None,
                 delta_radial: -20_000,
                 delta_along: 10_000,
                 delta_cross: -3_000,
@@ -16598,6 +16607,7 @@ mod tests {
                 orbit: vec![SsrOrbitRecord {
                     satellite_id: sat.prn,
                     iode,
+                    iod_crc: None,
                     delta_radial: -20_000,
                     delta_along: 10_000,
                     delta_cross: -3_000,

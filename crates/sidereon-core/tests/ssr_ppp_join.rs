@@ -336,6 +336,7 @@ fn synthetic_ssr_store_with_radial_offset(
         orbit.push(SsrOrbitRecord {
             satellite_id: obs.sat.prn,
             iode: record.issue_of_data.expect("broadcast issue").issue,
+            iod_crc: None,
             delta_radial: raw_rtcm_orbit(-radial, 1.0e-4),
             delta_along: raw_rtcm_orbit(-along, 4.0e-4),
             delta_cross: raw_rtcm_orbit(-cross, 4.0e-4),

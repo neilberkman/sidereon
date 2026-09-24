@@ -31,6 +31,9 @@
 //!   `fixtures-generators/pyrtcm_layouts/generate_network_frames.py`.
 //! - `rtk2go_1230.rtcm3`: the first two 1230 frames of each capture above and of
 //!   `HEYT` and `FF-Malar`, byte for byte.
+//! - `bnc_encoded_ssr.rtcm3`: BNC's encoder output, written by
+//!   `fixtures-generators/bnc_ssr_oracle/generate.sh`: every RTCM SSR message
+//!   1057..1270 and every IGS SSR subtype once.
 //! - `rtklib_encoded_1041.rtcm3`: RTKLIB's encoder output (`encode-1041`), one
 //!   1041 per NavIC record of `tests/fixtures/nav/BRDM00DLR_S_20262650000_01D_MN_navic.rnx`.
 //! - `rtklib_encoded_4076.rtcm3`: RTKLIB's encoder output (`encode-4076`), the
@@ -1016,6 +1019,222 @@ fn igs_ssr_satellite_name(system: GnssSystem, id: u8) -> Option<String> {
     Some(name)
 }
 
+/// Every value RTKLIB `decode_ssr1`..`decode_ssr7` stored from `ssr`, bit for
+/// bit, with its epoch, update interval, IOD SSR, issue and datum; the number
+/// of satellites checked. `name_of` names a satellite as RTKLIB does.
+fn check_rtklib_ssr(
+    at: &str,
+    ssr: &rtcm::SsrMessage,
+    rtklib: &Value,
+    name_of: fn(GnssSystem, u8) -> Option<String>,
+    values: &mut usize,
+) -> usize {
+    let stored = rtklib["ssr"].as_array().expect("ssr");
+    let by_satellite: BTreeMap<&str, &Value> = stored
+        .iter()
+        .map(|entry| (entry["sat"].as_str().expect("sat"), entry))
+        .collect();
+    let week = rtklib["week"].as_i64().expect("week");
+    let epoch = if ssr.system == GnssSystem::Glonass && ssr.igs_ssr_version.is_none() {
+        // The native GLONASS epoch is a GLONASS time of day (UTC + 3 h), which
+        // RTKLIB `adjday_glot` places in GPS time: GPS - UTC is 18 s here.
+        let tow = f64::from_bits(bits64(&rtklib["tow"]));
+        assert_eq!(tow.fract(), 0.0, "{at}");
+        let tow = tow as i64;
+        assert_eq!(
+            (tow - 18 + 10_800).rem_euclid(86_400),
+            i64::from(ssr.header.epoch_time_s),
+            "{at} GLONASS epoch"
+        );
+        GPST0_UNIX_S + 604_800 * week + tow
+    } else {
+        GPST0_UNIX_S + 604_800 * week + i64::from(ssr.header.epoch_time_s)
+    };
+    let udi = SSR_UPDATE_INTERVAL_S[usize::from(ssr.header.update_interval)];
+    let mut named = 0usize;
+    let check_common = |entry: &Value, slots: &[usize]| {
+        for &k in slots {
+            assert_eq!(entry["t0"][k][0].as_i64(), Some(epoch), "{at} t0[{k}]");
+            assert_eq!(bits64(&entry["t0"][k][1]), 0f64.to_bits(), "{at} t0[{k}]");
+            assert_eq!(bits64(&entry["udi"][k]), udi.to_bits(), "{at} udi[{k}]");
+            assert_eq!(
+                entry["iod"][k].as_u64(),
+                Some(u64::from(ssr.header.iod_ssr)),
+                "{at} iod[{k}]"
+            );
+        }
+    };
+    let entry_of = |id: u8| -> Option<&Value> {
+        let sat = name_of(ssr.system, id)?;
+        Some(
+            by_satellite
+                .get(sat.as_str())
+                .copied()
+                .unwrap_or_else(|| panic!("{at}: RTKLIB stored no {sat}")),
+        )
+    };
+    let orbit_values = |entry: &Value, orbit: &rtcm::SsrOrbitRecord| {
+        let iodcrc = match (ssr.igs_ssr_version, ssr.system) {
+            (None, GnssSystem::Sbas) => orbit.iod_crc.expect("IOD CRC"),
+            _ => 0,
+        };
+        assert_eq!(entry["iode"].as_u64(), Some(u64::from(orbit.iode)), "{at}");
+        assert_eq!(entry["iodcrc"].as_u64(), Some(u64::from(iodcrc)), "{at}");
+        assert_eq!(
+            entry["refd"].as_u64(),
+            Some(u64::from(
+                ssr.header.satellite_reference_datum.expect("datum")
+            )),
+            "{at}"
+        );
+        let deph = [
+            f64::from(orbit.delta_radial) * 1E-4,
+            f64::from(orbit.delta_along) * 4E-4,
+            f64::from(orbit.delta_cross) * 4E-4,
+        ];
+        let ddeph = [
+            f64::from(orbit.dot_delta_radial) * 1E-6,
+            f64::from(orbit.dot_delta_along) * 4E-6,
+            f64::from(orbit.dot_delta_cross) * 4E-6,
+        ];
+        for k in 0..3 {
+            assert_eq!(bits64(&entry["deph"][k]), deph[k].to_bits(), "{at} deph");
+            assert_eq!(bits64(&entry["ddeph"][k]), ddeph[k].to_bits(), "{at} ddeph");
+        }
+    };
+    let clock_values = |entry: &Value, clock: &rtcm::SsrClockRecord| {
+        let dclk = [
+            f64::from(clock.c0) * 1E-4,
+            f64::from(clock.c1) * 1E-6,
+            f64::from(clock.c2) * 2E-8,
+        ];
+        for (k, value) in dclk.iter().enumerate() {
+            assert_eq!(bits64(&entry["dclk"][k]), value.to_bits(), "{at} dclk");
+        }
+    };
+    match ssr.kind {
+        rtcm::SsrKind::Orbit => {
+            for orbit in &ssr.orbit {
+                let Some(entry) = entry_of(orbit.satellite_id) else {
+                    continue;
+                };
+                check_common(entry, &[0]);
+                orbit_values(entry, orbit);
+                named += 1;
+                *values += 6;
+            }
+        }
+        rtcm::SsrKind::Clock => {
+            for clock in &ssr.clock {
+                let Some(entry) = entry_of(clock.satellite_id) else {
+                    continue;
+                };
+                check_common(entry, &[1]);
+                clock_values(entry, clock);
+                named += 1;
+                *values += 3;
+            }
+        }
+        rtcm::SsrKind::CombinedOrbitClock => {
+            for (orbit, clock) in ssr.orbit.iter().zip(&ssr.clock) {
+                let Some(entry) = entry_of(orbit.satellite_id) else {
+                    continue;
+                };
+                check_common(entry, &[0, 1]);
+                orbit_values(entry, orbit);
+                clock_values(entry, clock);
+                named += 1;
+                *values += 9;
+            }
+        }
+        rtcm::SsrKind::HighRateClock => {
+            for clock in &ssr.clock {
+                let Some(entry) = entry_of(clock.satellite_id) else {
+                    continue;
+                };
+                check_common(entry, &[2]);
+                let hrclk = f64::from(clock.c0) * 1E-4;
+                assert_eq!(bits64(&entry["hrclk"]), hrclk.to_bits(), "{at} hrclk");
+                named += 1;
+                *values += 1;
+            }
+        }
+        rtcm::SsrKind::Ura => {
+            for &(id, ura) in &ssr.ura {
+                let Some(entry) = entry_of(id) else { continue };
+                check_common(entry, &[3]);
+                assert_eq!(entry["ura"].as_u64(), Some(u64::from(ura)), "{at} ura");
+                named += 1;
+                *values += 1;
+            }
+        }
+        rtcm::SsrKind::CodeBias => {
+            for record in &ssr.code_bias {
+                let Some(entry) = entry_of(record.satellite_id) else {
+                    continue;
+                };
+                check_common(entry, &[4]);
+                // RTKLIB reads the identifiers through its RTCM SSR tables and
+                // keeps the last value of a signal.
+                let mut expected = BTreeMap::new();
+                for &(signal, bias) in &record.biases {
+                    if let Some(physical) = sidereon_core::ssr::rtcm_ssr_signal(ssr.system, signal)
+                    {
+                        expected
+                            .insert(physical.code().to_string(), (f64::from(bias) * 0.01) as f32);
+                    }
+                }
+                expected.retain(|_, value| *value != 0.0);
+                let stored = entry["cbias"].as_object().expect("cbias");
+                assert_eq!(stored.len(), expected.len(), "{at} cbias");
+                for (code, value) in &expected {
+                    assert_eq!(bits32(&stored[code]), value.to_bits(), "{at} cbias {code}");
+                }
+                named += 1;
+                *values += expected.len();
+            }
+        }
+        rtcm::SsrKind::PhaseBias => {
+            for record in &ssr.phase_bias {
+                let Some(entry) = entry_of(record.satellite_id) else {
+                    continue;
+                };
+                check_common(entry, &[5]);
+                let yaw_ang = f64::from(record.yaw_angle) / 256.0 * 180.0;
+                let yaw_rate = f64::from(record.yaw_rate) / 8192.0 * 180.0;
+                assert_eq!(bits64(&entry["yaw_ang"]), yaw_ang.to_bits(), "{at} yaw");
+                assert_eq!(
+                    bits64(&entry["yaw_rate"]),
+                    yaw_rate.to_bits(),
+                    "{at} yaw rate"
+                );
+                let mut expected = BTreeMap::new();
+                for bias in &record.biases {
+                    if let Some(physical) =
+                        sidereon_core::ssr::rtcm_ssr_signal(ssr.system, bias.signal_id)
+                    {
+                        expected.insert(physical.code().to_string(), f64::from(bias.bias) * 0.0001);
+                    }
+                }
+                expected.retain(|_, value| *value != 0.0);
+                let stored = entry["pbias"].as_object().expect("pbias");
+                assert_eq!(stored.len(), expected.len(), "{at} pbias");
+                for (code, value) in &expected {
+                    assert_eq!(bits64(&stored[code]), value.to_bits(), "{at} pbias {code}");
+                }
+                named += 1;
+                *values += 2 + expected.len();
+            }
+        }
+    }
+    assert_eq!(
+        named,
+        stored.len(),
+        "{at}: every satellite RTKLIB stored is checked"
+    );
+    named
+}
+
 /// IGS SSR 4076 frames of every satellite subtype, written by RTKLIB's encoder
 /// from the corrections of a real IGS RTCM SSR stream: every orbit, clock,
 /// high-rate clock, URA, code-bias and phase-bias value RTKLIB `decode_ssr1`..
@@ -1046,193 +1265,7 @@ fn igs_ssr_matches_rtklib() {
             unread += 1;
             continue;
         }
-        let by_satellite: BTreeMap<&str, &Value> = stored
-            .iter()
-            .map(|entry| (entry["sat"].as_str().expect("sat"), entry))
-            .collect();
-        let week = frame.rtklib["week"].as_i64().expect("week");
-        let epoch = GPST0_UNIX_S + 604_800 * week + i64::from(ssr.header.epoch_time_s);
-        let udi = SSR_UPDATE_INTERVAL_S[usize::from(ssr.header.update_interval)];
-        let mut named = 0usize;
-        let check_common = |entry: &Value, slots: &[usize]| {
-            for &k in slots {
-                assert_eq!(entry["t0"][k][0].as_i64(), Some(epoch), "{at} t0[{k}]");
-                assert_eq!(bits64(&entry["t0"][k][1]), 0f64.to_bits(), "{at} t0[{k}]");
-                assert_eq!(bits64(&entry["udi"][k]), udi.to_bits(), "{at} udi[{k}]");
-                assert_eq!(
-                    entry["iod"][k].as_u64(),
-                    Some(u64::from(ssr.header.iod_ssr)),
-                    "{at} iod[{k}]"
-                );
-            }
-        };
-        let entry_of = |id: u8| -> Option<&Value> {
-            let sat = igs_ssr_satellite_name(ssr.system, id)?;
-            Some(
-                by_satellite
-                    .get(sat.as_str())
-                    .copied()
-                    .unwrap_or_else(|| panic!("{at}: RTKLIB stored no {sat}")),
-            )
-        };
-        let orbit_values = |entry: &Value, orbit: &rtcm::SsrOrbitRecord| {
-            assert_eq!(entry["iode"].as_u64(), Some(u64::from(orbit.iode)), "{at}");
-            assert_eq!(
-                entry["refd"].as_u64(),
-                Some(u64::from(
-                    ssr.header.satellite_reference_datum.expect("datum")
-                )),
-                "{at}"
-            );
-            let deph = [
-                f64::from(orbit.delta_radial) * 1E-4,
-                f64::from(orbit.delta_along) * 4E-4,
-                f64::from(orbit.delta_cross) * 4E-4,
-            ];
-            let ddeph = [
-                f64::from(orbit.dot_delta_radial) * 1E-6,
-                f64::from(orbit.dot_delta_along) * 4E-6,
-                f64::from(orbit.dot_delta_cross) * 4E-6,
-            ];
-            for k in 0..3 {
-                assert_eq!(bits64(&entry["deph"][k]), deph[k].to_bits(), "{at} deph");
-                assert_eq!(bits64(&entry["ddeph"][k]), ddeph[k].to_bits(), "{at} ddeph");
-            }
-        };
-        let clock_values = |entry: &Value, clock: &rtcm::SsrClockRecord| {
-            let dclk = [
-                f64::from(clock.c0) * 1E-4,
-                f64::from(clock.c1) * 1E-6,
-                f64::from(clock.c2) * 2E-8,
-            ];
-            for (k, value) in dclk.iter().enumerate() {
-                assert_eq!(bits64(&entry["dclk"][k]), value.to_bits(), "{at} dclk");
-            }
-        };
-        match ssr.kind {
-            rtcm::SsrKind::Orbit => {
-                for orbit in &ssr.orbit {
-                    let Some(entry) = entry_of(orbit.satellite_id) else {
-                        continue;
-                    };
-                    check_common(entry, &[0]);
-                    orbit_values(entry, orbit);
-                    named += 1;
-                    values += 6;
-                }
-            }
-            rtcm::SsrKind::Clock => {
-                for clock in &ssr.clock {
-                    let Some(entry) = entry_of(clock.satellite_id) else {
-                        continue;
-                    };
-                    check_common(entry, &[1]);
-                    clock_values(entry, clock);
-                    named += 1;
-                    values += 3;
-                }
-            }
-            rtcm::SsrKind::CombinedOrbitClock => {
-                for (orbit, clock) in ssr.orbit.iter().zip(&ssr.clock) {
-                    let Some(entry) = entry_of(orbit.satellite_id) else {
-                        continue;
-                    };
-                    check_common(entry, &[0, 1]);
-                    orbit_values(entry, orbit);
-                    clock_values(entry, clock);
-                    named += 1;
-                    values += 9;
-                }
-            }
-            rtcm::SsrKind::HighRateClock => {
-                for clock in &ssr.clock {
-                    let Some(entry) = entry_of(clock.satellite_id) else {
-                        continue;
-                    };
-                    check_common(entry, &[2]);
-                    let hrclk = f64::from(clock.c0) * 1E-4;
-                    assert_eq!(bits64(&entry["hrclk"]), hrclk.to_bits(), "{at} hrclk");
-                    named += 1;
-                    values += 1;
-                }
-            }
-            rtcm::SsrKind::Ura => {
-                for &(id, ura) in &ssr.ura {
-                    let Some(entry) = entry_of(id) else { continue };
-                    check_common(entry, &[3]);
-                    assert_eq!(entry["ura"].as_u64(), Some(u64::from(ura)), "{at} ura");
-                    named += 1;
-                    values += 1;
-                }
-            }
-            rtcm::SsrKind::CodeBias => {
-                for record in &ssr.code_bias {
-                    let Some(entry) = entry_of(record.satellite_id) else {
-                        continue;
-                    };
-                    check_common(entry, &[4]);
-                    // RTKLIB reads the identifiers through its RTCM SSR tables and
-                    // keeps the last value of a signal.
-                    let mut expected = BTreeMap::new();
-                    for &(signal, bias) in &record.biases {
-                        if let Some(physical) =
-                            sidereon_core::ssr::rtcm_ssr_signal(ssr.system, signal)
-                        {
-                            expected.insert(
-                                physical.code().to_string(),
-                                (f64::from(bias) * 0.01) as f32,
-                            );
-                        }
-                    }
-                    expected.retain(|_, value| *value != 0.0);
-                    let stored = entry["cbias"].as_object().expect("cbias");
-                    assert_eq!(stored.len(), expected.len(), "{at} cbias");
-                    for (code, value) in &expected {
-                        assert_eq!(bits32(&stored[code]), value.to_bits(), "{at} cbias {code}");
-                    }
-                    named += 1;
-                    values += expected.len();
-                }
-            }
-            rtcm::SsrKind::PhaseBias => {
-                for record in &ssr.phase_bias {
-                    let Some(entry) = entry_of(record.satellite_id) else {
-                        continue;
-                    };
-                    check_common(entry, &[5]);
-                    let yaw_ang = f64::from(record.yaw_angle) / 256.0 * 180.0;
-                    let yaw_rate = f64::from(record.yaw_rate) / 8192.0 * 180.0;
-                    assert_eq!(bits64(&entry["yaw_ang"]), yaw_ang.to_bits(), "{at} yaw");
-                    assert_eq!(
-                        bits64(&entry["yaw_rate"]),
-                        yaw_rate.to_bits(),
-                        "{at} yaw rate"
-                    );
-                    let mut expected = BTreeMap::new();
-                    for bias in &record.biases {
-                        if let Some(physical) =
-                            sidereon_core::ssr::rtcm_ssr_signal(ssr.system, bias.signal_id)
-                        {
-                            expected
-                                .insert(physical.code().to_string(), f64::from(bias.bias) * 0.0001);
-                        }
-                    }
-                    expected.retain(|_, value| *value != 0.0);
-                    let stored = entry["pbias"].as_object().expect("pbias");
-                    assert_eq!(stored.len(), expected.len(), "{at} pbias");
-                    for (code, value) in &expected {
-                        assert_eq!(bits64(&stored[code]), value.to_bits(), "{at} pbias {code}");
-                    }
-                    named += 1;
-                    values += 2 + expected.len();
-                }
-            }
-        }
-        assert_eq!(
-            named,
-            stored.len(),
-            "{at}: every satellite RTKLIB stored is checked"
-        );
+        let named = check_rtklib_ssr(&at, ssr, &frame.rtklib, igs_ssr_satellite_name, &mut values);
         satellites += named;
     }
     eprintln!(
@@ -1241,6 +1274,81 @@ fn igs_ssr_matches_rtklib() {
     );
     assert_eq!(subtypes.len(), 42, "every satellite subtype");
     assert!(values > 0);
+}
+
+/// RTKLIB's satellite name for a native RTCM SSR satellite ID of GPS, GLONASS,
+/// Galileo or SBAS, or `None` when RTKLIB `satno` has no satellite for it
+/// (`decode_ssr*` offsets SBAS by 120).
+fn rtcm_ssr_satellite_name(system: GnssSystem, id: u8) -> Option<String> {
+    let name = match system {
+        GnssSystem::Gps if (1..=32).contains(&id) => format!("G{id:02}"),
+        GnssSystem::Glonass if (1..=27).contains(&id) => format!("R{id:02}"),
+        GnssSystem::Galileo if (1..=36).contains(&id) => format!("E{id:02}"),
+        GnssSystem::Sbas if id <= 38 => format!("{:03}", u16::from(id) + 120),
+        _ => return None,
+    };
+    Some(name)
+}
+
+/// The RTCM SSR messages BNC's encoder writes (`bnc_encoded_ssr.rtcm3`, see
+/// `rtcm_ssr_bnc_oracle.rs`) for GPS, GLONASS, Galileo and SBAS (1252..1257,
+/// with the 9-bit t0 modulo and the 24-bit IOD CRC): every value RTKLIB
+/// `decode_ssr1`..`decode_ssr6` store, bit for bit.
+///
+/// RTKLIB stores nothing from the phase-bias messages 1265..1270 or the VTEC
+/// message 1264. It reads the other frames in layouts that differ from the
+/// one RTCM 10403.3 states and BNC reads, so they are checked against BNC
+/// only: for QZSS (1246..1251) RTKLIB reads a 4-bit satellite count where the
+/// header carries the 6-bit DF387 count, and stores no satellite; for BeiDou
+/// (1258..1263) RTKLIB demo5 reads a 24-bit IOD CRC after the 10-bit toe
+/// modulo where the frame carries the 8-bit BeiDou IOD.
+#[test]
+fn rtcm_ssr_matches_rtklib() {
+    let name = "bnc_encoded_ssr.rtcm3";
+    let mut values = 0usize;
+    let mut satellites = 0usize;
+    let mut numbers = std::collections::BTreeSet::new();
+    for frame in fixture(name) {
+        let Message::Ssr(ssr) = &frame.message else {
+            continue;
+        };
+        if ssr.igs_ssr_version.is_some() {
+            continue;
+        }
+        let at = format!("{name} frame at {}", frame.offset);
+        if ssr.kind == rtcm::SsrKind::PhaseBias {
+            assert_eq!(frame.rtklib["ret"].as_i64(), Some(0), "{at}");
+            continue;
+        }
+        let stored = frame.rtklib["ssr"].as_array().expect("ssr");
+        match ssr.system {
+            GnssSystem::Qzss => {
+                assert!(stored.is_empty(), "{at}");
+                continue;
+            }
+            GnssSystem::BeiDou => continue,
+            _ => {}
+        }
+        numbers.insert(ssr.message_number);
+        let named = check_rtklib_ssr(
+            &at,
+            ssr,
+            &frame.rtklib,
+            rtcm_ssr_satellite_name,
+            &mut values,
+        );
+        assert!(named > 0, "{at}");
+        satellites += named;
+    }
+    eprintln!(
+        "{name}: {} messages, {satellites} satellite records, {values} values",
+        numbers.len()
+    );
+    assert_eq!(
+        numbers.len(),
+        24,
+        "GPS, GLONASS, Galileo and SBAS, six messages each"
+    );
 }
 
 /// Real 1013 frames decode strictly and round-trip; RTKLIB `decode_type1013`
