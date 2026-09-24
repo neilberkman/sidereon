@@ -440,7 +440,7 @@ fn sp3_fixture_with_time_system(label: &str) -> String {
 #[test]
 fn standard_sp3_time_system_labels_parse_from_committed_fixture() {
     for (label, system, scale) in [
-        ("GLO", Sp3TimeSystem::Glonass, TimeScale::Utc),
+        ("GLO", Sp3TimeSystem::Glonass, TimeScale::Glonasst),
         ("QZS", Sp3TimeSystem::Qzss, TimeScale::Qzsst),
         ("IRN", Sp3TimeSystem::Irnss, TimeScale::Gpst),
         ("GAL", Sp3TimeSystem::Galileo, TimeScale::Gst),
@@ -3138,12 +3138,13 @@ fn test_writer_refuses_a_product_whose_stored_arrays_disagree() {
     assert!(reparsed.header.satellites.contains(&g99));
     assert_eq!(reparsed.skipped_records, 0);
 
-    // Header line 1 states the product's start epoch; a product with no epoch
-    // has none, and is not given an invented one.
+    // SP3 sets no minimum epoch count and RTKLIB `readsp3` reads a file that
+    // carries only a header. A product with no epoch is written with the start
+    // its line-2 GPS week and seconds of week name, and reads back as itself.
     // Every per-epoch array goes with the epoch list, and the header's own
-    // count goes with it too, or the product is reported as out of shape before
-    // its emptiness is ever considered. This is the shape `Sp3::parse` gives a
-    // file that carries a header and no epoch records.
+    // count goes with it too, or the product is reported as out of shape. This
+    // is the shape `Sp3::parse` gives a file that carries a header and no epoch
+    // records.
     let mut epochless = base;
     epochless.header.num_epochs = 0;
     epochless.epochs.clear();
@@ -3151,7 +3152,22 @@ fn test_writer_refuses_a_product_whose_stored_arrays_disagree() {
     epochless.clock_records.clear();
     epochless.interp_raw.clear();
     epochless.epoch_j2000_s.clear();
-    assert_eq!(epochless.to_sp3_string(), Err(Sp3WriteError::NoEpochs));
+    let text = epochless
+        .to_sp3_string()
+        .expect("write an epoch-less product");
+    assert!(
+        text.starts_with("#cP2020  6 24  0  0  0.00000000       0 "),
+        "{text}"
+    );
+    assert!(!text.contains("\n*  "), "{text}");
+    let reread = Sp3::parse(text.as_bytes()).expect("re-parse an epoch-less product");
+    assert!(reread.epochs.is_empty());
+    assert_eq!(reread.header.gnss_week, epochless.header.gnss_week);
+    assert_eq!(
+        reread.header.seconds_of_week,
+        epochless.header.seconds_of_week
+    );
+    assert_eq!(reread.to_sp3_string().expect("rewrite"), text);
 }
 
 // --- record values must restate what the product holds ----------------------
@@ -4001,16 +4017,9 @@ fn test_writer_refuses_labels_that_would_take_a_reserved_column() {
     );
 }
 
-/// Two values this writer has no record for: a record field that is not a
-/// number, and an epoch held as a count of nanoseconds.
-///
-/// The second is a limit of the SP3 writer's contract rather than of the
-/// instant. An integer-nanosecond count is exact and core reads one against the
-/// J2000 origin elsewhere, but `InstantRepr::Nanos` names no origin of its own
-/// and SP3's own node axis declines the conversion for exactly that reason, so
-/// the writer refuses by name instead of choosing one here.
+/// A record field that is not a number has no written form.
 #[test]
-fn test_writer_refuses_record_and_epoch_values_with_no_written_form() {
+fn test_writer_refuses_a_record_value_with_no_written_form() {
     let g01 = id(GnssSystem::Gps, 1);
 
     let mut not_a_number = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
@@ -4027,11 +4036,172 @@ fn test_writer_refuses_record_and_epoch_values_with_no_written_form() {
             epoch_index: 0,
         })
     );
+}
 
-    let mut counted_in_nanos = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
-    counted_in_nanos.epochs[1].repr = InstantRepr::Nanos(0);
+/// The same product with every epoch held as integer nanoseconds from the
+/// J2000 origin, the count each parsed epoch's exact whole-second axis names.
+fn with_nanosecond_epochs(product: &Sp3) -> Sp3 {
+    let mut counted = product.clone();
+    for (epoch, seconds) in counted.epochs.iter_mut().zip(&product.epoch_j2000_s) {
+        assert_eq!(seconds.fract(), 0.0, "fixture epochs are whole seconds");
+        epoch.repr = InstantRepr::Nanos(*seconds as i128 * 1_000_000_000);
+    }
+    counted
+}
+
+/// An epoch held as integer nanoseconds is read from the J2000 origin in its own
+/// scale and written as the record that count names - the record the parser
+/// read the equivalent split Julian date from, byte for byte. That includes an
+/// epoch eleven seconds after J2000, whose day fraction is not a dyadic
+/// rational and whose split the parser builds only approximately.
+#[test]
+fn test_writer_states_nanosecond_epochs_from_the_j2000_origin() {
+    for text in [SP3C_FILE, SP3C_FRACTIONAL_EPOCH_FILE] {
+        let parsed = Sp3::parse(text.as_bytes()).unwrap();
+        let counted = with_nanosecond_epochs(&parsed);
+        let from_splits = parsed.to_sp3_string().expect("write split epochs");
+        let from_counts = counted.to_sp3_string().expect("write nanosecond epochs");
+        assert_eq!(from_counts, from_splits);
+
+        // Writers mirror readers: the written records read back as the parser's
+        // own epochs, and the count and the split sit on one J2000 axis.
+        let reread = Sp3::parse(from_counts.as_bytes()).unwrap();
+        assert_eq!(reread.epochs, parsed.epochs);
+        assert_eq!(reread.epochs_j2000_seconds(), parsed.epochs_j2000_seconds());
+        for (index, count) in counted.epochs.iter().enumerate() {
+            assert_eq!(
+                super::interp::instant_to_j2000_seconds(count),
+                Some(parsed.epoch_j2000_s[index])
+            );
+        }
+    }
+}
+
+/// The count's calendar decomposition is exact integer arithmetic on both sides
+/// of the origin: ten nanoseconds before J2000 is the last tick of the
+/// preceding second, and a count a whole number of days before it lands on
+/// the same clock time of an earlier day.
+#[test]
+fn test_writer_decomposes_nanosecond_epochs_before_the_origin() {
+    let mut counted = with_nanosecond_epochs(&Sp3::parse(SP3C_FILE.as_bytes()).unwrap());
+    counted.epochs[0].repr = InstantRepr::Nanos(-10);
+    counted.epochs[1].repr = InstantRepr::Nanos(-86_400 * 1_000_000_000);
+    let text = counted.to_sp3_string().expect("write nanosecond epochs");
+    let epoch_lines: Vec<&str> = text
+        .lines()
+        .filter(|line| line.starts_with("*  "))
+        .collect();
     assert_eq!(
-        counted_in_nanos.to_sp3_string(),
-        Err(Sp3WriteError::EpochRepresentationUnsupported { epoch_index: 1 })
+        epoch_lines,
+        vec![
+            "*  2000  1  1 11 59 59.99999999",
+            "*  1999 12 31 12  0  0.00000000"
+        ]
     );
+    assert!(text.starts_with("#cP2000  1  1 11 59 59.99999999"));
+}
+
+/// A count the seconds field cannot state - finer than its 10-nanosecond tick,
+/// or past the four-digit year - is refused by name, never rounded onto a
+/// neighbouring record.
+#[test]
+fn test_writer_refuses_nanosecond_epochs_no_record_states() {
+    let parsed = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+
+    let mut off_tick = with_nanosecond_epochs(&parsed);
+    let InstantRepr::Nanos(count) = off_tick.epochs[1].repr else {
+        unreachable!("set to a count above")
+    };
+    off_tick.epochs[1].repr = InstantRepr::Nanos(count + 5);
+    assert_eq!(
+        off_tick.to_sp3_string(),
+        Err(Sp3WriteError::EpochNotRestatable {
+            epoch_index: 1,
+            field_seconds: 0.0,
+            residual_s: 5.0 / 1.0e9,
+        })
+    );
+
+    let mut far = with_nanosecond_epochs(&parsed);
+    far.epochs[1].repr = InstantRepr::Nanos(i128::MAX);
+    assert!(matches!(
+        far.to_sp3_string(),
+        Err(Sp3WriteError::YearNotRepresentable { epoch_index: 1, .. })
+    ));
+}
+
+/// A count with a sub-second part that is a whole number of ticks is written
+/// as the record that states it, reads back to a split Julian date, and that
+/// split writes the same bytes again.
+#[test]
+fn test_writer_restates_sub_second_nanosecond_epochs() {
+    let parsed = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
+    let mut counted = with_nanosecond_epochs(&parsed);
+    for epoch in &mut counted.epochs {
+        let InstantRepr::Nanos(count) = epoch.repr else {
+            unreachable!("set to a count above")
+        };
+        epoch.repr = InstantRepr::Nanos(count + 123_456_780);
+    }
+    let text = counted.to_sp3_string().expect("write sub-second counts");
+    assert!(text.contains("*  2020  6 24  0  0  0.12345678\n"), "{text}");
+    assert!(text.contains("*  2020  6 24  0 15  0.12345678\n"), "{text}");
+
+    let reread = Sp3::parse(text.as_bytes()).unwrap();
+    assert_eq!(reread.to_sp3_string().expect("rewrite"), text);
+}
+
+/// Interpolation reads a count on the axis a split Julian date sits on: the
+/// same product with every epoch held as a count interpolates bit for bit as
+/// the parsed product, and a query held as a count equals the same query in
+/// seconds.
+#[test]
+fn nanosecond_epochs_interpolate_on_the_split_axis() {
+    let parsed = grg_final_product();
+    let counted = with_nanosecond_epochs(&parsed);
+    let sat = parsed.satellites()[0];
+    let start = parsed.epoch_j2000_s[0];
+    for offset_s in [450.0, 3_600.0, 40_050.0] {
+        let query_s = start + offset_s;
+        let expected = parsed
+            .position_at_j2000_seconds(sat, query_s)
+            .expect("parsed product serves the query");
+        let from_counts = counted
+            .position(
+                sat,
+                Instant::from_nanos(parsed.header.time_scale, query_s as i128 * 1_000_000_000),
+            )
+            .expect("counted product serves the query");
+        assert_eq!(from_counts.position, expected.position, "{offset_s}");
+        assert_eq!(from_counts.clock_s, expected.clock_s, "{offset_s}");
+    }
+}
+
+/// The node axis is one axis: an instant a nanosecond short of a whole second
+/// lands on that second whether it is held as a split Julian date or as a
+/// count, and one a microsecond short lands on the second before, both ways.
+#[test]
+fn node_axis_agrees_for_split_and_count_near_a_whole_second() {
+    use super::interp::precise_node_j2000_seconds_from_instant;
+    let whole_s: i128 = 646_272_000;
+    for below_ns in [1_i128, 1_000] {
+        let count = whole_s * 1_000_000_000 - below_ns;
+        let from_count =
+            precise_node_j2000_seconds_from_instant(&Instant::from_nanos(TimeScale::Gpst, count))
+                .unwrap();
+        let days = count.div_euclid(86_400_000_000_000);
+        let within_ns = count.rem_euclid(86_400_000_000_000);
+        let split = Instant::from_julian_date(
+            TimeScale::Gpst,
+            JulianDateSplit::new(
+                crate::constants::J2000_JD + days as f64,
+                within_ns as f64 / 86_400_000_000_000.0,
+            )
+            .unwrap(),
+        );
+        let from_split = precise_node_j2000_seconds_from_instant(&split).unwrap();
+        assert_eq!(from_count, from_split, "{below_ns} ns below");
+        let expected = if below_ns == 1 { whole_s } else { whole_s - 1 };
+        assert_eq!(from_count, expected as f64, "{below_ns} ns below");
+    }
 }

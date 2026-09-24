@@ -38,8 +38,6 @@ use sidereon_core::ephemeris::{Sp3, Sp3WriteError};
 /// hold is skipped at read time and never reaches the writer.
 fn is_readable_input_refusal(error: &Sp3WriteError) -> bool {
     match error {
-        // A header with no epoch records at all.
-        Sp3WriteError::NoEpochs => true,
         // Line 2's seconds-of-week and epoch interval are kept even when the
         // field states an infinity or a NaN, so `validate_exact_sp3` can report
         // them as typed integrity failures.

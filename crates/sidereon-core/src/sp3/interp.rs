@@ -432,7 +432,30 @@ pub(super) fn precise_node_j2000_seconds(seconds: f64) -> f64 {
 pub(super) fn precise_node_j2000_seconds_from_instant(instant: &Instant) -> Option<f64> {
     match instant.repr {
         InstantRepr::JulianDate(split) => Some(precise_node_j2000_seconds_from_split(split)),
-        InstantRepr::Nanos(_) => instant_to_j2000_seconds(instant).map(precise_node_j2000_seconds),
+        InstantRepr::Nanos(ns) => Some(precise_node_j2000_seconds_from_nanos(ns)),
+    }
+}
+
+/// The node second of an integer-nanosecond instant, by the rule
+/// [`precise_node_j2000_seconds_from_split`] applies to a split Julian date:
+/// the nearest whole second when the instant lies within two units in the
+/// last place of that second's `f64`, otherwise the whole second at or before
+/// it. One instant held either way therefore lands on one node. Both steps are
+/// taken on the exact count in `i128`.
+fn precise_node_j2000_seconds_from_nanos(ns: i128) -> f64 {
+    const NANOS_PER_SECOND: i128 = 1_000_000_000;
+    let floor = ns.div_euclid(NANOS_PER_SECOND);
+    let nearest = if ns.rem_euclid(NANOS_PER_SECOND) * 2 >= NANOS_PER_SECOND {
+        floor + 1
+    } else {
+        floor
+    };
+    let candidate = nearest as f64;
+    let residual_s = (ns - nearest * NANOS_PER_SECOND) as f64 / 1.0e9;
+    if candidate.is_finite() && residual_s.abs() <= 2.0 * epoch_ulp(candidate) {
+        candidate
+    } else {
+        floor as f64
     }
 }
 
@@ -852,6 +875,10 @@ fn fitted_span_distance(arc: &ClockSplineArc, query: f64) -> f64 {
 /// Convert a parser [`Instant`] to seconds since J2000, as `f64`, **exact**
 /// (not quantized).
 ///
+/// An [`InstantRepr::Nanos`] count is read from the J2000 origin in the
+/// instant's own scale, so an epoch assigned as nanoseconds sits on the same
+/// axis as the parser's split Julian dates.
+///
 /// The split-JD difference is taken whole-part first to avoid cancellation.
 /// This returns the precise instant; whole-second quantization belongs to the
 /// *node axis* only:
@@ -873,12 +900,16 @@ pub(super) fn instant_to_j2000_seconds(instant: &Instant) -> Option<f64> {
             Some(j2000_seconds_from_split(split.jd_whole, split.fraction))
         }
         InstantRepr::Nanos(ns) => {
-            // Integer ns since the scale epoch - but the parser stores SP3
-            // epochs as JulianDate, so this path is not exercised by SP3.
-            // J2000 is JD 2451545.0; without a fixed ns-origin convention here
-            // we cannot map ns->J2000-seconds unambiguously, so decline.
-            let _ = ns;
-            None
+            // Integer nanoseconds from the J2000 origin in the instant's own
+            // scale, the convention `julian_date_from_instant` documents and
+            // the SP3 writer states records from. The whole seconds and the
+            // sub-second remainder are split in `i128` so a count past the
+            // 53-bit integers an `f64` holds keeps its seconds up to the one
+            // final rounding.
+            const NANOS_PER_SECOND: i128 = 1_000_000_000;
+            let whole_s = ns.div_euclid(NANOS_PER_SECOND) as f64;
+            let fraction_s = ns.rem_euclid(NANOS_PER_SECOND) as f64 / 1.0e9;
+            Some(whole_s + fraction_s)
         }
     }
 }
