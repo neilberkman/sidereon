@@ -250,26 +250,46 @@ in-flight state. Old cleanup ignores the new filenames. New cleanup may remove
 only retired coordination artifacts and the heartbeat belonging to the token
 it retired. This makes the sidecar safe for rolling upgrades and downgrades.
 
-## Binding follow-up
+## Bindings
 
-- Python adds one optional exact-cache single-flight option object/field with
-  poll, heartbeat, liveness, and total-wait durations. Its extension maps
-  `Hit` and `Owner`; acquisition and filesystem transitions stay in Rust.
-- Elixir adds the equivalent option keys in `Sidereon.GNSS.ExactCache`; the NIF
-  maps the same two outcomes and owner publication. The Elixir module adds no
-  filesystem logic.
-- C adds an options struct (size/version guarded in the normal ABI style), an
-  open result discriminant, and opaque owner heartbeat/publish/release calls.
-- WASM keeps schema-v3 `buildExactCacheCommit`/`verifyExactCacheCommit` bytes.
-  `BrowserExactProductCache` maps the open decision into one IndexedDB
-  read-write transaction: return the committed record if present, otherwise
-  create/read the in-flight object and choose owner or waiter. IndexedDB
-  serializes conflicting read-write transactions, so compare-and-swap,
-  takeover, and commit ordering are transaction outcomes; the JavaScript file
-  does not reproduce native rename races or advisory-lock reasoning. A timer
-  updates the token's heartbeat object; bounded polling passes the transaction's
-  opaque owner/heartbeat revision and browser monotonic time to core's
-  `ExactCacheSingleFlightWait`, then performs the returned wait, takeover, or
-  timeout action. JavaScript therefore owns storage/timer adaptation but no
-  liveness rules. Web Locks may remain a same-origin accelerator, not a second
-  state machine.
+Every foreign interface ships single-flight acquisition. Each maps the two open
+outcomes, a verified hit or ownership of the miss, and the owner operations onto
+the Rust kernel; none reimplements acquisition, liveness or the filesystem
+transitions.
+
+- Python: `SingleFlightOptions` holds the poll, heartbeat, liveness and total-wait
+  durations in seconds (each finite and positive, the heartbeat shorter than the
+  liveness timeout). `open_single_flight(path, identity, source, options)` is a
+  context manager that yields the committed files on a hit or an
+  `ExactCacheOwner` (`heartbeat`, `publish`, `close`) on a miss, and raises
+  `CacheSingleFlightTimeout` when the bounded wait runs out. Both live in the
+  package's `_exact_cache` module; the distribution layer still acquires under
+  the schema-v3 `entry_lock`.
+- Elixir: `Sidereon.GNSS.ExactCache.open_single_flight/4` takes the options
+  `:poll_interval_ms`, `:heartbeat_interval_ms`, `:liveness_timeout_ms` and
+  `:wait_timeout_ms` and returns `{:hit, entry}` or `{:owner, %Owner{}}`;
+  `publish/4`, `heartbeat/1` and `abandon/1` act on the owner. Refusals are
+  `:single_flight_timeout`, `:single_flight_ownership_lost`,
+  `{:invalid_option, key}` and the cache read and write errors. The module adds
+  no filesystem logic.
+- C: `SidereonExactCacheSingleFlightOptions` is size- and version-guarded
+  (`SIDEREON_EXACT_CACHE_SINGLE_FLIGHT_OPTIONS_ABI_VERSION`) and initialized by
+  `sidereon_exact_cache_single_flight_options_init`.
+  `sidereon_exact_cache_open_single_flight` writes a `SidereonExactCacheOpenResult`
+  (`SIDEREON_EXACT_CACHE_OPEN_RESULT_HIT` or `SIDEREON_EXACT_CACHE_OPEN_RESULT_OWNER`)
+  and, for an owner, an opaque `SidereonExactCacheOwner` with
+  `sidereon_exact_cache_owner_heartbeat`, `sidereon_exact_cache_owner_publish` and
+  `sidereon_exact_cache_owner_free`.
+- WASM: `BrowserExactProductCache.openSingleFlight(identity, source, options)`
+  keeps the schema-v3 `buildExactCacheCommit`/`verifyExactCacheCommit` bytes and
+  maps the open decision onto one IndexedDB read-write transaction: return the
+  committed record if present, otherwise create or read the in-flight object and
+  choose owner or waiter. IndexedDB serializes conflicting read-write
+  transactions, so compare-and-swap, takeover and commit ordering are
+  transaction outcomes; the JavaScript does not reproduce native rename races or
+  advisory-lock reasoning. `ExactCacheSingleFlightOwner` updates its token's
+  heartbeat object on a timer. A waiter passes the transaction's opaque
+  owner/heartbeat revision and the browser's monotonic time to core's
+  `ExactCacheSingleFlightWait` and performs the wait, takeover or timeout it
+  returns, so the JavaScript adapts storage and timers but holds no liveness
+  rules. The Web Locks API serves only the separate `withLock` path.
