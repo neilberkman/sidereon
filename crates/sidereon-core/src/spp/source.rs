@@ -240,6 +240,30 @@ pub trait EphemerisSource {
     fn ssr_correction_source(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
         None
     }
+
+    /// Variance (m²) of the satellite position and clock error of the state
+    /// [`Self::try_position_clock_group_delay_selected_at_j2000_s`] returns for `sat` at
+    /// `t_j2000_s` from the record selected at `selection_j2000_s`: the `var` RTKLIB
+    /// `satposs` returns with each satellite, which `rescode` adds to the pseudorange
+    /// variance a single-point solve weights the satellite by.
+    ///
+    /// A broadcast store returns RTKLIB `var_uraeph` of the selected record's accuracy
+    /// (the URA, or the Galileo SISA), the GLONASS `ERREPH_GLO` variance, or the SBAS
+    /// URA variance; an SSR-corrected source RTKLIB `var_urassr` of the satellite's SSR
+    /// URA; an SBAS-corrected source the variance of the fast correction it applies.
+    /// `0.0` by default: the source states no error. The SP3 and precise-interpolant
+    /// sources keep the default. RTKLIB `peph2pos` forms its variance from the SP3
+    /// records' standard deviations, which [`Sp3`] does not keep, and from the distance
+    /// to the nearest node of its linear clock interpolation, where these sources
+    /// interpolate the clock by spline.
+    fn ephemeris_variance_m2(
+        &self,
+        _sat: GnssSatelliteId,
+        _t_j2000_s: f64,
+        _selection_j2000_s: f64,
+    ) -> f64 {
+        0.0
+    }
 }
 
 /// A view of an ephemeris source that reads it through its fallible methods
@@ -399,6 +423,16 @@ impl<S: EphemerisSource + ?Sized> EphemerisSource for Ut1Tracked<'_, S> {
             .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s);
         self.note(&result);
         result
+    }
+
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        self.inner
+            .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
     }
 }
 
@@ -864,6 +898,16 @@ impl EphemerisSource for TransmitStateMemo<'_> {
             });
         }
         result
+    }
+
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        self.source
+            .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
     }
 }
 

@@ -17,11 +17,11 @@ pub use crate::spp::{
     solve_spp_batch_serial, solve_with_doppler_velocity, solve_with_fallback, solve_with_policy,
     solve_with_solver, BroadcastReason, ClockRelativity, Corrections, DopplerObservation,
     DopplerVelocityInputs, EphemerisSource, FallbackError, FixSource, GalileoNequickCoeffs,
-    KlobucharCoeffs, Observation, PseudorangeCode, ReceiverSolution, RejectedSat, RejectionReason,
-    RobustConfig, SolutionMetadata, SolveInputs, SolvePolicy, SolvePolicyError, SourcedSolution,
-    SppDopplerSolution, SppError, SurfaceMet, DEFAULT_HUBER_K, DEFAULT_ROBUST_MAX_OUTER,
-    DEFAULT_ROBUST_OUTER_TOL_M, DEFAULT_ROBUST_SCALE_FLOOR_M, ELEVATION_MASK_RAD, SIGMA0_M,
-    TRANSMIT_TIME_ITERATIONS,
+    KlobucharCoeffs, Observation, PseudorangeCode, QzssClock, ReceiverSolution, RejectedSat,
+    RejectionReason, RobustConfig, SolutionMetadata, SolveInputs, SolvePolicy, SolvePolicyError,
+    SourcedSolution, SppDopplerSolution, SppError, SurfaceMet, TroposphereModel, DEFAULT_HUBER_K,
+    DEFAULT_ROBUST_MAX_OUTER, DEFAULT_ROBUST_OUTER_TOL_M, DEFAULT_ROBUST_SCALE_FLOOR_M,
+    ELEVATION_MASK_RAD, TRANSMIT_TIME_ITERATIONS,
 };
 pub use crate::static_positioning::{
     solve_static, StaticClockBias, StaticCovariance, StaticEpoch, StaticEpochInfluence,
@@ -301,6 +301,16 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for RinexSppSource<'_, E> {
         self.ephemeris
             .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
     }
+
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        self.ephemeris
+            .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
+    }
 }
 
 impl<E: EphemerisSource + ?Sized> RinexSppAssemblySource for RinexSppSource<'_, E> {
@@ -340,6 +350,12 @@ pub struct RinexSppOptions {
     pub met: SurfaceMet,
     /// Optional robust reweighting for every assembled epoch.
     pub robust: Option<RobustConfig>,
+    /// Which receiver clock QZSS pseudoranges are solved on in every assembled
+    /// epoch; see [`QzssClock`].
+    pub qzss_clock: QzssClock,
+    /// The troposphere model every assembled epoch applies when the troposphere is
+    /// corrected; see [`TroposphereModel`].
+    pub troposphere_model: TroposphereModel,
 }
 
 impl RinexSppOptions {
@@ -353,6 +369,8 @@ impl RinexSppOptions {
             satellites: None,
             met: SurfaceMet::default(),
             robust: None,
+            qzss_clock: QzssClock::Gps,
+            troposphere_model: TroposphereModel::Rtklib,
         }
     }
 
@@ -397,6 +415,20 @@ impl RinexSppOptions {
     #[must_use]
     pub const fn with_robust(mut self, robust: Option<RobustConfig>) -> Self {
         self.robust = robust;
+        self
+    }
+
+    /// Replace the receiver clock QZSS pseudoranges are solved on.
+    #[must_use]
+    pub const fn with_qzss_clock(mut self, qzss_clock: QzssClock) -> Self {
+        self.qzss_clock = qzss_clock;
+        self
+    }
+
+    /// Replace the troposphere model.
+    #[must_use]
+    pub const fn with_troposphere_model(mut self, troposphere_model: TroposphereModel) -> Self {
+        self.troposphere_model = troposphere_model;
         self
     }
 }
@@ -589,6 +621,8 @@ where
                 met: options.met,
                 robust: options.robust,
                 pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+                qzss_clock: options.qzss_clock,
+                troposphere_model: options.troposphere_model,
             },
         });
     }
@@ -752,6 +786,8 @@ where
                 met: options.met,
                 robust: options.robust,
                 pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+                qzss_clock: options.qzss_clock,
+                troposphere_model: options.troposphere_model,
             },
         });
     }

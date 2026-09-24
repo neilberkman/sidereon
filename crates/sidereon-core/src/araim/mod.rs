@@ -167,7 +167,7 @@ fn receiver_solution_clock_systems(
     } else if !solution.metadata.systems.is_empty() {
         solution.metadata.systems.clone()
     } else {
-        crate::spp::clock_systems(&solution.used_sats)
+        crate::spp::clock_systems(&solution.used_sats, crate::spp::QzssClock::Gps)
     };
     if clock_systems.is_empty() {
         return Err(AraimError::InsufficientGeometry);
@@ -243,9 +243,16 @@ pub enum AraimError {
     Ut1OutsideCoverage(crate::astro::time::DegradeReason),
 }
 
-pub(crate) fn clock_system_for_row(system: GnssSystem) -> GnssSystem {
+/// The receiver clock among `clock_systems` a row of `system` takes: the system's own
+/// clock where the geometry carries one, and otherwise the GPS clock for SBAS and for
+/// QZSS, which an SPP solve puts on the GPS clock by default
+/// ([`crate::spp::QzssClock::Gps`]).
+pub(crate) fn clock_system_for_row(system: GnssSystem, clock_systems: &[GnssSystem]) -> GnssSystem {
+    if clock_systems.contains(&system) {
+        return system;
+    }
     match system {
-        GnssSystem::Sbas => GnssSystem::Gps,
+        GnssSystem::Sbas | GnssSystem::Qzss => GnssSystem::Gps,
         other => other,
     }
 }

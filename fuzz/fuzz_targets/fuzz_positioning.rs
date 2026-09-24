@@ -276,6 +276,16 @@ fuzz_target!(|data: &[u8]| {
         } else {
             positioning::PseudorangeCode::IonosphereFree
         },
+        qzss_clock: if input.bits[6] & 4 == 0 {
+            positioning::QzssClock::Gps
+        } else {
+            positioning::QzssClock::Separate
+        },
+        troposphere_model: if input.bits[6] & 8 == 0 {
+            positioning::TroposphereModel::Rtklib
+        } else {
+            positioning::TroposphereModel::SaastamoinenNiell
+        },
     };
     assert_ok_finite_or_err(
         "positioning::solve",

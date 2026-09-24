@@ -38,6 +38,7 @@ use crate::astro::math::least_squares::{
     self, normal_covariance, singular_value_diagnostics, LeastSquaresProblem, SolveOptions, Status,
     TrustRegionSolve,
 };
+use crate::astro::math::linear::invert_symmetric_pd;
 use crate::astro::math::portable;
 use crate::astro::math::robust::{huber_weight, mad_scale, RobustError};
 use crate::dop::{rotate_covariance_ecef_to_enu_m2, LineOfSight};
@@ -49,10 +50,11 @@ use crate::sbas::SbasIonoGrid;
 use crate::spp::{
     clock_system, clock_systems, ionosphere_for, line_of_sight, lost_grid_coverage, model_env,
     residual_unweighted, rtklib_step, rtklib_step_norm, sat_model, select_at, solve_converged,
-    validate_solve_inputs, weighted_design, Corrections, EphemerisSource, GalileoNequickCoeffs,
-    IterateState, KlobucharCoeffs, Observation, PseudorangeCode, RejectedSat, RobustConfig,
-    SolveInputs, SppError, SppInputErrorKind, SppModelRecipe, SurfaceMet, Ut1TrackedSource, C_M_S,
-    MAX_SELECTION_PASSES, SELECTION_STEP_TOL_M,
+    validate_solve_inputs, weighted_design, weighted_normal_matrix, Corrections, EphemerisSource,
+    GalileoNequickCoeffs, IterateState, KlobucharCoeffs, Observation, PseudorangeCode, QzssClock,
+    RejectedSat, RobustConfig, SolveInputs, SppError, SppInputErrorKind, SppModelRecipe,
+    SurfaceMet, TroposphereModel, Ut1TrackedSource, C_M_S, MAX_SELECTION_PASSES,
+    SELECTION_STEP_TOL_M,
 };
 use crate::validate;
 
@@ -72,7 +74,7 @@ const STATIC_POSITION_FD_MIN_STEP_M: f64 = 0.1;
 ///
 /// `measurements` are raw pseudorange measurements in meters. `weights`, when
 /// present, must be aligned with `measurements` and are multiplied by the
-/// existing SPP elevation weights. The clock seed is a receiver clock range
+/// SPP weights, the inverse pseudorange variances. The clock seed is a receiver clock range
 /// bias in meters for this epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StaticEpoch {
@@ -145,13 +147,21 @@ pub struct StaticSolveOptions {
     pub with_geodetic: bool,
     /// Optional Huber iteratively reweighted least-squares configuration.
     pub robust: Option<RobustConfig>,
+    /// Which receiver clock each epoch's QZSS pseudoranges are solved on; see
+    /// [`QzssClock`].
+    pub qzss_clock: QzssClock,
+    /// The troposphere model each epoch's `corrections.troposphere` applies; see
+    /// [`TroposphereModel`]. The Saastamoinen-Niell model reads each epoch's
+    /// [`StaticEpoch::met`].
+    pub troposphere_model: TroposphereModel,
 }
 
 impl StaticSolveOptions {
     /// Build static options from an existing SPP input.
     ///
-    /// The initial position and robust configuration are copied. Static epoch
-    /// clock seeds are still taken from each [`StaticEpoch`].
+    /// The initial position, robust configuration, QZSS clock choice and troposphere
+    /// model are copied.
+    /// Static epoch clock seeds are still taken from each [`StaticEpoch`].
     pub fn from_solve_inputs(inputs: &SolveInputs, with_geodetic: bool) -> Self {
         Self {
             initial_position_m: [
@@ -161,6 +171,8 @@ impl StaticSolveOptions {
             ],
             with_geodetic,
             robust: inputs.robust,
+            qzss_clock: inputs.qzss_clock,
+            troposphere_model: inputs.troposphere_model,
         }
     }
 }
@@ -171,6 +183,8 @@ impl Default for StaticSolveOptions {
             initial_position_m: [0.0; 3],
             with_geodetic: false,
             robust: None,
+            qzss_clock: QzssClock::Gps,
+            troposphere_model: TroposphereModel::Rtklib,
         }
     }
 }
@@ -822,7 +836,7 @@ fn solve_static_core(
                     }
                     StaticPassEnd::CoverageLost(x) => {
                         // The last accepted iterate, reported with the rows and
-                        // elevation weights there until a reweighted solve or step
+                        // weights there until a reweighted solve or step
                         // replaces them.
                         state.update(&current, &x);
                         let next = prepare_static(eph, epochs, &epoch_inputs, model, &state)?;
@@ -864,7 +878,7 @@ fn solve_static_core(
                         });
                     }
                     // A satellite left the augmentation grid: report the rows and
-                    // elevation weights at the state reached.
+                    // weights at the state reached.
                     prepared = current.clone();
                     final_weights = prepared.base_weights.clone();
                     final_robust_scale_m = None;
@@ -931,7 +945,7 @@ fn static_lines_of_sight(
                 + epoch
                     .systems
                     .iter()
-                    .position(|s| *s == clock_system(sat.system))
+                    .position(|s| *s == clock_system(sat.system, epoch.inputs.qzss_clock))
                     .unwrap_or(0);
             let m = sat_model(
                 &env,
@@ -987,7 +1001,7 @@ fn static_coverage_lost(
         + epoch
             .systems
             .iter()
-            .position(|s| *s == clock_system(satellite.system))
+            .position(|s| *s == clock_system(satellite.system, epoch.inputs.qzss_clock))
             .unwrap_or(0);
     let env = model_env(eph, &epoch.inputs, model, None);
     lost_grid_coverage(
@@ -1211,7 +1225,7 @@ fn prepare_static(
         let selection = select_at(eph, inputs, model, None, position, &|system| {
             epoch_state.clock_m(system)
         });
-        let systems = clock_systems(&selection.used);
+        let systems = clock_systems(&selection.used, inputs.qzss_clock);
         let weight_by_sat = measurement_weight_map(epoch);
         let obs_by_id: Vec<(GnssSatelliteId, f64)> = inputs
             .observations
@@ -1232,7 +1246,7 @@ fn prepare_static(
             selection_residuals_m.push(selection.residuals_m[row_idx]);
             let system_index = systems
                 .iter()
-                .position(|s| *s == clock_system(satellite_id.system))
+                .position(|s| *s == clock_system(satellite_id.system, inputs.qzss_clock))
                 .unwrap_or(0);
             clock_columns.push(clock_offset + system_index);
         }
@@ -1296,6 +1310,8 @@ fn solve_inputs_for_epoch(epoch: &StaticEpoch, options: StaticSolveOptions) -> S
         met: epoch.met,
         robust: None,
         pseudorange_code: epoch.pseudorange_code,
+        qzss_clock: options.qzss_clock,
+        troposphere_model: options.troposphere_model,
     }
 }
 
@@ -1380,7 +1396,21 @@ fn finish_static(input: FinishStaticInput<'_>) -> Result<CoreStaticSolution, Sta
             least_squares::SolveError::SingularJacobian,
         ));
     }
-    let gdop = covariance_trace(&covariance_matrix).sqrt();
+    // The GDOP is the geometry's alone, every row at unit weight, as RTKLIB `dops`
+    // forms it: the covariance is in square metres of the pseudorange variances the
+    // rows are weighted by.
+    let unit_weights = vec![1.0_f64; lines_of_sight.len()];
+    let gdop = weighted_normal_matrix(
+        &lines_of_sight,
+        &prepared.clock_columns,
+        prepared.n_params,
+        &unit_weights,
+    )
+    .and_then(|normal| invert_symmetric_pd(&normal))
+    .map(|q| (0..prepared.n_params).map(|i| q[i][i]).sum::<f64>().sqrt())
+    .ok_or(StaticSolveError::Singular(
+        least_squares::SolveError::SingularJacobian,
+    ))?;
     let redundancy = prepared.rows.len() as isize - prepared.n_params as isize;
     let geometry_quality = classify(
         diagnostics.rank,
@@ -1745,12 +1775,6 @@ fn matrix_to_rows(matrix: &DMatrix<f64>) -> Vec<Vec<f64>> {
     (0..matrix.nrows())
         .map(|row| (0..matrix.ncols()).map(|col| matrix[(row, col)]).collect())
         .collect()
-}
-
-fn covariance_trace(matrix: &DMatrix<f64>) -> f64 {
-    (0..matrix.nrows().min(matrix.ncols()))
-        .map(|idx| matrix[(idx, idx)])
-        .sum()
 }
 
 fn residual_rms(residuals: &[f64]) -> f64 {

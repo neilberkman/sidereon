@@ -163,6 +163,8 @@ fn epoch_inputs(obs: &RinexObs, epoch: &ObsEpoch) -> SolveInputs {
         },
         robust: None,
         pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
+        qzss_clock: sidereon_core::positioning::QzssClock::Gps,
+        troposphere_model: sidereon_core::positioning::TroposphereModel::Rtklib,
     }
 }
 

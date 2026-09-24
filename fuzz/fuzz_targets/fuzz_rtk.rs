@@ -13,7 +13,7 @@ use sidereon_core::{
     observables::{ObservableEphemerisSource, ObservableState, ObservablesError},
     positioning::{
         Corrections, EphemerisSource, KlobucharCoeffs, Observation as SppObservation,
-        PseudorangeCode, SolveInputs, SurfaceMet,
+        PseudorangeCode, QzssClock, SolveInputs, SurfaceMet, TroposphereModel,
     },
     precise_positioning::CycleSlipPolicy,
     rtk::{
@@ -471,6 +471,16 @@ fuzz_target!(|data: &[u8]| {
             PseudorangeCode::SingleFrequency
         } else {
             PseudorangeCode::IonosphereFree
+        },
+        qzss_clock: if input.bits[7] & 2 == 0 {
+            QzssClock::Gps
+        } else {
+            QzssClock::Separate
+        },
+        troposphere_model: if input.bits[7] & 4 == 0 {
+            TroposphereModel::Rtklib
+        } else {
+            TroposphereModel::SaastamoinenNiell
         },
     };
     assert_ok_finite_or_err(

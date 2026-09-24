@@ -1417,6 +1417,16 @@ impl<E: EphemerisSource + ?Sized> EphemerisSource for DeclaredScenarioSource<'_,
         self.source
             .try_transmit_epoch_clock_s(sat, t_j2000_s, selection_j2000_s)
     }
+
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        self.source
+            .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s)
+    }
 }
 
 impl<E: ObservableEphemerisSource + ?Sized> ObservableEphemerisSource
@@ -1788,10 +1798,32 @@ impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
         );
         result
     }
+
+    /// Transcribed with its own tag and the selection epoch.
+    fn ephemeris_variance_m2(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> f64 {
+        let variance_m2 = self
+            .source
+            .ephemeris_variance_m2(sat, t_j2000_s, selection_j2000_s);
+        self.transcribe_selected(
+            EPHEMERIS_VARIANCE_TAG,
+            sat,
+            t_j2000_s,
+            selection_j2000_s,
+            Some((std::slice::from_ref(&variance_m2), None)),
+        );
+        variance_m2
+    }
 }
 
 /// Transcript tag of a transmit-epoch clock query.
 const TRANSMIT_EPOCH_CLOCK_TAG: u64 = 0x5458_434c_4f43_4b53;
+/// Transcript tag of an ephemeris variance query.
+const EPHEMERIS_VARIANCE_TAG: u64 = 0x4550_4856_4152_4941;
 /// Transcript tag of a state query with the record selected at another epoch.
 const SELECTED_STATE_TAG: u64 = 0x5345_4c53_5441_5445;
 /// Transcript tag of a velocity query with the record selected at another epoch.
@@ -2491,6 +2523,7 @@ where
         day_of_year: epoch_context.day_of_year,
         corrections: epoch_context.corrections,
         met: &epoch_context.met,
+        troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,

@@ -121,6 +121,8 @@ fn solve_inputs(observations: Vec<Observation>, initial_guess: [f64; 4]) -> Solv
         },
         robust: None,
         pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
+        qzss_clock: sidereon_core::positioning::QzssClock::Gps,
+        troposphere_model: sidereon_core::positioning::TroposphereModel::Rtklib,
     }
 }
 
@@ -573,20 +575,37 @@ fn dgnss_common_mode_error_cancels_in_position_solve() {
     ];
     // Re-frozen when the base and rover models moved to RTKLIB `satposs` placement: each
     // satellite sits at t_rx - P / c - dts, the rover's placed from its raw pseudoranges.
-    // The clean solve is then exact to rounding: every residual is zero and the baseline
-    // is its designed (2000, 1000, 1500) m to within a few ulps.
+    // The clean solve is then exact to rounding: every residual is zero or one ulp of a
+    // 2e7 m range (2^-28 m), and the baseline is its designed (2000, 1000, 1500) m to
+    // within a few ulps. Re-frozen when the weights became the inverse RTKLIB `rescode`
+    // variances: the solve ends a few ulps from where it ended, five residuals one ulp
+    // from zero.
     let frozen_bits: [(&str, Vec<u64>); 5] = [
         (
             "position",
-            vec![0x414ad10a00000000, 0x4127d977fffffffa, 0x4154072600000001],
+            vec![0x414ad10a00000004, 0x4127d9780000000c, 0x4154072600000005],
         ),
-        ("rx_clock", vec![0xbec92a737110dee3]),
+        ("rx_clock", vec![0xbec92a737110c643]),
         (
             "baseline_vector",
-            vec![0x409f400000000000, 0x408f3fffffffe800, 0x4097700000001000],
+            vec![0x409f400000002000, 0x408f400000003000, 0x4097700000005000],
         ),
-        ("baseline", vec![0x40a5092a30cce712]),
-        ("residuals", vec![0x0; 10]),
+        ("baseline", vec![0x40a5092a30cd0b78]),
+        (
+            "residuals",
+            vec![
+                0x0,
+                0x0,
+                0x0,
+                0x0,
+                0x3e30000000000000,
+                0x3e30000000000000,
+                0x3e30000000000000,
+                0x3e30000000000000,
+                0x3e30000000000000,
+                0x0,
+            ],
+        ),
     ];
     assert_eq!(
         clean_bits

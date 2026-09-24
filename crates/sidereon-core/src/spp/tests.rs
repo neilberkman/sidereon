@@ -259,6 +259,8 @@ fn esbc_first_epoch_inputs(initial_guess: [f64; 4]) -> (SolveInputs, [f64; 3]) {
             },
             robust: None,
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            qzss_clock: crate::spp::QzssClock::Gps,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
         },
         truth,
     )
@@ -442,6 +444,10 @@ fn solve_inputs(i: &Inputs) -> SolveInputs {
         met: i.met,
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        // The trace references model the troposphere as Saastamoinen with the fixture's
+        // surface meteorology and Niell mapping.
+        troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
     }
 }
 
@@ -576,6 +582,7 @@ fn weighted_residual_at(
         day_of_year: inputs.doy,
         corrections: inputs.corrections,
         met: &inputs.met,
+        troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::geometric_light_time_replay(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -613,6 +620,7 @@ fn trace_replay_level(level: &str) {
         day_of_year: inputs.doy,
         corrections: inputs.corrections,
         met: &inputs.met,
+        troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::geometric_light_time_replay(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -906,6 +914,7 @@ fn regen_trace_level(level: &str) {
             day_of_year: inputs0.doy,
             corrections: inputs0.corrections,
             met: &inputs0.met,
+            troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::geometric_light_time_replay(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -962,6 +971,7 @@ fn regen_trace_level(level: &str) {
         day_of_year: inputs.doy,
         corrections: inputs.corrections,
         met: &inputs.met,
+        troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::geometric_light_time_replay(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -1203,6 +1213,7 @@ fn independent_solve_level(level: &str) {
             day_of_year: inputs.doy,
             corrections: inputs.corrections,
             met: &inputs.met,
+            troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::geometric_light_time_replay(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -1367,6 +1378,7 @@ fn dop_from_converged_geometry_agrees() {
                 day_of_year: inputs.doy,
                 corrections: inputs.corrections,
                 met: &inputs.met,
+                troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
                 glonass_channels: &glonass_channels,
                 model: SppModelRecipe::geometric_light_time_replay(),
                 pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -1388,10 +1400,10 @@ fn dop_from_converged_geometry_agrees() {
                 &format!("{level}.dop.{}", observation.satellite_id),
             );
         }
-        // The recipe weighted every satellite at the initial guess for the whole solve;
-        // the solve weights it at the solution. The DOP arithmetic at the converged
-        // geometry reproduces the recipe's with the recipe's weights, and the solution
-        // reports it with its own.
+        // The recipe weighted every satellite by `sin^2(el)` at the initial guess for the
+        // whole solve. The DOP arithmetic at the converged geometry reproduces the
+        // recipe's with the recipe's weights, and the solution reports the geometry's
+        // own DOP, every line of sight at unit weight, as RTKLIB `dops` forms it.
         let at_solution = test_support::selection_at_solution_for_test(
             &NoRelativityTerm(&sp3),
             &solve_inputs(&inputs),
@@ -1414,8 +1426,9 @@ fn dop_from_converged_geometry_agrees() {
             .collect();
         let recipe_dop = crate::dop::dop(&at_solution.lines_of_sight, &recipe_weights, geo)
             .expect("DOP with the recipe weights");
-        let own_dop = crate::dop::dop(&at_solution.lines_of_sight, &at_solution.weights, geo)
-            .expect("DOP with the weights at the solution");
+        let unit_weights = vec![1.0; at_solution.lines_of_sight.len()];
+        let own_dop = crate::dop::dop(&at_solution.lines_of_sight, &unit_weights, geo)
+            .expect("DOP at unit weight");
         let want = &doc["fixture"]["dop"];
         for (label, recipe, own, got) in [
             ("gdop", recipe_dop.gdop, own_dop.gdop, dop.gdop),
@@ -1433,12 +1446,12 @@ fn dop_from_converged_geometry_agrees() {
             let rel = (got - own).abs() / own.max(1.0);
             assert!(
                 rel <= 1e-9,
-                "{level}: {label} reported {got}, with the weights at the solution {own}"
+                "{level}: {label} reported {got}, at unit weight {own}"
             );
         }
         assert!(
             (dop.gdop - recipe_dop.gdop).abs() > 1e-6,
-            "{level}: weights at the solution moved no DOP"
+            "{level}: the reported DOP is the recipe's weighted DOP"
         );
     }
 }
@@ -1604,6 +1617,7 @@ fn galileo_ionosphere_uses_nequick_coefficients_and_gps_stays_klobuchar() {
         day_of_year: fixture_inputs.doy,
         corrections: Corrections::IONO,
         met: &fixture_inputs.met,
+        troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
         glonass_channels: &glonass_channels,
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -1818,6 +1832,7 @@ fn synthetic_spp_case_at(
         day_of_year: 176.0,
         corrections: Corrections::NONE,
         met: &SurfaceMet::default(),
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
         glonass_channels: &std::collections::BTreeMap::new(),
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -1876,6 +1891,8 @@ fn synthetic_spp_case_at(
             met: SurfaceMet::default(),
             robust: None,
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            qzss_clock: crate::spp::QzssClock::Gps,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
         },
     )
 }
@@ -2080,6 +2097,8 @@ fn degenerate_geometry_case() -> (crate::sp3::Sp3, SolveInputs) {
             },
             robust: None,
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+            qzss_clock: crate::spp::QzssClock::Gps,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
         },
     )
 }
@@ -2324,6 +2343,7 @@ fn transmit_epoch_is_rtklib_satposs_arithmetic_on_a_real_pseudorange() {
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
         met: &inputs.met,
+        troposphere_model: inputs.troposphere_model,
         glonass_channels: &inputs.glonass_channels,
         model: SppModelRecipe::reference(),
         pseudorange_code: inputs.pseudorange_code,
@@ -2449,6 +2469,7 @@ fn real_receiver_clock_moves_the_geometric_light_time_by_decimetres() {
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
         met: &inputs.met,
+        troposphere_model: inputs.troposphere_model,
         glonass_channels: &inputs.glonass_channels,
         model: SppModelRecipe::geometric_light_time_replay(),
         pseudorange_code: inputs.pseudorange_code,
@@ -2502,7 +2523,10 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     // iterate, as RTKLIB `estpos` re-runs `rescode`. The geocentre seed had kept every
     // satellite through the mask for its whole solve, so the search preferred it for
     // its satellite count; it now settles on the solution every seed reaches, 0.88 m
-    // and 2.3e-9 s from the one frozen before. The whole array is printed on a mismatch.
+    // and 2.3e-9 s from the one frozen before. Re-frozen again when the weights became
+    // the inverse RTKLIB `rescode` variances: the solution moved by 0.32 m and the clock
+    // by -3.4e-10 s. Re-frozen again when the troposphere became RTKLIB `tropmodel`:
+    // 0.37 m and -1.0e-9 s. The whole array is printed on a mismatch.
     let sol_bits = [
         sol.position.x_m.to_bits(),
         sol.position.y_m.to_bits(),
@@ -2512,10 +2536,10 @@ fn policy_coarse_search_recovers_esbc_cold_start() {
     assert_eq!(
         sol_bits,
         [
-            0x414b544cc998d851,
-            0x412040dba20b6ef1,
-            0x4153f61dd16a1a14,
-            0x3f3f84e902b3457d
+            0x414b544ca3fe62bb,
+            0x412040dc327ee1fa,
+            0x4153f61db756d3c3,
+            0x3f3f84e3103883fa
         ],
         "x, y, z, clock bits: {:#x?}",
         sol_bits
@@ -2646,7 +2670,10 @@ fn owned_deterministic_solver_frozen_bits() {
         .expect("owned deterministic solve");
     // Re-frozen when the weights moved from the initial guess to the current iterate and
     // the solve ended with RTKLIB's least-squares step: the solution moved by 1e-5 m and
-    // the clock by 2.5e-14 s. The whole array is printed on a mismatch.
+    // the clock by 2.5e-14 s. Re-frozen again when the weights became the inverse RTKLIB
+    // `rescode` variances: the solution moved by 0.32 m and the clock by -3.4e-10 s.
+    // Re-frozen again when the troposphere became RTKLIB `tropmodel`: 0.37 m and
+    // -1.0e-9 s. The whole array is printed on a mismatch.
     let owned_bits = [
         owned.position.x_m.to_bits(),
         owned.position.y_m.to_bits(),
@@ -2656,10 +2683,10 @@ fn owned_deterministic_solver_frozen_bits() {
     assert_eq!(
         owned_bits,
         [
-            0x414b544cc998d850,
-            0x412040dba20b6edb,
-            0x4153f61dd16a1a12,
-            0x3f3f84e902b344fe
+            0x414b544ca3fe62be,
+            0x412040dc327ee1ff,
+            0x4153f61db756d3c3,
+            0x3f3f84e3103884d1
         ],
         "x, y, z, clock bits: {:#x?}",
         owned_bits
@@ -2831,7 +2858,7 @@ fn covariance_at_solution(
     weights: &[f64],
 ) -> PositionCovariance {
     let model = SppModelRecipe::reference();
-    let systems = clock_systems(&solution.used_sats);
+    let systems = clock_systems(&solution.used_sats, inputs.qzss_clock);
     let rx_ecef = solution.position.as_array();
     let clocks_m: Vec<_> = systems
         .iter()
@@ -2851,6 +2878,7 @@ fn covariance_at_solution(
         day_of_year: inputs.day_of_year,
         corrections: inputs.corrections,
         met: &inputs.met,
+        troposphere_model: inputs.troposphere_model,
         glonass_channels: &inputs.glonass_channels,
         model,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -2865,10 +2893,7 @@ fn covariance_at_solution(
             .find(|observation| observation.satellite_id == sat)
             .expect("used satellite has an observation")
             .pseudorange_m;
-        let sat_clock_system = match sat.system {
-            GnssSystem::Sbas => GnssSystem::Gps,
-            system => system,
-        };
+        let sat_clock_system = super::clock_system(sat.system, inputs.qzss_clock);
         let idx = systems
             .iter()
             .position(|system| *system == sat_clock_system)
@@ -2912,45 +2937,55 @@ fn robust_position_covariance_uses_final_irls_weights() {
     let base = solve_inputs(&inputs);
     let clean = solve(&sp3, &base, false).expect("clean solve");
 
-    let outlier_sat = clean.used_sats[0];
-    let mut corrupt = base.clone();
-    let outlier_obs_idx = corrupt
-        .observations
-        .iter()
-        .position(|observation| observation.satellite_id == outlier_sat)
-        .expect("used satellite has an observation");
-    corrupt.observations[outlier_obs_idx].pseudorange_m += 75.0;
-
     let robust_config = RobustConfig {
         huber_k: 1.345,
         scale_floor_m: 1.0,
         max_outer: 2,
         outer_tol_m: f64::MIN_POSITIVE,
     };
-    let static_corrupt = solve(&sp3, &corrupt, false).expect("corrupt static solve");
-    // The robust loop starts from the settled solve, weighted at its position.
-    let selected = test_support::selection_at_solution_for_test(
-        &sp3,
-        &corrupt,
-        &static_corrupt,
-        SppModelRecipe::reference(),
-    );
-    assert_eq!(selected.used, static_corrupt.used_sats);
-    let scale = mad_scale(&static_corrupt.residuals_m, robust_config.scale_floor_m)
-        .expect("valid robust residual scale");
-    let final_weights: Vec<f64> = static_corrupt
-        .residuals_m
+    // A 75 m error on one used satellite, the first in id order whose residual the
+    // static solve leaves beyond the Huber threshold. How much of an error a satellite's
+    // own residual keeps depends on its weight against the others', so which satellites
+    // show an error as an outlier depends on the weight model.
+    let (corrupt, selected, final_weights, outlier_used_idx) = clean
+        .used_sats
         .iter()
-        .zip(&selected.weights)
-        .map(|(&residual_m, &base_weight)| {
-            base_weight * huber_weight(residual_m / scale, robust_config.huber_k)
+        .find_map(|&outlier_sat| {
+            let mut corrupt = base.clone();
+            let outlier_obs_idx = corrupt
+                .observations
+                .iter()
+                .position(|observation| observation.satellite_id == outlier_sat)
+                .expect("used satellite has an observation");
+            corrupt.observations[outlier_obs_idx].pseudorange_m += 75.0;
+            let static_corrupt = solve(&sp3, &corrupt, false).expect("corrupt static solve");
+            // The robust loop starts from the settled solve, weighted at its position.
+            let selected = test_support::selection_at_solution_for_test(
+                &sp3,
+                &corrupt,
+                &static_corrupt,
+                SppModelRecipe::reference(),
+            );
+            assert_eq!(selected.used, static_corrupt.used_sats);
+            let scale = mad_scale(&static_corrupt.residuals_m, robust_config.scale_floor_m)
+                .expect("valid robust residual scale");
+            let final_weights: Vec<f64> = static_corrupt
+                .residuals_m
+                .iter()
+                .zip(&selected.weights)
+                .map(|(&residual_m, &base_weight)| {
+                    base_weight * huber_weight(residual_m / scale, robust_config.huber_k)
+                })
+                .collect();
+            let outlier_used_idx = selected.used.iter().position(|sat| *sat == outlier_sat)?;
+            (final_weights[outlier_used_idx] < selected.weights[outlier_used_idx]).then_some((
+                corrupt,
+                selected,
+                final_weights,
+                outlier_used_idx,
+            ))
         })
-        .collect();
-    let outlier_used_idx = selected
-        .used
-        .iter()
-        .position(|sat| *sat == outlier_sat)
-        .expect("outlier satellite stayed used");
+        .expect("a 75 m error on some used satellite is downweighted");
     let outlier_multiplier = final_weights[outlier_used_idx] / selected.weights[outlier_used_idx];
     assert!(
         outlier_multiplier < 1.0,
@@ -3153,7 +3188,10 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     // BAR 1: frozen-bits determinism golden (this build's reproducible output).
     // Re-frozen when the weights moved from the initial guess to the current iterate and
     // the solve ended with RTKLIB's least-squares step: the solution moved by 1e-5 m and
-    // the clock by 2.5e-14 s. The whole array is printed on a mismatch.
+    // the clock by 2.5e-14 s. Re-frozen again when the weights became the inverse RTKLIB
+    // `rescode` variances: the solution moved by 0.32 m and the clock by -3.4e-10 s.
+    // Re-frozen again when the troposphere became RTKLIB `tropmodel`: 0.37 m and
+    // -1.0e-9 s. The whole array is printed on a mismatch.
     let canonical_bits = [
         canonical.position.x_m.to_bits(),
         canonical.position.y_m.to_bits(),
@@ -3163,10 +3201,10 @@ fn canonical_spp_is_deterministic_bounded_and_truthful() {
     assert_eq!(
         canonical_bits,
         [
-            0x414b544cc99b589c,
-            0x412040dba20910ee,
-            0x4153f61dd16a57f8,
-            0x3f3f84e902be9ffe
+            0x414b544ca40207df,
+            0x412040dc3278fdcc,
+            0x4153f61db757335c,
+            0x3f3f84e31057994c
         ],
         "x, y, z, clock bits: {:#x?}",
         canonical_bits
@@ -3340,6 +3378,7 @@ fn iono_term_m(
         day_of_year: 177.0,
         corrections: Corrections::IONO,
         met: &met,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
         glonass_channels,
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -3473,6 +3512,8 @@ fn glonass_validation_inputs(channels: std::collections::BTreeMap<u8, i8>) -> So
         },
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     }
 }
 
@@ -3785,6 +3826,7 @@ fn spp_declines_a_satellite_whose_relativity_term_is_unavailable() {
             day_of_year: inputs.doy,
             corrections: inputs.corrections,
             met: &inputs.met,
+            troposphere_model: crate::spp::TroposphereModel::SaastamoinenNiell,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -3801,7 +3843,7 @@ fn spp_declines_a_satellite_whose_relativity_term_is_unavailable() {
 /// The ESBC first epoch solved from the geocentre, the all-zero cold start, settles on
 /// the solution a start from the header position reaches, with the same satellites.
 /// RTKLIB `satazel` puts every satellite at the zenith for a receiver at the geocentre,
-/// so the first pass keeps every satellite with an ephemeris at unit weight; the
+/// so the first pass keeps every satellite with an ephemeris at its zenith weight; the
 /// elevation mask applies from the next iterate on. Before the selection followed the
 /// iterate, the mask and weights stayed at the geocentre for the whole solve, and the
 /// cold solve kept satellites below the mask at the solution.
@@ -3827,7 +3869,30 @@ fn cold_start_from_the_geocentre_settles_on_the_warm_start_solution() {
         "the geocentre masks nothing: {:?}",
         first.rejected
     );
-    assert!(first.weights.iter().all(|&weight| weight == 1.0));
+    // Every satellite at the zenith: the ephemeris variance of its record, the code
+    // bias, the uncorrected ionosphere, the troposphere model at `sin(el) = 1` and the
+    // code error at the zenith, the ionosphere uncorrected in this solve.
+    let zenith_code_m2 = super::code_error_variance_m2(
+        GnssSystem::Gps,
+        std::f64::consts::FRAC_PI_2,
+        crate::spp::PseudorangeCode::SingleFrequency,
+    );
+    let tropo_std_m = super::TROPOSPHERE_MODEL_ERROR_M / (1.0 + 0.1);
+    for (sat, &weight) in first.used.iter().zip(&first.weights) {
+        let ephemeris_m2 = store
+            .ephemeris_variance_m2(*sat, cold_inputs.t_rx_j2000_s)
+            .expect("the used satellite has a record");
+        let expected = 1.0
+            / (ephemeris_m2
+                + super::CODE_BIAS_ERROR_M * super::CODE_BIAS_ERROR_M
+                + super::UNCORRECTED_IONOSPHERE_ERROR_M * super::UNCORRECTED_IONOSPHERE_ERROR_M
+                + tropo_std_m * tropo_std_m
+                + zenith_code_m2);
+        assert!(
+            (weight - expected).abs() <= 4.0 * f64::EPSILON * expected,
+            "{sat}: weight {weight}, zenith weight {expected}"
+        );
+    }
 
     let cold = solve(&store, &cold_inputs, false).expect("cold start solves");
     let warm = solve(&store, &warm_inputs, false).expect("warm start solves");
@@ -3881,25 +3946,43 @@ fn cold_start_from_the_geocentre_settles_on_the_warm_start_solution() {
     eprintln!("cold and warm {apart_m:.3e} m apart, coarse and warm {coarse_apart_m:.3e} m");
 }
 
+/// Largest distance (m) of an SPP solution from RTKLIB `pntpos`'s; 8.2e-5 m is
+/// measured. The transmission epochs are formed in `f64` seconds since J2000, whose
+/// spacing near 2020 is 1.2e-7 s, where RTKLIB `gtime_t` keeps the fraction of the
+/// second; each satellite sits its range rate times that rounding along the line of
+/// sight from RTKLIB's ([`transmit_epoch_rounding_shift_m`]).
+const RTKLIB_FLOOR_M: f64 = 1.0e-4;
+/// Largest distance (m) of an SPP solution from RTKLIB's once the position shift of the
+/// transmission-epoch rounding is taken out; 2.2e-7 m is measured with the troposphere
+/// corrected and 3.4e-8 m without. What is left is where each solve stops short of its
+/// fixed point: both end on the first step below 1e-4 m, and the four starts land
+/// within 1.3e-7 m of one another here and within 9.0e-8 m in RTKLIB.
+const RTKLIB_LESS_ROUNDING_FLOOR_M: f64 = 1.0e-6;
+const RTKLIB_COVARIANCE_FLOOR: f64 = f32::EPSILON as f64 / 2.0 + 1.0e-9;
+
 /// RTKLIB `pntpos` (demo5 75a2e56, `tests/fixtures/rtk/rtklib_spp_selection_oracle.json`,
 /// generated by `fixtures-generators/rtklib_spp_oracle`) solved every epoch of the ESBC
 /// and WTZR 120-epoch fixtures, GPS L1 C/A with a 10 degree mask, from the geocentre, the
-/// header position, and that position turned 12 degrees east and west (about 800 km).
-/// SPP from the same four starts uses the satellites RTKLIB used in every case, the
-/// selection made at RTKLIB's own position and clock is RTKLIB's, the four starts land
-/// within 4e-7 m of one another, and each solution lies within the cross-implementation
-/// floor of RTKLIB's: the two differ in the elevation
-/// weights (RTKLIB's variance model against `sin^2(el)`) and the troposphere model,
-/// which move a solution by up to 1.4 m here. From each far start some satellites
-/// cross the mask between the start and the solution, both ways, and still match.
+/// header position, and that position turned 12 degrees east and west (about 800 km),
+/// with and without the troposphere corrected. SPP from the same four starts uses the
+/// satellites RTKLIB used in every case, the selection made at RTKLIB's own position and
+/// clock is RTKLIB's, the four starts land within 4e-7 m of one another, and each
+/// solution lies within the cross-implementation floor of RTKLIB's.
+///
+/// The weights are RTKLIB's: at RTKLIB's position the covariance `(H^T W H)^-1` with the
+/// selection's weights restates RTKLIB's `Q` to the single precision it is written in
+/// ([`RTKLIB_COVARIANCE_FLOOR`]), and the troposphere is RTKLIB `tropmodel`. One
+/// difference remains, the rounding of the `f64` transmission epochs, which leaves the
+/// solutions within [`RTKLIB_FLOOR_M`] and, once the position shift it predicts is taken
+/// out ([`transmit_epoch_rounding_shift_m`]), within [`RTKLIB_LESS_ROUNDING_FLOOR_M`].
+/// From each far start some satellites cross the mask between the start and the
+/// solution, both ways, and still match.
 #[test]
 fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
     use crate::ephemeris::BroadcastEphemeris;
     use crate::positioning::{spp_inputs_from_rinex_obs, RinexSppOptions};
     use crate::rinex::observations::ObservationFile;
 
-    // The largest distance measured is 1.39 m.
-    const RTKLIB_FLOOR_M: f64 = 2.0;
     let oracle = read_fixture("rtk/rtklib_spp_selection_oracle.json");
     let nav = std::fs::read_to_string(fixture_path(oracle["nav"].as_str().expect("nav")))
         .expect("read nav fixture");
@@ -3915,17 +3998,28 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
     // the start and the solution.
     let mut crossings: std::collections::BTreeMap<String, (usize, usize)> =
         std::collections::BTreeMap::new();
-    let mut largest_rtklib_m = 0.0_f64;
+    // Per run: the largest distance to RTKLIB's position.
+    let mut largest_rtklib_m: std::collections::BTreeMap<String, f64> =
+        std::collections::BTreeMap::new();
+    // The largest difference of the covariance at RTKLIB's position from RTKLIB's `Q`,
+    // each entry over the square root of the product of its two variances.
+    let mut largest_covariance_difference = 0.0_f64;
+    // Per run: the largest transmission-epoch rounding shift, and distance to RTKLIB with
+    // it taken out.
+    let mut less_rounding_by_run: std::collections::BTreeMap<String, (f64, f64)> =
+        std::collections::BTreeMap::new();
     let mut largest_spread_m = 0.0_f64;
     let mut largest_contraction = 0.0_f64;
     let mut largest_bound_m = 0.0_f64;
     for run in oracle["runs"].as_array().expect("runs") {
         let label = run["label"].as_str().expect("label");
         let obs_name = match label {
-            "esbc_iono_tropo" | "esbc_tropo" => {
+            "esbc_iono_tropo" | "esbc_tropo" | "esbc_iono" => {
                 "obs/ESBC00DNK_R_20201770000_01D_30S_MO_120epoch.rnx"
             }
-            "wtzr_iono_tropo" => "obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx",
+            "wtzr_iono_tropo" | "wtzr_iono" => {
+                "obs/WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx"
+            }
             other => panic!("unknown oracle run {other}"),
         };
         let obs = ObservationFile::parse(
@@ -3987,8 +4081,21 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
                     "{label} {key} {guess_name}: used satellites"
                 );
                 let rtklib_position = num3(&rtklib["position_m"]);
-                largest_rtklib_m =
-                    largest_rtklib_m.max(position_error_m(&solution, rtklib_position));
+                let run_largest = largest_rtklib_m.entry(label.to_string()).or_insert(0.0);
+                *run_largest = run_largest.max(position_error_m(&solution, rtklib_position));
+                let rounding = transmit_epoch_rounding_shift_m(&store, &epoch.inputs, &solution);
+                let p = solution.position.as_array();
+                let norm = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+                let less_rounding = [
+                    p[0] - rtklib_position[0] - rounding[0],
+                    p[1] - rtklib_position[1] - rounding[1],
+                    p[2] - rtklib_position[2] - rounding[2],
+                ];
+                let entry = less_rounding_by_run
+                    .entry(label.to_string())
+                    .or_insert((0.0, 0.0));
+                entry.0 = entry.0.max(norm(rounding));
+                entry.1 = entry.1.max(norm(less_rounding));
 
                 // The selection alone, apart from the weights and models that move
                 // the solution: at RTKLIB's own position and clock it keeps the
@@ -4006,6 +4113,28 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
                     at_rtklib.used, rtklib_used,
                     "{label} {key} {guess_name}: selection at RTKLIB's solution"
                 );
+                let geodetic =
+                    super::geodetic_from_ecef(SppModelRecipe::reference().frame, rtklib_position);
+                let covariance = super::spp_position_covariance(
+                    &at_rtklib.lines_of_sight,
+                    &vec![3; at_rtklib.used.len()],
+                    4,
+                    &at_rtklib.weights,
+                    geodetic,
+                )
+                .expect("full-rank covariance at RTKLIB's solution")
+                .ecef_m2;
+                let qr = rtklib["qr_m2"].as_array().expect("qr_m2");
+                let qr = |i: usize| qr[i].as_f64().expect("covariance entry");
+                // `sol.qr`: xx, yy, zz, xy, yz, zx.
+                for (index, (row, column)) in [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0)]
+                    .into_iter()
+                    .enumerate()
+                {
+                    let scale = (covariance[row][row] * covariance[column][column]).sqrt();
+                    let difference = (covariance[row][column] - qr(index)).abs() / scale;
+                    largest_covariance_difference = largest_covariance_difference.max(difference);
+                }
 
                 // The satellites the start itself would use, against the ones used.
                 let at_start = super::select_at(
@@ -4072,15 +4201,30 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
         }
     }
     eprintln!(
-        "{cases} cases: largest distance to RTKLIB {largest_rtklib_m:.4} m, largest spread \
+        "{cases} cases: largest distance to RTKLIB per run {largest_rtklib_m:?} m, largest \
+         covariance difference {largest_covariance_difference:.3e}, largest spread \
          between starts {largest_spread_m:.3e} m, largest contraction {largest_contraction:.3e}, largest bound {largest_bound_m:.3e} m, \
          (rose, set) per start {crossings:?}"
     );
-    assert_eq!(cases, 1440);
+    eprintln!("per run (rounding shift, distance less rounding) {less_rounding_by_run:?} m");
+    assert_eq!(cases, 2400);
     assert!(
-        largest_rtklib_m < RTKLIB_FLOOR_M,
-        "an SPP solution is {largest_rtklib_m} m from RTKLIB's"
+        largest_covariance_difference <= RTKLIB_COVARIANCE_FLOOR,
+        "a covariance at RTKLIB's solution differs from RTKLIB's Q by \
+         {largest_covariance_difference:.3e} of its scale"
     );
+    for (label, &largest_m) in &largest_rtklib_m {
+        let (_, less_rounding_m) = less_rounding_by_run[label];
+        assert!(
+            largest_m < RTKLIB_FLOOR_M,
+            "{label}: an SPP solution is {largest_m} m from RTKLIB's, beyond {RTKLIB_FLOOR_M} m"
+        );
+        assert!(
+            less_rounding_m < RTKLIB_LESS_ROUNDING_FLOOR_M,
+            "{label}: an SPP solution is {less_rounding_m} m from RTKLIB's with the rounding \
+             shift taken out, beyond {RTKLIB_LESS_ROUNDING_FLOOR_M} m"
+        );
+    }
     // The far starts see satellites cross the mask both ways, not only the
     // geocentre, which keeps every satellite on its first pass.
     for start in ["east", "west"] {
@@ -4090,6 +4234,89 @@ fn spp_selection_matches_rtklib_pntpos_from_every_initial_position() {
             "{start}: {risen} satellites rose and {fallen} set between start and solution"
         );
     }
+}
+
+/// The exact rounding error of `a + b` in `f64`: `a + b = s + err` with `s = a + b`
+/// rounded (Knuth's TwoSum).
+fn two_sum_error(a: f64, b: f64) -> f64 {
+    let s = a + b;
+    let bb = s - a;
+    (a - (s - bb)) + (b - bb)
+}
+
+/// The position shift `-A δρ` at `solution`, `A = (H^T W H)^-1 H^T W`, of the range
+/// errors `δρ` the `f64` transmission epochs carry: each epoch `t_rx - P / c - dts` is
+/// formed in seconds since J2000, whose spacing near 2020 is 1.2e-7 s, where RTKLIB
+/// `gtime_t` keeps the fraction of the second; the satellite moves along the line of
+/// sight by its range rate times that rounding.
+fn transmit_epoch_rounding_shift_m(
+    store: &crate::ephemeris::BroadcastEphemeris,
+    inputs: &SolveInputs,
+    solution: &super::ReceiverSolution,
+) -> [f64; 3] {
+    use super::EphemerisSource;
+    let rx = solution.position.as_array();
+    let clock_m = solution.rx_clock_s * C_M_S;
+    let selection = super::select_at(
+        store,
+        inputs,
+        SppModelRecipe::reference(),
+        None,
+        rx,
+        &|_| clock_m,
+    );
+    let t_rx = inputs.t_rx_j2000_s;
+    let range_errors: Vec<f64> = selection
+        .used
+        .iter()
+        .zip(&selection.lines_of_sight)
+        .map(|(&sat, los)| {
+            let p = inputs
+                .observations
+                .iter()
+                .find(|o| o.satellite_id == sat)
+                .expect("observed")
+                .pseudorange_m;
+            let x = p / C_M_S;
+            let a = t_rx - x;
+            let e1 = two_sum_error(t_rx, -x);
+            let dt = store
+                .try_transmit_epoch_clock_s(sat, a, t_rx)
+                .expect("clock")
+                .expect("clock")
+                .value;
+            let b = a - dt;
+            let e2 = two_sum_error(a, -dt);
+            // The f64 epoch less the exact one.
+            let dt_epoch = -(e1 + e2);
+            let at = |t: f64| {
+                store
+                    .try_position_clock_group_delay_selected_at_j2000_s(sat, t, t_rx)
+                    .expect("state")
+                    .expect("state")
+                    .value
+                    .0
+            };
+            let r0 = at(b);
+            let r1 = at(b + 1.0e-3);
+            let v = [
+                (r1[0] - r0[0]) / 1.0e-3,
+                (r1[1] - r0[1]) / 1.0e-3,
+                (r1[2] - r0[2]) / 1.0e-3,
+            ];
+            (los.e_x * v[0] + los.e_y * v[1] + los.e_z * v[2]) * dt_epoch
+        })
+        .collect();
+    let columns = vec![3; selection.used.len()];
+    let a_drho = super::rtklib_step(
+        &selection.lines_of_sight,
+        &columns,
+        4,
+        &selection.weights,
+        &range_errors,
+    )
+    .expect("full-rank design");
+    [-a_drho[0], -a_drho[1], -a_drho[2]]
 }
 
 fn num3(v: &Value) -> [f64; 3] {
@@ -4142,6 +4369,7 @@ fn sbas_coverage_lost_inside_a_pass_changes_the_selection() {
                 lon_deg: lon,
                 vertical_delay_m: 2.0,
                 give_variance_m2: None,
+                t0_j2000_s: 0.0,
             });
         }
     }
@@ -4250,6 +4478,80 @@ fn gps_galileo_solve_settles_with_an_inter_system_bias() {
     assert!(position_error_m(&solution, [6_378_137.0, 0.0, 0.0]) < 1.0e-3);
 }
 
+/// The synthetic GPS case with its last three satellites turned into QZSS satellites,
+/// their pseudoranges `qzss_offset_m` longer, and the inputs solving QZSS on
+/// `qzss_clock`.
+fn gps_qzss_case(
+    qzss_offset_m: f64,
+    qzss_clock: super::QzssClock,
+) -> (SyntheticEphemeris, SolveInputs) {
+    let deg = std::f64::consts::PI / 180.0;
+    let directions = [
+        direction_el_az(70.0 * deg, 0.0),
+        direction_el_az(50.0 * deg, 90.0 * deg),
+        direction_el_az(50.0 * deg, 180.0 * deg),
+        direction_el_az(50.0 * deg, 270.0 * deg),
+        direction_el_az(60.0 * deg, 45.0 * deg),
+        direction_el_az(40.0 * deg, 225.0 * deg),
+        direction_el_az(35.0 * deg, 315.0 * deg),
+    ];
+    let (gps_eph, mut inputs) = synthetic_spp_case(&directions);
+    let mut positions = Vec::new();
+    for (index, (sat, position)) in gps_eph.positions.iter().enumerate() {
+        let id = if index >= 4 {
+            GnssSatelliteId::new(GnssSystem::Qzss, sat.prn).expect("valid id")
+        } else {
+            *sat
+        };
+        positions.push((id, *position));
+        if index >= 4 {
+            inputs.observations[index].satellite_id = id;
+            inputs.observations[index].pseudorange_m += qzss_offset_m;
+        }
+    }
+    inputs.qzss_clock = qzss_clock;
+    (SyntheticEphemeris { positions }, inputs)
+}
+
+/// QZSS system time is aligned with GPS time, so by default a QZSS pseudorange takes
+/// the GPS receiver clock: a GPS and QZSS epoch solves one clock, and the QZSS
+/// satellites count towards the GPS clock's redundancy.
+#[test]
+fn qzss_takes_the_gps_clock_by_default() {
+    let (eph, inputs) = gps_qzss_case(0.0, super::QzssClock::default());
+    assert_eq!(inputs.qzss_clock, super::QzssClock::Gps);
+    let solution = solve(&eph, &inputs, false).expect("GPS+QZSS solve");
+    assert_eq!(solution.metadata.status, Status::SelectionSettled);
+    assert_eq!(solution.metadata.systems, vec![GnssSystem::Gps]);
+    assert_eq!(solution.system_clocks_s.len(), 1);
+    assert_eq!(solution.used_sats.len(), 7);
+    assert_eq!(solution.metadata.redundancy, 3);
+    assert!(position_error_m(&solution, [6_378_137.0, 0.0, 0.0]) < 1.0e-3);
+    assert!((solution.rx_clock_s * C_M_S).abs() < 1.0e-3);
+}
+
+/// [`super::QzssClock::Separate`] solves QZSS on a clock of its own, as RTKLIB demo5
+/// `pntpos` estimates a QZS-GPS offset with `QZSDT`: a 30 km QZSS offset is recovered
+/// as the difference of the two clocks.
+#[test]
+fn qzss_separate_clock_recovers_a_qzss_offset() {
+    let offset_m = 30_000.0;
+    let (eph, inputs) = gps_qzss_case(offset_m, super::QzssClock::Separate);
+    let solution = solve(&eph, &inputs, false).expect("GPS+QZSS solve");
+    assert_eq!(solution.metadata.status, Status::SelectionSettled);
+    assert_eq!(
+        solution.metadata.systems,
+        vec![GnssSystem::Gps, GnssSystem::Qzss]
+    );
+    assert_eq!(solution.metadata.redundancy, 2);
+    let offset_solved_m = (solution.system_clocks_s[1].1 - solution.system_clocks_s[0].1) * C_M_S;
+    assert!(
+        (offset_solved_m - offset_m).abs() < 1.0e-3,
+        "offset {offset_solved_m} m"
+    );
+    assert!(position_error_m(&solution, [6_378_137.0, 0.0, 0.0]) < 1.0e-3);
+}
+
 /// The synthetic receiver's inputs with one northern satellite just above the
 /// elevation mask whose pseudorange is 500 m long. With it the solution moves
 /// south, which takes it below the mask; without it the solution returns to the
@@ -4312,7 +4614,7 @@ fn a_satellite_oscillating_across_the_mask_leaves_the_selection_unsettled() {
 
 /// `(|A (J - H)|, |A|)` (Frobenius norms, which bound the spectral ones) at
 /// `solution`, with `A = (H^T W H)^-1 H^T W`: `H = [-e, 1]` the design the RTKLIB
-/// step takes, `W` the elevation weights, and `J` the model's own Jacobian of the
+/// step takes, `W` the weights, and `J` the model's own Jacobian of the
 /// predicted range, by forward difference. The first is the contraction factor of
 /// the RTKLIB iteration there; the second carries residual rounding into a step.
 fn rtklib_iteration_contraction(
@@ -4449,6 +4751,7 @@ fn a_pierce_point_one_probe_inside_the_grid_edge_settles() {
         day_of_year: inputs.day_of_year,
         corrections: Corrections::NONE,
         met: &inputs.met,
+        troposphere_model: inputs.troposphere_model,
         glonass_channels: &inputs.glonass_channels,
         model: SppModelRecipe::reference(),
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -4501,6 +4804,7 @@ fn a_pierce_point_one_probe_inside_the_grid_edge_settles() {
                 lon_deg,
                 vertical_delay_m: 0.0,
                 give_variance_m2: None,
+                t0_j2000_s: 0.0,
             });
         }
     }

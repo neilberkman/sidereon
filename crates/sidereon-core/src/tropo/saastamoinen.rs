@@ -249,6 +249,33 @@ pub(crate) fn standard_atmosphere(height_m: f64, relative_humidity: f64) -> Stan
     }
 }
 
+/// RTKLIB `tropmodel` with relative humidity `humidity`, meters: the Saastamoinen
+/// hydrostatic and wet zenith delays from the standard atmosphere at the receiver
+/// height (clamped to be non-negative), each mapped by `1 / cos(z)`, `z` the zenith
+/// angle, in RTKLIB's operation order. Zero for a height outside `[-100, 1e4]` m or an
+/// elevation at or below the horizon, as RTKLIB gives. RTKLIB `tropcorr` passes it
+/// `REL_HUMI`, 0.7, for `TROPOPT_SAAS`.
+pub(crate) fn rtklib_tropmodel_m(el_rad: f64, receiver: Wgs84Geodetic, humidity: f64) -> f64 {
+    const TEMP0_C: f64 = 15.0;
+    if receiver.height_m < MET_GATE_LOW_M || MET_GATE_HI_M < receiver.height_m || el_rad <= 0.0 {
+        return 0.0;
+    }
+    let hgt = if receiver.height_m < 0.0 {
+        0.0
+    } else {
+        receiver.height_m
+    };
+    let pres = 1013.25 * libm::pow(1.0 - 2.2557e-5 * hgt, 5.2568);
+    let temp = TEMP0_C - 6.5e-3 * hgt + 273.16;
+    let e = 6.108 * humidity * libm::exp((17.15 * temp - 4684.0) / (temp - 38.45));
+    let z = PI / 2.0 - el_rad;
+    let trph = 0.0022768 * pres
+        / (1.0 - 0.00266 * libm::cos(2.0 * receiver.lat_rad) - 0.00028 * hgt / 1e3)
+        / libm::cos(z);
+    let trpw = 0.002277 * (1255.0 / temp + 0.05) * e / libm::cos(z);
+    trph + trpw
+}
+
 /// Niell (1996) hydrostatic and wet mapping factors and seasonal intermediates.
 ///
 /// `el_rad` is the elevation angle in radians, `lat_rad` is the geodetic

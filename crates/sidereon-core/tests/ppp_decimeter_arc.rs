@@ -1120,7 +1120,11 @@ fn zim2_sp3_spp_with_the_peph2pos_relativity_term_is_closer_to_truth() {
                 relative_humidity: 0.5,
             },
             robust: None,
-            pseudorange_code: sidereon_core::positioning::PseudorangeCode::SingleFrequency,
+            // The observations are the ionosphere-free combination, which takes no group
+            // delay and the ionosphere-free pseudorange variance.
+            pseudorange_code: sidereon_core::positioning::PseudorangeCode::IonosphereFree,
+            qzss_clock: sidereon_core::positioning::QzssClock::Gps,
+            troposphere_model: sidereon_core::positioning::TroposphereModel::Rtklib,
         };
         let with_term = solve(&sp3, &inputs, false).expect("SPP with the peph2pos term");
         let without_term =

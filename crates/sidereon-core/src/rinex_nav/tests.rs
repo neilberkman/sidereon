@@ -294,6 +294,7 @@ fn spp_solves_from_broadcast_glonass() {
             day_of_year: doy,
             corrections: corr,
             met: &met,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -340,6 +341,8 @@ fn spp_solves_from_broadcast_glonass() {
         met,
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
 
     let sol = solve(&store, &inputs, true).expect("GLONASS broadcast SPP solve");
@@ -398,6 +401,7 @@ fn beidou_uses_its_own_klobuchar_coefficients() {
             day_of_year: doy,
             corrections: Corrections::IONO,
             met: &met,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -444,6 +448,8 @@ fn beidou_uses_its_own_klobuchar_coefficients() {
         met,
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
 
     // With the BeiDou coefficients supplied, BeiDou uses them and the truth is
@@ -976,6 +982,7 @@ fn spp_solves_from_broadcast_gps() {
             day_of_year: doy,
             corrections: corr,
             met: &met,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -1022,6 +1029,8 @@ fn spp_solves_from_broadcast_gps() {
         met,
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
 
     let sol = solve(&store, &inputs, true).expect("broadcast SPP solve");
@@ -1399,6 +1408,7 @@ fn synthetic_spp_inputs(store: &BroadcastStore) -> crate::spp::SolveInputs {
             day_of_year: doy,
             corrections,
             met: &met,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -1445,6 +1455,8 @@ fn synthetic_spp_inputs(store: &BroadcastStore) -> crate::spp::SolveInputs {
         met,
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     }
 }
 
@@ -2594,6 +2606,8 @@ fn qzss_cnav_observable_source_feeds_end_to_end_spp() {
         },
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
 
     let solution = solve(&store, &inputs, true).expect("QZSS CNAV SPP solve");
@@ -3996,6 +4010,7 @@ fn mixed_constellation_solve_recovers_the_receiver() {
             day_of_year: doy,
             corrections: corr,
             met: &met,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -4037,6 +4052,8 @@ fn mixed_constellation_solve_recovers_the_receiver() {
         met,
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
 
     // The combined GPS+Galileo solve carries a per-system clock (a reference
@@ -4155,6 +4172,7 @@ fn mixed_constellation_solve_recovers_a_nonzero_inter_system_bias() {
             day_of_year: doy,
             corrections: corr,
             met: &met,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -4196,6 +4214,8 @@ fn mixed_constellation_solve_recovers_a_nonzero_inter_system_bias() {
         met,
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
 
     let sol = solve(&store, &inputs, false).expect("mixed solve with inter-system bias");
@@ -4272,6 +4292,7 @@ fn mixed_solve_recovers_with_gps_galileo_and_beidou() {
             day_of_year: doy,
             corrections: corr,
             met: &met,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -4316,6 +4337,8 @@ fn mixed_solve_recovers_with_gps_galileo_and_beidou() {
         met,
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
 
     let sol = solve(&store, &inputs, false).expect("three-constellation solve");
@@ -4392,6 +4415,7 @@ fn ionosphere_correction_is_applied_to_beidou_b1i() {
             day_of_year: doy,
             corrections: corr,
             met: &met,
+            troposphere_model: crate::spp::TroposphereModel::Rtklib,
             glonass_channels: &glonass_channels,
             model: SppModelRecipe::reference(),
             pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
@@ -4432,6 +4456,8 @@ fn ionosphere_correction_is_applied_to_beidou_b1i() {
         met,
         robust: None,
         pseudorange_code: crate::spp::PseudorangeCode::SingleFrequency,
+        qzss_clock: crate::spp::QzssClock::Gps,
+        troposphere_model: crate::spp::TroposphereModel::Rtklib,
     };
 
     let sol = solve(&store, &inputs, false).expect("BeiDou-bearing iono-corrected solve");

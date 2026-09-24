@@ -31,6 +31,7 @@
 #![warn(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 mod store;
+pub(crate) use store::ura_variance_m2;
 pub use store::{BroadcastStore, NavMessagePreference};
 
 mod write;
