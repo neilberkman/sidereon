@@ -2840,6 +2840,115 @@ impl Default for SsrFallbackPolicy {
     }
 }
 
+/// Largest norm, metres, of the SSR orbit correction at the epoch it is applied to:
+/// RTKLIB `MAXECORSSR`. A larger one is refused under
+/// [`SsrCorrectionSizePolicy::Strict`].
+pub const SSR_MAX_ORBIT_CORRECTION_M: f64 = 10.0;
+
+/// Largest magnitude, metres, of the SSR clock correction at the epoch it is applied to,
+/// the high-rate term included: RTKLIB `MAXCCORSSR`, `1e-6 · c`. A larger one is
+/// refused under [`SsrCorrectionSizePolicy::Strict`].
+pub const SSR_MAX_CLOCK_CORRECTION_M: f64 = 1.0e-6 * C_M_S;
+
+/// What an SSR-corrected source does with an orbit or clock correction larger than RTKLIB
+/// `satpos_ssr` applies ([`SSR_MAX_ORBIT_CORRECTION_M`], [`SSR_MAX_CLOCK_CORRECTION_M`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SsrCorrectionSizePolicy {
+    /// Refuse the satellite at that epoch, as `satpos_ssr` does (it marks the satellite
+    /// unhealthy and returns no state): no state, and no broadcast fallback state either,
+    /// since the correction states that the broadcast orbit or clock is off by more than
+    /// the limit. [`SsrCorrectedEphemeris::applied_orbit_clock_status`] names the refusal
+    /// as [`SsrStateUnavailable::CorrectionExceedsLimit`].
+    #[default]
+    Strict,
+    /// Apply the correction whatever its size and report it in
+    /// [`SsrCorrectedEphemeris::oversized_corrections`].
+    Lenient,
+}
+
+/// Size of the SSR orbit and clock corrections at the epoch they are applied to, as RTKLIB
+/// `satpos_ssr` measures them against `MAXECORSSR` and `MAXCCORSSR`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SsrCorrectionSize {
+    /// Euclidean norm, metres, of the radial, along-track and cross-track orbit correction
+    /// with its rate terms, summed in `norm`'s order (cross-track, along-track, radial).
+    pub orbit_m: f64,
+    /// Clock correction, metres: `C0 + C1·dt + C2·dt²` plus the high-rate term when one
+    /// applies.
+    pub clock_m: f64,
+}
+
+impl SsrCorrectionSize {
+    /// Whether the orbit correction is larger than [`SSR_MAX_ORBIT_CORRECTION_M`]. A
+    /// correction of exactly the limit is within it, as RTKLIB compares with `>`.
+    pub fn orbit_exceeds_limit(&self) -> bool {
+        self.orbit_m > SSR_MAX_ORBIT_CORRECTION_M
+    }
+
+    /// Whether the clock correction's magnitude is larger than
+    /// [`SSR_MAX_CLOCK_CORRECTION_M`]; exactly the limit is within it.
+    pub fn clock_exceeds_limit(&self) -> bool {
+        self.clock_m.abs() > SSR_MAX_CLOCK_CORRECTION_M
+    }
+
+    /// Whether either correction is larger than its limit.
+    pub fn exceeds_limit(&self) -> bool {
+        self.orbit_exceeds_limit() || self.clock_exceeds_limit()
+    }
+}
+
+/// An SSR orbit and clock correction larger than RTKLIB applies, which a source under
+/// [`SsrCorrectionSizePolicy::Lenient`] applied.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SsrOversizedCorrection {
+    /// Satellite the correction is for.
+    pub sat: GnssSatelliteId,
+    /// Solution of the orbit and clock corrections.
+    pub solution: SsrSolution,
+    /// Reference epoch of the orbit correction, J2000 seconds.
+    pub orbit_ref_epoch_j2000_s: f64,
+    /// Reference epoch of the clock correction, J2000 seconds.
+    pub clock_ref_epoch_j2000_s: f64,
+    /// First epoch, J2000 seconds, the source formed a state with the correction at.
+    pub t_j2000_s: f64,
+    /// Size of the correction at `t_j2000_s`.
+    pub size: SsrCorrectionSize,
+}
+
+/// The oversized corrections a source and its clones applied under
+/// [`SsrCorrectionSizePolicy::Lenient`], one entry per satellite, solution and pair of
+/// reference epochs, in the order they were first applied. Safe to record from several
+/// threads.
+#[derive(Clone, Debug, Default)]
+struct OversizedCorrectionRecord(Arc<std::sync::Mutex<Vec<SsrOversizedCorrection>>>);
+
+impl OversizedCorrectionRecord {
+    fn record(&self, correction: SsrOversizedCorrection) {
+        let mut entries = match self.0.lock() {
+            Ok(entries) => entries,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let seen = entries.iter().any(|entry| {
+            entry.sat == correction.sat
+                && entry.solution == correction.solution
+                && entry.orbit_ref_epoch_j2000_s.to_bits()
+                    == correction.orbit_ref_epoch_j2000_s.to_bits()
+                && entry.clock_ref_epoch_j2000_s.to_bits()
+                    == correction.clock_ref_epoch_j2000_s.to_bits()
+        });
+        if !seen {
+            entries.push(correction);
+        }
+    }
+
+    fn entries(&self) -> Vec<SsrOversizedCorrection> {
+        match self.0.lock() {
+            Ok(entries) => entries.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+}
+
 /// An ephemeris source that applies SSR orbit and clock corrections from a store, as seen
 /// by a positioning solve that has to know which SSR solution a satellite state came from.
 ///
@@ -2870,6 +2979,24 @@ pub trait SsrCorrectionSource {
     ) -> Result<Option<SsrSolution>> {
         Ok(self.applied_orbit_clock_solution(sat, t_j2000_s))
     }
+
+    /// Size of the SSR orbit and clock corrections for which the source refuses `sat` at
+    /// `t_j2000_s`, the broadcast record selected at `selection_j2000_s`, under
+    /// [`SsrCorrectionSizePolicy::Strict`]; `None` when it does not refuse the satellite
+    /// for their size there. A positioning solve reports a satellite it has no state for
+    /// with this reason: SPP as [`crate::spp::RejectionReason::SsrCorrectionExceedsLimit`],
+    /// PPP as
+    /// [`crate::precise_positioning::UnplacedObservationReason::SsrCorrectionExceedsLimit`].
+    /// The default refuses nothing.
+    fn correction_size_refusal(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<SsrCorrectionSize> {
+        let _ = (sat, t_j2000_s, selection_j2000_s);
+        None
+    }
 }
 
 impl SsrCorrectionSource for SsrCorrectedEphemeris<'_> {
@@ -2891,6 +3018,15 @@ impl SsrCorrectionSource for SsrCorrectedEphemeris<'_> {
         t_j2000_s: f64,
     ) -> Result<Option<SsrSolution>> {
         self.applied_orbit_clock_checked(sat, t_j2000_s)
+    }
+
+    fn correction_size_refusal(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<SsrCorrectionSize> {
+        SsrCorrectedEphemeris::correction_size_refusal(self, sat, t_j2000_s, selection_j2000_s)
     }
 }
 
@@ -2914,14 +3050,26 @@ impl SsrCorrectionSource for SsrCorrectedEphemerisOwned {
     ) -> Result<Option<SsrSolution>> {
         self.borrowed().applied_orbit_clock_checked(sat, t_j2000_s)
     }
+
+    fn correction_size_refusal(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<SsrCorrectionSize> {
+        self.borrowed()
+            .correction_size_refusal(sat, t_j2000_s, selection_j2000_s)
+    }
 }
 
 /// Why an SSR-corrected source applies no SSR orbit and clock corrections to a satellite
 /// at an epoch.
 ///
 /// [`SsrCorrectedEphemeris::applied_orbit_clock_status`] returns it. Where a broadcast
-/// fallback is allowed, the source then returns the broadcast state instead.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// fallback is allowed, the source then returns the broadcast state instead, except after
+/// [`Self::CorrectionExceedsLimit`] or [`Self::Ut1OutsideCoverage`], or when the stored
+/// orbit correction refers to the centre of mass.
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[non_exhaustive]
 pub enum SsrStateUnavailable {
     /// A Galileo HAS do-not-use indication excludes the satellite at the epoch.
@@ -2945,6 +3093,12 @@ pub enum SsrStateUnavailable {
     ClockNotFresh,
     /// The orbit correction is regional and its provider is not allowed.
     RegionalProviderNotAllowed,
+    /// The orbit or clock correction at the epoch is larger than RTKLIB `satpos_ssr`
+    /// applies ([`SSR_MAX_ORBIT_CORRECTION_M`], [`SSR_MAX_CLOCK_CORRECTION_M`]), and the
+    /// source's policy is [`SsrCorrectionSizePolicy::Strict`]. The satellite is not given a
+    /// broadcast fallback state: the correction states that the broadcast orbit or clock
+    /// is off by more than the limit.
+    CorrectionExceedsLimit(SsrCorrectionSize),
     /// The satellite's system has no broadcast model SSR corrections are applied to here
     /// (GPS, GLONASS, Galileo, QZSS and BeiDou have one).
     NoBroadcastModel,
@@ -3016,6 +3170,8 @@ pub struct SsrCorrectedEphemeris<'a> {
     fallback: SsrFallbackPolicy,
     ut1_validity: ValidityMode,
     ut1_departures: Ut1DepartureRecord,
+    size_policy: SsrCorrectionSizePolicy,
+    oversized: OversizedCorrectionRecord,
 }
 
 impl<'a> SsrCorrectedEphemeris<'a> {
@@ -3030,6 +3186,8 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             fallback: SsrFallbackPolicy::default(),
             ut1_validity: ValidityMode::Strict,
             ut1_departures: Ut1DepartureRecord::default(),
+            size_policy: SsrCorrectionSizePolicy::Strict,
+            oversized: OversizedCorrectionRecord::default(),
         }
     }
 
@@ -3057,6 +3215,37 @@ impl<'a> SsrCorrectedEphemeris<'a> {
 
     fn with_departure_record(mut self, record: Ut1DepartureRecord) -> Self {
         self.ut1_departures = record;
+        self
+    }
+
+    /// Set what the source does with an orbit or clock correction larger than RTKLIB
+    /// `satpos_ssr` applies. The default, [`SsrCorrectionSizePolicy::Strict`], refuses the
+    /// satellite at that epoch as `satpos_ssr` does; [`SsrCorrectionSizePolicy::Lenient`]
+    /// applies the correction and reports it in [`Self::oversized_corrections`]. The
+    /// policy holds for every route through the source: the `corrected_state` methods,
+    /// [`EphemerisSource`] and [`ObservableEphemerisSource`] (SPP, DGNSS, PPP and the
+    /// tightly coupled solves), and [`SsrCorrectionSource`].
+    pub fn with_correction_size_policy(mut self, policy: SsrCorrectionSizePolicy) -> Self {
+        self.size_policy = policy;
+        self
+    }
+
+    /// The correction-size policy; see [`Self::with_correction_size_policy`].
+    pub fn correction_size_policy(&self) -> SsrCorrectionSizePolicy {
+        self.size_policy
+    }
+
+    /// The corrections larger than RTKLIB `satpos_ssr` applies that this source and its
+    /// clones applied under [`SsrCorrectionSizePolicy::Lenient`]: one entry per
+    /// satellite, solution and pair of orbit and clock reference epochs, with the size at
+    /// the first epoch a state was formed with it, in the order first applied. Empty
+    /// under [`SsrCorrectionSizePolicy::Strict`].
+    pub fn oversized_corrections(&self) -> Vec<SsrOversizedCorrection> {
+        self.oversized.entries()
+    }
+
+    fn with_oversized_record(mut self, record: OversizedCorrectionRecord) -> Self {
+        self.oversized = record;
         self
     }
 
@@ -3119,6 +3308,15 @@ impl<'a> SsrCorrectedEphemeris<'a> {
     ///
     /// A broadcast fallback state keeps the broadcast clock of
     /// [`EphemerisSource::position_clock_at_j2000_s`].
+    ///
+    /// Under [`SsrCorrectionSizePolicy::Strict`], the default, an orbit correction larger
+    /// than [`SSR_MAX_ORBIT_CORRECTION_M`] or a clock correction larger than
+    /// [`SSR_MAX_CLOCK_CORRECTION_M`] at `t_j2000_s` gives `None`, with no broadcast
+    /// fallback, as RTKLIB `satpos_ssr` refuses it;
+    /// [`Self::applied_orbit_clock_status`] names it as
+    /// [`SsrStateUnavailable::CorrectionExceedsLimit`]. Under
+    /// [`SsrCorrectionSizePolicy::Lenient`] the correction is applied and reported in
+    /// [`Self::oversized_corrections`].
     ///
     /// `None` also when the CoM-to-APC conversion is refused outside the UT1
     /// table; [`Self::corrected_state_checked`] returns that reason.
@@ -3194,6 +3392,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             Err(SsrStateUnavailable::Ut1OutsideCoverage(reason)) => {
                 Err(Error::Ut1OutsideCoverage(reason))
             }
+            Err(SsrStateUnavailable::CorrectionExceedsLimit(_)) => Ok(Validated::ok(None)),
             Err(_) => Ok(Validated::ok(self.broadcast_fallback_with_group_delay(
                 sat,
                 t_j2000_s,
@@ -3229,6 +3428,26 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         }
         self.ssr_corrected_state(sat, t_j2000_s, t_j2000_s)
             .map(|state| state.solution)
+    }
+
+    /// Size of the SSR orbit and clock corrections for which this source refuses `sat` at
+    /// `t_j2000_s`, the broadcast record selected at `selection_j2000_s`: `Some` exactly
+    /// where [`Self::corrected_state_with_group_delay_checked_selected`] gives no state
+    /// because the policy is [`SsrCorrectionSizePolicy::Strict`] and a correction is larger
+    /// than RTKLIB `satpos_ssr` applies ([`SsrStateUnavailable::CorrectionExceedsLimit`]).
+    pub fn correction_size_refusal(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<SsrCorrectionSize> {
+        if self.store.is_satellite_excluded(sat, t_j2000_s) {
+            return None;
+        }
+        match self.ssr_corrected_state(sat, t_j2000_s, selection_j2000_s) {
+            Err(SsrStateUnavailable::CorrectionExceedsLimit(size)) => Some(size),
+            _ => None,
+        }
     }
 
     /// [`Self::applied_orbit_clock_solution`] with a UT1 refusal returned as
@@ -3315,6 +3534,7 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             Err(SsrStateUnavailable::Ut1OutsideCoverage(reason)) => {
                 return VelocitySource::Ut1Refused(reason)
             }
+            Err(SsrStateUnavailable::CorrectionExceedsLimit(_)) => return VelocitySource::None,
             Err(_) => {}
         }
         if self
@@ -3470,6 +3690,39 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             return Err(Unavailable::RegionalProviderNotAllowed);
         }
 
+        let dt_orbit = t_j2000_s - orbit.ref_epoch_j2000_s;
+        let radial = orbit.radial_m + orbit.radial_rate_m_s * dt_orbit;
+        let along = orbit.along_m + orbit.along_rate_m_s * dt_orbit;
+        let cross = orbit.cross_m + orbit.cross_rate_m_s * dt_orbit;
+        let dt_clock = t_j2000_s - clock.ref_epoch_j2000_s;
+        let mut dclock_m =
+            clock.c0_m + clock.c1_m_s * dt_clock + clock.c2_m_s2 * dt_clock * dt_clock;
+        if let Some(high_rate) = clock.high_rate {
+            if high_rate_matches(clock, &high_rate)
+                && self.correction_fresh(
+                    high_rate.solution.source,
+                    t_j2000_s,
+                    high_rate.ref_epoch_j2000_s,
+                    high_rate.transmitted_epoch_j2000_s,
+                    high_rate.update_interval_s,
+                    RtcmAgeLimit::HighRateClock,
+                )
+            {
+                dclock_m += high_rate.c0_m;
+            }
+        }
+        // RTKLIB `satpos_ssr` gates the corrections before it reads the broadcast record:
+        // `norm(deph,3)>MAXECORSSR||fabs(dclk)>MAXCCORSSR`. `norm` sums the squares from
+        // the last component down, and `radial`, `along` and `cross` are the negated
+        // `deph`, so the squares and their sum are `norm`'s bit for bit.
+        let size = SsrCorrectionSize {
+            orbit_m: (cross * cross + along * along + radial * radial).sqrt(),
+            clock_m: dclock_m,
+        };
+        if size.exceeds_limit() && self.size_policy == SsrCorrectionSizePolicy::Strict {
+            return Err(Unavailable::CorrectionExceedsLimit(size));
+        }
+
         let SsrBroadcastState {
             position_m: r,
             velocity_m_s: v,
@@ -3478,10 +3731,6 @@ impl<'a> SsrCorrectedEphemeris<'a> {
         } = self.ssr_broadcast_state(sat, orbit, t_j2000_s, selection_j2000_s)?;
 
         let (er, ea, ec) = velocity_aligned_basis(r, v).ok_or(Unavailable::DegenerateOrbitFrame)?;
-        let dt_orbit = t_j2000_s - orbit.ref_epoch_j2000_s;
-        let radial = orbit.radial_m + orbit.radial_rate_m_s * dt_orbit;
-        let along = orbit.along_m + orbit.along_rate_m_s * dt_orbit;
-        let cross = orbit.cross_m + orbit.cross_rate_m_s * dt_orbit;
         // RTKLIB `satpos_ssr`: rs[i]+=-(er[i]*deph[0]+ea[i]*deph[1]+ec[i]*deph[2])+dant[i];
         // `radial`, `along` and `cross` are the negated `deph`, and negation is exact, so
         // the sum of the products is `satpos_ssr`'s negated term bit for bit and is added
@@ -3505,23 +3754,6 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             corrected_position = add3(corrected_position, pco_ecef_m);
         }
 
-        let dt_clock = t_j2000_s - clock.ref_epoch_j2000_s;
-        let mut dclock_m =
-            clock.c0_m + clock.c1_m_s * dt_clock + clock.c2_m_s2 * dt_clock * dt_clock;
-        if let Some(high_rate) = clock.high_rate {
-            if high_rate_matches(clock, &high_rate)
-                && self.correction_fresh(
-                    high_rate.solution.source,
-                    t_j2000_s,
-                    high_rate.ref_epoch_j2000_s,
-                    high_rate.transmitted_epoch_j2000_s,
-                    high_rate.update_interval_s,
-                    RtcmAgeLimit::HighRateClock,
-                )
-            {
-                dclock_m += high_rate.c0_m;
-            }
-        }
         // t_corr = t_sv - (dts(brdc) + dclk(ssr) / c): the correction adds to the clock
         // for RTCM SSR and Galileo HAS alike.
         clock_s += dclock_m / C_M_S;
@@ -3533,6 +3765,16 @@ impl<'a> SsrCorrectedEphemeris<'a> {
             Err(crate::astro::frames::transforms::FrameTransformError::InvalidInput { .. }) => None,
         };
         self.ut1_departures.record(ut1_degraded);
+        if size.exceeds_limit() {
+            self.oversized.record(SsrOversizedCorrection {
+                sat,
+                solution: clock.solution,
+                orbit_ref_epoch_j2000_s: orbit.ref_epoch_j2000_s,
+                clock_ref_epoch_j2000_s: clock.ref_epoch_j2000_s,
+                t_j2000_s,
+                size,
+            });
+        }
         Ok(SsrAppliedState {
             position_m: corrected_position,
             clock_s,
@@ -3648,6 +3890,10 @@ impl<'a> SsrCorrectedEphemeris<'a> {
 }
 
 impl EphemerisSource for SsrCorrectedEphemeris<'_> {
+    fn ssr_correction_source(&self) -> Option<&dyn SsrCorrectionSource> {
+        Some(self)
+    }
+
     fn position_clock_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
@@ -3873,6 +4119,8 @@ pub struct SsrCorrectedEphemerisOwned {
     fallback: SsrFallbackPolicy,
     ut1_validity: ValidityMode,
     ut1_departures: Ut1DepartureRecord,
+    size_policy: SsrCorrectionSizePolicy,
+    oversized: OversizedCorrectionRecord,
 }
 
 impl SsrCorrectedEphemerisOwned {
@@ -3888,6 +4136,8 @@ impl SsrCorrectedEphemerisOwned {
             fallback: SsrFallbackPolicy::default(),
             ut1_validity: ValidityMode::Strict,
             ut1_departures: Ut1DepartureRecord::default(),
+            size_policy: SsrCorrectionSizePolicy::Strict,
+            oversized: OversizedCorrectionRecord::default(),
         }
     }
 
@@ -3900,6 +4150,35 @@ impl SsrCorrectedEphemerisOwned {
     /// See [`SsrCorrectedEphemeris::ut1_departure`].
     pub fn ut1_departure(&self) -> Option<DegradeReason> {
         self.ut1_departures.first()
+    }
+
+    /// Set the correction-size policy; see
+    /// [`SsrCorrectedEphemeris::with_correction_size_policy`].
+    pub fn with_correction_size_policy(mut self, policy: SsrCorrectionSizePolicy) -> Self {
+        self.size_policy = policy;
+        self
+    }
+
+    /// The correction-size policy; see
+    /// [`SsrCorrectedEphemeris::with_correction_size_policy`].
+    pub fn correction_size_policy(&self) -> SsrCorrectionSizePolicy {
+        self.size_policy
+    }
+
+    /// See [`SsrCorrectedEphemeris::oversized_corrections`].
+    pub fn oversized_corrections(&self) -> Vec<SsrOversizedCorrection> {
+        self.oversized.entries()
+    }
+
+    /// See [`SsrCorrectedEphemeris::correction_size_refusal`].
+    pub fn correction_size_refusal(
+        &self,
+        sat: GnssSatelliteId,
+        t_j2000_s: f64,
+        selection_j2000_s: f64,
+    ) -> Option<SsrCorrectionSize> {
+        self.borrowed()
+            .correction_size_refusal(sat, t_j2000_s, selection_j2000_s)
     }
 
     /// See [`SsrCorrectedEphemeris::corrected_state_checked`].
@@ -4026,7 +4305,9 @@ impl SsrCorrectedEphemerisOwned {
             .with_fallback(self.fallback.clone())
             .with_satellite_attitude(self.attitude)
             .with_validity(self.ut1_validity)
-            .with_departure_record(self.ut1_departures.clone());
+            .with_departure_record(self.ut1_departures.clone())
+            .with_correction_size_policy(self.size_policy)
+            .with_oversized_record(self.oversized.clone());
         if let Some(antex) = &self.antex {
             source.with_satellite_antennas(antex)
         } else {
@@ -4036,6 +4317,10 @@ impl SsrCorrectedEphemerisOwned {
 }
 
 impl EphemerisSource for SsrCorrectedEphemerisOwned {
+    fn ssr_correction_source(&self) -> Option<&dyn SsrCorrectionSource> {
+        Some(self)
+    }
+
     fn position_clock_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
@@ -5460,6 +5745,10 @@ mod tests {
         combined.header.epoch_time_s = REAL_SSR_EPOCH_TOW_S as u32;
         combined.header.update_interval = 0;
         combined.orbit[0].iode = iode;
+        // The template's orbit correction is 14.5 m (1 m, -8 m, 12 m), larger than
+        // RTKLIB `satpos_ssr` applies (`MAXECORSSR`, 10 m); keep this one within it.
+        combined.orbit[0].delta_along = -2_000;
+        combined.orbit[0].delta_cross = 3_000;
         let mut high_rate = combined_message(&[(sat.prn, sat.prn)]);
         high_rate.message_number = 1062;
         high_rate.kind = SsrKind::HighRateClock;
@@ -15048,6 +15337,26 @@ mod tests {
         clock_m: f64,
         reception: GnssWeekTow,
     ) -> SsrCorrectionStore {
+        has_orbit_clock_store_with_orbit(
+            sat,
+            iode,
+            nav_message,
+            [1.25, -2.0, 3.0],
+            clock_m,
+            reception,
+        )
+    }
+
+    /// [`has_orbit_clock_store`] with the radial, along-track and cross-track orbit
+    /// correction `orbit_m`, metres, as the HAS message states it.
+    fn has_orbit_clock_store_with_orbit(
+        sat: GnssSatelliteId,
+        iode: u32,
+        nav_message: u8,
+        orbit_m: [f64; 3],
+        clock_m: f64,
+        reception: GnssWeekTow,
+    ) -> SsrCorrectionStore {
         let message = HasMt1Message {
             header: HasMt1Header {
                 toh_s: (reception.tow_s as u32 % 3600) as u16,
@@ -15077,9 +15386,9 @@ mod tests {
                     sat,
                     nav_message,
                     iode,
-                    radial_m: Some(1.25),
-                    along_m: Some(-2.0),
-                    cross_m: Some(3.0),
+                    radial_m: Some(orbit_m[0]),
+                    along_m: Some(orbit_m[1]),
+                    cross_m: Some(orbit_m[2]),
                 }],
             }),
             clock_full_set: Some(HasClockBlock {
@@ -15185,6 +15494,430 @@ mod tests {
         assert!(clock(&negative) < clock(&zero));
         assert!(((clock(&positive) - clock(&zero)) - c0_m / C_M_S).abs() < 1.0e-18);
         assert!(((clock(&zero) - clock(&negative)) - c0_m / C_M_S).abs() < 1.0e-18);
+    }
+
+    /// Header of the RTCM SSR messages the correction-size tests ingest for G30.
+    fn g30_size_header() -> SsrHeader {
+        SsrHeader {
+            epoch_time_s: REAL_SSR_EPOCH_TOW_S as u32,
+            update_interval: 0,
+            multiple_message: false,
+            iod_ssr: 3,
+            provider_id: 9,
+            solution_id: 1,
+            satellite_reference_datum: Some(false),
+            dispersive_bias_consistency: None,
+            mw_consistency: None,
+            satellite_count: 1,
+        }
+    }
+
+    /// An RTCM 1060 message for G30 against `iode` with the raw orbit fields `orbit`
+    /// (radial 0.1 mm, along-track and cross-track 0.4 mm, no rates) and clock C0 `c0`
+    /// (0.1 mm), then, when `high_rate_c0` is given, a 1062 high-rate clock of that many
+    /// 0.1 mm from the same solution and IOD SSR, all ingested at the fixture epoch.
+    fn rtcm_g30_sized_store(
+        iode: u32,
+        orbit: [i32; 3],
+        c0: i32,
+        high_rate_c0: Option<i32>,
+    ) -> SsrCorrectionStore {
+        let combined = SsrMessage {
+            message_number: 1060,
+            system: GnssSystem::Gps,
+            kind: SsrKind::CombinedOrbitClock,
+            header: g30_size_header(),
+            orbit: vec![SsrOrbitRecord {
+                satellite_id: 30,
+                iode,
+                delta_radial: orbit[0],
+                delta_along: orbit[1],
+                delta_cross: orbit[2],
+                dot_delta_radial: 0,
+                dot_delta_along: 0,
+                dot_delta_cross: 0,
+            }],
+            clock: vec![SsrClockRecord {
+                satellite_id: 30,
+                c0,
+                c1: 0,
+                c2: 0,
+            }],
+            code_bias: Vec::new(),
+            phase_bias: Vec::<SsrPhaseBiasRecord>::new(),
+            ura: Vec::new(),
+            padding_bits: Vec::new(),
+        };
+        let week = GnssWeekTow::new(TimeScale::Gpst, REAL_SSR_WEEK, REAL_SSR_EPOCH_TOW_S)
+            .expect("valid SSR week");
+        let mut store = SsrCorrectionStore::new();
+        store.ingest_ssr(&combined, week).expect("ingest RTCM 1060");
+        if let Some(high_rate_c0) = high_rate_c0 {
+            let high_rate = SsrMessage {
+                message_number: 1062,
+                system: GnssSystem::Gps,
+                kind: SsrKind::HighRateClock,
+                header: SsrHeader {
+                    satellite_reference_datum: None,
+                    ..g30_size_header()
+                },
+                orbit: Vec::new(),
+                clock: vec![SsrClockRecord {
+                    satellite_id: 30,
+                    c0: high_rate_c0,
+                    c1: 0,
+                    c2: 0,
+                }],
+                code_bias: Vec::new(),
+                phase_bias: Vec::<SsrPhaseBiasRecord>::new(),
+                ura: Vec::new(),
+                padding_bits: Vec::new(),
+            };
+            store
+                .ingest_ssr(&high_rate, week)
+                .expect("ingest RTCM 1062");
+        }
+        store
+    }
+
+    /// RTKLIB `norm(deph,3)`: `sqrt(dot(a,a,3))`, with `dot` summing from the last
+    /// component down, starting at 0.
+    fn rtklib_norm3(a: [f64; 3]) -> f64 {
+        let mut c = 0.0_f64;
+        for x in a.iter().rev() {
+            c += x * x;
+        }
+        c.sqrt()
+    }
+
+    /// RTKLIB `deph` for raw RTCM orbit fields: `getbits * 1e-4` radial, `* 4e-4` along-track
+    /// and cross-track (`decode_ssr1`), no rates.
+    fn rtklib_deph(orbit: [i32; 3]) -> [f64; 3] {
+        [
+            f64::from(orbit[0]) * 1.0e-4,
+            f64::from(orbit[1]) * 4.0e-4,
+            f64::from(orbit[2]) * 4.0e-4,
+        ]
+    }
+
+    fn g30_iode(broadcast: &BroadcastEphemeris, t: f64) -> u32 {
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        broadcast
+            .select_record_at(sat, t)
+            .expect("broadcast record")
+            .issue_of_data
+            .expect("broadcast issue")
+            .issue
+    }
+
+    /// RTKLIB `satpos_ssr` refuses `norm(deph,3) > MAXECORSSR` (10 m). The comparison is
+    /// strict, so an orbit correction of exactly 10 m is applied, and the next value the
+    /// RTCM fields hold above it is refused, alone or as the norm of two components. The
+    /// raw values give 10 m exactly: 100000 · 1e-4 = 10, and 60000 · 1e-4 = 6 and
+    /// 20000 · 4e-4 = 8 with 8² + 6² = 100.
+    #[test]
+    fn strict_policy_refuses_an_orbit_correction_above_maxecorssr_as_rtklib_does() {
+        let broadcast = g30_g31_broadcast();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let iode = g30_iode(&broadcast, t);
+        let solution = SsrSolution {
+            source: SsrSource::RtcmSsr,
+            provider_id: 9,
+            solution_id: 1,
+        };
+        let cases: [([i32; 3], bool); 8] = [
+            ([100_000, 0, 0], true),
+            ([-100_000, 0, 0], true),
+            ([99_999, 0, 0], true),
+            ([100_001, 0, 0], false),
+            ([-100_001, 0, 0], false),
+            ([60_000, 20_000, 0], true),
+            ([60_001, 20_000, 0], false),
+            ([0, 0, 25_001], false),
+        ];
+        for (orbit, applied) in cases {
+            let deph = rtklib_deph(orbit);
+            let rtklib_norm = rtklib_norm3(deph);
+            assert_eq!(
+                rtklib_norm > 10.0,
+                !applied,
+                "{orbit:?}: the case agrees with RTKLIB's comparison"
+            );
+            let store = rtcm_g30_sized_store(iode, orbit, 0, None);
+            for fallback in [
+                SsrFallbackPolicy::default(),
+                SsrFallbackPolicy {
+                    on_missing_correction: MissingCorrectionAction::FallBackToBroadcast,
+                    regional: RegionalPolicy::DeclineRegional,
+                },
+            ] {
+                let source = SsrCorrectedEphemeris::new(&broadcast, &store).with_fallback(fallback);
+                assert_eq!(
+                    source.correction_size_policy(),
+                    SsrCorrectionSizePolicy::Strict
+                );
+                let status = source.applied_orbit_clock_status(sat, t);
+                if applied {
+                    assert_eq!(status, Ok(solution), "{orbit:?}");
+                    assert!(source.corrected_state(sat, t).is_some(), "{orbit:?}");
+                } else {
+                    let Err(SsrStateUnavailable::CorrectionExceedsLimit(size)) = status else {
+                        panic!("{orbit:?}: expected a correction-size refusal, got {status:?}");
+                    };
+                    assert_eq!(size.orbit_m.to_bits(), rtklib_norm.to_bits(), "{orbit:?}");
+                    assert_eq!(size.clock_m.to_bits(), 0.0_f64.to_bits(), "{orbit:?}");
+                    assert!(size.orbit_exceeds_limit() && !size.clock_exceeds_limit());
+                    // `satpos_ssr` marks the satellite unhealthy: no state, and no
+                    // broadcast fallback state either.
+                    assert_eq!(source.corrected_state(sat, t), None, "{orbit:?}");
+                    assert_eq!(source.corrected_velocity(sat, t), None, "{orbit:?}");
+                    assert_eq!(
+                        source
+                            .corrected_state_checked(sat, t)
+                            .expect("no UT1 refusal"),
+                        Validated::ok(None),
+                        "{orbit:?}"
+                    );
+                    assert!(source.oversized_corrections().is_empty());
+                }
+            }
+        }
+    }
+
+    /// RTKLIB `satpos_ssr` refuses `fabs(dclk) > MAXCCORSSR` (`1e-6 · CLIGHT`), with the
+    /// high-rate clock added to `dclk` first. The limit, 299.792458 m, is not on the
+    /// 0.1 mm grid, so the cases straddle it: 200 m + 99.7924 m is applied and
+    /// 200 m + 99.7925 m is refused, with either sign. C0 alone is applied: the high-rate
+    /// term takes the sum over the limit.
+    #[test]
+    fn strict_policy_refuses_a_clock_correction_above_maxccorssr_as_rtklib_does() {
+        let broadcast = g30_g31_broadcast();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let iode = g30_iode(&broadcast, t);
+        let maxccorssr = 1.0e-6 * 299_792_458.0_f64;
+        assert_eq!(SSR_MAX_CLOCK_CORRECTION_M.to_bits(), maxccorssr.to_bits());
+        assert_eq!(SSR_MAX_ORBIT_CORRECTION_M.to_bits(), 10.0_f64.to_bits());
+        let cases: [(i32, Option<i32>, bool); 6] = [
+            (2_000_000, None, true),
+            (2_000_000, Some(997_924), true),
+            (2_000_000, Some(997_925), false),
+            (-2_000_000, Some(-997_924), true),
+            (-2_000_000, Some(-997_925), false),
+            (2_097_151, Some(900_774), false),
+        ];
+        for (c0, high_rate_c0, applied) in cases {
+            // RTKLIB: dclk = dclk[0] + dclk[1]·t2 + dclk[2]·t2², then + hrclk. C1 and C2
+            // are zero, so the rate terms add zero.
+            let mut dclk = f64::from(c0) * 1.0e-4;
+            if let Some(high_rate_c0) = high_rate_c0 {
+                dclk += f64::from(high_rate_c0) * 1.0e-4;
+            }
+            assert_eq!(dclk.abs() > maxccorssr, !applied, "{c0} {high_rate_c0:?}");
+            let store = rtcm_g30_sized_store(iode, [10_000, 0, 0], c0, high_rate_c0);
+            let source = SsrCorrectedEphemeris::new(&broadcast, &store);
+            let status = source.applied_orbit_clock_status(sat, t);
+            if applied {
+                assert!(status.is_ok(), "{c0} {high_rate_c0:?}: {status:?}");
+                let clock = source.corrected_state(sat, t).expect("applied").1;
+                assert_eq!(
+                    clock.to_bits(),
+                    satpos_ssr_clock_s(&broadcast, sat, REAL_SSR_EPOCH_TOW_S, dclk).to_bits(),
+                    "{c0} {high_rate_c0:?}"
+                );
+            } else {
+                let Err(SsrStateUnavailable::CorrectionExceedsLimit(size)) = status else {
+                    panic!("{c0} {high_rate_c0:?}: expected a refusal, got {status:?}");
+                };
+                assert_eq!(size.clock_m.to_bits(), dclk.to_bits());
+                assert!(size.clock_exceeds_limit() && !size.orbit_exceeds_limit());
+                assert_eq!(source.corrected_state(sat, t), None);
+            }
+        }
+    }
+
+    /// The lenient policy applies an oversized correction exactly as a correction within
+    /// the limit is applied, and reports it once per correction, shared by clones and by
+    /// the owned source's borrowed views.
+    #[test]
+    fn lenient_policy_applies_an_oversized_correction_and_reports_it() {
+        let broadcast = g30_g31_broadcast();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let iode = g30_iode(&broadcast, t);
+        let orbit = [100_001, 0, 0];
+        let store = rtcm_g30_sized_store(iode, orbit, 0, None);
+        let strict = SsrCorrectedEphemeris::new(&broadcast, &store);
+        assert_eq!(strict.corrected_state(sat, t), None);
+        let lenient = SsrCorrectedEphemeris::new(&broadcast, &store)
+            .with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
+        assert!(lenient.oversized_corrections().is_empty());
+
+        let (position, clock) = lenient.corrected_state(sat, t).expect("applied");
+        let (broadcast_position, _) = broadcast
+            .position_clock_at_j2000_s(sat, t)
+            .expect("broadcast state");
+        let velocity = finite_difference_broadcast_velocity(&broadcast, sat, t);
+        let (er, _, _) = analytic_velocity_aligned_basis(broadcast_position, velocity);
+        // `rs += -(er·deph[0])`, deph[0] = 100001 · 1e-4.
+        let radial_m = -(100_001.0_f64 * 1.0e-4);
+        let expected = [
+            broadcast_position[0] + radial_m * er[0],
+            broadcast_position[1] + radial_m * er[1],
+            broadcast_position[2] + radial_m * er[2],
+        ];
+        assert_vector_close(position, expected, 2.0e-9);
+        assert_eq!(
+            clock.to_bits(),
+            satpos_ssr_clock_s(&broadcast, sat, REAL_SSR_EPOCH_TOW_S, 0.0).to_bits()
+        );
+
+        // Asked again, through a clone and through another route, it is one entry.
+        lenient.clone().corrected_state(sat, t).expect("applied");
+        assert!(lenient.applied_orbit_clock_status(sat, t).is_ok());
+        let reported = lenient.oversized_corrections();
+        assert_eq!(reported.len(), 1);
+        let entry = reported[0];
+        assert_eq!(entry.sat, sat);
+        assert_eq!(
+            entry.solution,
+            SsrSolution {
+                source: SsrSource::RtcmSsr,
+                provider_id: 9,
+                solution_id: 1,
+            }
+        );
+        assert_eq!(entry.t_j2000_s.to_bits(), t.to_bits());
+        let stored_orbit = store.orbit(sat).expect("stored orbit");
+        let stored_clock = store.clock(sat).expect("stored clock");
+        assert_eq!(
+            entry.orbit_ref_epoch_j2000_s.to_bits(),
+            stored_orbit.ref_epoch_j2000_s.to_bits()
+        );
+        assert_eq!(
+            entry.clock_ref_epoch_j2000_s.to_bits(),
+            stored_clock.ref_epoch_j2000_s.to_bits()
+        );
+        assert_eq!(
+            entry.size.orbit_m.to_bits(),
+            rtklib_norm3(rtklib_deph(orbit)).to_bits()
+        );
+        assert!(entry.size.exceeds_limit());
+        // A correction within the limit is not reported.
+        let within = rtcm_g30_sized_store(iode, [100_000, 0, 0], 0, None);
+        let within_source = SsrCorrectedEphemeris::new(&broadcast, &within)
+            .with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
+        within_source.corrected_state(sat, t).expect("applied");
+        assert!(within_source.oversized_corrections().is_empty());
+
+        let owned = SsrCorrectedEphemerisOwned::new(Arc::new(g30_g31_broadcast()), Arc::new(store))
+            .with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
+        assert_eq!(
+            owned.correction_size_policy(),
+            SsrCorrectionSizePolicy::Lenient
+        );
+        let owned_state = owned.corrected_state(sat, t).expect("applied");
+        assert_eq!(owned_state.1.to_bits(), clock.to_bits());
+        assert_eq!(owned.oversized_corrections(), reported);
+        let strict_owned = owned
+            .clone()
+            .with_correction_size_policy(SsrCorrectionSizePolicy::Strict);
+        assert_eq!(strict_owned.corrected_state(sat, t), None);
+    }
+
+    /// The policy holds for every route a positioning solve reads the source through: the
+    /// SPP and DGNSS ephemeris routes, the observable routes of PPP and the tightly coupled
+    /// solves, velocity, and the SSR solution a PPP bias check compares against.
+    #[test]
+    fn correction_size_policy_holds_on_every_source_route() {
+        let broadcast = g30_g31_broadcast();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let iode = g30_iode(&broadcast, t);
+        let store = rtcm_g30_sized_store(iode, [0, 0, 25_001], 0, None);
+        let strict = SsrCorrectedEphemeris::new(&broadcast, &store);
+        assert_eq!(
+            EphemerisSource::position_clock_at_j2000_s(&strict, sat, t),
+            None
+        );
+        assert_eq!(
+            EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(&strict, sat, t, t)
+                .expect("not a solve failure"),
+            None
+        );
+        assert!(matches!(
+            ObservableEphemerisSource::observable_state_at_j2000_s(&strict, sat, t),
+            Err(ObservablesError::NoEphemeris)
+        ));
+        assert!(matches!(
+            ObservableEphemerisSource::velocity_at_j2000_s(&strict, sat, t),
+            Some(Err(ObservablesError::NoEphemeris))
+        ));
+        assert_eq!(
+            SsrCorrectionSource::try_applied_orbit_clock_solution(&strict, sat, t)
+                .expect("not a solve failure"),
+            None
+        );
+
+        let lenient = SsrCorrectedEphemeris::new(&broadcast, &store)
+            .with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
+        let state = EphemerisSource::position_clock_at_j2000_s(&lenient, sat, t).expect("applied");
+        let selected = EphemerisSource::try_position_clock_group_delay_selected_at_j2000_s(
+            &lenient, sat, t, t,
+        )
+        .expect("not a solve failure")
+        .expect("applied");
+        assert_eq!(selected.value.0, state.0);
+        let observable = ObservableEphemerisSource::observable_state_at_j2000_s(&lenient, sat, t)
+            .expect("applied");
+        assert_eq!(observable.position_ecef_m, state.0);
+        assert!(matches!(
+            ObservableEphemerisSource::velocity_at_j2000_s(&lenient, sat, t),
+            Some(Ok(_))
+        ));
+        assert!(
+            SsrCorrectionSource::try_applied_orbit_clock_solution(&lenient, sat, t)
+                .expect("not a solve failure")
+                .is_some()
+        );
+        assert_eq!(lenient.oversized_corrections().len(), 1);
+    }
+
+    /// Galileo HAS corrections are gated as RTCM SSR ones are: HAS states along-track and
+    /// cross-track corrections up to 16.376 m, so an orbit vector over 10 m is on the
+    /// wire. 1250 · 0.008 = 10 m exactly is applied; 1251 · 0.008 is refused.
+    #[test]
+    fn has_corrections_are_held_to_the_same_size_limits() {
+        let broadcast = g30_g31_broadcast();
+        let sat = GnssSatelliteId::new(GnssSystem::Gps, 30).unwrap();
+        let t = ssr_j2000(REAL_SSR_EPOCH_TOW_S);
+        let iode = g30_iode(&broadcast, t);
+        let reception = GnssWeekTow::new(TimeScale::Gst, REAL_SSR_WEEK, REAL_SSR_EPOCH_TOW_S)
+            .expect("GST reception");
+        let at_limit =
+            has_orbit_clock_store_with_orbit(sat, iode, 0, [0.0, 10.0, 0.0], 0.0, reception);
+        let source = SsrCorrectedEphemeris::new(&broadcast, &at_limit);
+        assert!(source.applied_orbit_clock_status(sat, t).is_ok());
+        assert!(source.corrected_state(sat, t).is_some());
+
+        let over =
+            has_orbit_clock_store_with_orbit(sat, iode, 0, [0.0, 10.008, 0.0], 0.0, reception);
+        let strict = SsrCorrectedEphemeris::new(&broadcast, &over);
+        let status = strict.applied_orbit_clock_status(sat, t);
+        let Err(SsrStateUnavailable::CorrectionExceedsLimit(size)) = status else {
+            panic!("expected a correction-size refusal, got {status:?}");
+        };
+        let stored = over.orbit(sat).expect("stored orbit");
+        assert_eq!(
+            size.orbit_m.to_bits(),
+            rtklib_norm3([stored.radial_m, stored.along_m, stored.cross_m]).to_bits()
+        );
+        assert!(size.orbit_m > 10.0);
+        assert_eq!(strict.corrected_state(sat, t), None);
+        let lenient = strict.with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
+        assert!(lenient.corrected_state(sat, t).is_some());
+        assert_eq!(lenient.oversized_corrections().len(), 1);
     }
 
     /// Metamorphic check of the SSR clock against the broadcast group delay, for RTCM SSR

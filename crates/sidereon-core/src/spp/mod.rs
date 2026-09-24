@@ -215,15 +215,23 @@ pub struct Observation {
 /// Why a satellite was excluded from the solve.
 ///
 /// SPP selection tests a satellite in the order RTKLIB `rescode` does and
-/// reports the first reason that applies: [`Self::NoEphemeris`], then
-/// [`Self::LowElevation`], then [`Self::SbasIonoUncovered`], then
-/// [`Self::IonosphereCarrierUnresolved`]. [`Self::SbasWithdrawn`] is not
-/// reported by SPP selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// reports the first reason that applies: [`Self::NoEphemeris`] (or, for a
+/// state an SSR-corrected source refuses for the size of its corrections,
+/// [`Self::SsrCorrectionExceedsLimit`]), then [`Self::LowElevation`], then
+/// [`Self::SbasIonoUncovered`], then [`Self::IonosphereCarrierUnresolved`].
+/// [`Self::SbasWithdrawn`] is not reported by SPP selection.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RejectionReason {
     /// The SP3 product has no usable position or clock for the satellite at the
     /// transmit epoch.
     NoEphemeris,
+    /// The SSR-corrected source refuses the satellite's state at the transmission
+    /// epoch because its SSR orbit or clock correction there is larger than RTKLIB
+    /// `satpos_ssr` applies, under [`crate::ssr::SsrCorrectionSizePolicy::Strict`]
+    /// ([`crate::ssr::SsrStateUnavailable::CorrectionExceedsLimit`]). RTKLIB marks
+    /// the satellite unhealthy and `rescode` leaves it out; the rest of the epoch is
+    /// solved. Carries the size of the corrections at that epoch.
+    SsrCorrectionExceedsLimit(crate::ssr::SsrCorrectionSize),
     /// The satellite is below the elevation mask at the state the reported
     /// selection was made at.
     LowElevation,
@@ -244,7 +252,7 @@ pub enum RejectionReason {
 }
 
 /// A rejected satellite paired with its rejection reason.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RejectedSat {
     /// The excluded satellite.
     pub satellite_id: GnssSatelliteId,
@@ -1046,6 +1054,46 @@ pub(crate) fn sat_model(
     p_meas_m: f64,
     ionosphere: SppIonosphere<'_>,
 ) -> Option<SatModel> {
+    sat_model_checked(env, sat, rx_ecef_m, b_m, p_meas_m, ionosphere).ok()
+}
+
+/// Why [`sat_model_checked`] gives no model for a satellite.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum SatModelGap {
+    /// The source withholds the satellite's state at the epoch the model reads it
+    /// because an SSR correction there is larger than RTKLIB `satpos_ssr` applies
+    /// ([`crate::ssr::SsrCorrectionSource::correction_size_refusal`]).
+    SsrCorrectionExceedsLimit(crate::ssr::SsrCorrectionSize),
+    /// Any other gap: no state or clock, a code that places no transmission epoch, no
+    /// relativistic term for a product clock, or no augmentation-grid delay.
+    Other,
+}
+
+/// The gap for a state the source gave none for at `t_j2000_s`, the record selected at
+/// `selection_j2000_s`.
+fn state_gap(
+    env: &SatModelEnv,
+    sat: GnssSatelliteId,
+    t_j2000_s: f64,
+    selection_j2000_s: f64,
+) -> SatModelGap {
+    env.eph
+        .ssr_correction_source()
+        .and_then(|ssr| ssr.correction_size_refusal(sat, t_j2000_s, selection_j2000_s))
+        .map_or(SatModelGap::Other, SatModelGap::SsrCorrectionExceedsLimit)
+}
+
+/// [`sat_model`] with the reason it gives no model: the size of the SSR corrections for
+/// which the source refuses the state it reads, asked at the same epoch and record
+/// selection as the state, or [`SatModelGap::Other`].
+pub(crate) fn sat_model_checked(
+    env: &SatModelEnv,
+    sat: GnssSatelliteId,
+    rx_ecef_m: [f64; 3],
+    b_m: f64,
+    p_meas_m: f64,
+    ionosphere: SppIonosphere<'_>,
+) -> Result<SatModel, SatModelGap> {
     let sagnac = env.model.sagnac;
     let frame = env.model.frame;
 
@@ -1064,7 +1112,7 @@ pub(crate) fn sat_model(
                 .and_then(|placement| placement.get(&sat).copied())
                 .unwrap_or(p_meas_m);
             if !p_place_m.is_finite() || p_place_m <= 0.0 {
-                return None;
+                return Err(SatModelGap::Other);
             }
             let clock_epoch =
                 crate::observables::pseudorange_clock_epoch_j2000_s(env.t_rx_j2000_s, p_place_m);
@@ -1074,7 +1122,8 @@ pub(crate) fn sat_model(
                 .eph
                 .try_transmit_epoch_clock_s(sat, clock_epoch, env.t_rx_j2000_s)
                 .ok()
-                .flatten()?
+                .flatten()
+                .ok_or(SatModelGap::Other)?
                 .value;
             let t_tx = crate::observables::pseudorange_transmit_epoch_from_clock_j2000_s(
                 env.t_rx_j2000_s,
@@ -1085,7 +1134,8 @@ pub(crate) fn sat_model(
                 .eph
                 .try_position_clock_group_delay_selected_at_j2000_s(sat, t_tx, env.t_rx_j2000_s)
                 .ok()
-                .flatten()?
+                .flatten()
+                .ok_or_else(|| state_gap(env, sat, t_tx, env.t_rx_j2000_s))?
                 .value;
             // The flight time a closed-form rotation turns the satellite through, when a
             // recipe pairs one with this placement: the geometric range over `c`. RTKLIB
@@ -1106,7 +1156,10 @@ pub(crate) fn sat_model(
             let mut group_delay = None;
             let mut t_state = t_tx;
             for _ in 0..TRANSMIT_TIME_ITERATIONS {
-                let (pos, clk, gd) = env.eph.position_clock_group_delay_at_j2000_s(sat, t_tx)?;
+                let (pos, clk, gd) = env
+                    .eph
+                    .position_clock_group_delay_at_j2000_s(sat, t_tx)
+                    .ok_or_else(|| state_gap(env, sat, t_tx, t_tx))?;
                 sat_pos = pos;
                 dt_sat = clk;
                 group_delay = gd;
@@ -1140,7 +1193,10 @@ pub(crate) fn sat_model(
             let mut t_state = t_tx;
             let mut prev_tau = f64::INFINITY;
             for _ in 0..CANONICAL_LIGHT_TIME_MAX_ITERS {
-                let (pos, clk, gd) = env.eph.position_clock_group_delay_at_j2000_s(sat, t_tx)?;
+                let (pos, clk, gd) = env
+                    .eph
+                    .position_clock_group_delay_at_j2000_s(sat, t_tx)
+                    .ok_or_else(|| state_gap(env, sat, t_tx, t_tx))?;
                 sat_pos = pos;
                 dt_sat = clk;
                 group_delay = gd;
@@ -1175,7 +1231,7 @@ pub(crate) fn sat_model(
     let dt_sat = match env.eph.clock_relativity_for_state_s(sat, t_state, sat_pos) {
         ClockRelativity::NotApplicable => dt_sat,
         ClockRelativity::Term(relativity_s) => dt_sat + relativity_s,
-        ClockRelativity::Unavailable => return None,
+        ClockRelativity::Unavailable => return Err(SatModelGap::Other),
     };
 
     let group_delay = match env.pseudorange_code {
@@ -1258,9 +1314,9 @@ pub(crate) fn sat_model(
                     frequency_hz: freq_hz,
                 },
             ),
-            SppIonosphere::SbasGrid(grid) => {
-                grid.slant_delay_m(g.geodetic, g.el_rad, g.az_rad, freq_hz)?
-            }
+            SppIonosphere::SbasGrid(grid) => grid
+                .slant_delay_m(g.geodetic, g.el_rad, g.az_rad, freq_hz)
+                .ok_or(SatModelGap::Other)?,
         };
     }
     if env.corrections.troposphere {
@@ -1278,7 +1334,7 @@ pub(crate) fn sat_model(
     // Predicted pseudorange, left-to-right; c*dt_sat is a single multiply.
     let p_hat = rho + b_m - C_M_S * dt_sat + iono_m + tropo_m;
 
-    Some(SatModel {
+    Ok(SatModel {
         sat_rot_ecef_m: sat_rot,
         el_rad: g.el_rad,
         p_hat_m: p_hat,
@@ -1369,32 +1425,39 @@ pub(crate) fn select_at(
         let sat = ob.satellite_id;
         let b = clock_m(clock_system(sat.system));
         let ionosphere = ionosphere_for(sat.system, inputs);
-        let Some(model) = sat_model(&env, sat, rx_ecef_m, b, ob.pseudorange_m, ionosphere) else {
-            // With an augmentation grid bound, a line of sight the grid does
-            // not cover leaves no model either. The grid-free model tells an
-            // ephemeris gap from that, and gives the elevation, which is
-            // tested before coverage.
-            let reason = match ionosphere {
-                SppIonosphere::SbasGrid(_) => {
-                    let grid_free = SppIonosphere::Klobuchar(KlobucharCoeffs {
-                        alpha: [0.0; 4],
-                        beta: [0.0; 4],
-                    });
-                    match sat_model(&env, sat, rx_ecef_m, b, ob.pseudorange_m, grid_free) {
-                        None => RejectionReason::NoEphemeris,
-                        Some(geometry) if geometry.el_rad < ELEVATION_MASK_RAD => {
-                            RejectionReason::LowElevation
-                        }
-                        Some(_) => RejectionReason::SbasIonoUncovered,
+        let model = match sat_model_checked(&env, sat, rx_ecef_m, b, ob.pseudorange_m, ionosphere) {
+            Ok(model) => model,
+            Err(gap) => {
+                // A state the source refuses for the size of its SSR corrections is
+                // reported by that name. With an augmentation grid bound, a line of
+                // sight the grid does not cover leaves no model either. The
+                // grid-free model tells an ephemeris gap from that, and gives the
+                // elevation, which is tested before coverage.
+                let reason = match (gap, ionosphere) {
+                    (SatModelGap::SsrCorrectionExceedsLimit(size), _) => {
+                        RejectionReason::SsrCorrectionExceedsLimit(size)
                     }
-                }
-                _ => RejectionReason::NoEphemeris,
-            };
-            rejected.push(RejectedSat {
-                satellite_id: sat,
-                reason,
-            });
-            continue;
+                    (SatModelGap::Other, SppIonosphere::SbasGrid(_)) => {
+                        let grid_free = SppIonosphere::Klobuchar(KlobucharCoeffs {
+                            alpha: [0.0; 4],
+                            beta: [0.0; 4],
+                        });
+                        match sat_model(&env, sat, rx_ecef_m, b, ob.pseudorange_m, grid_free) {
+                            None => RejectionReason::NoEphemeris,
+                            Some(geometry) if geometry.el_rad < ELEVATION_MASK_RAD => {
+                                RejectionReason::LowElevation
+                            }
+                            Some(_) => RejectionReason::SbasIonoUncovered,
+                        }
+                    }
+                    (SatModelGap::Other, _) => RejectionReason::NoEphemeris,
+                };
+                rejected.push(RejectedSat {
+                    satellite_id: sat,
+                    reason,
+                });
+                continue;
+            }
         };
         if model.el_rad < ELEVATION_MASK_RAD {
             rejected.push(RejectedSat {

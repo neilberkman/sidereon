@@ -6,7 +6,11 @@ use sidereon_core::ephemeris::{
     BroadcastEphemeris, BroadcastIssue, EphemerisSource, NavMessage, Sp3,
 };
 use sidereon_core::observables::{j2000_seconds_from_split, predict, PredictOptions};
+use sidereon_core::positioning::{
+    solve as solve_spp, spp_inputs_from_rinex_obs, Corrections, RejectionReason, RinexSppOptions,
+};
 use sidereon_core::ppp_corrections::CivilDateTime;
+use sidereon_core::precise_positioning::UnplacedObservationReason;
 use sidereon_core::precise_positioning::{
     solve_float_epochs, FloatEpoch, FloatObservation, FloatObservationSignals, FloatSolveConfig,
     FloatSolveOptions, FloatState, MeasurementWeights, RangeCorrections, TroposphereOptions,
@@ -17,7 +21,9 @@ use sidereon_core::rinex::observations::{
 use sidereon_core::rtcm::{
     Message, SsrClockRecord, SsrHeader, SsrKind, SsrMessage, SsrOrbitRecord, SsrStreamAssembler,
 };
-use sidereon_core::ssr::{SignalCode, SsrCorrectionStore};
+use sidereon_core::ssr::{
+    SignalCode, SsrCorrectedEphemeris, SsrCorrectionSizePolicy, SsrCorrectionStore,
+};
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -275,6 +281,18 @@ fn synthetic_ssr_store(
     epoch: &FloatEpoch,
     receiver_m: [f64; 3],
 ) -> SsrCorrectionStore {
+    synthetic_ssr_store_with_radial_offset(broadcast, sp3, epoch, receiver_m, None)
+}
+
+/// [`synthetic_ssr_store`] with `offset`'s satellite's raw radial orbit field (0.1 mm)
+/// moved by its amount, before the clock correction is fitted.
+fn synthetic_ssr_store_with_radial_offset(
+    broadcast: &BroadcastEphemeris,
+    sp3: &Sp3,
+    epoch: &FloatEpoch,
+    receiver_m: [f64; 3],
+    offset: Option<(GnssSatelliteId, i32)>,
+) -> SsrCorrectionStore {
     let mut orbit = Vec::new();
     let mut targets = Vec::new();
     let mut used = BTreeSet::new();
@@ -325,6 +343,14 @@ fn synthetic_ssr_store(
         targets.push((obs.sat, t_tx, sp3_clock));
     }
 
+    if let Some((sat, raw)) = offset {
+        let record = orbit
+            .iter_mut()
+            .find(|record: &&mut SsrOrbitRecord| record.satellite_id == sat.prn)
+            .expect("the offset satellite has an orbit record");
+        record.delta_radial += raw;
+    }
+
     let tow = epoch.t_rx_j2000_s + GPS_EPOCH_TO_J2000_S;
     let week = (tow / SECONDS_PER_WEEK).floor() as u32;
     let tow_s = tow - f64::from(week) * SECONDS_PER_WEEK;
@@ -338,8 +364,11 @@ fn synthetic_ssr_store(
         })
         .collect();
     let uncorrected = synthetic_rtcm_store(orbit.clone(), zero_clock, week, tow_s);
+    // Lenient, so an offset orbit correction past RTKLIB's limit still gives the clock
+    // the correction is fitted to; the clock does not read the orbit correction.
     let uncorrected_source =
-        sidereon_core::ssr::SsrCorrectedEphemeris::new(broadcast, &uncorrected);
+        sidereon_core::ssr::SsrCorrectedEphemeris::new(broadcast, &uncorrected)
+            .with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
     let clock = targets
         .iter()
         .map(|&(sat, t_tx, sp3_clock)| {
@@ -732,4 +761,238 @@ fn synthetic_ssr_corrected_broadcast_ppp_moves_toward_sp3_solution() {
         ssr_error + 0.05 < broadcast_error,
         "SSR error {ssr_error} m must beat broadcast error {broadcast_error} m"
     );
+}
+
+/// A radial orbit correction raised by 15 m (150000 in the 0.1 mm field), which puts
+/// the correction's norm past RTKLIB's 10 m `MAXECORSSR` whatever the real correction.
+const OVERSIZED_RADIAL_RAW: i32 = 150_000;
+
+/// SPP end to end on the real IGS SSR epoch 14:07:40 and the LAMA observations of that
+/// epoch, with one used satellite's radial orbit correction raised past RTKLIB's limit.
+/// Under the strict default the satellite is rejected with the typed reason and the
+/// epoch is solved from the other satellites, as RTKLIB `satpos_ssr` marks it unhealthy
+/// and `rescode` leaves it out; the solution is the one the other satellites give with
+/// the unmodified corrections. Under the lenient policy the correction is applied, the
+/// satellite is used, and the source reports the correction.
+#[test]
+fn spp_rejects_an_oversized_real_ssr_correction_under_strict_and_applies_it_under_lenient() {
+    let messages = load_real_ssr_messages();
+    let obs = load_real_obs();
+    let broadcast = load_real_broadcast();
+    let tow = 223_660;
+    let frames: Vec<SsrMessage> = gps_combined_by_epoch(&messages)
+        .remove(&tow)
+        .expect("real GPS SSR epoch 14:07:40")
+        .into_iter()
+        .cloned()
+        .collect();
+    let store_from = |frames: &[SsrMessage]| {
+        let mut store = SsrCorrectionStore::new();
+        let week_tow =
+            GnssWeekTow::new(TimeScale::Gpst, REAL_GPS_WEEK, f64::from(tow)).expect("GPS week/TOW");
+        for frame in frames {
+            store
+                .ingest_ssr(frame, week_tow)
+                .expect("ingest real GPS SSR");
+        }
+        store
+    };
+    let real = store_from(&frames);
+    let frame_refs: Vec<&SsrMessage> = frames.iter().collect();
+    let sats = store_sats_for_frames(&frame_refs);
+    let options = RinexSppOptions::default_for(&obs)
+        .expect("default signal policy")
+        .with_corrections(Corrections::IONO_TROPO)
+        .with_satellites(sats.iter().copied());
+    let epoch = spp_inputs_from_rinex_obs(&obs, &broadcast, &options)
+        .expect("assemble LAMA SPP inputs")
+        .into_iter()
+        .find(|epoch| epoch.epoch_index == 0)
+        .expect("the 14:07:40 epoch");
+    assert!(
+        (epoch.inputs.t_rx_j2000_s - gps_week_tow_to_j2000_s(REAL_GPS_WEEK, f64::from(tow))).abs()
+            < 1.0e-6,
+        "the observation epoch is the SSR epoch"
+    );
+
+    let baseline = solve_spp(
+        &SsrCorrectedEphemeris::new(&broadcast, &real),
+        &epoch.inputs,
+        false,
+    )
+    .expect("SPP on the real SSR corrections");
+    assert!(baseline.used_sats.len() >= 6, "{:?}", baseline.used_sats);
+    assert!(baseline.rejected_sats.iter().all(|rejected| !matches!(
+        rejected.reason,
+        RejectionReason::SsrCorrectionExceedsLimit(_)
+    )));
+    let victim = baseline.used_sats[0];
+
+    let mut raised = frames.clone();
+    let mut found = false;
+    for frame in &mut raised {
+        for record in &mut frame.orbit {
+            if record.satellite_id == victim.prn {
+                record.delta_radial += OVERSIZED_RADIAL_RAW;
+                found = true;
+            }
+        }
+    }
+    assert!(found, "{victim} has a real orbit correction");
+    let raised = store_from(&raised);
+
+    let strict = SsrCorrectedEphemeris::new(&broadcast, &raised);
+    let solution = solve_spp(&strict, &epoch.inputs, false)
+        .expect("SPP from the satellites whose corrections apply");
+    let rejected = solution
+        .rejected_sats
+        .iter()
+        .find(|rejected| rejected.satellite_id == victim)
+        .expect("the raised satellite is rejected");
+    let RejectionReason::SsrCorrectionExceedsLimit(size) = rejected.reason else {
+        panic!("{victim} rejected as {:?}", rejected.reason);
+    };
+    assert!(
+        size.orbit_exceeds_limit() && size.orbit_m > 10.0,
+        "{size:?}"
+    );
+    assert!(!solution.used_sats.contains(&victim));
+    let others: Vec<GnssSatelliteId> = baseline
+        .used_sats
+        .iter()
+        .copied()
+        .filter(|sat| *sat != victim)
+        .collect();
+    assert_eq!(solution.used_sats, others);
+    assert!(strict.oversized_corrections().is_empty());
+
+    // The same epoch without the raised satellite, on the unmodified corrections.
+    let mut without = epoch.inputs.clone();
+    without
+        .observations
+        .retain(|observation| observation.satellite_id != victim);
+    let expected = solve_spp(
+        &SsrCorrectedEphemeris::new(&broadcast, &real),
+        &without,
+        false,
+    )
+    .expect("SPP without the raised satellite");
+    assert_eq!(expected.used_sats, others);
+    let moved = position_error_m(solution.position.as_array(), expected.position.as_array());
+    assert!(
+        moved < 1.0e-6,
+        "the rest solves as it does alone: {moved} m"
+    );
+
+    let lenient = SsrCorrectedEphemeris::new(&broadcast, &raised)
+        .with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
+    let applied = solve_spp(&lenient, &epoch.inputs, false)
+        .expect("SPP with the oversized correction applied");
+    assert!(
+        applied.used_sats.contains(&victim),
+        "{:?}",
+        applied.used_sats
+    );
+    assert!(applied
+        .rejected_sats
+        .iter()
+        .all(|rejected| rejected.satellite_id != victim));
+    let reported = lenient.oversized_corrections();
+    assert!(!reported.is_empty());
+    assert!(reported
+        .iter()
+        .all(|correction| correction.sat == victim && correction.size.orbit_m > 10.0));
+}
+
+/// PPP end to end on the ESBC epoch with the SSR store fitted to the SP3 orbits and
+/// clocks, one satellite's radial orbit correction raised past RTKLIB's limit. Under the
+/// strict default the satellite's observation is left out before the solve and listed in
+/// `unplaced_observations` with the typed reason, and the epoch is solved from the rest,
+/// as RTKLIB `pppos` leaves out a satellite `satpos_ssr` marks unhealthy; the solution is
+/// the one the other observations give with the unmodified corrections. Under the lenient
+/// policy the correction is applied and reported.
+#[test]
+fn ppp_leaves_out_an_oversized_ssr_correction_under_strict_and_applies_it_under_lenient() {
+    let sp3 = load_sp3();
+    let broadcast = load_broadcast();
+    let obs = load_obs();
+    let approx = obs
+        .header()
+        .approx_position_m
+        .expect("ESBC approx position");
+    let epochs = vec![first_gps_epoch(&obs)];
+    let reference = solve_float_epochs(
+        &sp3,
+        &epochs,
+        initial_state(&epochs, approx),
+        float_config(),
+    )
+    .expect("SP3 PPP reference solve");
+    let victim = epochs[0].observations[0].sat;
+    let fitted = synthetic_ssr_store(&broadcast, &sp3, &epochs[0], reference.position_m);
+    let raised = synthetic_ssr_store_with_radial_offset(
+        &broadcast,
+        &sp3,
+        &epochs[0],
+        reference.position_m,
+        Some((victim, OVERSIZED_RADIAL_RAW)),
+    );
+
+    let strict = SsrCorrectedEphemeris::new(&broadcast, &raised);
+    let solution = solve_float_epochs(
+        &strict,
+        &epochs,
+        initial_state(&epochs, approx),
+        float_config(),
+    )
+    .expect("PPP from the observations whose corrections apply");
+    assert_eq!(solution.unplaced_observations.len(), 1);
+    let unplaced = &solution.unplaced_observations[0];
+    assert_eq!(unplaced.epoch_index, 0);
+    assert_eq!(unplaced.satellite_id, victim.to_string());
+    let UnplacedObservationReason::SsrCorrectionExceedsLimit(size) = unplaced.reason else {
+        panic!("{victim} unplaced as {:?}", unplaced.reason);
+    };
+    assert!(
+        size.orbit_exceeds_limit() && size.orbit_m > 10.0,
+        "{size:?}"
+    );
+    assert!(!solution.used_sats.contains(&victim.to_string()));
+    assert_eq!(solution.used_sats.len(), epochs[0].observations.len() - 1);
+
+    // The same epoch without the raised satellite, on the unmodified corrections.
+    let mut without = epochs.clone();
+    without[0]
+        .observations
+        .retain(|observation| observation.sat != victim);
+    let expected = solve_float_epochs(
+        &SsrCorrectedEphemeris::new(&broadcast, &fitted),
+        &without,
+        initial_state(&without, approx),
+        float_config(),
+    )
+    .expect("PPP without the raised satellite");
+    assert_eq!(expected.used_sats, solution.used_sats);
+    let moved = position_error_m(solution.position_m, expected.position_m);
+    assert!(
+        moved < 1.0e-6,
+        "the rest solves as it does alone: {moved} m"
+    );
+
+    let lenient = SsrCorrectedEphemeris::new(&broadcast, &raised)
+        .with_correction_size_policy(SsrCorrectionSizePolicy::Lenient);
+    let applied = solve_float_epochs(
+        &lenient,
+        &epochs,
+        initial_state(&epochs, approx),
+        float_config(),
+    )
+    .expect("PPP with the oversized correction applied");
+    assert!(applied.unplaced_observations.is_empty());
+    assert!(applied.used_sats.contains(&victim.to_string()));
+    let reported = lenient.oversized_corrections();
+    assert!(!reported.is_empty());
+    assert!(reported
+        .iter()
+        .all(|correction| correction.sat == victim && correction.size.orbit_m > 10.0));
 }

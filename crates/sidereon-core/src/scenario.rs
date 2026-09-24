@@ -1334,6 +1334,10 @@ impl<'a, E: ?Sized> DeclaredScenarioSource<'a, E> {
 }
 
 impl<E: EphemerisSource + ?Sized> EphemerisSource for DeclaredScenarioSource<'_, E> {
+    fn ssr_correction_source(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        self.source.ssr_correction_source()
+    }
+
     fn position_clock_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
@@ -1625,6 +1629,10 @@ impl<'a, E> SourceTranscript<'a, E> {
 }
 
 impl<E: EphemerisSource> EphemerisSource for SourceTranscript<'_, E> {
+    fn ssr_correction_source(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        self.source.ssr_correction_source()
+    }
+
     fn position_clock_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
