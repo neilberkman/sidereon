@@ -1093,6 +1093,14 @@ impl Sp3 {
             if exact_instant(restated) == exact_instant(split) {
                 return Ok(text);
             }
+            // The split a 2.x reader built from the same line (the clock
+            // fields summed in `f64`, then divided by the day) states this
+            // text too: an instant read before 3.0.0 stays writable.
+            if restated_split_2x(&text, self.header.time_system)
+                .is_some_and(|restated_2x| exact_instant(restated_2x) == exact_instant(split))
+            {
+                return Ok(text);
+            }
             if !measured {
                 field_seconds = fields.seconds;
                 residual_s = elapsed_seconds(split, restated);
@@ -1808,6 +1816,19 @@ fn leap_fields(jdn: i64, ticks_into_leap: i64) -> EpochFields {
 /// `super::civil_to_julian_split`. `None` when the parser would not accept the
 /// line back at all.
 fn restated_split(text: &str, time_system: Sp3TimeSystem) -> Option<JulianDateSplit> {
+    super::civil_to_julian_split(restated_civil(text, time_system)?).ok()
+}
+
+/// The instant a 2.x reader built from an emitted epoch record
+/// (`super::civil_to_julian_split_2x`), after the same civil validation.
+fn restated_split_2x(text: &str, time_system: Sp3TimeSystem) -> Option<JulianDateSplit> {
+    super::civil_to_julian_split_2x(restated_civil(text, time_system)?)
+}
+
+/// The civil fields of an emitted epoch record, read and validated as
+/// [`Sp3::parse`] reads an epoch line; `None` when the parser would not accept
+/// the line.
+fn restated_civil(text: &str, time_system: Sp3TimeSystem) -> Option<validate::ValidCivil> {
     let mut fields = text.split_whitespace();
     let year = fields.next()?.parse::<i64>().ok()?;
     let month = fields.next()?.parse::<i64>().ok()?;
@@ -1818,7 +1839,7 @@ fn restated_split(text: &str, time_system: Sp3TimeSystem) -> Option<JulianDateSp
     if fields.next().is_some() {
         return None;
     }
-    let civil = validate::civil_datetime_with_second_policy(
+    validate::civil_datetime_with_second_policy(
         year,
         month,
         day,
@@ -1827,8 +1848,7 @@ fn restated_split(text: &str, time_system: Sp3TimeSystem) -> Option<JulianDateSp
         seconds,
         time_system.civil_second_policy(),
     )
-    .ok()?;
-    super::civil_to_julian_split(civil).ok()
+    .ok()
 }
 
 /// The exact value of a split Julian date, as the two `f64`s of an error-free

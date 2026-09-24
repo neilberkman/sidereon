@@ -3697,6 +3697,40 @@ fn test_writer_preserves_a_parsed_epoch_whose_tick_count_is_not_whole() {
     );
 }
 
+/// An instant a 2.x reader produced from an epoch line stays writable.
+///
+/// Before 3.0.0 the reader summed the clock fields in `f64` and divided by the
+/// day, rounding twice; for 18:14:57.45199834 that lands one unit in the last
+/// place of the fraction from the correctly rounded split the reader builds
+/// now. The writer recognizes the 2.x reading of the line it would emit, as
+/// the clock writer recognizes 2.x GPS-seconds exports, so a product holding
+/// that instant is written with the stated line rather than refused; reading
+/// the text back gives the correctly rounded split.
+#[test]
+fn test_writer_restates_a_2x_reading_of_a_fractional_epoch() {
+    let mut sp3 = Sp3::parse(SP3C_FRACTIONAL_EPOCH_FILE.as_bytes()).unwrap();
+    let fraction_2x: f64 = (18.0 * 3_600.0 + 14.0 * 60.0 + 57.451_998_34) / 86_400.0;
+    let (jd_whole, fraction) = split_julian_date(2000, 1, 1, 18, 14, 57.451_998_34);
+    assert_eq!(jd_whole, 2_451_544.5);
+    assert_eq!(fraction.to_bits(), 0x3fe8_5517_7c9a_25f1);
+    assert_eq!(fraction_2x.to_bits(), 0x3fe8_5517_7c9a_25f0);
+    set_epoch_split(&mut sp3.epochs[1], jd_whole, fraction_2x);
+
+    let text = sp3
+        .to_sp3_string()
+        .expect("an instant a 2.x reader built from an epoch line writes as that line");
+    assert!(
+        text.contains("*  2000  1  1 18 14 57.45199834\n"),
+        "the 2.x reading is restated as the line it was read from:\n{text}"
+    );
+    let reparsed = Sp3::parse(text.as_bytes()).expect("the written product reparses");
+    assert_eq!(
+        reparsed.epochs[1].julian_date(),
+        Some(JulianDateSplit { jd_whole, fraction }),
+        "reading the line back gives the correctly rounded split"
+    );
+}
+
 /// An epoch whose split does not carry its day on the `*.5` midnight boundary
 /// is still an epoch a record states, and it is written.
 ///
