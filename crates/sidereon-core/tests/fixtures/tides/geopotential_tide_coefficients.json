@@ -30,7 +30,7 @@
     },
     {
       "id": "solid_earth_step1_orekit_2003_05_06_degree3_degree4",
-      "source": "Orekit SolidTidesFieldTest.testDeltaCnmSnm reference arrays for AbsoluteDate 2003-05-06T13:43:32.125 UTC, citing IERS Conventions (2010) Chapter 6. This row checks degree 3 and degree 4 values only; Orekit's degree 2 row also includes Step 2 frequency-dependent and permanent-tide terms that this implementation intentionally does not ship.",
+      "source": "Orekit SolidTidesFieldTest.testDeltaCnmSnm reference arrays for AbsoluteDate 2003-05-06T13:43:32.125 UTC, citing IERS Conventions (2010) Chapter 6. This row checks degree 3 and degree 4 values only; Orekit's degree 2 row is Step 1 plus Step 2 evaluated with Orekit's own UT1 and ephemerides, and the test source questions its C20 value in a comment. Degree 2 is checked against SolidTidesField given this crate's Sun and Moon positions and arguments in geopotential_tide_orekit_field.json, and Step 2 alone in geopotential_tide_step2_orekit.json.",
       "utc": "2003-05-06T13:43:32.125Z",
       "max_abs_error": 0.000000000001,
       "coefficients": [

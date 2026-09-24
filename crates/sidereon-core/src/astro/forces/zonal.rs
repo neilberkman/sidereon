@@ -11,6 +11,7 @@ use crate::astro::constants::{
     J2_EARTH, J3_EARTH, J4_EARTH, J5_EARTH, J6_EARTH, MU_EARTH, RE_EARTH,
 };
 use crate::astro::error::PropagationError;
+use crate::astro::forces::geopotential::TideSystem;
 use crate::astro::forces::r#trait::ForceModel;
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
@@ -109,6 +110,10 @@ pub struct ZonalCoefficients {
     pub j5: f64,
     /// J6 coefficient, dimensionless.
     pub j6: f64,
+    /// Tide system of `j2`. `j2 = -sqrt(5) C20`, so it carries whatever
+    /// permanent tide `C20` holds; the default coefficients are EGM96's, which
+    /// are tide-free.
+    pub tide_system: TideSystem,
 }
 
 impl Default for ZonalCoefficients {
@@ -119,6 +124,7 @@ impl Default for ZonalCoefficients {
             j4: J4_EARTH,
             j5: J5_EARTH,
             j6: J6_EARTH,
+            tide_system: TideSystem::TideFree,
         }
     }
 }

@@ -469,10 +469,16 @@ fn gast_radians(ts: &TimeScales, dpsi: f64) -> f64 {
 
 /// Greenwich Mean Sidereal Time for an instant, radians in `[0, 2pi)`.
 ///
-/// The IAU-1982 GMST used internally by the frame pipeline, surfaced as a public
-/// entry point. This is a thin wrapper over the existing private sidereal-time
-/// computation: it adds no new numerics, so the value is bit-identical to the
-/// quantity the transforms consume.
+/// The IAU 2006 GMST of IERS Conventions (2010) Equation (5.32) (Capitaine et
+/// al., 2003): the Earth rotation angle at UT1 plus
+/// `0.014506" + 4612.156534" t + 1.3915817" t^2 - 0.00000044" t^3 -
+/// 0.000029956" t^4 - 0.0000000368" t^5`, with `t` in Julian centuries from
+/// J2000.0. As in Skyfield, `t` is formed from the TDB day fraction; the
+/// Conventions use TT, and the two differ by under 2 ms of time, which moves
+/// the polynomial by under 1e-13 rad. It is the GMST the GCRS/ITRS transforms
+/// build their apparent sidereal time on, operation for operation. The TEME
+/// rotation and [`greenwich_mean_sidereal_time_radians_from_j2000_seconds`]
+/// use the IAU 1982 GMST instead.
 pub fn greenwich_mean_sidereal_time_radians(ts: &TimeScales) -> Result<f64, FrameTransformError> {
     validate_ut1_time_scales(ts)?;
     let radians = greenwich_mean_sidereal_time_radians_unchecked(ts);
@@ -485,11 +491,11 @@ fn greenwich_mean_sidereal_time_radians_unchecked(ts: &TimeScales) -> f64 {
     hours / 24.0 * TAU
 }
 
-/// IAU-1982 GMST in radians from continuous seconds past J2000.
+/// IAU 1982 GMST in radians from continuous seconds past J2000.
 ///
-/// The input epoch is treated as UT1 for this thin drag helper. It reuses the
-/// same `compute_theta_gmst1982` polynomial as
-/// [`greenwich_mean_sidereal_time_radians`] and adds no new sidereal-time math.
+/// The input epoch is treated as UT1 for this thin drag helper. It evaluates
+/// the IAU 1982 GMST polynomial the TEME rotation uses, not the ERA-based
+/// IAU 2006 GMST of [`greenwich_mean_sidereal_time_radians`].
 pub fn greenwich_mean_sidereal_time_radians_from_j2000_seconds(
     sec: f64,
 ) -> Result<f64, FrameTransformError> {
@@ -1840,7 +1846,7 @@ mod tests {
         let eq_eq = diff.min(TAU - diff);
         assert!(eq_eq < 1.0e-3, "equation of equinoxes too large: {eq_eq}");
 
-        // The mean wrapper matches the Skyfield-parity IAU-1982 sidereal time.
+        // The mean wrapper is the Skyfield-parity ERA-based IAU 2006 sidereal time.
         let gmst_hours = sidereal_time_hours(ts.jd_whole, ts.ut1_fraction, ts.tdb_fraction);
         assert_eq!(gmst, gmst_hours / 24.0 * TAU);
     }

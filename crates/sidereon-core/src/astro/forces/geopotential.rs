@@ -26,8 +26,34 @@ pub const EGM96_EMBEDDED_MAX_ORDER: u16 = 36;
 ///
 /// Each non-comment row contains `degree order Cnm Snm sigmaC sigmaS`. The
 /// parser ignores the sigma columns. Coefficients are dimensionless and use the
-/// fully normalized real convention for `Pnm(sin latitude)`.
+/// fully normalized real convention for `Pnm(sin latitude)`. The values are
+/// those of EGM96 (Lemoine et al., 1998, NASA/TP-1998-206861), a tide-free
+/// model: the ICGEM distribution of EGM96 states `tide_system tide_free`.
 pub const EGM96_DEGREE_ORDER_36: &str = include_str!("egm96_to_36.txt");
+
+/// How a geopotential's `C20` treats the permanent tide, IERS Conventions
+/// (2010) Section 1.1 and Section 6.2.2.
+///
+/// The degree-2 zonal tide-generating potential has a nonzero mean, the
+/// permanent tide, of amplitude `H0 = -0.31460 m`. It deforms the Earth, and
+/// the deformation changes `C20` by `A0 H0 k20` (Equation 6.14). A field's
+/// tide system says which of these two parts its `C20` holds, which decides
+/// what [`crate::astro::forces::SolidEarthTideGravity`] must remove from its
+/// corrections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TideSystem {
+    /// "Conventional tide free": `C20` holds neither the permanent
+    /// deformation nor the permanent tide-generating potential. EGM96 and the
+    /// NGA release of EGM2008 are tide-free.
+    TideFree,
+    /// "Zero tide": `C20` holds the permanent deformation `A0 H0 k20` but not
+    /// the permanent tide-generating potential. The IERS Conventions (2010)
+    /// Table 6.2 values are zero-tide.
+    ZeroTide,
+    /// "Mean tide": `C20` holds the permanent deformation and the permanent
+    /// tide-generating potential `A0 H0` as well.
+    MeanTide,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CoefficientPair {
@@ -67,6 +93,12 @@ pub struct SphericalHarmonicGravityConfig {
 }
 
 impl SphericalHarmonicGravityConfig {
+    /// Tide system of the coefficients this selector builds: every selector
+    /// reads the embedded EGM96 table, which is tide-free.
+    pub fn tide_system(&self) -> TideSystem {
+        TideSystem::TideFree
+    }
+
     /// Build a selector from explicit gravity constants and degree/order limits.
     ///
     /// All four fields are required because the constants and active harmonic
@@ -133,6 +165,7 @@ impl SphericalHarmonicGravityConfig {
             self.max_degree,
             self.max_order,
             EGM96_DEGREE_ORDER_36,
+            self.tide_system(),
         )
     }
 }
@@ -149,6 +182,7 @@ pub struct SphericalHarmonicGravity {
     max_order: u16,
     coefficients: Vec<CoefficientPair>,
     has_non_zonal_terms: bool,
+    tide_system: TideSystem,
 }
 
 impl Default for SphericalHarmonicGravity {
@@ -177,7 +211,8 @@ impl SphericalHarmonicGravity {
         SphericalHarmonicGravityConfig::earth(max_degree, max_order)?.build()
     }
 
-    /// Build from caller-supplied fully normalized coefficients.
+    /// Build from caller-supplied fully normalized coefficients in the tide
+    /// system `tide_system`.
     ///
     /// Coefficients above the requested degree or order are ignored. Degree 0
     /// and 1 coefficients are ignored because this force contains only the
@@ -188,6 +223,7 @@ impl SphericalHarmonicGravity {
         max_degree: u16,
         max_order: u16,
         coefficients: &[SphericalHarmonicCoefficient],
+        tide_system: TideSystem,
     ) -> Result<Self, PropagationError> {
         validate_finite_positive(mu_km3_s2, "mu_km3_s2")?;
         validate_finite_positive(reference_radius_km, "reference_radius_km")?;
@@ -230,10 +266,12 @@ impl SphericalHarmonicGravity {
             max_order,
             coefficients: dense,
             has_non_zonal_terms,
+            tide_system,
         })
     }
 
-    /// Build from an ASCII coefficient table.
+    /// Build from an ASCII coefficient table in the tide system
+    /// `tide_system`.
     ///
     /// Accepted data rows are either `n m Cnm Snm ...` or `gfc n m Cnm Snm ...`.
     /// Blank lines and lines beginning with `#` are ignored.
@@ -243,6 +281,7 @@ impl SphericalHarmonicGravity {
         max_degree: u16,
         max_order: u16,
         table: &str,
+        tide_system: TideSystem,
     ) -> Result<Self, PropagationError> {
         let coefficients = parse_ascii_coefficients(table)?;
         Self::from_normalized_coefficients(
@@ -251,6 +290,7 @@ impl SphericalHarmonicGravity {
             max_degree,
             max_order,
             &coefficients,
+            tide_system,
         )
     }
 
@@ -272,6 +312,11 @@ impl SphericalHarmonicGravity {
     /// Highest active order.
     pub fn max_order(&self) -> u16 {
         self.max_order
+    }
+
+    /// Tide system of the coefficients, as the constructor was told.
+    pub fn tide_system(&self) -> TideSystem {
+        self.tide_system
     }
 
     /// Return the coefficient at `degree, order`, if it lies inside the model.
@@ -912,6 +957,7 @@ mod tests {
                 max_degree,
                 0,
                 &zonal_coefficients(max_degree),
+                TideSystem::TideFree,
             )
             .expect("zonal harmonic gravity");
             let zonal = zonal_gravity(max_degree as u8);
@@ -959,6 +1005,7 @@ mod tests {
             2,
             2,
             &coefficients,
+            TideSystem::TideFree,
         )
         .expect("degree two gravity");
         let position = [7033.0, -1221.0, 1329.0];
@@ -997,6 +1044,7 @@ mod tests {
             2,
             2,
             &coefficients,
+            TideSystem::TideFree,
         )
         .expect("degree two gravity");
         let position = [0.0, 0.0, 7000.0];
@@ -1021,6 +1069,7 @@ gfc 3 0 0.957161207093D-06 0.000000000000D+00 0.0 0.0
             2,
             0,
             table,
+            TideSystem::TideFree,
         )
         .expect("ASCII loader");
         assert!(gravity.coefficient(3, 0).is_none());

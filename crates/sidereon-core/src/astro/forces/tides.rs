@@ -3,12 +3,19 @@
 //! These forces implement the low-degree time-variable geopotential corrections
 //! from IERS Conventions (2010), Chapter 6, for numerical propagation:
 //!
-//! * [`SolidEarthTideGravity`] applies Chapter 6, Section 6.2.1, Step 1:
-//!   frequency-independent anelastic Love-number corrections to fully
-//!   normalized `Cnm`/`Snm` from the Sun and Moon. It includes degree 2, degree
-//!   3, and the degree 4 corrections produced by degree-2 tides. Step 2
-//!   frequency-dependent constituent corrections are not included here; they
-//!   require the constituent argument tables and are a documented follow-up.
+//! * [`SolidEarthTideGravity`] applies Chapter 6, Section 6.2.1. Step 1 gives
+//!   the frequency-independent anelastic Love-number corrections to fully
+//!   normalized `Cnm`/`Snm` from the Sun and Moon: degree 2, degree 3, and the
+//!   degree 4 corrections produced by degree-2 tides. Step 2 adds the
+//!   frequency-dependent corrections to `C20`, `C21`/`S21` and `C22`/`S22`,
+//!   Equations (6.8a) and (6.8b) summed over the constituents of Tables 6.5b,
+//!   6.5a and 6.5c, with each argument `theta_f = m (theta_g + pi) - N . F`
+//!   formed from the Greenwich mean sidereal time and the Delaunay arguments.
+//!   Step 3 (Section 6.2.2) then takes out of `C20` the permanent tide that
+//!   the geopotential already holds, by its [`TideSystem`]: nothing for a
+//!   tide-free field such as EGM96, the permanent deformation `A0 H0 k20` of
+//!   Equation (6.14) for a zero-tide field, and that plus the permanent
+//!   tide-generating potential `A0 H0` for a mean-tide field.
 //! * [`SolidEarthPoleTideGravity`] applies the Chapter 6 solid Earth pole tide
 //!   correction to normalized `C21` and `S21`, using the polar motion stored in
 //!   the propagation context's Earth-orientation provider.
@@ -19,21 +26,25 @@
 
 use crate::astro::bodies::sun_moon::sun_moon_ecef_with_polar_motion;
 use crate::astro::constants::astro::{GM_MOON_KM3_S2, GM_SUN_KM3_S2};
-use crate::astro::constants::time::J2000_JD;
+use crate::astro::constants::time::{DAYS_PER_JULIAN_CENTURY, J2000_JD};
 use crate::astro::constants::units::{ARCSEC_TO_RAD, M_PER_KM};
 use crate::astro::error::PropagationError;
 use crate::astro::forces::geopotential::{
-    SphericalHarmonicCoefficient, SphericalHarmonicGravity, EGM96_MU_KM3_S2,
+    SphericalHarmonicCoefficient, SphericalHarmonicGravity, TideSystem, EGM96_MU_KM3_S2,
     EGM96_REFERENCE_RADIUS_KM,
 };
 use crate::astro::forces::r#trait::ForceModel;
+use crate::astro::frames::nutation::skyfield_fundamental_arguments;
 use crate::astro::frames::orientation::EarthOrientation;
-use crate::astro::frames::transforms::{with_ut1_validity, PolarMotion};
+use crate::astro::frames::transforms::{
+    greenwich_mean_sidereal_time_radians, with_ut1_validity, PolarMotion,
+};
 use crate::astro::propagator::api::PropagationContext;
 use crate::astro::state::CartesianState;
 use crate::astro::time::scales::TimeScales;
 use crate::astro::time::ValidityMode;
 use nalgebra::Vector3;
+use std::f64::consts::PI;
 
 const SOLID_TIDE_MAX_DEGREE: u16 = 4;
 const SOLID_TIDE_MAX_ORDER: u16 = 3;
@@ -66,6 +77,14 @@ pub const SOLID_EARTH_TIDE_K31_REAL: f64 = 0.093;
 pub const SOLID_EARTH_TIDE_K32_REAL: f64 = 0.093;
 /// IERS Conventions (2010), Chapter 6, Table 6.3 `k33`.
 pub const SOLID_EARTH_TIDE_K33_REAL: f64 = 0.094;
+
+/// IERS Conventions (2010), Chapter 6, Equation (6.8c): `A0 = 1 / (Re sqrt(4 pi))`,
+/// per metre of tide-generating potential amplitude.
+pub const SOLID_EARTH_TIDE_A0_PER_M: f64 = 4.4228e-8;
+/// IERS Conventions (2010), Chapter 6, Equation (6.14): amplitude `H0` of the
+/// permanent (zero-frequency) part of the degree-2 zonal tide-generating
+/// potential, metres.
+pub const PERMANENT_TIDE_H0_M: f64 = -0.31460;
 
 /// Chapter 6 solid Earth pole tide normalized-coefficient scale.
 pub const SOLID_EARTH_POLE_TIDE_SCALE: f64 = -1.333e-9;
@@ -127,7 +146,8 @@ const DEGREE3_LOVE: [ComplexLoveNumber; 4] = [
     },
 ];
 
-/// Step-1 solid Earth tide geopotential perturbation force.
+/// Solid Earth tide geopotential perturbation force, IERS Conventions (2010)
+/// Chapter 6, Section 6.2.1, Steps 1 and 2.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SolidEarthTideGravity {
     /// Earth gravitational parameter used by the correction potential, km^3/s^2.
@@ -138,6 +158,17 @@ pub struct SolidEarthTideGravity {
     pub gm_sun_km3_s2: f64,
     /// Lunar gravitational parameter, km^3/s^2.
     pub gm_moon_km3_s2: f64,
+    /// Whether the Step 2 frequency-dependent corrections of Tables 6.5a-c are
+    /// added to the Step 1 corrections. `true` by default and from
+    /// [`SolidEarthTideGravity::new`]; `false` gives Step 1 alone.
+    pub frequency_dependent: bool,
+    /// Tide system of the geopotential these corrections are added to; Step 3
+    /// takes out of `C20` the permanent tide that geopotential already holds.
+    /// [`TideSystem::TideFree`] by default and from
+    /// [`SolidEarthTideGravity::new`], matching the embedded EGM96 field and
+    /// the default zonal coefficients. A composite force refuses a value that
+    /// differs from its zonal or spherical-harmonic field's.
+    pub tide_system: TideSystem,
 }
 
 impl Default for SolidEarthTideGravity {
@@ -147,12 +178,15 @@ impl Default for SolidEarthTideGravity {
             reference_radius_km: EGM96_REFERENCE_RADIUS_KM,
             gm_sun_km3_s2: GM_SUN_KM3_S2,
             gm_moon_km3_s2: GM_MOON_KM3_S2,
+            frequency_dependent: true,
+            tide_system: TideSystem::TideFree,
         }
     }
 }
 
 impl SolidEarthTideGravity {
-    /// Build with explicit Earth, Sun, and Moon parameters.
+    /// Build with explicit Earth, Sun, and Moon parameters, the Step 2
+    /// corrections on, and a tide-free geopotential.
     pub fn new(
         mu_earth_km3_s2: f64,
         reference_radius_km: f64,
@@ -164,14 +198,44 @@ impl SolidEarthTideGravity {
             reference_radius_km,
             gm_sun_km3_s2,
             gm_moon_km3_s2,
+            frequency_dependent: true,
+            tide_system: TideSystem::TideFree,
         }
     }
 
-    /// Coefficient corrections from already body-fixed Sun and Moon positions.
+    /// Build for `geopotential`: its gravitational parameter, reference
+    /// radius and tide system, the crate's Sun and Moon parameters, and the
+    /// Step 2 corrections on.
+    pub fn for_geopotential(geopotential: &SphericalHarmonicGravity) -> Self {
+        Self {
+            mu_earth_km3_s2: geopotential.mu_km3_s2(),
+            reference_radius_km: geopotential.reference_radius_km(),
+            gm_sun_km3_s2: GM_SUN_KM3_S2,
+            gm_moon_km3_s2: GM_MOON_KM3_S2,
+            frequency_dependent: true,
+            tide_system: geopotential.tide_system(),
+        }
+    }
+
+    /// Step 1 and Step 3 coefficient corrections from already body-fixed Sun
+    /// and Moon positions. The Step 2 corrections depend on the epoch rather
+    /// than on the bodies' positions and are not included; see
+    /// [`SolidEarthTideGravity::coefficient_corrections_at_epoch`].
     pub fn coefficient_corrections_for_body_fixed_bodies(
         &self,
         sun_itrf_km: [f64; 3],
         moon_itrf_km: [f64; 3],
+    ) -> Result<[SphericalHarmonicCoefficient; 10], PropagationError> {
+        self.corrections(sun_itrf_km, moon_itrf_km, None)
+    }
+
+    /// Step 1 from the bodies, plus `step2` when given, then Step 3, in the
+    /// order Orekit's `SolidTidesField` applies them.
+    fn corrections(
+        &self,
+        sun_itrf_km: [f64; 3],
+        moon_itrf_km: [f64; 3],
+        step2: Option<[SphericalHarmonicCoefficient; 3]>,
     ) -> Result<[SphericalHarmonicCoefficient; 10], PropagationError> {
         validate_positive(self.mu_earth_km3_s2, "mu_earth_km3_s2")?;
         validate_positive(self.reference_radius_km, "reference_radius_km")?;
@@ -181,18 +245,41 @@ impl SolidEarthTideGravity {
         let mut corrections = empty_solid_tide_coefficients();
         add_body_tide_coefficients(self, self.gm_sun_km3_s2, sun_itrf_km, &mut corrections)?;
         add_body_tide_coefficients(self, self.gm_moon_km3_s2, moon_itrf_km, &mut corrections)?;
+        if let Some(step2) = step2 {
+            for (index, correction) in step2.iter().enumerate() {
+                corrections[index].c += correction.c;
+                corrections[index].s += correction.s;
+            }
+        }
+        corrections[0].c -= permanent_tide_c20(self.tide_system);
         Ok(corrections)
     }
 
-    /// Coefficient corrections at an epoch using the context's body-fixed frame provider.
+    /// Coefficient corrections at an epoch using the context's body-fixed
+    /// frame provider: Step 1, plus Step 2 when
+    /// [`SolidEarthTideGravity::frequency_dependent`] is set, then Step 3.
     pub fn coefficient_corrections_at_epoch(
         &self,
         epoch_tdb_seconds: f64,
         ctx: &PropagationContext,
     ) -> Result<[SphericalHarmonicCoefficient; 10], PropagationError> {
         let orientation = orientation_at_state(ctx, epoch_tdb_seconds)?;
-        let bodies = sun_moon_itrf_km(&orientation)?;
-        self.coefficient_corrections_for_body_fixed_bodies(bodies.sun_itrf_km, bodies.moon_itrf_km)
+        self.corrections_for_orientation(&orientation)
+    }
+
+    fn corrections_for_orientation(
+        &self,
+        orientation: &EarthOrientation,
+    ) -> Result<[SphericalHarmonicCoefficient; 10], PropagationError> {
+        let bodies = sun_moon_itrf_km(orientation)?;
+        let step2 = if self.frequency_dependent {
+            Some(frequency_dependent_corrections_at(
+                &orientation.time_scales(),
+            )?)
+        } else {
+            None
+        };
+        self.corrections(bodies.sun_itrf_km, bodies.moon_itrf_km, step2)
     }
 }
 
@@ -210,17 +297,15 @@ impl ForceModel for SolidEarthTideGravity {
                     "solid Earth tide body-fixed position rotation failed: {error}"
                 ))
             })?;
-        let bodies = sun_moon_itrf_km(&orientation)?;
-        let corrections = self.coefficient_corrections_for_body_fixed_bodies(
-            bodies.sun_itrf_km,
-            bodies.moon_itrf_km,
-        )?;
+        let corrections = self.corrections_for_orientation(&orientation)?;
         let tide = SphericalHarmonicGravity::from_normalized_coefficients(
             self.mu_earth_km3_s2,
             self.reference_radius_km,
             SOLID_TIDE_MAX_DEGREE,
             SOLID_TIDE_MAX_ORDER,
             &corrections,
+            // A field of corrections holds no permanent tide of its own.
+            TideSystem::TideFree,
         )?;
         let accel_itrf = tide.body_fixed_acceleration_km_s2(position_itrf_km)?;
         let accel_gcrf = orientation
@@ -306,6 +391,8 @@ impl ForceModel for SolidEarthPoleTideGravity {
             POLE_TIDE_MAX_DEGREE,
             POLE_TIDE_MAX_ORDER,
             &[correction],
+            // A field of corrections holds no permanent tide of its own.
+            TideSystem::TideFree,
         )?;
         let accel_itrf = tide.body_fixed_acceleration_km_s2(position_itrf_km)?;
         let accel_gcrf = orientation
@@ -439,6 +526,254 @@ fn empty_solid_tide_coefficients() -> [SphericalHarmonicCoefficient; 10] {
             s: 0.0,
         },
     ]
+}
+
+/// Part of the Step 1 `C20` correction that a geopotential in `tide_system`
+/// already holds, to be subtracted (Section 6.2.2).
+///
+/// The time average of the Step 1 `C20` correction is the permanent
+/// deformation `A0 H0 k20` of Equation (6.14). A zero-tide `C20` holds it,
+/// so Equation (6.13) subtracts it. A mean-tide `C20` also holds the permanent
+/// part of the tide-generating potential, `A0 H0` (Chapter 1, Section 1.1);
+/// the Sun and Moon third-body attraction already applies the whole
+/// tide-generating potential, its permanent part included, so that part is
+/// subtracted as well. A tide-free `C20` holds neither. The products are formed
+/// as Orekit forms its IERS 2010 permanent tide, `(A0 * H0) * k20`.
+fn permanent_tide_c20(tide_system: TideSystem) -> f64 {
+    let potential = SOLID_EARTH_TIDE_A0_PER_M * PERMANENT_TIDE_H0_M;
+    let deformation = potential * SOLID_EARTH_TIDE_K20_REAL;
+    match tide_system {
+        TideSystem::TideFree => 0.0,
+        TideSystem::ZeroTide => deformation,
+        TideSystem::MeanTide => deformation + potential,
+    }
+}
+
+/// One tidal constituent of IERS Conventions (2010) Tables 6.5a-c.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct FrequencyDependentTerm {
+    /// Doodson number as printed without its comma, e.g. 165555 for K1. Only
+    /// the transcription test reads it, against the multipliers.
+    #[cfg_attr(not(test), allow(dead_code))]
+    doodson_number: u32,
+    /// Multipliers of the Doodson arguments (tau, s, h, p, N', ps). The first is
+    /// the order `m` of the coefficient the term corrects.
+    doodson: [i8; 6],
+    /// Multipliers `N` of the Delaunay arguments (l, l', F, D, Omega), with the
+    /// argument `theta_f = m (theta_g + pi) - N . F`.
+    delaunay: [i8; 5],
+    /// In-phase amplitude, units of 1e-12: `A0 Hf dkf_R` in Table 6.5b,
+    /// `A1 dkf_R Hf` in Table 6.5a, `A2 dkf Hf` in Table 6.5c.
+    in_phase: f64,
+    /// Out-of-phase amplitude, units of 1e-12: `A0 Hf dkf_I` in Table 6.5b,
+    /// `A1 dkf_I Hf` in Table 6.5a, and zero in Table 6.5c.
+    out_of_phase: f64,
+}
+
+const fn term(
+    doodson_number: u32,
+    doodson: [i8; 6],
+    delaunay: [i8; 5],
+    in_phase: f64,
+    out_of_phase: f64,
+) -> FrequencyDependentTerm {
+    FrequencyDependentTerm {
+        doodson_number,
+        doodson,
+        delaunay,
+        in_phase,
+        out_of_phase,
+    }
+}
+
+/// Unit of the amplitudes in Tables 6.5a-c.
+const TABLE_6_5_UNIT: f64 = 1.0e-12;
+
+/// IERS Conventions (2010) Table 6.5b: zonal (long-period) tides, `k20`.
+#[rustfmt::skip]
+const K20_TERMS: [FrequencyDependentTerm; 21] = [
+    term( 55565, [ 0,  0,  0,  0,  1,  0], [ 0,  0,  0,  0,  1],   16.6,  -6.7),
+    term( 55575, [ 0,  0,  0,  0,  2,  0], [ 0,  0,  0,  0,  2],   -0.1,   0.1),
+    term( 56554, [ 0,  0,  1,  0,  0, -1], [ 0, -1,  0,  0,  0],   -1.2,   0.8), // Sa
+    term( 57555, [ 0,  0,  2,  0,  0,  0], [ 0,  0, -2,  2, -2],   -5.5,   4.3), // Ssa
+    term( 57565, [ 0,  0,  2,  0,  1,  0], [ 0,  0, -2,  2, -1],    0.1,  -0.1),
+    term( 58554, [ 0,  0,  3,  0,  0, -1], [ 0, -1, -2,  2, -2],   -0.3,   0.2),
+    term( 63655, [ 0,  1, -2,  1,  0,  0], [ 1,  0,  0, -2,  0],   -0.3,   0.7), // Msm
+    term( 65445, [ 0,  1,  0, -1, -1,  0], [-1,  0,  0,  0, -1],    0.1,  -0.2),
+    term( 65455, [ 0,  1,  0, -1,  0,  0], [-1,  0,  0,  0,  0],   -1.2,   3.7), // Mm
+    term( 65465, [ 0,  1,  0, -1,  1,  0], [-1,  0,  0,  0,  1],    0.1,  -0.2),
+    term( 65655, [ 0,  1,  0,  1,  0,  0], [ 1,  0, -2,  0, -2],    0.1,  -0.2),
+    term( 73555, [ 0,  2, -2,  0,  0,  0], [ 0,  0,  0, -2,  0],    0.0,   0.6), // Msf
+    term( 75355, [ 0,  2,  0, -2,  0,  0], [-2,  0,  0,  0,  0],    0.0,   0.3),
+    term( 75555, [ 0,  2,  0,  0,  0,  0], [ 0,  0, -2,  0, -2],    0.6,   6.3), // Mf
+    term( 75565, [ 0,  2,  0,  0,  1,  0], [ 0,  0, -2,  0, -1],    0.2,   2.6),
+    term( 75575, [ 0,  2,  0,  0,  2,  0], [ 0,  0, -2,  0,  0],    0.0,   0.2),
+    term( 83655, [ 0,  3, -2,  1,  0,  0], [ 1,  0, -2, -2, -2],    0.1,   0.2), // Mstm
+    term( 85455, [ 0,  3,  0, -1,  0,  0], [-1,  0, -2,  0, -2],    0.4,   1.1), // Mtm
+    term( 85465, [ 0,  3,  0, -1,  1,  0], [-1,  0, -2,  0, -1],    0.2,   0.5),
+    term( 93555, [ 0,  4, -2,  0,  0,  0], [ 0,  0, -2, -2, -2],    0.1,   0.2), // Msqm
+    term( 95355, [ 0,  4,  0, -2,  0,  0], [-2,  0, -2,  0, -2],    0.1,   0.1), // Mqm
+];
+
+/// IERS Conventions (2010) Table 6.5a: diurnal tides, `k21`.
+#[rustfmt::skip]
+const K21_TERMS: [FrequencyDependentTerm; 48] = [
+    term(125755, [ 1, -3,  0,  2,  0,  0], [ 2,  0,  2,  0,  2],   -0.1,   0.0), // 2Q1
+    term(127555, [ 1, -3,  2,  0,  0,  0], [ 0,  0,  2,  2,  2],   -0.1,   0.0), // sigma1
+    term(135645, [ 1, -2,  0,  1, -1,  0], [ 1,  0,  2,  0,  1],   -0.1,   0.0),
+    term(135655, [ 1, -2,  0,  1,  0,  0], [ 1,  0,  2,  0,  2],   -0.7,   0.1), // Q1
+    term(137455, [ 1, -2,  2, -1,  0,  0], [-1,  0,  2,  2,  2],   -0.1,   0.0), // rho1
+    term(145545, [ 1, -1,  0,  0, -1,  0], [ 0,  0,  2,  0,  1],   -1.3,   0.1),
+    term(145555, [ 1, -1,  0,  0,  0,  0], [ 0,  0,  2,  0,  2],   -6.8,   0.6), // O1
+    term(147555, [ 1, -1,  2,  0,  0,  0], [ 0,  0,  0,  2,  0],    0.1,   0.0), // tau1
+    term(153655, [ 1,  0, -2,  1,  0,  0], [ 1,  0,  2, -2,  2],    0.1,   0.0), // Ntau1
+    term(155445, [ 1,  0,  0, -1, -1,  0], [-1,  0,  2,  0,  1],    0.1,   0.0),
+    term(155455, [ 1,  0,  0, -1,  0,  0], [-1,  0,  2,  0,  2],    0.4,   0.0), // Lk1
+    term(155655, [ 1,  0,  0,  1,  0,  0], [ 1,  0,  0,  0,  0],    1.3,  -0.1), // No1
+    term(155665, [ 1,  0,  0,  1,  1,  0], [ 1,  0,  0,  0,  1],    0.3,   0.0),
+    term(157455, [ 1,  0,  2, -1,  0,  0], [-1,  0,  0,  2,  0],    0.3,   0.0), // chi1
+    term(157465, [ 1,  0,  2, -1,  1,  0], [-1,  0,  0,  2,  1],    0.1,   0.0),
+    term(162556, [ 1,  1, -3,  0,  0,  1], [ 0,  1,  2, -2,  2],   -1.9,   0.1), // pi1
+    term(163545, [ 1,  1, -2,  0, -1,  0], [ 0,  0,  2, -2,  1],    0.5,   0.0),
+    term(163555, [ 1,  1, -2,  0,  0,  0], [ 0,  0,  2, -2,  2],  -43.4,   2.9), // P1
+    term(164554, [ 1,  1, -1,  0,  0, -1], [ 0, -1,  2, -2,  2],    0.6,   0.0),
+    term(164556, [ 1,  1, -1,  0,  0,  1], [ 0,  1,  0,  0,  0],    1.6,  -0.1), // S1
+    term(165345, [ 1,  1,  0, -2, -1,  0], [-2,  0,  2,  0,  1],    0.1,   0.0),
+    term(165535, [ 1,  1,  0,  0, -2,  0], [ 0,  0,  0,  0, -2],    0.1,   0.0),
+    term(165545, [ 1,  1,  0,  0, -1,  0], [ 0,  0,  0,  0, -1],   -8.8,   0.5),
+    term(165555, [ 1,  1,  0,  0,  0,  0], [ 0,  0,  0,  0,  0],  470.9, -30.2), // K1
+    term(165565, [ 1,  1,  0,  0,  1,  0], [ 0,  0,  0,  0,  1],   68.1,  -4.6),
+    term(165575, [ 1,  1,  0,  0,  2,  0], [ 0,  0,  0,  0,  2],   -1.6,   0.1),
+    term(166455, [ 1,  1,  1, -1,  0,  0], [-1,  0,  0,  1,  0],    0.1,   0.0),
+    term(166544, [ 1,  1,  1,  0, -1, -1], [ 0, -1,  0,  0, -1],   -0.1,   0.0),
+    term(166554, [ 1,  1,  1,  0,  0, -1], [ 0, -1,  0,  0,  0],  -20.6,  -0.3), // psi1
+    term(166556, [ 1,  1,  1,  0,  0,  1], [ 0,  1, -2,  2, -2],    0.3,   0.0),
+    term(166564, [ 1,  1,  1,  0,  1, -1], [ 0, -1,  0,  0,  1],   -0.3,   0.0),
+    term(167355, [ 1,  1,  2, -2,  0,  0], [-2,  0,  0,  2,  0],   -0.2,   0.0),
+    term(167365, [ 1,  1,  2, -2,  1,  0], [-2,  0,  0,  2,  1],   -0.1,   0.0),
+    term(167555, [ 1,  1,  2,  0,  0,  0], [ 0,  0, -2,  2, -2],   -5.0,   0.3), // phi1
+    term(167565, [ 1,  1,  2,  0,  1,  0], [ 0,  0, -2,  2, -1],    0.2,   0.0),
+    term(168554, [ 1,  1,  3,  0,  0, -1], [ 0, -1, -2,  2, -2],   -0.2,   0.0),
+    term(173655, [ 1,  2, -2,  1,  0,  0], [ 1,  0,  0, -2,  0],   -0.5,   0.0), // theta1
+    term(173665, [ 1,  2, -2,  1,  1,  0], [ 1,  0,  0, -2,  1],   -0.1,   0.0),
+    term(175445, [ 1,  2,  0, -1, -1,  0], [-1,  0,  0,  0, -1],    0.1,   0.0),
+    term(175455, [ 1,  2,  0, -1,  0,  0], [-1,  0,  0,  0,  0],   -2.1,   0.1), // J1
+    term(175465, [ 1,  2,  0, -1,  1,  0], [-1,  0,  0,  0,  1],   -0.4,   0.0),
+    term(183555, [ 1,  3, -2,  0,  0,  0], [ 0,  0,  0, -2,  0],   -0.2,   0.0), // So1
+    term(185355, [ 1,  3,  0, -2,  0,  0], [-2,  0,  0,  0,  0],   -0.1,   0.0),
+    term(185555, [ 1,  3,  0,  0,  0,  0], [ 0,  0, -2,  0, -2],   -0.6,   0.0), // Oo1
+    term(185565, [ 1,  3,  0,  0,  1,  0], [ 0,  0, -2,  0, -1],   -0.4,   0.0),
+    term(185575, [ 1,  3,  0,  0,  2,  0], [ 0,  0, -2,  0,  0],   -0.1,   0.0),
+    term(195455, [ 1,  4,  0, -1,  0,  0], [-1,  0, -2,  0, -2],   -0.1,   0.0), // nu1
+    term(195465, [ 1,  4,  0, -1,  1,  0], [-1,  0, -2,  0, -1],   -0.1,   0.0),
+];
+
+/// IERS Conventions (2010) Table 6.5c: semidiurnal tides, `k22`; the corrections are
+/// only to the real part, so the out-of-phase amplitudes are zero.
+#[rustfmt::skip]
+const K22_TERMS: [FrequencyDependentTerm; 2] = [
+    term(245655, [ 2, -1,  0,  1,  0,  0], [ 1,  0,  2,  0,  2],   -0.3,   0.0), // N2
+    term(255555, [ 2,  0,  0,  0,  0,  0], [ 0,  0,  2,  0,  2],   -1.2,   0.0), // M2
+];
+
+/// Step 2 corrections at the instant of `time_scales`, with `theta_g` the
+/// Greenwich mean sidereal time and the Delaunay arguments evaluated in Julian
+/// centuries of TT from J2000.0. The time scales are accepted with whatever UT1
+/// they carry: the caller's orientation provider has already applied its UT1
+/// policy to them.
+fn frequency_dependent_corrections_at(
+    time_scales: &TimeScales,
+) -> Result<[SphericalHarmonicCoefficient; 3], PropagationError> {
+    let gmst_rad = with_ut1_validity(
+        time_scales,
+        ValidityMode::Permissive,
+        greenwich_mean_sidereal_time_radians,
+    )
+    .map(|validated| validated.value)
+    .map_err(|error| PropagationError::from_frame("solid Earth tide sidereal time", error))?;
+    let t = ((time_scales.jd_whole - J2000_JD) + time_scales.tt_fraction) / DAYS_PER_JULIAN_CENTURY;
+    let delaunay_rad = skyfield_fundamental_arguments(t).map_err(|error| {
+        PropagationError::ForceModelFailure(format!(
+            "solid Earth tide fundamental arguments: {error}"
+        ))
+    })?;
+    Ok(frequency_dependent_corrections(gmst_rad + PI, delaunay_rad))
+}
+
+/// Step 2 corrections to normalized `C20`, `C21`/`S21` and `C22`/`S22`, in
+/// that order, for `gamma_rad = theta_g + pi` and the Delaunay arguments
+/// (l, l', F, D, Omega) in radians.
+///
+/// Equation (6.8a) gives `dC20 = sum(ip cos(theta_f) - op sin(theta_f))`.
+/// Equation (6.8b) with `eta_1 = -i` gives
+/// `dC21 = sum(ip sin(theta_f) + op cos(theta_f))` and
+/// `dS21 = sum(ip cos(theta_f) - op sin(theta_f))`, and with `eta_2 = 1` gives
+/// `dC22 = sum(ip cos(theta_f) - op sin(theta_f))` and
+/// `dS22 = -sum(ip sin(theta_f) + op cos(theta_f))`.
+fn frequency_dependent_corrections(
+    gamma_rad: f64,
+    delaunay_rad: [f64; 5],
+) -> [SphericalHarmonicCoefficient; 3] {
+    let mut corrections = [
+        SphericalHarmonicCoefficient {
+            degree: 2,
+            order: 0,
+            c: 0.0,
+            s: 0.0,
+        },
+        SphericalHarmonicCoefficient {
+            degree: 2,
+            order: 1,
+            c: 0.0,
+            s: 0.0,
+        },
+        SphericalHarmonicCoefficient {
+            degree: 2,
+            order: 2,
+            c: 0.0,
+            s: 0.0,
+        },
+    ];
+    for (index, terms) in [&K20_TERMS[..], &K21_TERMS[..], &K22_TERMS[..]]
+        .into_iter()
+        .enumerate()
+    {
+        for term in terms {
+            let (dc, ds) = frequency_dependent_term(term, gamma_rad, delaunay_rad);
+            corrections[index].c += dc;
+            corrections[index].s += ds;
+        }
+    }
+    corrections
+}
+
+/// Contribution `(dC2m, dS2m)` of one constituent, `m` being its first Doodson
+/// multiplier.
+fn frequency_dependent_term(
+    term: &FrequencyDependentTerm,
+    gamma_rad: f64,
+    delaunay_rad: [f64; 5],
+) -> (f64, f64) {
+    let order = term.doodson[0];
+    let mut theta = f64::from(order) * gamma_rad;
+    for (multiplier, argument) in term.delaunay.iter().zip(delaunay_rad) {
+        theta -= f64::from(*multiplier) * argument;
+    }
+    let sin_theta = libm::sin(theta);
+    let cos_theta = libm::cos(theta);
+    let in_phase = term.in_phase * TABLE_6_5_UNIT;
+    let out_of_phase = term.out_of_phase * TABLE_6_5_UNIT;
+    match order {
+        0 => (in_phase * cos_theta - out_of_phase * sin_theta, 0.0),
+        1 => (
+            in_phase * sin_theta + out_of_phase * cos_theta,
+            in_phase * cos_theta - out_of_phase * sin_theta,
+        ),
+        _ => (
+            in_phase * cos_theta - out_of_phase * sin_theta,
+            -(in_phase * sin_theta + out_of_phase * cos_theta),
+        ),
+    }
 }
 
 fn add_body_tide_coefficients(
@@ -842,6 +1177,347 @@ mod tests {
             assert_close(actual.c, expected.c, tolerance);
             assert_close(actual.s, expected.s, tolerance);
         }
+    }
+
+    const STEP2_ORACLE_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/tides/geopotential_tide_step2_orekit.json");
+
+    #[derive(Debug, Deserialize)]
+    struct Step2Oracle {
+        epochs: Vec<Step2OracleEpoch>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Step2OracleEpoch {
+        jd_whole: f64,
+        tt_fraction: f64,
+        gamma: f64,
+        l: f64,
+        l_prime: f64,
+        f: f64,
+        d: f64,
+        omega: f64,
+        c20: f64,
+        c21: f64,
+        s21: f64,
+        c22: f64,
+        s22: f64,
+    }
+
+    fn step2_oracle() -> Vec<Step2OracleEpoch> {
+        let oracle: Step2Oracle =
+            serde_json::from_str(STEP2_ORACLE_FIXTURE).expect("parse Step 2 oracle fixture");
+        assert_eq!(oracle.epochs.len(), 64);
+        oracle.epochs
+    }
+
+    fn assert_step2_matches(
+        actual: &[SphericalHarmonicCoefficient; 3],
+        epoch: &Step2OracleEpoch,
+        tolerance: f64,
+    ) {
+        assert_eq!(
+            [
+                (actual[0].degree, actual[0].order),
+                (actual[1].degree, actual[1].order),
+                (actual[2].degree, actual[2].order),
+            ],
+            [(2, 0), (2, 1), (2, 2)]
+        );
+        assert_eq!(actual[0].s, 0.0);
+        assert_close(actual[0].c, epoch.c20, tolerance);
+        assert_close(actual[1].c, epoch.c21, tolerance);
+        assert_close(actual[1].s, epoch.s21, tolerance);
+        assert_close(actual[2].c, epoch.c22, tolerance);
+        assert_close(actual[2].s, epoch.s22, tolerance);
+    }
+
+    #[test]
+    fn step2_tables_match_iers_tables_6_5() {
+        assert_eq!(K20_TERMS.len(), 21);
+        assert_eq!(K21_TERMS.len(), 48);
+        assert_eq!(K22_TERMS.len(), 2);
+        for (order, terms) in [
+            (0, &K20_TERMS[..]),
+            (1, &K21_TERMS[..]),
+            (2, &K22_TERMS[..]),
+        ] {
+            for term in terms {
+                let n = term.doodson.map(i32::from);
+                // The Doodson number spells n1 and then n2..n6 each plus 5.
+                let spelled = n[1..]
+                    .iter()
+                    .fold(n[0], |number, multiplier| number * 10 + multiplier + 5);
+                assert_eq!(spelled as u32, term.doodson_number);
+                assert_eq!(n[0], order, "{}", term.doodson_number);
+                // With tau = theta_g + pi - s, s = F + Omega, h = s - D,
+                // p = s - l, N' = -Omega and ps = h - l', the Doodson argument
+                // equals m (theta_g + pi) - N . F for the table's Delaunay
+                // multipliers N.
+                let from_doodson = [
+                    -n[3],
+                    -n[5],
+                    -n[0] + n[1] + n[2] + n[3] + n[5],
+                    -n[2] - n[5],
+                    -n[0] + n[1] + n[2] + n[3] - n[4] + n[5],
+                ];
+                assert_eq!(
+                    from_doodson,
+                    term.delaunay.map(|multiplier| -i32::from(multiplier)),
+                    "{}",
+                    term.doodson_number
+                );
+            }
+        }
+        assert!(K22_TERMS.iter().all(|term| term.out_of_phase == 0.0));
+    }
+
+    #[test]
+    fn step2_k1_term_matches_the_worked_example_of_section_6_2_1() {
+        // Section 6.2.1: for K1, theta_f = theta_g + pi and
+        // dC21 = 470.9e-12 sin(theta_g + pi) - 30.2e-12 cos(theta_g + pi),
+        // dS21 = 470.9e-12 cos(theta_g + pi) + 30.2e-12 sin(theta_g + pi).
+        let k1 = K21_TERMS
+            .iter()
+            .find(|term| term.doodson_number == 165_555)
+            .expect("K1 row");
+        for gamma in [0.0, 0.7, 2.5, -4.0, 1234.5] {
+            let (dc21, ds21) = frequency_dependent_term(k1, gamma, [3.1, -0.4, 17.0, 2.2, -9.9]);
+            let expected_c = 470.9e-12 * libm::sin(gamma) - 30.2e-12 * libm::cos(gamma);
+            let expected_s = 470.9e-12 * libm::cos(gamma) + 30.2e-12 * libm::sin(gamma);
+            assert_close(dc21, expected_c, 1.0e-24);
+            assert_close(ds21, expected_s, 1.0e-24);
+        }
+    }
+
+    #[test]
+    fn step2_matches_orekit_for_the_same_arguments() {
+        // The fixture's arguments are fed in as Orekit formed them, so the two
+        // sides differ only in trigonometric rounding and summation order:
+        // below 1e-20 for sums of terms up to 5e-10, while the smallest table
+        // entry is 1e-13.
+        for epoch in step2_oracle() {
+            let actual = frequency_dependent_corrections(
+                epoch.gamma,
+                [epoch.l, epoch.l_prime, epoch.f, epoch.d, epoch.omega],
+            );
+            assert_step2_matches(&actual, &epoch, 1.0e-20);
+        }
+    }
+
+    #[test]
+    fn step2_at_epoch_matches_orekit() {
+        // The same instants through this crate's own sidereal time and
+        // Delaunay arguments. Orekit took TAI as UT1, so UT1 = TT - 32.184 s.
+        // The arguments agree to about 1e-12 rad, which moves the corrections
+        // by less than 1e-20.
+        for epoch in step2_oracle() {
+            let ut1_fraction = epoch.tt_fraction - 32.184 / 86_400.0;
+            let time_scales = TimeScales {
+                jd_whole: epoch.jd_whole,
+                ut1_fraction,
+                tt_fraction: epoch.tt_fraction,
+                tdb_fraction: epoch.tt_fraction,
+                jd_ut1: epoch.jd_whole + ut1_fraction,
+                jd_tt: epoch.jd_whole + epoch.tt_fraction,
+                jd_tdb: epoch.jd_whole + epoch.tt_fraction,
+                ut1_degraded: None,
+            };
+            let actual = frequency_dependent_corrections_at(&time_scales).expect("Step 2");
+            assert_step2_matches(&actual, &epoch, 1.0e-18);
+        }
+    }
+
+    #[test]
+    fn step2_is_added_to_step1_at_epoch_unless_turned_off() {
+        let scales =
+            TimeScales::from_utc(2003, 5, 6, 13, 43, 32.125).expect("valid UTC time scales");
+        let epoch_tdb_seconds = crate::astro::time::civil::j2000_seconds_from_split(
+            scales.jd_whole,
+            scales.tdb_fraction,
+        );
+        let ctx = PropagationContext::new()
+            .with_body_fixed_frame_provider(Arc::new(TdbEarthOrientationProvider::default()));
+        let with_step2 = SolidEarthTideGravity::default();
+        assert!(with_step2.frequency_dependent);
+        let step1_only = SolidEarthTideGravity {
+            frequency_dependent: false,
+            ..with_step2
+        };
+        let full = with_step2
+            .coefficient_corrections_at_epoch(epoch_tdb_seconds, &ctx)
+            .expect("Step 1 and Step 2");
+        let step1 = step1_only
+            .coefficient_corrections_at_epoch(epoch_tdb_seconds, &ctx)
+            .expect("Step 1");
+        let orientation = orientation_at_state(&ctx, epoch_tdb_seconds).expect("orientation");
+        let step2 = frequency_dependent_corrections_at(&orientation.time_scales()).expect("Step 2");
+
+        for index in 0..3 {
+            assert_eq!(full[index].c, step1[index].c + step2[index].c);
+            assert_eq!(full[index].s, step1[index].s + step2[index].s);
+        }
+        assert_eq!(&full[3..], &step1[3..]);
+        // The K1 term alone is 4.7e-10 in C21/S21.
+        assert!((step2[1].c * step2[1].c + step2[1].s * step2[1].s).sqrt() > 1.0e-10);
+    }
+
+    const FIELD_ORACLE_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/tides/geopotential_tide_orekit_field.json");
+
+    #[derive(Debug, Deserialize)]
+    struct FieldOracle {
+        epochs: Vec<FieldOracleEpoch>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct FieldOracleEpoch {
+        gamma: f64,
+        l: f64,
+        l_prime: f64,
+        f: f64,
+        d: f64,
+        omega: f64,
+        sun_km: [f64; 3],
+        moon_km: [f64; 3],
+        tide_free: Vec<FixtureCoefficient>,
+        zero_tide: Vec<FixtureCoefficient>,
+    }
+
+    #[test]
+    fn permanent_tide_matches_iers_equation_6_14() {
+        // Equation (6.14): dC20_perm = A0 H0 k20 = (4.4228e-8)(-0.31460) k20.
+        let a0_h0: f64 = 4.4228e-8 * -0.31460;
+        assert_eq!(permanent_tide_c20(TideSystem::TideFree), 0.0);
+        assert_eq!(
+            permanent_tide_c20(TideSystem::ZeroTide).to_bits(),
+            (a0_h0 * 0.30190).to_bits()
+        );
+        assert_close(
+            permanent_tide_c20(TideSystem::ZeroTide),
+            -4.2007e-9,
+            1.0e-13,
+        );
+        // A mean-tide C20 also holds the permanent tide-generating potential.
+        assert_eq!(
+            permanent_tide_c20(TideSystem::MeanTide).to_bits(),
+            (a0_h0 * 0.30190 + a0_h0).to_bits()
+        );
+        assert_close(
+            permanent_tide_c20(TideSystem::MeanTide),
+            -1.81148e-8,
+            1.0e-13,
+        );
+    }
+
+    #[test]
+    fn step3_changes_only_c20_by_the_permanent_tide_of_the_tide_system() {
+        let sun = [1.2e8, -8.0e7, 3.1e7];
+        let moon = [2.9e5, 2.4e5, -1.1e5];
+        let tide_free = SolidEarthTideGravity::default();
+        let free = tide_free
+            .coefficient_corrections_for_body_fixed_bodies(sun, moon)
+            .expect("tide-free corrections");
+        for (tide_system, removed) in [
+            (TideSystem::ZeroTide, 4.4228e-8 * -0.31460 * 0.30190),
+            (
+                TideSystem::MeanTide,
+                4.4228e-8 * -0.31460 * 0.30190 + 4.4228e-8 * -0.31460,
+            ),
+        ] {
+            let model = SolidEarthTideGravity {
+                tide_system,
+                ..tide_free
+            };
+            let corrections = model
+                .coefficient_corrections_for_body_fixed_bodies(sun, moon)
+                .expect("corrections");
+            assert_eq!(corrections[0].c, free[0].c - removed, "{tide_system:?}");
+            assert_eq!(&corrections[1..], &free[1..], "{tide_system:?}");
+        }
+    }
+
+    #[test]
+    fn steps_1_to_3_match_orekit_solid_tides_field() {
+        // Orekit's SolidTidesField was given the same Sun and Moon positions,
+        // Earth and body constants, fundamental arguments and tide system, so
+        // the two sides differ only in rounding: the Legendre functions (a
+        // recursion there, closed forms here), the trigonometry and the order
+        // of the sums.
+        let oracle: FieldOracle =
+            serde_json::from_str(FIELD_ORACLE_FIXTURE).expect("parse SolidTidesField fixture");
+        assert_eq!(oracle.epochs.len(), 48);
+        let mut max_dev = 0.0_f64;
+        for epoch in &oracle.epochs {
+            let step2 = frequency_dependent_corrections(
+                epoch.gamma,
+                [epoch.l, epoch.l_prime, epoch.f, epoch.d, epoch.omega],
+            );
+            for (tide_system, expected) in [
+                (TideSystem::TideFree, &epoch.tide_free),
+                (TideSystem::ZeroTide, &epoch.zero_tide),
+            ] {
+                let model = SolidEarthTideGravity {
+                    tide_system,
+                    ..SolidEarthTideGravity::default()
+                };
+                let actual = model
+                    .corrections(epoch.sun_km, epoch.moon_km, Some(step2))
+                    .expect("Steps 1 to 3");
+                assert_eq!(expected.len(), 12, "degrees 2 to 4, orders 0 to n");
+                for row in expected.iter() {
+                    let (c, s) = actual
+                        .iter()
+                        .find(|value| value.degree == row.degree && value.order == row.order)
+                        .map_or((0.0, 0.0), |value| (value.c, value.s));
+                    max_dev = max_dev.max((c - row.c).abs()).max((s - row.s).abs());
+                }
+            }
+        }
+        println!("max deviation from SolidTidesField: {max_dev:.3e}");
+        assert!(
+            max_dev <= STEPS_1_TO_3_ORACLE_TOLERANCE,
+            "max deviation from SolidTidesField {max_dev:.3e}"
+        );
+    }
+
+    /// Largest difference from Orekit's SolidTidesField allowed for any
+    /// coefficient of degree 2 to 4 over the 48 epochs of the fixture. The
+    /// measured largest difference is 4.963e-24, a few units in the last place
+    /// of degree-2 corrections near 1e-8; the bound is four times that.
+    const STEPS_1_TO_3_ORACLE_TOLERANCE: f64 = 2.0e-23;
+
+    #[test]
+    fn for_geopotential_takes_the_field_constants_and_tide_system() {
+        let coefficients = [SphericalHarmonicCoefficient {
+            degree: 2,
+            order: 0,
+            c: -0.484_169_48e-3,
+            s: 0.0,
+        }];
+        let field = SphericalHarmonicGravity::from_normalized_coefficients(
+            398_600.441_8,
+            6_378.136_6,
+            2,
+            0,
+            &coefficients,
+            TideSystem::ZeroTide,
+        )
+        .expect("zero-tide field");
+        let tide = SolidEarthTideGravity::for_geopotential(&field);
+        assert_eq!(tide.mu_earth_km3_s2, 398_600.441_8);
+        assert_eq!(tide.reference_radius_km, 6_378.136_6);
+        assert_eq!(tide.tide_system, TideSystem::ZeroTide);
+        assert!(tide.frequency_dependent);
+        assert_eq!(tide.gm_sun_km3_s2, GM_SUN_KM3_S2);
+        assert_eq!(tide.gm_moon_km3_s2, GM_MOON_KM3_S2);
+
+        let egm96 = SphericalHarmonicGravity::egm96_truncated(4, 4).expect("EGM96");
+        assert_eq!(egm96.tide_system(), TideSystem::TideFree);
+        assert_eq!(
+            SolidEarthTideGravity::for_geopotential(&egm96),
+            SolidEarthTideGravity::default()
+        );
     }
 
     #[test]
