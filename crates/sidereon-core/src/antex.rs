@@ -22,8 +22,9 @@
 use crate::antenna;
 use crate::constants::MM_PER_M;
 use crate::format::columns::{field, fortran_f64, raw_field};
-use crate::format::{Diagnostics, RecordRef, Skip, SkipReason};
-use crate::validate::{self, FieldError};
+pub use crate::format::{Diagnostics, RecordRef, Skip, SkipReason};
+use crate::validate;
+pub use crate::validate::FieldError;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -46,18 +47,15 @@ pub struct Antex {
     /// File order of every antenna block, as its id and its index in that id's
     /// interval list.
     block_order: Vec<(String, usize)>,
-    /// Count of records skipped or found inconsistent during a forgiving parse
-    /// (a corrupt PCV grid value, an unrecognized grid-row head, a line outside
+    /// Records skipped or found inconsistent during a forgiving parse (a
+    /// corrupt PCV grid value, an unrecognized grid-row head, a line outside
     /// any record the format defines, a `# OF FREQUENCIES` count that disagrees
     /// with the frequency sections read, a block or section not closed by its
-    /// own end record); each is surfaced as a typed [`Skip`]
-    /// in the parser's [`Diagnostics`]. A clean file parses with
-    /// `skipped_records == 0`; a non-zero count lets a caller tell a pristine
-    /// product apart from one that carried a malformed record without aborting
-    /// the whole parse. No fabricated sample is emitted in place of a skipped
-    /// one. Read it through [`Antex::skipped_records`]. Mirrors
-    /// [`crate::atmosphere::Ionex::skipped_records`].
-    skipped_records: usize,
+    /// own end record), each a typed [`Skip`] with its one-based line and
+    /// [`SkipReason`], in file order. A clean file parses with no skip. No
+    /// fabricated sample is emitted in place of a skipped one. Read it through
+    /// [`Antex::diagnostics`]; [`Antex::skipped_records`] is its skip count.
+    diagnostics: Diagnostics,
 }
 
 /// ANTEX header records.
@@ -630,20 +628,29 @@ impl Antex {
         }
         close_open_block(&mut state)?;
 
-        let skipped_records = state.diagnostics.skips.len();
         Ok(Self {
             header: state.header,
             outer_comments: state.outer_comments,
             antennas: state.antennas,
             antenna_intervals: state.antenna_intervals,
             block_order: state.block_order,
-            skipped_records,
+            diagnostics: state.diagnostics,
         })
     }
 
-    /// Number of records skipped during a forgiving parse (see the field docs).
+    /// The records the parse skipped, each a [`Skip`] whose `at.line` is the
+    /// one-based line of the skipped record and whose [`SkipReason`] says why,
+    /// in file order. A block or frequency section not closed by its own end
+    /// record is reported at the line where the reader found it unclosed. A
+    /// clean file has no skip.
+    pub fn diagnostics(&self) -> &Diagnostics {
+        &self.diagnostics
+    }
+
+    /// Number of records skipped during a forgiving parse: the length of
+    /// [`Antex::diagnostics`]' skips.
     pub fn skipped_records(&self) -> usize {
-        self.skipped_records
+        self.diagnostics.skips.len()
     }
 
     /// Return an antenna by the `TYPE / SERIAL` id.
@@ -3017,7 +3024,7 @@ mod tests {
             antenna_intervals: BTreeMap::new(),
             block_order: vec![(antenna.id.clone(), 0)],
             outer_comments: Vec::new(),
-            skipped_records: 0,
+            diagnostics: Diagnostics::new(),
         };
         antex
             .antenna_intervals

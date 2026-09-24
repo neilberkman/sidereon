@@ -2,7 +2,8 @@
 
 use serde_json::Value;
 use sidereon_core::antex::{
-    AntennaKind, Antex, AntexDateTime, AntexError, Calibration, OuterComment, PcvGrid, PcvType,
+    AntennaKind, Antex, AntexDateTime, AntexError, Calibration, FieldError, OuterComment, PcvGrid,
+    PcvType, SkipReason,
 };
 
 // Fixture provenance:
@@ -1858,6 +1859,56 @@ fn rms_sections_are_retained_and_written_after_their_frequency() {
         ]
     );
     assert_eq!(Antex::parse(&encoded).unwrap(), antex);
+}
+
+#[test]
+fn each_skip_is_reported_with_its_line_and_reason() {
+    let mut records = vec!["stray text".to_string()];
+    records.extend(grid_records("     0.0", "     0.0  10.0   5.0"));
+    records.extend(frequency_section(
+        "G01",
+        "      0.00      0.00      0.00",
+        &["   NOAZI    1.00", "   BADHD    1.00"],
+    ));
+    // Line 1 opens the block and line 2 names it, so the stray text is line 3
+    // and the second grid row is line 9.
+    let antex = Antex::parse(&one_antenna(&records)).unwrap();
+    let skips: Vec<(Option<usize>, SkipReason)> = antex
+        .diagnostics()
+        .skips
+        .iter()
+        .map(|skip| (skip.at.line, skip.reason.clone()))
+        .collect();
+    assert_eq!(
+        skips,
+        vec![
+            (Some(3), SkipReason::UnknownBlock("stray text".to_string())),
+            (
+                Some(9),
+                SkipReason::MalformedField(FieldError::FloatParse {
+                    field: "antex pcv row head",
+                    value: "BADHD".to_string(),
+                })
+            ),
+        ]
+    );
+    assert_eq!(antex.skipped_records(), 2);
+    assert!(antex.diagnostics().warnings.is_empty());
+
+    // An antenna block the file never closes is reported at the last line.
+    let text = one_antenna(&grid_records("     0.0", "     0.0  10.0   5.0"));
+    let unclosed = text
+        .lines()
+        .filter(|line| !line.ends_with("END OF ANTENNA"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let antex = Antex::parse(&unclosed).unwrap();
+    assert_eq!(antex.diagnostics().skips.len(), 1);
+    assert_eq!(antex.diagnostics().skips[0].at.line, Some(4));
+    assert_eq!(
+        antex.diagnostics().skips[0].reason,
+        SkipReason::InconsistentRecord("antex antenna block not closed by END OF ANTENNA")
+    );
 }
 
 #[test]
