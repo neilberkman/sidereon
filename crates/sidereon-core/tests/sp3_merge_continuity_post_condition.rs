@@ -112,18 +112,18 @@ fn a_switch_between_inconsistent_contributors_reports_and_names_both_sides() {
         continuity.violations
     );
 
-    let splice = splices[0];
-    assert_eq!(
-        splice.from_sources,
-        vec![0],
-        "the earlier side came from source 0"
-    );
-    assert_eq!(
-        splice.to_sources,
-        vec![1],
-        "the later side came from source 1"
-    );
-    assert!(splice.crosses_contributors);
+    // A hold-out residual near the handover is predicted from nodes on both
+    // sides of it, so a violation whose bracketing pair lies inside one source
+    // is still a splice. The one bracketing the handover itself names source 0
+    // on its earlier side and source 1 on its later side.
+    let handover = splices
+        .iter()
+        .find(|splice| splice.from_sources == vec![0] && splice.to_sources == vec![1])
+        .expect("a violation bracketing the handover");
+    assert!(handover.crosses_contributors);
+    for splice in &splices {
+        assert_eq!(splice.sources, vec![0, 1], "{splice:?}");
+    }
 }
 
 #[test]

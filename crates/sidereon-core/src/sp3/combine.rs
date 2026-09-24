@@ -38,7 +38,7 @@ use crate::frame_catalog::{
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::sp3::continuity::{
     check_continuity, ContinuityDefect, ContinuityOptions, ContinuityReport, EpochWindow,
-    StencilExtent, WindowContinuityDecision, WindowContinuityVerdict,
+    InterpolationNodes, WindowContinuityDecision, WindowContinuityVerdict,
 };
 use crate::tolerances::WHOLE_SECOND_EPS_S;
 use crate::validate;
@@ -641,26 +641,72 @@ pub struct MergeProvenance {
     pub coverage: Vec<ContributorCoverage>,
 }
 
+/// The part one merged cell plays in a continuity finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeContinuityCellRole {
+    /// The sample a hold-out residual compares against its prediction.
+    HeldOut,
+    /// A retained node the hold-out prediction was formed from.
+    InterpolationNode,
+    /// One end of the adjacent pair the speed gate measured.
+    PairEnd,
+    /// The epoch a duplicate-epoch finding names.
+    RepeatedEpoch,
+}
+
+/// One merged cell a continuity finding rests on, with the selection the merge
+/// recorded for it when it decided the cell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeContinuityCell {
+    /// Epoch of the cell, seconds since J2000.
+    pub epoch_j2000_s: f64,
+    /// The part the cell plays in the finding.
+    pub role: MergeContinuityCellRole,
+    /// How the merge arrived at the value it wrote there. The selected source
+    /// ([`CellSelection::selected_source`]) and the rest of the agreeing
+    /// members stay distinct. `None` when the merge recorded no selection for
+    /// the cell.
+    pub selection: Option<CellSelection>,
+}
+
 /// One continuity violation in the merged product, attributed to the
-/// contributors on each side of it.
+/// contributors whose records it rests on.
 ///
 /// At a splice the actionable fact is not that the arc jumped but *between
-/// which two contributors* it jumped, which is why this exists rather than a
-/// bare [`ContinuityDefect`].
+/// which contributors* it jumped, which is why this exists rather than a bare
+/// [`ContinuityDefect`]. A hold-out residual rests on more than its bracketing
+/// pair: the prediction is formed from up to eleven retained nodes, and near a
+/// run end the window slides inward, so a residual reported between two
+/// records of one source can be caused by another source's nodes several
+/// epochs away. [`Self::cells`] names every one of those records.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MergeContinuityViolation {
     /// The violation as the continuity check reported it.
     pub defect: ContinuityDefect,
-    /// Sources supplying the earlier side of the offending epoch pair, as
-    /// recorded when the merge chose that cell. Empty when the merged product
-    /// carries no cell there (the check reached past the merge's own coverage).
+    /// Sources whose value was written to the earlier record of the offending
+    /// epoch pair, as recorded when the merge chose that cell: the selected
+    /// source of a precedence or single-source cell, every member of a combined
+    /// cell - the same meaning as [`Self::sources`]. Empty when the merged
+    /// product carries no cell there (the check reached past the merge's own
+    /// coverage).
     pub from_sources: Vec<usize>,
-    /// Sources supplying the later side of the offending epoch pair.
+    /// Sources whose value was written to the later record of the offending
+    /// epoch pair, in the same meaning.
     pub to_sources: Vec<usize>,
-    /// Whether the two sides were supplied by different contributors. A
-    /// violation across a contributor change is a splice; one inside a single
-    /// contributor's arc is that contributor's own discontinuity, and the two
-    /// call for different follow-up.
+    /// Every merged cell the finding rests on, ascending by epoch: for a
+    /// hold-out residual the held-out sample and each node its prediction used;
+    /// for a speed-bound finding both ends of the pair; for a duplicate epoch
+    /// that epoch. Empty for a single-sample series, which names no epoch.
+    pub cells: Vec<MergeContinuityCell>,
+    /// Every source whose value was written to a cell in [`Self::cells`],
+    /// ascending: the selected source of a precedence or single-source cell,
+    /// and every member of a combined cell.
+    pub sources: Vec<usize>,
+    /// Whether the cells in [`Self::cells`] were written from different
+    /// contributors: different selected sources, or a combination over a
+    /// different member set. A violation across a contributor change is a
+    /// splice; one inside a single contributor's arc is that contributor's own
+    /// discontinuity, and the two call for different follow-up.
     pub crosses_contributors: bool,
 }
 
@@ -673,8 +719,12 @@ pub struct MergeContinuityViolation {
 pub struct MergeContinuityReport {
     /// The full continuity report over the merged product.
     pub report: ContinuityReport,
-    /// Each violation, attributed to the contributors on both sides.
+    /// Each violation, attributed to the contributors whose records it rests
+    /// on.
     pub violations: Vec<MergeContinuityViolation>,
+    /// The merged product's position nodes, which window-scoped verdicts read
+    /// to find exactly the nodes a window's interpolations use.
+    pub nodes: InterpolationNodes,
 }
 
 impl MergeContinuityReport {
@@ -690,43 +740,88 @@ impl MergeContinuityReport {
             .filter(|violation| violation.crosses_contributors)
     }
 
-    /// Contributor-changing violations that can influence an evaluation
-    /// window through the product interpolator's stencil.
-    pub fn splices_influencing(
-        &self,
-        window: EpochWindow,
-        stencil: StencilExtent,
-    ) -> Vec<&MergeContinuityViolation> {
-        self.splices()
-            .filter(|violation| violation.defect.influences(window, stencil))
+    /// Violations that the interpolations of an evaluation window rest on.
+    ///
+    /// The window's nodes are found exactly, per satellite, with the
+    /// interpolator's own rule ([`InterpolationNodes::selected_nodes`]). A
+    /// violation influences the window when those nodes include its held-out,
+    /// repeated or pair-end record, or straddle a handover between its
+    /// records: two consecutive records written from different sources, with a
+    /// selected node at or before the earlier and one at or after the later. A
+    /// window whose nodes include only records on one side of the handover, and
+    /// not the record at fault, interpolates records the finding does not
+    /// implicate. A single-sample series names no epoch and influences every
+    /// window.
+    pub fn violations_influencing(&self, window: EpochWindow) -> Vec<&MergeContinuityViolation> {
+        self.violations
+            .iter()
+            .filter(|violation| violation.influences(window, &self.nodes))
             .collect()
     }
 
-    /// Compose defect and splice findings into one window-scoped decision.
+    /// Contributor-changing violations that influence an evaluation window;
+    /// see [`Self::violations_influencing`].
+    pub fn splices_influencing(&self, window: EpochWindow) -> Vec<&MergeContinuityViolation> {
+        self.violations_influencing(window)
+            .into_iter()
+            .filter(|violation| violation.crosses_contributors)
+            .collect()
+    }
+
+    /// One window-scoped decision over every violation.
     ///
-    /// The decision refuses when any recorded defect influences the requested
-    /// evaluation window. Both the influencing subset and complete finding lists
-    /// remain available on the returned verdict.
-    pub fn verdict_for_window(
-        &self,
-        window: EpochWindow,
-        stencil: StencilExtent,
-    ) -> WindowContinuityVerdict<'_> {
-        let influencing_defects = self.report.defects_influencing(window, stencil);
-        let influencing_splices = self.splices_influencing(window, stencil);
-        let all_splices = self.splices().collect();
-        let decision = if influencing_defects.is_empty() && influencing_splices.is_empty() {
+    /// The decision refuses when any violation influences the window (see
+    /// [`Self::violations_influencing`]). Both the influencing subset and
+    /// complete finding lists remain available on the returned verdict.
+    pub fn verdict_for_window(&self, window: EpochWindow) -> WindowContinuityVerdict<'_> {
+        let influencing = self.violations_influencing(window);
+        let decision = if influencing.is_empty() {
             WindowContinuityDecision::Accept
         } else {
             WindowContinuityDecision::Refuse
         };
         WindowContinuityVerdict {
             decision,
-            influencing_defects,
-            influencing_splices,
+            influencing_defects: influencing
+                .iter()
+                .map(|violation| &violation.defect)
+                .collect(),
+            influencing_splices: influencing
+                .into_iter()
+                .filter(|violation| violation.crosses_contributors)
+                .collect(),
             all_defects: &self.report.defects,
-            all_splices,
+            all_splices: self.splices().collect(),
         }
+    }
+}
+
+impl MergeContinuityViolation {
+    /// Whether the interpolations of `window` rest on this violation; see
+    /// [`MergeContinuityReport::violations_influencing`].
+    fn influences(&self, window: EpochWindow, nodes: &InterpolationNodes) -> bool {
+        if matches!(self.defect, ContinuityDefect::SingleSampleSeries { .. }) {
+            return true;
+        }
+        let selected = nodes.selected_nodes(self.defect.satellite(), window);
+        let (Some(&first), Some(&last)) = (selected.first(), selected.last()) else {
+            return false;
+        };
+        let at_fault = self.cells.iter().any(|cell| {
+            cell.role != MergeContinuityCellRole::InterpolationNode
+                && selected
+                    .binary_search_by(|node| node.total_cmp(&cell.epoch_j2000_s))
+                    .is_ok()
+        });
+        let straddles_handover = self.cells.windows(2).any(|pair| {
+            let (Some(earlier), Some(later)) = (&pair[0].selection, &pair[1].selection) else {
+                return false;
+            };
+            written_sources(earlier) != written_sources(later)
+                && first <= pair[0].epoch_j2000_s
+                && last >= pair[1].epoch_j2000_s
+        });
+        at_fault || straddles_handover
     }
 }
 
@@ -761,19 +856,19 @@ pub struct MergeReport {
 }
 
 impl MergeReport {
-    /// Contributor-changing violations that can influence an evaluation
-    /// window, when merge continuity verification was requested.
+    /// Contributor-changing violations that influence an evaluation window,
+    /// when merge continuity verification was requested; see
+    /// [`MergeContinuityReport::violations_influencing`].
     ///
     /// `None` means verification was not requested. `Some(Vec::new())` means it
-    /// ran and no recorded splice can enter the requested stencil.
+    /// ran and no recorded splice influences the window.
     pub fn splices_influencing(
         &self,
         window: EpochWindow,
-        stencil: StencilExtent,
     ) -> Option<Vec<&MergeContinuityViolation>> {
         self.continuity
             .as_ref()
-            .map(|report| report.splices_influencing(window, stencil))
+            .map(|report| report.splices_influencing(window))
     }
 
     /// Decide whether the optional continuity post-condition influences an
@@ -785,11 +880,10 @@ impl MergeReport {
     pub fn continuity_verdict_for_window(
         &self,
         window: EpochWindow,
-        stencil: StencilExtent,
     ) -> Option<WindowContinuityVerdict<'_>> {
         self.continuity
             .as_ref()
-            .map(|report| report.verdict_for_window(window, stencil))
+            .map(|report| report.verdict_for_window(window))
     }
 
     /// Fraction of accepted cells that were carried from a single source, in
@@ -1903,12 +1997,15 @@ fn prepare_merge_timing(sources: &[Sp3], opts: &MergeOptions) -> Result<MergeTim
 }
 
 /// Run the continuity check over the merged product and attribute each
-/// violation to the contributors on both sides of it.
+/// violation to the contributors whose records it rests on.
 ///
 /// The check runs on the product the merge actually emitted, so it verifies the
 /// output rather than re-deriving it from the inputs. Attribution reads the
 /// selections recorded while the merge decided, so a splice names the real
-/// contributors rather than a guess reconstructed afterwards.
+/// contributors rather than a guess reconstructed afterwards. A hold-out
+/// residual is attributed to the held-out cell and to every node its
+/// prediction used, which the continuity check reports from the interpolator's
+/// own node selection.
 fn verify_merged_continuity(
     merged: &Sp3,
     options: &ContinuityOptions,
@@ -1921,27 +2018,93 @@ fn verify_merged_continuity(
         .iter()
         .map(|defect| {
             let sat = defect.satellite();
+            let selection_at = |epoch_j2000_s: f64| selection.get(&(sat, epoch_j2000_s as i64));
             let (from_epoch, to_epoch) = defect_epoch_pair(defect);
             let from_sources = from_epoch
                 .and_then(|epoch| selection.get(&(sat, epoch)))
-                .map(CellSelection::members)
+                .map(written_sources)
                 .unwrap_or_default();
             let to_sources = to_epoch
                 .and_then(|epoch| selection.get(&(sat, epoch)))
-                .map(CellSelection::members)
+                .map(written_sources)
                 .unwrap_or_default();
-            let crosses_contributors =
-                !from_sources.is_empty() && !to_sources.is_empty() && from_sources != to_sources;
+
+            let mut cells: Vec<MergeContinuityCell> = defect_cells(defect)
+                .into_iter()
+                .map(|(epoch_j2000_s, role)| MergeContinuityCell {
+                    epoch_j2000_s,
+                    role,
+                    selection: selection_at(epoch_j2000_s).cloned(),
+                })
+                .collect();
+            cells.sort_by(|a, b| a.epoch_j2000_s.total_cmp(&b.epoch_j2000_s));
+
+            let written: Vec<Vec<usize>> = cells
+                .iter()
+                .filter_map(|cell| cell.selection.as_ref().map(written_sources))
+                .collect();
+            let crosses_contributors = written.windows(2).any(|pair| pair[0] != pair[1]);
+            let sources: Vec<usize> = written
+                .iter()
+                .flatten()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+
             MergeContinuityViolation {
                 defect: defect.clone(),
                 from_sources,
                 to_sources,
+                cells,
+                sources,
                 crosses_contributors,
             }
         })
         .collect();
 
-    MergeContinuityReport { report, violations }
+    MergeContinuityReport {
+        report,
+        violations,
+        nodes: InterpolationNodes::for_sp3(merged),
+    }
+}
+
+/// The sources whose values a cell's written value came from: the selected
+/// source where one supplied it, otherwise every member of the combination.
+fn written_sources(selection: &CellSelection) -> Vec<usize> {
+    selection
+        .selected_source()
+        .map_or_else(|| selection.members(), |source| vec![source])
+}
+
+/// Every record a defect rests on, with the part it plays.
+fn defect_cells(defect: &ContinuityDefect) -> Vec<(f64, MergeContinuityCellRole)> {
+    match defect {
+        ContinuityDefect::HoldOutResidual {
+            epoch_j2000_s,
+            node_epochs_j2000_s,
+            ..
+        } => core::iter::once((*epoch_j2000_s, MergeContinuityCellRole::HeldOut))
+            .chain(
+                node_epochs_j2000_s
+                    .iter()
+                    .map(|&node| (node, MergeContinuityCellRole::InterpolationNode)),
+            )
+            .collect(),
+        ContinuityDefect::SpeedBound {
+            from_j2000_s,
+            to_j2000_s,
+            ..
+        } => vec![
+            (*from_j2000_s, MergeContinuityCellRole::PairEnd),
+            (*to_j2000_s, MergeContinuityCellRole::PairEnd),
+        ],
+        ContinuityDefect::DuplicateEpoch { epoch_j2000_s, .. } => {
+            vec![(*epoch_j2000_s, MergeContinuityCellRole::RepeatedEpoch)]
+        }
+        ContinuityDefect::SingleSampleSeries { .. } => Vec::new(),
+    }
 }
 
 /// The epoch pair a defect brackets, as integer epoch keys.
