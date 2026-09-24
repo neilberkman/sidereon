@@ -871,20 +871,20 @@ fn msm_signal_rinex_code_has_anchor_mappings() {
 
 #[test]
 fn unsupported_message_round_trips_verbatim() {
-    // Message 1230 (GLONASS code-phase biases) is not decoded; build a body
-    // whose first 12 bits are 1230 and check it survives a frame round-trip.
+    // Message 4094 (a proprietary number) is not decoded; build a body whose
+    // first 12 bits are 4094 and check it survives a frame round-trip.
     let mut w = BitWriter::new();
-    w.push_u(1230, 12);
+    w.push_u(4094, 12);
     w.push_u(0xABCD, 16);
     let body = w.into_bytes();
 
     let message = Message::decode(&body).unwrap();
     match &message {
-        Message::Unsupported(u) => assert_eq!(u.message_number, 1230),
+        Message::Unsupported(u) => assert_eq!(u.message_number, 4094),
         _ => panic!("expected Unsupported"),
     }
     assert_eq!(message.encode().unwrap(), body);
-    assert_eq!(message.message_number(), 1230);
+    assert_eq!(message.message_number(), 4094);
 
     let frame = message.to_frame().unwrap();
     assert_eq!(decode_messages(&frame).unwrap(), vec![message]);
@@ -947,10 +947,10 @@ fn decode_stream_surfaces_skipped_frames_without_dropping_unsupported_messages()
     let valid_frame = valid.to_frame().unwrap();
 
     let mut unsupported_body = BitWriter::new();
-    unsupported_body.push_u(1230, 12);
+    unsupported_body.push_u(4094, 12);
     unsupported_body.push_u(0xABCD, 16);
     let unsupported = Message::Unsupported(UnsupportedMessage {
-        message_number: 1230,
+        message_number: 4094,
         body: unsupported_body.into_bytes(),
     });
     let unsupported_frame = unsupported.to_frame().unwrap();
@@ -1552,6 +1552,8 @@ fn message_enum_is_matched_exhaustively_without_wildcard() {
         Message::AntennaDescriptor(a) => a.message_number,
         Message::GpsEphemeris(_) => 1019,
         Message::GlonassEphemeris(_) => 1020,
+        Message::NavicEphemeris(_) => 1041,
+        Message::GlonassCodePhaseBiases(_) => 1230,
         Message::BeidouEphemeris(_) => 1042,
         Message::QzssEphemeris(_) => 1044,
         Message::GalileoFnavEphemeris(_) => 1045,
@@ -2301,9 +2303,9 @@ fn raw_codec_round_trips_retain_absence_and_spare_accuracy_indices() {
 // Format audit: framing diagnostics, departures and policy
 // ---------------------------------------------------------------------------
 
-fn unsupported_1230_frame() -> Vec<u8> {
+fn unsupported_4094_frame() -> Vec<u8> {
     let mut w = BitWriter::new();
-    w.push_u(1230, 12);
+    w.push_u(4094, 12);
     w.push_u(0xABCD, 16);
     encode_frame(&w.into_bytes()).unwrap()
 }
@@ -2367,14 +2369,14 @@ fn crc_failures_and_resync_bytes_are_counted_by_every_scanner() {
     let a = Message::StationCoordinates(sample_station(1005, None))
         .to_frame()
         .unwrap();
-    let mut bad = unsupported_1230_frame();
+    let mut bad = unsupported_4094_frame();
     let last = bad.len() - 1;
     bad[last] ^= 0x01;
     assert!(
         !bad[1..].contains(&PREAMBLE),
         "one preamble in the bad frame"
     );
-    let c = unsupported_1230_frame();
+    let c = unsupported_4094_frame();
     let mut bytes = vec![0x00, 0x01];
     bytes.extend_from_slice(&a);
     bytes.extend_from_slice(&bad);
@@ -3015,24 +3017,24 @@ fn antenna_strings_round_trip_every_byte_value() {
 /// An unsupported message encodes only a body that decodes back to it.
 #[test]
 fn unsupported_encode_refuses_a_body_that_decodes_as_something_else() {
-    let frame = unsupported_1230_frame();
+    let frame = unsupported_4094_frame();
     let body = decode_frame(&frame).unwrap().body.to_vec();
     let ok = UnsupportedMessage {
-        message_number: 1230,
+        message_number: 4094,
         body: body.clone(),
     };
     assert_eq!(ok.encode().unwrap(), body);
     let mismatched = UnsupportedMessage {
-        message_number: 1231,
+        message_number: 4093,
         body: body.clone(),
     };
     assert!(mismatched
         .encode()
         .unwrap_err()
         .to_string()
-        .contains("carries message number 1230"));
+        .contains("carries message number 4094"));
     let short = UnsupportedMessage {
-        message_number: 1230,
+        message_number: 4094,
         body: vec![0x4C],
     };
     assert!(short.encode().is_err());
@@ -3659,4 +3661,128 @@ fn legacy_encoder_refuses_what_its_layout_cannot_state() {
     let mut m = legacy_message(1004);
     m.message_number = 1005;
     refused(m, "is not a legacy observation message");
+}
+
+fn navic_ephemeris() -> NavicEphemeris {
+    NavicEphemeris {
+        satellite_id: 9,
+        week_number: 389,
+        a_f0: -1_234_567,
+        a_f1: -12_345,
+        a_f2: -3,
+        ura: 2,
+        t_oc: 10_821,
+        t_gd: -5,
+        delta_n: 1_234_567,
+        iodec: 161,
+        reserved: 0x2A5,
+        l5_flag: true,
+        s_flag: false,
+        c_uc: -16_000,
+        c_us: 15_000,
+        c_ic: -1,
+        c_is: 2,
+        c_rc: 16_383,
+        c_rs: -16_384,
+        idot: -8_000,
+        m0: -2_000_000_000,
+        t_oe: 10_821,
+        eccentricity: 3_000_000,
+        sqrt_a: 3_404_000_000,
+        omega0: 1_500_000_000,
+        omega: -1_000_000_000,
+        omega_dot: -2_000_000,
+        i0: 400_000_000,
+        spare_df544: 3,
+        spare_df545: 1,
+        trailing_bits: Vec::new(),
+    }
+}
+
+/// A 1041 body is the 482 bits of RTCM 10403.3 Amendment 2's table (DF002,
+/// DF516..DF545) and round-trips, spare and reserved bits included; its
+/// health word is the L5 flag in bit 1 and the S flag in bit 0, as RTKLIB
+/// stores it, and a PRN wider than DF516 is refused.
+#[test]
+fn navic_ephemeris_round_trips_with_its_field_widths() {
+    let eph = navic_ephemeris();
+    let body = eph.encode().unwrap();
+    assert_eq!(body.len(), 482usize.div_ceil(8));
+    assert_eq!(NavicEphemeris::decode(&body).unwrap(), eph);
+    assert_eq!(
+        Message::decode(&body).unwrap(),
+        Message::NavicEphemeris(eph.clone())
+    );
+    assert_eq!(Message::NavicEphemeris(eph.clone()).message_number(), 1041);
+    assert_eq!(eph.health(), 2);
+    assert_eq!(eph.satellite().unwrap().to_string(), "I09");
+
+    let record = eph.to_broadcast_record(1024 + 389).unwrap();
+    assert_eq!(record.message, crate::rinex_nav::NavMessage::NavicLnav);
+    assert_eq!(record.issue_of_data.unwrap().issue, 161);
+    assert_eq!(record.sv_health, 2.0);
+    assert_eq!(record.sv_accuracy_m, Some(4.85));
+    assert_eq!(record.elements.toe_sow, 173_136.0);
+    assert_eq!(record.clock.af0, -1_234_567.0 * 2f64.powi(-31));
+    assert_eq!(
+        record.elements.delta_n,
+        1_234_567.0 * 2f64.powi(-41) * core::f64::consts::PI
+    );
+    assert_eq!(record.elements.crc, 16_383.0 / 16.0);
+    assert!(eph.to_broadcast_record(389 + 1).is_err());
+
+    let mut wide = eph;
+    wide.satellite_id = 64;
+    assert!(wide.encode().unwrap_err().to_string().contains("6-bit"));
+}
+
+/// A 1230 body carries a bias for each set bit of its four-bit signal mask,
+/// in mask order. A mask with no bit set is a complete 32-bit message, which
+/// RTKLIB `decode_type1230` refuses as short and RTCM 10403.3 gives no bias
+/// fields; it is read here. The invalid value decodes as transmitted and
+/// reads as no bias in metres.
+#[test]
+fn glonass_code_phase_biases_round_trip_by_mask() {
+    let empty = GlonassCodePhaseBiases {
+        reference_station_id: 7,
+        aligned: true,
+        reserved: 0,
+        l1_ca: None,
+        l1_p: None,
+        l2_ca: None,
+        l2_p: None,
+        trailing_bits: Vec::new(),
+    };
+    let body = empty.encode().unwrap();
+    assert_eq!(body.len(), 4);
+    assert_eq!(empty.signal_mask(), 0);
+    assert_eq!(GlonassCodePhaseBiases::decode(&body).unwrap(), empty);
+
+    let some = GlonassCodePhaseBiases {
+        l1_ca: Some(953),
+        l2_ca: Some(GLONASS_CODE_PHASE_BIAS_INVALID),
+        l2_p: Some(-1),
+        reserved: 5,
+        ..empty.clone()
+    };
+    let body = some.encode().unwrap();
+    assert_eq!(some.signal_mask(), 0b1011);
+    assert_eq!(body.len(), (32 + 3 * 16) / 8);
+    let decoded = GlonassCodePhaseBiases::decode(&body).unwrap();
+    assert_eq!(decoded, some);
+    assert_eq!(
+        Message::decode(&body).unwrap(),
+        Message::GlonassCodePhaseBiases(some.clone())
+    );
+    assert_eq!(
+        decoded.biases_m(),
+        [Some(953.0 * 0.02), None, None, Some(-0.02)]
+    );
+    let mut wide = some;
+    wide.reserved = 8;
+    assert!(wide
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("reserved 8"));
 }

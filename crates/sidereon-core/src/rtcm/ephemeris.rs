@@ -1,5 +1,5 @@
 //! RTCM 3 broadcast ephemeris messages 1019 (GPS), 1020 (GLONASS),
-//! 1042 (BeiDou), 1044 (QZSS), and 1045/1046 (Galileo).
+//! 1041 (NavIC), 1042 (BeiDou), 1044 (QZSS), and 1045/1046 (Galileo).
 //!
 //! Message 1019 (RTCM 10403.3 Table 3.5-21) carries one complete set of GPS
 //! LNAV ephemeris and clock parameters; message 1020 (Table 3.5-22) carries one
@@ -2081,6 +2081,282 @@ impl super::TrailingBits for QzssEphemeris {
 }
 
 impl super::TrailingBits for GlonassEphemeris {
+    fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
+        &mut self.trailing_bits
+    }
+}
+
+/// A decoded NavIC (IRNSS) broadcast ephemeris (message 1041).
+///
+/// The fields and their order are RTCM 10403.3 Amendment 2's message 1041
+/// (DF516..DF545); the scale factors are those of the IRNSS SPS ICD, as RTKLIB
+/// `decode_type1041` applies them. Every field is the raw transmitted integer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NavicEphemeris {
+    /// NavIC satellite PRN (DF516, 6 bits).
+    pub satellite_id: u8,
+    /// Week number (DF517, 10 bits), the GPS week modulo 1024.
+    pub week_number: u16,
+    /// Clock bias a_f0 (DF518, int22, scale 2^-31 s).
+    pub a_f0: i32,
+    /// Clock drift a_f1 (DF519, int16, scale 2^-43 s/s).
+    pub a_f1: i32,
+    /// Clock drift rate a_f2 (DF520, int8, scale 2^-55 s/s^2).
+    pub a_f2: i16,
+    /// User range accuracy index (DF521, 4 bits), on the GPS URA table.
+    pub ura: u8,
+    /// Clock reference time t_oc (DF522, uint16, scale 16 s).
+    pub t_oc: u16,
+    /// Total group delay T_GD (DF523, int8, scale 2^-31 s).
+    pub t_gd: i16,
+    /// Mean-motion difference dn (DF524, int22, scale 2^-41 semicircles/s).
+    pub delta_n: i32,
+    /// Issue of data, ephemeris and clock IODEC (DF525, 8 bits).
+    pub iodec: u8,
+    /// The ten reserved bits after IODEC (DF526), kept for the round trip.
+    pub reserved: u16,
+    /// L5 health flag (DF527).
+    pub l5_flag: bool,
+    /// S health flag (DF528).
+    pub s_flag: bool,
+    /// Latitude-argument cosine correction C_uc (DF529, int15, scale 2^-28
+    /// rad).
+    pub c_uc: i32,
+    /// Latitude-argument sine correction C_us (DF530, int15, scale 2^-28 rad).
+    pub c_us: i32,
+    /// Inclination cosine correction C_ic (DF531, int15, scale 2^-28 rad).
+    pub c_ic: i32,
+    /// Inclination sine correction C_is (DF532, int15, scale 2^-28 rad).
+    pub c_is: i32,
+    /// Orbit-radius cosine correction C_rc (DF533, int15, scale 2^-4 m).
+    pub c_rc: i32,
+    /// Orbit-radius sine correction C_rs (DF534, int15, scale 2^-4 m).
+    pub c_rs: i32,
+    /// Rate of inclination IDOT (DF535, int14, scale 2^-43 semicircles/s).
+    pub idot: i32,
+    /// Mean anomaly M_0 (DF536, int32, scale 2^-31 semicircles).
+    pub m0: i64,
+    /// Ephemeris reference time t_oe (DF537, uint16, scale 16 s).
+    pub t_oe: u16,
+    /// Eccentricity e (DF538, uint32, scale 2^-33).
+    pub eccentricity: u64,
+    /// Square root of the semi-major axis (DF539, uint32, scale 2^-19
+    /// m^(1/2)).
+    pub sqrt_a: u64,
+    /// Longitude of the ascending node Omega_0 (DF540, int32, scale 2^-31
+    /// semicircles).
+    pub omega0: i64,
+    /// Argument of perigee omega (DF541, int32, scale 2^-31 semicircles).
+    pub omega: i64,
+    /// Rate of right ascension Omega-dot (DF542, int22, scale 2^-41
+    /// semicircles/s).
+    pub omega_dot: i32,
+    /// Inclination i_0 (DF543, int32, scale 2^-31 semicircles).
+    pub i0: i64,
+    /// The two spare bits DF544, kept for the round trip.
+    pub spare_df544: u8,
+    /// The two spare bits DF545, kept for the round trip.
+    pub spare_df545: u8,
+    /// Every body bit after the last field, the zeros that align the body to a
+    /// byte included, kept whenever those bits are anything other than fewer
+    /// than eight zeros: read under [`RtcmPolicy::Lenient`] and written back
+    /// after the last field by `encode_with_policy` under that policy, so the
+    /// body re-encodes byte for byte. Empty when the bits after the last field
+    /// are fewer than eight zeros, for every body read under
+    /// [`RtcmPolicy::Strict`], and for a message built by hand; `encode`
+    /// refuses a nonempty value. A tail set by hand is zero-padded to the byte
+    /// when written and reads back with that padding.
+    pub trailing_bits: Vec<bool>,
+}
+
+impl NavicEphemeris {
+    /// The satellite identifier for this ephemeris.
+    ///
+    /// Refuses a `satellite_id` that does not fit the six-bit DF516 field or is
+    /// not a spellable satellite token; see `raw_satellite`.
+    pub fn satellite(&self) -> Result<GnssSatelliteId> {
+        raw_satellite(GnssSystem::Navic, self.satellite_id, 6, "NavIC PRN", "1041")
+    }
+
+    /// The health word RTKLIB `decode_type1041` stores: the L5 flag in bit 1
+    /// and the S flag in bit 0.
+    pub fn health(&self) -> u8 {
+        (u8::from(self.l5_flag) << 1) | u8::from(self.s_flag)
+    }
+
+    /// Decode a message 1041 body (without the transport frame).
+    pub fn decode(body: &[u8]) -> Result<Self> {
+        decode_body(body, &mut DecodeContext::new(RtcmPolicy::Strict), |r, _| {
+            Self::read(r)
+        })
+        .map_err(Into::into)
+    }
+
+    pub(crate) fn read(r: &mut BitReader<'_>) -> DecodeResult<Self> {
+        let message_number = r.u(12)? as u16;
+        if message_number != 1041 {
+            return Err(Error::Parse(format!(
+                "message {message_number} is not NavIC ephemeris 1041"
+            ))
+            .into());
+        }
+        Ok(Self {
+            satellite_id: r.u(6)? as u8,
+            week_number: r.u(10)? as u16,
+            a_f0: r.i(22)? as i32,
+            a_f1: r.i(16)? as i32,
+            a_f2: r.i(8)? as i16,
+            ura: r.u(4)? as u8,
+            t_oc: r.u(16)? as u16,
+            t_gd: r.i(8)? as i16,
+            delta_n: r.i(22)? as i32,
+            iodec: r.u(8)? as u8,
+            reserved: r.u(10)? as u16,
+            l5_flag: r.flag()?,
+            s_flag: r.flag()?,
+            c_uc: r.i(15)? as i32,
+            c_us: r.i(15)? as i32,
+            c_ic: r.i(15)? as i32,
+            c_is: r.i(15)? as i32,
+            c_rc: r.i(15)? as i32,
+            c_rs: r.i(15)? as i32,
+            idot: r.i(14)? as i32,
+            m0: r.i(32)?,
+            t_oe: r.u(16)? as u16,
+            eccentricity: r.u(32)?,
+            sqrt_a: r.u(32)?,
+            omega0: r.i(32)?,
+            omega: r.i(32)?,
+            omega_dot: r.i(22)? as i32,
+            i0: r.i(32)?,
+            spare_df544: r.u(2)? as u8,
+            spare_df545: r.u(2)? as u8,
+            trailing_bits: Vec::new(),
+        })
+    }
+
+    /// Encode this NavIC ephemeris body (without the transport frame).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidInput`] when `satellite_id` does not fit the 6-bit
+    /// satellite field; writing it would keep only its low bits and name
+    /// another satellite. [`Error::InvalidInput`] naming the field when any
+    /// other value is wider than its field: an unsigned field of `n` bits holds
+    /// `0..=2^n - 1`, a two's-complement one `-2^(n-1)..=2^(n-1) - 1`.
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.encode_with_policy(RtcmPolicy::Strict)
+            .map(|(body, _)| body)
+    }
+
+    /// Encode this body under `policy`. Under [`RtcmPolicy::Lenient`] nonempty
+    /// `trailing_bits` are written after the last field and reported as an
+    /// [`RtcmDeparture::TrailingBits`]; every other refusal of `encode` applies
+    /// under both policies.
+    pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
+        raw_satellite_field(self.satellite_id, 6, "NavIC PRN", "1041")?;
+        let mut w = FieldWriter::new(1041);
+        w.u("message number", 1041, 12)?;
+        w.u("satellite_id", u64::from(self.satellite_id), 6)?;
+        w.u("week_number", u64::from(self.week_number), 10)?;
+        w.i("a_f0", i64::from(self.a_f0), 22)?;
+        w.i("a_f1", i64::from(self.a_f1), 16)?;
+        w.i("a_f2", i64::from(self.a_f2), 8)?;
+        w.u("ura", u64::from(self.ura), 4)?;
+        w.u("t_oc", u64::from(self.t_oc), 16)?;
+        w.i("t_gd", i64::from(self.t_gd), 8)?;
+        w.i("delta_n", i64::from(self.delta_n), 22)?;
+        w.u("iodec", u64::from(self.iodec), 8)?;
+        w.u("reserved", u64::from(self.reserved), 10)?;
+        w.flag(self.l5_flag);
+        w.flag(self.s_flag);
+        w.i("c_uc", i64::from(self.c_uc), 15)?;
+        w.i("c_us", i64::from(self.c_us), 15)?;
+        w.i("c_ic", i64::from(self.c_ic), 15)?;
+        w.i("c_is", i64::from(self.c_is), 15)?;
+        w.i("c_rc", i64::from(self.c_rc), 15)?;
+        w.i("c_rs", i64::from(self.c_rs), 15)?;
+        w.i("idot", i64::from(self.idot), 14)?;
+        w.i("m0", self.m0, 32)?;
+        w.u("t_oe", u64::from(self.t_oe), 16)?;
+        w.u("eccentricity", self.eccentricity, 32)?;
+        w.u("sqrt_a", self.sqrt_a, 32)?;
+        w.i("omega0", self.omega0, 32)?;
+        w.i("omega", self.omega, 32)?;
+        w.i("omega_dot", i64::from(self.omega_dot), 22)?;
+        w.i("i0", self.i0, 32)?;
+        w.u("spare_df544", u64::from(self.spare_df544), 2)?;
+        w.u("spare_df545", u64::from(self.spare_df545), 2)?;
+        let departures = write_trailing(&mut w, &self.trailing_bits, policy)?;
+        Ok((w.into_bytes(), departures))
+    }
+
+    /// Convert this raw message into the GPST-tagged NavIC LNAV broadcast
+    /// record used by the orbital evaluator, as a RINEX NavIC record reads:
+    /// the week is the GPS week, the issue is IODEC, the health is
+    /// [`Self::health`], and the accuracy is the URA index on the GPS table.
+    /// `full_week` must have the same ten-bit residue as
+    /// [`Self::week_number`]. Mismatched weeks, invalid satellite IDs,
+    /// unrepresentable times, or URA indices lacking a defined numerical
+    /// accuracy prediction (index 15) are rejected with
+    /// [`Error::InvalidInput`].
+    pub fn to_broadcast_record(&self, full_week: u32) -> Result<BroadcastRecord> {
+        if full_week % 1024 != u32::from(self.week_number) {
+            return Err(Error::InvalidInput(format!(
+                "NavIC full week {full_week} disagrees with 10-bit RTCM week {}",
+                self.week_number
+            )));
+        }
+        let satellite_id = self.satellite()?;
+        let toe_sow = f64::from(self.t_oe) * 16.0;
+        let toc_sow = f64::from(self.t_oc) * 16.0;
+        let toe = gnss_week_tow(TimeScale::Gpst, full_week, toe_sow, "NavIC toe")?;
+        let toc = gnss_week_tow(TimeScale::Gpst, full_week, toc_sow, "NavIC toc")?;
+        Ok(BroadcastRecord {
+            satellite_id,
+            message: NavMessage::NavicLnav,
+            issue_of_data: Some(BroadcastIssue {
+                issue: u32::from(self.iodec),
+                message: NavMessage::NavicLnav,
+            }),
+            week: full_week,
+            toe,
+            toc,
+            elements: KeplerianElements {
+                sqrt_a: scaled_u(self.sqrt_a, -19),
+                e: scaled_u(self.eccentricity, -33),
+                m0: scaled_semicircle(self.m0, -31),
+                delta_n: scaled_semicircle(self.delta_n, -41),
+                omega0: scaled_semicircle(self.omega0, -31),
+                i0: scaled_semicircle(self.i0, -31),
+                omega: scaled_semicircle(self.omega, -31),
+                omega_dot: scaled_semicircle(self.omega_dot, -41),
+                idot: scaled_semicircle(self.idot, -43),
+                cuc: scaled_i(self.c_uc, -28),
+                cus: scaled_i(self.c_us, -28),
+                crc: scaled_i(self.c_rc, -4),
+                crs: scaled_i(self.c_rs, -4),
+                cic: scaled_i(self.c_ic, -28),
+                cis: scaled_i(self.c_is, -28),
+                toe_sow,
+            },
+            clock: ClockPolynomial {
+                af0: scaled_i(self.a_f0, -31),
+                af1: scaled_i(self.a_f1, -43),
+                af2: scaled_i(self.a_f2, -55),
+                toc_sow,
+            },
+            group_delays: BroadcastGroupDelays::gps_lnav(scaled_i(self.t_gd, -31)),
+            cnav: None,
+            sv_health: f64::from(self.health()),
+            sv_accuracy_m: Some(gps_ura_to_meters(self.ura, "NavIC")?),
+            fit_interval_s: None,
+            stated: StatedNavFields::default(),
+        })
+    }
+}
+
+impl super::TrailingBits for NavicEphemeris {
     fn trailing_bits_mut(&mut self) -> &mut Vec<bool> {
         &mut self.trailing_bits
     }
