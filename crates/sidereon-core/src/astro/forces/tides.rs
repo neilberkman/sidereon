@@ -34,7 +34,7 @@ use crate::astro::forces::geopotential::{
     EGM96_REFERENCE_RADIUS_KM,
 };
 use crate::astro::forces::r#trait::ForceModel;
-use crate::astro::frames::nutation::skyfield_fundamental_arguments;
+use crate::astro::frames::nutation::iers_2010_solid_tide_arguments;
 use crate::astro::frames::orientation::EarthOrientation;
 use crate::astro::frames::transforms::{
     greenwich_mean_sidereal_time_radians, with_ut1_validity, PolarMotion,
@@ -722,7 +722,7 @@ fn frequency_dependent_arguments_at(
     .map(|validated| validated.value)
     .map_err(|error| PropagationError::from_frame("solid Earth tide sidereal time", error))?;
     let t = ((time_scales.jd_whole - J2000_JD) + time_scales.tt_fraction) / DAYS_PER_JULIAN_CENTURY;
-    let delaunay_rad = skyfield_fundamental_arguments(t).map_err(|error| {
+    let delaunay_rad = iers_2010_solid_tide_arguments(t).map_err(|error| {
         PropagationError::ForceModelFailure(format!(
             "solid Earth tide fundamental arguments: {error}"
         ))
@@ -1473,6 +1473,44 @@ mod tests {
             serde_json::from_str(STEP2_ORACLE_FIXTURE).expect("parse Step 2 oracle fixture");
         assert_eq!(oracle.epochs.len(), 64);
         oracle.epochs
+    }
+
+    #[test]
+    fn step2_uses_iers_equation_5_43_constant_pair_only_for_l_prime_and_d() {
+        let arguments =
+            iers_2010_solid_tide_arguments(0.0).expect("IERS 2010 tide arguments at J2000");
+        let skyfield_arguments =
+            crate::astro::frames::nutation::skyfield_fundamental_arguments(0.0)
+                .expect("shared Skyfield arguments at J2000");
+        let l_prime_arcseconds = 1_287_104.793_048_f64;
+        let d_arcseconds = 1_072_260.703_692_f64;
+        let l_prime_degrees = 357.529_109_18_f64;
+        let d_degrees = 297.850_195_47_f64;
+        let radians_per_degree = std::f64::consts::PI / 180.0;
+        let expected_l_prime = l_prime_degrees * radians_per_degree;
+        let expected_d = d_degrees * radians_per_degree;
+        let arcsecond_path_magnitude =
+            l_prime_arcseconds * ARCSEC_TO_RAD + d_arcseconds * ARCSEC_TO_RAD;
+        let degree_path_magnitude =
+            l_prime_degrees * radians_per_degree + d_degrees * radians_per_degree;
+        let decimal_input_bound =
+            0.5 * f64::EPSILON * (arcsecond_path_magnitude + degree_path_magnitude);
+        let arcsecond_path_operation_bound = roundoff_gamma(2) * arcsecond_path_magnitude;
+        let degree_path_operation_bound = roundoff_gamma(3) * degree_path_magnitude;
+        let conversion_operation_bound =
+            arcsecond_path_operation_bound + degree_path_operation_bound;
+        let conversion_bound = decimal_input_bound + conversion_operation_bound;
+
+        assert_close(arguments[1], expected_l_prime, conversion_bound);
+        assert_close(arguments[3], expected_d, conversion_bound);
+        assert_ne!(arguments[1].to_bits(), skyfield_arguments[1].to_bits());
+        assert_ne!(arguments[3].to_bits(), skyfield_arguments[3].to_bits());
+        for index in [0, 2, 4] {
+            assert_eq!(
+                arguments[index].to_bits(),
+                skyfield_arguments[index].to_bits()
+            );
+        }
     }
 
     fn assert_step2_matches(
