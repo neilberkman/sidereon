@@ -49,7 +49,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::astro::time::civil::{j2000_seconds, split_julian_date};
+use crate::astro::time::civil::{days_from_seconds, j2000_seconds, split_julian_date};
 use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale};
 
 use crate::constants::{KM_TO_M, US_TO_S};
@@ -706,14 +706,14 @@ fn time_system_from_label(label: &str) -> Result<Sp3TimeSystem> {
 /// concern handled by the core `scales` machinery, not the parser). The
 /// algorithm is the standard Fliegel-Van Flandern Gregorian-to-JDN, then the
 /// time-of-day fraction. JDN is computed in integer arithmetic so the whole-day
-/// boundary is exact; only the sub-day fraction is floating point.
+/// boundary is exact; the fraction is the `f64` nearest to the exact fraction
+/// of the day the epoch line states, rounded once ([`split_julian_date`]).
 fn civil_to_julian_split(civil: validate::ValidCivil) -> Result<JulianDateSplit> {
     // Canonical civil-to-split conversion: the integer JDN places the `*.5`
     // civil-midnight boundary and the within-day clock fields become the
     // fraction. SP3 epochs are civil days in the file's own scale (no leap
-    // second). The carry below is retained for the rare epoch whose seconds
-    // overflow a day.
-    let (mut jd_whole, mut fraction) = split_julian_date(
+    // second).
+    let (jd_whole, fraction) = split_julian_date(
         civil.year as i32,
         civil.month as i32,
         civil.day as i32,
@@ -721,11 +721,20 @@ fn civil_to_julian_split(civil: validate::ValidCivil) -> Result<JulianDateSplit>
         civil.minute as i32,
         civil.second,
     );
-    if fraction > 1.0 {
-        let carry = fraction.floor();
-        jd_whole += carry;
-        fraction -= carry;
-    }
+    let (jd_whole, fraction) = if civil.second >= 60.0 {
+        // A UTC `23:59:60.x` label, held as the RINEX clock reader holds one:
+        // on the next day's boundary with the negative fraction of the time
+        // remaining to it, `(x - 1) / 86400` rounded once. On the label's own
+        // day it would state more than a day, and carried past the boundary
+        // it could round onto the next day's `00:00:00.x`.
+        let clock_seconds = i64::from(civil.hour) * 3_600 + i64::from(civil.minute) * 60;
+        (
+            jd_whole + 1.0,
+            days_from_seconds(clock_seconds - 86_401, civil.second),
+        )
+    } else {
+        (jd_whole, fraction)
+    };
     JulianDateSplit::new(jd_whole, fraction)
         .map_err(|error| Error::Parse(format!("invalid SP3 epoch Julian date: {error}")))
 }

@@ -1,6 +1,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use super::epoch::{epoch_cmp, instant_to_j2000_seconds, interpolate, nearest_microsecond_civil};
+use super::epoch::{
+    epoch_cmp, instant_to_j2000_seconds, interpolate, nearest_microsecond_civil, EpochSource,
+};
 use super::numeric::format_e19_12;
 use super::record::{read_parent, render_record, EpochContext, SigmaGap, TypedEpoch, TypedRecord};
 use super::*;
@@ -295,7 +297,7 @@ fn interpolation_rejects_non_positive_bracket_span() {
         ClockPoint::new(p1, 2.0e-4, Vec::new()),
     ];
 
-    assert_eq!(interpolate(&records, query), None);
+    assert_eq!(interpolate(&records, query, EpochSource::Instant), None);
 }
 
 #[test]
@@ -2007,12 +2009,15 @@ fn record_gps_seconds(
 
 #[test]
 fn tags_the_split_cannot_tell_apart_keep_their_own_gps_seconds() {
-    // Each tag's reader split is also the reader split of a ten-digit tag on
-    // the other side of a rounding boundary of the GPS-seconds grid, so the
-    // instant alone gives the neighbouring double. A record read from text,
-    // in a GPST or a QZSST product, keeps its tag and gives the correctly
-    // rounded value. (`ClockRecord::new` refuses a tag finer than a
-    // microsecond on insertion, so only a read record can hold one.)
+    // Under the pre-3.0.0 arithmetic, which rounded the split twice, each
+    // tag's reader split was also the reader split of a ten-digit tag on the
+    // other side of a rounding boundary of the GPS-seconds grid, so the
+    // instant alone gave the neighbouring double. A record read from text, in
+    // a GPST or a QZSST product, keeps its tag and gives the correctly rounded
+    // value. The split is now rounded once, within 5e-12 s of the tag, and
+    // the instant alone gives the same value for these tags. (`ClockRecord::new`
+    // refuses a tag finer than a microsecond on insertion, so only a read
+    // record can hold one.)
     for (fields, whole_second, fraction) in [
         ((2002, 10, 2, 19, 39), 7, "79081088304"),
         ((2022, 9, 26, 21, 6), 52, "513679146771"),
@@ -2062,11 +2067,7 @@ fn tags_the_split_cannot_tell_apart_keep_their_own_gps_seconds() {
         let lookup = ClockPoint::new(point.epoch, 1.0e-4, Vec::new())
             .gps_seconds()
             .unwrap();
-        assert_eq!(
-            lookup.to_bits().abs_diff(want.to_bits()),
-            1,
-            "the instant alone lands on the neighbouring double"
-        );
+        assert_eq!(lookup.to_bits(), want.to_bits(), "the instant alone");
     }
 }
 
@@ -2125,9 +2126,17 @@ fn gps_seconds_exported_before_3_0_0_are_written_as_their_tags() {
     let mut correct = Vec::new();
     for tag in tags {
         let second: f64 = tag.parse().unwrap();
-        let instant =
-            civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, second).expect("instant");
-        let exported_2x = instant_to_j2000_seconds(&instant).unwrap() + GPS_EPOCH_TO_J2000_S;
+        // The 2.x reader's split: the clock fields summed in f64, then divided
+        // by the day. Every tag here is on the microsecond grid.
+        let whole = second.trunc();
+        let microsecond = ((second - whole) * 1.0e6).round();
+        let fraction_2x = (whole + microsecond / 1.0e6) / SECONDS_PER_DAY;
+        let jd_whole = crate::astro::time::scales::julian_day_number(2026, 5, 13) as f64 - 0.5;
+        let split_2x = Instant::from_julian_date(
+            TimeScale::Gpst,
+            JulianDateSplit::new(jd_whole, fraction_2x).expect("2.x split"),
+        );
+        let exported_2x = instant_to_j2000_seconds(&split_2x).unwrap() + GPS_EPOCH_TO_J2000_S;
         let rounded = civil_to_gps_seconds(2026, 5, 13, 0, 0, second).unwrap();
         assert_ne!(exported_2x, rounded, "{tag}");
         rows.push((exported_2x, 1.0e-4));
@@ -2148,4 +2157,192 @@ fn gps_seconds_exported_before_3_0_0_are_written_as_their_tags() {
     assert_eq!(lenient, text);
     let reread = RinexClock::parse(&text).expect("reread");
     assert_eq!(reread.series_rows()[0].1, correct);
+}
+
+#[test]
+fn intervals_between_clock_tags_are_exact() {
+    // A day of 30 s records. Each record's split is rounded, so the day
+    // fractions of two records 30 s apart do not differ by exactly 30 s; the
+    // interval between their tags is.
+    let mut text = String::from("     3.00           C                   G                   RINEX VERSION / TYPE\n   GPS                                                      TIME SYSTEM ID\n                                                            END OF HEADER\n");
+    for k in 0..2880_u32 {
+        let seconds = k * 30;
+        text.push_str(&format!(
+            "AS G05  2026 05 13 {:02} {:02} {:2}.000000  1   {}.0e-06\n",
+            seconds / 3600,
+            seconds % 3600 / 60,
+            seconds % 60,
+            k % 7
+        ));
+    }
+    let clock = RinexClock::parse(&text).expect("clock");
+    let records = &clock.series()["G05"];
+    let mut split_intervals_off = 0;
+    for pair in records.windows(2) {
+        let (p0, p1) = (&pair[0], &pair[1]);
+        assert_eq!(
+            super::epoch::seconds_between((&p1.epoch, p1.source), (&p0.epoch, p0.source)),
+            Some(30.0)
+        );
+        let (a, b) = (
+            p0.epoch.julian_date().unwrap(),
+            p1.epoch.julian_date().unwrap(),
+        );
+        if crate::astro::time::civil::seconds_between_splits(
+            b.jd_whole, b.fraction, a.jd_whole, a.fraction,
+        ) != 30.0
+        {
+            split_intervals_off += 1;
+        }
+    }
+    assert!(split_intervals_off > 0);
+
+    // A query by civil tag, by GPS seconds and by instant is taken at its
+    // exact time: 10 s into a 30 s span is exactly a third of it.
+    let expected = crate::astro::math::interp::lerp_ratio(
+        records[100].bias_s,
+        records[101].bias_s,
+        10.0,
+        30.0,
+    );
+    let tag = ClockEpoch {
+        year: 2026,
+        month: 5,
+        day: 13,
+        hour: 0,
+        minute: 50,
+        second: 10.0,
+    };
+    assert_eq!(clock.clock_s("G05", tag).unwrap(), Some(expected));
+    let instant = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 50, 10.0).unwrap();
+    assert_eq!(
+        clock.clock_s_at_instant("G05", instant).unwrap(),
+        Some(expected)
+    );
+    let gps_seconds = civil_to_gps_seconds(2026, 5, 13, 0, 50, 10.0).unwrap();
+    assert_eq!(
+        clock.clock_s_at_gps_seconds("G05", gps_seconds).unwrap(),
+        Some(expected)
+    );
+}
+
+#[test]
+fn intervals_between_fractional_clock_tags_are_the_decimal_difference() {
+    let text = "AS G05  2026 05 13 00 00 30.1261057  1   1.0e-04\n\
+                AS G05  2026 05 13 00 00 30.3261058  1   2.0e-04\n";
+    let clock = RinexClock::parse(text).expect("clock");
+    let records = &clock.series()["G05"];
+    let (p0, p1) = (&records[0], &records[1]);
+    assert_eq!(
+        super::epoch::seconds_between((&p1.epoch, p1.source), (&p0.epoch, p0.source)),
+        Some(0.2000001)
+    );
+    // A split Julian date that is no tag's reading is taken at the exact time
+    // its two parts hold.
+    let split = p0.epoch.julian_date().unwrap();
+    let off_grid = Instant::from_julian_date(
+        TimeScale::Gpst,
+        JulianDateSplit::new(split.jd_whole, split.fraction + f64::EPSILON / 8.0).unwrap(),
+    );
+    let seconds = super::epoch::seconds_between(
+        (&off_grid, EpochSource::Instant),
+        (&p0.epoch, EpochSource::Instant),
+    )
+    .unwrap();
+    assert!(seconds != 0.0 && seconds.abs() < 1.0e-11, "{seconds:e}");
+}
+
+#[test]
+fn an_instant_the_2x_reader_built_is_written_as_its_tag() {
+    // Before 3.0.0 the reader summed the clock fields in f64 and divided by
+    // the day; for 00:00:30.007919 that split is one unit in the last place
+    // from the correctly rounded one the reader builds now. A product holding
+    // the 2.x split is written strict as the tag.
+    let tag = civil_to_clock_instant(TimeScale::Gpst, 2026, 5, 13, 0, 0, 30.007_919).unwrap();
+    let split = tag.julian_date().unwrap();
+    assert_eq!(split.fraction.to_bits(), 0x3f36_c2f5_be98_79a2);
+    let split_2x = Instant::from_julian_date(
+        TimeScale::Gpst,
+        JulianDateSplit::new(split.jd_whole, f64::from_bits(0x3f36_c2f5_be98_79a3)).unwrap(),
+    );
+    assert_eq!(
+        split_2x.julian_date().unwrap().fraction,
+        (30.0 + 7_919.0 / 1.0e6) / SECONDS_PER_DAY
+    );
+    let clock = RinexClock::from_instant_series_rows(
+        TimeScale::Gpst,
+        vec![("G05".to_string(), vec![(split_2x, 1.0e-4)])],
+    )
+    .expect("2.x instant");
+    let text = clock.to_rinex_string().expect("written strict");
+    assert!(
+        text.contains("AS G05  2026 05 13 00 00 30.007919"),
+        "{text}"
+    );
+}
+
+#[test]
+fn samples_held_off_the_midnight_boundary_are_ordered_by_time() {
+    // 2026-09-22 18:00 held as (2461306.0, 0.25): later than 17:00 and
+    // earlier than 19:00 of the same day, whose splits sit on the midnight
+    // boundary 2461305.5.
+    let at = |hour: u8, minute: u8| {
+        civil_to_clock_instant(TimeScale::Gpst, 2026, 9, 22, hour, minute, 0.0).unwrap()
+    };
+    let six_pm = Instant::from_julian_date(
+        TimeScale::Gpst,
+        JulianDateSplit::new(2_461_306.0, 0.25).unwrap(),
+    );
+    let clock = RinexClock::from_instant_series_rows(
+        TimeScale::Gpst,
+        vec![(
+            "G05".to_string(),
+            vec![(at(17, 0), 1.0e-4), (six_pm, 2.0e-4), (at(19, 0), 4.0e-4)],
+        )],
+    )
+    .expect("increasing in time");
+    assert_eq!(
+        clock.clock_s_at_instant("G05", at(18, 30)).unwrap(),
+        Some(crate::astro::math::interp::lerp_ratio(
+            2.0e-4, 4.0e-4, 1_800.0, 3_600.0
+        ))
+    );
+    assert_eq!(
+        clock.clock_s_at_instant("G05", six_pm).unwrap(),
+        Some(2.0e-4)
+    );
+}
+
+#[test]
+fn a_query_between_a_samples_reading_and_its_tag_is_bracketed_by_time() {
+    // The reader's split of 00:01:30 lies 1.25e-15 s before the tag. A query
+    // split between the two (held on a boundary 90 s into the day) is before
+    // the sample the interpolation measures at its tag, so it is bracketed by
+    // 00:00:00 and 00:01:30, not by 00:01:30 and 00:03:00.
+    let text = "     3.00           C                   G                   RINEX VERSION / TYPE\n   GPS                                                      TIME SYSTEM ID\n                                                            END OF HEADER\n\
+                AS G05  2026 05 13 00 00  0.000000  1   1.0e-04\n\
+                AS G05  2026 05 13 00 01 30.000000  1   2.0e-04\n\
+                AS G05  2026 05 13 00 03  0.000000  1   3.0e-04\n";
+    let clock = RinexClock::parse(text).expect("clock");
+    let sample = clock.series()["G05"][1].epoch.julian_date().unwrap();
+    assert_eq!(
+        (sample.jd_whole, sample.fraction.to_bits()),
+        (2_461_173.5, 0x3f51_1111_1111_1111)
+    );
+    let query = Instant::from_julian_date(
+        TimeScale::Gpst,
+        JulianDateSplit::new(
+            f64::from_bits(0x4142_c6fa_c022_2222),
+            f64::from_bits(0x3dd1_1111_1108_8889),
+        )
+        .unwrap(),
+    );
+    let bias = clock
+        .clock_s_at_instant("G05", query)
+        .unwrap()
+        .expect("bracketed");
+    assert_eq!(
+        bias,
+        crate::astro::math::interp::lerp_ratio(1.0e-4, 2.0e-4, 90.0, 90.0)
+    );
 }

@@ -439,7 +439,7 @@ pub use sidereon_core::astro::sgp4::{DecayLatch, DecayLatchedError, Loss, XScale
 pub use sidereon_core::astro::space_weather::{
     ApHistorySample, ObservationClass, SpaceWeatherPolicy, SpaceWeatherSample, SpaceWeatherTable,
 };
-pub use sidereon_core::astro::time::{DegradeReason, Validated, ValidityMode};
+pub use sidereon_core::astro::time::{DegradeReason, ExactEpoch, Validated, ValidityMode};
 pub use sidereon_core::astro::{
     omm, passes, propagator, sgp4, space_weather, state, tca, tdm, tle,
 };

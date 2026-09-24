@@ -815,9 +815,13 @@ fn coordinate_calendar_to_utc_with_table(
     tai_calendar_to_utc_with_table(tai, leap_seconds)
 }
 
+/// The Julian date a calendar label states in its own continuous scale: the
+/// `f64` nearest to the exact value, ties to even, with the second read as its
+/// shortest decimal.
 fn continuous_calendar_jd(cal: ScaleCal) -> f64 {
-    let jd1 = julian_day_number(cal.year, cal.month, cal.day) as f64 - 0.5;
-    jd1 + seconds_of_day(cal) / SECONDS_PER_DAY
+    let midnight_seconds = julian_day_number(cal.year, cal.month, cal.day) * 86_400 - 43_200;
+    let whole_seconds = midnight_seconds + i64::from(cal.hour) * 3_600 + i64::from(cal.minute) * 60;
+    civil::days_from_seconds(whole_seconds, cal.second)
 }
 
 fn tai_minus_scale_seconds(scale: TimeScale) -> f64 {

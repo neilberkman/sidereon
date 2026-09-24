@@ -14,10 +14,14 @@
 //! [`super::scales::TimeScales::from_utc`] path.
 //!
 //! The integer day-number step delegates to [`super::scales::julian_day_number`]
-//! (the existing Fliegel-style core primitive); the remaining arithmetic mirrors
-//! the binding reference operation order exactly, so a binding that switches to
-//! these helpers reproduces its previous values bit-for-bit.
+//! (the existing Fliegel-style core primitive). A day fraction
+//! ([`split_julian_date`], [`day_of_year`]) is the `f64` nearest to the exact
+//! value the civil fields state, with the second read as its shortest decimal,
+//! rounded once. The seconds conversions ([`j2000_seconds`], [`second_of_day`])
+//! add the second to the whole clock seconds in one `f64` addition, the form of
+//! RTKLIB's `epoch2time` and `time2gpst`.
 
+use super::exact::{nearest_ratio, ExactSeconds};
 use super::model::{Instant, InstantRepr, JulianDateSplit, TimeModelError, TimeScale};
 use super::scales::julian_day_number;
 use crate::astro::constants::time::SECONDS_PER_DAY_I64;
@@ -39,6 +43,12 @@ pub const J2000_NOON_OFFSET_S: i64 = 43_200;
 /// convention the SP3 reader and the RTK epoch axis use. The instant is
 /// `jd_whole + fraction` in the caller's own time scale; no leap second is
 /// applied.
+///
+/// `fraction` is the `f64` nearest to `(hour * 3600 + minute * 60 + second) /
+/// 86400`, ties to even, with `second` read as the shortest decimal that reads
+/// back to it (`0.1` is one tenth of a second), so the instant is within half a
+/// unit in the last place of the fraction (under 5 picoseconds) of the label.
+/// A non-finite second gives a non-finite fraction.
 #[must_use]
 pub fn split_julian_date(
     year: i32,
@@ -49,9 +59,29 @@ pub fn split_julian_date(
     second: f64,
 ) -> (f64, f64) {
     let jd_whole = julian_day_number(year, month, day) as f64 - 0.5;
-    let day_seconds = hour as f64 * SECONDS_PER_HOUR + minute as f64 * SECONDS_PER_MINUTE + second;
-    let fraction = day_seconds / SECONDS_PER_DAY;
-    (jd_whole, fraction)
+    let clock_seconds = i64::from(hour) * 3_600 + i64::from(minute) * 60;
+    (jd_whole, days_from_seconds(clock_seconds, second))
+}
+
+/// `(whole_seconds + second) / 86400`: the `f64` nearest to the exact value,
+/// ties to even, with `second` read as the shortest decimal that reads back to
+/// it. A non-finite second propagates as it would through the plain
+/// arithmetic.
+pub(crate) fn days_from_seconds(whole_seconds: i64, second: f64) -> f64 {
+    // A whole second below 2^52 leaves an integer sum that an `f64` holds
+    // exactly, and one IEEE division of exact operands is correctly rounded.
+    if second.fract() == 0.0 && second.abs() < 4_503_599_627_370_496.0 {
+        let total = whole_seconds as i128 + second as i128;
+        if total.unsigned_abs() < 1 << 53 {
+            return total as f64 / SECONDS_PER_DAY;
+        }
+    }
+    match ExactSeconds::from_shortest_decimal(second) {
+        Some(second) => ExactSeconds::from_integer(i128::from(whole_seconds))
+            .add(&second)
+            .div_to_f64(SECONDS_PER_DAY_I64 as u64),
+        None => (whole_seconds as f64 + second) / SECONDS_PER_DAY,
+    }
 }
 
 impl Instant {
@@ -135,14 +165,17 @@ pub fn second_of_day(hour: i32, minute: i32, second: f64) -> f64 {
 /// This is the value the SPP solve consumes as
 /// [`crate::positioning::SolveInputs::day_of_year`] (the Niell troposphere
 /// seasonal argument). The integer day-of-year is the day-number difference from
-/// January 1 of the same year (exact integer arithmetic, leap-year independent),
-/// plus the within-day fraction.
+/// January 1 of the same year (exact integer arithmetic, leap-year independent);
+/// the result is the `f64` nearest to that day plus the exact within-day
+/// fraction, ties to even, with `second` read as its shortest decimal.
 #[must_use]
 pub fn day_of_year(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: f64) -> f64 {
     let integer_day_of_year =
-        (julian_day_number(year, month, day) - julian_day_number(year, 1, 1) + 1) as f64;
-    let sod = second_of_day(hour, minute, second);
-    integer_day_of_year + sod / SECONDS_PER_DAY
+        julian_day_number(year, month, day) - julian_day_number(year, 1, 1) + 1;
+    let whole_seconds = integer_day_of_year * SECONDS_PER_DAY_I64
+        + i64::from(hour) * 3_600
+        + i64::from(minute) * 60;
+    days_from_seconds(whole_seconds, second)
 }
 
 /// Integer day-of-year (January 1 is `1`) for a civil date.
@@ -239,25 +272,7 @@ fn two_to_minus(bits: u32) -> f64 {
 /// femtosecond fraction in `f64` rounds at each step and can land one unit in
 /// the last place away from it.
 pub(crate) fn seconds_from_femtoseconds(femtoseconds: i128) -> f64 {
-    let magnitude = femtoseconds.unsigned_abs();
-    if magnitude == 0 {
-        return 0.0;
-    }
-    // With the dividend's top bit at bit 126 (or 127) the quotient carries at
-    // least 76 significant bits: the 53 an f64 keeps, its rounding bit, and
-    // bits below those into which a nonzero remainder is folded, so the single
-    // rounding of the conversion sees it. Scaling back by a power of two is
-    // exact.
-    let shift = magnitude.leading_zeros().saturating_sub(1);
-    let scaled = magnitude << shift;
-    let quotient = scaled / FEMTOSECONDS_PER_SECOND;
-    let inexact = !scaled.is_multiple_of(FEMTOSECONDS_PER_SECOND);
-    let seconds = (quotient | u128::from(inexact)) as f64 * two_to_minus(shift);
-    if femtoseconds < 0 {
-        -seconds
-    } else {
-        seconds
-    }
+    nearest_ratio(femtoseconds, FEMTOSECONDS_PER_SECOND)
 }
 
 /// Fraction bits of the fixed-point sum in [`seconds_from_split_exact`].
@@ -365,8 +380,10 @@ pub(crate) fn seconds_from_split_exact(
 /// Elapsed seconds between two split Julian dates `later - earlier`.
 ///
 /// The whole-day and fractional differences are summed first and scaled once
-/// (`(dwhole + dfrac) * 86400`), the policy the RINEX clock interpolation and
-/// reduced-orbit fit duration share. (The J2000-seconds conversion
+/// (`(dwhole + dfrac) * 86400`), the policy the reduced-orbit fit duration and
+/// the bias validity windows share. The difference of two labels is exact only
+/// through [`super::exact::ExactEpoch::seconds_since`]: each fraction here is
+/// already rounded. (The J2000-seconds conversion
 /// [`j2000_seconds_from_split`] scales each part separately; that ordering is
 /// kept distinct because the two are not bit-identical in the last place.)
 #[must_use]
@@ -783,6 +800,81 @@ mod tests {
             j2000_seconds_from_split(whole, frac),
             j2000_seconds(2020, 6, 25, 0, 0, 0.0)
         );
+    }
+
+    /// The day fraction of every label in the exact-rational reference
+    /// (`fixtures-generators/generate_day_fraction_exact.py`: Python
+    /// `Fraction`, rounded by `float`), from [`split_julian_date`],
+    /// [`super::super::exact::ExactEpoch::split_julian_date`] and, less the
+    /// day, [`day_of_year`]. The reference also records the pre-3.0.0
+    /// arithmetic: it moves only labels with a fractional second.
+    #[cfg(sidereon_repo_tests)]
+    #[test]
+    fn day_fractions_are_the_exact_rational_rounded_once() {
+        use super::super::exact::ExactEpoch;
+        let doc: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/time/day_fraction_exact.json"
+        ))
+        .unwrap();
+        let cases = doc["cases"].as_array().unwrap();
+        assert!(cases.len() > 4_000);
+        let mut moved = 0;
+        for case in cases {
+            let hour = case[0].as_i64().unwrap() as i32;
+            let minute = case[1].as_i64().unwrap() as i32;
+            let text = case[2].as_str().unwrap();
+            let second: f64 = text.parse().unwrap();
+            let expected = u64::from_str_radix(case[3].as_str().unwrap(), 16).unwrap();
+            let expected_2x = u64::from_str_radix(case[4].as_str().unwrap(), 16).unwrap();
+            let (jd_whole, fraction) = split_julian_date(2026, 9, 23, hour, minute, second);
+            assert_eq!(jd_whole, 2_461_306.5);
+            assert_eq!(fraction.to_bits(), expected, "{hour:02}:{minute:02}:{text}");
+            let exact = ExactEpoch::from_civil(2026, 9, 23, hour, minute, second).unwrap();
+            assert_eq!(exact.split_julian_date(), (jd_whole, fraction), "{text}");
+            // The pre-3.0.0 arithmetic, reproduced here.
+            let old =
+                (hour as f64 * SECONDS_PER_HOUR + minute as f64 * SECONDS_PER_MINUTE + second)
+                    / SECONDS_PER_DAY;
+            assert_eq!(old.to_bits(), expected_2x, "{text}");
+            if expected != expected_2x {
+                moved += 1;
+                assert!(second.fract() != 0.0, "{text}");
+            }
+        }
+        assert!(moved > 1_000, "{moved}");
+    }
+
+    #[test]
+    fn day_of_year_rounds_the_whole_day_count_once() {
+        // Jan 1 plus one second: 1 + 1/86400, one rounding. Adding the
+        // rounded fraction to the day number rounds twice.
+        let expected: f64 = 86_401.0 / SECONDS_PER_DAY;
+        assert_eq!(day_of_year(2021, 1, 1, 0, 0, 1.0), expected);
+        // Day 266 at 06:30:15.25 is exactly (266 * 86400 + 23415.25) / 86400,
+        // and that numerator is a double.
+        let expected = (266.0 * SECONDS_PER_DAY + 23_415.25) / SECONDS_PER_DAY;
+        assert_eq!(day_of_year(2026, 9, 23, 6, 30, 15.25), expected);
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        for _ in 0..5_000 {
+            let seconds = (xorshift(&mut state) % 86_400) as i32;
+            let (hour, minute, second) = (seconds / 3_600, seconds % 3_600 / 60, seconds % 60);
+            let day = (xorshift(&mut state) % 28) as i32 + 1;
+            let whole = (day_of_year_int(2026, 2, day) * 86_400 + i64::from(seconds)) as f64;
+            assert_eq!(
+                day_of_year(2026, 2, day, hour, minute, f64::from(second)),
+                whole / SECONDS_PER_DAY
+            );
+        }
+    }
+
+    #[test]
+    fn split_julian_date_propagates_non_finite_seconds() {
+        assert!(split_julian_date(2026, 9, 23, 0, 0, f64::NAN).1.is_nan());
+        assert_eq!(
+            split_julian_date(2026, 9, 23, 0, 0, f64::INFINITY).1,
+            f64::INFINITY
+        );
+        assert!(day_of_year(2026, 9, 23, 0, 0, f64::NAN).is_nan());
     }
 
     fn xorshift(state: &mut u64) -> u64 {

@@ -30,8 +30,9 @@ pub use record::{ClockRecord, ClockRecordReading, ClockRecordType, ClockSurplusV
 
 use derived::{Derived, DerivedBuilder};
 use epoch::{
-    civil_second_policy_for_time_scale, civil_to_instant, epoch_cmp, gps_seconds_to_instant,
-    interpolate, point_gps_seconds, sample_at_gps_seconds, validate_instant, Civil, EpochSource,
+    civil_second_policy_for_time_scale, civil_to_instant, clock_epoch_to_civil, epoch_cmp,
+    gps_seconds_to_instant, interpolate, point_gps_seconds, sample_at_gps_seconds,
+    validate_instant, Civil, EpochSource,
 };
 use header::{
     constructed_layout, identify_label, is_end_of_header, label_rank, read_header,
@@ -788,30 +789,40 @@ impl RinexClock {
                 "the product's time system does not resolve to a time scale",
             )
         })?;
-        let epoch = civil_to_clock_instant(
-            scale,
-            epoch.year,
-            epoch.month,
-            epoch.day,
-            epoch.hour,
-            epoch.minute,
-            epoch.second,
-        )
-        .ok_or_else(|| invalid_input("epoch", "invalid civil clock epoch"))?;
-        self.clock_s_at_instant(satellite_id, epoch)
+        let (instant, civil) =
+            clock_epoch_to_civil(epoch, civil_second_policy_for_time_scale(scale))
+                .and_then(|civil| Some((civil_to_instant(scale, civil).ok()?, civil)))
+                .ok_or_else(|| invalid_input("epoch", "invalid civil clock epoch"))?;
+        self.clock_s_from(satellite_id, instant, EpochSource::Civil(civil))
     }
 
     /// Interpolate one satellite clock bias at a scale-tagged instant.
+    ///
+    /// An instant that is the reading of a civil tag with at most ten
+    /// fractional second digits is taken at that tag, and a GPST instant that
+    /// [`RinexClock::clock_s_at_gps_seconds`] builds from GPS seconds is taken
+    /// at those GPS seconds, so the intervals the interpolation forms are
+    /// exact; any other split Julian date is taken at the exact time its two
+    /// parts hold.
     pub fn clock_s_at_instant(
         &self,
         satellite_id: &str,
         epoch: Instant,
     ) -> Result<Option<f64>, RinexClockError> {
+        self.clock_s_from(satellite_id, epoch, EpochSource::Instant)
+    }
+
+    fn clock_s_from(
+        &self,
+        satellite_id: &str,
+        epoch: Instant,
+        source: EpochSource,
+    ) -> Result<Option<f64>, RinexClockError> {
         validate_instant(epoch, "epoch")?;
         let Some(records) = self.series().get(satellite_id) else {
             return Ok(None);
         };
-        Ok(interpolate(records, epoch))
+        Ok(interpolate(records, epoch, source))
     }
 
     /// Interpolate one satellite clock bias at GPS seconds. GPST and QZSST
@@ -838,7 +849,7 @@ impl RinexClock {
         {
             return Ok(Some(bias_s));
         }
-        self.clock_s_at_instant(satellite_id, epoch)
+        self.clock_s_from(satellite_id, epoch, EpochSource::GpsSeconds(gps_seconds))
     }
 
     /// Write the product as RINEX clock text.
