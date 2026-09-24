@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use sidereon_core::astro::time::model::TimeScale;
+use sidereon_core::astro::time::model::{Instant, JulianDateSplit, TimeScale};
 use sidereon_core::bias::{
     bias_epoch_instant, ionosphere_free_coefficients, write_bias_sinex, write_bias_sinex_bytes,
     write_code_dcb, write_code_dcb_bytes, BiasDeparture, BiasEpoch, BiasError, BiasKind,
@@ -1658,6 +1658,61 @@ fn slope_reference_epoch_follows_section_5_1() {
     assert_eq!(
         at("C5Q", 10),
         BiasLookup::UndefinedSlopeReference { record: 3 }
+    );
+}
+
+#[test]
+fn slope_intervals_are_the_exact_time_from_the_reference_epoch() {
+    // A sloped bias referred to 2020:001:00000, queried at 06:30:15.1 on that
+    // day. The interval is 23415.1 s exactly; the difference of the two split
+    // Julian dates, each rounded, is 23415.100000000002 s.
+    let rows = [solution_row(Row {
+        end: "0000:000:00000",
+        slope: "1.0",
+        ..Row::osb("G01", "C1C", "ns", "10.0")
+    })];
+    let set = parse(&document('A', &ABSOLUTE_G, &rows));
+    let record = &set.records()[0];
+    let slope = record.slope.expect("sloped record");
+    let query = Instant::from_julian_date(TimeScale::Gpst, {
+        let (jd_whole, fraction) =
+            sidereon_core::astro::time::split_julian_date(2020, 1, 1, 6, 30, 15.1);
+        JulianDateSplit::new(jd_whole, fraction).unwrap()
+    });
+    let split = query.julian_date().unwrap();
+    assert_eq!(split.fraction * 86_400.0, 23_415.100_000_000_002);
+    assert_eq!(
+        set.code_osb_seconds(sat(GnssSystem::Gps, 1), "C1C", query)
+            .value()
+            .unwrap()
+            .to_bits(),
+        (record.value + slope * 23_415.1).to_bits()
+    );
+    // A nanosecond query is taken at its count, and a query just before the
+    // record's start is outside it.
+    let nanos_from_j2000 = (sidereon_core::astro::time::j2000_seconds(2020, 1, 1, 6, 30, 15.0)
+        as i128)
+        * 1_000_000_000
+        + 100_000_000;
+    assert_eq!(
+        set.code_osb_seconds(
+            sat(GnssSystem::Gps, 1),
+            "C1C",
+            Instant::from_nanos(TimeScale::Gpst, nanos_from_j2000)
+        )
+        .value()
+        .unwrap()
+        .to_bits(),
+        (record.value + slope * 23_415.1).to_bits()
+    );
+    let just_before = Instant::from_julian_date(TimeScale::Gpst, {
+        let (jd_whole, fraction) =
+            sidereon_core::astro::time::split_julian_date(2019, 12, 31, 23, 59, 59.999_999_999_9);
+        JulianDateSplit::new(jd_whole, fraction).unwrap()
+    });
+    assert_eq!(
+        set.code_osb_seconds(sat(GnssSystem::Gps, 1), "C1C", just_before),
+        BiasLookup::Absent
     );
 }
 

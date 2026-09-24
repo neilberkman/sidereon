@@ -1,8 +1,9 @@
 //! Time-scale bridge for reduced-orbit fitting/evaluation.
 
 use crate::astro::time::civil;
+use crate::astro::time::exact::{ExactEpoch, ExactSeconds};
 use crate::astro::time::model::TimeScale;
-use crate::astro::time::scales::TimeScales;
+use crate::astro::time::scales::{label_tai_minus_utc, TimeScales};
 
 /// A UTC calendar instant `(year, month, day, hour, minute, second)`, the form
 /// the core [`TimeScales::from_utc`] consumes. The Elixir layer produces these
@@ -57,14 +58,143 @@ impl CalendarEpoch {
     }
 }
 
-/// Seconds between two calendar epochs via their J2000-TT split day numbers.
-pub(crate) fn dt_seconds(t0: &TimeScales, t: &TimeScales) -> f64 {
-    civil::seconds_between_splits(t.jd_whole, t.tt_fraction, t0.jd_whole, t0.tt_fraction)
+/// A calendar epoch labelled in `scale` as exact TT seconds, up to an offset
+/// that depends on `scale` alone, so the difference of two epochs in one
+/// scale is their exact TT interval.
+///
+/// A TAI, TT, GPST, Galileo, BeiDou or QZSS label is a fixed offset from TT,
+/// so the label itself, read exactly ([`ExactEpoch::from_civil`]), is used. A
+/// UTC or GLONASST label adds the TAI - UTC that [`TimeScales::from_scale`]
+/// applies to it, so an interval across a leap second counts the leap second.
+/// A TCG, TDB or TCB label, whose offset from TT varies, takes the exact TT
+/// that `ts`, its [`TimeScales`], holds.
+pub(crate) fn exact_tt_seconds(
+    epoch: CalendarEpoch,
+    ts: &TimeScales,
+    scale: TimeScale,
+) -> ExactSeconds {
+    let split_tt = || {
+        civil::exact_seconds_of_split_parts(ts.jd_whole, ts.tt_fraction)
+            .expect("time scales have finite parts")
+    };
+    let label = || {
+        ExactEpoch::from_civil(
+            epoch.year,
+            epoch.month,
+            epoch.day,
+            epoch.hour,
+            epoch.minute,
+            epoch.second,
+        )
+    };
+    match scale {
+        TimeScale::Tcg | TimeScale::Tdb | TimeScale::Tcb => split_tt(),
+        TimeScale::Utc | TimeScale::Glonasst => {
+            let leap = label_tai_minus_utc(
+                scale,
+                epoch.year,
+                epoch.month,
+                epoch.day,
+                epoch.hour,
+                epoch.minute,
+                epoch.second,
+            )
+            .and_then(ExactSeconds::from_f64);
+            match (label(), leap) {
+                (Some(label), Some(leap)) => label.exact_seconds().add(&leap),
+                _ => split_tt(),
+            }
+        }
+        TimeScale::Tai
+        | TimeScale::Tt
+        | TimeScale::Gpst
+        | TimeScale::Gst
+        | TimeScale::Bdt
+        | TimeScale::Qzsst => label().map_or_else(split_tt, ExactEpoch::exact_seconds),
+    }
+}
+
+/// TT seconds from `t0` to `t`, the exact interval rounded once.
+pub(crate) fn dt_seconds(t0: &ExactSeconds, t: &ExactSeconds) -> f64 {
+    t.sub(t0).to_f64()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dt(t0: CalendarEpoch, t: CalendarEpoch, scale: TimeScale) -> f64 {
+        dt_seconds(
+            &exact_tt_seconds(t0, &t0.time_scales(scale), scale),
+            &exact_tt_seconds(t, &t.time_scales(scale), scale),
+        )
+    }
+
+    #[test]
+    fn intervals_are_the_exact_tt_difference_of_the_labels() {
+        // Whole and decimal labels on an atomic scale: the label difference.
+        let base = CalendarEpoch::new(2020, 6, 24, 0, 0, 0.0);
+        assert_eq!(
+            dt(
+                base,
+                CalendarEpoch::new(2020, 6, 24, 1, 0, 0.0),
+                TimeScale::Gpst
+            ),
+            3_600.0
+        );
+        assert_eq!(
+            dt(
+                CalendarEpoch::new(2020, 6, 24, 0, 0, 0.2),
+                CalendarEpoch::new(2020, 6, 24, 0, 0, 0.3),
+                TimeScale::Gpst
+            ),
+            0.1
+        );
+        // UTC across the 2016 leap second counts it, and the leap-second
+        // label sits one second after 23:59:59.
+        let before = CalendarEpoch::new(2016, 12, 31, 23, 59, 59.5);
+        assert_eq!(
+            dt(
+                before,
+                CalendarEpoch::new(2017, 1, 1, 0, 0, 0.5),
+                TimeScale::Utc
+            ),
+            2.0
+        );
+        assert_eq!(
+            dt(
+                before,
+                CalendarEpoch::new(2016, 12, 31, 23, 59, 60.5),
+                TimeScale::Utc
+            ),
+            1.0
+        );
+        // GLONASST is UTC three hours ahead: the same leap second, at 03:00.
+        assert_eq!(
+            dt(
+                CalendarEpoch::new(2017, 1, 1, 2, 59, 59.5),
+                CalendarEpoch::new(2017, 1, 1, 3, 0, 0.5),
+                TimeScale::Glonasst
+            ),
+            2.0
+        );
+        // A TDB label takes the exact difference of its TT splits.
+        let t0 = CalendarEpoch::new(2020, 6, 24, 0, 0, 0.0).time_scales(TimeScale::Tdb);
+        let t1 = CalendarEpoch::new(2020, 6, 24, 1, 0, 0.0).time_scales(TimeScale::Tdb);
+        let exact = civil::exact_seconds_of_split_parts(t1.jd_whole, t1.tt_fraction)
+            .unwrap()
+            .sub(&civil::exact_seconds_of_split_parts(t0.jd_whole, t0.tt_fraction).unwrap())
+            .to_f64();
+        assert_eq!(
+            dt(
+                CalendarEpoch::new(2020, 6, 24, 0, 0, 0.0),
+                CalendarEpoch::new(2020, 6, 24, 1, 0, 0.0),
+                TimeScale::Tdb
+            ),
+            exact
+        );
+        assert!((exact - 3_600.0).abs() < 1.0e-6);
+    }
 
     /// GLONASST = UTC(SU) + 3 h: a GLONASST calendar instant resolves to the
     /// same TT scales as the UTC instant three hours earlier (no leap term in

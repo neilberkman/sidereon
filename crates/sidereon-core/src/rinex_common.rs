@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use crate::astro::time::civil::j2000_seconds;
 use crate::astro::time::model::TimeScale;
+use crate::astro::time::ExactEpoch;
 use crate::rinex_obs::ObsEpochTime;
 
 /// Map a RINEX header time-system label onto the core [`TimeScale`].
@@ -63,6 +64,29 @@ pub(crate) fn obs_epoch_seconds(epoch: ObsEpochTime) -> f64 {
     )
 }
 
+/// An observation epoch held exactly ([`ExactEpoch::from_civil`]); `None` only
+/// for a non-finite second.
+pub(crate) fn obs_exact_epoch(epoch: ObsEpochTime) -> Option<ExactEpoch> {
+    ExactEpoch::from_civil(
+        epoch.year,
+        i32::from(epoch.month),
+        i32::from(epoch.day),
+        i32::from(epoch.hour),
+        i32::from(epoch.minute),
+        epoch.second,
+    )
+}
+
+/// Seconds from `earlier` to `later`: the exact difference of the two labels,
+/// rounded once. The difference of their J2000 doubles
+/// ([`obs_epoch_seconds`]) carries the last place of each, 2^-23 s near 8e8 s.
+pub(crate) fn obs_epoch_interval_s(later: ObsEpochTime, earlier: ObsEpochTime) -> f64 {
+    match (obs_exact_epoch(later), obs_exact_epoch(earlier)) {
+        (Some(later), Some(earlier)) => later.seconds_since(earlier),
+        _ => obs_epoch_seconds(later) - obs_epoch_seconds(earlier),
+    }
+}
+
 /// Columns and decimals of the observation `INTERVAL` header field (`F10.3`).
 pub(crate) const OBS_INTERVAL_WIDTH: usize = 10;
 pub(crate) const OBS_INTERVAL_DECIMALS: usize = 3;
@@ -100,7 +124,7 @@ pub(crate) fn usable_obs_interval_s(interval_s: f64) -> bool {
 pub(crate) fn dominant_obs_interval_s(times: &[ObsEpochTime]) -> Option<f64> {
     let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
     for pair in times.windows(2) {
-        let delta_s = obs_epoch_seconds(pair[1]) - obs_epoch_seconds(pair[0]);
+        let delta_s = obs_epoch_interval_s(pair[1], pair[0]);
         if !delta_s.is_finite() || delta_s <= 0.0 {
             continue;
         }
@@ -119,6 +143,30 @@ pub(crate) fn dominant_obs_interval_s(times: &[ObsEpochTime]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observation_intervals_are_the_exact_label_difference() {
+        let at = |minute: u8, second: f64| ObsEpochTime {
+            year: 2026,
+            month: 9,
+            day: 23,
+            hour: 6,
+            minute,
+            second,
+        };
+        // Labels a tenth of a second apart are 0.1 s apart; their J2000
+        // doubles near 8e8 s differ by a multiple of 2^-23 s.
+        assert_eq!(obs_epoch_interval_s(at(30, 0.2), at(30, 0.1)), 0.1);
+        assert_ne!(
+            obs_epoch_seconds(at(30, 0.2)) - obs_epoch_seconds(at(30, 0.1)),
+            0.1
+        );
+        assert_eq!(obs_epoch_interval_s(at(31, 0.0), at(30, 30.0)), 30.0);
+        assert_eq!(obs_epoch_interval_s(at(30, 0.1), at(30, 0.2)), -0.1);
+        // A 10 Hz stream has a 0.1 s dominant interval.
+        let times: Vec<ObsEpochTime> = (0..50).map(|k| at(30, f64::from(k) / 10.0)).collect();
+        assert_eq!(dominant_obs_interval_s(&times), Some(0.1));
+    }
 
     #[test]
     fn known_labels_round_trip() {

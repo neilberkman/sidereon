@@ -360,48 +360,51 @@ fn piecewise_fit_segment_selection_and_positions_match_oracle_fixture() {
             .len()
     );
 
+    // This implementation's segment fits, pinned bit for bit; the oracle bounds
+    // below check them against the reference. Each sample interval is the
+    // exact TT difference of the sample labels, rounded once.
     const SEGMENT_BITS: [[u64; 12]; 3] = [
         [
-            0x4179546001cf1b61,
-            0x3f9581060cf08fa3,
-            0x3feeb7be4eaab4f8,
-            0x3feccccd3babfe36,
-            0xbe41fd6098d25539,
-            0xbe40d328537e91be,
-            0x3ffcccce64470bac,
-            0x3f231e25d07b327a,
-            0x3f8bb4e2bfa39888,
-            0x3f9072776cf961d1,
-            0x3fe34fa6accec221,
-            0x3fee68d611296e52,
+            0x4179546001cf199e,
+            0x3f9581060cf09859,
+            0x3feeb7be4eaab4ed,
+            0x3feccccd3babfe56,
+            0xbe41fd6098d67a9f,
+            0xbe40d328537e9689,
+            0x3ffcccce64470a5a,
+            0x3f231e25d07b353a,
+            0x3f8bb4e2bfa33103,
+            0x3f9072776cf998cf,
+            0x3fe34fa6ac3d739e,
+            0x3fee68d605f2dca9,
         ],
         [
-            0x4179545fd6f4cf55,
-            0x3f95810d5e44cf90,
-            0x3feeb7c92d5023ad,
-            0x3feccc4b60803d9a,
-            0xbe4057a8f8820497,
-            0xbe40d31ca8729055,
-            0x4006cd2738a46a98,
-            0x3f231e2193dc3b29,
-            0x3f8bb4eb530c6cdd,
-            0x3f90727d61b12a2e,
-            0x3ff186d7132f474d,
-            0x3fff422ca689f698,
+            0x4179545fd6f4d1bf,
+            0x3f95810d5e44725d,
+            0x3feeb7c92d502ea5,
+            0x3feccc4b608039a9,
+            0xbe4057a8f64b5dad,
+            0xbe40d31ca8727cdd,
+            0x4006cd2738a46bf7,
+            0x3f231e2193dc320b,
+            0x3f8bb4eb530c4111,
+            0x3f90727d61b0c2c6,
+            0x3ff186d7130e5f0e,
+            0x3fff422c6d5f8d5d,
         ],
         [
-            0x4179545ff03f8d7e,
-            0x3f95810836f576ab,
-            0x3feeb7c537b24e17,
-            0x3feccbd40412feb7,
-            0xbe416e04ab7e6611,
-            0xbe40d3212e9da761,
-            0xc00310110a8a3d61,
-            0x3f231e237d36b5e3,
-            0x3f8bb4e61787533a,
-            0x3f907278d8e0dfce,
-            0x3fdb0a8bf7b1aeaf,
-            0x3fe628fe36d3af66,
+            0x4179545ff03fc892,
+            0x3f95810836ed0f4f,
+            0x3feeb7c537b24dfe,
+            0x3feccbd40412fd12,
+            0xbe416e04aa7d83bc,
+            0xbe40d3212e9d0572,
+            0xc00310110a8a285c,
+            0x3f231e237d3656fb,
+            0x3f8bb4e617740fca,
+            0x3f907278d8ddffd7,
+            0x3fdb0a8bf5cd3d4d,
+            0x3fe628fd2a6f04ad,
         ],
     ];
 
@@ -426,10 +429,10 @@ fn piecewise_fit_segment_selection_and_positions_match_oracle_fixture() {
     }
 
     const POSITION_BITS: [[u64; 3]; 4] = [
-        [0xc171bba826325352, 0xc1425cc7fe82defe, 0x4171ccd202c5ad1e],
-        [0xc1715102ae7dda14, 0xc172c5ff1e2b02d7, 0x4145a09e7e63fa3c],
-        [0x41340d617d13208e, 0xc172959829f423c5, 0xc171e72b84cc2c95],
-        [0x416cdd54f4e8b877, 0xc153c12ec86113f7, 0xc17487514877aa81],
+        [0xc171bba826325357, 0xc1425cc7fe82df3d, 0x4171ccd202c5ad1d],
+        [0xc1715102ae7dda34, 0xc172c5ff1e2b02c4, 0x4145a09e7e63f97e],
+        [0x41340d617d1319b8, 0xc172959829f4232f, 0xc171e72b84cc2b67],
+        [0x416cdd54f4e8bbfc, 0xc153c12ec861198d, 0xc17487514877aed0],
     ];
 
     for (pos_index, pos) in expected["positions"]

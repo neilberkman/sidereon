@@ -14,6 +14,7 @@ fn dual_epochs(slip: bool) -> Vec<DualFrequencyEpoch> {
     (0..3)
         .map(|epoch_idx| DualFrequencyEpoch {
             gap_time_s: Some(epoch_idx as f64 * 30.0),
+            gap_epoch: None,
             observations: (0..4)
                 .map(|sat_idx| {
                     let slip_cycles = if slip && sat_idx == 0 && epoch_idx >= 1 {
@@ -41,6 +42,7 @@ fn dual_epochs_with_l1_slip(
     (0..epoch_count)
         .map(|epoch_idx| DualFrequencyEpoch {
             gap_time_s: Some(epoch_idx as f64 * 30.0),
+            gap_epoch: None,
             observations: (0..4)
                 .map(|sat_idx| {
                     let slipped = sat_idx == 0
@@ -68,6 +70,7 @@ fn day_length_mw_spike_epochs(epoch_count: usize, sat_count: usize) -> Vec<Float
     (0..epoch_count)
         .map(|epoch_idx| FloatCycleSlipEpoch {
             gap_time_s: Some(epoch_idx as f64 * 30.0),
+            gap_epoch: None,
             observations: (0..sat_count)
                 .map(|sat_idx| {
                     let code_noise_m = if epoch_idx > 0
@@ -152,6 +155,7 @@ fn float_epochs_from_dual(epochs: Vec<DualFrequencyEpoch>) -> Vec<FloatCycleSlip
         .into_iter()
         .map(|epoch| FloatCycleSlipEpoch {
             gap_time_s: epoch.gap_time_s,
+            gap_epoch: epoch.gap_epoch,
             observations: epoch
                 .observations
                 .into_iter()
@@ -317,6 +321,7 @@ fn float_cycle_slip_split_tags_are_core_owned() {
         .into_iter()
         .map(|epoch| FloatCycleSlipEpoch {
             gap_time_s: epoch.gap_time_s,
+            gap_epoch: epoch.gap_epoch,
             observations: epoch
                 .observations
                 .into_iter()
@@ -437,6 +442,7 @@ fn float_cycle_slip_split_skips_only_epochs_missing_raw_dual_frequency_data() {
         .into_iter()
         .map(|epoch| FloatCycleSlipEpoch {
             gap_time_s: epoch.gap_time_s,
+            gap_epoch: epoch.gap_epoch,
             observations: epoch
                 .observations
                 .into_iter()

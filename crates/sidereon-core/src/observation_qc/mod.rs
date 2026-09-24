@@ -25,7 +25,8 @@ use crate::precise_positioning::{
 };
 use crate::rinex::observations::{ObsEpoch, ObsEpochTime, ObsHeader, ObsHeaderTimeline, RinexObs};
 use crate::rinex_common::{
-    dominant_obs_interval_s, obs_epoch_seconds, time_scale_rinex_label, usable_obs_interval_s,
+    dominant_obs_interval_s, obs_epoch_interval_s, obs_epoch_seconds, obs_exact_epoch,
+    time_scale_rinex_label, usable_obs_interval_s,
 };
 use crate::rinex_qc::{lint_obs, Severity};
 
@@ -568,7 +569,7 @@ fn observation_qc_header(
     let duration_s = observation_epoch_times
         .first()
         .zip(observation_epoch_times.last())
-        .map(|(first, last)| obs_epoch_seconds(*last) - obs_epoch_seconds(*first))
+        .map(|(first, last)| obs_epoch_interval_s(*last, *first))
         .filter(|duration_s| duration_s.is_finite() && *duration_s >= 0.0);
 
     ObservationQcHeader {
@@ -718,7 +719,7 @@ fn detect_gaps(
         let Some(interval_s) = nominal.at(header_interval_s) else {
             continue;
         };
-        let observed_delta_s = obs_epoch_seconds(end_epoch) - obs_epoch_seconds(start_epoch);
+        let observed_delta_s = obs_epoch_interval_s(end_epoch, start_epoch);
         if !observed_delta_s.is_finite()
             || observed_delta_s <= 0.0
             || observed_delta_s <= interval_s * options.gap_factor
@@ -742,7 +743,7 @@ fn detect_gaps(
 fn non_monotonic_notes(observation_epoch_times: &[ObsEpochTime]) -> Vec<ObservationQcNote> {
     let mut notes = Vec::new();
     for (idx, window) in observation_epoch_times.windows(2).enumerate() {
-        if obs_epoch_seconds(window[1]) - obs_epoch_seconds(window[0]) <= 0.0 {
+        if obs_epoch_interval_s(window[1], window[0]) <= 0.0 {
             notes.push(ObservationQcNote::NonMonotonicEpoch {
                 epoch_index: idx + 1,
             });
@@ -809,7 +810,6 @@ pub fn aggregate_cycle_slips(obs: &RinexObs) -> CycleSlipQc {
 struct ClockOffsetSample {
     epoch_index: usize,
     epoch: ObsEpochTime,
-    epoch_time_s: f64,
     offset_s: f64,
 }
 
@@ -839,12 +839,11 @@ fn clock_offset_deltas(obs: &RinexObs) -> Vec<ClockOffsetDelta> {
         let sample = ClockOffsetSample {
             epoch_index,
             epoch: epoch_time,
-            epoch_time_s: obs_epoch_seconds(epoch_time),
             offset_s,
         };
 
         if let Some(prev) = previous {
-            let time_delta_s = sample.epoch_time_s - prev.epoch_time_s;
+            let time_delta_s = obs_epoch_interval_s(sample.epoch, prev.epoch);
             if time_delta_s > 0.0 {
                 deltas.push(ClockOffsetDelta {
                     epoch_index: sample.epoch_index,
@@ -938,6 +937,7 @@ fn dual_frequency_epochs(obs: &RinexObs) -> Vec<DualFrequencyEpoch> {
             let header = timeline.at(epoch_index);
             DualFrequencyEpoch {
                 gap_time_s: epoch.epoch.map(obs_epoch_seconds),
+                gap_epoch: epoch.epoch.and_then(obs_exact_epoch),
                 observations: epoch
                     .sats
                     .iter()

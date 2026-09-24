@@ -20,10 +20,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::str::FromStr;
 
 use crate::astro::constants::time::SECONDS_PER_DAY_I64;
-use crate::astro::time::civil::{day_of_year_int, seconds_between_splits, split_julian_date};
+use crate::astro::time::civil::{
+    day_of_year_int, exact_j2000_seconds_of_split, split_julian_date, J2000_JULIAN_DAY_NUMBER,
+    J2000_NOON_OFFSET_S,
+};
+use crate::astro::time::exact::ExactSeconds;
 use crate::astro::time::model::{Instant, InstantRepr, JulianDateSplit, TimeScale};
 use crate::astro::time::scales::julian_day_number;
-use crate::constants::{C_M_S, NS_TO_S, SECONDS_PER_DAY};
+use crate::constants::{C_M_S, NS_TO_S};
 use crate::format::columns::strict_f64;
 pub use crate::format::{Diagnostics, Parsed, RecordRef, Skip, SkipReason, Warning, WarningKind};
 pub use crate::validate::FieldError;
@@ -377,6 +381,17 @@ impl BiasEpoch {
 
     fn day_number(self) -> i64 {
         julian_day_number(self.year, 1, 1) + i64::from(self.day_of_year) - 1
+    }
+
+    /// The exact seconds since J2000 the epoch names; second 86400 of a day
+    /// is the following midnight.
+    fn exact_j2000_seconds(self) -> ExactSeconds {
+        ExactSeconds::from_integer(
+            i128::from(self.day_number() - J2000_JULIAN_DAY_NUMBER)
+                * i128::from(SECONDS_PER_DAY_I64)
+                - i128::from(J2000_NOON_OFFSET_S)
+                + i128::from(self.second_of_day),
+        )
     }
 
     /// Whole seconds from `self` to `later`, exact in integer arithmetic.
@@ -1618,7 +1633,7 @@ impl BiasSet {
         if obs1 == obs2 {
             return BiasLookup::exact(0.0);
         }
-        let query = match self.query_split(epoch) {
+        let query = match self.query_seconds(epoch) {
             Ok(query) => query,
             Err(status) => return status,
         };
@@ -1626,7 +1641,7 @@ impl BiasSet {
             BiasTargetKey::satellite(sat),
             BiasTargetKey::system(sat.system),
         ] {
-            let answer = self.dsb_for_key(&key, obs1, obs2, query);
+            let answer = self.dsb_for_key(&key, obs1, obs2, &query);
             if answer.lookup != BiasLookup::Absent {
                 return answer.lookup;
             }
@@ -1650,14 +1665,14 @@ impl BiasSet {
         obs: &str,
         epoch: Instant,
     ) -> BiasLookup {
-        let query = match self.query_split(epoch) {
+        let query = match self.query_seconds(epoch) {
             Ok(query) => query,
             Err(status) => return status,
         };
         let keys = self.station_keys(&BiasTargetKey::receiver(system, station));
         combine_alternatives(
             keys.iter()
-                .map(|key| self.osb_for_key(key, obs, query, BiasObservableFamily::Code, None)),
+                .map(|key| self.osb_for_key(key, obs, &query, BiasObservableFamily::Code, None)),
         )
     }
 
@@ -1676,14 +1691,14 @@ impl BiasSet {
         if obs1 == obs2 {
             return BiasLookup::exact(0.0);
         }
-        let query = match self.query_split(epoch) {
+        let query = match self.query_seconds(epoch) {
             Ok(query) => query,
             Err(status) => return status,
         };
         let keys = self.station_keys(&BiasTargetKey::receiver(system, station));
         combine_alternatives(
             keys.iter()
-                .map(|key| self.dsb_for_key(key, obs1, obs2, query)),
+                .map(|key| self.dsb_for_key(key, obs1, obs2, &query)),
         )
     }
 
@@ -1696,14 +1711,14 @@ impl BiasSet {
         obs: &str,
         epoch: Instant,
     ) -> BiasLookup {
-        let query = match self.query_split(epoch) {
+        let query = match self.query_seconds(epoch) {
             Ok(query) => query,
             Err(status) => return status,
         };
         let keys = self.station_keys(&BiasTargetKey::satellite_receiver(sat, station));
         combine_alternatives(
             keys.iter()
-                .map(|key| self.osb_for_key(key, obs, query, BiasObservableFamily::Code, None)),
+                .map(|key| self.osb_for_key(key, obs, &query, BiasObservableFamily::Code, None)),
         )
     }
 
@@ -1721,14 +1736,14 @@ impl BiasSet {
         if obs1 == obs2 {
             return BiasLookup::exact(0.0);
         }
-        let query = match self.query_split(epoch) {
+        let query = match self.query_seconds(epoch) {
             Ok(query) => query,
             Err(status) => return status,
         };
         let keys = self.station_keys(&BiasTargetKey::satellite_receiver(sat, station));
         combine_alternatives(
             keys.iter()
-                .map(|key| self.dsb_for_key(key, obs1, obs2, query)),
+                .map(|key| self.dsb_for_key(key, obs1, obs2, &query)),
         )
     }
 
@@ -1848,9 +1863,9 @@ impl BiasSet {
         self.index = index;
     }
 
-    /// Checks the query scale against the product scale and converts the
-    /// epoch for coverage tests.
-    fn query_split(&self, epoch: Instant) -> Result<JulianDateSplit, BiasLookup> {
+    /// Checks the query scale against the product scale and takes the
+    /// epoch's exact seconds since J2000 for coverage tests and slopes.
+    fn query_seconds(&self, epoch: Instant) -> Result<ExactSeconds, BiasLookup> {
         match self.time_scale {
             Some(scale) if scale == epoch.scale => {}
             product => {
@@ -1860,7 +1875,7 @@ impl BiasSet {
                 })
             }
         }
-        instant_split(epoch).ok_or(BiasLookup::InvalidEpoch)
+        instant_exact_seconds(epoch).ok_or(BiasLookup::InvalidEpoch)
     }
 
     fn osb_for_target_chain(
@@ -1871,7 +1886,7 @@ impl BiasSet {
         family: BiasObservableFamily,
         carrier_hz: Option<Option<f64>>,
     ) -> BiasLookup {
-        let query = match self.query_split(epoch) {
+        let query = match self.query_seconds(epoch) {
             Ok(query) => query,
             Err(status) => return status,
         };
@@ -1879,7 +1894,7 @@ impl BiasSet {
             BiasTargetKey::satellite(sat),
             BiasTargetKey::system(sat.system),
         ] {
-            let answer = self.osb_for_key(&key, obs, query, family, carrier_hz);
+            let answer = self.osb_for_key(&key, obs, &query, family, carrier_hz);
             if answer.lookup != BiasLookup::Absent {
                 return answer.lookup;
             }
@@ -1893,7 +1908,7 @@ impl BiasSet {
         &self,
         key: &BiasTargetKey,
         obs: &str,
-        query: JulianDateSplit,
+        query: &ExactSeconds,
         family: BiasObservableFamily,
         carrier_hz: Option<Option<f64>>,
     ) -> Answer {
@@ -1988,7 +2003,7 @@ impl BiasSet {
         target_key: &BiasTargetKey,
         obs1: &str,
         obs2: &str,
-        query: JulianDateSplit,
+        query: &ExactSeconds,
     ) -> Answer {
         let mut graph = DsbGraph::new();
         let mut blocked: Option<BiasLookup> = None;
@@ -2144,7 +2159,7 @@ impl BiasSet {
         &self,
         target_key: &BiasTargetKey,
         obs_key: &str,
-        query: JulianDateSplit,
+        query: &ExactSeconds,
         predicate: impl Fn(&BiasRecord) -> bool,
     ) -> Selection {
         match self.index.get(&(target_key.clone(), obs_key.to_string())) {
@@ -2159,7 +2174,7 @@ impl BiasSet {
     fn evaluate(
         &self,
         selection: Selection,
-        query: JulianDateSplit,
+        query: &ExactSeconds,
         convert: impl Fn(usize, f64) -> Result<f64, BiasLookup>,
     ) -> BiasLookup {
         let mut value: Option<(usize, f64)> = None;
@@ -2203,28 +2218,21 @@ impl BiasSet {
 
     /// Value of a covering record at the query, with its slope applied from
     /// the section 5.1 reference epoch.
-    fn value_at(&self, index: usize, query: JulianDateSplit) -> Result<f64, BiasLookup> {
+    fn value_at(&self, index: usize, query: &ExactSeconds) -> Result<f64, BiasLookup> {
         let record = &self.records[index];
         let Some(slope) = record.slope else {
             return Ok(record.value);
         };
-        let seconds_since = |epoch: BiasEpoch| -> Result<f64, BiasLookup> {
-            let split = epoch.to_split().map_err(|_| BiasLookup::InvalidEpoch)?;
-            Ok(seconds_between_splits(
-                query.jd_whole,
-                query.fraction,
-                split.jd_whole,
-                split.fraction,
-            ))
-        };
+        // The time from the reference epoch, exact and rounded once.
+        let since = |reference: ExactSeconds| query.sub(&reference).to_f64();
         let dt_s = match record.slope_reference() {
             BiasSlopeReference::Midpoint { start, end } => {
-                // Half the interval is a whole or half second, exact in f64.
-                let half_s = start.seconds_until(end) as f64 * 0.5;
-                seconds_since(start)? - half_s
+                // Half the interval is a whole or half second.
+                let half = ExactSeconds::from_decimal(i128::from(start.seconds_until(end)) * 5, 1);
+                since(start.exact_j2000_seconds().add(&half))
             }
-            BiasSlopeReference::Start(start) => seconds_since(start)?,
-            BiasSlopeReference::End(end) => seconds_since(end)?,
+            BiasSlopeReference::Start(start) => since(start.exact_j2000_seconds()),
+            BiasSlopeReference::End(end) => since(end.exact_j2000_seconds()),
             BiasSlopeReference::Undefined => {
                 return Err(BiasLookup::UndefinedSlopeReference { record: index })
             }
@@ -2248,7 +2256,7 @@ struct Selection {
 fn select_covering_latest(
     records: &[BiasRecord],
     indices: &[usize],
-    query: JulianDateSplit,
+    query: &ExactSeconds,
     predicate: impl Fn(&BiasRecord) -> bool,
 ) -> Selection {
     let covering: Vec<usize> = indices
@@ -2269,28 +2277,16 @@ fn select_covering_latest(
     Selection { latest, overridden }
 }
 
-fn record_covers(record: &BiasRecord, query: JulianDateSplit) -> bool {
+/// Whether a record's validity window `[from, until)` holds the query,
+/// compared exactly.
+fn record_covers(record: &BiasRecord, query: &ExactSeconds) -> bool {
     if let Some(from) = record.valid_from {
-        let Ok(from) = from.to_split() else {
-            return false;
-        };
-        if seconds_between_splits(query.jd_whole, query.fraction, from.jd_whole, from.fraction)
-            < 0.0
-        {
+        if query.sub(&from.exact_j2000_seconds()).sign() == Ordering::Less {
             return false;
         }
     }
     if let Some(until) = record.valid_until {
-        let Ok(until) = until.to_split() else {
-            return false;
-        };
-        if seconds_between_splits(
-            query.jd_whole,
-            query.fraction,
-            until.jd_whole,
-            until.fraction,
-        ) >= 0.0
-        {
+        if query.sub(&until.exact_j2000_seconds()).sign() != Ordering::Less {
             return false;
         }
     }
@@ -5177,15 +5173,16 @@ fn station_marker(station: &str) -> Option<&str> {
     }
 }
 
-fn instant_split(epoch: Instant) -> Option<JulianDateSplit> {
+/// The exact seconds since J2000 an instant stands for: a split Julian date
+/// as [`exact_j2000_seconds_of_split`] takes it (the label it is the reading
+/// of, or the exact time its parts hold), and a nanosecond count from J2000 as
+/// that count.
+fn instant_exact_seconds(epoch: Instant) -> Option<ExactSeconds> {
     match epoch.repr {
-        InstantRepr::JulianDate(split) => Some(split),
-        InstantRepr::Nanos(nanos) => {
-            let seconds = nanos as f64 * NS_TO_S;
-            let days = seconds.div_euclid(SECONDS_PER_DAY);
-            let rem = seconds.rem_euclid(SECONDS_PER_DAY);
-            JulianDateSplit::new(crate::constants::J2000_JD + days, rem / SECONDS_PER_DAY).ok()
+        InstantRepr::JulianDate(split) => {
+            exact_j2000_seconds_of_split(split.jd_whole, split.fraction)
         }
+        InstantRepr::Nanos(nanos) => Some(ExactSeconds::from_decimal(nanos, 9)),
     }
 }
 

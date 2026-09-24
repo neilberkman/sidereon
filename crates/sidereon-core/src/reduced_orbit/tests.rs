@@ -86,7 +86,8 @@ fn synth_samples(
     cadence_s: f64,
 ) -> ([f64; N_PARAMS], Vec<EcefSample>) {
     let base = base_epoch();
-    let t0 = base.time_scales(TimeScale::Utc);
+    let t0_ts = base.time_scales(TimeScale::Utc);
+    let t0 = exact_tt_seconds(base, &t0_ts, TimeScale::Utc);
     let n = (MU_EARTH / (a_km * a_km * a_km)).sqrt();
     let params = [a_km, i, raan0, raan_rate, arg_lat0, n];
 
@@ -94,7 +95,7 @@ fn synth_samples(
     for k in 0..n_samples {
         let ep = epoch_at(base, k as f64 * cadence_s);
         let ts = ep.time_scales(TimeScale::Utc);
-        let dt = dt_seconds(&t0, &ts);
+        let dt = dt_seconds(&t0, &exact_tt_seconds(ep, &ts, TimeScale::Utc));
         let r_gcrs = eval_gcrs_km(&params, dt);
         let mat = gcrs_to_itrs_matrix(&ts).expect("valid frame transform");
         let r_itrs = mat3_vec3_mul(&mat, &r_gcrs).expect("finite matrix-vector product");
@@ -418,7 +419,8 @@ fn permissive_fit_after_the_ut1_table_recovers_the_orbit_and_reports_it() {
     // The synthetic orbit of `synth_samples`, generated at 2028-06-24, after the
     // UT1 table, with the long-term UT1 the permissive fit will also use.
     let base = CalendarEpoch::new(2028, 6, 24, 0, 0, 0.0);
-    let t0 = base.time_scales(TimeScale::Utc);
+    let t0_ts = base.time_scales(TimeScale::Utc);
+    let t0 = exact_tt_seconds(base, &t0_ts, TimeScale::Utc);
     let a_km = 26_560.0;
     let n = (MU_EARTH / (a_km * a_km * a_km)).sqrt();
     let params = [a_km, 0.9599, 1.0, 0.0, 0.5, n];
@@ -426,7 +428,10 @@ fn permissive_fit_after_the_ut1_table_recovers_the_orbit_and_reports_it() {
         .map(|k| {
             let ep = epoch_at(base, k as f64 * 900.0);
             let ts = ep.time_scales(TimeScale::Utc);
-            let r_gcrs = eval_gcrs_km(&params, dt_seconds(&t0, &ts));
+            let r_gcrs = eval_gcrs_km(
+                &params,
+                dt_seconds(&t0, &exact_tt_seconds(ep, &ts, TimeScale::Utc)),
+            );
             let mat = crate::astro::frames::transforms::with_ut1_validity(
                 &ts,
                 ValidityMode::Permissive,
@@ -636,7 +641,8 @@ fn synth_ecc(
         big_m0,
     } = orbit;
     let base = base_epoch();
-    let t0 = base.time_scales(TimeScale::Utc);
+    let t0_ts = base.time_scales(TimeScale::Utc);
+    let t0 = exact_tt_seconds(base, &t0_ts, TimeScale::Utc);
     let n = (MU_EARTH / (a_km * a_km * a_km)).sqrt();
     let h = e * libm::sin(omega);
     let k = e * libm::cos(omega);
@@ -647,7 +653,7 @@ fn synth_ecc(
     for s in 0..n_samples {
         let ep = epoch_at(base, s as f64 * cadence_s);
         let ts = ep.time_scales(TimeScale::Utc);
-        let dt = dt_seconds(&t0, &ts);
+        let dt = dt_seconds(&t0, &exact_tt_seconds(ep, &ts, TimeScale::Utc));
         let r_gcrs = eval_gcrs_km_ecc(&params, dt);
         let mat = gcrs_to_itrs_matrix(&ts).expect("valid frame transform");
         let r_itrs = mat3_vec3_mul(&mat, &r_gcrs).expect("finite matrix-vector product");

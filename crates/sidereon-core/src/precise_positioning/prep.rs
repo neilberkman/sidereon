@@ -10,6 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ambiguity::{self, AmbiguityId, CycleSlipPolicy, NarrowLaneParams};
+use crate::astro::time::ExactEpoch;
 use crate::carrier_phase::{
     detect_cycle_slips, wide_lane_wavelength, ArcEpoch, CarrierPhaseError, CycleSlipOptions,
     SlipReason, SlipResult,
@@ -46,6 +47,10 @@ pub struct DualFrequencyObservation {
 pub struct DualFrequencyEpoch {
     /// Comparable epoch coordinate in seconds for data-gap cycle-slip checks.
     pub gap_time_s: Option<f64>,
+    /// The epoch held exactly, when the caller can supply one. When this epoch
+    /// and the one a data-gap check compares it with both carry one, the check
+    /// uses their exact difference and `gap_time_s` is not used for it.
+    pub gap_epoch: Option<ExactEpoch>,
     /// Complete dual-frequency records for this accepted input epoch; prep later sorts retained records by satellite and ambiguity id.
     pub observations: Vec<DualFrequencyObservation>,
 }
@@ -192,6 +197,9 @@ pub struct FloatCycleSlipObservation {
 pub struct FloatCycleSlipEpoch {
     /// Optional comparable time copied into detector samples for data-gap checks.
     pub gap_time_s: Option<f64>,
+    /// Optional exact epoch copied into detector samples; data-gap checks
+    /// between two epochs that both carry one use their exact difference.
+    pub gap_epoch: Option<ExactEpoch>,
     /// Float observations grouped by satellite for cycle-slip tagging.
     pub observations: Vec<FloatCycleSlipObservation>,
 }
@@ -269,6 +277,7 @@ pub fn split_float_cycle_slip_epochs(
 struct DualArcSample<'a> {
     epoch_index: usize,
     gap_time_s: Option<f64>,
+    gap_epoch: Option<ExactEpoch>,
     observation: &'a DualFrequencyObservation,
 }
 
@@ -332,6 +341,7 @@ fn wide_lane_ambiguities(
                 .push(DualArcSample {
                     epoch_index,
                     gap_time_s: epoch.gap_time_s,
+                    gap_epoch: epoch.gap_epoch,
                     observation,
                 });
         }
@@ -534,7 +544,7 @@ fn cycle_slips_for_dual_arc<'a>(
         .map(|sample| {
             (
                 sample.epoch_index,
-                dual_arc_epoch(sample.observation, sample.gap_time_s),
+                dual_arc_epoch(sample.observation, sample.gap_time_s, sample.gap_epoch),
             )
         })
         .collect::<Vec<_>>();
@@ -702,7 +712,11 @@ impl SlipReference {
     }
 }
 
-fn dual_arc_epoch(observation: &DualFrequencyObservation, gap_time_s: Option<f64>) -> ArcEpoch {
+fn dual_arc_epoch(
+    observation: &DualFrequencyObservation,
+    gap_time_s: Option<f64>,
+    gap_epoch: Option<ExactEpoch>,
+) -> ArcEpoch {
     ArcEpoch {
         phi1_cycles: Some(observation.phi1_cyc),
         phi2_cycles: Some(observation.phi2_cyc),
@@ -713,7 +727,7 @@ fn dual_arc_epoch(observation: &DualFrequencyObservation, gap_time_s: Option<f64
         f1_hz: Some(observation.f1_hz),
         f2_hz: Some(observation.f2_hz),
         gap_time_s,
-        gap_epoch: None,
+        gap_epoch,
     }
 }
 
@@ -936,6 +950,7 @@ fn ionosphere_free_observations(
 struct FloatSlipSample<'a> {
     epoch_index: usize,
     gap_time_s: Option<f64>,
+    gap_epoch: Option<ExactEpoch>,
     observation: &'a FloatCycleSlipObservation,
 }
 
@@ -951,6 +966,7 @@ fn float_cycle_slip_tags(
                 .push(FloatSlipSample {
                     epoch_index,
                     gap_time_s: epoch.gap_time_s,
+                    gap_epoch: epoch.gap_epoch,
                     observation,
                 });
         }
@@ -998,7 +1014,10 @@ fn float_carrier_phase_arc(arc: &[FloatSlipSample<'_>]) -> Vec<(usize, ArcEpoch)
     arc.iter()
         .filter_map(|sample| {
             let raw = sample.observation.raw.as_ref()?;
-            Some((sample.epoch_index, dual_arc_epoch(raw, sample.gap_time_s)))
+            Some((
+                sample.epoch_index,
+                dual_arc_epoch(raw, sample.gap_time_s, sample.gap_epoch),
+            ))
         })
         .collect()
 }

@@ -12,7 +12,7 @@ use crate::astro::time::model::TimeScale;
 use crate::crinex;
 use crate::id::{GnssSatelliteId, GnssSystem};
 use crate::rinex_common::{
-    dominant_obs_interval_s, obs_epoch_seconds, usable_obs_interval_s, writable_obs_interval_s,
+    dominant_obs_interval_s, obs_epoch_interval_s, usable_obs_interval_s, writable_obs_interval_s,
 };
 use crate::rinex_nav::{
     parse_iono_corrections, parse_leap_seconds, parse_nav, parse_nav_lenient, BroadcastRecord,
@@ -1753,7 +1753,7 @@ fn lint_obs_gaps(
             .saturating_sub(1);
         if let (Some(prev), Some(interval_s)) = (previous, spacings.get(stretch).copied().flatten())
         {
-            let gap = obs_epoch_seconds(time) - obs_epoch_seconds(prev);
+            let gap = obs_epoch_interval_s(time, prev);
             if gap > interval_s * 1.5 {
                 findings.push(Finding::ObsEpochGap {
                     at: FindingRef::epoch(idx),
