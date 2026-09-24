@@ -182,6 +182,18 @@ impl ClockRecord {
         valid_civil_to_clock_epoch(self.civil)
     }
 
+    /// The seconds field of the epoch exactly as the source record states it,
+    /// trimmed of blanks, for example `"5.1234567"`. It carries every digit
+    /// the field states, including digits the `f64` second of
+    /// [`civil_epoch`](Self::civil_epoch) cannot hold. A record read from
+    /// text keeps it, and so does such a record after its values are edited
+    /// or after it is inserted into a product read from text. `None` for a
+    /// record built through [`ClockRecord::new`], and for a record of a
+    /// product built from typed instants, whose epoch has no source text.
+    pub fn second_text(&self) -> Option<&str> {
+        self.second_text.as_deref()
+    }
+
     /// The epoch as an instant in the product's time scale; `None` when the
     /// product's time system resolves to no time scale.
     pub fn epoch(&self) -> Option<Instant> {
