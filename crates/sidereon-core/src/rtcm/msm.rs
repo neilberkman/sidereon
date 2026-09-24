@@ -39,6 +39,9 @@ use crate::id::GnssSystem;
 
 use super::bits::{BitReader, FieldWriter, OutOfInput};
 use super::{decode_body, write_trailing, DecodeContext, DecodeResult, RtcmDeparture, RtcmPolicy};
+use super::{
+    MsmMaskProblem, MsmOptionalField, MsmOptionalProblem, RtcmEncodeError, RtcmRecordKind,
+};
 
 /// DF397 rough range invalid / not available value (255), as RTKLIB
 /// `decode_msm4`..`decode_msm7` test it.
@@ -386,7 +389,7 @@ impl MsmMessage {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming what cannot be written as the MSM wire
+    /// [`Error::RtcmEncode`] naming what cannot be written as the MSM wire
     /// form states it:
     ///
     /// * a message number whose constellation and MSM type differ from
@@ -416,10 +419,14 @@ impl MsmMessage {
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         let number = self.message_number;
         if msm_kind(number) != Some((self.system, self.kind)) {
-            return Err(Error::InvalidInput(format!(
-                "RTCM message number {number} is not the {:?} {:?} message this MSM holds",
-                self.system, self.kind
-            )));
+            return Err(RtcmEncodeError::MessageNumber {
+                message_number: number,
+                record: RtcmRecordKind::Msm {
+                    system: self.system,
+                    kind: self.kind,
+                },
+            }
+            .into());
         }
         self.check_masks()?;
         self.check_optional_fields()?;
@@ -442,9 +449,7 @@ impl MsmMessage {
             };
             match policy {
                 RtcmPolicy::Strict => {
-                    return Err(Error::InvalidInput(format!(
-                        "{departure} (refused under the strict policy)"
-                    )))
+                    return Err(RtcmEncodeError::StrictDeparture(departure).into())
                 }
                 RtcmPolicy::Lenient => departures.push(departure),
             }
@@ -601,49 +606,50 @@ impl MsmMessage {
 
     /// Refuse satellite and signal lists the MSM masks cannot state exactly.
     fn check_masks(&self) -> Result<()> {
-        let refuse = |what: String| {
-            Err(Error::InvalidInput(format!(
-                "RTCM MSM {} cannot be encoded: {what}",
-                self.message_number
-            )))
+        let refuse = |problem: MsmMaskProblem| -> Result<()> {
+            Err(RtcmEncodeError::MsmMask {
+                message_number: self.message_number,
+                problem,
+            }
+            .into())
         };
         let mut sat_ids = std::collections::BTreeSet::new();
         for satellite in &self.satellites {
             if !(1..=MSM_SATELLITE_MASK_BITS).contains(&satellite.id) {
-                return refuse(format!(
-                    "satellite id {} is outside the 1..={MSM_SATELLITE_MASK_BITS} satellite mask",
-                    satellite.id
-                ));
+                return refuse(MsmMaskProblem::SatelliteOutsideMask {
+                    satellite: satellite.id,
+                });
             }
             if !sat_ids.insert(satellite.id) {
-                return refuse(format!("satellite id {} is listed twice", satellite.id));
+                return refuse(MsmMaskProblem::SatelliteListedTwice {
+                    satellite: satellite.id,
+                });
             }
         }
         let mut cells = std::collections::BTreeSet::new();
         for signal in &self.signals {
             if !(1..=MSM_SIGNAL_MASK_BITS).contains(&signal.signal_id) {
-                return refuse(format!(
-                    "signal id {} is outside the 1..={MSM_SIGNAL_MASK_BITS} signal mask",
-                    signal.signal_id
-                ));
+                return refuse(MsmMaskProblem::SignalOutsideMask {
+                    signal: signal.signal_id,
+                });
             }
             if self.signal_mask & (1u32 << (32 - u32::from(signal.signal_id))) == 0 {
-                return refuse(format!(
-                    "signal id {} is not set in the signal mask {:#010x}",
-                    signal.signal_id, self.signal_mask
-                ));
+                return refuse(MsmMaskProblem::SignalNotInMask {
+                    signal: signal.signal_id,
+                    mask: self.signal_mask,
+                });
             }
             if !sat_ids.contains(&signal.satellite_id) {
-                return refuse(format!(
-                    "signal {} names satellite id {}, which the satellite list does not hold",
-                    signal.signal_id, signal.satellite_id
-                ));
+                return refuse(MsmMaskProblem::SignalSatelliteNotListed {
+                    signal: signal.signal_id,
+                    satellite: signal.satellite_id,
+                });
             }
             if !cells.insert((signal.satellite_id, signal.signal_id)) {
-                return refuse(format!(
-                    "the cell for satellite id {} signal {} is listed twice",
-                    signal.satellite_id, signal.signal_id
-                ));
+                return refuse(MsmMaskProblem::CellListedTwice {
+                    satellite: signal.satellite_id,
+                    signal: signal.signal_id,
+                });
             }
         }
         Ok(())
@@ -659,27 +665,53 @@ impl MsmMessage {
             let id = s.id;
             match (msm7, s.extended_info.is_some()) {
                 (true, false) => {
-                    return Err(Error::InvalidInput(format!(
-                        "RTCM MSM7 {number} satellite {id} has no extended info, which MSM7 carries"
-                    )))
+                    return Err(RtcmEncodeError::MsmOptional {
+                        message_number: number,
+                        kind: self.kind,
+                        satellite: id,
+                        signal: None,
+                        field: MsmOptionalField::ExtendedInfo,
+                        problem: MsmOptionalProblem::Missing,
+                    }
+                    .into())
                 }
                 (false, true) => {
-                    return Err(Error::InvalidInput(format!(
-                        "RTCM MSM4 {number} satellite {id} holds extended info, which MSM4 does not carry"
-                    )))
+                    return Err(RtcmEncodeError::MsmOptional {
+                        message_number: number,
+                        kind: self.kind,
+                        satellite: id,
+                        signal: None,
+                        field: MsmOptionalField::ExtendedInfo,
+                        problem: MsmOptionalProblem::NotCarried,
+                    }
+                    .into())
                 }
                 _ => {}
             }
             match s.rough_phase_range_rate_m_s {
                 Some(_) if !msm7 => {
-                    return Err(Error::InvalidInput(format!(
-                        "RTCM MSM4 {number} satellite {id} holds a rough phase-range rate, which MSM4 does not carry"
-                    )))
+                    return Err(RtcmEncodeError::MsmOptional {
+                        message_number: number,
+                        kind: self.kind,
+                        satellite: id,
+                        signal: None,
+                        field: MsmOptionalField::RoughPhaseRangeRate,
+                        problem: MsmOptionalProblem::NotCarried,
+                    }
+                    .into())
                 }
                 Some(MSM_ROUGH_PHASE_RANGE_RATE_INVALID) => {
-                    return Err(Error::InvalidInput(format!(
-                        "RTCM MSM7 {number} satellite {id} rough phase-range rate Some({MSM_ROUGH_PHASE_RANGE_RATE_INVALID}) is the invalid value, written for None"
-                    )))
+                    return Err(RtcmEncodeError::MsmOptional {
+                        message_number: number,
+                        kind: self.kind,
+                        satellite: id,
+                        signal: None,
+                        field: MsmOptionalField::RoughPhaseRangeRate,
+                        problem: MsmOptionalProblem::InvalidValue(i64::from(
+                            MSM_ROUGH_PHASE_RANGE_RATE_INVALID,
+                        )),
+                    }
+                    .into())
                 }
                 _ => {}
             }
@@ -688,14 +720,28 @@ impl MsmMessage {
             let (sat, sig) = (s.satellite_id, s.signal_id);
             match s.fine_phase_range_rate {
                 Some(_) if !msm7 => {
-                    return Err(Error::InvalidInput(format!(
-                        "RTCM MSM4 {number} satellite {sat} signal {sig} holds a fine phase-range rate, which MSM4 does not carry"
-                    )))
+                    return Err(RtcmEncodeError::MsmOptional {
+                        message_number: number,
+                        kind: self.kind,
+                        satellite: sat,
+                        signal: Some(sig),
+                        field: MsmOptionalField::FinePhaseRangeRate,
+                        problem: MsmOptionalProblem::NotCarried,
+                    }
+                    .into())
                 }
                 Some(MSM_FINE_PHASE_RANGE_RATE_INVALID) => {
-                    return Err(Error::InvalidInput(format!(
-                        "RTCM MSM7 {number} satellite {sat} signal {sig} fine phase-range rate Some({MSM_FINE_PHASE_RANGE_RATE_INVALID}) is the invalid value, written for None"
-                    )))
+                    return Err(RtcmEncodeError::MsmOptional {
+                        message_number: number,
+                        kind: self.kind,
+                        satellite: sat,
+                        signal: Some(sig),
+                        field: MsmOptionalField::FinePhaseRangeRate,
+                        problem: MsmOptionalProblem::InvalidValue(i64::from(
+                            MSM_FINE_PHASE_RANGE_RATE_INVALID,
+                        )),
+                    }
+                    .into())
                 }
                 _ => {}
             }

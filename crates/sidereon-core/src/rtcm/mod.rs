@@ -93,6 +93,7 @@
 mod antenna;
 pub(crate) mod bits;
 pub(crate) mod crc;
+mod encode_error;
 mod ephemeris;
 mod framing;
 mod lli;
@@ -109,6 +110,10 @@ use crate::error::Result;
 use bits::BitReader;
 
 pub use antenna::AntennaDescriptor;
+pub use encode_error::{
+    MsmMaskProblem, MsmOptionalField, MsmOptionalProblem, RtcmConversionError, RtcmEncodeError,
+    RtcmFieldEncoding, RtcmRecordKind,
+};
 pub use ephemeris::{
     BeidouEphemeris, GalileoFnavEphemeris, GalileoInavEphemeris, GlonassEphemeris, GpsEphemeris,
     QzssEphemeris,
@@ -473,20 +478,18 @@ pub(crate) fn write_trailing(
     let mut read_back = bits.to_vec();
     read_back.extend(std::iter::repeat_n(false, pad));
     if !is_departing_tail(&read_back) {
-        return Err(crate::error::Error::InvalidInput(format!(
-            "RTCM {message_number} trailing_bits holds {} zero bits, which read back as the \
-             byte alignment; leave it empty",
-            bits.len()
-        )));
+        return Err(RtcmEncodeError::TrailingZeroBits {
+            message_number,
+            bits: bits.len(),
+        }
+        .into());
     }
     let departure = RtcmDeparture::TrailingBits {
         message_number,
         bits: read_back,
     };
     match policy {
-        RtcmPolicy::Strict => Err(crate::error::Error::InvalidInput(format!(
-            "{departure} (refused under the strict policy)"
-        ))),
+        RtcmPolicy::Strict => Err(RtcmEncodeError::StrictDeparture(departure).into()),
         RtcmPolicy::Lenient => {
             for &bit in bits {
                 w.flag(bit);
@@ -630,8 +633,8 @@ impl Message {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::InvalidInput`] naming the message and the field when the
-    /// message cannot be written as its wire form states it: a field value
+    /// [`crate::Error::RtcmEncode`], an [`RtcmEncodeError`] naming the message
+    /// and the field, when the message cannot be written as its wire form states it: a field value
     /// wider than its field, a message number that does not name the variant's
     /// layout, an optional part present where the message has none or absent
     /// where it has one, or an [`RtcmDeparture`]. The encoder never truncates,
@@ -679,7 +682,7 @@ impl Message {
 
     /// Encode this message and wrap it in a fresh RTCM transport frame.
     ///
-    /// Returns [`crate::Error::InvalidInput`] if the body cannot be encoded (see
+    /// Returns [`crate::Error::RtcmEncode`] if the body cannot be encoded (see
     /// [`Message::encode`]) or exceeds the frame length limit.
     pub fn to_frame(&self) -> Result<Vec<u8>> {
         encode_frame(&self.encode()?)
@@ -691,7 +694,7 @@ impl UnsupportedMessage {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::InvalidInput`] when the body is shorter than the 12-bit
+    /// [`crate::Error::RtcmEncode`] when the body is shorter than the 12-bit
     /// message number, when its first 12 bits differ from
     /// [`Self::message_number`], or when the number is one this codec decodes
     /// into a typed variant: the body would then decode as that variant, or be
@@ -699,22 +702,22 @@ impl UnsupportedMessage {
     /// [`encode_frame`] directly.
     pub fn encode(&self) -> Result<Vec<u8>> {
         let carried = message_number(&self.body).map_err(|_| {
-            crate::error::Error::InvalidInput(format!(
-                "RTCM unsupported message {} body is shorter than its 12-bit message number",
-                self.message_number
-            ))
+            crate::error::Error::from(RtcmEncodeError::UnsupportedBodyTooShort {
+                message_number: self.message_number,
+            })
         })?;
         if carried != self.message_number {
-            return Err(crate::error::Error::InvalidInput(format!(
-                "RTCM unsupported message {} body carries message number {carried}",
-                self.message_number
-            )));
+            return Err(RtcmEncodeError::UnsupportedBodyNumber {
+                message_number: self.message_number,
+                carried,
+            }
+            .into());
         }
         if is_decoded_number(self.message_number) {
-            return Err(crate::error::Error::InvalidInput(format!(
-                "RTCM message {} is decoded into its typed variant, not held as unsupported",
-                self.message_number
-            )));
+            return Err(RtcmEncodeError::UnsupportedDecodedNumber {
+                message_number: self.message_number,
+            }
+            .into());
         }
         Ok(self.body.clone())
     }

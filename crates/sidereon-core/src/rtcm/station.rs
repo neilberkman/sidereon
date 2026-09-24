@@ -15,6 +15,7 @@ use crate::error::{Error, Result};
 
 use super::bits::{BitReader, FieldWriter};
 use super::{decode_body, write_trailing, DecodeContext, DecodeResult, RtcmDeparture, RtcmPolicy};
+use super::{RtcmEncodeError, RtcmRecordKind};
 
 /// ECEF reference-point scale: each integer step is 0.0001 m.
 const ECEF_SCALE_M: f64 = 0.0001;
@@ -143,7 +144,7 @@ impl StationCoordinates {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming the field when `message_number` is not
+    /// [`Error::RtcmEncode`] naming the field when `message_number` is not
     /// 1005 or 1006, when `antenna_height` is absent from a 1006 or present in
     /// a 1005 (the height would be left out of the body, or written where the
     /// decoder reads none), or when a value is wider than its field: the
@@ -163,20 +164,21 @@ impl StationCoordinates {
         let number = self.message_number;
         match (number, self.antenna_height) {
             (1005, None) | (1006, Some(_)) => {}
-            (1005, Some(_)) => {
-                return Err(Error::InvalidInput(
-                    "RTCM 1005 carries no antenna height; a height is written as 1006".to_string(),
-                ))
-            }
-            (1006, None) => {
-                return Err(Error::InvalidInput(
-                    "RTCM 1006 carries an antenna height, and none is given".to_string(),
-                ))
+            (1005, Some(_)) | (1006, None) => {
+                return Err(RtcmEncodeError::FieldPresence {
+                    message_number: number,
+                    record: RtcmRecordKind::StationCoordinates,
+                    field: "antenna height",
+                    carried: number == 1006,
+                }
+                .into())
             }
             _ => {
-                return Err(Error::InvalidInput(format!(
-                    "RTCM message number {number} is not station coordinates 1005/1006"
-                )))
+                return Err(RtcmEncodeError::MessageNumber {
+                    message_number: number,
+                    record: RtcmRecordKind::StationCoordinates,
+                }
+                .into())
             }
         }
         let mut w = FieldWriter::new(number);

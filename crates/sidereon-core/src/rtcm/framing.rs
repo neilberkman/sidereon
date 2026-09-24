@@ -28,6 +28,7 @@
 use crate::error::{Error, Result};
 
 use super::crc::crc24q;
+use super::RtcmEncodeError;
 
 /// The RTCM 3 frame preamble byte.
 pub const PREAMBLE: u8 = 0xD3;
@@ -53,7 +54,8 @@ pub struct DecodedFrame<'a> {
 
 /// Wrap a message body in an RTCM 3 transport frame with a fresh CRC-24Q.
 ///
-/// Returns [`Error::InvalidInput`] if the body exceeds [`MAX_BODY_LEN`].
+/// Returns [`Error::RtcmEncode`] with [`RtcmEncodeError::FrameBodyTooLong`]
+/// if the body exceeds [`MAX_BODY_LEN`].
 pub fn encode_frame(body: &[u8]) -> Result<Vec<u8>> {
     encode_frame_with_reserved(body, 0)
 }
@@ -63,19 +65,15 @@ pub fn encode_frame(body: &[u8]) -> Result<Vec<u8>> {
 ///
 /// This writes back a frame read with nonzero reserved bits
 /// ([`DecodedFrame::reserved`]) as it was read. Returns
-/// [`Error::InvalidInput`] if the body exceeds [`MAX_BODY_LEN`] or `reserved`
-/// does not fit six bits.
+/// [`Error::RtcmEncode`] if the body exceeds [`MAX_BODY_LEN`]
+/// ([`RtcmEncodeError::FrameBodyTooLong`]) or `reserved` does not fit six
+/// bits ([`RtcmEncodeError::FrameReservedOutOfRange`]).
 pub fn encode_frame_with_reserved(body: &[u8], reserved: u8) -> Result<Vec<u8>> {
     if body.len() > MAX_BODY_LEN {
-        return Err(Error::InvalidInput(format!(
-            "RTCM body of {} bytes exceeds the 1023-byte frame limit",
-            body.len()
-        )));
+        return Err(RtcmEncodeError::FrameBodyTooLong { len: body.len() }.into());
     }
     if reserved > MAX_RESERVED {
-        return Err(Error::InvalidInput(format!(
-            "RTCM frame reserved value {reserved} does not fit its 6-bit field (0..=63)"
-        )));
+        return Err(RtcmEncodeError::FrameReservedOutOfRange { value: reserved }.into());
     }
     let len = body.len() as u16;
     let mut out = Vec::with_capacity(body.len() + FRAME_OVERHEAD);

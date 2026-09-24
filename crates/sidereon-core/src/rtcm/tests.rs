@@ -513,7 +513,7 @@ fn msm_encode_refuses_satellite_and_signal_lists_its_masks_cannot_state() {
             .encode()
             .expect_err("the masks cannot state this message");
         assert!(
-            matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+            matches!(err, Error::RtcmEncode(ref e) if e.to_string().contains(needle)),
             "expected {needle:?}, got {err}"
         );
     }
@@ -1868,7 +1868,7 @@ fn ephemeris_satellite_refuses_zero_and_values_wider_than_the_raw_field() {
     for (message, result) in ephemeris_satellites(0) {
         let err = result.expect_err("satellite id 0 is not a spellable token");
         assert!(
-            matches!(err, Error::Parse(_)),
+            matches!(err, Error::RtcmConversion(_)),
             "{message}: refusal must be typed, got {err}"
         );
         assert!(
@@ -1881,7 +1881,7 @@ fn ephemeris_satellite_refuses_zero_and_values_wider_than_the_raw_field() {
         for (message, result) in ephemeris_satellites(satellite_id) {
             let err = expect_refusal(result, message, satellite_id);
             assert!(
-                matches!(err, Error::Parse(_)),
+                matches!(err, Error::RtcmConversion(_)),
                 "{message} {satellite_id}: refusal must be typed, got {err}"
             );
             assert!(
@@ -2000,8 +2000,8 @@ fn raw_ephemeris_encoders_refuse_out_of_width_satellite_ids() {
     ] {
         let err = result.expect_err("an out-of-width satellite id is refused");
         assert!(
-            matches!(err, Error::InvalidInput(ref text)
-                if text.contains("raw satellite field") && text.contains(message)),
+            matches!(err, Error::RtcmEncode(ref e)
+                if e.to_string().contains("raw satellite field") && e.to_string().contains(message)),
             "{message}: {err}"
         );
     }
@@ -2043,21 +2043,23 @@ fn broadcast_conversion_refuses_ura_absence_and_range_for_gps_beidou_qzss() {
     );
     gps_eph.sv_accuracy = 15;
     match gps_eph.to_broadcast_record(2434) {
-        Err(Error::InvalidInput(msg)) => {
+        Err(Error::RtcmConversion(refusal)) => {
+            let msg = refusal.to_string();
             assert!(msg.contains("GPS"));
             assert!(msg.contains("URA index 15"));
             assert!(msg.contains("no accuracy prediction"));
         }
-        other => panic!("expected InvalidInput for GPS URA 15 absence, got {other:?}"),
+        other => panic!("expected RtcmConversion for GPS URA 15 absence, got {other:?}"),
     }
     gps_eph.sv_accuracy = 16;
     match gps_eph.to_broadcast_record(2434) {
-        Err(Error::InvalidInput(msg)) => {
+        Err(Error::RtcmConversion(refusal)) => {
+            let msg = refusal.to_string();
             assert!(msg.contains("GPS"));
             assert!(msg.contains("URA index 16"));
             assert!(msg.contains("exceeds 4-bit range"));
         }
-        other => panic!("expected InvalidInput for GPS URA 16 out of range, got {other:?}"),
+        other => panic!("expected RtcmConversion for GPS URA 16 out of range, got {other:?}"),
     }
 
     // BeiDou (message 1042)
@@ -2082,21 +2084,23 @@ fn broadcast_conversion_refuses_ura_absence_and_range_for_gps_beidou_qzss() {
     );
     bds_eph.sv_urai = 15;
     match bds_eph.to_broadcast_record() {
-        Err(Error::InvalidInput(msg)) => {
+        Err(Error::RtcmConversion(refusal)) => {
+            let msg = refusal.to_string();
             assert!(msg.contains("BeiDou"));
             assert!(msg.contains("URA index 15"));
             assert!(msg.contains("no accuracy prediction"));
         }
-        other => panic!("expected InvalidInput for BeiDou URA 15 absence, got {other:?}"),
+        other => panic!("expected RtcmConversion for BeiDou URA 15 absence, got {other:?}"),
     }
     bds_eph.sv_urai = 16;
     match bds_eph.to_broadcast_record() {
-        Err(Error::InvalidInput(msg)) => {
+        Err(Error::RtcmConversion(refusal)) => {
+            let msg = refusal.to_string();
             assert!(msg.contains("BeiDou"));
             assert!(msg.contains("URA index 16"));
             assert!(msg.contains("exceeds 4-bit range"));
         }
-        other => panic!("expected InvalidInput for BeiDou URA 16 out of range, got {other:?}"),
+        other => panic!("expected RtcmConversion for BeiDou URA 16 out of range, got {other:?}"),
     }
 
     // QZSS (message 1044)
@@ -2121,21 +2125,23 @@ fn broadcast_conversion_refuses_ura_absence_and_range_for_gps_beidou_qzss() {
     );
     qzss_eph.ura = 15;
     match qzss_eph.to_broadcast_record(2434) {
-        Err(Error::InvalidInput(msg)) => {
+        Err(Error::RtcmConversion(refusal)) => {
+            let msg = refusal.to_string();
             assert!(msg.contains("QZSS"));
             assert!(msg.contains("URA index 15"));
             assert!(msg.contains("no accuracy prediction"));
         }
-        other => panic!("expected InvalidInput for QZSS URA 15 absence, got {other:?}"),
+        other => panic!("expected RtcmConversion for QZSS URA 15 absence, got {other:?}"),
     }
     qzss_eph.ura = 16;
     match qzss_eph.to_broadcast_record(2434) {
-        Err(Error::InvalidInput(msg)) => {
+        Err(Error::RtcmConversion(refusal)) => {
+            let msg = refusal.to_string();
             assert!(msg.contains("QZSS"));
             assert!(msg.contains("URA index 16"));
             assert!(msg.contains("exceeds 4-bit range"));
         }
-        other => panic!("expected InvalidInput for QZSS URA 16 out of range, got {other:?}"),
+        other => panic!("expected RtcmConversion for QZSS URA 16 out of range, got {other:?}"),
     }
 }
 
@@ -2162,24 +2168,26 @@ fn broadcast_conversion_refuses_galileo_sisa_spare_and_napa_and_accepts_valid_in
     for spare_idx in [126, 254] {
         fnav.sisa = spare_idx;
         match fnav.to_broadcast_record() {
-            Err(Error::InvalidInput(msg)) => {
+            Err(Error::RtcmConversion(refusal)) => {
+                let msg = refusal.to_string();
                 assert!(msg.contains("Galileo"));
                 assert!(msg.contains(&format!("SISA index {spare_idx}")));
                 assert!(msg.contains("spare with no defined accuracy"));
             }
             other => {
-                panic!("expected spare InvalidInput for F/NAV SISA {spare_idx}, got {other:?}")
+                panic!("expected spare RtcmConversion for F/NAV SISA {spare_idx}, got {other:?}")
             }
         }
         inav.sisa_index = spare_idx;
         match inav.to_broadcast_record() {
-            Err(Error::InvalidInput(msg)) => {
+            Err(Error::RtcmConversion(refusal)) => {
+                let msg = refusal.to_string();
                 assert!(msg.contains("Galileo"));
                 assert!(msg.contains(&format!("SISA index {spare_idx}")));
                 assert!(msg.contains("spare with no defined accuracy"));
             }
             other => {
-                panic!("expected spare InvalidInput for I/NAV SISA {spare_idx}, got {other:?}")
+                panic!("expected spare RtcmConversion for I/NAV SISA {spare_idx}, got {other:?}")
             }
         }
     }
@@ -2187,21 +2195,23 @@ fn broadcast_conversion_refuses_galileo_sisa_spare_and_napa_and_accepts_valid_in
     // NAPA index (255)
     fnav.sisa = 255;
     match fnav.to_broadcast_record() {
-        Err(Error::InvalidInput(msg)) => {
+        Err(Error::RtcmConversion(refusal)) => {
+            let msg = refusal.to_string();
             assert!(msg.contains("Galileo"));
             assert!(msg.contains("SISA index 255"));
             assert!(msg.contains("no accuracy prediction available (NAPA)"));
         }
-        other => panic!("expected NAPA InvalidInput for F/NAV SISA 255, got {other:?}"),
+        other => panic!("expected NAPA RtcmConversion for F/NAV SISA 255, got {other:?}"),
     }
     inav.sisa_index = 255;
     match inav.to_broadcast_record() {
-        Err(Error::InvalidInput(msg)) => {
+        Err(Error::RtcmConversion(refusal)) => {
+            let msg = refusal.to_string();
             assert!(msg.contains("Galileo"));
             assert!(msg.contains("SISA index 255"));
             assert!(msg.contains("no accuracy prediction available (NAPA)"));
         }
-        other => panic!("expected NAPA InvalidInput for I/NAV SISA 255, got {other:?}"),
+        other => panic!("expected NAPA RtcmConversion for I/NAV SISA 255, got {other:?}"),
     }
 }
 
@@ -2711,7 +2721,7 @@ fn msm_encode_refuses_values_it_would_truncate_fill_or_drop() {
         edit(&mut m);
         let err = m.encode().expect_err(needle);
         assert!(
-            matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+            matches!(err, Error::RtcmEncode(ref e) if e.to_string().contains(needle)),
             "expected {needle:?}, got {err}"
         );
     };
@@ -2868,7 +2878,7 @@ fn ephemeris_encoders_refuse_values_wider_than_their_fields() {
     let check = |result: crate::error::Result<Vec<u8>>, needle: &str| {
         let err = result.expect_err(needle);
         assert!(
-            matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+            matches!(err, Error::RtcmEncode(ref e) if e.to_string().contains(needle)),
             "expected {needle:?}, got {err}"
         );
     };
@@ -2916,7 +2926,7 @@ fn station_encode_refuses_what_it_would_truncate_drop_or_misplace() {
     let refused = |station: StationCoordinates, needle: &str| {
         let err = station.encode().expect_err(needle);
         assert!(
-            matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+            matches!(err, Error::RtcmEncode(ref e) if e.to_string().contains(needle)),
             "expected {needle:?}, got {err}"
         );
     };
@@ -2966,7 +2976,7 @@ fn antenna_strings_round_trip_every_byte_value() {
     let refused = |descriptor: AntennaDescriptor, needle: &str| {
         let err = descriptor.encode().expect_err(needle);
         assert!(
-            matches!(err, Error::InvalidInput(ref text) if text.contains(needle)),
+            matches!(err, Error::RtcmEncode(ref e) if e.to_string().contains(needle)),
             "expected {needle:?}, got {err}"
         );
     };
@@ -3059,4 +3069,182 @@ fn assembler_finish_reads_past_an_unfinished_preamble() {
     assert_eq!(assembler.push(&frame[..frame.len() - 1]).len(), 0);
     assert!(assembler.finish().is_empty());
     assert_eq!(assembler.diagnostics().resync_bytes, frame.len() - 1);
+}
+
+/// Every encoder refusal is an `Error::RtcmEncode` whose fields name the
+/// message, the field and the value, and whose text is the refusal's message.
+#[test]
+fn encoder_refusals_are_typed() {
+    let refusal = |result: crate::error::Result<Vec<u8>>| match result {
+        Err(Error::RtcmEncode(refusal)) => *refusal,
+        other => panic!("expected an RTCM encode refusal, got {other:?}"),
+    };
+
+    let mut station = sample_station(1005, None);
+    station.reference_station_id = 4096;
+    let error = refusal(station.encode());
+    assert_eq!(
+        error,
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1005,
+            field: "reference station ID".to_string(),
+            value: 4096,
+            width: 12,
+            encoding: RtcmFieldEncoding::Unsigned,
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "RTCM 1005 reference station ID 4096 does not fit its 12-bit unsigned field (0..=4095)"
+    );
+    let mut station = sample_station(1005, None);
+    station.ecef_x = 1 << 37;
+    assert_eq!(
+        refusal(station.encode()).to_string(),
+        "RTCM 1005 ECEF X 137438953472 does not fit its 38-bit two's-complement field \
+         (-137438953472..=137438953471)"
+    );
+
+    assert_eq!(
+        refusal(sample_station(1005, Some(1)).encode()),
+        RtcmEncodeError::FieldPresence {
+            message_number: 1005,
+            record: RtcmRecordKind::StationCoordinates,
+            field: "antenna height",
+            carried: false,
+        }
+    );
+    assert_eq!(
+        refusal(sample_station(1007, None).encode()),
+        RtcmEncodeError::MessageNumber {
+            message_number: 1007,
+            record: RtcmRecordKind::StationCoordinates,
+        }
+    );
+
+    let mut gps = valid_gps_ephemeris();
+    gps.satellite_id = 64;
+    let error = refusal(gps.encode());
+    assert_eq!(
+        error,
+        RtcmEncodeError::SatelliteIdOutOfRange {
+            message_number: 1019,
+            field: "GPS PRN",
+            value: 64,
+            width: 6,
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "GPS PRN 64 in 1019 does not fit the 6-bit raw satellite field (0..=63)"
+    );
+
+    let error = refusal(msm4(vec![msm4_satellite(3)], vec![msm4_signal(4, 2)]).encode());
+    assert_eq!(
+        error,
+        RtcmEncodeError::MsmMask {
+            message_number: 1074,
+            problem: MsmMaskProblem::SignalSatelliteNotListed {
+                signal: 2,
+                satellite: 4,
+            },
+        }
+    );
+    let mut msm = msm4(vec![msm4_satellite(3)], vec![msm4_signal(3, 2)]);
+    msm.signals[0].fine_phase_range_rate = Some(1);
+    assert_eq!(
+        refusal(msm.encode()),
+        RtcmEncodeError::MsmOptional {
+            message_number: 1074,
+            kind: MsmKind::Msm4,
+            satellite: 3,
+            signal: Some(2),
+            field: MsmOptionalField::FinePhaseRangeRate,
+            problem: MsmOptionalProblem::NotCarried,
+        }
+    );
+    let mut msm = msm4(vec![msm4_satellite(3)], vec![msm4_signal(3, 2)]);
+    msm.trailing_bits = vec![true];
+    assert!(matches!(
+        refusal(msm.encode()),
+        RtcmEncodeError::StrictDeparture(RtcmDeparture::TrailingBits {
+            message_number: 1074,
+            ..
+        })
+    ));
+
+    assert_eq!(
+        refusal(encode_frame(&[0u8; 1024])),
+        RtcmEncodeError::FrameBodyTooLong { len: 1024 }
+    );
+    assert_eq!(
+        refusal(encode_frame_with_reserved(&[0x3E, 0xD0], 64)),
+        RtcmEncodeError::FrameReservedOutOfRange { value: 64 }
+    );
+}
+
+/// Every ephemeris conversion refusal is an `Error::RtcmConversion` whose
+/// fields name the cause.
+#[test]
+fn ephemeris_conversion_refusals_are_typed() {
+    let refusal = |result: crate::error::Result<crate::rinex_nav::BroadcastRecord>| match result {
+        Err(Error::RtcmConversion(refusal)) => *refusal,
+        other => panic!("expected an RTCM conversion refusal, got {other:?}"),
+    };
+
+    let gps = valid_gps_ephemeris();
+    let week = gps.week_number;
+    let wrong_week = u32::from(week) + 2 * 1024 + 1;
+    assert_eq!(
+        refusal(gps.to_broadcast_record(wrong_week)),
+        RtcmConversionError::WeekMismatch {
+            message_number: 1019,
+            full_week: wrong_week,
+            week,
+        }
+    );
+    let full_week = u32::from(week) + 2 * 1024;
+    let mut ura = valid_gps_ephemeris();
+    ura.sv_accuracy = 15;
+    assert_eq!(
+        refusal(ura.to_broadcast_record(full_week)),
+        RtcmConversionError::UraNoPrediction {
+            system: crate::GnssSystem::Gps,
+            index: 15,
+        }
+    );
+    let mut wide = valid_gps_ephemeris();
+    wide.satellite_id = 100;
+    let error = refusal(wide.to_broadcast_record(full_week));
+    assert_eq!(
+        error,
+        RtcmConversionError::SatelliteIdOutOfRange {
+            message_number: 1019,
+            field: "GPS PRN",
+            value: 100,
+            width: 6,
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        "GPS PRN 100 in 1019 does not fit the 6-bit raw satellite field (0..=63)"
+    );
+    let mut sbas = valid_gps_ephemeris();
+    sbas.satellite_id = 40;
+    assert!(matches!(
+        refusal(sbas.to_broadcast_record(full_week)),
+        RtcmConversionError::NoLnavRecord { value: 40, .. }
+    ));
+
+    let mut spare = valid_galileo_fnav_ephemeris();
+    spare.sisa = 200;
+    assert_eq!(
+        refusal(spare.to_broadcast_record()),
+        RtcmConversionError::SisaSpare { index: 200 }
+    );
+    spare.sisa = 255;
+    assert_eq!(
+        refusal(spare.to_broadcast_record()),
+        RtcmConversionError::SisaNoPrediction
+    );
 }

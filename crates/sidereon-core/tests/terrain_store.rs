@@ -19,7 +19,7 @@ use serde_json::Value;
 use sidereon_core::data::hgt_to_dted;
 use sidereon_core::geoid::egm96_undulation;
 use sidereon_core::terrain::{
-    DtedHorizontalDatum, DtedInterpolation, DtedLookupOptions, DtedTerrain,
+    DtedHorizontalDatum, DtedInterpolation, DtedLookupOptions, DtedTerrain, DtedTileError,
 };
 use sidereon_core::terrain_store::{
     dted_tile_list_to_mmap_store, dted_tree_to_mmap_store, terrain_store_checksum64,
@@ -1076,4 +1076,24 @@ fn a_corner_query_tries_every_candidate_after_an_unreadable_neighbour() {
         })
     );
     fs::remove_dir_all(root).expect("remove temp DTED root");
+}
+
+#[test]
+fn a_dted_input_that_is_not_a_tile_is_refused_with_its_typed_cause() {
+    let root = temp_path("terrain-store-not-a-tile");
+    fs::create_dir_all(&root).expect("create temp dir");
+    let path = root.join("n36_w107_1arc_v3.dt2");
+    fs::write(&path, b"not a DTED tile").expect("write non-tile");
+    let error = dted_tile_list_to_mmap_store(&[DtedTileListEntry::from_indices(36, -107, &path)])
+        .expect_err("a non-tile input is refused");
+    assert_eq!(
+        error,
+        TerrainStoreError::Tile {
+            path: path.clone(),
+            error: Box::new(DtedTileError::TooShort {
+                path: path.display().to_string(),
+            }),
+        }
+    );
+    fs::remove_dir_all(root).expect("remove temp dir");
 }

@@ -52,7 +52,11 @@ const MIN_LOOKUP_LONGITUDE_DEG: f64 = -180.0;
 const MAX_LOOKUP_LONGITUDE_DEG: f64 = 180.0;
 
 /// Error returned when a DTED tile cannot be read, validated, or queried.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
+///
+/// Equality compares the coordinates of [`DtedTileError::Outside`] bit for
+/// bit, so it is an equivalence relation (a NaN coordinate equals itself) and
+/// the type is [`Eq`].
+#[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DtedTileError {
     /// The tile could not be read from disk.
@@ -231,6 +235,166 @@ pub enum DtedTileError {
     },
 }
 
+impl PartialEq for DtedTileError {
+    fn eq(&self, other: &Self) -> bool {
+        use DtedTileError as E;
+        match (self, other) {
+            (
+                E::Io { path, message },
+                E::Io {
+                    path: p,
+                    message: m,
+                },
+            ) => path == p && message == m,
+            (E::TooShort { path }, E::TooShort { path: p })
+            | (E::MissingUhl1 { path }, E::MissingUhl1 { path: p }) => path == p,
+            (E::InvalidEncoding(a), E::InvalidEncoding(b))
+            | (E::InvalidField(a), E::InvalidField(b)) => a == b,
+            (
+                E::InvalidDimensions {
+                    path,
+                    lon_count,
+                    lat_count,
+                },
+                E::InvalidDimensions {
+                    path: p,
+                    lon_count: lo,
+                    lat_count: la,
+                },
+            ) => path == p && lon_count == lo && lat_count == la,
+            (
+                E::Truncated {
+                    path,
+                    actual,
+                    expected,
+                },
+                E::Truncated {
+                    path: p,
+                    actual: a,
+                    expected: e,
+                },
+            ) => path == p && actual == a && expected == e,
+            (
+                E::Outside {
+                    longitude,
+                    latitude,
+                    origin_longitude,
+                    origin_latitude,
+                },
+                E::Outside {
+                    longitude: lo,
+                    latitude: la,
+                    origin_longitude: olo,
+                    origin_latitude: ola,
+                },
+            ) => {
+                longitude.to_bits() == lo.to_bits()
+                    && latitude.to_bits() == la.to_bits()
+                    && origin_longitude.to_bits() == olo.to_bits()
+                    && origin_latitude.to_bits() == ola.to_bits()
+            }
+            (
+                E::PostingIndexOutOfBounds {
+                    longitude_index,
+                    latitude_index,
+                },
+                E::PostingIndexOutOfBounds {
+                    longitude_index: lo,
+                    latitude_index: la,
+                },
+            )
+            | (
+                E::NullPosting {
+                    longitude_index,
+                    latitude_index,
+                },
+                E::NullPosting {
+                    longitude_index: lo,
+                    latitude_index: la,
+                },
+            ) => longitude_index == lo && latitude_index == la,
+            (
+                E::MissingDataSentinel { longitude_index },
+                E::MissingDataSentinel {
+                    longitude_index: lo,
+                },
+            ) => longitude_index == lo,
+            (
+                E::Checksum {
+                    longitude_index,
+                    checksum,
+                    sum,
+                },
+                E::Checksum {
+                    longitude_index: lo,
+                    checksum: c,
+                    sum: s,
+                },
+            ) => longitude_index == lo && checksum == c && sum == s,
+            (E::EmptyCoordinate, E::EmptyCoordinate) => true,
+            (E::InvalidHemisphere { hemisphere }, E::InvalidHemisphere { hemisphere: h }) => {
+                hemisphere == h
+            }
+            (E::NegativePostingIndex { index }, E::NegativePostingIndex { index: i }) => index == i,
+            (
+                E::CoordinateOutOfRange { field, text },
+                E::CoordinateOutOfRange { field: f, text: t },
+            )
+            | (
+                E::OriginNotWholeDegree { field, text },
+                E::OriginNotWholeDegree { field: f, text: t },
+            ) => field == f && text == t,
+            (
+                E::WrongHemisphere {
+                    field,
+                    hemisphere,
+                    expected,
+                },
+                E::WrongHemisphere {
+                    field: f,
+                    hemisphere: h,
+                    expected: e,
+                },
+            ) => field == f && hemisphere == h && expected == e,
+            (
+                E::IntervalCountMismatch {
+                    field,
+                    interval_tenths_arcsec,
+                    count,
+                },
+                E::IntervalCountMismatch {
+                    field: f,
+                    interval_tenths_arcsec: i,
+                    count: c,
+                },
+            ) => field == f && interval_tenths_arcsec == i && count == c,
+            (
+                E::ProfileLongitudeCountMismatch {
+                    longitude_index,
+                    declared,
+                },
+                E::ProfileLongitudeCountMismatch {
+                    longitude_index: lo,
+                    declared: d,
+                },
+            ) => longitude_index == lo && declared == d,
+            (
+                E::UnsupportedPartialProfile {
+                    longitude_index,
+                    first_latitude_index,
+                },
+                E::UnsupportedPartialProfile {
+                    longitude_index: lo,
+                    first_latitude_index: f,
+                },
+            ) => longitude_index == lo && first_latitude_index == f,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for DtedTileError {}
+
 #[cfg(test)]
 mod error_display_tests {
     use super::{parse_dted_coord, DtedTileError};
@@ -337,6 +501,97 @@ mod error_display_tests {
         for (error, expected) in cases {
             assert_eq!(error.to_string(), expected);
         }
+    }
+
+    #[test]
+    fn dted_error_equality_is_reflexive_for_every_variant() {
+        let every = [
+            DtedTileError::Io {
+                path: "a".to_string(),
+                message: "b".to_string(),
+            },
+            DtedTileError::TooShort {
+                path: "a".to_string(),
+            },
+            DtedTileError::MissingUhl1 {
+                path: "a".to_string(),
+            },
+            DtedTileError::InvalidEncoding("a".to_string()),
+            DtedTileError::InvalidField("a".to_string()),
+            DtedTileError::InvalidDimensions {
+                path: "a".to_string(),
+                lon_count: 1,
+                lat_count: 1,
+            },
+            DtedTileError::Truncated {
+                path: "a".to_string(),
+                actual: 1,
+                expected: 2,
+            },
+            DtedTileError::Outside {
+                longitude: f64::NAN,
+                latitude: -0.0,
+                origin_longitude: 0.0,
+                origin_latitude: 1.0,
+            },
+            DtedTileError::PostingIndexOutOfBounds {
+                longitude_index: 1,
+                latitude_index: 2,
+            },
+            DtedTileError::MissingDataSentinel { longitude_index: 1 },
+            DtedTileError::Checksum {
+                longitude_index: 1,
+                checksum: 2,
+                sum: 3,
+            },
+            DtedTileError::EmptyCoordinate,
+            DtedTileError::InvalidHemisphere { hemisphere: 'X' },
+            DtedTileError::NegativePostingIndex { index: -1 },
+            DtedTileError::CoordinateOutOfRange {
+                field: "a",
+                text: "b".to_string(),
+            },
+            DtedTileError::WrongHemisphere {
+                field: "a",
+                hemisphere: 'N',
+                expected: "EW",
+            },
+            DtedTileError::OriginNotWholeDegree {
+                field: "a",
+                text: "b".to_string(),
+            },
+            DtedTileError::IntervalCountMismatch {
+                field: "a",
+                interval_tenths_arcsec: 1,
+                count: 2,
+            },
+            DtedTileError::ProfileLongitudeCountMismatch {
+                longitude_index: 1,
+                declared: 2,
+            },
+            DtedTileError::UnsupportedPartialProfile {
+                longitude_index: 1,
+                first_latitude_index: 2,
+            },
+            DtedTileError::NullPosting {
+                longitude_index: 1,
+                latitude_index: 2,
+            },
+        ];
+        for (i, a) in every.iter().enumerate() {
+            for (j, b) in every.iter().enumerate() {
+                assert_eq!(a == b, i == j, "{a:?} vs {b:?}");
+            }
+            assert_eq!(a, &a.clone());
+        }
+        // Coordinates compare bit for bit: -0.0 and 0.0 differ.
+        let at = |latitude: f64| DtedTileError::Outside {
+            longitude: 1.0,
+            latitude,
+            origin_longitude: 0.0,
+            origin_latitude: 0.0,
+        };
+        assert_ne!(at(0.0), at(-0.0));
     }
 
     #[test]
@@ -571,19 +826,22 @@ impl DtedTerrain {
             if !path.is_file() {
                 return Ok(false);
             }
-            let tile =
-                DtedTile::from_path(&path).map_err(|error| Error::Parse(error.to_string()))?;
+            let tile = DtedTile::from_path(&path).map_err(|error| Error::TerrainTile {
+                lat_index: grid_idx.0,
+                lon_index: grid_idx.1,
+                error: Box::new(error),
+            })?;
             if tile.origin_latitude != f64::from(grid_idx.0)
                 || tile.origin_longitude != f64::from(grid_idx.1)
             {
-                return Err(Error::Parse(format!(
-                    "{}: DTED origin ({},{}) does not match tile ({},{}) named by the file",
-                    path.display(),
-                    tile.origin_latitude,
-                    tile.origin_longitude,
-                    grid_idx.0,
-                    grid_idx.1
-                )));
+                // The origin is a validated whole degree inside [-180, 180].
+                return Err(Error::TerrainTileOrigin {
+                    path,
+                    lat_index: grid_idx.0,
+                    lon_index: grid_idx.1,
+                    origin_latitude: tile.origin_latitude as i32,
+                    origin_longitude: tile.origin_longitude as i32,
+                });
             }
             if !tile.horizontal_datum.is_wgs84_compatible() {
                 return Err(Error::NonWgs84TerrainTile {
@@ -664,7 +922,8 @@ fn height_from_tile(
     Ok(z)
 }
 
-/// Map a tile lookup failure to the crate error, keeping a null posting typed.
+/// Map a tile lookup failure to the crate error: a null posting as an unknown
+/// elevation, anything else as the tile's typed error.
 fn tile_lookup_error(tile: &DtedTile, error: DtedTileError) -> Error {
     match error {
         DtedTileError::NullPosting {
@@ -677,7 +936,11 @@ fn tile_lookup_error(tile: &DtedTile, error: DtedTileError) -> Error {
             latitude_posting: latitude_index,
             longitude_posting: longitude_index,
         },
-        other => Error::Parse(other.to_string()),
+        other => Error::TerrainTile {
+            lat_index: tile.origin_latitude as i32,
+            lon_index: tile.origin_longitude as i32,
+            error: Box::new(other),
+        },
     }
 }
 
@@ -2351,7 +2614,8 @@ mod tests {
         );
         assert!(got[2].is_ok(), "index 2 remains valid");
         assert!(
-            matches!(&got[3], Err(Error::Parse(msg)) if msg.contains("too short")),
+            matches!(&got[3], Err(Error::TerrainTile { error, .. })
+                if matches!(**error, DtedTileError::TooShort { .. })),
             "index 3 is the corrupt-tile error: {:?}",
             got[3]
         );
@@ -2753,7 +3017,8 @@ mod tests {
             .height_m(-106.625, 36.5)
             .expect_err("a swapped profile must not be read");
         assert!(
-            matches!(&err, Error::Parse(msg) if msg.contains("declares longitude count")),
+            matches!(&err, Error::TerrainTile { lat_index: 36, lon_index: -107, error }
+                if matches!(**error, DtedTileError::ProfileLongitudeCountMismatch { .. })),
             "{err:?}"
         );
 
@@ -2799,10 +3064,17 @@ mod tests {
         let err = DtedTerrain::new(&root)
             .height_m(-106.5, 36.5)
             .expect_err("a misnamed tile must not read as sea level");
-        assert!(
-            matches!(&err, Error::Parse(msg) if msg.contains("does not match tile (36,-107)")),
-            "{err:?}"
+        assert_eq!(
+            err,
+            Error::TerrainTileOrigin {
+                path: root.join(format!("n36_w107{DTED_SUFFIX}")),
+                lat_index: 36,
+                lon_index: -107,
+                origin_latitude: 36,
+                origin_longitude: -106,
+            }
         );
+        assert!(err.to_string().contains("does not match tile (36,-107)"));
         fs::remove_dir_all(root).expect("remove temp DTED dir");
     }
 

@@ -33,7 +33,7 @@ fuzz_target!(|data: &[u8]| {
                     assert_eq!(body, frame.body, "message {}", message.message_number())
                 }
                 Err(error) => assert!(
-                    matches!(error, Error::InvalidInput(ref text) if !text.is_empty()),
+                    matches!(error, Error::RtcmEncode(ref refusal) if !refusal.to_string().is_empty()),
                     "message {}: {error}",
                     message.message_number()
                 ),

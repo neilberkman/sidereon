@@ -19,6 +19,7 @@ use crate::error::{Error, Result};
 
 use super::bits::{BitReader, FieldWriter};
 use super::{decode_body, write_trailing, DecodeContext, DecodeResult, RtcmDeparture, RtcmPolicy};
+use super::{RtcmEncodeError, RtcmRecordKind};
 
 /// A decoded antenna / receiver descriptor message (1007, 1008, or 1033).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,7 +103,7 @@ impl AntennaDescriptor {
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidInput`] naming the field when `message_number` is not
+    /// [`Error::RtcmEncode`] naming the field when `message_number` is not
     /// 1007, 1008 or 1033; when a string the message carries is absent (the
     /// antenna serial number of 1008 and 1033, the three receiver strings of
     /// 1033) or one it does not carry is present (it would be dropped); when
@@ -125,9 +126,11 @@ impl AntennaDescriptor {
             1008 => (true, false),
             1033 => (true, true),
             _ => {
-                return Err(Error::InvalidInput(format!(
-                    "RTCM message number {number} is not an antenna descriptor 1007/1008/1033"
-                )))
+                return Err(RtcmEncodeError::MessageNumber {
+                    message_number: number,
+                    record: RtcmRecordKind::AntennaDescriptor,
+                }
+                .into())
             }
         };
         let presence = [
@@ -145,18 +148,14 @@ impl AntennaDescriptor {
             ),
         ];
         for (field, value, carried) in presence {
-            match (value.is_some(), carried) {
-                (true, false) => {
-                    return Err(Error::InvalidInput(format!(
-                        "RTCM {number} carries no {field}, and one is given"
-                    )))
+            if value.is_some() != carried {
+                return Err(RtcmEncodeError::FieldPresence {
+                    message_number: number,
+                    record: RtcmRecordKind::AntennaDescriptor,
+                    field,
+                    carried,
                 }
-                (false, true) => {
-                    return Err(Error::InvalidInput(format!(
-                        "RTCM {number} carries the {field}, and none is given"
-                    )))
-                }
-                _ => {}
+                .into());
             }
         }
         let mut w = FieldWriter::new(number);
@@ -195,10 +194,10 @@ fn write_string(w: &mut FieldWriter, field: &str, s: &str) -> Result<()> {
     let mut bytes = Vec::with_capacity(s.len());
     for c in s.chars() {
         let byte = u8::try_from(u32::from(c)).map_err(|_| {
-            Error::InvalidInput(format!(
-                "RTCM {field} character {c:?} (U+{:04X}) is not an 8-bit character",
-                u32::from(c)
-            ))
+            Error::from(RtcmEncodeError::NonLatin1Character {
+                field: field.to_string(),
+                character: c,
+            })
         })?;
         bytes.push(byte);
     }

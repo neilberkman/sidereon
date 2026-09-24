@@ -19,6 +19,7 @@
 
 use core::fmt;
 
+use super::encode_error::{RtcmEncodeError, RtcmFieldEncoding};
 use crate::error::Error;
 
 /// Internal typed error for exhausting an RTCM message-body bit reader.
@@ -216,8 +217,9 @@ impl BitWriter {
 ///
 /// [`BitWriter`] keeps the low `n` bits of whatever it is given. The RTCM
 /// encoders write through this type instead, so a value wider than its field
-/// is refused with an [`Error::InvalidInput`] naming the message, the field,
-/// the value and the field's range, rather than written as other bits.
+/// is refused with an [`RtcmEncodeError::FieldOutOfRange`] naming the
+/// message, the field, the value and the field's width and encoding, rather
+/// than written as other bits.
 pub(crate) struct FieldWriter {
     writer: BitWriter,
     message_number: u16,
@@ -233,11 +235,21 @@ impl FieldWriter {
         }
     }
 
-    fn refuse(&self, field: impl fmt::Display, value: i128, width: usize, range: &str) -> Error {
-        Error::InvalidInput(format!(
-            "RTCM {} {field} {value} does not fit its {width}-bit {range}",
-            self.message_number
-        ))
+    fn refuse(
+        &self,
+        field: impl fmt::Display,
+        value: i128,
+        width: usize,
+        encoding: RtcmFieldEncoding,
+    ) -> Error {
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: self.message_number,
+            field: field.to_string(),
+            value,
+            width: width as u8,
+            encoding,
+        }
+        .into()
     }
 
     /// Write `value` as an unsigned `width`-bit field (`width <= 64`).
@@ -249,13 +261,7 @@ impl FieldWriter {
     ) -> Result<(), Error> {
         debug_assert!(width <= 64);
         if width < 64 && value >> width != 0 {
-            let widest = (1u64 << width) - 1;
-            return Err(self.refuse(
-                field,
-                i128::from(value),
-                width,
-                &format!("unsigned field (0..={widest})"),
-            ));
+            return Err(self.refuse(field, i128::from(value), width, RtcmFieldEncoding::Unsigned));
         }
         self.writer.push_u(value, width);
         Ok(())
@@ -276,7 +282,7 @@ impl FieldWriter {
                 field,
                 i128::from(value),
                 width,
-                &format!("two's-complement field ({low}..={high})"),
+                RtcmFieldEncoding::TwosComplement,
             ));
         }
         self.writer.push_i(value, width);
@@ -302,14 +308,16 @@ impl FieldWriter {
                 field,
                 i128::from(value),
                 width,
-                &format!("sign-magnitude field (-{widest}..={widest})"),
+                RtcmFieldEncoding::SignMagnitude,
             ));
         }
         if negative_zero && value != 0 {
-            return Err(Error::InvalidInput(format!(
-                "RTCM {} {field} is marked negative zero but holds {value}",
-                self.message_number
-            )));
+            return Err(RtcmEncodeError::NegativeZeroWithValue {
+                message_number: self.message_number,
+                field: field.to_string(),
+                value,
+            }
+            .into());
         }
         self.writer.push_flag(value < 0 || negative_zero);
         self.writer.push_u(value.unsigned_abs(), width - 1);

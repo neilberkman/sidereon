@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use crate::geoid::{egm96_undulation, GeoidError, GeoidGrid};
 use crate::terrain::{
     self, terrain_grid_candidates, validate_lookup_coordinates, DtedHorizontalDatum,
-    DtedInterpolation, DtedLookupOptions, DtedTile, TileGrid,
+    DtedInterpolation, DtedLookupOptions, DtedTile, DtedTileError, TileGrid,
 };
 use crate::{Error, Result};
 
@@ -398,6 +398,7 @@ impl DtedTileListEntry {
 
 /// Errors from terrain store conversion, serialization, and parsing.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TerrainStoreError {
     /// File or directory I/O failed.
     Io {
@@ -482,6 +483,13 @@ pub enum TerrainStoreError {
         /// Datum the tile's DSI record states.
         datum: DtedHorizontalDatum,
     },
+    /// A DTED input could not be read as a tile.
+    Tile {
+        /// Path of the DTED tile.
+        path: PathBuf,
+        /// Why the tile could not be read.
+        error: Box<DtedTileError>,
+    },
 }
 
 impl core::fmt::Display for TerrainStoreError {
@@ -545,6 +553,9 @@ impl core::fmt::Display for TerrainStoreError {
                 "{} states horizontal datum {datum}, not WGS84",
                 path.display()
             ),
+            Self::Tile { path, error } => {
+                write!(f, "terrain store parse error: {}: {error}", path.display())
+            }
         }
     }
 }
@@ -566,25 +577,36 @@ impl MmapTile {
 
     fn get_elevation(&self, bytes: &[u8], longitude_deg: f64, latitude_deg: f64) -> Result<i16> {
         if !self.contains(longitude_deg, latitude_deg) {
-            return Err(Error::Parse(format!(
-                "point ({longitude_deg},{latitude_deg}) is outside terrain store tile ({},{})",
-                self.index.min_longitude_deg, self.index.min_latitude_deg
-            )));
+            return Err(self.tile_error(DtedTileError::Outside {
+                longitude: longitude_deg,
+                latitude: latitude_deg,
+                origin_longitude: self.index.min_longitude_deg,
+                origin_latitude: self.index.min_latitude_deg,
+            }));
         }
 
         let lat_count = self.index.lat_count as usize;
         let lon_count = self.index.lon_count as usize;
-        let latitude_index = terrain::nearest_posting_index(
+        let latitude_index = terrain::nearest_posting_index::<DtedTileError>(
             latitude_deg - self.index.min_latitude_deg,
             lat_count - 1,
         )
-        .map_err(Error::Parse)?;
-        let longitude_index = terrain::nearest_posting_index(
+        .map_err(|error| self.tile_error(error))?;
+        let longitude_index = terrain::nearest_posting_index::<DtedTileError>(
             longitude_deg - self.index.min_longitude_deg,
             lon_count - 1,
         )
-        .map_err(Error::Parse)?;
+        .map_err(|error| self.tile_error(error))?;
         self.posting(bytes, longitude_index, latitude_index)
+    }
+
+    /// A lookup failure in this tile as the crate's typed terrain error.
+    fn tile_error(&self, error: DtedTileError) -> Error {
+        Error::TerrainTile {
+            lat_index: self.index.lat_index,
+            lon_index: self.index.lon_index,
+            error: Box::new(error),
+        }
     }
 
     /// Stored posting `(longitude_index, latitude_index)`, or
@@ -593,9 +615,10 @@ impl MmapTile {
         let lat_count = self.index.lat_count as usize;
         let lon_count = self.index.lon_count as usize;
         if latitude_index >= lat_count || longitude_index >= lon_count {
-            return Err(Error::Parse(format!(
-                "posting index out of bounds lon={longitude_index} lat={latitude_index}"
-            )));
+            return Err(self.tile_error(DtedTileError::PostingIndexOutOfBounds {
+                longitude_index,
+                latitude_index,
+            }));
         }
 
         let sample_start =
@@ -1322,8 +1345,9 @@ fn pending_tile_from_dted_path(
     path: &Path,
     expected_id: Option<TerrainTileId>,
 ) -> core::result::Result<PendingTile, TerrainStoreError> {
-    let tile = DtedTile::from_path(path).map_err(|reason| TerrainStoreError::Parse {
-        reason: format!("{}: {reason}", path.display()),
+    let tile = DtedTile::from_path(path).map_err(|error| TerrainStoreError::Tile {
+        path: path.to_path_buf(),
+        error: Box::new(error),
     })?;
     if !tile.horizontal_datum().is_wgs84_compatible() {
         return Err(TerrainStoreError::NonWgs84Tile {
@@ -1333,8 +1357,9 @@ fn pending_tile_from_dted_path(
     }
     let decoded = tile
         .decoded_postings_lon_major()
-        .map_err(|reason| TerrainStoreError::Parse {
-            reason: format!("{}: {reason}", path.display()),
+        .map_err(|error| TerrainStoreError::Tile {
+            path: path.to_path_buf(),
+            error: Box::new(error),
         })?;
     let mut data = Vec::with_capacity(decoded.len() * 2);
     for posting in decoded {
@@ -1902,5 +1927,62 @@ mod wire_width_tests {
             ),
         }
         assert_eq!(wire_usize(4146, "total length"), Ok(4146));
+    }
+}
+
+#[cfg(test)]
+mod lookup_error_tests {
+    use super::{MmapTile, TerrainStoreTileIndex, VerticalDatum};
+    use crate::terrain::DtedTileError;
+    use crate::Error;
+
+    fn tile() -> MmapTile {
+        MmapTile {
+            index: TerrainStoreTileIndex {
+                lat_index: 36,
+                lon_index: -107,
+                min_longitude_deg: -107.0,
+                min_latitude_deg: 36.0,
+                max_longitude_deg: -106.0,
+                max_latitude_deg: 37.0,
+                lon_count: 2,
+                lat_count: 2,
+                data_offset: 0,
+                data_len: 8,
+                checksum64: 0,
+                vertical_datum: VerticalDatum::Egm96MslOrthometric,
+            },
+        }
+    }
+
+    /// A lookup outside the tile or past its postings is the typed tile error
+    /// the raw DTED reader gives, with the tile id.
+    #[test]
+    fn a_lookup_the_tile_cannot_answer_is_a_typed_tile_error() {
+        let tile = tile();
+        assert_eq!(
+            tile.get_elevation(&[0; 8], -105.5, 36.5),
+            Err(Error::TerrainTile {
+                lat_index: 36,
+                lon_index: -107,
+                error: Box::new(DtedTileError::Outside {
+                    longitude: -105.5,
+                    latitude: 36.5,
+                    origin_longitude: -107.0,
+                    origin_latitude: 36.0,
+                }),
+            })
+        );
+        assert_eq!(
+            tile.posting(&[0; 8], 2, 0),
+            Err(Error::TerrainTile {
+                lat_index: 36,
+                lon_index: -107,
+                error: Box::new(DtedTileError::PostingIndexOutOfBounds {
+                    longitude_index: 2,
+                    latitude_index: 0,
+                }),
+            })
+        );
     }
 }
