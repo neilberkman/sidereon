@@ -370,21 +370,21 @@ fn msm4_gps_round_trip() {
     let satellites = vec![
         MsmSatellite {
             id: 3,
-            rough_range_ms: 75,
+            rough_range_ms: Some(75),
             rough_range_mod1: 512,
             extended_info: None,
             rough_phase_range_rate_m_s: None,
         },
         MsmSatellite {
             id: 14,
-            rough_range_ms: 80,
+            rough_range_ms: Some(80),
             rough_range_mod1: 1000,
             extended_info: None,
             rough_phase_range_rate_m_s: None,
         },
         MsmSatellite {
             id: 22,
-            rough_range_ms: 255,
+            rough_range_ms: Some(255),
             rough_range_mod1: 0,
             extended_info: None,
             rough_phase_range_rate_m_s: None,
@@ -395,31 +395,31 @@ fn msm4_gps_round_trip() {
         MsmSignal {
             satellite_id: 3,
             signal_id: 2,
-            fine_pseudorange: -4000,
-            fine_phase_range: 100_000,
-            lock_time_indicator: 9,
-            half_cycle_ambiguity: false,
-            cnr: 45,
+            fine_pseudorange: Some(-4000),
+            fine_phase_range: Some(100_000),
+            lock_time_indicator: Some(9),
+            half_cycle_ambiguity: Some(false),
+            cnr: Some(45),
             fine_phase_range_rate: None,
         },
         MsmSignal {
             satellite_id: 3,
             signal_id: 15,
-            fine_pseudorange: 4000,
-            fine_phase_range: -100_000,
-            lock_time_indicator: 3,
-            half_cycle_ambiguity: true,
-            cnr: 38,
+            fine_pseudorange: Some(4000),
+            fine_phase_range: Some(-100_000),
+            lock_time_indicator: Some(3),
+            half_cycle_ambiguity: Some(true),
+            cnr: Some(38),
             fine_phase_range_rate: None,
         },
         MsmSignal {
             satellite_id: 14,
             signal_id: 2,
-            fine_pseudorange: 16,
-            fine_phase_range: -7,
-            lock_time_indicator: 15,
-            half_cycle_ambiguity: false,
-            cnr: 50,
+            fine_pseudorange: Some(16),
+            fine_phase_range: Some(-7),
+            lock_time_indicator: Some(15),
+            half_cycle_ambiguity: Some(false),
+            cnr: Some(50),
             fine_phase_range_rate: None,
         },
     ];
@@ -446,7 +446,7 @@ fn msm4_gps_round_trip() {
 fn msm_encode_refuses_satellite_and_signal_lists_its_masks_cannot_state() {
     let satellite = |id| MsmSatellite {
         id,
-        rough_range_ms: 70,
+        rough_range_ms: Some(70),
         rough_range_mod1: 256,
         extended_info: None,
         rough_phase_range_rate_m_s: None,
@@ -454,11 +454,11 @@ fn msm_encode_refuses_satellite_and_signal_lists_its_masks_cannot_state() {
     let signal = |satellite_id, signal_id| MsmSignal {
         satellite_id,
         signal_id,
-        fine_pseudorange: 16,
-        fine_phase_range: -7,
-        lock_time_indicator: 15,
-        half_cycle_ambiguity: false,
-        cnr: 50,
+        fine_pseudorange: Some(16),
+        fine_phase_range: Some(-7),
+        lock_time_indicator: Some(15),
+        half_cycle_ambiguity: Some(false),
+        cnr: Some(50),
         fine_phase_range_rate: None,
     };
     let message = |satellites: Vec<MsmSatellite>, signals: Vec<MsmSignal>| MsmMessage {
@@ -524,14 +524,14 @@ fn msm7_glonass_round_trip_with_extended_info() {
     let satellites = vec![
         MsmSatellite {
             id: 1,
-            rough_range_ms: 70,
+            rough_range_ms: Some(70),
             rough_range_mod1: 256,
             extended_info: Some(8),
             rough_phase_range_rate_m_s: Some(-1500),
         },
         MsmSatellite {
             id: 9,
-            rough_range_ms: 90,
+            rough_range_ms: Some(90),
             rough_range_mod1: 900,
             extended_info: Some(2),
             rough_phase_range_rate_m_s: Some(3000),
@@ -541,21 +541,21 @@ fn msm7_glonass_round_trip_with_extended_info() {
         MsmSignal {
             satellite_id: 1,
             signal_id: 2,
-            fine_pseudorange: -500_000,
-            fine_phase_range: 8_000_000,
-            lock_time_indicator: 700,
-            half_cycle_ambiguity: false,
-            cnr: 800,
+            fine_pseudorange: Some(-500_000),
+            fine_phase_range: Some(8_000_000),
+            lock_time_indicator: Some(700),
+            half_cycle_ambiguity: Some(false),
+            cnr: Some(800),
             fine_phase_range_rate: Some(-12_000),
         },
         MsmSignal {
             satellite_id: 9,
             signal_id: 2,
-            fine_pseudorange: 500_000,
-            fine_phase_range: -8_000_000,
-            lock_time_indicator: 1,
-            half_cycle_ambiguity: true,
-            cnr: 640,
+            fine_pseudorange: Some(500_000),
+            fine_phase_range: Some(-8_000_000),
+            lock_time_indicator: Some(1),
+            half_cycle_ambiguity: Some(true),
+            cnr: Some(640),
             fine_phase_range_rate: Some(16_000),
         },
     ];
@@ -578,8 +578,17 @@ fn msm7_glonass_round_trip_with_extended_info() {
 fn msm_kind_maps_constellation_and_type() {
     use crate::id::GnssSystem::*;
     let cases = [
+        (1071, Gps, MsmKind::Msm1),
+        (1072, Gps, MsmKind::Msm2),
+        (1073, Gps, MsmKind::Msm3),
         (1074, Gps, MsmKind::Msm4),
+        (1075, Gps, MsmKind::Msm5),
+        (1076, Gps, MsmKind::Msm6),
         (1077, Gps, MsmKind::Msm7),
+        (1105, Sbas, MsmKind::Msm5),
+        (1113, Qzss, MsmKind::Msm3),
+        (1131, Navic, MsmKind::Msm1),
+        (1136, Navic, MsmKind::Msm6),
         (1084, Glonass, MsmKind::Msm4),
         (1087, Glonass, MsmKind::Msm7),
         (1094, Galileo, MsmKind::Msm4),
@@ -615,22 +624,16 @@ fn lli_msm(
     lock_time_indicator: u16,
     half_cycle_ambiguity: bool,
 ) -> MsmMessage {
-    let message_number = match (system, kind) {
-        (crate::id::GnssSystem::Gps, MsmKind::Msm4) => 1074,
-        (crate::id::GnssSystem::Gps, MsmKind::Msm7) => 1077,
-        (crate::id::GnssSystem::Glonass, MsmKind::Msm4) => 1084,
-        (crate::id::GnssSystem::Glonass, MsmKind::Msm7) => 1087,
-        (crate::id::GnssSystem::Galileo, MsmKind::Msm4) => 1094,
-        (crate::id::GnssSystem::Galileo, MsmKind::Msm7) => 1097,
-        (crate::id::GnssSystem::Sbas, MsmKind::Msm4) => 1104,
-        (crate::id::GnssSystem::Sbas, MsmKind::Msm7) => 1107,
-        (crate::id::GnssSystem::Qzss, MsmKind::Msm4) => 1114,
-        (crate::id::GnssSystem::Qzss, MsmKind::Msm7) => 1117,
-        (crate::id::GnssSystem::BeiDou, MsmKind::Msm4) => 1124,
-        (crate::id::GnssSystem::BeiDou, MsmKind::Msm7) => 1127,
-        (crate::id::GnssSystem::Navic, MsmKind::Msm4) => 1134,
-        (crate::id::GnssSystem::Navic, MsmKind::Msm7) => 1137,
+    let group: u16 = match system {
+        crate::id::GnssSystem::Gps => 0,
+        crate::id::GnssSystem::Glonass => 1,
+        crate::id::GnssSystem::Galileo => 2,
+        crate::id::GnssSystem::Sbas => 3,
+        crate::id::GnssSystem::Qzss => 4,
+        crate::id::GnssSystem::BeiDou => 5,
+        crate::id::GnssSystem::Navic => 6,
     };
+    let message_number = 1070 + 10 * group + u16::from(kind.number());
     let mut header = msm_header();
     header.epoch_time = epoch_time;
     MsmMessage {
@@ -641,7 +644,7 @@ fn lli_msm(
         signal_mask: 1u32 << (32 - u32::from(signal_id)),
         satellites: vec![MsmSatellite {
             id: satellite_id,
-            rough_range_ms: 75,
+            rough_range_ms: Some(75),
             rough_range_mod1: 512,
             extended_info: (kind == MsmKind::Msm7).then_some(0),
             rough_phase_range_rate_m_s: (kind == MsmKind::Msm7).then_some(0),
@@ -649,11 +652,11 @@ fn lli_msm(
         signals: vec![MsmSignal {
             satellite_id,
             signal_id,
-            fine_pseudorange: 0,
-            fine_phase_range: 0,
-            lock_time_indicator,
-            half_cycle_ambiguity,
-            cnr: 40,
+            fine_pseudorange: Some(0),
+            fine_phase_range: Some(0),
+            lock_time_indicator: Some(lock_time_indicator),
+            half_cycle_ambiguity: Some(half_cycle_ambiguity),
+            cnr: Some(40),
             fine_phase_range_rate: (kind == MsmKind::Msm7).then_some(0),
         }],
         trailing_bits: Vec::new(),
@@ -679,11 +682,11 @@ fn msm_lock_time_tables_and_signal_helpers_are_pinned() {
     let signal = MsmSignal {
         satellite_id: 1,
         signal_id: 2,
-        fine_pseudorange: 0,
-        fine_phase_range: 0,
-        lock_time_indicator: 6,
-        half_cycle_ambiguity: false,
-        cnr: 0,
+        fine_pseudorange: Some(0),
+        fine_phase_range: Some(0),
+        lock_time_indicator: Some(6),
+        half_cycle_ambiguity: Some(false),
+        cnr: Some(0),
         fine_phase_range_rate: None,
     };
     assert_eq!(signal.minimum_lock_time_ms(MsmKind::Msm4), Some(1024));
@@ -1388,14 +1391,14 @@ fn build_msm4_from_scratch_round_trips() {
     let satellites = vec![
         MsmSatellite {
             id: 3,
-            rough_range_ms: 75,
+            rough_range_ms: Some(75),
             rough_range_mod1: 512,
             extended_info: None,
             rough_phase_range_rate_m_s: None,
         },
         MsmSatellite {
             id: 14,
-            rough_range_ms: 80,
+            rough_range_ms: Some(80),
             rough_range_mod1: 1000,
             extended_info: None,
             rough_phase_range_rate_m_s: None,
@@ -1405,21 +1408,21 @@ fn build_msm4_from_scratch_round_trips() {
         MsmSignal {
             satellite_id: 3,
             signal_id: 2,
-            fine_pseudorange: -4000,
-            fine_phase_range: 100_000,
-            lock_time_indicator: 9,
-            half_cycle_ambiguity: false,
-            cnr: 45,
+            fine_pseudorange: Some(-4000),
+            fine_phase_range: Some(100_000),
+            lock_time_indicator: Some(9),
+            half_cycle_ambiguity: Some(false),
+            cnr: Some(45),
             fine_phase_range_rate: None,
         },
         MsmSignal {
             satellite_id: 14,
             signal_id: 2,
-            fine_pseudorange: 16,
-            fine_phase_range: -7,
-            lock_time_indicator: 15,
-            half_cycle_ambiguity: true,
-            cnr: 50,
+            fine_pseudorange: Some(16),
+            fine_phase_range: Some(-7),
+            lock_time_indicator: Some(15),
+            half_cycle_ambiguity: Some(true),
+            cnr: Some(50),
             fine_phase_range_rate: None,
         },
     ];
@@ -1444,7 +1447,7 @@ fn build_msm4_from_scratch_round_trips() {
 fn build_msm7_from_scratch_round_trips() {
     let satellites = vec![MsmSatellite {
         id: 1,
-        rough_range_ms: 70,
+        rough_range_ms: Some(70),
         rough_range_mod1: 256,
         extended_info: Some(8),
         rough_phase_range_rate_m_s: Some(-1500),
@@ -1452,11 +1455,11 @@ fn build_msm7_from_scratch_round_trips() {
     let signals = vec![MsmSignal {
         satellite_id: 1,
         signal_id: 2,
-        fine_pseudorange: -500_000,
-        fine_phase_range: 8_000_000,
-        lock_time_indicator: 700,
-        half_cycle_ambiguity: false,
-        cnr: 800,
+        fine_pseudorange: Some(-500_000),
+        fine_phase_range: Some(8_000_000),
+        lock_time_indicator: Some(700),
+        half_cycle_ambiguity: Some(false),
+        cnr: Some(800),
         fine_phase_range_rate: Some(-12_000),
     }];
     let message = MsmMessage {
@@ -1481,14 +1484,14 @@ fn msm7_absent_phase_range_rate_distinguished_from_zero() {
     let satellites = vec![
         MsmSatellite {
             id: 1,
-            rough_range_ms: 70,
+            rough_range_ms: Some(70),
             rough_range_mod1: 256,
             extended_info: Some(0),
             rough_phase_range_rate_m_s: None,
         },
         MsmSatellite {
             id: 2,
-            rough_range_ms: 72,
+            rough_range_ms: Some(72),
             rough_range_mod1: 512,
             extended_info: Some(0),
             rough_phase_range_rate_m_s: Some(0),
@@ -1498,21 +1501,21 @@ fn msm7_absent_phase_range_rate_distinguished_from_zero() {
         MsmSignal {
             satellite_id: 1,
             signal_id: 1,
-            fine_pseudorange: 100,
-            fine_phase_range: 200,
-            lock_time_indicator: 50,
-            half_cycle_ambiguity: false,
-            cnr: 400,
+            fine_pseudorange: Some(100),
+            fine_phase_range: Some(200),
+            lock_time_indicator: Some(50),
+            half_cycle_ambiguity: Some(false),
+            cnr: Some(400),
             fine_phase_range_rate: None,
         },
         MsmSignal {
             satellite_id: 2,
             signal_id: 1,
-            fine_pseudorange: 300,
-            fine_phase_range: 400,
-            lock_time_indicator: 60,
-            half_cycle_ambiguity: false,
-            cnr: 450,
+            fine_pseudorange: Some(300),
+            fine_phase_range: Some(400),
+            lock_time_indicator: Some(60),
+            half_cycle_ambiguity: Some(false),
+            cnr: Some(450),
             fine_phase_range_rate: Some(0),
         },
     ];
@@ -2611,7 +2614,7 @@ fn trailing_bits_after_the_last_field_are_a_departure() {
 fn msm4_satellite(id: u8) -> MsmSatellite {
     MsmSatellite {
         id,
-        rough_range_ms: 70,
+        rough_range_ms: Some(70),
         rough_range_mod1: 256,
         extended_info: None,
         rough_phase_range_rate_m_s: None,
@@ -2622,11 +2625,11 @@ fn msm4_signal(satellite_id: u8, signal_id: u8) -> MsmSignal {
     MsmSignal {
         satellite_id,
         signal_id,
-        fine_pseudorange: 16,
-        fine_phase_range: -7,
-        lock_time_indicator: 15,
-        half_cycle_ambiguity: false,
-        cnr: 50,
+        fine_pseudorange: Some(16),
+        fine_phase_range: Some(-7),
+        lock_time_indicator: Some(15),
+        half_cycle_ambiguity: Some(false),
+        cnr: Some(50),
         fine_phase_range_rate: None,
     }
 }
@@ -2740,29 +2743,29 @@ fn msm_encode_refuses_values_it_would_truncate_fill_or_drop() {
     );
     refused(
         &|m| m.satellites[0].extended_info = Some(1),
-        "holds extended info",
+        "extended info is given, and MSM4 does not carry it",
     );
     refused(
         &|m| m.satellites[0].rough_phase_range_rate_m_s = Some(1),
-        "holds a rough phase-range rate",
+        "rough phase-range rate is given, and MSM4 does not carry it",
     );
     refused(
         &|m| m.signals[0].fine_phase_range_rate = Some(1),
-        "holds a fine phase-range rate",
+        "fine phase-range rate is given, and MSM4 does not carry it",
     );
     refused(
-        &|m| m.signals[0].fine_pseudorange = 1 << 14,
+        &|m| m.signals[0].fine_pseudorange = Some(1 << 14),
         "fine pseudorange 16384",
     );
     refused(
-        &|m| m.signals[0].fine_phase_range = -(1 << 21) - 1,
+        &|m| m.signals[0].fine_phase_range = Some(-(1 << 21) - 1),
         "fine phase range",
     );
     refused(
-        &|m| m.signals[0].lock_time_indicator = 16,
+        &|m| m.signals[0].lock_time_indicator = Some(16),
         "lock-time indicator 16",
     );
-    refused(&|m| m.signals[0].cnr = 64, "CNR 64");
+    refused(&|m| m.signals[0].cnr = Some(64), "CNR 64");
 
     // MSM7: extended info is carried and must be given; `Some` of an invalid
     // value is the spelling of `None` and is refused.
@@ -2777,7 +2780,7 @@ fn msm_encode_refuses_values_it_would_truncate_fill_or_drop() {
         .encode()
         .unwrap_err()
         .to_string()
-        .contains("has no extended info"));
+        .contains("extended info is not given, and MSM7 carries it"));
     let mut wide = msm7.clone();
     wide.satellites[0].extended_info = Some(16);
     assert!(wide
@@ -2800,7 +2803,7 @@ fn msm_encode_refuses_values_it_would_truncate_fill_or_drop() {
         .to_string()
         .contains("invalid value"));
     let mut cnr = msm7.clone();
-    cnr.signals[0].cnr = 1024;
+    cnr.signals[0].cnr = Some(1024);
     assert!(cnr.encode().unwrap_err().to_string().contains("CNR 1024"));
     let mut prr = msm7;
     prr.signals[0].fine_phase_range_rate = Some(i16::MAX);
@@ -2815,9 +2818,9 @@ fn msm_encode_refuses_values_it_would_truncate_fill_or_drop() {
 #[test]
 fn msm_invalid_values_round_trip_as_transmitted() {
     let mut message = msm4(vec![msm4_satellite(3)], vec![msm4_signal(3, 2)]);
-    message.satellites[0].rough_range_ms = MSM_ROUGH_RANGE_INVALID;
-    message.signals[0].fine_pseudorange = MSM4_FINE_PSEUDORANGE_INVALID;
-    message.signals[0].fine_phase_range = MSM4_FINE_PHASE_RANGE_INVALID;
+    message.satellites[0].rough_range_ms = Some(MSM_ROUGH_RANGE_INVALID);
+    message.signals[0].fine_pseudorange = Some(MSM4_FINE_PSEUDORANGE_INVALID);
+    message.signals[0].fine_phase_range = Some(MSM4_FINE_PHASE_RANGE_INVALID);
     let body = message.encode().unwrap();
     assert_eq!(MsmMessage::decode(&body).unwrap(), message);
 
@@ -2825,8 +2828,8 @@ fn msm_invalid_values_round_trip_as_transmitted() {
     msm7.message_number = 1077;
     msm7.kind = MsmKind::Msm7;
     msm7.satellites[0].extended_info = Some(0);
-    msm7.signals[0].fine_pseudorange = MSM7_FINE_PSEUDORANGE_INVALID;
-    msm7.signals[0].fine_phase_range = MSM7_FINE_PHASE_RANGE_INVALID;
+    msm7.signals[0].fine_pseudorange = Some(MSM7_FINE_PSEUDORANGE_INVALID);
+    msm7.signals[0].fine_phase_range = Some(MSM7_FINE_PHASE_RANGE_INVALID);
     let body = msm7.encode().unwrap();
     assert_eq!(MsmMessage::decode(&body).unwrap(), msm7);
 }
@@ -3247,4 +3250,236 @@ fn ephemeris_conversion_refusals_are_typed() {
         refusal(spare.to_broadcast_record()),
         RtcmConversionError::SisaNoPrediction
     );
+}
+
+/// An MSM message of `kind` for `system` with two satellites and two signals,
+/// every carried field set to a distinct value and every field the type does
+/// not carry `None`.
+fn msm_of_kind(system: crate::id::GnssSystem, kind: MsmKind) -> MsmMessage {
+    let group: u16 = match system {
+        crate::id::GnssSystem::Gps => 0,
+        crate::id::GnssSystem::Glonass => 1,
+        crate::id::GnssSystem::Galileo => 2,
+        crate::id::GnssSystem::Sbas => 3,
+        crate::id::GnssSystem::Qzss => 4,
+        crate::id::GnssSystem::BeiDou => 5,
+        crate::id::GnssSystem::Navic => 6,
+    };
+    let rate = kind.carries_phase_range_rate();
+    let phase = kind.carries_phase_range();
+    let extended = kind.is_extended_resolution();
+    let satellites: Vec<_> = [(4u8, 71u8, 300u16, 9u8, -512i16), (17, 80, 1023, 13, 777)]
+        .into_iter()
+        .map(|(id, ms, mod1, ext, prr)| MsmSatellite {
+            id,
+            rough_range_ms: kind.carries_rough_range_ms().then_some(ms),
+            rough_range_mod1: mod1,
+            extended_info: rate.then_some(ext),
+            rough_phase_range_rate_m_s: rate.then_some(prr),
+        })
+        .collect();
+    let signals: Vec<_> = [(4u8, 2u8, 1i32), (4, 15, -2), (17, 2, 3)]
+        .into_iter()
+        .map(|(satellite_id, signal_id, k)| MsmSignal {
+            satellite_id,
+            signal_id,
+            fine_pseudorange: kind
+                .carries_pseudorange()
+                .then_some(k * (if extended { 100_000 } else { 5_000 })),
+            fine_phase_range: phase.then_some(-k * (if extended { 2_000_000 } else { 500_000 })),
+            lock_time_indicator: phase
+                .then_some((if extended { 600 } else { 11 }) + k.unsigned_abs() as u16),
+            half_cycle_ambiguity: phase.then_some(k > 1),
+            cnr: kind
+                .carries_cnr()
+                .then_some((if extended { 700 } else { 40 }) + k.unsigned_abs() as u16),
+            fine_phase_range_rate: rate.then_some(k as i16 * 1_000),
+        })
+        .collect();
+    MsmMessage {
+        message_number: 1070 + 10 * group + u16::from(kind.number()),
+        system,
+        kind,
+        header: msm_header(),
+        signal_mask: msm_signal_mask(&signals),
+        satellites,
+        signals,
+        trailing_bits: Vec::new(),
+    }
+}
+
+/// Every MSM type of every system round-trips, and its body holds exactly the
+/// fields RTCM 10403.3 Tables 3.5-78 to 3.5-99 give it: the 169-bit header and
+/// masks, the cell mask, then per satellite and per cell the widths of its
+/// type. MSM1..MSM3 have 10 satellite bits (DF398); MSM4 and MSM6 18
+/// (DF397, DF398); MSM5 and MSM7 36 (DF397, DF419, DF398, DF399). Per cell:
+/// MSM1 15, MSM2 27, MSM3 42, MSM4 48, MSM5 63, MSM6 65, MSM7 80.
+#[test]
+fn every_msm_type_round_trips_with_its_field_widths() {
+    use crate::id::GnssSystem::*;
+    let kinds: [(MsmKind, usize, usize); 7] = [
+        (MsmKind::Msm1, 10, 15),
+        (MsmKind::Msm2, 10, 27),
+        (MsmKind::Msm3, 10, 42),
+        (MsmKind::Msm4, 18, 48),
+        (MsmKind::Msm5, 36, 63),
+        (MsmKind::Msm6, 18, 65),
+        (MsmKind::Msm7, 36, 80),
+    ];
+    for system in [Gps, Glonass, Galileo, Sbas, Qzss, BeiDou, Navic] {
+        for (kind, sat_bits, cell_bits) in kinds {
+            let message = msm_of_kind(system, kind);
+            let body = message.encode().unwrap();
+            // Header 12+12+30+1+3+7+2+2+1+3, satellite mask 64, signal mask
+            // 32, cell mask 2 satellites x 2 signals.
+            let bits = 169 + 4 + 2 * sat_bits + 3 * cell_bits;
+            assert_eq!(body.len(), bits.div_ceil(8), "{system:?} {kind:?}");
+            let decoded = MsmMessage::decode(&body).unwrap();
+            assert_eq!(decoded, message, "{system:?} {kind:?}");
+            assert_eq!(
+                Message::decode(&body).unwrap(),
+                Message::Msm(message),
+                "{system:?} {kind:?}"
+            );
+        }
+    }
+    // The last digits 8, 9 and 0 are not MSM types.
+    for number in [1078u16, 1079, 1080, 1138] {
+        let mut w = BitWriter::new();
+        w.push_u(u64::from(number), 12);
+        w.push_u(0, 12);
+        assert!(matches!(
+            Message::decode(&w.into_bytes()).unwrap(),
+            Message::Unsupported(_)
+        ));
+    }
+}
+
+/// A field an MSM type does not carry is refused when given, and a field it
+/// carries is refused when missing, rather than written or left out.
+#[test]
+fn msm_types_refuse_fields_they_do_not_carry() {
+    let gps = crate::id::GnssSystem::Gps;
+    let refusal = |message: &MsmMessage| match message.encode() {
+        Err(Error::RtcmEncode(refusal)) => *refusal,
+        other => panic!("expected an RTCM encode refusal, got {other:?}"),
+    };
+    let mut msm1 = msm_of_kind(gps, MsmKind::Msm1);
+    msm1.signals[0].fine_phase_range = Some(0);
+    assert_eq!(
+        refusal(&msm1),
+        RtcmEncodeError::FieldPresence {
+            message_number: 1071,
+            record: RtcmRecordKind::Msm {
+                system: gps,
+                kind: MsmKind::Msm1,
+            },
+            field: "fine phase range",
+            carried: false,
+        }
+    );
+
+    let mut msm2 = msm_of_kind(gps, MsmKind::Msm2);
+    msm2.signals[0].fine_pseudorange = Some(0);
+    assert_eq!(
+        refusal(&msm2),
+        RtcmEncodeError::FieldPresence {
+            message_number: 1072,
+            record: RtcmRecordKind::Msm {
+                system: gps,
+                kind: MsmKind::Msm2,
+            },
+            field: "fine pseudorange",
+            carried: false,
+        }
+    );
+
+    let mut msm3 = msm_of_kind(gps, MsmKind::Msm3);
+    msm3.satellites[0].rough_range_ms = Some(70);
+    assert_eq!(
+        refusal(&msm3),
+        RtcmEncodeError::FieldPresence {
+            message_number: 1073,
+            record: RtcmRecordKind::Msm {
+                system: gps,
+                kind: MsmKind::Msm3,
+            },
+            field: "rough range",
+            carried: false,
+        }
+    );
+
+    let mut msm5 = msm_of_kind(gps, MsmKind::Msm5);
+    msm5.signals[1].cnr = None;
+    assert_eq!(
+        refusal(&msm5),
+        RtcmEncodeError::FieldPresence {
+            message_number: 1075,
+            record: RtcmRecordKind::Msm {
+                system: gps,
+                kind: MsmKind::Msm5,
+            },
+            field: "CNR",
+            carried: true,
+        }
+    );
+
+    let mut msm6 = msm_of_kind(gps, MsmKind::Msm6);
+    msm6.signals[0].half_cycle_ambiguity = None;
+    assert_eq!(
+        refusal(&msm6),
+        RtcmEncodeError::FieldPresence {
+            message_number: 1076,
+            record: RtcmRecordKind::Msm {
+                system: gps,
+                kind: MsmKind::Msm6,
+            },
+            field: "half-cycle ambiguity indicator",
+            carried: true,
+        }
+    );
+    let mut msm6 = msm_of_kind(gps, MsmKind::Msm6);
+    msm6.signals[0].lock_time_indicator = Some(1024);
+    assert!(matches!(
+        refusal(&msm6),
+        RtcmEncodeError::FieldOutOfRange {
+            message_number: 1076,
+            value: 1024,
+            width: 10,
+            encoding: RtcmFieldEncoding::Unsigned,
+            ..
+        }
+    ));
+
+    // MSM5 carries the phase-range rates, whose invalid values read as None.
+    let mut msm5 = msm_of_kind(gps, MsmKind::Msm5);
+    msm5.satellites[0].rough_phase_range_rate_m_s = None;
+    msm5.signals[0].fine_phase_range_rate = None;
+    let body = msm5.encode().unwrap();
+    assert_eq!(MsmMessage::decode(&body).unwrap(), msm5);
+}
+
+/// MSM1 carries no lock-time or half-cycle indicator, so the lock tracker
+/// derives no LLI from it and keeps no state for it; MSM2, MSM3 and MSM5 use
+/// DF402 and MSM6 DF407.
+#[test]
+fn lock_tracker_reads_each_msm_type_by_its_lock_field() {
+    let gps = crate::id::GnssSystem::Gps;
+    let mut tracker = LockTimeTracker::new();
+    assert!(tracker.observe(&msm_of_kind(gps, MsmKind::Msm1)).is_empty());
+    for kind in [MsmKind::Msm2, MsmKind::Msm3, MsmKind::Msm5, MsmKind::Msm6] {
+        let message = msm_of_kind(gps, kind);
+        let cells = LockTimeTracker::new().observe(&message);
+        assert_eq!(cells.len(), message.signals.len(), "{kind:?}");
+        for (cell, signal) in cells.iter().zip(&message.signals) {
+            assert_eq!(
+                cell.min_lock_time_ms,
+                minimum_lock_time_ms(kind, signal.lock_time_indicator.unwrap()),
+                "{kind:?}"
+            );
+        }
+    }
+    assert_eq!(minimum_lock_time_ms(MsmKind::Msm1, 0), None);
+    assert_eq!(minimum_lock_time_ms(MsmKind::Msm3, 6), Some(1024));
+    assert_eq!(minimum_lock_time_ms(MsmKind::Msm6, 6), Some(6));
 }

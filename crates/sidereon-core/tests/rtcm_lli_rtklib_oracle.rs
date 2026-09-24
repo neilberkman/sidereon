@@ -384,7 +384,15 @@ fn build_our_observations(
             continue;
         };
 
-        for (signal, cell) in msm.signals.iter().zip(cells) {
+        // The tracker gives one cell per signal carrying a lock-time indicator.
+        let phase_signals = msm
+            .signals
+            .iter()
+            .filter(|signal| signal.lock_time_indicator.is_some());
+        for (signal, cell) in phase_signals.zip(cells) {
+            let Some(lock_time_indicator) = signal.lock_time_indicator else {
+                continue;
+            };
             let Some(suffix) = rtcm::msm_signal_rinex_code(msm.system, signal.signal_id) else {
                 continue;
             };
@@ -395,8 +403,9 @@ fn build_our_observations(
 
             let state_key = (msm.system, signal.satellite_id, signal.signal_id);
             let previous = raw_states.get(&state_key).copied();
-            let min_lock_time_ms = rtcm::minimum_lock_time_ms(msm.kind, signal.lock_time_indicator);
-            let divergence = classify_divergence(previous, msm, signal, min_lock_time_ms);
+            let min_lock_time_ms = rtcm::minimum_lock_time_ms(msm.kind, lock_time_indicator);
+            let divergence =
+                classify_divergence(previous, msm, lock_time_indicator, min_lock_time_ms);
             if previous.is_none_or(|state| {
                 rtcm::msm_epoch_dt_ms(msm.system, state.raw_epoch_time, msm.header.epoch_time) != 0
             }) {
@@ -404,7 +413,7 @@ fn build_our_observations(
                     state_key,
                     RawState {
                         raw_epoch_time: msm.header.epoch_time,
-                        raw_lock_indicator: signal.lock_time_indicator,
+                        raw_lock_indicator: lock_time_indicator,
                     },
                 );
             }
@@ -439,11 +448,11 @@ fn build_our_observations(
 fn classify_divergence(
     previous: Option<RawState>,
     msm: &rtcm::MsmMessage,
-    signal: &rtcm::MsmSignal,
+    lock_time_indicator: u16,
     min_lock_time_ms: Option<u32>,
 ) -> Divergence {
     let Some(previous) = previous else {
-        return if signal.lock_time_indicator == 0 {
+        return if lock_time_indicator == 0 {
             Divergence::D1
         } else {
             Divergence::None
@@ -453,8 +462,8 @@ fn classify_divergence(
         return Divergence::None;
     };
     let dt = rtcm::msm_epoch_dt_ms(msm.system, previous.raw_epoch_time, msm.header.epoch_time);
-    let no_raw_decrease = signal.lock_time_indicator >= previous.raw_lock_indicator;
-    let bucket_zero_stall = signal.lock_time_indicator == 0 && previous.raw_lock_indicator == 0;
+    let no_raw_decrease = lock_time_indicator >= previous.raw_lock_indicator;
+    let bucket_zero_stall = lock_time_indicator == 0 && previous.raw_lock_indicator == 0;
     if no_raw_decrease && !bucket_zero_stall && u64::from(current_min_lock_ms) < dt {
         Divergence::D2
     } else {

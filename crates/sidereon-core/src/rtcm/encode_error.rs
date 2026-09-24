@@ -317,7 +317,12 @@ pub enum RtcmEncodeError {
 
 fn msm_label(kind: MsmKind) -> &'static str {
     match kind {
+        MsmKind::Msm1 => "MSM1",
+        MsmKind::Msm2 => "MSM2",
+        MsmKind::Msm3 => "MSM3",
         MsmKind::Msm4 => "MSM4",
+        MsmKind::Msm5 => "MSM5",
+        MsmKind::Msm6 => "MSM6",
         MsmKind::Msm7 => "MSM7",
     }
 }

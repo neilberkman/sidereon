@@ -1,7 +1,8 @@
 //! RINEX loss-of-lock indicator derivation from decoded RTCM MSM fields.
 //!
-//! RTCM MSM messages carry raw phase lock-time indicators (DF402 for MSM4,
-//! DF407 for MSM7) plus the half-cycle ambiguity flag (DF420). RINEX stores
+//! RTCM MSM messages carry raw phase lock-time indicators (DF402 for MSM2
+//! through MSM5, DF407 for MSM6 and MSM7) plus the half-cycle ambiguity flag
+//! (DF420). MSM1 carries neither, having no phase observation. RINEX stores
 //! that state as an LLI digit attached to phase observations: bit 0 means loss
 //! of lock is possible, and bit 1 means half-cycle ambiguity is possible. This
 //! module keeps that mapping as a small sans-I/O layer over decoded MSM IR.
@@ -68,8 +69,8 @@ struct CellState {
 
 /// Tracks per-signal MSM lock history and derives RINEX LLI values.
 ///
-/// State is keyed by `(constellation, satellite id, signal id)`, so MSM4 and
-/// MSM7 observations of the same signal share continuity while different
+/// State is keyed by `(constellation, satellite id, signal id)`, so the MSM
+/// types of one signal share continuity while different
 /// constellations never collide. Call [`Self::reset`] when a stream reconnects
 /// or the caller intentionally starts a new continuity arc.
 #[derive(Clone, Debug, Default)]
@@ -83,9 +84,12 @@ impl LockTimeTracker {
         Self::default()
     }
 
-    /// Derive LLI for every signal cell in `message` and advance tracker state.
+    /// Derive LLI for every signal cell in `message` that carries a phase
+    /// range and advance tracker state.
     ///
-    /// Output order matches `message.signals`. The tracker stores raw MSM epoch
+    /// Output order matches `message.signals`. An MSM1 message carries no
+    /// phase range, lock-time indicator or half-cycle indicator, so it gives no
+    /// cells and leaves the tracker as it was. The tracker stores raw MSM epoch
     /// fields and computes elapsed time pairwise, including GPS-week rollover
     /// and GLONASS day-of-week handling. If the same cell repeats at the same
     /// epoch, LLI is derived but the stored state is not advanced, so a
@@ -93,6 +97,9 @@ impl LockTimeTracker {
     pub fn observe(&mut self, message: &MsmMessage) -> Vec<CellLli> {
         let mut out = Vec::with_capacity(message.signals.len());
         for signal in &message.signals {
+            let Some(half_cycle_ambiguity) = signal.half_cycle_ambiguity else {
+                continue;
+            };
             let key = CellKey {
                 system: message.system,
                 satellite_id: signal.satellite_id,
@@ -107,7 +114,7 @@ impl LockTimeTracker {
                     message.header.epoch_time,
                 ),
             });
-            let lli = derive_lli(previous, min_lock_time_ms, signal.half_cycle_ambiguity);
+            let lli = derive_lli(previous, min_lock_time_ms, half_cycle_ambiguity);
             out.push(CellLli {
                 satellite_id: signal.satellite_id,
                 signal_id: signal.signal_id,
@@ -135,13 +142,17 @@ impl LockTimeTracker {
 
 /// Minimum continuous-lock time encoded by an MSM lock-time indicator.
 ///
-/// MSM4 uses DF402, a 4-bit coarse bucket. MSM7 uses DF407, a 10-bit extended
-/// bucket. Returns `None` for indicators outside the field's bit range and for
-/// DF407 reserved values 705 through 1023.
+/// MSM2 through MSM5 use DF402, a 4-bit coarse bucket. MSM6 and MSM7 use
+/// DF407, a 10-bit extended bucket. MSM1 carries no lock-time indicator and
+/// gives `None`. Returns `None` for indicators outside the field's bit range and
+/// for DF407 reserved values 705 through 1023.
 pub fn minimum_lock_time_ms(kind: MsmKind, indicator: u16) -> Option<u32> {
     match kind {
-        MsmKind::Msm4 => df402_minimum_lock_time_ms(indicator),
-        MsmKind::Msm7 => df407_minimum_lock_time_ms(indicator),
+        MsmKind::Msm1 => None,
+        MsmKind::Msm2 | MsmKind::Msm3 | MsmKind::Msm4 | MsmKind::Msm5 => {
+            df402_minimum_lock_time_ms(indicator)
+        }
+        MsmKind::Msm6 | MsmKind::Msm7 => df407_minimum_lock_time_ms(indicator),
     }
 }
 

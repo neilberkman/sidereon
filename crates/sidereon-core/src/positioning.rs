@@ -511,13 +511,17 @@ where
             .collect::<Vec<_>>();
 
         // Each signal is read with the MSM type and satellite data of the
-        // message that carries it: an epoch may mix MSM4 and MSM7, whose fine
-        // pseudoranges have different scales and invalid values.
+        // message that carries it: an epoch may mix MSM types, whose fine
+        // pseudoranges have different scales and invalid values. MSM1, MSM2
+        // and MSM3 carry no whole-millisecond rough range, so their ranges are
+        // known only modulo one millisecond and give no pseudorange, as RTKLIB
+        // `decode_msm0` gives none; their cells are not candidates.
         let mut by_satellite = BTreeMap::<u8, Vec<RtcmCell<'_>>>::new();
         for message in group_indexes
             .iter()
             .copied()
             .filter_map(|index| messages.get(index))
+            .filter(|message| message.kind.carries_rough_range_ms())
         {
             for signal in &message.signals {
                 let Some(satellite) = message
@@ -602,11 +606,11 @@ struct RtcmCell<'a> {
 
 /// The pseudorange of the selected cell, or `None` when its rough range or its
 /// fine pseudorange is the field's invalid value (DF397 255; DF400 `-2^14` in
-/// MSM4, DF405 `-2^19` in MSM7), as RTKLIB `decode_msm4` and `decode_msm7`
-/// leave such a pseudorange unset. A whole-millisecond rough range of 0 also
-/// gives `None`: RTKLIB `decode_msm4`..`decode_msm7` leave the satellite range
-/// at zero, add no modulo-1-ms remainder to it, and `save_msm_obs` stores a
-/// pseudorange only when that range is nonzero.
+/// MSM4 and MSM5, DF405 `-2^19` in MSM6 and MSM7), as RTKLIB `decode_msm4`
+/// through `decode_msm7` leave such a pseudorange unset. A whole-millisecond
+/// rough range of 0 also gives `None`: RTKLIB `decode_msm4`..`decode_msm7`
+/// leave the satellite range at zero, add no modulo-1-ms remainder to it, and
+/// `save_msm_obs` stores a pseudorange only when that range is nonzero.
 fn rtcm_msm_pseudorange_m(
     system: GnssSystem,
     cells: &[RtcmCell<'_>],
@@ -614,25 +618,22 @@ fn rtcm_msm_pseudorange_m(
 ) -> Option<f64> {
     let cell = select_rtcm_signal(system, cells, preferred_codes)?;
     let satellite = cell.satellite;
-    if satellite.rough_range_ms == rtcm::MSM_ROUGH_RANGE_INVALID || satellite.rough_range_ms == 0 {
+    let rough_range_ms = satellite.rough_range_ms?;
+    if rough_range_ms == rtcm::MSM_ROUGH_RANGE_INVALID || rough_range_ms == 0 {
         return None;
     }
-    let rough_ms =
-        f64::from(satellite.rough_range_ms) + f64::from(satellite.rough_range_mod1) / 1024.0;
-    let fine = cell.signal.fine_pseudorange;
-    let fine_ms = match cell.kind {
-        MsmKind::Msm4 => {
-            if fine == rtcm::MSM4_FINE_PSEUDORANGE_INVALID {
-                return None;
-            }
-            f64::from(fine) / 2_f64.powi(24)
+    let rough_ms = f64::from(rough_range_ms) + f64::from(satellite.rough_range_mod1) / 1024.0;
+    let fine = cell.signal.fine_pseudorange?;
+    let fine_ms = if cell.kind.is_extended_resolution() {
+        if fine == rtcm::MSM7_FINE_PSEUDORANGE_INVALID {
+            return None;
         }
-        MsmKind::Msm7 => {
-            if fine == rtcm::MSM7_FINE_PSEUDORANGE_INVALID {
-                return None;
-            }
-            f64::from(fine) / 2_f64.powi(29)
+        f64::from(fine) / 2_f64.powi(29)
+    } else {
+        if fine == rtcm::MSM4_FINE_PSEUDORANGE_INVALID {
+            return None;
         }
+        f64::from(fine) / 2_f64.powi(24)
     };
     Some((rough_ms + fine_ms) * 1.0e-3 * C_M_S)
 }
@@ -894,7 +895,7 @@ mod tests {
             signal_mask: 0xC000_0000,
             satellites: vec![MsmSatellite {
                 id: 1,
-                rough_range_ms: 100,
+                rough_range_ms: Some(100),
                 rough_range_mod1: 512,
                 extended_info: None,
                 rough_phase_range_rate_m_s: None,
@@ -903,21 +904,21 @@ mod tests {
                 MsmSignal {
                     satellite_id: 1,
                     signal_id: 1,
-                    fine_pseudorange: 1 << 24,
-                    lock_time_indicator: 0,
-                    half_cycle_ambiguity: false,
-                    cnr: 0,
-                    fine_phase_range: 0,
+                    fine_pseudorange: Some(1 << 24),
+                    lock_time_indicator: Some(0),
+                    half_cycle_ambiguity: Some(false),
+                    cnr: Some(0),
+                    fine_phase_range: Some(0),
                     fine_phase_range_rate: None,
                 },
                 MsmSignal {
                     satellite_id: 1,
                     signal_id: 2,
-                    fine_pseudorange: 0,
-                    lock_time_indicator: 0,
-                    half_cycle_ambiguity: false,
-                    cnr: 0,
-                    fine_phase_range: 0,
+                    fine_pseudorange: Some(0),
+                    lock_time_indicator: Some(0),
+                    half_cycle_ambiguity: Some(false),
+                    cnr: Some(0),
+                    fine_phase_range: Some(0),
                     fine_phase_range_rate: None,
                 },
             ],
@@ -956,25 +957,24 @@ mod tests {
     }
 
     fn single_signal_msm(kind: MsmKind, satellite_id: u8, fine_pseudorange: i32) -> MsmMessage {
-        let (message_number, extended_info, fine_phase_range_rate) = match kind {
-            MsmKind::Msm4 => (1074, None, None),
-            MsmKind::Msm7 => (1077, Some(0), Some(0)),
-        };
+        let rate = kind.carries_phase_range_rate();
+        let phase = kind.carries_phase_range();
         let mut message = synthetic_rtcm_messages().remove(0);
-        message.message_number = message_number;
+        message.message_number = 1070 + u16::from(kind.number());
         message.kind = kind;
         message.signal_mask = 1 << (32 - 2);
         message.satellites[0].id = satellite_id;
-        message.satellites[0].extended_info = extended_info;
+        message.satellites[0].rough_range_ms = kind.carries_rough_range_ms().then_some(100);
+        message.satellites[0].extended_info = rate.then_some(0);
         message.signals = vec![MsmSignal {
             satellite_id,
             signal_id: 2,
-            fine_pseudorange,
-            lock_time_indicator: 0,
-            half_cycle_ambiguity: false,
-            cnr: 0,
-            fine_phase_range: 0,
-            fine_phase_range_rate,
+            fine_pseudorange: kind.carries_pseudorange().then_some(fine_pseudorange),
+            lock_time_indicator: phase.then_some(0),
+            half_cycle_ambiguity: phase.then_some(false),
+            cnr: kind.carries_cnr().then_some(0),
+            fine_phase_range: phase.then_some(0),
+            fine_phase_range_rate: rate.then_some(0),
         }];
         message
     }
@@ -1014,8 +1014,62 @@ mod tests {
     #[test]
     fn msm_zero_rough_range_yields_no_observation() {
         let mut zero = single_signal_msm(MsmKind::Msm7, 1, 0);
-        zero.satellites[0].rough_range_ms = 0;
+        zero.satellites[0].rough_range_ms = Some(0);
         assert!(solve_inputs(&[zero]).is_empty());
+    }
+
+    /// MSM5 fine pseudoranges have the MSM4 scale and invalid value (DF400),
+    /// MSM6 ones the MSM7 scale and invalid value (DF405), as RTKLIB
+    /// `decode_msm5` and `decode_msm6` read them.
+    #[test]
+    fn msm5_and_msm6_pseudoranges_have_the_msm4_and_msm7_scales() {
+        let rough_ms = 100.0 + 512.0 / 1024.0;
+        for (kind, fine_ms, invalid) in [
+            (
+                MsmKind::Msm5,
+                2_f64.powi(-11),
+                crate::rtcm::MSM4_FINE_PSEUDORANGE_INVALID,
+            ),
+            (
+                MsmKind::Msm6,
+                2_f64.powi(-16),
+                crate::rtcm::MSM7_FINE_PSEUDORANGE_INVALID,
+            ),
+        ] {
+            let inputs = solve_inputs(&[single_signal_msm(kind, 1, 1 << 13)]);
+            let observation = &inputs[0].inputs.observations[0];
+            let expected = (rough_ms + fine_ms) * 1.0e-3 * C_M_S;
+            assert!(
+                (observation.pseudorange_m - expected).abs() < 1.0e-6,
+                "{kind:?}: {} vs {expected}",
+                observation.pseudorange_m
+            );
+            assert!(
+                solve_inputs(&[single_signal_msm(kind, 1, invalid)]).is_empty(),
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// MSM1, MSM2 and MSM3 carry no whole-millisecond rough range, so they give
+    /// no pseudorange (RTKLIB `decode_msm0` gives none). An MSM3 cell of the
+    /// signal an MSM4 message also carries at that epoch does not take the
+    /// MSM4 cell's place.
+    #[test]
+    fn msm1_to_msm3_give_no_pseudorange_and_do_not_displace_msm4() {
+        for kind in [MsmKind::Msm1, MsmKind::Msm2, MsmKind::Msm3] {
+            assert!(
+                solve_inputs(&[single_signal_msm(kind, 1, 0)]).is_empty(),
+                "{kind:?}"
+            );
+        }
+        let msm3 = single_signal_msm(MsmKind::Msm3, 1, 0);
+        let msm4 = single_signal_msm(MsmKind::Msm4, 1, 1 << 13);
+        let inputs = solve_inputs(&[msm3, msm4]);
+        let observations = &inputs[0].inputs.observations;
+        assert_eq!(observations.len(), 1);
+        let expected = (100.0 + 512.0 / 1024.0 + 2_f64.powi(-11)) * 1.0e-3 * C_M_S;
+        assert!((observations[0].pseudorange_m - expected).abs() < 1.0e-6);
     }
 
     /// Each signal is scaled by the MSM type of the message that carries it.

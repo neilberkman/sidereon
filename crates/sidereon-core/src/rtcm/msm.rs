@@ -1,22 +1,29 @@
-//! RTCM 3 Multiple Signal Message (MSM) observations, types MSM4 and MSM7.
+//! RTCM 3 Multiple Signal Messages (MSM), types MSM1 through MSM7.
 //!
 //! The MSM family carries multi-constellation, multi-signal pseudorange,
 //! carrier-phase, phase-range-rate, lock-time, and carrier-to-noise observations
-//! in one compact message (RTCM 10403.3, Section 3.5). This module decodes and
-//! re-encodes the two highest-value members:
+//! in one compact message (RTCM 10403.3, Section 3.5). The seven types share a
+//! header and a satellite/signal/cell mask layout and differ in the fields they
+//! carry:
 //!
-//!   * **MSM4** - full pseudoranges and phase ranges with the standard
-//!     resolution (message numbers 1074 / 1084 / 1094 / 1124, and the SBAS /
-//!     QZSS / NavIC siblings).
-//!   * **MSM7** - full pseudoranges, phase ranges, phase-range-rates, and
-//!     extended resolution (message numbers 1077 / 1087 / 1097 / 1127, and the
-//!     siblings).
+//! | Type | Satellite data                      | Signal data                                  |
+//! |------|-------------------------------------|----------------------------------------------|
+//! | MSM1 | DF398                               | DF400                                        |
+//! | MSM2 | DF398                               | DF401, DF402, DF420                          |
+//! | MSM3 | DF398                               | DF400, DF401, DF402, DF420                   |
+//! | MSM4 | DF397, DF398                        | DF400, DF401, DF402, DF420, DF403            |
+//! | MSM5 | DF397, DF419, DF398, DF399          | DF400, DF401, DF402, DF420, DF403, DF404     |
+//! | MSM6 | DF397, DF398                        | DF405, DF406, DF407, DF420, DF408            |
+//! | MSM7 | DF397, DF419, DF398, DF399          | DF405, DF406, DF407, DF420, DF408, DF404     |
+//!
+//! MSM1, MSM2 and MSM3 carry no whole-millisecond rough range (DF397): their
+//! ranges are known modulo one millisecond. MSM6 and MSM7 carry the
+//! extended-resolution fields.
 //!
 //! The message number alone fixes both the constellation and the MSM type via
 //! the regular RTCM numbering (`107x` GPS, `108x` GLONASS, `109x` Galileo, `110x`
 //! SBAS, `111x` QZSS, `112x` BeiDou, `113x` NavIC; the trailing digit is the MSM
-//! type). Other MSM types (1, 2, 3, 5, 6) are left to the caller as
-//! [`super::Message::Unsupported`].
+//! type).
 //!
 //! ## Field-major packing
 //!
@@ -31,8 +38,9 @@
 //! Field values are stored as the raw transmitted integers (the
 //! `DFxxx`-numbered quantities), not pre-scaled engineering units, so the IR is
 //! an exact, loss-free image of the wire bits and `decode` -> `encode`
-//! round-trips byte-for-byte. Each accessor documents the standard scale factor
-//! so a consumer can recover meters, milliseconds, or dB-Hz when needed.
+//! round-trips byte-for-byte. A field the message's type does not carry is
+//! `None`. Each accessor documents the standard scale factor so a consumer can
+//! recover meters, milliseconds, or dB-Hz when needed.
 
 use crate::error::{Error, Result};
 use crate::id::GnssSystem;
@@ -53,29 +61,137 @@ pub const MSM_ROUGH_PHASE_RANGE_RATE_INVALID: i16 = -(1 << 13);
 /// DF404 fine phase-range-rate invalid / not available sentinel (-16384 = -(1 << 14)).
 pub const MSM_FINE_PHASE_RANGE_RATE_INVALID: i16 = -(1 << 14);
 
-/// DF400 (MSM4) fine pseudorange invalid value, `-2^14`.
+/// DF400 fine pseudorange invalid value, `-2^14`, carried by MSM1, MSM3,
+/// MSM4 and MSM5.
 pub const MSM4_FINE_PSEUDORANGE_INVALID: i32 = -(1 << 14);
 
-/// DF401 (MSM4) fine phase range invalid value, `-2^21`.
+/// DF401 fine phase range invalid value, `-2^21`, carried by MSM2, MSM3, MSM4
+/// and MSM5.
 pub const MSM4_FINE_PHASE_RANGE_INVALID: i32 = -(1 << 21);
 
-/// DF405 (MSM7) fine pseudorange invalid value, `-2^19`.
+/// DF405 fine pseudorange invalid value, `-2^19`, carried by MSM6 and MSM7.
 pub const MSM7_FINE_PSEUDORANGE_INVALID: i32 = -(1 << 19);
 
-/// DF406 (MSM7) fine phase range invalid value, `-2^23`.
+/// DF406 fine phase range invalid value, `-2^23`, carried by MSM6 and MSM7.
 pub const MSM7_FINE_PHASE_RANGE_INVALID: i32 = -(1 << 23);
 
 /// Longest cell mask (DF396) RTCM 10403 allows, in bits.
 const MSM_MAX_CELLS: usize = 64;
 
-/// Which MSM variant a message is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Which MSM type a message is, from the last digit of its message number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MsmKind {
-    /// MSM4: full pseudorange + phase range, standard resolution.
+    /// MSM1: fine pseudorange (DF400); ranges modulo one millisecond.
+    Msm1,
+    /// MSM2: fine phase range, lock time and half-cycle indicator; ranges
+    /// modulo one millisecond.
+    Msm2,
+    /// MSM3: the MSM1 and MSM2 fields together; ranges modulo one millisecond.
+    Msm3,
+    /// MSM4: full pseudorange and phase range plus CNR, standard resolution.
     Msm4,
-    /// MSM7: full pseudorange + phase range + phase-range-rate, extended
-    /// resolution.
+    /// MSM5: MSM4 plus the phase-range rate, standard resolution.
+    Msm5,
+    /// MSM6: full pseudorange and phase range plus CNR, extended resolution.
+    Msm6,
+    /// MSM7: MSM6 plus the phase-range rate, extended resolution.
     Msm7,
+}
+
+impl MsmKind {
+    /// The MSM type number, `1..=7`: the last digit of the message number.
+    pub const fn number(self) -> u8 {
+        match self {
+            Self::Msm1 => 1,
+            Self::Msm2 => 2,
+            Self::Msm3 => 3,
+            Self::Msm4 => 4,
+            Self::Msm5 => 5,
+            Self::Msm6 => 6,
+            Self::Msm7 => 7,
+        }
+    }
+
+    /// The MSM type whose number is `number`, the last digit of an MSM
+    /// message number; `None` outside `1..=7`.
+    pub const fn from_number(number: u8) -> Option<Self> {
+        match number {
+            1 => Some(Self::Msm1),
+            2 => Some(Self::Msm2),
+            3 => Some(Self::Msm3),
+            4 => Some(Self::Msm4),
+            5 => Some(Self::Msm5),
+            6 => Some(Self::Msm6),
+            7 => Some(Self::Msm7),
+            _ => None,
+        }
+    }
+
+    /// Whether the satellite data carries the whole-millisecond rough range
+    /// (DF397): MSM4 through MSM7. Without it a range is known modulo one
+    /// millisecond.
+    pub const fn carries_rough_range_ms(self) -> bool {
+        matches!(self, Self::Msm4 | Self::Msm5 | Self::Msm6 | Self::Msm7)
+    }
+
+    /// Whether the message carries the extended satellite information (DF419)
+    /// and the rough and fine phase-range rates (DF399, DF404): MSM5 and MSM7.
+    pub const fn carries_phase_range_rate(self) -> bool {
+        matches!(self, Self::Msm5 | Self::Msm7)
+    }
+
+    /// Whether the signal data carries a fine pseudorange (DF400 or DF405):
+    /// every type but MSM2.
+    pub const fn carries_pseudorange(self) -> bool {
+        !matches!(self, Self::Msm2)
+    }
+
+    /// Whether the signal data carries a fine phase range, a lock-time
+    /// indicator and a half-cycle ambiguity indicator: every type but MSM1.
+    pub const fn carries_phase_range(self) -> bool {
+        !matches!(self, Self::Msm1)
+    }
+
+    /// Whether the signal data carries the carrier-to-noise ratio (DF403 or
+    /// DF408): MSM4 through MSM7.
+    pub const fn carries_cnr(self) -> bool {
+        self.carries_rough_range_ms()
+    }
+
+    /// Whether the signal fields have the extended resolution (DF405, DF406,
+    /// DF407, DF408): MSM6 and MSM7.
+    pub const fn is_extended_resolution(self) -> bool {
+        matches!(self, Self::Msm6 | Self::Msm7)
+    }
+
+    /// Widths of the fine pseudorange, fine phase range, lock-time indicator
+    /// and CNR fields.
+    const fn signal_widths(self) -> SignalWidths {
+        if self.is_extended_resolution() {
+            SignalWidths {
+                pseudorange: 20,
+                phase_range: 24,
+                lock_time: 10,
+                cnr: 10,
+            }
+        } else {
+            SignalWidths {
+                pseudorange: 15,
+                phase_range: 22,
+                lock_time: 4,
+                cnr: 6,
+            }
+        }
+    }
+}
+
+/// Signal-field widths of one MSM type.
+#[derive(Clone, Copy)]
+struct SignalWidths {
+    pseudorange: usize,
+    phase_range: usize,
+    lock_time: usize,
+    cnr: usize,
 }
 
 /// The MSM message header, common to every MSM type (RTCM 10403.3 Table 3.5-78).
@@ -109,66 +225,76 @@ pub struct MsmSatellite {
     /// Satellite identifier: the 1-based index of the set bit in the satellite
     /// mask (DF394). For most constellations this equals the PRN / slot number.
     pub id: u8,
-    /// Rough range, whole milliseconds (DF397). The value 255
+    /// Rough range, whole milliseconds (DF397), carried by MSM4 through MSM7
+    /// and `None` in MSM1, MSM2 and MSM3. The value 255
     /// ([`MSM_ROUGH_RANGE_INVALID`]) marks the satellite range as invalid.
-    pub rough_range_ms: u8,
+    pub rough_range_ms: Option<u8>,
     /// Rough range remainder, in units of 1/1024 ms (DF398, scale 2^-10 ms).
     pub rough_range_mod1: u16,
-    /// Extended satellite info (DF419), present only in MSM7. For GLONASS this
-    /// is the frequency channel number.
+    /// Extended satellite info (DF419), carried by MSM5 and MSM7. For GLONASS
+    /// this is the frequency channel number plus 7.
     pub extended_info: Option<u8>,
-    /// Rough phase-range-rate in whole m/s (DF399), present only in MSM7.
+    /// Rough phase-range-rate in whole m/s (DF399), carried by MSM5 and MSM7;
+    /// `None` also when the field holds its invalid value
+    /// ([`MSM_ROUGH_PHASE_RANGE_RATE_INVALID`]).
     pub rough_phase_range_rate_m_s: Option<i16>,
 }
 
 /// Per-cell signal data for one active (satellite, signal) pair.
+///
+/// A field the message's MSM type does not carry is `None`; see
+/// [`MsmKind`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MsmSignal {
     /// Owning satellite id (1-based satellite-mask index).
     pub satellite_id: u8,
     /// Signal id: the 1-based index of the set bit in the signal mask (DF395).
     pub signal_id: u8,
-    /// Fine pseudorange (DF400 for MSM4, scale 2^-24 ms; DF405 for MSM7, scale
-    /// 2^-29 ms). The invalid value is [`MSM4_FINE_PSEUDORANGE_INVALID`]
-    /// (`-2^14`) in MSM4 and [`MSM7_FINE_PSEUDORANGE_INVALID`] (`-2^19`) in
-    /// MSM7.
-    pub fine_pseudorange: i32,
-    /// Fine phase range (DF401 for MSM4, scale 2^-29 ms; DF406 for MSM7, scale
-    /// 2^-31 ms). The invalid value is [`MSM4_FINE_PHASE_RANGE_INVALID`]
-    /// (`-2^21`) in MSM4 and [`MSM7_FINE_PHASE_RANGE_INVALID`] (`-2^23`) in
-    /// MSM7.
-    pub fine_phase_range: i32,
-    /// Phase-range lock-time indicator (DF402, 4-bit, for MSM4; DF407, 10-bit,
-    /// for MSM7).
-    pub lock_time_indicator: u16,
-    /// Half-cycle ambiguity indicator (DF420).
-    pub half_cycle_ambiguity: bool,
-    /// Carrier-to-noise density ratio (DF403, 1 dB-Hz, for MSM4; DF408, scale
-    /// 2^-4 dB-Hz, for MSM7).
-    pub cnr: u16,
-    /// Fine phase-range-rate (DF404, scale 0.0001 m/s), present only in MSM7.
+    /// Fine pseudorange (DF400 in MSM1, MSM3, MSM4 and MSM5, scale 2^-24 ms;
+    /// DF405 in MSM6 and MSM7, scale 2^-29 ms); `None` in MSM2. The invalid
+    /// value is [`MSM4_FINE_PSEUDORANGE_INVALID`] (`-2^14`) for DF400 and
+    /// [`MSM7_FINE_PSEUDORANGE_INVALID`] (`-2^19`) for DF405.
+    pub fine_pseudorange: Option<i32>,
+    /// Fine phase range (DF401 in MSM2 through MSM5, scale 2^-29 ms; DF406 in
+    /// MSM6 and MSM7, scale 2^-31 ms); `None` in MSM1. The invalid value is
+    /// [`MSM4_FINE_PHASE_RANGE_INVALID`] (`-2^21`) for DF401 and
+    /// [`MSM7_FINE_PHASE_RANGE_INVALID`] (`-2^23`) for DF406.
+    pub fine_phase_range: Option<i32>,
+    /// Phase-range lock-time indicator (DF402, 4-bit, in MSM2 through MSM5;
+    /// DF407, 10-bit, in MSM6 and MSM7); `None` in MSM1.
+    pub lock_time_indicator: Option<u16>,
+    /// Half-cycle ambiguity indicator (DF420); `None` in MSM1.
+    pub half_cycle_ambiguity: Option<bool>,
+    /// Carrier-to-noise density ratio (DF403, 1 dB-Hz, in MSM4 and MSM5;
+    /// DF408, scale 2^-4 dB-Hz, in MSM6 and MSM7); `None` in MSM1, MSM2 and
+    /// MSM3.
+    pub cnr: Option<u16>,
+    /// Fine phase-range-rate (DF404, scale 0.0001 m/s), carried by MSM5 and
+    /// MSM7; `None` also when the field holds its invalid value
+    /// ([`MSM_FINE_PHASE_RANGE_RATE_INVALID`]).
     pub fine_phase_range_rate: Option<i16>,
 }
 
 impl MsmSignal {
     /// Minimum continuous-lock time encoded by this signal's lock indicator.
     ///
-    /// The caller supplies the owning message kind because MSM4 carries DF402
-    /// while MSM7 carries DF407. Returns `None` for values outside the
+    /// The caller supplies the owning message kind because MSM2 through MSM5
+    /// carry DF402 while MSM6 and MSM7 carry DF407. Returns `None` when the
+    /// signal carries no lock indicator (MSM1) and for values outside the
     /// indicator's defined range.
     pub fn minimum_lock_time_ms(&self, kind: MsmKind) -> Option<u32> {
-        super::lli::minimum_lock_time_ms(kind, self.lock_time_indicator)
+        super::lli::minimum_lock_time_ms(kind, self.lock_time_indicator?)
     }
 }
 
-/// A decoded MSM4 or MSM7 observation message.
+/// A decoded MSM1 through MSM7 observation message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MsmMessage {
     /// The message number (e.g. 1077).
     pub message_number: u16,
     /// The constellation, derived from the message number.
     pub system: GnssSystem,
-    /// The MSM variant (MSM4 or MSM7).
+    /// The MSM type, from the last digit of the message number.
     pub kind: MsmKind,
     /// Common MSM header.
     pub header: MsmHeader,
@@ -193,10 +319,11 @@ pub struct MsmMessage {
     pub trailing_bits: Vec<bool>,
 }
 
-/// Map an MSM message number to its constellation and (supported) MSM type.
+/// Map an MSM message number to its constellation and MSM type.
 ///
-/// Returns `None` for numbers outside the MSM range and for MSM types this
-/// module does not decode (1, 2, 3, 5, 6).
+/// Returns `None` for numbers outside the MSM ranges `1071..=1077`,
+/// `1081..=1087`, ..., `1131..=1137`: the last digit 8, 9 and 0 are not MSM
+/// types.
 pub(crate) fn msm_kind(message_number: u16) -> Option<(GnssSystem, MsmKind)> {
     if !(1071..=1137).contains(&message_number) {
         return None;
@@ -212,21 +339,17 @@ pub(crate) fn msm_kind(message_number: u16) -> Option<(GnssSystem, MsmKind)> {
         6 => GnssSystem::Navic,
         _ => return None,
     };
-    let kind = match message_number % 10 {
-        4 => MsmKind::Msm4,
-        7 => MsmKind::Msm7,
-        _ => return None,
-    };
+    let kind = MsmKind::from_number((message_number % 10) as u8)?;
     Some((system, kind))
 }
 
-/// True if `message_number` is an MSM type decoded by this module.
+/// True if `message_number` is an MSM message number.
 pub(crate) fn is_supported_msm(message_number: u16) -> bool {
     msm_kind(message_number).is_some()
 }
 
 impl MsmMessage {
-    /// Decode an MSM4 / MSM7 message body (without the transport frame) under
+    /// Decode an MSM body (without the transport frame) under
     /// [`RtcmPolicy::Strict`]: a cell mask over 64 bits and bits after the last
     /// field other than the zero byte alignment are refused.
     pub fn decode(body: &[u8]) -> Result<Self> {
@@ -240,11 +363,8 @@ impl MsmMessage {
 
     pub(crate) fn read(r: &mut BitReader<'_>, ctx: &mut DecodeContext) -> DecodeResult<Self> {
         let message_number = r.u(12)? as u16;
-        let (system, kind) = msm_kind(message_number).ok_or_else(|| {
-            Error::Parse(format!(
-                "message {message_number} is not a supported MSM4/MSM7 type"
-            ))
-        })?;
+        let (system, kind) = msm_kind(message_number)
+            .ok_or_else(|| Error::Parse(format!("message {message_number} is not an MSM type")))?;
 
         let header = MsmHeader {
             reference_station_id: r.u(12)? as u16,
@@ -279,33 +399,16 @@ impl MsmMessage {
         }
 
         // Satellite block (column-major).
-        let mut rough_range_ms = Vec::with_capacity(nsat);
-        for _ in 0..nsat {
-            rough_range_ms.push(r.u(8)? as u8);
-        }
-        let extended_info = if kind == MsmKind::Msm7 {
-            let mut v = Vec::with_capacity(nsat);
-            for _ in 0..nsat {
-                v.push(Some(r.u(4)? as u8));
-            }
-            v
-        } else {
-            vec![None; nsat]
-        };
-        let mut rough_range_mod1 = Vec::with_capacity(nsat);
-        for _ in 0..nsat {
-            rough_range_mod1.push(r.u(10)? as u16);
-        }
-        let rough_prr = if kind == MsmKind::Msm7 {
-            let mut v = Vec::with_capacity(nsat);
-            for _ in 0..nsat {
-                let raw = r.i(14)? as i16;
-                v.push((raw != MSM_ROUGH_PHASE_RANGE_RATE_INVALID).then_some(raw));
-            }
-            v
-        } else {
-            vec![None; nsat]
-        };
+        let rough_range_ms = read_if(r, kind.carries_rough_range_ms(), nsat, |rr| {
+            rr.u(8).map(|v| v as u8)
+        })?;
+        let extended_info = read_if(r, kind.carries_phase_range_rate(), nsat, |rr| {
+            rr.u(4).map(|v| v as u8)
+        })?;
+        let rough_range_mod1 = read_vec(r, nsat, |rr| rr.u(10).map(|v| v as u16))?;
+        let rough_prr = read_if(r, kind.carries_phase_range_rate(), nsat, |rr| {
+            rr.i(14).map(|v| v as i16)
+        })?;
 
         let satellites: Vec<MsmSatellite> = (0..nsat)
             .map(|s| MsmSatellite {
@@ -313,7 +416,8 @@ impl MsmMessage {
                 rough_range_ms: rough_range_ms[s],
                 rough_range_mod1: rough_range_mod1[s],
                 extended_info: extended_info[s],
-                rough_phase_range_rate_m_s: rough_prr[s],
+                rough_phase_range_rate_m_s: rough_prr[s]
+                    .filter(|&raw| raw != MSM_ROUGH_PHASE_RANGE_RATE_INVALID),
             })
             .collect();
 
@@ -322,55 +426,39 @@ impl MsmMessage {
         let ncell = cells.len();
 
         // Signal block (column-major over cells).
-        let signals = match kind {
-            MsmKind::Msm4 => {
-                let fine_pr = read_vec(r, ncell, |rr| rr.i(15).map(|v| v as i32))?;
-                let fine_ph = read_vec(r, ncell, |rr| rr.i(22).map(|v| v as i32))?;
-                let lock = read_vec(r, ncell, |rr| rr.u(4).map(|v| v as u16))?;
-                let half = read_vec(r, ncell, |rr| rr.flag())?;
-                let cnr = read_vec(r, ncell, |rr| rr.u(6).map(|v| v as u16))?;
-                cells
-                    .iter()
-                    .enumerate()
-                    .map(|(c, &(sat, sig))| MsmSignal {
-                        satellite_id: sat,
-                        signal_id: sig,
-                        fine_pseudorange: fine_pr[c],
-                        fine_phase_range: fine_ph[c],
-                        lock_time_indicator: lock[c],
-                        half_cycle_ambiguity: half[c],
-                        cnr: cnr[c],
-                        fine_phase_range_rate: None,
-                    })
-                    .collect()
-            }
-            MsmKind::Msm7 => {
-                let fine_pr = read_vec(r, ncell, |rr| rr.i(20).map(|v| v as i32))?;
-                let fine_ph = read_vec(r, ncell, |rr| rr.i(24).map(|v| v as i32))?;
-                let lock = read_vec(r, ncell, |rr| rr.u(10).map(|v| v as u16))?;
-                let half = read_vec(r, ncell, |rr| rr.flag())?;
-                let cnr = read_vec(r, ncell, |rr| rr.u(10).map(|v| v as u16))?;
-                let fine_prr = read_vec(r, ncell, |rr| rr.i(15).map(|v| v as i16))?;
-                cells
-                    .iter()
-                    .enumerate()
-                    .map(|(c, &(sat, sig))| {
-                        let prr = fine_prr[c];
-                        MsmSignal {
-                            satellite_id: sat,
-                            signal_id: sig,
-                            fine_pseudorange: fine_pr[c],
-                            fine_phase_range: fine_ph[c],
-                            lock_time_indicator: lock[c],
-                            half_cycle_ambiguity: half[c],
-                            cnr: cnr[c],
-                            fine_phase_range_rate: (prr != MSM_FINE_PHASE_RANGE_RATE_INVALID)
-                                .then_some(prr),
-                        }
-                    })
-                    .collect()
-            }
-        };
+        let widths = kind.signal_widths();
+        let phase = kind.carries_phase_range();
+        let fine_pr = read_if(r, kind.carries_pseudorange(), ncell, |rr| {
+            rr.i(widths.pseudorange).map(|v| v as i32)
+        })?;
+        let fine_ph = read_if(r, phase, ncell, |rr| {
+            rr.i(widths.phase_range).map(|v| v as i32)
+        })?;
+        let lock = read_if(r, phase, ncell, |rr| {
+            rr.u(widths.lock_time).map(|v| v as u16)
+        })?;
+        let half = read_if(r, phase, ncell, |rr| rr.flag())?;
+        let cnr = read_if(r, kind.carries_cnr(), ncell, |rr| {
+            rr.u(widths.cnr).map(|v| v as u16)
+        })?;
+        let fine_prr = read_if(r, kind.carries_phase_range_rate(), ncell, |rr| {
+            rr.i(15).map(|v| v as i16)
+        })?;
+        let signals = cells
+            .iter()
+            .enumerate()
+            .map(|(c, &(sat, sig))| MsmSignal {
+                satellite_id: sat,
+                signal_id: sig,
+                fine_pseudorange: fine_pr[c],
+                fine_phase_range: fine_ph[c],
+                lock_time_indicator: lock[c],
+                half_cycle_ambiguity: half[c],
+                cnr: cnr[c],
+                fine_phase_range_rate: fine_prr[c]
+                    .filter(|&raw| raw != MSM_FINE_PHASE_RANGE_RATE_INVALID),
+            })
+            .collect();
 
         Ok(Self {
             message_number,
@@ -399,9 +487,10 @@ impl MsmMessage {
     ///   outside `1..=32` or not set in [`Self::signal_mask`], or a signal
     ///   whose satellite is not in the satellite list;
     /// * a cell mask over 64 bits ([`RtcmDeparture::MsmCellMaskOver64`]);
-    /// * an MSM7 satellite without extended info, or an MSM4 satellite or
-    ///   signal holding extended info or a phase-range rate, which MSM4 does
-    ///   not carry;
+    /// * a field the message's MSM type carries held as `None`, or a field it
+    ///   does not carry held as `Some` (see [`MsmKind`]); the rough and fine
+    ///   phase-range rates, whose `None` is also the invalid value, are only
+    ///   refused as `Some` where the type does not carry them;
     /// * a phase-range rate of `Some` holding its field's invalid value, which
     ///   is how `None` is written and would be read back as `None`;
     /// * a value wider than its field.
@@ -499,19 +588,22 @@ impl MsmMessage {
         }
 
         // Satellite block, column-major, in the same sorted id order.
+        // `check_optional_fields` has refused a `None` the type carries and a
+        // `Some` it does not, so each `if let` below writes exactly the
+        // carried columns.
         let mut satellites: Vec<&MsmSatellite> = self.satellites.iter().collect();
         satellites.sort_unstable_by_key(|s| s.id);
         for s in &satellites {
-            w.u(
-                format_args!("satellite {} rough range", s.id),
-                u64::from(s.rough_range_ms),
-                8,
-            )?;
+            if let Some(ms) = s.rough_range_ms {
+                w.u(
+                    format_args!("satellite {} rough range", s.id),
+                    u64::from(ms),
+                    8,
+                )?;
+            }
         }
-        if self.kind == MsmKind::Msm7 {
-            for s in &satellites {
-                // `check_optional_fields` has refused an MSM7 satellite without it.
-                let ext = s.extended_info.unwrap_or_default();
+        for s in &satellites {
+            if let Some(ext) = s.extended_info {
                 w.u(
                     format_args!("satellite {} extended info", s.id),
                     u64::from(ext),
@@ -526,7 +618,7 @@ impl MsmMessage {
                 10,
             )?;
         }
-        if self.kind == MsmKind::Msm7 {
+        if self.kind.carries_phase_range_rate() {
             for s in &satellites {
                 let prr = s
                     .rough_phase_range_rate_m_s
@@ -540,57 +632,54 @@ impl MsmMessage {
         }
 
         // Signal block, column-major over the ordered cells.
-        let (pr_bits, ph_bits, lock_bits, cnr_bits) = match self.kind {
-            MsmKind::Msm4 => (15, 22, 4, 6),
-            MsmKind::Msm7 => (20, 24, 10, 10),
+        let widths = self.kind.signal_widths();
+        let cell_name = |s: &MsmSignal, field: &str| {
+            format!(
+                "satellite {} signal {} {field}",
+                s.satellite_id, s.signal_id
+            )
         };
         for s in &ordered {
-            w.i(
-                format_args!(
-                    "satellite {} signal {} fine pseudorange",
-                    s.satellite_id, s.signal_id
-                ),
-                i64::from(s.fine_pseudorange),
-                pr_bits,
-            )?;
+            if let Some(value) = s.fine_pseudorange {
+                w.i(
+                    cell_name(s, "fine pseudorange"),
+                    i64::from(value),
+                    widths.pseudorange,
+                )?;
+            }
         }
         for s in &ordered {
-            w.i(
-                format_args!(
-                    "satellite {} signal {} fine phase range",
-                    s.satellite_id, s.signal_id
-                ),
-                i64::from(s.fine_phase_range),
-                ph_bits,
-            )?;
+            if let Some(value) = s.fine_phase_range {
+                w.i(
+                    cell_name(s, "fine phase range"),
+                    i64::from(value),
+                    widths.phase_range,
+                )?;
+            }
         }
         for s in &ordered {
-            w.u(
-                format_args!(
-                    "satellite {} signal {} lock-time indicator",
-                    s.satellite_id, s.signal_id
-                ),
-                u64::from(s.lock_time_indicator),
-                lock_bits,
-            )?;
+            if let Some(value) = s.lock_time_indicator {
+                w.u(
+                    cell_name(s, "lock-time indicator"),
+                    u64::from(value),
+                    widths.lock_time,
+                )?;
+            }
         }
         for s in &ordered {
-            w.flag(s.half_cycle_ambiguity);
+            if let Some(half) = s.half_cycle_ambiguity {
+                w.flag(half);
+            }
         }
         for s in &ordered {
-            w.u(
-                format_args!("satellite {} signal {} CNR", s.satellite_id, s.signal_id),
-                u64::from(s.cnr),
-                cnr_bits,
-            )?;
+            if let Some(value) = s.cnr {
+                w.u(cell_name(s, "CNR"), u64::from(value), widths.cnr)?;
+            }
         }
-        if self.kind == MsmKind::Msm7 {
+        if self.kind.carries_phase_range_rate() {
             for s in &ordered {
                 w.i(
-                    format_args!(
-                        "satellite {} signal {} fine phase-range rate",
-                        s.satellite_id, s.signal_id
-                    ),
+                    cell_name(s, "fine phase-range rate"),
                     i64::from(
                         s.fine_phase_range_rate
                             .unwrap_or(MSM_FINE_PHASE_RANGE_RATE_INVALID),
@@ -660,14 +749,43 @@ impl MsmMessage {
     /// `None`).
     fn check_optional_fields(&self) -> Result<()> {
         let number = self.message_number;
-        let msm7 = self.kind == MsmKind::Msm7;
+        let kind = self.kind;
+        let record = RtcmRecordKind::Msm {
+            system: self.system,
+            kind,
+        };
+        let check = |field: &'static str, present: bool, carried: bool| -> Result<()> {
+            match (carried, present) {
+                (true, false) => Err(RtcmEncodeError::FieldPresence {
+                    message_number: number,
+                    record,
+                    field,
+                    carried: true,
+                }
+                .into()),
+                (false, true) => Err(RtcmEncodeError::FieldPresence {
+                    message_number: number,
+                    record,
+                    field,
+                    carried: false,
+                }
+                .into()),
+                _ => Ok(()),
+            }
+        };
+        let rate = kind.carries_phase_range_rate();
         for s in &self.satellites {
             let id = s.id;
-            match (msm7, s.extended_info.is_some()) {
+            check(
+                "rough range",
+                s.rough_range_ms.is_some(),
+                kind.carries_rough_range_ms(),
+            )?;
+            match (rate, s.extended_info.is_some()) {
                 (true, false) => {
                     return Err(RtcmEncodeError::MsmOptional {
                         message_number: number,
-                        kind: self.kind,
+                        kind,
                         satellite: id,
                         signal: None,
                         field: MsmOptionalField::ExtendedInfo,
@@ -678,7 +796,7 @@ impl MsmMessage {
                 (false, true) => {
                     return Err(RtcmEncodeError::MsmOptional {
                         message_number: number,
-                        kind: self.kind,
+                        kind,
                         satellite: id,
                         signal: None,
                         field: MsmOptionalField::ExtendedInfo,
@@ -689,10 +807,10 @@ impl MsmMessage {
                 _ => {}
             }
             match s.rough_phase_range_rate_m_s {
-                Some(_) if !msm7 => {
+                Some(_) if !rate => {
                     return Err(RtcmEncodeError::MsmOptional {
                         message_number: number,
-                        kind: self.kind,
+                        kind,
                         satellite: id,
                         signal: None,
                         field: MsmOptionalField::RoughPhaseRangeRate,
@@ -717,14 +835,34 @@ impl MsmMessage {
             }
         }
         for s in &self.signals {
-            let (sat, sig) = (s.satellite_id, s.signal_id);
+            check(
+                "fine pseudorange",
+                s.fine_pseudorange.is_some(),
+                kind.carries_pseudorange(),
+            )?;
+            check(
+                "fine phase range",
+                s.fine_phase_range.is_some(),
+                kind.carries_phase_range(),
+            )?;
+            check(
+                "lock-time indicator",
+                s.lock_time_indicator.is_some(),
+                kind.carries_phase_range(),
+            )?;
+            check(
+                "half-cycle ambiguity indicator",
+                s.half_cycle_ambiguity.is_some(),
+                kind.carries_phase_range(),
+            )?;
+            check("CNR", s.cnr.is_some(), kind.carries_cnr())?;
             match s.fine_phase_range_rate {
-                Some(_) if !msm7 => {
+                Some(_) if !rate => {
                     return Err(RtcmEncodeError::MsmOptional {
                         message_number: number,
-                        kind: self.kind,
-                        satellite: sat,
-                        signal: Some(sig),
+                        kind,
+                        satellite: s.satellite_id,
+                        signal: Some(s.signal_id),
                         field: MsmOptionalField::FinePhaseRangeRate,
                         problem: MsmOptionalProblem::NotCarried,
                     }
@@ -733,9 +871,9 @@ impl MsmMessage {
                 Some(MSM_FINE_PHASE_RANGE_RATE_INVALID) => {
                     return Err(RtcmEncodeError::MsmOptional {
                         message_number: number,
-                        kind: self.kind,
-                        satellite: sat,
-                        signal: Some(sig),
+                        kind,
+                        satellite: s.satellite_id,
+                        signal: Some(s.signal_id),
                         field: MsmOptionalField::FinePhaseRangeRate,
                         problem: MsmOptionalProblem::InvalidValue(i64::from(
                             MSM_FINE_PHASE_RANGE_RATE_INVALID,
@@ -765,6 +903,21 @@ pub fn msm_signal_mask(signals: &[MsmSignal]) -> u32 {
 const MSM_SATELLITE_MASK_BITS: u8 = 64;
 /// Signal mask width (DF395): signal ids run `1..=32`.
 const MSM_SIGNAL_MASK_BITS: u8 = 32;
+
+/// Read `n` values with `f` when `carried`, or give `n` `None`s when the
+/// message's type does not carry the field.
+fn read_if<T>(
+    r: &mut BitReader<'_>,
+    carried: bool,
+    n: usize,
+    f: impl FnMut(&mut BitReader<'_>) -> std::result::Result<T, OutOfInput>,
+) -> std::result::Result<Vec<Option<T>>, OutOfInput> {
+    if carried {
+        Ok(read_vec(r, n, f)?.into_iter().map(Some).collect())
+    } else {
+        Ok(std::iter::repeat_with(|| None).take(n).collect())
+    }
+}
 
 /// Read `n` values with `f`, collecting into a vector.
 fn read_vec<T>(
