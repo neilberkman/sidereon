@@ -217,6 +217,10 @@ impl<'a, E: EphemerisSource + ?Sized> RinexSppSource<'a, E> {
 }
 
 impl<E: EphemerisSource + ?Sized> EphemerisSource for RinexSppSource<'_, E> {
+    fn ssr_correction_source(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        self.ephemeris.ssr_correction_source()
+    }
+
     fn position_clock_at_j2000_s(
         &self,
         sat: GnssSatelliteId,

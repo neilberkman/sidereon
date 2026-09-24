@@ -1166,6 +1166,10 @@ struct ObservableClockSource<'a> {
 }
 
 impl EphemerisSource for ObservableClockSource<'_> {
+    fn ssr_correction_source(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        self.source.ssr_corrections()
+    }
+
     fn position_clock_at_j2000_s(
         &self,
         sat: crate::GnssSatelliteId,

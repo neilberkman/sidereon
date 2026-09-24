@@ -231,6 +231,15 @@ pub trait EphemerisSource {
                 degraded: state.degraded,
             }))
     }
+
+    /// The SSR corrections this source applies, which a solve asks why the source has no
+    /// state for a satellite ([`crate::ssr::SsrCorrectionSource::correction_size_refusal`]).
+    /// `None`, the default, for a source that applies no SSR corrections; the SSR-corrected
+    /// sources return themselves, and a source that wraps another returns the inner
+    /// source's.
+    fn ssr_correction_source(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        None
+    }
 }
 
 /// A view of an ephemeris source that reads it through its fallible methods
@@ -301,6 +310,10 @@ impl<S: ?Sized> Ut1Tracked<'_, S> {
 }
 
 impl<S: EphemerisSource + ?Sized> EphemerisSource for Ut1Tracked<'_, S> {
+    fn ssr_correction_source(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        self.inner.ssr_correction_source()
+    }
+
     fn position_clock_at_j2000_s(
         &self,
         sat: GnssSatelliteId,
@@ -742,6 +755,10 @@ impl<'a> TransmitStateMemo<'a> {
 }
 
 impl EphemerisSource for TransmitStateMemo<'_> {
+    fn ssr_correction_source(&self) -> Option<&dyn crate::ssr::SsrCorrectionSource> {
+        self.source.ssr_correction_source()
+    }
+
     fn position_clock_at_j2000_s(
         &self,
         sat: GnssSatelliteId,

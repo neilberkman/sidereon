@@ -8,7 +8,7 @@ use crate::estimation::recipe::NormalRecipe;
 use crate::observables::ObservableEphemerisSource;
 
 use super::rows::{
-    build_rows, exclude_unresolved_ssr_bias_observations_with_clock,
+    build_rows, exclude_unresolved_ssr_bias_observations_with_clock, leave_out_ssr_size_refusals,
     leave_out_unplaced_observations, AmbiguityBinding, PppRowError,
 };
 use super::{
@@ -410,8 +410,16 @@ pub fn correct_kinematic_state(
     validate_measurement_config(config)?;
     let float_state = float_state_from_kinematic(state);
     let corrections = &config.corrections;
-    let (placeable, unplaced_observations) =
+    let (placeable, mut unplaced_observations) =
         leave_out_unplaced_observations(std::slice::from_ref(epoch), epoch_index);
+    let (placeable, refused) = leave_out_ssr_size_refusals(
+        source,
+        &placeable,
+        epoch_index,
+        corrections.satellite_clock.as_ref(),
+    )
+    .map_err(kinematic_error_from_float)?;
+    unplaced_observations.extend(refused);
     let (retained, ssr_bias_exclusions) = exclude_unresolved_ssr_bias_observations_with_clock(
         source,
         &placeable,

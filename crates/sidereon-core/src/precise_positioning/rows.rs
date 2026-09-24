@@ -111,6 +111,65 @@ pub(super) fn leave_out_unplaced_observations(
     (retained, unplaced)
 }
 
+/// Leave out, before the solve, every observation of `epochs` (caller epoch indices from
+/// `first_epoch_index`) whose satellite the source refuses at the transmission epoch the
+/// observation places, because an SSR orbit or clock correction there is larger than
+/// RTKLIB `satpos_ssr` applies ([`crate::ssr::SsrCorrectionSource::correction_size_refusal`]),
+/// returning the retained epochs and one [`UnplacedObservation`] per observation left out,
+/// with the size of the corrections. RTKLIB marks the satellite unhealthy and `pppos`
+/// leaves it out of the update.
+///
+/// The transmission epoch is the one the rows place from the observation's code
+/// ([`super::observation_transmit_epoch_j2000_s`]), and the broadcast record is selected
+/// at the reception epoch, as the rows read the state. An observation whose epoch cannot
+/// be placed is kept, and the rows refuse it as before; a source that applies no SSR
+/// corrections leaves every observation in. A UT1 refusal placing the epoch is returned
+/// as [`FloatSolveError::Ut1OutsideCoverage`].
+pub(super) fn leave_out_ssr_size_refusals(
+    source: &dyn ObservableEphemerisSource,
+    epochs: &[FloatEpoch],
+    first_epoch_index: usize,
+    satellite_clock: Option<&SatelliteClockCorrections>,
+) -> Result<(Vec<FloatEpoch>, Vec<UnplacedObservation>), FloatSolveError> {
+    let Some(ssr) = source.ssr_corrections() else {
+        return Ok((epochs.to_vec(), Vec::new()));
+    };
+    let mut unplaced = Vec::new();
+    let mut retained = Vec::with_capacity(epochs.len());
+    for (offset, epoch) in epochs.iter().enumerate() {
+        let mut epoch_out = epoch.clone();
+        let mut observations = Vec::with_capacity(epoch.observations.len());
+        for obs in &epoch.observations {
+            let t_tx = match super::observation_transmit_epoch_j2000_s(
+                source,
+                obs,
+                epoch.t_rx_j2000_s,
+                satellite_clock,
+            ) {
+                Ok(t_tx) if t_tx.is_finite() => Some(t_tx),
+                Err(FloatSolveError::Ut1OutsideCoverage(reason)) => {
+                    return Err(FloatSolveError::Ut1OutsideCoverage(reason))
+                }
+                _ => None,
+            };
+            let refusal = t_tx
+                .and_then(|t_tx| ssr.correction_size_refusal(obs.sat, t_tx, epoch.t_rx_j2000_s));
+            match refusal {
+                Some(size) => unplaced.push(UnplacedObservation {
+                    epoch_index: first_epoch_index + offset,
+                    satellite_id: obs.satellite_id.clone(),
+                    ambiguity_id: obs.ambiguity_id.clone(),
+                    reason: UnplacedObservationReason::SsrCorrectionExceedsLimit(size),
+                }),
+                None => observations.push(obs.clone()),
+            }
+        }
+        epoch_out.observations = observations;
+        retained.push(epoch_out);
+    }
+    Ok((retained, unplaced))
+}
+
 #[cfg(test)]
 pub(super) fn exclude_unresolved_ssr_bias_observations(
     source: &dyn ObservableEphemerisSource,

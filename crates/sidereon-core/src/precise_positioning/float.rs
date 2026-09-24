@@ -19,7 +19,8 @@ use crate::observables::ObservableEphemerisSource;
 use super::normal::{ppp_position_covariance, solve_normal_equations, PppNormalLayout};
 use super::rows::{
     build_rows, drop_empty_epochs, exclude_unresolved_ssr_bias_observations_with_clock,
-    leave_out_unplaced_observations, residual_rows, AmbiguityBinding, PppRowError,
+    leave_out_ssr_size_refusals, leave_out_unplaced_observations, residual_rows, AmbiguityBinding,
+    PppRowError,
 };
 use super::temporal::{estimate_temporal_correlation, temporal_position_covariance};
 use super::{
@@ -199,7 +200,14 @@ pub(super) fn prepare_arc(
     left_out: &LeftOut<'_>,
     state: &FloatState,
 ) -> Result<(PreparedArc, Vec<SsrBiasExclusion>), FloatSolveError> {
-    let (placeable, unplaced) = leave_out_unplaced_observations(epochs, 0);
+    let (placeable, mut unplaced) = leave_out_unplaced_observations(epochs, 0);
+    let (placeable, refused) = leave_out_ssr_size_refusals(
+        arc.source,
+        &placeable,
+        0,
+        arc.corrections.satellite_clock.as_ref(),
+    )?;
+    unplaced.extend(refused);
     let remaining = without_keys(
         &without_exclusions(&placeable, left_out.excluded),
         left_out.screened,

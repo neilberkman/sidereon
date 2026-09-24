@@ -846,9 +846,9 @@ pub struct SsrBiasExclusion {
     pub application: Option<SsrObsApplicationReport>,
 }
 
-/// An observation left out of a PPP solve before it solves because no transmission epoch
-/// can be placed from it, with the reason.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An observation left out of a PPP solve before it solves because no satellite can be
+/// placed for it, with the reason.
+#[derive(Debug, Clone, PartialEq)]
 pub struct UnplacedObservation {
     /// Zero-based index of the observation's epoch in the solve's input epochs.
     pub epoch_index: usize,
@@ -856,18 +856,26 @@ pub struct UnplacedObservation {
     pub satellite_id: String,
     /// Ambiguity state key of the observation.
     pub ambiguity_id: String,
-    /// Why no transmission epoch can be placed from it.
+    /// Why no satellite can be placed for it.
     pub reason: UnplacedObservationReason,
 }
 
-/// Why a PPP observation places no transmission epoch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why no satellite can be placed for a PPP observation.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum UnplacedObservationReason {
     /// The code is zero or negative. RTKLIB reads a zero pseudorange as none and places
     /// no satellite for it (`satposs`); a negative code places the satellite at no
     /// meaningful epoch.
     CodeNotPositive,
+    /// The SSR-corrected source refuses the satellite's state at the transmission epoch
+    /// the observation places, because its SSR orbit or clock correction there is larger
+    /// than RTKLIB `satpos_ssr` applies, under
+    /// [`crate::ssr::SsrCorrectionSizePolicy::Strict`]
+    /// ([`crate::ssr::SsrStateUnavailable::CorrectionExceedsLimit`]). RTKLIB marks the
+    /// satellite unhealthy and `pppos` leaves it out of the update (`satexclude`); the
+    /// other observations are solved. Carries the size of the corrections at that epoch.
+    SsrCorrectionExceedsLimit(crate::ssr::SsrCorrectionSize),
 }
 
 /// Options for applying SSR/HAS PPP biases.
