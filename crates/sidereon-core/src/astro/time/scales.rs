@@ -225,11 +225,11 @@ static LEAP_SECONDS: &[LeapSecondEntry] = &[
         tai_utc: 30.0,
     },
     LeapSecondEntry {
-        mjd: 50448,
+        mjd: 50630,
         tai_utc: 31.0,
     },
     LeapSecondEntry {
-        mjd: 50813,
+        mjd: 51179,
         tai_utc: 32.0,
     },
     LeapSecondEntry {
@@ -1375,10 +1375,11 @@ pub fn julian_day_number(year: i32, month: i32, day: i32) -> i64 {
 
 /// TAI-UTC (cumulative leap seconds) for a UTC Julian date.
 ///
-/// For instants from 1972-01-01 (MJD 41317) onward this reads the embedded IERS
-/// integer leap-second table, clamping above to the last entry exactly as the
-/// original `orbis_nif` implementation did (parity-preserving). This post-1972
-/// branch is byte-for-byte the original lookup and is never perturbed.
+/// For instants from 1972-01-01 (MJD 41317) onward this reads the embedded
+/// integer leap-second table of IERS Bulletin C, clamping above to the last
+/// entry: TAI - UTC takes the value of the last entry whose MJD is at or
+/// before the instant's UTC day. The table dates each change to the first
+/// day under the new value (31 s from 1997-07-01, 32 s from 1999-01-01).
 ///
 /// For instants in the 1961-01-01 .. 1972-01-01 rubber-second era it evaluates
 /// the published piecewise-linear IERS/USNO model
@@ -1394,10 +1395,9 @@ pub fn julian_day_number(year: i32, month: i32, day: i32) -> i64 {
 /// second `23:59:60` and the following `00:00:00` share essentially the same
 /// Julian date, so an end-of-day instant resolves to the **post-leap** count -
 /// the leap second itself cannot be distinguished from the next day's start
-/// through a JD. This is intrinsic to a JD-keyed lookup and is pinned to
-/// `orbis_nif` for bit-exact parity; callers that must label `23:59:60`
-/// distinctly have to carry the civil second out-of-band rather than rely on
-/// this function.
+/// through a JD. This is intrinsic to a JD-keyed lookup; callers that must
+/// label `23:59:60` distinctly have to carry the civil second out-of-band
+/// rather than rely on this function.
 pub fn find_leap_seconds(jd_utc: f64) -> f64 {
     if !jd_utc.is_finite() {
         return f64::NAN;
@@ -3098,5 +3098,24 @@ mod tests {
             timescale_offset_at_s(TimeScale::Utc, TimeScale::Gpst, jd).expect("leap-aware offset");
         // 2020 is between the 2017 leap and now: TAI-UTC=37, GPST-UTC=18.
         assert_eq!(gpst_minus_utc, 18.0);
+    }
+
+    #[test]
+    fn the_1997_and_1999_leap_seconds_fall_where_iers_bulletin_c_puts_them() {
+        // TAI - UTC became 31 s on 1997-07-01 and 32 s on 1999-01-01 (IERS
+        // Bulletin C 13 and 16); the embedded UT1 - UTC series steps by one
+        // second between MJD 50629 and 50630 and between 51178 and 51179.
+        let jd = |mjd: f64| mjd + 2_400_000.5;
+        assert_eq!(find_leap_seconds(jd(50_447.5)), 30.0);
+        assert_eq!(find_leap_seconds(jd(50_448.5)), 30.0);
+        assert_eq!(find_leap_seconds(jd(50_629.5)), 30.0);
+        assert_eq!(find_leap_seconds(jd(50_630.5)), 31.0);
+        assert_eq!(find_leap_seconds(jd(50_813.5)), 31.0);
+        assert_eq!(find_leap_seconds(jd(51_178.5)), 31.0);
+        assert_eq!(find_leap_seconds(jd(51_179.5)), 32.0);
+        assert!(!is_positive_leap_second_label(1996, 12, 31, 23, 59));
+        assert!(is_positive_leap_second_label(1997, 6, 30, 23, 59));
+        assert!(!is_positive_leap_second_label(1997, 12, 31, 23, 59));
+        assert!(is_positive_leap_second_label(1998, 12, 31, 23, 59));
     }
 }

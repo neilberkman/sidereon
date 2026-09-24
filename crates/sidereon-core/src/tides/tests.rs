@@ -16,7 +16,10 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use super::{solid_earth_tide, solid_earth_tide_unchecked, TideError, TideInputErrorKind};
+use super::{
+    solid_earth_tide, solid_earth_tide_unchecked, tai_minus_utc_seconds, TideError,
+    TideInputErrorKind,
+};
 
 fn fixture_path() -> PathBuf {
     let crate_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -191,4 +194,28 @@ fn solid_earth_tide_valid_date_and_hour_matches_unchecked_result() {
     let expected = solid_earth_tide_unchecked(&station, 2020, 6, 24, 23.5, &sun, &moon);
 
     assert_eq!(got, expected);
+}
+
+#[test]
+fn the_tide_leap_second_table_equals_the_main_table_month_by_month() {
+    // The SOFA DAT table kept for the tides is checked against
+    // `find_leap_seconds` on the first and last day of every month from
+    // 1972 to 2035.
+    for year in 1972..=2035 {
+        for month in 1..=12 {
+            for day in [
+                1,
+                crate::astro::time::civil::days_in_month(i64::from(year), i64::from(month)),
+            ] {
+                let jd = crate::astro::time::scales::julian_day_number(year, month, day as i32)
+                    as f64
+                    - 0.5;
+                assert_eq!(
+                    tai_minus_utc_seconds(year, month, day as i32),
+                    crate::astro::time::scales::find_leap_seconds(jd),
+                    "{year}-{month:02}-{day:02}"
+                );
+            }
+        }
+    }
 }
