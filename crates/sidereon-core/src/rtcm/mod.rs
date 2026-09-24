@@ -23,6 +23,14 @@
 //! | MSM1..MSM7 observations | 1071..1077 GPS, 1081..1087 GLONASS, 1091..1097 Galileo, 1101..1107 SBAS, 1111..1117 QZSS, 1121..1127 BeiDou, 1131..1137 NavIC | [`MsmMessage`] |
 //! | Legacy RTK observations | 1001..1004 GPS, 1009..1012 GLONASS          | [`LegacyObservations`] |
 //! | Station coordinates| 1005 / 1006                              | [`StationCoordinates`] |
+//! | Network auxiliary station | 1014                              | [`NetworkAuxiliaryStation`] |
+//! | Network correction differences | 1015-1017 GPS, 1037-1039 GLONASS | [`NetworkCorrectionDifferences`] |
+//! | Transformation parameters | 1021 / 1022                       | [`HelmertTransformation`] |
+//! | Transformation residual grids | 1023 / 1024                   | [`ResidualGrid`] |
+//! | Projection parameters | 1025 / 1026 / 1027                    | [`Projection`] |
+//! | Network RTK residuals | 1030 GPS, 1031 GLONASS                | [`NetworkResiduals`] |
+//! | Physical reference station | 1032                             | [`PhysicalReferenceStation`] |
+//! | FKP gradients      | 1034 GPS, 1035 GLONASS                   | [`FkpGradients`] |
 //! | Antenna / receiver | 1007 / 1008 / 1033                       | [`AntennaDescriptor`] |
 //! | GPS ephemeris      | 1019                                     | [`GpsEphemeris`] |
 //! | GLONASS ephemeris  | 1020                                     | [`GlonassEphemeris`] |
@@ -37,16 +45,18 @@
 //!
 //! Any other message number is preserved losslessly as [`Message::Unsupported`]
 //! (its raw body is kept so the frame still round-trips), and so is a 4076
-//! message whose IGS SSR message number is none of the above. Deferred message
-//! types include the network-RTK correction families and the SSR messages not
-//! listed above. They decode as `Unsupported` rather than erroring.
+//! message whose IGS SSR message number is none of the above. Message types
+//! kept this way include the system parameters 1013, the text message 1029,
+//! the SSR messages not listed above, and proprietary messages. They decode as
+//! `Unsupported` rather than erroring.
 //!
 //! ## Departures and policy
 //!
 //! Input whose every field can be read but which departs from the format -
 //! nonzero frame reserved bits, bits after a message's last field other than
-//! the zero byte alignment, an MSM cell mask over 64 bits, an SSR or legacy
-//! observation body that ends before the records its header counts - is an
+//! the zero byte alignment, an MSM cell mask over 64 bits, an SSR, legacy
+//! observation or network RTK body that ends before the records its header
+//! counts - is an
 //! [`RtcmDeparture`]. Under [`RtcmPolicy::Strict`], the default, it is refused
 //! by name; under [`RtcmPolicy::Lenient`] it is read and reported. The encoders
 //! write every field in its own width and refuse by name a value they would
@@ -102,8 +112,10 @@ mod framing;
 mod legacy;
 mod lli;
 mod msm;
+mod network;
 mod ssr;
 mod station;
+mod transformation;
 mod vtec;
 
 #[cfg(test)]
@@ -142,12 +154,20 @@ pub use msm::{
     MSM7_FINE_PSEUDORANGE_INVALID, MSM_FINE_PHASE_RANGE_RATE_INVALID,
     MSM_ROUGH_PHASE_RANGE_RATE_INVALID, MSM_ROUGH_RANGE_INVALID,
 };
+pub use network::{
+    FkpGradient, FkpGradients, NetworkAuxiliaryStation, NetworkCorrectionDifference,
+    NetworkCorrectionDifferences, NetworkResidual, NetworkResiduals, PhysicalReferenceStation,
+};
 pub(crate) use ssr::is_native_qzss_ssr;
 pub use ssr::{
     SsrClockRecord, SsrCodeBiasRecord, SsrHeader, SsrKind, SsrMessage, SsrOrbitRecord,
     SsrPhaseBiasRecord, SsrPhaseBiasSignal, IGS_SSR_MESSAGE_NUMBER,
 };
 pub use station::StationCoordinates;
+pub use transformation::{
+    GridResidual, HelmertTransformation, Projection, ProjectionParameters, ResidualGrid,
+    RotationPoint, RESIDUAL_GRID_POINTS,
+};
 pub use vtec::{SsrVtecLayer, SsrVtecMessage};
 
 /// A message whose number is recognized but whose body this codec does not
@@ -554,6 +574,22 @@ pub enum Message {
     StationCoordinates(StationCoordinates),
     /// A 1007 / 1008 / 1033 antenna or receiver descriptor.
     AntennaDescriptor(AntennaDescriptor),
+    /// A 1014 network auxiliary station data message.
+    NetworkAuxiliaryStation(NetworkAuxiliaryStation),
+    /// A 1015-1017 or 1037-1039 network RTK correction-difference message.
+    NetworkCorrectionDifferences(NetworkCorrectionDifferences),
+    /// A 1021 / 1022 transformation parameter message.
+    HelmertTransformation(HelmertTransformation),
+    /// A 1023 / 1024 transformation residual grid message.
+    ResidualGrid(ResidualGrid),
+    /// A 1025 / 1026 / 1027 projection parameter message.
+    Projection(Projection),
+    /// A 1030 / 1031 network RTK residual message.
+    NetworkResiduals(NetworkResiduals),
+    /// A 1032 physical reference station position.
+    PhysicalReferenceStation(PhysicalReferenceStation),
+    /// A 1034 / 1035 FKP gradient message.
+    FkpGradients(FkpGradients),
     /// A 1019 GPS broadcast ephemeris.
     GpsEphemeris(GpsEphemeris),
     /// A 1020 GLONASS broadcast ephemeris.
@@ -622,6 +658,24 @@ impl Message {
             1007 | 1008 | 1033 => Message::AntennaDescriptor(decode_body(body, ctx, |r, _| {
                 AntennaDescriptor::read(r)
             })?),
+            1014 => Message::NetworkAuxiliaryStation(decode_body(body, ctx, |r, _| {
+                NetworkAuxiliaryStation::read(r)
+            })?),
+            1015..=1017 | 1037..=1039 => Message::NetworkCorrectionDifferences(
+                NetworkCorrectionDifferences::decode_inner(body, ctx)?,
+            ),
+            1021 | 1022 => Message::HelmertTransformation(decode_body(body, ctx, |r, _| {
+                HelmertTransformation::read(r)
+            })?),
+            1023 | 1024 => {
+                Message::ResidualGrid(decode_body(body, ctx, |r, _| ResidualGrid::read(r))?)
+            }
+            1025..=1027 => Message::Projection(decode_body(body, ctx, |r, _| Projection::read(r))?),
+            1030 | 1031 => Message::NetworkResiduals(NetworkResiduals::decode_inner(body, ctx)?),
+            1032 => Message::PhysicalReferenceStation(decode_body(body, ctx, |r, _| {
+                PhysicalReferenceStation::read(r)
+            })?),
+            1034 | 1035 => Message::FkpGradients(FkpGradients::decode_inner(body, ctx)?),
             1019 => Message::GpsEphemeris(decode_body(body, ctx, |r, _| GpsEphemeris::read(r))?),
             1020 => {
                 Message::GlonassEphemeris(decode_body(body, ctx, |r, _| GlonassEphemeris::read(r))?)
@@ -718,6 +772,14 @@ impl Message {
             Message::LegacyObservations(o) => o.encode_with_policy(policy),
             Message::StationCoordinates(s) => s.encode_with_policy(policy),
             Message::AntennaDescriptor(a) => a.encode_with_policy(policy),
+            Message::NetworkAuxiliaryStation(m) => m.encode_with_policy(policy),
+            Message::NetworkCorrectionDifferences(m) => m.encode_with_policy(policy),
+            Message::HelmertTransformation(m) => m.encode_with_policy(policy),
+            Message::ResidualGrid(m) => m.encode_with_policy(policy),
+            Message::Projection(m) => m.encode_with_policy(policy),
+            Message::NetworkResiduals(m) => m.encode_with_policy(policy),
+            Message::PhysicalReferenceStation(m) => m.encode_with_policy(policy),
+            Message::FkpGradients(m) => m.encode_with_policy(policy),
             Message::GpsEphemeris(e) => e.encode_with_policy(policy),
             Message::GlonassEphemeris(e) => e.encode_with_policy(policy),
             Message::NavicEphemeris(e) => e.encode_with_policy(policy),
@@ -739,6 +801,14 @@ impl Message {
             Message::LegacyObservations(o) => o.message_number,
             Message::StationCoordinates(s) => s.message_number,
             Message::AntennaDescriptor(a) => a.message_number,
+            Message::NetworkAuxiliaryStation(_) => 1014,
+            Message::NetworkCorrectionDifferences(m) => m.message_number,
+            Message::HelmertTransformation(m) => m.message_number,
+            Message::ResidualGrid(m) => m.message_number,
+            Message::Projection(m) => m.message_number(),
+            Message::NetworkResiduals(m) => m.message_number,
+            Message::PhysicalReferenceStation(_) => 1032,
+            Message::FkpGradients(m) => m.message_number,
             Message::GpsEphemeris(_) => 1019,
             Message::GlonassEphemeris(_) => 1020,
             Message::NavicEphemeris(_) => 1041,
@@ -814,7 +884,19 @@ fn is_decoded_body(number: u16, body: &[u8]) -> bool {
 fn is_decoded_number(number: u16) -> bool {
     matches!(
         number,
-        1005 | 1006 | 1007 | 1008 | 1033 | 1019 | 1020 | 1041 | 1042 | 1044 | 1045 | 1046 | 1230
+        1005..=1008
+            | 1014..=1017
+            | 1021..=1027
+            | 1030..=1035
+            | 1037..=1039
+            | 1019
+            | 1020
+            | 1041
+            | 1042
+            | 1044
+            | 1045
+            | 1046
+            | 1230
     ) || legacy::is_legacy_observation(number)
         || msm::is_supported_msm(number)
         || ssr::is_supported_ssr(number)

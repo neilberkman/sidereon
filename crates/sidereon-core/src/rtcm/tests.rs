@@ -1550,6 +1550,14 @@ fn message_enum_is_matched_exhaustively_without_wildcard() {
         Message::LegacyObservations(o) => o.message_number,
         Message::StationCoordinates(s) => s.message_number,
         Message::AntennaDescriptor(a) => a.message_number,
+        Message::NetworkAuxiliaryStation(_) => 1014,
+        Message::NetworkCorrectionDifferences(m) => m.message_number,
+        Message::HelmertTransformation(m) => m.message_number,
+        Message::ResidualGrid(m) => m.message_number,
+        Message::Projection(m) => m.message_number(),
+        Message::NetworkResiduals(m) => m.message_number,
+        Message::PhysicalReferenceStation(_) => 1032,
+        Message::FkpGradients(m) => m.message_number,
         Message::GpsEphemeris(_) => 1019,
         Message::GlonassEphemeris(_) => 1020,
         Message::NavicEphemeris(_) => 1041,
@@ -4081,4 +4089,355 @@ fn vtec_messages_round_trip_with_their_field_widths() {
     let mut m = vtec_message(4076);
     m.quality_indicator = 512;
     refused(m, "VTEC quality indicator 512");
+}
+
+fn correction_differences(number: u16) -> NetworkCorrectionDifferences {
+    let geometric = matches!(number, 1016 | 1017 | 1038 | 1039);
+    let ionospheric = !matches!(number, 1016 | 1038);
+    NetworkCorrectionDifferences {
+        message_number: number,
+        network_id: 200,
+        subnetwork_id: 9,
+        epoch_time: if number >= 1037 { 864_000 } else { 6_047_999 },
+        multiple_message: true,
+        master_station_id: 4095,
+        auxiliary_station_id: 17,
+        satellite_count: 2,
+        satellites: [(5u8, 1i32), (21, -1)]
+            .into_iter()
+            .map(|(satellite_id, k)| NetworkCorrectionDifference {
+                satellite_id,
+                ambiguity_status: 2,
+                non_sync_count: 7,
+                geometric: geometric.then_some(65_535 * k),
+                iod: geometric.then_some(200),
+                ionospheric: ionospheric.then_some(-65_536 * k.max(0)),
+            })
+            .collect(),
+        trailing_bits: Vec::new(),
+    }
+}
+
+/// The correction-difference messages carry the ionospheric difference
+/// (1015, 1037), the geometric difference with its IOD (1016, 1038), or both
+/// (1017, 1039): 36 + 40 header bits (DF065 23 bits for GPS, DF233 20 for
+/// GLONASS) and 28, 36 or 53 bits per satellite. A part the number does not
+/// carry is refused when given, and a body shorter than its satellite count
+/// is refused strictly and read leniently to the last complete record.
+#[test]
+fn network_correction_differences_round_trip_by_layout() {
+    for (number, header, record) in [
+        (1015u16, 76usize, 28usize),
+        (1016, 76, 36),
+        (1017, 76, 53),
+        (1037, 73, 28),
+        (1038, 73, 36),
+        (1039, 73, 53),
+    ] {
+        let message = correction_differences(number);
+        let body = message.encode().unwrap();
+        assert_eq!(body.len(), (header + 2 * record).div_ceil(8), "{number}");
+        assert_eq!(
+            NetworkCorrectionDifferences::decode(&body).unwrap(),
+            message,
+            "{number}"
+        );
+        assert_eq!(
+            Message::decode(&body).unwrap(),
+            Message::NetworkCorrectionDifferences(message),
+            "{number}"
+        );
+    }
+    let mut m = correction_differences(1015);
+    m.satellites[0].geometric = Some(1);
+    assert!(m
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("geometric difference is given, and 1015 does not carry it"));
+    let mut m = correction_differences(1038);
+    m.satellites[1].iod = None;
+    assert!(m
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("IOD is not given, and 1038 carries it"));
+
+    let full = correction_differences(1017);
+    let body = full.encode().unwrap();
+    let short = body[..body.len() - 4].to_vec();
+    assert!(NetworkCorrectionDifferences::decode(&short)
+        .unwrap_err()
+        .to_string()
+        .contains("truncated"));
+    let (read, departures) =
+        NetworkCorrectionDifferences::decode_with_policy(&short, RtcmPolicy::Lenient).unwrap();
+    let departure = RtcmDeparture::RecordsShort {
+        message_number: 1017,
+        declared: 2,
+        read: 1,
+    };
+    assert_eq!(departures, vec![departure.clone()]);
+    assert_eq!(read.satellites, full.satellites[..1].to_vec());
+    assert!(read.encode().is_err());
+    assert_eq!(
+        read.encode_with_policy(RtcmPolicy::Lenient).unwrap(),
+        (short, vec![departure])
+    );
+}
+
+/// The network residual, physical station, FKP and auxiliary-station messages
+/// round-trip with the widths RTCM 10403.3 gives them.
+#[test]
+fn network_rtk_messages_round_trip_with_their_field_widths() {
+    let residual = NetworkResidual {
+        satellite_id: 63,
+        s_oc: 255,
+        s_od: 511,
+        s_oh: 63,
+        s_lc: 1023,
+        s_ld: 0,
+    };
+    for (number, header) in [(1030u16, 56usize), (1031, 53)] {
+        let message = NetworkResiduals {
+            message_number: number,
+            epoch_time: if number == 1030 { 604_799 } else { 86_399 },
+            reference_station_id: 12,
+            reference_station_count: 127,
+            satellite_count: 2,
+            satellites: vec![residual, residual],
+            trailing_bits: Vec::new(),
+        };
+        let body = message.encode().unwrap();
+        assert_eq!(body.len(), (header + 2 * 49).div_ceil(8), "{number}");
+        assert_eq!(NetworkResiduals::decode(&body).unwrap(), message);
+        assert_eq!(
+            Message::decode(&body).unwrap(),
+            Message::NetworkResiduals(message)
+        );
+    }
+    let gradient = FkpGradient {
+        satellite_id: 1,
+        iod: 255,
+        geometric_north: -2048,
+        geometric_east: 2047,
+        ionospheric_north: -8192,
+        ionospheric_east: 8191,
+    };
+    for (number, header) in [(1034u16, 49usize), (1035, 46)] {
+        let message = FkpGradients {
+            message_number: number,
+            reference_station_id: 4095,
+            epoch_time: 3,
+            satellite_count: 1,
+            satellites: vec![gradient],
+            trailing_bits: Vec::new(),
+        };
+        let body = message.encode().unwrap();
+        assert_eq!(body.len(), (header + 66).div_ceil(8), "{number}");
+        assert_eq!(FkpGradients::decode(&body).unwrap(), message);
+        let mut wide = message;
+        wide.satellites[0].geometric_north = -2049;
+        assert!(wide.encode().unwrap_err().to_string().contains("-2049"));
+    }
+    let station = PhysicalReferenceStation {
+        non_physical_station_id: 100,
+        physical_station_id: 4000,
+        itrf_realization_year: 20,
+        ecef_x: -(1 << 37),
+        ecef_y: (1 << 37) - 1,
+        ecef_z: 12_602_528_900,
+        trailing_bits: Vec::new(),
+    };
+    let body = station.encode().unwrap();
+    assert_eq!(body.len(), 156usize.div_ceil(8));
+    assert_eq!(PhysicalReferenceStation::decode(&body).unwrap(), station);
+    let auxiliary = NetworkAuxiliaryStation {
+        network_id: 255,
+        subnetwork_id: 15,
+        auxiliary_station_count: 31,
+        master_station_id: 1,
+        auxiliary_station_id: 2,
+        delta_latitude: -(1 << 19),
+        delta_longitude: (1 << 20) - 1,
+        delta_height: -1,
+        trailing_bits: Vec::new(),
+    };
+    let body = auxiliary.encode().unwrap();
+    assert_eq!(body.len(), 117usize.div_ceil(8));
+    assert_eq!(NetworkAuxiliaryStation::decode(&body).unwrap(), auxiliary);
+}
+
+fn helmert(number: u16) -> HelmertTransformation {
+    HelmertTransformation {
+        message_number: number,
+        source_name: "ETRF2000".to_string(),
+        target_name: "\u{e9}\u{ff}".to_string(),
+        system_id: 3,
+        utilized_messages: 0x3FF,
+        plate_number: 31,
+        computation_indicator: 15,
+        height_indicator: 3,
+        validity_latitude: -(1 << 18),
+        validity_longitude: (1 << 19) - 1,
+        validity_extension_latitude: 16_383,
+        validity_extension_longitude: 0,
+        dx: -(1 << 22),
+        dy: 1,
+        dz: (1 << 22) - 1,
+        r1: i32::MIN,
+        r2: i32::MAX,
+        r3: 0,
+        ds: -(1 << 24),
+        rotation_point: (number == 1022).then_some(RotationPoint {
+            x: -(1 << 34),
+            y: (1 << 34) - 1,
+            z: 7,
+        }),
+        add_as: (1 << 24) - 1,
+        add_bs: (1 << 25) - 1,
+        add_at: 0,
+        add_bt: 1,
+        horizontal_quality: 7,
+        vertical_quality: 0,
+        trailing_bits: Vec::new(),
+    }
+}
+
+/// 1021 and 1022 round-trip, their names as 8-bit characters (every byte
+/// value kept), 1022 with its 105-bit rotation point; a rotation point held
+/// against the number, a character above U+00FF and a 32-character name are
+/// refused. The residual grids and projections round-trip with their widths.
+#[test]
+fn transformation_messages_round_trip_with_their_field_widths() {
+    for (number, rotation) in [(1021u16, 0usize), (1022, 105)] {
+        let message = helmert(number);
+        let body = message.encode().unwrap();
+        // 12 + 5 + 8*8 + 5 + 2*8 + 8+10+5+4+2 + 19+20+14+14 + 3*23 + 3*32 + 25
+        // + rotation + 24+25+24+25 + 3+3.
+        let bits = 12 + 5 + 64 + 5 + 16 + 29 + 67 + 69 + 96 + 25 + rotation + 98 + 6;
+        assert_eq!(body.len(), bits.div_ceil(8), "{number}");
+        assert_eq!(HelmertTransformation::decode(&body).unwrap(), message);
+        assert_eq!(
+            Message::decode(&body).unwrap(),
+            Message::HelmertTransformation(message)
+        );
+    }
+    let mut m = helmert(1021);
+    m.rotation_point = helmert(1022).rotation_point;
+    assert!(m
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("carries no rotation point"));
+    let mut m = helmert(1022);
+    m.target_name = "\u{100}".to_string();
+    assert!(m
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("not an 8-bit character"));
+    let mut m = helmert(1022);
+    m.source_name = "x".repeat(32);
+    assert!(m
+        .encode()
+        .unwrap_err()
+        .to_string()
+        .contains("source name character count 32"));
+
+    for (number, origin_bits, offset_bits) in [(1023u16, 43usize, 16usize), (1024, 51, 20)] {
+        let mut residuals = [GridResidual::default(); RESIDUAL_GRID_POINTS];
+        for (index, r) in residuals.iter_mut().enumerate() {
+            *r = GridResidual {
+                horizontal_1: index as i16 - 256,
+                horizontal_2: 255 - index as i16,
+                height: -(index as i16),
+            };
+        }
+        let grid = ResidualGrid {
+            message_number: number,
+            system_id: 9,
+            horizontal_shift: true,
+            vertical_shift: false,
+            origin_1: -1000,
+            origin_2: if number == 1024 { (1 << 26) - 1 } else { -1 },
+            extension_1: 4095,
+            extension_2: 1,
+            mean_offset_1: -128,
+            mean_offset_2: 127,
+            mean_height_offset: -16_384,
+            residuals,
+            horizontal_interpolation: 3,
+            vertical_interpolation: 2,
+            horizontal_quality: 7,
+            vertical_quality: 1,
+            mjd: 60_000,
+            trailing_bits: Vec::new(),
+        };
+        let body = grid.encode().unwrap();
+        let bits = 12 + 10 + origin_bits + 24 + offset_bits + 15 + 16 * 27 + 26;
+        assert_eq!(body.len(), bits.div_ceil(8), "{number}");
+        assert_eq!(ResidualGrid::decode(&body).unwrap(), grid);
+        if number == 1024 {
+            let mut negative = grid;
+            negative.origin_2 = -1;
+            assert!(negative
+                .encode()
+                .unwrap_err()
+                .to_string()
+                .contains("unsigned"));
+        }
+    }
+
+    for (parameters, bits) in [
+        (
+            ProjectionParameters::NaturalOrigin {
+                latitude: -(1 << 33),
+                longitude: (1 << 34) - 1,
+                add_scale: (1 << 30) - 1,
+                false_easting: (1 << 36) - 1,
+                false_northing: -(1 << 34),
+            },
+            26 + 34 + 35 + 30 + 36 + 35,
+        ),
+        (
+            ProjectionParameters::LambertConicConformal {
+                latitude: 1,
+                longitude: -1,
+                standard_parallel_1: 2,
+                standard_parallel_2: -2,
+                false_easting: 3,
+                false_northing: -3,
+            },
+            26 + 34 + 35 + 34 + 34 + 36 + 35,
+        ),
+        (
+            ProjectionParameters::ObliqueMercator {
+                rectification: true,
+                latitude: 5,
+                longitude: 6,
+                azimuth: (1 << 35) - 1,
+                rectified_to_skew: -(1 << 25),
+                add_scale: 9,
+                easting: 10,
+                northing: -11,
+            },
+            26 + 1 + 34 + 35 + 35 + 26 + 30 + 36 + 35,
+        ),
+    ] {
+        let projection = Projection {
+            system_id: 1,
+            projection_type: 63,
+            parameters,
+            trailing_bits: Vec::new(),
+        };
+        let body = projection.encode().unwrap();
+        let bits: usize = bits;
+        assert_eq!(body.len(), bits.div_ceil(8), "{:?}", projection.parameters);
+        assert_eq!(Projection::decode(&body).unwrap(), projection);
+        assert_eq!(
+            Message::decode(&body).unwrap().message_number(),
+            projection.message_number()
+        );
+    }
 }
