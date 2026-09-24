@@ -26,17 +26,18 @@
 //! | Antenna / receiver | 1007 / 1008 / 1033                       | [`AntennaDescriptor`] |
 //! | GPS ephemeris      | 1019                                     | [`GpsEphemeris`] |
 //! | GLONASS ephemeris  | 1020                                     | [`GlonassEphemeris`] |
+//! | NavIC ephemeris    | 1041                                     | [`NavicEphemeris`] |
 //! | BeiDou ephemeris   | 1042                                     | [`BeidouEphemeris`] |
 //! | QZSS ephemeris     | 1044                                     | [`QzssEphemeris`] |
 //! | Galileo ephemeris  | 1045 / 1046                              | [`GalileoFnavEphemeris`] / [`GalileoInavEphemeris`] |
+//! | GLONASS code-phase biases | 1230                              | [`GlonassCodePhaseBiases`] |
 //! | SSR corrections    | GPS 1057-1062, 1265; GLONASS 1063-1068; Galileo 1240-1245, 1267; QZSS 1246-1251, 1268; BeiDou 1258-1263, 1270 | [`SsrMessage`] |
 //!
 //! Any other message number is preserved losslessly as [`Message::Unsupported`]
 //! (its raw body is kept so the frame still round-trips). Deferred message types
-//! include the NavIC ephemeris 1041, the
-//! GLONASS code-phase biases 1230, the IGS SSR messages 4076, the network-RTK
-//! correction families and the SSR messages not listed above. They decode as
-//! `Unsupported` rather than erroring.
+//! include the IGS SSR messages 4076, the network-RTK correction families and
+//! the SSR messages not listed above. They decode as `Unsupported` rather than
+//! erroring.
 //!
 //! ## Departures and policy
 //!
@@ -91,6 +92,7 @@
 
 mod antenna;
 pub(crate) mod bits;
+mod code_phase_bias;
 pub(crate) mod crc;
 mod encode_error;
 mod ephemeris;
@@ -110,13 +112,14 @@ use crate::error::Result;
 use bits::BitReader;
 
 pub use antenna::AntennaDescriptor;
+pub use code_phase_bias::{GlonassCodePhaseBiases, GLONASS_CODE_PHASE_BIAS_INVALID};
 pub use encode_error::{
     MsmMaskProblem, MsmOptionalField, MsmOptionalProblem, RtcmConversionError, RtcmEncodeError,
     RtcmFieldEncoding, RtcmRecordKind,
 };
 pub use ephemeris::{
     BeidouEphemeris, GalileoFnavEphemeris, GalileoInavEphemeris, GlonassEphemeris, GpsEphemeris,
-    QzssEphemeris,
+    NavicEphemeris, QzssEphemeris,
 };
 pub use framing::{
     decode_frame, encode_frame, encode_frame_with_reserved, DecodedFrame, FrameScanner,
@@ -551,6 +554,8 @@ pub enum Message {
     GpsEphemeris(GpsEphemeris),
     /// A 1020 GLONASS broadcast ephemeris.
     GlonassEphemeris(GlonassEphemeris),
+    /// A 1041 NavIC broadcast ephemeris.
+    NavicEphemeris(NavicEphemeris),
     /// A 1042 BeiDou broadcast ephemeris.
     BeidouEphemeris(BeidouEphemeris),
     /// A 1044 QZSS broadcast ephemeris.
@@ -559,6 +564,8 @@ pub enum Message {
     GalileoFnavEphemeris(GalileoFnavEphemeris),
     /// A 1046 Galileo I/NAV broadcast ephemeris.
     GalileoInavEphemeris(GalileoInavEphemeris),
+    /// A 1230 GLONASS code-phase bias message.
+    GlonassCodePhaseBiases(GlonassCodePhaseBiases),
     /// A supported RTCM SSR correction message.
     Ssr(SsrMessage),
     /// A recognized-but-undecoded message, preserved verbatim.
@@ -613,9 +620,15 @@ impl Message {
             1020 => {
                 Message::GlonassEphemeris(decode_body(body, ctx, |r, _| GlonassEphemeris::read(r))?)
             }
+            1041 => {
+                Message::NavicEphemeris(decode_body(body, ctx, |r, _| NavicEphemeris::read(r))?)
+            }
             1042 => {
                 Message::BeidouEphemeris(decode_body(body, ctx, |r, _| BeidouEphemeris::read(r))?)
             }
+            1230 => Message::GlonassCodePhaseBiases(decode_body(body, ctx, |r, _| {
+                GlonassCodePhaseBiases::read(r)
+            })?),
             1044 => Message::QzssEphemeris(decode_body(body, ctx, |r, _| QzssEphemeris::read(r))?),
             1045 => Message::GalileoFnavEphemeris(decode_body(body, ctx, |r, _| {
                 GalileoFnavEphemeris::read(r)
@@ -685,6 +698,8 @@ impl Message {
             Message::AntennaDescriptor(a) => a.encode_with_policy(policy),
             Message::GpsEphemeris(e) => e.encode_with_policy(policy),
             Message::GlonassEphemeris(e) => e.encode_with_policy(policy),
+            Message::NavicEphemeris(e) => e.encode_with_policy(policy),
+            Message::GlonassCodePhaseBiases(b) => b.encode_with_policy(policy),
             Message::BeidouEphemeris(e) => e.encode_with_policy(policy),
             Message::QzssEphemeris(e) => e.encode_with_policy(policy),
             Message::GalileoFnavEphemeris(e) => e.encode_with_policy(policy),
@@ -703,6 +718,8 @@ impl Message {
             Message::AntennaDescriptor(a) => a.message_number,
             Message::GpsEphemeris(_) => 1019,
             Message::GlonassEphemeris(_) => 1020,
+            Message::NavicEphemeris(_) => 1041,
+            Message::GlonassCodePhaseBiases(_) => 1230,
             Message::BeidouEphemeris(_) => 1042,
             Message::QzssEphemeris(_) => 1044,
             Message::GalileoFnavEphemeris(_) => 1045,
@@ -759,7 +776,7 @@ impl UnsupportedMessage {
 fn is_decoded_number(number: u16) -> bool {
     matches!(
         number,
-        1005 | 1006 | 1007 | 1008 | 1033 | 1019 | 1020 | 1042 | 1044 | 1045 | 1046
+        1005 | 1006 | 1007 | 1008 | 1033 | 1019 | 1020 | 1041 | 1042 | 1044 | 1045 | 1046 | 1230
     ) || legacy::is_legacy_observation(number)
         || msm::is_supported_msm(number)
         || ssr::is_supported_ssr(number)

@@ -26,9 +26,17 @@
 //! - `rtklib_encoded_msm1_to_msm4.rtcm3`: RTKLIB's encoder output (`encode-msm`)
 //!   from the MSM7 observations of RTKLIB's test stream
 //!   `test/data/rcvraw/GMSD7_20121014.rtcm3`, first 12 epochs.
+//! - `rtk2go_1230.rtcm3`: the first two 1230 frames of each capture above and of
+//!   `HEYT` and `FF-Malar`, byte for byte.
+//! - `rtklib_encoded_1041.rtcm3`: RTKLIB's encoder output (`encode-1041`), one
+//!   1041 per NavIC record of `tests/fixtures/nav/BRDM00DLR_S_20262650000_01D_MN_navic.rnx`.
 //! - `rtklib_encoded_legacy.rtcm3`: RTKLIB's encoder output
 //!   (`encode-legacy`), 1001..1004 and 1009..1012 from the observations of
 //!   `testglo.rtcm3`, first 12 epochs.
+
+// The RTKLIB constants below are spelled as RTKLIB spells them; the nearest
+// double to each decimal is what RTKLIB multiplies by.
+#![allow(clippy::excessive_precision)]
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -777,4 +785,204 @@ fn legacy_observations_match_rtklib() {
         assert!(coverage.values > 0, "{name}");
         assert_eq!(compared > 0, compact, "{name}");
     }
+}
+
+const P2_19: f64 = 1.907348632812500E-06;
+const P2_28: f64 = 3.725290298461914E-09;
+const P2_33: f64 = 1.164153218269348E-10;
+const P2_41: f64 = 4.547473508864641E-13;
+const P2_43: f64 = 1.136868377216160E-13;
+const P2_55: f64 = 2.775557561562891E-17;
+/// RTKLIB's semicircle-to-radian factor, the IS-GPS-200 value, not `PI`.
+#[allow(clippy::approx_constant)]
+const SC2RAD: f64 = 3.1415926535898;
+/// RTKLIB `gpst2time` of the GPS epoch: 1980-01-06 as a Unix time.
+const GPST0_UNIX_S: i64 = 315_964_800;
+
+/// NavIC 1041 frames RTKLIB's encoder wrote from the real NavIC records of
+/// DLR's merged broadcast file: every ephemeris value RTKLIB `decode_type1041`
+/// stores, bit for bit, and the broadcast record built from the message
+/// against the RINEX record it came from.
+#[test]
+fn navic_ephemeris_matches_rtklib() {
+    let name = "rtklib_encoded_1041.rtcm3";
+    let frames = fixture(name);
+    let rinex = sidereon_core::rinex::nav::parse_nav(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/nav/BRDM00DLR_S_20262650000_01D_MN_navic.rnx"
+        ))
+        .expect("read NavIC RINEX"),
+    )
+    .expect("parse NavIC RINEX");
+    let rinex: Vec<_> = rinex
+        .into_iter()
+        .filter(|record| record.satellite_id.system == GnssSystem::Navic)
+        .collect();
+    assert_eq!(frames.len(), rinex.len(), "one 1041 per NavIC record");
+    for (frame, record) in frames.iter().zip(&rinex) {
+        let Message::NavicEphemeris(eph) = &frame.message else {
+            panic!("{name}: frame at {} is not 1041", frame.offset);
+        };
+        let at = format!("{name} frame at {}", frame.offset);
+        let e = &frame.rtklib["eph"];
+        assert_eq!(frame.rtklib["ret"].as_i64(), Some(2), "{at}");
+        assert_eq!(
+            e["sat"].as_str(),
+            Some(format!("I{:02}", eph.satellite_id).as_str()),
+            "{at}"
+        );
+        assert_eq!(e["iode"].as_u64(), Some(u64::from(eph.iodec)), "{at}");
+        assert_eq!(e["iodc"].as_u64(), Some(u64::from(eph.iodec)), "{at}");
+        assert_eq!(e["sva"].as_u64(), Some(u64::from(eph.ura)), "{at}");
+        assert_eq!(e["svh"].as_u64(), Some(u64::from(eph.health())), "{at}");
+        let week = e["week"].as_i64().expect("week");
+        assert_eq!(week % 1024, i64::from(eph.week_number), "{at}");
+        for (key, count) in [("toe", eph.t_oe), ("toc", eph.t_oc)] {
+            assert_eq!(
+                e[key][0].as_i64(),
+                Some(GPST0_UNIX_S + 604_800 * week + i64::from(count) * 16),
+                "{at} {key}"
+            );
+            assert_eq!(bits64(&e[key][1]), 0.0f64.to_bits(), "{at} {key}");
+        }
+        let sqrt_a = eph.sqrt_a as f64 * P2_19;
+        for (key, value) in [
+            ("A", sqrt_a * sqrt_a),
+            ("e", eph.eccentricity as f64 * P2_33),
+            ("i0", eph.i0 as f64 * P2_31 * SC2RAD),
+            ("OMG0", eph.omega0 as f64 * P2_31 * SC2RAD),
+            ("omg", eph.omega as f64 * P2_31 * SC2RAD),
+            ("M0", eph.m0 as f64 * P2_31 * SC2RAD),
+            ("deln", f64::from(eph.delta_n) * P2_41 * SC2RAD),
+            ("OMGd", f64::from(eph.omega_dot) * P2_41 * SC2RAD),
+            ("idot", f64::from(eph.idot) * P2_43 * SC2RAD),
+            ("crc", f64::from(eph.c_rc) * 0.0625),
+            ("crs", f64::from(eph.c_rs) * 0.0625),
+            ("cuc", f64::from(eph.c_uc) * P2_28),
+            ("cus", f64::from(eph.c_us) * P2_28),
+            ("cic", f64::from(eph.c_ic) * P2_28),
+            ("cis", f64::from(eph.c_is) * P2_28),
+            ("toes", f64::from(eph.t_oe) * 16.0),
+            ("f0", f64::from(eph.a_f0) * P2_31),
+            ("f1", f64::from(eph.a_f1) * P2_43),
+            ("f2", f64::from(eph.a_f2) * P2_55),
+            ("tgd0", f64::from(eph.t_gd) * P2_31),
+        ] {
+            assert_eq!(bits64(&e[key]), value.to_bits(), "{at} {key}");
+        }
+
+        // The record built from the message states what the RINEX record
+        // states: the same satellite, issue, health and times, the accuracy
+        // bin RTKLIB `uraindex` chose for the RINEX metres, and the orbit and
+        // clock to half a unit of each field RTKLIB rounded them to.
+        let built = eph
+            .to_broadcast_record(u32::try_from(week).expect("week"))
+            .expect("broadcast record");
+        assert_eq!(built.satellite_id, record.satellite_id, "{at}");
+        assert_eq!(built.message, record.message, "{at}");
+        assert_eq!(built.issue_of_data, record.issue_of_data, "{at}");
+        assert_eq!(built.sv_health, record.sv_health, "{at}");
+        assert!(
+            record.sv_accuracy_m.expect("RINEX accuracy") <= built.sv_accuracy_m.expect("URA bin"),
+            "{at}"
+        );
+        assert_eq!(built.elements.toe_sow, record.elements.toe_sow, "{at}");
+        assert_eq!(built.clock.toc_sow, record.clock.toc_sow, "{at}");
+        let semicircle = std::f64::consts::PI;
+        for (what, a, b, unit) in [
+            (
+                "sqrt_a",
+                built.elements.sqrt_a,
+                record.elements.sqrt_a,
+                2f64.powi(-19),
+            ),
+            ("e", built.elements.e, record.elements.e, 2f64.powi(-33)),
+            (
+                "m0",
+                built.elements.m0,
+                record.elements.m0,
+                2f64.powi(-31) * semicircle,
+            ),
+            (
+                "omega0",
+                built.elements.omega0,
+                record.elements.omega0,
+                2f64.powi(-31) * semicircle,
+            ),
+            (
+                "omega_dot",
+                built.elements.omega_dot,
+                record.elements.omega_dot,
+                2f64.powi(-41) * semicircle,
+            ),
+            (
+                "delta_n",
+                built.elements.delta_n,
+                record.elements.delta_n,
+                2f64.powi(-41) * semicircle,
+            ),
+            ("af0", built.clock.af0, record.clock.af0, 2f64.powi(-31)),
+            ("af1", built.clock.af1, record.clock.af1, 2f64.powi(-43)),
+        ] {
+            assert!(
+                (a - b).abs() <= unit * 0.500_001 + 1e-14 * b.abs(),
+                "{at} {what}: {a} vs {b}"
+            );
+        }
+    }
+}
+
+/// Real 1230 frames from seven rtk2go receivers, one with nonzero biases:
+/// the alignment flag and the four biases RTKLIB `decode_type1230` stores,
+/// bit for bit.
+#[test]
+fn glonass_code_phase_biases_match_rtklib() {
+    let name = "rtk2go_1230.rtcm3";
+    let frames = fixture(name);
+    let mut station = 0u16;
+    let mut compared = 0;
+    for frame in &frames {
+        let Message::GlonassCodePhaseBiases(biases) = &frame.message else {
+            panic!("{name}: frame at {} is not 1230", frame.offset);
+        };
+        let at = format!("{name} frame at {}", frame.offset);
+        // RTKLIB `test_staid` refuses a station that differs from the nonzero
+        // one it holds, and forgets that one; only such a frame goes unread.
+        let id = biases.reference_station_id;
+        if station != 0 && station != id {
+            assert_eq!(frame.rtklib["ret"].as_i64(), Some(-1), "{at}");
+            station = 0;
+            continue;
+        }
+        station = id;
+        assert_eq!(frame.rtklib["ret"].as_i64(), Some(5), "{at}");
+        let cp = &frame.rtklib["glo_cp"];
+        assert_eq!(
+            cp["align"].as_u64(),
+            Some(u64::from(biases.aligned)),
+            "{at}"
+        );
+        for (index, bias) in [biases.l1_ca, biases.l1_p, biases.l2_ca, biases.l2_p]
+            .into_iter()
+            .enumerate()
+        {
+            let expected = match bias {
+                Some(raw) if raw != rtcm::GLONASS_CODE_PHASE_BIAS_INVALID => f64::from(raw) * 0.02,
+                _ => 0.0,
+            };
+            assert_eq!(
+                bits64(&cp["bias"][index]),
+                expected.to_bits(),
+                "{at} {index}"
+            );
+        }
+        compared += 1;
+    }
+    eprintln!("{name}: {compared} of {} frames compared", frames.len());
+    assert!(compared >= frames.len() - 1, "{name}");
+    assert!(frames.iter().any(|frame| matches!(
+        &frame.message,
+        Message::GlonassCodePhaseBiases(b) if b.l1_ca.is_some_and(|raw| raw != 0)
+    )));
 }

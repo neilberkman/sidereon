@@ -99,3 +99,20 @@ files.
 - **Committed file:** 6253 bytes, SHA-256
   `f31502c3206b5f3edcfaeab3c7cc084514f51fb67cdef062806294f5cb804de2`.
 - **Used by:** the RINEX 4 CNAV/CNV2 parsing tests in `src/rinex_nav/tests.rs`.
+
+## `BRDM00DLR_S_20262650000_01D_MN_navic.rnx`
+
+- **Upstream product:** `BRDM00DLR_S_20262650000_01D_MN.rnx.gz`, the DLR/GSOC
+  merged multi-GNSS broadcast navigation file (header program `BCEmerge`),
+  RINEX 3.04, 2026 day-of-year 265, from
+  `https://igs.bkg.bund.de/root_ftp/IGS/BRDC/2026/265/BRDM00DLR_S_20262650000_01D_MN.rnx.gz`
+  (decompressed SHA-256
+  `eec8830b8e1b9bafa699dc98388fe36df22647b10637c4b81a6e5b69a17ffaa5`).
+- **Trim:** the header through `END OF HEADER` plus the first three NavIC
+  records of each NavIC satellite the file carries (I02, I09 and I10), nine
+  records, in file order, with the blanks at the ends of lines removed.
+- **Committed file:** 6952 bytes, SHA-256
+  `be522dcb399300a12d53b2a484c532d7e09610310e29023162875025f2bbfefd`.
+- **Used by:** `fixtures-generators/rtklib_rtcm_oracle/generate.sh`, which
+  writes RTKLIB's 1041 frames from these records, and
+  `tests/rtcm_family_rtklib_oracle.rs`.
