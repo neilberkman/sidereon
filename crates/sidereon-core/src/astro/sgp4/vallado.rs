@@ -2023,7 +2023,7 @@ pub fn sgp4init(
         etasq = satrec.eta * satrec.eta;
         eeta = satrec.ecco * satrec.eta;
         psisq = (1.0 - etasq).abs();
-        coef = qzms24 * tsi * tsi * tsi * tsi;
+        coef = qzms24 * libm::pow(tsi, 4.0);
         coef1 = coef / libm::pow(psisq, 3.5);
         cc2 = coef1
             * satrec.no_unkozai
