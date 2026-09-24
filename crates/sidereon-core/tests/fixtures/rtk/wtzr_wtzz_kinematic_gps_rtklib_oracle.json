@@ -1,13 +1,13 @@
 {
  "version": "1",
- "description": "RTKLIB kinematic-mode oracle on the static WTZR/WTZZ 2020-06-25 120-epoch pair (GPS L1, fix-and-hold). Truth is the static antenna baseline; gates the kinematic process/time-update path. Expect a cold-start transient on epoch 0 before convergence.",
+ "description": "RTKLIB kinematic-mode oracle on the static WTZR/WTZZ 2020-06-25 120-epoch pair (GPS L1, fix-and-hold, 10 degree elevation mask, broadcast ephemeris, base at the WTZR antenna reference point). Truth is the static antenna baseline; gates the kinematic process/time-update path. Epochs 0 and 1 are float before the first fix.",
  "generator": {
   "rtklib": {
    "program": "rnx2rtkp",
    "version": "v2.4.2-p13",
    "commit": "71db0ff"
   },
-  "config": "track_a_kinematic_gps_l1.conf"
+  "command": "rnx2rtkp -p 2 -f 1 -h -m 10 -r 4075580.3566 931854.0647 4801568.3343 -a WTZZ00DEU_R_20201770000_01D_30S_MO_120epoch.rnx WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx ESBC00DNK_R_20201770000_01D_MN.rnx"
  },
  "truth": {
   "frame": "ENU at WTZR ARP, metres",
@@ -31,57 +31,56 @@
  },
  "reference": {
   "label": "kinematic_gps_l1_fix_and_hold",
-  "config": "track_a_kinematic_gps_l1.conf",
-  "source_pos": "track_a_kinematic_gps_l1.pos",
+  "command": "rnx2rtkp -p 2 -f 1 -h -m 10 -r 4075580.3566 931854.0647 4801568.3343 -a WTZZ00DEU_R_20201770000_01D_30S_MO_120epoch.rnx WTZR00DEU_R_20201770000_01D_30S_MO_120epoch.rnx ESBC00DNK_R_20201770000_01D_MN.rnx",
   "epochs": 120,
-  "fixed_epochs": 119,
-  "first_fixed_index": 0,
-  "first_fixed_time": "2020-06-25T00:00:00",
+  "fixed_epochs": 118,
+  "first_fixed_index": 2,
+  "first_fixed_time": "2020-06-25T00:01:00",
   "final_status": "fixed",
   "final_ratio": 999.9,
   "final_baseline_enu_m": {
    "east": -0.4178,
-   "north": 1.5321,
-   "up": 0.0881
+   "north": 1.5327,
+   "up": 0.0845
   },
-  "final_truth_error_m": 0.007378358971,
-  "mean_truth_error_m": 0.015715892113,
-  "max_truth_error_m": 1.021086317507
+  "final_truth_error_m": 0.003987166391,
+  "mean_truth_error_m": 0.021886976878,
+  "max_truth_error_m": 0.975458127804
  },
  "per_epoch": [
   {
    "time": "2020-06-25T00:00:00",
-   "fix_status": "fixed",
-   "q": 1,
-   "satellites": 6,
+   "fix_status": "float",
+   "q": 2,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.412,
-    "north": 1.5361,
-    "up": 0.0791
+    "east": -0.4041,
+    "north": 1.7737,
+    "up": -0.7835
    },
-   "ratio": 3.7
+   "ratio": 2.7
   },
   {
    "time": "2020-06-25T00:00:30",
    "fix_status": "float",
    "q": 2,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.3273,
-    "north": 1.9142,
-    "up": -0.8624
+    "east": -0.3197,
+    "north": 1.8903,
+    "up": -0.8218
    },
-   "ratio": 1.8
+   "ratio": 2.2
   },
   {
    "time": "2020-06-25T00:01:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4134,
-    "north": 1.5369,
-    "up": 0.0827
+    "east": -0.413,
+    "north": 1.5364,
+    "up": 0.0838
    },
    "ratio": 3.2
   },
@@ -89,119 +88,119 @@
    "time": "2020-06-25T00:01:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4133,
-    "north": 1.5332,
-    "up": 0.0841
+    "east": -0.4135,
+    "north": 1.5335,
+    "up": 0.0834
    },
-   "ratio": 5.3
+   "ratio": 5.4
   },
   {
    "time": "2020-06-25T00:02:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4147,
-    "north": 1.5378,
-    "up": 0.0796
+    "east": -0.4144,
+    "north": 1.5374,
+    "up": 0.0807
    },
-   "ratio": 5.7
+   "ratio": 8.7
   },
   {
    "time": "2020-06-25T00:02:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4162,
-    "north": 1.5375,
-    "up": 0.0729
+    "east": -0.4151,
+    "north": 1.536,
+    "up": 0.0782
    },
-   "ratio": 6.1
+   "ratio": 9.2
   },
   {
    "time": "2020-06-25T00:03:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4158,
-    "north": 1.5346,
-    "up": 0.0745
+    "east": -0.415,
+    "north": 1.5335,
+    "up": 0.0783
    },
-   "ratio": 8.7
+   "ratio": 11.1
   },
   {
    "time": "2020-06-25T00:03:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4177,
-    "north": 1.5345,
-    "up": 0.0783
+    "east": -0.4176,
+    "north": 1.5343,
+    "up": 0.0789
    },
-   "ratio": 7.9
+   "ratio": 11.2
   },
   {
    "time": "2020-06-25T00:04:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4171,
-    "north": 1.5358,
-    "up": 0.0737
+    "east": -0.4166,
+    "north": 1.5351,
+    "up": 0.0763
    },
-   "ratio": 7.7
+   "ratio": 11.3
   },
   {
    "time": "2020-06-25T00:04:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4181,
-    "north": 1.5361,
-    "up": 0.0765
+    "east": -0.4175,
+    "north": 1.5354,
+    "up": 0.0789
    },
-   "ratio": 6.2
+   "ratio": 9.6
   },
   {
    "time": "2020-06-25T00:05:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4147,
-    "north": 1.5342,
-    "up": 0.0821
+    "east": -0.4143,
+    "north": 1.5337,
+    "up": 0.0837
    },
-   "ratio": 5.7
+   "ratio": 9.5
   },
   {
    "time": "2020-06-25T00:05:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4159,
-    "north": 1.5348,
-    "up": 0.0782
+    "east": -0.4158,
+    "north": 1.5347,
+    "up": 0.0783
    },
-   "ratio": 7.5
+   "ratio": 12.7
   },
   {
    "time": "2020-06-25T00:06:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4185,
-    "north": 1.5383,
-    "up": 0.0801
+    "east": -0.4183,
+    "north": 1.5381,
+    "up": 0.0805
    },
    "ratio": 999.9
   },
@@ -209,11 +208,11 @@
    "time": "2020-06-25T00:06:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4163,
-    "north": 1.5368,
-    "up": 0.0839
+    "east": -0.4159,
+    "north": 1.5362,
+    "up": 0.0863
    },
    "ratio": 999.9
   },
@@ -221,11 +220,11 @@
    "time": "2020-06-25T00:07:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 7,
    "baseline_enu_m": {
-    "east": -0.4158,
-    "north": 1.5373,
-    "up": 0.0772
+    "east": -0.4156,
+    "north": 1.5371,
+    "up": 0.0785
    },
    "ratio": 999.9
   },
@@ -233,23 +232,23 @@
    "time": "2020-06-25T00:07:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4155,
-    "north": 1.5383,
-    "up": 0.0841
+    "east": -0.4151,
+    "north": 1.5379,
+    "up": 0.0858
    },
-   "ratio": 999.9
+   "ratio": 59.0
   },
   {
    "time": "2020-06-25T00:08:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 5,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4166,
-    "north": 1.5394,
-    "up": 0.0774
+    "east": -0.416,
+    "north": 1.5381,
+    "up": 0.0792
    },
    "ratio": 999.9
   },
@@ -257,11 +256,11 @@
    "time": "2020-06-25T00:08:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 5,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4181,
-    "north": 1.5362,
-    "up": 0.0733
+    "east": -0.4176,
+    "north": 1.5344,
+    "up": 0.0825
    },
    "ratio": 999.9
   },
@@ -269,11 +268,11 @@
    "time": "2020-06-25T00:09:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 5,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.416,
-    "north": 1.5363,
-    "up": 0.0831
+    "east": -0.4161,
+    "north": 1.5358,
+    "up": 0.0861
    },
    "ratio": 999.9
   },
@@ -281,11 +280,11 @@
    "time": "2020-06-25T00:09:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 5,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4174,
-    "north": 1.5342,
-    "up": 0.085
+    "east": -0.4169,
+    "north": 1.5338,
+    "up": 0.0875
    },
    "ratio": 999.9
   },
@@ -293,11 +292,11 @@
    "time": "2020-06-25T00:10:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 5,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4153,
-    "north": 1.5388,
-    "up": 0.0873
+    "east": -0.4154,
+    "north": 1.5386,
+    "up": 0.0857
    },
    "ratio": 999.9
   },
@@ -305,11 +304,11 @@
    "time": "2020-06-25T00:10:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 5,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.414,
-    "north": 1.5346,
-    "up": 0.086
+    "east": -0.4142,
+    "north": 1.5335,
+    "up": 0.0914
    },
    "ratio": 999.9
   },
@@ -317,11 +316,11 @@
    "time": "2020-06-25T00:11:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 5,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4147,
-    "north": 1.536,
-    "up": 0.0933
+    "east": -0.4146,
+    "north": 1.5359,
+    "up": 0.0915
    },
    "ratio": 999.9
   },
@@ -329,11 +328,11 @@
    "time": "2020-06-25T00:11:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 5,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.417,
-    "north": 1.5348,
-    "up": 0.0895
+    "east": -0.4171,
+    "north": 1.5345,
+    "up": 0.0913
    },
    "ratio": 999.9
   },
@@ -341,23 +340,23 @@
    "time": "2020-06-25T00:12:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4158,
-    "north": 1.5353,
-    "up": 0.0852
+    "north": 1.5342,
+    "up": 0.088
    },
-   "ratio": 156.5
+   "ratio": 999.9
   },
   {
    "time": "2020-06-25T00:12:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4159,
-    "north": 1.5344,
-    "up": 0.0902
+    "east": -0.4162,
+    "north": 1.5345,
+    "up": 0.0901
    },
    "ratio": 999.9
   },
@@ -365,11 +364,11 @@
    "time": "2020-06-25T00:13:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4174,
-    "north": 1.5339,
-    "up": 0.0847
+    "east": -0.4179,
+    "north": 1.5333,
+    "up": 0.088
    },
    "ratio": 999.9
   },
@@ -377,11 +376,11 @@
    "time": "2020-06-25T00:13:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4185,
-    "north": 1.5414,
-    "up": 0.0901
+    "east": -0.4182,
+    "north": 1.5406,
+    "up": 0.0903
    },
    "ratio": 999.9
   },
@@ -389,11 +388,11 @@
    "time": "2020-06-25T00:14:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4176,
-    "north": 1.5347,
-    "up": 0.0878
+    "north": 1.5348,
+    "up": 0.086
    },
    "ratio": 999.9
   },
@@ -401,11 +400,11 @@
    "time": "2020-06-25T00:14:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4183,
-    "north": 1.5356,
-    "up": 0.0899
+    "east": -0.418,
+    "north": 1.535,
+    "up": 0.0891
    },
    "ratio": 999.9
   },
@@ -413,11 +412,11 @@
    "time": "2020-06-25T00:15:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4188,
-    "north": 1.5358,
-    "up": 0.084
+    "north": 1.5357,
+    "up": 0.0832
    },
    "ratio": 999.9
   },
@@ -425,11 +424,11 @@
    "time": "2020-06-25T00:15:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4171,
-    "north": 1.5348,
-    "up": 0.0814
+    "north": 1.5344,
+    "up": 0.0815
    },
    "ratio": 999.9
   },
@@ -437,11 +436,11 @@
    "time": "2020-06-25T00:16:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.417,
-    "north": 1.5345,
-    "up": 0.0818
+    "east": -0.4164,
+    "north": 1.5339,
+    "up": 0.0793
    },
    "ratio": 999.9
   },
@@ -449,11 +448,11 @@
    "time": "2020-06-25T00:16:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4164,
-    "north": 1.5322,
-    "up": 0.081
+    "east": -0.4166,
+    "north": 1.5323,
+    "up": 0.0803
    },
    "ratio": 999.9
   },
@@ -461,11 +460,11 @@
    "time": "2020-06-25T00:17:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4193,
-    "north": 1.5385,
-    "up": 0.0908
+    "east": -0.4185,
+    "north": 1.5381,
+    "up": 0.0859
    },
    "ratio": 999.9
   },
@@ -473,11 +472,11 @@
    "time": "2020-06-25T00:17:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4153,
-    "north": 1.5371,
-    "up": 0.0875
+    "east": -0.4154,
+    "north": 1.5372,
+    "up": 0.0851
    },
    "ratio": 999.9
   },
@@ -485,11 +484,11 @@
    "time": "2020-06-25T00:18:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.417,
-    "north": 1.5362,
-    "up": 0.0884
+    "east": -0.4168,
+    "north": 1.5363,
+    "up": 0.0853
    },
    "ratio": 999.9
   },
@@ -497,11 +496,11 @@
    "time": "2020-06-25T00:18:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4178,
-    "north": 1.5338,
-    "up": 0.0811
+    "east": -0.418,
+    "north": 1.5343,
+    "up": 0.0787
    },
    "ratio": 999.9
   },
@@ -509,11 +508,11 @@
    "time": "2020-06-25T00:19:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4186,
-    "north": 1.5364,
-    "up": 0.0808
+    "east": -0.4194,
+    "north": 1.5372,
+    "up": 0.0802
    },
    "ratio": 999.9
   },
@@ -521,11 +520,11 @@
    "time": "2020-06-25T00:19:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4185,
-    "north": 1.5368,
-    "up": 0.0852
+    "east": -0.4187,
+    "north": 1.5371,
+    "up": 0.0825
    },
    "ratio": 999.9
   },
@@ -533,23 +532,23 @@
    "time": "2020-06-25T00:20:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 9,
    "baseline_enu_m": {
-    "east": -0.4153,
-    "north": 1.5322,
-    "up": 0.0756
+    "east": -0.4158,
+    "north": 1.5317,
+    "up": 0.0781
    },
-   "ratio": 999.9
+   "ratio": 338.1
   },
   {
    "time": "2020-06-25T00:20:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 9,
    "baseline_enu_m": {
-    "east": -0.4186,
-    "north": 1.5352,
-    "up": 0.0831
+    "east": -0.4185,
+    "north": 1.5355,
+    "up": 0.0801
    },
    "ratio": 999.9
   },
@@ -557,11 +556,11 @@
    "time": "2020-06-25T00:21:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 9,
    "baseline_enu_m": {
-    "east": -0.419,
+    "east": -0.4195,
     "north": 1.5364,
-    "up": 0.0764
+    "up": 0.0756
    },
    "ratio": 999.9
   },
@@ -569,11 +568,11 @@
    "time": "2020-06-25T00:21:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 9,
    "baseline_enu_m": {
-    "east": -0.419,
-    "north": 1.5382,
-    "up": 0.0975
+    "east": -0.4184,
+    "north": 1.5389,
+    "up": 0.0888
    },
    "ratio": 999.9
   },
@@ -581,11 +580,11 @@
    "time": "2020-06-25T00:22:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.418,
-    "north": 1.5339,
-    "up": 0.0865
+    "east": -0.4182,
+    "north": 1.5345,
+    "up": 0.0841
    },
    "ratio": 999.9
   },
@@ -593,11 +592,11 @@
    "time": "2020-06-25T00:22:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4176,
-    "north": 1.5338,
-    "up": 0.0868
+    "north": 1.5343,
+    "up": 0.0843
    },
    "ratio": 999.9
   },
@@ -605,11 +604,11 @@
    "time": "2020-06-25T00:23:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4179,
-    "north": 1.5376,
-    "up": 0.092
+    "east": -0.4182,
+    "north": 1.538,
+    "up": 0.0906
    },
    "ratio": 999.9
   },
@@ -617,11 +616,11 @@
    "time": "2020-06-25T00:23:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4164,
-    "north": 1.5277,
-    "up": 0.0852
+    "east": -0.4165,
+    "north": 1.5285,
+    "up": 0.0815
    },
    "ratio": 999.9
   },
@@ -629,11 +628,11 @@
    "time": "2020-06-25T00:24:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4203,
-    "north": 1.5381,
-    "up": 0.0941
+    "east": -0.42,
+    "north": 1.5387,
+    "up": 0.0911
    },
    "ratio": 999.9
   },
@@ -641,11 +640,11 @@
    "time": "2020-06-25T00:24:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4165,
-    "north": 1.5335,
-    "up": 0.0769
+    "east": -0.4167,
+    "north": 1.5328,
+    "up": 0.08
    },
    "ratio": 999.9
   },
@@ -653,11 +652,11 @@
    "time": "2020-06-25T00:25:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4209,
-    "north": 1.5314,
-    "up": 0.0825
+    "east": -0.4207,
+    "north": 1.5312,
+    "up": 0.0831
    },
    "ratio": 999.9
   },
@@ -665,11 +664,11 @@
    "time": "2020-06-25T00:25:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4193,
-    "north": 1.5352,
-    "up": 0.0841
+    "east": -0.4189,
+    "north": 1.5346,
+    "up": 0.0866
    },
    "ratio": 999.9
   },
@@ -677,11 +676,11 @@
    "time": "2020-06-25T00:26:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4187,
-    "north": 1.5337,
-    "up": 0.084
+    "east": -0.4185,
+    "north": 1.5333,
+    "up": 0.0855
    },
    "ratio": 999.9
   },
@@ -689,11 +688,11 @@
    "time": "2020-06-25T00:26:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4173,
-    "north": 1.5313,
-    "up": 0.0795
+    "east": -0.4171,
+    "north": 1.5304,
+    "up": 0.0841
    },
    "ratio": 999.9
   },
@@ -701,11 +700,11 @@
    "time": "2020-06-25T00:27:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4183,
-    "north": 1.5347,
-    "up": 0.0856
+    "east": -0.4181,
+    "north": 1.5346,
+    "up": 0.0861
    },
    "ratio": 999.9
   },
@@ -713,11 +712,11 @@
    "time": "2020-06-25T00:27:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.417,
-    "north": 1.5341,
-    "up": 0.0814
+    "east": -0.4169,
+    "north": 1.534,
+    "up": 0.0823
    },
    "ratio": 999.9
   },
@@ -725,11 +724,11 @@
    "time": "2020-06-25T00:28:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4155,
-    "north": 1.5282,
-    "up": 0.0768
+    "east": -0.4156,
+    "north": 1.5281,
+    "up": 0.0773
    },
    "ratio": 999.9
   },
@@ -737,11 +736,11 @@
    "time": "2020-06-25T00:28:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4183,
-    "north": 1.5379,
-    "up": 0.0871
+    "east": -0.4182,
+    "north": 1.5377,
+    "up": 0.088
    },
    "ratio": 999.9
   },
@@ -749,11 +748,11 @@
    "time": "2020-06-25T00:29:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4161,
-    "north": 1.528,
-    "up": 0.0765
+    "east": -0.4162,
+    "north": 1.5278,
+    "up": 0.0784
    },
    "ratio": 999.9
   },
@@ -761,11 +760,11 @@
    "time": "2020-06-25T00:29:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4188,
-    "north": 1.5361,
-    "up": 0.0866
+    "east": -0.4182,
+    "north": 1.5357,
+    "up": 0.0885
    },
    "ratio": 999.9
   },
@@ -773,11 +772,11 @@
    "time": "2020-06-25T00:30:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4192,
-    "north": 1.5352,
-    "up": 0.0828
+    "east": -0.419,
+    "north": 1.5343,
+    "up": 0.0879
    },
    "ratio": 999.9
   },
@@ -785,11 +784,11 @@
    "time": "2020-06-25T00:30:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.418,
-    "north": 1.5324,
-    "up": 0.0933
+    "east": -0.4178,
+    "north": 1.5325,
+    "up": 0.0923
    },
    "ratio": 999.9
   },
@@ -797,11 +796,11 @@
    "time": "2020-06-25T00:31:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4179,
-    "north": 1.5353,
-    "up": 0.0973
+    "east": -0.4177,
+    "north": 1.5354,
+    "up": 0.0963
    },
    "ratio": 999.9
   },
@@ -809,11 +808,11 @@
    "time": "2020-06-25T00:31:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4185,
-    "north": 1.5332,
-    "up": 0.0915
+    "east": -0.4183,
+    "north": 1.533,
+    "up": 0.0929
    },
    "ratio": 999.9
   },
@@ -821,11 +820,11 @@
    "time": "2020-06-25T00:32:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4179,
-    "north": 1.5309,
-    "up": 0.0864
+    "east": -0.4175,
+    "north": 1.5313,
+    "up": 0.0834
    },
    "ratio": 999.9
   },
@@ -833,11 +832,11 @@
    "time": "2020-06-25T00:32:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4194,
-    "north": 1.5342,
-    "up": 0.0946
+    "east": -0.4192,
+    "north": 1.5343,
+    "up": 0.0939
    },
    "ratio": 999.9
   },
@@ -845,11 +844,11 @@
    "time": "2020-06-25T00:33:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4217,
-    "north": 1.5369,
-    "up": 0.0943
+    "east": -0.4209,
+    "north": 1.5368,
+    "up": 0.0946
    },
    "ratio": 999.9
   },
@@ -857,11 +856,11 @@
    "time": "2020-06-25T00:33:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4174,
-    "north": 1.5364,
-    "up": 0.0912
+    "east": -0.4175,
+    "north": 1.5362,
+    "up": 0.0923
    },
    "ratio": 999.9
   },
@@ -869,11 +868,11 @@
    "time": "2020-06-25T00:34:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4162,
-    "north": 1.5364,
-    "up": 0.0927
+    "east": -0.4159,
+    "north": 1.5369,
+    "up": 0.0888
    },
    "ratio": 999.9
   },
@@ -881,11 +880,11 @@
    "time": "2020-06-25T00:34:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4178,
-    "north": 1.5384,
-    "up": 0.093
+    "east": -0.4175,
+    "north": 1.5386,
+    "up": 0.0916
    },
    "ratio": 999.9
   },
@@ -893,11 +892,11 @@
    "time": "2020-06-25T00:35:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4184,
-    "north": 1.5369,
-    "up": 0.0968
+    "east": -0.418,
+    "north": 1.5374,
+    "up": 0.0929
    },
    "ratio": 999.9
   },
@@ -905,11 +904,11 @@
    "time": "2020-06-25T00:35:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.422,
-    "north": 1.5378,
-    "up": 0.0986
+    "east": -0.4216,
+    "north": 1.5381,
+    "up": 0.0962
    },
    "ratio": 999.9
   },
@@ -917,11 +916,11 @@
    "time": "2020-06-25T00:36:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4174,
-    "north": 1.5365,
-    "up": 0.0828
+    "north": 1.5363,
+    "up": 0.0835
    },
    "ratio": 999.9
   },
@@ -929,11 +928,11 @@
    "time": "2020-06-25T00:36:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4157,
+    "east": -0.416,
     "north": 1.5358,
-    "up": 0.0881
+    "up": 0.0883
    },
    "ratio": 999.9
   },
@@ -941,11 +940,11 @@
    "time": "2020-06-25T00:37:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4169,
-    "north": 1.5448,
-    "up": 0.0982
+    "east": -0.4168,
+    "north": 1.545,
+    "up": 0.0962
    },
    "ratio": 999.9
   },
@@ -953,11 +952,11 @@
    "time": "2020-06-25T00:37:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4164,
-    "north": 1.5382,
-    "up": 0.0952
+    "east": -0.4162,
+    "north": 1.5388,
+    "up": 0.091
    },
    "ratio": 999.9
   },
@@ -965,11 +964,11 @@
    "time": "2020-06-25T00:38:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4155,
-    "north": 1.5364,
-    "up": 0.0908
+    "north": 1.5365,
+    "up": 0.0896
    },
    "ratio": 999.9
   },
@@ -977,11 +976,11 @@
    "time": "2020-06-25T00:38:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4136,
-    "north": 1.5376,
-    "up": 0.084
+    "east": -0.4139,
+    "north": 1.5377,
+    "up": 0.0826
    },
    "ratio": 999.9
   },
@@ -989,11 +988,11 @@
    "time": "2020-06-25T00:39:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4165,
-    "north": 1.5379,
-    "up": 0.0859
+    "east": -0.4164,
+    "north": 1.5375,
+    "up": 0.0882
    },
    "ratio": 999.9
   },
@@ -1001,11 +1000,11 @@
    "time": "2020-06-25T00:39:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4188,
-    "north": 1.5431,
-    "up": 0.0852
+    "east": -0.419,
+    "north": 1.5426,
+    "up": 0.0888
    },
    "ratio": 999.9
   },
@@ -1013,11 +1012,11 @@
    "time": "2020-06-25T00:40:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4184,
-    "north": 1.5382,
-    "up": 0.081
+    "north": 1.5378,
+    "up": 0.084
    },
    "ratio": 999.9
   },
@@ -1025,11 +1024,11 @@
    "time": "2020-06-25T00:40:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.418,
-    "north": 1.543,
-    "up": 0.0818
+    "east": -0.4184,
+    "north": 1.5426,
+    "up": 0.0845
    },
    "ratio": 999.9
   },
@@ -1037,11 +1036,11 @@
    "time": "2020-06-25T00:41:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.416,
-    "north": 1.5403,
-    "up": 0.076
+    "east": -0.4164,
+    "north": 1.5394,
+    "up": 0.0824
    },
    "ratio": 999.9
   },
@@ -1049,11 +1048,11 @@
    "time": "2020-06-25T00:41:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.415,
-    "north": 1.5365,
-    "up": 0.0771
+    "east": -0.4152,
+    "north": 1.5361,
+    "up": 0.0803
    },
    "ratio": 999.9
   },
@@ -1061,11 +1060,11 @@
    "time": "2020-06-25T00:42:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4153,
-    "north": 1.5353,
-    "up": 0.0726
+    "east": -0.4157,
+    "north": 1.5348,
+    "up": 0.0769
    },
    "ratio": 999.9
   },
@@ -1073,11 +1072,11 @@
    "time": "2020-06-25T00:42:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4172,
-    "north": 1.5345,
-    "up": 0.0815
+    "east": -0.4171,
+    "north": 1.5343,
+    "up": 0.0832
    },
    "ratio": 999.9
   },
@@ -1085,11 +1084,11 @@
    "time": "2020-06-25T00:43:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4188,
-    "north": 1.536,
-    "up": 0.0875
+    "east": -0.4186,
+    "north": 1.5361,
+    "up": 0.087
    },
    "ratio": 999.9
   },
@@ -1097,11 +1096,11 @@
    "time": "2020-06-25T00:43:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4186,
-    "north": 1.5401,
-    "up": 0.0909
+    "east": -0.4189,
+    "north": 1.54,
+    "up": 0.0916
    },
    "ratio": 999.9
   },
@@ -1109,11 +1108,11 @@
    "time": "2020-06-25T00:44:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4166,
-    "north": 1.5389,
-    "up": 0.0935
+    "east": -0.4165,
+    "north": 1.5388,
+    "up": 0.0936
    },
    "ratio": 999.9
   },
@@ -1121,11 +1120,11 @@
    "time": "2020-06-25T00:44:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4163,
-    "north": 1.5359,
-    "up": 0.0909
+    "east": -0.4165,
+    "north": 1.5358,
+    "up": 0.0917
    },
    "ratio": 999.9
   },
@@ -1133,11 +1132,11 @@
    "time": "2020-06-25T00:45:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4152,
-    "north": 1.5332,
-    "up": 0.088
+    "east": -0.4157,
+    "north": 1.5335,
+    "up": 0.0856
    },
    "ratio": 999.9
   },
@@ -1145,11 +1144,11 @@
    "time": "2020-06-25T00:45:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4136,
-    "north": 1.5351,
-    "up": 0.0971
+    "east": -0.4138,
+    "north": 1.5356,
+    "up": 0.0927
    },
    "ratio": 999.9
   },
@@ -1157,11 +1156,11 @@
    "time": "2020-06-25T00:46:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4147,
-    "north": 1.5344,
-    "up": 0.09
+    "east": -0.4148,
+    "north": 1.5345,
+    "up": 0.0883
    },
    "ratio": 999.9
   },
@@ -1169,11 +1168,11 @@
    "time": "2020-06-25T00:46:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4133,
-    "north": 1.5336,
-    "up": 0.0894
+    "east": -0.4137,
+    "north": 1.5334,
+    "up": 0.0903
    },
    "ratio": 999.9
   },
@@ -1181,11 +1180,11 @@
    "time": "2020-06-25T00:47:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4148,
-    "north": 1.5351,
-    "up": 0.0963
+    "east": -0.4146,
+    "north": 1.5356,
+    "up": 0.0921
    },
    "ratio": 999.9
   },
@@ -1193,11 +1192,11 @@
    "time": "2020-06-25T00:47:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4148,
+    "east": -0.4145,
     "north": 1.5354,
-    "up": 0.0931
+    "up": 0.0938
    },
    "ratio": 999.9
   },
@@ -1205,11 +1204,11 @@
    "time": "2020-06-25T00:48:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4176,
+    "east": -0.4175,
     "north": 1.5376,
-    "up": 0.0879
+    "up": 0.0878
    },
    "ratio": 999.9
   },
@@ -1217,11 +1216,11 @@
    "time": "2020-06-25T00:48:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4161,
-    "north": 1.5368,
-    "up": 0.0857
+    "north": 1.5365,
+    "up": 0.0882
    },
    "ratio": 999.9
   },
@@ -1229,11 +1228,11 @@
    "time": "2020-06-25T00:49:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4166,
-    "north": 1.5347,
-    "up": 0.0791
+    "east": -0.4163,
+    "north": 1.5342,
+    "up": 0.0828
    },
    "ratio": 999.9
   },
@@ -1241,11 +1240,11 @@
    "time": "2020-06-25T00:49:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4169,
-    "north": 1.5327,
-    "up": 0.0711
+    "north": 1.5319,
+    "up": 0.0773
    },
    "ratio": 999.9
   },
@@ -1253,11 +1252,11 @@
    "time": "2020-06-25T00:50:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4155,
-    "north": 1.5365,
-    "up": 0.078
+    "east": -0.4156,
+    "north": 1.5362,
+    "up": 0.0802
    },
    "ratio": 999.9
   },
@@ -1265,11 +1264,11 @@
    "time": "2020-06-25T00:50:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.416,
-    "north": 1.535,
-    "up": 0.076
+    "north": 1.5345,
+    "up": 0.0804
    },
    "ratio": 999.9
   },
@@ -1277,11 +1276,11 @@
    "time": "2020-06-25T00:51:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4152,
-    "north": 1.5325,
-    "up": 0.0784
+    "east": -0.4153,
+    "north": 1.5321,
+    "up": 0.0802
    },
    "ratio": 999.9
   },
@@ -1289,11 +1288,11 @@
    "time": "2020-06-25T00:51:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4143,
-    "north": 1.534,
-    "up": 0.0688
+    "north": 1.5332,
+    "up": 0.0743
    },
    "ratio": 999.9
   },
@@ -1301,11 +1300,11 @@
    "time": "2020-06-25T00:52:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4149,
-    "north": 1.5346,
-    "up": 0.0695
+    "east": -0.415,
+    "north": 1.5334,
+    "up": 0.0784
    },
    "ratio": 999.9
   },
@@ -1313,11 +1312,11 @@
    "time": "2020-06-25T00:52:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4162,
-    "north": 1.537,
-    "up": 0.0838
+    "east": -0.4163,
+    "north": 1.5368,
+    "up": 0.0852
    },
    "ratio": 999.9
   },
@@ -1325,11 +1324,11 @@
    "time": "2020-06-25T00:53:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4133,
-    "north": 1.5357,
-    "up": 0.081
+    "east": -0.4136,
+    "north": 1.5352,
+    "up": 0.0836
    },
    "ratio": 999.9
   },
@@ -1337,11 +1336,11 @@
    "time": "2020-06-25T00:53:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4153,
-    "north": 1.5374,
-    "up": 0.0768
+    "east": -0.4158,
+    "north": 1.5368,
+    "up": 0.0806
    },
    "ratio": 999.9
   },
@@ -1349,11 +1348,11 @@
    "time": "2020-06-25T00:54:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4173,
-    "north": 1.5336,
-    "up": 0.0755
+    "east": -0.4174,
+    "north": 1.5335,
+    "up": 0.0756
    },
    "ratio": 999.9
   },
@@ -1361,11 +1360,11 @@
    "time": "2020-06-25T00:54:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4154,
+    "east": -0.4159,
     "north": 1.5343,
-    "up": 0.0744
+    "up": 0.0737
    },
    "ratio": 999.9
   },
@@ -1373,11 +1372,11 @@
    "time": "2020-06-25T00:55:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4155,
-    "north": 1.5339,
-    "up": 0.0783
+    "east": -0.4154,
+    "north": 1.5338,
+    "up": 0.0787
    },
    "ratio": 999.9
   },
@@ -1385,11 +1384,11 @@
    "time": "2020-06-25T00:55:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4138,
-    "north": 1.5329,
-    "up": 0.0826
+    "east": -0.414,
+    "north": 1.5332,
+    "up": 0.0808
    },
    "ratio": 999.9
   },
@@ -1397,11 +1396,11 @@
    "time": "2020-06-25T00:56:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4181,
-    "north": 1.5266,
-    "up": 0.077
+    "north": 1.5267,
+    "up": 0.0764
    },
    "ratio": 999.9
   },
@@ -1409,11 +1408,11 @@
    "time": "2020-06-25T00:56:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4161,
-    "north": 1.5309,
-    "up": 0.0829
+    "east": -0.4163,
+    "north": 1.5312,
+    "up": 0.0804
    },
    "ratio": 999.9
   },
@@ -1421,11 +1420,11 @@
    "time": "2020-06-25T00:57:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4162,
-    "north": 1.5308,
-    "up": 0.0877
+    "north": 1.5318,
+    "up": 0.0809
    },
    "ratio": 999.9
   },
@@ -1433,11 +1432,11 @@
    "time": "2020-06-25T00:57:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4149,
-    "north": 1.5302,
-    "up": 0.0854
+    "east": -0.4154,
+    "north": 1.5306,
+    "up": 0.0821
    },
    "ratio": 999.9
   },
@@ -1445,11 +1444,11 @@
    "time": "2020-06-25T00:58:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4192,
-    "north": 1.5329,
-    "up": 0.0855
+    "east": -0.4191,
+    "north": 1.5335,
+    "up": 0.0815
    },
    "ratio": 999.9
   },
@@ -1457,11 +1456,11 @@
    "time": "2020-06-25T00:58:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4185,
-    "north": 1.5322,
-    "up": 0.092
+    "north": 1.5327,
+    "up": 0.0888
    },
    "ratio": 999.9
   },
@@ -1469,11 +1468,11 @@
    "time": "2020-06-25T00:59:00",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
-    "east": -0.4189,
-    "north": 1.5313,
-    "up": 0.0921
+    "east": -0.419,
+    "north": 1.5324,
+    "up": 0.0852
    },
    "ratio": 999.9
   },
@@ -1481,11 +1480,11 @@
    "time": "2020-06-25T00:59:30",
    "fix_status": "fixed",
    "q": 1,
-   "satellites": 6,
+   "satellites": 8,
    "baseline_enu_m": {
     "east": -0.4178,
-    "north": 1.5321,
-    "up": 0.0881
+    "north": 1.5327,
+    "up": 0.0845
    },
    "ratio": 999.9
   }
