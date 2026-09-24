@@ -1835,6 +1835,45 @@ fn the_stated_second_of_a_record_is_its_nearest_double() {
 }
 
 #[test]
+fn the_stated_seconds_text_is_public_and_survives_a_value_edit() {
+    // The second record's seconds field states a digit below the microsecond.
+    let text = "AS G05  2026 05 13 00 00  0.000000  1   1.0e-04\n\
+                AS G06  2026 05 13 00 00 30.0003571  1   2.0e-04\n";
+    let mut clock = RinexClock::parse(text).expect("clock");
+    let texts: Vec<Option<String>> = clock
+        .records()
+        .map(|record| record.second_text().map(str::to_string))
+        .collect();
+    assert_eq!(
+        texts,
+        vec![Some("0.000000".to_string()), Some("30.0003571".to_string())]
+    );
+    clock
+        .set_record_values(0, vec![3.0e-4])
+        .expect("edit values");
+    assert_eq!(
+        clock.records().next().unwrap().second_text(),
+        Some("0.000000")
+    );
+
+    let built = ClockRecord::new(
+        ClockRecordType::As,
+        "G07",
+        ClockEpoch {
+            year: 2026,
+            month: 5,
+            day: 13,
+            hour: 0,
+            minute: 1,
+            second: 0.0,
+        },
+        vec![1.0e-4],
+    )
+    .expect("record");
+    assert_eq!(built.second_text(), None);
+}
+
+#[test]
 fn the_nearest_microsecond_rounds_the_stated_digits() {
     let civil = |minute: u32, second: u32, microsecond: u32, femtosecond: u32| Civil {
         year: 2026,
