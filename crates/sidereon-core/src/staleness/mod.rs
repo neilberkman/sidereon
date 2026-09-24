@@ -506,7 +506,7 @@ pub fn select_ionex_over_range(
     // so a fresher non-representable candidate cannot mask an older usable one.
     // The terminal error reflects the first binding reason a usable result was
     // not produced: cap exceedance, then overflow, then no covering grid.
-    let mut beyond_cap: Option<(i64, i64)> = None; // (source_epoch, staleness)
+    let mut beyond_cap: Option<(f64, i64)> = None; // (source_epoch, staleness)
     let mut overflow_ctx: Option<&'static str> = None;
     for (product, lo, hi) in priors {
         // Whole-day shift that brings the source grid up onto the range end.
@@ -521,10 +521,11 @@ pub fn select_ionex_over_range(
             overflow_ctx.get_or_insert("days * 86400");
             continue;
         };
-        let Some(source_epoch_j2000_s) = end_epoch_j2000_s.checked_sub(staleness_s) else {
+        let Some(source_epoch_j2000_s) = end.seconds.checked_sub(staleness_s) else {
             overflow_ctx.get_or_insert("end - staleness");
             continue;
         };
+        let source_epoch_j2000_s = source_epoch_j2000_s as f64 + end.fraction;
 
         // Staleness is non-decreasing down the list, so once one candidate
         // exceeds the cap every remaining (older) candidate does too. Record the
@@ -558,7 +559,7 @@ pub fn select_ionex_over_range(
                 metadata: StalenessMetadata {
                     kind: DegradationKind::DiurnalShift,
                     requested_epoch_j2000_s,
-                    source_epoch_j2000_s: source_epoch_j2000_s as f64,
+                    source_epoch_j2000_s,
                     staleness_s: staleness_s as f64,
                     staleness_days: days as f64,
                 },
@@ -569,7 +570,7 @@ pub fn select_ionex_over_range(
     if let Some((source_epoch_j2000_s, staleness_s)) = beyond_cap {
         return Err(SelectionError::BeyondStalenessCap {
             requested_epoch_j2000_s,
-            source_epoch_j2000_s: source_epoch_j2000_s as f64,
+            source_epoch_j2000_s,
             staleness_s: staleness_s as f64,
             max_staleness_s: policy.max_staleness_s,
         });
