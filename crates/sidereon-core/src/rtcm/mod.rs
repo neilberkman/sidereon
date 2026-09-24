@@ -21,6 +21,7 @@
 //! | Message            | Numbers                                  | IR type |
 //! |--------------------|------------------------------------------|---------|
 //! | MSM1..MSM7 observations | 1071..1077 GPS, 1081..1087 GLONASS, 1091..1097 Galileo, 1101..1107 SBAS, 1111..1117 QZSS, 1121..1127 BeiDou, 1131..1137 NavIC | [`MsmMessage`] |
+//! | Legacy RTK observations | 1001..1004 GPS, 1009..1012 GLONASS          | [`LegacyObservations`] |
 //! | Station coordinates| 1005 / 1006                              | [`StationCoordinates`] |
 //! | Antenna / receiver | 1007 / 1008 / 1033                       | [`AntennaDescriptor`] |
 //! | GPS ephemeris      | 1019                                     | [`GpsEphemeris`] |
@@ -32,8 +33,7 @@
 //!
 //! Any other message number is preserved losslessly as [`Message::Unsupported`]
 //! (its raw body is kept so the frame still round-trips). Deferred message types
-//! include the legacy L1/L1-L2
-//! observation messages (1001-1004, 1009-1012), the NavIC ephemeris 1041, the
+//! include the NavIC ephemeris 1041, the
 //! GLONASS code-phase biases 1230, the IGS SSR messages 4076, the network-RTK
 //! correction families and the SSR messages not listed above. They decode as
 //! `Unsupported` rather than erroring.
@@ -42,8 +42,8 @@
 //!
 //! Input whose every field can be read but which departs from the format -
 //! nonzero frame reserved bits, bits after a message's last field other than
-//! the zero byte alignment, an MSM cell mask over 64 bits, an SSR body that ends
-//! before the records its header counts - is an
+//! the zero byte alignment, an MSM cell mask over 64 bits, an SSR or legacy
+//! observation body that ends before the records its header counts - is an
 //! [`RtcmDeparture`]. Under [`RtcmPolicy::Strict`], the default, it is refused
 //! by name; under [`RtcmPolicy::Lenient`] it is read and reported. The encoders
 //! write every field in its own width and refuse by name a value they would
@@ -95,6 +95,7 @@ pub(crate) mod crc;
 mod encode_error;
 mod ephemeris;
 mod framing;
+mod legacy;
 mod lli;
 mod msm;
 mod ssr;
@@ -120,6 +121,10 @@ pub use ephemeris::{
 pub use framing::{
     decode_frame, encode_frame, encode_frame_with_reserved, DecodedFrame, FrameScanner,
     FRAME_OVERHEAD, MAX_BODY_LEN, PREAMBLE,
+};
+pub use legacy::{
+    LegacyL1, LegacyL2, LegacyObservations, LegacySatellite, LEGACY_PHASE_RANGE_INVALID,
+    LEGACY_PSEUDORANGE_DIFFERENCE_INVALID,
 };
 pub use lli::{
     derive_lli, minimum_lock_time_ms, msm_epoch_dt_ms, msm_signal_rinex_code, CellLli,
@@ -156,9 +161,9 @@ pub struct UnsupportedMessage {
 /// [`RtcmPolicy::Lenient`] it is read or written and the departure reported.
 /// A CRC-24Q mismatch and a body that ends inside a field are refused under
 /// both policies: no reading of those bits is known to be the message. An SSR
-/// body that ends before the records its header counts is read under
-/// [`RtcmPolicy::Lenient`] up to its last complete record
-/// ([`RtcmDeparture::SsrRecordsShort`]).
+/// or legacy observation body that ends before the records its header counts
+/// is read under [`RtcmPolicy::Lenient`] up to its last complete record
+/// ([`RtcmDeparture::SsrRecordsShort`], [`RtcmDeparture::RecordsShort`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum RtcmPolicy {
     /// Refuse the first departure.
@@ -212,6 +217,19 @@ pub enum RtcmDeparture {
         /// The complete records the body holds.
         read: usize,
     },
+    /// A legacy observation body (1001-1004, 1009-1012) that ends before the
+    /// records its header's satellite count (DF006, DF035) states. RTKLIB
+    /// `decode_type1002`..`decode_type1012` read the complete records. The
+    /// header count is kept as transmitted and the bits of the incomplete
+    /// record in the message's `trailing_bits`.
+    RecordsShort {
+        /// The message number.
+        message_number: u16,
+        /// The record count the header states.
+        declared: usize,
+        /// The complete records the body holds.
+        read: usize,
+    },
 }
 
 impl core::fmt::Display for RtcmDeparture {
@@ -243,6 +261,14 @@ impl core::fmt::Display for RtcmDeparture {
             } => write!(
                 f,
                 "RTCM SSR {message_number} header counts {declared} satellites, and the body holds {read} complete records"
+            ),
+            Self::RecordsShort {
+                message_number,
+                declared,
+                read,
+            } => write!(
+                f,
+                "RTCM {message_number} header counts {declared} records, and the body holds {read} complete records"
             ),
         }
     }
@@ -515,6 +541,8 @@ struct DecodeFailure {
 pub enum Message {
     /// An MSM1 through MSM7 multi-signal observation message.
     Msm(MsmMessage),
+    /// A 1001..1004 GPS or 1009..1012 GLONASS legacy RTK observation message.
+    LegacyObservations(LegacyObservations),
     /// A 1005 / 1006 station antenna reference point.
     StationCoordinates(StationCoordinates),
     /// A 1007 / 1008 / 1033 antenna or receiver descriptor.
@@ -595,6 +623,9 @@ impl Message {
             1046 => Message::GalileoInavEphemeris(decode_body(body, ctx, |r, _| {
                 GalileoInavEphemeris::read(r)
             })?),
+            n if legacy::is_legacy_observation(n) => {
+                Message::LegacyObservations(LegacyObservations::decode_inner(body, ctx)?)
+            }
             n if msm::is_supported_msm(n) => {
                 Message::Msm(decode_body(body, ctx, MsmMessage::read)?)
             }
@@ -649,6 +680,7 @@ impl Message {
     pub fn encode_with_policy(&self, policy: RtcmPolicy) -> Result<(Vec<u8>, Vec<RtcmDeparture>)> {
         match self {
             Message::Msm(m) => m.encode_with_policy(policy),
+            Message::LegacyObservations(o) => o.encode_with_policy(policy),
             Message::StationCoordinates(s) => s.encode_with_policy(policy),
             Message::AntennaDescriptor(a) => a.encode_with_policy(policy),
             Message::GpsEphemeris(e) => e.encode_with_policy(policy),
@@ -666,6 +698,7 @@ impl Message {
     pub fn message_number(&self) -> u16 {
         match self {
             Message::Msm(m) => m.message_number,
+            Message::LegacyObservations(o) => o.message_number,
             Message::StationCoordinates(s) => s.message_number,
             Message::AntennaDescriptor(a) => a.message_number,
             Message::GpsEphemeris(_) => 1019,
@@ -727,7 +760,8 @@ fn is_decoded_number(number: u16) -> bool {
     matches!(
         number,
         1005 | 1006 | 1007 | 1008 | 1033 | 1019 | 1020 | 1042 | 1044 | 1045 | 1046
-    ) || msm::is_supported_msm(number)
+    ) || legacy::is_legacy_observation(number)
+        || msm::is_supported_msm(number)
         || ssr::is_supported_ssr(number)
 }
 

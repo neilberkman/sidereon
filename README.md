@@ -115,7 +115,7 @@ Every numerical routine is cross-checked against the reference implementation or
 | Geoid undulation (EGM96 15-arcminute) | PROJ (`us_nga_egm96_15`), to 5 mm | PROJ |
 | RINEX observation QC - multipath (MP1/MP2) | teqc `+qc` on a real captured stream, to sub-micrometer | teqc |
 | RTCM MSM lock-time to RINEX LLI | RTKLIB `convbin` decode of a real MSM stream | RTKLIB |
-| RTCM 3 MSM1..MSM7 decoding | RTKLIB `decode_rtcm3` of real multi-constellation streams and RTKLIB-encoded streams, bit for bit | RTKLIB |
+| RTCM 3 MSM1..MSM7 and legacy 1001..1004 / 1009..1012 decoding | RTKLIB `decode_rtcm3` of real multi-constellation streams and RTKLIB-encoded streams, bit for bit | RTKLIB |
 
 The per-crate test suites document the exact references, fixtures, and tolerances.
 The [Python oracle version-pinning note](docs/oracle-version-pinning.md) records
