@@ -35,11 +35,12 @@
 //!     G01/G03 LNAV+CNAV, J02 LNAV+CNAV+CNV2, and C19 CNV2 frames. The public
 //!     product carries no GPS CNV2 frames; GPS CNV2 roster coverage is synthetic
 //!     in this module, while the real fixture exercises QZSS CNV2.
-//!   * `BRDC00GOP_R_20210010000_01D_MN.rnx`: merged BRDC header (GOP/Pecny),
-//!     header-only, from nav-solutions/data NAV/V3 (gz sha256
+//!   * `BRDC00GOP_R_20210010000_01D_MN.rnx`: merged BRDC header (GOP/Pecny)
+//!     plus four records (C01, E03, R10, S36), from nav-solutions/data NAV/V3
+//!     (gz sha256
 //!     1bb7bb0ca70fb1e11e366abd9126881d62b238b687ace7fba360002b61a12f09). Carries
 //!     IONOSPHERIC CORR for GPS/Galileo/QZSS/NavIC, with committed coverage for
-//!     BeiDou (BDSA/BDSB Klobuchar-8). No orbit records.
+//!     BeiDou (BDSA/BDSB Klobuchar-8).
 
 use super::*;
 use crate::astro::time::model::{GnssWeekTow, TimeScale};

@@ -16,7 +16,7 @@ use sidereon_core::positioning::{
 };
 use sidereon_core::{GnssSatelliteId, GnssSystem};
 
-const GOLDEN: &str = include_str!("fixtures/orbis_gnss_application_golden.json");
+const GOLDEN: &str = include_str!("fixtures/sidereon_gnss_application_golden.json");
 const T_RX_J2000_S: f64 = 646_272_000.0;
 
 struct ClocklessSatSource<'a> {

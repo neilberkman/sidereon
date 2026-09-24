@@ -884,8 +884,8 @@ mod tests {
     }
 
     // --- LAMBDA port vs RTKLIB's own committed reference vectors ----------
-    // (t_lambda.c utest1/utest2; see parity/generator/lambda_ref). RTKLIB's
-    // unit test tolerates 1e-4 on the residuals; we hold the same.
+    // (t_lambda.c utest1/utest2, also in tests/fixtures/lambda_golden.json).
+    // RTKLIB's unit test tolerates 1e-4 on the residuals; we hold the same.
 
     fn full_matrix(flat: &[f64], n: usize) -> Vec<Vec<f64>> {
         (0..n)

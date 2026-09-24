@@ -1,17 +1,16 @@
 #![cfg(sidereon_repo_tests)]
 //! Authoritative 0-ULP golden for the GPS LNAV codec.
 //!
-//! Pins the codec against the Python reference generator
-//! (`parity/generator`, captured in `orbis_gnss_application_golden.json`): the
-//! IS-GPS-200 Table 20-XIV parity vectors, and the exact 300-bit subframes plus
-//! per-word hex produced by encoding the canonical example ephemeris with the
-//! recorded TLM/HOW options. This is bit-for-bit equality, so the crate alone
-//! proves the codec correct without the sidereon suite.
+//! Pins the codec against the Python reference values captured in
+//! `sidereon_gnss_application_golden.json`: the IS-GPS-200 Table 20-XIV parity
+//! vectors, and the exact 300-bit subframes plus per-word hex produced by
+//! encoding the canonical example ephemeris with the recorded TLM/HOW options. This is bit-for-bit equality, so the crate's own
+//! tests prove the codec correct.
 
 use serde_json::Value;
 use sidereon_core::navigation::lnav::{self, LnavNumber, LnavOptions, LnavParams};
 
-const GOLDEN: &str = include_str!("fixtures/orbis_gnss_application_golden.json");
+const GOLDEN: &str = include_str!("fixtures/sidereon_gnss_application_golden.json");
 
 fn n(v: f64) -> LnavNumber {
     LnavNumber::Float(v)

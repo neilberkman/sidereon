@@ -1,11 +1,10 @@
 //! 0-ULP parity tests for the Klobuchar L1 ionospheric delay recipe.
 //!
-//! These assert the Rust port reproduces the canonical reference recipe
-//! `parity/generator/klobuchar.py` bit-for-bit, using the committed golden
-//! fixture `parity/fixtures/klobuchar_golden.json`. Values are serialised as
-//! hex-float (Python `float.hex()`) so there is no decimal-parse ambiguity, and
-//! parity is measured as ULP distance via the integer reinterpretation of the
-//! IEEE-754 bit pattern, per the `skyfield_parity_test.exs` discipline.
+//! These assert the Rust port reproduces, bit for bit, the Python reference
+//! values in the committed golden fixture `tests/fixtures/klobuchar_golden.json`.
+//! Values are serialised as hex-float (Python `float.hex()`) so there is no
+//! decimal-parse ambiguity, and parity is measured as ULP distance via the
+//! integer reinterpretation of the IEEE-754 bit pattern.
 //!
 //! Every intermediate quantity (psi, phi_i, lambda_i, phi_m, t, F, AMP, PER, x,
 //! t_iono) and the final delay is checked per component, so a divergence is

@@ -1,5 +1,5 @@
 {
-  "schema": "orbis-gnss-parity/troposphere.v1",
+  "schema": "sidereon-gnss-parity/troposphere.v1",
   "purpose": "Saastamoinen zenith (dry+wet) + Niell NMF mapping -> slant tropospheric delay (meters). Reference recipe is generator/troposphere.py (RTKLIB rtkcmn.c operation order and constants); the Rust port asserts 0 ULP per intermediate and on the final meters against these hex-float goldens.",
   "env_ref": {
     "fixture": "fixtures/env.json",

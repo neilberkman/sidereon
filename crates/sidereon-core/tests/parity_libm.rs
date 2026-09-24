@@ -7,8 +7,7 @@
 //! and assert 0 ULP (bit-identical) per
 //! component.
 //!
-//! This mirrors the discipline of `repos/sidereon/test/skyfield_parity_test.exs`:
-//! values are serialized as hex-float (Python `float.hex()`) so there is no
+//! Values are serialized as hex-float (Python `float.hex()`) so there is no
 //! decimal-parse ambiguity, and parity is measured as ULP distance via the
 //! integer reinterpretation of the IEEE-754 bit pattern.
 //!
@@ -84,8 +83,8 @@ fn exp2_pow(n: i32) -> f64 {
 }
 
 /// ULP distance between two `f64`, using the monotone signed-integer mapping of
-/// the IEEE-754 bit pattern (same scheme as `skyfield_parity_test.exs`). Returns
-/// `u64::MAX` for any NaN, so a NaN never silently reads as 0 ULP.
+/// the IEEE-754 bit pattern. Returns `u64::MAX` for any NaN, so a NaN never
+/// silently reads as 0 ULP.
 fn ulp_distance(a: f64, b: f64) -> u64 {
     if a.is_nan() || b.is_nan() {
         return u64::MAX;

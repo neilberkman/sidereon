@@ -1,7 +1,7 @@
 {
-  "schema": "orbis-gnss-parity/broadcast_ephemeris.v1",
+  "schema": "sidereon-gnss-parity/broadcast_ephemeris.v1",
   "source_nav": "ESBC00DNK_R_20201770000_01D_MN.rnx",
-  "source_provenance": "parity/fixtures/nav/PROVENANCE.md",
+  "source_provenance": "tests/fixtures/nav/PROVENANCE.md",
   "recipe": "broadcast_eval_portable.py: IS-GPS-200 / Galileo OS ICD Keplerian orbit + clock; portable Rust libm 0.2 reference rounded to binary64 after every operation; no FMA; explicit-multiply powers; RTKLIB eph2pos statement order: Kepler Newton E-=(E-e*sin(E)-M)/(1-e*cos(E)) seeded E=M, Ek=0, while |E-Ek|>1e-13 and n<30; i=(i0+idot*tk)+di; BeiDou GEO rotation with SIN_5/COS_5 literals; clock polynomial at t-toc without refinement, relativistic -2*sqrt(mu*A)*e*sinE/(c*c), minus group delay",
   "python_version": "3.14.7",
   "kepler_tol_hex": "0x3d3c25c268497682",

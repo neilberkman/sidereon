@@ -1,6 +1,6 @@
 {
-  "schema": "orbis-gnss-parity/reduced_orbit.v1",
-  "purpose": "Independent Astropy/scipy oracle for Orbis.GNSS.ReducedOrbit and Piecewise.",
+  "schema": "sidereon-gnss-parity/reduced_orbit.v1",
+  "purpose": "Independent Astropy/scipy oracle for the reduced orbit and its piecewise form.",
   "environment": {
     "python": "3.14.4",
     "executable": "python",

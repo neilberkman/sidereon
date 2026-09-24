@@ -5,9 +5,9 @@
 //! The satellite ECEF velocity uses `v_ecef = R*v_gcrs - omega x r`, the
 //! standard rotating-frame transport. This is consistent with core's
 //! oracle-validated GNSS range-rate model
-//! `precise_positioning::velocity::predict_range_rate_m_s`. It deliberately
-//! differs from the legacy orbis `shift/4`, which had the transport sign
-//! inverted and was never oracle-gated.
+//! `precise_positioning::velocity::predict_range_rate_m_s`. The opposite
+//! transport sign (`+omega x r`) is wrong; the numerical-derivative test below
+//! rejects it.
 
 use crate::astro::constants::{models::pz90::OMEGA_E_RAD_S, units::M_PER_KM};
 use crate::astro::frames::transforms::{
@@ -105,8 +105,8 @@ pub fn range_rate_and_ratio(
 
 /// Compute range rate, Doppler ratio, and carrier Doppler shift.
 ///
-/// `frequency_hz` is multiplied by the Doppler ratio exactly as the Orbis
-/// wrapper did.
+/// The carrier Doppler shift is `frequency_hz` multiplied by the Doppler
+/// ratio.
 pub fn doppler_shift(
     gcrs_position_km: [f64; 3],
     gcrs_velocity_km_s: [f64; 3],
@@ -188,7 +188,7 @@ mod tests {
         )
         .expect("valid Doppler computation");
 
-        // The legacy orbis +omega x r sign would fail this by roughly 4.5e-3 km/s.
+        // A +omega x r transport sign would fail this by roughly 4.5e-3 km/s.
         assert!((analytic_range_rate - numerical).abs() < 1.0e-6);
     }
 

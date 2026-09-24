@@ -1,5 +1,5 @@
 {
-  "schema": "orbis-gnss-parity/ionex.v1",
+  "schema": "sidereon-gnss-parity/ionex.v1",
   "purpose": "IONEX TEC grid bilinear + temporal interpolation + single-layer slant geometry -> slant ionospheric group delay (meters). Parser substrate is gnssanalysis.read_ionex; the float pipeline reference recipe is generator/ionex.py. The Rust port asserts 0 ULP per intermediate and on the final meters against these hex-float goldens.",
   "env_ref": {
     "fixture": "fixtures/env.json",

@@ -5,10 +5,9 @@
 //! module is parity-critical and must not be refactored in any way that
 //! perturbs a single last bit.
 //!
-//! The only change from the `orbis_nif` original is visibility: the formerly
-//! `pub(crate)` `TimeScales` internals are promoted to a clean public API so a
-//! Rust-only consumer of `sidereon-core` can reach the precise time scales
-//! without pulling in Rustler or the BEAM.
+//! The `TimeScales` internals are a public API so a Rust-only consumer of
+//! `sidereon-core` can reach the precise time scales without pulling in
+//! Rustler or the BEAM.
 
 use crate::astro::constants::time::{BDT_MINUS_TAI_S, GPST_MINUS_TAI_S};
 use crate::astro::constants::time::{

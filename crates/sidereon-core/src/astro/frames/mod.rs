@@ -1,7 +1,7 @@
 //! High-accuracy frame transforms (Skyfield-compatible, 0-ULP).
 //!
-//! The precise frame-transform substrate that used to be `pub(crate)` inside
-//! `orbis_nif`, now a public part of the core crate. It exposes:
+//! The precise frame-transform substrate, a public part of the core crate. It
+//! exposes:
 //!
 //! - [`nutation`] - IAU 2000A nutation in longitude/obliquity, mean obliquity,
 //!   the nutation rotation matrix, and the equation-of-equinoxes complementary
@@ -15,15 +15,13 @@
 //!   Depends on [`nutation`], [`precession`], [`crate::astro::math::mat3`],
 //!   and [`crate::astro::time::scales`].
 //!
-//! The numerics are byte-for-byte identical to the `orbis_nif` originals so the
-//! existing Skyfield 0-ULP parity (`test/skyfield_parity_test.exs`) holds. The
-//! only changes on relocation are visibility (`pub(crate)` -> `pub`) and import
-//! paths; the operation order, summation order, transcendental sequence, and the
-//! single sanctioned `mul_add` site are preserved exactly.
+//! The operation order, summation order, transcendental sequence, and the
+//! single sanctioned `mul_add` site follow Skyfield exactly, so the transforms
+//! agree with Skyfield to 0 ULP; `crates/sidereon/tests/skyfield_parity.rs`
+//! checks that bit for bit against captured Skyfield 1.49 vectors.
 //!
-//! Per the crate-boundary invariant, the Rustler decode/encode shims
-//! (`*_impl`, `parse_datetime_tuple`) stay in `orbis_nif`; only the pure
-//! float-producing compute functions live here.
+//! Only the pure float-producing compute functions live here; the language
+//! bindings add nothing but decode/encode shims around them.
 
 pub mod nutation;
 pub mod orientation;

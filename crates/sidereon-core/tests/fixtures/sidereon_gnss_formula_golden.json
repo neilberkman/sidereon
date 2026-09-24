@@ -1,13 +1,13 @@
 {
-  "schema": "orbis-gnss-parity/orbis_gnss_formula.v1",
-  "purpose": "Independent Python/scipy oracle fixture for Orbis-only GNSS formula helpers: ionosphere-free combinations and QC weighting / chi-square gates.",
+  "schema": "sidereon-gnss-parity/gnss_formula.v1",
+  "purpose": "Independent Python/scipy oracle fixture for the GNSS formula helpers: ionosphere-free combinations and QC weighting / chi-square gates.",
   "env_ref": {
     "fixture": "fixtures/env.json",
     "note": "Generated in the pinned parity virtualenv; floats are stored as Python float.hex()."
   },
   "generator": {
     "python": "3.14.6",
-    "executable": "/Volumes/ExternalSSD/orbis-gnss-workspace/parity/.venv/bin/python",
+    "executable": "python",
     "numpy": "2.4.6",
     "scipy": "1.17.1"
   },
@@ -248,7 +248,7 @@
   },
   "observables": {
     "source": "test/fixtures/sp3/GRG0MGXFIN_20201760000_01D_15M_ORB.SP3",
-    "reference": "canonical sp3_interp CubicSpline recipe + Orbis/Skyfield WGS84 geodetic op-order",
+    "reference": "canonical sp3_interp CubicSpline recipe + Skyfield WGS84 geodetic op-order",
     "cases": [
       {
         "sat": "G21",

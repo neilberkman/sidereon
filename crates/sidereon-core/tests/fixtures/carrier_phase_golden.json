@@ -1,6 +1,6 @@
 {
-  "schema": "orbis-gnss-parity/carrier_phase.v1",
-  "purpose": "Independent Python/georinex oracle fixture for Orbis.GNSS.RINEX.Observations values/phases and Orbis.GNSS.CarrierPhase combinations, cycle-slip detection, Hatch smoothing, and ionosphere-free smoothing.",
+  "schema": "sidereon-gnss-parity/carrier_phase.v1",
+  "purpose": "Independent Python/georinex oracle fixture for RINEX observation values/phases and carrier-phase combinations, cycle-slip detection, Hatch smoothing, and ionosphere-free smoothing.",
   "env_ref": {
     "fixture": "fixtures/env.json",
     "note": "Generated in the pinned parity virtualenv; floats are stored as Python float.hex()."

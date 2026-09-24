@@ -34,8 +34,9 @@
 //!     (gz sha256 51971877df4b4bb6c43bb13ff5c850752100d38048526d6bf39ecd98b54aaf27).
 //!     The committed GRG product carries no BeiDou; GBM is the BeiDou physical
 //!     anchor. Full day not vendored into the crate; trims below are committed.
-//!   * `GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3`: first 120 epochs + the
-//!     records the Wettzell RTK real-arc harness needs (243328 B sha256
+//!   * `GBM0MGXRAP_20201770000_01D_05M_ORB_120epoch.sp3`: the first 24 SP3
+//!     epochs (00:00..01:55), which span the first 120 observation epochs of the
+//!     30 s real-arc fixtures (243328 B sha256
 //!     769e61ab9153cac0c9103df1b1721cda8a8e04457188b862a5f63c431ca3cba2); no values
 //!     altered.
 //!   * `GBM_BDS_C21_C08_trim.sp3`: header + position records for BeiDou C21 (MEO)

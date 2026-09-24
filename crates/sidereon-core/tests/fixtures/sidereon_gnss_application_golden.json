@@ -1,6 +1,6 @@
 {
-  "schema": "orbis-gnss-parity/orbis_gnss_application.v1",
-  "purpose": "Independent Python oracle fixture for Orbis-only GNSS application modules.",
+  "schema": "sidereon-gnss-parity/gnss_application.v1",
+  "purpose": "Independent Python oracle fixture for the GNSS application modules.",
   "env_ref": {
     "fixture": "fixtures/env.json",
     "note": "Generated in the pinned parity virtualenv; floats are stored as Python float.hex()."

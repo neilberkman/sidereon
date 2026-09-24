@@ -189,7 +189,7 @@ def main() -> None:
     )
 
     doc = {
-        "schema": "orbis-gnss-parity/dop_multi.v1",
+        "schema": "sidereon-gnss-parity/dop_multi.v1",
         "purpose": (
             "Multi-system DOP: per-constellation TDOP = sqrt(Q[3+i][3+i]) from "
             "Q = (H^T W H)^-1 with one receiver-clock column per GNSS. Reference "

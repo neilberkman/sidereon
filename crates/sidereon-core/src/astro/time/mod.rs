@@ -1,11 +1,10 @@
 //! Time scales and the public time model.
 //!
-//! The precise time-scale machinery, which used to be `pub(crate)` inside
-//! `orbis_nif` and is now public in the core crate. It exposes three layers:
+//! The precise time-scale machinery, public in the core crate. It exposes three
+//! layers:
 //!
-//! - [`scales`] - the parity-critical UTC->TAI->TT->TDB->UT1 conversion, moved
-//!   verbatim from `orbis_nif/src/time_scales.rs`. The numerics are byte-for-byte
-//!   identical so the existing Skyfield 0-ULP parity holds.
+//! - [`scales`] - the parity-critical UTC->TAI->TT->TDB->UT1 conversion, which
+//!   follows Skyfield's operation order so it agrees with Skyfield to 0 ULP.
 //! - [`civil`] - the no-leap-second civil-calendar conversions (split Julian
 //!   date, seconds since J2000, second-of-day, fractional day-of-year) that the
 //!   GNSS bindings consume directly, so each interface stops reimplementing them.

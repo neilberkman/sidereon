@@ -1,9 +1,8 @@
 //! 0-ULP parity tests for the IONEX slant ionospheric delay pipeline.
 //!
-//! These assert the Rust port reproduces the canonical reference recipe
-//! `parity/generator/ionex.py` bit-for-bit, using the committed golden fixture
-//! `parity/fixtures/ionex_golden.json` and the synthetic IONEX product the
-//! fixture was generated from. Values are serialised as hex-float (Python
+//! These assert the Rust port reproduces, bit for bit, the Python reference
+//! values in the committed golden fixture `tests/fixtures/ionex_golden.json`,
+//! using the synthetic IONEX product the fixture was generated from. Values are serialised as hex-float (Python
 //! `float.hex()`) so there is no decimal-parse ambiguity, and parity is measured
 //! as ULP distance via the integer reinterpretation of the IEEE-754 bit pattern.
 //!

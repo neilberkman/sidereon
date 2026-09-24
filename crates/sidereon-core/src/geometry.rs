@@ -869,7 +869,7 @@ mod tests {
     use serde_json::Value;
 
     const APPLICATION_GOLDEN: &str =
-        include_str!("../tests/fixtures/orbis_gnss_application_golden.json");
+        include_str!("../tests/fixtures/sidereon_gnss_application_golden.json");
     const SPP_TRACE: &str = include_str!("../tests/fixtures/spp_trace_L2_tropo.json");
 
     fn sp3_fixture() -> Sp3 {
@@ -1053,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn visibility_series_matches_orbis_sampling_counts() {
+    fn visibility_series_matches_pinned_sampling_counts() {
         let sp3 = sp3_fixture();
         let rx = trace_receiver();
         let window = (
@@ -1074,7 +1074,7 @@ mod tests {
     }
 
     #[test]
-    fn dop_series_matches_orbis_first_sample_bits() {
+    fn dop_series_matches_pinned_first_sample_bits() {
         let sp3 = sp3_fixture();
         let rx = trace_receiver();
         let window = (
@@ -1117,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    fn passes_match_orbis_sampled_rise_set_peak_rows() {
+    fn passes_match_pinned_sampled_rise_set_peak_rows() {
         let sp3 = sp3_fixture();
         let rx = trace_receiver();
         let window = (

@@ -1309,7 +1309,7 @@ mod tests {
     //! `us_nga_egm08_25.tif`, SHA-256
     //! `4191d471eefebf24091b56dbc604353cb3b8cf8cc70e448bb9ae56a272bef17a`.
     //! Command:
-    //! `PROJ_DATA=/Volumes/ExternalSSD/sidereon-fleet/.tmp-egm2008/proj cct -d 12 +proj=pipeline +step +inv +proj=vgridshift +grids=us_nga_egm08_25.tif +multiplier=1`.
+    //! `PROJ_DATA=<dir containing us_nga_egm08_25.tif> cct -d 12 +proj=pipeline +step +inv +proj=vgridshift +grids=us_nga_egm08_25.tif +multiplier=1`.
     //! With input height zero, the undulation is `-output_z`. The crop test
     //! asserts agreement to 5 mm.
 

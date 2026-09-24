@@ -25,7 +25,7 @@
 //! The codec is integer / exact-power-of-two arithmetic throughout, so it is a
 //! 0-ULP target: a given set of parameters encodes to one exact bit pattern. The
 //! authoritative golden is the `lnav` section of
-//! `tests/fixtures/orbis_gnss_application_golden.json` (the Python reference
+//! `tests/fixtures/sidereon_gnss_application_golden.json` (the Python reference
 //! generator), asserted bit-for-bit in `tests/lnav.rs`.
 
 use crate::validate;

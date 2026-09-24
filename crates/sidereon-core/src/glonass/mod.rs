@@ -9,12 +9,10 @@
 //! Runge-Kutta integrator - the canonical GLONASS-ICD / RTKLIB `glorbit`/`deq`
 //! algorithm.
 //!
-//! This reproduces the reference recipe `parity/generator/glonass_eval.py`
+//! This follows the reference recipe in `fixtures-generators/glonass_golden.py`
 //! statement-for-statement: plain `f64` arithmetic with no fused multiply-add and
 //! integer powers written as explicit multiplies, so it is a bit-exact (0-ULP)
-//! target against the committed `glonass_golden.json`. Unlike the closed-form
-//! Keplerian path it is a numerical integrator, so it is additionally validated
-//! physically against precise GLONASS orbits by the parity SP3 gate.
+//! target against the committed `glonass_golden.json`.
 //!
 //! The step is pinned at 60 s with a final partial step to land exactly on the
 //! requested epoch, and the integration direction follows the sign of the time

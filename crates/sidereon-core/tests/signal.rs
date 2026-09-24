@@ -7,7 +7,7 @@ use sidereon_core::signal::{
 };
 use std::collections::BTreeMap;
 
-const GOLDEN: &str = include_str!("fixtures/orbis_gnss_application_golden.json");
+const GOLDEN: &str = include_str!("fixtures/sidereon_gnss_application_golden.json");
 
 fn parse_hex_float(s: &str) -> f64 {
     let (sign, body) = if let Some(rest) = s.strip_prefix('-') {

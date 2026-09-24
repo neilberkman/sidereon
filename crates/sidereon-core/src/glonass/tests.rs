@@ -1,10 +1,10 @@
 //! 0-ULP parity tests for the GLONASS RK4 state-vector propagator.
 //!
-//! These assert the Rust port reproduces the canonical reference recipe
-//! `parity/generator/glonass_eval.py` bit-for-bit, using the committed golden
-//! `parity/fixtures/glonass_golden.json` (vendored at `tests/fixtures/`). Values
-//! are hex-float (Python `float.hex()`) and parity is measured as ULP distance on
-//! the IEEE-754 bit pattern. The golden carries the state after every RK4 step,
+//! These assert the Rust port reproduces, bit for bit, the committed golden
+//! `tests/fixtures/glonass_golden.json`, whose expected values
+//! `fixtures-generators/glonass_golden.py` recomputes. Values are hex-float
+//! (Python `float.hex()`) and parity is measured as ULP distance on the
+//! IEEE-754 bit pattern. The golden carries the state after every RK4 step,
 //! so a divergence is localised to a single integration step, not just the
 //! output. The integration direction/step branches (tk = 0, one step, partial
 //! step, multi-step, backward, the +15 min edge) are all exercised.
