@@ -333,7 +333,10 @@ fn ionex_range_diurnal_shift_covers_the_whole_window() {
 
 #[test]
 fn sp3_present_path_is_byte_identical() {
-    let day = make_sp3(2024, 3, 10);
+    // Twelve 15-minute epochs: the position interpolator takes eleven nodes,
+    // so the day holds a query it serves.
+    let quarter_hours: Vec<(i64, i64, i64)> = (0..12).map(|k| (10, k / 4, (k % 4) * 15)).collect();
+    let day = make_sp3_epochs(&quarter_hours);
     let span = day.epochs_j2000_seconds();
     let requested = span[0] + 300.0; // inside [00:00, 00:15]
 

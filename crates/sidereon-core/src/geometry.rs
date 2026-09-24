@@ -954,18 +954,36 @@ mod tests {
             .expect("valid visibility mask");
         let expected = case["visible_gps_mask10"].as_array().expect("visible rows");
 
-        assert_eq!(got.len(), expected.len());
-        for (got, want) in got.iter().zip(expected) {
-            assert_eq!(got.satellite.to_string(), want["satellite_id"]);
-            assert_eq!(
-                got.elevation_deg.to_bits(),
-                hexf(&want["elevation_deg"]).to_bits()
-            );
-            assert_eq!(
-                got.azimuth_deg.to_bits(),
-                hexf(&want["azimuth_deg"]).to_bits()
-            );
-        }
+        // Every row is compared at once, so a mismatch prints every row. The epoch,
+        // 12:00, is an SP3 node, where the interpolating polynomial passes through the
+        // node whichever eleven nodes it is fitted to; the G16 azimuth and the G08 and
+        // G10 elevations were re-frozen one unit in the last place when the pivot at
+        // a node moved to the node before it, as RTKLIB pephpos takes it, which moves
+        // only the rounding of Neville's evaluation.
+        let got_rows: Vec<(String, u64, u64)> = got
+            .iter()
+            .map(|row| {
+                (
+                    row.satellite.to_string(),
+                    row.elevation_deg.to_bits(),
+                    row.azimuth_deg.to_bits(),
+                )
+            })
+            .collect();
+        let want_rows: Vec<(String, u64, u64)> = expected
+            .iter()
+            .map(|row| {
+                (
+                    row["satellite_id"]
+                        .as_str()
+                        .expect("satellite id")
+                        .to_owned(),
+                    hexf(&row["elevation_deg"]).to_bits(),
+                    hexf(&row["azimuth_deg"]).to_bits(),
+                )
+            })
+            .collect();
+        assert_eq!(got_rows, want_rows, "{got_rows:#x?}");
     }
 
     #[test]
@@ -1109,11 +1127,22 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["G21", "G16", "G26", "G20", "G27", "G18", "G10", "G08", "G07"]
         );
-        assert_eq!(first.geometry.dop.gdop.to_bits(), 0x4000c042642e3cbc);
-        assert_eq!(first.geometry.dop.pdop.to_bits(), 0x3ffd34cde2c7e3ff);
-        assert_eq!(first.geometry.dop.hdop.to_bits(), 0x3ff257e7df379516);
-        assert_eq!(first.geometry.dop.vdop.to_bits(), 0x3ff6ba2ad4e284ae);
-        assert_eq!(first.geometry.dop.tdop.to_bits(), 0x3ff069acbf06750f);
+        // Re-frozen (up to three units in the last place) when the pivot at an SP3
+        // node moved to the node before it, as RTKLIB pephpos takes it: the first
+        // sample sits on a node, where only the rounding of the fit moves.
+        let dop = &first.geometry.dop;
+        let got = [dop.gdop, dop.pdop, dop.hdop, dop.vdop, dop.tdop].map(f64::to_bits);
+        assert_eq!(
+            got,
+            [
+                0x4000c042642e3cba,
+                0x3ffd34cde2c7e3fd,
+                0x3ff257e7df379517,
+                0x3ff6ba2ad4e284ab,
+                0x3ff069acbf06750c,
+            ],
+            "{got:#x?}"
+        );
     }
 
     #[test]

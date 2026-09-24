@@ -53,7 +53,10 @@ use std::path::PathBuf;
 //   30 GPS LNAV records selected by real SSR IODE matching at the comparison
 //   epochs, with toc/toe 230400 s except G23 and G27 at 230384 s.
 // - SP3: gzip -dc IGS0OPSULT_20261870600_02D_15M_ORB.SP3.gz > .SP3; keep the
-//   seven 15-minute epochs from 2026-07-07 13:15 through 14:45 GPS.
+//   thirteen 15-minute epochs from 2026-07-07 12:30 through 15:30 GPS, every
+//   record verbatim, with header line 1 and line 2 restated for that start
+//   and count. The position interpolator takes eleven nodes (RTKLIB pephpos's
+//   NMAX + 1), and a comparison epoch near 14:08 selects 12:45 through 15:15.
 
 const REAL_GPS_WEEK: u32 = 2426;
 const REAL_UPDATE_INTERVAL_S: f64 = 10.0;
@@ -513,7 +516,7 @@ fn load_real_broadcast() -> BroadcastEphemeris {
 fn load_real_truth_sp3() -> Sp3 {
     let path = fixture_path(&[
         "ssr",
-        "IGS0OPSULT_20261870600_02D_15M_ORB_20261881315_07E.SP3",
+        "IGS0OPSULT_20261870600_02D_15M_ORB_20261881230_13E.SP3",
     ]);
     let bytes = std::fs::read(&path).unwrap_or_else(|err| panic!("read fixture {path:?}: {err}"));
     Sp3::parse(&bytes).unwrap_or_else(|err| panic!("parse SP3 {path:?}: {err}"))

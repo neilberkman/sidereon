@@ -86,6 +86,17 @@ pub enum Error {
     IonexEpoch(crate::ionex::IonexEpochError),
     /// A requested epoch lies outside the sampled / valid span.
     EpochOutOfRange,
+    /// A precise-orbit position query falls in a contiguous run of fewer
+    /// nodes than the interpolator takes, so no position is served there. RTKLIB
+    /// `preceph.c` pephpos refuses on the same count.
+    InsufficientPreciseNodes {
+        /// The satellite queried.
+        sat: crate::GnssSatelliteId,
+        /// Nodes in the run serving the query.
+        nodes: usize,
+        /// Nodes the interpolator takes.
+        required: usize,
+    },
     /// An operation received inputs it cannot combine (e.g. an empty set of
     /// products to merge, or products on mismatched time scales, epoch grids, or
     /// coordinate-system labels).
@@ -153,6 +164,14 @@ impl fmt::Display for Error {
             }
             Error::IonexEpoch(error) => write!(f, "invalid input: {error}"),
             Error::EpochOutOfRange => write!(f, "epoch out of range"),
+            Error::InsufficientPreciseNodes {
+                sat,
+                nodes,
+                required,
+            } => write!(
+                f,
+                "{sat}: {nodes} precise orbit nodes serve the query, {required} are needed"
+            ),
             Error::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Error::SbasEncode(error) => write!(f, "SBAS encode error: {error}"),
             Error::RtcmEncode(error) => write!(f, "invalid input: {error}"),

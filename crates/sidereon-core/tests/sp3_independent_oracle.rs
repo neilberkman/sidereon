@@ -14,7 +14,7 @@ use sidereon_core::ephemeris::{
     observable_states_at_j2000_s, PreciseEphemerisInterpolant, PreciseEphemerisSample,
     PreciseEphemerisSamples, Sp3,
 };
-use sidereon_core::{GnssSatelliteId, GnssSystem};
+use sidereon_core::{Error, GnssSatelliteId, GnssSystem};
 use std::collections::BTreeMap;
 
 const COD_5M_FIXTURE: &str = "tests/fixtures/sp3/COD0MGXFIN_20201770000_01D_05M_ORB.SP3";
@@ -226,6 +226,9 @@ struct AdjudicationStats {
     parsed_wins: u64,
     sample_wins: u64,
     ties: u64,
+    /// Held-out records both schemes refuse because the run serving them holds
+    /// fewer than the eleven nodes the interpolator takes.
+    refused: u64,
     per_sat: BTreeMap<GnssSatelliteId, (SchemeScore, SchemeScore)>,
 }
 
@@ -263,6 +266,7 @@ impl AdjudicationStats {
         self.parsed_wins += other.parsed_wins;
         self.sample_wins += other.sample_wins;
         self.ties += other.ties;
+        self.refused += other.refused;
         for (&sat, &(parsed, samples)) in &other.per_sat {
             let entry = self.per_sat.entry(sat).or_default();
             entry.0.count += parsed.count;
@@ -304,12 +308,19 @@ fn score_decimation_holdout(fixture: &str) -> AdjudicationStats {
         if next_node >= full_epoch_count {
             continue;
         }
-        let parsed_state = parsed_path
-            .position_at_j2000_seconds(record.sat, record.epoch.j2000_s)
-            .expect("parsed decimated interpolation");
-        let sample_state = sample_path
-            .position_at_j2000_seconds(record.sat, record.epoch.j2000_s)
-            .expect("sample decimated interpolation");
+        let parsed = parsed_path.position_at_j2000_seconds(record.sat, record.epoch.j2000_s);
+        let sample = sample_path.position_at_j2000_seconds(record.sat, record.epoch.j2000_s);
+        if let Err(Error::InsufficientPreciseNodes { .. }) = parsed {
+            assert_eq!(
+                sample.map(|state| state.position),
+                parsed.map(|state| state.position),
+                "both schemes refuse a short run alike"
+            );
+            stats.refused += 1;
+            continue;
+        }
+        let parsed_state = parsed.expect("parsed decimated interpolation");
+        let sample_state = sample.expect("sample decimated interpolation");
         stats.record(
             record.sat,
             error_3d_m(parsed_state.position.as_array(), record.position_m),
@@ -321,7 +332,6 @@ fn score_decimation_holdout(fixture: &str) -> AdjudicationStats {
         );
     }
 
-    assert!(stats.parsed.count > 0, "no held-out records scored");
     assert_eq!(
         stats.parsed.count, stats.samples.count,
         "schemes must score the same held-out records"
@@ -780,6 +790,13 @@ fn decimated_real_sp3_holdout_adjudicates_mid_interval_schemes() {
     combined.merge(&cod);
     combined.merge(&gbm);
 
+    // The GBM trim holds 24 five-minute epochs, eight once decimated to fifteen
+    // minutes: fewer than the eleven nodes the interpolator takes (RTKLIB
+    // pephpos's NMAX + 1), so both schemes refuse every held-out record of it.
+    assert_eq!(cod.refused, 0);
+    assert_eq!(gbm.parsed.count, 0);
+    assert_eq!(gbm.refused, 1_722);
+
     assert_adjudication(
         "COD",
         &cod,
@@ -803,52 +820,8 @@ fn decimated_real_sp3_holdout_adjudicates_mid_interval_schemes() {
             worst_max_sample_3d_m: 1.280_029_161_638_427,
         },
     );
-    assert_adjudication(
-        "GBM",
-        &gbm,
-        ExpectedAdjudication {
-            records: 1_722,
-            satellites: 123,
-            parsed_rms_3d_m: 2.649_722_808_521_194e-1,
-            parsed_max_3d_m: 6.961_158_104_996_079,
-            sample_rms_3d_m: 2.649_722_808_525_167e-1,
-            sample_max_3d_m: 6.961_158_104_996_079,
-            path_delta_rms_3d_m: 1.914_499_825_598_923e-9,
-            path_delta_max_3d_m: 1.501_712_528_671_799e-8,
-            parsed_wins: 95,
-            sample_wins: 83,
-            ties: 1_544,
-            worst_rms_sat: "E18",
-            worst_rms_parsed_3d_m: 2.932_349_026_062_27,
-            worst_rms_sample_3d_m: 2.932_349_026_062_27,
-            worst_max_sat: "E18",
-            worst_max_parsed_3d_m: 6.961_158_104_996_079,
-            worst_max_sample_3d_m: 6.961_158_104_996_079,
-        },
-    );
-    assert_adjudication(
-        "combined",
-        &combined,
-        ExpectedAdjudication {
-            records: 19_002,
-            satellites: 124,
-            parsed_rms_3d_m: 8.049_797_247_371_743e-2,
-            parsed_max_3d_m: 6.961_158_104_996_079,
-            sample_rms_3d_m: 8.049_797_247_415_32e-2,
-            sample_max_3d_m: 6.961_158_104_996_079,
-            path_delta_rms_3d_m: 1.863_940_305_977_352e-9,
-            path_delta_max_3d_m: 4.020_965_667_248_365e-8,
-            parsed_wins: 763,
-            sample_wins: 734,
-            ties: 17_505,
-            worst_rms_sat: "E18",
-            worst_rms_parsed_3d_m: 7.709_599_414_124_974e-1,
-            worst_rms_sample_3d_m: 7.709_599_414_139_712e-1,
-            worst_max_sat: "E18",
-            worst_max_parsed_3d_m: 6.961_158_104_996_079,
-            worst_max_sample_3d_m: 6.961_158_104_996_079,
-        },
-    );
+    assert_eq!(combined.parsed.count, cod.parsed.count);
+    assert_eq!(combined.refused, gbm.refused);
 
     let rms_ratio = (combined.parsed.rms_3d_m() / combined.samples.rms_3d_m())
         .max(combined.samples.rms_3d_m() / combined.parsed.rms_3d_m());

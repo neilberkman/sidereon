@@ -25,8 +25,8 @@ use crate::observables::{
     ObservableEphemerisSource, ObservableState, ObservableStateBatch, ObservablesError,
 };
 use crate::sp3::interp::{
-    instant_to_j2000_seconds, neville, PreciseQuery, Sp3InterpolationOptions,
-    DEFAULT_GAP_THRESHOLD_FACTOR, NEVILLE_POINTS,
+    instant_to_j2000_seconds, neville, neville_window, select_position_nodes, PreciseQuery,
+    Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR, NEVILLE_POINTS,
 };
 use crate::sp3::{PreciseEphemerisInterpolant, Sp3, Sp3State};
 use crate::{validate, Error, Result};
@@ -680,6 +680,7 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
             return Err(Error::UnknownSatellite(sat));
         };
         interpolate_mapped_state(
+            sat,
             self.bytes.as_ref(),
             series,
             query,
@@ -696,6 +697,7 @@ impl<'a> MmapPreciseEphemerisInterpolant<'a> {
     ) -> Result<[f64; 3]> {
         let series = self.series.get(&sat).ok_or(Error::UnknownSatellite(sat))?;
         interpolate_mapped_position(
+            sat,
             self.bytes.as_ref(),
             series,
             PreciseQuery::at(t_j2000_s).ephpos_step(),
@@ -1427,13 +1429,19 @@ fn parse_store<'a>(
 // invariant: validated mapped payloads contain finite ITRF coordinates.
 #[allow(clippy::expect_used)]
 fn interpolate_mapped_state(
+    sat: GnssSatelliteId,
     bytes: &[u8],
     series: &MmapSeries,
     query: f64,
     gap_threshold_factor: f64,
 ) -> Result<Sp3State> {
-    let (x_m, y_m, z_m) =
-        interpolate_mapped_position(bytes, series, PreciseQuery::at(query), gap_threshold_factor)?;
+    let (x_m, y_m, z_m) = interpolate_mapped_position(
+        sat,
+        bytes,
+        series,
+        PreciseQuery::at(query),
+        gap_threshold_factor,
+    )?;
     let clock_s = interpolate_mapped_clock(bytes, series, query);
     Ok(Sp3State {
         position: ItrfPositionM::new(x_m, y_m, z_m).expect("valid ITRF position"),
@@ -1447,35 +1455,20 @@ fn interpolate_mapped_state(
 /// Mapped-series position at `precise_query`, with the in-memory path's coverage and
 /// gap checks.
 fn interpolate_mapped_position(
+    sat: GnssSatelliteId,
     bytes: &[u8],
     series: &MmapSeries,
     precise_query: PreciseQuery,
     gap_threshold_factor: f64,
 ) -> Result<(f64, f64, f64)> {
     let query = precise_query.j2000_s();
-    if series.pos_count < 2 {
-        return Err(Error::EpochOutOfRange);
+    if series.pos_count == 0 {
+        return Err(Error::UnknownSatellite(sat));
     }
-
-    let nominal = nominal_positive_spacing(bytes, series).ok_or(Error::EpochOutOfRange)?;
-    let first = series.pos_x.get(bytes, 0);
-    let last = series.pos_x.get(bytes, series.pos_count - 1);
-    if query < first - nominal || query > last + nominal {
-        return Err(Error::EpochOutOfRange);
-    }
-
-    let gap_thresh = gap_threshold_factor * nominal;
-    let mut bi = 0usize;
-    while bi + 1 < series.pos_count && series.pos_x.get(bytes, bi + 1) <= query {
-        bi += 1;
-    }
-    if bi + 1 < series.pos_count {
-        let lo = series.pos_x.get(bytes, bi);
-        let hi = series.pos_x.get(bytes, bi + 1);
-        if hi - lo > gap_thresh && query > lo + nominal && query < hi - nominal {
-            return Err(Error::EpochOutOfRange);
-        }
-    }
+    select_position_nodes(series.pos_count, query, gap_threshold_factor, |i| {
+        series.pos_x.get(bytes, i)
+    })
+    .map_err(|refusal| refusal.into_error(sat))?;
 
     let (x_m, y_m, z_m) =
         interpolate_mapped_position_neville(bytes, series, precise_query, gap_threshold_factor);
@@ -1497,46 +1490,16 @@ fn interpolate_mapped_position_neville(
     gap_threshold_factor: f64,
 ) -> (f64, f64, f64) {
     let query = precise_query.j2000_s();
-    let n = series.pos_count;
     let nominal = nominal_positive_spacing(bytes, series).unwrap_or(1.0);
-    let gap_thresh = gap_threshold_factor * nominal;
-
-    let mut pivot = 0usize;
-    while pivot + 1 < n && series.pos_x.get(bytes, pivot + 1) <= query {
-        pivot += 1;
-    }
-    if pivot + 1 < n {
-        let x_pivot = series.pos_x.get(bytes, pivot);
-        let x_next = series.pos_x.get(bytes, pivot + 1);
-        if (x_next - x_pivot) > gap_thresh && query >= x_next - nominal {
-            pivot += 1;
-        }
-    }
-
-    let mut run_lo = pivot;
-    while run_lo > 0
-        && (series.pos_x.get(bytes, run_lo) - series.pos_x.get(bytes, run_lo - 1)) <= gap_thresh
-    {
-        run_lo -= 1;
-    }
-    let mut run_hi = pivot + 1;
-    while run_hi < n
-        && (series.pos_x.get(bytes, run_hi) - series.pos_x.get(bytes, run_hi - 1)) <= gap_thresh
-    {
-        run_hi += 1;
-    }
-    let run_len = run_hi - run_lo;
-
-    let win = NEVILLE_POINTS.min(run_len);
-    let half = (NEVILLE_POINTS / 2) as isize;
-    let mut start = pivot as isize - half;
-    if start < run_lo as isize {
-        start = run_lo as isize;
-    }
-    if start + win as isize > run_hi as isize {
-        start = run_hi as isize - win as isize;
-    }
-    let start = start as usize;
+    let window = neville_window(
+        series.pos_count,
+        nominal,
+        gap_threshold_factor,
+        query,
+        |i| series.pos_x.get(bytes, i),
+    );
+    let start = window.start;
+    let win = window.len();
 
     let mut t = [0.0f64; NEVILLE_POINTS];
     let mut px = [0.0f64; NEVILLE_POINTS];
