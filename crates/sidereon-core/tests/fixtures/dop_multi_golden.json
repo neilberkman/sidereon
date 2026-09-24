@@ -1,5 +1,5 @@
 {
-  "schema": "orbis-gnss-parity/dop_multi.v1",
+  "schema": "sidereon-gnss-parity/dop_multi.v1",
   "purpose": "Multi-system DOP: per-constellation TDOP = sqrt(Q[3+i][3+i]) from Q = (H^T W H)^-1 with one receiver-clock column per GNSS. Reference uses numpy.linalg.inv (a dense LU inverse); the Rust dop_multi uses a dense symmetric (Cholesky) inverse, so this is a TIGHT-TOLERANCE agreement target (~1e-12 relative), NOT 0 ULP. The single-system scalar DOP stays 0-ULP in dop_golden.json.",
   "recipe": "H row = [-ex,-ey,-ez, one-hot clock columns]; A = H^T W H; Q = A^-1; R(lat,lon)=[[-sl,cl,0],[-sp*cl,-sp*sl,cp],[cp*cl,cp*sl,sp]]; ENU = R Q[0:3,0:3] R^T; GDOP=sqrt(trace Q); PDOP=sqrt(qE+qN+qU); HDOP=sqrt(qE+qN); VDOP=sqrt(qU); TDOP=sqrt(Q[3][3]); per-system TDOP[i]=sqrt(Q[3+i][3+i]).",
   "generator": {

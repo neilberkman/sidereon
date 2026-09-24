@@ -1,5 +1,5 @@
-//! Embedded reference-data tables, relocated from `orbis_nif` so the core
-//! crate is usable from Rust without Rustler or the BEAM.
+//! Embedded reference-data tables, compiled into the core crate so it is
+//! usable from Rust without Rustler or the BEAM.
 //!
 //! These tables are parity-critical: their numeric contents are reproduced
 //! byte-for-byte from the upstream sources and must not be regenerated or

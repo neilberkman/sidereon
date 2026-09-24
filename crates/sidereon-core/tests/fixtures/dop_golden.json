@@ -1,5 +1,5 @@
 {
-  "schema": "orbis-gnss-parity/dop.v1",
+  "schema": "sidereon-gnss-parity/dop.v1",
   "purpose": "GDOP/PDOP/HDOP/VDOP/TDOP from a design (geometry) matrix of unit line-of-sight vectors plus a clock column and a diagonal weight matrix, via Q = (H^T W H)^-1 with the horizontal/vertical split taken in a local ENU frame. Reference recipe is generator/dop.py: the normal matrix is summed left-to-right and the 4x4 inverse is an explicit cofactor (adjugate/determinant) expansion -- NOT numpy.linalg.inv / LAPACK -- so it is independently 0-ULP. The Rust port asserts 0 ULP per intermediate and per DOP scalar against these hex-float goldens.",
   "env_ref": {
     "fixture": "fixtures/env.json",

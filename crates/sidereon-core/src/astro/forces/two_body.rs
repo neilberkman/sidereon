@@ -51,7 +51,7 @@ mod tests {
     use crate::astro::state::CartesianState;
 
     #[test]
-    fn acceleration_matches_orbis_force_wrapper_bits() {
+    fn acceleration_matches_pinned_bits() {
         let state = CartesianState::new(0.0, [7000.0, -1210.0, 1300.0], [0.0, 0.0, 0.0]);
         let acceleration = TwoBodyGravity::default()
             .acceleration(&state, &PropagationContext::default())

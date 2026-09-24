@@ -8,10 +8,12 @@
 //! UT1-UTC = 0, matching the UTC argument here), the two ECEF displacement
 //! vectors are required to agree to well under a millimetre.
 //!
-//! The reference vectors below were produced by the C harness
-//! `~/xuku/rtklib/oracle_harness/oload_oracle.c`, which calls RTKLIB's own
-//! `readblq()` + `tidedisp(..., opt=2, erp=NULL, ...)` (build recipe in the
-//! harness header; the harness reproduces these exact numbers).
+//! The reference vectors below were produced by a local C harness built
+//! against the RTKLIB demo5 sources (it is not part of RTKLIB or of this
+//! repository). The harness feeds the ZIM2 BLQ block (the coefficients of
+//! `ZIM2_BLQ` below) to RTKLIB's own `readblq()`, calls
+//! `tidedisp(..., opt=2, erp=NULL, ...)` at each epoch, and prints the ECEF
+//! displacement; it reproduces these exact numbers.
 //!
 //! ARG2 omits the 18.6-yr nodal modulation and minor side constituents the
 //! admittance method carries; at inland ZIM2 (OTL a few mm) the achieved

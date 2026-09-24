@@ -1,5 +1,5 @@
 {
-  "description": "BroadcastComparison.compare inputs: ESBC00DNK MN broadcast vs COD0MGXFIN precise, GPS, 2020-06-25 00:15:00..23:45:00 UTC step 900 s. The per-epoch evaluation keys the Rust core consumes (broadcast J2000 seconds + SP3 split Julian dates for the epoch and the +/-half-step velocity neighbours), as IEEE-754 to_bits hex, marshaled by the Orbis Time module.",
+  "description": "BroadcastComparison.compare inputs: ESBC00DNK MN broadcast vs COD0MGXFIN precise, GPS, 2020-06-25 00:15:00..23:45:00 UTC step 900 s. The per-epoch evaluation keys the Rust core consumes (broadcast J2000 seconds + SP3 split Julian dates for the epoch and the +/-half-step velocity neighbours), as IEEE-754 to_bits hex, marshaled by the time module.",
   "inputs": {
     "epochs": [
       [

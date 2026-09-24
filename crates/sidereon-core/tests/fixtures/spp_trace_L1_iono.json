@@ -1,5 +1,5 @@
 {
-  "schema": "orbis-gnss-parity/spp_trace.v1",
+  "schema": "sidereon-gnss-parity/spp_trace.v1",
   "purpose": "GPS L1 single-point-positioning trace fixture. Records the synthesized observations, the FIXED receiver truth, the frozen-branch choices, the effective scipy options, and the full iteration trace (per trace-state x: per-satellite intermediates t_tx/sat_ecef/dt_sat/theta/sat_rot/rho/az/el/iono/tropo/p_hat, residual vector, 2-point FD perturbations, FD Jacobian, accepted steps, full fun() evaluation log, stopping reason). The residual and the 2-point FD Jacobian at the recorded trace states are the 0-ULP substrate the Rust trace-replay asserts; the trf converged position/clock is a BLAS-bound sub-micron solver-agreement target, never 0 ULP.",
   "env_ref": {
     "fixture": "fixtures/env.json",
@@ -98,7 +98,7 @@
     "level_note": "L0 + Klobuchar L1 ionosphere",
     "inputs": {
       "sp3_file": "GRG0MGXFIN_20201760000_01D_15M_ORB.SP3",
-      "sp3_provenance": "parity/fixtures/sp3/PROVENANCE.md",
+      "sp3_provenance": "tests/fixtures/sp3/PROVENANCE.md",
       "epoch_index": 48,
       "t_rx_j2000_s": "0x41c342aa00000000",
       "t_rx_j2000_s_int": 646272000,

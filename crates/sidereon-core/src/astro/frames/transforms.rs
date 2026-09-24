@@ -6,12 +6,11 @@
 //! Also provides GCRS -> ITRS, ITRS -> geodetic (WGS84), and topocentric
 //! (az/el/range) transformations.
 //!
-//! The pure compute functions live here in the core crate; the Rustler
-//! decode/encode shims that used to wrap them stay in `orbis_nif` as glue, so
-//! no domain formula lives in the NIF layer. The numerics, summation order,
-//! transcendental sequence, and the single sanctioned `mul_add` site
-//! (`mat3_vec3_mul_fma`) are preserved exactly so the existing Skyfield 0-ULP
-//! parity holds.
+//! The pure compute functions live here in the core crate; language-binding
+//! decode/encode shims only wrap them, so no domain formula lives in a binding
+//! layer. The numerics, summation order, transcendental sequence, and the
+//! single sanctioned `mul_add` site (`mat3_vec3_mul_fma`) follow Skyfield
+//! exactly, so the transforms agree with Skyfield to 0 ULP.
 
 use crate::astro::frames::nutation::{
     build_skyfield_nutation_matrix_unchecked,

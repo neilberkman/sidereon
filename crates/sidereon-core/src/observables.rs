@@ -3722,7 +3722,7 @@ mod tests {
     }
 
     #[test]
-    fn split_julian_to_j2000_seconds_matches_orbis_time() {
+    fn split_julian_to_j2000_seconds_is_exact_at_noon() {
         let t = j2000_seconds_from_split(2_459_024.5, 0.5).expect("valid split Julian date");
         assert_eq!(t, 646_272_000.0);
     }

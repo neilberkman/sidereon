@@ -1,7 +1,7 @@
 //! RTKLIB convbin oracle for RTCM MSM LLI derivation.
 //!
 //! Fixture: `tests/fixtures/rtcm/gmsd7_20121014.rtcm3`, copied byte-for-byte
-//! from `/Users/neil/xuku/rtklib/test/data/rcvraw/GMSD7_20121014.rtcm3`.
+//! from `test/data/rcvraw/GMSD7_20121014.rtcm3` in the RTKLIB demo5 tree.
 //! Source SHA-256:
 //! `8b466a6829122c21ee28053324811022b3e44baa6dcd878a51b9a746a10d8cb1`.
 //! Source provenance: RTKLIB demo5 sample receiver stream, marker `0611`,
@@ -12,9 +12,11 @@
 //! derivation over B1I/B2I/B3I (RINEX codes L2I/L7I/L6I). GPS, GLONASS,
 //! Galileo, and QZSS LLI derivation are covered by the synthetic truth-table
 //! vectors in the unit tests rather than by this oracle.
-//! Reference tool: `/Users/neil/xuku/rtklib/app/consapp/convbin/gcc/convbin`,
-//! RINEX header program `CONVBIN demo5 b34L`; the test runs `-v 3.05 -r rtcm3
-//! -tr 2012/10/14 0:00:00 -od -os`.
+//! Reference tool: RTKLIB demo5 `convbin` (built from
+//! `app/consapp/convbin/gcc`), RINEX header program `CONVBIN demo5 b34L`; the
+//! test runs `-v 3.05 -r rtcm3 -tr 2012/10/14 0:00:00 -od -os`. Set
+//! `RTKLIB_CONVBIN` to the binary's path to run the oracle; without it the test
+//! skips.
 //! GPS week 1710 after the week rollover in the fixture; leap-second count
 //! 16 s; BeiDou-to-GPST offset +14 s.
 
@@ -33,7 +35,6 @@ const FIXTURE_FILE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/rtcm/gmsd7_20121014.rtcm3"
 );
-const CONVBIN_DEFAULT: &str = "/Users/neil/xuku/rtklib/app/consapp/convbin/gcc/convbin";
 const WEEK_MS: i64 = 604_800_000;
 const DAY_MS: i64 = 86_400_000;
 const LEAP_SECONDS_MS: i64 = 16_000;
@@ -90,8 +91,8 @@ fn rtklib_convbin_real_msm_stream_matches_lli_except_d1_d2() {
     let Some(convbin) = resolve_convbin() else {
         eprintln!(
             "SKIP rtklib_convbin_real_msm_stream_matches_lli_except_d1_d2: \
-             RTKLIB convbin not found (set RTKLIB_CONVBIN or install at {CONVBIN_DEFAULT}). \
-             The LLI oracle gate runs where RTKLIB is provisioned; CI runs it explicitly."
+             RTKLIB_CONVBIN is unset or does not name a file. Set it to an RTKLIB \
+             demo5 convbin binary to run the LLI oracle."
         );
         return;
     };
@@ -167,13 +168,11 @@ fn rtklib_convbin_real_msm_stream_matches_lli_except_d1_d2() {
     assert_eq!(our_bit0_count, 7);
 }
 
-/// Resolve the RTKLIB convbin binary, preferring `RTKLIB_CONVBIN` then the
-/// known local path. Returns `None` when the binary is absent so the oracle
-/// skips rather than reddening a build where RTKLIB is not provisioned.
+/// Resolve the RTKLIB convbin binary from `RTKLIB_CONVBIN`. Returns `None`
+/// when the variable is unset or does not name a file, so the oracle skips
+/// rather than failing a build where RTKLIB is not provisioned.
 fn resolve_convbin() -> Option<PathBuf> {
-    let candidate = env::var_os("RTKLIB_CONVBIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(CONVBIN_DEFAULT));
+    let candidate = PathBuf::from(env::var_os("RTKLIB_CONVBIN")?);
     candidate.is_file().then_some(candidate)
 }
 

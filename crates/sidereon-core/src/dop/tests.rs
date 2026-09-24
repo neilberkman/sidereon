@@ -1,12 +1,10 @@
 //! 0-ULP parity tests for the dilution-of-precision recipe.
 //!
-//! These assert the Rust port reproduces the canonical reference recipe
-//! `parity/generator/dop.py` bit-for-bit, using the committed golden fixture
-//! `parity/fixtures/dop_golden.json` (vendored at
-//! `tests/fixtures/dop_golden.json`). Values are serialised as hex-float
-//! (Python `float.hex()`) so there is no decimal-parse ambiguity, and parity is
-//! measured as ULP distance via the integer reinterpretation of the IEEE-754
-//! bit pattern, per the `skyfield_parity_test.exs` discipline.
+//! These assert the Rust port reproduces, bit for bit, the Python reference
+//! values in the committed golden fixture `tests/fixtures/dop_golden.json`.
+//! Values are serialised as hex-float (Python `float.hex()`) so there is no
+//! decimal-parse ambiguity, and parity is measured as ULP distance via the
+//! integer reinterpretation of the IEEE-754 bit pattern.
 //!
 //! Unlike the BLAS-bound `trf` solver step, the DOP inverse is an explicit
 //! small-matrix cofactor expansion with a pinned operation order, so it is a

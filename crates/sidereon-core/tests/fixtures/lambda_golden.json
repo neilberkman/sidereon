@@ -1,7 +1,7 @@
 {
   "_source": "RTKLIB lambda() (BSD-2), vendored unmodified at _tools/RTKLIB/src/lambda.c",
   "_reference": "Teunissen LAMBDA method; cases rtklib_utest1/2 are RTKLIB's own committed t_lambda.c vectors",
-  "_metric": "residual s[j] = (a-F_j)' Q^-1 (a-F_j); ratio = s[1]/s[0] (RTKLIB convention, same as orbis second/best)",
+  "_metric": "residual s[j] = (a-F_j)' Q^-1 (a-F_j); ratio = s[1]/s[0] (RTKLIB convention: second-best over best)",
   "cases": [
     {
       "name": "rtklib_utest1",

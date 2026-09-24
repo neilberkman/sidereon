@@ -33,8 +33,9 @@ pub enum AngleError {
 }
 
 /// Radians to degrees in the reference operation order (`rad * 180 / pi`,
-/// multiply before divide), required for bit-exact parity with the prior
-/// Elixir reference rather than a single rounded `RAD_TO_DEG` constant.
+/// multiply before divide) rather than through a single rounded `RAD_TO_DEG`
+/// constant. The 0-ULP SPP trace fixtures (`tests/fixtures/spp_trace_*.json`)
+/// pin this order.
 #[inline]
 pub fn rad_to_deg_ref(rad: f64) -> f64 {
     rad * DEGREES_PER_SEMICIRCLE / std::f64::consts::PI

@@ -627,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn split_epoch_constant_matches_orbis_velocity_fixture() {
+    fn split_epoch_constant_matches_receiver_epoch() {
         assert_eq!(
             j2000_seconds_from_split(2_459_024.5, 0.5).expect("valid split Julian date"),
             T_RX_J2000_S

@@ -1,9 +1,9 @@
 //! Two-track parity for the GPS L1 single-point-positioning pipeline.
 //!
-//! The reference recipe is `parity/generator/spp.py`; the committed fixtures
-//! (vendored at `tests/fixtures/spp_trace_*.json`) record the synthesized
-//! observations, the frozen-branch choices, the effective scipy options, and
-//! the full iteration trace. Float values are serialized as the raw IEEE-754
+//! The committed fixtures `tests/fixtures/spp_trace_*.json`, produced by a
+//! Python/scipy reference recipe, record the synthesized observations, the
+//! frozen-branch choices, the effective scipy options, and the full iteration
+//! trace. Float values are serialized as the raw IEEE-754
 //! bit pattern (`f64::to_bits`, a 16-hex-digit `0x...` literal) so there is no
 //! decimal-parse ambiguity; parity is measured as ULP distance via the integer
 //! reinterpretation of the bit pattern, per the existing SP3/DOP/atmosphere

@@ -1,10 +1,10 @@
 //! IAU 2000A nutation computation, ported from the C++ Skyfield-compatible
 //! implementation.
 //!
-//! Originally `pub(crate)` inside `orbis_nif`; now public in the core crate so
-//! a Rust-only consumer can reach the transform substrate without Rustler or
-//! the BEAM. The numerics, summation order, and transcendental sequence are
-//! preserved exactly so the existing Skyfield 0-ULP parity holds.
+//! Public in the core crate so a Rust-only consumer can reach the transform
+//! substrate without Rustler or the BEAM. The numerics, summation order, and
+//! transcendental sequence follow Skyfield exactly, so the result agrees with
+//! Skyfield to 0 ULP.
 //!
 //! All arithmetic uses plain operators (no `f64::mul_add`) so that
 //! rounding matches CPython / Skyfield compiled without FMA contraction.
