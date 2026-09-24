@@ -1830,7 +1830,9 @@ fn next_field<T: std::str::FromStr>(
 
 mod combine;
 mod continuity;
+mod coverage;
 mod exact;
+mod grid;
 mod interp;
 pub(crate) use interp::{peph2pos_clock_relativity, peph2pos_state_clock_relativity};
 mod interpolant;
@@ -1853,9 +1855,13 @@ pub use continuity::{
     EpochWindow, OrbitClass, SpeedBound, StencilExtent, WindowContinuityDecision,
     WindowContinuityVerdict,
 };
+pub use coverage::{
+    Sp3ChannelCoverage, Sp3Coverage, Sp3CoverageGap, Sp3CoverageSpan, Sp3SatelliteCoverage,
+};
 pub use exact::{
     parse_exact_sp3, validate_exact_sp3, ExactSp3Coverage, ExactSp3Request, ExactSp3ValidationError,
 };
+pub use grid::Sp3EpochGrid;
 pub use interp::{Sp3InterpolationOptions, DEFAULT_GAP_THRESHOLD_FACTOR};
 pub use interpolant::{PreciseEphemerisInterpolant, PreciseInterpolantError};
 pub use interpolant_store::{

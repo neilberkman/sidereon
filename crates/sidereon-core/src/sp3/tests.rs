@@ -4131,8 +4131,8 @@ fn test_writer_refuses_nanosecond_epochs_no_record_states() {
 }
 
 /// A count with a sub-second part that is a whole number of ticks is written
-/// as the record that states it, reads back to a split Julian date, and that
-/// split writes the same bytes again.
+/// as the record that states it, reads back to a split Julian date on the same
+/// tick, and that split writes the same bytes again.
 #[test]
 fn test_writer_restates_sub_second_nanosecond_epochs() {
     let parsed = Sp3::parse(SP3C_FILE.as_bytes()).unwrap();
@@ -4148,6 +4148,16 @@ fn test_writer_restates_sub_second_nanosecond_epochs() {
     assert!(text.contains("*  2020  6 24  0 15  0.12345678\n"), "{text}");
 
     let reread = Sp3::parse(text.as_bytes()).unwrap();
+    let expected: Vec<Option<i128>> = counted
+        .epochs
+        .iter()
+        .map(|epoch| match epoch.repr {
+            InstantRepr::Nanos(count) => Some(count / 10),
+            InstantRepr::JulianDate(_) => None,
+        })
+        .collect();
+    assert_eq!(super::grid::product_ticks(&reread), expected);
+    assert_eq!(super::grid::product_ticks(&counted), expected);
     assert_eq!(reread.to_sp3_string().expect("rewrite"), text);
 }
 
